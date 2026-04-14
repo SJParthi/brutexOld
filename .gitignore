@@ -39,8 +39,9 @@ htmlcov/
 .vscode/
 *.code-workspace
 
-# BruteX runtime data
-data/
+# BruteX runtime data (runtime lake & audit output — NOT the
+# brutex/data source package)
+/data/
 raw/
 canonical/
 audit/
