@@ -101,10 +101,10 @@ These are **verified** from Groww's public documentation and are treated as immo
 | HC-06 | Options chain history API | **Not provided** as a single call | Must reconstruct per-contract via symbol enumeration |
 | HC-07 | Instrument master | Daily CSV snapshot, no history | Temporal master must be built by snapshotting daily |
 | HC-08 | Corporate actions | **Not in instrument CSV** | Must be sourced / computed externally |
-| HC-09 | Historical option contracts (expired) | **Invisible** in today's CSV | Pre-2026 expired options must be recovered via deterministic symbol probe |
+| HC-09 | Historical option contracts (expired) | Enumerable via `get_expiries(year=N)` + `get_contracts(expiry_date)` — 2020 onwards | See `docs/groww-sdk/backtesting.md §3-§4` |
 | HC-10 | SDK method | `get_historical_candles(...)`; `get_historical_candle_data` is **deprecated** | Use only the non-deprecated method |
 | HC-11 | Time format | `"YYYY-MM-DD HH:mm:ss"` | IST, no timezone suffix |
-| HC-12 | Max bars per call | **Undocumented** | Adapter must probe and self-configure |
+| HC-12 | Max duration per candle request | **30 days** (1m/2m/3m/5m), **90 days** (10m/15m/30m), **180 days** (1h/4h/1d/1w/1mo) | Verbatim from `docs/groww-sdk/backtesting.md §6`. Adapter chunker (`FR-ING-006`) splits requests by these limits. |
 | HC-13 | Retry-after semantics | **Undocumented** | Assume exponential backoff on 429/5xx |
 | HC-14 | Auth | API auth token (`GROWW_API_AUTH_TOKEN`) | Data-only scope recommended (lower blast radius) |
 | HC-15 | PyPI package | `growwapi` (v1.5.0 as of Dec 2025, Python 3.9–3.13) | Version pinning in lockfile |
@@ -183,7 +183,7 @@ Each FR has a stable ID, a testable statement, and a verification mechanism.
 | FR-UNI-001 | The temporal master SHALL represent every distinct `groww_symbol` ever seen, with `[valid_from_date, valid_to_date)` ranges. | SQL test: symbol seen on day A and day C but not B yields two intervals. |
 | FR-UNI-002 | The master SHALL track lot-size revisions, tick-size revisions, freeze-quantity revisions, and strike/expiry addition/removal. | Diff test across two snapshots. |
 | FR-UNI-003 | An `as_of(date).filter(instrument_type='CE', underlying='NIFTY', expiry=date2)` API SHALL return the exact active option chain on that date. | Test against a recorded fixture. |
-| FR-UNI-004 | Expired option contracts pre-dating the first local snapshot SHALL be recovered via a deterministic `groww_symbol` enumeration function (e.g., `NSE-NIFTY25APR22500CE`) with all failed probes logged to a `unrecoverable.csv` audit file. | Probe harness test. |
+| FR-UNI-004 | Expired option contracts SHALL be enumerated via `groww.get_expiries(exchange, underlying_symbol, year)` for every year in `[2020, current_year]`, followed by `groww.get_contracts(exchange, underlying_symbol, expiry_date)` for every returned expiry. No symbol-probing fallback is needed. | Integration test against recorded fixture — see `docs/groww-sdk/backtesting.md §3–§4`. |
 
 ### 4.5 Indicators & Feature Engine (FR-IND)
 
@@ -548,17 +548,81 @@ Wall-clock at 15 req/s effective: 16.5M / 15 ≈ **12.7 days continuous**.
 - **Phase B (background):** 1-minute bars, streamed as a low-priority background job. Progress visible via `brutex status --ingest`.
 - **Phase C (opportunistic):** 5m / 15m / 60m resampled on-demand from 1m once Phase B covers the requested slice; else they can be fetched directly if the resample coverage is < 100%.
 
-### 8.3 Pre-2026 Expired Option Recovery
+### 8.3 Historical Expiry Enumeration (revised from earlier draft)
 
-Since Groww's instrument CSV is today-only, expired contracts are invisible. Recovery strategy (FR-UNI-004):
+> **Revised 2026-04-14.** Earlier drafts proposed a "deterministic symbol
+> probe" fallback to recover pre-snapshot expired options. **That approach
+> is now deleted** — it was a workaround for an assumed SDK limitation
+> that does not exist. The Groww backtesting SDK exposes `get_expiries`
+> and `get_contracts` methods that enumerate historical derivatives
+> natively from 2020 onwards.
 
-1. Enumerate all (underlying, expiry, strike, side) combinations derivable from active expiries and a historical strike grid.
-2. Construct the deterministic `groww_symbol` (format TBD — empirically probed, golden-frozen).
-3. Attempt candle pull for each constructed symbol.
-4. On success → integrate into the temporal master with `valid_from = first_bar_ts`, `valid_to = last_bar_ts`.
-5. On failure → log to `data/unrecoverable.csv` with reason, never silently drop.
+The authoritative enumeration algorithm for v1 F&O indices:
 
-This is a **best-effort** recovery. Misses are expected and explicitly logged as `MG-###` gaps.
+```
+for exchange, underlying in V1_UNDERLYINGS:
+    for year in 2020..current_year:
+        expiries = groww.get_expiries(
+            exchange=exchange,
+            underlying_symbol=underlying,
+            year=year,
+        )["expiries"]
+        for expiry in expiries:
+            contracts = groww.get_contracts(
+                exchange=exchange,
+                underlying_symbol=underlying,
+                expiry_date=expiry,
+            )["contracts"]
+            persist_instrument_rows(contracts)
+            for contract in contracts:
+                for chunk_start, chunk_end in chunk_by_max_duration(...):
+                    candles = groww.get_historical_candles(
+                        exchange=exchange,
+                        segment=groww.SEGMENT_FNO,
+                        groww_symbol=contract,
+                        start_time=chunk_start,
+                        end_time=chunk_end,
+                        candle_interval=interval,
+                    )
+                    persist_candles(contract, interval, candles)
+```
+
+Full reference: `docs/groww-sdk/backtesting.md §3–§5, §10`.
+
+### 8.4 Revised Call Budget — v1 F&O indices universe (2020 → today)
+
+Based on the **real** per-request time limits documented in
+`docs/groww-sdk/backtesting.md §6` (30 / 90 / 180 days by interval group),
+NOT the earlier bar-count guess:
+
+| Component | Calls |
+|---|---:|
+| `get_expiries` (8 underlyings × 5 years) | ~40 |
+| `get_contracts` (~2,500 distinct historical expiries) | ~2,500 |
+| Spot indices (8 × 60 × 1m) | 480 |
+| Index futures (~1,440 contracts × ~3 chunks each) | ~4,320 |
+| Index options (~207,000 contracts × ~1 chunk each — each option lives < 30 days) | ~207,000 |
+| **Total calls for 1-minute full v1 universe** | **~214,340** |
+
+At 15 req/s effective (BruteX safety cap, `FR-ING-007`):
+
+```
+214,340 / 15 ≈ 14,290 seconds ≈ 3.97 hours
+```
+
+**v1 full 1-minute ingest from scratch completes in ~4 hours on a single operator.**
+
+For each additional interval (5m, 15m, 1h, 1d), add another ~4 hours.
+
+| Passes | Wall-clock |
+|---|---|
+| 1m only | ~4 hours (one morning) |
+| 1m + 5m + 15m + 1h + 1d | ~20 hours (overnight + morning) |
+| All 12 native intervals | ~48 hours (one weekend) |
+
+This is a **95% reduction** from my earlier (wrong) estimate of 12.7 days
+for the all-NSE-equities plan, and a ~75% reduction from the intermediate
+~16-hour estimate that used a conservative 1000-bars-per-call guess.
 
 ---
 
@@ -978,7 +1042,7 @@ Every known gap tracked explicitly. Status: `accepted` = will build; `deferred` 
 | MG-027 | NaN / gap detector | accepted | G-NAN / G-GAP |
 | MG-028 | Idempotency guard | accepted | NFR-REL-001/002 |
 | MG-029 | Deterministic replay log | accepted | NFR-DET-002 + audit chain |
-| MG-030 | Pre-2026 expired options recovery | accepted (best-effort) | §8.3 |
+| MG-030 | Pre-2026 expired options recovery | **RESOLVED** — `get_expiries`/`get_contracts` enumerate natively from 2020 | see `docs/groww-sdk/backtesting.md §3-§4` |
 | MG-031 | BSE cash / derivatives | deferred | v1.1 |
 | MG-032 | Distributed multi-node Ray | deferred | v2.1 |
 | MG-033 | Live forward-test (paper) | deferred | v1.2 |
@@ -997,7 +1061,7 @@ Every known gap tracked explicitly. Status: `accepted` = will build; `deferred` 
 | R-03 | Groww deprecates `backtesting` endpoint | Low | Critical | Abstract `IBrokerDataSource`; alt adapter (Zerodha/Upstox) designed |
 | R-04 | Token leak | Low | Critical | Env-only + keyring; secret scanning; rotation procedure |
 | R-05 | SLA fails on reference runner | Med | High | Two-phase funnel + Rust kernel + bitmap prefilter; CI gate |
-| R-06 | Pre-2026 option recovery incomplete | High | Med | Explicit miss log; results annotated with coverage % |
+| R-06 | `get_expiries` year filter upper/lower bound behaviour differs from docs | Low | Med | Golden-master test on a known 2020 expiry; empirically verify edge cases in P1c |
 | R-07 | SPAN files unavailable / format change | Med | High | Parser versioned; manual override path |
 | R-08 | Data corruption mid-ingest | Low | High | Content-addressed raw store; integrity gates; resumable |
 | R-09 | Silent look-ahead bias | Med | Critical | Detector (FR-INT-004) + property test on every strategy |
@@ -1141,7 +1205,7 @@ Things **we cannot get from Groww** and must source elsewhere or compute:
 2. Historical options Greeks / IV surface → **must compute** from price + rate curve.
 3. SPAN daily parameter files → **out-of-band** download from NSE.
 4. Corporate actions → **out-of-band** (BSE/NSE corporate action feeds or user supply).
-5. Historical instrument master (pre-first-snapshot) → **daily snapshotting** going forward; deterministic symbol probe for pre-2026 options.
+5. Historical instrument master (pre-first-snapshot) → **daily snapshotting** going forward for stable identifiers; historical F&O contracts (including expired ones) enumerated natively via `get_expiries` + `get_contracts` from 2020 onwards.
 6. Holiday calendar → **derived** from index-bar absence pattern.
 7. Continuous-futures series → **built** by stitcher (Panama / ratio / OI-weighted).
 8. Historical circuit-filter bands → **derived** from bar-limit detection.
@@ -1155,9 +1219,12 @@ These do **not** block P0 sign-off but must be resolved before the relevant phas
 | # | Question | Resolve by |
 |---|----------|-----------|
 | OQ-01 | Exact `groww_symbol` format for historical expired options | P1b |
-| OQ-02 | Max bars per call per interval (empirical probe) | P1c |
+| OQ-02 | ~~Max bars per call per interval~~ — **RESOLVED**: documented as 30/90/180 days by interval group in `docs/groww-sdk/backtesting.md §6` | — |
 | OQ-03 | Whether Groww's OHLC bucket is per-token or per-IP | P1c |
-| OQ-04 | Exact retry-after semantics on 429 | P1c |
+| OQ-04 | Exact retry-after semantics on 429 (SDK raises? headers? silent?) | P1c |
+| OQ-GROWW-CANDLE-NAMES | `CANDLE_INTERVAL_DAY` vs `CANDLE_INTERVAL_DAY_1` discrepancy between annexures and backtesting docs pages — introspect `dir(GrowwAPI)` at startup and golden-master | P1c |
+| OQ-GROWW-YEAR-BOUNDS | Does `get_expiries(year=2020)` include expiries whose last_trade_date is in Jan 2020 but first_trade_date is in Dec 2019? Edge case around the boundary. | P1c |
+| OQ-GROWW-TIMEZONE | Groww docs say "timestamps are in IST" but candle response uses `yyyy-MM-ddTHH:mm:ss` with no explicit timezone. Confirm the raw wire format is naive-IST (no Z suffix, no offset). | P1c |
 | OQ-05 | Whether Greeks should be precomputed and cached, or computed on-read | P2 |
 | OQ-06 | Default CPCV parameters (N, k, embargo, purge) for Indian F&O | P4 |
 | OQ-07 | Dashboard stack: Streamlit MVP vs React/Next.js from day 1 | P5 |
