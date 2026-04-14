@@ -155,28 +155,69 @@ def build_parser() -> argparse.ArgumentParser:
     expiries.add_argument("--run-id", default=None)
     expiries.add_argument("--dry-run", action="store_true")
 
-    # Phase C placeholder — needs Phase B output wiring
+    # Phase C — contracts per (underlying, expiry). Runs A→B→C in one
+    # process so the in-memory collected_expiries from Phase B feeds
+    # straight into Phase C without a re-read step.
     contracts = ingest_sub.add_parser(
         "contracts",
-        help="Phase C — fetch contracts per (underlying, expiry). "
-        "Requires Phase B to have run first. NOT YET WIRED via CLI.",
+        help="Phases A → B → C — enumerate all F&O contracts per expiry",
     )
-    contracts.set_defaults(_is_placeholder=True, _placeholder_name="ingest contracts")
+    contracts.add_argument(
+        "--start-year",
+        type=int,
+        default=2020,
+        help="First year for Phase B (inclusive; default 2020 per FD-08)",
+    )
+    contracts.add_argument("--end-year", type=int, default=None)
+    contracts.add_argument("--run-id", default=None)
+    contracts.add_argument("--dry-run", action="store_true")
 
-    # Phase D placeholder — same story
+    # Phase D — historical candles. Runs A→B→C→D end-to-end. The CLI
+    # exposes a --limit flag so a user can sanity-check a small subset
+    # of contracts before committing to the full 2020→today pull.
     candles = ingest_sub.add_parser(
         "candles",
-        help="Phase D — fetch historical candles per contract × interval × range. "
-        "NOT YET WIRED via CLI.",
+        help="Phases A → B → C → D — pull historical candles",
     )
-    candles.set_defaults(_is_placeholder=True, _placeholder_name="ingest candles")
+    candles.add_argument("--start-year", type=int, default=2020)
+    candles.add_argument("--end-year", type=int, default=None)
+    candles.add_argument("--run-id", default=None)
+    candles.add_argument("--dry-run", action="store_true")
+    candles.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Max contracts to pull candles for (CLI sanity-check; "
+        "default 20). Set to 0 for no limit.",
+    )
+    candles.add_argument(
+        "--interval",
+        default="1minute",
+        help="Candle interval — one of the 12 Groww intervals (default 1minute)",
+    )
+    candles.add_argument(
+        "--candle-start",
+        default=None,
+        help="Candle range start YYYY-MM-DD (default 2020-01-01)",
+    )
+    candles.add_argument(
+        "--candle-end",
+        default=None,
+        help="Candle range end YYYY-MM-DD (default today UTC)",
+    )
 
-    # Full pipeline placeholder
+    # Full pipeline — alias for `ingest candles` with no limit.
     all_cmd = ingest_sub.add_parser(
         "all",
-        help="Full sequential A → B → C → D pipeline. NOT YET WIRED via CLI.",
+        help="Full sequential A → B → C → D pipeline (no candle subset limit)",
     )
-    all_cmd.set_defaults(_is_placeholder=True, _placeholder_name="ingest all")
+    all_cmd.add_argument("--start-year", type=int, default=2020)
+    all_cmd.add_argument("--end-year", type=int, default=None)
+    all_cmd.add_argument("--run-id", default=None)
+    all_cmd.add_argument("--dry-run", action="store_true")
+    all_cmd.add_argument("--interval", default="1minute")
+    all_cmd.add_argument("--candle-start", default=None)
+    all_cmd.add_argument("--candle-end", default=None)
 
     # ── audit verify ──────────────────────────────────────────────
     audit = sub.add_parser("audit", help="Audit log tools")
@@ -315,15 +356,15 @@ def cmd_ingest_instruments(args: argparse.Namespace) -> int:
                     from brutex.adapters.groww.client import GrowwAdapter  # noqa: PLC0415
 
                     # Import test fake via duck typing — only works in dev
-                    # environments where tests are importable.
+                    # environments where the tests/ tree is on sys.path.
                     try:
-                        from tests.unit.test_adapters_groww_client import (  # noqa: PLC0415
+                        from tests.fakes.groww import (  # noqa: PLC0415
                             FakeDataFrame,
                             FakeGrowwClient,
                         )
                     except ImportError:
                         print(
-                            "dry-run: tests.unit not available — "
+                            "dry-run: tests.fakes not available — "
                             "cannot construct FakeGrowwClient. "
                             "Run from the source tree with tests installed."
                         )
@@ -432,7 +473,7 @@ def cmd_ingest_expiries(args: argparse.Namespace) -> int:
                     from brutex.adapters.groww.client import GrowwAdapter  # noqa: PLC0415
 
                     try:
-                        from tests.unit.test_adapters_groww_client import (  # noqa: PLC0415
+                        from tests.fakes.groww import (  # noqa: PLC0415
                             FakeGrowwClient,
                         )
                     except ImportError:
@@ -494,6 +535,310 @@ def cmd_ingest_expiries(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_ingest_contracts(args: argparse.Namespace) -> int:
+    """Run A → B → C in a single process — stop after contracts."""
+    return _run_pipeline_cli(args=args, stop_after="C")
+
+
+def cmd_ingest_candles(args: argparse.Namespace) -> int:
+    """Run A → B → C → D — the subset-limited candle sanity-check."""
+    return _run_pipeline_cli(args=args, stop_after="D")
+
+
+def cmd_ingest_all(args: argparse.Namespace) -> int:
+    """Run A → B → C → D — full pipeline, no contract-count limit."""
+    # Synthesise a limit=0 (unlimited) attribute for the shared helper
+    # so we don't need a second argparse definition block.
+    args.limit = 0
+    return _run_pipeline_cli(args=args, stop_after="D")
+
+
+def _run_pipeline_cli(
+    *, args: argparse.Namespace, stop_after: str
+) -> int:
+    """Shared driver for `ingest contracts | candles | all`.
+
+    Runs Phase A → B → C (→ D) in one process. The in-memory
+    collected_expiries from Phase B feeds directly into Phase C, and
+    Phase C's iter_all_contracts feeds Phase D. This matches the
+    smoke-test wiring (tests/integration/test_end_to_end_smoke.py).
+
+    Parameters
+    ----------
+    args
+        argparse Namespace from the CLI.
+    stop_after
+        One of "A", "B", "C", "D" — the last phase to run.
+    """
+    import tempfile  # noqa: PLC0415
+    from datetime import datetime as _dt  # noqa: PLC0415
+
+    from brutex.adapters.groww.candles import (  # noqa: PLC0415
+        CandleRequest,
+        PhaseDDriver,
+    )
+    from brutex.adapters.groww.client import GrowwAdapter  # noqa: PLC0415
+    from brutex.adapters.groww.contracts import (  # noqa: PLC0415
+        ContractsScopeError,
+        PhaseCDriver,
+    )
+    from brutex.adapters.groww.expiries import (  # noqa: PLC0415
+        ExpiriesScopeError,
+        PhaseBDriver,
+    )
+    from brutex.adapters.groww.instruments import (  # noqa: PLC0415
+        InstrumentsScopeError,
+        PhaseADriver,
+    )
+    from brutex.orchestrator.audit import AuditWriter  # noqa: PLC0415
+    from brutex.orchestrator.pipeline import PhaseHaltError  # noqa: PLC0415
+    from brutex.orchestrator.rate_limiter import (  # noqa: PLC0415
+        AdaptiveTokenBucket,
+    )
+    from brutex.orchestrator.store import WorkItemStore  # noqa: PLC0415
+    from brutex.universe import V1_INDICES  # noqa: PLC0415
+
+    run_id = args.run_id or str(uuid4())
+    end_year = args.end_year or _dt.now(UTC).year
+    snapshot_date = _dt.now(UTC).date()
+
+    print(f"BruteX ingest (stop_after={stop_after})")
+    print(f"  run_id:       {run_id}")
+    print(f"  years:        {args.start_year}..{end_year}")
+    print(f"  dry_run:      {args.dry_run}")
+    if stop_after == "D":
+        print(f"  interval:     {args.interval}")
+        limit = getattr(args, "limit", 0) or 0
+        print(f"  contract cap: {'none' if limit == 0 else limit}")
+
+    token = os.environ.get("GROWW_API_AUTH_TOKEN")
+    if not token and not args.dry_run:
+        print("⚠  GROWW_API_AUTH_TOKEN is not set. Use --dry-run for offline mode.")
+        return EXIT_USER_ERROR
+
+    with tempfile.TemporaryDirectory(prefix="brutex-pipeline-") as tmp_dir:
+        tmp_root = Path(tmp_dir) if args.dry_run else _runs_dir() / run_id
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        bucket = AdaptiveTokenBucket()
+
+        try:
+            with (
+                WorkItemStore.open(tmp_root / "store.lmdb") as store,
+                AuditWriter.open(
+                    tmp_root / "audit" / f"{run_id}.jsonl"
+                ) as audit,
+            ):
+                adapter = _build_adapter(
+                    dry_run=args.dry_run,
+                    token=token,
+                    bucket=bucket,
+                    store=store,
+                    audit=audit,
+                    run_id=run_id,
+                )
+                if adapter is None:
+                    return EXIT_USER_ERROR
+
+                # ── Phase A ─────────────────────────────────────────
+                phase_a = PhaseADriver(
+                    adapter=adapter,
+                    store=store,
+                    audit=audit,
+                    run_id=run_id,
+                    snapshot_date=snapshot_date,
+                )
+                try:
+                    a_result = phase_a.run()
+                except (PhaseHaltError, InstrumentsScopeError) as exc:
+                    print(f"❌ Phase A halted: {exc}")
+                    return EXIT_PIPELINE_HALT
+                print(
+                    f"✓ Phase A: {a_result.success}/{a_result.total} "
+                    f"({a_result.elapsed_seconds:.1f}s)"
+                )
+                if stop_after == "A":
+                    return EXIT_OK
+
+                # ── Phase B ─────────────────────────────────────────
+                phase_b = PhaseBDriver(
+                    adapter=adapter,
+                    store=store,
+                    audit=audit,
+                    run_id=run_id,
+                    underlyings=V1_INDICES,
+                    start_year=args.start_year,
+                    end_year=end_year,
+                )
+                try:
+                    b_result = phase_b.run()
+                except (PhaseHaltError, ExpiriesScopeError) as exc:
+                    print(f"❌ Phase B halted: {exc}")
+                    return EXIT_PIPELINE_HALT
+                print(
+                    f"✓ Phase B: {b_result.success}/{b_result.total} "
+                    f"({b_result.elapsed_seconds:.1f}s)"
+                )
+                if stop_after == "B":
+                    return EXIT_OK
+
+                # ── Phase C ─────────────────────────────────────────
+                phase_c = PhaseCDriver(
+                    adapter=adapter,
+                    store=store,
+                    audit=audit,
+                    run_id=run_id,
+                    expiries=phase_b.collected_expiries,
+                )
+                try:
+                    c_result = phase_c.run()
+                except (PhaseHaltError, ContractsScopeError) as exc:
+                    print(f"❌ Phase C halted: {exc}")
+                    return EXIT_PIPELINE_HALT
+                print(
+                    f"✓ Phase C: {c_result.success}/{c_result.total} "
+                    f"({c_result.elapsed_seconds:.1f}s)"
+                )
+                if phase_c.last_result is not None:
+                    print(
+                        f"  total contracts: "
+                        f"{phase_c.last_result.total_contracts}"
+                    )
+                if stop_after == "C":
+                    return EXIT_OK
+
+                # ── Phase D ─────────────────────────────────────────
+                all_contracts = list(phase_c.iter_all_contracts())
+                limit = getattr(args, "limit", 0) or 0
+                if limit and limit > 0:
+                    all_contracts = all_contracts[:limit]
+
+                if not all_contracts:
+                    print("⚠  Phase D: no contracts to fetch, skipping")
+                    return EXIT_OK
+
+                candle_start = (
+                    date.fromisoformat(args.candle_start)
+                    if args.candle_start
+                    else date(args.start_year, 1, 1)
+                )
+                candle_end = (
+                    date.fromisoformat(args.candle_end)
+                    if args.candle_end
+                    else _dt.now(UTC).date()
+                )
+                requests = [
+                    CandleRequest(
+                        exchange=exchange,
+                        segment="FNO",
+                        groww_symbol=symbol,
+                        interval=args.interval,
+                        start=candle_start,
+                        end=candle_end,
+                    )
+                    for exchange, _underlying, _expiry, symbol in all_contracts
+                ]
+                phase_d = PhaseDDriver(
+                    adapter=adapter,
+                    store=store,
+                    audit=audit,
+                    run_id=run_id,
+                    requests=requests,
+                )
+                try:
+                    d_result = phase_d.run()
+                except PhaseHaltError as exc:
+                    print(f"❌ Phase D halted: {exc}")
+                    return EXIT_PIPELINE_HALT
+                print(
+                    f"✓ Phase D: {d_result.success}/{d_result.total} "
+                    f"({d_result.elapsed_seconds:.1f}s)"
+                )
+                if phase_d.last_result is not None:
+                    print(
+                        f"  total candle rows: "
+                        f"{phase_d.last_result.total_candle_rows}"
+                    )
+        except Exception as exc:  # noqa: BLE001
+            print(f"❌ Unexpected error: {exc}", file=sys.stderr)
+            return EXIT_INTERNAL_ERROR
+
+    return EXIT_OK
+
+
+def _build_adapter(
+    *,
+    dry_run: bool,
+    token: str | None,
+    bucket: object,
+    store: object,
+    audit: object,
+    run_id: str,
+) -> object | None:
+    """Construct a GrowwAdapter (real or fake-backed).
+
+    Returns None if the caller must exit with EXIT_USER_ERROR (e.g.
+    dry-run mode but tests/fakes is not importable).
+    """
+    from brutex.adapters.groww.client import GrowwAdapter  # noqa: PLC0415
+
+    if dry_run:
+        try:
+            from tests.fakes.groww import (  # noqa: PLC0415
+                FakeDataFrame,
+                FakeGrowwClient,
+            )
+        except ImportError:
+            print(
+                "dry-run requires tests/fakes — run from source tree",
+                file=sys.stderr,
+            )
+            return None
+        client = FakeGrowwClient()
+        # Give Phase A at least one in-scope instrument row so the
+        # pipeline can continue past the empty-CSV fast path.
+        client.instruments_response = FakeDataFrame(
+            [
+                {
+                    "exchange": "NSE",
+                    "exchange_token": 26000,
+                    "trading_symbol": "NIFTY",
+                    "groww_symbol": "NSE-NIFTY",
+                    "name": "Nifty 50",
+                    "instrument_type": "IDX",
+                    "segment": "CASH",
+                    "series": "",
+                    "isin": "",
+                    "underlying_symbol": "",
+                    "underlying_exchange_token": float("nan"),
+                    "lot_size": 1,
+                    "expiry_date": "",
+                    "strike_price": float("nan"),
+                    "tick_size": 0.05,
+                    "freeze_quantity": float("nan"),
+                    "is_reserved": 0,
+                    "buy_allowed": 1,
+                    "sell_allowed": 1,
+                    "internal_trading_symbol": "NIFTY",
+                }
+            ]
+        )
+        return GrowwAdapter(
+            client=client,
+            bucket=bucket,  # type: ignore[arg-type]
+            store=store,  # type: ignore[arg-type]
+            audit=audit,  # type: ignore[arg-type]
+            run_id=run_id,
+        )
+
+    return GrowwAdapter.from_token(
+        token=token or "",
+        bucket=bucket,  # type: ignore[arg-type]
+        store=store,  # type: ignore[arg-type]
+        audit=audit,  # type: ignore[arg-type]
+        run_id=run_id,
+    )
+
+
 def cmd_audit_verify(args: argparse.Namespace) -> int:
     audit_file: Path = args.audit_file
     try:
@@ -550,6 +895,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_ingest_instruments(args)
         if args.ingest_command == "expiries":
             return cmd_ingest_expiries(args)
+        if args.ingest_command == "contracts":
+            return cmd_ingest_contracts(args)
+        if args.ingest_command == "candles":
+            return cmd_ingest_candles(args)
+        if args.ingest_command == "all":
+            return cmd_ingest_all(args)
         return cmd_placeholder(args)
 
     if command == "audit":
