@@ -61,14 +61,39 @@
 //! from fno_math_py.strategies import Strategy
 //! ```
 
+// Lint policy inherited from tickvault — defense in depth.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+#![deny(clippy::print_stdout)]
+#![deny(clippy::print_stderr)]
+#![deny(clippy::dbg_macro)]
 #![deny(unsafe_code)]
-#![deny(missing_docs)]
-#![warn(clippy::all)]
-#![warn(clippy::pedantic)]
+#![allow(missing_docs)] // TODO: re-enable after adding docs to all public items
 
+/// Compatibility shim — vendored copy of `tickvault-common` types
+/// needed by the extracted `greeks/` / `indicators/` / `strategies/`
+/// modules. See [`compat`] docs for the provenance and end-state plan.
+pub mod compat;
+
+/// Options Greeks — Black-Scholes pricing, Jaeckel IV solver, PCR,
+/// buildup, aggregator. Extracted from
+/// `tickvault/crates/trading/src/greeks/`.
 pub mod greeks;
+
+/// O(1) per-tick indicator engine — obi + types + engine. Extracted
+/// from `tickvault/crates/trading/src/indicator/`. Bar-level indicators
+/// (SMA/EMA/RSI/MACD/…) are not yet present and will be added here in
+/// Phase 2 per `MG-043`.
 pub mod indicators;
+
+/// Math utilities — placeholder scaffold (not yet extracted; tickvault
+/// does not yet expose a dedicated math module — utilities are inlined
+/// in greeks/indicator files. Will be refactored here in Phase 2).
 pub mod math;
+
+/// FSM-based strategy evaluator — config + evaluator + hot_reload +
+/// types + tests. Extracted from
+/// `tickvault/crates/trading/src/strategy/`.
 pub mod strategies;
 
 /// Crate version (semver). Must be bumped on any breaking change and

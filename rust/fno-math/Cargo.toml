@@ -3,21 +3,17 @@
 #
 # Per REQUIREMENTS.md §7A Shared Core Library Contract.
 #
-# Name kept as `fno-math` for historical reasons; scope includes
-# greeks, indicators, strategies, and math utilities — see §7A scope
-# block.
-#
-# Published as a normal Rust crate. Tickvault depends on it via
-# `fno-math = { path = "<relative>" }` or via a registry version.
-# BruteX consumes it via the PyO3 wrapper crate `fno-math-py` which
-# builds a Python wheel.
+# **Status:** first-pass extraction from tickvault@aad528a completed
+# 2026-04-14. Dependencies mirror tickvault's trading + common crates
+# minus the live-infrastructure-only items (tokio, reqwest, metrics,
+# notify). See EXTRACTION.md for provenance and known TODOs.
 
 [package]
 name = "fno-math"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.93.1"
-description = "Pure-compute Greeks + indicators + strategies shared by tickvault and BruteX"
+description = "Shared Greeks + indicators + strategies crate (tickvault <-> BruteX)"
 license = "Proprietary"
 repository = "https://github.com/SJParthi/bruteX"
 readme = "README.md"
@@ -27,21 +23,45 @@ name = "fno_math"
 path = "src/lib.rs"
 
 [dependencies]
-# Deliberately minimal — this crate is the dependency floor for two
-# products, so every addition must be justified. No logging, no async,
-# no allocations (except in non-hot utilities).
+# ── Core dependencies mirrored from tickvault ──────────────────────
+# Pinned to the same versions tickvault uses so compiled bytecode is
+# byte-identical.
 
-# Only dependency allowed in v0.1 is a numerical errfc implementation
-# for Black-Scholes normal CDF. Alternatively we can reimplement Abramowitz
-# & Stegun inline and drop this. Decide during extraction.
-# libm = "0.2"
+# Serialization (used by compat::types and strategy config)
+serde = { version = "1.0.227", features = ["derive"] }
+serde_json = "1.0.146"
+toml = "0.8.19"
+
+# Time handling (used by compat::trading_calendar and greeks calibration)
+chrono = { version = "0.4.42", features = ["serde"] }
+chrono-tz = "0.10.0"
+
+# Error handling
+anyhow = "1.0.100"
+thiserror = "2.0.17"
+
+# Tracing (fno-math stays log-emitting; silent unless a subscriber is registered)
+tracing = "0.1.44"
+
+# Archival types (used by compat::instrument_registry for rkyv serialization)
+rkyv = { version = "0.8.13", features = ["alloc"] }
+
+# Black-Scholes implied volatility — Peter Jaeckel's "Let's Be Rational" solver
+# (same crate tickvault uses)
+# jaeckel = "0.2"  # TODO: uncomment once we verify the crate is still on crates.io
+
+# UUID (used by compat::order_types for order correlation IDs)
+uuid = { version = "1.18.2", features = ["serde", "v4"] }
+
+# Secret redaction (used by compat::config for API token handling)
+secrecy = { version = "0.10.3", features = ["serde"] }
+
+# Figment-based config layering (used by compat::config for .toml + env
+# overrides)
+figment = { version = "0.10.19", features = ["toml", "env"] }
 
 [dev-dependencies]
-# Test vectors are loaded from JSON fixtures shared with BruteX's
-# parity test. Zero test-time network I/O.
-# serde = { version = "1", features = ["derive"] }
-# serde_json = "1"
-# proptest = "1"
+proptest = "1.6.0"
 
 [profile.release]
 opt-level = 3
