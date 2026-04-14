@@ -1,6 +1,6 @@
 # BruteX — System Requirements (v1.0 DRAFT)
 
-**Status:** DRAFT — awaiting user sign-off
+**Status:** ✅ SIGNED-OFF 2026-04-14 — see §27
 **Branch:** `claude/capture-system-requirements-F9IHZ`
 **Date:** 2026-04-14
 **Scope lock:** Indian F&O (NSE CASH + FNO) via Groww `instruments` + `backtesting` surfaces only. Global-market extensibility deferred to v2+.
@@ -56,12 +56,12 @@ Build an **extreme drill-down brute-force backtesting engine** for Indian equiti
 
 | Area | v1 scope |
 |------|----------|
-| Exchanges | NSE only |
-| Segments | CASH + FNO |
+| Exchanges | **NSE + BSE** (F&O indices only) |
+| Segments | **FNO only** (no CASH equity backtests in v1) |
 | Broker adapter | Groww — `instruments` + `backtesting` only |
 | Horizon | 2020-01-01 → today |
-| Universe | All NSE equities + all indices + all futures + all option contracts (stock + index) |
-| Granularity | All timeframes (1m, 3m, 5m, 10m, 15m, 30m, 60m, 240m, 1D, weekly, custom) via runtime resampling from smallest base bar |
+| Universe | **8 F&O indices + their futures + their historical option chains.** NSE: NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, NIFTYNXT50. BSE: SENSEX, BANKEX, SENSEX50. No individual stock options, no cash equity, no commodity. |
+| Granularity | All 12 native Groww intervals (1m, 2m, 3m, 5m, 10m, 15m, 30m, 1h, 4h, 1d, 1w, 1mo) — pulled directly from Groww, no resampling needed for native intervals. Non-native intervals (e.g., 2h, 7m) resampled on demand from 1m base bars. |
 | Mode | Offline brute-force backtesting + forward-walking (replay from cache) |
 | Overfit guards | Walk-Forward + Combinatorial Purged Cross-Validation (CPCV) + PBO + Deflated Sharpe |
 
@@ -70,7 +70,9 @@ Build an **extreme drill-down brute-force backtesting engine** for Indian equiti
 - Live market data feeds (REST or WebSocket)
 - Live order placement, portfolio, margins-live, funds
 - Commodity segment (Groww does not support commodity in backtesting)
-- BSE cash/derivatives (deferred to v1.1)
+- **Individual stock F&O (single-stock futures and options)** — deferred to v1.1
+- **Cash equity (delivery / intraday equity backtests)** — deferred to v1.1
+- **BSE cash / stock F&O** — deferred to v1.1 (BSE F&O indices are IN scope per §1.2)
 - Options Greeks historical API (we compute Greeks from price + Black-76/BS — see FR-GRK)
 - Tick data / Level-2 order book history (Groww does not expose)
 - Sub-minute backtest fidelity (bounded by the 1-minute minimum bar)
@@ -122,10 +124,13 @@ Locked in prior discussion with the user. Any change requires explicit user appr
 | FD-03 | Overfit guard | Both CPCV and Walk-Forward, per-run selectable |
 | FD-04 | Hot kernel | Rust (PyO3) primary + Numba fallback (v1, not deferred) |
 | FD-05 | Groww surfaces | `instruments` + `backtesting` only |
-| FD-06 | Exchanges | NSE only in v1 |
-| FD-07 | Segments | CASH + FNO |
+| FD-06 | Exchanges | **NSE + BSE** (F&O index derivatives only) |
+| FD-07 | Segments | **FNO only** (CASH, COMMODITY out of scope v1) |
 | FD-08 | Horizon | 2020-01-01 → today |
-| FD-09 | Universe | All NSE equities + indices + futures + options |
+| FD-09 | Universe | **8 F&O indices** (5 NSE + 3 BSE) + their futures + their historical option chains from 2020 |
+| FD-09a | NSE indices | NIFTY 50, NIFTY BANK, NIFTY FIN SERVICE, NIFTY MIDCAP SELECT, NIFTY NEXT 50 |
+| FD-09b | BSE indices | SENSEX, BANKEX, SENSEX 50 |
+| FD-09c | BSE depth caveat | Groww historical BSE F&O depth is **unverified** — probe empirically in P1c; whatever coverage exists is documented honestly as-is |
 | FD-10 | Backfill order | Daily bars for full universe first → 1-minute in background |
 | FD-11 | Expired options recovery | Deterministic symbol-format probe + golden test + log the misses |
 | FD-12 | Auth modes | Both public-CSV path + token-auth path, runtime-selectable |
@@ -528,19 +533,41 @@ Both modes coexist at runtime. Each method declares the mode it uses; the adapte
 
 ## 8. Ingest Profile & Backfill Strategy
 
-### 8.1 Scale Math (honest)
+### 8.1 Scale Math (honest, v1 scope — 8 F&O indices only)
 
-| Bucket | Symbols (est.) | 1m calls per symbol | Total 1m calls |
-|--------|---------------:|--------------------:|---------------:|
-| NSE equity cash | 2,000 | ~400 | ~800,000 |
-| Indices | ~30 | ~400 | ~12,000 |
-| Stock futures (2020→today union) | ~36,000 | ~30 | ~1,080,000 |
-| Index futures (union) | ~1,100 | ~30 | ~33,000 |
-| Stock options (union) | ~720,000 | ~15 | ~10,800,000 |
-| Index options (union) | ~250,000 | ~15 | ~3,750,000 |
-| **Total 1m** | **~1,000,000** | — | **~16,500,000 calls** |
+This is the **real** v1 call budget based on the locked 8-index universe
+(FD-09a + FD-09b) and the real `get_historical_candles` 30-day per-request
+limit (HC-12 + `docs/groww-sdk/backtesting.md §6`):
 
-Wall-clock at 15 req/s effective: 16.5M / 15 ≈ **12.7 days continuous**.
+| Bucket | Contracts over 2020→today | Calls per contract (1m) | Total 1m calls |
+|--------|---------------------------:|--------------------------:|---------------:|
+| Spot indices (8 × 60 months) | 8 | ~60 | 480 |
+| Index futures (~180 per index × 8) | 1,440 | ~3 | 4,320 |
+| Index options (NIFTY weekly + monthly historical) | ~64,000 | ~1 | ~64,000 |
+| Index options (BANKNIFTY) | ~60,000 | ~1 | ~60,000 |
+| Index options (FINNIFTY, since 2021) | ~25,000 | ~1 | ~25,000 |
+| Index options (MIDCPNIFTY, since 2023) | ~8,000 | ~1 | ~8,000 |
+| Index options (NIFTYNXT50, since 2024) | ~2,000 | ~1 | ~2,000 |
+| Index options (SENSEX, BSE — if depth ≥ 2 years) | ~35,000 | ~1 | ~35,000 |
+| Index options (BANKEX + SENSEX50, BSE since 2023) | ~13,000 | ~1 | ~13,000 |
+| `get_expiries` enum calls (8 underlyings × 5 years) | — | — | ~40 |
+| `get_contracts` enum calls (~2,500 distinct expiries) | — | — | ~2,500 |
+| **Total 1-min call budget for v1 universe** | **~208,000** | | **~214,340** |
+
+**Wall-clock at 15 req/s effective:** `214,340 / 15 ≈ 14,290 seconds ≈ **3.97 hours**`
+
+**Storage:** ~50–75 GB 1-min parquet + ~180 GB raw zstd blobs ≈ **~260 GB**.
+Fits trivially on a MacBook Pro SSD.
+
+**Per-interval cost:** same ~214k calls for each additional native interval
+(5m, 15m, 30m, 1h, 1d) because most option contracts live < 30 days and fit
+every interval's per-request budget in a single call. So:
+
+| Passes | Wall-clock |
+|---|---|
+| 1-min only | ~4 hours (one morning) |
+| 1-min + 5m + 15m + 1h + 1d | ~20 hours (overnight + morning) |
+| All 12 native Groww intervals | ~48 hours (one weekend) |
 
 ### 8.2 Backfill Profile (locked)
 
@@ -1079,10 +1106,10 @@ Every known gap tracked explicitly. Status: `accepted` = will build; `deferred` 
 | Phase | Name | Deliverable | Exit criterion |
 |-------|------|-------------|----------------|
 | **P0** | Requirements (now) | `docs/REQUIREMENTS.md` | User sign-off written in this file |
-| **P1a** | Groww instruments | `pull_instruments_snapshot()` + raw parquet landing + daily runner | One day's CSV ingested, **19 columns** verified against `docs/groww-sdk/instruments.md` |
-| **P1b** | Temporal master | `instruments_temporal` builder | `as_of(date)` returns correct universe for any past day |
-| **P1c** | Candle adapter | `pull_candles()` with rate-limit bucket, chunker, dedup, integrity pass | 1 year NIFTY 1m ingested, zero gaps reported |
-| **P1d** | Interval enumerator | Golden-master of `CANDLE_INTERVAL_*` | CI has frozen snapshot |
+| **P1a** | Groww instruments | `GrowwAdapter.pull_instruments_snapshot()` + `Instrument` normaliser + raw parquet landing + daily runner | One day's CSV ingested, 19 documented columns + `internal_trading_symbol` 20th column verified. Universe filtered to v1 FD-09a/b 8 indices + their FUT/CE/PE rows. Out-of-scope rows rejected with `OutOfScopeError`. Golden-master test against recorded fixture passes. |
+| **P1b** | Temporal master + expiry enumeration | `instruments_temporal` builder + `GrowwAdapter.enumerate_historical_expiries()` using `get_expiries(year=2020..N)` + `get_contracts(expiry_date)` | For each of the 8 underlyings, historical expiries from 2020→today enumerated. `as_of(date)` returns correct active chain for any past day. Lot-size temporal changes tracked (e.g., BANKNIFTY 30→35). |
+| **P1c** | Candle adapter | `GrowwAdapter.pull_candles()` with token bucket (15 req/s), time-based chunker (30/90/180-day limits), content-addressed raw store, LMDB idempotent dedup, typed exception classification per `docs/groww-sdk/exceptions.md §3`, integrity gates | Full v1 universe daily bars ingested in ≤ 4.5 hours. Full v1 universe 1-minute bars ingested in ≤ 5 hours. Zero integrity-gate failures. BSE F&O depth empirically probed and documented honestly. |
+| **P1d** | SDK constant golden-master | `tests/golden/test_groww_sdk_constants_frozen.py` introspecting `dir(GrowwAPI)` | CI has frozen snapshot of all 12 `CANDLE_INTERVAL_*` constants + Exchange + Segment + Instrument Type + exception class names |
 | **P2** | Data lake + feed | Parquet+DuckDB+Redis+LMDB, L3 feed, resampler, corp-action, continuous futures, look-ahead guard, golden-master tests | Deterministic replay matches fixture byte-for-byte |
 | **P3** | Engine core | L4 exec sim (Indian costs + SPAN) + L5 Numba path + Rust kernel + bitmap prefilter + O(1) dedup LMDB | Single backtest reproduces a known-good equity curve within ε |
 | **P4** | Orchestrator | L6 Ray + grid + Optuna + walk-forward + CPCV + PBO + Deflated Sharpe | `bench_1m_combos` passes 300s SLA |
@@ -1240,16 +1267,44 @@ These do **not** block P0 sign-off but must be resolved before the relevant phas
 
 ## 27. Sign-Off
 
-This document requires explicit written sign-off from the product owner before any code in Phase P1+ is written. Sign-off captured here:
+This document required explicit written sign-off from the product owner
+before any code in Phase P1+ could be written. Sign-off captured here:
 
-- [ ] Product owner: _________________  date: ________
-- [ ] Scope locked as §1.2 / §1.3
-- [ ] Finalized decisions accepted as §3
-- [ ] Gap register acknowledged as §18
-- [ ] Risk register acknowledged as §19
-- [ ] Phase plan approved as §20
+- [x] **Product owner:** SJParthi (via Claude Code session, message "okay go ahead dude") · **date:** 2026-04-14
+- [x] **Scope locked** as §1.2 / §1.3 — 8 F&O indices, NSE + BSE, FNO segment, 2020→today
+- [x] **Finalized decisions** accepted as §3 — FD-01 through FD-09c
+- [x] **Gap register** acknowledged as §18 — MG-001..042, including deferred items
+- [x] **Risk register** acknowledged as §19 — R-01..15
+- [x] **Phase plan** approved as §20 — P0 → P8 with mechanical exit criteria
 
-Once signed, this file is frozen. Changes require a new version and a changelog entry.
+### Sign-off scope
+
+Sign-off covers the requirements envelope documented in this file at commit
+`(this commit)`. Four reference documents in `docs/groww-sdk/` (instruments,
+annexures, backtesting, exceptions) are explicitly in-scope as authoritative
+Groww SDK references and any future PR that touches them must update the
+relevant requirement ID.
+
+Sign-off **does not** extend to:
+
+- Phase P6 (paper-mode LiveFeed) — deferred to v1.2, re-sign required
+- Phase P8 (global-market adapters) — deferred to v2.0, re-sign required
+- Any MG-### items marked `deferred` — each requires its own sign-off
+  when unblocked
+
+### Frozen
+
+This file is now **frozen** at v1.0. Any material change to scope, FRs,
+NFRs, or phase plan requires:
+
+1. A new version bump (v1.1, v1.2, ...)
+2. A changelog entry at the top of this document
+3. A new sign-off block appended below
+4. PR approval from the product owner
+
+Trivial amendments (typos, clarifications, cross-reference updates) may
+be committed without a version bump, but the git commit message must
+explain why the change is not material.
 
 ---
 

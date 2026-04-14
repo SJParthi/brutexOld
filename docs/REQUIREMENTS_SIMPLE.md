@@ -6,7 +6,24 @@
 >
 > **Branch:** `claude/capture-system-requirements-F9IHZ`
 > **Date:** 2026-04-14
-> **Status:** DRAFT — awaiting sign-off
+> **Status:** ✅ SIGNED-OFF 2026-04-14 — see `REQUIREMENTS.md §27`
+
+## v1 universe (locked)
+
+**8 F&O indices, nothing else.** No individual stocks, no cash equity, no commodity.
+
+| # | Index | Exchange |
+|---|---|---|
+| 1 | NIFTY 50 | NSE |
+| 2 | NIFTY BANK | NSE |
+| 3 | NIFTY FINANCIAL SERVICES | NSE |
+| 4 | NIFTY MIDCAP SELECT | NSE |
+| 5 | NIFTY NEXT 50 | NSE |
+| 6 | SENSEX | BSE |
+| 7 | BANKEX | BSE |
+| 8 | SENSEX 50 | BSE |
+
+For each index: the spot + all futures + all historical option chains from 2020 to today. ~208,000 contracts total. Full 1-minute ingest fits in **~4 hours** on your MacBook.
 
 ---
 
