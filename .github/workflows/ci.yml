@@ -141,7 +141,8 @@ jobs:
             --cov-report=term-missing \
             --cov-report=xml \
             --cov-fail-under=100 \
-            tests/unit
+            --ignore=tests/bench \
+            tests/unit tests/integration tests/property
       - name: Upload coverage XML
         if: always()
         uses: actions/upload-artifact@v5
@@ -173,6 +174,48 @@ jobs:
           else
             echo "⏸  tests/property does not exist yet — skipping"
           fi
+
+  # ─────────────────────────────────────────────────────────────────
+  # BENCHMARK GATE — pytest-benchmark O(1) assertions (NFR-PERF-001/002/003)
+  #
+  # The benchmark tests include empirical ratio assertions (e.g. store
+  # lookup at 10k items vs 1k items must be < 3×). They run on every
+  # push so a linear-scan regression fails CI, not just shows up in a
+  # benchmark report nobody reads.
+  # ─────────────────────────────────────────────────────────────────
+  bench:
+    name: Benchmarks (O(1) NFR gates)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: pip install -e ".[dev]"
+      - name: pytest benchmarks
+        run: |
+          if [ -d tests/bench ]; then
+            pytest tests/bench \
+              -x \
+              --benchmark-min-rounds=5 \
+              --benchmark-disable-gc \
+              --benchmark-columns=min,mean,median,stddev,ops \
+              --benchmark-json=bench-results.json
+          else
+            echo "⏸  tests/bench does not exist yet — skipping"
+          fi
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: bench-results
+          path: bench-results.json
+          retention-days: 30
+          if-no-files-found: ignore
 
   # ─────────────────────────────────────────────────────────────────
   # GOLDEN TESTS — fixture-based (CG-11)
@@ -369,6 +412,7 @@ jobs:
       - type
       - test
       - property
+      - bench
       - golden
       - security
       - docs
@@ -387,6 +431,7 @@ jobs:
           echo "  type:          ${{ needs.type.result }}"
           echo "  test:          ${{ needs.test.result }}"
           echo "  property:      ${{ needs.property.result }}"
+          echo "  bench:         ${{ needs.bench.result }}"
           echo "  golden:        ${{ needs.golden.result }}"
           echo "  security:      ${{ needs.security.result }}"
           echo "  docs:          ${{ needs.docs.result }}"
@@ -400,6 +445,7 @@ jobs:
             "${{ needs.type.result }}" \
             "${{ needs.test.result }}" \
             "${{ needs.property.result }}" \
+            "${{ needs.bench.result }}" \
             "${{ needs.golden.result }}" \
             "${{ needs.security.result }}" \
             "${{ needs.docs.result }}" \
