@@ -18,6 +18,22 @@ See ``docs/REQUIREMENTS.md §8.5 / §8.6 / §8.7 / §15.5`` for the spec.
 
 from __future__ import annotations
 
+from brutex.orchestrator.pipeline import (
+    DEFAULT_MAX_ITERATIONS_PER_ITEM,
+    EventSubscriber,
+    InvokeCallable,
+    IterationLimitError,
+    PhaseDriverProtocol,
+    PhaseHaltError,
+    PhaseResult,
+    PhaseRunner,
+    PipelineError,
+    PipelineEvent,
+    PipelineEventKind,
+    SleepCallable,
+    drive_item_to_terminal,
+    run_sequential_pipeline,
+)
 from brutex.orchestrator.audit import (
     GENESIS_PREV_HASH,
     AuditChainCorruption,
@@ -131,4 +147,19 @@ __all__ = [
     "StoreError",
     "StoreKeyError",
     "WorkItemStore",
+    # pipeline.py
+    "DEFAULT_MAX_ITERATIONS_PER_ITEM",
+    "EventSubscriber",
+    "InvokeCallable",
+    "IterationLimitError",
+    "PhaseDriverProtocol",
+    "PhaseHaltError",
+    "PhaseResult",
+    "PhaseRunner",
+    "PipelineError",
+    "PipelineEvent",
+    "PipelineEventKind",
+    "SleepCallable",
+    "drive_item_to_terminal",
+    "run_sequential_pipeline",
 ]
