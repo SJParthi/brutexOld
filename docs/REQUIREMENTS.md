@@ -274,6 +274,28 @@ Each FR has a stable ID, a testable statement, and a verification mechanism.
 | FR-UI-007 | On startup, BruteX SHALL write a service discovery file at `~/.brutex/runtime.json` containing: `pid`, `run_id`, `started_at` (ISO-8601 UTC), `host_bind`, resolved `dashboard` / `metrics` / `jupyter` URLs (three forms per FR-UI-008), current `phase`, and a snapshot of the relevant `BRUTEX_*` env vars. The file MUST be deleted on clean exit (SIGTERM handler). On `brutex status` invocation, the file is read and: if the PID is alive → show status; if the PID is dead (stale file from a crash) → auto-delete the file and report "no running instance". The runtime file location SHALL be configurable via `BRUTEX_RUNTIME_FILE` env var for multi-user / CI scenarios. | Unit test: write + read round-trip; integration test: simulate crash via SIGKILL, assert `brutex status` cleans up. |
 | FR-UI-008 | The dashboard startup banner and `brutex status` output SHALL detect the host environment and emit URLs in the correct form: (a) plain terminal → `http://localhost:<port>/` + `http://<lan-ip>:<port>/` for phone/tablet access; (b) Claude Cowork (detected via `CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE` env var) → note "running inside Cowork — dashboard may be forwarded automatically, check session panel"; (c) IntelliJ / PyCharm (detected via `PYCHARM_HOSTED` / `IDEA_INITIAL_DIRECTORY` env vars) → note "running inside IntelliJ — check Services panel for port forwarding"; (d) generic Docker (detected via `/.dockerenv`) → warn that the host-side port mapping must be set by the operator. | Unit test per environment: monkeypatch env vars and assert the correct `RuntimeEnvironment` value and URL list. |
 
+### 4.12 Math Library — Shared with tickvault via `fno-math` Rust crate (FR-MATH)
+
+Every Greek calculation and technical indicator that BruteX exposes to
+strategies MUST be the **exact same code** (not a re-implementation, not
+a mirror, not a port) as tickvault's live trading system. There is
+**one source of truth** — a standalone Rust crate named `fno-math` —
+consumed by both products: natively in tickvault, via PyO3 bindings in
+BruteX. **Any change to a Greek or indicator formula applies to live
+and backtest simultaneously**, because the bytes being executed are
+byte-identical.
+
+Zero Python reimplementation is permitted. This rule is non-negotiable
+and was locked in by the product owner to eliminate live-vs-backtest
+drift as a failure mode.
+
+| ID | Requirement | Verification |
+|----|-------------|--------------|
+| FR-MATH-001 | BruteX SHALL NOT re-implement any mathematical formula that already exists in tickvault's `crates/trading/src/greeks/` or `crates/trading/src/indicator/` directories. Every such formula SHALL be consumed from the shared `fno-math` Rust crate via PyO3 bindings. Reimplementations are explicitly forbidden — the build gate refuses any `brutex/math/**/*.py` file that contains a mathematical formula not marked as `# Delegated to fno-math Rust implementation (imported via PyO3)`. | Static check in `tests/golden/test_no_python_math_impl.py`: grep for forbidden patterns (e.g., `math.erf`, `math.log`, `scipy.stats.norm.cdf`) inside `brutex/math/` and assert zero hits. |
+| FR-MATH-002 | The extraction of `fno-math` from tickvault's existing `crates/trading/src/greeks/` and `indicator/` SHALL be done as a one-shot refactor **before BruteX Phase P3 (strategy engine) begins**. P1a (instruments), P1b (temporal master), P1c (candles), P2 (data lake) do not need math and can proceed without `fno-math`. The extraction procedure is documented in `docs/runbooks/fno-math-extraction.md`. | Runbook exists; P3 kickoff gate verifies `fno-math` is published and `from fno_math_py import delta` works. |
+| FR-MATH-003 | After extraction, tickvault's `Cargo.toml` depends on `fno-math` as a normal crate (`path = "../fno-math"` if monorepo, or `fno-math = "<version>"` from a registry). BruteX's `pyproject.toml` depends on `fno-math-py` (the PyO3 wheel). Every public function in `brutex.math` is a one-line re-export of its `fno-math-py` equivalent. CI on BruteX verifies the PyO3 wheel version matches tickvault's declared `fno-math` version — any mismatch fails the build. | Cross-repo CI check; dependency-version audit step in `make audit`. |
+| FR-MATH-004 | Until `fno-math` is extracted and published, `brutex/math/__init__.py` SHALL exist as a placeholder that raises `NotImplementedError("math library not yet extracted — see docs/runbooks/fno-math-extraction.md")` on every attempted import of a Greek or indicator. This prevents accidental usage of a non-existent module and acts as a forcing function: P3 cannot start until the placeholder is replaced with real PyO3 re-exports. | `tests/unit/test_math_placeholder.py`: assert NotImplementedError on stub calls. |
+
 ---
 
 ## 5. Non-Functional Requirements (NFR)
@@ -332,6 +354,7 @@ Every NFR has an **enforcement mechanism**. If there is no test that can fail th
 | NFR-UNIQ-002 | Canonical params SHALL be serialised via a total-order canonical form (sorted keys, stable float repr, no NaN keys). | Canonicalisation round-trip test. |
 | NFR-DET-001 | `PYTHONHASHSEED=0` and all RNGs SHALL accept an explicit seed; no seedless randomness in the hot path. | Grep test forbids `random.random()` without seed. |
 | NFR-DET-002 | Same inputs SHALL produce byte-identical outputs across two runs on the same code_commit_sha. | Golden-master test. |
+| **NFR-MATH-001** | **Tickvault math parity tolerance.** Every Greek (delta, gamma, theta, vega, rho, implied volatility) and every technical indicator in `brutex.math` SHALL match tickvault's Rust implementation within `abs_tol = 1e-9` OR `rel_tol = 1e-6` (whichever is looser), measured on a golden-master vector set shared between the two repositories. Violations fail CI. This tolerance accounts for the allowed difference in transcendental function implementations (Python's `math.erf` vs Rust's `libm::erf`) and floating-point accumulation order. Anything looser than this tolerance SHALL be treated as a material divergence requiring an ADR. | `tests/golden/test_tickvault_math_parity.py` with vectors under `tests/fixtures/tickvault_math/` — generated once by running tickvault's test suite and checked in. Vectors cover: ATM / deep-ITM / deep-OTM options across NIFTY / BANKNIFTY / SENSEX, 0-90 DTE, r = 5-8%, σ = 10-80%. |
 
 ### 5.6 Security NFRs
 
@@ -539,6 +562,178 @@ class GrowwAdapter:
 | `token_auth` | Historical candles | Yes (`GROWW_API_AUTH_TOKEN`) |
 
 Both modes coexist at runtime. Each method declares the mode it uses; the adapter picks credentials accordingly.
+
+---
+
+## 7A. Shared Core Library Contract (`fno-math`)
+
+This section defines the cross-product invariant that makes
+live-vs-backtest drift a **compile-time error** instead of a
+runtime surprise.
+
+**Scope (locked 2026-04-14):** the shared crate is named `fno-math`
+for historical reasons but its scope is broader than just math. It
+contains **every pure-compute layer that must be identical between
+live and backtest**:
+
+1. **Greeks** — Black-Scholes, calibration, PCR, aggregator, etc.
+2. **Indicators** — SMA / EMA / RSI / MACD / BB / ATR / Supertrend / VWAP / OBI / and every future indicator
+3. **Strategy primitives** — base `Strategy` trait, signal types, state transitions, position-sizing rules, stop-loss/take-profit helpers, and every future strategy
+4. **Math utilities** — rolling stats, distributions, solvers (Newton-Raphson, bisection), calendar helpers
+
+Any change to code in this crate **automatically applies to both
+tickvault and BruteX** on the next version bump. That's the whole
+point. If you edit `fno-math/src/strategies/momentum.rs`, the next
+tickvault release runs the new logic live AND the next BruteX run
+backtests against the same logic. Zero manual syncing. Zero drift.
+
+The operator can write new strategies and new indicators in Claude
+Code / Claude Cowork **at exactly one location** — `rust/fno-math/src/` —
+and both products immediately see the change.
+
+### 7A.1 The single-source rule
+
+BruteX and tickvault share **one** implementation of every Greek,
+every indicator, and every strategy. That implementation lives in a
+standalone Rust crate named `fno-math`. There is no Python mirror, no
+parallel port, no manually-synced copy.
+
+```
+                 ┌──────────────────────────┐
+                 │                          │
+                 │   fno-math (Rust crate)  │   ← THE single source of truth
+                 │                          │
+                 │   src/                   │
+                 │   ├── greeks/            │
+                 │   │   ├── black_scholes  │
+                 │   │   ├── calibration    │
+                 │   │   ├── pcr            │
+                 │   │   └── aggregator     │
+                 │   ├── indicators/        │
+                 │   │   ├── sma / ema      │
+                 │   │   ├── rsi / macd     │
+                 │   │   ├── bb / atr       │
+                 │   │   ├── supertrend     │
+                 │   │   ├── vwap           │
+                 │   │   └── obi            │
+                 │   ├── strategies/        │
+                 │   │   ├── base (trait)   │
+                 │   │   ├── momentum       │
+                 │   │   ├── mean_revert    │
+                 │   │   ├── iron_condor    │
+                 │   │   ├── straddle       │
+                 │   │   └── ...            │
+                 │   └── math/              │
+                 │       ├── rolling        │
+                 │       ├── distributions  │
+                 │       └── solvers        │
+                 │                          │
+                 └────┬─────────────────┬───┘
+                      │                 │
+                      │ Cargo dep       │ PyO3 binding (fno-math-py)
+                      ▼                 ▼
+             ┌────────────────┐   ┌─────────────────┐
+             │   tickvault    │   │     brutex      │
+             │   (Rust, live) │   │  (Python,       │
+             │                │   │   backtest)     │
+             └────────────────┘   └─────────────────┘
+```
+
+**Any change to a function in `fno-math` → both products get it
+simultaneously** on the next version bump. There is no way for the
+formulas to drift because there is no second copy to drift from.
+
+### 7A.2 Repository layout
+
+The shared crate lives in **this repository** (BruteX) under `rust/`:
+
+```
+bruteX/
+├── rust/
+│   ├── fno-math/           ← the Rust crate (extracted from tickvault)
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   ├── greeks/
+│   │   │   ├── indicators/
+│   │   │   └── math/
+│   │   ├── tests/
+│   │   └── benches/
+│   └── fno-math-py/        ← PyO3 binding (exposes fno-math as a Python wheel)
+│       ├── Cargo.toml
+│       ├── pyproject.toml
+│       └── src/lib.rs      ← `#[pymodule]` with every public fn
+│
+├── brutex/
+│   └── math/               ← thin Python re-export layer (ONE-LINE imports only)
+│       ├── __init__.py
+│       ├── greeks.py       ← `from fno_math_py import delta, gamma, ...`
+│       └── indicators.py   ← `from fno_math_py import rsi, macd, ...`
+│
+└── scripts/
+    └── extract-fno-math.sh ← operator tool: vendor tickvault sources into rust/fno-math/
+```
+
+**Tickvault's side:** after extraction, tickvault adds
+`fno-math = { path = "../brutex/rust/fno-math" }` (or a published
+version) to its `Cargo.toml` and deletes its local `crates/trading/src/greeks/`
+and `crates/trading/src/indicator/` pure-math files. Tickvault's
+`crates/trading/` then imports from `fno_math::greeks::*` etc.
+
+This keeps **one git repo = one source** for the math code. The
+BruteX repo is the "owner" of `fno-math`; tickvault consumes it.
+
+### 7A.3 Extraction procedure
+
+The one-shot refactor is documented as a step-by-step runbook in
+`docs/runbooks/fno-math-extraction.md`. Summary:
+
+1. Operator clones both repositories locally (`bruteX/` and `tickvault/`).
+2. Operator runs `scripts/extract-fno-math.sh` which copies tickvault's
+   `crates/trading/src/greeks/**` and `crates/trading/src/indicator/**`
+   Rust files into `rust/fno-math/src/`, rewriting module paths.
+3. Operator commits the result on a BruteX branch
+   (`claude/extract-fno-math-<uuid>`).
+4. Operator opens a companion PR on tickvault that:
+   - Adds `fno-math` as a Cargo dependency
+   - Replaces all in-tree `greeks::` / `indicator::` uses with
+     `fno_math::greeks::*` / `fno_math::indicators::*`
+   - Deletes the now-duplicate files from `crates/trading/src/`
+5. Operator builds the PyO3 wrapper: `cd rust/fno-math-py && maturin develop`
+   which produces a Python wheel installed into BruteX's venv.
+6. Operator replaces `brutex/math/__init__.py` placeholder with the
+   one-line re-exports and runs `pytest tests/golden/test_tickvault_math_parity.py`.
+
+### 7A.4 Drift-check CI
+
+Even though there's no Python duplication, the Rust files could
+theoretically diverge from what tickvault has checked in. BruteX's
+CI runs a **drift check** on every push:
+
+```
+make check-fno-math-drift
+  ↓
+  1. git clone --depth 1 https://github.com/SJParthi/tickvault.git /tmp/tv
+  2. Compare /tmp/tv/crates/trading/src/greeks/* against rust/fno-math/src/greeks/*
+  3. Compare /tmp/tv/crates/trading/src/indicator/*  against rust/fno-math/src/indicators/*
+  4. If tickvault has been updated more recently (commit SHA newer) AND the
+     source files differ → CI fails with instructions to run
+     `scripts/extract-fno-math.sh` again and bump `fno-math` version.
+  5. If files are identical OR tickvault is older → pass.
+```
+
+This is a watchdog, not a source-of-truth fork. The contract is still
+"same code, one place". The drift check only exists because the
+extraction is operator-run (not automated at commit time).
+
+### 7A.5 Versioning and compatibility
+
+| Concern | Rule |
+|---------|------|
+| Semver | `fno-math` follows strict semver. Any API change bumps minor; any formula change bumps major (formulas are part of the public contract because results are user-visible). |
+| Breaking changes | Require coordinated PR on both `brutex` and `tickvault` on the same day. CI refuses merge until both are green. |
+| Lockfiles | Both `brutex/pyproject.toml` and `tickvault/Cargo.lock` pin `fno-math` to an exact version. `cargo update` on tickvault without a matching `pip install` on BruteX fails the cross-repo CI check. |
+| Test vectors | `rust/fno-math/tests/fixtures/` contains canonical `.json` files of `(inputs, expected_output)` pairs used by both the Rust unit tests AND BruteX's Python parity tests. Same file, same tolerance, same answer. |
 
 ---
 
@@ -1569,6 +1764,7 @@ ADRs live in `docs/adr/NNNN-title.md`. Initial set (one-line summary here; full 
 | ADR-0013 | Dual-mode strategies (vectorised + event-driven) | Accepted |
 | ADR-0014 | Runtime-dynamic timeframe resampler | Accepted |
 | ADR-0015 | `import-linter` enforced layer dependencies | Accepted |
+| ADR-0016 | Shared math library strategy — `fno-math` Rust crate owned by BruteX, consumed by tickvault via Cargo and BruteX via PyO3 (`fno-math-py`). No Python reimplementation. See `§7A Shared Math Library Contract`. | Accepted 2026-04-14 |
 
 ---
 
@@ -1646,6 +1842,7 @@ These do **not** block P0 sign-off but must be resolved before the relevant phas
 | ~~OQ-GROWW-CANDLE-NAMES~~ | **RESOLVED 2026-04-14** — bare names (`CANDLE_INTERVAL_DAY`/`WEEK`/`MONTH`) are canonical, matches annexures page. See `docs/groww-sdk/backtesting.md §9` and `docs/groww-sdk/annexures.md §4`. Golden-master `test_groww_sdk_constants_frozen` pins all 12 names. | — |
 | OQ-V1-SSD-CAPACITY | Product owner MacBook SSD free space must be confirmed ≥ 1.5 TB before full-FNO ingest. If < 1.5 TB, disable raw-blob storage (drops footprint to ~250 GB canonical-only, loses provenance replay). | Before P1c runs |
 | MG-FNO-STOCK-DROPOUTS | Stocks that were F&O-eligible between 2020 and today but are no longer in today's CSV (removed from F&O list, delisted, merged) will be missed in the initial backfill. Daily snapshotting of the instrument CSV going forward captures future changes. Pre-2026 dropouts are accepted as gaps. | Document as MG at P1a, do not block |
+| MG-043 | Tickvault's current `crates/trading/src/indicator/` only contains OBI (order book imbalance — tick-level, not applicable to bar-based backtesting). The full indicator catalog (SMA / EMA / WMA / HMA / DEMA / TEMA / RSI / Stoch / MACD / BB / ATR / ADX / Supertrend / VWAP / Anchored-VWAP / Keltner / Donchian / OBV / CMF / MFI / Ichimoku / PSAR / Pivot / CPR / OpeningRange / RealizedVol) does NOT yet exist in tickvault — it will be first added to `fno-math` as part of the extraction, then consumed by tickvault's next minor version AND BruteX Phase P3 simultaneously. This is a scope expansion, not a drift, and is tracked here for explicit visibility. | Inventoried at extraction; catalog file list verified against FR-IND-001 |
 | OQ-GROWW-INTERNAL-TRADING-SYMBOL | `get_all_instruments()` DataFrame has a 20th column `internal_trading_symbol` that is NOT in the documented CSV-columns table. Appears identical to `trading_symbol` in samples. Verify via CI assertion and flag any divergence. | P1a |
 | OQ-GROWW-TICK-SIZE-UNIT | `tick_size` shows as `0.05` (float rupees) in CSV but as `5` (integer, presumably paise) in dict output. Normalise to `Decimal` rupees in adapter; assert crossed value matches expected NSE/BSE tick sizes. | P1a |
 | OQ-GROWW-RATE-LIMIT-BUCKET | Is the OHLC rate bucket per-token, per-IP, or per-account? Probe by running from 2 machines simultaneously with the same token. | P1c |

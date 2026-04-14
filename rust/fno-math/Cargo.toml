@@ -1,0 +1,56 @@
+# fno-math — the single source of truth for Greeks, indicators, and
+# strategies shared between tickvault (live) and BruteX (backtest).
+#
+# Per REQUIREMENTS.md §7A Shared Core Library Contract.
+#
+# Name kept as `fno-math` for historical reasons; scope includes
+# greeks, indicators, strategies, and math utilities — see §7A scope
+# block.
+#
+# Published as a normal Rust crate. Tickvault depends on it via
+# `fno-math = { path = "<relative>" }` or via a registry version.
+# BruteX consumes it via the PyO3 wrapper crate `fno-math-py` which
+# builds a Python wheel.
+
+[package]
+name = "fno-math"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.1"
+description = "Pure-compute Greeks + indicators + strategies shared by tickvault and BruteX"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+
+[lib]
+name = "fno_math"
+path = "src/lib.rs"
+
+[dependencies]
+# Deliberately minimal — this crate is the dependency floor for two
+# products, so every addition must be justified. No logging, no async,
+# no allocations (except in non-hot utilities).
+
+# Only dependency allowed in v0.1 is a numerical errfc implementation
+# for Black-Scholes normal CDF. Alternatively we can reimplement Abramowitz
+# & Stegun inline and drop this. Decide during extraction.
+# libm = "0.2"
+
+[dev-dependencies]
+# Test vectors are loaded from JSON fixtures shared with BruteX's
+# parity test. Zero test-time network I/O.
+# serde = { version = "1", features = ["derive"] }
+# serde_json = "1"
+# proptest = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = true  # Finance code — overflow must never be silent
+
+[profile.bench]
+inherits = "release"
+debug = true
