@@ -87,7 +87,7 @@ bruteX/
 | Fact | Value | Source |
 |------|-------|--------|
 | Instrument CSV URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` | Groww docs |
-| Instrument CSV columns | 21 (see REQUIREMENTS §Data Model) | Groww docs |
+| Instrument CSV columns | 19 (see REQUIREMENTS §Data Model; authoritative list in `docs/groww-sdk/instruments.md`) | Groww docs |
 | Historical endpoint | `GET /v1/historical/candle/range` | Groww docs |
 | SDK method (current) | `get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` | python-sdk/historical-data |
 | SDK method (deprecated) | `get_historical_candle_data` — do NOT use | python-sdk/historical-data |

@@ -347,8 +347,8 @@ bar {
   symbol:          string            # groww_symbol
   exchange:        enum              # NSE, BSE
   segment:         enum              # CASH, FNO
-  instrument_type: enum              # equity, index, FUT, CE, PE
-  interval:        enum              # 1m, 3m, 5m, 15m, 30m, 60m, 240m, 1d
+  instrument_type: enum              # EQ, IDX, FUT, CE, PE (Groww SDK — see docs/groww-sdk/annexures.md)
+  interval:        enum              # 1m, 2m, 3m, 5m, 10m, 15m, 30m, 1h, 4h, 1d, 1w, 1mo (12 native Groww intervals)
   ts_open_utc:     int64             # microseconds since epoch (bar open)
   ts_close_utc:    int64             # exclusive close
   open:            float64
@@ -1015,7 +1015,7 @@ Every known gap tracked explicitly. Status: `accepted` = will build; `deferred` 
 | Phase | Name | Deliverable | Exit criterion |
 |-------|------|-------------|----------------|
 | **P0** | Requirements (now) | `docs/REQUIREMENTS.md` | User sign-off written in this file |
-| **P1a** | Groww instruments | `pull_instruments_snapshot()` + raw parquet landing + daily runner | One day's CSV ingested, 21 columns verified |
+| **P1a** | Groww instruments | `pull_instruments_snapshot()` + raw parquet landing + daily runner | One day's CSV ingested, **19 columns** verified against `docs/groww-sdk/instruments.md` |
 | **P1b** | Temporal master | `instruments_temporal` builder | `as_of(date)` returns correct universe for any past day |
 | **P1c** | Candle adapter | `pull_candles()` with rate-limit bucket, chunker, dedup, integrity pass | 1 year NIFTY 1m ingested, zero gaps reported |
 | **P1d** | Interval enumerator | Golden-master of `CANDLE_INTERVAL_*` | CI has frozen snapshot |
@@ -1122,7 +1122,7 @@ ADRs live in `docs/adr/NNNN-title.md`. Initial set (one-line summary here; full 
 | Fact | Value | Source |
 |------|-------|--------|
 | Instrument CSV URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` | `groww.in/trade-api/docs/python-sdk/instruments` |
-| Columns in CSV | 21 (see §6.2) | Groww docs |
+| Columns in CSV | **19** (see §6.2 and `docs/groww-sdk/instruments.md`) | Groww docs |
 | Backtest segments | `CASH`, `FNO` only | `groww.in/trade-api/docs/python-sdk/backtesting` |
 | FNO history depth | From 2020 onward | Groww docs |
 | Historical endpoint | `GET /v1/historical/candle/range` | Groww cURL docs |
