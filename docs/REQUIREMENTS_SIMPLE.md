@@ -8,9 +8,11 @@
 > **Date:** 2026-04-14
 > **Status:** ✅ SIGNED-OFF 2026-04-14 — see `REQUIREMENTS.md §27`
 
-## v1 universe (locked)
+## v1 universe (locked — expanded 2026-04-14)
 
-**8 F&O indices, nothing else.** No individual stocks, no cash equity, no commodity.
+**Everything in Groww's FNO segment.** Two pieces:
+
+### 1. Index F&O (8 indices)
 
 | # | Index | Exchange |
 |---|---|---|
@@ -23,7 +25,37 @@
 | 7 | BANKEX | BSE |
 | 8 | SENSEX 50 | BSE |
 
-For each index: the spot + all futures + all historical option chains from 2020 to today. ~208,000 contracts total. Full 1-minute ingest fits in **~4 hours** on your MacBook.
+### 2. Stock F&O (~215 NSE stocks)
+
+All NSE stocks currently eligible for F&O trading — roughly **215 underlyings** as of late 2024/2025 (exact count varies as SEBI adds/removes stocks). Examples: RELIANCE, TCS, HDFCBANK, ICICIBANK, INFY, SBIN, ITC, LT, AXISBANK, KOTAKBANK, BHARTIARTL, HINDUNILVR, M&M, MARUTI, ASIANPAINT, WIPRO, TATAMOTORS, SUNPHARMA, BAJFINANCE, ADANIPORTS… and ~195 more.
+
+**The list is NOT hardcoded** — it's discovered at runtime by reading Groww's instrument CSV and filtering to `segment == FNO`.
+
+### What's NOT in v1
+
+❌ Cash equity backtests (pure equity strategies without F&O) — deferred to v1.1
+❌ Commodity (GOLD, CRUDE, SILVER on MCX) — Groww doesn't support it
+❌ BSE cash + BSE stock F&O — deferred to v1.1
+
+### Scale numbers (honest)
+
+| | Number |
+|---|---:|
+| Total F&O underlyings | 8 indices + ~215 stocks = **~223** |
+| Total contracts over 2020→today (historical union) | **~1.3 million** |
+| Total 1-minute API calls needed | **~1.3 million** |
+| Wall-clock at 15 req/s (with thermal throttling) | **~24-28 hours** |
+| Storage (canonical + raw blobs) | **~800 GB – 1.2 TB** |
+
+⚠️ **SSD check needed:** You'll need ~1.5 TB free space on your MacBook SSD before we run the full ingest. Check Apple menu → About This Mac → Storage. If it's less, we have an option to skip raw-blob storage and drop to ~250 GB canonical-only.
+
+### The ingest plan
+
+**Day 1 morning:** Daily bars for the whole FNO universe (~10 hours). You can start running daily-bar backtests by afternoon.
+
+**Day 1 night → Day 2 morning:** 1-minute bars in the background (~24-28 hours overnight). By Day 2 morning you have full 1-minute coverage.
+
+**Day 2+:** Higher intervals (5m, 15m, 1h, 1d) pulled on demand for specific slices you care about.
 
 ---
 

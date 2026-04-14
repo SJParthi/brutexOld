@@ -56,11 +56,11 @@ Build an **extreme drill-down brute-force backtesting engine** for Indian equiti
 
 | Area | v1 scope |
 |------|----------|
-| Exchanges | **NSE + BSE** (F&O indices only) |
+| Exchanges | **NSE + BSE** |
 | Segments | **FNO only** (no CASH equity backtests in v1) |
 | Broker adapter | Groww — `instruments` + `backtesting` only |
 | Horizon | 2020-01-01 → today |
-| Universe | **8 F&O indices + their futures + their historical option chains.** NSE: NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, NIFTYNXT50. BSE: SENSEX, BANKEX, SENSEX50. No individual stock options, no cash equity, no commodity. |
+| Universe | **All FNO-segment instruments.** Includes: 8 F&O indices (NSE: NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, NIFTYNXT50; BSE: SENSEX, BANKEX, SENSEX50) **and** all F&O-eligible stocks (**~215 NSE stock underlyings** as of late 2024/2025, varies over time per SEBI revisions) with their futures and options. **Exact list is discovered at runtime** from Groww's instrument CSV — the set of unique `underlying_symbol` values where `segment = FNO` IS the F&O-eligible universe for that day. Excludes cash equity standalone backtests and commodity. |
 | Granularity | All 12 native Groww intervals (1m, 2m, 3m, 5m, 10m, 15m, 30m, 1h, 4h, 1d, 1w, 1mo) — pulled directly from Groww, no resampling needed for native intervals. Non-native intervals (e.g., 2h, 7m) resampled on demand from 1m base bars. |
 | Mode | Offline brute-force backtesting + forward-walking (replay from cache) |
 | Overfit guards | Walk-Forward + Combinatorial Purged Cross-Validation (CPCV) + PBO + Deflated Sharpe |
@@ -70,9 +70,8 @@ Build an **extreme drill-down brute-force backtesting engine** for Indian equiti
 - Live market data feeds (REST or WebSocket)
 - Live order placement, portfolio, margins-live, funds
 - Commodity segment (Groww does not support commodity in backtesting)
-- **Individual stock F&O (single-stock futures and options)** — deferred to v1.1
-- **Cash equity (delivery / intraday equity backtests)** — deferred to v1.1
-- **BSE cash / stock F&O** — deferred to v1.1 (BSE F&O indices are IN scope per §1.2)
+- **Cash equity standalone backtests** — deferred to v1.1. Note: F&O stocks ARE in v1 via FNO segment; only pure equity strategies are out of scope.
+- **BSE cash / BSE stock F&O** — deferred to v1.1 (BSE F&O indices are IN scope per §1.2)
 - Options Greeks historical API (we compute Greeks from price + Black-76/BS — see FR-GRK)
 - Tick data / Level-2 order book history (Groww does not expose)
 - Sub-minute backtest fidelity (bounded by the 1-minute minimum bar)
@@ -127,10 +126,12 @@ Locked in prior discussion with the user. Any change requires explicit user appr
 | FD-06 | Exchanges | **NSE + BSE** (F&O index derivatives only) |
 | FD-07 | Segments | **FNO only** (CASH, COMMODITY out of scope v1) |
 | FD-08 | Horizon | 2020-01-01 → today |
-| FD-09 | Universe | **8 F&O indices** (5 NSE + 3 BSE) + their futures + their historical option chains from 2020 |
-| FD-09a | NSE indices | NIFTY 50, NIFTY BANK, NIFTY FIN SERVICE, NIFTY MIDCAP SELECT, NIFTY NEXT 50 |
-| FD-09b | BSE indices | SENSEX, BANKEX, SENSEX 50 |
+| FD-09 | Universe | **All FNO-segment instruments**: 8 F&O indices (5 NSE + 3 BSE) + **all F&O-eligible NSE stocks** (~215 underlyings as of late 2024/2025) + their futures + their historical option chains from 2020 |
+| FD-09a | NSE indices (named) | NIFTY 50, NIFTY BANK, NIFTY FIN SERVICE, NIFTY MIDCAP SELECT, NIFTY NEXT 50 |
+| FD-09b | BSE indices (named) | SENSEX, BANKEX, SENSEX 50 |
 | FD-09c | BSE depth caveat | Groww historical BSE F&O depth is **unverified** — probe empirically in P1c; whatever coverage exists is documented honestly as-is |
+| FD-09d | Stock F&O discovery | The list of F&O-eligible NSE stocks is **discovered at runtime** from Groww's instrument CSV — the filter is simply `segment == FNO AND instrument_type IN (FUT, CE, PE) AND underlying_symbol NOT IN indices`. NOT hardcoded. The exact count varies over time (SEBI adds/removes based on liquidity + market cap criteria). |
+| FD-09e | Stock F&O historical union | Stocks that were F&O-eligible between 2020 and now but are not in today's CSV (delisted, removed from F&O list) will be missed unless we daily-snapshot the CSV going forward. For the initial v1 backfill, we accept "today's F&O list is the universe." Stocks removed from F&O pre-2026 are documented as `MG-FNO-STOCK-DROPOUTS` gap. |
 | FD-10 | Backfill order | Daily bars for full universe first → 1-minute in background |
 | FD-11 | Expired options recovery | Deterministic symbol-format probe + golden test + log the misses |
 | FD-12 | Auth modes | Both public-CSV path + token-auth path, runtime-selectable |
@@ -533,41 +534,107 @@ Both modes coexist at runtime. Each method declares the mode it uses; the adapte
 
 ## 8. Ingest Profile & Backfill Strategy
 
-### 8.1 Scale Math (honest, v1 scope — 8 F&O indices only)
+### 8.1 Scale Math (honest, v1 scope — all FNO segment)
 
-This is the **real** v1 call budget based on the locked 8-index universe
-(FD-09a + FD-09b) and the real `get_historical_candles` 30-day per-request
-limit (HC-12 + `docs/groww-sdk/backtesting.md §6`):
+This is the **real** v1 call budget based on the full FNO segment
+(8 F&O indices + ~215 F&O-eligible NSE stocks) and the real
+`get_historical_candles` 30-day per-request limit (HC-12 +
+`docs/groww-sdk/backtesting.md §6`).
+
+**Important:** the exact numbers below are estimates for capacity planning.
+The real contract counts are discovered at runtime by calling
+`get_expiries` + `get_contracts` for every FNO underlying (FD-09d). The
+ingest progress bar will show the true running totals.
+
+#### Index F&O sub-total
 
 | Bucket | Contracts over 2020→today | Calls per contract (1m) | Total 1m calls |
 |--------|---------------------------:|--------------------------:|---------------:|
 | Spot indices (8 × 60 months) | 8 | ~60 | 480 |
 | Index futures (~180 per index × 8) | 1,440 | ~3 | 4,320 |
-| Index options (NIFTY weekly + monthly historical) | ~64,000 | ~1 | ~64,000 |
-| Index options (BANKNIFTY) | ~60,000 | ~1 | ~60,000 |
-| Index options (FINNIFTY, since 2021) | ~25,000 | ~1 | ~25,000 |
-| Index options (MIDCPNIFTY, since 2023) | ~8,000 | ~1 | ~8,000 |
-| Index options (NIFTYNXT50, since 2024) | ~2,000 | ~1 | ~2,000 |
-| Index options (SENSEX, BSE — if depth ≥ 2 years) | ~35,000 | ~1 | ~35,000 |
-| Index options (BANKEX + SENSEX50, BSE since 2023) | ~13,000 | ~1 | ~13,000 |
-| `get_expiries` enum calls (8 underlyings × 5 years) | — | — | ~40 |
-| `get_contracts` enum calls (~2,500 distinct expiries) | — | — | ~2,500 |
-| **Total 1-min call budget for v1 universe** | **~208,000** | | **~214,340** |
+| NIFTY options (weekly + monthly) | ~64,000 | ~1 | ~64,000 |
+| BANKNIFTY options | ~60,000 | ~1 | ~60,000 |
+| FINNIFTY options (since 2021) | ~25,000 | ~1 | ~25,000 |
+| MIDCPNIFTY options (since 2023) | ~8,000 | ~1 | ~8,000 |
+| NIFTYNXT50 options (since 2024) | ~2,000 | ~1 | ~2,000 |
+| SENSEX options (BSE) | ~35,000 | ~1 | ~35,000 |
+| BANKEX + SENSEX50 options (BSE since 2023) | ~13,000 | ~1 | ~13,000 |
+| **Index F&O subtotal** | **~208,000** | | **~211,800** |
 
-**Wall-clock at 15 req/s effective:** `214,340 / 15 ≈ 14,290 seconds ≈ **3.97 hours**`
+#### Stock F&O sub-total (new in this scope expansion)
 
-**Storage:** ~50–75 GB 1-min parquet + ~180 GB raw zstd blobs ≈ **~260 GB**.
-Fits trivially on a MacBook Pro SSD.
+Per stock (typical F&O-eligible NSE stock):
 
-**Per-interval cost:** same ~214k calls for each additional native interval
-(5m, 15m, 30m, 1h, 1d) because most option contracts live < 30 days and fit
-every interval's per-request budget in a single call. So:
+| Item | Count over 5 years | Calls (1m) |
+|---|---:|---:|
+| Stock futures (3 running months × 60 months) | ~180 | ~180 (1 call each, monthly contracts live ≤ 30 days → fit 30-day limit) |
+| Stock options per expiry (~40 strikes × CE+PE) | ~80 | ~80 |
+| Monthly expiries 2020→today | 60 | — |
+| **Stock option contracts per stock (60 months × 80 strikes/expiry)** | **~4,800** | **~4,800** |
+| **Total per stock (futures + options, 1m calls)** | **~4,980** | **~4,980** |
+
+× ~215 stocks (F&O-eligible union over 2020→today):
+
+| Bucket | Contracts over 2020→today | Total 1m calls |
+|---|---:|---:|
+| Stock futures (~180 × 215) | ~38,700 | ~38,700 |
+| Stock options (~4,800 × 215) | ~1,032,000 | ~1,032,000 |
+| `get_expiries` enum calls (215 × 5 years) | — | ~1,075 |
+| `get_contracts` enum calls (~12,900 distinct expiries) | — | ~12,900 |
+| **Stock F&O subtotal** | **~1,070,700** | **~1,084,675** |
+
+> **Note on stock option call budget:** this estimate is on the higher
+> side. Stock options have thinner strike grids than index options
+> (~20-40 strikes vs ~100 for NIFTY), so the real number may be
+> ~700,000-900,000 calls. The actual figure is discovered at ingest time.
+
+#### Full v1 total
+
+| | Index F&O | Stock F&O | **GRAND TOTAL** |
+|---|---:|---:|---:|
+| Contracts over 2020→today | ~208,000 | ~1,070,700 | **~1,278,700** |
+| 1-minute call budget | ~211,800 | ~1,084,675 | **~1,296,475** |
+
+**Wall-clock at 15 req/s effective:**
+`1,296,475 / 15 ≈ 86,432 seconds ≈ **24 hours (one full day)**`
+
+**Realistic caveat:** sustained 24-hour ingest on a MacBook laptop will
+hit thermal throttling. Budget for ~15% slowdown → **~27-28 hours** end
+to end. Run as an overnight job with a 30-hour wall-clock budget. Resume
+semantics (FR-ING-012) mean if the laptop sleeps or crashes mid-ingest,
+rerun picks up where it left off.
+
+**Storage estimate (1-minute pass, full v1 FNO universe):**
+
+| | Low estimate | High estimate |
+|---|---:|---:|
+| Canonical parquet (snappy/zstd compressed) | ~200 GB | ~300 GB |
+| Raw Groww response blobs (zstd) | ~600 GB | ~900 GB |
+| Instrument daily snapshots | ~500 MB | ~1 GB |
+| **Total** | **~800 GB** | **~1.2 TB** |
+
+**⚠️ SSD CAPACITY CHECK REQUIRED.** The v1 universe expanded from
+~260 GB (index-only) to **~800 GB – 1.2 TB** (full FNO). The product
+owner must confirm MacBook SSD free space ≥ 1.5 TB before the initial
+ingest, OR disable raw-blob storage to drop to ~250 GB canonical-only
+footprint (loses provenance but still functional). Tracked as
+`OQ-V1-SSD-CAPACITY` in §26.
+
+**Per-interval cost:** same ~1.3M calls per native interval for 1m/2m/3m/5m
+(since stock options live ~30 days which fits exactly one chunk). Higher
+intervals (15m, 1h, 1d) cost slightly less because their max-duration is
+larger (90/180 days), but the option contracts still dominate.
 
 | Passes | Wall-clock |
 |---|---|
-| 1-min only | ~4 hours (one morning) |
-| 1-min + 5m + 15m + 1h + 1d | ~20 hours (overnight + morning) |
-| All 12 native Groww intervals | ~48 hours (one weekend) |
+| 1-min only (full FNO) | ~24-28 hours (overnight) |
+| 1-min + 5m + 15m + 1h + 1d | ~5-6 days |
+| All 12 native Groww intervals | ~2 weeks |
+
+**Realistic v1 ingest plan:**
+1. **Phase A — daily bars first** (~10 hours): unlocks daily-bar backtests by morning
+2. **Phase B — 1-min bars in background** (~24-28 hours): unlocks full 1m backtests
+3. **Phase C — higher intervals opportunistic**: 5m/15m/1h/1d only for subsets the user actually wants, resampled from 1m when possible
 
 ### 8.2 Backfill Profile (locked)
 
@@ -1250,6 +1317,8 @@ These do **not** block P0 sign-off but must be resolved before the relevant phas
 | OQ-03 | Whether Groww's OHLC bucket is per-token or per-IP | P1c |
 | OQ-04 | Exact retry-after semantics on 429 (SDK raises? headers? silent?) | P1c |
 | ~~OQ-GROWW-CANDLE-NAMES~~ | **RESOLVED 2026-04-14** — bare names (`CANDLE_INTERVAL_DAY`/`WEEK`/`MONTH`) are canonical, matches annexures page. See `docs/groww-sdk/backtesting.md §9` and `docs/groww-sdk/annexures.md §4`. Golden-master `test_groww_sdk_constants_frozen` pins all 12 names. | — |
+| OQ-V1-SSD-CAPACITY | Product owner MacBook SSD free space must be confirmed ≥ 1.5 TB before full-FNO ingest. If < 1.5 TB, disable raw-blob storage (drops footprint to ~250 GB canonical-only, loses provenance replay). | Before P1c runs |
+| MG-FNO-STOCK-DROPOUTS | Stocks that were F&O-eligible between 2020 and today but are no longer in today's CSV (removed from F&O list, delisted, merged) will be missed in the initial backfill. Daily snapshotting of the instrument CSV going forward captures future changes. Pre-2026 dropouts are accepted as gaps. | Document as MG at P1a, do not block |
 | OQ-GROWW-INTERNAL-TRADING-SYMBOL | `get_all_instruments()` DataFrame has a 20th column `internal_trading_symbol` that is NOT in the documented CSV-columns table. Appears identical to `trading_symbol` in samples. Verify via CI assertion and flag any divergence. | P1a |
 | OQ-GROWW-TICK-SIZE-UNIT | `tick_size` shows as `0.05` (float rupees) in CSV but as `5` (integer, presumably paise) in dict output. Normalise to `Decimal` rupees in adapter; assert crossed value matches expected NSE/BSE tick sizes. | P1a |
 | OQ-GROWW-RATE-LIMIT-BUCKET | Is the OHLC rate bucket per-token, per-IP, or per-account? Probe by running from 2 machines simultaneously with the same token. | P1c |
