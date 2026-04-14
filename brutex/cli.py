@@ -135,13 +135,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build everything but do not persist (useful for testing)",
     )
 
-    # Placeholder subcommands (future phases)
-    for phase_name in ("expiries", "contracts", "candles", "all"):
-        p = ingest_sub.add_parser(
-            phase_name,
-            help=f"Phase {phase_name} (NOT YET IMPLEMENTED)",
-        )
-        p.set_defaults(_is_placeholder=True, _placeholder_name=phase_name)
+    # Phase B — expiries
+    expiries = ingest_sub.add_parser(
+        "expiries",
+        help="Phase B — enumerate historical expiries for every F&O underlying",
+    )
+    expiries.add_argument(
+        "--start-year",
+        type=int,
+        default=2020,
+        help="First year to enumerate (inclusive; default 2020 per FD-08)",
+    )
+    expiries.add_argument(
+        "--end-year",
+        type=int,
+        default=None,
+        help="Last year (inclusive; default current UTC year)",
+    )
+    expiries.add_argument("--run-id", default=None)
+    expiries.add_argument("--dry-run", action="store_true")
+
+    # Phase C placeholder — needs Phase B output wiring
+    contracts = ingest_sub.add_parser(
+        "contracts",
+        help="Phase C — fetch contracts per (underlying, expiry). "
+        "Requires Phase B to have run first. NOT YET WIRED via CLI.",
+    )
+    contracts.set_defaults(_is_placeholder=True, _placeholder_name="ingest contracts")
+
+    # Phase D placeholder — same story
+    candles = ingest_sub.add_parser(
+        "candles",
+        help="Phase D — fetch historical candles per contract × interval × range. "
+        "NOT YET WIRED via CLI.",
+    )
+    candles.set_defaults(_is_placeholder=True, _placeholder_name="ingest candles")
+
+    # Full pipeline placeholder
+    all_cmd = ingest_sub.add_parser(
+        "all",
+        help="Full sequential A → B → C → D pipeline. NOT YET WIRED via CLI.",
+    )
+    all_cmd.set_defaults(_is_placeholder=True, _placeholder_name="ingest all")
 
     # ── audit verify ──────────────────────────────────────────────
     audit = sub.add_parser("audit", help="Audit log tools")
@@ -356,6 +391,109 @@ def cmd_ingest_instruments(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_ingest_expiries(args: argparse.Namespace) -> int:
+    """Run Phase B — enumerate historical expiries for every F&O underlying."""
+    import tempfile  # noqa: PLC0415
+    from datetime import datetime as _dt  # noqa: PLC0415
+
+    from brutex.adapters.groww.expiries import (  # noqa: PLC0415
+        ExpiriesScopeError,
+        PhaseBDriver,
+    )
+    from brutex.orchestrator.audit import AuditWriter  # noqa: PLC0415
+    from brutex.orchestrator.pipeline import PhaseHaltError  # noqa: PLC0415
+    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket  # noqa: PLC0415
+    from brutex.orchestrator.store import WorkItemStore  # noqa: PLC0415
+
+    run_id = args.run_id or str(uuid4())
+    end_year = args.end_year or _dt.now(UTC).year
+
+    print("BruteX ingest expiries")
+    print(f"  run_id:       {run_id}")
+    print(f"  years:        {args.start_year}..{end_year}")
+    print(f"  dry_run:      {args.dry_run}")
+
+    token = os.environ.get("GROWW_API_AUTH_TOKEN")
+    if not token and not args.dry_run:
+        print("⚠  GROWW_API_AUTH_TOKEN is not set. Use --dry-run for offline mode.")
+        return EXIT_USER_ERROR
+
+    with tempfile.TemporaryDirectory(prefix="brutex-dryrun-") as tmp_dir:
+        tmp_root = Path(tmp_dir) if args.dry_run else _runs_dir() / run_id
+        tmp_root.mkdir(parents=True, exist_ok=True)
+
+        bucket = AdaptiveTokenBucket()
+        try:
+            with (
+                WorkItemStore.open(tmp_root / "store.lmdb") as store,
+                AuditWriter.open(tmp_root / "audit" / f"{run_id}.jsonl") as audit,
+            ):
+                if args.dry_run:
+                    from brutex.adapters.groww.client import GrowwAdapter  # noqa: PLC0415
+
+                    try:
+                        from tests.unit.test_adapters_groww_client import (  # noqa: PLC0415
+                            FakeGrowwClient,
+                        )
+                    except ImportError:
+                        print(
+                            "dry-run requires the test fakes; run from source tree"
+                        )
+                        return EXIT_USER_ERROR
+                    client = FakeGrowwClient()
+                    adapter = GrowwAdapter(
+                        client=client,
+                        bucket=bucket,
+                        store=store,
+                        audit=audit,
+                        run_id=run_id,
+                    )
+                else:
+                    from brutex.adapters.groww.client import GrowwAdapter  # noqa: PLC0415
+
+                    adapter = GrowwAdapter.from_token(
+                        token=token or "",
+                        bucket=bucket,
+                        store=store,
+                        audit=audit,
+                        run_id=run_id,
+                    )
+
+                driver = PhaseBDriver(
+                    adapter=adapter,
+                    store=store,
+                    audit=audit,
+                    run_id=run_id,
+                    start_year=args.start_year,
+                    end_year=end_year,
+                )
+                try:
+                    result = driver.run()
+                except (PhaseHaltError, ExpiriesScopeError) as exc:
+                    print(f"❌ Phase B halted: {exc}")
+                    return EXIT_PIPELINE_HALT
+
+                details = driver.last_result
+                print()
+                print("Phase B complete")
+                print(f"  work items:        {result.total}")
+                print(f"  success:           {result.success}")
+                print(f"  no_data:           {result.no_data}")
+                print(f"  quarantined:       {result.quarantined}")
+                if details is not None:
+                    print(
+                        f"  underlyings:       {details.underlyings_enumerated}"
+                    )
+                    print(f"  years:             {details.years_enumerated}")
+                    print(f"  total expiries:    {details.total_expiries}")
+                print(f"  elapsed:           {result.elapsed_seconds:.2f}s")
+        except Exception as exc:  # noqa: BLE001
+            print(f"❌ Unexpected error: {exc}", file=sys.stderr)
+            return EXIT_INTERNAL_ERROR
+
+    return EXIT_OK
+
+
 def cmd_audit_verify(args: argparse.Namespace) -> int:
     audit_file: Path = args.audit_file
     try:
@@ -410,6 +548,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "ingest":
         if args.ingest_command == "instruments":
             return cmd_ingest_instruments(args)
+        if args.ingest_command == "expiries":
+            return cmd_ingest_expiries(args)
         return cmd_placeholder(args)
 
     if command == "audit":
