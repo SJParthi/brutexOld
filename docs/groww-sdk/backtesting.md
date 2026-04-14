@@ -394,7 +394,7 @@ MAX_DURATION_DAYS = {
     "MIN_1": 30,  "MIN_2": 30,  "MIN_3": 30,  "MIN_5": 30,
     "MIN_10": 90, "MIN_15": 90, "MIN_30": 90,
     "HOUR_1": 180, "HOUR_4": 180,
-    "DAY_1": 180, "WEEK_1": 180, "MONTH_1": 180,
+    "DAY": 180, "WEEK": 180, "MONTH": 180,   # note: no _1 suffix on DAY/WEEK/MONTH — matches Groww SDK
 }
 
 def chunk_request(start: datetime, end: datetime, interval: str):
@@ -479,32 +479,46 @@ these additions on top:
 
 ---
 
-## 9. ⚠️ Constant Naming Discrepancy
+## 9. Constant Naming — RESOLVED
 
-The backtesting docs page (captured here) and the annexures docs page
-(captured in `docs/groww-sdk/annexures.md`) use **different constant
-names** for the day/week/month intervals:
+Earlier drafts of this file flagged a potential discrepancy between two
+doc pastes where one version of the backtesting page appeared to use
+`CANDLE_INTERVAL_DAY_1` / `WEEK_1` / `MONTH_1` (with `_1` suffix) while
+the annexures page used the bare `CANDLE_INTERVAL_DAY` / `WEEK` / `MONTH`
+(no suffix).
 
-| Interval | Annexures page | Backtesting page |
-|---|---|---|
-| 1 day | `CANDLE_INTERVAL_DAY` | `CANDLE_INTERVAL_DAY_1` |
-| 1 week | `CANDLE_INTERVAL_WEEK` | `CANDLE_INTERVAL_WEEK_1` |
-| 1 month | `CANDLE_INTERVAL_MONTH` | `CANDLE_INTERVAL_MONTH_1` |
+After comparing a second, more comprehensive paste from the product owner:
 
-**Two possibilities:**
+- **Annexures page (both pastes):** bare names, no suffix
+- **Backtesting page code examples (latest paste):** uses
+  `CANDLE_INTERVAL_MIN_15`, `CANDLE_INTERVAL_MIN_30` — no day/week/month
+  examples shown, so no contradiction with annexures
+- **Earlier paste's appendix** had `_1` variants, but this looks like an
+  older or annotated version
 
-1. The annexures page is out-of-date and the `_1` suffix is the current
-   canonical name (more consistent with `MIN_1`, `MIN_2`, `HOUR_1`,
-   `HOUR_4` — i.e. every constant has a numeric suffix)
-2. The backtesting page is out-of-date and the bare names are canonical
+**Canonical names** (matches `docs/groww-sdk/annexures.md §4`):
 
-**Resolution plan (P1c):** In the Groww adapter's first-run health-check,
-introspect `dir(growwapi.GrowwAPI)` and print all `CANDLE_INTERVAL_*`
-attributes. Whichever names exist is the truth. Record in
-`tests/golden/test_groww_sdk_constants.py` and pin via golden-master.
-Update both `annexures.md` and this file in the same commit.
+```python
+groww.CANDLE_INTERVAL_MIN_1
+groww.CANDLE_INTERVAL_MIN_2
+groww.CANDLE_INTERVAL_MIN_3
+groww.CANDLE_INTERVAL_MIN_5
+groww.CANDLE_INTERVAL_MIN_10
+groww.CANDLE_INTERVAL_MIN_15
+groww.CANDLE_INTERVAL_MIN_30
+groww.CANDLE_INTERVAL_HOUR_1
+groww.CANDLE_INTERVAL_HOUR_4
+groww.CANDLE_INTERVAL_DAY        # ← no _1 suffix
+groww.CANDLE_INTERVAL_WEEK       # ← no _1 suffix
+groww.CANDLE_INTERVAL_MONTH      # ← no _1 suffix
+```
 
-This is tracked as `OQ-GROWW-CANDLE-NAMES` in `REQUIREMENTS.md §26`.
+**Safety net:** the golden-master test
+`tests/golden/test_groww_sdk_constants_frozen` introspects
+`dir(growwapi.GrowwAPI)` at CI time and asserts the exact set of
+`CANDLE_INTERVAL_*` attributes. If Groww ever renames any of them
+upstream, CI fails loudly and the adapter is updated deliberately
+(never silently). See `docs/groww-sdk/annexures.md §13`.
 
 ---
 

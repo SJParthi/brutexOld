@@ -342,11 +342,125 @@ Never silently dropped.
 
 ---
 
-## 12. Changelog for this reference file
+## 12. Observed inconsistencies — real, unresolved
+
+Found while reviewing a second doc paste from the product owner. None of these
+are deal-breakers, but the adapter MUST handle them.
+
+### 12.1 `internal_trading_symbol` — the 20th column (undocumented)
+
+The official "Instrument CSV Columns" table in §4 lists **19 columns**. But the
+actual output of `get_all_instruments().head()` shows an additional
+`internal_trading_symbol` column:
+
+```
+  exchange exchange_token          trading_symbol                   groww_symbol  ... is_reserved buy_allowed sell_allowed internal_trading_symbol
+0      NSE          35154      ASIANPAINT25FEBFUT       NSE-ASIANPAINT-Feb25-FUT  ...           0           1            1      ASIANPAINT25FEBFUT
+1      NSE          35158          ABB25APR9600PE          NSE-ABB-Apr25-9600-PE  ...           1           1            1          ABB25APR9600PE
+```
+
+So the actual DataFrame has **20 columns**, not 19. In the examples seen,
+`internal_trading_symbol` appears to be a duplicate of `trading_symbol`, but
+this is **unverified** and may diverge for some instruments.
+
+**Adapter behaviour:**
+
+1. Read all 20 columns from the DataFrame
+2. Check in a CI golden-master test that `internal_trading_symbol == trading_symbol`
+   for every row
+3. If the assertion ever fails, log the diff and mark the row for review
+4. Store `internal_trading_symbol` in the raw parquet but not in the canonical
+   `Instrument` dataclass — only surfaces if the assertion breaks
+5. **Do NOT** rely on `internal_trading_symbol` as a primary key — use
+   `groww_symbol` as documented
+
+This is tracked as `OQ-GROWW-INTERNAL-TRADING-SYMBOL` in `REQUIREMENTS.md §26`.
+
+### 12.2 `tick_size` format inconsistency — paise vs rupees
+
+Two different sample outputs disagree on the `tick_size` format:
+
+**From the CSV raw row (text representation):**
+```
+tick_size  0.05
+```
+Float in rupees — 0.05 means ₹0.05 (5 paise).
+
+**From `get_instrument_by_groww_symbol("NSE-RELIANCE")` dict:**
+```python
+{'...', 'tick_size': 5, '...'}
+```
+Integer — 5 what? Almost certainly **paise** (= ₹0.05), matching the CSV
+float value. But could also be a unit confusion.
+
+**Adapter behaviour:**
+
+1. Normalise **both forms** to a canonical representation:
+   `Decimal("0.05")` in rupees (never `float`, never `int`)
+2. Detection logic:
+   - If value is a float with at most 3 decimal places → treat as rupees
+   - If value is an integer ≥ 1 and < 1000 → treat as paise, divide by 100
+   - Otherwise → raise `TickSizeFormatError` with the raw value
+3. Cross-validate: after normalisation, assert `tick_size ∈ {0.01, 0.05, 0.10, 0.25, 0.50, 1.00, 5.00}` (the common NSE/BSE tick sizes)
+4. Golden-master test records the normalised value for every liquid contract
+
+Tracked as `OQ-GROWW-TICK-SIZE-UNIT` in `REQUIREMENTS.md §26`.
+
+### 12.3 `lot_size` is temporal — it changes across expiries
+
+The real CSV sample shows lot size drift for BANKNIFTY:
+
+| groww_symbol | expiry_date | lot_size |
+|---|---|---:|
+| NSE-BANKNIFTY-26Jun25-35400-PE | 2025-06-26 | **30** |
+| NSE-BANKNIFTY-25Sep25-28500-CE | 2025-09-25 | **35** |
+| NSE-BANKNIFTY-24Dec25-27000-PE | 2025-12-24 | **35** |
+
+BANKNIFTY's lot size changed from 30 to 35 between June 2025 and September
+2025. This is a real SEBI-mandated lot-size revision and it means:
+
+1. **The temporal master MUST track `lot_size` per expiry** (not per
+   underlying). Already implied by `instruments_temporal` in
+   `REQUIREMENTS.md §6.2`, but this real example makes it concrete.
+2. **Backtest exec sim** must look up the lot size via
+   `instruments_temporal.as_of(trade_date).lot_size` — never cache the
+   "current" lot size and apply it to historical trades.
+3. **Golden test:** a BANKNIFTY trade dated 2025-07-15 must size using
+   `lot_size=30`, and the same trade re-run dated 2025-10-15 must size
+   using `lot_size=35`. Both values must persist in the temporal master.
+
+`freeze_quantity` likely follows the same temporal pattern (SEBI revises
+both together). Assume temporal until proven otherwise.
+
+This refines `FR-UNI-002` in `REQUIREMENTS.md` and adds
+`MG-TEMPORAL-LOT-SIZE` to the missing-fn register (actually accepted, not
+missing — just making the requirement explicit).
+
+### 12.4 `freeze_quantity` is per-contract, not per-underlying
+
+Same sample shows:
+
+| groww_symbol | freeze_quantity |
+|---|---:|
+| NSE-BANKNIFTY-* (all Dec 2025) | 601 |
+| NSE-BANKNIFTY-* (all Jun 2025) | 601 |
+| NSE-BANKINDIA-31Jul25-96-CE | **208001** |
+
+BANKINDIA is a stock option with a completely different freeze quantity
+(208001 vs BANKNIFTY's 601). So `freeze_quantity` is per-contract, not
+per-underlying, and must be stored on every row.
+
+Adapter already does this via the `Instrument` dataclass in §10, so no
+change — just making it explicit.
+
+---
+
+## 13. Changelog for this reference file
 
 | Date | Change | Commit |
 |---|---|---|
-| 2026-04-14 | Initial capture from Groww docs | `(this commit)` |
+| 2026-04-14 | Initial capture from Groww docs (19 documented columns) | `4793353` |
+| 2026-04-14 | Add §12: undocumented 20th column, tick_size format inconsistency, BANKNIFTY lot_size temporal variance, per-contract freeze_quantity | `(this commit)` |
 
 ---
 

@@ -105,7 +105,7 @@ These are **verified** from Groww's public documentation and are treated as immo
 | HC-10 | SDK method | `get_historical_candles(...)`; `get_historical_candle_data` is **deprecated** | Use only the non-deprecated method |
 | HC-11 | Time format | `"YYYY-MM-DD HH:mm:ss"` | IST, no timezone suffix |
 | HC-12 | Max duration per candle request | **30 days** (1m/2m/3m/5m), **90 days** (10m/15m/30m), **180 days** (1h/4h/1d/1w/1mo) | Verbatim from `docs/groww-sdk/backtesting.md §6`. Adapter chunker (`FR-ING-006`) splits requests by these limits. |
-| HC-13 | Retry-after semantics | **Undocumented** | Assume exponential backoff on 429/5xx |
+| HC-13 | Exception surface | Groww SDK raises typed exceptions from `growwapi.groww.exceptions` — `GrowwAPIRateLimitException` / `GrowwAPITimeoutException` / `GrowwAPIAuthentication(Authorisation)Exception` / `GrowwAPIBadRequestException` / `GrowwAPINotFoundException`. Retry-after value availability on rate-limit exception is unverified (OQ-GROWW-429-RETRY-AFTER). Full classification in `docs/groww-sdk/exceptions.md §3`. |
 | HC-14 | Auth | API auth token (`GROWW_API_AUTH_TOKEN`) | Data-only scope recommended (lower blast radius) |
 | HC-15 | PyPI package | `growwapi` (v1.5.0 as of Dec 2025, Python 3.9–3.13) | Version pinning in lockfile |
 
@@ -151,7 +151,7 @@ Each FR has a stable ID, a testable statement, and a verification mechanism.
 | FR-ING-005 | The system SHALL support all Groww-published candle intervals, enumerated programmatically via `dir(growwapi)`-introspection and golden-master frozen. | Test asserts frozen set matches SDK. |
 | FR-ING-006 | The system SHALL chunk historical fetches by probed `max_bars_per_call` per interval, stored per-interval in a config table. | Integration test: probe runs once, caches result. |
 | FR-ING-007 | The system SHALL apply a token-bucket rate limiter capped at `BRUTEX_OHLC_RATE_LIMIT_RPS` (default 15 req/s). | Property test: 1000 calls complete in ≥ (1000/15)s. |
-| FR-ING-008 | The system SHALL retry transient failures (429, 5xx, connection reset) with exponential backoff (2s → 4s → 8s → 16s) and jitter; permanent failures (4xx non-429) SHALL fail fast. | Unit test with injected mock failures. |
+| FR-ING-008 | The system SHALL classify Groww SDK exceptions per `docs/groww-sdk/exceptions.md §3`. RETRY bucket (`GrowwAPIRateLimitException`, `GrowwAPITimeoutException`, generic `GrowwAPIException`/`GrowwBaseException`): exponential backoff `[2s, 4s, 8s, 16s]` with ±20% jitter. FAIL FAST bucket (`GrowwAPIBadRequestException`, `GrowwAPINotFoundException`): skip chunk, continue run. HALT RUN bucket (`GrowwAPIAuthenticationException`, `GrowwAPIAuthorisationException`, exhausted rate-limit retries): stop entire ingest, preserve partial state, exit non-zero. | Unit tests with injected mock exceptions — one per bucket — in `tests/unit/test_groww_retry_classification.py`. |
 | FR-ING-009 | All raw Groww responses SHALL be stored content-addressed in `raw/groww/<sha256>.json.zst` before parsing. | Test: corrupted parse still leaves raw blob intact. |
 | FR-ING-010 | Every ingest run SHALL be idempotent: re-invoking with the same `(symbol, interval, range)` SHALL skip already-present chunks via content-hash dedup. | Test: second run completes in < 1s with zero API calls. |
 | FR-ING-011 | The adapter SHALL support both public-CSV (instruments) and token-auth (candles) modes, runtime-selectable. | Config test with both paths. |
@@ -1222,7 +1222,11 @@ These do **not** block P0 sign-off but must be resolved before the relevant phas
 | OQ-02 | ~~Max bars per call per interval~~ — **RESOLVED**: documented as 30/90/180 days by interval group in `docs/groww-sdk/backtesting.md §6` | — |
 | OQ-03 | Whether Groww's OHLC bucket is per-token or per-IP | P1c |
 | OQ-04 | Exact retry-after semantics on 429 (SDK raises? headers? silent?) | P1c |
-| OQ-GROWW-CANDLE-NAMES | `CANDLE_INTERVAL_DAY` vs `CANDLE_INTERVAL_DAY_1` discrepancy between annexures and backtesting docs pages — introspect `dir(GrowwAPI)` at startup and golden-master | P1c |
+| ~~OQ-GROWW-CANDLE-NAMES~~ | **RESOLVED 2026-04-14** — bare names (`CANDLE_INTERVAL_DAY`/`WEEK`/`MONTH`) are canonical, matches annexures page. See `docs/groww-sdk/backtesting.md §9` and `docs/groww-sdk/annexures.md §4`. Golden-master `test_groww_sdk_constants_frozen` pins all 12 names. | — |
+| OQ-GROWW-INTERNAL-TRADING-SYMBOL | `get_all_instruments()` DataFrame has a 20th column `internal_trading_symbol` that is NOT in the documented CSV-columns table. Appears identical to `trading_symbol` in samples. Verify via CI assertion and flag any divergence. | P1a |
+| OQ-GROWW-TICK-SIZE-UNIT | `tick_size` shows as `0.05` (float rupees) in CSV but as `5` (integer, presumably paise) in dict output. Normalise to `Decimal` rupees in adapter; assert crossed value matches expected NSE/BSE tick sizes. | P1a |
+| OQ-GROWW-RATE-LIMIT-BUCKET | Is the OHLC rate bucket per-token, per-IP, or per-account? Probe by running from 2 machines simultaneously with the same token. | P1c |
+| OQ-GROWW-429-RETRY-AFTER | Does `GrowwAPIRateLimitException.code` contain a Retry-After value, or just a generic error code? Probe by triggering a deliberate rate limit. | P1c |
 | OQ-GROWW-YEAR-BOUNDS | Does `get_expiries(year=2020)` include expiries whose last_trade_date is in Jan 2020 but first_trade_date is in Dec 2019? Edge case around the boundary. | P1c |
 | OQ-GROWW-TIMEZONE | Groww docs say "timestamps are in IST" but candle response uses `yyyy-MM-ddTHH:mm:ss` with no explicit timezone. Confirm the raw wire format is naive-IST (no Z suffix, no offset). | P1c |
 | OQ-05 | Whether Greeks should be precomputed and cached, or computed on-read | P2 |
