@@ -1,0 +1,141 @@
+# Scheduled drift check — runs every 6 hours to detect when tickvault's
+# upstream `crates/trading/src/greeks/**` or `indicator/**` have moved
+# ahead of BruteX's extracted `rust/fno-math/src/` copy.
+#
+# When drift is detected, this workflow opens (or updates) a GitHub issue
+# titled "fno-math drift detected from tickvault" with the diff summary.
+# The operator then runs `scripts/extract-fno-math.sh` locally, commits
+# the refreshed extraction, and the issue auto-closes on the next run.
+#
+# This is separate from the main CI workflow because:
+#   - It runs on a schedule, not on every push
+#   - It has permission to open/close issues (main CI is read-only)
+#   - It should never block merges — merges only care about the snapshot
+#     that exists at merge time, not future tickvault drift
+#
+# Per REQUIREMENTS.md §7A.4 Drift-check CI.
+
+name: fno-math drift check (scheduled)
+
+on:
+  schedule:
+    # Every 6 hours on the hour
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run drift check
+        id: drift
+        continue-on-error: true
+        run: |
+          set +e
+          output=$(bash scripts/check-fno-math-drift.sh 2>&1)
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          # Put the captured output into a heredoc output var
+          {
+            echo "output<<EOF"
+            echo "$output"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Report drift in an issue (when detected)
+        if: steps.drift.outputs.exit_code != '0'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const title = "fno-math drift detected from tickvault";
+            const body = [
+              "## Drift detected",
+              "",
+              "The scheduled `drift-check` workflow detected that tickvault's",
+              "`crates/trading/src/greeks/**` or `indicator/**` have moved",
+              "ahead of BruteX's extracted `rust/fno-math/src/` copy.",
+              "",
+              "### Drift-check output",
+              "```",
+              `${{ steps.drift.outputs.output }}`,
+              "```",
+              "",
+              "### Resolution",
+              "",
+              "Run the extraction refresh locally and push:",
+              "",
+              "```bash",
+              "cd ~/dev/tickvault && git pull",
+              "cd ~/dev/bruteX",
+              "./scripts/extract-fno-math.sh ~/dev/tickvault",
+              "git add rust/fno-math/",
+              "git commit -m 'chore(fno-math): refresh extraction from tickvault@<new-sha>'",
+              "git push",
+              "```",
+              "",
+              "This issue will auto-close on the next successful drift check."
+            ].join("\n");
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: "drift"
+            });
+            const existing = issues.find(i => i.title === title);
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body
+              });
+              core.info(`Updated existing drift issue #${existing.number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ["drift", "automated"]
+              });
+              core.info(`Opened new drift issue #${created.data.number}`);
+            }
+
+      - name: Close any stale drift issue (when clean)
+        if: steps.drift.outputs.exit_code == '0'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const title = "fno-math drift detected from tickvault";
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: "drift"
+            });
+            for (const issue of issues) {
+              if (issue.title === title) {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: "closed",
+                  state_reason: "completed"
+                });
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: "✅ Drift check passed — closing automatically."
+                });
+                core.info(`Closed stale drift issue #${issue.number}`);
+              }
+            }

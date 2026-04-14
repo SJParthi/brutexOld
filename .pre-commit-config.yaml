@@ -1,0 +1,98 @@
+# Pre-commit hooks — fast local gates that catch issues BEFORE
+# the developer pushes. These mirror a subset of the CI gates in
+# .github/workflows/ci.yml so feedback is quick.
+#
+# Install once:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Run manually on the whole tree:
+#   pre-commit run --all-files
+#
+# Hooks auto-run on every `git commit` after install. Failing hooks
+# abort the commit — fix and retry.
+#
+# Philosophy: fast hooks only (<10 seconds total). Slow things like
+# pytest with full coverage, cargo test, bandit etc. are CI-only.
+
+repos:
+  # ── Generic file hygiene ───────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+      - id: check-case-conflict
+      - id: no-commit-to-branch
+        args: [--branch, main, --branch, master]
+
+  # ── Python: ruff (lint + format) ────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff
+        name: ruff check
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+        name: ruff format
+
+  # ── Python: mypy --strict (only changed files) ──────────────────
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        name: mypy --strict
+        args: [--strict, --ignore-missing-imports]
+        files: ^brutex/
+        additional_dependencies:
+          - pydantic>=2.7
+          - types-requests
+
+  # ── Rust: cargo fmt + clippy (fast, only if rust/ touched) ─────
+  - repo: https://github.com/doublify/pre-commit-rust
+    rev: v1.0
+    hooks:
+      - id: fmt
+        name: cargo fmt (fno-math)
+        args:
+          - --manifest-path=rust/fno-math/Cargo.toml
+          - --
+      - id: clippy
+        name: cargo clippy (fno-math)
+        args:
+          - --manifest-path=rust/fno-math/Cargo.toml
+          - --all-targets
+          - --
+          - -D
+          - warnings
+
+  # ── Secrets: gitleaks (local scan) ─────────────────────────────
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # ── Custom local hooks ─────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: banned-patterns
+        name: scan for banned patterns
+        entry: bash scripts/ci/scan-banned-patterns.sh
+        language: system
+        pass_filenames: false
+
+      - id: conventional-commit
+        name: conventional commit format
+        entry: bash scripts/ci/check-conventional-commits.sh HEAD~1 HEAD
+        language: system
+        pass_filenames: false
+        stages: [commit-msg]

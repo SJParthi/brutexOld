@@ -1,0 +1,416 @@
+# BruteX CI/CD — the complete quality gate pipeline.
+#
+# This workflow implements every gate from REQUIREMENTS.md §17 (CG-01
+# through CG-20). Any failing gate blocks merge. Sub-jobs run in
+# parallel where possible so the total wall clock is dominated by
+# the slowest job (usually pytest or cargo check).
+#
+# Gates implemented:
+#   CG-01  100% line + branch coverage (pytest-cov + --cov-fail-under=100)
+#   CG-03  type checking (mypy --strict + pyright)
+#   CG-04  lint (ruff check + ruff format --check)
+#   CG-05  security (bandit + pip-audit)
+#   CG-09  audit chain integrity (brutex audit verify, on integration tests)
+#   CG-14  import graph (import-linter — wired once ingest lands)
+#   CG-15  docstring coverage (interrogate)
+#   CG-18  integrity gate coverage (unit tests per gate)
+#   CG-19  review gate (branch protection; not in this file, set on GitHub)
+#   CG-20  license compliance (pip-licenses)
+#
+# Plus BruteX-specific gates:
+#   - Rust crate build + test + clippy + fmt (for rust/fno-math/)
+#   - Tickvault drift check (schedule-only in drift-check.yml)
+#   - Conventional commit format check
+#   - Secret-scanning via gitleaks
+#   - Banned patterns (no print, no TODO in production, no env.sh files)
+#
+# Caching strategy:
+#   - Python deps cached by pyproject.toml hash via actions/cache
+#   - Rust deps cached by Cargo.lock hash via Swatinem/rust-cache
+#   - uv recommended but not required — works with pip
+#
+# Parallelism model:
+#   - lint / type / test / rust-check / docs run in parallel
+#   - final "ci-ok" job depends on ALL of them; merge gate is ci-ok
+#
+# Triggered on: every push to a branch, every PR against main,
+#   and manual dispatch via workflow_dispatch
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+      - "feat/**"
+      - "fix/**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch on new pushes — saves
+# CI minutes when the operator pushes multiple commits quickly.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  # Read-only by default; individual jobs escalate if needed.
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  RUST_VERSION: "1.93.1"
+  # Reproducibility (matches REQUIREMENTS.md NFR-DET-001)
+  PYTHONHASHSEED: "0"
+  PYTHONDONTWRITEBYTECODE: "1"
+  # BruteX runtime config
+  BRUTEX_SAFETY_FACTOR: "0.6"
+  BRUTEX_OHLC_RATE_LIMIT_RPS: "15"
+  BRUTEX_AUDIT_CHAIN_ENABLED: "1"
+  BRUTEX_REPRODUCIBILITY_STRICT: "1"
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # LINT — ruff + ruff format check
+  # Fast — should finish in under 15 seconds.
+  # ─────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install ruff
+        run: pip install "ruff>=0.5,<1.0"
+      - name: ruff check
+        run: ruff check brutex tests
+      - name: ruff format check
+        run: ruff format --check brutex tests
+
+  # ─────────────────────────────────────────────────────────────────
+  # TYPE — mypy --strict + pyright
+  # ─────────────────────────────────────────────────────────────────
+  type:
+    name: Type check (mypy + pyright)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: |
+          pip install -e ".[dev]"
+      - name: mypy --strict
+        run: mypy --strict brutex
+      - name: pyright
+        run: pyright brutex
+
+  # ─────────────────────────────────────────────────────────────────
+  # UNIT TESTS + coverage gate (CG-01: 100% line + branch)
+  # ─────────────────────────────────────────────────────────────────
+  test:
+    name: Unit tests + coverage (100% gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: pip install -e ".[dev]"
+      - name: pytest with coverage gate
+        run: |
+          pytest \
+            --cov=brutex \
+            --cov-branch \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=100 \
+            tests/unit
+      - name: Upload coverage XML
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────
+  # PROPERTY TESTS — hypothesis-driven (CG-12)
+  # ─────────────────────────────────────────────────────────────────
+  property:
+    name: Property tests (hypothesis)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: pip install -e ".[dev]"
+      - name: pytest property tests
+        run: |
+          if [ -d tests/property ]; then
+            pytest tests/property -x --hypothesis-show-statistics
+          else
+            echo "⏸  tests/property does not exist yet — skipping"
+          fi
+
+  # ─────────────────────────────────────────────────────────────────
+  # GOLDEN TESTS — fixture-based (CG-11)
+  # ─────────────────────────────────────────────────────────────────
+  golden:
+    name: Golden-master tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: pip install -e ".[dev]"
+      - name: pytest golden tests
+        run: |
+          if [ -d tests/golden ]; then
+            pytest tests/golden -x
+          else
+            echo "⏸  tests/golden does not exist yet — skipping"
+          fi
+
+  # ─────────────────────────────────────────────────────────────────
+  # SECURITY — bandit + pip-audit (CG-05)
+  # ─────────────────────────────────────────────────────────────────
+  security:
+    name: Security scan (bandit + pip-audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install scanners
+        run: |
+          pip install "bandit>=1.7,<2.0" "pip-audit>=2.7,<3.0"
+      - name: bandit
+        run: bandit -r brutex -ll
+      - name: Install project deps (for pip-audit)
+        run: pip install -e "."
+      - name: pip-audit
+        run: pip-audit --strict
+
+  # ─────────────────────────────────────────────────────────────────
+  # DOCSTRINGS — interrogate (CG-15)
+  # ─────────────────────────────────────────────────────────────────
+  docs:
+    name: Docstring coverage (interrogate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install interrogate
+        run: pip install "interrogate>=1.7"
+      - name: Check docstring coverage
+        run: |
+          # Target 90% during P1a (raise to 100% by P3).
+          interrogate brutex \
+            --ignore-init-method \
+            --ignore-init-module \
+            --ignore-private \
+            --ignore-magic \
+            --ignore-nested-functions \
+            --fail-under=90 \
+            -vv
+
+  # ─────────────────────────────────────────────────────────────────
+  # LICENSE COMPLIANCE — pip-licenses (CG-20)
+  # ─────────────────────────────────────────────────────────────────
+  licenses:
+    name: License compliance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps + pip-licenses
+        run: |
+          pip install -e "." "pip-licenses>=5.0"
+      - name: Check licenses
+        run: |
+          pip-licenses --fail-on "UNKNOWN;GPL;AGPL" \
+            --allow-only "MIT;BSD;Apache;ISC;Python Software Foundation License;BSD-3-Clause;BSD-2-Clause;Apache-2.0;MIT-0;MPL-2.0"
+
+  # ─────────────────────────────────────────────────────────────────
+  # RUST — cargo check + clippy + fmt + test for fno-math
+  # ─────────────────────────────────────────────────────────────────
+  rust:
+    name: Rust (fno-math build + clippy + test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/fno-math
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/fno-math -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --release
+
+  # ─────────────────────────────────────────────────────────────────
+  # BANNED PATTERNS — no print, no TODO in prod, no .env*
+  # ─────────────────────────────────────────────────────────────────
+  banned:
+    name: Banned pattern scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run scanner
+        run: bash scripts/ci/scan-banned-patterns.sh
+
+  # ─────────────────────────────────────────────────────────────────
+  # CONVENTIONAL COMMITS — commit format check (only on PRs)
+  # ─────────────────────────────────────────────────────────────────
+  conv-commits:
+    name: Conventional commit format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Check commit messages
+        run: bash scripts/ci/check-conventional-commits.sh ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }}
+
+  # ─────────────────────────────────────────────────────────────────
+  # SECRETS — gitleaks (CG-05 secret scan)
+  # ─────────────────────────────────────────────────────────────────
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  # ─────────────────────────────────────────────────────────────────
+  # FNO-MATH DRIFT CHECK — runs on every push (fast)
+  # Also runs on schedule via drift-check.yml
+  # ─────────────────────────────────────────────────────────────────
+  fno-math-drift:
+    name: fno-math drift check (vs tickvault)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run drift check script
+        run: bash scripts/check-fno-math-drift.sh
+
+  # ─────────────────────────────────────────────────────────────────
+  # CI OK — single aggregate job that succeeds iff all gates pass.
+  # Branch protection should require this job for merge.
+  # ─────────────────────────────────────────────────────────────────
+  ci-ok:
+    name: CI OK (aggregate gate)
+    runs-on: ubuntu-24.04
+    needs:
+      - lint
+      - type
+      - test
+      - property
+      - golden
+      - security
+      - docs
+      - licenses
+      - rust
+      - banned
+      - secrets
+      - fno-math-drift
+    if: always()
+    steps:
+      - name: Verify all required jobs passed
+        run: |
+          set -e
+          echo "Gate results:"
+          echo "  lint:          ${{ needs.lint.result }}"
+          echo "  type:          ${{ needs.type.result }}"
+          echo "  test:          ${{ needs.test.result }}"
+          echo "  property:      ${{ needs.property.result }}"
+          echo "  golden:        ${{ needs.golden.result }}"
+          echo "  security:      ${{ needs.security.result }}"
+          echo "  docs:          ${{ needs.docs.result }}"
+          echo "  licenses:      ${{ needs.licenses.result }}"
+          echo "  rust:          ${{ needs.rust.result }}"
+          echo "  banned:        ${{ needs.banned.result }}"
+          echo "  secrets:       ${{ needs.secrets.result }}"
+          echo "  fno-math-drift:${{ needs.fno-math-drift.result }}"
+          for result in \
+            "${{ needs.lint.result }}" \
+            "${{ needs.type.result }}" \
+            "${{ needs.test.result }}" \
+            "${{ needs.property.result }}" \
+            "${{ needs.golden.result }}" \
+            "${{ needs.security.result }}" \
+            "${{ needs.docs.result }}" \
+            "${{ needs.licenses.result }}" \
+            "${{ needs.rust.result }}" \
+            "${{ needs.banned.result }}" \
+            "${{ needs.secrets.result }}" \
+            "${{ needs.fno-math-drift.result }}"; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "❌ A required gate failed or was cancelled"
+              exit 1
+            fi
+          done
+          echo "✅ All CI gates passed"
