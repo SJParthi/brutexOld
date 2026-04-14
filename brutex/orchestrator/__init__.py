@@ -28,6 +28,17 @@ from brutex.orchestrator.audit import (
     read_entries,
     verify_chain,
 )
+from brutex.orchestrator.rate_limiter import (
+    DEFAULT_BURST,
+    DEFAULT_DOWNSHIFT_RPS,
+    DEFAULT_DOWNSHIFT_TRIGGER,
+    DEFAULT_DOWNSHIFT_WINDOW,
+    DEFAULT_INITIAL_RPS,
+    DEFAULT_UPSHIFT_RECOVERY,
+    AdaptiveTokenBucket,
+    RateLimiterError,
+    RateLimiterEvent,
+)
 from brutex.orchestrator.retry import (
     BACKOFF_SCHEDULE_SECONDS,
     GROWW_EXCEPTION_CLASSIFICATION,
@@ -38,6 +49,15 @@ from brutex.orchestrator.retry import (
     classify_exception,
     classify_exception_name,
     outcome_severity,
+)
+from brutex.orchestrator.store import (
+    CONTENT_HASH_BYTES,
+    DEFAULT_MAP_SIZE_MB,
+    MAX_DBS,
+    StoreCorruptionError,
+    StoreError,
+    StoreKeyError,
+    WorkItemStore,
 )
 from brutex.orchestrator.state import (
     NON_TERMINAL_STATES,
@@ -93,4 +113,22 @@ __all__ = [
     "GENESIS_PREV_HASH",
     "read_entries",
     "verify_chain",
+    # rate_limiter.py
+    "AdaptiveTokenBucket",
+    "DEFAULT_BURST",
+    "DEFAULT_DOWNSHIFT_RPS",
+    "DEFAULT_DOWNSHIFT_TRIGGER",
+    "DEFAULT_DOWNSHIFT_WINDOW",
+    "DEFAULT_INITIAL_RPS",
+    "DEFAULT_UPSHIFT_RECOVERY",
+    "RateLimiterError",
+    "RateLimiterEvent",
+    # store.py
+    "CONTENT_HASH_BYTES",
+    "DEFAULT_MAP_SIZE_MB",
+    "MAX_DBS",
+    "StoreCorruptionError",
+    "StoreError",
+    "StoreKeyError",
+    "WorkItemStore",
 ]
