@@ -157,11 +157,16 @@ Each FR has a stable ID, a testable statement, and a verification mechanism.
 | FR-ING-005 | The system SHALL support all Groww-published candle intervals, enumerated programmatically via `dir(growwapi)`-introspection and golden-master frozen. | Test asserts frozen set matches SDK. |
 | FR-ING-006 | The system SHALL chunk historical fetches by probed `max_bars_per_call` per interval, stored per-interval in a config table. | Integration test: probe runs once, caches result. |
 | FR-ING-007 | The system SHALL apply a token-bucket rate limiter capped at `BRUTEX_OHLC_RATE_LIMIT_RPS` (default 15 req/s). | Property test: 1000 calls complete in ≥ (1000/15)s. |
-| FR-ING-008 | The system SHALL classify Groww SDK exceptions per `docs/groww-sdk/exceptions.md §3`. RETRY bucket (`GrowwAPIRateLimitException`, `GrowwAPITimeoutException`, generic `GrowwAPIException`/`GrowwBaseException`): exponential backoff `[2s, 4s, 8s, 16s]` with ±20% jitter. FAIL FAST bucket (`GrowwAPIBadRequestException`, `GrowwAPINotFoundException`): skip chunk, continue run. HALT RUN bucket (`GrowwAPIAuthenticationException`, `GrowwAPIAuthorisationException`, exhausted rate-limit retries): stop entire ingest, preserve partial state, exit non-zero. | Unit tests with injected mock exceptions — one per bucket — in `tests/unit/test_groww_retry_classification.py`. |
+| FR-ING-008 | The system SHALL classify Groww SDK exceptions into **work-item state transitions** per §8.6 — never "silently skip" any chunk. Specific mapping: `GrowwAPIRateLimitException` / `GrowwAPITimeoutException` / generic `GrowwAPIException` / `GrowwBaseException` → `RETRYING` with exponential backoff `[2s, 4s, 8s, 16s, 32s, 60s, 120s, 240s, 480s, 900s]` (up to 10 soft retries). `GrowwAPINotFoundException` → `NO_DATA` (recorded, not skipped). `GrowwAPIBadRequestException` → `QUARANTINED` with reason `bad_request` + Telegram alert + phase HALT. `GrowwAPIAuthenticationException` / `GrowwAPIAuthorisationException` → `QUARANTINED` with reason `auth_failed` + Telegram alert + phase HALT. Retry exhaustion (>10 soft retries on the same item) → `QUARANTINED` with reason `retry_exhausted`. | Unit tests: one per exception → state mapping, plus property test asserting no transition ever returns "silently missing" for any exception type. |
 | FR-ING-009 | All raw Groww responses SHALL be stored content-addressed in `raw/groww/<sha256>.json.zst` before parsing. | Test: corrupted parse still leaves raw blob intact. |
 | FR-ING-010 | Every ingest run SHALL be idempotent: re-invoking with the same `(symbol, interval, range)` SHALL skip already-present chunks via content-hash dedup. | Test: second run completes in < 1s with zero API calls. |
 | FR-ING-011 | The adapter SHALL support both public-CSV (instruments) and token-auth (candles) modes, runtime-selectable. | Config test with both paths. |
 | FR-ING-012 | The ingest CLI SHALL be resumable: killing the process mid-run SHALL leave the catalog consistent; rerun SHALL continue from the last completed chunk. | Integration test: SIGKILL mid-run → rerun completes. |
+| FR-ING-013 | The ingest SHALL run as a **4-phase sequential pipeline** (A: instruments → B: expiries → C: contracts → D: candles) per §8.5. Phase P+1 SHALL NOT start until `phase_complete(P)` holds per §8.7. | Integration test: injects a QUARANTINED item in Phase B → asserts Phase C does not start. |
+| FR-ING-014 | Every work item SHALL have one of 6 states (`PENDING`, `IN_FLIGHT`, `RETRYING`, `SUCCESS`, `NO_DATA`, `QUARANTINED`) per §8.6. State transitions SHALL be atomic and each transition SHALL append one entry to the audit chain. | Unit test per transition; property test: no state is "silently missing". |
+| FR-ING-015 | The ingest SHALL honour the **never-skip guarantee**: no work item may remain in a non-terminal state when a phase is declared complete. Silent skipping of any kind SHALL fail the completeness verifier. | `NFR-REL-006` completeness test — injects every Groww exception type and asserts zero items in "silently missing" state. |
+| FR-ING-016 | The ingest SHALL emit Telegram notifications per §15.6 at: run start, phase start, phase progress (every 30-300s depending on phase), phase end, quarantine events, rate-limit anomalies, run end. Telegram credentials live in env vars only (`BRUTEX_TELEGRAM_BOT_TOKEN`, `BRUTEX_TELEGRAM_CHAT_ID`). | Unit test with mock HTTP; end-to-end test with a sandbox chat. |
+| FR-ING-017 | The ingest SHALL use an **adaptive rate limiter**: starts at 15 req/s effective, auto-downshifts to 10 req/s after 3 consecutive 429s in 60 seconds, emits a rate-limit-anomaly Telegram event, and upshifts back to 15 req/s after 2 minutes of clean operation. The limiter SHALL NEVER fail a call silently due to rate limiting — it SHALL always route the call through the token bucket even if that means waiting. | Unit test with mock Groww raising `GrowwAPIRateLimitException` — assert downshift, alert fired, no request dropped. |
 
 ### 4.2 Data Catalog & Storage (FR-CAT)
 
@@ -265,6 +270,7 @@ Each FR has a stable ID, a testable statement, and a verification mechanism.
 | FR-UI-003 | A FastAPI HTTP server SHALL expose the same operations as the CLI under `/api/v1/`. | Endpoint contract test. |
 | FR-UI-004 | A web dashboard SHALL provide drill-down views: per-combo equity curve, trade blotter, margin timeline, drawdown chart, per-regime heatmap, param-sensitivity surface. | Snapshot test (React). |
 | FR-UI-005 | Jupyter kernel integration SHALL allow notebook-based research over the data lake. | Notebook smoke test. |
+| FR-UI-006 | A **real-time ingest dashboard** SHALL be served at `http://<host>:8080/` (local network binding by default — `0.0.0.0:8080` — so the operator can monitor from phone/tablet on the same WiFi per product-owner preference). The dashboard SHALL show, updating every 500ms via WebSocket: (a) four phase cards (A/B/C/D) with status badge + progress bar + elapsed/ETA + throughput; (b) the adaptive rate-limit panel with current rps / headroom / last-60s-429-count; (c) the quarantine queue table (empty when no quarantined items, populated with item_id / reason / timestamp / Telegram-sent flag otherwise); (d) the worker activity table (N rows, one per worker, showing current task + elapsed); (e) total ETA + storage usage. Implementation MUST be single-file FastAPI + Jinja2 template + vanilla JS WebSocket (no React, no npm, no build step). | Integration test: spin up server, connect WebSocket, inject fake events, assert DOM updates. |
 
 ---
 
@@ -302,6 +308,7 @@ Every NFR has an **enforcement mechanism**. If there is no test that can fail th
 | NFR-REL-003 | Process crash mid-run SHALL leave the catalog, cache, and audit chain in a consistent state. | Chaos test: SIGKILL at random points. |
 | NFR-REL-004 | Every run manifest SHALL be durable before any worker starts executing combos. | WAL test. |
 | NFR-REL-005 | No background worker SHALL be allowed to run silently: absence of heartbeat > 5s triggers auto-kill and requeue. | Watchdog integration test. |
+| **NFR-REL-006** | **Never-skip invariant.** For every documented Groww SDK exception type (see `docs/groww-sdk/exceptions.md §1`) and for every "empty response" shape, the ingest state machine SHALL route the work item into one of {SUCCESS, NO_DATA, QUARANTINED} or into RETRYING with at least one subsequent resolution path to a terminal state. No code path may result in a work item being silently dropped, deleted, forgotten, or left in a non-terminal state at phase-completion time. | Property test `tests/property/test_never_skip_invariant.py` — generates every exception type from `GROWW_EXCEPTION_CLASS_NAMES` via Hypothesis, drives them through the state machine, and asserts 100% of items reach a terminal state. The test also verifies `completeness_check` returns True for a full run with synthetic fixtures. Fails the build on regression. |
 
 ### 5.4 Observability NFRs
 
@@ -718,6 +725,247 @@ This is a **95% reduction** from my earlier (wrong) estimate of 12.7 days
 for the all-NSE-equities plan, and a ~75% reduction from the intermediate
 ~16-hour estimate that used a conservative 1000-bars-per-call guess.
 
+### 8.5 Sequential Phase Pipeline (the ingest state machine)
+
+BruteX's initial backfill runs as a **strict 4-phase sequential pipeline**.
+Each phase has a hard gate: the next phase cannot start until the current
+phase's completeness invariant holds (see §8.7).
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  Phase A — FETCH INSTRUMENTS                                   │
+│  ──────────────────────────                                    │
+│  1. groww.get_all_instruments() → one DataFrame (1 API call)   │
+│  2. Filter rows via brutex.universe.is_in_scope                │
+│     (keeps: IDX rows in the 8 named indices + any FNO          │
+│      derivative — see FD-09d)                                  │
+│  3. Normalise each row via normalise_instrument                │
+│  4. Store to canonical parquet + raw blob (content-addressed)  │
+│  5. Emit Telegram: "Phase A complete" + summary                │
+│         │                                                      │
+│         ▼  completeness invariant holds → Phase B starts       │
+│                                                                │
+│  Phase B — FETCH EXPIRIES (all historical)                     │
+│  ─────────────────────────                                     │
+│  For each underlying in the filtered set (≈223 items):         │
+│    For each year in [2020, 2021, ..., current_year]:           │
+│      groww.get_expiries(exchange, underlying, year=Y)          │
+│      Store returned expiry dates, keyed by                     │
+│      sha256(exchange|underlying|year)                          │
+│  5. Emit Telegram: "Phase B complete" + count of expiries      │
+│         │                                                      │
+│         ▼  completeness invariant holds → Phase C starts       │
+│                                                                │
+│  Phase C — FETCH CONTRACTS (all strikes × sides per expiry)    │
+│  ──────────────────────────                                    │
+│  For each (underlying, expiry_date) from Phase B output:       │
+│    groww.get_contracts(exchange, underlying, expiry_date)      │
+│    Store returned groww_symbol list, keyed by                  │
+│    sha256(exchange|underlying|expiry_date)                     │
+│  4. Emit Telegram: "Phase C complete" + contract count         │
+│         │                                                      │
+│         ▼  completeness invariant holds → Phase D starts       │
+│                                                                │
+│  Phase D — FETCH CANDLES (OHLCV per contract per interval)     │
+│  ──────────────────────────                                    │
+│  For each contract from Phase C:                               │
+│    For each interval requested (default: 1m):                  │
+│      For each time-chunk per HC-12 max-duration table:         │
+│        groww.get_historical_candles(...)                       │
+│        Store candles, keyed by                                 │
+│        sha256(exch|seg|symbol|interval|chunk_start|chunk_end)  │
+│  4. Emit Telegram: "Phase D complete" + total bars persisted   │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+```
+
+Each phase is **resume-safe**: if the ingest is killed mid-phase, a
+rerun picks up from the last completed work item (LMDB dedup cache, see
+FR-BF-004 + FR-ING-010).
+
+**Rationale for sequential ordering:**
+
+- Phase B depends on the underlying set from Phase A
+- Phase C depends on the expiry list from Phase B
+- Phase D depends on the contract list from Phase C
+- Running them in parallel would race; running them sequentially gives
+  clean phase boundaries, Telegram announce-points, and operator control
+- Within each phase, work items run in parallel (Ray workers), bounded
+  by the 15 req/s rate limit
+
+### 8.6 Work Item State Machine
+
+Every **work item** (one instrument row, one `get_expiries` call, one
+`get_contracts` call, one `get_historical_candles` chunk) moves through
+this state machine. The same state machine applies to all four phases.
+
+```
+                  ┌─────────────┐
+                  │   PENDING   │  queued, not yet dispatched
+                  └──────┬──────┘
+                         │  worker picks it up
+                         ▼
+                  ┌─────────────┐
+                  │  IN_FLIGHT  │  worker is calling Groww
+                  └──────┬──────┘
+                         │
+         ┌───────────────┼───────────────┬────────────────┐
+         │               │               │                │
+         ▼               ▼               ▼                ▼
+   ┌─────────┐     ┌──────────┐    ┌──────────┐    ┌─────────────┐
+   │ SUCCESS │     │ NO_DATA  │    │ RETRYING │    │ QUARANTINED │
+   │ (term.) │     │ (term.)  │    │  (loop)  │    │   (term.)   │
+   └─────────┘     └──────────┘    └────┬─────┘    └─────────────┘
+                                        │                │
+                                        │ backoff elapsed│ human review
+                                        ▼                ▼
+                                   IN_FLIGHT       SUCCESS | NO_DATA
+                                                   (resolved manually)
+```
+
+#### Terminal states
+
+| State | Meaning | How entered |
+|---|---|---|
+| ✅ `SUCCESS` | Groww returned a valid, non-empty payload that was parsed and persisted. | Normal path |
+| 🅾️ `NO_DATA` | Groww explicitly reported "no results" — empty `candles`, empty `expiries`, empty `contracts`, or `GrowwAPINotFoundException` for a genuinely-missing resource. **This is NOT skipping** — it is a recorded ground-truth "Groww says nothing here". | Delisted symbol, pre-FNO-live dates, explicit NotFound |
+| 🚨 `QUARANTINED` | A deterministic error that needs human review — `GrowwAPIBadRequestException` (malformed params → adapter bug), `GrowwAPIAuthenticationException` / `AuthorisationException` (bad token), or >N consecutive hard failures on the same item. **Fires a Telegram alert.** Phase is BLOCKED until resolved. | Code bug, expired token, SDK breaking change |
+
+#### Non-terminal states
+
+| State | Meaning |
+|---|---|
+| `PENDING` | In the work queue, waiting for a worker |
+| `IN_FLIGHT` | A worker is currently calling Groww for this item |
+| `RETRYING` | A transient error happened (rate limit, timeout, 5xx, connection reset). Exponential backoff is counting down. Will re-enter `IN_FLIGHT` when the timer elapses. **Loops indefinitely** until the item resolves to SUCCESS / NO_DATA / QUARANTINED. No maximum retry count — but after N hard retries (default 10), it upgrades to QUARANTINED and fires Telegram. |
+
+#### State transitions (formally)
+
+```python
+# pseudocode
+def on_worker_call(item) -> State:
+    item.state = IN_FLIGHT
+    try:
+        response = groww.<phase_method>(**item.params)
+    except GrowwAPIAuthenticationException:
+        return QUARANTINED, reason="auth_failed"
+    except GrowwAPIAuthorisationException:
+        return QUARANTINED, reason="authz_failed"
+    except GrowwAPIBadRequestException:
+        return QUARANTINED, reason="bad_request"
+    except GrowwAPINotFoundException:
+        return NO_DATA, reason="not_found"
+    except GrowwAPIRateLimitException:
+        return RETRYING, backoff=exponential(item.retry_count)
+    except GrowwAPITimeoutException:
+        return RETRYING, backoff=exponential(item.retry_count)
+    except (GrowwAPIException, GrowwBaseException):
+        # generic unknown Groww error
+        if item.retry_count < MAX_SOFT_RETRIES:
+            return RETRYING, backoff=exponential(item.retry_count)
+        return QUARANTINED, reason="generic_exhausted"
+
+    # got a response — check if empty
+    if is_empty(response):
+        return NO_DATA, reason="empty_response"
+    parse_and_persist(response)
+    return SUCCESS
+```
+
+#### Retry escalation
+
+`item.retry_count` is incremented on each entry into RETRYING. After
+`MAX_SOFT_RETRIES` (default **10**) entries, the item is upgraded to
+QUARANTINED with reason `retry_exhausted`. This prevents infinite
+backoff loops while still guaranteeing "never silently skip" — the
+operator is alerted and can either:
+
+1. Retry manually (`brutex requeue <item_id>`)
+2. Mark as NO_DATA with a reason (`brutex mark-no-data <item_id> --reason="delisted"`)
+3. Fix the underlying bug and restart the phase
+
+### 8.7 Completeness Guarantee
+
+This is the formal contract backing the "never skip anything" rule.
+
+**Phase Completeness Invariant:**
+
+```
+phase_complete(P) ≡
+    (∀ item ∈ work_queue(P):
+        item.state ∈ {SUCCESS, NO_DATA, QUARANTINED})
+    ∧ (∀ item with state == QUARANTINED:
+        item.resolved_by_human == True)
+    ∧ (no item in {PENDING, IN_FLIGHT, RETRYING})
+```
+
+**Phase gating rule:** Phase P+1 cannot start unless `phase_complete(P)`
+holds. Verified by `brutex verify-phase <P>` and enforced by the
+orchestrator at each phase boundary.
+
+**Run Completeness Invariant:**
+
+```
+run_complete ≡ ∀ P ∈ {A, B, C, D}: phase_complete(P)
+```
+
+**Proof mechanism:**
+
+1. **Every state transition writes one entry to the hash-chained audit
+   log** (`NFR-OBS-003`). The audit chain is verifiable via
+   `brutex audit verify`, which replays the chain and asserts integrity.
+
+2. **Every work item has a content-addressed hash** (`NFR-UNIQ-001`).
+   The LMDB dedup cache stores `{hash: terminal_state}` pairs. At phase
+   boundary:
+
+    ```
+    verify_phase_complete(P):
+        expected_items = enumerate_work_items(P)
+        for item in expected_items:
+            state = lmdb.get(item.hash)
+            if state not in {SUCCESS, NO_DATA, QUARANTINED_RESOLVED}:
+                raise IncompletePhaseError(item)
+    ```
+
+3. **The test suite includes `NFR-REL-006` (never-skip invariant)**
+   which injects every documented exception type into a mock Groww
+   client and asserts that no work item reaches a "silently missing"
+   state. See §5.3.
+
+**Human audit path:**
+
+The operator can run:
+
+```
+brutex report --run <run_id> --completeness
+```
+
+Which emits a per-phase table:
+
+```
+Phase A | 223 items | 223 SUCCESS | 0 NO_DATA | 0 QUARANTINED | ✅
+Phase B | 1115 items | 1108 SUCCESS | 5 NO_DATA | 2 QUARANTINED | ⏸ BLOCKED
+  └─ QUARANTINED: RELIANCE get_expiries(2020) — reason=bad_request
+  └─ QUARANTINED: NIFTYIT get_expiries(2020) — reason=not_found
+Phase C | NOT STARTED (blocked by Phase B)
+Phase D | NOT STARTED
+```
+
+If the run is green across all four phases, the report ends with:
+
+```
+🎉 Run complete.
+   Total items: 1,296,517
+   Success:     1,291,340 (99.60%)
+   No data:         4,989 (0.39%)
+   Quarantined:       188 (0.01%, all resolved)
+   Silently skipped:    0 (0.00%) ✅ completeness guarantee holds
+```
+
+The `silently skipped: 0` line is the mechanical proof of the
+"never miss a single data" guarantee.
+
 ---
 
 ## 9. Integrity Gates
@@ -1032,6 +1280,82 @@ Spans: `ingest.chunk → catalog.write → feed.materialise → indicator.comput
 - Every entry's `entry_hash` is `sha256(seq ‖ prev_hash ‖ ts ‖ actor ‖ action ‖ subject ‖ payload)`.
 - `brutex audit verify` recomputes the chain; any mismatch exits non-zero.
 - CI integration test re-verifies after every pipeline run.
+
+### 15.6 Telegram Alert Channel
+
+BruteX emits operator-facing notifications to a **Telegram chat** as the
+primary real-time channel during long-running ingests. This supplements
+(does NOT replace) the structlog/Prometheus/audit-chain observability
+stack. The Telegram channel is optimised for **human attention**:
+few, high-signal messages. Per-work-item noise stays in structlog.
+
+#### Credentials
+
+Three environment variables — never stored in files, never logged:
+
+| Env var | Purpose |
+|---|---|
+| `BRUTEX_TELEGRAM_BOT_TOKEN` | Bot token from @BotFather (format `<digits>:<base64>`) |
+| `BRUTEX_TELEGRAM_CHAT_ID` | Numeric chat ID where messages are sent (user DM or group) |
+| `BRUTEX_TELEGRAM_ENABLED` | `true` / `false` (default `false` — must opt in). When `false`, all notifier calls become no-ops and the dashboard shows "Telegram disabled". |
+
+Setup procedure captured in `docs/runbooks/telegram-setup.md`
+(@BotFather walkthrough).
+
+#### Event taxonomy
+
+Every Telegram event has a **severity** (`info`/`warn`/`error`/`critical`),
+a **dedupe key** (so the same event fires at most once per dedupe window
+— prevents flooding), and a **template**. Events:
+
+| Event | Severity | Dedupe window | Template |
+|---|---|---|---|
+| `run.start` | info | none | 🚀 Ingest starting. Run `{run_id}` · {n_underlyings} underlyings · target intervals: {intervals} |
+| `phase.start` | info | none | ⏳ Phase {P} ({phase_name}) started. Target: {target_count} work items |
+| `phase.progress` | info | 30s per phase (A), 60s (B), 120s (C), 300s (D) | Phase {P}: {done}/{total} ({pct}%) · ETA {eta} · tput {rps}/s |
+| `phase.complete` | info | none | ✅ Phase {P} complete. Elapsed {elapsed} · SUCCESS: {s} · NO_DATA: {n} · QUARANTINED: {q} |
+| `phase.blocked` | error | none | ⏸ Phase {P} BLOCKED — {q} quarantined item(s) need review. Next phase will not start. |
+| `quarantine.new` | warn | 1s per `item_hash` | 🚨 QUARANTINED: Phase {P} `{item_id}` — reason `{reason}`. See `brutex requeue {item_hash}` |
+| `rate_limit.downshift` | warn | 60s | ⚠️ Rate-limit downshift: 15 → 10 rps after {n} consecutive 429s in 60s. Back-off active. No requests dropped. |
+| `rate_limit.recovered` | info | 60s | ✅ Rate-limit recovered: back to 15 rps after 2m clean. |
+| `worker.hung` | error | none | 🔴 Worker `{worker_id}` hung >5s — auto-killed + requeued. Item state preserved. |
+| `run.heartbeat` | info | 10min | 💓 Heartbeat: {workers_alive}/{workers_total} workers · queue {queue_depth} · tput {rps}/s · storage {disk_used} |
+| `run.complete` | info | none | 🎉 Run `{run_id}` complete. Elapsed {elapsed} · {success}/{total} success · {no_data} no_data · {quarantined} quarantined (resolved) · storage {disk_used} |
+
+#### Delivery semantics
+
+- **Async fire-and-forget:** the notifier runs in a separate asyncio task.
+  A `send()` call returns immediately after enqueueing. The caller never
+  blocks on Telegram latency.
+- **On-failure tolerance:** if the Telegram API is unreachable, the
+  notifier logs the failure to structlog, increments a `brutex_telegram_failures_total`
+  metric, and **drops the message** (does not retry indefinitely — the
+  audit chain still has the event). **The ingest is NEVER blocked by
+  Telegram outages.** This is the only exception to the "never drop"
+  rule, because Telegram is supplementary and the audit log is the
+  source of truth.
+- **Dedupe:** events with the same `(event_name, dedupe_key)` within the
+  dedupe window are coalesced into one message — the latest one wins.
+- **Bundling:** progress messages are rate-limited to 1 message per
+  phase per dedupe window to prevent flooding.
+- **Markdown:** all messages use Telegram MarkdownV2 for code blocks +
+  bold + emoji. Payloads are escaped to prevent injection.
+
+#### Mute discipline
+
+During peak Phase D (~24 hours of 1-min candle fetching), the operator
+should expect roughly:
+
+- 1 `run.start`
+- 4 × `phase.start` + `phase.complete`
+- ~288 `phase.progress` (Phase D, every 5 minutes)
+- ~144 `run.heartbeat` (every 10 minutes)
+- 0 to ~20 `quarantine.new` if anything goes wrong
+- 0 to ~5 `rate_limit.downshift` during peak Groww load
+- 1 `run.complete`
+
+**Total: ~440 messages over 24 hours**, manageable for one chat. If it
+grows, we can add a "quiet hours" flag in a future version.
 
 ---
 
