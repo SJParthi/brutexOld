@@ -17,7 +17,7 @@ from brutex.orchestrator.audit import AuditWriter
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 from brutex.orchestrator.state import IngestPhase
 from brutex.orchestrator.store import WorkItemStore
-from tests.unit.test_adapters_groww_client import FakeGrowwClient
+from tests.fakes.groww import FakeGrowwClient
 
 
 # ────────────────────────────────────────────────────────────────────────

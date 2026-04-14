@@ -19,7 +19,7 @@ from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 from brutex.orchestrator.state import IngestPhase, WorkItemState
 from brutex.orchestrator.store import WorkItemStore
 from brutex.universe import UnderlyingSpec
-from tests.unit.test_adapters_groww_client import FakeGrowwClient
+from tests.fakes.groww import FakeGrowwClient
 
 
 # ────────────────────────────────────────────────────────────────────────

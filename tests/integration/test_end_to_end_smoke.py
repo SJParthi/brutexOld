@@ -48,7 +48,7 @@ from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 from brutex.orchestrator.state import IngestPhase, WorkItemState
 from brutex.orchestrator.store import WorkItemStore
 from brutex.universe import UnderlyingSpec
-from tests.unit.test_adapters_groww_client import FakeDataFrame, FakeGrowwClient
+from tests.fakes.groww import FakeDataFrame, FakeGrowwClient
 from tests.unit.test_adapters_groww_instruments import (
     _banknifty_pe_row,
     _nifty_spot_row,
@@ -369,7 +369,7 @@ class TestPipelineHaltsOnQuarantine:
         # Inject a synthetic BadRequest from the client.
         # Use the synthetic exception class from the test module
         # (same class name as the real one so classify_exception dispatches).
-        from tests.unit.test_adapters_groww_client import (
+        from tests.fakes.groww import (
             GrowwAPIBadRequestException,
         )
 

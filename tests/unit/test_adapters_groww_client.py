@@ -9,10 +9,8 @@ call → classify → transition → persist → audit.
 from __future__ import annotations
 
 import hashlib
-import threading
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -32,147 +30,18 @@ from brutex.orchestrator.state import (
     WorkItemState,
 )
 from brutex.orchestrator.store import WorkItemStore
-
-
-# ────────────────────────────────────────────────────────────────────────
-# Synthetic Groww exception classes (name-matched to the real SDK)
-# ────────────────────────────────────────────────────────────────────────
-
-
-class GrowwBaseException(Exception):
-    pass
-
-
-class GrowwAPIException(GrowwBaseException):
-    pass
-
-
-class GrowwAPIRateLimitException(GrowwAPIException):
-    pass
-
-
-class GrowwAPITimeoutException(GrowwAPIException):
-    pass
-
-
-class GrowwAPINotFoundException(GrowwAPIException):
-    pass
-
-
-class GrowwAPIBadRequestException(GrowwAPIException):
-    pass
-
-
-class GrowwAPIAuthenticationException(GrowwAPIException):
-    pass
-
-
-class GrowwAPIAuthorisationException(GrowwAPIException):
-    pass
-
-
-# ────────────────────────────────────────────────────────────────────────
-# FakeGrowwClient — implements GrowwClientProtocol for tests
-# ────────────────────────────────────────────────────────────────────────
-
-
-class FakeDataFrame:
-    """Minimal pandas.DataFrame stand-in supporting ``len`` and ``.empty``."""
-
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
-        self._rows = rows
-
-    def __len__(self) -> int:
-        return len(self._rows)
-
-    @property
-    def empty(self) -> bool:
-        return len(self._rows) == 0
-
-
-class FakeGrowwClient:
-    """Test double. Configurable per-method responses and exceptions."""
-
-    def __init__(self) -> None:
-        # Per-method configurable behaviour
-        self.instruments_response: Any = FakeDataFrame(
-            [{"groww_symbol": "NSE-NIFTY"}]
-        )
-        self.instruments_exception: Exception | None = None
-
-        self.expiries_response: dict[str, list[str]] = {"expiries": ["2024-01-25"]}
-        self.expiries_exception: Exception | None = None
-
-        self.contracts_response: dict[str, list[str]] = {
-            "contracts": ["NSE-NIFTY-25Jan24-22000-CE"]
-        }
-        self.contracts_exception: Exception | None = None
-
-        self.candles_response: dict[str, Any] = {
-            "candles": [["2024-01-25T09:15:00", 22000.0, 22010.0, 21990.0, 22005.0, 100, None]],
-            "closing_price": 22005.0,
-            "start_time": "2024-01-25 09:15:00",
-            "end_time": "2024-01-25 09:16:00",
-            "interval_in_minutes": 1,
-        }
-        self.candles_exception: Exception | None = None
-
-        # Call counters
-        self.get_all_instruments_calls = 0
-        self.get_instrument_by_groww_symbol_calls = 0
-        self.get_expiries_calls = 0
-        self.get_contracts_calls = 0
-        self.get_historical_candles_calls = 0
-
-    def get_all_instruments(self) -> Any:
-        self.get_all_instruments_calls += 1
-        if self.instruments_exception is not None:
-            raise self.instruments_exception
-        return self.instruments_response
-
-    def get_instrument_by_groww_symbol(self, groww_symbol: str) -> dict[str, Any]:
-        self.get_instrument_by_groww_symbol_calls += 1
-        return {"groww_symbol": groww_symbol}
-
-    def get_expiries(
-        self,
-        *,
-        exchange: str,
-        underlying_symbol: str,
-        year: int | None = None,
-        month: int | None = None,
-    ) -> dict[str, list[str]]:
-        self.get_expiries_calls += 1
-        if self.expiries_exception is not None:
-            raise self.expiries_exception
-        return self.expiries_response
-
-    def get_contracts(
-        self,
-        *,
-        exchange: str,
-        underlying_symbol: str,
-        expiry_date: str,
-    ) -> dict[str, list[str]]:
-        self.get_contracts_calls += 1
-        if self.contracts_exception is not None:
-            raise self.contracts_exception
-        return self.contracts_response
-
-    def get_historical_candles(
-        self,
-        *,
-        exchange: str,
-        segment: str,
-        groww_symbol: str,
-        start_time: str,
-        end_time: str,
-        candle_interval: str,
-    ) -> dict[str, Any]:
-        self.get_historical_candles_calls += 1
-        if self.candles_exception is not None:
-            raise self.candles_exception
-        return self.candles_response
+from tests.fakes.groww import (
+    FakeDataFrame,
+    FakeGrowwClient,
+    GrowwAPIAuthenticationException,
+    GrowwAPIAuthorisationException,
+    GrowwAPIBadRequestException,
+    GrowwAPIException,
+    GrowwAPINotFoundException,
+    GrowwAPIRateLimitException,
+    GrowwAPITimeoutException,
+    GrowwBaseException,
+)
 
 
 # ────────────────────────────────────────────────────────────────────────

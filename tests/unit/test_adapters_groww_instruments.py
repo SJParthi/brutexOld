@@ -22,7 +22,7 @@ from brutex.orchestrator.pipeline import PhaseResult
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 from brutex.orchestrator.state import IngestPhase
 from brutex.orchestrator.store import WorkItemStore
-from tests.unit.test_adapters_groww_client import FakeDataFrame, FakeGrowwClient
+from tests.fakes.groww import FakeDataFrame, FakeGrowwClient
 
 
 # ────────────────────────────────────────────────────────────────────────
