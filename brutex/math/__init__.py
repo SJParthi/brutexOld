@@ -1,168 +1,144 @@
-"""BruteX math layer — PLACEHOLDER until ``fno-math`` is extracted.
+"""BruteX math layer — re-exports from the ``fno_math_py`` PyO3 wheel.
 
-This module is intentionally a stub that raises :exc:`NotImplementedError`
-on every attempted import of a Greek, indicator, or strategy. The real
-implementation lives in a shared Rust crate ``fno-math`` under
-``rust/fno-math/`` in this repository, and is consumed via the PyO3
-binding crate ``fno-math-py``.
+Per ``REQUIREMENTS.md §7A Shared Core Library Contract`` and
+``FR-MATH-004``, BruteX must not contain any Python reimplementation
+of Greeks, indicators, or strategies. The single source of truth is
+the Rust crate ``rust/fno-math/`` in this repository, which is also
+consumed by ``tickvault`` (live trading) via a Cargo path dep. BruteX
+consumes the same logic via a compiled PyO3 wheel named
+``fno_math_py`` built from ``rust/fno-math-py/``.
 
-**Why a placeholder?**
+## Module contract
 
-Per ``REQUIREMENTS.md §7A Shared Core Library Contract`` and FR-MATH-004,
-BruteX must not contain any Python reimplementation of Greeks, indicators,
-or strategies. The single source of truth is the Rust crate, and BruteX
-consumes it via a compiled Python wheel. Until that wheel is built (which
-happens during the extraction procedure in
-``docs/runbooks/fno-math-extraction.md``), this placeholder prevents
-accidental usage of a non-existent module.
+When the wheel **is** installed, every symbol in :data:`__all__`
+(``delta``, ``gamma``, ``sma``, ``rsi`` …) points directly at the
+native Rust function — zero Python shim, no wrapper cost.
 
-**When does this go away?**
+When the wheel is **not yet** installed (e.g. a fresh checkout where
+the operator hasn't run ``maturin develop`` yet), importing any
+symbol from this module still succeeds, but calling the function
+raises :class:`FnoMathNotExtractedError` with a clear pointer to
+``docs/runbooks/fno-math-extraction.md``.
 
-When the operator runs ``scripts/extract-fno-math.sh`` and builds the
-PyO3 wheel, this file is replaced with one-line re-exports from
-``fno_math_py``::
+This split lets downstream code write ``from brutex.math import
+delta`` unconditionally — the moment the wheel lands in
+``site-packages``, the real implementation is picked up without any
+code change on the BruteX side.
 
-    from fno_math_py.greeks import delta, gamma, theta, vega, rho
-    from fno_math_py.indicators import sma, ema, rsi, macd, bb, atr
-    from fno_math_py.strategies import Strategy, Signal
+## Runtime introspection
 
-That's it — the body becomes just imports. No logic. Ever.
+Callers that need to branch on availability can check
+:data:`FNO_MATH_BACKEND`:
+
+* ``"native"`` — :mod:`fno_math_py` imported OK; symbols are real
+* ``"placeholder"`` — :mod:`fno_math_py` missing; symbols raise on call
+
+Tests in :mod:`tests.unit.test_math_facade` exercise both paths.
 """
 
 from __future__ import annotations
 
-from typing import Any, NoReturn
+from typing import Any, Callable, Final, NoReturn
 
-_EXTRACTION_POINTER = (
-    "The shared Rust crate fno-math has not been extracted yet. "
-    "Run scripts/extract-fno-math.sh /path/to/tickvault to populate "
-    "rust/fno-math/src/, then build the PyO3 wheel with "
-    "cd rust/fno-math-py && maturin develop. "
-    "Full procedure: docs/runbooks/fno-math-extraction.md. "
+_EXTRACTION_POINTER: Final[str] = (
+    "fno_math_py wheel is not installed. Build it via:\n"
+    "  cd rust/fno-math-py && maturin develop --release\n"
+    "Full procedure: docs/runbooks/fno-math-extraction.md.\n"
     "See REQUIREMENTS.md §7A for the architectural rationale."
 )
 
 
 class FnoMathNotExtractedError(NotImplementedError):
-    """Raised when BruteX code tries to use math that has not been extracted yet.
+    """Raised when math is called before the PyO3 wheel is built.
 
     Inherits :exc:`NotImplementedError` so it shows up in the standard
-    Python "feature missing" bucket and is caught by
-    ``except NotImplementedError``. The error message always points at
-    ``docs/runbooks/fno-math-extraction.md``.
+    "feature missing" bucket and is catchable via
+    ``except NotImplementedError``.
     """
 
     def __init__(self, symbol: str) -> None:
-        super().__init__(
-            f"{symbol}() is not available yet. {_EXTRACTION_POINTER}"
-        )
-
-
-def _not_extracted(symbol: str) -> NoReturn:
-    """Raise :exc:`FnoMathNotExtractedError` for *symbol*."""
-    raise FnoMathNotExtractedError(symbol)
+        super().__init__(f"{symbol}() is unavailable. {_EXTRACTION_POINTER}")
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Facade — a fixed list of function names that future code might try to
-# import. Each raises the extraction error if called, so you get a
-# clear message instead of a silent ImportError.
-#
-# When the extraction runs, this entire module is replaced with:
-#
-#     from fno_math_py.greeks import delta, gamma, theta, vega, rho
-#     from fno_math_py.indicators import sma, ema, rsi, macd, bb, atr
-#     from fno_math_py.strategies import Strategy, Signal
-#
-# These stubs are only here to catch the "oops I used math too early"
-# case during Phase P1a / P1b / P1c / P2 development.
+# Backend detection
 # ────────────────────────────────────────────────────────────────────────
 
 
-def delta(*args: Any, **kwargs: Any) -> NoReturn:
-    """Black-Scholes delta — PLACEHOLDER, see module docstring."""
-    del args, kwargs
-    _not_extracted("delta")
+def _make_placeholder(symbol: str) -> Callable[..., NoReturn]:
+    """Build a callable that raises :class:`FnoMathNotExtractedError`.
+
+    One factory per symbol so the traceback frame names the exact
+    function the caller tried to use.
+    """
+
+    def _placeholder(*args: Any, **kwargs: Any) -> NoReturn:
+        del args, kwargs
+        raise FnoMathNotExtractedError(symbol)
+
+    _placeholder.__name__ = symbol
+    _placeholder.__qualname__ = f"brutex.math.{symbol}"
+    _placeholder.__doc__ = (
+        f"Placeholder for {symbol}. Raises FnoMathNotExtractedError "
+        f"if called — install fno_math_py to use the real Rust "
+        f"implementation. See :mod:`brutex.math`."
+    )
+    return _placeholder
 
 
-def gamma(*args: Any, **kwargs: Any) -> NoReturn:
-    """Black-Scholes gamma — PLACEHOLDER."""
-    del args, kwargs
-    _not_extracted("gamma")
+#: Symbols we re-export from fno_math_py when available. Keep in
+#: lexicographic order so the ``__all__`` list and the test matrix
+#: stay consistent.
+_GREEK_SYMBOLS: Final[tuple[str, ...]] = (
+    "delta",
+    "gamma",
+    "implied_volatility",
+    "rho",
+    "theta",
+    "vega",
+)
+
+_INDICATOR_SYMBOLS: Final[tuple[str, ...]] = (
+    "atr",
+    "bollinger_bands",
+    "ema",
+    "macd",
+    "rsi",
+    "sma",
+)
 
 
-def theta(*args: Any, **kwargs: Any) -> NoReturn:
-    """Black-Scholes theta — PLACEHOLDER."""
-    del args, kwargs
-    _not_extracted("theta")
+FNO_MATH_BACKEND: str
+"""Which backend is currently wired — ``"native"`` or ``"placeholder"``."""
 
 
-def vega(*args: Any, **kwargs: Any) -> NoReturn:
-    """Black-Scholes vega — PLACEHOLDER."""
-    del args, kwargs
-    _not_extracted("vega")
-
-
-def rho(*args: Any, **kwargs: Any) -> NoReturn:
-    """Black-Scholes rho — PLACEHOLDER."""
-    del args, kwargs
-    _not_extracted("rho")
-
-
-def implied_volatility(*args: Any, **kwargs: Any) -> NoReturn:
-    """Implied volatility solver — PLACEHOLDER."""
-    del args, kwargs
-    _not_extracted("implied_volatility")
-
-
-def sma(*args: Any, **kwargs: Any) -> NoReturn:
-    """Simple moving average — PLACEHOLDER."""
-    del args, kwargs
-    _not_extracted("sma")
-
-
-def ema(*args: Any, **kwargs: Any) -> NoReturn:
-    """Exponential moving average — PLACEHOLDER."""
-    del args, kwargs
-    _not_extracted("ema")
-
-
-def rsi(*args: Any, **kwargs: Any) -> NoReturn:
-    """Relative strength index — PLACEHOLDER."""
-    del args, kwargs
-    _not_extracted("rsi")
-
-
-def macd(*args: Any, **kwargs: Any) -> NoReturn:
-    """Moving average convergence divergence — PLACEHOLDER."""
-    del args, kwargs
-    _not_extracted("macd")
-
-
-def bollinger_bands(*args: Any, **kwargs: Any) -> NoReturn:
-    """Bollinger bands — PLACEHOLDER."""
-    del args, kwargs
-    _not_extracted("bollinger_bands")
-
-
-def atr(*args: Any, **kwargs: Any) -> NoReturn:
-    """Average true range — PLACEHOLDER."""
-    del args, kwargs
-    _not_extracted("atr")
+# Try the native import first. If successful, each symbol points at
+# the real Rust function. Otherwise fall back to placeholder shims.
+try:
+    import fno_math_py as _native  # type: ignore[import-not-found]
+except ImportError:
+    FNO_MATH_BACKEND = "placeholder"
+    for _sym in _GREEK_SYMBOLS + _INDICATOR_SYMBOLS:
+        globals()[_sym] = _make_placeholder(_sym)
+else:
+    FNO_MATH_BACKEND = "native"
+    # Re-export — we don't care which submodule the symbol lives in,
+    # we just want the name resolvable at ``brutex.math.<name>``.
+    # fno_math_py is expected to expose greeks + indicators at the
+    # top level per the extraction runbook.
+    for _sym in _GREEK_SYMBOLS + _INDICATOR_SYMBOLS:
+        try:
+            globals()[_sym] = getattr(_native, _sym)
+        except AttributeError:
+            # Backward-compat: if a wheel is built from an older fno-math
+            # that is missing a symbol, fall back to the placeholder for
+            # that specific name rather than crashing the whole import.
+            globals()[_sym] = _make_placeholder(_sym)
 
 
 __all__ = [
+    "FNO_MATH_BACKEND",
     "FnoMathNotExtractedError",
-    "atr",
-    "bollinger_bands",
-    "delta",
-    "ema",
-    "gamma",
-    "implied_volatility",
-    "macd",
-    "rho",
-    "rsi",
-    "sma",
-    "theta",
-    "vega",
+    *_GREEK_SYMBOLS,
+    *_INDICATOR_SYMBOLS,
 ]
