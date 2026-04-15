@@ -133,10 +133,9 @@ class CatalogEntry:
             raise ValueError(f"CatalogEntry.month must be in [1, 12], got {self.month}")
         if self.row_count < 0:
             raise ValueError(f"CatalogEntry.row_count must be non-negative, got {self.row_count}")
-        if self.first_ts > self.last_ts:
-            raise ValueError(
-                f"CatalogEntry: first_ts ({self.first_ts}) must be <= last_ts ({self.last_ts})"
-            )
+        # Validate tz-awareness BEFORE any datetime comparison — comparing
+        # an aware datetime against a naive one raises TypeError instead
+        # of letting the guard below fire cleanly.
         for ts_name, ts in (
             ("first_ts", self.first_ts),
             ("last_ts", self.last_ts),
@@ -146,3 +145,7 @@ class CatalogEntry:
                 raise ValueError(
                     f"CatalogEntry.{ts_name} must be timezone-aware, got naive datetime {ts!r}"
                 )
+        if self.first_ts > self.last_ts:
+            raise ValueError(
+                f"CatalogEntry: first_ts ({self.first_ts}) must be <= last_ts ({self.last_ts})"
+            )

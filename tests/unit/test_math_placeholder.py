@@ -61,9 +61,14 @@ class TestFnoMathNotExtractedError:
         msg = str(err)
         assert "docs/runbooks/fno-math-extraction.md" in msg
 
-    def test_error_message_mentions_scripts(self) -> None:
+    def test_error_message_mentions_extraction_path(self) -> None:
+        # After upgrading brutex.math from hard-placeholder to lazy
+        # facade, the placeholder message points at the maturin build
+        # path + the extraction runbook rather than the legacy
+        # scripts/extract-fno-math.sh shim.
         err = FnoMathNotExtractedError("delta")
-        assert "scripts/extract-fno-math.sh" in str(err)
+        msg = str(err)
+        assert "fno-math-py" in msg or "maturin" in msg
 
     def test_error_message_mentions_maturin(self) -> None:
         err = FnoMathNotExtractedError("delta")

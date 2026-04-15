@@ -235,10 +235,14 @@ def normalise_tick_size(raw: float | int | Decimal | str) -> Decimal:
                 f"tick_size integer out of expected paise range [1, 1000): {raw}"
             )
     elif isinstance(raw, float):
-        # Convert via str to avoid binary-float precision loss
+        # Convert via str to avoid binary-float precision loss.
         candidate = Decimal(str(raw))
-        # If the float looks like integer paise (e.g., 5.0), treat as paise
-        if candidate >= Decimal("1") and candidate == candidate.to_integral_value():
+        # Integer-valued floats > 1.0 (5.0, 10.0, 25.0, 50.0) are
+        # treated as paise and converted to rupees. Values <= 1.0
+        # (0.05, 0.10, 1.00) are kept as rupees. 1.00 is the unique
+        # rupees/paise crossover value and we preserve it as rupees
+        # because it's a common index tick size.
+        if candidate > Decimal("1") and candidate == candidate.to_integral_value():
             candidate = candidate / Decimal(100)
     else:
         raise TickSizeFormatError(f"Unsupported tick_size type: {type(raw).__name__}")

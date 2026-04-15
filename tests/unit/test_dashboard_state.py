@@ -181,7 +181,7 @@ class TestOnPipelineEvent:
     def test_events_ring_buffer_bounded(self) -> None:
         state = DashboardState()
         for _ in range(600):  # > deque maxlen (500)
-            state.on_pipeline_event(_event(PipelineEventKind.RUN_HEARTBEAT))
+            state.on_pipeline_event(_event(PipelineEventKind.PHASE_PROGRESS))
         assert len(state.recent_events) == 500
 
 

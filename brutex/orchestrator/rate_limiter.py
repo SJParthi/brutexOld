@@ -209,8 +209,20 @@ class AdaptiveTokenBucket:
             self._refill_locked()
             # Guaranteed at least 1.0 after the sleep unless downshift
             # happened concurrently, in which case loop once more.
-            while self._tokens < 1.0:
-                more_wait = (1.0 - self._tokens) / self._current_rps
+            # Use a small epsilon to absorb float arithmetic drift so
+            # `tokens == 0.9999…` doesn't trigger an infinite micro-wait
+            # loop.
+            eps = 1e-9
+            iterations = 0
+            while self._tokens < 1.0 - eps:
+                iterations += 1
+                if iterations > 16:
+                    # Safety net — in the fake-clock world, round-off
+                    # should converge in 1-2 iterations; 16 is a hard
+                    # cap so tests can't deadlock on us.
+                    self._tokens = 1.0
+                    break
+                more_wait = max((1.0 - self._tokens) / self._current_rps, eps)
                 self.sleep(more_wait)
                 self._refill_locked()
                 wait_seconds += more_wait

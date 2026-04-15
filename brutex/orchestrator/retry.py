@@ -220,7 +220,7 @@ def backoff_delay(
         returns a sensible fallback).
     """
     if retry_count <= 0:
-        raise ValueError(f"retry_count must be ≥ 1, got {retry_count}")
+        raise ValueError(f"retry_count must be >= 1, got {retry_count}")
 
     # Clamp to the last slot if we're past the schedule length. The
     # FSM should have escalated to QUARANTINED by now, but belt-and-

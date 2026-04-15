@@ -257,15 +257,24 @@ class WorkItemStore:
             subdir=True,
             readonly=read_only,
             create=not read_only,
-            lock=not read_only,
+            # Always keep the reader lock table live — even read-only
+            # processes need it to coordinate with writers.
+            lock=True,
         )
-        # Open one sub-database per phase. LMDB requires this in a
-        # transaction and the sub-db name must be bytes.
+        # Open one sub-database per phase. LMDB has a quirk where sub-db
+        # handles acquired inside a read-only transaction don't persist
+        # across transactions in all versions of the Python binding.
+        # For read-only mode we instead use `env.open_db(key)` with NO
+        # txn argument — the binding opens an implicit internal txn
+        # and returns a handle that's valid for the env's lifetime.
         dbs: dict[IngestPhase, lmdb._Database] = {}
-        with env.begin(write=not read_only) as txn:
+        if read_only:
             for phase in IngestPhase:
-                db = env.open_db(phase.value.encode("utf-8"), txn=txn, create=not read_only)
-                dbs[phase] = db
+                dbs[phase] = env.open_db(phase.value.encode("utf-8"), create=False)
+        else:
+            with env.begin(write=True) as txn:
+                for phase in IngestPhase:
+                    dbs[phase] = env.open_db(phase.value.encode("utf-8"), txn=txn, create=True)
         return cls(path=path, env=env, dbs=dbs)
 
     # ── Context manager ────────────────────────────────────────────
@@ -338,7 +347,11 @@ class WorkItemStore:
         key = _encode_key(content_hash)
         with self._env.begin() as txn:
             raw = txn.get(key, db=self._dbs[phase])
-        return _deserialize_item(raw) if raw is not None else None
+        if raw is None:
+            return None
+        # lmdb returns memoryview by default; coerce to bytes for the
+        # deserialiser's narrower type signature.
+        return _deserialize_item(bytes(raw))
 
     def exists_terminal(self, phase: IngestPhase, content_hash: str) -> bool:
         """Fast dedup check — True iff an item exists AND is terminal.
@@ -363,7 +376,8 @@ class WorkItemStore:
         with self._env.begin() as txn:
             cursor = txn.cursor(db=self._dbs[phase])
             for _, raw in cursor:
-                yield _deserialize_item(raw)
+                # Coerce memoryview → bytes for the deserialiser.
+                yield _deserialize_item(bytes(raw))
 
     def count_by_state(self, phase: IngestPhase) -> dict[WorkItemState, int]:
         """Return a histogram of states within *phase*.
