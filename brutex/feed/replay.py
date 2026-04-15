@@ -176,6 +176,11 @@ class ReplayFeed:
         """Return the ordered symbol tuple this feed was configured with."""
         return tuple(self._symbols)
 
+    @property
+    def interval(self) -> str:
+        """Return the Groww interval name this feed streams bars at."""
+        return self._interval
+
     def ensure_no_lookahead(self, ts: datetime) -> None:
         """Assert that *ts* is not strictly after the feed's current cursor.
 
