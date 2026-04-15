@@ -254,6 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_version(args: argparse.Namespace) -> int:
+    """Handle the ``brutex version`` subcommand — print version + commit SHA."""
     commit = _current_commit_sha()
     if commit:
         pass
@@ -682,7 +683,7 @@ def _build_adapter(
             [
                 {
                     "exchange": "NSE",
-                    "exchange_token": 26000,
+                    "exchange_token": 26000,  # nosec B105 — NIFTY exchange token, not a password
                     "trading_symbol": "NIFTY",
                     "groww_symbol": "NSE-NIFTY",
                     "name": "Nifty 50",
@@ -722,6 +723,7 @@ def _build_adapter(
 
 
 def cmd_audit_verify(args: argparse.Namespace) -> int:
+    """Handle ``brutex audit verify`` — replay and verify a JSONL audit chain."""
     audit_file: Path = args.audit_file
     try:
         verify_chain(audit_file)
@@ -733,6 +735,7 @@ def cmd_audit_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_placeholder(args: argparse.Namespace) -> int:
+    """Stub handler for not-yet-implemented subcommands; prints a clear error."""
     getattr(args, "_placeholder_name", "this command")
     return EXIT_USER_ERROR
 
@@ -743,6 +746,7 @@ def cmd_placeholder(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """BruteX CLI entry point — dispatches to the appropriate cmd_* handler."""
     parser = build_parser()
     args = parser.parse_args(argv)
 

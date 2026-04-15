@@ -140,6 +140,7 @@ def parse_groww_candle_rows(
 
 
 def _to_decimal(value: Any, field_name: str) -> Decimal:
+    """Convert a raw int/float/str/Decimal to Decimal via str() to preserve precision."""
     if isinstance(value, Decimal):
         return value
     if isinstance(value, (int, float)):

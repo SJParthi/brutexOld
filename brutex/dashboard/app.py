@@ -71,6 +71,7 @@ class PhaseSnapshot:
 
     @property
     def percent(self) -> float:
+        """Return progress percentage as float in [0.0, 100.0]."""
         if self.total <= 0:
             return 0.0
         return min(100.0, round(100.0 * self.done / self.total, 2))
@@ -89,6 +90,8 @@ class WorkerRow:
 
 @dataclass(slots=True)
 class TelegramStatsPanel:
+    """Telegram delivery counters shown in the dashboard sidebar."""
+
     enabled: bool = False
     sent: int = 0
     dropped_on_failure: int = 0
@@ -99,6 +102,8 @@ class TelegramStatsPanel:
 
 @dataclass(slots=True)
 class RateLimitPanel:
+    """Rate-limiter snapshot (current RPS, available tokens, recent 429s)."""
+
     current_rps: float = 0.0
     available_tokens: float = 0.0
     recent_429_count: int = 0
@@ -231,12 +236,14 @@ class DashboardState:
         available_tokens: float,
         recent_429_count: int,
     ) -> None:
+        """Update the rate-limit panel from a fresh :class:`AdaptiveTokenBucket` snapshot."""
         with self._lock:
             self.rate_limit.current_rps = current_rps
             self.rate_limit.available_tokens = available_tokens
             self.rate_limit.recent_429_count = recent_429_count
 
     def update_telegram(self, *, stats: dict[str, int | float]) -> None:
+        """Update the Telegram panel from a fresh notifier counter snapshot."""
         with self._lock:
             self.telegram.sent = int(stats.get("sent", 0))
             self.telegram.dropped_on_failure = int(stats.get("dropped_on_failure", 0))
@@ -252,6 +259,7 @@ class DashboardState:
         current_task: str | None = None,
         elapsed_seconds: float = 0.0,
     ) -> None:
+        """Update one worker row in the workers table."""
         with self._lock:
             self.workers[worker_id] = WorkerRow(
                 worker_id=worker_id,
@@ -339,20 +347,24 @@ def build_app(state: DashboardState) -> Any:
 
     @app.get("/api/v1/state")
     async def api_state() -> JSONResponse:
+        """GET /api/v1/state — JSON snapshot of the current dashboard state."""
         return JSONResponse(state.to_dict())
 
     @app.get("/api/v1/events")
     async def api_events() -> JSONResponse:
+        """GET /api/v1/events — JSON dump of the recent-events ring buffer."""
         with state._lock:
             events = list(state.recent_events)
         return JSONResponse({"events": events})
 
     @app.get("/metrics", response_class=PlainTextResponse)
     async def metrics() -> str:
+        """GET /metrics — Prometheus text-format metrics for scraping."""
         return render_prometheus(get_registry())
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
+        """GET / — inline HTML dashboard with embedded JS WebSocket client."""
         return _render_index_html()
 
     # WebSocket handler — defined at module scope below to sidestep
@@ -385,6 +397,7 @@ def _make_ws_handler(state: DashboardState) -> Any:
     globals()["WebSocketDisconnect"] = WebSocketDisconnect
 
     async def ws_handler(websocket: WebSocket) -> None:
+        """WebSocket /ws — pushes a state snapshot every 500 ms."""
         await websocket.accept()
         try:
             while True:
@@ -398,6 +411,7 @@ def _make_ws_handler(state: DashboardState) -> Any:
 
 
 async def _async_sleep(seconds: float) -> None:
+    """Async-friendly wrapper around ``asyncio.sleep`` used by the WS handler."""
     import asyncio
 
     await asyncio.sleep(seconds)

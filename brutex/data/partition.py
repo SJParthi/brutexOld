@@ -101,21 +101,25 @@ _FORBIDDEN_SYMBOL_CHARS: Final[frozenset[str]] = frozenset(
 
 
 def _validate_exchange(exchange: str) -> None:
+    """Raise PartitionError if *exchange* is not in VALID_EXCHANGES."""
     if exchange not in VALID_EXCHANGES:
         raise PartitionError(f"exchange must be one of {sorted(VALID_EXCHANGES)}, got {exchange!r}")
 
 
 def _validate_segment(segment: str) -> None:
+    """Raise PartitionError if *segment* is not in VALID_SEGMENTS."""
     if segment not in VALID_SEGMENTS:
         raise PartitionError(f"segment must be one of {sorted(VALID_SEGMENTS)}, got {segment!r}")
 
 
 def _validate_interval(interval: str) -> None:
+    """Raise PartitionError if *interval* is not a Groww canonical interval name."""
     if interval not in VALID_INTERVALS:
         raise PartitionError(f"interval must be one of the 12 Groww intervals, got {interval!r}")
 
 
 def _validate_symbol(symbol: str) -> None:
+    """Raise PartitionError on empty or filesystem-illegal symbols."""
     if not symbol:
         raise PartitionError("symbol must be a non-empty string")
     illegal = _FORBIDDEN_SYMBOL_CHARS.intersection(symbol)
@@ -124,6 +128,7 @@ def _validate_symbol(symbol: str) -> None:
 
 
 def _validate_year_month(year: int, month: int) -> None:
+    """Raise PartitionError on out-of-range year or month values."""
     if year < MIN_PARTITION_YEAR or year > MAX_PARTITION_YEAR:
         raise PartitionError(
             f"year must be a 4-digit Gregorian year in "

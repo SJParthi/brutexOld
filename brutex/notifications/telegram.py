@@ -391,6 +391,7 @@ class TelegramNotifier:
         return notifier
 
     def _start_worker(self) -> None:
+        """Start the background daemon thread that drains the publish queue."""
         if self._synchronous or self._running:
             return
         self._running = True
@@ -461,6 +462,7 @@ class TelegramNotifier:
     # ── Worker loop ────────────────────────────────────────────────
 
     def _worker_loop(self) -> None:
+        """Background-thread loop: pull events from the queue and call _send_one."""
         while self._running:
             try:
                 event = self._queue.get(timeout=0.5)
@@ -471,6 +473,7 @@ class TelegramNotifier:
             self._send_one(event)
 
     def _send_one(self, event: TelegramEvent) -> None:
+        """Send a single :class:`TelegramEvent` via the configured transport."""
         try:
             ok = self._transport(self._config, event)
         except Exception as exc:

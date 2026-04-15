@@ -334,6 +334,7 @@ class PortConfig:
 
 
 def _parse_port(env_var: str, default: int) -> int:
+    """Parse and validate a port number from an environment variable string."""
     raw = os.environ.get(env_var)
     if raw is None or raw == "":
         return default

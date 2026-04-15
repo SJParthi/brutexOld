@@ -98,6 +98,7 @@ class ParquetWriter:
 
     @property
     def lake_root(self) -> Path:
+        """Return the configured top-level lake directory path."""
         return self._lake_root
 
     def write(

@@ -88,9 +88,12 @@ class GrowwClientProtocol(Protocol):
     """
 
     def get_all_instruments(self) -> Any:  # returns pandas.DataFrame
+        """Return the full instrument master DataFrame from the Groww SDK."""
         ...
 
-    def get_instrument_by_groww_symbol(self, groww_symbol: str) -> dict[str, Any]: ...
+    def get_instrument_by_groww_symbol(self, groww_symbol: str) -> dict[str, Any]:
+        """Return one instrument record by groww_symbol via the SDK."""
+        ...
 
     def get_expiries(
         self,
@@ -99,7 +102,9 @@ class GrowwClientProtocol(Protocol):
         underlying_symbol: str,
         year: int | None = None,
         month: int | None = None,
-    ) -> dict[str, list[str]]: ...
+    ) -> dict[str, list[str]]:
+        """Return the expiry dates for ``(exchange, underlying)`` from the SDK."""
+        ...
 
     def get_contracts(
         self,
@@ -107,7 +112,9 @@ class GrowwClientProtocol(Protocol):
         exchange: str,
         underlying_symbol: str,
         expiry_date: str,
-    ) -> dict[str, list[str]]: ...
+    ) -> dict[str, list[str]]:
+        """Return contracts for ``(exchange, underlying, expiry)`` from the SDK."""
+        ...
 
     def get_historical_candles(
         self,
@@ -118,7 +125,9 @@ class GrowwClientProtocol(Protocol):
         start_time: str,
         end_time: str,
         candle_interval: str,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Return historical OHLCV candles for one symbol+interval slice."""
+        ...
 
 
 # ────────────────────────────────────────────────────────────────────────

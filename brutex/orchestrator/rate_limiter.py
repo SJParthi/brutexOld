@@ -328,6 +328,7 @@ class AdaptiveTokenBucket:
     # ── Internal helpers (lock held by caller) ────────────────────
 
     def _refill_locked(self) -> None:
+        """Refill the token bucket based on elapsed wall-clock time (caller holds the lock)."""
         now = self.clock()
         elapsed = now - self._last_refill
         if elapsed <= 0:

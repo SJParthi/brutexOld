@@ -265,6 +265,7 @@ class PhaseADriver:
         raw_response: dict[str, Any] = {}
 
         def invoke(work_item: WorkItem) -> tuple[WorkItem, Any]:
+            """Drive the single instruments snapshot work item (Phase A dispatch hook)."""
             new_item, response = self._adapter.pull_all_instruments(work_item=work_item)
             if response is not None:
                 raw_response["df"] = response

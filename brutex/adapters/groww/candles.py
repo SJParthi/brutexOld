@@ -237,6 +237,7 @@ def _content_hash(
     chunk_start: date,
     chunk_end: date,
 ) -> str:
+    """Compute the deterministic dedup hash for a Phase D candle chunk."""
     content = (
         f"get_historical_candles:{exchange}:{segment}:{groww_symbol}"
         f":{interval}:{chunk_start.isoformat()}:{chunk_end.isoformat()}"
@@ -249,6 +250,7 @@ def _make_item(
     request: CandleRequest,
     chunk: CandleChunk,
 ) -> WorkItem:
+    """Build a Phase D :class:`WorkItem` from one (request, chunk) pair."""
     return WorkItem.new(
         phase=IngestPhase.D_CANDLES,
         content_hash=_content_hash(
@@ -338,6 +340,7 @@ class PhaseDDriver:
         total_chunks = len(items)
 
         def invoke(work_item: WorkItem) -> tuple[WorkItem, Any]:
+            """Drive a single candle work item through the adapter (Phase D dispatch hook)."""
             params = dict(work_item.params)
             exchange = params["exchange"]
             segment = params["segment"]
@@ -416,6 +419,7 @@ class PhaseDDriver:
 
     @property
     def last_result(self) -> CandlesResult | None:
+        """Return the most recent :class:`CandlesResult`, or None before run()."""
         return self._last_result
 
     @property
