@@ -39,25 +39,21 @@ import json
 from pathlib import Path
 
 import pytest
-from hypothesis import given, settings
-from hypothesis import strategies as st
-
 from brutex.orchestrator.audit import (
     GENESIS_PREV_HASH,
     AuditChainCorruption,
     AuditWriter,
     verify_chain,
 )
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ────────────────────────────────────────────────────────────────────────
 # Strategies
 # ────────────────────────────────────────────────────────────────────────
 
 
-_ACTION_ALPHABET = st.characters(
-    min_codepoint=0x41, max_codepoint=0x5A
-)  # A-Z
+_ACTION_ALPHABET = st.characters(min_codepoint=0x41, max_codepoint=0x5A)  # A-Z
 
 
 action_st = st.text(alphabet=_ACTION_ALPHABET, min_size=1, max_size=12)
@@ -108,9 +104,7 @@ class TestAppendOnlyIntegrity:
         path = tmp_path_factory.mktemp("audit") / "chain.jsonl"
         with AuditWriter.open(path) as writer:
             for action, subject, payload in entries:
-                writer.append(
-                    action=action, subject=subject, payload=payload
-                )
+                writer.append(action=action, subject=subject, payload=payload)
         count = verify_chain(path)
         assert count == len(entries)
 
@@ -129,9 +123,7 @@ class TestSequenceMonotonicity:
         path = tmp_path_factory.mktemp("audit") / "chain.jsonl"
         with AuditWriter.open(path) as writer:
             for action, subject, payload in entries:
-                writer.append(
-                    action=action, subject=subject, payload=payload
-                )
+                writer.append(action=action, subject=subject, payload=payload)
 
         seqs = []
         with path.open("r", encoding="utf-8") as fp:
@@ -154,9 +146,7 @@ class TestPrevHashThreading:
         path = tmp_path_factory.mktemp("audit") / "chain.jsonl"
         with AuditWriter.open(path) as writer:
             for action, subject, payload in entries:
-                writer.append(
-                    action=action, subject=subject, payload=payload
-                )
+                writer.append(action=action, subject=subject, payload=payload)
 
         raw_entries = []
         with path.open("r", encoding="utf-8") as fp:
@@ -164,10 +154,9 @@ class TestPrevHashThreading:
 
         assert raw_entries[0]["prev_hash"] == GENESIS_PREV_HASH
         for i in range(1, len(raw_entries)):
-            assert (
-                raw_entries[i]["prev_hash"]
-                == raw_entries[i - 1]["entry_hash"]
-            ), f"broken chain at seq {i}"
+            assert raw_entries[i]["prev_hash"] == raw_entries[i - 1]["entry_hash"], (
+                f"broken chain at seq {i}"
+            )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -221,9 +210,7 @@ class TestTamperDetection:
         with pytest.raises(AuditChainCorruption):
             verify_chain(populated_chain)
 
-    def test_tamper_modify_entry_hash(
-        self, populated_chain: Path
-    ) -> None:
+    def test_tamper_modify_entry_hash(self, populated_chain: Path) -> None:
         lines = populated_chain.read_text().splitlines()
         obj = json.loads(lines[2])
         obj["entry_hash"] = "0" * 64
@@ -239,18 +226,14 @@ class TestTamperDetection:
         with pytest.raises(AuditChainCorruption):
             verify_chain(populated_chain)
 
-    def test_tamper_reorder_entries(
-        self, populated_chain: Path
-    ) -> None:
+    def test_tamper_reorder_entries(self, populated_chain: Path) -> None:
         lines = populated_chain.read_text().splitlines()
         lines[2], lines[3] = lines[3], lines[2]
         _rewrite_lines(populated_chain, lines)
         with pytest.raises(AuditChainCorruption):
             verify_chain(populated_chain)
 
-    def test_tamper_duplicate_entry(
-        self, populated_chain: Path
-    ) -> None:
+    def test_tamper_duplicate_entry(self, populated_chain: Path) -> None:
         lines = populated_chain.read_text().splitlines()
         lines.insert(3, lines[2])
         _rewrite_lines(populated_chain, lines)
@@ -278,15 +261,11 @@ class TestResumeCorrectness:
         path = tmp_path_factory.mktemp("audit") / "chain.jsonl"
         with AuditWriter.open(path) as writer:
             for action, subject, payload in initial:
-                writer.append(
-                    action=action, subject=subject, payload=payload
-                )
+                writer.append(action=action, subject=subject, payload=payload)
 
         with AuditWriter.open(path, resume=True) as writer:
             for action, subject, payload in resumed:
-                writer.append(
-                    action=action, subject=subject, payload=payload
-                )
+                writer.append(action=action, subject=subject, payload=payload)
 
         total = verify_chain(path)
         assert total == len(initial) + len(resumed)

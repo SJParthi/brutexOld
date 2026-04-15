@@ -18,7 +18,6 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
-
 from brutex.adapters.protocol import (
     DerivativeContract,
     InstrumentPage,
@@ -26,11 +25,11 @@ from brutex.adapters.protocol import (
     MarketCapabilities,
 )
 from brutex.models import Exchange
+
 from tests.fakes.demo_crypto_adapter import (
     DemoPerpCryptoAdapter,
     DemoSpotCryptoAdapter,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # MarketCapabilities validation
@@ -85,9 +84,7 @@ class TestMarketCapabilities:
             )
 
     def test_rejects_expiries_without_derivatives(self) -> None:
-        with pytest.raises(
-            ValueError, match="has_expiries.*has_derivatives"
-        ):
+        with pytest.raises(ValueError, match="has_expiries.*has_derivatives"):
             MarketCapabilities(
                 market_id="x",
                 display_name="x",
@@ -102,9 +99,7 @@ class TestMarketCapabilities:
             )
 
     def test_rejects_option_chains_without_derivatives(self) -> None:
-        with pytest.raises(
-            ValueError, match="has_option_chains.*has_derivatives"
-        ):
+        with pytest.raises(ValueError, match="has_option_chains.*has_derivatives"):
             MarketCapabilities(
                 market_id="x",
                 display_name="x",
@@ -215,32 +210,24 @@ class TestSpotCryptoAdapter:
     def adapter(self) -> DemoSpotCryptoAdapter:
         return DemoSpotCryptoAdapter()
 
-    def test_protocol_satisfaction(
-        self, adapter: DemoSpotCryptoAdapter
-    ) -> None:
+    def test_protocol_satisfaction(self, adapter: DemoSpotCryptoAdapter) -> None:
         """isinstance check via @runtime_checkable."""
         assert isinstance(adapter, MarketAdapter)
 
-    def test_capabilities_are_spot_only(
-        self, adapter: DemoSpotCryptoAdapter
-    ) -> None:
+    def test_capabilities_are_spot_only(self, adapter: DemoSpotCryptoAdapter) -> None:
         caps = adapter.capabilities
         assert caps.market_id == "demo-crypto-spot"
         assert caps.has_derivatives is False
         assert caps.has_expiries is False
         assert caps.has_option_chains is False
 
-    def test_pagination_first_page(
-        self, adapter: DemoSpotCryptoAdapter
-    ) -> None:
+    def test_pagination_first_page(self, adapter: DemoSpotCryptoAdapter) -> None:
         page = adapter.list_instruments(cursor=None)
         assert isinstance(page, InstrumentPage)
         assert len(page.instruments) == 4  # page_size default
         assert page.next_cursor is not None
 
-    def test_pagination_walks_to_end(
-        self, adapter: DemoSpotCryptoAdapter
-    ) -> None:
+    def test_pagination_walks_to_end(self, adapter: DemoSpotCryptoAdapter) -> None:
         """Walking through all cursors must enumerate every instrument
         exactly once with no duplicates and no gaps."""
         seen: set[str] = set()
@@ -260,9 +247,7 @@ class TestSpotCryptoAdapter:
         assert len(seen) == 10  # _SPOT_PAIRS length
         assert pages >= 2  # paginated, not one-shot
 
-    def test_list_derivatives_is_empty(
-        self, adapter: DemoSpotCryptoAdapter
-    ) -> None:
+    def test_list_derivatives_is_empty(self, adapter: DemoSpotCryptoAdapter) -> None:
         """Spot-only market has no derivatives — iterator must be empty."""
         contracts = list(
             adapter.list_derivatives(
@@ -272,9 +257,7 @@ class TestSpotCryptoAdapter:
         )
         assert contracts == []
 
-    def test_fetch_ohlcv_returns_utc_bars(
-        self, adapter: DemoSpotCryptoAdapter
-    ) -> None:
+    def test_fetch_ohlcv_returns_utc_bars(self, adapter: DemoSpotCryptoAdapter) -> None:
         bars = adapter.fetch_ohlcv(
             symbol="BTC-USDT",
             exchange=Exchange.NSE,
@@ -300,14 +283,10 @@ class TestPerpCryptoAdapter:
     def adapter(self) -> DemoPerpCryptoAdapter:
         return DemoPerpCryptoAdapter()
 
-    def test_protocol_satisfaction(
-        self, adapter: DemoPerpCryptoAdapter
-    ) -> None:
+    def test_protocol_satisfaction(self, adapter: DemoPerpCryptoAdapter) -> None:
         assert isinstance(adapter, MarketAdapter)
 
-    def test_capabilities_are_perp(
-        self, adapter: DemoPerpCryptoAdapter
-    ) -> None:
+    def test_capabilities_are_perp(self, adapter: DemoPerpCryptoAdapter) -> None:
         caps = adapter.capabilities
         assert caps.market_id == "demo-crypto-perps"
         # Perpetuals have derivatives WITHOUT expiries — this is the
@@ -316,9 +295,7 @@ class TestPerpCryptoAdapter:
         assert caps.has_expiries is False
         assert caps.has_option_chains is False
 
-    def test_yields_perpetual_contract(
-        self, adapter: DemoPerpCryptoAdapter
-    ) -> None:
+    def test_yields_perpetual_contract(self, adapter: DemoPerpCryptoAdapter) -> None:
         contracts = list(
             adapter.list_derivatives(
                 underlying_symbol="BTC",
@@ -332,9 +309,7 @@ class TestPerpCryptoAdapter:
         assert c.strike is None
         assert c.symbol == "BTC-PERP"
 
-    def test_perp_fetch_returns_oi(
-        self, adapter: DemoPerpCryptoAdapter
-    ) -> None:
+    def test_perp_fetch_returns_oi(self, adapter: DemoPerpCryptoAdapter) -> None:
         """Perpetuals have open interest even though they don't expire."""
         bars = adapter.fetch_ohlcv(
             symbol="BTC-PERP",

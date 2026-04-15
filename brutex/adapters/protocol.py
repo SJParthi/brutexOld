@@ -107,7 +107,6 @@ from typing import Protocol, runtime_checkable
 from brutex.data.models import CandleBar
 from brutex.models import Exchange, Instrument
 
-
 # ────────────────────────────────────────────────────────────────────────
 # Capabilities descriptor
 # ────────────────────────────────────────────────────────────────────────
@@ -183,21 +182,14 @@ class MarketCapabilities:
     def __post_init__(self) -> None:
         if not self.market_id or "/" in self.market_id:
             raise ValueError(
-                f"market_id must be a non-empty identifier without '/', "
-                f"got {self.market_id!r}"
+                f"market_id must be a non-empty identifier without '/', got {self.market_id!r}"
             )
         if self.has_expiries and not self.has_derivatives:
-            raise ValueError(
-                "has_expiries=True requires has_derivatives=True"
-            )
+            raise ValueError("has_expiries=True requires has_derivatives=True")
         if self.has_option_chains and not self.has_derivatives:
-            raise ValueError(
-                "has_option_chains=True requires has_derivatives=True"
-            )
+            raise ValueError("has_option_chains=True requires has_derivatives=True")
         if self.rate_limit_rps <= 0:
-            raise ValueError(
-                f"rate_limit_rps must be > 0, got {self.rate_limit_rps}"
-            )
+            raise ValueError(f"rate_limit_rps must be > 0, got {self.rate_limit_rps}")
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -247,14 +239,9 @@ class DerivativeContract:
 
     def __post_init__(self) -> None:
         if self.contract_type not in {"FUT", "CE", "PE", "PERP"}:
-            raise ValueError(
-                f"contract_type must be FUT/CE/PE/PERP, "
-                f"got {self.contract_type}"
-            )
+            raise ValueError(f"contract_type must be FUT/CE/PE/PERP, got {self.contract_type}")
         if self.contract_type in {"CE", "PE"} and self.strike is None:
-            raise ValueError(
-                f"{self.contract_type} contracts must have a strike"
-            )
+            raise ValueError(f"{self.contract_type} contracts must have a strike")
         if self.contract_type == "PERP" and self.expiry is not None:
             raise ValueError("PERP contracts must have expiry=None")
 
@@ -295,9 +282,7 @@ class MarketAdapter(Protocol):
         """
         ...
 
-    def list_instruments(
-        self, *, cursor: str | None = None
-    ) -> InstrumentPage:
+    def list_instruments(self, *, cursor: str | None = None) -> InstrumentPage:
         """Return one page of in-scope instruments.
 
         This is the market-neutral analogue of Phase A. Static-universe

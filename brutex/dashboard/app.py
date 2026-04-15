@@ -324,7 +324,7 @@ def build_app(state: DashboardState) -> Any:
         server of choice.
     """
     try:
-        from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+        from fastapi import FastAPI
         from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
     except ImportError as exc:
         raise RuntimeError(

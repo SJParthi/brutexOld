@@ -34,15 +34,12 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
-import pytest
-
 from brutex.orchestrator.state import (
     IngestPhase,
     WorkItem,
     WorkItemState,
 )
 from brutex.orchestrator.store import WorkItemStore
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -65,9 +62,7 @@ def _make_item(seed: int) -> WorkItem:
 
 
 class TestConcurrentReadersOnePersistentWriter:
-    def test_10_readers_see_committed_writes(
-        self, tmp_path: Path
-    ) -> None:
+    def test_10_readers_see_committed_writes(self, tmp_path: Path) -> None:
         """10 reader threads probe while the main thread writes 500 items.
         Every item must eventually be visible to every reader."""
         path = tmp_path / "stress.lmdb"
@@ -84,19 +79,14 @@ class TestConcurrentReadersOnePersistentWriter:
                 count = 0
                 while not stop.is_set():
                     for item in items[:100]:
-                        store.get(
-                            IngestPhase.D_CANDLES, item.content_hash
-                        )
+                        store.get(IngestPhase.D_CANDLES, item.content_hash)
                         count += 1
                         if stop.is_set():
                             break
                 with read_lock:
                     reads_completed[idx] = count
 
-            threads = [
-                threading.Thread(target=reader, args=(i,))
-                for i in range(10)
-            ]
+            threads = [threading.Thread(target=reader, args=(i,)) for i in range(10)]
             for t in threads:
                 t.start()
 
@@ -105,9 +95,7 @@ class TestConcurrentReadersOnePersistentWriter:
 
             # Verify writes landed
             for item in items:
-                fetched = store.get(
-                    IngestPhase.D_CANDLES, item.content_hash
-                )
+                fetched = store.get(IngestPhase.D_CANDLES, item.content_hash)
                 assert fetched is not None
                 assert fetched.state == WorkItemState.SUCCESS
 
@@ -117,8 +105,7 @@ class TestConcurrentReadersOnePersistentWriter:
 
             # Every reader must have issued at least one probe
             assert sum(reads_completed) > 0, (
-                "readers never observed any probes — thread scheduling "
-                "problem, not a BruteX bug"
+                "readers never observed any probes — thread scheduling problem, not a BruteX bug"
             )
         finally:
             store.close()
@@ -130,9 +117,7 @@ class TestConcurrentReadersOnePersistentWriter:
 
 
 class TestExistsTerminalRaceFree:
-    def test_exists_terminal_never_returns_partial(
-        self, tmp_path: Path
-    ) -> None:
+    def test_exists_terminal_never_returns_partial(self, tmp_path: Path) -> None:
         """Readers probing for keys written concurrently must see
         either False (before the write) or True (after the write),
         never a torn half-written state."""
@@ -148,20 +133,14 @@ class TestExistsTerminalRaceFree:
                 the item was fully written; the subsequent .get()
                 must succeed with a complete WorkItem."""
                 for item in items:
-                    present = store.exists_terminal(
-                        IngestPhase.D_CANDLES, item.content_hash
-                    )
+                    present = store.exists_terminal(IngestPhase.D_CANDLES, item.content_hash)
                     if present:
-                        fetched = store.get(
-                            IngestPhase.D_CANDLES, item.content_hash
-                        )
+                        fetched = store.get(IngestPhase.D_CANDLES, item.content_hash)
                         if fetched is None:
                             with reads_lock:
                                 torn_reads.append(item.content_hash)
 
-            threads = [
-                threading.Thread(target=probe) for _ in range(5)
-            ]
+            threads = [threading.Thread(target=probe) for _ in range(5)]
             for t in threads:
                 t.start()
             store.put_many(items)
@@ -182,9 +161,7 @@ class TestExistsTerminalRaceFree:
 
 
 class TestCountByStateConsistency:
-    def test_count_never_exceeds_write_count(
-        self, tmp_path: Path
-    ) -> None:
+    def test_count_never_exceeds_write_count(self, tmp_path: Path) -> None:
         """A reader's count_by_state snapshot is a consistent view
         of the DB at read time. It should never exceed the total
         number of writes issued so far (LMDB MVCC guarantee)."""
@@ -198,13 +175,10 @@ class TestCountByStateConsistency:
 
             def observer() -> None:
                 while not stop.is_set():
-                    counts = store.count_by_state(
-                        IngestPhase.D_CANDLES
-                    )
+                    counts = store.count_by_state(IngestPhase.D_CANDLES)
                     total = sum(counts.values())
                     with lock:
-                        if total > max_count_seen[0]:
-                            max_count_seen[0] = total
+                        max_count_seen[0] = max(max_count_seen[0], total)
 
             obs_thread = threading.Thread(target=observer)
             obs_thread.start()
@@ -231,9 +205,7 @@ class TestCountByStateConsistency:
 
 
 class TestHashCollisionFreedom:
-    def test_5000_distinct_hashes_all_persist(
-        self, tmp_path: Path
-    ) -> None:
+    def test_5000_distinct_hashes_all_persist(self, tmp_path: Path) -> None:
         """Write 5000 distinct content hashes and verify all 5000
         are retrievable afterward — proves the B+tree key-space is
         distinct for distinct sha256 outputs."""
@@ -244,12 +216,8 @@ class TestHashCollisionFreedom:
             store.put_many(items)
 
             for item in items:
-                fetched = store.get(
-                    IngestPhase.D_CANDLES, item.content_hash
-                )
-                assert fetched is not None, (
-                    f"item {item.content_hash} missing after put_many"
-                )
+                fetched = store.get(IngestPhase.D_CANDLES, item.content_hash)
+                assert fetched is not None, f"item {item.content_hash} missing after put_many"
                 assert fetched.state == WorkItemState.SUCCESS
 
             counts = store.count_by_state(IngestPhase.D_CANDLES)
