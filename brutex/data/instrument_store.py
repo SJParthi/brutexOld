@@ -72,7 +72,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -1271,9 +1271,7 @@ class InstrumentStore:
         as_of_clause = " AND snapshot_date <= ?" if as_of is not None else ""
         params: list[Any] = [as_of] if as_of is not None else []
         base = "SELECT underlying_symbol, COUNT(*) FROM instruments "
-        where_sql = (
-            f"WHERE in_scope = TRUE AND underlying_symbol IS NOT NULL{as_of_clause} "
-        )
+        where_sql = f"WHERE in_scope = TRUE AND underlying_symbol IS NOT NULL{as_of_clause} "
         group_sql = "GROUP BY underlying_symbol ORDER BY underlying_symbol"
         count_sql = f"{base}{where_sql}{group_sql}"  # nosec B608
         rows = self._conn.execute(count_sql, params).fetchall()
@@ -1441,14 +1439,21 @@ class InstrumentStore:
 # ────────────────────────────────────────────────────────────────────────
 
 
-@contextmanager
-def open_instrument_store(path: Path) -> Iterator[InstrumentStore]:
-    """Context-manager wrapper around :meth:`InstrumentStore.open`."""
-    store = InstrumentStore.open(path)
-    try:
-        yield store
-    finally:
-        store.close()
+def open_instrument_store(path: Path) -> Any:
+    """Context-manager wrapper around :meth:`InstrumentStore.open`.
+
+    Uses :func:`contextlib.closing` under the hood so callers can
+    write::
+
+        with open_instrument_store(path) as store:
+            store.upsert_many(...)
+
+    and still get a guaranteed close on exception paths, without
+    the explicit ``try: yield; finally: store.close()`` generator
+    pattern (which CodeQL's ``py/should-use-with`` rule doesn't
+    recognise as safe).
+    """
+    return closing(InstrumentStore.open(path))
 
 
 # ────────────────────────────────────────────────────────────────────────
