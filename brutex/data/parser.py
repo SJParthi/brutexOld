@@ -30,6 +30,11 @@ from brutex.data.models import CandleBar
 #: India Standard Time offset (+05:30). No DST — IST is fixed.
 _IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30), name="IST")
 
+#: Number of fields in a Groww historical candle row. See
+#: ``docs/groww-sdk/backtesting.md §10.3``: 7-tuple
+#: ``[timestamp, open, high, low, close, volume, open_interest]``.
+GROWW_CANDLE_ROW_FIELDS: Final[int] = 7
+
 
 class CandleRowError(DataLakeError):
     """Raised when a raw Groww candle row cannot be parsed.
@@ -58,9 +63,9 @@ def parse_groww_candle_row(row: Sequence[Any]) -> CandleBar:
         If the row is wrong length, has a malformed timestamp, or
         contains a non-numeric price / volume field.
     """
-    if len(row) != 7:
+    if len(row) != GROWW_CANDLE_ROW_FIELDS:
         raise CandleRowError(
-            f"Groww candle row must have 7 elements "
+            f"Groww candle row must have {GROWW_CANDLE_ROW_FIELDS} elements "
             f"[ts, o, h, l, c, v, oi], got {len(row)}: {row!r}"
         )
     ts_raw, open_raw, high_raw, low_raw, close_raw, vol_raw, oi_raw = row

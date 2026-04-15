@@ -56,6 +56,7 @@ seq number.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -359,13 +360,11 @@ class AuditWriter:
         """Close the underlying file handle."""
         if self._fp is not None:
             self._fp.flush()
-            try:
+            # Some filesystems / platforms (e.g., /tmp on macOS
+            # sandbox) don't support fsync on append-only files.
+            # Best-effort — the flush above still hits the kernel.
+            with contextlib.suppress(OSError):
                 os.fsync(self._fp.fileno())
-            except OSError:
-                # Some filesystems / platforms (e.g., /tmp on macOS
-                # sandbox) don't support fsync on append-only files.
-                # Best-effort — the flush above still hits the kernel.
-                pass
             self._fp.close()
             self._fp = None
 
@@ -492,9 +491,8 @@ def verify_chain(path: Path) -> int:
     entries = _read_entries(path)
 
     prev_hash = GENESIS_PREV_HASH
-    expected_seq = 0
 
-    for entry in entries:
+    for expected_seq, entry in enumerate(entries):
         # 1. seq is a strictly increasing 0-based counter
         if entry.seq != expected_seq:
             raise AuditChainCorruption(
@@ -521,7 +519,6 @@ def verify_chain(path: Path) -> int:
                 reason="entry_hash does not match recomputed hash (content tampered)",
             )
         prev_hash = entry.entry_hash
-        expected_seq += 1
 
     return len(entries)
 

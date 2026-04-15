@@ -84,28 +84,27 @@ select = [
     "T20",  # no-print (REQUIREMENTS.md §4 CLAUDE.md rule: structlog only)
 ]
 ignore = [
+    # Intentional architectural patterns
     "PLR0913", # many args — acceptable in adapter boundaries
     "PLR0911", # too many return statements — common in dispatchers/CLIs
-    "PLR0912", # too many branches — same
-    "PLR0915", # too many statements — same
-    "PLC0415", # lazy imports are deliberate (P2 optional extras, test fakes, etc.)
+    "PLR0912", # too many branches — common in dispatchers/CLIs
+    "PLR0915", # too many statements — common in dispatchers/CLIs
+    "PLC0415", # lazy imports are deliberate (P2 optional extras, test fakes)
+    "PLE0604", # dynamic __all__ — math facade builds it programmatically
+    # Docstring / comment stylistic
     "RUF001", # ambiguous unicode — box-drawing chars in docstrings are intentional
     "RUF002", # same, in docstring separators
     "RUF003", # same, in comment separators
     "RUF043", # regex-match against Exception class — stylistic
+    "E501",   # line-too-long — handled by formatter; surviving lines are URLs/docstrings
+    # Security — justified
     "S104",   # bind 0.0.0.0 — dashboard deliberately binds all interfaces for LAN access
     "S108",   # /tmp references — used only in docs/examples, never at runtime
     "S311",   # non-crypto random — used for backoff jitter, not crypto
-    "E501",   # line-too-long — handled by formatter; surviving lines are URLs/docstrings
-    "N818",   # exception class naming — BruteXError base, legacy shim names retained
-    "ERA001", # commented-out code — some structured docstring examples trip this
-    "SIM105", # contextlib.suppress — explicit try/except is clearer for one-liners
-    "SIM103", # explicit bool returns keep intent clear
-    "SIM113", # enumerate rewrite — inline counter is clearer alongside seq validation
-    "PLR2004", # magic values — bounds checks read clearer as literals
-    "PLE0604", # dynamic __all__ — math facade builds it programmatically
     "S105",   # env var NAMES aren't secrets (ENV_BOT_TOKEN constant)
     "S110",   # try/except/pass — used in fsync fallback where failure is acceptable
+    # Naming / legacy
+    "N818",   # exception class naming — BruteXError base, legacy shim names retained
 ]
 
 [tool.ruff.lint.per-file-ignores]
