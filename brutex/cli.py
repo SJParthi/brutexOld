@@ -273,6 +273,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # ── dashboard ─────────────────────────────────────────────────
+    dashboard = sub.add_parser(
+        "dashboard",
+        help="Start the BruteX dashboard (FR-UI-006) with optional InstrumentStore browser",
+    )
+    dashboard.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help=(
+            "Lake directory containing ``instruments.duckdb``. When "
+            "supplied, the dashboard exposes /api/v1/instruments, "
+            "/expiries, /contracts + an HTML browser for them. When "
+            "omitted, only live pipeline progress is shown."
+        ),
+    )
+    dashboard.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)")
+    dashboard.add_argument("--port", type=int, default=9080, help="Bind port (default 9080)")
+
     # ── audit verify ──────────────────────────────────────────────
     audit = sub.add_parser("audit", help="Audit log tools")
     audit_sub = audit.add_subparsers(dest="audit_command", required=True)
@@ -837,6 +856,41 @@ def cmd_audit_verify(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Handle ``brutex dashboard`` — start the FastAPI dashboard server.
+
+    When ``--lake-root`` is supplied, opens the
+    :class:`~brutex.data.instrument_store.InstrumentStore` and wires
+    it into the app so the Instruments Browser section is available.
+    Otherwise starts in pipeline-progress-only mode.
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        return EXIT_USER_ERROR
+
+    from brutex.dashboard.app import DashboardState, build_app
+
+    lake_root: Path | None = getattr(args, "lake_root", None)
+    instrument_store = None
+    if lake_root is not None:
+        from brutex.data.instrument_store import InstrumentStore
+
+        db_path = lake_root / "instruments.duckdb"
+        if not db_path.exists():
+            return EXIT_USER_ERROR
+        instrument_store = InstrumentStore.open(db_path)
+
+    try:
+        state = DashboardState()
+        app = build_app(state, instrument_store=instrument_store)
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    finally:
+        if instrument_store is not None:
+            instrument_store.close()
+    return EXIT_OK
+
+
 def cmd_placeholder(args: argparse.Namespace) -> int:
     """Stub handler for not-yet-implemented subcommands; prints a clear error."""
     getattr(args, "_placeholder_name", "this command")
@@ -865,6 +919,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     dispatcher: dict[str, Callable[[argparse.Namespace], int]] = {
         "version": cmd_version,
         "status": cmd_status,
+        "dashboard": cmd_dashboard,
     }
 
     # Sub-subcommands

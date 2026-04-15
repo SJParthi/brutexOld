@@ -150,6 +150,7 @@ module = [
     "polars", "polars.*",
     "pyarrow", "pyarrow.*",
     "fastapi", "fastapi.*",
+    "uvicorn", "uvicorn.*",
     "fno_math_py", "fno_math_py.*",
 ]
 ignore_missing_imports = true

@@ -38,7 +38,7 @@ import json
 import threading
 from collections import deque
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from brutex.orchestrator.pipeline import (
@@ -318,12 +318,29 @@ def snapshot_to_json(state: DashboardState) -> str:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def build_app(state: DashboardState) -> Any:
+def build_app(
+    state: DashboardState,
+    *,
+    instrument_store: Any = None,
+) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
     Lazy imports ``fastapi`` so unit tests can import this module
     without the ``fastapi`` dep installed. Raises a helpful error
     at construction time if FastAPI is missing.
+
+    Parameters
+    ----------
+    state
+        In-memory :class:`DashboardState` updated by pipeline events.
+    instrument_store
+        Optional :class:`~brutex.data.instrument_store.InstrumentStore`
+        handle. When supplied, the app exposes read-only instruments /
+        expiries / contracts / stats endpoints + an HTML browser
+        section so a user can literally see what the Groww ingest
+        pulled. When ``None`` (the default), those endpoints return
+        503 and the HTML section stays hidden \u2014 the pipeline
+        progress cards still work.
 
     Returns
     -------
@@ -332,7 +349,7 @@ def build_app(state: DashboardState) -> Any:
         server of choice.
     """
     try:
-        from fastapi import FastAPI
+        from fastapi import FastAPI, HTTPException, Query
         from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
     except ImportError as exc:
         raise RuntimeError(
@@ -362,10 +379,157 @@ def build_app(state: DashboardState) -> Any:
         """GET /metrics — Prometheus text-format metrics for scraping."""
         return render_prometheus(get_registry())
 
+    # ── Instruments browser endpoints (require InstrumentStore) ──────
+
+    def _require_store() -> Any:
+        """Return the configured store or raise 503 with a helpful message."""
+        if instrument_store is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "InstrumentStore not wired. Start the dashboard with "
+                    "`brutex dashboard --lake-root <path>` to enable the "
+                    "instruments / expiries / contracts browser."
+                ),
+            )
+        return instrument_store
+
+    @app.get("/api/v1/instruments/stats")
+    async def api_instruments_stats() -> JSONResponse:
+        """GET /api/v1/instruments/stats — summary counts for the dashboard tiles.
+
+        Returns the headline numbers:
+          * total rows in the ``instruments`` table
+          * total rows in the ``expiries`` table
+          * total rows in the ``contracts`` table
+          * per-underlying instrument count (for the chart strip)
+        """
+        store = _require_store()
+        return JSONResponse(_collect_store_stats(store))
+
+    @app.get("/api/v1/instruments")
+    async def api_instruments_list(
+        underlying: str | None = Query(default=None),
+        instrument_type: str | None = Query(default=None),
+        segment: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0),
+    ) -> JSONResponse:
+        """GET /api/v1/instruments — filterable + paginated instruments list.
+
+        Query parameters
+        ----------------
+        underlying
+            Filter by underlying symbol (e.g. ``NIFTY``). Matches
+            both spot indices and their derivatives.
+        instrument_type
+            Filter by ``IDX`` / ``FUT`` / ``CE`` / ``PE`` / ``EQ``.
+        segment
+            Filter by ``CASH`` / ``FNO``.
+        limit, offset
+            Server-side pagination. ``limit`` is capped at 1000 to
+            keep responses snappy even on large universes.
+        """
+        store = _require_store()
+        rows = _query_instruments(
+            store,
+            underlying=underlying,
+            instrument_type=instrument_type,
+            segment=segment,
+            limit=limit,
+            offset=offset,
+        )
+        return JSONResponse({"instruments": rows, "limit": limit, "offset": offset})
+
+    @app.get("/api/v1/expiries")
+    async def api_expiries_list(
+        underlying: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/expiries — every expiry row for the latest snapshot.
+
+        Filters by ``underlying`` if supplied. Returns the full list
+        (no pagination) because one underlying rarely has > 100
+        expiries worth of history.
+        """
+        store = _require_store()
+        records = store.list_expiries(underlying_symbol=underlying)
+        return JSONResponse(
+            {
+                "expiries": [
+                    {
+                        "exchange": r.exchange,
+                        "underlying_symbol": r.underlying_symbol,
+                        "expiry_date": r.expiry_date.isoformat(),
+                        "snapshot_date": r.snapshot_date.isoformat(),
+                        "pulled_year": r.pulled_year,
+                    }
+                    for r in records
+                ]
+            }
+        )
+
+    @app.get("/api/v1/contracts")
+    async def api_contracts_list(
+        underlying: str | None = Query(default=None),
+        expiry: str | None = Query(default=None),
+        limit: int = Query(default=500, ge=1, le=5000),
+    ) -> JSONResponse:
+        """GET /api/v1/contracts — filterable contracts list.
+
+        Query parameters
+        ----------------
+        underlying
+            Filter by underlying symbol (e.g. ``NIFTY``). Required
+            for any interesting query \u2014 full universe is tens of
+            thousands of rows.
+        expiry
+            ISO date string (``YYYY-MM-DD``). When supplied alongside
+            ``underlying``, the query hits the composite index and
+            returns in microseconds.
+        limit
+            Server-side cap. Defaults to 500 so a typical option
+            chain (~150 strikes per expiry) fits comfortably.
+        """
+        store = _require_store()
+        expiry_parsed: date | None = None
+        if expiry is not None:
+            try:
+                expiry_parsed = date.fromisoformat(expiry)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"expiry must be YYYY-MM-DD, got {expiry!r}",
+                ) from exc
+        records = store.list_contracts(
+            underlying_symbol=underlying,
+            expiry_date=expiry_parsed,
+        )[:limit]
+        return JSONResponse(
+            {
+                "contracts": [
+                    {
+                        "exchange": r.exchange,
+                        "underlying_symbol": r.underlying_symbol,
+                        "expiry_date": r.expiry_date.isoformat(),
+                        "contract_symbol": r.contract_symbol,
+                        "instrument_type": str(r.instrument_type),
+                        "strike_price": (
+                            str(r.strike_price) if r.strike_price is not None else None
+                        ),
+                        "lot_size": r.lot_size,
+                        "freeze_quantity": r.freeze_quantity,
+                        "tick_size": str(r.tick_size),
+                    }
+                    for r in records
+                ],
+                "limit": limit,
+            }
+        )
+
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
         """GET / — inline HTML dashboard with embedded JS WebSocket client."""
-        return _render_index_html()
+        return _render_index_html(instruments_enabled=instrument_store is not None)
 
     # WebSocket handler — defined at module scope below to sidestep
     # the `from __future__ import annotations` closure-annotation
@@ -417,14 +581,253 @@ async def _async_sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
-def _render_index_html() -> str:
+def _collect_store_stats(store: Any) -> dict[str, Any]:
+    """Collect summary tile numbers from an :class:`InstrumentStore`.
+
+    Returns a dict with the headline counts every dashboard user
+    wants to see on landing: total rows in each of the three core
+    tables plus the per-underlying instrument breakdown. Called by
+    the ``/api/v1/instruments/stats`` endpoint.
+    """
+    conn = store._conn
+    row_instruments = conn.execute("SELECT COUNT(*) FROM instruments").fetchone()
+    row_expiries = conn.execute("SELECT COUNT(*) FROM expiries").fetchone()
+    row_contracts = conn.execute("SELECT COUNT(*) FROM contracts").fetchone()
+    row_runs = conn.execute("SELECT COUNT(*) FROM instrument_runs").fetchone()
+    by_underlying = conn.execute(
+        "SELECT underlying_symbol, COUNT(*) FROM instruments "
+        "WHERE underlying_symbol IS NOT NULL "
+        "GROUP BY underlying_symbol "
+        "ORDER BY COUNT(*) DESC "
+        "LIMIT 20"
+    ).fetchall()
+    by_type = conn.execute(
+        "SELECT instrument_type, COUNT(*) FROM instruments GROUP BY instrument_type"
+    ).fetchall()
+    return {
+        "totals": {
+            "instruments": int(row_instruments[0]) if row_instruments else 0,
+            "expiries": int(row_expiries[0]) if row_expiries else 0,
+            "contracts": int(row_contracts[0]) if row_contracts else 0,
+            "runs": int(row_runs[0]) if row_runs else 0,
+        },
+        "by_underlying": [{"underlying": str(u), "count": int(c)} for u, c in by_underlying],
+        "by_type": [{"instrument_type": str(t), "count": int(c)} for t, c in by_type],
+    }
+
+
+def _query_instruments(
+    store: Any,
+    *,
+    underlying: str | None,
+    instrument_type: str | None,
+    segment: str | None,
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
+    """Run a filtered instruments query and return JSON-friendly rows.
+
+    Goes through the store's raw connection for speed (the dashboard
+    is a read-only peer; all the tables are open at the same time).
+    Every user-supplied filter value flows through parameter
+    binding, never string concatenation.
+    """
+    conn = store._conn
+    clauses: list[str] = []
+    params: list[Any] = []
+    if underlying is not None:
+        clauses.append("(underlying_symbol = ? OR trading_symbol = ?)")
+        params.append(underlying)
+        params.append(underlying)
+    if instrument_type is not None:
+        clauses.append("instrument_type = ?")
+        params.append(instrument_type)
+    if segment is not None:
+        clauses.append("segment = ?")
+        params.append(segment)
+    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    # Clauses are fixed-literal WHERE fragments; every user value is
+    # parameter-bound via DuckDB "?" placeholders. Not an injection vector.
+    base_select = (
+        "SELECT groww_symbol, exchange, trading_symbol, instrument_type, "
+        "segment, underlying_symbol, expiry_date, strike_price, lot_size, "
+        "freeze_quantity, tick_size, snapshot_date FROM instruments"
+    )
+    order_limit = " ORDER BY groww_symbol LIMIT ? OFFSET ?"
+    sql = base_select + where_sql + order_limit  # nosec B608
+    params.append(limit)
+    params.append(offset)
+    rows = conn.execute(sql, params).fetchall()
+    return [
+        {
+            "groww_symbol": r[0],
+            "exchange": r[1],
+            "trading_symbol": r[2],
+            "instrument_type": str(r[3]),
+            "segment": str(r[4]),
+            "underlying_symbol": r[5],
+            "expiry_date": r[6].isoformat() if r[6] is not None else None,
+            "strike_price": str(r[7]) if r[7] is not None else None,
+            "lot_size": r[8],
+            "freeze_quantity": r[9],
+            "tick_size": str(r[10]) if r[10] is not None else None,
+            "snapshot_date": r[11].isoformat() if r[11] is not None else None,
+        }
+        for r in rows
+    ]
+
+
+def _render_index_html(*, instruments_enabled: bool = False) -> str:
     """Return the single-page dashboard HTML.
 
     Inline CSS + inline JS, zero build step. Connects to /ws, parses
     JSON, updates the DOM every 500ms. If WebSocket is unavailable,
     falls back to polling /api/v1/state once per second.
+
+    When *instruments_enabled* is ``True``, also renders an
+    Instruments Browser panel that calls ``/api/v1/instruments/stats``
+    and ``/api/v1/instruments`` to show the FNO universe that Phase A
+    pulled. When ``False``, that panel stays hidden and the page only
+    shows the live pipeline progress.
     """
-    return """\
+    instruments_block = _INSTRUMENTS_HTML_BLOCK if instruments_enabled else ""
+    instruments_js = _INSTRUMENTS_JS_BLOCK if instruments_enabled else ""
+    return _INDEX_HTML_TEMPLATE.replace("<!--INSTRUMENTS_BLOCK-->", instruments_block).replace(
+        "/*INSTRUMENTS_JS*/", instruments_js
+    )
+
+
+_INSTRUMENTS_HTML_BLOCK = """\
+<div class="card" id="instruments-card">
+  <h3>Instruments Browser
+    <span class="stats" style="font-weight:normal;">
+      (FR-ING-003 temporal master — read-only view of the pulled FNO universe)
+    </span>
+  </h3>
+  <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
+    <div class="card">
+      <h3>Total Instruments</h3>
+      <div class="stats" style="font-size:22px;color:#e5e7eb;" id="ins-total">-</div>
+    </div>
+    <div class="card">
+      <h3>Total Expiries</h3>
+      <div class="stats" style="font-size:22px;color:#e5e7eb;" id="exp-total">-</div>
+    </div>
+    <div class="card">
+      <h3>Total Contracts</h3>
+      <div class="stats" style="font-size:22px;color:#e5e7eb;" id="con-total">-</div>
+    </div>
+    <div class="card">
+      <h3>Ingest Runs</h3>
+      <div class="stats" style="font-size:22px;color:#e5e7eb;" id="run-total">-</div>
+    </div>
+  </div>
+
+  <div style="margin:12px 0;">
+    <label class="stats">Underlying:
+      <input id="ins-filter-underlying" type="text" placeholder="NIFTY"
+             style="background:#1a1d24;color:#e5e7eb;border:1px solid #2a2e39;
+                    padding:4px 8px;border-radius:4px;">
+    </label>
+    <label class="stats" style="margin-left:12px;">Type:
+      <select id="ins-filter-type"
+              style="background:#1a1d24;color:#e5e7eb;border:1px solid #2a2e39;
+                     padding:4px 8px;border-radius:4px;">
+        <option value="">(any)</option>
+        <option value="IDX">IDX</option>
+        <option value="FUT">FUT</option>
+        <option value="CE">CE</option>
+        <option value="PE">PE</option>
+        <option value="EQ">EQ</option>
+      </select>
+    </label>
+    <label class="stats" style="margin-left:12px;">Segment:
+      <select id="ins-filter-segment"
+              style="background:#1a1d24;color:#e5e7eb;border:1px solid #2a2e39;
+                     padding:4px 8px;border-radius:4px;">
+        <option value="">(any)</option>
+        <option value="FNO">FNO</option>
+        <option value="CASH">CASH</option>
+      </select>
+    </label>
+    <button id="ins-refresh"
+            style="margin-left:12px;background:#0b63b5;color:#fff;border:none;
+                   padding:5px 12px;border-radius:4px;cursor:pointer;">
+      Refresh
+    </button>
+  </div>
+
+  <table id="ins-table">
+    <thead>
+      <tr>
+        <th>groww_symbol</th>
+        <th>type</th>
+        <th>segment</th>
+        <th>underlying</th>
+        <th>expiry</th>
+        <th>strike</th>
+        <th>lot</th>
+        <th>freeze</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <div class="stats" id="ins-status">no query yet</div>
+</div>
+"""
+
+_INSTRUMENTS_JS_BLOCK = """\
+async function loadInstrumentStats() {
+  try {
+    const r = await fetch('/api/v1/instruments/stats');
+    if (!r.ok) return;
+    const s = await r.json();
+    document.getElementById('ins-total').textContent = s.totals.instruments.toLocaleString();
+    document.getElementById('exp-total').textContent = s.totals.expiries.toLocaleString();
+    document.getElementById('con-total').textContent = s.totals.contracts.toLocaleString();
+    document.getElementById('run-total').textContent = s.totals.runs.toLocaleString();
+  } catch (e) { /* dashboard continues without the tiles */ }
+}
+
+async function loadInstruments() {
+  const u = document.getElementById('ins-filter-underlying').value.trim();
+  const t = document.getElementById('ins-filter-type').value;
+  const seg = document.getElementById('ins-filter-segment').value;
+  const qs = new URLSearchParams();
+  if (u) qs.set('underlying', u);
+  if (t) qs.set('instrument_type', t);
+  if (seg) qs.set('segment', seg);
+  qs.set('limit', '200');
+  const status = document.getElementById('ins-status');
+  status.textContent = 'loading…';
+  try {
+    const r = await fetch('/api/v1/instruments?' + qs.toString());
+    const body = await r.json();
+    const rows = body.instruments || [];
+    const tb = document.querySelector('#ins-table tbody');
+    tb.innerHTML = rows.map(i =>
+      `<tr>
+        <td>${i.groww_symbol}</td>
+        <td>${i.instrument_type}</td>
+        <td>${i.segment}</td>
+        <td>${i.underlying_symbol || '-'}</td>
+        <td>${i.expiry_date || '-'}</td>
+        <td>${i.strike_price || '-'}</td>
+        <td>${i.lot_size || '-'}</td>
+        <td>${i.freeze_quantity || '-'}</td>
+      </tr>`
+    ).join('');
+    status.textContent = rows.length + ' rows';
+  } catch (e) { status.textContent = 'error: ' + e.message; }
+}
+
+document.getElementById('ins-refresh').addEventListener('click', loadInstruments);
+loadInstrumentStats();
+loadInstruments();
+"""
+
+
+_INDEX_HTML_TEMPLATE = """\
 <!doctype html>
 <html lang="en">
 <head>
@@ -503,6 +906,8 @@ def _render_index_html() -> str:
   </tr></thead><tbody></tbody></table>
 </div>
 
+<!--INSTRUMENTS_BLOCK-->
+
 <script>
 const phasesEl = document.getElementById('phases');
 const runDot = document.getElementById('run-dot');
@@ -563,6 +968,8 @@ function connect() {
 // Polling fallback for browsers where WebSocket fails
 fetch('/api/v1/state').then(r => r.json()).then(renderState);
 connect();
+
+/*INSTRUMENTS_JS*/
 </script>
 </body>
 </html>
