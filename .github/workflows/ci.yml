@@ -269,38 +269,35 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Upgrade baseline tooling
-        # pip-audit scans every installed package in the venv, so we
-        # upgrade the runner image's baseline pip / setuptools / wheel
-        # first, then install clean copies of common transitive deps
-        # whose older versions carry CVEs that pip-audit would flag.
         run: |
           python -m pip install --upgrade \
             "pip>=26.0" "setuptools>=78.1.1" "wheel>=0.46.2"
-          python -m pip install --upgrade \
-            "cryptography>=44.0.0" \
-            "pyjwt>=2.13.0" \
-            "certifi>=2025.1.31" \
-            "urllib3>=2.2.3" \
-            "requests>=2.32.3" \
-            "idna>=3.10" \
-            "zipp>=3.19.1"
       - name: Install scanners
         run: |
           pip install "bandit>=1.7,<2.0" "pip-audit>=2.7,<3.0"
       - name: bandit
         run: bandit -r brutex -ll
-      - name: Install project deps (for pip-audit)
-        run: pip install -e "."
-      - name: pip-audit
-        # --strict: exit non-zero on any finding.
-        # --skip-editable: don't flag the editable `brutex` install.
-        # --ignore-vuln: specific advisory IDs that apply only to
-        #   transitive deps we can't patch directly; tracked in
-        #   follow-up issues and re-audited weekly in security-audit.yml.
+      - name: Compile declared deps to requirements.txt
+        # pip-audit on a fat venv scans the runner-image baseline and
+        # gets noisy with CVEs in dev-transitives we don't control.
+        # Instead, resolve brutex's declared pyproject deps into a
+        # pinned requirements.txt via pip install --dry-run + pip
+        # freeze style, then scan ONLY that file.
         run: |
-          pip-audit --strict --skip-editable \
-            --ignore-vuln PYSEC-2022-42969 \
-            --ignore-vuln GHSA-6p56-wp2h-9hxr
+          python -m venv /tmp/audit-venv
+          /tmp/audit-venv/bin/pip install --upgrade pip setuptools wheel
+          /tmp/audit-venv/bin/pip install -e .
+          /tmp/audit-venv/bin/pip freeze --exclude-editable > /tmp/brutex-reqs.txt
+          echo "---- Resolved direct+transitive dep set ----"
+          cat /tmp/brutex-reqs.txt
+      - name: pip-audit (scoped to brutex declared deps)
+        # Scans ONLY the transitive closure of `pip install brutex`,
+        # not the dev toolchain or the runner image's preinstalled
+        # packages. A real CVE in any of our declared deps still
+        # fails this gate. Weekly security-audit.yml runs a broader
+        # audit against the full venv.
+        run: |
+          pip-audit --strict --requirement /tmp/brutex-reqs.txt
 
   # ─────────────────────────────────────────────────────────────────
   # DOCSTRINGS — interrogate (CG-15)
