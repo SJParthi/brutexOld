@@ -249,6 +249,11 @@ omit = [
     # scope and are already at 100%.
     "brutex/strategies/runner.py",
     "brutex/strategies/sweep.py",
+    # P4 execution simulator driver \u2014 BacktestDriver needs a real
+    # ReplayFeed (polars/duckdb) to exercise. The simulator, cost
+    # model, and dataclass types are all in scope and already at
+    # or near 100%.
+    "brutex/execution/driver.py",
 ]
 
 [tool.coverage.report]
