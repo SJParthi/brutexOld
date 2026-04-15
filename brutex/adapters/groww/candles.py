@@ -53,13 +53,21 @@ specifies one (contract, interval, range) tuple. Typically:
         for symbol in phase_c.iter_all_contracts()
     ]
 
-## Note on actual persistence
+## Persistence
 
-Phase D collects raw candle arrays in memory but does NOT write
-them to Parquet / DuckDB in this commit. The data-lake layer is a
-separate module (``brutex/data/``, P2+) and will subscribe to a
-``candles_appended`` hook. Until then, tests pull candle data out
-via the accessor :meth:`PhaseDDriver.collected_candles`.
+Phase D always collects the raw candle arrays in memory (for legacy
+callers that read via :meth:`PhaseDDriver.collected_candles`) and,
+when a :class:`~brutex.data.sink.BarSink` is supplied, *also* parses
+them into canonical :class:`~brutex.data.models.CandleBar` objects
+and hands them to the sink. The production sink is
+:class:`~brutex.data.sink.ParquetBarSink`, which writes one Parquet
+file per ``(year, month)`` partition and upserts a catalog row via
+the DuckDB :class:`~brutex.data.catalog.Catalog`.
+
+When no sink is supplied the driver behaves exactly as it did before
+this commit — raw candles stay in memory and nothing is written to
+disk. That keeps every existing unit test green and makes the data
+lake strictly opt-in for P1a callers.
 """
 
 from __future__ import annotations
@@ -73,6 +81,8 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final
 
 from brutex.adapters.groww.client import GrowwAdapter
+from brutex.data.parser import parse_groww_candle_rows
+from brutex.data.sink import BarSink, SinkAppendResult
 from brutex.models import BruteXError
 from brutex.orchestrator.audit import AuditWriter
 from brutex.orchestrator.pipeline import (
@@ -222,6 +232,8 @@ class CandlesResult:
     contracts_empty: int
     per_contract_row_counts: dict[str, int]
     persisted_at: datetime
+    bars_persisted: int = 0  # total bars handed to the sink (0 if no sink wired)
+    partitions_written: int = 0  # total (year, month) partitions touched
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -296,6 +308,13 @@ class PhaseDDriver:
         Phase C's iter_all_contracts.
     subscribers
         Pipeline event subscribers.
+    bar_sink
+        Optional :class:`~brutex.data.sink.BarSink`. When supplied,
+        every SUCCESS chunk has its raw candle rows parsed into
+        canonical :class:`~brutex.data.models.CandleBar` objects and
+        handed to the sink. When ``None`` (the default) nothing is
+        persisted — legacy callers keep reading via
+        :meth:`collected_candles`.
     """
 
     phase: IngestPhase = IngestPhase.D_CANDLES
@@ -309,6 +328,7 @@ class PhaseDDriver:
         run_id: str,
         requests: Sequence[CandleRequest],
         subscribers: Sequence[EventSubscriber] = (),
+        bar_sink: BarSink | None = None,
     ) -> None:
         self._adapter = adapter
         self._store = store
@@ -316,10 +336,13 @@ class PhaseDDriver:
         self._run_id = run_id
         self._requests = list(requests)
         self._subscribers = list(subscribers)
+        self._bar_sink = bar_sink
 
         # Populated during run()
         self._collected_candles: dict[str, list[list[Any]]] = defaultdict(list)
         self._last_result: CandlesResult | None = None
+        self._bars_persisted: int = 0
+        self._partitions_written: int = 0
 
     # ── PhaseDriverProtocol ────────────────────────────────────────
 
@@ -365,6 +388,16 @@ class PhaseDDriver:
                 candles = response.get("candles", [])
                 if isinstance(candles, list):
                     self._collected_candles[groww_symbol].extend(candles)
+                    if self._bar_sink is not None and candles:
+                        sink_result = self._persist_chunk(
+                            exchange=exchange,
+                            segment=segment,
+                            groww_symbol=groww_symbol,
+                            interval=interval,
+                            raw_candles=candles,
+                        )
+                        self._bars_persisted += sink_result.bars_appended
+                        self._partitions_written += sink_result.partitions_written
 
             return new_item, response
 
@@ -397,6 +430,8 @@ class PhaseDDriver:
             contracts_empty=contracts_empty,
             per_contract_row_counts=per_contract_row_counts,
             persisted_at=datetime.now(UTC),
+            bars_persisted=self._bars_persisted,
+            partitions_written=self._partitions_written,
         )
         self._last_result = result
 
@@ -410,10 +445,43 @@ class PhaseDDriver:
                 "total_candle_rows": total_candle_rows,
                 "contracts_with_data": contracts_with_data,
                 "contracts_empty": contracts_empty,
+                "bars_persisted": self._bars_persisted,
+                "partitions_written": self._partitions_written,
             },
         )
 
         return phase_result
+
+    # ── Sink wiring ───────────────────────────────────────────────
+
+    def _persist_chunk(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        groww_symbol: str,
+        interval: str,
+        raw_candles: list[Any],
+    ) -> SinkAppendResult:
+        """Parse *raw_candles* and append them to the configured sink.
+
+        Precondition: ``self._bar_sink is not None``.
+
+        A parse failure is a schema mismatch against Groww's documented
+        row layout — we let :class:`~brutex.data.parser.CandleRowError`
+        propagate so the phase halts loudly rather than silently
+        corrupting the lake.
+        """
+        if self._bar_sink is None:  # pragma: no cover — guarded by caller
+            raise RuntimeError("_persist_chunk called with no bar_sink configured")
+        bars = parse_groww_candle_rows(raw_candles)
+        return self._bar_sink.append(
+            exchange=exchange,
+            segment=segment,
+            symbol=groww_symbol,
+            interval=interval,
+            bars=bars,
+        )
 
     # ── Accessors ──────────────────────────────────────────────────
 

@@ -420,3 +420,320 @@ class TestSinkEndToEnd:
             ):
                 assert entry is not None
                 assert entry.row_count > 0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# FR-CAT-003 — Catalog.get_bars (Arrow zero-copy reader)
+# FR-CAT-004 — Catalog.data_snapshot_hash
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestCatalogGetBars:
+    """FR-CAT-003: ``get_bars`` returns a pyarrow.Table of canonical bars."""
+
+    def _seed_lake(
+        self,
+        tmp_path: Path,
+        *,
+        symbol: str = "NSE-NIFTY",
+        months: tuple[int, ...] = (1, 2, 3),
+    ) -> tuple[Path, Path]:
+        """Write 5 bars per month for *months*; return ``(lake_root, catalog_path)``."""
+        lake_root = tmp_path / "lake"
+        catalog_path = tmp_path / "catalog.duckdb"
+        writer = ParquetWriter(lake_root=lake_root)
+        with Catalog.open(catalog_path) as cat:
+            sink = ParquetBarSink(writer=writer, catalog=cat)
+            for month in months:
+                bars = [_bar(day, month=month) for day in range(1, 6)]
+                sink.append(
+                    exchange="NSE",
+                    segment="FNO",
+                    symbol=symbol,
+                    interval="1minute",
+                    bars=bars,
+                )
+        return lake_root, catalog_path
+
+    def test_returns_empty_table_when_no_partitions(self, tmp_path: Path) -> None:
+        """Empty slice → empty table with the canonical schema."""
+        catalog_path = tmp_path / "catalog.duckdb"
+        with Catalog.open(catalog_path) as cat:
+            table = cat.get_bars(
+                lake_root=tmp_path / "lake",
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 12, 31, tzinfo=UTC),
+            )
+        assert table.num_rows == 0
+        assert table.schema.names == [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "open_interest",
+        ]
+
+    def test_reads_back_single_partition(self, tmp_path: Path) -> None:
+        lake_root, catalog_path = self._seed_lake(tmp_path, months=(1,))
+        with Catalog.open(catalog_path) as cat:
+            table = cat.get_bars(
+                lake_root=lake_root,
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 1, 31, tzinfo=UTC),
+            )
+        assert table.num_rows == 5
+        # Monotonically sorted by timestamp
+        ts_list = table.column("timestamp").to_pylist()
+        assert ts_list == sorted(ts_list)
+
+    def test_spans_multiple_partitions(self, tmp_path: Path) -> None:
+        lake_root, catalog_path = self._seed_lake(tmp_path, months=(1, 2, 3))
+        with Catalog.open(catalog_path) as cat:
+            table = cat.get_bars(
+                lake_root=lake_root,
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 3, 31, tzinfo=UTC),
+            )
+        assert table.num_rows == 15  # 5 bars × 3 months
+
+    def test_filters_exact_window(self, tmp_path: Path) -> None:
+        """Window narrower than a partition must return only matching rows."""
+        lake_root, catalog_path = self._seed_lake(tmp_path, months=(1,))
+        with Catalog.open(catalog_path) as cat:
+            # Only day 3 — minute 15 of Jan 3 ↔ Jan 4 at 09:00 UTC
+            table = cat.get_bars(
+                lake_root=lake_root,
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                start=datetime(2024, 1, 3, 0, tzinfo=UTC),
+                end=datetime(2024, 1, 3, 23, 59, tzinfo=UTC),
+            )
+        assert table.num_rows == 1
+
+    def test_reject_naive_timestamps(self, tmp_path: Path) -> None:
+        from brutex.data.errors import CatalogError
+
+        with (
+            Catalog.open(tmp_path / "catalog.duckdb") as cat,
+            pytest.raises(CatalogError, match="timezone-aware"),
+        ):
+            cat.get_bars(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol="X",
+                interval="1minute",
+                start=datetime(2024, 1, 1),  # naive
+                end=datetime(2024, 1, 31, tzinfo=UTC),
+            )
+
+    def test_reject_inverted_window(self, tmp_path: Path) -> None:
+        from brutex.data.errors import CatalogError
+
+        with (
+            Catalog.open(tmp_path / "catalog.duckdb") as cat,
+            pytest.raises(CatalogError, match=">="),
+        ):
+            cat.get_bars(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol="X",
+                interval="1minute",
+                start=datetime(2024, 12, 31, tzinfo=UTC),
+                end=datetime(2024, 1, 1, tzinfo=UTC),
+            )
+
+    def test_missing_partition_file_raises(self, tmp_path: Path) -> None:
+        """Catalog row exists but Parquet file is missing → CatalogError."""
+        from brutex.data.errors import CatalogError
+
+        lake_root, catalog_path = self._seed_lake(tmp_path, months=(1,))
+        # Delete the parquet file but leave the catalog row behind.
+        (lake_root / "bars/NSE/FNO/NSE-NIFTY/1minute/2024/01.parquet").unlink()
+        with (
+            Catalog.open(catalog_path) as cat,
+            pytest.raises(CatalogError, match="missing partition"),
+        ):
+            cat.get_bars(
+                lake_root=lake_root,
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 1, 31, tzinfo=UTC),
+            )
+
+
+class TestCatalogDataSnapshotHash:
+    """FR-CAT-004: ``data_snapshot_hash`` is stable + universe-aware."""
+
+    def _seed(self, tmp_path: Path, *, symbols=("AAA", "BBB")) -> Path:
+        lake_root = tmp_path / "lake"
+        catalog_path = tmp_path / "catalog.duckdb"
+        writer = ParquetWriter(lake_root=lake_root)
+        with Catalog.open(catalog_path) as cat:
+            sink = ParquetBarSink(writer=writer, catalog=cat)
+            for symbol in symbols:
+                for month in (1, 2):
+                    bars = [_bar(day, month=month) for day in range(1, 4)]
+                    sink.append(
+                        exchange="NSE",
+                        segment="FNO",
+                        symbol=symbol,
+                        interval="1minute",
+                        bars=bars,
+                    )
+        return catalog_path
+
+    def test_empty_slice_returns_sha256_of_empty_string(self, tmp_path: Path) -> None:
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            snapshot = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["X"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 12, 31, tzinfo=UTC),
+            )
+        assert snapshot == hashlib.sha256(b"").hexdigest()
+
+    def test_stable_across_repeated_calls(self, tmp_path: Path) -> None:
+        catalog_path = self._seed(tmp_path)
+        with Catalog.open(catalog_path) as cat:
+            h1 = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["AAA", "BBB"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 12, 31, tzinfo=UTC),
+            )
+            h2 = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["AAA", "BBB"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 12, 31, tzinfo=UTC),
+            )
+        assert h1 == h2
+        assert len(h1) == 64
+
+    def test_symbol_order_does_not_matter(self, tmp_path: Path) -> None:
+        """Caller can pass symbols in any order; result is canonicalised."""
+        catalog_path = self._seed(tmp_path)
+        with Catalog.open(catalog_path) as cat:
+            h1 = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["AAA", "BBB"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 12, 31, tzinfo=UTC),
+            )
+            h2 = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["BBB", "AAA"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 12, 31, tzinfo=UTC),
+            )
+        assert h1 == h2
+
+    def test_duplicate_symbols_deduped(self, tmp_path: Path) -> None:
+        catalog_path = self._seed(tmp_path)
+        with Catalog.open(catalog_path) as cat:
+            h_clean = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["AAA"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 12, 31, tzinfo=UTC),
+            )
+            h_dup = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["AAA", "AAA", "AAA"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 12, 31, tzinfo=UTC),
+            )
+        assert h_clean == h_dup
+
+    def test_different_universe_different_hash(self, tmp_path: Path) -> None:
+        catalog_path = self._seed(tmp_path)
+        with Catalog.open(catalog_path) as cat:
+            h_aaa = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["AAA"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 12, 31, tzinfo=UTC),
+            )
+            h_both = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["AAA", "BBB"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 12, 31, tzinfo=UTC),
+            )
+        assert h_aaa != h_both
+
+    def test_different_window_different_hash(self, tmp_path: Path) -> None:
+        catalog_path = self._seed(tmp_path)
+        with Catalog.open(catalog_path) as cat:
+            h_jan = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["AAA"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 1, 31, tzinfo=UTC),
+            )
+            h_both = cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["AAA"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 2, 28, tzinfo=UTC),
+            )
+        assert h_jan != h_both
+
+    def test_reject_naive_timestamps(self, tmp_path: Path) -> None:
+        from brutex.data.errors import CatalogError
+
+        with (
+            Catalog.open(tmp_path / "catalog.duckdb") as cat,
+            pytest.raises(CatalogError, match="timezone-aware"),
+        ):
+            cat.data_snapshot_hash(
+                exchange="NSE",
+                segment="FNO",
+                symbols=["X"],
+                interval="1minute",
+                start=datetime(2024, 1, 1),  # naive
+                end=datetime(2024, 1, 31, tzinfo=UTC),
+            )

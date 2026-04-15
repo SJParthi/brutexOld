@@ -209,6 +209,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Candle range end YYYY-MM-DD (default today UTC)",
     )
+    candles.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help=(
+            "Directory to persist candles into as canonical Parquet + "
+            "DuckDB catalog (FR-CAT-001..004). When omitted, bars stay "
+            "in memory only."
+        ),
+    )
 
     # Full pipeline — alias for `ingest candles` with no limit.
     all_cmd = ingest_sub.add_parser(
@@ -222,6 +232,16 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument("--interval", default="1minute")
     all_cmd.add_argument("--candle-start", default=None)
     all_cmd.add_argument("--candle-end", default=None)
+    all_cmd.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help=(
+            "Directory to persist candles into as canonical Parquet + "
+            "DuckDB catalog (FR-CAT-001..004). When omitted, bars stay "
+            "in memory only."
+        ),
+    )
 
     # ── audit verify ──────────────────────────────────────────────
     audit = sub.add_parser("audit", help="Audit log tools")
@@ -516,6 +536,9 @@ def _run_pipeline_cli(*, args: argparse.Namespace, stop_after: str) -> int:
         InstrumentsScopeError,
         PhaseADriver,
     )
+    from brutex.data.catalog import Catalog
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import BarSink, ParquetBarSink
     from brutex.orchestrator.audit import AuditWriter
     from brutex.orchestrator.pipeline import PhaseHaltError
     from brutex.orchestrator.rate_limiter import (
@@ -633,19 +656,34 @@ def _run_pipeline_cli(*, args: argparse.Namespace, stop_after: str) -> int:
                     )
                     for exchange, _underlying, _expiry, symbol in all_contracts
                 ]
-                phase_d = PhaseDDriver(
-                    adapter=adapter,
-                    store=store,
-                    audit=audit,
-                    run_id=run_id,
-                    requests=requests,
-                )
+
+                lake_root: Path | None = getattr(args, "lake_root", None)
+                bar_sink: BarSink | None = None
+                catalog_ctx: Catalog | None = None
+                if lake_root is not None:
+                    lake_root.mkdir(parents=True, exist_ok=True)
+                    writer = ParquetWriter(lake_root=lake_root)
+                    catalog_ctx = Catalog.open(lake_root / "catalog.duckdb")
+                    bar_sink = ParquetBarSink(writer=writer, catalog=catalog_ctx)
+
                 try:
-                    phase_d.run()
-                except PhaseHaltError:
-                    return EXIT_PIPELINE_HALT
-                if phase_d.last_result is not None:
-                    pass
+                    phase_d = PhaseDDriver(
+                        adapter=adapter,
+                        store=store,
+                        audit=audit,
+                        run_id=run_id,
+                        requests=requests,
+                        bar_sink=bar_sink,
+                    )
+                    try:
+                        phase_d.run()
+                    except PhaseHaltError:
+                        return EXIT_PIPELINE_HALT
+                    if phase_d.last_result is not None:
+                        pass
+                finally:
+                    if catalog_ctx is not None:
+                        catalog_ctx.close()
         except Exception:
             return EXIT_INTERNAL_ERROR
 

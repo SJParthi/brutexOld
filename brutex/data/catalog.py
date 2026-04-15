@@ -1,28 +1,30 @@
 """DuckDB-backed catalog for the BruteX data lake.
 
-Implements ``FR-CAT-002`` (catalog row shape) and a minimal upsert
-API. The full ``get_bars`` API with zero-copy Arrow (``FR-CAT-003``)
-and the ``data_snapshot_hash`` rollup (``FR-CAT-004``) land in later
-commits — this file lays the schema and the upsert pathway so the
-ingest adapter can start populating the catalog immediately.
+Implements ``FR-CAT-002`` (catalog row shape), ``FR-CAT-003``
+(``get_bars`` Arrow zero-copy reader) and ``FR-CAT-004``
+(``data_snapshot_hash`` rollup).
 
-``duckdb`` is imported lazily so unit tests that touch only the
-pure-Python pieces don't need the dep installed.
+``duckdb``, ``polars`` and ``pyarrow`` are imported lazily so unit
+tests that touch only the pure-Python pieces don't need the P2
+data-lake extras installed.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import hashlib
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from brutex.data.errors import CatalogError
 from brutex.data.models import CatalogEntry
+from brutex.data.partition import build_partition_path
 
 if TYPE_CHECKING:  # pragma: no cover
-    pass
+    import pyarrow as pa
 
 
 #: DDL for the single ``partitions`` table. Keep this in sync with
@@ -183,6 +185,247 @@ class Catalog:
             fetched_at=row[10],
         )
 
+    def list_partitions(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[CatalogEntry]:
+        """Return every partition whose ``[first_ts, last_ts]`` overlaps
+        ``[start, end]`` for the given coordinates.
+
+        The result is sorted ascending by ``(year, month)`` so repeated
+        calls are deterministic — the ordering is the contract the
+        :meth:`data_snapshot_hash` rollup relies on.
+
+        ``start`` / ``end`` may be ``None`` to mean "no bound on that
+        side". Both must be timezone-aware if supplied.
+        """
+        if self._closed:
+            raise CatalogError("Catalog is closed")
+        _require_tz_aware(start, name="start")
+        _require_tz_aware(end, name="end")
+
+        clauses: list[str] = [
+            "exchange = ?",
+            "segment = ?",
+            "symbol = ?",
+            "interval = ?",
+        ]
+        params: list[Any] = [exchange, segment, symbol, interval]
+        # A partition intersects the query window iff last_ts >= start
+        # AND first_ts <= end. Skipping either bound drops the clause.
+        if start is not None:
+            clauses.append("last_ts >= ?")
+            params.append(start)
+        if end is not None:
+            clauses.append("first_ts <= ?")
+            params.append(end)
+
+        # Every user-supplied value flows through DuckDB parameter
+        # binding (the ``?`` placeholders). The only string
+        # concatenation is over the static whitelist of ``clauses``
+        # literals defined above, not over any untrusted input — so
+        # this is not a SQL-injection vector.
+        where = " AND ".join(clauses)
+        base_sql = (
+            "SELECT exchange, segment, symbol, interval, year, month, "
+            "raw_hash, row_count, first_ts, last_ts, fetched_at "
+            "FROM partitions"
+        )
+        sql = f"{base_sql} WHERE {where} ORDER BY year ASC, month ASC"  # nosec B608
+        rows = self._conn.execute(sql, params).fetchall()  # type: ignore[attr-defined]
+        return [
+            CatalogEntry(
+                exchange=row[0],
+                segment=row[1],
+                symbol=row[2],
+                interval=row[3],
+                year=row[4],
+                month=row[5],
+                raw_hash=row[6],
+                row_count=row[7],
+                first_ts=row[8],
+                last_ts=row[9],
+                fetched_at=row[10],
+            )
+            for row in rows
+        ]
+
+    def get_bars(
+        self,
+        *,
+        lake_root: Path,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        start: datetime,
+        end: datetime,
+    ) -> pa.Table:
+        """Return a :class:`pyarrow.Table` of bars in ``[start, end]``.
+
+        Implements ``FR-CAT-003``. The catalog is consulted to find
+        every ``(year, month)`` partition whose timestamp range
+        intersects the query window; each matching Parquet file is
+        read via :func:`polars.read_parquet` and converted to Arrow
+        with zero-copy (``polars.DataFrame.to_arrow``). The individual
+        tables are then concatenated and filtered to the exact
+        ``[start, end]`` window.
+
+        The return type is a ``pyarrow.Table`` — the shared lingua
+        franca for zero-copy interop between the Python side and the
+        Rust hot kernels (``rust/fno-math``). Columns are::
+
+            timestamp (timestamp[us, tz=UTC])
+            open / high / low / close (float64)
+            volume (int64)
+            open_interest (int64, nullable)
+
+        Parameters
+        ----------
+        lake_root
+            Top-level lake directory. Used to resolve each catalog
+            row to its on-disk Parquet file.
+        exchange, segment, symbol, interval
+            Partition coordinates. All four must be concrete — this
+            method reads bars for one series at a time. Cross-symbol
+            queries should call :meth:`get_bars` per symbol.
+        start, end
+            Inclusive window. Must be timezone-aware.
+
+        Returns
+        -------
+        pa.Table
+            Bars sorted ascending by timestamp. Empty table (with the
+            canonical schema) when no partitions match.
+
+        Raises
+        ------
+        CatalogError
+            If ``polars`` or ``pyarrow`` is not installed, or if a
+            referenced partition file is missing from disk.
+        """
+        if self._closed:
+            raise CatalogError("Catalog is closed")
+        if start.tzinfo is None or end.tzinfo is None:
+            raise CatalogError("get_bars: start and end must be timezone-aware")
+        if end < start:
+            raise CatalogError(f"get_bars: end ({end}) must be >= start ({start})")
+
+        try:
+            import polars as pl
+            import pyarrow as pa
+        except ImportError as exc:
+            raise CatalogError(
+                "get_bars requires 'polars' + 'pyarrow' — install with "
+                "'pip install -e .[data]' to enable the P2 data lake"
+            ) from exc
+
+        entries = self.list_partitions(
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            interval=interval,
+            start=start,
+            end=end,
+        )
+        if not entries:
+            return _empty_bars_table(pa)
+
+        frames: list[pl.DataFrame] = []
+        for entry in entries:
+            path = build_partition_path(
+                lake_root=lake_root,
+                exchange=entry.exchange,
+                segment=entry.segment,
+                symbol=entry.symbol,
+                interval=entry.interval,
+                year=entry.year,
+                month=entry.month,
+            )
+            if not path.exists():
+                raise CatalogError(
+                    f"catalog references missing partition file {path} "
+                    f"— run 'brutex data verify' to re-sync the catalog"
+                )
+            frames.append(pl.read_parquet(str(path)))
+
+        combined = pl.concat(frames, how="vertical_relaxed")
+        # Filter to the exact window and keep only the canonical column
+        # order. polars' filter is zero-copy slice-level, not row-level.
+        filtered = combined.filter(
+            (pl.col("timestamp") >= start) & (pl.col("timestamp") <= end)
+        ).sort("timestamp")
+        return filtered.to_arrow()
+
+    def data_snapshot_hash(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbols: Sequence[str],
+        interval: str,
+        start: datetime,
+        end: datetime,
+    ) -> str:
+        """Return the ``data_snapshot_hash`` for a ``(universe, interval, range)``.
+
+        Implements ``FR-CAT-004``. The hash is the sha256 of the
+        concatenated ``raw_hash`` values of every partition that
+        intersects the query window, ordered canonically so the
+        result is stable across invocations::
+
+            sorted_entries = sort_by(symbol, year, month)
+            concat = "".join(e.raw_hash for e in sorted_entries)
+            snapshot = sha256(concat).hexdigest()
+
+        An empty slice (no partitions match) returns the sha256 of the
+        empty string — deterministic by construction.
+
+        Parameters
+        ----------
+        exchange, segment, interval
+            Shared partition coordinates.
+        symbols
+            Iterable of Groww symbols in the universe. Duplicates are
+            de-duped and the final ordering is alphabetical so the
+            caller does not need to pre-sort.
+        start, end
+            Inclusive window. Must be timezone-aware.
+
+        Returns
+        -------
+        str
+            64-character sha256 hex digest.
+        """
+        if self._closed:
+            raise CatalogError("Catalog is closed")
+        if start.tzinfo is None or end.tzinfo is None:
+            raise CatalogError("data_snapshot_hash: start and end must be timezone-aware")
+        if end < start:
+            raise CatalogError(f"data_snapshot_hash: end ({end}) must be >= start ({start})")
+
+        canonical_symbols = sorted(set(symbols))
+        hasher = hashlib.sha256()
+        for symbol in canonical_symbols:
+            entries = self.list_partitions(
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                start=start,
+                end=end,
+            )
+            # list_partitions already returns rows sorted by (year, month).
+            for entry in entries:
+                hasher.update(entry.raw_hash.encode("ascii"))
+        return hasher.hexdigest()
+
     def count(self) -> int:
         """Return the number of partition rows recorded in the catalog."""
         if self._closed:
@@ -221,3 +464,41 @@ def open_catalog(path: Path) -> Iterator[Catalog]:
         yield cat
     finally:
         cat.close()
+
+
+def _require_tz_aware(ts: datetime | None, *, name: str) -> None:
+    """Raise :class:`CatalogError` if *ts* is a naive (tz-less) datetime."""
+    if ts is not None and ts.tzinfo is None:
+        raise CatalogError(f"{name} must be timezone-aware, got naive datetime {ts!r}")
+
+
+def _empty_bars_table(pa_mod: Any) -> Any:
+    """Return an empty ``pyarrow.Table`` matching the canonical bar schema.
+
+    Centralised so both the empty-slice return path in
+    :meth:`Catalog.get_bars` and any future "no partitions matched"
+    caller emit the exact same schema object.
+    """
+    schema = pa_mod.schema(
+        [
+            pa_mod.field("timestamp", pa_mod.timestamp("us", tz="UTC")),
+            pa_mod.field("open", pa_mod.float64()),
+            pa_mod.field("high", pa_mod.float64()),
+            pa_mod.field("low", pa_mod.float64()),
+            pa_mod.field("close", pa_mod.float64()),
+            pa_mod.field("volume", pa_mod.int64()),
+            pa_mod.field("open_interest", pa_mod.int64()),
+        ]
+    )
+    return pa_mod.table(
+        {
+            "timestamp": [],
+            "open": [],
+            "high": [],
+            "low": [],
+            "close": [],
+            "volume": [],
+            "open_interest": [],
+        },
+        schema=schema,
+    )
