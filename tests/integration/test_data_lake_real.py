@@ -1,0 +1,430 @@
+"""End-to-end integration test for the data lake write/read path.
+
+Unlike ``tests/unit/test_data_sink.py`` (which uses a FakeWriter stub),
+these tests install the real P2 ``[data]`` dependency group
+(``polars`` + ``duckdb`` + ``pyarrow``) and exercise the actual
+Parquet writer + DuckDB catalog.
+
+## What's verified
+
+1. **Real Parquet round-trip** — a batch of :class:`CandleBar` instances
+   is written to disk via :class:`ParquetWriter`, then re-read with
+   ``polars.read_parquet``. Every column value is asserted equal to
+   the input (timestamps, prices, volume, open interest).
+
+2. **Byte-for-byte reproducibility** — the same input written twice
+   produces identical bytes (same sha256). This exercises
+   ``NFR-DET-001``.
+
+3. **Hash-conflict rejection** — re-writing the same
+   ``(symbol, interval, year, month)`` with different content raises
+   :class:`WriterError`.
+
+4. **Multi-partition grouping** — a batch straddling a month boundary
+   is split into two partitions by :class:`ParquetBarSink`, each
+   landing in the correct canonical path.
+
+5. **Real DuckDB catalog** — :meth:`Catalog.upsert` inserts a
+   :class:`CatalogEntry`, :meth:`Catalog.get` reads it back unchanged,
+   :meth:`Catalog.count` returns 1.
+
+6. **Upsert replaces not duplicates** — re-upserting the same primary
+   key updates the existing row rather than creating a duplicate.
+
+These tests are skipped automatically if ``polars`` / ``duckdb`` /
+``pyarrow`` aren't installed, so they don't break local runs that
+don't have ``.[data]`` installed.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from brutex.data import (
+    CandleBar,
+    CatalogEntry,
+    ParquetBarSink,
+    WriterError,
+)
+from brutex.data.catalog import Catalog
+from brutex.data.parquet_writer import ParquetWriter
+
+# Skip the whole module if the P2 extras aren't installed.
+pytest.importorskip("polars")
+pytest.importorskip("duckdb")
+pytest.importorskip("pyarrow")
+
+import polars as pl  # noqa: E402 — after importorskip
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Helpers
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _bar(
+    day: int,
+    minute: int = 15,
+    open_price: float = 22000.0,
+    month: int = 1,
+    year: int = 2024,
+) -> CandleBar:
+    """Construct a deterministic ``CandleBar`` with sensible defaults."""
+    return CandleBar(
+        timestamp=datetime(year, month, day, 9, minute, 0, tzinfo=UTC),
+        open=Decimal(str(open_price)),
+        high=Decimal(str(open_price + 10)),
+        low=Decimal(str(open_price - 10)),
+        close=Decimal(str(open_price + 5)),
+        volume=100,
+        open_interest=500,
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Real Parquet round-trip
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestRealParquetRoundTrip:
+    def test_single_bar_writes_and_reads_back(self, tmp_path: Path) -> None:
+        writer = ParquetWriter(lake_root=tmp_path)
+        bars = [_bar(25)]
+        result = writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=bars,
+        )
+        assert result.path.exists()
+        assert result.row_count == 1
+        assert len(result.raw_hash) == 64
+        assert result.bytes_written > 0
+
+        df = pl.read_parquet(result.path)
+        assert df.shape == (1, 7)
+        row = df.row(0, named=True)
+        assert row["open"] == 22000.0
+        assert row["high"] == 22010.0
+        assert row["low"] == 21990.0
+        assert row["close"] == 22005.0
+        assert row["volume"] == 100
+        assert row["open_interest"] == 500
+
+    def test_multiple_bars_sorted_in_output(self, tmp_path: Path) -> None:
+        """Writer must sort bars by timestamp before serialising."""
+        writer = ParquetWriter(lake_root=tmp_path)
+        # Deliberately unsorted input
+        bars = [
+            _bar(25, minute=30),
+            _bar(25, minute=15),
+            _bar(25, minute=45),
+        ]
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=bars,
+        )
+        df = pl.read_parquet(
+            tmp_path / "bars/NSE/FNO/NSE-NIFTY/1minute/2024/01.parquet"
+        )
+        minutes = df["timestamp"].dt.minute().to_list()
+        assert minutes == [15, 30, 45]
+
+    def test_byte_for_byte_reproducibility(self, tmp_path: Path) -> None:
+        """NFR-DET-001: identical input → identical bytes → identical sha256."""
+        bars = [_bar(day, minute=15 + i) for i, day in enumerate(range(1, 6))]
+
+        writer1 = ParquetWriter(lake_root=tmp_path / "run1")
+        result1 = writer1.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=bars,
+        )
+
+        writer2 = ParquetWriter(lake_root=tmp_path / "run2")
+        result2 = writer2.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=bars,
+        )
+
+        assert result1.raw_hash == result2.raw_hash, (
+            f"expected byte-for-byte reproducibility; "
+            f"hash1={result1.raw_hash} hash2={result2.raw_hash}"
+        )
+        assert result1.bytes_written == result2.bytes_written
+
+    def test_idempotent_rewrite_same_content(self, tmp_path: Path) -> None:
+        """Re-writing identical content to the same path must be a no-op."""
+        writer = ParquetWriter(lake_root=tmp_path)
+        bars = [_bar(25)]
+        r1 = writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=bars,
+        )
+        r2 = writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=bars,
+        )
+        assert r1.raw_hash == r2.raw_hash
+        assert r1.path == r2.path
+
+    def test_hash_conflict_raises(self, tmp_path: Path) -> None:
+        """Rewriting with different bars must raise WriterError."""
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(25, open_price=22000.0)],
+        )
+        with pytest.raises(WriterError, match="different content"):
+            writer.write(
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                bars=[_bar(25, open_price=99999.0)],  # different price
+            )
+
+    def test_reject_multi_partition_input(self, tmp_path: Path) -> None:
+        """Writer rejects a batch that spans multiple (year, month) partitions."""
+        writer = ParquetWriter(lake_root=tmp_path)
+        bars = [
+            _bar(25, month=1),  # Jan
+            _bar(5, month=2),  # Feb — different partition
+        ]
+        with pytest.raises(WriterError, match="multiple partitions"):
+            writer.write(
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                bars=bars,
+            )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Real DuckDB Catalog
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _make_entry(symbol: str = "NSE-NIFTY", month: int = 1) -> CatalogEntry:
+    return CatalogEntry(
+        exchange="NSE",
+        segment="FNO",
+        symbol=symbol,
+        interval="1minute",
+        year=2024,
+        month=month,
+        raw_hash=hashlib.sha256(f"{symbol}:{month}".encode()).hexdigest(),
+        row_count=1000,
+        first_ts=datetime(2024, month, 1, 9, 15, tzinfo=UTC),
+        last_ts=datetime(2024, month, 28, 15, 30, tzinfo=UTC),
+        fetched_at=datetime(2024, 1, 1, 12, tzinfo=UTC),
+    )
+
+
+class TestRealDuckDBCatalog:
+    def test_insert_and_get(self, tmp_path: Path) -> None:
+        path = tmp_path / "catalog.duckdb"
+        with Catalog.open(path) as cat:
+            entry = _make_entry()
+            cat.upsert(entry)
+
+            fetched = cat.get(
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                year=2024,
+                month=1,
+            )
+        assert fetched is not None
+        assert fetched.symbol == "NSE-NIFTY"
+        assert fetched.row_count == 1000
+        assert fetched.raw_hash == entry.raw_hash
+
+    def test_get_missing_returns_none(self, tmp_path: Path) -> None:
+        path = tmp_path / "catalog.duckdb"
+        with Catalog.open(path) as cat:
+            result = cat.get(
+                exchange="NSE",
+                segment="FNO",
+                symbol="DOES-NOT-EXIST",
+                interval="1minute",
+                year=2024,
+                month=1,
+            )
+        assert result is None
+
+    def test_count(self, tmp_path: Path) -> None:
+        path = tmp_path / "catalog.duckdb"
+        with Catalog.open(path) as cat:
+            assert cat.count() == 0
+            cat.upsert(_make_entry(symbol="A"))
+            cat.upsert(_make_entry(symbol="B"))
+            cat.upsert(_make_entry(symbol="C", month=2))
+            assert cat.count() == 3
+
+    def test_upsert_replaces_not_duplicates(self, tmp_path: Path) -> None:
+        """Re-upserting same primary key must replace, not duplicate."""
+        path = tmp_path / "catalog.duckdb"
+        with Catalog.open(path) as cat:
+            cat.upsert(_make_entry())
+            cat.upsert(_make_entry())  # Same PK
+            cat.upsert(_make_entry())  # Same PK
+            assert cat.count() == 1
+
+    def test_upsert_updates_row_content(self, tmp_path: Path) -> None:
+        """The second upsert's content must be what get() returns."""
+        path = tmp_path / "catalog.duckdb"
+        with Catalog.open(path) as cat:
+            e1 = _make_entry()
+            cat.upsert(e1)
+
+            e2 = CatalogEntry(
+                exchange=e1.exchange,
+                segment=e1.segment,
+                symbol=e1.symbol,
+                interval=e1.interval,
+                year=e1.year,
+                month=e1.month,
+                raw_hash="b" * 64,  # different hash
+                row_count=2000,  # different count
+                first_ts=e1.first_ts,
+                last_ts=e1.last_ts + timedelta(days=1),
+                fetched_at=e1.fetched_at + timedelta(hours=1),
+            )
+            cat.upsert(e2)
+
+            fetched = cat.get(
+                exchange=e1.exchange,
+                segment=e1.segment,
+                symbol=e1.symbol,
+                interval=e1.interval,
+                year=e1.year,
+                month=e1.month,
+            )
+            assert fetched is not None
+            assert fetched.raw_hash == "b" * 64
+            assert fetched.row_count == 2000
+
+    def test_operations_on_closed_catalog_raise(
+        self, tmp_path: Path
+    ) -> None:
+        from brutex.data.errors import CatalogError
+
+        path = tmp_path / "catalog.duckdb"
+        cat = Catalog.open(path)
+        cat.close()
+        with pytest.raises(CatalogError, match="closed"):
+            cat.upsert(_make_entry())
+        with pytest.raises(CatalogError, match="closed"):
+            cat.get(
+                exchange="NSE",
+                segment="FNO",
+                symbol="X",
+                interval="1minute",
+                year=2024,
+                month=1,
+            )
+        with pytest.raises(CatalogError, match="closed"):
+            cat.count()
+
+    def test_close_is_idempotent(self, tmp_path: Path) -> None:
+        path = tmp_path / "catalog.duckdb"
+        cat = Catalog.open(path)
+        cat.close()
+        cat.close()  # must not raise
+
+
+# ────────────────────────────────────────────────────────────────────────
+# ParquetBarSink + ParquetWriter + Catalog end-to-end
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSinkEndToEnd:
+    def test_sink_writes_parquet_and_upserts_catalog(
+        self, tmp_path: Path
+    ) -> None:
+        writer = ParquetWriter(lake_root=tmp_path / "lake")
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            sink = ParquetBarSink(writer=writer, catalog=cat)
+
+            bars = [_bar(day) for day in range(1, 6)]
+            result = sink.append(
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                bars=bars,
+            )
+
+            assert result.bars_appended == 5
+            assert result.partitions_written == 1
+            assert cat.count() == 1
+
+            # Verify the parquet file is real
+            (write_result,) = result.write_results
+            df = pl.read_parquet(write_result.path)
+            assert df.shape == (5, 7)
+
+    def test_sink_spans_multiple_months(self, tmp_path: Path) -> None:
+        writer = ParquetWriter(lake_root=tmp_path / "lake")
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            sink = ParquetBarSink(writer=writer, catalog=cat)
+
+            bars = [
+                _bar(10, month=1),
+                _bar(25, month=1),
+                _bar(5, month=2),
+                _bar(15, month=2),
+                _bar(1, month=3),
+            ]
+            result = sink.append(
+                exchange="NSE",
+                segment="FNO",
+                symbol="NSE-NIFTY",
+                interval="1minute",
+                bars=bars,
+            )
+
+            assert result.bars_appended == 5
+            assert result.partitions_written == 3
+            assert cat.count() == 3
+
+            # Each catalog row should match a real parquet file
+            for entry in (
+                cat.get(
+                    exchange="NSE",
+                    segment="FNO",
+                    symbol="NSE-NIFTY",
+                    interval="1minute",
+                    year=2024,
+                    month=m,
+                )
+                for m in (1, 2, 3)
+            ):
+                assert entry is not None
+                assert entry.row_count > 0

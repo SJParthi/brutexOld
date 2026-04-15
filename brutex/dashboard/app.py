@@ -355,18 +355,46 @@ def build_app(state: DashboardState) -> Any:
     async def index() -> str:
         return _render_index_html()
 
-    @app.websocket("/ws")
-    async def ws(socket: WebSocket) -> None:
-        await socket.accept()
+    # WebSocket handler — defined at module scope below to sidestep
+    # the `from __future__ import annotations` closure-annotation
+    # resolution problem. We register it dynamically.
+    app.add_api_websocket_route("/ws", _make_ws_handler(state))
+
+    return app
+
+
+def _make_ws_handler(state: DashboardState) -> Any:
+    """Build a WebSocket handler closure for :func:`build_app`.
+
+    Defined at module scope so that when FastAPI inspects the
+    handler's type annotations at registration time, the
+    ``WebSocket`` name resolves against this module's globals
+    rather than against a closure-local import that
+    ``from __future__ import annotations`` has stringified.
+
+    We import ``WebSocket`` / ``WebSocketDisconnect`` at call time
+    to keep the ``fastapi`` dep lazy (unit tests that don't hit
+    the dashboard still don't need FastAPI installed).
+    """
+    # Import inside the function body so the module-level doesn't
+    # require fastapi. But hoist the types into globals so the
+    # handler's annotation is resolvable.
+    from fastapi import WebSocket, WebSocketDisconnect
+
+    globals()["WebSocket"] = WebSocket
+    globals()["WebSocketDisconnect"] = WebSocketDisconnect
+
+    async def ws_handler(websocket: WebSocket) -> None:
+        await websocket.accept()
         try:
             while True:
                 payload = state.to_dict()
-                await socket.send_json(payload)
+                await websocket.send_json(payload)
                 await _async_sleep(0.5)
         except WebSocketDisconnect:
             return
 
-    return app
+    return ws_handler
 
 
 async def _async_sleep(seconds: float) -> None:
