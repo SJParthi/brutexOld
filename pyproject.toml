@@ -239,6 +239,7 @@ omit = [
     "brutex/data/catalog.py",
     "brutex/data/parquet_writer.py",
     "brutex/data/sink.py",
+    "brutex/data/instrument_store.py",
     # L3 feed layer — ReplayFeed transitively needs polars/pyarrow
     # via Catalog.get_bars. The pure pieces (FeedEvent dataclass,
     # errors, resampler) stay in scope and are already at 100%.
