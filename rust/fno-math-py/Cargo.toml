@@ -24,13 +24,9 @@ crate-type = ["cdylib", "rlib"]
 # The whole point — this crate depends on fno-math and only fno-math.
 fno-math = { path = "../fno-math" }
 
-# PyO3 itself — version pinned exactly, abi3 for forward-compat with
-# any Python 3.12+ without rebuilding.
-# pyo3 = { version = "0.24", features = ["extension-module", "abi3-py312"] }
-
-# numpy crate for zero-copy ndarray ↔ np.ndarray bridge (needed for
-# indicators that take large time-series slices).
-# numpy = { version = "0.24" }
+# PyO3 — pinned exactly; abi3-py312 for forward-compat with any
+# Python 3.12+ without rebuilding.
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py312"] }
 
 [profile.release]
 opt-level = 3
