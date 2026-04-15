@@ -35,10 +35,8 @@ require network access.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 import pytest
-
 from brutex.notifications.telegram import (
     TelegramConfig,
     TelegramEvent,
@@ -47,7 +45,6 @@ from brutex.notifications.telegram import (
     TelegramSeverity,
 )
 
-
 # ────────────────────────────────────────────────────────────────────────
 # Recording transport — captures every call's config + event
 # ────────────────────────────────────────────────────────────────────────
@@ -55,15 +52,11 @@ from brutex.notifications.telegram import (
 
 @dataclass
 class RecordingTransport:
-    sends: list[tuple[TelegramConfig, TelegramEvent]] = field(
-        default_factory=list
-    )
+    sends: list[tuple[TelegramConfig, TelegramEvent]] = field(default_factory=list)
     fail_next: bool = False
     return_value: bool = True
 
-    def __call__(
-        self, config: TelegramConfig, event: TelegramEvent
-    ) -> bool:
+    def __call__(self, config: TelegramConfig, event: TelegramEvent) -> bool:
         self.sends.append((config, event))
         if self.fail_next:
             self.fail_next = False
@@ -91,9 +84,7 @@ def transport() -> RecordingTransport:
 
 
 @pytest.fixture
-def notifier(
-    config: TelegramConfig, transport: RecordingTransport
-) -> TelegramNotifier:
+def notifier(config: TelegramConfig, transport: RecordingTransport) -> TelegramNotifier:
     n = TelegramNotifier(
         config=config,
         transport=transport,
@@ -228,9 +219,7 @@ class TestNeverRaises:
         # so one send was attempted.
         assert len(transport.sends) == 1
 
-    def test_disabled_config_is_no_op(
-        self, transport: RecordingTransport
-    ) -> None:
+    def test_disabled_config_is_no_op(self, transport: RecordingTransport) -> None:
         disabled_config = TelegramConfig(
             bot_token="tok",
             chat_id="@c",

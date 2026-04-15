@@ -498,18 +498,20 @@ jobs:
       image: semgrep/semgrep:latest
     steps:
       - uses: actions/checkout@v5
-      - name: semgrep ci
+      - name: semgrep scan
+        # Use `semgrep scan` (not `semgrep ci`) so we don't need a
+        # SEMGREP_APP_TOKEN — public rulesets are pulled from the
+        # community registry anonymously. Fails on ERROR severity
+        # findings only; WARN/INFO are reported but don't block merge.
         run: |
-          semgrep ci \
+          semgrep scan \
             --config p/python \
             --config p/security-audit \
             --config p/owasp-top-ten \
-            --config p/secrets \
-            --config p/supply-chain \
+            --severity ERROR \
             --error \
-            --severity ERROR
-        env:
-          SEMGREP_RULES: "p/python p/security-audit p/owasp-top-ten"
+            --metrics off \
+            brutex tests
 
   # ─────────────────────────────────────────────────────────────────
   # Trivy — filesystem + config + vuln scan

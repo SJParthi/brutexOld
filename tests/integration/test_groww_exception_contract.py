@@ -44,12 +44,10 @@ import pytest
 
 pytest.importorskip("growwapi")
 
-import growwapi.groww.exceptions as groww_exceptions  # noqa: E402
-
-from brutex.orchestrator.retry import (  # noqa: E402
+import growwapi.groww.exceptions as groww_exceptions
+from brutex.orchestrator.retry import (
     GROWW_EXCEPTION_CLASSIFICATION,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Collect the real Groww exception hierarchy
@@ -60,11 +58,7 @@ def _real_groww_exception_classes() -> dict[str, type[Exception]]:
     """Return every Exception subclass exported by growwapi.groww.exceptions."""
     classes: dict[str, type[Exception]] = {}
     for name, obj in inspect.getmembers(groww_exceptions):
-        if (
-            inspect.isclass(obj)
-            and issubclass(obj, BaseException)
-            and name.endswith("Exception")
-        ):
+        if inspect.isclass(obj) and issubclass(obj, BaseException) and name.endswith("Exception"):
             classes[name] = obj
     return classes
 
@@ -98,12 +92,8 @@ class TestClassifierNamesExist:
     actual Exception subclass in the real SDK (directly or via
     KNOWN_ALIASES)."""
 
-    @pytest.mark.parametrize(
-        "classifier_name", sorted(GROWW_EXCEPTION_CLASSIFICATION.keys())
-    )
-    def test_name_resolves_to_real_class(
-        self, classifier_name: str
-    ) -> None:
+    @pytest.mark.parametrize("classifier_name", sorted(GROWW_EXCEPTION_CLASSIFICATION.keys()))
+    def test_name_resolves_to_real_class(self, classifier_name: str) -> None:
         real_name = KNOWN_ALIASES.get(classifier_name, classifier_name)
         assert real_name in _REAL_CLASSES, (
             f"brutex.orchestrator.retry.GROWW_EXCEPTION_CLASSIFICATION "
@@ -114,9 +104,7 @@ class TestClassifierNamesExist:
             f"update the classifier."
         )
         cls = _REAL_CLASSES[real_name]
-        assert issubclass(cls, BaseException), (
-            f"{real_name} is not an Exception subclass"
-        )
+        assert issubclass(cls, BaseException), f"{real_name} is not an Exception subclass"
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -133,17 +121,15 @@ class TestCoverageOfRealHierarchy:
 
     # Names in the classifier + their known-alias equivalents form the
     # set of "covered names" for MRO-fallback purposes.
-    _COVERED_NAMES: frozenset[str] = frozenset(
-        GROWW_EXCEPTION_CLASSIFICATION.keys()
-    ) | frozenset(KNOWN_ALIASES.values())
+    _COVERED_NAMES: frozenset[str] = frozenset(GROWW_EXCEPTION_CLASSIFICATION.keys()) | frozenset(
+        KNOWN_ALIASES.values()
+    )
 
     @pytest.mark.parametrize(
-        "real_name,real_cls",
+        ("real_name", "real_cls"),
         sorted(_real_groww_exception_classes().items()),
     )
-    def test_real_class_is_classifiable(
-        self, real_name: str, real_cls: type[Exception]
-    ) -> None:
+    def test_real_class_is_classifiable(self, real_name: str, real_cls: type[Exception]) -> None:
         mro_names = [c.__name__ for c in real_cls.mro()]
         covered = [name for name in mro_names if name in self._COVERED_NAMES]
         assert covered, (

@@ -21,33 +21,23 @@ from __future__ import annotations
 
 import hashlib
 
+from brutex.orchestrator.state import IngestPhase, WorkItem
 from hypothesis import given, settings
 from hypothesis import strategies as st
-
-from brutex.orchestrator.state import IngestPhase, WorkItem
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Strategies
 # ────────────────────────────────────────────────────────────────────────
 
 
-_PARAMS_KEY_ALPHABET = st.characters(
-    min_codepoint=0x61, max_codepoint=0x7A
-)  # a-z
+_PARAMS_KEY_ALPHABET = st.characters(min_codepoint=0x61, max_codepoint=0x7A)  # a-z
 
-_PARAMS_VALUE_ALPHABET = st.characters(
-    min_codepoint=0x20, max_codepoint=0x7E
-)  # printable ASCII
+_PARAMS_VALUE_ALPHABET = st.characters(min_codepoint=0x20, max_codepoint=0x7E)  # printable ASCII
 
 
 params_st = st.dictionaries(
-    keys=st.text(
-        alphabet=_PARAMS_KEY_ALPHABET, min_size=1, max_size=12
-    ),
-    values=st.text(
-        alphabet=_PARAMS_VALUE_ALPHABET, max_size=40
-    ),
+    keys=st.text(alphabet=_PARAMS_KEY_ALPHABET, min_size=1, max_size=12),
+    values=st.text(alphabet=_PARAMS_VALUE_ALPHABET, max_size=40),
     min_size=1,
     max_size=8,
 )
@@ -67,9 +57,7 @@ def _content_hash(params: dict[str, str]) -> str:
 class TestDeterminism:
     @given(params=params_st)
     @settings(max_examples=200, deadline=None)
-    def test_same_params_same_hash(
-        self, params: dict[str, str]
-    ) -> None:
+    def test_same_params_same_hash(self, params: dict[str, str]) -> None:
         h1 = _content_hash(params)
         h2 = _content_hash(params)
         h3 = _content_hash(dict(params))
@@ -92,17 +80,13 @@ class TestDeterminism:
 class TestOrderInvariance:
     @given(params=params_st)
     @settings(max_examples=200, deadline=None)
-    def test_reversed_insertion_same_hash(
-        self, params: dict[str, str]
-    ) -> None:
+    def test_reversed_insertion_same_hash(self, params: dict[str, str]) -> None:
         reversed_params = dict(reversed(list(params.items())))
         assert _content_hash(params) == _content_hash(reversed_params)
 
     @given(params=params_st)
     @settings(max_examples=150, deadline=None)
-    def test_workitem_canonicalisation_matches(
-        self, params: dict[str, str]
-    ) -> None:
+    def test_workitem_canonicalisation_matches(self, params: dict[str, str]) -> None:
         """WorkItem.new sorts params on construction; two items
         built from the same params (in any order) have identical
         canonical params tuples."""
@@ -154,37 +138,27 @@ class TestCollisionResistance:
 
 class TestPrefixSensitivity:
     @given(
-        key=st.text(
-            alphabet=_PARAMS_KEY_ALPHABET, min_size=1, max_size=6
-        ),
-        value=st.text(
-            alphabet=_PARAMS_VALUE_ALPHABET, min_size=1, max_size=10
-        ),
+        key=st.text(alphabet=_PARAMS_KEY_ALPHABET, min_size=1, max_size=6),
+        value=st.text(alphabet=_PARAMS_VALUE_ALPHABET, min_size=1, max_size=10),
     )
     @settings(max_examples=150, deadline=None)
-    def test_any_value_mutation_changes_hash(
-        self, key: str, value: str
-    ) -> None:
+    def test_any_value_mutation_changes_hash(self, key: str, value: str) -> None:
         h1 = _content_hash({key: value})
         h2 = _content_hash({key: value + "X"})
         assert h1 != h2
 
     @given(
         keys=st.lists(
-            st.text(
-                alphabet=_PARAMS_KEY_ALPHABET, min_size=1, max_size=6
-            ),
+            st.text(alphabet=_PARAMS_KEY_ALPHABET, min_size=1, max_size=6),
             min_size=2,
             max_size=6,
             unique=True,
         ),
     )
     @settings(max_examples=100, deadline=None)
-    def test_dropping_a_key_changes_hash(
-        self, keys: list[str]
-    ) -> None:
-        full = {k: "v" for k in keys}
-        reduced = {k: "v" for k in keys[:-1]}
+    def test_dropping_a_key_changes_hash(self, keys: list[str]) -> None:
+        full = dict.fromkeys(keys, "v")
+        reduced = dict.fromkeys(keys[:-1], "v")
         assert _content_hash(full) != _content_hash(reduced)
 
 
@@ -196,9 +170,7 @@ class TestPrefixSensitivity:
 class TestStructuralRoundTrip:
     @given(params=params_st)
     @settings(max_examples=100, deadline=None)
-    def test_params_tuple_is_sorted(
-        self, params: dict[str, str]
-    ) -> None:
+    def test_params_tuple_is_sorted(self, params: dict[str, str]) -> None:
         item = WorkItem.new(
             phase=IngestPhase.A_INSTRUMENTS,
             content_hash=_content_hash(params),
@@ -209,9 +181,7 @@ class TestStructuralRoundTrip:
 
     @given(params=params_st)
     @settings(max_examples=100, deadline=None)
-    def test_params_tuple_preserves_every_entry(
-        self, params: dict[str, str]
-    ) -> None:
+    def test_params_tuple_preserves_every_entry(self, params: dict[str, str]) -> None:
         item = WorkItem.new(
             phase=IngestPhase.A_INSTRUMENTS,
             content_hash=_content_hash(params),

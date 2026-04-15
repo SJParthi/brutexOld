@@ -44,7 +44,6 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-
 from brutex.data import (
     CandleBar,
     CatalogEntry,
@@ -59,8 +58,7 @@ pytest.importorskip("polars")
 pytest.importorskip("duckdb")
 pytest.importorskip("pyarrow")
 
-import polars as pl  # noqa: E402 — after importorskip
-
+import polars as pl
 
 # ────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -133,9 +131,7 @@ class TestRealParquetRoundTrip:
             interval="1minute",
             bars=bars,
         )
-        df = pl.read_parquet(
-            tmp_path / "bars/NSE/FNO/NSE-NIFTY/1minute/2024/01.parquet"
-        )
+        df = pl.read_parquet(tmp_path / "bars/NSE/FNO/NSE-NIFTY/1minute/2024/01.parquet")
         minutes = df["timestamp"].dt.minute().to_list()
         assert minutes == [15, 30, 45]
 
@@ -330,9 +326,7 @@ class TestRealDuckDBCatalog:
             assert fetched.raw_hash == "b" * 64
             assert fetched.row_count == 2000
 
-    def test_operations_on_closed_catalog_raise(
-        self, tmp_path: Path
-    ) -> None:
+    def test_operations_on_closed_catalog_raise(self, tmp_path: Path) -> None:
         from brutex.data.errors import CatalogError
 
         path = tmp_path / "catalog.duckdb"
@@ -365,9 +359,7 @@ class TestRealDuckDBCatalog:
 
 
 class TestSinkEndToEnd:
-    def test_sink_writes_parquet_and_upserts_catalog(
-        self, tmp_path: Path
-    ) -> None:
+    def test_sink_writes_parquet_and_upserts_catalog(self, tmp_path: Path) -> None:
         writer = ParquetWriter(lake_root=tmp_path / "lake")
         with Catalog.open(tmp_path / "catalog.duckdb") as cat:
             sink = ParquetBarSink(writer=writer, catalog=cat)

@@ -40,7 +40,6 @@ from brutex.models import (
     Segment,
 )
 
-
 # ────────────────────────────────────────────────────────────────────────
 # DemoSpotCryptoAdapter — no derivatives, paginated, 24/7
 # ────────────────────────────────────────────────────────────────────────
@@ -79,18 +78,14 @@ class DemoSpotCryptoAdapter:
             earliest_history=date(2020, 1, 1),
             native_timezone="UTC",
             rate_limit_rps=10.0,
-            supported_intervals=frozenset(
-                {"1minute", "5minute", "1hour", "1day"}
-            ),
+            supported_intervals=frozenset({"1minute", "5minute", "1hour", "1day"}),
         )
 
     @property
     def capabilities(self) -> MarketCapabilities:
         return self._capabilities
 
-    def list_instruments(
-        self, *, cursor: str | None = None
-    ) -> InstrumentPage:
+    def list_instruments(self, *, cursor: str | None = None) -> InstrumentPage:
         """Return one page of spot pairs.
 
         Paginated to exercise the cursor path — static markets can
@@ -127,9 +122,7 @@ class DemoSpotCryptoAdapter:
         )
 
         next_cursor = str(end_idx) if end_idx < len(_SPOT_PAIRS) else None
-        return InstrumentPage(
-            instruments=instruments, next_cursor=next_cursor
-        )
+        return InstrumentPage(instruments=instruments, next_cursor=next_cursor)
 
     def list_derivatives(
         self, *, underlying_symbol: str, exchange: Exchange
@@ -206,9 +199,7 @@ class DemoPerpCryptoAdapter:
     def capabilities(self) -> MarketCapabilities:
         return self._capabilities
 
-    def list_instruments(
-        self, *, cursor: str | None = None
-    ) -> InstrumentPage:
+    def list_instruments(self, *, cursor: str | None = None) -> InstrumentPage:
         del cursor
         return InstrumentPage(instruments=(), next_cursor=None)
 

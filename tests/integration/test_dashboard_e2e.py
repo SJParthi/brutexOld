@@ -20,7 +20,6 @@ it doesn't break minimal runs.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -29,15 +28,13 @@ import pytest
 pytest.importorskip("fastapi")
 pytest.importorskip("httpx")
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from brutex.dashboard.app import DashboardState, build_app  # noqa: E402
-from brutex.orchestrator.pipeline import (  # noqa: E402
+from brutex.dashboard.app import DashboardState, build_app
+from brutex.orchestrator.pipeline import (
     PipelineEvent,
     PipelineEventKind,
 )
-from brutex.orchestrator.state import IngestPhase  # noqa: E402
-
+from brutex.orchestrator.state import IngestPhase
+from fastapi.testclient import TestClient
 
 # ────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -81,9 +78,7 @@ class TestHttpRoutes:
         # Basic sanity — the inline JS connects to /ws
         assert "/ws" in body
 
-    def test_api_state_returns_json(
-        self, client: TestClient, state: DashboardState
-    ) -> None:
+    def test_api_state_returns_json(self, client: TestClient, state: DashboardState) -> None:
         r = client.get("/api/v1/state")
         assert r.status_code == 200
         data = r.json()
@@ -101,9 +96,7 @@ class TestHttpRoutes:
         # One event was fired in the fixture setup
         assert len(data["events"]) >= 1
 
-    def test_metrics_returns_prometheus_text(
-        self, client: TestClient
-    ) -> None:
+    def test_metrics_returns_prometheus_text(self, client: TestClient) -> None:
         r = client.get("/metrics")
         assert r.status_code == 200
         assert "text/plain" in r.headers["content-type"]
@@ -113,9 +106,7 @@ class TestHttpRoutes:
         for line in text.splitlines():
             if not line:
                 continue
-            assert line.startswith("#") or line[0].isalpha(), (
-                f"bad Prometheus line: {line!r}"
-            )
+            assert line.startswith("#") or line[0].isalpha(), f"bad Prometheus line: {line!r}"
 
     def test_unknown_route_is_404(self, client: TestClient) -> None:
         r = client.get("/does-not-exist")
@@ -128,9 +119,7 @@ class TestHttpRoutes:
 
 
 class TestWebSocketStream:
-    def test_ws_sends_initial_state(
-        self, client: TestClient, state: DashboardState
-    ) -> None:
+    def test_ws_sends_initial_state(self, client: TestClient, state: DashboardState) -> None:
         """Connecting to /ws must immediately receive a state snapshot."""
         with client.websocket_connect("/ws") as socket:
             payload = socket.receive_json()
@@ -147,9 +136,7 @@ class TestWebSocketStream:
             for frame in (first, second, third):
                 assert "phases" in frame
 
-    def test_ws_reflects_state_updates(
-        self, client: TestClient, state: DashboardState
-    ) -> None:
+    def test_ws_reflects_state_updates(self, client: TestClient, state: DashboardState) -> None:
         """Firing a new pipeline event between two WS frames must be visible."""
         with client.websocket_connect("/ws") as socket:
             _first = socket.receive_json()
@@ -175,9 +162,7 @@ class TestWebSocketStream:
 
 
 class TestPrometheusFormat:
-    def test_metrics_parses_as_prometheus(
-        self, client: TestClient
-    ) -> None:
+    def test_metrics_parses_as_prometheus(self, client: TestClient) -> None:
         """The /metrics response must be parseable by any Prometheus
         text-format parser. We use prometheus_client if available,
         otherwise fall back to structural validation.
@@ -186,7 +171,7 @@ class TestPrometheusFormat:
         text = r.text
 
         try:
-            from prometheus_client.parser import (  # noqa: PLC0415
+            from prometheus_client.parser import (
                 text_string_to_metric_families,
             )
         except ImportError:
@@ -195,9 +180,7 @@ class TestPrometheusFormat:
                 if line and not line.startswith("#"):
                     # Metric line — must have at least name and value
                     parts = line.rsplit(" ", 1)
-                    assert len(parts) == 2, (
-                        f"malformed prom line: {line!r}"
-                    )
+                    assert len(parts) == 2, f"malformed prom line: {line!r}"
             return
 
         # Full parse
