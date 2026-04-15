@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from brutex.feed.replay import FeedEvent
 from brutex.strategies.types import Signal, StrategyState
@@ -102,7 +102,7 @@ class Strategy(Protocol):
     start of iteration.
     """
 
-    META: StrategyMeta
+    META: ClassVar[StrategyMeta]
 
     def on_event(
         self,
