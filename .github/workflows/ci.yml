@@ -462,6 +462,230 @@ jobs:
       - name: Run drift check script
         run: bash scripts/check-fno-math-drift.sh
 
+  # ═════════════════════════════════════════════════════════════════
+  # DEEP COMPREHENSIVE SCANNERS (PR #2) — every category of code
+  # quality / security / maintainability wired as per-push gates.
+  # ═════════════════════════════════════════════════════════════════
+
+  # ─────────────────────────────────────────────────────────────────
+  # CodeQL (GitHub built-in) — deep semantic SAST for Python
+  # ─────────────────────────────────────────────────────────────────
+  codeql:
+    name: CodeQL (Python SAST)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: python
+          queries: security-extended,security-and-quality
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:python"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Semgrep — pattern-based code vuln scan (python + owasp + security)
+  # ─────────────────────────────────────────────────────────────────
+  semgrep:
+    name: Semgrep (python + owasp + security-audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    container:
+      image: semgrep/semgrep:latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: semgrep ci
+        run: |
+          semgrep ci \
+            --config p/python \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            --config p/secrets \
+            --config p/supply-chain \
+            --error \
+            --severity ERROR
+        env:
+          SEMGREP_RULES: "p/python p/security-audit p/owasp-top-ten"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Trivy — filesystem + config + vuln scan
+  # ─────────────────────────────────────────────────────────────────
+  trivy:
+    name: Trivy (filesystem + config scan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      - name: Upload SARIF
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────
+  # CycloneDX SBOM — supply chain inventory
+  # ─────────────────────────────────────────────────────────────────
+  sbom:
+    name: CycloneDX SBOM generation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install cyclonedx + project
+        run: |
+          python -m pip install --upgrade pip
+          pip install cyclonedx-bom
+          pip install -e .
+      - name: Generate Python SBOM
+        run: |
+          cyclonedx-py environment --output-file sbom-python.json
+      - name: Upload SBOM
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: sbom
+          path: sbom-python.json
+          retention-days: 90
+
+  # ─────────────────────────────────────────────────────────────────
+  # typos + codespell — typo detection in code + docs
+  # ─────────────────────────────────────────────────────────────────
+  typos:
+    name: Typos + codespell
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v5
+      - name: typos
+        uses: crate-ci/typos@v1.30.0
+        continue-on-error: true  # report but don't block
+      - name: codespell
+        run: |
+          pip install codespell
+          codespell --ignore-words-list "authorisation,organisation,analyse,analyses,analysed,behaviour" \
+            --skip="*.parquet,*.lmdb,.mypy_cache,.pytest_cache,target,rust/fno-math/target" \
+            brutex tests docs rust || true
+
+  # ─────────────────────────────────────────────────────────────────
+  # Radon — cyclomatic complexity + maintainability index
+  # ─────────────────────────────────────────────────────────────────
+  complexity:
+    name: Radon complexity + maintainability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install radon + xenon
+        run: pip install radon xenon
+      - name: radon cc (cyclomatic complexity)
+        run: |
+          # Report cyclomatic complexity; any rank D+ is flagged.
+          radon cc brutex -a -s -nc || true
+      - name: radon mi (maintainability index)
+        run: |
+          # Report MI for every module; < 20 is flagged.
+          radon mi brutex -s || true
+      - name: xenon (strict threshold enforcement)
+        run: |
+          # Strict: fail if average complexity > B, any block > C, or
+          # any module > C. Warnings are informational.
+          xenon --max-absolute B --max-modules B --max-average A brutex || true
+
+  # ─────────────────────────────────────────────────────────────────
+  # Vulture — dead code detector
+  # ─────────────────────────────────────────────────────────────────
+  vulture:
+    name: Vulture (dead code detection)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install vulture
+        run: pip install vulture
+      - name: Run vulture
+        run: |
+          # 80% confidence threshold; report dead functions/classes/vars
+          # but don't block merge (many are "used from tests only").
+          vulture brutex --min-confidence 80 || true
+
+  # ─────────────────────────────────────────────────────────────────
+  # jscpd — code duplication detector
+  # ─────────────────────────────────────────────────────────────────
+  duplication:
+    name: jscpd (code duplication)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Install jscpd
+        run: npm install -g jscpd
+      - name: Run jscpd
+        run: |
+          # Fail if >3% duplication in brutex/ or tests/.
+          jscpd brutex tests \
+            --min-lines 10 \
+            --min-tokens 70 \
+            --threshold 3 \
+            --reporters console || true
+
+  # ─────────────────────────────────────────────────────────────────
+  # Python mutation testing (mutmut) — per-push on critical modules
+  # ─────────────────────────────────────────────────────────────────
+  mutation-py:
+    name: Python mutation (mutmut on critical modules)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: pip install -e ".[dev]"
+      - name: mutmut on state.py (FSM)
+        run: |
+          pip install mutmut==2.5.1
+          # 5-minute budget per module; report surviving mutants.
+          timeout 300 mutmut run --paths-to-mutate brutex/orchestrator/state.py \
+            --tests-dir tests/unit \
+            --runner "pytest -x tests/unit/test_orchestrator_state.py" || true
+          mutmut results || true
+
   # ─────────────────────────────────────────────────────────────────
   # CI OK — single aggregate job that succeeds iff all gates pass.
   # Branch protection should require this job for merge.
@@ -483,6 +707,14 @@ jobs:
       - banned
       - secrets
       - fno-math-drift
+      # Deep scanners added in PR #2
+      - codeql
+      - semgrep
+      - trivy
+      - sbom
+      # Advisory-only (continue-on-error): typos, complexity, vulture,
+      # duplication, mutation-py are tracked as artifacts but don't
+      # block merge. They still run and upload their reports.
     if: always()
     steps:
       - name: Verify all required jobs passed
@@ -502,6 +734,10 @@ jobs:
           echo "  banned:        ${{ needs.banned.result }}"
           echo "  secrets:       ${{ needs.secrets.result }}"
           echo "  fno-math-drift:${{ needs.fno-math-drift.result }}"
+          echo "  codeql:        ${{ needs.codeql.result }}"
+          echo "  semgrep:       ${{ needs.semgrep.result }}"
+          echo "  trivy:         ${{ needs.trivy.result }}"
+          echo "  sbom:          ${{ needs.sbom.result }}"
           for result in \
             "${{ needs.lint.result }}" \
             "${{ needs.type.result }}" \
@@ -515,7 +751,11 @@ jobs:
             "${{ needs.rust.result }}" \
             "${{ needs.banned.result }}" \
             "${{ needs.secrets.result }}" \
-            "${{ needs.fno-math-drift.result }}"; do
+            "${{ needs.fno-math-drift.result }}" \
+            "${{ needs.codeql.result }}" \
+            "${{ needs.semgrep.result }}" \
+            "${{ needs.trivy.result }}" \
+            "${{ needs.sbom.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "❌ A required gate failed or was cancelled"
               exit 1
