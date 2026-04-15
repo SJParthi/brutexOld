@@ -52,6 +52,15 @@ from brutex.strategies.registry import (
     register_strategy,
 )
 from brutex.strategies.runner import StrategyRunner, StrategyRunResult
+from brutex.strategies.sweep import (
+    ComboCache,
+    ComboResult,
+    ComboSweep,
+    FeedFactory,
+    ParamGrid,
+    StrategyFactory,
+    SweepSummary,
+)
 from brutex.strategies.types import (
     Side,
     Signal,
@@ -59,17 +68,24 @@ from brutex.strategies.types import (
 )
 
 __all__ = [
+    "ComboCache",
+    "ComboResult",
+    "ComboSweep",
+    "FeedFactory",
+    "ParamGrid",
     "Side",
     "Signal",
     "Strategy",
     "StrategyContractError",
     "StrategyError",
+    "StrategyFactory",
     "StrategyMeta",
     "StrategyRegistrationError",
     "StrategyRegistry",
     "StrategyRunResult",
     "StrategyRunner",
     "StrategyState",
+    "SweepSummary",
     "canonicalise_params",
     "combo_hash",
     "default_registry",
