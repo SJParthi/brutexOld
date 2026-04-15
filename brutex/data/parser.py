@@ -19,9 +19,10 @@ dependency extras installed.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Final, Sequence
+from typing import Any, Final
 
 from brutex.data.errors import DataLakeError
 from brutex.data.models import CandleBar
@@ -66,16 +67,12 @@ def parse_groww_candle_row(row: Sequence[Any]) -> CandleBar:
 
     # ── Timestamp: IST ISO → UTC ──────────────────────────────────────
     if not isinstance(ts_raw, str):
-        raise CandleRowError(
-            f"timestamp must be an ISO string, got {type(ts_raw).__name__}"
-        )
+        raise CandleRowError(f"timestamp must be an ISO string, got {type(ts_raw).__name__}")
     try:
         # Groww uses 'T' separator; fromisoformat handles both 'T' and ' '.
         naive = datetime.fromisoformat(ts_raw)
     except ValueError as exc:
-        raise CandleRowError(
-            f"timestamp {ts_raw!r} is not valid ISO-8601"
-        ) from exc
+        raise CandleRowError(f"timestamp {ts_raw!r} is not valid ISO-8601") from exc
     # Groww omits the offset; attach IST then convert to UTC.
     if naive.tzinfo is None:
         naive = naive.replace(tzinfo=_IST)
@@ -94,9 +91,7 @@ def parse_groww_candle_row(row: Sequence[Any]) -> CandleBar:
     try:
         volume = int(vol_raw)
     except (TypeError, ValueError) as exc:
-        raise CandleRowError(
-            f"volume {vol_raw!r} is not an integer"
-        ) from exc
+        raise CandleRowError(f"volume {vol_raw!r} is not an integer") from exc
 
     open_interest: int | None
     if oi_raw is None:
@@ -105,9 +100,7 @@ def parse_groww_candle_row(row: Sequence[Any]) -> CandleBar:
         try:
             open_interest = int(oi_raw)
         except (TypeError, ValueError) as exc:
-            raise CandleRowError(
-                f"open_interest {oi_raw!r} is not an integer or None"
-            ) from exc
+            raise CandleRowError(f"open_interest {oi_raw!r} is not an integer or None") from exc
 
     try:
         return CandleBar(
@@ -148,9 +141,7 @@ def _to_decimal(value: Any, field_name: str) -> Decimal:
         return Decimal(str(value))
     if isinstance(value, str):
         return Decimal(value)
-    raise ValueError(
-        f"{field_name} must be numeric, got {type(value).__name__}: {value!r}"
-    )
+    raise ValueError(f"{field_name} must be numeric, got {type(value).__name__}: {value!r}")
 
 
 __all__ = [

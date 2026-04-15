@@ -8,16 +8,13 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-import pytest
-
 from brutex.dashboard.app import (
     DashboardState,
     PhaseSnapshot,
     snapshot_to_json,
 )
 from brutex.orchestrator.pipeline import PipelineEvent, PipelineEventKind
-from brutex.orchestrator.state import IngestPhase, WorkItemState
-
+from brutex.orchestrator.state import IngestPhase
 
 # ────────────────────────────────────────────────────────────────────────
 # PhaseSnapshot
@@ -79,9 +76,7 @@ def _event(
 class TestOnPipelineEvent:
     def test_run_start(self) -> None:
         state = DashboardState()
-        state.on_pipeline_event(
-            _event(PipelineEventKind.RUN_START, run_id="run-abc")
-        )
+        state.on_pipeline_event(_event(PipelineEventKind.RUN_START, run_id="run-abc"))
         assert state.run_id == "run-abc"
         assert state.run_status == "running"
         assert state.run_started_at is not None
@@ -179,9 +174,7 @@ class TestOnPipelineEvent:
     def test_run_complete(self) -> None:
         state = DashboardState()
         state.on_pipeline_event(_event(PipelineEventKind.RUN_START))
-        state.on_pipeline_event(
-            _event(PipelineEventKind.RUN_COMPLETE, elapsed_seconds=42.0)
-        )
+        state.on_pipeline_event(_event(PipelineEventKind.RUN_COMPLETE, elapsed_seconds=42.0))
         assert state.run_status == "complete"
         assert state.run_elapsed_seconds == 42.0
 
@@ -200,9 +193,7 @@ class TestOnPipelineEvent:
 class TestOtherUpdates:
     def test_update_rate_limit(self) -> None:
         state = DashboardState()
-        state.update_rate_limit(
-            current_rps=12.5, available_tokens=3.0, recent_429_count=1
-        )
+        state.update_rate_limit(current_rps=12.5, available_tokens=3.0, recent_429_count=1)
         assert state.rate_limit.current_rps == 12.5
         assert state.rate_limit.available_tokens == 3.0
         assert state.rate_limit.recent_429_count == 1

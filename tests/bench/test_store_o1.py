@@ -37,7 +37,6 @@ import hashlib
 from pathlib import Path
 
 import pytest
-
 from brutex.orchestrator.state import (
     IngestPhase,
     WorkItem,
@@ -196,9 +195,7 @@ class TestExistsTerminalIsO1:
 
         assert benchmark(_probe) is True
 
-    def test_exists_terminal_miss_is_fast(
-        self, benchmark, store_10k
-    ) -> None:
+    def test_exists_terminal_miss_is_fast(self, benchmark, store_10k) -> None:
         """A miss (unknown hash) must also be fast — no full scan
         to confirm absence."""
         store, _ = store_10k

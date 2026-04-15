@@ -13,7 +13,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-
 from brutex.adapters.groww.client import (
     GrowwAdapter,
     GrowwClientProtocol,
@@ -30,6 +29,7 @@ from brutex.orchestrator.state import (
     WorkItemState,
 )
 from brutex.orchestrator.store import WorkItemStore
+
 from tests.fakes.groww import (
     FakeDataFrame,
     FakeGrowwClient,
@@ -42,7 +42,6 @@ from tests.fakes.groww import (
     GrowwAPITimeoutException,
     GrowwBaseException,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Fake clock for deterministic rate limiter
@@ -122,9 +121,7 @@ def adapter(
     )
 
 
-def _make_work_item(
-    method: str, phase: IngestPhase = IngestPhase.A_INSTRUMENTS
-) -> WorkItem:
+def _make_work_item(method: str, phase: IngestPhase = IngestPhase.A_INSTRUMENTS) -> WorkItem:
     """Construct a fresh PENDING work item with a deterministic hash."""
     content_hash = hashlib.sha256(method.encode()).hexdigest()
     return WorkItem.new(
@@ -140,9 +137,7 @@ def _make_work_item(
 
 
 class TestProtocol:
-    def test_fake_client_satisfies_protocol(
-        self, fake_client: FakeGrowwClient
-    ) -> None:
+    def test_fake_client_satisfies_protocol(self, fake_client: FakeGrowwClient) -> None:
         """@runtime_checkable lets us check with isinstance."""
         assert isinstance(fake_client, GrowwClientProtocol)
 
@@ -153,9 +148,7 @@ class TestProtocol:
 
 
 class TestPullAllInstrumentsSuccess:
-    def test_happy_path(
-        self, adapter: GrowwAdapter, fake_client: FakeGrowwClient
-    ) -> None:
+    def test_happy_path(self, adapter: GrowwAdapter, fake_client: FakeGrowwClient) -> None:
         item = _make_work_item("get_all_instruments")
         updated, response = adapter.pull_all_instruments(work_item=item)
 
@@ -172,11 +165,9 @@ class TestPullAllInstrumentsSuccess:
         updated, _ = adapter.pull_all_instruments(work_item=item)
         assert updated.state == WorkItemState.NO_DATA
 
-    def test_persists_to_store(
-        self, adapter: GrowwAdapter, store: WorkItemStore
-    ) -> None:
+    def test_persists_to_store(self, adapter: GrowwAdapter, store: WorkItemStore) -> None:
         item = _make_work_item("get_all_instruments")
-        updated, _ = adapter.pull_all_instruments(work_item=item)
+        _updated, _ = adapter.pull_all_instruments(work_item=item)
         fetched = store.get(item.phase, item.content_hash)
         assert fetched is not None
         assert fetched.state == WorkItemState.SUCCESS
@@ -188,9 +179,7 @@ class TestPullAllInstrumentsSuccess:
 
 
 class TestOtherPullMethods:
-    def test_pull_expiries_happy(
-        self, adapter: GrowwAdapter, fake_client: FakeGrowwClient
-    ) -> None:
+    def test_pull_expiries_happy(self, adapter: GrowwAdapter, fake_client: FakeGrowwClient) -> None:
         item = _make_work_item("get_expiries", IngestPhase.B_EXPIRIES)
         updated, response = adapter.pull_expiries(
             work_item=item,
@@ -202,9 +191,7 @@ class TestOtherPullMethods:
         assert fake_client.get_expiries_calls == 1
         assert response == {"expiries": ["2024-01-25"]}
 
-    def test_pull_expiries_empty(
-        self, adapter: GrowwAdapter, fake_client: FakeGrowwClient
-    ) -> None:
+    def test_pull_expiries_empty(self, adapter: GrowwAdapter, fake_client: FakeGrowwClient) -> None:
         fake_client.expiries_response = {"expiries": []}
         item = _make_work_item("get_expiries", IngestPhase.B_EXPIRIES)
         updated, _ = adapter.pull_expiries(
@@ -405,9 +392,7 @@ class TestAuditIntegration:
         # START + RETRY
         assert entry_count == 2
 
-    def test_dedup_writes_one_entry(
-        self, adapter: GrowwAdapter, audit_path: Path
-    ) -> None:
+    def test_dedup_writes_one_entry(self, adapter: GrowwAdapter, audit_path: Path) -> None:
         item = _make_work_item("get_all_instruments")
         adapter.pull_all_instruments(work_item=item)  # 2 entries
         adapter.pull_all_instruments(work_item=item)  # +1 entry (DEDUP_SKIP)
@@ -415,9 +400,7 @@ class TestAuditIntegration:
         entry_count = verify_chain(audit_path)
         assert entry_count == 3
 
-    def test_chain_remains_valid(
-        self, adapter: GrowwAdapter, audit_path: Path
-    ) -> None:
+    def test_chain_remains_valid(self, adapter: GrowwAdapter, audit_path: Path) -> None:
         """After many calls, the chain stays verifiable."""
         for method in ["get_all_instruments"] * 5:
             item = WorkItem.new(

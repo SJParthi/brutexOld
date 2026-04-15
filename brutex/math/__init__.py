@@ -38,7 +38,8 @@ Tests in :mod:`tests.unit.test_math_facade` exercise both paths.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Final, NoReturn
+from collections.abc import Callable
+from typing import Any, Final, NoReturn
 
 _EXTRACTION_POINTER: Final[str] = (
     "fno_math_py wheel is not installed. Build it via:\n"
@@ -115,7 +116,7 @@ FNO_MATH_BACKEND: str
 # Try the native import first. If successful, each symbol points at
 # the real Rust function. Otherwise fall back to placeholder shims.
 try:
-    import fno_math_py as _native  # type: ignore[import-not-found]
+    import fno_math_py as _native
 except ImportError:
     FNO_MATH_BACKEND = "placeholder"
     for _sym in _GREEK_SYMBOLS + _INDICATOR_SYMBOLS:

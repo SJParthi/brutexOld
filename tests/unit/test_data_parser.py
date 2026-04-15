@@ -6,8 +6,6 @@ from datetime import UTC, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-
-from brutex.data import CandleBar
 from brutex.data.parser import (
     CandleRowError,
     parse_groww_candle_row,
@@ -58,9 +56,9 @@ class TestHappyPath:
     def test_t_separator_and_space_both_parse(self) -> None:
         t_row = ["2024-01-25T09:15:00", 1.0, 1.0, 1.0, 1.0, 0, None]
         space_row = ["2024-01-25 09:15:00", 1.0, 1.0, 1.0, 1.0, 0, None]
-        assert parse_groww_candle_row(t_row).timestamp == parse_groww_candle_row(
-            space_row
-        ).timestamp
+        assert (
+            parse_groww_candle_row(t_row).timestamp == parse_groww_candle_row(space_row).timestamp
+        )
 
     def test_batch_parses_all(self) -> None:
         rows = [
@@ -93,26 +91,18 @@ class TestErrorPaths:
 
     def test_rejects_non_numeric_price(self) -> None:
         with pytest.raises(CandleRowError, match="open"):
-            parse_groww_candle_row(
-                ["2024-01-25T09:15:00", None, 1.0, 1.0, 1.0, 0, None]
-            )
+            parse_groww_candle_row(["2024-01-25T09:15:00", None, 1.0, 1.0, 1.0, 0, None])
 
     def test_rejects_non_integer_volume(self) -> None:
         with pytest.raises(CandleRowError, match="volume"):
-            parse_groww_candle_row(
-                ["2024-01-25T09:15:00", 1.0, 1.0, 1.0, 1.0, "twelve", None]
-            )
+            parse_groww_candle_row(["2024-01-25T09:15:00", 1.0, 1.0, 1.0, 1.0, "twelve", None])
 
     def test_rejects_non_integer_oi(self) -> None:
         with pytest.raises(CandleRowError, match="open_interest"):
-            parse_groww_candle_row(
-                ["2024-01-25T09:15:00", 1.0, 1.0, 1.0, 1.0, 0, "fifty"]
-            )
+            parse_groww_candle_row(["2024-01-25T09:15:00", 1.0, 1.0, 1.0, 1.0, 0, "fifty"])
 
     def test_rejects_high_less_than_low(self) -> None:
         # CandleBar.__post_init__ validates OHLC ordering; parser
         # surfaces that as CandleRowError.
         with pytest.raises(CandleRowError, match="high"):
-            parse_groww_candle_row(
-                ["2024-01-25T09:15:00", 100.0, 99.0, 100.0, 100.0, 0, None]
-            )
+            parse_groww_candle_row(["2024-01-25T09:15:00", 100.0, 99.0, 100.0, 100.0, 0, None])

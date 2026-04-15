@@ -46,9 +46,6 @@ from __future__ import annotations
 import hashlib
 
 import pytest
-from hypothesis import given, settings
-from hypothesis import strategies as st
-
 from brutex.orchestrator.state import (
     MAX_SOFT_RETRIES,
     IngestPhase,
@@ -62,6 +59,8 @@ from brutex.orchestrator.state import (
     phase_complete,
     transition,
 )
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ────────────────────────────────────────────────────────────────────────
 # Strategies
@@ -156,9 +155,7 @@ def _drive_sequence(
         if is_terminal(current.state):
             break
         in_flight = dispatch(current)
-        current = transition(
-            in_flight, outcome, max_soft_retries=max_soft_retries
-        )
+        current = transition(in_flight, outcome, max_soft_retries=max_soft_retries)
         consumed += 1
     return current, consumed
 
@@ -173,32 +170,24 @@ class TestNeverSkipInvariant:
 
     @given(item=fresh_item_st, outcomes=outcome_sequence_st)
     @settings(max_examples=200, deadline=None)
-    def test_every_sequence_reaches_terminal(
-        self, item: WorkItem, outcomes: list[Outcome]
-    ) -> None:
+    def test_every_sequence_reaches_terminal(self, item: WorkItem, outcomes: list[Outcome]) -> None:
         """A non-empty random outcome sequence must drive the item to
         a terminal state (eventually)."""
         # Use a small max_soft_retries so that retry-exhaustion kicks
         # in quickly even for sequences of just 3 transients.
-        final, _consumed = _drive_sequence(
-            item, outcomes, max_soft_retries=3
-        )
+        final, _consumed = _drive_sequence(item, outcomes, max_soft_retries=3)
         # Either we hit a terminal during the sequence, or we ran out
         # of outcomes while still non-terminal. Pad with transients
         # until we're guaranteed terminal — this checks the FSM always
         # eventually terminates.
         if not is_terminal(final.state):
             padding = [Outcome.TIMEOUT] * 5
-            final, _ = _drive_sequence(
-                final, padding, max_soft_retries=3
-            )
+            final, _ = _drive_sequence(final, padding, max_soft_retries=3)
         assert is_terminal(final.state)
 
     @given(item=fresh_item_st)
     @settings(max_examples=100, deadline=None)
-    def test_single_ok_with_data_reaches_success(
-        self, item: WorkItem
-    ) -> None:
+    def test_single_ok_with_data_reaches_success(self, item: WorkItem) -> None:
         final = _drive_once(item, Outcome.OK_WITH_DATA)
         assert final.state == WorkItemState.SUCCESS
         assert final.quarantine_reason is None
@@ -211,9 +200,7 @@ class TestNeverSkipInvariant:
 
     @given(item=fresh_item_st)
     @settings(max_examples=100, deadline=None)
-    def test_single_not_found_reaches_no_data(
-        self, item: WorkItem
-    ) -> None:
+    def test_single_not_found_reaches_no_data(self, item: WorkItem) -> None:
         """NOT_FOUND is explicitly a recorded NO_DATA, not a skip."""
         final = _drive_once(item, Outcome.NOT_FOUND)
         assert final.state == WorkItemState.NO_DATA
@@ -256,9 +243,7 @@ class TestTerminalAbsorbs:
 class TestRetryMonotonic:
     @given(item=fresh_item_st, outcomes=outcome_sequence_st)
     @settings(max_examples=200, deadline=None)
-    def test_retry_count_never_decreases(
-        self, item: WorkItem, outcomes: list[Outcome]
-    ) -> None:
+    def test_retry_count_never_decreases(self, item: WorkItem, outcomes: list[Outcome]) -> None:
         current = item
         prev_retry = current.retry_count
         for outcome in outcomes:
@@ -278,9 +263,7 @@ class TestRetryMonotonic:
 class TestRetryExhaustion:
     @given(
         item=fresh_item_st,
-        transients=st.lists(
-            transient_outcome_st, min_size=5, max_size=12
-        ),
+        transients=st.lists(transient_outcome_st, min_size=5, max_size=12),
     )
     @settings(max_examples=100, deadline=None)
     def test_many_transients_quarantine_retry_exhausted(
@@ -296,16 +279,12 @@ class TestRetryExhaustion:
 
     @given(item=fresh_item_st)
     @settings(max_examples=50, deadline=None)
-    def test_retry_counter_equals_transitions_to_retrying(
-        self, item: WorkItem
-    ) -> None:
+    def test_retry_counter_equals_transitions_to_retrying(self, item: WorkItem) -> None:
         """Each transient outcome bumps retry_count by exactly one."""
         current = item
         for i in range(1, 4):  # max_soft_retries=5 so 3 is safe
             in_flight = dispatch(current)
-            current = transition(
-                in_flight, Outcome.TIMEOUT, max_soft_retries=5
-            )
+            current = transition(in_flight, Outcome.TIMEOUT, max_soft_retries=5)
             assert current.retry_count == i
             assert current.state == WorkItemState.RETRYING
 
@@ -330,27 +309,21 @@ class TestQuarantineReasonConsistency:
 
     @given(item=fresh_item_st)
     @settings(max_examples=50, deadline=None)
-    def test_bad_request_outcome_yields_bad_request_reason(
-        self, item: WorkItem
-    ) -> None:
+    def test_bad_request_outcome_yields_bad_request_reason(self, item: WorkItem) -> None:
         final = _drive_once(item, Outcome.BAD_REQUEST)
         assert final.state == WorkItemState.QUARANTINED
         assert final.quarantine_reason == QuarantineReason.BAD_REQUEST
 
     @given(item=fresh_item_st)
     @settings(max_examples=50, deadline=None)
-    def test_auth_failed_outcome_yields_auth_failed_reason(
-        self, item: WorkItem
-    ) -> None:
+    def test_auth_failed_outcome_yields_auth_failed_reason(self, item: WorkItem) -> None:
         final = _drive_once(item, Outcome.AUTH_FAILED)
         assert final.state == WorkItemState.QUARANTINED
         assert final.quarantine_reason == QuarantineReason.AUTH_FAILED
 
     @given(item=fresh_item_st)
     @settings(max_examples=50, deadline=None)
-    def test_authz_failed_outcome_yields_authz_failed_reason(
-        self, item: WorkItem
-    ) -> None:
+    def test_authz_failed_outcome_yields_authz_failed_reason(self, item: WorkItem) -> None:
         final = _drive_once(item, Outcome.AUTHZ_FAILED)
         assert final.state == WorkItemState.QUARANTINED
         assert final.quarantine_reason == QuarantineReason.AUTHZ_FAILED
@@ -401,16 +374,12 @@ class TestParamsCanonicalisation:
         phase=st.sampled_from(_ALL_PHASES),
         params=st.dictionaries(
             keys=st.text(
-                alphabet=st.characters(
-                    min_codepoint=0x61, max_codepoint=0x7A
-                ),
+                alphabet=st.characters(min_codepoint=0x61, max_codepoint=0x7A),
                 min_size=1,
                 max_size=6,
             ),
             values=st.text(
-                alphabet=st.characters(
-                    min_codepoint=0x30, max_codepoint=0x39
-                ),
+                alphabet=st.characters(min_codepoint=0x30, max_codepoint=0x39),
                 min_size=1,
                 max_size=6,
             ),
@@ -419,9 +388,7 @@ class TestParamsCanonicalisation:
         ),
     )
     @settings(max_examples=150, deadline=None)
-    def test_param_order_irrelevant(
-        self, phase: IngestPhase, params: dict[str, str]
-    ) -> None:
+    def test_param_order_irrelevant(self, phase: IngestPhase, params: dict[str, str]) -> None:
         """WorkItem.new must canonicalise params to a sorted tuple —
         the order in which the caller builds the dict is irrelevant."""
         h = hashlib.sha256(repr(sorted(params.items())).encode()).hexdigest()
@@ -429,9 +396,7 @@ class TestParamsCanonicalisation:
 
         # Shuffle the dict by rebuilding it in reverse key order.
         reversed_params = dict(reversed(list(params.items())))
-        item2 = WorkItem.new(
-            phase=phase, content_hash=h, params=reversed_params
-        )
+        item2 = WorkItem.new(phase=phase, content_hash=h, params=reversed_params)
 
         assert item1.params == item2.params
         # And the canonical form is in sorted order.
@@ -466,14 +431,10 @@ class TestPhaseCompleteProperty:
             # Make sure it's terminal (may need retry padding for
             # transient outcomes).
             if not is_terminal(final.state):
-                final, _ = _drive_sequence(
-                    final, [Outcome.TIMEOUT] * 12, max_soft_retries=3
-                )
+                final, _ = _drive_sequence(final, [Outcome.TIMEOUT] * 12, max_soft_retries=3)
             # Resolve any quarantines so phase_complete can pass.
             if final.state == WorkItemState.QUARANTINED:
-                final = resolve_quarantine(
-                    final, as_state=WorkItemState.NO_DATA
-                )
+                final = resolve_quarantine(final, as_state=WorkItemState.NO_DATA)
             terminal_items.append(final)
 
         assert phase_complete(terminal_items) is True

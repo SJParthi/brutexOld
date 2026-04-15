@@ -52,7 +52,7 @@ class TestCandleIntervalValues:
             "WEEK": "1week",
             "MONTH": "1month",
         }
-        assert GROWW_CANDLE_INTERVAL_VALUES == expected
+        assert expected == GROWW_CANDLE_INTERVAL_VALUES
 
     def test_day_week_month_have_no_suffix(self) -> None:
         """Resolution of OQ-GROWW-CANDLE-NAMES — bare names canonical."""
@@ -74,9 +74,7 @@ class TestCandleIntervalAttrNames:
             assert name.startswith("CANDLE_INTERVAL_")
 
     def test_attr_names_cover_dict_keys(self) -> None:
-        short_codes = {
-            n.removeprefix("CANDLE_INTERVAL_") for n in GROWW_CANDLE_INTERVAL_ATTR_NAMES
-        }
+        short_codes = {n.removeprefix("CANDLE_INTERVAL_") for n in GROWW_CANDLE_INTERVAL_ATTR_NAMES}
         assert short_codes == set(GROWW_CANDLE_INTERVAL_VALUES.keys())
 
 
@@ -94,9 +92,7 @@ class TestMaxDurationDays:
             assert GROWW_MAX_DURATION_DAYS[code] == 180
 
     def test_covers_every_candle_interval(self) -> None:
-        assert set(GROWW_MAX_DURATION_DAYS.keys()) == set(
-            GROWW_CANDLE_INTERVAL_VALUES.keys()
-        )
+        assert set(GROWW_MAX_DURATION_DAYS.keys()) == set(GROWW_CANDLE_INTERVAL_VALUES.keys())
 
 
 class TestInstrumentTypeMapping:

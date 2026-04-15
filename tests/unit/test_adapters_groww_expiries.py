@@ -5,22 +5,20 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from brutex.adapters.groww.client import GrowwAdapter
 from brutex.adapters.groww.expiries import (
     ExpiriesResult,
-    ExpiriesScopeError,
     PhaseBDriver,
     _content_hash,
 )
 from brutex.models import Exchange
 from brutex.orchestrator.audit import AuditWriter
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
-from brutex.orchestrator.state import IngestPhase, WorkItemState
+from brutex.orchestrator.state import IngestPhase
 from brutex.orchestrator.store import WorkItemStore
 from brutex.universe import UnderlyingSpec
-from tests.fakes.groww import FakeGrowwClient
 
+from tests.fakes.groww import FakeGrowwClient
 
 # ────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -42,17 +40,13 @@ def audit(tmp_path: Path):
 @pytest.fixture
 def fake_client() -> FakeGrowwClient:
     client = FakeGrowwClient()
-    client.expiries_response = {
-        "expiries": ["2024-01-25", "2024-02-29", "2024-03-28"]
-    }
+    client.expiries_response = {"expiries": ["2024-01-25", "2024-02-29", "2024-03-28"]}
     return client
 
 
 @pytest.fixture
 def bucket() -> AdaptiveTokenBucket:
-    return AdaptiveTokenBucket(
-        initial_rps=1000.0, downshift_rps=500.0, burst=100
-    )
+    return AdaptiveTokenBucket(initial_rps=1000.0, downshift_rps=500.0, burst=100)
 
 
 @pytest.fixture
@@ -100,15 +94,9 @@ class TestContentHash:
         assert len(h1) == 64
 
     def test_different_inputs_different_hashes(self) -> None:
-        assert _content_hash("NSE", "NIFTY", 2024) != _content_hash(
-            "NSE", "NIFTY", 2025
-        )
-        assert _content_hash("NSE", "NIFTY", 2024) != _content_hash(
-            "BSE", "NIFTY", 2024
-        )
-        assert _content_hash("NSE", "NIFTY", 2024) != _content_hash(
-            "NSE", "BANKNIFTY", 2024
-        )
+        assert _content_hash("NSE", "NIFTY", 2024) != _content_hash("NSE", "NIFTY", 2025)
+        assert _content_hash("NSE", "NIFTY", 2024) != _content_hash("BSE", "NIFTY", 2024)
+        assert _content_hash("NSE", "NIFTY", 2024) != _content_hash("NSE", "BANKNIFTY", 2024)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -318,9 +306,7 @@ class TestEmptyResponses:
         """One underlying has data, other empty — happy coexistence."""
         call_count = {"n": 0}
 
-        def stateful_invoke(
-            *, exchange, underlying_symbol, year=None, month=None
-        ):
+        def stateful_invoke(*, exchange, underlying_symbol, year=None, month=None):
             call_count["n"] += 1
             if underlying_symbol == "NIFTY":
                 return {"expiries": ["2024-01-25"]}

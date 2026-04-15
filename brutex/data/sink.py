@@ -27,12 +27,12 @@ has no heavy deps.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from brutex.data.catalog import Catalog
-from brutex.data.models import CandleBar, CatalogEntry
+from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter, WriteResult
 from brutex.data.partition import partition_for_timestamp
 
@@ -132,9 +132,7 @@ class ParquetBarSink:
         who only need raw files.
     """
 
-    def __init__(
-        self, *, writer: ParquetWriter, catalog: Catalog | None = None
-    ) -> None:
+    def __init__(self, *, writer: ParquetWriter, catalog: Catalog | None = None) -> None:
         self._writer = writer
         self._catalog = catalog
 

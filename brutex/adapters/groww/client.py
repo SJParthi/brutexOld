@@ -43,9 +43,10 @@ via a queue, not by direct method calls.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any, Callable, Final, Protocol, runtime_checkable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
-from brutex.orchestrator.audit import AuditEntry, AuditWriter
+from brutex.orchestrator.audit import AuditWriter
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket, RateLimiterEvent
 from brutex.orchestrator.retry import (
     UnknownExceptionError,
@@ -89,8 +90,7 @@ class GrowwClientProtocol(Protocol):
     def get_all_instruments(self) -> Any:  # returns pandas.DataFrame
         ...
 
-    def get_instrument_by_groww_symbol(self, groww_symbol: str) -> dict[str, Any]:
-        ...
+    def get_instrument_by_groww_symbol(self, groww_symbol: str) -> dict[str, Any]: ...
 
     def get_expiries(
         self,
@@ -99,8 +99,7 @@ class GrowwClientProtocol(Protocol):
         underlying_symbol: str,
         year: int | None = None,
         month: int | None = None,
-    ) -> dict[str, list[str]]:
-        ...
+    ) -> dict[str, list[str]]: ...
 
     def get_contracts(
         self,
@@ -108,8 +107,7 @@ class GrowwClientProtocol(Protocol):
         exchange: str,
         underlying_symbol: str,
         expiry_date: str,
-    ) -> dict[str, list[str]]:
-        ...
+    ) -> dict[str, list[str]]: ...
 
     def get_historical_candles(
         self,
@@ -120,8 +118,7 @@ class GrowwClientProtocol(Protocol):
         start_time: str,
         end_time: str,
         candle_interval: str,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -255,7 +252,7 @@ class GrowwAdapter:
         """
         try:
             # Lazy import — this is the ONLY place growwapi gets imported.
-            from growwapi import GrowwAPI  # noqa: PLC0415
+            from growwapi import GrowwAPI
         except ImportError as exc:
             raise RuntimeError(
                 "growwapi package is not installed. "
@@ -276,9 +273,7 @@ class GrowwAdapter:
 
     # ── Public API — one method per Groww SDK call ────────────────
 
-    def pull_all_instruments(
-        self, *, work_item: WorkItem
-    ) -> tuple[WorkItem, Any]:
+    def pull_all_instruments(self, *, work_item: WorkItem) -> tuple[WorkItem, Any]:
         """Phase A call — fetch the full instrument DataFrame.
 
         The work item's ``content_hash`` should encode the fact that
@@ -294,7 +289,7 @@ class GrowwAdapter:
         return self._execute_call(
             work_item=work_item,
             method_name="get_all_instruments",
-            call=lambda: self._client.get_all_instruments(),
+            call=self._client.get_all_instruments,
             is_empty=_is_dataframe_empty,
             response_summary=lambda r: {
                 "rows": len(r) if r is not None else 0,
@@ -470,9 +465,7 @@ class GrowwAdapter:
                     "method": method_name,
                     "cached_state": cached.state.value,
                     "reason": (
-                        cached.quarantine_reason.value
-                        if cached.quarantine_reason
-                        else "unknown"
+                        cached.quarantine_reason.value if cached.quarantine_reason else "unknown"
                     ),
                 },
             )
@@ -508,7 +501,7 @@ class GrowwAdapter:
 
         try:
             response = call()
-        except Exception as exc:  # noqa: BLE001 — intentional catch-all
+        except Exception as exc:
             try:
                 outcome = classify_exception(exc)
             except UnknownExceptionError:
@@ -525,10 +518,7 @@ class GrowwAdapter:
                     self._on_rate_limit_event(event)
         else:
             # Success path — detect empty vs non-empty
-            if is_empty(response):
-                outcome = Outcome.OK_EMPTY
-            else:
-                outcome = Outcome.OK_WITH_DATA
+            outcome = Outcome.OK_EMPTY if is_empty(response) else Outcome.OK_WITH_DATA
             self._bucket.record_success()
 
         elapsed_ms = (time.monotonic() - t0) * 1000.0
@@ -557,7 +547,7 @@ class GrowwAdapter:
         if response is not None:
             try:
                 payload["response_summary"] = response_summary(response)
-            except Exception:  # noqa: BLE001 — summary is best-effort
+            except Exception:
                 payload["response_summary"] = {"_unparseable": True}
 
         self._audit.append(
@@ -583,8 +573,7 @@ class GrowwAdapter:
             # Should be unreachable — transition() always moves to one
             # of the above states or raises.
             raise RuntimeError(
-                f"Unexpected post-call state {state.value} — "
-                f"transition() invariant broken"
+                f"Unexpected post-call state {state.value} — transition() invariant broken"
             )
         return mapping[state]
 

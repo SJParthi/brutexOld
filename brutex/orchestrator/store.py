@@ -56,10 +56,11 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Final, Iterator, Self
+from typing import Final, Self
 
 import lmdb
 
@@ -122,8 +123,7 @@ def _encode_key(content_hash: str) -> bytes:
     """Convert a 64-char hex content_hash into 32 raw bytes for LMDB."""
     if len(content_hash) != CONTENT_HASH_BYTES * 2:
         raise StoreKeyError(
-            f"content_hash must be {CONTENT_HASH_BYTES * 2} hex chars "
-            f"(got {len(content_hash)})"
+            f"content_hash must be {CONTENT_HASH_BYTES * 2} hex chars (got {len(content_hash)})"
         )
     try:
         return bytes.fromhex(content_hash)
@@ -140,16 +140,12 @@ def _serialize_item(item: WorkItem) -> bytes:
         "params": [list(kv) for kv in item.params],
         "state": item.state.value,
         "retry_count": item.retry_count,
-        "quarantine_reason": (
-            item.quarantine_reason.value if item.quarantine_reason else None
-        ),
+        "quarantine_reason": (item.quarantine_reason.value if item.quarantine_reason else None),
         "resolved_by_human": item.resolved_by_human,
         "created_at": item.created_at.isoformat(),
         "last_transition_at": item.last_transition_at.isoformat(),
     }
-    return json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8"
-    )
+    return json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
 def _deserialize_item(raw: bytes) -> WorkItem:
@@ -173,9 +169,7 @@ def _deserialize_item(raw: bytes) -> WorkItem:
     }
     missing = required - set(data.keys())
     if missing:
-        raise StoreCorruptionError(
-            f"Store entry missing required fields: {sorted(missing)}"
-        )
+        raise StoreCorruptionError(f"Store entry missing required fields: {sorted(missing)}")
 
     try:
         return WorkItem(
@@ -186,9 +180,7 @@ def _deserialize_item(raw: bytes) -> WorkItem:
             state=WorkItemState(data["state"]),
             retry_count=int(data["retry_count"]),
             quarantine_reason=(
-                QuarantineReason(data["quarantine_reason"])
-                if data["quarantine_reason"]
-                else None
+                QuarantineReason(data["quarantine_reason"]) if data["quarantine_reason"] else None
             ),
             resolved_by_human=bool(data["resolved_by_human"]),
             created_at=datetime.fromisoformat(data["created_at"]),
@@ -272,9 +264,7 @@ class WorkItemStore:
         dbs: dict[IngestPhase, lmdb._Database] = {}
         with env.begin(write=not read_only) as txn:
             for phase in IngestPhase:
-                db = env.open_db(
-                    phase.value.encode("utf-8"), txn=txn, create=not read_only
-                )
+                db = env.open_db(phase.value.encode("utf-8"), txn=txn, create=not read_only)
                 dbs[phase] = db
         return cls(path=path, env=env, dbs=dbs)
 
@@ -375,9 +365,7 @@ class WorkItemStore:
             for _, raw in cursor:
                 yield _deserialize_item(raw)
 
-    def count_by_state(
-        self, phase: IngestPhase
-    ) -> dict[WorkItemState, int]:
+    def count_by_state(self, phase: IngestPhase) -> dict[WorkItemState, int]:
         """Return a histogram of states within *phase*.
 
         Dashboard uses this for the "123 success / 4 no-data /

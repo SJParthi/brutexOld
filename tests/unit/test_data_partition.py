@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
-
 from brutex.data import (
     BAR_DIR_NAME,
     PartitionError,
@@ -14,7 +13,6 @@ from brutex.data import (
     parse_partition_path,
     partition_for_timestamp,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # build_partition_path
@@ -132,9 +130,7 @@ class TestBuildPartitionValidation:
             )
 
     @pytest.mark.parametrize("bad", ["a/b", "c:d", "e*f", "g?h", "i<j"])
-    def test_rejects_symbol_with_forbidden_chars(
-        self, tmp_path: Path, bad: str
-    ) -> None:
+    def test_rejects_symbol_with_forbidden_chars(self, tmp_path: Path, bad: str) -> None:
         with pytest.raises(PartitionError, match="forbidden"):
             build_partition_path(
                 lake_root=tmp_path,
@@ -221,9 +217,7 @@ class TestParsePartitionPath:
 
     def test_rejects_missing_bars_dir(self) -> None:
         # Construct a path that has 7+ components but the wrong top
-        bogus = Path(
-            "not_bars/NSE/FNO/NSE-NIFTY/1minute/2024/01.parquet"
-        )
+        bogus = Path("not_bars/NSE/FNO/NSE-NIFTY/1minute/2024/01.parquet")
         with pytest.raises(PartitionError, match="under bars"):
             parse_partition_path(bogus)
 
@@ -249,9 +243,7 @@ class TestParsePartitionPath:
         outside_file.parent.mkdir(parents=True)
         outside_file.touch()
         with pytest.raises(PartitionError, match="not inside"):
-            parse_partition_path(
-                outside_file, lake_root=tmp_path / "lake"
-            )
+            parse_partition_path(outside_file, lake_root=tmp_path / "lake")
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -266,7 +258,7 @@ class TestPartitionForTimestamp:
 
     def test_ist_converts_to_utc(self) -> None:
         # 2024-03-01 00:30 IST = 2024-02-29 19:00 UTC — so partition (2024, 2)
-        ist = timezone(offset=datetime.now(UTC).utcoffset() or timezone.utc.utcoffset(datetime.now(UTC)))  # noqa
+        ist = timezone(offset=datetime.now(UTC).utcoffset() or UTC.utcoffset(datetime.now(UTC)))
         # Use a fixed IST +05:30 explicitly:
         from datetime import timedelta
 

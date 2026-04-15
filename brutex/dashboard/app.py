@@ -36,17 +36,16 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Deque
+from typing import Any
 
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
     PipelineEventKind,
 )
-from brutex.orchestrator.state import IngestPhase, WorkItemState
+from brutex.orchestrator.state import IngestPhase
 
 # ────────────────────────────────────────────────────────────────────────
 # Snapshot dataclasses
@@ -127,16 +126,13 @@ class DashboardState:
     run_elapsed_seconds: float | None = None
     phases: dict[str, PhaseSnapshot] = field(
         default_factory=lambda: {
-            phase.value: PhaseSnapshot(phase=phase.value, status="pending")
-            for phase in IngestPhase
+            phase.value: PhaseSnapshot(phase=phase.value, status="pending") for phase in IngestPhase
         }
     )
     workers: dict[str, WorkerRow] = field(default_factory=dict)
     telegram: TelegramStatsPanel = field(default_factory=TelegramStatsPanel)
     rate_limit: RateLimitPanel = field(default_factory=RateLimitPanel)
-    recent_events: Deque[dict[str, Any]] = field(
-        default_factory=lambda: deque(maxlen=500)
-    )
+    recent_events: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=500))
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     # ── Event subscription entry point ──────────────────────────────
@@ -156,9 +152,7 @@ class DashboardState:
                     "at": event.at.isoformat(),
                     "phase": event.phase.value if event.phase else None,
                     "item_id": event.item_id,
-                    "item_state": (
-                        event.item_state.value if event.item_state else None
-                    ),
+                    "item_state": (event.item_state.value if event.item_state else None),
                     "done": event.done,
                     "total": event.total,
                     "success": event.success,
@@ -247,12 +241,8 @@ class DashboardState:
             self.telegram.sent = int(stats.get("sent", 0))
             self.telegram.dropped_on_failure = int(stats.get("dropped_on_failure", 0))
             self.telegram.dropped_on_dedupe = int(stats.get("dropped_on_dedupe", 0))
-            self.telegram.dropped_on_queue_full = int(
-                stats.get("dropped_on_queue_full", 0)
-            )
-            self.telegram.dropped_on_disabled = int(
-                stats.get("dropped_on_disabled", 0)
-            )
+            self.telegram.dropped_on_queue_full = int(stats.get("dropped_on_queue_full", 0))
+            self.telegram.dropped_on_disabled = int(stats.get("dropped_on_disabled", 0))
 
     def update_worker(
         self,
@@ -334,8 +324,8 @@ def build_app(state: DashboardState) -> Any:
         server of choice.
     """
     try:
-        from fastapi import FastAPI, WebSocket, WebSocketDisconnect  # noqa: PLC0415
-        from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse  # noqa: PLC0415
+        from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+        from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
     except ImportError as exc:
         raise RuntimeError(
             "FastAPI is not installed. Install with `pip install "
@@ -343,7 +333,7 @@ def build_app(state: DashboardState) -> Any:
             "state model do not need FastAPI."
         ) from exc
 
-    from brutex.observability.metrics import get_registry, render_prometheus  # noqa: PLC0415
+    from brutex.observability.metrics import get_registry, render_prometheus
 
     app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
 
@@ -353,7 +343,7 @@ def build_app(state: DashboardState) -> Any:
 
     @app.get("/api/v1/events")
     async def api_events() -> JSONResponse:
-        with state._lock:  # noqa: SLF001
+        with state._lock:
             events = list(state.recent_events)
         return JSONResponse({"events": events})
 
@@ -380,7 +370,7 @@ def build_app(state: DashboardState) -> Any:
 
 
 async def _async_sleep(seconds: float) -> None:
-    import asyncio  # noqa: PLC0415
+    import asyncio
 
     await asyncio.sleep(seconds)
 

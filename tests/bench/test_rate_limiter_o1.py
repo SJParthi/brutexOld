@@ -24,15 +24,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import List
-
-import pytest
 
 from brutex.orchestrator.rate_limiter import (
     AdaptiveTokenBucket,
-    RateLimiterEvent,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Fake clock
@@ -71,9 +66,7 @@ def _fresh_bucket(clock: FakeClock) -> AdaptiveTokenBucket:
     )
 
 
-def _bucket_with_primed_window(
-    clock: FakeClock, hits: int
-) -> AdaptiveTokenBucket:
+def _bucket_with_primed_window(clock: FakeClock, hits: int) -> AdaptiveTokenBucket:
     """A bucket with *hits* 429s recorded within the current window."""
     bucket = _fresh_bucket(clock)
     for _ in range(hits):
@@ -192,6 +185,5 @@ class TestWindowAgeOutIsO1:
 
         # Should be well under 100µs per call — empty fast path.
         assert per_call < 100_000, (
-            f"acquire() took {per_call:.0f}ns on average after window "
-            f"flush — expected <100µs."
+            f"acquire() took {per_call:.0f}ns on average after window flush — expected <100µs."
         )

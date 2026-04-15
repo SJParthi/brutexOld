@@ -10,7 +10,7 @@ See ``docs/REQUIREMENTS.md §6`` for the full data-model specification and
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
@@ -139,21 +139,13 @@ class Instrument:
     def __post_init__(self) -> None:  # pragma: no cover — dataclass init guard
         # Integrity invariants — catch adapter bugs at construction time
         if self.is_derivative and self.underlying_symbol is None:
-            raise ValueError(
-                f"Derivative {self.groww_symbol} must have underlying_symbol"
-            )
+            raise ValueError(f"Derivative {self.groww_symbol} must have underlying_symbol")
         if self.is_derivative and self.expiry_date is None:
-            raise ValueError(
-                f"Derivative {self.groww_symbol} must have expiry_date"
-            )
+            raise ValueError(f"Derivative {self.groww_symbol} must have expiry_date")
         if self.is_option and self.strike_price is None:
-            raise ValueError(
-                f"Option {self.groww_symbol} must have strike_price"
-            )
+            raise ValueError(f"Option {self.groww_symbol} must have strike_price")
         if self.is_option and self.strike_price is not None and self.strike_price <= 0:
-            raise ValueError(
-                f"Option {self.groww_symbol} strike_price must be positive"
-            )
+            raise ValueError(f"Option {self.groww_symbol} strike_price must be positive")
         if self.lot_size <= 0:
             raise ValueError(f"{self.groww_symbol} lot_size must be positive")
         if self.tick_size <= 0:
@@ -262,6 +254,7 @@ def normalise_tick_size(raw: float | int | Decimal | str) -> Decimal:
 
 
 __all__ = [
+    "VALID_TICK_SIZES_RUPEES",
     "BruteXError",
     "Exchange",
     "Instrument",
@@ -271,6 +264,5 @@ __all__ = [
     "OutOfScopeError",
     "Segment",
     "TickSizeFormatError",
-    "VALID_TICK_SIZES_RUPEES",
     "normalise_tick_size",
 ]

@@ -10,7 +10,6 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-
 from brutex.adapters.groww.client import GrowwAdapter
 from brutex.adapters.groww.instruments import (
     InstrumentsResult,
@@ -18,12 +17,11 @@ from brutex.adapters.groww.instruments import (
     PhaseADriver,
 )
 from brutex.orchestrator.audit import AuditWriter
-from brutex.orchestrator.pipeline import PhaseResult
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 from brutex.orchestrator.state import IngestPhase
 from brutex.orchestrator.store import WorkItemStore
-from tests.fakes.groww import FakeDataFrame, FakeGrowwClient
 
+from tests.fakes.groww import FakeDataFrame, FakeGrowwClient
 
 # ────────────────────────────────────────────────────────────────────────
 # Canonical row shapes
@@ -206,9 +204,7 @@ def adapter(
 
 
 @pytest.fixture
-def driver(
-    adapter: GrowwAdapter, store: WorkItemStore, audit: AuditWriter
-) -> PhaseADriver:
+def driver(adapter: GrowwAdapter, store: WorkItemStore, audit: AuditWriter) -> PhaseADriver:
     return PhaseADriver(
         adapter=adapter,
         store=store,
@@ -314,7 +310,7 @@ class TestIntegrityFailures:
         fake_client.instruments_response = FakeDataFrame(
             [_nifty_spot_row(), bad_row, _sensex_ce_row()]
         )
-        phase_result = driver.run()
+        driver.run()
         result = driver.last_result
         assert result is not None
         assert result.total_raw_rows == 3
@@ -339,9 +335,7 @@ class TestIntegrityFailures:
 
 
 class TestEmptyCsv:
-    def test_empty_csv_no_halt(
-        self, driver: PhaseADriver, fake_client: FakeGrowwClient
-    ) -> None:
+    def test_empty_csv_no_halt(self, driver: PhaseADriver, fake_client: FakeGrowwClient) -> None:
         """Empty response is OK_EMPTY → NO_DATA terminal, no halt."""
         fake_client.instruments_response = FakeDataFrame([])
         phase_result = driver.run()

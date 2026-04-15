@@ -45,9 +45,9 @@ The exporter renders this as::
 
 from __future__ import annotations
 
+import itertools
 import math
 import threading
-from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
@@ -217,13 +217,10 @@ class MetricRegistry:
         """Declare a histogram."""
         if not buckets or buckets[-1] != math.inf:
             raise MetricsError(
-                f"Histogram {name!r} buckets must be non-empty and end with "
-                f"+Inf (got {buckets!r})"
+                f"Histogram {name!r} buckets must be non-empty and end with +Inf (got {buckets!r})"
             )
-        if any(a >= b for a, b in zip(buckets, buckets[1:], strict=False)):
-            raise MetricsError(
-                f"Histogram {name!r} buckets must be strictly increasing"
-            )
+        if any(a >= b for a, b in itertools.pairwise(buckets)):
+            raise MetricsError(f"Histogram {name!r} buckets must be strictly increasing")
         with self._lock:
             if name in self._histograms:
                 self._validate_same_definition(
@@ -280,9 +277,7 @@ class MetricRegistry:
             (counters are monotonic).
         """
         if amount < 0:
-            raise MetricsError(
-                f"Counter increment must be non-negative, got {amount}"
-            )
+            raise MetricsError(f"Counter increment must be non-negative, got {amount}")
         with self._lock:
             if name not in self._counters:
                 raise MetricsError(f"Counter {name!r} is not registered")
@@ -321,9 +316,7 @@ class MetricRegistry:
             histogram = self._histograms[name]
             self._validate_label_cardinality(histogram.definition, labels)
         with histogram.definition.lock:
-            counts = histogram.bucket_counts.setdefault(
-                labels, [0] * len(histogram.buckets)
-            )
+            counts = histogram.bucket_counts.setdefault(labels, [0] * len(histogram.buckets))
             for i, upper in enumerate(histogram.buckets):
                 if value <= upper:
                     counts[i] += 1
@@ -343,24 +336,16 @@ class MetricRegistry:
 
     # ── Read-only accessors for tests ──────────────────────────────
 
-    def counter_value(
-        self, name: str, *, labels: tuple[str, ...] = _EMPTY_LABELS
-    ) -> float:
+    def counter_value(self, name: str, *, labels: tuple[str, ...] = _EMPTY_LABELS) -> float:
         return self._counters[name].values.get(labels, 0.0)
 
-    def gauge_value(
-        self, name: str, *, labels: tuple[str, ...] = _EMPTY_LABELS
-    ) -> float:
+    def gauge_value(self, name: str, *, labels: tuple[str, ...] = _EMPTY_LABELS) -> float:
         return self._gauges[name].values.get(labels, 0.0)
 
-    def histogram_count(
-        self, name: str, *, labels: tuple[str, ...] = _EMPTY_LABELS
-    ) -> int:
+    def histogram_count(self, name: str, *, labels: tuple[str, ...] = _EMPTY_LABELS) -> int:
         return self._histograms[name].counts.get(labels, 0)
 
-    def histogram_sum(
-        self, name: str, *, labels: tuple[str, ...] = _EMPTY_LABELS
-    ) -> float:
+    def histogram_sum(self, name: str, *, labels: tuple[str, ...] = _EMPTY_LABELS) -> float:
         return self._histograms[name].sums.get(labels, 0.0)
 
 
@@ -378,10 +363,10 @@ def render_prometheus(registry: MetricRegistry) -> str:
     """
     out: list[str] = []
 
-    with registry._lock:  # noqa: SLF001
-        counters = sorted(registry._counters.items())  # noqa: SLF001
-        gauges = sorted(registry._gauges.items())  # noqa: SLF001
-        histograms = sorted(registry._histograms.items())  # noqa: SLF001
+    with registry._lock:
+        counters = sorted(registry._counters.items())
+        gauges = sorted(registry._gauges.items())
+        histograms = sorted(registry._histograms.items())
 
     for name, counter in counters:
         with counter.definition.lock:
@@ -411,16 +396,10 @@ def render_prometheus(registry: MetricRegistry) -> str:
             for labels in label_values:
                 counts = histogram.bucket_counts[labels]
                 for upper, count in zip(histogram.buckets, counts, strict=False):
-                    bucket_label = (
-                        "+Inf" if upper == math.inf else f"{upper}"
-                    )
-                    extra_labels = histogram.definition.labels + ("le",)
-                    extra_values = labels + (bucket_label,)
-                    out.append(
-                        _format_line(
-                            name + "_bucket", extra_labels, extra_values, count
-                        )
-                    )
+                    bucket_label = "+Inf" if upper == math.inf else f"{upper}"
+                    extra_labels = (*histogram.definition.labels, "le")
+                    extra_values = (*labels, bucket_label)
+                    out.append(_format_line(name + "_bucket", extra_labels, extra_values, count))
                 out.append(
                     _format_line(
                         name + "_sum",

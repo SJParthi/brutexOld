@@ -26,6 +26,7 @@ must first delete the old file or resolve the conflict explicitly.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import tempfile
@@ -134,9 +135,7 @@ class ParquetWriter:
             destination exists with conflicting content.
         """
         if not bars:
-            raise WriterError(
-                "ParquetWriter.write called with an empty bars list"
-            )
+            raise WriterError("ParquetWriter.write called with an empty bars list")
 
         # Group by (year, month) — must all be in one partition.
         partitions = {partition_for_timestamp(b.timestamp) for b in bars}
@@ -227,7 +226,7 @@ class ParquetWriter:
         if the import fails.
         """
         try:
-            import polars as pl  # noqa: PLC0415 — lazy on purpose
+            import polars as pl
         except ImportError as exc:
             raise WriterError(
                 "ParquetWriter requires 'polars' — install with "
@@ -262,7 +261,7 @@ class ParquetWriter:
 
         # polars write_parquet → file-like. Use an in-memory BytesIO so
         # we can compute the hash before touching the filesystem.
-        import io  # noqa: PLC0415
+        import io
 
         bio = io.BytesIO()
         df.write_parquet(
@@ -295,8 +294,6 @@ class ParquetWriter:
             os.replace(tmp_path, dest)
         except Exception:
             # Clean up on any error path.
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 os.unlink(tmp_path)
-            except FileNotFoundError:
-                pass
             raise

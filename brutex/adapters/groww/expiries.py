@@ -43,22 +43,22 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from brutex.adapters.groww.client import GrowwAdapter
-from brutex.models import BruteXError, Exchange
+from brutex.models import BruteXError
 from brutex.orchestrator.audit import AuditWriter
 from brutex.orchestrator.pipeline import (
     EventSubscriber,
-    PhaseHaltError,
     PhaseResult,
     PhaseRunner,
 )
 from brutex.orchestrator.state import IngestPhase, WorkItem, WorkItemState
 from brutex.orchestrator.store import WorkItemStore
-from brutex.universe import UnderlyingSpec, V1_INDICES
+from brutex.universe import V1_INDICES, UnderlyingSpec
 
 logger = logging.getLogger(__name__)
 
@@ -175,8 +175,7 @@ class PhaseBDriver:
 
         if self._end_year < self._start_year:
             raise ValueError(
-                f"end_year ({self._end_year}) must be >= start_year "
-                f"({self._start_year})"
+                f"end_year ({self._end_year}) must be >= start_year ({self._start_year})"
             )
 
         # Populated during run()
@@ -209,7 +208,7 @@ class PhaseBDriver:
         total_items = len(items)
 
         def invoke(work_item: WorkItem) -> tuple[WorkItem, Any]:
-            params = {k: v for k, v in work_item.params}
+            params = dict(work_item.params)
             exchange = params["exchange"]
             underlying = params["underlying_symbol"]
             year = int(params["year"])
@@ -221,13 +220,9 @@ class PhaseBDriver:
                 year=year,
             )
 
-            if new_item.state == WorkItemState.SUCCESS and isinstance(
-                response, dict
-            ):
+            if new_item.state == WorkItemState.SUCCESS and isinstance(response, dict):
                 for expiry_date in response.get("expiries", []):
-                    self._collected_expiries[(exchange, underlying)].add(
-                        str(expiry_date)
-                    )
+                    self._collected_expiries[(exchange, underlying)].add(str(expiry_date))
 
             return new_item, response
 
@@ -243,9 +238,7 @@ class PhaseBDriver:
 
         # Scope check — every phase-A-driven scope error pattern applies.
         total_expiries = sum(len(v) for v in self._collected_expiries.values())
-        underlyings_with_expiries = sum(
-            1 for v in self._collected_expiries.values() if v
-        )
+        underlyings_with_expiries = sum(1 for v in self._collected_expiries.values() if v)
 
         if phase_result.success > 0 and total_expiries == 0:
             raise ExpiriesScopeError(
@@ -255,9 +248,7 @@ class PhaseBDriver:
                 f"pipeline and investigate."
             )
 
-        per_underlying_counts = {
-            key: len(value) for key, value in self._collected_expiries.items()
-        }
+        per_underlying_counts = {key: len(value) for key, value in self._collected_expiries.items()}
 
         result = ExpiriesResult(
             phase_result=phase_result,

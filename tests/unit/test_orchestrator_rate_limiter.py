@@ -9,15 +9,12 @@ of the timing the caller reports.
 from __future__ import annotations
 
 import pytest
-
 from brutex.orchestrator.rate_limiter import (
     DEFAULT_DOWNSHIFT_RPS,
     DEFAULT_INITIAL_RPS,
     AdaptiveTokenBucket,
     RateLimiterError,
-    RateLimiterEvent,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Fake clock & sleep helpers — deterministic test infrastructure
@@ -113,9 +110,7 @@ class TestAcquireBurst:
             wait = bucket.acquire()
             assert wait == 0.0
 
-    def test_sixth_call_waits(
-        self, bucket: AdaptiveTokenBucket, clock: FakeClock
-    ) -> None:
+    def test_sixth_call_waits(self, bucket: AdaptiveTokenBucket, clock: FakeClock) -> None:
         # Drain burst
         for _ in range(5):
             bucket.acquire()
@@ -126,9 +121,7 @@ class TestAcquireBurst:
         assert wait == pytest.approx(1.0 / 15.0)
         assert after - before == pytest.approx(1.0 / 15.0)
 
-    def test_steady_state_throughput(
-        self, bucket: AdaptiveTokenBucket, clock: FakeClock
-    ) -> None:
+    def test_steady_state_throughput(self, bucket: AdaptiveTokenBucket, clock: FakeClock) -> None:
         """After burst, sustained throughput = initial_rps."""
         # Drain burst
         for _ in range(5):
@@ -147,26 +140,21 @@ class TestAcquireBurst:
 
 
 class TestDownshift:
-    def test_single_429_does_not_downshift(
-        self, bucket: AdaptiveTokenBucket
-    ) -> None:
+    def test_single_429_does_not_downshift(self, bucket: AdaptiveTokenBucket) -> None:
         event = bucket.record_rate_limit_hit()
         assert event is not None
         assert event.kind == "rate_limit_hit"
         assert event.from_rps == 15.0
         assert bucket.current_rps() == 15.0
 
-    def test_two_429s_do_not_downshift(
-        self, bucket: AdaptiveTokenBucket
-    ) -> None:
+    def test_two_429s_do_not_downshift(self, bucket: AdaptiveTokenBucket) -> None:
         for _ in range(2):
             event = bucket.record_rate_limit_hit()
-            assert event is not None and event.kind == "rate_limit_hit"
+            assert event is not None
+            assert event.kind == "rate_limit_hit"
         assert bucket.current_rps() == 15.0
 
-    def test_three_429s_trigger_downshift(
-        self, bucket: AdaptiveTokenBucket
-    ) -> None:
+    def test_three_429s_trigger_downshift(self, bucket: AdaptiveTokenBucket) -> None:
         events = [bucket.record_rate_limit_hit() for _ in range(3)]
         assert events[2] is not None
         assert events[2].kind == "downshift"
@@ -197,8 +185,10 @@ class TestDownshift:
         # The first two are now out of window
         event1 = bucket.record_rate_limit_hit()
         event2 = bucket.record_rate_limit_hit()
-        assert event1 is not None and event1.kind == "rate_limit_hit"
-        assert event2 is not None and event2.kind == "rate_limit_hit"
+        assert event1 is not None
+        assert event1.kind == "rate_limit_hit"
+        assert event2 is not None
+        assert event2.kind == "rate_limit_hit"
         assert bucket.current_rps() == 15.0
 
     def test_three_within_window_still_triggers_after_eviction(
@@ -209,7 +199,8 @@ class TestDownshift:
         bucket.record_rate_limit_hit()
         clock.advance(30.0)
         event = bucket.record_rate_limit_hit()
-        assert event is not None and event.kind == "downshift"
+        assert event is not None
+        assert event.kind == "downshift"
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -245,19 +236,13 @@ class TestDownshiftedThroughput:
 
 
 class TestStats:
-    def test_current_rps_after_construction(
-        self, bucket: AdaptiveTokenBucket
-    ) -> None:
+    def test_current_rps_after_construction(self, bucket: AdaptiveTokenBucket) -> None:
         assert bucket.current_rps() == 15.0
 
-    def test_available_tokens_starts_at_burst(
-        self, bucket: AdaptiveTokenBucket
-    ) -> None:
+    def test_available_tokens_starts_at_burst(self, bucket: AdaptiveTokenBucket) -> None:
         assert bucket.available_tokens() == 5.0
 
-    def test_available_tokens_after_acquire(
-        self, bucket: AdaptiveTokenBucket
-    ) -> None:
+    def test_available_tokens_after_acquire(self, bucket: AdaptiveTokenBucket) -> None:
         bucket.acquire()
         # 5 - 1 = 4 (no time passed, no refill)
         # But the refill helper runs on every check, so a micro refill may occur.
@@ -271,21 +256,15 @@ class TestStats:
         clock.advance(1000.0)
         assert bucket.available_tokens() == 5.0
 
-    def test_recent_429_count_starts_at_zero(
-        self, bucket: AdaptiveTokenBucket
-    ) -> None:
+    def test_recent_429_count_starts_at_zero(self, bucket: AdaptiveTokenBucket) -> None:
         assert bucket.recent_429_count() == 0
 
-    def test_recent_429_count_tracks_hits(
-        self, bucket: AdaptiveTokenBucket
-    ) -> None:
+    def test_recent_429_count_tracks_hits(self, bucket: AdaptiveTokenBucket) -> None:
         bucket.record_rate_limit_hit()
         bucket.record_rate_limit_hit()
         assert bucket.recent_429_count() == 2
 
-    def test_recent_429_count_evicts(
-        self, bucket: AdaptiveTokenBucket, clock: FakeClock
-    ) -> None:
+    def test_recent_429_count_evicts(self, bucket: AdaptiveTokenBucket, clock: FakeClock) -> None:
         bucket.record_rate_limit_hit()
         clock.advance(61.0)
         assert bucket.recent_429_count() == 0
@@ -304,33 +283,25 @@ class TestNeverDropGuarantee:
     never raises an exception.
     """
 
-    def test_acquire_always_returns_non_negative(
-        self, bucket: AdaptiveTokenBucket
-    ) -> None:
+    def test_acquire_always_returns_non_negative(self, bucket: AdaptiveTokenBucket) -> None:
         for _ in range(20):
             wait = bucket.acquire()
             assert wait >= 0.0
 
-    def test_acquire_after_downshift_still_works(
-        self, bucket: AdaptiveTokenBucket
-    ) -> None:
+    def test_acquire_after_downshift_still_works(self, bucket: AdaptiveTokenBucket) -> None:
         for _ in range(3):
             bucket.record_rate_limit_hit()
         for _ in range(10):
             wait = bucket.acquire()
             assert wait >= 0.0
 
-    def test_rate_limit_hits_never_raise(
-        self, bucket: AdaptiveTokenBucket
-    ) -> None:
+    def test_rate_limit_hits_never_raise(self, bucket: AdaptiveTokenBucket) -> None:
         """Recording 429s should never raise, regardless of count."""
         for _ in range(100):
             event = bucket.record_rate_limit_hit()
             assert event is not None  # Always returns an event
 
-    def test_record_success_never_raises(
-        self, bucket: AdaptiveTokenBucket
-    ) -> None:
+    def test_record_success_never_raises(self, bucket: AdaptiveTokenBucket) -> None:
         bucket.record_success()
         bucket.record_success()
         # Still at initial rps

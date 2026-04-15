@@ -40,10 +40,10 @@ import json
 import os
 import re
 import tempfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Final
 
 from brutex.models import BruteXError
 
@@ -160,9 +160,7 @@ class RuntimeInfo:
         }
         missing = required - data.keys()
         if missing:
-            raise RuntimeFileError(
-                f"runtime.json missing required fields: {sorted(missing)}"
-            )
+            raise RuntimeFileError(f"runtime.json missing required fields: {sorted(missing)}")
 
         env_snapshot = tuple(sorted(data["env_snapshot"].items()))
         dashboard_urls = tuple(data["dashboard_urls"])

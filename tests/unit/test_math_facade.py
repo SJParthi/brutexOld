@@ -24,7 +24,6 @@ import types
 
 import pytest
 
-
 # ────────────────────────────────────────────────────────────────────────
 # Placeholder path
 # ────────────────────────────────────────────────────────────────────────
@@ -80,9 +79,7 @@ class TestPlaceholderBackend:
             assert "maturin" in msg
             assert "fno-math-extraction.md" in msg
         else:
-            pytest.fail(
-                "FnoMathNotExtractedError was not raised"
-            )
+            pytest.fail("FnoMathNotExtractedError was not raised")
 
     def test_placeholder_has_correct_name(self) -> None:
         """Traceback frames must name the actual function, not _placeholder."""
@@ -159,8 +156,7 @@ class TestNativeBackend:
         for name, expected_value in expected.items():
             fn = getattr(self.math, name)
             assert fn() == expected_value, (
-                f"{name} did not dispatch to native — "
-                f"got {fn()!r}, expected {expected_value!r}"
+                f"{name} did not dispatch to native — got {fn()!r}, expected {expected_value!r}"
             )
 
 
@@ -192,9 +188,7 @@ class TestPartialNativeBackend:
         assert self.math.delta() == "NATIVE_DELTA"
 
     def test_missing_symbol_falls_back_to_placeholder(self) -> None:
-        with pytest.raises(
-            self.math.FnoMathNotExtractedError, match="gamma"
-        ):
+        with pytest.raises(self.math.FnoMathNotExtractedError, match="gamma"):
             self.math.gamma()
 
 
@@ -242,6 +236,4 @@ class TestAllContract:
         ]
         # Should decompose into Greeks block then Indicators block,
         # each sorted.
-        assert math_symbols == sorted(math_symbols[:6]) + sorted(
-            math_symbols[6:]
-        )
+        assert math_symbols == sorted(math_symbols[:6]) + sorted(math_symbols[6:])

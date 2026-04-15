@@ -75,9 +75,7 @@ GROWW_EXCEPTION_CLASSIFICATION: Final[dict[str, Outcome]] = {
 #: Used by the golden-master test to catch upstream renames. Same as
 #: :data:`brutex.adapters.groww.constants.GROWW_EXCEPTION_CLASS_NAMES`
 #: but duplicated here so the retry module is self-contained.
-REQUIRED_EXCEPTION_NAMES: Final[frozenset[str]] = frozenset(
-    GROWW_EXCEPTION_CLASSIFICATION.keys()
-)
+REQUIRED_EXCEPTION_NAMES: Final[frozenset[str]] = frozenset(GROWW_EXCEPTION_CLASSIFICATION.keys())
 
 
 class UnknownExceptionError(BruteXError):

@@ -14,7 +14,6 @@ that the extraction is still pending.
 from __future__ import annotations
 
 import pytest
-
 from brutex.math import (
     FnoMathNotExtractedError,
     atr,
@@ -30,7 +29,6 @@ from brutex.math import (
     theta,
     vega,
 )
-
 
 # All placeholder symbols — parametrized for brevity.
 PLACEHOLDER_SYMBOLS = [
@@ -86,9 +84,7 @@ class TestPlaceholderSymbols:
         assert name in str(exc_info.value)
 
     @pytest.mark.parametrize(("name", "fn"), PLACEHOLDER_SYMBOLS)
-    def test_raises_with_positional_args(
-        self, name: str, fn: object
-    ) -> None:
+    def test_raises_with_positional_args(self, name: str, fn: object) -> None:
         with pytest.raises(FnoMathNotExtractedError) as exc_info:
             fn(100.0, 100.0, 0.25, 0.07, 0.2, True)  # type: ignore[operator]
         assert name in str(exc_info.value)
@@ -106,9 +102,7 @@ class TestPublicApi:
         import brutex.math as m
 
         for name in m.__all__:
-            assert hasattr(m, name), (
-                f"brutex.math.__all__ lists {name!r} but it's not defined"
-            )
+            assert hasattr(m, name), f"brutex.math.__all__ lists {name!r} but it's not defined"
 
     def test_has_required_greeks(self) -> None:
         import brutex.math as m

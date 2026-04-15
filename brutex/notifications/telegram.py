@@ -50,7 +50,7 @@ if config.enabled:
 
 from __future__ import annotations
 
-import json
+import contextlib
 import logging
 import os
 import queue
@@ -59,10 +59,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import TracebackType
-from typing import Callable, Final, Self
+from typing import Final, Self
 
 from brutex.models import BruteXError
 
@@ -364,9 +365,7 @@ class TelegramNotifier:
         self._config = config
         self._transport = transport
         self._synchronous = synchronous
-        self._queue: queue.Queue[TelegramEvent | None] = queue.Queue(
-            maxsize=config.queue_capacity
-        )
+        self._queue: queue.Queue[TelegramEvent | None] = queue.Queue(maxsize=config.queue_capacity)
         self._bucket = TelegramBucket()
         self._worker: threading.Thread | None = None
         self._running = False
@@ -402,10 +401,8 @@ class TelegramNotifier:
             return
         self._running = False
         # Poison pill
-        try:
+        with contextlib.suppress(queue.Full):
             self._queue.put(None, timeout=0.5)
-        except queue.Full:
-            pass
         if self._worker is not None:
             self._worker.join(timeout=timeout)
             self._worker = None
@@ -433,12 +430,12 @@ class TelegramNotifier:
         caller continues unaffected.
         """
         if not self._config.enabled:
-            with self._bucket._lock:  # noqa: SLF001
+            with self._bucket._lock:
                 self._bucket.dropped_on_disabled += 1
             return
 
         now = time.monotonic()
-        with self._bucket._lock:  # noqa: SLF001
+        with self._bucket._lock:
             self._bucket.evict_expired_dedupe_locked(now)
             if self._bucket.check_dedupe_locked(event.kind, event.dedupe_key, now):
                 self._bucket.dropped_on_dedupe += 1
@@ -451,7 +448,7 @@ class TelegramNotifier:
         try:
             self._queue.put_nowait(event)
         except queue.Full:
-            with self._bucket._lock:  # noqa: SLF001
+            with self._bucket._lock:
                 self._bucket.dropped_on_queue_full += 1
             logger.warning("telegram_queue_full", extra={"kind": event.kind})
 
@@ -470,11 +467,11 @@ class TelegramNotifier:
     def _send_one(self, event: TelegramEvent) -> None:
         try:
             ok = self._transport(self._config, event)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("telegram_transport_exception", extra={"error": str(exc)})
             ok = False
 
-        with self._bucket._lock:  # noqa: SLF001
+        with self._bucket._lock:
             now = time.monotonic()
             if ok:
                 self._bucket.sent += 1
@@ -487,7 +484,7 @@ class TelegramNotifier:
 
     def stats(self) -> dict[str, int | float]:
         """Return a snapshot of the bucket stats for the dashboard."""
-        with self._bucket._lock:  # noqa: SLF001
+        with self._bucket._lock:
             return {
                 "sent": self._bucket.sent,
                 "dropped_on_failure": self._bucket.dropped_on_failure,

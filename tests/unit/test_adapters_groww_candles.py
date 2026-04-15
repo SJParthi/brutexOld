@@ -6,7 +6,6 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-
 from brutex.adapters.groww.candles import (
     MAX_DURATION_DAYS,
     CandleChunk,
@@ -22,8 +21,8 @@ from brutex.orchestrator.audit import AuditWriter
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 from brutex.orchestrator.state import IngestPhase
 from brutex.orchestrator.store import WorkItemStore
-from tests.fakes.groww import FakeGrowwClient
 
+from tests.fakes.groww import FakeGrowwClient
 
 # ────────────────────────────────────────────────────────────────────────
 # chunk_date_range — the pure function
@@ -194,9 +193,7 @@ def fake_client() -> FakeGrowwClient:
 
 @pytest.fixture
 def bucket() -> AdaptiveTokenBucket:
-    return AdaptiveTokenBucket(
-        initial_rps=1000.0, downshift_rps=500.0, burst=100
-    )
+    return AdaptiveTokenBucket(initial_rps=1000.0, downshift_rps=500.0, burst=100)
 
 
 @pytest.fixture

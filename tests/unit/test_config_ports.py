@@ -14,13 +14,11 @@ Covers:
 
 from __future__ import annotations
 
-import errno
 import os
 import socket
 from unittest.mock import patch
 
 import pytest
-
 from brutex.config.ports import (
     DEFAULT_DASHBOARD_PORT,
     DEFAULT_HOST_BIND,
@@ -44,7 +42,6 @@ from brutex.config.ports import (
     is_tickvault_reserved_port,
     load_port_config,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -240,21 +237,15 @@ class TestDetectEnvironment:
             RuntimeEnvironment.DOCKER,
         )
 
-    def test_claude_cowork_from_remote_env_type(
-        self, clean_env: pytest.MonkeyPatch
-    ) -> None:
+    def test_claude_cowork_from_remote_env_type(self, clean_env: pytest.MonkeyPatch) -> None:
         clean_env.setenv("CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE", "sandbox")
         assert detect_environment() == RuntimeEnvironment.CLAUDE_COWORK
 
-    def test_claude_cowork_from_claudecode_var(
-        self, clean_env: pytest.MonkeyPatch
-    ) -> None:
+    def test_claude_cowork_from_claudecode_var(self, clean_env: pytest.MonkeyPatch) -> None:
         clean_env.setenv("CLAUDECODE", "1")
         assert detect_environment() == RuntimeEnvironment.CLAUDE_COWORK
 
-    def test_intellij_from_pycharm_hosted(
-        self, clean_env: pytest.MonkeyPatch
-    ) -> None:
+    def test_intellij_from_pycharm_hosted(self, clean_env: pytest.MonkeyPatch) -> None:
         clean_env.setenv("PYCHARM_HOSTED", "1")
         assert detect_environment() == RuntimeEnvironment.INTELLIJ
 
@@ -262,9 +253,7 @@ class TestDetectEnvironment:
         clean_env.setenv("IDEA_INITIAL_DIRECTORY", "/tmp/project")
         assert detect_environment() == RuntimeEnvironment.INTELLIJ
 
-    def test_cowork_takes_precedence_over_intellij(
-        self, clean_env: pytest.MonkeyPatch
-    ) -> None:
+    def test_cowork_takes_precedence_over_intellij(self, clean_env: pytest.MonkeyPatch) -> None:
         """Cowork is checked first because it's more specific."""
         clean_env.setenv("CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE", "sandbox")
         clean_env.setenv("PYCHARM_HOSTED", "1")
@@ -285,8 +274,8 @@ class TestDetectLanIp:
     def test_none_on_oserror(self) -> None:
         """Simulate network failure → None (not a crash)."""
         with patch("brutex.config.ports.socket.socket") as mock_sock:
-            mock_sock.return_value.__enter__.return_value.connect.side_effect = (
-                OSError("fake network error")
+            mock_sock.return_value.__enter__.return_value.connect.side_effect = OSError(
+                "fake network error"
             )
             assert detect_lan_ip() is None
 
@@ -429,9 +418,7 @@ class TestPortBinding:
         s.listen(1)
         try:
             with pytest.raises(PortInUseError, match="already in use"):
-                assert_port_available(
-                    port=bound_port, service="dashboard", host="127.0.0.1"
-                )
+                assert_port_available(port=bound_port, service="dashboard", host="127.0.0.1")
         finally:
             s.close()
 

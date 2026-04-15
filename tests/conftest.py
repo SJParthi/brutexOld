@@ -7,7 +7,6 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 
 # ────────────────────────────────────────────────────────────────────────

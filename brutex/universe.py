@@ -169,9 +169,7 @@ def is_in_scope(instrument: Instrument) -> bool:
 
     # Rule 2: any FNO derivative (futures + options for BOTH index and stock)
     if instrument.segment == Segment.FNO and instrument.is_derivative:
-        if instrument.underlying_symbol is None:
-            return False
-        return True
+        return instrument.underlying_symbol is not None
 
     # Rule 3: everything else → out of scope
     return False
@@ -200,9 +198,9 @@ def classify_underlying_kind(instrument: Instrument) -> str:
 __all__ = [
     "ALLOWED_UNDERLYINGS",
     "INDEX_UNDERLYINGS",
-    "UnderlyingSpec",
     "V1_INDICES",
     "V1_UNDERLYINGS",
+    "UnderlyingSpec",
     "classify_underlying_kind",
     "is_in_scope",
     "is_index_underlying",

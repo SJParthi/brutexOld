@@ -113,8 +113,7 @@ class AuditChainCorruption(AuditError):
         self.actual = actual
         self.reason = reason
         super().__init__(
-            f"Audit chain corruption at seq={seq}: {reason}. "
-            f"Expected {expected!r}, got {actual!r}."
+            f"Audit chain corruption at seq={seq}: {reason}. Expected {expected!r}, got {actual!r}."
         )
 
 
@@ -127,7 +126,7 @@ class AuditWriteError(AuditError):
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _canonical_json(obj: Any) -> str:  # noqa: ANN401
+def _canonical_json(obj: Any) -> str:
     """Return a stable, hash-friendly JSON representation.
 
     * Keys sorted lexicographically
@@ -345,9 +344,7 @@ class AuditWriter:
     def __enter__(self) -> Self:
         if self._fp is None:
             # Not opened via .open() — caller used the raw constructor.
-            self._fp = open(  # noqa: SIM115
-                self._path, "a", encoding="utf-8"
-            )
+            self._fp = open(self._path, "a", encoding="utf-8")
         return self
 
     def __exit__(
@@ -405,9 +402,7 @@ class AuditWriter:
             ``entry_hash``.
         """
         if self._fp is None or getattr(self._fp, "closed", True):
-            raise AuditWriteError(
-                f"Cannot append to closed audit writer at {self._path}"
-            )
+            raise AuditWriteError(f"Cannot append to closed audit writer at {self._path}")
 
         stamped_payload = dict(payload) if payload else {}
         entry = AuditEntry(
@@ -465,9 +460,7 @@ def _read_entries(path: Path) -> list[AuditEntry]:
             try:
                 entries.append(AuditEntry.from_json_line(line))
             except AuditError as exc:
-                raise AuditError(
-                    f"{path}:{line_no}: {exc}"
-                ) from exc
+                raise AuditError(f"{path}:{line_no}: {exc}") from exc
     return entries
 
 
@@ -544,12 +537,12 @@ def read_entries(path: Path) -> list[AuditEntry]:
 
 
 __all__ = [
+    "GENESIS_PREV_HASH",
     "AuditChainCorruption",
     "AuditEntry",
     "AuditError",
     "AuditWriteError",
     "AuditWriter",
-    "GENESIS_PREV_HASH",
     "read_entries",
     "verify_chain",
 ]

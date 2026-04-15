@@ -6,9 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-
 from brutex.data.models import CandleBar, CatalogEntry
-
 
 # ────────────────────────────────────────────────────────────────────────
 # CandleBar

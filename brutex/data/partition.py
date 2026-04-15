@@ -85,23 +85,17 @@ _FORBIDDEN_SYMBOL_CHARS: Final[frozenset[str]] = frozenset(
 
 def _validate_exchange(exchange: str) -> None:
     if exchange not in VALID_EXCHANGES:
-        raise PartitionError(
-            f"exchange must be one of {sorted(VALID_EXCHANGES)}, got {exchange!r}"
-        )
+        raise PartitionError(f"exchange must be one of {sorted(VALID_EXCHANGES)}, got {exchange!r}")
 
 
 def _validate_segment(segment: str) -> None:
     if segment not in VALID_SEGMENTS:
-        raise PartitionError(
-            f"segment must be one of {sorted(VALID_SEGMENTS)}, got {segment!r}"
-        )
+        raise PartitionError(f"segment must be one of {sorted(VALID_SEGMENTS)}, got {segment!r}")
 
 
 def _validate_interval(interval: str) -> None:
     if interval not in VALID_INTERVALS:
-        raise PartitionError(
-            f"interval must be one of the 12 Groww intervals, got {interval!r}"
-        )
+        raise PartitionError(f"interval must be one of the 12 Groww intervals, got {interval!r}")
 
 
 def _validate_symbol(symbol: str) -> None:
@@ -109,16 +103,12 @@ def _validate_symbol(symbol: str) -> None:
         raise PartitionError("symbol must be a non-empty string")
     illegal = _FORBIDDEN_SYMBOL_CHARS.intersection(symbol)
     if illegal:
-        raise PartitionError(
-            f"symbol {symbol!r} contains forbidden characters: {sorted(illegal)}"
-        )
+        raise PartitionError(f"symbol {symbol!r} contains forbidden characters: {sorted(illegal)}")
 
 
 def _validate_year_month(year: int, month: int) -> None:
     if year < 2000 or year > 2100:
-        raise PartitionError(
-            f"year must be a 4-digit Gregorian year in [2000, 2100], got {year}"
-        )
+        raise PartitionError(f"year must be a 4-digit Gregorian year in [2000, 2100], got {year}")
     if not (1 <= month <= 12):
         raise PartitionError(f"month must be in [1, 12], got {month}")
 
@@ -168,20 +158,11 @@ def build_partition_path(
 
     filename = f"{month:02d}.parquet"
     return (
-        lake_root
-        / BAR_DIR_NAME
-        / exchange
-        / segment
-        / symbol
-        / interval
-        / f"{year:04d}"
-        / filename
+        lake_root / BAR_DIR_NAME / exchange / segment / symbol / interval / f"{year:04d}" / filename
     )
 
 
-def parse_partition_path(
-    path: Path | str, *, lake_root: Path | None = None
-) -> dict[str, object]:
+def parse_partition_path(path: Path | str, *, lake_root: Path | None = None) -> dict[str, object]:
     """Inverse of :func:`build_partition_path`.
 
     Parameters
@@ -211,9 +192,7 @@ def parse_partition_path(
         try:
             rel = Path(path).resolve().relative_to(lake_root.resolve())
         except (ValueError, OSError) as exc:
-            raise PartitionError(
-                f"path {path!r} is not inside lake_root {lake_root!r}"
-            ) from exc
+            raise PartitionError(f"path {path!r} is not inside lake_root {lake_root!r}") from exc
         parts = PurePosixPath(rel.as_posix()).parts
     else:
         parts = p.parts
@@ -237,20 +216,14 @@ def parse_partition_path(
         month_filename,
     ) = tail
     if bar_dir != BAR_DIR_NAME:
-        raise PartitionError(
-            f"partition must live under {BAR_DIR_NAME}/, got {bar_dir!r}"
-        )
+        raise PartitionError(f"partition must live under {BAR_DIR_NAME}/, got {bar_dir!r}")
     if not month_filename.endswith(".parquet"):
-        raise PartitionError(
-            f"partition filename must end with .parquet, got {month_filename!r}"
-        )
+        raise PartitionError(f"partition filename must end with .parquet, got {month_filename!r}")
 
     try:
         year = int(year_str)
     except ValueError as exc:
-        raise PartitionError(
-            f"year segment must be an integer, got {year_str!r}"
-        ) from exc
+        raise PartitionError(f"year segment must be an integer, got {year_str!r}") from exc
 
     month_str = month_filename.removesuffix(".parquet")
     try:
@@ -301,8 +274,7 @@ def partition_for_timestamp(ts: datetime) -> tuple[int, int]:
     """
     if ts.tzinfo is None:
         raise PartitionError(
-            f"partition_for_timestamp requires tz-aware datetime, "
-            f"got naive {ts!r}"
+            f"partition_for_timestamp requires tz-aware datetime, got naive {ts!r}"
         )
     utc = ts.astimezone(tz=UTC)
     return (utc.year, utc.month)

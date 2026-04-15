@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-
 from brutex.config.runtime import (
     ENV_RUNTIME_FILE,
     RuntimeFileError,
@@ -22,7 +21,6 @@ from brutex.config.runtime import (
     runtime_file_path,
     write_runtime_file,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -71,9 +69,7 @@ class TestRuntimeFilePath:
         monkeypatch.setenv(ENV_RUNTIME_FILE, "/tmp/custom.json")
         assert runtime_file_path() == Path("/tmp/custom.json")
 
-    def test_override_expands_user(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_override_expands_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ENV_RUNTIME_FILE, "~/custom.json")
         result = runtime_file_path()
         # ~ should be expanded to the user's home dir
@@ -127,9 +123,7 @@ class TestRedactEnvSnapshot:
         assert result == {"BRUTEX_PORT_DASHBOARD": "9080"}
 
     def test_token_redacted(self) -> None:
-        result = _redact_env_snapshot(
-            {"BRUTEX_TELEGRAM_BOT_TOKEN": "secret:stuff"}
-        )
+        result = _redact_env_snapshot({"BRUTEX_TELEGRAM_BOT_TOKEN": "secret:stuff"})
         assert result == {"BRUTEX_TELEGRAM_BOT_TOKEN": "<redacted>"}
 
     def test_secret_redacted(self) -> None:
@@ -191,9 +185,7 @@ class TestBuildRuntimeInfo:
         keys = [k for k, _ in info.env_snapshot]
         assert keys == sorted(keys)
 
-    def test_secret_env_vars_redacted(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_secret_env_vars_redacted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("BRUTEX_TELEGRAM_BOT_TOKEN", "SECRETVALUE")
         info = build_runtime_info(
             pid=1,
@@ -215,9 +207,7 @@ class TestBuildRuntimeInfo:
 
 
 class TestWriteReadRoundTrip:
-    def test_write_then_read(
-        self, tmp_runtime_file: Path, sample_info: RuntimeInfo
-    ) -> None:
+    def test_write_then_read(self, tmp_runtime_file: Path, sample_info: RuntimeInfo) -> None:
         path = write_runtime_file(sample_info)
         assert path == tmp_runtime_file
         assert path.exists()
@@ -225,9 +215,7 @@ class TestWriteReadRoundTrip:
         info = read_runtime_file()
         assert info == sample_info
 
-    def test_read_missing_file_returns_none(
-        self, tmp_runtime_file: Path
-    ) -> None:
+    def test_read_missing_file_returns_none(self, tmp_runtime_file: Path) -> None:
         assert not tmp_runtime_file.exists()
         assert read_runtime_file() is None
 
@@ -240,9 +228,7 @@ class TestWriteReadRoundTrip:
         assert deep.exists()
         assert deep.parent.is_dir()
 
-    def test_write_is_atomic(
-        self, tmp_runtime_file: Path, sample_info: RuntimeInfo
-    ) -> None:
+    def test_write_is_atomic(self, tmp_runtime_file: Path, sample_info: RuntimeInfo) -> None:
         """Verify no temp file is left behind after a normal write."""
         write_runtime_file(sample_info)
         siblings = list(tmp_runtime_file.parent.iterdir())
@@ -250,16 +236,12 @@ class TestWriteReadRoundTrip:
         temp_files = [f for f in siblings if f.name.startswith(".runtime.")]
         assert temp_files == []
 
-    def test_delete_existing(
-        self, tmp_runtime_file: Path, sample_info: RuntimeInfo
-    ) -> None:
+    def test_delete_existing(self, tmp_runtime_file: Path, sample_info: RuntimeInfo) -> None:
         write_runtime_file(sample_info)
         assert delete_runtime_file() is True
         assert not tmp_runtime_file.exists()
 
-    def test_delete_missing_returns_false(
-        self, tmp_runtime_file: Path
-    ) -> None:
+    def test_delete_missing_returns_false(self, tmp_runtime_file: Path) -> None:
         assert delete_runtime_file() is False
 
 
@@ -312,9 +294,7 @@ class TestClearStaleRuntime:
         assert clear_stale_runtime() is False
         assert tmp_runtime_file.exists()
 
-    def test_dead_pid_clears_file(
-        self, tmp_runtime_file: Path, sample_info: RuntimeInfo
-    ) -> None:
+    def test_dead_pid_clears_file(self, tmp_runtime_file: Path, sample_info: RuntimeInfo) -> None:
         """Runtime file with an impossible PID → cleared."""
         dead_info = RuntimeInfo(
             pid=2**31 - 1,

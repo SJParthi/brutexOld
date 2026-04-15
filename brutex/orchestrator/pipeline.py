@@ -59,10 +59,11 @@ Per ``FR-ING-015``:
 
 from __future__ import annotations
 
+import contextlib
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Protocol
 
@@ -146,7 +147,7 @@ class IterationLimitError(PipelineError):
 # ────────────────────────────────────────────────────────────────────────
 
 
-class PipelineEventKind:  # noqa: D101 — enum-like namespace
+class PipelineEventKind:
     PHASE_START: Final[str] = "phase.start"
     PHASE_PROGRESS: Final[str] = "phase.progress"
     PHASE_COMPLETE: Final[str] = "phase.complete"
@@ -379,7 +380,7 @@ class PhaseRunner:
         for sub in self._subscribers:
             try:
                 sub(event)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 # Subscriber errors must NEVER block the pipeline.
                 # We eat them here but the audit log still records
                 # the event itself via _audit_phase_event.
@@ -490,9 +491,7 @@ class PhaseRunner:
             payload={"phase": self._phase.value, "total": total},
         )
 
-    def _emit_progress(
-        self, *, done: int, total: int, counts: Counter[WorkItemState]
-    ) -> None:
+    def _emit_progress(self, *, done: int, total: int, counts: Counter[WorkItemState]) -> None:
         evt = PipelineEvent(
             kind=PipelineEventKind.PHASE_PROGRESS,
             at=datetime.now(UTC),
@@ -698,10 +697,8 @@ def _emit_run_event(
         message=message,
     )
     for sub in subscribers:
-        try:
+        with contextlib.suppress(Exception):
             sub(evt)
-        except Exception:  # noqa: BLE001
-            pass
     audit.append(
         action=kind.upper().replace(".", "_"),
         subject=f"run:{run_id}",

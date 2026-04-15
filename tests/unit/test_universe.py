@@ -6,14 +6,12 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.universe import (
     ALLOWED_UNDERLYINGS,
     INDEX_UNDERLYINGS,
     V1_INDICES,
     V1_UNDERLYINGS,
-    UnderlyingSpec,
     classify_underlying_kind,
     is_in_scope,
     is_index_underlying,
@@ -42,9 +40,7 @@ class TestV1IndicesComposition:
         """Ordering is deliberate: NSE first (deeper history) then BSE."""
         exchanges_seen = [u.exchange for u in V1_INDICES]
         first_bse_idx = exchanges_seen.index(Exchange.BSE)
-        last_nse_idx = max(
-            i for i, ex in enumerate(exchanges_seen) if ex == Exchange.NSE
-        )
+        last_nse_idx = max(i for i, ex in enumerate(exchanges_seen) if ex == Exchange.NSE)
         assert last_nse_idx < first_bse_idx
 
     def test_fno_live_years(self) -> None:
@@ -121,9 +117,7 @@ def _make(
             else None
         ),
         strike_price=(
-            Decimal("25000")
-            if instrument_type in {InstrumentType.CE, InstrumentType.PE}
-            else None
+            Decimal("25000") if instrument_type in {InstrumentType.CE, InstrumentType.PE} else None
         ),
         is_reserved=False,
         buy_allowed=True,
@@ -145,9 +139,7 @@ class TestIsInScopeSpotIndices:
             (Exchange.BSE, "SENSEX50"),
         ],
     )
-    def test_all_eight_spot_indices_in_scope(
-        self, exchange: Exchange, trading_symbol: str
-    ) -> None:
+    def test_all_eight_spot_indices_in_scope(self, exchange: Exchange, trading_symbol: str) -> None:
         spot = _make(
             exchange=exchange,
             instrument_type=InstrumentType.IDX,
@@ -178,9 +170,7 @@ class TestIsInScopeIndexDerivatives:
             (Exchange.BSE, "BANKEX"),
         ],
     )
-    def test_index_futures_in_scope(
-        self, exchange: Exchange, underlying: str
-    ) -> None:
+    def test_index_futures_in_scope(self, exchange: Exchange, underlying: str) -> None:
         fut = _make(
             exchange=exchange,
             instrument_type=InstrumentType.FUT,

@@ -5,11 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from brutex.adapters.groww.client import GrowwAdapter
 from brutex.adapters.groww.contracts import (
     ContractsResult,
-    ContractsScopeError,
     PhaseCDriver,
     _content_hash,
 )
@@ -17,8 +15,8 @@ from brutex.orchestrator.audit import AuditWriter
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 from brutex.orchestrator.state import IngestPhase
 from brutex.orchestrator.store import WorkItemStore
-from tests.fakes.groww import FakeGrowwClient
 
+from tests.fakes.groww import FakeGrowwClient
 
 # ────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -52,9 +50,7 @@ def fake_client() -> FakeGrowwClient:
 
 @pytest.fixture
 def bucket() -> AdaptiveTokenBucket:
-    return AdaptiveTokenBucket(
-        initial_rps=1000.0, downshift_rps=500.0, burst=100
-    )
+    return AdaptiveTokenBucket(initial_rps=1000.0, downshift_rps=500.0, burst=100)
 
 
 @pytest.fixture
@@ -164,7 +160,7 @@ class TestRunHappyPath:
         # 3 (exchange, underlying, expiry) keys
         assert len(collected) == 3
         # Each gets the same 3 contracts from the fake
-        for key, contracts in collected.items():
+        for _key, contracts in collected.items():
             assert len(contracts) == 3
 
     def test_last_result(
@@ -203,7 +199,7 @@ class TestRunHappyPath:
         driver.run()
         all_contracts = list(driver.iter_all_contracts())
         assert len(all_contracts) == 9  # 3 expiries × 3 contracts
-        for exchange, underlying, expiry, symbol in all_contracts:
+        for exchange, _underlying, _expiry, symbol in all_contracts:
             assert exchange in ("NSE", "BSE")
             assert symbol.startswith(f"{exchange}-")
 

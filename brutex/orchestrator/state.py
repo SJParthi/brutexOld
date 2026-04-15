@@ -250,7 +250,7 @@ class IncompletePhaseError(BruteXError):
 # ────────────────────────────────────────────────────────────────────────
 
 
-def transition(  # noqa: C901, PLR0911, PLR0912 — exhaustive switch, not complex
+def transition(
     item: WorkItem,
     outcome: Outcome,
     *,
@@ -382,8 +382,7 @@ def dispatch(item: WorkItem) -> WorkItem:
     """
     if item.state not in {WorkItemState.PENDING, WorkItemState.RETRYING}:
         raise TransitionError(
-            f"{item.item_id}: can only dispatch from PENDING or RETRYING, "
-            f"not {item.state.value}"
+            f"{item.item_id}: can only dispatch from PENDING or RETRYING, not {item.state.value}"
         )
     return replace(
         item,
@@ -484,14 +483,14 @@ def phase_complete(items: list[WorkItem]) -> bool:
 
 
 __all__ = [
-    "IncompletePhaseError",
-    "IngestPhase",
     "MAX_SOFT_RETRIES",
     "NON_TERMINAL_STATES",
+    "TERMINAL_STATES",
+    "IncompletePhaseError",
+    "IngestPhase",
     "NonTerminalStateError",
     "Outcome",
     "QuarantineReason",
-    "TERMINAL_STATES",
     "TransitionError",
     "WorkItem",
     "WorkItemState",

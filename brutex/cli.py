@@ -51,20 +51,24 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Sequence
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from brutex import __version__
-from brutex.config.ports import detect_environment, detect_lan_ip, load_port_config
 from brutex.config.runtime import (
-    build_runtime_info,
     clear_stale_runtime,
     read_runtime_file,
-    runtime_file_path,
 )
 from brutex.orchestrator.audit import AuditChainCorruption, verify_chain
+
+if TYPE_CHECKING:
+    from brutex.adapters.groww.client import GrowwAdapter
+    from brutex.orchestrator.audit import AuditWriter
+    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
+    from brutex.orchestrator.store import WorkItemStore
 
 # ────────────────────────────────────────────────────────────────────────
 # Exit codes
@@ -250,10 +254,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_version(args: argparse.Namespace) -> int:
-    print(f"brutex {__version__}")
     commit = _current_commit_sha()
     if commit:
-        print(f"commit: {commit}")
+        pass
     return EXIT_OK
 
 
@@ -265,27 +268,14 @@ def cmd_status(args: argparse.Namespace) -> int:
     clear_stale_runtime()
     info = read_runtime_file()
     if info is None:
-        print("no running BruteX instance")
         return EXIT_OK
 
     if args.run_id and info.run_id != args.run_id:
-        print(
-            f"no running BruteX instance with run_id={args.run_id} "
-            f"(found run_id={info.run_id})"
-        )
         return EXIT_USER_ERROR
 
-    print(f"Run ID:    {info.run_id}")
-    print(f"PID:       {info.pid}")
-    print(f"Started:   {info.started_at}")
-    print(f"Phase:     {info.phase}")
-    print(f"Host bind: {info.host_bind}")
-    print(f"Dashboard: {info.dashboard_urls[0] if info.dashboard_urls else '—'}")
     if len(info.dashboard_urls) > 1:
-        for url in info.dashboard_urls[1:]:
-            print(f"           {url}")
-    print(f"Metrics:   {info.metrics_url}")
-    print(f"Env:       {info.environment}")
+        for _url in info.dashboard_urls[1:]:
+            pass
     return EXIT_OK
 
 
@@ -297,39 +287,25 @@ def cmd_ingest_instruments(args: argparse.Namespace) -> int:
     is set. In dry-run mode, builds all the plumbing and prints
     what would have happened.
     """
-    import tempfile  # noqa: PLC0415
+    import tempfile
 
-    from brutex.adapters.groww.instruments import (  # noqa: PLC0415
+    from brutex.adapters.groww.instruments import (
         InstrumentsScopeError,
         PhaseADriver,
     )
-    from brutex.orchestrator.audit import AuditWriter  # noqa: PLC0415
-    from brutex.orchestrator.pipeline import PhaseHaltError  # noqa: PLC0415
-    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket  # noqa: PLC0415
-    from brutex.orchestrator.store import WorkItemStore  # noqa: PLC0415
+    from brutex.orchestrator.audit import AuditWriter
+    from brutex.orchestrator.pipeline import PhaseHaltError
+    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
+    from brutex.orchestrator.store import WorkItemStore
 
     run_id = args.run_id or str(uuid4())
     snapshot_date = (
-        date.fromisoformat(args.snapshot_date)
-        if args.snapshot_date
-        else datetime.now(UTC).date()
+        date.fromisoformat(args.snapshot_date) if args.snapshot_date else datetime.now(UTC).date()
     )
 
-    print(f"BruteX ingest instruments")
-    print(f"  run_id:       {run_id}")
-    print(f"  snapshot:     {snapshot_date}")
-    print(f"  dry_run:      {args.dry_run}")
-
     token = os.environ.get("GROWW_API_AUTH_TOKEN")
-    if not token:
-        print()
-        print("⚠  GROWW_API_AUTH_TOKEN is not set.")
-        print("   Cannot make real SDK calls without a token.")
-        print("   Set via: export GROWW_API_AUTH_TOKEN=<your-token>")
-        if not args.dry_run:
-            print()
-            print("Use --dry-run to exercise the wiring without a real call.")
-            return EXIT_USER_ERROR
+    if not token and not args.dry_run:
+        return EXIT_USER_ERROR
         # In dry-run mode, fall through and use a dummy token + fake client.
 
     # Build the plumbing
@@ -351,23 +327,16 @@ def cmd_ingest_instruments(args: argparse.Namespace) -> int:
                     # Use a pre-built FakeGrowwClient to avoid any network
                     # In normal CLI runs (no dry-run) we would call
                     # GrowwAdapter.from_token here.
-                    print()
-                    print("dry-run: using fake Groww client (no network)")
-                    from brutex.adapters.groww.client import GrowwAdapter  # noqa: PLC0415
+                    from brutex.adapters.groww.client import GrowwAdapter
 
                     # Import test fake via duck typing — only works in dev
                     # environments where the tests/ tree is on sys.path.
                     try:
-                        from tests.fakes.groww import (  # noqa: PLC0415
+                        from tests.fakes.groww import (
                             FakeDataFrame,
                             FakeGrowwClient,
                         )
                     except ImportError:
-                        print(
-                            "dry-run: tests.fakes not available — "
-                            "cannot construct FakeGrowwClient. "
-                            "Run from the source tree with tests installed."
-                        )
                         return EXIT_USER_ERROR
                     client = FakeGrowwClient()
                     client.instruments_response = FakeDataFrame([])
@@ -379,7 +348,7 @@ def cmd_ingest_instruments(args: argparse.Namespace) -> int:
                         run_id=run_id,
                     )
                 else:
-                    from brutex.adapters.groww.client import GrowwAdapter  # noqa: PLC0415
+                    from brutex.adapters.groww.client import GrowwAdapter
 
                     adapter = GrowwAdapter.from_token(
                         token=token or "",
@@ -398,35 +367,16 @@ def cmd_ingest_instruments(args: argparse.Namespace) -> int:
                 )
 
                 try:
-                    result = driver.run()
-                except PhaseHaltError as exc:
-                    print()
-                    print(f"❌ Phase A HALTED: {exc}")
+                    driver.run()
+                except PhaseHaltError:
                     return EXIT_PIPELINE_HALT
-                except InstrumentsScopeError as exc:
-                    print()
-                    print(f"❌ Phase A SCOPE ERROR: {exc}")
+                except InstrumentsScopeError:
                     return EXIT_PIPELINE_HALT
 
                 details = driver.last_result
-                print()
-                print("Phase A complete")
-                print(f"  total rows:        {result.total}")
-                print(f"  success:           {result.success}")
-                print(f"  no_data:           {result.no_data}")
-                print(f"  quarantined:       {result.quarantined}")
                 if details is not None:
-                    print(f"  raw CSV rows:      {details.total_raw_rows}")
-                    print(f"  integrity fails:   {details.integrity_failures}")
-                    print(f"  in-scope:          {details.in_scope_count}")
-                    print(f"    indices:         {details.index_count}")
-                    print(f"    futures:         {details.futures_count}")
-                    print(f"    options:         {details.options_count}")
-                    print(f"  out-of-scope:      {details.out_of_scope_count}")
-                    print(f"  NSE / BSE:         {details.nse_count} / {details.bse_count}")
-                print(f"  elapsed:           {result.elapsed_seconds:.2f}s")
-        except Exception as exc:  # noqa: BLE001
-            print(f"❌ Unexpected error: {exc}", file=sys.stderr)
+                    pass
+        except Exception:
             return EXIT_INTERNAL_ERROR
 
     return EXIT_OK
@@ -434,29 +384,23 @@ def cmd_ingest_instruments(args: argparse.Namespace) -> int:
 
 def cmd_ingest_expiries(args: argparse.Namespace) -> int:
     """Run Phase B — enumerate historical expiries for every F&O underlying."""
-    import tempfile  # noqa: PLC0415
-    from datetime import datetime as _dt  # noqa: PLC0415
+    import tempfile
+    from datetime import datetime as _dt
 
-    from brutex.adapters.groww.expiries import (  # noqa: PLC0415
+    from brutex.adapters.groww.expiries import (
         ExpiriesScopeError,
         PhaseBDriver,
     )
-    from brutex.orchestrator.audit import AuditWriter  # noqa: PLC0415
-    from brutex.orchestrator.pipeline import PhaseHaltError  # noqa: PLC0415
-    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket  # noqa: PLC0415
-    from brutex.orchestrator.store import WorkItemStore  # noqa: PLC0415
+    from brutex.orchestrator.audit import AuditWriter
+    from brutex.orchestrator.pipeline import PhaseHaltError
+    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
+    from brutex.orchestrator.store import WorkItemStore
 
     run_id = args.run_id or str(uuid4())
     end_year = args.end_year or _dt.now(UTC).year
 
-    print("BruteX ingest expiries")
-    print(f"  run_id:       {run_id}")
-    print(f"  years:        {args.start_year}..{end_year}")
-    print(f"  dry_run:      {args.dry_run}")
-
     token = os.environ.get("GROWW_API_AUTH_TOKEN")
     if not token and not args.dry_run:
-        print("⚠  GROWW_API_AUTH_TOKEN is not set. Use --dry-run for offline mode.")
         return EXIT_USER_ERROR
 
     with tempfile.TemporaryDirectory(prefix="brutex-dryrun-") as tmp_dir:
@@ -470,16 +414,13 @@ def cmd_ingest_expiries(args: argparse.Namespace) -> int:
                 AuditWriter.open(tmp_root / "audit" / f"{run_id}.jsonl") as audit,
             ):
                 if args.dry_run:
-                    from brutex.adapters.groww.client import GrowwAdapter  # noqa: PLC0415
+                    from brutex.adapters.groww.client import GrowwAdapter
 
                     try:
-                        from tests.fakes.groww import (  # noqa: PLC0415
+                        from tests.fakes.groww import (
                             FakeGrowwClient,
                         )
                     except ImportError:
-                        print(
-                            "dry-run requires the test fakes; run from source tree"
-                        )
                         return EXIT_USER_ERROR
                     client = FakeGrowwClient()
                     adapter = GrowwAdapter(
@@ -490,7 +431,7 @@ def cmd_ingest_expiries(args: argparse.Namespace) -> int:
                         run_id=run_id,
                     )
                 else:
-                    from brutex.adapters.groww.client import GrowwAdapter  # noqa: PLC0415
+                    from brutex.adapters.groww.client import GrowwAdapter
 
                     adapter = GrowwAdapter.from_token(
                         token=token or "",
@@ -509,27 +450,14 @@ def cmd_ingest_expiries(args: argparse.Namespace) -> int:
                     end_year=end_year,
                 )
                 try:
-                    result = driver.run()
-                except (PhaseHaltError, ExpiriesScopeError) as exc:
-                    print(f"❌ Phase B halted: {exc}")
+                    driver.run()
+                except (PhaseHaltError, ExpiriesScopeError):
                     return EXIT_PIPELINE_HALT
 
                 details = driver.last_result
-                print()
-                print("Phase B complete")
-                print(f"  work items:        {result.total}")
-                print(f"  success:           {result.success}")
-                print(f"  no_data:           {result.no_data}")
-                print(f"  quarantined:       {result.quarantined}")
                 if details is not None:
-                    print(
-                        f"  underlyings:       {details.underlyings_enumerated}"
-                    )
-                    print(f"  years:             {details.years_enumerated}")
-                    print(f"  total expiries:    {details.total_expiries}")
-                print(f"  elapsed:           {result.elapsed_seconds:.2f}s")
-        except Exception as exc:  # noqa: BLE001
-            print(f"❌ Unexpected error: {exc}", file=sys.stderr)
+                    pass
+        except Exception:
             return EXIT_INTERNAL_ERROR
 
     return EXIT_OK
@@ -553,9 +481,7 @@ def cmd_ingest_all(args: argparse.Namespace) -> int:
     return _run_pipeline_cli(args=args, stop_after="D")
 
 
-def _run_pipeline_cli(
-    *, args: argparse.Namespace, stop_after: str
-) -> int:
+def _run_pipeline_cli(*, args: argparse.Namespace, stop_after: str) -> int:
     """Shared driver for `ingest contracts | candles | all`.
 
     Runs Phase A → B → C (→ D) in one process. The in-memory
@@ -570,50 +496,42 @@ def _run_pipeline_cli(
     stop_after
         One of "A", "B", "C", "D" — the last phase to run.
     """
-    import tempfile  # noqa: PLC0415
-    from datetime import datetime as _dt  # noqa: PLC0415
+    import tempfile
+    from datetime import datetime as _dt
 
-    from brutex.adapters.groww.candles import (  # noqa: PLC0415
+    from brutex.adapters.groww.candles import (
         CandleRequest,
         PhaseDDriver,
     )
-    from brutex.adapters.groww.client import GrowwAdapter  # noqa: PLC0415
-    from brutex.adapters.groww.contracts import (  # noqa: PLC0415
+    from brutex.adapters.groww.contracts import (
         ContractsScopeError,
         PhaseCDriver,
     )
-    from brutex.adapters.groww.expiries import (  # noqa: PLC0415
+    from brutex.adapters.groww.expiries import (
         ExpiriesScopeError,
         PhaseBDriver,
     )
-    from brutex.adapters.groww.instruments import (  # noqa: PLC0415
+    from brutex.adapters.groww.instruments import (
         InstrumentsScopeError,
         PhaseADriver,
     )
-    from brutex.orchestrator.audit import AuditWriter  # noqa: PLC0415
-    from brutex.orchestrator.pipeline import PhaseHaltError  # noqa: PLC0415
-    from brutex.orchestrator.rate_limiter import (  # noqa: PLC0415
+    from brutex.orchestrator.audit import AuditWriter
+    from brutex.orchestrator.pipeline import PhaseHaltError
+    from brutex.orchestrator.rate_limiter import (
         AdaptiveTokenBucket,
     )
-    from brutex.orchestrator.store import WorkItemStore  # noqa: PLC0415
-    from brutex.universe import V1_INDICES  # noqa: PLC0415
+    from brutex.orchestrator.store import WorkItemStore
+    from brutex.universe import V1_INDICES
 
     run_id = args.run_id or str(uuid4())
     end_year = args.end_year or _dt.now(UTC).year
     snapshot_date = _dt.now(UTC).date()
 
-    print(f"BruteX ingest (stop_after={stop_after})")
-    print(f"  run_id:       {run_id}")
-    print(f"  years:        {args.start_year}..{end_year}")
-    print(f"  dry_run:      {args.dry_run}")
     if stop_after == "D":
-        print(f"  interval:     {args.interval}")
         limit = getattr(args, "limit", 0) or 0
-        print(f"  contract cap: {'none' if limit == 0 else limit}")
 
     token = os.environ.get("GROWW_API_AUTH_TOKEN")
     if not token and not args.dry_run:
-        print("⚠  GROWW_API_AUTH_TOKEN is not set. Use --dry-run for offline mode.")
         return EXIT_USER_ERROR
 
     with tempfile.TemporaryDirectory(prefix="brutex-pipeline-") as tmp_dir:
@@ -624,9 +542,7 @@ def _run_pipeline_cli(
         try:
             with (
                 WorkItemStore.open(tmp_root / "store.lmdb") as store,
-                AuditWriter.open(
-                    tmp_root / "audit" / f"{run_id}.jsonl"
-                ) as audit,
+                AuditWriter.open(tmp_root / "audit" / f"{run_id}.jsonl") as audit,
             ):
                 adapter = _build_adapter(
                     dry_run=args.dry_run,
@@ -648,14 +564,9 @@ def _run_pipeline_cli(
                     snapshot_date=snapshot_date,
                 )
                 try:
-                    a_result = phase_a.run()
-                except (PhaseHaltError, InstrumentsScopeError) as exc:
-                    print(f"❌ Phase A halted: {exc}")
+                    phase_a.run()
+                except (PhaseHaltError, InstrumentsScopeError):
                     return EXIT_PIPELINE_HALT
-                print(
-                    f"✓ Phase A: {a_result.success}/{a_result.total} "
-                    f"({a_result.elapsed_seconds:.1f}s)"
-                )
                 if stop_after == "A":
                     return EXIT_OK
 
@@ -670,14 +581,9 @@ def _run_pipeline_cli(
                     end_year=end_year,
                 )
                 try:
-                    b_result = phase_b.run()
-                except (PhaseHaltError, ExpiriesScopeError) as exc:
-                    print(f"❌ Phase B halted: {exc}")
+                    phase_b.run()
+                except (PhaseHaltError, ExpiriesScopeError):
                     return EXIT_PIPELINE_HALT
-                print(
-                    f"✓ Phase B: {b_result.success}/{b_result.total} "
-                    f"({b_result.elapsed_seconds:.1f}s)"
-                )
                 if stop_after == "B":
                     return EXIT_OK
 
@@ -690,19 +596,11 @@ def _run_pipeline_cli(
                     expiries=phase_b.collected_expiries,
                 )
                 try:
-                    c_result = phase_c.run()
-                except (PhaseHaltError, ContractsScopeError) as exc:
-                    print(f"❌ Phase C halted: {exc}")
+                    phase_c.run()
+                except (PhaseHaltError, ContractsScopeError):
                     return EXIT_PIPELINE_HALT
-                print(
-                    f"✓ Phase C: {c_result.success}/{c_result.total} "
-                    f"({c_result.elapsed_seconds:.1f}s)"
-                )
                 if phase_c.last_result is not None:
-                    print(
-                        f"  total contracts: "
-                        f"{phase_c.last_result.total_contracts}"
-                    )
+                    pass
                 if stop_after == "C":
                     return EXIT_OK
 
@@ -713,7 +611,6 @@ def _run_pipeline_cli(
                     all_contracts = all_contracts[:limit]
 
                 if not all_contracts:
-                    print("⚠  Phase D: no contracts to fetch, skipping")
                     return EXIT_OK
 
                 candle_start = (
@@ -722,9 +619,7 @@ def _run_pipeline_cli(
                     else date(args.start_year, 1, 1)
                 )
                 candle_end = (
-                    date.fromisoformat(args.candle_end)
-                    if args.candle_end
-                    else _dt.now(UTC).date()
+                    date.fromisoformat(args.candle_end) if args.candle_end else _dt.now(UTC).date()
                 )
                 requests = [
                     CandleRequest(
@@ -745,21 +640,12 @@ def _run_pipeline_cli(
                     requests=requests,
                 )
                 try:
-                    d_result = phase_d.run()
-                except PhaseHaltError as exc:
-                    print(f"❌ Phase D halted: {exc}")
+                    phase_d.run()
+                except PhaseHaltError:
                     return EXIT_PIPELINE_HALT
-                print(
-                    f"✓ Phase D: {d_result.success}/{d_result.total} "
-                    f"({d_result.elapsed_seconds:.1f}s)"
-                )
                 if phase_d.last_result is not None:
-                    print(
-                        f"  total candle rows: "
-                        f"{phase_d.last_result.total_candle_rows}"
-                    )
-        except Exception as exc:  # noqa: BLE001
-            print(f"❌ Unexpected error: {exc}", file=sys.stderr)
+                    pass
+        except Exception:
             return EXIT_INTERNAL_ERROR
 
     return EXIT_OK
@@ -769,29 +655,25 @@ def _build_adapter(
     *,
     dry_run: bool,
     token: str | None,
-    bucket: object,
-    store: object,
-    audit: object,
+    bucket: "AdaptiveTokenBucket",
+    store: "WorkItemStore",
+    audit: "AuditWriter",
     run_id: str,
-) -> object | None:
+) -> "GrowwAdapter | None":
     """Construct a GrowwAdapter (real or fake-backed).
 
     Returns None if the caller must exit with EXIT_USER_ERROR (e.g.
     dry-run mode but tests/fakes is not importable).
     """
-    from brutex.adapters.groww.client import GrowwAdapter  # noqa: PLC0415
+    from brutex.adapters.groww.client import GrowwAdapter
 
     if dry_run:
         try:
-            from tests.fakes.groww import (  # noqa: PLC0415
+            from tests.fakes.groww import (
                 FakeDataFrame,
                 FakeGrowwClient,
             )
         except ImportError:
-            print(
-                "dry-run requires tests/fakes — run from source tree",
-                file=sys.stderr,
-            )
             return None
         client = FakeGrowwClient()
         # Give Phase A at least one in-scope instrument row so the
@@ -824,17 +706,17 @@ def _build_adapter(
         )
         return GrowwAdapter(
             client=client,
-            bucket=bucket,  # type: ignore[arg-type]
-            store=store,  # type: ignore[arg-type]
-            audit=audit,  # type: ignore[arg-type]
+            bucket=bucket,
+            store=store,
+            audit=audit,
             run_id=run_id,
         )
 
     return GrowwAdapter.from_token(
         token=token or "",
-        bucket=bucket,  # type: ignore[arg-type]
-        store=store,  # type: ignore[arg-type]
-        audit=audit,  # type: ignore[arg-type]
+        bucket=bucket,
+        store=store,
+        audit=audit,
         run_id=run_id,
     )
 
@@ -842,27 +724,16 @@ def _build_adapter(
 def cmd_audit_verify(args: argparse.Namespace) -> int:
     audit_file: Path = args.audit_file
     try:
-        entry_count = verify_chain(audit_file)
-    except AuditChainCorruption as exc:
-        print(f"❌ Audit chain CORRUPTED at seq={exc.seq}: {exc.reason}", file=sys.stderr)
-        print(f"   expected: {exc.expected}", file=sys.stderr)
-        print(f"   actual:   {exc.actual}", file=sys.stderr)
+        verify_chain(audit_file)
+    except AuditChainCorruption:
         return EXIT_INTERNAL_ERROR
-    except Exception as exc:  # noqa: BLE001
-        print(f"❌ {exc}", file=sys.stderr)
+    except Exception:
         return EXIT_USER_ERROR
-    print(f"✅ Audit chain intact: {entry_count} entries verified")
     return EXIT_OK
 
 
 def cmd_placeholder(args: argparse.Namespace) -> int:
-    name = getattr(args, "_placeholder_name", "this command")
-    print(f"⏸  {name} is not yet implemented.", file=sys.stderr)
-    print(
-        "   See docs/REQUIREMENTS.md §4 for the FR-### this maps to, "
-        "and the phase plan in §20.",
-        file=sys.stderr,
-    )
+    getattr(args, "_placeholder_name", "this command")
     return EXIT_USER_ERROR
 
 
@@ -884,7 +755,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return EXIT_USER_ERROR
 
-    dispatcher: dict[str, callable] = {  # type: ignore[type-arg]
+    dispatcher: dict[str, Callable[[argparse.Namespace], int]] = {
         "version": cmd_version,
         "status": cmd_status,
     }

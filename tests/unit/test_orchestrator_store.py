@@ -7,11 +7,9 @@ in an isolated directory and cleaned up automatically.
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-
 from brutex.orchestrator.state import (
     IngestPhase,
     Outcome,
@@ -28,7 +26,6 @@ from brutex.orchestrator.store import (
     StoreKeyError,
     WorkItemStore,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -224,50 +221,35 @@ class TestExistsTerminal:
     def test_pending_is_not_terminal(self, store) -> None:
         item = _make_item(hash_seed="p", state=WorkItemState.PENDING)
         store.put(item)
-        assert (
-            store.exists_terminal(IngestPhase.A_INSTRUMENTS, item.content_hash) is False
-        )
+        assert store.exists_terminal(IngestPhase.A_INSTRUMENTS, item.content_hash) is False
 
     def test_in_flight_is_not_terminal(self, store) -> None:
         item = _make_item(hash_seed="inf", state=WorkItemState.IN_FLIGHT)
         store.put(item)
-        assert (
-            store.exists_terminal(IngestPhase.A_INSTRUMENTS, item.content_hash) is False
-        )
+        assert store.exists_terminal(IngestPhase.A_INSTRUMENTS, item.content_hash) is False
 
     def test_retrying_is_not_terminal(self, store) -> None:
         item = _make_item(hash_seed="ret", state=WorkItemState.RETRYING)
         store.put(item)
-        assert (
-            store.exists_terminal(IngestPhase.A_INSTRUMENTS, item.content_hash) is False
-        )
+        assert store.exists_terminal(IngestPhase.A_INSTRUMENTS, item.content_hash) is False
 
     def test_success_is_terminal(self, store) -> None:
         item = _make_item(hash_seed="suc", state=WorkItemState.SUCCESS)
         store.put(item)
-        assert (
-            store.exists_terminal(IngestPhase.A_INSTRUMENTS, item.content_hash) is True
-        )
+        assert store.exists_terminal(IngestPhase.A_INSTRUMENTS, item.content_hash) is True
 
     def test_no_data_is_terminal(self, store) -> None:
         item = _make_item(hash_seed="nod", state=WorkItemState.NO_DATA)
         store.put(item)
-        assert (
-            store.exists_terminal(IngestPhase.A_INSTRUMENTS, item.content_hash) is True
-        )
+        assert store.exists_terminal(IngestPhase.A_INSTRUMENTS, item.content_hash) is True
 
     def test_quarantined_is_terminal(self, store) -> None:
         item = _make_item(hash_seed="qua", state=WorkItemState.QUARANTINED)
         store.put(item)
-        assert (
-            store.exists_terminal(IngestPhase.A_INSTRUMENTS, item.content_hash) is True
-        )
+        assert store.exists_terminal(IngestPhase.A_INSTRUMENTS, item.content_hash) is True
 
     def test_missing_returns_false(self, store) -> None:
-        assert (
-            store.exists_terminal(IngestPhase.A_INSTRUMENTS, _make_hash("nothing"))
-            is False
-        )
+        assert store.exists_terminal(IngestPhase.A_INSTRUMENTS, _make_hash("nothing")) is False
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -374,7 +356,7 @@ class TestKeyEncoding:
 class TestCorruption:
     def test_malformed_json_raises(self, store, store_path: Path) -> None:
         """Write garbage directly into LMDB and confirm deserialize raises."""
-        import lmdb  # noqa: PLC0415
+        import lmdb
 
         # Close store first to release the env
         store.close()
@@ -390,7 +372,5 @@ class TestCorruption:
             txn.put(b"\x00" * CONTENT_HASH_BYTES, b"not json at all", db=db)
         env.close()
 
-        with WorkItemStore.open(store_path) as s, pytest.raises(
-            StoreCorruptionError
-        ):
+        with WorkItemStore.open(store_path) as s, pytest.raises(StoreCorruptionError):
             s.get(IngestPhase.A_INSTRUMENTS, "00" * CONTENT_HASH_BYTES)

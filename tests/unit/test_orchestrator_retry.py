@@ -10,7 +10,6 @@ from __future__ import annotations
 import random
 
 import pytest
-
 from brutex.orchestrator.retry import (
     BACKOFF_SCHEDULE_SECONDS,
     GROWW_EXCEPTION_CLASSIFICATION,
@@ -94,7 +93,7 @@ class TestClassificationTable:
             "GrowwFeedNotSubscribedException",
         }
         assert set(GROWW_EXCEPTION_CLASSIFICATION.keys()) == expected
-        assert REQUIRED_EXCEPTION_NAMES == expected
+        assert expected == REQUIRED_EXCEPTION_NAMES
 
     def test_british_authorisation_spelling(self) -> None:
         """Groww uses British 'Authorisation' — locked."""
@@ -145,9 +144,7 @@ class TestClassifyExceptionName:
             ("GrowwAPIAuthorisationException", Outcome.AUTHZ_FAILED),
         ],
     )
-    def test_known_names_classify_correctly(
-        self, name: str, expected: Outcome
-    ) -> None:
+    def test_known_names_classify_correctly(self, name: str, expected: Outcome) -> None:
         assert classify_exception_name(name) == expected
 
     def test_unknown_name_raises(self) -> None:
@@ -213,14 +210,8 @@ class TestClassifyException:
 
     def test_feed_exceptions(self) -> None:
         assert classify_exception(GrowwFeedException("x")) == Outcome.GENERIC_API_ERROR
-        assert (
-            classify_exception(GrowwFeedConnectionException("x"))
-            == Outcome.GENERIC_API_ERROR
-        )
-        assert (
-            classify_exception(GrowwFeedNotSubscribedException("x"))
-            == Outcome.GENERIC_API_ERROR
-        )
+        assert classify_exception(GrowwFeedConnectionException("x")) == Outcome.GENERIC_API_ERROR
+        assert classify_exception(GrowwFeedNotSubscribedException("x")) == Outcome.GENERIC_API_ERROR
 
     def test_non_groww_exception_raises(self) -> None:
         """Exceptions from outside the Groww hierarchy are a bug in

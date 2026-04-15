@@ -18,6 +18,16 @@ See ``docs/REQUIREMENTS.md §8.5 / §8.6 / §8.7 / §15.5`` for the spec.
 
 from __future__ import annotations
 
+from brutex.orchestrator.audit import (
+    GENESIS_PREV_HASH,
+    AuditChainCorruption,
+    AuditEntry,
+    AuditError,
+    AuditWriteError,
+    AuditWriter,
+    read_entries,
+    verify_chain,
+)
 from brutex.orchestrator.pipeline import (
     DEFAULT_MAX_ITERATIONS_PER_ITEM,
     EventSubscriber,
@@ -33,16 +43,6 @@ from brutex.orchestrator.pipeline import (
     SleepCallable,
     drive_item_to_terminal,
     run_sequential_pipeline,
-)
-from brutex.orchestrator.audit import (
-    GENESIS_PREV_HASH,
-    AuditChainCorruption,
-    AuditEntry,
-    AuditError,
-    AuditWriteError,
-    AuditWriter,
-    read_entries,
-    verify_chain,
 )
 from brutex.orchestrator.rate_limiter import (
     DEFAULT_BURST,
@@ -66,15 +66,6 @@ from brutex.orchestrator.retry import (
     classify_exception_name,
     outcome_severity,
 )
-from brutex.orchestrator.store import (
-    CONTENT_HASH_BYTES,
-    DEFAULT_MAP_SIZE_MB,
-    MAX_DBS,
-    StoreCorruptionError,
-    StoreError,
-    StoreKeyError,
-    WorkItemStore,
-)
 from brutex.orchestrator.state import (
     NON_TERMINAL_STATES,
     TERMINAL_STATES,
@@ -92,66 +83,53 @@ from brutex.orchestrator.state import (
     resolve_quarantine,
     transition,
 )
+from brutex.orchestrator.store import (
+    CONTENT_HASH_BYTES,
+    DEFAULT_MAP_SIZE_MB,
+    MAX_DBS,
+    StoreCorruptionError,
+    StoreError,
+    StoreKeyError,
+    WorkItemStore,
+)
 
 __all__ = [
-    # state.py
-    "IncompletePhaseError",
-    "IngestPhase",
-    "NON_TERMINAL_STATES",
-    "NonTerminalStateError",
-    "Outcome",
-    "QuarantineReason",
-    "TERMINAL_STATES",
-    "TransitionError",
-    "WorkItem",
-    "WorkItemState",
-    "dispatch",
-    "is_terminal",
-    "phase_complete",
-    "resolve_quarantine",
-    "transition",
     # retry.py
     "BACKOFF_SCHEDULE_SECONDS",
+    # store.py
+    "CONTENT_HASH_BYTES",
+    "DEFAULT_BURST",
+    "DEFAULT_DOWNSHIFT_RPS",
+    "DEFAULT_DOWNSHIFT_TRIGGER",
+    "DEFAULT_DOWNSHIFT_WINDOW",
+    "DEFAULT_INITIAL_RPS",
+    "DEFAULT_MAP_SIZE_MB",
+    # pipeline.py
+    "DEFAULT_MAX_ITERATIONS_PER_ITEM",
+    "DEFAULT_UPSHIFT_RECOVERY",
+    "GENESIS_PREV_HASH",
     "GROWW_EXCEPTION_CLASSIFICATION",
     "JITTER_FRACTION",
+    "MAX_DBS",
+    "NON_TERMINAL_STATES",
     "REQUIRED_EXCEPTION_NAMES",
-    "UnknownExceptionError",
-    "backoff_delay",
-    "classify_exception",
-    "classify_exception_name",
-    "outcome_severity",
+    "TERMINAL_STATES",
+    # rate_limiter.py
+    "AdaptiveTokenBucket",
     # audit.py
     "AuditChainCorruption",
     "AuditEntry",
     "AuditError",
     "AuditWriteError",
     "AuditWriter",
-    "GENESIS_PREV_HASH",
-    "read_entries",
-    "verify_chain",
-    # rate_limiter.py
-    "AdaptiveTokenBucket",
-    "DEFAULT_BURST",
-    "DEFAULT_DOWNSHIFT_RPS",
-    "DEFAULT_DOWNSHIFT_TRIGGER",
-    "DEFAULT_DOWNSHIFT_WINDOW",
-    "DEFAULT_INITIAL_RPS",
-    "DEFAULT_UPSHIFT_RECOVERY",
-    "RateLimiterError",
-    "RateLimiterEvent",
-    # store.py
-    "CONTENT_HASH_BYTES",
-    "DEFAULT_MAP_SIZE_MB",
-    "MAX_DBS",
-    "StoreCorruptionError",
-    "StoreError",
-    "StoreKeyError",
-    "WorkItemStore",
-    # pipeline.py
-    "DEFAULT_MAX_ITERATIONS_PER_ITEM",
     "EventSubscriber",
+    # state.py
+    "IncompletePhaseError",
+    "IngestPhase",
     "InvokeCallable",
     "IterationLimitError",
+    "NonTerminalStateError",
+    "Outcome",
     "PhaseDriverProtocol",
     "PhaseHaltError",
     "PhaseResult",
@@ -159,7 +137,29 @@ __all__ = [
     "PipelineError",
     "PipelineEvent",
     "PipelineEventKind",
+    "QuarantineReason",
+    "RateLimiterError",
+    "RateLimiterEvent",
     "SleepCallable",
+    "StoreCorruptionError",
+    "StoreError",
+    "StoreKeyError",
+    "TransitionError",
+    "UnknownExceptionError",
+    "WorkItem",
+    "WorkItemState",
+    "WorkItemStore",
+    "backoff_delay",
+    "classify_exception",
+    "classify_exception_name",
+    "dispatch",
     "drive_item_to_terminal",
+    "is_terminal",
+    "outcome_severity",
+    "phase_complete",
+    "read_entries",
+    "resolve_quarantine",
     "run_sequential_pipeline",
+    "transition",
+    "verify_chain",
 ]

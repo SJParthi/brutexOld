@@ -41,7 +41,7 @@ def _is_missing(value: object) -> bool:
         return True
     if isinstance(value, float) and math.isnan(value):
         return True
-    if isinstance(value, str) and value.strip() == "":  # noqa: SIM103
+    if isinstance(value, str) and value.strip() == "":
         return True
     return False
 
@@ -62,8 +62,12 @@ def _required_str(value: object, field: str, row_id: str) -> str:
 def _opt_int(value: object, field: str, row_id: str) -> int | None:
     if _is_missing(value):
         return None
+    if not isinstance(value, (int, float, str, bytes, bytearray)):
+        raise InstrumentFormatError(
+            f"{row_id}: field {field!r} is not an integer: {value!r}"
+        )
     try:
-        return int(value)  # type: ignore[arg-type]
+        return int(value)
     except (TypeError, ValueError) as e:
         raise InstrumentFormatError(
             f"{row_id}: field {field!r} is not an integer: {value!r}"
@@ -73,9 +77,7 @@ def _opt_int(value: object, field: str, row_id: str) -> int | None:
 def _required_int(value: object, field: str, row_id: str) -> int:
     i = _opt_int(value, field, row_id)
     if i is None:
-        raise InstrumentFormatError(
-            f"{row_id}: missing required integer field {field!r}"
-        )
+        raise InstrumentFormatError(f"{row_id}: missing required integer field {field!r}")
     return i
 
 
@@ -86,14 +88,10 @@ def _opt_decimal(value: object, field: str, row_id: str) -> Decimal | None:
         if isinstance(value, Decimal):
             return value
         if isinstance(value, bool):  # bool is a subclass of int — reject
-            raise InstrumentFormatError(
-                f"{row_id}: field {field!r} cannot be bool: {value!r}"
-            )
+            raise InstrumentFormatError(f"{row_id}: field {field!r} cannot be bool: {value!r}")
         return Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as e:
-        raise InstrumentFormatError(
-            f"{row_id}: field {field!r} is not a decimal: {value!r}"
-        ) from e
+        raise InstrumentFormatError(f"{row_id}: field {field!r} is not a decimal: {value!r}") from e
 
 
 def _required_date(value: object, field: str, row_id: str) -> date:
@@ -110,9 +108,7 @@ def _required_date(value: object, field: str, row_id: str) -> date:
             raise InstrumentFormatError(
                 f"{row_id}: field {field!r} is not an ISO date: {value!r}"
             ) from e
-    raise InstrumentFormatError(
-        f"{row_id}: field {field!r} is not a date: {type(value).__name__}"
-    )
+    raise InstrumentFormatError(f"{row_id}: field {field!r} is not a date: {type(value).__name__}")
 
 
 def _opt_date(value: object, field: str, row_id: str) -> date | None:
@@ -135,9 +131,7 @@ def _truthy(value: object, field: str, row_id: str) -> bool:
             return True
         if v in {"0", "false", "no", "n", ""}:
             return False
-    raise InstrumentFormatError(
-        f"{row_id}: field {field!r} is not a boolean-like value: {value!r}"
-    )
+    raise InstrumentFormatError(f"{row_id}: field {field!r} is not a boolean-like value: {value!r}")
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -197,8 +191,7 @@ def normalise_instrument(row: dict[str, Any]) -> Instrument:
         instrument_type = InstrumentType(raw_itype)
     except ValueError as e:
         raise InstrumentFormatError(
-            f"{row_id}: unsupported instrument_type {raw_itype!r} "
-            f"(valid: EQ, IDX, FUT, CE, PE)"
+            f"{row_id}: unsupported instrument_type {raw_itype!r} (valid: EQ, IDX, FUT, CE, PE)"
         ) from e
 
     # Identity fields
@@ -229,9 +222,7 @@ def normalise_instrument(row: dict[str, Any]) -> Instrument:
 
     strike_price = _opt_decimal(row.get("strike_price"), "strike_price", row_id)
     if instrument_type in {InstrumentType.CE, InstrumentType.PE} and strike_price is None:
-        raise InstrumentFormatError(
-            f"{row_id}: option missing strike_price"
-        )
+        raise InstrumentFormatError(f"{row_id}: option missing strike_price")
 
     underlying_symbol = _opt_str(row.get("underlying_symbol"))
     underlying_token = _opt_int(

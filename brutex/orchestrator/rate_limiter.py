@@ -42,8 +42,9 @@ import math
 import threading
 import time as _time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Final
+from typing import Final
 
 from brutex.models import BruteXError
 
@@ -161,18 +162,13 @@ class AdaptiveTokenBucket:
         if self.initial_rps <= 0:
             raise RateLimiterError(f"initial_rps must be > 0, got {self.initial_rps}")
         if self.downshift_rps <= 0:
-            raise RateLimiterError(
-                f"downshift_rps must be > 0, got {self.downshift_rps}"
-            )
+            raise RateLimiterError(f"downshift_rps must be > 0, got {self.downshift_rps}")
         if self.downshift_rps >= self.initial_rps:
             raise RateLimiterError(
-                f"downshift_rps ({self.downshift_rps}) must be < "
-                f"initial_rps ({self.initial_rps})"
+                f"downshift_rps ({self.downshift_rps}) must be < initial_rps ({self.initial_rps})"
             )
         if self.downshift_trigger < 1:
-            raise RateLimiterError(
-                f"downshift_trigger must be ≥ 1, got {self.downshift_trigger}"
-            )
+            raise RateLimiterError(f"downshift_trigger must be ≥ 1, got {self.downshift_trigger}")
         if self.burst < 1:
             raise RateLimiterError(f"burst must be ≥ 1, got {self.burst}")
 
@@ -368,13 +364,13 @@ class AdaptiveTokenBucket:
 
 
 __all__ = [
-    "AdaptiveTokenBucket",
     "DEFAULT_BURST",
     "DEFAULT_DOWNSHIFT_RPS",
     "DEFAULT_DOWNSHIFT_TRIGGER",
     "DEFAULT_DOWNSHIFT_WINDOW",
     "DEFAULT_INITIAL_RPS",
     "DEFAULT_UPSHIFT_RECOVERY",
+    "AdaptiveTokenBucket",
     "RateLimiterError",
     "RateLimiterEvent",
 ]

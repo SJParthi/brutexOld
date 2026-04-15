@@ -67,9 +67,10 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Final, Iterable, Sequence
+from typing import Any, Final
 
 from brutex.adapters.groww.client import GrowwAdapter
 from brutex.models import BruteXError
@@ -168,13 +169,10 @@ def chunk_date_range(
     """
     if interval not in MAX_DURATION_DAYS:
         raise CandleChunkerError(
-            f"Unknown interval {interval!r}. "
-            f"Known: {sorted(MAX_DURATION_DAYS.keys())}"
+            f"Unknown interval {interval!r}. Known: {sorted(MAX_DURATION_DAYS.keys())}"
         )
     if end < start:
-        raise CandleChunkerError(
-            f"end ({end}) must be >= start ({start})"
-        )
+        raise CandleChunkerError(f"end ({end}) must be >= start ({start})")
 
     max_days = MAX_DURATION_DAYS[interval]
     step = timedelta(days=max_days - 1)  # inclusive → -1
@@ -340,7 +338,7 @@ class PhaseDDriver:
         total_chunks = len(items)
 
         def invoke(work_item: WorkItem) -> tuple[WorkItem, Any]:
-            params = {k: v for k, v in work_item.params}
+            params = dict(work_item.params)
             exchange = params["exchange"]
             segment = params["segment"]
             groww_symbol = params["groww_symbol"]
@@ -360,9 +358,7 @@ class PhaseDDriver:
                 candle_interval=interval,
             )
 
-            if new_item.state == WorkItemState.SUCCESS and isinstance(
-                response, dict
-            ):
+            if new_item.state == WorkItemState.SUCCESS and isinstance(response, dict):
                 candles = response.get("candles", [])
                 if isinstance(candles, list):
                     self._collected_candles[groww_symbol].extend(candles)
@@ -384,9 +380,7 @@ class PhaseDDriver:
             symbol: len(rows) for symbol, rows in self._collected_candles.items()
         }
         total_candle_rows = sum(per_contract_row_counts.values())
-        contracts_with_data = sum(
-            1 for n in per_contract_row_counts.values() if n > 0
-        )
+        contracts_with_data = sum(1 for n in per_contract_row_counts.values() if n > 0)
         # All requested contracts minus ones that had data = empty
         requested_symbols = {req.groww_symbol for req in self._requests}
         contracts_empty = len(requested_symbols) - contracts_with_data
@@ -436,11 +430,11 @@ class PhaseDDriver:
 
 
 __all__ = [
+    "MAX_DURATION_DAYS",
     "CandleChunk",
     "CandleChunkerError",
     "CandleRequest",
     "CandlesResult",
-    "MAX_DURATION_DAYS",
     "PhaseDDriver",
     "chunk_date_range",
 ]

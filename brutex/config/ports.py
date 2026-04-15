@@ -338,9 +338,7 @@ def _parse_port(env_var: str, default: int) -> int:
             f"Invalid {env_var}={raw!r} — must be an integer in 1..65535"
         ) from exc
     if not (1 <= port <= 65535):
-        raise InvalidPortError(
-            f"Invalid {env_var}={port} — must be in 1..65535"
-        )
+        raise InvalidPortError(f"Invalid {env_var}={port} — must be in 1..65535")
     return port
 
 
@@ -440,11 +438,11 @@ __all__ = [
     "ENV_PORT_JUPYTER",
     "ENV_PORT_METRICS",
     "ENV_PORT_RAY",
+    "TICKVAULT_RESERVED_PORTS",
     "InvalidPortError",
     "PortConfig",
     "PortInUseError",
     "RuntimeEnvironment",
-    "TICKVAULT_RESERVED_PORTS",
     "assert_port_available",
     "check_port_free",
     "detect_environment",

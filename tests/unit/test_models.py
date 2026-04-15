@@ -6,7 +6,6 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-
 from brutex.models import (
     VALID_TICK_SIZES_RUPEES,
     BruteXError,
@@ -18,7 +17,6 @@ from brutex.models import (
     TickSizeFormatError,
     normalise_tick_size,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Enum values — pinned to Groww SDK values (docs/groww-sdk/annexures.md)

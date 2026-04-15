@@ -10,7 +10,6 @@ state or keep it retrying — never "silently lost".
 from __future__ import annotations
 
 import pytest
-
 from brutex.orchestrator.state import (
     MAX_SOFT_RETRIES,
     NON_TERMINAL_STATES,
@@ -29,7 +28,6 @@ from brutex.orchestrator.state import (
     resolve_quarantine,
     transition,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -55,23 +53,23 @@ def _in_flight_item(phase: IngestPhase = IngestPhase.A_INSTRUMENTS) -> WorkItem:
 
 class TestStateSets:
     def test_terminal_states_are_exactly_three(self) -> None:
-        assert TERMINAL_STATES == {
+        assert {
             WorkItemState.SUCCESS,
             WorkItemState.NO_DATA,
             WorkItemState.QUARANTINED,
-        }
+        } == TERMINAL_STATES
 
     def test_non_terminal_states_are_exactly_three(self) -> None:
-        assert NON_TERMINAL_STATES == {
+        assert {
             WorkItemState.PENDING,
             WorkItemState.IN_FLIGHT,
             WorkItemState.RETRYING,
-        }
+        } == NON_TERMINAL_STATES
 
     def test_terminal_and_non_terminal_are_disjoint_and_cover_all(self) -> None:
         all_states = set(WorkItemState)
-        assert TERMINAL_STATES | NON_TERMINAL_STATES == all_states
-        assert TERMINAL_STATES & NON_TERMINAL_STATES == set()
+        assert all_states == TERMINAL_STATES | NON_TERMINAL_STATES
+        assert set() == TERMINAL_STATES & NON_TERMINAL_STATES
 
     def test_is_terminal_function(self) -> None:
         for s in TERMINAL_STATES:
@@ -114,7 +112,7 @@ class TestWorkItemNew:
 
     def test_frozen_dataclass(self) -> None:
         item = _new_item()
-        with pytest.raises(Exception):  # noqa: B017
+        with pytest.raises(Exception):
             item.state = WorkItemState.SUCCESS  # type: ignore[misc]
 
 
@@ -267,9 +265,7 @@ class TestTransitionIllegal:
         "terminal_state",
         [WorkItemState.SUCCESS, WorkItemState.NO_DATA, WorkItemState.QUARANTINED],
     )
-    def test_cannot_transition_from_terminal(
-        self, terminal_state: WorkItemState
-    ) -> None:
+    def test_cannot_transition_from_terminal(self, terminal_state: WorkItemState) -> None:
         """Terminal states are, well, terminal."""
         # Build an item already in the terminal state via legal paths
         if terminal_state == WorkItemState.SUCCESS:
@@ -302,9 +298,7 @@ class TestNeverSkipInvariant:
     """
 
     @pytest.mark.parametrize("outcome", list(Outcome))
-    def test_every_outcome_resolves_to_terminal_or_retry(
-        self, outcome: Outcome
-    ) -> None:
+    def test_every_outcome_resolves_to_terminal_or_retry(self, outcome: Outcome) -> None:
         item = _in_flight_item()
         result = transition(item, outcome)
         # After one transition, the item is either terminal or retrying
@@ -323,9 +317,9 @@ class TestNeverSkipInvariant:
                 item = dispatch(item)
             item = transition(item, outcome)
 
-        assert is_terminal(
-            item.state
-        ), f"Outcome {outcome.value} left item in non-terminal state {item.state.value}"
+        assert is_terminal(item.state), (
+            f"Outcome {outcome.value} left item in non-terminal state {item.state.value}"
+        )
 
     def test_mixed_outcome_sequence_terminates(self) -> None:
         """A realistic sequence: rate-limit twice, then timeout, then

@@ -17,7 +17,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from brutex.orchestrator.audit import (
     GENESIS_PREV_HASH,
     AuditChainCorruption,
@@ -28,7 +27,6 @@ from brutex.orchestrator.audit import (
     read_entries,
     verify_chain,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -264,9 +262,7 @@ class TestAuditWriterOpen:
             log.append(action="A", subject="s", ts_utc=1.0)
         assert nested.exists()
 
-    def test_refuses_to_overwrite_without_resume(
-        self, audit_path: Path
-    ) -> None:
+    def test_refuses_to_overwrite_without_resume(self, audit_path: Path) -> None:
         with AuditWriter.open(audit_path) as log:
             log.append(action="A", subject="s", ts_utc=1.0)
         with pytest.raises(AuditWriteError, match="already exists"):

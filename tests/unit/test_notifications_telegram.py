@@ -6,12 +6,8 @@ network calls, zero thread races.
 
 from __future__ import annotations
 
-import time
-
 import pytest
-
 from brutex.notifications.telegram import (
-    DEDUPE_WINDOW_SECONDS,
     ENV_BOT_TOKEN,
     ENV_CHAT_ID,
     ENV_ENABLED,
@@ -24,49 +20,38 @@ from brutex.notifications.telegram import (
     TelegramSeverity,
 )
 
-
 # ────────────────────────────────────────────────────────────────────────
 # TelegramConfig.from_env
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestConfigFromEnv:
-    def test_disabled_when_env_not_set(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_disabled_when_env_not_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for k in (ENV_ENABLED, ENV_BOT_TOKEN, ENV_CHAT_ID):
             monkeypatch.delenv(k, raising=False)
         config = TelegramConfig.from_env()
         assert config.enabled is False
 
-    def test_disabled_when_enabled_is_false(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_disabled_when_enabled_is_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ENV_ENABLED, "false")
         config = TelegramConfig.from_env()
         assert config.enabled is False
 
-    def test_enabled_true_requires_token(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_enabled_true_requires_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ENV_ENABLED, "true")
         monkeypatch.delenv(ENV_BOT_TOKEN, raising=False)
         monkeypatch.setenv(ENV_CHAT_ID, "12345")
         with pytest.raises(TelegramConfigError, match=ENV_BOT_TOKEN):
             TelegramConfig.from_env()
 
-    def test_enabled_true_requires_chat_id(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_enabled_true_requires_chat_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ENV_ENABLED, "true")
         monkeypatch.setenv(ENV_BOT_TOKEN, "bot-token")
         monkeypatch.delenv(ENV_CHAT_ID, raising=False)
         with pytest.raises(TelegramConfigError, match=ENV_CHAT_ID):
             TelegramConfig.from_env()
 
-    def test_enabled_true_happy_path(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_enabled_true_happy_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ENV_ENABLED, "true")
         monkeypatch.setenv(ENV_BOT_TOKEN, "bot-token")
         monkeypatch.setenv(ENV_CHAT_ID, "12345")
@@ -86,34 +71,22 @@ class TestBucketDedupe:
         """RUN_START has dedupe_window=0 so every call passes through."""
         bucket = TelegramBucket()
         with bucket._lock:
-            assert not bucket.check_dedupe_locked(
-                TelegramEventKind.RUN_START, "", 1000.0
-            )
-            assert not bucket.check_dedupe_locked(
-                TelegramEventKind.RUN_START, "", 1000.1
-            )
+            assert not bucket.check_dedupe_locked(TelegramEventKind.RUN_START, "", 1000.0)
+            assert not bucket.check_dedupe_locked(TelegramEventKind.RUN_START, "", 1000.1)
 
     def test_dedupe_within_window(self) -> None:
         """First HEARTBEAT at t=1000 is unique; second at t=1005 is dup."""
         bucket = TelegramBucket()
         with bucket._lock:
-            assert not bucket.check_dedupe_locked(
-                TelegramEventKind.RUN_HEARTBEAT, "", 1000.0
-            )
-            assert bucket.check_dedupe_locked(
-                TelegramEventKind.RUN_HEARTBEAT, "", 1005.0
-            )
+            assert not bucket.check_dedupe_locked(TelegramEventKind.RUN_HEARTBEAT, "", 1000.0)
+            assert bucket.check_dedupe_locked(TelegramEventKind.RUN_HEARTBEAT, "", 1005.0)
 
     def test_dedupe_outside_window_passes(self) -> None:
         """HEARTBEAT window is 600s. A second call 601s later should pass."""
         bucket = TelegramBucket()
         with bucket._lock:
-            assert not bucket.check_dedupe_locked(
-                TelegramEventKind.RUN_HEARTBEAT, "", 1000.0
-            )
-            assert not bucket.check_dedupe_locked(
-                TelegramEventKind.RUN_HEARTBEAT, "", 1601.0
-            )
+            assert not bucket.check_dedupe_locked(TelegramEventKind.RUN_HEARTBEAT, "", 1000.0)
+            assert not bucket.check_dedupe_locked(TelegramEventKind.RUN_HEARTBEAT, "", 1601.0)
 
     def test_different_dedupe_keys_not_conflated(self) -> None:
         """QUARANTINE_NEW dedupes per item_id, not globally."""
@@ -165,18 +138,14 @@ class RecordingTransport:
         self.sent: list[TelegramEvent] = []
         self.call_count = 0
 
-    def __call__(
-        self, config: TelegramConfig, event: TelegramEvent
-    ) -> bool:
+    def __call__(self, config: TelegramConfig, event: TelegramEvent) -> bool:
         self.call_count += 1
         self.sent.append(event)
         return self.return_value
 
 
 class TestNotifierPublish:
-    def test_disabled_notifier_drops_events(
-        self, disabled_config: TelegramConfig
-    ) -> None:
+    def test_disabled_notifier_drops_events(self, disabled_config: TelegramConfig) -> None:
         transport = RecordingTransport()
         notifier = TelegramNotifier(
             config=disabled_config,
@@ -211,9 +180,7 @@ class TestNotifierPublish:
         assert notifier.stats()["sent"] == 1
         assert notifier.stats()["dropped_on_failure"] == 0
 
-    def test_transport_failure_drops_gracefully(
-        self, enabled_config: TelegramConfig
-    ) -> None:
+    def test_transport_failure_drops_gracefully(self, enabled_config: TelegramConfig) -> None:
         transport = RecordingTransport(return_value=False)
         notifier = TelegramNotifier(
             config=enabled_config,
@@ -230,12 +197,8 @@ class TestNotifierPublish:
         )
         assert notifier.stats()["dropped_on_failure"] == 1
 
-    def test_transport_exception_drops_gracefully(
-        self, enabled_config: TelegramConfig
-    ) -> None:
-        def bad_transport(
-            config: TelegramConfig, event: TelegramEvent
-        ) -> bool:
+    def test_transport_exception_drops_gracefully(self, enabled_config: TelegramConfig) -> None:
+        def bad_transport(config: TelegramConfig, event: TelegramEvent) -> bool:
             raise RuntimeError("simulated network error")
 
         notifier = TelegramNotifier(
@@ -253,9 +216,7 @@ class TestNotifierPublish:
         )
         assert notifier.stats()["dropped_on_failure"] == 1
 
-    def test_dedupe_drops_duplicates(
-        self, enabled_config: TelegramConfig
-    ) -> None:
+    def test_dedupe_drops_duplicates(self, enabled_config: TelegramConfig) -> None:
         transport = RecordingTransport()
         notifier = TelegramNotifier(
             config=enabled_config,
@@ -276,9 +237,7 @@ class TestNotifierPublish:
         assert notifier.stats()["sent"] == 1
         assert notifier.stats()["dropped_on_dedupe"] == 4
 
-    def test_different_dedupe_keys_all_pass(
-        self, enabled_config: TelegramConfig
-    ) -> None:
+    def test_different_dedupe_keys_all_pass(self, enabled_config: TelegramConfig) -> None:
         transport = RecordingTransport()
         notifier = TelegramNotifier(
             config=enabled_config,
@@ -296,14 +255,10 @@ class TestNotifierPublish:
             )
         assert transport.call_count == 5
 
-    def test_never_raises_even_when_all_paths_fail(
-        self, enabled_config: TelegramConfig
-    ) -> None:
+    def test_never_raises_even_when_all_paths_fail(self, enabled_config: TelegramConfig) -> None:
         """Per FR-ING-016: Telegram must never block the ingest."""
 
-        def terrible_transport(
-            config: TelegramConfig, event: TelegramEvent
-        ) -> bool:
+        def terrible_transport(config: TelegramConfig, event: TelegramEvent) -> bool:
             raise SystemError("catastrophic")
 
         notifier = TelegramNotifier(

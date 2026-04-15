@@ -13,18 +13,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from brutex.data import (
     BarSink,
     CandleBar,
     CatalogEntry,
     NullBarSink,
     ParquetBarSink,
-    SinkAppendResult,
 )
-from brutex.data.parquet_writer import ParquetWriter, WriteResult
-
+from brutex.data.parquet_writer import WriteResult
 
 # ────────────────────────────────────────────────────────────────────────
 # Fake writer + catalog (no polars, no duckdb)

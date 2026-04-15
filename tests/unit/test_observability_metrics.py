@@ -5,17 +5,13 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from brutex.observability.metrics import (
-    DEFAULT_HISTOGRAM_BUCKETS_SECONDS,
-    MetricKind,
     MetricRegistry,
     MetricsError,
     get_registry,
     render_prometheus,
     reset_global_registry,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Registration

@@ -45,9 +45,10 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 from brutex.adapters.groww.client import GrowwAdapter
 from brutex.models import BruteXError
@@ -164,9 +165,7 @@ class PhaseCDriver:
         self._subscribers = list(subscribers)
 
         # Populated during run()
-        self._collected_contracts: dict[
-            tuple[str, str, str], set[str]
-        ] = defaultdict(set)
+        self._collected_contracts: dict[tuple[str, str, str], set[str]] = defaultdict(set)
         self._last_result: ContractsResult | None = None
 
     # ── PhaseDriverProtocol ────────────────────────────────────────
@@ -187,7 +186,7 @@ class PhaseCDriver:
         total_items = len(items)
 
         def invoke(work_item: WorkItem) -> tuple[WorkItem, Any]:
-            params = {k: v for k, v in work_item.params}
+            params = dict(work_item.params)
             exchange = params["exchange"]
             underlying = params["underlying_symbol"]
             expiry_date = params["expiry_date"]
@@ -199,13 +198,11 @@ class PhaseCDriver:
                 expiry_date=expiry_date,
             )
 
-            if new_item.state == WorkItemState.SUCCESS and isinstance(
-                response, dict
-            ):
+            if new_item.state == WorkItemState.SUCCESS and isinstance(response, dict):
                 for contract in response.get("contracts", []):
-                    self._collected_contracts[
-                        (exchange, underlying, expiry_date)
-                    ].add(str(contract))
+                    self._collected_contracts[(exchange, underlying, expiry_date)].add(
+                        str(contract)
+                    )
 
             return new_item, response
 
@@ -220,19 +217,12 @@ class PhaseCDriver:
         phase_result = runner.run(items)
 
         # Stats aggregation
-        total_contracts = sum(
-            len(v) for v in self._collected_contracts.values()
-        )
-        per_expiry_counts = {
-            key: len(value)
-            for key, value in self._collected_contracts.items()
-        }
+        total_contracts = sum(len(v) for v in self._collected_contracts.values())
+        per_expiry_counts = {key: len(value) for key, value in self._collected_contracts.items()}
 
         # Per-underlying rollup
         per_underlying_counts: dict[tuple[str, str], int] = defaultdict(int)
-        for (exchange, underlying, _expiry), contracts in (
-            self._collected_contracts.items()
-        ):
+        for (exchange, underlying, _expiry), contracts in self._collected_contracts.items():
             per_underlying_counts[(exchange, underlying)] += len(contracts)
 
         # Scope check: if everything succeeded but zero contracts → halt
@@ -246,10 +236,8 @@ class PhaseCDriver:
         result = ContractsResult(
             phase_result=phase_result,
             total_work_items=total_items,
-            underlyings_enumerated=len(
-                {k[:2] for k in self._collected_contracts.keys()}
-            )
-            or len({k for k in self._expiries.keys()}),
+            underlyings_enumerated=len({k[:2] for k in self._collected_contracts})
+            or len(set(self._expiries.keys())),
             expiries_enumerated=total_items,
             total_contracts=total_contracts,
             per_expiry_counts=per_expiry_counts,
@@ -288,9 +276,7 @@ class PhaseCDriver:
 
         Used by Phase D to build its work items.
         """
-        for (exchange, underlying, expiry), symbols in (
-            self._collected_contracts.items()
-        ):
+        for (exchange, underlying, expiry), symbols in self._collected_contracts.items():
             for symbol in sorted(symbols):
                 yield (exchange, underlying, expiry, symbol)
 

@@ -23,7 +23,6 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-
 from brutex.adapters.groww.candles import CandleRequest, PhaseDDriver
 from brutex.adapters.groww.client import GrowwAdapter
 from brutex.adapters.groww.contracts import PhaseCDriver
@@ -45,9 +44,10 @@ from brutex.orchestrator.pipeline import (
     run_sequential_pipeline,
 )
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
-from brutex.orchestrator.state import IngestPhase, WorkItemState
+from brutex.orchestrator.state import IngestPhase
 from brutex.orchestrator.store import WorkItemStore
 from brutex.universe import UnderlyingSpec
+
 from tests.fakes.groww import FakeDataFrame, FakeGrowwClient
 from tests.unit.test_adapters_groww_instruments import (
     _banknifty_pe_row,
@@ -62,9 +62,7 @@ class RecordingTransport:
     def __init__(self) -> None:
         self.sent: list[TelegramEvent] = []
 
-    def __call__(
-        self, config: TelegramConfig, event: TelegramEvent
-    ) -> bool:
+    def __call__(self, config: TelegramConfig, event: TelegramEvent) -> bool:
         self.sent.append(event)
         return True
 
@@ -179,9 +177,7 @@ class TestEndToEndSmoke:
         dashboard = DashboardState()
 
         # Telegram notifier in sync mode with a RecordingTransport
-        telegram_config = TelegramConfig(
-            bot_token="test", chat_id="123", enabled=True
-        )
+        telegram_config = TelegramConfig(bot_token="test", chat_id="123", enabled=True)
         telegram_transport = RecordingTransport()
         notifier = TelegramNotifier(
             config=telegram_config,
@@ -239,9 +235,7 @@ class TestEndToEndSmoke:
         assert phase_b_result.total == 2
         assert phase_b_result.success == 2
         # 2 underlyings × 2 expiries each = 4 collected expiry keys
-        assert (
-            sum(len(v) for v in phase_b.collected_expiries.values()) == 4
-        )
+        assert sum(len(v) for v in phase_b.collected_expiries.values()) == 4
 
         # Phase C consumes Phase B's output
         phase_c = PhaseCDriver(
@@ -373,9 +367,7 @@ class TestPipelineHaltsOnQuarantine:
             GrowwAPIBadRequestException,
         )
 
-        fake_client.instruments_exception = GrowwAPIBadRequestException(
-            "bad params"
-        )
+        fake_client.instruments_exception = GrowwAPIBadRequestException("bad params")
 
         adapter = GrowwAdapter(
             client=fake_client,

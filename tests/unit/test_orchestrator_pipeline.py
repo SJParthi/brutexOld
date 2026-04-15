@@ -9,16 +9,13 @@ Validates:
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
-
 from brutex.orchestrator.audit import AuditWriter, verify_chain
 from brutex.orchestrator.pipeline import (
-    DEFAULT_MAX_ITERATIONS_PER_ITEM,
-    IterationLimitError,
     PhaseHaltError,
     PhaseResult,
     PhaseRunner,
@@ -39,7 +36,6 @@ from brutex.orchestrator.state import (
     transition,
 )
 from brutex.orchestrator.store import WorkItemStore
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Helpers / fixtures
@@ -229,9 +225,7 @@ class TestDriveItemToTerminal:
 
 
 class TestPhaseRunner:
-    def test_all_success(
-        self, store: WorkItemStore, audit: AuditWriter
-    ) -> None:
+    def test_all_success(self, store: WorkItemStore, audit: AuditWriter) -> None:
         runner = PhaseRunner(
             phase=IngestPhase.A_INSTRUMENTS,
             store=store,
@@ -248,9 +242,7 @@ class TestPhaseRunner:
         assert result.no_data == 0
         assert result.quarantined == 0
 
-    def test_mixed_outcomes(
-        self, store: WorkItemStore, audit: AuditWriter
-    ) -> None:
+    def test_mixed_outcomes(self, store: WorkItemStore, audit: AuditWriter) -> None:
         """3 success + 1 no-data + rest success."""
         outcomes_sequence = [
             Outcome.OK_WITH_DATA,
@@ -340,9 +332,7 @@ class TestPhaseRunner:
         assert result.no_data == 1
         assert result.quarantined == 0
 
-    def test_terminal_items_passed_through(
-        self, store: WorkItemStore, audit: AuditWriter
-    ) -> None:
+    def test_terminal_items_passed_through(self, store: WorkItemStore, audit: AuditWriter) -> None:
         """A terminal item in the input is counted but not driven."""
         base = _make_item("already")
         dispatched = dispatch(base)
@@ -363,9 +353,7 @@ class TestPhaseRunner:
         # Only the non-terminal item was actually invoked
         assert invoke_tracker.call_count == 1
 
-    def test_events_emitted_in_order(
-        self, store: WorkItemStore, audit: AuditWriter
-    ) -> None:
+    def test_events_emitted_in_order(self, store: WorkItemStore, audit: AuditWriter) -> None:
         events: list[PipelineEvent] = []
         runner = PhaseRunner(
             phase=IngestPhase.A_INSTRUMENTS,
@@ -448,17 +436,13 @@ class StubDriver:
     def run(self) -> PhaseResult:
         self.call_count += 1
         if self.raise_halt:
-            raise PhaseHaltError(
-                phase=self.phase, quarantined_count=self.quarantined_count
-            )
+            raise PhaseHaltError(phase=self.phase, quarantined_count=self.quarantined_count)
         assert self.result is not None, "StubDriver.result must be set"
         return self.result
 
 
 class TestSequentialPipeline:
-    def test_all_phases_run_in_order(
-        self, store: WorkItemStore, audit: AuditWriter
-    ) -> None:
+    def test_all_phases_run_in_order(self, store: WorkItemStore, audit: AuditWriter) -> None:
         drivers = [
             StubDriver(
                 phase=IngestPhase.A_INSTRUMENTS,
@@ -485,9 +469,7 @@ class TestSequentialPipeline:
                 ),
             ),
         ]
-        results = run_sequential_pipeline(
-            drivers=drivers, audit=audit, run_id="seq-run"
-        )
+        results = run_sequential_pipeline(drivers=drivers, audit=audit, run_id="seq-run")
         assert len(results) == 2
         assert [r.phase for r in results] == [
             IngestPhase.A_INSTRUMENTS,
@@ -519,16 +501,12 @@ class TestSequentialPipeline:
             ),
         ]
         with pytest.raises(PhaseHaltError):
-            run_sequential_pipeline(
-                drivers=drivers, audit=audit, run_id="halt-run"
-            )
+            run_sequential_pipeline(drivers=drivers, audit=audit, run_id="halt-run")
         # Phase A was called, Phase B was NOT
         assert drivers[0].call_count == 1
         assert drivers[1].call_count == 0
 
-    def test_run_level_events_emitted(
-        self, store: WorkItemStore, audit: AuditWriter
-    ) -> None:
+    def test_run_level_events_emitted(self, store: WorkItemStore, audit: AuditWriter) -> None:
         events: list[PipelineEvent] = []
         drivers = [
             StubDriver(

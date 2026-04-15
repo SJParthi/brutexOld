@@ -58,32 +58,24 @@ class CandleBar:
     def __post_init__(self) -> None:
         if self.timestamp.tzinfo is None:
             raise ValueError(
-                f"CandleBar.timestamp must be timezone-aware, "
-                f"got naive datetime {self.timestamp!r}"
+                f"CandleBar.timestamp must be timezone-aware, got naive datetime {self.timestamp!r}"
             )
         if self.volume < 0:
-            raise ValueError(
-                f"CandleBar.volume must be non-negative, got {self.volume}"
-            )
+            raise ValueError(f"CandleBar.volume must be non-negative, got {self.volume}")
         if self.open_interest is not None and self.open_interest < 0:
             raise ValueError(
-                f"CandleBar.open_interest must be non-negative or None, "
-                f"got {self.open_interest}"
+                f"CandleBar.open_interest must be non-negative or None, got {self.open_interest}"
             )
         # Price ordering sanity — allow equal (limit-locked bars).
         if self.high < self.low:
-            raise ValueError(
-                f"CandleBar: high ({self.high}) must be >= low ({self.low})"
-            )
+            raise ValueError(f"CandleBar: high ({self.high}) must be >= low ({self.low})")
         if not (self.low <= self.open <= self.high):
             raise ValueError(
-                f"CandleBar: open ({self.open}) must be in "
-                f"[low={self.low}, high={self.high}]"
+                f"CandleBar: open ({self.open}) must be in [low={self.low}, high={self.high}]"
             )
         if not (self.low <= self.close <= self.high):
             raise ValueError(
-                f"CandleBar: close ({self.close}) must be in "
-                f"[low={self.low}, high={self.high}]"
+                f"CandleBar: close ({self.close}) must be in [low={self.low}, high={self.high}]"
             )
 
 
@@ -135,22 +127,15 @@ class CatalogEntry:
     def __post_init__(self) -> None:
         if len(self.raw_hash) != 64:
             raise ValueError(
-                f"CatalogEntry.raw_hash must be 64-char sha256 hex, "
-                f"got {len(self.raw_hash)} chars"
+                f"CatalogEntry.raw_hash must be 64-char sha256 hex, got {len(self.raw_hash)} chars"
             )
         if not (1 <= self.month <= 12):
-            raise ValueError(
-                f"CatalogEntry.month must be in [1, 12], got {self.month}"
-            )
+            raise ValueError(f"CatalogEntry.month must be in [1, 12], got {self.month}")
         if self.row_count < 0:
-            raise ValueError(
-                f"CatalogEntry.row_count must be non-negative, "
-                f"got {self.row_count}"
-            )
+            raise ValueError(f"CatalogEntry.row_count must be non-negative, got {self.row_count}")
         if self.first_ts > self.last_ts:
             raise ValueError(
-                f"CatalogEntry: first_ts ({self.first_ts}) must be <= "
-                f"last_ts ({self.last_ts})"
+                f"CatalogEntry: first_ts ({self.first_ts}) must be <= last_ts ({self.last_ts})"
             )
         for ts_name, ts in (
             ("first_ts", self.first_ts),
@@ -159,6 +144,5 @@ class CatalogEntry:
         ):
             if ts.tzinfo is None:
                 raise ValueError(
-                    f"CatalogEntry.{ts_name} must be timezone-aware, "
-                    f"got naive datetime {ts!r}"
+                    f"CatalogEntry.{ts_name} must be timezone-aware, got naive datetime {ts!r}"
                 )

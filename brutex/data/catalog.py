@@ -12,10 +12,11 @@ pure-Python pieces don't need the dep installed.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Iterator, Self
+from typing import TYPE_CHECKING, Self
 
 from brutex.data.errors import CatalogError
 from brutex.data.models import CatalogEntry
@@ -70,7 +71,7 @@ class Catalog:
             If duckdb is not installed or the DB cannot be opened.
         """
         try:
-            import duckdb  # noqa: PLC0415 — lazy on purpose
+            import duckdb
         except ImportError as exc:
             raise CatalogError(
                 "Catalog requires 'duckdb' — install with "

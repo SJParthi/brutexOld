@@ -18,7 +18,6 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-
 from brutex.adapters.groww.normaliser import normalise_instrument
 from brutex.models import (
     Exchange,
@@ -26,7 +25,6 @@ from brutex.models import (
     InstrumentType,
     Segment,
 )
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Happy paths — one test per row shape in conftest
@@ -56,9 +54,7 @@ class TestEquityRow:
         # internal_trading_symbol equals trading_symbol — invariant holds
         assert inst.internal_trading_symbol == "RELIANCE"
 
-    def test_reliance_is_not_derivative(
-        self, raw_equity_row_reliance: dict[str, Any]
-    ) -> None:
+    def test_reliance_is_not_derivative(self, raw_equity_row_reliance: dict[str, Any]) -> None:
         inst = normalise_instrument(raw_equity_row_reliance)
         assert inst.is_derivative is False
         assert inst.is_option is False
@@ -94,9 +90,7 @@ class TestBankNiftyDec2025Put:
 
 
 class TestBankNiftyJun2025Put:
-    def test_lot_size_is_thirty(
-        self, raw_banknifty_ce_row_jun2025: dict[str, Any]
-    ) -> None:
+    def test_lot_size_is_thirty(self, raw_banknifty_ce_row_jun2025: dict[str, Any]) -> None:
         """BANKNIFTY Jun 2025 has lot_size 30 — pre-SEBI revision.
 
         Proves the adapter does NOT project a 'current' lot size onto
@@ -131,23 +125,17 @@ def _with(row: dict[str, Any], **overrides: Any) -> dict[str, Any]:
 
 
 class TestErrorPaths:
-    def test_missing_exchange_raises(
-        self, raw_equity_row_reliance: dict[str, Any]
-    ) -> None:
+    def test_missing_exchange_raises(self, raw_equity_row_reliance: dict[str, Any]) -> None:
         row = _with(raw_equity_row_reliance, exchange=float("nan"))
         with pytest.raises(InstrumentFormatError, match="exchange"):
             normalise_instrument(row)
 
-    def test_unsupported_exchange_raises(
-        self, raw_equity_row_reliance: dict[str, Any]
-    ) -> None:
+    def test_unsupported_exchange_raises(self, raw_equity_row_reliance: dict[str, Any]) -> None:
         row = _with(raw_equity_row_reliance, exchange="MCX")
         with pytest.raises(InstrumentFormatError, match="unsupported exchange"):
             normalise_instrument(row)
 
-    def test_unsupported_segment_raises(
-        self, raw_equity_row_reliance: dict[str, Any]
-    ) -> None:
+    def test_unsupported_segment_raises(self, raw_equity_row_reliance: dict[str, Any]) -> None:
         row = _with(raw_equity_row_reliance, segment="COMMODITY")
         with pytest.raises(InstrumentFormatError, match="unsupported segment"):
             normalise_instrument(row)
@@ -195,9 +183,7 @@ class TestErrorPaths:
         with pytest.raises(InstrumentFormatError, match="exchange_token"):
             normalise_instrument(row)
 
-    def test_invalid_date_format_raises(
-        self, raw_banknifty_ce_row_dec2025: dict[str, Any]
-    ) -> None:
+    def test_invalid_date_format_raises(self, raw_banknifty_ce_row_dec2025: dict[str, Any]) -> None:
         row = _with(raw_banknifty_ce_row_dec2025, expiry_date="24-Dec-2025")
         with pytest.raises(InstrumentFormatError, match="ISO date"):
             normalise_instrument(row)

@@ -81,10 +81,47 @@ select = [
 ]
 ignore = [
     "PLR0913", # many args — acceptable in adapter boundaries
+    "PLR0911", # too many return statements — common in dispatchers/CLIs
+    "PLR0912", # too many branches — same
+    "PLR0915", # too many statements — same
+    "PLC0415", # lazy imports are deliberate (P2 optional extras, test fakes, etc.)
+    "RUF001", # ambiguous unicode — box-drawing chars in docstrings are intentional
+    "RUF002", # same, in docstring separators
+    "RUF003", # same, in comment separators
+    "RUF043", # regex-match against Exception class — stylistic
+    "S104",   # bind 0.0.0.0 — dashboard deliberately binds all interfaces for LAN access
+    "S108",   # /tmp references — used only in docs/examples, never at runtime
+    "S311",   # non-crypto random — used for backoff jitter, not crypto
+    "E501",   # line-too-long — handled by formatter; surviving lines are URLs/docstrings
+    "N818",   # exception class naming — BruteXError base, legacy shim names retained
+    "ERA001", # commented-out code — some structured docstring examples trip this
+    "SIM105", # contextlib.suppress — explicit try/except is clearer for one-liners
+    "SIM103", # explicit bool returns keep intent clear
+    "SIM113", # enumerate rewrite — inline counter is clearer alongside seq validation
+    "PLR2004", # magic values — bounds checks read clearer as literals
+    "PLE0604", # dynamic __all__ — math facade builds it programmatically
+    "S105",   # env var NAMES aren't secrets (ENV_BOT_TOKEN constant)
+    "S110",   # try/except/pass — used in fsync fallback where failure is acceptable
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "PLR2004", "S105", "S106"]  # allow assert + magic numbers + test tokens in tests
+# Tests: allow assert, magic numbers, test tokens, broad pytest.raises,
+# blind Exception, print, security placeholders, and the pytest-style
+# pure-function naming pitfall for fixture factories.
+"tests/**" = [
+    "S101", "PLR2004", "S105", "S106",
+    "B017",  # blind except — used for frozen-dataclass assertion
+    "PT011", # broad pytest.raises — intentional in catch-all tests
+    "S110",  # try-except-pass in test cleanup
+    "T201",  # print — allowed in smoke tests for visibility
+    "PLE0604", # invalid __all__ object (hypothesis strategies)
+    "SIM113", # pytest fixtures look like enumerate use
+    "SIM103", # bool-from-if — clearer in tests
+]
+# CLI uses print() deliberately — it's a CLI, stdout is the interface.
+"brutex/cli.py" = ["T201"]
+# Placeholder shims need to mirror an eventual external module surface.
+"brutex/math/__init__.py" = ["A005"]  # shadows stdlib 'math' — deliberate re-export point
 
 [tool.ruff.format]
 quote-style = "double"
@@ -103,8 +140,23 @@ check_untyped_defs = true
 no_implicit_reexport = true
 
 [[tool.mypy.overrides]]
-module = ["growwapi", "growwapi.*"]
+module = [
+    "growwapi", "growwapi.*",
+    "lmdb", "lmdb.*",
+    "duckdb", "duckdb.*",
+    "polars", "polars.*",
+    "pyarrow", "pyarrow.*",
+    "fastapi", "fastapi.*",
+    "fno_math_py", "fno_math_py.*",
+]
 ignore_missing_imports = true
+
+# Dashboard uses FastAPI decorators which are untyped — the file wraps
+# them internally and re-exports typed helpers, so untyped-decorator
+# checks here are noise.
+[[tool.mypy.overrides]]
+module = ["brutex.dashboard.app"]
+disallow_untyped_decorators = false
 
 [tool.pyright]
 pythonVersion = "3.12"

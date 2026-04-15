@@ -105,8 +105,7 @@ class FakeDataFrame:
     def to_dict(self, orient: str = "records") -> list[dict[str, Any]]:
         if orient != "records":
             raise NotImplementedError(
-                f"FakeDataFrame.to_dict only supports orient='records', "
-                f"got {orient!r}"
+                f"FakeDataFrame.to_dict only supports orient='records', got {orient!r}"
             )
         return list(self._rows)
 
@@ -127,15 +126,11 @@ class FakeGrowwClient:
 
     def __init__(self) -> None:
         # Phase A: get_all_instruments
-        self.instruments_response: Any = FakeDataFrame(
-            [{"groww_symbol": "NSE-NIFTY"}]
-        )
+        self.instruments_response: Any = FakeDataFrame([{"groww_symbol": "NSE-NIFTY"}])
         self.instruments_exception: Exception | None = None
 
         # Phase B: get_expiries
-        self.expiries_response: dict[str, list[str]] = {
-            "expiries": ["2024-01-25"]
-        }
+        self.expiries_response: dict[str, list[str]] = {"expiries": ["2024-01-25"]}
         self.expiries_exception: Exception | None = None
 
         # Phase C: get_contracts
@@ -177,9 +172,7 @@ class FakeGrowwClient:
             raise self.instruments_exception
         return self.instruments_response
 
-    def get_instrument_by_groww_symbol(
-        self, groww_symbol: str
-    ) -> dict[str, Any]:
+    def get_instrument_by_groww_symbol(self, groww_symbol: str) -> dict[str, Any]:
         self.get_instrument_by_groww_symbol_calls += 1
         return {"groww_symbol": groww_symbol}
 

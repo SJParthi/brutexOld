@@ -51,9 +51,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from brutex.adapters.groww.client import GrowwAdapter
 from brutex.adapters.groww.normaliser import normalise_instrument
@@ -61,11 +62,10 @@ from brutex.models import BruteXError, Instrument, InstrumentFormatError
 from brutex.orchestrator.audit import AuditWriter
 from brutex.orchestrator.pipeline import (
     EventSubscriber,
-    PhaseHaltError,
     PhaseResult,
     PhaseRunner,
 )
-from brutex.orchestrator.state import IngestPhase, WorkItem, WorkItemState
+from brutex.orchestrator.state import IngestPhase, WorkItem
 from brutex.orchestrator.store import WorkItemStore
 from brutex.universe import is_in_scope
 
@@ -148,12 +148,12 @@ def _dataframe_to_rows(dataframe: Any) -> list[dict[str, Any]]:
         return []
     # Real pandas path
     if hasattr(dataframe, "to_dict"):
-        records = dataframe.to_dict(orient="records")  # type: ignore[no-any-return]
+        records = dataframe.to_dict(orient="records")
         if isinstance(records, list):
             return records
     # Test fake: attribute access
     if hasattr(dataframe, "_rows"):
-        return list(dataframe._rows)  # type: ignore[no-any-return, attr-defined]  # noqa: SLF001
+        return list(dataframe._rows)
     return []
 
 
@@ -265,9 +265,7 @@ class PhaseADriver:
         raw_response: dict[str, Any] = {}
 
         def invoke(work_item: WorkItem) -> tuple[WorkItem, Any]:
-            new_item, response = self._adapter.pull_all_instruments(
-                work_item=work_item
-            )
+            new_item, response = self._adapter.pull_all_instruments(work_item=work_item)
             if response is not None:
                 raw_response["df"] = response
             return new_item, response
