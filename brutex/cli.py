@@ -655,11 +655,11 @@ def _build_adapter(
     *,
     dry_run: bool,
     token: str | None,
-    bucket: "AdaptiveTokenBucket",
-    store: "WorkItemStore",
-    audit: "AuditWriter",
+    bucket: AdaptiveTokenBucket,
+    store: WorkItemStore,
+    audit: AuditWriter,
     run_id: str,
-) -> "GrowwAdapter | None":
+) -> GrowwAdapter | None:
     """Construct a GrowwAdapter (real or fake-backed).
 
     Returns None if the caller must exit with EXIT_USER_ERROR (e.g.

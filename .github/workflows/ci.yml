@@ -89,7 +89,9 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install ruff
-        run: pip install "ruff>=0.5,<1.0"
+        # Pin to a recent 0.15 line — 0.5/0.6 don't know the RUF043 /
+        # newer ignore codes we rely on in pyproject.
+        run: pip install "ruff>=0.15,<1.0"
       - name: ruff check
         run: ruff check brutex tests
       - name: ruff format check

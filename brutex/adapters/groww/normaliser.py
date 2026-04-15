@@ -63,9 +63,7 @@ def _opt_int(value: object, field: str, row_id: str) -> int | None:
     if _is_missing(value):
         return None
     if not isinstance(value, (int, float, str, bytes, bytearray)):
-        raise InstrumentFormatError(
-            f"{row_id}: field {field!r} is not an integer: {value!r}"
-        )
+        raise InstrumentFormatError(f"{row_id}: field {field!r} is not an integer: {value!r}")
     try:
         return int(value)
     except (TypeError, ValueError) as e:

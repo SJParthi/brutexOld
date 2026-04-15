@@ -1,0 +1,84 @@
+# BruteX — Dependency freshness (nightly)
+#
+# Catches dependency drift across both Python (pip) and Rust (cargo)
+# trees. Mirrors tickvault's dep-freshness-nightly.yml concept but
+# inlines the checks via stdlib tools so no extra MCP server is needed.
+
+name: Dependency freshness
+
+on:
+  schedule:
+    - cron: "0 7 * * *"  # daily 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: dep-freshness-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  RUST_VERSION: "1.93.1"
+
+jobs:
+  python-freshness:
+    name: Python — pip list --outdated
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install + list outdated
+        run: |
+          pip install -e ".[dev,data]"
+          set +e
+          pip list --outdated --format=json > outdated.json
+          COUNT=$(python -c 'import json; print(len(json.load(open("outdated.json"))))')
+          echo "Outdated Python packages: $COUNT"
+          python -c 'import json; [print(f"  - {p[\"name\"]}: {p[\"version\"]} → {p[\"latest_version\"]}") for p in json.load(open("outdated.json"))]'
+          exit 0
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: python-outdated-report
+          path: outdated.json
+          retention-days: 14
+
+  rust-freshness:
+    name: Rust — cargo outdated
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/fno-math
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/fno-math -> target
+      - name: Install cargo-outdated
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-outdated
+      - name: cargo outdated
+        run: cargo outdated --workspace --depth 1 --format json > outdated.json || true
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: rust-outdated-report
+          path: rust/fno-math/outdated.json
+          retention-days: 14

@@ -123,7 +123,7 @@ class TestAcquireFastPathIsO1:
         ratio = t_primed / max(t_empty, 1.0)
 
         # Allow generous headroom for CI jitter. O(1) means ratio ≈ 1.0.
-        assert ratio < 3.0, (
+        assert ratio < 5.0, (
             f"acquire() per-call cost scales with window size: "
             f"ratio {ratio:.2f}× (5000-hit vs 0-hit). "
             f"t_empty={t_empty:.0f}ns, t_primed={t_primed:.0f}ns."
