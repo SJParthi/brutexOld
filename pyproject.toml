@@ -204,6 +204,13 @@ markers = [
 ]
 filterwarnings = [
     "error",
+    # Third-party DeprecationWarnings we don't control — keep them as
+    # warnings so `-W error` still catches *our* regressions but lets
+    # upstream churn (hypothesis, pytest-benchmark, lmdb, polars) slide.
+    "default::DeprecationWarning:hypothesis.*",
+    "default::DeprecationWarning:_pytest.*",
+    "default::DeprecationWarning:pytest_benchmark.*",
+    "default::PendingDeprecationWarning",
 ]
 
 [tool.coverage.run]
