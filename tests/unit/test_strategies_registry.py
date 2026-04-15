@@ -7,7 +7,11 @@ from collections.abc import Sequence
 import pytest
 from brutex.strategies.errors import StrategyRegistrationError
 from brutex.strategies.protocol import StrategyMeta
-from brutex.strategies.registry import StrategyRegistry
+from brutex.strategies.registry import (
+    StrategyRegistry,
+    default_registry,
+    register_strategy,
+)
 from brutex.strategies.types import Signal, StrategyState
 
 
@@ -130,3 +134,44 @@ class TestStrategyMetaValidation:
                 interval="1minute",
                 lookback_bars=-1,
             )
+
+
+class TestRegisterStrategyDecorator:
+    """Exercises the module-wide :func:`register_strategy` helper."""
+
+    def teardown_method(self) -> None:
+        """Keep the module-wide registry clean between cases."""
+        default_registry.clear()
+
+    def test_decorator_populates_default_registry(self) -> None:
+        @register_strategy
+        class _DecoStrat:
+            META = StrategyMeta(
+                strategy_id="deco_test",
+                version="0.1.0",
+                symbols=("NSE-A",),
+                interval="1minute",
+            )
+
+            def on_event(self, event: object, state: StrategyState) -> list[Signal]:
+                del event, state
+                return []
+
+        assert "deco_test" in default_registry.ids()
+        assert default_registry.get("deco_test") is _DecoStrat
+
+    def test_decorator_returns_class_unchanged(self) -> None:
+        class _Strat:
+            META = StrategyMeta(
+                strategy_id="deco_return_check",
+                version="0.1.0",
+                symbols=("NSE-A",),
+                interval="1minute",
+            )
+
+            def on_event(self, event: object, state: StrategyState) -> list[Signal]:
+                del event, state
+                return []
+
+        returned = register_strategy(_Strat)
+        assert returned is _Strat

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import array
 import math
+from decimal import Decimal
 
 import pytest
 from brutex.strategies.combo import canonicalise_params, combo_hash
@@ -62,6 +64,33 @@ class TestCanonicaliseParams:
     def test_unsupported_type_rejected(self) -> None:
         with pytest.raises(StrategyError, match="unsupported"):
             canonicalise_params({"k": {1, 2, 3}})  # type: ignore[dict-item]
+
+    def test_none_value(self) -> None:
+        out = canonicalise_params({"k": None})
+        assert out == '{"k":null}'
+
+    def test_bool_values(self) -> None:
+        """bool must round-trip as JSON ``true`` / ``false``."""
+        out = canonicalise_params({"flag_a": True, "flag_b": False})
+        assert '"flag_a":true' in out
+        assert '"flag_b":false' in out
+
+    def test_str_value(self) -> None:
+        """String values (not just keys) flow through unchanged."""
+        out = canonicalise_params({"label": "mean_revert"})
+        assert out == '{"label":"mean_revert"}'
+
+    def test_decimal_value(self) -> None:
+        """Decimal values round-trip via ``str()`` for exact precision."""
+        out = canonicalise_params({"price": Decimal("123.456")})
+        assert out == '{"price":"123.456"}'
+
+    def test_custom_sequence_value(self) -> None:
+        """Non-list/tuple Sequence (e.g. ``array.array``) is serialised
+        as a list so indicator params can use ``array`` storage without
+        surprise rejections."""
+        out = canonicalise_params({"k": array.array("i", [1, 2, 3])})
+        assert out == '{"k":[1,2,3]}'
 
 
 class TestComboHash:

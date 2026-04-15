@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import itertools
 import json
-import logging
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -49,15 +48,13 @@ from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 
+from brutex.feed.replay import ReplayFeed
 from brutex.strategies.combo import combo_hash
 from brutex.strategies.errors import StrategyError
 from brutex.strategies.runner import StrategyRunner
 
 if TYPE_CHECKING:  # pragma: no cover
-    from brutex.feed.replay import ReplayFeed
     from brutex.strategies.protocol import Strategy
-
-logger = logging.getLogger(__name__)
 
 
 #: Factory returning a freshly-constructed :class:`Strategy` for the
@@ -73,7 +70,7 @@ SHA256_HEX_LEN: int = 64
 #: given params. Receives the full combo params dict so strategies
 #: whose symbol universe depends on a param can build the right
 #: feed, but most callers will ignore the argument.
-FeedFactory = Callable[[Mapping[str, Any]], "ReplayFeed"]
+FeedFactory = Callable[[Mapping[str, Any]], ReplayFeed]
 
 
 # ────────────────────────────────────────────────────────────────────────
