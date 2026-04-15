@@ -22,7 +22,6 @@ from brutex.execution.types import (
 from brutex.models import InstrumentType, Segment
 from brutex.strategies.types import Side
 
-
 # ────────────────────────────────────────────────────────────────────────
 # InstrumentMeta validation
 # ────────────────────────────────────────────────────────────────────────
