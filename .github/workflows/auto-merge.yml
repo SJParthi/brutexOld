@@ -1,71 +1,177 @@
 # BruteX — Auto-merge for trusted PRs on green CI.
 #
-# Mirrors tickvault's auto-merge.yml. Enables auto-merge (squash mode)
-# on any PR that:
-#   1. Is not a draft
-#   2. Targets main
-#   3. Is authored by SJParthi, dependabot[bot], renovate[bot], or any
-#      branch starting with `claude/`
-#   4. Has the "CI OK" aggregate gate green
+# ## How this works
 #
-# When auto-merge is enabled on a PR, GitHub will merge it
-# automatically as soon as the required checks pass (i.e. when
-# ci-ok reports success).
+# The original (tickvault-copy) version of this workflow fired on
+# `pull_request_target` and called `gh pr merge --auto --squash`. That
+# assumed branch protection on main had required status checks
+# configured, so GitHub's own auto-merge queue would wait for CI.
+# BruteX has no branch protection yet, so `--auto` merged PRs
+# immediately on creation, before any CI had run.
+#
+# This version fixes that by triggering on `workflow_run` instead —
+# the workflow only fires AFTER the CI workflow has completed for
+# the PR's head commit. We then:
+#
+#   1. Find the PR that this workflow_run belongs to (head SHA lookup)
+#   2. Check that the PR is open, not a draft, and authored by a
+#      trusted actor (SJParthi, dependabot[bot], renovate[bot], or any
+#      branch whose head ref starts with `claude/`)
+#   3. Check that the `ci-ok (aggregate gate)` check run is green
+#   4. If all of the above pass, squash-merge the PR and delete the
+#      branch
+#
+# If CI is still running or failed, this workflow exits cleanly and
+# will be re-triggered the next time CI completes for the same PR.
+#
+# ## Why `workflow_run` and not `check_suite`?
+#
+# `workflow_run` is the idiomatic way to chain workflows in GitHub
+# Actions. It gives us the SHA of the head commit and the conclusion
+# of the upstream workflow, both of which we need to decide whether
+# to merge. `check_suite` is noisier — it fires for every individual
+# check, and the aggregation logic would duplicate what `ci-ok`
+# already does.
 
 name: Auto-merge
 
 on:
-  pull_request_target:
+  workflow_run:
+    workflows:
+      - "CI"
     types:
-      - opened
-      - ready_for_review
-      - synchronize
-      - reopened
+      - completed
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to auto-merge (manual trigger)"
+        required: false
 
 permissions:
   contents: write
   pull-requests: write
+  actions: read
+  checks: read
 
 concurrency:
-  group: auto-merge-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: auto-merge-${{ github.event.workflow_run.head_sha || github.event.inputs.pr_number }}
+  cancel-in-progress: false
 
 jobs:
   auto-merge:
-    name: Enable auto-merge
+    name: Auto-merge on green CI
     runs-on: ubuntu-24.04
+    # Only run when the upstream CI workflow completed successfully.
+    # If ci.yml failed or was cancelled, skip the merge entirely.
     if: |
-      github.event.pull_request.draft != true &&
-      github.event.pull_request.base.ref == 'main' && (
-        github.event.pull_request.user.login == 'SJParthi' ||
-        github.event.pull_request.user.login == 'dependabot[bot]' ||
-        github.event.pull_request.user.login == 'renovate[bot]' ||
-        startsWith(github.event.pull_request.head.ref, 'claude/')
+      github.event_name == 'workflow_dispatch' || (
+        github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.conclusion == 'success'
       )
     timeout-minutes: 5
     steps:
-      - name: Enable auto-merge (squash)
+      - name: Find associated PR
+        id: find-pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          MANUAL_PR: ${{ github.event.inputs.pr_number }}
         run: |
-          set -e
-          echo "Enabling auto-merge on PR #${PR_NUMBER} in ${REPO}"
-          # Use the REST API via gh CLI. gh merge --auto enables GitHub's
-          # built-in auto-merge queue, which merges as soon as required
-          # checks pass. We use squash mode to keep main linear.
+          set -euo pipefail
+          if [[ -n "${MANUAL_PR}" ]]; then
+            echo "Using manually-specified PR #${MANUAL_PR}"
+            echo "pr_number=${MANUAL_PR}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Look up the open PR whose head SHA matches the workflow_run.
+          prs=$(gh pr list \
+            --repo "${REPO}" \
+            --state open \
+            --search "${HEAD_SHA}" \
+            --json number,headRefOid,headRefName,author,isDraft \
+            --jq ".[] | select(.headRefOid == \"${HEAD_SHA}\")")
+          if [[ -z "${prs}" ]]; then
+            echo "::notice::No open PR found for head SHA ${HEAD_SHA}; nothing to merge"
+            echo "pr_number=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Found PR data: ${prs}"
+          pr_number=$(echo "${prs}" | head -1 | jq -r .number)
+          author=$(echo "${prs}" | head -1 | jq -r .author.login)
+          head_ref=$(echo "${prs}" | head -1 | jq -r .headRefName)
+          is_draft=$(echo "${prs}" | head -1 | jq -r .isDraft)
+
+          echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+          echo "author=${author}" >> "$GITHUB_OUTPUT"
+          echo "head_ref=${head_ref}" >> "$GITHUB_OUTPUT"
+          echo "is_draft=${is_draft}" >> "$GITHUB_OUTPUT"
+
+      - name: Check trusted actor
+        id: trust-check
+        if: steps.find-pr.outputs.pr_number != ''
+        env:
+          AUTHOR: ${{ steps.find-pr.outputs.author }}
+          HEAD_REF: ${{ steps.find-pr.outputs.head_ref }}
+          IS_DRAFT: ${{ steps.find-pr.outputs.is_draft }}
+        run: |
+          set -euo pipefail
+          if [[ "${IS_DRAFT}" == "true" ]]; then
+            echo "::notice::PR is draft; skipping auto-merge"
+            echo "trusted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "${AUTHOR}" in
+            SJParthi|dependabot\[bot\]|renovate\[bot\])
+              echo "Author ${AUTHOR} is trusted"
+              echo "trusted=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          if [[ "${HEAD_REF}" == claude/* ]]; then
+            echo "Head ref ${HEAD_REF} starts with claude/ — trusted"
+            echo "trusted=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::notice::Author ${AUTHOR} on branch ${HEAD_REF} is NOT trusted; skipping"
+          echo "trusted=false" >> "$GITHUB_OUTPUT"
+
+      - name: Verify ci-ok aggregate is green
+        id: ci-check
+        if: steps.trust-check.outputs.trusted == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          # The ci-ok job produces a check run of the same name.
+          # It must exist AND be in conclusion=success.
+          conclusion=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" \
+            --jq '.check_runs[] | select(.name == "CI OK (aggregate gate)") | .conclusion' \
+            | head -1)
+          echo "ci-ok conclusion: ${conclusion:-<missing>}"
+          if [[ "${conclusion}" != "success" ]]; then
+            echo "::notice::ci-ok is not green (${conclusion:-missing}); skipping merge"
+            echo "green=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "green=true" >> "$GITHUB_OUTPUT"
+
+      - name: Squash-merge + delete branch
+        if: steps.ci-check.outputs.green == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.find-pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          echo "Merging PR #${PR_NUMBER} (ci-ok is green)"
           gh pr merge "${PR_NUMBER}" \
             --repo "${REPO}" \
-            --auto \
             --squash \
-            --delete-branch
-      - name: Post comment
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-        run: |
+            --delete-branch \
+            --subject "$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json title --jq .title) (#${PR_NUMBER})"
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body \
-            "🤖 Auto-merge enabled. This PR will squash-merge once CI goes green."
+            "🤖 Auto-merged (ci-ok was green on head commit ${{ github.event.workflow_run.head_sha }})."
