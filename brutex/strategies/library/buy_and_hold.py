@@ -43,8 +43,13 @@ class BuyAndHold:
     )
 
     def __init__(self, params: Mapping[str, Any] | None = None) -> None:
-        """Accept and ignore any params \u2014 BuyAndHold has no tunables."""
-        del params  # explicit no-op so the sweep factory signature matches
+        """Accept and ignore any params \u2014 BuyAndHold has no tunables.
+
+        The ``params`` argument is kept so the class satisfies the
+        :data:`~brutex.strategies.sweep.StrategyFactory` callable
+        protocol used by :class:`ComboSweep`; the body intentionally
+        does nothing with it.
+        """
 
     def on_event(
         self,

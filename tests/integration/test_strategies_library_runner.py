@@ -145,10 +145,7 @@ class TestDonchianBreakoutLive:
         This test pins that behaviour explicitly so no one is surprised
         by the double-gate later.
         """
-        bars = [_bar(1, 15, close=100.0)]  # placeholder; overwritten below
-        bars = []
-        for i in range(25):
-            bars.append(_bar(1, 15 + i, close=100.0))
+        bars = [_bar(1, 15 + i, close=100.0) for i in range(25)]
         lake_root, catalog_path = _seed_lake(tmp_path, bars)
         with Catalog.open(catalog_path) as cat:
             feed = _make_feed(cat, lake_root)

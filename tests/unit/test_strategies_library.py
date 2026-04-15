@@ -439,10 +439,9 @@ class TestDeterministicReplay:
 
     def test_momentum_replay_is_identical(self) -> None:
         strat = ClosePreviousMomentum({"k": 2})
-        # Alternating up-down-up sequences
+        # Alternating up-down-up sequences. Spread timestamps across
+        # successive minutes so every :class:`CandleBar` stays valid.
         closes = [100, 101, 102, 103, 100, 99, 98, 99, 100, 101, 102]
-        bars = [_bar(1, 15, close=c) for c in closes]
-        # Spread timestamps so CandleBar stays valid
         bars = [_bar(1, 15 + i, close=c) for i, c in enumerate(closes)]
         s1 = StrategyState()
         trace1 = self._run(strat, bars, s1)
