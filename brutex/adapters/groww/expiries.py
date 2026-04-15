@@ -104,6 +104,7 @@ def _content_hash(exchange: str, underlying: str, year: int) -> str:
 
 
 def _make_item(*, exchange: str, underlying: str, year: int) -> WorkItem:
+    """Build a Phase B :class:`WorkItem` from one (underlying, year) pair."""
     return WorkItem.new(
         phase=IngestPhase.B_EXPIRIES,
         content_hash=_content_hash(exchange, underlying, year),
@@ -117,6 +118,7 @@ def _make_item(*, exchange: str, underlying: str, year: int) -> WorkItem:
 
 
 def _current_year_utc() -> int:
+    """Return the current UTC year as an integer."""
     return datetime.now(UTC).year
 
 
@@ -184,6 +186,7 @@ class PhaseBDriver:
 
     @property
     def years(self) -> tuple[int, ...]:
+        """Return the inclusive year range this driver enumerates over."""
         return tuple(range(self._start_year, self._end_year + 1))
 
     # ── PhaseDriverProtocol ────────────────────────────────────────
@@ -208,6 +211,7 @@ class PhaseBDriver:
         total_items = len(items)
 
         def invoke(work_item: WorkItem) -> tuple[WorkItem, Any]:
+            """Drive a single expiries work item (Phase B dispatch hook)."""
             params = dict(work_item.params)
             exchange = params["exchange"]
             underlying = params["underlying_symbol"]
@@ -281,6 +285,7 @@ class PhaseBDriver:
 
     @property
     def last_result(self) -> ExpiriesResult | None:
+        """Return the most recent :class:`ExpiriesResult`, or None before run()."""
         return self._last_result
 
     @property

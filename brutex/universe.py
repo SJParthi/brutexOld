@@ -124,6 +124,7 @@ V1_UNDERLYINGS: Final[tuple[UnderlyingSpec, ...]] = V1_INDICES
 
 
 def _build_index_symbols() -> frozenset[tuple[Exchange, str]]:
+    """Return frozenset of (exchange, trading_symbol) tuples for the v1 index universe."""
     return frozenset((u.exchange, u.underlying_symbol) for u in V1_INDICES)
 
 

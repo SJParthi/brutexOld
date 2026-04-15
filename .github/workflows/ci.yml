@@ -276,7 +276,7 @@ jobs:
         run: |
           pip install "bandit>=1.7,<2.0" "pip-audit>=2.7,<3.0"
       - name: bandit
-        run: bandit -r brutex -ll
+        run: bandit -r brutex -l
       - name: Compile declared deps to requirements.txt
         # pip-audit on a fat venv scans the runner-image baseline and
         # gets noisy with CVEs in dev-transitives we don't control.
@@ -317,9 +317,10 @@ jobs:
         run: pip install "interrogate>=1.7"
       - name: Check docstring coverage
         run: |
-          # Target 75% during P1a (progressively raised per docs/adr/).
-          # Modules with complex internal structure (pipeline, metrics,
-          # dashboard) get docstrings as logic stabilises.
+          # 100% gate. Every public + private function/class/method has
+          # a docstring, including dataclass field validators and
+          # internal helpers. Bumped from 75% → 100% in PR #5 after
+          # adding ~80 missing docstrings across the codebase.
           interrogate brutex \
             --ignore-init-method \
             --ignore-init-module \
@@ -328,7 +329,7 @@ jobs:
             --ignore-nested-functions \
             --ignore-module \
             --ignore-setters \
-            --fail-under=75 \
+            --fail-under=100 \
             -vv
 
   # ─────────────────────────────────────────────────────────────────

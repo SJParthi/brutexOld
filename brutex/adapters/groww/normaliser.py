@@ -45,12 +45,14 @@ def _is_missing(value: object) -> bool:
 
 
 def _opt_str(value: object) -> str | None:
+    """Convert a possibly-NaN raw field to ``str | None``."""
     if _is_missing(value):
         return None
     return str(value).strip() or None
 
 
 def _required_str(value: object, field: str, row_id: str) -> str:
+    """Extract a required non-empty string field, raising on missing data."""
     s = _opt_str(value)
     if s is None:
         raise InstrumentFormatError(f"{row_id}: missing required string field {field!r}")
@@ -58,6 +60,7 @@ def _required_str(value: object, field: str, row_id: str) -> str:
 
 
 def _opt_int(value: object, field: str, row_id: str) -> int | None:
+    """Convert a possibly-NaN raw field to ``int | None``, raising on bad data."""
     if _is_missing(value):
         return None
     if not isinstance(value, (int, float, str, bytes, bytearray)):
@@ -71,6 +74,7 @@ def _opt_int(value: object, field: str, row_id: str) -> int | None:
 
 
 def _required_int(value: object, field: str, row_id: str) -> int:
+    """Parse a required integer field, raising InstrumentFormatError on missing/bad data."""
     i = _opt_int(value, field, row_id)
     if i is None:
         raise InstrumentFormatError(f"{row_id}: missing required integer field {field!r}")
@@ -78,6 +82,7 @@ def _required_int(value: object, field: str, row_id: str) -> int:
 
 
 def _opt_decimal(value: object, field: str, row_id: str) -> Decimal | None:
+    """Parse an optional Decimal field; returns None on NaN/missing."""
     if _is_missing(value):
         return None
     try:
@@ -91,6 +96,7 @@ def _opt_decimal(value: object, field: str, row_id: str) -> Decimal | None:
 
 
 def _required_date(value: object, field: str, row_id: str) -> date:
+    """Parse a required ISO date field, raising on missing/bad input."""
     if _is_missing(value):
         raise InstrumentFormatError(f"{row_id}: missing required date field {field!r}")
     if isinstance(value, date) and not isinstance(value, datetime):
@@ -108,6 +114,7 @@ def _required_date(value: object, field: str, row_id: str) -> date:
 
 
 def _opt_date(value: object, field: str, row_id: str) -> date | None:
+    """Parse an optional ISO date field; returns None on NaN/missing."""
     if _is_missing(value):
         return None
     return _required_date(value, field, row_id)

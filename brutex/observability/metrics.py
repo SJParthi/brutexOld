@@ -69,6 +69,8 @@ class MetricsError(BruteXError):
 
 
 class MetricKind(StrEnum):
+    """Enum of supported Prometheus metric types."""
+
     COUNTER = "counter"
     GAUGE = "gauge"
     HISTOGRAM = "histogram"
@@ -119,18 +121,24 @@ class _MetricDefinition:
 
 @dataclass(slots=True)
 class _CounterMetric:
+    """Internal counter dataclass — use :class:`MetricRegistry.counter` to create."""
+
     definition: _MetricDefinition
     values: dict[tuple[str, ...], float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class _GaugeMetric:
+    """Internal gauge dataclass — use :class:`MetricRegistry.gauge` to create."""
+
     definition: _MetricDefinition
     values: dict[tuple[str, ...], float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class _HistogramMetric:
+    """Internal histogram dataclass — use :class:`MetricRegistry.histogram` to create."""
+
     definition: _MetricDefinition
     buckets: tuple[float, ...]
     # label_values -> (bucket_index -> cumulative_count)
@@ -239,6 +247,7 @@ class MetricRegistry:
             )
 
     def _reject_name_collision(self, name: str) -> None:
+        """Raise MetricError if *name* is already registered with a different kind."""
         if name in self._counters or name in self._gauges or name in self._histograms:
             raise MetricsError(f"Metric name {name!r} already registered")
 
@@ -248,6 +257,7 @@ class MetricRegistry:
         labels: tuple[str, ...],
         kind: MetricKind,
     ) -> None:
+        """Raise MetricError if a re-registration disagrees with the original definition."""
         if existing.kind != kind:
             raise MetricsError(
                 f"Metric {existing.name!r} already registered as "
@@ -328,6 +338,7 @@ class MetricRegistry:
         definition: _MetricDefinition,
         labels: tuple[str, ...],
     ) -> None:
+        """Raise MetricError if observed label set diverges from the metric's declared labels."""
         if len(labels) != len(definition.labels):
             raise MetricsError(
                 f"Metric {definition.name!r} expects {len(definition.labels)} "
@@ -337,15 +348,19 @@ class MetricRegistry:
     # ── Read-only accessors for tests ──────────────────────────────
 
     def counter_value(self, name: str, *, labels: tuple[str, ...] = _EMPTY_LABELS) -> float:
+        """Return the current value of a registered counter (test-only accessor)."""
         return self._counters[name].values.get(labels, 0.0)
 
     def gauge_value(self, name: str, *, labels: tuple[str, ...] = _EMPTY_LABELS) -> float:
+        """Return the current value of a registered gauge (test-only accessor)."""
         return self._gauges[name].values.get(labels, 0.0)
 
     def histogram_count(self, name: str, *, labels: tuple[str, ...] = _EMPTY_LABELS) -> int:
+        """Return the total observation count of a histogram (test-only accessor)."""
         return self._histograms[name].counts.get(labels, 0)
 
     def histogram_sum(self, name: str, *, labels: tuple[str, ...] = _EMPTY_LABELS) -> float:
+        """Return the sum of all observed values in a histogram (test-only accessor)."""
         return self._histograms[name].sums.get(labels, 0.0)
 
 
@@ -426,6 +441,7 @@ def _format_line(
     label_values: tuple[str, ...],
     value: float | int,
 ) -> str:
+    """Format one Prometheus text-format metric line for output."""
     if not label_keys:
         return f"{metric_name} {_format_value(value)}"
     pairs = ",".join(
@@ -435,6 +451,7 @@ def _format_line(
 
 
 def _format_value(value: float | int) -> str:
+    """Format a numeric metric value per Prometheus text-format rules."""
     if isinstance(value, int):
         return str(value)
     if math.isinf(value):
@@ -445,6 +462,7 @@ def _format_value(value: float | int) -> str:
 
 
 def _escape_label(value: str) -> str:
+    r"""Escape a label value for Prometheus text format (\\, ", \n)."""
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 

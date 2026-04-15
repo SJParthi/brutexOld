@@ -103,11 +103,13 @@ ExpiriesInput = Mapping[tuple[str, str], Sequence[str]]
 
 
 def _content_hash(exchange: str, underlying: str, expiry_date: str) -> str:
+    """Compute the deterministic dedup hash for a contracts work item."""
     content = f"get_contracts:{exchange}:{underlying}:{expiry_date}"
     return hashlib.sha256(content.encode()).hexdigest()
 
 
 def _make_item(*, exchange: str, underlying: str, expiry_date: str) -> WorkItem:
+    """Build a Phase C :class:`WorkItem` from one (underlying, expiry) pair."""
     return WorkItem.new(
         phase=IngestPhase.C_CONTRACTS,
         content_hash=_content_hash(exchange, underlying, expiry_date),
@@ -186,6 +188,7 @@ class PhaseCDriver:
         total_items = len(items)
 
         def invoke(work_item: WorkItem) -> tuple[WorkItem, Any]:
+            """Drive a single contracts work item (Phase C dispatch hook)."""
             params = dict(work_item.params)
             exchange = params["exchange"]
             underlying = params["underlying_symbol"]
@@ -264,6 +267,7 @@ class PhaseCDriver:
 
     @property
     def last_result(self) -> ContractsResult | None:
+        """Return the most recent :class:`ContractsResult`, or None before run()."""
         return self._last_result
 
     @property

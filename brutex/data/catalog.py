@@ -88,6 +88,7 @@ class Catalog:
 
     @property
     def path(self) -> Path:
+        """Return the on-disk path of the underlying DuckDB file."""
         return self._path
 
     def upsert(self, entry: CatalogEntry) -> None:

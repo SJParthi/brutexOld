@@ -148,6 +148,8 @@ class IterationLimitError(PipelineError):
 
 
 class PipelineEventKind:
+    """String enum of pipeline event kind identifiers (RUN_START, PHASE_START, etc.)."""
+
     PHASE_START: Final[str] = "phase.start"
     PHASE_PROGRESS: Final[str] = "phase.progress"
     PHASE_COMPLETE: Final[str] = "phase.complete"
@@ -210,10 +212,12 @@ class PhaseResult:
 
     @property
     def terminal(self) -> int:
+        """Return True if every work item in this phase is in a terminal state."""
         return self.success + self.no_data + self.quarantined
 
     @property
     def had_quarantines(self) -> bool:
+        """Return True if any work item in this phase ended quarantined."""
         return self.quarantined > 0
 
 
@@ -377,6 +381,7 @@ class PhaseRunner:
         self._subscribers.append(subscriber)
 
     def _publish(self, event: PipelineEvent) -> None:
+        """Fan an event out to every subscriber (errors swallowed)."""
         for sub in self._subscribers:
             # Subscriber errors must NEVER block the pipeline. We
             # eat them here but the audit log still records the
@@ -390,6 +395,7 @@ class PhaseRunner:
         action: str,
         payload: dict[str, Any],
     ) -> None:
+        """Append a phase event to the audit chain."""
         self._audit.append(
             action=action,
             subject=f"phase:{self._phase.value}",
@@ -476,6 +482,7 @@ class PhaseRunner:
     # ── Event emitters ─────────────────────────────────────────────
 
     def _emit_phase_start(self, *, total: int) -> None:
+        """Build + publish a PHASE_START :class:`PipelineEvent`."""
         evt = PipelineEvent(
             kind=PipelineEventKind.PHASE_START,
             at=datetime.now(UTC),
@@ -490,6 +497,7 @@ class PhaseRunner:
         )
 
     def _emit_progress(self, *, done: int, total: int, counts: Counter[WorkItemState]) -> None:
+        """Build + publish a PHASE_PROGRESS :class:`PipelineEvent`."""
         evt = PipelineEvent(
             kind=PipelineEventKind.PHASE_PROGRESS,
             at=datetime.now(UTC),
@@ -504,6 +512,7 @@ class PhaseRunner:
         self._publish(evt)
 
     def _emit_item_complete(self, item: WorkItem) -> None:
+        """Build + publish an ITEM_COMPLETE :class:`PipelineEvent`."""
         evt = PipelineEvent(
             kind=PipelineEventKind.ITEM_COMPLETE,
             at=datetime.now(UTC),
@@ -516,6 +525,7 @@ class PhaseRunner:
         self._publish(evt)
 
     def _emit_phase_complete(self, *, result: PhaseResult) -> None:
+        """Build + publish a PHASE_COMPLETE :class:`PipelineEvent`."""
         evt = PipelineEvent(
             kind=PipelineEventKind.PHASE_COMPLETE,
             at=datetime.now(UTC),
@@ -544,6 +554,7 @@ class PhaseRunner:
         )
 
     def _emit_phase_halted(self, *, result: PhaseResult, reason: str) -> None:
+        """Build + publish a PHASE_HALTED :class:`PipelineEvent`."""
         evt = PipelineEvent(
             kind=PipelineEventKind.PHASE_HALTED,
             at=datetime.now(UTC),

@@ -98,6 +98,7 @@ class NullBarSink:
         interval: str,
         bars: Sequence[CandleBar],
     ) -> SinkAppendResult:
+        """Discard *bars* and report the count — no persistence side effects."""
         del exchange, segment, symbol, interval
         return SinkAppendResult(
             bars_appended=len(bars),
@@ -138,10 +139,12 @@ class ParquetBarSink:
 
     @property
     def writer(self) -> ParquetWriter:
+        """Return the underlying :class:`ParquetWriter`."""
         return self._writer
 
     @property
     def catalog(self) -> Catalog | None:
+        """Return the configured :class:`Catalog`, or None if no catalog is wired."""
         return self._catalog
 
     def append(

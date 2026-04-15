@@ -164,23 +164,31 @@ disallow_untyped_decorators = false
 [tool.pyright]
 pythonVersion = "3.12"
 # mypy --strict is the authoritative type check (see [tool.mypy] above).
-# Pyright runs in basic mode as a secondary sanity check — the two tools
-# diverge on stylistic rules (private-access across modules, dict
-# literal widening, redefining module-level constants), and we don't
-# want both bikeshedding. Errors that matter show up in mypy.
-typeCheckingMode = "basic"
-reportMissingTypeStubs = "none"
+# Pyright runs in STANDARD mode as a secondary sanity check — the two
+# tools diverge on a handful of stylistic rules that we explicitly
+# silence below. Anything that matters semantically still fires in
+# mypy; pyright is the belt to mypy's suspenders.
+typeCheckingMode = "standard"
+# Stylistic divergences silenced so the two checkers don't bikeshed:
+reportPrivateUsage = "none"             # pytest fixtures touch _rows on FakeDataFrame etc.
+reportConstantRedefinition = "none"     # brutex.math facade rebinds __all__ symbols
+reportUnusedFunction = "none"           # FastAPI route handlers are nominally unused
+reportUntypedFunctionDecorator = "none" # FastAPI decorators lack generic types
+reportUnsupportedDunderAll = "none"     # math facade builds __all__ programmatically
+# Unknown-type noise inherited from deliberately lazy imports (polars,
+# duckdb, fastapi, lmdb, fno_math_py). mypy's [[overrides]] list already
+# ignores missing imports for these; pyright sees the members as Unknown
+# which is informational, not a real type safety issue:
 reportUnknownMemberType = "none"
 reportUnknownVariableType = "none"
 reportUnknownParameterType = "none"
-reportPrivateUsage = "none"
-reportConstantRedefinition = "none"
-reportUnusedFunction = "none"
-reportUntypedFunctionDecorator = "none"
-reportUnsupportedDunderAll = "none"
-reportMissingImports = "none"
 reportUnnecessaryIsInstance = "none"
-reportArgumentType = "none"
+# Missing imports — pyright may run against a different venv than
+# the one with growwapi/fno_math_py/lmdb installed. mypy's
+# [[overrides]] table handles this properly; pyright gets the
+# blanket silence here:
+reportMissingImports = "none"
+reportMissingTypeStubs = "none"
 
 [tool.pytest.ini_options]
 minversion = "8.0"
