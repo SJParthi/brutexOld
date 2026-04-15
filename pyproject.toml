@@ -123,6 +123,9 @@ ignore = [
 ]
 # CLI uses print() deliberately — it's a CLI, stdout is the interface.
 "brutex/cli.py" = ["T201"]
+# Proof / smoke scripts — intentionally print to stdout and touch
+# private ._conn on the stores to show the underlying DuckDB guarantees.
+"scripts/**" = ["T201", "SLF001", "PLR2004", "S101", "PLR0915"]
 # Placeholder shims need to mirror an eventual external module surface.
 "brutex/math/__init__.py" = ["A005"]  # shadows stdlib 'math' — deliberate re-export point
 
