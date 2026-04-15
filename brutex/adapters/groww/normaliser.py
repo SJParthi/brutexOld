@@ -41,9 +41,7 @@ def _is_missing(value: object) -> bool:
         return True
     if isinstance(value, float) and math.isnan(value):
         return True
-    if isinstance(value, str) and value.strip() == "":
-        return True
-    return False
+    return isinstance(value, str) and value.strip() == ""
 
 
 def _opt_str(value: object) -> str | None:

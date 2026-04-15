@@ -343,11 +343,10 @@ def is_pid_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except OSError as exc:
-        if exc.errno == errno.ESRCH:
-            return False
-        # Any other errno is unexpected — treat as alive to avoid
-        # deleting a possibly-valid runtime file on an ambiguous error.
-        return True
+        # ESRCH == "no such process" → dead. Any other errno is
+        # unexpected — treat as alive to avoid deleting a
+        # possibly-valid runtime file on an ambiguous error.
+        return exc.errno != errno.ESRCH
     else:
         return True
 

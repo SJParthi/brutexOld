@@ -58,6 +58,12 @@ DEFAULT_RAY_DASHBOARD_PORT: Final[int] = 9265
 #: Override to ``127.0.0.1`` for localhost-only.
 DEFAULT_HOST_BIND: Final[str] = "0.0.0.0"  # nosec B104 — intentional LAN bind
 
+#: Maximum valid TCP/UDP port number (2^16 - 1).
+MAX_PORT: Final[int] = 65535
+
+#: Minimum valid TCP/UDP port number — port 0 is reserved.
+MIN_PORT: Final[int] = 1
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Env var names — single source of truth
@@ -335,10 +341,10 @@ def _parse_port(env_var: str, default: int) -> int:
         port = int(raw)
     except ValueError as exc:
         raise InvalidPortError(
-            f"Invalid {env_var}={raw!r} — must be an integer in 1..65535"
+            f"Invalid {env_var}={raw!r} — must be an integer in {MIN_PORT}..{MAX_PORT}"
         ) from exc
-    if not (1 <= port <= 65535):
-        raise InvalidPortError(f"Invalid {env_var}={port} — must be in 1..65535")
+    if not (MIN_PORT <= port <= MAX_PORT):
+        raise InvalidPortError(f"Invalid {env_var}={port} — must be in {MIN_PORT}..{MAX_PORT}")
     return port
 
 

@@ -190,6 +190,16 @@ class TickSizeFormatError(InstrumentFormatError):
 # Tick-size normalisation — handles the CSV(float rupees)/dict(int paise) drift
 # ────────────────────────────────────────────────────────────────────────
 
+#: Minimum value of a tick size when expressed as integer paise (the
+#: dict-output form from Groww). Below 1 is meaningless (paise < 1 =
+#: fractional rupee, should use the float-rupees branch instead).
+MIN_TICK_PAISE: Final[int] = 1
+
+#: Upper bound on a tick size in paise. 1000 paise = Rs 10.00, which
+#: is larger than any legitimate tick size BruteX has ever encountered.
+MAX_TICK_PAISE: Final[int] = 1000
+
+
 VALID_TICK_SIZES_RUPEES: Final[frozenset[Decimal]] = frozenset(
     Decimal(s) for s in ("0.01", "0.05", "0.10", "0.25", "0.50", "1.00", "5.00")
 )
@@ -227,12 +237,13 @@ def normalise_tick_size(raw: float | int | Decimal | str) -> Decimal:
         # bool is a subclass of int — catch it explicitly
         raise TickSizeFormatError(f"tick_size cannot be bool: {raw!r}")
     elif isinstance(raw, int):
-        if 1 <= raw < 1000:
+        if MIN_TICK_PAISE <= raw < MAX_TICK_PAISE:
             # integer paise convention (the dict-output form)
             candidate = Decimal(raw) / Decimal(100)
         else:
             raise TickSizeFormatError(
-                f"tick_size integer out of expected paise range [1, 1000): {raw}"
+                f"tick_size integer out of expected paise range "
+                f"[{MIN_TICK_PAISE}, {MAX_TICK_PAISE}): {raw}"
             )
     elif isinstance(raw, float):
         # Convert via str to avoid binary-float precision loss.

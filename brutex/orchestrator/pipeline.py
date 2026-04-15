@@ -378,13 +378,11 @@ class PhaseRunner:
 
     def _publish(self, event: PipelineEvent) -> None:
         for sub in self._subscribers:
-            try:
+            # Subscriber errors must NEVER block the pipeline. We
+            # eat them here but the audit log still records the
+            # event itself via _audit_phase_event.
+            with contextlib.suppress(Exception):
                 sub(event)
-            except Exception:
-                # Subscriber errors must NEVER block the pipeline.
-                # We eat them here but the audit log still records
-                # the event itself via _audit_phase_event.
-                pass
 
     def _audit_phase_event(
         self,

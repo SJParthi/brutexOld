@@ -90,6 +90,10 @@ ENV_CHAT_ID: Final[str] = "BRUTEX_TELEGRAM_CHAT_ID"
 ENV_ENABLED: Final[str] = "BRUTEX_TELEGRAM_ENABLED"
 ENV_API_BASE: Final[str] = "BRUTEX_TELEGRAM_API_BASE"
 
+#: HTTP "successful response" status range per RFC 9110 §15.3.
+HTTP_OK_MIN: Final[int] = 200
+HTTP_OK_MAX: Final[int] = 300
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Errors
@@ -319,8 +323,8 @@ def _default_transport(config: TelegramConfig, event: TelegramEvent) -> bool:
         with urllib.request.urlopen(  # nosec B310 — URL is constructed from our own BASE_URL constant  # noqa: S310
             req, timeout=config.http_timeout
         ) as resp:
-            status = getattr(resp, "status", 200)
-            return 200 <= status < 300
+            status = getattr(resp, "status", HTTP_OK_MIN)
+            return HTTP_OK_MIN <= status < HTTP_OK_MAX
     except urllib.error.HTTPError as exc:
         logger.warning("telegram_http_error", extra={"status": exc.code})
         return False

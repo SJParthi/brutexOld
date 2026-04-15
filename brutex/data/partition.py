@@ -43,6 +43,23 @@ from brutex.data.errors import PartitionError
 BAR_DIR_NAME: Final[str] = "bars"
 
 
+#: Minimum acceptable partition year. BruteX supports 2000 onward
+#: because Groww historical data begins around 2000 and NSE itself
+#: only launched in 1994.
+MIN_PARTITION_YEAR: Final[int] = 2000
+
+#: Maximum acceptable partition year. Far enough in the future that
+#: BruteX's adapters are guaranteed to be rewritten before this
+#: becomes binding.
+MAX_PARTITION_YEAR: Final[int] = 2100
+
+#: Number of months in a Gregorian calendar year.
+MONTHS_PER_YEAR: Final[int] = 12
+
+#: Number of components in a canonical partition path:
+#: ``bars / exchange / segment / symbol / interval / yyyy / mm.parquet``
+PARTITION_PATH_COMPONENTS: Final[int] = 7
+
 #: The 12 Groww candle intervals accepted in partition paths. Must be
 #: kept in sync with ``brutex.adapters.groww.candles.MAX_DURATION_DAYS``.
 VALID_INTERVALS: Final[frozenset[str]] = frozenset(
@@ -107,10 +124,13 @@ def _validate_symbol(symbol: str) -> None:
 
 
 def _validate_year_month(year: int, month: int) -> None:
-    if year < 2000 or year > 2100:
-        raise PartitionError(f"year must be a 4-digit Gregorian year in [2000, 2100], got {year}")
-    if not (1 <= month <= 12):
-        raise PartitionError(f"month must be in [1, 12], got {month}")
+    if year < MIN_PARTITION_YEAR or year > MAX_PARTITION_YEAR:
+        raise PartitionError(
+            f"year must be a 4-digit Gregorian year in "
+            f"[{MIN_PARTITION_YEAR}, {MAX_PARTITION_YEAR}], got {year}"
+        )
+    if not (1 <= month <= MONTHS_PER_YEAR):
+        raise PartitionError(f"month must be in [1, {MONTHS_PER_YEAR}], got {month}")
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -198,9 +218,9 @@ def parse_partition_path(path: Path | str, *, lake_root: Path | None = None) -> 
         parts = p.parts
 
     # Walk from the tail: <yyyy>/<mm>.parquet with 5 parent dirs above.
-    if len(parts) < 7:
+    if len(parts) < PARTITION_PATH_COMPONENTS:
         raise PartitionError(
-            f"partition path must have at least 7 components "
+            f"partition path must have at least {PARTITION_PATH_COMPONENTS} components "
             f"(bars / exchange / segment / symbol / interval / yyyy / mm.parquet), "
             f"got {len(parts)}: {parts}"
         )

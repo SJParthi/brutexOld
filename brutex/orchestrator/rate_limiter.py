@@ -73,6 +73,12 @@ DEFAULT_UPSHIFT_RECOVERY: Final[float] = 120.0
 #: dropping below the steady-state rate.
 DEFAULT_BURST: Final[int] = 5
 
+#: Safety cap on the refill-loop inside :meth:`AdaptiveTokenBucket.acquire`.
+#: Under injected fake clocks, round-off errors can occasionally leave
+#: the token count at ``0.9999…`` indefinitely — this bound guarantees
+#: the loop terminates after at most 16 iterations even in that case.
+_ACQUIRE_LOOP_CAP: Final[int] = 16
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Errors
@@ -216,7 +222,7 @@ class AdaptiveTokenBucket:
             iterations = 0
             while self._tokens < 1.0 - eps:
                 iterations += 1
-                if iterations > 16:
+                if iterations > _ACQUIRE_LOOP_CAP:
                     # Safety net — in the fake-clock world, round-off
                     # should converge in 1-2 iterations; 16 is a hard
                     # cap so tests can't deadlock on us.

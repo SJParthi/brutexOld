@@ -17,6 +17,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import Final
+
+#: sha256 hex digest length (64 chars = 256 bits / 4 bits per nibble).
+SHA256_HEX_LEN: Final[int] = 64
+
+#: Number of months in a Gregorian calendar year. The trailing comma is
+#: not a typo — the name exists so ``CatalogEntry`` validation reads as
+#: a sentence (``1 <= month <= MONTHS_PER_YEAR``).
+MONTHS_PER_YEAR: Final[int] = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,12 +134,15 @@ class CatalogEntry:
     fetched_at: datetime
 
     def __post_init__(self) -> None:
-        if len(self.raw_hash) != 64:
+        if len(self.raw_hash) != SHA256_HEX_LEN:
             raise ValueError(
-                f"CatalogEntry.raw_hash must be 64-char sha256 hex, got {len(self.raw_hash)} chars"
+                f"CatalogEntry.raw_hash must be {SHA256_HEX_LEN}-char sha256 hex, "
+                f"got {len(self.raw_hash)} chars"
             )
-        if not (1 <= self.month <= 12):
-            raise ValueError(f"CatalogEntry.month must be in [1, 12], got {self.month}")
+        if not (1 <= self.month <= MONTHS_PER_YEAR):
+            raise ValueError(
+                f"CatalogEntry.month must be in [1, {MONTHS_PER_YEAR}], got {self.month}"
+            )
         if self.row_count < 0:
             raise ValueError(f"CatalogEntry.row_count must be non-negative, got {self.row_count}")
         # Validate tz-awareness BEFORE any datetime comparison — comparing
