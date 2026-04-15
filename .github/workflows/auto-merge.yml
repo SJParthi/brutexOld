@@ -1,0 +1,71 @@
+# BruteX — Auto-merge for trusted PRs on green CI.
+#
+# Mirrors tickvault's auto-merge.yml. Enables auto-merge (squash mode)
+# on any PR that:
+#   1. Is not a draft
+#   2. Targets main
+#   3. Is authored by SJParthi, dependabot[bot], renovate[bot], or any
+#      branch starting with `claude/`
+#   4. Has the "CI OK" aggregate gate green
+#
+# When auto-merge is enabled on a PR, GitHub will merge it
+# automatically as soon as the required checks pass (i.e. when
+# ci-ok reports success).
+
+name: Auto-merge
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - ready_for_review
+      - synchronize
+      - reopened
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    name: Enable auto-merge
+    runs-on: ubuntu-24.04
+    if: |
+      github.event.pull_request.draft != true &&
+      github.event.pull_request.base.ref == 'main' && (
+        github.event.pull_request.user.login == 'SJParthi' ||
+        github.event.pull_request.user.login == 'dependabot[bot]' ||
+        github.event.pull_request.user.login == 'renovate[bot]' ||
+        startsWith(github.event.pull_request.head.ref, 'claude/')
+      )
+    timeout-minutes: 5
+    steps:
+      - name: Enable auto-merge (squash)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          echo "Enabling auto-merge on PR #${PR_NUMBER} in ${REPO}"
+          # Use the REST API via gh CLI. gh merge --auto enables GitHub's
+          # built-in auto-merge queue, which merges as soon as required
+          # checks pass. We use squash mode to keep main linear.
+          gh pr merge "${PR_NUMBER}" \
+            --repo "${REPO}" \
+            --auto \
+            --squash \
+            --delete-branch
+      - name: Post comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body \
+            "🤖 Auto-merge enabled. This PR will squash-merge once CI goes green."

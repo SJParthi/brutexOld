@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git fetch:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(pwd)",
+      "Bash(python -m:*)",
+      "Bash(python3 -m:*)",
+      "Bash(uv:*)",
+      "Bash(ruff:*)",
+      "Bash(mypy:*)",
+      "Bash(pyright:*)",
+      "Bash(pytest:*)",
+      "Bash(cargo:*)",
+      "Bash(make:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean -fd:*)",
+      "Bash(git commit --amend:*)",
+      "Bash(git rebase -i:*)",
+      "Bash(sudo:*)",
+      "Bash(curl:* | sh)",
+      "Bash(wget:* | sh)",
+      "WebFetch(domain:*.groww.in)"
+    ]
+  },
+  "env": {
+    "BRUTEX_SAFETY_FACTOR": "0.6",
+    "BRUTEX_OHLC_RATE_LIMIT_RPS": "15",
+    "BRUTEX_AUDIT_CHAIN_ENABLED": "1",
+    "BRUTEX_REPRODUCIBILITY_STRICT": "1",
+    "PYTHONHASHSEED": "0",
+    "PYTHONDONTWRITEBYTECODE": "1"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if [[ \"$CLAUDE_TOOL_INPUT_FILE_PATH\" == *\"/main\"* && \"$CLAUDE_CURRENT_BRANCH\" == \"main\" ]]; then echo \"BLOCKED: direct edit on main\"; exit 2; fi'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'f=\"$CLAUDE_TOOL_INPUT_FILE_PATH\"; case \"$f\" in *.py) command -v ruff >/dev/null && ruff check --fix \"$f\" 2>/dev/null || true ;; esac'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'echo \"[brutex] session stop — run: ruff check && mypy --strict brutex && pytest -q\" 1>&2'"
+          }
+        ]
+      }
+    ]
+  }
+}

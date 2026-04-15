@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+*.whl
+
+# Virtual envs
+.venv/
+venv/
+env/
+.env
+.envrc
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mutmut-cache
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+
+# Tooling
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# BruteX runtime data (runtime lake & audit output — NOT the
+# brutex/data source package)
+/data/
+raw/
+canonical/
+audit/
+cache/
+runs/
+*.lmdb
+*.parquet
+*.arrow
+*.zst
+*.zstd
+
+# Secrets — NEVER commit
+.env.local
+.env.*.local
+secrets/
+**/api_token*
+**/groww_token*
+GROWW_API_AUTH_TOKEN*
+
+# Rust (future P3)
+target/
+Cargo.lock

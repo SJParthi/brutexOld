@@ -1,0 +1,45 @@
+# gitleaks configuration for BruteX.
+#
+# We extend the default rules with allowlists for source-code identifiers
+# that look like credentials but are actually environment-variable names,
+# example values in docs, or test-only fake tokens.
+
+title = "BruteX gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist for paths + regex patterns"
+
+paths = [
+  '''docs/.*\.md$''',
+  '''README\.md$''',
+  '''tests/.*''',
+  '''rust/fno-math/target/''',
+  '''\.mypy_cache/''',
+  '''\.ruff_cache/''',
+  '''\.pytest_cache/''',
+]
+
+regexes = [
+  # Environment variable name constants — these are the *names* of
+  # env vars, never the values.
+  '''BRUTEX_TELEGRAM_BOT_TOKEN''',
+  '''BRUTEX_TELEGRAM_CHAT_ID''',
+  '''BRUTEX_GROWW_TOKEN''',
+  '''GROWW_API_AUTH_TOKEN''',
+  '''ENV_BOT_TOKEN''',
+  '''ENV_CHAT_ID''',
+  '''ENV_ENABLED''',
+  # Fixture / synthetic test tokens
+  '''test-token''',
+  '''fake-token''',
+  '''bot_token="test"''',
+]
+
+[[rules]]
+id = "brutex-no-real-telegram-token"
+description = "Real Telegram bot tokens have the form <int>:<35-char>"
+regex = '''\b[0-9]{8,12}:[A-Za-z0-9_-]{35}\b'''
+tags = ["token", "telegram"]

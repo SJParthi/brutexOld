@@ -1,0 +1,29 @@
+# Maturin build backend for fno-math-py.
+#
+# Invoked by `maturin develop` (dev) or `maturin build --release` (prod)
+# to produce a Python wheel containing the compiled PyO3 module.
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fno-math-py"
+version = "0.1.0"
+description = "Python bindings for fno-math — shared Greeks/indicators/strategies crate"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "SJParthi" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+# Point at the Cargo manifest for this crate (not the workspace)
+manifest-path = "Cargo.toml"
+# abi3 forward-compat: one wheel runs on any Python 3.12+
+features = ["pyo3/extension-module"]
+# Name of the importable Python module that consumers use
+module-name = "fno_math_py"

@@ -1,0 +1,174 @@
+# BruteX — Mutation testing (weekly)
+#
+# Runs two mutation-testing passes:
+#
+# 1. Python side: `mutmut` over brutex/ — walks the AST, perturbs one
+#    literal / comparison / conditional at a time, and runs the unit
+#    suite against each mutant. Any mutant that **survives** a full
+#    test run means the tests don't actually cover that logic branch.
+#
+# 2. Rust side: `cargo-mutants` over rust/fno-math/ — same idea in the
+#    Rust crate. Mirrors tickvault's mutation.yml semantics.
+#
+# Threshold: **zero surviving mutants on critical modules**. Failing
+# this gate means tests pass but don't detect a behavior change — a
+# direct hit on the NFR-REL-006 never-skip guarantee.
+#
+# Runs on:
+#   - weekly schedule (Monday 04:00 UTC)
+#   - manual dispatch via workflow_dispatch
+#   - push to main (only when brutex/** or rust/fno-math/** touched)
+
+name: Mutation testing
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "brutex/**"
+      - "rust/fno-math/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/mutation.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  RUST_VERSION: "1.93.1"
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # Python mutation — mutmut over the brutex/ package
+  # ─────────────────────────────────────────────────────────────────
+  python-mutation:
+    name: Python mutation (mutmut)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: pip install -e ".[dev]" mutmut>=2.5
+      - name: Run mutmut on critical modules
+        run: |
+          set -e
+          # Target the modules where silent regressions cause the
+          # biggest damage: the FSM, retry classifier, audit chain,
+          # rate limiter, store. Tests on these already hit 100% line
+          # coverage; mutmut verifies that the coverage is *meaningful*.
+          mutmut run \
+            --paths-to-mutate brutex/orchestrator/state.py,brutex/orchestrator/retry.py,brutex/orchestrator/audit.py,brutex/orchestrator/rate_limiter.py,brutex/orchestrator/store.py,brutex/data/partition.py,brutex/data/parser.py \
+            --runner "pytest tests/unit -x -q --no-header" \
+            --simple-output
+          # Fail if any mutants survived
+          mutmut results | tee mutmut-results.txt
+          if grep -qE "^[0-9]+" mutmut-results.txt; then
+            echo "❌ Surviving mutants detected"
+            mutmut show all 2>&1 | head -200
+            exit 1
+          fi
+          echo "✅ No surviving mutants"
+      - name: Upload mutmut cache
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: mutmut-cache
+          path: .mutmut-cache
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Open GitHub issue on failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `mutmut: surviving mutants on ${context.sha.substring(0, 7)}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'bug,mutation,python',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: `Python mutation testing detected surviving mutants on commit ${context.sha}. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+              labels: ['bug', 'mutation', 'python', 'critical'],
+            });
+
+  # ─────────────────────────────────────────────────────────────────
+  # Rust mutation — cargo-mutants over rust/fno-math/
+  # ─────────────────────────────────────────────────────────────────
+  rust-mutation:
+    name: Rust mutation (cargo-mutants)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: rust/fno-math
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/fno-math -> target
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: Run cargo-mutants
+        run: |
+          cargo mutants \
+            --test-tool cargo \
+            --no-shuffle \
+            --timeout 300 \
+            --output cargo-mutants.out \
+            -- \
+            --release
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: cargo-mutants-report
+          path: rust/fno-math/cargo-mutants.out
+          retention-days: 14
+      - name: Open GitHub issue on failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `cargo-mutants: surviving mutants in fno-math on ${context.sha.substring(0, 7)}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'bug,mutation,rust',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: `cargo-mutants detected surviving mutants on commit ${context.sha}. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+              labels: ['bug', 'mutation', 'rust', 'critical'],
+            });
