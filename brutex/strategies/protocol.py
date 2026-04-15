@@ -131,4 +131,4 @@ class Strategy(Protocol):
             in ``META.symbols`` and carry a timestamp ``<=
             event.timestamp``.
         """
-        ...
+        raise NotImplementedError  # Protocol stub — concrete strategies override.
