@@ -357,3 +357,132 @@ class TestRunHappyPath:
         )
         driver.run()
         assert len(driver.collected_candles["NSE-NIFTY"]) == 2
+
+
+# ────────────────────────────────────────────────────────────────────────
+# BarSink hookup — Phase D persistence path
+# ────────────────────────────────────────────────────────────────────────
+
+
+class _RecordingSink:
+    """Minimal :class:`BarSink` that records every append call.
+
+    Used in the sink-hookup tests so we can assert on the exact
+    arguments the PhaseDDriver forwards — partition coordinates,
+    bar count, and parsed :class:`CandleBar` instances — without
+    pulling in the polars / duckdb deps.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars,  # type: ignore[no-untyped-def]
+    ):  # type: ignore[no-untyped-def]
+        from brutex.data.sink import SinkAppendResult
+
+        self.calls.append(
+            {
+                "exchange": exchange,
+                "segment": segment,
+                "symbol": symbol,
+                "interval": interval,
+                "bars": list(bars),
+            }
+        )
+        return SinkAppendResult(
+            bars_appended=len(bars),
+            partitions_written=1,
+            write_results=(),
+        )
+
+
+class TestPhaseDDriverSinkHookup:
+    def test_default_no_sink_does_not_persist(
+        self,
+        adapter: GrowwAdapter,
+        store: WorkItemStore,
+        audit: AuditWriter,
+    ) -> None:
+        driver = PhaseDDriver(
+            adapter=adapter,
+            store=store,
+            audit=audit,
+            run_id="r",
+            requests=[_nifty_request()],
+        )
+        driver.run()
+        assert driver.last_result is not None
+        assert driver.last_result.bars_persisted == 0
+        assert driver.last_result.partitions_written == 0
+
+    def test_explicit_sink_receives_parsed_bars(
+        self,
+        adapter: GrowwAdapter,
+        store: WorkItemStore,
+        audit: AuditWriter,
+    ) -> None:
+        from brutex.data.models import CandleBar
+
+        sink = _RecordingSink()
+        driver = PhaseDDriver(
+            adapter=adapter,
+            store=store,
+            audit=audit,
+            run_id="r",
+            requests=[_nifty_request()],
+            bar_sink=sink,
+        )
+        driver.run()
+
+        assert len(sink.calls) == 1
+        call = sink.calls[0]
+        assert call["exchange"] == "NSE"
+        assert call["segment"] == "FNO"
+        assert call["symbol"] == "NSE-NIFTY-02Jan25-28500-PE"
+        assert call["interval"] == "1minute"
+        bars = call["bars"]
+        assert len(bars) == 1  # type: ignore[arg-type]
+        assert isinstance(bars[0], CandleBar)  # type: ignore[index]
+
+        # CandlesResult carries the persistence counters now.
+        assert driver.last_result is not None
+        assert driver.last_result.bars_persisted == 1
+        assert driver.last_result.partitions_written == 1
+
+    def test_multi_chunk_accumulates_sink_counters(
+        self,
+        adapter: GrowwAdapter,
+        store: WorkItemStore,
+        audit: AuditWriter,
+    ) -> None:
+        """Every chunk's SUCCESS must flush bars to the sink."""
+        sink = _RecordingSink()
+        req = CandleRequest(
+            exchange="NSE",
+            segment="FNO",
+            groww_symbol="NSE-NIFTY",
+            interval="1minute",
+            start=date(2024, 1, 1),
+            end=date(2024, 2, 15),  # 2 chunks
+        )
+        driver = PhaseDDriver(
+            adapter=adapter,
+            store=store,
+            audit=audit,
+            run_id="r",
+            requests=[req],
+            bar_sink=sink,
+        )
+        driver.run()
+
+        assert len(sink.calls) == 2
+        assert driver.last_result is not None
+        assert driver.last_result.bars_persisted == 2
+        assert driver.last_result.partitions_written == 2

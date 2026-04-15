@@ -1,0 +1,312 @@
+"""Integration tests for the dashboard instruments browser endpoints.
+
+Uses FastAPI's :class:`TestClient` to hit every ``/api/v1/instruments*``,
+``/api/v1/expiries``, ``/api/v1/contracts`` endpoint exactly as a
+browser would. Verifies both the *enabled* path (a real
+:class:`~brutex.data.instrument_store.InstrumentStore` wired in) and
+the *disabled* path (returns 503 with a helpful error and the HTML
+hides the Instruments Browser panel).
+
+Skipped when ``fastapi`` / ``duckdb`` are absent \u2014 matches the
+existing ``test_dashboard_e2e.py`` convention.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("fastapi")
+pytest.importorskip("duckdb")
+
+from brutex.dashboard.app import DashboardState, build_app
+from brutex.data.instrument_store import (
+    ContractRecord,
+    ExpiryRecord,
+    InstrumentRun,
+    InstrumentStore,
+)
+from brutex.models import (
+    Exchange,
+    Instrument,
+    InstrumentType,
+    Segment,
+)
+from fastapi.testclient import TestClient
+
+# ────────────────────────────────────────────────────────────────────────
+# Fixtures
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _make_instrument(
+    groww_symbol: str = "NSE-NIFTY",
+    *,
+    instrument_type: InstrumentType = InstrumentType.IDX,
+    segment: Segment = Segment.CASH,
+    underlying: str | None = "NIFTY",
+    expiry: date | None = None,
+    strike: Decimal | None = None,
+) -> Instrument:
+    return Instrument(
+        exchange=Exchange.NSE,
+        exchange_token=26000,
+        trading_symbol="NIFTY",
+        groww_symbol=groww_symbol,
+        name="Nifty 50",
+        instrument_type=instrument_type,
+        segment=segment,
+        series=None,
+        isin=None,
+        underlying_symbol=underlying,
+        underlying_exchange_token=None,
+        lot_size=25,
+        tick_size=Decimal("0.05"),
+        freeze_quantity=1800,
+        expiry_date=expiry,
+        strike_price=strike,
+        is_reserved=False,
+        buy_allowed=True,
+        sell_allowed=True,
+        internal_trading_symbol=None,
+    )
+
+
+@pytest.fixture
+def populated_store(tmp_path: Path):
+    """Return an :class:`InstrumentStore` with one of each row type."""
+    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+    snap_date = date(2024, 1, 2)
+
+    # 3 instruments: 1 index, 1 future, 1 option
+    instruments = [
+        _make_instrument("NSE-NIFTY"),
+        _make_instrument(
+            "NSE-NIFTY25JANFUT",
+            instrument_type=InstrumentType.FUT,
+            segment=Segment.FNO,
+            expiry=date(2025, 1, 30),
+        ),
+        _make_instrument(
+            "NSE-NIFTY25JAN24000CE",
+            instrument_type=InstrumentType.CE,
+            segment=Segment.FNO,
+            expiry=date(2025, 1, 30),
+            strike=Decimal("24000"),
+        ),
+    ]
+    store.upsert_many(
+        instruments,
+        snapshot_date=snap_date,
+        run_id="test-run",
+        csv_source_sha256="a" * 64,
+    )
+
+    # 1 expiry row
+    store.upsert_expiries(
+        [
+            ExpiryRecord(
+                exchange="NSE",
+                underlying_symbol="NIFTY",
+                expiry_date=date(2025, 1, 30),
+                snapshot_date=snap_date,
+                pulled_year=2024,
+                fetched_at=datetime(2024, 1, 2, 12, tzinfo=UTC),
+                run_id="test-run",
+            )
+        ]
+    )
+
+    # 1 contract row
+    store.upsert_contracts(
+        [
+            ContractRecord(
+                exchange="NSE",
+                underlying_symbol="NIFTY",
+                expiry_date=date(2025, 1, 30),
+                contract_symbol="NSE-NIFTY25JAN24000CE",
+                snapshot_date=snap_date,
+                instrument_type=InstrumentType.CE,
+                strike_price=Decimal("24000"),
+                lot_size=25,
+                freeze_quantity=1800,
+                tick_size=Decimal("0.05"),
+                fetched_at=datetime(2024, 1, 2, 12, tzinfo=UTC),
+                run_id="test-run",
+            )
+        ]
+    )
+
+    # 1 instrument_runs row
+    store.record_run(
+        InstrumentRun(
+            run_id="test-run",
+            snapshot_date=snap_date,
+            fetched_at=datetime(2024, 1, 2, 12, tzinfo=UTC),
+            csv_source_sha256="a" * 64,
+            total_raw_rows=3,
+            integrity_failures=0,
+            in_scope_count=3,
+            out_of_scope_count=0,
+            index_count=1,
+            futures_count=1,
+            options_count=1,
+            bse_count=0,
+            nse_count=3,
+            code_commit_sha="deadbeef",
+            schema_version=1,
+        )
+    )
+
+    yield store
+    store.close()
+
+
+@pytest.fixture
+def client_with_store(populated_store: InstrumentStore) -> TestClient:
+    """Return a ``TestClient`` bound to an app with the store wired."""
+    state = DashboardState()
+    app = build_app(state, instrument_store=populated_store)
+    return TestClient(app)
+
+
+@pytest.fixture
+def client_without_store() -> TestClient:
+    """Return a ``TestClient`` bound to an app with NO store."""
+    state = DashboardState()
+    app = build_app(state)
+    return TestClient(app)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Enabled path — store wired
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestInstrumentsEnabled:
+    def test_index_html_has_instruments_card(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/")
+        assert r.status_code == 200
+        assert "instruments-card" in r.text
+        assert "Instruments Browser" in r.text
+
+    def test_stats_endpoint_returns_totals(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/instruments/stats")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["totals"]["instruments"] == 3
+        assert body["totals"]["expiries"] == 1
+        assert body["totals"]["contracts"] == 1
+        assert body["totals"]["runs"] == 1
+
+    def test_stats_breaks_down_by_underlying(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/instruments/stats")
+        body = r.json()
+        nifty_rows = [row for row in body["by_underlying"] if row["underlying"] == "NIFTY"]
+        assert len(nifty_rows) == 1
+        assert nifty_rows[0]["count"] == 3
+
+    def test_instruments_list_returns_all_rows(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/instruments")
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body["instruments"]) == 3
+
+    def test_instruments_list_filter_by_type(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/instruments?instrument_type=CE")
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body["instruments"]) == 1
+        assert body["instruments"][0]["instrument_type"].endswith("CE")
+
+    def test_instruments_list_filter_by_segment(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/instruments?segment=FNO")
+        body = r.json()
+        assert len(body["instruments"]) == 2  # FUT + CE
+        for row in body["instruments"]:
+            assert row["segment"].endswith("FNO")
+
+    def test_instruments_list_filter_by_underlying(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/instruments?underlying=NIFTY")
+        body = r.json()
+        # Matches both underlying_symbol=NIFTY and trading_symbol=NIFTY
+        # (the index row has trading_symbol=NIFTY but underlying=NIFTY too)
+        assert len(body["instruments"]) == 3
+
+    def test_instruments_list_pagination(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/instruments?limit=1&offset=0")
+        body = r.json()
+        assert len(body["instruments"]) == 1
+        assert body["limit"] == 1
+        assert body["offset"] == 0
+
+    def test_expiries_endpoint(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/expiries")
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body["expiries"]) == 1
+        assert body["expiries"][0]["underlying_symbol"] == "NIFTY"
+        assert body["expiries"][0]["expiry_date"] == "2025-01-30"
+
+    def test_expiries_filter_by_underlying(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/expiries?underlying=BANKNIFTY")
+        body = r.json()
+        assert len(body["expiries"]) == 0
+
+    def test_contracts_endpoint(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/contracts?underlying=NIFTY")
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body["contracts"]) == 1
+        c = body["contracts"][0]
+        assert c["contract_symbol"] == "NSE-NIFTY25JAN24000CE"
+        assert Decimal(c["strike_price"]) == Decimal("24000")
+        assert c["lot_size"] == 25
+
+    def test_contracts_filter_by_expiry(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/contracts?underlying=NIFTY&expiry=2025-01-30")
+        body = r.json()
+        assert len(body["contracts"]) == 1
+
+    def test_contracts_rejects_malformed_expiry(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/contracts?expiry=not-a-date")
+        assert r.status_code == 400
+        assert "YYYY-MM-DD" in r.json()["detail"]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Disabled path — no store wired
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestInstrumentsDisabled:
+    def test_index_html_hides_instruments_card(self, client_without_store: TestClient) -> None:
+        r = client_without_store.get("/")
+        assert r.status_code == 200
+        assert "instruments-card" not in r.text
+
+    def test_stats_returns_503(self, client_without_store: TestClient) -> None:
+        r = client_without_store.get("/api/v1/instruments/stats")
+        assert r.status_code == 503
+        assert "InstrumentStore not wired" in r.json()["detail"]
+
+    def test_instruments_list_returns_503(self, client_without_store: TestClient) -> None:
+        r = client_without_store.get("/api/v1/instruments")
+        assert r.status_code == 503
+
+    def test_expiries_returns_503(self, client_without_store: TestClient) -> None:
+        r = client_without_store.get("/api/v1/expiries")
+        assert r.status_code == 503
+
+    def test_contracts_returns_503(self, client_without_store: TestClient) -> None:
+        r = client_without_store.get("/api/v1/contracts")
+        assert r.status_code == 503
+
+    def test_state_endpoint_still_works(self, client_without_store: TestClient) -> None:
+        """Core dashboard features must stay available even without store."""
+        r = client_without_store.get("/api/v1/state")
+        assert r.status_code == 200
+        assert "phases" in r.json()

@@ -158,6 +158,8 @@ class PhaseCDriver:
         run_id: str,
         expiries: ExpiriesInput,
         subscribers: Sequence[EventSubscriber] = (),
+        instrument_store: Any = None,
+        snapshot_date: Any = None,
     ) -> None:
         self._adapter = adapter
         self._store = store
@@ -165,6 +167,11 @@ class PhaseCDriver:
         self._run_id = run_id
         self._expiries = {k: tuple(v) for k, v in expiries.items()}
         self._subscribers = list(subscribers)
+        # Optional InstrumentStore + snapshot_date \u2014 when both are
+        # supplied, every collected contract leg is persisted via
+        # ``upsert_contracts`` after the run completes.
+        self._instrument_store = instrument_store
+        self._phase_c_snapshot_date = snapshot_date
 
         # Populated during run()
         self._collected_contracts: dict[tuple[str, str, str], set[str]] = defaultdict(set)
@@ -248,6 +255,67 @@ class PhaseCDriver:
             persisted_at=datetime.now(UTC),
         )
         self._last_result = result
+
+        # ── Persist every contract leg to the InstrumentStore ───────
+        # The Groww ``get_contracts`` response gives us only the list
+        # of contract ``groww_symbol`` values \u2014 to write a fully-
+        # populated :class:`ContractRecord` we cross-reference each
+        # symbol against the Phase A ``instruments`` table to pick
+        # up strike / lot_size / tick_size / freeze_quantity.
+        #
+        # Symbols unknown to Phase A (should be impossible since
+        # Phase A pulls the entire CSV) are skipped with an audit
+        # note rather than crashing the run.
+        if self._instrument_store is not None and self._phase_c_snapshot_date is not None:
+            from datetime import date as _date_t
+
+            from brutex.data.instrument_store import ContractRecord
+
+            now = datetime.now(UTC)
+            records: list[ContractRecord] = []
+            skipped = 0
+            for (
+                exchange,
+                underlying,
+                expiry_iso,
+            ), contract_symbols in self._collected_contracts.items():
+                expiry_date = _date_t.fromisoformat(expiry_iso)
+                for contract_symbol in contract_symbols:
+                    instr = self._instrument_store.get(
+                        contract_symbol,
+                        as_of=self._phase_c_snapshot_date,
+                    )
+                    if instr is None:
+                        skipped += 1
+                        continue
+                    records.append(
+                        ContractRecord(
+                            exchange=exchange,
+                            underlying_symbol=underlying,
+                            expiry_date=expiry_date,
+                            contract_symbol=contract_symbol,
+                            snapshot_date=self._phase_c_snapshot_date,
+                            instrument_type=instr.instrument_type,
+                            strike_price=instr.strike_price,
+                            lot_size=instr.lot_size,
+                            freeze_quantity=instr.freeze_quantity,
+                            tick_size=instr.tick_size,
+                            fetched_at=now,
+                            run_id=self._run_id,
+                        )
+                    )
+            if records:
+                self._instrument_store.upsert_contracts(records)
+            if skipped:
+                self._audit.append(
+                    action="CONTRACTS_CROSSREF_SKIP",
+                    subject=f"phase:C:run:{self._run_id}",
+                    payload={
+                        "run_id": self._run_id,
+                        "skipped_count": skipped,
+                        "reason": "contract symbol not found in Phase A instruments table",
+                    },
+                )
 
         self._audit.append(
             action="CONTRACTS_SUMMARY",

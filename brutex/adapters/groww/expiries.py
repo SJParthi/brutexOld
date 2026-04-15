@@ -165,6 +165,8 @@ class PhaseBDriver:
         start_year: int = 2020,
         end_year: int | None = None,
         subscribers: Sequence[EventSubscriber] = (),
+        instrument_store: Any = None,
+        snapshot_date: Any = None,
     ) -> None:
         self._adapter = adapter
         self._store = store
@@ -174,6 +176,11 @@ class PhaseBDriver:
         self._start_year = start_year
         self._end_year = end_year if end_year is not None else _current_year_utc()
         self._subscribers = list(subscribers)
+        # Optional InstrumentStore + snapshot_date \u2014 when both are
+        # supplied, every collected expiry is persisted via
+        # ``upsert_expiries`` after the run completes.
+        self._instrument_store = instrument_store
+        self._phase_b_snapshot_date = snapshot_date
 
         if self._end_year < self._start_year:
             raise ValueError(
@@ -265,6 +272,35 @@ class PhaseBDriver:
             persisted_at=datetime.now(UTC),
         )
         self._last_result = result
+
+        # ── Persist every collected expiry to the InstrumentStore ────
+        # when the optional handle is wired. Each row keys on the
+        # composite PK ``(exchange, underlying, expiry, snapshot_date)``
+        # so re-runs upsert in place and 100\u00d7 pulls on the same day
+        # produce one row per ``(underlying, expiry)`` triplet.
+        if self._instrument_store is not None and self._phase_b_snapshot_date is not None:
+            from datetime import date as _date_t
+
+            from brutex.data.instrument_store import ExpiryRecord
+
+            now = datetime.now(UTC)
+            records: list[ExpiryRecord] = []
+            for (exchange, underlying), expiries_set in self._collected_expiries.items():
+                for expiry_iso in sorted(expiries_set):
+                    expiry = _date_t.fromisoformat(expiry_iso)
+                    records.append(
+                        ExpiryRecord(
+                            exchange=exchange,
+                            underlying_symbol=underlying,
+                            expiry_date=expiry,
+                            snapshot_date=self._phase_b_snapshot_date,
+                            pulled_year=expiry.year,
+                            fetched_at=now,
+                            run_id=self._run_id,
+                        )
+                    )
+            if records:
+                self._instrument_store.upsert_expiries(records)
 
         self._audit.append(
             action="EXPIRIES_SUMMARY",

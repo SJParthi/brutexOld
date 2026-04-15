@@ -226,6 +226,7 @@ class PhaseADriver:
         run_id: str,
         snapshot_date: date | None = None,
         subscribers: Sequence[EventSubscriber] = (),
+        instrument_store: Any = None,
     ) -> None:
         self._adapter = adapter
         self._store = store
@@ -233,6 +234,12 @@ class PhaseADriver:
         self._run_id = run_id
         self._snapshot_date = snapshot_date or datetime.now(UTC).date()
         self._subscribers = list(subscribers)
+        # Optional :class:`~brutex.data.instrument_store.InstrumentStore`
+        # \u2014 when supplied, filtered rows are persisted via
+        # ``upsert_many`` after the classify step so downstream phases
+        # and the dashboard can read from disk instead of the in-memory
+        # ``_last_instruments`` list.
+        self._instrument_store = instrument_store
 
         # Post-processing result holder — populated by run()
         self._last_result: InstrumentsResult | None = None
@@ -336,6 +343,30 @@ class PhaseADriver:
         )
         self._last_result = result
         self._last_instruments = in_scope
+
+        # ── Persist to InstrumentStore if wired ────────────────────
+        # A caller that passed `instrument_store=...` wants every
+        # filtered row committed to the durable DuckDB master so
+        # downstream phases can read from disk. Idempotent via
+        # composite PK `(groww_symbol, snapshot_date)` \u2014 pulling
+        # Phase A twice on the same day is a no-op.
+        if self._instrument_store is not None:
+            import hashlib as _hashlib
+
+            # The sha256 of the raw CSV bytes would come from the
+            # adapter ideally, but for now we synthesise a
+            # deterministic tag from (run_id, snapshot_date) so the
+            # drift-detection column is populated. Real CSV hashing
+            # lands in a follow-up that adds `client.last_csv_bytes`.
+            csv_sha = _hashlib.sha256(
+                f"{self._run_id}:{self._snapshot_date.isoformat()}".encode()
+            ).hexdigest()
+            self._instrument_store.upsert_many(
+                in_scope,
+                snapshot_date=self._snapshot_date,
+                run_id=self._run_id,
+                csv_source_sha256=csv_sha,
+            )
 
         # Audit the summary
         self._audit.append(

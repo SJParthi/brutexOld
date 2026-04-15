@@ -123,6 +123,9 @@ ignore = [
 ]
 # CLI uses print() deliberately — it's a CLI, stdout is the interface.
 "brutex/cli.py" = ["T201"]
+# Proof / smoke scripts — intentionally print to stdout and touch
+# private ._conn on the stores to show the underlying DuckDB guarantees.
+"scripts/**" = ["T201", "SLF001", "PLR2004", "S101", "PLR0915"]
 # Placeholder shims need to mirror an eventual external module surface.
 "brutex/math/__init__.py" = ["A005"]  # shadows stdlib 'math' — deliberate re-export point
 
@@ -150,6 +153,7 @@ module = [
     "polars", "polars.*",
     "pyarrow", "pyarrow.*",
     "fastapi", "fastapi.*",
+    "uvicorn", "uvicorn.*",
     "fno_math_py", "fno_math_py.*",
 ]
 ignore_missing_imports = true
@@ -239,6 +243,22 @@ omit = [
     "brutex/data/catalog.py",
     "brutex/data/parquet_writer.py",
     "brutex/data/sink.py",
+    "brutex/data/instrument_store.py",
+    # L3 feed layer — ReplayFeed transitively needs polars/pyarrow
+    # via Catalog.get_bars. The pure pieces (FeedEvent dataclass,
+    # errors, resampler) stay in scope and are already at 100%.
+    "brutex/feed/replay.py",
+    # P3 strategy engine runtime — StrategyRunner needs a real
+    # ReplayFeed and ComboSweep / ComboCache need lmdb. The pure
+    # pieces (types, protocol, registry, combo, errors) stay in
+    # scope and are already at 100%.
+    "brutex/strategies/runner.py",
+    "brutex/strategies/sweep.py",
+    # P4 execution simulator driver \u2014 BacktestDriver needs a real
+    # ReplayFeed (polars/duckdb) to exercise. The simulator, cost
+    # model, and dataclass types are all in scope and already at
+    # or near 100%.
+    "brutex/execution/driver.py",
 ]
 
 [tool.coverage.report]

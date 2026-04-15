@@ -5,15 +5,31 @@ has happened, every public symbol in brutex.math must raise
 FnoMathNotExtractedError on call, and the error must contain a pointer
 to the extraction runbook.
 
-After the extraction runs, brutex/math/__init__.py is replaced with
-real re-exports from fno_math_py, and these placeholder tests are
-deleted in the same commit. Their continued existence in git signals
-that the extraction is still pending.
+The module is **skipped** when the ``fno_math_py`` PyO3 wheel has
+been built and installed \u2014 in that case :mod:`brutex.math` pulls
+native implementations and the placeholder contract no longer
+applies. The corresponding native-backend verification lives in
+:mod:`tests.unit.test_math_native`.
 """
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
+
+# Gate: only run when the wheel is NOT installed. In CI's `[dev]`-only
+# environment, fno_math_py is absent and these tests exercise the
+# placeholder path. In a dev env where `maturin develop` has been run,
+# the wheel is installed and brutex.math now binds to native Rust
+# functions \u2014 the placeholder contract does not apply, so skip.
+if importlib.util.find_spec("fno_math_py") is not None:
+    pytest.skip(
+        "fno_math_py is installed \u2014 placeholder contract replaced by native backend "
+        "(see tests/unit/test_math_native.py)",
+        allow_module_level=True,
+    )
+
 from brutex.math import (
     FnoMathNotExtractedError,
     atr,

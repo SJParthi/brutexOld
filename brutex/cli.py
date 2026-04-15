@@ -138,6 +138,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Build everything but do not persist (useful for testing)",
     )
+    instruments.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help=(
+            "Directory to persist instruments into the InstrumentStore "
+            "DuckDB (FR-ING-003). When omitted, Phase A stays in memory "
+            "only and nothing is written to disk."
+        ),
+    )
 
     # Phase B — expiries
     expiries = ingest_sub.add_parser(
@@ -158,6 +168,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     expiries.add_argument("--run-id", default=None)
     expiries.add_argument("--dry-run", action="store_true")
+    expiries.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help=(
+            "Directory to persist expiries into the InstrumentStore "
+            "DuckDB (FR-ING-003 expiries table). When omitted, Phase B "
+            "stays in memory only."
+        ),
+    )
 
     # Phase C — contracts per (underlying, expiry). Runs A→B→C in one
     # process so the in-memory collected_expiries from Phase B feeds
@@ -175,6 +195,16 @@ def build_parser() -> argparse.ArgumentParser:
     contracts.add_argument("--end-year", type=int, default=None)
     contracts.add_argument("--run-id", default=None)
     contracts.add_argument("--dry-run", action="store_true")
+    contracts.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help=(
+            "Directory to persist instruments + expiries + contracts "
+            "into the InstrumentStore DuckDB. When omitted, every phase "
+            "stays in memory only."
+        ),
+    )
 
     # Phase D — historical candles. Runs A→B→C→D end-to-end. The CLI
     # exposes a --limit flag so a user can sanity-check a small subset
@@ -209,6 +239,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Candle range end YYYY-MM-DD (default today UTC)",
     )
+    candles.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help=(
+            "Directory to persist candles into as canonical Parquet + "
+            "DuckDB catalog (FR-CAT-001..004). When omitted, bars stay "
+            "in memory only."
+        ),
+    )
 
     # Full pipeline — alias for `ingest candles` with no limit.
     all_cmd = ingest_sub.add_parser(
@@ -222,6 +262,35 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument("--interval", default="1minute")
     all_cmd.add_argument("--candle-start", default=None)
     all_cmd.add_argument("--candle-end", default=None)
+    all_cmd.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help=(
+            "Directory to persist candles into as canonical Parquet + "
+            "DuckDB catalog (FR-CAT-001..004). When omitted, bars stay "
+            "in memory only."
+        ),
+    )
+
+    # ── dashboard ─────────────────────────────────────────────────
+    dashboard = sub.add_parser(
+        "dashboard",
+        help="Start the BruteX dashboard (FR-UI-006) with optional InstrumentStore browser",
+    )
+    dashboard.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help=(
+            "Lake directory containing ``instruments.duckdb``. When "
+            "supplied, the dashboard exposes /api/v1/instruments, "
+            "/expiries, /contracts + an HTML browser for them. When "
+            "omitted, only live pipeline progress is shown."
+        ),
+    )
+    dashboard.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)")
+    dashboard.add_argument("--port", type=int, default=9080, help="Bind port (default 9080)")
 
     # ── audit verify ──────────────────────────────────────────────
     audit = sub.add_parser("audit", help="Audit log tools")
@@ -359,24 +428,40 @@ def cmd_ingest_instruments(args: argparse.Namespace) -> int:
                         run_id=run_id,
                     )
 
-                driver = PhaseADriver(
-                    adapter=adapter,
-                    store=store,
-                    audit=audit,
-                    run_id=run_id,
-                    snapshot_date=snapshot_date,
-                )
+                # Optional InstrumentStore persistence (FR-ING-003).
+                lake_root: Path | None = getattr(args, "lake_root", None)
+                instrument_store_ctx = None
+                instrument_store = None
+                if lake_root is not None:
+                    from brutex.data.instrument_store import InstrumentStore
+
+                    lake_root.mkdir(parents=True, exist_ok=True)
+                    instrument_store_ctx = InstrumentStore.open(lake_root / "instruments.duckdb")
+                    instrument_store = instrument_store_ctx
 
                 try:
-                    driver.run()
-                except PhaseHaltError:
-                    return EXIT_PIPELINE_HALT
-                except InstrumentsScopeError:
-                    return EXIT_PIPELINE_HALT
+                    driver = PhaseADriver(
+                        adapter=adapter,
+                        store=store,
+                        audit=audit,
+                        run_id=run_id,
+                        snapshot_date=snapshot_date,
+                        instrument_store=instrument_store,
+                    )
 
-                details = driver.last_result
-                if details is not None:
-                    pass
+                    try:
+                        driver.run()
+                    except PhaseHaltError:
+                        return EXIT_PIPELINE_HALT
+                    except InstrumentsScopeError:
+                        return EXIT_PIPELINE_HALT
+
+                    details = driver.last_result
+                    if details is not None:
+                        pass
+                finally:
+                    if instrument_store_ctx is not None:
+                        instrument_store_ctx.close()
         except Exception:
             return EXIT_INTERNAL_ERROR
 
@@ -516,6 +601,10 @@ def _run_pipeline_cli(*, args: argparse.Namespace, stop_after: str) -> int:
         InstrumentsScopeError,
         PhaseADriver,
     )
+    from brutex.data.catalog import Catalog
+    from brutex.data.instrument_store import InstrumentStore
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import BarSink, ParquetBarSink
     from brutex.orchestrator.audit import AuditWriter
     from brutex.orchestrator.pipeline import PhaseHaltError
     from brutex.orchestrator.rate_limiter import (
@@ -540,6 +629,15 @@ def _run_pipeline_cli(*, args: argparse.Namespace, stop_after: str) -> int:
         tmp_root.mkdir(parents=True, exist_ok=True)
         bucket = AdaptiveTokenBucket()
 
+        # Optional InstrumentStore — shared across Phase A/B/C so every
+        # row (instrument, expiry, contract) lands in the same DuckDB
+        # file and is queryable / deduped / O(1)-lookup downstream.
+        lake_root: Path | None = getattr(args, "lake_root", None)
+        instrument_store_ctx = None
+        if lake_root is not None:
+            lake_root.mkdir(parents=True, exist_ok=True)
+            instrument_store_ctx = InstrumentStore.open(lake_root / "instruments.duckdb")
+
         try:
             with (
                 WorkItemStore.open(tmp_root / "store.lmdb") as store,
@@ -563,6 +661,7 @@ def _run_pipeline_cli(*, args: argparse.Namespace, stop_after: str) -> int:
                     audit=audit,
                     run_id=run_id,
                     snapshot_date=snapshot_date,
+                    instrument_store=instrument_store_ctx,
                 )
                 try:
                     phase_a.run()
@@ -580,6 +679,8 @@ def _run_pipeline_cli(*, args: argparse.Namespace, stop_after: str) -> int:
                     underlyings=V1_INDICES,
                     start_year=args.start_year,
                     end_year=end_year,
+                    instrument_store=instrument_store_ctx,
+                    snapshot_date=snapshot_date,
                 )
                 try:
                     phase_b.run()
@@ -595,6 +696,8 @@ def _run_pipeline_cli(*, args: argparse.Namespace, stop_after: str) -> int:
                     audit=audit,
                     run_id=run_id,
                     expiries=phase_b.collected_expiries,
+                    instrument_store=instrument_store_ctx,
+                    snapshot_date=snapshot_date,
                 )
                 try:
                     phase_c.run()
@@ -633,21 +736,40 @@ def _run_pipeline_cli(*, args: argparse.Namespace, stop_after: str) -> int:
                     )
                     for exchange, _underlying, _expiry, symbol in all_contracts
                 ]
-                phase_d = PhaseDDriver(
-                    adapter=adapter,
-                    store=store,
-                    audit=audit,
-                    run_id=run_id,
-                    requests=requests,
-                )
+
+                # Reuse the outer ``lake_root`` so the bar-sink / Parquet
+                # lake + DuckDB catalog live in the same directory as
+                # the InstrumentStore opened at the top of this fn.
+                bar_sink: BarSink | None = None
+                catalog_ctx: Catalog | None = None
+                if lake_root is not None:
+                    writer = ParquetWriter(lake_root=lake_root)
+                    catalog_ctx = Catalog.open(lake_root / "catalog.duckdb")
+                    bar_sink = ParquetBarSink(writer=writer, catalog=catalog_ctx)
+
                 try:
-                    phase_d.run()
-                except PhaseHaltError:
-                    return EXIT_PIPELINE_HALT
-                if phase_d.last_result is not None:
-                    pass
+                    phase_d = PhaseDDriver(
+                        adapter=adapter,
+                        store=store,
+                        audit=audit,
+                        run_id=run_id,
+                        requests=requests,
+                        bar_sink=bar_sink,
+                    )
+                    try:
+                        phase_d.run()
+                    except PhaseHaltError:
+                        return EXIT_PIPELINE_HALT
+                    if phase_d.last_result is not None:
+                        pass
+                finally:
+                    if catalog_ctx is not None:
+                        catalog_ctx.close()
         except Exception:
             return EXIT_INTERNAL_ERROR
+        finally:
+            if instrument_store_ctx is not None:
+                instrument_store_ctx.close()
 
     return EXIT_OK
 
@@ -734,6 +856,41 @@ def cmd_audit_verify(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Handle ``brutex dashboard`` — start the FastAPI dashboard server.
+
+    When ``--lake-root`` is supplied, opens the
+    :class:`~brutex.data.instrument_store.InstrumentStore` and wires
+    it into the app so the Instruments Browser section is available.
+    Otherwise starts in pipeline-progress-only mode.
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        return EXIT_USER_ERROR
+
+    from brutex.dashboard.app import DashboardState, build_app
+
+    lake_root: Path | None = getattr(args, "lake_root", None)
+    instrument_store = None
+    if lake_root is not None:
+        from brutex.data.instrument_store import InstrumentStore
+
+        db_path = lake_root / "instruments.duckdb"
+        if not db_path.exists():
+            return EXIT_USER_ERROR
+        instrument_store = InstrumentStore.open(db_path)
+
+    try:
+        state = DashboardState()
+        app = build_app(state, instrument_store=instrument_store)
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    finally:
+        if instrument_store is not None:
+            instrument_store.close()
+    return EXIT_OK
+
+
 def cmd_placeholder(args: argparse.Namespace) -> int:
     """Stub handler for not-yet-implemented subcommands; prints a clear error."""
     getattr(args, "_placeholder_name", "this command")
@@ -762,6 +919,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     dispatcher: dict[str, Callable[[argparse.Namespace], int]] = {
         "version": cmd_version,
         "status": cmd_status,
+        "dashboard": cmd_dashboard,
     }
 
     # Sub-subcommands

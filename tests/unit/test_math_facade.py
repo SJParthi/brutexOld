@@ -19,16 +19,28 @@ up the native functions without any further code change.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import sys
 import types
 
 import pytest
+
+#: True iff the real PyO3 wheel is installed. Classes that assume the
+#: placeholder backend must skip when this is set, because pure
+#: ``sys.modules.pop(...)`` does not unregister a wheel living in
+#: site-packages \u2014 the re-import happily reloads the native path.
+_NATIVE_WHEEL_PRESENT = importlib.util.find_spec("fno_math_py") is not None
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Placeholder path
 # ────────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.skipif(
+    _NATIVE_WHEEL_PRESENT,
+    reason="fno_math_py is installed \u2014 placeholder backend unreachable; see test_math_native.py",
+)
 class TestPlaceholderBackend:
     """The default path when fno_math_py is not installed."""
 
@@ -97,10 +109,32 @@ class TestPlaceholderBackend:
 # ────────────────────────────────────────────────────────────────────────
 
 
+def _purge_fno_math_py_cache() -> None:
+    """Drop every cached ``fno_math_py`` entry from :data:`sys.modules`.
+
+    When the real maturin-built wheel is installed, the package ships
+    as ``fno_math_py/__init__.py`` with a compiled submodule at
+    ``fno_math_py.fno_math_py`` (the .so file). Popping only the
+    top-level name leaves the submodule cached, so the next re-import
+    of the package runs its ``__init__.py`` without rebinding the
+    submodule name \u2014 producing a spurious
+    ``NameError: name 'fno_math_py' is not defined``. Clearing both
+    keys makes re-imports idempotent whether or not the real wheel
+    is installed.
+    """
+    for key in list(sys.modules):
+        if key == "fno_math_py" or key.startswith("fno_math_py."):
+            del sys.modules[key]
+
+
 class TestNativeBackend:
     """Simulate fno_math_py being installed and verify re-export."""
 
     def setup_method(self) -> None:
+        # Start from a clean slate so the fake we inject below is the
+        # one brutex.math picks up, regardless of whether the real
+        # wheel is installed in site-packages.
+        _purge_fno_math_py_cache()
         # Build a fake fno_math_py module with stub functions that
         # return sentinel values so we can assert dispatch.
         fake = types.ModuleType("fno_math_py")
@@ -126,7 +160,7 @@ class TestNativeBackend:
         self.math = importlib.import_module("brutex.math")
 
     def teardown_method(self) -> None:
-        sys.modules.pop("fno_math_py", None)
+        _purge_fno_math_py_cache()
         sys.modules.pop("brutex.math", None)
 
     def test_backend_is_native(self) -> None:
@@ -172,6 +206,7 @@ class TestPartialNativeBackend:
     """
 
     def setup_method(self) -> None:
+        _purge_fno_math_py_cache()
         fake = types.ModuleType("fno_math_py")
         # Only provide delta. Every other symbol is missing.
         fake.delta = lambda *a, **kw: "NATIVE_DELTA"  # type: ignore[attr-defined]
@@ -180,7 +215,7 @@ class TestPartialNativeBackend:
         self.math = importlib.import_module("brutex.math")
 
     def teardown_method(self) -> None:
-        sys.modules.pop("fno_math_py", None)
+        _purge_fno_math_py_cache()
         sys.modules.pop("brutex.math", None)
 
     def test_available_symbol_is_native(self) -> None:
@@ -198,9 +233,14 @@ class TestPartialNativeBackend:
 
 
 class TestAllContract:
+    """Backend-agnostic __all__ membership + ordering checks.
+
+    Does not touch ``sys.modules`` \u2014 the ``__all__`` surface is the
+    same whether we are on the placeholder path or the native path,
+    so we read the already-imported :mod:`brutex.math` directly.
+    """
+
     def setup_method(self) -> None:
-        sys.modules.pop("fno_math_py", None)
-        sys.modules.pop("brutex.math", None)
         self.math = importlib.import_module("brutex.math")
 
     def test_all_contains_greeks_and_indicators(self) -> None:
