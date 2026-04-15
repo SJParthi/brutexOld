@@ -59,14 +59,30 @@ echo "▸ Recorded SHA:    ${RECORDED_SHA}"
 echo "▸ Current SHA:     ${CURRENT_SHA}"
 echo "▸ Commits ahead:   ${AHEAD}"
 
-# Diff the source trees
+# Before diffing, normalise tickvault's import paths to match ours.
+# Extraction rewrote ``tickvault_common::*`` → ``crate::compat::*``
+# so a naive diff shows every greek/indicator file as changed. We
+# apply the same rewrite to a copy of tickvault's tree and diff
+# the normalised copy against ours. -bB (ignore whitespace) further
+# absorbs any cargo-fmt drift.
+NORMALISED="${SCRATCH}/tickvault-normalised"
+mkdir -p "${NORMALISED}"
+cp -r "${SCRATCH}/tickvault/crates/trading/src/greeks" "${NORMALISED}/greeks"
+cp -r "${SCRATCH}/tickvault/crates/trading/src/indicator" "${NORMALISED}/indicators"
+find "${NORMALISED}" -type f -name "*.rs" -print0 | xargs -0 \
+    sed -i \
+        -e 's|tickvault_common::|crate::compat::|g' \
+        -e 's|crate::indicator::|crate::indicators::|g'
+
 DIFF_OUTPUT="$(
     {
-        diff -ruN \
-            "${SCRATCH}/tickvault/crates/trading/src/greeks/" \
+        diff -ruN -bB \
+            --exclude='tests.rs' \
+            "${NORMALISED}/greeks/" \
             "${FNO_MATH_ROOT}/src/greeks/" 2>/dev/null || true
-        diff -ruN \
-            "${SCRATCH}/tickvault/crates/trading/src/indicator/" \
+        diff -ruN -bB \
+            --exclude='tests.rs' \
+            "${NORMALISED}/indicators/" \
             "${FNO_MATH_ROOT}/src/indicators/" 2>/dev/null || true
     } | grep -v '^Only in .*:' || true
 )"

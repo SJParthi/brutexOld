@@ -316,7 +316,9 @@ def _default_transport(config: TelegramConfig, event: TelegramEvent) -> bool:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=config.http_timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(  # nosec B310 — URL is constructed from our own BASE_URL constant  # noqa: S310
+            req, timeout=config.http_timeout
+        ) as resp:
             status = getattr(resp, "status", 200)
             return 200 <= status < 300
     except urllib.error.HTTPError as exc:

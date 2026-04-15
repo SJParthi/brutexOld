@@ -1232,7 +1232,7 @@ mod tests {
     #[test]
     fn test_build_metadata_duration_serde_roundtrip() {
         use chrono::Utc;
-        let ist = super::trading_calendar::ist_offset();
+        let ist = crate::compat::trading_calendar::ist_offset();
         let metadata = UniverseBuildMetadata {
             csv_source: "primary".to_string(),
             csv_row_count: 100,
@@ -1279,7 +1279,7 @@ mod tests {
     }
 
     fn make_test_fno_universe() -> FnoUniverse {
-        use super::types::{Exchange, ExchangeSegment, OptionType};
+        use crate::compat::types::{Exchange, ExchangeSegment, OptionType};
 
         let mut underlyings = HashMap::new();
         underlyings.insert(
@@ -1665,7 +1665,7 @@ mod tests {
 
     #[test]
     fn test_rkyv_datetime_fixed_offset_roundtrip() {
-        let ist = super::trading_calendar::ist_offset();
+        let ist = crate::compat::trading_calendar::ist_offset();
         let original = UniverseBuildMetadata {
             csv_source: "test".to_string(),
             csv_row_count: 42,
@@ -1696,7 +1696,7 @@ mod tests {
 
     #[test]
     fn test_rkyv_duration_as_millis_roundtrip() {
-        let ist = super::trading_calendar::ist_offset();
+        let ist = crate::compat::trading_calendar::ist_offset();
         let original = UniverseBuildMetadata {
             csv_source: "test".to_string(),
             csv_row_count: 0,
@@ -2056,7 +2056,7 @@ mod tests {
 
     #[test]
     fn test_duration_serde_zero() {
-        let ist = super::trading_calendar::ist_offset();
+        let ist = crate::compat::trading_calendar::ist_offset();
         let metadata = UniverseBuildMetadata {
             csv_source: "test".to_string(),
             csv_row_count: 0,
@@ -2076,7 +2076,7 @@ mod tests {
 
     #[test]
     fn test_duration_serde_large_value() {
-        let ist = super::trading_calendar::ist_offset();
+        let ist = crate::compat::trading_calendar::ist_offset();
         let dur = std::time::Duration::from_millis(u64::MAX / 2);
         let metadata = UniverseBuildMetadata {
             csv_source: "test".to_string(),
@@ -2161,7 +2161,7 @@ mod tests {
 
     #[test]
     fn test_instrument_info_index_variant_rkyv() {
-        use super::types::Exchange;
+        use crate::compat::types::Exchange;
         let info = InstrumentInfo::Index {
             security_id: 13,
             symbol: "NIFTY".to_string(),
@@ -2290,7 +2290,7 @@ mod tests {
             exchange_segment: ExchangeSegment::NseFno,
             expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
             strike_price: 24000.0,
-            option_type: Some(super::types::OptionType::Call),
+            option_type: Some(crate::compat::types::OptionType::Call),
             lot_size: 75,
             tick_size: 0.05,
             symbol_name: "NIFTY-27MAR26-24000-CE".to_string(),
@@ -2302,7 +2302,7 @@ mod tests {
         assert!((deserialized.strike_price - 24000.0).abs() < f64::EPSILON);
         assert_eq!(
             deserialized.option_type,
-            Some(super::types::OptionType::Call)
+            Some(crate::compat::types::OptionType::Call)
         );
     }
 
@@ -2359,7 +2359,7 @@ mod tests {
 
     #[test]
     fn test_subscribed_index_serde_roundtrip() {
-        use super::types::Exchange;
+        use crate::compat::types::Exchange;
         let idx = SubscribedIndex {
             symbol: "INDIA VIX".to_string(),
             security_id: 21,
@@ -2382,7 +2382,7 @@ mod tests {
             exchange_segment: ExchangeSegment::NseFno,
             expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
             strike_price: 24000.0,
-            option_type: Some(super::types::OptionType::Call),
+            option_type: Some(crate::compat::types::OptionType::Call),
         };
         let json = serde_json::to_string(&info).unwrap();
         let deserialized: InstrumentInfo = serde_json::from_str(&json).unwrap();
@@ -2425,7 +2425,7 @@ mod tests {
 
     #[test]
     fn test_subscribed_index_rkyv_roundtrip() {
-        use super::types::Exchange;
+        use crate::compat::types::Exchange;
         let idx = SubscribedIndex {
             symbol: "INDIA VIX".to_string(),
             security_id: 26017,
@@ -2449,7 +2449,7 @@ mod tests {
     #[test]
     fn test_duration_serde_deserialize_roundtrip() {
         // Exercises duration_serde::deserialize by round-tripping through JSON
-        let ist = super::trading_calendar::ist_offset();
+        let ist = crate::compat::trading_calendar::ist_offset();
         let original = UniverseBuildMetadata {
             csv_source: "test".to_string(),
             csv_row_count: 1,
@@ -2550,7 +2550,7 @@ mod tests {
     fn test_datetime_fixed_offset_as_i64_invalid_offset() {
         // Forge bytes with an invalid UTC offset (> 86400 seconds) to trigger
         // FixedOffset::east_opt returning None (line 655).
-        let ist = super::trading_calendar::ist_offset();
+        let ist = crate::compat::trading_calendar::ist_offset();
         let original = UniverseBuildMetadata {
             csv_source: "t".to_string(),
             csv_row_count: 0,
@@ -2591,7 +2591,7 @@ mod tests {
     fn test_datetime_fixed_offset_as_i64_invalid_timestamp() {
         // Forge bytes with an invalid timestamp to trigger
         // DateTime::from_timestamp returning None (line 657-658).
-        let ist = super::trading_calendar::ist_offset();
+        let ist = crate::compat::trading_calendar::ist_offset();
         let original = UniverseBuildMetadata {
             csv_source: "t".to_string(),
             csv_row_count: 0,
@@ -2727,7 +2727,7 @@ mod tests {
 
     #[test]
     fn test_rkyv_duration_as_millis_zero_roundtrip() {
-        let ist = super::trading_calendar::ist_offset();
+        let ist = crate::compat::trading_calendar::ist_offset();
         let original = UniverseBuildMetadata {
             csv_source: "dur-zero".to_string(),
             csv_row_count: 0,
@@ -2750,7 +2750,7 @@ mod tests {
 
     #[test]
     fn test_rkyv_duration_as_millis_large_roundtrip() {
-        let ist = super::trading_calendar::ist_offset();
+        let ist = crate::compat::trading_calendar::ist_offset();
         // 24 hours in milliseconds
         let dur = std::time::Duration::from_millis(86_400_000);
         let original = UniverseBuildMetadata {
@@ -2779,7 +2779,7 @@ mod tests {
 
     #[test]
     fn test_instrument_info_derivative_variant_rkyv() {
-        use super::types::OptionType;
+        use crate::compat::types::OptionType;
         let info = InstrumentInfo::Derivative {
             security_id: 49001,
             underlying_symbol: "RELIANCE".to_string(),
@@ -3127,7 +3127,7 @@ mod tests {
 
     #[test]
     fn test_constituency_build_metadata_with_populated_fields() {
-        let ist = super::trading_calendar::ist_offset();
+        let ist = crate::compat::trading_calendar::ist_offset();
         let meta = ConstituencyBuildMetadata {
             download_duration: std::time::Duration::from_millis(500),
             indices_downloaded: 5,
@@ -3379,7 +3379,7 @@ mod tests {
             exchange_segment: ExchangeSegment::NseFno,
             expiry_date: NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
             strike_price: 23500.0,
-            option_type: Some(super::types::OptionType::Call),
+            option_type: Some(crate::compat::types::OptionType::Call),
             lot_size: 25,
             tick_size: 0.05,
             symbol_name: "NIFTY-Mar2026-23500-CE".to_string(),

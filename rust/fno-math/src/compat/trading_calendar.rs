@@ -268,7 +268,7 @@ fn today_ist() -> NaiveDate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::config::NseHolidayEntry;
+    use crate::compat::config::NseHolidayEntry;
 
     fn make_test_config() -> TradingConfig {
         TradingConfig {
@@ -999,7 +999,7 @@ mod tests {
         // Line 185: NaiveDate::MAX.succ_opt() returns None → return from.
         // NaiveDate::MAX might be a weekday, so we need to add it as a holiday
         // to force the loop to try succ_opt() which returns None.
-        use super::config::{NseHolidayEntry, TradingConfig};
+        use crate::compat::config::{NseHolidayEntry, TradingConfig};
         let max_date = chrono::NaiveDate::MAX;
         let config = TradingConfig {
             market_open_time: "09:15:00".to_string(),
@@ -1027,7 +1027,7 @@ mod tests {
         // Line 190: 14 consecutive non-trading days exhausts the lookahead.
         // Create a calendar where every weekday in a 14-day window is a holiday.
         // Loop checks days 0..13 (14 iterations). All must be non-trading.
-        use super::config::{NseHolidayEntry, TradingConfig};
+        use crate::compat::config::{NseHolidayEntry, TradingConfig};
         let start = NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(); // Monday
         let mut holidays = Vec::new();
         // Need to cover 14 days from start (days 0-13). Weekends are auto non-trading.

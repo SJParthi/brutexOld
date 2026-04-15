@@ -3,10 +3,10 @@
 //! Verifies correctness of all incremental indicator algorithms
 //! against known values and mathematical properties.
 
-use crate::indicators::engine::IndicatorEngine;
-use crate::indicators::types::{IndicatorParams, RingBuffer};
 use crate::compat::constants::INDICATOR_RING_BUFFER_CAPACITY;
 use crate::compat::tick_types::ParsedTick;
+use crate::indicators::engine::IndicatorEngine;
+use crate::indicators::types::{IndicatorParams, RingBuffer};
 
 /// Helper: create a tick with the given LTP, high, low, volume.
 fn make_tick(security_id: u32, ltp: f32, high: f32, low: f32, volume: u32) -> ParsedTick {

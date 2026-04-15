@@ -531,7 +531,7 @@ mod tests {
             price_feed_security_id: 2885,
             price_feed_segment: ExchangeSegment::NseEquity,
             derivative_segment: ExchangeSegment::NseFno,
-            kind: super::instrument_types::UnderlyingKind::Stock,
+            kind: crate::compat::instrument_types::UnderlyingKind::Stock,
             lot_size: 250,
             contract_count: 100,
         };
@@ -693,7 +693,7 @@ mod tests {
             price_feed_security_id: 2885,
             price_feed_segment: ExchangeSegment::NseEquity,
             derivative_segment: ExchangeSegment::NseFno,
-            kind: super::instrument_types::UnderlyingKind::Stock,
+            kind: crate::compat::instrument_types::UnderlyingKind::Stock,
             lot_size: 250,
             contract_count: 100,
         };
@@ -834,7 +834,7 @@ mod tests {
             price_feed_security_id: 5001,
             price_feed_segment: ExchangeSegment::BseEquity,
             derivative_segment: ExchangeSegment::BseFno,
-            kind: super::instrument_types::UnderlyingKind::Stock,
+            kind: crate::compat::instrument_types::UnderlyingKind::Stock,
             lot_size: 100,
             contract_count: 50,
         };

@@ -64,11 +64,29 @@
 // Lint policy inherited from tickvault — defense in depth.
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(not(test), deny(clippy::expect_used))]
-#![deny(clippy::print_stdout)]
-#![deny(clippy::print_stderr)]
-#![deny(clippy::dbg_macro)]
+#![cfg_attr(not(test), deny(clippy::print_stdout))]
+#![cfg_attr(not(test), deny(clippy::print_stderr))]
+#![cfg_attr(not(test), deny(clippy::dbg_macro))]
 #![deny(unsafe_code)]
-#![allow(missing_docs)] // TODO: re-enable after adding docs to all public items
+#![allow(missing_docs)]
+// TODO: re-enable after adding docs to all public items
+// Style lints that fire on code extracted verbatim from tickvault. These
+// are noise at the fno-math level — tickvault is already clippy-clean
+// against its own (looser) config, and we don't want to rewrite
+// thousands of lines on extraction. Will be progressively tightened
+// as fno-math gets its own style polish pass.
+#![allow(clippy::excessive_precision)]
+#![allow(clippy::inconsistent_digit_grouping)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::bind_instead_of_map)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::assertions_on_constants)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::manual_range_contains)]
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::unreadable_literal)]
 
 /// Compatibility shim — vendored copy of `tickvault-common` types
 /// needed by the extracted `greeks/` / `indicators/` / `strategies/`

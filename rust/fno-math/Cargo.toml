@@ -47,8 +47,8 @@ tracing = "0.1.44"
 rkyv = { version = "0.8.13", features = ["alloc"] }
 
 # Black-Scholes implied volatility — Peter Jaeckel's "Let's Be Rational" solver
-# (same crate tickvault uses)
-# jaeckel = "0.2"  # TODO: uncomment once we verify the crate is still on crates.io
+# (same crate tickvault uses — pinned to tickvault workspace version)
+jaeckel = "0.2.0"
 
 # UUID (used by compat::order_types for order correlation IDs)
 uuid = { version = "1.18.2", features = ["serde", "v4"] }
@@ -59,6 +59,14 @@ secrecy = { version = "0.10.3", features = ["serde"] }
 # Figment-based config layering (used by compat::config for .toml + env
 # overrides)
 figment = { version = "0.10.19", features = ["toml", "env"] }
+
+# File-watching (used by strategies::hot_reload — matches tickvault
+# workspace pin)
+notify = "8.2.0"
+
+# Channel for hot-reload watcher (used by strategies::hot_reload —
+# pinned to tickvault workspace version)
+crossbeam-channel = "0.5.15"
 
 [dev-dependencies]
 proptest = "1.6.0"

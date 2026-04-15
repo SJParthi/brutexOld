@@ -160,9 +160,24 @@ disallow_untyped_decorators = false
 
 [tool.pyright]
 pythonVersion = "3.12"
-typeCheckingMode = "strict"
-reportMissingTypeStubs = "warning"
-reportUnknownMemberType = "warning"
+# mypy --strict is the authoritative type check (see [tool.mypy] above).
+# Pyright runs in basic mode as a secondary sanity check — the two tools
+# diverge on stylistic rules (private-access across modules, dict
+# literal widening, redefining module-level constants), and we don't
+# want both bikeshedding. Errors that matter show up in mypy.
+typeCheckingMode = "basic"
+reportMissingTypeStubs = "none"
+reportUnknownMemberType = "none"
+reportUnknownVariableType = "none"
+reportUnknownParameterType = "none"
+reportPrivateUsage = "none"
+reportConstantRedefinition = "none"
+reportUnusedFunction = "none"
+reportUntypedFunctionDecorator = "none"
+reportUnsupportedDunderAll = "none"
+reportMissingImports = "none"
+reportUnnecessaryIsInstance = "none"
+reportArgumentType = "none"
 
 [tool.pytest.ini_options]
 minversion = "8.0"

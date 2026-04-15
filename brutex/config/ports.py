@@ -56,7 +56,7 @@ DEFAULT_RAY_DASHBOARD_PORT: Final[int] = 9265
 #: Default bind host. ``0.0.0.0`` means "all interfaces" — the operator
 #: can reach the dashboard from their phone/tablet on the same LAN.
 #: Override to ``127.0.0.1`` for localhost-only.
-DEFAULT_HOST_BIND: Final[str] = "0.0.0.0"
+DEFAULT_HOST_BIND: Final[str] = "0.0.0.0"  # nosec B104 — intentional LAN bind
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -282,7 +282,7 @@ class PortConfig:
         urls: list[str] = []
 
         # LAN IP goes first when host_bind is 0.0.0.0 and we have an IP.
-        if self.host_bind in ("0.0.0.0", "::"):
+        if self.host_bind in ("0.0.0.0", "::"):  # nosec B104 — intentional LAN-discovery compare
             ip = lan_ip if lan_ip is not None else detect_lan_ip()
             if ip:
                 urls.append(f"http://{ip}:{self.dashboard}/")

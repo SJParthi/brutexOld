@@ -1946,12 +1946,12 @@ mod tests {
         // this should fail. If running after July 2026, the guard is no longer
         // active and this test should be updated.
         let today = (chrono::Utc::now()
-            + chrono::TimeDelta::seconds(super::constants::IST_UTC_OFFSET_SECONDS_I64))
+            + chrono::TimeDelta::seconds(crate::compat::constants::IST_UTC_OFFSET_SECONDS_I64))
         .date_naive();
         let earliest = chrono::NaiveDate::from_ymd_opt(
-            super::constants::LIVE_TRADING_EARLIEST_YEAR,
-            super::constants::LIVE_TRADING_EARLIEST_MONTH,
-            super::constants::LIVE_TRADING_EARLIEST_DAY,
+            crate::compat::constants::LIVE_TRADING_EARLIEST_YEAR,
+            crate::compat::constants::LIVE_TRADING_EARLIEST_MONTH,
+            crate::compat::constants::LIVE_TRADING_EARLIEST_DAY,
         )
         .unwrap();
         if today < earliest {

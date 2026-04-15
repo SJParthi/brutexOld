@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_exchange_segment_binary_code_matches_constants() {
-        use super::constants::{
+        use crate::compat::constants::{
             EXCHANGE_SEGMENT_BSE_CURRENCY, EXCHANGE_SEGMENT_BSE_EQ, EXCHANGE_SEGMENT_BSE_FNO,
             EXCHANGE_SEGMENT_IDX_I, EXCHANGE_SEGMENT_MCX_COMM, EXCHANGE_SEGMENT_NSE_CURRENCY,
             EXCHANGE_SEGMENT_NSE_EQ, EXCHANGE_SEGMENT_NSE_FNO,
@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn test_archived_exchange_from_roundtrip() {
-        use super::instrument_types::{FnoUnderlying, UnderlyingKind};
+        use crate::compat::instrument_types::{FnoUnderlying, UnderlyingKind};
         // Use a struct that contains Exchange to get ArchivedExchange
         let underlying = FnoUnderlying {
             underlying_symbol: "TEST".to_string(),
@@ -647,7 +647,7 @@ mod tests {
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&underlying).unwrap();
         let archived = rkyv::access::<
-            super::instrument_types::ArchivedFnoUnderlying,
+            crate::compat::instrument_types::ArchivedFnoUnderlying,
             rkyv::rancor::Error,
         >(&bytes)
         .unwrap();
@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn test_archived_exchange_segment_from_all_variants() {
-        use super::instrument_types::{FnoUnderlying, UnderlyingKind};
+        use crate::compat::instrument_types::{FnoUnderlying, UnderlyingKind};
         let segments = [
             ExchangeSegment::IdxI,
             ExchangeSegment::NseEquity,
@@ -687,7 +687,7 @@ mod tests {
             };
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&underlying).unwrap();
             let archived = rkyv::access::<
-                super::instrument_types::ArchivedFnoUnderlying,
+                crate::compat::instrument_types::ArchivedFnoUnderlying,
                 rkyv::rancor::Error,
             >(&bytes)
             .unwrap();
@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     fn test_archived_option_type_from_roundtrip() {
-        use super::instrument_types::{DerivativeContract, DhanInstrumentKind};
+        use crate::compat::instrument_types::{DerivativeContract, DhanInstrumentKind};
         for opt_type in [OptionType::Call, OptionType::Put] {
             let contract = DerivativeContract {
                 security_id: 1,
@@ -714,7 +714,7 @@ mod tests {
             };
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&contract).unwrap();
             let archived = rkyv::access::<
-                super::instrument_types::ArchivedDerivativeContract,
+                crate::compat::instrument_types::ArchivedDerivativeContract,
                 rkyv::rancor::Error,
             >(&bytes)
             .unwrap();
