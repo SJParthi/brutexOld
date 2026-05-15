@@ -64,11 +64,53 @@ re-enters. NOT to be confused with "Phase 2" of the Track 1 build plan
 - Sweep uses **10 cores (the P-cores)**; 4 E-cores reserved for OS + daily apps
 - Working set capped at 40 GB RAM during sweep
 
-**SLA per sweep on this envelope:** **2-4 days wall time** for ~33
-billion trials. Faster hardware (64-128 core EPYC / Threadripper)
+**SLA per sweep on this envelope:** **target 2-4 days wall time** for
+~33 billion trials. Faster hardware (64-128 core EPYC / Threadripper)
 brings this to 12-24 hours. The spec must restate SLA per hardware
 envelope. See `TRACK1_PERFORMANCE_BUDGET.md` for the memory-bandwidth
 analysis that bounds these numbers.
+
+### 2.1 Honest Disclaimer (added 2026-05-15 evening, post-throughput-audit)
+
+**The 2-4 day figure is a TARGET, not a guarantee.** It is predicated on
+sustained 80-150K trials/sec, which has **never been measured** on a
+real M4 Pro running BruteX code. The throughput is memory-bandwidth
+bound with **zero margin** (per `TRACK1_PERFORMANCE_BUDGET.md §3.3`).
+
+The Phase 3 bench gate `tests/bench/test_full_sweep_extrapolation.py`
+is the SOLE validator: it runs 100K real trials end-to-end and refuses
+CI merge if the projected 33B wall exceeds the published SLA band.
+
+**Contingency SLA matrix (derived from worst-case throughput audit):**
+
+| Phase 3 canary measures | Published SLA (33B) | Recommended action |
+|---|---|---|
+| ≥ 300K t/s (CPU + GPU) | **1-2 days** | proceed with Phase 3.5 Metal GPU offload |
+| ≥ 150K t/s (CPU only) | **2-3 days** | proceed with current plan |
+| 80-149K t/s | **3-5 days** | proceed; enable Stage 2 incremental checkpoint every 6h |
+| 30-79K t/s | **5-12 days** | escalate: Phase 3.5 Metal GPU is mandatory; consider tighter Stage 1B funnel from 10K → 3K survivors (cuts 33B → ~10B) |
+| < 30K t/s | **12-30 days — HALT** | re-architect: sweep sharding across N machines OR shrink universe |
+
+**LOCAL-ONLY constraint (user decision 2026-05-15 evening):** AWS /
+cloud offload is **explicitly out of scope** for Track 1. The only
+hardware escalation lever is the Apple Metal GPU (20-core, already
+present in the M4 Pro). All SLAs above assume single-machine execution.
+
+If the canary lands in a slower band, the published SLA is amended
+**and a new `Decision #` row is added to `docs/MIGRATION.md`** before
+any sweep proceeds. Per `CLAUDE.md §2 rule 10`, no "guarantee"
+language ships ahead of the bench gate. The 2026-05-15 4-agent review
+caught a 10× over-optimistic throughput claim; this clause exists to
+prevent that pattern from repeating.
+
+**Public benchmark gap (honest):** there is **no public benchmark for
+"trials/sec on M4 Pro for a Python+Rust quantitative backtest"**. The
+closest analog is vectorbt's "50K simulations/sec on M1" claim
+(hardware unverified, work-equivalence unclear). NEON benchmarks
+(Erio-Harrison) verify 2.5-9× scalar speedups for byte-scan and
+range-check kernels but no direct measurement for u64 bitmask AND
+exists. The honest implication: the 80-150K target is a defensible
+projection but requires Phase 3 validation.
 
 ---
 
@@ -272,6 +314,27 @@ Detailed flow + pseudocode in `TRACK1_DATA_INGEST_DESIGN.md §5A`.
 
 ## 6. Timeframes (21 total)
 
+### 6.0 Single-Timeframe Invariant (no multi-TF strategies)
+
+Every brute-forced strategy is evaluated on bars of **exactly one**
+chosen intraday timeframe (the run's `timeframe_id`). The 52-condition
+vocabulary contains **no cross-intraday-TF condition**:
+
+- Indicators EMA20/EMA200, day_high/day_low, candle shape, prior-N-bar
+  patterns, time-of-day are all computed on the chosen TF.
+- PDH, PDL, PDC, daily pivots (P/R1-R3/S1-S3), daily Fib anchors, and
+  prev_close are **scalar constants** derived once per trading day from
+  the daily series and broadcast across that day's intraday bars —
+  they are NOT a parallel bar stream and do not constitute multi-TF logic.
+
+This is industry-standard "daily-anchor on intraday" behavior
+(TradingView, NinjaTrader, etc.). Each (instrument, timeframe) tuple
+runs as an entirely independent backtest over the full 5-year range.
+Property test P-25 (Phase 1) asserts the bar-mask evaluator only reads
+the chosen-TF Parquet plus the daily-anchor scalar table.
+
+### 6.1 Timeframes themselves
+
 All resampled from 1m base, anchored to 09:15 IST. The 1m base + 1d
 daily are fetched directly from Dhan (`/v2/charts/intraday` and
 `/v2/charts/historical` respectively); the 19 intraday derived TFs are
@@ -434,9 +497,9 @@ STAGE 1A — Pattern discovery (NIFTY 15m only)
    ~5.8M trials, ~90 sec wall
    → top 50,000 patterns
 
-STAGE 1B — Pattern expansion across all 45 (inst × TF) combos
-   Top 50K × 45 inst-TF × default params
-   ~2.25M trials, ~40 sec wall
+STAGE 1B — Pattern expansion across all 63 (inst × TF) combos
+   Top 50K × 63 inst-TF × default params
+   ~3.15M trials, ~56 sec wall
    → top 10,000 (pattern × inst × TF × direction) combos
 
 STAGE 2 — Full parameter brute force
@@ -490,7 +553,7 @@ combo_hash = SHA256(
     strategy_mask_u64     ‖  // which of 52 conditions
     direction_bit         ‖  // bull/bear
     instrument_id         ‖  // NIFTY/BANKNIFTY/SENSEX
-    timeframe_id          ‖  // 1m to 1d (one of 15)
+    timeframe_id          ‖  // 1m to 1d (one of 21)
     mode_byte             ‖  // A or B
     canonical_params_json ‖  // sorted keys, NaN-rejected
     data_version_hash     ‖  // SHA of input Parquet files
@@ -499,8 +562,15 @@ combo_hash = SHA256(
 )
 ```
 
-- Bloom filter (~5GB at 0.1% FPR, ~14 bits/element) for fast negative
-  membership check
+- Bloom filter (~5GB at ~0.1% FPR for the **survivors-only** working set
+  of 100M-1B post-threshold-filter combos, NOT for all 33B raw trials).
+  Math: 5 GiB = 40e9 bits; at 1B survivors → 40 bits/elem → FPR ≈ 1e-12;
+  at 150M survivors → 267 bits/elem → FPR ≈ 0. The L3 LMDB B+tree is
+  the source of truth on Bloom collision. **Math sanity-check 2026-05-15
+  evening:** if Bloom were sized for all 33B raw trials (not survivors)
+  the same 5 GB would give only 1.21 bits/elem → FPR ≈ 56% (broken).
+  Track 1 sizes Bloom for survivors-only because raw trials are
+  threshold-filtered out of LMDB at write time (see §16).
 - LMDB (~30 GB at 33B keys, but in practice we only store **survivors**
   above a result-threshold, dropping it to ~250 MB)
 - Lookup path: Bloom check → LMDB confirm (both O(1))

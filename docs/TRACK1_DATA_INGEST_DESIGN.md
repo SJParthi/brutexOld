@@ -532,7 +532,7 @@ for each of the following. Failure = CI red.
 |---|---|---|---|
 | Bar lookup by ts | Catalog routes to partition; polars binary-search on sorted u64 ts | O(1) per partition + O(log n) inside (n < 100k bars) ≈ O(1) | <1 µs at 1M |
 | Watermark lookup | DuckDB PK index on `(inst, tf)` | O(1) | <100 µs |
-| Chunk dedup pre-check | Bloom filter (~14 bits/element) | O(1) | <200 ns |
+| Chunk dedup pre-check | Bloom filter on **survivors-only** working set (5 GB / ~150M-1B post-threshold-filter survivors → 40-267 bits/elem → FPR ≈ 1e-12 to 0) | O(1) | <200 ns |
 | Chunk dedup confirm | LMDB B+tree | O(1) | <100 µs |
 | Bar dedup by hash | sha256 → 32-byte LMDB key | O(1) | <100 µs |
 | Audit append | append-only fwrite | O(1) | <50 µs |
