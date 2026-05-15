@@ -64,11 +64,47 @@ re-enters. NOT to be confused with "Phase 2" of the Track 1 build plan
 - Sweep uses **10 cores (the P-cores)**; 4 E-cores reserved for OS + daily apps
 - Working set capped at 40 GB RAM during sweep
 
-**SLA per sweep on this envelope:** **2-4 days wall time** for ~33
-billion trials. Faster hardware (64-128 core EPYC / Threadripper)
+**SLA per sweep on this envelope:** **target 2-4 days wall time** for
+~33 billion trials. Faster hardware (64-128 core EPYC / Threadripper)
 brings this to 12-24 hours. The spec must restate SLA per hardware
 envelope. See `TRACK1_PERFORMANCE_BUDGET.md` for the memory-bandwidth
 analysis that bounds these numbers.
+
+### 2.1 Honest Disclaimer (added 2026-05-15 evening, post-throughput-audit)
+
+**The 2-4 day figure is a TARGET, not a guarantee.** It is predicated on
+sustained 80-150K trials/sec, which has **never been measured** on a
+real M4 Pro running BruteX code. The throughput is memory-bandwidth
+bound with **zero margin** (per `TRACK1_PERFORMANCE_BUDGET.md §3.3`).
+
+The Phase 3 bench gate `tests/bench/test_full_sweep_extrapolation.py`
+is the SOLE validator: it runs 100K real trials end-to-end and refuses
+CI merge if the projected 33B wall exceeds the published SLA band.
+
+**Contingency SLA matrix (derived from worst-case throughput audit):**
+
+| Phase 3 canary measures | Published SLA (33B) | Recommended action |
+|---|---|---|
+| ≥ 150K t/s | **2-3 days** | proceed with current plan |
+| 80-149K t/s | **3-5 days** | proceed; enable Stage 2 incremental checkpoint every 6h |
+| 30-79K t/s | **5-12 days** | escalate: AWS c7a.48xlarge EPYC sweep OR tighten Stage 1B funnel from 10K → 3K survivors (cuts 33B → ~10B) |
+| < 30K t/s | **12-30 days — HALT** | re-architect: sweep sharding across N machines OR shrink universe |
+
+If the canary lands in a slower band, the published SLA is amended
+**and a new `Decision #` row is added to `docs/MIGRATION.md`** before
+any sweep proceeds. Per `CLAUDE.md §2 rule 10`, no "guarantee"
+language ships ahead of the bench gate. The 2026-05-15 4-agent review
+caught a 10× over-optimistic throughput claim; this clause exists to
+prevent that pattern from repeating.
+
+**Public benchmark gap (honest):** there is **no public benchmark for
+"trials/sec on M4 Pro for a Python+Rust quantitative backtest"**. The
+closest analog is vectorbt's "50K simulations/sec on M1" claim
+(hardware unverified, work-equivalence unclear). NEON benchmarks
+(Erio-Harrison) verify 2.5-9× scalar speedups for byte-scan and
+range-check kernels but no direct measurement for u64 bitmask AND
+exists. The honest implication: the 80-150K target is a defensible
+projection but requires Phase 3 validation.
 
 ---
 
@@ -520,8 +556,15 @@ combo_hash = SHA256(
 )
 ```
 
-- Bloom filter (~5GB at 0.1% FPR, ~14 bits/element) for fast negative
-  membership check
+- Bloom filter (~5GB at ~0.1% FPR for the **survivors-only** working set
+  of 100M-1B post-threshold-filter combos, NOT for all 33B raw trials).
+  Math: 5 GiB = 40e9 bits; at 1B survivors → 40 bits/elem → FPR ≈ 1e-12;
+  at 150M survivors → 267 bits/elem → FPR ≈ 0. The L3 LMDB B+tree is
+  the source of truth on Bloom collision. **Math sanity-check 2026-05-15
+  evening:** if Bloom were sized for all 33B raw trials (not survivors)
+  the same 5 GB would give only 1.21 bits/elem → FPR ≈ 56% (broken).
+  Track 1 sizes Bloom for survivors-only because raw trials are
+  threshold-filtered out of LMDB at write time (see §16).
 - LMDB (~30 GB at 33B keys, but in practice we only store **survivors**
   above a result-threshold, dropping it to ~250 MB)
 - Lookup path: Bloom check → LMDB confirm (both O(1))

@@ -456,8 +456,24 @@ Runs all 10 C-checks → single status table. **First command of every workday.*
 │ C8  disk.free                  │ AMBER │ 7.2 GB free (< 10 GB)      │    3 │
 │ C9  telegram.delivery          │ SKIP  │ disabled (Decision #78)    │    0 │
 │ C10 instrument_master.fresh    │ GREEN │ CSV age 4h                 │    7 │
+│ C11 throughput.canary_fresh    │ GREEN │ 112K t/s, proj 3.4d (≤4)   │   18 │
 └────────────────────────────────┴───────┴────────────────────────────┴──────┘
 ```
+
+#### 6.4.1 C11 — `throughput.canary_fresh` (added 2026-05-15 evening)
+
+Reads `.brutex/bench/canary_throughput.json` (written by
+`tests/bench/test_full_sweep_extrapolation.py`).
+
+| Criterion | GREEN | AMBER | RED |
+|---|---|---|---|
+| Canary artifact age | ≤ 7 days | 7-14 days | > 14 days OR missing |
+| Projected 33B wall vs published SLA | within band | n/a | exceeds SLA upper bound |
+
+RED forces `brutex doctor` exit 1, blocking the workday-start gate.
+If no one has measured throughput in > 2 weeks OR last measurement
+projected wall > published SLA, work is blocked until canary is re-run
+and (if needed) SLA band is amended in `TRACK1_BACKTEST_SPEC.md §2.1`.
 
 ### 6.5 Per-task Cowork isolation (3-layer)
 
