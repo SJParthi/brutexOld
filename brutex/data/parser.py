@@ -1,11 +1,11 @@
-"""Parse raw Groww candle rows into :class:`CandleBar` instances.
+"""Parse raw the broker candle rows into :class:`CandleBar` instances.
 
-Groww's ``get_historical_candles`` returns rows as 7-element arrays::
+the broker's ``get_historical_candles`` returns rows as 7-element arrays::
 
     [timestamp_iso, open, high, low, close, volume, open_interest_or_none]
 
 * ``timestamp_iso`` — ``YYYY-MM-DDTHH:mm:ss`` (no timezone suffix, but
-  per ``docs/groww-sdk/backtesting.md §10.4`` these are **IST** market
+  per ``docs/broker-sdk-docs/backtesting.md §10.4`` these are **IST** market
   times and the adapter MUST convert to UTC on ingest).
 * ``open/high/low/close`` — floats (price in rupees).
 * ``volume`` — integer trade volume.
@@ -30,22 +30,22 @@ from brutex.data.models import CandleBar
 #: India Standard Time offset (+05:30). No DST — IST is fixed.
 _IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30), name="IST")
 
-#: Number of fields in a Groww historical candle row. See
-#: ``docs/groww-sdk/backtesting.md §10.3``: 7-tuple
+#: Number of fields in a the broker historical candle row. See
+#: ``docs/broker-sdk-docs/backtesting.md §10.3``: 7-tuple
 #: ``[timestamp, open, high, low, close, volume, open_interest]``.
-GROWW_CANDLE_ROW_FIELDS: Final[int] = 7
+BROKER_CANDLE_ROW_FIELDS: Final[int] = 7
 
 
 class CandleRowError(DataLakeError):
-    """Raised when a raw Groww candle row cannot be parsed.
+    """Raised when a raw the broker candle row cannot be parsed.
 
     The error message always names the offending field so debugging
     a bad upstream payload is a single log-line lookup.
     """
 
 
-def parse_groww_candle_row(row: Sequence[Any]) -> CandleBar:
-    """Convert one raw Groww candle row into a :class:`CandleBar`.
+def parse_candle_row(row: Sequence[Any]) -> CandleBar:
+    """Convert one raw the broker candle row into a :class:`CandleBar`.
 
     Parameters
     ----------
@@ -63,9 +63,9 @@ def parse_groww_candle_row(row: Sequence[Any]) -> CandleBar:
         If the row is wrong length, has a malformed timestamp, or
         contains a non-numeric price / volume field.
     """
-    if len(row) != GROWW_CANDLE_ROW_FIELDS:
+    if len(row) != BROKER_CANDLE_ROW_FIELDS:
         raise CandleRowError(
-            f"Groww candle row must have {GROWW_CANDLE_ROW_FIELDS} elements "
+            f"the broker candle row must have {BROKER_CANDLE_ROW_FIELDS} elements "
             f"[ts, o, h, l, c, v, oi], got {len(row)}: {row!r}"
         )
     ts_raw, open_raw, high_raw, low_raw, close_raw, vol_raw, oi_raw = row
@@ -74,11 +74,11 @@ def parse_groww_candle_row(row: Sequence[Any]) -> CandleBar:
     if not isinstance(ts_raw, str):
         raise CandleRowError(f"timestamp must be an ISO string, got {type(ts_raw).__name__}")
     try:
-        # Groww uses 'T' separator; fromisoformat handles both 'T' and ' '.
+        # the broker uses 'T' separator; fromisoformat handles both 'T' and ' '.
         naive = datetime.fromisoformat(ts_raw)
     except ValueError as exc:
         raise CandleRowError(f"timestamp {ts_raw!r} is not valid ISO-8601") from exc
-    # Groww omits the offset; attach IST then convert to UTC.
+    # the broker omits the offset; attach IST then convert to UTC.
     if naive.tzinfo is None:
         naive = naive.replace(tzinfo=_IST)
     ts_utc = naive.astimezone(UTC)
@@ -122,16 +122,16 @@ def parse_groww_candle_row(row: Sequence[Any]) -> CandleBar:
         raise CandleRowError(f"invalid bar content: {exc}") from exc
 
 
-def parse_groww_candle_rows(
+def parse_candle_rows(
     rows: Sequence[Sequence[Any]],
 ) -> list[CandleBar]:
-    """Parse a list of Groww candle rows, raising on the first error.
+    """Parse a list of the broker candle rows, raising on the first error.
 
     The driver should call this inside a try/except so a single
     malformed row doesn't crash the whole batch — it can be routed
     to the quarantine queue instead.
     """
-    return [parse_groww_candle_row(row) for row in rows]
+    return [parse_candle_row(row) for row in rows]
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -152,6 +152,6 @@ def _to_decimal(value: Any, field_name: str) -> Decimal:
 
 __all__ = [
     "CandleRowError",
-    "parse_groww_candle_row",
-    "parse_groww_candle_rows",
+    "parse_candle_row",
+    "parse_candle_rows",
 ]

@@ -3,7 +3,7 @@
 > Persistent instructions for Claude Code working in this repository.
 > Every Claude session in `bruteX/` must read and honor this file.
 
-_Last updated: 2026-05-15. Groww → Dhan migration; Track 1 spec locked
+_Last updated: 2026-05-15. the broker → Dhan migration; Track 1 spec locked
 after 4-agent hostile-review pass._
 
 ---
@@ -126,8 +126,8 @@ bruteX/
 │   ├── TRACK1_PHASE_PLAN.md        ← 8-12 week build plan
 │   ├── TRACK1_PERFORMANCE_BUDGET.md
 │   ├── TRACK1_MICROSTRUCTURE.md
-│   ├── MIGRATION.md                ← Groww → Dhan log
-│   ├── REQUIREMENTS.md             ← DEPRECATED (Groww v1.0)
+│   ├── MIGRATION.md                ← the broker → Dhan log
+│   ├── REQUIREMENTS.md             ← DEPRECATED (v1.0 (legacy))
 │   ├── ROADMAP.md
 │   ├── adapters.md
 │   ├── adr/                        ← architecture decisions

@@ -21,7 +21,7 @@
 #   revert   reverts a previous commit
 #
 # Format: <type>(<optional-scope>): <description>
-#   example: feat(adapter): add Groww instrument snapshot pull
+#   example: feat(adapter): add Dhan instrument snapshot pull
 #   example: fix(engine): O(1) regression in bar lookup
 #   example: docs(requirements): add FR-MATH section
 #
@@ -73,7 +73,7 @@ Allowed types: feat, fix, docs, style, refactor, perf, test, chore,
                build, ci, revert
 
 Examples:
-  feat(adapter): add Groww instrument snapshot pull
+  feat(adapter): add Dhan instrument snapshot pull
   fix(engine): O(1) regression in bar lookup
   docs(requirements): add FR-MATH section
   chore(claude): update CLAUDE.md rules

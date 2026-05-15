@@ -6,10 +6,10 @@ IBKR, Coinbase, …) is a **one-file job** — not a rewrite.
 
 ## Why a market-neutral protocol?
 
-In PR #1 we shipped :class:`brutex.adapters.groww.client.GrowwClientProtocol`,
-whose method names were lifted verbatim from the Groww SDK
+In PR #1 we shipped :class:`the deleted broker adapter`,
+whose method names were lifted verbatim from the broker SDK
 (``get_expiries``, ``get_contracts``, ``get_historical_candles``). That's
-fine when BruteX only knows about Groww. But:
+fine when BruteX only knows about the broker. But:
 
 * **US equities via Polygon** have no "expiries" — they're continuous.
 * **Crypto via Binance/Coinbase** have no "contracts" — they're spot pairs.
@@ -18,7 +18,7 @@ fine when BruteX only knows about Groww. But:
 * **IBKR** uses ``reqContractDetails`` / ``reqHistoricalData`` with
   delta protocol semantics.
 
-If every adapter had to implement the Groww-shaped protocol, new markets
+If every adapter had to implement the the broker-shaped protocol, new markets
 would be forced to fake data they don't have. This module breaks that
 coupling by defining a **semantic** contract — what BruteX needs the
 adapter to *do*, not what the adapter's upstream SDK *calls the methods*.
@@ -76,11 +76,11 @@ for a spot-only crypto adapter, Phase B (expiries) and Phase C
 (contracts) are no-ops, and Phase D fetches bars directly from the
 instrument list returned by Phase A.
 
-## Mapping existing Groww adapter onto this protocol
+## Mapping existing broker adapter (deleted) onto this protocol
 
-The existing :class:`GrowwAdapter` in ``brutex/adapters/groww/client.py``
+The existing :class:`VendorAdapter` in ``(deleted)/client.py``
 stays intact for backward compatibility. A thin wrapper
-:class:`brutex.adapters.groww.market.GrowwMarketAdapter` translates the
+:class:`the deleted broker adapter` translates the
 three semantic methods onto the existing SDK-shaped calls, so all the
 hard plumbing (rate limit, dedup, audit) keeps working unchanged.
 
@@ -255,7 +255,7 @@ class DerivativeContract:
 class MarketAdapter(Protocol):
     """Market-neutral adapter interface.
 
-    Every BruteX adapter (Groww, Polygon, Binance, Dhan, …) implements
+    Every BruteX adapter (the broker, Polygon, Binance, Dhan, …) implements
     this protocol. The orchestrator talks ONLY through these methods —
     no market-specific code leaks upstream.
 
@@ -269,7 +269,7 @@ class MarketAdapter(Protocol):
     * :mod:`brutex.orchestrator.retry`
     * :mod:`brutex.orchestrator.state`
 
-    That's what :class:`GrowwAdapter` does, and it's what every future
+    That's what :class:`VendorAdapter` does, and it's what every future
     adapter should do too.
     """
 
@@ -327,7 +327,7 @@ class MarketAdapter(Protocol):
 
         * Converting the market's native timezone to UTC
         * Chunking the date range if the upstream SDK has per-call
-          limits (Groww has 30/90/180 day limits by interval)
+          limits (the broker has 30/90/180 day limits by interval)
         * Retrying transient errors (429, timeout, 5xx) via the
           adapter's own rate limiter + retry policy
         * Raising :class:`~brutex.models.OutOfScopeError` if the symbol

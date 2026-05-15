@@ -21,7 +21,7 @@ Implements ``FR-ING-013`` (sequential phase gating) and ``FR-ING-014``
 
 ## Design — pure composition, zero adapter lock-in
 
-:class:`PhaseRunner` does NOT know about the GrowwAdapter directly.
+:class:`PhaseRunner` does NOT know about the VendorAdapter directly.
 It takes an ``invoke`` callable::
 
     invoke: Callable[[WorkItem], tuple[WorkItem, Any]]

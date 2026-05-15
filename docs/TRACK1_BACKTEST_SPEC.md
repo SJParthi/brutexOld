@@ -1,7 +1,7 @@
 # Track 1 — Backtest System Build Specification
 
 > **Status:** Locked spec, 2026-05-15. Supersedes the legacy
-> `docs/REQUIREMENTS.md` (Groww v1.0) and the prior `TRACK1_BACKTEST_SPEC.md`
+> `docs/REQUIREMENTS.md` (v1.0 (legacy)) and the prior `TRACK1_BACKTEST_SPEC.md`
 > draft. All decisions below survived a 4-agent hostile-review pass
 > (Audit + Verification-Architecture + Hostile-Review + Throughput-Reality).
 >
@@ -13,7 +13,7 @@
 > - `TRACK1_PHASE_PLAN.md` — 8-12 week build plan
 > - `TRACK1_PERFORMANCE_BUDGET.md` — honest throughput math
 > - `TRACK1_MICROSTRUCTURE.md` — Indian-market edge cases
-> - `MIGRATION.md` — Groww → Dhan migration log
+> - `MIGRATION.md` — the broker → Dhan migration log
 
 ---
 

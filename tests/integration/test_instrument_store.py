@@ -64,7 +64,7 @@ def _idx(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
         exchange=exchange,
         exchange_token=26000,
         trading_symbol=symbol,
-        groww_symbol=f"{exchange}-{symbol}",
+        vendor_symbol=f"{exchange}-{symbol}",
         name=f"{symbol} 50",
         instrument_type=InstrumentType.IDX,
         segment=Segment.CASH,
@@ -98,7 +98,7 @@ def _option(
         exchange=exchange,
         exchange_token=hash(tag) & 0x7FFFFFFF,
         trading_symbol=tag.replace(f"{exchange}-", ""),
-        groww_symbol=tag,
+        vendor_symbol=tag,
         name=f"{underlying} {strike}",
         instrument_type=side,
         segment=Segment.FNO,
@@ -397,9 +397,9 @@ class TestInstrumentSnapshot:
             snapshot = s.load_snapshot()
         # Hot path: direct dict lookup.
         for instr in chain:
-            fetched = snapshot.get(instr.groww_symbol)
+            fetched = snapshot.get(instr.vendor_symbol)
             assert fetched is not None
-            assert fetched.groww_symbol == instr.groww_symbol
+            assert fetched.vendor_symbol == instr.vendor_symbol
 
     def test_snapshot_by_segment_is_pre_indexed(self, tmp_path: Path) -> None:
         chain = _make_chain("NIFTY", date(2025, 5, 29), range(24000, 24100, 50))
@@ -455,7 +455,7 @@ class TestInstrumentSnapshot:
 
     def test_snapshot_rejects_duplicates_at_construction(self) -> None:
         nifty = _idx("NIFTY")
-        with pytest.raises(CatalogError, match="duplicate groww_symbol"):
+        with pytest.raises(CatalogError, match="duplicate vendor_symbol"):
             InstrumentSnapshot([nifty, nifty])
 
     def test_snapshot_is_frozen(self, tmp_path: Path) -> None:

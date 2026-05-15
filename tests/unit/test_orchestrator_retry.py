@@ -1,7 +1,7 @@
 """Unit tests for brutex.orchestrator.retry.
 
 Validates the exception-to-Outcome classifier, the exponential backoff
-schedule, and the severity helper. No growwapi imports at module load
+schedule, and the severity helper. No the brokerapi imports at module load
 time — tests use synthetic exception classes with the same names.
 """
 
@@ -12,7 +12,7 @@ import random
 import pytest
 from brutex.orchestrator.retry import (
     BACKOFF_SCHEDULE_SECONDS,
-    GROWW_EXCEPTION_CLASSIFICATION,
+    BROKER_EXCEPTION_CLASSIFICATION,
     JITTER_FRACTION,
     REQUIRED_EXCEPTION_NAMES,
     UnknownExceptionError,
@@ -24,51 +24,51 @@ from brutex.orchestrator.retry import (
 from brutex.orchestrator.state import Outcome
 
 # ────────────────────────────────────────────────────────────────────────
-# Synthetic Groww exception classes (name-matched to the real SDK)
+# Synthetic the broker exception classes (name-matched to the real SDK)
 # ────────────────────────────────────────────────────────────────────────
 
 
-class GrowwBaseException(Exception):
+class VendorBaseException(Exception):
     pass
 
 
-class GrowwAPIException(GrowwBaseException):
+class VendorAPIException(VendorBaseException):
     pass
 
 
-class GrowwAPIRateLimitException(GrowwAPIException):
+class VendorAPIRateLimitException(VendorAPIException):
     pass
 
 
-class GrowwAPITimeoutException(GrowwAPIException):
+class VendorAPITimeoutException(VendorAPIException):
     pass
 
 
-class GrowwAPINotFoundException(GrowwAPIException):
+class VendorAPINotFoundException(VendorAPIException):
     pass
 
 
-class GrowwAPIBadRequestException(GrowwAPIException):
+class VendorAPIBadRequestException(VendorAPIException):
     pass
 
 
-class GrowwAPIAuthenticationException(GrowwAPIException):
+class VendorAPIAuthenticationException(VendorAPIException):
     pass
 
 
-class GrowwAPIAuthorisationException(GrowwAPIException):
+class VendorAPIAuthorisationException(VendorAPIException):
     pass
 
 
-class GrowwFeedException(GrowwBaseException):
+class VendorFeedException(VendorBaseException):
     pass
 
 
-class GrowwFeedConnectionException(GrowwFeedException):
+class VendorFeedConnectionException(VendorFeedException):
     pass
 
 
-class GrowwFeedNotSubscribedException(GrowwFeedException):
+class VendorFeedNotSubscribedException(VendorFeedException):
     pass
 
 
@@ -80,32 +80,32 @@ class GrowwFeedNotSubscribedException(GrowwFeedException):
 class TestClassificationTable:
     def test_table_has_all_required_exception_names(self) -> None:
         expected = {
-            "GrowwBaseException",
-            "GrowwAPIException",
-            "GrowwAPIRateLimitException",
-            "GrowwAPITimeoutException",
-            "GrowwAPINotFoundException",
-            "GrowwAPIBadRequestException",
-            "GrowwAPIAuthenticationException",
-            "GrowwAPIAuthorisationException",
-            "GrowwFeedException",
-            "GrowwFeedConnectionException",
-            "GrowwFeedNotSubscribedException",
+            "VendorBaseException",
+            "VendorAPIException",
+            "VendorAPIRateLimitException",
+            "VendorAPITimeoutException",
+            "VendorAPINotFoundException",
+            "VendorAPIBadRequestException",
+            "VendorAPIAuthenticationException",
+            "VendorAPIAuthorisationException",
+            "VendorFeedException",
+            "VendorFeedConnectionException",
+            "VendorFeedNotSubscribedException",
         }
-        assert set(GROWW_EXCEPTION_CLASSIFICATION.keys()) == expected
+        assert set(BROKER_EXCEPTION_CLASSIFICATION.keys()) == expected
         assert expected == REQUIRED_EXCEPTION_NAMES
 
     def test_british_authorisation_spelling(self) -> None:
-        """Groww uses British 'Authorisation' — locked."""
-        assert "GrowwAPIAuthorisationException" in GROWW_EXCEPTION_CLASSIFICATION
-        assert "GrowwAPIAuthorizationException" not in GROWW_EXCEPTION_CLASSIFICATION
+        """the broker uses British 'Authorisation' — locked."""
+        assert "VendorAPIAuthorisationException" in BROKER_EXCEPTION_CLASSIFICATION
+        assert "VendorAPIAuthorizationException" not in BROKER_EXCEPTION_CLASSIFICATION
 
     def test_every_outcome_has_at_least_one_mapping(self) -> None:
         """Every Outcome that can come from an exception must be
         reachable from at least one class name. OK_WITH_DATA and
         OK_EMPTY are not exception outcomes, so they are excluded.
         """
-        exception_outcomes = set(GROWW_EXCEPTION_CLASSIFICATION.values())
+        exception_outcomes = set(BROKER_EXCEPTION_CLASSIFICATION.values())
         # Outcomes that should be in the map
         expected = {
             Outcome.RATE_LIMIT,
@@ -121,8 +121,8 @@ class TestClassificationTable:
     def test_ok_outcomes_not_in_map(self) -> None:
         """OK_WITH_DATA and OK_EMPTY are set by the happy path, not
         by exception classification."""
-        assert Outcome.OK_WITH_DATA not in GROWW_EXCEPTION_CLASSIFICATION.values()
-        assert Outcome.OK_EMPTY not in GROWW_EXCEPTION_CLASSIFICATION.values()
+        assert Outcome.OK_WITH_DATA not in BROKER_EXCEPTION_CLASSIFICATION.values()
+        assert Outcome.OK_EMPTY not in BROKER_EXCEPTION_CLASSIFICATION.values()
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -134,29 +134,29 @@ class TestClassifyExceptionName:
     @pytest.mark.parametrize(
         ("name", "expected"),
         [
-            ("GrowwAPIRateLimitException", Outcome.RATE_LIMIT),
-            ("GrowwAPITimeoutException", Outcome.TIMEOUT),
-            ("GrowwAPIException", Outcome.GENERIC_API_ERROR),
-            ("GrowwBaseException", Outcome.GENERIC_API_ERROR),
-            ("GrowwAPINotFoundException", Outcome.NOT_FOUND),
-            ("GrowwAPIBadRequestException", Outcome.BAD_REQUEST),
-            ("GrowwAPIAuthenticationException", Outcome.AUTH_FAILED),
-            ("GrowwAPIAuthorisationException", Outcome.AUTHZ_FAILED),
+            ("VendorAPIRateLimitException", Outcome.RATE_LIMIT),
+            ("VendorAPITimeoutException", Outcome.TIMEOUT),
+            ("VendorAPIException", Outcome.GENERIC_API_ERROR),
+            ("VendorBaseException", Outcome.GENERIC_API_ERROR),
+            ("VendorAPINotFoundException", Outcome.NOT_FOUND),
+            ("VendorAPIBadRequestException", Outcome.BAD_REQUEST),
+            ("VendorAPIAuthenticationException", Outcome.AUTH_FAILED),
+            ("VendorAPIAuthorisationException", Outcome.AUTHZ_FAILED),
         ],
     )
     def test_known_names_classify_correctly(self, name: str, expected: Outcome) -> None:
         assert classify_exception_name(name) == expected
 
     def test_unknown_name_raises(self) -> None:
-        with pytest.raises(UnknownExceptionError, match="Unknown Groww exception"):
-            classify_exception_name("GrowwAPITotallyNewException")
+        with pytest.raises(UnknownExceptionError, match="Unknown the broker exception"):
+            classify_exception_name("VendorAPITotallyNewException")
 
     def test_unknown_error_mentions_remediation(self) -> None:
         try:
-            classify_exception_name("NotAGrowwException")
+            classify_exception_name("NotAVendorException")
         except UnknownExceptionError as e:
             msg = str(e)
-            assert "GROWW_EXCEPTION_CLASSIFICATION" in msg
+            assert "BROKER_EXCEPTION_CLASSIFICATION" in msg
             assert "test_orchestrator_retry.py" in msg
 
 
@@ -167,54 +167,56 @@ class TestClassifyExceptionName:
 
 class TestClassifyException:
     def test_direct_rate_limit(self) -> None:
-        exc = GrowwAPIRateLimitException("too many requests")
+        exc = VendorAPIRateLimitException("too many requests")
         assert classify_exception(exc) == Outcome.RATE_LIMIT
 
     def test_direct_timeout(self) -> None:
-        exc = GrowwAPITimeoutException("slow")
+        exc = VendorAPITimeoutException("slow")
         assert classify_exception(exc) == Outcome.TIMEOUT
 
     def test_direct_not_found(self) -> None:
-        exc = GrowwAPINotFoundException("no such symbol")
+        exc = VendorAPINotFoundException("no such symbol")
         assert classify_exception(exc) == Outcome.NOT_FOUND
 
     def test_direct_bad_request(self) -> None:
-        exc = GrowwAPIBadRequestException("bad params")
+        exc = VendorAPIBadRequestException("bad params")
         assert classify_exception(exc) == Outcome.BAD_REQUEST
 
     def test_direct_auth_failed(self) -> None:
-        exc = GrowwAPIAuthenticationException("bad token")
+        exc = VendorAPIAuthenticationException("bad token")
         assert classify_exception(exc) == Outcome.AUTH_FAILED
 
     def test_direct_authz_failed(self) -> None:
-        exc = GrowwAPIAuthorisationException("missing scope")
+        exc = VendorAPIAuthorisationException("missing scope")
         assert classify_exception(exc) == Outcome.AUTHZ_FAILED
 
     def test_generic_api_error(self) -> None:
-        exc = GrowwAPIException("unknown API issue")
+        exc = VendorAPIException("unknown API issue")
         assert classify_exception(exc) == Outcome.GENERIC_API_ERROR
 
     def test_base_exception_fallback(self) -> None:
-        exc = GrowwBaseException("something bad")
+        exc = VendorBaseException("something bad")
         assert classify_exception(exc) == Outcome.GENERIC_API_ERROR
 
     def test_subclass_falls_through_mro(self) -> None:
-        """A future subclass of GrowwAPIRateLimitException should
+        """A future subclass of VendorAPIRateLimitException should
         still classify as RATE_LIMIT via MRO walk."""
 
-        class BurstRateLimit(GrowwAPIRateLimitException):
+        class BurstRateLimit(VendorAPIRateLimitException):
             pass
 
         exc = BurstRateLimit("burst")
         assert classify_exception(exc) == Outcome.RATE_LIMIT
 
     def test_feed_exceptions(self) -> None:
-        assert classify_exception(GrowwFeedException("x")) == Outcome.GENERIC_API_ERROR
-        assert classify_exception(GrowwFeedConnectionException("x")) == Outcome.GENERIC_API_ERROR
-        assert classify_exception(GrowwFeedNotSubscribedException("x")) == Outcome.GENERIC_API_ERROR
+        assert classify_exception(VendorFeedException("x")) == Outcome.GENERIC_API_ERROR
+        assert classify_exception(VendorFeedConnectionException("x")) == Outcome.GENERIC_API_ERROR
+        assert (
+            classify_exception(VendorFeedNotSubscribedException("x")) == Outcome.GENERIC_API_ERROR
+        )
 
-    def test_non_groww_exception_raises(self) -> None:
-        """Exceptions from outside the Groww hierarchy are a bug in
+    def test_non_vendor_exception_raises(self) -> None:
+        """Exceptions from outside the the broker hierarchy are a bug in
         the caller — should not reach classify_exception."""
         with pytest.raises(UnknownExceptionError, match="should not have reached"):
             classify_exception(ValueError("unrelated"))

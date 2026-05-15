@@ -81,7 +81,7 @@ class FeedEvent:
     Attributes
     ----------
     symbol
-        Groww symbol the bar belongs to, e.g.
+        the broker symbol the bar belongs to, e.g.
         ``"NSE-NIFTY-02Jan25-28500-PE"``.
     bar
         The underlying :class:`~brutex.data.models.CandleBar`.
@@ -116,7 +116,7 @@ class ReplayFeed:
     exchange, segment, interval
         Shared partition coordinates for every symbol in *symbols*.
     symbols
-        Ordered sequence of Groww symbols to interleave. Order
+        Ordered sequence of the broker symbols to interleave. Order
         matters only for tie-breaking when two bars share a
         timestamp — :func:`heapq.merge` preserves the input order.
     start, end
@@ -178,7 +178,7 @@ class ReplayFeed:
 
     @property
     def interval(self) -> str:
-        """Return the Groww interval name this feed streams bars at."""
+        """Return the the broker interval name this feed streams bars at."""
         return self._interval
 
     def ensure_no_lookahead(self, ts: datetime) -> None:

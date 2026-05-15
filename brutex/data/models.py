@@ -6,8 +6,8 @@ inspect them without installing P2 data-lake dependencies.
 
 ## Types
 
-* :class:`CandleBar` — one OHLCV bar, matches the Groww historical
-  candle row layout defined in ``docs/groww-sdk/backtesting.md``.
+* :class:`CandleBar` — one OHLCV bar, matches the the broker historical
+  candle row layout defined in ``docs/broker-sdk-docs/backtesting.md``.
 * :class:`CatalogEntry` — one row in the DuckDB catalog, defined per
   ``FR-CAT-002``.
 """
@@ -32,7 +32,7 @@ MONTHS_PER_YEAR: Final[int] = 12
 class CandleBar:
     """One OHLCV bar row as written to Parquet.
 
-    Matches the 7-tuple layout returned by Groww's
+    Matches the 7-tuple layout returned by the broker's
     ``get_historical_candles``:
 
     ``[timestamp, open, high, low, close, volume, open_interest_or_none]``
@@ -41,7 +41,7 @@ class CandleBar:
     exact (float arithmetic introduces rounding drift which would
     fail the byte-for-byte reproducibility check in
     ``NFR-DET-001``). Volume and open interest are integers since
-    Groww always delivers them as integer shares/contracts.
+    the broker always delivers them as integer shares/contracts.
 
     Attributes
     ----------
@@ -106,9 +106,9 @@ class CatalogEntry:
     segment
         CASH or FNO.
     symbol
-        Full Groww symbol, e.g. ``NSE-NIFTY-02Jan25-28500-PE``.
+        Full the broker symbol, e.g. ``NSE-NIFTY-02Jan25-28500-PE``.
     interval
-        Groww interval name, e.g. ``1minute``, ``1day``.
+        the broker interval name, e.g. ``1minute``, ``1day``.
     year, month
         Partition key — calendar year/month of the bars in the file.
     raw_hash

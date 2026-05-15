@@ -589,7 +589,7 @@ concrete. Tracking checklist:
 | `brutex/adapters/dhan/intraday.py` | new | ⏳ |
 | `brutex/adapters/dhan/historical.py` | new | ⏳ |
 | `brutex/data/watermark.py` (new DuckDB table) | new | ⏳ |
-| `brutex/data/parser_dhan.py` (replaces Groww parser) | new | ⏳ |
+| `brutex/data/parser_dhan.py` (replaces the broker parser) | new | ⏳ |
 | `brutex/data/partition.py` — extend `VALID_INTERVALS` to 21 TFs | edit | ⏳ |
 | `brutex/data/partition.py` — add `IDX_I, BSE_I` to `VALID_SEGMENTS` | edit | ⏳ |
 | `brutex/feed/resampler.py` — 09:15 IST anchor + 19 TFs | edit | ⏳ |

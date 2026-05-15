@@ -35,7 +35,7 @@ class Signal:
     Attributes
     ----------
     symbol
-        Groww symbol the signal applies to. Must be one of the
+        the broker symbol the signal applies to. Must be one of the
         strategy's declared :attr:`StrategyMeta.symbols`.
     side
         :class:`Side` — ``BUY``, ``SELL``, or ``HOLD``.

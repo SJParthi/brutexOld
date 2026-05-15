@@ -45,7 +45,7 @@ def _make_instrument(i: int, snap: date) -> Instrument:
         exchange=Exchange.NSE,
         exchange_token=100_000 + i,
         trading_symbol=f"SYM{i}",
-        groww_symbol=f"NSE-SYM{i:06d}",
+        vendor_symbol=f"NSE-SYM{i:06d}",
         name=f"Symbol {i}",
         instrument_type=InstrumentType.CE,
         segment=Segment.FNO,
@@ -67,7 +67,7 @@ def _make_instrument(i: int, snap: date) -> Instrument:
 
 def _pk_select_nanos(conn: object, symbol: str) -> int:
     """Time a single PK-bound SELECT on `instruments`, in nanoseconds."""
-    stmt = "SELECT trading_symbol FROM instruments WHERE groww_symbol = ? AND snapshot_date = ?"
+    stmt = "SELECT trading_symbol FROM instruments WHERE vendor_symbol = ? AND snapshot_date = ?"
     t0 = time.perf_counter_ns()
     conn.execute(stmt, [symbol, date(2024, 1, 2)]).fetchone()  # type: ignore[attr-defined]
     return time.perf_counter_ns() - t0
@@ -189,14 +189,14 @@ def main() -> int:
         duplicate_blocked = False
         try:
             store._conn.execute(
-                "INSERT INTO instruments (groww_symbol, snapshot_date, "
+                "INSERT INTO instruments (vendor_symbol, snapshot_date, "
                 "exchange, trading_symbol, instrument_type, segment, "
                 "lot_size, tick_size, in_scope, raw_hash, fetched_at, "
                 "run_id, csv_source_sha256, is_reserved, buy_allowed, "
                 "sell_allowed) VALUES (?, ?, 'NSE', 'X', 'CE', 'FNO', "
                 "25, 0.05, TRUE, 'h', '2024-01-02T12:00:00+00:00', "
                 "'proof-run', ?, FALSE, TRUE, TRUE)",
-                [dup.groww_symbol, snap, "a" * 64],
+                [dup.vendor_symbol, snap, "a" * 64],
             )
         except Exception as exc:
             duplicate_blocked = True

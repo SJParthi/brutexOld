@@ -49,12 +49,12 @@ class WorkItemState(StrEnum):
 
     # ── Non-terminal ──────────────────────────────────────────────
     PENDING = "PENDING"  # queued, not yet dispatched
-    IN_FLIGHT = "IN_FLIGHT"  # worker is calling Groww
+    IN_FLIGHT = "IN_FLIGHT"  # worker is calling the broker
     RETRYING = "RETRYING"  # transient error; waiting on exponential backoff
 
     # ── Terminal ──────────────────────────────────────────────────
-    SUCCESS = "SUCCESS"  # Groww returned valid data; parsed + stored
-    NO_DATA = "NO_DATA"  # Groww confirmed empty / not found — recorded, not skipped
+    SUCCESS = "SUCCESS"  # the broker returned valid data; parsed + stored
+    NO_DATA = "NO_DATA"  # the broker confirmed empty / not found — recorded, not skipped
     QUARANTINED = "QUARANTINED"  # needs human review; phase blocked until resolved
 
 
@@ -87,7 +87,7 @@ class IngestPhase(StrEnum):
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Outcomes — what the worker reports after calling Groww
+# Outcomes — what the worker reports after calling the broker
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -95,8 +95,8 @@ class Outcome(StrEnum):
     """Outcomes the worker can report to the FSM.
 
     The FSM translates each outcome + current state into a new state.
-    These map onto the Groww exception hierarchy (see
-    ``docs/groww-sdk/exceptions.md §3``) plus two non-error outcomes
+    These map onto the the broker exception hierarchy (see
+    ``docs/broker-sdk-docs/exceptions.md §3``) plus two non-error outcomes
     for empty/valid responses.
     """
 
@@ -105,15 +105,15 @@ class Outcome(StrEnum):
     OK_EMPTY = "OK_EMPTY"  # empty list/array returned — NO_DATA
 
     # ── Transient errors (retry loop) ──────────────────────────────
-    RATE_LIMIT = "RATE_LIMIT"  # GrowwAPIRateLimitException
-    TIMEOUT = "TIMEOUT"  # GrowwAPITimeoutException
-    GENERIC_API_ERROR = "GENERIC_API_ERROR"  # generic GrowwAPIException / GrowwBaseException
+    RATE_LIMIT = "RATE_LIMIT"  # VendorAPIRateLimitException
+    TIMEOUT = "TIMEOUT"  # VendorAPITimeoutException
+    GENERIC_API_ERROR = "GENERIC_API_ERROR"  # generic VendorAPIException / VendorBaseException
 
     # ── Permanent errors (quarantine or no-data) ──────────────────
-    NOT_FOUND = "NOT_FOUND"  # GrowwAPINotFoundException — recorded as NO_DATA
-    BAD_REQUEST = "BAD_REQUEST"  # GrowwAPIBadRequestException — quarantine
-    AUTH_FAILED = "AUTH_FAILED"  # GrowwAPIAuthenticationException — quarantine
-    AUTHZ_FAILED = "AUTHZ_FAILED"  # GrowwAPIAuthorisationException — quarantine
+    NOT_FOUND = "NOT_FOUND"  # VendorAPINotFoundException — recorded as NO_DATA
+    BAD_REQUEST = "BAD_REQUEST"  # VendorAPIBadRequestException — quarantine
+    AUTH_FAILED = "AUTH_FAILED"  # VendorAPIAuthenticationException — quarantine
+    AUTHZ_FAILED = "AUTHZ_FAILED"  # VendorAPIAuthorisationException — quarantine
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -128,8 +128,8 @@ class QuarantineReason(StrEnum):
     dashboard's quarantine-queue table.
     """
 
-    BAD_REQUEST = "bad_request"  # adapter bug — wrong params sent to Groww
-    AUTH_FAILED = "auth_failed"  # bad or expired BRUTEX_GROWW_TOKEN
+    BAD_REQUEST = "bad_request"  # adapter bug — wrong params sent to the broker
+    AUTH_FAILED = "auth_failed"  # bad or expired BRUTEX_BROKER_TOKEN
     AUTHZ_FAILED = "authz_failed"  # token lacks the required scope
     RETRY_EXHAUSTED = "retry_exhausted"  # >= MAX_SOFT_RETRIES entries into RETRYING
 
@@ -165,7 +165,7 @@ class WorkItem:
         key in the LMDB dedup cache — re-issuing a call with identical
         params yields the same hash and is deduplicated.
     params
-        Immutable mapping of the arguments passed to the Groww SDK method.
+        Immutable mapping of the arguments passed to the broker SDK method.
         Example for Phase B: ``{"exchange": "NSE", "underlying_symbol":
         "NIFTY", "year": 2024}``.
     state
@@ -273,7 +273,7 @@ def transition(
         The work item (must be in a non-terminal state; ``TransitionError``
         is raised otherwise).
     outcome
-        What the worker reported after calling Groww.
+        What the worker reported after calling the broker.
     max_soft_retries
         Override the default retry-escalation threshold (default
         :data:`MAX_SOFT_RETRIES` = 10). Lower values are useful in tests.
@@ -321,7 +321,7 @@ def transition(
             last_transition_at=now,
         )
 
-    # ── NOT_FOUND is a terminal NO_DATA (Groww says "no such thing") ─
+    # ── NOT_FOUND is a terminal NO_DATA (the broker says "no such thing") ─
     if outcome == Outcome.NOT_FOUND:
         return replace(
             item,

@@ -3,7 +3,7 @@
 THE single source of truth for every tradable symbol BruteX knows
 about. Every downstream phase (expiries / contracts / candles /
 strategies / sweep / execution / dashboard) reads from this store
-instead of re-parsing the Groww CSV or holding its own copy.
+instead of re-parsing the broker CSV or holding its own copy.
 
 ## Why this exists
 
@@ -28,7 +28,7 @@ process and every downstream layer re-parses the CSV from disk.
 
 ## Design guarantees
 
-**Uniqueness** \u2014 primary key ``(groww_symbol, snapshot_date)``.
+**Uniqueness** \u2014 primary key ``(vendor_symbol, snapshot_date)``.
 DuckDB's B+tree enforces it; duplicate inserts are physically
 impossible. Two snapshots of the same symbol on the same day
 upsert to one row, but two snapshots on different days live as
@@ -107,7 +107,7 @@ SHA256_HEX_LEN: Final[int] = 64
 
 _DDL_INSTRUMENTS: Final[str] = """
 CREATE TABLE IF NOT EXISTS instruments (
-    groww_symbol           VARCHAR NOT NULL,
+    vendor_symbol           VARCHAR NOT NULL,
     snapshot_date          DATE NOT NULL,
 
     exchange               VARCHAR NOT NULL,
@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS instruments (
     run_id                 VARCHAR NOT NULL,
     csv_source_sha256      VARCHAR NOT NULL,
 
-    PRIMARY KEY (groww_symbol, snapshot_date)
+    PRIMARY KEY (vendor_symbol, snapshot_date)
 );
 """
 
@@ -180,7 +180,7 @@ CREATE TABLE IF NOT EXISTS contracts (
     exchange          VARCHAR NOT NULL,
     underlying_symbol VARCHAR NOT NULL,
     expiry_date       DATE    NOT NULL,
-    contract_symbol   VARCHAR NOT NULL,   -- full Groww symbol of the leg
+    contract_symbol   VARCHAR NOT NULL,   -- full the broker symbol of the leg
     snapshot_date     DATE    NOT NULL,
 
     instrument_type   VARCHAR NOT NULL,   -- FUT | CE | PE
@@ -218,7 +218,7 @@ _DDL_INDEXES: Final[tuple[str, ...]] = (
 )
 
 _INSTR_COLUMNS: Final[tuple[str, ...]] = (
-    "groww_symbol",
+    "vendor_symbol",
     "snapshot_date",
     "exchange",
     "exchange_token",
@@ -259,7 +259,7 @@ class InstrumentRun:
     Written to ``instrument_runs`` table by
     :meth:`InstrumentStore.record_run` after the upsert completes.
     Lets the dashboard and audit layer reconstruct the full history
-    of ingest attempts without replaying the Groww CSV.
+    of ingest attempts without replaying the broker CSV.
     """
 
     run_id: str
@@ -324,7 +324,7 @@ class ContractRecord:
     """One contract leg \u2014 output of Phase C per ``(underlying, expiry)``.
 
     Primary key is ``(contract_symbol, snapshot_date)`` \u2014
-    ``contract_symbol`` is the full Groww symbol (e.g.
+    ``contract_symbol`` is the full the broker symbol (e.g.
     ``NSE-NIFTY-29May25-24000-CE``) which is globally unique, and
     ``snapshot_date`` gives temporal history.
     """
@@ -380,7 +380,7 @@ def compute_raw_hash(instrument: Instrument) -> str:
     the hash; ``None`` fields become the literal ``"None"``.
     """
     parts = (
-        instrument.groww_symbol,
+        instrument.vendor_symbol,
         str(instrument.exchange),
         str(instrument.exchange_token),
         instrument.trading_symbol,
@@ -442,7 +442,7 @@ class InstrumentSnapshot:
 
     ## Guarantees verified at construction
 
-    * **No duplicates** \u2014 every ``(groww_symbol, snapshot_date)``
+    * **No duplicates** \u2014 every ``(vendor_symbol, snapshot_date)``
       pair appears exactly once. Violation raises :class:`CatalogError`
       before the snapshot becomes visible.
     * **Non-empty** \u2014 a caller who loads an empty snapshot gets a
@@ -456,7 +456,7 @@ class InstrumentSnapshot:
 
     by_symbol
         The master dict. Every :class:`Instrument` the snapshot
-        covers, keyed by its ``groww_symbol``.
+        covers, keyed by its ``vendor_symbol``.
     by_segment
         Pre-indexed ``{Segment: tuple[Instrument, ...]}`` so sweep
         filters like "every FNO row" skip the per-call scan.
@@ -495,16 +495,16 @@ class InstrumentSnapshot:
 
         Verifies uniqueness at construction time so callers never
         observe a duplicate-bearing snapshot. Raises
-        :class:`CatalogError` on duplicate ``groww_symbol``.
+        :class:`CatalogError` on duplicate ``vendor_symbol``.
         """
         by_symbol: dict[str, Instrument] = {}
         for instr in instruments:
-            if instr.groww_symbol in by_symbol:
+            if instr.vendor_symbol in by_symbol:
                 raise CatalogError(
-                    "InstrumentSnapshot: duplicate groww_symbol "
-                    f"{instr.groww_symbol!r} in input (uniqueness invariant)"
+                    "InstrumentSnapshot: duplicate vendor_symbol "
+                    f"{instr.vendor_symbol!r} in input (uniqueness invariant)"
                 )
-            by_symbol[instr.groww_symbol] = instr
+            by_symbol[instr.vendor_symbol] = instr
 
         self._by_symbol: dict[str, Instrument] = by_symbol
         self._snapshot_date: date | None = snapshot_date
@@ -521,8 +521,8 @@ class InstrumentSnapshot:
             by_type.setdefault(instr.instrument_type, []).append(instr)
             if instr.underlying_symbol is not None:
                 by_underlying.setdefault(instr.underlying_symbol, []).append(instr)
-            meta_by_symbol[instr.groww_symbol] = ExecutionInstrumentMeta(
-                symbol=instr.groww_symbol,
+            meta_by_symbol[instr.vendor_symbol] = ExecutionInstrumentMeta(
+                symbol=instr.vendor_symbol,
                 segment=instr.segment,
                 instrument_type=instr.instrument_type,
                 lot_size=instr.lot_size,
@@ -547,13 +547,13 @@ class InstrumentSnapshot:
         """Return the ``as_of`` date the snapshot was built for."""
         return self._snapshot_date
 
-    def get(self, groww_symbol: str) -> Instrument | None:
-        """O(1) lookup by ``groww_symbol`` \u2014 the hot-path entry point."""
-        return self._by_symbol.get(groww_symbol)
+    def get(self, vendor_symbol: str) -> Instrument | None:
+        """O(1) lookup by ``vendor_symbol`` \u2014 the hot-path entry point."""
+        return self._by_symbol.get(vendor_symbol)
 
-    def __contains__(self, groww_symbol: object) -> bool:
+    def __contains__(self, vendor_symbol: object) -> bool:
         """Membership test \u2014 also O(1)."""
-        return groww_symbol in self._by_symbol
+        return vendor_symbol in self._by_symbol
 
     def __len__(self) -> int:
         """Return the number of unique symbols in the snapshot."""
@@ -579,9 +579,9 @@ class InstrumentSnapshot:
         """Return every instrument of *instrument_type*, O(1)."""
         return self._by_instrument_type.get(instrument_type, ())
 
-    def meta(self, groww_symbol: str) -> ExecutionInstrumentMeta | None:
-        """Return the :class:`InstrumentMeta` for *groww_symbol*, O(1)."""
-        return self._meta_by_symbol.get(groww_symbol)
+    def meta(self, vendor_symbol: str) -> ExecutionInstrumentMeta | None:
+        """Return the :class:`InstrumentMeta` for *vendor_symbol*, O(1)."""
+        return self._meta_by_symbol.get(vendor_symbol)
 
     def meta_map(self) -> dict[str, ExecutionInstrumentMeta]:
         """Return a copy of the full ``{symbol: InstrumentMeta}`` map.
@@ -710,7 +710,7 @@ class InstrumentStore:
 
         Wrapped in a single transaction so partial failures roll
         back cleanly. Re-running with the same
-        ``(groww_symbol, snapshot_date)`` replaces in place; the
+        ``(vendor_symbol, snapshot_date)`` replaces in place; the
         ``raw_hash`` will match on byte-for-byte identical inputs.
 
         Parameters
@@ -719,7 +719,7 @@ class InstrumentStore:
             Normalised :class:`Instrument` objects, typically the
             full filtered output of Phase A.
         snapshot_date
-            Calendar date the Groww CSV was pulled for. Part of
+            Calendar date the broker CSV was pulled for. Part of
             the primary key.
         run_id
             Ingest run UUID. Recorded on every row for audit.
@@ -747,8 +747,8 @@ class InstrumentStore:
                 # result is bit-identical whether we are inserting
                 # fresh or replacing stale.
                 cursor = self._conn.execute(
-                    "DELETE FROM instruments WHERE groww_symbol = ? AND snapshot_date = ?",
-                    [instr.groww_symbol, snapshot_date],
+                    "DELETE FROM instruments WHERE vendor_symbol = ? AND snapshot_date = ?",
+                    [instr.vendor_symbol, snapshot_date],
                 )
                 rows_replaced += int(getattr(cursor, "rowcount", 0) or 0)
                 self._conn.execute(
@@ -1084,11 +1084,11 @@ class InstrumentStore:
 
     def get(
         self,
-        groww_symbol: str,
+        vendor_symbol: str,
         *,
         as_of: date | None = None,
     ) -> Instrument | None:
-        """Return *groww_symbol*'s state, optionally as-of *as_of*.
+        """Return *vendor_symbol*'s state, optionally as-of *as_of*.
 
         O(1) via the primary-key B+tree when ``as_of`` is a known
         snapshot; O(log n) when the caller asks for a historical
@@ -1098,22 +1098,22 @@ class InstrumentStore:
         if as_of is None:
             row = self._conn.execute(
                 "SELECT * FROM instruments "
-                "WHERE groww_symbol = ? "
+                "WHERE vendor_symbol = ? "
                 "ORDER BY snapshot_date DESC LIMIT 1",
-                [groww_symbol],
+                [vendor_symbol],
             ).fetchone()
         else:
             row = self._conn.execute(
                 "SELECT * FROM instruments "
-                "WHERE groww_symbol = ? AND snapshot_date <= ? "
+                "WHERE vendor_symbol = ? AND snapshot_date <= ? "
                 "ORDER BY snapshot_date DESC LIMIT 1",
-                [groww_symbol, as_of],
+                [vendor_symbol, as_of],
             ).fetchone()
         return _row_to_instrument(row) if row is not None else None
 
-    def exists(self, groww_symbol: str, *, as_of: date | None = None) -> bool:
-        """Return ``True`` iff *groww_symbol* has at least one row <= *as_of*."""
-        return self.get(groww_symbol, as_of=as_of) is not None
+    def exists(self, vendor_symbol: str, *, as_of: date | None = None) -> bool:
+        """Return ``True`` iff *vendor_symbol* has at least one row <= *as_of*."""
+        return self.get(vendor_symbol, as_of=as_of) is not None
 
     # ── Filtered scans ────────────────────────────────────────────
 
@@ -1127,7 +1127,7 @@ class InstrumentStore:
     ) -> list[Instrument]:
         """Return every in-scope instrument matching the filters.
 
-        Uses the latest-snapshot semantics: for each groww_symbol,
+        Uses the latest-snapshot semantics: for each vendor_symbol,
         returns the most recent snapshot <= *as_of* (or latest of
         all time if *as_of* is ``None``).
         """
@@ -1152,18 +1152,18 @@ class InstrumentStore:
         base_sql = (
             "SELECT i.* FROM instruments i "
             "JOIN ("
-            "    SELECT groww_symbol, MAX(snapshot_date) AS snap "
+            "    SELECT vendor_symbol, MAX(snapshot_date) AS snap "
             "    FROM instruments "
         )
         sub_sql = f"    WHERE in_scope = TRUE{as_of_clause} "
         join_sql = (
-            "    GROUP BY groww_symbol"
+            "    GROUP BY vendor_symbol"
             ") latest "
-            "ON i.groww_symbol = latest.groww_symbol "
+            "ON i.vendor_symbol = latest.vendor_symbol "
             "AND i.snapshot_date = latest.snap "
         )
         outer_sql = f"WHERE i.in_scope = TRUE{extras_sql} "
-        order_sql = "ORDER BY i.groww_symbol"
+        order_sql = "ORDER BY i.vendor_symbol"
         sql = f"{base_sql}{sub_sql}{join_sql}{outer_sql}{order_sql}"  # nosec B608
         params: list[Any] = []
         if as_of is not None:
@@ -1202,7 +1202,7 @@ class InstrumentStore:
 
         Results merged from two secondary-index scans (one for CE,
         one for PE) so the filtered list is a single flat list in
-        groww_symbol order.
+        vendor_symbol order.
         """
         calls = self.list_in_scope(
             as_of=as_of,
@@ -1214,7 +1214,7 @@ class InstrumentStore:
             instrument_type=InstrumentType.PE,
             underlying_symbol=underlying,
         )
-        return sorted(calls + puts, key=lambda i: i.groww_symbol)
+        return sorted(calls + puts, key=lambda i: i.vendor_symbol)
 
     def universe_as_of(self, as_of_date: date) -> list[Instrument]:
         """Return every in-scope instrument as it existed on *as_of_date*."""
@@ -1309,13 +1309,13 @@ class InstrumentStore:
                 for row in self._conn.execute(
                     "SELECT i.* FROM instruments i "
                     "JOIN ("
-                    "    SELECT groww_symbol, MAX(snapshot_date) AS snap "
+                    "    SELECT vendor_symbol, MAX(snapshot_date) AS snap "
                     "    FROM instruments "
                     "    WHERE (? IS NULL OR snapshot_date <= ?) "
-                    "    GROUP BY groww_symbol"
-                    ") latest ON i.groww_symbol = latest.groww_symbol "
+                    "    GROUP BY vendor_symbol"
+                    ") latest ON i.vendor_symbol = latest.vendor_symbol "
                     "AND i.snapshot_date = latest.snap "
-                    "ORDER BY i.groww_symbol",
+                    "ORDER BY i.vendor_symbol",
                     [as_of, as_of],
                 ).fetchall()
             ]
@@ -1331,7 +1331,7 @@ class InstrumentStore:
         or assert on. Catches:
 
         * **Duplicate primary keys** \u2014
-          ``COUNT(*) vs COUNT(DISTINCT (groww_symbol, snapshot_date))``.
+          ``COUNT(*) vs COUNT(DISTINCT (vendor_symbol, snapshot_date))``.
           DuckDB's PK constraint makes this impossible via normal
           writes, but this check defends against direct-SQL
           tampering.
@@ -1343,12 +1343,12 @@ class InstrumentStore:
         * **CSV source drift** \u2014 returns a per-date map of
           distinct ``csv_source_sha256`` counts. Anything other
           than ``1`` means two pulls on the same day saw
-          different CSV content \u2014 Groww drift in-flight.
+          different CSV content \u2014 the broker drift in-flight.
         """
         self._ensure_open()
         total_row = self._conn.execute("SELECT COUNT(*) FROM instruments").fetchone()
         distinct_row = self._conn.execute(
-            "SELECT COUNT(*) FROM (  SELECT DISTINCT groww_symbol, snapshot_date FROM instruments)"
+            "SELECT COUNT(*) FROM (  SELECT DISTINCT vendor_symbol, snapshot_date FROM instruments)"
         ).fetchone()
         total_rows = int(total_row[0]) if total_row else 0
         distinct_pk_count = int(distinct_row[0]) if distinct_row else 0
@@ -1485,7 +1485,7 @@ def _instrument_to_params(
     """Project *instrument* into the column tuple the INSERT expects."""
     raw_hash = compute_raw_hash(instrument)
     return [
-        instrument.groww_symbol,
+        instrument.vendor_symbol,
         snapshot_date,
         str(instrument.exchange),
         instrument.exchange_token,
@@ -1521,7 +1521,7 @@ def _row_to_instrument(row: Sequence[Any]) -> Instrument:
     tuple unpacking here stays in sync with the writer.
     """
     (
-        groww_symbol,
+        vendor_symbol,
         _snapshot_date,
         exchange,
         exchange_token,
@@ -1552,7 +1552,7 @@ def _row_to_instrument(row: Sequence[Any]) -> Instrument:
         exchange=Exchange(exchange),
         exchange_token=int(exchange_token) if exchange_token is not None else 0,
         trading_symbol=trading_symbol,
-        groww_symbol=groww_symbol,
+        vendor_symbol=vendor_symbol,
         name=name,
         instrument_type=InstrumentType(instrument_type),
         segment=Segment(segment),

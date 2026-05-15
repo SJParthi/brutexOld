@@ -22,10 +22,10 @@ documentation) through to the first production sweep.
 | `docs/TRACK1_PERFORMANCE_BUDGET.md` written | this PR | (next) |
 | `docs/TRACK1_MICROSTRUCTURE.md` written | this PR | (next) |
 | `docs/MIGRATION.md` written | this PR | (next) |
-| Groww adapter deleted | this PR | ✅ |
-| Groww test files deleted | this PR | ✅ |
-| `docs/groww-sdk/` deleted | this PR | ✅ |
-| `pyproject.toml` growwapi dep removed | this PR | ✅ |
+| broker adapter (deleted) deleted | this PR | ✅ |
+| the broker test files deleted | this PR | ✅ |
+| `docs/broker-sdk-docs/` deleted | this PR | ✅ |
+| `pyproject.toml` the brokerapi dep removed | this PR | ✅ |
 | `brutex/cli.py` stubbed to minimal Track 1 | this PR | ✅ |
 | `brutex/universe.py` rewritten for spot indexes | this PR | ✅ |
 | PR #12 description updated | TBD | ⏳ |
@@ -210,7 +210,7 @@ Every phase ends with a 4-agent hostile-review gate. Pattern:
 4. Reality-check agent (general) → public-benchmark / hardware-budget sanity
 ```
 
-This pattern caught the major issues on 2026-05-15 (Groww-vs-Dhan
+This pattern caught the major issues on 2026-05-15 (the broker-vs-Dhan
 adapter mismatch, 10x throughput claim, spot-index tradability,
 DSR-with-N=33B, basis-point vs absolute-point tolerances, native Dhan
 timeframe count, securityId hardcoding). It is a non-negotiable gate.

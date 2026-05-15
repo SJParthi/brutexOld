@@ -43,7 +43,7 @@ from fastapi.testclient import TestClient
 
 
 def _make_instrument(
-    groww_symbol: str = "NSE-NIFTY",
+    vendor_symbol: str = "NSE-NIFTY",
     *,
     instrument_type: InstrumentType = InstrumentType.IDX,
     segment: Segment = Segment.CASH,
@@ -55,7 +55,7 @@ def _make_instrument(
         exchange=Exchange.NSE,
         exchange_token=26000,
         trading_symbol="NIFTY",
-        groww_symbol=groww_symbol,
+        vendor_symbol=vendor_symbol,
         name="Nifty 50",
         instrument_type=instrument_type,
         segment=segment,

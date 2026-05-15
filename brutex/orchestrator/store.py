@@ -356,7 +356,7 @@ class WorkItemStore:
     def exists_terminal(self, phase: IngestPhase, content_hash: str) -> bool:
         """Fast dedup check — True iff an item exists AND is terminal.
 
-        Used by every worker before making a Groww call. If this
+        Used by every worker before making a the broker call. If this
         returns True, the call is skipped entirely (deduplication
         guarantee + O(1) lookup).
         """

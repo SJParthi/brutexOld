@@ -1,7 +1,7 @@
 """A fake crypto-spot adapter that satisfies :class:`MarketAdapter`.
 
 This exists to **prove** the market-neutral protocol works for shapes
-that are nothing like Groww/F&O:
+that are nothing like the broker/F&O:
 
 * No expiries — crypto spot is continuous
 * No option chains — just spot pairs
@@ -100,7 +100,7 @@ class DemoSpotCryptoAdapter:
                 exchange=Exchange.NSE,  # stand-in
                 exchange_token=start_idx + i,
                 trading_symbol=pair,
-                groww_symbol=f"CRYPTO-{pair}",
+                vendor_symbol=f"CRYPTO-{pair}",
                 name=pair,
                 instrument_type=InstrumentType.EQ,  # closest fit
                 segment=Segment.CASH,

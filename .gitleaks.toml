@@ -27,8 +27,8 @@ regexes = [
   # env vars, never the values.
   '''BRUTEX_TELEGRAM_BOT_TOKEN''',
   '''BRUTEX_TELEGRAM_CHAT_ID''',
-  '''BRUTEX_GROWW_TOKEN''',
-  '''GROWW_API_AUTH_TOKEN''',
+  '''BRUTEX_BROKER_TOKEN''',
+  '''BROKER_API_AUTH_TOKEN''',
   '''ENV_BOT_TOKEN''',
   '''ENV_CHAT_ID''',
   '''ENV_ENABLED''',

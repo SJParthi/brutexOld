@@ -1,32 +1,33 @@
-# BruteX — Roadmap & Storage Guarantees
+# BruteX — Roadmap & Storage Guarantees (LEGACY — pre-Track-1)
 
 > ⚠️ **PARTIALLY DEPRECATED 2026-05-15.** This document describes the
-> Groww 4-phase ingest pipeline that was deleted on 2026-05-15
+> legacy 4-phase ingest pipeline (broker adapter + instrument master +
+> expiries + contracts + candles) that was deleted on 2026-05-15
 > (see `docs/MIGRATION.md`). The **O(1) + uniqueness + dedup
 > persistence guarantees** described here remain valid and apply to
 > the Track 1 Dhan adapter (Phase 2 of the Track 1 build, see
-> `docs/TRACK1_PHASE_PLAN.md`). The Groww-specific phase tables and
+> `docs/TRACK1_PHASE_PLAN.md`). The legacy-broker phase tables and
 > code paths below are kept for historical reference but are
 > non-operational.
 >
 > **Active source of truth for Track 1:**
 > `docs/TRACK1_BACKTEST_SPEC.md` + companion `TRACK1_*` docs.
 
-Last updated: 2026-04-15 (legacy Groww phase tables);
+Last updated: 2026-04-15 (legacy phase tables);
 Banner added: 2026-05-15 (Dhan + Track 1 pivot).
 
-## 1. What is implemented — end-to-end Groww ingest
+## 1. What is implemented — end-to-end the broker ingest
 
-The Groww 4-phase pipeline is implemented and wired into the CLI. Every
+The Track 1 4-phase pipeline is implemented and wired into the CLI. Every
 phase persists into a primary-keyed store so reruns are idempotent and
 every lookup is O(1)/O(log n) on an index.
 
 | Phase | Pulls                              | Persists to                                | Primary key                                                              | Code path                                                                |
 |-------|------------------------------------|--------------------------------------------|--------------------------------------------------------------------------|--------------------------------------------------------------------------|
-| A     | Instrument master CSV (~100k rows) | `instruments.duckdb` → `instruments`       | `(groww_symbol, snapshot_date)`                                          | `brutex/adapters/groww/instruments.py` → `InstrumentStore.upsert_many`   |
-| B     | Expiry dates per underlying        | `instruments.duckdb` → `expiries`          | `(exchange, underlying_symbol, expiry_date, snapshot_date)`              | `brutex/adapters/groww/expiries.py` → `InstrumentStore.upsert_expiries`  |
-| C     | Legs per (underlying, expiry)      | `instruments.duckdb` → `contracts`         | `(contract_symbol, snapshot_date)`                                       | `brutex/adapters/groww/contracts.py` → `InstrumentStore.upsert_contracts`|
-| D     | Historical OHLC candles per leg    | `lake/<partitioned Parquet>` + `catalog.duckdb` → `partitions` | `(exchange, segment, symbol, interval, year, month)` | `brutex/adapters/groww/candles.py` → `ParquetBarSink` + `Catalog.upsert` |
+| A     | Instrument master CSV (~100k rows) | `instruments.duckdb` → `instruments`       | `(the broker_symbol, snapshot_date)`                                          | `(deleted)/instruments.py` → `InstrumentStore.upsert_many`   |
+| B     | Expiry dates per underlying        | `instruments.duckdb` → `expiries`          | `(exchange, underlying_symbol, expiry_date, snapshot_date)`              | `(deleted)/expiries.py` → `InstrumentStore.upsert_expiries`  |
+| C     | Legs per (underlying, expiry)      | `instruments.duckdb` → `contracts`         | `(contract_symbol, snapshot_date)`                                       | `(deleted)/contracts.py` → `InstrumentStore.upsert_contracts`|
+| D     | Historical OHLC candles per leg    | `lake/<partitioned Parquet>` + `catalog.duckdb` → `partitions` | `(exchange, segment, symbol, interval, year, month)` | `(deleted)/candles.py` → `ParquetBarSink` + `Catalog.upsert` |
 
 Plus a fifth metadata table in `instruments.duckdb`:
 
@@ -122,7 +123,7 @@ Nothing is made up, nothing is inferred.
 ## 5. Still open (tracked here, not in REQUIREMENTS.md)
 
 ### 5.1 Correctness / drift
-- CSV sha256 drift detection — cross-check Groww CSV vs NSE `fomon.zip`
+- CSV sha256 drift detection — cross-check broker CSV vs NSE `fomon.zip`
   so a silent upstream schema change is caught before ingest
 - Golden-file test pinning `(csv_sha256 → expected filtered row count)`
   per underlying — prevents silent universe drift
@@ -143,7 +144,7 @@ Nothing is made up, nothing is inferred.
   `brutex/strategies/sweep.py`, `brutex/execution/driver.py` — same
 
 ### 5.4 Blocked (need operator action)
-- Real Groww API contract test — needs `GROWW_API_AUTH_TOKEN` GH secret
+- Real Dhan API contract test — needs `BROKER_API_AUTH_TOKEN` GH secret
 - Mac M4 benchmark suite — needs a self-hosted runner
 - `fno-math-py` in the CI Rust gate — needs a workflow change to
   `maturin build` and `pip install` the wheel before pytest

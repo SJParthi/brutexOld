@@ -7,7 +7,7 @@ and the Ray-backed workers.
 Structure (being built incrementally):
 
 * :mod:`brutex.orchestrator.state` — work-item state machine (FR-ING-014)
-* :mod:`brutex.orchestrator.retry` — Groww exception → Outcome classifier + backoff schedule (FR-ING-008 refined)
+* :mod:`brutex.orchestrator.retry` — the broker exception → Outcome classifier + backoff schedule (FR-ING-008 refined)
 * :mod:`brutex.orchestrator.audit` — hash-chained JSONL audit log (NFR-OBS-003)
 * ``brutex.orchestrator.pipeline`` — phase pipeline + gating (FR-ING-013) — TBD
 * ``brutex.orchestrator.rate_limiter`` — adaptive token bucket (FR-ING-017) — TBD
@@ -57,7 +57,7 @@ from brutex.orchestrator.rate_limiter import (
 )
 from brutex.orchestrator.retry import (
     BACKOFF_SCHEDULE_SECONDS,
-    GROWW_EXCEPTION_CLASSIFICATION,
+    BROKER_EXCEPTION_CLASSIFICATION,
     JITTER_FRACTION,
     REQUIRED_EXCEPTION_NAMES,
     UnknownExceptionError,
@@ -96,6 +96,7 @@ from brutex.orchestrator.store import (
 __all__ = [
     # retry.py
     "BACKOFF_SCHEDULE_SECONDS",
+    "BROKER_EXCEPTION_CLASSIFICATION",
     # store.py
     "CONTENT_HASH_BYTES",
     "DEFAULT_BURST",
@@ -108,7 +109,6 @@ __all__ = [
     "DEFAULT_MAX_ITERATIONS_PER_ITEM",
     "DEFAULT_UPSHIFT_RECOVERY",
     "GENESIS_PREV_HASH",
-    "GROWW_EXCEPTION_CLASSIFICATION",
     "JITTER_FRACTION",
     "MAX_DBS",
     "NON_TERMINAL_STATES",

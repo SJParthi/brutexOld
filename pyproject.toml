@@ -10,8 +10,8 @@ authors = [
 ]
 
 # Track 1 base dependencies. The Dhan adapter (Phase 2) will add `dhanhq`
-# as an optional extra. The legacy `growwapi` dependency was dropped on
-# 2026-05-15 as part of the Groww → Dhan migration (see docs/MIGRATION.md).
+# as an optional extra. The legacy a broker SDK dependency was dropped on
+# 2026-05-15 as part of the the broker → Dhan migration (see docs/MIGRATION.md).
 dependencies = [
     "pydantic>=2.7,<3.0",
     "structlog>=24.1,<25.0",
@@ -188,7 +188,7 @@ reportUnknownVariableType = "none"
 reportUnknownParameterType = "none"
 reportUnnecessaryIsInstance = "none"
 # Missing imports — pyright may run against a different venv than
-# the one with growwapi/fno_math_py/lmdb installed. mypy's
+# the one with the brokerapi/fno_math_py/lmdb installed. mypy's
 # [[overrides]] table handles this properly; pyright gets the
 # blanket silence here:
 reportMissingImports = "none"
