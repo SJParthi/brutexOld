@@ -272,6 +272,27 @@ Detailed flow + pseudocode in `TRACK1_DATA_INGEST_DESIGN.md §5A`.
 
 ## 6. Timeframes (21 total)
 
+### 6.0 Single-Timeframe Invariant (no multi-TF strategies)
+
+Every brute-forced strategy is evaluated on bars of **exactly one**
+chosen intraday timeframe (the run's `timeframe_id`). The 52-condition
+vocabulary contains **no cross-intraday-TF condition**:
+
+- Indicators EMA20/EMA200, day_high/day_low, candle shape, prior-N-bar
+  patterns, time-of-day are all computed on the chosen TF.
+- PDH, PDL, PDC, daily pivots (P/R1-R3/S1-S3), daily Fib anchors, and
+  prev_close are **scalar constants** derived once per trading day from
+  the daily series and broadcast across that day's intraday bars —
+  they are NOT a parallel bar stream and do not constitute multi-TF logic.
+
+This is industry-standard "daily-anchor on intraday" behavior
+(TradingView, NinjaTrader, etc.). Each (instrument, timeframe) tuple
+runs as an entirely independent backtest over the full 5-year range.
+Property test P-25 (Phase 1) asserts the bar-mask evaluator only reads
+the chosen-TF Parquet plus the daily-anchor scalar table.
+
+### 6.1 Timeframes themselves
+
 All resampled from 1m base, anchored to 09:15 IST. The 1m base + 1d
 daily are fetched directly from Dhan (`/v2/charts/intraday` and
 `/v2/charts/historical` respectively); the 19 intraday derived TFs are
@@ -434,9 +455,9 @@ STAGE 1A — Pattern discovery (NIFTY 15m only)
    ~5.8M trials, ~90 sec wall
    → top 50,000 patterns
 
-STAGE 1B — Pattern expansion across all 45 (inst × TF) combos
-   Top 50K × 45 inst-TF × default params
-   ~2.25M trials, ~40 sec wall
+STAGE 1B — Pattern expansion across all 63 (inst × TF) combos
+   Top 50K × 63 inst-TF × default params
+   ~3.15M trials, ~56 sec wall
    → top 10,000 (pattern × inst × TF × direction) combos
 
 STAGE 2 — Full parameter brute force
@@ -490,7 +511,7 @@ combo_hash = SHA256(
     strategy_mask_u64     ‖  // which of 52 conditions
     direction_bit         ‖  // bull/bear
     instrument_id         ‖  // NIFTY/BANKNIFTY/SENSEX
-    timeframe_id          ‖  // 1m to 1d (one of 15)
+    timeframe_id          ‖  // 1m to 1d (one of 21)
     mode_byte             ‖  // A or B
     canonical_params_json ‖  // sorted keys, NaN-rejected
     data_version_hash     ‖  // SHA of input Parquet files

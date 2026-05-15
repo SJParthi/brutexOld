@@ -144,7 +144,7 @@ hitting the throughput SLA.
 | Deliverable | Notes |
 |---|---|
 | Stage 1A implementation (pattern discovery, NIFTY 15m) | ~90 sec wall |
-| Stage 1B implementation (expansion to 45 inst-TF) | ~40 sec wall |
+| Stage 1B implementation (expansion to 63 inst-TF = 3 brute-force inst × 21 TFs) | ~56 sec wall |
 | Stage 2 implementation (full Mode A + Mode B sweeps) | The bulk |
 | `brutex/strategies/result_writer.py` — Parquet streaming + threshold filter | |
 | Dedup unified across stages (Bloom + LMDB) | |

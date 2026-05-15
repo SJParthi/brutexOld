@@ -20,6 +20,12 @@ bar — ~1 nanosecond on Apple M4).
 > `TRACK1_BACKTEST_SPEC.md §4.1`. Property P-25 (Phase 1) enforces
 > this: no generated pattern mask shall contain any VIX-referencing
 > bit.
+>
+> **Single-TF reminder:** every condition below is evaluated on the
+> chosen run's intraday TF only. PDH, PDL, PDC, daily pivots, daily
+> Fib anchors, prev_close are scalar daily constants broadcast across
+> the day's intraday bars — NOT a parallel multi-TF stream. See
+> `TRACK1_BACKTEST_SPEC.md §6.0` for the full single-TF invariant.
 
 ---
 
