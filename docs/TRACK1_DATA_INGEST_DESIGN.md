@@ -21,13 +21,17 @@ audit, and structlog-based observability.
 
 | Aspect | Track 1 Value |
 |---|---|
-| **Instruments** | 4: NIFTY 50, BANKNIFTY, SENSEX, **India VIX** |
+| **Total instruments fetched** | 4: NIFTY 50, BANKNIFTY, SENSEX + India VIX |
+| **Brute-forced (in vocabulary)** | 3: NIFTY 50, BANKNIFTY, SENSEX |
+| **Reference-only** | 1: **India VIX** (context columns only, never in patterns) |
 | **Range** | Rolling: `2021-01-01 → today` |
 | **Native fetched** | 1-min (intraday) + 1-day (historical) from Dhan |
 | **Resampled** | 19 derived intraday TFs from 1m base |
-| **Total TFs persisted** | **21** (= 1 base + 19 derived + 1 daily) |
+| **Total TFs persisted** | **21** (= 1 base + 19 derived + 1 daily) per instrument |
 | **Tradability** | None (signal-only research) |
 | **Brokerage/STT** | NONE (spot indexes don't trade) |
+| **Dhan Data API rate limit** | **5 req/s + 100,000/day** (verified) |
+| **Adapter effective cap** | 3 r/s (5 × 0.6 safety factor) |
 
 **Unfrozen from prior spec:**
 - Decision #2 (3 instruments → 4)
@@ -48,7 +52,7 @@ same chunking). Adding a 5th later = 1 line in
 |---|---|---|---|---|---|---|---|
 | 1 | `NIFTY 50` | NIFTY 50 | NSE | `IDX_I` | `INDEX` | 1996 | ✅ |
 | 2 | `NIFTY BANK` | BANKNIFTY | NSE | `IDX_I` | `INDEX` | 2003 | ✅ |
-| 3 | `SENSEX` | BSE SENSEX | BSE | `BSE_I` ⚠️ verify at runtime | `INDEX` | 1986 | partial |
+| 3 | `SENSEX` | BSE SENSEX | BSE | `IDX_I` (single Index segment per Dhan annexure) | `INDEX` | 1986 | ✅ |
 | 4 | `INDIA VIX` | India VIX | NSE | `IDX_I` | `INDEX` | 2008 | ✅ |
 
 ### India VIX specifics (Agent A research)
@@ -458,6 +462,80 @@ later-phase enhancement.
 
 ---
 
+## 10A. Dhan API Error Code Map (verified 2026-05-15 from annexure)
+
+Authoritative mapping from Dhan's published error codes to BruteX
+orchestrator outcomes. Used by `brutex/orchestrator/retry.py` (the
+`BROKER_EXCEPTION_CLASSIFICATION` dict) and by the rate-limit
+downshift logic.
+
+### Data API Errors (we will see these most often)
+
+| Dhan Code | Meaning | BruteX Outcome | Action |
+|---|---|---|---|
+| `800` | Internal Server Error | `GENERIC_API_ERROR` | retry with backoff (3 attempts) |
+| `804` | Requested instruments exceeds limit | `FATAL` | code bug — chunk smaller |
+| `805` | Too many requests / connections | `RATE_LIMIT` | downshift bucket, retry |
+| `806` | Data APIs not subscribed | `FATAL` | operator must subscribe |
+| `807` | Access token expired | `AUTH_FAILED` | quarantine + alert |
+| `808` | Auth failed (clientId/token invalid) | `AUTH_FAILED` | quarantine + alert |
+| `809` | Access token invalid | `AUTH_FAILED` | quarantine + alert |
+| `810` | Client ID invalid | `AUTH_FAILED` | quarantine + alert |
+| `811` | Invalid Expiry Date | `BAD_REQUEST` | quarantine (not used for index spot) |
+| `812` | Invalid Date Format | `BAD_REQUEST` | quarantine + alert (code bug) |
+| `813` | Invalid SecurityId | `BAD_REQUEST` | quarantine + alert (refresh master CSV) |
+| `814` | Invalid Request | `BAD_REQUEST` | quarantine + alert |
+
+### Trading API Errors (may surface on mis-call)
+
+| Dhan Code | Meaning | BruteX Outcome | Action |
+|---|---|---|---|
+| `DH-901` | Invalid Authentication | `AUTH_FAILED` | quarantine + alert |
+| `DH-902` | No Data API subscription | `FATAL` | operator must subscribe |
+| `DH-903` | User Account issue | `AUTH_FAILED` | quarantine + alert |
+| `DH-904` | Rate Limit | `RATE_LIMIT` | downshift bucket, retry |
+| `DH-905` | Input Exception | `BAD_REQUEST` | quarantine + alert |
+| `DH-906` | Order Error | `BAD_REQUEST` | (not used in Track 1 — Data APIs only) |
+| `DH-907` | Data Error | `NO_DATA` | record, advance, do not retry |
+| `DH-908` | Internal Server Error | `GENERIC_API_ERROR` | retry with backoff |
+| `DH-909` | Network Error | `TIMEOUT` | retry with backoff |
+| `DH-910` | Others | `GENERIC_API_ERROR` | retry once, then quarantine |
+
+### Retry / Outcome Routing
+
+```
+HTTP 4xx, Dhan code in {807, 808, 809, 810, DH-901, DH-902, DH-903} → AUTH_FAILED → quarantine + CRITICAL alert
+HTTP 4xx, Dhan code in {811, 812, 813, 814, DH-905, DH-906}         → BAD_REQUEST → quarantine + ERROR alert
+HTTP 4xx, Dhan code in {804, 806}                                    → FATAL      → halt run + CRITICAL alert
+HTTP 4xx, Dhan code in {805, DH-904}                                 → RATE_LIMIT → downshift bucket, retry up to 3x with backoff
+HTTP 5xx OR Dhan code in {800, DH-908, DH-910}                       → GENERIC_API_ERROR → retry with exp backoff (3 attempts)
+Network error (timeout, DNS, connection)  OR Dhan code DH-909        → TIMEOUT    → retry with backoff (3 attempts)
+Dhan code DH-907                                                     → NO_DATA    → advance watermark to chunk_end, do NOT retry
+```
+
+### Exchange Segment Constants (verified)
+
+| Code | Description | Enum | Used in Track 1? |
+|---|---|---|---|
+| `IDX_I` | Index Value | 0 | ✅ ALL 4 instruments |
+| `NSE_EQ` | NSE Equity Cash | 1 | ❌ out of scope |
+| `NSE_FNO` | NSE Futures & Options | 2 | ❌ out of scope |
+| `NSE_CURRENCY` | NSE Currency | 3 | ❌ out of scope |
+| `BSE_EQ` | BSE Equity Cash | 4 | ❌ out of scope |
+| `MCX_COMM` | MCX Commodity | 5 | ❌ out of scope |
+| `BSE_CURRENCY` | BSE Currency | 7 | ❌ out of scope |
+| `BSE_FNO` | BSE Futures & Options | 8 | ❌ out of scope |
+
+### Instrument Type Constants (verified)
+
+| Type | Description | Used in Track 1? |
+|---|---|---|
+| `INDEX` | Index | ✅ ALL 4 instruments |
+| `FUTIDX`, `OPTIDX` | Futures/Options of Index | ❌ Options Track (post-Track-1) |
+| `EQUITY`, `FUTSTK`, `OPTSTK`, `FUTCOM`, `OPTFUT`, `FUTCUR`, `OPTCUR` | other types | ❌ out of scope |
+
+---
+
 ## 11. Pseudocode — 4 Core Functions
 
 ### 11.1 `pull_chunk` — one 90-day window
@@ -591,7 +669,7 @@ concrete. Tracking checklist:
 | `brutex/data/watermark.py` (new DuckDB table) | new | ⏳ |
 | `brutex/data/parser_dhan.py` (replaces the broker parser) | new | ⏳ |
 | `brutex/data/partition.py` — extend `VALID_INTERVALS` to 21 TFs | edit | ⏳ |
-| `brutex/data/partition.py` — add `IDX_I, BSE_I` to `VALID_SEGMENTS` | edit | ⏳ |
+| `brutex/data/partition.py` — add `IDX_I` to `VALID_SEGMENTS` (single Index segment for all 4 instruments) | edit | ⏳ |
 | `brutex/feed/resampler.py` — 09:15 IST anchor + 19 TFs | edit | ⏳ |
 | `brutex/data/parquet_writer.py` — allow current-month grow | edit | ⏳ |
 | `brutex/orchestrator/state.py` — collapse `IngestPhase` to Track 1 phases | edit | ⏳ |
@@ -632,5 +710,5 @@ The 24 property invariants are catalogued in
 | 77 | Bar identity = sha256(inst, tf, ts, OHLC paisa, vol, source_version) |
 | 78 | Telegram delivery deferred (structlog + dashboard primary for now) |
 | 79 | 4-layer dedup defence (Watermark → Bloom → LMDB → bar_hash) |
-| 80 | All `INDEX`-type instruments use `IDX_I` (NSE) or `BSE_I` (BSE) segments |
+| 80 | All `INDEX`-type instruments use `IDX_I` — the single Index segment in Dhan's annexure (no separate BSE_I) |
 

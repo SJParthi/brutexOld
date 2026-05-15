@@ -20,19 +20,26 @@
 ## 1. Project Identity
 
 **BruteX Track 1** is a brute-force backtesting engine that produces
-**signal-only research output** on four Indian equity-index series:
+**signal-only research output** on three Indian equity-index spot series,
+with India VIX added as a **reference-only** context signal:
 
-- **NIFTY 50** (NSE spot)
-- **NIFTY BANK** / `BANKNIFTY` (NSE spot)
-- **BSE SENSEX** / `SENSEX` (BSE spot)
-- **India VIX** (NSE volatility index)
+- **NIFTY 50** (NSE spot) — brute-forced
+- **NIFTY BANK** / `BANKNIFTY` (NSE spot) — brute-forced
+- **BSE SENSEX** / `SENSEX` (BSE spot) — brute-forced
+- **India VIX** (NSE volatility index) — **reference only** (see §4.1)
 
 The pipeline brute-forces ~2.9 million unique strategy patterns
 (combinations of 2–5 atomic conditions from a 52-condition vocabulary)
-× full parameter sweeps across **21 timeframes × 4 instruments** × 2 exit
-modes, applies a 4-filter cascade (DSR → CPCV → WFO → Lockbox), and
-returns the top 3 production candidates per sweep. Data ingest pipeline
-specified in `TRACK1_DATA_INGEST_DESIGN.md`.
+× full parameter sweeps across **21 timeframes × 3 brute-force instruments**
+× 2 exit modes, applies a 4-filter cascade (DSR → CPCV → WFO → Lockbox),
+and returns the top 3 production candidates per sweep. India VIX is
+fetched + stored exactly like the 3 spot indexes but is NEVER part of
+brute-force combinations or the 52-condition vocabulary. Every trade
+entry/exit captures `vix_at_entry` / `vix_at_exit` as reference columns
+on the result row, enabling downstream "did this strategy work better
+when VIX was high?" slicing.
+
+Data ingest pipeline specified in `TRACK1_DATA_INGEST_DESIGN.md`.
 
 **Out of scope (Track 1):** futures, options, F&O contracts, broker
 execution simulation, live feed, WebSocket, multi-tenant SaaS,
@@ -86,7 +93,8 @@ analysis that bounds these numbers.
 
 | Aspect | Value |
 |---|---|
-| Instruments | NIFTY 50, BANKNIFTY, SENSEX (spot) + India VIX (volatility index) |
+| Brute-force instruments | NIFTY 50, BANKNIFTY, SENSEX (spot) — **3** |
+| Reference-only instrument | India VIX (volatility index) — **1**, see §4.1 |
 | Tradability | None (Track 1 is signal-only) |
 | Volume column | Zero / null (indexes don't trade) |
 | Continuous-series stitching | N/A (indexes are naturally continuous) |
@@ -97,6 +105,36 @@ analysis that bounds these numbers.
 | Muhurat sessions | Excluded by hardcoded date list (see `TRACK1_MICROSTRUCTURE.md`) |
 | Holiday calendar | NSE official 2021-2026 (resolved at ingest) |
 | Index rebalance dates | Flagged in audit; data series is exchange-published (chain-linked) |
+
+### 4.1 India VIX — Reference-Only Role
+
+India VIX is **fetched and stored** like the 3 spot indexes — same
+Dhan endpoints, same 1m + 1d intervals, same 21 derived timeframes,
+same audit guarantees — but is **never** an input to the brute-force
+search. Specifically:
+
+| What VIX participates in | Yes / No |
+|---|---|
+| Fetched from Dhan (1m + 1d) | ✅ YES |
+| Stored in Parquet lake (all 21 TFs) | ✅ YES |
+| Watermark tracking, audit chain | ✅ YES |
+| Brute-force pattern combinations | ❌ NO — never |
+| 52-condition vocabulary atoms | ❌ NO — never |
+| `vix_at_entry` column on trade result | ✅ YES — captured at signal bar close |
+| `vix_at_exit` column on trade result | ✅ YES — captured at exit bar close |
+| Stage 4 post-filter input | ✅ optional (e.g., "slice winners where vix_at_entry > 18") |
+
+**Why not put VIX in the vocabulary?**
+1. VIX updates every 15 seconds, not tick — its 1m OHLC has ~4 underlying samples (low intra-bar resolution)
+2. Cross-instrument signals dramatically inflate the brute-force surface area
+3. VIX-as-context is a known design pattern in volatility research — it's a regime indicator, not a price-action pattern
+4. Future filter additions can use VIX without retroactively expanding the locked vocabulary
+
+**Implementation:** `brutex/universe.py` exports `BRUTE_FORCE_INDICES`
+(3 spot indexes, used by the engine) and `REFERENCE_ONLY_INDICES`
+(India VIX, used only by the ingest + context-snapshot path). Property
+P-25 (Phase 1) asserts no pattern in the generated set ever references
+the VIX symbol.
 
 ---
 
@@ -136,15 +174,28 @@ on master CSV revisions.
 Expected (verify at first call):
 - NIFTY 50: segment `IDX_I`, symbol `NIFTY 50`
 - BANKNIFTY: segment `IDX_I`, symbol `NIFTY BANK`
-- SENSEX: segment `BSE_I` (BSE indices segment — verify code), symbol `SENSEX`
+- SENSEX: segment `IDX_I` (single Index segment for all indexes per Dhan annexure verified 2026-05-15), symbol `SENSEX`
 
 ### 5.5 Rate limiting
 
-Dhan rate limit is **UNVERIFIED**. Until the first calls confirm the
-actual throttle, the adapter caps at **10 req/s effective** with the
-standard 0.6 safety factor. Once verified, the constant moves to a
-single source in `brutex/adapters/dhan/constants.py` and the cap is
-revisited.
+**Verified 2026-05-15 from dhanhq.co/docs/v2 Rate Limit table:**
+
+| Tier | per-second | per-day |
+|---|---|---|
+| Data APIs (what Track 1 uses) | **5 req/s** | **100,000 / day** |
+| Order APIs (not used in Track 1) | 10 | 7,000 |
+| Quote APIs (not used in Track 1) | 1 | unlimited |
+
+**Adapter caps:**
+- Per-second: 5 × 0.6 safety factor = **3 r/s effective**
+- Per-day: 100,000 hard ceiling — track in audit log, refuse to start a run that projects above 80% utilisation
+
+**Track 1 typical utilisation:**
+- First run (5-year backfill): 4 instruments × (22 × 1m chunks + 1 daily chunk) = 92 requests
+- Daily incremental: 4 instruments × 1 chunk = 4 requests
+- **Both are < 0.1% of the daily quota** — quota is not the binding constraint.
+
+Constants live in `brutex/adapters/dhan/constants.py` (Phase 2 deliverable).
 
 ---
 
@@ -295,6 +346,7 @@ Signal at bar N → enter at bar (N+1) OPEN.
 | GST | **NONE** |
 | Stamp duty | **NONE** |
 | PnL column | `paper_pnl_paisa` (single column, signal-only honest paper) |
+| **VIX context columns** | `vix_at_entry` (NIFTY VIX close at signal bar) + `vix_at_exit` (NIFTY VIX close at exit bar) — captured but NOT used in entry/exit decision |
 | Position size unit | % of notional capital; lot-rounded reserved for the Options Track |
 
 Execution realism (brokerage, STT, slippage, spread, IV decay, theta)
@@ -484,8 +536,8 @@ Detailed in `TRACK1_PHASE_PLAN.md`. Summary:
 
 ## 20. Final Locked Decisions (one-line ledger)
 
-The full decision list (70 items) is mirrored in `MIGRATION.md`.
-Highlights:
+The full decision list (85 items, last amended 2026-05-15 evening) is
+mirrored in `MIGRATION.md`. Highlights:
 
 1. Spot indexes + India VIX, signal-only research, no broker theatre
 2. Dhan API; 1m + 1d fetched, 19 additional intraday TFs resampled (21 total)
