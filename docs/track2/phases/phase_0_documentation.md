@@ -46,8 +46,8 @@ build schedule — before any code is written. Mirrors Track 1 Phase 0.
 - [ ] #207 — IV from Dhan; Greeks computed (BSM)
 - [ ] #208 — Risk-free rate from 3-month T-bill table
 - [ ] #209 — Dividend yield q = 0
-- [ ] #210 — Storage ~3-4 GB / 5y
-- [ ] #211 — Backfill ~10,250 calls / ~1 hour / <0.1% quota
+- [ ] #210 — Storage ~5.1 GB / 5y (revised after 3-agent cross-verification: 6 streams × 42 series × ~23 MB; SENSEX extended back to 2021-01-01)
+- [ ] #211 — Backfill ~15,624 calls / ~87 min wall time / 15.6% daily quota (one-time; revised after 3-agent cross-verification)
 - [ ] #212 — Cost model location + versioning
 - [ ] #213 — Slippage profile = 80 combos per (signal, strike, expiry)
 - [ ] #214 — Money int64 paisa
@@ -64,7 +64,7 @@ build schedule — before any code is written. Mirrors Track 1 Phase 0.
 
 - [ ] **Agent 1 — Architect Reviewer:** Walks the spec; finds gaps and inconsistencies between SPEC and DATA_INGEST_DESIGN.
 - [ ] **Agent 2 — Hostile Reviewer:** Tries to break the design (e.g., "what if Dhan removes /rollingoption mid-year?", "what about ATM strike rollover discontinuities?").
-- [ ] **Agent 3 — Reality-check Reviewer:** Cross-references claimed numbers (10,250 calls, 1 hour wall, 3-4 GB) against the Dhan rate limit + 30-day chunking math.
+- [ ] **Agent 3 — Reality-check Reviewer:** Cross-references claimed numbers (~15,624 calls, ~87 min wall, ~5.1 GB) against the Dhan rate limit + 30-day chunking math, with per-regime date gating audited.
 - [ ] **Agent 4 — Synthesis:** Merges the 3 reviews; produces a findings list.
 - [ ] Operator reviews findings list and either:
   - (a) Accepts as-is + adds notes to spec, OR

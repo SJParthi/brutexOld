@@ -21,9 +21,9 @@ _Last updated: 2026-05-15._
 
 Per-stream active window (from `TRACK2_OPTIONS_SPEC.md §2`):
 - NIFTY-WEEK + NIFTY-MONTH: 2021-01-01 → today
-- BANKNIFTY-WEEK: 2021-01-01 → **2024-11-13** (SEBI killed)
-- BANKNIFTY-MONTH: 2021-01-01 → today
-- SENSEX-WEEK + SENSEX-MONTH: **2023-05-15** → today (BSE re-launched May 2023)
+- BANKNIFTY-WEEK: 2021-01-01 → **2024-11-13** (SEBI killed; last expiry Wed)
+- BANKNIFTY-MONTH: 2021-01-01 → today (day-of-week varies — see SPEC §2)
+- SENSEX-WEEK + SENSEX-MONTH: **2021-01-01** → today (Thursday cycle to 2023-05-12 per BSE Notice 20230327-65 — thin liquidity; Friday 2023-05-15 → 2024-12-31; Tuesday 2025-01-01 → 2025-08-31 with one-off Friday carve-out 2025-01-03; Thursday 2025-09-04 → today)
 
 Total active backfill series = 6 × 21 × 2 = **252**.
 
@@ -51,8 +51,8 @@ $BRUTEX_LAKE/
 │   │   │   ├── WEEK/  (populated 2021-01-01 → 2024-11-13; dormant thereafter)
 │   │   │   └── MONTH/ (continuous)
 │   │   └── BSE_FNO/OPTIDX/SENSEX/
-│   │       ├── WEEK/  (populated 2023-05-15 onwards)
-│   │       └── MONTH/ (populated 2023-05-15 onwards)
+│   │       ├── WEEK/  (populated 2021-01-01 onwards; thin pre-2023-05-15)
+│   │       └── MONTH/ (populated 2021-01-01 onwards; thin pre-2023-05-15)
 │   │
 │   └── reference/                                  ← shared
 │       ├── risk_free_rate.parquet                 (60-row 5y monthly)
@@ -182,15 +182,15 @@ recovery test exercises this).
 | NIFTY-MONTH   | 2021-01-01 → today | ~1,960 | 65 | 2,730 |
 | BANKNIFTY-WEEK| 2021-01-01 → 2024-11-13 | ~1,410 | 47 | 1,974 |
 | BANKNIFTY-MONTH| 2021-01-01 → today | ~1,960 | 65 | 2,730 |
-| SENSEX-WEEK   | 2023-05-15 → today | ~735 | 25 | 1,050 |
-| SENSEX-MONTH  | 2023-05-15 → today | ~735 | 25 | 1,050 |
-| | | | **Total calls** | **~12,300** |
+| SENSEX-WEEK   | **2021-01-01** → today | ~1,960 | 65 | 2,730 |
+| SENSEX-MONTH  | **2021-01-01** → today | ~1,960 | 65 | 2,730 |
+| | | | **Total calls** | **~15,624** |
 
 | Quantity | Value |
 |---|---|
 | Effective rate (3 r/s cap) | 3 calls/sec |
-| Backfill wall time | 12,300 / 3 = 4,100 sec = **~68 minutes** |
-| Daily quota used | 12,300 / 100,000 = **12.3%** (one-time; below cap) |
+| Backfill wall time | 15,624 / 3 = 5,208 sec = **~87 minutes** |
+| Daily quota used | 15,624 / 100,000 = **15.6%** (one-time; below cap) |
 
 ### Daily incremental
 
@@ -461,7 +461,7 @@ def test_options_smoke():
 These are ingest-design decisions specifically (will append to MIGRATION.md):
 
 - Storage layout: `options/<exchange>/<segment>/<underlying>/<cycle>/ATM<offset>/<type>/<YYYY>/<MM>.parquet`
-- Watermark file: single JSON with 168 rows (one per series)
+- Watermark file: single JSON with 252 rows (one per series)
 - Audit kinds: `OPT_INGEST_CHUNK_OK/ERR`, `OPT_GREEK_COMPUTED`, `OPT_BACKTEST_ENTRY/EXIT`
 - Concurrency: per-series asyncio task; 3 r/s shared token bucket
 - Greeks computed inline at chunk-write time (not lazy)

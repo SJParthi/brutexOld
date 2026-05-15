@@ -88,52 +88,75 @@ day-of-week" mapping is wrong for the 5y window.
 #### NIFTY 50 (NSE_FNO)
 | Period | Weekly day | Monthly day | Source |
 |---|---|---|---|
-| 2021-01-01 → 2025-08-28 | Thursday | Last Thursday | NSE; SEBI/NSE FAOP circulars |
-| 2025-09-01 → today | **Tuesday** | Last Tuesday | SEBI circular 26-May-2025; first Tue cycle Sep 2, 2025 |
+| 2021-01-01 → 2025-08-28 | Thursday | Last Thursday | NSE original 2019-02-11 launch (circ. 39675/39704); FAOP/60011 |
+| 2025-09-02 → today | **Tuesday** | Last Tuesday | NSE FAOP/68747; SEBI standardization circular May 2025; first Tuesday weekly Sep 2, 2025 |
+
+> **Withdrawn regime annotation (Mar-Apr 2025):** NSE announced an
+> all-weekly shift to **Monday** effective 2025-04-04 (circular early
+> March 2025), then **withdrew it on 2025-03-27** (Zerodha bulletin
+> 407122, Business Standard) before the first Monday expiry could trade.
+> NIFTY weekly stayed Thursday through 2025-08-28 and jumped directly to
+> Tuesday 2025-09-02. **The Monday window never traded** and is NOT a
+> backfill regime — do not split watermarks on these dates.
 
 #### BANKNIFTY (NSE_FNO)
 | Period | Weekly day | Monthly day | Source |
 |---|---|---|---|
-| 2021-01-01 → 2023-09-05 | Thursday | Last Thursday | NSE |
-| 2023-09-06 → 2024-11-13 | **Wednesday** | Last Wednesday | NSE circular FAOP56619 |
-| 2024-11-13 → today | ❌ **KILLED** | Last Wed → Last Thu → Last Tue | SEBI/HO/MRD/TPD-1/P/CIR/2024/132 (Oct 1, 2024); last weekly expiry Nov 13, 2024 |
+| 2021-01-01 → 2023-09-03 | Thursday | Last Thursday | NSE original 2016-05-27 launch (BS/PTI 2016-05-05) |
+| 2023-09-04 → 2024-02-29 | **Wednesday** | Last Thursday | NSE circ. 119/2023 = FAOP57540 (2023-07-12); first Wed weekly 2023-09-06 |
+| 2024-03-01 → 2024-11-13 | **Wednesday** | **Last Wednesday** | NSE FAOP/60011 (2023-12-29); first Wed monthly 2024-03-27 |
+| 2024-11-14 → 2024-12-31 | ❌ **KILLED** | Last Wednesday | NSE FAOP/64506 (2024-10-10) implementing SEBI master circular 2024-10-01; last BN weekly Wed 2024-11-13 (Zeebiz "ends today" 2024-11-13); 2 monthly expiries on Last-Wed: 2024-11-27, 2024-12-24 |
+| 2025-01-01 → 2025-08-28 | ❌ **KILLED** | **Last Thursday** | NSE FAOP/65336 (eff. EOD 2025-01-01) reverted monthly Wed→Thu; first Last-Thu monthly 2025-01-30; Business Standard 2024-11-30 confirms |
+| 2025-09-02 → today | ❌ **KILLED** | **Last Tuesday** | NSE FAOP/68747 + SEBI standardization May 2025; first Last-Tue monthly 2025-09-30 |
 
 #### SENSEX (BSE_FNO)
 | Period | Weekly day | Monthly day | Source |
 |---|---|---|---|
-| 2021-01-01 → 2023-05-14 | ❌ **NOT TRADABLE** (UNVERIFIED — operator running independent check) | n/a | BSE Sensex options relaunched May 15, 2023 — single-source Business Standard; cross-verification pending |
-| 2023-05-15 → 2024-12-31 | Friday | Last Friday | BSE |
-| 2025-01-01 → 2025-08-31 | Tuesday | Last Tuesday | BSE BFX circular Jan-2025 |
-| 2025-09-01 → today | **Thursday** | Last Thursday | SEBI Sep 2025 reshuffle |
+| 2021-01-01 → 2023-05-12 | **Thursday** (thin liquidity) | Last Thursday | **BSE Notice 20230327-65** (verbatim: "All existing contracts of S&P BSE SENSEX (weekly, monthly and long dated) … with expiry day as Thursday expired on May 12, 2023 EOD"). BSE FNO segment was illiquid pre-relaunch; contracts existed and were tradable but volume was near-zero (~₹crores/day vs NSE ₹lakh-crores/day) |
+| 2023-05-15 → 2024-12-31 | Friday | Last Friday | BSE Notice 20230327-65 (cycle revision); Business Standard 2023-05-15 confirms first Fri weekly 2023-05-19. No gap from prior Thu cycle (last Thu = 2023-05-12; first Fri = 2023-05-19) |
+| 2025-01-01 → 2025-08-31 | Tuesday | Last Tuesday | Business Standard 2024-10-04; 5paisa Jan-2025 article. **Carve-out: 2025-01-03 SENSEX weekly kept Friday as one-off transition** (do not flag as Tuesday in expiry calendar) |
+| 2025-09-04 → today | **Thursday** | Last Thursday | SEBI standardization May 2025; first Thursday SENSEX weekly = 2025-09-04 (Sept 2 2025 was Tuesday under old regime). 5paisa + Business Today + Kotak Securities cite |
 
 ### Resulting **6 backfill streams** (with date-range gating)
 
-| # | Stream | Underlying | Cycle | Active window | Total trading days |
-|---|---|---|---|---|---|
-| 1 | NIFTY-WEEK    | NIFTY     | WEEK  | 2021-01-01 → today | ~1,250 |
-| 2 | NIFTY-MONTH   | NIFTY     | MONTH | 2021-01-01 → today | ~1,250 |
-| 3 | BANKNIFTY-WEEK| BANKNIFTY | WEEK  | 2021-01-01 → **2024-11-13** | ~960 |
-| 4 | BANKNIFTY-MONTH| BANKNIFTY| MONTH | 2021-01-01 → today | ~1,250 |
-| 5 | SENSEX-WEEK   | SENSEX    | WEEK  | **2023-05-15** → today | ~700 |
-| 6 | SENSEX-MONTH  | SENSEX    | MONTH | **2023-05-15** → today | ~700 |
+| # | Stream | Underlying | Cycle | Active window | Total trading days | Liquidity note |
+|---|---|---|---|---|---|---|
+| 1 | NIFTY-WEEK    | NIFTY     | WEEK  | 2021-01-01 → today | ~1,250 | normal |
+| 2 | NIFTY-MONTH   | NIFTY     | MONTH | 2021-01-01 → today | ~1,250 | normal |
+| 3 | BANKNIFTY-WEEK| BANKNIFTY | WEEK  | 2021-01-01 → **2024-11-13** | ~960 | normal; dormant after |
+| 4 | BANKNIFTY-MONTH| BANKNIFTY| MONTH | 2021-01-01 → today | ~1,250 | normal; day-of-week varies (see §2 BANKNIFTY table) |
+| 5 | SENSEX-WEEK   | SENSEX    | WEEK  | **2021-01-01** → today | ~1,250 | **thin pre-2023-05-15** (BSE FNO illiquid; data exists per BSE Notice 20230327-65 — may contain long NaN runs at far OTM strikes) |
+| 6 | SENSEX-MONTH  | SENSEX    | MONTH | **2021-01-01** → today | ~1,250 | thin pre-2023-05-15 (same caveat) |
 
 Each stream backfills 21 strikes (ATM ± 10) × 2 types (CALL + PUT) = 42
 series. **Total active series = 6 × 42 = 252.**
 
 Day-of-week regime changes within a stream are NOT separately
 backfilled — Dhan's rolling endpoint automatically follows whatever
-day-of-week was the active expiry on each historical date.
+day-of-week was the active expiry on each historical date. The
+per-bar `strike` value in the response (see §3) tells us which absolute
+contract each bar refers to, so cross-regime stitching is transparent.
 
-> **Decision rationale (operator pushback 2026-05-15):** earlier Phase 0
-> draft had only 4 streams (no BANKNIFTY-WEEK, no SENSEX-MONTH).
-> Operator correctly flagged that BANKNIFTY weekly DID exist 2021→
-> Nov 2024 — dropping it loses ~3.9 years of high-volume BN weekly data.
-> Storage agent confirmed: the +3 GB / +43 min cost of 6 vs 4 streams
-> is negligible; the strategy-flexibility gain (full W vs M A/B + BN
-> monthly-only regime 2021-2024 preserved) is material.
+> **Decision rationale (operator pushback + 3-agent cross-verification 2026-05-15):**
+>
+> Phase 0 v1 draft (4 streams, no BANKNIFTY-WEEK, no SENSEX-MONTH, SENSEX
+> from 2023-05-15) was hit by two corrections:
+> 1. Operator flagged BANKNIFTY weekly DID exist 2021 → Nov 2024 —
+>    dropping it lost ~3.9 years of the highest-volume BN options data.
+> 2. Cross-verification agent (BSE-domain) flagged SENSEX options WERE
+>    tradable 2021-01-01 → 2023-05-12 on Thursday cycle (BSE Notice
+>    20230327-65). Pre-relaunch volume was near-zero but contracts
+>    were listed and ingestible.
+>
+> Resolution: 6 streams with full date gating. Backfill cost: ~15.7K
+> Dhan calls / ~87 min wall time / ~5 GB storage. Strategy flexibility
+> gained: full W vs M A/B test capability + BN historical (2021-2024)
+> + complete SENSEX historical (2021-2026). The pre-2023-05-15 SENSEX
+> data is annotated thin — sweep can be configured to skip it, but the
+> bytes are ingested anyway (cheap insurance, no re-backfill needed).
 >
 > An even simpler "current-expiry-only" model (3 streams, one per
-> underlying) was considered but rejected: the API requires explicit
+> underlying) was considered and rejected: the API requires explicit
 > `expiryFlag` (WEEK|MONTH) — there is no auto-current mode. See §3.
 
 ---
@@ -204,7 +227,7 @@ per-bar `strike` value tells us which absolute strike the bar refers to.
 - Up to **30 days per call** (Dhan-enforced).
 - **5y backfill** (Track 2 default range): page over 30-day chunks.
 - Per-underlying validity windows (see §2): SENSEX options only exist
-  2023-05-15 onwards; BANKNIFTY-WEEK only exists 2021-01-01 → 2024-11-13.
+  2021-01-01 onwards on Thursday cycle (thin pre-2023-05-15 per BSE Notice 20230327-65); BANKNIFTY-WEEK only exists 2021-01-01 → 2024-11-13.
 
 #### Rate limit
 
@@ -224,8 +247,8 @@ Rationale:
 - Options premium is highly nonlinear in spot; resampling 1m → 5m / 15m
   loses path information (e.g., wick that touched ATM-5 IV spike).
 - Greeks are bar-local; resampling muddies them.
-- 5y × 4 streams × 21 strikes × 2 types × 375 minutes/day at ~50 bytes/bar
-  ≈ 3-4 GB total — small enough to keep at 1m.
+- 5y × 6 streams × 21 strikes × 2 types × 375 minutes/day at ~50 bytes/bar
+  ≈ 5.1 GB total — small enough to keep at 1m.
 
 When the engine needs a higher timeframe (e.g., to align with a Track 1
 15m signal), it queries 1m bars and the engine timestamps the entry/exit
@@ -371,8 +394,8 @@ Per the Phase 0 storage + history-timeline + API agents (all 2026-05-15):
 | 2 | NIFTY     | MONTH | ~1,250 | 21 × 2 | 42 |
 | 3 | BANKNIFTY | WEEK  | ~960   | 21 × 2 | 42 |
 | 4 | BANKNIFTY | MONTH | ~1,250 | 21 × 2 | 42 |
-| 5 | SENSEX    | WEEK  | ~700   | 21 × 2 | 42 |
-| 6 | SENSEX    | MONTH | ~700   | 21 × 2 | 42 |
+| 5 | SENSEX    | WEEK  | ~1,250 | 21 × 2 | 42 |
+| 6 | SENSEX    | MONTH | ~1,250 | 21 × 2 | 42 |
 | | | | **Total active series** | | **252** |
 
 ### Backfill calls + wall time
@@ -380,15 +403,15 @@ Per the Phase 0 storage + history-timeline + API agents (all 2026-05-15):
 | Quantity | Calculation | Value |
 |---|---|---|
 | Calendar days in window | 2021-01-01 → 2026-05-15 | ~1,960 |
-| Chunks per series (30-day chunks) | Per-stream window / 30 | NIFTY: 65 / BN-WEEK: 47 / SENSEX: 25 |
+| Chunks per series (30-day chunks) | Per-stream window / 30 | NIFTY: 65 / BN-WEEK: 47 / BN-MONTH: 65 / SENSEX: 65 |
 | Calls — NIFTY (2 streams) | 42 × 65 × 2 | 5,460 |
 | Calls — BANKNIFTY-WEEK | 42 × 47 | 1,974 |
 | Calls — BANKNIFTY-MONTH | 42 × 65 | 2,730 |
-| Calls — SENSEX (2 streams) | 42 × 25 × 2 | 2,100 |
-| **Total backfill calls** | | **~12,300** |
+| Calls — SENSEX (2 streams) | 42 × 65 × 2 | 5,460 |
+| **Total backfill calls** | | **~15,624** |
 | Effective rate (3 r/s cap) | adapter shared token bucket | 3 calls/sec |
-| Backfill wall time | 12,300 / 3 = 4,100 sec | **~68 minutes** |
-| Daily quota used | 12,300 / 100,000 | **12.3%** (one-time, below cap) |
+| Backfill wall time | 15,624 / 3 = 5,208 sec | **~87 minutes** |
+| Daily quota used | 15,624 / 100,000 | **15.6%** (one-time, below cap) |
 
 ### Storage
 
@@ -396,14 +419,15 @@ Per the Phase 0 storage + history-timeline + API agents (all 2026-05-15):
 |---|---|
 | Bars per trading day | 375 (09:15–15:30 IST, 1-minute) |
 | Bytes per bar (Parquet ZSTD, 16 columns) | ~50 |
-| Bytes per series (NIFTY active 5y) | 375 × 1,250 × 50 = 23.4 MB |
-| Bytes per series (BN-WEEK active ~4y) | 375 × 960 × 50 = 18 MB |
-| Bytes per series (SENSEX ~3y) | 375 × 700 × 50 = 13 MB |
+| Bytes per series (full 5y, ~1,250 days) | 375 × 1,250 × 50 = 23.4 MB |
+| Bytes per series (BN-WEEK active ~4y, ~960 days) | 375 × 960 × 50 = 18 MB |
+| Bytes per series (SENSEX 2021-2023-05-12 thin Thursday, ~600 days × low-fill) | 375 × 600 × 50 × ~0.3 fill ≈ 3.4 MB |
+| Bytes per series (SENSEX 2023-05-15 → today, ~700 normal days) | 375 × 700 × 50 = 13 MB |
 | Total: NIFTY 2 streams × 42 series × 23.4 MB | 1.97 GB |
 | Total: BANKNIFTY WEEK 42 × 18 MB | 0.76 GB |
 | Total: BANKNIFTY MONTH 42 × 23.4 MB | 0.98 GB |
-| Total: SENSEX 2 streams × 42 series × 13 MB | 1.09 GB |
-| **Total options lake (5y, 252 series)** | **~4.8 GB** |
+| Total: SENSEX 2 streams × 42 series × (13 + 3.4) MB | 1.38 GB |
+| **Total options lake (5y, 252 series)** | **~5.1 GB** |
 
 ### Daily incremental (post-backfill)
 
@@ -414,8 +438,16 @@ Per the Phase 0 storage + history-timeline + API agents (all 2026-05-15):
 | Daily quota used | 210 / 100,000 = **0.21%** |
 | Daily wall time | 210 / 3 = 70 sec |
 
-Total disk: Track 1 spot lake (~80 MB) + Track 2 options lake (~4.8 GB)
-≈ 4.9 GB. Compute lake (results.parquet) is the dominant disk user.
+Total disk: Track 1 spot lake (~80 MB) + Track 2 options lake (~5.1 GB)
+≈ 5.2 GB. Compute lake (results.parquet) is the dominant disk user.
+
+> **Note on SENSEX thin pre-2023-05-15 data:** BSE FNO segment was
+> illiquid before the May 2023 relaunch (per Business Standard 2023-05-15:
+> first-day post-relaunch turnover ~₹53 crore vs NSE ₹lakh-crores/day).
+> Many far-OTM strikes will return NaN-heavy series. Storage estimate
+> assumes ~30% fill rate for this window — actual could be lower.
+> Sweep config can filter strategies that touch the thin window if
+> liquidity floor required.
 
 ---
 
@@ -552,13 +584,13 @@ These will be appended to `docs/MIGRATION.md` when Phase 0 PR merges:
 - #202: 3 underlyings (NIFTY/BANKNIFTY/SENSEX) — NO India VIX options
 - #203: ATM ± 10 strike radius, hardcoded; rationale = Dhan-enforced
 - #204: 1-minute bars ONLY; no resampling
-- #205: Expiry cycles per SEBI mandate Sep 2025 + Nov 2024 (NIFTY=Tue, BANKNIFTY=MONTH only, SENSEX=Thu)
-- #206: 4 backfill streams (NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-MONTH, SENSEX-WEEK)
+- #205: Expiry cycle history reconstructed for 5y window from primary sources (BSE Notice 20230327-65; NSE FAOP/57540, 60011, 64506, 65336, 68747; SEBI master circular 2024-10-01); withdrawn Monday-window 2025-Apr explicitly excluded
+- #206: **6 backfill streams** (NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-WEEK [until 2024-11-13], BANKNIFTY-MONTH, SENSEX-WEEK, SENSEX-MONTH; SENSEX windows extend back to 2021-01-01 per BSE Notice 20230327-65 with thin-liquidity annotation)
 - #207: IV from Dhan; Greeks computed (Black-Scholes-Merton)
 - #208: Risk-free rate from 3-month T-bill monthly table (60 rows, 5y)
 - #209: Dividend yield q = 0 for all 3 indices
-- #210: Storage estimate ~3-4 GB for 5y
-- #211: Backfill ~10,250 calls, ~1 hour wall time, <0.1% daily quota
+- #210: Storage estimate ~5.1 GB for 5y (revised after S1 verification)
+- #211: Backfill ~15,624 calls / ~87 min wall time / 15.6% daily quota (revised)
 - #212: Cost model lives at `brutex/options/costs.py`, version-stamped
 - #213: Slippage profile = 5 × 4 × 4 = 80 combos per (signal, strike, expiry)
 - #214: Money is int64 paisa (same as Track 1)
@@ -573,15 +605,40 @@ These will be appended to `docs/MIGRATION.md` when Phase 0 PR merges:
 
 ---
 
-## 18. References
+## 18. References (verified 2026-05-15 by 3-agent cross-verification)
 
+### Track 1 + API
 | Source | Detail |
 |---|---|
 | `docs/TRACK1_BACKTEST_SPEC.md` | Parent spec |
-| Dhan v2 API docs | dhanhq.co/docs/v2 — search "rollingoption" |
-| Dhan Python SDK | `dhanhq.sdk.dhanhq.get_charts_rollingoption` (source verified 2026-05-15) |
+| Dhan v2 API docs | dhanhq.co/docs/v2/expired-options-data/ |
+| Dhan Python SDK | `dhanhq.sdk.dhanhq.expired_options_data` (source verified 2026-05-15) |
 | Dhan annexure | dhanhq.co/docs/v2/annexure (segment + instrument enums) |
 | Dhan instrument master | `https://images.dhan.co/api-data/api-scrip-master-detailed.csv` |
-| SEBI expiry mandate Sep 2025 | NSE/BSE circulars (NIFTY moves to Tuesday; SENSEX moves to Thursday) |
-| SEBI weekly contracts mandate Nov 2024 | BANKNIFTY weekly killed; monthly only |
 | `py_vollib` | https://github.com/vollib/py_vollib (BSM oracle) |
+
+### Primary regulatory + exchange sources (per-claim citations)
+
+| Subject | Source | URL / ID |
+|---|---|---|
+| NIFTY 50 weekly launch (2019-02-11) | NSE circular 39675 (2018-12-18) | `nsearchives.nseindia.com/content/circulars/39675` |
+| NIFTY 50 + BANKNIFTY Sep-2025 Tuesday shift | NSE FAOP/68747 | `nsearchives.nseindia.com/content/circulars/FAOP68747.pdf` |
+| Nov 2024 weekly discontinuation (NSE side) | NSE FAOP/64506 (2024-10-10) | `nsearchives.nseindia.com/content/circulars/FAOP64506.pdf` |
+| BANKNIFTY weekly Wed shift (Sep 2023) | NSE 119/2023 = FAOP57540 (2023-07-12) | `archives.nseindia.com/content/circulars/FAOP57540.pdf` |
+| BANKNIFTY monthly Wed shift (Mar 2024) | NSE FAOP/60011 (2023-12-29) | `nsearchives.nseindia.com/content/circulars/FAOP60011.pdf` |
+| BANKNIFTY monthly Wed→Thu revert (Jan 2025) | NSE FAOP/65336 (eff. EOD 2025-01-01) | `nsearchives.nseindia.com/content/circulars/FAOP65336.pdf` |
+| BANKNIFTY weekly launch (2016-05-27) | Business Standard / PTI 2016-05-05 | `business-standard.com/article/pti-stories/nse-to-launch-weekly-options-contracts-on-bank-nifty-index-116050501487_1.html` |
+| Last BANKNIFTY weekly expiry 2024-11-13 | Zeebiz feature 2024-11-13 | `zeebiz.com/market-news/news-bank-nifty-weekly-expiry-ends-today-...325884` |
+| Withdrawn Monday-expiry window (Mar 2025) | Zerodha bulletin 407122; Business Standard 2025-03-27 | `zerodha.com/marketintel/bulletin/407122/...`; `business-standard.com/markets/.../125030500178_1.html` |
+| SENSEX pre-relaunch Thursday cycle 2021-2023 | **BSE Notice 20230327-65** (primary) | `bseindia.com/markets/MarketInfo/DispNewNoticesCirculars.aspx?page=20230327-65` |
+| SENSEX/BANKEX May-2023 relaunch (Friday) | Business Standard 2023-05-15 | `business-standard.com/markets/news/bse-relaunches-sensex-bankex-derivatives-contracts-to-boost-trading-123051501206_1.html` |
+| BANKEX shift Fri→Mon (Oct 2023) | Business Standard 2023-08-30 | `business-standard.com/markets/news/bse-moves-bankex-expiry-to-monday-from-friday-...-123083000569_1.html` |
+| SENSEX/BANKEX Jan-2025 Tuesday shift | Business Standard 2024-10-04; 5paisa Jan 2025 | `business-standard.com/markets/capital-market-news/bse-discontinues-weekly-contracts-on-bankex-sensex-50-124100400441_1.html` |
+| SENSEX Sept-2025 Thursday shift (first Thu = 2025-09-04) | 5paisa SEBI reshuffle; Kotak Securities | `5paisa.com/news/sebi-reshuffles-equity-derivatives-expiry-days-to-streamline-trading` |
+| BSE weekly discontinuation Nov 2024 (SENSEX 50, BANKEX) | Business Standard 2024-10-04 + Business Today 2024-10-03 | (URLs as above) |
+| SEBI master circular (underlying source) | SEBI Oct-1-2024 "Measures to strengthen index derivatives framework for increased investor protection" | `sebi.gov.in` |
+| FINNIFTY launch (2021-01-11) | NSE press release 2020-12-10 | `nseindia.com/nse-to-launch-derivatives-on-the-nifty-financial-services-index-from-january-11-2021` |
+| FINNIFTY Tue shift (Oct 2021) | NSE FAOP49595 | `www1.nseindia.com/content/circulars/FAOP49595.pdf` |
+| MIDCPNIFTY F&O launch (2022-01-24) | NSE FAOP54335 | `archives.nseindia.com/content/circulars/FAOP54335.pdf` |
+| MIDCPNIFTY Wed→Mon shift (Aug 2023) | NSE FAOP56128 | `archives.nseindia.com/content/circulars/FAOP56128.pdf` |
+| NIFTY NEXT 50 launch (2024-04-24, monthly-only) | Business Standard 2024-04-18 | `business-standard.com/markets/stock-market-news/nse-to-launch-derivatives-on-nifty-next-50-index-from-apr-24-gets-sebi-nod-124041800743_1.html` |

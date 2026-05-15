@@ -85,16 +85,19 @@ LOCKED TRACK 2 SCOPE (do NOT silently change):
 - Endpoint: POST /v2/charts/rollingoption (ATM-relative time-series).
 - Strikes: ATM-10 to ATM+10 (21 strikes), CE + PE = 42 series per
   (underlying, cycle, day).
-- Cycles: weekly (NIFTY + SENSEX) + monthly (NIFTY + BANKNIFTY + SENSEX).
-  Per SEBI Sep 2025 / Nov 2024 mandates — BANKNIFTY weekly is GONE,
-  NIFTY expiry day is Tuesday, SENSEX expiry day is Thursday.
-- 4 active backfill streams: NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-MONTH,
-  SENSEX-WEEK.
+- Cycles: weekly + monthly per underlying, with per-regime date gating
+  across 2021-2026 (see TRACK2_OPTIONS_SPEC.md §2 for the full timeline
+  reconstructed from BSE Notice 20230327-65 + NSE FAOP circulars).
+  Key facts: BANKNIFTY weekly killed 2024-11-13 (data exists for 2021→
+  Nov 2024 window). SENSEX options were tradable 2021-01-01 onwards on
+  Thursday (thin liquidity pre-2023-05-15). Post-Sep-2025: NSE→Tue, BSE→Thu.
+- **6 active backfill streams**: NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-WEEK
+  (until 2024-11-13), BANKNIFTY-MONTH, SENSEX-WEEK, SENSEX-MONTH.
 - Timeframe: 1m ONLY (no resampling for options).
 - Greeks: IV from Dhan; delta/gamma/theta/vega computed by BruteX
   using Black-Scholes-Merton.
-- Storage: ~3-4 GB for 5y across all 4 streams.
-- Backfill: ~10,250 API calls, ~1 hour wall time, <0.1% of daily quota.
+- Storage: ~5.1 GB for 5y across all 6 streams.
+- Backfill: ~15,624 API calls, ~87 min wall time, 15.6% of daily quota (one-time).
 
 DELIVERY EXPECTATIONS:
 

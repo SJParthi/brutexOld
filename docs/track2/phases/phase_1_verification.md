@@ -22,7 +22,7 @@ can run Phase 1 in parallel with Track 1 Phase 1/2.
 
 ### Test scaffolding
 
-- [ ] `tests/fakes/fake_rolling_option_adapter.py` — synthetic bars for 168 series
+- [ ] `tests/fakes/fake_rolling_option_adapter.py` — synthetic bars for 252 series
 - [ ] `tests/fakes/synthetic_options_data.py` — generates BSM-priced bars given (S, K, T, r, σ, q)
 
 ### 11 property invariants (P-O1 .. P-O11)

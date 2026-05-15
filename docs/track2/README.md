@@ -63,8 +63,9 @@ Same as Track 1:
 | Strike model | n/a | ATM ± 10 (Dhan-enforced) |
 | Greeks | n/a | IV from Dhan; delta/gamma/theta computed (Black-Scholes) |
 | Brokerage / STT | NONE (signal-only) | TBD (Phase 3 — for realistic execution) |
-| Storage | ~80 MB / 5y | ~3-4 GB / 5y |
-| Backfill wall time | ~5 min | ~1 hour |
-| Daily API quota | < 0.01% | < 0.1% |
+| Storage | ~80 MB / 5y | ~5.1 GB / 5y (6 streams × 42 series × ~23 MB) |
+| Backfill wall time | ~5 min | ~87 min (15,624 calls / 3 r/s) |
+| Daily API quota (backfill) | < 0.01% | 15.6% one-time |
+| Daily API quota (incremental) | < 0.01% | 0.21% (210 active series × 1 call) |
 | Phase 0 effort | done | in progress |
 | Total build effort | 12-17 weeks | 6-8 weeks (after Track 1 ships) |

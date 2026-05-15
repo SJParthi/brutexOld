@@ -40,7 +40,7 @@ proceeds in parallel.
 | 1-minute timeframe ONLY (no resampling) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §4 |
 | ATM ± 10 strike radius (Dhan-enforced) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §5 |
 | Current expiry only at sweep time (week + month per underlying) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §6 |
-| **6 backfill streams** with per-regime date gating (NIFTY-WEEK/MONTH, BANKNIFTY-WEEK [2021→Nov 2024]/BANKNIFTY-MONTH, SENSEX-WEEK/MONTH [2023-05-15 onwards]) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §2 |
+| **6 backfill streams** with per-regime date gating (NIFTY-WEEK/MONTH 2021→today; BANKNIFTY-WEEK 2021→2024-11-13; BANKNIFTY-MONTH 2021→today; SENSEX-WEEK/MONTH **2021-01-01 → today** — Thursday cycle pre-2023-05-12 per BSE Notice 20230327-65, thin liquidity annotated) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §2 |
 | IV from Dhan; delta/gamma/theta/vega computed by BruteX (Black-Scholes) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §8 |
 | Storage layout: `options/<exch>/<segment>/<underlying>/<cycle>/ATM<offset>/<type>/<year>/<month>.parquet` | 🔒 locked | `TRACK2_DATA_INGEST_DESIGN.md` §3 |
 | Money: int64 paisa everywhere (same as Track 1) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §11 |
@@ -61,7 +61,7 @@ proceeds in parallel.
 - **Exit:** 11 new property invariants (options-specific) + 2 new oracle tests pass against a fake adapter.
 
 ### Phase 2 — Dhan options adapter (BLOCKED on Track 1 Phase 2)
-- **Goal:** Real `/v2/charts/rollingoption` calls, 4-stream backfill, daily incremental.
+- **Goal:** Real `/v2/charts/rollingoption` calls, **6-stream** backfill (~15,624 calls / ~87 min wall time / ~5.1 GB storage), daily incremental.
 - **Exit:** 5y backfill green; daily incremental + bar_hash audit chain unbroken; `brutex doctor` C12 (options-fresh) added.
 
 ### Phase 3 — Options backtest engine

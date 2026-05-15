@@ -9,7 +9,7 @@
 
 Implement the production Dhan `/v2/charts/rollingoption` adapter:
 authentication (shared with Track 1), rate limiting (shared 3 r/s
-token bucket), the 4-stream backfill driver, daily incremental,
+token bucket), the **6-stream** backfill driver, daily incremental,
 state-machine recovery, Greeks computation, and the `brutex doctor`
 C12 OPTIONS_FRESH check.
 
@@ -27,14 +27,14 @@ C12 OPTIONS_FRESH check.
 
 - [ ] `brutex/adapters/dhan/options_constants.py` — hardcoded underlying + exchange + segment + strike step + lot size for 3 underlyings
 - [ ] `brutex/adapters/dhan/options_client.py` — typed wrapper around `/v2/charts/rollingoption`
-- [ ] `brutex/adapters/dhan/options_backfill.py` — 4-stream driver + state machine
+- [ ] `brutex/adapters/dhan/options_backfill.py` — **6-stream** driver + state machine (per-stream date gating)
 - [ ] `brutex/options/expiry_calendar.py` — per-underlying expiry day registry (SEBI-aware)
 - [ ] `brutex/options/strike_grid.py` — per-underlying strike step
 - [ ] `brutex/options/risk_free.py` — 60-row monthly 5y T-bill table
 - [ ] `brutex/data/options_partitioner.py` — write to `data/options/<exch>/<segment>/<underlying>/<cycle>/ATM<offset>/<type>/<YYYY>/<MM>.parquet`
 - [ ] `brutex/orchestrator/options_state.py` — watermark + state-machine transitions
 - [ ] Audit kinds `OPT_INGEST_CHUNK_OK/ERR` wired
-- [ ] 5y backfill green on real Dhan against all 4 streams (~57 min wall time, ~10K calls)
+- [ ] 5y backfill green on real Dhan against all **6 streams** (~87 min wall time, ~15,624 calls; ~5.1 GB storage)
 
 ### Week 2 — Greeks + incremental + doctor
 
@@ -44,7 +44,7 @@ C12 OPTIONS_FRESH check.
 - [ ] Audit kind `OPT_GREEK_COMPUTED` wired (sampled 1/1000)
 - [ ] Daily incremental driver
 - [ ] `brutex/cli/cmd_doctor.py` — add C12 OPTIONS_FRESH check
-- [ ] Re-measure: P-O10 put-call parity holds across all 168 series on real Dhan data
+- [ ] Re-measure: P-O10 put-call parity holds across all 252 series on real Dhan data
 - [ ] Re-measure: backfill wall time on M4 Pro
 
 ### Phase 2 sign-off
@@ -64,9 +64,9 @@ C12 OPTIONS_FRESH check.
 
 ## Exit criteria
 
-- [ ] 5y options lake live (~3-4 GB)
+- [ ] 5y options lake live (~5.1 GB)
 - [ ] Daily incremental runs in < 60 sec
-- [ ] All 168 series tracked by watermark
+- [ ] All 252 series tracked by watermark
 - [ ] Doctor C12 GREEN
 - [ ] User signs off
 
@@ -91,7 +91,7 @@ rust/fno-math-py/src/bsm.rs                      (new)
 ## Decisions to lock (#231-#250 estimated)
 
 - #231 — Dhan options adapter wired
-- #232 — 4-stream backfill driver
+- #232 — **6-stream** backfill driver (with per-stream date gating)
 - #233 — Expiry calendar + SEBI-aware
 - #234 — Strike grid + lot size hardcoded
 - #235 — Risk-free rate table v1
