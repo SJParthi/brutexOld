@@ -1,7 +1,7 @@
 [project]
 name = "brutex"
-version = "0.1.0a0"
-description = "Extreme drill-down brute-force backtesting engine for Indian F&O indices"
+version = "0.2.0a0"
+description = "Extreme drill-down brute-force backtesting engine for Indian spot indexes (NIFTY / BANKNIFTY / SENSEX)"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
@@ -9,10 +9,10 @@ authors = [
     { name = "SJParthi" },
 ]
 
-# P1a dependencies only — minimal surface so the tree is auditable.
-# Larger dependencies (polars, duckdb, ray, numba) come in later phases.
+# Track 1 base dependencies. The Dhan adapter (Phase 2) will add `dhanhq`
+# as an optional extra. The legacy `growwapi` dependency was dropped on
+# 2026-05-15 as part of the Groww → Dhan migration (see docs/MIGRATION.md).
 dependencies = [
-    "growwapi>=1.5.0,<2.0.0",
     "pydantic>=2.7,<3.0",
     "structlog>=24.1,<25.0",
     "lmdb>=1.5,<3.0",
@@ -147,7 +147,6 @@ no_implicit_reexport = true
 
 [[tool.mypy.overrides]]
 module = [
-    "growwapi", "growwapi.*",
     "lmdb", "lmdb.*",
     "duckdb", "duckdb.*",
     "polars", "polars.*",
@@ -155,6 +154,7 @@ module = [
     "fastapi", "fastapi.*",
     "uvicorn", "uvicorn.*",
     "fno_math_py", "fno_math_py.*",
+    "dhanhq", "dhanhq.*",  # Track 1 Dhan adapter (Phase 2 dependency)
 ]
 ignore_missing_imports = true
 

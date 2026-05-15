@@ -35,13 +35,11 @@
       "Bash(git rebase -i:*)",
       "Bash(sudo:*)",
       "Bash(curl:* | sh)",
-      "Bash(wget:* | sh)",
-      "WebFetch(domain:*.groww.in)"
+      "Bash(wget:* | sh)"
     ]
   },
   "env": {
     "BRUTEX_SAFETY_FACTOR": "0.6",
-    "BRUTEX_OHLC_RATE_LIMIT_RPS": "15",
     "BRUTEX_AUDIT_CHAIN_ENABLED": "1",
     "BRUTEX_REPRODUCIBILITY_STRICT": "1",
     "PYTHONHASHSEED": "0",
