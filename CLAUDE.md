@@ -12,9 +12,10 @@ after 4-agent hostile-review pass._
 
 - **Name:** BruteX
 - **Purpose:** Extreme drill-down brute-force backtesting engine for
-  Indian **spot indexes** (NIFTY 50 / BANKNIFTY / SENSEX). Track 1 is
-  signal-only research; Phase 2 translates winning signals to options
-  for execution realism.
+  Indian **spot indexes** (NIFTY 50 / BANKNIFTY / SENSEX) + **India
+  VIX** (volatility index). Track 1 is signal-only research; the
+  Options Track translates winning signals to options for execution
+  realism.
 - **Data source (Track 1):** **Dhan Historical Data API** — only two
   surfaces:
   1. `POST /v2/charts/intraday` (1-minute OHLC; other timeframes
@@ -36,9 +37,10 @@ after 4-agent hostile-review pass._
    `docs/TRACK1_*.md`. Every PR references a section + decision ID.
    The pre-2026-05-15 `docs/REQUIREMENTS.md` is DEPRECATED — see its
    header banner.
-3. **Scope lock.** Track 1 = Dhan + spot indexes only (NIFTY 50,
-   BANKNIFTY, SENSEX). No futures, no options, no F&O contracts. Do
-   not silently expand scope.
+3. **Scope lock.** Track 1 = Dhan + spot indexes + India VIX (NIFTY 50,
+   BANKNIFTY, SENSEX, INDIA VIX). 21 timeframes (1m base + 19 derived
+   intraday + 1d). Rolling `2021-01-01 → today` range. No futures, no
+   options, no F&O contracts. Do not silently expand scope.
 4. **Reproducibility first.** Every run is identified by `sha256(
    strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params
    ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_hash)`. No
@@ -169,6 +171,9 @@ bruteX/
 | Chunk window (intraday) | 90 days per call | dhanhq.co/docs/v2 |
 | Spot index segment (NSE) | `IDX_I` | dhanhq.co/docs/v2/annexure |
 | Spot index segment (BSE) | `BSE_I` (verify at runtime) | dhanhq.co/docs/v2/annexure |
+| India VIX segment | `IDX_I` (NSE-only; calculated index) | Dhan master CSV (verified 2026-05-15) |
+| India VIX trading symbol | `INDIA VIX` (with space) | Dhan master CSV |
+| India VIX update cadence | every 15 seconds (NOT tick) | NSE |
 | Instrument master URL | `https://images.dhan.co/api-data/api-scrip-master-detailed.csv` | dhan.co |
 | Time format | IST market times (convert to UTC at ingest) | dhanhq.co/docs/v2 |
 | Rate limit | **UNVERIFIED** — cap at 10 r/s until confirmed | TODO |

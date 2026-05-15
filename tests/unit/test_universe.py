@@ -47,32 +47,30 @@ class TestUnderlyingSpec:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# V1_INDICES — the 3 spot indices allow-list
+# V1_INDICES — the 4 Track 1 indices allow-list (NIFTY + BANKNIFTY + SENSEX + INDIAVIX)
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestV1IndicesComposition:
-    """V1_INDICES is the Track 1 spot index allow-list (exactly 3)."""
+    """V1_INDICES is the Track 1 named-index allow-list (exactly 4)."""
 
-    def test_has_exactly_three_indices(self) -> None:
-        assert len(V1_INDICES) == 3
+    def test_has_exactly_four_indices(self) -> None:
+        assert len(V1_INDICES) == 4
 
-    def test_contains_nifty_and_banknifty_on_nse(self) -> None:
+    def test_nse_contains_nifty_banknifty_indiavix(self) -> None:
         nse_syms = {u.underlying_symbol for u in V1_INDICES if u.exchange == Exchange.NSE}
-        assert nse_syms == {"NIFTY", "BANKNIFTY"}
+        assert nse_syms == {"NIFTY", "BANKNIFTY", "INDIAVIX"}
 
     def test_contains_sensex_on_bse(self) -> None:
         bse_syms = {u.underlying_symbol for u in V1_INDICES if u.exchange == Exchange.BSE}
         assert bse_syms == {"SENSEX"}
 
-    def test_nse_comes_first(self) -> None:
-        """Ordering: NSE indices first (deeper history), then BSE."""
-        first_bse = next((i for i, u in enumerate(V1_INDICES) if u.exchange == Exchange.BSE), None)
-        assert first_bse is not None
-        nse_after_bse = [
-            i for i, u in enumerate(V1_INDICES) if u.exchange == Exchange.NSE and i > first_bse
-        ]
-        assert nse_after_bse == []
+    def test_ordering_groups_nse_with_bse_between(self) -> None:
+        """Ordering: NIFTY, BANKNIFTY (NSE) → SENSEX (BSE) → INDIAVIX (NSE)."""
+        exchanges = [u.exchange for u in V1_INDICES]
+        # NSE-NSE-BSE-NSE: a deliberate ordering preserving the original
+        # 3-index sequence with INDIAVIX appended at the end.
+        assert exchanges == [Exchange.NSE, Exchange.NSE, Exchange.BSE, Exchange.NSE]
 
     def test_spot_live_years_are_historical(self) -> None:
         """Every index must have been live before 2021 (Track 1 backtest window)."""
@@ -82,7 +80,7 @@ class TestV1IndicesComposition:
     def test_display_names_match_dhan(self) -> None:
         """Display names match Dhan's instrument master conventions."""
         names = {u.display_name for u in V1_INDICES}
-        assert names == {"NIFTY 50", "NIFTY BANK", "BSE SENSEX"}
+        assert names == {"NIFTY 50", "NIFTY BANK", "BSE SENSEX", "India VIX"}
 
     def test_is_tuple_not_list_frozen(self) -> None:
         assert isinstance(V1_INDICES, tuple)
@@ -101,8 +99,8 @@ class TestIndexUnderlyings:
     def test_is_frozenset(self) -> None:
         assert isinstance(INDEX_UNDERLYINGS, frozenset)
 
-    def test_has_three_entries(self) -> None:
-        assert len(INDEX_UNDERLYINGS) == 3
+    def test_has_four_entries(self) -> None:
+        assert len(INDEX_UNDERLYINGS) == 4
 
     def test_contains_expected_pairs(self) -> None:
         assert (
@@ -111,6 +109,7 @@ class TestIndexUnderlyings:
                     (Exchange.NSE, "NIFTY"),
                     (Exchange.NSE, "BANKNIFTY"),
                     (Exchange.BSE, "SENSEX"),
+                    (Exchange.NSE, "INDIAVIX"),
                 }
             )
             == INDEX_UNDERLYINGS
@@ -133,6 +132,7 @@ class TestIsIndexUnderlying:
             (Exchange.NSE, "NIFTY"),
             (Exchange.NSE, "BANKNIFTY"),
             (Exchange.BSE, "SENSEX"),
+            (Exchange.NSE, "INDIAVIX"),
         ],
     )
     def test_named_indices_accepted(self, exchange: Exchange, symbol: str) -> None:
@@ -219,9 +219,10 @@ class TestIsInScope:
             (Exchange.NSE, "NIFTY"),
             (Exchange.NSE, "BANKNIFTY"),
             (Exchange.BSE, "SENSEX"),
+            (Exchange.NSE, "INDIAVIX"),
         ],
     )
-    def test_three_track1_indices_in_scope(self, exchange: Exchange, symbol: str) -> None:
+    def test_four_track1_indices_in_scope(self, exchange: Exchange, symbol: str) -> None:
         assert is_in_scope(_make_idx(exchange, symbol)) is True
 
     def test_cash_equity_rejected(self) -> None:

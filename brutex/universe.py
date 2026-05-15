@@ -1,21 +1,28 @@
-"""BruteX Track 1 universe — Indian spot indexes only.
+"""BruteX Track 1 universe — Indian spot indexes + India VIX.
 
 **STATUS (2026-05-15):** rewritten for Track 1 / Dhan migration. The
 prior universe (8 F&O indices + dynamic stock-derivative discovery) is
-out of scope for Track 1. See ``docs/TRACK1_BACKTEST_SPEC.md`` and
-``docs/MIGRATION.md``.
+out of scope for Track 1. India VIX added after 4-agent verification on
+2026-05-15 (late-day scope expansion, see
+``docs/TRACK1_DATA_INGEST_DESIGN.md`` §2 and ``docs/MIGRATION.md``
+decisions #71-72).
 
 ## Track 1 universe
 
-Three Indian equity-index **spot** instruments only:
+Four Indian equity-index instruments:
 
-* **NIFTY 50** (NSE)
-* **NIFTY BANK** (NSE) — symbol ``BANKNIFTY``
-* **BSE SENSEX** (BSE) — symbol ``SENSEX``
+* **NIFTY 50** (NSE spot)
+* **NIFTY BANK** (NSE spot) — symbol ``BANKNIFTY``
+* **BSE SENSEX** (BSE spot) — symbol ``SENSEX``
+* **India VIX** (NSE volatility index) — symbol ``INDIAVIX``
 
-These are computed index values, not tradable directly. Track 1 produces
-signal-only research output (``paper_pnl_paisa``); execution-realistic
-PnL is deferred to Phase 2 (options translation, see TRACK1_PHASE_PLAN).
+All four are computed index values, not tradable directly. Track 1
+produces signal-only research output (``paper_pnl_paisa``); execution-
+realistic PnL is deferred to the Options Track (post-Track-1).
+
+India VIX is a volatility index calculated from NIFTY 50 option mid-
+quotes. It updates every 15 seconds (NOT tick-by-tick) and shares the
+NSE trading window (09:15-15:30 IST) with the spot indexes.
 
 ## Scope filter
 
@@ -54,11 +61,11 @@ class UnderlyingSpec:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# The 3 Track 1 spot indexes (named allow-list)
+# The 4 Track 1 named indexes (allow-list)
 # ────────────────────────────────────────────────────────────────────────
 
 
-#: The 3 named spot indexes. Iterated in order during enumeration.
+#: The 4 named indexes. Iterated in order during enumeration.
 V1_INDICES: Final[tuple[UnderlyingSpec, ...]] = (
     UnderlyingSpec(
         exchange=Exchange.NSE,
@@ -77,6 +84,12 @@ V1_INDICES: Final[tuple[UnderlyingSpec, ...]] = (
         underlying_symbol="SENSEX",
         display_name="BSE SENSEX",
         spot_live_since_year=1986,
+    ),
+    UnderlyingSpec(
+        exchange=Exchange.NSE,
+        underlying_symbol="INDIAVIX",
+        display_name="India VIX",
+        spot_live_since_year=2008,
     ),
 )
 
@@ -140,7 +153,7 @@ def classify_underlying_kind(instrument: Instrument) -> str:
     if not is_in_scope(instrument):
         raise ValueError(
             f"{instrument.trading_symbol}: not in Track 1 scope — "
-            f"only spot indexes (NIFTY, BANKNIFTY, SENSEX) are accepted"
+            f"only NIFTY, BANKNIFTY, SENSEX, INDIAVIX are accepted"
         )
     return "index"
 

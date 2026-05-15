@@ -2,6 +2,13 @@
 
 > **Status:** Locked 2026-05-15. This document is the authoritative
 > log of the Groww → Dhan + spot-index pivot.
+>
+> **Late-day amendment (2026-05-15):** decisions #2 and #7 were
+> unfrozen after a 4-agent verification pass on the user-driven data
+> ingest scope expansion. New decisions #71-80 added covering India
+> VIX, 21 TFs, rolling date range, watermark design. See
+> `TRACK1_DATA_INGEST_DESIGN.md` for the full incremental pipeline
+> design.
 
 ---
 
@@ -115,12 +122,12 @@ hostile-review pass. Future changes must justify against this list.
 ### Source & scope
 
 1. Data source: **Dhan API only** (was: Groww)
-2. Universe: **NIFTY 50, BANKNIFTY, SENSEX spot indexes only** (was: 8 F&O indices + ~215 stocks)
+2. Universe: **NIFTY 50, BANKNIFTY, SENSEX spot + India VIX volatility index** (was: 8 F&O indices + ~215 stocks; **amended 2026-05-15** from 3 → 4 instruments per user scope expansion, see decisions #71-72)
 3. Tradability: **NONE — signal-only research** (was: F&O execution)
-4. Range: 2021-05-15 → 2026-05-15 (5 years)
+4. Range: **Rolling `2021-01-01 → today`** (**amended 2026-05-15** from fixed 2021-05-15 → 2026-05-15 window per user scope expansion, see decision #75)
 5. Range source: `POST /v2/charts/intraday` (1m, 90-day chunks) + `POST /v2/charts/historical` (daily)
 6. Native timeframes: 1/5/15/25/60 min + 1d (was: incorrectly claimed 21)
-7. Resampled timeframes: 15 derived from 1m base, anchored to 09:15 IST
+7. Resampled timeframes: **19 derived intraday TFs from 1m base** (**amended 2026-05-15** from 14 derived per user scope expansion to 21 total, see decisions #73-74)
 8. Money unit: int64 paisa throughout
 9. Exchange segment: `IDX_I` (NSE indices), `BSE_I` (BSE indices) — resolved at runtime
 10. securityId: never hardcoded; resolved from `api-scrip-master-detailed.csv` at startup
@@ -220,6 +227,19 @@ hostile-review pass. Future changes must justify against this list.
 68. Rust hot kernel: extends existing `rust/fno-math/`
 69. 8-12 week build timeline (Phase 0-4)
 70. 4-agent hostile-review pattern at each phase end
+
+### Late-day additions (2026-05-15, post user scope expansion)
+
+71. **4 instruments**: NIFTY 50, BANKNIFTY, SENSEX, **India VIX** (added VIX)
+72. India VIX integration: same code path as other 3 indices (segment `IDX_I`, `instrument=INDEX`, securityId resolved at runtime from master CSV; symbol `INDIA VIX` with space)
+73. **21 TFs total**: 1m base (fetched) + 19 derived intraday (resampled) + 1d (fetched daily)
+74. Derived TFs: `2m, 3m, 4m, 5m, 6m, 7m, 8m, 9m, 10m, 11m, 12m, 13m, 14m, 15m, 30m, 60m, 120m, 180m, 240m` (14 minute-increments + 5 longer)
+75. Date range: **rolling `2021-01-01 → today`** (was fixed 2021-05-15 → 2026-05-15)
+76. **Watermark table** in DuckDB (`watermarks` PK `(instrument_id, timeframe)`, lives next to existing `partitions` table)
+77. **Bar identity hash** = `sha256(inst‖tf‖ts_us‖OHLC_paisa‖vol‖source_version)` — proves bit-identical bars across reruns
+78. **Telegram delivery deferred** to a later phase. Track 1 uses structlog + dashboard primary
+79. **4-layer dedup defence**: L1 Watermark check → L2 Bloom filter → L3 LMDB B+tree → L4 per-bar bar_hash
+80. All `INDEX`-type instruments use `IDX_I` (NSE) or `BSE_I` (BSE) segments — extends `VALID_SEGMENTS` from `{CASH, FNO}` to include `IDX_I, BSE_I`
 
 ---
 

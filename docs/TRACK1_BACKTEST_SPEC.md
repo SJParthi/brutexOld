@@ -20,18 +20,19 @@
 ## 1. Project Identity
 
 **BruteX Track 1** is a brute-force backtesting engine that produces
-**signal-only research output** on three Indian equity-index **spot**
-series:
+**signal-only research output** on four Indian equity-index series:
 
-- **NIFTY 50** (NSE)
-- **NIFTY BANK** / `BANKNIFTY` (NSE)
-- **BSE SENSEX** / `SENSEX` (BSE)
+- **NIFTY 50** (NSE spot)
+- **NIFTY BANK** / `BANKNIFTY` (NSE spot)
+- **BSE SENSEX** / `SENSEX` (BSE spot)
+- **India VIX** (NSE volatility index)
 
 The pipeline brute-forces ~2.9 million unique strategy patterns
 (combinations of 2–5 atomic conditions from a 52-condition vocabulary)
-× full parameter sweeps across 15 timeframes × 3 instruments × 2 exit
+× full parameter sweeps across **21 timeframes × 4 instruments** × 2 exit
 modes, applies a 4-filter cascade (DSR → CPCV → WFO → Lockbox), and
-returns the top 3 production candidates per sweep.
+returns the top 3 production candidates per sweep. Data ingest pipeline
+specified in `TRACK1_DATA_INGEST_DESIGN.md`.
 
 **Out of scope (Track 1):** futures, options, F&O contracts, broker
 execution simulation, live feed, WebSocket, multi-tenant SaaS,
@@ -85,11 +86,11 @@ analysis that bounds these numbers.
 
 | Aspect | Value |
 |---|---|
-| Instruments | NIFTY 50, BANKNIFTY, SENSEX (spot indexes only) |
+| Instruments | NIFTY 50, BANKNIFTY, SENSEX (spot) + India VIX (volatility index) |
 | Tradability | None (Track 1 is signal-only) |
 | Volume column | Zero / null (indexes don't trade) |
-| Continuous-series stitching | N/A (spot is naturally continuous) |
-| Range | 2021-05-15 → 2026-05-15 (5 years) |
+| Continuous-series stitching | N/A (indexes are naturally continuous) |
+| Range | Rolling: `2021-01-01 → today` |
 | Trading session | 09:15 - 15:30 IST |
 | Pre-open exclusion | Bars before 09:15:00 IST dropped at ingest |
 | Forced exit | 15:20 IST (Track 1 convention) |
@@ -147,19 +148,28 @@ revisited.
 
 ---
 
-## 6. Timeframes (15 derived)
+## 6. Timeframes (21 total)
 
-All resampled from 1m base, anchored to 09:15 IST:
+All resampled from 1m base, anchored to 09:15 IST. The 1m base + 1d
+daily are fetched directly from Dhan (`/v2/charts/intraday` and
+`/v2/charts/historical` respectively); the 19 intraday derived TFs are
+resampled in a single-pass cascade.
 
-| Group | Timeframes |
-|---|---|
-| Minutes | 1m, 2m, 3m, 5m, 10m, 15m, 20m, 30m, 45m |
-| Hours | 60m (1h), 90m, 120m (2h), 180m (3h), 240m (4h) |
-| Daily | 1d |
+| Group | Timeframes | Count |
+|---|---|---|
+| Native fetched | 1m (intraday), 1d (daily) | 2 |
+| Derived — 1-min increments through 15m | 2m, 3m, 4m, 5m, 6m, 7m, 8m, 9m, 10m, 11m, 12m, 13m, 14m, 15m | 14 |
+| Derived — longer windows | 30m, 60m, 120m, 180m, 240m | 5 |
+| **TOTAL** | | **21** |
 
-**15 total** — corrected from the earlier "21 timeframes" claim which
-double-counted, included a non-native 25m, and used inconsistent
-groupings. The hostile review caught this.
+**Updated 2026-05-15** (from 15 → 21 TFs per user scope expansion).
+The 1-minute increment series 2m through 15m provides finer
+intermediate granularity for short-horizon strategies; longer
+windows (30m up to 4h) cover swing setups.
+
+The resampling pipeline is specified in detail in
+`TRACK1_DATA_INGEST_DESIGN.md §3` and `§11.2`. Property test P-08
+asserts associativity: `resample(resample(x,2),3) ≡ resample(x,6)`.
 
 ---
 
@@ -477,8 +487,8 @@ Detailed in `TRACK1_PHASE_PLAN.md`. Summary:
 The full decision list (70 items) is mirrored in `MIGRATION.md`.
 Highlights:
 
-1. Spot indexes only, signal-only research, no broker theatre
-2. Dhan API; 1m fetched, 14 additional TFs resampled (15 total inc. 1m)
+1. Spot indexes + India VIX, signal-only research, no broker theatre
+2. Dhan API; 1m + 1d fetched, 19 additional intraday TFs resampled (21 total)
 3. 9 indicators, no VWAP
 4. 52 atomic conditions, K=2..5 ANDed, conflict-graph pruned
 5. ~1.2-1.5M unique patterns (post-prune) × 2 directions

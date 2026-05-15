@@ -1,0 +1,636 @@
+# Track 1 — Data Ingest Design
+
+> **Status:** Locked 2026-05-15 after a 4-agent verification pass.
+> Companion to `TRACK1_BACKTEST_SPEC.md`, `TRACK1_PHASE_PLAN.md`.
+> Implemented in Phase 2 of the build plan (Dhan Adapter + Vocabulary).
+>
+> Verified by:
+> - Agent A: India VIX availability + identifiers (from Dhan master CSV)
+> - Agent B: existing storage code audit (`/brutex/data/*.py`)
+> - Agent C: incremental pipeline + state machine design
+> - Agent D: observability + audit layer design
+
+This document defines the end-to-end data ingest pipeline for Track 1:
+fetch raw OHLCV bars from Dhan, resample to 21 timeframes, persist to
+a Parquet+DuckDB+LMDB lake with full O(1) guarantees, hash-chained
+audit, and structlog-based observability.
+
+---
+
+## 1. Scope (after 2026-05-15 unfreeze)
+
+| Aspect | Track 1 Value |
+|---|---|
+| **Instruments** | 4: NIFTY 50, BANKNIFTY, SENSEX, **India VIX** |
+| **Range** | Rolling: `2021-01-01 → today` |
+| **Native fetched** | 1-min (intraday) + 1-day (historical) from Dhan |
+| **Resampled** | 19 derived intraday TFs from 1m base |
+| **Total TFs persisted** | **21** (= 1 base + 19 derived + 1 daily) |
+| **Tradability** | None (signal-only research) |
+| **Brokerage/STT** | NONE (spot indexes don't trade) |
+
+**Unfrozen from prior spec:**
+- Decision #2 (3 instruments → 4)
+- Decision #7 (15 TFs → 21 TFs)
+- Date range (fixed window → rolling)
+
+See `MIGRATION.md §6` for the ledger entries.
+
+---
+
+## 2. The 4 Instruments — Verified from Dhan Master CSV
+
+All 4 share the same code path (same endpoints, same segment family,
+same chunking). Adding a 5th later = 1 line in
+`brutex/config/instruments.toml`.
+
+| # | Trading Symbol | Display Name | Exchange | Segment | Instrument Type | Spot Live Since | Verified |
+|---|---|---|---|---|---|---|---|
+| 1 | `NIFTY 50` | NIFTY 50 | NSE | `IDX_I` | `INDEX` | 1996 | ✅ |
+| 2 | `NIFTY BANK` | BANKNIFTY | NSE | `IDX_I` | `INDEX` | 2003 | ✅ |
+| 3 | `SENSEX` | BSE SENSEX | BSE | `BSE_I` ⚠️ verify at runtime | `INDEX` | 1986 | partial |
+| 4 | `INDIA VIX` | India VIX | NSE | `IDX_I` | `INDEX` | 2008 | ✅ |
+
+### India VIX specifics (Agent A research)
+
+| Attribute | Value | Source |
+|---|---|---|
+| `SEM_TRADING_SYMBOL` (master CSV) | `INDIA VIX` (with space) | marketcalls/ExpiryFlow mirror of Dhan CSV |
+| `SEM_CUSTOM_SYMBOL` | `India VIX` | same |
+| `SEM_INSTRUMENT_NAME` | `INDEX` | same |
+| `securityId` | `21` (lookup-at-runtime; one community source said `26`) | TradeHull/Dhan-Tradehull, ysrastogi/trado |
+| `exchangeSegment` (API) | `IDX_I` | dhan-oss/DhanHQ-py official SDK |
+| Update cadence | every **15 seconds** (NOT tick-by-tick) | NSE official |
+| Calculated from | NIFTY 50 option mid-quotes | NSE / Business Standard |
+| BSE equivalent | NONE — NSE only | confirmed |
+| Volume | always zero (computed index) | confirmed |
+| Trading hours | 09:15-15:30 IST (same as NIFTY) | NSE official |
+
+**1m OHLC caveat:** Because VIX updates every 15s, each 1m bar contains
+~4 underlying samples. The H/L within a 1m bar therefore has lower
+"intra-bar resolution" than NIFTY. Irrelevant for Track 1's 1m+
+resampled timeframes.
+
+**Phase 2 implementation:** add one row to `V1_INDICES`. No new code paths.
+
+---
+
+## 3. The 21 Timeframes
+
+### 3.1 Native (fetched directly)
+
+| TF | Endpoint | Chunk size |
+|---|---|---|
+| `1m` | `POST /v2/charts/intraday` (`interval=1`) | 90-day windows |
+| `1d` | `POST /v2/charts/historical` | full range in 1 call |
+
+### 3.2 Derived (resampled from 1m, single pass)
+
+**Group A — 1-minute increments through 15m (14 TFs):**
+`2m, 3m, 4m, 5m, 6m, 7m, 8m, 9m, 10m, 11m, 12m, 13m, 14m, 15m`
+
+**Group B — Longer windows (5 TFs):**
+`30m, 60m, 120m, 180m, 240m`
+
+**Total: 21 TFs** = 1 base (1m) + 14 (Group A) + 5 (Group B) + 1 daily.
+
+### 3.3 Why not Dhan's native 5/15/60-minute intervals?
+
+Dhan natively supports 1, 5, 15, 25, 60 minute and 1-day. Track 1
+fetches **only 1m** and resamples to all derived TFs from the 1m base.
+This guarantees:
+
+- Single deterministic resampling rule (P-08: `resample(resample(x,2),3) ≡ resample(x,6)`)
+- Single reproducibility hash (data_version_hash covers one source TF)
+- No mixing of "native" vs "resampled" semantics across TFs
+
+The 25-minute native is dropped (no equivalent derived TF in our 21).
+
+### 3.4 Resampling rules (from `TRACK1_BACKTEST_SPEC.md §5.3`)
+
+| Rule | Value |
+|---|---|
+| Anchor origin | 09:15:00 IST (every trading day) |
+| Aggregate functions | `open = first`, `high = max`, `low = min`, `close = last`, `volume = sum` (always 0 for indexes) |
+| Partial bars at session close | DROPPED — e.g. the 240m bar from 13:15-17:15 IST never completes (15:30 close), so it's not emitted |
+| Storage | one Parquet file per `(instrument, tf, year, month)` |
+
+Property test P-08 (associative resampling) lives in the verification
+pyramid and asserts this holds for every (n, m) pair where n × m matches
+a target TF.
+
+---
+
+## 4. Storage Architecture — 3 Backends
+
+| Backend | What | Why | Primary Key | O(1)? |
+|---|---|---|---|---|
+| **Parquet** files | OHLCV bars (raw + resampled) | columnar compression, polars/Rust zero-copy, mmap-friendly | partition path = `(exch, seg, sym, tf, year, month)` | O(1) per partition |
+| **DuckDB** (`catalog.duckdb`) | Partition metadata + watermarks | SQL, ACID, small footprint | `(exch, seg, sym, tf, year, month)` for partitions; `(inst, tf)` for watermarks | O(1) PK |
+| **LMDB** (`work_items/`) | Chunk dedup index | mmap'd B+tree, microsecond lookup | `sha256(inst‖tf‖window)` | O(1) Bloom + B+tree |
+
+### 4.1 Directory layout
+
+```
+/Volumes/QuantData/brutex-lake/
+  ├── bars/
+  │   ├── NSE/
+  │   │   └── IDX/
+  │   │       ├── NIFTY/         ← display "NIFTY 50"
+  │   │       │   ├── 1m/2021/01.parquet, …, 2026/05.parquet
+  │   │       │   ├── 2m/…       ← resampled
+  │   │       │   ├── …
+  │   │       │   ├── 240m/…
+  │   │       │   └── 1d/all.parquet
+  │   │       ├── BANKNIFTY/     (same)
+  │   │       └── INDIAVIX/      (same)
+  │   └── BSE/
+  │       └── IDX/
+  │           └── SENSEX/        (same)
+  ├── catalog.duckdb             ← partitions + watermarks
+  ├── lmdb/work_items/            ← dedup index
+  └── audit/
+      ├── audit.jsonl            ← hash-chained event log
+      └── index.duckdb           ← run_id → file offsets
+```
+
+### 4.2 Watermark table (new — Phase 2 deliverable)
+
+```sql
+CREATE TABLE watermarks (
+    instrument_id   VARCHAR NOT NULL,
+    timeframe       VARCHAR NOT NULL,
+    last_bar_ts     TIMESTAMP WITH TIME ZONE NOT NULL,
+    last_bar_hash   VARCHAR(64) NOT NULL,
+    chunk_id        VARCHAR(64) NOT NULL,
+    bars_written    BIGINT NOT NULL,
+    updated_at      TIMESTAMP WITH TIME ZONE NOT NULL,
+    PRIMARY KEY (instrument_id, timeframe)
+);
+CREATE INDEX ix_wm_inst ON watermarks(instrument_id);
+-- Total rows: 4 instruments × 21 TFs = 84
+```
+
+### 4.3 Bar identity hash (dedup proof)
+
+```
+bar_hash = sha256(
+    instrument_id        ‖  "NSE:NIFTY"
+    timeframe            ‖  "1m"
+    ts_utc_int64_us      ‖  1747333215000000
+    open_paisa_i64       ‖
+    high_paisa_i64       ‖
+    low_paisa_i64        ‖
+    close_paisa_i64      ‖
+    volume_i64           ‖  0 (always for indexes)
+    data_source_version     "dhan-v2-2026-05-15"
+)
+```
+
+**Property:** same bar from Dhan twice → same hash. Reading + re-writing
+the same chunk produces bit-identical Parquet bytes (P-19).
+
+---
+
+## 5. Pipeline State Machine
+
+```
+                  ┌───────────────────────────────────────┐
+                  │  Daily cron OR `brutex pull` manual   │
+                  ▼                                       │
+              ┌────────┐  read config + watermarks        │
+       ┌─────▶│  IDLE  │──────────────────────────┐       │
+       │      └────────┘                          ▼       │
+       │           ▲                       ┌─────────────┐│
+       │  audit OK │                       │  PLAN_GAPS  ││
+       │           │                       └──────┬──────┘│
+       │      ┌─────────┐                         │       │
+       │      │AUDIT_DONE│  ◀─────  chain ─────────┤       │
+       │      └─────────┘   verify                │       │
+       │           ▲                              │       │
+       │           │                              ▼       │
+       │      ┌─────────┐                  ┌──────────────┐│
+       │      │ AUDIT   │ ◀─── all done ──│  FETCH_CHUNK │◀┘
+       │      └─────────┘                  └──────┬───────┘
+       │           ▲                              │
+       │           │ resample OK                  ▼
+       │      ┌──────────┐                  ┌──────────────┐
+       │      │ RESAMPLE │◀── 1m landed ───│  validate    │
+       │      │  CASCADE │                  │  + write     │
+       │      └──────────┘                  │  + watermark │
+       │           │                        └──────────────┘
+       │           ▼ on error
+       │      ┌─────────┐
+       └──────│ HALTED  │ ◀── any unrecoverable failure
+              └─────────┘
+                  │ operator `brutex resume`
+                  ▼
+              re-enter PLAN_GAPS (watermarks resume work)
+```
+
+### 5.1 Transitions
+
+| From → To | Trigger | Audit event | Rollback semantics |
+|---|---|---|---|
+| IDLE → PLAN_GAPS | cron tick / manual | `RUN_START` | n/a |
+| PLAN_GAPS → FETCH_CHUNK | gaps ≠ ∅ | `PLAN_GAPS` | n/a |
+| PLAN_GAPS → AUDIT_DONE | gaps = ∅ (no-op) | `RUN_COMPLETE noop` | n/a |
+| FETCH_CHUNK → (self) | next chunk in window | `CHUNK_START`/`CHUNK_DONE` | discard buffer; watermark NOT advanced |
+| FETCH_CHUNK → RESAMPLE_CASCADE | all 1m chunks for instrument written | `PHASE_TRANSITION` | leave 1m landed; resample is idempotent |
+| RESAMPLE_CASCADE → AUDIT | all 19 derived TFs produced | `RESAMPLE_DONE` | re-derive on restart |
+| AUDIT → AUDIT_DONE | `verify_chain()` OK | `AUDIT_VERIFY` + `RUN_COMPLETE` | n/a |
+| any → HALTED | rate-limit exhaust, validation fail, audit-break | `RUN_HALTED` | watermark unchanged |
+| HALTED → PLAN_GAPS | operator `brutex resume` | `RUN_RESUME` | n/a |
+
+---
+
+## 6. Incremental Behaviour — Day 1 vs Day 5 vs Same-Day Rerun
+
+| Run | Watermark before | Gap | Chunks fetched | Watermark after | Wall time |
+|---|---|---|---|---|---|
+| **Day 1** (first run, 2026-05-15) | ∅ (empty) | 5 years × 4 inst | 88 (1m, 90-day chunks) + 4 (1d) = 92 chunks | 2026-05-15 15:30 IST | ~5 min |
+| **Day 5** (incremental, 2026-05-19) | 2026-05-15 15:30 | 4 trading days × ~375 bars | 1 chunk/inst × 4 = 4 chunks | 2026-05-19 15:30 IST | ~5 sec |
+| **Same Day** rerun | 2026-05-19 15:30 | ∅ (no gap) | 0 (nothing to fetch) | unchanged | ~0.1 sec |
+
+### 6.1 Worked example (first run vs incremental)
+
+```
+DAY 1 (FIRST RUN):                       DAY 5 (INCREMENTAL):
+
+  watermark = ∅                            watermark = 2026-05-15 15:30 IST
+
+   ████████████████████████ 5y              ▌ 4d  ← only fetch the gap
+
+  → 92 chunks fetched (10 r/s cap)         → 4 chunks fetched
+  → ~5 min wall                            → ~5 sec wall
+
+  After 1m written:                        After 1m written:
+    resample to 19 derived TFs                resample only the 4 new days × 19 TFs
+    = 19 × 4 inst × 5y of partitions          = 19 × 4 inst × 4 days
+```
+
+### 6.2 Recovery matrix (kill at any point)
+
+| Kill point | Persisted state | Restart behaviour |
+|---|---|---|
+| Mid-Parquet write | tempfile only (atomic rename not yet fired) | orphaned tempfile cleaned; rerun re-creates partition with same hash |
+| Post-Parquet, pre-watermark | Parquet landed, watermark unchanged | idempotent writer detects matching hash → watermark advances |
+| Post-watermark, pre-resample | watermark advanced for 1m only | resampler notices 1m watermark > derived watermark → replays affected days |
+| Mid-resample | partial derived Parquet (no rename) | derived watermark unmoved → day re-derives identically |
+| Audit chain break | refuses to write more | FSM → HALTED, structlog ERROR, operator must investigate |
+| Power cut | filesystem consistent (tempfile-rename atomic) | as above — no data loss |
+
+**Property:** ANY kill point + restart → byte-identical Parquet output.
+Proven by the audit-log replay oracle test
+(`tests/integration/test_replay_audit_log.py` — Phase 1 deliverable).
+
+---
+
+## 7. Dedup + Uniqueness — 4 Layers of Defense
+
+| Layer | What it catches | How | Typical latency |
+|---|---|---|---|
+| **L1: Watermark check** | "Already fetched this window?" | DuckDB `WHERE inst=? AND tf=?` → if `last_ts ≥ window.end: skip` | ~10 µs |
+| **L2: Bloom filter** | "Probably seen this chunk-hash?" | `sha256(inst‖tf‖window)` → Bloom probe | ~5 ns |
+| **L3: LMDB confirm** | "Definitely seen this chunk?" (resolves Bloom FP) | LMDB B+tree get | ~50 µs |
+| **L4: Per-bar bar_hash** | "Has Dhan mutated this bar?" | compare new bar_hash vs stored bar_hash | O(1) per bar |
+
+```
+   L1 Watermark            L2 Bloom               L3 LMDB
+   ┌─────────────┐        ┌──────────────┐      ┌──────────────┐
+   │ Already     │ YES    │ Probably     │ YES  │ Definitely   │
+   │ past this   │ ────▶  │ seen this    │────▶ │ seen this    │
+   │ window?     │        │ chunk?       │      │ chunk?       │
+   └──────┬──────┘        └──────┬───────┘      └──────┬───────┘
+          │ NO                   │ NO                  │ NO
+          ▼                      ▼                     ▼
+       proceed              proceed               proceed
+       (fetch)              (fetch)               (fetch + write)
+```
+
+**Uniqueness invariant:** at no point does the lake contain two rows
+with the same `(instrument, timeframe, ts)`. Enforced by:
+
+- File-level dedup at write (`parquet_writer.py:150` sorts + dedups by ts before writing)
+- Watermark check before any fetch (L1 above)
+- Property test P-21 (Phase 1): "every persisted (inst, tf) sequence has strictly monotonic ts"
+
+---
+
+## 8. O(1) Hot-Path Guarantees
+
+CI gate (`tests/bench/`, Phase 1 deliverable): `p99(N=1M) / p99(N=1K) ≤ 1.1`
+for each of the following. Failure = CI red.
+
+| Hot path | Mechanism | Complexity | Absolute p99 target |
+|---|---|---|---|
+| Bar lookup by ts | Catalog routes to partition; polars binary-search on sorted u64 ts | O(1) per partition + O(log n) inside (n < 100k bars) ≈ O(1) | <1 µs at 1M |
+| Watermark lookup | DuckDB PK index on `(inst, tf)` | O(1) | <100 µs |
+| Chunk dedup pre-check | Bloom filter (~14 bits/element) | O(1) | <200 ns |
+| Chunk dedup confirm | LMDB B+tree | O(1) | <100 µs |
+| Bar dedup by hash | sha256 → 32-byte LMDB key | O(1) | <100 µs |
+| Audit append | append-only fwrite | O(1) | <50 µs |
+| Parquet write | tempfile + rename | O(n) per chunk (~37500 bars), constant per call | <5 ms per chunk |
+
+---
+
+## 9. Audit Chain — Tamper Detection
+
+```
+   audit/audit.jsonl
+   ──────────────────────────────────────────────────────
+   seq=1   {kind:"RUN_START",   prev_sha=GENESIS,    this_sha=a3f…}
+              │                                       │
+              └─────────────── feeds into ───────────▶┘
+                                                      │
+   seq=2   {kind:"CHUNK_START", prev_sha=a3f…,  this_sha=b2e…}
+              │                                       │
+              └─────────────── feeds into ───────────▶┘
+                                                      │
+   seq=3   {kind:"CHUNK_DONE",  prev_sha=b2e…,  this_sha=c91…}
+              │
+              ...
+   ──────────────────────────────────────────────────────
+   verify_chain() walks every line, recomputes this_sha,
+   compares to next line's prev_sha. Any mismatch = TAMPER.
+   ──────────────────────────────────────────────────────
+```
+
+### 9.1 Material events (one audit line each)
+
+| Event kind | Fired when | Payload includes |
+|---|---|---|
+| `RUN_START` | FSM enters RUNNING | run_id, host, instruments, start_ts |
+| `PLAN_GAPS` | gap computation done | gaps[] per (inst, tf), total_chunks |
+| `CHUNK_START` | before Dhan POST | run_id, inst, tf, window |
+| `CHUNK_DONE` | after Parquet write + watermark advance | run_id, inst, tf, bars, first/last_ts, chunk_sha |
+| `CHUNK_FAIL` | rate-limit exhaust or validation fail | run_id, error, retries |
+| `WRITE_DONE` | per partition file written | path, raw_hash, row_count |
+| `RESAMPLE_DONE` | per (inst, day) resample finished | inst, day, tfs[] |
+| `WATERMARK_ADVANCED` | watermark row UPSERT | inst, tf, new_ts, new_hash |
+| `AUDIT_VERIFY` | chain verified | total_lines, verify_took_ms |
+| `RUN_COMPLETE` | FSM → AUDIT_DONE | run_id, total_bars, elapsed |
+| `RUN_HALTED` | FSM → HALTED | reason, last_completed_chunk |
+
+### 9.2 Verification — proven by:
+
+- Property P-16: `verify_chain(file)` count == `#append()` calls
+- Property P-17: any single-byte tamper → `AuditChainCorruption` raised
+- Property P-20: audit replay produces byte-identical Parquet output
+
+---
+
+## 10. Observability — structlog + Dashboard
+
+**No Telegram in this phase** (per user decision, 2026-05-15). All
+alerts route to structlog → file + dashboard. Telegram delivery is a
+later-phase enhancement.
+
+### 10.1 structlog event taxonomy
+
+| Severity | Event kind | Trigger | Logged fields |
+|---|---|---|---|
+| INFO | `run.start` | RUN_START | run_id, host, ts, instruments |
+| INFO | `run.complete` | RUN_COMPLETE | run_id, elapsed, total_bars, chain_status |
+| INFO | `phase.complete` | per phase done | run_id, phase, ok, skipped |
+| WARN | `rate_limit.downshift` | 3 retries in 60s | rps, cap, retries |
+| WARN | `gap.partial` | 1-4 missing 1m bars | inst, tf, missing, window |
+| WARN | `worker.hung` | no heartbeat >120s | worker_id, task |
+| ERROR | `dhan.api_down` | 3+ consecutive 5xx | code, endpoint, retries |
+| ERROR | `validate.fail` | bad envelope | inst, chunk, error_code |
+| ERROR | `quarantine.new` | chunk quarantined | inst, reason, count |
+| CRITICAL | `audit.chain_break` | SHA verifier mismatch | line, expected, got |
+| CRITICAL | `data.corruption` | Parquet ≠ LMDB count | store, inst, tf |
+| CRITICAL | `disk.full` | free <10 GB | mount, free_gb |
+| CRITICAL | `phase.halted` | FSM → HALTED | phase, reason |
+
+### 10.2 Dashboard endpoints (FastAPI; extension of `brutex/dashboard/app.py`)
+
+| Method + URL | Purpose | Schema |
+|---|---|---|
+| `GET /api/v1/state` | Current `DashboardState` (existing) | `{run_id, status, phases, workers, recent_events}` |
+| `GET /api/v1/instrument/{symbol}/watermark` | Per-instrument watermark grid | `{symbol, watermarks: {tf → iso_ts}, lag_seconds: {tf → s}}` |
+| `GET /api/v1/health` | Aggregate health (red/amber/green) | `{status, checks: [C1…C10]}` |
+| `GET /api/v1/audit/tail?n=200` | Last N audit events + chain status | `{lines, chain_ok, break_at}` |
+| `GET /api/v1/audit/verify` | Full chain re-verification | `{ok, verified, break_at, took_ms}` |
+| `GET /api/v1/charts/throughput?window=24h` | Bars/sec over time | `{points}` |
+| `GET /api/v1/charts/gaps?inst=NIFTY` | Heatmap: missing bars by (date, tf) | `{cells}` |
+| `GET /api/v1/charts/resample-latency` | Per-TF p50/p95/p99 | `{tf → percentiles}` |
+| `GET /api/v1/charts/rate-limit?window=24h` | Used/cap ratio time series | `{points}` |
+| `GET /metrics` | Prometheus 0.0.4 text format (existing) | `text/plain` |
+
+### 10.3 Real-time invariants (C1-C10) — checked on every dashboard ping
+
+| # | Check | 🟢 criterion | 🔴 criterion |
+|---|---|---|---|
+| C1 | `watermark.freshness` | lag ≤ 30 min on trading day, ≤ 24h on holidays | lag > 24h on trading day |
+| C2 | `gap.last7d` | no gaps > 5 bars in last 7 trading sessions | ≥1 gap > 5 bars |
+| C3 | `parquet_lmdb.parity` | row counts match exactly | mismatch |
+| C4 | `audit.chain_intact` | SHA chain verifies clean | break detected |
+| C5 | `dedupe.hit_rate` | < 0.1% over last 1000 trials | > 1% |
+| C6 | `rate_limit.headroom` | used/cap ≤ 70% | > 95% OR any 429 in 60s |
+| C7 | `resample.determinism` | sampled day matches golden SHA | mismatch |
+| C8 | `disk.free` | > 10 GB AND > 5% | either fails |
+| C9 | `telegram.delivery` (when enabled) | drop rate ≤ 5% | > 20% |
+| C10 | `instrument_master.fresh` | CSV age < 25h | > 48h |
+
+### 10.4 Chart designs
+
+| Chart | x-axis | y-axis | Reveals |
+|---|---|---|---|
+| Pull throughput | time (24h, 5min bins) | bars/sec per instrument | API saturation, dead spots |
+| Gap heatmap | date (last 30) × tf | cell color = missing-bar count | Holes by instrument × date |
+| Resample latency | TF (21 bars) | p50/p95/p99 ms | Slow TFs, SLA regressions |
+| Rate-limit headroom | time (24h) | used_rps stacked vs cap_rps | 429 risk |
+| Audit timeline | time (7d) | event count by severity (stacked) | Burst patterns; chain breaks pinned in red |
+| Watermark lag | instrument (4 rows) × tf (21 cols) | lag minutes (log) — heatmap | Per-cell staleness |
+
+### 10.5 Anti-noise rules
+
+| Event | Dedupe window | Rationale |
+|---|---|---|
+| `rate_limit.downshift` | 60s | one alert, not per retry |
+| `gap.partial` | per (inst, tf, date) | one per affected day, not per bar |
+| `audit.chain_break` | 0s (no dedupe) | always alert |
+| `data.corruption` | 0s | always alert |
+| `disk.full` | 15 min | paging once is enough |
+| heartbeat | 10 min | one ping per run |
+
+---
+
+## 11. Pseudocode — 4 Core Functions
+
+### 11.1 `pull_chunk` — one 90-day window
+
+```python
+def pull_chunk(inst: InstrumentConfig, tf: Literal["1m","1d"],
+               window: tuple[datetime, datetime]) -> ChunkResult:
+    audit.append("CHUNK_START", subject=inst.id+":"+tf, payload={"window": window})
+    bucket.acquire()  # 10 r/s cap
+    try:
+        raw = dhan.post(
+            "/v2/charts/intraday" if tf == "1m" else "/v2/charts/historical",
+            body={"securityId": inst.security_id, "exchangeSegment": inst.segment,
+                  "instrument": "INDEX", "fromDate": window[0], "toDate": window[1],
+                  "interval": "1" if tf == "1m" else None})
+    except RateLimitErr as e:    bucket.downshift(); raise Retryable(e)
+    except TimeoutErr as e:                          raise Retryable(e)
+    except (BadRequest, AuthFail) as e: log.error("dhan.api_down", error=e); raise Fatal(e)
+
+    bars = parse_dhan_ohlc(raw, tf, native_tz="Asia/Kolkata")
+    assert_sorted_ascending(bars)
+    assert_no_duplicates(bars, key="ts")
+    bars = drop_pre_open(bars)
+    bars = drop_holidays(bars, calendar=NSE_CAL)
+    bars = drop_muhurat(bars)
+    assert first_ts_of(bars) > watermark(inst, tf)
+
+    for (yr, mo), group in groupby(bars, key=partition_for_timestamp):
+        wr = parquet_writer.write(exchange=inst.exchange, segment="IDX",
+                                  symbol=inst.symbol, interval=tf, bars=group)
+        catalog.upsert(make_catalog_entry(wr, ...))
+        audit.append("WRITE_DONE", payload={"path": wr.path, "raw_hash": wr.raw_hash})
+
+    advance_watermark(inst, tf, last_bar=bars[-1], chunk_sha=sha256_chunk(bars))
+    audit.append("CHUNK_DONE", payload={...})
+    return ChunkResult(bars=len(bars), first=bars[0].ts, last=bars[-1].ts)
+```
+
+### 11.2 `resample_1m_to_tf` — single-pass cascade
+
+```python
+INTRADAY_TFS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+                30, 60, 120, 180, 240]  # minutes — 19 derived
+
+def resample_1m_to_tf(inst: InstrumentConfig, day: date) -> ResampleResult:
+    bars_1m = read_parquet(partition_path(inst, "1m", day))
+    bars_1m.sort_by("ts")
+    if not bars_1m: return ResampleResult(empty=True)
+
+    anchor_utc = ist_to_utc(day, time(9, 15))
+    aggrs = {n: BarAggr(anchor=anchor_utc, bucket_seconds=n*60) for n in INTRADAY_TFS}
+    out = {n: [] for n in INTRADAY_TFS}
+
+    # Single linear pass — fans to all 19 derived TFs simultaneously
+    for bar in bars_1m:
+        for n, agg in aggrs.items():
+            closed_bar = agg.feed(bar)
+            if closed_bar is not None:
+                out[n].append(closed_bar)
+
+    # Session-close at 15:30 IST — flush only COMPLETE buckets, drop partial
+    last_close = ist_to_utc(day, time(15, 30))
+    for n, agg in aggrs.items():
+        agg.flush_if_complete(now=last_close, out=out[n])
+
+    for n, derived in out.items():
+        compute_bar_hashes(derived, inst, f"{n}m")
+        parquet_writer.write(exchange=inst.exchange, segment="IDX",
+                             symbol=inst.symbol, interval=f"{n}m", bars=derived)
+        advance_watermark(inst, f"{n}m", derived[-1] if derived else None, ...)
+    audit.append("RESAMPLE_DONE", payload={"inst": inst.id, "day": day,
+                                           "tfs": list(out.keys())})
+```
+
+### 11.3 `advance_watermark` — atomic, dedup-safe
+
+```python
+def advance_watermark(inst, tf, last_bar, chunk_sha):
+    if last_bar is None: return
+    new_hash = sha256_bar(inst, tf, last_bar)
+    with duckdb.transaction():
+        cur = duckdb.execute("SELECT last_bar_ts, last_bar_hash FROM watermarks "
+                             "WHERE instrument_id=? AND timeframe=?",
+                             (inst.id, tf)).fetchone()
+        if cur is not None and cur[0] >= last_bar.timestamp:
+            # Re-run with same data — must be identical
+            assert cur[1] == new_hash, "Dhan bar mutated; quarantine + halt"
+            return  # idempotent no-op
+        duckdb.execute("INSERT OR REPLACE INTO watermarks VALUES (?,?,?,?,?,?,?)",
+                       (inst.id, tf, last_bar.timestamp, new_hash, chunk_sha,
+                        rows_written, now_utc()))
+    audit.append("WATERMARK_ADVANCED", payload={"inst": inst.id, "tf": tf,
+                                                "ts": last_bar.timestamp})
+```
+
+### 11.4 `recover` — deterministic, watermark-driven
+
+```python
+def recover(run_id: str):
+    audit.verify_chain()  # else AuditChainCorruption
+    for inst in config.instruments:
+        for tf in ["1m", "1d"]:
+            wm = watermark(inst, tf)
+            # Planner re-emits chunks from wm+1min. Nothing persisted past
+            # watermark is trusted (orphaned tempfiles already cleaned).
+        for tf_min in INTRADAY_TFS:
+            days_to_redo = duckdb.execute("""
+                SELECT DISTINCT date_trunc('day', last_bar_ts) FROM watermarks
+                WHERE instrument_id=? AND timeframe='1m'
+                  AND last_bar_ts > (SELECT COALESCE(MAX(last_bar_ts), '1970-01-01')
+                                     FROM watermarks WHERE instrument_id=? AND timeframe=?)
+            """, (inst.id, inst.id, f"{tf_min}m")).fetchall()
+            for d in days_to_redo:
+                resample_1m_to_tf(inst, d.date)
+```
+
+---
+
+## 12. Phase 2 Implementation Checklist
+
+When Phase 2 (Dhan Adapter + Vocabulary) lands, this design becomes
+concrete. Tracking checklist:
+
+| Item | File | Status |
+|---|---|---|
+| `brutex/config/instruments.toml` (dynamic config) | new | ⏳ |
+| `brutex/adapters/dhan/client.py` | new | ⏳ |
+| `brutex/adapters/dhan/instruments.py` (master CSV resolver) | new | ⏳ |
+| `brutex/adapters/dhan/intraday.py` | new | ⏳ |
+| `brutex/adapters/dhan/historical.py` | new | ⏳ |
+| `brutex/data/watermark.py` (new DuckDB table) | new | ⏳ |
+| `brutex/data/parser_dhan.py` (replaces Groww parser) | new | ⏳ |
+| `brutex/data/partition.py` — extend `VALID_INTERVALS` to 21 TFs | edit | ⏳ |
+| `brutex/data/partition.py` — add `IDX_I, BSE_I` to `VALID_SEGMENTS` | edit | ⏳ |
+| `brutex/feed/resampler.py` — 09:15 IST anchor + 19 TFs | edit | ⏳ |
+| `brutex/data/parquet_writer.py` — allow current-month grow | edit | ⏳ |
+| `brutex/orchestrator/state.py` — collapse `IngestPhase` to Track 1 phases | edit | ⏳ |
+| `brutex/universe.py` — add India VIX | edit (NOW) | ✅ |
+
+---
+
+## 13. Verification — How Every Guarantee Maps to a Test
+
+| Guarantee | Verified by | Test ID |
+|---|---|---|
+| 1m→derived associative | property test | P-08 |
+| No look-ahead at bar N | property test | P-06 |
+| Bar hash deterministic | property test | P-19 |
+| Audit chain integrity | property test + oracle | P-16, P-17, P-20 |
+| Holiday calendar coverage | property test | P-22 |
+| Session window correctness | property test | P-23 |
+| Watermark monotonic | property test (Phase 1) | P-21 (extend to ts-monotonicity per (inst, tf)) |
+| Bloom no false negatives | property test | P-05 |
+| Rate limiter throughput | property test | P-18 |
+| O(1) hot paths | bench test (`p99(N=1M)/p99(N=1K) ≤ 1.1`) | bench gate |
+
+The 24 property invariants are catalogued in
+`TRACK1_VERIFICATION_PYRAMID.md §3`.
+
+---
+
+## 14. Decisions Locked Here (additions to `MIGRATION.md §6`)
+
+| # | Decision |
+|---|---|
+| 71 | 4 instruments: NIFTY 50, BANKNIFTY, SENSEX, **India VIX** |
+| 72 | India VIX integration: add to V1_INDICES, same code path as other 3 |
+| 73 | 21 TFs total: 1m base + 19 derived intraday + 1d native |
+| 74 | Derived TFs: 2m-15m every minute (14) + 30m, 60m, 120m, 180m, 240m (5) |
+| 75 | Range: rolling `2021-01-01 → today`, not fixed end |
+| 76 | Watermark table in DuckDB (`watermarks` next to `partitions`) |
+| 77 | Bar identity = sha256(inst, tf, ts, OHLC paisa, vol, source_version) |
+| 78 | Telegram delivery deferred (structlog + dashboard primary for now) |
+| 79 | 4-layer dedup defence (Watermark → Bloom → LMDB → bar_hash) |
+| 80 | All `INDEX`-type instruments use `IDX_I` (NSE) or `BSE_I` (BSE) segments |
+
