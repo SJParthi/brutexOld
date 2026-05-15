@@ -13,13 +13,19 @@ _Last updated: 2026-05-15._
 | Input | Source | Cardinality |
 |---|---|---|
 | Underlying | Track 2 universe (NIFTY, BANKNIFTY, SENSEX) | 3 |
-| Expiry cycle | WEEK + MONTH per underlying (per §2 of TRACK2_OPTIONS_SPEC.md) | 4 active streams |
-| Strike position | ATM-10 .. ATM+10 | 21 per stream |
-| Option type | CE + PE | 2 per strike |
-| Timeframe | 1 minute ONLY | 1 |
-| Date range | 2021-01-01 → today | rolling |
+| Expiry cycle | WEEK + MONTH per underlying with per-regime gating (per §2 of TRACK2_OPTIONS_SPEC.md) | **6 active streams** |
+| Strike | `ATM`, `ATM+1..+10`, `ATM-1..-10` (string sent to API) | 21 per stream |
+| Option type | `CALL` + `PUT` (sent as `drvOptionType`) | 2 per strike |
+| Timeframe | 1 minute ONLY (`interval: 1`) | 1 |
+| Date range | 2021-01-01 → today, per-stream date gating | rolling |
 
-Total active backfill series = 4 × 21 × 2 = **168**.
+Per-stream active window (from `TRACK2_OPTIONS_SPEC.md §2`):
+- NIFTY-WEEK + NIFTY-MONTH: 2021-01-01 → today
+- BANKNIFTY-WEEK: 2021-01-01 → **2024-11-13** (SEBI killed)
+- BANKNIFTY-MONTH: 2021-01-01 → today
+- SENSEX-WEEK + SENSEX-MONTH: **2023-05-15** → today (BSE re-launched May 2023)
+
+Total active backfill series = 6 × 21 × 2 = **252**.
 
 ---
 
@@ -35,16 +41,18 @@ $BRUTEX_LAKE/
 │   ├── options/                                    ← Track 2 (NEW)
 │   │   ├── NSE_FNO/OPTIDX/NIFTY/
 │   │   │   ├── WEEK/
-│   │   │   │   ├── ATM-10/CE/2024/05.parquet
-│   │   │   │   ├── ATM-10/PE/2024/05.parquet
-│   │   │   │   ├── ATM-9/CE/2024/05.parquet
+│   │   │   │   ├── ATM-10/CALL/2024/05.parquet
+│   │   │   │   ├── ATM-10/PUT/2024/05.parquet
+│   │   │   │   ├── ATM-9/CALL/2024/05.parquet
 │   │   │   │   ├── …  (21 strikes × 2 types = 42 partitions)
 │   │   │   └── MONTH/
 │   │   │       └── (same shape as WEEK)
 │   │   ├── NSE_FNO/OPTIDX/BANKNIFTY/
-│   │   │   └── MONTH/(same shape; NO WEEK — SEBI killed it)
+│   │   │   ├── WEEK/  (populated 2021-01-01 → 2024-11-13; dormant thereafter)
+│   │   │   └── MONTH/ (continuous)
 │   │   └── BSE_FNO/OPTIDX/SENSEX/
-│   │       └── WEEK/(same shape; MONTH derived from last-Thursday-of-month)
+│   │       ├── WEEK/  (populated 2023-05-15 onwards)
+│   │       └── MONTH/ (populated 2023-05-15 onwards)
 │   │
 │   └── reference/                                  ← shared
 │       ├── risk_free_rate.parquet                 (60-row 5y monthly)
@@ -88,7 +96,12 @@ Compressed with ZSTD at level 3. Per-row ≈ 50 bytes after compression.
 
 ### Per-(stream, strike, type) watermark
 
-`$BRUTEX_LAKE/watermark/options_ingest.json` is a single file with 168 rows, one per series:
+`$BRUTEX_LAKE/watermark/options_ingest.json` is a single file with **252 rows**, one per series.
+
+Each row also carries the `active_window` (start_date, end_date) so the
+state machine can determine when the series is "permanently dormant"
+(e.g., BANKNIFTY-WEEK after 2024-11-13) vs simply "no fresh data yet
+today" (transient). Dormant series do not trigger doctor RED:
 
 ```json
 {
@@ -161,27 +174,32 @@ recovery test exercises this).
 | Response bytes (JSON, uncompressed) | ~1 MB (8 arrays × 11,250 × ~10 bytes) |
 | Compressed (gzip in-flight) | ~250 KB |
 
-### 5-year backfill
+### 5-year backfill (with per-stream date gating)
+
+| Stream | Window | Days | Chunks/series | Calls (× 42 series) |
+|---|---|---|---|---|
+| NIFTY-WEEK    | 2021-01-01 → today | ~1,960 | 65 | 2,730 |
+| NIFTY-MONTH   | 2021-01-01 → today | ~1,960 | 65 | 2,730 |
+| BANKNIFTY-WEEK| 2021-01-01 → 2024-11-13 | ~1,410 | 47 | 1,974 |
+| BANKNIFTY-MONTH| 2021-01-01 → today | ~1,960 | 65 | 2,730 |
+| SENSEX-WEEK   | 2023-05-15 → today | ~735 | 25 | 1,050 |
+| SENSEX-MONTH  | 2023-05-15 → today | ~735 | 25 | 1,050 |
+| | | | **Total calls** | **~12,300** |
 
 | Quantity | Value |
 |---|---|
-| Days in 5y (calendar) | ~1,825 |
-| Chunks per series (30-day chunks) | 1,825 / 30 = ~61 |
-| Series total | 168 |
-| **Total backfill calls** | **168 × 61 = 10,248** |
 | Effective rate (3 r/s cap) | 3 calls/sec |
-| Backfill wall time | 10,248 / 3 = 3,416 sec = **~57 minutes** |
-| Daily quota used | 10,248 / 100,000 = **10.2%** (one-time; below cap) |
+| Backfill wall time | 12,300 / 3 = 4,100 sec = **~68 minutes** |
+| Daily quota used | 12,300 / 100,000 = **12.3%** (one-time; below cap) |
 
 ### Daily incremental
 
 | Quantity | Value |
 |---|---|
-| Calls per day per series | 1 (yesterday only) |
-| Series total | 168 |
-| Daily call count | 168 |
-| Daily quota used | 168 / 100,000 = **0.17%** |
-| Daily wall time | 168 / 3 = 56 sec |
+| Active series on a typical post-Nov-2024 day | 210 (252 total − 42 BN-WEEK dormant) |
+| Calls per day | 210 |
+| Daily quota used | 210 / 100,000 = **0.21%** |
+| Daily wall time | 210 / 3 = 70 sec |
 
 Well below quota in both modes.
 

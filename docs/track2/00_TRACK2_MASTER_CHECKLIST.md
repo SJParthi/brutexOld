@@ -40,7 +40,7 @@ proceeds in parallel.
 | 1-minute timeframe ONLY (no resampling) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §4 |
 | ATM ± 10 strike radius (Dhan-enforced) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §5 |
 | Current expiry only at sweep time (week + month per underlying) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §6 |
-| 4 backfill streams (NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-MONTH, SENSEX-WEEK) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §7 |
+| **6 backfill streams** with per-regime date gating (NIFTY-WEEK/MONTH, BANKNIFTY-WEEK [2021→Nov 2024]/BANKNIFTY-MONTH, SENSEX-WEEK/MONTH [2023-05-15 onwards]) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §2 |
 | IV from Dhan; delta/gamma/theta/vega computed by BruteX (Black-Scholes) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §8 |
 | Storage layout: `options/<exch>/<segment>/<underlying>/<cycle>/ATM<offset>/<type>/<year>/<month>.parquet` | 🔒 locked | `TRACK2_DATA_INGEST_DESIGN.md` §3 |
 | Money: int64 paisa everywhere (same as Track 1) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §11 |

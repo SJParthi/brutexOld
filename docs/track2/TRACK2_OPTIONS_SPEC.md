@@ -79,81 +79,140 @@ For every (underlying, expiry, day):
 Dhan's `/charts/rollingoption` API enforces `strikePosition ∈ [-10, +10]`.
 No silent expansion beyond that.
 
-### Expiry cycles (locked, per SEBI mandates as of 2026-05-15)
+### Expiry cycle history — 5y backfill window 2021-01-01 → 2026-05-15
 
-| Underlying | Weekly expiry | Monthly expiry | Notes |
+The historical window spans multiple SEBI/NSE/BSE regime changes.
+**Backfill must respect per-regime date gating** — a single "current
+day-of-week" mapping is wrong for the 5y window.
+
+#### NIFTY 50 (NSE_FNO)
+| Period | Weekly day | Monthly day | Source |
 |---|---|---|---|
-| NIFTY 50 | **Tuesday** | Last Tuesday of month | SEBI mandate Sep 2025; pre-Sep-2025 weekly was Thursday |
-| BANKNIFTY | ❌ **NONE** (killed Nov 2024) | Last Tuesday of month | SEBI mandate Nov 2024; weekly contracts stopped |
-| SENSEX | **Thursday** | Last Thursday of month | SEBI mandate Sep 2025; pre-Sep-2025 weekly was Tuesday |
+| 2021-01-01 → 2025-08-28 | Thursday | Last Thursday | NSE; SEBI/NSE FAOP circulars |
+| 2025-09-01 → today | **Tuesday** | Last Tuesday | SEBI circular 26-May-2025; first Tue cycle Sep 2, 2025 |
 
-Resulting **4 backfill streams** (one row = one rollingoption series
-to backfill):
+#### BANKNIFTY (NSE_FNO)
+| Period | Weekly day | Monthly day | Source |
+|---|---|---|---|
+| 2021-01-01 → 2023-09-05 | Thursday | Last Thursday | NSE |
+| 2023-09-06 → 2024-11-13 | **Wednesday** | Last Wednesday | NSE circular FAOP56619 |
+| 2024-11-13 → today | ❌ **KILLED** | Last Wed → Last Thu → Last Tue | SEBI/HO/MRD/TPD-1/P/CIR/2024/132 (Oct 1, 2024); last weekly expiry Nov 13, 2024 |
 
-| Stream | Underlying | Expiry cycle | Strike radius | Types | Series count per day |
+#### SENSEX (BSE_FNO)
+| Period | Weekly day | Monthly day | Source |
+|---|---|---|---|
+| 2021-01-01 → 2023-05-14 | ❌ **NOT TRADABLE** (UNVERIFIED — operator running independent check) | n/a | BSE Sensex options relaunched May 15, 2023 — single-source Business Standard; cross-verification pending |
+| 2023-05-15 → 2024-12-31 | Friday | Last Friday | BSE |
+| 2025-01-01 → 2025-08-31 | Tuesday | Last Tuesday | BSE BFX circular Jan-2025 |
+| 2025-09-01 → today | **Thursday** | Last Thursday | SEBI Sep 2025 reshuffle |
+
+### Resulting **6 backfill streams** (with date-range gating)
+
+| # | Stream | Underlying | Cycle | Active window | Total trading days |
 |---|---|---|---|---|---|
-| 1 | NIFTY | WEEK | ATM ± 10 | CE+PE | 42 |
-| 2 | NIFTY | MONTH | ATM ± 10 | CE+PE | 42 |
-| 3 | BANKNIFTY | MONTH | ATM ± 10 | CE+PE | 42 |
-| 4 | SENSEX | WEEK | ATM ± 10 | CE+PE | 42 |
+| 1 | NIFTY-WEEK    | NIFTY     | WEEK  | 2021-01-01 → today | ~1,250 |
+| 2 | NIFTY-MONTH   | NIFTY     | MONTH | 2021-01-01 → today | ~1,250 |
+| 3 | BANKNIFTY-WEEK| BANKNIFTY | WEEK  | 2021-01-01 → **2024-11-13** | ~960 |
+| 4 | BANKNIFTY-MONTH| BANKNIFTY| MONTH | 2021-01-01 → today | ~1,250 |
+| 5 | SENSEX-WEEK   | SENSEX    | WEEK  | **2023-05-15** → today | ~700 |
+| 6 | SENSEX-MONTH  | SENSEX    | MONTH | **2023-05-15** → today | ~700 |
 
-A SENSEX MONTH stream is NOT separately backfilled — the SENSEX
-monthly contract IS the last Thursday SENSEX WEEK contract by
-convention. Phase 2 verifies this against Dhan's expiry calendar.
+Each stream backfills 21 strikes (ATM ± 10) × 2 types (CALL + PUT) = 42
+series. **Total active series = 6 × 42 = 252.**
 
-A BANKNIFTY WEEK stream does NOT exist (SEBI killed it Nov 2024).
+Day-of-week regime changes within a stream are NOT separately
+backfilled — Dhan's rolling endpoint automatically follows whatever
+day-of-week was the active expiry on each historical date.
+
+> **Decision rationale (operator pushback 2026-05-15):** earlier Phase 0
+> draft had only 4 streams (no BANKNIFTY-WEEK, no SENSEX-MONTH).
+> Operator correctly flagged that BANKNIFTY weekly DID exist 2021→
+> Nov 2024 — dropping it loses ~3.9 years of high-volume BN weekly data.
+> Storage agent confirmed: the +3 GB / +43 min cost of 6 vs 4 streams
+> is negligible; the strategy-flexibility gain (full W vs M A/B + BN
+> monthly-only regime 2021-2024 preserved) is material.
+>
+> An even simpler "current-expiry-only" model (3 streams, one per
+> underlying) was considered but rejected: the API requires explicit
+> `expiryFlag` (WEEK|MONTH) — there is no auto-current mode. See §3.
 
 ---
 
-## 3. Endpoint (locked)
+## 3. Endpoint (locked, corrected 2026-05-15 against Dhan SDK source)
 
-### `POST /v2/charts/rollingoption` (Dhan v2)
+### `POST /v2/charts/rollingoption` (Dhan v2; SDK function `expired_options_data`)
 
-Verified from the Dhan official Python SDK source
-(`dhanhq.sdk.dhanhq:get_charts_rollingoption`) on 2026-05-15.
+Field names verified from the Dhan official Python SDK source
+(`src/dhanhq/_historical_data.py:expired_options_data`) and Dhan v2
+docs at `https://dhanhq.co/docs/v2/expired-options-data/` on 2026-05-15.
 
 #### Request body
 
 ```json
 {
-  "underlying": "NIFTY",          // or "BANKNIFTY" or "SENSEX"
-  "exchangeSegment": "NSE_FNO",   // or "BSE_FNO" for SENSEX
-  "instrument": "OPTIDX",
-  "expiryCycle": "WEEK",          // or "MONTH"
-  "optionType": "CE",             // or "PE"
-  "strikePosition": -10,          // int, -10..+10 (ATM-relative)
-  "fromDate": "2024-05-01",       // YYYY-MM-DD IST
-  "toDate":   "2024-05-30",       // YYYY-MM-DD IST (≤ 30 days span)
-  "interval": "1"                 // 1-minute ONLY for Track 2
+  "securityId": "13",              // underlying security ID — 13 / 25 / 51
+  "exchangeSegment": "NSE_FNO",    // or "BSE_FNO" for SENSEX
+  "instrument": "OPTIDX",          // index options
+  "expiryFlag": "WEEK",            // "WEEK" or "MONTH" — SDK validator enforces
+  "expiryCode": 0,                 // int 0/1/2/3 — current + 3 forward cycles
+  "strike": "ATM",                 // string "ATM" / "ATM+1" .. "ATM+10" / "ATM-1" .. "ATM-10"
+  "drvOptionType": "CALL",         // "CALL" or "PUT" — NOT "CE"/"PE"
+  "requiredData": ["open","high","low","close","volume","iv","oi","spot","strike"],
+  "fromDate": "2024-05-01",        // YYYY-MM-DD IST
+  "toDate":   "2024-05-30",        // YYYY-MM-DD IST (≤ 30 days span)
+  "interval": 1                    // int 1 / 5 / 15 / 25 / 60 — Track 2 uses 1 ONLY
 }
 ```
 
-#### Response body (1-minute bars, IST trading hours)
+**Strike-radius rule (Dhan-enforced):**
+- Index near-expiry: ATM ± 10
+- Index non-near-expiry (`expiryCode ≥ 1`): ATM ± 3 only
+- Stock options: ATM ± 3 (out of Track 2 scope)
+
+#### Response body
 
 ```json
 {
-  "open":      [...float...],     // option premium open
-  "high":      [...float...],
-  "low":       [...float...],
-  "close":     [...float...],
-  "volume":    [...int...],
-  "open_interest": [...int...],
-  "implied_volatility": [...float...],
-  "timestamp": [...epoch_seconds_IST...]
+  "data": {
+    "ce": {
+      "open":      [...float...],
+      "high":      [...float...],
+      "low":       [...float...],
+      "close":     [...float...],
+      "volume":    [...int...],
+      "iv":        [...float...],   // implied volatility, fraction (0.2 = 20%)
+      "oi":        [...int...],     // open interest, lots
+      "spot":      [...float...],   // underlying spot at the same bar
+      "strike":    [...float...],   // absolute strike of the contract at this bar (rolls with ATM)
+      "timestamp": [...epoch_seconds...]   // UNIX epoch seconds (timezone-neutral)
+    },
+    "pe": null    // null when drvOptionType=CALL; populated when drvOptionType=PUT
+  }
 }
 ```
 
-Arrays are parallel; index `i` corresponds to the same 1m bar.
+Arrays parallel-indexed; index `i` = same 1m bar across all 10 arrays.
+
+**Per-bar `strike` array confirms ATM-rolling semantics:** the contract
+that backs `strike="ATM+5"` at bar `i=100` may not be the same
+contract that backs it at bar `i=1000` — the rolling endpoint stitches
+across contracts as the underlying spot moves and ATM shifts. The
+per-bar `strike` value tells us which absolute strike the bar refers to.
 
 #### Coverage window
 
 - Up to **30 days per call** (Dhan-enforced).
-- **5y backfill** (Track 2 default range): we'll page over 30-day chunks.
+- **5y backfill** (Track 2 default range): page over 30-day chunks.
+- Per-underlying validity windows (see §2): SENSEX options only exist
+  2023-05-15 onwards; BANKNIFTY-WEEK only exists 2021-01-01 → 2024-11-13.
 
 #### Rate limit
 
-Same Dhan data-API limit as Track 1: **5 req/s + 100K/day**. Adapter
-caps at 3 r/s effective (5 × 0.6 safety factor, same as Track 1).
+**5 req/s + 100,000/day** (Dhan freshdesk article; same as Track 1
+Data APIs). A newer Dhan support article says "10 r/s for Data APIs"
+but the historical-data subset remained 5 r/s; we use the conservative
+limit. Adapter caps at **3 r/s effective** (5 × 0.6 safety factor,
+shared token bucket with Track 1).
 
 ---
 
@@ -190,21 +249,26 @@ The ATM strike for an underlying at any 1-minute bar is the strike
 
 (Strike steps are Dhan-published; smoke test verifies them quarterly.)
 
-### ATM-relative offsets
+### ATM-relative offsets (sent as a STRING — verified)
 
-`strikePosition = +5` means "5 strike steps above ATM at the bar in
+`strike="ATM+5"` means "5 strike steps above ATM at the bar in
 question." For NIFTY at spot 25,012:
 
 - ATM strike = 25,000 (round-to-nearest)
-- `strikePosition=0` → strike 25,000
-- `strikePosition=+5` → strike 25,250 (= 25,000 + 5 × 50)
-- `strikePosition=-3` → strike 24,850 (= 25,000 − 3 × 50)
+- `strike="ATM"` → strike 25,000
+- `strike="ATM+5"` → strike 25,250 (= 25,000 + 5 × 50)
+- `strike="ATM-3"` → strike 24,850 (= 25,000 − 3 × 50)
 
-**The /charts/rollingoption endpoint stitches across actual contracts**
-behind the scenes — when ATM rolls from 25,000 to 25,050, the
-`strikePosition=0` series automatically jumps to whatever contract is
-the new ATM. The discontinuity is data-encoded as a NaN row or a
-fresh-OHLC bar; Phase 2 quantifies which.
+Valid string values: `ATM`, `ATM+1`..`ATM+10`, `ATM-1`..`ATM-10`
+(21 strikes for index near-expiry).
+
+**The endpoint stitches across actual contracts behind the scenes:**
+when ATM rolls from 25,000 to 25,050, the `strike="ATM"` series
+automatically jumps to whatever contract is the new ATM. The response's
+**per-bar `strike` array** records the absolute strike at each bar —
+this is how we detect rollover boundaries deterministically. No NaN
+needed: a rollover is detected when `strike[i] ≠ strike[i-1]` for
+adjacent bars with `bar_ts[i] = bar_ts[i-1] + 60_000_000` (one minute).
 
 ---
 
@@ -295,27 +359,63 @@ Sweep cardinality = 5 × 4 × 4 = 80 slippage profiles per (signal, strike, expi
 
 ---
 
-## 10. Storage estimate
+## 10. Storage + backfill estimate (revised after 3-agent verification)
 
-Per the Phase 0 storage agent (2026-05-15):
+Per the Phase 0 storage + history-timeline + API agents (all 2026-05-15):
 
-| Dimension | Count |
+### Series count
+
+| Stream | Underlying | Cycle | Active days in window | Strikes × Types | Series |
+|---|---|---|---|---|---|
+| 1 | NIFTY     | WEEK  | ~1,250 | 21 × 2 | 42 |
+| 2 | NIFTY     | MONTH | ~1,250 | 21 × 2 | 42 |
+| 3 | BANKNIFTY | WEEK  | ~960   | 21 × 2 | 42 |
+| 4 | BANKNIFTY | MONTH | ~1,250 | 21 × 2 | 42 |
+| 5 | SENSEX    | WEEK  | ~700   | 21 × 2 | 42 |
+| 6 | SENSEX    | MONTH | ~700   | 21 × 2 | 42 |
+| | | | **Total active series** | | **252** |
+
+### Backfill calls + wall time
+
+| Quantity | Calculation | Value |
+|---|---|---|
+| Calendar days in window | 2021-01-01 → 2026-05-15 | ~1,960 |
+| Chunks per series (30-day chunks) | Per-stream window / 30 | NIFTY: 65 / BN-WEEK: 47 / SENSEX: 25 |
+| Calls — NIFTY (2 streams) | 42 × 65 × 2 | 5,460 |
+| Calls — BANKNIFTY-WEEK | 42 × 47 | 1,974 |
+| Calls — BANKNIFTY-MONTH | 42 × 65 | 2,730 |
+| Calls — SENSEX (2 streams) | 42 × 25 × 2 | 2,100 |
+| **Total backfill calls** | | **~12,300** |
+| Effective rate (3 r/s cap) | adapter shared token bucket | 3 calls/sec |
+| Backfill wall time | 12,300 / 3 = 4,100 sec | **~68 minutes** |
+| Daily quota used | 12,300 / 100,000 | **12.3%** (one-time, below cap) |
+
+### Storage
+
+| Quantity | Value |
 |---|---|
-| Streams | 4 (NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-MONTH, SENSEX-WEEK) |
-| Strikes per stream | 21 (ATM ± 10) |
-| Types per strike | 2 (CE, PE) |
-| Series per stream | 21 × 2 = 42 |
-| Total series | 4 × 42 = **168** |
 | Bars per trading day | 375 (09:15–15:30 IST, 1-minute) |
-| Trading days in 5y | ~1,250 (5y × 250) |
-| Bars per series per 5y | 375 × 1,250 = **468,750** |
-| Bytes per bar (with Greeks) | ~50 (compressed Parquet, ZSTD) |
-| Bytes per series per 5y | 468,750 × 50 = 23.4 MB |
-| Total storage (5y, 168 series) | 168 × 23.4 MB = **3.93 GB** |
+| Bytes per bar (Parquet ZSTD, 16 columns) | ~50 |
+| Bytes per series (NIFTY active 5y) | 375 × 1,250 × 50 = 23.4 MB |
+| Bytes per series (BN-WEEK active ~4y) | 375 × 960 × 50 = 18 MB |
+| Bytes per series (SENSEX ~3y) | 375 × 700 × 50 = 13 MB |
+| Total: NIFTY 2 streams × 42 series × 23.4 MB | 1.97 GB |
+| Total: BANKNIFTY WEEK 42 × 18 MB | 0.76 GB |
+| Total: BANKNIFTY MONTH 42 × 23.4 MB | 0.98 GB |
+| Total: SENSEX 2 streams × 42 series × 13 MB | 1.09 GB |
+| **Total options lake (5y, 252 series)** | **~4.8 GB** |
 
-This is a small fraction of disk; 2 TB on the M4 Pro external SSD is
-plenty. Track 1 spot lake (~80 MB) + Track 2 options lake (~4 GB) ≈
-4.1 GB total. Compute lake (results.parquet) is the dominant disk user.
+### Daily incremental (post-backfill)
+
+| Quantity | Value |
+|---|---|
+| Active series on a given day (excludes BN-WEEK after Nov 2024) | 210 (252 minus 42 dormant BN-WEEK) |
+| Calls per day | 210 |
+| Daily quota used | 210 / 100,000 = **0.21%** |
+| Daily wall time | 210 / 3 = 70 sec |
+
+Total disk: Track 1 spot lake (~80 MB) + Track 2 options lake (~4.8 GB)
+≈ 4.9 GB. Compute lake (results.parquet) is the dominant disk user.
 
 ---
 
