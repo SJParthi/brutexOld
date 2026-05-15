@@ -61,7 +61,7 @@ proceeds in parallel.
 - **Exit:** 11 new property invariants (options-specific) + 2 new oracle tests pass against a fake adapter.
 
 ### Phase 2 — Dhan options adapter (BLOCKED on Track 1 Phase 2)
-- **Goal:** Real `/v2/charts/rollingoption` calls, **6-stream** backfill (~15,624 calls / ~87 min wall time / ~5.1 GB storage), daily incremental.
+- **Goal:** Real `/v2/charts/rollingoption` calls, **6-stream** backfill (~15,876 calls / ~88 min wall time / ~5.5 GB storage), daily incremental.
 - **Exit:** 5y backfill green; daily incremental + bar_hash audit chain unbroken; `brutex doctor` C12 (options-fresh) added.
 
 ### Phase 3 — Options backtest engine

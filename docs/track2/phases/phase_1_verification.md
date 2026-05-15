@@ -90,10 +90,17 @@ tests/contract/test_rollingoption_schema.py
 tests/golden/options_replay_fixture.json
 ```
 
-## Decisions to lock (#221-#230 estimated)
+## Decisions to lock (#241-#250 estimated)
 
-- #221 — 11 Track 2 invariants land in CI
-- #222 — 2 Track 2 oracles land in CI
-- #223 — FakeRollingOptionAdapter shipped + smoke gate
-- #224 — Rust BSM kernel in `fno-math::bsm` (Phase 2 will wire PyO3)
-- #225-#230 — TBD during implementation
+> Numbering note: SPEC §17 (#200-#220) + OPERATIONAL_GUARANTEES §11
+> (#221-#230) + Phase 2 (#231-#240) precede this range — architect
+> review caught the prior #221-#230 collision. Phase 1 takes #241+.
+
+- #241 — 12 Track 2 invariants land in CI (P-O1 .. P-O12)
+- #242 — 2 Track 2 oracles land in CI (O-O1 options replay, O-O2 BSM-vs-py_vollib)
+- #243 — FakeRollingOptionAdapter shipped + smoke gate
+- #244 — Rust BSM kernel in `fno-math::bsm` with versioned API (Phase 2 wires PyO3)
+- #245 — Contract test C-2: expiryFlag enforcement against live API (validator vs server)
+- #246 — Contract test C-3: expiryCode=0 semantics on historical fromDate
+- #247 — Contract test C-4: withdrawn-Monday-window response shape (Mar-Apr 2025)
+- #248-#250 — TBD during implementation

@@ -96,8 +96,8 @@ LOCKED TRACK 2 SCOPE (do NOT silently change):
 - Timeframe: 1m ONLY (no resampling for options).
 - Greeks: IV from Dhan; delta/gamma/theta/vega computed by BruteX
   using Black-Scholes-Merton.
-- Storage: ~5.1 GB for 5y across all 6 streams.
-- Backfill: ~15,624 API calls, ~87 min wall time, 15.6% of daily quota (one-time).
+- Storage: ~5.5 GB for 5.37y across all 6 streams.
+- Backfill: ~15,876 API calls, ~88 min wall time, 15.9% of daily quota (one-time).
 
 DELIVERY EXPECTATIONS:
 
@@ -181,7 +181,7 @@ These are LOCKED. The new session must NOT change them without user approval:
 - 1-minute timeframe ONLY (no resampling)
 - ATM ± 10 strike radius (Dhan-enforced)
 - Current expiry at sweep time (week + month per underlying)
-- 4 backfill streams (NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-MONTH, SENSEX-WEEK)
+- **6 backfill streams** (NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-WEEK [active until 2024-11-13, dormant after], BANKNIFTY-MONTH, SENSEX-WEEK, SENSEX-MONTH; SENSEX extends back to 2021-01-01 per BSE Notice 20230327-65 with thin pre-2023-05-15 liquidity)
 - IV from Dhan; delta/gamma/theta/vega computed (Black-Scholes-Merton)
 - Money: int64 paisa everywhere
 - NO AWS — local M4 Pro only

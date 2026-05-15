@@ -76,19 +76,28 @@ $BRUTEX_LAKE/
 | `high` | `int64` (paisa) | |
 | `low` | `int64` (paisa) | |
 | `close` | `int64` (paisa) | |
-| `volume` | `int64` (lots) | Lot size per underlying (NIFTY 25, BANKNIFTY 15, SENSEX 10 — verified Phase 2) |
-| `open_interest` | `int64` (lots) | |
+| `volume` | `int64` (contracts) | Stored as **number of contracts**, NOT lots — see lot-size hostile-review fix in §13. Lot size at the date is keyed from `reference/lot_size_history.parquet` and applied in the engine. |
+| `open_interest` | `int64` (contracts) | Same lot-size policy as volume. |
 | `iv` | `float64` | Implied volatility from Dhan, fraction (0.2 = 20%) |
 | `delta` | `float64` | Computed BSM |
 | `gamma` | `float64` | Computed BSM |
 | `theta` | `float64` | Computed BSM (per-year; convert to per-day in engine) |
 | `vega` | `float64` | Computed BSM |
 | `spot_at_bar` | `int64` (paisa) | NIFTY/BANKNIFTY/SENSEX spot price at same `bar_ts` (foreign-keyed from Track 1 spot lake at ingest time) |
-| `strike` | `int64` (paisa) | Absolute strike for this bar (e.g., 25,000 NIFTY = 2,500,000 paisa) |
+| `strike_api` | `int64` (paisa) | Absolute strike as **returned by Dhan** in the rollingoption response — the contract that backs this bar. Rolls when ATM shifts. |
+| `strike_computed` | `int64` (paisa) | Engine-recomputed strike = `compute_absolute_strike(spot_at_bar, strikePosition, strike_step)`. **Invariant P-O12**: `strike_api == strike_computed` modulo Dhan's tie-break at midpoints (deviation must match `expected_tiebreak_table`). |
 | `time_to_expiry_us` | `int64` (microseconds) | (expiry_ts_at_15_30 − bar_ts) |
-| `bar_hash` | `bytes(8)` | SHA256-low-64-bits of (bar_ts ‖ ohlc ‖ iv ‖ spot ‖ strike); used in audit log |
+| `raw_bar_hash` | `bytes(8)` | SHA256-low-64-bits of (bar_ts ‖ ohlc ‖ iv ‖ spot_at_bar ‖ strike_api). Covers Dhan-returned raw data. Used in audit log for ingest replay. |
+| `cooked_bar_hash` | `bytes(8)` | SHA256-low-64-bits of (raw_bar_hash ‖ delta ‖ gamma ‖ theta ‖ vega ‖ bsm_kernel_version). Covers BSM-derived Greeks. Used in audit log for full-replay (oracle O-O1 checks BOTH hashes). |
 
 Compressed with ZSTD at level 3. Per-row ≈ 50 bytes after compression.
+
+> **Why two hashes?** Hostile review caught that a single hash over raw
+> data alone leaves replay oracle O-O1 blind to BSM kernel regressions
+> (a Greek-only refactor would silently change Parquet bytes while
+> `bar_hash` stays identical). Separating raw and cooked hashes lets the
+> oracle check both: raw-ingest determinism AND Greeks-compute
+> determinism, independently.
 
 ---
 
@@ -176,21 +185,25 @@ recovery test exercises this).
 
 ### 5-year backfill (with per-stream date gating)
 
-| Stream | Window | Days | Chunks/series | Calls (× 42 series) |
+> **Chunk count uses `ceil(window_days / 30)`**. Leftover partial windows
+> need a final call. Reality-check agent caught the prior floor-based
+> off-by-one (15,624 → 15,876).
+
+| Stream | Window | Cal days | Chunks/series (ceil) | Calls (× 42 series) |
 |---|---|---|---|---|
-| NIFTY-WEEK    | 2021-01-01 → today | ~1,960 | 65 | 2,730 |
-| NIFTY-MONTH   | 2021-01-01 → today | ~1,960 | 65 | 2,730 |
-| BANKNIFTY-WEEK| 2021-01-01 → 2024-11-13 | ~1,410 | 47 | 1,974 |
-| BANKNIFTY-MONTH| 2021-01-01 → today | ~1,960 | 65 | 2,730 |
-| SENSEX-WEEK   | **2021-01-01** → today | ~1,960 | 65 | 2,730 |
-| SENSEX-MONTH  | **2021-01-01** → today | ~1,960 | 65 | 2,730 |
-| | | | **Total calls** | **~15,624** |
+| NIFTY-WEEK    | 2021-01-01 → today | ~1,960 | 66 | 2,772 |
+| NIFTY-MONTH   | 2021-01-01 → today | ~1,960 | 66 | 2,772 |
+| BANKNIFTY-WEEK| 2021-01-01 → 2024-11-13 | ~1,412 | 48 | 2,016 |
+| BANKNIFTY-MONTH| 2021-01-01 → today | ~1,960 | 66 | 2,772 |
+| SENSEX-WEEK   | **2021-01-01** → today | ~1,960 | 66 | 2,772 |
+| SENSEX-MONTH  | **2021-01-01** → today | ~1,960 | 66 | 2,772 |
+| | | | **Total calls** | **~15,876** |
 
 | Quantity | Value |
 |---|---|
 | Effective rate (3 r/s cap) | 3 calls/sec |
-| Backfill wall time | 15,624 / 3 = 5,208 sec = **~87 minutes** |
-| Daily quota used | 15,624 / 100,000 = **15.6%** (one-time; below cap) |
+| Backfill wall time | 15,876 / 3 = 5,292 sec = **~88 minutes** |
+| Daily quota used | 15,876 / 100,000 = **15.9%** (one-time; below cap) |
 
 ### Daily incremental
 
@@ -236,32 +249,57 @@ post-process computes Greeks per bar:
 ```python
 def compute_greeks_for_chunk(chunk_parquet_path):
     df = pl.read_parquet(chunk_parquet_path)
+    # df already contains strike_api (Dhan-returned per-bar strike).
     spot_lake = read_track1_spot(df['bar_ts'])           # foreign-key join
     df = df.join(spot_lake, on='bar_ts', how='left')
-    df['strike'] = compute_absolute_strike(
+
+    # Compute engine's own strike from spot + strikePosition + step.
+    df['strike_computed'] = compute_absolute_strike(
         df['spot_at_bar'],
         underlying=…,
         strike_position=…,
         strike_step=STRIKE_STEPS[underlying],
     )
+    # P-O12 invariant — strike_api should match strike_computed
+    # modulo Dhan tie-break at exact midpoints. Phase 2 builds the
+    # tie-break exception table from observed midpoint cases.
+    assert_strike_invariant(df['strike_api'], df['strike_computed'],
+                            tiebreak_table=EXPECTED_TIEBREAKS[underlying])
+
     df['time_to_expiry_us'] = expiry_ts(…) - df['bar_ts']
     rf_rate = lookup_risk_free_rate(df['bar_ts'])         # 60-row monthly table
+
+    # Use strike_api (the contract that actually traded) for BSM,
+    # NOT strike_computed (engine's idea).
     df['delta'], df['gamma'], df['theta'], df['vega'] = fno_math.bsm.greeks(
         S=df['spot_at_bar'] / 100.0,                      # paisa → rupees
-        K=df['strike'] / 100.0,
+        K=df['strike_api'] / 100.0,
         T=df['time_to_expiry_us'] / (365.25 * 86400 * 1e6),
         r=rf_rate,
         sigma=df['iv'],
         q=0.0,
-        option_type=…,
+        option_type=…,                                    # 'CALL' or 'PUT'
     )
-    df['bar_hash'] = sha256_low64(df['bar_ts'] ‖ df['open'] ‖ … ‖ df['strike'])
+
+    # Two hashes — raw covers Dhan-returned bytes, cooked covers Greeks.
+    BSM_KERNEL_VERSION = fno_math.bsm.VERSION             # int, bumped on kernel change
+    df['raw_bar_hash'] = sha256_low64(
+        df['bar_ts'] ‖ df['open'] ‖ df['high'] ‖ df['low'] ‖ df['close']
+        ‖ df['volume'] ‖ df['open_interest'] ‖ df['iv']
+        ‖ df['spot_at_bar'] ‖ df['strike_api']
+    )
+    df['cooked_bar_hash'] = sha256_low64(
+        df['raw_bar_hash'] ‖ df['delta'] ‖ df['gamma']
+        ‖ df['theta'] ‖ df['vega'] ‖ BSM_KERNEL_VERSION
+    )
     df.write_parquet(chunk_parquet_path, compression='zstd')
 ```
 
-Output bar_hash is what goes into the audit chain. Replay oracle
-recomputes Greeks from raw input + spot lake; if anything is
-non-deterministic, replay diverges and CI fails.
+Audit log carries BOTH hashes. Replay oracle O-O1:
+- Re-runs ingest from same Dhan input + spot lake → `raw_bar_hash` must match
+- Re-runs Greeks compute with same BSM kernel version → `cooked_bar_hash` must match
+- If BSM kernel version is bumped, replay only re-validates raw; cooked is
+  reproducible-only-against-the-pinned-version (audit row records the version).
 
 ---
 
@@ -292,42 +330,56 @@ non-deterministic, replay diverges and CI fails.
 ### High-level driver
 
 ```python
-async def backfill_options(start_date, end_date):
+# All 6 streams with per-regime date gating (see §1).
+# Vocabulary: optionType ∈ {'CALL','PUT'} per Dhan SDK validator
+# (drvOptionType field) — NOT 'CE'/'PE'.
+async def backfill_options(global_start, global_end):
     streams = [
-        ('NIFTY',     'NSE_FNO', 'WEEK'),
-        ('NIFTY',     'NSE_FNO', 'MONTH'),
-        ('BANKNIFTY', 'NSE_FNO', 'MONTH'),
-        ('SENSEX',    'BSE_FNO', 'WEEK'),
+        # (underlying, securityId, exchange_segment, cycle, start, end)
+        ('NIFTY',     '13', 'NSE_FNO', 'WEEK',  '2021-01-01', None),
+        ('NIFTY',     '13', 'NSE_FNO', 'MONTH', '2021-01-01', None),
+        ('BANKNIFTY', '25', 'NSE_FNO', 'WEEK',  '2021-01-01', '2024-11-13'),
+        ('BANKNIFTY', '25', 'NSE_FNO', 'MONTH', '2021-01-01', None),
+        ('SENSEX',    '51', 'BSE_FNO', 'WEEK',  '2021-01-01', None),
+        ('SENSEX',    '51', 'BSE_FNO', 'MONTH', '2021-01-01', None),
     ]
     tasks = []
-    for underlying, segment, cycle in streams:
+    for underlying, sec_id, segment, cycle, w_start, w_end in streams:
+        stream_end = w_end or global_end
         for sp in range(-10, 11):                        # 21 strikes
-            for ot in ('CE', 'PE'):                      # 2 types
+            for ot in ('CALL', 'PUT'):                   # SDK-validated vocab
                 tasks.append(asyncio.create_task(
-                    backfill_series(underlying, segment, cycle, sp, ot,
-                                    start_date, end_date)
+                    backfill_series(underlying, sec_id, segment, cycle, sp, ot,
+                                    max(w_start, global_start), stream_end)
                 ))
     await asyncio.gather(*tasks)
 
-async def backfill_series(underlying, segment, cycle, sp, ot,
+def strike_label(sp: int) -> str:
+    """API takes strike as string 'ATM', 'ATM+1', …, 'ATM-10'."""
+    if sp == 0: return 'ATM'
+    return f"ATM{'+' if sp > 0 else ''}{sp}"
+
+async def backfill_series(underlying, sec_id, segment, cycle, sp, ot,
                           start_date, end_date):
-    key = f"{underlying}:{cycle}:{sp}:{ot}"
+    key = f"{underlying}:{cycle}:{sp:+d}:{ot}"          # e.g. "NIFTY:WEEK:+5:CALL"
     wm = load_watermark(key)
     cursor = wm['next_chunk_from'] or start_date
     while cursor < end_date:
         chunk_to = min(cursor + timedelta(days=30), end_date)
         try:
             async with rate_limiter:
-                resp = await dhan_client.charts_rollingoption(
-                    underlying=underlying,
-                    exchange_segment=segment,
+                resp = await dhan_client.expired_options_data(
+                    securityId=sec_id,
+                    exchangeSegment=segment,
                     instrument='OPTIDX',
-                    expiry_cycle=cycle,
-                    option_type=ot,
-                    strike_position=sp,
-                    from_date=cursor,
-                    to_date=chunk_to,
-                    interval='1',
+                    expiryFlag=cycle,                   # 'WEEK' or 'MONTH'
+                    expiryCode=0,                       # current cycle as of fromDate
+                    strike=strike_label(sp),            # 'ATM' / 'ATM+5' / 'ATM-3'
+                    drvOptionType=ot,                   # 'CALL' / 'PUT'
+                    requiredData=['open','high','low','close','volume','iv','oi','spot','strike'],
+                    fromDate=cursor.isoformat(),
+                    toDate=chunk_to.isoformat(),
+                    interval=1,                         # int per SDK
                 )
             df = parse_response(resp)
             df = validate_ohlc(df)              # P-O2, P-O3 invariants
@@ -408,16 +460,20 @@ def validate_ohlc(df):
 C12 OPTIONS_FRESH: every active series has watermark within 1 day of today (IST)
 ```
 
-Output format:
+Output format (5 active streams + 1 dormant after 2024-11-13):
 ```
 C12 OPTIONS_FRESH:
-  NIFTY:WEEK     CE×21  PE×21   last_ok=2026-05-14  (≤1d)  ✓ GREEN
-  NIFTY:MONTH    CE×21  PE×21   last_ok=2026-05-14  (≤1d)  ✓ GREEN
-  BANKNIFTY:MONTH CE×21 PE×21   last_ok=2026-05-14  (≤1d)  ✓ GREEN
-  SENSEX:WEEK    CE×21  PE×21   last_ok=2026-05-14  (≤1d)  ✓ GREEN
+  NIFTY:WEEK       CALL×21  PUT×21   last_ok=2026-05-14  (≤1d)  ✓ GREEN
+  NIFTY:MONTH      CALL×21  PUT×21   last_ok=2026-05-14  (≤1d)  ✓ GREEN
+  BANKNIFTY:WEEK   CALL×21  PUT×21   last_ok=2024-11-13  DORMANT (SEBI killed)  ◌ SKIP
+  BANKNIFTY:MONTH  CALL×21  PUT×21   last_ok=2026-05-14  (≤1d)  ✓ GREEN
+  SENSEX:WEEK      CALL×21  PUT×21   last_ok=2026-05-14  (≤1d)  ✓ GREEN
+  SENSEX:MONTH     CALL×21  PUT×21   last_ok=2026-05-14  (≤1d)  ✓ GREEN
 ```
 
-RED if any series has `last_ok_to_date < today − 1 day` OR state ≠ IDLE.
+RED if any non-dormant series has `last_ok_to_date < today − 1 day`
+OR state ≠ IDLE. DORMANT series (BN-WEEK post-2024-11-13) are SKIP,
+not RED.
 
 ---
 
@@ -429,18 +485,18 @@ RED if any series has `last_ok_to_date < today − 1 day` OR state ≠ IDLE.
 def test_options_smoke():
     """≤30s smoke: fake adapter returns 1 day × 1 series; verify pipeline."""
     fake = FakeRollingOptionAdapter(
-        series={('NIFTY','WEEK',0,'CE'): synthetic_bars(date='2024-05-13')}
+        series={('NIFTY','WEEK',0,'CALL'): synthetic_bars(date='2024-05-13')}
     )
     asyncio.run(backfill_options(
         adapter=fake,
         start_date=date(2024,5,13),
         end_date=date(2024,5,13),
-        streams=[('NIFTY','NSE_FNO','WEEK',0,'CE')],
+        streams=[('NIFTY','13','NSE_FNO','WEEK',0,'CALL')],
     ))
     # Assert partition exists, audit row appended, watermark updated.
-    assert Path(LAKE / 'data/options/NSE_FNO/OPTIDX/NIFTY/WEEK/ATM-0/CE/2024/05.parquet').exists()
+    assert Path(LAKE / 'data/options/NSE_FNO/OPTIDX/NIFTY/WEEK/ATM/CALL/2024/05.parquet').exists()
     assert audit_chain_intact()
-    assert load_watermark('NIFTY:WEEK:0:CE')['last_ok_to_date'] == '2024-05-13'
+    assert load_watermark('NIFTY:WEEK:+0:CALL')['last_ok_to_date'] == '2024-05-13'
 ```
 
 ---
@@ -461,12 +517,16 @@ def test_options_smoke():
 These are ingest-design decisions specifically (will append to MIGRATION.md):
 
 - Storage layout: `options/<exchange>/<segment>/<underlying>/<cycle>/ATM<offset>/<type>/<YYYY>/<MM>.parquet`
-- Watermark file: single JSON with 252 rows (one per series)
-- Audit kinds: `OPT_INGEST_CHUNK_OK/ERR`, `OPT_GREEK_COMPUTED`, `OPT_BACKTEST_ENTRY/EXIT`
+- Strike folder name: `ATM` for ATM, `ATM+N` / `ATM-N` for offsets (matches API `strike` string)
+- Option type folder name: `CALL` / `PUT` (matches API `drvOptionType`)
+- Watermark file: single JSON with 252 rows (one per series); watermark key format `"<underlying>:<cycle>:<+N|-N|+0>:<CALL|PUT>"`
+- Audit kinds: `OPT_INGEST_CHUNK_OK/ERR`, `OPT_GREEK_COMPUTED`, `OPT_BACKTEST_ENTRY/EXIT` — payload uses CALL/PUT (NOT CE/PE)
 - Concurrency: per-series asyncio task; 3 r/s shared token bucket
-- Greeks computed inline at chunk-write time (not lazy)
-- Risk-free rate table: 60-row 5y monthly snapshot in `reference/risk_free_rate.parquet`
-- Strike grid: hardcoded per-underlying in `brutex/options/strike_grid.py` (NIFTY 50, BANKNIFTY 100, SENSEX 100)
-- Lot size: hardcoded per-underlying in `brutex/options/lot_size.py` (verified Phase 2 against Dhan master CSV)
-- Doctor adds C12 OPTIONS_FRESH check
+- **Audit log append serialization (hostile-review fix):** all audit appends pass through a single asyncio writer task — `audit_writer_task` consumes from an `asyncio.Queue` and writes serially. flock is for cross-process protection only. Replay oracle O-O1 sorts replayed rows by `(stream, chunk_from)` to remove asyncio-scheduler nondeterminism.
+- Greeks computed inline at chunk-write time (not lazy); two-hash design (`raw_bar_hash` + `cooked_bar_hash`) ensures replay catches BSM kernel regressions
+- Risk-free rate table: 60-row 5y monthly snapshot in `reference/risk_free_rate.parquet`. **Lookup is step-function (no interpolation)** — bar at `bar_ts` uses the row for `floor(bar_ts, month)`. Replay oracle locks this policy.
+- Strike grid: hardcoded per-underlying in `brutex/options/strike_grid.py` (NIFTY 50, BANKNIFTY 100, SENSEX 100), **with date-keyed override support** (Phase 2 verifies historical stability against Dhan master CSV snapshots; emits ADR if any step changed in 2021-2026)
+- **Lot size: date-keyed table `reference/lot_size_history.parquet`** — NOT hardcoded per-underlying. SEBI revised NIFTY lot size 50→75 Nov 2024 and BANKNIFTY lot size multiple times in 2022-2024; per-bar `volume`/`open_interest` are stored as **contract count** (independent of lot size), engine looks up lot size for P&L conversion. (Hostile review caught: hardcoded once would silently corrupt P&L reconstruction across lot-size revision dates.)
+- **Expiry-day theta policy:** bars with `time_to_expiry_us < 1 minute` (i.e., the 15:29:00 → 15:30:00 bar on expiry day) **clamp T at 1 minute** for Greeks computation to avoid divergence. Bars themselves are stored (not NaN). This policy is recorded in the audit chain via `BSM_KERNEL_VERSION`.
+- Doctor adds C12 OPTIONS_FRESH check (5 active + 1 dormant for BN-WEEK)
 - Smoke test against FakeRollingOptionAdapter < 30 sec

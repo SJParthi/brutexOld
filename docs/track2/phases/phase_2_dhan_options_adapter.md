@@ -34,7 +34,7 @@ C12 OPTIONS_FRESH check.
 - [ ] `brutex/data/options_partitioner.py` — write to `data/options/<exch>/<segment>/<underlying>/<cycle>/ATM<offset>/<type>/<YYYY>/<MM>.parquet`
 - [ ] `brutex/orchestrator/options_state.py` — watermark + state-machine transitions
 - [ ] Audit kinds `OPT_INGEST_CHUNK_OK/ERR` wired
-- [ ] 5y backfill green on real Dhan against all **6 streams** (~87 min wall time, ~15,624 calls; ~5.1 GB storage)
+- [ ] 5y backfill green on real Dhan against all **6 streams** (~88 min wall time, ~15,876 calls; ~5.5 GB storage)
 
 ### Week 2 — Greeks + incremental + doctor
 
@@ -64,7 +64,7 @@ C12 OPTIONS_FRESH check.
 
 ## Exit criteria
 
-- [ ] 5y options lake live (~5.1 GB)
+- [ ] 5y options lake live (~5.5 GB)
 - [ ] Daily incremental runs in < 60 sec
 - [ ] All 252 series tracked by watermark
 - [ ] Doctor C12 GREEN
@@ -88,16 +88,15 @@ rust/fno-math/src/bsm.rs                         (new)
 rust/fno-math-py/src/bsm.rs                      (new)
 ```
 
-## Decisions to lock (#231-#250 estimated)
+## Decisions to lock (#231-#240 estimated)
 
-- #231 — Dhan options adapter wired
-- #232 — **6-stream** backfill driver (with per-stream date gating)
-- #233 — Expiry calendar + SEBI-aware
-- #234 — Strike grid + lot size hardcoded
-- #235 — Risk-free rate table v1
-- #236 — Greeks computed inline (Rust BSM)
+- #231 — Dhan options adapter wired (CALL/PUT vocabulary; integer interval)
+- #232 — **6-stream** backfill driver (with per-stream date gating + dormant-after-2024-11-13 BN-WEEK)
+- #233 — Expiry calendar in `brutex/options/expiry_calendar.py` (SEBI-aware; encodes 5y regime changes from SPEC §2 with withdrawn-Monday-window excluded)
+- #234 — Strike grid (date-keyed historical verification) + **lot-size history table** (NOT hardcoded; SEBI revisions handled per SPEC §17 #211c)
+- #235 — Risk-free rate table v1 (step-function lookup, no interpolation per §13)
+- #236 — Greeks computed inline (Rust BSM); BSM_KERNEL_VERSION tracked in audit; expiry-day T-clamp at 1 min
 - #237 — Daily incremental driver
-- #238 — `brutex doctor` C12 wired
-- #239 — Measured backfill wall time
+- #238 — `brutex doctor` C12 wired (5 active + 1 dormant)
+- #239 — Measured backfill wall time recorded
 - #240 — Phase 2 4-agent hostile review pass
-- #241-#250 — TBD during implementation

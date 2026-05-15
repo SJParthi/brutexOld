@@ -41,13 +41,14 @@ build schedule — before any code is written. Mirrors Track 1 Phase 0.
 - [ ] #202 — 3 underlyings; NO India VIX options
 - [ ] #203 — ATM ± 10 strike radius
 - [ ] #204 — 1m timeframe ONLY
-- [ ] #205 — SEBI expiry mandate (NIFTY=Tue, BANKNIFTY=MONTH only, SENSEX=Thu)
-- [ ] #206 — 4 backfill streams
+- [ ] #205 — Expiry cycle history reconstructed for 5y window from primary sources (BSE Notice 20230327-65; NSE FAOP/57540, 60011, 64506, 65336, 68747; SEBI master circular 2024-10-01); withdrawn Monday-window 2025-Apr explicitly excluded
+- [ ] #206 — **6 backfill streams** (NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-WEEK [until 2024-11-13], BANKNIFTY-MONTH, SENSEX-WEEK, SENSEX-MONTH; SENSEX extends back to 2021-01-01 per BSE Notice 20230327-65 with thin-liquidity annotation)
 - [ ] #207 — IV from Dhan; Greeks computed (BSM)
 - [ ] #208 — Risk-free rate from 3-month T-bill table
 - [ ] #209 — Dividend yield q = 0
-- [ ] #210 — Storage ~5.1 GB / 5y (revised after 3-agent cross-verification: 6 streams × 42 series × ~23 MB; SENSEX extended back to 2021-01-01)
-- [ ] #211 — Backfill ~15,624 calls / ~87 min wall time / 15.6% daily quota (one-time; revised after 3-agent cross-verification)
+- [ ] #210 — Storage ~5.5 GB / 5.37y (revised: 6 streams × 42 series × ~25 MB; SENSEX extended back to 2021-01-01; trading-day count corrected 1,250 → 1,342)
+- [ ] #211 — Backfill ~15,876 calls / ~88 min wall time / 15.9% daily quota (one-time; chunk count uses ceil per reality-check fix)
+- [ ] #211a-#211g — Two-hash bar integrity, CALL/PUT vocabulary lock, date-keyed lot-size table, audit serialization, step-function risk-free rate, expiry-day theta clamp, interval int
 - [ ] #212 — Cost model location + versioning
 - [ ] #213 — Slippage profile = 80 combos per (signal, strike, expiry)
 - [ ] #214 — Money int64 paisa
@@ -64,7 +65,7 @@ build schedule — before any code is written. Mirrors Track 1 Phase 0.
 
 - [ ] **Agent 1 — Architect Reviewer:** Walks the spec; finds gaps and inconsistencies between SPEC and DATA_INGEST_DESIGN.
 - [ ] **Agent 2 — Hostile Reviewer:** Tries to break the design (e.g., "what if Dhan removes /rollingoption mid-year?", "what about ATM strike rollover discontinuities?").
-- [ ] **Agent 3 — Reality-check Reviewer:** Cross-references claimed numbers (~15,624 calls, ~87 min wall, ~5.1 GB) against the Dhan rate limit + 30-day chunking math, with per-regime date gating audited.
+- [ ] **Agent 3 — Reality-check Reviewer:** Cross-references claimed numbers (~15,876 calls, ~88 min wall, ~5.5 GB) against the Dhan rate limit + 30-day chunking math (ceil), with per-regime date gating + 1,342 trading-day count audited.
 - [ ] **Agent 4 — Synthesis:** Merges the 3 reviews; produces a findings list.
 - [ ] Operator reviews findings list and either:
   - (a) Accepts as-is + adds notes to spec, OR

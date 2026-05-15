@@ -57,7 +57,7 @@ Every numerical claim in `TRACK2_OPTIONS_SPEC.md` and
 | **A — Dhan-published** | "30 days per call" | URL + verified date in spec |
 | **B — SDK source** | "`expiryFlag` ∈ {WEEK, MONTH}" | GitHub commit hash + filename + line |
 | **C — SEBI/NSE/BSE circular** | "BANKNIFTY weekly killed 2024-11-13" | Circular number + URL |
-| **D — Derived calculation** | "12,300 total backfill calls" | Math shown in tables side-by-side |
+| **D — Derived calculation** | "15,876 total backfill calls" | Math shown in tables side-by-side |
 | **E — Measured (post-Phase-2)** | "Real backfill wall time on M4 Pro = 64 min" | `.brutex/bench/options_canary.json` |
 | **F — UNVERIFIED** | "API behavior for BN-WEEK request post-Nov-2024" | Flagged explicitly; needs Phase 2 smoke test |
 
@@ -316,9 +316,9 @@ recompile. No schema migration (Parquet partitions auto-create).
 
 | Series count | Backfill wall time | Daily incremental | Disk |
 |---|---|---|---|
-| 252 (current) | 68 min | 70 sec | 4.8 GB |
-| 504 (+FINNIFTY/MIDCPNIFTY when SEBI re-allows) | 136 min | 140 sec | 9.6 GB |
-| 1,008 (hypothetical 2× growth) | 4h 32m | 5m 40s | 19.2 GB |
+| 252 (current) | 88 min | 70 sec | 5.5 GB |
+| 504 (+FINNIFTY/MIDCPNIFTY when SEBI re-allows) | 176 min | 140 sec | 11.0 GB |
+| 1,008 (hypothetical 2× growth) | 5h 52m | 5m 40s | 22.0 GB |
 
 Linear scaling. Rate-limit bound at 3 r/s aggregate; no parallelism gain past that.
 
@@ -456,7 +456,7 @@ specifically try to break each guarantee:
 | Audit | "Show me one number in this doc without a citation" |
 | Architect | "Show me a state transition that can lose data" |
 | Hostile | "What if Dhan changes the API mid-month? What if the disk fills up between WRITE and audit append?" |
-| Reality | "Re-derive the 12,300-calls / 68-min / 4.8 GB numbers from raw quantities — do they hold?" |
+| Reality | "Re-derive the 15,876-calls / 88-min / 5.5 GB numbers from raw quantities — do they hold?" |
 
 If any agent finds a hole, this doc gets a follow-up commit before merge.
 
@@ -469,7 +469,7 @@ If any agent finds a hole, this doc gets a follow-up commit before merge.
 - #221 — 6 Track 2 guarantees (G1-G6) documented + locked
 - #222 — Track 2 inherits Track 1's audit chain (no fork)
 - #223 — Bloom filter sized for survivors-only (~1B max), not raw 33B
-- #224 — `bar_hash` = SHA256-low-64 of (bar_ts ‖ ohlc ‖ iv ‖ spot ‖ strike)
+- #224 — Two-hash bar integrity: `raw_bar_hash` = SHA256-low-64 of (bar_ts ‖ ohlc ‖ iv ‖ spot ‖ strike_api); `cooked_bar_hash` = SHA256-low-64 of (raw_bar_hash ‖ delta ‖ gamma ‖ theta ‖ vega ‖ BSM_KERNEL_VERSION) — hostile-review fix so replay oracle catches BSM regressions
 - #225 — 4-tier dedup defense (Watermark → Bloom → LMDB → bar_hash)
 - #226 — Audit kinds OPT_* documented
 - #227 — Doctor extends to C12-C15 for options

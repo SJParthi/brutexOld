@@ -29,10 +29,18 @@ realism sweep:
 ### Week 1 — First sweep + filters + lockbox
 
 - [ ] Load Track 1 top-3 spot signals from `results/track1/top3.json`
-- [ ] Sweep grid:
-  - 3 signals × 5 strike positions × 2 expiries × 80 slippage profiles = **2,400 backtests**
-  - Per-underlying overrides:
-    - BANKNIFTY: 2 expiries → 1 (MONTH only post-Nov-2024); reduces to 1,200 for BN
+- [ ] Sweep grid (per-underlying expiry-cycle count is **regime-dependent** — hostile-review fix):
+  - **Formula:** `sum_over_signals(strike_positions × expiry_cycles(underlying, signal_date) × slippage_profiles)`
+  - Per-underlying expiry cycles (at sweep time, post-2024-11-13):
+    - NIFTY → 2 (WEEK + MONTH)
+    - BANKNIFTY → 1 (MONTH only; SEBI killed weekly)
+    - SENSEX → 2 (WEEK + MONTH)
+  - Sweep cardinality per signal at slippage_profiles=80, strike_positions=5:
+    - NIFTY signal: 5 × 2 × 80 = 800
+    - BANKNIFTY signal: 5 × 1 × 80 = 400
+    - SENSEX signal: 5 × 2 × 80 = 800
+  - **Total for 3 signals** depends on which underlyings: e.g., all-NIFTY = 2,400; mixed (1 each) = 2,000; all-BN = 1,200.
+  - **Historical signals on BANKNIFTY pre-2024-11-13** can additionally test WEEK (2 cycles), boosting BN-historical-signal sweep to 5 × 2 × 80 = 800.
 - [ ] Run sweep (single-node, M4 Pro; ~30 min wall time expected)
 - [ ] Apply DSR / CPCV / WFO / Lockbox filters
 - [ ] Generate top-3 options strategies (with realistic P&L distributions)

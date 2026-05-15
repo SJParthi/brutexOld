@@ -121,12 +121,12 @@ day-of-week" mapping is wrong for the 5y window.
 
 | # | Stream | Underlying | Cycle | Active window | Total trading days | Liquidity note |
 |---|---|---|---|---|---|---|
-| 1 | NIFTY-WEEK    | NIFTY     | WEEK  | 2021-01-01 → today | ~1,250 | normal |
-| 2 | NIFTY-MONTH   | NIFTY     | MONTH | 2021-01-01 → today | ~1,250 | normal |
-| 3 | BANKNIFTY-WEEK| BANKNIFTY | WEEK  | 2021-01-01 → **2024-11-13** | ~960 | normal; dormant after |
-| 4 | BANKNIFTY-MONTH| BANKNIFTY| MONTH | 2021-01-01 → today | ~1,250 | normal; day-of-week varies (see §2 BANKNIFTY table) |
-| 5 | SENSEX-WEEK   | SENSEX    | WEEK  | **2021-01-01** → today | ~1,250 | **thin pre-2023-05-15** (BSE FNO illiquid; data exists per BSE Notice 20230327-65 — may contain long NaN runs at far OTM strikes) |
-| 6 | SENSEX-MONTH  | SENSEX    | MONTH | **2021-01-01** → today | ~1,250 | thin pre-2023-05-15 (same caveat) |
+| 1 | NIFTY-WEEK    | NIFTY     | WEEK  | 2021-01-01 → today | ~1,342 | normal |
+| 2 | NIFTY-MONTH   | NIFTY     | MONTH | 2021-01-01 → today | ~1,342 | normal |
+| 3 | BANKNIFTY-WEEK| BANKNIFTY | WEEK  | 2021-01-01 → **2024-11-13** | ~966 | normal; dormant after |
+| 4 | BANKNIFTY-MONTH| BANKNIFTY| MONTH | 2021-01-01 → today | ~1,342 | normal; day-of-week varies (see §2 BANKNIFTY table) |
+| 5 | SENSEX-WEEK   | SENSEX    | WEEK  | **2021-01-01** → today | ~1,342 (~642 thin + ~700 normal) | **thin pre-2023-05-15** (BSE FNO illiquid; data exists per BSE Notice 20230327-65 — may contain long NaN runs at far OTM strikes) |
+| 6 | SENSEX-MONTH  | SENSEX    | MONTH | **2021-01-01** → today | ~1,342 (~642 thin + ~700 normal) | thin pre-2023-05-15 (same caveat) |
 
 Each stream backfills 21 strikes (ATM ± 10) × 2 types (CALL + PUT) = 42
 series. **Total active series = 6 × 42 = 252.**
@@ -148,16 +148,19 @@ contract each bar refers to, so cross-regime stitching is transparent.
 >    20230327-65). Pre-relaunch volume was near-zero but contracts
 >    were listed and ingestible.
 >
-> Resolution: 6 streams with full date gating. Backfill cost: ~15.7K
-> Dhan calls / ~87 min wall time / ~5 GB storage. Strategy flexibility
+> Resolution: 6 streams with full date gating. Backfill cost: ~15,876
+> Dhan calls / ~88 min wall time / ~5.5 GB storage. Strategy flexibility
 > gained: full W vs M A/B test capability + BN historical (2021-2024)
 > + complete SENSEX historical (2021-2026). The pre-2023-05-15 SENSEX
 > data is annotated thin — sweep can be configured to skip it, but the
 > bytes are ingested anyway (cheap insurance, no re-backfill needed).
 >
 > An even simpler "current-expiry-only" model (3 streams, one per
-> underlying) was considered and rejected: the API requires explicit
-> `expiryFlag` (WEEK|MONTH) — there is no auto-current mode. See §3.
+> underlying) was considered and rejected: per the Dhan SDK validator
+> (`_historical_data.py`) the API requires explicit `expiryFlag`
+> ∈ {WEEK, MONTH} — there is no auto-current mode. See §3. **Phase 1
+> contract test C-2 will verify this against the live HTTP endpoint,
+> in case the validator is SDK-side defensive rather than API-enforced.**
 
 ---
 
@@ -247,8 +250,8 @@ Rationale:
 - Options premium is highly nonlinear in spot; resampling 1m → 5m / 15m
   loses path information (e.g., wick that touched ATM-5 IV spike).
 - Greeks are bar-local; resampling muddies them.
-- 5y × 6 streams × 21 strikes × 2 types × 375 minutes/day at ~50 bytes/bar
-  ≈ 5.1 GB total — small enough to keep at 1m.
+- 5.37y × 6 streams × 21 strikes × 2 types × 375 minutes/day at ~50 bytes/bar
+  ≈ 5.5 GB total — small enough to keep at 1m.
 
 When the engine needs a higher timeframe (e.g., to align with a Track 1
 15m signal), it queries 1m bars and the engine timestamps the entry/exit
@@ -400,46 +403,54 @@ Per the Phase 0 storage + history-timeline + API agents (all 2026-05-15):
 
 ### Backfill calls + wall time
 
+> **Chunk count uses `ceil(window_days / 30)`** — a partial leftover
+> window still needs one call. Reality-check agent flagged the initial
+> floor-based count as off-by-one.
+
 | Quantity | Calculation | Value |
 |---|---|---|
 | Calendar days in window | 2021-01-01 → 2026-05-15 | ~1,960 |
-| Chunks per series (30-day chunks) | Per-stream window / 30 | NIFTY: 65 / BN-WEEK: 47 / BN-MONTH: 65 / SENSEX: 65 |
-| Calls — NIFTY (2 streams) | 42 × 65 × 2 | 5,460 |
-| Calls — BANKNIFTY-WEEK | 42 × 47 | 1,974 |
-| Calls — BANKNIFTY-MONTH | 42 × 65 | 2,730 |
-| Calls — SENSEX (2 streams) | 42 × 65 × 2 | 5,460 |
-| **Total backfill calls** | | **~15,624** |
+| Chunks per series (30-day chunks, ceil) | Per-stream window / 30, rounded up | NIFTY: 66 / BN-WEEK: 48 / BN-MONTH: 66 / SENSEX: 66 |
+| Calls — NIFTY (2 streams) | 42 × 66 × 2 | 5,544 |
+| Calls — BANKNIFTY-WEEK | 42 × 48 | 2,016 |
+| Calls — BANKNIFTY-MONTH | 42 × 66 | 2,772 |
+| Calls — SENSEX (2 streams) | 42 × 66 × 2 | 5,544 |
+| **Total backfill calls** | | **~15,876** |
 | Effective rate (3 r/s cap) | adapter shared token bucket | 3 calls/sec |
-| Backfill wall time | 15,624 / 3 = 5,208 sec | **~87 minutes** |
-| Daily quota used | 15,624 / 100,000 | **15.6%** (one-time, below cap) |
+| Backfill wall time | 15,876 / 3 = 5,292 sec | **~88 minutes** |
+| Daily quota used | 15,876 / 100,000 | **15.9%** (one-time, below cap) |
 
 ### Storage
+
+> **Trading-day note:** the 2021-01-01 → 2026-05-15 window is **5.37
+> years**, not 5.0. At ~250 trading days/year that's ~1,342 trading
+> days (not the prior 1,250). Reality-check agent corrected this.
 
 | Quantity | Value |
 |---|---|
 | Bars per trading day | 375 (09:15–15:30 IST, 1-minute) |
-| Bytes per bar (Parquet ZSTD, 16 columns) | ~50 |
-| Bytes per series (full 5y, ~1,250 days) | 375 × 1,250 × 50 = 23.4 MB |
-| Bytes per series (BN-WEEK active ~4y, ~960 days) | 375 × 960 × 50 = 18 MB |
-| Bytes per series (SENSEX 2021-2023-05-12 thin Thursday, ~600 days × low-fill) | 375 × 600 × 50 × ~0.3 fill ≈ 3.4 MB |
-| Bytes per series (SENSEX 2023-05-15 → today, ~700 normal days) | 375 × 700 × 50 = 13 MB |
-| Total: NIFTY 2 streams × 42 series × 23.4 MB | 1.97 GB |
-| Total: BANKNIFTY WEEK 42 × 18 MB | 0.76 GB |
-| Total: BANKNIFTY MONTH 42 × 23.4 MB | 0.98 GB |
-| Total: SENSEX 2 streams × 42 series × (13 + 3.4) MB | 1.38 GB |
-| **Total options lake (5y, 252 series)** | **~5.1 GB** |
+| Bytes per bar (Parquet ZSTD, 16 columns) | ~50 (uncompressed ~128 bytes; ZSTD ~2.5× ratio) |
+| Bytes per series (full 5.37y, ~1,342 td) | 375 × 1,342 × 50 = 25.2 MB |
+| Bytes per series (BN-WEEK active ~3.87y, ~966 td) | 375 × 966 × 50 = 18.1 MB |
+| Bytes per series (SENSEX 2021→today, ~1,342 td but pre-2023-05-15 thin) | (375 × 642 × 50 × ~0.3 fill) + (375 × 700 × 50) = 3.6 + 13.1 = 16.7 MB |
+| Total: NIFTY 2 streams × 42 series × 25.2 MB | 2.12 GB |
+| Total: BANKNIFTY WEEK 42 × 18.1 MB | 0.76 GB |
+| Total: BANKNIFTY MONTH 42 × 25.2 MB | 1.06 GB |
+| Total: SENSEX 2 streams × 42 series × 16.7 MB | 1.40 GB |
+| **Total options lake (5.37y, 252 series)** | **~5.5 GB** |
 
 ### Daily incremental (post-backfill)
 
 | Quantity | Value |
 |---|---|
-| Active series on a given day (excludes BN-WEEK after Nov 2024) | 210 (252 minus 42 dormant BN-WEEK) |
-| Calls per day | 210 |
+| Active series on a given day (post-2024-11-13, BN-WEEK dormant) | 210 (252 minus 42 dormant BN-WEEK) |
+| Active series on a historical day (2021-01-01 → 2024-11-13) | 252 (all streams live) |
+| Calls per day (post-2024-11-13) | 210 |
 | Daily quota used | 210 / 100,000 = **0.21%** |
 | Daily wall time | 210 / 3 = 70 sec |
 
-Total disk: Track 1 spot lake (~80 MB) + Track 2 options lake (~5.1 GB)
-≈ 5.2 GB. Compute lake (results.parquet) is the dominant disk user.
+Total disk: Track 1 spot lake (~80 MB) + Track 2 options lake (~5.5 GB)
+≈ 5.6 GB. Compute lake (results.parquet) is the dominant disk user.
 
 > **Note on SENSEX thin pre-2023-05-15 data:** BSE FNO segment was
 > illiquid before the May 2023 relaunch (per Business Standard 2023-05-15:
@@ -468,17 +479,24 @@ time (one conversion per fill, not per bar).
 
 ## 12. Audit trail (inherits Track 1)
 
-Same audit log as Track 1. Track 2 adds these audit kinds:
+Same audit log as Track 1. Track 2 adds these audit kinds (vocabulary
+`drvOptionType` ∈ `{CALL, PUT}` per Dhan SDK — NOT `CE`/`PE`):
 
 | audit_kind | Payload (compact) |
 |---|---|
-| `OPT_INGEST_CHUNK_OK` | (underlying, cycle, strikePosition, optionType, from, to, n_bars, n_NaN, sha256_first_64hex) |
-| `OPT_INGEST_CHUNK_ERR` | (underlying, cycle, strikePosition, optionType, from, to, error_code, retry_count) |
-| `OPT_GREEK_COMPUTED` | (underlying, cycle, strikePosition, optionType, bar_ts, IV, delta, gamma, theta, vega) — sampled (1 per 1000 bars) |
-| `OPT_BACKTEST_ENTRY` | (signal_hash, underlying, strike, optionType, entry_premium_paisa, slippage_profile_hash) |
+| `OPT_INGEST_CHUNK_OK` | (underlying, cycle, strikePosition, drvOptionType, from, to, n_bars, n_NaN, raw_bar_hash_aggregate, cooked_bar_hash_aggregate, bsm_kernel_version) |
+| `OPT_INGEST_CHUNK_ERR` | (underlying, cycle, strikePosition, drvOptionType, from, to, error_code, retry_count) |
+| `OPT_GREEK_COMPUTED` | (underlying, cycle, strikePosition, drvOptionType, bar_ts, IV, delta, gamma, theta, vega, bsm_kernel_version) — sampled (1 per 1000 bars) |
+| `OPT_BACKTEST_ENTRY` | (signal_hash, underlying, strike, drvOptionType, entry_premium_paisa, slippage_profile_hash) |
 | `OPT_BACKTEST_EXIT` | (signal_hash, exit_reason, exit_premium_paisa, pnl_paisa) |
 
 Audit chain SHA256 continues from Track 1 — never resets.
+
+**Concurrency-determinism rule:** audit appends are serialized through a
+single asyncio writer task (per `TRACK2_DATA_INGEST_DESIGN.md §13`). flock
+provides cross-process safety only. Replay oracle O-O1 sorts replayed
+audit rows by `(stream, chunk_from)` to remove asyncio-scheduler
+nondeterminism.
 
 ---
 
@@ -528,30 +546,31 @@ Phase 1 (against fakes) can proceed in parallel with Track 1 Phase 1.
 | Layer | Track 1 invariants (current count) | Track 2 adds | New total |
 |---|---|---|---|
 | L1 unit | many | ~30 | many |
-| L2 property | 26 | **+11 options-specific** | 37 |
+| L2 property | 26 | **+12 options-specific** | 38 |
 | L3 integration / oracle | 4 | **+2** (options replay + BSM-vs-py_vollib) | 6 |
 | L4 golden / fixtures | yes | options replay golden | yes |
-| L5 contract | yes | rollingoption contract | yes |
-| L6 audit-chain | yes | options audit kinds | yes |
+| L5 contract | yes | rollingoption contract + expiryCode historical semantics + withdrawn-Monday-window probe | yes |
+| L6 audit-chain | yes | options audit kinds; raw + cooked bar_hash | yes |
 | L7 bench (O(1)) | yes | options bar lookup; Greeks compute | yes |
 | L8 stress | yes | 24h options replay | yes |
 | L9 dashboard / smoke | yes | options health gate (C12) | yes |
 
-**11 Track 2-specific property invariants:**
+**12 Track 2-specific property invariants:**
 
 | ID | Invariant |
 |---|---|
 | P-O1 | ATM-rolled rollingoption series has monotonic timestamps within each contract span |
 | P-O2 | Premium ≥ 0 always; volume ≥ 0; OI ≥ 0 |
 | P-O3 | OHLC consistency: `low ≤ open, close ≤ high` |
-| P-O4 | Strike step = published step (50 for NIFTY, 100 for BANKNIFTY/SENSEX) |
+| P-O4 | Strike step = published step (50 for NIFTY, 100 for BANKNIFTY/SENSEX) — verified historically against Dhan master CSV snapshots |
 | P-O5 | strikePosition ∈ [-10, +10] |
-| P-O6 | At expiry-day 15:30 IST, time-to-expiry T ≤ 1/(365.25 × 86400) |
-| P-O7 | Delta(CE) ∈ [0, 1]; Delta(PE) ∈ [-1, 0] |
+| P-O6 | At expiry-day 15:30 IST, time-to-expiry T ≤ 1/(365.25 × 86400); BSM uses clamp(T, 1 min) per §13 expiry-day theta policy |
+| P-O7 | Delta(CALL) ∈ [0, 1]; Delta(PUT) ∈ [-1, 0] |
 | P-O8 | Gamma ≥ 0 always (call and put) |
 | P-O9 | Theta ≤ 0 always (long premium decays) |
-| P-O10 | put-call parity: \|C − P − (S − Ke^{-rT})\| ≤ tol (10 paisa) for each bar |
+| P-O10 | Put-call parity: \|C − P − (S − K·e^{-rT})\| ≤ `max(₹0.10, 0.1% × min(C,P))`; **skipped** when C<₹0.50 or P<₹0.50 or either is NaN (handles thin SENSEX pre-2023-05-15 window without false RED) |
 | P-O11 | Audit chain unbroken across mixed Track1+Track2 ingest |
+| P-O12 | `strike_api == strike_computed` modulo Dhan tie-break at exact midpoints (`expected_tiebreak_table[underlying]` lookup; deviations must match recorded tie-break rule) |
 
 **2 Track 2-specific oracle tests:**
 
@@ -589,8 +608,15 @@ These will be appended to `docs/MIGRATION.md` when Phase 0 PR merges:
 - #207: IV from Dhan; Greeks computed (Black-Scholes-Merton)
 - #208: Risk-free rate from 3-month T-bill monthly table (60 rows, 5y)
 - #209: Dividend yield q = 0 for all 3 indices
-- #210: Storage estimate ~5.1 GB for 5y (revised after S1 verification)
-- #211: Backfill ~15,624 calls / ~87 min wall time / 15.6% daily quota (revised)
+- #210: Storage estimate ~5.5 GB for 5.37y window (revised after S1 verification + reality-check trading-day correction)
+- #211: Backfill ~15,876 calls / ~88 min wall time / 15.9% daily quota (revised — chunk count uses ceil; reality-check off-by-one correction)
+- #211a: Two-hash bar integrity — `raw_bar_hash` (Dhan-returned OHLC+IV+spot+strike_api) + `cooked_bar_hash` (raw_bar_hash ‖ Greeks ‖ BSM_KERNEL_VERSION); audit log carries both; replay oracle O-O1 checks both (hostile-review fix)
+- #211b: CALL/PUT vocabulary locked everywhere (SPEC, INGEST, audit, watermark keys, folder names) — never CE/PE (matches Dhan SDK `drvOptionType` validator)
+- #211c: Lot size stored in date-keyed `reference/lot_size_history.parquet`; `volume`/`open_interest` columns are contract counts (lot-size-independent) — handles SEBI lot-size revisions across the 5y window
+- #211d: Audit log appends serialized through single asyncio writer; replay sorts by `(stream, chunk_from)` for asyncio-scheduler determinism
+- #211e: Risk-free rate lookup is step-function (no interpolation) at monthly boundaries
+- #211f: Expiry-day Greeks clamp T at 1 min to avoid theta divergence at 15:29-15:30 bars
+- #211g: `interval=1` integer (not string) per Dhan SDK; CI lint catches `interval='1'` regression
 - #212: Cost model lives at `brutex/options/costs.py`, version-stamped
 - #213: Slippage profile = 5 × 4 × 4 = 80 combos per (signal, strike, expiry)
 - #214: Money is int64 paisa (same as Track 1)
