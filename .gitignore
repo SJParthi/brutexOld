@@ -58,8 +58,10 @@ runs/
 .env.*.local
 secrets/
 **/api_token*
-**/groww_token*
-GROWW_API_AUTH_TOKEN*
+**/dhan_token*
+**/access_token*
+*_API_AUTH_TOKEN*
+*_ACCESS_TOKEN*
 
 # Rust (future P3)
 target/

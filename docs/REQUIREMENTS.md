@@ -1,11 +1,41 @@
-# BruteX — System Requirements (v1.0 DRAFT)
+# BruteX — System Requirements (v1.0 — DEPRECATED 2026-05-15)
 
-**Status:** ✅ SIGNED-OFF 2026-04-14 — see §27
-**Branch:** `claude/capture-system-requirements-F9IHZ`
-**Date:** 2026-04-14
-**Scope lock:** Indian F&O (NSE CASH + FNO) via Groww `instruments` + `backtesting` surfaces only. Global-market extensibility deferred to v2+.
+> ⚠️ **DEPRECATED** — superseded by Track 1 specs.
+>
+> This document was the frozen v1.0 spec for BruteX as a Groww + F&O
+> backtesting system. On **2026-05-15** the project pivoted to **Dhan +
+> Indian spot indexes (NIFTY 50 / BANKNIFTY / SENSEX), signal-only
+> research (Track 1)** after a 4-agent hostile-review pass surfaced
+> multiple blocker issues (spot is not tradable so brokerage/STT
+> calculations are theatre; the prior throughput claim was 10x
+> optimistic; Groww `groww-sdk` has no public spot-index intraday
+> history surface for the chosen index list). See `docs/MIGRATION.md`
+> for the full Groww→Dhan migration log.
+>
+> **Active source of truth:** `docs/TRACK1_BACKTEST_SPEC.md`
+>
+> Related Track 1 docs (the new "single source of truth" set):
+> - `docs/TRACK1_VERIFICATION_PYRAMID.md` — 9-layer test pyramid + 24 property invariants
+> - `docs/TRACK1_VOCABULARY.md` — the 52 atomic conditions, K=2..5 ANDed
+> - `docs/TRACK1_PHASE_PLAN.md` — 8-12 week build plan with hostile-review gates
+> - `docs/TRACK1_PERFORMANCE_BUDGET.md` — honest 33B-trials-in-2-4-days SLA on M4 Pro
+> - `docs/TRACK1_MICROSTRUCTURE.md` — pre-open / Muhurat / halts / index rebalance handling
+> - `docs/MIGRATION.md` — what was deleted, what was kept, why, and the post-wipe checklist
+>
+> Content below is preserved for historical reference. Most sections
+> reference Groww API surfaces and FNO segment scope that **no longer
+> apply**. Do not derive new requirements from this file. The FR-###,
+> NFR-###, MG-### identifier scheme is retired; Track 1 docs use plain
+> headings.
 
-> This document is the **single source of truth**. Every future PR must reference an ID from this file (`FR-###`, `NFR-###`, `MG-###`, `ADR-###`). No scope expansion without a new version bump.
+---
+
+**Original status (pre-deprecation):** ✅ SIGNED-OFF 2026-04-14 — see §27
+**Original branch:** `claude/capture-system-requirements-F9IHZ`
+**Current branch:** `claude/backtest-system-spec-ITI4Y`
+**Original date:** 2026-04-14
+**Deprecated:** 2026-05-15
+**Original scope lock:** Indian F&O (NSE CASH + FNO) via Groww `instruments` + `backtesting` surfaces only — **no longer in scope**. Track 1 = Dhan + spot indexes only.
 
 ---
 

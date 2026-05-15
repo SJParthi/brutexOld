@@ -135,13 +135,13 @@ class TestRedactEnvSnapshot:
         assert result == {"BRUTEX_X_PASSWORD": "<redacted>"}
 
     def test_api_key_redacted(self) -> None:
-        result = _redact_env_snapshot({"BRUTEX_GROWW_API_KEY": "key"})
-        assert result == {"BRUTEX_GROWW_API_KEY": "<redacted>"}
+        result = _redact_env_snapshot({"BRUTEX_BROKER_API_KEY": "key"})
+        assert result == {"BRUTEX_BROKER_API_KEY": "<redacted>"}
 
     def test_auth_redacted(self) -> None:
-        result = _redact_env_snapshot({"BRUTEX_GROWW_API_AUTH_TOKEN": "t"})
+        result = _redact_env_snapshot({"BRUTEX_BROKER_API_AUTH_TOKEN": "t"})
         # Matches both AUTH and TOKEN patterns
-        assert result == {"BRUTEX_GROWW_API_AUTH_TOKEN": "<redacted>"}
+        assert result == {"BRUTEX_BROKER_API_AUTH_TOKEN": "<redacted>"}
 
     def test_case_insensitive(self) -> None:
         result = _redact_env_snapshot({"BRUTEX_x_token_y": "v"})

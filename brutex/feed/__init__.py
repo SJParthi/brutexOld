@@ -9,7 +9,7 @@ Implements ``FR-FWD-001`` (chronological replay from the data lake) and
   (:class:`FeedError`, :class:`LookAheadError`, :class:`ResampleError`).
 * :mod:`brutex.feed.resampler` — pure :class:`~brutex.data.models.CandleBar`
   → :class:`~brutex.data.models.CandleBar` OHLCV aggregation for the
-  sub-day Groww intervals. Fails loudly on unknown or unaligned
+  sub-day the broker intervals. Fails loudly on unknown or unaligned
   intervals; no silent up/down-sampling.
 * :mod:`brutex.feed.replay` — :class:`ReplayFeed`: heap-based k-way
   merge over :meth:`~brutex.data.catalog.Catalog.get_bars` results so

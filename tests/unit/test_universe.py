@@ -1,8 +1,13 @@
-"""Unit tests for brutex.universe — the locked v1 F&O indices universe."""
+"""Unit tests for brutex.universe — the Track 1 spot-index universe.
+
+Rewritten 2026-05-15 for the Dhan + spot-index pivot. The prior tests
+expected an 8-named-index F&O universe with futures/options/stock
+contracts; that scope was wiped (see ``docs/MIGRATION.md``). Track 1
+universe is exactly 3 spot indexes.
+"""
 
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -12,305 +17,107 @@ from brutex.universe import (
     INDEX_UNDERLYINGS,
     V1_INDICES,
     V1_UNDERLYINGS,
+    UnderlyingSpec,
     classify_underlying_kind,
     is_in_scope,
     is_index_underlying,
 )
 
+# ────────────────────────────────────────────────────────────────────────
+# UnderlyingSpec
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestUnderlyingSpec:
+    """The frozen dataclass that anchors each Track 1 index."""
+
+    def test_str_repr(self) -> None:
+        spec = UnderlyingSpec(
+            exchange=Exchange.NSE,
+            underlying_symbol="NIFTY",
+            display_name="NIFTY 50",
+            spot_live_since_year=1996,
+        )
+        assert str(spec) == "NSE:NIFTY"
+
+    def test_frozen(self) -> None:
+        spec = V1_INDICES[0]
+        with pytest.raises(Exception):  # FrozenInstanceError
+            spec.underlying_symbol = "FOO"  # type: ignore[misc]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# V1_INDICES — the 4 Track 1 indices allow-list (NIFTY + BANKNIFTY + SENSEX + INDIAVIX)
+# ────────────────────────────────────────────────────────────────────────
+
 
 class TestV1IndicesComposition:
-    """V1_INDICES is the 8 NAMED F&O indices allow-list.
+    """V1_INDICES is the Track 1 named-index allow-list (exactly 4)."""
 
-    Stock underlyings are NOT in this tuple — they are discovered at
-    runtime from Groww's CSV per FD-09d.
-    """
+    def test_has_exactly_four_indices(self) -> None:
+        assert len(V1_INDICES) == 4
 
-    def test_has_exactly_eight_named_indices(self) -> None:
-        assert len(V1_INDICES) == 8
-
-    def test_contains_all_five_nse_indices(self) -> None:
+    def test_nse_contains_nifty_banknifty_indiavix(self) -> None:
         nse_syms = {u.underlying_symbol for u in V1_INDICES if u.exchange == Exchange.NSE}
-        assert nse_syms == {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
+        assert nse_syms == {"NIFTY", "BANKNIFTY", "INDIAVIX"}
 
-    def test_contains_all_three_bse_indices(self) -> None:
+    def test_contains_sensex_on_bse(self) -> None:
         bse_syms = {u.underlying_symbol for u in V1_INDICES if u.exchange == Exchange.BSE}
-        assert bse_syms == {"SENSEX", "BANKEX", "SENSEX50"}
+        assert bse_syms == {"SENSEX"}
 
-    def test_nse_comes_first(self) -> None:
-        """Ordering is deliberate: NSE first (deeper history) then BSE."""
-        exchanges_seen = [u.exchange for u in V1_INDICES]
-        first_bse_idx = exchanges_seen.index(Exchange.BSE)
-        last_nse_idx = max(i for i, ex in enumerate(exchanges_seen) if ex == Exchange.NSE)
-        assert last_nse_idx < first_bse_idx
+    def test_ordering_groups_nse_with_bse_between(self) -> None:
+        """Ordering: NIFTY, BANKNIFTY (NSE) → SENSEX (BSE) → INDIAVIX (NSE)."""
+        exchanges = [u.exchange for u in V1_INDICES]
+        # NSE-NSE-BSE-NSE: a deliberate ordering preserving the original
+        # 3-index sequence with INDIAVIX appended at the end.
+        assert exchanges == [Exchange.NSE, Exchange.NSE, Exchange.BSE, Exchange.NSE]
 
-    def test_fno_live_years(self) -> None:
-        expected = {
-            "NIFTY": 2000,
-            "BANKNIFTY": 2005,
-            "FINNIFTY": 2021,
-            "MIDCPNIFTY": 2023,
-            "NIFTYNXT50": 2024,
-            "SENSEX": 2000,
-            "BANKEX": 2023,
-            "SENSEX50": 2023,
-        }
-        actual = {u.underlying_symbol: u.fno_live_since_year for u in V1_INDICES}
-        assert actual == expected
+    def test_spot_live_years_are_historical(self) -> None:
+        """Every index must have been live before 2021 (Track 1 backtest window)."""
+        for spec in V1_INDICES:
+            assert spec.spot_live_since_year < 2021
+
+    def test_display_names_match_dhan(self) -> None:
+        """Display names match Dhan's instrument master conventions."""
+        names = {u.display_name for u in V1_INDICES}
+        assert names == {"NIFTY 50", "NIFTY BANK", "BSE SENSEX", "India VIX"}
 
     def test_is_tuple_not_list_frozen(self) -> None:
         assert isinstance(V1_INDICES, tuple)
 
-    def test_index_underlyings_is_frozenset(self) -> None:
-        assert isinstance(INDEX_UNDERLYINGS, frozenset)
-        assert len(INDEX_UNDERLYINGS) == 8
-
-    def test_backwards_compat_aliases(self) -> None:
-        """Old code using V1_UNDERLYINGS and ALLOWED_UNDERLYINGS still works."""
+    def test_v1_underlyings_alias(self) -> None:
+        """V1_UNDERLYINGS is a backwards-compat alias for V1_INDICES."""
         assert V1_UNDERLYINGS is V1_INDICES
+
+
+# ────────────────────────────────────────────────────────────────────────
+# INDEX_UNDERLYINGS — the O(1) membership set
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestIndexUnderlyings:
+    def test_is_frozenset(self) -> None:
+        assert isinstance(INDEX_UNDERLYINGS, frozenset)
+
+    def test_has_four_entries(self) -> None:
+        assert len(INDEX_UNDERLYINGS) == 4
+
+    def test_contains_expected_pairs(self) -> None:
+        assert (
+            frozenset(
+                {
+                    (Exchange.NSE, "NIFTY"),
+                    (Exchange.NSE, "BANKNIFTY"),
+                    (Exchange.BSE, "SENSEX"),
+                    (Exchange.NSE, "INDIAVIX"),
+                }
+            )
+            == INDEX_UNDERLYINGS
+        )
+
+    def test_allowed_underlyings_alias(self) -> None:
+        """ALLOWED_UNDERLYINGS is the backwards-compat alias."""
         assert ALLOWED_UNDERLYINGS is INDEX_UNDERLYINGS
-
-
-class TestUnderlyingSpec:
-    def test_str_repr(self) -> None:
-        spec = V1_UNDERLYINGS[0]
-        assert str(spec) == f"{spec.exchange}:{spec.underlying_symbol}"
-
-    def test_frozen(self) -> None:
-        spec = V1_UNDERLYINGS[0]
-        with pytest.raises(Exception):
-            spec.display_name = "something-else"  # type: ignore[misc]
-
-
-# ────────────────────────────────────────────────────────────────────────
-# is_in_scope — the adapter's filter gate
-# ────────────────────────────────────────────────────────────────────────
-
-
-def _make(
-    *,
-    exchange: Exchange = Exchange.NSE,
-    instrument_type: InstrumentType = InstrumentType.EQ,
-    trading_symbol: str = "RELIANCE",
-    groww_symbol: str = "NSE-RELIANCE",
-    underlying_symbol: str | None = None,
-    segment: Segment = Segment.CASH,
-) -> Instrument:
-    """Tiny factory — only the fields that affect scope filtering vary."""
-    return Instrument(
-        exchange=exchange,
-        exchange_token=1,
-        trading_symbol=trading_symbol,
-        groww_symbol=groww_symbol,
-        name=None,
-        instrument_type=instrument_type,
-        segment=segment,
-        series=None,
-        isin=None,
-        underlying_symbol=underlying_symbol,
-        underlying_exchange_token=None,
-        lot_size=1,
-        tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=(
-            date(2025, 12, 25)
-            if instrument_type in {InstrumentType.FUT, InstrumentType.CE, InstrumentType.PE}
-            else None
-        ),
-        strike_price=(
-            Decimal("25000") if instrument_type in {InstrumentType.CE, InstrumentType.PE} else None
-        ),
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
-    )
-
-
-class TestIsInScopeSpotIndices:
-    @pytest.mark.parametrize(
-        ("exchange", "trading_symbol"),
-        [
-            (Exchange.NSE, "NIFTY"),
-            (Exchange.NSE, "BANKNIFTY"),
-            (Exchange.NSE, "FINNIFTY"),
-            (Exchange.NSE, "MIDCPNIFTY"),
-            (Exchange.NSE, "NIFTYNXT50"),
-            (Exchange.BSE, "SENSEX"),
-            (Exchange.BSE, "BANKEX"),
-            (Exchange.BSE, "SENSEX50"),
-        ],
-    )
-    def test_all_eight_spot_indices_in_scope(self, exchange: Exchange, trading_symbol: str) -> None:
-        spot = _make(
-            exchange=exchange,
-            instrument_type=InstrumentType.IDX,
-            trading_symbol=trading_symbol,
-            groww_symbol=f"{exchange.value}-{trading_symbol}",
-            segment=Segment.CASH,
-        )
-        assert is_in_scope(spot) is True
-
-    def test_unknown_index_out_of_scope(self) -> None:
-        spot = _make(
-            exchange=Exchange.NSE,
-            instrument_type=InstrumentType.IDX,
-            trading_symbol="NIFTYIT",
-            groww_symbol="NSE-NIFTYIT",
-            segment=Segment.CASH,
-        )
-        assert is_in_scope(spot) is False
-
-
-class TestIsInScopeIndexDerivatives:
-    @pytest.mark.parametrize(
-        ("exchange", "underlying"),
-        [
-            (Exchange.NSE, "NIFTY"),
-            (Exchange.NSE, "BANKNIFTY"),
-            (Exchange.BSE, "SENSEX"),
-            (Exchange.BSE, "BANKEX"),
-        ],
-    )
-    def test_index_futures_in_scope(self, exchange: Exchange, underlying: str) -> None:
-        fut = _make(
-            exchange=exchange,
-            instrument_type=InstrumentType.FUT,
-            trading_symbol=f"{underlying}25DECFUT",
-            groww_symbol=f"{exchange.value}-{underlying}-Dec25-FUT",
-            underlying_symbol=underlying,
-            segment=Segment.FNO,
-        )
-        assert is_in_scope(fut) is True
-
-    @pytest.mark.parametrize("side", [InstrumentType.CE, InstrumentType.PE])
-    def test_index_options_in_scope(self, side: InstrumentType) -> None:
-        opt = _make(
-            exchange=Exchange.NSE,
-            instrument_type=side,
-            trading_symbol=f"NIFTY25DEC25000{side.value}",
-            groww_symbol=f"NSE-NIFTY-25Dec25-25000-{side.value}",
-            underlying_symbol="NIFTY",
-            segment=Segment.FNO,
-        )
-        assert is_in_scope(opt) is True
-
-
-class TestIsInScopeStockDerivatives:
-    """v1.0.1 scope expansion — stock F&O is now IN scope."""
-
-    @pytest.mark.parametrize(
-        "stock",
-        ["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN", "TATAMOTORS"],
-    )
-    def test_stock_futures_in_scope(self, stock: str) -> None:
-        fut = _make(
-            exchange=Exchange.NSE,
-            instrument_type=InstrumentType.FUT,
-            trading_symbol=f"{stock}25DECFUT",
-            groww_symbol=f"NSE-{stock}-Dec25-FUT",
-            underlying_symbol=stock,
-            segment=Segment.FNO,
-        )
-        assert is_in_scope(fut) is True
-
-    @pytest.mark.parametrize(
-        ("stock", "strike"),
-        [("RELIANCE", 3000), ("TCS", 4000), ("HDFCBANK", 1700)],
-    )
-    def test_stock_options_in_scope(self, stock: str, strike: int) -> None:
-        opt = _make(
-            exchange=Exchange.NSE,
-            instrument_type=InstrumentType.CE,
-            trading_symbol=f"{stock}25DEC{strike}CE",
-            groww_symbol=f"NSE-{stock}-25Dec25-{strike}-CE",
-            underlying_symbol=stock,
-            segment=Segment.FNO,
-        )
-        assert is_in_scope(opt) is True
-
-
-class TestIsInScopeRejects:
-    def test_cash_equity_out_of_scope(self) -> None:
-        """Cash equity standalone backtests are still v1.1."""
-        eq = _make()
-        assert is_in_scope(eq) is False
-
-    def test_non_v1_index_out_of_scope(self) -> None:
-        """NIFTY IT is an index but not one of the 8 F&O-tradeable ones."""
-        spot = _make(
-            exchange=Exchange.NSE,
-            instrument_type=InstrumentType.IDX,
-            trading_symbol="NIFTYIT",
-            groww_symbol="NSE-NIFTYIT",
-            segment=Segment.CASH,
-        )
-        assert is_in_scope(spot) is False
-
-
-# ────────────────────────────────────────────────────────────────────────
-# classify_underlying_kind — "index" vs "stock"
-# ────────────────────────────────────────────────────────────────────────
-
-
-class TestClassifyUnderlyingKind:
-    def test_nifty_option_is_index(self) -> None:
-        opt = _make(
-            exchange=Exchange.NSE,
-            instrument_type=InstrumentType.CE,
-            trading_symbol="NIFTY25DEC25000CE",
-            groww_symbol="NSE-NIFTY-25Dec25-25000-CE",
-            underlying_symbol="NIFTY",
-            segment=Segment.FNO,
-        )
-        assert classify_underlying_kind(opt) == "index"
-
-    def test_sensex_option_is_index(self) -> None:
-        opt = _make(
-            exchange=Exchange.BSE,
-            instrument_type=InstrumentType.PE,
-            trading_symbol="SENSEX25SEP79500PE",
-            groww_symbol="BSE-SENSEX-25Sep25-79500-PE",
-            underlying_symbol="SENSEX",
-            segment=Segment.FNO,
-        )
-        assert classify_underlying_kind(opt) == "index"
-
-    def test_reliance_option_is_stock(self) -> None:
-        opt = _make(
-            exchange=Exchange.NSE,
-            instrument_type=InstrumentType.CE,
-            trading_symbol="RELIANCE25DEC3000CE",
-            groww_symbol="NSE-RELIANCE-25Dec25-3000-CE",
-            underlying_symbol="RELIANCE",
-            segment=Segment.FNO,
-        )
-        assert classify_underlying_kind(opt) == "stock"
-
-    def test_tcs_future_is_stock(self) -> None:
-        fut = _make(
-            exchange=Exchange.NSE,
-            instrument_type=InstrumentType.FUT,
-            trading_symbol="TCS25DECFUT",
-            groww_symbol="NSE-TCS-Dec25-FUT",
-            underlying_symbol="TCS",
-            segment=Segment.FNO,
-        )
-        assert classify_underlying_kind(fut) == "stock"
-
-    def test_raises_on_equity(self) -> None:
-        eq = _make()
-        with pytest.raises(ValueError, match="not an FNO derivative"):
-            classify_underlying_kind(eq)
-
-    def test_raises_on_index_spot(self) -> None:
-        spot = _make(
-            exchange=Exchange.NSE,
-            instrument_type=InstrumentType.IDX,
-            trading_symbol="NIFTY",
-            groww_symbol="NSE-NIFTY",
-            segment=Segment.CASH,
-        )
-        with pytest.raises(ValueError, match="not an FNO derivative"):
-            classify_underlying_kind(spot)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -325,22 +132,129 @@ class TestIsIndexUnderlying:
             (Exchange.NSE, "NIFTY"),
             (Exchange.NSE, "BANKNIFTY"),
             (Exchange.BSE, "SENSEX"),
-            (Exchange.BSE, "BANKEX"),
-            (Exchange.BSE, "SENSEX50"),
+            (Exchange.NSE, "INDIAVIX"),
         ],
     )
-    def test_named_indices(self, exchange: Exchange, symbol: str) -> None:
+    def test_named_indices_accepted(self, exchange: Exchange, symbol: str) -> None:
         assert is_index_underlying(exchange, symbol) is True
 
     @pytest.mark.parametrize(
         ("exchange", "symbol"),
         [
             (Exchange.NSE, "RELIANCE"),
+            (Exchange.NSE, "FINNIFTY"),
+            (Exchange.NSE, "SENSEX"),
+            (Exchange.BSE, "NIFTY"),
             (Exchange.NSE, "TCS"),
-            (Exchange.NSE, "NIFTYIT"),
-            (Exchange.BSE, "NIFTY"),  # wrong exchange
-            (Exchange.NSE, "SENSEX"),  # wrong exchange
         ],
     )
-    def test_stocks_and_wrong_combos(self, exchange: Exchange, symbol: str) -> None:
+    def test_rejects_out_of_scope(self, exchange: Exchange, symbol: str) -> None:
         assert is_index_underlying(exchange, symbol) is False
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Helpers — build Instrument fixtures
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _make_idx(exchange: Exchange, symbol: str) -> Instrument:
+    """Build a minimal IDX-type Instrument for scope testing."""
+    return Instrument(
+        exchange=exchange,
+        exchange_token=hash(symbol) % 100_000,
+        trading_symbol=symbol,
+        vendor_symbol=symbol,
+        name=symbol,
+        instrument_type=InstrumentType.IDX,
+        segment=Segment.CASH,
+        series=None,
+        isin=None,
+        underlying_symbol=symbol,
+        underlying_exchange_token=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        freeze_quantity=None,
+        expiry_date=None,
+        strike_price=None,
+        is_reserved=False,
+        buy_allowed=False,
+        sell_allowed=False,
+    )
+
+
+def _make_equity(exchange: Exchange, symbol: str) -> Instrument:
+    """Build a cash-equity Instrument (out of scope for Track 1)."""
+    return Instrument(
+        exchange=exchange,
+        exchange_token=hash(symbol) % 100_000,
+        trading_symbol=symbol,
+        vendor_symbol=symbol,
+        name=symbol,
+        instrument_type=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=symbol,
+        underlying_exchange_token=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        freeze_quantity=None,
+        expiry_date=None,
+        strike_price=None,
+        is_reserved=False,
+        buy_allowed=True,
+        sell_allowed=True,
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# is_in_scope
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestIsInScope:
+    @pytest.mark.parametrize(
+        ("exchange", "symbol"),
+        [
+            (Exchange.NSE, "NIFTY"),
+            (Exchange.NSE, "BANKNIFTY"),
+            (Exchange.BSE, "SENSEX"),
+            (Exchange.NSE, "INDIAVIX"),
+        ],
+    )
+    def test_four_track1_indices_in_scope(self, exchange: Exchange, symbol: str) -> None:
+        assert is_in_scope(_make_idx(exchange, symbol)) is True
+
+    def test_cash_equity_rejected(self) -> None:
+        """Cash stocks are not in Track 1 scope."""
+        assert is_in_scope(_make_equity(Exchange.NSE, "RELIANCE")) is False
+
+    def test_non_v1_index_rejected(self) -> None:
+        """FINNIFTY and other formerly-F&O indices are now out of scope."""
+        assert is_in_scope(_make_idx(Exchange.NSE, "FINNIFTY")) is False
+
+    def test_wrong_exchange_rejected(self) -> None:
+        """SENSEX on NSE (wrong exchange) is rejected."""
+        assert is_in_scope(_make_idx(Exchange.NSE, "SENSEX")) is False
+
+
+# ────────────────────────────────────────────────────────────────────────
+# classify_underlying_kind
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestClassifyUnderlyingKind:
+    def test_returns_index_for_in_scope(self) -> None:
+        for spec in V1_INDICES:
+            inst = _make_idx(spec.exchange, spec.underlying_symbol)
+            assert classify_underlying_kind(inst) == "index"
+
+    def test_raises_on_equity(self) -> None:
+        inst = _make_equity(Exchange.NSE, "RELIANCE")
+        with pytest.raises(ValueError, match="not in Track 1 scope"):
+            classify_underlying_kind(inst)
+
+    def test_raises_on_non_v1_index(self) -> None:
+        inst = _make_idx(Exchange.NSE, "FINNIFTY")
+        with pytest.raises(ValueError, match="not in Track 1 scope"):
+            classify_underlying_kind(inst)

@@ -458,6 +458,11 @@ jobs:
     name: fno-math drift check (vs tickvault)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # Advisory only — per docs/drift-check.yml design intent, this should
+    # never block merges. Failure here means tickvault upstream has moved
+    # and operator should run scripts/extract-fno-math.sh, not that the
+    # PR is unsafe to merge.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - name: Run drift check script
@@ -812,15 +817,18 @@ jobs:
       - rust
       - banned
       - secrets
-      - fno-math-drift
+      # fno-math-drift moved to advisory-only on 2026-05-15.
+      # Per docs/drift-check.yml design intent (line 12: "It should
+      # never block merges — merges only care about the snapshot that
+      # exists at merge time"), drift detection runs but doesn't gate.
       # Deep scanners added in PR #2
       - codeql
       - semgrep
       - trivy
       - sbom
       # Advisory-only (continue-on-error): typos, complexity, vulture,
-      # duplication, mutation-py are tracked as artifacts but don't
-      # block merge. They still run and upload their reports.
+      # duplication, mutation-py, fno-math-drift — tracked as artifacts
+      # but don't block merge. They still run and upload reports.
     if: always()
     steps:
       - name: Verify all required jobs passed
@@ -839,7 +847,6 @@ jobs:
           echo "  rust:          ${{ needs.rust.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
           echo "  secrets:       ${{ needs.secrets.result }}"
-          echo "  fno-math-drift:${{ needs.fno-math-drift.result }}"
           echo "  codeql:        ${{ needs.codeql.result }}"
           echo "  semgrep:       ${{ needs.semgrep.result }}"
           echo "  trivy:         ${{ needs.trivy.result }}"
@@ -857,7 +864,6 @@ jobs:
             "${{ needs.rust.result }}" \
             "${{ needs.banned.result }}" \
             "${{ needs.secrets.result }}" \
-            "${{ needs.fno-math-drift.result }}" \
             "${{ needs.codeql.result }}" \
             "${{ needs.semgrep.result }}" \
             "${{ needs.trivy.result }}" \

@@ -191,7 +191,7 @@ Once wired, you'll start receiving messages automatically. Typical Phase D
 - ~288 × `phase.progress` (every 5 minutes during Phase D)
 - ~144 × `run.heartbeat` (every 10 minutes)
 - 0-20 × `quarantine.new` if anything goes wrong
-- 0-5 × `rate_limit.downshift` during Groww peak load
+- 0-5 × `rate_limit.downshift` during the broker peak load
 - 1 × `run.complete`
 
 If that's too chatty, you can mute the chat in Telegram (long-press → mute)
@@ -233,7 +233,7 @@ get errors and they'll surface in structlog but not affect ingest correctness.
 
 - `docs/REQUIREMENTS.md §15.6` — full Telegram event taxonomy
 - `docs/REQUIREMENTS.md FR-ING-016` — notifier requirement
-- `docs/groww-sdk/` — Groww SDK references (no relation to Telegram; listed here for context)
+- `docs/broker-sdk-docs/` — broker SDK references (no relation to Telegram; listed here for context)
 - Telegram Bot API docs — https://core.telegram.org/bots/api (referenced by the operator, not fetched by BruteX)
 
 ---

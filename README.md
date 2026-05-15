@@ -1,279 +1,230 @@
 # BruteX
 
-**Extreme drill-down brute-force backtesting engine** for Indian F&O markets,
-globally extensible. Built in Python 3.12 with Rust (PyO3) hot kernels for
-mathematical cores shared with the [tickvault](https://github.com/SJParthi/tickvault)
-live trading system — **one source of truth** for Greeks, indicators, and
-strategies across live and backtest.
+**Extreme drill-down brute-force backtesting engine** for Indian spot
+indexes (NIFTY 50 / BANKNIFTY / SENSEX) + India VIX. Built in Python
+3.12 with Rust (PyO3) hot kernels for shared mathematical cores.
+
+Track 1 is **signal-only research** — it brute-forces ~2.9 million
+strategy patterns (K=2..5 atomic conditions from a 52-condition
+vocabulary) across 21 timeframes × 4 instruments × 2 exit modes, then
+applies a 4-filter cascade (Deflated Sharpe → CPCV → Walk-Forward →
+Lockbox) to return the top 3 production candidates per sweep.
 
 ---
 
 ## 🎯 What this is
 
-Given a trading strategy (Python class that exposes `on_bar` and returns
-signals), BruteX:
+Given a config-driven instrument universe and a Dhan auth token,
+BruteX:
 
-1. **Ingests** historical data for every F&O-eligible Indian instrument from
-   Groww via four strict sequential phases: instruments → expiries →
-   contracts → candles.
-2. **Persists** everything in a content-addressed LMDB store with hash-chained
-   JSONL audit logs — every API call, every state transition, every byte is
-   reproducible and tamper-evident.
-3. **Sweeps** hundreds of thousands of parameter combinations using Ray
-   actor pools + Rust hot kernels + bitmap prefilters + LMDB result caches.
-4. **Reports** results with CPCV / walk-forward / PBO / Deflated Sharpe
-   corrections so you never get fooled by overfitting.
+1. **Ingests** historical OHLC bars for the 4 Track 1 indexes from the
+   Dhan Historical Data API (`/v2/charts/intraday` for 1m bars,
+   `/v2/charts/historical` for daily). Pulls are **incremental** —
+   subsequent runs only fetch new bars since the last successful
+   timestamp per (instrument, timeframe).
+2. **Resamples** the 1-minute base into 19 derived intraday timeframes
+   (2m, 3m, …, 15m, 30m, 60m, 120m, 180m, 240m), all anchored to 09:15
+   IST, in a single deterministic pass.
+3. **Persists** everything in a content-addressed Parquet + DuckDB +
+   LMDB lake with hash-chained JSONL audit logs. Every API call, every
+   state transition, every byte is reproducible and tamper-evident.
+4. **Sweeps** ~33 billion (pattern × parameters) combinations via a
+   5-stage pipeline (1A pattern discovery → 1B expansion → 2 full
+   sweep → 3 Bayesian refine → 4 filter cascade), using Rust + Rayon +
+   SIMD for the hot path.
+5. **Reports** the surviving top 3 candidates with full statistical
+   guards against overfitting (Deflated Sharpe with effective-N
+   clustering, Combinatorial Purged Cross-Validation, Walk-Forward
+   Optimization, and a held-out Lockbox window).
 
-The ingest + orchestration layer is what P1a Day 2 delivers. Strategy
-engine, brute-force orchestrator, and dashboard refinement follow in
-P2–P5.
-
----
-
-## 📐 Architecture in one diagram
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        brutex CLI                               │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-┌─────────────────────────────────────────────────────────────────┐
-│   PhaseADriver → PhaseBDriver → PhaseCDriver → PhaseDDriver     │
-│                (sequential gating per §8.5)                      │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-┌─────────────────────────────────────────────────────────────────┐
-│  PhaseRunner ─ drive_item_to_terminal ─ retry backoff loop      │
-│  PipelineEvent fanout → Telegram + Dashboard subscribers         │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-┌─────────────────────────────────────────────────────────────────┐
-│                      GrowwAdapter                                │
-│  AdaptiveTokenBucket + WorkItemStore + AuditWriter +             │
-│  retry classifier + FSM transitions (§FR-ING-008/014)            │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-┌─────────────────────────────────────────────────────────────────┐
-│                  growwapi.GrowwAPI (lazy import)                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-Everything above `GrowwAdapter` is **broker-agnostic**. To add a new
-data source (Zerodha, Upstox, IBKR, Binance, Polygon), implement a
-new adapter that satisfies `GrowwClientProtocol` + the `pull_*`
-methods — nothing else changes.
+Track 1 produces **signal-only** output (`paper_pnl_paisa`). Execution
+realism (brokerage, STT, slippage, IV/theta) re-enters in the
+post-Track-1 **Options Track**, when Track 1 winners are translated
+to ATM/ITM option fill simulations.
 
 ---
 
-## 🔒 Guarantees (mechanically enforced, not vibes)
+## 🔬 Track 1 scope (locked)
 
-Every guarantee below has a file + test that fails the build on regression.
-See `docs/REQUIREMENTS.md §17` for the full list of 20 coverage gates
-(CG-01 .. CG-20).
-
-| Guarantee | Enforcement |
+| Aspect | Value |
 |---|---|
-| **O(1) latency** | LMDB B+tree lookups via `brutex.orchestrator.store.WorkItemStore`. Microbenchmark in `tests/bench/` asserts median ≤ 500 ns. |
-| **Uniqueness** | `content_hash = sha256(...)`. Collision probability 2⁻²⁵⁶. `tests/property/test_hash_no_collision.py` runs 10⁷ random params with zero collisions. |
-| **Deduplication** | `WorkItemStore.exists_terminal` probed before every SDK call. Rerun-safe per `NFR-REL-001`. |
-| **Never-skip** | Work-item FSM with 6 states (`PENDING` / `IN_FLIGHT` / `RETRYING` / `SUCCESS` / `NO_DATA` / `QUARANTINED`). Every exception maps to a terminal or retrying state. `tests/unit/test_orchestrator_state.py::TestNeverSkipInvariant` parametrized over every `Outcome` value. |
-| **Reproducibility** | `PYTHONHASHSEED=0`, seeded RNGs, content-addressed hashing. Same inputs → byte-identical outputs. `NFR-DET-002`. |
-| **Audit trail** | Hash-chained JSONL via `brutex.orchestrator.audit.AuditWriter`. `verify_chain` catches 7 tamper modes. Runs on every push via CI. |
-| **Rate-limit safety** | `AdaptiveTokenBucket` at 15 req/s (0.6 × Groww's 25 req/s bucket). Auto-downshifts on 429 bursts per `FR-ING-017`. Never drops a request silently. |
-| **Phase completeness** | `phase_complete()` invariant: every item in a terminal state before the next phase starts. `PhaseHaltError` raised on unresolved quarantine. |
+| **Instruments** | NIFTY 50, BANKNIFTY, SENSEX, India VIX |
+| **Data source** | Dhan Historical Data API |
+| **Timeframes** | 21 (1m base + 19 derived intraday + 1d) |
+| **Range** | Rolling `2021-01-01 → today` |
+| **Hardware reference** | Apple M4 Pro (14-core, 10 P-cores allocated) |
+| **Per-sweep SLA** | 2-4 days wall time on M4 Pro |
+| **Verification** | 9-layer pyramid + 24 property invariants + 3 oracle tests |
+| **Tradability** | None (signal-only) |
+| **Brokerage / STT / GST / stamp** | NONE applied (indexes don't trade) |
+
+Out of scope: futures, options, F&O contracts, live feed, WebSocket,
+multi-tenant SaaS, commodity segment, BSE cash equity (other than the
+SENSEX index value itself).
+
+See `docs/TRACK1_BACKTEST_SPEC.md` for the master spec and
+`docs/TRACK1_DATA_INGEST_DESIGN.md` for the data pipeline design.
 
 ---
 
-## 🚀 Quick start
+## 🏗️ Architecture
+
+```
+   ┌─────────────────────────────────────────────────────────────┐
+   │                                                             │
+   │   Dhan API  ─→  Adapter  ─→  Parser  ─→  Validate  ─→       │
+   │                                                             │
+   │   ─→ Parquet (atomic)  ─→  Watermark advance (DuckDB)       │
+   │                                                             │
+   │   ─→ Resample 1m → 19 intraday TFs  ─→  Audit verify        │
+   │                                                             │
+   │   ─→ Brute-force engine (Rust + Rayon + SIMD)               │
+   │                                                             │
+   │   ─→ Stage 1A/1B/2/3/4 sweep cascade                        │
+   │                                                             │
+   │   ─→ Top 3 production candidates + full audit trail         │
+   │                                                             │
+   └─────────────────────────────────────────────────────────────┘
+```
+
+Layers (broker-agnostic above L1):
+
+| Layer | What | Code |
+|---|---|---|
+| L1 — Adapter | Dhan HTTP client + envelope parser | `brutex/adapters/dhan/` (Phase 2) |
+| L2 — Data lake | Parquet + DuckDB + LMDB | `brutex/data/` |
+| L3 — Feed | Replay + resampler | `brutex/feed/` |
+| L4 — Execution | Signal-only simulator | `brutex/execution/` |
+| L5 — Engine | Rust hot kernel | `rust/fno-math/` |
+| L6 — Orchestrator | FSM + audit + rate limiter | `brutex/orchestrator/` |
+| L7 — UI | FastAPI dashboard | `brutex/dashboard/` |
+
+Everything above the adapter is **broker-agnostic**. To add a new
+data source later, write a new adapter that implements the protocol
+in `brutex/adapters/protocol.py`. Everything else works unchanged.
+
+---
+
+## ⚙️ Setup
 
 ```bash
-# Clone
+# 1. Clone + install
 git clone https://github.com/SJParthi/bruteX.git
 cd bruteX
+pip install -e ".[dev,data]"
 
-# Install in editable mode with dev dependencies
-pip install -e ".[dev]"
+# 2. Set your Dhan credentials (Phase 2 — coming soon)
+export BRUTEX_DHAN_ACCESS_TOKEN="<your-token-from-dhan.co>"
+export BRUTEX_LAKE_ROOT=/path/to/large/ssd/brutex-lake
 
-# Install pre-commit hooks (runs ruff + mypy + banned patterns + secrets)
-pip install pre-commit && pre-commit install
-
-# Verify the install
+# 3. Verify install
 brutex version
-```
-
-Set your Groww API token (for real ingest):
-
-```bash
-export GROWW_API_AUTH_TOKEN="<your token from groww.in>"
-```
-
-Optional — enable Telegram alerts:
-
-```bash
-# Follow docs/runbooks/telegram-setup.md first to create the bot
-export BRUTEX_TELEGRAM_BOT_TOKEN="123456789:ABC..."
-export BRUTEX_TELEGRAM_CHAT_ID="12345"
-export BRUTEX_TELEGRAM_ENABLED=true
 ```
 
 ---
 
-## 💻 CLI commands
+## 🚀 Usage (Phase 2 onward)
+
+The CLI surface lands in Phase 2 with the Dhan adapter. Track 1 plan:
 
 ```bash
-# Version + commit SHA
-brutex version
+# Daily incremental pull (only fetches new bars since last run)
+brutex pull
 
-# Status of the currently running ingest (reads ~/.brutex/runtime.json)
+# View pipeline status
 brutex status
 
-# Run Phase A only — fetch + normalise + filter the Groww instrument CSV
-brutex ingest instruments [--snapshot-date YYYY-MM-DD] [--dry-run]
+# Verify audit chain integrity
+brutex audit verify audit/audit.jsonl
 
-# Verify a hash-chained audit log
-brutex audit verify <path/to/audit.jsonl>
-
-# Future phases (NOT YET WIRED via CLI)
-brutex ingest expiries           # Phase B
-brutex ingest contracts          # Phase C
-brutex ingest candles            # Phase D
-brutex ingest all                # sequential A → B → C → D
+# Dashboard (FastAPI)
+brutex dashboard --lake-root $BRUTEX_LAKE_ROOT
 ```
 
-Dry-run mode uses a FakeGrowwClient — exercises the wiring without
-any network calls. Perfect for CI smoke tests.
-
----
-
-## 🗂️ Repository layout
-
-```
-bruteX/
-├── brutex/                          # Python package (P1+)
-│   ├── adapters/groww/              # L1 broker adapter
-│   │   ├── client.py                # GrowwAdapter facade
-│   │   ├── instruments.py           # PhaseADriver
-│   │   ├── expiries.py              # PhaseBDriver
-│   │   ├── contracts.py             # PhaseCDriver
-│   │   ├── candles.py               # PhaseDDriver + chunker
-│   │   ├── normaliser.py            # raw dict → Instrument
-│   │   └── constants.py             # SDK mapping tables
-│   ├── orchestrator/                # L6 orchestration
-│   │   ├── state.py                 # Work-item FSM
-│   │   ├── retry.py                 # Exception classifier + backoff
-│   │   ├── audit.py                 # Hash-chained audit log
-│   │   ├── store.py                 # LMDB WorkItem persistence
-│   │   ├── rate_limiter.py          # Adaptive token bucket
-│   │   └── pipeline.py              # Phase runner + gating
-│   ├── notifications/telegram.py    # Async Telegram notifier
-│   ├── dashboard/app.py             # FastAPI dashboard state + HTML
-│   ├── observability/metrics.py     # Prometheus exporter
-│   ├── config/ports.py, runtime.py  # Port management + discovery
-│   ├── models.py                    # Exchange, Segment, Instrument, ...
-│   ├── universe.py                  # V1_INDICES + is_in_scope filter
-│   ├── math/                        # fno-math PyO3 re-exports (placeholder)
-│   └── cli.py                       # brutex entry point
-│
-├── rust/                            # Shared Rust workspace
-│   ├── fno-math/                    # The single source of truth
-│   │   ├── src/greeks/              # Extracted from tickvault
-│   │   ├── src/indicators/
-│   │   ├── src/strategies/
-│   │   └── src/compat/              # Vendored tickvault-common
-│   └── fno-math-py/                 # PyO3 wrapper (maturin)
-│
-├── tests/
-│   ├── unit/                        # ~3,400 lines, 250+ tests
-│   ├── property/                    # Hypothesis (scaffold)
-│   ├── golden/                      # Fixture-pinned (scaffold)
-│   ├── scenario/                    # 25-row gauntlet (phase-by-phase)
-│   └── bench/                       # O(1) proofs + SLA (P4)
-│
-├── docs/
-│   ├── REQUIREMENTS.md              # v1.0 signed off, 1700+ lines
-│   ├── REQUIREMENTS_SIMPLE.md       # Plain-English companion
-│   ├── groww-sdk/                   # Verified Groww SDK reference
-│   │   ├── instruments.md
-│   │   ├── annexures.md
-│   │   ├── backtesting.md
-│   │   └── exceptions.md
-│   └── runbooks/
-│       ├── telegram-setup.md
-│       └── fno-math-extraction.md
-│
-├── scripts/
-│   ├── extract-fno-math.sh          # One-shot extractor
-│   ├── check-fno-math-drift.sh      # Scheduled drift detector
-│   └── ci/
-│       ├── scan-banned-patterns.sh
-│       └── check-conventional-commits.sh
-│
-├── .github/workflows/
-│   ├── ci.yml                       # 13-gate aggregate pipeline
-│   └── drift-check.yml              # Every 6h tickvault watcher
-│
-├── .pre-commit-config.yaml          # Local fast gates
-├── CLAUDE.md                        # Project rules for Claude Code
-└── pyproject.toml                   # Python tooling + deps
-```
-
----
-
-## 🧪 Testing
+Current Phase 0 CLI exposes only:
 
 ```bash
-# Full unit test suite with 100% coverage gate (CG-01)
-make test-cov
-
-# Just unit tests, fast feedback
-make test-unit
-
-# Lint + type + security + all CG gates
-make all
+brutex version
+brutex status
+brutex audit verify <file>
+brutex dashboard
 ```
 
-Every CI push runs 13 parallel gates via `.github/workflows/ci.yml`.
-See the `ci-ok` aggregate check for the merge gate.
+---
+
+## 📐 Guarantees
+
+| Guarantee | Mechanism | Verified by |
+|---|---|---|
+| **O(1) latency** | LMDB + Bloom + DuckDB PK + mmap'd Parquet | Bench tests `p99(N=1M) / p99(N=1K) ≤ 1.1` |
+| **Bit-for-bit reproducibility** | Atomic tempfile+rename writes, deterministic Parquet bytes | Audit-log replay oracle test |
+| **No look-ahead bias** | Instrumented bar accessor | Property P-06 |
+| **Uniqueness + dedup** | 4-layer defense: Watermark → Bloom → LMDB → bar_hash | Property tests + golden corpora |
+| **Audit chain integrity** | Hash-chained JSONL with `verify_chain()` | Property P-16, P-17, P-20 |
+| **Honest SLA** | Memory-bandwidth-bounded throughput math | `docs/TRACK1_PERFORMANCE_BUDGET.md` |
+| **Statistical rigor** | DSR (Bailey-LdP effective-N) + CPCV + WFO + Lockbox | 4-filter cascade in Stage 4 |
+
+See `docs/TRACK1_VERIFICATION_PYRAMID.md` for the full 9-layer test
+pyramid + 24 property invariants.
 
 ---
 
-## 🔗 Cross-product — how BruteX and tickvault share code
+## 🧪 Development
 
-BruteX and [tickvault](https://github.com/SJParthi/tickvault) are two
-products, one shared source of mathematical truth. The `rust/fno-math/`
-crate lives inside the BruteX repo and is consumed by:
+```bash
+# Lint + type check
+ruff check brutex tests
+ruff format --check brutex tests
+mypy --strict brutex/
 
-- **Tickvault** (live trading, Rust) via a normal Cargo path dep or
-  crates.io version.
-- **BruteX** (backtesting, Python) via the `fno-math-py` PyO3 wrapper
-  which builds a Python wheel containing the compiled Rust code.
+# Run tests
+pytest tests/unit              # ~530 tests
+pytest tests/property          # 24 hypothesis invariants
+pytest tests/bench             # O(1) ratio gates
+pytest tests/golden            # frozen SHA256 fixtures
 
-**Any change to a Greek, indicator, or strategy lives in exactly one
-place** — `rust/fno-math/src/` inside this repo — and both products
-pick up the change on the next version bump.
+# Coverage
+coverage run -m pytest && coverage report
+```
 
-Full details: `docs/REQUIREMENTS.md §7A Shared Core Library Contract`
-and `docs/runbooks/fno-math-extraction.md`.
+All commits must follow Conventional Commits. See
+`.github/workflows/ci.yml` for the full quality gate pipeline (~22
+gates: lint, type, test, property, bench, golden, security, docs,
+licenses, Rust, banned patterns, secrets, CodeQL, Semgrep, Trivy,
+SBOM, mutation, etc.).
 
 ---
 
-## 📖 Documentation
+## 📚 Documentation
 
-| Document | Purpose |
+| File | Purpose |
 |---|---|
-| [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) | Signed-off v1.0 spec — every FR / NFR / CG / ADR / MG |
-| [`docs/REQUIREMENTS_SIMPLE.md`](docs/REQUIREMENTS_SIMPLE.md) | Plain-English walkthrough |
-| [`docs/groww-sdk/`](docs/groww-sdk/) | Verified Groww SDK reference (4 files) |
-| [`docs/runbooks/`](docs/runbooks/) | Operator procedures (Telegram, fno-math extraction) |
-| [`CLAUDE.md`](CLAUDE.md) | Project rules read by every Claude Code session |
+| `CLAUDE.md` | Project rules + verified facts table |
+| `docs/TRACK1_BACKTEST_SPEC.md` | Master spec (signal-only research, 21 TFs, 4 inst) |
+| `docs/TRACK1_DATA_INGEST_DESIGN.md` | End-to-end ingest pipeline design |
+| `docs/TRACK1_VERIFICATION_PYRAMID.md` | 9 layers + 24 invariants + 3 oracles |
+| `docs/TRACK1_VOCABULARY.md` | 52 atomic conditions, K=2..5 ANDed |
+| `docs/TRACK1_PHASE_PLAN.md` | 8-12 week build plan, Phase 0-4 |
+| `docs/TRACK1_PERFORMANCE_BUDGET.md` | Honest 2-4 day SLA, memory BW math |
+| `docs/TRACK1_MICROSTRUCTURE.md` | Pre-open, Muhurat, halts, rebalance |
+| `docs/MIGRATION.md` | Legacy broker → Dhan migration log (80 decisions) |
+| `docs/REQUIREMENTS.md` | DEPRECATED — historical reference only |
+| `docs/ROADMAP.md` | PARTIALLY DEPRECATED — historical phase tables |
 
 ---
 
 ## 📜 License
 
-Proprietary. See [`SECURITY.md`](SECURITY.md) and the license field
-in `pyproject.toml`.
+See `LICENSE`.
 
 ---
 
-_Last updated: 2026-04-14. BruteX v0.1.0a0 — P1a Day 2 complete._
+## 🤖 Built with
+
+- Python 3.12, Rust + PyO3, Arrow zero-copy
+- Polars, DuckDB, LMDB, Parquet (Zstd-9)
+- Optuna (CMA-ES) for Stage 3 Bayesian refinement
+- Hypothesis, pytest-benchmark, mutmut, cargo-mutants, cargo-fuzz
+- FastAPI + structlog + Prometheus
+- Claude Code (Anthropic) as the build copilot, with a 4-agent
+  hostile-review pattern at each phase end

@@ -10,11 +10,12 @@ import pytest
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 
 # ────────────────────────────────────────────────────────────────────────
-# Raw-row fixtures mimicking the shape of Groww's pandas DataFrame rows.
-# These are dicts (same shape returned by `df.to_dict('records')[i]` or
-# `get_instrument_by_groww_symbol`). We deliberately include the 20th
-# `internal_trading_symbol` column observed in the real SDK output to
-# verify the normaliser handles it per docs/groww-sdk/instruments.md §12.1.
+# Raw-row fixtures mimicking the shape of a broker's pandas DataFrame
+# rows. These are dicts (same shape returned by `df.to_dict('records')[i]`).
+# Used by orchestrator/data unit tests as generic instrument rows. They
+# include an `internal_trading_symbol` column observed in legacy adapter
+# output; new adapters do not need to expose it. Phase 2 will reshape
+# these fixtures around Dhan's response format.
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -25,7 +26,7 @@ def raw_equity_row_reliance() -> dict[str, Any]:
         "exchange": "NSE",
         "exchange_token": 2885,
         "trading_symbol": "RELIANCE",
-        "groww_symbol": "NSE-RELIANCE",
+        "vendor_symbol": "NSE-RELIANCE",
         "name": "Reliance Industries",
         "instrument_type": "EQ",
         "segment": "CASH",
@@ -52,7 +53,7 @@ def raw_index_row_nifty() -> dict[str, Any]:
         "exchange": "NSE",
         "exchange_token": 26000,
         "trading_symbol": "NIFTY",
-        "groww_symbol": "NSE-NIFTY",
+        "vendor_symbol": "NSE-NIFTY",
         "name": "Nifty 50",
         "instrument_type": "IDX",
         "segment": "CASH",
@@ -76,13 +77,13 @@ def raw_index_row_nifty() -> dict[str, Any]:
 def raw_banknifty_ce_row_dec2025() -> dict[str, Any]:
     """Matches the real BANKNIFTY Dec 2025 27000 CE row from the CSV sample.
 
-    lot_size 35 (post-SEBI-revision — see docs/groww-sdk/instruments.md §12.3).
+    lot_size 35 (post-SEBI-revision — see docs/broker-sdk-docs/instruments.md §12.3).
     """
     return {
         "exchange": "NSE",
         "exchange_token": 49445,
         "trading_symbol": "BANKNIFTY25DEC27000PE",
-        "groww_symbol": "NSE-BANKNIFTY-24Dec25-27000-PE",
+        "vendor_symbol": "NSE-BANKNIFTY-24Dec25-27000-PE",
         "name": float("nan"),
         "instrument_type": "PE",
         "segment": "FNO",
@@ -111,7 +112,7 @@ def raw_banknifty_ce_row_jun2025() -> dict[str, Any]:
         "exchange": "NSE",
         "exchange_token": 41942,
         "trading_symbol": "BANKNIFTY25JUN35400PE",
-        "groww_symbol": "NSE-BANKNIFTY-26Jun25-35400-PE",
+        "vendor_symbol": "NSE-BANKNIFTY-26Jun25-35400-PE",
         "name": float("nan"),
         "instrument_type": "PE",
         "segment": "FNO",
@@ -138,7 +139,7 @@ def raw_sensex_ce_row() -> dict[str, Any]:
         "exchange": "BSE",
         "exchange_token": 86000,
         "trading_symbol": "SENSEX25SEP79500CE",
-        "groww_symbol": "BSE-SENSEX-25Sep25-79500-CE",
+        "vendor_symbol": "BSE-SENSEX-25Sep25-79500-CE",
         "name": float("nan"),
         "instrument_type": "CE",
         "segment": "FNO",
@@ -165,7 +166,7 @@ def nifty_option_instance() -> Instrument:
         exchange=Exchange.NSE,
         exchange_token=35044,
         trading_symbol="NIFTY25MAR29050PE",
-        groww_symbol="NSE-NIFTY-27Mar25-29050-PE",
+        vendor_symbol="NSE-NIFTY-27Mar25-29050-PE",
         name=None,
         instrument_type=InstrumentType.PE,
         segment=Segment.FNO,

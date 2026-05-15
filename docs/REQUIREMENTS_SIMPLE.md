@@ -10,7 +10,7 @@
 
 ## v1 universe (locked — expanded 2026-04-14)
 
-**Everything in Groww's FNO segment.** Two pieces:
+**Everything in the broker's FNO segment.** Two pieces:
 
 ### 1. Index F&O (8 indices)
 
@@ -29,12 +29,12 @@
 
 All NSE stocks currently eligible for F&O trading — roughly **215 underlyings** as of late 2024/2025 (exact count varies as SEBI adds/removes stocks). Examples: RELIANCE, TCS, HDFCBANK, ICICIBANK, INFY, SBIN, ITC, LT, AXISBANK, KOTAKBANK, BHARTIARTL, HINDUNILVR, M&M, MARUTI, ASIANPAINT, WIPRO, TATAMOTORS, SUNPHARMA, BAJFINANCE, ADANIPORTS… and ~195 more.
 
-**The list is NOT hardcoded** — it's discovered at runtime by reading Groww's instrument CSV and filtering to `segment == FNO`.
+**The list is NOT hardcoded** — it's discovered at runtime by reading the broker's instrument CSV and filtering to `segment == FNO`.
 
 ### What's NOT in v1
 
 ❌ Cash equity backtests (pure equity strategies without F&O) — deferred to v1.1
-❌ Commodity (GOLD, CRUDE, SILVER on MCX) — Groww doesn't support it
+❌ Commodity (GOLD, CRUDE, SILVER on MCX) — the broker doesn't support it
 ❌ BSE cash + BSE stock F&O — deferred to v1.1
 
 ### Scale numbers (honest)
@@ -69,7 +69,7 @@ You want to know: **does this recipe actually work?**
 BruteX is a **time machine for trading strategies**. You feed it:
 
 - Your recipe (a "strategy")
-- Old market data (from 2020 to today, from Groww)
+- Old market data (from 2020 to today, from the broker)
 - A bunch of variations of the recipe (*"what if I use 10 instead of 20? What if 50? What about 100?"*)
 
 And it tells you: *"This recipe would have made ₹X profit. This variation made ₹Y. This one lost money."*
@@ -138,8 +138,8 @@ Here's every promise in the technical `REQUIREMENTS.md` rewritten for a human.
 
 **Like:** a blockchain. You can prove exactly what happened, when, and why. If anyone ever tampers with it, we catch it instantly.
 
-### Promise 8: "Never get banned by Groww"
-**Plain:** Groww allows ~25 API calls/second. We cap ourselves at **15** — 60% of the limit, just to be safe. **We will never get rate-limited or banned.**
+### Promise 8: "Never get banned by the broker"
+**Plain:** the broker allows ~25 API calls/second. We cap ourselves at **15** — 60% of the limit, just to be safe. **We will never get rate-limited or banned.**
 
 ### Promise 9: "No fake winners (overfitting protection)"
 **Plain:** **Listen carefully, bro — this is the most important one.**
@@ -187,8 +187,8 @@ Think of BruteX as a 7-floor building. Each floor has **one job**. Floors talk d
              "Store every price we've ever seen, forever"
                         ▲
 🏢 Floor 1:  The Delivery Guy
-             (Groww adapter — pluggable, rate-limited)
-             "Fetch data from Groww, respect rate limits"
+             (broker adapter (deleted) — pluggable, rate-limited)
+             "Fetch data from the broker, respect rate limits"
 ```
 
 **Why this structure matters:** If tomorrow we want to add Binance (crypto), we write **only a new Floor 1** (a BinanceAdapter). Floors 2–7 stay the same. Same for Zerodha, IBKR, Polygon, anything.
@@ -317,7 +317,7 @@ Bar = (symbol, exchange, ts, open, high, low, close, volume, oi)
 ```
 
 This works for:
-- ✅ NSE stocks / F&O (Groww)
+- ✅ NSE stocks / F&O (the broker)
 - ✅ BSE stocks / F&O
 - ✅ Binance / Coinbase crypto (OI = None)
 - ✅ Forex pairs (OI = None)
@@ -348,7 +348,7 @@ class BinanceCalendar(ICalendar):
 |---|---|---|
 | **Step 0 (now)** | Write the rulebook (`REQUIREMENTS.md` + this file) | ✅ Done |
 | **Step 0.5** | Extract shared core from tickvault | ~1 week |
-| **Step 1** | Build Floor 1 — fetch data from Groww, store it | ~2 weeks |
+| **Step 1** | Build Floor 1 — fetch data from the broker, store it | ~2 weeks |
 | **Step 2** | Build Floors 2+3 — librarian + warehouse + fast lookup | ~2 weeks |
 | **Step 3** | Build Floors 4+5 — cashier + workers + Rust hot kernel | ~3 weeks |
 | **Step 4** | Build Floor 6 — manager + 1M-combos speed test (CI gate) | ~3 weeks |
@@ -363,7 +363,7 @@ class BinanceCalendar(ICalendar):
 **Just ONE thing:** Read this page (not the 1186-line monster) and tell me:
 
 ### 👉 Option A: "Sign off, start P1a"
-Everything accepted as-is. I start building Phase P1a (Groww instruments adapter).
+Everything accepted as-is. I start building Phase P1a (the broker instruments adapter).
 
 ### 👉 Option B: "Amend these items: X, Y, Z"
 List what you want changed. I edit both docs, commit, push, iterate.

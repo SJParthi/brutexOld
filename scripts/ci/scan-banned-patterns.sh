@@ -17,7 +17,8 @@
 #   2. No bare `except:` — must specify exception type
 #   3. No `# TODO:` lingering in production code — use MG-### in REQUIREMENTS.md instead
 #   4. No `.env*` files checked in (already in .gitignore, double-check)
-#   5. No hardcoded Groww auth tokens (pattern: `GROWW_API_AUTH_TOKEN = "..."`)
+#   5. No hardcoded broker auth tokens (pattern: any `*_API_AUTH_TOKEN = "..."`
+#      or `*_ACCESS_TOKEN = "..."`)
 #   6. No hardcoded Telegram tokens (pattern: `<digits>:<base64>`)
 #   7. No `pandas` imports in brutex/math/ (must be pure compute or numpy)
 
@@ -62,10 +63,10 @@ if git ls-files | grep -E '^\.env' 2>/dev/null; then
     fail ".env* file committed. Add to .gitignore and rotate any exposed secrets immediately."
 fi
 
-# ── 5. hardcoded Groww auth token ──
+# ── 5. hardcoded broker auth token (any vendor pattern) ──
 if git ls-files 'brutex/**/*.py' 'tests/**/*.py' 2>/dev/null | \
-   xargs grep -En 'GROWW_API_AUTH_TOKEN\s*=\s*["\047][^"\047{]{10,}["\047]' 2>/dev/null; then
-    fail "Hardcoded GROWW_API_AUTH_TOKEN detected. Use environment variable."
+   xargs grep -En '(API_AUTH_TOKEN|ACCESS_TOKEN|API_TOKEN)\s*=\s*["\047][^"\047{]{10,}["\047]' 2>/dev/null; then
+    fail "Hardcoded broker auth token detected. Use environment variable (e.g. BRUTEX_DHAN_ACCESS_TOKEN)."
 fi
 
 # ── 6. hardcoded Telegram token pattern (digits:base64-like, length > 30) ──

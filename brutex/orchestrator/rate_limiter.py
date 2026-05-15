@@ -1,4 +1,4 @@
-"""Adaptive token-bucket rate limiter for the Groww adapter.
+"""Adaptive token-bucket rate limiter for the broker adapter (deleted).
 
 Implements ``FR-ING-017`` (adaptive rate limiter) from
 ``docs/REQUIREMENTS.md §4.1``.
@@ -6,9 +6,9 @@ Implements ``FR-ING-017`` (adaptive rate limiter) from
 ## Contract
 
 * **Start at 15 req/s** (the ``BRUTEX_OHLC_RATE_LIMIT_RPS`` env-var
-  default — 60% of Groww's documented ~25 req/s OHLC bucket).
+  default — 60% of the broker's documented ~25 req/s OHLC bucket).
 * **Auto-downshift to 10 req/s** after 3 consecutive
-  :class:`GrowwAPIRateLimitException` hits inside a 60-second window.
+  :class:`VendorAPIRateLimitException` hits inside a 60-second window.
 * **Emit a ``rate_limit.downshift`` Telegram event** when downshifting.
 * **Upshift back to 15 req/s** after 2 consecutive minutes of clean
   operation (no 429s).
@@ -52,7 +52,7 @@ from brutex.models import BruteXError
 # Constants (tuned per FR-ING-017)
 # ────────────────────────────────────────────────────────────────────────
 
-#: Default steady-state rate (req/s). 60% of Groww's documented 25 r/s.
+#: Default steady-state rate (req/s). 60% of the broker's documented 25 r/s.
 DEFAULT_INITIAL_RPS: Final[float] = 15.0
 
 #: Rate we downshift to after consecutive 429s.
@@ -119,9 +119,9 @@ class RateLimiterEvent:
 class AdaptiveTokenBucket:
     """Thread-safe adaptive token bucket.
 
-    Create one instance per Groww adapter. Workers call
+    Create one instance per broker adapter (deleted). Workers call
     :meth:`acquire` before every API call and :meth:`record_rate_limit_hit`
-    if the call returned a 429 / ``GrowwAPIRateLimitException``.
+    if the call returned a 429 / ``VendorAPIRateLimitException``.
 
     Parameters
     ----------

@@ -337,7 +337,7 @@ def build_app(
         Optional :class:`~brutex.data.instrument_store.InstrumentStore`
         handle. When supplied, the app exposes read-only instruments /
         expiries / contracts / stats endpoints + an HTML browser
-        section so a user can literally see what the Groww ingest
+        section so a user can literally see what the the broker ingest
         pulled. When ``None`` (the default), those endpoints return
         503 and the HTML section stays hidden \u2014 the pipeline
         progress cards still work.
@@ -649,18 +649,18 @@ def _query_instruments(
     # Clauses are fixed-literal WHERE fragments; every user value is
     # parameter-bound via DuckDB "?" placeholders. Not an injection vector.
     base_select = (
-        "SELECT groww_symbol, exchange, trading_symbol, instrument_type, "
+        "SELECT vendor_symbol, exchange, trading_symbol, instrument_type, "
         "segment, underlying_symbol, expiry_date, strike_price, lot_size, "
         "freeze_quantity, tick_size, snapshot_date FROM instruments"
     )
-    order_limit = " ORDER BY groww_symbol LIMIT ? OFFSET ?"
+    order_limit = " ORDER BY vendor_symbol LIMIT ? OFFSET ?"
     sql = base_select + where_sql + order_limit  # nosec B608
     params.append(limit)
     params.append(offset)
     rows = conn.execute(sql, params).fetchall()
     return [
         {
-            "groww_symbol": r[0],
+            "vendor_symbol": r[0],
             "exchange": r[1],
             "trading_symbol": r[2],
             "instrument_type": str(r[3]),
@@ -760,7 +760,7 @@ _INSTRUMENTS_HTML_BLOCK = """\
   <table id="ins-table">
     <thead>
       <tr>
-        <th>groww_symbol</th>
+        <th>vendor_symbol</th>
         <th>type</th>
         <th>segment</th>
         <th>underlying</th>
@@ -807,7 +807,7 @@ async function loadInstruments() {
     const tb = document.querySelector('#ins-table tbody');
     tb.innerHTML = rows.map(i =>
       `<tr>
-        <td>${i.groww_symbol}</td>
+        <td>${i.vendor_symbol}</td>
         <td>${i.instrument_type}</td>
         <td>${i.segment}</td>
         <td>${i.underlying_symbol || '-'}</td>

@@ -3,120 +3,235 @@
 > Persistent instructions for Claude Code working in this repository.
 > Every Claude session in `bruteX/` must read and honor this file.
 
+_Last updated: 2026-05-15. the broker → Dhan migration; Track 1 spec locked
+after 4-agent hostile-review pass._
+
+---
+
 ## 1. Project Identity
 
 - **Name:** BruteX
-- **Purpose:** Extreme drill-down brute-force backtesting engine for Indian F&O (NSE cash + FNO), globally extensible in later phases.
-- **Data source (v1):** Groww API — **only** two surfaces:
-  1. `https://groww.in/trade-api/docs/python-sdk/instruments` (instrument master CSV)
-  2. `https://groww.in/trade-api/docs/python-sdk/backtesting` (historical candles)
-- **Out of scope v1:** Live feed, WebSocket, orders, portfolio, funds, margins-live, commodity segment.
-- **Primary deliverable phase (current):** `docs/REQUIREMENTS.md` — no code yet.
+- **Purpose:** Extreme drill-down brute-force backtesting engine for
+  Indian **spot indexes** (NIFTY 50 / BANKNIFTY / SENSEX) + **India
+  VIX** (volatility index). Track 1 is signal-only research; the
+  Options Track translates winning signals to options for execution
+  realism.
+- **Data source (Track 1):** **Dhan Historical Data API** — only two
+  surfaces:
+  1. `POST /v2/charts/intraday` (1-minute OHLC; other timeframes
+     resampled deterministically from 1m)
+  2. `POST /v2/charts/historical` (daily OHLC, used for PDH/PDL anchors)
+- **Out of scope (Track 1):** Live feed, WebSocket, order placement,
+  portfolio, funds, F&O contracts, options, commodity segment, BSE-cash
+  segment, multi-user SaaS.
+- **Active branch:** `claude/backtest-system-spec-ITI4Y`
+
+---
 
 ## 2. Golden Rules (never violate)
 
-1. **No hallucination.** Every factual claim about Groww, NSE, SPAN, or any external system must be traceable to a verified source. If unsure, say "unverified" and stop.
-2. **No premature code.** Do not write implementation code until `docs/REQUIREMENTS.md` is signed off by the user.
-3. **Single source of truth.** All functional / non-functional requirements live under `docs/REQUIREMENTS.md` with IDs (`FR-###`, `NFR-###`, `MG-###`). Every later PR references an ID.
-4. **Scope lock.** Groww surface is frozen to `instruments` + `backtesting`. Do not introduce live feeds, order placement, or WebSocket.
-5. **Reproducibility first.** Every run is identified by `sha256(strategy ‖ params ‖ data_snapshot_hash ‖ code_sha)`. No computation without that hash recorded.
-6. **O(1) discipline.** Bar lookup, combo dedup, and result cache must be O(1). Any regression fails CI.
-7. **Rate-limit safety.** Groww OHLC bucket is ~25 req/s. BruteX adapter caps at **15 req/s effective** (0.6 safety factor). Never raise without explicit user approval.
-8. **Idempotence.** Every ingest and every backtest combo must be rerun-safe. Same inputs → same outputs, bit-for-bit.
-9. **Audit trail.** Every material action (ingest chunk, combo run, error, kill) appends one line to a hash-chained JSONL audit log. Breaking the chain fails CI.
-10. **Honest limits.** If an SLA cannot be met under the current hardware envelope, SAY SO. Do not promise "millions in minutes" without naming the hardware and strategy envelope.
+1. **No hallucination.** Every factual claim about Dhan, NSE, BSE, NIFTY
+   composition, brokerage, taxes, or any external system must be
+   traceable to a verified source. If unsure, say "unverified" and stop.
+2. **Single source of truth.** All Track 1 specs live under
+   `docs/TRACK1_*.md`. Every PR references a section + decision ID.
+   The pre-2026-05-15 `docs/REQUIREMENTS.md` is DEPRECATED — see its
+   header banner.
+3. **Scope lock.** Track 1 = Dhan + spot indexes + India VIX (NIFTY 50,
+   BANKNIFTY, SENSEX, INDIA VIX). 21 timeframes (1m base + 19 derived
+   intraday + 1d). Rolling `2021-01-01 → today` range. No futures, no
+   options, no F&O contracts. Do not silently expand scope.
+4. **Reproducibility first.** Every run is identified by `sha256(
+   strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params
+   ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_hash)`. No
+   computation without that hash recorded.
+5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
+   (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
+   append must all be O(1). CI gates: `p99(N=1M) / p99(N=1K) ≤ 1.1`
+   for each hot path. Any regression fails CI.
+6. **Rate-limit safety.** Dhan rate limits must be verified at adapter
+   ingest time. Until verified, cap effective rate at 10 req/s and
+   document the source. Never raise without explicit user approval.
+7. **Idempotence.** Every ingest chunk and every backtest combo must be
+   rerun-safe. Same inputs → same outputs, bit-for-bit. The audit-log
+   replay test is the oracle.
+8. **Audit trail.** Every material action (ingest chunk, combo run,
+   error, kill) appends one line to a hash-chained JSONL audit log.
+   Breaking the chain fails CI.
+9. **Hostile review before code.** Major design changes get a
+   parallel-agent hostile review (Plan + general-purpose + Explore)
+   before implementation. See the 4-agent pattern in
+   `docs/TRACK1_PHASE_PLAN.md §0`.
+10. **Honest limits.** If an SLA cannot be met under the current
+    hardware envelope, SAY SO. No "millions in minutes" claims without
+    naming the hardware AND citing public benchmarks. The 4-agent
+    review on 2026-05-15 caught a 10x-overoptimistic throughput claim;
+    do not repeat that pattern.
+
+---
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/capture-system-requirements-F9IHZ`
+- **Active feature branch:** `claude/backtest-system-spec-ITI4Y`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
-  - `docs(requirements): add FR-### data-lake section`
-  - `feat(adapter): implement Groww instrument snapshot pull`
+  - `docs(track1): add 52-condition vocabulary appendix`
+  - `feat(adapter/dhan): implement intraday OHLC chunking`
   - `fix(engine): O(1) regression in bar lookup`
-  - `test(bench): add 1M combos SLA benchmark`
+  - `test(property): add DSR effective-N invariant`
   - `chore(claude): update CLAUDE.md rules`
-- **Never skip hooks** (`--no-verify` is forbidden unless the user explicitly requests).
+- **Never skip hooks** (`--no-verify` is forbidden unless the user
+  explicitly requests).
 - **Never force-push** shared branches.
 - **Never amend** published commits; always create new commits.
 
+---
+
 ## 4. Coding Standards (when code phase starts)
 
-- **Language:** Python 3.12 primary; Rust (PyO3) for hot kernels; no other languages without ADR.
+- **Language:** Python 3.12 primary; Rust (PyO3) for hot kernels; no
+  other languages without ADR.
 - **Formatters:** `ruff format` (not black); `ruff check --fix`.
-- **Types:** `mypy --strict` and `pyright` both must pass.
+- **Types:** `mypy --strict` AND `pyright` both must pass.
 - **Linters:** `ruff`, `pylint` (warnings-as-errors), `bandit` (security).
-- **Tests:** `pytest`, `hypothesis` (property), `pytest-benchmark` (SLA), `mutmut` (mutation).
-- **Coverage gates:** 100% line + 100% branch on `brutex/` package (test files excluded). Mutation score ≥ 85%.
+- **Tests:** `pytest`, `hypothesis` (property), `pytest-benchmark`
+  (SLA), `mutmut` (mutation), `cargo test`, `proptest`,
+  `cargo-mutants`, `cargo fuzz`.
+- **Coverage gates:** 100% line + 100% branch on `brutex/` package.
+  Mutation score ≥ 85% (Python AND Rust).
 - **Docstrings:** every public symbol. NumPy style.
 - **No `print`** — always `structlog`.
 - **No bare `except`** — specific exceptions only.
 - **No global mutable state** — inject dependencies.
-- **No `pandas` in hot paths** — use `polars` or `numpy` + `numba` or Rust.
+- **No `pandas` in hot paths** — use `polars` or `numpy` + `numba`
+  or Rust.
+- **No look-ahead** — at bar N, the engine may only access bars 0..N.
+  Property P-06 (instrumented bar accessor) enforces this.
+
+---
 
 ## 5. Directory Conventions
 
 ```
 bruteX/
-├── CLAUDE.md                  ← this file
+├── CLAUDE.md                       ← this file
 ├── README.md
 ├── .claude/
-│   ├── settings.json          ← hooks, permissions, env
-│   └── agents/                ← project subagents (later)
+│   ├── settings.json
+│   └── agents/
 ├── docs/
-│   ├── REQUIREMENTS.md        ← FROZEN source of truth
-│   ├── adr/                   ← architecture decisions
+│   ├── TRACK1_BACKTEST_SPEC.md     ← Track 1 master spec
+│   ├── TRACK1_VERIFICATION_PYRAMID.md
+│   ├── TRACK1_VOCABULARY.md        ← 52 atomic conditions
+│   ├── TRACK1_PHASE_PLAN.md        ← 8-12 week build plan
+│   ├── TRACK1_PERFORMANCE_BUDGET.md
+│   ├── TRACK1_MICROSTRUCTURE.md
+│   ├── MIGRATION.md                ← the broker → Dhan log
+│   ├── REQUIREMENTS.md             ← DEPRECATED (v1.0 (legacy))
+│   ├── ROADMAP.md
+│   ├── adapters.md
+│   ├── adr/                        ← architecture decisions
 │   └── runbooks/
-├── brutex/                    ← Python package (P1+)
-├── rust/                      ← Rust hot kernels (P3+)
+├── brutex/                         ← Python package
+│   ├── adapters/                   ← Dhan adapter lands in Phase 2
+│   ├── data/                       ← Parquet + DuckDB lake (generic)
+│   ├── execution/                  ← signal-only simulator (Track 1)
+│   ├── feed/                       ← replay + resampler
+│   ├── math/                       ← facade to Rust hot kernel
+│   ├── orchestrator/               ← FSM + audit + rate limiter
+│   ├── strategies/                 ← 52-vocabulary engine (Phase 3)
+│   ├── dashboard/                  ← FastAPI UI
+│   ├── config/
+│   ├── notifications/
+│   └── observability/
+├── rust/                           ← Rust hot kernels
+│   ├── fno-math/                   ← Greeks, indicators, calendar
+│   └── fno-math-py/                ← PyO3 bindings
 ├── tests/
 │   ├── unit/
-│   ├── property/
-│   ├── golden/
-│   ├── scenario/
-│   └── bench/
-├── ops/
-│   ├── docker/
-│   ├── k8s/
-│   └── grafana/
+│   ├── integration/
+│   ├── property/                   ← hypothesis + proptest (24 invariants)
+│   ├── golden/                     ← byte-equality fixtures
+│   ├── bench/                      ← O(1) ratio tests
+│   ├── stress/                     ← 24h sustained
+│   ├── smoke/                      ← <30s pre-push
+│   └── fakes/                      ← test doubles
 └── .github/workflows/
 ```
 
-## 6. Verified Groww Facts (cite these, don't re-derive)
+---
+
+## 6. Verified Dhan Facts (cite these, don't re-derive)
 
 | Fact | Value | Source |
 |------|-------|--------|
-| Instrument CSV URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` | Groww docs |
-| Instrument CSV columns | 19 (see REQUIREMENTS §Data Model; authoritative list in `docs/groww-sdk/instruments.md`) | Groww docs |
-| Historical endpoint | `GET /v1/historical/candle/range` | Groww docs |
-| SDK method (current) | `get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` | python-sdk/historical-data |
-| SDK method (deprecated) | `get_historical_candle_data` — do NOT use | python-sdk/historical-data |
-| Backtest segments | `CASH`, `FNO` only (no commodity) | Groww docs |
-| FNO history depth | From 2020 onward | Groww docs |
-| OHLC rate limit | ~25 req/s (shared bucket with quote) | marketcalls/stratzy |
-| Time format | `YYYY-MM-DD HH:mm:ss` | Groww docs |
-| PyPI package | `growwapi` (v1.5.0, Python 3.9–3.13 as of Dec 2025) | PyPI |
-
-## 7. Hardware Envelope (for SLA claims)
-
-**Reference runner:** 16 physical cores, 64 GB RAM, NVMe SSD, Linux x86_64.
-
-All NFR throughput claims in `REQUIREMENTS.md` are valid **only** on this envelope with the specified strategy complexity bound. Larger machines scale linearly; smaller machines must document their own SLA profile.
-
-## 8. When in Doubt
-
-1. Re-read `docs/REQUIREMENTS.md`.
-2. If answer not there → ask the user with `AskUserQuestion`.
-3. Never guess on scope. Never expand scope silently.
-4. Never propose "improvements" outside the requested task.
-
-## 9. Session Etiquette
-
-- Start of every session: read this file + the "Finalized Decisions" section of `REQUIREMENTS.md`.
-- Use the `TodoWrite` tool for any multi-step task.
-- Split long writes into multiple `Write` tool calls to avoid stream idle timeouts.
-- Report honestly on failures; do not paper over errors.
+| Historical intraday endpoint | `POST /v2/charts/intraday` | dhanhq.co/docs/v2 |
+| Historical daily endpoint | `POST /v2/charts/historical` | dhanhq.co/docs/v2 |
+| Native intraday timeframes | **1, 5, 15, 25, 60 minute** ONLY | dhanhq.co/docs/v2 |
+| Chunk window (intraday) | 90 days per call | dhanhq.co/docs/v2 |
+| Spot index segment (NSE) | `IDX_I` | dhanhq.co/docs/v2/annexure |
+| Spot index segment (BSE) | `BSE_I` (verify at runtime) | dhanhq.co/docs/v2/annexure |
+| India VIX segment | `IDX_I` (NSE-only; calculated index) | Dhan master CSV (verified 2026-05-15) |
+| India VIX trading symbol | `INDIA VIX` (with space) | Dhan master CSV |
+| India VIX update cadence | every 15 seconds (NOT tick) | NSE |
+| Instrument master URL | `https://images.dhan.co/api-data/api-scrip-master-detailed.csv` | dhan.co |
+| Time format | IST market times (convert to UTC at ingest) | dhanhq.co/docs/v2 |
+| Rate limit | **UNVERIFIED** — cap at 10 r/s until confirmed | TODO |
+| securityId resolution | **At runtime from master CSV; never hardcode** | this file §2 |
 
 ---
 
-_Last updated: 2026-04-14._
+## 7. Verified Indian Market Microstructure Facts
+
+| Fact | Value |
+|------|-------|
+| Trading hours | 09:15 - 15:30 IST (NSE + BSE equity) |
+| Pre-open auction | 09:00 - 09:15 IST (exclude from backtest bars) |
+| Spot index ticks from | 09:15:00 IST (post-auction opening) |
+| Track 1 forced exit | 15:20 IST |
+| Muhurat session (Diwali) | 1 hour per year; date list in `TRACK1_MICROSTRUCTURE.md` |
+| NIFTY 50 rebalance | Semi-annual (March, September) — ~10 events in 2021-2026 |
+| Stamp duty (equity intraday) | 0.003% buy side (signal-only mode: NOT applied) |
+| Brokerage assumption (Track 1) | **NONE** — spot is not tradable |
+
+---
+
+## 8. Hardware Envelope (for honest SLA claims)
+
+**Track 1 reference:** Apple M4 Pro, 14-core CPU (10P + 4E), 48 GB RAM,
+8 TB external SSD. Daily apps run concurrently (10 cores used by sweep,
+2 reserved).
+
+**Production sweep SLA:** **2-4 days wall time** for ~33 billion trials
+on this envelope, after Stage 1A → 1B → 2 → 3 → 4 pipeline. Public
+benchmarks (vectorbt, NautilusTrader, Jesse) constrain the upper bound;
+see `docs/TRACK1_PERFORMANCE_BUDGET.md` for the full memory-bandwidth
+analysis.
+
+Larger machines (64-128 core EPYC / Threadripper) scale linearly and
+bring sweep to 12-24 hours; the spec MUST state SLA per hardware
+envelope.
+
+---
+
+## 9. When in Doubt
+
+1. Re-read `docs/TRACK1_BACKTEST_SPEC.md`.
+2. If answer not there → ask the user with `AskUserQuestion`.
+3. Never guess on scope. Never expand scope silently.
+4. Never propose "improvements" outside the requested task.
+5. Before major design choices, spawn a 4-agent hostile review (see
+   `docs/TRACK1_PHASE_PLAN.md §0` for the pattern).
+
+---
+
+## 10. Session Etiquette
+
+- Start of every session: read this file + `TRACK1_BACKTEST_SPEC.md` +
+  open the locked-decisions log in `docs/MIGRATION.md`.
+- Use TodoWrite for any multi-step task.
+- Split long writes into multiple Write tool calls (avoid stream idle
+  timeouts on docs >300 lines).
+- Report honestly on failures; do not paper over errors.
+- After any major refactor: run `ruff check brutex && mypy --strict
+  brutex && pytest -q` before considering the change complete.

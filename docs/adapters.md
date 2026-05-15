@@ -1,9 +1,14 @@
 # BruteX Adapters — the multi-market contract
 
 > **Status:** Architectural runbook. Applies from PR #2 onward.
+> Examples in this doc reference a legacy broker adapter (deleted) that was
+> deleted on 2026-05-15 (see `docs/MIGRATION.md`). The Track 1 Dhan
+> adapter is the next implementation; it lands in Phase 2 of the
+> Track 1 build plan. The contract described here is broker-neutral
+> and applies unchanged.
 >
-> **Audience:** Anyone adding a new market to BruteX — Polygon,
-> Binance, Dhan, Zerodha, IBKR, Coinbase, or anything else.
+> **Audience:** Anyone adding a new market to BruteX — Dhan, Polygon,
+> Binance, Zerodha, IBKR, Coinbase, or anything else.
 
 ## TL;DR
 
@@ -23,9 +28,9 @@ That's the whole protocol. Everything else is the orchestrator's job.
 
 ## Why it's market-neutral
 
-In PR #1 BruteX had a Groww-shaped protocol with method names
+In PR #1 BruteX had a the broker-shaped protocol with method names
 `get_expiries` / `get_contracts` / `get_historical_candles`. That was
-fine when Groww was the only market, but it would force a crypto-spot
+fine when the broker was the only market, but it would force a crypto-spot
 adapter to fake "expiries" it doesn't have, and a US-equities adapter
 to fake "FNO contracts" it doesn't need.
 
@@ -166,7 +171,7 @@ orchestrator **automatically** skips Phase B (expiries) and Phase C
 | **Dashboard** | `brutex/dashboard/` | ❌ No — shows phases/work items by market |
 | **Telegram** | `brutex/notifications/` | ❌ No — generic event bus |
 | **Brute-force backtest engine (P3+)** | `rust/fno-math/` + `brutex/engine/` | ❌ No — takes any OHLCV stream |
-| **SDK wrapper (groww/polygon/binance/…)** | `brutex/adapters/<market>/` | ✅ Yes — one file per market |
+| **SDK wrapper (the broker/polygon/binance/…)** | `brutex/adapters/<market>/` | ✅ Yes — one file per market |
 | **Instrument normaliser** | `brutex/adapters/<market>/instruments.py` | ✅ Yes — one file per market |
 
 ## Proof that the protocol is market-neutral
@@ -186,12 +191,12 @@ via two demo adapters:
 Both satisfy `isinstance(adapter, MarketAdapter)` via `@runtime_checkable`.
 If the protocol were leaky, one of these would fail.
 
-## Backwards compatibility with PR #1's Groww adapter
+## Backwards compatibility with PR #1's broker adapter (deleted)
 
-The existing `brutex/adapters/groww/client.py` + `GrowwAdapter` +
-`GrowwClientProtocol` stay **unchanged**. PR #2 only adds the new
+The existing `(deleted)/client.py` + `the brokerAdapter` +
+`the brokerClientProtocol` stay **unchanged**. PR #2 only adds the new
 market-neutral protocol alongside them. A follow-up commit will add
-`brutex/adapters/groww/market.py` with a thin `GrowwMarketAdapter`
+`(deleted)/market.py` with a thin `the brokerMarketAdapter`
 wrapper that translates the three semantic methods onto the existing
 SDK-shaped calls. All the rate-limiting + dedup + audit plumbing
 keeps working.
@@ -222,7 +227,7 @@ keeps working.
    carries a rate limit RPS but the operator must set it right per
    their API tier.
 
-2. **Symbol normalisation** is per-market. `NSE-NIFTY` in Groww is
+2. **Symbol normalisation** is per-market. `NSE-NIFTY` in the broker is
    different from `NIFTY50` in Zerodha. If two adapters report the
    "same" symbol differently, cross-market strategies must handle it.
 

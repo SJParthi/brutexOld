@@ -8,7 +8,7 @@ sweep orchestration smoke tests and as the canonical example of
 Single parameter:
 
 ``symbol``
-    The Groww symbol to trade. Declared in the strategy's
+    The the broker symbol to trade. Declared in the strategy's
     :class:`StrategyMeta` so the runner's symbol-whitelist filter
     lets exactly this one through.
 

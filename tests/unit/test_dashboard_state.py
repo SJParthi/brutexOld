@@ -163,12 +163,12 @@ class TestOnPipelineEvent:
                 total=5,
                 done=3,
                 quarantined=1,
-                message="bad request from Groww",
+                message="bad request from the broker",
             )
         )
         snap = state.phases["A_INSTRUMENTS"]
         assert snap.status == "halted"
-        assert snap.message == "bad request from Groww"
+        assert snap.message == "bad request from the broker"
         assert state.run_status == "halted"
 
     def test_run_complete(self) -> None:

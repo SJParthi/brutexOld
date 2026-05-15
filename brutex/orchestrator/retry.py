@@ -1,15 +1,15 @@
-"""Retry classifier — map Groww SDK exception types to :class:`Outcome`.
+"""Retry classifier — map broker SDK exception types to :class:`Outcome`.
 
 Implements the ``FR-ING-008`` (refined) classification table from
-``docs/REQUIREMENTS.md §8.6`` and ``docs/groww-sdk/exceptions.md §3``.
+``docs/REQUIREMENTS.md §8.6`` and ``docs/broker-sdk-docs/exceptions.md §3``.
 
 The classifier is a **pure function** over exception types and
 exception-class names (strings). It deliberately does NOT import
-``growwapi`` at module load time — this keeps unit tests running
+`a broker SDK` at module load time — this keeps unit tests running
 without the real SDK installed. Classification works on either:
 
 * A real exception instance (``isinstance`` dispatch)
-* A class name string (e.g., ``"GrowwAPIRateLimitException"``)
+* A class name string (e.g., ``"VendorAPIRateLimitException"``)
   — used by tests and by the golden-master integration test
 
 Both paths return the same :class:`Outcome` value for the same
@@ -21,7 +21,7 @@ Usage from the worker loop::
     from brutex.orchestrator.state import Outcome, transition, WorkItemState
 
     try:
-        response = groww.get_historical_candles(...)
+        response = the broker.get_historical_candles(...)
     except Exception as e:  # noqa: BLE001 — intentional catch-all
         outcome = classify_exception(e)
     else:
@@ -45,37 +45,37 @@ from brutex.orchestrator.state import Outcome
 # Exception-name → Outcome table
 # ────────────────────────────────────────────────────────────────────────
 
-#: Mapping from Groww exception class names (as reported by
+#: Mapping from the broker exception class names (as reported by
 #: ``type(exc).__name__``) to the :class:`Outcome` the FSM should see.
 #:
-#: See ``docs/groww-sdk/exceptions.md §3`` for the source of truth.
-#: If Groww renames or adds an exception, update this table AND the
-#: ``tests/golden/test_groww_sdk_constants_frozen.py`` golden-master
+#: See ``docs/broker-sdk-docs/exceptions.md §3`` for the source of truth.
+#: If the broker renames or adds an exception, update this table AND the
+#: ``tests/golden/test_vendor_sdk_constants_frozen.py`` golden-master
 #: in the same commit.
-GROWW_EXCEPTION_CLASSIFICATION: Final[dict[str, Outcome]] = {
+BROKER_EXCEPTION_CLASSIFICATION: Final[dict[str, Outcome]] = {
     # Rate-limit & transient — loop through RETRYING
-    "GrowwAPIRateLimitException": Outcome.RATE_LIMIT,
-    "GrowwAPITimeoutException": Outcome.TIMEOUT,
+    "VendorAPIRateLimitException": Outcome.RATE_LIMIT,
+    "VendorAPITimeoutException": Outcome.TIMEOUT,
     # Generic API / base — treat as unknown transient, retry once
-    "GrowwAPIException": Outcome.GENERIC_API_ERROR,
-    "GrowwBaseException": Outcome.GENERIC_API_ERROR,
+    "VendorAPIException": Outcome.GENERIC_API_ERROR,
+    "VendorBaseException": Outcome.GENERIC_API_ERROR,
     # Permanent "no such resource" — recorded as NO_DATA (not skipped)
-    "GrowwAPINotFoundException": Outcome.NOT_FOUND,
+    "VendorAPINotFoundException": Outcome.NOT_FOUND,
     # Permanent client error — QUARANTINE (auth halt, bad-request halt)
-    "GrowwAPIBadRequestException": Outcome.BAD_REQUEST,
-    "GrowwAPIAuthenticationException": Outcome.AUTH_FAILED,
-    "GrowwAPIAuthorisationException": Outcome.AUTHZ_FAILED,  # British spelling
+    "VendorAPIBadRequestException": Outcome.BAD_REQUEST,
+    "VendorAPIAuthenticationException": Outcome.AUTH_FAILED,
+    "VendorAPIAuthorisationException": Outcome.AUTHZ_FAILED,  # British spelling
     # Feed-specific (v1.2+); stay on the generic path for now
-    "GrowwFeedException": Outcome.GENERIC_API_ERROR,
-    "GrowwFeedConnectionException": Outcome.GENERIC_API_ERROR,
-    "GrowwFeedNotSubscribedException": Outcome.GENERIC_API_ERROR,
+    "VendorFeedException": Outcome.GENERIC_API_ERROR,
+    "VendorFeedConnectionException": Outcome.GENERIC_API_ERROR,
+    "VendorFeedNotSubscribedException": Outcome.GENERIC_API_ERROR,
 }
 
-#: Class names that MUST be present on ``growwapi.groww.exceptions``.
+#: Class names that MUST be present on ``the brokerapi.the broker.exceptions``.
 #: Used by the golden-master test to catch upstream renames. Same as
-#: :data:`brutex.adapters.groww.constants.GROWW_EXCEPTION_CLASS_NAMES`
+#: :data:`the deleted broker adapter`
 #: but duplicated here so the retry module is self-contained.
-REQUIRED_EXCEPTION_NAMES: Final[frozenset[str]] = frozenset(GROWW_EXCEPTION_CLASSIFICATION.keys())
+REQUIRED_EXCEPTION_NAMES: Final[frozenset[str]] = frozenset(BROKER_EXCEPTION_CLASSIFICATION.keys())
 
 
 class UnknownExceptionError(BruteXError):
@@ -83,25 +83,25 @@ class UnknownExceptionError(BruteXError):
     does not recognise.
 
     This is treated as a bug in the caller, not a runtime condition —
-    the set of Groww exception names is closed and any new one MUST be
-    added to :data:`GROWW_EXCEPTION_CLASSIFICATION` before the code that
+    the set of the broker exception names is closed and any new one MUST be
+    added to :data:`BROKER_EXCEPTION_CLASSIFICATION` before the code that
     raises it can be merged.
     """
 
 
 def classify_exception_name(class_name: str) -> Outcome:
-    """Return the :class:`Outcome` for a Groww exception class name.
+    """Return the :class:`Outcome` for a the broker exception class name.
 
     Parameters
     ----------
     class_name
         The ``__name__`` of the exception class, e.g.
-        ``"GrowwAPIRateLimitException"``.
+        ``"VendorAPIRateLimitException"``.
 
     Raises
     ------
     UnknownExceptionError
-        If *class_name* is not in :data:`GROWW_EXCEPTION_CLASSIFICATION`.
+        If *class_name* is not in :data:`BROKER_EXCEPTION_CLASSIFICATION`.
         Forces explicit handling of every new exception type.
 
     Returns
@@ -110,11 +110,11 @@ def classify_exception_name(class_name: str) -> Outcome:
         The outcome the FSM should consume.
     """
     try:
-        return GROWW_EXCEPTION_CLASSIFICATION[class_name]
+        return BROKER_EXCEPTION_CLASSIFICATION[class_name]
     except KeyError as exc:
         raise UnknownExceptionError(
-            f"Unknown Groww exception class: {class_name!r}. "
-            f"Add it to GROWW_EXCEPTION_CLASSIFICATION in brutex/orchestrator/retry.py "
+            f"Unknown the broker exception class: {class_name!r}. "
+            f"Add it to BROKER_EXCEPTION_CLASSIFICATION in brutex/orchestrator/retry.py "
             f"and re-run tests/unit/test_orchestrator_retry.py."
         ) from exc
 
@@ -123,9 +123,9 @@ def classify_exception(exc: BaseException) -> Outcome:
     """Classify a live exception instance.
 
     Walks the exception's MRO (method resolution order) and picks the
-    most-specific match in :data:`GROWW_EXCEPTION_CLASSIFICATION`. This
+    most-specific match in :data:`BROKER_EXCEPTION_CLASSIFICATION`. This
     correctly handles subclass relationships — e.g., a hypothetical
-    ``GrowwAPIRateLimitBurstException(GrowwAPIRateLimitException)``
+    ``VendorAPIRateLimitBurstException(VendorAPIRateLimitException)``
     would classify as ``RATE_LIMIT`` without needing its own table entry.
 
     Parameters
@@ -137,8 +137,8 @@ def classify_exception(exc: BaseException) -> Outcome:
     ------
     UnknownExceptionError
         If none of the exception's MRO entries match. This indicates
-        either a non-Groww exception reaching this classifier (caller
-        bug — should catch only Groww exceptions) or a new Groww
+        either a non-the broker exception reaching this classifier (caller
+        bug — should catch only the broker exceptions) or a new the broker
         exception type that needs an entry.
 
     Returns
@@ -146,15 +146,15 @@ def classify_exception(exc: BaseException) -> Outcome:
     Outcome
     """
     for cls in type(exc).__mro__:
-        if cls.__name__ in GROWW_EXCEPTION_CLASSIFICATION:
-            return GROWW_EXCEPTION_CLASSIFICATION[cls.__name__]
+        if cls.__name__ in BROKER_EXCEPTION_CLASSIFICATION:
+            return BROKER_EXCEPTION_CLASSIFICATION[cls.__name__]
     # No match anywhere in the MRO — this is a bug
     raise UnknownExceptionError(
         f"Exception {type(exc).__name__!r} (MRO: "
         f"{[c.__name__ for c in type(exc).__mro__]}) does not match "
-        f"any entry in GROWW_EXCEPTION_CLASSIFICATION. "
+        f"any entry in BROKER_EXCEPTION_CLASSIFICATION. "
         f"This exception should not have reached the retry classifier — "
-        f"verify the adapter only catches Groww exceptions."
+        f"verify the adapter only catches the broker exceptions."
     )
 
 
@@ -261,7 +261,7 @@ def outcome_severity(outcome: Outcome) -> str:
 
 __all__ = [
     "BACKOFF_SCHEDULE_SECONDS",
-    "GROWW_EXCEPTION_CLASSIFICATION",
+    "BROKER_EXCEPTION_CLASSIFICATION",
     "JITTER_FRACTION",
     "REQUIRED_EXCEPTION_NAMES",
     "UnknownExceptionError",

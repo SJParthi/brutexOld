@@ -167,7 +167,7 @@ class TestTransitionSuccess:
         assert result.quarantine_reason is None
 
     def test_in_flight_not_found_to_no_data(self) -> None:
-        """NotFound is NOT quarantined — it is recorded as 'Groww says
+        """NotFound is NOT quarantined — it is recorded as 'the broker says
         nothing here'. This is the core of the never-skip guarantee.
         """
         item = _in_flight_item()

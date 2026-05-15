@@ -19,7 +19,7 @@ from brutex.models import (
 )
 
 # ────────────────────────────────────────────────────────────────────────
-# Enum values — pinned to Groww SDK values (docs/groww-sdk/annexures.md)
+# Enum values — pinned to broker SDK values (docs/broker-sdk-docs/annexures.md)
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -54,7 +54,7 @@ class TestInstrumentTypeEnum:
         assert {i.value for i in InstrumentType} == {"EQ", "IDX", "FUT", "CE", "PE"}
 
     def test_idx_not_index(self) -> None:
-        """The Groww SDK uses 3-letter IDX, not the word INDEX."""
+        """The broker SDK uses 3-letter IDX, not the word INDEX."""
         assert InstrumentType.IDX.value == "IDX"
         assert "INDEX" not in {i.value for i in InstrumentType}
 
@@ -75,7 +75,7 @@ def _minimal_equity(**overrides: object) -> Instrument:
         "exchange": Exchange.NSE,
         "exchange_token": 1,
         "trading_symbol": "RELIANCE",
-        "groww_symbol": "NSE-RELIANCE",
+        "vendor_symbol": "NSE-RELIANCE",
         "name": "Reliance",
         "instrument_type": InstrumentType.EQ,
         "segment": Segment.CASH,
@@ -101,7 +101,7 @@ def _minimal_option(**overrides: object) -> Instrument:
         "exchange": Exchange.NSE,
         "exchange_token": 1,
         "trading_symbol": "NIFTY25MAR29050PE",
-        "groww_symbol": "NSE-NIFTY-27Mar25-29050-PE",
+        "vendor_symbol": "NSE-NIFTY-27Mar25-29050-PE",
         "name": None,
         "instrument_type": InstrumentType.PE,
         "segment": Segment.FNO,
@@ -134,7 +134,7 @@ class TestInstrumentClassification:
             instrument_type=InstrumentType.FUT,
             strike_price=None,
             trading_symbol="NIFTY25MARFUT",
-            groww_symbol="NSE-NIFTY-27Mar25-FUT",
+            vendor_symbol="NSE-NIFTY-27Mar25-FUT",
         )
         assert i.is_derivative is True
         assert i.is_option is False
@@ -144,7 +144,7 @@ class TestInstrumentClassification:
         i = _minimal_option(
             instrument_type=InstrumentType.CE,
             trading_symbol="NIFTY25MAR29050CE",
-            groww_symbol="NSE-NIFTY-27Mar25-29050-CE",
+            vendor_symbol="NSE-NIFTY-27Mar25-29050-CE",
         )
         assert i.is_derivative is True
         assert i.is_option is True
@@ -161,7 +161,7 @@ class TestInstrumentClassification:
             instrument_type=InstrumentType.IDX,
             segment=Segment.CASH,
             trading_symbol="NIFTY",
-            groww_symbol="NSE-NIFTY",
+            vendor_symbol="NSE-NIFTY",
         )
         assert i.is_derivative is False
         assert i.is_option is False
@@ -227,7 +227,7 @@ class TestErrorHierarchy:
 
 # ────────────────────────────────────────────────────────────────────────
 # normalise_tick_size — the format drift handler
-# See docs/groww-sdk/instruments.md §12.2
+# See docs/broker-sdk-docs/instruments.md §12.2
 # ────────────────────────────────────────────────────────────────────────
 
 

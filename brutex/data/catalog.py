@@ -392,7 +392,7 @@ class Catalog:
         exchange, segment, interval
             Shared partition coordinates.
         symbols
-            Iterable of Groww symbols in the universe. Duplicates are
+            Iterable of the broker symbols in the universe. Duplicates are
             de-duped and the final ordering is alphabetical so the
             caller does not need to pre-sort.
         start, end
