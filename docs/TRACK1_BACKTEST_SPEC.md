@@ -85,10 +85,16 @@ CI merge if the projected 33B wall exceeds the published SLA band.
 
 | Phase 3 canary measures | Published SLA (33B) | Recommended action |
 |---|---|---|
-| ≥ 150K t/s | **2-3 days** | proceed with current plan |
+| ≥ 300K t/s (CPU + GPU) | **1-2 days** | proceed with Phase 3.5 Metal GPU offload |
+| ≥ 150K t/s (CPU only) | **2-3 days** | proceed with current plan |
 | 80-149K t/s | **3-5 days** | proceed; enable Stage 2 incremental checkpoint every 6h |
-| 30-79K t/s | **5-12 days** | escalate: AWS c7a.48xlarge EPYC sweep OR tighten Stage 1B funnel from 10K → 3K survivors (cuts 33B → ~10B) |
+| 30-79K t/s | **5-12 days** | escalate: Phase 3.5 Metal GPU is mandatory; consider tighter Stage 1B funnel from 10K → 3K survivors (cuts 33B → ~10B) |
 | < 30K t/s | **12-30 days — HALT** | re-architect: sweep sharding across N machines OR shrink universe |
+
+**LOCAL-ONLY constraint (user decision 2026-05-15 evening):** AWS /
+cloud offload is **explicitly out of scope** for Track 1. The only
+hardware escalation lever is the Apple Metal GPU (20-core, already
+present in the M4 Pro). All SLAs above assume single-machine execution.
 
 If the canary lands in a slower band, the published SLA is amended
 **and a new `Decision #` row is added to `docs/MIGRATION.md`** before
