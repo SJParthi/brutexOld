@@ -685,7 +685,7 @@ downshift logic.
 | `810` | Client ID invalid | `AUTH_FAILED` | quarantine + alert |
 | `811` | Invalid Expiry Date | `BAD_REQUEST` | quarantine (not used for index spot) |
 | `812` | Invalid Date Format | `BAD_REQUEST` | quarantine + alert (code bug) |
-| `813` | Invalid SecurityId | `BAD_REQUEST` | quarantine + alert (refresh master CSV) |
+| `813` | Invalid SecurityId | `BAD_REQUEST` | quarantine + alert (re-verify against `web.dhan.co/Charts?...&secid=X` — code fix to constants.py needed) |
 | `814` | Invalid Request | `BAD_REQUEST` | quarantine + alert |
 
 ### Trading API Errors (may surface on mis-call)
@@ -865,7 +865,8 @@ concrete. Tracking checklist:
 |---|---|---|
 | `brutex/config/instruments.toml` (dynamic config) | new | ⏳ |
 | `brutex/adapters/dhan/client.py` | new | ⏳ |
-| `brutex/adapters/dhan/instruments.py` (master CSV resolver) | new | ⏳ |
+| `brutex/adapters/dhan/constants.py` — 4 hardcoded tuples (NIFTY=13, BANKNIFTY=25, SENSEX=51, INDIAVIX=21; all `IDX_I` + `INDEX`) | new | ⏳ |
+| ~~`brutex/adapters/dhan/instruments.py` (master CSV resolver)~~ — **dropped per 2026-05-15 simplification (4-instrument universe is static)** | — | ❌ not built |
 | `brutex/adapters/dhan/intraday.py` | new | ⏳ |
 | `brutex/adapters/dhan/historical.py` | new | ⏳ |
 | `brutex/data/watermark.py` (new DuckDB table) | new | ⏳ |

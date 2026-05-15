@@ -163,18 +163,43 @@ all TFs and a single reproducibility hash.
   `volume = sum` (always 0 for spot)
 - Each TF stored as separate Parquet file partitioned by (instrument, date)
 
-### 5.4 securityId resolution
+### 5.4 securityId resolution — Static (hardcoded for Track 1)
 
-`securityId` and `exchangeSegment` are **resolved at runtime** from
-Dhan's instrument master at
-`https://images.dhan.co/api-data/api-scrip-master-detailed.csv`. The
-adapter caches the snapshot hash. **Never hardcode** — IDs can change
-on master CSV revisions.
+Track 1's universe is permanently locked to 4 instruments. All
+identifiers are **hardcoded** in `brutex/adapters/dhan/constants.py`
+(Phase 2 deliverable). The previous "runtime CSV lookup + never
+hardcode" rule is relaxed for this narrow scope — verified once,
+locked forever, quarterly smoke-tested.
 
-Expected (verify at first call):
-- NIFTY 50: segment `IDX_I`, symbol `NIFTY 50`
-- BANKNIFTY: segment `IDX_I`, symbol `NIFTY BANK`
-- SENSEX: segment `IDX_I` (single Index segment for all indexes per Dhan annexure verified 2026-05-15), symbol `SENSEX`
+**The 4 verified tuples (2026-05-15, user-confirmed via
+`web.dhan.co/Charts?exch=IDX&seg=I&secid=X`):**
+
+| # | Trading Symbol | securityId | exchangeSegment | instrument | Use |
+|---|---|---|---|---|---|
+| 1 | `NIFTY 50` | `13` | `IDX_I` | `INDEX` | brute-force |
+| 2 | `NIFTY BANK` (BANKNIFTY) | `25` | `IDX_I` | `INDEX` | brute-force |
+| 3 | `SENSEX` | `51` | `IDX_I` | `INDEX` | brute-force |
+| 4 | `INDIA VIX` | `21` | `IDX_I` | `INDEX` | reference-only |
+
+**Why hardcode:**
+- 4-tuple universe is locked in MIGRATION decisions #71 and #87
+- Adding a 5th instrument requires a code change (intentional friction)
+- Saves ~100k-row master CSV download per adapter startup
+- Saves a network call + snapshot hash tracking on every run
+- Deterministic — no drift from upstream CSV revisions
+
+**Verification (quarterly smoke test, `tests/smoke/test_dhan_secid_alive.py`):**
+
+For each of the 4 securityIds, GET `web.dhan.co/Charts?exch=IDX&seg=I&secid=X`
+and assert the response is HTTP 200 with the expected symbol in the
+page title. If a securityId is ever invalidated by Dhan (extremely
+unlikely for index spot), CI nightly catches it.
+
+**The master CSV approach is preserved as a fallback** only — if all 4
+hardcoded values fail simultaneously (catastrophic Dhan re-numbering),
+operators can manually fetch the CSV at
+`https://images.dhan.co/api-data/api-scrip-master-detailed.csv` and
+update the constants module.
 
 ### 5.5 Rate limiting
 

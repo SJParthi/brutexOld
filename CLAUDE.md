@@ -183,7 +183,11 @@ bruteX/
 | Time format | IST market times (convert to UTC at ingest) | dhanhq.co/docs/v2 |
 | Rate limit (Data APIs) | **5 req/s + 100,000/day** verified | dhanhq.co/docs/v2 Rate Limit table |
 | Adapter effective cap | 3 r/s (5 × 0.6 safety factor) | this file §2 rule 6 |
-| securityId resolution | **At runtime from master CSV; never hardcode** | this file §2 |
+| securityId — NIFTY 50 | **`13`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=13 |
+| securityId — BANKNIFTY | **`25`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=25 |
+| securityId — SENSEX | **`51`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=51 |
+| securityId — India VIX | **`21`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=21 |
+| securityId policy | **Hardcoded in `brutex/adapters/dhan/constants.py`** for Track 1's 4-instrument universe (rationale: 4-tuple is permanently locked; runtime CSV lookup adds complexity for no benefit). Smoke test verifies quarterly against web.dhan.co URLs. | this file §2 |
 
 ---
 
