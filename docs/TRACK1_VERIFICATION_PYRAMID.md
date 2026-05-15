@@ -170,7 +170,7 @@ individual atomic condition.
 | **G2 Reproducibility** | Parquet writer unit | P-19, P-20 | corpora #1, #9 SHA256 frozen | **replay_audit_log** | — | nightly two-machine identity | Parquet reader fuzz | writer mutants |
 | **G3 No look-ahead** | bar iterator unit | P-06 instrumented accessor | — | reference strategies trace test | — | — | — | iterator mutants |
 | **G4 Correct PnL** | costs.py 100% branch | P-03, P-04, P-08, P-09, P-13, P-14, P-21 | corpus #8 (12-fill paisa) | **python_rust_parity** | — | — | — | costs.py mutants |
-| **G5 33B/2-4 days** | — | — | — | 100K micro-sweep correctness | bench_full_sweep_extrapolation projection | 24h sustained throughput | — | — |
+| **G5 33B/2-4 days** | per-trial cost unit (criterion micro-bench) | — | — | 100K micro-sweep correctness | bench_full_sweep_extrapolation projection | 24h sustained throughput | — | mutation on cost-counter helpers |
 | **G6 Dedup uniqueness** | hash function unit | P-01, P-02, P-05, P-11, P-24 | corpus #9 | resume_from_kill | LMDB O(1) | — | LMDB key fuzz | hash mutants |
 | **G7 Audit chain** | audit.py 100% branch | P-16, P-17 | — | **replay_audit_log** | — | 24h log size + verify | JSONL reader fuzz | audit mutants |
 | **G8 Microstructure** | calendar + session unit | P-22, P-23, P-18 | corpora #1-5 | calendar integration | — | — | calendar TOML fuzz | calendar mutants |

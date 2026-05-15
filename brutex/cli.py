@@ -207,9 +207,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         return cmd_status(run_id=args.run_id)
     if args.command == "audit":
-        if args.audit_command == "verify":
-            return cmd_audit_verify(audit_file=args.audit_file)
-        parser.error(f"unknown audit subcommand: {args.audit_command}")
+        if args.audit_command != "verify":
+            parser.error(f"unknown audit subcommand: {args.audit_command}")
+        return cmd_audit_verify(audit_file=args.audit_file)
     if args.command == "dashboard":
         return cmd_dashboard(
             lake_root=args.lake_root,
@@ -217,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
         )
     parser.error(f"unknown command: {args.command}")
+    return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits
 
 
 if __name__ == "__main__":  # pragma: no cover — invoked only by [project.scripts]

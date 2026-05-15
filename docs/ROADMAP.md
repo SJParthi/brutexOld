@@ -1,12 +1,19 @@
 # BruteX — Roadmap & Storage Guarantees
 
-> Living status of the 4-phase Groww ingest pipeline, the O(1) + uniqueness
-> + dedup guarantees of the persistence layer, and the work still open.
+> ⚠️ **PARTIALLY DEPRECATED 2026-05-15.** This document describes the
+> Groww 4-phase ingest pipeline that was deleted on 2026-05-15
+> (see `docs/MIGRATION.md`). The **O(1) + uniqueness + dedup
+> persistence guarantees** described here remain valid and apply to
+> the Track 1 Dhan adapter (Phase 2 of the Track 1 build, see
+> `docs/TRACK1_PHASE_PLAN.md`). The Groww-specific phase tables and
+> code paths below are kept for historical reference but are
+> non-operational.
 >
-> Complements `docs/REQUIREMENTS.md` (the frozen functional spec). This
-> file is the operational tracker; `REQUIREMENTS.md` is the contract.
+> **Active source of truth for Track 1:**
+> `docs/TRACK1_BACKTEST_SPEC.md` + companion `TRACK1_*` docs.
 
-Last updated: 2026-04-15
+Last updated: 2026-04-15 (legacy Groww phase tables);
+Banner added: 2026-05-15 (Dhan + Track 1 pivot).
 
 ## 1. What is implemented — end-to-end Groww ingest
 

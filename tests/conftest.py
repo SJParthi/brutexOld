@@ -10,11 +10,12 @@ import pytest
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 
 # ────────────────────────────────────────────────────────────────────────
-# Raw-row fixtures mimicking the shape of Groww's pandas DataFrame rows.
-# These are dicts (same shape returned by `df.to_dict('records')[i]` or
-# `get_instrument_by_groww_symbol`). We deliberately include the 20th
-# `internal_trading_symbol` column observed in the real SDK output to
-# verify the normaliser handles it per docs/groww-sdk/instruments.md §12.1.
+# Raw-row fixtures mimicking the shape of a broker's pandas DataFrame
+# rows. These are dicts (same shape returned by `df.to_dict('records')[i]`).
+# Used by orchestrator/data unit tests as generic instrument rows. They
+# include an `internal_trading_symbol` column observed in legacy adapter
+# output; new adapters do not need to expose it. Phase 2 will reshape
+# these fixtures around Dhan's response format.
 # ────────────────────────────────────────────────────────────────────────
 
 

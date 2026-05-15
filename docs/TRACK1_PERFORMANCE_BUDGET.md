@@ -13,7 +13,7 @@ was 5-15x optimistic. This doc shows why.
 
 ```
 Engine:       Rust + std::simd + Rayon parallel, Apple M4 Pro
-              (12-core, 10 cores allocated to sweep)
+              (14-core: 10 P-cores + 4 E-cores; 10 P-cores allocated to sweep)
 Workload:     ~33 billion backtest trials per sweep
               (Stage 1A 5.8M + Stage 1B 2.25M + Stage 2 ~33B)
 Per-trial:    Walk 5y OHLC at one timeframe; eval 52 atoms once per
@@ -50,7 +50,7 @@ careful SIMD tiling, but no margin.
 
 ## 3. Hardware Budget — M4 Pro
 
-| Resource | M4 Pro 12-core | Source |
+| Resource | M4 Pro 14-core (10P + 4E) | Source |
 |---|---|---|
 | P-core clock | up to 4.512 GHz | eclecticlight.co M4 P-cores |
 | L1 per P-core | 192 KB I + 128 KB D | same |
@@ -194,7 +194,7 @@ From the 2026-05-15 hostile review:
 
 1. **Always benchmark against public engines first.** No public engine
    at 700K trials/sec → the claim was a fantasy.
-2. **Memory bandwidth dominates, not compute.** A 12-core M4 Pro has
+2. **Memory bandwidth dominates, not compute.** A 14-core M4 Pro has
    compute headroom but is BW-bound for this workload.
 3. **State the SLA per hardware envelope** in the spec, every time.
 4. **Tiling is not optional.** Naive per-trial-per-bar loops will be

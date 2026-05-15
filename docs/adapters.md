@@ -1,9 +1,14 @@
 # BruteX Adapters — the multi-market contract
 
 > **Status:** Architectural runbook. Applies from PR #2 onward.
+> Examples in this doc reference a legacy Groww adapter that was
+> deleted on 2026-05-15 (see `docs/MIGRATION.md`). The Track 1 Dhan
+> adapter is the next implementation; it lands in Phase 2 of the
+> Track 1 build plan. The contract described here is broker-neutral
+> and applies unchanged.
 >
-> **Audience:** Anyone adding a new market to BruteX — Polygon,
-> Binance, Dhan, Zerodha, IBKR, Coinbase, or anything else.
+> **Audience:** Anyone adding a new market to BruteX — Dhan, Polygon,
+> Binance, Zerodha, IBKR, Coinbase, or anything else.
 
 ## TL;DR
 

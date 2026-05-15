@@ -107,7 +107,7 @@ winners to options for execution realism.
 
 ---
 
-## 6. Locked Decision Ledger (60+ items)
+## 6. Locked Decision Ledger (70 items)
 
 Complete record of design decisions made during the 2026-05-15
 hostile-review pass. Future changes must justify against this list.
@@ -166,7 +166,7 @@ hostile-review pass. Future changes must justify against this list.
 35. Stage 1B: expand top 50K patterns to all 45 inst-TF (~40 sec wall)
 36. Stage 2: full param brute force on top 10K combos (~33B trials)
 37. Stage 3: Bayesian CMA-ES refine top 100 (~15-20 min)
-38. Stage 4: 5-filter cascade (DSR/CPCV/WFO/Lockbox) → final 3
+38. Stage 4: 4-filter cascade (DSR/CPCV/WFO/Lockbox) → final 3
 
 ### Statistical filters
 
@@ -179,7 +179,7 @@ hostile-review pass. Future changes must justify against this list.
 
 43. Target sustained throughput: 80-150K trials/sec on 10-core M4 Pro
 44. Sweep wall time: **2-4 days on M4 Pro** (was: 10-13 hours, 5-15x optimistic)
-45. CPU budget: 10 of 12 cores; 2 reserved for OS + daily apps
+45. CPU budget: 10 P-cores used; 4 E-cores reserved for OS + daily apps (14-core M4 Pro)
 46. Memory tiling required: by (instrument, TF, day-window) bucket
 
 ### Dedup & audit

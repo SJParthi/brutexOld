@@ -30,27 +30,30 @@ series:
 The pipeline brute-forces ~2.9 million unique strategy patterns
 (combinations of 2–5 atomic conditions from a 52-condition vocabulary)
 × full parameter sweeps across 15 timeframes × 3 instruments × 2 exit
-modes, applies a 4-stage filter cascade, and returns the top 3
-production candidates per sweep.
+modes, applies a 4-filter cascade (DSR → CPCV → WFO → Lockbox), and
+returns the top 3 production candidates per sweep.
 
 **Out of scope (Track 1):** futures, options, F&O contracts, broker
 execution simulation, live feed, WebSocket, multi-tenant SaaS,
 commodity segment, BSE cash equity (other than the SENSEX index value
 itself).
 
-**Phase 2 (post-Track-1):** translates Track 1 winning signals into
-ATM/ITM option fill simulations with IV/theta/spread modeling — this
-is when execution realism (brokerage, STT, slippage) re-enters.
+**Options Track (post-Track-1, future):** translates Track 1 winning
+signals into ATM/ITM option fill simulations with IV/theta/spread
+modeling — this is when execution realism (brokerage, STT, slippage)
+re-enters. NOT to be confused with "Phase 2" of the Track 1 build plan
+(see `TRACK1_PHASE_PLAN.md §Phase 2`), which is the Dhan adapter +
+52-vocabulary work within Track 1.
 
 ---
 
 ## 2. Hardware Target
 
-- **MacBook Pro M4 Pro**: 14-core CPU (10P + 4E), 20-core GPU, 48 GB RAM
+- **MacBook Pro M4 Pro**: 14-core CPU (10 Performance + 4 Efficiency), 20-core GPU, 48 GB RAM
 - macOS Tahoe 26.x
 - 8 TB external SSD mounted at `/Volumes/QuantData`
 - Daily apps (Chrome, IntelliJ, Claude Desktop) run concurrently
-- Sweep uses **10 of 12 cores**; 2 reserved for OS + daily apps
+- Sweep uses **10 cores (the P-cores)**; 4 E-cores reserved for OS + daily apps
 - Working set capped at 40 GB RAM during sweep
 
 **SLA per sweep on this envelope:** **2-4 days wall time** for ~33
@@ -171,7 +174,7 @@ groupings. The hostile review caught this.
 | 5 | PDH (Previous Day High) | from daily data; **previous trading day** (skips holidays) |
 | 6 | PDL (Previous Day Low) | symmetric to PDH |
 | 7 | Daily Pivots (P, R1, R2, R3, S1, S2, S3) | computed from PDH/PDL/PDC, pure function — no intraday leak |
-| 8 | Static Daily Fib levels (12) | anchor: previous-day H→L; extensions in trade direction; levels 0, 23.6, 38.2, 50, 61.8, 78.6, 100, 127.2, 161.8, 200, 261.8, 423.6 |
+| 8 | Static Daily Fib levels (12 computed, 11 in vocabulary) | anchor: previous-day H→L; extensions in trade direction; computed levels: 0, 23.6, 38.2, 50, 61.8, 78.6, 100, 127.2, 161.8, 200, 261.8, 423.6. The 423.6% extension is computed but reserved for Options Track (rarely hits on 5y spot data) — see `TRACK1_VOCABULARY.md §5`. |
 | 9 | Candle metadata | color (bull/bear/doji defined by close vs open), body_pct, upper_wick_pct, lower_wick_pct |
 
 **VWAP intentionally dropped** — indexes have no volume.
@@ -282,11 +285,12 @@ Signal at bar N → enter at bar (N+1) OPEN.
 | GST | **NONE** |
 | Stamp duty | **NONE** |
 | PnL column | `paper_pnl_paisa` (single column, signal-only honest paper) |
-| Position size unit | % of notional capital; lot-rounded reserved for Phase 2 |
+| Position size unit | % of notional capital; lot-rounded reserved for the Options Track |
 
 Execution realism (brokerage, STT, slippage, spread, IV decay, theta)
-re-enters in **Phase 2** when Track 1 winners are translated to option
-contracts.
+re-enters in the **Options Track** (post-Track-1) when Track 1 winners
+are translated to option contracts. Distinct from Track 1's own
+"Phase 2" build phase (Dhan adapter + vocabulary; see `TRACK1_PHASE_PLAN.md`).
 
 ---
 
@@ -306,8 +310,8 @@ STAGE 2 — Full parameter brute force
    Top 10K × Mode A (2.76M params) = 27.6B trials
    Top 10K × Mode B (500K params) = 5.0B trials
    ~33 BILLION trials total
-   ~8-12 HOURS wall (memory-bandwidth bound) on M4 Pro
-   ~2-4 DAYS wall realistic at sustained throughput (per Agent 4 review)
+   ~2-4 DAYS wall on M4 Pro at 80-150K trials/sec sustained
+   (memory-bandwidth bound; see TRACK1_PERFORMANCE_BUDGET.md)
    → top 1,000 combos
 
 STAGE 3 — Bayesian fine refinement
@@ -315,7 +319,7 @@ STAGE 3 — Bayesian fine refinement
    ~50K trials, ~15-20 min wall
    → top 100 combos
 
-STAGE 4 — 5-filter cascade
+STAGE 4 — 4-filter cascade
    Top 100 → DSR (effective-N, cluster-adjusted) → CPCV → WFO → Lockbox
    ~30-45 min wall
    → FINAL 3 selected
@@ -470,11 +474,11 @@ Detailed in `TRACK1_PHASE_PLAN.md`. Summary:
 
 ## 20. Final Locked Decisions (one-line ledger)
 
-The full decision list (60+ items) is mirrored in `MIGRATION.md`.
+The full decision list (70 items) is mirrored in `MIGRATION.md`.
 Highlights:
 
 1. Spot indexes only, signal-only research, no broker theatre
-2. Dhan API; 1m fetched, 14 TFs resampled
+2. Dhan API; 1m fetched, 14 additional TFs resampled (15 total inc. 1m)
 3. 9 indicators, no VWAP
 4. 52 atomic conditions, K=2..5 ANDed, conflict-graph pruned
 5. ~1.2-1.5M unique patterns (post-prune) × 2 directions
@@ -487,7 +491,7 @@ Highlights:
 12. DSR with effective-N (cluster-adjusted, Bailey-LdP)
 13. 5-stage smart-staged search (1A → 1B → 2 → 3 → 4)
 14. ~33B trials per sweep; **2-4 days wall time honestly stated**
-15. 10 of 12 cores used; overnight/multi-day execution
+15. 10 P-cores used (4 E-cores reserved for OS + daily apps); multi-day execution
 16. SHA256+Bloom+LMDB dedup with TF as part of hash
 17. Hash-chained audit JSONL with selective material-event logging
 18. Threshold-filtered Parquet (~50-100GB per sweep)
