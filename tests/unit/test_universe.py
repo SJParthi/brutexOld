@@ -14,7 +14,9 @@ import pytest
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.universe import (
     ALLOWED_UNDERLYINGS,
+    BRUTE_FORCE_INDICES,
     INDEX_UNDERLYINGS,
+    REFERENCE_ONLY_INDICES,
     V1_INDICES,
     V1_UNDERLYINGS,
     UnderlyingSpec,
@@ -88,6 +90,46 @@ class TestV1IndicesComposition:
     def test_v1_underlyings_alias(self) -> None:
         """V1_UNDERLYINGS is a backwards-compat alias for V1_INDICES."""
         assert V1_UNDERLYINGS is V1_INDICES
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Reference-only vs brute-force partitioning
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestReferenceOnlyPartition:
+    """India VIX is fetched + stored but never in brute-force combinations."""
+
+    def test_india_vix_is_reference_only(self) -> None:
+        vix = next(u for u in V1_INDICES if u.underlying_symbol == "INDIAVIX")
+        assert vix.reference_only is True
+
+    def test_three_spot_indices_are_brute_forced(self) -> None:
+        for sym in ("NIFTY", "BANKNIFTY", "SENSEX"):
+            spec = next(u for u in V1_INDICES if u.underlying_symbol == sym)
+            assert spec.reference_only is False
+
+    def test_brute_force_indices_excludes_vix(self) -> None:
+        symbols = {u.underlying_symbol for u in BRUTE_FORCE_INDICES}
+        assert symbols == {"NIFTY", "BANKNIFTY", "SENSEX"}
+        assert "INDIAVIX" not in symbols
+
+    def test_brute_force_count_is_three(self) -> None:
+        assert len(BRUTE_FORCE_INDICES) == 3
+
+    def test_reference_only_contains_only_vix(self) -> None:
+        symbols = {u.underlying_symbol for u in REFERENCE_ONLY_INDICES}
+        assert symbols == {"INDIAVIX"}
+
+    def test_reference_only_count_is_one(self) -> None:
+        assert len(REFERENCE_ONLY_INDICES) == 1
+
+    def test_partition_is_complete(self) -> None:
+        """V1_INDICES == BRUTE_FORCE_INDICES ∪ REFERENCE_ONLY_INDICES, disjoint."""
+        bf = set(BRUTE_FORCE_INDICES)
+        ro = set(REFERENCE_ONLY_INDICES)
+        assert bf.isdisjoint(ro)
+        assert bf | ro == set(V1_INDICES)
 
 
 # ────────────────────────────────────────────────────────────────────────

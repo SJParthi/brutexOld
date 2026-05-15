@@ -129,7 +129,7 @@ hostile-review pass. Future changes must justify against this list.
 6. Native timeframes: 1/5/15/25/60 min + 1d (was: incorrectly claimed 21)
 7. Resampled timeframes: **19 derived intraday TFs from 1m base** (**amended 2026-05-15** from 14 derived per user scope expansion to 21 total, see decisions #73-74)
 8. Money unit: int64 paisa throughout
-9. Exchange segment: `IDX_I` (NSE indices), `BSE_I` (BSE indices) — resolved at runtime
+9. Exchange segment: `IDX_I` for ALL 4 Track 1 instruments (single Index segment per Dhan annexure verified 2026-05-15; there is no separate `BSE_I`)
 10. securityId: never hardcoded; resolved from `api-scrip-master-detailed.csv` at startup
 
 ### Indicators (9)
@@ -239,7 +239,17 @@ hostile-review pass. Future changes must justify against this list.
 77. **Bar identity hash** = `sha256(inst‖tf‖ts_us‖OHLC_paisa‖vol‖source_version)` — proves bit-identical bars across reruns
 78. **Telegram delivery deferred** to a later phase. Track 1 uses structlog + dashboard primary
 79. **4-layer dedup defence**: L1 Watermark check → L2 Bloom filter → L3 LMDB B+tree → L4 per-bar bar_hash
-80. All `INDEX`-type instruments use `IDX_I` (NSE) or `BSE_I` (BSE) segments — extends `VALID_SEGMENTS` from `{CASH, FNO}` to include `IDX_I, BSE_I`
+80. All `INDEX`-type instruments use `IDX_I` (single Index segment per Dhan annexure verified 2026-05-15; there is no separate `BSE_I`) — extends `VALID_SEGMENTS` from `{CASH, FNO}` to include `IDX_I`
+
+### Evening additions (2026-05-15, post India VIX scope-correction + Dhan annexure)
+
+81. **India VIX is REFERENCE ONLY** — fetched + stored exactly like the 3 spot indexes but NEVER part of brute-force combinations or the 52-condition vocabulary. Property P-25 (Phase 1) asserts no generated pattern mask references VIX.
+82. **`vix_at_entry` + `vix_at_exit` columns** captured on every trade result row — snapshots of NIFTY VIX close at signal bar and exit bar respectively. Optional Stage 4 post-filter can slice winners by these columns.
+83. **`BRUTE_FORCE_INDICES` (3) vs `REFERENCE_ONLY_INDICES` (1)** — `brutex/universe.py` partitions the 4 instruments. Engine code iterates `BRUTE_FORCE_INDICES` only.
+84. **Dhan Data API rate limit verified**: **5 req/s + 100,000/day** from dhanhq.co/docs/v2 Rate Limit table. Adapter caps at 3 r/s effective (0.6 safety factor). First-run 92 chunks + daily 4 chunks = < 0.1% of daily quota.
+85. **Dhan error code map locked** (`TRACK1_DATA_INGEST_DESIGN.md §10A`): Data API codes 800/804-814 + Trading API DH-901..DH-910 mapped to BruteX outcomes (AUTH_FAILED / BAD_REQUEST / FATAL / RATE_LIMIT / GENERIC_API_ERROR / TIMEOUT / NO_DATA). Single source of truth for `brutex/orchestrator/retry.py` retry/quarantine routing.
+86. **Authentication: manual paste + auto-renew.** First-time setup = user copies Access Token + Client ID from `web.dhan.co` (24h validity) into `~/.brutex/dhan/access_token.json` (gitignored). Adapter calls `POST /v2/RenewToken` every ~22h (or when expiry < 25 min) to refresh. On renewal failure → FSM HALTED + CRITICAL alert. Full design in `TRACK1_DATA_INGEST_DESIGN.md §5A`. SENSEX securityId = 51 (verified from `web.dhan.co/Charts?exch=IDX&seg=I&secid=51` URL), exchangeSegment = `IDX_I`, instrument = `INDEX`. Allowed segment enum (verified from Dhan API docs UI): `{NSE_EQ, NSE_FNO, BSE_EQ, BSE_FNO, MCX_COMM, IDX_I}` — no `BSE_I`.
+87. **All 4 securityIds verified + hardcoded** (user-confirmed 2026-05-15 evening). Previous "runtime CSV lookup, never hardcode" rule is **RELAXED for Track 1's fixed universe**. Master CSV resolver (`brutex/adapters/dhan/instruments.py`) is **DROPPED** from Phase 2 deliverables. Verified tuples now live in `brutex/adapters/dhan/constants.py` (Phase 2): NIFTY 50=`13`, BANKNIFTY=`25`, SENSEX=`51`, INDIA VIX=`21`, all on segment `IDX_I` with instrument type `INDEX`. Quarterly smoke test (`tests/smoke/test_dhan_secid_alive.py`) GETs each `web.dhan.co/Charts?exch=IDX&seg=I&secid=X` URL nightly to confirm IDs still resolve. Catastrophic-fallback approach (manual CSV fetch + constants update) documented in `TRACK1_BACKTEST_SPEC.md §5.4`. Rationale: 4-tuple is permanently locked + adding a 5th instrument is intentional friction + saves ~100k-row CSV download per startup.
 
 ---
 

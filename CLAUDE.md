@@ -38,7 +38,10 @@ after 4-agent hostile-review pass._
    The pre-2026-05-15 `docs/REQUIREMENTS.md` is DEPRECATED — see its
    header banner.
 3. **Scope lock.** Track 1 = Dhan + spot indexes + India VIX (NIFTY 50,
-   BANKNIFTY, SENSEX, INDIA VIX). 21 timeframes (1m base + 19 derived
+   BANKNIFTY, SENSEX, INDIA VIX). **India VIX is REFERENCE ONLY** — it
+   is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
+   every trade, but is NEVER part of brute-force pattern combinations
+   or the 52-condition vocabulary. 21 timeframes (1m base + 19 derived
    intraday + 1d). Rolling `2021-01-01 → today` range. No futures, no
    options, no F&O contracts. Do not silently expand scope.
 4. **Reproducibility first.** Every run is identified by `sha256(
@@ -49,9 +52,12 @@ after 4-agent hostile-review pass._
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
    append must all be O(1). CI gates: `p99(N=1M) / p99(N=1K) ≤ 1.1`
    for each hot path. Any regression fails CI.
-6. **Rate-limit safety.** Dhan rate limits must be verified at adapter
-   ingest time. Until verified, cap effective rate at 10 req/s and
-   document the source. Never raise without explicit user approval.
+6. **Rate-limit safety.** Dhan Data APIs: **5 req/s** per-second cap +
+   **100,000/day** quota (verified 2026-05-15 from dhanhq.co/docs/v2
+   Rate Limit table). Adapter caps at 3 r/s effective (5 × 0.6 safety
+   factor). Never raise without explicit user approval. Track 1's
+   typical 92-chunk first-run + 4-chunk daily incremental is < 0.1% of
+   the daily quota.
 7. **Idempotence.** Every ingest chunk and every backtest combo must be
    rerun-safe. Same inputs → same outputs, bit-for-bit. The audit-log
    replay test is the oracle.
@@ -169,15 +175,19 @@ bruteX/
 | Historical daily endpoint | `POST /v2/charts/historical` | dhanhq.co/docs/v2 |
 | Native intraday timeframes | **1, 5, 15, 25, 60 minute** ONLY | dhanhq.co/docs/v2 |
 | Chunk window (intraday) | 90 days per call | dhanhq.co/docs/v2 |
-| Spot index segment (NSE) | `IDX_I` | dhanhq.co/docs/v2/annexure |
-| Spot index segment (BSE) | `BSE_I` (verify at runtime) | dhanhq.co/docs/v2/annexure |
-| India VIX segment | `IDX_I` (NSE-only; calculated index) | Dhan master CSV (verified 2026-05-15) |
+| Index segment (ALL indexes) | `IDX_I` enum 0 — single segment for NIFTY 50, BANKNIFTY, SENSEX, India VIX | dhanhq.co/docs/v2/annexure (verified 2026-05-15) |
+| Instrument type (all 4 Track 1 instruments) | `INDEX` | dhanhq.co/docs/v2/annexure |
 | India VIX trading symbol | `INDIA VIX` (with space) | Dhan master CSV |
 | India VIX update cadence | every 15 seconds (NOT tick) | NSE |
 | Instrument master URL | `https://images.dhan.co/api-data/api-scrip-master-detailed.csv` | dhan.co |
 | Time format | IST market times (convert to UTC at ingest) | dhanhq.co/docs/v2 |
-| Rate limit | **UNVERIFIED** — cap at 10 r/s until confirmed | TODO |
-| securityId resolution | **At runtime from master CSV; never hardcode** | this file §2 |
+| Rate limit (Data APIs) | **5 req/s + 100,000/day** verified | dhanhq.co/docs/v2 Rate Limit table |
+| Adapter effective cap | 3 r/s (5 × 0.6 safety factor) | this file §2 rule 6 |
+| securityId — NIFTY 50 | **`13`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=13 |
+| securityId — BANKNIFTY | **`25`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=25 |
+| securityId — SENSEX | **`51`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=51 |
+| securityId — India VIX | **`21`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=21 |
+| securityId policy | **Hardcoded in `brutex/adapters/dhan/constants.py`** for Track 1's 4-instrument universe (rationale: 4-tuple is permanently locked; runtime CSV lookup adds complexity for no benefit). Smoke test verifies quarterly against web.dhan.co URLs. | this file §2 |
 
 ---
 

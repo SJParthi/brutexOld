@@ -12,6 +12,15 @@ required-conditions u64 mask. Detection becomes `(strategy_mask &
 bar_mask) == strategy_mask` (bitwise AND + compare per strategy per
 bar — ~1 nanosecond on Apple M4).
 
+> **Scope reminder (2026-05-15):** the 52 conditions are evaluated on
+> the 3 brute-force instruments only (NIFTY, BANKNIFTY, SENSEX).
+> **India VIX is NOT in this vocabulary.** VIX is fetched + stored but
+> is captured only as `vix_at_entry` / `vix_at_exit` context columns
+> on the result row — never as a pattern input. See
+> `TRACK1_BACKTEST_SPEC.md §4.1`. Property P-25 (Phase 1) enforces
+> this: no generated pattern mask shall contain any VIX-referencing
+> bit.
+
 ---
 
 ## 1. Counting Summary

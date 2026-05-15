@@ -49,12 +49,22 @@ from brutex.models import Exchange, Instrument, InstrumentType
 
 @dataclass(frozen=True, slots=True)
 class UnderlyingSpec:
-    """Spec for one named index underlying in the Track 1 universe."""
+    """Spec for one named index underlying in the Track 1 universe.
+
+    Attributes
+    ----------
+    reference_only
+        When True (India VIX), the instrument is fetched + stored but is
+        NEVER part of brute-force pattern combinations or the 52-condition
+        vocabulary. It is captured as ``vix_at_entry`` / ``vix_at_exit``
+        snapshots on every trade for downstream filter analysis.
+    """
 
     exchange: Exchange
     underlying_symbol: str
     display_name: str
     spot_live_since_year: int
+    reference_only: bool = False
 
     def __str__(self) -> str:
         return f"{self.exchange}:{self.underlying_symbol}"
@@ -65,7 +75,7 @@ class UnderlyingSpec:
 # ────────────────────────────────────────────────────────────────────────
 
 
-#: The 4 named indexes. Iterated in order during enumeration.
+#: The 4 named indexes. 3 brute-forced + 1 reference-only (India VIX).
 V1_INDICES: Final[tuple[UnderlyingSpec, ...]] = (
     UnderlyingSpec(
         exchange=Exchange.NSE,
@@ -90,7 +100,20 @@ V1_INDICES: Final[tuple[UnderlyingSpec, ...]] = (
         underlying_symbol="INDIAVIX",
         display_name="India VIX",
         spot_live_since_year=2008,
+        reference_only=True,
     ),
+)
+
+
+#: Symbols brute-forced (3 — excludes India VIX which is reference-only).
+BRUTE_FORCE_INDICES: Final[tuple[UnderlyingSpec, ...]] = tuple(
+    u for u in V1_INDICES if not u.reference_only
+)
+
+
+#: Symbols used only for reference / context (1 — India VIX).
+REFERENCE_ONLY_INDICES: Final[tuple[UnderlyingSpec, ...]] = tuple(
+    u for u in V1_INDICES if u.reference_only
 )
 
 
@@ -160,7 +183,9 @@ def classify_underlying_kind(instrument: Instrument) -> str:
 
 __all__ = [
     "ALLOWED_UNDERLYINGS",
+    "BRUTE_FORCE_INDICES",
     "INDEX_UNDERLYINGS",
+    "REFERENCE_ONLY_INDICES",
     "V1_INDICES",
     "V1_UNDERLYINGS",
     "UnderlyingSpec",

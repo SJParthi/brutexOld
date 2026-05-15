@@ -21,13 +21,17 @@ audit, and structlog-based observability.
 
 | Aspect | Track 1 Value |
 |---|---|
-| **Instruments** | 4: NIFTY 50, BANKNIFTY, SENSEX, **India VIX** |
+| **Total instruments fetched** | 4: NIFTY 50, BANKNIFTY, SENSEX + India VIX |
+| **Brute-forced (in vocabulary)** | 3: NIFTY 50, BANKNIFTY, SENSEX |
+| **Reference-only** | 1: **India VIX** (context columns only, never in patterns) |
 | **Range** | Rolling: `2021-01-01 → today` |
 | **Native fetched** | 1-min (intraday) + 1-day (historical) from Dhan |
 | **Resampled** | 19 derived intraday TFs from 1m base |
-| **Total TFs persisted** | **21** (= 1 base + 19 derived + 1 daily) |
+| **Total TFs persisted** | **21** (= 1 base + 19 derived + 1 daily) per instrument |
 | **Tradability** | None (signal-only research) |
 | **Brokerage/STT** | NONE (spot indexes don't trade) |
+| **Dhan Data API rate limit** | **5 req/s + 100,000/day** (verified) |
+| **Adapter effective cap** | 3 r/s (5 × 0.6 safety factor) |
 
 **Unfrozen from prior spec:**
 - Decision #2 (3 instruments → 4)
@@ -48,7 +52,7 @@ same chunking). Adding a 5th later = 1 line in
 |---|---|---|---|---|---|---|---|
 | 1 | `NIFTY 50` | NIFTY 50 | NSE | `IDX_I` | `INDEX` | 1996 | ✅ |
 | 2 | `NIFTY BANK` | BANKNIFTY | NSE | `IDX_I` | `INDEX` | 2003 | ✅ |
-| 3 | `SENSEX` | BSE SENSEX | BSE | `BSE_I` ⚠️ verify at runtime | `INDEX` | 1986 | partial |
+| 3 | `SENSEX` | BSE SENSEX | BSE | `IDX_I` (single Index segment per Dhan annexure) | `INDEX` | 1986 | ✅ |
 | 4 | `INDIA VIX` | India VIX | NSE | `IDX_I` | `INDEX` | 2008 | ✅ |
 
 ### India VIX specifics (Agent A research)
@@ -241,6 +245,208 @@ the same chunk produces bit-identical Parquet bytes (P-19).
 | AUDIT → AUDIT_DONE | `verify_chain()` OK | `AUDIT_VERIFY` + `RUN_COMPLETE` | n/a |
 | any → HALTED | rate-limit exhaust, validation fail, audit-break | `RUN_HALTED` | watermark unchanged |
 | HALTED → PLAN_GAPS | operator `brutex resume` | `RUN_RESUME` | n/a |
+
+---
+
+## 5A. Authentication (Manual Paste + Auto-Renew)
+
+Track 1 uses Dhan's **individual trader** access token flow — simplest
+possible first-run experience, automated for the steady state.
+
+### 5A.1 Token storage
+
+File: `~/.brutex/dhan/access_token.json` (gitignored)
+
+```json
+{
+  "client_id":      "1000000401",
+  "access_token":   "eyJ0eXAi…",
+  "expiry_time":    "2026-05-16T15:00:00.000Z",
+  "last_renewed_at":"2026-05-15T15:00:00Z"
+}
+```
+
+Path resolution order (Phase 2 adapter):
+
+1. `$BRUTEX_DHAN_TOKEN_PATH` if set
+2. `~/.brutex/dhan/access_token.json` (default)
+3. ERROR + helpful setup instructions if neither exists
+
+### 5A.2 First-time setup (manual, once)
+
+```
+   ┌──────────────────────────────────────────────────────────────┐
+   │  1. Login to web.dhan.co                                     │
+   │  2. My Profile → Access DhanHQ APIs                          │
+   │  3. Generate Access Token (24h validity)                     │
+   │  4. Copy Client ID + Access Token + Expiry Time              │
+   │  5. Paste into ~/.brutex/dhan/access_token.json              │
+   │  6. Run `brutex pull` — adapter reads + uses                 │
+   └──────────────────────────────────────────────────────────────┘
+```
+
+### 5A.3 Auto-renewal flow
+
+```
+   ┌──────────────────────────────────────────────────────────────┐
+   │                                                              │
+   │   On every adapter startup                                   │
+   │   AND once per ~22 hours of run-time                         │
+   │   AND just before every API call if expiry < 1 hour:         │
+   │                                                              │
+   │       │                                                      │
+   │       ▼                                                      │
+   │   ┌─────────────────────────────────────────┐                │
+   │   │ Read token from JSON                    │                │
+   │   └────────────────┬────────────────────────┘                │
+   │                    ▼                                         │
+   │   ┌─────────────────────────────────────────┐                │
+   │   │ Is expiry > 25 min from now?            │                │
+   │   └─────────┬────────────────────┬──────────┘                │
+   │             │ YES                │ NO                        │
+   │             ▼                    ▼                           │
+   │       Use as-is        POST /v2/RenewToken                   │
+   │                        with current token                    │
+   │                            │                                 │
+   │                            ▼                                 │
+   │                    ┌───────────────────┐                     │
+   │                    │ HTTP 200?         │                     │
+   │                    └──┬──────────┬─────┘                     │
+   │                       │ YES      │ NO                        │
+   │                       ▼          ▼                           │
+   │              Write new token   structlog CRITICAL            │
+   │              atomically        auth.token_expired            │
+   │              (tempfile+rename) FSM → HALTED                  │
+   │                                Telegram (when wired)         │
+   │                                                              │
+   └──────────────────────────────────────────────────────────────┘
+```
+
+### 5A.4 Renewal API call (verified from Dhan docs)
+
+```
+POST https://api.dhan.co/v2/RenewToken
+Headers:
+  access-token: {current JWT}
+  dhanClientId: {client_id}
+Body: (none)
+
+Response 200:
+{
+  "dhanClientId":   "1000000401",
+  "dhanClientName": "JOHN DOE",
+  "dhanClientUcc":  "ABCD12345E",
+  "accessToken":    "<new JWT>",
+  "expiryTime":     "2026-05-17T15:00:00.000"
+}
+
+Response error:
+- Token already expired → DH-907 "Data Error" → halt + alert
+- Auth fail → DH-901 / DH-908 → halt + alert
+```
+
+### 5A.5 Pseudocode
+
+```python
+# brutex/adapters/dhan/auth.py (Phase 2 deliverable)
+
+@dataclass(frozen=True, slots=True)
+class DhanCredentials:
+    client_id: str
+    access_token: str
+    expiry_time: datetime  # UTC
+    last_renewed_at: datetime
+
+def load_credentials(path: Path = DEFAULT_TOKEN_PATH) -> DhanCredentials:
+    """Read credentials from JSON. Raises if file missing or malformed."""
+    if not path.exists():
+        raise AuthConfigError(
+            f"No Dhan credentials at {path}. "
+            f"Run `brutex auth setup` for instructions."
+        )
+    data = json.loads(path.read_text())
+    return DhanCredentials(
+        client_id=data["client_id"],
+        access_token=data["access_token"],
+        expiry_time=parse_iso8601(data["expiry_time"]),
+        last_renewed_at=parse_iso8601(data["last_renewed_at"]),
+    )
+
+def needs_renewal(creds: DhanCredentials, *, threshold_minutes: int = 25) -> bool:
+    """True if token expires within `threshold_minutes`."""
+    return creds.expiry_time - utc_now() < timedelta(minutes=threshold_minutes)
+
+def renew_token(creds: DhanCredentials) -> DhanCredentials:
+    """Call /v2/RenewToken and return fresh credentials."""
+    response = httpx.post(
+        "https://api.dhan.co/v2/RenewToken",
+        headers={
+            "access-token": creds.access_token,
+            "dhanClientId": creds.client_id,
+        },
+        timeout=10.0,
+    )
+    if response.status_code != 200:
+        log.critical("auth.token_renewal_failed",
+                     status=response.status_code, body=response.text[:500])
+        raise AuthRenewalError(
+            f"Renewal failed (HTTP {response.status_code}). "
+            f"You must manually regenerate at web.dhan.co."
+        )
+    body = response.json()
+    return DhanCredentials(
+        client_id=body["dhanClientId"],
+        access_token=body["accessToken"],
+        expiry_time=parse_iso8601(body["expiryTime"]),
+        last_renewed_at=utc_now(),
+    )
+
+def persist_atomically(creds: DhanCredentials, path: Path) -> None:
+    """Tempfile + rename — never leaves a half-written file."""
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({
+        "client_id":      creds.client_id,
+        "access_token":   creds.access_token,
+        "expiry_time":    creds.expiry_time.isoformat(),
+        "last_renewed_at":creds.last_renewed_at.isoformat(),
+    }, indent=2))
+    tmp.replace(path)  # atomic on POSIX
+    audit.append("AUTH_RENEWED", payload={
+        "new_expiry": creds.expiry_time.isoformat(),
+        "renewed_at": creds.last_renewed_at.isoformat(),
+    })
+
+def get_or_renew(path: Path = DEFAULT_TOKEN_PATH) -> str:
+    """Hot path — returns a fresh access token, renewing if needed."""
+    creds = load_credentials(path)
+    if needs_renewal(creds):
+        creds = renew_token(creds)
+        persist_atomically(creds, path)
+    return creds.access_token
+```
+
+### 5A.6 Audit events
+
+Renewal adds one event type to the chain:
+
+| Event kind | Fired when | Payload |
+|---|---|---|
+| `AUTH_RENEWED` | Token successfully refreshed | new_expiry, renewed_at |
+| `auth.token_renewal_failed` (structlog only, not audit) | Renewal API returned non-200 | status_code, body excerpt |
+| `auth.token_expired` (CRITICAL) | Refresh attempted on expired token | last_known_expiry |
+
+### 5A.7 Phase 2 deliverables (added to checklist)
+
+| Item | File | Status |
+|---|---|---|
+| `DhanCredentials` dataclass | `brutex/adapters/dhan/auth.py` | ⏳ |
+| `load_credentials()` + path resolution | `brutex/adapters/dhan/auth.py` | ⏳ |
+| `needs_renewal()` + `renew_token()` | `brutex/adapters/dhan/auth.py` | ⏳ |
+| `persist_atomically()` (tempfile + rename) | `brutex/adapters/dhan/auth.py` | ⏳ |
+| `get_or_renew()` hot-path helper | `brutex/adapters/dhan/auth.py` | ⏳ |
+| `brutex auth setup` CLI subcommand with setup instructions | `brutex/cli.py` | ⏳ |
+| `brutex auth status` CLI subcommand (show expiry) | `brutex/cli.py` | ⏳ |
+| Unit tests for renewal logic | `tests/unit/test_dhan_auth.py` (new) | ⏳ |
 
 ---
 
@@ -458,6 +664,80 @@ later-phase enhancement.
 
 ---
 
+## 10A. Dhan API Error Code Map (verified 2026-05-15 from annexure)
+
+Authoritative mapping from Dhan's published error codes to BruteX
+orchestrator outcomes. Used by `brutex/orchestrator/retry.py` (the
+`BROKER_EXCEPTION_CLASSIFICATION` dict) and by the rate-limit
+downshift logic.
+
+### Data API Errors (we will see these most often)
+
+| Dhan Code | Meaning | BruteX Outcome | Action |
+|---|---|---|---|
+| `800` | Internal Server Error | `GENERIC_API_ERROR` | retry with backoff (3 attempts) |
+| `804` | Requested instruments exceeds limit | `FATAL` | code bug — chunk smaller |
+| `805` | Too many requests / connections | `RATE_LIMIT` | downshift bucket, retry |
+| `806` | Data APIs not subscribed | `FATAL` | operator must subscribe |
+| `807` | Access token expired | `AUTH_FAILED` | quarantine + alert |
+| `808` | Auth failed (clientId/token invalid) | `AUTH_FAILED` | quarantine + alert |
+| `809` | Access token invalid | `AUTH_FAILED` | quarantine + alert |
+| `810` | Client ID invalid | `AUTH_FAILED` | quarantine + alert |
+| `811` | Invalid Expiry Date | `BAD_REQUEST` | quarantine (not used for index spot) |
+| `812` | Invalid Date Format | `BAD_REQUEST` | quarantine + alert (code bug) |
+| `813` | Invalid SecurityId | `BAD_REQUEST` | quarantine + alert (re-verify against `web.dhan.co/Charts?...&secid=X` — code fix to constants.py needed) |
+| `814` | Invalid Request | `BAD_REQUEST` | quarantine + alert |
+
+### Trading API Errors (may surface on mis-call)
+
+| Dhan Code | Meaning | BruteX Outcome | Action |
+|---|---|---|---|
+| `DH-901` | Invalid Authentication | `AUTH_FAILED` | quarantine + alert |
+| `DH-902` | No Data API subscription | `FATAL` | operator must subscribe |
+| `DH-903` | User Account issue | `AUTH_FAILED` | quarantine + alert |
+| `DH-904` | Rate Limit | `RATE_LIMIT` | downshift bucket, retry |
+| `DH-905` | Input Exception | `BAD_REQUEST` | quarantine + alert |
+| `DH-906` | Order Error | `BAD_REQUEST` | (not used in Track 1 — Data APIs only) |
+| `DH-907` | Data Error | `NO_DATA` | record, advance, do not retry |
+| `DH-908` | Internal Server Error | `GENERIC_API_ERROR` | retry with backoff |
+| `DH-909` | Network Error | `TIMEOUT` | retry with backoff |
+| `DH-910` | Others | `GENERIC_API_ERROR` | retry once, then quarantine |
+
+### Retry / Outcome Routing
+
+```
+HTTP 4xx, Dhan code in {807, 808, 809, 810, DH-901, DH-902, DH-903} → AUTH_FAILED → quarantine + CRITICAL alert
+HTTP 4xx, Dhan code in {811, 812, 813, 814, DH-905, DH-906}         → BAD_REQUEST → quarantine + ERROR alert
+HTTP 4xx, Dhan code in {804, 806}                                    → FATAL      → halt run + CRITICAL alert
+HTTP 4xx, Dhan code in {805, DH-904}                                 → RATE_LIMIT → downshift bucket, retry up to 3x with backoff
+HTTP 5xx OR Dhan code in {800, DH-908, DH-910}                       → GENERIC_API_ERROR → retry with exp backoff (3 attempts)
+Network error (timeout, DNS, connection)  OR Dhan code DH-909        → TIMEOUT    → retry with backoff (3 attempts)
+Dhan code DH-907                                                     → NO_DATA    → advance watermark to chunk_end, do NOT retry
+```
+
+### Exchange Segment Constants (verified)
+
+| Code | Description | Enum | Used in Track 1? |
+|---|---|---|---|
+| `IDX_I` | Index Value | 0 | ✅ ALL 4 instruments |
+| `NSE_EQ` | NSE Equity Cash | 1 | ❌ out of scope |
+| `NSE_FNO` | NSE Futures & Options | 2 | ❌ out of scope |
+| `NSE_CURRENCY` | NSE Currency | 3 | ❌ out of scope |
+| `BSE_EQ` | BSE Equity Cash | 4 | ❌ out of scope |
+| `MCX_COMM` | MCX Commodity | 5 | ❌ out of scope |
+| `BSE_CURRENCY` | BSE Currency | 7 | ❌ out of scope |
+| `BSE_FNO` | BSE Futures & Options | 8 | ❌ out of scope |
+
+### Instrument Type Constants (verified)
+
+| Type | Description | Used in Track 1? |
+|---|---|---|
+| `INDEX` | Index | ✅ ALL 4 instruments |
+| `FUTIDX`, `OPTIDX` | Futures/Options of Index | ❌ Options Track (post-Track-1) |
+| `EQUITY`, `FUTSTK`, `OPTSTK`, `FUTCOM`, `OPTFUT`, `FUTCUR`, `OPTCUR` | other types | ❌ out of scope |
+
+---
+
 ## 11. Pseudocode — 4 Core Functions
 
 ### 11.1 `pull_chunk` — one 90-day window
@@ -585,13 +865,14 @@ concrete. Tracking checklist:
 |---|---|---|
 | `brutex/config/instruments.toml` (dynamic config) | new | ⏳ |
 | `brutex/adapters/dhan/client.py` | new | ⏳ |
-| `brutex/adapters/dhan/instruments.py` (master CSV resolver) | new | ⏳ |
+| `brutex/adapters/dhan/constants.py` — 4 hardcoded tuples (NIFTY=13, BANKNIFTY=25, SENSEX=51, INDIAVIX=21; all `IDX_I` + `INDEX`) | new | ⏳ |
+| ~~`brutex/adapters/dhan/instruments.py` (master CSV resolver)~~ — **dropped per 2026-05-15 simplification (4-instrument universe is static)** | — | ❌ not built |
 | `brutex/adapters/dhan/intraday.py` | new | ⏳ |
 | `brutex/adapters/dhan/historical.py` | new | ⏳ |
 | `brutex/data/watermark.py` (new DuckDB table) | new | ⏳ |
 | `brutex/data/parser_dhan.py` (replaces the broker parser) | new | ⏳ |
 | `brutex/data/partition.py` — extend `VALID_INTERVALS` to 21 TFs | edit | ⏳ |
-| `brutex/data/partition.py` — add `IDX_I, BSE_I` to `VALID_SEGMENTS` | edit | ⏳ |
+| `brutex/data/partition.py` — add `IDX_I` to `VALID_SEGMENTS` (single Index segment for all 4 instruments) | edit | ⏳ |
 | `brutex/feed/resampler.py` — 09:15 IST anchor + 19 TFs | edit | ⏳ |
 | `brutex/data/parquet_writer.py` — allow current-month grow | edit | ⏳ |
 | `brutex/orchestrator/state.py` — collapse `IngestPhase` to Track 1 phases | edit | ⏳ |
@@ -632,5 +913,5 @@ The 24 property invariants are catalogued in
 | 77 | Bar identity = sha256(inst, tf, ts, OHLC paisa, vol, source_version) |
 | 78 | Telegram delivery deferred (structlog + dashboard primary for now) |
 | 79 | 4-layer dedup defence (Watermark → Bloom → LMDB → bar_hash) |
-| 80 | All `INDEX`-type instruments use `IDX_I` (NSE) or `BSE_I` (BSE) segments |
+| 80 | All `INDEX`-type instruments use `IDX_I` — the single Index segment in Dhan's annexure (no separate BSE_I) |
 
