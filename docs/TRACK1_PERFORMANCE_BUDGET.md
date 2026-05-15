@@ -152,6 +152,37 @@ is the design envelope.
 
 ---
 
+## 6A. Day vs Night Envelope Split (M4 Pro reference)
+
+The M4 Pro is a personal machine, not a dedicated server. During the
+day (07:00-22:00 IST) the user runs IntelliJ + Docker + Chrome + Claude
+Code, leaving BruteX a much smaller envelope.
+
+| Mode | Cores for BruteX | RAM for BruteX | GPU for BruteX | Throughput target |
+|---|---|---|---|---|
+| ☀️ Day | 5-6 P-cores | 16-20 GB | 20 cores (idle, free) | 40-90K trials/sec |
+| 🌙 Night | 10 P-cores | 40-44 GB | 20 cores (full Metal) | 80-150K trials/sec |
+| 🌙 Night + Metal GPU | 10 P-cores + 20 GPU | 40-44 GB | full | 160-400K trials/sec |
+
+Wall time for 33B-trial sweep:
+
+| Mode | Wall time |
+|---|---|
+| Day-only (impossible — no one runs 100h sequentially during work) | ~100 hours |
+| Night-only at 9h/night | **~7 nights** (CPU only) or **~3 nights** (with GPU) |
+| Mixed daytime probes + nighttime sweep | **3-4 days realistic** |
+
+For 1B-trial probes during day work: **~3 hours**. For 10B-trial deep
+probes: **night-only** is the right tool.
+
+The auto-throttle implementation lives in
+`brutex/orchestrator/scheduler.py` (Phase 2 deliverable) per
+`TRACK1_RUNTIME_ARCHITECTURE.md §5A.5`. Resumable checkpoints (every
+100M trials) ensure no work is lost on a clean morning stop
+(`§5A.7`).
+
+---
+
 ## 7. Storage I/O Budget
 
 ```
