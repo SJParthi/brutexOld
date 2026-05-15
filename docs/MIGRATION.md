@@ -248,6 +248,7 @@ hostile-review pass. Future changes must justify against this list.
 83. **`BRUTE_FORCE_INDICES` (3) vs `REFERENCE_ONLY_INDICES` (1)** — `brutex/universe.py` partitions the 4 instruments. Engine code iterates `BRUTE_FORCE_INDICES` only.
 84. **Dhan Data API rate limit verified**: **5 req/s + 100,000/day** from dhanhq.co/docs/v2 Rate Limit table. Adapter caps at 3 r/s effective (0.6 safety factor). First-run 92 chunks + daily 4 chunks = < 0.1% of daily quota.
 85. **Dhan error code map locked** (`TRACK1_DATA_INGEST_DESIGN.md §10A`): Data API codes 800/804-814 + Trading API DH-901..DH-910 mapped to BruteX outcomes (AUTH_FAILED / BAD_REQUEST / FATAL / RATE_LIMIT / GENERIC_API_ERROR / TIMEOUT / NO_DATA). Single source of truth for `brutex/orchestrator/retry.py` retry/quarantine routing.
+86. **Authentication: manual paste + auto-renew.** First-time setup = user copies Access Token + Client ID from `web.dhan.co` (24h validity) into `~/.brutex/dhan/access_token.json` (gitignored). Adapter calls `POST /v2/RenewToken` every ~22h (or when expiry < 25 min) to refresh. On renewal failure → FSM HALTED + CRITICAL alert. Full design in `TRACK1_DATA_INGEST_DESIGN.md §5A`. SENSEX securityId = 51 (verified from `web.dhan.co/Charts?exch=IDX&seg=I&secid=51` URL), exchangeSegment = `IDX_I`, instrument = `INDEX`. Allowed segment enum (verified from Dhan API docs UI): `{NSE_EQ, NSE_FNO, BSE_EQ, BSE_FNO, MCX_COMM, IDX_I}` — no `BSE_I`.
 
 ---
 

@@ -197,6 +197,52 @@ Expected (verify at first call):
 
 Constants live in `brutex/adapters/dhan/constants.py` (Phase 2 deliverable).
 
+### 5.6 Authentication (manual paste + auto-renew)
+
+Track 1 uses Dhan's **individual trader** access token model, NOT the
+TOTP / API-key flow.
+
+**First-time setup (manual, once per user):**
+
+1. User logs into `web.dhan.co`
+2. Navigates: My Profile → Access DhanHQ APIs → Generate Access Token
+3. Token has 24-hour validity
+4. User copies the token + their Client ID into a JSON file at
+   `~/.brutex/dhan/access_token.json`:
+
+```json
+{
+  "client_id": "1000000401",
+  "access_token": "eyJ0eXAi…",
+  "expiry_time": "2026-05-16T15:00:00.000Z",
+  "last_renewed_at": "2026-05-15T15:00:00Z"
+}
+```
+
+The JSON file path is gitignored (`**/dhan_token*`, `**/access_token*`)
+and never committed.
+
+**Automatic renewal:**
+
+- At adapter startup AND every ~22 hours, BruteX calls
+  `POST https://api.dhan.co/v2/RenewToken` with headers
+  `access-token: <current>` + `dhanClientId: <client_id>`.
+- On success: write new token + new expiry to the JSON file
+  atomically (tempfile + rename).
+- On failure (e.g., 24h elapsed, token already expired): structlog
+  `CRITICAL auth.token_expired` event, FSM → HALTED, user must
+  manually regenerate.
+
+**Why this design:**
+
+- Simplest first-run experience (one copy-paste)
+- Auto-renewal keeps Track 1 running indefinitely as long as someone
+  refreshes once per ~6 months (or whenever they want)
+- TOTP flow is reserved for an optional `brutex auth setup --totp`
+  command later (out of Track 1 minimum)
+
+Detailed flow + pseudocode in `TRACK1_DATA_INGEST_DESIGN.md §5A`.
+
 ---
 
 ## 6. Timeframes (21 total)

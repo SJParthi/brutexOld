@@ -248,6 +248,208 @@ the same chunk produces bit-identical Parquet bytes (P-19).
 
 ---
 
+## 5A. Authentication (Manual Paste + Auto-Renew)
+
+Track 1 uses Dhan's **individual trader** access token flow — simplest
+possible first-run experience, automated for the steady state.
+
+### 5A.1 Token storage
+
+File: `~/.brutex/dhan/access_token.json` (gitignored)
+
+```json
+{
+  "client_id":      "1000000401",
+  "access_token":   "eyJ0eXAi…",
+  "expiry_time":    "2026-05-16T15:00:00.000Z",
+  "last_renewed_at":"2026-05-15T15:00:00Z"
+}
+```
+
+Path resolution order (Phase 2 adapter):
+
+1. `$BRUTEX_DHAN_TOKEN_PATH` if set
+2. `~/.brutex/dhan/access_token.json` (default)
+3. ERROR + helpful setup instructions if neither exists
+
+### 5A.2 First-time setup (manual, once)
+
+```
+   ┌──────────────────────────────────────────────────────────────┐
+   │  1. Login to web.dhan.co                                     │
+   │  2. My Profile → Access DhanHQ APIs                          │
+   │  3. Generate Access Token (24h validity)                     │
+   │  4. Copy Client ID + Access Token + Expiry Time              │
+   │  5. Paste into ~/.brutex/dhan/access_token.json              │
+   │  6. Run `brutex pull` — adapter reads + uses                 │
+   └──────────────────────────────────────────────────────────────┘
+```
+
+### 5A.3 Auto-renewal flow
+
+```
+   ┌──────────────────────────────────────────────────────────────┐
+   │                                                              │
+   │   On every adapter startup                                   │
+   │   AND once per ~22 hours of run-time                         │
+   │   AND just before every API call if expiry < 1 hour:         │
+   │                                                              │
+   │       │                                                      │
+   │       ▼                                                      │
+   │   ┌─────────────────────────────────────────┐                │
+   │   │ Read token from JSON                    │                │
+   │   └────────────────┬────────────────────────┘                │
+   │                    ▼                                         │
+   │   ┌─────────────────────────────────────────┐                │
+   │   │ Is expiry > 25 min from now?            │                │
+   │   └─────────┬────────────────────┬──────────┘                │
+   │             │ YES                │ NO                        │
+   │             ▼                    ▼                           │
+   │       Use as-is        POST /v2/RenewToken                   │
+   │                        with current token                    │
+   │                            │                                 │
+   │                            ▼                                 │
+   │                    ┌───────────────────┐                     │
+   │                    │ HTTP 200?         │                     │
+   │                    └──┬──────────┬─────┘                     │
+   │                       │ YES      │ NO                        │
+   │                       ▼          ▼                           │
+   │              Write new token   structlog CRITICAL            │
+   │              atomically        auth.token_expired            │
+   │              (tempfile+rename) FSM → HALTED                  │
+   │                                Telegram (when wired)         │
+   │                                                              │
+   └──────────────────────────────────────────────────────────────┘
+```
+
+### 5A.4 Renewal API call (verified from Dhan docs)
+
+```
+POST https://api.dhan.co/v2/RenewToken
+Headers:
+  access-token: {current JWT}
+  dhanClientId: {client_id}
+Body: (none)
+
+Response 200:
+{
+  "dhanClientId":   "1000000401",
+  "dhanClientName": "JOHN DOE",
+  "dhanClientUcc":  "ABCD12345E",
+  "accessToken":    "<new JWT>",
+  "expiryTime":     "2026-05-17T15:00:00.000"
+}
+
+Response error:
+- Token already expired → DH-907 "Data Error" → halt + alert
+- Auth fail → DH-901 / DH-908 → halt + alert
+```
+
+### 5A.5 Pseudocode
+
+```python
+# brutex/adapters/dhan/auth.py (Phase 2 deliverable)
+
+@dataclass(frozen=True, slots=True)
+class DhanCredentials:
+    client_id: str
+    access_token: str
+    expiry_time: datetime  # UTC
+    last_renewed_at: datetime
+
+def load_credentials(path: Path = DEFAULT_TOKEN_PATH) -> DhanCredentials:
+    """Read credentials from JSON. Raises if file missing or malformed."""
+    if not path.exists():
+        raise AuthConfigError(
+            f"No Dhan credentials at {path}. "
+            f"Run `brutex auth setup` for instructions."
+        )
+    data = json.loads(path.read_text())
+    return DhanCredentials(
+        client_id=data["client_id"],
+        access_token=data["access_token"],
+        expiry_time=parse_iso8601(data["expiry_time"]),
+        last_renewed_at=parse_iso8601(data["last_renewed_at"]),
+    )
+
+def needs_renewal(creds: DhanCredentials, *, threshold_minutes: int = 25) -> bool:
+    """True if token expires within `threshold_minutes`."""
+    return creds.expiry_time - utc_now() < timedelta(minutes=threshold_minutes)
+
+def renew_token(creds: DhanCredentials) -> DhanCredentials:
+    """Call /v2/RenewToken and return fresh credentials."""
+    response = httpx.post(
+        "https://api.dhan.co/v2/RenewToken",
+        headers={
+            "access-token": creds.access_token,
+            "dhanClientId": creds.client_id,
+        },
+        timeout=10.0,
+    )
+    if response.status_code != 200:
+        log.critical("auth.token_renewal_failed",
+                     status=response.status_code, body=response.text[:500])
+        raise AuthRenewalError(
+            f"Renewal failed (HTTP {response.status_code}). "
+            f"You must manually regenerate at web.dhan.co."
+        )
+    body = response.json()
+    return DhanCredentials(
+        client_id=body["dhanClientId"],
+        access_token=body["accessToken"],
+        expiry_time=parse_iso8601(body["expiryTime"]),
+        last_renewed_at=utc_now(),
+    )
+
+def persist_atomically(creds: DhanCredentials, path: Path) -> None:
+    """Tempfile + rename — never leaves a half-written file."""
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({
+        "client_id":      creds.client_id,
+        "access_token":   creds.access_token,
+        "expiry_time":    creds.expiry_time.isoformat(),
+        "last_renewed_at":creds.last_renewed_at.isoformat(),
+    }, indent=2))
+    tmp.replace(path)  # atomic on POSIX
+    audit.append("AUTH_RENEWED", payload={
+        "new_expiry": creds.expiry_time.isoformat(),
+        "renewed_at": creds.last_renewed_at.isoformat(),
+    })
+
+def get_or_renew(path: Path = DEFAULT_TOKEN_PATH) -> str:
+    """Hot path — returns a fresh access token, renewing if needed."""
+    creds = load_credentials(path)
+    if needs_renewal(creds):
+        creds = renew_token(creds)
+        persist_atomically(creds, path)
+    return creds.access_token
+```
+
+### 5A.6 Audit events
+
+Renewal adds one event type to the chain:
+
+| Event kind | Fired when | Payload |
+|---|---|---|
+| `AUTH_RENEWED` | Token successfully refreshed | new_expiry, renewed_at |
+| `auth.token_renewal_failed` (structlog only, not audit) | Renewal API returned non-200 | status_code, body excerpt |
+| `auth.token_expired` (CRITICAL) | Refresh attempted on expired token | last_known_expiry |
+
+### 5A.7 Phase 2 deliverables (added to checklist)
+
+| Item | File | Status |
+|---|---|---|
+| `DhanCredentials` dataclass | `brutex/adapters/dhan/auth.py` | ⏳ |
+| `load_credentials()` + path resolution | `brutex/adapters/dhan/auth.py` | ⏳ |
+| `needs_renewal()` + `renew_token()` | `brutex/adapters/dhan/auth.py` | ⏳ |
+| `persist_atomically()` (tempfile + rename) | `brutex/adapters/dhan/auth.py` | ⏳ |
+| `get_or_renew()` hot-path helper | `brutex/adapters/dhan/auth.py` | ⏳ |
+| `brutex auth setup` CLI subcommand with setup instructions | `brutex/cli.py` | ⏳ |
+| `brutex auth status` CLI subcommand (show expiry) | `brutex/cli.py` | ⏳ |
+| Unit tests for renewal logic | `tests/unit/test_dhan_auth.py` (new) | ⏳ |
+
+---
+
 ## 6. Incremental Behaviour — Day 1 vs Day 5 vs Same-Day Rerun
 
 | Run | Watermark before | Gap | Chunks fetched | Watermark after | Wall time |
