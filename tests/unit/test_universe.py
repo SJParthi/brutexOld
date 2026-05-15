@@ -67,13 +67,10 @@ class TestV1IndicesComposition:
 
     def test_nse_comes_first(self) -> None:
         """Ordering: NSE indices first (deeper history), then BSE."""
-        first_bse = next(
-            (i for i, u in enumerate(V1_INDICES) if u.exchange == Exchange.BSE), None
-        )
+        first_bse = next((i for i, u in enumerate(V1_INDICES) if u.exchange == Exchange.BSE), None)
         assert first_bse is not None
         nse_after_bse = [
-            i for i, u in enumerate(V1_INDICES)
-            if u.exchange == Exchange.NSE and i > first_bse
+            i for i, u in enumerate(V1_INDICES) if u.exchange == Exchange.NSE and i > first_bse
         ]
         assert nse_after_bse == []
 
@@ -108,13 +105,16 @@ class TestIndexUnderlyings:
         assert len(INDEX_UNDERLYINGS) == 3
 
     def test_contains_expected_pairs(self) -> None:
-        assert frozenset(
-            {
-                (Exchange.NSE, "NIFTY"),
-                (Exchange.NSE, "BANKNIFTY"),
-                (Exchange.BSE, "SENSEX"),
-            }
-        ) == INDEX_UNDERLYINGS
+        assert (
+            frozenset(
+                {
+                    (Exchange.NSE, "NIFTY"),
+                    (Exchange.NSE, "BANKNIFTY"),
+                    (Exchange.BSE, "SENSEX"),
+                }
+            )
+            == INDEX_UNDERLYINGS
+        )
 
     def test_allowed_underlyings_alias(self) -> None:
         """ALLOWED_UNDERLYINGS is the backwards-compat alias."""
@@ -221,9 +221,7 @@ class TestIsInScope:
             (Exchange.BSE, "SENSEX"),
         ],
     )
-    def test_three_track1_indices_in_scope(
-        self, exchange: Exchange, symbol: str
-    ) -> None:
+    def test_three_track1_indices_in_scope(self, exchange: Exchange, symbol: str) -> None:
         assert is_in_scope(_make_idx(exchange, symbol)) is True
 
     def test_cash_equity_rejected(self) -> None:

@@ -124,9 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
             "omitted, only live pipeline progress is shown."
         ),
     )
-    dashboard.add_argument(
-        "--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)"
-    )
+    dashboard.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)")
     dashboard.add_argument("--port", type=int, default=9080, help="Bind port (default 9080)")
 
     return parser
