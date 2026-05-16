@@ -107,9 +107,19 @@ Patched in `TRACK2_DATA_INGEST_DESIGN.md` and `TRACK2_EXECUTION_SIMULATOR.md §1
 Sharpe SE at N=100 is 0.10. The "30%-drop" gate is inside random noise.
 Expected false-pass ≈ 25%.
 
-**Patch:** Lockbox lock raised from 6 months to **18 months OR ≥500 trades**
-(whichever is more restrictive). Patched in `TRACK1_BACKTEST_SPEC.md §"Stage 4.7"`.
-Decision logged as **DEC-LOCK-001**.
+**Patch (REVISED 2026-05-16 evening per operator):** Keep the **6-month
+default** (institutional standard) AND add an **adaptive backwards-extension
+rule**: if a combo accumulates < 500 trades in the default 6mo window, extend
+the window backwards one trading day at a time until ≥ 500 trades are reached.
+If 500 is unreachable from available history, REJECT the combo
+(`lockbox_status = "insufficient_n"`). Patched in `TRACK1_BACKTEST_SPEC.md
+§"Stage 4.7"`. Decision **DEC-LOCK-001 (final form)**.
+
+Earlier draft of this patch proposed 18 months hard-coded; operator
+correctly noted this departs from the institutional 6mo standard
+without justification. Adaptive extension is the cleaner fix —
+preserves 6mo for high-frequency combos, only extends for the
+low-N edge case.
 
 #### 3.1.2 DSR composability broken across Track 1 → Track 2
 

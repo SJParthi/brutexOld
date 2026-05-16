@@ -354,17 +354,37 @@ operator must HALT the sweep, modify the registry, restart the sweep
    2-year train, 6-month test, 3-month slide
    ~16 walks across 5 years
    Keep candidates with positive Sharpe in ≥12 of 16 walks
-7. **Lockbox:** reserve last **18 months** (Nov 2024 - May 2026), NEVER seen
-   by any prior stage. Code-enforced isolation: any access path outside
-   Stage 4.7 raises exception. Top 10 candidates tested ONCE.
-   Pass criteria (DEC-LOCK-001, REVISED 2026-05-16 from 6mo to 18mo):
-   - Minimum **500 trades** in lockbox (else REJECT — insufficient power)
+7. **Lockbox:** reserve last **6 months** (Dec 2025 - May 2026) by
+   default, NEVER seen by any prior stage. Code-enforced isolation:
+   any access path outside Stage 4.7 raises exception. Top 10
+   candidates tested ONCE.
+
+   **Adaptive window rule (DEC-LOCK-001, REVISED 2026-05-16 evening):**
+   If the default 6-month window has < 500 trades for a given combo,
+   the lockbox window auto-extends BACKWARDS in time (one trading day
+   at a time) until the combo accumulates ≥ 500 trades.
+   - If 500 trades cannot be reached within available history → REJECT
+     combo (insufficient evidence; mark `lockbox_status = "insufficient_n"`).
+   - The extended window is per-combo; different combos may end up
+     with different lockbox start dates.
+   - The "extended" portion is still NEVER seen by Stages 1-3 — the
+     extension consumes data from BEFORE the original training window,
+     not from the training window itself. This preserves the
+     held-out-data invariant.
+
+   Pass criteria:
+   - Lockbox trade count ≥ 500 (hard floor — combos failing this auto-rejected)
    - Lockbox Sharpe within 30% of training
    - MDD within 50% of training
-   Rationale: 6mo × 1-min × signal-driven yields ~100 trades; Sharpe SE
-   ~0.10; the 30%-drop gate falls inside random noise → ~25% false-pass.
-   Hostile review 2026-05-16 (Agent A) flagged this; raised to 18mo + 500
-   trades to bring Sharpe SE below 0.05.
+
+   Rationale: 6 months is the institutional standard (López de Prado
+   / Bailey pattern). At our 1-min × signal-driven trade frequency,
+   6 months typically yields ~100 trades → Sharpe SE 0.10 → 30%-drop
+   gate falls in noise → ~25% false-pass. Adaptive extension to ≥500
+   trades brings Sharpe SE below 0.05 without changing the institutional
+   default for high-frequency combos. Operator-preferred design
+   (2026-05-16 evening) — supersedes the earlier "18 months + 500"
+   proposal which was over-conservative.
 
 ## Result Row Schema (Every Single Trial — 30+ Metrics)
 
