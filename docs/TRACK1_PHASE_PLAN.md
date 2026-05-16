@@ -14,7 +14,7 @@ documentation) through to the first production sweep.
 | Deliverable | Owner | Status |
 |---|---|---|
 | `CLAUDE.md` rewritten for Dhan + Track 1 | this PR | ✅ |
-| `docs/REQUIREMENTS.md` marked DEPRECATED | this PR | ✅ |
+| `docs/REQUIREMENTS.md` retired to stub | this PR | ✅ |
 | `docs/TRACK1_BACKTEST_SPEC.md` rewritten | this PR | ✅ |
 | `docs/TRACK1_VERIFICATION_PYRAMID.md` written | this PR | ✅ |
 | `docs/TRACK1_VOCABULARY.md` written | this PR | ✅ |

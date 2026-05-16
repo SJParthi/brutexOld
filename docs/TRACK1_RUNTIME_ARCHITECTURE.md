@@ -622,9 +622,8 @@ These three are cheap NOW but expensive later. Should land in Phase 1 alongside 
 | `docs/TRACK1_PERFORMANCE_BUDGET.md` | Honest 2-4 day SLA, memory BW math |
 | `docs/TRACK1_MICROSTRUCTURE.md` | Pre-open, Muhurat, halts, rebalance |
 | `docs/TRACK1_RUNTIME_ARCHITECTURE.md` | **THIS DOC** — operations atlas |
-| `docs/MIGRATION.md` | 95-decision ledger (was 87 before this doc) |
-| `docs/REQUIREMENTS.md` | DEPRECATED v1.0 |
-| `docs/ROADMAP.md` | PARTIALLY DEPRECATED legacy |
+| `docs/MIGRATION.md` | Decision ledger (#1-#102+) |
+| `docs/REQUIREMENTS.md` / `REQUIREMENTS_SIMPLE.md` / `ROADMAP.md` / `adapters.md` | All RETIRED to stubs 2026-05-16 |
 
 ---
 

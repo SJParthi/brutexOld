@@ -207,9 +207,9 @@ SBOM, mutation, etc.).
 | `docs/TRACK1_PHASE_PLAN.md` | 8-12 week build plan, Phase 0-4 |
 | `docs/TRACK1_PERFORMANCE_BUDGET.md` | Honest 2-4 day SLA, memory BW math |
 | `docs/TRACK1_MICROSTRUCTURE.md` | Pre-open, Muhurat, halts, rebalance |
-| `docs/MIGRATION.md` | Legacy broker → Dhan migration log (80 decisions) |
-| `docs/REQUIREMENTS.md` | DEPRECATED — historical reference only |
-| `docs/ROADMAP.md` | PARTIALLY DEPRECATED — historical phase tables |
+| `docs/MIGRATION.md` | Decision ledger (#1-#102+) |
+| `docs/REQUIREMENTS.md` | RETIRED (stub) — see Track 1 docs |
+| `docs/ROADMAP.md` | RETIRED (stub) — see `docs/phases/00_MASTER_CHECKLIST.md` |
 
 ---
 
