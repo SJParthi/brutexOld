@@ -1,0 +1,86 @@
+name: Red-team / planted-bug harness (nightly)
+# Per docs/STANDARDS_100PCT.md §1 and ASSURANCE_ROUND_2026-05-16.md.
+#
+# Verifies that each claimed CI gate ACTUALLY catches violations.
+# For each gate (ruff, mypy, bandit, conventional-commits, etc.),
+# `tests/redteam/` plants a known bug and asserts the gate's tool
+# returns non-zero / flags it.
+#
+# This is the "test the tester" pattern from:
+#   - Rotten Green Tests (Delplanque et al., ICSE 2019)
+#   - Trail of Bits Sep 2025 mutation testing post
+#   - Meta Engineering Sep 2025 LLM-mutation pipeline
+#
+# Runs:
+#   - nightly cron (02:00 UTC; ~07:30 IST)
+#   - manual dispatch
+#   - on push if redteam/ or .github/workflows/redteam-nightly.yml changed
+#
+# **If ANY redteam test fails → a claimed CI gate is silently broken.**
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+  push:
+    paths:
+      - "tests/redteam/**"
+      - ".github/workflows/redteam-nightly.yml"
+      - "scripts/ci/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: redteam-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  redteam:
+    name: Red-team harness — verify gates actually block
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dev deps (includes ruff, mypy, bandit, pytest)
+        run: pip install -e ".[dev]"
+
+      - name: Verify gate tools installed
+        run: |
+          ruff --version
+          mypy --version
+          bandit --version
+          pytest --version
+
+      - name: Run red-team harness
+        # Every test in tests/redteam/ MUST pass. A failure means a
+        # CI gate that's supposed to block violations is silently passing them.
+        # NO `|| true` here — this is the meta-gate.
+        run: |
+          pytest tests/redteam/ -v --no-cov --tb=short
+
+      - name: Summarize redteam result
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "## ✅ All red-team tests passed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Every claimed CI gate (ruff, mypy, bandit, conventional-commits) was empirically verified to catch the planted violations." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## 🔴 RED-TEAM FAILURE" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "A claimed CI gate is **silently broken** — it didn't catch a planted violation." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "This is exactly the failure mode the harness exists to detect. Per docs/STANDARDS_100PCT.md and Golden Rule #10 (honest limits), this MUST be fixed before claiming the gate is enforced." >> $GITHUB_STEP_SUMMARY
+          fi

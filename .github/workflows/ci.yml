@@ -151,6 +151,23 @@ jobs:
             --cov-fail-under=90 \
             --ignore=tests/bench \
             tests/unit tests/integration tests/property
+      - name: Strict per-module 100% coverage gate (Golden Rule #12)
+        # New modules ship at 100% line + 100% branch from the start.
+        # Add modules to this list as they reach 100%. Legacy modules
+        # converge over time under the 90% global floor above.
+        run: |
+          if compgen -G "tests/unit/test_costs_*.py" > /dev/null; then
+            pytest \
+              --cov=brutex.costs \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_costs_*.py
+          else
+            echo "(brutex.costs test files not present yet — gate inactive)"
+          fi
+      - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
+        run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
         if: always()
         uses: actions/upload-artifact@v5
@@ -492,6 +509,7 @@ jobs:
         with:
           languages: python
           queries: security-extended,security-and-quality
+          config-file: ./.github/codeql/codeql-config.yml
       - uses: github/codeql-action/analyze@v4
         with:
           category: "/language:python"
