@@ -90,6 +90,24 @@ after 4-agent hostile-review pass._
       Operator monitoring: ZERO clicks per day.
     See `docs/TRACK1_BACKTEST_SPEC.md` §"COMMON · DYNAMIC · SCALABLE ·
     AUTOMATED" for the full rule + enforcement matrix + violations list.
+12. **100% ALWAYS STANDARDS** (operator decree 2026-05-16 evening).
+    Every branch, every PR, every sub-PR, every commit, every task,
+    every sub-task, every plan, every doc, every spec, every agent run
+    obeys 18 standing requirements:
+    coverage 100% line + 100% branch; mutation ≥ 85%; type-check
+    (mypy strict AND pyright); static analysis (ruff + pylint + bandit);
+    zero duplication; functionality + scenario completeness; bug-fix
+    regression coverage; 7 test types (unit + integration + property +
+    golden + bench + stress + mutation); CI every push + nightly soak;
+    O(1) per hot path (p99 ratio ≤ 1.1); throughput canary ≥ 50 M/s;
+    Bloom + LMDB 4-tier dedup; audit JSONL hash-chain on every
+    material action; observability 4 pillars (tracking + logging +
+    dashboard + alerting); 7 explicit SLAs; deep-research protocol
+    (4-agent for major, 2-agent for compliance, 1-agent hostile for
+    refactor); decision ID for every locked decision in MIGRATION.md.
+    See `docs/STANDARDS_100PCT.md` for the full enforcement matrix +
+    tooling per gate + auto-driver-test discipline. Any PR with a
+    red gate is BLOCKED; operator override requires ADR.
 
 ---
 

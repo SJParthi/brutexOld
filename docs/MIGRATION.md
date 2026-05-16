@@ -262,6 +262,10 @@ superseded.
 
 136. **DEC-DOCS-001 — UNVERIFIED inventory single source of truth** (Agent D consistency audit). Counts diverged across CALCULATOR_SPEC §16 (11 items), TRACK2_TAX_HANDLING §11 (5), TRACK2_RISK_MGMT §11 (own list). Consolidated to CALCULATOR_SPEC §16 as the authoritative inventory; other docs reference back. After this assurance round: 4 of 5 originally-flagged items now LOCKED; item 2 (SENSEX freeze qty) fact-corrected.
 
+### Operator standards decree (2026-05-16 night)
+
+137. **Golden Rule #12 — "100% ALWAYS STANDARDS"** added to CLAUDE.md (operator decree: *"I need 100 percentage dude. Okay? See how can you guarantee all these without hallucination or illusion or missing even by doing a real deep thorough research as well I need guarantee assurance and proof"*). Codified in new doc `docs/STANDARDS_100PCT.md` as the project law applying to every branch, PR, sub-PR, commit, task, sub-task, plan, doc, spec, and agent run. 18 standing requirements: coverage 100% line + 100% branch; mutation ≥ 85%; mypy strict AND pyright; ruff + pylint + bandit; zero duplication; functionality + scenario completeness; bug-fix regression coverage; 7 test types; CI every push + nightly soak; O(1) per hot path (p99 ratio ≤ 1.1); throughput canary ≥ 50 M/s; Bloom + LMDB 4-tier dedup; audit JSONL hash-chain; observability 4 pillars; 7 SLAs; deep-research protocol; MIGRATION.md decision IDs for every lock. Any PR with red CI gate is BLOCKED. Operator override requires ADR.
+
 ---
 
 ## Acknowledgement
