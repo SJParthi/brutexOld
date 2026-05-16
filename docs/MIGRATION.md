@@ -1,23 +1,21 @@
-# BruteX Migration Log — Decision Ledger
+# BruteX — Decision Ledger
 
 > **Status:** Locked 2026-05-15. Living ledger of design decisions.
+> Every PR justifies changes against the numbered rows below.
 >
-> **Pivot summary:** Original v1.0 spec (signed off 2026-04-14, now in
-> retired `docs/REQUIREMENTS.md` stub) targeted Groww API + Indian
-> F&O. On **2026-05-15** a 4-agent hostile-review pass surfaced
-> 17 blocker / high-severity issues — spot is not tradable so
-> brokerage maths was theatre; the 10-13h SLA claim was 5-15x
-> optimistic (memory-bandwidth bound); Groww has no public spot-index
-> intraday history; SEBI segment + securityId assumptions were wrong.
+> **Project scope (locked):** Dhan + Indian spot indexes (NIFTY 50,
+> BANKNIFTY, SENSEX) + India VIX (reference-only) — signal-only
+> research (Track 1). Track 2 (options) is the realism leg that
+> translates Track 1 winners into priced option trades.
 >
-> The pivot: **Groww + F&O → Dhan + Indian spot indexes (NIFTY 50,
-> BANKNIFTY, SENSEX) + India VIX (reference-only), signal-only
-> research (Track 1)**. Track 2 (options) is the realism leg that
-> translates Track 1 winners into priced option trades. The full
-> blocker-by-blocker review table and per-file wipe inventory have
-> been removed from this document — they're in `git log` and the
-> commit message of `2e86bab` (the pivot commit). This file is now
-> just the forward-looking decision ledger.
+> An earlier v1.0 spec targeted a different broker + the F&O segment;
+> it was retired on 2026-05-15 after a 4-agent hostile-review pass
+> surfaced 17 blocker / high-severity issues (spot is not tradable so
+> brokerage maths was theatre; the original SLA claim was 5-15x
+> optimistic; the prior broker had no public spot-index intraday
+> history; SEBI segment + securityId assumptions were wrong). The
+> blocker-by-blocker table and per-file wipe inventory are in `git
+> log` and the commit message of `2e86bab` (the pivot commit).
 >
 > **Active sources of truth:**
 > - `docs/TRACK1_BACKTEST_SPEC.md` — Track 1 master spec
@@ -28,12 +26,12 @@
 
 ---
 
-## 2. Wipe inventory (summary)
+## Wipe inventory (summary)
 
-The 2026-05-15 pivot deleted Groww-specific code: 8 adapter files
-under `brutex/adapters/groww/`, 4 docs under `docs/groww-sdk/`, and
-10 test files (Groww-named units + Groww-coupled integration tests).
-Full path-by-path breakdown is in git log of commit `2e86bab`.
+The 2026-05-15 pivot deleted the prior broker's adapter and tests:
+8 adapter source files, 4 SDK docs, 10 test files (broker-named
+units + integration tests). Full path-by-path breakdown is in
+commit `2e86bab`.
 
 **Total: 8 source files + 4 docs + 10 tests = 22 files deleted.**
 
@@ -48,7 +46,7 @@ superseded.
 
 ### Source & scope
 
-1. Data source: **Dhan API only** (was: Groww)
+1. Data source: **Dhan API only** (single-source vendor lock for v1)
 2. Universe: **NIFTY 50, BANKNIFTY, SENSEX spot + India VIX volatility index** (was: 8 F&O indices + ~215 stocks; **amended 2026-05-15** from 3 → 4 instruments per user scope expansion, see decisions #71-72)
 3. Tradability: **NONE — signal-only research** (was: F&O execution)
 4. Range: **Rolling `2021-01-01 → today`** (**amended 2026-05-15** from fixed 2021-05-15 → 2026-05-15 window per user scope expansion, see decision #75)
@@ -198,32 +196,11 @@ superseded.
 
 ---
 
-## Phase-1 technical debt (residual Groww docstrings)
-
-The 2026-05-15 wipe removed all Groww code, tests, and dependencies.
-Residual Groww references survive only in docstrings/comments of the
-generic modules retained for reuse:
-
-| Module | Cleanup |
-|---|---|
-| `brutex/data/parser.py` | Rename `parse_groww_candle_row` → `parse_candle_row` |
-| `brutex/data/models.py` | Rename `groww_symbol` → `symbol`; strip Groww examples |
-| `brutex/orchestrator/{state,pipeline,store,retry,rate_limiter}.py` | Strip Groww docstring examples |
-| `brutex/{config/runtime,data/instrument_store,feed/replay,dashboard/app}.py` | Same |
-| `tests/unit/test_data_parser.py`, `tests/unit/test_models.py` | Update for renamed symbols |
-
-Not functional blockers; tracked as Phase 1 cleanup work. Each PR
-that touches one of these modules should clean its docstrings in
-passing.
-
----
-
 ## Acknowledgement
 
-The 2026-05-15 pivot was driven by a 4-agent hostile-review pass
-(Explore + Plan + general-purpose hostile + general-purpose throughput
-+ Explore wipe-inventory). The pattern is now memorialised in
-`CLAUDE.md §9` and `TRACK1_PHASE_PLAN.md §0` as a non-negotiable gate
-at every phase end. Track 2 Phase 0 went through 2 rounds of this
-pattern (cross-verification + hostile review) — see commits `6d848fa`,
+The 2026-05-15 pivot was driven by a 4-agent hostile-review pass.
+The pattern is now memorialised in `CLAUDE.md §9` and
+`TRACK1_PHASE_PLAN.md §0` as a non-negotiable gate at every phase
+end. Track 2 Phase 0 went through 2 rounds of the same pattern
+(cross-verification + hostile review) — see commits `6d848fa`,
 `dd0af27`, `73e2613` and PR #16.
