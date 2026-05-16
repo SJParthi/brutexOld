@@ -133,10 +133,11 @@ bruteX/
 │   ├── TRACK1_PHASE_PLAN.md        ← 8-12 week build plan
 │   ├── TRACK1_PERFORMANCE_BUDGET.md
 │   ├── TRACK1_MICROSTRUCTURE.md
-│   ├── MIGRATION.md                ← the broker → Dhan log
-│   ├── REQUIREMENTS.md             ← DEPRECATED (v1.0 (legacy))
-│   ├── ROADMAP.md
-│   ├── adapters.md
+│   ├── MIGRATION.md                ← decision ledger
+│   ├── REQUIREMENTS.md             ← RETIRED (stub)
+│   ├── REQUIREMENTS_SIMPLE.md      ← RETIRED (stub)
+│   ├── ROADMAP.md                  ← RETIRED (stub)
+│   ├── adapters.md                 ← RETIRED (stub)
 │   ├── adr/                        ← architecture decisions
 │   └── runbooks/
 ├── brutex/                         ← Python package
