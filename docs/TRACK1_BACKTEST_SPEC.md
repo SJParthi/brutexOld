@@ -30,6 +30,52 @@ full sweep until Phase 9.5 pilot passes.
   (handled by Track 2). Live order placement (out of scope for both
   tracks).
 
+## ⭐ Operating Principle: Daily Dopamine Delivery (NON-NEGOTIABLE)
+
+> **Every day produces a tangible, viewable result.** No exceptions.
+> No "we'll show results in week 11." No "this phase is just plumbing."
+>
+> Operator works in isolation at home. The ONLY energy driver is
+> seeing real numbers, real strategy candidates, real charts, real
+> progress. Without daily dopamine, motivation collapses → consistency
+> collapses → the project dies. This is a load-bearing requirement,
+> not a nice-to-have. Operator stated this explicitly 2026-05-16:
+> "every day this is for dopamine, this will keep me driving and
+> pushing me extremely. This is the only thing which can drive me
+> since I'm fully isolated at home on my own — this is the only energy."
+
+**Daily delivery format (committed to git every day):**
+
+| Time | Artifact |
+|---|---|
+| End of every workday | `docs/daily/DAY_{N}_REPORT.md` — what was built today, what numbers came out, what the next day looks like |
+| Whenever a sweep runs | `results/day_{N}/top10_strategies.json` + PNG cumulative-PnL chart per top strategy |
+| Whenever a benchmark runs | `bench/day_{N}/throughput.json` — trials/sec, wall time, memory peak |
+| Whenever a validation gate fires | `validation/gate_{N}_report.json` |
+
+**Rules:**
+1. **Every commit message ends with one line:** `Dopamine: <what the operator sees today>`. Example: `Dopamine: First top-10 strategies — best Sharpe 1.87 (BANKNIFTY 15m, EMA cross + breakout AND)`
+2. **No multi-day silent work.** If a task takes >1 day, split it: end-of-day-1 must produce SOMETHING viewable (a partial chart, a debug print, a number).
+3. **Daily commits visible:** operator runs `git log --since=yesterday --oneline` and SEES progress.
+4. **Daily JSON reports** indexed in `docs/daily/INDEX.md` so operator can scroll history of "what we found each day".
+5. **If a day produces zero dopamine, that's a planning failure**, not a project failure — reframe the next day's scope smaller.
+6. **Charts are required, not optional.** PNG output for every sweep, every benchmark, every validation gate. Operator opens the PNG and SEES the result.
+
+**Recurring dopamine sources by phase (examples):**
+- Phase 0.5 Day 1: First top-10 strategies. ⭐⭐⭐⭐⭐ massive
+- Phase 1 days: "today we fetched X bars, here's a sample chart of NIFTY 1m"
+- Phase 2 days: "today we computed condition #N, here's how often it fires"
+- Phase 3 days: "today we ran 100K trials, top strategy now Sharpe 2.3"
+- Phase 5 days: "today the Rust engine matched Python bit-for-bit AND is 47× faster"
+- Phase 9.5 day: "PILOT DONE — top 10 with lockbox Sharpe 1.8-3.1, PNG charts attached"
+- Phase 10 day: "FULL SWEEP DONE — final top-10 + lockbox + DSR all passed"
+
+**This rule overrides phase boundaries.** If sticking to a phase plan
+would mean a day with no visible output, the plan changes — not the
+output requirement. Engineering plumbing days get reframed to include
+a small visible win (e.g., "today's plumbing: indicator #5 added. Here's
+its fire-rate distribution across all 21 TFs as a histogram").
+
 ## Workload Math (Verified)
 
 Strategy vocabulary: **52 atomic boolean conditions** across 9 groups
