@@ -76,6 +76,179 @@ output requirement. Engineering plumbing days get reframed to include
 a small visible win (e.g., "today's plumbing: indicator #5 added. Here's
 its fire-rate distribution across all 21 TFs as a histogram").
 
+## ⭐ Operating Principle: Full Automation (NON-NEGOTIABLE, LOCKED 2026-05-16)
+
+> **No manual input during operation.** Once one-time bootstrap is done,
+> the system runs unattended for weeks. Operator stated 2026-05-16:
+> "always it should be extremely completely automated — none of the
+> manual process or human input should be expected."
+
+### One-time bootstrap (~30 minutes total, done ONCE)
+
+| Step | What | Time |
+|---|---|---|
+| 1 | Plug in 8 TB external SSD (auto-detected at `/Volumes/QuantData`) | 30s |
+| 2 | Paste Dhan access token into `~/.brutex/dhan/access_token.json` ONCE | 1 min |
+| 3 | Generate GPG key for signed commits (`gpg --gen-key`) | 5 min |
+| 4 | Add sudoers entry for `/usr/bin/powermetrics` (or use macmon fallback) | 2 min |
+| 5 | Talk to @BotFather, paste Telegram bot token into Keychain | 5 min |
+| | One-time bootstrap script (`scripts/bootstrap.sh`) runs steps 3-5 automatically | — |
+
+**After bootstrap → zero manual input for weeks.**
+
+### Automated pipeline (locked operator decisions 2026-05-16)
+
+| Layer | Behavior | Source decision |
+|---|---|---|
+| Dhan token renewal | Auto-renew via `/v2/RenewToken` loop, no human intervention | TRACK1_DATA_INGEST_DESIGN.md §5A |
+| Data ingest | Daily cron pulls yesterday's bars automatically | Auto |
+| Sweep launch | Cron / systemd timer schedules nightly sweeps | Auto |
+| Phase transitions | **Auto-proceed on green validation gate** (operator decision 2026-05-16) | LOCKED |
+| Checkpoint + resume | Every 100M trials, auto on restart | Auto |
+| Telegram alerts | aiogram 3.x async bot, 4 message types (hourly digest / instant error / threshold / summary) | Agent C |
+| Dashboard | FastAPI + Jinja2 + HTMX, live equity curve + throughput + thermals + top-10 | Agent C |
+| Logging | structlog 24+ with orjson (85K entries/sec) → rotating JSONL + hash-chained audit | Agent C |
+| Provenance seal | DVC `dvc add` + OpenTimestamps `ots stamp` at end of every run | Agent C |
+| GPG-signed commits | Pre-push hook + CI `git verify-commit` rejects unsigned | Agent C |
+| Thermal auto-pause | `powermetrics --samplers smc,thermal -i 60000` → 95°C or pressure=heavy = auto-pause | Agent C |
+| Disk full | Auto-checkpoint + Telegram + HALT (not ASK) | Agent C |
+| Audit chain break | HALT + Telegram (system pauses safely, no ASK) | Rule §2.8 |
+| Lockbox leak | HALT + Telegram | Phase 7 hard gate |
+| **PR merges** | **Docs-only PRs auto-merge after 22 CI gates green** (operator decision 2026-05-16) | LOCKED |
+| Code PRs | Operator clicks merge (kept manual for code review) | LOCKED |
+| Daily report | `docs/daily/DAY_{N}_REPORT.md` auto-committed end of every workday | Daily Dopamine §|
+
+### Safety breaks (HALT not ASK)
+
+These trigger AUTOMATIC pauses. System stops safely, sends Telegram,
+and **waits patiently**. Operator does not need to respond immediately —
+state is preserved indefinitely. Resume when operator is ready.
+
+| Trigger | Action | Operator role |
+|---|---|---|
+| Audit-chain break | HALT + Telegram | Whenever (state preserved) |
+| Lockbox unauthorized access | HALT + Telegram | Whenever |
+| 5+ consecutive sweep retries failed | HALT + Telegram | Whenever |
+| Disk full | Checkpoint + HALT + Telegram | Plug in storage / clear space |
+| Battery discharging | Auto-pause + Telegram | Plug in power |
+| Thermal pressure heavy | Auto-pause (NOT halt — resumes when cool) | None — automatic resume |
+
+### What CANNOT be automated (honest)
+
+| Action | Why | Frequency |
+|---|---|---|
+| Dhan token initial issuance | Dhan portal requires user login | ONCE |
+| SSD physical plug | Hardware action | ONCE per session |
+| GPG key generation | Security — must be human-initiated | ONCE |
+| Sudoers entry | macOS security — requires admin password | ONCE |
+| Telegram bot token initial creation | @BotFather conversation | ONCE |
+| Final go/no-go on Track 2 Phase 4 ship (live trading) | Business judgment on real money | ONCE per final ship |
+
+Everything else is automated. No exceptions.
+
+## Proof of Architecture (3-Agent Research, 2026-05-16)
+
+> Three parallel research agents verified the architecture before
+> any code was written. Each agent returned citation-grounded
+> verdicts. This section summarizes their findings; full reports
+> are in agent transcripts (commit `4c32457` had the original 30+
+> metrics section, this commit extends with proof).
+
+### Agent A — Metrics computation performance
+
+**Verdict: SOUND.** Computing 30+ metrics per trial adds **3-7%
+wall time** vs a 10-metric baseline. Bar-simulation remains the
+bottleneck, not metric reduction.
+
+| Claim | Number | Source |
+|---|---|---|
+| VectorBT 1K Sharpe on M1 | 593 ms | vectorbt.pro/features/performance |
+| VectorBT 1M sims end-to-end on M1 | 20 sec | pyquantnews.com/1000000-backtest-simulations |
+| VectorBT 1M orders filled | 70-100 ms | github.com/polakowo/vectorbt README |
+| M-series HPC bandwidth | 100 GB/s STREAM | arxiv.org/abs/2502.05317 (Feb 2025) |
+| Polars 100M-row groupby | 23 sec | medium.com/codastra |
+| zstd level 3 compression | 200-398 MB/s | openbenchmarking.org compress-zstd |
+
+**Algorithm decomposition:** Welford+Pébaÿ (Sandia 2008) fuses moment
+1-4 + drawdown + win/loss accumulators into ONE pass. Tail ratio
+(p5/p95) needs one nth_element pass. Total **2 passes** per trial,
+fully L1-resident (~48 KB) on M4 Pro P-cores (192 KB L1d).
+
+### Agent B — O(1) + uniqueness + dedup architecture
+
+**Verdict: SOUND with 2 caveats.**
+
+**Hash collision math (blake3 truncated to 128 bits, n=7.3×10¹¹):**
+- Birthday-bound probability: `P ≈ exp(-n² / 2·2¹²⁸)` = **7.83 × 10⁻¹⁶**
+- One collision expected only at ~2⁶⁴ ≈ 1.8×10¹⁹ keys
+- 730B is **8 orders of magnitude below** the birthday threshold — acceptable
+
+**Bloom filter sizing (CORRECTS old MIGRATION.md #98):**
+
+| Survivors | FPR target | Bits/elem | k hashes | Size |
+|---|---|---|---|---|
+| 1B | 10⁻⁴ | 19.17 | 14 | **2.40 GB** |
+| 1B | 10⁻⁶ (5 GB budget) | 40 | 28 | 5 GB |
+| 150M | 10⁻⁴ | 19.17 | 14 | 360 MB |
+
+The OLD doc claimed FPR ≈ 10⁻¹² to 0 at 5 GB — that's **wrong**.
+Actual is 10⁻⁶. Doc fix coming next commit.
+
+**Component throughput (cited):**
+
+| Component | Throughput | Source |
+|---|---|---|
+| blake3 ARM NEON | ~6 GB/s | BLAKE3 issue #310 (Pi 4 verified +26% vs portable) |
+| fastbloom insert | **41 ns/op** | tomtomwombat/bench-bloom-filters |
+| fastbloom lookup | **42 ns/op** | same |
+| LMDB random read | ~mm-scale reads/s in-RAM | Howard Chu MDB paper |
+| LMDB max DB | **128 TB** (47-bit addr) | Wikipedia LMDB |
+| LMDB largest deployment | **5 billion entries** (Symas customer) | SE Radio #371 |
+| CRoaring AND on 770 MB | **2.82 ms** (memory-BW bound) | Lemire 2018 SP&E |
+| PyO3 FFI overhead | ~25 ns/call (<1% batched) | PyO3 issue #1607 |
+
+**Caveat 1: CRoaring AND is O(n_containers), NOT strict O(1).**
+For 770 MB matrix: 2.82 ms. CI gate `p99(1M)/p99(1K) ≤ 1.10` must
+compare like-vs-like (same matrix size).
+
+**Caveat 2: macOS WRITEMAP gotcha** — LMDB preallocates full
+`map_size` eagerly. Must `mdb_env_set_mapsize(256 GB)` explicitly
+and DISABLE WRITEMAP on macOS.
+
+### Agent C — Observability + Telegram + dashboard
+
+**Verdict: SOUND.** Day 1 ships a 4-piece kit; Day 7+ adds upgrades.
+
+**Day 1 minimum-viable stack:**
+
+| Layer | Pick | Cited evidence |
+|---|---|---|
+| Telegram bot | **aiogram 3.x** (async, matches FastAPI loop) | github.com/aiogram/aiogram |
+| Dashboard | **FastAPI + Jinja2 + HTMX** (no React, no Dash) | medium.com/codex FastAPI+HTMX+Plotly |
+| Logging | structlog 24+ with orjson | structlog.org/performance |
+| Process metrics | `psutil` + `powermetrics --samplers smc,thermal -f plist` | github.com/tlkh/asitop |
+| Static viz | matplotlib Agg backend (PNG) | optuna-dashboard pattern |
+
+**Telegram rate-limit facts (verified):**
+- Global cap: 30 msg/sec per bot
+- Per chat: 1 msg/sec sustained
+- Use `edit-message` for hourly digest (no rate-limit pressure)
+- 60s dedup window on error class hash
+
+**Day 7+ upgrades:**
+- Plotly Dash on dash-extensions WebSocket
+- Grafana panels via Prometheus textfile collector
+- DVC + OpenTimestamps daily seal
+- GPG enforcement in CI
+
+## Honest caveats from research (LOCKED)
+
+1. **CRoaring AND is O(n_containers), not strict O(1).** Document this honestly in CI gates. Separate gate for matrix-AND scaling.
+2. **MIGRATION.md #98 Bloom math was numerically off** — claimed 10⁻¹², actual 10⁻⁶ at 5 GB/1B/k=28. Will fix in next commit (decision #321 amends #98).
+3. **macOS WRITEMAP must be DISABLED** for LMDB. Explicit `mdb_env_set_mapsize(256 GB)`. `brutex doctor` C-LMDB check: macOS + WRITEMAP=true = RED.
+4. **128-bit truncation is fine at 730B** (P=8×10⁻¹⁶) but canonical row ID stays 256-bit; truncated 128-bit is secondary index only.
+5. **No public hedge-fund precedent for billion-row backtest storage on a single laptop.** VectorBT-Pro's "test billions" is cloud language. The 730B-on-M4-Pro SLA remains **55-65% confidence** per MIGRATION.md #98 (Phase 6 calibration sweep is the canary).
+
 ## Workload Math (Verified)
 
 Strategy vocabulary: **52 atomic boolean conditions** across 9 groups
