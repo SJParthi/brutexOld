@@ -1,0 +1,569 @@
+# Track 2 — Per-Trade Cost Calculator Specification
+
+**Status:** LOCKED 2026-05-16 (consolidation of `TRACK2_OPTIONS_SPEC.md`
+§8 + §9 + `COSTS_VERIFIED.md` §3-§14 + §18). No code yet — this is the
+build-target spec.
+
+**Scope:** Per-trade cost computation for one round-trip options trade
+(entry + exit) on a single instrument (NIFTY 50 / BANKNIFTY / SENSEX
+options) under a single broker (Dhan). The output of this calculator
+feeds into:
+- Per-trade `net_pnl` (gross PnL − slippage − all charges)
+- Aggregator for annual income tax (see `COSTS_VERIFIED.md §18`)
+
+**Out of scope for THIS spec (and why):**
+- Spot index PnL (Track 1, signal-only, NO costs applied)
+- Margin / peak-margin computation (we're backtesting outcomes, not capital)
+- Dividend / corporate action handling (cash-settled options on indexes)
+- Mark-to-market intraday rebalancing (Track 2 holds positions until exit signal)
+- Carry forward of losses (handled in annual tax module, not per-trade)
+- Multi-broker A/B comparison at scale (only Dhan locked; Zerodha mentioned for comparability sanity-check)
+
+**Single source of truth for verified values:** `COSTS_VERIFIED.md`.
+This document defines the *algorithm*. The *numeric constants* live in
+`COSTS_VERIFIED.md` and (eventually) `brutex/costs/dhan_constants.py`.
+
+---
+
+## 1. Calculator inputs (per round-trip)
+
+| Field | Type | Range | Notes |
+|---|---|---|---|
+| `entry_dt_ist` | `datetime` | 2021-01-01 09:15 → today 15:30 | IST. Determines STT-era, lot-size era. |
+| `exit_dt_ist` | `datetime` | ≥ entry_dt_ist | Same day or later. Track 2 forced exit 15:20 IST. |
+| `instrument` | `Literal["NIFTY", "BANKNIFTY", "SENSEX"]` | enum | Determines exchange (NIFTY/BANKNIFTY=NSE, SENSEX=BSE) and lot-size table. |
+| `option_type` | `Literal["CE", "PE"]` | enum | NOT used by calculator (call vs put → no charge difference). Stored for audit only. |
+| `strike` | `int64` (paisa) | ≥ 1 | NOT used by calculator. Stored for audit only. |
+| `expiry_date` | `date` | ≥ entry_dt_ist.date() | NOT used by calculator. Stored for audit only. |
+| `entry_bar_open_inr` | `int64` (paisa) | ≥ 5 (₹0.05 minimum) | Bar OPEN at entry. Slippage applied on top. |
+| `exit_bar_open_inr` | `int64` (paisa) | ≥ 5 | Bar OPEN at exit. Slippage applied on top. |
+| `side` | `Literal["long_call", "long_put", "short_call", "short_put"]` | enum | Determines which leg is "buy" (pays STT-no, pays stamp), which is "sell" (pays STT-yes, no stamp). |
+| `n_lots` | `int` | ≥ 1 | Number of lots. Each lot's share-count looked up from `lot_size_history[instrument, entry_dt_ist.date()]`. |
+| `broker` | `Literal["dhan", "zerodha"]` | enum | Brokerage differs. Default `"dhan"`. |
+| `gst_split` | `Literal["intra_state", "inter_state"]` | enum | `"intra_state"` → CGST 9% + SGST 9% (each rounded separately). `"inter_state"` → IGST 18% (single rounding). Set once per trader account, not per trade. Default `"intra_state"` to match `TRACK2_OPTIONS_SPEC.md §8.2` worked example. |
+
+**No other inputs are needed.** Charges depend only on these.
+
+---
+
+## 2. Constants table (locked, source-cited)
+
+All from `COSTS_VERIFIED.md`. Reproduced here for spec self-containment;
+single source of truth remains `COSTS_VERIFIED.md` and the Python
+constants module.
+
+| Symbol | Value | Source |
+|---|---|---|
+| `TICK_PAISA` | `5` (= ₹0.05) | COSTS_VERIFIED §11 |
+| `DHAN_BROKERAGE_PAISA` | `2000` (= ₹20 per executed order) | COSTS_VERIFIED §8.1 |
+| `ZERODHA_BROKERAGE_PAISA` | `2000` (= ₹20 per executed order, also flat for F&O) | COSTS_VERIFIED §8.2 |
+| `STT_RATE_PRE_APR2026` | `0.0010` (= 0.10% of sell premium) | COSTS_VERIFIED §3 |
+| `STT_RATE_POST_APR2026` | `0.0015` (= 0.15% of sell premium) | COSTS_VERIFIED §3 (UNVERIFIED gazette text) |
+| `STT_HIKE_EFFECTIVE_DATE` | `date(2026, 4, 1)` | Budget 2026 |
+| `NSE_FNO_RATE` | `0.00035030` (= 0.03503%, both sides) | COSTS_VERIFIED §4 |
+| `BSE_FNO_RATE` | `0.00032500` (= 0.03250%, both sides) | COSTS_VERIFIED §4 (UNVERIFIED for Bankex) |
+| `SEBI_RATE` | `0.0000010` (= ₹10/cr = 0.0001%, both sides) | COSTS_VERIFIED §5 |
+| `IPFT_NSE_RATE` | `0.0000050` (= ₹50/cr = 0.0005%, both sides) | COSTS_VERIFIED §6 |
+| `IPFT_BSE_RATE` | `0.0000050` (= ₹50/cr, both sides — BSE applies same) | COSTS_VERIFIED §6 |
+| `STAMP_DUTY_BUY_RATE` | `0.00003` (= 0.003%, buy leg only) | COSTS_VERIFIED §7 |
+| `GST_RATE` | `0.18` (CGST 9% + SGST 9% OR IGST 18%) | COSTS_VERIFIED §9 |
+| `CGST_RATE` | `0.09` | COSTS_VERIFIED §9 |
+| `SGST_RATE` | `0.09` | COSTS_VERIFIED §9 |
+| `IGST_RATE` | `0.18` | COSTS_VERIFIED §9 |
+
+**Exchange routing:**
+- `NIFTY` options → NSE → `NSE_FNO_RATE`, `IPFT_NSE_RATE`
+- `BANKNIFTY` options → NSE → `NSE_FNO_RATE`, `IPFT_NSE_RATE`
+- `SENSEX` options → BSE → `BSE_FNO_RATE`, `IPFT_BSE_RATE`
+
+---
+
+## 3. Lot size lookup (per-date)
+
+Per `TRACK2_OPTIONS_SPEC.md §8.3`, lot sizes changed 7 times in
+2021-2026. Build `lot_size_history.csv` keyed on
+`(instrument, effective_from_date)`:
+
+```
+NIFTY,     2021-01-01, 75
+NIFTY,     2021-07-01, 50      # NSE July 2021 expiry change
+NIFTY,     2023-06-30, 50      # unchanged for NIFTY
+NIFTY,     2024-04-26, 25      # NSE FAOP circular
+NIFTY,     2024-11-20, 75      # SEBI ₹15L notional floor
+NIFTY,     2025-07-01, 75      # transitional, unchanged
+NIFTY,     2025-12-30, 75      # NSE FAOP70616 — actually changed BANKNIFTY this date
+NIFTY,     2026-01-01, 65      # Jan 2026 circular (CURRENT)
+
+BANKNIFTY, 2021-01-01, 25
+BANKNIFTY, 2023-06-30, 15
+BANKNIFTY, 2024-11-20, 30
+BANKNIFTY, 2025-07-01, 35
+BANKNIFTY, 2025-12-30, 30
+BANKNIFTY, 2026-01-01, 30      # CURRENT
+
+SENSEX,    2021-01-01, 10
+SENSEX,    2024-11-20, 20
+SENSEX,    2026-01-01, 20      # CURRENT
+```
+
+Lookup rule: `n_shares_per_lot = max(row.lot_size where row.effective_from_date ≤ entry_dt_ist.date())`.
+Same lot size used at exit (lot doesn't change mid-trade).
+
+---
+
+## 4. Per-trade algorithm (deterministic, O(1))
+
+All math in **`int64` paisa** to avoid float drift. Convert to rupees
+only for display.
+
+```
+INPUT:  entry_dt, exit_dt, instrument, side, entry_open_paisa, exit_open_paisa,
+        n_lots, broker, gst_split
+
+# ── Step 1: apply slippage (flat 1-tick adverse, per Track 2 §9) ───────────
+buy_fill_paisa  = (entry_open_paisa + TICK_PAISA) if side starts with "long"
+                  else (exit_open_paisa - TICK_PAISA)
+sell_fill_paisa = (exit_open_paisa + TICK_PAISA) if side starts with "short"   # CHECK SIGN
+                  else (exit_open_paisa - TICK_PAISA)
+# Long side: BUY at entry+1tick, SELL at exit-1tick
+# Short side: SELL at entry+1tick, BUY at exit-1tick (and PnL inverts)
+
+# ── Step 2: lookup lot size ──────────────────────────────────────────────
+n_shares_per_lot = lot_size_lookup(instrument, entry_dt.date())
+n_shares         = n_lots * n_shares_per_lot
+
+# ── Step 3: notionals (in paisa) ─────────────────────────────────────────
+buy_notional_paisa  = buy_fill_paisa  * n_shares
+sell_notional_paisa = sell_fill_paisa * n_shares
+
+# ── Step 4: brokerage (₹20 flat per executed order, both legs) ───────────
+brokerage_paisa = (DHAN_BROKERAGE_PAISA if broker == "dhan"
+                   else ZERODHA_BROKERAGE_PAISA) * 2
+# (each leg is one order; flat regardless of premium or lots)
+
+# ── Step 5: STT (sell side only, on premium) ─────────────────────────────
+stt_rate = STT_RATE_POST_APR2026 if entry_dt.date() >= STT_HIKE_EFFECTIVE_DATE
+           else STT_RATE_PRE_APR2026
+stt_paisa_raw = sell_notional_paisa * stt_rate
+stt_paisa     = ROUND_TO_NEAREST_RUPEE(stt_paisa_raw)
+# Statutory: STT rounded to nearest rupee per Rule 11 STT Rules
+
+# ── Step 6: exchange transaction charge (both sides, on premium) ──────────
+exch_rate = NSE_FNO_RATE if instrument in {"NIFTY", "BANKNIFTY"}
+            else BSE_FNO_RATE
+exch_buy_paisa  = TRUNC_TO_PAISA(buy_notional_paisa  * exch_rate)
+exch_sell_paisa = TRUNC_TO_PAISA(sell_notional_paisa * exch_rate)
+exch_paisa      = exch_buy_paisa + exch_sell_paisa
+# Non-statutory: paise precision retained
+
+# ── Step 7: SEBI fee (both sides, on premium) ────────────────────────────
+sebi_buy_paisa  = TRUNC_TO_PAISA(buy_notional_paisa  * SEBI_RATE)
+sebi_sell_paisa = TRUNC_TO_PAISA(sell_notional_paisa * SEBI_RATE)
+sebi_paisa      = sebi_buy_paisa + sebi_sell_paisa
+
+# ── Step 8: IPFT (both sides, on premium) ────────────────────────────────
+ipft_rate = IPFT_NSE_RATE if instrument in {"NIFTY", "BANKNIFTY"}
+            else IPFT_BSE_RATE
+ipft_buy_paisa  = TRUNC_TO_PAISA(buy_notional_paisa  * ipft_rate)
+ipft_sell_paisa = TRUNC_TO_PAISA(sell_notional_paisa * ipft_rate)
+ipft_paisa      = ipft_buy_paisa + ipft_sell_paisa
+
+# ── Step 9: stamp duty (buy leg only) ────────────────────────────────────
+stamp_paisa_raw = buy_notional_paisa * STAMP_DUTY_BUY_RATE
+stamp_paisa     = ROUND_TO_NEAREST_RUPEE(stamp_paisa_raw)
+# Statutory: stamp duty rounded to nearest rupee per Indian Stamp Rules 2019
+
+# ── Step 10: GST (on brokerage + exchange + SEBI + IPFT only) ────────────
+# NOT on STT, NOT on stamp duty (those are statutory levies, not services).
+
+per_leg_brokerage = DHAN_BROKERAGE_PAISA  # ₹20 per leg
+buy_gst_base_paisa  = per_leg_brokerage + exch_buy_paisa  + sebi_buy_paisa  + ipft_buy_paisa
+sell_gst_base_paisa = per_leg_brokerage + exch_sell_paisa + sebi_sell_paisa + ipft_sell_paisa
+
+if gst_split == "intra_state":
+    # CGST 9% + SGST 9%, each rounded separately PER LEG
+    cgst_buy_paisa  = ROUND_TO_NEAREST_RUPEE(buy_gst_base_paisa  * CGST_RATE)
+    cgst_sell_paisa = ROUND_TO_NEAREST_RUPEE(sell_gst_base_paisa * CGST_RATE)
+    sgst_buy_paisa  = ROUND_TO_NEAREST_RUPEE(buy_gst_base_paisa  * SGST_RATE)
+    sgst_sell_paisa = ROUND_TO_NEAREST_RUPEE(sell_gst_base_paisa * SGST_RATE)
+    gst_paisa = cgst_buy_paisa + cgst_sell_paisa + sgst_buy_paisa + sgst_sell_paisa
+else:  # inter_state
+    igst_buy_paisa  = ROUND_TO_NEAREST_RUPEE(buy_gst_base_paisa  * IGST_RATE)
+    igst_sell_paisa = ROUND_TO_NEAREST_RUPEE(sell_gst_base_paisa * IGST_RATE)
+    gst_paisa = igst_buy_paisa + igst_sell_paisa
+
+# ── Step 11: total charges ───────────────────────────────────────────────
+total_charges_paisa = brokerage_paisa + stt_paisa + exch_paisa + sebi_paisa
+                    + ipft_paisa + stamp_paisa + gst_paisa
+
+# ── Step 12: gross PnL (slippage already baked into fill prices) ─────────
+gross_pnl_paisa = sell_notional_paisa - buy_notional_paisa
+# (positive for profitable long; negative for losing long; short side inverts at construction)
+
+# ── Step 13: net PnL ──────────────────────────────────────────────────────
+net_pnl_paisa = gross_pnl_paisa - total_charges_paisa
+
+# ── Output: full breakdown ────────────────────────────────────────────────
+return TradeCostBreakdown(
+    n_shares,
+    buy_fill_paisa, sell_fill_paisa,
+    buy_notional_paisa, sell_notional_paisa,
+    brokerage_paisa,
+    stt_paisa,
+    exch_paisa, sebi_paisa, ipft_paisa,
+    stamp_paisa, gst_paisa,
+    total_charges_paisa,
+    gross_pnl_paisa,
+    net_pnl_paisa,
+)
+```
+
+### 4.1 Rounding helper definitions
+
+```
+ROUND_TO_NEAREST_RUPEE(paisa_raw):
+    # paisa_raw can be float-derived (rate × paisa); coerce to integer paisa first,
+    # then round in rupees (i.e. find nearest multiple of 100 paisa).
+    full_paisa = int(round(paisa_raw))            # banker's rounding to integer paisa
+    rupees     = full_paisa // 100
+    remainder  = full_paisa % 100
+    if remainder >= 50:
+        return (rupees + 1) * 100
+    else:
+        return rupees * 100
+# NB: ties at exactly 50 paisa → round UP (commercial rounding, NOT banker's).
+# Section 170 CGST / Rule 11 STT use commercial rounding.
+
+TRUNC_TO_PAISA(paisa_raw):
+    # Keep paisa precision (no rupee rounding); floor to integer paisa.
+    return int(paisa_raw)  # truncation toward zero; OK because rates are positive
+# Used for: brokerage*, exchange, SEBI, IPFT.
+# (* brokerage is already exact ₹20.00 = 2000 paisa, no rounding needed.)
+```
+
+---
+
+## 5. Rounding rules table
+
+| Component | Rate × premium gives | Round to | Why |
+|---|---|---|---|
+| Brokerage | ₹20.00 exact | exact (no round) | flat fee, no fraction |
+| STT | premium × 0.10%/0.15% | **nearest rupee** | Rule 11 STT Rules 2004 |
+| Exchange (NSE/BSE) | premium × 0.0350%/0.0325% | nearest paise | non-statutory; quoted in paise |
+| SEBI fee | premium × 0.0001% | nearest paise | non-statutory; quoted in paise |
+| IPFT | premium × 0.0005% | nearest paise | non-statutory; quoted in paise |
+| Stamp duty | buy_premium × 0.003% | **nearest rupee** | Indian Stamp Rules 2019 |
+| CGST / SGST / IGST | base × 9%/9%/18% | **nearest rupee** | Section 170 CGST Act |
+
+**Critical:** rupee-rounded items are rounded **per-leg** (per contract
+note / invoice), then summed. This matches §8.2 worked example AND
+real Dhan contract note format.
+
+---
+
+## 6. GST base composition (LOCKED)
+
+GST applies to **services provided**, NOT statutory levies.
+
+| Included in GST base | Excluded from GST base |
+|---|---|
+| Brokerage | STT |
+| Exchange transaction charge | Stamp duty |
+| SEBI turnover fee | (everything else not listed left) |
+| IPFT | |
+
+Source: COSTS_VERIFIED.md §9, cross-cited ClearTax + Zerodha + Angel.
+
+---
+
+## 7. Effective-date switches
+
+| Event | Trigger | Effect |
+|---|---|---|
+| STT hike 0.10% → 0.15% | `entry_dt.date() ≥ 2026-04-01` | Use `STT_RATE_POST_APR2026` (see §2). UNVERIFIED — depends on Finance Act 2026 gazette text. |
+| Lot size change | `entry_dt.date() ≥ row.effective_from_date` | Use that row's `lot_size`. Same lot used at exit (no mid-trade change). |
+| Tick size change | none through 2026 | `TICK_PAISA = 5` constant for entire 2021-2026 backfill window. |
+
+---
+
+## 8. Slippage application (Track 2 §9 — flat 1-tick)
+
+| Side | Entry fill | Exit fill |
+|---|---|---|
+| Long (long_call / long_put) | `entry_bar_open + 1 tick` | `exit_bar_open - 1 tick` |
+| Short (short_call / short_put) | `entry_bar_open - 1 tick` | `exit_bar_open + 1 tick` |
+
+(Slippage is adverse — buy higher, sell lower.)
+
+`1 tick = TICK_PAISA = 5` paisa = ₹0.05.
+
+**Slippage cost per round-trip** (for retrospective display, NOT
+double-counted):
+```
+slippage_paisa = 2 * TICK_PAISA * n_shares
+             = 2 * 5 * n_shares
+             = 10 * n_shares paisa
+             = 0.10 INR * n_shares
+```
+- NIFTY: 0.10 × 65 = ₹6.50 per round-trip
+- BANKNIFTY: 0.10 × 30 = ₹3.00 per round-trip
+- SENSEX: 0.10 × 20 = ₹2.00 per round-trip
+
+(This is already baked into the fill prices; the calculator does NOT
+subtract it a second time as a separate line. Output struct exposes
+`slippage_paisa` as informational.)
+
+---
+
+## 9. Per-broker variants
+
+**Currently locked:** `dhan`.
+
+`zerodha` is wired up for comparability sanity-check only (Phase 6
+"shadow-broker" diagnostic) — same ₹20/order brokerage means net cost
+should match exactly when broker config is the only knob varied. If
+they differ, calculator has a bug.
+
+Future brokers (Upstox, Angel, Groww, etc.) — each adds one row to
+`COSTS_VERIFIED.md §8` and one constant; no algorithm change needed.
+
+---
+
+## 10. Annual aggregate (separate concern)
+
+`compute_annual_tax(...)` in `brutex/costs/income_tax.py` consumes the
+output ledger of `compute_trade_cost(...)`. See `COSTS_VERIFIED.md §18`
+for full signature.
+
+Per-trade calculator returns `int64 paisa` for both `total_charges`
+and `net_pnl`. Annual aggregator sums these across all FY trades and
+applies slab tax. Loss carry-forward is the aggregator's concern, not
+this calculator's.
+
+---
+
+## 11. API surface (Python type hints, NO implementation)
+
+```python
+from dataclasses import dataclass
+from datetime import datetime, date
+from typing import Literal
+
+Side       = Literal["long_call", "long_put", "short_call", "short_put"]
+Instrument = Literal["NIFTY", "BANKNIFTY", "SENSEX"]
+Broker     = Literal["dhan", "zerodha"]
+GstSplit   = Literal["intra_state", "inter_state"]
+
+@dataclass(frozen=True)
+class TradeInput:
+    entry_dt_ist:        datetime
+    exit_dt_ist:         datetime
+    instrument:          Instrument
+    side:                Side
+    option_type:         Literal["CE", "PE"]
+    strike_paisa:        int           # stored for audit only
+    expiry_date:         date          # stored for audit only
+    entry_bar_open_paisa: int          # int64 paisa
+    exit_bar_open_paisa:  int
+    n_lots:              int
+    broker:              Broker = "dhan"
+    gst_split:           GstSplit = "intra_state"
+
+@dataclass(frozen=True)
+class TradeCostBreakdown:
+    # quantities
+    n_shares_per_lot:    int
+    n_shares:            int
+    # fill prices (after slippage)
+    buy_fill_paisa:      int
+    sell_fill_paisa:     int
+    # notionals
+    buy_notional_paisa:  int
+    sell_notional_paisa: int
+    # charges (each component, int paisa)
+    brokerage_paisa:     int
+    stt_paisa:           int
+    exch_paisa:          int
+    sebi_paisa:          int
+    ipft_paisa:          int
+    stamp_paisa:         int
+    gst_paisa:           int
+    # informational
+    slippage_paisa:      int           # 2 * TICK * n_shares
+    # roll-ups
+    total_charges_paisa: int
+    gross_pnl_paisa:     int           # incl slippage (slippage baked into fills)
+    net_pnl_paisa:       int           # gross − charges
+
+def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
+    """Pure function. No I/O, no global state. Deterministic. O(1)."""
+    ...
+```
+
+---
+
+## 12. Test fixture matrix (golden values for unit tests)
+
+Phase 3 build acceptance: 100% pass rate on these fixtures.
+
+### 12.1 The canonical NIFTY fixture (matches §8.2)
+
+| Field | Value |
+|---|---|
+| entry_dt_ist | 2026-05-15 10:00 IST |
+| exit_dt_ist | 2026-05-15 11:00 IST |
+| instrument | NIFTY |
+| side | long_call |
+| entry_bar_open_paisa | 9_995 (= ₹99.95, so +1 tick = ₹100.00) |
+| exit_bar_open_paisa | 12_005 (= ₹120.05, so -1 tick = ₹120.00) |
+| n_lots | 1 |
+| broker | dhan |
+| gst_split | intra_state |
+
+Expected output (matches §8.2 worked example):
+
+| Component | Expected paisa | INR |
+|---|---|---|
+| n_shares | 65 | — |
+| buy_fill_paisa | 10_000 | ₹100.00 |
+| sell_fill_paisa | 12_000 | ₹120.00 |
+| buy_notional_paisa | 650_000 | ₹6,500 |
+| sell_notional_paisa | 780_000 | ₹7,800 |
+| brokerage_paisa | 4_000 | ₹40.00 |
+| stt_paisa | 1_200 | ₹12 (= ₹11.70 → ₹12 rounded) |
+| exch_paisa | 501 | ₹5.01 |
+| sebi_paisa | 2 | ₹0.02 |
+| ipft_paisa | 7 | ₹0.07 |
+| stamp_paisa | 0 | ₹0 (= ₹0.195 → ₹0 rounded) |
+| gst_paisa | 800 | ₹8 (= 2+2+2+2 per-leg rupee-rounded) |
+| slippage_paisa | 650 | ₹6.50 |
+| total_charges_paisa | 6_510 | ₹65.10 |
+| gross_pnl_paisa | 130_000 | ₹1,300 |
+| net_pnl_paisa | 123_490 | ₹1,234.90 |
+
+### 12.2 Additional fixtures (Phase 3 acceptance set)
+
+| # | Instrument | side | Premium move | n_lots | trade_date | STT era | Reason |
+|---|---|---|---|---|---|---|---|
+| F1 | NIFTY | long_call | ₹100 → ₹120 | 1 | 2026-05-15 | post-Apr | canonical (§12.1) |
+| F2 | NIFTY | long_call | ₹100 → ₹80 | 1 | 2026-05-15 | post-Apr | losing trade (negative gross PnL) |
+| F3 | NIFTY | short_call | ₹100 → ₹80 | 1 | 2026-05-15 | post-Apr | short profitable |
+| F4 | NIFTY | short_call | ₹100 → ₹120 | 1 | 2026-05-15 | post-Apr | short losing |
+| F5 | NIFTY | long_call | ₹100 → ₹120 | 1 | 2025-12-15 | pre-Apr (0.10%) | STT-era switch (lot 75 in 2025-Dec or 25 in 2025-Jul? check §8.3) |
+| F6 | NIFTY | long_call | ₹100 → ₹120 | 10 | 2026-05-15 | post-Apr | 10-lot scaling (verify brokerage is still ₹40 total) |
+| F7 | NIFTY | long_call | ₹50 → ₹60 | 1 | 2026-05-15 | post-Apr | deep-OTM low premium (8.9% friction expected) |
+| F8 | BANKNIFTY | long_put | ₹200 → ₹250 | 1 | 2026-05-15 | post-Apr | BANKNIFTY (lot 30) NSE exchange |
+| F9 | SENSEX | long_call | ₹100 → ₹120 | 1 | 2026-05-15 | post-Apr | SENSEX (lot 20) BSE exchange + BSE IPFT |
+| F10 | NIFTY | long_call | ₹100 → ₹120 | 1 | 2024-05-15 | pre-Apr (0.10%) | lot size 25 (Apr-2024 era) |
+| F11 | NIFTY | long_call | ₹100 → ₹120 | 1 | 2021-06-15 | pre-Apr (0.10%) | lot size 75 (pre-Jul-2021) |
+| F12 | NIFTY | long_call | ₹100 → ₹120 | 1 | 2026-05-15 | post-Apr | gst_split=inter_state — verify IGST rounding differs |
+| F13 | NIFTY | long_call | ₹100 → ₹100 | 1 | 2026-05-15 | post-Apr | zero gross PnL — should produce negative net PnL = -charges |
+| F14 | NIFTY | long_call | ₹0.05 → ₹0.10 | 1 | 2026-05-15 | post-Apr | minimum premium edge case (5 paise) |
+| F15 | NIFTY | long_call | ₹100 → ₹120 | 1 | 2026-03-31 | pre-Apr (0.10%) | day-before STT-hike boundary |
+| F16 | NIFTY | long_call | ₹100 → ₹120 | 1 | 2026-04-01 | post-Apr (0.15%) | day-of STT-hike boundary |
+
+Each fixture has a static `expected_*.json` file checked into
+`tests/golden/calculator/`. Property test: every component value
+matches byte-for-byte.
+
+---
+
+## 13. Edge cases (explicit list)
+
+| Case | Behavior |
+|---|---|
+| Zero gross PnL (entry_open == exit_open) | `net_pnl = -total_charges` (always negative; no charge-skip) |
+| Negative gross PnL (losing trade) | Same compute path; charges applied regardless. `net_pnl` more negative than `gross_pnl`. |
+| Premium below ₹0.05 (tick floor) | Reject input — premium < 1 tick is impossible on real options. Calculator raises `ValueError`. |
+| Entry on lot-size transition date | Use the row whose `effective_from_date ≤ entry_dt.date()` (latest matching). At exit same lot size — they don't re-quantize mid-trade. |
+| Entry on STT-hike date 2026-04-01 | Use `STT_RATE_POST_APR2026`. Day 2026-03-31 uses `STT_RATE_PRE_APR2026`. |
+| Multi-lot brokerage | Brokerage is **flat per ORDER**, not per lot. 10-lot trade = same ₹40 brokerage as 1-lot. STT and exchange scale linearly with notional. |
+| BSE Bankex exchange charge | Currently using `0.03250%`. UNVERIFIED — operator must confirm before code-lock. |
+| Short side (premium received) | Buy leg is at exit (closing the short); sell leg is at entry (opening the short). PnL = sell_notional - buy_notional ≥ 0 means profit. STT still applies to sell (entry) leg. Stamp duty applies to buy (exit) leg of the short. |
+
+---
+
+## 14. What this calculator does NOT compute
+
+| Excluded | Why | Where it lives |
+|---|---|---|
+| Margin / peak-margin requirement | Backtest doesn't simulate margin call | (operational, post-backtest) |
+| Dividend adjustment | Cash-settled options on indexes — no dividend | N/A |
+| Mark-to-market intraday | Position held until exit signal | N/A |
+| Lot-size mid-trade quantization | Same lot used entry → exit | §13 |
+| Annual income tax | Aggregates many trades; not per-trade | `compute_annual_tax(...)` per `COSTS_VERIFIED.md §18` |
+| ITR form / TDS / advance tax | Operational concern | (out of scope) |
+| Loss carry-forward (8 years) | Annual aggregator concern | `compute_annual_tax(...)` |
+| Multi-broker comparison sweep | Sweep orchestrator concern | Phase 4 |
+| Per-trade margin attribution | Capital-deployment metric | Phase 4 metrics |
+
+---
+
+## 15. Pipeline integration
+
+```
+ENTRY signal (Phase 3 strategy engine emits trade intent)
+   ↓
+strike-selection (Track 2 §6b rule R8/R9/R10) → option_type, strike, expiry
+   ↓
+fill at entry_bar_open + 1 tick
+   ↓
+[hold position; check exit conditions on each bar]
+   ↓
+EXIT signal (e.g., 15:20 forced or TP/SL hit)
+   ↓
+fill at exit_bar_open - 1 tick (for long)
+   ↓
+compute_trade_cost(...) → TradeCostBreakdown  ← THIS CALCULATOR
+   ↓
+ledger.append(trade_id, breakdown)            ← persistent ledger (Parquet)
+   ↓
+[at run end: aggregate ledger by FY]
+   ↓
+compute_annual_tax(...) → AnnualTaxResult
+```
+
+Calculator is **pure**: no I/O, no DB, no rate fetch, no random.
+Determinism is the audit oracle (Golden Rule #7 idempotence).
+
+---
+
+## 16. Open items (block code-lock)
+
+Per `TRACK2_OPTIONS_SPEC.md §8b` — three items still UNVERIFIED:
+
+| # | Item | Impact on calculator | Blocker? |
+|---|---|---|---|
+| 1 | Dhan official rate card (page returns HTTP 403 to agents) | If actual brokerage ≠ ₹20, recompute all fixtures | YES |
+| 2 | Finance Act 2026 STT gazette text | If 0.15% ≠ correct value, recompute fixtures F1-F4, F6-F9, F12-F14, F16 | YES — but date-switched so easy patch |
+| 3 | BSE Bankex options exchange rate | If 0.03250% wrong, only SENSEX fixture F9 affected | LOW (SENSEX only) |
+
+**All 3 items require operator manual verification.** I can chase them
+no further than what's already in `§8b`.
+
+---
+
+## 17. Acceptance criteria for Phase 3 build
+
+1. ✅ All 16 fixtures pass byte-for-byte (`int64 paisa` exact match).
+2. ✅ Hypothesis property tests:
+   - `total_charges_paisa ≥ 0` (never negative)
+   - `total_charges_paisa == sum_of_components` (idempotent decomp)
+   - `net_pnl_paisa == gross_pnl_paisa - total_charges_paisa` (definitional)
+   - For any two trades with identical inputs → identical breakdowns (determinism)
+3. ✅ Performance: 10,000 calls/sec single-threaded (p99 < 100 µs).
+4. ✅ Mutation score ≥ 85% on `compute_trade_cost` (mutmut Python).
+5. ✅ Zero `float` in hot path; all `int64`.
+6. ✅ Coverage: 100% line + 100% branch.
+
+---
+
+## 18. Amendment log
+
+| Date | Change | Why |
+|---|---|---|
+| 2026-05-16 | Initial spec | Consolidate §8 + §9 + §18 of `TRACK2_OPTIONS_SPEC.md` into a single calculator build-target spec |
+
+---
+
+**END OF SPEC.**
