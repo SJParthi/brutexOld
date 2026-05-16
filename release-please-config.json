@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "python",
+  "packages": {
+    ".": {
+      "package-name": "brutex",
+      "release-type": "python",
+      "changelog-path": "CHANGELOG.md",
+      "draft": false,
+      "prerelease": false,
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": false,
+      "include-component-in-tag": false
+    }
+  },
+  "plugins": [],
+  "changelog-sections": [
+    {"type": "feat",     "section": "Features", "hidden": false},
+    {"type": "fix",      "section": "Bug Fixes", "hidden": false},
+    {"type": "perf",     "section": "Performance", "hidden": false},
+    {"type": "day1",     "section": "Day 1 Sprint", "hidden": false},
+    {"type": "docs",     "section": "Documentation", "hidden": false},
+    {"type": "refactor", "section": "Refactoring", "hidden": true},
+    {"type": "test",     "section": "Tests", "hidden": true},
+    {"type": "chore",    "section": "Chores", "hidden": true}
+  ]
+}

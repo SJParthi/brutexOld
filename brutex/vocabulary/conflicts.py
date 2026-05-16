@@ -1,0 +1,127 @@
+"""Conflict pairs — pairs of bits that produce zero-trade strategies.
+
+Per `docs/TRACK1_VOCABULARY.md` §11 — any pattern containing both
+members of a conflict pair will fire zero trades, so the pattern
+generator MUST prune them upfront. This saves ~50% of Stage 1A
+compute (drops mask count from ~2.9M to ~1.5M survivors).
+
+## Conflict types
+
+1. **Direct opposition** — bit A and bit B describe mutually
+   exclusive truths. E.g., `close > EMA20` AND `close < EMA20` —
+   impossible.
+
+2. **Mutual exclusion within group** — e.g., bullish bar AND
+   bearish bar in the same bar.
+
+The opposite of conflict is **orthogonal independence** — two bits
+that can co-occur naturally (e.g., `close > EMA20` AND `close > PDH`).
+These are NOT pruned.
+"""
+
+from __future__ import annotations
+
+from typing import Final
+
+from brutex.vocabulary.bits import (
+    BIT_AFTERNOON,
+    BIT_BAR_BEARISH,
+    BIT_BAR_BULLISH,
+    BIT_BAR_DOJI,
+    BIT_BAR_LARGE_BODY,
+    BIT_BAR_SMALL_BODY,
+    BIT_CLOSE_ABOVE_EMA20,
+    BIT_CLOSE_ABOVE_EMA200,
+    BIT_CLOSE_ABOVE_PDH,
+    BIT_CLOSE_ABOVE_PDL,
+    BIT_CLOSE_AT_DAY_HIGH,
+    BIT_CLOSE_AT_DAY_LOW,
+    BIT_CLOSE_BELOW_EMA20,
+    BIT_CLOSE_BELOW_EMA200,
+    BIT_CLOSE_BELOW_PDH,
+    BIT_CLOSE_BELOW_PDL,
+    BIT_CLOSE_IN_LOWER_THIRD,
+    BIT_CLOSE_IN_UPPER_THIRD,
+    BIT_EARLY_MORNING,
+    BIT_EMA20_ABOVE_EMA200,
+    BIT_EMA20_BELOW_EMA200,
+    BIT_GAP_DOWN_DAY,
+    BIT_GAP_UP_DAY,
+    BIT_INSIDE_DAY,
+    BIT_MID_MORNING,
+    BIT_MIDDAY,
+    BIT_OUTSIDE_DAY,
+    BIT_PRIOR_ALTERNATING,
+    BIT_PRIOR_N_BEARISH,
+    BIT_PRIOR_N_BULLISH,
+)
+
+# Each tuple = (bit_a, bit_b) where a < b. Order matters for the
+# `has_conflict` lookup (we always check the smaller bit first).
+CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset({
+    # Group 1: EMA position direct opposition
+    (BIT_CLOSE_ABOVE_EMA20,  BIT_CLOSE_BELOW_EMA20),
+    (BIT_CLOSE_ABOVE_EMA200, BIT_CLOSE_BELOW_EMA200),
+    (BIT_EMA20_ABOVE_EMA200, BIT_EMA20_BELOW_EMA200),
+
+    # Group 3: PDH/PDL direct opposition
+    (BIT_CLOSE_ABOVE_PDH, BIT_CLOSE_BELOW_PDH),
+    (BIT_CLOSE_ABOVE_PDL, BIT_CLOSE_BELOW_PDL),
+
+    # Group 5: Candle shape mutual exclusions
+    (BIT_BAR_BULLISH,    BIT_BAR_BEARISH),
+    (BIT_BAR_BULLISH,    BIT_BAR_DOJI),
+    (BIT_BAR_BEARISH,    BIT_BAR_DOJI),
+    (BIT_BAR_LARGE_BODY, BIT_BAR_SMALL_BODY),
+
+    # Group 6: Prior bar pattern mutual exclusions
+    (BIT_PRIOR_N_BULLISH, BIT_PRIOR_N_BEARISH),
+    (BIT_PRIOR_N_BULLISH, BIT_PRIOR_ALTERNATING),
+    (BIT_PRIOR_N_BEARISH, BIT_PRIOR_ALTERNATING),
+
+    # Group 7: Day structure mutual exclusions
+    (BIT_CLOSE_AT_DAY_HIGH, BIT_CLOSE_AT_DAY_LOW),
+    (BIT_CLOSE_IN_UPPER_THIRD, BIT_CLOSE_IN_LOWER_THIRD),
+    (BIT_CLOSE_AT_DAY_HIGH, BIT_CLOSE_IN_LOWER_THIRD),
+    (BIT_CLOSE_AT_DAY_LOW,  BIT_CLOSE_IN_UPPER_THIRD),
+
+    # Group 8: Time-of-day buckets are mutually exclusive within a single bar
+    (BIT_EARLY_MORNING, BIT_MID_MORNING),
+    (BIT_EARLY_MORNING, BIT_MIDDAY),
+    (BIT_EARLY_MORNING, BIT_AFTERNOON),
+    (BIT_MID_MORNING,   BIT_MIDDAY),
+    (BIT_MID_MORNING,   BIT_AFTERNOON),
+    (BIT_MIDDAY,        BIT_AFTERNOON),
+
+    # Group 9: Day type mutual exclusions
+    (BIT_GAP_UP_DAY, BIT_GAP_DOWN_DAY),
+    (BIT_INSIDE_DAY, BIT_OUTSIDE_DAY),
+})
+
+
+def has_conflict(mask: int) -> bool:
+    """Return True if `mask` contains any conflict pair.
+
+    Args:
+        mask: u64 strategy mask (52 bits used).
+
+    Returns:
+        True if mask has any conflict pair (i.e., the strategy is
+        guaranteed to fire zero trades and should be pruned).
+    """
+    for (a, b) in CONFLICT_PAIRS:
+        if (mask >> a) & 1 and (mask >> b) & 1:
+            return True
+    return False
+
+
+def count_conflicts(mask: int) -> int:
+    """Return the number of conflict pairs in `mask`.
+
+    Useful for debugging strategy-generation pruning.
+    """
+    count = 0
+    for (a, b) in CONFLICT_PAIRS:
+        if (mask >> a) & 1 and (mask >> b) & 1:
+            count += 1
+    return count

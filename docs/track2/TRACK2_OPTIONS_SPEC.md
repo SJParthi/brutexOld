@@ -240,6 +240,52 @@ but the historical-data subset remained 5 r/s; we use the conservative
 limit. Adapter caps at **3 r/s effective** (5 × 0.6 safety factor,
 shared token bucket with Track 1).
 
+### 3.1 KEY simplification (verified 2026-05-16)
+
+The `securityId` in the request body is the **UNDERLYING's spot id**
+(13 = NIFTY, 25 = BANKNIFTY, 51 = SENSEX), **NOT a per-contract id**.
+No per-strike CSV lookup needed. The constants in
+`brutex/adapters/dhan/constants.py` (already locked per CLAUDE.md §6)
+are reusable as-is.
+
+Confirmed via the Dhan SDK signature
+(`security_id=13, exchange_segment="NSE_FNO", instrument_type="INDEX"`
+for NIFTY example) on `github.com/dhan-oss/DhanHQ-py`.
+
+### 3.2 Phase 0 empirical floor probe (REQUIRED)
+
+**Marketed coverage:** ~5 years rolling per Dhan docs.
+
+**Community evidence:** a tradingqna.com thread titled "Dhan API for
+expired F&O data (1-min, **2 years**)" suggests actual reality may be
+~2 years, not 5.
+
+**Operator action BEFORE locking 2021-01-01 floor:**
+
+1. Run probe script: fetch NIFTY weekly ATM CE for these candidate
+   dates and observe response:
+   - 2020-12-31 (pre-Track 2 floor)
+   - 2021-01-01 (Track 2 floor)
+   - 2022-01-01
+   - 2023-01-01
+   - 2024-01-01
+2. Same probe for BANKNIFTY monthly + SENSEX weekly.
+3. Floor = **earliest date where response contains non-empty `open` array**.
+4. If actual floor > 2021-01-01, AMEND `§2 Universe` to reflect real floor.
+
+Estimated probe cost: 15 API calls × 3 underlyings = 45 calls. Well
+within daily 100K quota.
+
+### 3.3 Known gotchas (2026-05-16 research)
+
+| Gotcha | Mitigation |
+|---|---|
+| Greeks NOT returned by endpoint — only IV | Compute Greeks via Rust BSM (§7) |
+| Per-bar `strike` array stores ABSOLUTE strike (not offset) | Already handled in ingest design (§3 response body) |
+| Non-idempotent responses may exist (community-built `ExpiryFlow` has duplicate-detection logic) | Examine `github.com/marketcalls/ExpiryFlow` source before ingest design; add idempotence dedup on (bar_ts, strike, side) |
+| `requiredData` parameter order may matter for response parsing | Adapter must use exact field order from successful test calls |
+| SENSEX `BSE_FNO` segment coverage depth UNVERIFIED | Phase 0 probe (§3.2) covers this |
+
 ---
 
 ## 4. Timeframes (locked: 1m only)
@@ -298,14 +344,14 @@ adjacent bars with `bar_ts[i] = bar_ts[i-1] + 60_000_000` (one minute).
 
 ---
 
-## 6. Trade horizon (locked)
+## 6. Trade horizon (locked + AMENDED 2026-05-16 with historical effective-dates)
 
 Track 2 trades the **current expiry** for the underlying:
 
 | Underlying | Default trade expiry | When monthly is used |
 |---|---|---|
 | NIFTY | WEEK (current Tuesday weekly) | If signal closes within 0-2 days of Tuesday, also test MONTH |
-| BANKNIFTY | MONTH (last Tuesday) | Always (no weekly available) |
+| BANKNIFTY | MONTH (last Tuesday) | Always (no weekly available since Nov 20, 2024) |
 | SENSEX | WEEK (current Thursday weekly) | If signal closes within 0-2 days of Thursday, also test MONTH |
 
 "Current expiry at sweep time" means: at the simulated bar's wall
@@ -314,74 +360,674 @@ engine NEVER looks at expiries that have not been published yet (e.g.,
 NIFTY weekly for the week after next is not visible until the prior
 week's expiry passes).
 
+### 6.1 Historical expiry calendar (CRITICAL — verified 2026-05-16)
+
+**For 2021-01-01 → today backtest, current-day expiry rules DO NOT
+APPLY retroactively.** The engine MUST use per-date historical rules:
+
+| Period | NIFTY weekly | BANKNIFTY weekly | SENSEX weekly |
+|---|---|---|---|
+| 2021-01-01 → 2024-11-19 | **Thursday** | **Wednesday** | **Friday** (then Tuesday from a 2024 BSE realignment) |
+| 2024-11-20 → 2025-08-31 | **Tuesday** (SEBI Oct 2024 circular) | **DISCONTINUED** (last Nov 13, 2024) | Tuesday |
+| 2025-09-01 → 2025-09-03 | **Tuesday** (NSE standardisation reaffirmed) | Monthly only (last Tuesday) | Tuesday |
+| **2025-09-04 → today** | **Tuesday** | Monthly only (last Tuesday) | **Thursday** (BSE realignment effective Sept 4, 2025) |
+
+| Period | NIFTY monthly | BANKNIFTY monthly | SENSEX monthly |
+|---|---|---|---|
+| 2021-01-01 → 2025-08-31 | Last Thursday | Last Thursday | Last Tuesday (then per BSE) |
+| **2025-09-01 → today** | **Last Tuesday** | **Last Tuesday** | **Last Thursday** |
+
+**Implementation rule:** build `expiry_calendar.csv` keyed on
+`(instrument, expiry_type, effective_from_date, day_of_week, fallback_rule)`.
+Lookup at sweep time using `entry_dt.date()`. This is analogous to the
+lot-size history table in `CALCULATOR_SPEC §3`.
+
+**Authoritative source:** consume actual NSE FAOP series + BSE notice
+files; do NOT rule-compute from the table above for backtest precision
+(the table is for documentation only). NSE publishes expiry calendars
+in CSV form in their annual FAOP releases.
+
+### 6.2 Settlement formula (LOCKED 2026-05-16)
+
+For expiry-day P&L computation (if Track 2 ever holds to expiry —
+currently it forces exit at 15:20 IST):
+
+```
+settlement_price = VWAP(underlying_spot, 15:00 IST → 15:30 IST)
+                   on expiry day
+```
+
+NOT the single 15:30 closing tick. Confirmed via NSE Clearing
+Settlement Mechanism page. ITM contracts get intrinsic-value cash
+credit on T+1.
+
+For Track 2 (forced 15:20 exit), the settlement formula is informational
+only — never invoked.
+
+### 6.3 Holiday shift rule (LOCKED 2026-05-16)
+
+If scheduled expiry day is an exchange holiday, expiry shifts to the
+**immediately preceding trading day** (NEVER forward). Applies to both
+NSE Tuesday and BSE Thursday expiries.
+
+Source: ICICIdirect FAQ + Upstox BANKNIFTY notice (2024-2025 holiday
+shifts during specific months).
+
+### 6.4 Muhurat session
+
+Diwali Muhurat session (~18:00-19:15 IST) is a SEPARATE symbolic
+session — NOT a regular trading bar, NEVER an expiry day. Cross-ref
+`TRACK1_MICROSTRUCTURE.md` for the annual date list. Track 2 engine
+must EXCLUDE muhurat bars from backtest universe.
+
+### 6.5 Strikes per expiry
+
+| Instrument | Strikes per expiry (baseline) |
+|---|---|
+| NIFTY | 30 ITM + 1 ATM + 30 OTM = **61 strikes** |
+| BANKNIFTY | 40 ITM + 1 ATM + 40 OTM = **81 strikes** |
+| SENSEX | 20 ITM + 1 ATM + 20 OTM = **41 strikes** |
+
+Exchanges add MORE strikes intraday on large index moves. Track 2
+uses ATM±10 (21 strikes), well within baseline.
+
+Source: NSE / BSE / IndiaINX contract specification pages.
+
+### 6.6 References for this section (verified 2026-05-16)
+
+- Kotak Neo SEBI expiry reshuffle article
+- ICICIdirect Revised Expiry Days
+- 5paisa Bank Nifty Weekly Ends
+- Ventura Securities SENSEX Expiry Day
+- NSE Circular FAOP64506 (BANKNIFTY discontinuation)
+- NSE Circular FAOP68747 (Sept 2025 reaffirmation)
+- BSE/IndiaINX SENSEX option specifications
+- NSE Clearing settlement mechanism page
+
 ---
 
-## 7. Greeks (locked)
+## 6b. Strike Selection Rules (LOCKED 2026-05-16) ⭐
+
+Operator decision 2026-05-16: when a Track 1 signal fires, the engine
+must pick a strike to trade. Three options were considered:
+
+| Approach | Verdict |
+|---|---|
+| Cherry-pick best in hindsight | ❌ REJECTED — classic in-sample overfitting trap |
+| Report distribution of all 21 strikes | Considered, but doesn't produce executable strategies |
+| **Pre-trade rule** — sweep over rules per signal | ✅ **LOCKED** |
+
+### The 10 pre-trade strike-selection rules
+
+For each Track 1 signal, the engine evaluates the strategy under
+EACH of these 10 rules and records the PnL per rule. The rule is
+part of the strategy mask — sweeping rules is part of the brute-force
+grid. No hindsight bias because the rule is fixed BEFORE the trade.
+
+| # | Rule name | What it does | Notes |
+|---|---|---|---|
+| 1 | `atm` | Pick the strike closest to spot price at signal time | Highest liquidity, tightest spread |
+| 2 | `atm_plus_1_in_dir` | ATM + 1 step in trade direction (CE → strike up; PE → strike down) | Slightly OTM, cheaper premium |
+| 3 | `atm_plus_2_in_dir` | ATM + 2 steps in trade direction | More OTM, higher leverage |
+| 4 | `atm_plus_5_in_dir` | ATM + 5 steps in trade direction | Aggressive OTM, high gamma |
+| 5 | `atm_minus_1_in_dir` | ATM - 1 step in trade direction | Slightly ITM, more premium |
+| 6 | `atm_minus_2_in_dir` | ATM - 2 steps in trade direction | More ITM, lower gamma |
+| 7 | `atm_minus_5_in_dir` | ATM - 5 steps in trade direction | Deep ITM, premium-heavy |
+| 8 | `delta_target_030` | Strike with delta closest to 0.30 (CE) or -0.30 (PE) at signal time | Common OTM trade-off |
+| 9 | `delta_target_050` | Strike with delta closest to 0.50 (CE) or -0.50 (PE) — effectively ATM | Greek-based ATM lookup |
+| 10 | `delta_target_015` | Strike with delta closest to 0.15 (CE) or -0.15 (PE) | Far OTM, only if liquidity OK |
+
+### Rule semantics — "in trade direction"
+
+| Trade direction | Rule applied to CE | Rule applied to PE |
+|---|---|---|
+| BULL (buy CE) | `atm_plus_N` → strike higher than ATM (more OTM call) | n/a (bull trades CE) |
+| BULL (buy CE) | `atm_minus_N` → strike lower than ATM (more ITM call) | n/a |
+| BEAR (buy PE) | n/a (bear trades PE) | `atm_plus_N` → strike LOWER than ATM (more OTM put) |
+| BEAR (buy PE) | n/a | `atm_minus_N` → strike HIGHER than ATM (more ITM put) |
+
+So `atm_plus_1_in_dir` means "1 strike further OTM than ATM for the
+chosen direction":
+- BULL CE: strike = ATM + 1 step (price up)
+- BEAR PE: strike = ATM - 1 step (price down)
+
+### Delta-target rules (rules 8, 9, 10)
+
+Delta is computed from the option's bar-time Greeks (BSM, see §7).
+The engine scans the 21-strike chain at signal time and picks the
+strike whose absolute delta is closest to the target. If two strikes
+are equally close, the one closer to ATM wins (tie-breaker).
+
+Implementation note: delta-target rules require the Greeks pipeline
+to be operational, so they're enabled in Phase 4 (after Phase 3's
+Rust BSM kernel ships). Rules 1-7 (offset-based) work from Phase 2
+onwards using just the strike grid.
+
+### Sweep cardinality impact
+
+Per Track 1 signal, the engine produces **10 options PnL records**
+(one per rule). With ~5,000 signals across top-10 Track 1 strategies:
+
+| Item | Count |
+|---|---|
+| Top-10 Track 1 strategies | 10 |
+| Signals per strategy | ~500 |
+| Pre-trade rules per signal | 10 |
+| Total options-trade simulations | **~50,000 per first sweep** |
+| Approx compute time | **5-15 min** on Polars lake |
+
+### Why this beats "sweep all 21 strikes and pick best"
+
+| Property | Sweep 21 + pick best | Pre-trade rule sweep |
+|---|---|---|
+| Hindsight bias | ❌ Yes — picks best in hindsight | ✅ No — rule fixed before trade |
+| Trades simulated per signal | 21 × 2 (CE+PE) = 42 | 10 |
+| Inflated Sharpe risk | High (2-3× inflated typical) | None |
+| Statistical validity | Low | High |
+| Produces executable strategy | Ambiguous | ✅ Yes (rule is the strategy) |
+| Sweep size | ~210,000 trades | ~50,000 trades |
+
+### Rule lookup table (config-driven)
+
+Lives at `brutex/options/strike_rules.py` (Phase 2 deliverable):
+
+```python
+# Each rule is a dataclass with:
+# - name: str  (e.g., "atm_plus_2_in_dir")
+# - kind: enum  (OFFSET | DELTA_TARGET)
+# - param: int OR float  (offset count OR delta target)
+@dataclass(frozen=True)
+class StrikeRule:
+    name: str
+    kind: StrikeRuleKind
+    param: float
+    requires_greeks: bool
+```
+
+10 instances at module level, exported as `ALL_STRIKE_RULES`.
+
+### Adding new rules
+
+Per the COMMON · DYNAMIC · SCALABLE · AUTOMATED principle (§Operating
+Principle in Track 1 spec): add a new rule by appending to
+`ALL_STRIKE_RULES`. No re-architecting. The brute-force engine
+automatically sweeps the new rule on the next run. Strategy masks
+that referenced specific rule indices remain valid (rules are
+identified by name, not index).
+
+---
+
+## 7. Greeks (LOCKED + EXPANDED 2026-05-16 per Stream D research)
+
+### 7.1 Greeks source table
 
 | Greek | Source | Why |
 |---|---|---|
-| **IV** (Implied Volatility) | **Dhan** — returned as `implied_volatility` array | Dhan computes it from their option pricer; we don't second-guess |
-| **Delta** | **Computed** (Black-Scholes-Merton) | Standard; needed for hedge-ratio + ATM definition |
+| **IV** (Implied Volatility) | **Dhan** — returned as `iv` array | Dhan computes it from their option pricer; we don't second-guess. **Cross-checked** against our recomputation, 50bp tolerance (§7.7). |
+| **Delta** | **Computed** (Black-Scholes-Merton) | Standard; needed for hedge-ratio + ATM definition + R8/R9/R10 strike selection |
 | **Gamma** | **Computed** (BSM) | Needed for risk metrics + early-exit Greek thresholds |
 | **Theta** | **Computed** (BSM) | Daily decay; critical for short premium |
 | **Vega** | **Computed** (BSM) | IV sensitivity for stress tests |
 | Vanna, charm, color | NOT computed | Out of scope for Phase 4 first sweep |
 
-### Black-Scholes-Merton inputs
+### 7.2 Black-Scholes-Merton inputs
 
 | Input | Source |
 |---|---|
 | S (spot) | Track 1's spot bar for the underlying at the same timestamp |
-| K (strike) | Derived from ATM-relative offset + per-underlying strike step |
+| K (strike) | Per-bar `strike` array from Dhan response (absolute strike, not offset) |
 | T (time to expiry, in years) | (expiry timestamp at 15:30 IST − bar timestamp) / 365.25 / 86400 |
-| r (risk-free rate) | **3-month T-bill yield**, monthly snapshot, hardcoded as a 60-row table in `brutex/options/risk_free.py` (Phase 2 deliverable) |
-| σ (volatility) | Dhan's `implied_volatility` for the same bar |
-| q (dividend yield) | **0** for all 3 indices (index points are price-weighted; no underlying dividend stream)  |
+| r (risk-free rate) | **91-day T-bill yield, DAILY T+1 snapshot from FBIL** (RBI DBIE weekly auction fallback). See §7.3. |
+| σ (volatility) | Dhan's `iv` for the same bar |
+| q (dividend yield) | **0 for all 3 indices** with EXPLICIT bias documentation (§7.4) |
 
-### BSM implementation
+### 7.3 Risk-free rate `r` (REVISED 2026-05-16)
 
-- Pure Rust `fno_math::bsm::{call_price, put_price, delta, gamma, theta, vega}`.
+**Source:** Financial Benchmarks India Ltd (FBIL) daily 91-day T-bill
+curve at `fbil.org.in/securities?op=tbillcurve`. Fallback: RBI DBIE
+weekly auction cut-off yield.
+
+**Snapshot frequency:** DAILY (previously monthly — too coarse during
+2022 RBI hiking cycle where rates moved 50+bp/month).
+
+**Storage:** ~1,300-row CSV in `brutex/options/risk_free_daily.csv`
+for 2021-01-01 → today. ~10 KB total.
+
+**Money-market → continuously compounded conversion** (REQUIRED):
+T-bills are quoted as annualized money-market yield (actual/365 simple
+basis). BSM requires continuously compounded:
+
+```
+r_cc = (365 / n_days) × ln(1 + y_mm × n_days / 365)
+
+Example: 91-day T-bill at 6.50% MM yield
+       → r_cc = (365/91) × ln(1 + 0.065 × 91/365)
+              = 4.011 × ln(1.0162)
+              = 6.454%   (~4-5 bp below quoted MM yield)
+```
+
+**Rho sensitivity (informational):** 100bp `r` error → ~1.3% weekly
+ATM premium impact; ~2.5% monthly; ~4.4% 3-month. Daily-snapshot
+precision keeps `r` error to <10bp.
+
+**UNVERIFIED:** whether FBIL has a programmatic API or requires HTML
+scraping. Operator must verify before Phase 3 ingest design.
+
+### 7.4 Dividend yield `q` — explicit decision (operator input required)
+
+**The mathematics:** NIFTY 50 / BANKNIFTY / SENSEX are PRICE indices.
+When constituents go ex-dividend, the index drops mechanically. BSM
+requires `q` to compensate, otherwise calls are over-priced and puts
+under-priced by:
+
+| Tenor | q=0 bias direction (NIFTY ATM, σ=15%, r=7%) |
+|---|---|
+| Daily (T=1/365) | <0.4% of premium |
+| Weekly (T=7/365) | ~1.7% of premium |
+| Monthly (T=30/365) | ~3.8% of premium |
+
+NIFTY 50 trailing dividend yield ≈ 1.3% (Trendlyne).
+
+**Track 2 design choice — q=0 with explicit defense:**
+
+The spec sets `q=0` for ALL pricing. This is defensible BECAUSE:
+
+1. Track 2 uses **observed Dhan bar prices for all FILLS** — never
+   BSM-theoretical prices. P&L is exactly market-anchored.
+2. BSM is used ONLY for:
+   - Delta-bucket strike selection (rules R8/R9/R10)
+   - Greeks reporting (delta/gamma/theta/vega values)
+3. **Delta-bucket selection uses RELATIVE delta ranking** — the q=0
+   bias shifts ALL strikes by approximately the same amount, so the
+   relative ranking is preserved.
+4. Greek values reported include the q=0 bias direction; downstream
+   metrics that depend on absolute delta (rare) must be calibrated.
+
+**ALTERNATIVE (Option B):** use `niftyindices.com` published daily
+dividend yield as `q_at_pricing`. Spec stays open to this change if
+operator wants institutional-grade rigor.
+
+**Operator decision:** **OPTION A (q=0) LOCKED** unless explicitly
+revisited. Document the bias direction in all Greeks output.
+
+### 7.5 T-floor / time-to-expiry floor (LOCKED 2026-05-16)
+
+As T → 0 with S ≈ K, BSM gamma → ∞ and theta → −∞. These divergences
+are mathematical, not numerical.
+
+**Hard T-floor: 600 seconds (10 minutes).** Any Greek request with
+`T < 600s` MUST panic in the Rust kernel.
+
+Track 2 forces exit at 15:20 IST and weekly options trade until 15:30,
+so this window is NEVER inside the strategy's Greek-evaluation path.
+
+**Property test (Phase 1):** assert any Greek with T<600s raises
+`panic!` with a clear message. Test fixture: `T = 599s` triggers panic,
+`T = 600s` does not.
+
+### 7.6 Strike admission filters (LOCKED 2026-05-16)
+
+For strikes admitted to the Track 2 universe, both filters must hold:
+
+```
+admit_strike(K, S, T, σ, r, q) requires:
+    |delta| ≥ 0.02    # rejects ultra-OTM dust
+    vega ≥ 1e-6       # rejects vega-zero strikes where IV is unstable
+```
+
+Strikes failing either filter are EXCLUDED from the entry universe.
+R10 (delta-target 0.15) is comfortably inside the trustworthy region.
+R8 (delta-target 0.30) + offset can push to delta ≈ 0.05 on India
+VIX > 30 days — the delta floor MUST be enforced regardless.
+
+### 7.7 IV cross-check (LOCKED 2026-05-16)
+
+Ingest Dhan's `iv` as authoritative. ALSO recompute IV from observed
+mid-price using `lets_be_rational` (Jäckel) algorithm. Assert agreement
+within 50 basis points.
+
+```
+ingest_bar(bar):
+    iv_dhan = bar.iv
+    iv_recomputed = jaeckel_iv(bar.mid_price, S, K, T, r, q)
+    if abs(iv_dhan - iv_recomputed) > 0.0050:
+        audit_log.append(IV_MISMATCH, bar.timestamp, iv_dhan, iv_recomputed)
+        # but USE iv_dhan for downstream Greek computation
+        # (reproducibility > pedantic correctness)
+    bar.iv_validated = iv_dhan
+```
+
+Why authoritative-Dhan-with-audit instead of replace-on-mismatch:
+strict reproducibility. The audit log lets us spot-check Dhan IV
+quality without introducing a second pricing model in the hot path.
+
+### 7.8 Tick-floor saturation flag (LOCKED 2026-05-16)
+
+Indian index options trade in ₹0.05 tick increments. Theoretical
+BSM prices below ₹0.05 are quoted at the ₹0.05 floor, producing
+misleadingly high implied volatility:
+
+| Theoretical | Quoted | Mark-up |
+|---|---|---|
+| ₹0.0473 | ₹0.05 | 5.7% (manageable) |
+| ₹0.0094 | ₹0.05 | 5.3× (unusable) |
+
+**Rule:** if a strike's observed bar price is at ₹0.05 floor for ≥ N
+consecutive bars (N = 30 bars = 30 minutes), flag as
+`tick_floor_saturated = True` and EXCLUDE from entry universe.
+
+Track 2 entries must satisfy: `entry_strike.bar_price > 5 × TICK_PAISA`
+(i.e., > ₹0.25) at entry timestamp. Property test enforces.
+
+### 7.9 BSM kernel implementation + validation
+
+- Pure Rust `fno_math::bsm::{call_price, put_price, delta, gamma, theta, vega, iv}`.
 - Float64 inputs, Float64 outputs.
-- Cross-validated against `py_vollib` (CPython, 1e-10 tolerance) in the
-  Phase 1 BSM oracle test (`tests/integration/test_bsm_vs_pyvollib.py`).
-- Greeks at every bar are precomputed and stored in the Parquet
+- **Dual validation oracle** (NOT py_vollib alone):
+  1. **`lets_be_rational` (Jäckel 2015)** — for IV (gold standard, 2-iteration Householder, machine precision)
+  2. **QuantLib `AnalyticEuropeanEngine` (C++)** — for prices + Greeks (independent implementation)
+  
+  Tolerance: 1e-10 absolute for BSM-on-BSM cross-checks; 50bp for
+  NSE-observed sanity checks (NSE uses r=10% fixed assumption).
+
+- Greeks at every bar are PRECOMPUTED and stored in the Parquet
   alongside OHLC + IV (not lazy — needed at engine evaluation time).
 
+### 7.10 Option style (verified 2026-05-16)
+
+All 3 indexes are **European-style, cash-settled** options. Confirmed
+NSE Clearing + BSE/IndiaINX contract spec pages. **BSM closed-form is
+EXACT** — no American early-exercise premium adjustment needed.
+
+Settlement = T+1 cash credit of intrinsic value × lot × n_lots, where
+intrinsic value uses the §6.2 30-min VWAP settlement price.
+
+### 7.11 Dhan IV computation method (UNVERIFIED)
+
+Dhan's public docs don't document HOW `iv` is computed. Industry
+standard for Indian platforms (Sensibull, NSE) is iterative root-finding
+on a BSM/Black-76 closed-form against last-traded-price or mid-quote.
+
+NSE's own option chain uses a **fixed r = 10% assumption**, which can
+differ materially from the actual 91-day T-bill yield (6-7% during
+2024-2026).
+
+**Operator action:** open Dhan support ticket to confirm IV
+methodology (Newton-Raphson? Mid-price? LTP? `r` assumption?).
+Until then, the §7.7 cross-check at 50bp tolerance catches gross
+discrepancies.
+
+### 7.12 References for this section (verified 2026-05-16)
+
+- Hull "Options, Futures, and Other Derivatives" 11th ed (BSM chapter)
+- Jäckel "Let's Be Rational" 2015 — gold-standard IV inversion
+- QuantLib `AnalyticEuropeanEngine` — independent BSM oracle
+- FBIL T-bill curve — fbil.org.in
+- RBI DBIE database
+- NSE Clearing settlement mechanism
+- Trendlyne NIFTY trailing dividend yield
+- Dhan v2 option chain + expired_options_data docs
+
 ---
 
-## 8. Brokerage / STT / STO / SEBI / GST cost model (TBD — Phase 3)
+## 8. Brokerage / STT / Exchange / SEBI / Stamp / GST cost model (LOCKED 2026-05-16)
 
-This is the single largest unknown in Track 2 and the reason for the
-"first sweep" being scheduled in Phase 4. The cost model lives at:
+Research agent verified all rates against ClearTax, Zerodha Z-Connect,
+Bajaj Broking, Angel One, NSE, sahi.com, Ventura, PL Capital,
+Chittorgarh, IPOGMPINDIA (2026-05-16). **Dhan's official rate card page
+returned HTTP 403 on automated fetch** — numbers below are
+cross-verified from 3+ independent secondary sources that quote Dhan
+directly. Operator must manually verify Dhan's published page before
+final code-lock.
 
-- `brutex/options/costs.py` (Phase 3 deliverable)
-- Verified table at `docs/track2/COSTS_VERIFIED.md` (Phase 3 deliverable)
+### 8.1 Verified constants table
 
-Categories to verify before Phase 4:
-1. Dhan brokerage per options leg (₹ flat or % capped) — cite Dhan tariff page
-2. STT — 0.05% on sell side options (on premium); cite NSE/BSE circular
-3. STO (Securities Transaction on Options) — varies by exercise; cite circular
-4. SEBI turnover charge — current rate is 0.0001% (per NSE/BSE)
-5. NSE/BSE transaction fee per leg
-6. GST — 18% on (brokerage + SEBI + exchange)
-7. Stamp duty — 0.003% buy side
+| Charge | Rate | Applied to | Side | Source |
+|---|---|---|---|---|
+| Dhan brokerage | **₹20.00 flat per order** | per executed order | both legs | dhan.co/pricing (cross-confirmed: ipogmpindia.com 2026, chittorgarh.com, Zerodha review) |
+| STT (Securities Transaction Tax) | **0.10% pre-1-Apr-2026; 0.15% post-1-Apr-2026** | premium | sell side only | ClearTax 2026; Budget 2026 (Finnovate); SEBI raised from 0.0625% on Oct 1, 2024 |
+| NSE F&O exchange charge | **0.03503%** | premium | both sides | NSE post-Oct-1-2024 SEBI "true-to-label" circular |
+| BSE F&O exchange charge | **0.03250%** | premium | both sides | BSE post-Oct-1-2024 (Sensex/Bankex); Angel One verified |
+| SEBI turnover fee | **0.0001%** | premium | both sides | NSE: ₹10 per crore |
+| IPFT (Investor Protection Fund Trust, NSE) | **0.0005%** | premium | both sides | NSE charge sheet |
+| Stamp duty | **0.003%** | premium | buy side only | Indian Stamp Act 2020 (unified rate) |
+| GST | **18%** | (brokerage + exchange + SEBI + IPFT) | both sides | CGST 9% + SGST 9% OR IGST 18%; ClearTax 2026 |
 
-All numbers must be CITED with their source URL and verified date.
-No hallucinated tariffs.
+**Not in cost basis for GST:** STT, stamp duty (statutory levies, not services).
+
+### 8.2 Round-trip worked example (NIFTY ATM call, ₹100 → ₹120, 1 lot of 65)
+
+**AMENDED 2026-05-16** per Agent C deep-research finding (Rule 11 STT
+Rules + Section 170 CGST + Indian Stamp Rules 2019). STT, stamp duty,
+and GST are STATUTORILY rounded to nearest rupee (not paise). Brokerage,
+exchange, SEBI, IPFT remain paise-precision. See `COSTS_VERIFIED.md`
+§3 for citations.
+
+Buy premium notional: 65 × ₹100 = **₹6,500**.
+Sell premium notional: 65 × ₹120 = **₹7,800**.
+Gross PnL: **+₹1,300**.
+
+| Component | Buy side | Sell side | Total | Rule applied |
+|---|---|---|---|---|
+| Premium × lot | -6,500.00 | +7,800.00 | +1,300.00 | gross |
+| Brokerage (₹20 flat per order) | -20.00 | -20.00 | -40.00 | paise |
+| STT 0.15% × ₹7,800 = ₹11.70 | 0 | — | **-12** | **round to nearest rupee (Rule 11)** |
+| Exchange NSE (0.03503%) | -2.28 | -2.73 | -5.01 | paise |
+| SEBI (0.0001%) | -0.01 | -0.01 | -0.02 | paise (per-side) |
+| IPFT NSE (0.0005%) | -0.03 | -0.04 | -0.07 | paise (per-side) |
+| Stamp duty 0.003% × ₹6,500 = ₹0.195 | -0 | 0 | **-0** | **round to rupee (<0.50 → 0)** |
+| GST base = 40 + 5.01 + 0.02 + 0.07 = ₹45.10 | | | | |
+| CGST 9% × 45.10 = ₹4.059 | -2 | -2 | -4 | **round to rupee (Section 170)** |
+| SGST 9% × 45.10 = ₹4.059 | -2 | -2 | -4 | **round to rupee (Section 170)** |
+| **Charges total** | | | **-65.10** | |
+| **Net PnL** | | | **+1,234.90** | gross 1,300 − 65.10 |
+
+**Round-trip cost = ₹65.10 = 1.00% of buy premium / 5.0% of gross move.**
+
+Critical note: multi-lot trades change the per-lot cost ratio drastically
+because brokerage is flat per ORDER, not per lot. See `COSTS_VERIFIED.md`
+§11 for multi-lot examples.
+
+For a deeper OTM trade (₹50 → ₹60, 1 lot, post-Apr-2026):
+- Buy: 65 × 50 = ₹3,250. Sell: 65 × 60 = ₹3,900. Gross +₹650.
+- Charges ≈ ₹58 = 1.78% of buy premium / 8.9% of gross move.
+- **Minimum profitable move on deep OTM ≈ 1.78% on premium just to break even on costs alone** (excludes slippage).
+
+### 8.3 Lot size history (PER-DATE LOOKUP REQUIRED)
+
+Lot sizes changed 7 times in our 2021-2026 backfill window. Using a
+single lot would mis-size positions by 3-7× in places. Build
+`lot_size_history.csv` keyed on `(instrument, effective_date)` —
+REQUIRED, not optional.
+
+| Effective from | NIFTY 50 | BANKNIFTY | SENSEX | Source |
+|---|---|---|---|---|
+| ≤ Jun 2021 | 75 | 25 | 10 | NSE historic |
+| **Jul 2021 expiry** | 50 | 25 | 10 | NSE bulletin |
+| **30-Jun-2023** | 50 | 15 | 10 | Zerodha Marketintel #353422 |
+| **26-Apr-2024** | 25 | 15 | 10 | NSE FAOP circular |
+| **20-Nov-2024 (new contracts)** | 75 | 30 | 20 | SEBI/HO/MRD-PoD2/CIR/P/2024/00181 — ₹15L notional minimum |
+| **Jul 2025 (transitional)** | 75 | 35 | 20 | NSE bulletins |
+| **30-Dec-2025 EOD** | 75 | 30 | 20 | NSE FAOP70616 |
+| **Jan 2026 onwards (CURRENT)** | **65** | **30** | **20** | NSE Jan-2026 circular — notional rebased on Sep-25 closing prices, ₹15-20L range |
+
+Source-cites:
+- sahi.com 2026 lots
+- Ventura Securities Jan 2026 blog
+- Scanx NSE Jan 2026 circular
+- PL Capital NIFTY lot history
+- Zerodha Marketintel bulletins
+
+### 8.4 Constants to bake into code
+
+When `brutex/costs/dhan_constants.py` lands (Phase 3 deliverable):
+
+```python
+# Verified 2026-05-16, see TRACK2_OPTIONS_SPEC.md §8.1 for source-cites.
+
+DHAN_BROKERAGE_INR_PER_ORDER     = 20.00
+STT_OPTIONS_SELL_PCT_PRE_APR2026 = 0.0010   # 0.10%
+STT_OPTIONS_SELL_PCT_POST_APR2026= 0.0015   # 0.15% (Budget 2026)
+STT_HIKE_EFFECTIVE_DATE          = date(2026, 4, 1)
+EXCHANGE_NSE_FNO_PCT             = 0.00035030
+EXCHANGE_BSE_FNO_PCT             = 0.00032500
+SEBI_TURNOVER_PCT                = 0.0000010
+IPFT_NSE_PCT                     = 0.0000050
+STAMP_DUTY_BUY_PCT               = 0.00003   # 0.003%
+GST_PCT                          = 0.18      # on brokerage + exchange + SEBI + IPFT only
+TICK_SIZE_INR_INDEX_OPTIONS      = 0.05      # 5 paise — unchanged for index options
+```
 
 ---
 
-## 9. Slippage model (TBD — Phase 3)
+## 9. Slippage model (REVISED 2026-05-16, flat 1-tick)
 
-Three slippage knobs to test in Phase 4 sweep:
+**AMENDED 2026-05-16** after operator challenge: the previous
+delta-bucketed model assumed we could classify spread width by delta
+bucket, but with **1-minute OHLCV bars only (no tick data, ever)** we
+cannot measure or verify spreads. The delta-bucketed model was an
+industry-magnitude GUESS dressed up as a measurement.
 
-| Knob | Range | Default |
-|---|---|---|
-| `slippage_premium_pct` | 0 / 0.1 / 0.25 / 0.5 / 1.0% | 0.25% |
-| `slippage_bid_ask_half` | 0 / 25 / 50 / 100% of spread | 50% |
-| `slippage_partial_fill_pct` | 100 / 90 / 75 / 50% of quantity | 100% |
+Replaced with the **simplest defensible model given the data we have**:
+flat 1-tick adverse on bar-open fills.
 
-Sweep cardinality = 5 × 4 × 4 = 80 slippage profiles per (signal, strike, expiry).
+### 9.1 Data we have (permanent constraint)
+
+| Available | Used for |
+|---|---|
+| 1-minute OHLCV per option strike | bar-open fill prices, range checks |
+| Open Interest (OI) | liquidity filter (reject trades on illiquid strikes) |
+| Implied Volatility (IV) | Greeks computation (delta, gamma, vega) |
+| Strike price | strike-rule classification (§6b) |
+| Spot price (NIFTY/BANKNIFTY/SENSEX) | BSM input |
+
+| NOT available (and never will be) | Why excluded |
+|---|---|
+| Tick-level bid/ask | Dhan API returns 1m aggregates only |
+| Order book depth | Same |
+| Within-bar fill sequence | Same |
+| Per-trade volume profile | Same |
+
+### 9.2 The model — flat 1-tick adverse
+
+```
+   ENTRY (bar N+1 OPEN after signal at bar N close):
+     fill_price = bar(N+1).open + 1 tick   if side = buy
+                = bar(N+1).open - 1 tick   if side = sell
+
+   EXIT (bar M+1 OPEN after exit signal at bar M close):
+     fill_price = bar(M+1).open + 1 tick   if side = buy
+                = bar(M+1).open - 1 tick   if side = sell
+
+   tick = ₹0.05 (uniform for all NSE/BSE index options post-2020)
+```
+
+That's it. No delta bucket. No ToD multiplier. No VIX multiplier.
+
+### 9.3 Why this is the right call given 1m-bar-only constraint
+
+| Reason | Detail |
+|---|---|
+| Bar OPEN is a real traded price | First transacted price of that minute — not a model output |
+| 1 tick ≈ half-spread for ATM/near-OTM strikes | Where Track 2 §6b rules operate (max strike OTM-5) |
+| Honest about uncertainty | Doesn't pretend to know what spread does as delta varies |
+| Defensible in audit | "Smallest defensible friction. Real friction may be slightly more." |
+| Academic standard | vectorbt, NautilusTrader, Jesse all default to ~1-tick when tick data unavailable |
+| Penalizes high-frequency strategies | ₹6.50/trade × N trades — strategies trading often face cumulative drag |
+
+### 9.4 Numerical impact
+
+For NIFTY ATM ₹100 → ₹120, 1 lot of 65:
+- Buy fill: ₹100.05 (was ₹100.00)
+- Sell fill: ₹119.95 (was ₹120.00)
+- Slippage cost: (0.05 + 0.05) × 65 = **₹6.50 per round-trip**
+- For BANKNIFTY: 0.10 × 30 = ₹3.00 per round-trip
+- For SENSEX: 0.10 × 20 = ₹2.00 per round-trip
+
+Combined with §8 charges (~₹65 per round-trip on NIFTY), total friction
+per trade is ~₹70-75 on NIFTY ATM 1-lot. Strategy edge must exceed this
+to be viable.
+
+### 9.5 Sweep cardinality (Phase 4)
+
+**No slippage profile variation.** 1 deterministic model = 1 profile per
+trade. Sweep cardinality from slippage = **1× multiplier (no change to
+combinatorial space).**
+
+### 9.6 What we GIVE UP by using flat 1-tick
+
+- **Over-credits deep OTM trades**: real spread on far OTM is much
+  wider than 1 tick. But Track 2 §6b rules cap strike selection at
+  OTM-5 (delta ≥ 0.20), where 1-tick is a defensible underestimate.
+- **Under-credits very-near-ATM in low-vol days**: real ATM spread can
+  be < 1 tick (1 paise apart). But 1 tick is the smallest non-zero
+  tick increment, so we can't get tighter.
+- **No event-day handling**: Earnings, RBI policy days have wider
+  spreads. We accept this as model limitation.
+
+### 9.7 Future refinement (TickVault Phase 5+)
+
+When TickVault accumulates real Dhan tick data (via live WebSocket,
+NOT historical API), refine to a delta-bucketed or IV-scaled model
+based on **measured** spreads. Until then, flat 1-tick stands.
+
+### 9.8 Legacy delta-bucketed model (archived for reference)
+
+The previous delta-bucketed model (1/2/5 ticks × ToD × VIX) is
+preserved in git history at commit `5defd08` for reference. It was
+an industry-magnitude estimate from PL Capital / Groww / Journal of
+Asset Management 2024, but could not be validated without tick data.
+Removed 2026-05-16 per operator decision to favor honest simplicity
+over false precision.
+
+---
+
+## 8b. UNVERIFIED items (require operator manual verification before code-lock)
+
+Per CLAUDE.md Golden Rule #1, items the research agent could not verify
+via automated fetch:
+
+1. **Dhan official rate card** (`dhan.co/pricing`, `dhan.co/charges`):
+   every URL returned HTTP 403 to WebFetch. Numbers in §8.1 are from
+   3+ secondary sources (Zerodha, Angel One, Chittorgarh, IPOGMPINDIA)
+   that quote Dhan directly. **Action: operator manually visits the
+   Dhan page in browser + posts a screenshot. If any number differs,
+   amend §8.1 before code-lock.**
+
+2. **STT 0.15% post-1-Apr-2026**: Budget 2026 proposed the hike from
+   0.10% to 0.15%. Multiple sources state it became effective
+   1-Apr-2026, but the agent did not pull the final Finance Act 2026
+   gazette text. **Action: operator verifies the Finance Act 2026 (or
+   gazette notification) before code-lock — could still be 0.10% if
+   the proposal was modified.**
+
+3. **BSE Bankex options exchange charge**: conflicting sources —
+   ₹3,250/cr (0.03250%) per one source, ₹325/cr (0.00325%) per another
+   (Ventura). **Action: verify directly from BSE Membership Transaction
+   Fees page before code-lock.** §8.1 currently uses 0.03250% (Angel
+   One verified).
+
+4. **Dhan plan tiers** (Free / Founder / Pro): no evidence found in
+   2026 sources. Only documented variant is a **50% brokerage discount
+   for women customers** (₹10/order). DhanHQ refers to the API access
+   product, not a brokerage tier. **Action: confirm with operator
+   account.**
+
+5. **Slippage paisa-level calibration**: agent's numbers in §9.1 are
+   industry-magnitude estimates, NOT measured from Dhan tick data.
+   **Action: final calibration from operator's own Dhan tick history
+   in Phase 2 data ingest.**
+
+6. **NIFTY index-option tick size at 5 paise**: NSE reduced
+   cash-segment tick for sub-₹250 stocks to 1 paise (May 2024) and
+   stock-options to ~1 paise (Nov 2025). **Index options (NIFTY,
+   BANKNIFTY) remain 5 paise** per agent research — but re-verify
+   before code-lock since regulator may extend the 1-paise rule to
+   index options.
+
+These items are blockers for Phase 3 code-lock but NOT blockers for
+Phase 2 data-ingest. Phase 2 can start as soon as operator provides
+Dhan access token; cost-model verification can run in parallel.
 
 ---
 

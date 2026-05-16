@@ -85,6 +85,12 @@ proceeds in parallel.
 | `../MIGRATION.md` | Decision ledger; Track 2 adds rows #200+ |
 | `TRACK2_OPTIONS_SPEC.md` | Master spec (API, universe, scope) — THIS DIR |
 | `TRACK2_DATA_INGEST_DESIGN.md` | Storage + state machine + pseudocode — THIS DIR |
+| `CALCULATOR_SPEC.md` | Per-trade cost calculator (4-outcome state machine) — THIS DIR |
+| `COSTS_VERIFIED.md` | Verified rate table + statutory rounding rules — THIS DIR |
+| `TRACK2_OPERATIONAL_GUARANTEES.md` | SLOs, watchdog, auto-resume — THIS DIR |
+| `TRACK2_RISK_MGMT.md` | SEBI position limits + SPAN/ELM + circuit breakers — THIS DIR |
+| `TRACK2_TAX_HANDLING.md` | Section 43(5) + ICAI 2025 + post-tax PnL pipeline — THIS DIR |
+| `PLAN_FINALIZATION_2026-05-16.md` | 2-round deep research summary — THIS DIR |
 
 ## Convention
 

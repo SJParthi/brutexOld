@@ -30,6 +30,38 @@ full sweep until Phase 9.5 pilot passes.
   (handled by Track 2). Live order placement (out of scope for both
   tracks).
 
+## ⭐ Operating Principle: COMMON · DYNAMIC · SCALABLE · AUTOMATED (NON-NEGOTIABLE, LOCKED 2026-05-16)
+
+> Operator decree 2026-05-16: "Entirely comprehensively extremely common
+> dynamic scalable approach as an extreme automated process. 100%, without
+> any manual intervention or manual process."
+
+This is the master architectural rule the project lives by. Every module,
+every commit, every workflow obeys all 5 of:
+
+| # | Principle | Definition | Enforcement |
+|---|---|---|---|
+| 1 | **COMPREHENSIVE** | Every indicator/calendar/adapter has streaming + batch interface, bit-exact oracle test, look-ahead invariant test, serialize/restore for checkpoints | CLAUDE.md §4 coverage gates (100% line + 100% branch; mutation ≥85%) |
+| 2 | **COMMON** | One Python package, one source of truth. Backtest (BruteX) and Live (TickVault) share the SAME `brutex.*` modules via `pip install git+...@v0.X.Y`. NEVER copy-paste between repos. | `docs/SHARED_LIBRARY.md` + `tests/unit/test_streaming_parity.py` (16 tests proving backtest = live bit-identical) |
+| 3 | **DYNAMIC** | Add a new indicator / TF / condition / strategy mask without re-architecting. Plugin-style state classes, u64 bitmask vocabulary, config-driven, no recompile. | `brutex/indicators/__init__.py` registry + 52-condition vocab via u64 masks |
+| 4 | **SCALABLE** | Same code path Day 1 (12.6M trials) → Phase 10 (730B trials). O(1) per-bar updates, O(1) mask AND, O(1) dedup, O(1) result write. | CI gate `p99(N=1M)/p99(N=1K) ≤ 1.10` (CLAUDE.md §2 #5); memory-BW proof (Agent A research) |
+| 5 | **AUTOMATED** | 100% automated. Zero manual intervention after one-time bootstrap. CI, releases, merges, validation gates, resumes, alerts, deploys — all automatic. | `.github/workflows/release.yml` (Release Please), `auto-merge.yml`, watchdog, Telegram bot, daily dopamine commits |
+
+**Operator monitoring required: ZERO clicks per day.**
+
+This rule overrides convenience. If a faster path would violate any of
+the 5 principles, the faster path is rejected. Examples:
+- ❌ "Just paste the EMA code into TickVault later" — violates COMMON.
+- ❌ "Hardcode the 21 timeframes in the engine" — violates DYNAMIC.
+- ❌ "Manually run the sweep every night" — violates AUTOMATED.
+- ❌ "Compute EMA in two ways (batch + streaming) with different math" — violates COMMON.
+- ❌ "Use O(N) per-bar accessor in the hot loop" — violates SCALABLE.
+- ❌ "Skip the look-ahead test for this module" — violates COMPREHENSIVE.
+
+This rule supersedes phase boundaries. If a phase plan would require
+violating one of the 5 principles, the plan changes — not the
+principle.
+
 ## ⭐ Operating Principle: Daily Dopamine Delivery (NON-NEGOTIABLE)
 
 > **Every day produces a tangible, viewable result.** No exceptions.
@@ -184,6 +216,70 @@ spot timeline by timestamp alignment.
   - Total grid: **2,000 cells per mask**
 - **Mode B** — signal-driven exit:
   - Exit on opposite signal, or candle reversal pattern, or forced 15:20 IST.
+- **Mode C** — no-early-exits (NEW 2026-05-16, operator decision):
+  - NO stop-loss, NO take-profit, NO signal-driven exit.
+  - Exit ONLY at forced 15:20 IST.
+  - The "pure ride-to-forced-exit" baseline.
+  - Tests whether early exits help or hurt vs holding to 15:20.
+  - Cardinality: 1 cell per mask (no grid).
+  - Brute-force evaluates ALL THREE modes per strategy mask, so each
+    mask produces 3 strategy variants (Mode A grid + Mode B + Mode C).
+  - Logged as DEC-MODE-001 in MIGRATION.md.
+
+## Plugin Add/Remove Policy (NEW 2026-05-16, DEC-PLUGIN-001)
+
+The Golden Rule #11 DYNAMIC mandate states "add a new indicator / TF /
+condition / mask without re-architecting". This section formalizes how
+to BOTH add and remove indicators safely, without invalidating past results.
+
+### How to ADD a new indicator
+
+1. Implement the indicator class in `brutex/indicators/<name>.py` with
+   the standard streaming + batch interface (`update_bar()` + `compute_batch()`).
+2. Add the indicator to the registry in `brutex/indicators/__init__.py`.
+3. Add a new bit to the 52-condition u64 vocab (now 53 conditions). The
+   condition is mapped to bit position 52 (next available).
+4. Bump `indicator_version` constant (semver minor bump).
+5. The cache-key `blake3(data_snapshot_hash || indicator_version)`
+   forces a fresh recompute. Past cached results remain valid for the
+   PREVIOUS indicator_version — they are NOT auto-deleted.
+6. Past brute-force result rows keep their old `indicator_version` stamp;
+   new runs use the new version. Both coexist in the Parquet lake;
+   queries filter by `indicator_version` for reproducibility.
+
+### How to REMOVE an indicator
+
+1. Mark the indicator deprecated in the registry (do NOT delete code).
+2. Set the corresponding bit position as RESERVED (do NOT reuse for a
+   different indicator — would silently corrupt old result interpretation).
+3. Bump `indicator_version` (semver major bump — breaking change).
+4. New brute-force runs will simply not fire the deprecated bit.
+5. Old cached results referencing the removed indicator's bit STILL
+   render correctly when queried by their original `indicator_version`.
+
+### Guarantees
+
+- **Backward compatibility:** all past brute-force results remain
+  interpretable as long as `indicator_version` is stamped on every row
+  (already in result schema §"Identity (hash inputs)").
+- **Forward compatibility:** adding indicators never requires migrating
+  past data — just bumps version.
+- **No bit reuse:** the u64 mask vocab is grow-only; removed bits are
+  marked RESERVED forever. This means the vocab can hold 64 historical
+  conditions; if BruteX ever exceeds 64, the engine must transition to
+  u128 (an explicit ADR, not a silent change).
+- **Same applies to timeframes and strategy modes** (Mode A/B/C):
+  the `timeframe_id` and `mode_byte` fields in `combo_hash` are stable
+  identifiers; deprecated IDs are reserved.
+
+### Hot-reload during a sweep
+
+NOT supported. Indicators are loaded once at sweep start; removing or
+adding an indicator mid-sweep is REJECTED at the orchestrator. The
+operator must HALT the sweep, modify the registry, restart the sweep
+(checkpoint-resume preserves progress on still-active indicators).
+
+---
 
 ## 5-Stage Funnel (Research-Validated)
 
@@ -258,10 +354,37 @@ spot timeline by timestamp alignment.
    2-year train, 6-month test, 3-month slide
    ~16 walks across 5 years
    Keep candidates with positive Sharpe in ≥12 of 16 walks
-7. **Lockbox:** reserve last 6 months (Dec 2025 - May 2026), NEVER seen
-   by any prior stage. Code-enforced isolation: any access path outside
-   Stage 4.7 raises exception. Top 10 candidates tested ONCE.
-   Pass: lockbox Sharpe within 30% of training, MDD within 50% of training.
+7. **Lockbox:** reserve last **6 months** (Dec 2025 - May 2026) by
+   default, NEVER seen by any prior stage. Code-enforced isolation:
+   any access path outside Stage 4.7 raises exception. Top 10
+   candidates tested ONCE.
+
+   **Adaptive window rule (DEC-LOCK-001, REVISED 2026-05-16 evening):**
+   If the default 6-month window has < 500 trades for a given combo,
+   the lockbox window auto-extends BACKWARDS in time (one trading day
+   at a time) until the combo accumulates ≥ 500 trades.
+   - If 500 trades cannot be reached within available history → REJECT
+     combo (insufficient evidence; mark `lockbox_status = "insufficient_n"`).
+   - The extended window is per-combo; different combos may end up
+     with different lockbox start dates.
+   - The "extended" portion is still NEVER seen by Stages 1-3 — the
+     extension consumes data from BEFORE the original training window,
+     not from the training window itself. This preserves the
+     held-out-data invariant.
+
+   Pass criteria:
+   - Lockbox trade count ≥ 500 (hard floor — combos failing this auto-rejected)
+   - Lockbox Sharpe within 30% of training
+   - MDD within 50% of training
+
+   Rationale: 6 months is the institutional standard (López de Prado
+   / Bailey pattern). At our 1-min × signal-driven trade frequency,
+   6 months typically yields ~100 trades → Sharpe SE 0.10 → 30%-drop
+   gate falls in noise → ~25% false-pass. Adaptive extension to ≥500
+   trades brings Sharpe SE below 0.05 without changing the institutional
+   default for high-frequency combos. Operator-preferred design
+   (2026-05-16 evening) — supersedes the earlier "18 months + 500"
+   proposal which was over-conservative.
 
 ## Result Row Schema (Every Single Trial — 30+ Metrics)
 
@@ -391,9 +514,21 @@ ALL 30+ metrics displayed in the JSON report and PNG charts.
 3. **UTC storage internal, IST display only.** Session: 03:45-10:00 UTC.
 4. **No look-ahead:** bar N signal → bar N+1 open entry. Instrumented
    bar accessor catches violations at runtime (debug build only).
-5. **Pessimistic fills:** entry at worst price within entry bar (high for
-   buys, low for sells); exits at worst price too.
-6. **Slippage:** 1 tick adverse on entry + 1 tick adverse on exit.
+5. **Precise fills (corrected 2026-05-16):** entry at bar N+1 OPEN
+   (exact value); exit at bar M+1 OPEN (exact value). NO pessimistic
+   fill on spot. Operator clarified: spot indices (NIFTY/BANKNIFTY/
+   SENSEX) are computed averages and are NOT directly tradable — there
+   is no order book to slip against, so pessimistic fill is fiction.
+   Pessimistic-fill convention applies ONLY to Track 2 options (where
+   real order books exist).
+6. **NO slippage on spot (corrected 2026-05-16):** spot indices have
+   no executable venue, so any slippage adjustment is meaningless.
+   Track 1 backtest uses the exact bar OPEN price at entry and exit.
+   Slippage applies ONLY in Track 2 options per
+   `docs/track2/TRACK2_OPTIONS_SPEC.md` §9 (delta-bucketed × ToD ×
+   VIX). At 1-minute granularity we never have tick-level access,
+   so spot's "1-tick adverse" rule (from v1 spec, now retired) is
+   doubly inappropriate: no venue + no tick data.
 7. **NO brokerage / NO STT / NO costs.** Track 1 is signal research only
    (operator confirmed 2026-05-16). Track 2 handles realism via expired
    options data (see `docs/track2/`).
