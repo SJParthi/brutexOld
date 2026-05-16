@@ -263,6 +263,127 @@ spot timeline by timestamp alignment.
    Stage 4.7 raises exception. Top 10 candidates tested ONCE.
    Pass: lockbox Sharpe within 30% of training, MDD within 50% of training.
 
+## Result Row Schema (Every Single Trial — 30+ Metrics)
+
+**Sharpe alone is a noob trap.** Real institutional strategy evaluation
+ranks on a composite of 12-15 metrics, with hard rejection gates BEFORE
+composite scoring. TradingView's Strategy Report (the standard) shows
+all of these — we compute every one of them per trial.
+
+Every result row written to `stage2_results.parquet` carries the
+following columns (paisa-int64 where money, float64 where ratio):
+
+### Identity (hash inputs)
+- `result_id` (blake3-low-128 of canonical params)
+- `strategy_mask` (u64 bitmask)
+- `direction` (enum: bull, bear)
+- `instrument` (enum: NIFTY, BANKNIFTY, SENSEX)
+- `tf` (enum: 1m..1d, 21 values)
+- `mode` (enum: A, B)
+- `sl_paisa`, `tp_paisa` (Mode A only, else NULL)
+- `data_snapshot_hash`, `indicator_version`, `code_commit_hash`
+
+### Return metrics
+- `net_pnl_paisa` (int64)
+- `total_return_pct` (float64)
+- `cagr_pct` (float64, annualized)
+- `gross_profit_paisa` (int64)
+- `gross_loss_paisa` (int64, absolute value)
+
+### Risk-adjusted return
+- `sharpe_ratio` (float64)
+- `sortino_ratio` (float64) — downside-only volatility
+- `calmar_ratio` (float64) — CAGR / MaxDD
+- `mar_ratio` (float64) — Calmar alternative
+- `information_ratio` (float64) — excess vs buy-and-hold
+- `omega_ratio` (float64) — at 0% threshold
+
+### Drawdown
+- `max_drawdown_pct` (float64)
+- `max_drawdown_paisa` (int64)
+- `max_drawdown_duration_bars` (int64)
+- `recovery_factor` (float64) — net profit / MDD
+- `ulcer_index` (float64) — time-weighted drawdown
+- `largest_losing_trade_paisa` (int64)
+- `max_consecutive_losses` (int32)
+- `max_consecutive_wins` (int32)
+
+### Trade quality
+- `total_trades` (int64)
+- `winning_trades` (int64)
+- `losing_trades` (int64)
+- `win_rate` (float64, fraction)
+- `profit_factor` (float64) — gross_profit / gross_loss
+- `avg_winning_trade_paisa` (int64)
+- `avg_losing_trade_paisa` (int64, absolute)
+- `win_loss_ratio` (float64) — avg_win / avg_loss
+- `expectancy_paisa` (int64) — money per trade
+- `avg_mfe_paisa` (int64) — Maximum Favorable Excursion
+- `avg_mae_paisa` (int64) — Maximum Adverse Excursion
+
+### Trade timing
+- `avg_holding_time_bars` (float64)
+- `max_holding_time_bars` (int64)
+- `time_in_market_pct` (float64)
+
+### Distribution robustness
+- `tail_ratio` (float64) — p95 / |p5|
+- `skewness` (float64)
+- `kurtosis` (float64)
+- `returns_std_dev` (float64)
+
+### Statistical validity (Stage 4 only, NULL before then)
+- `deflated_sharpe_ratio` (float64) — Bailey & LdP 2014
+- `pbo_probability` (float64) — Bailey 2017
+- `cpcv_pass_rate` (float64) — fraction of 12,870 splits with positive Sharpe
+- `wfo_pass_rate` (float64) — fraction of 16 walks with positive Sharpe
+- `lockbox_sharpe` (float64) — out-of-sample Sharpe (Dec 2025 – May 2026)
+- `lockbox_mdd_pct` (float64)
+
+### Hard rejection gates (applied BEFORE Stage 4 composite scoring)
+
+A result is REJECTED (excluded from top-10) if ANY of:
+
+| Gate | Threshold | Rationale |
+|---|---|---|
+| `total_trades` | < 30 | Insufficient sample (statistical noise) |
+| `profit_factor` | < 1.2 | No real edge |
+| `max_drawdown_pct` | > 30% | Uninvestable capital risk |
+| `win_rate` < 25% AND `win_loss_ratio` < 2.0 | both true | Psychologically uninvestable |
+| `max_consecutive_losses` | > 10 | Account-blower risk |
+| `lockbox_sharpe / sharpe_ratio` (training) | < 0.5 | Overfit (out-of-sample collapse) |
+
+### Composite ranking score (Stage 4)
+
+After gates pass, rank by composite score:
+
+```
+composite_score(s) =
+    0.25 × normalize(s.sharpe_ratio)
+  + 0.20 × normalize(s.sortino_ratio)
+  + 0.15 × normalize(s.calmar_ratio)
+  + 0.15 × normalize(s.profit_factor − 1.0)
+  + 0.10 × normalize(s.recovery_factor)
+  + 0.10 × normalize(s.win_rate × s.win_loss_ratio)
+  + 0.05 × normalize(s.lockbox_sharpe)
+```
+
+Where `normalize(x)` is per-(instrument, TF) leaderboard z-score
+clamped to [-3, +3] (prevents single-metric outliers from dominating).
+
+### Day 1 (Phase 0.5) computes a SUBSET
+
+To fit ~30 metrics into Day 1's 16-20h budget, Day 1 computes:
+- All Return metrics
+- All Risk-adjusted return metrics (Sharpe, Sortino, Calmar)
+- All Drawdown metrics (except Ulcer Index — added Day 7)
+- All Trade quality metrics
+- Hard rejection gates 1-5 (lockbox gate added Day 14+ when CPCV+lockbox lands)
+- Simplified composite score (no lockbox term, weights normalized to sum to 1)
+
+Day 1 output: top-10 strategies by Day-1-simplified composite, with
+ALL 30+ metrics displayed in the JSON report and PNG charts.
+
 ## Non-Negotiable Correctness Requirements
 
 1. **Money in int64 paisa.** NO floats in hot paths.
