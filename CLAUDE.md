@@ -74,6 +74,22 @@ after 4-agent hostile-review pass._
     naming the hardware AND citing public benchmarks. The 4-agent
     review on 2026-05-15 caught a 10x-overoptimistic throughput claim;
     do not repeat that pattern.
+11. **COMMON · DYNAMIC · SCALABLE · AUTOMATED** (operator decree 2026-05-16).
+    Every module obeys all 5:
+    - **COMPREHENSIVE** — streaming + batch interface, bit-exact oracle
+      test, look-ahead invariant test, serialize/restore.
+    - **COMMON** — one source of truth (this repo). Backtest +
+      TickVault share `brutex.*` via `pip install git+...@v0.X.Y`.
+      NEVER copy-paste. See `docs/SHARED_LIBRARY.md`.
+    - **DYNAMIC** — add new indicator/TF/condition/mask without
+      re-architecting. Plugin-style state classes, u64 mask vocab.
+    - **SCALABLE** — same code path Day 1 (12.6M) → Phase 10 (730B).
+      O(1) per-bar / per-mask / per-dedup / per-write.
+    - **AUTOMATED** — 100% automated after one-time bootstrap.
+      Release Please + auto-merge + watchdog + Telegram + auto-resume.
+      Operator monitoring: ZERO clicks per day.
+    See `docs/TRACK1_BACKTEST_SPEC.md` §"COMMON · DYNAMIC · SCALABLE ·
+    AUTOMATED" for the full rule + enforcement matrix + violations list.
 
 ---
 
