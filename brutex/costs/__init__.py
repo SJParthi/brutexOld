@@ -8,32 +8,49 @@ instrument (NIFTY / BANKNIFTY / SENSEX) under a single broker.
 All numeric values are int64 paise. No floats anywhere in the
 critical path (eliminates accumulator drift across 33B trial sweeps).
 
-## Build status (2026-05-16)
+## Public API
 
-This package is under active development. Currently exposes:
-- `constants` — verified rate constants from COSTS_VERIFIED.md
+``compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown``
 
-Coming in subsequent commits on this branch:
-- `types` — TradeInput, TradeCostBreakdown, TradeOutcome enum
-- `calculator` — `compute_trade_cost()` core function
-- 16 fixture tests per CALCULATOR_SPEC.md §12
+The calculator is the build-target of `claude/cost-calculator-complete`
+branch; landed in the merge to ``main``.
 
-Public API (forward-compat re-exports added as modules land).
-Reading this docstring while the only export is `constants` means
-this module is mid-build — see branch `claude/cost-calculator-impl`.
+## Assurance-round amendments baked in
+
+- **DEC-COST-001**: GST rounded as TOTAL once at 18% (Section 170 CGST).
+- **DEC-COST-002**: STT regime selected by ``entry_dt_ist.date()``.
+- **DEC-COST-003**: Finance Act 2026 STT rates LOCKED (primary source).
+- **DEC-COST-004**: STT-on-exercise rate split LOCKED.
+- **DEC-EXEC-008**: BUY-only policy (Track 2 uses long_call / long_put only).
 
 ## Dependencies
 
 NO external dependencies in the hot math path beyond Python stdlib
-(`dataclasses`, `datetime`, `enum`, `typing`). This keeps the
-calculator inline-able by Rust/Numba downstream.
++ ``brutex.options.lot_size_history`` for the per-date lot lookup.
 """
 
-# Currently only constants module is implemented. Other modules
-# (calculator, types) will be added in subsequent commits on this
-# branch and their public symbols re-exported here.
 from brutex.costs import constants
+from brutex.costs.calculator import compute_trade_cost
+from brutex.costs.types import (
+    Broker,
+    GstSplit,
+    Instrument,
+    OptionType,
+    TradeCostBreakdown,
+    TradeInput,
+    TradeOutcome,
+    TradeSide,
+)
 
 __all__ = [
+    "Broker",
+    "GstSplit",
+    "Instrument",
+    "OptionType",
+    "TradeCostBreakdown",
+    "TradeInput",
+    "TradeOutcome",
+    "TradeSide",
+    "compute_trade_cost",
     "constants",
 ]

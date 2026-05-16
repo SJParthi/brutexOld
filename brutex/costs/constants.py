@@ -138,11 +138,13 @@ Source: COSTS_VERIFIED §6."""
 # GST
 # ─────────────────────────────────────────────────────────────────
 
-GST_TOTAL_BPS_X100: Final[int] = 180_000
+GST_TOTAL_BPS_X100: Final[int] = 1_800_000
 """GST 18% on (brokerage + exchange + SEBI + IPFT). Per DEC-COST-001
 (2026-05-16), the TOTAL is rounded ONCE — NOT CGST/SGST separately.
 Section 170 CGST mandates rounding the total tax. Earlier spec rounded
-each component separately at 9%, creating systematic +₹1 overcharge."""
+each component separately at 9%, creating systematic +₹1 overcharge.
+
+Encoding: rate_decimal × 10_000_000 = 0.18 × 10_000_000 = 1_800_000."""
 
 
 # ─────────────────────────────────────────────────────────────────
