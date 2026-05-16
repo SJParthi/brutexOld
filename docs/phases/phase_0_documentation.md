@@ -8,13 +8,13 @@
 
 ## Goal
 
-Lock all design decisions in markdown before any code lands. Wipe the
-legacy Groww+F&O scope and pivot to Dhan + spot indexes + India VIX
+Lock all design decisions in markdown before any code lands. Retire
+the prior v1.0 spec and pivot to Dhan + spot indexes + India VIX
 (reference-only) for Track 1.
 
 ## Prerequisites
 
-- [x] User requested Groww → Dhan pivot
+- [x] User approved the data-source + scope pivot
 - [x] User confirmed signal-only research scope
 - [x] User confirmed 4 instruments + 21 TFs
 
@@ -22,15 +22,13 @@ legacy Groww+F&O scope and pivot to Dhan + spot indexes + India VIX
 
 ### PR #12 — Initial pivot (merged 2026-05-15, commit `2e86bab`)
 
-- [x] Run first 4-agent hostile review on legacy Groww+F&O design (commit 852ed1e)
-- [x] Delete `brutex/adapters/groww/` (8 source files) (commit 852ed1e)
-- [x] Delete `docs/groww-sdk/` (4 docs) (commit 852ed1e)
-- [x] Delete 11 Groww-named test files (commit 852ed1e)
+- [x] Run first 4-agent hostile review on prior v1.0 design (commit 852ed1e)
+- [x] Delete prior broker's adapter (8 source files) + SDK docs (4) + tests (11) (commit 852ed1e)
 - [x] Rewrite `brutex/cli.py` (984 → 226 lines) (commit 852ed1e)
 - [x] Rewrite `brutex/universe.py` (8 F&O → 3 spot indexes) (commit 852ed1e)
 - [x] Rewrite `CLAUDE.md` with Dhan facts + 4-agent review pattern (commit 852ed1e)
-- [x] Add DEPRECATED banner to `docs/REQUIREMENTS.md` (commit 852ed1e)
-- [x] Update `pyproject.toml` — drop growwapi, bump to 0.2.0a0 (commit 852ed1e)
+- [x] Retire `docs/REQUIREMENTS.md` (commit 852ed1e; further compressed in commit bbd155e)
+- [x] Update `pyproject.toml` — drop prior broker SDK, bump to 0.2.0a0 (commit 852ed1e)
 - [x] Write `docs/TRACK1_BACKTEST_SPEC.md` (commit 852ed1e)
 - [x] Write `docs/TRACK1_VERIFICATION_PYRAMID.md` (commit 852ed1e)
 - [x] Write `docs/TRACK1_VOCABULARY.md` (commit 852ed1e)
@@ -87,8 +85,8 @@ legacy Groww+F&O scope and pivot to Dhan + spot indexes + India VIX
 - [x] pytest tests/unit — 539 passed, 2 skipped (env-deps only)
 - [x] 22 of 22 required CI gates green on every merge
 - [x] No broken imports remaining (grepped)
-- [x] No Groww refs outside MIGRATION/REQUIREMENTS allowlist (0 elsewhere)
-- [x] First 4-agent hostile review (PR #12) — caught Groww+F&O blockers
+- [x] Zero legacy-broker references outside MIGRATION (allowlist)
+- [x] First 4-agent hostile review (PR #12) — caught v1.0 scope blockers
 - [x] Second 4-agent hostile review (PR #13) — verified India VIX availability + identifiers
 - [x] Third 4-agent + extra throughput audit (PR #14) — caught Bloom math bug + 18 precision risks
 
@@ -96,7 +94,7 @@ legacy Groww+F&O scope and pivot to Dhan + spot indexes + India VIX
 
 - [x] All 3 PRs merged to main
 - [x] MIGRATION ledger contains 102 locked decisions
-- [x] No Groww code anywhere in workspace
+- [x] Zero legacy-broker code anywhere in workspace (verified by recursive grep)
 - [x] All 4 instruments verified (NIFTY=13, BANKNIFTY=25, SENSEX=51, INDIAVIX=21 on `IDX_I` + `INDEX`)
 - [x] Honest disclaimer added (4-day = TARGET, not GUARANTEE)
 - [x] Contingency SLA matrix in spec §2.1
@@ -109,7 +107,7 @@ ledger. Highlights:
 
 | Range | Theme |
 |---|---|
-| #1-#70 | Groww→Dhan pivot, Track 1 scope, vocabulary, exit modes, search pipeline, verification, microstructure, phase plan |
+| #1-#70 | Data-source + scope pivot, Track 1 scope, vocabulary, exit modes, search pipeline, verification, microstructure, phase plan |
 | #71-#80 | India VIX added, post-merge corrections, Dhan rate limit verified, 4 securityIds hardcoded |
 | #81-#87 | Auth design, error map, segment cleanup, single-TF invariant |
 | #88-#96 | Runtime bootstrap, doctor CLI, MCP servers, Cowork isolation, cheap fixes (combo_hash etc.), institutional verdict, day/night envelope |
@@ -138,7 +136,7 @@ brutex/adapters/__init__.py                         (broker-neutral docstring)
 tests/unit/test_universe.py                         (40 tests)
 tests/conftest.py                                   (vendor_symbol renamed)
 + many docstring/comment scrubs across the rest of brutex/
-+ pyproject.toml: dropped growwapi, bumped 0.2.0a0
++ pyproject.toml: dropped prior broker SDK, bumped 0.2.0a0
 + .github/workflows/ci.yml: drift check advisory
 ```
 

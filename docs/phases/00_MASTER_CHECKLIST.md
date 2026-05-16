@@ -21,7 +21,7 @@ Last updated: 2026-05-15 evening
 
 | Phase | Status | Effort | Owner | What it produces |
 |---|---|---|---|---|
-| 0 — Documentation | ✅ DONE | done | Claude | 11 TRACK1 docs + 102 decisions + Groww wipe |
+| 0 — Documentation | ✅ DONE | done | Claude | 11 TRACK1 docs + 102 decisions + legacy-broker wipe |
 | 1 — Verification Scaffolding | ☐ Not started | 2-3 weeks | Claude | 9-layer empty test pyramid + 26 invariant stubs + brutex doctor + bootstrap hook |
 | 2 — Dhan Adapter + Vocabulary | ⏸️ Blocked | 3-4 weeks | Claude (needs token) | Working Dhan ingest + 52-condition atoms + pattern generator |
 | 2.5 — Bayesian Early-Stop | ☐ Not started | 1 week | Claude | Stage 2 trial reduction 61% |
@@ -46,7 +46,7 @@ See `../MIGRATION.md` for the full ledger. Phase-grouped:
 
 | Phase | Decision range | Count |
 |---|---|---|
-| 0 (Groww→Dhan pivot, Phase 0-4 plan) | #1-#70 | 70 |
+| 0 (Data-source + scope pivot, Phase 0-4 plan) | #1-#70 | 70 |
 | 0 (post-merge corrections, design refinements) | #71-#80 | 10 |
 | Post-#14 (runtime + Phase 2.5/3.5 designs) | #81-#102 | 22 |
 | **TOTAL** | **#1-#102** | **102** |
@@ -82,7 +82,7 @@ See `../MIGRATION.md` for the full ledger. Phase-grouped:
 
 | PR | Merged | Highlights |
 |---|---|---|
-| #12 | ✅ | Groww wipe + 7 TRACK1 docs + decisions #1-#70 |
+| #12 | ✅ | Legacy-broker wipe + 7 TRACK1 docs + decisions #1-#70 |
 | #13 | ✅ | VIX reference-only + Dhan rate limit + 4 securityIds + auth design + decisions #71-#87 |
 | #14 | ✅ | Runtime atlas + day/night envelope + Phase 2.5/3.5 designs + decisions #88-#102 |
 
