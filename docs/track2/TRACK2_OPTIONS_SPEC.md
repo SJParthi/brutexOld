@@ -349,39 +349,207 @@ week's expiry passes).
 
 ---
 
-## 8. Brokerage / STT / STO / SEBI / GST cost model (TBD — Phase 3)
+## 8. Brokerage / STT / Exchange / SEBI / Stamp / GST cost model (LOCKED 2026-05-16)
 
-This is the single largest unknown in Track 2 and the reason for the
-"first sweep" being scheduled in Phase 4. The cost model lives at:
+Research agent verified all rates against ClearTax, Zerodha Z-Connect,
+Bajaj Broking, Angel One, NSE, sahi.com, Ventura, PL Capital,
+Chittorgarh, IPOGMPINDIA (2026-05-16). **Dhan's official rate card page
+returned HTTP 403 on automated fetch** — numbers below are
+cross-verified from 3+ independent secondary sources that quote Dhan
+directly. Operator must manually verify Dhan's published page before
+final code-lock.
 
-- `brutex/options/costs.py` (Phase 3 deliverable)
-- Verified table at `docs/track2/COSTS_VERIFIED.md` (Phase 3 deliverable)
+### 8.1 Verified constants table
 
-Categories to verify before Phase 4:
-1. Dhan brokerage per options leg (₹ flat or % capped) — cite Dhan tariff page
-2. STT — 0.05% on sell side options (on premium); cite NSE/BSE circular
-3. STO (Securities Transaction on Options) — varies by exercise; cite circular
-4. SEBI turnover charge — current rate is 0.0001% (per NSE/BSE)
-5. NSE/BSE transaction fee per leg
-6. GST — 18% on (brokerage + SEBI + exchange)
-7. Stamp duty — 0.003% buy side
+| Charge | Rate | Applied to | Side | Source |
+|---|---|---|---|---|
+| Dhan brokerage | **₹20.00 flat per order** | per executed order | both legs | dhan.co/pricing (cross-confirmed: ipogmpindia.com 2026, chittorgarh.com, Zerodha review) |
+| STT (Securities Transaction Tax) | **0.10% pre-1-Apr-2026; 0.15% post-1-Apr-2026** | premium | sell side only | ClearTax 2026; Budget 2026 (Finnovate); SEBI raised from 0.0625% on Oct 1, 2024 |
+| NSE F&O exchange charge | **0.03503%** | premium | both sides | NSE post-Oct-1-2024 SEBI "true-to-label" circular |
+| BSE F&O exchange charge | **0.03250%** | premium | both sides | BSE post-Oct-1-2024 (Sensex/Bankex); Angel One verified |
+| SEBI turnover fee | **0.0001%** | premium | both sides | NSE: ₹10 per crore |
+| IPFT (Investor Protection Fund Trust, NSE) | **0.0005%** | premium | both sides | NSE charge sheet |
+| Stamp duty | **0.003%** | premium | buy side only | Indian Stamp Act 2020 (unified rate) |
+| GST | **18%** | (brokerage + exchange + SEBI + IPFT) | both sides | CGST 9% + SGST 9% OR IGST 18%; ClearTax 2026 |
 
-All numbers must be CITED with their source URL and verified date.
-No hallucinated tariffs.
+**Not in cost basis for GST:** STT, stamp duty (statutory levies, not services).
+
+### 8.2 Round-trip worked example (NIFTY ATM call, ₹100 → ₹120, 1 lot of 65)
+
+Buy premium notional: 65 × ₹100 = **₹6,500**.
+Sell premium notional: 65 × ₹120 = **₹7,800**.
+Gross PnL: **+₹1,300**.
+
+| Component | Buy side | Sell side | Total | Calc |
+|---|---|---|---|---|
+| Premium × lot | -6,500.00 | +7,800.00 | +1,300.00 | gross |
+| Brokerage (₹20 flat) | -20.00 | -20.00 | -40.00 | Dhan |
+| STT (0.15% sell premium, post-Apr-2026) | 0 | -11.70 | -11.70 | 0.0015 × 7,800 |
+| Exchange (NSE 0.03503%) | -2.28 | -2.73 | -5.01 | 0.0003503 × each side |
+| SEBI (0.0001%) | -0.01 | -0.01 | -0.02 | |
+| IPFT NSE (0.0005%) | -0.03 | -0.04 | -0.07 | |
+| Stamp duty (0.003% buy) | -0.20 | 0 | -0.20 | 0.00003 × 6,500 |
+| GST (18% on brokerage + exchange + SEBI + IPFT) | -4.02 | -4.10 | -8.12 | |
+| **Charges total** | **-26.54** | **-38.58** | **-65.12** | |
+| **Net PnL** | | | **+1,234.88** | gross 1,300 − 65.12 |
+
+**Round-trip cost = ₹65.12 = 1.00% of buy premium / 5.0% of gross move.**
+
+For a deeper OTM trade (₹50 → ₹60, 1 lot, post-Apr-2026):
+- Buy: 65 × 50 = ₹3,250. Sell: 65 × 60 = ₹3,900. Gross +₹650.
+- Charges ≈ ₹58 = 1.78% of buy premium / 8.9% of gross move.
+- **Minimum profitable move on deep OTM ≈ 1.78% on premium just to break even on costs alone** (excludes slippage).
+
+### 8.3 Lot size history (PER-DATE LOOKUP REQUIRED)
+
+Lot sizes changed 7 times in our 2021-2026 backfill window. Using a
+single lot would mis-size positions by 3-7× in places. Build
+`lot_size_history.csv` keyed on `(instrument, effective_date)` —
+REQUIRED, not optional.
+
+| Effective from | NIFTY 50 | BANKNIFTY | SENSEX | Source |
+|---|---|---|---|---|
+| ≤ Jun 2021 | 75 | 25 | 10 | NSE historic |
+| **Jul 2021 expiry** | 50 | 25 | 10 | NSE bulletin |
+| **30-Jun-2023** | 50 | 15 | 10 | Zerodha Marketintel #353422 |
+| **26-Apr-2024** | 25 | 15 | 10 | NSE FAOP circular |
+| **20-Nov-2024 (new contracts)** | 75 | 30 | 20 | SEBI/HO/MRD-PoD2/CIR/P/2024/00181 — ₹15L notional minimum |
+| **Jul 2025 (transitional)** | 75 | 35 | 20 | NSE bulletins |
+| **30-Dec-2025 EOD** | 75 | 30 | 20 | NSE FAOP70616 |
+| **Jan 2026 onwards (CURRENT)** | **65** | **30** | **20** | NSE Jan-2026 circular — notional rebased on Sep-25 closing prices, ₹15-20L range |
+
+Source-cites:
+- sahi.com 2026 lots
+- Ventura Securities Jan 2026 blog
+- Scanx NSE Jan 2026 circular
+- PL Capital NIFTY lot history
+- Zerodha Marketintel bulletins
+
+### 8.4 Constants to bake into code
+
+When `brutex/costs/dhan_constants.py` lands (Phase 3 deliverable):
+
+```python
+# Verified 2026-05-16, see TRACK2_OPTIONS_SPEC.md §8.1 for source-cites.
+
+DHAN_BROKERAGE_INR_PER_ORDER     = 20.00
+STT_OPTIONS_SELL_PCT_PRE_APR2026 = 0.0010   # 0.10%
+STT_OPTIONS_SELL_PCT_POST_APR2026= 0.0015   # 0.15% (Budget 2026)
+STT_HIKE_EFFECTIVE_DATE          = date(2026, 4, 1)
+EXCHANGE_NSE_FNO_PCT             = 0.00035030
+EXCHANGE_BSE_FNO_PCT             = 0.00032500
+SEBI_TURNOVER_PCT                = 0.0000010
+IPFT_NSE_PCT                     = 0.0000050
+STAMP_DUTY_BUY_PCT               = 0.00003   # 0.003%
+GST_PCT                          = 0.18      # on brokerage + exchange + SEBI + IPFT only
+TICK_SIZE_INR_INDEX_OPTIONS      = 0.05      # 5 paise — unchanged for index options
+```
 
 ---
 
-## 9. Slippage model (TBD — Phase 3)
+## 9. Slippage model (LOCKED 2026-05-16, delta-bucketed)
 
-Three slippage knobs to test in Phase 4 sweep:
+Per agent research 2026-05-16: industry-magnitude estimates from PL
+Capital, Groww, Journal of Asset Management 2024 (DOTM bid-ask
+amplification study), Bajaj Broking. **Final calibration must be done
+from operator's own Dhan tick history once data ingest is operational
+(Phase 2).**
 
-| Knob | Range | Default |
+### 9.1 Per-side slippage by delta bucket
+
+| Delta range | Strike position | Per-side slippage | Rationale |
+|---|---|---|---|
+| 0.45 - 0.55 | ATM | **1 tick = ₹0.05** | typical spread 5-15 paise on NIFTY ATM peak hours |
+| 0.20 - 0.44 | OTM 1-3 strikes | **2 ticks = ₹0.10** | spread 15-50 paise |
+| 0.05 - 0.19 | OTM 4-8 strikes | **5 ticks = ₹0.25 OR 0.5% of mid, whichever greater** | spread 50 paise to ₹2 |
+| < 0.05 | Deep OTM | **EXCLUDE from backtest universe** | spread routinely > 5% of premium; results = noise |
+
+### 9.2 Time-of-day multiplier
+
+| Window (IST) | Multiplier | Why |
 |---|---|---|
-| `slippage_premium_pct` | 0 / 0.1 / 0.25 / 0.5 / 1.0% | 0.25% |
-| `slippage_bid_ask_half` | 0 / 25 / 50 / 100% of spread | 50% |
-| `slippage_partial_fill_pct` | 100 / 90 / 75 / 50% of quantity | 100% |
+| 09:15 - 09:30 | **× 1.5** | open auction settling, wide spreads |
+| 10:00 - 14:30 | **× 1.0** | peak liquidity baseline |
+| 09:30 - 10:00, 14:30 - 15:00 | **× 1.25** | transitional |
+| 15:00 - 15:20 | **× 1.5** | pre-close, wider spreads + thin book |
 
-Sweep cardinality = 5 × 4 × 4 = 80 slippage profiles per (signal, strike, expiry).
+### 9.3 Volatility multiplier (India VIX-driven)
+
+| India VIX | Multiplier | Source |
+|---|---|---|
+| VIX ≤ 20 | × 1.0 | baseline |
+| 20 < VIX ≤ 30 | × 1.5 | engineering default (no academic cite) |
+| VIX > 30 | × 2.0 | event-day, very wide spreads |
+
+India VIX series already ingested via Track 1 (`securityId=21`, see Track 1 spec §Data Source).
+
+### 9.4 Final per-side slippage formula
+
+```
+slippage_inr = base_slippage(delta_bucket) × tod_multiplier × vix_multiplier
+```
+
+Applied separately on entry fill (worst price within entry bar + slippage)
+and exit fill (same).
+
+### 9.5 Sweep cardinality (Phase 4)
+
+Old §9 (TBD draft) proposed 5 × 4 × 4 = 80 slippage profiles. New
+locked design uses **delta-bucketed deterministic** slippage (NOT a
+brute-force grid) since the delta bucket is determined by strike
+position relative to ATM and is not a free parameter. **Sweep
+cardinality reduces from 80 to 1 slippage profile per (signal, strike,
+expiry).** Variance comes from delta bucketing + time-of-day + VIX
+naturally.
+
+---
+
+## 8b. UNVERIFIED items (require operator manual verification before code-lock)
+
+Per CLAUDE.md Golden Rule #1, items the research agent could not verify
+via automated fetch:
+
+1. **Dhan official rate card** (`dhan.co/pricing`, `dhan.co/charges`):
+   every URL returned HTTP 403 to WebFetch. Numbers in §8.1 are from
+   3+ secondary sources (Zerodha, Angel One, Chittorgarh, IPOGMPINDIA)
+   that quote Dhan directly. **Action: operator manually visits the
+   Dhan page in browser + posts a screenshot. If any number differs,
+   amend §8.1 before code-lock.**
+
+2. **STT 0.15% post-1-Apr-2026**: Budget 2026 proposed the hike from
+   0.10% to 0.15%. Multiple sources state it became effective
+   1-Apr-2026, but the agent did not pull the final Finance Act 2026
+   gazette text. **Action: operator verifies the Finance Act 2026 (or
+   gazette notification) before code-lock — could still be 0.10% if
+   the proposal was modified.**
+
+3. **BSE Bankex options exchange charge**: conflicting sources —
+   ₹3,250/cr (0.03250%) per one source, ₹325/cr (0.00325%) per another
+   (Ventura). **Action: verify directly from BSE Membership Transaction
+   Fees page before code-lock.** §8.1 currently uses 0.03250% (Angel
+   One verified).
+
+4. **Dhan plan tiers** (Free / Founder / Pro): no evidence found in
+   2026 sources. Only documented variant is a **50% brokerage discount
+   for women customers** (₹10/order). DhanHQ refers to the API access
+   product, not a brokerage tier. **Action: confirm with operator
+   account.**
+
+5. **Slippage paisa-level calibration**: agent's numbers in §9.1 are
+   industry-magnitude estimates, NOT measured from Dhan tick data.
+   **Action: final calibration from operator's own Dhan tick history
+   in Phase 2 data ingest.**
+
+6. **NIFTY index-option tick size at 5 paise**: NSE reduced
+   cash-segment tick for sub-₹250 stocks to 1 paise (May 2024) and
+   stock-options to ~1 paise (Nov 2025). **Index options (NIFTY,
+   BANKNIFTY) remain 5 paise** per agent research — but re-verify
+   before code-lock since regulator may extend the 1-paise rule to
+   index options.
+
+These items are blockers for Phase 3 code-lock but NOT blockers for
+Phase 2 data-ingest. Phase 2 can start as soon as operator provides
+Dhan access token; cost-model verification can run in parallel.
 
 ---
 
