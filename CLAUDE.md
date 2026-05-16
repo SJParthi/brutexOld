@@ -34,9 +34,10 @@ after 4-agent hostile-review pass._
    composition, brokerage, taxes, or any external system must be
    traceable to a verified source. If unsure, say "unverified" and stop.
 2. **Single source of truth.** All Track 1 specs live under
-   `docs/TRACK1_*.md`. Every PR references a section + decision ID.
-   The pre-2026-05-15 `docs/REQUIREMENTS.md` is DEPRECATED — see its
-   header banner.
+   `docs/TRACK1_*.md` + `docs/track2/TRACK2_*.md`. Every PR references
+   a section + decision ID from `docs/MIGRATION.md`. The legacy
+   `docs/REQUIREMENTS.md` is a retired stub (banner only) — do not
+   read or derive new requirements from it.
 3. **Scope lock.** Track 1 = Dhan + spot indexes + India VIX (NIFTY 50,
    BANKNIFTY, SENSEX, INDIA VIX). **India VIX is REFERENCE ONLY** — it
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
