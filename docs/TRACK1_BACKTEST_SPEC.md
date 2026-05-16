@@ -1,702 +1,813 @@
-# Track 1 — Backtest System Build Specification
+# BruteX Track 1 — Build Specification (Research-Grounded v2)
 
-> **Status:** Locked spec, 2026-05-15. Supersedes the legacy
-> `docs/REQUIREMENTS.md` (v1.0 (legacy)) and the prior `TRACK1_BACKTEST_SPEC.md`
-> draft. All decisions below survived a 4-agent hostile-review pass
-> (Audit + Verification-Architecture + Hostile-Review + Throughput-Reality).
+> **Status:** Locked 2026-05-16. Supersedes `docs/archive/TRACK1_BACKTEST_SPEC_v1.md`.
+> Decision-ledger numbering picks up at #300 (room reserved for v1 amendments #103-#299).
 >
-> **Active branch:** `claude/backtest-system-spec-ITI4Y`
+> **Active branch tracking this spec:** `claude/track1-research-grounded-v2-VXTRG`
+
+## Project Identity
+
+BruteX is a long-horizon research-grade brute-force backtest platform for
+Indian spot indices. Track 1 = pure signal research (no broker costs).
+Track 2 (already designed in `docs/track2/`) translates winning signals
+into priced option trades using expired-options data — that's where
+realism + costs land.
+
+BruteX Track 1 targets **730 billion parameter combinations** swept on a
+single Apple M4 Pro laptop, with bit-identical reproducibility and
+institutional-grade statistical filtering.
+
+**Timeline expectation: 16 weeks of phased build.** Do not attempt the
+full sweep until Phase 9.5 pilot passes.
+
+## Scope Lock (Confirmed 2026-05-16)
+
+- **In scope:** Spot indices only (NIFTY 50, BANKNIFTY, SENSEX) +
+  India VIX (reference-only). Signal research → top-10 candidates →
+  handed off to Track 2 for options-priced realism.
+- **NOT in scope:** Futures execution (futures lack daily volume on
+  these indices — operator decision 2026-05-16). Options costs
+  (handled by Track 2). Live order placement (out of scope for both
+  tracks).
+
+## ⭐ Operating Principle: Daily Dopamine Delivery (NON-NEGOTIABLE)
+
+> **Every day produces a tangible, viewable result.** No exceptions.
+> No "we'll show results in week 11." No "this phase is just plumbing."
 >
-> Companion documents (read these together):
-> - `TRACK1_VERIFICATION_PYRAMID.md` — 9-layer test pyramid + 24 invariants
-> - `TRACK1_VOCABULARY.md` — the 52 atomic conditions
-> - `TRACK1_PHASE_PLAN.md` — 8-12 week build plan
-> - `TRACK1_PERFORMANCE_BUDGET.md` — honest throughput math
-> - `TRACK1_MICROSTRUCTURE.md` — Indian-market edge cases
-> - `MIGRATION.md` — the broker → Dhan migration log
+> Operator works in isolation at home. The ONLY energy driver is
+> seeing real numbers, real strategy candidates, real charts, real
+> progress. Without daily dopamine, motivation collapses → consistency
+> collapses → the project dies. This is a load-bearing requirement,
+> not a nice-to-have. Operator stated this explicitly 2026-05-16:
+> "every day this is for dopamine, this will keep me driving and
+> pushing me extremely. This is the only thing which can drive me
+> since I'm fully isolated at home on my own — this is the only energy."
 
----
+**Daily delivery format (committed to git every day):**
 
-## 1. Project Identity
+| Time | Artifact |
+|---|---|
+| End of every workday | `docs/daily/DAY_{N}_REPORT.md` — what was built today, what numbers came out, what the next day looks like |
+| Whenever a sweep runs | `results/day_{N}/top10_strategies.json` + PNG cumulative-PnL chart per top strategy |
+| Whenever a benchmark runs | `bench/day_{N}/throughput.json` — trials/sec, wall time, memory peak |
+| Whenever a validation gate fires | `validation/gate_{N}_report.json` |
 
-**BruteX Track 1** is a brute-force backtesting engine that produces
-**signal-only research output** on three Indian equity-index spot series,
-with India VIX added as a **reference-only** context signal:
+**Rules:**
+1. **Every commit message ends with one line:** `Dopamine: <what the operator sees today>`. Example: `Dopamine: First top-10 strategies — best Sharpe 1.87 (BANKNIFTY 15m, EMA cross + breakout AND)`
+2. **No multi-day silent work.** If a task takes >1 day, split it: end-of-day-1 must produce SOMETHING viewable (a partial chart, a debug print, a number).
+3. **Daily commits visible:** operator runs `git log --since=yesterday --oneline` and SEES progress.
+4. **Daily JSON reports** indexed in `docs/daily/INDEX.md` so operator can scroll history of "what we found each day".
+5. **If a day produces zero dopamine, that's a planning failure**, not a project failure — reframe the next day's scope smaller.
+6. **Charts are required, not optional.** PNG output for every sweep, every benchmark, every validation gate. Operator opens the PNG and SEES the result.
 
-- **NIFTY 50** (NSE spot) — brute-forced
-- **NIFTY BANK** / `BANKNIFTY` (NSE spot) — brute-forced
-- **BSE SENSEX** / `SENSEX` (BSE spot) — brute-forced
-- **India VIX** (NSE volatility index) — **reference only** (see §4.1)
+**Recurring dopamine sources by phase (examples):**
+- Phase 0.5 Day 1: First top-10 strategies. ⭐⭐⭐⭐⭐ massive
+- Phase 1 days: "today we fetched X bars, here's a sample chart of NIFTY 1m"
+- Phase 2 days: "today we computed condition #N, here's how often it fires"
+- Phase 3 days: "today we ran 100K trials, top strategy now Sharpe 2.3"
+- Phase 5 days: "today the Rust engine matched Python bit-for-bit AND is 47× faster"
+- Phase 9.5 day: "PILOT DONE — top 10 with lockbox Sharpe 1.8-3.1, PNG charts attached"
+- Phase 10 day: "FULL SWEEP DONE — final top-10 + lockbox + DSR all passed"
 
-The pipeline brute-forces ~2.9 million unique strategy patterns
-(combinations of 2–5 atomic conditions from a 52-condition vocabulary)
-× full parameter sweeps across **21 timeframes × 3 brute-force instruments**
-× 2 exit modes, applies a 4-filter cascade (DSR → CPCV → WFO → Lockbox),
-and returns the top 3 production candidates per sweep. India VIX is
-fetched + stored exactly like the 3 spot indexes but is NEVER part of
-brute-force combinations or the 52-condition vocabulary. Every trade
-entry/exit captures `vix_at_entry` / `vix_at_exit` as reference columns
-on the result row, enabling downstream "did this strategy work better
-when VIX was high?" slicing.
+**This rule overrides phase boundaries.** If sticking to a phase plan
+would mean a day with no visible output, the plan changes — not the
+output requirement. Engineering plumbing days get reframed to include
+a small visible win (e.g., "today's plumbing: indicator #5 added. Here's
+its fire-rate distribution across all 21 TFs as a histogram").
 
-Data ingest pipeline specified in `TRACK1_DATA_INGEST_DESIGN.md`.
+## Workload Math (Verified)
 
-**Out of scope (Track 1):** futures, options, F&O contracts, broker
-execution simulation, live feed, WebSocket, multi-tenant SaaS,
-commodity segment, BSE cash equity (other than the SENSEX index value
-itself).
+Strategy vocabulary: **52 atomic boolean conditions** across 9 groups
+(price-action, indicator-crossover, VWAP, Bollinger, regime, breakout,
+divergence, anchor, candle). See `docs/TRACK1_VOCABULARY.md` for the
+full atom list.
 
-**Options Track (post-Track-1, future):** translates Track 1 winning
-signals into ATM/ITM option fill simulations with IV/theta/spread
-modeling — this is when execution realism (brokerage, STT, slippage)
-re-enters. NOT to be confused with "Phase 2" of the Track 1 build plan
-(see `TRACK1_PHASE_PLAN.md §Phase 2`), which is the Dhan adapter +
-52-vocabulary work within Track 1.
+Combine with **AND only**. K = 2..5 conditions per strategy.
 
----
+Strategy mask count:
+```
+  C(52,2) =     1,326
+  C(52,3) =    22,100
+  C(52,4) =   270,725
+  C(52,5) = 2,598,960
+  TOTAL   = 2,893,111 unique masks
+```
 
-## 2. Hardware Target
+Full trial count:
+```
+  2,893,111 masks
+  ×       2 directions (bull, bear)
+  ×       3 instruments (NIFTY 50, BANKNIFTY, SENSEX)
+  ×      21 timeframes  (1m, 2-15m every minute, 30m, 60m, 120m, 180m, 240m, 1d)
+  ×       2 modes        (Mode A SL/TP grid, Mode B signal-exit)
+  ×   2,000 SL/TP grid cells (Mode A only; SL ∈ [5,200] paisa × 40 steps,
+                              TP ∈ [10,500] paisa × 50 steps)
+  ≈   730 BILLION trials BEFORE any pruning
+```
 
-- **MacBook Pro M4 Pro**: 14-core CPU (10 Performance + 4 Efficiency), 20-core GPU, 48 GB RAM
-- macOS Tahoe 26.x
-- 8 TB external SSD mounted at `/Volumes/QuantData`
-- Daily apps (Chrome, IntelliJ, Claude Desktop) run concurrently
-- Sweep uses **10 cores (the P-cores)**; 4 E-cores reserved for OS + daily apps
-- Working set capped at 40 GB RAM during sweep
+## Performance Reality (Research-Verified)
 
-**SLA per sweep on this envelope:** **target 2-4 days wall time** for
-~33 billion trials. Faster hardware (64-128 core EPYC / Threadripper)
-brings this to 12-24 hours. The spec must restate SLA per hardware
-envelope. See `TRACK1_PERFORMANCE_BUDGET.md` for the memory-bandwidth
-analysis that bounds these numbers.
+**Apple M4 Pro hardware envelope:**
+- 14-core CPU (10 P + 4 E), 20-core GPU
+- 48 GB unified memory at 273 GB/s theoretical
+- Real-world usable bandwidth: ~150-165 GB/s (~55% of theoretical)
+- Sustained combined load: 22.1W CPU + 19.8W GPU = ~42W chip
+- System wall draw under load: 75-90W
+- Surface max temp: 46.4°C (closed-lid, vertical stand, 22°C ambient)
+- **NO PUBLIC 8-12 HOUR THERMAL CORPUS** exists for M4 Pro 14"
 
-### 2.1 Honest Disclaimer (added 2026-05-15 evening, post-throughput-audit)
+**Bandwidth-bound calculation:**
+- 52-condition bitmap matrix: ~770 MB (fits System Level Cache)
+- Per-mask scan: one streaming read of 770 MB at 150 GB/s = ~5 ms
+- Stage 2 single-pass: 2.9M masks × 2 dirs × 5 ms ≈ 8 hours
+- With Stage 1B 50% drop + Stage 2.5 61% early-stop:
+  effective Stage 2 ≈ 5-7 hours
+- **Total funnel: 14-20 hours overnight**
 
-**The 2-4 day figure is a TARGET, not a guarantee.** It is predicated on
-sustained 80-150K trials/sec, which has **never been measured** on a
-real M4 Pro running BruteX code. The throughput is memory-bandwidth
-bound with **zero margin** (per `TRACK1_PERFORMANCE_BUDGET.md §3.3`).
+**THE BOTTLENECK IS MEMORY BANDWIDTH, NOT COMPUTE.** Adding CPU threads
+past 6 P-cores yields zero gain (SoC fabric saturates at ~224 GB/s on
+M1 Max; similar ceiling expected on M4 Pro). GPU offload helps only
+the indicator precompute (Stage 1A) and the bitmask AND (Stage 1B).
 
-The Phase 3 bench gate `tests/bench/test_full_sweep_extrapolation.py`
-is the SOLE validator: it runs 100K real trials end-to-end and refuses
-CI merge if the projected 33B wall exceeds the published SLA band.
+## Tech Stack (Locked from Research)
 
-**Contingency SLA matrix (derived from worst-case throughput audit):**
+| Layer | Tool | Version | Lock reason |
+|-------|------|---------|-------------|
+| Engine hot path | Rust | 1.78 stable | NEON intrinsics via `core::arch::aarch64` |
+| Concurrency | Rayon | 1.10 | Work-stealing parallelism |
+| GPU (Stage 1B only) | Metal Shading Language | 4.0 | 32-thread simdgroups (WWDC20) |
+| BLAS | accelerate-src | 0.3 | Apple AMX coprocessor |
+| Outer optimizer | Optuna | 4.1 | TPE sampler for mask layer (4.8 not yet released) |
+| Inner optimizer | pycma | 3.4.0 | Hansen BIPOP-CMA-ES |
+| Data | Polars | 1.18 | Columnar AArch64 native (was 0.20; bumped to stable 1.x) |
+| Storage | Parquet + Zstd 9 | Arrow 18 (arrow-rs v53) | Industry standard |
+| Query | DuckDB | 1.1 | Ad-hoc SQL on results |
+| Dedup index | LMDB | latest | Faster than RocksDB append-only |
+| Bloom filter | fastbloom | 0.7 | SIMD on AArch64 |
+| Bitmap ops | croaring-rs | 1.1 → CRoaring 4.x | NEON-optimized |
+| Hash | blake3 | 1.5 | 2.5 GB/s measured on M4 Pro |
+| Provenance | DVC | 3.x | Content-addressed datasets |
+| Time-stamping | OpenTimestamps | latest | Free Bitcoin anchor |
+| Python ↔ Rust | PyO3 | 0.22 (abi3-py312) | |
+| Python pkg | uv | 0.5+ | Hash-pinned lockfile |
+| Python | 3.12 exact | | AArch64 native |
 
-| Phase 3 canary measures | Published SLA (33B) | Recommended action |
+## Data Source
+
+**Dhan Historical Data API:**
+- `POST /v2/charts/intraday` (`interval=1` only — fetch 1-min, resample locally)
+- `POST /v2/charts/historical` (daily, for PDH/PDL reference)
+- Rate limit: **5 req/s, 100K req/day** (operator caps at 3 r/s effective)
+- 90-day polling window per request
+- 5 years × 3 instruments × 90-day chunks ≈ 60 API calls + 3 daily calls
+
+**Indices security IDs and segments (hardcoded per CLAUDE.md §6):**
+- NIFTY 50: `securityId=13`, `exchangeSegment=IDX_I`
+- BANKNIFTY: `securityId=25`, `exchangeSegment=IDX_I`
+- SENSEX: `securityId=51`, `exchangeSegment=IDX_I`
+- India VIX: `securityId=21`, reference-only — stamp `vix_at_entry`/`vix_at_exit` per result row
+
+**Volume note:** Spot indices do not have stable historical volume. VWAP
+must be computed from corresponding index futures volume, mirrored to
+spot timeline by timestamp alignment.
+
+**Data history:** `2021-01-01 → today` (~5 years, ~250 trading days/year).
+
+## Strategy Specification
+
+- **Entry rule:** signal at bar N → enter at bar N+1 OPEN.
+- **Forced exit:** 15:20 IST. Overrides everything.
+- **Mode A** — stop-loss + take-profit grid:
+  - SL ∈ [5, 200] paisa, 40 steps
+  - TP ∈ [10, 500] paisa, 50 steps
+  - Total grid: **2,000 cells per mask**
+- **Mode B** — signal-driven exit:
+  - Exit on opposite signal, or candle reversal pattern, or forced 15:20 IST.
+
+## 5-Stage Funnel (Research-Validated)
+
+### Stage 1A — Precompute (one-time, ~3 hours)
+- Compute all 52 atomic conditions per bar per (instrument, TF)
+- Pack into bitmap matrix: 63 matrices (3 instruments × 21 TFs), each
+  with 52 columns + N bars
+- Cache to Parquet as additional columns alongside OHLCV
+- Cache key: `blake3(data_snapshot_hash || indicator_version)`
+
+### Stage 1B — Coarse score + drop bottom 50% (~4-6 hours)
+- Per (instrument, TF) pair (63 pairs total): score each strategy mask
+  by **CHEAP proxy** (no full backtest)
+- **Coarse score formula (locked here):**
+  ```
+  coarse_score(mask) = signal_frequency(mask) ×
+                       sign_correlation(mask_signal, next_bar_direction) ×
+                       coverage_penalty(mask)
+  ```
+  where:
+  - `signal_frequency(mask)` = bars where mask AND fires / total bars (drop if <0.1% or >10%)
+  - `sign_correlation` = Pearson correlation between (mask fires) and (next bar sign)
+  - `coverage_penalty` = 1 if mask fires across ≥ 90% of 5y window, else linearly down to 0
+- Drop bottom 50% of masks per (instrument, TF) pair
+- Survivors: ~1.45M masks per pair on average
+
+### Stage 2 — Full backtest on survivors (~5-7 hours with Stage 2.5)
+- For each `(mask, direction, instrument, TF, mode, params)` tuple, run
+  full bar-by-bar backtest
+- Concurrency: **12 worker threads** (10 P + 2 E, leave 2 for OS)
+- Per-worker working set ≤ 500 MB
+- Memory-mapped shared read-only data
+- No shared mutable state between workers
+- Result row written to streaming Parquet
+
+### Stage 2.5 — Bayesian early-stop (~61% reduction)
+- **Gaussian conjugate posterior** on 95th-percentile Sharpe per (instrument, TF)
+- **Wald SPRT** at α=0.05, β=0.10
+- Kill trial mid-flight if `Pr(true_sharpe > p95_threshold) < 0.10` after
+  minimum 50 trades
+- Document SPRT thresholds and posterior update math in code comments
+
+### Stage 3 — BIPOP-CMA-ES refinement (~1-2 hours)
+- **Outer:** Optuna TPE over top 10,000 survivor masks from Stage 2.5
+- **Inner:** pycma 3.4 BIPOP-CMA-ES per mask over (SL, TP) normalized [0,1]²
+  - Dimension d = 2
+  - Population λ = 6 (4 + ⌊3 ln 2⌋)
+  - Parents μ = 3
+  - Initial step σ₀ = 0.3
+  - TolX = TolFun = 1e-6
+  - MaxFEvals per restart = 200
+  - Restart strategy: BIPOP (Hansen GECCO 2009)
+- Total inner budget: 10K masks × 200 evals = 2M backtest calls
+- **CMA-ES must NOT cross discrete dimensions** — mask layer is OUTER only
+
+### Stage 4 — Statistical filters (pipeline order matters)
+
+1. **Top-K composite:** keep top 1,000 per (strategy_template, instrument, mode)
+   from Stage 3
+2. **Deflated Sharpe Ratio** (Bailey & López de Prado, JPM 2014):
+   COMPUTE PER (instrument, TF) LEADERBOARD with N ≤ 10⁷, **NOT pool-wide**.
+   Pool-wide N=10¹² gives threshold ≈ 7.4σ ≈ Sharpe 23 (impossible).
+   Per-leaderboard N=10⁷ gives threshold ≈ 5.3σ ≈ Sharpe 2-3 (realistic).
+3. **CPCV** (López de Prado, Adv ML in Finance 2018, Ch 12):
+   S = 16 sub-periods, C(16,8) = 12,870 splits
+   Embargo = max indicator lookback bars (NOT 1% of timeline)
+4. **PBO via CSCV** (Bailey-Borwein-LdP-Zhu, JCF 2017)
+5. **Romano-Wolf step-down** (Econometrica 73(4) 2005):
+   USE THIS, NOT Bonferroni. At N=10K, Bonferroni gives p ≈ 5×10⁻⁶ →
+   rejects everything real.
+6. **Walk-Forward rolling** (NOT anchored):
+   2-year train, 6-month test, 3-month slide
+   ~16 walks across 5 years
+   Keep candidates with positive Sharpe in ≥12 of 16 walks
+7. **Lockbox:** reserve last 6 months (Dec 2025 - May 2026), NEVER seen
+   by any prior stage. Code-enforced isolation: any access path outside
+   Stage 4.7 raises exception. Top 10 candidates tested ONCE.
+   Pass: lockbox Sharpe within 30% of training, MDD within 50% of training.
+
+## Result Row Schema (Every Single Trial — 30+ Metrics)
+
+**Sharpe alone is a noob trap.** Real institutional strategy evaluation
+ranks on a composite of 12-15 metrics, with hard rejection gates BEFORE
+composite scoring. TradingView's Strategy Report (the standard) shows
+all of these — we compute every one of them per trial.
+
+Every result row written to `stage2_results.parquet` carries the
+following columns (paisa-int64 where money, float64 where ratio):
+
+### Identity (hash inputs)
+- `result_id` (blake3-low-128 of canonical params)
+- `strategy_mask` (u64 bitmask)
+- `direction` (enum: bull, bear)
+- `instrument` (enum: NIFTY, BANKNIFTY, SENSEX)
+- `tf` (enum: 1m..1d, 21 values)
+- `mode` (enum: A, B)
+- `sl_paisa`, `tp_paisa` (Mode A only, else NULL)
+- `data_snapshot_hash`, `indicator_version`, `code_commit_hash`
+
+### Return metrics
+- `net_pnl_paisa` (int64)
+- `total_return_pct` (float64)
+- `cagr_pct` (float64, annualized)
+- `gross_profit_paisa` (int64)
+- `gross_loss_paisa` (int64, absolute value)
+
+### Risk-adjusted return
+- `sharpe_ratio` (float64)
+- `sortino_ratio` (float64) — downside-only volatility
+- `calmar_ratio` (float64) — CAGR / MaxDD
+- `mar_ratio` (float64) — Calmar alternative
+- `information_ratio` (float64) — excess vs buy-and-hold
+- `omega_ratio` (float64) — at 0% threshold
+
+### Drawdown
+- `max_drawdown_pct` (float64)
+- `max_drawdown_paisa` (int64)
+- `max_drawdown_duration_bars` (int64)
+- `recovery_factor` (float64) — net profit / MDD
+- `ulcer_index` (float64) — time-weighted drawdown
+- `largest_losing_trade_paisa` (int64)
+- `max_consecutive_losses` (int32)
+- `max_consecutive_wins` (int32)
+
+### Trade quality
+- `total_trades` (int64)
+- `winning_trades` (int64)
+- `losing_trades` (int64)
+- `win_rate` (float64, fraction)
+- `profit_factor` (float64) — gross_profit / gross_loss
+- `avg_winning_trade_paisa` (int64)
+- `avg_losing_trade_paisa` (int64, absolute)
+- `win_loss_ratio` (float64) — avg_win / avg_loss
+- `expectancy_paisa` (int64) — money per trade
+- `avg_mfe_paisa` (int64) — Maximum Favorable Excursion
+- `avg_mae_paisa` (int64) — Maximum Adverse Excursion
+
+### Trade timing
+- `avg_holding_time_bars` (float64)
+- `max_holding_time_bars` (int64)
+- `time_in_market_pct` (float64)
+
+### Distribution robustness
+- `tail_ratio` (float64) — p95 / |p5|
+- `skewness` (float64)
+- `kurtosis` (float64)
+- `returns_std_dev` (float64)
+
+### Statistical validity (Stage 4 only, NULL before then)
+- `deflated_sharpe_ratio` (float64) — Bailey & LdP 2014
+- `pbo_probability` (float64) — Bailey 2017
+- `cpcv_pass_rate` (float64) — fraction of 12,870 splits with positive Sharpe
+- `wfo_pass_rate` (float64) — fraction of 16 walks with positive Sharpe
+- `lockbox_sharpe` (float64) — out-of-sample Sharpe (Dec 2025 – May 2026)
+- `lockbox_mdd_pct` (float64)
+
+### Hard rejection gates (applied BEFORE Stage 4 composite scoring)
+
+A result is REJECTED (excluded from top-10) if ANY of:
+
+| Gate | Threshold | Rationale |
 |---|---|---|
-| ≥ 300K t/s (CPU + GPU) | **1-2 days** | proceed with Phase 3.5 Metal GPU offload |
-| ≥ 150K t/s (CPU only) | **2-3 days** | proceed with current plan |
-| 80-149K t/s | **3-5 days** | proceed; enable Stage 2 incremental checkpoint every 6h |
-| 30-79K t/s | **5-12 days** | escalate: Phase 3.5 Metal GPU is mandatory; consider tighter Stage 1B funnel from 10K → 3K survivors (cuts 33B → ~10B) |
-| < 30K t/s | **12-30 days — HALT** | re-architect: sweep sharding across N machines OR shrink universe |
+| `total_trades` | < 30 | Insufficient sample (statistical noise) |
+| `profit_factor` | < 1.2 | No real edge |
+| `max_drawdown_pct` | > 30% | Uninvestable capital risk |
+| `win_rate` < 25% AND `win_loss_ratio` < 2.0 | both true | Psychologically uninvestable |
+| `max_consecutive_losses` | > 10 | Account-blower risk |
+| `lockbox_sharpe / sharpe_ratio` (training) | < 0.5 | Overfit (out-of-sample collapse) |
 
-**LOCAL-ONLY constraint (user decision 2026-05-15 evening):** AWS /
-cloud offload is **explicitly out of scope** for Track 1. The only
-hardware escalation lever is the Apple Metal GPU (20-core, already
-present in the M4 Pro). All SLAs above assume single-machine execution.
+### Composite ranking score (Stage 4)
 
-If the canary lands in a slower band, the published SLA is amended
-**and a new `Decision #` row is added to `docs/MIGRATION.md`** before
-any sweep proceeds. Per `CLAUDE.md §2 rule 10`, no "guarantee"
-language ships ahead of the bench gate. The 2026-05-15 4-agent review
-caught a 10× over-optimistic throughput claim; this clause exists to
-prevent that pattern from repeating.
+After gates pass, rank by composite score:
 
-**Public benchmark gap (honest):** there is **no public benchmark for
-"trials/sec on M4 Pro for a Python+Rust quantitative backtest"**. The
-closest analog is vectorbt's "50K simulations/sec on M1" claim
-(hardware unverified, work-equivalence unclear). NEON benchmarks
-(Erio-Harrison) verify 2.5-9× scalar speedups for byte-scan and
-range-check kernels but no direct measurement for u64 bitmask AND
-exists. The honest implication: the 80-150K target is a defensible
-projection but requires Phase 3 validation.
+```
+composite_score(s) =
+    0.25 × normalize(s.sharpe_ratio)
+  + 0.20 × normalize(s.sortino_ratio)
+  + 0.15 × normalize(s.calmar_ratio)
+  + 0.15 × normalize(s.profit_factor − 1.0)
+  + 0.10 × normalize(s.recovery_factor)
+  + 0.10 × normalize(s.win_rate × s.win_loss_ratio)
+  + 0.05 × normalize(s.lockbox_sharpe)
+```
+
+Where `normalize(x)` is per-(instrument, TF) leaderboard z-score
+clamped to [-3, +3] (prevents single-metric outliers from dominating).
+
+### Day 1 (Phase 0.5) computes a SUBSET
+
+To fit ~30 metrics into Day 1's 16-20h budget, Day 1 computes:
+- All Return metrics
+- All Risk-adjusted return metrics (Sharpe, Sortino, Calmar)
+- All Drawdown metrics (except Ulcer Index — added Day 7)
+- All Trade quality metrics
+- Hard rejection gates 1-5 (lockbox gate added Day 14+ when CPCV+lockbox lands)
+- Simplified composite score (no lockbox term, weights normalized to sum to 1)
+
+Day 1 output: top-10 strategies by Day-1-simplified composite, with
+ALL 30+ metrics displayed in the JSON report and PNG charts.
+
+## Non-Negotiable Correctness Requirements
+
+1. **Money in int64 paisa.** NO floats in hot paths.
+2. **Prices in int64 ticks** (₹0.05 = 5 paisa unit).
+3. **UTC storage internal, IST display only.** Session: 03:45-10:00 UTC.
+4. **No look-ahead:** bar N signal → bar N+1 open entry. Instrumented
+   bar accessor catches violations at runtime (debug build only).
+5. **Pessimistic fills:** entry at worst price within entry bar (high for
+   buys, low for sells); exits at worst price too.
+6. **Slippage:** 1 tick adverse on entry + 1 tick adverse on exit.
+7. **NO brokerage / NO STT / NO costs.** Track 1 is signal research only
+   (operator confirmed 2026-05-16). Track 2 handles realism via expired
+   options data (see `docs/track2/`).
+8. **Forced 15:20 IST exit.** NO overrides ever.
+9. **Every result row hashed:**
+   ```
+   blake3(strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖
+          canonical_params ‖ data_snapshot_hash ‖ indicator_version ‖
+          code_commit_hash)
+   ```
+10. **Audit chain:** hash-chained JSONL log, BLAKE3 verifies end-to-end.
+11. **FPCR rounding mode** pinned to round-nearest-even at process start
+    in both Rust and Python paths. Don't touch FPCR afterwards.
+12. **Subnormal flush-to-zero (FZ bit)** explicitly DISABLED for
+    scalar/vector consistency.
+13. **Debug builds:** enable `feenableexcept(FE_DIVBYZERO | FE_INVALID |
+    FE_OVERFLOW)` to trap on NaN.
+14. **Reproducibility:** same inputs → bit-identical outputs across
+    rebuilds of same toolchain version.
+
+## Indian Market Calendar (Phase 1 Deliverable)
+
+Build `brutex/calendars/nse.py` as first-class ~500-line module:
+- Full holiday list 2021 through 2026
+- Muhurat sessions (Diwali ~1 hour; **EXCLUDE from Sharpe denominator**)
+- Pre-open auction 09:00-09:15 (EXCLUDE; first usable bar 09:16-09:17)
+- Semi-annual rebalance dates (March, September)
+- Half-day flags
+- Forced exit time: 15:20 IST
+- Tick size: ₹0.05 (5 paisa) throughout 2021-2026 — no discontinuity
+
+## Phased Build Plan (16 weeks + Day 1 Sprint)
+
+> **Phase 0.5 — Dopamine Day** runs FIRST (operator instruction 2026-05-16:
+> "results give me dopamine and confidence — that's my only energy").
+> Day 1 produces real top-10 strategies on real data via a fast
+> Python+Polars implementation. The 16-week plan (Phase 1-10) then
+> rebuilds the same pipeline properly in Rust with full statistical
+> rigor — but Day 1 is the smell test that proves the project is alive.
+>
+> **Phase 1 (Week 1-2) covers ALL 3 instruments × ALL 21 timeframes
+> from day one** (operator instruction 2026-05-16). The pilot in
+> Phase 9.5 is also full-coverage on instruments and TFs (only the
+> mask vocab and SL/TP grid are reduced).
+
+### **Phase 0.5: DOPAMINE DAY (Day 1, 16-20h focused work)** ⭐⭐⭐
+
+Maximum-aggressive Day-1 sprint to produce real strategy results in
+one day. Trade-off: Python+Polars (slower) instead of Rust (faster
+to write); crude rigor (raw Sharpe ranking, no DSR/CPCV/PBO/RW); no
+lockbox isolation barrier (just visual holdout). The 16-week plan
+rebuilds all of this properly.
+
+**Day 1 scope:**
+
+| Dimension | Day 1 | Phase 9.5 pilot | Full Phase 10 |
+|---|---|---|---|
+| Instruments | 3 (all) | 3 | 3 |
+| Timeframes | 21 (all) | 21 | 21 |
+| Masks | **1,000** random K=2..4 | 294K | 2.9M |
+| SL/TP grid | **100 cells** (10×10) | 700 | 2,000 |
+| Directions | 2 | 2 | 2 |
+| Modes | **Mode A only** | A + B | A + B |
+| Total trials | **~12.6M** | ~52B | 730B |
+| Wall time | **~30-60 min sweep + 16h setup** | 1-2h | 14-20h |
+
+**Day 1 hour-by-hour:**
+
+```
+Hour 0-2   ──  Python skeleton + Dhan token wired + first 1m batch fetched
+Hour 2-4   ──  Full 5y data for all 3 instruments (5 min API time after token works)
+               Stored as Parquet + ZSTD
+Hour 4-6   ──  Resample 1m → all 21 TFs (Polars groupby + agg)
+               Build calendar module (holidays, Muhurat, pre-open)
+Hour 6-10  ──  Implement 52 atomic conditions in Polars vectorized
+               Precompute bitmap matrix for each (inst, TF) — 63 matrices
+Hour 10-14 ──  Backtest engine in Python (Polars-vectorized, no per-bar loop)
+               Test on 10 hand-coded scenarios → confirm correctness
+Hour 14-16 ──  Run sweep: ~12.6M trials, ~30-60 min wall
+Hour 16-18 ──  Compute Sharpe / MDD / hit-rate per result, rank top 10
+Hour 18-20 ──  Generate PnL curves (matplotlib), output JSON + 10 PNG charts
+```
+
+**Day 1 deliverable:**
+- `/Volumes/QuantData/results/day1/top10_strategies.json`
+- 10 PNG cumulative-PnL charts at `/Volumes/QuantData/results/day1/charts/`
+- A real table: rank | mask | inst | TF | Sharpe | MDD | win rate | sample size
+- Operator confidence: "the engine works, the data is good, patterns exist"
+
+**Day 1 VALIDATION GATE (relaxed — this is a smell test):**
+- Sweep completes without crash
+- No NaN/inf in result rows
+- Top 10 each have ≥ 30 trades over 5y (statistical floor)
+- Top-1 Sharpe > 0.5 (anything less means the vocab is broken or data is bad)
+- Save report to `gate0_5_dopamine_report.json`
+
+**What Day 1 explicitly skips (added on Day 2+):**
+- Rust hot-path (Python is 100× slower but 100× faster to write)
+- DSR / CPCV / PBO / Romano-Wolf (statistical rigor, Day 14+)
+- Lockbox isolation barrier (Day 21+ — Day 1 uses last 6 months visual-only)
+- BIPOP-CMA-ES refinement (Day 14+)
+- Audit chain + blake3 + DVC + OpenTimestamps (Day 7+)
+- Full 2.9M masks (Day 1 = 1K random sample)
+- Full 2,000 SL/TP cells (Day 1 = 100-cell coarse grid)
+- Mode B signal-exit (Day 1 = Mode A only)
+- 100% test coverage gates (Day 1 = sanity tests on 10 hand-coded scenarios)
+
+**Prerequisites the operator must provide before Phase 0.5 starts:**
+- ⬜ `DHAN_ACCESS_TOKEN` environment variable set (Dhan account + token issued)
+- ⬜ `/Volumes/QuantData` mounted (or alternative path specified)
+
+If both green → Day 1 sprint executes in one continuous session.
 
 ---
 
-## 3. Tech Stack (locked)
+### Phase 1: Foundation (Week 1-2)
+- Rust workspace skeleton + Python package via PyO3
+- Dhan API client with 5 req/s rate limit, exponential backoff on 429
+- Fetch 5-year 1-minute data for **NIFTY, BANKNIFTY, SENSEX** (all 3)
+- Resample to **all 21 timeframes** anchored to 09:15 IST
+- Store as Parquet+Zstd9 at `/Volumes/QuantData/raw/{instrument}/`
+- Build `brutex/calendars/nse.py`
 
-| Layer | Technology |
-|---|---|
-| Backtest hot kernel | Rust workspace (extends existing `rust/fno-math/`) |
-| Parallelism | Rayon for CPU parallelism |
-| SIMD | `std::simd` (portable SIMD; NEON on Apple Silicon) |
-| GPU | Metal compute (Apple Silicon) for indicator precompute only |
-| Python orchestrator | Python 3.12 |
-| Python-Rust FFI | PyO3 + Arrow zero-copy |
-| Optimizer (Stage 3) | Optuna (CMA-ES) |
-| Storage | Parquet + Zstd-9 (results), LMDB (dedup index + work-item store), DuckDB (catalog + queries) |
-| Validation | pytest + cargo test + hypothesis + proptest + pytest-benchmark + criterion + mutmut + cargo-mutants + cargo fuzz |
-| Money type | `int64` paisa throughout |
+**VALIDATION GATE 1:**
+- 50 random bars match TradingView within 0.05% on prices
+- All 21 timeframes generated, no partial bars
+- NSE holiday list complete 2021-2026
+- Save report to `/Volumes/QuantData/validation/gate1_report.json`
 
----
+### Phase 2: Indicator Precompute (Week 3-4)
+- Implement 52 atomic conditions in Rust with NEON intrinsics
+- Pack as bitmap matrix per (instrument, TF) — 63 matrices
+- Stage 1A cache: Parquet columns alongside OHLCV
+- Daily-anchored indicators (PDH, PDL, Pivots, Fib) computed from daily
+  Parquet, constant across day for all TFs
 
-## 4. Market Scope (locked)
+**VALIDATION GATE 2:**
+- 10 random timestamps per condition match manually computed values
+  exactly (zero tolerance on boolean conditions)
+- Save report to `gate2_report.json`
 
-| Aspect | Value |
-|---|---|
-| Brute-force instruments | NIFTY 50, BANKNIFTY, SENSEX (spot) — **3** |
-| Reference-only instrument | India VIX (volatility index) — **1**, see §4.1 |
-| Tradability | None (Track 1 is signal-only) |
-| Volume column | Zero / null (indexes don't trade) |
-| Continuous-series stitching | N/A (indexes are naturally continuous) |
-| Range | Rolling: `2021-01-01 → today` |
-| Trading session | 09:15 - 15:30 IST |
-| Pre-open exclusion | Bars before 09:15:00 IST dropped at ingest |
-| Forced exit | 15:20 IST (Track 1 convention) |
-| Muhurat sessions | Excluded by hardcoded date list (see `TRACK1_MICROSTRUCTURE.md`) |
-| Holiday calendar | NSE official 2021-2026 (resolved at ingest) |
-| Index rebalance dates | Flagged in audit; data series is exchange-published (chain-linked) |
+### Phase 3: Single-Backtest Engine (Week 5-6)
+Modules: `data_loader`, `bar_iterator`, `signal_evaluator`,
+`position_manager`, `fill_simulator`, `cost_calculator` (zero-cost in
+Track 1), `metrics_computer`, `result_writer`.
+- 12-worker concurrency model
+- Build reference test suite: 100 hand-coded scenarios with expected PnL
 
-### 4.1 India VIX — Reference-Only Role
+**VALIDATION GATE 3:**
+- All 100 reference scenarios match expected PnL within 1 paisa
+- Memory-mapped data shared across workers
+- Per-worker peak memory ≤ 500 MB
+- Save report to `gate3_report.json`
 
-India VIX is **fetched and stored** like the 3 spot indexes — same
-Dhan endpoints, same 1m + 1d intervals, same 21 derived timeframes,
-same audit guarantees — but is **never** an input to the brute-force
-search. Specifically:
+### Phase 4: TradingView Reference Validation (Week 7)
+- Build TradingView replay tool: 20 random combinations
+- Manually replay each on TradingView, record entry/exit/PnL
+- Engine must match within 0.5%
 
-| What VIX participates in | Yes / No |
-|---|---|
-| Fetched from Dhan (1m + 1d) | ✅ YES |
-| Stored in Parquet lake (all 21 TFs) | ✅ YES |
-| Watermark tracking, audit chain | ✅ YES |
-| Brute-force pattern combinations | ❌ NO — never |
-| 52-condition vocabulary atoms | ❌ NO — never |
-| `vix_at_entry` column on trade result | ✅ YES — captured at signal bar close |
-| `vix_at_exit` column on trade result | ✅ YES — captured at exit bar close |
-| Stage 4 post-filter input | ✅ optional (e.g., "slice winners where vix_at_entry > 18") |
+**CRITICAL VALIDATION GATE 4:**
+- All 20 TradingView replays match within 0.5%
+- **DO NOT PROCEED TO PHASE 5 IF ANY FAILS**
+- Save report to `gate4_report.json`
 
-**Why not put VIX in the vocabulary?**
-1. VIX updates every 15 seconds, not tick — its 1m OHLC has ~4 underlying samples (low intra-bar resolution)
-2. Cross-instrument signals dramatically inflate the brute-force surface area
-3. VIX-as-context is a known design pattern in volatility research — it's a regime indicator, not a price-action pattern
-4. Future filter additions can use VIX without retroactively expanding the locked vocabulary
+### Phase 5: Single-Stage Sweep Benchmark (Week 8-10)
+- Run Stage 2 monolithically on SMALL slice:
+  1 instrument × 1 TF × 10,000 random masks × Mode A only
+- Measure: trials/sec, memory peak, per-mask scan time
+- Compare to theoretical bandwidth-bound estimate (~5 ms/scan)
 
-**Implementation:** `brutex/universe.py` exports `BRUTE_FORCE_INDICES`
-(3 spot indexes, used by the engine) and `REFERENCE_ONLY_INDICES`
-(India VIX, used only by the ingest + context-snapshot path). Property
-P-25 (Phase 1) asserts no pattern in the generated set ever references
-the VIX symbol.
+**VALIDATION GATE 5:**
+- Measured throughput within 30% of theoretical estimate
+- No NaN/inf in any result row
+- Reproducible bit-for-bit on rerun
+- Save benchmark to `gate5_report.json`
 
----
+### Phase 6: 6-Hour Calibration Sweep (Week 11)
+- 1 instrument × 3 TFs × 50,000 masks × Mode A
+- Continuous 6-hour run under powermetrics logging:
+  `powermetrics --samplers smc,cpu_power,gpu_power -i 60000`
+- Open lid, vertical stand, 22°C ambient, Macs Fan Control aggressive
+  (3500-5500 RPM)
+- Document M4 Pro sustained-load behavior
 
-## 5. Data Acquisition (Dhan)
+**VALIDATION GATE 6:**
+- No thermal throttle observed (package temp < 95°C sustained)
+- No crash, no resource leak (memory steady-state)
+- Checkpoint resume tested mid-sweep, results bit-identical
+- Save thermal log + benchmark to `gate6_report.json`
+- **THIS IS YOUR M4 PRO 6-12 HOUR CORPUS — NO PUBLIC EQUIVALENT EXISTS**
 
-### 5.1 Endpoints
+### Phase 7: Statistical Filters (Week 12-13)
+- Deflated Sharpe per (instrument, TF) leaderboard
+- CPCV with S=16, embargo = max indicator lookback
+- PBO via CSCV
+- Romano-Wolf step-down
+- Walk-Forward rolling 2y/6m/3m slide
+- Lockbox isolation enforced at code level (assert exception)
 
-| Endpoint | Use |
-|---|---|
-| `POST /v2/charts/intraday` | 1-minute OHLC; 90-day chunks |
-| `POST /v2/charts/historical` | Daily OHLC (for PDH/PDL anchors, calendar) |
+**VALIDATION GATE 7:**
+- Known-overfit synthetic strategy correctly rejected by DSR + PBO
+- Known-real synthetic strategy correctly accepted
+- Lockbox access from outside Stage 4.7 raises Exception
+- Save report to `gate7_report.json`
 
-### 5.2 Native granularity
+### Phase 8: Stage 3 Optimizer (Week 14)
+- Optuna TPE outer over masks
+- pycma 3.4 BIPOP-CMA-ES inner over (SL, TP)
+- Hyperparameters as locked above
 
-**Dhan provides 1, 5, 15, 25, 60 minute and 1-day intraday natively.**
-Track 1 fetches **1-minute only** and deterministically resamples to
-all other timeframes from the 1m base, anchored to 09:15 IST. The 25m
-and 60m natives are NOT used — we resample 1m for full parity across
-all TFs and a single reproducibility hash.
+**VALIDATION GATE 8:**
+- Synthetic 2D Rosenbrock function optimized to f(x) < 1e-4 in <100 evals
+- Convergence reproducible across reruns
+- Save report to `gate8_report.json`
 
-### 5.3 Resampling rules
+### Phase 9: Full Funnel Integration (Week 15)
+- End-to-end: Phase 2 indicators → Phase 5 sweep → Phase 7 filters →
+  Phase 8 refinement → top 10 strategies
+- Resumable checkpoints every 100M trials
+- Hash-chained JSONL audit log
+- Daily Parquet seal: BLAKE3 root + OpenTimestamps
+- DVC pipeline with content-addressed data versioning
+- GPG-signed git commits for all code state
 
-- Anchor origin to 09:15 IST each day
-- Drop partial bars at session close (15:30 cutoff)
-- Aggregate: `open = first`, `high = max`, `low = min`, `close = last`,
-  `volume = sum` (always 0 for spot)
-- Each TF stored as separate Parquet file partitioned by (instrument, date)
+**VALIDATION GATE 9:**
+- Full pipeline runs end-to-end on small slice (1 inst × 3 TF × 100K masks)
+- Deterministic: rerun produces identical result hashes
+- Audit chain verifies end-to-end via blake3
+- Save report to `gate9_report.json`
 
-### 5.4 securityId resolution — Static (hardcoded for Track 1)
+### **Phase 9.5: PILOT SWEEP (~52B trials, ~1-2h) — NEW** ⭐
 
-Track 1's universe is permanently locked to 4 instruments. All
-identifiers are **hardcoded** in `brutex/adapters/dhan/constants.py`
-(Phase 2 deliverable). The previous "runtime CSV lookup + never
-hardcode" rule is relaxed for this narrow scope — verified once,
-locked forever, quarterly smoke-tested.
+> Operator instruction 2026-05-16: do a smaller pilot before committing
+> to the full 730B Phase 10 sweep. Pilot must cover **all 3 instruments
+> × all 21 timeframes** from day one — only mask vocab and SL/TP grid
+> are reduced.
 
-**The 4 verified tuples (2026-05-15, user-confirmed via
-`web.dhan.co/Charts?exch=IDX&seg=I&secid=X`):**
+**Pilot configuration:**
+| Dimension | Pilot value | Phase 10 (full) value | Reduction |
+|---|---|---|---|
+| Instruments | **3 (all)** | 3 | 1× (full coverage) |
+| Timeframes | **21 (all)** | 21 | 1× (full coverage) |
+| Mask K range | **K=2..4** (294K masks) | K=2..5 (2.9M masks) | 10× |
+| SL/TP grid | **700 cells** (25 SL × 28 TP) | 2,000 cells (40 × 50) | ~2.9× |
+| Directions | 2 (bull, bear) | 2 | 1× |
+| Modes | 2 (A, B) | 2 | 1× |
+| **Total trials** | **~52B** | 730B | **14×** |
+| Wall time | ~1-2h | 14-20h | ~10× |
 
-| # | Trading Symbol | securityId | exchangeSegment | instrument | Use |
-|---|---|---|---|---|---|
-| 1 | `NIFTY 50` | `13` | `IDX_I` | `INDEX` | brute-force |
-| 2 | `NIFTY BANK` (BANKNIFTY) | `25` | `IDX_I` | `INDEX` | brute-force |
-| 3 | `SENSEX` | `51` | `IDX_I` | `INDEX` | brute-force |
-| 4 | `INDIA VIX` | `21` | `IDX_I` | `INDEX` | reference-only |
+**VALIDATION GATE 9.5 (PILOT):**
+- Sweep completes without crash
+- Measured throughput within 30% of bandwidth-bound projection
+- Top 10 pilot candidates pass lockbox (Sharpe within 30% of training, MDD within 50%)
+- Audit chain verifies end-to-end via blake3
+- Wall time matches 1-2h projection (±50%)
+- No NaN/inf in any result row
+- Save report to `gate9_5_pilot_report.json`
 
-**Why hardcode:**
-- 4-tuple universe is locked in MIGRATION decisions #71 and #87
-- Adding a 5th instrument requires a code change (intentional friction)
-- Saves ~100k-row master CSV download per adapter startup
-- Saves a network call + snapshot hash tracking on every run
-- Deterministic — no drift from upstream CSV revisions
+**Decision branches after Phase 9.5:**
+- **Pilot finds ≥3 candidates with lockbox Sharpe > 1.5** → consider stopping;
+  hand off top-10 to Track 2 for options realism. Skip Phase 10 unless
+  operator demands wider coverage.
+- **Pilot finds 1-2 candidates** → consider Phase 10 only for the
+  surviving (instrument, TF) regions, not the full grid.
+- **Pilot finds 0 candidates** → diagnose (vocab insufficient? data wrong?
+  filters too strict?). Do NOT auto-proceed to Phase 10. Operator review.
 
-**Verification (quarterly smoke test, `tests/smoke/test_dhan_secid_alive.py`):**
+### Phase 10: Full 730B Sweep (Week 16, CONDITIONAL on Phase 9.5)
+- Full 730B trials with 5-stage funnel — only if Phase 9.5 outcome
+  justifies it
+- Target wall time: 14-20 hours
+- Run under: `caffeinate -d -i -m -s -u brutex-sweep --config production.yaml`
+- powermetrics logging continuous to JSONL
+- Auto-pause triggers:
+  - Package temp > 95°C sustained 5 min → pause, drop to 4 cores
+  - System wall draw > 100W sustained 10 min → pause
+  - Battery discharging (`pmset -g batt`) → immediate pause
+- Save sweep state every 100M trials to 8TB SSD
+- Top 10 strategies → JSON config for Track 2 options realism leg
 
-For each of the 4 securityIds, GET `web.dhan.co/Charts?exch=IDX&seg=I&secid=X`
-and assert the response is HTTP 200 with the expected symbol in the
-page title. If a securityId is ever invalidated by Dhan (extremely
-unlikely for index spot), CI nightly catches it.
+**VALIDATION GATE 10:**
+- Sweep completes without crash
+- Top 10 strategies all pass lockbox test
+- Audit chain verifies
+- Total wall time within 14-24 hour band
+- Save final report to `gate10_final.json`
 
-**The master CSV approach is preserved as a fallback** only — if all 4
-hardcoded values fail simultaneously (catastrophic Dhan re-numbering),
-operators can manually fetch the CSV at
-`https://images.dhan.co/api-data/api-scrip-master-detailed.csv` and
-update the constants module.
+## Safety + Kill Switch
 
-### 5.5 Rate limiting
-
-**Verified 2026-05-15 from dhanhq.co/docs/v2 Rate Limit table:**
-
-| Tier | per-second | per-day |
-|---|---|---|
-| Data APIs (what Track 1 uses) | **5 req/s** | **100,000 / day** |
-| Order APIs (not used in Track 1) | 10 | 7,000 |
-| Quote APIs (not used in Track 1) | 1 | unlimited |
-
-**Adapter caps:**
-- Per-second: 5 × 0.6 safety factor = **3 r/s effective**
-- Per-day: 100,000 hard ceiling — track in audit log, refuse to start a run that projects above 80% utilisation
-
-**Track 1 typical utilisation:**
-- First run (5-year backfill): 4 instruments × (22 × 1m chunks + 1 daily chunk) = 92 requests
-- Daily incremental: 4 instruments × 1 chunk = 4 requests
-- **Both are < 0.1% of the daily quota** — quota is not the binding constraint.
-
-Constants live in `brutex/adapters/dhan/constants.py` (Phase 2 deliverable).
-
-### 5.6 Authentication (manual paste + auto-renew)
-
-Track 1 uses Dhan's **individual trader** access token model, NOT the
-TOTP / API-key flow.
-
-**First-time setup (manual, once per user):**
-
-1. User logs into `web.dhan.co`
-2. Navigates: My Profile → Access DhanHQ APIs → Generate Access Token
-3. Token has 24-hour validity
-4. User copies the token + their Client ID into a JSON file at
-   `~/.brutex/dhan/access_token.json`:
-
-```json
-{
-  "client_id": "1000000401",
-  "access_token": "eyJ0eXAi…",
-  "expiry_time": "2026-05-16T15:00:00.000Z",
-  "last_renewed_at": "2026-05-15T15:00:00Z"
+```rust
+struct StageBudget {
+    stage: Stage,
+    max_wall_sec: u64,
+    max_memory_gb: f32,
+    max_trials: u64,
+    checkpoint_every_n_trials: u64,
 }
+
+const STAGE_1B: StageBudget = StageBudget {
+    stage: Stage::CoarseScore,
+    max_wall_sec: 30 * 60,
+    max_memory_gb: 8.0,
+    max_trials: 200_000_000,
+    checkpoint_every_n_trials: 10_000_000,
+};
 ```
 
-The JSON file path is gitignored (`**/dhan_token*`, `**/access_token*`)
-and never committed.
+**Watchdog (`brutex doctor` adjacent):**
+- Main writes heartbeat JSON to `/tmp/brutex_heartbeat.json` every 30s
+- `brutex doctor` polls every 60s
+- Stale > 5 min → SIGTERM
+- After 30s → SIGKILL
+- `shutdown_clean()` flushes Parquet, closes LMDB, BLAKE3-chains partial results
 
-**Automatic renewal:**
+**NaN / overflow detection:**
+- int64: `checked_add/sub/mul` → log + skip + overflow_counter on `None`
+- f64: `is_finite()` on every accumulation; non-finite → NaN bucket dispatch
+- AArch64 FPCR: enable IXE trap in debug builds only
 
-- At adapter startup AND every ~22 hours, BruteX calls
-  `POST https://api.dhan.co/v2/RenewToken` with headers
-  `access-token: <current>` + `dhanClientId: <client_id>`.
-- On success: write new token + new expiry to the JSON file
-  atomically (tempfile + rename).
-- On failure (e.g., 24h elapsed, token already expired): structlog
-  `CRITICAL auth.token_expired` event, FSM → HALTED, user must
-  manually regenerate.
-
-**Why this design:**
-
-- Simplest first-run experience (one copy-paste)
-- Auto-renewal keeps Track 1 running indefinitely as long as someone
-  refreshes once per ~6 months (or whenever they want)
-- TOTP flow is reserved for an optional `brutex auth setup --totp`
-  command later (out of Track 1 minimum)
-
-Detailed flow + pseudocode in `TRACK1_DATA_INGEST_DESIGN.md §5A`.
-
----
-
-## 6. Timeframes (21 total)
-
-### 6.0 Single-Timeframe Invariant (no multi-TF strategies)
-
-Every brute-forced strategy is evaluated on bars of **exactly one**
-chosen intraday timeframe (the run's `timeframe_id`). The 52-condition
-vocabulary contains **no cross-intraday-TF condition**:
-
-- Indicators EMA20/EMA200, day_high/day_low, candle shape, prior-N-bar
-  patterns, time-of-day are all computed on the chosen TF.
-- PDH, PDL, PDC, daily pivots (P/R1-R3/S1-S3), daily Fib anchors, and
-  prev_close are **scalar constants** derived once per trading day from
-  the daily series and broadcast across that day's intraday bars —
-  they are NOT a parallel bar stream and do not constitute multi-TF logic.
-
-This is industry-standard "daily-anchor on intraday" behavior
-(TradingView, NinjaTrader, etc.). Each (instrument, timeframe) tuple
-runs as an entirely independent backtest over the full 5-year range.
-Property test P-25 (Phase 1) asserts the bar-mask evaluator only reads
-the chosen-TF Parquet plus the daily-anchor scalar table.
-
-### 6.1 Timeframes themselves
-
-All resampled from 1m base, anchored to 09:15 IST. The 1m base + 1d
-daily are fetched directly from Dhan (`/v2/charts/intraday` and
-`/v2/charts/historical` respectively); the 19 intraday derived TFs are
-resampled in a single-pass cascade.
-
-| Group | Timeframes | Count |
-|---|---|---|
-| Native fetched | 1m (intraday), 1d (daily) | 2 |
-| Derived — 1-min increments through 15m | 2m, 3m, 4m, 5m, 6m, 7m, 8m, 9m, 10m, 11m, 12m, 13m, 14m, 15m | 14 |
-| Derived — longer windows | 30m, 60m, 120m, 180m, 240m | 5 |
-| **TOTAL** | | **21** |
-
-**Updated 2026-05-15** (from 15 → 21 TFs per user scope expansion).
-The 1-minute increment series 2m through 15m provides finer
-intermediate granularity for short-horizon strategies; longer
-windows (30m up to 4h) cover swing setups.
-
-The resampling pipeline is specified in detail in
-`TRACK1_DATA_INGEST_DESIGN.md §3` and `§11.2`. Property test P-08
-asserts associativity: `resample(resample(x,2),3) ≡ resample(x,6)`.
-
----
-
-## 7. Indicators (9 precomputed)
-
-| # | Indicator | Notes |
-|---|---|---|
-| 1 | EMA 20 (close) | per-TF |
-| 2 | EMA 200 (close) | per-TF |
-| 3 | Day High | running intraday; `day_high[t] = max(day_high[t-1], high[t])` — no resample leak |
-| 4 | Day Low | symmetric to Day High |
-| 5 | PDH (Previous Day High) | from daily data; **previous trading day** (skips holidays) |
-| 6 | PDL (Previous Day Low) | symmetric to PDH |
-| 7 | Daily Pivots (P, R1, R2, R3, S1, S2, S3) | computed from PDH/PDL/PDC, pure function — no intraday leak |
-| 8 | Static Daily Fib levels (12 computed, 11 in vocabulary) | anchor: previous-day H→L; extensions in trade direction; computed levels: 0, 23.6, 38.2, 50, 61.8, 78.6, 100, 127.2, 161.8, 200, 261.8, 423.6. The 423.6% extension is computed but reserved for Options Track (rarely hits on 5y spot data) — see `TRACK1_VOCABULARY.md §5`. |
-| 9 | Candle metadata | color (bull/bear/doji defined by close vs open), body_pct, upper_wick_pct, lower_wick_pct |
-
-**VWAP intentionally dropped** — indexes have no volume.
-
-All indicators are precomputed once per (instrument, timeframe) and
-stored as additional columns in the same Parquet file as OHLCV bars.
-Cache key: `sha256(data_version ‖ indicator_version)`.
-
----
-
-## 8. Strategy Vocabulary (52 atomic conditions)
-
-The strategy space is a **brute force over condition combinations**,
-not a hand-picked strategy list. The 52 atomic conditions are organised
-into 9 groups (EMA position 6, pivot proximity 7, PDH/PDL 6, Fib
-proximity 11, candle shape 7, prior bar pattern 3, day structure 4,
-time of day 4, day type 4).
-
-**A "strategy" = pick K conditions (K ∈ {2,3,4,5}) and AND them.**
-
-- AND only (no OR / mixed boolean)
-- Per-instrument direction parameter (bull/bear) — same condition set
-  evaluated in both directions
-- Mutually-exclusive combinations (e.g., `close > EMA20 AND
-  close < EMA20`) pruned at generation time via a conflict graph
-- Effective pattern count after pruning: ~1.2-1.5M (down from raw 2.9M)
-
-### Tolerance / proximity parameters
-
-All "near" conditions use **basis points (bps) relative to current
-close**, NOT absolute points. This is critical: a 10-point tolerance
-on NIFTY ≈ 4 bps but on SENSEX ≈ 1.3 bps — same number is a different
-signal.
-
-- `fib_proximity_bps`: 5, 10, 25, 50 bps
-- `pivot_proximity_bps`: 5, 10, 25, 50 bps
-- `ema_proximity_bps`: 5, 10, 25, 50 bps
-- `pdh_retest_dip_bps`: 0, 5, 10, 25 bps
-- `pdh_retest_close_above_bps`: 5, 10, 25 bps
-
-See `TRACK1_VOCABULARY.md` for the full enumeration with pseudocode
-for each of the 52 atomic conditions.
-
----
-
-## 9. Exit Modes (both brute-forced in parallel)
-
-### Mode A — SL/TP-based (~2.76M params per pattern)
-
-| Param | Values |
-|---|---|
-| SL points (Stage 2 coarse) | 10-300 step 25 (12 values) |
-| TP points (Stage 2 coarse) | 30-1500 step 50 (30 values) |
-| SL refine (Stage 3) | 1-pt grid around winners |
-| TP refine (Stage 3) | 1-pt grid around winners |
-| SL type | fixed / trailing (2 values) |
-| Confirm candles | 1, 2, 3 (3 values) |
-| Entry window | early / mid / midday / afternoon / all (5 values) |
-| Proximity tolerance | 4 values (see above) |
-| Position size | 1, 2, 3, 5% (4 values) |
-| Max trades/day | 1, 2, 3, 5 (4 values) |
-| Min gap | 0, 15, 30, 60 min (4 values) |
-
-Exit triggers: SL hit, TP hit, or 15:20 forced exit (whichever fires first).
-
-### Mode B — signal-based exit (~500K params per pattern)
-
-Exit vocabulary (1 or 2 exit conditions, ORed):
-
-1. Opposite entry condition fires
-2. 1-bar candle color reversal
-3. 2-bar candle reversal
-4. EMA 20 cross opposite
-5. EMA 200 cross opposite
-6. Pivot break opposite (R1/S1)
-7. PDH/PDL break opposite
-8. Fib level break opposite
-9. Time-based: N bars elapsed (N ∈ {10, 30, 60, 120, 240})
-10. **Forced 15:20 IST close (always active)**
-
----
-
-## 10. Entry Rule (carved in stone)
+## Storage Layout (8TB SSD)
 
 ```
-ALWAYS on bar CLOSE.
-NEVER on bar touch / mid-bar.
-Signal at bar N → enter at bar (N+1) OPEN.
+/Volumes/QuantData/
+├── raw/
+│   ├── NIFTY/
+│   │   ├── 1min_2021_2026.parquet
+│   │   └── daily_2021_2026.parquet
+│   ├── BANKNIFTY/...
+│   └── SENSEX/...
+├── resampled/
+│   └── {instrument}/{tf}.parquet           # 21 TFs × 3 instruments = 63 files
+├── indicators/
+│   └── {instrument}_{tf}_indicators.parquet # 52 conditions packed
+├── stages/
+│   ├── stage1b_survivors.parquet
+│   ├── stage2_results.parquet              # streaming append
+│   ├── stage2_5_pruned.parquet
+│   ├── stage3_refined.parquet
+│   └── stage4_lockbox/                     # access-controlled
+├── audit/
+│   └── {run_id}/chain.jsonl                # hash-chained, BLAKE3-sealed
+├── checkpoints/
+│   └── {run_id}/chunk_{N}.json
+├── validation/
+│   └── gate{N}_report.json                  # 1..10 + 9_5_pilot
+├── results/
+│   ├── pilot_top10_strategies.json
+│   └── final_top10_strategies.json
+└── dvc-cache/                              # content-addressed datasets
 ```
 
-**Definitions:**
+## Reproducibility Trail
 
-- "Bar is bullish" = `close > open` (not `close > prev_close`)
-- "Prior N bars bullish" = N parametrised (N ∈ {1, 2, 3, 4})
-- "Near level X within K bps" = `abs(bar.close - X) ≤ X × K / 10000`
-
----
-
-## 11. Fill Model (signal-only)
-
-| Aspect | Value |
-|---|---|
-| Fill price | bar OPEN of (signal_bar + 1) |
-| Slippage | ZERO |
-| Pessimistic fill | NONE |
-| Brokerage | **NONE** — spot is not tradable |
-| STT | **NONE** |
-| GST | **NONE** |
-| Stamp duty | **NONE** |
-| PnL column | `paper_pnl_paisa` (single column, signal-only honest paper) |
-| **VIX context columns** | `vix_at_entry` (NIFTY VIX close at signal bar) + `vix_at_exit` (NIFTY VIX close at exit bar) — captured but NOT used in entry/exit decision |
-| Position size unit | % of notional capital; lot-rounded reserved for the Options Track |
-
-Execution realism (brokerage, STT, slippage, spread, IV decay, theta)
-re-enters in the **Options Track** (post-Track-1) when Track 1 winners
-are translated to option contracts. Distinct from Track 1's own
-"Phase 2" build phase (Dhan adapter + vocabulary; see `TRACK1_PHASE_PLAN.md`).
-
----
-
-## 12. Search Pipeline (5 stages)
-
+Every result row tagged with:
 ```
-STAGE 1A — Pattern discovery (NIFTY 15m only)
-   ~5.8M trials, ~90 sec wall
-   → top 50,000 patterns
-
-STAGE 1B — Pattern expansion across all 63 (inst × TF) combos
-   Top 50K × 63 inst-TF × default params
-   ~3.15M trials, ~56 sec wall
-   → top 10,000 (pattern × inst × TF × direction) combos
-
-STAGE 2 — Full parameter brute force
-   Top 10K × Mode A (2.76M params) = 27.6B trials
-   Top 10K × Mode B (500K params) = 5.0B trials
-   ~33 BILLION trials total
-   ~2-4 DAYS wall on M4 Pro at 80-150K trials/sec sustained
-   (memory-bandwidth bound; see TRACK1_PERFORMANCE_BUDGET.md)
-   → top 1,000 combos
-
-STAGE 3 — Bayesian fine refinement
-   Top 1K × CMA-ES with 1-pt SL/TP precision
-   ~50K trials, ~15-20 min wall
-   → top 100 combos
-
-STAGE 4 — 4-filter cascade
-   Top 100 → DSR (effective-N, cluster-adjusted) → CPCV → WFO → Lockbox
-   ~30-45 min wall
-   → FINAL 3 selected
+blake3(strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖
+       canonical_params ‖ data_snapshot_hash ‖ indicator_version ‖
+       code_commit_hash)
 ```
 
-**Effective N for DSR** uses Bailey & López de Prado correlation
-clustering: patterns that share ≥ 3 of K conditions are clustered, and
-the cluster counts as 1 trial. Typical effective N: 10K-100K, not 33B.
-This makes the DSR threshold achievable for genuine-edge strategies.
+Where:
+- `data_snapshot_hash` = blake3 of input Parquet bytes (DVC-tracked)
+- `indicator_version` = semver from `pyproject.toml`
+- `code_commit_hash` = git SHA, GPG-signed
 
----
+**Daily seal:** blake3 of all run Parquet files → OpenTimestamps commit.
 
-## 13. O(1) Guarantees (proven in CI)
+## Working Style
 
-Every hot path is provably O(1). Bench tests at N ∈ {1K, 10K, 100K,
-1M} with hard assertion `p99(N=1M) / p99(N=1K) ≤ 1.1`.
+1. After EACH phase, pause for operator to verify the validation gate.
+2. Do not proceed to next phase if validation gate fails.
+3. Document every non-obvious decision in code comments with research citation.
+4. Run benchmarks on the actual M4 Pro and report measured numbers, not
+   theoretical claims.
+5. Flag any deviation from research recommendations explicitly with reason.
+6. Build incrementally — do not skip phases.
+7. If a requirement conflict is discovered, STOP and ask. Do not guess.
 
-| Operation | Mechanism |
-|---|---|
-| Bar lookup by ts | Pre-sorted u64 index in mmap |
-| Indicator value lookup | Column array index |
-| Strategy mask evaluation | Bitwise AND on u64 |
-| Combo dedup pre-check | Bloom filter (~5ns) |
-| Combo dedup confirm | LMDB B+tree get (~50µs amortised) |
-| Result Parquet append | Buffered streaming writer (~100ns amortised) |
+## Hand-off to Track 2
 
-See `TRACK1_VERIFICATION_PYRAMID.md §5` for the full bench-test design.
+Phase 9.5 (or Phase 10, if executed) produces a top-10 list. That list
+is the input to Track 2's Phase 4 sweep (`docs/track2/phases/phase_4_first_sweep.md`).
+Track 2 takes each (mask, direction, instrument, TF, mode, params) tuple
+and translates it into priced option trades using expired-options data,
+applying realistic brokerage / STT / STO / GST / slippage. Track 2 does
+NOT modify the spot signal — only adds the realism leg.
 
----
+## Decision Ledger Linkage
 
-## 14. Dedup & Uniqueness
+This spec adds the following decision rows to `docs/MIGRATION.md`
+(numbering starts at #300 to leave room for v1 amendments #103-#299):
 
-```
-combo_hash = SHA256(
-    strategy_mask_u64     ‖  // which of 52 conditions
-    direction_bit         ‖  // bull/bear
-    instrument_id         ‖  // NIFTY/BANKNIFTY/SENSEX
-    timeframe_id          ‖  // 1m to 1d (one of 21)
-    mode_byte             ‖  // A or B
-    canonical_params_json ‖  // sorted keys, NaN-rejected
-    data_version_hash     ‖  // SHA of input Parquet files
-    indicator_version     ‖  // bump on indicator code change
-    code_commit_hash         // current git HEAD
-)
-```
+- #300 — Track 1 v2 spec adopted (this doc); v1 archived to `docs/archive/`
+- #301 — Track 1 = signal-only, NO futures, NO costs (operator 2026-05-16)
+- #302 — Phase 9.5 pilot inserted (~52B, all 3 inst × all 21 TFs, K=2..4, 700 SL/TP cells)
+- #303 — Tech stack version locks (Rust 1.78, Polars 1.18, Optuna 4.1, pycma 3.4, etc.)
+- #304 — Stage 1B coarse-score formula locked
+- #305 — DSR threshold per (instrument, TF) leaderboard, N≤10⁷ (not pool-wide)
+- #306 — BIPOP-CMA-ES hyperparameters locked (λ=6, μ=3, σ₀=0.3)
+- #307 — Lockbox window = Dec 2025 – May 2026
+- #308 — `/Volumes/QuantData` 8TB SSD partition layout
+- #309 — FPCR pinning + FZ bit DISABLED + feenableexcept on debug
+- #310 — Audit chain via blake3 + OpenTimestamps daily seal + DVC content-addressed
 
-- Bloom filter (~5GB at ~0.1% FPR for the **survivors-only** working set
-  of 100M-1B post-threshold-filter combos, NOT for all 33B raw trials).
-  Math: 5 GiB = 40e9 bits; at 1B survivors → 40 bits/elem → FPR ≈ 1e-12;
-  at 150M survivors → 267 bits/elem → FPR ≈ 0. The L3 LMDB B+tree is
-  the source of truth on Bloom collision. **Math sanity-check 2026-05-15
-  evening:** if Bloom were sized for all 33B raw trials (not survivors)
-  the same 5 GB would give only 1.21 bits/elem → FPR ≈ 56% (broken).
-  Track 1 sizes Bloom for survivors-only because raw trials are
-  threshold-filtered out of LMDB at write time (see §16).
-- LMDB (~30 GB at 33B keys, but in practice we only store **survivors**
-  above a result-threshold, dropping it to ~250 MB)
-- Lookup path: Bloom check → LMDB confirm (both O(1))
-- Timeframe is part of the hash: same pattern + params on 5m vs 15m
-  are **different combos** with different rows
+## First Action (Before Writing Any Code)
 
----
+Operator approved 2026-05-16 ("go ahead"). Implementation proceeds with:
 
-## 15. Hash-Chained Audit Log
+1. ✅ Folder structure (per Phase 0 PR proposal)
+2. ✅ Cargo.toml + pyproject.toml + uv.lock approach (per Phase 0 PR proposal)
+3. ✅ Dhan API test call (per `scripts/dhan_test_call.sh`)
+4. ✅ 90-day chunking + rate limit handler (per design above + `TRACK1_DATA_INGEST_DESIGN.md`)
+5. ✅ 8TB SSD partition plan (per `Storage Layout` section)
+6. ✅ Validation harness skeleton for Phase 1 (per `brutex/validation/gate1.py` design)
 
-Every material event (ingest chunk start/end, stage start/end, error,
-quarantine, kill) appends ONE line to `audit/audit.jsonl`:
-
-```
-{
-  "ts": "...",
-  "kind": "...",
-  "data": {...},
-  "prev_sha256": "<hash of prior line bytes>",
-  "this_sha256": "<hash of this line w/o this_sha256 field>"
-}
-```
-
-Replay test (oracle): re-running the audit log through the orchestrator
-MUST produce a byte-identical Parquet output. SHA256 mismatch fails CI.
-
-Selective logging: at 33B trials per sweep, NOT every trial logs to
-audit. Only material events (pattern_discovered, stage_complete,
-top_1k_winners, filter_decisions, errors). The full per-trial result
-goes to Parquet, not audit.
-
----
-
-## 16. Storage Strategy
-
-| Item | Size |
-|---|---|
-| Raw 1m OHLC (5y × 3 inst) | ~20 MB compressed |
-| Resampled 15 TFs | ~80 MB compressed |
-| 9 indicators precomputed | ~80 MB compressed |
-| **Result Parquet (threshold-filtered)** | **~50-100 GB per sweep** |
-| `failures.parquet` (audit completeness) | ~500 MB per sweep |
-| LMDB dedup index | ~250 MB |
-| Optuna SQLite (Stage 3 only) | ~500 MB |
-| Audit JSONL (selective) | ~50 MB |
-| **Per-sweep total** | **~50-100 GB** |
-| 8 TB SSD capacity | ~80-160 sweeps |
-
-Threshold filter (drops 95% of result rows that scored too poorly to
-ever survive the filter cascade) keeps daily iteration tractable.
-
----
-
-## 17. Indian Microstructure Handling
-
-Documented in detail in `TRACK1_MICROSTRUCTURE.md`. Highlights:
-
-- Pre-open 09:00-09:15 bars dropped at ingest
-- 15:20 forced exit (Track 1 convention)
-- Muhurat dates excluded by hardcoded list (Samvat 2078-2083)
-- NIFTY 50 reconstitution dates flagged in audit
-- Circuit breaker halts: drop the full day; do not carry signals
-- Half-day sessions (Ram Navami etc.) honoured by calendar
-
----
-
-## 18. Verification (the path to 99.9% assurance)
-
-See `TRACK1_VERIFICATION_PYRAMID.md` for the full 9-layer pyramid:
-
-1. Unit tests (100% line + branch on Python, 100% line + 95% branch on Rust)
-2. Property tests (24 invariants, hypothesis + proptest, 500 examples each)
-3. Golden tests (byte-equal SHA256 against fixtures)
-4. Integration tests (audit-log replay, Python-Rust parity, 52-condition spec table)
-5. Benchmark tests (O(1) ratio ≤ 1.1 at all hot paths)
-6. Stress tests (24h sustained, RSS ±5%)
-7. Smoke tests (<30s pre-push)
-8. Fuzz tests (cargo fuzz + atheris, 10 min/target nightly)
-9. Mutation tests (mutmut + cargo-mutants ≥ 85%)
-
-**The 3 oracle tests** that catch impl bugs:
-
-- **Audit-log replay** → byte-identical Parquet (proves reproducibility)
-- **Python-Rust parity** → naive ref engine ≡ Rust engine on 1-day/50-combo input (proves correctness)
-- **52-condition spec table** → engine returns exactly the hardcoded boolean for each atomic condition (proves vocabulary semantics)
-
----
-
-## 19. Phase Plan
-
-Detailed in `TRACK1_PHASE_PLAN.md`. Summary:
-
-| Phase | Duration | Deliverable |
-|---|---|---|
-| 0 | This week | Documentation, REQUIREMENTS deprecation, wipe |
-| 1 | 2-3 weeks | Verification scaffolding (9-layer pyramid, 24 invariants, 3 oracle tests) |
-| 2 | 3-4 weeks | Dhan adapter + spot-index ingest + 52-vocabulary |
-| 3 | 2-3 weeks | Brute-force engine (Stage 1A/1B/2/3) |
-| 4 | 1-2 weeks | Filter cascade (Stage 4) + first production sweep |
-
-**Total: 8-12 weeks** to ship Track 1 with 99.9% verification.
-
----
-
-## 20. Final Locked Decisions (one-line ledger)
-
-The full decision list (85 items, last amended 2026-05-15 evening) is
-mirrored in `MIGRATION.md`. Highlights:
-
-1. Spot indexes + India VIX, signal-only research, no broker theatre
-2. Dhan API; 1m + 1d fetched, 19 additional intraday TFs resampled (21 total)
-3. 9 indicators, no VWAP
-4. 52 atomic conditions, K=2..5 ANDed, conflict-graph pruned
-5. ~1.2-1.5M unique patterns (post-prune) × 2 directions
-6. Bull/bear paired as a direction parameter
-7. AND only; no OR
-8. Two modes: A (SL/TP), B (signal-exit) — parallel sweep
-9. Entry: bar (N+1) open after candle close signal
-10. PnL: `paper_pnl_paisa` only; brokerage/STT/GST/stamp REMOVED
-11. Tolerances in basis points (not absolute points)
-12. DSR with effective-N (cluster-adjusted, Bailey-LdP)
-13. 5-stage smart-staged search (1A → 1B → 2 → 3 → 4)
-14. ~33B trials per sweep; **2-4 days wall time honestly stated**
-15. 10 P-cores used (4 E-cores reserved for OS + daily apps); multi-day execution
-16. SHA256+Bloom+LMDB dedup with TF as part of hash
-17. Hash-chained audit JSONL with selective material-event logging
-18. Threshold-filtered Parquet (~50-100GB per sweep)
-19. 9-layer test pyramid, 24 invariants, 3 oracles
-20. 8-12 week build phase plan
+Phase 1 implementation begins on branch `claude/track1-phase-1-foundation-VXTP1`
+after this spec PR merges. Phase 1 exits on Validation Gate 1 sign-off.
