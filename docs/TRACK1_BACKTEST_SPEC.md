@@ -216,6 +216,70 @@ spot timeline by timestamp alignment.
   - Total grid: **2,000 cells per mask**
 - **Mode B** — signal-driven exit:
   - Exit on opposite signal, or candle reversal pattern, or forced 15:20 IST.
+- **Mode C** — no-early-exits (NEW 2026-05-16, operator decision):
+  - NO stop-loss, NO take-profit, NO signal-driven exit.
+  - Exit ONLY at forced 15:20 IST.
+  - The "pure ride-to-forced-exit" baseline.
+  - Tests whether early exits help or hurt vs holding to 15:20.
+  - Cardinality: 1 cell per mask (no grid).
+  - Brute-force evaluates ALL THREE modes per strategy mask, so each
+    mask produces 3 strategy variants (Mode A grid + Mode B + Mode C).
+  - Logged as DEC-MODE-001 in MIGRATION.md.
+
+## Plugin Add/Remove Policy (NEW 2026-05-16, DEC-PLUGIN-001)
+
+The Golden Rule #11 DYNAMIC mandate states "add a new indicator / TF /
+condition / mask without re-architecting". This section formalizes how
+to BOTH add and remove indicators safely, without invalidating past results.
+
+### How to ADD a new indicator
+
+1. Implement the indicator class in `brutex/indicators/<name>.py` with
+   the standard streaming + batch interface (`update_bar()` + `compute_batch()`).
+2. Add the indicator to the registry in `brutex/indicators/__init__.py`.
+3. Add a new bit to the 52-condition u64 vocab (now 53 conditions). The
+   condition is mapped to bit position 52 (next available).
+4. Bump `indicator_version` constant (semver minor bump).
+5. The cache-key `blake3(data_snapshot_hash || indicator_version)`
+   forces a fresh recompute. Past cached results remain valid for the
+   PREVIOUS indicator_version — they are NOT auto-deleted.
+6. Past brute-force result rows keep their old `indicator_version` stamp;
+   new runs use the new version. Both coexist in the Parquet lake;
+   queries filter by `indicator_version` for reproducibility.
+
+### How to REMOVE an indicator
+
+1. Mark the indicator deprecated in the registry (do NOT delete code).
+2. Set the corresponding bit position as RESERVED (do NOT reuse for a
+   different indicator — would silently corrupt old result interpretation).
+3. Bump `indicator_version` (semver major bump — breaking change).
+4. New brute-force runs will simply not fire the deprecated bit.
+5. Old cached results referencing the removed indicator's bit STILL
+   render correctly when queried by their original `indicator_version`.
+
+### Guarantees
+
+- **Backward compatibility:** all past brute-force results remain
+  interpretable as long as `indicator_version` is stamped on every row
+  (already in result schema §"Identity (hash inputs)").
+- **Forward compatibility:** adding indicators never requires migrating
+  past data — just bumps version.
+- **No bit reuse:** the u64 mask vocab is grow-only; removed bits are
+  marked RESERVED forever. This means the vocab can hold 64 historical
+  conditions; if BruteX ever exceeds 64, the engine must transition to
+  u128 (an explicit ADR, not a silent change).
+- **Same applies to timeframes and strategy modes** (Mode A/B/C):
+  the `timeframe_id` and `mode_byte` fields in `combo_hash` are stable
+  identifiers; deprecated IDs are reserved.
+
+### Hot-reload during a sweep
+
+NOT supported. Indicators are loaded once at sweep start; removing or
+adding an indicator mid-sweep is REJECTED at the orchestrator. The
+operator must HALT the sweep, modify the registry, restart the sweep
+(checkpoint-resume preserves progress on still-active indicators).
+
+---
 
 ## 5-Stage Funnel (Research-Validated)
 
