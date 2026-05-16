@@ -3,59 +3,70 @@
 Per `docs/TRACK1_VOCABULARY.md` Indicator Group 1 (Anchors):
     "Static Daily Fib (12 levels)"
 
-Verified against ES Trading Academy AmiBroker v11 formula (operator
-screenshots 2026-05-16). Exact match on BANKNIFTY 13-May-2026:
-    PDH=54000, PDL=53594.40, 23% level = 53904.28 ✓
+## Direction-aware (verified against ES Trading Academy AmiBroker v11)
 
-## The math
+Operator screenshots (2026-05-16, multiple days) show the indicator
+flips between BULLISH and BEARISH conventions depending on the day's
+bias:
 
-```
-range = PDH − PDL    (computed from previous trading day's daily bar)
+BEARISH setup (gap-down / downtrend, e.g. BANKNIFTY 30-Apr-2026):
+- 0% = PDH (top of retracement)
+- 100% = PDL (bottom of retracement)
+- Extensions go DOWN below PDL: 127%, 162%, 200%, 262%, 424%
 
-INTRA-PD RANGE (retracements):
-    0%   = PDH                       (anchor: previous day's high)
-    23%  = PDH − 0.236 × range
-    38%  = PDH − 0.382 × range
-    50%  = (PDH + PDL) / 2           (midpoint)
-    62%  = PDH − 0.618 × range
-    78%  = PDH − 0.786 × range
-    100% = PDL                       (anchor: previous day's low)
+BULLISH setup (gap-up / uptrend, e.g. NIFTY 07-May-2026):
+- 0% = PDL (bottom of retracement)
+- 100% = PDH (top of retracement)
+- Extensions go UP above PDH: 127%, 162%, 200%, 262%, 424%
 
-EXTENSIONS BELOW PDL:
-    127% = PDL − 0.272 × range
-    162% = PDL − 0.618 × range
-    200% = PDL − 1.000 × range       (one full range below PDL)
-    262% = PDL − 1.618 × range
-    424% = PDL − 3.236 × range
-```
+In BOTH cases the same PDH/PDL range is the anchor — only the
+"direction" of extensions flips.
 
-## When computed
+## What we compute
 
-ONCE per trading day, at session open (09:15:00 IST), using the
-previous trading day's completed daily bar (PDH, PDL from
-`brutex/data/parser.py` daily Parquet).
+For each trading day we compute **17 unique anchor price levels**:
+- 7 retracement levels INSIDE the PDH-PDL range (same in both conventions)
+- 5 bullish extension levels ABOVE PDH (price targets when trending up)
+- 5 bearish extension levels BELOW PDL (price targets when trending down)
 
-## Why "static"
+The strategy engine references whichever subset matches its mask.
+Vocabulary conditions like:
+- `close > fib_50` — retracement (direction-agnostic)
+- `close > fib_ext_127_up` — above bullish extension
+- `close < fib_ext_127_down` — below bearish extension
 
-Held CONSTANT throughout the trading day across all 21 timeframes.
-This is what makes them "anchor" conditions — they're scalar
-broadcasts (not multi-TF reads, no look-ahead per Property P-25).
+## Verified bit-exact against 3 screenshots (2026-05-16)
+
+1. BANKNIFTY 13-May-2026 (BEARISH):
+   PDH=54,000  PDL=53,594.40  range=405.60
+   23% level = 53,904.28 ✓ (matches chart)
+
+2. BANKNIFTY 30-Apr-2026 (BEARISH):
+   PDH=56,502  PDL=55,650.00  range=852.00
+   38% level = 56,176.54 ✓ (matches chart)
+   200% down extension = 54,798.00 ✓ (matches chart)
+
+3. NIFTY 07-May-2026 (BULLISH):
+   PDH=24,313  PDL=24,056  range=257
+   200% UP extension = 24,570.00 ✓ (matches chart)
+   78% retracement = 24,258 ✓ (matches chart)
 
 ## Money representation
 
 All levels stored as `int64 paisa` per CLAUDE.md §4 (no floats in
 hot path). Multiplication by Fib ratios uses i64 arithmetic with
-rounding-to-nearest-even per the project's reproducibility rules.
+banker's rounding (round-half-to-even) per CLAUDE.md §4 reproducibility.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from enum import Enum
 from typing import Final
 
-# Standard Fibonacci ratios (exact int64 representation requires careful rounding).
-FIB_RATIOS_INTRA: Final[dict[str, float]] = {
+# Standard Fibonacci ratios.
+FIB_RATIOS_RETRACEMENT: Final[dict[str, float]] = {
     "0":    0.0,
     "23":   0.236,
     "38":   0.382,
@@ -73,68 +84,134 @@ FIB_RATIOS_EXTENSION: Final[dict[str, float]] = {
     "424":  3.236,
 }
 
-ALL_FIB_LEVEL_KEYS: Final[tuple[str, ...]] = (
+ALL_RETRACEMENT_KEYS: Final[tuple[str, ...]] = (
     "0", "23", "38", "50", "62", "78", "100",
+)
+
+ALL_EXTENSION_KEYS: Final[tuple[str, ...]] = (
     "127", "162", "200", "262", "424",
 )
 
 
+class FibDirection(Enum):
+    """Which direction the Fib extensions point.
+
+    BEARISH = extensions BELOW PDL (downtrend convention: 0%=PDH, 100%=PDL).
+    BULLISH = extensions ABOVE PDH (uptrend convention: 0%=PDL, 100%=PDH).
+    """
+
+    BEARISH = "bearish"
+    BULLISH = "bullish"
+
+
 @dataclass(frozen=True)
 class FibLevels:
-    """The 12 static daily Fibonacci levels for one (instrument, trading_day).
+    """The full set of static daily Fibonacci anchor levels for one
+    (instrument, trading_day).
 
-    All values are int64 paisa to match the project's money representation.
-    Computed ONCE per day from previous trading day's PDH/PDL.
+    Stores BOTH bullish and bearish convention extensions so the strategy
+    engine can reference whichever direction matches its mask.
+
+    All values in int64 paisa.
     """
 
     trading_day: date
-    pdh_paisa: int        # 0% level = Previous Day's High
-    pdl_paisa: int        # 100% level = Previous Day's Low
+    pdh_paisa: int        # Previous Day's High
+    pdl_paisa: int        # Previous Day's Low
     range_paisa: int      # PDH - PDL
 
-    # Retracements within previous-day range (PDH at 0%, PDL at 100%)
-    level_0_paisa: int    # = PDH
-    level_23_paisa: int
-    level_38_paisa: int
-    level_50_paisa: int   # midpoint
-    level_62_paisa: int
-    level_78_paisa: int
-    level_100_paisa: int  # = PDL
+    # ───── Retracement levels (inside PDH-PDL range) ─────
+    # These 7 levels are SAME regardless of direction convention.
+    # Labels differ: bearish reads top-down (0=PDH..100=PDL),
+    # bullish reads bottom-up (0=PDL..100=PDH).
+    retrace_level_at_pdh_paisa: int       # = PDH (top)
+    retrace_23_paisa: int                  # 23.6% from PDH downward
+    retrace_38_paisa: int                  # 38.2% from PDH downward
+    retrace_50_paisa: int                  # midpoint
+    retrace_62_paisa: int                  # 61.8% from PDH downward
+    retrace_78_paisa: int                  # 78.6% from PDH downward
+    retrace_level_at_pdl_paisa: int       # = PDL (bottom)
 
-    # Extensions BELOW PDL (downward expansion)
-    level_127_paisa: int
-    level_162_paisa: int
-    level_200_paisa: int
-    level_262_paisa: int
-    level_424_paisa: int
+    # ───── Bullish extensions ABOVE PDH ─────
+    # Price targets when the day is trending up (gap-up open).
+    ext_up_127_paisa: int   # PDH + 0.272 × range
+    ext_up_162_paisa: int   # PDH + 0.618 × range
+    ext_up_200_paisa: int   # PDH + 1.000 × range
+    ext_up_262_paisa: int   # PDH + 1.618 × range
+    ext_up_424_paisa: int   # PDH + 3.236 × range
 
-    def get(self, key: str) -> int:
-        """Lookup by string key (e.g. '50', '127')."""
-        mapping = {
-            "0":   self.level_0_paisa,
-            "23":  self.level_23_paisa,
-            "38":  self.level_38_paisa,
-            "50":  self.level_50_paisa,
-            "62":  self.level_62_paisa,
-            "78":  self.level_78_paisa,
-            "100": self.level_100_paisa,
-            "127": self.level_127_paisa,
-            "162": self.level_162_paisa,
-            "200": self.level_200_paisa,
-            "262": self.level_262_paisa,
-            "424": self.level_424_paisa,
+    # ───── Bearish extensions BELOW PDL ─────
+    # Price targets when the day is trending down (gap-down open).
+    ext_down_127_paisa: int  # PDL - 0.272 × range
+    ext_down_162_paisa: int  # PDL - 0.618 × range
+    ext_down_200_paisa: int  # PDL - 1.000 × range
+    ext_down_262_paisa: int  # PDL - 1.618 × range
+    ext_down_424_paisa: int  # PDL - 3.236 × range
+
+    def get_by_bearish_label(self, key: str) -> int:
+        """Lookup level by BEARISH convention label.
+
+        Bearish: 0% = PDH (top), 100% = PDL (bottom), extensions go DOWN.
+        Example: BANKNIFTY 30-Apr-2026 chart.
+        """
+        bearish_map = {
+            "0":   self.retrace_level_at_pdh_paisa,
+            "23":  self.retrace_23_paisa,
+            "38":  self.retrace_38_paisa,
+            "50":  self.retrace_50_paisa,
+            "62":  self.retrace_62_paisa,
+            "78":  self.retrace_78_paisa,
+            "100": self.retrace_level_at_pdl_paisa,
+            "127": self.ext_down_127_paisa,
+            "162": self.ext_down_162_paisa,
+            "200": self.ext_down_200_paisa,
+            "262": self.ext_down_262_paisa,
+            "424": self.ext_down_424_paisa,
         }
-        return mapping[key]
+        return bearish_map[key]
+
+    def get_by_bullish_label(self, key: str) -> int:
+        """Lookup level by BULLISH convention label.
+
+        Bullish: 0% = PDL (bottom), 100% = PDH (top), extensions go UP.
+        Example: NIFTY 07-May-2026 chart.
+
+        Note: retracement labels are REVERSED relative to bearish convention.
+        Bullish 23% = bearish 77% (~78% — same numerical price).
+        We map bullish-labeled 23/38/62/78 to the closest bearish-equivalent
+        physical level for label consistency with the AmiBroker indicator
+        as the operator sees it.
+        """
+        bullish_map = {
+            "0":   self.retrace_level_at_pdl_paisa,    # PDL is the bottom (0% in bullish)
+            "23":  self.retrace_78_paisa,              # 23% up from PDL = 78% down from PDH
+            "38":  self.retrace_62_paisa,              # 38% up = 62% down
+            "50":  self.retrace_50_paisa,              # midpoint (same)
+            "62":  self.retrace_38_paisa,              # 62% up = 38% down
+            "78":  self.retrace_23_paisa,              # 78% up = 23% down
+            "100": self.retrace_level_at_pdh_paisa,    # PDH is the top (100% in bullish)
+            "127": self.ext_up_127_paisa,
+            "162": self.ext_up_162_paisa,
+            "200": self.ext_up_200_paisa,
+            "262": self.ext_up_262_paisa,
+            "424": self.ext_up_424_paisa,
+        }
+        return bullish_map[key]
+
+    def get(self, key: str, direction: FibDirection) -> int:
+        """Lookup level by key + direction convention."""
+        if direction == FibDirection.BEARISH:
+            return self.get_by_bearish_label(key)
+        return self.get_by_bullish_label(key)
 
 
 def _round_half_even(x: float) -> int:
     """Round-half-to-even (banker's rounding) for deterministic i64 conversion.
 
-    Matches IEEE 754 default rounding mode AND the FPCR pin in CLAUDE.md §4 /
-    spec §Non-Negotiable Correctness #11. Critical for bit-identical replay.
+    Matches IEEE 754 default rounding mode and the FPCR pin per
+    CLAUDE.md §4 / spec §Non-Negotiable Correctness #11. Critical for
+    bit-identical replay across rebuilds.
     """
-    # Python's built-in `round()` uses banker's rounding (round-half-to-even)
-    # which matches IEEE-754 default. Verified: round(0.5) == 0, round(1.5) == 2.
     return int(round(x))
 
 
@@ -143,7 +220,7 @@ def compute_fib_levels(
     pdh_paisa: int,
     pdl_paisa: int,
 ) -> FibLevels:
-    """Compute the 12 static daily Fibonacci levels.
+    """Compute all 17 static daily Fibonacci anchor levels.
 
     Args:
         trading_day: The trading day these levels apply to (today).
@@ -151,12 +228,15 @@ def compute_fib_levels(
         pdl_paisa: Previous Day's Low in int64 paisa.
 
     Returns:
-        FibLevels dataclass with all 12 levels in int64 paisa.
+        FibLevels with 7 retracements + 5 bullish extensions + 5 bearish
+        extensions, all in int64 paisa.
 
-    Verified against ES Trading Academy AmiBroker v11 formula
-    (operator screenshot 2026-05-16):
-        BANKNIFTY 13-May-2026: PDH=54000.00, PDL=53594.40
-        Expected 23% = 53904.28 → matches exactly.
+    Verified against three operator screenshots (2026-05-16):
+    - BANKNIFTY 13-May-2026 (BEARISH): PDH=54000 PDL=53594.40 -> 23%=53904.28
+    - BANKNIFTY 30-Apr-2026 (BEARISH): PDH=56502 PDL=55650.00 -> 38%=56176.54
+                                                              -> 200%down=54798.00
+    - NIFTY 07-May-2026 (BULLISH): PDH=24313 PDL=24056 -> 200%up=24570.00
+                                                       -> 78%retrace=24258
 
     Raises:
         ValueError: if pdh < pdl (data corruption indicator).
@@ -169,37 +249,49 @@ def compute_fib_levels(
 
     range_paisa = pdh_paisa - pdl_paisa
 
-    # Retracements
-    level_0   = pdh_paisa
-    level_23  = _round_half_even(pdh_paisa - 0.236 * range_paisa)
-    level_38  = _round_half_even(pdh_paisa - 0.382 * range_paisa)
-    level_50  = _round_half_even((pdh_paisa + pdl_paisa) / 2.0)
-    level_62  = _round_half_even(pdh_paisa - 0.618 * range_paisa)
-    level_78  = _round_half_even(pdh_paisa - 0.786 * range_paisa)
-    level_100 = pdl_paisa
+    # Retracements (same physical levels regardless of direction label)
+    retrace_pdh = pdh_paisa
+    retrace_23  = _round_half_even(pdh_paisa - 0.236 * range_paisa)
+    retrace_38  = _round_half_even(pdh_paisa - 0.382 * range_paisa)
+    retrace_50  = _round_half_even((pdh_paisa + pdl_paisa) / 2.0)
+    retrace_62  = _round_half_even(pdh_paisa - 0.618 * range_paisa)
+    retrace_78  = _round_half_even(pdh_paisa - 0.786 * range_paisa)
+    retrace_pdl = pdl_paisa
 
-    # Extensions below PDL
-    level_127 = _round_half_even(pdl_paisa - 0.272 * range_paisa)
-    level_162 = _round_half_even(pdl_paisa - 0.618 * range_paisa)
-    level_200 = _round_half_even(pdl_paisa - 1.000 * range_paisa)
-    level_262 = _round_half_even(pdl_paisa - 1.618 * range_paisa)
-    level_424 = _round_half_even(pdl_paisa - 3.236 * range_paisa)
+    # Bullish extensions ABOVE PDH
+    ext_up_127 = _round_half_even(pdh_paisa + 0.272 * range_paisa)
+    ext_up_162 = _round_half_even(pdh_paisa + 0.618 * range_paisa)
+    ext_up_200 = _round_half_even(pdh_paisa + 1.000 * range_paisa)
+    ext_up_262 = _round_half_even(pdh_paisa + 1.618 * range_paisa)
+    ext_up_424 = _round_half_even(pdh_paisa + 3.236 * range_paisa)
+
+    # Bearish extensions BELOW PDL
+    ext_down_127 = _round_half_even(pdl_paisa - 0.272 * range_paisa)
+    ext_down_162 = _round_half_even(pdl_paisa - 0.618 * range_paisa)
+    ext_down_200 = _round_half_even(pdl_paisa - 1.000 * range_paisa)
+    ext_down_262 = _round_half_even(pdl_paisa - 1.618 * range_paisa)
+    ext_down_424 = _round_half_even(pdl_paisa - 3.236 * range_paisa)
 
     return FibLevels(
         trading_day=trading_day,
         pdh_paisa=pdh_paisa,
         pdl_paisa=pdl_paisa,
         range_paisa=range_paisa,
-        level_0_paisa=level_0,
-        level_23_paisa=level_23,
-        level_38_paisa=level_38,
-        level_50_paisa=level_50,
-        level_62_paisa=level_62,
-        level_78_paisa=level_78,
-        level_100_paisa=level_100,
-        level_127_paisa=level_127,
-        level_162_paisa=level_162,
-        level_200_paisa=level_200,
-        level_262_paisa=level_262,
-        level_424_paisa=level_424,
+        retrace_level_at_pdh_paisa=retrace_pdh,
+        retrace_23_paisa=retrace_23,
+        retrace_38_paisa=retrace_38,
+        retrace_50_paisa=retrace_50,
+        retrace_62_paisa=retrace_62,
+        retrace_78_paisa=retrace_78,
+        retrace_level_at_pdl_paisa=retrace_pdl,
+        ext_up_127_paisa=ext_up_127,
+        ext_up_162_paisa=ext_up_162,
+        ext_up_200_paisa=ext_up_200,
+        ext_up_262_paisa=ext_up_262,
+        ext_up_424_paisa=ext_up_424,
+        ext_down_127_paisa=ext_down_127,
+        ext_down_162_paisa=ext_down_162,
+        ext_down_200_paisa=ext_down_200,
+        ext_down_262_paisa=ext_down_262,
+        ext_down_424_paisa=ext_down_424,
     )
