@@ -570,6 +570,12 @@ This is the Phase 3 deliverable spec. Implementation follows in
 > **Separate concern from per-trade cost calculator.** Lives at
 > `brutex/costs/income_tax.py`. Computes annual tax liability from
 > the aggregated F&O PnL ledger.
+>
+> **Comprehensive treatment moved to `TRACK2_TAX_HANDLING.md`
+> (2026-05-16).** This section retains the API stub + slab tables.
+> All rules (turnover formula, set-off, carry-forward, advance-tax
+> buffer, regime toggle, ICAI Revised 2025 Guidance Note) are in the
+> dedicated spec.
 
 ### Classification under Income Tax Act
 
@@ -583,7 +589,8 @@ income** per Section 43(5) of the Income Tax Act. Implications:
 | ITR form | ITR-3 (mandatory for F&O traders) |
 | Deductible expenses | All charges (STT, brokerage, ETC, GST), trading software/data subscriptions, internet/electricity proportional, advisory fees, etc. |
 | Carry-forward of losses | 8 years (must file ITR by deadline) |
-| Audit requirement | If turnover > ₹10 crore (2024 amendment), OR profit < 6% of turnover |
+| Audit requirement | Section 44AB: turnover > ₹10 Cr (F&O is 100% electronic so the 5%-cash carve-out always applies). The "profit < 6% of turnover" trigger is a Section 44AD opt-out trap, NOT a 44AB threshold; see `TRACK2_TAX_HANDLING.md` §4. |
+| Turnover formula | Sum of absolute values of P&L per squared-off trade (ICAI Revised 2025 Guidance Note; no premium re-add). See `TRACK2_TAX_HANDLING.md` §3. |
 
 ### FY 2026-27 New Regime slabs (default — Income Tax Act 2025)
 
