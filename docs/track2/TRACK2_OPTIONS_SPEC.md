@@ -617,11 +617,13 @@ These will be appended to `docs/MIGRATION.md` when Phase 0 PR merges:
 - #211e: Risk-free rate lookup is step-function (no interpolation) at monthly boundaries
 - #211f: Expiry-day Greeks clamp T at 1 min to avoid theta divergence at 15:29-15:30 bars
 - #211g: `interval=1` integer (not string) per Dhan SDK; CI lint catches `interval='1'` regression
+- #211h: **ATM tie-break rule** — Phase 2 ingests a calibration batch (≥1 month, all 6 streams) and observes Dhan's tie-break behavior at exact spot-midpoint cases. The empirically-observed rule is locked into `EXPECTED_TIEBREAKS[underlying]` and verified by invariant P-O12. Operator signs off on the resulting table before Phase 2 backfill proceeds. (Sensible default if no midpoint case is observed: `round-half-up`.)
+- #211i: **Token refresh race protection** — single shared `asyncio.Lock` around the auth-renewal call. The first task to hit HTTP 401 acquires the lock, refreshes, then releases; all other 251 tasks waiting at the rate-limiter resume with the new token automatically (token is read from a shared `TokenCell`, not passed per-task). Prevents thundering-herd refresh.
 - #212: Cost model lives at `brutex/options/costs.py`, version-stamped
 - #213: Slippage profile = 5 × 4 × 4 = 80 combos per (signal, strike, expiry)
 - #214: Money is int64 paisa (same as Track 1)
 - #215: Audit kinds OPT_INGEST_*/OPT_GREEK_*/OPT_BACKTEST_* added
-- #216: 11 Track 2 property invariants added (Phase 1)
+- #216: 12 Track 2 property invariants added (Phase 1; P-O1..P-O12)
 - #217: 2 Track 2 oracle tests added (Phase 1)
 - #218: `brutex doctor` C12 (options-fresh) check added
 - #219: Track 2 effort = 6-8 weeks AFTER Track 1 Phase 2 ships
