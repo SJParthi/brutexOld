@@ -35,14 +35,56 @@
 | Pre-open window | 4 | ✅ |
 | Constants (tick size) | 1 | ✅ |
 
-### What's still pending (Hours 2-20)
+### Hour 2-4 (batch 2): Static Daily Fibonacci ✅
+
+`brutex/indicators/fib_levels.py` — 12-level Fib indicator anchored
+to Previous Day's High and Low, computed once per trading day and
+held constant intraday across all 21 timeframes.
+
+**Verified against operator's AmiBroker v11 screenshot:**
+- BANKNIFTY 13-May-2026: PDH=54,000, PDL=53,594.40
+- Expected 23% level = 53,904.28
+- Computed 23% level = 53,904.28 ✓ **bit-exact match**
+
+**The 12 levels (all in int64 paisa):**
+
+| Level | Formula | Type |
+|---|---|---|
+| 0% | PDH | anchor (top) |
+| 23% | PDH − 0.236×range | retracement |
+| 38% | PDH − 0.382×range | retracement |
+| 50% | (PDH+PDL)/2 | midpoint |
+| 62% | PDH − 0.618×range | retracement |
+| 78% | PDH − 0.786×range | retracement |
+| 100% | PDL | anchor (bottom) |
+| 127% | PDL − 0.272×range | extension below |
+| 162% | PDL − 0.618×range | extension below |
+| 200% | PDL − 1.000×range | extension below |
+| 262% | PDL − 1.618×range | extension below |
+| 424% | PDL − 3.236×range | extension below |
+
+**Tests:** 17/17 passing in 40 ms. Includes exact-match oracle test
+against operator's AmiBroker screenshot.
+
+### Day 1 commit so far (combined)
+
+| Module | Lines | Tests | Status |
+|---|---|---|---|
+| `brutex/calendars/nse.py` | 280 | 35 ✅ | Done |
+| `brutex/indicators/fib_levels.py` | 175 | 17 ✅ | Done |
+| Placeholder skeletons (`backtest`, `metrics`, `ranking`, `sprint`, `visualization`, `adapters/dhan`) | docstring stubs | — | Ready to fill |
+| **Total tests passing** | **52** | | **in 130 ms** |
+
+### What's still pending (Hours 4-20)
 
 | Hour | Module | Status |
 |---|---|---|
-| 2-4 | `brutex/adapters/dhan/` (HTTP client + token + auto-renew) | ⏸️ pending Dhan token |
-| 2-4 | `brutex/data/resampler.py` (1m → 21 TFs) | ⬜ next |
-| 4-6 | Real 5y Dhan data fetched + Parquet stored | ⏸️ pending Dhan token |
+| 4-6 | `brutex/indicators/pivots.py` (Standard Pivots P, R1-R4, S1-S4) | ⬜ next |
+| 4-6 | `brutex/indicators/ema.py` (EMA 20, EMA 200) | ⬜ |
+| 4-6 | `brutex/data/resampler.py` (1m → 21 TFs) | ⬜ |
 | 6-10 | `brutex/indicators/conditions.py` (52 vocab atoms) | ⬜ |
+| 4-6 | `brutex/adapters/dhan/` (HTTP client + token + auto-renew) | ⏸️ pending Dhan token |
+| 4-6 | Real 5y Dhan data fetched + Parquet stored | ⏸️ pending Dhan token |
 | 10-14 | `brutex/backtest/engine.py` (Polars vectorized) | ⬜ |
 | 14-16 | Sweep run (~12.6M trials, ~30-60 min wall) | ⏸️ pending Dhan data |
 | 16-18 | `brutex/metrics/calculator.py` (30+ metrics) | ⬜ |
@@ -60,10 +102,24 @@
 
 ## Dopamine of the day
 
-Calendar module locked. NSE 2021-2026 holidays + Muhurat sessions + forced 15:20 exit + tick size 5 paisa = ready. 35 tests passing in 90 ms. **First brick of the building is in.**
+**Calendar + Fib indicator both locked.** 52 tests passing in 130 ms.
+
+Bit-exact match against operator's AmiBroker v11 screenshot
+(BANKNIFTY 13-May-2026 23% level = 53,904.28). Proof the formula
+is correct — no hallucination, traceable to a verified screenshot.
+
+**First strategy template** indicator set:
+| # | Indicator | Status |
+|---|---|---|
+| 1 | Static Daily Fib (12 levels) | ✅ DONE |
+| 2 | Standard Pivots (P, R1-R4, S1-S4) | ⬜ next |
+| 3 | EMA 20 | ⬜ next |
+| 4 | EMA 200 | ⬜ next |
+| 5 | Previous Day OHLC | ⬜ next |
+| 6 | Day High / Day Low (running) | ⬜ next |
 
 ## Next commit target
 
-- Resampler: `brutex/data/resampler.py` (1m → 21 TFs, Polars vectorized)
-- 21 TF list verified against spec §Workload Math
-- Unit tests on synthetic 1m data
+- `brutex/indicators/pivots.py` — Standard Pivots (P, R1-R4, S1-S4)
+- `brutex/indicators/ema.py` — EMA 20, EMA 200
+- Spec amendment: vocab decision #11 says R1-R3 / S1-S3 — bump to R1-R4 / S1-S4 to match TradingView Traditional Auto pivot levels operator uses
