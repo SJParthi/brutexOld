@@ -316,4 +316,81 @@ Before any code commits, operator must:
 
 ---
 
-**END OF FINALIZATION DOC.**
+---
+
+## 8. Round 2 — Claude-chat prompt verification (added 2026-05-16)
+
+Operator shared a Claude-chat-generated cost-module prompt and asked
+for deep verification. 2 parallel agents dispatched. Both returned.
+
+### 8.1 Prompt-claim verification (4 high-risk items)
+
+| # | Claim | Verdict |
+|---|---|---|
+| 1 | Futures STT 0.05% post-Apr-2026 (Budget 2026) | ✅ **VERIFIED** — multiple Q1 2026 sources |
+| 2 | Dhan futures brokerage = min(₹20, 0.03% × turnover) | ✅ **VERIFIED** — same MIS + NRML |
+| 3 | Options exercise = ₹20 per CONTRACT | ❌ **CONTRADICTED** — actual is per ORDER. Prompt would over-count 100-lot exercise by ₹1,980 |
+| 4 | Physical settlement = 0.10% of contract value | ✅ **VERIFIED** — stock derivs only; index F&O is cash-settled |
+
+### 8.2 Extended instrument scope verification (Stream 2)
+
+| Instrument | Exists? | Lot Jan 2026 | Freeze | Notes |
+|---|---|---:|---|---|
+| FINNIFTY | ✅ Monthly only | 60 ✅ | UNVERIFIED | Weekly discontinued Nov 19, 2024 |
+| MIDCPNIFTY | ✅ Monthly only | 120 ✅ | UNVERIFIED | Weekly discontinued Nov 18, 2024 |
+| BANKEX (BSE) | ✅ Monthly only | 30 ✅ | UNVERIFIED | Last Thursday since Sept 1, 2025 |
+| NIFTYNXT50 | ✅ Monthly only | 25 ✅ | 600 ✅ | Liquidity historically thin |
+
+All 4 instrument lot sizes match prompt. Freeze quantities for
+FINNIFTY/MIDCPNIFTY/BANKEX are UNVERIFIED (NSE circulars HTTP 403).
+
+### 8.3 Dhan-specific gotcha — ₹20 on worthless options
+
+**NEW FINDING:** Dhan charges ₹20 per executed order EVEN when an
+option expires worthless. Unlike Zerodha which dropped this to ₹0 in
+June 2024. Material for short-OTM held-to-expiry strategies (each
+worthless short costs ₹23.60 = ₹20 + 18% GST).
+
+### 8.4 Operator scope decision: ADOPT STRUCTURE ONLY
+
+Operator chose "Adopt structure only" (recommended option). Means:
+
+- **KEEP** current Track 2 scope: NIFTY / BANKNIFTY / SENSEX options only
+- **DO NOT** add futures (separate scope expansion required)
+- **DO NOT** add FINNIFTY / MIDCPNIFTY / BANKEX / NIFTYNXT50 (separate
+  scope expansion required)
+- **ADOPT** the prompt's 5-action TradeOutcome enum for forward-
+  compatibility with future tracks that hold to expiry
+- **ADOPT** the prompt's per-leg modular file structure (12 files)
+  as the Phase 3 implementation plan (when code starts)
+
+### 8.5 Spec amendments this round (CALCULATOR_SPEC.md)
+
+- §1 inputs: replaced `held_to_expiry_exercise: bool` with
+  `trade_outcome: TradeOutcome` enum
+- §4.2 rewritten as 4-outcome state machine
+- §4.3 added: Dhan ₹20-on-worthless gotcha
+- §4.4 added: prompt-error correction recorded (per-contract WRONG)
+- §11 API: TradeOutcome enum added
+- §16 unverified items: 14 → 17 (added items 15-17)
+- §18 amendment log: +6 entries
+
+### 8.6 Items deferred for separate scope expansion
+
+If operator later expands scope (futures or other instruments), the
+following research is needed BEFORE code-lock:
+
+- [ ] Futures lot sizes per-date (NIFTY/BNX/SENSEX futures may use
+  different lot history than options)
+- [ ] Futures STT rate-era table (0.0125% pre-Oct-2024 → 0.02%
+  post-Oct-2024 → 0.05% post-Apr-2026)
+- [ ] Futures exchange transaction charges per contract
+- [ ] Freeze qty for FINNIFTY / MIDCPNIFTY / BANKEX (NSE/BSE
+  primary-source PDFs)
+- [ ] Strike intervals for FINNIFTY / MIDCPNIFTY / BANKEX /
+  NIFTYNXT50 (likely 50/25/100/n, but not verified)
+- [ ] NIFTYNXT50 monthly expiry day post-Sept-2025 alignment
+
+---
+
+**END OF FINALIZATION DOC v2.**
