@@ -61,6 +61,10 @@ exclude = ["tests*"]
 line-length = 100
 target-version = "py312"
 src = ["brutex", "tests"]
+# Red-team fixtures intentionally contain planted bugs. Excluded
+# from the global ruff scan; verified individually by tests/redteam/
+# subprocess invocations.
+extend-exclude = ["tests/redteam/fixtures/*.stripped.py", "tests/redteam/fixtures/planted_*.py"]
 
 [tool.ruff.lint]
 select = [
