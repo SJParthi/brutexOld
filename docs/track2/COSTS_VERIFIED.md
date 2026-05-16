@@ -559,6 +559,7 @@ This is the Phase 3 deliverable spec. Implementation follows in
 | 2026-05-16 | Initial draft | 4-agent deep research synthesis |
 | 2026-05-16 | §14 switched from Decimal to int math (`bps_x100`) | Operator cross-verification w/ parallel Claude chat spec; performance target <1µs |
 | 2026-05-16 | Added §18 Income Tax module | Operator cross-verification spec included annual FY 2026-27 tax computation |
+| 2026-05-16 | Slippage model simplified to flat 1-tick | Operator challenge: cannot validate delta-bucketed without tick data (Dhan API only provides 1m bars, no tick stream — ever). Honest simplicity > false precision. Track 2 §9 amended. |
 | _(future)_ | Level-1 verification result | After operator first real trade |
 | _(future)_ | BSE IPFT rate locked | After operator verifies via BSE page |
 | _(future)_ | Dhan rate card primary verification | After operator screenshot dhan.co/pricing |
@@ -655,7 +656,7 @@ conducted. Results:
 | All-int paisa math | YES | YES | ✅ EXACT |
 | GST 18% on (brokerage + exch + SEBI + IPFT) | YES | YES | ✅ EXACT |
 | GST rounding | rupee (Section 170 CGST) | paise (no rule cited) | ⚠️ DISCREPANCY |
-| Slippage model | delta-bucketed (Track 2 §9) | flat 1-tick (stale "project memory") | ⚠️ DISCREPANCY |
+| Slippage model | flat 1-tick (REVISED 2026-05-16) | flat 1-tick (stale "project memory" actually correct here) | ✅ NOW AGREE |
 | Multi-lot critical (₹20 per ORDER not per lot) | YES (Agent D) | NOT FLAGGED | my spec wins |
 | Muhurat session brokerage=0 | YES (Agent D) | NOT FLAGGED | my spec wins |
 | Women's discount discontinued July 2024 | YES (Agent D) | NOT FLAGGED | my spec wins |
@@ -674,7 +675,7 @@ conducted. Results:
 **Resolution decisions (operator confirmed 2026-05-16):**
 
 1. **GST rounding = rupee** (per Section 170 CGST Act citation). Reconcile against real contract note when available.
-2. **Slippage = delta-bucketed per Track 2 §9** (not flat 1-tick). Project memory's 1-tick rule was for Track 1 spot, which now uses NO slippage.
+2. **Slippage = flat 1-tick adverse on bar-open fills** (Track 2 §9 REVISED 2026-05-16). The previous delta-bucketed model couldn't be validated without tick data (which Dhan API does not provide). Flat 1-tick is the simplest defensible model given 1m OHLCV + OI + IV + strike + spot only.
 3. **Integrate Claude chat additions** (multi-file structure, int math, performance target, income tax module).
 4. **Keep my spec's edge cases** (multi-lot, Muhurat, women's discount, DhanHQ API, BSE) — Claude chat missed these.
 

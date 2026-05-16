@@ -570,60 +570,105 @@ TICK_SIZE_INR_INDEX_OPTIONS      = 0.05      # 5 paise — unchanged for index o
 
 ---
 
-## 9. Slippage model (LOCKED 2026-05-16, delta-bucketed)
+## 9. Slippage model (REVISED 2026-05-16, flat 1-tick)
 
-Per agent research 2026-05-16: industry-magnitude estimates from PL
-Capital, Groww, Journal of Asset Management 2024 (DOTM bid-ask
-amplification study), Bajaj Broking. **Final calibration must be done
-from operator's own Dhan tick history once data ingest is operational
-(Phase 2).**
+**AMENDED 2026-05-16** after operator challenge: the previous
+delta-bucketed model assumed we could classify spread width by delta
+bucket, but with **1-minute OHLCV bars only (no tick data, ever)** we
+cannot measure or verify spreads. The delta-bucketed model was an
+industry-magnitude GUESS dressed up as a measurement.
 
-### 9.1 Per-side slippage by delta bucket
+Replaced with the **simplest defensible model given the data we have**:
+flat 1-tick adverse on bar-open fills.
 
-| Delta range | Strike position | Per-side slippage | Rationale |
-|---|---|---|---|
-| 0.45 - 0.55 | ATM | **1 tick = ₹0.05** | typical spread 5-15 paise on NIFTY ATM peak hours |
-| 0.20 - 0.44 | OTM 1-3 strikes | **2 ticks = ₹0.10** | spread 15-50 paise |
-| 0.05 - 0.19 | OTM 4-8 strikes | **5 ticks = ₹0.25 OR 0.5% of mid, whichever greater** | spread 50 paise to ₹2 |
-| < 0.05 | Deep OTM | **EXCLUDE from backtest universe** | spread routinely > 5% of premium; results = noise |
+### 9.1 Data we have (permanent constraint)
 
-### 9.2 Time-of-day multiplier
+| Available | Used for |
+|---|---|
+| 1-minute OHLCV per option strike | bar-open fill prices, range checks |
+| Open Interest (OI) | liquidity filter (reject trades on illiquid strikes) |
+| Implied Volatility (IV) | Greeks computation (delta, gamma, vega) |
+| Strike price | strike-rule classification (§6b) |
+| Spot price (NIFTY/BANKNIFTY/SENSEX) | BSM input |
 
-| Window (IST) | Multiplier | Why |
-|---|---|---|
-| 09:15 - 09:30 | **× 1.5** | open auction settling, wide spreads |
-| 10:00 - 14:30 | **× 1.0** | peak liquidity baseline |
-| 09:30 - 10:00, 14:30 - 15:00 | **× 1.25** | transitional |
-| 15:00 - 15:20 | **× 1.5** | pre-close, wider spreads + thin book |
+| NOT available (and never will be) | Why excluded |
+|---|---|
+| Tick-level bid/ask | Dhan API returns 1m aggregates only |
+| Order book depth | Same |
+| Within-bar fill sequence | Same |
+| Per-trade volume profile | Same |
 
-### 9.3 Volatility multiplier (India VIX-driven)
-
-| India VIX | Multiplier | Source |
-|---|---|---|
-| VIX ≤ 20 | × 1.0 | baseline |
-| 20 < VIX ≤ 30 | × 1.5 | engineering default (no academic cite) |
-| VIX > 30 | × 2.0 | event-day, very wide spreads |
-
-India VIX series already ingested via Track 1 (`securityId=21`, see Track 1 spec §Data Source).
-
-### 9.4 Final per-side slippage formula
+### 9.2 The model — flat 1-tick adverse
 
 ```
-slippage_inr = base_slippage(delta_bucket) × tod_multiplier × vix_multiplier
+   ENTRY (bar N+1 OPEN after signal at bar N close):
+     fill_price = bar(N+1).open + 1 tick   if side = buy
+                = bar(N+1).open - 1 tick   if side = sell
+
+   EXIT (bar M+1 OPEN after exit signal at bar M close):
+     fill_price = bar(M+1).open + 1 tick   if side = buy
+                = bar(M+1).open - 1 tick   if side = sell
+
+   tick = ₹0.05 (uniform for all NSE/BSE index options post-2020)
 ```
 
-Applied separately on entry fill (worst price within entry bar + slippage)
-and exit fill (same).
+That's it. No delta bucket. No ToD multiplier. No VIX multiplier.
+
+### 9.3 Why this is the right call given 1m-bar-only constraint
+
+| Reason | Detail |
+|---|---|
+| Bar OPEN is a real traded price | First transacted price of that minute — not a model output |
+| 1 tick ≈ half-spread for ATM/near-OTM strikes | Where Track 2 §6b rules operate (max strike OTM-5) |
+| Honest about uncertainty | Doesn't pretend to know what spread does as delta varies |
+| Defensible in audit | "Smallest defensible friction. Real friction may be slightly more." |
+| Academic standard | vectorbt, NautilusTrader, Jesse all default to ~1-tick when tick data unavailable |
+| Penalizes high-frequency strategies | ₹6.50/trade × N trades — strategies trading often face cumulative drag |
+
+### 9.4 Numerical impact
+
+For NIFTY ATM ₹100 → ₹120, 1 lot of 65:
+- Buy fill: ₹100.05 (was ₹100.00)
+- Sell fill: ₹119.95 (was ₹120.00)
+- Slippage cost: (0.05 + 0.05) × 65 = **₹6.50 per round-trip**
+- For BANKNIFTY: 0.10 × 30 = ₹3.00 per round-trip
+- For SENSEX: 0.10 × 20 = ₹2.00 per round-trip
+
+Combined with §8 charges (~₹65 per round-trip on NIFTY), total friction
+per trade is ~₹70-75 on NIFTY ATM 1-lot. Strategy edge must exceed this
+to be viable.
 
 ### 9.5 Sweep cardinality (Phase 4)
 
-Old §9 (TBD draft) proposed 5 × 4 × 4 = 80 slippage profiles. New
-locked design uses **delta-bucketed deterministic** slippage (NOT a
-brute-force grid) since the delta bucket is determined by strike
-position relative to ATM and is not a free parameter. **Sweep
-cardinality reduces from 80 to 1 slippage profile per (signal, strike,
-expiry).** Variance comes from delta bucketing + time-of-day + VIX
-naturally.
+**No slippage profile variation.** 1 deterministic model = 1 profile per
+trade. Sweep cardinality from slippage = **1× multiplier (no change to
+combinatorial space).**
+
+### 9.6 What we GIVE UP by using flat 1-tick
+
+- **Over-credits deep OTM trades**: real spread on far OTM is much
+  wider than 1 tick. But Track 2 §6b rules cap strike selection at
+  OTM-5 (delta ≥ 0.20), where 1-tick is a defensible underestimate.
+- **Under-credits very-near-ATM in low-vol days**: real ATM spread can
+  be < 1 tick (1 paise apart). But 1 tick is the smallest non-zero
+  tick increment, so we can't get tighter.
+- **No event-day handling**: Earnings, RBI policy days have wider
+  spreads. We accept this as model limitation.
+
+### 9.7 Future refinement (TickVault Phase 5+)
+
+When TickVault accumulates real Dhan tick data (via live WebSocket,
+NOT historical API), refine to a delta-bucketed or IV-scaled model
+based on **measured** spreads. Until then, flat 1-tick stands.
+
+### 9.8 Legacy delta-bucketed model (archived for reference)
+
+The previous delta-bucketed model (1/2/5 ticks × ToD × VIX) is
+preserved in git history at commit `5defd08` for reference. It was
+an industry-magnitude estimate from PL Capital / Groww / Journal of
+Asset Management 2024, but could not be validated without tick data.
+Removed 2026-05-16 per operator decision to favor honest simplicity
+over false precision.
 
 ---
 
