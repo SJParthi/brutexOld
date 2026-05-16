@@ -509,6 +509,7 @@ jobs:
         with:
           languages: python
           queries: security-extended,security-and-quality
+          config-file: ./.github/codeql/codeql-config.yml
       - uses: github/codeql-action/analyze@v4
         with:
           category: "/language:python"

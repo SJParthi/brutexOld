@@ -1,0 +1,17 @@
+name: BruteX CodeQL Config
+# Excludes intentional planted-bug fixtures from CodeQL scanning.
+# The fixtures in tests/redteam/fixtures/ CONTAIN known violations
+# by design — they exist for the redteam harness to verify that CI
+# gates (ruff, mypy, bandit, etc.) actually catch the violations.
+#
+# CodeQL flagging these is a false positive — the fixtures are not
+# production code; they're test inputs that the redteam tests run
+# linters against via subprocess.
+#
+# See:
+#   - tests/redteam/README.md
+#   - docs/STANDARDS_100PCT.md §1 row 8
+
+paths-ignore:
+  - "tests/redteam/fixtures/**"
+  - "tests/redteam/fixtures/planted_*.py"
