@@ -451,22 +451,25 @@ jobs:
             --exit-code 1
 
   # ─────────────────────────────────────────────────────────────────
-  # FNO-MATH DRIFT CHECK — runs on every push (fast)
-  # Also runs on schedule via drift-check.yml
+  # FNO-MATH DRIFT CHECK — REMOVED from per-push CI on 2026-05-15.
+  #
+  # The drift check (scripts/check-fno-math-drift.sh) clones tickvault
+  # from GitHub to diff against rust/fno-math/src/. In remote / sandboxed
+  # CI environments that can't reach the tickvault repo, the script
+  # always fails with a network error, producing a noisy red X on
+  # every PR — even on docs-only PRs that don't touch rust/fno-math/.
+  #
+  # The check still runs on schedule (every 6 hours) via
+  # .github/workflows/drift-check.yml, which has the right network
+  # context and opens/closes a tracking issue when drift is detected.
+  # Per the drift-check.yml design intent (line 12-14), it should
+  # never block merges anyway — merges only care about the snapshot
+  # that exists at merge time, not future tickvault drift.
+  #
+  # Restore here only if the scheduled workflow proves insufficient
+  # AND the per-push job can be made to skip cleanly when rust/fno-math/
+  # is untouched in the diff (e.g., via dorny/paths-filter).
   # ─────────────────────────────────────────────────────────────────
-  fno-math-drift:
-    name: fno-math drift check (vs tickvault)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    # Advisory only — per docs/drift-check.yml design intent, this should
-    # never block merges. Failure here means tickvault upstream has moved
-    # and operator should run scripts/extract-fno-math.sh, not that the
-    # PR is unsafe to merge.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v5
-      - name: Run drift check script
-        run: bash scripts/check-fno-math-drift.sh
 
   # ═════════════════════════════════════════════════════════════════
   # DEEP COMPREHENSIVE SCANNERS (PR #2) — every category of code
