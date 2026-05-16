@@ -151,21 +151,21 @@ stt_paisa     = ROUND_TO_NEAREST_RUPEE(stt_paisa_raw)
 # ── Step 6: exchange transaction charge (both sides, on premium) ──────────
 exch_rate = NSE_FNO_RATE if instrument in {"NIFTY", "BANKNIFTY"}
             else BSE_FNO_RATE
-exch_buy_paisa  = TRUNC_TO_PAISA(buy_notional_paisa  * exch_rate)
-exch_sell_paisa = TRUNC_TO_PAISA(sell_notional_paisa * exch_rate)
+exch_buy_paisa  = ROUND_TO_NEAREST_PAISA(buy_notional_paisa  * exch_rate)
+exch_sell_paisa = ROUND_TO_NEAREST_PAISA(sell_notional_paisa * exch_rate)
 exch_paisa      = exch_buy_paisa + exch_sell_paisa
-# Non-statutory: paise precision retained
+# Non-statutory: paise precision retained (commercial half-up rounding)
 
 # ── Step 7: SEBI fee (both sides, on premium) ────────────────────────────
-sebi_buy_paisa  = TRUNC_TO_PAISA(buy_notional_paisa  * SEBI_RATE)
-sebi_sell_paisa = TRUNC_TO_PAISA(sell_notional_paisa * SEBI_RATE)
+sebi_buy_paisa  = ROUND_TO_NEAREST_PAISA(buy_notional_paisa  * SEBI_RATE)
+sebi_sell_paisa = ROUND_TO_NEAREST_PAISA(sell_notional_paisa * SEBI_RATE)
 sebi_paisa      = sebi_buy_paisa + sebi_sell_paisa
 
 # ── Step 8: IPFT (both sides, on premium) ────────────────────────────────
 ipft_rate = IPFT_NSE_RATE if instrument in {"NIFTY", "BANKNIFTY"}
             else IPFT_BSE_RATE
-ipft_buy_paisa  = TRUNC_TO_PAISA(buy_notional_paisa  * ipft_rate)
-ipft_sell_paisa = TRUNC_TO_PAISA(sell_notional_paisa * ipft_rate)
+ipft_buy_paisa  = ROUND_TO_NEAREST_PAISA(buy_notional_paisa  * ipft_rate)
+ipft_sell_paisa = ROUND_TO_NEAREST_PAISA(sell_notional_paisa * ipft_rate)
 ipft_paisa      = ipft_buy_paisa + ipft_sell_paisa
 
 # ── Step 9: stamp duty (buy leg only) ────────────────────────────────────
@@ -234,26 +234,42 @@ ROUND_TO_NEAREST_RUPEE(paisa_raw):
 # NB: ties at exactly 50 paisa → round UP (commercial rounding, NOT banker's).
 # Section 170 CGST / Rule 11 STT use commercial rounding.
 
-TRUNC_TO_PAISA(paisa_raw):
-    # Keep paisa precision (no rupee rounding); floor to integer paisa.
-    return int(paisa_raw)  # truncation toward zero; OK because rates are positive
-# Used for: brokerage*, exchange, SEBI, IPFT.
-# (* brokerage is already exact ₹20.00 = 2000 paisa, no rounding needed.)
+ROUND_TO_NEAREST_PAISA(paisa_raw):
+    # paisa_raw is a float-derived value (rate × notional_paisa).
+    # Round to nearest integer paisa using commercial rounding (half-up).
+    # NOT truncation — truncation would break the §8.2 worked example
+    # (2.27695 INR truncates to ₹2.27 but spec requires ₹2.28).
+    return int(paisa_raw + 0.5)  # commercial half-up for positive values
+# Used for: exchange, SEBI, IPFT.
+# Brokerage is already exact ₹20.00 = 2000 paisa, no rounding needed.
+
+# IMPORTANT (rounding mode reconciliation):
+# - ROUND_TO_NEAREST_RUPEE uses commercial half-up at the 0.50 boundary.
+# - ROUND_TO_NEAREST_PAISA also uses commercial half-up at the 0.50 boundary.
+# - Both match the §8.2 LOCKED worked example byte-for-byte.
+# - This is NOT banker's rounding (half-to-even). Statutory texts
+#   (Section 170 CGST, Rule 11 STT, Indian Stamp Rules 2019) do not
+#   specify rounding mode, but commercial usage (and broker contract
+#   notes from Zerodha + Angel One) consistently use half-up.
 ```
 
 ---
 
 ## 5. Rounding rules table
 
-| Component | Rate × premium gives | Round to | Why |
-|---|---|---|---|
-| Brokerage | ₹20.00 exact | exact (no round) | flat fee, no fraction |
-| STT | premium × 0.10%/0.15% | **nearest rupee** | Rule 11 STT Rules 2004 |
-| Exchange (NSE/BSE) | premium × 0.0350%/0.0325% | nearest paise | non-statutory; quoted in paise |
-| SEBI fee | premium × 0.0001% | nearest paise | non-statutory; quoted in paise |
-| IPFT | premium × 0.0005% | nearest paise | non-statutory; quoted in paise |
-| Stamp duty | buy_premium × 0.003% | **nearest rupee** | Indian Stamp Rules 2019 |
-| CGST / SGST / IGST | base × 9%/9%/18% | **nearest rupee** | Section 170 CGST Act |
+| Component | Rate × premium gives | Round to | Mode | Why |
+|---|---|---|---|---|
+| Brokerage | ₹20.00 exact | exact (no round) | — | flat fee, no fraction |
+| STT | premium × 0.10%/0.15% | **nearest rupee** | commercial half-up | Rule 11 STT Rules 2004 |
+| Exchange (NSE/BSE) | premium × 0.0350%/0.0325% | nearest paise | commercial half-up | non-statutory; quoted in paise |
+| SEBI fee | premium × 0.0001% | nearest paise | commercial half-up | non-statutory; quoted in paise |
+| IPFT | premium × 0.0005% | nearest paise | commercial half-up | non-statutory; quoted in paise |
+| Stamp duty | buy_premium × 0.003% | **nearest rupee** | commercial half-up | Indian Stamp Rules 2019 |
+| CGST / SGST / IGST | base × 9%/9%/18% | **nearest rupee** | commercial half-up | Section 170 CGST Act |
+
+**Rounding mode:** commercial half-up (ties at exactly 0.50 → round
+UP). NOT banker's rounding (half-to-even). This matches §8.2 worked
+example and broker contract notes from Zerodha + Angel One.
 
 **Critical:** rupee-rounded items are rounded **per-leg** (per contract
 note / invoice), then summed. This matches §8.2 worked example AND
@@ -466,6 +482,93 @@ Each fixture has a static `expected_*.json` file checked into
 `tests/golden/calculator/`. Property test: every component value
 matches byte-for-byte.
 
+### 12.3 Multi-lot scaling table (NIFTY ATM, post-Apr-2026 STT 0.15%)
+
+Same scenario as §12.1 (NIFTY ATM ₹100→₹120, lot=65), repeated for
+lots 1..20 + 25. Demonstrates:
+- Brokerage stays FLAT at ₹40 (per-order, not per-lot)
+- Everything else scales linearly with notional
+- Cost% drops from 5.01% (1 lot) → 1.52% (25 lots) → ~1.50% asymptote
+
+| n | Shares | Gross PnL | Brkr | STT | Exch | SEBI | IPFT | Stamp | GST | **Charges** | Net PnL | Cost% |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 65 | 1,300.00 | 40.00 | 12 | 5.01 | 0.02 | 0.07 | 0 | 8 | **65.10** | 1,234.90 | 5.01% |
+| 2 | 130 | 2,600.00 | 40.00 | 23 | 10.01 | 0.03 | 0.15 | 0 | 8 | **81.19** | 2,518.81 | 3.12% |
+| 3 | 195 | 3,900.00 | 40.00 | 35 | 15.03 | 0.04 | 0.22 | 1 | 10 | **101.29** | 3,798.71 | 2.60% |
+| 4 | 260 | 5,200.00 | 40.00 | 47 | 20.04 | 0.06 | 0.29 | 1 | 12 | **120.39** | 5,079.61 | 2.32% |
+| 5 | 325 | 6,500.00 | 40.00 | 59 | 25.04 | 0.07 | 0.36 | 1 | 12 | **137.47** | 6,362.53 | 2.11% |
+| 6 | 390 | 7,800.00 | 40.00 | 70 | 30.05 | 0.09 | 0.43 | 1 | 12 | **153.57** | 7,646.43 | 1.97% |
+| 7 | 455 | 9,100.00 | 40.00 | 82 | 35.07 | 0.10 | 0.50 | 1 | 14 | **172.67** | 8,927.33 | 1.90% |
+| 8 | 520 | 10,400.00 | 40.00 | 94 | 40.08 | 0.11 | 0.57 | 2 | 14 | **190.76** | 10,209.24 | 1.83% |
+| 9 | 585 | 11,700.00 | 40.00 | 105 | 45.08 | 0.13 | 0.64 | 2 | 16 | **208.85** | 11,491.15 | 1.79% |
+| 10 | 650 | 13,000.00 | 40.00 | 117 | 50.09 | 0.15 | 0.72 | 2 | 16 | **225.96** | 12,774.04 | 1.74% |
+| 11 | 715 | 14,300.00 | 40.00 | 129 | 55.11 | 0.16 | 0.79 | 2 | 18 | **245.06** | 14,054.94 | 1.71% |
+| 12 | 780 | 15,600.00 | 40.00 | 140 | 60.11 | 0.17 | 0.86 | 2 | 18 | **261.14** | 15,338.86 | 1.67% |
+| 13 | 845 | 16,900.00 | 40.00 | 152 | 65.12 | 0.18 | 0.93 | 3 | 20 | **281.23** | 16,618.77 | 1.66% |
+| 14 | 910 | 18,200.00 | 40.00 | 164 | 70.13 | 0.20 | 1.01 | 3 | 20 | **298.34** | 17,901.66 | 1.64% |
+| 15 | 975 | 19,500.00 | 40.00 | 176 | 75.14 | 0.22 | 1.08 | 3 | 22 | **317.44** | 19,182.56 | 1.63% |
+| 16 | 1,040 | 20,800.00 | 40.00 | 187 | 80.15 | 0.22 | 1.14 | 3 | 22 | **333.51** | 20,466.49 | 1.60% |
+| 17 | 1,105 | 22,100.00 | 40.00 | 199 | 85.16 | 0.24 | 1.21 | 3 | 22 | **350.61** | 21,749.39 | 1.59% |
+| 18 | 1,170 | 23,400.00 | 40.00 | 211 | 90.17 | 0.26 | 1.29 | 4 | 24 | **370.72** | 23,029.28 | 1.58% |
+| 19 | 1,235 | 24,700.00 | 40.00 | 222 | 95.17 | 0.27 | 1.36 | 4 | 26 | **388.80** | 24,311.20 | 1.57% |
+| 20 | 1,300 | 26,000.00 | 40.00 | 234 | 100.19 | 0.29 | 1.43 | 4 | 26 | **405.91** | 25,594.09 | 1.56% |
+| **25** | **1,625** | **32,500.00** | **40.00** | **293** | **125.23** | **0.36** | **1.79** | **5** | **30** | **495.38** | **32,004.62** | **1.52%** |
+
+### 12.4 Slippage broken out separately (informational)
+
+Same scenarios with slippage as its own line. Raw bar opens: entry
+₹99.95, exit ₹120.05. After ±1-tick slippage: fills ₹100.00 / ₹120.00.
+
+| n | Raw Gross | + Slippage | + Charges | **Total Friction** | Net PnL | Friction% |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1,306.50 | 6.50 | 65.10 | **71.60** | 1,234.90 | 5.48% |
+| 2 | 2,613.00 | 13.00 | 81.19 | **94.19** | 2,518.81 | 3.60% |
+| 5 | 6,532.50 | 32.50 | 137.47 | **169.97** | 6,362.53 | 2.60% |
+| 10 | 13,065.00 | 65.00 | 225.96 | **290.96** | 12,774.04 | 2.23% |
+| 15 | 19,597.50 | 97.50 | 317.44 | **414.94** | 19,182.56 | 2.12% |
+| 20 | 26,130.00 | 130.00 | 405.91 | **535.91** | 25,594.09 | 2.05% |
+| 25 | 32,662.50 | 162.50 | 495.38 | **657.88** | 32,004.62 | 2.01% |
+
+### 12.5 Per-lot breakdown formula (scales linearly except brokerage)
+
+For arbitrary `n` lots on NIFTY ATM ₹100→₹120 post-Apr-2026:
+
+```
+shares_n     = 65 × n
+buy_not_n    = 6,500 × n        (₹)
+sell_not_n   = 7,800 × n        (₹)
+gross_pnl_n  = 1,300 × n        (₹)
+
+brokerage    = ₹40              (FLAT, regardless of n)
+STT          = round(11.70 × n)        → nearest rupee
+exch_total   = round(2.27695 × n) + round(2.73234 × n)   → nearest paisa, per leg
+SEBI_total   = round(0.0065 × n) + round(0.0078 × n)
+IPFT_total   = round(0.0325 × n) + round(0.039 × n)
+stamp        = round(0.195 × n)        → nearest rupee
+GST          = 2 × [round(0.09 × (20 + ...)) + round(0.09 × (20 + ...))]   per-leg, rupee
+```
+
+Why cost% drops: brokerage ₹40 is constant ⇒ amortized cost%
+asymptotes to ~1.50% as n→∞ (the sum of all percentage-based rates
+on a 20% gain).
+
+### 12.6 BANKNIFTY / SENSEX scaling pointers
+
+Same algorithm; different lot size + exchange routing.
+
+| Instrument | Lot size | Exchange | Exch rate | IPFT rate | Tick |
+|---|---:|---|---:|---:|---:|
+| NIFTY | 65 | NSE | 0.03503% | 0.0005% | ₹0.05 |
+| BANKNIFTY | 30 | NSE | 0.03503% | 0.0005% | ₹0.05 |
+| SENSEX | 20 | BSE | 0.03250%* | 0.0005% | ₹0.05 |
+
+*BSE Bankex options exchange rate is **UNVERIFIED** — see §16 item 3.
+
+A BANKNIFTY equivalent table would replace `n × 65` with `n × 30` and
+keep NSE rates. A SENSEX table would use `n × 20` and BSE rates.
+Phase 3 build emits all 3 instrument × 20 lot count = 60 fixture
+files automatically from a parametrized generator.
+
 ---
 
 ## 13. Edge cases (explicit list)
@@ -563,6 +666,11 @@ no further than what's already in `§8b`.
 | Date | Change | Why |
 |---|---|---|
 | 2026-05-16 | Initial spec | Consolidate §8 + §9 + §18 of `TRACK2_OPTIONS_SPEC.md` into a single calculator build-target spec |
+| 2026-05-16 | Fixed §4.1 rounding bug | TRUNC_TO_PAISA → ROUND_TO_NEAREST_PAISA. Truncation would have produced ₹5.00 exchange charge in canonical fixture; §8.2 LOCKED requires ₹5.01. Commercial half-up matches Zerodha + Angel contract notes. |
+| 2026-05-16 | Added §12.3 multi-lot table | Operator request: verify cost scaling for 2..20 + 25 lots. Demonstrates brokerage is FLAT ₹40 regardless of lots; cost% asymptotes to ~1.50%. |
+| 2026-05-16 | Added §12.4 slippage broken out | Operator clarity: show slippage as separate line even though it's baked into fill prices in main algorithm. |
+| 2026-05-16 | Added §12.5 per-lot formula | Demonstrates O(1) linear scaling formula for any n. |
+| 2026-05-16 | Added §12.6 BANKNIFTY/SENSEX pointer | Same algorithm, different lot/exchange routing. Phase 3 generator emits 60 fixtures (3 instruments × 20 lot counts) parametrically. |
 
 ---
 
