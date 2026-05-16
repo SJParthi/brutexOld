@@ -13,7 +13,7 @@ IndicatorSnapshot — no real data required.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest

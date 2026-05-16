@@ -51,17 +51,12 @@ intervals, so bar at time T uses only rows [T, T+tf). Property P-06 holds.
 
 from __future__ import annotations
 
-from datetime import timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import polars as pl
 
-from brutex.data.timeframes import (
-    ALL_TF_MINUTES,
-    DAILY_TF_MINUTES,
-    is_intraday,
-)
+from brutex.data.timeframes import ALL_TF_MINUTES, is_intraday
 
 # Required schema for input 1m DataFrame.
 REQUIRED_COLUMNS: tuple[str, ...] = (

@@ -22,8 +22,6 @@ import pytest
 from brutex.indicators.fib_levels import (
     ALL_EXTENSION_KEYS,
     ALL_RETRACEMENT_KEYS,
-    FIB_RATIOS_EXTENSION,
-    FIB_RATIOS_RETRACEMENT,
     FibDirection,
     FibLevels,
     compute_fib_levels,

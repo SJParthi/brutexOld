@@ -107,7 +107,8 @@ ALL_STRIKE_RULES: Final[tuple[StrikeRule, ...]] = (
 assert len(ALL_STRIKE_RULES) == 10
 assert len({r.name for r in ALL_STRIKE_RULES}) == 10, "rule names must be unique"
 
-# Convenience lookups
+# Convenience lookups (re-exported via brutex.options package __init__ +
+# consumed by tests/unit/test_strike_rules.py — CodeQL false-positive otherwise).
 RULES_BY_NAME: Final[dict[str, StrikeRule]] = {r.name: r for r in ALL_STRIKE_RULES}
 OFFSET_RULES: Final[tuple[StrikeRule, ...]] = tuple(
     r for r in ALL_STRIKE_RULES if r.kind == StrikeRuleKind.OFFSET
@@ -115,6 +116,20 @@ OFFSET_RULES: Final[tuple[StrikeRule, ...]] = tuple(
 DELTA_TARGET_RULES: Final[tuple[StrikeRule, ...]] = tuple(
     r for r in ALL_STRIKE_RULES if r.kind == StrikeRuleKind.DELTA_TARGET
 )
+
+# Explicit public API (suppresses CodeQL "unused global variable" false positives
+# for the three convenience-lookup constants above).
+__all__ = [
+    "ALL_STRIKE_RULES",
+    "DELTA_TARGET_RULES",
+    "OFFSET_RULES",
+    "RULES_BY_NAME",
+    "StrikeRule",
+    "StrikeRuleKind",
+    "TradeDirection",
+    "resolve_delta_target_strike",
+    "resolve_offset_strike",
+]
 
 
 def resolve_offset_strike(

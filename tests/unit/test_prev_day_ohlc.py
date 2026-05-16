@@ -16,7 +16,6 @@ import pytest
 
 from brutex.indicators.prev_day_ohlc import (
     DailyCandle,
-    PrevDayOHLC,
     find_prev_trading_day,
     lookup_prev_day_ohlc,
     lookup_prev_day_ohlc_series,

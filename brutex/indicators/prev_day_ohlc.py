@@ -44,7 +44,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-from brutex.calendars.nse import is_trading_day, trading_days_between
+from brutex.calendars.nse import is_trading_day
 
 
 @dataclass(frozen=True)

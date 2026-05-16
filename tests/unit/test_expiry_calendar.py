@@ -15,7 +15,6 @@ import pytest
 
 from brutex.options.expiry_calendar import (
     FRIDAY,
-    MONDAY,
     THURSDAY,
     TUESDAY,
     WEDNESDAY,

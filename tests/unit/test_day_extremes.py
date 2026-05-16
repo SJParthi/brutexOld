@@ -19,10 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from brutex.indicators.day_extremes import (
-    DayExtremesBar,
-    compute_day_extremes,
-)
+from brutex.indicators.day_extremes import compute_day_extremes
 
 IST = ZoneInfo("Asia/Kolkata")
 

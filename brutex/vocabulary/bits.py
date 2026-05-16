@@ -151,6 +151,9 @@ NAME_TO_BIT: Final[dict[str, int]] = {
 
 BIT_TO_NAME: Final[dict[int, str]] = {v: k for k, v in NAME_TO_BIT.items()}
 
+# Re-exported via brutex.vocabulary package __init__ for downstream tooling
+# (e.g., strategy mask serialization). CodeQL false-positive otherwise since
+# nothing in this module consumes it directly.
 ALL_CONDITION_NAMES: Final[tuple[str, ...]] = tuple(NAME_TO_BIT.keys())
 
 # Compile-time invariants

@@ -11,7 +11,6 @@ from brutex.adapters.dhan.options_constants import (
     BY_UNDERLYING,
     NIFTY,
     SENSEX,
-    DhanOptionsContract,
     get_contract,
 )
 from brutex.options.lot_size_history import OptionsUnderlying

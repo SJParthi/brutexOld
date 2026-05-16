@@ -17,7 +17,6 @@ from brutex.options.strike_rules import (
     DELTA_TARGET_RULES,
     OFFSET_RULES,
     RULES_BY_NAME,
-    StrikeRule,
     StrikeRuleKind,
     TradeDirection,
     resolve_delta_target_strike,

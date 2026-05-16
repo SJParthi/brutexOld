@@ -8,8 +8,6 @@ Verified against:
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from brutex.indicators.ema import alpha, compute_ema, latest_ema
