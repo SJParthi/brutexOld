@@ -423,9 +423,21 @@ ALL 30+ metrics displayed in the JSON report and PNG charts.
 3. **UTC storage internal, IST display only.** Session: 03:45-10:00 UTC.
 4. **No look-ahead:** bar N signal → bar N+1 open entry. Instrumented
    bar accessor catches violations at runtime (debug build only).
-5. **Pessimistic fills:** entry at worst price within entry bar (high for
-   buys, low for sells); exits at worst price too.
-6. **Slippage:** 1 tick adverse on entry + 1 tick adverse on exit.
+5. **Precise fills (corrected 2026-05-16):** entry at bar N+1 OPEN
+   (exact value); exit at bar M+1 OPEN (exact value). NO pessimistic
+   fill on spot. Operator clarified: spot indices (NIFTY/BANKNIFTY/
+   SENSEX) are computed averages and are NOT directly tradable — there
+   is no order book to slip against, so pessimistic fill is fiction.
+   Pessimistic-fill convention applies ONLY to Track 2 options (where
+   real order books exist).
+6. **NO slippage on spot (corrected 2026-05-16):** spot indices have
+   no executable venue, so any slippage adjustment is meaningless.
+   Track 1 backtest uses the exact bar OPEN price at entry and exit.
+   Slippage applies ONLY in Track 2 options per
+   `docs/track2/TRACK2_OPTIONS_SPEC.md` §9 (delta-bucketed × ToD ×
+   VIX). At 1-minute granularity we never have tick-level access,
+   so spot's "1-tick adverse" rule (from v1 spec, now retired) is
+   doubly inappropriate: no venue + no tick data.
 7. **NO brokerage / NO STT / NO costs.** Track 1 is signal research only
    (operator confirmed 2026-05-16). Track 2 handles realism via expired
    options data (see `docs/track2/`).
