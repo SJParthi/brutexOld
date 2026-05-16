@@ -268,6 +268,22 @@ skip_covered = false
 # P1 baseline — heavy-dep modules excluded in [run].omit, so this
 # applies only to the pure-Python tested core. Progressively raised
 # to 100% as the remaining branches get dedicated tests.
+#
+# Per Golden Rule #12 (100% Always Standards, 2026-05-16): all NEW
+# modules must ship at 100% line + 100% branch coverage. Legacy
+# modules converge to 100% over time. The 90% gate below applies
+# to the full package; per-module gates enforce 100% on new code
+# via the precise CI invocation in .github/workflows/ci.yml:
+#
+#   pytest --cov=brutex --cov-branch --cov-fail-under=90 \
+#          --cov-report=term-missing -- ...
+#
+# AND a second pass for new strict modules:
+#
+#   pytest --cov=brutex.costs --cov-branch --cov-fail-under=100 \
+#          tests/unit/test_costs_*.py
+#
+# As each module hits 100%, it's added to the strict pass list.
 fail_under = 90
 exclude_lines = [
     "pragma: no cover",
