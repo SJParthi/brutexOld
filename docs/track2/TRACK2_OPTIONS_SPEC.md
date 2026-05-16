@@ -487,24 +487,36 @@ final code-lock.
 
 ### 8.2 Round-trip worked example (NIFTY ATM call, ₹100 → ₹120, 1 lot of 65)
 
+**AMENDED 2026-05-16** per Agent C deep-research finding (Rule 11 STT
+Rules + Section 170 CGST + Indian Stamp Rules 2019). STT, stamp duty,
+and GST are STATUTORILY rounded to nearest rupee (not paise). Brokerage,
+exchange, SEBI, IPFT remain paise-precision. See `COSTS_VERIFIED.md`
+§3 for citations.
+
 Buy premium notional: 65 × ₹100 = **₹6,500**.
 Sell premium notional: 65 × ₹120 = **₹7,800**.
 Gross PnL: **+₹1,300**.
 
-| Component | Buy side | Sell side | Total | Calc |
+| Component | Buy side | Sell side | Total | Rule applied |
 |---|---|---|---|---|
 | Premium × lot | -6,500.00 | +7,800.00 | +1,300.00 | gross |
-| Brokerage (₹20 flat) | -20.00 | -20.00 | -40.00 | Dhan |
-| STT (0.15% sell premium, post-Apr-2026) | 0 | -11.70 | -11.70 | 0.0015 × 7,800 |
-| Exchange (NSE 0.03503%) | -2.28 | -2.73 | -5.01 | 0.0003503 × each side |
-| SEBI (0.0001%) | -0.01 | -0.01 | -0.02 | |
-| IPFT NSE (0.0005%) | -0.03 | -0.04 | -0.07 | |
-| Stamp duty (0.003% buy) | -0.20 | 0 | -0.20 | 0.00003 × 6,500 |
-| GST (18% on brokerage + exchange + SEBI + IPFT) | -4.02 | -4.10 | -8.12 | |
-| **Charges total** | **-26.54** | **-38.58** | **-65.12** | |
-| **Net PnL** | | | **+1,234.88** | gross 1,300 − 65.12 |
+| Brokerage (₹20 flat per order) | -20.00 | -20.00 | -40.00 | paise |
+| STT 0.15% × ₹7,800 = ₹11.70 | 0 | — | **-12** | **round to nearest rupee (Rule 11)** |
+| Exchange NSE (0.03503%) | -2.28 | -2.73 | -5.01 | paise |
+| SEBI (0.0001%) | -0.01 | -0.01 | -0.02 | paise (per-side) |
+| IPFT NSE (0.0005%) | -0.03 | -0.04 | -0.07 | paise (per-side) |
+| Stamp duty 0.003% × ₹6,500 = ₹0.195 | -0 | 0 | **-0** | **round to rupee (<0.50 → 0)** |
+| GST base = 40 + 5.01 + 0.02 + 0.07 = ₹45.10 | | | | |
+| CGST 9% × 45.10 = ₹4.059 | -2 | -2 | -4 | **round to rupee (Section 170)** |
+| SGST 9% × 45.10 = ₹4.059 | -2 | -2 | -4 | **round to rupee (Section 170)** |
+| **Charges total** | | | **-65.10** | |
+| **Net PnL** | | | **+1,234.90** | gross 1,300 − 65.10 |
 
-**Round-trip cost = ₹65.12 = 1.00% of buy premium / 5.0% of gross move.**
+**Round-trip cost = ₹65.10 = 1.00% of buy premium / 5.0% of gross move.**
+
+Critical note: multi-lot trades change the per-lot cost ratio drastically
+because brokerage is flat per ORDER, not per lot. See `COSTS_VERIFIED.md`
+§11 for multi-lot examples.
 
 For a deeper OTM trade (₹50 → ₹60, 1 lot, post-Apr-2026):
 - Buy: 65 × 50 = ₹3,250. Sell: 65 × 60 = ₹3,900. Gross +₹650.

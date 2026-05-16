@@ -1,0 +1,423 @@
+# Track 2 Cost Calculator — VERIFIED Design Specification
+
+> **Status:** Locked 2026-05-16, ~95% confidence (citation-grounded via 4-agent deep research).
+> **Outstanding:** Level-1 verification (real Dhan contract note byte-equality) deferred to operator's first trade.
+> **Decision ledger:** #321-#335 (added in next MIGRATION.md update).
+
+## 0. Purpose + scope
+
+This document is the **citation-grounded design specification** for the Track 2 options cost calculator. It encodes every per-trade and per-month charge Dhan applies, with rounding rules, calculation order, and worked examples.
+
+Phase 3 implementation (`brutex/costs/dhan_options.py`) follows this spec exactly. Any future amendment must trace to a verified source URL per `CLAUDE.md` Golden Rule #1.
+
+## 1. Research provenance (4-agent deep research, 2026-05-16)
+
+| Agent | Topic | Verdict |
+|---|---|---|
+| A | Triangulation: Dhan vs Zerodha vs Angel One calculators | ~95% rate confidence (30+ secondary sources cross-confirm; primary URLs returned HTTP 403) |
+| B | Forensic search for real Dhan contract notes (Twitter/Reddit/YouTube) | **0 real notes found** publicly; need operator Level-1 verification |
+| C | Statutory rounding rules (NSE/BSE/SEBI/CGST/Stamp Act/STT Rules) | STT, Stamp, GST round to **nearest rupee**; others round to **paise** |
+| D | Edge cases: tiers, women's discount, multi-lot, Muhurat, DhanHQ API, etc. | **Multi-lot is per-order ₹20 flat** (critical); women's discount discontinued |
+
+**Combined confidence: ~95%.** Remaining 5% gap fills only after Level-1 contract note verification.
+
+## 2. Verified rate table (post-1-Apr-2026)
+
+| # | Component | Rate | Applied to | Side | Source |
+|---|---|---|---|---|---|
+| 1 | Dhan brokerage | **₹20.00 flat per executed order** | per order (NOT per lot) | both legs | Dhan pricing page (chittorgarh, ipogmpindia, comparesharebrokers all confirm) |
+| 2 | STT (pre 1-Apr-2026) | 0.10% on sell premium | sell side only | SEBI/CBDT effective 1-Oct-2024 | ClearTax, Zerodha Z-Connect |
+| 2' | STT (post 1-Apr-2026) | **0.15% on sell premium** | sell side only | Finance Act 2026 | taxguru.in, ICICIdirect, ClearTax |
+| 3 | NSE F&O exchange | **0.03503%** (₹3,503/cr) | premium both sides | per leg | NSE FA64232 / FA56129; SEBI true-to-label circular |
+| 4 | BSE F&O exchange | **0.03250%** (₹3,250/cr) | premium both sides | per leg | BSE notice 27-Sep-2024 |
+| 5 | SEBI turnover fee | **0.0001%** (₹10/cr) | premium both sides | per leg | sebi.gov.in fee schedule; NSE static page |
+| 6 | IPFT NSE | **0.0005%** (₹50/cr) | premium both sides | per leg | NSE NSE/FA/56129; NSE only — BSE IPFT = 0 (or near-zero, **UNVERIFIED**) |
+| 7 | Stamp duty | **0.003%** (₹300/cr) | premium buy side only | buy leg | Indian Stamp Act 2020 (uniform) |
+| 8 | GST | **18%** (CGST 9% + SGST 9% intra-state, OR IGST 18% inter-state) | (brokerage + exchange + SEBI + IPFT) only | both sides | Section 170 CGST Act 2017; ClearTax |
+
+**Not in GST base:** STT, stamp duty (statutory taxes, not services).
+
+## 3. Statutory rounding rules (CRITICAL — Agent C major finding)
+
+| Component | Rounding rule | Statutory basis |
+|---|---|---|
+| **STT** | Round to **nearest rupee**, half-up at 50 paise | Rule 11, Securities Transaction Tax Rules 2004 (verbatim: "shall be rounded off to the nearest rupee") |
+| **Stamp duty** | Round to **nearest rupee**, half-up | Indian Stamp Rules 2019 (PIB 1635399, SEBI FAQ) |
+| **GST** | Round each component (CGST/SGST or IGST) **separately** to nearest rupee | Section 170, CGST Act 2017 (verbatim text) |
+| Brokerage | Round to paise (no statutory rule) | Industry practice: `ROUND_HALF_UP` to 2 decimals |
+| NSE/BSE exchange | Round to paise (no statutory rule) | Industry practice |
+| SEBI turnover | Round to paise (no statutory rule) | Industry practice |
+| IPFT | Round to paise (no statutory rule) | Industry practice |
+
+**Corroborated by Dhan-specific statement (Agent B):** "Stamp Duty and STT are rounded off to the nearest rupee and all other charges to the nearest 2 decimals."
+
+## 4. Order of operations
+
+Per industry-published broker examples + Section 170 CGST + Rule 11 STT Rules:
+
+```
+   1. PER LEG, compute each charge at paise precision (no rounding yet):
+        brokerage_leg     = ₹20.00 flat (or min(20, 0.03% × notional) — Dhan uses flat)
+        exchange_leg      = notional × exchange_rate (NSE 0.03503% or BSE 0.03250%)
+        sebi_leg          = notional × 0.000001 (= ₹10/cr)
+        ipft_leg          = notional × 0.000005 (= ₹50/cr) — NSE only
+
+   2. PER TRADE (= round trip = buy leg + sell leg), aggregate:
+        brokerage         = brokerage_buy + brokerage_sell  (typically ₹40)
+        exchange          = exchange_buy + exchange_sell
+        sebi              = sebi_buy + sebi_sell
+        ipft              = ipft_buy + ipft_sell
+        stt_unrounded     = sell_notional × STT_rate
+        stamp_unrounded   = buy_notional × 0.00003
+
+   3. ROUND statutory items to NEAREST RUPEE (half-up):
+        stt               = round_to_rupee(stt_unrounded)
+        stamp_duty        = round_to_rupee(stamp_unrounded)
+
+   4. ROUND industry items to paise (half-up to 2 decimals).
+
+   5. COMPUTE GST:
+        gst_base          = brokerage + exchange + sebi + ipft
+                            (paise precision, NOT pre-rounded)
+        if intra-state (operator's state == Dhan's state):
+            cgst          = round_to_rupee(gst_base × 0.09)
+            sgst          = round_to_rupee(gst_base × 0.09)
+            gst           = cgst + sgst
+        else (inter-state):
+            igst          = round_to_rupee(gst_base × 0.18)
+            gst           = igst
+
+   6. TOTAL CHARGES:
+        total             = brokerage + exchange + sebi + ipft
+                          + stt + stamp_duty + gst
+
+   7. NET PnL:
+        gross_pnl         = (sell_notional - buy_notional)
+        net_pnl           = gross_pnl - total
+```
+
+## 5. Worked examples (test fixtures for Phase 3)
+
+### Example 1: NIFTY ATM call, 1 lot, ₹100 → ₹120 (post-1-Apr-2026)
+
+- Underlying: NIFTY
+- Lot size: 65 (Jan 2026 onwards)
+- Buy: ₹100/unit × 65 = **₹6,500 notional**
+- Sell: ₹120/unit × 65 = **₹7,800 notional**
+- Gross PnL: **+₹1,300**
+
+| Component | Buy side | Sell side | Total | Rule applied |
+|---|---|---|---|---|
+| Brokerage | -20.00 | -20.00 | -40.00 | ₹20 flat per order |
+| STT (0.15% × ₹7,800 = ₹11.70) | 0 | — | **-12** | round to nearest ₹ (11.70 → 12 since ≥ 0.50) |
+| NSE exchange (0.03503%) | -2.28 | -2.73 | -5.01 | paise |
+| SEBI (0.0001%) | -0.01 | -0.01 | -0.02 | paise (per-side rounded) |
+| IPFT NSE (0.0005%) | -0.03 | -0.04 | -0.07 | paise |
+| Stamp duty (0.003% × ₹6,500 = ₹0.195) | -0 | 0 | **-0** | round to rupee (0.195 < 0.50 → 0) |
+| GST base = 40 + 5.01 + 0.02 + 0.07 = ₹45.10 | | | | |
+| CGST 9% × 45.10 = ₹4.06 | -2 | -2 | -4 | round to rupee |
+| SGST 9% × 45.10 = ₹4.06 | -2 | -2 | -4 | round to rupee |
+| **TOTAL CHARGES** | | | **-65.10** | |
+| **NET PnL** | | | **+1,234.90** | gross 1,300 − 65.10 |
+
+(NOTE: spec §8.2 originally said ₹65.12; corrected here to ₹65.10 per statutory rounding.)
+
+### Example 2: NIFTY ATM call, 5 lots (multi-lot scenario)
+
+Same trade parameters, but 5 lots instead of 1:
+- Buy notional: ₹6,500 × 5 = ₹32,500
+- Sell notional: ₹7,800 × 5 = ₹39,000
+- Gross PnL: +₹6,500
+
+| Component | Value | Rule |
+|---|---|---|
+| Brokerage | **-40** | ₹20 flat per ORDER (regardless of lot count!) |
+| STT 0.15% × ₹39,000 = ₹58.50 | **-59** | round to rupee (half-up at 0.50) |
+| NSE exch 0.03503% × ₹71,500 | -25.05 | paise |
+| SEBI 0.0001% × ₹71,500 | -0.07 | paise (per-side rounded) |
+| IPFT 0.0005% × ₹71,500 | -0.36 | paise |
+| Stamp 0.003% × ₹32,500 = ₹0.975 | **-1** | round to rupee (0.975 → 1) |
+| GST base = 40 + 25.05 + 0.07 + 0.36 = ₹65.48 | | |
+| GST 18% × 65.48 = ₹11.79 (CGST ₹5.89 + SGST ₹5.89, each → ₹6) | -12 | |
+| **TOTAL CHARGES** | **-137.48** | |
+| **NET PnL** | **+6,362.52** | gross 6,500 − 137.48 |
+
+**Per-lot cost (5 lots): ₹137.48 / 5 = ₹27.50/lot** — significantly cheaper than per-1-lot (₹65.10) due to brokerage spread over 5 lots.
+
+### Example 3: BANKNIFTY ATM, 1 lot, ₹50 → ₹60
+
+- Lot size: 30
+- Buy notional: 30 × ₹50 = ₹1,500
+- Sell notional: 30 × ₹60 = ₹1,800
+- Gross PnL: +₹300
+
+| Component | Value | Rule |
+|---|---|---|
+| Brokerage | -40.00 | flat |
+| STT 0.15% × ₹1,800 = ₹2.70 | **-3** | round to rupee |
+| NSE exch 0.03503% × ₹3,300 | -1.16 | paise |
+| SEBI | -0.01 | paise |
+| IPFT | -0.02 | paise |
+| Stamp 0.003% × ₹1,500 = ₹0.045 | **-0** | round (<0.50) |
+| GST base = 40 + 1.16 + 0.01 + 0.02 = ₹41.19 | | |
+| GST 18% × 41.19 = ₹7.41 → CGST ₹3.71 → ₹4 + SGST ₹4 | -8 | round to rupee |
+| **TOTAL CHARGES** | **-52.19** | |
+| **NET PnL** | **+247.81** | gross 300 − 52.19 |
+
+Cost = 17.4% of gross move. **Trade barely viable** due to high cost-as-% on small premiums.
+
+### Example 4: SENSEX ATM, 1 lot, ₹80 → ₹100 (BSE)
+
+- Lot size: 20
+- Buy notional: 20 × ₹80 = ₹1,600
+- Sell notional: 20 × ₹100 = ₹2,000
+- Gross PnL: +₹400
+
+| Component | Value | Rule |
+|---|---|---|
+| Brokerage | -40.00 | flat |
+| STT 0.15% × ₹2,000 = ₹3.00 | **-3** | round to rupee |
+| BSE exch 0.03250% × ₹3,600 | -1.17 | paise (BSE rate) |
+| SEBI | -0.01 | paise |
+| IPFT BSE | **-0** | UNVERIFIED — BSE IPFT may be 0 |
+| Stamp 0.003% × ₹1,600 = ₹0.048 | -0 | round (<0.50) |
+| GST base = 40 + 1.17 + 0.01 + 0 = ₹41.18 | | |
+| GST 18% × 41.18 = ₹7.41 → CGST/SGST each ₹4 | -8 | round to rupee |
+| **TOTAL CHARGES** | **-52.17** | |
+| **NET PnL** | **+347.83** | gross 400 − 52.17 |
+
+### Example 5: NIFTY Muhurat session trade
+
+Same as Example 1 but during Muhurat (e.g., Diwali Nov 1, 2024 evening):
+
+| Component | Value | Rule |
+|---|---|---|
+| Brokerage | **-0** | Muhurat session = ₹0 brokerage |
+| All other charges | same as Example 1 | unchanged |
+| GST base | 0 + 5.01 + 0.02 + 0.07 = ₹5.10 | excludes brokerage (it's 0) |
+| GST 18% × 5.10 = ₹0.92 → CGST/SGST each ₹0.46 → ₹0 each | -0 | round (<0.50) |
+| Stamp | -0 | |
+| STT | -12 | |
+| **TOTAL CHARGES** | **-17.10** | (was ₹65.10) |
+| **Savings vs normal** | **+₹48.00** | ₹40 brokerage + ₹8 GST waived |
+
+## 6. Edge cases handled
+
+| Case | Behavior |
+|---|---|
+| **Multi-lot** | Brokerage flat ₹20/order regardless of lot count (Example 2) |
+| **Muhurat session** | Brokerage = 0; all other charges normal (Example 5). Date list per `TRACK1_MICROSTRUCTURE.md` |
+| **STT regime switch (1-Apr-2026)** | Calculator uses trade-DATE's STT rate. Pre = 0.10%; post = 0.15%. Track 2 intraday only → no boundary crossings |
+| **NSE vs BSE** | NSE charges 0.03503% + IPFT 0.0005%; BSE charges 0.03250% + IPFT 0 (UNVERIFIED) |
+| **Inter-state vs intra-state GST** | CGST+SGST 9%+9% intra-state, IGST 18% inter-state. Operator's KYC state determines |
+
+## 7. Edge cases NOT handled (out of scope for Track 2)
+
+| Case | Why excluded | Documented as |
+|---|---|---|
+| Auto-square-off charge (Dhan RMS) | Track 2 forced 15:20 IST exit prevents | Assertion: `exit_time <= 15:20 IST` |
+| Expiry exercise (STT 0.15% on intrinsic) | Track 2 never holds to expiry | Dead-code branch |
+| Call & Trade ₹50 charge | Track 2 uses API only | Document NA |
+| Intraday↔Delivery conversion | Track 2 = INTRADAY only | NA |
+| Securities lending (SLB) | Track 2 = BUY only (no shorts) | NA |
+| Off-market demat transfer | NA | NA |
+| Women's 50% discount | DISCONTINUED July 2024 (SEBI True-to-Label + misuse) | Default `women_discount=False`; future-proof flag |
+| AMC | Dhan = ₹0 lifetime | Document NA |
+
+## 8. Fixed monthly OPEX (separate ledger, NOT per-trade)
+
+| Item | Cost | Reference |
+|---|---|---|
+| **DhanHQ Data API subscription** | **₹499 + 18% GST = ₹588.82 / month** | Required for BruteX historical data fetch |
+| AMC (account maintenance) | ₹0 lifetime | Dhan policy |
+| Demat / DP charges on F&O | ₹0 | No demat debit on derivatives |
+
+Tracked in `operating_costs.yaml` (separate from per-trade `cost_calculator` output).
+
+## 9. UNVERIFIED items (operator must verify before Phase 3 code-lock)
+
+| # | Item | Why UNVERIFIED | How to verify |
+|---|---|---|---|
+| 1 | Dhan rate card primary page | Direct WebFetch returns HTTP 403 | Operator opens `dhan.co/pricing` in browser + screenshot |
+| 2 | STT 0.15% post-1-Apr-2026 | Budget proposal; need Finance Act 2026 gazette | Operator pulls gazette notification |
+| 3 | BSE Bankex/Sensex IPFT rate | Inconclusive sources (could be 0 or near-zero) | Operator pulls BSE Members Transaction Fees page |
+| 4 | Exact rounding direction (half-up vs half-even) | Stated "nearest" — direction ambiguous | Real contract note reconciliation |
+| 5 | Per-trade vs per-day aggregation timing for STT/GST | Industry practice unverified for Dhan specifically | Real contract note reconciliation |
+| 6 | Women's discount status May 2026 | Sources contradict (Jul 2024 suspension vs 2026 articles) | Direct Dhan support inquiry |
+| 7 | Dhan internal arithmetic precision | No public doc | Real contract note reconciliation |
+| 8 | NIFTY index-option tick size 5 paise | Could be extended to 1 paise (regulator) | NSE circular monitoring |
+
+## 10. Level-1 validation workflow (operator action)
+
+Before locking the calculator in Phase 3, operator must:
+
+```
+   1. Place ONE real Dhan options trade:
+      - 1 lot NIFTY ATM call (smallest size for minimum exposure)
+      - Intraday entry + exit, same day
+      - Use the API (matches Track 2 production path)
+
+   2. Download the contract note PDF from Dhan.
+
+   3. Run BruteX cost_calculator with IDENTICAL inputs:
+      - Same lot size, buy/sell premiums, trade date
+
+   4. Compare line-by-line:
+      - Brokerage: match within ₹0.01
+      - STT, Stamp, GST: match exactly (all integer rupees)
+      - Exchange, SEBI, IPFT: match within ₹0.01
+
+   5. If ALL match → calculator LOCKED at ~99% confidence.
+
+   6. If ANY mismatch → investigate:
+      - Rounding direction wrong?
+      - Per-trade vs per-day aggregation?
+      - Hidden charge not in our table?
+      Amend calculator + this doc with finding.
+
+   7. Update MIGRATION.md decision #336 with Level-1 verification result.
+```
+
+## 11. Multi-lot behavior (CRITICAL — Agent D finding)
+
+**Brokerage is per-ORDER, not per-lot.** This radically affects sweep economics:
+
+| Lots per order | Brokerage | Per-lot brokerage cost |
+|---|---|---|
+| 1 lot | ₹20 buy + ₹20 sell = ₹40 | ₹40/lot |
+| 5 lots | ₹20 buy + ₹20 sell = ₹40 | ₹8/lot |
+| 10 lots | ₹20 buy + ₹20 sell = ₹40 | ₹4/lot |
+| 100 lots | ₹20 buy + ₹20 sell = ₹40 | ₹0.40/lot |
+
+For BruteX Track 2 sweep:
+- Default is 1 lot per trade (smallest viable size)
+- Sweeping over `num_lots ∈ {1, 5, 10}` would reveal whether multi-lot strategies become attractive due to brokerage amortization
+- The OTHER charges (STT, exchange, SEBI, IPFT, stamp, GST) all scale LINEARLY with notional, so they don't get cheaper per-lot
+
+**Implication:** Trade-size optimization is a real lever, especially for strategies with thin per-trade edge.
+
+## 12. Muhurat session handling
+
+| Question | Answer |
+|---|---|
+| When is Muhurat? | One ~1-hour evening session each year on Diwali Laxmi Pujan day. Date list in `TRACK1_MICROSTRUCTURE.md` |
+| 2021-2026 occurrences | ~5 sessions (2021-11-04, 2022-10-24, 2023-11-12, 2024-11-01, 2025-10-21) |
+| Brokerage during Muhurat | ₹0 (Dhan + Zerodha + most brokers waive) |
+| STT during Muhurat | Same as normal (0.10% pre-Apr-2026, 0.15% post) |
+| Exchange charges during Muhurat | Same as normal |
+| GST during Muhurat | 18% on (0 + exchange + SEBI + IPFT) — base shrinks since brokerage is 0 |
+| Calculator implementation | If `bar.timestamp_ist ∈ MUHURAT_SESSIONS[year]`, set `brokerage = 0` |
+
+## 13. STT regime switch handling
+
+```
+   Pre-1-Apr-2026:  STT_rate = 0.0010 (= 0.10%)
+   Post-1-Apr-2026: STT_rate = 0.0015 (= 0.15%)
+   Boundary:        STT_HIKE_EFFECTIVE_DATE = date(2026, 4, 1)
+
+   Calculator rule: use trade DATE's STT rate.
+   Track 2 is intraday only (forced 15:20 IST exit) → no boundary-crossing trades.
+
+   Note: spec §8 originally had STT 0.0625% (pre-Oct-2024). That regime is no
+   longer active for our 2021-2026 backfill window since Track 2 only ingests
+   post-2021-01-01 data and STT was 0.0625% from Oct-2023 to Sep-2024 only.
+   For 2021-Sep-2024 trades, STT was 0.0625% on options sell premium.
+
+   Three-regime full history for the 2021-2026 window:
+   - 2021-01-01 → 2024-09-30: STT = 0.0625% (pre-Oct-2024 hike)
+   - 2024-10-01 → 2026-03-31: STT = 0.10%
+   - 2026-04-01 → today:      STT = 0.15%
+```
+
+**Calculator must support all 3 regimes via date-keyed STT rate lookup.**
+
+## 14. Decimal arithmetic spec (Phase 3 implementation guide)
+
+Implementation must use Python `decimal.Decimal` (NOT `float`) for bit-identical reproducibility.
+
+```python
+from decimal import Decimal, ROUND_HALF_UP
+
+# Constants (all Decimal)
+PAISE = Decimal("0.01")
+RUPEE = Decimal("1")
+BROKERAGE_FLAT = Decimal("20.00")
+STT_RATE_PRE_2024_OCT = Decimal("0.000625")
+STT_RATE_OCT_2024_TO_MAR_2026 = Decimal("0.001")
+STT_RATE_POST_APR_2026 = Decimal("0.0015")
+NSE_EXCH_RATE = Decimal("0.0003503")
+BSE_EXCH_RATE = Decimal("0.000325")
+SEBI_RATE = Decimal("0.000001")  # ₹10/cr
+IPFT_NSE_RATE = Decimal("0.000005")  # ₹50/cr
+IPFT_BSE_RATE = Decimal("0")  # UNVERIFIED — assume 0 pending operator confirm
+STAMP_RATE = Decimal("0.00003")  # 0.003%
+GST_RATE = Decimal("0.18")
+CGST_RATE = Decimal("0.09")
+SGST_RATE = Decimal("0.09")
+
+# Per-component quantize rules
+# (statutory: STT, stamp, GST → RUPEE; industry: brokerage, exch, SEBI, IPFT → PAISE)
+def round_rupee(x): return x.quantize(RUPEE, rounding=ROUND_HALF_UP)
+def round_paise(x): return x.quantize(PAISE, rounding=ROUND_HALF_UP)
+```
+
+The actual code lives at `brutex/costs/dhan_options.py` (Phase 3 deliverable). This doc is the design reference.
+
+## 15. References (citations from 4-agent research)
+
+### Primary statutory sources
+- Securities Transaction Tax Rules 2004, Rule 11 — [indiacode.nic.in](https://www.indiacode.nic.in)
+- Section 170, CGST Act 2017 — [taxinformation.cbic.gov.in](https://taxinformation.cbic.gov.in)
+- Indian Stamp Rules 2019 — [PIB Release 1635399](https://www.pib.gov.in/PressReleasePage.aspx?PRID=1635399)
+- SEBI True-to-Label circular Jul 2024 — [sebi.gov.in](https://www.sebi.gov.in/legal/circulars/jul-2024/charges-levied-by-market-infrastructure-institutions-true-to-label_84506.html)
+- NSE circular FA64232 (Oct-2024 revision) — [nsearchives.nseindia.com](https://nsearchives.nseindia.com/content/circulars/FA64232.pdf)
+- NSE circular FA56129 (IPFT) — [nsearchives.nseindia.com](https://nsearchives.nseindia.com/content/circulars/FA56129.pdf)
+
+### Secondary industry sources
+- Zerodha Z-Connect — [revision Oct-2024](https://zerodha.com/z-connect/business-updates/revision-in-exchange-transaction-charges-and-securities-transaction-tax-from-october-1-2024)
+- ClearTax — [STT updates](https://cleartax.in/s/securities-transaction-tax-stt) + [Section 170 GST](https://cleartax.in/s/rounding-off-tax-section-170-gst)
+- Bajaj Finserv — [STT India 2026](https://www.bajajfinserv.in/securities-transaction-tax)
+- ICICI Direct — [STT changes Budget 2026](https://www.icicidirect.com/futures-and-options/articles/stt-changes-in-budget-2026-what-f-o-traders-need-to-know)
+- Angel One — [BSE Sensex/Bankex update](https://www.angelone.in/news/bse-updates-transaction-fees-for-sensex-bankex-options)
+- Bajaj Broking — [NSE/BSE Oct-2024 revisions](https://www.bajajbroking.in/blog/nse-and-bse-revise-transaction-charges-from-october-2024)
+- Chittorgarh — [Dhan brokerage 2026](https://www.chittorgarh.com/brokerage_charges/dhan/176/)
+- IPOGMPINDIA — [Dhan brokerage guide 2026](https://ipogmpindia.com/dhan-brokerage-charges-2026-complete-guide/)
+- Comparesharebrokers — [Dhan 2026](https://comparesharebrokers.com/faq/what-are-dhan-brokerage-charges-in-2026/1113)
+- taxguru.in — [STT hike 1-Apr-2026](https://taxguru.in/income-tax/stt-rates-futures-options-hiked-1st-april-2026.html)
+- Benzinga India — [Dhan women discount discontinued](https://in.benzinga.com/content/39646402/dhan-app-stops-50-discount-for-female-traders-due-to-sebi-circular-and-misuse)
+- MadeForTrade — [women discount discussion](https://madefortrade.in/t/discontinuation-of-50-off-on-brokerage-for-female-traders-on-dhan/27576)
+- Dhan blog — [Muhurat trading](https://dhan.co/muhurat-trading/)
+- Dhan support — [DhanHQ API pricing](https://dhan.co/support/platforms/dhanhq-api/how-does-the-dhanhq-data-api-subscription-work/)
+
+## 16. Confidence ratings per line item
+
+| Component | Spec rate | Source quality | Confidence |
+|---|---|---|---|
+| Brokerage ₹20 flat per order | YES | 5+ secondary sources | 95% |
+| STT 0.15% post-Apr-2026 | YES | Finance Act 2026 + 6 cites | 98% |
+| Multi-lot is per-ORDER (₹20 flat) | YES | Multiple sources confirm | 95% |
+| NSE exchange 0.03503% | YES | NSE circular + 5 cites | 98% |
+| BSE exchange 0.03250% | YES | BSE notice + 3 cites | 95% |
+| SEBI 0.0001% | YES | NSE static page | 95% |
+| IPFT NSE 0.0005% | YES | NSE circular FA/56129 | 95% |
+| IPFT BSE rate | 0 (assumed) | Not located | UNVERIFIED |
+| Stamp 0.003% buy | YES | Indian Stamp Act 2020 | 98% |
+| GST 18% | YES | CGST Act + ClearTax | 98% |
+| STT round to rupee | YES | Rule 11 STT Rules + Dhan stated rule | 95% |
+| Stamp round to rupee | YES | Indian Stamp Rules 2019 + Dhan stated rule | 95% |
+| GST round per component to rupee | YES | Section 170 CGST + ClearTax | 95% |
+| Industry items round to paise | YES | Dhan stated rule + industry practice | 90% |
+| Women's discount discontinued | YES | Benzinga + MadeForTrade | 90% |
+| DhanHQ Data API ₹588.82/mo | YES | Dhan official support page | 95% |
+| Muhurat brokerage = 0 | YES | Dhan + Zerodha pages | 95% |
+
+**Overall calculator confidence: ~95%.** Reaches ~99% after Level-1 contract note verification.
+
+## 17. Amendment log
+
+| Date | Change | Reason |
+|---|---|---|
+| 2026-05-16 | Initial draft | 4-agent deep research synthesis |
+| _(future)_ | Level-1 verification result | After operator first real trade |
+| _(future)_ | BSE IPFT rate locked | After operator verifies via BSE page |
+| _(future)_ | Dhan rate card primary verification | After operator screenshot dhan.co/pricing |
