@@ -41,6 +41,8 @@ This document defines the *algorithm*. The *numeric constants* live in
 | `n_lots` | `int` | ≥ 1 | Number of lots. Each lot's share-count looked up from `lot_size_history[instrument, entry_dt_ist.date()]`. |
 | `broker` | `Literal["dhan", "zerodha"]` | enum | Brokerage differs. Default `"dhan"`. |
 | `gst_split` | `Literal["intra_state", "inter_state"]` | enum | `"intra_state"` → CGST 9% + SGST 9% (each rounded separately). `"inter_state"` → IGST 18% (single rounding). Set once per trader account, not per trade. Default `"intra_state"` to match `TRACK2_OPTIONS_SPEC.md §8.2` worked example. |
+| `held_to_expiry_exercise` | `bool` | default `False` | TRUE iff this is a LONG ITM option held to expiry and exercised. Triggers STT-on-exercise branch (§4.2) instead of normal sell-leg STT. For Track 2 (forced exit 15:20 IST), ALWAYS `False`. |
+| `intrinsic_value_paisa_at_expiry` | `int64` | ≥ 0 | Required only when `held_to_expiry_exercise=True`. The intrinsic value (max(0, spot − strike) for CE; max(0, strike − spot) for PE) at expiry. STT-on-exercise is computed on this, not on premium. |
 
 **No other inputs are needed.** Charges depend only on these.
 
@@ -253,6 +255,41 @@ ROUND_TO_NEAREST_PAISA(paisa_raw):
 #   notes from Zerodha + Angel One) consistently use half-up.
 ```
 
+### 4.2 STT-on-exercise branch (LONG ITM held to expiry)
+
+Per agent research 2026-05-16: when a LONG (BUY) option position is
+held to expiry AND finishes ITM, the buyer pays a different STT
+structure (different rate AND different base AND no normal sell leg).
+
+```
+IF held_to_expiry_exercise == True:
+    # Override Step 5 STT calculation:
+    STT_EXERCISE_RATE_PRE_APR2026  = 0.00125   # 0.125% on intrinsic value
+    STT_EXERCISE_RATE_POST_APR2026 = 0.0015    # 0.15% post-Apr-2026 (verify gazette)
+
+    stt_rate_ex = STT_EXERCISE_RATE_POST_APR2026 if exit_dt.date() >= STT_HIKE_EFFECTIVE_DATE
+                  else STT_EXERCISE_RATE_PRE_APR2026
+    stt_paisa_raw = intrinsic_value_paisa_at_expiry * n_shares * stt_rate_ex
+    stt_paisa     = ROUND_TO_NEAREST_RUPEE(stt_paisa_raw)
+    # Note: REPLACES (does not add to) the normal sell-side STT.
+    # The "sell" leg at expiry is auto-exercise — no manual sell, no normal STT.
+
+    # Exchange / SEBI / IPFT on exit leg = 0 (auto-exercise, no traded order)
+    exch_sell_paisa = 0
+    sebi_sell_paisa = 0
+    ipft_sell_paisa = 0
+    brokerage_paisa = DHAN_BROKERAGE_PAISA      # entry leg only (₹20, not ₹40)
+```
+
+**For Track 2:** `held_to_expiry_exercise` is ALWAYS `False` because
+strategy forces exit at 15:20 IST on every trade. This branch exists
+for forward-compatibility with future tracks that may hold-to-expiry.
+All 16 Phase-3 fixtures have this flag `False`.
+
+**Source:** ClearTax STT page + Zerodha STT FAQ (cited in 2026-05-16
+agent research). **STT-on-exercise rate post-Apr-2026 UNVERIFIED**
+(Finance Act 2026 gazette text required — see §16 item 4).
+
 ---
 
 ## 5. Rounding rules table
@@ -289,6 +326,40 @@ GST applies to **services provided**, NOT statutory levies.
 | IPFT | |
 
 Source: COSTS_VERIFIED.md §9, cross-cited ClearTax + Zerodha + Angel.
+
+### 6b. Order-splitting / freeze quantity (LOCKED 2026-05-16)
+
+Per agent research 2026-05-16 + ICICIdirect Dec-2025 freeze qty circular:
+NSE/BSE cap maximum single-order quantity for index options. Exceeding
+the cap → broker submits an ICEBERG ORDER, which splits into multiple
+back-end orders. **Each slice = one executed order = ₹20 brokerage**.
+
+| Instrument | Freeze qty (contracts/order) | Max lots/order (with current lot size) | Source |
+|---|---:|---:|---|
+| NIFTY | 1,800 | 1,755 (= floor(1800/65)×65 / 65) | ICICIdirect Dec 2025 |
+| BANKNIFTY | 600 | 600 | NSE freeze table |
+| SENSEX | ~1,000 | ~1,000 | **UNVERIFIED post-Mar-2026** (Angel mentions revision) |
+
+```
+# Calculator must compute order count:
+freeze_lots = FREEZE_LOTS_TABLE[instrument]   # 1755 / 600 / 1000
+n_orders_per_leg = ceil(n_lots / freeze_lots)
+brokerage_paisa = DHAN_BROKERAGE_PAISA * 2 * n_orders_per_leg
+# (× 2 for both buy + sell legs; × n_orders_per_leg for iceberg slices)
+```
+
+**Impact for Track 2 lot scales (typical 1-100 lots):**
+- All NIFTY orders fit in 1 slice → `n_orders_per_leg = 1`
+- All BANKNIFTY orders ≤ 600 lots fit → `n_orders_per_leg = 1`
+- Most Track 2 sweep configurations never exceed freeze
+
+**Impact when exceeded:**
+- 2,000-lot NIFTY order → 2 slices → ₹80 round-trip brokerage (2 × 2 × ₹20)
+- 5,000-lot NIFTY order → 3 slices → ₹120 round-trip brokerage
+- All other charges scale linearly with notional regardless of slicing
+
+**Phase 3 fixture F17 (NEW):** 2,000-lot NIFTY to exercise the slicing
+branch. Expected `n_orders_per_leg = 2`, `brokerage_paisa = 8000`.
 
 ---
 
@@ -384,6 +455,8 @@ class TradeInput:
     n_lots:              int
     broker:              Broker = "dhan"
     gst_split:           GstSplit = "intra_state"
+    held_to_expiry_exercise: bool = False        # §4.2 STT-on-exercise branch
+    intrinsic_value_paisa_at_expiry: int = 0     # required when held_to_expiry_exercise=True
 
 @dataclass(frozen=True)
 class TradeCostBreakdown:
@@ -410,6 +483,9 @@ class TradeCostBreakdown:
     total_charges_paisa: int
     gross_pnl_paisa:     int           # incl slippage (slippage baked into fills)
     net_pnl_paisa:       int           # gross − charges
+    # branch flags
+    used_exercise_branch:    bool      # §4.2 STT-on-exercise was used
+    n_orders_per_leg:        int       # §6b iceberg slicing (1 unless freeze qty exceeded)
 
 def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     """Pure function. No I/O, no global state. Deterministic. O(1)."""
@@ -569,6 +645,74 @@ keep NSE rates. A SENSEX table would use `n × 20` and BSE rates.
 Phase 3 build emits all 3 instrument × 20 lot count = 60 fixture
 files automatically from a parametrized generator.
 
+### 12.7 Long vs Short — side-symmetry verification (LOCKED 2026-05-16)
+
+Operator question 2026-05-16: "is calculator same for both options
+buying and selling?" Answer: **NO** for most cases — because STT is
+on the SELL leg only and stamp is on the BUY leg only.
+
+**Identity rule:** total charges depend on which leg has the higher
+premium (more STT) and which has the lower premium (less stamp),
+NOT on long/short label. Three identity classes:
+
+| Comparison | Result |
+|---|---|
+| Same price pair, mirror outcomes (one wins, one loses) | **Different charges** (winner pays more) |
+| Both profitable with same gross PnL | **Identical charges** (both sell at higher leg) |
+| Both losing with same gross PnL but opposite directions | **Different charges** (depends on which leg is the actual sell) |
+
+#### Worked examples (n=25 lots NIFTY, post-Apr-2026 STT 0.15%)
+
+**Scenario A — Same price pair (₹100 / ₹120), one winner one loser:**
+
+| Side | Direction | Gross | Brkr | STT | Stamp | Exch | GST | **Total** | Net |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| LONG winner buy@100, sell@120 | ↑ | +32,500 | 40 | 293 | 5 | 125.23 | 30 | **495.38** | +32,004.62 |
+| SHORT loser sell@100, buy@120 | ↑ | -32,500 | 40 | 244 | 6 | 125.23 | 30 | **447.38** | -32,947.38 |
+
+Difference: ₹48 less for short loser (STT base ₹100 vs ₹120).
+
+**Scenario B — Both PROFITABLE (long ↑ premium vs short ↓ premium):**
+
+| Side | Direction | Gross | Brkr | STT | Stamp | Exch | GST | **Total** | Net |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| LONG winner buy@100, sell@120 | ↑ | +32,500 | 40 | 293 | 5 | 125.23 | 30 | **495.38** | +32,004.62 |
+| SHORT winner sell@120, buy@100 | ↓ | +32,500 | 40 | 293 | 5 | 125.23 | 30 | **495.38** | +32,004.62 |
+
+**Identical.** Both sell at ₹120 → same STT.
+
+**Scenario C — Both LOSING (long ↓ premium vs short ↑ premium):**
+
+| Side | Direction | Gross | Brkr | STT | Stamp | Exch | GST | **Total** | Net |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| LONG loser buy@100, sell@80 | ↓ | -32,500 | 40 | 195 | 5 | 102.46 | 26 | **370.21** | -32,870.21 |
+| SHORT loser sell@100, buy@120 | ↑ | -32,500 | 40 | 244 | 6 | 125.23 | 30 | **447.38** | -32,947.38 |
+
+Difference: ₹77 more for short loser (sells at ₹100 vs long-loser sells at ₹80).
+
+**Phase 3 fixtures F18-F23 (NEW):** 6 long/short symmetry fixtures
+covering each scenario at n=1 / n=25 / n=100. Calculator MUST produce
+exactly these outputs.
+
+### 12.8 Position-side charges NOT in calculator (event-based ledger)
+
+Per agent research 2026-05-16, the following side-specific costs may
+apply to options sellers (shorts) but are NOT per-trade calculator
+concerns:
+
+| Cost | When | Where modeled |
+|---|---|---|
+| **Margin shortfall penalty** | 0.5%–5%/day on shortfall amount (SEBI 2021 regime) | Event-based ledger; only fires if backtest models capital |
+| **ELM 2% on expiry-day short index** | Margin requirement, not P&L | Out of scope (no margin in Track 2 backtest) |
+| **Peak-margin penalty** | Per random intraday snapshot | Event ledger |
+| **Auto-square-off** | Dhan ₹20/order when RMS-initiated | Event ledger |
+| **Call & Trade** | Dealer-assisted orders | Event ledger (rare) |
+
+Track 2 calculator does NOT model these — they fire on operational
+events, not on simulated signal-to-fill paths. Per Golden Rule #3,
+this is scope-locked: per-trade calculator = 7 charges + slippage,
+nothing more.
+
 ---
 
 ## 13. Edge cases (explicit list)
@@ -631,24 +775,51 @@ Determinism is the audit oracle (Golden Rule #7 idempotence).
 
 ---
 
-## 16. Open items (block code-lock)
+## 16. Open items (block code-lock) — EXPANDED 2026-05-16
 
-Per `TRACK2_OPTIONS_SPEC.md §8b` — three items still UNVERIFIED:
+Per `TRACK2_OPTIONS_SPEC.md §8b` + 2026-05-16 deep research, items
+still UNVERIFIED (3 original + 5 new):
 
-| # | Item | Impact on calculator | Blocker? |
-|---|---|---|---|
-| 1 | Dhan official rate card (page returns HTTP 403 to agents) | If actual brokerage ≠ ₹20, recompute all fixtures | YES |
-| 2 | Finance Act 2026 STT gazette text | If 0.15% ≠ correct value, recompute fixtures F1-F4, F6-F9, F12-F14, F16 | YES — but date-switched so easy patch |
-| 3 | BSE Bankex options exchange rate | If 0.03250% wrong, only SENSEX fixture F9 affected | LOW (SENSEX only) |
+| # | Item | Source of uncertainty | Impact | Blocker? |
+|---|---|---|---|---|
+| 1 | **Dhan official rate card** (₹20 brokerage etc.) | dhan.co/pricing returns HTTP 403 to all automated WebFetch | If actual brokerage ≠ ₹20, recompute all fixtures | YES |
+| 2 | **Finance Act 2026 STT 0.15% gazette text** | Multiple secondary sources, no agent could pull final gazette PDF | If 0.15% wrong, recompute all post-Apr-2026 fixtures | YES (but date-switched, easy patch) |
+| 3 | **BSE Bankex options exchange rate** | Conflicting: ₹3,250/cr vs ₹325/cr (10× discrepancy) | Only SENSEX fixture F9 affected | LOW (SENSEX only) |
+| 4 | **STT-on-exercise rate post-Apr-2026** | ClearTax cites 0.15%; Finance Act gazette unconfirmed | Only fires if `held_to_expiry_exercise=True` (Track 2 never sets this) | LOW for Track 2; HIGH if future tracks model held-to-expiry |
+| 5 | **SENSEX freeze quantity post-Mar-2026** | Angel One mentions revision, exact new cap not extracted | Only affects orders > ~1,000 lots SENSEX (rare) | LOW |
+| 6 | **Dhan Call & Trade exact rate** | Secondary sources conflict: ₹20 vs ₹50/order | Event-based, NOT per-trade — but if event ledger built, needs verified rate | LOW for calculator; MEDIUM for event ledger |
+| 7 | **Dhan API-vs-UI brokerage parity** | No source mentions a differential; assumed identical | If algo-API orders incur additional brokerage, ALL fixtures off | LOW (unverified but not flagged anywhere) |
+| 8 | **Dhan auto-SqOff trigger conditions** for short-options NRML overnight | Search snippets imply RMS-initiated only, not scheduled EOD | Only relevant for event ledger; not per-trade calculator | LOW |
 
-**All 3 items require operator manual verification.** I can chase them
-no further than what's already in `§8b`.
+**Items 1-3:** original 3 from `TRACK2_OPTIONS_SPEC §8b`.
+**Items 4-8:** added 2026-05-16 from deep research on long/short
+asymmetry + freeze quantity + hidden costs.
+
+**All 8 items require operator manual verification.** Items 1, 2, 4
+materially affect calculator output. Items 3, 5-8 affect edge cases
+or related modules.
+
+### 16.1 Verification action checklist
+
+Operator manual steps before code-lock:
+
+1. [ ] Visit `dhan.co/pricing` in browser, screenshot, confirm ₹20/order.
+2. [ ] Verify Finance Act 2026 gazette PDF: STT rate + effective date.
+3. [ ] Verify BSE Membership Transaction Fees PDF for Bankex options.
+4. [ ] Verify Finance Act 2026 STT-on-exercise rate (if same as sell-leg STT, single rate).
+5. [ ] Check BSE notice board for SENSEX freeze qty post-Mar-2026.
+6. [ ] Open Dhan support ticket: confirm Call & Trade exact rate.
+7. [ ] Open Dhan support ticket: confirm no brokerage differential for API orders.
+8. [ ] Open Dhan support ticket: confirm auto-SqOff trigger conditions for NRML short index options.
+
+Items 1, 2, 4 are CALCULATOR BLOCKERS. Items 3, 5-8 unblock related
+work but calculator can ship without them.
 
 ---
 
 ## 17. Acceptance criteria for Phase 3 build
 
-1. ✅ All 16 fixtures pass byte-for-byte (`int64 paisa` exact match).
+1. ✅ All **23 fixtures** pass byte-for-byte (`int64 paisa` exact match): F1-F16 base + F17 iceberg slicing + F18-F23 long-vs-short symmetry.
 2. ✅ Hypothesis property tests:
    - `total_charges_paisa ≥ 0` (never negative)
    - `total_charges_paisa == sum_of_components` (idempotent decomp)
@@ -671,6 +842,13 @@ no further than what's already in `§8b`.
 | 2026-05-16 | Added §12.4 slippage broken out | Operator clarity: show slippage as separate line even though it's baked into fill prices in main algorithm. |
 | 2026-05-16 | Added §12.5 per-lot formula | Demonstrates O(1) linear scaling formula for any n. |
 | 2026-05-16 | Added §12.6 BANKNIFTY/SENSEX pointer | Same algorithm, different lot/exchange routing. Phase 3 generator emits 60 fixtures (3 instruments × 20 lot counts) parametrically. |
+| 2026-05-16 | Added §4.2 STT-on-exercise branch | Operator question on buy-vs-sell asymmetry triggered deep research. Agent found that LONG ITM held-to-expiry incurs different STT (0.125%→0.15% on intrinsic value, not on premium). Track 2 never sets this flag, but spec must support forward-compatibility. Added `held_to_expiry_exercise` + `intrinsic_value_paisa_at_expiry` inputs. |
+| 2026-05-16 | Added §6b freeze quantity / order splitting | NSE freeze quantities: NIFTY 1,800 contracts (1,755 lots), BANKNIFTY 600 lots, SENSEX ~1,000 lots. Above freeze, broker submits iceberg → multiple back-end orders → ₹20 brokerage per slice. Calculator now computes `n_orders_per_leg = ceil(n_lots / freeze_lots)`. Added F17 fixture (2,000-lot NIFTY = 2 slices). |
+| 2026-05-16 | Added §12.7 long-vs-short symmetry table | Three identity classes: (A) same price pair mirror outcomes → DIFFERENT, (B) both profitable same gross → IDENTICAL, (C) both losing same gross → DIFFERENT. Concrete worked examples at n=25. Added F18-F23 fixtures. |
+| 2026-05-16 | Added §12.8 position-side costs NOT in calculator | Margin shortfall, ELM 2%, peak-margin, auto-SqOff, Call & Trade — all event-based, NOT per-trade. Scope-locked. |
+| 2026-05-16 | Expanded §16 from 3 to 8 unverified items | Added: (4) STT-on-exercise rate, (5) SENSEX freeze qty post-Mar-2026, (6) Dhan Call & Trade rate, (7) Dhan API-vs-UI brokerage parity, (8) Dhan auto-SqOff trigger conditions. Items 1-3 are CALCULATOR BLOCKERS; items 4-8 affect related modules. Added 8-step operator verification checklist (§16.1). |
+| 2026-05-16 | Updated §11 API: 2 new inputs + 2 new outputs | `held_to_expiry_exercise` + `intrinsic_value_paisa_at_expiry` inputs; `used_exercise_branch` + `n_orders_per_leg` outputs for audit. |
+| 2026-05-16 | Acceptance criteria §17: 16 → 23 fixtures | F17 iceberg + F18-F23 long-vs-short symmetry. |
 
 ---
 
