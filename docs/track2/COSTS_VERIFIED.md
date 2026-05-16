@@ -76,16 +76,23 @@ Per industry-published broker examples + Section 170 CGST + Rule 11 STT Rules:
 
    4. ROUND industry items to paise (half-up to 2 decimals).
 
-   5. COMPUTE GST:
+   5. COMPUTE GST (REVISED 2026-05-16 per DEC-COST-001):
         gst_base          = brokerage + exchange + sebi + ipft
                             (paise precision, NOT pre-rounded)
+        # CRITICAL: round TOTAL GST once, then split — NOT each component
+        # Section 170 CGST mandates rounding of the TOTAL tax.
+        # Previous spec rounded CGST + SGST separately at 9% each,
+        # which created systematic +₹1 overcharge ~50% of the time
+        # (e.g., ₹50.55 base: correct ₹9, was: 2×round(4.55)=2×5=₹10).
+        # Hostile review 2026-05-16 (Agent A finding 7) caught this.
+        gst_total         = round_to_rupee(gst_base × 0.18)
         if intra-state (operator's state == Dhan's state):
-            cgst          = round_to_rupee(gst_base × 0.09)
-            sgst          = round_to_rupee(gst_base × 0.09)
-            gst           = cgst + sgst
+            cgst          = gst_total // 2       # display only
+            sgst          = gst_total - cgst     # display only (avoids parity drift)
+            gst           = gst_total
         else (inter-state):
-            igst          = round_to_rupee(gst_base × 0.18)
-            gst           = igst
+            igst          = gst_total
+            gst           = gst_total
 
    6. TOTAL CHARGES:
         total             = brokerage + exchange + sebi + ipft
@@ -239,7 +246,7 @@ Tracked in `operating_costs.yaml` (separate from per-trade `cost_calculator` out
 | # | Item | Why UNVERIFIED | How to verify |
 |---|---|---|---|
 | 1 | Dhan rate card primary page | Direct WebFetch returns HTTP 403 | Operator opens `dhan.co/pricing` in browser + screenshot |
-| 2 | STT 0.15% post-1-Apr-2026 | Budget proposal; need Finance Act 2026 gazette | Operator pulls gazette notification |
+| ~~2~~ | ~~STT 0.15% post-1-Apr-2026~~ | **LOCKED 2026-05-16 (DEC-COST-003)**: VERIFIED via TaxGuru + Wikipedia STT page + 1Finance citing Finance Bill 2026 PDF at indiabudget.gov.in/doc/Finance_Bill.pdf. Rates: options 0.10%→0.15%, futures 0.02%→0.05%, exercise 0.125%→0.15%. | n/a — locked |
 | 3 | BSE Bankex/Sensex IPFT rate | Inconclusive sources (could be 0 or near-zero) | Operator pulls BSE Members Transaction Fees page |
 | 4 | Exact rounding direction (half-up vs half-even) | Stated "nearest" — direction ambiguous | Real contract note reconciliation |
 | 5 | Per-trade vs per-day aggregation timing for STT/GST | Industry practice unverified for Dhan specifically | Real contract note reconciliation |

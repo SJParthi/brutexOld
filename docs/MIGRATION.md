@@ -218,6 +218,50 @@ superseded.
 
 115. **TRACK2_OBSERVABILITY.md written** (2026-05-16 evening, operator request: "tracking capturing logging dashboard visualizing alerting notifications and all dude okay? with guarantee and assurance dude okay?"). Consolidates observability requirements scattered across TRACK1_RUNTIME_ARCHITECTURE §6, TRACK2_OPERATIONAL_GUARANTEES §5/6/8, and CLAUDE.md §10 into a single 11-section reference. 4 pillars: TRACKING (audit JSONL hash-chain), LOGGING (structlog only, no print), DASHBOARD (FastAPI 127.0.0.1:9080 with 9 pages), ALERTING (Telegram + dashboard + email digest + macOS fallback). 13-event alert matrix with severity, channel, sustain duration. Prometheus /metrics on port 9081 with 10 core counters + 4 histograms. brutex doctor 10→12 C-checks (added C11 throughput.canary_fresh, C12 options_fresh). 7 explicit SLAs: every audit emit ≤ 100 ms, CRITICAL alert ≤ 60 sec, dashboard accuracy ≤ 5 sec, doctor runs every workday 07:30 IST, backtest reproducible bit-for-bit, no data loss on crash, hash chain always intact. 7 property invariants P-OBS-1 through P-OBS-7 enforce these at build time. 8 decision IDs DEC-OBS-001 through DEC-OBS-008.
 
+### 4-agent ASSURANCE round (2026-05-16 night, operator request: "i need the guarantee and assurance dude okay?")
+
+116. **Assurance round summary written** (`docs/track2/ASSURANCE_ROUND_2026-05-16.md`). 4 parallel agents (hostile review + UNVERIFIED-items lock + 2024-2026 methodology audit + internal consistency audit). Net: 5 UNVERIFIED items → 4 LOCKED + 1 fact-corrected; 15 hostile findings → 14 patched + 1 deliberate-scope; 3 method upgrades patched; 1 consolidation done. 20 new decision IDs DEC-LOCK-001 through DEC-DOCS-001. Spec now at institutional-grade maturity for code-lock.
+
+117. **DEC-LOCK-001 — Lockbox raised 6mo → 18mo + ≥500 trades** (hostile review Agent A finding 1). 6 months of signal-driven trades yields ~100 trades, Sharpe SE ~0.10, the 30%-drop gate falls inside random noise → ~25% false-pass rate. Raised to 18 months (Nov 2024 - May 2026) with hard minimum 500 trades. Patched in `TRACK1_BACKTEST_SPEC.md` Stage 4.7 section.
+
+118. **DEC-DSR-001 — Track 1→2 DSR composability fix** (hostile review Agent A finding 2). Track 1 deflates by N_eff_track1; Track 2 must propagate this and deflate against N_eff_track1 × 21_strikes when ranking strike-sweep results. Threshold rises from ~5.3σ to ~5.7σ. Patched in `TRACK2_EXECUTION_SIMULATOR.md §7.1`.
+
+119. **DEC-RISK-013 — Liquidity OI filter = rolling 30-min trailing as of signal bar** (hostile review Agent A finding 3). EOD OI is look-ahead at signal time. Replaced with rolling 30-min trailing OI. Patched in `TRACK2_RISK_MGMT.md §4.3`.
+
+120. **DEC-RISK-014 — Spread filter replaced with (high-low)/close proxy** (hostile review Agent A finding 4). Bid-ask spread data unobtainable from Dhan rolling-option API. Honest proxy: `(bar.high − bar.low) / bar.close ≤ 0.05`. Patched in `TRACK2_RISK_MGMT.md §4.3`.
+
+121. **DEC-RISK-015 — Circuit-close exit price = last traded + 50 bps slippage** (hostile review Agent A finding 13). Resolves circuit-close + DEC-RISK-011 (no overnight) apparent contradiction. Patched in `TRACK2_RISK_MGMT.md §7.1`.
+
+122. **DEC-RISK-016 — SENSEX freeze qty corrected: 50 lots/order (= 1,000 contracts at lot=20)** (Agent B primary-source verification). Operator's earlier "1,000 lots" conflated contracts with lots. Verified via Zerodha official + BSE Apr 2025 circular 20250401-8. Patched in `TRACK2_RISK_MGMT.md §1.2`.
+
+123. **DEC-STAT-001 — CPCV embargo formula** (hostile review Agent A finding 6). Was: max indicator lookback. Now: `max(max_indicator_lookback, max_trade_horizon_bars, 1_trading_day_in_bars)`. For Mode C ride-to-15:20 with 360-bar horizon, embargo must dominate. Patched in `TRACK1_BACKTEST_SPEC.md` Stage 4.
+
+124. **DEC-STAT-002 — e-value / stopped e-BH wrapper at Stage 2.5** (Agent C 2024-2026 currency review, HIGHEST LEVERAGE). Current Wald/Gelman/Efron-Hastie Bayesian stack lacks frequentist anytime-valid Type-I guarantee. e-BH (Ramdas-Wang 2024, ScienceDirect 2025) gives FDR control at any stopping time. Cheap to compute, regulator-defensible. Patched in `TRACK1_BACKTEST_SPEC.md` Stage 2.5.
+
+125. **DEC-STAT-003 — Regime tagging on every result row** (Agent C). Tag every backtest path with `regime_vol_quintile` (1-5 from realised vol) and `regime_trend_sign` (BULL/BEAR/FLAT from prior-N-bar slope). Enables post-hoc filtering. No new training; reuse existing vol stamp. Patched in `TRACK1_BACKTEST_SPEC.md` Result Row Schema.
+
+126. **DEC-COST-001 — GST round total once, not CGST/SGST separately** (hostile review Agent A finding 7). Previous spec rounded CGST + SGST independently at 9% each, violating Section 170 CGST (which rounds total tax) and creating systematic +₹1 overcharge ~50% of trades. Fix: `gst_total = round_to_rupee(gst_base × 0.18)`, then split half-half for display. Patched in `COSTS_VERIFIED.md §4`.
+
+127. **DEC-COST-002 — STT regime key = entry_dt_ist.date()** (hostile review Agent A finding 8). Previously undefined which date field picks STT rate at era boundaries (Oct 2024, Apr 2026). Locked to entry date. Property test fixture for 2024-09-30 vs 2024-10-01 added. Patched in `CALCULATOR_SPEC.md §4`.
+
+128. **DEC-COST-003 — Finance Act 2026 STT rates LOCKED** (Agent B primary-source verification). Options sell-side 0.10%→0.15%, futures 0.02%→0.05%, exercise 0.125%→0.15%. Sources: Finance Bill 2026 PDF at indiabudget.gov.in + TaxGuru + Wikipedia STT page + 1Finance. Previously flagged UNVERIFIED in COSTS_VERIFIED §9 item 2; now removed from unverified list.
+
+129. **DEC-COST-004 — STT-on-exercise rate 0.125%/0.15% split LOCKED** (Agent B). Same Finance Act 2026 verification; covered by DEC-COST-003. Patched in `CALCULATOR_SPEC.md §4.2`.
+
+130. **DEC-REPRO-001 — data_snapshot_hash = bars-≤-cutoff, not file bytes** (hostile review Agent A finding 5). Previous spec hashed Parquet file bytes which mutate on every daily incremental append → past result rows non-reproducible. Fix: hash bars with `timestamp ≤ snapshot_cutoff_ts`. Result rows stamp `snapshot_cutoff_ts` for exact replay. Patched in `TRACK1_BACKTEST_SPEC.md`.
+
+131. **DEC-PLUGIN-002 — indicator_version auto-hashed from module bytes** (hostile review Agent A finding 15). Hand-bumped version can drift from actual code. Now: `indicator_version = blake3(indicator_module_bytes)` computed at process start. Never hand-bumped. Patched in `TRACK1_BACKTEST_SPEC.md` Plugin Add/Remove Policy.
+
+132. **DEC-INFRA-001 — Bloom sizing re-derived; Cuckoo fallback** (hostile review Agent A finding 11). Bloom budget assumed ≤2B survivors but Stage 1A+1B reduction is multiplicative ~80% → may leave ~146B. Re-derive empirically; if >2B, escalate to disk-backed Cuckoo filter or sharded Bloom. Patched in `TRACK2_OPERATIONAL_GUARANTEES.md §4`.
+
+133. **DEC-CAL-001 — 7 Indian-market 2024-2026 regime-break dates appendix** (Agent C). Nov 20 2024 (weekly expiry restriction), Apr 5 2025 (NIFTY weekly Thu→Mon), Jul 1 2025 (FutEq OI methodology), Sep 1 2025 (NSE F&O Tuesday expiry), Oct 1 2025 (new MWPL formula), Nov 3 2025 (intraday MWPL monitoring), Dec 6 2025 (FutEq penalty enforcement). Plus lot size changes (NIFTY 25→75 Apr-2024, BANKNIFTY 15→30). Patched in `TRACK2_OPTIONS_SPEC.md`.
+
+134. **DEC-TAX-009 — 44AD opt-out config flag** (hostile review Agent A finding 12). If operator EVER filed under 44AD, opting out triggers 5-year mandatory audit lock (~₹3-5 lakh/yr compliance cost). New config flag `prior_44ad_opt_in: bool = False`; if True, simulator adds annual audit-cost line item. Patched in `TRACK2_TAX_HANDLING.md §1.1`.
+
+135. **DEC-OBS-009 — VIX synthetic fallback from NIFTY ATM IV** (hostile review Agent A finding 14). Dhan 1m VIX has gaps + 1-tick lag. Risk-mgmt volatility-targeting reads vix_at_entry directly. Now: compute synthetic VIX from NIFTY 30-day ATM IV as fallback. Document `vix_source ∈ {dhan_native, computed}` per row. Patched in `TRACK2_OBSERVABILITY.md §2.2`.
+
+136. **DEC-DOCS-001 — UNVERIFIED inventory single source of truth** (Agent D consistency audit). Counts diverged across CALCULATOR_SPEC §16 (11 items), TRACK2_TAX_HANDLING §11 (5), TRACK2_RISK_MGMT §11 (own list). Consolidated to CALCULATOR_SPEC §16 as the authoritative inventory; other docs reference back. After this assurance round: 4 of 5 originally-flagged items now LOCKED; item 2 (SENSEX freeze qty) fact-corrected.
+
 ---
 
 ## Acknowledgement

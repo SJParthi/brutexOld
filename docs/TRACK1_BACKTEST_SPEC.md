@@ -354,10 +354,17 @@ operator must HALT the sweep, modify the registry, restart the sweep
    2-year train, 6-month test, 3-month slide
    ~16 walks across 5 years
    Keep candidates with positive Sharpe in ≥12 of 16 walks
-7. **Lockbox:** reserve last 6 months (Dec 2025 - May 2026), NEVER seen
+7. **Lockbox:** reserve last **18 months** (Nov 2024 - May 2026), NEVER seen
    by any prior stage. Code-enforced isolation: any access path outside
    Stage 4.7 raises exception. Top 10 candidates tested ONCE.
-   Pass: lockbox Sharpe within 30% of training, MDD within 50% of training.
+   Pass criteria (DEC-LOCK-001, REVISED 2026-05-16 from 6mo to 18mo):
+   - Minimum **500 trades** in lockbox (else REJECT — insufficient power)
+   - Lockbox Sharpe within 30% of training
+   - MDD within 50% of training
+   Rationale: 6mo × 1-min × signal-driven yields ~100 trades; Sharpe SE
+   ~0.10; the 30%-drop gate falls inside random noise → ~25% false-pass.
+   Hostile review 2026-05-16 (Agent A) flagged this; raised to 18mo + 500
+   trades to bring Sharpe SE below 0.05.
 
 ## Result Row Schema (Every Single Trial — 30+ Metrics)
 

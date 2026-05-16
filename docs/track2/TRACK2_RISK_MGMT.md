@@ -51,7 +51,7 @@ Per NSE circular FAOP68834 / FAOP70616 effective 2025-09-01.
 |---|---|---|
 | NIFTY 50 | 1,800 | NSE FAOP68834 |
 | BANKNIFTY | 900 | NSE 2025-09-01 circular |
-| SENSEX | 1,000 | UNVERIFIED — operator value; needs primary BSE circular |
+| SENSEX | **50 lots/order** (= 1,000 contracts at lot=20) | VERIFIED 2026-05-16 via Zerodha official (X/Twitter) + BSE Apr 2025 circular 20250401-8. Operator's earlier "1,000 lots" conflated contracts with lots; DEC-RISK-016. |
 
 Freeze quantity is the maximum number of lots per single order leg.
 Orders exceeding the cap are rejected at the exchange gateway. The
@@ -351,15 +351,33 @@ Any combo whose simulated single-event loss exceeds 5% of capital is
 flagged as `tail_risk_fail` in audit log and excluded from the
 deployable set (regardless of Sharpe ratio).
 
-### 4.3 Liquidity floor
+### 4.3 Liquidity floor (REVISED 2026-05-16 per hostile review)
 
-Reject any signal whose target strike has either:
-- EOD open interest < 10,000 contracts, OR
-- Average bid-ask spread > 5% of premium
+Reject any signal whose target strike fails either:
 
-Both fields must be encoded in the Track 1 vocabulary appendix as
-`oi_at_entry` and `spread_at_entry` (currently planned as audit fields;
-this spec elevates them to gating fields for Track 2).
+1. **Rolling 30-minute trailing open interest ≥ 10,000 contracts**
+   as of the signal-evaluation bar (DEC-RISK-013, was EOD).
+   - Previous spec used EOD OI which is look-ahead at signal time.
+   - Now: at signal bar T, use mean OI over [T-30min, T]; reject if < 10K.
+   - For BANKNIFTY post-Nov-2024 (monthly-only), the threshold should
+     be re-calibrated per-instrument from empirical distribution;
+     a hard 10K may filter too aggressively.
+
+2. **Intra-bar range proxy ≤ 5% of close** as a spread surrogate
+   (DEC-RISK-014, was "spread > 5% of premium").
+   - Previous spec required bid-ask spread data; Dhan rolling-option
+     API does not return it.
+   - Replacement proxy: `(bar.high - bar.low) / bar.close ≤ 0.05`
+     at the entry bar. A wide intra-bar range correlates with wide
+     spreads; an honest proxy from available data.
+
+Both fields are computed from Dhan-fetched OHLC+OI per-minute. They
+appear in the Track 1 vocabulary appendix as `oi_at_entry`,
+`oi_rolling_30m_at_entry`, and `intra_bar_range_pct_at_entry`.
+
+Rejected signals are AUDITED (with reject_reason) but do NOT contribute
+to PnL. See `TRACK2_EXECUTION_SIMULATOR.md §5.4` for the rejection
+ledger format.
 
 ### 4.4 Far-OTM expiry-day restrictions
 
@@ -441,12 +459,21 @@ the simulator must:
 1. Halt simulated trading per matrix above.
 2. Stamp `circuit_triggered` flag in audit log.
 3. If 15% post-14:00 OR 20% any-time fires, mark the day as DAY CLOSE
-   and emit `circuit_close` event. Existing open positions are not
-   force-exited at 15:20 (the day already closed); the next session's
-   open is the next event.
+   and emit `circuit_close` event. **Per DEC-RISK-015 (2026-05-16):**
+   Open positions are synthetically exited at the **last traded price
+   of the halt bar** plus a **50 bps slippage penalty** (calibrated
+   from the 2024-06-04 election-crash empirical data). The position
+   is marked `exit_reason = circuit_close` AND `held_overnight = false`.
+   This resolves the apparent contradiction between circuit-close
+   (no continuous quote available) and the DEC-RISK-011 intraday-only
+   lock.
 
-The audit log must distinguish "forced 15:20 exit" from "circuit-triggered
-close" in the `exit_reason` field.
+The audit log distinguishes:
+- `exit_reason = forced_1520` (normal 15:20 forced exit)
+- `exit_reason = circuit_close` (synthetic exit at halt)
+- `exit_reason = signal_exit` (Mode B opposite-signal or reversal)
+- `exit_reason = sl_hit` (Mode A stop-loss fired)
+- `exit_reason = tp_hit` (Mode A take-profit fired)
 
 ---
 
@@ -492,6 +519,10 @@ The following risk-management decisions must be logged in
 | DEC-RISK-009 | Position sizing in FutEq from 2025-10-01 | SEBI rule |
 | DEC-RISK-010 | Circuit-triggered close ≠ forced 15:20 exit | audit distinction |
 | DEC-RISK-011 | INTRADAY ONLY: MIS, NO NRML, NO overnight, NO held-to-expiry; entry window 09:16-15:00 IST; forced exit 15:20 IST | single most important constraint; simplifies cost model + tax model |
+| DEC-RISK-013 | Liquidity OI filter = rolling 30-min trailing as of signal bar (was EOD) | hostile review caught EOD as look-ahead leak |
+| DEC-RISK-014 | Spread filter = (bar.high − bar.low) / bar.close ≤ 0.05 proxy (was bid-ask 5% of premium) | bid-ask data unobtainable from Dhan rolling option API; honest proxy |
+| DEC-RISK-015 | Circuit-triggered close exit price = last traded price + 50 bps slippage penalty (calibrated from 2024-06-04 crash) | resolves circuit-close + 15:20-forced-exit contradiction |
+| DEC-RISK-016 | SENSEX freeze qty corrected: 50 lots per order (= 1,000 contracts at lot size 20); was "1,000 lots" | conflated contracts vs lots; primary source Zerodha + BSE Apr 2025 circular 20250401-8 |
 
 ---
 
