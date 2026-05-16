@@ -20,8 +20,12 @@ Modules:
 - `conditions`     — Vocabulary: 52 boolean conditions per bar (TBD).
 """
 
-from brutex.indicators.day_extremes import DayExtremesBar, compute_day_extremes
-from brutex.indicators.ema import alpha, compute_ema, latest_ema
+from brutex.indicators.day_extremes import (
+    DayExtremesBar,
+    DayExtremesState,
+    compute_day_extremes,
+)
+from brutex.indicators.ema import EMAState, alpha, compute_ema, latest_ema
 from brutex.indicators.fib_levels import (
     ALL_EXTENSION_KEYS,
     ALL_RETRACEMENT_KEYS,
@@ -52,12 +56,14 @@ __all__ = [
     # Pivots
     "PivotLevels",
     "compute_pivot_levels",
-    # EMA
+    # EMA (streaming + batch)
+    "EMAState",
     "alpha",
     "compute_ema",
     "latest_ema",
-    # Day extremes
+    # Day extremes (streaming + batch)
     "DayExtremesBar",
+    "DayExtremesState",
     "compute_day_extremes",
     # Prev Day OHLC
     "DailyCandle",

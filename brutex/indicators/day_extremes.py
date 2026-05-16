@@ -3,48 +3,56 @@
 Per `docs/TRACK1_VOCABULARY.md` Indicator Group 1 (Anchors):
     "Day High, Day Low (running)"
 
-## What it computes
+## ONE indicator, TWO interfaces (online/offline parity)
 
-For each intraday bar, the running maximum HIGH and running minimum
-LOW from session open (09:15 IST) through that bar — inclusive of
-the current bar.
+Same pattern as EMA: a streaming state object + a batch helper that
+delegates to it. Live TickVault and backtest backups produce
+**bit-identical** day_high / day_low values at every bar.
 
-Reference Pine Script (provided by operator 2026-05-16, Pine v3):
-```
-t = time("1440", session.extended)
+### Streaming / live mode
+
+    state = DayExtremesState()
+    for tick_bar in live_feed:
+        result = state.update(ts_ist=tick_bar.ts_ist,
+                              high=tick_bar.high,
+                              low=tick_bar.low)
+        # result has running day_high and day_low
+
+### Batch / backtest mode
+
+    bars = compute_day_extremes(historical_bars)
+    # internally instantiates a DayExtremesState and feeds in order
+
+## The math (matches operator's Pine v3 source)
+
+```pine
 is_first = na(t[1]) and not na(t) or t[1] < t
-
 if is_first and barstate.isnew:
     day_high := high
     day_low  := low
 else:
     day_high := day_high[1]
     day_low  := day_low[1]
-
 if high > day_high: day_high := high
 if low  < day_low : day_low  := low
 ```
 
-Our implementation matches this logic exactly:
-- At the first bar of each trading day, reset to bar.high / bar.low.
-- For every subsequent bar in the same trading day, expand to include
-  the bar's high/low.
+Our implementation:
+- At first bar of any new IST trading day: reset to (high, low) of that bar.
+- For every subsequent bar in the same trading day: expand to include
+  the new bar's (high, low).
 
-## Reset trigger
+## O(1) per-step
 
-Reset on **trading-day boundary in IST**. We use the IST calendar
-date (via the bar's IST timestamp) — NOT a fixed 24-hour window —
-so weekends and holidays are correctly handled.
-
-## Money representation
-
-int64 paisa throughout per CLAUDE.md §4. No arithmetic operations
-on the values, just min/max comparison — so no rounding concerns.
+Each `update()` call:
+- 1 date comparison (`bar_day != current_day`)
+- Either: 2 assignments (new day) OR 2 comparisons + 0-2 assignments (same day)
+- Total: ≤ 5 ops per bar
+- State: 24 bytes (1 date + 2 int64)
 
 ## No look-ahead (Property P-06)
 
-`day_high[N]` and `day_low[N]` are computed from bars 0..N only.
-Streaming-safe.
+`day_high(t)` and `day_low(t)` depend only on bars [0..t]. Streaming-safe.
 """
 
 from __future__ import annotations
@@ -56,7 +64,7 @@ from typing import Iterable
 
 @dataclass(frozen=True)
 class DayExtremesBar:
-    """One bar's running day high / day low values.
+    """One bar's running day high / day low values (output record).
 
     Both in int64 paisa.
     """
@@ -68,61 +76,109 @@ class DayExtremesBar:
     day_low_paisa: int       # running min from session open through this bar
 
 
+@dataclass
+class DayExtremesState:
+    """Streaming-mode running Day High / Day Low state object.
+
+    Hold once, call `.update()` per new bar. Works identically in:
+    - Live TickVault loop (each bar close → update)
+    - Backtest replay (historical bar → update)
+    - Resumable sweeps (serialize/restore between checkpoints)
+
+    Attributes:
+        current_day: IST date of the currently-tracked trading day.
+        day_high_paisa: Running max for current_day.
+        day_low_paisa: Running min for current_day.
+    """
+
+    current_day: date | None = None
+    day_high_paisa: int = 0
+    day_low_paisa: int = 0
+
+    def update(
+        self,
+        ts_ist: datetime,
+        high_paisa: int,
+        low_paisa: int,
+    ) -> tuple[int, int]:
+        """Process one bar. Returns (day_high, day_low) in int64 paisa.
+
+        Args:
+            ts_ist: Bar's IST timestamp (open or close — caller's choice,
+                must be consistent; only the .date() part is used to
+                detect day boundary).
+            high_paisa: Bar's high in int64 paisa.
+            low_paisa: Bar's low in int64 paisa.
+
+        Returns:
+            Tuple of (running_day_high_paisa, running_day_low_paisa)
+            AFTER this bar is incorporated.
+        """
+        bar_day = ts_ist.date()
+        if bar_day != self.current_day:
+            # New trading day → reset to this bar's H/L
+            self.current_day = bar_day
+            self.day_high_paisa = high_paisa
+            self.day_low_paisa = low_paisa
+        else:
+            # Same trading day → expand
+            if high_paisa > self.day_high_paisa:
+                self.day_high_paisa = high_paisa
+            if low_paisa < self.day_low_paisa:
+                self.day_low_paisa = low_paisa
+        return self.day_high_paisa, self.day_low_paisa
+
+    def reset(self) -> None:
+        """Forget all history. Used at start-of-session-replay or in tests."""
+        self.current_day = None
+        self.day_high_paisa = 0
+        self.day_low_paisa = 0
+
+    def to_dict(self) -> dict:
+        """Serialize for checkpoint persistence."""
+        return {
+            "current_day": self.current_day.isoformat() if self.current_day else None,
+            "day_high_paisa": self.day_high_paisa,
+            "day_low_paisa": self.day_low_paisa,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DayExtremesState":
+        """Restore from checkpoint dict."""
+        cd = date.fromisoformat(d["current_day"]) if d["current_day"] else None
+        return cls(
+            current_day=cd,
+            day_high_paisa=d["day_high_paisa"],
+            day_low_paisa=d["day_low_paisa"],
+        )
+
+
 def compute_day_extremes(
     bars: Iterable[tuple[datetime, int, int]],
 ) -> list[DayExtremesBar]:
-    """Compute running day high / day low for a sequence of intraday bars.
+    """Batch interface: compute running day extremes for a bar sequence.
+
+    Wraps `DayExtremesState` so backtest replay produces bit-identical
+    output to a live `DayExtremesState.update()` loop.
 
     Args:
         bars: Iterable of (ist_timestamp, high_paisa, low_paisa) tuples.
-              Must be sorted ascending by timestamp. Caller is responsible
-              for sort order — function does NOT re-sort.
+              Must be sorted ascending by timestamp.
 
     Returns:
-        List of DayExtremesBar in the same order as input.
-
-    Behavior:
-        - First bar of any trading day resets day_high/day_low to bar.high/bar.low.
-        - Subsequent bars expand the running range.
-        - Trading-day boundary is detected by IST calendar date change.
-
-    Example:
-        bars = [
-            (datetime(2026, 5, 13, 9, 15, ist), 5400000, 5395000),  # day 1 bar 1
-            (datetime(2026, 5, 13, 9, 16, ist), 5410000, 5398000),  # day 1 bar 2
-            (datetime(2026, 5, 14, 9, 15, ist), 5390000, 5380000),  # day 2 bar 1 (RESET)
-        ]
-        result[0]: day_high=5400000, day_low=5395000
-        result[1]: day_high=5410000, day_low=5395000  (high expanded)
-        result[2]: day_high=5390000, day_low=5380000  (new day, reset)
+        List of DayExtremesBar in same order as input.
     """
     out: list[DayExtremesBar] = []
-    current_day: date | None = None
-    running_high = 0
-    running_low = 0
-
+    state = DayExtremesState()
     for ts, high, low in bars:
-        bar_day = ts.date()
-        if bar_day != current_day:
-            # New trading day → reset
-            running_high = high
-            running_low = low
-            current_day = bar_day
-        else:
-            # Same trading day → expand
-            if high > running_high:
-                running_high = high
-            if low < running_low:
-                running_low = low
-
+        day_high, day_low = state.update(ts, high, low)
         out.append(
             DayExtremesBar(
                 timestamp_ist=ts,
                 high_paisa=high,
                 low_paisa=low,
-                day_high_paisa=running_high,
-                day_low_paisa=running_low,
+                day_high_paisa=day_high,
+                day_low_paisa=day_low,
             )
         )
-
     return out
