@@ -316,6 +316,117 @@ week's expiry passes).
 
 ---
 
+## 6b. Strike Selection Rules (LOCKED 2026-05-16) ⭐
+
+Operator decision 2026-05-16: when a Track 1 signal fires, the engine
+must pick a strike to trade. Three options were considered:
+
+| Approach | Verdict |
+|---|---|
+| Cherry-pick best in hindsight | ❌ REJECTED — classic in-sample overfitting trap |
+| Report distribution of all 21 strikes | Considered, but doesn't produce executable strategies |
+| **Pre-trade rule** — sweep over rules per signal | ✅ **LOCKED** |
+
+### The 10 pre-trade strike-selection rules
+
+For each Track 1 signal, the engine evaluates the strategy under
+EACH of these 10 rules and records the PnL per rule. The rule is
+part of the strategy mask — sweeping rules is part of the brute-force
+grid. No hindsight bias because the rule is fixed BEFORE the trade.
+
+| # | Rule name | What it does | Notes |
+|---|---|---|---|
+| 1 | `atm` | Pick the strike closest to spot price at signal time | Highest liquidity, tightest spread |
+| 2 | `atm_plus_1_in_dir` | ATM + 1 step in trade direction (CE → strike up; PE → strike down) | Slightly OTM, cheaper premium |
+| 3 | `atm_plus_2_in_dir` | ATM + 2 steps in trade direction | More OTM, higher leverage |
+| 4 | `atm_plus_5_in_dir` | ATM + 5 steps in trade direction | Aggressive OTM, high gamma |
+| 5 | `atm_minus_1_in_dir` | ATM - 1 step in trade direction | Slightly ITM, more premium |
+| 6 | `atm_minus_2_in_dir` | ATM - 2 steps in trade direction | More ITM, lower gamma |
+| 7 | `atm_minus_5_in_dir` | ATM - 5 steps in trade direction | Deep ITM, premium-heavy |
+| 8 | `delta_target_030` | Strike with delta closest to 0.30 (CE) or -0.30 (PE) at signal time | Common OTM trade-off |
+| 9 | `delta_target_050` | Strike with delta closest to 0.50 (CE) or -0.50 (PE) — effectively ATM | Greek-based ATM lookup |
+| 10 | `delta_target_015` | Strike with delta closest to 0.15 (CE) or -0.15 (PE) | Far OTM, only if liquidity OK |
+
+### Rule semantics — "in trade direction"
+
+| Trade direction | Rule applied to CE | Rule applied to PE |
+|---|---|---|
+| BULL (buy CE) | `atm_plus_N` → strike higher than ATM (more OTM call) | n/a (bull trades CE) |
+| BULL (buy CE) | `atm_minus_N` → strike lower than ATM (more ITM call) | n/a |
+| BEAR (buy PE) | n/a (bear trades PE) | `atm_plus_N` → strike LOWER than ATM (more OTM put) |
+| BEAR (buy PE) | n/a | `atm_minus_N` → strike HIGHER than ATM (more ITM put) |
+
+So `atm_plus_1_in_dir` means "1 strike further OTM than ATM for the
+chosen direction":
+- BULL CE: strike = ATM + 1 step (price up)
+- BEAR PE: strike = ATM - 1 step (price down)
+
+### Delta-target rules (rules 8, 9, 10)
+
+Delta is computed from the option's bar-time Greeks (BSM, see §7).
+The engine scans the 21-strike chain at signal time and picks the
+strike whose absolute delta is closest to the target. If two strikes
+are equally close, the one closer to ATM wins (tie-breaker).
+
+Implementation note: delta-target rules require the Greeks pipeline
+to be operational, so they're enabled in Phase 4 (after Phase 3's
+Rust BSM kernel ships). Rules 1-7 (offset-based) work from Phase 2
+onwards using just the strike grid.
+
+### Sweep cardinality impact
+
+Per Track 1 signal, the engine produces **10 options PnL records**
+(one per rule). With ~5,000 signals across top-10 Track 1 strategies:
+
+| Item | Count |
+|---|---|
+| Top-10 Track 1 strategies | 10 |
+| Signals per strategy | ~500 |
+| Pre-trade rules per signal | 10 |
+| Total options-trade simulations | **~50,000 per first sweep** |
+| Approx compute time | **5-15 min** on Polars lake |
+
+### Why this beats "sweep all 21 strikes and pick best"
+
+| Property | Sweep 21 + pick best | Pre-trade rule sweep |
+|---|---|---|
+| Hindsight bias | ❌ Yes — picks best in hindsight | ✅ No — rule fixed before trade |
+| Trades simulated per signal | 21 × 2 (CE+PE) = 42 | 10 |
+| Inflated Sharpe risk | High (2-3× inflated typical) | None |
+| Statistical validity | Low | High |
+| Produces executable strategy | Ambiguous | ✅ Yes (rule is the strategy) |
+| Sweep size | ~210,000 trades | ~50,000 trades |
+
+### Rule lookup table (config-driven)
+
+Lives at `brutex/options/strike_rules.py` (Phase 2 deliverable):
+
+```python
+# Each rule is a dataclass with:
+# - name: str  (e.g., "atm_plus_2_in_dir")
+# - kind: enum  (OFFSET | DELTA_TARGET)
+# - param: int OR float  (offset count OR delta target)
+@dataclass(frozen=True)
+class StrikeRule:
+    name: str
+    kind: StrikeRuleKind
+    param: float
+    requires_greeks: bool
+```
+
+10 instances at module level, exported as `ALL_STRIKE_RULES`.
+
+### Adding new rules
+
+Per the COMMON · DYNAMIC · SCALABLE · AUTOMATED principle (§Operating
+Principle in Track 1 spec): add a new rule by appending to
+`ALL_STRIKE_RULES`. No re-architecting. The brute-force engine
+automatically sweeps the new rule on the next run. Strategy masks
+that referenced specific rule indices remain valid (rules are
+identified by name, not index).
+
+---
+
 ## 7. Greeks (locked)
 
 | Greek | Source | Why |
