@@ -191,10 +191,21 @@ bruteX/
 |------|-------|--------|
 | Historical intraday endpoint | `POST /v2/charts/intraday` | dhanhq.co/docs/v2 |
 | Historical daily endpoint | `POST /v2/charts/historical` | dhanhq.co/docs/v2 |
+| **Expired/rolling options endpoint** | `POST /v2/charts/rollingoption` (SDK: `expired_options_data`) | dhanhq.co/docs/v2/expired-options-data (verified 2026-05-16) |
 | Native intraday timeframes | **1, 5, 15, 25, 60 minute** ONLY | dhanhq.co/docs/v2 |
 | Chunk window (intraday) | 90 days per call | dhanhq.co/docs/v2 |
+| **Chunk window (rollingoption)** | **30 days per call** | dhanhq.co/docs/v2/expired-options-data |
 | Index segment (ALL indexes) | `IDX_I` enum 0 — single segment for NIFTY 50, BANKNIFTY, SENSEX, India VIX | dhanhq.co/docs/v2/annexure (verified 2026-05-15) |
 | Instrument type (all 4 Track 1 instruments) | `INDEX` | dhanhq.co/docs/v2/annexure |
+| **Options segment** | `NSE_FNO` (NIFTY/BANKNIFTY) or `BSE_FNO` (SENSEX) | dhanhq.co/docs/v2/annexure (verified 2026-05-16) |
+| **Options instrument** | `OPTIDX` (index options) | dhanhq.co/docs/v2/expired-options-data |
+| **Options drvOptionType** | `CALL` or `PUT` (NOT `CE`/`PE`) | Dhan SDK source |
+| **Options strike addressing** | ATM-relative string: `"ATM"`, `"ATM±N"` (max ±10 index near-expiry, ±3 otherwise) | dhanhq.co/docs/v2/expired-options-data |
+| **Options securityId rule** | **UNDERLYING's spot id (13/25/51) — NOT per-contract** | Dhan SDK `expired_options_data` signature (verified 2026-05-16) |
+| **Options fields returned** | OHLC + volume + OI + IV + spot per minute | dhanhq.co/docs/v2/expired-options-data |
+| **Options Greeks** | NOT returned — must compute via BSM | dhanhq.co/docs/v2/expired-options-data |
+| **Options marketed depth** | ~5 years rolling | dhanhq.co docs |
+| **Options ACTUAL depth (UNVERIFIED)** | Community evidence suggests ~2 years; **Phase 0 empirical probe REQUIRED** before locking 2021-01-01 floor | tradingqna.com "Dhan API for expired F&O data (1-min, 2 years)" thread |
 | India VIX trading symbol | `INDIA VIX` (with space) | Dhan master CSV |
 | India VIX update cadence | every 15 seconds (NOT tick) | NSE |
 | Instrument master URL | `https://images.dhan.co/api-data/api-scrip-master-detailed.csv` | dhan.co |
@@ -205,7 +216,7 @@ bruteX/
 | securityId — BANKNIFTY | **`25`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=25 |
 | securityId — SENSEX | **`51`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=51 |
 | securityId — India VIX | **`21`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=21 |
-| securityId policy | **Hardcoded in `brutex/adapters/dhan/constants.py`** for Track 1's 4-instrument universe (rationale: 4-tuple is permanently locked; runtime CSV lookup adds complexity for no benefit). Smoke test verifies quarterly against web.dhan.co URLs. | this file §2 |
+| securityId policy | **Hardcoded in `brutex/adapters/dhan/constants.py`** for Track 1's 4-instrument universe (rationale: 4-tuple is permanently locked; runtime CSV lookup adds complexity for no benefit). Smoke test verifies quarterly against web.dhan.co URLs. **For Track 2 options: SAME 4 securityIds reused — no per-strike CSV lookup** (verified 2026-05-16). | this file §2 |
 
 ---
 

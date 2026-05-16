@@ -240,6 +240,52 @@ but the historical-data subset remained 5 r/s; we use the conservative
 limit. Adapter caps at **3 r/s effective** (5 × 0.6 safety factor,
 shared token bucket with Track 1).
 
+### 3.1 KEY simplification (verified 2026-05-16)
+
+The `securityId` in the request body is the **UNDERLYING's spot id**
+(13 = NIFTY, 25 = BANKNIFTY, 51 = SENSEX), **NOT a per-contract id**.
+No per-strike CSV lookup needed. The constants in
+`brutex/adapters/dhan/constants.py` (already locked per CLAUDE.md §6)
+are reusable as-is.
+
+Confirmed via the Dhan SDK signature
+(`security_id=13, exchange_segment="NSE_FNO", instrument_type="INDEX"`
+for NIFTY example) on `github.com/dhan-oss/DhanHQ-py`.
+
+### 3.2 Phase 0 empirical floor probe (REQUIRED)
+
+**Marketed coverage:** ~5 years rolling per Dhan docs.
+
+**Community evidence:** a tradingqna.com thread titled "Dhan API for
+expired F&O data (1-min, **2 years**)" suggests actual reality may be
+~2 years, not 5.
+
+**Operator action BEFORE locking 2021-01-01 floor:**
+
+1. Run probe script: fetch NIFTY weekly ATM CE for these candidate
+   dates and observe response:
+   - 2020-12-31 (pre-Track 2 floor)
+   - 2021-01-01 (Track 2 floor)
+   - 2022-01-01
+   - 2023-01-01
+   - 2024-01-01
+2. Same probe for BANKNIFTY monthly + SENSEX weekly.
+3. Floor = **earliest date where response contains non-empty `open` array**.
+4. If actual floor > 2021-01-01, AMEND `§2 Universe` to reflect real floor.
+
+Estimated probe cost: 15 API calls × 3 underlyings = 45 calls. Well
+within daily 100K quota.
+
+### 3.3 Known gotchas (2026-05-16 research)
+
+| Gotcha | Mitigation |
+|---|---|
+| Greeks NOT returned by endpoint — only IV | Compute Greeks via Rust BSM (§7) |
+| Per-bar `strike` array stores ABSOLUTE strike (not offset) | Already handled in ingest design (§3 response body) |
+| Non-idempotent responses may exist (community-built `ExpiryFlow` has duplicate-detection logic) | Examine `github.com/marketcalls/ExpiryFlow` source before ingest design; add idempotence dedup on (bar_ts, strike, side) |
+| `requiredData` parameter order may matter for response parsing | Adapter must use exact field order from successful test calls |
+| SENSEX `BSE_FNO` segment coverage depth UNVERIFIED | Phase 0 probe (§3.2) covers this |
+
 ---
 
 ## 4. Timeframes (locked: 1m only)
@@ -298,14 +344,14 @@ adjacent bars with `bar_ts[i] = bar_ts[i-1] + 60_000_000` (one minute).
 
 ---
 
-## 6. Trade horizon (locked)
+## 6. Trade horizon (locked + AMENDED 2026-05-16 with historical effective-dates)
 
 Track 2 trades the **current expiry** for the underlying:
 
 | Underlying | Default trade expiry | When monthly is used |
 |---|---|---|
 | NIFTY | WEEK (current Tuesday weekly) | If signal closes within 0-2 days of Tuesday, also test MONTH |
-| BANKNIFTY | MONTH (last Tuesday) | Always (no weekly available) |
+| BANKNIFTY | MONTH (last Tuesday) | Always (no weekly available since Nov 20, 2024) |
 | SENSEX | WEEK (current Thursday weekly) | If signal closes within 0-2 days of Thursday, also test MONTH |
 
 "Current expiry at sweep time" means: at the simulated bar's wall
@@ -313,6 +359,90 @@ time, pick the next not-yet-expired expiry of the chosen cycle. The
 engine NEVER looks at expiries that have not been published yet (e.g.,
 NIFTY weekly for the week after next is not visible until the prior
 week's expiry passes).
+
+### 6.1 Historical expiry calendar (CRITICAL — verified 2026-05-16)
+
+**For 2021-01-01 → today backtest, current-day expiry rules DO NOT
+APPLY retroactively.** The engine MUST use per-date historical rules:
+
+| Period | NIFTY weekly | BANKNIFTY weekly | SENSEX weekly |
+|---|---|---|---|
+| 2021-01-01 → 2024-11-19 | **Thursday** | **Wednesday** | **Friday** (then Tuesday from a 2024 BSE realignment) |
+| 2024-11-20 → 2025-08-31 | **Tuesday** (SEBI Oct 2024 circular) | **DISCONTINUED** (last Nov 13, 2024) | Tuesday |
+| 2025-09-01 → 2025-09-03 | **Tuesday** (NSE standardisation reaffirmed) | Monthly only (last Tuesday) | Tuesday |
+| **2025-09-04 → today** | **Tuesday** | Monthly only (last Tuesday) | **Thursday** (BSE realignment effective Sept 4, 2025) |
+
+| Period | NIFTY monthly | BANKNIFTY monthly | SENSEX monthly |
+|---|---|---|---|
+| 2021-01-01 → 2025-08-31 | Last Thursday | Last Thursday | Last Tuesday (then per BSE) |
+| **2025-09-01 → today** | **Last Tuesday** | **Last Tuesday** | **Last Thursday** |
+
+**Implementation rule:** build `expiry_calendar.csv` keyed on
+`(instrument, expiry_type, effective_from_date, day_of_week, fallback_rule)`.
+Lookup at sweep time using `entry_dt.date()`. This is analogous to the
+lot-size history table in `CALCULATOR_SPEC §3`.
+
+**Authoritative source:** consume actual NSE FAOP series + BSE notice
+files; do NOT rule-compute from the table above for backtest precision
+(the table is for documentation only). NSE publishes expiry calendars
+in CSV form in their annual FAOP releases.
+
+### 6.2 Settlement formula (LOCKED 2026-05-16)
+
+For expiry-day P&L computation (if Track 2 ever holds to expiry —
+currently it forces exit at 15:20 IST):
+
+```
+settlement_price = VWAP(underlying_spot, 15:00 IST → 15:30 IST)
+                   on expiry day
+```
+
+NOT the single 15:30 closing tick. Confirmed via NSE Clearing
+Settlement Mechanism page. ITM contracts get intrinsic-value cash
+credit on T+1.
+
+For Track 2 (forced 15:20 exit), the settlement formula is informational
+only — never invoked.
+
+### 6.3 Holiday shift rule (LOCKED 2026-05-16)
+
+If scheduled expiry day is an exchange holiday, expiry shifts to the
+**immediately preceding trading day** (NEVER forward). Applies to both
+NSE Tuesday and BSE Thursday expiries.
+
+Source: ICICIdirect FAQ + Upstox BANKNIFTY notice (2024-2025 holiday
+shifts during specific months).
+
+### 6.4 Muhurat session
+
+Diwali Muhurat session (~18:00-19:15 IST) is a SEPARATE symbolic
+session — NOT a regular trading bar, NEVER an expiry day. Cross-ref
+`TRACK1_MICROSTRUCTURE.md` for the annual date list. Track 2 engine
+must EXCLUDE muhurat bars from backtest universe.
+
+### 6.5 Strikes per expiry
+
+| Instrument | Strikes per expiry (baseline) |
+|---|---|
+| NIFTY | 30 ITM + 1 ATM + 30 OTM = **61 strikes** |
+| BANKNIFTY | 40 ITM + 1 ATM + 40 OTM = **81 strikes** |
+| SENSEX | 20 ITM + 1 ATM + 20 OTM = **41 strikes** |
+
+Exchanges add MORE strikes intraday on large index moves. Track 2
+uses ATM±10 (21 strikes), well within baseline.
+
+Source: NSE / BSE / IndiaINX contract specification pages.
+
+### 6.6 References for this section (verified 2026-05-16)
+
+- Kotak Neo SEBI expiry reshuffle article
+- ICICIdirect Revised Expiry Days
+- 5paisa Bank Nifty Weekly Ends
+- Ventura Securities SENSEX Expiry Day
+- NSE Circular FAOP64506 (BANKNIFTY discontinuation)
+- NSE Circular FAOP68747 (Sept 2025 reaffirmation)
+- BSE/IndiaINX SENSEX option specifications
+- NSE Clearing settlement mechanism page
 
 ---
 
@@ -427,36 +557,216 @@ identified by name, not index).
 
 ---
 
-## 7. Greeks (locked)
+## 7. Greeks (LOCKED + EXPANDED 2026-05-16 per Stream D research)
+
+### 7.1 Greeks source table
 
 | Greek | Source | Why |
 |---|---|---|
-| **IV** (Implied Volatility) | **Dhan** — returned as `implied_volatility` array | Dhan computes it from their option pricer; we don't second-guess |
-| **Delta** | **Computed** (Black-Scholes-Merton) | Standard; needed for hedge-ratio + ATM definition |
+| **IV** (Implied Volatility) | **Dhan** — returned as `iv` array | Dhan computes it from their option pricer; we don't second-guess. **Cross-checked** against our recomputation, 50bp tolerance (§7.7). |
+| **Delta** | **Computed** (Black-Scholes-Merton) | Standard; needed for hedge-ratio + ATM definition + R8/R9/R10 strike selection |
 | **Gamma** | **Computed** (BSM) | Needed for risk metrics + early-exit Greek thresholds |
 | **Theta** | **Computed** (BSM) | Daily decay; critical for short premium |
 | **Vega** | **Computed** (BSM) | IV sensitivity for stress tests |
 | Vanna, charm, color | NOT computed | Out of scope for Phase 4 first sweep |
 
-### Black-Scholes-Merton inputs
+### 7.2 Black-Scholes-Merton inputs
 
 | Input | Source |
 |---|---|
 | S (spot) | Track 1's spot bar for the underlying at the same timestamp |
-| K (strike) | Derived from ATM-relative offset + per-underlying strike step |
+| K (strike) | Per-bar `strike` array from Dhan response (absolute strike, not offset) |
 | T (time to expiry, in years) | (expiry timestamp at 15:30 IST − bar timestamp) / 365.25 / 86400 |
-| r (risk-free rate) | **3-month T-bill yield**, monthly snapshot, hardcoded as a 60-row table in `brutex/options/risk_free.py` (Phase 2 deliverable) |
-| σ (volatility) | Dhan's `implied_volatility` for the same bar |
-| q (dividend yield) | **0** for all 3 indices (index points are price-weighted; no underlying dividend stream)  |
+| r (risk-free rate) | **91-day T-bill yield, DAILY T+1 snapshot from FBIL** (RBI DBIE weekly auction fallback). See §7.3. |
+| σ (volatility) | Dhan's `iv` for the same bar |
+| q (dividend yield) | **0 for all 3 indices** with EXPLICIT bias documentation (§7.4) |
 
-### BSM implementation
+### 7.3 Risk-free rate `r` (REVISED 2026-05-16)
 
-- Pure Rust `fno_math::bsm::{call_price, put_price, delta, gamma, theta, vega}`.
+**Source:** Financial Benchmarks India Ltd (FBIL) daily 91-day T-bill
+curve at `fbil.org.in/securities?op=tbillcurve`. Fallback: RBI DBIE
+weekly auction cut-off yield.
+
+**Snapshot frequency:** DAILY (previously monthly — too coarse during
+2022 RBI hiking cycle where rates moved 50+bp/month).
+
+**Storage:** ~1,300-row CSV in `brutex/options/risk_free_daily.csv`
+for 2021-01-01 → today. ~10 KB total.
+
+**Money-market → continuously compounded conversion** (REQUIRED):
+T-bills are quoted as annualized money-market yield (actual/365 simple
+basis). BSM requires continuously compounded:
+
+```
+r_cc = (365 / n_days) × ln(1 + y_mm × n_days / 365)
+
+Example: 91-day T-bill at 6.50% MM yield
+       → r_cc = (365/91) × ln(1 + 0.065 × 91/365)
+              = 4.011 × ln(1.0162)
+              = 6.454%   (~4-5 bp below quoted MM yield)
+```
+
+**Rho sensitivity (informational):** 100bp `r` error → ~1.3% weekly
+ATM premium impact; ~2.5% monthly; ~4.4% 3-month. Daily-snapshot
+precision keeps `r` error to <10bp.
+
+**UNVERIFIED:** whether FBIL has a programmatic API or requires HTML
+scraping. Operator must verify before Phase 3 ingest design.
+
+### 7.4 Dividend yield `q` — explicit decision (operator input required)
+
+**The mathematics:** NIFTY 50 / BANKNIFTY / SENSEX are PRICE indices.
+When constituents go ex-dividend, the index drops mechanically. BSM
+requires `q` to compensate, otherwise calls are over-priced and puts
+under-priced by:
+
+| Tenor | q=0 bias direction (NIFTY ATM, σ=15%, r=7%) |
+|---|---|
+| Daily (T=1/365) | <0.4% of premium |
+| Weekly (T=7/365) | ~1.7% of premium |
+| Monthly (T=30/365) | ~3.8% of premium |
+
+NIFTY 50 trailing dividend yield ≈ 1.3% (Trendlyne).
+
+**Track 2 design choice — q=0 with explicit defense:**
+
+The spec sets `q=0` for ALL pricing. This is defensible BECAUSE:
+
+1. Track 2 uses **observed Dhan bar prices for all FILLS** — never
+   BSM-theoretical prices. P&L is exactly market-anchored.
+2. BSM is used ONLY for:
+   - Delta-bucket strike selection (rules R8/R9/R10)
+   - Greeks reporting (delta/gamma/theta/vega values)
+3. **Delta-bucket selection uses RELATIVE delta ranking** — the q=0
+   bias shifts ALL strikes by approximately the same amount, so the
+   relative ranking is preserved.
+4. Greek values reported include the q=0 bias direction; downstream
+   metrics that depend on absolute delta (rare) must be calibrated.
+
+**ALTERNATIVE (Option B):** use `niftyindices.com` published daily
+dividend yield as `q_at_pricing`. Spec stays open to this change if
+operator wants institutional-grade rigor.
+
+**Operator decision:** **OPTION A (q=0) LOCKED** unless explicitly
+revisited. Document the bias direction in all Greeks output.
+
+### 7.5 T-floor / time-to-expiry floor (LOCKED 2026-05-16)
+
+As T → 0 with S ≈ K, BSM gamma → ∞ and theta → −∞. These divergences
+are mathematical, not numerical.
+
+**Hard T-floor: 600 seconds (10 minutes).** Any Greek request with
+`T < 600s` MUST panic in the Rust kernel.
+
+Track 2 forces exit at 15:20 IST and weekly options trade until 15:30,
+so this window is NEVER inside the strategy's Greek-evaluation path.
+
+**Property test (Phase 1):** assert any Greek with T<600s raises
+`panic!` with a clear message. Test fixture: `T = 599s` triggers panic,
+`T = 600s` does not.
+
+### 7.6 Strike admission filters (LOCKED 2026-05-16)
+
+For strikes admitted to the Track 2 universe, both filters must hold:
+
+```
+admit_strike(K, S, T, σ, r, q) requires:
+    |delta| ≥ 0.02    # rejects ultra-OTM dust
+    vega ≥ 1e-6       # rejects vega-zero strikes where IV is unstable
+```
+
+Strikes failing either filter are EXCLUDED from the entry universe.
+R10 (delta-target 0.15) is comfortably inside the trustworthy region.
+R8 (delta-target 0.30) + offset can push to delta ≈ 0.05 on India
+VIX > 30 days — the delta floor MUST be enforced regardless.
+
+### 7.7 IV cross-check (LOCKED 2026-05-16)
+
+Ingest Dhan's `iv` as authoritative. ALSO recompute IV from observed
+mid-price using `lets_be_rational` (Jäckel) algorithm. Assert agreement
+within 50 basis points.
+
+```
+ingest_bar(bar):
+    iv_dhan = bar.iv
+    iv_recomputed = jaeckel_iv(bar.mid_price, S, K, T, r, q)
+    if abs(iv_dhan - iv_recomputed) > 0.0050:
+        audit_log.append(IV_MISMATCH, bar.timestamp, iv_dhan, iv_recomputed)
+        # but USE iv_dhan for downstream Greek computation
+        # (reproducibility > pedantic correctness)
+    bar.iv_validated = iv_dhan
+```
+
+Why authoritative-Dhan-with-audit instead of replace-on-mismatch:
+strict reproducibility. The audit log lets us spot-check Dhan IV
+quality without introducing a second pricing model in the hot path.
+
+### 7.8 Tick-floor saturation flag (LOCKED 2026-05-16)
+
+Indian index options trade in ₹0.05 tick increments. Theoretical
+BSM prices below ₹0.05 are quoted at the ₹0.05 floor, producing
+misleadingly high implied volatility:
+
+| Theoretical | Quoted | Mark-up |
+|---|---|---|
+| ₹0.0473 | ₹0.05 | 5.7% (manageable) |
+| ₹0.0094 | ₹0.05 | 5.3× (unusable) |
+
+**Rule:** if a strike's observed bar price is at ₹0.05 floor for ≥ N
+consecutive bars (N = 30 bars = 30 minutes), flag as
+`tick_floor_saturated = True` and EXCLUDE from entry universe.
+
+Track 2 entries must satisfy: `entry_strike.bar_price > 5 × TICK_PAISA`
+(i.e., > ₹0.25) at entry timestamp. Property test enforces.
+
+### 7.9 BSM kernel implementation + validation
+
+- Pure Rust `fno_math::bsm::{call_price, put_price, delta, gamma, theta, vega, iv}`.
 - Float64 inputs, Float64 outputs.
-- Cross-validated against `py_vollib` (CPython, 1e-10 tolerance) in the
-  Phase 1 BSM oracle test (`tests/integration/test_bsm_vs_pyvollib.py`).
-- Greeks at every bar are precomputed and stored in the Parquet
+- **Dual validation oracle** (NOT py_vollib alone):
+  1. **`lets_be_rational` (Jäckel 2015)** — for IV (gold standard, 2-iteration Householder, machine precision)
+  2. **QuantLib `AnalyticEuropeanEngine` (C++)** — for prices + Greeks (independent implementation)
+  
+  Tolerance: 1e-10 absolute for BSM-on-BSM cross-checks; 50bp for
+  NSE-observed sanity checks (NSE uses r=10% fixed assumption).
+
+- Greeks at every bar are PRECOMPUTED and stored in the Parquet
   alongside OHLC + IV (not lazy — needed at engine evaluation time).
+
+### 7.10 Option style (verified 2026-05-16)
+
+All 3 indexes are **European-style, cash-settled** options. Confirmed
+NSE Clearing + BSE/IndiaINX contract spec pages. **BSM closed-form is
+EXACT** — no American early-exercise premium adjustment needed.
+
+Settlement = T+1 cash credit of intrinsic value × lot × n_lots, where
+intrinsic value uses the §6.2 30-min VWAP settlement price.
+
+### 7.11 Dhan IV computation method (UNVERIFIED)
+
+Dhan's public docs don't document HOW `iv` is computed. Industry
+standard for Indian platforms (Sensibull, NSE) is iterative root-finding
+on a BSM/Black-76 closed-form against last-traded-price or mid-quote.
+
+NSE's own option chain uses a **fixed r = 10% assumption**, which can
+differ materially from the actual 91-day T-bill yield (6-7% during
+2024-2026).
+
+**Operator action:** open Dhan support ticket to confirm IV
+methodology (Newton-Raphson? Mid-price? LTP? `r` assumption?).
+Until then, the §7.7 cross-check at 50bp tolerance catches gross
+discrepancies.
+
+### 7.12 References for this section (verified 2026-05-16)
+
+- Hull "Options, Futures, and Other Derivatives" 11th ed (BSM chapter)
+- Jäckel "Let's Be Rational" 2015 — gold-standard IV inversion
+- QuantLib `AnalyticEuropeanEngine` — independent BSM oracle
+- FBIL T-bill curve — fbil.org.in
+- RBI DBIE database
+- NSE Clearing settlement mechanism
+- Trendlyne NIFTY trailing dividend yield
+- Dhan v2 option chain + expired_options_data docs
 
 ---
 
