@@ -119,6 +119,172 @@ flag both in audit log with `margin_method` field.
 
 ---
 
+## 2A. Intraday-Only Policy (HARD-LOCKED, NO OVERNIGHT EVER)
+
+**This is the single most important constraint of the Track 2 universe.**
+
+Track 2 trades intraday options exclusively. No position is ever held
+overnight, across a weekend, or held to expiry under any circumstances.
+
+### 2A.1 The 3 hard-locked bounds
+
+| Bound | Value | Enforcement |
+|---|---|---|
+| **Earliest entry execution** | 09:16:00 IST (bar "09:16" OPEN) | Fires only if the 09:15 bar's close at 09:16:00 triggers a signal. The 09:15 bar IS USED as first signal source (operator decision 2026-05-16 — see §2A.2B). |
+| **Latest entry execution** | 15:01:00 IST (bar "15:01" OPEN) | Fires only if bar "15:00" close triggers a signal. The 19-minute buffer before forced exit ensures every position has at least one full bar of holding period. |
+| **Forced exit** | 15:20:00 IST | NO overrides ever. Every open position is closed at the 15:20 bar open price, regardless of P&L, signal, or strategy mask. |
+
+### 2A.2 Product type: MIS only
+
+Track 2 simulates **Dhan MIS** (Margin Intraday Square-off) only.
+NRML (Normal / Carry-Forward) product type is NEVER used.
+
+| Product | Used in Track 2? | Reason |
+|---|---|---|
+| MIS (intraday) | YES — only | Auto-square-off at 15:20 IST matches forced exit |
+| NRML (overnight) | NO — never | Allows held-to-expiry; violates intraday lock |
+| BTST (buy-today-sell-tomorrow) | NO — never | Equity-only product; doesn't apply to options |
+| Cover Order / Bracket Order | NO — never | Track 2 uses explicit per-bar entry/exit signals, not bracket OCO |
+
+### 2A.2A Signal evaluation timing (bar-close → next-bar-open execution)
+
+Track 2 uses the standard no-look-ahead pattern locked in
+`TRACK1_BACKTEST_SPEC.md §211, §424, §426`:
+
+| Step | When | Operation |
+|---|---|---|
+| 1 | Bar N closes (e.g., 09:16:00 IST) | Engine receives the OHLC of bar [09:15:00-09:15:59] — the "09:15 bar" |
+| 2 | Bar N closes | All 52 vocabulary conditions evaluated using bars 0..N only |
+| 3 | Bar N closes | Strategy mask AND fires → signal decision (BUY / SELL / no-op) |
+| 4 | Bar N+1 OPENS (e.g., 09:16:00 IST) | If signal fired, order executes at this bar's OPEN price |
+
+### 2A.2B Concrete first-bar walkthrough (operator decision 2026-05-16)
+
+**Operator decision:** the 09:15 candle IS USED as the first
+signal-evaluation bar. This is a Track-2-specific decision that
+diverges from `TRACK1_MICROSTRUCTURE.md §168`'s exclusion of the
+auction-influenced bar. Rationale: operator wants to use ALL available
+market data — the 09:15 candle's data, once fully formed at 09:16:00,
+is fair game for signal evaluation.
+
+For a NIFTY 50 trading day:
+
+```
+09:00:00 - 09:15:00 IST   →  Pre-open auction (NO bars emitted to lake)
+09:15:00 IST              →  Auction-cleared opening print becomes 09:15 bar OPEN
+09:15:00 - 09:15:59       →  Bar "09:15" fills with first minute of continuous trading
+09:16:00 IST              →  Bar "09:15" CLOSES. Its OHLC is now fully available.
+09:16:00 IST              →  Signal evaluation #1 — uses ONLY bar "09:15" (and any
+                              indicators derived from it + prior-day anchors like PDH/PDL)
+09:16:00 IST              →  If signal fires: order executes at bar "09:16" OPEN price
+09:16:00 - 09:16:59       →  Bar "09:16" forms; position is now established (if entered)
+09:17:00 IST              →  Bar "09:16" CLOSES. Signal evaluation #2 — uses bars [09:15, 09:16].
+...
+15:19:00 IST              →  Bar "15:18" closes. Signal eval — uses bars [09:15..15:18].
+                              (Reminder: latest entry is 15:00 IST per §2A.1.)
+15:20:00 IST              →  Bar "15:19" closes. Forced-exit logic fires.
+15:20:00 IST              →  Bar "15:20" OPEN price → exit execution for any open position.
+15:20:00 IST              →  ALL POSITIONS FLAT. Day complete.
+```
+
+### 2A.2C First entry and last entry timestamps
+
+- **Earliest possible entry execution:** 09:16:00 IST (bar "09:16" OPEN)
+  — fires only if the 09:15 bar's data alone triggers a signal
+- **Latest possible entry execution:** 15:01:00 IST (bar "15:01" OPEN)
+  — fires only if the bar "15:00" close triggers a signal; bar "15:00"
+  closing at 15:01 is the last signal evaluation before the latest-entry
+  cutoff
+- **Forced exit execution:** 15:20:00 IST (bar "15:20" OPEN) — always
+
+### 2A.2D Auction-bar caveat (informational, not blocking)
+
+The 09:15 candle is influenced by the call-auction-cleared opening
+print. Practitioners sometimes argue this bar is "non-stationary"
+because auction volume is reported as a single block, not as continuous
+microstructure. Two consequences:
+
+1. Volume-based indicators (e.g., volume profile, VWAP) evaluated on
+   the 09:15 bar reflect auction volume, which can be much larger than
+   subsequent intraday bars.
+2. The 09:15 close-vs-open price difference reflects auction-to-tick
+   transition, which is a different dynamic than continuous trading.
+
+**Operator-confirmed disposition:** use the 09:15 bar anyway. The
+brute-force engine will discover whether 09:16-entry strategies
+outperform or underperform 09:17-entry strategies. If empirical
+backtests later show systematic degradation tied to the 09:15 bar,
+operator can revisit. This is intentional empirical-first stance, not
+prejudgement.
+
+### 2A.2E Property invariants (additional)
+
+| ID | Invariant | Failure mode caught |
+|---|---|---|
+| P-INTRA-4 | `entry_signal_eval_bar.timestamp >= 09:15:00 IST` (first eligible) | engine accidentally uses pre-open auction bar |
+| P-INTRA-5 | `entry_execution_bar.open_dt == entry_signal_eval_bar.close_dt` | accidental same-bar execution (look-ahead) |
+| P-INTRA-6 | `entry_execution_dt >= 09:16:00 IST` AND `entry_execution_dt <= 15:01:00 IST` | earliest/latest entry boundaries enforced |
+
+### 2A.3 What this means in plain rules
+
+1. **Maximum holding period = 6 hours 4 minutes** (09:16:00 → 15:20:00).
+2. **Minimum holding period = 1 bar = 60 seconds** (entry 15:19:00 → forced exit 15:20:00; rare but allowed).
+3. **No weekend exposure.** Friday's last bar of activity is 15:20 IST.
+4. **No expiry exposure.** On Tuesday/Thursday expiry days (per index),
+   positions are still force-exited at 15:20 IST — never held to the
+   15:30 settlement.
+5. **No gap-risk exposure.** Overnight gaps cannot hit any open position
+   because no position exists overnight.
+6. **No T+1 settlement risk.** All round-trips complete same day.
+
+### 2A.4 Why this matters for cost model
+
+The intraday-only lock simplifies the cost model materially:
+
+- **No SPAN+ELM held overnight** — peak-margin penalty risk reduced to
+  intraday snapshots only. Section 2.2 still applies but only within
+  the trading day, not across days.
+- **No expiry-day +2% additional ELM applied to held position** — the
+  +2% ELM only fires if a short is OPEN AT SOD on expiry day. Since
+  Track 2 has zero positions at SOD (all closed at prior 15:20),
+  this cost is **inapplicable**.
+- **No held-to-expiry STT-on-exercise** — `CALCULATOR_SPEC.md §4.2`
+  `EXPIRY_EXERCISE` / `EXPIRY_ASSIGN` / `EXPIRY_WORTHLESS` branches
+  are reserved for forward-compatibility ONLY. Track 2 simulator
+  hard-codes `trade_outcome = "NORMAL_CLOSE"` for every trade.
+- **No overnight margin-funding cost** — relevant for spreads that
+  hold overnight; N/A here.
+
+### 2A.5 Tax implications
+
+The intraday-only lock means:
+- All trades are settled same day → all P&L is **realized**.
+- No mark-to-market open positions at FY-end → no Section 36(1)(xv)
+  complexity for unrealized losses.
+- Audit log emits `held_overnight: false` on every trade for
+  unambiguous classification.
+
+### 2A.6 Property invariants (Phase 1 tests)
+
+Three test invariants enforce this lock:
+
+| ID | Invariant | Failure mode caught |
+|---|---|---|
+| P-INTRA-1 | `entry_dt_ist.date() == exit_dt_ist.date()` for every trade | code accidentally carries a position to next session |
+| P-INTRA-2 | `15:20:00 IST ≤ exit_dt_ist ≤ 15:20:00 IST` (exit_dt strictly equal to 15:20 unless circuit-close) | forced-exit logic accidentally skipped |
+| P-INTRA-3 | `entry_dt_ist ≥ 09:16:00 IST` AND `entry_dt_ist ≤ 15:00:00 IST` | entries fired during auction or in last 20 min |
+
+Any property violation fails the build.
+
+### 2A.7 Decision ID
+
+Logged as **DEC-RISK-011** in `MIGRATION.md`: "Track 2 is intraday-only,
+MIS-only, NO NRML, NO overnight, NO held-to-expiry, NO weekend exposure.
+Forced exit 15:20:00 IST. Entry window 09:16:00–15:00:00 IST. Single
+most important constraint."
+
+---
+
 ## 3. Hard Risk Rules (conservative defaults)
 
 The following rules are baked into the simulator as defaults. All
@@ -325,6 +491,7 @@ The following risk-management decisions must be logged in
 | DEC-RISK-008 | Forced exit 15:20 strict (Dhan MIS aligned) | broker portability |
 | DEC-RISK-009 | Position sizing in FutEq from 2025-10-01 | SEBI rule |
 | DEC-RISK-010 | Circuit-triggered close ≠ forced 15:20 exit | audit distinction |
+| DEC-RISK-011 | INTRADAY ONLY: MIS, NO NRML, NO overnight, NO held-to-expiry; entry window 09:16-15:00 IST; forced exit 15:20 IST | single most important constraint; simplifies cost model + tax model |
 
 ---
 
