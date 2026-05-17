@@ -72,7 +72,17 @@ _SEED: int = 42
 
 # Ratio gate ceiling — matches `test_store_o1.py:162` pattern (5× ratio
 # allows for CI jitter; a real O(n) regression would show ratio >> 5×).
-_RATIO_CEILING: float = 5.0
+# Ratio ceiling — bumped from 5.0 → 8.0 per PR #46 hotfix.
+# Diagnostic agent measured `test_vectorized_mask_and_ratio` has only 1.10×
+# headroom at 5× ceiling (worst local: 3.90× of 5.0× = 78% used). The
+# small-N measurement (5 iters × 100K elem ≈ 500µs total) is fast enough
+# that one shared-GHA scheduler jitter slice (~100µs) inflates the ratio
+# past 5× even though the underlying op is genuinely O(1).
+# 8× still catches any real O(n) regression (which would land at 30-100×)
+# and matches the cache-cliff-aware ceiling pattern PR #45 established for
+# the dict test (10× via `dict_ratio_ceiling` local). evaluate_atoms ratio
+# stays healthy at 3.7× headroom under 8×.
+_RATIO_CEILING: float = 8.0
 
 
 def _make_bar_bits_array(n: int) -> np.ndarray:
