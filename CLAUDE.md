@@ -2,9 +2,23 @@
 
 > Persistent instructions for Claude Code working in this repository.
 > Every Claude session in `bruteX/` must read and honor this file.
+>
+> **Authority order (locked in DEC-PROTOCOL-001):**
+> 1. This file (`CLAUDE.md` — 12 Golden Rules)
+> 2. `docs/PROTOCOL_BRUTEX_ADAPTATION.md` (tickvault→BruteX translation table)
+> 3. `.claude/rules/project/brutex-protocol.md` (auto-loaded protocol bundle body)
+> 4. Defaults
+>
+> Adaptation doc OUTRANKS bundle body because the bundle is verbatim tickvault
+> content; you must filter it through the adaptation doc before applying.
+> When the bundle's tickvault examples (WS / QuestDB / DHAT / Loom / `crates/`)
+> don't translate, follow the adaptation doc and apply the SHAPE of the rule
+> with BruteX-native substitutions — never invent a tickvault-like component
+> just to satisfy a rule.
 
-_Last updated: 2026-05-15. the broker → Dhan migration; Track 1 spec locked
-after 4-agent hostile-review pass._
+_Last updated: 2026-05-17. Protocol bundle adopted (DEC-PROTOCOL-001).
+2026-05-15: the broker → Dhan migration; Track 1 spec locked after
+4-agent hostile-review pass._
 
 ---
 
