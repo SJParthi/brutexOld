@@ -23,6 +23,7 @@ the user asked for:
 from __future__ import annotations
 
 import hashlib
+import zlib
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -58,26 +59,37 @@ def _csv_hash(tag: str = "fixture") -> str:
     return hashlib.sha256(tag.encode()).hexdigest()
 
 
+# Per DEC-P0-018 (PR #40): hoisted to module scope from the per-call inline
+# dict that was rebuilt on every `_idx()` invocation (Agent 1 LOW finding).
+# Track 1 verified securityIds from CLAUDE.md §6 ONLY — the prior
+# FINNIFTY/MIDCPNIFTY/NIFTYNXT50 entries were UNVERIFIED guesses (per
+# docs/track2/PLAN_FINALIZATION_2026-05-16.md:339-345) and were removed
+# (Agent 3 MEDIUM finding). Track 2 symbols fall through to crc32 fallback.
+_TRACK1_TOKEN_MAP: dict[str, int] = {
+    "NIFTY": 13,
+    "BANKNIFTY": 25,
+    "SENSEX": 51,
+    "INDIAVIX": 21,
+}
+
+
 def _idx(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
     """Build a minimal valid IDX instrument.
 
     Per DEC-P0-011 (PR #33): exchange_token from a stable per-symbol map so each
     test-fixture instrument has a unique PK (previous fixed `26000` collided
-    when multiple indices were inserted in the same batch). Uses a deterministic
-    map of well-known Indian indices; falls back to crc32 for unknown symbols.
-    """
-    import zlib
+    when multiple indices were inserted in the same batch). Track 1 verified
+    securityIds (NIFTY=13, BANKNIFTY=25, SENSEX=51, INDIAVIX=21 per CLAUDE.md
+    §6) are looked up in `_TRACK1_TOKEN_MAP`; unknown symbols fall back to
+    crc32 with full 32-bit mask.
 
-    _token_map: dict[str, int] = {
-        "NIFTY": 13,
-        "BANKNIFTY": 25,
-        "SENSEX": 51,
-        "INDIAVIX": 21,
-        "FINNIFTY": 27,
-        "MIDCPNIFTY": 28,
-        "NIFTYNXT50": 29,
-    }
-    token = _token_map.get(symbol, zlib.crc32(symbol.encode()) & 0xFFFFFF)
+    Per DEC-P0-018 (PR #40): the mask was widened from 24-bit (`& 0xFFFFFF`)
+    to 32-bit (`& 0xFFFFFFFF`) to reduce collision probability for arbitrary
+    symbol inputs. This is a test-only fixture — do NOT reuse for fuzz
+    harnesses (`hypothesis.strategies.text()`) without re-reviewing the
+    collision bound. crc32 is NOT cryptographically secure.
+    """
+    token = _TRACK1_TOKEN_MAP.get(symbol, zlib.crc32(symbol.encode()) & 0xFFFFFFFF)
     return Instrument(
         exchange=exchange,
         exchange_token=token,
