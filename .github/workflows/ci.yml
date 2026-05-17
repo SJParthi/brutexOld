@@ -756,12 +756,13 @@ jobs:
           fi
           # Print results for visibility (mutmut results exits 0 even with survivors).
           mutmut results || true
-          # Enforce ≥60% mutation score interim per DEC-P0-002 (2026-05-17).
-          # The ≥85% target per Golden Rule #12 / STANDARDS row 3 remains the
-          # eventual goal; lowered to 60% as honest interim while
-          # brutex/orchestrator/state.py test suite is expanded. Bumping
-          # the threshold back to 85% is a P1 follow-up: write more
-          # state.py tests until mutation score ≥ 85%, then flip this constant.
+          # Enforce ≥85% mutation score per Golden Rule #12 / STANDARDS row 3.
+          # Operator decree 2026-05-17 (DEC-P0-003): no downgrade — 100% standards
+          # held. If state.py current score is below 85%, write more tests until
+          # the gate passes. Do NOT relax this threshold without explicit operator
+          # approval. The earlier DEC-P0-002 60% interim was REVERTED at operator
+          # direction; mutation row in STANDARDS_100PCT.md §1 is therefore RESTORED
+          # to ✅ ENFORCED at the decree-level threshold.
           # mutmut 2.5.1 supports `junitxml` subcommand (since 2.2.0). Defensive
           # parsing — fail loudly on schema drift or empty mutant set rather than
           # silently pass.
@@ -804,10 +805,10 @@ jobs:
               sys.exit(1)
           score = killed / tests
           print(f"mutation score: killed={killed} / total={tests} = {score:.2%}")
-          if score < 0.60:
-              print(f"FAILED: mutation score {score:.2%} below 60% interim gate (DEC-P0-002)")
+          if score < 0.85:
+              print(f"FAILED: mutation score {score:.2%} below 85% gate (Golden Rule #12, no-downgrade per operator)")
               sys.exit(1)
-          print(f"PASSED: mutation score {score:.2%} ≥ 60% (interim; eventual target 85% per Golden Rule #12)")
+          print(f"PASSED: mutation score {score:.2%} ≥ 85%")
           PY
 
   # ─────────────────────────────────────────────────────────────────
@@ -942,9 +943,16 @@ jobs:
       - semgrep
       - trivy
       - sbom
-      # Advisory-only (continue-on-error): typos, complexity, vulture,
-      # duplication, mutation-py, fno-math-drift — tracked as artifacts
-      # but don't block merge. They still run and upload reports.
+      # DEC-P0-001 + DEC-P0-003 (2026-05-17): vulture / duplication /
+      # mutation-py promoted from advisory to HARD GATES. They now
+      # block ci-ok per Golden Rule #12 / STANDARDS_100PCT §1 rows 3,
+      # 7-jscpd, 7-vulture. Removed from "advisory-only" comment below.
+      - vulture
+      - duplication
+      - mutation-py
+      # Still advisory-only (continue-on-error): typos, complexity,
+      # fno-math-drift — these are informational scans, not enforcement
+      # gates per Golden Rule #12.
     if: always()
     steps:
       - name: Verify all required jobs passed
@@ -967,6 +975,9 @@ jobs:
           echo "  semgrep:       ${{ needs.semgrep.result }}"
           echo "  trivy:         ${{ needs.trivy.result }}"
           echo "  sbom:          ${{ needs.sbom.result }}"
+          echo "  vulture:       ${{ needs.vulture.result }}"
+          echo "  duplication:   ${{ needs.duplication.result }}"
+          echo "  mutation-py:   ${{ needs.mutation-py.result }}"
           for result in \
             "${{ needs.lint.result }}" \
             "${{ needs.type.result }}" \
@@ -983,7 +994,10 @@ jobs:
             "${{ needs.codeql.result }}" \
             "${{ needs.semgrep.result }}" \
             "${{ needs.trivy.result }}" \
-            "${{ needs.sbom.result }}"; do
+            "${{ needs.sbom.result }}" \
+            "${{ needs.vulture.result }}" \
+            "${{ needs.duplication.result }}" \
+            "${{ needs.mutation-py.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "❌ A required gate failed or was cancelled"
               exit 1
