@@ -89,8 +89,34 @@ BIT_GAP_DOWN_DAY: Final[int] = 49
 BIT_INSIDE_DAY: Final[int] = 50
 BIT_OUTSIDE_DAY: Final[int] = 51
 
+# ────── Group 10: Weekly Fib (bits 52-56, 5 conditions) ──────
+# DEC-VOCAB-001 (2026-05-17): added multi-anchor Fib support per operator
+# rare-pattern strategy requirement. Weekly Fib levels are computed by
+# `brutex/indicators/weekly_fib_levels.py` (anchored on previous trading
+# week's H-L).
+BIT_NEAR_WEEKLY_FIB_236: Final[int] = 52
+BIT_NEAR_WEEKLY_FIB_382: Final[int] = 53
+BIT_NEAR_WEEKLY_FIB_50: Final[int] = 54
+BIT_NEAR_WEEKLY_FIB_618: Final[int] = 55
+BIT_NEAR_WEEKLY_FIB_786: Final[int] = 56
+
+# ────── Group 11: Pivot-Point Fib R/S (bits 57-62, 6 conditions) ──────
+# DEC-VOCAB-001: Fib-scaled pivot R/S derived from previous day's H/L/C.
+# Computed by `brutex/indicators/pivot_fib_levels.py`. Distinct from
+# the standard floor-pivot R1/R2/R3 in bits 7-12 (those use the
+# 1.0/2.0/H+2*(P-L) formulas; Pivot-Fib uses 0.382/0.618/1.000 ratios).
+BIT_NEAR_PIVOT_FIB_R1: Final[int] = 57
+BIT_NEAR_PIVOT_FIB_R2: Final[int] = 58
+BIT_NEAR_PIVOT_FIB_R3: Final[int] = 59
+BIT_NEAR_PIVOT_FIB_S1: Final[int] = 60
+BIT_NEAR_PIVOT_FIB_S2: Final[int] = 61
+BIT_NEAR_PIVOT_FIB_S3: Final[int] = 62
+
 # ────── Metadata ──────
-TOTAL_CONDITIONS: Final[int] = 52
+# DEC-VOCAB-001: vocabulary expanded from 52 → 63 conditions to cover
+# weekly Fib + pivot-Fib R/S. Bit 63 reserved for session-Fib anchor
+# (PR #31). u64 mask supports up to 64; we keep 1 bit headroom.
+TOTAL_CONDITIONS: Final[int] = 63
 
 # Name lookup tables. Generated from the constants above so they're
 # always in sync.
@@ -147,6 +173,19 @@ NAME_TO_BIT: Final[dict[str, int]] = {
     "gap_down_day": BIT_GAP_DOWN_DAY,
     "inside_day": BIT_INSIDE_DAY,
     "outside_day": BIT_OUTSIDE_DAY,
+    # Group 10: Weekly Fib (DEC-VOCAB-001)
+    "near_weekly_fib_236": BIT_NEAR_WEEKLY_FIB_236,
+    "near_weekly_fib_382": BIT_NEAR_WEEKLY_FIB_382,
+    "near_weekly_fib_50": BIT_NEAR_WEEKLY_FIB_50,
+    "near_weekly_fib_618": BIT_NEAR_WEEKLY_FIB_618,
+    "near_weekly_fib_786": BIT_NEAR_WEEKLY_FIB_786,
+    # Group 11: Pivot-Fib R/S (DEC-VOCAB-001)
+    "near_pivot_fib_r1": BIT_NEAR_PIVOT_FIB_R1,
+    "near_pivot_fib_r2": BIT_NEAR_PIVOT_FIB_R2,
+    "near_pivot_fib_r3": BIT_NEAR_PIVOT_FIB_R3,
+    "near_pivot_fib_s1": BIT_NEAR_PIVOT_FIB_S1,
+    "near_pivot_fib_s2": BIT_NEAR_PIVOT_FIB_S2,
+    "near_pivot_fib_s3": BIT_NEAR_PIVOT_FIB_S3,
 }
 
 BIT_TO_NAME: Final[dict[int, str]] = {v: k for k, v in NAME_TO_BIT.items()}
