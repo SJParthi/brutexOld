@@ -59,11 +59,11 @@ __all__ = [
     "ALL_CONDITION_NAMES",
     "BIT_TO_NAME",
     "CONFLICT_PAIRS",
-    "IndicatorSnapshot",
     "NAME_TO_BIT",
+    "TOTAL_CONDITIONS",
+    "IndicatorSnapshot",
     "PriorBarHistory",
     "ProximityParams",
-    "TOTAL_CONDITIONS",
     "evaluate_atoms",
     "has_conflict",
 ]

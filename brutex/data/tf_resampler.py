@@ -150,9 +150,9 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
         df_1m
         # Add a "trading_day" column derived from IST date
         .with_columns(
-            ((pl.col("ts_utc") + pl.duration(hours=5, minutes=30))
+            (pl.col("ts_utc") + pl.duration(hours=5, minutes=30))
                 .dt.date()
-                .alias("trading_day"))
+                .alias("trading_day")
         )
         .group_by("trading_day", maintain_order=True)
         .agg(
@@ -168,7 +168,7 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
     )
 
 
-def resample_all_21_tfs(df_1m) -> dict[int, "pl.DataFrame"]:  # type: ignore[no-untyped-def]
+def resample_all_21_tfs(df_1m) -> dict[int, pl.DataFrame]:  # type: ignore[no-untyped-def]
     """Resample 1m bars to all 21 timeframes in one call.
 
     Args:

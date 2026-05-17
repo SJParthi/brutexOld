@@ -20,7 +20,6 @@ from brutex.indicators.fib_levels import FibLevels
 from brutex.indicators.pivots import PivotLevels
 from brutex.vocabulary import bits as B
 
-
 # ────── Input dataclasses ──────
 
 

@@ -52,8 +52,9 @@ JSON. Supports checkpoint/restore for resumable sweeps per
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any
 
 
 def alpha(period: int) -> float:
@@ -90,7 +91,7 @@ class EMAState:
     seed_sum: float = 0.0
 
     @classmethod
-    def new(cls, period: int) -> "EMAState":
+    def new(cls, period: int) -> EMAState:
         """Construct a fresh EMAState for the given period."""
         return cls(period=period, alpha=alpha(period))
 
@@ -138,7 +139,7 @@ class EMAState:
         self.bars_seen = 0
         self.seed_sum = 0.0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize for checkpoint persistence."""
         return {
             "period": self.period,
@@ -149,7 +150,7 @@ class EMAState:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "EMAState":
+    def from_dict(cls, d: dict[str, Any]) -> EMAState:
         """Restore from checkpoint dict."""
         return cls(**d)
 

@@ -57,9 +57,10 @@ Each `update()` call:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Iterable
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -122,10 +123,8 @@ class DayExtremesState:
             self.day_low_paisa = low_paisa
         else:
             # Same trading day → expand
-            if high_paisa > self.day_high_paisa:
-                self.day_high_paisa = high_paisa
-            if low_paisa < self.day_low_paisa:
-                self.day_low_paisa = low_paisa
+            self.day_high_paisa = max(self.day_high_paisa, high_paisa)
+            self.day_low_paisa = min(self.day_low_paisa, low_paisa)
         return self.day_high_paisa, self.day_low_paisa
 
     def reset(self) -> None:
@@ -134,7 +133,7 @@ class DayExtremesState:
         self.day_high_paisa = 0
         self.day_low_paisa = 0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize for checkpoint persistence."""
         return {
             "current_day": self.current_day.isoformat() if self.current_day else None,
@@ -143,7 +142,7 @@ class DayExtremesState:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "DayExtremesState":
+    def from_dict(cls, d: dict[str, Any]) -> DayExtremesState:
         """Restore from checkpoint dict."""
         cd = date.fromisoformat(d["current_day"]) if d["current_day"] else None
         return cls(
