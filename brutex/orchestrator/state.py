@@ -48,16 +48,14 @@ class WorkItemState(StrEnum):
     """
 
     # ── Non-terminal ──────────────────────────────────────────────
-    PENDING = "PENDING"  # pragma: no mutate  # queued, not yet dispatched
-    IN_FLIGHT = "IN_FLIGHT"  # pragma: no mutate  # worker is calling the broker
-    RETRYING = "RETRYING"  # pragma: no mutate  # transient error; waiting on exponential backoff
+    PENDING = "PENDING"  # pragma: no mutate
+    IN_FLIGHT = "IN_FLIGHT"  # pragma: no mutate
+    RETRYING = "RETRYING"  # pragma: no mutate
 
     # ── Terminal ──────────────────────────────────────────────────
-    SUCCESS = "SUCCESS"  # pragma: no mutate  # the broker returned valid data; parsed + stored
-    NO_DATA = "NO_DATA"  # pragma: no mutate  # the broker confirmed empty / not found — recorded, not skipped
-    QUARANTINED = (
-        "QUARANTINED"  # pragma: no mutate  # needs human review; phase blocked until resolved
-    )
+    SUCCESS = "SUCCESS"  # pragma: no mutate
+    NO_DATA = "NO_DATA"  # pragma: no mutate
+    QUARANTINED = "QUARANTINED"  # pragma: no mutate
 
 
 #: Frozen sets used by ``is_terminal`` and ``phase_complete``.
@@ -103,25 +101,19 @@ class Outcome(StrEnum):
     """
 
     # ── Success path ──────────────────────────────────────────────
-    OK_WITH_DATA = "OK_WITH_DATA"  # pragma: no mutate  # non-empty response parsed OK
-    OK_EMPTY = "OK_EMPTY"  # pragma: no mutate  # empty list/array returned — NO_DATA
+    OK_WITH_DATA = "OK_WITH_DATA"  # pragma: no mutate
+    OK_EMPTY = "OK_EMPTY"  # pragma: no mutate
 
     # ── Transient errors (retry loop) ──────────────────────────────
-    RATE_LIMIT = "RATE_LIMIT"  # pragma: no mutate  # VendorAPIRateLimitException
-    TIMEOUT = "TIMEOUT"  # pragma: no mutate  # VendorAPITimeoutException
-    GENERIC_API_ERROR = (
-        "GENERIC_API_ERROR"  # pragma: no mutate  # generic VendorAPIException / VendorBaseException
-    )
+    RATE_LIMIT = "RATE_LIMIT"  # pragma: no mutate
+    TIMEOUT = "TIMEOUT"  # pragma: no mutate
+    GENERIC_API_ERROR = "GENERIC_API_ERROR"  # pragma: no mutate
 
     # ── Permanent errors (quarantine or no-data) ──────────────────
-    NOT_FOUND = "NOT_FOUND"  # pragma: no mutate  # VendorAPINotFoundException — recorded as NO_DATA
-    BAD_REQUEST = "BAD_REQUEST"  # pragma: no mutate  # VendorAPIBadRequestException — quarantine
-    AUTH_FAILED = (
-        "AUTH_FAILED"  # pragma: no mutate  # VendorAPIAuthenticationException — quarantine
-    )
-    AUTHZ_FAILED = (
-        "AUTHZ_FAILED"  # pragma: no mutate  # VendorAPIAuthorisationException — quarantine
-    )
+    NOT_FOUND = "NOT_FOUND"  # pragma: no mutate
+    BAD_REQUEST = "BAD_REQUEST"  # pragma: no mutate
+    AUTH_FAILED = "AUTH_FAILED"  # pragma: no mutate
+    AUTHZ_FAILED = "AUTHZ_FAILED"  # pragma: no mutate
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -136,14 +128,10 @@ class QuarantineReason(StrEnum):
     dashboard's quarantine-queue table.
     """
 
-    BAD_REQUEST = (
-        "bad_request"  # pragma: no mutate  # adapter bug — wrong params sent to the broker
-    )
-    AUTH_FAILED = "auth_failed"  # pragma: no mutate  # bad or expired BRUTEX_BROKER_TOKEN
-    AUTHZ_FAILED = "authz_failed"  # pragma: no mutate  # token lacks the required scope
-    RETRY_EXHAUSTED = (
-        "retry_exhausted"  # pragma: no mutate  # >= MAX_SOFT_RETRIES entries into RETRYING
-    )
+    BAD_REQUEST = "bad_request"  # pragma: no mutate
+    AUTH_FAILED = "auth_failed"  # pragma: no mutate
+    AUTHZ_FAILED = "authz_failed"  # pragma: no mutate
+    RETRY_EXHAUSTED = "retry_exhausted"  # pragma: no mutate
 
 
 # ────────────────────────────────────────────────────────────────────────

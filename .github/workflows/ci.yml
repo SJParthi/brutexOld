@@ -766,7 +766,9 @@ jobs:
             mutmut show "$i" 2>/dev/null || true
           done
           echo "::endgroup::"
-          # Enforce ≥85% mutation score per Golden Rule #12 / STANDARDS row 3.
+          # Enforce ≥96% mutation score per operator decree 2026-05-17 + DEC-P0-009.
+          # (Originally 85% per Golden Rule #12 / STANDARDS row 3, bumped to 96% by
+          # operator: "minimum 96 percentage dude".)
           # Operator decree 2026-05-17 (DEC-P0-003): no downgrade — 100% standards
           # held. If state.py current score is below 85%, write more tests until
           # the gate passes. Do NOT relax this threshold without explicit operator
@@ -818,10 +820,10 @@ jobs:
               sys.exit(1)
           score = killed / tests
           print(f"mutation score: killed={killed} / total={tests} = {score:.2%}")
-          if score < 0.85:
-              print(f"FAILED: mutation score {score:.2%} below 85% gate (Golden Rule #12, no-downgrade per DEC-P0-003)")
+          if score < 0.96:
+              print(f"FAILED: mutation score {score:.2%} below 96% gate (operator decree 2026-05-17, DEC-P0-009)")
               sys.exit(1)
-          print(f"PASSED: mutation score {score:.2%} >= 85%")
+          print(f"PASSED: mutation score {score:.2%} >= 96%")
           PY
           # Strip the 10-space CI-yml indent that bash heredoc preserves
           # (it would still cause IndentationError when python parses).
