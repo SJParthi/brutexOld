@@ -26,6 +26,7 @@
   "platformAutomerge": false,
   "dependencyDashboard": true,
   "dependencyDashboardTitle": "Renovate Dependency Dashboard",
+  "prBodyTemplate": "{{{header}}}{{{table}}}{{{notes}}}{{{changelogs}}}{{{configDescription}}}{{{controls}}}{{{footer}}}\n\n---\n\n## Z+ envelope (DEC-P0-015, auto-injected)\n\nThis is a Renovate-managed PR. The full Z+ matrices live in\n`docs/zplus/ZPLUS_PR_DISCIPLINE.md`; Renovate dep bumps follow the\n**reduced discipline** below per the carve-out:\n\n- **Z+ 15-row matrix**: N/A — dep bump only; CI gate enforces ruff + mypy + pyright + pytest 100% coverage.\n- **Z+ 7-row resilience matrix**: N/A — no hot-path code touched.\n- **Z+ 7-layer audit**: DETECT/VERIFY via CI; PREVENT via this packageRule; AUDIT via Renovate's per-PR commit history; RECOVER via `git revert`; COOLDOWN N/A.\n- **4-agent hostile review**: SKIPPED — automated dep bump in trusted range; CI is the gate.\n- **Honest envelope**: Renovate trusts `pip install -e \".[dev,data]\"` resolves to a green test suite. If CI fails, the PR does NOT auto-merge.\n- **Decision ID**: DEC-P0-015 (`docs/MIGRATION.md`) authorizes Renovate auto-merge for non-data-lake CVE patches.",
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": [
@@ -37,9 +38,11 @@
       "security",
       "dependencies"
     ],
-    "automerge": false,
-    "prCreation": "immediate"
+    "automerge": true,
+    "prCreation": "immediate",
+    "prPriority": 10
   },
+  "osvVulnerabilityAlerts": true,
   "packageRules": [
     {
       "description": "Group all non-major Python dependency updates into a single PR",
@@ -218,6 +221,29 @@
         "renovate",
         "pre-commit",
         "major-bump"
+      ]
+    },
+    {
+      "description": "DEC-P0-015 (PR #37) — Z+ security auto-merge carve-out: data-lake trio (polars+duckdb+pyarrow) is EXCLUDED from vulnerabilityAlerts auto-merge to preserve the python-data-lake lock-step group (single CVE patch must not split the ABI-locked trio). All OTHER deps with a vulnerability patch auto-merge after green CI. Placed LAST in packageRules per Agent 1 hot-path review precedence rule. Concurrent-limit:1 prevents racing security PRs from squash-conflicting (Agent 1 MEDIUM finding).",
+      "matchPackageNames": [
+        "polars",
+        "duckdb",
+        "pyarrow"
+      ],
+      "matchDepTypes": [
+        "dependencies",
+        "optional-dependencies"
+      ],
+      "automerge": false,
+      "prConcurrentLimit": 1,
+      "labels": [
+        "dependencies",
+        "renovate",
+        "security",
+        "data-lake-lockstep"
+      ],
+      "prBodyNotes": [
+        ":lock: This dep is part of the **python-data-lake lock-step group** (polars + duckdb + pyarrow). Auto-merge is DISABLED for this group to preserve C-ABI alignment. Human review required even for CVE patches. See DEC-P0-015 in `docs/MIGRATION.md`."
       ]
     }
   ],

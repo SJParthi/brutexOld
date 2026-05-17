@@ -44,6 +44,8 @@ def _run(
     override: bool = False,
     reason: str | None = None,
     log_path: Path | None = None,
+    pr_author: str | None = None,
+    pr_has_security_label: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Invoke the guard with `body` on stdin and return CompletedProcess."""
     env = os.environ.copy()
@@ -53,6 +55,10 @@ def _run(
         env["OPERATOR_OVERRIDE_REASON"] = reason
     if log_path is not None:
         env["OVERRIDE_LOG_PATH"] = str(log_path)
+    if pr_author is not None:
+        env["PR_AUTHOR"] = pr_author
+    if pr_has_security_label:
+        env["PR_HAS_SECURITY_LABEL"] = "true"
     # Use shell=False explicitly so input piping works the same on POSIX
     return subprocess.run(
         [str(GUARD)],
@@ -133,3 +139,57 @@ class TestZPlusPrGuard:
         """
         result = _run(body)
         assert result.returncode == 0
+
+
+class TestBotExemption:
+    """DEC-P0-015 (PR #37): renovate/dependabot bots with security label
+    are exempt from the 6-marker check so CVE patches can auto-merge."""
+
+    def test_renovate_bot_with_security_label_exempt(self, override_log_path: Path) -> None:
+        result = _run(
+            "Renovate PR body without Z+ markers — should still pass.",
+            pr_author="renovate[bot]",
+            pr_has_security_label=True,
+            log_path=override_log_path,
+        )
+        assert result.returncode == 0
+        # Bot exemption MUST be audited.
+        lines = override_log_path.read_text().splitlines()
+        assert any("EXEMPT=bot" in line and "renovate[bot]" in line for line in lines)
+
+    def test_dependabot_with_security_label_exempt(self, override_log_path: Path) -> None:
+        result = _run(
+            "Dependabot PR body without markers.",
+            pr_author="dependabot[bot]",
+            pr_has_security_label=True,
+            log_path=override_log_path,
+        )
+        assert result.returncode == 0
+
+    def test_renovate_without_security_label_blocks(self) -> None:
+        """Bot author alone is NOT enough — security label required."""
+        result = _run(
+            "Renovate body — author yes, label no.",
+            pr_author="renovate[bot]",
+            pr_has_security_label=False,
+        )
+        # Both gates required; bot still must carry markers if no security label.
+        assert result.returncode == 1
+
+    def test_non_bot_with_security_label_blocks(self) -> None:
+        """Human author + security label is NOT enough — exempt is bots only."""
+        result = _run(
+            "Human PR body claiming security label.",
+            pr_author="some-developer",
+            pr_has_security_label=True,
+        )
+        assert result.returncode == 1
+
+    def test_arbitrary_bot_author_blocks(self) -> None:
+        """Only renovate[bot] / dependabot[bot] are allowed — not custom bots."""
+        result = _run(
+            "Custom bot body.",
+            pr_author="evil-bot[bot]",
+            pr_has_security_label=True,
+        )
+        assert result.returncode == 1
