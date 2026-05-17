@@ -133,6 +133,93 @@ if [[ -n "$FAILED_CHECKS" ]]; then
         OVERRIDE_LOG="${OVERRIDE_LOG_PATH:-$(dirname "$0")/pre-merge-overrides.log}"
         TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         REASON="${OPERATOR_OVERRIDE_REASON:-no reason provided}"
+
+        # DEC-P0-008 (PR #30, Z+ L7 COOLDOWN): rate-limit overrides to prevent
+        # the escape hatch from becoming the default merge path. Thresholds
+        # (override-able via env for tests):
+        #   - Warn at 2 overrides in last 24h (encourages root-cause fix)
+        #   - Hard-fail at 5 overrides in last 24h OR 10 in last 7 days
+        #   - Always counts — never silently allows >threshold without explicit
+        #     2nd-level operator escalation token
+        OVERRIDE_24H_WARN="${OVERRIDE_24H_WARN:-2}"
+        OVERRIDE_24H_HARD="${OVERRIDE_24H_HARD:-5}"
+        OVERRIDE_7D_HARD="${OVERRIDE_7D_HARD:-10}"
+        OVERRIDE_ESCALATION_TOKEN="${OPERATOR_OVERRIDE_ESCALATION:-}"
+
+        if [[ -f "$OVERRIDE_LOG" ]]; then
+            # Count overrides in last 24h + 7d. Each log line starts with
+            # an ISO8601 UTC timestamp; we filter via Python for date math
+            # rather than fragile bash arithmetic.
+            count_24h=$(python3 -c "
+import datetime, sys
+from pathlib import Path
+log = Path('$OVERRIDE_LOG')
+if not log.exists():
+    print(0); sys.exit(0)
+cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=24)
+n = 0
+for line in log.read_text().splitlines():
+    if not line.strip():
+        continue
+    ts_str = line.split()[0]
+    try:
+        ts = datetime.datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+        if ts >= cutoff:
+            n += 1
+    except ValueError:
+        continue
+print(n)
+")
+            count_7d=$(python3 -c "
+import datetime, sys
+from pathlib import Path
+log = Path('$OVERRIDE_LOG')
+if not log.exists():
+    print(0); sys.exit(0)
+cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=7)
+n = 0
+for line in log.read_text().splitlines():
+    if not line.strip():
+        continue
+    ts_str = line.split()[0]
+    try:
+        ts = datetime.datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+        if ts >= cutoff:
+            n += 1
+    except ValueError:
+        continue
+print(n)
+")
+            if [[ "$count_24h" -ge "$OVERRIDE_24H_HARD" ]] || [[ "$count_7d" -ge "$OVERRIDE_7D_HARD" ]]; then
+                echo "===================================================================" >&2
+                echo "❌ MERGE BLOCKED: OPERATOR_OVERRIDE rate limit exceeded." >&2
+                echo "===================================================================" >&2
+                echo "  Overrides in last 24h: $count_24h (hard limit: $OVERRIDE_24H_HARD)" >&2
+                echo "  Overrides in last 7d:  $count_7d (hard limit: $OVERRIDE_7D_HARD)" >&2
+                echo "" >&2
+                echo "Per Z+ L7 COOLDOWN doctrine (DEC-P0-008): the override mechanism" >&2
+                echo "exists for RARE one-off operator-authorized bypasses, not as a" >&2
+                echo "default merge path. Repeated overrides indicate a gate that needs" >&2
+                echo "FIXING, not bypassing." >&2
+                echo "" >&2
+                echo "Required actions:" >&2
+                echo "  1. Identify which gate is causing repeated overrides" >&2
+                echo "  2. Address the root cause (write tests, fix bugs, redesign gate)" >&2
+                echo "  3. OR: provide a 2nd-level operator escalation token:" >&2
+                echo "     OPERATOR_OVERRIDE_ESCALATION='I-acknowledge-this-bypasses-the-cooldown'" >&2
+                echo "     (the literal string above; copying-pasting is the friction-by-design)" >&2
+                if [[ "$OVERRIDE_ESCALATION_TOKEN" != "I-acknowledge-this-bypasses-the-cooldown" ]]; then
+                    exit 8  # NEW exit code: rate-limit-exceeded without escalation
+                fi
+                echo "" >&2
+                echo "⚠️  ESCALATION TOKEN provided — proceeding with bypass. Logged with marker." >&2
+                REASON="$REASON [ESCALATED — rate-limit-bypassed]"
+            elif [[ "$count_24h" -ge "$OVERRIDE_24H_WARN" ]]; then
+                echo "⚠️  WARNING: $count_24h overrides in last 24h (warn threshold: $OVERRIDE_24H_WARN)." >&2
+                echo "    Consider root-cause-fixing the gate instead of bypassing again." >&2
+            fi
+        fi
+
         echo "$TIMESTAMP PR=$PR_NUMBER REPO=$REPO REASON=$REASON FAILED=$(echo "$FAILED_CHECKS" | tr '\n' ',')" \
             >> "$OVERRIDE_LOG"
         echo "⚠️  OPERATOR_OVERRIDE=true: bypassing guard. Logged to $OVERRIDE_LOG"
