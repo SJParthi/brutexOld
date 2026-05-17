@@ -368,7 +368,15 @@ class TestReadAPI:
         """Track 2 work — options listing requires F&O instrument data."""
 
     def test_count_by_underlying_with_indices(self, tmp_path: Path) -> None:
-        """DEC-P0-011: rewrite from option-count → index-count (Track 1)."""
+        """DEC-P0-011 + DEC-P0-014 (PR #36 Agent 3 audit-fix): IDX
+        instruments have NULL ``underlying_symbol`` per Phase A schema.
+        ``count_by_underlying()`` filters ``WHERE underlying_symbol IS NOT
+        NULL``, so the call MUST return an empty dict for IDX-only data.
+
+        The prior assertion ``isinstance(counts, dict)`` was a tautological
+        false-OK (Agent 3 HIGH finding) — ``isinstance`` of any dict-return
+        is trivially true. This assertion now pins the schema invariant.
+        """
         with InstrumentStore.open(tmp_path / "db") as s:
             s.upsert_many(
                 [_idx("NIFTY"), _idx("BANKNIFTY")],
@@ -377,9 +385,10 @@ class TestReadAPI:
                 csv_source_sha256=_csv_hash(),
             )
             counts = s.count_by_underlying()
-            # IDX instruments have NULL underlying_symbol per Phase A schema.
-            # We're verifying the count call doesn't error on IDX-only data.
-            assert isinstance(counts, dict)
+
+        # Real behavior pin: IDX rows have NULL underlying_symbol; SQL
+        # filters them out; counts MUST be the empty dict (not just "a dict").
+        assert counts == {}
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -815,12 +824,18 @@ class TestIdempotenceStress:
     """DEC-P0-011 (PR #33): rewritten from FNO chains → 4 Track 1 indices."""
 
     def test_10x_upsert_same_batch_is_stable(self, tmp_path: Path) -> None:
-        """Pull the same batch 10 times \u2192 final state is a pure function."""
-        instruments = (
-            [_idx(s) for s in ("NIFTY", "BANKNIFTY", "FINNIFTY")]
-            + _make_chain("NIFTY", date(2025, 5, 29), range(24000, 24500, 50))
-            + _make_chain("BANKNIFTY", date(2025, 5, 29), range(52000, 52500, 100))
-        )
+        """Pull the same batch 10 times \u2192 final state is a pure function.
+
+        Audit-fix (DEC-P0-014, PR #36 Agent 3): the prior PR #33 rewrite
+        still used FINNIFTY + ``_make_chain()`` FNO chains while claiming
+        "4 Track 1 indices" -- a HIGH false-OK. Body now matches docstring.
+        """
+        instruments = [
+            _idx("NIFTY"),
+            _idx("BANKNIFTY"),
+            _idx("SENSEX", exchange=Exchange.BSE),
+            _idx("INDIAVIX"),
+        ]
         with InstrumentStore.open(tmp_path / "db") as s:
             for _ in range(10):
                 s.upsert_many(
@@ -830,9 +845,12 @@ class TestIdempotenceStress:
                     csv_source_sha256=_csv_hash(),
                 )
             report = s.verify_integrity()
-            count = s.count(in_scope_only=False)
+            in_scope_count = s.count(in_scope_only=True)
+            total_count = s.count(in_scope_only=False)
 
-        assert count == len(instruments)
+        # All 4 are in scope (Track 1). No out-of-scope rows should exist.
+        assert in_scope_count == 4
+        assert total_count == 4
         assert report.is_clean is True
         assert report.raw_hash_mismatches == 0
         assert report.pk_duplicates == 0
