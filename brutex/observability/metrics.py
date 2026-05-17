@@ -378,10 +378,15 @@ def render_prometheus(registry: MetricRegistry) -> str:
     """
     out: list[str] = []
 
-    with registry._lock:
-        counters = sorted(registry._counters.items())
-        gauges = sorted(registry._gauges.items())
-        histograms = sorted(registry._histograms.items())
+    # DEC-P0-017 (PR #39): same-module friend access — `expose_prometheus`
+    # is the Prometheus exposition function defined alongside
+    # MetricsRegistry in this module. Friend-style direct private-attr
+    # access is intentional here; using public getters would require
+    # exposing the snapshot semantics through the public surface.
+    with registry._lock:  # pyright: ignore[reportPrivateUsage]
+        counters = sorted(registry._counters.items())  # pyright: ignore[reportPrivateUsage]
+        gauges = sorted(registry._gauges.items())  # pyright: ignore[reportPrivateUsage]
+        histograms = sorted(registry._histograms.items())  # pyright: ignore[reportPrivateUsage]
 
     for name, counter in counters:
         with counter.definition.lock:

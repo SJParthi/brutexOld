@@ -221,7 +221,7 @@ typeCheckingMode = "strict"
 # gates fire; tests/redteam/test_*.py imports them via subprocess only).
 exclude = ["tests/redteam/fixtures/*.stripped.py", "tests/redteam/fixtures/planted_*.py", "**/__pycache__"]
 # Stylistic divergences silenced so the two checkers don't bikeshed:
-reportPrivateUsage = "none"             # pytest fixtures touch _rows on FakeDataFrame etc.
+reportPrivateUsage = "warning"          # DEC-P0-017 (PR #39): narrowed from "none" to "warning". Per-site `# pyright: ignore[reportPrivateUsage]` at 8 brutex/* friend-access sites + file-top `# pyright: reportPrivateUsage=none` at 2 whitebox test files. Future private-access bugs in production code now surface as warnings.
 reportConstantRedefinition = "none"     # brutex.math facade rebinds __all__ symbols
 reportUnusedFunction = "none"           # FastAPI route handlers are nominally unused
 reportUntypedFunctionDecorator = "none" # FastAPI decorators lack generic types

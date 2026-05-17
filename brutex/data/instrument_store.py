@@ -644,6 +644,22 @@ class InstrumentStore:
         self._path = path
         self._closed = False
 
+    @property
+    def connection(self) -> Any:
+        """Public read-only access to the underlying DuckDB connection.
+
+        Exposed for whitebox consumers (`brutex/dashboard/app.py` stats
+        queries) that need raw connection access without touching the
+        private ``_conn`` attribute. Per DEC-P0-017 (PR #39): added to
+        enable narrowing pyright's `reportPrivateUsage` from "none" to
+        "warning" without per-call-site ignore comments.
+
+        Treat as read-only — any state mutation MUST go through the
+        InstrumentStore's typed methods (upsert_many, verify_integrity,
+        etc.) to preserve audit + idempotence guarantees.
+        """
+        return self._conn
+
     @classmethod
     def open(cls, path: Path) -> Self:
         """Open or create an instrument store at *path*.

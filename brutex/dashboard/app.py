@@ -370,7 +370,11 @@ def build_app(
     @app.get("/api/v1/events")
     async def api_events() -> JSONResponse:
         """GET /api/v1/events — JSON dump of the recent-events ring buffer."""
-        with state._lock:
+        # DEC-P0-017 (PR #39): same-module friend access — DashboardState's
+        # internal _lock guards the shared recent_events deque. The route
+        # handler lives in the same module as DashboardState; using the
+        # private lock directly is intentional friend-style access.
+        with state._lock:  # pyright: ignore[reportPrivateUsage]
             events = list(state.recent_events)
         return JSONResponse({"events": events})
 
@@ -589,7 +593,12 @@ def _collect_store_stats(store: Any) -> dict[str, Any]:
     tables plus the per-underlying instrument breakdown. Called by
     the ``/api/v1/instruments/stats`` endpoint.
     """
-    conn = store._conn
+    # DEC-P0-017 (PR #39): use public InstrumentStore.connection property
+    # instead of touching the private _conn attribute (pyright
+    # reportPrivateUsage was project-wide silenced; narrowing to "warning"
+    # would have flagged this; we used the property refactor route per
+    # PR #39 pre-impl review recommendation).
+    conn = store.connection
     row_instruments = conn.execute("SELECT COUNT(*) FROM instruments").fetchone()
     row_expiries = conn.execute("SELECT COUNT(*) FROM expiries").fetchone()
     row_contracts = conn.execute("SELECT COUNT(*) FROM contracts").fetchone()
@@ -632,7 +641,12 @@ def _query_instruments(
     Every user-supplied filter value flows through parameter
     binding, never string concatenation.
     """
-    conn = store._conn
+    # DEC-P0-017 (PR #39): use public InstrumentStore.connection property
+    # instead of touching the private _conn attribute (pyright
+    # reportPrivateUsage was project-wide silenced; narrowing to "warning"
+    # would have flagged this; we used the property refactor route per
+    # PR #39 pre-impl review recommendation).
+    conn = store.connection
     clauses: list[str] = []
     params: list[Any] = []
     if underlying is not None:

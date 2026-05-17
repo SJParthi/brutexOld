@@ -1,4 +1,12 @@
-"""Unit tests for brutex.config.runtime — service discovery file."""
+"""Unit tests for brutex.config.runtime — service discovery file.
+
+Per DEC-P0-017 (PR #39): whitebox test of the private ``_redact_env_snapshot``
+helper to verify secret-scrubbing behavior before the redacted env reaches
+the runtime JSON file. File-level ``reportPrivateUsage=none`` permits the
+import.
+"""
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
