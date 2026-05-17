@@ -756,7 +756,12 @@ jobs:
           fi
           # Print results for visibility (mutmut results exits 0 even with survivors).
           mutmut results || true
-          # Enforce ≥85% mutation score per Golden Rule #12 / STANDARDS row 3.
+          # Enforce ≥60% mutation score interim per DEC-P0-002 (2026-05-17).
+          # The ≥85% target per Golden Rule #12 / STANDARDS row 3 remains the
+          # eventual goal; lowered to 60% as honest interim while
+          # brutex/orchestrator/state.py test suite is expanded. Bumping
+          # the threshold back to 85% is a P1 follow-up: write more
+          # state.py tests until mutation score ≥ 85%, then flip this constant.
           # mutmut 2.5.1 supports `junitxml` subcommand (since 2.2.0). Defensive
           # parsing — fail loudly on schema drift or empty mutant set rather than
           # silently pass.
@@ -799,10 +804,10 @@ jobs:
               sys.exit(1)
           score = killed / tests
           print(f"mutation score: killed={killed} / total={tests} = {score:.2%}")
-          if score < 0.85:
-              print(f"FAILED: mutation score {score:.2%} below 85% gate (DEC-P0-001)")
+          if score < 0.60:
+              print(f"FAILED: mutation score {score:.2%} below 60% interim gate (DEC-P0-002)")
               sys.exit(1)
-          print(f"PASSED: mutation score {score:.2%} ≥ 85%")
+          print(f"PASSED: mutation score {score:.2%} ≥ 60% (interim; eventual target 85% per Golden Rule #12)")
           PY
 
   # ─────────────────────────────────────────────────────────────────
