@@ -171,6 +171,13 @@ disallow_untyped_defs = true
 disallow_incomplete_defs = true
 check_untyped_defs = true
 no_implicit_reexport = true
+# DEC-P0-004 Agent 5 HIGH fix: pyright [tool.pyright] exclude already
+# covers redteam planted-bug fixtures; mypy needs the same exclusion or
+# strict mode will trip on the intentional bugs on every PR.
+exclude = [
+    "tests/redteam/fixtures/.*\\.stripped\\.py",
+    "tests/redteam/fixtures/planted_.*\\.py",
+]
 
 [[tool.mypy.overrides]]
 module = [

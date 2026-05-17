@@ -957,6 +957,11 @@ jobs:
       - vulture
       - duplication
       - mutation-py
+      # DEC-P0-004 (Agent 5 MED fix): proof-bundle was missing from ci-ok
+      # needs:. The runbook lists it as required, but ci-ok didn't gate on
+      # it — if proof-bundle failed, ci-ok could still pass while branch
+      # protection blocks merge (confusing operator). Added now.
+      - proof-bundle
       # Still advisory-only (continue-on-error): typos, complexity,
       # fno-math-drift — these are informational scans, not enforcement
       # gates per Golden Rule #12.
@@ -985,6 +990,7 @@ jobs:
           echo "  vulture:       ${{ needs.vulture.result }}"
           echo "  duplication:   ${{ needs.duplication.result }}"
           echo "  mutation-py:   ${{ needs.mutation-py.result }}"
+          echo "  proof-bundle:  ${{ needs.proof-bundle.result }}"
           for result in \
             "${{ needs.lint.result }}" \
             "${{ needs.type.result }}" \
@@ -1004,7 +1010,8 @@ jobs:
             "${{ needs.sbom.result }}" \
             "${{ needs.vulture.result }}" \
             "${{ needs.duplication.result }}" \
-            "${{ needs.mutation-py.result }}"; do
+            "${{ needs.mutation-py.result }}" \
+            "${{ needs.proof-bundle.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "❌ A required gate failed or was cancelled"
               exit 1

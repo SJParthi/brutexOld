@@ -17,8 +17,23 @@
 set -euo pipefail
 
 PR_NUMBER="${1:-}"
-REPO="${2:-sjparthi/brutex}"
+REPO="${2:-SJParthi/bruteX}"
 OVERRIDE_FLAG="${OPERATOR_OVERRIDE:-false}"
+# Per Agent 5 of DEC-P0-004 hostile-review pass: a freshly-pushed PR may
+# have empty statusCheckRollup (CI hasn't started registering jobs).
+# If we don't gate on a minimum check count, the script falsely returns
+# "all green" on empty rollup → false-merge approval (the exact PR #25
+# failure mode this script exists to prevent). Set to the count of
+# jobs in `ci-ok needs:` list (currently 20 hard gates).
+EXPECTED_MIN_CHECKS="${EXPECTED_MIN_CHECKS:-20}"
+
+# OPERATOR_OVERRIDE requires a non-empty reason (Agent 5 MED finding):
+# default of "no reason provided" was useless for audit. Enforce.
+if [[ "$OVERRIDE_FLAG" == "true" ]] && [[ -z "${OPERATOR_OVERRIDE_REASON:-}" ]]; then
+    echo "ERROR: OPERATOR_OVERRIDE=true requires OPERATOR_OVERRIDE_REASON='<why>'." >&2
+    echo "  e.g.: OPERATOR_OVERRIDE=true OPERATOR_OVERRIDE_REASON='one-time revert PR' $0 $PR_NUMBER" >&2
+    exit 5
+fi
 
 if [[ -z "$PR_NUMBER" ]]; then
     echo "Usage: $0 <PR_NUMBER> [<owner/repo>]" >&2
@@ -57,7 +72,47 @@ if [[ "$STATUS_JSON" == "{}" ]]; then
     exit 3
 fi
 
+# Check mergeable state (Agent 5 MED finding: was fetched but unused).
+# CONFLICTING means merge conflicts; BLOCKED means branch protection rules
+# refuse the merge. Both are hard failures.
+MERGEABLE=$(echo "$STATUS_JSON" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(data.get('mergeable', 'UNKNOWN'))
+")
+
+if [[ "$MERGEABLE" == "CONFLICTING" ]]; then
+    echo "❌ MERGE BLOCKED: PR #$PR_NUMBER has merge conflicts with the target branch." >&2
+    echo "Fix: rebase or merge the target branch into your feature branch + resolve conflicts." >&2
+    if [[ "$OVERRIDE_FLAG" != "true" ]]; then
+        exit 6
+    fi
+fi
+
 # Parse status check rollup
+ROLLUP_COUNT=$(echo "$STATUS_JSON" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(len(data.get('statusCheckRollup', [])))
+")
+
+# Agent 5 CRIT fix: empty rollup means CI hasn't started yet. Treat as
+# PENDING, not GREEN. Refuse merge until at least EXPECTED_MIN_CHECKS
+# jobs have registered (default 20 per ci-ok needs: list).
+if [[ "$ROLLUP_COUNT" -lt "$EXPECTED_MIN_CHECKS" ]]; then
+    echo "===================================================================" >&2
+    echo "❌ MERGE BLOCKED: PR #$PR_NUMBER has only $ROLLUP_COUNT CI checks" >&2
+    echo "registered (expected ≥ $EXPECTED_MIN_CHECKS). CI may not have" >&2
+    echo "started, or some jobs failed to register." >&2
+    echo "===================================================================" >&2
+    echo "Per Z+ defensive doctrine (DEC-P0-004, Agent 5 CRIT fix):" >&2
+    echo "empty/incomplete rollup means we CANNOT measure CI status — fail" >&2
+    echo "CLOSED. Wait for all $EXPECTED_MIN_CHECKS jobs to register + complete." >&2
+    if [[ "$OVERRIDE_FLAG" != "true" ]]; then
+        exit 7
+    fi
+fi
+
 FAILED_CHECKS=$(echo "$STATUS_JSON" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
