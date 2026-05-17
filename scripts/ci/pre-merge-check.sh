@@ -53,7 +53,7 @@ if ! command -v gh >/dev/null 2>&1; then
     echo "Operator override: OPERATOR_OVERRIDE=true OPERATOR_OVERRIDE_REASON='<why>' $0 $PR_NUMBER" >&2
 
     if [[ "$OVERRIDE_FLAG" == "true" ]]; then
-        OVERRIDE_LOG="$(dirname "$0")/pre-merge-overrides.log"
+        OVERRIDE_LOG="${OVERRIDE_LOG_PATH:-$(dirname "$0")/pre-merge-overrides.log}"
         TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         REASON="${OPERATOR_OVERRIDE_REASON:-no reason provided}"
         echo "$TIMESTAMP PR=$PR_NUMBER REPO=$REPO REASON=$REASON FAILED=gh-cli-missing" \
@@ -130,7 +130,7 @@ if [[ -n "$FAILED_CHECKS" ]]; then
     echo "===================================================================="
 
     if [[ "$OVERRIDE_FLAG" == "true" ]]; then
-        OVERRIDE_LOG="$(dirname "$0")/pre-merge-overrides.log"
+        OVERRIDE_LOG="${OVERRIDE_LOG_PATH:-$(dirname "$0")/pre-merge-overrides.log}"
         TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         REASON="${OPERATOR_OVERRIDE_REASON:-no reason provided}"
         echo "$TIMESTAMP PR=$PR_NUMBER REPO=$REPO REASON=$REASON FAILED=$(echo "$FAILED_CHECKS" | tr '\n' ',')" \

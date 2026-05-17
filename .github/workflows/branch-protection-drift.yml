@@ -1,0 +1,212 @@
+name: Branch protection drift detector
+
+# Per DEC-P0-005 P1 follow-up #4: daily cron that verifies `main` branch
+# protection rules still match the checked-in expected snapshot. Drift
+# detection: if someone (operator or attacker with admin token) silently
+# disables "Do not allow bypassing" or removes a required check, this
+# workflow catches it within 24h + opens an issue.
+#
+# Z+ L3 RECONCILE layer for the GitHub-server-side enforcement we
+# document in docs/runbooks/github-branch-protection-setup.md.
+
+on:
+  schedule:
+    # 03:30 UTC daily = 09:00 IST (morning standup time for operator).
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why are you manually running drift detection?"
+        required: false
+        default: "manual verification"
+
+permissions:
+  contents: read
+  issues: write  # to file drift-alert issues
+
+jobs:
+  drift-check:
+    name: Verify main branch protection matches snapshot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fetch live branch protection rule for main
+        id: fetch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # Note: this query requires `read:repo` scope. The default
+          # GITHUB_TOKEN has it. If the branch protection rule does NOT
+          # exist (operator hasn't applied the runbook yet), gh exits
+          # 404 — we treat that as drift "rule missing entirely".
+          if ! gh api "repos/${{ github.repository }}/branches/main/protection" \
+                > live-protection.json 2>fetch.err; then
+            echo "::warning::Branch protection rule for main does NOT exist."
+            echo "::warning::Per docs/runbooks/github-branch-protection-setup.md,"
+            echo "::warning::the operator must apply the rule (one-time UI setup)."
+            echo "RULE_MISSING=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "RULE_MISSING=false" >> "$GITHUB_OUTPUT"
+          echo "::group::Live protection rule"
+          jq '.' live-protection.json
+          echo "::endgroup::"
+
+      - name: Compare live rule against expected snapshot
+        if: steps.fetch.outputs.RULE_MISSING == 'false'
+        id: drift
+        run: |
+          # Extract the fields we care about + compare to expected.
+          python3 - <<'PY'
+          import json
+          import sys
+
+          live = json.load(open("live-protection.json"))
+
+          # ── Expected snapshot (per docs/runbooks/github-branch-protection-setup.md) ──
+          # Required: every gate in ci.yml's ci-ok needs: list.
+          expected_required_checks = {
+              "Lint (ruff)",
+              "Type check (mypy + pyright)",
+              "Unit tests + coverage (100% gate)",
+              "Property tests (hypothesis)",
+              "Benchmarks (O(1) NFR gates)",
+              "Golden-master tests",
+              "Security scan (bandit + pip-audit)",
+              "Docstring coverage (interrogate)",
+              "License compliance",
+              "Rust (fno-math build + clippy + test)",
+              "Banned pattern scan",
+              "Secret scan (gitleaks)",
+              "CodeQL (Python SAST)",
+              "Semgrep (python + owasp + security-audit)",
+              "Trivy (filesystem + config scan)",
+              "CycloneDX SBOM generation",
+              "Vulture (dead code detection)",
+              "jscpd (code duplication)",
+              "Python mutation (mutmut on critical modules)",
+              "Proof bundle (aggregate CI artifacts)",
+              "CI OK (aggregate gate)",
+          }
+
+          drift = []
+
+          # ── Required status checks ──
+          live_checks = set()
+          for ctx in live.get("required_status_checks", {}).get("contexts", []) or []:
+              live_checks.add(ctx)
+          missing = expected_required_checks - live_checks
+          unexpected = live_checks - expected_required_checks
+          if missing:
+              drift.append(f"MISSING required status checks: {sorted(missing)}")
+          if unexpected:
+              drift.append(f"UNEXPECTED required status checks: {sorted(unexpected)}")
+
+          # ── "Do not allow bypassing" — the killshot ──
+          enforce_admins = live.get("enforce_admins", {}).get("enabled", False)
+          if not enforce_admins:
+              drift.append(
+                  "CRITICAL: enforce_admins=false (admins can bypass branch protection). "
+                  "Per docs/runbooks/github-branch-protection-setup.md §5, this MUST be on."
+              )
+
+          # ── Linear history ──
+          require_linear = live.get("required_linear_history", {}).get("enabled", False)
+          if not require_linear:
+              drift.append("MISSING: required_linear_history=false (squash/rebase policy enforcement)")
+
+          # ── PR review required ──
+          prr = live.get("required_pull_request_reviews")
+          if prr is None:
+              drift.append("MISSING: required_pull_request_reviews (PRs not required)")
+
+          # ── Strict status checks (branch up-to-date) ──
+          strict = live.get("required_status_checks", {}).get("strict", False)
+          if not strict:
+              drift.append("MISSING: required_status_checks.strict=false (branch can be stale at merge)")
+
+          # ── Conversation resolution ──
+          conv = live.get("required_conversation_resolution", {}).get("enabled", False)
+          if not conv:
+              drift.append("MISSING: required_conversation_resolution=false")
+
+          if drift:
+              print("::error::Branch protection drift detected!")
+              for d in drift:
+                  print(f"::error::  - {d}")
+              with open("drift-summary.txt", "w") as f:
+                  f.write("Branch protection drift detected for main:\n\n")
+                  for d in drift:
+                      f.write(f"  - {d}\n")
+              sys.exit(1)
+          print("✅ Branch protection rule matches expected snapshot. No drift.")
+          PY
+
+      - name: Open drift-alert issue
+        if: failure() && steps.drift.conclusion == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Don't open dupes — check if an open drift-alert already exists.
+          existing=$(gh issue list \
+            --repo "${{ github.repository }}" \
+            --label "branch-protection-drift" \
+            --state open \
+            --json number,title \
+            --limit 1 | jq -r '.[0].number // empty')
+          if [[ -n "$existing" ]]; then
+            echo "Existing drift-alert issue #$existing already open; adding comment."
+            gh issue comment "$existing" --repo "${{ github.repository }}" \
+              --body "$(cat <<EOF
+**Drift re-detected on $(date -u +%Y-%m-%dT%H:%M:%SZ)**
+
+\`\`\`
+$(cat drift-summary.txt)
+\`\`\`
+
+Per DEC-P0-005 P1 follow-up: see \`docs/runbooks/github-branch-protection-setup.md\`.
+EOF
+)"
+          else
+            gh issue create \
+              --repo "${{ github.repository }}" \
+              --title "🚨 Branch protection drift detected on main ($(date -u +%Y-%m-%d))" \
+              --label "branch-protection-drift" \
+              --body "$(cat <<EOF
+## Drift detected
+
+The branch protection rule on \`main\` no longer matches the expected
+snapshot in \`docs/runbooks/github-branch-protection-setup.md\`.
+
+### Details
+
+\`\`\`
+$(cat drift-summary.txt)
+\`\`\`
+
+### Why this matters
+
+Per DEC-P0-005 + the Z+ L4 PREVENT layer: server-side branch protection
+is the ONLY mechanical lock preventing merges with red CI. If this rule
+drifts (e.g., admin bypass re-enabled, required checks removed), Claude
+or any contributor could silently merge red CI again — the exact
+violation PR #25 caused.
+
+### Action required
+
+1. Read \`docs/runbooks/github-branch-protection-setup.md\`
+2. Re-apply the missing settings via GitHub Settings → Branches
+3. Document the drift cause in a follow-up DEC entry in MIGRATION.md
+4. Close this issue once verified
+
+### Audit trail
+
+- Detected by: \`.github/workflows/branch-protection-drift.yml\`
+- Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+- Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+)"
+          fi
