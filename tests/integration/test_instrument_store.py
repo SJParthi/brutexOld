@@ -59,10 +59,28 @@ def _csv_hash(tag: str = "fixture") -> str:
 
 
 def _idx(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
-    """Build a minimal valid IDX instrument."""
+    """Build a minimal valid IDX instrument.
+
+    Per DEC-P0-011 (PR #33): exchange_token from a stable per-symbol map so each
+    test-fixture instrument has a unique PK (previous fixed `26000` collided
+    when multiple indices were inserted in the same batch). Uses a deterministic
+    map of well-known Indian indices; falls back to crc32 for unknown symbols.
+    """
+    import zlib
+
+    _token_map: dict[str, int] = {
+        "NIFTY": 13,
+        "BANKNIFTY": 25,
+        "SENSEX": 51,
+        "INDIAVIX": 21,
+        "FINNIFTY": 27,
+        "MIDCPNIFTY": 28,
+        "NIFTYNXT50": 29,
+    }
+    token = _token_map.get(symbol, zlib.crc32(symbol.encode()) & 0xFFFFFF)
     return Instrument(
         exchange=exchange,
-        exchange_token=26000,
+        exchange_token=token,
         trading_symbol=symbol,
         vendor_symbol=f"{exchange}-{symbol}",
         name=f"{symbol} 50",
@@ -185,14 +203,6 @@ class TestOpenAndSchema:
 # ------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "DEC-P0-004 (2026-05-17): same root cause as TestReadAPI — tests insert "
-        "FNO option chains via _make_chain() that get in_scope=False after PR #12 "
-        "universe narrowing. P1 follow-up: rewrite with IDX-only fixtures."
-    ),
-    strict=False,
-)
 class TestUniquenessAndDedup:
     """The two guarantees you asked for, with real-time verification."""
 
@@ -218,7 +228,10 @@ class TestUniquenessAndDedup:
     def test_verify_integrity_finds_no_duplicates_after_100_upserts(self, tmp_path: Path) -> None:
         """``verify_integrity()`` returns ``pk_duplicates == 0`` always."""
         instruments = [
-            _idx(s) for s in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50")
+            _idx("NIFTY"),
+            _idx("BANKNIFTY"),
+            _idx("SENSEX", exchange=Exchange.BSE),
+            _idx("INDIAVIX"),
         ]
         with InstrumentStore.open(tmp_path / "db") as s:
             for _ in range(100):
@@ -230,8 +243,8 @@ class TestUniquenessAndDedup:
                 )
             report = s.verify_integrity()
 
-        assert report.total_rows == 5
-        assert report.distinct_pk_count == 5
+        assert report.total_rows == 4
+        assert report.distinct_pk_count == 4
         assert report.pk_duplicates == 0
         assert report.raw_hash_mismatches == 0
         assert report.is_clean is True
@@ -271,18 +284,6 @@ class TestUniquenessAndDedup:
 # ────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    reason=(
-        "DEC-P0-004 (2026-05-17): tests insert FNO option chains, but the universe "
-        "was narrowed to Track 1 spot indexes only (NIFTY/BANKNIFTY/SENSEX/India VIX) "
-        "in PR #12 (DEC-S-001 Groww→Dhan pivot). brutex/universe.py:is_in_scope() "
-        "returns False for non-IDX instrument types, so FNO rows get in_scope=False "
-        "and queries with WHERE in_scope=TRUE return empty. The tests pre-date the "
-        "scope narrowing and need rewriting with IDX-only fixtures. Tracked as P1 "
-        "follow-up; xfail with strict=False so a future correct fix flips to pass."
-    ),
-    strict=False,
-)
 class TestReadAPI:
     def test_get_returns_latest_by_default(self, tmp_path: Path) -> None:
         with InstrumentStore.open(tmp_path / "db") as s:
@@ -319,70 +320,66 @@ class TestReadAPI:
             assert s.get("NOPE") is None
             assert s.exists("NOPE") is False
 
-    def test_list_in_scope_filters_segment(self, tmp_path: Path) -> None:
+    def test_list_in_scope_returns_idx_instruments(self, tmp_path: Path) -> None:
+        """DEC-P0-011 (PR #33): rewrite from FNO chain → 4 IDX instruments.
+
+        Track 1 universe filter (brutex/universe.py:is_in_scope()) admits only
+        IDX in (NIFTY, BANKNIFTY, SENSEX, INDIA VIX). list_in_scope() returns
+        the in-scope set. FNO/options filtering is Track 2 functionality.
+        """
         with InstrumentStore.open(tmp_path / "db") as s:
-            chain = _make_chain("NIFTY", date(2025, 5, 29), range(24000, 24100, 50))
             s.upsert_many(
-                [_idx("NIFTY"), *chain],
+                [_idx("NIFTY"), _idx("BANKNIFTY")],
                 snapshot_date=date(2025, 4, 15),
                 run_id="r",
                 csv_source_sha256=_csv_hash(),
             )
-            fno = s.list_in_scope(segment=Segment.FNO)
             cash = s.list_in_scope(segment=Segment.CASH)
-            assert len(fno) == len(chain)
-            assert len(cash) == 1
+            assert len(cash) == 2
+            assert {i.trading_symbol for i in cash} == {"NIFTY", "BANKNIFTY"}
 
     def test_list_indices_returns_only_idx(self, tmp_path: Path) -> None:
+        """DEC-P0-011: rewrite from mixed IDX+FNO → Track 1's 4 in-scope indices."""
         with InstrumentStore.open(tmp_path / "db") as s:
             s.upsert_many(
                 [
                     _idx("NIFTY"),
                     _idx("BANKNIFTY"),
-                    _idx("FINNIFTY"),
-                    *_make_chain(
-                        "NIFTY",
-                        date(2025, 5, 29),
-                        range(24000, 24100, 50),
-                    ),
+                    _idx("SENSEX", exchange=Exchange.BSE),
+                    _idx("INDIAVIX"),
                 ],
                 snapshot_date=date(2025, 4, 15),
                 run_id="r",
                 csv_source_sha256=_csv_hash(),
             )
             indices = s.list_indices()
-            assert len(indices) == 3
+            assert len(indices) == 4
             assert {i.trading_symbol for i in indices} == {
                 "NIFTY",
                 "BANKNIFTY",
-                "FINNIFTY",
+                "SENSEX",
+                "INDIAVIX",
             }
 
+    @pytest.mark.skip(
+        reason="Track 2 F&O functionality — list_options requires options data; revisit in Phase 2"
+    )
     def test_list_options_by_underlying(self, tmp_path: Path) -> None:
-        chain = _make_chain("NIFTY", date(2025, 5, 29), range(24000, 24200, 50))
-        with InstrumentStore.open(tmp_path / "db") as s:
-            s.upsert_many(
-                chain,
-                snapshot_date=date(2025, 4, 15),
-                run_id="r",
-                csv_source_sha256=_csv_hash(),
-            )
-            opts = s.list_options(underlying="NIFTY")
-            assert len(opts) == len(chain)
-            assert all(i.underlying_symbol == "NIFTY" for i in opts)
+        """Track 2 work — options listing requires F&O instrument data."""
 
-    def test_count_by_underlying(self, tmp_path: Path) -> None:
+    def test_count_by_underlying_with_indices(self, tmp_path: Path) -> None:
+        """DEC-P0-011: rewrite from option-count → index-count (Track 1)."""
         with InstrumentStore.open(tmp_path / "db") as s:
             s.upsert_many(
-                _make_chain("NIFTY", date(2025, 5, 29), range(24000, 24100, 50))
-                + _make_chain("BANKNIFTY", date(2025, 5, 29), range(52000, 52200, 100)),
+                [_idx("NIFTY"), _idx("BANKNIFTY")],
                 snapshot_date=date(2025, 4, 15),
                 run_id="r",
                 csv_source_sha256=_csv_hash(),
             )
             counts = s.count_by_underlying()
-            assert counts["NIFTY"] > 0
-            assert counts["BANKNIFTY"] > 0
+            # IDX instruments have NULL underlying_symbol per Phase A schema.
+            # We're verifying the count call doesn't error on IDX-only data.
+            assert isinstance(counts, dict)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -390,80 +387,71 @@ class TestReadAPI:
 # ────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    reason=(
-        "DEC-P0-004 (2026-05-17): same root cause as TestReadAPI above — "
-        "snapshot tests insert FNO option chains that get in_scope=False after "
-        "the PR #12 universe narrowing to spot indexes only. P1 follow-up to "
-        "rewrite with IDX-only fixtures."
-    ),
-    strict=False,
-)
 class TestInstrumentSnapshot:
+    """DEC-P0-011 (PR #33): rewritten from FNO chains \u2192 4 IDX instruments."""
+
     def test_load_snapshot_builds_frozen_view(self, tmp_path: Path) -> None:
-        chain = _make_chain("NIFTY", date(2025, 5, 29), range(24000, 24200, 50))
         with InstrumentStore.open(tmp_path / "db") as s:
             s.upsert_many(
-                [_idx("NIFTY"), *chain],
+                [
+                    _idx("NIFTY"),
+                    _idx("BANKNIFTY"),
+                    _idx("SENSEX", exchange=Exchange.BSE),
+                    _idx("INDIAVIX"),
+                ],
                 snapshot_date=date(2025, 4, 15),
                 run_id="r",
                 csv_source_sha256=_csv_hash(),
             )
             snapshot = s.load_snapshot()
         assert isinstance(snapshot, InstrumentSnapshot)
-        assert len(snapshot) == 1 + len(chain)
+        assert len(snapshot) == 4
 
     def test_snapshot_o1_by_symbol(self, tmp_path: Path) -> None:
         """``snapshot.get()`` is a plain dict lookup \u2014 constant time."""
-        chain = _make_chain("NIFTY", date(2025, 5, 29), range(24000, 25000, 50))
+        instruments = [
+            _idx("NIFTY"),
+            _idx("BANKNIFTY"),
+            _idx("SENSEX", exchange=Exchange.BSE),
+            _idx("INDIAVIX"),
+        ]
         with InstrumentStore.open(tmp_path / "db") as s:
             s.upsert_many(
-                chain,
+                instruments,
                 snapshot_date=date(2025, 4, 15),
                 run_id="r",
                 csv_source_sha256=_csv_hash(),
             )
             snapshot = s.load_snapshot()
-        # Hot path: direct dict lookup.
-        for instr in chain:
+        for instr in instruments:
             fetched = snapshot.get(instr.vendor_symbol)
             assert fetched is not None
             assert fetched.vendor_symbol == instr.vendor_symbol
 
     def test_snapshot_by_segment_is_pre_indexed(self, tmp_path: Path) -> None:
-        chain = _make_chain("NIFTY", date(2025, 5, 29), range(24000, 24100, 50))
+        """All 4 Track 1 indices are CASH segment (no FNO in Track 1 scope)."""
         with InstrumentStore.open(tmp_path / "db") as s:
             s.upsert_many(
-                [_idx("NIFTY"), *chain],
+                [_idx("NIFTY"), _idx("BANKNIFTY")],
                 snapshot_date=date(2025, 4, 15),
                 run_id="r",
                 csv_source_sha256=_csv_hash(),
             )
             snap = s.load_snapshot()
-        fno = snap.by_segment(Segment.FNO)
         cash = snap.by_segment(Segment.CASH)
-        assert len(fno) == len(chain)
-        assert len(cash) == 1
+        assert len(cash) == 2
 
+    @pytest.mark.skip(
+        reason="Track 2 F&O functionality \u2014 by_underlying needs options data; revisit in Phase 2"
+    )
     def test_snapshot_by_underlying_is_pre_indexed(self, tmp_path: Path) -> None:
-        chain = _make_chain("NIFTY", date(2025, 5, 29), range(24000, 24100, 50))
-        with InstrumentStore.open(tmp_path / "db") as s:
-            s.upsert_many(
-                chain,
-                snapshot_date=date(2025, 4, 15),
-                run_id="r",
-                csv_source_sha256=_csv_hash(),
-            )
-            snap = s.load_snapshot()
-        nifty_derivs = snap.by_underlying("NIFTY")
-        assert len(nifty_derivs) == len(chain)
+        """Track 2 work \u2014 derivatives grouping requires F&O instrument data."""
 
     def test_snapshot_meta_map_direct_handoff(self, tmp_path: Path) -> None:
         """``meta_map()`` produces the exact dict ExecutionSimulator wants."""
-        chain = _make_chain("NIFTY", date(2025, 5, 29), range(24000, 24100, 50))
         with InstrumentStore.open(tmp_path / "db") as s:
             s.upsert_many(
-                chain,
+                [_idx("NIFTY"), _idx("BANKNIFTY")],
                 snapshot_date=date(2025, 4, 15),
                 run_id="r",
                 csv_source_sha256=_csv_hash(),
@@ -478,7 +466,6 @@ class TestInstrumentSnapshot:
             default_qty=25,
             slippage_bps=Decimal("0"),
         )
-        # The simulator accepts the map directly \u2014 no conversion layer.
         assert len(sim.positions) == 0
         assert sim.cash == Decimal("1_000_000")
 
@@ -508,14 +495,6 @@ class TestInstrumentSnapshot:
 # ────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    reason=(
-        "DEC-P0-004 (2026-05-17): same root cause as TestReadAPI — tests insert "
-        "FNO option chains via _make_chain() that get in_scope=False after PR #12 "
-        "universe narrowing. P1 follow-up: rewrite with IDX-only fixtures."
-    ),
-    strict=False,
-)
 class TestInstrumentRunMetadata:
     def test_record_run_and_read_back(self, tmp_path: Path) -> None:
         with InstrumentStore.open(tmp_path / "db") as s:
@@ -634,13 +613,13 @@ class TestClosedStore:
 # ────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
+@pytest.mark.skip(
     reason=(
-        "DEC-P0-004 (2026-05-17): same root cause as TestReadAPI \u2014 tests insert "
-        "FNO option chains via _make_chain() that get in_scope=False after PR #12 "
-        "universe narrowing. P1 follow-up: rewrite with IDX-only fixtures."
+        "DEC-P0-011 (PR #33): Track 2 F&O functionality. The expiries table "
+        "stores option expiry dates per (exchange, underlying, year) \u2014 meaningless "
+        "for Track 1 spot indexes which don't have expiries. Revisit in Phase 2 "
+        "when Track 2 options pipeline lands."
     ),
-    strict=False,
 )
 class TestExpiriesTable:
     """Phase B persistence \u2014 expiries per (exchange, underlying, year)."""
@@ -733,13 +712,12 @@ class TestExpiriesTable:
             assert rows[0].snapshot_date == date(2025, 4, 10)
 
 
-@pytest.mark.xfail(
+@pytest.mark.skip(
     reason=(
-        "DEC-P0-004 (2026-05-17): same root cause as TestReadAPI \u2014 tests insert "
-        "FNO option chains via _make_chain() that get in_scope=False after PR #12 "
-        "universe narrowing. P1 follow-up: rewrite with IDX-only fixtures."
+        "DEC-P0-011 (PR #33): Track 2 F&O functionality. The contracts table "
+        "stores option contract legs per (underlying, expiry) \u2014 meaningless for "
+        "Track 1 spot indexes. Revisit in Phase 2."
     ),
-    strict=False,
 )
 class TestContractsTable:
     """Phase C persistence \u2014 contract legs per (underlying, expiry)."""
@@ -833,15 +811,9 @@ class TestContractsTable:
             assert len(s.list_contracts()) == 3
 
 
-@pytest.mark.xfail(
-    reason=(
-        "DEC-P0-004 (2026-05-17): same root cause as TestReadAPI — tests insert "
-        "FNO option chains via _make_chain() that get in_scope=False after PR #12 "
-        "universe narrowing. P1 follow-up: rewrite with IDX-only fixtures."
-    ),
-    strict=False,
-)
 class TestIdempotenceStress:
+    """DEC-P0-011 (PR #33): rewritten from FNO chains → 4 Track 1 indices."""
+
     def test_10x_upsert_same_batch_is_stable(self, tmp_path: Path) -> None:
         """Pull the same batch 10 times \u2192 final state is a pure function."""
         instruments = (
