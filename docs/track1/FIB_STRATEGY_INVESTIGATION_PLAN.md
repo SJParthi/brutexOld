@@ -43,6 +43,23 @@ operator approves a locked spec.
 
 ## The 3 open questions (operator answer needed before code)
 
+### Update 2026-05-17 (operator clarification round 2)
+
+Operator answered: **"take 4 fibs also but separate separate strategies"** + **"5 conditions I don't have an idea exactly at level also no idea dude"** + **"all kinds of brute force combinations as per institutional previous discussions ... uniquely for every unique timeframes"**.
+
+**Interpretation locked:**
+
+| Aspect | Decision |
+|---|---|
+| **4 Fib anchors** | Each becomes its OWN brute-force strategy lane (4 parallel families of condition bits — not a unified anchor). |
+| **5 conditions / tolerance / level** | NO pre-spec'd combo. Brute force discovers the optimal K=2..5 ANDs across ALL conditions + the optimal tolerance per combo. Operator hands the search the indicator menu, not a recipe. |
+| **Timeframes** | Brute force tests EVERY combo uniquely on EACH of the 21 timeframes (1m base + 19 derived intraday + 1d). The Stage 1A → 1B → 2 → 3 → 4 cascade handles the per-TF expansion. |
+| **Statistical validation** | Per "institutional previous discussions" — use the existing DSR/CPCV/WFO/Lockbox cascade from `docs/TRACK1_BACKTEST_SPEC.md`. For low-N cases, Track B 6-evidence stack from this doc supplements (does not replace) Track A. |
+
+**This simplifies the open questions list** — we don't need exact conditions from the operator. We need:
+
+### Q1. Exact Fib formulas for each anchor system
+
 ### Q1. Exact Fib formulas for each anchor system
 
 For each of the 4 anchor systems, we need the **formula + bullish/bearish
@@ -94,6 +111,26 @@ Open questions:
 ---
 
 ## Proposed sequence (after operator answers above)
+
+### Update 2026-05-17 (operator clarification round 2 — revised sequence)
+
+Per operator: 4 Fib anchors as SEPARATE strategy families + no pre-spec'd combo + all TFs. Revised PR sequence:
+
+| # | PR title | Scope | Status |
+|---|---|---|---|
+| Doc-1 | This plan doc | DOCS only | ✅ landed in PR #29 |
+| ~~PR-1~~ ~~PR-2~~ ~~PR-3~~ | (Multi-anchor as single PR family) | OBSOLETE per operator clarification | — |
+| PR-A | Weekly H-L Fib anchor — separate strategy family | indicator module + 7 vocab bits + tests | pending |
+| PR-B | Session intraday H-L Fib — separate strategy family | indicator module + 7 vocab bits + tests + anchor-update logic | pending |
+| PR-C | Pivot-Point Fibonacci R/S — separate strategy family | indicator module + 7 vocab bits + tests | pending |
+| PR-D | Vocab expansion (52 → 80 bits) for 4-family Fib | bits.py + invariant tests + spec update | pending |
+| PR-E | Pattern frequency probe SCRIPT — across all 4 families | script + golden fixture + N regime classification | pending |
+| PR-F | Track B rare-pattern output schema + 6-evidence computation | results.parquet schema extension | pending |
+| PR-G | Trade replay generator | matplotlib/HTML output per trade | pending |
+
+**Total:** 1 doc (already landed) + 7 code PRs. None of A-G start until the operator answers Q1 + reviews this revised sequence.
+
+### Original (now obsolete) sequence
 
 This is a sketch, not a commitment. All items below would be SEPARATE
 PRs and only proceed after operator approves a locked spec.

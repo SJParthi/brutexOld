@@ -271,3 +271,190 @@ class TestGuardFailsClosed:
         )
         assert result.returncode == 2, f"Missing PR# must exit 2; got {result.returncode}"
         assert "Usage" in result.stderr or "PR_NUMBER" in result.stderr
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-P0-008 (PR #30): OPERATOR_OVERRIDE rate-limit (Z+ L7 COOLDOWN)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestOverrideRateLimit:
+    """Verify the override mechanism rate-limits + escalates per DEC-P0-008.
+
+    Default thresholds:
+      - Warn at 2 in 24h
+      - Hard-fail at 5 in 24h OR 10 in 7d (unless ESCALATION token provided)
+    """
+
+    def _seed_log(self, log_path: Path, count: int, hours_ago_start: int = 0) -> None:
+        """Write `count` synthetic override entries spread across recent hours."""
+        from datetime import UTC, datetime, timedelta
+
+        lines = []
+        now = datetime.now(UTC)
+        for i in range(count):
+            ts = now - timedelta(hours=hours_ago_start + i)
+            ts_str = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+            lines.append(f"{ts_str} PR=1{i:03d} REPO=test/test REASON=synthetic FAILED=test")
+        log_path.write_text("\n".join(lines) + "\n")
+
+    def test_below_warn_threshold_proceeds_silently(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """1 prior override in 24h → no warning, override proceeds."""
+        log_path = tmp_path / "overrides.log"
+        self._seed_log(log_path, count=1)
+        rollup = {
+            "statusCheckRollup": [
+                {"name": "x", "conclusion": "FAILURE", "status": "COMPLETED"},
+            ]
+            + [
+                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(25)
+            ],
+            "mergeable": "MERGEABLE",
+            "number": 99,
+        }
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(
+            99,
+            {"OPERATOR_OVERRIDE": "true", "OPERATOR_OVERRIDE_REASON": "low count"},
+            extra_path=fake_bin,
+            override_log_path=log_path,
+        )
+        assert result.returncode == 0, (
+            f"Below warn threshold (1 override) must allow merge; got exit {result.returncode}.\n"
+            f"stderr={result.stderr!r}"
+        )
+
+    def test_warn_threshold_proceeds_with_stderr_warning(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """2 prior overrides in 24h → warning printed but override proceeds."""
+        log_path = tmp_path / "overrides.log"
+        self._seed_log(log_path, count=2)
+        rollup = {
+            "statusCheckRollup": [
+                {"name": "x", "conclusion": "FAILURE", "status": "COMPLETED"},
+            ]
+            + [
+                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(25)
+            ],
+            "mergeable": "MERGEABLE",
+            "number": 99,
+        }
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(
+            99,
+            {"OPERATOR_OVERRIDE": "true", "OPERATOR_OVERRIDE_REASON": "at warn"},
+            extra_path=fake_bin,
+            override_log_path=log_path,
+        )
+        assert result.returncode == 0, "warn threshold must still allow"
+        assert "WARNING" in result.stderr or "overrides in last 24h" in result.stderr, (
+            f"expected warning in stderr, got: {result.stderr!r}"
+        )
+
+    def test_hard_24h_limit_blocks_without_escalation(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """5 prior overrides in 24h → hard fail with exit 8."""
+        log_path = tmp_path / "overrides.log"
+        self._seed_log(log_path, count=5)
+        rollup = {
+            "statusCheckRollup": [
+                {"name": "x", "conclusion": "FAILURE", "status": "COMPLETED"},
+            ]
+            + [
+                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(25)
+            ],
+            "mergeable": "MERGEABLE",
+            "number": 99,
+        }
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(
+            99,
+            {"OPERATOR_OVERRIDE": "true", "OPERATOR_OVERRIDE_REASON": "should fail"},
+            extra_path=fake_bin,
+            override_log_path=log_path,
+        )
+        assert result.returncode == 8, (
+            f"5 overrides in 24h must exit 8 (rate-limit-exceeded); got {result.returncode}.\n"
+            f"stderr={result.stderr!r}"
+        )
+        assert "rate limit" in result.stderr.lower()
+
+    def test_hard_limit_bypassed_with_escalation_token(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """5 prior overrides + correct escalation token → proceeds with marker."""
+        log_path = tmp_path / "overrides.log"
+        self._seed_log(log_path, count=5)
+        rollup = {
+            "statusCheckRollup": [
+                {"name": "x", "conclusion": "FAILURE", "status": "COMPLETED"},
+            ]
+            + [
+                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(25)
+            ],
+            "mergeable": "MERGEABLE",
+            "number": 99,
+        }
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(
+            99,
+            {
+                "OPERATOR_OVERRIDE": "true",
+                "OPERATOR_OVERRIDE_REASON": "must escalate",
+                "OPERATOR_OVERRIDE_ESCALATION": "I-acknowledge-this-bypasses-the-cooldown",
+            },
+            extra_path=fake_bin,
+            override_log_path=log_path,
+        )
+        assert result.returncode == 0, (
+            f"Correct escalation token must allow bypass; got exit {result.returncode}.\n"
+            f"stderr={result.stderr!r}"
+        )
+        # Verify the new log entry carries the ESCALATED marker.
+        new_log = log_path.read_text()
+        assert "ESCALATED" in new_log, f"log must mark escalated entry; got: {new_log!r}"
+
+    def test_wrong_escalation_token_still_blocks(
+        self,
+        fake_gh_returning,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """Escalation requires the EXACT literal token (friction by design)."""
+        log_path = tmp_path / "overrides.log"
+        self._seed_log(log_path, count=5)
+        rollup = {
+            "statusCheckRollup": [
+                {"name": "x", "conclusion": "FAILURE", "status": "COMPLETED"},
+            ]
+            + [
+                {"name": f"c{i}", "conclusion": "SUCCESS", "status": "COMPLETED"} for i in range(25)
+            ],
+            "mergeable": "MERGEABLE",
+            "number": 99,
+        }
+        fake_bin = fake_gh_returning(json.dumps(rollup))
+        result = _run_guard(
+            99,
+            {
+                "OPERATOR_OVERRIDE": "true",
+                "OPERATOR_OVERRIDE_REASON": "wrong token",
+                "OPERATOR_OVERRIDE_ESCALATION": "yes do it",
+            },
+            extra_path=fake_bin,
+            override_log_path=log_path,
+        )
+        assert result.returncode == 8, (
+            f"Wrong escalation token must still block; got exit {result.returncode}"
+        )
