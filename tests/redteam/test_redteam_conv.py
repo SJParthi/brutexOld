@@ -29,9 +29,7 @@ def _checker_path() -> Path:
     return REPO_ROOT / "scripts" / "ci" / "check-conventional-commits.sh"
 
 
-@pytest.mark.skipif(
-    not _checker_path().exists(), reason="conventional-commits checker not present"
-)
+@pytest.mark.skipif(not _checker_path().exists(), reason="conventional-commits checker not present")
 def test_checker_rejects_compound_prefix(tmp_path: Path) -> None:
     """The checker MUST reject `ci+chore:` (compound prefix).
 
@@ -43,12 +41,15 @@ def test_checker_rejects_compound_prefix(tmp_path: Path) -> None:
     """
     # Create throwaway git repo with TWO commits — the checker validates
     # HEAD~1..HEAD by default, so we need a baseline commit before the bad one.
-    env = {**os.environ, "GIT_AUTHOR_NAME": "redteam", "GIT_AUTHOR_EMAIL": "rt@x",
-           "GIT_COMMITTER_NAME": "redteam", "GIT_COMMITTER_EMAIL": "rt@x"}
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "redteam",
+        "GIT_AUTHOR_EMAIL": "rt@x",
+        "GIT_COMMITTER_NAME": "redteam",
+        "GIT_COMMITTER_EMAIL": "rt@x",
+    }
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True, env=env)
-    subprocess.run(
-        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, env=env
-    )
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, env=env)
 
     # Commit 1: baseline with VALID conventional-commit prefix
     (tmp_path / "f.txt").write_text("hello", encoding="utf-8")

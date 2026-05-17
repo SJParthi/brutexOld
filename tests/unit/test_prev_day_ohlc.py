@@ -13,7 +13,6 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
-
 from brutex.indicators.prev_day_ohlc import (
     DailyCandle,
     find_prev_trading_day,
@@ -69,9 +68,7 @@ class TestLookupPrevDayOHLC:
             ),
         }
 
-    def test_lookup_tuesday_returns_monday(
-        self, daily_dict: dict[date, DailyCandle]
-    ) -> None:
+    def test_lookup_tuesday_returns_monday(self, daily_dict: dict[date, DailyCandle]) -> None:
         result = lookup_prev_day_ohlc(date(2026, 5, 12), daily_dict)
         assert result is not None
         assert result.today == date(2026, 5, 12)
@@ -81,18 +78,14 @@ class TestLookupPrevDayOHLC:
         assert result.pdo_paisa == 5_390_000
         assert result.pdc_paisa == 5_410_000
 
-    def test_lookup_monday_returns_friday(
-        self, daily_dict: dict[date, DailyCandle]
-    ) -> None:
+    def test_lookup_monday_returns_friday(self, daily_dict: dict[date, DailyCandle]) -> None:
         result = lookup_prev_day_ohlc(date(2026, 5, 11), daily_dict)
         assert result is not None
         assert result.prev_day == date(2026, 5, 8)
         assert result.pdh_paisa == 5_400_000
         assert result.pdl_paisa == 5_340_000
 
-    def test_today_is_holiday_raises(
-        self, daily_dict: dict[date, DailyCandle]
-    ) -> None:
+    def test_today_is_holiday_raises(self, daily_dict: dict[date, DailyCandle]) -> None:
         # 2024-01-26 is Republic Day
         with pytest.raises(ValueError, match="not a trading day"):
             lookup_prev_day_ohlc(date(2024, 1, 26), daily_dict)
@@ -126,13 +119,17 @@ class TestLookupSeries:
         daily_dict = {
             date(2026, 5, 8): DailyCandle(
                 day=date(2026, 5, 8),
-                open_paisa=100_00, high_paisa=110_00,
-                low_paisa=90_00, close_paisa=105_00,
+                open_paisa=100_00,
+                high_paisa=110_00,
+                low_paisa=90_00,
+                close_paisa=105_00,
             ),
             date(2026, 5, 11): DailyCandle(
                 day=date(2026, 5, 11),
-                open_paisa=105_00, high_paisa=115_00,
-                low_paisa=95_00, close_paisa=110_00,
+                open_paisa=105_00,
+                high_paisa=115_00,
+                low_paisa=95_00,
+                close_paisa=110_00,
             ),
         }
         trading_days = [date(2026, 5, 11), date(2026, 5, 12)]

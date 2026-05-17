@@ -43,8 +43,7 @@ def test_ruff_catches_unused_import(fixtures_dir: Path) -> None:
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     assert "F401" in result.stdout, (
-        f"ruff returned non-zero but didn't mention F401 specifically.\n"
-        f"Output: {result.stdout}"
+        f"ruff returned non-zero but didn't mention F401 specifically.\nOutput: {result.stdout}"
     )
 
 

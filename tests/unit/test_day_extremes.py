@@ -49,11 +49,11 @@ class TestSingleDay:
         assert result[0].day_high_paisa == 5400000
         assert result[0].day_low_paisa == 5395000
         assert result[1].day_high_paisa == 5410000  # new high
-        assert result[1].day_low_paisa == 5395000   # unchanged
+        assert result[1].day_low_paisa == 5395000  # unchanged
         assert result[2].day_high_paisa == 5410000  # unchanged
-        assert result[2].day_low_paisa == 5390000   # new low
+        assert result[2].day_low_paisa == 5390000  # new low
         assert result[3].day_high_paisa == 5410000  # unchanged
-        assert result[3].day_low_paisa == 5390000   # unchanged
+        assert result[3].day_low_paisa == 5390000  # unchanged
 
     def test_running_high_only_increases(self) -> None:
         # Strictly increasing highs: running_high tracks each bar
