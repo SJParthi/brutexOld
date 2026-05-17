@@ -51,12 +51,12 @@ from brutex.calendars.nse import is_trading_day
 class PrevDayOHLC:
     """Previous trading day's OHLC anchors for one (instrument, today)."""
 
-    today: date  # today (the trading day these anchors apply to)
-    prev_day: date  # the trading day from which OHLC was fetched
-    pdo_paisa: int  # Previous Day Open
-    pdh_paisa: int  # Previous Day High
-    pdl_paisa: int  # Previous Day Low
-    pdc_paisa: int  # Previous Day Close
+    today: date           # today (the trading day these anchors apply to)
+    prev_day: date        # the trading day from which OHLC was fetched
+    pdo_paisa: int        # Previous Day Open
+    pdh_paisa: int        # Previous Day High
+    pdl_paisa: int        # Previous Day Low
+    pdc_paisa: int        # Previous Day Close
 
 
 @dataclass(frozen=True)
@@ -87,7 +87,6 @@ def find_prev_trading_day(today: date, lookback_max: int = 14) -> date | None:
         find_prev_trading_day(Tue after long weekend) -> previous Fri
     """
     from datetime import timedelta
-
     d = today - timedelta(days=1)
     for _ in range(lookback_max):
         if is_trading_day(d):
@@ -118,7 +117,9 @@ def lookup_prev_day_ohlc(
             holiday).
     """
     if not is_trading_day(today):
-        raise ValueError(f"today ({today}) is not a trading day — PDH/PDL lookup invalid")
+        raise ValueError(
+            f"today ({today}) is not a trading day — PDH/PDL lookup invalid"
+        )
 
     prev_day = find_prev_trading_day(today)
     if prev_day is None:

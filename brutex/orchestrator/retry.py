@@ -234,7 +234,7 @@ def backoff_delay(
     if rng is not None:
         jitter = rng.uniform(-jitter_fraction, jitter_fraction) * base
     else:
-        jitter = random.uniform(-jitter_fraction, jitter_fraction) * base  # noqa: S311  # nosec B311 — backoff jitter, non-crypto
+        jitter = random.uniform(-jitter_fraction, jitter_fraction) * base  # nosec B311
     delay = base + jitter
     return max(0.0, delay)
 

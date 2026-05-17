@@ -72,7 +72,6 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
 def _validate_input(df_1m) -> None:  # type: ignore[no-untyped-def]
     """Validate input DataFrame schema and sort order."""
     import polars as pl
-
     if not isinstance(df_1m, pl.DataFrame):
         raise TypeError(f"Expected polars.DataFrame, got {type(df_1m).__name__}")
     missing = [c for c in REQUIRED_COLUMNS if c not in df_1m.columns]
@@ -126,17 +125,21 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
     if is_intraday(target_tf_minutes):
         # Minute-multiple bucketing.
         bucket_str = f"{target_tf_minutes}m"
-        return df_1m.group_by_dynamic(
-            index_column="ts_utc",
-            every=bucket_str,
-            closed="left",
-            label="left",
-        ).agg(
-            pl.col("open").first().alias("open"),
-            pl.col("high").max().alias("high"),
-            pl.col("low").min().alias("low"),
-            pl.col("close").last().alias("close"),
-            pl.col("volume").sum().alias("volume"),
+        return (
+            df_1m
+            .group_by_dynamic(
+                index_column="ts_utc",
+                every=bucket_str,
+                closed="left",
+                label="left",
+            )
+            .agg(
+                pl.col("open").first().alias("open"),
+                pl.col("high").max().alias("high"),
+                pl.col("low").min().alias("low"),
+                pl.col("close").last().alias("close"),
+                pl.col("volume").sum().alias("volume"),
+            )
         )
 
     # Daily TF (375 minutes). Group by trading-day IST date.
@@ -147,7 +150,9 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
         df_1m
         # Add a "trading_day" column derived from IST date
         .with_columns(
-            (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date().alias("trading_day")
+            (pl.col("ts_utc") + pl.duration(hours=5, minutes=30))
+                .dt.date()
+                .alias("trading_day")
         )
         .group_by("trading_day", maintain_order=True)
         .agg(

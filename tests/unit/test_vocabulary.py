@@ -17,15 +17,16 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
+
 from brutex.indicators.fib_levels import compute_fib_levels
 from brutex.indicators.pivots import compute_pivot_levels
+from brutex.vocabulary import bits as B
 from brutex.vocabulary import (
     IndicatorSnapshot,
     PriorBarHistory,
     ProximityParams,
     evaluate_atoms,
 )
-from brutex.vocabulary import bits as B
 from brutex.vocabulary.conflicts import CONFLICT_PAIRS, count_conflicts, has_conflict
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -136,12 +137,9 @@ class TestGroup1_EMA:
         s = _make_snapshot(ema20_paisa=None, ema200_paisa=None)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         for bit in [
-            B.BIT_CLOSE_ABOVE_EMA20,
-            B.BIT_CLOSE_BELOW_EMA20,
-            B.BIT_CLOSE_ABOVE_EMA200,
-            B.BIT_CLOSE_BELOW_EMA200,
-            B.BIT_EMA20_ABOVE_EMA200,
-            B.BIT_EMA20_BELOW_EMA200,
+            B.BIT_CLOSE_ABOVE_EMA20, B.BIT_CLOSE_BELOW_EMA20,
+            B.BIT_CLOSE_ABOVE_EMA200, B.BIT_CLOSE_BELOW_EMA200,
+            B.BIT_EMA20_ABOVE_EMA200, B.BIT_EMA20_BELOW_EMA200,
         ]:
             assert not _bit(m, bit), f"bit {bit} should not be set during warm-up"
 
@@ -153,25 +151,19 @@ class TestGroup2_Pivots:
     def test_close_at_pivot_p(self) -> None:
         # PDH=24,050  PDL=23,950  PDC=24,000  -> P = 24,000.00
         # close right at P -> near_pivot_p fires
-        s = _make_snapshot(
-            close_paisa=24_000_00, pdh_paisa=24_050_00, pdl_paisa=23_950_00, pdc_paisa=24_000_00
-        )
+        s = _make_snapshot(close_paisa=24_000_00, pdh_paisa=24_050_00,
+                           pdl_paisa=23_950_00, pdc_paisa=24_000_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_NEAR_PIVOT_P)
 
     def test_close_far_from_all_pivots(self) -> None:
         # Move close very far away from all pivots
-        s = _make_snapshot(
-            close_paisa=20_000_00, pdh_paisa=24_050_00, pdl_paisa=23_950_00, pdc_paisa=24_000_00
-        )
+        s = _make_snapshot(close_paisa=20_000_00, pdh_paisa=24_050_00,
+                           pdl_paisa=23_950_00, pdc_paisa=24_000_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         for bit in [
-            B.BIT_NEAR_PIVOT_P,
-            B.BIT_NEAR_PIVOT_R1,
-            B.BIT_NEAR_PIVOT_R2,
-            B.BIT_NEAR_PIVOT_R3,
-            B.BIT_NEAR_PIVOT_S1,
-            B.BIT_NEAR_PIVOT_S2,
+            B.BIT_NEAR_PIVOT_P, B.BIT_NEAR_PIVOT_R1, B.BIT_NEAR_PIVOT_R2,
+            B.BIT_NEAR_PIVOT_R3, B.BIT_NEAR_PIVOT_S1, B.BIT_NEAR_PIVOT_S2,
             B.BIT_NEAR_PIVOT_S3,
         ]:
             assert not _bit(m, bit), f"bit {bit} should not fire when far from pivots"
@@ -220,61 +212,54 @@ class TestGroup3_PDH_PDL:
 
 class TestGroup5_CandleShape:
     def test_bar_bullish(self) -> None:
-        s = _make_snapshot(
-            open_paisa=24_000_00, close_paisa=24_005_00, high_paisa=24_006_00, low_paisa=23_999_00
-        )
+        s = _make_snapshot(open_paisa=24_000_00, close_paisa=24_005_00,
+                           high_paisa=24_006_00, low_paisa=23_999_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_BAR_BULLISH)
         assert not _bit(m, B.BIT_BAR_BEARISH)
 
     def test_bar_bearish(self) -> None:
-        s = _make_snapshot(
-            open_paisa=24_005_00, close_paisa=24_000_00, high_paisa=24_006_00, low_paisa=23_999_00
-        )
+        s = _make_snapshot(open_paisa=24_005_00, close_paisa=24_000_00,
+                           high_paisa=24_006_00, low_paisa=23_999_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_BAR_BEARISH)
         assert not _bit(m, B.BIT_BAR_BULLISH)
 
     def test_bar_doji_tiny_body(self) -> None:
         # Body = 0.5; Range = 10 → 5% body → doji (< 10%)
-        s = _make_snapshot(
-            open_paisa=24_000_00, close_paisa=24_000_50, high_paisa=24_005_00, low_paisa=23_995_00
-        )
+        s = _make_snapshot(open_paisa=24_000_00, close_paisa=24_000_50,
+                           high_paisa=24_005_00, low_paisa=23_995_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_BAR_DOJI)
         # Note: doji also fires bullish since close > open (a "doji-bull")
 
     def test_large_body(self) -> None:
         # body = 8, range = 10 → 80% body → large
-        s = _make_snapshot(
-            open_paisa=24_000_00, close_paisa=24_008_00, high_paisa=24_009_00, low_paisa=23_999_00
-        )
+        s = _make_snapshot(open_paisa=24_000_00, close_paisa=24_008_00,
+                           high_paisa=24_009_00, low_paisa=23_999_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_BAR_LARGE_BODY)
         assert not _bit(m, B.BIT_BAR_SMALL_BODY)
 
     def test_small_body(self) -> None:
         # body = 2, range = 10 → 20% body → small
-        s = _make_snapshot(
-            open_paisa=24_000_00, close_paisa=24_002_00, high_paisa=24_005_00, low_paisa=23_995_00
-        )
+        s = _make_snapshot(open_paisa=24_000_00, close_paisa=24_002_00,
+                           high_paisa=24_005_00, low_paisa=23_995_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_BAR_SMALL_BODY)
         assert not _bit(m, B.BIT_BAR_LARGE_BODY)
 
     def test_long_upper_wick(self) -> None:
         # open=close=24,000, high=24,008, low=23,999 -> upper wick = 8 (range = 9) → 88% > 50%
-        s = _make_snapshot(
-            open_paisa=24_000_00, close_paisa=24_000_00, high_paisa=24_008_00, low_paisa=23_999_00
-        )
+        s = _make_snapshot(open_paisa=24_000_00, close_paisa=24_000_00,
+                           high_paisa=24_008_00, low_paisa=23_999_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_LONG_UPPER_WICK)
 
     def test_long_lower_wick(self) -> None:
         # open=close=24,000, high=24,001, low=23,992 -> lower wick = 8 (range = 9) → 88% > 50%
-        s = _make_snapshot(
-            open_paisa=24_000_00, close_paisa=24_000_00, high_paisa=24_001_00, low_paisa=23_992_00
-        )
+        s = _make_snapshot(open_paisa=24_000_00, close_paisa=24_000_00,
+                           high_paisa=24_001_00, low_paisa=23_992_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_LONG_LOWER_WICK)
 
@@ -321,26 +306,30 @@ class TestGroup6_PriorBars:
 
 class TestGroup7_DayStructure:
     def test_close_at_day_high(self) -> None:
-        s = _make_snapshot(close_paisa=24_010_00, day_high_paisa=24_010_00, day_low_paisa=23_980_00)
+        s = _make_snapshot(close_paisa=24_010_00, day_high_paisa=24_010_00,
+                           day_low_paisa=23_980_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_CLOSE_AT_DAY_HIGH)
 
     def test_close_at_day_low(self) -> None:
-        s = _make_snapshot(close_paisa=23_980_00, day_high_paisa=24_010_00, day_low_paisa=23_980_00)
+        s = _make_snapshot(close_paisa=23_980_00, day_high_paisa=24_010_00,
+                           day_low_paisa=23_980_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_CLOSE_AT_DAY_LOW)
 
     def test_close_in_upper_third(self) -> None:
         # Range = 24,010 - 23,980 = 30. Upper third starts at 23,980 + 20 = 24,000.
         # close = 24,005 → in upper third
-        s = _make_snapshot(close_paisa=24_005_00, day_high_paisa=24_010_00, day_low_paisa=23_980_00)
+        s = _make_snapshot(close_paisa=24_005_00, day_high_paisa=24_010_00,
+                           day_low_paisa=23_980_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_CLOSE_IN_UPPER_THIRD)
         assert not _bit(m, B.BIT_CLOSE_IN_LOWER_THIRD)
 
     def test_close_in_lower_third(self) -> None:
         # Lower third < 23,980 + 10 = 23,990. close = 23,985 → lower third.
-        s = _make_snapshot(close_paisa=23_985_00, day_high_paisa=24_010_00, day_low_paisa=23_980_00)
+        s = _make_snapshot(close_paisa=23_985_00, day_high_paisa=24_010_00,
+                           day_low_paisa=23_980_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_CLOSE_IN_LOWER_THIRD)
         assert not _bit(m, B.BIT_CLOSE_IN_UPPER_THIRD)
@@ -418,24 +407,16 @@ class TestGroup9_DayType:
 
     def test_inside_day(self) -> None:
         # Today's range strictly inside prev day's range
-        s = _make_snapshot(
-            day_high_paisa=24_040_00,
-            day_low_paisa=23_960_00,
-            pdh_paisa=24_050_00,
-            pdl_paisa=23_950_00,
-        )
+        s = _make_snapshot(day_high_paisa=24_040_00, day_low_paisa=23_960_00,
+                           pdh_paisa=24_050_00, pdl_paisa=23_950_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_INSIDE_DAY)
         assert not _bit(m, B.BIT_OUTSIDE_DAY)
 
     def test_outside_day(self) -> None:
         # Today's range strictly outside prev day's range
-        s = _make_snapshot(
-            day_high_paisa=24_100_00,
-            day_low_paisa=23_900_00,
-            pdh_paisa=24_050_00,
-            pdl_paisa=23_950_00,
-        )
+        s = _make_snapshot(day_high_paisa=24_100_00, day_low_paisa=23_900_00,
+                           pdh_paisa=24_050_00, pdl_paisa=23_950_00)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         assert _bit(m, B.BIT_OUTSIDE_DAY)
         assert not _bit(m, B.BIT_INSIDE_DAY)
@@ -539,10 +520,10 @@ class TestIntegration:
             ema200_paisa=23_900_00,
             pdh_paisa=24_050_00,
             pdl_paisa=23_950_00,
-            pdc_paisa=23_960_00,  # within [PDL, PDH]
+            pdc_paisa=23_960_00,           # within [PDL, PDH]
             day_high_paisa=24_055_00,
             day_low_paisa=24_020_00,
-            open_of_day_paisa=24_100_00,  # >0.5% gap up from PDC=23,960
+            open_of_day_paisa=24_100_00,   # >0.5% gap up from PDC=23,960
         )
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
 

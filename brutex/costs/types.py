@@ -156,7 +156,10 @@ class TradeInput:
         # Lightweight sanity checks at boundaries only — internal
         # users (Track 2 execution simulator) construct valid inputs.
         if self.exit_dt_ist < self.entry_dt_ist:
-            msg = f"exit_dt_ist {self.exit_dt_ist} must be >= entry_dt_ist {self.entry_dt_ist}"
+            msg = (
+                f"exit_dt_ist {self.exit_dt_ist} must be >= entry_dt_ist "
+                f"{self.entry_dt_ist}"
+            )
             raise ValueError(msg)
         if self.entry_bar_open_paisa < 5:  # noqa: PLR2004 — 5 paise = 1 tick
             msg = f"entry_bar_open_paisa {self.entry_bar_open_paisa} below 1 tick (5 paise)"

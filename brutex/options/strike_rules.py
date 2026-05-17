@@ -56,24 +56,14 @@ from typing import Final
 
 class TradeDirection(Enum):
     """Bull (buy CE) or bear (buy PE)."""
-
-    BULL = "bull"  # CE
-    BEAR = "bear"  # PE
+    BULL = "bull"   # CE
+    BEAR = "bear"   # PE
 
 
 class StrikeRuleKind(Enum):
     """How the rule computes the strike."""
-
-    OFFSET = "offset"  # Rules 1-7: integer step offset from ATM
-    DELTA_TARGET = "delta_target"  # Rules 8-10: pick strike with |delta| closest to target
-
-
-#: Phase 2 enables OFFSET rules (no Greeks needed).
-_OFFSET_RULES_AVAILABLE_PHASE: Final[int] = 2
-#: Phase 4 enables DELTA_TARGET rules (Greeks pipeline online).
-_DELTA_RULES_AVAILABLE_PHASE: Final[int] = 4
-#: Track 2 spec §6b locks exactly 10 pre-trade strike-selection rules.
-_EXPECTED_RULE_COUNT: Final[int] = 10
+    OFFSET = "offset"             # Rules 1-7: integer step offset from ATM
+    DELTA_TARGET = "delta_target" # Rules 8-10: pick strike with |delta| closest to target
 
 
 @dataclass(frozen=True)
@@ -96,31 +86,26 @@ class StrikeRule:
     def applies_to_phase(self, phase: int) -> bool:
         """Rules 1-7 (OFFSET) work from Phase 2. Rules 8-10 need Phase 4 Greeks."""
         if self.requires_greeks:
-            return phase >= _DELTA_RULES_AVAILABLE_PHASE
-        return phase >= _OFFSET_RULES_AVAILABLE_PHASE
+            return phase >= 4
+        return phase >= 2
 
 
 # The 10 locked pre-trade rules. Order matches Track 2 spec §6b table.
 ALL_STRIKE_RULES: Final[tuple[StrikeRule, ...]] = (
-    StrikeRule("atm", StrikeRuleKind.OFFSET, 0, False),
-    StrikeRule("atm_plus_1_in_dir", StrikeRuleKind.OFFSET, 1, False),
-    StrikeRule("atm_plus_2_in_dir", StrikeRuleKind.OFFSET, 2, False),
-    StrikeRule("atm_plus_5_in_dir", StrikeRuleKind.OFFSET, 5, False),
-    StrikeRule("atm_minus_1_in_dir", StrikeRuleKind.OFFSET, -1, False),
-    StrikeRule("atm_minus_2_in_dir", StrikeRuleKind.OFFSET, -2, False),
-    StrikeRule("atm_minus_5_in_dir", StrikeRuleKind.OFFSET, -5, False),
-    StrikeRule("delta_target_030", StrikeRuleKind.DELTA_TARGET, 0.30, True),
-    StrikeRule("delta_target_050", StrikeRuleKind.DELTA_TARGET, 0.50, True),
-    StrikeRule("delta_target_015", StrikeRuleKind.DELTA_TARGET, 0.15, True),
+    StrikeRule("atm",                StrikeRuleKind.OFFSET, 0,    False),
+    StrikeRule("atm_plus_1_in_dir",  StrikeRuleKind.OFFSET, 1,    False),
+    StrikeRule("atm_plus_2_in_dir",  StrikeRuleKind.OFFSET, 2,    False),
+    StrikeRule("atm_plus_5_in_dir",  StrikeRuleKind.OFFSET, 5,    False),
+    StrikeRule("atm_minus_1_in_dir", StrikeRuleKind.OFFSET, -1,   False),
+    StrikeRule("atm_minus_2_in_dir", StrikeRuleKind.OFFSET, -2,   False),
+    StrikeRule("atm_minus_5_in_dir", StrikeRuleKind.OFFSET, -5,   False),
+    StrikeRule("delta_target_030",   StrikeRuleKind.DELTA_TARGET, 0.30, True),
+    StrikeRule("delta_target_050",   StrikeRuleKind.DELTA_TARGET, 0.50, True),
+    StrikeRule("delta_target_015",   StrikeRuleKind.DELTA_TARGET, 0.15, True),
 )
 
-if len(ALL_STRIKE_RULES) != _EXPECTED_RULE_COUNT:
-    raise AssertionError(
-        f"Expected {_EXPECTED_RULE_COUNT} strike rules per Track 2 spec §6b, "
-        f"got {len(ALL_STRIKE_RULES)}"
-    )
-if len({r.name for r in ALL_STRIKE_RULES}) != _EXPECTED_RULE_COUNT:
-    raise AssertionError("rule names must be unique")
+assert len(ALL_STRIKE_RULES) == 10
+assert len({r.name for r in ALL_STRIKE_RULES}) == 10, "rule names must be unique"
 
 # Convenience lookups (re-exported via brutex.options package __init__ +
 # consumed by tests/unit/test_strike_rules.py — CodeQL false-positive otherwise).
@@ -174,7 +159,9 @@ def resolve_offset_strike(
     means "further OTM in the trade direction."
     """
     if rule.kind != StrikeRuleKind.OFFSET:
-        raise ValueError(f"resolve_offset_strike called on non-OFFSET rule {rule.name!r}")
+        raise ValueError(
+            f"resolve_offset_strike called on non-OFFSET rule {rule.name!r}"
+        )
     step_count = int(rule.param)
     if direction == TradeDirection.BULL:
         # CE: OTM means higher strike
@@ -205,7 +192,9 @@ def resolve_delta_target_strike(
     direction (caller filters to CEs for BULL or PEs for BEAR).
     """
     if rule.kind != StrikeRuleKind.DELTA_TARGET:
-        raise ValueError(f"resolve_delta_target_strike called on non-DELTA rule {rule.name!r}")
+        raise ValueError(
+            f"resolve_delta_target_strike called on non-DELTA rule {rule.name!r}"
+        )
     if not strike_chain:
         raise ValueError("strike_chain is empty; cannot resolve delta target")
     target = rule.param
@@ -217,6 +206,7 @@ def resolve_delta_target_strike(
     median_strike = sorted(strike_chain)[len(strike_chain) // 2][0]
     best = min(
         strike_chain,
-        key=lambda sd: (round(abs(abs(sd[1]) - target), 6), abs(sd[0] - median_strike)),
+        key=lambda sd: (round(abs(abs(sd[1]) - target), 6),
+                        abs(sd[0] - median_strike)),
     )
     return best[0]

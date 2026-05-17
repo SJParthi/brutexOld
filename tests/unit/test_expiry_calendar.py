@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
+
 from brutex.options.expiry_calendar import (
     FRIDAY,
     THURSDAY,
@@ -30,11 +31,11 @@ class TestNiftyWeekly:
     @pytest.mark.parametrize(
         "on_date,expected_dow",
         [
-            (date(2021, 1, 1), THURSDAY),
-            (date(2024, 7, 15), THURSDAY),
-            (date(2025, 8, 28), THURSDAY),  # last Thursday weekly
-            (date(2025, 9, 2), TUESDAY),  # first Tuesday weekly
-            (date(2026, 5, 16), TUESDAY),  # today
+            (date(2021, 1, 1),   THURSDAY),
+            (date(2024, 7, 15),  THURSDAY),
+            (date(2025, 8, 28),  THURSDAY),  # last Thursday weekly
+            (date(2025, 9, 2),   TUESDAY),   # first Tuesday weekly
+            (date(2026, 5, 16),  TUESDAY),   # today
         ],
     )
     def test_nifty_weekly_dow(self, on_date: date, expected_dow: int) -> None:
@@ -50,13 +51,15 @@ class TestBankniftyWeekly:
     @pytest.mark.parametrize(
         "on_date,expected_dow",
         [
-            (date(2021, 1, 1), THURSDAY),
-            (date(2023, 9, 3), THURSDAY),  # day before Wednesday transition
-            (date(2023, 9, 4), WEDNESDAY),
+            (date(2021, 1, 1),   THURSDAY),
+            (date(2023, 9, 3),   THURSDAY),  # day before Wednesday transition
+            (date(2023, 9, 4),   WEDNESDAY),
             (date(2024, 11, 13), WEDNESDAY),  # last day of weekly
         ],
     )
-    def test_banknifty_weekly_dow_before_kill(self, on_date: date, expected_dow: int) -> None:
+    def test_banknifty_weekly_dow_before_kill(
+        self, on_date: date, expected_dow: int
+    ) -> None:
         assert get_weekly_dow(OptionsUnderlying.BANKNIFTY, on_date) == expected_dow
 
     @pytest.mark.parametrize(
@@ -65,7 +68,7 @@ class TestBankniftyWeekly:
             date(2024, 11, 14),  # day weekly killed
             date(2025, 1, 1),
             date(2025, 9, 2),
-            date(2026, 5, 16),  # today
+            date(2026, 5, 16),   # today
         ],
     )
     def test_banknifty_weekly_killed(self, on_date: date) -> None:
@@ -77,14 +80,14 @@ class TestSensexWeekly:
     @pytest.mark.parametrize(
         "on_date,expected_dow",
         [
-            (date(2021, 1, 1), THURSDAY),  # thin pre-2023-05-15
-            (date(2023, 5, 12), THURSDAY),
-            (date(2023, 5, 15), FRIDAY),  # first Friday weekly
+            (date(2021, 1, 1),   THURSDAY),  # thin pre-2023-05-15
+            (date(2023, 5, 12),  THURSDAY),
+            (date(2023, 5, 15),  FRIDAY),    # first Friday weekly
             (date(2024, 12, 31), FRIDAY),
-            (date(2025, 1, 1), TUESDAY),
-            (date(2025, 9, 3), TUESDAY),
-            (date(2025, 9, 4), THURSDAY),  # first Thursday weekly under SEBI rule
-            (date(2026, 5, 16), THURSDAY),
+            (date(2025, 1, 1),   TUESDAY),
+            (date(2025, 9, 3),   TUESDAY),
+            (date(2025, 9, 4),   THURSDAY),  # first Thursday weekly under SEBI rule
+            (date(2026, 5, 16),  THURSDAY),
         ],
     )
     def test_sensex_weekly_dow(self, on_date: date, expected_dow: int) -> None:
@@ -96,20 +99,20 @@ class TestMonthlyDow:
         "instrument,on_date,expected_dow",
         [
             # NIFTY: Thursday → Tuesday (Sep 2, 2025)
-            (OptionsUnderlying.NIFTY, date(2021, 1, 1), THURSDAY),
-            (OptionsUnderlying.NIFTY, date(2025, 9, 2), TUESDAY),
+            (OptionsUnderlying.NIFTY,     date(2021, 1, 1),  THURSDAY),
+            (OptionsUnderlying.NIFTY,     date(2025, 9, 2),  TUESDAY),
             # BANKNIFTY: Thursday → Wednesday (Mar 1, 2024) → Thursday (Jan 1, 2025) → Tuesday (Sep 2, 2025)
-            (OptionsUnderlying.BANKNIFTY, date(2021, 1, 1), THURSDAY),
-            (OptionsUnderlying.BANKNIFTY, date(2024, 2, 29), THURSDAY),
-            (OptionsUnderlying.BANKNIFTY, date(2024, 3, 1), WEDNESDAY),
-            (OptionsUnderlying.BANKNIFTY, date(2024, 12, 31), WEDNESDAY),
-            (OptionsUnderlying.BANKNIFTY, date(2025, 1, 1), THURSDAY),
-            (OptionsUnderlying.BANKNIFTY, date(2025, 9, 2), TUESDAY),
+            (OptionsUnderlying.BANKNIFTY, date(2021, 1, 1),     THURSDAY),
+            (OptionsUnderlying.BANKNIFTY, date(2024, 2, 29),    THURSDAY),
+            (OptionsUnderlying.BANKNIFTY, date(2024, 3, 1),     WEDNESDAY),
+            (OptionsUnderlying.BANKNIFTY, date(2024, 12, 31),   WEDNESDAY),
+            (OptionsUnderlying.BANKNIFTY, date(2025, 1, 1),     THURSDAY),
+            (OptionsUnderlying.BANKNIFTY, date(2025, 9, 2),     TUESDAY),
             # SENSEX: Thursday → Friday (May 15, 2023) → Tuesday (Jan 1, 2025) → Thursday (Sep 4, 2025)
-            (OptionsUnderlying.SENSEX, date(2021, 1, 1), THURSDAY),
-            (OptionsUnderlying.SENSEX, date(2023, 5, 15), FRIDAY),
-            (OptionsUnderlying.SENSEX, date(2025, 1, 1), TUESDAY),
-            (OptionsUnderlying.SENSEX, date(2025, 9, 4), THURSDAY),
+            (OptionsUnderlying.SENSEX,    date(2021, 1, 1),  THURSDAY),
+            (OptionsUnderlying.SENSEX,    date(2023, 5, 15), FRIDAY),
+            (OptionsUnderlying.SENSEX,    date(2025, 1, 1),  TUESDAY),
+            (OptionsUnderlying.SENSEX,    date(2025, 9, 4),  THURSDAY),
         ],
     )
     def test_monthly_dow(

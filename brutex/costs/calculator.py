@@ -20,7 +20,7 @@ at sweep time.
 
 from __future__ import annotations
 
-from brutex.costs import constants as C  # noqa: N812 — C = costs constants namespace
+from brutex.costs import constants as C
 from brutex.costs.types import TradeCostBreakdown, TradeInput
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 
@@ -196,7 +196,13 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
 
     # ── Step 11: total charges ──────────────────────────────────────────
     total_charges_paisa = (
-        brokerage_paisa + stt_paisa + exch_paisa + sebi_paisa + ipft_paisa + stamp_paisa + gst_paisa
+        brokerage_paisa
+        + stt_paisa
+        + exch_paisa
+        + sebi_paisa
+        + ipft_paisa
+        + stamp_paisa
+        + gst_paisa
     )
 
     # ── Step 12: gross PnL (slippage already baked into fills) ──────────
@@ -229,6 +235,7 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
         total_charges_paisa=total_charges_paisa,
         gross_pnl_paisa=gross_pnl_paisa,
         net_pnl_paisa=net_pnl_paisa,
-        used_exercise_branch=trade.trade_outcome in ("EXPIRY_EXERCISE", "EXPIRY_ASSIGN"),
+        used_exercise_branch=trade.trade_outcome
+        in ("EXPIRY_EXERCISE", "EXPIRY_ASSIGN"),
         n_orders_per_leg=1,  # iceberg slicing not yet implemented (§6b deferred)
     )

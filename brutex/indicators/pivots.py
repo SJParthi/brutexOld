@@ -54,20 +54,20 @@ class PivotLevels:
     trading_day: date
 
     # Previous day's anchors (used to compute pivot)
-    pdh_paisa: int  # Previous Day's High
-    pdl_paisa: int  # Previous Day's Low
-    pdc_paisa: int  # Previous Day's Close
+    pdh_paisa: int    # Previous Day's High
+    pdl_paisa: int    # Previous Day's Low
+    pdc_paisa: int    # Previous Day's Close
 
     # The 9 pivot levels (5 resistance + pivot + 4 support, top to bottom):
-    r4_paisa: int  # 4th resistance (extension)
-    r3_paisa: int  # 3rd resistance
-    r2_paisa: int  # 2nd resistance
-    r1_paisa: int  # 1st resistance
-    p_paisa: int  # Pivot (central)
-    s1_paisa: int  # 1st support
-    s2_paisa: int  # 2nd support
-    s3_paisa: int  # 3rd support
-    s4_paisa: int  # 4th support (extension)
+    r4_paisa: int     # 4th resistance (extension)
+    r3_paisa: int     # 3rd resistance
+    r2_paisa: int     # 2nd resistance
+    r1_paisa: int     # 1st resistance
+    p_paisa: int      # Pivot (central)
+    s1_paisa: int     # 1st support
+    s2_paisa: int     # 2nd support
+    s3_paisa: int     # 3rd support
+    s4_paisa: int     # 4th support (extension)
 
     def get(self, key: str) -> int:
         """Lookup by string key.
@@ -75,7 +75,7 @@ class PivotLevels:
         Keys: 'P', 'R1'..'R4', 'S1'..'S4'.
         """
         mapping = {
-            "P": self.p_paisa,
+            "P":  self.p_paisa,
             "R1": self.r1_paisa,
             "R2": self.r2_paisa,
             "R3": self.r3_paisa,
@@ -94,7 +94,7 @@ def _round_half_even(x: float) -> int:
     Matches IEEE 754 default rounding mode and the FPCR pin per
     CLAUDE.md §4 / spec §Non-Negotiable Correctness #11.
     """
-    return round(x)
+    return int(round(x))
 
 
 def compute_pivot_levels(
@@ -123,7 +123,8 @@ def compute_pivot_levels(
     """
     if pdh_paisa < pdl_paisa:
         raise ValueError(
-            f"PDH ({pdh_paisa}) must be >= PDL ({pdl_paisa}) — data corruption on {trading_day}"
+            f"PDH ({pdh_paisa}) must be >= PDL ({pdl_paisa}) — "
+            f"data corruption on {trading_day}"
         )
     if not (pdl_paisa <= pdc_paisa <= pdh_paisa):
         raise ValueError(
@@ -131,8 +132,7 @@ def compute_pivot_levels(
             f"data corruption on {trading_day}"
         )
 
-    # Compute pivot from the standard Floor Trader formula: average of
-    # previous day's high, low, and close (rounded to whole paisa).
+    # Pivot = (PDH + PDL + PDC) / 3
     p = _round_half_even((pdh_paisa + pdl_paisa + pdc_paisa) / 3.0)
 
     range_paisa = pdh_paisa - pdl_paisa  # H - L

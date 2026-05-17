@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
+
 from brutex.indicators.pivots import PivotLevels, compute_pivot_levels
 
 
@@ -98,7 +99,7 @@ class TestOrdering:
         ]
         for i in range(len(ordered) - 1):
             assert ordered[i] < ordered[i + 1], (
-                f"Level at index {i} ({ordered[i]}) not < level at {i + 1} ({ordered[i + 1]})"
+                f"Level at index {i} ({ordered[i]}) not < level at {i+1} ({ordered[i+1]})"
             )
 
 

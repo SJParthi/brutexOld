@@ -26,76 +26,55 @@ from typing import Final
 
 # 15 minute-by-minute intraday timeframes (1m to 15m).
 INTRADAY_MINUTE_TFS: Final[tuple[int, ...]] = (
-    1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    9,
-    10,
-    11,
-    12,
-    13,
-    14,
-    15,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 )
 
 # 5 multi-minute intraday timeframes.
 INTRADAY_MULTIMINUTE_TFS: Final[tuple[int, ...]] = (
-    30,
-    60,
-    120,
-    180,
-    240,
+    30, 60, 120, 180, 240,
 )
 
 # 1 daily timeframe (in minutes — 6h 15m session).
 DAILY_TF_MINUTES: Final[int] = 375
-
-#: Track 1 timeframe count per spec (1m base + 19 derived intraday + 1d).
-EXPECTED_TF_COUNT: Final[int] = 21
 
 # All 21 timeframes (in minutes).
 ALL_TF_MINUTES: Final[tuple[int, ...]] = (
     INTRADAY_MINUTE_TFS + INTRADAY_MULTIMINUTE_TFS + (DAILY_TF_MINUTES,)
 )
 
-if len(ALL_TF_MINUTES) != EXPECTED_TF_COUNT:
-    raise AssertionError(
-        f"Expected {EXPECTED_TF_COUNT} timeframes per spec, got {len(ALL_TF_MINUTES)}"
-    )
+assert len(ALL_TF_MINUTES) == 21, (
+    f"Expected 21 timeframes per spec, got {len(ALL_TF_MINUTES)}"
+)
 
 
 # Canonical string labels (used as Parquet partition keys and config IDs).
 TF_LABELS: Final[dict[int, str]] = {
-    1: "1m",
-    2: "2m",
-    3: "3m",
-    4: "4m",
-    5: "5m",
-    6: "6m",
-    7: "7m",
-    8: "8m",
-    9: "9m",
-    10: "10m",
-    11: "11m",
-    12: "12m",
-    13: "13m",
-    14: "14m",
-    15: "15m",
-    30: "30m",
-    60: "60m",
+    1:   "1m",
+    2:   "2m",
+    3:   "3m",
+    4:   "4m",
+    5:   "5m",
+    6:   "6m",
+    7:   "7m",
+    8:   "8m",
+    9:   "9m",
+    10:  "10m",
+    11:  "11m",
+    12:  "12m",
+    13:  "13m",
+    14:  "14m",
+    15:  "15m",
+    30:  "30m",
+    60:  "60m",
     120: "120m",
     180: "180m",
     240: "240m",
     375: "1d",
 }
 
-if set(TF_LABELS.keys()) != set(ALL_TF_MINUTES):
-    raise AssertionError("TF_LABELS keys must match ALL_TF_MINUTES exactly")
+assert set(TF_LABELS.keys()) == set(ALL_TF_MINUTES), (
+    "TF_LABELS keys must match ALL_TF_MINUTES exactly"
+)
 
 
 def label(tf_minutes: int) -> str:
@@ -129,7 +108,8 @@ def parse_label(s: str) -> int:
     inverse = {v: k for k, v in TF_LABELS.items()}
     if s not in inverse:
         raise ValueError(
-            f"Unknown timeframe label: {s!r}. Must be one of {sorted(inverse.keys())}."
+            f"Unknown timeframe label: {s!r}. "
+            f"Must be one of {sorted(inverse.keys())}."
         )
     return inverse[s]
 

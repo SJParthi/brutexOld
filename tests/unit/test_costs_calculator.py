@@ -22,6 +22,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 import pytest
+
 from brutex.costs import (
     Broker,
     GstSplit,
@@ -35,6 +36,7 @@ from brutex.costs import (
     constants,
 )
 
+
 # ─────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────
@@ -42,12 +44,12 @@ from brutex.costs import (
 
 def _make_trade(
     *,
-    entry_dt: datetime = datetime(2026, 5, 15, 10, 0),
+    entry_dt: datetime = datetime(2026, 5, 15, 10, 0),  # noqa: B008
     exit_dt: datetime | None = None,
     instrument: Instrument = "NIFTY",
     option_type: OptionType = "CE",
     strike: int = 2_500_000,
-    expiry_date: date = date(2026, 5, 21),
+    expiry_date: date = date(2026, 5, 21),  # noqa: B008
     entry_open_paisa: int = 9_995,
     exit_open_paisa: int = 12_005,
     side: TradeSide = "long_call",
