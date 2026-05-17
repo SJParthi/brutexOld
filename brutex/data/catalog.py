@@ -12,7 +12,7 @@ data-lake extras installed.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -457,7 +457,7 @@ class Catalog:
 
 
 @contextmanager
-def open_catalog(path: Path) -> Iterator[Catalog]:
+def open_catalog(path: Path) -> Generator[Catalog, None, None]:
     """Context-manager sugar for :meth:`Catalog.open`."""
     cat = Catalog.open(path)
     try:

@@ -133,8 +133,12 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-      - name: Install deps
-        run: pip install -e ".[dev]"
+      - name: Install deps (includes [data] extras per DEC-P0-001)
+        # DEC-P0-001 (2026-05-17): added `[data]` extra so polars + duckdb +
+        # pyarrow are installed in CI. Without these, ~6 tests in
+        # tests/unit/test_tf_resampler.py and tests/integration/test_data_lake_real.py
+        # fail at collection time, suppressing real coverage of the data lake.
+        run: pip install -e ".[dev,data]"
       - name: pytest with coverage gate
         run: |
           # Coverage floor is 90% for P1 — heavy-dep modules (cli,
@@ -302,8 +306,19 @@ jobs:
       - name: Install scanners
         run: |
           pip install "bandit>=1.7,<2.0" "pip-audit>=2.7,<3.0"
-      - name: bandit
-        run: bandit -r brutex -l
+      - name: bandit (low+ exit threshold per DEC-P0-001)
+        run: |
+          # DEC-P0-001 (2026-05-17): kept at -l (low+ severity); the prior
+          # draft of this PR proposed -ll (medium+) but that is WEAKER than
+          # -l (-ll ignores low-severity findings). Bandit semantics:
+          # -l reports low+, -ll reports medium+, -lll reports high+.
+          # The 4 legitimate low-severity exceptions (S104 × 2 in
+          # brutex/config/ports.py, S105 in brutex/notifications/telegram.py,
+          # S311 in brutex/orchestrator/retry.py) carry per-line `# nosec`
+          # tags so bandit at -l skips them. New S104 sites in brutex/ trip
+          # at the ruff layer (S-rules un-ignored at project level per
+          # pyproject.toml comment).
+          bandit -r brutex -l
       - name: Compile declared deps to requirements.txt
         # pip-audit on a fat venv scans the runner-image baseline and
         # gets noisy with CVEs in dev-transitives we don't control.
@@ -671,11 +686,13 @@ jobs:
           cache: pip
       - name: Install vulture
         run: pip install vulture
-      - name: Run vulture
+      - name: Run vulture (blocking — DEC-P0-001)
         run: |
-          # 80% confidence threshold; report dead functions/classes/vars
-          # but don't block merge (many are "used from tests only").
-          vulture brutex --min-confidence 80 || true
+          # 80% confidence threshold; DEC-P0-001 (2026-05-17) removed `|| true`
+          # so dead code blocks merge. Whitelist file mutes known-acceptable
+          # patterns (e.g., __exit__ args, FastAPI route handlers, dataclass
+          # __post_init__) so the gate fires only on genuine dead code.
+          vulture brutex scripts/ci/vulture_whitelist.py --min-confidence 80
 
   # ─────────────────────────────────────────────────────────────────
   # jscpd — code duplication detector
@@ -691,14 +708,17 @@ jobs:
           node-version: '22'
       - name: Install jscpd
         run: npm install -g jscpd
-      - name: Run jscpd
+      - name: Run jscpd (blocking — DEC-P0-001)
         run: |
-          # Fail if >3% duplication in brutex/ or tests/.
-          jscpd brutex tests \
+          # DEC-P0-001 (2026-05-17) removed `|| true`; jscpd now blocks merge
+          # if duplication >3%. tests/ deliberately repeat fixture patterns,
+          # so scan brutex/ only (tighter signal). Threshold stays at 3% per
+          # STANDARDS_100PCT row 7 interim target (1% is the eventual goal).
+          jscpd brutex \
             --min-lines 10 \
             --min-tokens 70 \
             --threshold 3 \
-            --reporters console || true
+            --reporters console
 
   # ─────────────────────────────────────────────────────────────────
   # Python mutation testing (mutmut) — per-push on critical modules
@@ -716,14 +736,106 @@ jobs:
           cache: pip
       - name: Install deps
         run: pip install -e ".[dev]"
-      - name: mutmut on state.py (FSM)
+      - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
-          # 5-minute budget per module; report surviving mutants.
-          timeout 300 mutmut run --paths-to-mutate brutex/orchestrator/state.py \
+          # 5-minute budget per module; DEC-P0-001 (2026-05-17) removed
+          # blanket `|| true`. mutmut run exits with the count of survivors
+          # which can be non-zero on success; we let the run finish even
+          # if survivors exist, then enforce a survivor-budget gate.
+          set +e
+          timeout 300 mutmut run \
+            --paths-to-mutate brutex/orchestrator/state.py \
             --tests-dir tests/unit \
-            --runner "pytest -x tests/unit/test_orchestrator_state.py" || true
+            --runner "pytest -x tests/unit/test_orchestrator_state.py"
+          run_rc=$?
+          set -e
+          if [ $run_rc -eq 124 ]; then
+            echo "ERROR: mutmut timed out after 5 minutes"
+            exit 124
+          fi
+          # Print results for visibility (mutmut results exits 0 even with survivors).
+          echo "::group::mutmut results — survivor list (for next-PR test targeting)"
           mutmut results || true
+          echo "::endgroup::"
+          echo "::group::mutmut show — first 20 surviving mutants (line-by-line diff)"
+          # DEC-P0-004 (Agent 5 follow-up): dump survivor diffs so next push
+          # can write targeted tests. Without this, mutation gate failures
+          # give no actionable info to the developer.
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            mutmut show "$i" 2>/dev/null || true
+          done
+          echo "::endgroup::"
+          # Enforce ≥85% mutation score per Golden Rule #12 / STANDARDS row 3.
+          # Operator decree 2026-05-17 (DEC-P0-003): no downgrade — 100% standards
+          # held. If state.py current score is below 85%, write more tests until
+          # the gate passes. Do NOT relax this threshold without explicit operator
+          # approval. The earlier DEC-P0-002 60% interim was REVERTED at operator
+          # direction; mutation row in STANDARDS_100PCT.md §1 is therefore RESTORED
+          # to ✅ ENFORCED at the decree-level threshold.
+          # mutmut 2.5.1 supports `junitxml` subcommand (since 2.2.0). Defensive
+          # parsing — fail loudly on schema drift or empty mutant set rather than
+          # silently pass.
+          set +e
+          mutmut junitxml > mutmut-results.xml 2>mutmut-junitxml.err
+          xml_rc=$?
+          set -e
+          if [ $xml_rc -ne 0 ]; then
+            echo "ERROR: mutmut junitxml subcommand failed with exit $xml_rc"
+            echo "--- stderr ---"
+            cat mutmut-junitxml.err
+            echo "--- (if junitxml is unavailable in this mutmut version, this gate"
+            echo "     needs to be reworked to parse 'mutmut results' text output;"
+            echo "     tracked as a follow-up to DEC-P0-001) ---"
+            exit 1
+          fi
+          # CRIT-1 fix (DEC-P0-003 eagle-eye review): inline heredoc was
+          # indented 10 spaces causing Python IndentationError on every run.
+          # Write the parser to a tmp file and exec it directly — no
+          # indentation sensitivity, no heredoc-tab/space gotchas.
+          cat > /tmp/check_mutation_score.py <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          try:
+              tree = ET.parse('mutmut-results.xml')
+          except ET.ParseError as exc:
+              print(f"ERROR: mutmut-results.xml is not valid XML: {exc}")
+              sys.exit(1)
+          root = tree.getroot()
+          # mutmut 2.x junitxml root is <testsuites> wrapping one <testsuite>.
+          suite = root.find('testsuite')
+          attrs = suite.attrib if suite is not None else root.attrib
+          try:
+              tests = int(attrs.get('tests', '0'))
+              failures = int(attrs.get('failures', '0'))
+              errors = int(attrs.get('errors', '0'))
+          except (ValueError, TypeError) as exc:
+              print(f"ERROR: mutmut XML missing expected attrs: {exc}")
+              print(f"--- root attrs: {dict(root.attrib)} ---")
+              sys.exit(1)
+          killed = tests - failures - errors
+          if tests == 0:
+              print("ERROR: mutmut produced 0 mutants on state.py — likely a config issue")
+              sys.exit(1)
+          score = killed / tests
+          print(f"mutation score: killed={killed} / total={tests} = {score:.2%}")
+          if score < 0.85:
+              print(f"FAILED: mutation score {score:.2%} below 85% gate (Golden Rule #12, no-downgrade per DEC-P0-003)")
+              sys.exit(1)
+          print(f"PASSED: mutation score {score:.2%} >= 85%")
+          PY
+          # Strip the 10-space CI-yml indent that bash heredoc preserves
+          # (it would still cause IndentationError when python parses).
+          sed -i 's/^          //' /tmp/check_mutation_score.py
+          python3 /tmp/check_mutation_score.py
+
+      - name: Upload mutmut results XML for analysis
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: mutmut-results-xml
+          path: mutmut-results.xml
+          retention-days: 7
+          if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────────
   # PROOF BUNDLE — downloads every per-job artifact and packages
@@ -857,9 +969,21 @@ jobs:
       - semgrep
       - trivy
       - sbom
-      # Advisory-only (continue-on-error): typos, complexity, vulture,
-      # duplication, mutation-py, fno-math-drift — tracked as artifacts
-      # but don't block merge. They still run and upload reports.
+      # DEC-P0-001 + DEC-P0-003 (2026-05-17): vulture / duplication /
+      # mutation-py promoted from advisory to HARD GATES. They now
+      # block ci-ok per Golden Rule #12 / STANDARDS_100PCT §1 rows 3,
+      # 7-jscpd, 7-vulture. Removed from "advisory-only" comment below.
+      - vulture
+      - duplication
+      - mutation-py
+      # DEC-P0-004 (Agent 5 MED fix): proof-bundle was missing from ci-ok
+      # needs:. The runbook lists it as required, but ci-ok didn't gate on
+      # it — if proof-bundle failed, ci-ok could still pass while branch
+      # protection blocks merge (confusing operator). Added now.
+      - proof-bundle
+      # Still advisory-only (continue-on-error): typos, complexity,
+      # fno-math-drift — these are informational scans, not enforcement
+      # gates per Golden Rule #12.
     if: always()
     steps:
       - name: Verify all required jobs passed
@@ -882,6 +1006,10 @@ jobs:
           echo "  semgrep:       ${{ needs.semgrep.result }}"
           echo "  trivy:         ${{ needs.trivy.result }}"
           echo "  sbom:          ${{ needs.sbom.result }}"
+          echo "  vulture:       ${{ needs.vulture.result }}"
+          echo "  duplication:   ${{ needs.duplication.result }}"
+          echo "  mutation-py:   ${{ needs.mutation-py.result }}"
+          echo "  proof-bundle:  ${{ needs.proof-bundle.result }}"
           for result in \
             "${{ needs.lint.result }}" \
             "${{ needs.type.result }}" \
@@ -898,7 +1026,11 @@ jobs:
             "${{ needs.codeql.result }}" \
             "${{ needs.semgrep.result }}" \
             "${{ needs.trivy.result }}" \
-            "${{ needs.sbom.result }}"; do
+            "${{ needs.sbom.result }}" \
+            "${{ needs.vulture.result }}" \
+            "${{ needs.duplication.result }}" \
+            "${{ needs.mutation-py.result }}" \
+            "${{ needs.proof-bundle.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "❌ A required gate failed or was cancelled"
               exit 1

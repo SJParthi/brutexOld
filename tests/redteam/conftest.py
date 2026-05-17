@@ -12,19 +12,19 @@ REPO_ROOT: Path = Path(__file__).resolve().parents[2]
 FIXTURES_DIR: Path = Path(__file__).resolve().parent / "fixtures"
 
 
-@pytest.fixture()
+@pytest.fixture
 def repo_root() -> Path:
     """Absolute path to the repository root."""
     return REPO_ROOT
 
 
-@pytest.fixture()
+@pytest.fixture
 def fixtures_dir() -> Path:
     """Absolute path to the redteam fixtures directory."""
     return FIXTURES_DIR
 
 
-@pytest.fixture()
+@pytest.fixture
 def temp_brutex_module(tmp_path: Path) -> Path:
     """Create a temporary brutex-like module path for scanner tests.
 
