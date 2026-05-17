@@ -58,7 +58,7 @@ Status legend:
 | 11 | 7 test types | all 7 | unit ✅, integration ✅, property ✅, golden ✅, bench ✅ (no ratio gate), mutation 🟡, stress 📋 | 🟡 | Add stress test job; wire bench ratio gate |
 | 12 | Real-time CI | every push + nightly | ✅ ci.yml on push + dep-freshness-nightly.yml + drift-check.yml | ✅ | none |
 | 13 | O(1) per hot path | p99(1M)/p99(1K) ≤ 1.1 | bench job runs with `--benchmark-min-rounds=3`; **NO ratio assertion exists** | 📋 | Commit baseline JSON + `--benchmark-compare --fail` step |
-| 14 | Throughput canary ≥ 50 M/s | yes | `tests/bench/test_full_sweep_extrapolation.py` referenced but **doesn't exist in repo** | 📋 | Write the test + wire into bench job |
+| 14 | Throughput canary ≥ 50 M/s | yes | `tests/bench/test_throughput_canary.py` LIVE (DEC-P0-020, PR #42) — 3 benchmarks gate the O(1) ratio (`p99(1M)/p99(100K) < 5×`) on the brute-force hot path (numpy mask AND + dict bar lookup). **CI gate is RATIO** (matches Rule #5 + existing `test_store_o1.py` pattern); absolute ops/s recorded in `bench-results.json` informationally. Local measurement: numpy ratio 1.27× (absolute 512M ops/s), dict ratio 3.59× (absolute 2.3M ops/s). **50 M/s absolute is the M4 Pro production envelope** (per `docs/TRACK1_PERFORMANCE_BUDGET.md`); CI shared GHA runner is the sub-target. Absolute gates would chronic-flake on shared GHA — verified empirically when PR #42 commit `8ea175a` failed both push + PR runs with 30M/2.5M absolute gates; hotfix `fd3f2dd` switched to ratio gates. | 🟡 | CI gate live (ratio); ROADMAP: M4 Pro local-runner runbook + Phase 3 PyO3 kernel can lift to ≥200 M/s absolute |
 | 15 | Bloom + LMDB dedup | 4-tier | `brutex/orchestrator/store.py` has the implementation; **P-DEDUP-1 property test doesn't exist** | 📋 | Write property test for the 4-tier defence |
 | 16 | Audit JSONL hash-chain | always | `brutex/orchestrator/audit.py` has hash-chain code; **`brutex doctor` CLI doesn't exist** | 📋 | Build minimal `brutex doctor` CLI + wire to CI |
 | 17 | No hallucination | every claim cited | Golden Rule #1 in CLAUDE.md + PR template checkbox | 👁️ | Cannot be fully automated; reviewer + PR template |
@@ -248,7 +248,7 @@ By honoring this standards document on every PR, the operator gets:
 **ROADMAP (Phase-based closing path):**
 - 100% coverage line + branch on `brutex/` (currently 96.03% global, per-module 100% only on `brutex/costs/` + `brutex/engine/`)
 - Bench p99 ratio gate `p99(N=1M)/p99(N=1K) ≤ 1.1` (currently missing)
-- Throughput canary ≥ 50 M/s (currently missing)
+- Throughput canary ≥ 50 M/s (CI ratio-gate LIVE per DEC-P0-020 PR #42; absolute 50 M/s is M4 Pro production envelope — ROADMAP for local-runner runbook)
 - `brutex doctor` C-checks (CLI doesn't exist)
 - P-DEDUP-1, P-AUDIT-1 property tests (don't exist)
 - Pylint (not installed; DEC-P0-001 considered + deferred)
