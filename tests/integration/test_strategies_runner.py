@@ -7,10 +7,11 @@ FR-STR-001 → FR-STR-003 → FR-INT-004 path.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
 from brutex.data.catalog import Catalog
@@ -75,12 +76,15 @@ def _seed_single_symbol(
 class _AlwaysBuyStrategy:
     """Emits a BUY signal on every bar. No indicators, no lookback."""
 
-    META = StrategyMeta(
+    META: ClassVar[StrategyMeta] = StrategyMeta(
         strategy_id="always_buy",
         version="0.1.0",
         symbols=("NSE-A",),
         interval="1minute",
     )
+
+    def __init__(self, params: Mapping[str, Any] | None = None) -> None:
+        del params
 
     def on_event(
         self,
@@ -102,13 +106,16 @@ class _AlwaysBuyStrategy:
 class _LookbackThreeStrategy:
     """Emits one BUY every time bar_count is exactly 4 or 5."""
 
-    META = StrategyMeta(
+    META: ClassVar[StrategyMeta] = StrategyMeta(
         strategy_id="lookback_three",
         version="0.1.0",
         symbols=("NSE-A",),
         interval="1minute",
         lookback_bars=3,
     )
+
+    def __init__(self, params: Mapping[str, Any] | None = None) -> None:
+        del params
 
     def on_event(
         self,
@@ -128,12 +135,15 @@ class _LookbackThreeStrategy:
 class _QuietStrategy:
     """Returns an empty sequence on every bar (no signals)."""
 
-    META = StrategyMeta(
+    META: ClassVar[StrategyMeta] = StrategyMeta(
         strategy_id="quiet",
         version="0.1.0",
         symbols=("NSE-A",),
         interval="1minute",
     )
+
+    def __init__(self, params: Mapping[str, Any] | None = None) -> None:
+        del params
 
     def on_event(
         self,
@@ -147,12 +157,15 @@ class _QuietStrategy:
 class _BadTypeStrategy:
     """Emits a non-Signal value. The runner must reject it."""
 
-    META = StrategyMeta(
+    META: ClassVar[StrategyMeta] = StrategyMeta(
         strategy_id="bad_type",
         version="0.1.0",
         symbols=("NSE-A",),
         interval="1minute",
     )
+
+    def __init__(self, params: Mapping[str, Any] | None = None) -> None:
+        del params
 
     def on_event(
         self,
@@ -166,12 +179,15 @@ class _BadTypeStrategy:
 class _OtherSymbolStrategy:
     """Emits a signal for a symbol outside its declared META.symbols."""
 
-    META = StrategyMeta(
+    META: ClassVar[StrategyMeta] = StrategyMeta(
         strategy_id="other_symbol",
         version="0.1.0",
         symbols=("NSE-A",),
         interval="1minute",
     )
+
+    def __init__(self, params: Mapping[str, Any] | None = None) -> None:
+        del params
 
     def on_event(
         self,
@@ -191,12 +207,15 @@ class _OtherSymbolStrategy:
 class _FutureSignalStrategy:
     """Emits a signal dated one minute in the future."""
 
-    META = StrategyMeta(
+    META: ClassVar[StrategyMeta] = StrategyMeta(
         strategy_id="future_signal",
         version="0.1.0",
         symbols=("NSE-A",),
         interval="1minute",
     )
+
+    def __init__(self, params: Mapping[str, Any] | None = None) -> None:
+        del params
 
     def on_event(
         self,

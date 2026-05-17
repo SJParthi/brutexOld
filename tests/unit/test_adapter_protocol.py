@@ -268,7 +268,9 @@ class TestSpotCryptoAdapter:
         assert len(bars) == 1
         bar = bars[0]
         assert bar.timestamp.tzinfo is not None
-        assert bar.timestamp.utcoffset().total_seconds() == 0
+        utcoffset = bar.timestamp.utcoffset()
+        assert utcoffset is not None
+        assert utcoffset.total_seconds() == 0
         # Spot bars have no open interest
         assert bar.open_interest is None
 

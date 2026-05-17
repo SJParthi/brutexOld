@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from brutex.strategies.errors import StrategyError
 from brutex.strategies.sweep import ParamGrid
@@ -54,7 +56,7 @@ class TestParamGrid:
     def test_iterable_axis_materialised(self) -> None:
         """Axes passed as generators must still be iterable twice."""
 
-        def gen() -> object:
+        def gen() -> Iterator[int]:
             yield from [1, 2, 3]
 
         grid = ParamGrid.from_dict({"a": gen()})

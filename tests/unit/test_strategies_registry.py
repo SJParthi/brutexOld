@@ -169,12 +169,15 @@ class TestRegisterStrategyDecorator:
 
     def test_decorator_returns_class_unchanged(self) -> None:
         class _Strat:
-            META = StrategyMeta(
+            META: ClassVar[StrategyMeta] = StrategyMeta(
                 strategy_id="deco_return_check",
                 version="0.1.0",
                 symbols=("NSE-A",),
                 interval="1minute",
             )
+
+            def __init__(self, params: Mapping[str, Any] | None = None) -> None:
+                del params
 
             def on_event(self, event: object, state: StrategyState) -> list[Signal]:
                 del event, state

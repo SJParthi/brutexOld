@@ -34,6 +34,7 @@ require network access.
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from dataclasses import dataclass, field
 
 import pytest
@@ -84,7 +85,7 @@ def transport() -> RecordingTransport:
 
 
 @pytest.fixture
-def notifier(config: TelegramConfig, transport: RecordingTransport) -> TelegramNotifier:
+def notifier(config: TelegramConfig, transport: RecordingTransport) -> Generator[TelegramNotifier]:
     n = TelegramNotifier(
         config=config,
         transport=transport,
