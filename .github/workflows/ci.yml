@@ -779,7 +779,11 @@ jobs:
             echo "     tracked as a follow-up to DEC-P0-001) ---"
             exit 1
           fi
-          python3 - <<'PY'
+          # CRIT-1 fix (DEC-P0-003 eagle-eye review): inline heredoc was
+          # indented 10 spaces causing Python IndentationError on every run.
+          # Write the parser to a tmp file and exec it directly — no
+          # indentation sensitivity, no heredoc-tab/space gotchas.
+          cat > /tmp/check_mutation_score.py <<'PY'
           import sys, xml.etree.ElementTree as ET
           try:
               tree = ET.parse('mutmut-results.xml')
@@ -788,7 +792,6 @@ jobs:
               sys.exit(1)
           root = tree.getroot()
           # mutmut 2.x junitxml root is <testsuites> wrapping one <testsuite>.
-          # Pick the suite-level attrs; fall back to root if suite is missing.
           suite = root.find('testsuite')
           attrs = suite.attrib if suite is not None else root.attrib
           try:
@@ -801,15 +804,19 @@ jobs:
               sys.exit(1)
           killed = tests - failures - errors
           if tests == 0:
-              print("ERROR: mutmut produced 0 mutants on state.py — likely a config issue, not 100% kill")
+              print("ERROR: mutmut produced 0 mutants on state.py — likely a config issue")
               sys.exit(1)
           score = killed / tests
           print(f"mutation score: killed={killed} / total={tests} = {score:.2%}")
           if score < 0.85:
-              print(f"FAILED: mutation score {score:.2%} below 85% gate (Golden Rule #12, no-downgrade per operator)")
+              print(f"FAILED: mutation score {score:.2%} below 85% gate (Golden Rule #12, no-downgrade per DEC-P0-003)")
               sys.exit(1)
-          print(f"PASSED: mutation score {score:.2%} ≥ 85%")
+          print(f"PASSED: mutation score {score:.2%} >= 85%")
           PY
+          # Strip the 10-space CI-yml indent that bash heredoc preserves
+          # (it would still cause IndentationError when python parses).
+          sed -i 's/^          //' /tmp/check_mutation_score.py
+          python3 /tmp/check_mutation_score.py
 
   # ─────────────────────────────────────────────────────────────────
   # PROOF BUNDLE — downloads every per-job artifact and packages
