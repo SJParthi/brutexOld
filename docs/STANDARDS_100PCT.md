@@ -64,14 +64,20 @@ Status legend:
 | 17 | No hallucination | every claim cited | Golden Rule #1 in CLAUDE.md + PR template checkbox | 👁️ | Cannot be fully automated; reviewer + PR template |
 | 18 | Decision IDs | every locked decision | PR template requires DEC-ID + MIGRATION.md row | 👁️ | Reviewer-enforced via PR template |
 
-### Summary count (post DEC-P0-001 + DEC-P0-002 + DEC-P0-003, 2026-05-17)
+### Summary count (post DEC-P0-001 + DEC-P0-002 + DEC-P0-003 + DEC-P0-004, 2026-05-17)
 
-| Status | Count of 18 (multi-sub rows count separately) |
+| Status | Count of 21 sub-rows |
 |---|---:|
 | ✅ Fully enforced | 9 (rows 3 [mutation 85%], 4×2 [mypy + pyright], 5 [ruff], 6, 7×2 [jscpd + vulture], 9 [property], 12) |
-| 🟡 Partial (runs but threshold/advisory issues) | 3 (rows 1, 2, 8, 11, 16) |
-| 📋 Roadmap (not yet wired) | 4 (rows 5 [pylint], 13, 14, 15) |
-| 👁️ Manual (PR template + reviewer) | 4 (rows 10, 16, 17, 18) |
+| 🟡 Partial (runs but threshold/advisory issues) | 4 (rows 1 [coverage line], 2 [coverage branch], 8, 11) |
+| 📋 Roadmap (not yet wired) | 5 (rows 5 [pylint], 13, 14, 15, 16) |
+| 👁️ Manual (PR template + reviewer) | 3 (rows 10, 17, 18) |
+
+**Arithmetic check (per Agent 4 of DEC-P0-004 hostile-review pass):**
+9 + 4 + 5 + 3 = **21 sub-rows** ✅ (the table has 21 sub-rows total;
+row 4 has 2 sub-items mypy+pyright; row 5 has ruff+pylint; row 7 has
+jscpd+vulture; row 16 is roadmap only, not also Manual — previous double-
+counting fixed).
 
 **Note on counts (post operator's no-downgrade decree DEC-P0-003):**
 the table has 21 sub-rows (some requirement-numbers have 2 sub-items, e.g.
@@ -228,22 +234,27 @@ Use tables over prose. Cross-references over duplication.
 
 By honoring this standards document on every PR, the operator gets:
 
-**REAL today (4 enforced gates blocking merge):**
-1. mypy --strict (when 0 errors)
-2. ruff (when clean)
-3. unit tests (100% pass on runnable subset)
-4. conventional commit message
-5. Golden fixtures (when dir exists)
+**REAL today (9 enforced gates blocking merge, post DEC-P0-001/002/003/004):**
+1. mypy --strict (0 errors required; currently clean)
+2. **pyright strict** (0 errors on `brutex/`; tests use scoped warnings) — DEC-P0-001 + DEC-P0-002 + DEC-P0-004
+3. ruff (when clean; 29 legacy errors cleared in DEC-P0-001)
+4. unit tests (100% pass + ≥90% coverage; 96.03% currently)
+5. **mutation 85% gate** on `brutex/orchestrator/state.py` — DEC-P0-001 + DEC-P0-003 (operator no-downgrade restored from DEC-P0-002 60% interim)
+6. **bandit -l** (kept stricter; DEC-P0-001 un-ignored S104/S105/S108/S110/S311 + per-line noqa rationale)
+7. **jscpd code-duplication 3% gate** on `brutex/` — DEC-P0-001 (`|| true` removed)
+8. **Vulture dead-code 80%-confidence gate** with minimal whitelist — DEC-P0-001 (`|| true` removed)
+9. Golden fixtures (when dir exists) + interrogate docstring 100%
 
 **ROADMAP (Phase-based closing path):**
-- 100% coverage line + branch (currently 72-90%)
-- Pyright strict mode (currently no-op)
-- Mutation testing gate (currently advisory)
-- Bench ratio gate (currently missing)
-- `brutex doctor` C-checks (tool doesn't exist)
+- 100% coverage line + branch on `brutex/` (currently 96.03% global, per-module 100% only on `brutex/costs/` + `brutex/engine/`)
+- Bench p99 ratio gate `p99(N=1M)/p99(N=1K) ≤ 1.1` (currently missing)
+- Throughput canary ≥ 50 M/s (currently missing)
+- `brutex doctor` C-checks (CLI doesn't exist)
 - P-DEDUP-1, P-AUDIT-1 property tests (don't exist)
-- Pylint (not installed)
-- Tightened bandit + un-ignored S-rules
+- Pylint (not installed; DEC-P0-001 considered + deferred)
+- Server-side GitHub branch protection per `docs/runbooks/github-branch-protection-setup.md` (operator-applied)
+- Re-promote 6 demoted pyright report-codes from per-test "warning" → "error" by fixing each pattern in source (P1)
+- Rewrite TestReadAPI + TestInstrumentSnapshot with IDX-only fixtures (currently xfail per DEC-P0-004)
 
 **MANUAL (reviewer-enforced, cannot be automated):**
 - No-hallucination per Golden Rule #1

@@ -27,9 +27,26 @@ if [[ -z "$PR_NUMBER" ]]; then
 fi
 
 if ! command -v gh >/dev/null 2>&1; then
-    echo "WARNING: gh CLI not available; falling back to skip-check (cannot enforce)." >&2
-    echo "Install gh + re-run for full enforcement." >&2
-    exit 0
+    echo "===================================================================" >&2
+    echo "❌ MERGE BLOCKED: gh CLI not available; cannot verify PR CI status." >&2
+    echo "===================================================================" >&2
+    echo "Per Z+ defensive doctrine (DEC-P0-004): missing-instrument means" >&2
+    echo "FAIL CLOSED, never FAIL OPEN. A guard that silently allows merge" >&2
+    echo "when it cannot measure is a Golden-Rule-#10 violation." >&2
+    echo "" >&2
+    echo "Fix: install gh CLI (https://cli.github.com) and re-run." >&2
+    echo "Operator override: OPERATOR_OVERRIDE=true OPERATOR_OVERRIDE_REASON='<why>' $0 $PR_NUMBER" >&2
+
+    if [[ "$OVERRIDE_FLAG" == "true" ]]; then
+        OVERRIDE_LOG="$(dirname "$0")/pre-merge-overrides.log"
+        TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        REASON="${OPERATOR_OVERRIDE_REASON:-no reason provided}"
+        echo "$TIMESTAMP PR=$PR_NUMBER REPO=$REPO REASON=$REASON FAILED=gh-cli-missing" \
+            >> "$OVERRIDE_LOG"
+        echo "⚠️  OPERATOR_OVERRIDE=true: bypassing gh-missing check. Logged to $OVERRIDE_LOG"
+        exit 0
+    fi
+    exit 4
 fi
 
 # Query CI status via gh pr view

@@ -273,7 +273,7 @@ class TestUniquenessAndDedup:
         "scope narrowing and need rewriting with IDX-only fixtures. Tracked as P1 "
         "follow-up; xfail with strict=False so a future correct fix flips to pass."
     ),
-    strict=False,
+    strict=True,
 )
 class TestReadAPI:
     def test_get_returns_latest_by_default(self, tmp_path: Path) -> None:
@@ -389,7 +389,7 @@ class TestReadAPI:
         "the PR #12 universe narrowing to spot indexes only. P1 follow-up to "
         "rewrite with IDX-only fixtures."
     ),
-    strict=False,
+    strict=True,
 )
 class TestInstrumentSnapshot:
     def test_load_snapshot_builds_frozen_view(self, tmp_path: Path) -> None:

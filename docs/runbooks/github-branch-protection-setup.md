@@ -9,9 +9,14 @@
 > Doctrine; without it, the lock is only as strong as Claude's
 > discipline (which failed once on PR #25).
 >
-> **Outcome:** After this setup, even if Claude calls
+> **Outcome:** AFTER this setup completes (one-time, ~5 min of
+> operator clicks in GitHub Settings UI), even if Claude calls
 > `mcp__github__merge_pull_request` while CI is red, GitHub will
-> REJECT the merge at the API boundary. True mechanical guarantee.
+> REJECT the merge at the API boundary. **Honest envelope: this
+> file describes the intended state; the mechanical guarantee is
+> 📋 ROADMAP until §1-6 below are completed by the operator.**
+> Until then, the only enforcement is the client-side
+> `scripts/ci/pre-merge-check.sh` script (Claude-discipline-dependent).
 
 ---
 
@@ -75,8 +80,10 @@ explicit is better than implicit):**
 - [ ] **Vulture (dead code detection)** — added in DEC-P0-001
 - [ ] **jscpd (code duplication)** — added in DEC-P0-001
 - [ ] **Python mutation (mutmut on critical modules)** — added in DEC-P0-001
-- [ ] Red-team harness — verify gates actually block
 - [ ] **Proof bundle (aggregate CI artifacts)** — final artifact step
+
+**Do NOT add (these run on nightly cron only — would block ALL PR merges if listed):**
+- ~~Red-team harness — verify gates actually block~~ — defined in `.github/workflows/redteam-nightly.yml`, runs on `schedule: cron "0 2 * * *"` + `paths` filter on `tests/redteam/**`. Per Agent 4 of the DEC-P0-004 hostile-review pass: if you add this as a required check, GitHub will block every PR forever because the job doesn't run on most PRs. Wire it to all PRs first (separate PR), then add here.
 
 **Advisory-only (do NOT add — these are informational):**
 - ~~Typos + codespell~~
