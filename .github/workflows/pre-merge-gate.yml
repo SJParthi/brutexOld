@@ -1,0 +1,142 @@
+name: Pre-merge gate (auto-invoke pre-merge-check.sh)
+
+# Per DEC-P0-005 P1 follow-up #1: closes the Z+ L4 PREVENT auto-invocation
+# gap. Until now, `scripts/ci/pre-merge-check.sh` was client-side discipline
+# only — Claude had to remember to call it before merging. This workflow
+# auto-invokes the same script on every PR after CI completes and posts a
+# verdict comment, creating a tamper-evident paper trail visible in the PR UI.
+#
+# Why workflow_run (not pull_request)?
+# Running this INSIDE the ci.yml workflow would query an incomplete CI rollup
+# (it would still be running). We trigger AFTER ci.yml completes so the rollup
+# is final.
+#
+# This workflow is INFORMATIONAL — it posts a comment but does NOT itself block
+# merge. The actual merge block comes from:
+#   1. GitHub branch protection (server-side; see docs/runbooks/...)
+#   2. The pre-merge-check.sh script when invoked by humans/automation
+# This workflow is the auditable "did anyone check?" trail.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  pull-requests: write  # to post merge-readiness comment
+  contents: read
+  actions: read  # to read workflow_run conclusion
+
+jobs:
+  invoke-pre-merge-check:
+    name: Auto-invoke pre-merge-check.sh
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Only run for PR events (not push to main, scheduled, etc.)
+    if: ${{ github.event.workflow_run.event == 'pull_request' }}
+    steps:
+      - name: Checkout the head ref of the triggering PR
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Determine PR number from workflow_run
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -e
+          # workflow_run doesn't include the PR number directly; query the API
+          # for open PRs on this head branch.
+          pr_num=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --head "$HEAD_BRANCH" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+          if [[ -z "$pr_num" ]]; then
+            echo "::warning::No open PR found for head branch $HEAD_BRANCH; skipping verdict."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Found PR #$pr_num"
+            echo "pr_num=$pr_num" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run pre-merge-check.sh against the PR
+        if: steps.pr.outputs.skip != 'true'
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ steps.pr.outputs.pr_num }}
+        run: |
+          # Run the script + capture exit code + output.
+          set +e
+          bash scripts/ci/pre-merge-check.sh "$PR_NUM" "${{ github.repository }}" \
+            > pre-merge-output.txt 2> pre-merge-error.txt
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          echo "::group::pre-merge-check.sh stdout"
+          cat pre-merge-output.txt
+          echo "::endgroup::"
+          echo "::group::pre-merge-check.sh stderr"
+          cat pre-merge-error.txt
+          echo "::endgroup::"
+
+      - name: Post verdict comment on PR
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ steps.pr.outputs.pr_num }}
+          EXIT_CODE: ${{ steps.check.outputs.exit_code }}
+        run: |
+          if [[ "$EXIT_CODE" == "0" ]]; then
+            verdict="✅ MERGE-READY"
+            detail="All CI checks GREEN. Safe to merge via squash."
+          elif [[ "$EXIT_CODE" == "1" ]]; then
+            verdict="❌ MERGE BLOCKED (CI failures)"
+            detail="One or more required CI checks failed. See output below."
+          elif [[ "$EXIT_CODE" == "4" ]]; then
+            verdict="❌ MERGE BLOCKED (instrumentation)"
+            detail="\`gh\` CLI not available in CI runner. FAIL-CLOSED per Z+ doctrine."
+          elif [[ "$EXIT_CODE" == "5" ]]; then
+            verdict="❌ MERGE BLOCKED (override missing reason)"
+            detail="OPERATOR_OVERRIDE attempted without OPERATOR_OVERRIDE_REASON."
+          elif [[ "$EXIT_CODE" == "6" ]]; then
+            verdict="❌ MERGE BLOCKED (merge conflict)"
+            detail="Branch has merge conflicts with target. Rebase + resolve required."
+          elif [[ "$EXIT_CODE" == "7" ]]; then
+            verdict="❌ MERGE BLOCKED (CI rollup incomplete)"
+            detail="Fewer than 20 status checks registered. CI may still be starting; re-check later."
+          else
+            verdict="⚠️ MERGE-CHECK ERROR (exit $EXIT_CODE)"
+            detail="Unexpected exit code from pre-merge-check.sh. See logs."
+          fi
+
+          # Compose comment body.
+          {
+            echo "## Pre-merge gate verdict — $verdict"
+            echo ""
+            echo "$detail"
+            echo ""
+            echo "<details><summary>pre-merge-check.sh output</summary>"
+            echo ""
+            echo '```'
+            cat pre-merge-output.txt 2>/dev/null || echo "(no stdout)"
+            echo ""
+            echo "--- stderr ---"
+            cat pre-merge-error.txt 2>/dev/null || echo "(no stderr)"
+            echo '```'
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "Auto-invoked by \`.github/workflows/pre-merge-gate.yml\` after CI completion."
+            echo "Reference: DEC-P0-005 P1 item #1 (Z+ L4 PREVENT auto-invocation closure)."
+          } > comment-body.md
+
+          gh pr comment "$PR_NUM" \
+            --repo "${{ github.repository }}" \
+            --body-file comment-body.md
