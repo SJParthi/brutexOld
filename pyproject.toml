@@ -43,6 +43,7 @@ dev = [
     "pytest-cov>=5.0,<8.0",         # was <6.0; PyPI latest 7.1.0 (DEC-P0-012)
     "pytest-benchmark>=4.0,<6.0",   # was <5.0; PyPI latest 5.2.3 (DEC-P0-012)
     "hypothesis>=6.100,<7.0",
+    "numpy>=1.26,<3.0",             # DEC-P0-020 (PR #42): throughput canary uses numpy.bitwise_and; required by tests/bench/test_throughput_canary.py
     "ruff>=0.15,<1.0",
     "mypy>=1.10,<3.0",              # was <2.0; PyPI latest 2.1.0 (DEC-P0-012)
     "pyright>=1.1.360,<2.0",
