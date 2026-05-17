@@ -453,3 +453,175 @@ class TestIngestPhase:
             "C_CONTRACTS",
             "D_CANDLES",
         }
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Mutation-killing boundary tests (DEC-P0-004)
+# ────────────────────────────────────────────────────────────────────────
+# These tests target specific mutation operators that mutmut applies on
+# state.py: comparison flips (==/!=, >=/>), arithmetic mutations (+/-),
+# set-membership flips, and boolean (and/or) mutations. Each test
+# asserts an exact equality/inequality that mutated code would violate.
+
+
+class TestMutationKillers:
+    """Surgical tests targeting common mutmut mutation patterns."""
+
+    def test_is_terminal_true_for_success(self) -> None:
+        """Kills mutant `state in TERMINAL_STATES` → `state not in TERMINAL_STATES`."""
+        assert is_terminal(WorkItemState.SUCCESS) is True
+
+    def test_is_terminal_true_for_no_data(self) -> None:
+        assert is_terminal(WorkItemState.NO_DATA) is True
+
+    def test_is_terminal_true_for_quarantined(self) -> None:
+        assert is_terminal(WorkItemState.QUARANTINED) is True
+
+    def test_is_terminal_false_for_pending(self) -> None:
+        """Kills mutant that adds PENDING to TERMINAL_STATES set."""
+        assert is_terminal(WorkItemState.PENDING) is False
+
+    def test_is_terminal_false_for_in_flight(self) -> None:
+        assert is_terminal(WorkItemState.IN_FLIGHT) is False
+
+    def test_is_terminal_false_for_retrying(self) -> None:
+        assert is_terminal(WorkItemState.RETRYING) is False
+
+    def test_terminal_states_set_size(self) -> None:
+        """Kills mutants that swap items between TERMINAL/NON_TERMINAL sets."""
+        assert len(TERMINAL_STATES) == 3
+        assert len(NON_TERMINAL_STATES) == 3
+
+    def test_terminal_and_non_terminal_disjoint(self) -> None:
+        """Kills set-membership swap mutants."""
+        assert TERMINAL_STATES.isdisjoint(NON_TERMINAL_STATES)
+
+    def test_outcome_ok_with_data_to_success(self) -> None:
+        """Kills `if outcome == Outcome.OK_WITH_DATA` flip mutant."""
+        item = transition(_in_flight_item(), Outcome.OK_WITH_DATA)
+        assert item.state == WorkItemState.SUCCESS
+        assert item.quarantine_reason is None
+
+    def test_outcome_ok_empty_to_no_data(self) -> None:
+        """Kills `if outcome == Outcome.OK_EMPTY` flip mutant."""
+        item = transition(_in_flight_item(), Outcome.OK_EMPTY)
+        assert item.state == WorkItemState.NO_DATA
+        assert item.quarantine_reason is None
+
+    def test_outcome_not_found_to_no_data(self) -> None:
+        """Kills `if outcome == Outcome.NOT_FOUND` flip mutant."""
+        item = transition(_in_flight_item(), Outcome.NOT_FOUND)
+        assert item.state == WorkItemState.NO_DATA
+
+    def test_outcome_bad_request_to_quarantined(self) -> None:
+        """Kills `if outcome == Outcome.BAD_REQUEST` flip mutant + reason map."""
+        item = transition(_in_flight_item(), Outcome.BAD_REQUEST)
+        assert item.state == WorkItemState.QUARANTINED
+        assert item.quarantine_reason == QuarantineReason.BAD_REQUEST
+
+    def test_outcome_auth_failed_to_quarantined(self) -> None:
+        item = transition(_in_flight_item(), Outcome.AUTH_FAILED)
+        assert item.state == WorkItemState.QUARANTINED
+        assert item.quarantine_reason == QuarantineReason.AUTH_FAILED
+
+    def test_outcome_authz_failed_to_quarantined(self) -> None:
+        item = transition(_in_flight_item(), Outcome.AUTHZ_FAILED)
+        assert item.state == WorkItemState.QUARANTINED
+        assert item.quarantine_reason == QuarantineReason.AUTHZ_FAILED
+
+    def test_outcome_rate_limit_to_retrying(self) -> None:
+        item = transition(_in_flight_item(), Outcome.RATE_LIMIT)
+        assert item.state == WorkItemState.RETRYING
+        assert item.retry_count == 1
+
+    def test_outcome_timeout_to_retrying(self) -> None:
+        item = transition(_in_flight_item(), Outcome.TIMEOUT)
+        assert item.state == WorkItemState.RETRYING
+        assert item.retry_count == 1
+
+    def test_outcome_generic_api_error_to_retrying(self) -> None:
+        item = transition(_in_flight_item(), Outcome.GENERIC_API_ERROR)
+        assert item.state == WorkItemState.RETRYING
+        assert item.retry_count == 1
+
+    def test_retry_count_increments_by_exactly_one(self) -> None:
+        """Kills `+ 1` → `- 1`, `+ 1` → `+ 2`, `+ 1` → `* 1`, `+ 1` → `+ 0` mutants."""
+        item = _in_flight_item()
+        item = transition(item, Outcome.RATE_LIMIT)
+        assert item.retry_count == 1
+        item = dispatch(item)
+        item = transition(item, Outcome.RATE_LIMIT)
+        assert item.retry_count == 2
+        item = dispatch(item)
+        item = transition(item, Outcome.RATE_LIMIT)
+        assert item.retry_count == 3
+
+    def test_retry_boundary_at_exactly_max_minus_one(self) -> None:
+        """Kills `>= max_soft_retries` → `> max_soft_retries` (off-by-one)."""
+        item = _in_flight_item()
+        # Walk to retry_count = MAX-1; should still be RETRYING, not QUARANTINED
+        for _ in range(MAX_SOFT_RETRIES - 1):
+            item = transition(item, Outcome.RATE_LIMIT)
+            assert item.state == WorkItemState.RETRYING
+            item = dispatch(item)
+        assert item.retry_count == MAX_SOFT_RETRIES - 1
+
+    def test_retry_boundary_at_exactly_max(self) -> None:
+        """Kills `>= max_soft_retries` → `> max_soft_retries` + custom-cap test."""
+        item = _in_flight_item()
+        item = transition(item, Outcome.RATE_LIMIT, max_soft_retries=1)
+        assert item.state == WorkItemState.QUARANTINED
+        assert item.quarantine_reason == QuarantineReason.RETRY_EXHAUSTED
+        assert item.retry_count == 1
+
+    def test_retry_exhaustion_with_max_2(self) -> None:
+        item = _in_flight_item()
+        item = transition(item, Outcome.RATE_LIMIT, max_soft_retries=2)
+        assert item.state == WorkItemState.RETRYING
+        assert item.retry_count == 1
+        item = dispatch(item)
+        item = transition(item, Outcome.RATE_LIMIT, max_soft_retries=2)
+        assert item.state == WorkItemState.QUARANTINED
+        assert item.retry_count == 2
+
+    def test_dispatch_from_pending_to_in_flight(self) -> None:
+        """Kills mutations on dispatch state transitions."""
+        from dataclasses import replace
+
+        in_flight = _in_flight_item()
+        pending = replace(in_flight, state=WorkItemState.PENDING)
+        result = dispatch(pending)
+        assert result.state == WorkItemState.IN_FLIGHT
+
+    def test_dispatch_from_retrying_to_in_flight(self) -> None:
+        item = _in_flight_item()
+        item = transition(item, Outcome.RATE_LIMIT)
+        assert item.state == WorkItemState.RETRYING
+        item = dispatch(item)
+        assert item.state == WorkItemState.IN_FLIGHT
+
+    def test_phase_complete_quarantined_unresolved_raises(self) -> None:
+        """Kills `state == QUARANTINED and not resolved_by_human` → flip to `or`."""
+        quarantined = transition(_in_flight_item(), Outcome.BAD_REQUEST)
+        # Verify resolved_by_human is False by default
+        assert quarantined.resolved_by_human is False
+        with pytest.raises(IncompletePhaseError):
+            phase_complete([quarantined])
+
+    def test_phase_complete_quarantined_resolved_passes(self) -> None:
+        """Kills the `and not` mutant from above; resolved=True must pass."""
+        quarantined = transition(_in_flight_item(), Outcome.BAD_REQUEST)
+        resolved = resolve_quarantine(quarantined, as_state=WorkItemState.SUCCESS)
+        assert phase_complete([resolved]) is True
+
+    def test_resolve_quarantine_requires_quarantined_state(self) -> None:
+        """Kills `state != QUARANTINED` flip mutant."""
+        in_flight = _in_flight_item()
+        with pytest.raises(TransitionError):
+            resolve_quarantine(in_flight, as_state=WorkItemState.SUCCESS)
+
+    def test_resolve_quarantine_requires_terminal_as_state(self) -> None:
+        """Kills `as_state not in {SUCCESS, NO_DATA}` flip mutant."""
+        quarantined = transition(_in_flight_item(), Outcome.BAD_REQUEST)
+        with pytest.raises(TransitionError):
+            resolve_quarantine(quarantined, as_state=WorkItemState.IN_FLIGHT)
