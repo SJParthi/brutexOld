@@ -755,7 +755,17 @@ jobs:
             exit 124
           fi
           # Print results for visibility (mutmut results exits 0 even with survivors).
+          echo "::group::mutmut results — survivor list (for next-PR test targeting)"
           mutmut results || true
+          echo "::endgroup::"
+          echo "::group::mutmut show — first 20 surviving mutants (line-by-line diff)"
+          # DEC-P0-004 (Agent 5 follow-up): dump survivor diffs so next push
+          # can write targeted tests. Without this, mutation gate failures
+          # give no actionable info to the developer.
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            mutmut show "$i" 2>/dev/null || true
+          done
+          echo "::endgroup::"
           # Enforce ≥85% mutation score per Golden Rule #12 / STANDARDS row 3.
           # Operator decree 2026-05-17 (DEC-P0-003): no downgrade — 100% standards
           # held. If state.py current score is below 85%, write more tests until
@@ -817,6 +827,15 @@ jobs:
           # (it would still cause IndentationError when python parses).
           sed -i 's/^          //' /tmp/check_mutation_score.py
           python3 /tmp/check_mutation_score.py
+
+      - name: Upload mutmut results XML for analysis
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: mutmut-results-xml
+          path: mutmut-results.xml
+          retention-days: 7
+          if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────────
   # PROOF BUNDLE — downloads every per-job artifact and packages
