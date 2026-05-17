@@ -47,6 +47,6 @@ def test_mypy_catches_type_mismatch(fixtures_dir: Path) -> None:
     )
     # mypy should specifically mention 'incompatible type' or 'arg-type'
     output = (result.stdout + result.stderr).lower()
-    assert "incompatible" in output or "arg-type" in output or "str" in output, (
-        f"mypy returned non-zero but message unclear: {result.stdout}"
-    )
+    assert (
+        "incompatible" in output or "arg-type" in output or "str" in output
+    ), f"mypy returned non-zero but message unclear: {result.stdout}"

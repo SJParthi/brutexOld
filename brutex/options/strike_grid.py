@@ -24,9 +24,9 @@ from brutex.options.lot_size_history import OptionsUnderlying
 # Strike step in price units (rupees). All instruments use integer
 # strike values; step is integer too.
 STRIKE_STEP: Final[dict[OptionsUnderlying, int]] = {
-    OptionsUnderlying.NIFTY: 50,
+    OptionsUnderlying.NIFTY:     50,
     OptionsUnderlying.BANKNIFTY: 100,
-    OptionsUnderlying.SENSEX: 100,
+    OptionsUnderlying.SENSEX:    100,
 }
 
 
@@ -99,4 +99,7 @@ def grid_around_atm(
         Sorted list of strikes from ATM - half_width × step to ATM + half_width × step.
     """
     step = STRIKE_STEP[instrument]
-    return [atm_strike + i * step for i in range(-half_width, half_width + 1)]
+    return [
+        atm_strike + i * step
+        for i in range(-half_width, half_width + 1)
+    ]

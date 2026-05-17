@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
+
 from brutex.options.lot_size_history import (
     LotSizeChange,
     OptionsUnderlying,
@@ -32,16 +33,16 @@ class TestNiftyHistory:
     @pytest.mark.parametrize(
         "on_date,expected_lot",
         [
-            (date(2021, 1, 1), 75),  # pre-Jul 2021
-            (date(2021, 7, 28), 75),  # one day before transition
-            (date(2021, 7, 29), 50),  # Jul 2021 expiry rebasing
-            (date(2024, 4, 25), 50),  # one day before next transition
-            (date(2024, 4, 26), 25),  # 26-Apr-2024
+            (date(2021, 1, 1),   75),  # pre-Jul 2021
+            (date(2021, 7, 28),  75),  # one day before transition
+            (date(2021, 7, 29),  50),  # Jul 2021 expiry rebasing
+            (date(2024, 4, 25),  50),  # one day before next transition
+            (date(2024, 4, 26),  25),  # 26-Apr-2024
             (date(2024, 11, 19), 25),  # one day before SEBI Rs 15L
             (date(2024, 11, 20), 75),  # 20-Nov-2024 SEBI rule
             (date(2025, 12, 31), 75),  # still 75
-            (date(2026, 1, 1), 65),  # Jan 2026 current
-            (date(2026, 5, 16), 65),  # today
+            (date(2026, 1, 1),   65),  # Jan 2026 current
+            (date(2026, 5, 16),  65),  # today
         ],
     )
     def test_nifty_lot_by_date(self, on_date: date, expected_lot: int) -> None:
@@ -52,16 +53,16 @@ class TestBankniftyHistory:
     @pytest.mark.parametrize(
         "on_date,expected_lot",
         [
-            (date(2021, 1, 1), 25),
-            (date(2023, 6, 29), 25),
-            (date(2023, 6, 30), 15),
+            (date(2021, 1, 1),   25),
+            (date(2023, 6, 29),  25),
+            (date(2023, 6, 30),  15),
             (date(2024, 11, 19), 15),
             (date(2024, 11, 20), 30),
-            (date(2025, 6, 30), 30),
-            (date(2025, 7, 1), 35),  # transitional bump
+            (date(2025, 6, 30),  30),
+            (date(2025, 7, 1),   35),  # transitional bump
             (date(2025, 12, 29), 35),
             (date(2025, 12, 30), 30),  # revert
-            (date(2026, 5, 16), 30),
+            (date(2026, 5, 16),  30),
         ],
     )
     def test_banknifty_lot_by_date(self, on_date: date, expected_lot: int) -> None:
@@ -72,10 +73,10 @@ class TestSensexHistory:
     @pytest.mark.parametrize(
         "on_date,expected_lot",
         [
-            (date(2021, 1, 1), 10),
+            (date(2021, 1, 1),   10),
             (date(2024, 11, 19), 10),
             (date(2024, 11, 20), 20),
-            (date(2026, 5, 16), 20),
+            (date(2026, 5, 16),  20),
         ],
     )
     def test_sensex_lot_by_date(self, on_date: date, expected_lot: int) -> None:
@@ -123,16 +124,16 @@ class TestAllCurrentLotSizes:
     def test_current_today(self) -> None:
         # As of today (2026-05-16): NIFTY=65, BANKNIFTY=30, SENSEX=20
         current = all_current_lot_sizes(date(2026, 5, 16))
-        assert current[OptionsUnderlying.NIFTY] == 65
+        assert current[OptionsUnderlying.NIFTY]     == 65
         assert current[OptionsUnderlying.BANKNIFTY] == 30
-        assert current[OptionsUnderlying.SENSEX] == 20
+        assert current[OptionsUnderlying.SENSEX]    == 20
 
     def test_current_at_old_date(self) -> None:
         # At Jul 2022: NIFTY=50, BANKNIFTY=25, SENSEX=10
         current = all_current_lot_sizes(date(2022, 7, 1))
-        assert current[OptionsUnderlying.NIFTY] == 50
+        assert current[OptionsUnderlying.NIFTY]     == 50
         assert current[OptionsUnderlying.BANKNIFTY] == 25
-        assert current[OptionsUnderlying.SENSEX] == 10
+        assert current[OptionsUnderlying.SENSEX]    == 10
 
 
 class TestSEBI20Nov2024_BigRebase:
@@ -142,11 +143,11 @@ class TestSEBI20Nov2024_BigRebase:
     def test_all_3_change_same_day(self) -> None:
         # Day before: old lots
         before = all_current_lot_sizes(date(2024, 11, 19))
-        assert before[OptionsUnderlying.NIFTY] == 25
+        assert before[OptionsUnderlying.NIFTY]     == 25
         assert before[OptionsUnderlying.BANKNIFTY] == 15
-        assert before[OptionsUnderlying.SENSEX] == 10
+        assert before[OptionsUnderlying.SENSEX]    == 10
         # On the day: new lots
         on_day = all_current_lot_sizes(date(2024, 11, 20))
-        assert on_day[OptionsUnderlying.NIFTY] == 75
+        assert on_day[OptionsUnderlying.NIFTY]     == 75
         assert on_day[OptionsUnderlying.BANKNIFTY] == 30
-        assert on_day[OptionsUnderlying.SENSEX] == 20
+        assert on_day[OptionsUnderlying.SENSEX]    == 20

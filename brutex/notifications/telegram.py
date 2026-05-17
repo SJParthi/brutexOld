@@ -84,11 +84,8 @@ DEFAULT_HTTP_TIMEOUT: Final[float] = 5.0
 #: Dropping + logging is safer than blocking the caller.
 DEFAULT_QUEUE_CAPACITY: Final[int] = 1024
 
-#: Env var names. These are the NAMES of env vars (not their values, which are
-#: actual secrets and read at runtime only). bandit/ruff S105 flags strings
-#: containing "TOKEN" — suppressed here because we deliberately use this
-#: convention for self-documenting env var identifiers.
-ENV_BOT_TOKEN: Final[str] = "BRUTEX_TELEGRAM_BOT_TOKEN"  # noqa: S105  # env var name, not the token itself
+#: Env var names.
+ENV_BOT_TOKEN: Final[str] = "BRUTEX_TELEGRAM_BOT_TOKEN"
 ENV_CHAT_ID: Final[str] = "BRUTEX_TELEGRAM_CHAT_ID"
 ENV_ENABLED: Final[str] = "BRUTEX_TELEGRAM_ENABLED"
 ENV_API_BASE: Final[str] = "BRUTEX_TELEGRAM_API_BASE"

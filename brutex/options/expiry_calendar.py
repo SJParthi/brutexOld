@@ -54,17 +54,14 @@ from typing import Final
 from brutex.options.lot_size_history import OptionsUnderlying
 
 # Day-of-week constants (matches Python's date.weekday() convention).
-MONDAY: Final[int] = 0
-TUESDAY: Final[int] = 1
+MONDAY:    Final[int] = 0
+TUESDAY:   Final[int] = 1
 WEDNESDAY: Final[int] = 2
-THURSDAY: Final[int] = 3
-FRIDAY: Final[int] = 4
+THURSDAY:  Final[int] = 3
+FRIDAY:    Final[int] = 4
 
 # Sentinel meaning "no weekly expiry available on this date".
 NO_WEEKLY: Final[int] = -1
-
-#: December — last calendar month, used for next-month rollover.
-_DECEMBER: Final[int] = 12
 
 
 # ────── Weekly expiry day-of-week history ──────
@@ -72,21 +69,21 @@ _DECEMBER: Final[int] = 12
 # means weekly was killed.
 
 _WEEKLY_NIFTY: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1), THURSDAY),
-    (date(2025, 9, 2), TUESDAY),  # NSE FAOP/68747 + SEBI standardization May 2025
+    (date(2021, 1, 1),  THURSDAY),
+    (date(2025, 9, 2),  TUESDAY),   # NSE FAOP/68747 + SEBI standardization May 2025
 )
 
 _WEEKLY_BANKNIFTY: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1), THURSDAY),
-    (date(2023, 9, 4), WEDNESDAY),  # NSE FAOP/57540 — first Wed weekly 2023-09-06
-    (date(2024, 11, 14), NO_WEEKLY),  # SEBI killed BN-WEEK on EOD 2024-11-13
+    (date(2021, 1, 1),  THURSDAY),
+    (date(2023, 9, 4),  WEDNESDAY),  # NSE FAOP/57540 — first Wed weekly 2023-09-06
+    (date(2024, 11, 14), NO_WEEKLY), # SEBI killed BN-WEEK on EOD 2024-11-13
 )
 
 _WEEKLY_SENSEX: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1), THURSDAY),  # thin liquidity pre-2023-05-15
-    (date(2023, 5, 15), FRIDAY),  # BSE Notice 20230327-65
-    (date(2025, 1, 1), TUESDAY),  # Business Standard 2024-10-04
-    (date(2025, 9, 4), THURSDAY),  # SEBI standardization May 2025
+    (date(2021, 1, 1),   THURSDAY),  # thin liquidity pre-2023-05-15
+    (date(2023, 5, 15),  FRIDAY),    # BSE Notice 20230327-65
+    (date(2025, 1, 1),   TUESDAY),   # Business Standard 2024-10-04
+    (date(2025, 9, 4),   THURSDAY),  # SEBI standardization May 2025
 )
 
 
@@ -94,35 +91,35 @@ _WEEKLY_SENSEX: Final[tuple[tuple[date, int], ...]] = (
 # Monthly expiry = "last <day-of-week> of the calendar month".
 
 _MONTHLY_NIFTY: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1), THURSDAY),  # last Thursday
-    (date(2025, 9, 2), TUESDAY),  # last Tuesday — SEBI standardization
+    (date(2021, 1, 1),  THURSDAY),    # last Thursday
+    (date(2025, 9, 2),  TUESDAY),     # last Tuesday — SEBI standardization
 )
 
 _MONTHLY_BANKNIFTY: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1), THURSDAY),  # last Thursday
-    (date(2024, 3, 1), WEDNESDAY),  # NSE FAOP/60011 — first Wed monthly 2024-03-27
-    (date(2025, 1, 1), THURSDAY),  # NSE FAOP/65336 — reverted to last Thursday
-    (date(2025, 9, 2), TUESDAY),  # SEBI standardization — last Tuesday
+    (date(2021, 1, 1),    THURSDAY),   # last Thursday
+    (date(2024, 3, 1),    WEDNESDAY),  # NSE FAOP/60011 — first Wed monthly 2024-03-27
+    (date(2025, 1, 1),    THURSDAY),   # NSE FAOP/65336 — reverted to last Thursday
+    (date(2025, 9, 2),    TUESDAY),    # SEBI standardization — last Tuesday
 )
 
 _MONTHLY_SENSEX: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1), THURSDAY),  # last Thursday (thin)
-    (date(2023, 5, 15), FRIDAY),  # last Friday
-    (date(2025, 1, 1), TUESDAY),  # last Tuesday
-    (date(2025, 9, 4), THURSDAY),  # last Thursday — SEBI standardization
+    (date(2021, 1, 1),   THURSDAY),    # last Thursday (thin)
+    (date(2023, 5, 15),  FRIDAY),      # last Friday
+    (date(2025, 1, 1),   TUESDAY),     # last Tuesday
+    (date(2025, 9, 4),   THURSDAY),    # last Thursday — SEBI standardization
 )
 
 
 _WEEKLY_BY_UNDERLYING: Final[dict[OptionsUnderlying, tuple[tuple[date, int], ...]]] = {
-    OptionsUnderlying.NIFTY: _WEEKLY_NIFTY,
+    OptionsUnderlying.NIFTY:     _WEEKLY_NIFTY,
     OptionsUnderlying.BANKNIFTY: _WEEKLY_BANKNIFTY,
-    OptionsUnderlying.SENSEX: _WEEKLY_SENSEX,
+    OptionsUnderlying.SENSEX:    _WEEKLY_SENSEX,
 }
 
 _MONTHLY_BY_UNDERLYING: Final[dict[OptionsUnderlying, tuple[tuple[date, int], ...]]] = {
-    OptionsUnderlying.NIFTY: _MONTHLY_NIFTY,
+    OptionsUnderlying.NIFTY:     _MONTHLY_NIFTY,
     OptionsUnderlying.BANKNIFTY: _MONTHLY_BANKNIFTY,
-    OptionsUnderlying.SENSEX: _MONTHLY_SENSEX,
+    OptionsUnderlying.SENSEX:    _MONTHLY_SENSEX,
 }
 
 
@@ -208,11 +205,13 @@ def next_monthly_expiry(
     """
     # Use this month's regime first
     this_month_dow = get_monthly_dow(instrument, on_or_after)
-    candidate = _last_dow_of_month(on_or_after.year, on_or_after.month, this_month_dow)
+    candidate = _last_dow_of_month(
+        on_or_after.year, on_or_after.month, this_month_dow
+    )
     if candidate >= on_or_after:
         return candidate
     # This month's expiry already past — roll to next month and re-evaluate dow
-    if on_or_after.month == _DECEMBER:
+    if on_or_after.month == 12:
         next_year, next_month = on_or_after.year + 1, 1
     else:
         next_year, next_month = on_or_after.year, on_or_after.month + 1
@@ -226,7 +225,10 @@ def next_monthly_expiry(
 def _last_dow_of_month(year: int, month: int, target_dow: int) -> date:
     """Return the last <target_dow> of (year, month)."""
     # Find last day of month
-    next_month_first = date(year + 1, 1, 1) if month == _DECEMBER else date(year, month + 1, 1)
+    if month == 12:
+        next_month_first = date(year + 1, 1, 1)
+    else:
+        next_month_first = date(year, month + 1, 1)
     last_day = next_month_first - timedelta(days=1)
     # Walk back from last_day until we hit target_dow
     days_back = (last_day.weekday() - target_dow) % 7

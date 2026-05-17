@@ -11,10 +11,11 @@ Synthetic-data tests covering:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import polars as pl
 import pytest
+
 from brutex.data.tf_resampler import (
     REQUIRED_COLUMNS,
     resample_1m_to_tf,
@@ -32,51 +33,43 @@ def _make_1m_session(
     Each bar increments by 0.1 in close.  High = close + 0.05, Low = close - 0.05.
     Volume = 1000 per bar.
     """
-    timestamps = [session_open_utc + timedelta(minutes=i) for i in range(n_bars)]
+    timestamps = [
+        session_open_utc + timedelta(minutes=i) for i in range(n_bars)
+    ]
     closes = [base_price + i * 0.1 for i in range(n_bars)]
-    return pl.DataFrame(
-        {
-            "ts_utc": timestamps,
-            "open": [base_price + i * 0.1 - 0.05 for i in range(n_bars)],
-            "high": [c + 0.05 for c in closes],
-            "low": [c - 0.05 for c in closes],
-            "close": closes,
-            "volume": [1000] * n_bars,
-        },
-        schema={
-            "ts_utc": pl.Datetime,
-            "open": pl.Float64,
-            "high": pl.Float64,
-            "low": pl.Float64,
-            "close": pl.Float64,
-            "volume": pl.Int64,
-        },
-    )
+    return pl.DataFrame({
+        "ts_utc": timestamps,
+        "open":   [base_price + i * 0.1 - 0.05 for i in range(n_bars)],
+        "high":   [c + 0.05 for c in closes],
+        "low":    [c - 0.05 for c in closes],
+        "close":  closes,
+        "volume": [1000] * n_bars,
+    }, schema={
+        "ts_utc": pl.Datetime,
+        "open":   pl.Float64,
+        "high":   pl.Float64,
+        "low":    pl.Float64,
+        "close":  pl.Float64,
+        "volume": pl.Int64,
+    })
 
 
 class TestSchemaValidation:
     def test_missing_column_raises(self) -> None:
-        df = pl.DataFrame(
-            {
-                "ts_utc": [datetime(2026, 5, 13, 3, 45, tzinfo=UTC)],
-                "open": [100.0],
-                # missing high, low, close, volume
-            }
-        )
+        df = pl.DataFrame({
+            "ts_utc": [datetime(2026, 5, 13, 3, 45, tzinfo=timezone.utc)],
+            "open": [100.0],
+            # missing high, low, close, volume
+        })
         with pytest.raises(ValueError, match="missing required columns"):
             resample_1m_to_tf(df, 5)
 
     def test_non_datetime_ts_raises(self) -> None:
-        df = pl.DataFrame(
-            {
-                "ts_utc": ["2026-05-13"],  # string, not datetime
-                "open": [100.0],
-                "high": [100.0],
-                "low": [100.0],
-                "close": [100.0],
-                "volume": [1000],
-            }
-        )
+        df = pl.DataFrame({
+            "ts_utc": ["2026-05-13"],  # string, not datetime
+            "open": [100.0], "high": [100.0], "low": [100.0],
+            "close": [100.0], "volume": [1000],
+        })
         with pytest.raises(ValueError, match="must be polars.Datetime"):
             resample_1m_to_tf(df, 5)
 
@@ -108,30 +101,23 @@ class TestBucketMath:
         result = resample_1m_to_tf(df, 5)
         assert result.height == 1
         row = result.row(0, named=True)
-        assert abs(row["open"] - 99.95) < 1e-9
+        assert abs(row["open"]  - 99.95) < 1e-9
         assert abs(row["close"] - 100.4) < 1e-9
 
     def test_5m_bucket_high_is_max(self) -> None:
         # Build bars where high[2] is the explicit max in the bucket
         ts = datetime(2026, 5, 13, 3, 45)
-        df = pl.DataFrame(
-            {
-                "ts_utc": [ts + timedelta(minutes=i) for i in range(5)],
-                "open": [100.0, 100.0, 100.0, 100.0, 100.0],
-                "high": [100.5, 100.6, 105.0, 100.4, 100.3],  # max=105.0
-                "low": [99.5, 99.6, 99.7, 99.4, 99.3],  # min=99.3
-                "close": [100.0, 100.0, 100.0, 100.0, 100.0],
-                "volume": [1000, 1000, 1000, 1000, 1000],
-            },
-            schema={
-                "ts_utc": pl.Datetime,
-                "open": pl.Float64,
-                "high": pl.Float64,
-                "low": pl.Float64,
-                "close": pl.Float64,
-                "volume": pl.Int64,
-            },
-        )
+        df = pl.DataFrame({
+            "ts_utc": [ts + timedelta(minutes=i) for i in range(5)],
+            "open":   [100.0, 100.0, 100.0, 100.0, 100.0],
+            "high":   [100.5, 100.6, 105.0, 100.4, 100.3],  # max=105.0
+            "low":    [99.5,  99.6,  99.7,  99.4,  99.3],   # min=99.3
+            "close":  [100.0, 100.0, 100.0, 100.0, 100.0],
+            "volume": [1000, 1000, 1000, 1000, 1000],
+        }, schema={
+            "ts_utc": pl.Datetime, "open": pl.Float64, "high": pl.Float64,
+            "low": pl.Float64, "close": pl.Float64, "volume": pl.Int64,
+        })
         result = resample_1m_to_tf(df, 5)
         assert result.height == 1
         row = result.row(0, named=True)

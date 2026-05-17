@@ -151,7 +151,6 @@ Encoding: rate_decimal × 10_000_000 = 0.18 × 10_000_000 = 1_800_000."""
 # Helpers
 # ─────────────────────────────────────────────────────────────────
 
-
 def stt_options_rate_bps_x100(entry_date: date) -> int:
     """Pick the STT rate (options sell premium) for a given entry date.
 

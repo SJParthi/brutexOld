@@ -71,10 +71,10 @@ class DayExtremesBar:
     """
 
     timestamp_ist: datetime  # bar's open timestamp in IST
-    high_paisa: int  # this bar's high
-    low_paisa: int  # this bar's low
-    day_high_paisa: int  # running max from session open through this bar
-    day_low_paisa: int  # running min from session open through this bar
+    high_paisa: int          # this bar's high
+    low_paisa: int           # this bar's low
+    day_high_paisa: int      # running max from session open through this bar
+    day_low_paisa: int       # running min from session open through this bar
 
 
 @dataclass

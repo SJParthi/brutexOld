@@ -111,7 +111,7 @@ class EMAState:
         self.bars_seen += 1
 
         if self.period == 1:
-            # Degenerate case where EMA period 1 collapses to identity.
+            # Degenerate: EMA(1) = identity
             self.value = close
             return self.value
 
@@ -126,13 +126,10 @@ class EMAState:
             self.value = self.seed_sum / self.period
             return self.value
 
-        # Post-seed: recursive update (O(1)). Value is guaranteed
-        # non-None here by the above branches; narrow via local copy
-        # so the type checker sees float, not float | None.
-        prior = self.value
-        if prior is None:  # pragma: no cover — invariant from branches above
-            raise AssertionError("EMA state corrupted: post-seed value is None")
-        self.value = self.alpha * close + (1.0 - self.alpha) * prior
+        # Post-seed: recursive update (O(1))
+        # The value is guaranteed non-None here by the above branches.
+        assert self.value is not None
+        self.value = self.alpha * close + (1.0 - self.alpha) * self.value
         return self.value
 
     def reset(self) -> None:
