@@ -30,6 +30,15 @@ set -euo pipefail
 PR_BODY_FILE="${1:-/dev/stdin}"
 OVERRIDE_FLAG="${OPERATOR_OVERRIDE:-false}"
 OVERRIDE_LOG="${OVERRIDE_LOG_PATH:-$(dirname "$0")/pre-merge-overrides.log}"
+# Per DEC-P0-015 (PR #37) Agent 2 CRITICAL finding: Renovate-generated security
+# PRs do NOT carry the Z+ markers. To avoid blocking every CVE patch
+# indefinitely, the guard exempts authors matching $PR_AUTHOR_EXEMPT_PATTERN
+# IF they also carry the 'security' label (set via $PR_HAS_SECURITY_LABEL).
+# Both gates required — author alone is not enough (a future bot might
+# open a non-security PR; only auto-merge the explicit CVE patches).
+PR_AUTHOR="${PR_AUTHOR:-}"
+PR_HAS_SECURITY_LABEL="${PR_HAS_SECURITY_LABEL:-false}"
+PR_AUTHOR_EXEMPT_PATTERN="${PR_AUTHOR_EXEMPT_PATTERN:-^(renovate\[bot\]|dependabot\[bot\])$}"
 
 if [[ "$OVERRIDE_FLAG" == "true" ]] && [[ -z "${OPERATOR_OVERRIDE_REASON:-}" ]]; then
     echo "ERROR: OPERATOR_OVERRIDE=true requires OPERATOR_OVERRIDE_REASON='<why>'" >&2
@@ -42,6 +51,19 @@ if [[ ! -r "$PR_BODY_FILE" ]] && [[ "$PR_BODY_FILE" != "/dev/stdin" ]]; then
 fi
 
 BODY="$(cat "$PR_BODY_FILE")"
+
+# DEC-P0-015 (PR #37): label-gated Renovate/Dependabot exemption.
+# Both gates required (author AND label) to prevent silent bypass.
+if [[ -n "$PR_AUTHOR" ]] \
+    && [[ "$PR_HAS_SECURITY_LABEL" == "true" ]] \
+    && [[ "$PR_AUTHOR" =~ $PR_AUTHOR_EXEMPT_PATTERN ]]; then
+    echo "Z+ PR guard: bot-exempt path — author=$PR_AUTHOR + security-label"
+    # Audit log every exempt bypass so the operator can review.
+    TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "$TIMESTAMP TOOL=zplus-pr-guard EXEMPT=bot AUTHOR=$PR_AUTHOR LABEL=security" \
+        >> "$OVERRIDE_LOG"
+    exit 0
+fi
 
 REQUIRED_MARKERS=(
     "Z+ 15-row matrix"

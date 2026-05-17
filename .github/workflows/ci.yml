@@ -866,6 +866,41 @@ jobs:
   # (regardless of conclusion) so even a partial proof is still
   # uploaded — useful for debugging failed runs.
   # ─────────────────────────────────────────────────────────────────
+  # Z+ PR-body guard (DEC-P0-015, PR #37): refuses PR bodies missing
+  # any of 6 mandatory Z+ marker phrases. Skipped on push events
+  # (only checks PR body, which doesn't exist on push). Bot exemption
+  # for renovate[bot]/dependabot[bot] + security label is honored.
+  # ─────────────────────────────────────────────────────────────────
+  zplus-pr-guard:
+    name: Z+ PR-body marker check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+      - name: Detect PR author + security label
+        id: pr-meta
+        env:
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels) }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          has_security=$(echo "$PR_LABELS_JSON" \
+            | python3 -c "import json,sys; ls=json.load(sys.stdin); print('true' if any(l['name']=='security' for l in ls) else 'false')")
+          echo "author=$PR_AUTHOR" >> "$GITHUB_OUTPUT"
+          echo "has_security=$has_security" >> "$GITHUB_OUTPUT"
+      - name: Run Z+ PR guard
+        env:
+          PR_AUTHOR: ${{ steps.pr-meta.outputs.author }}
+          PR_HAS_SECURITY_LABEL: ${{ steps.pr-meta.outputs.has_security }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp)
+          printf '%s\n' "$PR_BODY" > "$tmp"
+          bash scripts/ci/zplus-pr-guard.sh "$tmp"
+
+  # ─────────────────────────────────────────────────────────────────
   proof-bundle:
     name: Proof bundle (aggregate CI artifacts)
     runs-on: ubuntu-24.04
@@ -992,6 +1027,10 @@ jobs:
       # it — if proof-bundle failed, ci-ok could still pass while branch
       # protection blocks merge (confusing operator). Added now.
       - proof-bundle
+      # DEC-P0-015 (PR #37): Z+ PR-body marker guard. Skipped on push
+      # events (no PR body), enforced on pull_request events. Renovate
+      # bots with security label are exempted by the guard itself.
+      - zplus-pr-guard
       # Still advisory-only (continue-on-error): typos, complexity,
       # fno-math-drift — these are informational scans, not enforcement
       # gates per Golden Rule #12.
@@ -1021,6 +1060,7 @@ jobs:
           echo "  duplication:   ${{ needs.duplication.result }}"
           echo "  mutation-py:   ${{ needs.mutation-py.result }}"
           echo "  proof-bundle:  ${{ needs.proof-bundle.result }}"
+          echo "  zplus-pr-guard:${{ needs.zplus-pr-guard.result }}"
           for result in \
             "${{ needs.lint.result }}" \
             "${{ needs.type.result }}" \
@@ -1041,7 +1081,8 @@ jobs:
             "${{ needs.vulture.result }}" \
             "${{ needs.duplication.result }}" \
             "${{ needs.mutation-py.result }}" \
-            "${{ needs.proof-bundle.result }}"; do
+            "${{ needs.proof-bundle.result }}" \
+            "${{ needs.zplus-pr-guard.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "❌ A required gate failed or was cancelled"
               exit 1
