@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 from brutex.dashboard.app import (
     DashboardState,
@@ -63,7 +64,7 @@ def _event(
     kind: str,
     *,
     phase: IngestPhase | None = None,
-    **kwargs: object,
+    **kwargs: Any,
 ) -> PipelineEvent:
     return PipelineEvent(
         kind=kind,

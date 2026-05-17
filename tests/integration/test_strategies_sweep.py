@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from brutex.data.catalog import Catalog
@@ -75,15 +75,17 @@ class _ThresholdStrategy:
     sweep needs.
     """
 
-    def __init__(self, params: Mapping[str, Any]) -> None:
+    META: ClassVar[StrategyMeta] = StrategyMeta(
+        strategy_id="threshold",
+        version="0.1.0",
+        symbols=("NSE-A",),
+        interval="1minute",
+        params_schema={"min_bars": 0},
+    )
+
+    def __init__(self, params: Mapping[str, Any] | None = None) -> None:
+        params = params or {}
         self._min_bars = int(params["min_bars"])
-        self.META = StrategyMeta(
-            strategy_id="threshold",
-            version="0.1.0",
-            symbols=("NSE-A",),
-            interval="1minute",
-            params_schema={"min_bars": 0},
-        )
 
     def on_event(
         self,
@@ -172,14 +174,15 @@ class TestComboSweepHappyPath:
         lake_root, catalog_path = _seed_lake(tmp_path, n_bars=3)
 
         class _NoParamStrategy:
-            def __init__(self, params: Mapping[str, Any]) -> None:
+            META: ClassVar[StrategyMeta] = StrategyMeta(
+                strategy_id="noparam",
+                version="0.1.0",
+                symbols=("NSE-A",),
+                interval="1minute",
+            )
+
+            def __init__(self, params: Mapping[str, Any] | None = None) -> None:
                 del params
-                self.META = StrategyMeta(
-                    strategy_id="noparam",
-                    version="0.1.0",
-                    symbols=("NSE-A",),
-                    interval="1minute",
-                )
 
             def on_event(
                 self,

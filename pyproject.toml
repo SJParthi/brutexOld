@@ -275,17 +275,16 @@ reportUnusedExpression = "none"         # bare expressions in test fixtures (hyp
 # TypeVar on register_strategy + ClassVar META + __init__ on _DecoStrat,
 # targeted pyright:ignore on one decorator with Protocol-detection-limitation.
 #
-# 2 categories REMAIN downgraded (reportArgumentType + reportAttributeAccessIssue):
-# pyright in tests/ surfaces 56 + 17 = 73 additional errors of these types in
-# pre-existing test fixtures using fake/protocol-stub patterns (test_fakes/,
-# test_dashboard_state.py parametrize loose-typing, test_adapter_protocol.py
-# stub access). Per Golden Rule #10: honest envelope — fixing these 73 is a
-# separate dedicated PR (P1 follow-up #6b); they don't affect test correctness
-# (tests pass) but require ~3 days of test-fixture refactoring.
-[[tool.pyright.executionEnvironments]]
-root = "tests"
-reportArgumentType = "warning"       # 56 errors in test data fixtures; P1 follow-up
-reportAttributeAccessIssue = "warning"  # 17 errors on protocol-stub test fakes; P1 follow-up
+# DEC-P0-013 (PR #35, 2026-05-17): the final 2 per-test downgrades
+# (reportArgumentType + reportAttributeAccessIssue) have been REMOVED. The 73
+# errors that motivated the deferral in PR #32 were incidentally cleaned up
+# by the FNO test rewrite in PR #33 (DEC-P0-011): the bulk lived in
+# tests/integration/test_instrument_store.py FNO option-chain fixtures that
+# the rewrite either replaced with IDX-only fixtures or marked
+# `@pytest.mark.skip` for Track 2. Net result: full pyright strict mode now
+# applies project-wide (brutex/ + tests/) without per-environment overrides.
+# `pyright brutex tests` reports 0 errors, 0 warnings, 0 informations.
+# Closes DEC-P0-005 P1 follow-up #6b ahead of the original 3-day estimate.
 
 [tool.pytest.ini_options]
 minversion = "8.0"

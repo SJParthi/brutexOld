@@ -9,6 +9,7 @@ is planned separately under ``tests/golden/``.
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from brutex.execution.costs import (
@@ -176,7 +177,7 @@ class TestIndianCostModelOptions:
         OPT (0.03503%) \u226b EQUITY (0.00297%) > FUT (0.00173%).
         """
         model = IndianCostModel()
-        common = {
+        common: dict[str, Any] = {
             "side": Side.BUY,
             "qty": 1000,  # large enough to see the gap in paise
             "fill_price": Decimal("1000"),
@@ -301,7 +302,7 @@ class TestIndianCostModelCustomBrokerage:
         """Bumping brokerage scales GST proportionally (same base formula)."""
         low = IndianCostModel(brokerage_per_order=Decimal("10"))
         high = IndianCostModel(brokerage_per_order=Decimal("100"))
-        args = {
+        args: dict[str, Any] = {
             "side": Side.BUY,
             "qty": 100,
             "fill_price": Decimal("200"),

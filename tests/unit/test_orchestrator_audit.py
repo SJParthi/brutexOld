@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from brutex.orchestrator.audit import (
@@ -95,7 +96,7 @@ class TestAuditEntryHash:
         ["seq", "prev_hash", "ts_utc", "actor", "action", "subject"],
     )
     def test_hash_changes_when_field_changes(self, field: str) -> None:
-        base_kwargs = {
+        base_kwargs: dict[str, Any] = {
             "seq": 0,
             "prev_hash": GENESIS_PREV_HASH,
             "ts_utc": 1712987654.0,
@@ -106,7 +107,7 @@ class TestAuditEntryHash:
         }
         e1 = AuditEntry(**base_kwargs)
         modified_kwargs = dict(base_kwargs)
-        modifications: dict[str, object] = {
+        modifications: dict[str, Any] = {
             "seq": 1,
             "prev_hash": "f" * 64,
             "ts_utc": 9999999.0,
@@ -115,7 +116,7 @@ class TestAuditEntryHash:
             "subject": "run:xyz",
         }
         modified_kwargs[field] = modifications[field]
-        e2 = AuditEntry(**modified_kwargs)  # type: ignore[arg-type]
+        e2 = AuditEntry(**modified_kwargs)
         assert e1.compute_hash() != e2.compute_hash()
 
     def test_hash_changes_when_payload_changes(self) -> None:
