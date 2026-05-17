@@ -101,14 +101,15 @@ ignore = [
     "RUF003", # same, in comment separators
     "RUF043", # regex-match against Exception class — stylistic
     "E501",   # line-too-long — handled by formatter; surviving lines are URLs/docstrings
-    # Security — justified
-    "S104",   # bind 0.0.0.0 — dashboard deliberately binds all interfaces for LAN access
-    "S108",   # /tmp references — used only in docs/examples, never at runtime
-    "S311",   # non-crypto random — used for backoff jitter, not crypto
-    "S105",   # env var NAMES aren't secrets (ENV_BOT_TOKEN constant)
-    "S110",   # try/except/pass — used in fsync fallback where failure is acceptable
     # Naming / legacy
     "N818",   # exception class naming — BruteXError base, legacy shim names retained
+    # NOTE (DEC-P0-001 2026-05-17): S-rules S104, S105, S108, S110, S311
+    # UN-IGNORED from this global list and re-narrowed to per-line noqa with
+    # rationale at each remaining site (4 sites total: 2 × S104 in
+    # brutex/config/ports.py, 1 × S105 in brutex/notifications/telegram.py,
+    # 1 × S311 in brutex/orchestrator/retry.py). Per Golden Rule #12 honest
+    # standards: blanket-ignoring security rules at project level hid the
+    # justifications. Per-line noqa makes each exception auditable.
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -124,6 +125,28 @@ ignore = [
     "PLE0604", # invalid __all__ object (hypothesis strategies)
     "SIM113", # pytest fixtures look like enumerate use
     "SIM103", # bool-from-if — clearer in tests
+    # DEC-P0-001 (2026-05-17): S-rules removed from project-wide ignore now
+    # surface in tests/ too. The test-specific exemptions below cover the 35
+    # legitimate test patterns that were silently ignored before.
+    "S104",  # tests bind 0.0.0.0 for LAN-discovery integration tests
+    "S108",  # tests reference /tmp paths in fixtures
+    "S311",  # tests use random for synthetic data generation (not crypto)
+    "S603",  # subprocess calls in redteam harness (planted-bug fixture runners)
+    "S607",  # partial-path subprocess calls in redteam harness
+    # DEC-P0-001 (2026-05-17): pre-existing test-only patterns. tests/ uses
+    # parametrize tuple syntax (PT006), TestClass naming convention (N801),
+    # explanatory comments that ruff sees as commented-out code (ERA001),
+    # math-notation variable names like `l` (E741), zip without strict (B905),
+    # combinable isinstance (SIM101), complex pytest assert (PT018), and
+    # uppercase imports (N812) — all idiomatic in test code.
+    "PT006",  # pytest parametrize tuple syntax
+    "N801",   # TestClass / TestCase naming
+    "ERA001", # explanatory test comments flagged as commented-out code
+    "E741",   # math-notation variable names in test fixtures
+    "B905",   # zip without strict — fine in test data shaping
+    "SIM101", # combinable isinstance — clearer split form in test assertions
+    "PT018",  # complex pytest.assert — sometimes intentional for clarity
+    "N812",   # uppercase-imported alias in test fixtures
 ]
 # CLI uses print() deliberately — it's a CLI, stdout is the interface.
 "brutex/cli.py" = ["T201"]
@@ -171,12 +194,10 @@ disallow_untyped_decorators = false
 
 [tool.pyright]
 pythonVersion = "3.12"
-# mypy --strict is the authoritative type check (see [tool.mypy] above).
-# Pyright runs in STANDARD mode as a secondary sanity check — the two
-# tools diverge on a handful of stylistic rules that we explicitly
-# silence below. Anything that matters semantically still fires in
-# mypy; pyright is the belt to mypy's suspenders.
-typeCheckingMode = "standard"
+# DEC-P0-001 (2026-05-17): bumped from "standard" to "strict" per Golden Rule
+# #12 honest standards. Stylistic divergences from mypy are narrowed to the
+# specific report-codes below (everything else fires as a real error).
+typeCheckingMode = "strict"
 # Stylistic divergences silenced so the two checkers don't bikeshed:
 reportPrivateUsage = "none"             # pytest fixtures touch _rows on FakeDataFrame etc.
 reportConstantRedefinition = "none"     # brutex.math facade rebinds __all__ symbols
@@ -190,6 +211,8 @@ reportUnsupportedDunderAll = "none"     # math facade builds __all__ programmati
 reportUnknownMemberType = "none"
 reportUnknownVariableType = "none"
 reportUnknownParameterType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
 reportUnnecessaryIsInstance = "none"
 # Missing imports — pyright may run against a different venv than
 # the one with the brokerapi/fno_math_py/lmdb installed. mypy's
@@ -197,6 +220,12 @@ reportUnnecessaryIsInstance = "none"
 # blanket silence here:
 reportMissingImports = "none"
 reportMissingTypeStubs = "none"
+# Strict-mode additions silenced for now (DEC-P0-001): these fire on
+# legitimate patterns in test fixtures and the math facade. Re-enable
+# selectively when each pattern has a dedicated narrow fix.
+reportMissingParameterType = "none"     # test fixtures often use untyped lambdas
+reportMissingTypeArgument = "none"      # dict[str, Any] usages in JSON paths
+reportUnnecessaryComparison = "none"    # invariant-asserting if-not-None branches
 
 [tool.pytest.ini_options]
 minversion = "8.0"

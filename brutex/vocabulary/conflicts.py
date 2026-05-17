@@ -58,45 +58,41 @@ from brutex.vocabulary.bits import (
 
 # Each tuple = (bit_a, bit_b) where a < b. Order matters for the
 # `has_conflict` lookup (we always check the smaller bit first).
-CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset({
-    # Group 1: EMA position direct opposition
-    (BIT_CLOSE_ABOVE_EMA20,  BIT_CLOSE_BELOW_EMA20),
-    (BIT_CLOSE_ABOVE_EMA200, BIT_CLOSE_BELOW_EMA200),
-    (BIT_EMA20_ABOVE_EMA200, BIT_EMA20_BELOW_EMA200),
-
-    # Group 3: PDH/PDL direct opposition
-    (BIT_CLOSE_ABOVE_PDH, BIT_CLOSE_BELOW_PDH),
-    (BIT_CLOSE_ABOVE_PDL, BIT_CLOSE_BELOW_PDL),
-
-    # Group 5: Candle shape mutual exclusions
-    (BIT_BAR_BULLISH,    BIT_BAR_BEARISH),
-    (BIT_BAR_BULLISH,    BIT_BAR_DOJI),
-    (BIT_BAR_BEARISH,    BIT_BAR_DOJI),
-    (BIT_BAR_LARGE_BODY, BIT_BAR_SMALL_BODY),
-
-    # Group 6: Prior bar pattern mutual exclusions
-    (BIT_PRIOR_N_BULLISH, BIT_PRIOR_N_BEARISH),
-    (BIT_PRIOR_N_BULLISH, BIT_PRIOR_ALTERNATING),
-    (BIT_PRIOR_N_BEARISH, BIT_PRIOR_ALTERNATING),
-
-    # Group 7: Day structure mutual exclusions
-    (BIT_CLOSE_AT_DAY_HIGH, BIT_CLOSE_AT_DAY_LOW),
-    (BIT_CLOSE_IN_UPPER_THIRD, BIT_CLOSE_IN_LOWER_THIRD),
-    (BIT_CLOSE_AT_DAY_HIGH, BIT_CLOSE_IN_LOWER_THIRD),
-    (BIT_CLOSE_AT_DAY_LOW,  BIT_CLOSE_IN_UPPER_THIRD),
-
-    # Group 8: Time-of-day buckets are mutually exclusive within a single bar
-    (BIT_EARLY_MORNING, BIT_MID_MORNING),
-    (BIT_EARLY_MORNING, BIT_MIDDAY),
-    (BIT_EARLY_MORNING, BIT_AFTERNOON),
-    (BIT_MID_MORNING,   BIT_MIDDAY),
-    (BIT_MID_MORNING,   BIT_AFTERNOON),
-    (BIT_MIDDAY,        BIT_AFTERNOON),
-
-    # Group 9: Day type mutual exclusions
-    (BIT_GAP_UP_DAY, BIT_GAP_DOWN_DAY),
-    (BIT_INSIDE_DAY, BIT_OUTSIDE_DAY),
-})
+CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset(
+    {
+        # Group 1: EMA position direct opposition
+        (BIT_CLOSE_ABOVE_EMA20, BIT_CLOSE_BELOW_EMA20),
+        (BIT_CLOSE_ABOVE_EMA200, BIT_CLOSE_BELOW_EMA200),
+        (BIT_EMA20_ABOVE_EMA200, BIT_EMA20_BELOW_EMA200),
+        # Group 3: PDH/PDL direct opposition
+        (BIT_CLOSE_ABOVE_PDH, BIT_CLOSE_BELOW_PDH),
+        (BIT_CLOSE_ABOVE_PDL, BIT_CLOSE_BELOW_PDL),
+        # Group 5: Candle shape mutual exclusions
+        (BIT_BAR_BULLISH, BIT_BAR_BEARISH),
+        (BIT_BAR_BULLISH, BIT_BAR_DOJI),
+        (BIT_BAR_BEARISH, BIT_BAR_DOJI),
+        (BIT_BAR_LARGE_BODY, BIT_BAR_SMALL_BODY),
+        # Group 6: Prior bar pattern mutual exclusions
+        (BIT_PRIOR_N_BULLISH, BIT_PRIOR_N_BEARISH),
+        (BIT_PRIOR_N_BULLISH, BIT_PRIOR_ALTERNATING),
+        (BIT_PRIOR_N_BEARISH, BIT_PRIOR_ALTERNATING),
+        # Group 7: Day structure mutual exclusions
+        (BIT_CLOSE_AT_DAY_HIGH, BIT_CLOSE_AT_DAY_LOW),
+        (BIT_CLOSE_IN_UPPER_THIRD, BIT_CLOSE_IN_LOWER_THIRD),
+        (BIT_CLOSE_AT_DAY_HIGH, BIT_CLOSE_IN_LOWER_THIRD),
+        (BIT_CLOSE_AT_DAY_LOW, BIT_CLOSE_IN_UPPER_THIRD),
+        # Group 8: Time-of-day buckets are mutually exclusive within a single bar
+        (BIT_EARLY_MORNING, BIT_MID_MORNING),
+        (BIT_EARLY_MORNING, BIT_MIDDAY),
+        (BIT_EARLY_MORNING, BIT_AFTERNOON),
+        (BIT_MID_MORNING, BIT_MIDDAY),
+        (BIT_MID_MORNING, BIT_AFTERNOON),
+        (BIT_MIDDAY, BIT_AFTERNOON),
+        # Group 9: Day type mutual exclusions
+        (BIT_GAP_UP_DAY, BIT_GAP_DOWN_DAY),
+        (BIT_INSIDE_DAY, BIT_OUTSIDE_DAY),
+    }
+)
 
 
 def has_conflict(mask: int) -> bool:
@@ -109,10 +105,7 @@ def has_conflict(mask: int) -> bool:
         True if mask has any conflict pair (i.e., the strategy is
         guaranteed to fire zero trades and should be pruned).
     """
-    for (a, b) in CONFLICT_PAIRS:
-        if (mask >> a) & 1 and (mask >> b) & 1:
-            return True
-    return False
+    return any((mask >> a) & 1 and (mask >> b) & 1 for a, b in CONFLICT_PAIRS)
 
 
 def count_conflicts(mask: int) -> int:
@@ -121,7 +114,7 @@ def count_conflicts(mask: int) -> int:
     Useful for debugging strategy-generation pruning.
     """
     count = 0
-    for (a, b) in CONFLICT_PAIRS:
+    for a, b in CONFLICT_PAIRS:
         if (mask >> a) & 1 and (mask >> b) & 1:
             count += 1
     return count

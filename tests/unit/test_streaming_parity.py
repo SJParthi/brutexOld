@@ -17,7 +17,6 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
-
 from brutex.indicators.day_extremes import (
     DayExtremesState,
     compute_day_extremes,

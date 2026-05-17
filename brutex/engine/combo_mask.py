@@ -137,10 +137,7 @@ def bits_to_mask(*bit_positions: int) -> int:
     mask = 0
     for pos in bit_positions:
         if pos < 0 or pos >= MAX_VOCAB_BITS:
-            msg = (
-                f"bits_to_mask: position {pos} out of range "
-                f"[0, {MAX_VOCAB_BITS})"
-            )
+            msg = f"bits_to_mask: position {pos} out of range [0, {MAX_VOCAB_BITS})"
             raise ValueError(msg)
         mask |= 1 << pos
     return mask
@@ -272,6 +269,7 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
         raise ValueError(msg)
     # math.comb in Python 3.8+; integer-exact
     from math import comb
+
     return comb(n, k)
 
 

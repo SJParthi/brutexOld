@@ -14,7 +14,6 @@ from __future__ import annotations
 from datetime import date, time
 
 import pytest
-
 from brutex.calendars.nse import (
     SESSION_DURATION_MINUTES,
     TICK_SIZE_PAISA,
@@ -59,6 +58,7 @@ class TestHolidays:
             HOLIDAYS_2025,
             HOLIDAYS_2026,
         )
+
         for hols in [
             HOLIDAYS_2021,
             HOLIDAYS_2022,

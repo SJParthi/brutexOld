@@ -31,11 +31,11 @@ class DhanOptionsContract:
     # Spot index (used to find ATM and Track 1 spot data — same as Track 1 spec §6)
     spot_security_id: int
     spot_exchange_segment: str  # "IDX_I"
-    spot_instrument: str        # "INDEX"
+    spot_instrument: str  # "INDEX"
 
     # Options chain (Track 2 fetch via /v2/charts/rollingoption)
     options_exchange_segment: str  # "NSE_FNO" or "BSE_FNO"
-    options_instrument: str        # "OPTIDX"
+    options_instrument: str  # "OPTIDX"
 
     # Trading symbol used in API requests (e.g., "NIFTY", "BANKNIFTY", "SENSEX")
     trading_symbol: str
