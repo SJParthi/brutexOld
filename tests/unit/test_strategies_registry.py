@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar
 
 import pytest
 from brutex.strategies.errors import StrategyRegistrationError
@@ -144,14 +145,20 @@ class TestRegisterStrategyDecorator:
         default_registry.clear()
 
     def test_decorator_populates_default_registry(self) -> None:
-        @register_strategy
+        # pyright: ignore[reportUntypedClassDecorator] — Protocol satisfaction
+        # detection limitation for class decorators; runtime behavior verified
+        # by the test below + brutex/strategies/registry.py is typed.
+        @register_strategy  # pyright: ignore[reportUntypedClassDecorator]
         class _DecoStrat:
-            META = StrategyMeta(
+            META: ClassVar[StrategyMeta] = StrategyMeta(
                 strategy_id="deco_test",
                 version="0.1.0",
                 symbols=("NSE-A",),
                 interval="1minute",
             )
+
+            def __init__(self, params: Mapping[str, Any] | None = None) -> None:
+                self._params = params or {}
 
             def on_event(self, event: object, state: StrategyState) -> list[Signal]:
                 del event, state

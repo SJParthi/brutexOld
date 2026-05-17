@@ -11,6 +11,7 @@ Skipped when the ``[data]`` extras are absent.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -50,7 +51,7 @@ def _bar(day: int, minute: int, *, close: float) -> CandleBar:
     )
 
 
-def _seed_lake(tmp_path: Path, closes: list[float]) -> tuple[Path, Path]:
+def _seed_lake(tmp_path: Path, closes: Sequence[float]) -> tuple[Path, Path]:
     lake_root = tmp_path / "lake"
     catalog_path = tmp_path / "catalog.duckdb"
     writer = ParquetWriter(lake_root=lake_root)
