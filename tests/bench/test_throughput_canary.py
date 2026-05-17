@@ -47,11 +47,20 @@ from __future__ import annotations
 
 import operator
 import time
+from datetime import UTC, date, datetime
 from functools import reduce
 
 import numpy as np
 import pytest
 from brutex.engine.combo_mask import evaluate_mask
+from brutex.indicators.fib_levels import compute_fib_levels
+from brutex.indicators.pivots import compute_pivot_levels
+from brutex.vocabulary.evaluator import (
+    IndicatorSnapshot,
+    PriorBarHistory,
+    ProximityParams,
+    evaluate_atoms,
+)
 
 # Required-mask: 4 bits set out of 64 — matches the canonical strategy
 # combo size in `docs/TRACK1_VOCABULARY.md` (5-6 conditions per strategy).
@@ -208,3 +217,152 @@ class TestThroughputCanary:
             f"{_RATIO_CEILING}× — possible hash-collision regression. "
             f"t_small={t_small:.0f}ns, t_large={t_large:.0f}ns."
         )
+
+
+def _make_snapshot(bar_index: int) -> IndicatorSnapshot:
+    """Deterministic IndicatorSnapshot for bar #bar_index.
+
+    Per Rule #5 invariant P-06 (look-ahead protection): this fixture
+    builds ONE snapshot per call. The snapshot represents the engine
+    state AT bar N — it never references bar N+1 fields. The benchmark
+    calls evaluate_atoms once per snapshot, which is exactly the
+    real engine call pattern (one bar in, one mask out, no peek).
+    """
+    # Deterministic OHLC: walking-band synthetic prices around 24000
+    # paisa (NIFTY range) with sinusoidal variation per bar_index.
+    base_close = 24000_00 + (bar_index % 1000) * 5
+    open_paisa = base_close - 10
+    close_paisa = base_close + (bar_index % 7) - 3
+    high_paisa = max(open_paisa, close_paisa) + 15
+    low_paisa = min(open_paisa, close_paisa) - 15
+
+    # Pivots + Fib computed from PDH/PDL/PDC (deterministic from bar_index).
+    pdh = base_close + 200
+    pdl = base_close - 200
+    pdc = base_close + 50
+    trading_day = date(2024, 1, 2)
+    pivots = compute_pivot_levels(
+        trading_day=trading_day, pdh_paisa=pdh, pdl_paisa=pdl, pdc_paisa=pdc
+    )
+    fib = compute_fib_levels(trading_day=trading_day, pdh_paisa=pdh, pdl_paisa=pdl)
+
+    return IndicatorSnapshot(
+        timestamp_ist=datetime(2024, 1, 2, 9, 15, tzinfo=UTC),
+        open_paisa=open_paisa,
+        high_paisa=high_paisa,
+        low_paisa=low_paisa,
+        close_paisa=close_paisa,
+        ema20_paisa=base_close - 5,
+        ema200_paisa=base_close - 30,
+        pivots=pivots,
+        fib=fib,
+        day_high_paisa=high_paisa + 100,
+        day_low_paisa=low_paisa - 100,
+        open_of_day_paisa=base_close - 50,
+    )
+
+
+class TestEvaluateAtomsCanary:
+    """O(1)-ratio canary for `evaluate_atoms` — the indicator-eval hot path.
+
+    Per docstring at `brutex/vocabulary/evaluator.py:160`:
+    "O(1) per bar: ~50 cache-resident ops, no allocations, no I/O."
+
+    The benchmark calls evaluate_atoms once per pre-built snapshot,
+    measuring time per call at two dataset sizes. Ratio gate enforces
+    the O(1) shape; absolute ops/s recorded informationally.
+
+    Look-ahead invariant (P-06) is structurally safe: each snapshot
+    is a frozen dataclass representing bar N; evaluate_atoms reads
+    only from the snapshot fields + proximity params + prior_history
+    (which the caller maintains, NOT the benchmark). The benchmark
+    never peeks at bar N+1.
+    """
+
+    @pytest.mark.bench
+    def test_evaluate_atoms_ratio(self) -> None:
+        """`evaluate_atoms` per-call latency must be O(1) regardless of N.
+
+        Ratio ceiling: 5× (test_store_o1.py:162 pattern). A real
+        regression (e.g. accidental O(n) loop over prior bars
+        instead of O(1) PriorBarHistory check) would show ratio >> 10×.
+        """
+        small_n = 1_000
+        large_n = 10_000
+
+        # Pre-build snapshots once per N — keeps the benchmark
+        # measuring evaluate_atoms call cost, not fixture-build cost.
+        proximity = ProximityParams()
+        prior_history = PriorBarHistory(prior_n=3)
+        # Seed prior_history so Group 6 conditions exercise the
+        # all_bullish / all_bearish branches (3 of each).
+        for _ in range(3):
+            prior_history.update(is_bullish=True)
+
+        small_snapshots = [_make_snapshot(i) for i in range(small_n)]
+        large_snapshots = [_make_snapshot(i) for i in range(large_n)]
+
+        # Warm up: evaluator caches + branch predictor.
+        for snap in small_snapshots[:100]:
+            _ = evaluate_atoms(snap, proximity, prior_history)
+
+        def _time_per_call(snapshots: list[IndicatorSnapshot]) -> float:
+            t0 = time.perf_counter_ns()
+            total_mask = 0
+            for snap in snapshots:
+                total_mask |= evaluate_atoms(snap, proximity, prior_history)
+            t1 = time.perf_counter_ns()
+            # Sanity: at least SOME conditions fired across the sample
+            # (else the benchmark might be optimizing the call away).
+            assert total_mask != 0
+            return (t1 - t0) / len(snapshots)
+
+        t_small = _time_per_call(small_snapshots)
+        t_large = _time_per_call(large_snapshots)
+        ratio = t_large / max(t_small, 1.0)
+
+        ops_per_sec_large = 1e9 / t_large
+        print(
+            f"\nevaluate_atoms: t_per_call(1K)={t_small:.0f}ns, "
+            f"t_per_call(10K)={t_large:.0f}ns, "
+            f"ratio={ratio:.2f}×, "
+            f"absolute={ops_per_sec_large:,.0f} ops/s"
+        )
+
+        assert ratio < _RATIO_CEILING, (
+            f"evaluate_atoms ratio {ratio:.2f}× (10K vs 1K calls) exceeds "
+            f"{_RATIO_CEILING}× — possible O(n) regression in atom evaluator. "
+            f"t_small={t_small:.0f}ns, t_large={t_large:.0f}ns."
+        )
+
+    @pytest.mark.bench
+    def test_evaluate_atoms_look_ahead_safe(self) -> None:
+        """Invariant P-06: evaluate_atoms must NOT mutate prior_history.
+
+        The docstring says prior_history is "Rolling N-bar bullish/bearish
+        flags for Group 6" — read-only inside evaluate_atoms; the CALLER
+        updates it after each bar. If evaluate_atoms accidentally mutates
+        prior_history.flags, P-06 is violated (peek at "next" bar would
+        leak into current bar's mask).
+        """
+        proximity = ProximityParams()
+        prior_history = PriorBarHistory(prior_n=3)
+        prior_history.update(is_bullish=True)
+        prior_history.update(is_bullish=False)
+        prior_history.update(is_bullish=True)
+
+        # Snapshot of prior_history state before call.
+        flags_before = list(prior_history.flags)
+        n_before = prior_history.prior_n
+
+        snap = _make_snapshot(bar_index=42)
+        _ = evaluate_atoms(snap, proximity, prior_history)
+
+        # Invariant: prior_history must be unchanged.
+        assert prior_history.flags == flags_before, (
+            "P-06 violation: evaluate_atoms mutated prior_history.flags. "
+            "The caller (StrategyRunner) owns the update — this would leak "
+            "the current bar's bullish/bearish flag into the current bar's "
+            "evaluation, peek-ahead by one bar."
+        )
+        assert prior_history.prior_n == n_before
