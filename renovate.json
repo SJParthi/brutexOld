@@ -1,0 +1,231 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":semanticPrefixChore",
+    ":semanticCommitScopeDisabled",
+    ":dependencyDashboard",
+    ":timezone(Asia/Kolkata)",
+    ":enablePreCommit",
+    ":enableVulnerabilityAlertsWithLabel(security)"
+  ],
+  "schedule": [
+    "before 6am on Monday"
+  ],
+  "labels": [
+    "dependencies",
+    "renovate"
+  ],
+  "branchPrefix": "renovate/",
+  "rangeStrategy": "bump",
+  "rebaseWhen": "behind-base-branch",
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 10,
+  "configMigration": true,
+  "platformAutomerge": false,
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "Renovate Dependency Dashboard",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 6am on Sunday"
+    ]
+  },
+  "vulnerabilityAlerts": {
+    "labels": [
+      "security",
+      "dependencies"
+    ],
+    "automerge": false,
+    "prCreation": "immediate"
+  },
+  "packageRules": [
+    {
+      "description": "Group all non-major Python dependency updates into a single PR",
+      "matchManagers": [
+        "pep621",
+        "pip_requirements"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "python (minor + patch)",
+      "automerge": false,
+      "commitMessagePrefix": "chore(deps):"
+    },
+    {
+      "description": "Major Python dependency updates require manual review",
+      "matchManagers": [
+        "pep621",
+        "pip_requirements"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "automerge": false,
+      "commitMessagePrefix": "chore(deps)!:",
+      "labels": [
+        "dependencies",
+        "renovate",
+        "major-bump"
+      ]
+    },
+    {
+      "description": "GitHub Actions — group + auto-merge on green CI",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest"
+      ],
+      "groupName": "github-actions",
+      "automerge": false,
+      "commitMessagePrefix": "chore(ci):"
+    },
+    {
+      "description": "GitHub Actions majors require manual review",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "automerge": false,
+      "commitMessagePrefix": "chore(ci)!:",
+      "labels": [
+        "dependencies",
+        "renovate",
+        "ci",
+        "major-bump"
+      ]
+    },
+    {
+      "description": "Rust (Cargo) — group minor+patch under one PR",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "rust (minor + patch)",
+      "automerge": false,
+      "commitMessagePrefix": "chore(rust):"
+    },
+    {
+      "description": "Rust majors require manual review",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "automerge": false,
+      "commitMessagePrefix": "chore(rust)!:",
+      "labels": [
+        "dependencies",
+        "renovate",
+        "rust",
+        "major-bump"
+      ]
+    },
+    {
+      "description": "Lock-step security tooling (bandit + pip-audit + safety)",
+      "matchPackageNames": [
+        "bandit",
+        "pip-audit",
+        "safety"
+      ],
+      "groupName": "python-security-tooling",
+      "labels": [
+        "dependencies",
+        "renovate",
+        "security"
+      ]
+    },
+    {
+      "description": "Lock-step test toolchain (pytest + plugins)",
+      "matchPackageNames": [
+        "pytest",
+        "pytest-cov",
+        "pytest-benchmark",
+        "hypothesis"
+      ],
+      "groupName": "python-test-toolchain"
+    },
+    {
+      "description": "Lock-step type checkers (mypy + pyright) — bumping one alone causes parity drift",
+      "matchPackageNames": [
+        "mypy",
+        "pyright"
+      ],
+      "groupName": "python-type-checkers"
+    },
+    {
+      "description": "Lock-step P2 data lake (polars + duckdb + pyarrow)",
+      "matchPackageNames": [
+        "polars",
+        "duckdb",
+        "pyarrow"
+      ],
+      "groupName": "python-data-lake"
+    },
+    {
+      "description": "pin Python version itself — pinned in [project] requires-python and CI matrix",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchPackageNames": [
+        "actions/setup-python"
+      ],
+      "automerge": false,
+      "labels": [
+        "dependencies",
+        "renovate",
+        "python-runtime"
+      ]
+    },
+    {
+      "description": "pre-commit hook revisions — auto-bump minor + patch, majors require review",
+      "matchManagers": [
+        "pre-commit"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest"
+      ],
+      "groupName": "pre-commit-hooks",
+      "automerge": false,
+      "commitMessagePrefix": "chore(pre-commit):"
+    },
+    {
+      "description": "pre-commit hook majors require manual review",
+      "matchManagers": [
+        "pre-commit"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "automerge": false,
+      "commitMessagePrefix": "chore(pre-commit)!:",
+      "labels": [
+        "dependencies",
+        "renovate",
+        "pre-commit",
+        "major-bump"
+      ]
+    }
+  ],
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/__pycache__/**",
+    "**/.venv/**",
+    "**/venv/**",
+    "tests/redteam/fixtures/**"
+  ]
+}
