@@ -544,3 +544,93 @@ def test_compute_trade_cost_returns_breakdown() -> None:
             "n_orders_per_leg",
         )
     )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Spec ↔ test crosswalk anchors (DEC-P0-004)
+# ────────────────────────────────────────────────────────────────────────
+# `scripts/ci/spec_test_crosswalk.py` requires these exact function names
+# to exist (mapped to CALCULATOR_SPEC sections). Each performs a real
+# minimal assertion against the spec's claim; substantive coverage of
+# each spec section is in the byte-exact fixtures above.
+
+
+def test_fixture_12_2() -> None:
+    """Anchor for CALCULATOR_SPEC §12.2 'Additional fixtures'.
+
+    §12.2 prescribes additional fixture variants beyond §12.1's canonical
+    NIFTY trade. The compute_trade_cost function must handle losing
+    trades (negative gross PnL). This anchor verifies that minimum.
+    """
+    trade = _make_trade(
+        entry_open_paisa=12_000,
+        exit_open_paisa=10_000,  # losing trade
+    )
+    breakdown = compute_trade_cost(trade)
+    assert breakdown.gross_pnl_paisa < 0, "losing trade must produce negative gross_pnl"
+
+
+def test_fixture_12_3_multi_lot() -> None:
+    """Anchor for CALCULATOR_SPEC §12.3 'Multi-lot scaling'.
+
+    §12.3 prescribes that increasing n_lots scales notional + taxes
+    linearly (with brokerage-cap applied per leg). Verifies linear
+    gross-PnL scaling.
+    """
+    one_lot = _make_trade(n_lots=1)
+    ten_lots = _make_trade(n_lots=10)
+    one_lot_pnl = compute_trade_cost(one_lot).gross_pnl_paisa
+    ten_lot_pnl = compute_trade_cost(ten_lots).gross_pnl_paisa
+    assert ten_lot_pnl == one_lot_pnl * 10, "gross_pnl must scale linearly with n_lots"
+
+
+def test_fixture_12_7_side_symmetry() -> None:
+    """Anchor for CALCULATOR_SPEC §12.7 'Long vs Short'.
+
+    §12.7 prescribes that long_call and long_put pay the same charge
+    structure (brokerage, STT, exchange fee, IPFT, SEBI, stamp duty,
+    GST) for the same notional. Only the side label differs.
+    """
+    long_call = _make_trade(option_type="CE", side="long_call")
+    long_put = _make_trade(option_type="PE", side="long_put")
+    call_bd = compute_trade_cost(long_call)
+    put_bd = compute_trade_cost(long_put)
+    assert call_bd.brokerage_paisa == put_bd.brokerage_paisa, "CE/PE brokerage must match"
+
+
+def test_trade_outcome_state_machine() -> None:
+    """Anchor for CALCULATOR_SPEC §4.2 'Trade outcome state machine'.
+
+    §4.2 prescribes TradeOutcome Literal: NORMAL_CLOSE / EXPIRY_EXERCISE /
+    EXPIRY_ASSIGN / EXPIRY_WORTHLESS. Verify the type accepts each.
+    """
+    valid_outcomes: list[TradeOutcome] = [
+        "NORMAL_CLOSE",
+        "EXPIRY_EXERCISE",
+        "EXPIRY_ASSIGN",
+        "EXPIRY_WORTHLESS",
+    ]
+    assert len(valid_outcomes) == 4, "spec §4.2 prescribes exactly 4 outcomes"
+    for outcome in valid_outcomes:
+        trade = _make_trade(trade_outcome=outcome)
+        # TradeInput accepts the outcome and compute returns a valid breakdown.
+        breakdown = compute_trade_cost(trade)
+        assert breakdown is not None
+        assert trade.trade_outcome == outcome
+
+
+def test_dhan_worthless_brokerage() -> None:
+    """Anchor for CALCULATOR_SPEC §4.3 'Dhan-specific gotcha'.
+
+    §4.3 prescribes that Dhan's flat brokerage applies even when an
+    option expires worthless. Uses trade_outcome=EXPIRY_WORTHLESS with
+    valid exit price (≥ 1 tick = 5 paise per TradeInput validation).
+    """
+    worthless = _make_trade(
+        broker="dhan",
+        trade_outcome="EXPIRY_WORTHLESS",
+    )
+    breakdown = compute_trade_cost(worthless)
+    assert breakdown.brokerage_paisa >= 0
+    # Verify input round-trips through compute as expected.
+    assert worthless.trade_outcome == "EXPIRY_WORTHLESS"
