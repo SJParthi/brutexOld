@@ -1120,3 +1120,56 @@ class TestDirectWorkItemConstruction:
         assert item.state is not None
         assert item.state == WorkItemState.PENDING
         assert isinstance(item.state, WorkItemState)
+
+
+class TestZeroSurvivorMutants:
+    """Kill the final 2 mutants for 100% mutation score (operator decree 2026-05-17)."""
+
+    def test_quarantine_reason_type_annotation_is_optional(self) -> None:
+        """Kills #12: `QuarantineReason | None = None` → `QuarantineReason & None`.
+
+        Type-annotation mutation isn't runtime-visible normally. We introspect
+        via get_type_hints() which evaluates the annotation as a real type.
+        """
+        from typing import get_type_hints
+
+        hints = get_type_hints(WorkItem)
+        qr_type = hints["quarantine_reason"]
+        # Union[QuarantineReason, None] becomes Optional[QuarantineReason]
+        # The `&` (intersection) mutation would change the runtime type representation.
+        type_str = str(qr_type)
+        # Union must include both QuarantineReason AND NoneType (NOT intersection)
+        assert "QuarantineReason" in type_str
+        assert "None" in type_str
+        # The Union syntax should reflect an OR-of-types, which Python represents
+        # as Union[QuarantineReason, None] or QuarantineReason | None.
+        # The intersection mutation `&` would produce a different runtime type:
+        # specifically, the resulting type would NOT match `Optional[QuarantineReason]`.
+        from types import UnionType
+        from typing import Union, get_args, get_origin
+
+        # Get the origin — should be Union (or types.UnionType for PEP 604)
+        origin = get_origin(qr_type)
+        assert origin in (Union, UnionType), (
+            f"Expected Union/UnionType origin, got {origin} (intersection mutation?)"
+        )
+        # Args should be (QuarantineReason, NoneType)
+        args = get_args(qr_type)
+        assert QuarantineReason in args
+        assert type(None) in args
+
+    def test_work_item_new_is_decorated_staticmethod(self) -> None:
+        """Kills #20: removing `@staticmethod` decorator.
+
+        Without @staticmethod, WorkItem.__dict__['new'] is a plain function
+        (not a staticmethod object). With it, the dict entry IS a staticmethod.
+        We assert the staticmethod wrapper exists.
+        """
+        # Direct __dict__ access bypasses descriptor protocol, so we see
+        # the raw staticmethod object (if decorated) vs plain function.
+        raw = WorkItem.__dict__["new"]
+        assert isinstance(raw, staticmethod), (
+            f"WorkItem.new must be decorated with @staticmethod; "
+            f"got {type(raw).__name__} ({raw!r}). "
+            f"Mutmut may have removed the decorator."
+        )
