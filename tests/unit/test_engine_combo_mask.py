@@ -17,7 +17,6 @@ from __future__ import annotations
 from math import comb
 
 import pytest
-
 from brutex.engine import combo_mask
 from brutex.engine.combo_mask import (
     MAX_VOCAB_BITS,
@@ -29,7 +28,6 @@ from brutex.engine.combo_mask import (
     mask_to_bits,
     popcount,
 )
-
 
 # ─────────────────────────────────────────────────────────────────
 # Module-level constants

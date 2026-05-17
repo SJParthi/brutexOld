@@ -47,8 +47,8 @@ swap to a faster algorithm without breaking callers.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from itertools import combinations
-from typing import Iterator
 
 __all__ = [
     "MAX_VOCAB_BITS",
