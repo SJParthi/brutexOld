@@ -117,7 +117,12 @@ jobs:
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
-        run: pyright brutex
+        # Per DEC-P0-014 (PR #36 Agent 3 audit): the prior `pyright brutex`
+        # invocation enforced strict mode on source ONLY, leaving `tests/`
+        # un-gated despite PR #35's MIGRATION.md entry claiming "full
+        # project-wide strict". Expanded to `brutex tests` to match the
+        # honest envelope claim.
+        run: pyright brutex tests
 
   # ─────────────────────────────────────────────────────────────────
   # UNIT TESTS + coverage gate (CG-01: 100% line + branch)
