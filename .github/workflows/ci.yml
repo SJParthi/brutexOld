@@ -435,6 +435,20 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: cargo test
         run: cargo test --release
+      # DEC-P0-019 (PR #41a): math stub <-> Rust PyO3 signature verifier.
+      # Closes PR #38's deferred maturin verifier. Runs `cargo check`
+      # against rust/fno-math-py/ (PyO3 wrapper) to confirm the wrapper
+      # crate builds with the current Rust toolchain, then parses
+      # #[pyo3(signature = ...)] declarations and compares against
+      # brutex/math/__init__.pyi. NO maturin install needed — the
+      # verifier is source-based (parses Rust + .pyi files directly).
+      # Scope: 6 Greeks only; indicators excluded per DEC-P0-016.
+      - name: cargo check (fno-math-py PyO3 wrapper)
+        working-directory: rust/fno-math-py
+        run: cargo check --all-targets
+      - name: verify .pyi stub matches Rust PyO3 signatures
+        working-directory: .
+        run: python3 scripts/ci/verify-math-stub-vs-wheel.py
 
   # ─────────────────────────────────────────────────────────────────
   # BANNED PATTERNS — no print, no TODO in prod, no .env*
