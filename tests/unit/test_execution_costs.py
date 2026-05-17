@@ -221,7 +221,11 @@ class TestIndianCostModelQuantisation:
         ):
             value: Decimal = getattr(costs, name)
             # The quantised value has at most 2 decimal places.
-            assert -value.as_tuple().exponent <= 2, f"{name} not rounded: {value}"
+            # Decimal.as_tuple().exponent is int for finite values; Literal['n','N','F']
+            # only for NaN/Infinity which our cost model never produces.
+            exponent = value.as_tuple().exponent
+            assert isinstance(exponent, int), f"{name} produced non-finite Decimal: {value}"
+            assert -exponent <= 2, f"{name} not rounded: {value}"
 
     def test_total_is_sum_of_fields(self) -> None:
         model = IndianCostModel()

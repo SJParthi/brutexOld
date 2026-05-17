@@ -20,6 +20,7 @@ it doesn't break minimal runs.
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from datetime import UTC, datetime
 
 import pytest
@@ -57,7 +58,7 @@ def state() -> DashboardState:
 
 
 @pytest.fixture
-def client(state: DashboardState) -> TestClient:
+def client(state: DashboardState) -> Generator[TestClient]:
     app = build_app(state)
     with TestClient(app) as c:
         yield c

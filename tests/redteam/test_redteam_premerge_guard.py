@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -93,7 +94,7 @@ class TestGuardRefusesRedCI:
 
     def test_guard_refuses_when_a_check_failed(self, fake_gh_returning, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
         """Plant a CI rollup with one FAILURE → guard must exit non-zero."""
-        rollup = {
+        rollup: dict[str, Any] = {
             "statusCheckRollup": [
                 {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
                 for i in range(25)
@@ -113,7 +114,7 @@ class TestGuardRefusesRedCI:
 
     def test_guard_refuses_on_pending_checks(self, fake_gh_returning, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
         """Pending CI → guard must refuse (don't merge mid-run)."""
-        rollup = {
+        rollup: dict[str, Any] = {
             "statusCheckRollup": [
                 {"name": f"check-{i}", "conclusion": "SUCCESS", "status": "COMPLETED"}
                 for i in range(25)

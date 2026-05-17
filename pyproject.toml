@@ -260,31 +260,25 @@ reportUnusedExpression = "none"         # bare expressions in test fixtures (hyp
 # reportMissingTypeStubs (already silenced), reportUnknownLambdaType
 # (already silenced).
 
-# Per-file overrides for pyright strict mode (DEC-P0-004 — recovery PR).
-# These narrow silences cover legitimate test-only patterns that strict
-# mode flags but are correct in the test context. Each pattern has a
-# P1 follow-up to fix properly in source (see MIGRATION.md DEC-P0-004).
+# DEC-P0-010 (PR #32): partial re-promotion of per-test pyright overrides.
+# 4 of 6 categories REMOVED (now back at strict-mode error): reportCallIssue,
+# reportGeneralTypeIssues, reportUntypedClassDecorator, reportOperatorIssue.
+# Fixed via: _seed_lake Sequence[float], Generator fixture return types, dict
+# Any annotations on rollup data, isinstance Decimal exponent guard, generic
+# TypeVar on register_strategy + ClassVar META + __init__ on _DecoStrat,
+# targeted pyright:ignore on one decorator with Protocol-detection-limitation.
+#
+# 2 categories REMAIN downgraded (reportArgumentType + reportAttributeAccessIssue):
+# pyright in tests/ surfaces 56 + 17 = 73 additional errors of these types in
+# pre-existing test fixtures using fake/protocol-stub patterns (test_fakes/,
+# test_dashboard_state.py parametrize loose-typing, test_adapter_protocol.py
+# stub access). Per Golden Rule #10: honest envelope — fixing these 73 is a
+# separate dedicated PR (P1 follow-up #6b); they don't affect test correctness
+# (tests pass) but require ~3 days of test-fixture refactoring.
 [[tool.pyright.executionEnvironments]]
 root = "tests"
-# Test fixtures use META = StrategyMeta(...) at class scope without the
-# ClassVar annotation that the Strategy protocol declares. The runtime
-# behavior is identical; the annotation difference is cosmetic for tests.
-# Strategy fixtures use literal numeric data ([100, 102, ...]) that ruff
-# strict treats as list[int] when called functions take list[float] —
-# the implicit promotion is safe but pyright is conservative.
-# Test parametrize fixtures pass `object` values that don't always narrow
-# cleanly to the parameter type — pytest's parametrize is intentionally
-# loosely-typed. Test-only union narrowing in cost-calc tests covers
-# overloaded function signatures that the production code doesn't expose.
-# Test fakes intentionally do not inherit from real types (they mimic the
-# protocol surface) — protocol-attribute access on a fake matches the
-# protocol but not the production class hierarchy.
-reportArgumentType = "warning"       # list variance in test data fixtures
-reportAttributeAccessIssue = "warning"  # protocol-stub attributes on test fakes
-reportCallIssue = "warning"          # ClassVar-vs-instance META on test strategy fixtures
-reportGeneralTypeIssues = "warning"  # parametrize loose typing + union narrowing in test_execution_costs.py
-reportUntypedClassDecorator = "warning"  # @dataclass without explicit type args in test fixtures
-reportOperatorIssue = "warning"      # test_execution_costs.py has parametrize union that exercises overloads
+reportArgumentType = "warning"       # 56 errors in test data fixtures; P1 follow-up
+reportAttributeAccessIssue = "warning"  # 17 errors on protocol-stub test fakes; P1 follow-up
 
 [tool.pytest.ini_options]
 minversion = "8.0"

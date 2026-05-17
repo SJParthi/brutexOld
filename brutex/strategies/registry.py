@@ -15,13 +15,13 @@ This is the enforcement half of ``FR-STR-002``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from brutex.strategies.errors import StrategyRegistrationError
-from brutex.strategies.protocol import StrategyMeta
+from brutex.strategies.protocol import Strategy, StrategyMeta
 
 if TYPE_CHECKING:  # pragma: no cover
-    from brutex.strategies.protocol import Strategy
+    pass
 
 
 class StrategyRegistry:
@@ -104,7 +104,10 @@ class StrategyRegistry:
 default_registry: StrategyRegistry = StrategyRegistry()
 
 
-def register_strategy(strategy_cls: type[Strategy]) -> type[Strategy]:
+_StrategyT = TypeVar("_StrategyT", bound=type[Strategy])
+
+
+def register_strategy(strategy_cls: _StrategyT) -> _StrategyT:  # noqa: UP047 — PEP 695 not yet supported by mypy
     """Register *strategy_cls* in the module-wide :data:`default_registry`.
 
     Usable as a decorator::
@@ -115,5 +118,11 @@ def register_strategy(strategy_cls: type[Strategy]) -> type[Strategy]:
 
             def on_event(self, event, state):
                 ...
+
+    Per DEC-P0-010 (PR #32): generic TypeVar preserves the concrete class
+    type (vs ``type[Strategy]`` which would erase to the Protocol). This
+    silences pyright's `reportUntypedClassDecorator` since the decorated
+    class retains its original identity.
     """
-    return default_registry.register(strategy_cls)
+    default_registry.register(strategy_cls)
+    return strategy_cls
