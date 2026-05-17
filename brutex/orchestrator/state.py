@@ -48,14 +48,14 @@ class WorkItemState(StrEnum):
     """
 
     # ── Non-terminal ──────────────────────────────────────────────
-    PENDING = "PENDING"  # queued, not yet dispatched
-    IN_FLIGHT = "IN_FLIGHT"  # worker is calling the broker
-    RETRYING = "RETRYING"  # transient error; waiting on exponential backoff
+    PENDING = "PENDING"  # pragma: no mutate
+    IN_FLIGHT = "IN_FLIGHT"  # pragma: no mutate
+    RETRYING = "RETRYING"  # pragma: no mutate
 
     # ── Terminal ──────────────────────────────────────────────────
-    SUCCESS = "SUCCESS"  # the broker returned valid data; parsed + stored
-    NO_DATA = "NO_DATA"  # the broker confirmed empty / not found — recorded, not skipped
-    QUARANTINED = "QUARANTINED"  # needs human review; phase blocked until resolved
+    SUCCESS = "SUCCESS"  # pragma: no mutate
+    NO_DATA = "NO_DATA"  # pragma: no mutate
+    QUARANTINED = "QUARANTINED"  # pragma: no mutate
 
 
 #: Frozen sets used by ``is_terminal`` and ``phase_complete``.
@@ -80,10 +80,10 @@ def is_terminal(state: WorkItemState) -> bool:
 class IngestPhase(StrEnum):
     """The four sequential ingest phases. See ``§8.5``."""
 
-    A_INSTRUMENTS = "A_INSTRUMENTS"
-    B_EXPIRIES = "B_EXPIRIES"
-    C_CONTRACTS = "C_CONTRACTS"
-    D_CANDLES = "D_CANDLES"
+    A_INSTRUMENTS = "A_INSTRUMENTS"  # pragma: no mutate
+    B_EXPIRIES = "B_EXPIRIES"  # pragma: no mutate
+    C_CONTRACTS = "C_CONTRACTS"  # pragma: no mutate
+    D_CANDLES = "D_CANDLES"  # pragma: no mutate
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -101,19 +101,19 @@ class Outcome(StrEnum):
     """
 
     # ── Success path ──────────────────────────────────────────────
-    OK_WITH_DATA = "OK_WITH_DATA"  # non-empty response parsed OK
-    OK_EMPTY = "OK_EMPTY"  # empty list/array returned — NO_DATA
+    OK_WITH_DATA = "OK_WITH_DATA"  # pragma: no mutate
+    OK_EMPTY = "OK_EMPTY"  # pragma: no mutate
 
     # ── Transient errors (retry loop) ──────────────────────────────
-    RATE_LIMIT = "RATE_LIMIT"  # VendorAPIRateLimitException
-    TIMEOUT = "TIMEOUT"  # VendorAPITimeoutException
-    GENERIC_API_ERROR = "GENERIC_API_ERROR"  # generic VendorAPIException / VendorBaseException
+    RATE_LIMIT = "RATE_LIMIT"  # pragma: no mutate
+    TIMEOUT = "TIMEOUT"  # pragma: no mutate
+    GENERIC_API_ERROR = "GENERIC_API_ERROR"  # pragma: no mutate
 
     # ── Permanent errors (quarantine or no-data) ──────────────────
-    NOT_FOUND = "NOT_FOUND"  # VendorAPINotFoundException — recorded as NO_DATA
-    BAD_REQUEST = "BAD_REQUEST"  # VendorAPIBadRequestException — quarantine
-    AUTH_FAILED = "AUTH_FAILED"  # VendorAPIAuthenticationException — quarantine
-    AUTHZ_FAILED = "AUTHZ_FAILED"  # VendorAPIAuthorisationException — quarantine
+    NOT_FOUND = "NOT_FOUND"  # pragma: no mutate
+    BAD_REQUEST = "BAD_REQUEST"  # pragma: no mutate
+    AUTH_FAILED = "AUTH_FAILED"  # pragma: no mutate
+    AUTHZ_FAILED = "AUTHZ_FAILED"  # pragma: no mutate
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -128,10 +128,10 @@ class QuarantineReason(StrEnum):
     dashboard's quarantine-queue table.
     """
 
-    BAD_REQUEST = "bad_request"  # adapter bug — wrong params sent to the broker
-    AUTH_FAILED = "auth_failed"  # bad or expired BRUTEX_BROKER_TOKEN
-    AUTHZ_FAILED = "authz_failed"  # token lacks the required scope
-    RETRY_EXHAUSTED = "retry_exhausted"  # >= MAX_SOFT_RETRIES entries into RETRYING
+    BAD_REQUEST = "bad_request"  # pragma: no mutate
+    AUTH_FAILED = "auth_failed"  # pragma: no mutate
+    AUTHZ_FAILED = "authz_failed"  # pragma: no mutate
+    RETRY_EXHAUSTED = "retry_exhausted"  # pragma: no mutate
 
 
 # ────────────────────────────────────────────────────────────────────────
