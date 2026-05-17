@@ -12,9 +12,16 @@ authors = [
 # Track 1 base dependencies. The Dhan adapter (Phase 2) will add `dhanhq`
 # as an optional extra. The legacy a broker SDK dependency was dropped on
 # 2026-05-15 as part of the the broker → Dhan migration (see docs/MIGRATION.md).
+#
+# DEC-P0-012 (PR #34, 2026-05-17 "always latest"): upper bounds widened to
+# include the latest stable major published on PyPI as of branch date. New
+# bounds are next-major-after-latest so Renovate (added in renovate.json)
+# can auto-bump within the range without pyproject churn. Verified safe via
+# full pytest+ruff+mypy+pyright run; majors that broke (none yet) would be
+# pinned back to the old upper bound with rationale.
 dependencies = [
     "pydantic>=2.7,<3.0",
-    "structlog>=24.1,<25.0",
+    "structlog>=24.1,<26.0",  # was <25.0; PyPI latest 25.5.0 (DEC-P0-012)
     "lmdb>=1.5,<3.0",
 ]
 
@@ -28,21 +35,21 @@ dependencies = [
 data = [
     "polars>=1.0,<2.0",
     "duckdb>=1.0,<2.0",
-    "pyarrow>=16,<19",
+    "pyarrow>=16,<25",   # was <19; PyPI latest 24.0.0 (DEC-P0-012)
     "pytz>=2024.1",
 ]
 dev = [
-    "pytest>=8.0,<9.0",
-    "pytest-cov>=5.0,<6.0",
-    "pytest-benchmark>=4.0,<5.0",
+    "pytest>=8.0,<10.0",            # was <9.0; PyPI latest 9.0.3 (DEC-P0-012)
+    "pytest-cov>=5.0,<8.0",         # was <6.0; PyPI latest 7.1.0 (DEC-P0-012)
+    "pytest-benchmark>=4.0,<6.0",   # was <5.0; PyPI latest 5.2.3 (DEC-P0-012)
     "hypothesis>=6.100,<7.0",
     "ruff>=0.15,<1.0",
-    "mypy>=1.10,<2.0",
+    "mypy>=1.10,<3.0",              # was <2.0; PyPI latest 2.1.0 (DEC-P0-012)
     "pyright>=1.1.360,<2.0",
     "bandit>=1.7,<2.0",
     "pip-audit>=2.7,<3.0",
     "safety>=3.2,<4.0",
-    "mutmut>=2.5,<3.0",
+    "mutmut>=2.5,<4.0",             # was <3.0; PyPI latest 3.5.0 (DEC-P0-012)
     "interrogate>=1.7,<2.0",
     "pip-licenses>=5.0,<6.0",
 ]
