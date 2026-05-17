@@ -9,7 +9,6 @@ Verified against:
 from __future__ import annotations
 
 import pytest
-
 from brutex.indicators.ema import alpha, compute_ema, latest_ema
 
 
@@ -126,6 +125,5 @@ class TestNoLookAhead:
             prefix_ema = compute_ema(values[: n + 1], period=10)
             # The EMA at bar N in the prefix series == EMA at bar N in the full series
             assert prefix_ema[n] == full_ema[n], (
-                f"Look-ahead detected at bar {n}: "
-                f"prefix={prefix_ema[n]} != full={full_ema[n]}"
+                f"Look-ahead detected at bar {n}: prefix={prefix_ema[n]} != full={full_ema[n]}"
             )

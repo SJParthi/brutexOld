@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from brutex.data.timeframes import (
     ALL_TF_MINUTES,
     DAILY_TF_MINUTES,
@@ -36,11 +35,11 @@ class TestLabel:
     @pytest.mark.parametrize(
         "tf,expected",
         [
-            (1,   "1m"),
-            (5,   "5m"),
-            (15,  "15m"),
-            (30,  "30m"),
-            (60,  "60m"),
+            (1, "1m"),
+            (5, "5m"),
+            (15, "15m"),
+            (30, "30m"),
+            (60, "60m"),
             (240, "240m"),
             (375, "1d"),
         ],
@@ -57,11 +56,11 @@ class TestParseLabel:
     @pytest.mark.parametrize(
         "s,expected",
         [
-            ("1m",  1),
-            ("5m",  5),
+            ("1m", 1),
+            ("5m", 5),
             ("15m", 15),
             ("60m", 60),
-            ("1d",  375),
+            ("1d", 375),
         ],
     )
     def test_parse(self, s: str, expected: int) -> None:
@@ -91,12 +90,12 @@ class TestIsMultiple:
     @pytest.mark.parametrize(
         "target,source,expected",
         [
-            (5, 1, True),    # 1m -> 5m is fine
+            (5, 1, True),  # 1m -> 5m is fine
             (15, 1, True),
-            (15, 5, True),   # 5m -> 15m is fine
+            (15, 5, True),  # 5m -> 15m is fine
             (15, 3, True),
-            (7, 5, False),   # 5m -> 7m is NOT a multiple
-            (1, 1, True),    # no-op
+            (7, 5, False),  # 5m -> 7m is NOT a multiple
+            (1, 1, True),  # no-op
         ],
     )
     def test_multiple(self, target: int, source: int, expected: bool) -> None:
@@ -111,7 +110,7 @@ class TestSpecAlignment:
     """Verify the TF list exactly matches `docs/TRACK1_BACKTEST_SPEC.md`."""
 
     def test_intraday_minute_tfs_are_1_to_15(self) -> None:
-        assert INTRADAY_MINUTE_TFS == tuple(range(1, 16))
+        assert tuple(range(1, 16)) == INTRADAY_MINUTE_TFS
 
     def test_multiminute_tfs_are_30_60_120_180_240(self) -> None:
         assert INTRADAY_MULTIMINUTE_TFS == (30, 60, 120, 180, 240)

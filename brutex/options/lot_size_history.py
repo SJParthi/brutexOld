@@ -45,9 +45,10 @@ from typing import Final
 
 class OptionsUnderlying(Enum):
     """The 3 underlyings supported in Track 2."""
-    NIFTY     = "NIFTY"
+
+    NIFTY = "NIFTY"
     BANKNIFTY = "BANKNIFTY"
-    SENSEX    = "SENSEX"
+    SENSEX = "SENSEX"
 
 
 # Per-instrument lot-size history, sorted ascending by effective_date.
@@ -55,37 +56,38 @@ class OptionsUnderlying(Enum):
 # Source-cites in module docstring above.
 
 _LOT_HISTORY_NIFTY: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1),   75),  # pre-Jul 2021 default (extended back to start of backfill)
-    (date(2021, 7, 29),  50),  # Jul 2021 expiry rebasing
-    (date(2024, 4, 26),  25),  # 26-Apr-2024
+    (date(2021, 1, 1), 75),  # pre-Jul 2021 default (extended back to start of backfill)
+    (date(2021, 7, 29), 50),  # Jul 2021 expiry rebasing
+    (date(2024, 4, 26), 25),  # 26-Apr-2024
     (date(2024, 11, 20), 75),  # 20-Nov-2024 SEBI Rs 15L notional rule
-    (date(2026, 1, 1),   65),  # Jan 2026 onwards (current)
+    (date(2026, 1, 1), 65),  # Jan 2026 onwards (current)
 )
 
 _LOT_HISTORY_BANKNIFTY: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1),   25),  # pre-Jun 2023
-    (date(2023, 6, 30),  15),  # 30-Jun-2023
+    (date(2021, 1, 1), 25),  # pre-Jun 2023
+    (date(2023, 6, 30), 15),  # 30-Jun-2023
     (date(2024, 11, 20), 30),  # 20-Nov-2024
-    (date(2025, 7, 1),   35),  # Jul 2025 transitional
+    (date(2025, 7, 1), 35),  # Jul 2025 transitional
     (date(2025, 12, 30), 30),  # 30-Dec-2025 EOD revert
 )
 
 _LOT_HISTORY_SENSEX: Final[tuple[tuple[date, int], ...]] = (
-    (date(2021, 1, 1),   10),  # pre-Nov 2024
+    (date(2021, 1, 1), 10),  # pre-Nov 2024
     (date(2024, 11, 20), 20),  # 20-Nov-2024
 )
 
 
 _HISTORY_BY_UNDERLYING: Final[dict[OptionsUnderlying, tuple[tuple[date, int], ...]]] = {
-    OptionsUnderlying.NIFTY:     _LOT_HISTORY_NIFTY,
+    OptionsUnderlying.NIFTY: _LOT_HISTORY_NIFTY,
     OptionsUnderlying.BANKNIFTY: _LOT_HISTORY_BANKNIFTY,
-    OptionsUnderlying.SENSEX:    _LOT_HISTORY_SENSEX,
+    OptionsUnderlying.SENSEX: _LOT_HISTORY_SENSEX,
 }
 
 
 @dataclass(frozen=True)
 class LotSizeChange:
     """One lot size change event."""
+
     instrument: OptionsUnderlying
     effective_date: date
     lot_size: int
@@ -134,7 +136,4 @@ def all_transitions(instrument: OptionsUnderlying) -> list[LotSizeChange]:
 
 def all_current_lot_sizes(on_date: date) -> dict[OptionsUnderlying, int]:
     """Return current lot sizes for all 3 underlyings on `on_date`."""
-    return {
-        inst: get_lot_size(inst, on_date)
-        for inst in OptionsUnderlying
-    }
+    return {inst: get_lot_size(inst, on_date) for inst in OptionsUnderlying}

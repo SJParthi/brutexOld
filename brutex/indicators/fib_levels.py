@@ -67,29 +67,39 @@ from typing import Final
 
 # Standard Fibonacci ratios.
 FIB_RATIOS_RETRACEMENT: Final[dict[str, float]] = {
-    "0":    0.0,
-    "23":   0.236,
-    "38":   0.382,
-    "50":   0.500,
-    "62":   0.618,
-    "78":   0.786,
-    "100":  1.000,
+    "0": 0.0,
+    "23": 0.236,
+    "38": 0.382,
+    "50": 0.500,
+    "62": 0.618,
+    "78": 0.786,
+    "100": 1.000,
 }
 
 FIB_RATIOS_EXTENSION: Final[dict[str, float]] = {
-    "127":  0.272,
-    "162":  0.618,
-    "200":  1.000,
-    "262":  1.618,
-    "424":  3.236,
+    "127": 0.272,
+    "162": 0.618,
+    "200": 1.000,
+    "262": 1.618,
+    "424": 3.236,
 }
 
 ALL_RETRACEMENT_KEYS: Final[tuple[str, ...]] = (
-    "0", "23", "38", "50", "62", "78", "100",
+    "0",
+    "23",
+    "38",
+    "50",
+    "62",
+    "78",
+    "100",
 )
 
 ALL_EXTENSION_KEYS: Final[tuple[str, ...]] = (
-    "127", "162", "200", "262", "424",
+    "127",
+    "162",
+    "200",
+    "262",
+    "424",
 )
 
 
@@ -116,29 +126,29 @@ class FibLevels:
     """
 
     trading_day: date
-    pdh_paisa: int        # Previous Day's High
-    pdl_paisa: int        # Previous Day's Low
-    range_paisa: int      # PDH - PDL
+    pdh_paisa: int  # Previous Day's High
+    pdl_paisa: int  # Previous Day's Low
+    range_paisa: int  # PDH - PDL
 
     # ───── Retracement levels (inside PDH-PDL range) ─────
     # These 7 levels are SAME regardless of direction convention.
     # Labels differ: bearish reads top-down (0=PDH..100=PDL),
     # bullish reads bottom-up (0=PDL..100=PDH).
-    retrace_level_at_pdh_paisa: int       # = PDH (top)
-    retrace_23_paisa: int                  # 23.6% from PDH downward
-    retrace_38_paisa: int                  # 38.2% from PDH downward
-    retrace_50_paisa: int                  # midpoint
-    retrace_62_paisa: int                  # 61.8% from PDH downward
-    retrace_78_paisa: int                  # 78.6% from PDH downward
-    retrace_level_at_pdl_paisa: int       # = PDL (bottom)
+    retrace_level_at_pdh_paisa: int  # = PDH (top)
+    retrace_23_paisa: int  # 23.6% from PDH downward
+    retrace_38_paisa: int  # 38.2% from PDH downward
+    retrace_50_paisa: int  # midpoint
+    retrace_62_paisa: int  # 61.8% from PDH downward
+    retrace_78_paisa: int  # 78.6% from PDH downward
+    retrace_level_at_pdl_paisa: int  # = PDL (bottom)
 
     # ───── Bullish extensions ABOVE PDH ─────
     # Price targets when the day is trending up (gap-up open).
-    ext_up_127_paisa: int   # PDH + 0.272 × range
-    ext_up_162_paisa: int   # PDH + 0.618 × range
-    ext_up_200_paisa: int   # PDH + 1.000 × range
-    ext_up_262_paisa: int   # PDH + 1.618 × range
-    ext_up_424_paisa: int   # PDH + 3.236 × range
+    ext_up_127_paisa: int  # PDH + 0.272 × range
+    ext_up_162_paisa: int  # PDH + 0.618 × range
+    ext_up_200_paisa: int  # PDH + 1.000 × range
+    ext_up_262_paisa: int  # PDH + 1.618 × range
+    ext_up_424_paisa: int  # PDH + 3.236 × range
 
     # ───── Bearish extensions BELOW PDL ─────
     # Price targets when the day is trending down (gap-down open).
@@ -155,12 +165,12 @@ class FibLevels:
         Example: BANKNIFTY 30-Apr-2026 chart.
         """
         bearish_map = {
-            "0":   self.retrace_level_at_pdh_paisa,
-            "23":  self.retrace_23_paisa,
-            "38":  self.retrace_38_paisa,
-            "50":  self.retrace_50_paisa,
-            "62":  self.retrace_62_paisa,
-            "78":  self.retrace_78_paisa,
+            "0": self.retrace_level_at_pdh_paisa,
+            "23": self.retrace_23_paisa,
+            "38": self.retrace_38_paisa,
+            "50": self.retrace_50_paisa,
+            "62": self.retrace_62_paisa,
+            "78": self.retrace_78_paisa,
             "100": self.retrace_level_at_pdl_paisa,
             "127": self.ext_down_127_paisa,
             "162": self.ext_down_162_paisa,
@@ -183,13 +193,13 @@ class FibLevels:
         as the operator sees it.
         """
         bullish_map = {
-            "0":   self.retrace_level_at_pdl_paisa,    # PDL is the bottom (0% in bullish)
-            "23":  self.retrace_78_paisa,              # 23% up from PDL = 78% down from PDH
-            "38":  self.retrace_62_paisa,              # 38% up = 62% down
-            "50":  self.retrace_50_paisa,              # midpoint (same)
-            "62":  self.retrace_38_paisa,              # 62% up = 38% down
-            "78":  self.retrace_23_paisa,              # 78% up = 23% down
-            "100": self.retrace_level_at_pdh_paisa,    # PDH is the top (100% in bullish)
+            "0": self.retrace_level_at_pdl_paisa,  # PDL is the bottom (0% in bullish)
+            "23": self.retrace_78_paisa,  # 23% up from PDL = 78% down from PDH
+            "38": self.retrace_62_paisa,  # 38% up = 62% down
+            "50": self.retrace_50_paisa,  # midpoint (same)
+            "62": self.retrace_38_paisa,  # 62% up = 38% down
+            "78": self.retrace_23_paisa,  # 78% up = 23% down
+            "100": self.retrace_level_at_pdh_paisa,  # PDH is the top (100% in bullish)
             "127": self.ext_up_127_paisa,
             "162": self.ext_up_162_paisa,
             "200": self.ext_up_200_paisa,
@@ -212,7 +222,7 @@ def _round_half_even(x: float) -> int:
     CLAUDE.md §4 / spec §Non-Negotiable Correctness #11. Critical for
     bit-identical replay across rebuilds.
     """
-    return int(round(x))
+    return round(x)
 
 
 def compute_fib_levels(
@@ -243,19 +253,18 @@ def compute_fib_levels(
     """
     if pdh_paisa < pdl_paisa:
         raise ValueError(
-            f"PDH ({pdh_paisa}) must be >= PDL ({pdl_paisa}) — "
-            f"data corruption on {trading_day}"
+            f"PDH ({pdh_paisa}) must be >= PDL ({pdl_paisa}) — data corruption on {trading_day}"
         )
 
     range_paisa = pdh_paisa - pdl_paisa
 
     # Retracements (same physical levels regardless of direction label)
     retrace_pdh = pdh_paisa
-    retrace_23  = _round_half_even(pdh_paisa - 0.236 * range_paisa)
-    retrace_38  = _round_half_even(pdh_paisa - 0.382 * range_paisa)
-    retrace_50  = _round_half_even((pdh_paisa + pdl_paisa) / 2.0)
-    retrace_62  = _round_half_even(pdh_paisa - 0.618 * range_paisa)
-    retrace_78  = _round_half_even(pdh_paisa - 0.786 * range_paisa)
+    retrace_23 = _round_half_even(pdh_paisa - 0.236 * range_paisa)
+    retrace_38 = _round_half_even(pdh_paisa - 0.382 * range_paisa)
+    retrace_50 = _round_half_even((pdh_paisa + pdl_paisa) / 2.0)
+    retrace_62 = _round_half_even(pdh_paisa - 0.618 * range_paisa)
+    retrace_78 = _round_half_even(pdh_paisa - 0.786 * range_paisa)
     retrace_pdl = pdl_paisa
 
     # Bullish extensions ABOVE PDH

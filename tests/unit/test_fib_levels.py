@@ -18,7 +18,6 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
-
 from brutex.indicators.fib_levels import (
     ALL_EXTENSION_KEYS,
     ALL_RETRACEMENT_KEYS,
@@ -100,8 +99,8 @@ class TestBankniftyApr30BearishGapDown:
     def levels(self) -> FibLevels:
         return compute_fib_levels(
             trading_day=date(2026, 4, 30),
-            pdh_paisa=5_650_200,   # 56,502.00 inferred from 200% extension
-            pdl_paisa=5_565_000,   # 55,650.00 from chart
+            pdh_paisa=5_650_200,  # 56,502.00 inferred from 200% extension
+            pdl_paisa=5_565_000,  # 55,650.00 from chart
         )
 
     def test_range_inferred_correctly(self, levels: FibLevels) -> None:
@@ -185,8 +184,8 @@ class TestNiftyMay7BullishGapUp:
     def levels(self) -> FibLevels:
         return compute_fib_levels(
             trading_day=date(2026, 5, 7),
-            pdh_paisa=2_431_300,   # 24,313.00 from chart (= bullish 100% level)
-            pdl_paisa=2_405_600,   # 24,056.00 inferred from 200% UP extension
+            pdh_paisa=2_431_300,  # 24,313.00 from chart (= bullish 100% level)
+            pdl_paisa=2_405_600,  # 24,056.00 inferred from 200% UP extension
         )
 
     def test_range_correct(self, levels: FibLevels) -> None:

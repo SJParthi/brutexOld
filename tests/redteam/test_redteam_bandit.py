@@ -40,6 +40,5 @@ def test_bandit_catches_eval_user_input(fixtures_dir: Path) -> None:
     )
     output = (result.stdout + result.stderr).lower()
     assert "b307" in output or "eval" in output, (
-        f"bandit returned non-zero but didn't mention eval/B307.\n"
-        f"Output: {result.stdout}"
+        f"bandit returned non-zero but didn't mention eval/B307.\nOutput: {result.stdout}"
     )

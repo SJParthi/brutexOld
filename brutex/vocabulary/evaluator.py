@@ -18,7 +18,7 @@ from typing import Final
 
 from brutex.indicators.fib_levels import FibLevels
 from brutex.indicators.pivots import PivotLevels
-from brutex.vocabulary import bits as B
+from brutex.vocabulary import bits as B  # noqa: N812 — B = bit-position namespace
 
 # ────── Input dataclasses ──────
 
@@ -88,7 +88,7 @@ class PriorBarHistory:
         """Record this bar's bullish/bearish flag. O(1) per call."""
         self.flags.append(is_bullish)
         if len(self.flags) > self.prior_n:
-            self.flags = self.flags[-self.prior_n:]
+            self.flags = self.flags[-self.prior_n :]
 
     def all_bullish(self) -> bool:
         """True if the last `prior_n` bars are all bullish."""
@@ -106,10 +106,7 @@ class PriorBarHistory:
         """
         if len(self.flags) != self.prior_n:
             return False
-        for i in range(len(self.flags) - 1):
-            if self.flags[i] == self.flags[i + 1]:
-                return False
-        return True
+        return all(self.flags[i] != self.flags[i + 1] for i in range(len(self.flags) - 1))
 
 
 # ────── Helper functions ──────
@@ -117,10 +114,10 @@ class PriorBarHistory:
 
 # Time-of-day cutoffs (IST). Per vocab spec Group 8.
 _EARLY_MORNING_START: Final[time] = time(9, 16)
-_EARLY_MORNING_END:   Final[time] = time(10, 0)
-_MID_MORNING_END:     Final[time] = time(11, 30)
-_MIDDAY_END:          Final[time] = time(13, 0)
-_AFTERNOON_END:       Final[time] = time(15, 0)
+_EARLY_MORNING_END: Final[time] = time(10, 0)
+_MID_MORNING_END: Final[time] = time(11, 30)
+_MIDDAY_END: Final[time] = time(13, 0)
+_AFTERNOON_END: Final[time] = time(15, 0)
 
 
 def _is_near(close_paisa: int, level_paisa: int, bps: int) -> bool:
@@ -250,10 +247,10 @@ def evaluate_atoms(
     # ──────── Group 5: Candle Shape (bits 30-36) ────────
     o = snapshot.open_paisa
     h = snapshot.high_paisa
-    l = snapshot.low_paisa
+    lo = snapshot.low_paisa
     c = close
     body = abs(c - o)
-    total_range = h - l
+    total_range = h - lo
 
     if c > o:
         mask |= 1 << B.BIT_BAR_BULLISH
@@ -271,7 +268,7 @@ def evaluate_atoms(
             mask |= 1 << B.BIT_BAR_SMALL_BODY
         # Wicks
         upper_wick = h - max(o, c)
-        lower_wick = min(o, c) - l
+        lower_wick = min(o, c) - lo
         if upper_wick * 2 > total_range:
             mask |= 1 << B.BIT_LONG_UPPER_WICK
         if lower_wick * 2 > total_range:
