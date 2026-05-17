@@ -324,7 +324,10 @@ class AuditWriter:
             else:
                 writer = cls(path=path, actor=actor)
             # Open in append mode
-            writer._fp = open(  # noqa: SIM115 — writer owns the fd
+            # DEC-P0-017 (PR #39): classmethod factory assigns the private
+            # _fp on the just-constructed writer; writer owns the fd for
+            # its lifetime (companion to noqa: SIM115 below).
+            writer._fp = open(  # noqa: SIM115 — writer owns the fd  # pyright: ignore[reportPrivateUsage]
                 path, "a", encoding="utf-8"
             )
             return writer
@@ -337,7 +340,8 @@ class AuditWriter:
             )
 
         writer = cls(path=path, actor=actor)
-        writer._fp = open(  # noqa: SIM115 — writer owns the fd
+        # DEC-P0-017 (PR #39): same factory pattern as resume branch above.
+        writer._fp = open(  # noqa: SIM115 — writer owns the fd  # pyright: ignore[reportPrivateUsage]
             path, "x", encoding="utf-8"
         )
         return writer

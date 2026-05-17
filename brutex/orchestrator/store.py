@@ -218,7 +218,10 @@ class WorkItemStore:
         *,
         path: Path,
         env: lmdb.Environment,
-        dbs: dict[IngestPhase, lmdb._Database],
+        # DEC-P0-017 (PR #39): lmdb-py exports the Database type as `_Database`
+        # (no public alias in the binding stubs); intentional use of the
+        # private name. Same rationale at the dbs assignment in `open()` below.
+        dbs: dict[IngestPhase, lmdb._Database],  # pyright: ignore[reportPrivateUsage]
     ) -> None:
         self._path = path
         self._env = env
@@ -267,7 +270,7 @@ class WorkItemStore:
         # For read-only mode we instead use `env.open_db(key)` with NO
         # txn argument — the binding opens an implicit internal txn
         # and returns a handle that's valid for the env's lifetime.
-        dbs: dict[IngestPhase, lmdb._Database] = {}
+        dbs: dict[IngestPhase, lmdb._Database] = {}  # pyright: ignore[reportPrivateUsage]  # DEC-P0-017: see __init__ rationale above
         if read_only:
             for phase in IngestPhase:
                 dbs[phase] = env.open_db(phase.value.encode("utf-8"), create=False)

@@ -389,8 +389,11 @@ class TelegramNotifier:
         transport: TelegramTransport = _default_transport,
     ) -> TelegramNotifier:
         """Create + start a notifier with a background worker thread."""
+        # DEC-P0-017 (PR #39): same-module classmethod factory — _start_worker
+        # is the private init helper that boots the background thread; the
+        # factory legitimately invokes it as part of construction.
         notifier = cls(config=config, transport=transport, synchronous=False)
-        notifier._start_worker()
+        notifier._start_worker()  # pyright: ignore[reportPrivateUsage]
         return notifier
 
     def _start_worker(self) -> None:
@@ -440,12 +443,12 @@ class TelegramNotifier:
         caller continues unaffected.
         """
         if not self._config.enabled:
-            with self._bucket._lock:
+            with self._bucket._lock:  # pyright: ignore[reportPrivateUsage]  # DEC-P0-017: TelegramNotifier owns its TokenBucket; direct lock access avoids exposing the mutex through the public bucket surface.
                 self._bucket.dropped_on_disabled += 1
             return
 
         now = time.monotonic()
-        with self._bucket._lock:
+        with self._bucket._lock:  # pyright: ignore[reportPrivateUsage]  # DEC-P0-017: TelegramNotifier owns its TokenBucket; direct lock access avoids exposing the mutex through the public bucket surface.
             self._bucket.evict_expired_dedupe_locked(now)
             if self._bucket.check_dedupe_locked(event.kind, event.dedupe_key, now):
                 self._bucket.dropped_on_dedupe += 1
@@ -458,7 +461,7 @@ class TelegramNotifier:
         try:
             self._queue.put_nowait(event)
         except queue.Full:
-            with self._bucket._lock:
+            with self._bucket._lock:  # pyright: ignore[reportPrivateUsage]  # DEC-P0-017: TelegramNotifier owns its TokenBucket; direct lock access avoids exposing the mutex through the public bucket surface.
                 self._bucket.dropped_on_queue_full += 1
             logger.warning("telegram_queue_full", extra={"kind": event.kind})
 
@@ -483,7 +486,7 @@ class TelegramNotifier:
             logger.warning("telegram_transport_exception", extra={"error": str(exc)})
             ok = False
 
-        with self._bucket._lock:
+        with self._bucket._lock:  # pyright: ignore[reportPrivateUsage]  # DEC-P0-017: TelegramNotifier owns its TokenBucket; direct lock access avoids exposing the mutex through the public bucket surface.
             now = time.monotonic()
             if ok:
                 self._bucket.sent += 1
@@ -496,7 +499,7 @@ class TelegramNotifier:
 
     def stats(self) -> dict[str, int | float]:
         """Return a snapshot of the bucket stats for the dashboard."""
-        with self._bucket._lock:
+        with self._bucket._lock:  # pyright: ignore[reportPrivateUsage]  # DEC-P0-017: TelegramNotifier owns its TokenBucket; direct lock access avoids exposing the mutex through the public bucket surface.
             return {
                 "sent": self._bucket.sent,
                 "dropped_on_failure": self._bucket.dropped_on_failure,

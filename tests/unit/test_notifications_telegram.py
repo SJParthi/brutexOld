@@ -2,7 +2,17 @@
 
 All tests use synchronous mode + injected transport — zero real
 network calls, zero thread races.
+
+Per DEC-P0-017 (PR #39): this is a WHITEBOX test suite for the dedupe
+TokenBucket internals (`_lock`, `_dedupe_cache`). The file-level
+`reportPrivateUsage=none` directive below is intentional — we
+deliberately probe the private state to verify mutex acquisition order
+and cache invalidation timing. Production code reaches these symbols
+ONLY via the public surface; only this test file is permitted whitebox
+access.
 """
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 

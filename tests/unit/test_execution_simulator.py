@@ -4,7 +4,15 @@ Pure dataclass + state-machine tests \u2014 no feed, no catalog, no
 ``polars`` / ``duckdb`` / ``lmdb``. Covers lot-size + freeze
 validation, slippage direction, position open/extend/close/flip
 transitions, and equity snapshotting.
+
+Per DEC-P0-017 (PR #39): this is a WHITEBOX test that probes the
+simulator's private cost-model knobs (``_slippage_bps``,
+``_default_qty``) to verify cost-direction sign + lot-size rounding
+independent of the public construction surface. The file-level
+``reportPrivateUsage=none`` directive below is intentional.
 """
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
