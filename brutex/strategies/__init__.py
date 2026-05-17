@@ -42,7 +42,7 @@ from __future__ import annotations
 # Import the concrete strategy library so every @register_strategy
 # decorator fires and the default_registry is populated. Users then
 # discover strategies via ``default_registry.ids()`` or the CLI.
-from brutex.strategies import library  # noqa: F401  (side-effect import)
+from brutex.strategies import library  # noqa: F401  (side-effect import)  # pyright: ignore[reportUnusedImport]
 from brutex.strategies.combo import canonicalise_params, combo_hash
 from brutex.strategies.errors import (
     StrategyContractError,

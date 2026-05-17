@@ -104,6 +104,18 @@ class Strategy(Protocol):
 
     META: ClassVar[StrategyMeta]
 
+    def __init__(self, params: Mapping[str, Any] | None = None) -> None:
+        """Construct a strategy instance with optional parameter map.
+
+        Parameters
+        ----------
+        params
+            Strategy-specific parameter dict matching ``META.param_schema``,
+            or ``None`` to use defaults. Library strategies validate via
+            ``META.param_schema`` in their concrete ``__init__``.
+        """
+        ...
+
     def on_event(
         self,
         event: FeedEvent,

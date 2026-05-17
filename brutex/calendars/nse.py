@@ -30,6 +30,8 @@ SESSION_DURATION_MINUTES = 375  # 09:15-15:30 = 6h15m = 375 minutes
 
 
 class SessionType(Enum):
+    """Trading session classification: REGULAR / MUHURAT / HALF_DAY / HOLIDAY."""
+
     REGULAR = "regular"
     MUHURAT = "muhurat"
     HALF_DAY = "half_day"
@@ -47,6 +49,7 @@ class TradingSession:
 
     @property
     def duration_minutes(self) -> int:
+        """Session length in whole minutes (close - open in IST)."""
         delta = datetime.combine(self.date, self.close_time_ist) - datetime.combine(
             self.date, self.open_time_ist
         )
@@ -186,6 +189,7 @@ MUHURAT_SESSIONS: dict[date, tuple[time, time]] = {
 
 
 def is_holiday(d: date) -> bool:
+    """Return True if ``d`` is in the NSE/BSE published holiday list (2021-2026)."""
     return d in ALL_HOLIDAYS
 
 
@@ -194,6 +198,7 @@ _SATURDAY_WEEKDAY: Final[int] = 5
 
 
 def is_weekend(d: date) -> bool:
+    """Return True if ``d`` is Saturday or Sunday."""
     return d.weekday() >= _SATURDAY_WEEKDAY
 
 
@@ -203,6 +208,7 @@ def is_trading_day(d: date) -> bool:
 
 
 def has_muhurat_session(d: date) -> bool:
+    """Return True if ``d`` has a Diwali muhurat session (~1 hour, excluded from Sharpe denominator)."""
     return d in MUHURAT_SESSIONS
 
 
