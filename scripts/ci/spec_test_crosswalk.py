@@ -31,12 +31,18 @@ CROSSWALK: dict[Path, tuple[str, list[tuple[re.Pattern[str], str]]]] = {
     ROOT / "docs/track2/CALCULATOR_SPEC.md": (
         "tests/unit/test_costs_*.py",
         [
-            (re.compile(r"### 12\.1 The canonical NIFTY fixture"), "test_fixture_12_1_nifty_canonical"),
-            (re.compile(r"### 12\.2 Additional fixtures"),         "test_fixture_12_2"),
-            (re.compile(r"### 12\.3 Multi-lot scaling"),            "test_fixture_12_3_multi_lot"),
-            (re.compile(r"### 12\.7 Long vs Short"),                "test_fixture_12_7_side_symmetry"),
-            (re.compile(r"## 4\.2 Trade outcome state machine"),    "test_trade_outcome_state_machine"),
-            (re.compile(r"## 4\.3 Dhan-specific gotcha"),           "test_dhan_worthless_brokerage"),
+            (
+                re.compile(r"### 12\.1 The canonical NIFTY fixture"),
+                "test_fixture_12_1_nifty_canonical",
+            ),
+            (re.compile(r"### 12\.2 Additional fixtures"), "test_fixture_12_2"),
+            (re.compile(r"### 12\.3 Multi-lot scaling"), "test_fixture_12_3_multi_lot"),
+            (re.compile(r"### 12\.7 Long vs Short"), "test_fixture_12_7_side_symmetry"),
+            (
+                re.compile(r"## 4\.2 Trade outcome state machine"),
+                "test_trade_outcome_state_machine",
+            ),
+            (re.compile(r"## 4\.3 Dhan-specific gotcha"), "test_dhan_worthless_brokerage"),
         ],
     ),
 }
