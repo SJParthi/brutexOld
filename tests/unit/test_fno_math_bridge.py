@@ -138,7 +138,5 @@ class TestBitandCountU64s:
         # Coerce to u64 range for comparison.
         a_u64 = [x & 0xFFFFFFFFFFFFFFFF for x in a]
         b_u64 = [x & 0xFFFFFFFFFFFFFFFF for x in b]
-        expected = sum(
-            (x & y).bit_count() for x, y in zip(a_u64, b_u64, strict=True)
-        )
+        expected = sum((x & y).bit_count() for x, y in zip(a_u64, b_u64, strict=True))
         assert fno_math.bitand_count_u64s(a_u64, b_u64) == expected
