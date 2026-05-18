@@ -202,6 +202,7 @@ class _Accumulator:
     halt_reason: str | None = None
 
     def freeze(self) -> IngestStats:
+        """Return an immutable :class:`IngestStats` snapshot."""
         return IngestStats(
             ok_with_data=self.ok_with_data,
             ok_empty=self.ok_empty,
