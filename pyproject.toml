@@ -23,6 +23,7 @@ dependencies = [
     "pydantic>=2.7,<3.0",
     "structlog>=24.1,<26.0",  # was <25.0; PyPI latest 25.5.0 (DEC-P0-012)
     "lmdb>=1.5,<3.0",
+    "fastbloom-rs>=0.5,<1.0",  # DEC-P0-047: PyO3-backed Rust Bloom for the L1 4-tier dedup
 ]
 
 [project.optional-dependencies]
@@ -213,6 +214,7 @@ module = [
     "dhanhq", "dhanhq.*",  # Track 1 Dhan adapter (Phase 2 dependency)
     "httpx", "httpx.*",  # PR #2b Dhan HTTP transport — optional [dhan] extra
     "structlog", "structlog.*",  # DEC-P0-038: structlog runtime dep — type stubs not yet packaged
+    "fastbloom_rs", "fastbloom_rs.*",  # DEC-P0-047: PyO3-backed Rust Bloom — no Python stubs published
 ]
 ignore_missing_imports = true
 
