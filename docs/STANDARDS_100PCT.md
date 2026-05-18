@@ -134,7 +134,7 @@ Per Golden Rule #11. Every module obeys all 5:
 | Principle | Definition | Current enforcement |
 |---|---|---|
 | **COMPREHENSIVE** | streaming + batch interfaces; bit-exact oracle test; look-ahead invariant test; serialize/restore | ✅ pattern in `brutex/indicators/ema.py` etc.; 📋 not yet a property-test family |
-| **COMMON** | one source of truth; shared via `pip install git+...@v0.X.Y` | ✅ `docs/SHARED_LIBRARY.md` documents pattern; 👁️ enforced by review |
+| **COMMON** | one source of truth (this repo); every utility lives in exactly one place; downstream modules import; no copy-paste between modules | 👁️ enforced by review |
 | **DYNAMIC** | add/remove indicator/TF/condition without re-architecting | ✅ documented in DEC-PLUGIN-001 + DEC-PLUGIN-002 |
 | **SCALABLE** | same code path Day 1 → Phase 10; O(1) everywhere | 🟡 bench gates partial (no ratio assertion yet) |
 | **AUTOMATED** | 100% automated after one-time bootstrap | 🟡 Release Please ✅, auto-merge ✅, watchdog 📋, Telegram 📋 |

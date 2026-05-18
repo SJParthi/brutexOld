@@ -3,22 +3,18 @@
 > Persistent instructions for Claude Code working in this repository.
 > Every Claude session in `bruteX/` must read and honor this file.
 >
-> **Authority order (locked in DEC-PROTOCOL-001):**
+> **Authority order:**
 > 1. This file (`CLAUDE.md` — 12 Golden Rules)
-> 2. `docs/PROTOCOL_BRUTEX_ADAPTATION.md` (tickvault→BruteX translation table)
-> 3. `.claude/rules/project/brutex-protocol.md` (auto-loaded protocol bundle body)
-> 4. Defaults
+> 2. Defaults
 >
-> Adaptation doc OUTRANKS bundle body because the bundle is verbatim tickvault
-> content; you must filter it through the adaptation doc before applying.
-> When the bundle's tickvault examples (WS / QuestDB / DHAT / Loom / `crates/`)
-> don't translate, follow the adaptation doc and apply the SHAPE of the rule
-> with BruteX-native substitutions — never invent a tickvault-like component
-> just to satisfy a rule.
+> The previous DEC-PROTOCOL-001 layer (tickvault adaptation doc +
+> auto-loaded protocol bundle) was RETIRED in DEC-P0-026 (PR #48) —
+> BruteX is a self-contained Track 1 backtest engine with no
+> co-development relationship to any other repo.
 
-_Last updated: 2026-05-17. Protocol bundle adopted (DEC-PROTOCOL-001).
-2026-05-15: the broker → Dhan migration; Track 1 spec locked after
-4-agent hostile-review pass._
+_Last updated: 2026-05-18. DEC-P0-026 (PR #48) retired the tickvault
+co-development layer. 2026-05-15: the broker → Dhan migration;
+Track 1 spec locked after 4-agent hostile-review pass._
 
 ---
 
@@ -92,9 +88,9 @@ _Last updated: 2026-05-17. Protocol bundle adopted (DEC-PROTOCOL-001).
     Every module obeys all 5:
     - **COMPREHENSIVE** — streaming + batch interface, bit-exact oracle
       test, look-ahead invariant test, serialize/restore.
-    - **COMMON** — one source of truth (this repo). Backtest +
-      TickVault share `brutex.*` via `pip install git+...@v0.X.Y`.
-      NEVER copy-paste. See `docs/SHARED_LIBRARY.md`.
+    - **COMMON** — one source of truth (this repo). Every utility
+      lives in exactly one place; downstream modules import. No
+      copy-paste between modules.
     - **DYNAMIC** — add new indicator/TF/condition/mask without
       re-architecting. Plugin-style state classes, u64 mask vocab.
     - **SCALABLE** — same code path Day 1 (12.6M) → Phase 10 (730B).

@@ -975,10 +975,10 @@ based on **measured** spreads. Until then, flat 1-tick stands.
 
 The previous delta-bucketed model (1/2/5 ticks × ToD × VIX) is
 preserved in git history at commit `5defd08` for reference. It was
-an industry-magnitude estimate from PL Capital / Groww / Journal of
-Asset Management 2024, but could not be validated without tick data.
-Removed 2026-05-16 per operator decision to favor honest simplicity
-over false precision.
+an industry-magnitude estimate from external research literature
+(PL Capital + Journal of Asset Management 2024), but could not be
+validated without tick data. Removed 2026-05-16 per operator
+decision to favor honest simplicity over false precision.
 
 ---
 

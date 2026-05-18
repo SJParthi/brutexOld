@@ -226,6 +226,5 @@ bypass it.
 - `docs/MIGRATION.md` entry #142 (DEC-P0-004) — the violation that
   prompted this Z+ hardening
 - `CLAUDE.md` §2 rule 12 — 100% standards decree
-- `docs/PROTOCOL_BRUTEX_ADAPTATION.md` §0 — honest envelope wording
-- `.claude/rules/project/brutex-protocol.md` — protocol bundle including
-  Z+ Defense Doctrine
+- `docs/zplus/ZPLUS_PR_DISCIPLINE.md` — Z+ defensive layer + 6 marker
+  phrases enforced by `scripts/ci/zplus-pr-guard.sh`

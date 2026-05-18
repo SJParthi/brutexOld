@@ -42,7 +42,7 @@ every commit, every workflow obeys all 5 of:
 | # | Principle | Definition | Enforcement |
 |---|---|---|---|
 | 1 | **COMPREHENSIVE** | Every indicator/calendar/adapter has streaming + batch interface, bit-exact oracle test, look-ahead invariant test, serialize/restore for checkpoints | CLAUDE.md §4 coverage gates (100% line + 100% branch; mutation ≥85%) |
-| 2 | **COMMON** | One Python package, one source of truth. Backtest (BruteX) and Live (TickVault) share the SAME `brutex.*` modules via `pip install git+...@v0.X.Y`. NEVER copy-paste between repos. | `docs/SHARED_LIBRARY.md` + `tests/unit/test_streaming_parity.py` (16 tests proving backtest = live bit-identical) |
+| 2 | **COMMON** | One Python package, one source of truth (this repo). Every utility lives in exactly one place; downstream modules import. No copy-paste between modules. | enforced by review + jscpd duplication scanner (CI gate) |
 | 3 | **DYNAMIC** | Add a new indicator / TF / condition / strategy mask without re-architecting. Plugin-style state classes, u64 bitmask vocabulary, config-driven, no recompile. | `brutex/indicators/__init__.py` registry + 52-condition vocab via u64 masks |
 | 4 | **SCALABLE** | Same code path Day 1 (12.6M trials) → Phase 10 (730B trials). O(1) per-bar updates, O(1) mask AND, O(1) dedup, O(1) result write. | CI gate `p99(N=1M)/p99(N=1K) ≤ 1.10` (CLAUDE.md §2 #5); memory-BW proof (Agent A research) |
 | 5 | **AUTOMATED** | 100% automated. Zero manual intervention after one-time bootstrap. CI, releases, merges, validation gates, resumes, alerts, deploys — all automatic. | `.github/workflows/release.yml` (Release Please), `auto-merge.yml`, watchdog, Telegram bot, daily dopamine commits |
