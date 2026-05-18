@@ -1,9 +1,17 @@
+# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportAttributeAccessIssue=false
 """Unit tests for the PyO3 ⇆ Python bridge (DEC-P0-050 / PR-K).
 
 The `fno_math` Python module is built from `rust/fno-math/` via maturin
 and installed alongside `brutex` in CI. These tests verify that the
 bridge round-trips correctly under the abi3-py312 stable-ABI wheel
 build pipeline.
+
+The file-level pyright pragma above silences the missing-stub
+diagnostics — V1 ships the wheel WITHOUT a bundled `fno_math.pyi`
+(mixed Python+Rust layout complicates the build). A future PR can
+add proper stubs via `[tool.maturin] python-source` once the kernel
+grows beyond trivial primitives. Runtime correctness is verified by
+this test file; static-type confidence ratchets later.
 
 Future Stage 1B AND-mask kernel + blake3 hash + Bloom bit-density
 vectorisation will register their `#[pyfunction]` entries in

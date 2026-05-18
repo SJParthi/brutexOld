@@ -37,5 +37,11 @@ classifiers = [
 # Build as a Rust extension module — there is no Python source layer
 # (the cdylib IS the Python package). When future Phase 3 work needs
 # a Python shim, add `python-source = "python"` here.
+#
+# Note: type stubs (`fno_math.pyi`) are intentionally NOT shipped in
+# V1 — they would require a mixed Python+Rust layout that complicates
+# the build. The test file `tests/unit/test_fno_math_bridge.py` carries
+# a file-level pyright pragma to silence the missing-stub warnings
+# instead. Stub support tracked as a follow-up.
 features = ["pyo3/extension-module"]
 strip = true
