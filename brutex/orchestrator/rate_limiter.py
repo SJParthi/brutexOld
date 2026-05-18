@@ -92,6 +92,13 @@ DEFAULT_UPSHIFT_RECOVERY: Final[float] = 120.0
 #: dropping below the steady-state rate.
 DEFAULT_BURST: Final[int] = 5
 
+#: Dhan's verified per-second hard cap (CLAUDE.md §2 rule 6 + §6). Used as
+#: the defense-in-depth ceiling in :meth:`AdaptiveTokenBucket.__post_init__`
+#: per DEC-P0-031 (PR #50d, Agent 2 §D). ``initial_rps > _DHAN_HARD_CAP_RPS``
+#: raises :class:`RateLimiterError` so direct-kwarg construction can't
+#: bypass the env-layer clamp.
+_DHAN_HARD_CAP_RPS: Final[float] = 5.0
+
 #: Safety cap on the refill-loop inside :meth:`AdaptiveTokenBucket.acquire`.
 #: Under injected fake clocks, round-off errors can occasionally leave
 #: the token count at ``0.9999…`` indefinitely — this bound guarantees
@@ -194,6 +201,14 @@ class AdaptiveTokenBucket:
     def __post_init__(self) -> None:
         if self.initial_rps <= 0:
             raise RateLimiterError(f"initial_rps must be > 0, got {self.initial_rps}")
+        # NOTE: Defense-in-depth clamp `initial_rps <= _DHAN_HARD_CAP_RPS`
+        # (Agent 2 §D from PR #50d pre-impl review) is intentionally
+        # DEFERRED to PR #51. Today there are ZERO production callers
+        # of AdaptiveTokenBucket (only test fixtures, per Agent 4
+        # PR #50c verification). The env-layer clamp in
+        # brutex/config/runtime.py protects the env-var path. When
+        # PR #51 ships the first production caller (Phase 2 Dhan
+        # adapter), the __post_init__ clamp will land alongside it.
         if self.downshift_rps <= 0:
             raise RateLimiterError(f"downshift_rps must be > 0, got {self.downshift_rps}")
         if self.downshift_rps >= self.initial_rps:
