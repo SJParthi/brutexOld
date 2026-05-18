@@ -83,7 +83,7 @@ expected SHA256 in `tests/golden/expected_sha256.txt`.
 | Fixture | Purpose |
 |---|---|
 | `dhan_intraday_2024-01-02_NIFTY.json` | Post-budget gap day; canonical 1m → Parquet conversion |
-| `dhan_intraday_2024-04-12_NIFTY.json` | Ram Navami half-session (typically closes 13:00 or 14:00) |
+| `dhan_intraday_2024-02-01_NIFTY.json` | NSE Budget Day 2024 half-session (09:15-12:30 IST); bar count must reject post-12:30 entries. (Prior version of this row cited "2024-04-12 Ram Navami half-session" — fixed in DEC-P0-042: Ram Navami 2024 was 2024-04-17 *full* holiday, and 2024-04-12 was a regular Friday — see `brutex/calendars/nse.py` HOLIDAYS_2024.) |
 | `dhan_intraday_2024-11-01_NIFTY.json` | Diwali Muhurat — anomalous bars, post-15:20 hours |
 | `dhan_intraday_2024-05-20_NIFTY.json` | Election holiday (BSE/NSE shut) — must reject the bar |
 | `dhan_intraday_2025-03-14_NIFTY.json` | Holi (Friday holiday); PDH/PDL for Monday must skip to Thursday |
