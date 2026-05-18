@@ -51,6 +51,7 @@ from brutex.adapters.dhan.body import (
     build_intraday_body,
 )
 from brutex.adapters.dhan.parser import parse_response
+from brutex.adapters.dhan.ssrf_guard import assert_host_is_public
 from brutex.adapters.dhan.types import FetchResult
 from brutex.orchestrator.dhan_errors import (
     DHAN_CODE_TO_EXCEPTION,
@@ -121,11 +122,17 @@ class DhanClient:
         *,
         http_client: httpx.Client | None = None,
         base_url: str = DHAN_API_BASE_URL,
+        ssrf_check: bool = True,
     ) -> None:
         self._token = token
         self._bucket = bucket
         self._base_url = base_url
         if http_client is None:
+            # Pre-resolve the base URL hostname and refuse non-global IPs
+            # (DEC-P0-036 / SSRF guard). Tests pass `ssrf_check=False`
+            # when injecting an httpx.MockTransport against a fake host.
+            if ssrf_check:
+                assert_host_is_public(base_url)
             self._http = httpx.Client(
                 base_url=base_url,
                 trust_env=False,
@@ -136,6 +143,8 @@ class DhanClient:
             )
             self._owns_http = True
         else:
+            # Caller-supplied http_client (tests). SSRF check skipped —
+            # the mock transport never makes a real network call.
             self._http = http_client
             self._owns_http = False
 
