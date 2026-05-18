@@ -63,8 +63,10 @@ from types import TracebackType
 from typing import Final, Self
 
 import lmdb
+import structlog
 
 from brutex.models import BruteXError
+from brutex.orchestrator.bloom import BloomCapacityExceeded, BloomFilter
 from brutex.orchestrator.state import (
     IngestPhase,
     QuarantineReason,
@@ -222,11 +224,27 @@ class WorkItemStore:
         # (no public alias in the binding stubs); intentional use of the
         # private name. Same rationale at the dbs assignment in `open()` below.
         dbs: dict[IngestPhase, lmdb._Database],  # pyright: ignore[reportPrivateUsage]
+        bloom: BloomFilter | None = None,
     ) -> None:
         self._path = path
         self._env = env
         self._dbs = dbs
+        self._bloom = bloom
         self._closed = False
+        # DEC-P0-048 (PR-I): cold-start rebuild — when a BloomFilter is
+        # supplied, scan every phase + add every existing content_hash so
+        # the L1 fast-fail is in sync with LMDB ground-truth from the
+        # first :meth:`maybe_seen_terminal` call. Eager (not lazy) per
+        # 4-agent Architecture lens §4. On failure (capacity exceeded
+        # mid-rebuild, or any other exception) close the LMDB env so
+        # the half-opened state doesn't leak; operator runbook = bump
+        # capacity + restart.
+        if bloom is not None:
+            try:
+                self._rebuild_bloom_from_lmdb()
+            except BaseException:
+                self.close()
+                raise
 
     @classmethod
     def open(
@@ -235,6 +253,7 @@ class WorkItemStore:
         *,
         map_size_mb: int = DEFAULT_MAP_SIZE_MB,
         read_only: bool = False,
+        bloom: BloomFilter | None = None,
     ) -> WorkItemStore:
         """Create or resume the store at *path*.
 
@@ -278,7 +297,7 @@ class WorkItemStore:
             with env.begin(write=True) as txn:
                 for phase in IngestPhase:
                     dbs[phase] = env.open_db(phase.value.encode("utf-8"), txn=txn, create=True)
-        return cls(path=path, env=env, dbs=dbs)
+        return cls(path=path, env=env, dbs=dbs, bloom=bloom)
 
     # ── Context manager ────────────────────────────────────────────
 
@@ -308,12 +327,21 @@ class WorkItemStore:
         A put with an existing key OVERWRITES (expected — state
         transitions update the same row).
 
+        If a :class:`BloomFilter` was supplied at :meth:`open` time, the
+        item's content_hash is added to the L1 filter AFTER the LMDB
+        transaction commits (DEC-P0-048 / 4-agent Architecture §6
+        ordering lock). A crash between commit and Bloom-add leaves
+        LMDB ahead by one item; the next cold-start rebuild reconciles.
+
         Raises
         ------
         StoreError
             If the store is closed.
         StoreKeyError
             If the item's content_hash is malformed.
+        BloomCapacityExceeded
+            If the supplied Bloom is at capacity. LMDB commit has
+            already succeeded; cold-start rebuild reconciles.
         """
         if self._closed:
             raise StoreError(f"Store {self._path} is closed")
@@ -321,20 +349,62 @@ class WorkItemStore:
         value = _serialize_item(item)
         with self._env.begin(write=True) as txn:
             txn.put(key, value, db=self._dbs[item.phase])
+        # Post-commit Bloom-add. PR-H + PR-I locked: commit first, then
+        # update L1, so a crash mid-flight never seeds Bloom with a
+        # rolled-back write.
+        if self._bloom is not None:
+            self._bloom.add(key)
 
     def put_many(self, items: list[WorkItem]) -> None:
         """Batch insert/update — one transaction for all items.
 
         Significantly faster than repeated :meth:`put` for bulk
         operations like seeding a phase's initial PENDING items.
+
+        DEC-P0-048: if a :class:`BloomFilter` is supplied, the batch is
+        pre-flighted against ``bloom.capacity`` BEFORE opening the
+        write transaction — otherwise a mid-batch
+        :class:`BloomCapacityExceeded` would leave LMDB with all N
+        items committed and Bloom out of sync (4-agent Hostile §1 +
+        Architecture §5 lock).
+
+        Empty batches short-circuit with no LMDB I/O.
+
+        Raises
+        ------
+        BloomCapacityExceeded
+            If the batch would push the supplied Bloom past capacity.
+            Neither LMDB nor Bloom are mutated.
         """
+        if not items:
+            return
         if self._closed:
             raise StoreError(f"Store {self._path} is closed")
+        # Pre-flight Bloom capacity check — Hostile §1 + Architecture §5
+        # mandate this before opening the write txn.
+        if self._bloom is not None:
+            projected = self._bloom.insertions_attempted + len(items)
+            if projected > self._bloom.capacity:
+                raise BloomCapacityExceeded(
+                    f"put_many would push Bloom past capacity: "
+                    f"current={self._bloom.insertions_attempted:_} + "
+                    f"batch={len(items):_} > "
+                    f"capacity={self._bloom.capacity:_}"
+                )
+        # Pre-encode keys so post-commit Bloom-add doesn't re-walk the
+        # WorkItem list. Also catches malformed hashes BEFORE the LMDB
+        # txn opens (StoreKeyError is the first thing raised).
+        encoded: list[tuple[bytes, bytes, IngestPhase]] = [
+            (_encode_key(item.content_hash), _serialize_item(item), item.phase) for item in items
+        ]
         with self._env.begin(write=True) as txn:
-            for item in items:
-                key = _encode_key(item.content_hash)
-                value = _serialize_item(item)
-                txn.put(key, value, db=self._dbs[item.phase])
+            for key, value, phase in encoded:
+                txn.put(key, value, db=self._dbs[phase])
+        # Post-commit Bloom-add — pre-flight already validated the
+        # capacity envelope so the loop cannot raise.
+        if self._bloom is not None:
+            for key, _value, _phase in encoded:
+                self._bloom.add(key)
 
     # ── Reads ──────────────────────────────────────────────────────
 
@@ -362,9 +432,87 @@ class WorkItemStore:
         Used by every worker before making a Dhan API call. If this
         returns True, the call is skipped entirely (deduplication
         guarantee + O(1) lookup).
+
+        This method always touches LMDB. For Bloom-gated fast-fail
+        lookups, use :meth:`maybe_seen_terminal` instead.
         """
         item = self.get(phase, content_hash)
         return item is not None and is_terminal(item.state)
+
+    def maybe_seen_terminal(self, phase: IngestPhase, content_hash: str) -> bool:
+        """L1 Bloom fast-fail + L2 LMDB ground-truth dedup check.
+
+        DEC-P0-048: if no :class:`BloomFilter` was supplied at
+        :meth:`open` time, delegates directly to
+        :meth:`exists_terminal`. Otherwise:
+
+        * Bloom-miss → returns ``False`` immediately (no LMDB I/O).
+        * Bloom-hit → falls through to :meth:`exists_terminal` which
+          applies the terminal-state filter (Bloom tracks ALL inserted
+          items regardless of state, so a Bloom-hit only means "this
+          hash has been put at some point").
+
+        Concurrent-write contract: a ``False`` return under a concurrent
+        writer of the same ``content_hash`` MAY be a false negative
+        (see :meth:`brutex.orchestrator.bloom.BloomFilter.might_contain`).
+        The L2 LMDB layer is ground-truth; the worst case is an
+        unnecessary L2 lookup on a future call, never a duplicate
+        Dhan fetch.
+
+        Performance promise: when Bloom is configured, ``False`` returns
+        in sub-µs (Rust-backed bit-vector probe); ``True`` returns in
+        ~150 µs (Bloom probe + LMDB B+tree lookup). Compared to
+        :meth:`exists_terminal` (always ~150 µs), the L1 short-circuit
+        wins whenever the hit-rate skews toward miss.
+
+        Phase-1 honest envelope (Reality-check lens §2-3): the
+        bar-ingest workload has ~0% Bloom-miss rate because every
+        post-:meth:`put` lookup of the just-inserted hash returns True.
+        The L1 earns its keep at Stage 2 (Phase 3) where the funnel
+        survivors carry 30-80% duplicate combo-hashes. Ship the wiring
+        now; the overhead is invisible.
+        """
+        if self._closed:
+            raise StoreError(f"Store {self._path} is closed")
+        if self._bloom is None:
+            return self.exists_terminal(phase, content_hash)
+        key = _encode_key(content_hash)
+        if not self._bloom.might_contain(key):
+            return False
+        # Bloom says "maybe seen"; fall through to L2 ground-truth.
+        return self.exists_terminal(phase, content_hash)
+
+    def _rebuild_bloom_from_lmdb(self) -> None:
+        """Cold-start: re-seed the L1 Bloom from existing LMDB content.
+
+        Called once from :meth:`__init__` when a :class:`BloomFilter` is
+        supplied. Iterates every phase and adds each item's
+        ``content_hash`` to Bloom. Single-threaded by design — the
+        store is not yet exposed to readers when this runs.
+
+        Cost (Reality-check lens §1):
+        * ~2-3 s at 50M items (Phase 1 first-run)
+        * ~5 s to ~33 min at 1B items (Phase 3 Stage 2 survivors)
+
+        Raises propagate to :meth:`__init__` which calls
+        :meth:`close` and re-raises so the half-opened LMDB env
+        doesn't leak.
+        """
+        if self._bloom is None:  # pragma: no cover — defensive
+            return
+        logger = structlog.get_logger()
+        items_rebuilt = 0
+        for phase in IngestPhase:
+            for item in self.iter_phase(phase):
+                self._bloom.add(_encode_key(item.content_hash))
+                items_rebuilt += 1
+        logger.info(
+            "bloom_rebuild_complete",
+            store_path=str(self._path),
+            items_rebuilt=items_rebuilt,
+            bloom_capacity=self._bloom.capacity,
+            bloom_fpr_target=self._bloom.fpr_target,
+        )
 
     def iter_phase(self, phase: IngestPhase) -> Iterator[WorkItem]:
         """Stream every :class:`WorkItem` currently stored in *phase*.
