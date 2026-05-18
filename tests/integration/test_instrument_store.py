@@ -634,7 +634,7 @@ class TestClosedStore:
 # ────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.skip(
+@pytest.mark.skip(  # pyright: ignore[reportUntypedClassDecorator]
     reason=(
         "DEC-P0-011 (PR #33): Track 2 F&O functionality. The expiries table "
         "stores option expiry dates per (exchange, underlying, year) \u2014 meaningless "
@@ -733,7 +733,7 @@ class TestExpiriesTable:
             assert rows[0].snapshot_date == date(2025, 4, 10)
 
 
-@pytest.mark.skip(
+@pytest.mark.skip(  # pyright: ignore[reportUntypedClassDecorator]
     reason=(
         "DEC-P0-011 (PR #33): Track 2 F&O functionality. The contracts table "
         "stores option contract legs per (underlying, expiry) \u2014 meaningless for "
