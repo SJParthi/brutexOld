@@ -140,3 +140,53 @@ class TestBitandCountU64s:
         b_u64 = [x & 0xFFFFFFFFFFFFFFFF for x in b]
         expected = sum((x & y).bit_count() for x, y in zip(a_u64, b_u64, strict=True))
         assert fno_math.bitand_count_u64s(a_u64, b_u64) == expected
+
+
+class TestBlake3Hash:
+    """`blake3_hash` — DEC-P0-052 / PR-M foundational for sha256→blake3 migration."""
+
+    def test_returns_32_bytes(self) -> None:
+        """Blake3 digest length is 256 bits = 32 bytes (matches sha256)."""
+        digest = fno_math.blake3_hash(b"any input")
+        assert isinstance(digest, bytes)
+        assert len(digest) == 32
+
+    def test_empty_input_matches_reference_vector(self) -> None:
+        """BLAKE3 reference: empty input →
+        af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262.
+        """
+        digest = fno_math.blake3_hash(b"")
+        assert digest.hex() == "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+
+    def test_abc_matches_reference_vector(self) -> None:
+        """BLAKE3 reference: b'abc' →
+        6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85.
+        """
+        digest = fno_math.blake3_hash(b"abc")
+        assert digest.hex() == "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
+
+    def test_deterministic(self) -> None:
+        """Same input → same output, always (Golden Rule #4)."""
+        for payload in (b"", b"abc", b"\x00" * 100, b"\xff" * 1000):
+            assert fno_math.blake3_hash(payload) == fno_math.blake3_hash(payload)
+
+    def test_different_inputs_different_outputs(self) -> None:
+        """Collision resistance — basic differentiation."""
+        a = fno_math.blake3_hash(b"alpha")
+        b = fno_math.blake3_hash(b"beta")
+        assert a != b
+
+    def test_large_input(self) -> None:
+        """1 MiB input — exercises the streaming path."""
+        payload = b"x" * (1024 * 1024)
+        digest = fno_math.blake3_hash(payload)
+        assert len(digest) == 32
+
+    def test_avalanche_single_bit_flip(self) -> None:
+        """One-bit input difference produces ~50% bit-flip in output."""
+        a = fno_math.blake3_hash(b"\x00")
+        b = fno_math.blake3_hash(b"\x01")
+        # Count differing bits in 32-byte digests (256 total bits).
+        differing = sum((x ^ y).bit_count() for x, y in zip(a, b, strict=True))
+        # Statistically should be near 128 ± 32 (CLT envelope for n=256).
+        assert 64 < differing < 192, f"Poor avalanche: {differing}/256 bits differ"
