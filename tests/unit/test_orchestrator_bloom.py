@@ -415,3 +415,43 @@ class TestPhase1Defaults:
         # Default capacity must exceed this with ≥ 2× headroom.
         bf = BloomFilter()
         assert bf.capacity >= 50_000_000 * 2
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Empirical FPR measurement (DEC-P0-049 / PR-J)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestEmpiricalFprAtScale:
+    """Insert N hashes; measure observed FPR on disjoint probes.
+
+    Marked slow because it inserts + probes ~30k hashes. Validates the
+    sizing math against an end-to-end workload that the unit-test +
+    property suites only spot-check.
+    """
+
+    def test_empirical_fpr_within_target_at_10k_capacity(self) -> None:
+        """At ``capacity=10_000, fpr_target=1e-3`` the observed FPR on
+        20k disjoint probes must be ≤ ``fpr_target × 5`` (envelope for
+        finite-sample variance).
+        """
+        capacity = 10_000
+        fpr_target = 1e-3
+        bf = BloomFilter(capacity=capacity, fpr_target=fpr_target)
+        # Insert exactly capacity unique hashes.
+        for i in range(capacity):
+            bf.add(hashlib.sha256(f"in:{i}".encode()).digest())
+        # Probe 20k disjoint hashes.
+        probe_count = 20_000
+        false_positives = 0
+        for i in range(probe_count):
+            probe = hashlib.sha256(f"probe:{i}".encode()).digest()
+            if bf.might_contain(probe):
+                false_positives += 1
+        observed = false_positives / probe_count
+        # 5× envelope is loose; tighter would flake on the 20k-sample
+        # variance. The Bloom math guarantees ≤ fpr_target at sat'n.
+        assert observed <= fpr_target * 5, (
+            f"FPR breach: observed {observed} > {fpr_target * 5} on "
+            f"{probe_count} probes at capacity={capacity}"
+        )

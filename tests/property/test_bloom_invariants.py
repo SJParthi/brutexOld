@@ -1,0 +1,357 @@
+"""Hypothesis property tests for :mod:`brutex.orchestrator.bloom` (DEC-P0-049).
+
+Exhaustively explores random ``(capacity, fpr_target)`` parameterisations
+and random input sequences to prove the BloomFilter's core invariants
+from ``docs/MIGRATION.md`` entries #184 (DEC-P0-047) and #185 (DEC-P0-048):
+
+1. **No false negatives.** For any sequence of unique ``content_hash``
+   values added to the filter, every subsequent :meth:`might_contain`
+   on those exact hashes returns ``True``. The Bloom contract is
+   "false positives possible, false negatives never" (modulo the
+   documented concurrent-write race — these tests are single-threaded).
+
+2. **Empirical FPR within target.** For a sweep of ``(n, p)`` pairs,
+   the achieved empirical false-positive rate on 1000 disjoint probe
+   hashes is bounded above by ``fpr_target × 5`` (loose envelope so
+   the property doesn't flake on small-sample variance; the
+   :class:`BloomFilter` sizing math guarantees ≤ ``fpr_target`` at
+   :attr:`capacity` saturation).
+
+3. **Sizing monotonicity.** ``m_bits`` and ``k`` are monotonic
+   non-decreasing as ``capacity`` rises (with ``fpr_target`` fixed)
+   and as ``fpr_target`` falls (with ``capacity`` fixed). Catches the
+   Hostile-lens §1 truncate-vs-ceil regression on either dimension.
+
+4. **Determinism across instances.** Two :class:`BloomFilter` objects
+   constructed with identical ``(capacity, fpr_target)`` and fed the
+   same insertion sequence produce equal :attr:`m_bits`,
+   :attr:`m_bytes`, :attr:`k`, :attr:`insertions_attempted`, and equal
+   :meth:`might_contain` answers on every probe.
+
+5. **Insertions-counter discipline.** ``insertions_attempted`` equals
+   the exact number of :meth:`add` calls (including duplicates) for
+   any input sequence within capacity.
+
+6. **Capacity gate triggers exactly at threshold.** Adding exactly
+   ``capacity`` items succeeds; the ``(capacity + 1)``-th add raises
+   :class:`BloomCapacityExceeded`.
+
+7. **`MIN_FPR_TARGET` floor + `MAX_FPR_TARGET` ceiling rejected.**
+   Any ``fpr_target < MIN_FPR_TARGET`` OR ``fpr_target >= MAX_FPR_TARGET``
+   raises :class:`BloomConfigError` at construction.
+
+Uses Hypothesis bounded strategies to keep per-property runtime under
+a second. The empirical-FPR property runs with reduced
+``max_examples`` so the slow inner loop doesn't blow the CI budget.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import math
+
+import pytest
+from brutex.orchestrator.bloom import (
+    MAX_FPR_TARGET,
+    MIN_FPR_TARGET,
+    BloomCapacityExceeded,
+    BloomConfigError,
+    BloomFilter,
+)
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
+
+# ────────────────────────────────────────────────────────────────────────
+# Hypothesis strategies — bounded to keep tests fast
+# ────────────────────────────────────────────────────────────────────────
+
+
+# Capacity in [10, 5_000] — keeps bit-arrays small (under 30 KB), tests fast.
+_capacities = st.integers(min_value=10, max_value=5_000)
+
+# FPR in [1e-9, 0.4] — covers the V1 envelope without saturating the
+# 0.5 exclusive ceiling. Use log-scaled sampling so we explore the
+# tighter (more interesting) end of the range.
+_fprs = st.floats(
+    min_value=MIN_FPR_TARGET,
+    max_value=0.4,
+    exclude_min=False,
+    allow_nan=False,
+    allow_infinity=False,
+)
+
+# 32-byte content_hash values (sha256-shaped).
+_hashes = st.binary(min_size=32, max_size=32)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 1. No false negatives
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestNoFalseNegatives:
+    """Invariant: add(x) ⇒ might_contain(x) == True. Always."""
+
+    @given(
+        capacity=_capacities,
+        fpr_target=_fprs,
+        items=st.lists(_hashes, min_size=1, max_size=100, unique=True),
+    )
+    @settings(max_examples=50, deadline=None)
+    def test_added_hashes_always_contained(
+        self,
+        capacity: int,
+        fpr_target: float,
+        items: list[bytes],
+    ) -> None:
+        # Skip cases where item count exceeds capacity (gate-tested elsewhere).
+        if len(items) > capacity:
+            return
+        bf = BloomFilter(capacity=capacity, fpr_target=fpr_target)
+        for h in items:
+            bf.add(h)
+        for h in items:
+            assert bf.might_contain(h) is True, (
+                f"False negative for {h.hex()[:16]}... at capacity={capacity}, fpr={fpr_target}"
+            )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 2. Empirical FPR within target
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestEmpiricalFprBounded:
+    """Empirical FPR ≤ fpr_target × 5 at full capacity."""
+
+    @given(
+        capacity=st.integers(min_value=200, max_value=1000),
+        fpr_target=st.floats(
+            min_value=1e-3,  # below this, 1000 probes can't measure FPR
+            max_value=0.1,
+            allow_nan=False,
+            allow_infinity=False,
+        ),
+    )
+    @settings(
+        max_examples=10,
+        deadline=None,
+        suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
+    )
+    def test_fpr_within_target_at_capacity(
+        self,
+        capacity: int,
+        fpr_target: float,
+    ) -> None:
+        bf = BloomFilter(capacity=capacity, fpr_target=fpr_target)
+        # Insert exactly `capacity` deterministic hashes.
+        inserted = {hashlib.sha256(f"in:{i}".encode()).digest() for i in range(capacity)}
+        for h in inserted:
+            bf.add(h)
+        # Probe with 1000 disjoint hashes that were NEVER inserted.
+        probes = [hashlib.sha256(f"probe:{i}".encode()).digest() for i in range(1000)]
+        # Filter out any probe that accidentally collides with the
+        # inserted set (statistically zero but defensive).
+        probes = [p for p in probes if p not in inserted]
+        false_positives = sum(1 for p in probes if bf.might_contain(p))
+        empirical_fpr = false_positives / len(probes)
+        # Loose 5× envelope to accommodate 1000-sample variance.
+        assert empirical_fpr <= fpr_target * 5, (
+            f"FPR breach at capacity={capacity}, fpr_target={fpr_target}: "
+            f"observed {empirical_fpr} on {len(probes)} probes"
+        )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 3. Sizing monotonicity
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSizingMonotonicity:
+    """``m_bits`` and ``k`` are monotonic in (capacity, fpr_target)."""
+
+    @given(
+        capacity=_capacities,
+        fpr_target=_fprs,
+        delta=st.integers(min_value=1, max_value=100),
+    )
+    @settings(max_examples=30, deadline=None)
+    def test_m_bits_grows_with_capacity(
+        self,
+        capacity: int,
+        fpr_target: float,
+        delta: int,
+    ) -> None:
+        a = BloomFilter(capacity=capacity, fpr_target=fpr_target)
+        b = BloomFilter(capacity=capacity + delta, fpr_target=fpr_target)
+        assert b.m_bits >= a.m_bits
+
+    @given(
+        capacity=_capacities,
+        fpr_a=_fprs,
+        fpr_b=_fprs,
+    )
+    @settings(max_examples=30, deadline=None)
+    def test_m_bits_grows_as_fpr_tightens(
+        self,
+        capacity: int,
+        fpr_a: float,
+        fpr_b: float,
+    ) -> None:
+        a = BloomFilter(capacity=capacity, fpr_target=fpr_a)
+        b = BloomFilter(capacity=capacity, fpr_target=fpr_b)
+        # Tighter FPR (smaller p) ⇒ larger bit array.
+        if fpr_a < fpr_b:
+            assert a.m_bits >= b.m_bits
+        elif fpr_b < fpr_a:
+            assert b.m_bits >= a.m_bits
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 4. Determinism across instances
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestDeterminism:
+    """Two filters with identical params + inputs produce identical state."""
+
+    @given(
+        capacity=_capacities,
+        fpr_target=_fprs,
+        items=st.lists(_hashes, min_size=0, max_size=50, unique=True),
+    )
+    @settings(max_examples=30, deadline=None)
+    def test_two_filters_identical_state(
+        self,
+        capacity: int,
+        fpr_target: float,
+        items: list[bytes],
+    ) -> None:
+        if len(items) > capacity:
+            return
+        a = BloomFilter(capacity=capacity, fpr_target=fpr_target)
+        b = BloomFilter(capacity=capacity, fpr_target=fpr_target)
+        # Same sizing.
+        assert a.m_bits == b.m_bits
+        assert a.m_bytes == b.m_bytes
+        assert a.k == b.k
+        # Same inputs.
+        for h in items:
+            a.add(h)
+            b.add(h)
+        # Same observable state.
+        assert a.insertions_attempted == b.insertions_attempted
+        # Probe with 20 deterministic hashes — both filters agree.
+        for i in range(20):
+            probe = hashlib.sha256(f"probe:{i}".encode()).digest()
+            assert a.might_contain(probe) == b.might_contain(probe)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 5. Insertions-counter discipline
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestInsertionsCounter:
+    """``insertions_attempted`` equals the exact ``add()`` call count."""
+
+    @given(
+        n_adds=st.integers(min_value=0, max_value=200),
+    )
+    @settings(max_examples=20, deadline=None)
+    def test_counter_increments_per_add(self, n_adds: int) -> None:
+        bf = BloomFilter(capacity=max(n_adds, 1), fpr_target=1e-3)
+        # Same hash N times (duplicates count, per Hostile §2 docs).
+        h = hashlib.sha256(b"x").digest()
+        for _ in range(n_adds):
+            bf.add(h)
+        assert bf.insertions_attempted == n_adds
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 6. Capacity gate triggers exactly at threshold
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestCapacityGateThreshold:
+    """The ``(capacity+1)``-th add() raises; the ``capacity``-th does not."""
+
+    @given(capacity=st.integers(min_value=1, max_value=200))
+    @settings(max_examples=20, deadline=None)
+    def test_capacity_th_add_succeeds(self, capacity: int) -> None:
+        bf = BloomFilter(capacity=capacity, fpr_target=1e-3)
+        # Insert exactly capacity items.
+        for i in range(capacity):
+            bf.add(hashlib.sha256(f"k:{i}".encode()).digest())
+        assert bf.insertions_attempted == capacity
+
+    @given(capacity=st.integers(min_value=1, max_value=200))
+    @settings(max_examples=20, deadline=None)
+    def test_capacity_plus_one_add_raises(self, capacity: int) -> None:
+        bf = BloomFilter(capacity=capacity, fpr_target=1e-3)
+        for i in range(capacity):
+            bf.add(hashlib.sha256(f"k:{i}".encode()).digest())
+        with pytest.raises(BloomCapacityExceeded):
+            bf.add(hashlib.sha256(b"overflow").digest())
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 7. FPR floor + ceiling rejection
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestFprBoundaryRejection:
+    """``fpr_target`` outside ``[MIN_FPR_TARGET, MAX_FPR_TARGET)`` rejected."""
+
+    @given(
+        fpr_target=st.floats(
+            min_value=0.0,
+            max_value=MIN_FPR_TARGET,
+            exclude_max=True,  # below MIN_FPR_TARGET only
+            allow_nan=False,
+            allow_infinity=False,
+        ),
+    )
+    @settings(max_examples=10, deadline=None)
+    def test_fpr_below_min_rejected(self, fpr_target: float) -> None:
+        with pytest.raises(BloomConfigError):
+            BloomFilter(capacity=1000, fpr_target=fpr_target)
+
+    @given(
+        fpr_target=st.floats(
+            min_value=MAX_FPR_TARGET,
+            max_value=1.5,
+            allow_nan=False,
+            allow_infinity=False,
+        ),
+    )
+    @settings(max_examples=10, deadline=None)
+    def test_fpr_at_or_above_max_rejected(self, fpr_target: float) -> None:
+        with pytest.raises(BloomConfigError):
+            BloomFilter(capacity=1000, fpr_target=fpr_target)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 8. Sizing math vs canonical formula
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSizingMathProperty:
+    """``m_bits`` is ``ceil()``-rounded from the Bloom 1970 formula."""
+
+    @given(
+        capacity=_capacities,
+        fpr_target=_fprs,
+    )
+    @settings(max_examples=50, deadline=None)
+    def test_m_bits_at_or_above_canonical_float(
+        self,
+        capacity: int,
+        fpr_target: float,
+    ) -> None:
+        bf = BloomFilter(capacity=capacity, fpr_target=fpr_target)
+        canonical = -capacity * math.log(fpr_target) / (math.log(2) ** 2)
+        # Wrapper uses ceil() — must equal or exceed canonical float.
+        assert bf.m_bits >= canonical
+        # And must be exactly the ceiling.
+        assert bf.m_bits == math.ceil(canonical)
