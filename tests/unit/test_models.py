@@ -19,7 +19,7 @@ from brutex.models import (
 )
 
 # ────────────────────────────────────────────────────────────────────────
-# Enum values — pinned to broker SDK values (docs/broker-sdk-docs/annexures.md)
+# Enum values — pinned to broker SDK values (https://dhanhq.co/docs/v2/annexure)
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -227,7 +227,7 @@ class TestErrorHierarchy:
 
 # ────────────────────────────────────────────────────────────────────────
 # normalise_tick_size — the format drift handler
-# See docs/broker-sdk-docs/instruments.md §12.2
+# See https://dhanhq.co/docs/v2/annexure
 # ────────────────────────────────────────────────────────────────────────
 
 

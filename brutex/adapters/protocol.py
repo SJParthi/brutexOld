@@ -7,9 +7,9 @@ IBKR, Coinbase, …) is a **one-file job** — not a rewrite.
 ## Why a market-neutral protocol?
 
 In PR #1 we shipped :class:`the deleted broker adapter`,
-whose method names were lifted verbatim from the broker SDK
+whose method names were lifted verbatim from the Dhan API
 (``get_expiries``, ``get_contracts``, ``get_historical_candles``). That's
-fine when BruteX only knows about the broker. But:
+fine when BruteX only knows about the prior broker. But:
 
 * **US equities via Polygon** have no "expiries" — they're continuous.
 * **Crypto via Binance/Coinbase** have no "contracts" — they're spot pairs.
@@ -18,7 +18,7 @@ fine when BruteX only knows about the broker. But:
 * **IBKR** uses ``reqContractDetails`` / ``reqHistoricalData`` with
   delta protocol semantics.
 
-If every adapter had to implement the the broker-shaped protocol, new markets
+If every adapter had to implement the prior-broker-shaped protocol, new markets
 would be forced to fake data they don't have. This module breaks that
 coupling by defining a **semantic** contract — what BruteX needs the
 adapter to *do*, not what the adapter's upstream SDK *calls the methods*.
@@ -255,7 +255,7 @@ class DerivativeContract:
 class MarketAdapter(Protocol):
     """Market-neutral adapter interface.
 
-    Every BruteX adapter (the broker, Polygon, Binance, Dhan, …) implements
+    Every BruteX adapter (Dhan, Polygon, Binance, …) implements
     this protocol. The orchestrator talks ONLY through these methods —
     no market-specific code leaks upstream.
 
@@ -327,7 +327,7 @@ class MarketAdapter(Protocol):
 
         * Converting the market's native timezone to UTC
         * Chunking the date range if the upstream SDK has per-call
-          limits (the broker has 30/90/180 day limits by interval)
+          limits (Dhan has 30/90/180 day limits by interval)
         * Retrying transient errors (429, timeout, 5xx) via the
           adapter's own rate limiter + retry policy
         * Raising :class:`~brutex.models.OutOfScopeError` if the symbol

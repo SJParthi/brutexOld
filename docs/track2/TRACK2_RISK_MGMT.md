@@ -70,7 +70,7 @@ ban list mechanism. Confirmed via NSE clearing rules.
 
 ### 2.1 Margin stack composition
 
-For any short index option position, the broker reserves:
+For any short index option position, Dhan reserves:
 
 1. **SPAN margin** — worst-case 1-day risk per SPAN methodology, 16
    scenario array, recalibrated 6× intraday by the exchange.

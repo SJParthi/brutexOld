@@ -77,7 +77,7 @@ def raw_index_row_nifty() -> dict[str, Any]:
 def raw_banknifty_ce_row_dec2025() -> dict[str, Any]:
     """Matches the real BANKNIFTY Dec 2025 27000 CE row from the CSV sample.
 
-    lot_size 35 (post-SEBI-revision — see docs/broker-sdk-docs/instruments.md §12.3).
+    lot_size 35 (post-SEBI-revision — see https://dhanhq.co/docs/v2/annexure).
     """
     return {
         "exchange": "NSE",

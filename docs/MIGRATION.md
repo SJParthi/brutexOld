@@ -292,6 +292,52 @@ superseded.
 
 148. **DEC-P0-010 — pyright per-test re-promotion: 4 of 6 categories restored to error (PR #32)** (operator decree 2026-05-17 "go ahead dude"). Closes DEC-P0-005 P1 item #6 partially. **Source-pattern fixes** (16 errors → 0 across 5 files): (a) `tests/integration/test_execution_driver.py::_seed_lake` signature `list[float]` → `Sequence[float]` (kills 5 list-variance errors via covariant Sequence); (b) `tests/integration/test_dashboard_e2e.py::client` fixture return type `TestClient` → `Generator[TestClient]` (kills 2 generator errors); (c) `tests/redteam/test_redteam_premerge_guard.py` added `dict[str, Any]` annotation on rollup test data (kills 6 dict-index errors); (d) `tests/unit/test_execution_costs.py:224` added `isinstance(exponent, int)` guard before `-exponent` (kills 1 operator error on `int | Literal['n','N','F']`); (e) `tests/unit/test_strategies_registry.py::_DecoStrat` added `ClassVar[StrategyMeta]` annotation + `__init__(params)` to satisfy Strategy protocol (kills 1 protocol error) + targeted `# pyright: ignore[reportUntypedClassDecorator]` on the decorator line with documented Protocol-detection-limitation rationale (kills 1 untyped-decorator error). **Library changes:** `brutex/strategies/registry.py::register_strategy` rewritten with generic `TypeVar` (`_StrategyT = TypeVar("_StrategyT", bound=type[Strategy])`) so the decorator preserves concrete class type (vs erasing to `type[Strategy]`). PEP 695 syntax `def f[T](...)` skipped per UP047 because mypy 1.x doesn't yet support it; ruff noqa added with rationale. **4 categories restored to error** in tests/: `reportCallIssue`, `reportGeneralTypeIssues`, `reportUntypedClassDecorator`, `reportOperatorIssue`. **2 categories DEFERRED** (`reportArgumentType` 56 errors + `reportAttributeAccessIssue` 17 errors): downgraded to "warning" only, with honest comment block in `pyproject.toml` explaining the 73 remaining errors are pre-existing test-fixture patterns (test_dashboard_state.py parametrize loose-typing + test_adapter_protocol.py protocol-stub access + test_fakes patterns) requiring ~3 days of dedicated test-fixture refactoring. Tracked as P1 follow-up #6b for a dedicated future PR. **Honest envelope (Golden Rule #10):** "partial completion" per Agent 1 of PR #25 review prediction — the 6-category re-promotion was the right direction but full closure on `reportArgumentType` requires a separate focused effort. PR #32 closes 4 of 6 cleanly; 2 deferred with explicit deferral + tracking. **Local verification:** ruff/format/mypy strict/pyright strict ALL GREEN; pytest 1511 passed.
 
+165. **DEC-P0-027 — mechanical broker-pivot residue cleanup: "the broker" docstrings + broken docs/broker-sdk-docs/ citations (PR #49)** (operator directive 2026-05-18 to continue serial cleanup after PR #48 merged; "everything needs to be entirely extremely comprehensively automated"). Pure mechanical text-cleanup PR. Closes the docstring-drift residue from the broker-pivot (2026-05-15, PR #12), where a textual `s/Groww/the broker/` substitution left grammatically broken comments + dangling cite paths across 43 files.
+    **Substitutions applied via `sed -i` in priority order:**
+    - `the broker SDK` → `the Dhan API`
+    - `the brokerapi dep` → `the prior broker dep` (preserves history)
+    - `the brokerapi` → `the Dhan API`
+    - `the broker-specific` → `Dhan-specific`
+    - `the broker hierarchy` → `the Dhan exception hierarchy`
+    - `the broker exception` → `Dhan API exception`
+    - `the broker says` → `Dhan says`
+    - `the broker drift` → `Dhan master CSV drift`
+    - `the broker tick_size` → `Dhan tick_size`
+    - `the broker candle row` → `the Dhan candle row`
+    - `the broker reports OI` → `Dhan reports OI`
+    - `the broker CSV` → `the Dhan instrument master CSV`
+    - `the broker intervals` → `the Dhan native intervals`
+    - `the broker calendar` → `the Dhan trading calendar`
+    - `the broker symbols` → `Dhan trading symbols`
+    - `the broker uses` → `Dhan uses`
+    - `the broker has` → `Dhan has`
+    - `bad request from the broker` → `bad request from Dhan`
+    - `non-the broker exception` → `non-Dhan exception`
+    - bare `the broker` → `Dhan` (catch-all)
+    **Surgical post-sed cleanups (15 sites where sed mangled or context required human judgment):** `brutex/__init__.py:4`, `brutex/models.py:194`, `brutex/orchestrator/retry.py:{74,141}`, `brutex/data/parser.py:3`, `brutex/data/models.py:35`, `brutex/adapters/__init__.py:3`, `brutex/adapters/protocol.py:{12,21,258}`, `tests/fakes/demo_crypto_adapter.py:4`.
+    **Broken `docs/broker-sdk-docs/` citations resolved (17 sites across `brutex/{models,orchestrator/{state,retry},data/{partition,models,parser}}.py` + 3 test files):** all path citations to the deleted `docs/broker-sdk-docs/` directory were replaced with active Dhan API URLs:
+    - `docs/broker-sdk-docs/instruments.md §N` → `https://dhanhq.co/docs/v2/annexure`
+    - `docs/broker-sdk-docs/annexures.md §N` → `https://dhanhq.co/docs/v2/annexure`
+    - `docs/broker-sdk-docs/exceptions.md §N` → `the Dhan API error catalog`
+    - `docs/broker-sdk-docs/backtesting.md §N` → `Dhan historical data API docs`
+    **Other small drift fixes:**
+    - `CLAUDE.md §6` securityId-policy row — replaced "Hardcoded in `brutex/adapters/dhan/constants.py`" cite (file doesn't exist yet) with "Hardcoded for Track 1's 4-instrument universe. File lands as `brutex/adapters/dhan/constants.py` in PR #51 (DEC-P0-029)".
+    - `brutex/data/instrument_store.py:1192` docstring — "8 named underlyings" → "Track 1's 4 named underlyings".
+    - `docs/runbooks/telegram-setup.md:236` — removed dead `docs/broker-sdk-docs/` reference + dead `REQUIREMENTS.md §15.6` cite.
+    **Intentionally NOT touched (out of scope):**
+    - `brutex/orchestrator/rate_limiter.py:{9,55}` "60% of the broker's documented ~25 req/s" docstring + `DEFAULT_INITIAL_RPS=15.0` constant. These need substantive code changes (3 r/s + 100K/day quota counter) tracked for PR #50 (DEC-P0-028).
+    - `docs/MIGRATION.md` historical ledger entries mentioning "the broker" — these are part of the audit trail and stay as historical record.
+    - `docs/TRACK1_PHASE_PLAN.md:213` "the broker-vs-Dhan" — historical context about the 2026-05-15 pivot; stays.
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: 110 → 5 "the broker" occurrences across `brutex/` `tests/` `docs/` `scripts/` (the 5 residuals are in `rate_limiter.py` + historical docs, all intentional per scope above).
+    - ✅ REAL: 17 → 0 active `docs/broker-sdk-docs/` citations in source code; remaining 2 mentions in docs are historical context.
+    - ✅ REAL: 43 files modified; net +118 / -119 lines (1-line delta from the cleanup); pytest 1491 passed / 12 skipped; ruff + format + mypy --strict all green.
+    - ✅ REAL: BruteX-designed work preserved: all `docs/zplus/`, Z+ guard, throughput canary, Track 1 + Track 2 specs, `brutex/options/`, all standards docs untouched.
+    - 🟡 PARTIAL: `brutex/orchestrator/rate_limiter.py` defaults still broker-tuned (`DEFAULT_INITIAL_RPS=15.0`, no 100K/day quota counter). Scheduled for PR #50 (DEC-P0-028) which needs 4-agent pre+post review since it touches orchestrator code.
+    - 📋 ROADMAP: PR #50 (DEC-P0-028) — substantive Dhan-tuning: rate_limiter defaults 15→3 r/s + 100K/day quota counter, retry.py Dhan error classifier (800/804/805/807/808/DH-901..DH-910), EQ paths removal in `brutex/execution/costs.py` + `brutex/dashboard/app.py`.
+    - 📋 ROADMAP: PR #51 (DEC-P0-029) — Phase 2 Dhan adapter PR #1: create `brutex/adapters/dhan/constants.py` (4 spot indices), add `httpx` dep, smoke test scaffold.
+    **Decision ID:** DEC-P0-027.
+
 164. **DEC-P0-026 — tickvault co-development layer retired; Groww .md mentions removed (PR #48)** (operator decree 2026-05-18 follow-on to DEC-P0-025: *"i clealry told you to remove groww and groww related reeference … no live tickvault reference or groww reference is needed here dude"*). Closes the 🟡 PARTIAL clause in DEC-P0-025 about tickvault co-dev docs still being on disk. **DEC-PROTOCOL-001 is hereby RETIRED.** BruteX is a self-contained Track 1 backtest engine with no co-development relationship to tickvault or any other repo.
     **Deletions in this PR:**
     - `docs/PROTOCOL_BRUTEX_ADAPTATION.md` (~500 lines) — tickvault→BruteX translation table.

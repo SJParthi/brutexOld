@@ -1,4 +1,4 @@
-"""Adaptive token-bucket rate limiter for the broker adapter (deleted).
+"""Adaptive token-bucket rate limiter for Dhan adapter (deleted).
 
 Implements ``FR-ING-017`` (adaptive rate limiter) from
 ``docs/REQUIREMENTS.md §4.1``.

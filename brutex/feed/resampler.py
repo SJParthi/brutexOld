@@ -1,7 +1,7 @@
 """OHLCV resampler for canonical :class:`CandleBar` sequences.
 
 Implements ``FR-IND-003`` (timeframe-agnostic indicators) for the
-sub-day the broker intervals. Converts bars at a *source* interval into
+sub-day the Dhan native intervals. Converts bars at a *source* interval into
 bars at a coarser *target* interval using wall-clock UTC bucketing.
 
 ## Aggregation rules
@@ -19,12 +19,12 @@ Field          Rule
 ``close``      Last bar's close (latest timestamp in bucket).
 ``volume``     Sum of all bars' volumes.
 ``open_interest``  Last bar's open interest (snapshot semantics,
-               consistent with how the broker reports OI per bar).
+               consistent with how Dhan reports OI per bar).
 =============  ==================================================
 
 ## Scope — v1
 
-* Only the eight sub-day the broker intervals are supported as both source
+* Only the eight sub-day the Dhan native intervals are supported as both source
   and target — :data:`RESAMPLEABLE_INTERVALS`.
 * Target must be **an integer multiple** of the source. ``1minute ->
   5minute`` works; ``5minute -> 7minute`` raises
@@ -50,7 +50,7 @@ from typing import Final
 from brutex.data.models import CandleBar
 from brutex.feed.errors import ResampleError
 
-#: The sub-day the broker intervals in seconds. Keep aligned with
+#: The sub-day the Dhan native intervals in seconds. Keep aligned with
 #: :data:`brutex.data.partition.VALID_INTERVALS` but note that
 #: ``1week`` and ``1month`` are absent on purpose — see module
 #: docstring (P3 calendar work).

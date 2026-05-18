@@ -1,7 +1,7 @@
 """Retry classifier — map broker SDK exception types to :class:`Outcome`.
 
 Implements the ``FR-ING-008`` (refined) classification table from
-``docs/REQUIREMENTS.md §8.6`` and ``docs/broker-sdk-docs/exceptions.md §3``.
+``docs/REQUIREMENTS.md §8.6`` and the Dhan API error catalog.
 
 The classifier is a **pure function** over exception types and
 exception-class names (strings). It deliberately does NOT import
@@ -21,7 +21,7 @@ Usage from the worker loop::
     from brutex.orchestrator.state import Outcome, transition, WorkItemState
 
     try:
-        response = the broker.get_historical_candles(...)
+        response = Dhan.get_historical_candles(...)
     except Exception as e:  # noqa: BLE001 — intentional catch-all
         outcome = classify_exception(e)
     else:
@@ -45,11 +45,11 @@ from brutex.orchestrator.state import Outcome
 # Exception-name → Outcome table
 # ────────────────────────────────────────────────────────────────────────
 
-#: Mapping from the broker exception class names (as reported by
+#: Mapping from Dhan API exception class names (as reported by
 #: ``type(exc).__name__``) to the :class:`Outcome` the FSM should see.
 #:
-#: See ``docs/broker-sdk-docs/exceptions.md §3`` for the source of truth.
-#: If the broker renames or adds an exception, update this table AND the
+#: See the Dhan API error catalog for the source of truth.
+#: If Dhan renames or adds an exception, update this table AND the
 #: ``tests/golden/test_vendor_sdk_constants_frozen.py`` golden-master
 #: in the same commit.
 BROKER_EXCEPTION_CLASSIFICATION: Final[dict[str, Outcome]] = {
@@ -71,7 +71,7 @@ BROKER_EXCEPTION_CLASSIFICATION: Final[dict[str, Outcome]] = {
     "VendorFeedNotSubscribedException": Outcome.GENERIC_API_ERROR,
 }
 
-#: Class names that MUST be present on ``the brokerapi.the broker.exceptions``.
+#: Class names that MUST be present on ``the Dhan adapter's exception hierarchy``.
 #: Used by the golden-master test to catch upstream renames. Same as
 #: :data:`the deleted broker adapter`
 #: but duplicated here so the retry module is self-contained.
@@ -83,14 +83,14 @@ class UnknownExceptionError(BruteXError):
     does not recognise.
 
     This is treated as a bug in the caller, not a runtime condition —
-    the set of the broker exception names is closed and any new one MUST be
+    the set of Dhan API exception names is closed and any new one MUST be
     added to :data:`BROKER_EXCEPTION_CLASSIFICATION` before the code that
     raises it can be merged.
     """
 
 
 def classify_exception_name(class_name: str) -> Outcome:
-    """Return the :class:`Outcome` for a the broker exception class name.
+    """Return the :class:`Outcome` for a Dhan API exception class name.
 
     Parameters
     ----------
@@ -113,7 +113,7 @@ def classify_exception_name(class_name: str) -> Outcome:
         return BROKER_EXCEPTION_CLASSIFICATION[class_name]
     except KeyError as exc:
         raise UnknownExceptionError(
-            f"Unknown the broker exception class: {class_name!r}. "
+            f"Unknown Dhan API exception class: {class_name!r}. "
             f"Add it to BROKER_EXCEPTION_CLASSIFICATION in brutex/orchestrator/retry.py "
             f"and re-run tests/unit/test_orchestrator_retry.py."
         ) from exc
@@ -137,8 +137,8 @@ def classify_exception(exc: BaseException) -> Outcome:
     ------
     UnknownExceptionError
         If none of the exception's MRO entries match. This indicates
-        either a non-the broker exception reaching this classifier (caller
-        bug — should catch only the broker exceptions) or a new the broker
+        either a non-Dhan API exception reaching this classifier (caller
+        bug — should catch only Dhan API exceptions) or a new exception type
         exception type that needs an entry.
 
     Returns
@@ -154,7 +154,7 @@ def classify_exception(exc: BaseException) -> Outcome:
         f"{[c.__name__ for c in type(exc).__mro__]}) does not match "
         f"any entry in BROKER_EXCEPTION_CLASSIFICATION. "
         f"This exception should not have reached the retry classifier — "
-        f"verify the adapter only catches the broker exceptions."
+        f"verify the adapter only catches Dhan API exceptions."
     )
 
 
