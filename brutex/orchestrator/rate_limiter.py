@@ -138,9 +138,10 @@ class RateLimiterEvent:
 class AdaptiveTokenBucket:
     """Thread-safe adaptive token bucket.
 
-    Create one instance per broker adapter (deleted). Workers call
+    Create one instance per Dhan adapter. Workers call
     :meth:`acquire` before every API call and :meth:`record_rate_limit_hit`
-    if the call returned a 429 / ``VendorAPIRateLimitException``.
+    if the call returned a Dhan 429 / rate-limit response (codes 805 or
+    DH-904 per the Dhan API error catalog).
 
     Parameters
     ----------
