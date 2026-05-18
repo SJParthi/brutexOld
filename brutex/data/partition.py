@@ -12,13 +12,13 @@ reproducibility.
 
 ## Interval whitelist
 
-Only the 12 the broker candle intervals documented in
-``docs/broker-sdk-docs/annexures.md §4`` are accepted. Passing any other
+Only the 12 Dhan candle intervals documented in
+Dhan API annexure at https://dhanhq.co/docs/v2/annexure are accepted. Passing any other
 string raises :class:`PartitionError`.
 
 ## Symbol sanitisation
 
-the broker symbols contain hyphens (``NSE-NIFTY-02Jan25-28500-PE``) which
+Dhan trading symbols contain hyphens (``NSE-NIFTY-02Jan25-28500-PE``) which
 are filesystem-safe. We still reject symbols containing characters
 that would be problematic on any major OS: ``/`` ``\\`` ``:`` ``*``
 ``?`` ``"`` ``<`` ``>`` ``|`` or a null byte. This catches programming
@@ -44,7 +44,7 @@ BAR_DIR_NAME: Final[str] = "bars"
 
 
 #: Minimum acceptable partition year. BruteX supports 2000 onward
-#: because the broker historical data begins around 2000 and NSE itself
+#: because Dhan historical data begins around 2000 and NSE itself
 #: only launched in 1994.
 MIN_PARTITION_YEAR: Final[int] = 2000
 
@@ -60,7 +60,7 @@ MONTHS_PER_YEAR: Final[int] = 12
 #: ``bars / exchange / segment / symbol / interval / yyyy / mm.parquet``
 PARTITION_PATH_COMPONENTS: Final[int] = 7
 
-#: The 12 the broker candle intervals accepted in partition paths. Must be
+#: The 12 Dhan candle intervals accepted in partition paths. Must be
 #: kept in sync with ``the deleted broker adapter``.
 VALID_INTERVALS: Final[frozenset[str]] = frozenset(
     {
@@ -113,10 +113,10 @@ def _validate_segment(segment: str) -> None:
 
 
 def _validate_interval(interval: str) -> None:
-    """Raise PartitionError if *interval* is not a the broker canonical interval name."""
+    """Raise PartitionError if *interval* is not a Dhan canonical interval name."""
     if interval not in VALID_INTERVALS:
         raise PartitionError(
-            f"interval must be one of the 12 the broker intervals, got {interval!r}"
+            f"interval must be one of the 12 the Dhan native intervals, got {interval!r}"
         )
 
 

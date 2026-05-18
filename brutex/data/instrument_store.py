@@ -3,7 +3,7 @@
 THE single source of truth for every tradable symbol BruteX knows
 about. Every downstream phase (expiries / contracts / candles /
 strategies / sweep / execution / dashboard) reads from this store
-instead of re-parsing the broker CSV or holding its own copy.
+instead of re-parsing the Dhan instrument master CSV or holding its own copy.
 
 ## Why this exists
 
@@ -180,7 +180,7 @@ CREATE TABLE IF NOT EXISTS contracts (
     exchange          VARCHAR NOT NULL,
     underlying_symbol VARCHAR NOT NULL,
     expiry_date       DATE    NOT NULL,
-    contract_symbol   VARCHAR NOT NULL,   -- full the broker symbol of the leg
+    contract_symbol   VARCHAR NOT NULL,   -- full Dhan trading symbol of the leg
     snapshot_date     DATE    NOT NULL,
 
     instrument_type   VARCHAR NOT NULL,   -- FUT | CE | PE
@@ -259,7 +259,7 @@ class InstrumentRun:
     Written to ``instrument_runs`` table by
     :meth:`InstrumentStore.record_run` after the upsert completes.
     Lets the dashboard and audit layer reconstruct the full history
-    of ingest attempts without replaying the broker CSV.
+    of ingest attempts without replaying the Dhan instrument master CSV.
     """
 
     run_id: str
@@ -324,7 +324,7 @@ class ContractRecord:
     """One contract leg \u2014 output of Phase C per ``(underlying, expiry)``.
 
     Primary key is ``(contract_symbol, snapshot_date)`` \u2014
-    ``contract_symbol`` is the full the broker symbol (e.g.
+    ``contract_symbol`` is the full Dhan trading symbol (e.g.
     ``NSE-NIFTY-29May25-24000-CE``) which is globally unique, and
     ``snapshot_date`` gives temporal history.
     """
@@ -735,7 +735,7 @@ class InstrumentStore:
             Normalised :class:`Instrument` objects, typically the
             full filtered output of Phase A.
         snapshot_date
-            Calendar date the broker CSV was pulled for. Part of
+            Calendar date the Dhan instrument master CSV was pulled for. Part of
             the primary key.
         run_id
             Ingest run UUID. Recorded on every row for audit.
@@ -1189,7 +1189,7 @@ class InstrumentStore:
         return [_row_to_instrument(row) for row in rows]
 
     def list_indices(self, *, as_of: date | None = None) -> list[Instrument]:
-        """Return every in-scope spot index (the 8 named underlyings)."""
+        """Return every in-scope spot index (Track 1's 4 named underlyings)."""
         return self.list_in_scope(
             as_of=as_of,
             instrument_type=InstrumentType.IDX,
@@ -1359,7 +1359,7 @@ class InstrumentStore:
         * **CSV source drift** \u2014 returns a per-date map of
           distinct ``csv_source_sha256`` counts. Anything other
           than ``1`` means two pulls on the same day saw
-          different CSV content \u2014 the broker drift in-flight.
+          different CSV content \u2014 Dhan master CSV drift in-flight.
         """
         self._ensure_open()
         total_row = self._conn.execute("SELECT COUNT(*) FROM instruments").fetchone()

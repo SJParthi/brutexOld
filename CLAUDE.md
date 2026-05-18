@@ -244,7 +244,7 @@ bruteX/
 | securityId — BANKNIFTY | **`25`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=25 |
 | securityId — SENSEX | **`51`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=51 |
 | securityId — India VIX | **`21`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=21 |
-| securityId policy | **Hardcoded in `brutex/adapters/dhan/constants.py`** for Track 1's 4-instrument universe (rationale: 4-tuple is permanently locked; runtime CSV lookup adds complexity for no benefit). Smoke test verifies quarterly against web.dhan.co URLs. **For Track 2 options: SAME 4 securityIds reused — no per-strike CSV lookup** (verified 2026-05-16). | this file §2 |
+| securityId policy | **Hardcoded for Track 1's 4-instrument universe** (rationale: 4-tuple is permanently locked; runtime CSV lookup adds complexity for no benefit). File lands as `brutex/adapters/dhan/constants.py` in PR #51 (DEC-P0-029) Phase 2 Dhan adapter PR #1. Smoke test verifies quarterly against web.dhan.co URLs. **For Track 2 options: SAME 4 securityIds reused — no per-strike CSV lookup** (verified 2026-05-16). | this file §2 |
 
 ---
 

@@ -1,7 +1,7 @@
 """A fake crypto-spot adapter that satisfies :class:`MarketAdapter`.
 
 This exists to **prove** the market-neutral protocol works for shapes
-that are nothing like the broker/F&O:
+that are nothing like Dhan/F&O:
 
 * No expiries — crypto spot is continuous
 * No option chains — just spot pairs

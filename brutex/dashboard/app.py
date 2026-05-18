@@ -337,7 +337,7 @@ def build_app(
         Optional :class:`~brutex.data.instrument_store.InstrumentStore`
         handle. When supplied, the app exposes read-only instruments /
         expiries / contracts / stats endpoints + an HTML browser
-        section so a user can literally see what the the broker ingest
+        section so a user can literally see what Dhan ingest
         pulled. When ``None`` (the default), those endpoints return
         503 and the HTML section stays hidden \u2014 the pipeline
         progress cards still work.

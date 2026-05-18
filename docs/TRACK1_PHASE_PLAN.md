@@ -23,9 +23,9 @@ documentation) through to the first production sweep.
 | `docs/TRACK1_MICROSTRUCTURE.md` written | this PR | (next) |
 | `docs/MIGRATION.md` written | this PR | (next) |
 | broker adapter (deleted) deleted | this PR | ✅ |
-| the broker test files deleted | this PR | ✅ |
+| Dhan test files deleted | this PR | ✅ |
 | `docs/broker-sdk-docs/` deleted | this PR | ✅ |
-| `pyproject.toml` the brokerapi dep removed | this PR | ✅ |
+| `pyproject.toml` the prior broker dep removed | this PR | ✅ |
 | `brutex/cli.py` stubbed to minimal Track 1 | this PR | ✅ |
 | `brutex/universe.py` rewritten for spot indexes | this PR | ✅ |
 | PR #12 description updated | TBD | ⏳ |

@@ -2,7 +2,7 @@
 
 Pins the simplified FR-EXEC-002 charge schedule to concrete
 numbers so regulatory changes don't slip in silently. The full
-golden test cross-checking against Zerodha / the broker calculators
+golden test cross-checking against Zerodha / Dhan calculators
 is planned separately under ``tests/golden/``.
 """
 

@@ -87,7 +87,7 @@ class IngestPhase(StrEnum):
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Outcomes — what the worker reports after calling the broker
+# Outcomes — what the worker reports after calling the Dhan API
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -95,8 +95,8 @@ class Outcome(StrEnum):
     """Outcomes the worker can report to the FSM.
 
     The FSM translates each outcome + current state into a new state.
-    These map onto the the broker exception hierarchy (see
-    ``docs/broker-sdk-docs/exceptions.md §3``) plus two non-error outcomes
+    These map onto a Dhan API exception hierarchy (see
+    the Dhan API error catalog) plus two non-error outcomes
     for empty/valid responses.
     """
 
@@ -165,7 +165,7 @@ class WorkItem:
         key in the LMDB dedup cache — re-issuing a call with identical
         params yields the same hash and is deduplicated.
     params
-        Immutable mapping of the arguments passed to the broker SDK method.
+        Immutable mapping of the arguments passed to the Dhan API method.
         Example for Phase B: ``{"exchange": "NSE", "underlying_symbol":
         "NIFTY", "year": 2024}``.
     state
@@ -273,7 +273,7 @@ def transition(
         The work item (must be in a non-terminal state; ``TransitionError``
         is raised otherwise).
     outcome
-        What the worker reported after calling the broker.
+        What the worker reported after calling the Dhan API.
     max_soft_retries
         Override the default retry-escalation threshold (default
         :data:`MAX_SOFT_RETRIES` = 10). Lower values are useful in tests.
@@ -321,7 +321,7 @@ def transition(
             last_transition_at=now,
         )
 
-    # ── NOT_FOUND is a terminal NO_DATA (the broker says "no such thing") ─
+    # ── NOT_FOUND is a terminal NO_DATA (Dhan says "no such thing") ─
     if outcome == Outcome.NOT_FOUND:
         return replace(
             item,

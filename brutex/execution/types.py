@@ -54,7 +54,7 @@ class InstrumentMeta:
     Attributes
     ----------
     symbol
-        the broker symbol, e.g. ``"NSE-NIFTY-02Jan25-24000-CE"``.
+        Dhan trading symbol, e.g. ``"NSE-NIFTY-02Jan25-24000-CE"``.
     segment
         :class:`~brutex.models.Segment` \u2014 ``CASH`` or ``FNO``.
     instrument_type
@@ -150,7 +150,7 @@ class Fill:
     Attributes
     ----------
     symbol
-        the broker symbol the fill is for.
+        Dhan trading symbol the fill is for.
     side
         ``BUY`` or ``SELL``. ``HOLD`` is never recorded as a fill.
     qty
@@ -220,7 +220,7 @@ class Position:
     Attributes
     ----------
     symbol
-        the broker symbol this position belongs to.
+        Dhan trading symbol this position belongs to.
     qty
         Signed integer exposure. ``0`` means the position is flat.
     avg_price

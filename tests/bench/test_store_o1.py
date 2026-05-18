@@ -172,7 +172,7 @@ class TestGetIsO1:
 
 
 class TestExistsTerminalIsO1:
-    """The adapter calls ``exists_terminal`` before every the broker call.
+    """The adapter calls ``exists_terminal`` before every Dhan API call.
     It must be as fast as ``get`` on the hot path, since it's the
     gate that saves the Dhan API budget.
     """

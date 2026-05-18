@@ -13,7 +13,7 @@
 > - `TRACK1_PHASE_PLAN.md` — 8-12 week build plan
 > - `TRACK1_PERFORMANCE_BUDGET.md` — honest throughput math
 > - `TRACK1_MICROSTRUCTURE.md` — Indian-market edge cases
-> - `MIGRATION.md` — the broker → Dhan migration log
+> - `MIGRATION.md` — Dhan → Dhan migration log
 
 ---
 

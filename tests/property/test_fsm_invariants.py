@@ -127,7 +127,7 @@ def _drive_once(item: WorkItem, outcome: Outcome) -> WorkItem:
 
     Real workers call ``dispatch`` to move the item from PENDING (or
     RETRYING) to IN_FLIGHT, then invoke ``transition`` with whatever
-    outcome the the broker call produced. This helper composes the two so
+    outcome the Dhan API call produced. This helper composes the two so
     the tests can build long transition chains without repeating
     the boilerplate.
     """

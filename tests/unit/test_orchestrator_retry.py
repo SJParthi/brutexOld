@@ -1,7 +1,7 @@
 """Unit tests for brutex.orchestrator.retry.
 
 Validates the exception-to-Outcome classifier, the exponential backoff
-schedule, and the severity helper. No the brokerapi imports at module load
+schedule, and the severity helper. No the Dhan API imports at module load
 time — tests use synthetic exception classes with the same names.
 """
 
@@ -24,7 +24,7 @@ from brutex.orchestrator.retry import (
 from brutex.orchestrator.state import Outcome
 
 # ────────────────────────────────────────────────────────────────────────
-# Synthetic the broker exception classes (name-matched to the real SDK)
+# Synthetic Dhan API exception classes (name-matched to the real SDK)
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -96,7 +96,7 @@ class TestClassificationTable:
         assert expected == REQUIRED_EXCEPTION_NAMES
 
     def test_british_authorisation_spelling(self) -> None:
-        """the broker uses British 'Authorisation' — locked."""
+        """Dhan uses British 'Authorisation' — locked."""
         assert "VendorAPIAuthorisationException" in BROKER_EXCEPTION_CLASSIFICATION
         assert "VendorAPIAuthorizationException" not in BROKER_EXCEPTION_CLASSIFICATION
 
@@ -148,7 +148,7 @@ class TestClassifyExceptionName:
         assert classify_exception_name(name) == expected
 
     def test_unknown_name_raises(self) -> None:
-        with pytest.raises(UnknownExceptionError, match="Unknown the broker exception"):
+        with pytest.raises(UnknownExceptionError, match="Unknown Dhan API exception"):
             classify_exception_name("VendorAPITotallyNewException")
 
     def test_unknown_error_mentions_remediation(self) -> None:
@@ -216,7 +216,7 @@ class TestClassifyException:
         )
 
     def test_non_vendor_exception_raises(self) -> None:
-        """Exceptions from outside the the broker hierarchy are a bug in
+        """Exceptions from outside the Dhan exception hierarchy are a bug in
         the caller — should not reach classify_exception."""
         with pytest.raises(UnknownExceptionError, match="should not have reached"):
             classify_exception(ValueError("unrelated"))
