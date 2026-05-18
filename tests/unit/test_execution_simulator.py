@@ -62,11 +62,11 @@ def _signal(
 
 
 @pytest.fixture
-def equity_meta() -> InstrumentMeta:
+def idx_meta() -> InstrumentMeta:
     return InstrumentMeta(
         symbol="NSE-NIFTY",
         segment=Segment.CASH,
-        instrument_type=InstrumentType.EQ,
+        instrument_type=InstrumentType.IDX,
         lot_size=1,
         freeze_quantity=10_000,
     )
@@ -103,34 +103,34 @@ def _make_sim(
 
 
 class TestExecutionSimulatorConstruction:
-    def test_zero_cash_rejected(self, equity_meta: InstrumentMeta) -> None:
+    def test_zero_cash_rejected(self, idx_meta: InstrumentMeta) -> None:
         with pytest.raises(ValueError, match="initial_cash"):
             ExecutionSimulator(
                 initial_cash=Decimal("0"),
-                instruments={equity_meta.symbol: equity_meta},
+                instruments={idx_meta.symbol: idx_meta},
             )
 
-    def test_negative_slippage_rejected(self, equity_meta: InstrumentMeta) -> None:
+    def test_negative_slippage_rejected(self, idx_meta: InstrumentMeta) -> None:
         with pytest.raises(ValueError, match="slippage_bps"):
             ExecutionSimulator(
                 initial_cash=Decimal("1000"),
-                instruments={equity_meta.symbol: equity_meta},
+                instruments={idx_meta.symbol: idx_meta},
                 slippage_bps=Decimal("-1"),
             )
 
     def test_non_positive_default_qty_rejected(
         self,
-        equity_meta: InstrumentMeta,
+        idx_meta: InstrumentMeta,
     ) -> None:
         with pytest.raises(ValueError, match="default_qty"):
             ExecutionSimulator(
                 initial_cash=Decimal("1000"),
-                instruments={equity_meta.symbol: equity_meta},
+                instruments={idx_meta.symbol: idx_meta},
                 default_qty=0,
             )
 
-    def test_starts_with_empty_book(self, equity_meta: InstrumentMeta) -> None:
-        sim = _make_sim(equity_meta)
+    def test_starts_with_empty_book(self, idx_meta: InstrumentMeta) -> None:
+        sim = _make_sim(idx_meta)
         assert sim.cash == Decimal("1_000_000")
         assert sim.fills == ()
         assert sim.equity_curve == ()
@@ -143,15 +143,15 @@ class TestExecutionSimulatorConstruction:
 
 
 class TestSlippage:
-    def test_buy_pays_up(self, equity_meta: InstrumentMeta) -> None:
-        sim = _make_sim(equity_meta, slippage_bps=Decimal("10"))
+    def test_buy_pays_up(self, idx_meta: InstrumentMeta) -> None:
+        sim = _make_sim(idx_meta, slippage_bps=Decimal("10"))
         fill = sim.execute(_signal(Side.BUY), _bar(100))
         assert fill is not None
         # 10 bps = 0.1%, BUY fills 0.1% above mid → 100.10
         assert fill.fill_price == Decimal("100.1000")
 
-    def test_sell_takes_a_cut(self, equity_meta: InstrumentMeta) -> None:
-        sim = _make_sim(equity_meta, slippage_bps=Decimal("10"))
+    def test_sell_takes_a_cut(self, idx_meta: InstrumentMeta) -> None:
+        sim = _make_sim(idx_meta, slippage_bps=Decimal("10"))
         # Need an open long to sell against; first buy at zero-slippage env
         sim._slippage_bps = Decimal("0")  # type: ignore[attr-defined]
         sim.execute(_signal(Side.BUY), _bar(100))
@@ -161,8 +161,8 @@ class TestSlippage:
         # SELL 10 bps below → 99.9
         assert fill.fill_price == Decimal("99.9000")
 
-    def test_hold_returns_none(self, equity_meta: InstrumentMeta) -> None:
-        sim = _make_sim(equity_meta)
+    def test_hold_returns_none(self, idx_meta: InstrumentMeta) -> None:
+        sim = _make_sim(idx_meta)
         assert sim.execute(_signal(Side.HOLD), _bar(100)) is None
         assert sim.fills == ()
 
@@ -206,8 +206,8 @@ class TestLotSizeValidation:
         with pytest.raises(FreezeQuantityExceededError, match="freeze"):
             sim.execute(_signal(Side.BUY, symbol="NSE-NIFTY-FUT"), _bar(100))
 
-    def test_unknown_symbol_rejected(self, equity_meta: InstrumentMeta) -> None:
-        sim = _make_sim(equity_meta)
+    def test_unknown_symbol_rejected(self, idx_meta: InstrumentMeta) -> None:
+        sim = _make_sim(idx_meta)
         with pytest.raises(InvalidLotSizeError, match="unknown symbol"):
             sim.execute(_signal(Side.BUY, symbol="OTHER"), _bar(100))
 
@@ -218,9 +218,9 @@ class TestLotSizeValidation:
 
 
 class TestFundsCheck:
-    def test_underfunded_buy_rejected(self, equity_meta: InstrumentMeta) -> None:
+    def test_underfunded_buy_rejected(self, idx_meta: InstrumentMeta) -> None:
         sim = _make_sim(
-            equity_meta,
+            idx_meta,
             cash=Decimal("50"),  # too low for even one share @ 100
             default_qty=1,
         )
@@ -229,10 +229,10 @@ class TestFundsCheck:
 
     def test_funded_buy_deducts_notional_plus_costs(
         self,
-        equity_meta: InstrumentMeta,
+        idx_meta: InstrumentMeta,
     ) -> None:
         sim = _make_sim(
-            equity_meta,
+            idx_meta,
             cash=Decimal("1000"),
             default_qty=1,
             slippage_bps=Decimal("0"),
@@ -250,8 +250,8 @@ class TestFundsCheck:
 
 
 class TestPositionTransitions:
-    def test_fresh_buy_opens_long(self, equity_meta: InstrumentMeta) -> None:
-        sim = _make_sim(equity_meta, slippage_bps=Decimal("0"))
+    def test_fresh_buy_opens_long(self, idx_meta: InstrumentMeta) -> None:
+        sim = _make_sim(idx_meta, slippage_bps=Decimal("0"))
         sim.execute(_signal(Side.BUY), _bar(100))
         pos = sim.positions["NSE-NIFTY"]
         assert pos.qty == 1
@@ -260,9 +260,9 @@ class TestPositionTransitions:
 
     def test_second_buy_weighted_averages_avg_price(
         self,
-        equity_meta: InstrumentMeta,
+        idx_meta: InstrumentMeta,
     ) -> None:
-        sim = _make_sim(equity_meta, slippage_bps=Decimal("0"), default_qty=1)
+        sim = _make_sim(idx_meta, slippage_bps=Decimal("0"), default_qty=1)
         sim.execute(_signal(Side.BUY, minute=15), _bar(100, minute=15))
         sim.execute(_signal(Side.BUY, minute=16), _bar(120, minute=16))
         pos = sim.positions["NSE-NIFTY"]
@@ -272,10 +272,10 @@ class TestPositionTransitions:
 
     def test_sell_closes_long_and_realizes_pnl(
         self,
-        equity_meta: InstrumentMeta,
+        idx_meta: InstrumentMeta,
     ) -> None:
         sim = _make_sim(
-            equity_meta,
+            idx_meta,
             slippage_bps=Decimal("0"),
             cash=Decimal("10000"),
         )
@@ -288,18 +288,18 @@ class TestPositionTransitions:
 
     def test_sell_beyond_flat_opens_short(
         self,
-        equity_meta: InstrumentMeta,
+        idx_meta: InstrumentMeta,
     ) -> None:
         """SELL into a flat position is a naked short \u2014 qty goes negative."""
-        sim = _make_sim(equity_meta, slippage_bps=Decimal("0"))
+        sim = _make_sim(idx_meta, slippage_bps=Decimal("0"))
         sim.execute(_signal(Side.SELL), _bar(100))
         pos = sim.positions["NSE-NIFTY"]
         assert pos.qty == -1
         assert pos.avg_price == Decimal("100")
 
-    def test_buy_flips_short_to_long(self, equity_meta: InstrumentMeta) -> None:
+    def test_buy_flips_short_to_long(self, idx_meta: InstrumentMeta) -> None:
         """BUY qty > short size closes the short and opens a long with the remainder."""
-        sim = _make_sim(equity_meta, slippage_bps=Decimal("0"), default_qty=1)
+        sim = _make_sim(idx_meta, slippage_bps=Decimal("0"), default_qty=1)
         # Open short of 1 @ 100
         sim.execute(_signal(Side.SELL, minute=15), _bar(100, minute=15))
         assert sim.positions["NSE-NIFTY"].qty == -1
@@ -315,9 +315,9 @@ class TestPositionTransitions:
 
     def test_partial_close_leaves_avg_price_unchanged(
         self,
-        equity_meta: InstrumentMeta,
+        idx_meta: InstrumentMeta,
     ) -> None:
-        sim = _make_sim(equity_meta, slippage_bps=Decimal("0"), default_qty=3)
+        sim = _make_sim(idx_meta, slippage_bps=Decimal("0"), default_qty=3)
         sim.execute(_signal(Side.BUY, minute=15), _bar(100, minute=15))
         sim._default_qty = 1  # type: ignore[attr-defined]
         sim.execute(_signal(Side.SELL, minute=16), _bar(110, minute=16))
@@ -335,9 +335,9 @@ class TestPositionTransitions:
 class TestMarkToMarket:
     def test_flat_position_equity_equals_cash(
         self,
-        equity_meta: InstrumentMeta,
+        idx_meta: InstrumentMeta,
     ) -> None:
-        sim = _make_sim(equity_meta, cash=Decimal("1_000_000"))
+        sim = _make_sim(idx_meta, cash=Decimal("1_000_000"))
         point = sim.mark_to_market(
             symbol="NSE-NIFTY",
             price=Decimal("100"),
@@ -349,10 +349,10 @@ class TestMarkToMarket:
 
     def test_long_position_unrealized_updates(
         self,
-        equity_meta: InstrumentMeta,
+        idx_meta: InstrumentMeta,
     ) -> None:
         sim = _make_sim(
-            equity_meta,
+            idx_meta,
             slippage_bps=Decimal("0"),
             cash=Decimal("10000"),
         )
@@ -368,9 +368,9 @@ class TestMarkToMarket:
 
     def test_equity_curve_has_one_point_per_mark(
         self,
-        equity_meta: InstrumentMeta,
+        idx_meta: InstrumentMeta,
     ) -> None:
-        sim = _make_sim(equity_meta, cash=Decimal("10000"))
+        sim = _make_sim(idx_meta, cash=Decimal("10000"))
         for i in range(5):
             sim.mark_to_market(
                 symbol="NSE-NIFTY",
@@ -381,10 +381,10 @@ class TestMarkToMarket:
 
     def test_equity_curve_reflects_position_value(
         self,
-        equity_meta: InstrumentMeta,
+        idx_meta: InstrumentMeta,
     ) -> None:
         sim = _make_sim(
-            equity_meta,
+            idx_meta,
             slippage_bps=Decimal("0"),
             cash=Decimal("10000"),
         )

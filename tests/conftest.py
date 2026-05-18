@@ -19,31 +19,10 @@ from brutex.models import Exchange, Instrument, InstrumentType, Segment
 # ────────────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture
-def raw_equity_row_reliance() -> dict[str, Any]:
-    """Matches the exact docs example for NSE-RELIANCE."""
-    return {
-        "exchange": "NSE",
-        "exchange_token": 2885,
-        "trading_symbol": "RELIANCE",
-        "vendor_symbol": "NSE-RELIANCE",
-        "name": "Reliance Industries",
-        "instrument_type": "EQ",
-        "segment": "CASH",
-        "series": "EQ",
-        "isin": "INE002A01018",
-        "underlying_symbol": float("nan"),
-        "underlying_exchange_token": float("nan"),
-        "lot_size": 1,
-        "expiry_date": float("nan"),
-        "strike_price": float("nan"),
-        "tick_size": 5,  # integer paise form (dict output)
-        "freeze_quantity": float("nan"),
-        "is_reserved": 0,
-        "buy_allowed": 1,
-        "sell_allowed": 1,
-        "internal_trading_symbol": "RELIANCE",
-    }
+# raw_equity_row_reliance fixture removed in DEC-P0-032 (PR #50e).
+# Orphan fixture — zero callers per Agent 4 of PR #50e pre-impl review.
+# Track 1 is index-only per CLAUDE.md §3; EQ-rejection-path coverage is
+# already provided by inline `_make_equity` helpers in test_universe.py.
 
 
 @pytest.fixture

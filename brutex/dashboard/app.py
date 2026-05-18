@@ -427,7 +427,8 @@ def build_app(
             Filter by underlying symbol (e.g. ``NIFTY``). Matches
             both spot indices and their derivatives.
         instrument_type
-            Filter by ``IDX`` / ``FUT`` / ``CE`` / ``PE`` / ``EQ``.
+            Filter by ``IDX`` / ``FUT`` / ``CE`` / ``PE``. (``EQ`` removed
+            in DEC-P0-032 — Track 1 is index-only per CLAUDE.md §3.)
         segment
             Filter by ``CASH`` / ``FNO``.
         limit, offset
@@ -752,7 +753,6 @@ _INSTRUMENTS_HTML_BLOCK = """\
         <option value="FUT">FUT</option>
         <option value="CE">CE</option>
         <option value="PE">PE</option>
-        <option value="EQ">EQ</option>
       </select>
     </label>
     <label class="stats" style="margin-left:12px;">Segment:
