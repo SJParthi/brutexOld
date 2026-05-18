@@ -292,6 +292,49 @@ superseded.
 
 148. **DEC-P0-010 — pyright per-test re-promotion: 4 of 6 categories restored to error (PR #32)** (operator decree 2026-05-17 "go ahead dude"). Closes DEC-P0-005 P1 item #6 partially. **Source-pattern fixes** (16 errors → 0 across 5 files): (a) `tests/integration/test_execution_driver.py::_seed_lake` signature `list[float]` → `Sequence[float]` (kills 5 list-variance errors via covariant Sequence); (b) `tests/integration/test_dashboard_e2e.py::client` fixture return type `TestClient` → `Generator[TestClient]` (kills 2 generator errors); (c) `tests/redteam/test_redteam_premerge_guard.py` added `dict[str, Any]` annotation on rollup test data (kills 6 dict-index errors); (d) `tests/unit/test_execution_costs.py:224` added `isinstance(exponent, int)` guard before `-exponent` (kills 1 operator error on `int | Literal['n','N','F']`); (e) `tests/unit/test_strategies_registry.py::_DecoStrat` added `ClassVar[StrategyMeta]` annotation + `__init__(params)` to satisfy Strategy protocol (kills 1 protocol error) + targeted `# pyright: ignore[reportUntypedClassDecorator]` on the decorator line with documented Protocol-detection-limitation rationale (kills 1 untyped-decorator error). **Library changes:** `brutex/strategies/registry.py::register_strategy` rewritten with generic `TypeVar` (`_StrategyT = TypeVar("_StrategyT", bound=type[Strategy])`) so the decorator preserves concrete class type (vs erasing to `type[Strategy]`). PEP 695 syntax `def f[T](...)` skipped per UP047 because mypy 1.x doesn't yet support it; ruff noqa added with rationale. **4 categories restored to error** in tests/: `reportCallIssue`, `reportGeneralTypeIssues`, `reportUntypedClassDecorator`, `reportOperatorIssue`. **2 categories DEFERRED** (`reportArgumentType` 56 errors + `reportAttributeAccessIssue` 17 errors): downgraded to "warning" only, with honest comment block in `pyproject.toml` explaining the 73 remaining errors are pre-existing test-fixture patterns (test_dashboard_state.py parametrize loose-typing + test_adapter_protocol.py protocol-stub access + test_fakes patterns) requiring ~3 days of dedicated test-fixture refactoring. Tracked as P1 follow-up #6b for a dedicated future PR. **Honest envelope (Golden Rule #10):** "partial completion" per Agent 1 of PR #25 review prediction — the 6-category re-promotion was the right direction but full closure on `reportArgumentType` requires a separate focused effort. PR #32 closes 4 of 6 cleanly; 2 deferred with explicit deferral + tracking. **Local verification:** ruff/format/mypy strict/pyright strict ALL GREEN; pytest 1511 passed.
 
+177. **DEC-P0-040 — Track 1 requirements final review + 12 locked decisions (Renaissance-style hostile 4-agent audit)** (operator directive 2026-05-18 "I need to finalise it dude" + "Lock all 12 with the recommended answers"). Closes the requirements-finalisation gate before Phase 3 engine work. Output: `docs/TRACK1_REQUIREMENTS_FINAL.md` (~80 findings consolidated across 4 agents covering 12 lenses).
+    **Method:** 4 agents in parallel, each covering 3 dimensions (12 lenses total) over the full Track 1 doc set + CLAUDE.md + MIGRATION.md baseline:
+    - Agent 1: Math / Hot-path / Fact-checker (R-001 through R-020)
+    - Agent 2: Engineering / Security / Skills-checker (R-100 through R-120)
+    - Agent 3: Data integrity / Correctness / Scope-lock (R-200 through R-224)
+    - Agent 4: Operational realism / Cite-path / Sanity (R-300 through R-319)
+    **Verdict tally:**
+    - ✅ LOCKED: 17 items
+    - ⚠️ SCOPE-CREEP: 4 items (residual Track 2 code in Track 1 package)
+    - 🟠 PARTIAL-CLAIMED-AS-REAL: 8 items (honest envelope violations)
+    - 🟡 NEEDS VERIFICATION: ~15 items
+    - ❌ CONFLICT: 12 items
+    - 🔴 GAP: 15 items (capability required but not implemented)
+    **12 OPEN-QUESTIONS locked with recommended answers (operator decree 2026-05-18 "Lock all 12"):**
+    - **Q-01:** Canonical trial count = **1.095 trillion** (33B × 22 × 1.5 Mode C inclusion). Propagate through PERFORMANCE_BUDGET + VERIFICATION_PYRAMID + BACKTEST_SPEC in PR-D.
+    - **Q-02:** Hash function = **blake3** (spec-aligned, faster than sha256). Migrate code in PR-E.
+    - **Q-03:** Stage 1B coarse_score = **rewrite to purged-CV** (next-bar-sign correlation is in-sample peeking). Blocked on Stage 1B module existing (G-03).
+    - **Q-04:** DSR effective-N = **derive cluster-effective-N** (Bailey-Lopez de Prado appendix). Drop magic 10⁷.
+    - **Q-05:** Throughput canary 50 M/s = **downgrade** + replace with `test_full_sweep_extrapolation.py`.
+    - **Q-06:** Dashboard default bind = **127.0.0.1** (match docs); 0.0.0.0 only with explicit auth-required flag.
+    - **Q-07:** DhanWorker = **ship-now** (resume from stash). Closes 6 deferred decisions.
+    - **Q-08:** Scope-creep cleanup = **annotate brutex/options/ as Track 2 reference** (cost calculator imports it); keep FUT/CE/PE/FNO enum values (cascading test breaks); fix protocol.py docstring. Minimal-risk.
+    - **Q-09:** NIFTY 50 rebalance handling = **hardcode dates** (~10 events 2021-2026) + flag in audit.
+    - **Q-10:** TLS pinning = **add SPKI pinning** (modest operational cost vs MITM defence).
+    - **Q-11:** Mutation gate = **extend to all DEC-P0-modified modules**; ratchet operator's 95% wish over time.
+    - **Q-12:** Phase plan rebaselining = **rebaseline honestly** ("Phase 1 ingest + Phase 2 atoms complete; Phase 3 engine pending"). Update spec headers.
+    **Fix order chain (8 PRs, this PR is PR-A):**
+    - PR-A (this) — Push requirements doc + lock 12 decisions
+    - PR-B (DEC-P0-041) — §4 SCOPE-CREEP cleanup
+    - PR-C (DEC-P0-042) — Doc-only conflict fixes (C-11 stale 92→60 chunk + C-12 Ram Navami date + honest envelope rebaselining)
+    - PR-D (DEC-P0-043) — Trial count + storage + Bloom reconciliation
+    - PR-E (DEC-P0-044) — Hash composition + sha256→blake3 unification
+    - PR-F (DEC-P0-045) — DhanWorker (resume stash)
+    - PR-G (DEC-P0-046) — NIFTY rebalance + half-day session list
+    - PR-H+ — Engineering bloc (Bloom, Rust kernel, Stage 1A/1B/2/3/4) — multi-week
+    **Honest envelope:**
+    - ✅ REAL: 80 findings consolidated; full agent-output paths preserved; all 12 verdicts locked with explicit recommendations.
+    - ✅ REAL: 17 LOCKED requirements verified end-to-end (code + docs + CI).
+    - 🟠 PARTIAL: §3 GAPS — capability backlog of 15 items, of which 5 are months of work (Rust kernel + Bloom + Stage 1A/1B/2/3/4 + Metal GPU).
+    - 🟠 PARTIAL: §6 Q-03 (Stage 1B contamination) blocked on G-03 (Stage 1B module exists). Both have to land together in Phase 3.
+    - 📋 ROADMAP: every fix-order step PR-B through PR-H tracked here with its DEC-ID.
+    **Decision ID:** DEC-P0-040.
+
 176. **DEC-P0-038 — structlog configuration entry point (`brutex.observability.logging`)** (operator directive 2026-05-18 "Go ahead"). First production logging wiring for BruteX, closing the gap noted in `brutex/observability/__init__.py` ("structlog is configured in `brutex.__init__` (wired later)"). Lays the foundation that the Dhan orchestrator worker (DEC-P0-039) will consume as its first caller.
     **What this PR does:**
     - `brutex/observability/logging.py` (NEW, ~110 lines): `configure_logging(level="INFO", json_renderer=True)` is the single entry point. Builds the processor chain (`merge_contextvars` → `add_log_level` → ISO-UTC timestamp → stack info → exc_info → JSONRenderer or ConsoleRenderer) and wires it for BOTH structlog's native loggers AND stdlib `logging` (so third-party libraries like httpx that route through stdlib flow through the same enrichment).
