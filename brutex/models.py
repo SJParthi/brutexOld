@@ -31,10 +31,20 @@ class Exchange(StrEnum):
 
 
 class Segment(StrEnum):
-    """Trading segment — matches broker SDK SEGMENT_* constants."""
+    """Trading segment — matches broker SDK SEGMENT_* constants.
+
+    .. note::
+
+        **Track 1 scope (CLAUDE.md §3):** only ``CASH`` is used in the
+        signal-only spot-index brute-force backtest. ``FNO`` is **Track 2
+        reference** — kept in the enum so Track 2 modules and forward-compat
+        tests can construct it, but no Track 1 code path writes ``FNO``.
+        Per DEC-P0-040 Q-08, this enum value is annotated rather than
+        deleted to avoid cascading test breaks across 6+ test files.
+    """
 
     CASH = "CASH"
-    FNO = "FNO"
+    FNO = "FNO"  # Track 2 reference — out of scope for Track 1 signal-only mode
     # COMMODITY exists in broker SDK but is out of scope for BruteX v1.
 
 
@@ -42,13 +52,26 @@ class InstrumentType(StrEnum):
     """Instrument type — matches broker SDK values verbatim.
 
     See Dhan API annexure at https://dhanhq.co/docs/v2/annexure for the canonical list.
+
+    .. note::
+
+        **Track 1 scope (CLAUDE.md §3):** only ``IDX`` is used (4 spot
+        instruments: NIFTY / BANKNIFTY / SENSEX / INDIA VIX). The other
+        4 values — ``EQ`` / ``FUT`` / ``CE`` / ``PE`` — are **Track 2
+        reference / forward-compat**, kept in the enum so:
+
+        1. Dhan annexure parity is preserved (broker-CSV roundtrip).
+        2. Track 2 options modules + cost calculator can type-check.
+        3. Existing test fixtures across 6+ files keep importing them.
+
+        Per DEC-P0-040 Q-08, these values are annotated, not deleted.
     """
 
-    EQ = "EQ"  # Equity
-    IDX = "IDX"  # Index (NIFTY, BANKNIFTY, SENSEX, …)
-    FUT = "FUT"  # Futures
-    CE = "CE"  # Call option
-    PE = "PE"  # Put option
+    EQ = "EQ"  # Equity — Track 2 / forward-compat (cost calculator EQ path retained)
+    IDX = "IDX"  # Index (NIFTY, BANKNIFTY, SENSEX, India VIX) — Track 1 SCOPE
+    FUT = "FUT"  # Futures — Track 2 reference
+    CE = "CE"  # Call option — Track 2 reference
+    PE = "PE"  # Put option — Track 2 reference
 
 
 class OptionSide(StrEnum):
