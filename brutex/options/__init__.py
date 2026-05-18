@@ -1,5 +1,16 @@
 """Track 2 — Options realism leg.
 
+.. note::
+
+    **Scope:** This package is **TRACK 2 reference data**. Track 1 (the
+    locked spot-index brute-force backtest per CLAUDE.md §3) does NOT
+    use options data in its 52-condition vocabulary or its 5-stage
+    funnel. The package lives inside ``brutex/`` because the cost
+    calculator (`brutex/costs/calculator.py`) needs lot-size + expiry
+    lookups when Track 2 lands. The DEC-P0-040 requirements review
+    locked Q-08 = **annotate** (don't delete) to avoid cascading test
+    breaks across 6+ test files that import these modules.
+
 Modules:
 - `lot_size_history` — per-date lot size lookup (SEBI changes 2021-2026)
 - `strike_rules` — 10 pre-trade strike selection rules (Track 2 §6b)
@@ -8,9 +19,9 @@ Modules:
 - `risk_free` — T-bill rate table for BSM (TBD)
 - `greeks` — Black-Scholes-Merton wrapper around Rust kernel (TBD)
 
-Per `docs/track2/TRACK2_OPTIONS_SPEC.md`. All modules satisfy the
+Per ``docs/track2/TRACK2_OPTIONS_SPEC.md``. All modules satisfy the
 COMMON · DYNAMIC · SCALABLE · AUTOMATED principle:
-- COMMON — same code used by backtest + live TickVault
+- COMMON — same code used by backtest + live (when Track 2 lands)
 - DYNAMIC — add new underlying / new lot revision without re-architecting
 - SCALABLE — O(1) per-bar lookup
 - AUTOMATED — pure functions, no I/O

@@ -84,15 +84,26 @@ stays intact for backward compatibility. A thin wrapper
 three semantic methods onto the existing SDK-shaped calls, so all the
 hard plumbing (rate limit, dedup, audit) keeps working unchanged.
 
-## Future markets (one file each)
+## Current adapter (Track 1)
 
 ::
 
-    brutex/adapters/polygon/       # US equities + options
-    brutex/adapters/binance/       # Crypto perps + spot
-    brutex/adapters/dhan/          # Indian F&O (second source)
-    brutex/adapters/zerodha/       # Kite Connect
-    brutex/adapters/ibkr/          # Interactive Brokers
+    brutex/adapters/dhan/          # Dhan v2 historical-data API (Track 1 spot indices)
+
+## Future markets (out-of-scope for Track 1 — illustrative only)
+
+Per CLAUDE.md §3 scope-lock, Track 1 is locked to the Dhan adapter for
+4 Indian spot indices (NIFTY 50 / BANKNIFTY / SENSEX / INDIA VIX). The
+adapter Protocol is broker-neutral so future tracks could add::
+
+    brutex/adapters/polygon/       # (hypothetical) US equities + options
+    brutex/adapters/binance/       # (hypothetical) Crypto perps + spot
+    brutex/adapters/zerodha/       # (hypothetical) Kite Connect
+    brutex/adapters/ibkr/          # (hypothetical) Interactive Brokers
+
+— but none of these are in scope today; the Protocol shape exists so
+the broker-neutral L1 boundary survives a future scope expansion
+without re-architecting.
 
 Each is a single file + tests. The rest of BruteX is untouched.
 """
