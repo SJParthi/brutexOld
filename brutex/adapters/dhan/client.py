@@ -37,7 +37,7 @@ performs:
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any, Final
 
@@ -317,7 +317,7 @@ def _extract_error_code(response: httpx.Response) -> str:
 def dhan_client_context(
     token: DhanToken,
     bucket: AdaptiveTokenBucket,
-) -> Iterator[DhanClient]:
+) -> Generator[DhanClient, None, None]:
     """Context manager that closes the underlying httpx.Client on exit.
 
     Production code should prefer this over manual ``close()`` so
