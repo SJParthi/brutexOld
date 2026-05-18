@@ -81,5 +81,6 @@ fn fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::bitand_count_u64s, m)?)?;
     m.add_function(wrap_pyfunction!(python::bitcount_u64s, m)?)?;
     m.add_function(wrap_pyfunction!(python::blake3_hash, m)?)?;
+    m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
     Ok(())
 }
