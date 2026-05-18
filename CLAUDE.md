@@ -119,6 +119,18 @@ Track 1 spec locked after 4-agent hostile-review pass._
     tooling per gate + auto-driver-test discipline. Any PR with a
     red gate is BLOCKED; operator override requires ADR.
 
+    **Honest envelope (Golden Rule #10 + DEC-P0-040 / DEC-P0-042
+    rebaselining):** The 18-requirement decree above is the **target**.
+    The actual CI enforcement matrix in `docs/STANDARDS_100PCT.md` §1
+    is **9 of 21 sub-rows ✅ ENFORCED + 4 🟡 PARTIAL + 5 📋 ROADMAP +
+    3 👁️ MANUAL** (~22% fully enforced). Per Golden Rule #10 no PR
+    may claim "100% standards compliant" without first auditing against
+    that matrix. The decree-vs-reality gap is a living ratchet, not a
+    bypass — every gap row tracks a dedicated follow-up PR in
+    MIGRATION.md. PRs that touch a gap row MUST update the row's
+    status. See `docs/TRACK1_REQUIREMENTS_FINAL.md` §2 (DEC-P0-040)
+    for the full enumeration.
+
 ---
 
 ## 3. Branching and Commits

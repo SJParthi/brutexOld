@@ -192,7 +192,7 @@ the indicator precompute (Stage 1A) and the bitmask AND (Stage 1B).
 - `POST /v2/charts/historical` (daily, for PDH/PDL reference)
 - Rate limit: **5 req/s, 100K req/day** (operator caps at 3 r/s effective)
 - 90-day polling window per request
-- 5 years × 3 instruments × 90-day chunks ≈ 60 API calls + 3 daily calls
+- 5 years × **4 instruments** (NIFTY 50, BANKNIFTY, SENSEX, INDIA VIX — VIX ingested for `vix_at_entry`/`vix_at_exit` stamping per CLAUDE.md §3) × 90-day chunks ≈ **92 API calls + 4 daily calls** for first-run; ~4-chunk daily incremental afterwards.
 
 **Indices security IDs and segments (hardcoded per CLAUDE.md §6):**
 - NIFTY 50: `securityId=13`, `exchangeSegment=IDX_I`
