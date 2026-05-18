@@ -81,3 +81,62 @@ class TestBitcountU64s:
         values = [1 << (i % 64) for i in range(1000)]
         expected = sum(v.bit_count() for v in values)
         assert fno_math.bitcount_u64s(values) == expected
+
+
+class TestBitandCountU64s:
+    """`bitand_count_u64s` — Stage 1B AND-mask kernel (DEC-P0-051 / PR-L)."""
+
+    def test_basic_two_element_pair(self) -> None:
+        # 0xFF & 0x0F = 0x0F → popcount = 4
+        # 0xF0 & 0xFF = 0xF0 → popcount = 4
+        # Total = 8
+        assert fno_math.bitand_count_u64s([0xFF, 0xF0], [0x0F, 0xFF]) == 8
+
+    def test_all_ones_against_all_ones(self) -> None:
+        # u64::MAX & u64::MAX = u64::MAX → 64 bits × 3 elements = 192
+        assert (
+            fno_math.bitand_count_u64s(
+                [0xFFFFFFFFFFFFFFFF] * 3,
+                [0xFFFFFFFFFFFFFFFF] * 3,
+            )
+            == 192
+        )
+
+    def test_anything_anded_with_zero_is_zero(self) -> None:
+        assert fno_math.bitand_count_u64s([0xFF] * 5, [0] * 5) == 0
+
+    def test_empty_lists_return_zero(self) -> None:
+        assert fno_math.bitand_count_u64s([], []) == 0
+
+    def test_disjoint_masks_zero(self) -> None:
+        # 0x0F & 0xF0 = 0 — disjoint bits
+        assert fno_math.bitand_count_u64s([0x0F], [0xF0]) == 0
+
+    def test_length_mismatch_raises_value_error(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="length mismatch"):
+            fno_math.bitand_count_u64s([1, 2, 3], [4, 5])
+
+    def test_length_mismatch_empty_vs_nonempty(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="length mismatch"):
+            fno_math.bitand_count_u64s([], [1])
+
+    def test_aligned_with_python_bit_count(self) -> None:
+        """Cross-check the kernel against the Python reference."""
+        a = [0xDEADBEEF, 0xCAFEBABE, 0xFEEDFACE, 0x1234567890ABCDEF]
+        b = [0xFFFFFFFF, 0x0F0F0F0F, 0xAAAAAAAA, 0x5555555555555555]
+        expected = sum((x & y).bit_count() for x, y in zip(a, b, strict=True))
+        assert fno_math.bitand_count_u64s(a, b) == expected
+
+    def test_large_batch_matches_python_reference(self) -> None:
+        """1000-element AND-mask sweep — cross-check against Python."""
+        a = [i * 0x123456789 for i in range(1000)]
+        b = [(i + 1) * 0x987654321 for i in range(1000)]
+        # Coerce to u64 range for comparison.
+        a_u64 = [x & 0xFFFFFFFFFFFFFFFF for x in a]
+        b_u64 = [x & 0xFFFFFFFFFFFFFFFF for x in b]
+        expected = sum((x & y).bit_count() for x, y in zip(a_u64, b_u64, strict=True))
+        assert fno_math.bitand_count_u64s(a_u64, b_u64) == expected
