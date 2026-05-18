@@ -113,7 +113,7 @@ jobs:
           cache: pip
       - name: Install deps
         run: |
-          pip install -e ".[dev]"
+          pip install -e ".[dev,dhan]"
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -143,7 +143,7 @@ jobs:
         # pyarrow are installed in CI. Without these, ~6 tests in
         # tests/unit/test_tf_resampler.py and tests/integration/test_data_lake_real.py
         # fail at collection time, suppressing real coverage of the data lake.
-        run: pip install -e ".[dev,data]"
+        run: pip install -e ".[dev,data,dhan]"
       - name: pytest with coverage gate
         run: |
           # Coverage floor is 90% for P1 — heavy-dep modules (cli,
@@ -210,7 +210,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,dhan]"
       - name: pytest property tests
         run: |
           if [ -d tests/property ]; then
@@ -239,7 +239,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,dhan]"
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -281,7 +281,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,dhan]"
       - name: pytest golden tests
         run: |
           if [ -d tests/golden ]; then
@@ -726,7 +726,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,dhan]"
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1

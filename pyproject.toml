@@ -211,6 +211,7 @@ module = [
     "uvicorn", "uvicorn.*",
     "fno_math_py", "fno_math_py.*",
     "dhanhq", "dhanhq.*",  # Track 1 Dhan adapter (Phase 2 dependency)
+    "httpx", "httpx.*",  # PR #2b Dhan HTTP transport — optional [dhan] extra
 ]
 ignore_missing_imports = true
 
