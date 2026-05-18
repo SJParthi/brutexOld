@@ -13,9 +13,28 @@ Track 2 (already designed in `docs/track2/`) translates winning signals
 into priced option trades using expired-options data — that's where
 realism + costs land.
 
-BruteX Track 1 targets **730 billion parameter combinations** swept on a
-single Apple M4 Pro laptop, with bit-identical reproducibility and
-institutional-grade statistical filtering.
+BruteX Track 1 targets a **1.095 trillion (1.095 × 10¹²) parameter
+combination** total candidate space (per **DEC-P0-040 Q-01** lock —
+730 B baseline × 1.5 Mode C multiplier per DEC-MODE-001), swept via a
+5-stage funnel on a single Apple M4 Pro laptop, with bit-identical
+reproducibility and institutional-grade statistical filtering.
+
+**Trial-count taxonomy (DEC-P0-043 reconciliation):** The "trial" count
+varies by funnel stage and by what is being measured. Three load-bearing
+numbers, in different units:
+
+| # | Meaning | Count | Where measured |
+|---|---|---|---|
+| 1 | **Total candidate space** explored across Stages 1A → 1B → 2 → 2.5 → 3 → 4 | **1.095 T** (730 B × 1.5 Mode C) | spec headline + DEC-P0-040 Q-01 |
+| 2 | **Stage 2 hot-path backtests** (where most compute lives) | ~33 B baseline × 1.5 Mode C ≈ **50 B** | `docs/TRACK1_PERFORMANCE_BUDGET.md` SLA math (33 B figures pre-date Mode C; multiply by 1.5 for current envelope) |
+| 3 | **Final stored Parquet rows** (DSR-passed Stage 4 survivors) | **10² – 10⁴** | `docs/TRACK1_BACKTEST_SPEC.md` Stage 4 lockbox table |
+
+The headline "1.095 T" is the project's total exploration commitment.
+The perf-budget "33 B" was the Stage 2 hot-path figure published before
+Mode C was added; updated estimates should multiply by 1.5 to account for
+Mode C inclusion. The storage estimate of "50-100 GB after compression"
+applies to **stored Parquet rows (final survivors only)**, NOT to the
+total trial space, which would be ~22 TB raw at 200 bytes/trial.
 
 **Timeline expectation: 16 weeks of phased build.** Do not attempt the
 full sweep until Phase 9.5 pilot passes.
