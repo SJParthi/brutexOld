@@ -111,9 +111,11 @@ class Outcome(StrEnum):
 
     # ── Permanent errors (quarantine or no-data) ──────────────────
     NOT_FOUND = "NOT_FOUND"  # pragma: no mutate
+    NO_DATA = "NO_DATA"  # pragma: no mutate
     BAD_REQUEST = "BAD_REQUEST"  # pragma: no mutate
     AUTH_FAILED = "AUTH_FAILED"  # pragma: no mutate
     AUTHZ_FAILED = "AUTHZ_FAILED"  # pragma: no mutate
+    FATAL = "FATAL"  # pragma: no mutate
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -132,6 +134,7 @@ class QuarantineReason(StrEnum):
     AUTH_FAILED = "auth_failed"  # pragma: no mutate
     AUTHZ_FAILED = "authz_failed"  # pragma: no mutate
     RETRY_EXHAUSTED = "retry_exhausted"  # pragma: no mutate
+    FATAL_ERROR = "fatal_error"  # pragma: no mutate
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -326,6 +329,26 @@ def transition(
         return replace(
             item,
             state=WorkItemState.NO_DATA,
+            last_transition_at=now,
+        )
+
+    # ── NO_DATA is a terminal NO_DATA (Dhan DH-907: "Data Error" — no
+    # bars for this specific query window; advance watermark, do not retry).
+    if outcome == Outcome.NO_DATA:
+        return replace(
+            item,
+            state=WorkItemState.NO_DATA,
+            last_transition_at=now,
+        )
+
+    # ── FATAL: hard-fail terminal quarantine (Dhan 804/806/DH-902 etc.).
+    # Pipeline-level halt logic outside transition() reads this state and
+    # marks the entire phase HALTED on its next scan.
+    if outcome == Outcome.FATAL:
+        return replace(
+            item,
+            state=WorkItemState.QUARANTINED,
+            quarantine_reason=QuarantineReason.FATAL_ERROR,
             last_transition_at=now,
         )
 

@@ -158,7 +158,27 @@ class Instrument:
 
 
 class BruteXError(Exception):
-    """Base class for all BruteX errors."""
+    """Base class for all BruteX errors.
+
+    Subclasses MAY pass an optional ``safe_message`` keyword in addition
+    to the standard positional message. When set, ``str(exc)`` returns
+    only the safe message — never the raw positional args, which may
+    contain credentials, tokens, or HTTP response bodies. Callers that
+    persist exception text to the audit log or surface it in the
+    dashboard MUST use ``str(exc)`` so the redacted form is emitted.
+
+    Subclasses that do NOT pass ``safe_message`` keep the standard
+    Exception behaviour (``str(exc)`` returns the positional message).
+    """
+
+    def __init__(self, *args: object, safe_message: str | None = None) -> None:
+        super().__init__(*args)
+        self.safe_message: str | None = safe_message
+
+    def __str__(self) -> str:
+        if self.safe_message is not None:
+            return self.safe_message
+        return super().__str__()
 
 
 class OutOfScopeError(BruteXError):

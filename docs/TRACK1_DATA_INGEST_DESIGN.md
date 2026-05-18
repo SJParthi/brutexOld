@@ -341,8 +341,9 @@ Response 200:
 }
 
 Response error:
-- Token already expired → DH-907 "Data Error" → halt + alert
-- Auth fail → DH-901 / DH-908 → halt + alert
+- Token already expired → `807` "Access token expired" OR `DH-901` "Invalid Authentication" → halt + alert
+  (Note: `DH-907` is "Data Error" for missing-data windows, NOT for token expiry — corrected by DEC-P0-028.)
+- Auth fail → DH-901 / 808 → halt + alert
 ```
 
 ### 5A.5 Pseudocode
