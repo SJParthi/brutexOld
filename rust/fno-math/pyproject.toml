@@ -1,0 +1,41 @@
+# Maturin build configuration for the BruteX Rust hot kernel (DEC-P0-050 / PR-K).
+#
+# Pip installs this as a separate distribution alongside `brutex` so the
+# Python ⇆ Rust bridge can be developed independently of the Track 1
+# Python package. CI invokes `pip install -e rust/fno-math` after the
+# Python side installs `brutex` itself.
+#
+# References:
+#   - CLAUDE.md §4 (Rust hot kernel for hot paths)
+#   - CLAUDE.md §5 (rust/fno-math/ scaffold)
+#   - docs/MIGRATION.md #187 (DEC-P0-050 / PR-K — this PR)
+#   - https://www.maturin.rs/
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fno-math"
+version = "0.1.0"
+description = "BruteX Rust hot kernel — PyO3 bridge for the L1 dedup + future Stage 1B AND-mask kernel."
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.12"
+authors = [
+    { name = "SJParthi" },
+]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: Other/Proprietary License",
+]
+
+[tool.maturin]
+# Build as a Rust extension module — there is no Python source layer
+# (the cdylib IS the Python package). When future Phase 3 work needs
+# a Python shim, add `python-source = "python"` here.
+features = ["pyo3/extension-module"]
+strip = true

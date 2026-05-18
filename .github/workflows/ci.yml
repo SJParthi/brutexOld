@@ -114,6 +114,13 @@ jobs:
       - name: Install deps
         run: |
           pip install -e ".[dev,dhan]"
+      - name: Install Rust toolchain (for fno_math wheel)
+        # DEC-P0-050: required by pyright's strict mode which walks
+        # `tests/unit/test_fno_math_bridge.py` and needs the module
+        # actually importable.
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install fno_math Rust extension
+        run: pip install ./rust/fno-math
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -144,6 +151,18 @@ jobs:
         # tests/unit/test_tf_resampler.py and tests/integration/test_data_lake_real.py
         # fail at collection time, suppressing real coverage of the data lake.
         run: pip install -e ".[dev,data,dhan]"
+      - name: Install Rust toolchain (for fno_math wheel)
+        # DEC-P0-050 (PR-K): the fno-math Rust extension is built via
+        # maturin (PEP 517) at install time. ubuntu-24.04's pre-installed
+        # Rust may be older than the crate's `rust-version = "1.93.1"`
+        # floor, so install stable explicitly.
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install fno_math Rust extension
+        # `pip install` triggers maturin (declared in
+        # rust/fno-math/pyproject.toml's [build-system] requires) to
+        # build the cdylib + install it into the env so the unit tests
+        # can `import fno_math`.
+        run: pip install ./rust/fno-math
       - name: pytest with coverage gate
         run: |
           # Coverage floor is 90% for P1 — heavy-dep modules (cli,

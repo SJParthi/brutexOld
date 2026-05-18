@@ -19,8 +19,18 @@ readme = "README.md"
 [lib]
 name = "fno_math"
 path = "src/lib.rs"
+# DEC-P0-050 (PR-K): cdylib so Python's `import fno_math` finds the
+# built extension; rlib so `cargo test` + downstream Rust consumers
+# can link against the pure-Rust paths. Both are required.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# DEC-P0-050 (PR-K): PyO3 + maturin bridge for Python ⇆ Rust hot kernels.
+# `extension-module` strips the host Python lib link so the .so/.dylib
+# loads under any compatible CPython; `abi3-py312` pins the stable
+# ABI floor to BruteX's CLAUDE.md §4 Python 3.12 baseline.
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py312"] }
+
 # Serialization (used by compat::types, compat::config)
 serde = { version = "1.0.227", features = ["derive"] }
 serde_json = "1.0.146"

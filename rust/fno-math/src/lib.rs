@@ -56,5 +56,28 @@ pub mod compat;
 /// solvers). Currently empty — populated when MG-043 needs it.
 pub mod math;
 
+/// DEC-P0-050 (PR-K): PyO3 bridge to Python. Future Stage 1B
+/// AND-mask kernel, combo_hash blake3 migration, and other
+/// performance-critical Rust functions get registered here.
+pub mod python;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// ────────────────────────────────────────────────────────────────────────
+// PyO3 module entry point (DEC-P0-050 / PR-K)
+// ────────────────────────────────────────────────────────────────────────
+//
+// `#[pymodule]` registers the `fno_math` Python module. Maturin produces
+// a cdylib whose extern "C" `PyInit_fno_math` symbol matches this
+// function name. Python's `import fno_math` resolves to this entry.
+
+use pyo3::prelude::*;
+
+#[pymodule]
+fn fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", VERSION)?;
+    m.add_function(wrap_pyfunction!(python::bitcount_u64s, m)?)?;
+    m.add_function(wrap_pyfunction!(python::add_u64, m)?)?;
+    Ok(())
+}
