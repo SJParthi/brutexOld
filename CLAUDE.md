@@ -200,9 +200,9 @@ bruteX/
 │   ├── config/
 │   ├── notifications/
 │   └── observability/
-├── rust/                           ← Rust hot kernels
-│   ├── fno-math/                   ← Greeks, indicators, calendar
-│   └── fno-math-py/                ← PyO3 bindings
+├── rust/                           ← Rust hot kernel scaffold (Phase 2/3 only)
+│   └── fno-math/                   ← compat types + NSE calendar; Greeks/
+│                                     indicators removed in DEC-P0-025
 ├── tests/
 │   ├── unit/
 │   ├── integration/

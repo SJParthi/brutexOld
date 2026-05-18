@@ -29,12 +29,11 @@ IronCondor, …) from ``FR-STR-004`` lands in follow-up commits — this
 kickoff ships only the framework and one trivial *PassThrough*
 strategy used by the test suite.
 
-No math formulas live here. Every indicator / Greek a strategy might
-need is delegated to :mod:`brutex.math`, which in turn defers to the
-compiled ``fno_math_py`` PyO3 wheel. Strategies that need indicators
-will raise :class:`~brutex.math.FnoMathNotExtractedError` at call
-time until the wheel is built — not at import time — so this package
-is importable on a fresh checkout before ``maturin develop`` has run.
+No math formulas live here. Track 1 strategies operate on bar-level
+:class:`~brutex.data.models.CandleBar` values; any future Rust-accelerated
+indicator pipeline will live under ``rust/fno-math/`` and be wired in
+by Phase 2 (MG-043). Until then strategies that need indicators do the
+math in pure Python on the bar feed.
 """
 
 from __future__ import annotations

@@ -8,9 +8,8 @@ silent.
 ## Why this is FR-MATH-001 compliant
 
 Pure bar-level comparison. No rolling mean, no filter, no smoothing
-\u2014 nothing that matches a named indicator formula in
-``fno_math::indicators``. Only comparisons of adjacent
-:class:`~brutex.data.models.CandleBar` closes live here.
+\u2014 nothing that matches a named indicator formula. Only comparisons of
+adjacent :class:`~brutex.data.models.CandleBar` closes live here.
 
 ## State
 

@@ -11,9 +11,8 @@ silent.
 The strategy uses ``max`` and ``min`` over a ``collections.deque`` \u2014
 both are CPython builtins, not indicator formulas. Donchian channels
 are structurally a rolling max/min, **not** the named SMA / EMA /
-RSI / MACD / BB / ATR indicators that live in
-``fno_math::indicators``. No Python reimplementation of an indicator
-formula occurs here.
+RSI / MACD / BB / ATR family of indicators. No Python reimplementation
+of an indicator formula occurs here.
 
 ## State
 
