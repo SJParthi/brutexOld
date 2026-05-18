@@ -197,10 +197,11 @@ class IndianCostModel:
         if side == Side.BUY:
             return Decimal("0")
 
-        if segment == Segment.CASH and instrument_type in (
-            InstrumentType.EQ,
-            InstrumentType.IDX,
-        ):
+        # CASH+EQ: standard intraday-equity STT (kept for forward-compat).
+        # CASH+IDX falls through to Decimal("0") below per Track 1
+        # signal-only semantics (CLAUDE.md §7: "Brokerage assumption
+        # (Track 1) - NONE - spot is not tradable"). Updated in DEC-P0-032.
+        if segment == Segment.CASH and instrument_type == InstrumentType.EQ:
             return notional * STT_INTRADAY_EQUITY
         if segment == Segment.FNO and instrument_type == InstrumentType.FUT:
             return notional * STT_FUTURES
@@ -223,7 +224,11 @@ class IndianCostModel:
         instrument_type: InstrumentType,
     ) -> Decimal:
         """Return the NSE exchange turnover charge for one fill."""
-        if segment == Segment.CASH:
+        # CASH+EQ: standard cash-equity exchange charge (kept for
+        # forward-compat). CASH+IDX falls through to Decimal("0") below
+        # per Track 1 signal-only semantics (CLAUDE.md §7). Updated in
+        # DEC-P0-032.
+        if segment == Segment.CASH and instrument_type == InstrumentType.EQ:
             return notional * EXCH_NSE_EQUITY
         if segment == Segment.FNO and instrument_type == InstrumentType.FUT:
             return notional * EXCH_NSE_FUTURES

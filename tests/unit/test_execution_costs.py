@@ -332,3 +332,68 @@ class TestFillCostsPureBehaviour:
             gst=Decimal("3.80"),
         )
         assert c.total == Decimal("29.90")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# IDX signal-only zero-cost discipline (DEC-P0-032, PR #50e)
+#
+# Closes Agent 3 §H of PR #50e pre-impl review: Track 1 IDX path MUST
+# return all-zero FillCosts per CLAUDE.md §7 "Brokerage assumption
+# (Track 1) — NONE — spot is not tradable". Prior to DEC-P0-032, IDX
+# was grouped with EQ in costs.py:200-204 and hit STT_INTRADAY_EQUITY +
+# EXCH_NSE_EQUITY non-zero rates. Now IDX falls through to Decimal("0")
+# on every cost component.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestIndianCostModelIndexIntradayIsZero:
+    """Track 1 IDX (spot index) costs are all zero — signal-only mode."""
+
+    @pytest.fixture
+    def idx_cost_kwargs(self) -> dict[str, object]:
+        """Reusable kwargs for IDX intraday cost computation."""
+        return {
+            "side": Side.SELL,
+            "qty": 100,
+            "fill_price": Decimal("1000"),  # 100 * 1000 = 1 lakh notional
+            "segment": Segment.CASH,
+            "instrument_type": InstrumentType.IDX,
+        }
+
+    def test_idx_stt_is_zero_sell(self, idx_cost_kwargs: dict[str, object]) -> None:
+        """IDX sell-side STT is zero (was STT_INTRADAY_EQUITY pre-DEC-P0-032)."""
+        model = IndianCostModel()
+        costs = model.compute(**idx_cost_kwargs)  # type: ignore[arg-type]
+        assert costs.stt == Decimal("0")
+
+    def test_idx_exchange_fee_is_zero(self, idx_cost_kwargs: dict[str, object]) -> None:
+        """IDX exchange fee is zero (was EXCH_NSE_EQUITY pre-DEC-P0-032)."""
+        model = IndianCostModel()
+        costs = model.compute(**idx_cost_kwargs)  # type: ignore[arg-type]
+        assert costs.exchange_fee == Decimal("0")
+
+    def test_idx_buy_side_stt_and_exchange_fee_are_zero(
+        self, idx_cost_kwargs: dict[str, object]
+    ) -> None:
+        """IDX buy side STT + exchange_fee are zero (both rates were
+        previously applied via the EQ/IDX tuple at costs.py:200-204 +
+        the bare Segment.CASH branch at 226-227 — both now gated on EQ
+        only per DEC-P0-032).
+        """
+        idx_cost_kwargs["side"] = Side.BUY
+        model = IndianCostModel()
+        costs = model.compute(**idx_cost_kwargs)  # type: ignore[arg-type]
+        assert costs.stt == Decimal("0")
+        assert costs.exchange_fee == Decimal("0")
+
+    def test_idx_sell_side_stt_and_exchange_fee_are_zero(
+        self, idx_cost_kwargs: dict[str, object]
+    ) -> None:
+        """Same invariant on SELL side — both rate-based charges are
+        zero for IDX after DEC-P0-032.
+        """
+        # idx_cost_kwargs defaults to SELL
+        model = IndianCostModel()
+        costs = model.compute(**idx_cost_kwargs)  # type: ignore[arg-type]
+        assert costs.stt == Decimal("0")
+        assert costs.exchange_fee == Decimal("0")
