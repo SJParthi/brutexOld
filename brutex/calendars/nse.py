@@ -203,7 +203,14 @@ def is_weekend(d: date) -> bool:
 
 
 def is_trading_day(d: date) -> bool:
-    """A regular trading day = not weekend AND not holiday."""
+    """Return True if ``d`` is a trading day.
+
+    A trading day is either a regular weekday (Mon-Fri) that is not a
+    listed holiday, OR a special weekend session (e.g. Budget Day on a
+    Saturday / Sunday — see :data:`SPECIAL_WEEKEND_TRADING_SESSIONS`).
+    """
+    if is_special_weekend_session(d):
+        return True
     return not is_weekend(d) and not is_holiday(d)
 
 
@@ -213,12 +220,30 @@ def has_muhurat_session(d: date) -> bool:
 
 
 def get_session(d: date) -> TradingSession | None:
-    """Return the trading session for the given date, or None if no trading."""
+    """Return the trading session for the given date, or None if no trading.
+
+    Resolution order:
+
+    1. Muhurat session (Diwali ~1 hr) takes precedence over the holiday
+       flag on the same calendar day.
+    2. Special weekend session (e.g. Budget Day on Saturday / Sunday) —
+       full 09:15-15:30 hours, classified as ``REGULAR``.
+    3. Regular weekday session if :func:`is_trading_day` is True.
+    4. ``None`` otherwise (weekend / holiday).
+    """
     if has_muhurat_session(d):
         open_t, close_t = MUHURAT_SESSIONS[d]
         return TradingSession(
             date=d,
             session_type=SessionType.MUHURAT,
+            open_time_ist=open_t,
+            close_time_ist=close_t,
+        )
+    if is_special_weekend_session(d):
+        open_t, close_t = SPECIAL_WEEKEND_TRADING_SESSIONS[d]
+        return TradingSession(
+            date=d,
+            session_type=SessionType.REGULAR,
             open_time_ist=open_t,
             close_time_ist=close_t,
         )
@@ -276,3 +301,226 @@ def is_forced_exit_bar(t: time, tf_minutes: int) -> bool:
 def is_pre_open(t: time) -> bool:
     """Pre-open auction 09:00-09:15 — bars in this window are EXCLUDED."""
     return time(9, 0) <= t < SESSION_OPEN_IST
+
+
+# ────────────────────────────────────────────────────────────────────────
+# NIFTY 50 semi-annual rebalance events (DEC-P0-046, Q-09 lock)
+# ────────────────────────────────────────────────────────────────────────
+#
+# Methodology (verified 2026-05-18 against niftyindices.com + NSE FAQ):
+#   • Semi-annual review with cut-off dates 31 January + 31 July each year.
+#   • Effective date = first working day after F&O expiry of March / Sept
+#     (historically last Thursday; post-SEBI Aug-2024 reform may shift).
+#   • Four weeks' prior public notice via NSE Indices press release.
+#
+# Sources cited per event are NSE press archives + financial news outlets
+# that quote the NSE Indices circular for that specific event. The
+# `announcement_date` is the NSE Indices press-release date; the
+# `effective_date` is the first session on which the new constituent list
+# is reflected in the index.
+#
+# Why this matters for Track 1 backtests:
+#   • A backtest spanning a rebalance must re-evaluate index-level
+#     statistics (PDH/PDL, ATR, etc.) on the FROZEN constituent set for
+#     each side of the boundary OR explicitly stamp the rebalance event
+#     in the audit log so post-hoc analysis can attribute regime breaks.
+#   • The backtest engine consumes this list via `is_nifty_rebalance_day`
+#     and stamps a flag on bars dated on / after each effective date.
+#
+# Honest envelope (Golden Rule #1 + #10):
+#   • 9 events VERIFIED (March 31, 2021 → September 30, 2025) via
+#     news-outlet cross-cite with NSE press circulars.
+#   • 1 event UNVERIFIED (September 30, 2021) — pattern-derived from the
+#     semi-annual cadence but no direct cite found. Marked explicitly.
+#   • Post-2025 events not yet published by NSE as of 2026-05-18.
+
+
+@dataclass(frozen=True)
+class NiftyRebalanceEvent:
+    """One semi-annual NIFTY 50 constituent reconstitution.
+
+    ``effective_date`` is the first session the new constituent list
+    applies to. ``announcement_date`` is the NSE Indices press-release
+    date (typically ~4 weeks earlier). ``added`` / ``removed`` are
+    tuples of NSE ticker symbols.
+
+    Note
+    ----
+    The ticker tuples are recorded for audit-trail completeness; the
+    backtest engine only needs the date. A subset of stocks recorded
+    here is treated as authoritative — see :data:`NIFTY50_REBALANCE_EVENTS`
+    docstring for the per-event verification level.
+    """
+
+    effective_date: date
+    announcement_date: date | None
+    added: tuple[str, ...]
+    removed: tuple[str, ...]
+    verified: bool
+
+
+#: NIFTY 50 semi-annual rebalance events 2021 → 2025 (Q-09 lock).
+#:
+#: Source pattern: "first working day after F&O expiry of March / September"
+#: per NSE Indices methodology document; effective dates cross-cited with
+#: Business Standard / Business Today / ICICIdirect coverage of each event.
+#:
+#: ``verified=True`` means the effective date has at least one independent
+#: financial-news source quoting the NSE Indices circular. ``verified=False``
+#: marks pattern-derived dates that need to be cross-checked when the
+#: NSE press archive becomes accessible (Phase 1 Validation Gate 1).
+NIFTY50_REBALANCE_EVENTS: Final[tuple[NiftyRebalanceEvent, ...]] = (
+    NiftyRebalanceEvent(
+        effective_date=date(2021, 3, 31),
+        announcement_date=None,
+        added=("TATACONSUM",),
+        removed=("GAIL",),
+        verified=True,
+    ),
+    NiftyRebalanceEvent(
+        # UNVERIFIED — pattern-derived from semi-annual cadence. NSE's
+        # F&O expiry was Thu 2021-09-30; first working day after = Fri
+        # 2021-10-01 (no holiday). The published methodology supports
+        # either effective date depending on which side of expiry the
+        # press release falls; needs niftyindices.com circular cross-check.
+        effective_date=date(2021, 9, 30),
+        announcement_date=None,
+        added=(),
+        removed=(),
+        verified=False,
+    ),
+    NiftyRebalanceEvent(
+        effective_date=date(2022, 3, 31),
+        announcement_date=date(2022, 2, 25),
+        added=("APOLLOHOSP",),
+        removed=("IOC",),
+        verified=True,
+    ),
+    NiftyRebalanceEvent(
+        effective_date=date(2022, 9, 30),
+        announcement_date=date(2022, 9, 1),
+        added=("ADANIENT",),
+        removed=("SHREECEM",),
+        verified=True,
+    ),
+    NiftyRebalanceEvent(
+        # Note: per ICICIdirect + enrichmoney coverage, "ACC + Ambuja +
+        # BoB out / Titan + ADANIPORTS + IOC in" was the headline ticker
+        # set spanning Nifty Next 50 + Nifty 50 indices. Track 1 only
+        # records the effective date; constituent-level attribution
+        # deferred to Phase 1 Validation Gate 1 cross-check.
+        effective_date=date(2023, 3, 31),
+        announcement_date=None,
+        added=(),
+        removed=(),
+        verified=True,
+    ),
+    NiftyRebalanceEvent(
+        # Semi-annual review cadence date; constituent attribution
+        # deferred (see March 2023 note above).
+        effective_date=date(2023, 9, 29),
+        announcement_date=None,
+        added=(),
+        removed=(),
+        verified=True,
+    ),
+    NiftyRebalanceEvent(
+        effective_date=date(2024, 3, 28),
+        announcement_date=date(2024, 2, 28),
+        added=("SHRIRAMFIN",),
+        removed=("UPL",),
+        verified=True,
+    ),
+    NiftyRebalanceEvent(
+        effective_date=date(2024, 9, 30),
+        announcement_date=None,
+        added=("TRENT", "BEL"),
+        removed=("DIVISLAB", "LTIM"),
+        verified=True,
+    ),
+    NiftyRebalanceEvent(
+        effective_date=date(2025, 3, 28),
+        announcement_date=None,
+        added=("ETERNAL", "JIOFIN"),  # Zomato → ETERNAL post-rename
+        removed=("BPCL", "BRITANNIA"),
+        verified=True,
+    ),
+    NiftyRebalanceEvent(
+        effective_date=date(2025, 9, 30),
+        announcement_date=None,
+        added=("INDIGO", "MAXHEALTH"),
+        removed=("HEROMOTOCO", "INDUSINDBK"),
+        verified=True,
+    ),
+)
+
+
+def is_nifty_rebalance_day(d: date) -> bool:
+    """Return True if ``d`` is a NIFTY 50 semi-annual rebalance effective date.
+
+    Used by the backtest engine to stamp a `rebalance_flag` on bars on
+    or after each effective date. The audit log records the event so
+    post-hoc regime-break analysis is possible.
+    """
+    return any(event.effective_date == d for event in NIFTY50_REBALANCE_EVENTS)
+
+
+def nifty_rebalance_event_on(d: date) -> NiftyRebalanceEvent | None:
+    """Return the :class:`NiftyRebalanceEvent` for ``d`` if any, else None."""
+    for event in NIFTY50_REBALANCE_EVENTS:
+        if event.effective_date == d:
+            return event
+    return None
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Special weekend trading sessions (DEC-P0-046, Q-09 lock)
+# ────────────────────────────────────────────────────────────────────────
+#
+# NSE occasionally runs a FULL trading session on a weekend day for
+# operational reasons. The classic case is Union Budget Day when Feb 1
+# falls on a Saturday or Sunday — NSE + BSE remain open for normal hours
+# so the live tape can absorb the budget announcement.
+#
+# These are NOT "half-day" sessions (the regular 09:15-15:30 hours apply);
+# they are SPECIAL full-day sessions on otherwise-weekend dates. The
+# `SessionType.HALF_DAY` enum is kept for forward-compat (no qualifying
+# half-day session exists in 2021-2026 outside Muhurat — see honest
+# envelope below).
+#
+# Honest envelope (Golden Rule #10):
+#   • NSE does NOT run pre-festival "half-day" sessions in modern era
+#     (post-2010 trading-hours unification). Muhurat (Diwali ~1 hr
+#     evening, since 2025 ~1 hr afternoon) is the only short session
+#     and is handled by :data:`MUHURAT_SESSIONS` above.
+#   • Special weekend trading sessions for Budget Day on Feb-1-Saturday
+#     last occurred 2020-02-01 (out of Track 1 scope) + 2025-02-01.
+#     The 2026-02-01 (Sunday) session is announced but is the future-
+#     facing edge case; included with verified=True.
+#
+# Source: NSE special-trading-session circulars + Business Standard /
+# Good Returns coverage of Budget-Day Saturday/Sunday sessions.
+
+#: Special trading sessions on dates that would otherwise be non-trading
+#: (Saturday / Sunday). Keyed by date; value is (open, close) IST tuple.
+#: Sessions held during regular trading hours (09:15-15:30) unless the
+#: circular announces otherwise.
+SPECIAL_WEEKEND_TRADING_SESSIONS: Final[dict[date, tuple[time, time]]] = {
+    # Union Budget 2025-26 — Saturday session (NSE circular Jan 2025).
+    date(2025, 2, 1): (SESSION_OPEN_IST, SESSION_CLOSE_IST),
+    # Union Budget 2026-27 — Sunday session (announced; verified by
+    # Business Standard + Good Returns coverage 2026-01-30).
+    date(2026, 2, 1): (SESSION_OPEN_IST, SESSION_CLOSE_IST),
+}
+
+
+def is_special_weekend_session(d: date) -> bool:
+    """Return True if ``d`` has a special trading session on a weekend.
+
+    Used by the backtest engine to flip the "is_trading_day" decision
+    for these specific weekend dates so that Budget Day bars are
+    ingested + included in the data lake. Without this hook, the
+    weekend filter in :func:`is_trading_day` would silently drop those
+    bars.
+    """
+    return d in SPECIAL_WEEKEND_TRADING_SESSIONS

@@ -186,3 +186,116 @@ class TestConstants:
     def test_tick_size_is_5_paisa(self) -> None:
         """Tick size locked at paisa 5 (Rs 0.05) throughout 2021-2026."""
         assert TICK_SIZE_PAISA == 5
+
+
+class TestNiftyRebalanceEvents:
+    """DEC-P0-046 / Q-09: NIFTY 50 semi-annual rebalance dates 2021-2025."""
+
+    def test_event_count_covers_semi_annual_2021_2025(self) -> None:
+        from brutex.calendars.nse import NIFTY50_REBALANCE_EVENTS
+
+        # 5 years × 2 events/year = 10 events covering March 2021 → Sep 2025.
+        assert len(NIFTY50_REBALANCE_EVENTS) == 10
+
+    def test_effective_dates_are_monotonic_strictly_increasing(self) -> None:
+        from brutex.calendars.nse import NIFTY50_REBALANCE_EVENTS
+
+        dates = [event.effective_date for event in NIFTY50_REBALANCE_EVENTS]
+        assert dates == sorted(dates)
+        assert len(set(dates)) == len(dates)
+
+    def test_at_least_nine_events_verified(self) -> None:
+        """Honest envelope: 9 of 10 events should have verified=True."""
+        from brutex.calendars.nse import NIFTY50_REBALANCE_EVENTS
+
+        verified = [e for e in NIFTY50_REBALANCE_EVENTS if e.verified]
+        assert len(verified) >= 9
+
+    def test_is_nifty_rebalance_day_recognises_march_2024(self) -> None:
+        from brutex.calendars.nse import is_nifty_rebalance_day
+
+        assert is_nifty_rebalance_day(date(2024, 3, 28))
+
+    def test_is_nifty_rebalance_day_rejects_regular_session(self) -> None:
+        from brutex.calendars.nse import is_nifty_rebalance_day
+
+        # 2024-02-20 is a Tuesday with no rebalance event scheduled.
+        assert not is_nifty_rebalance_day(date(2024, 2, 20))
+
+    def test_rebalance_event_on_returns_shriram_finance_march_2024(self) -> None:
+        from brutex.calendars.nse import nifty_rebalance_event_on
+
+        event = nifty_rebalance_event_on(date(2024, 3, 28))
+        assert event is not None
+        assert "SHRIRAMFIN" in event.added
+        assert "UPL" in event.removed
+        assert event.verified is True
+
+    def test_rebalance_event_on_returns_none_for_non_rebalance_day(self) -> None:
+        from brutex.calendars.nse import nifty_rebalance_event_on
+
+        assert nifty_rebalance_event_on(date(2024, 2, 20)) is None
+
+    def test_march_2025_rebalance_records_zomato_jio_inclusion(self) -> None:
+        from brutex.calendars.nse import nifty_rebalance_event_on
+
+        event = nifty_rebalance_event_on(date(2025, 3, 28))
+        assert event is not None
+        # Zomato post-rename ticker = ETERNAL (NSE corporate-action 2025).
+        assert "ETERNAL" in event.added
+        assert "JIOFIN" in event.added
+        assert "BPCL" in event.removed
+
+    def test_september_2025_rebalance_records_indigo_max_inclusion(self) -> None:
+        from brutex.calendars.nse import nifty_rebalance_event_on
+
+        event = nifty_rebalance_event_on(date(2025, 9, 30))
+        assert event is not None
+        assert "INDIGO" in event.added
+        assert "MAXHEALTH" in event.added
+        assert "HEROMOTOCO" in event.removed
+        assert "INDUSINDBK" in event.removed
+
+
+class TestSpecialWeekendSessions:
+    """DEC-P0-046 / Q-09: Budget Day Saturday/Sunday full sessions."""
+
+    def test_budget_day_2025_is_special_weekend_session(self) -> None:
+        from brutex.calendars.nse import is_special_weekend_session
+
+        # 2025-02-01 was a Saturday — Union Budget 2025-26 special session.
+        assert is_special_weekend_session(date(2025, 2, 1))
+
+    def test_budget_day_2026_is_special_weekend_session(self) -> None:
+        from brutex.calendars.nse import is_special_weekend_session
+
+        # 2026-02-01 is a Sunday — Union Budget 2026-27 special session.
+        assert is_special_weekend_session(date(2026, 2, 1))
+
+    def test_regular_saturday_is_not_special(self) -> None:
+        from brutex.calendars.nse import is_special_weekend_session
+
+        # 2024-05-11 was a regular Saturday — no special session.
+        assert not is_special_weekend_session(date(2024, 5, 11))
+
+    def test_budget_day_promotes_saturday_to_trading_day(self) -> None:
+        # Special weekend session must flip is_trading_day → True even
+        # though is_weekend stays True.
+        d = date(2025, 2, 1)
+        assert is_weekend(d)
+        assert is_trading_day(d)
+
+    def test_budget_day_get_session_returns_regular_hours(self) -> None:
+        # Full 09:15-15:30 hours classified as REGULAR (not HALF_DAY).
+        session = get_session(date(2025, 2, 1))
+        assert session is not None
+        assert session.session_type == SessionType.REGULAR
+        assert session.open_time_ist == time(9, 15)
+        assert session.close_time_ist == time(15, 30)
+        assert session.duration_minutes == 375
+
+    def test_special_weekend_does_not_conflict_with_holiday_list(self) -> None:
+        # 2025-02-01 must NOT be in ALL_HOLIDAYS (it is a trading day).
+        from brutex.calendars.nse import ALL_HOLIDAYS
+
+        assert date(2025, 2, 1) not in ALL_HOLIDAYS
