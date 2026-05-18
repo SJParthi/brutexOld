@@ -116,12 +116,14 @@ pub fn bitand_count_u64s(a: Vec<u64>, b: Vec<u64>) -> PyResult<u64> {
 /// * Single-tree mode (no key, no derive-key context) — matches the
 ///   plain `sha256(payload)` API the existing combo_hash uses.
 ///
-/// Usage from Python::
+/// Usage from Python:
 ///
-///     import fno_math
-///     digest = fno_math.blake3_hash(b"my payload")
-///     assert len(digest) == 32
-///     assert digest.hex() == "..."  # deterministic
+/// ```ignore
+/// import fno_math
+/// digest = fno_math.blake3_hash(b"my payload")
+/// assert len(digest) == 32
+/// assert digest.hex() == "..."  # deterministic
+/// ```
 #[pyfunction]
 pub fn blake3_hash(py: Python<'_>, data: &[u8]) -> Py<PyBytes> {
     let hash = blake3::hash(data);
