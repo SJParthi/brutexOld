@@ -174,6 +174,29 @@ class TestTransitionSuccess:
         result = transition(item, Outcome.NOT_FOUND)
         assert result.state == WorkItemState.NO_DATA
 
+    def test_no_data_outcome_is_terminal_no_data(self) -> None:
+        """DH-907 'Data Error' (no bars for query window) → terminal NO_DATA.
+
+        Distinct from OK_EMPTY (legitimate empty trading window) and from
+        NOT_FOUND (instrument doesn't exist). DEC-P0-028.
+        """
+        item = _in_flight_item()
+        result = transition(item, Outcome.NO_DATA)
+        assert result.state == WorkItemState.NO_DATA
+        assert result.quarantine_reason is None
+
+    def test_fatal_outcome_quarantines_with_fatal_error_reason(self) -> None:
+        """FATAL outcome (Dhan 804/806/DH-902) → QUARANTINED with FATAL_ERROR.
+
+        Pipeline-level halt logic outside transition() reads this state
+        and marks the phase HALTED on its next scan. DEC-P0-028.
+        """
+        item = _in_flight_item()
+        result = transition(item, Outcome.FATAL)
+        assert result.state == WorkItemState.QUARANTINED
+        assert result.quarantine_reason == QuarantineReason.FATAL_ERROR
+        assert result.resolved_by_human is False
+
 
 # ────────────────────────────────────────────────────────────────────────
 # transition() — quarantine path
