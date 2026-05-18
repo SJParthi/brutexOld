@@ -503,7 +503,7 @@ subtract it a second time as a separate line. Output struct exposes
 should match exactly when broker config is the only knob varied. If
 they differ, calculator has a bug.
 
-Future brokers (Upstox, Angel, Groww, etc.) — each adds one row to
+Future brokers (none in scope today) — each would add one row to
 `COSTS_VERIFIED.md §8` and one constant; no algorithm change needed.
 
 ---

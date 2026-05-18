@@ -9,7 +9,8 @@ name: release
 # Operator decision 2026-05-16: "Everything should be entirely automated.
 # I can't monitor this. The process needs to be fully automated."
 #
-# See docs/SHARED_LIBRARY.md for the full automation chain.
+# Release automation chain: Release Please opens release PRs based on
+# Conventional Commits; auto-merge.yml lands them once CI is green.
 
 on:
   push:
