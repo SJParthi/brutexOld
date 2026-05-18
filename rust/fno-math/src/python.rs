@@ -23,6 +23,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 /// Add two unsigned 64-bit integers. Sanity-check the PyO3 wheel
 /// build round-trips correctly.
@@ -95,4 +96,36 @@ pub fn bitand_count_u64s(a: Vec<u64>, b: Vec<u64>) -> PyResult<u64> {
         .map(|(x, y)| u64::from((x & y).count_ones()))
         .sum();
     Ok(total)
+}
+
+/// Return the 32-byte blake3 hash of ``data`` as bytes.
+///
+/// DEC-P0-052 (PR-M). Foundational for the deferred sha256 → blake3
+/// migration of `brutex.strategies.combo.combo_hash` (DEC-P0-044 Q-02).
+/// Blake3 is ~5× faster than sha256 on a single core and ~10-20× on
+/// multi-core for large inputs (BLAKE3 paper §5.5); for the small
+/// (~256-byte) combo-hash payloads BruteX uses, the single-core speedup
+/// dominates.
+///
+/// Properties:
+///
+/// * Deterministic — same input always produces same output. Required
+///   by Golden Rule #4 (Reproducibility first).
+/// * 32-byte output (256-bit digest) — matches sha256's digest size so
+///   the swap is wire-format compatible at the storage layer.
+/// * Single-tree mode (no key, no derive-key context) — matches the
+///   plain `sha256(payload)` API the existing combo_hash uses.
+///
+/// Usage from Python:
+///
+/// ```ignore
+/// import fno_math
+/// digest = fno_math.blake3_hash(b"my payload")
+/// assert len(digest) == 32
+/// assert digest.hex() == "..."  # deterministic
+/// ```
+#[pyfunction]
+pub fn blake3_hash(py: Python<'_>, data: &[u8]) -> Py<PyBytes> {
+    let hash = blake3::hash(data);
+    PyBytes::new(py, hash.as_bytes()).into()
 }

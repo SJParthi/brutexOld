@@ -31,6 +31,14 @@ crate-type = ["cdylib", "rlib"]
 # ABI floor to BruteX's CLAUDE.md §4 Python 3.12 baseline.
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py312"] }
 
+# DEC-P0-052 (PR-M): blake3 hash function — foundational for the deferred
+# sha256 → blake3 combo_hash 9-field migration (DEC-P0-044 Q-02). Blake3
+# is ~5× faster than sha256 on multi-core, single-tree mode is
+# deterministic + reproducible (Golden Rule #4). The PR-M kernel exposes
+# `blake3_hash(data: bytes) -> bytes` so the future combo_hash migration
+# can call into it without re-deriving the byte-equality invariant.
+blake3 = "1.5"
+
 # Serialization (used by compat::types, compat::config)
 serde = { version = "1.0.227", features = ["derive"] }
 serde_json = "1.0.146"
