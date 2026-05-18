@@ -54,7 +54,7 @@ def sample_info() -> RuntimeInfo:
         metrics_url="http://localhost:9081/metrics",
         phase="A_INSTRUMENTS",
         env_snapshot=(
-            ("BRUTEX_OHLC_RATE_LIMIT_RPS", "15"),
+            ("BRUTEX_OHLC_RATE_LIMIT_RPS", "3"),
             ("BRUTEX_PORT_DASHBOARD", "9080"),
         ),
         environment="terminal",
