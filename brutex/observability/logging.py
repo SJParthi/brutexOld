@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Any, Final
+from typing import Any, ClassVar, Final
 
 import structlog
 
@@ -52,10 +52,17 @@ import structlog
 #: ``level`` argument from a config file or env var.
 _DEFAULT_LEVEL: Final[str] = "INFO"
 
-#: Module-level guard so :func:`configure_logging` is idempotent for
-#: identical arguments. Stores ``(level, json_renderer)`` tuple of the
-#: last successful call, or ``None`` if never configured.
-_LAST_CONFIG: tuple[str, bool] | None = None
+
+class _ConfigState:
+    """Module-private state holder for :func:`configure_logging`.
+
+    Held on a class (not a module-level global) so flow-analysis tools
+    (CodeQL) can see the read + write in the same scope. Stores the
+    ``(level, json_renderer)`` tuple of the last successful call, or
+    ``None`` if never configured.
+    """
+
+    last: ClassVar[tuple[str, bool] | None] = None
 
 
 def _shared_processors() -> list[Any]:
@@ -94,9 +101,8 @@ def configure_logging(
     Idempotent for identical arguments. Subsequent calls with different
     arguments override the prior config (last-call-wins).
     """
-    global _LAST_CONFIG  # noqa: PLW0603  # intentional idempotence guard
     cfg = (level, json_renderer)
-    if cfg == _LAST_CONFIG:
+    if cfg == _ConfigState.last:
         return
 
     shared = _shared_processors()
@@ -128,7 +134,7 @@ def configure_logging(
     root_logger.handlers = [handler]
     root_logger.setLevel(_level_to_int(level))
 
-    _LAST_CONFIG = cfg
+    _ConfigState.last = cfg
 
 
 def _level_to_int(level: str) -> int:
@@ -144,6 +150,5 @@ def _level_to_int(level: str) -> int:
 
 def reset_configuration() -> None:
     """Reset the idempotence guard. Test-only helper."""
-    global _LAST_CONFIG  # noqa: PLW0603  # test-only reset path
-    _LAST_CONFIG = None
+    _ConfigState.last = None
     structlog.reset_defaults()
