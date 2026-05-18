@@ -218,9 +218,7 @@ class TestWhitelistSemantics:
     def test_unknown_code_error_has_safe_message(self) -> None:
         with pytest.raises(UnknownDhanCodeError) as exc_info:
             classify_dhan_code("DH-999")
-        assert str(exc_info.value) == (
-            "Unknown Dhan API error code; halting for operator review."
-        )
+        assert str(exc_info.value) == ("Unknown Dhan API error code; halting for operator review.")
         # Detailed message (in exc.args[0]) DOES contain the code
         # for local debugging — but str(exc) returns the safe form.
         assert "DH-999" not in str(exc_info.value)
