@@ -1,32 +1,27 @@
-//! Compatibility shim — vendored copy of `tickvault-common` for use by
-//! the extracted greeks/indicators/strategies modules.
+//! Domain types used across the Rust hot kernel.
 //!
-//! This module exists because tickvault's `greeks/`, `indicator/`, and
-//! `strategy/` source files reference types and constants from its
-//! sibling crate `tickvault-common`. To keep `fno-math` a self-contained
-//! Rust crate that can be consumed identically by both tickvault (Rust)
-//! and BruteX (PyO3), we vendor those common files here.
+//! Originally vendored from a tickvault-common scaffold during the
+//! 2026-04-14 extraction. Per DEC-P0-025 (PR #47) the live-trading
+//! modules (`order_types`, `tick_types`, `instrument_registry`) were
+//! removed; this module now contains only the domain types BruteX
+//! itself uses for Track 1 (Dhan historical backtest, spot indices):
 //!
-//! **Provenance:** copied from `tickvault/crates/common/src/` at commit
-//! `aad528a7e7f58df0bda69e349a48e31442115fd7` on 2026-04-14 via
-//! `scripts/extract-fno-math.sh`.
-//!
-//! **End state (Phase 2 polish):** the types in this module will be
-//! promoted to first-class `fno-math` types (e.g., `fno_math::tick`
-//! instead of `fno_math::compat::tick_types`). At that point tickvault's
-//! `tickvault-common` crate is deleted and both products depend only on
-//! `fno-math`. Until that polish happens, tickvault keeps its own
-//! `tickvault-common` crate and the two stay in sync via the drift-check
-//! script.
+//! - [`config`] — runtime configuration containers
+//! - [`constants`] — exchange segment + numeric constants
+//! - [`error`] — common error types
+//! - [`instrument_types`] — instrument-kind codecs (CAUTION: still
+//!   contains tickvault residue for Equity/Stock variants; pruning
+//!   tracked as a follow-up to DEC-P0-025)
+//! - [`sanitize`] — string sanitization for symbol normalization
+//! - [`segment`] — ExchangeSegment helpers
+//! - [`trading_calendar`] — NSE/BSE holiday calendar
+//! - [`types`] — Exchange enum + OptionType enum + segment serde
 
 pub mod config;
 pub mod constants;
 pub mod error;
-pub mod instrument_registry;
 pub mod instrument_types;
-pub mod order_types;
 pub mod sanitize;
 pub mod segment;
-pub mod tick_types;
 pub mod trading_calendar;
 pub mod types;

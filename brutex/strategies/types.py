@@ -1,8 +1,8 @@
 """Core dataclasses + enums for the BruteX strategy engine.
 
-Intentionally pure — no ``polars`` / ``pyarrow`` / ``fno_math_py``
-imports — so this module can participate in the unit-test suite on
-a fresh checkout that has not yet built the PyO3 wheel.
+Intentionally pure — no ``polars`` / ``pyarrow`` imports — so this
+module can participate in the unit-test suite on a fresh checkout
+without any Rust toolchain present.
 """
 
 from __future__ import annotations

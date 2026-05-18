@@ -278,8 +278,8 @@ class Catalog:
         ``[start, end]`` window.
 
         The return type is a ``pyarrow.Table`` — the shared lingua
-        franca for zero-copy interop between the Python side and the
-        Rust hot kernels (``rust/fno-math``). Columns are::
+        franca for zero-copy interop with the data lake layer.
+        Columns are::
 
             timestamp (timestamp[us, tz=UTC])
             open / high / low / close (float64)

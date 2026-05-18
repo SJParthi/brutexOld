@@ -435,20 +435,9 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: cargo test
         run: cargo test --release
-      # DEC-P0-019 (PR #41a): math stub <-> Rust PyO3 signature verifier.
-      # Closes PR #38's deferred maturin verifier. Runs `cargo check`
-      # against rust/fno-math-py/ (PyO3 wrapper) to confirm the wrapper
-      # crate builds with the current Rust toolchain, then parses
-      # #[pyo3(signature = ...)] declarations and compares against
-      # brutex/math/__init__.pyi. NO maturin install needed — the
-      # verifier is source-based (parses Rust + .pyi files directly).
-      # Scope: 6 Greeks only; indicators excluded per DEC-P0-016.
-      - name: cargo check (fno-math-py PyO3 wrapper)
-        working-directory: rust/fno-math-py
-        run: cargo check --all-targets
-      - name: verify .pyi stub matches Rust PyO3 signatures
-        working-directory: .
-        run: python3 scripts/ci/verify-math-stub-vs-wheel.py
+      # Math-stub verifier removed in DEC-P0-025 (PR #47) along with
+      # rust/fno-math-py/ and brutex/math/. Track 1 backtest does not
+      # need Greeks or a PyO3 wheel as of now.
 
   # ─────────────────────────────────────────────────────────────────
   # BANNED PATTERNS — no print, no TODO in prod, no .env*
@@ -511,26 +500,9 @@ jobs:
             --verbose \
             --exit-code 1
 
-  # ─────────────────────────────────────────────────────────────────
-  # FNO-MATH DRIFT CHECK — REMOVED from per-push CI on 2026-05-15.
-  #
-  # The drift check (scripts/check-fno-math-drift.sh) clones tickvault
-  # from GitHub to diff against rust/fno-math/src/. In remote / sandboxed
-  # CI environments that can't reach the tickvault repo, the script
-  # always fails with a network error, producing a noisy red X on
-  # every PR — even on docs-only PRs that don't touch rust/fno-math/.
-  #
-  # The check still runs on schedule (every 6 hours) via
-  # .github/workflows/drift-check.yml, which has the right network
-  # context and opens/closes a tracking issue when drift is detected.
-  # Per the drift-check.yml design intent (line 12-14), it should
-  # never block merges anyway — merges only care about the snapshot
-  # that exists at merge time, not future tickvault drift.
-  #
-  # Restore here only if the scheduled workflow proves insufficient
-  # AND the per-push job can be made to skip cleanly when rust/fno-math/
-  # is untouched in the diff (e.g., via dorny/paths-filter).
-  # ─────────────────────────────────────────────────────────────────
+  # FNO-MATH DRIFT CHECK — removed entirely in DEC-P0-025 (PR #47).
+  # The crate is no longer extracted from any other repo; the drift
+  # check + scheduled workflow + extraction script are deleted.
 
   # ═════════════════════════════════════════════════════════════════
   # DEEP COMPREHENSIVE SCANNERS (PR #2) — every category of code
