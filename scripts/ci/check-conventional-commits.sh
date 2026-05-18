@@ -39,7 +39,7 @@ set -euo pipefail
 FROM="${1:-HEAD~1}"
 TO="${2:-HEAD}"
 
-REGEX='^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\([a-z0-9_-]+\))?!?: .+'
+REGEX='^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\([a-z0-9_/-]+\))?!?: .+'
 
 FAILED=0
 COUNT=0
