@@ -6,9 +6,15 @@ L5 engine, L6 orchestrator, L7 UI) consumes normalised BruteX models
 from :mod:`brutex.models` and is broker-agnostic.
 
 The contract is defined in :mod:`brutex.adapters.protocol`. The Dhan
-adapter (Track 1) will land in Phase 2 of the Track 1 build plan
-(see ``docs/TRACK1_PHASE_PLAN.md``). No adapter ships in this
-intermediate state — Track 1 is at Phase 0 (docs only).
+adapter (Track 1) is built incrementally across Phase 2:
+
+* PR #51 (DEC-P0-033) — :mod:`brutex.adapters.dhan.constants`
+  (DhanSpotInstrument singletons for the 4 Track 1 instruments).
+* PR #2a (DEC-P0-034) — :mod:`.timeconv`, :mod:`.body`, :mod:`.parser`
+  (pure-function foundation).
+* PR #2b (DEC-P0-035, planned) — :class:`brutex.adapters.dhan.client.DhanClient`
+  (HTTP transport + classify_response state machine).
+* PR #2c (DEC-P0-036, planned) — trust_env=False + SSRF guard + real-Dhan smoke.
 """
 
 from __future__ import annotations
