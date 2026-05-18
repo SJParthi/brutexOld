@@ -212,6 +212,7 @@ module = [
     "fno_math_py", "fno_math_py.*",
     "dhanhq", "dhanhq.*",  # Track 1 Dhan adapter (Phase 2 dependency)
     "httpx", "httpx.*",  # PR #2b Dhan HTTP transport — optional [dhan] extra
+    "structlog", "structlog.*",  # DEC-P0-038: structlog runtime dep — type stubs not yet packaged
 ]
 ignore_missing_imports = true
 
