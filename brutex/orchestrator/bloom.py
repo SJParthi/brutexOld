@@ -112,7 +112,9 @@ from typing import Any, Final
 
 import structlog
 from fastbloom_rs import BloomFilter as _RustBloomFilter
-from fno_math import popcount_bytes as _popcount_bytes
+from fno_math import (
+    popcount_bytes as _popcount_bytes,  # pyright: ignore[reportMissingTypeStubs]
+)
 
 from brutex.models import BruteXError
 
