@@ -1,20 +1,31 @@
-"""Adaptive token-bucket rate limiter for Dhan adapter (deleted).
+"""Adaptive token-bucket rate limiter for the Dhan Data API.
 
-Implements ``FR-ING-017`` (adaptive rate limiter) from
-``docs/REQUIREMENTS.md §4.1``.
+Defaults Dhan-tuned per ``CLAUDE.md §2 rule 6`` + §6 (DEC-P0-030, PR #50c):
+Dhan Data API caps at 5 req/s + 100,000/day; effective adapter cap is
+3 r/s (5 × 0.6 safety factor); downshift to 1.5 r/s on consecutive 429s.
+Integrated with :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`
+for the per-day 100K ceiling.
 
 ## Contract
 
-* **Start at 15 req/s** (the ``BRUTEX_OHLC_RATE_LIMIT_RPS`` env-var
-  default — 60% of the broker's documented ~25 req/s OHLC bucket).
-* **Auto-downshift to 10 req/s** after 3 consecutive
-  :class:`VendorAPIRateLimitException` hits inside a 60-second window.
+* **Start at ``DEFAULT_INITIAL_RPS`` req/s** (= 3.0; the
+  ``BRUTEX_OHLC_RATE_LIMIT_RPS`` env-var default — 60% of Dhan's
+  verified 5 req/s data-API cap per CLAUDE.md §6).
+* **Auto-downshift to ``DEFAULT_DOWNSHIFT_RPS`` req/s** (= 1.5) after
+  ``DEFAULT_DOWNSHIFT_TRIGGER`` (= 3) consecutive 429 / Dhan-rate-limit
+  exception hits inside ``DEFAULT_DOWNSHIFT_WINDOW`` (= 60) seconds.
 * **Emit a ``rate_limit.downshift`` Telegram event** when downshifting.
-* **Upshift back to 15 req/s** after 2 consecutive minutes of clean
-  operation (no 429s).
+* **Upshift back to ``DEFAULT_INITIAL_RPS``** after
+  ``DEFAULT_UPSHIFT_RECOVERY`` (= 120) seconds of clean operation
+  (no 429s).
 * **Never drops a request silently.** When the bucket is empty,
   :meth:`acquire` blocks until a token is available. The caller
   always gets through eventually.
+* **Optional daily quota gate.** When constructed with a
+  ``DailyQuotaTracker``, :meth:`acquire` consults the tracker AFTER
+  bucket success — if the daily 100K is exhausted, raises
+  :class:`~brutex.orchestrator.quota_tracker.DailyQuotaExceeded` which
+  the adapter maps to ``Outcome.FATAL`` (halt the phase, no auto-retry).
 
 ## Design
 
@@ -44,7 +55,10 @@ import time as _time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from brutex.orchestrator.quota_tracker import DailyQuotaTracker
 
 from brutex.models import BruteXError
 
@@ -52,11 +66,16 @@ from brutex.models import BruteXError
 # Constants (tuned per FR-ING-017)
 # ────────────────────────────────────────────────────────────────────────
 
-#: Default steady-state rate (req/s). 60% of the broker's documented 25 r/s.
-DEFAULT_INITIAL_RPS: Final[float] = 15.0
+#: Default steady-state rate (req/s). 60% of Dhan's verified 5 r/s data-API
+#: cap per CLAUDE.md §2 rule 6 + §6. Was 15.0 (calibrated for the deleted
+#: broker's 25 r/s); retuned to 3.0 in DEC-P0-030 (PR #50c).
+DEFAULT_INITIAL_RPS: Final[float] = 3.0
 
-#: Rate we downshift to after consecutive 429s.
-DEFAULT_DOWNSHIFT_RPS: Final[float] = 10.0
+#: Rate we downshift to after consecutive 429s. Was 10.0 (broker-tuned);
+#: retuned to 1.5 (50% of new initial) in DEC-P0-030. The invariant
+#: ``downshift_rps < initial_rps`` enforced in ``__post_init__`` forces
+#: atomic swap of both constants.
+DEFAULT_DOWNSHIFT_RPS: Final[float] = 1.5
 
 #: How many consecutive 429s within :data:`DEFAULT_DOWNSHIFT_WINDOW`
 #: seconds trigger the downshift.
@@ -119,9 +138,10 @@ class RateLimiterEvent:
 class AdaptiveTokenBucket:
     """Thread-safe adaptive token bucket.
 
-    Create one instance per broker adapter (deleted). Workers call
+    Create one instance per Dhan adapter. Workers call
     :meth:`acquire` before every API call and :meth:`record_rate_limit_hit`
-    if the call returned a 429 / ``VendorAPIRateLimitException``.
+    if the call returned a Dhan 429 / rate-limit response (codes 805 or
+    DH-904 per the Dhan API error catalog).
 
     Parameters
     ----------
@@ -154,6 +174,13 @@ class AdaptiveTokenBucket:
     burst: int = DEFAULT_BURST
     clock: Callable[[], float] = _time.monotonic
     sleep: Callable[[float], None] = _time.sleep
+    #: Optional daily-quota gate. When set, :meth:`acquire` calls
+    #: ``quota_tracker.acquire_or_raise()`` AFTER the bucket token is
+    #: consumed (Agent 1 §A — outside the bucket lock to avoid leaking
+    #: 150µs LMDB latency into observability reads). When ``None``, the
+    #: bucket runs in legacy "bucket-only" mode (production callers
+    #: MUST always pass a tracker; ``None`` is for test fixtures only).
+    quota_tracker: DailyQuotaTracker | None = None
 
     # ── Runtime state (not dataclass fields — computed in __post_init__) ──
     _current_rps: float = field(init=False)
@@ -202,37 +229,50 @@ class AdaptiveTokenBucket:
             self._refill_locked()
             if self._tokens >= 1.0:
                 self._tokens -= 1.0
-                return 0.0
+                wait_seconds = 0.0
+            else:
+                # Not enough tokens — compute wait time for one full token.
+                needed = 1.0 - self._tokens
+                wait_seconds = needed / self._current_rps
 
-            # Not enough tokens — compute wait time for one full token.
-            needed = 1.0 - self._tokens
-            wait_seconds = needed / self._current_rps
-
-        # Release the lock while sleeping so other threads can still
-        # check upshift status. After waking, re-enter and consume.
-        self.sleep(wait_seconds)
-        with self._lock:
-            self._refill_locked()
-            # Guaranteed at least 1.0 after the sleep unless downshift
-            # happened concurrently, in which case loop once more.
-            # Use a small epsilon to absorb float arithmetic drift so
-            # `tokens == 0.9999…` doesn't trigger an infinite micro-wait
-            # loop.
-            eps = 1e-9
-            iterations = 0
-            while self._tokens < 1.0 - eps:
-                iterations += 1
-                if iterations > _ACQUIRE_LOOP_CAP:
-                    # Safety net — in the fake-clock world, round-off
-                    # should converge in 1-2 iterations; 16 is a hard
-                    # cap so tests can't deadlock on us.
-                    self._tokens = 1.0
-                    break
-                more_wait = max((1.0 - self._tokens) / self._current_rps, eps)
-                self.sleep(more_wait)
+        if wait_seconds > 0.0:
+            # Release the lock while sleeping so other threads can still
+            # check upshift status. After waking, re-enter and consume.
+            self.sleep(wait_seconds)
+            with self._lock:
                 self._refill_locked()
-                wait_seconds += more_wait
-            self._tokens -= 1.0
+                # Guaranteed at least 1.0 after the sleep unless downshift
+                # happened concurrently, in which case loop once more.
+                # Use a small epsilon to absorb float arithmetic drift so
+                # `tokens == 0.9999…` doesn't trigger an infinite micro-wait
+                # loop.
+                eps = 1e-9
+                iterations = 0
+                while self._tokens < 1.0 - eps:
+                    iterations += 1
+                    if iterations > _ACQUIRE_LOOP_CAP:
+                        # Safety net — in the fake-clock world, round-off
+                        # should converge in 1-2 iterations; 16 is a hard
+                        # cap so tests can't deadlock on us.
+                        self._tokens = 1.0
+                        break
+                    more_wait = max((1.0 - self._tokens) / self._current_rps, eps)
+                    self.sleep(more_wait)
+                    self._refill_locked()
+                    wait_seconds += more_wait
+                self._tokens -= 1.0
+
+        # Daily quota gate (DEC-P0-030, PR #50c). Called OUTSIDE the
+        # bucket lock per Agent 1 §A to avoid leaking 150µs LMDB latency
+        # into dashboard reads. The quota tracker has its own lock; the
+        # two locks compose sequentially (bucket released → quota acquired)
+        # so no deadlock possible. If the daily quota is exhausted, the
+        # bucket token is "wasted" — acceptable per FATAL semantics
+        # (phase halts, no auto-retry).
+        if self.quota_tracker is not None:
+            # May raise DailyQuotaExceeded; bubbles up to the caller.
+            self.quota_tracker.acquire_or_raise()
+
         return wait_seconds
 
     def record_rate_limit_hit(self) -> RateLimiterEvent | None:
