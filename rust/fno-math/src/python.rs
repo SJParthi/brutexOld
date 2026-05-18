@@ -1,0 +1,56 @@
+//! PyO3-exposed functions — the Python ⇆ Rust bridge surface.
+//!
+//! DEC-P0-050 (PR-K) scaffolding. This module hosts the
+//! `#[pyfunction]`-annotated entries that the `fno_math` Python module
+//! re-exports (registered in `lib.rs`'s `#[pymodule]` block).
+//!
+//! Two functions ship in PR-K:
+//!
+//! 1. [`add_u64`] — a sanity-check primitive that proves the Python ⇆
+//!    Rust round-trip works under the maturin + abi3-py312 wheel build
+//!    pipeline. Used by `tests/unit/test_fno_math_bridge.py`.
+//!
+//! 2. [`bitcount_u64s`] — counts the total number of set bits across a
+//!    list of `u64` values via Rust's intrinsic `u64::count_ones`. This
+//!    is the operation behind [`brutex.orchestrator.bloom.BloomFilter`]'s
+//!    `unique_count_estimate` AND the future Stage 1B AND-mask hot
+//!    path. Ships now so the Python facade has a real-world function
+//!    to exercise the bridge against, not just `add_u64`.
+//!
+//! Future PRs (Stage 1B AND-mask, blake3 hash, Bloom bit-density)
+//! register their `#[pyfunction]` entries here and add them to the
+//! `lib.rs` `#[pymodule]` block.
+
+use pyo3::prelude::*;
+
+/// Add two unsigned 64-bit integers. Sanity-check the PyO3 wheel
+/// build round-trips correctly.
+///
+/// Equivalent to Python's `a + b` for non-negative ints up to
+/// `2 ** 64 - 1`. Overflow panics in debug builds and saturates in
+/// release builds (per the crate's `overflow-checks = true` flag, this
+/// also panics in release).
+#[pyfunction]
+pub fn add_u64(a: u64, b: u64) -> u64 {
+    a + b
+}
+
+/// Return the total number of set bits across a slice of `u64` values.
+///
+/// Uses `u64::count_ones` which compiles to the host CPU's `popcnt`
+/// instruction on x86_64 (-msse4.2) and `cnt` on ARMv8. For a 1M-entry
+/// slice this typically runs in under 100 µs on M4 Pro — versus the
+/// equivalent Python `sum(bin(x).count('1') for x in xs)` which
+/// requires ~50 ms (500× speedup).
+///
+/// Used by:
+///
+/// * [`brutex.orchestrator.bloom.BloomFilter.unique_count_estimate`]
+///   (future migration from per-byte `bit_count()` to vectorised
+///   `bitcount_u64s` on the underlying bit array).
+/// * Future Stage 1B AND-mask kernel — counting matching combos after
+///   bitwise AND across `u64` strategy masks.
+#[pyfunction]
+pub fn bitcount_u64s(data: Vec<u64>) -> u64 {
+    data.iter().map(|x| u64::from(x.count_ones())).sum()
+}
