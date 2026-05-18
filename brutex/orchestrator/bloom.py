@@ -1,3 +1,4 @@
+# pyright: reportMissingTypeStubs=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false
 """Bloom filter — L1 fast-fail primitive for the 4-tier dedup hot-path.
 
 The :class:`BloomFilter` is the sub-microsecond probabilistic membership
