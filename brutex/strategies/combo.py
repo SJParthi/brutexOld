@@ -6,6 +6,34 @@ Every combo in a brute-force sweep is uniquely identified by::
         strategy_id ‖ canonical_params ‖ data_snapshot_hash ‖ code_commit_sha
     )
 
+.. warning::
+
+    **DEC-P0-044 known gap (closing in Phase 3 engine PR):** the spec at
+    `docs/TRACK1_BACKTEST_SPEC.md` §"Identity" mandates 9 hash inputs:
+
+        ``strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖
+        canonical_params ‖ data_snapshot_hash ‖ indicator_version ‖
+        code_commit_hash``
+
+    This module currently hashes 4 of the 9 (`strategy_id` ≈
+    `strategy_mask`, `canonical_params`, `data_snapshot_hash`,
+    `code_commit_sha`). **Missing: direction, instrument, tf, mode,
+    indicator_version.** Per `docs/TRACK1_REQUIREMENTS_FINAL.md` C-04
+    + DEC-P0-040 Q-02 lock, the migration is **deferred to PR-H
+    (engine bloc)** because:
+
+    1. The missing 5 inputs are produced by Stage 1A/1B/2/3/4 engine
+       modules that don't yet exist (R-106 GAP).
+    2. Migrating sha256 → blake3 (DEC-P0-040 Q-02) requires
+       regenerating every pinned hash in the test suite — coupling
+       this to the engine PR amortises the test-pin update cost.
+    3. Adding the 5 fields without callers that produce them creates
+       a dead-code surface that complicates the next PR's review.
+
+    Until then, callers MUST embed direction/instrument/tf/mode/
+    indicator_version inside the ``params`` dict if they want them
+    to participate in the hash. This is a workaround, not a fix.
+
 The canonicalisation rules (``NFR-UNIQ-002``) are:
 
 * Keys sorted lexicographically.
