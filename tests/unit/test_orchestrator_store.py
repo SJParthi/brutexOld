@@ -374,3 +374,156 @@ class TestCorruption:
 
         with WorkItemStore.open(store_path) as s, pytest.raises(StoreCorruptionError):
             s.get(IngestPhase.A_INSTRUMENTS, "00" * CONTENT_HASH_BYTES)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# BloomFilter integration (DEC-P0-048 / PR-I)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestBloomNoneDelegates:
+    """When bloom=None the store behaves exactly as before PR-I."""
+
+    def test_open_without_bloom_works(self, store_path: Path) -> None:
+        with WorkItemStore.open(store_path) as s:
+            assert s._bloom is None  # type: ignore[reportPrivateUsage]
+
+    def test_maybe_seen_terminal_delegates_to_exists_terminal(self, store) -> None:
+        from brutex.orchestrator.state import WorkItemState
+
+        item = _make_item(hash_seed="x", state=WorkItemState.SUCCESS)
+        store.put(item)
+        # SUCCESS is terminal
+        assert store.maybe_seen_terminal(item.phase, item.content_hash) is True
+        # Non-terminal
+        pending = _make_item(hash_seed="pending", state=WorkItemState.PENDING)
+        store.put(pending)
+        assert store.maybe_seen_terminal(pending.phase, pending.content_hash) is False
+
+
+class TestBloomIntegration:
+    """Bloom-supplied store: L1 fast-fail + cold-start rebuild."""
+
+    def test_open_with_bloom_runs_cold_start_rebuild(self, store_path: Path) -> None:
+        from brutex.orchestrator.bloom import BloomFilter
+
+        # Seed LMDB without Bloom
+        with WorkItemStore.open(store_path) as s:
+            s.put(_make_item(hash_seed="a"))
+            s.put(_make_item(hash_seed="b"))
+            s.put(_make_item(hash_seed="c"))
+        # Re-open with Bloom; rebuild seeds all 3.
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            assert bloom.insertions_attempted == 3
+
+    def test_put_adds_to_bloom_after_commit(self, store_path: Path) -> None:
+        from brutex.orchestrator.bloom import BloomFilter
+
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            s.put(_make_item(hash_seed="x"))
+            assert bloom.insertions_attempted == 1
+
+    def test_maybe_seen_terminal_short_circuits_on_bloom_miss(self, store_path: Path) -> None:
+        from brutex.orchestrator.bloom import BloomFilter
+
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            # Never added — Bloom-miss → returns False without LMDB.
+            assert (
+                s.maybe_seen_terminal(
+                    IngestPhase.A_INSTRUMENTS,
+                    _make_hash("never-put"),
+                )
+                is False
+            )
+
+    def test_maybe_seen_terminal_bloom_hit_then_lmdb_filters_state(self, store_path: Path) -> None:
+        """Bloom-hit on a non-terminal item: falls through to LMDB and
+        the terminal-state filter returns False."""
+        from brutex.orchestrator.bloom import BloomFilter
+        from brutex.orchestrator.state import WorkItemState
+
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            pending = _make_item(hash_seed="p", state=WorkItemState.PENDING)
+            s.put(pending)
+            # Bloom-hit (we just added it) but state is PENDING.
+            assert s.maybe_seen_terminal(pending.phase, pending.content_hash) is False
+            # Now advance to terminal.
+            success = _make_item(hash_seed="p", state=WorkItemState.SUCCESS)
+            s.put(success)
+            assert s.maybe_seen_terminal(success.phase, success.content_hash) is True
+
+    def test_put_many_empty_short_circuits(self, store_path: Path) -> None:
+        from brutex.orchestrator.bloom import BloomFilter
+
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            s.put_many([])
+            assert bloom.insertions_attempted == 0
+
+    def test_put_many_pre_flight_rejects_oversize_batch(self, store_path: Path) -> None:
+        """Pre-flight capacity check raises BEFORE opening LMDB txn."""
+        from brutex.orchestrator.bloom import BloomCapacityExceeded, BloomFilter
+
+        bloom = BloomFilter(capacity=3, fpr_target=1e-3)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            items = [_make_item(hash_seed=str(i)) for i in range(5)]
+            with pytest.raises(BloomCapacityExceeded, match="put_many"):
+                s.put_many(items)
+            # Neither LMDB nor Bloom is mutated.
+            assert bloom.insertions_attempted == 0
+            assert s.get(IngestPhase.A_INSTRUMENTS, _make_hash("0")) is None
+
+    def test_put_many_batch_adds_all_after_commit(self, store_path: Path) -> None:
+        from brutex.orchestrator.bloom import BloomFilter
+
+        bloom = BloomFilter(capacity=100, fpr_target=1e-3)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            items = [_make_item(hash_seed=str(i)) for i in range(10)]
+            s.put_many(items)
+            assert bloom.insertions_attempted == 10
+            # Spot-check Bloom membership.
+            assert bloom.might_contain(bytes.fromhex(_make_hash("5"))) is True
+
+    def test_put_raises_when_bloom_full(self, store_path: Path) -> None:
+        from brutex.orchestrator.bloom import BloomCapacityExceeded, BloomFilter
+
+        bloom = BloomFilter(capacity=2, fpr_target=1e-3)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            s.put(_make_item(hash_seed="a"))
+            s.put(_make_item(hash_seed="b"))
+            # 3rd insertion past capacity. LMDB has already committed but
+            # Bloom rejects.
+            with pytest.raises(BloomCapacityExceeded):
+                s.put(_make_item(hash_seed="c"))
+
+    def test_cold_start_rebuild_failure_closes_store(self, store_path: Path) -> None:
+        """If cold-start rebuild raises (oversize capacity), the store
+        is closed and the exception propagates."""
+        from brutex.orchestrator.bloom import BloomCapacityExceeded, BloomFilter
+
+        # Seed LMDB with 10 items without Bloom.
+        with WorkItemStore.open(store_path) as s:
+            for i in range(10):
+                s.put(_make_item(hash_seed=f"seed-{i}"))
+        # Re-open with Bloom too small to hold them all.
+        small_bloom = BloomFilter(capacity=3, fpr_target=1e-3)
+        with pytest.raises(BloomCapacityExceeded):
+            WorkItemStore.open(store_path, bloom=small_bloom)
+
+    def test_exists_terminal_unchanged_when_bloom_supplied(self, store_path: Path) -> None:
+        """exists_terminal must NOT consult Bloom — only ground-truth."""
+        from brutex.orchestrator.bloom import BloomFilter
+        from brutex.orchestrator.state import WorkItemState
+
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            item = _make_item(hash_seed="x", state=WorkItemState.SUCCESS)
+            s.put(item)
+            # exists_terminal always touches LMDB.
+            assert s.exists_terminal(item.phase, item.content_hash) is True
+            # exists_terminal returns False on absent hashes.
+            assert s.exists_terminal(IngestPhase.A_INSTRUMENTS, _make_hash("z")) is False
