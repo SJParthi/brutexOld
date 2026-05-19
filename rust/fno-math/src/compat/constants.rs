@@ -1,4 +1,4 @@
-//! Compile-time constants for the tickvault system.
+//! Compile-time constants for the BruteX hot-kernel crate.
 //!
 //! All values known at compile time live here. Runtime values live in config TOML.
 //! If you see a raw number or string literal in application code, it's a bug.
@@ -588,7 +588,11 @@ pub const PUBLIC_IP_CHECK_MAX_RETRIES: u32 = 3;
 // Docker Container Naming
 // ---------------------------------------------------------------------------
 
-/// Container name prefix for all tickvault Docker services.
+/// Container name prefix for Docker services that consume this crate.
+///
+/// Retained from the pre-DEC-P0-025 live-trading scaffold for downstream
+/// callers; BruteX (the upstream Track 1 backtest engine) does not run
+/// Docker services itself.
 pub const DOCKER_CONTAINER_PREFIX: &str = "dlt";
 
 // ---------------------------------------------------------------------------
@@ -796,7 +800,7 @@ pub const VALIDATION_MIN_DERIVATIVE_COUNT: usize = 100;
 // ---------------------------------------------------------------------------
 
 /// Application name used in logs, metrics, and tracing.
-pub const APPLICATION_NAME: &str = "tickvault";
+pub const APPLICATION_NAME: &str = "brutex";
 
 /// Application version (updated with each release).
 pub const APPLICATION_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -2381,7 +2385,7 @@ mod tests {
 
     #[test]
     fn test_application_name() {
-        assert_eq!(APPLICATION_NAME, "tickvault");
+        assert_eq!(APPLICATION_NAME, "brutex");
     }
 
     #[test]
