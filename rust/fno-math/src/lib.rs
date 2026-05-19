@@ -65,17 +65,20 @@ pub mod python;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ────────────────────────────────────────────────────────────────────────
-// PyO3 module entry point (DEC-P0-050 / PR-K)
+// PyO3 module entry point (DEC-P0-050 / PR-K; DEC-P0-055 / PR-N+2)
 // ────────────────────────────────────────────────────────────────────────
 //
-// `#[pymodule]` registers the `fno_math` Python module. Maturin produces
-// a cdylib whose extern "C" `PyInit_fno_math` symbol matches this
-// function name. Python's `import fno_math` resolves to this entry.
+// `#[pymodule]` registers the `_fno_math` Python submodule. Maturin
+// produces a cdylib whose extern "C" `PyInit__fno_math` symbol matches
+// this function name. Under the DEC-P0-055 mixed Python+Rust layout,
+// the cdylib is installed at `site-packages/fno_math/_fno_math.<abi>.so`
+// and `site-packages/fno_math/__init__.py` re-exports its symbols, so
+// downstream callers continue to write `import fno_math; fno_math.X`.
 
 use pyo3::prelude::*;
 
 #[pymodule]
-fn fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", VERSION)?;
     m.add_function(wrap_pyfunction!(python::add_u64, m)?)?;
     m.add_function(wrap_pyfunction!(python::bitand_count_u64s, m)?)?;

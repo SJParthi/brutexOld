@@ -215,7 +215,8 @@ module = [
     "httpx", "httpx.*",  # PR #2b Dhan HTTP transport — optional [dhan] extra
     "structlog", "structlog.*",  # DEC-P0-038: structlog runtime dep — type stubs not yet packaged
     "fastbloom_rs", "fastbloom_rs.*",  # DEC-P0-047: PyO3-backed Rust Bloom — no Python stubs published
-    "fno_math", "fno_math.*",  # DEC-P0-050: BruteX Rust hot kernel — maturin-built, no stubs
+    # DEC-P0-055 (PR-N+2): `fno_math` removed — wheel now ships bundled
+    # `__init__.pyi` + `py.typed` via maturin's mixed Python+Rust layout.
 ]
 ignore_missing_imports = true
 
