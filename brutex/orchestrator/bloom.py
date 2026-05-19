@@ -411,6 +411,11 @@ class BloomFilter:
         (:math:`O(m_bytes)`). Avoid hot-path callers; intended for
         audit / dashboard / capacity-planning reads.
 
+        DEC-P0-053 (PR-N): the bit-density scan is delegated to the
+        Rust ``fno_math.popcount_bytes`` kernel (popcnt CPU instruction
+        per 8-byte chunk). ~25× faster than the previous per-byte
+        Python loop on Phase-1-sized filters.
+
         Returns
         -------
         int

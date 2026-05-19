@@ -230,6 +230,13 @@ jobs:
           cache: pip
       - name: Install deps
         run: pip install -e ".[dev,dhan]"
+      - name: Install Rust toolchain (for fno_math wheel)
+        # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
+        # at module load time. Every Python job that imports any
+        # brutex.orchestrator.* module must install the Rust extension.
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install fno_math Rust extension
+        run: pip install ./rust/fno-math
       - name: pytest property tests
         run: |
           if [ -d tests/property ]; then
@@ -259,6 +266,11 @@ jobs:
           cache: pip
       - name: Install deps
         run: pip install -e ".[dev,dhan]"
+      - name: Install Rust toolchain (for fno_math wheel)
+        # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install fno_math Rust extension
+        run: pip install ./rust/fno-math
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -301,6 +313,11 @@ jobs:
           cache: pip
       - name: Install deps
         run: pip install -e ".[dev,dhan]"
+      - name: Install Rust toolchain (for fno_math wheel)
+        # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install fno_math Rust extension
+        run: pip install ./rust/fno-math
       - name: pytest golden tests
         run: |
           if [ -d tests/golden ]; then
@@ -746,6 +763,12 @@ jobs:
           cache: pip
       - name: Install deps
         run: pip install -e ".[dev,dhan]"
+      - name: Install Rust toolchain (for fno_math wheel)
+        # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
+        # at module load; mutmut runs pytest which imports orchestrator.
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install fno_math Rust extension
+        run: pip install ./rust/fno-math
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
