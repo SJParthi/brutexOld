@@ -17,7 +17,7 @@ build-backend = "maturin"
 
 [project]
 name = "fno-math"
-version = "0.1.0"
+version = "0.2.0"
 description = "BruteX Rust hot kernel — PyO3 bridge for the L1 dedup + future Stage 1B AND-mask kernel."
 readme = "README.md"
 license = { text = "Proprietary" }
@@ -34,14 +34,14 @@ classifiers = [
 ]
 
 [tool.maturin]
-# Build as a Rust extension module — there is no Python source layer
-# (the cdylib IS the Python package). When future Phase 3 work needs
-# a Python shim, add `python-source = "python"` here.
-#
-# Note: type stubs (`fno_math.pyi`) are intentionally NOT shipped in
-# V1 — they would require a mixed Python+Rust layout that complicates
-# the build. The test file `tests/unit/test_fno_math_bridge.py` carries
-# a file-level pyright pragma to silence the missing-stub warnings
-# instead. Stub support tracked as a follow-up.
+# DEC-P0-055 (PR-N+2): mixed Python + Rust layout — Python source under
+# `python/`, with the cdylib registered as the `fno_math._fno_math`
+# private submodule. The package's `__init__.py` re-exports the cdylib
+# symbols so downstream callers continue to write `import fno_math` and
+# `fno_math.popcount_bytes(...)` unchanged. The `__init__.pyi` + the
+# `py.typed` marker enable pyright-strict typing for downstream callers
+# (closes the PR-N revert post-mortem at MIGRATION.md #190).
+python-source = "python"
+module-name = "fno_math._fno_math"
 features = ["pyo3/extension-module"]
 strip = true
