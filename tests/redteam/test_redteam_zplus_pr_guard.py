@@ -142,14 +142,21 @@ class TestZPlusPrGuard:
 
 
 class TestBotExemption:
-    """DEC-P0-015 (PR #37): renovate/dependabot bots with security label
-    are exempt from the 6-marker check so CVE patches can auto-merge."""
+    """DEC-P0-058 (PR-N+5): renovate/dependabot bots are exempt from the
+    6-marker check unconditionally — the pre-DEC-P0-058 security-label
+    requirement defeated the "always automated" decree by gating every
+    routine cargo/pip/github-actions bump on manual label application.
 
-    def test_renovate_bot_with_security_label_exempt(self, override_log_path: Path) -> None:
+    Substantive CI safety remains in the CI-OK aggregate gate
+    (auto-merge.yml requires every check green); the marker check is
+    purely a discipline reminder for human/Claude PRs, which bots
+    structurally cannot satisfy."""
+
+    def test_renovate_bot_exempt(self, override_log_path: Path) -> None:
+        """Renovate PR body without Z+ markers passes via author exemption."""
         result = _run(
             "Renovate PR body without Z+ markers — should still pass.",
             pr_author="renovate[bot]",
-            pr_has_security_label=True,
             log_path=override_log_path,
         )
         assert result.returncode == 0
@@ -157,29 +164,32 @@ class TestBotExemption:
         lines = override_log_path.read_text().splitlines()
         assert any("EXEMPT=bot" in line and "renovate[bot]" in line for line in lines)
 
-    def test_dependabot_with_security_label_exempt(self, override_log_path: Path) -> None:
+    def test_dependabot_exempt(self, override_log_path: Path) -> None:
+        """Dependabot PR body without Z+ markers passes via author exemption."""
         result = _run(
             "Dependabot PR body without markers.",
             pr_author="dependabot[bot]",
+            log_path=override_log_path,
+        )
+        assert result.returncode == 0
+        lines = override_log_path.read_text().splitlines()
+        assert any("EXEMPT=bot" in line and "dependabot[bot]" in line for line in lines)
+
+    def test_renovate_security_label_ignored(self, override_log_path: Path) -> None:
+        """DEC-P0-058: security label is accepted as env var for backwards
+        compat but ignored — bot author alone is sufficient."""
+        result = _run(
+            "Renovate body — security label set explicitly.",
+            pr_author="renovate[bot]",
             pr_has_security_label=True,
             log_path=override_log_path,
         )
         assert result.returncode == 0
 
-    def test_renovate_without_security_label_blocks(self) -> None:
-        """Bot author alone is NOT enough — security label required."""
+    def test_non_bot_blocks(self) -> None:
+        """Non-bot author with no markers is BLOCKED regardless of label."""
         result = _run(
-            "Renovate body — author yes, label no.",
-            pr_author="renovate[bot]",
-            pr_has_security_label=False,
-        )
-        # Both gates required; bot still must carry markers if no security label.
-        assert result.returncode == 1
-
-    def test_non_bot_with_security_label_blocks(self) -> None:
-        """Human author + security label is NOT enough — exempt is bots only."""
-        result = _run(
-            "Human PR body claiming security label.",
+            "Human PR body — no markers.",
             pr_author="some-developer",
             pr_has_security_label=True,
         )

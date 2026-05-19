@@ -30,14 +30,22 @@ set -euo pipefail
 PR_BODY_FILE="${1:-/dev/stdin}"
 OVERRIDE_FLAG="${OPERATOR_OVERRIDE:-false}"
 OVERRIDE_LOG="${OVERRIDE_LOG_PATH:-$(dirname "$0")/pre-merge-overrides.log}"
-# Per DEC-P0-015 (PR #37) Agent 2 CRITICAL finding: Renovate-generated security
-# PRs do NOT carry the Z+ markers. To avoid blocking every CVE patch
-# indefinitely, the guard exempts authors matching $PR_AUTHOR_EXEMPT_PATTERN
-# IF they also carry the 'security' label (set via $PR_HAS_SECURITY_LABEL).
-# Both gates required — author alone is not enough (a future bot might
-# open a non-security PR; only auto-merge the explicit CVE patches).
+# DEC-P0-058 (PR-N+5): unconditional bot exemption for dependabot[bot]
+# + renovate[bot]. These bots open only dep-bump PRs by design — they
+# cannot carry the 6-marker Z+ body that human/Claude PRs carry. The
+# pre-DEC-P0-058 version of this guard required a paired `security`
+# label, which made routine cargo / pip / github-actions bumps un-
+# mergeable without manual label application — defeating the operator
+# decree "always automated + always latest".
+#
+# Threat model preserved: ALL non-bot actors still get full Z+ marker
+# enforcement. The exemption is bot-scoped + author-pattern-pinned,
+# not a blanket bypass. Substantive CI safety remains in the CI-OK
+# aggregate gate (auto-merge.yml requires every check green).
+#
+# `PR_HAS_SECURITY_LABEL` env var still accepted for backwards-compat
+# with any caller that sets it; the value is ignored.
 PR_AUTHOR="${PR_AUTHOR:-}"
-PR_HAS_SECURITY_LABEL="${PR_HAS_SECURITY_LABEL:-false}"
 PR_AUTHOR_EXEMPT_PATTERN="${PR_AUTHOR_EXEMPT_PATTERN:-^(renovate\[bot\]|dependabot\[bot\])$}"
 
 if [[ "$OVERRIDE_FLAG" == "true" ]] && [[ -z "${OPERATOR_OVERRIDE_REASON:-}" ]]; then
@@ -52,15 +60,13 @@ fi
 
 BODY="$(cat "$PR_BODY_FILE")"
 
-# DEC-P0-015 (PR #37): label-gated Renovate/Dependabot exemption.
-# Both gates required (author AND label) to prevent silent bypass.
+# DEC-P0-058 (PR-N+5): author-pattern exemption only — see header.
 if [[ -n "$PR_AUTHOR" ]] \
-    && [[ "$PR_HAS_SECURITY_LABEL" == "true" ]] \
     && [[ "$PR_AUTHOR" =~ $PR_AUTHOR_EXEMPT_PATTERN ]]; then
-    echo "Z+ PR guard: bot-exempt path — author=$PR_AUTHOR + security-label"
+    echo "Z+ PR guard: bot-exempt path — author=$PR_AUTHOR"
     # Audit log every exempt bypass so the operator can review.
     TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "$TIMESTAMP TOOL=zplus-pr-guard EXEMPT=bot AUTHOR=$PR_AUTHOR LABEL=security" \
+    echo "$TIMESTAMP TOOL=zplus-pr-guard EXEMPT=bot AUTHOR=$PR_AUTHOR" \
         >> "$OVERRIDE_LOG"
     exit 0
 fi

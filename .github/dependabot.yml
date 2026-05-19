@@ -26,8 +26,11 @@ updates:
       - "dependencies"
       - "python"
     commit-message:
+      # Dependabot prepends the scope from `include` ON TOP OF the
+      # prefix, so combining both produces `chore(deps)(deps):`
+      # double-scope which fails brutex's Conventional commit format
+      # gate. Keep ONLY the explicit prefix.
       prefix: "chore(deps)"
-      include: "scope"
     groups:
       pip-patch-and-minor:
         update-types:
@@ -47,8 +50,11 @@ updates:
       - "dependencies"
       - "github-actions"
     commit-message:
+      # Dependabot prepends the scope from `include` ON TOP OF the
+      # prefix, so combining both produces `chore(deps)(deps):`
+      # double-scope which fails brutex's Conventional commit format
+      # gate. Keep ONLY the explicit prefix.
       prefix: "chore(deps)"
-      include: "scope"
     groups:
       gh-actions-patch-and-minor:
         update-types:
@@ -68,8 +74,11 @@ updates:
       - "dependencies"
       - "rust"
     commit-message:
+      # Dependabot prepends the scope from `include` ON TOP OF the
+      # prefix, so combining both produces `chore(deps)(deps):`
+      # double-scope which fails brutex's Conventional commit format
+      # gate. Keep ONLY the explicit prefix.
       prefix: "chore(deps)"
-      include: "scope"
     groups:
       cargo-patch-and-minor:
         update-types:
