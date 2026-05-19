@@ -1,4 +1,3 @@
-# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false
 """Bloom filter — L1 fast-fail primitive for the 4-tier dedup hot-path.
 
 The :class:`BloomFilter` is the sub-microsecond probabilistic membership
@@ -109,28 +108,12 @@ from __future__ import annotations
 import math
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Final, cast
+from typing import Any, Final
 
 import structlog
 from fastbloom_rs import BloomFilter as _RustBloomFilter
-from fno_math import (  # pyright: ignore[reportMissingTypeStubs]
-    popcount_bytes as _popcount_bytes_impl,
-)
 
 from brutex.models import BruteXError
-
-
-def _popcount_bytes(data: bytes) -> int:
-    """Typed wrapper around ``fno_math.popcount_bytes``.
-
-    The Rust extension ships without ``.pyi`` stubs in V1 (mixed
-    Python+Rust maturin layout deferred to a follow-up), so the import
-    is untyped from pyright's POV. This wrapper pins the type contract
-    at the module boundary so callers in :class:`BloomFilter` see a
-    properly-typed ``int`` return.
-    """
-    return cast(int, _popcount_bytes_impl(data))
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Sizing constants (locked by 4-agent Reality-check lens, DEC-P0-047)
@@ -440,7 +423,7 @@ class BloomFilter:
             upper-bounded by ``capacity`` (clipped).
         """
         raw = self._impl.get_bytes()
-        bits_set = _popcount_bytes(bytes(raw))
+        bits_set = sum(byte.bit_count() for byte in raw)
         if bits_set == 0:
             return 0
         if bits_set >= self._m_bits:
