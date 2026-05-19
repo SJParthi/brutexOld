@@ -355,3 +355,73 @@ class TestSizingMathProperty:
         assert bf.m_bits >= canonical
         # And must be exactly the ceiling.
         assert bf.m_bits == math.ceil(canonical)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 9. Rust popcount equivalence (DEC-P0-057 / PR-N+4)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestRustPopcountEquivalence:
+    """``fno_math.popcount_bytes`` must agree bit-for-bit with the Python reference.
+
+    The :attr:`BloomFilter.unique_count_estimate` property's bit-density scan
+    is delegated to the Rust ``popcount_bytes`` kernel (DEC-P0-057). This
+    property test cross-checks the Rust kernel against the obviously-correct
+    Python reference ``sum(byte.bit_count() for byte in data)`` on arbitrary
+    byte sequences plus the actual bit array of a populated filter.
+
+    Catches any future divergence — Rust kernel regression, wheel ABI drift,
+    endianness bug in the u64 chunk loop — at every CI run.
+    """
+
+    @given(data=st.binary(min_size=0, max_size=4096))
+    @settings(max_examples=100, deadline=None)
+    def test_popcount_matches_python_reference_on_arbitrary_bytes(
+        self,
+        data: bytes,
+    ) -> None:
+        """Rust popcount of any byte sequence equals the Python reference."""
+        import fno_math
+
+        python_ref = sum(byte.bit_count() for byte in data)
+        rust_kernel = fno_math.popcount_bytes(data)
+        assert rust_kernel == python_ref, (
+            f"popcount divergence on {len(data)}-byte input: "
+            f"Rust={rust_kernel} vs Python={python_ref}"
+        )
+
+    @given(
+        capacity=_capacities,
+        fpr_target=_fprs,
+        insertions=st.lists(st.binary(min_size=32, max_size=32), max_size=200),
+    )
+    @settings(
+        max_examples=20,
+        deadline=None,
+        suppress_health_check=[HealthCheck.too_slow],
+    )
+    def test_popcount_matches_on_live_bloom_bit_array(
+        self,
+        capacity: int,
+        fpr_target: float,
+        insertions: list[bytes],
+    ) -> None:
+        """Rust popcount of a real BloomFilter's bit array equals the Python reference.
+
+        Exercises the exact byte buffer that
+        :attr:`BloomFilter.unique_count_estimate` feeds to the kernel.
+        """
+        import fno_math
+
+        bf = BloomFilter(capacity=capacity, fpr_target=fpr_target)
+        for content_hash in insertions[: bf.capacity]:
+            bf.add(content_hash)
+        raw = bf._impl.get_bytes()  # noqa: SLF001 — internal-buffer cross-check
+        python_ref = sum(byte.bit_count() for byte in raw)
+        rust_kernel = fno_math.popcount_bytes(bytes(raw))
+        assert rust_kernel == python_ref, (
+            f"popcount divergence on Bloom({capacity},{fpr_target}) "
+            f"with {len(insertions)} insertions: "
+            f"Rust={rust_kernel} vs Python={python_ref}"
+        )
