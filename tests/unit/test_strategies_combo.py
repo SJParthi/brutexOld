@@ -5,6 +5,7 @@ from __future__ import annotations
 import array
 import math
 from decimal import Decimal
+from typing import ClassVar
 
 import pytest
 from brutex.strategies.combo import canonicalise_params, combo_hash
@@ -94,12 +95,28 @@ class TestCanonicaliseParams:
 
 
 class TestComboHash:
+    # DEC-P0-060 (PR-N+7): combo_hash migrated from 4-field SHA256 to 9-field
+    # BLAKE3 (`strategy_id ‖ direction ‖ instrument ‖ tf ‖ mode ‖
+    # canonical_params ‖ data_snapshot_hash ‖ indicator_version ‖
+    # code_commit_sha`). Wire format unchanged (64-char hex / 32-byte raw);
+    # these tests still exercise length, determinism, diff-input/diff-output,
+    # and empty-input-rejection — now across the 9 inputs.
     _SNAPSHOT = "a" * 64
     _COMMIT = "b" * 12
+    # Default-fill the 5 new fields with placeholders that the engine PR
+    # (G-03 GAP) will replace with real values.
+    _BASE: ClassVar[dict[str, str]] = {
+        "direction": "bull",
+        "instrument": "NIFTY",
+        "tf": "15m",
+        "mode": "A",
+        "indicator_version": "v1",
+    }
 
     def test_returns_64_hex_chars(self) -> None:
         h = combo_hash(
             strategy_id="ma_cross",
+            **self._BASE,
             params={"fast": 5, "slow": 20},
             data_snapshot_hash=self._SNAPSHOT,
             code_commit_sha=self._COMMIT,
@@ -110,12 +127,14 @@ class TestComboHash:
     def test_deterministic(self) -> None:
         h1 = combo_hash(
             strategy_id="ma_cross",
+            **self._BASE,
             params={"fast": 5, "slow": 20},
             data_snapshot_hash=self._SNAPSHOT,
             code_commit_sha=self._COMMIT,
         )
         h2 = combo_hash(
             strategy_id="ma_cross",
+            **self._BASE,
             params={"slow": 20, "fast": 5},  # reorder
             data_snapshot_hash=self._SNAPSHOT,
             code_commit_sha=self._COMMIT,
@@ -126,12 +145,14 @@ class TestComboHash:
         params = {"fast": 5, "slow": 20}
         h_a = combo_hash(
             strategy_id="ma_cross",
+            **self._BASE,
             params=params,
             data_snapshot_hash=self._SNAPSHOT,
             code_commit_sha=self._COMMIT,
         )
         h_b = combo_hash(
             strategy_id="rsi_mr",
+            **self._BASE,
             params=params,
             data_snapshot_hash=self._SNAPSHOT,
             code_commit_sha=self._COMMIT,
@@ -141,12 +162,14 @@ class TestComboHash:
     def test_different_params_different_hash(self) -> None:
         h_a = combo_hash(
             strategy_id="ma_cross",
+            **self._BASE,
             params={"fast": 5},
             data_snapshot_hash=self._SNAPSHOT,
             code_commit_sha=self._COMMIT,
         )
         h_b = combo_hash(
             strategy_id="ma_cross",
+            **self._BASE,
             params={"fast": 6},
             data_snapshot_hash=self._SNAPSHOT,
             code_commit_sha=self._COMMIT,
@@ -156,12 +179,14 @@ class TestComboHash:
     def test_different_snapshot_different_hash(self) -> None:
         h_a = combo_hash(
             strategy_id="x",
+            **self._BASE,
             params={},
             data_snapshot_hash="a" * 64,
             code_commit_sha=self._COMMIT,
         )
         h_b = combo_hash(
             strategy_id="x",
+            **self._BASE,
             params={},
             data_snapshot_hash="b" * 64,
             code_commit_sha=self._COMMIT,
@@ -171,15 +196,82 @@ class TestComboHash:
     def test_different_commit_different_hash(self) -> None:
         h_a = combo_hash(
             strategy_id="x",
+            **self._BASE,
             params={},
             data_snapshot_hash=self._SNAPSHOT,
             code_commit_sha="aaa",
         )
         h_b = combo_hash(
             strategy_id="x",
+            **self._BASE,
             params={},
             data_snapshot_hash=self._SNAPSHOT,
             code_commit_sha="bbb",
+        )
+        assert h_a != h_b
+
+    def test_different_direction_different_hash(self) -> None:
+        kwargs = dict(self._BASE)
+        kwargs.pop("direction")
+        h_a = combo_hash(
+            strategy_id="x", direction="bull", **kwargs,
+            params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+        )
+        h_b = combo_hash(
+            strategy_id="x", direction="bear", **kwargs,
+            params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+        )
+        assert h_a != h_b
+
+    def test_different_instrument_different_hash(self) -> None:
+        kwargs = dict(self._BASE)
+        kwargs.pop("instrument")
+        h_a = combo_hash(
+            strategy_id="x", instrument="NIFTY", **kwargs,
+            params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+        )
+        h_b = combo_hash(
+            strategy_id="x", instrument="BANKNIFTY", **kwargs,
+            params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+        )
+        assert h_a != h_b
+
+    def test_different_tf_different_hash(self) -> None:
+        kwargs = dict(self._BASE)
+        kwargs.pop("tf")
+        h_a = combo_hash(
+            strategy_id="x", tf="15m", **kwargs,
+            params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+        )
+        h_b = combo_hash(
+            strategy_id="x", tf="60m", **kwargs,
+            params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+        )
+        assert h_a != h_b
+
+    def test_different_mode_different_hash(self) -> None:
+        kwargs = dict(self._BASE)
+        kwargs.pop("mode")
+        h_a = combo_hash(
+            strategy_id="x", mode="A", **kwargs,
+            params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+        )
+        h_b = combo_hash(
+            strategy_id="x", mode="B", **kwargs,
+            params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+        )
+        assert h_a != h_b
+
+    def test_different_indicator_version_different_hash(self) -> None:
+        kwargs = dict(self._BASE)
+        kwargs.pop("indicator_version")
+        h_a = combo_hash(
+            strategy_id="x", indicator_version="v1", **kwargs,
+            params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+        )
+        h_b = combo_hash(
+            strategy_id="x", indicator_version="v2", **kwargs,
+            params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
         )
         assert h_a != h_b
 
@@ -187,15 +279,62 @@ class TestComboHash:
         with pytest.raises(StrategyError, match="strategy_id"):
             combo_hash(
                 strategy_id="",
+                **self._BASE,
                 params={},
                 data_snapshot_hash=self._SNAPSHOT,
                 code_commit_sha=self._COMMIT,
+            )
+
+    def test_empty_direction_rejected(self) -> None:
+        kwargs = dict(self._BASE)
+        kwargs["direction"] = ""
+        with pytest.raises(StrategyError, match="direction"):
+            combo_hash(
+                strategy_id="x", **kwargs,
+                params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+            )
+
+    def test_empty_instrument_rejected(self) -> None:
+        kwargs = dict(self._BASE)
+        kwargs["instrument"] = ""
+        with pytest.raises(StrategyError, match="instrument"):
+            combo_hash(
+                strategy_id="x", **kwargs,
+                params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+            )
+
+    def test_empty_tf_rejected(self) -> None:
+        kwargs = dict(self._BASE)
+        kwargs["tf"] = ""
+        with pytest.raises(StrategyError, match="tf"):
+            combo_hash(
+                strategy_id="x", **kwargs,
+                params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+            )
+
+    def test_empty_mode_rejected(self) -> None:
+        kwargs = dict(self._BASE)
+        kwargs["mode"] = ""
+        with pytest.raises(StrategyError, match="mode"):
+            combo_hash(
+                strategy_id="x", **kwargs,
+                params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
+            )
+
+    def test_empty_indicator_version_rejected(self) -> None:
+        kwargs = dict(self._BASE)
+        kwargs["indicator_version"] = ""
+        with pytest.raises(StrategyError, match="indicator_version"):
+            combo_hash(
+                strategy_id="x", **kwargs,
+                params={}, data_snapshot_hash=self._SNAPSHOT, code_commit_sha=self._COMMIT,
             )
 
     def test_empty_snapshot_rejected(self) -> None:
         with pytest.raises(StrategyError, match="data_snapshot_hash"):
             combo_hash(
                 strategy_id="x",
+                **self._BASE,
                 params={},
                 data_snapshot_hash="",
                 code_commit_sha=self._COMMIT,
@@ -205,6 +344,7 @@ class TestComboHash:
         with pytest.raises(StrategyError, match="code_commit_sha"):
             combo_hash(
                 strategy_id="x",
+                **self._BASE,
                 params={},
                 data_snapshot_hash=self._SNAPSHOT,
                 code_commit_sha="",

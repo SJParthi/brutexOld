@@ -15,10 +15,13 @@ Implements the core protocol + runner pieces of ``FR-STR-001`` through
   collecting every emitted :class:`Signal` into a
   :class:`StrategyRunResult`. Enforces FR-INT-004 look-ahead via the
   feed's ``ensure_no_lookahead`` on every event.
-* :func:`combo_hash` — deterministic sha256 over
-  ``(strategy_id, canonical_params, data_snapshot_hash,
-  code_commit_sha)`` per ``FR-BF-003``. Canonicalisation matches
-  ``NFR-UNIQ-002`` (sorted keys, stable float repr, no NaN keys).
+* :func:`combo_hash` — deterministic 9-field BLAKE3 over
+  ``(strategy_id, direction, instrument, tf, mode, canonical_params,
+  data_snapshot_hash, indicator_version, code_commit_sha)`` per
+  ``FR-BF-003`` + ``docs/TRACK1_BACKTEST_SPEC.md`` §"Identity"
+  (DEC-P0-060 / PR-N+7 migration; was 4-field SHA256 pre-PR-N+7).
+  Canonicalisation matches ``NFR-UNIQ-002`` (sorted keys, stable
+  float repr, no NaN keys).
 
 ## Scope — P3 kickoff
 
