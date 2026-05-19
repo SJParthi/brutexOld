@@ -65,14 +65,11 @@ StrategyFactory = Callable[[Mapping[str, Any]], "Strategy"]
 
 #: Length of a BLAKE3-256 hex digest in ASCII characters. Constant value
 #: 64 was previously named ``SHA256_HEX_LEN`` (DEC-P0-060 / PR-N+7 renamed
-#: alongside the sha256 → BLAKE3 migration in ``combo.py``). BLAKE3's
-#: default 32-byte digest matches SHA256's wire format, so existing LMDB
-#: keys remain 32-byte raw / 64-char hex unchanged.
+#: alongside the sha256 → BLAKE3 migration in ``combo.py``; DEC-P0-061 /
+#: PR-N+8 dropped the deprecated alias after confirming zero external
+#: imports). BLAKE3's default 32-byte digest matches SHA256's wire format,
+#: so existing LMDB keys remain 32-byte raw / 64-char hex unchanged.
 COMBO_HASH_HEX_LEN: int = 64
-
-#: Deprecated alias kept for backwards-compat with any caller still
-#: importing the old name. Will be removed in a follow-up cleanup.
-SHA256_HEX_LEN: int = COMBO_HASH_HEX_LEN
 
 #: Factory returning a freshly-prepared :class:`ReplayFeed` for the
 #: given params. Receives the full combo params dict so strategies
