@@ -906,21 +906,16 @@ jobs:
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v5
-      - name: Detect PR author + security label
+      - name: Detect PR author
         id: pr-meta
         env:
-          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels) }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
-          has_security=$(echo "$PR_LABELS_JSON" \
-            | python3 -c "import json,sys; ls=json.load(sys.stdin); print('true' if any(l['name']=='security' for l in ls) else 'false')")
           echo "author=$PR_AUTHOR" >> "$GITHUB_OUTPUT"
-          echo "has_security=$has_security" >> "$GITHUB_OUTPUT"
       - name: Run Z+ PR guard
         env:
           PR_AUTHOR: ${{ steps.pr-meta.outputs.author }}
-          PR_HAS_SECURITY_LABEL: ${{ steps.pr-meta.outputs.has_security }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           set -euo pipefail
