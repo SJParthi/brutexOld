@@ -110,6 +110,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+import fno_math
 import structlog
 from fastbloom_rs import BloomFilter as _RustBloomFilter
 
@@ -411,10 +412,14 @@ class BloomFilter:
         (:math:`O(m_bytes)`). Avoid hot-path callers; intended for
         audit / dashboard / capacity-planning reads.
 
-        DEC-P0-053 (PR-N): the bit-density scan is delegated to the
+        DEC-P0-057 (PR-N+4): the bit-density scan is delegated to the
         Rust ``fno_math.popcount_bytes`` kernel (popcnt CPU instruction
         per 8-byte chunk). ~25× faster than the previous per-byte
-        Python loop on Phase-1-sized filters.
+        Python loop on Phase-1-sized filters. The first attempt to ship
+        this 1-liner (DEC-P0-053 / PR-N) was reverted because the
+        ``fno_math`` wheel had no bundled type stubs; DEC-P0-055
+        (PR-N+2) shipped the stubs and DEC-P0-056 closed the
+        un-draft-after-CI-green auto-merge gap, unblocking this PR.
 
         Returns
         -------
@@ -423,7 +428,7 @@ class BloomFilter:
             upper-bounded by ``capacity`` (clipped).
         """
         raw = self._impl.get_bytes()
-        bits_set = sum(byte.bit_count() for byte in raw)
+        bits_set = fno_math.popcount_bytes(bytes(raw))
         if bits_set == 0:
             return 0
         if bits_set >= self._m_bits:
