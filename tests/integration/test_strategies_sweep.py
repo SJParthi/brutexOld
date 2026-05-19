@@ -343,10 +343,19 @@ class TestSweepComboHashes:
             summary = sweep.run()
 
         for result in summary.results:
+            # DEC-P0-060 (PR-N+7): combo_hash is now 9-field BLAKE3. The
+            # placeholder "N/A" values match what ComboSweep.run() passes
+            # (sweep.py:436-450 TODO markers) until the engine PR wires
+            # real direction/instrument/tf/mode/indicator_version.
             expected = combo_hash(
                 strategy_id="threshold",
+                direction="N/A",
+                instrument="N/A",
+                tf="N/A",
+                mode="N/A",
                 params=result.params,
                 data_snapshot_hash="a" * 64,
+                indicator_version="N/A",
                 code_commit_sha="deadbeef",
             )
             assert result.combo_hash == expected

@@ -63,8 +63,16 @@ if TYPE_CHECKING:  # pragma: no cover
 #: calls inside a single combo.
 StrategyFactory = Callable[[Mapping[str, Any]], "Strategy"]
 
-#: Length of a sha256 hex digest in ASCII characters.
-SHA256_HEX_LEN: int = 64
+#: Length of a BLAKE3-256 hex digest in ASCII characters. Constant value
+#: 64 was previously named ``SHA256_HEX_LEN`` (DEC-P0-060 / PR-N+7 renamed
+#: alongside the sha256 → BLAKE3 migration in ``combo.py``). BLAKE3's
+#: default 32-byte digest matches SHA256's wire format, so existing LMDB
+#: keys remain 32-byte raw / 64-char hex unchanged.
+COMBO_HASH_HEX_LEN: int = 64
+
+#: Deprecated alias kept for backwards-compat with any caller still
+#: importing the old name. Will be removed in a follow-up cleanup.
+SHA256_HEX_LEN: int = COMBO_HASH_HEX_LEN
 
 #: Factory returning a freshly-prepared :class:`ReplayFeed` for the
 #: given params. Receives the full combo params dict so strategies
@@ -438,8 +446,18 @@ class ComboSweep:
             strategy_id = probe.META.strategy_id
             ch = combo_hash(
                 strategy_id=strategy_id,
+                # TODO(engine PR): pass the real direction / instrument / tf /
+                # mode / indicator_version from the Stage 1A/1B/2 funnel. Until
+                # the engine modules exist (G-03 GAP), pre-engine sweep callers
+                # supply explicit "N/A" placeholders so the 9-field BLAKE3
+                # contract per DEC-P0-060 holds.
+                direction="N/A",
+                instrument="N/A",
+                tf="N/A",
+                mode="N/A",
                 params=params,
                 data_snapshot_hash=self._data_snapshot_hash,
+                indicator_version="N/A",
                 code_commit_sha=self._code_commit_sha,
             )
 
@@ -503,15 +521,16 @@ class ComboSweep:
 
 
 def _hex_to_key(combo_hash_hex: str) -> bytes:
-    """Convert a 64-char sha256 hex string to its 32-byte raw form.
+    """Convert a 64-char BLAKE3 hex string to its 32-byte raw form.
 
     Raises :class:`StrategyError` on a wrong-length input. Centralised
     so :class:`ComboCache` always speaks the same key format and
     malformed inputs fail at the call site, not inside LMDB.
     """
-    if len(combo_hash_hex) != SHA256_HEX_LEN:
+    if len(combo_hash_hex) != COMBO_HASH_HEX_LEN:
         raise StrategyError(
-            f"combo_hash must be {SHA256_HEX_LEN}-char sha256 hex, got {len(combo_hash_hex)} chars"
+            f"combo_hash must be {COMBO_HASH_HEX_LEN}-char BLAKE3 hex, "
+            f"got {len(combo_hash_hex)} chars"
         )
     try:
         return bytes.fromhex(combo_hash_hex)

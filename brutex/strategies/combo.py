@@ -1,40 +1,41 @@
-"""Canonical parameter hashing for ``FR-BF-003`` combo identity.
+"""Canonical combo identity hashing — FR-BF-003 + DEC-P0-060 (9-field, BLAKE3).
 
-Every combo in a brute-force sweep is uniquely identified by::
+Every combo in a brute-force sweep is uniquely identified by the
+9-field BLAKE3 digest mandated at ``docs/TRACK1_BACKTEST_SPEC.md``
+§"Identity"::
 
-    combo_hash = sha256(
-        strategy_id ‖ canonical_params ‖ data_snapshot_hash ‖ code_commit_sha
+    combo_hash = blake3(
+        strategy_id ‖ direction ‖ instrument ‖ tf ‖ mode ‖
+        canonical_params ‖ data_snapshot_hash ‖ indicator_version ‖
+        code_commit_sha
     )
 
-.. warning::
+History
+-------
 
-    **DEC-P0-044 known gap (closing in Phase 3 engine PR):** the spec at
-    `docs/TRACK1_BACKTEST_SPEC.md` §"Identity" mandates 9 hash inputs:
+* **PR #25 era — 4-field SHA256.** Original implementation hashed
+  ``(strategy_id, params, data_snapshot_hash, code_commit_sha)``.
+* **DEC-P0-044 (MIGRATION.md #181, 2026-05-18).** Documented the gap
+  against the spec (missing 5 inputs + SHA256-vs-BLAKE3 mismatch);
+  deferred to the engine PR to amortise the test-pin update cost.
+* **DEC-P0-052 (MIGRATION.md #189, PR-M).** Shipped the
+  ``fno_math.blake3_hash`` Rust kernel as the foundational primitive.
+* **DEC-P0-060 (this module, PR-N+7).** Lands the full 9-field BLAKE3
+  migration ahead of the engine PR. The 5 new fields are accepted as
+  keyword-only required parameters; callers that don't yet have real
+  values pass placeholder strings (``"N/A"``) with explicit
+  ``# TODO(engine PR)`` markers — see ``brutex/strategies/sweep.py``.
 
-        ``strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖
-        canonical_params ‖ data_snapshot_hash ‖ indicator_version ‖
-        code_commit_hash``
+Why BLAKE3:
 
-    This module currently hashes 4 of the 9 (`strategy_id` ≈
-    `strategy_mask`, `canonical_params`, `data_snapshot_hash`,
-    `code_commit_sha`). **Missing: direction, instrument, tf, mode,
-    indicator_version.** Per `docs/TRACK1_REQUIREMENTS_FINAL.md` C-04
-    + DEC-P0-040 Q-02 lock, the migration is **deferred to PR-H
-    (engine bloc)** because:
+* ~5× faster than SHA256 on single core; ~10-20× on multi-core for
+  large inputs (BLAKE3 paper §5.5).
+* 32-byte (256-bit) digest matches SHA256 — wire-format-compatible
+  at the LMDB key + Bloom hash layers (``COMBO_HASH_HEX_LEN = 64``
+  unchanged).
+* Single-tree mode is deterministic + reproducible (Golden Rule #4).
 
-    1. The missing 5 inputs are produced by Stage 1A/1B/2/3/4 engine
-       modules that don't yet exist (R-106 GAP).
-    2. Migrating sha256 → blake3 (DEC-P0-040 Q-02) requires
-       regenerating every pinned hash in the test suite — coupling
-       this to the engine PR amortises the test-pin update cost.
-    3. Adding the 5 fields without callers that produce them creates
-       a dead-code surface that complicates the next PR's review.
-
-    Until then, callers MUST embed direction/instrument/tf/mode/
-    indicator_version inside the ``params`` dict if they want them
-    to participate in the hash. This is a workaround, not a fix.
-
-The canonicalisation rules (``NFR-UNIQ-002``) are:
+The canonicalisation rules (NFR-UNIQ-002) are:
 
 * Keys sorted lexicographically.
 * Floats serialised via ``repr()`` so ``1.0`` and ``1.00`` hash the
@@ -47,18 +48,20 @@ The canonicalisation rules (``NFR-UNIQ-002``) are:
 * ``Decimal`` values are serialised via ``str()`` so their exact
   textual form round-trips through the hash.
 
-This module does **not** depend on any heavy third-party library —
-it participates in the unit-test suite without the P2 extras.
+This module imports ``fno_math`` (the BruteX Rust hot-kernel wheel,
+shipped via DEC-P0-055 with bundled ``py.typed`` stubs) — no other
+heavy third-party dependency.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Any
+
+import fno_math
 
 from brutex.strategies.errors import StrategyError
 
@@ -66,9 +69,9 @@ from brutex.strategies.errors import StrategyError
 def canonicalise_params(params: Mapping[str, Any]) -> str:
     """Return a deterministic JSON-string encoding of *params*.
 
-    This is the string that gets fed into the sha256 underlying
-    :func:`combo_hash`. Exposed on its own so tests can assert on
-    the canonical form directly without going through the hasher.
+    This is the string that gets fed into the BLAKE3 hasher underlying
+    :func:`combo_hash`. Exposed on its own so tests can assert on the
+    canonical form directly without going through the hasher.
 
     Raises
     ------
@@ -88,37 +91,75 @@ def canonicalise_params(params: Mapping[str, Any]) -> str:
 def combo_hash(
     *,
     strategy_id: str,
+    direction: str,
+    instrument: str,
+    tf: str,
+    mode: str,
     params: Mapping[str, Any],
     data_snapshot_hash: str,
+    indicator_version: str,
     code_commit_sha: str,
 ) -> str:
-    """Return the 64-char sha256 hex digest of a combo's identity.
+    """Return the 64-char BLAKE3 hex digest of a combo's 9-field identity.
 
-    Per ``FR-BF-003`` / ``NFR-UNIQ-001``, two combos collide iff all
-    four inputs collide. The ``canonicalise_params`` step guarantees
-    dict-key ordering does not affect the result.
+    Per FR-BF-003 / NFR-UNIQ-001 and the
+    ``docs/TRACK1_BACKTEST_SPEC.md`` §"Identity" mandate, two combos
+    collide iff all nine inputs collide. The :func:`canonicalise_params`
+    step guarantees dict-key ordering does not affect the result.
 
     Parameters
     ----------
     strategy_id
         Unique identifier from :attr:`StrategyMeta.strategy_id`.
+    direction
+        Trade direction (``"bull"``, ``"bear"``, ``"neutral"``). The
+        engine PR will pass real values; pre-engine callers pass
+        ``"N/A"`` placeholders with ``# TODO`` markers.
+    instrument
+        Instrument symbol (``"NIFTY"``, ``"BANKNIFTY"``, ``"SENSEX"``,
+        ``"INDIA VIX"`` per CLAUDE.md §6).
+    tf
+        Timeframe label (one of the 21 TFs per
+        ``brutex/data/timeframes.py``).
+    mode
+        Exit-mode label (``"A"`` = SL/TP-based, ``"B"`` = signal-exit
+        per MIGRATION.md decisions #22-#23).
     params
         Concrete parameter dict for this combo. Canonicalised via
         :func:`canonicalise_params`.
     data_snapshot_hash
-        sha256 hex of the data slice the combo will run against.
+        BLAKE3 hex of the data slice the combo will run against.
         Typically produced by
         :meth:`~brutex.data.catalog.Catalog.data_snapshot_hash`
-        (``FR-CAT-004``).
+        (FR-CAT-004).
+    indicator_version
+        Version tag of the 9-indicator computation stack. Bumping this
+        invalidates every previously-cached combo, forcing
+        re-evaluation against the new indicator outputs.
     code_commit_sha
         Git commit SHA of the BruteX checkout running the combo.
-        Included so a bug-fix release does not return a stale
-        cached result.
+        Included so a bug-fix release does not return a stale cached
+        result.
+
+    Raises
+    ------
+    StrategyError
+        If any required string input is empty.
     """
     if not strategy_id:
         raise StrategyError("combo_hash: strategy_id must be non-empty")
+    if not direction:
+        raise StrategyError("combo_hash: direction must be non-empty")
+    if not instrument:
+        raise StrategyError("combo_hash: instrument must be non-empty")
+    if not tf:
+        raise StrategyError("combo_hash: tf must be non-empty")
+    if not mode:
+        raise StrategyError("combo_hash: mode must be non-empty")
     if not data_snapshot_hash:
         raise StrategyError("combo_hash: data_snapshot_hash must be non-empty")
+    if not indicator_version:
+        raise StrategyError("combo_hash: indicator_version must be non-empty")
     if not code_commit_sha:
         raise StrategyError("combo_hash: code_commit_sha must be non-empty")
 
@@ -126,12 +167,17 @@ def combo_hash(
     payload = "\x1f".join(
         [
             strategy_id,
+            direction,
+            instrument,
+            tf,
+            mode,
             canonical,
             data_snapshot_hash,
+            indicator_version,
             code_commit_sha,
         ]
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return fno_math.blake3_hash(payload.encode("utf-8")).hex()
 
 
 # ────────────────────────────────────────────────────────────────────────

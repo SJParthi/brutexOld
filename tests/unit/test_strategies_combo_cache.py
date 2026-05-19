@@ -26,10 +26,17 @@ def _make_result(ch: str, signal_count: int = 5) -> ComboResult:
 
 
 def _hash(suffix: str = "a") -> str:
+    # DEC-P0-060 (PR-N+7): pass the 5 new combo_hash fields with placeholder
+    # strings until the engine PR (G-03 GAP) wires real values.
     return combo_hash(
         strategy_id=f"strat_{suffix}",
+        direction="N/A",
+        instrument="N/A",
+        tf="N/A",
+        mode="N/A",
         params={"fast": 5},
         data_snapshot_hash="a" * 64,
+        indicator_version="N/A",
         code_commit_sha="deadbeef",
     )
 
