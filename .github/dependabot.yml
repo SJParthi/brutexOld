@@ -1,0 +1,77 @@
+# =============================================================================
+# BruteX — Dependabot Configuration (DEC-P0-056 / PR-N+3)
+# =============================================================================
+# "Always latest" dep automation. Weekly Monday IST window matches the
+# operator's tickvault cadence. Patch + minor groups bundle into a single
+# PR per ecosystem; major upgrades come as separate PRs for review.
+#
+# Auto-merge: the `dependabot[bot]` actor is on the auto-merge allow-list
+# in `.github/workflows/auto-merge.yml`, so any green Dependabot PR
+# squash-merges automatically once the 27 Z+ CI gates pass.
+# =============================================================================
+
+version: 2
+
+updates:
+  # Python runtime + dev dependencies (pip / pyproject.toml + setup.py).
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "02:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      pip-patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
+
+  # GitHub Actions used in `.github/workflows/*.yml`.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "02:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      gh-actions-patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
+
+  # Rust hot kernel (`rust/fno-math/Cargo.toml`).
+  - package-ecosystem: "cargo"
+    directory: "/rust/fno-math"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "02:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      cargo-patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
