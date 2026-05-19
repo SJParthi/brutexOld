@@ -50,6 +50,7 @@ from __future__ import annotations
 import hashlib
 import math
 
+import fno_math
 import pytest
 from brutex.orchestrator.bloom import (
     MAX_FPR_TARGET,
@@ -382,8 +383,6 @@ class TestRustPopcountEquivalence:
         data: bytes,
     ) -> None:
         """Rust popcount of any byte sequence equals the Python reference."""
-        import fno_math
-
         python_ref = sum(byte.bit_count() for byte in data)
         rust_kernel = fno_math.popcount_bytes(data)
         assert rust_kernel == python_ref, (
@@ -412,12 +411,10 @@ class TestRustPopcountEquivalence:
         Exercises the exact byte buffer that
         :attr:`BloomFilter.unique_count_estimate` feeds to the kernel.
         """
-        import fno_math
-
         bf = BloomFilter(capacity=capacity, fpr_target=fpr_target)
         for content_hash in insertions[: bf.capacity]:
             bf.add(content_hash)
-        raw = bf._impl.get_bytes()  # noqa: SLF001 — internal-buffer cross-check
+        raw = bf._impl.get_bytes()
         python_ref = sum(byte.bit_count() for byte in raw)
         rust_kernel = fno_math.popcount_bytes(bytes(raw))
         assert rust_kernel == python_ref, (
