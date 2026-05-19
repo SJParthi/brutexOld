@@ -455,7 +455,7 @@ pub struct NotificationConfig {
     /// HTTP send timeout in milliseconds for notification POSTs.
     pub send_timeout_ms: u64,
     /// Enable SMS alerts via AWS SNS for Critical/High severity events.
-    /// Phone number is fetched from SSM at `/tickvault/{env}/sns/phone-number`.
+    /// Phone number is fetched from SSM at `/brutex/{env}/sns/phone-number`.
     pub sns_enabled: bool,
 }
 

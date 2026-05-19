@@ -1,4 +1,4 @@
-//! Common error types used across the tickvault workspace.
+//! Common error types used across the BruteX hot-kernel workspace.
 //!
 //! Each crate may define its own specific error types using `thiserror`,
 //! but cross-cutting errors live here.
@@ -87,11 +87,11 @@ mod tests {
     #[test]
     fn test_secret_retrieval_error_display() {
         let err = ApplicationError::SecretRetrieval {
-            path: "/tickvault/dev/dhan/client-id".to_string(),
+            path: "/brutex/dev/dhan/client-id".to_string(),
             source: anyhow::anyhow!("not found"),
         };
         let msg = err.to_string();
-        assert!(msg.contains("/tickvault/dev/dhan/client-id"));
+        assert!(msg.contains("/brutex/dev/dhan/client-id"));
         assert!(msg.contains("not found"));
     }
 
@@ -289,7 +289,7 @@ mod tests {
     fn test_secret_retrieval_error_source_chain() {
         use std::error::Error;
         let err = ApplicationError::SecretRetrieval {
-            path: "/tickvault/dev/key".to_string(),
+            path: "/brutex/dev/key".to_string(),
             source: anyhow::anyhow!("SSM unreachable"),
         };
         // thiserror wires up the source automatically
