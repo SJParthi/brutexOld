@@ -9,20 +9,27 @@
 # BruteX has no branch protection yet, so `--auto` merged PRs
 # immediately on creation, before any CI had run.
 #
-# This version fixes that by triggering on `workflow_run` instead —
-# the workflow only fires AFTER the CI workflow has completed for
-# the PR's head commit. We then:
+# This version triggers on THREE events to cover every path to a
+# merge-ready state:
 #
-#   1. Find the PR that this workflow_run belongs to (head SHA lookup)
-#   2. Check that the PR is open, not a draft, and authored by a
-#      trusted actor (SJParthi, dependabot[bot], renovate[bot], or any
-#      branch whose head ref starts with `claude/`)
-#   3. Check that the `ci-ok (aggregate gate)` check run is green
-#   4. If all of the above pass, squash-merge the PR and delete the
-#      branch
+#   1. `workflow_run` (CI completed) — the original case. When CI
+#      finishes green on a non-draft PR's head commit, merge.
+#   2. `pull_request: ready_for_review` — DEC-P0-056 fix. When a draft
+#      PR is undrafted AFTER CI already completed, the workflow_run
+#      trigger has already fired + skipped (because draft). This
+#      trigger re-checks the latest CI run for the PR's head and
+#      merges if green.
+#   3. `workflow_dispatch` — manual escape hatch with optional PR number.
 #
-# If CI is still running or failed, this workflow exits cleanly and
-# will be re-triggered the next time CI completes for the same PR.
+# In every path the chain is the same:
+#   a. Resolve the PR + head SHA.
+#   b. Check trusted actor (SJParthi, dependabot[bot], renovate[bot],
+#      or any branch with head ref starting `claude/`).
+#   c. Check that the `CI OK (aggregate gate)` check run is success.
+#   d. Squash-merge + delete branch + post audit comment.
+#
+# If any precondition fails the workflow exits cleanly — never
+# half-merges.
 #
 # ## Why `workflow_run` and not `check_suite`?
 #
@@ -30,7 +37,7 @@
 # Actions. It gives us the SHA of the head commit and the conclusion
 # of the upstream workflow, both of which we need to decide whether
 # to merge. `check_suite` is noisier — it fires for every individual
-# check, and the aggregation logic would duplicate what `ci-ok`
+# check, and the aggregation logic would duplicate what `CI OK`
 # already does.
 
 name: Auto-merge
@@ -41,6 +48,9 @@ on:
       - "CI"
     types:
       - completed
+  pull_request:
+    branches: [main]
+    types: [ready_for_review]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -54,19 +64,25 @@ permissions:
   checks: read
 
 concurrency:
-  group: auto-merge-${{ github.event.workflow_run.head_sha || github.event.inputs.pr_number }}
+  group: auto-merge-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.event.inputs.pr_number }}
   cancel-in-progress: false
 
 jobs:
   auto-merge:
     name: Auto-merge on green CI
     runs-on: ubuntu-24.04
-    # Only run when the upstream CI workflow completed successfully.
-    # If ci.yml failed or was cancelled, skip the merge entirely.
+    # Run when:
+    #  - workflow_dispatch (manual)
+    #  - workflow_run completed with conclusion=success on a PR-triggered CI
+    #  - pull_request ready_for_review (PR un-drafted; CI may already be green)
     if: |
       github.event_name == 'workflow_dispatch' || (
+        github.event_name == 'workflow_run' &&
         github.event.workflow_run.event == 'pull_request' &&
         github.event.workflow_run.conclusion == 'success'
+      ) || (
+        github.event_name == 'pull_request' &&
+        github.event.action == 'ready_for_review'
       )
     timeout-minutes: 5
     steps:
@@ -75,13 +91,31 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          # The HEAD_SHA + PR_NUMBER + AUTHOR + HEAD_REF below are
+          # populated from whichever trigger fired. Empty for the
+          # workflow_dispatch path (resolved from MANUAL_PR instead).
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+          DIRECT_PR: ${{ github.event.pull_request.number }}
+          DIRECT_AUTHOR: ${{ github.event.pull_request.user.login }}
+          DIRECT_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          DIRECT_IS_DRAFT: ${{ github.event.pull_request.draft }}
           MANUAL_PR: ${{ github.event.inputs.pr_number }}
         run: |
           set -euo pipefail
           if [[ -n "${MANUAL_PR}" ]]; then
             echo "Using manually-specified PR #${MANUAL_PR}"
             echo "pr_number=${MANUAL_PR}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Direct path (pull_request event): PR number + metadata
+          # come straight from the event payload; no API lookup needed.
+          if [[ -n "${DIRECT_PR}" ]]; then
+            echo "Using direct PR #${DIRECT_PR} from pull_request event"
+            echo "pr_number=${DIRECT_PR}" >> "$GITHUB_OUTPUT"
+            echo "author=${DIRECT_AUTHOR}" >> "$GITHUB_OUTPUT"
+            echo "head_ref=${DIRECT_HEAD_REF}" >> "$GITHUB_OUTPUT"
+            echo "is_draft=${DIRECT_IS_DRAFT}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -143,7 +177,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          # Workflow_run + pull_request events expose head SHA in
+          # different places. Fall through to whichever populated it.
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           # The ci-ok job produces a check run of the same name.
@@ -173,5 +209,6 @@ jobs:
             --squash \
             --delete-branch \
             --subject "$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json title --jq .title) (#${PR_NUMBER})"
+          HEAD_SHA="${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}"
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body \
-            "🤖 Auto-merged (ci-ok was green on head commit ${{ github.event.workflow_run.head_sha }})."
+            "🤖 Auto-merged (CI OK aggregate was green on head commit ${HEAD_SHA})."
