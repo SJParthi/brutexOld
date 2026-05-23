@@ -258,8 +258,9 @@ class TestPartitionForTimestamp:
 
     def test_ist_converts_to_utc(self) -> None:
         # 2024-03-01 00:30 IST = 2024-02-29 19:00 UTC — so partition (2024, 2)
-        ist = timezone(offset=datetime.now(UTC).utcoffset() or UTC.utcoffset(datetime.now(UTC)))
-        # Use a fixed IST +05:30 explicitly:
+        # DEC-P0-070: removed an earlier ambiguous ``ist =`` assignment
+        # that was immediately overwritten by the explicit IST +05:30
+        # below. Closes CodeQL alert #3 (``py/multiple-definition``).
         from datetime import timedelta
 
         ist = timezone(timedelta(hours=5, minutes=30))

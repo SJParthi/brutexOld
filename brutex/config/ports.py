@@ -54,9 +54,13 @@ DEFAULT_JUPYTER_PORT: Final[int] = 9888
 DEFAULT_RAY_DASHBOARD_PORT: Final[int] = 9265
 
 #: Default bind host. ``0.0.0.0`` means "all interfaces" — the operator
-#: can reach the dashboard from their phone/tablet on the same LAN.
-#: Override to ``127.0.0.1`` for localhost-only.
-DEFAULT_HOST_BIND: Final[str] = "0.0.0.0"  # noqa: S104  # nosec B104 — intentional LAN bind
+#: can reach the dashboard from their phone/tablet on the same LAN by
+#: setting ``BRUTEX_HOST_BIND=0.0.0.0`` via env.
+#: DEC-P0-070 (2026-05-23): default locked to ``127.0.0.1`` per the
+#: operator's localhost-only directive ("heavily focused on only local
+#: MacBook, nowhere AWS"). Closes CodeQL alert #43
+#: (``py/bind-socket-all-network-interfaces``, Medium).
+DEFAULT_HOST_BIND: Final[str] = "127.0.0.1"
 
 #: Maximum valid TCP/UDP port number (2^16 - 1).
 MAX_PORT: Final[int] = 65535

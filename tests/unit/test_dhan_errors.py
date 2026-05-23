@@ -117,7 +117,11 @@ class TestSafeMessageDiscipline:
             # NO safe_message_default
 
         with pytest.raises(AttributeError, match="safe_message_default"):
-            _BadDhanError("some detail")
+            # DEC-P0-070: explicit `_ =` discards the never-constructed
+            # instance — closes CodeQL alert #79 (`py/unused-exception`),
+            # the AttributeError fires inside `__init__` before the
+            # object is returned, so there is no object to use.
+            _ = _BadDhanError("some detail")
 
     def test_str_returns_safe_message_not_detailed(self) -> None:
         """str(exc) MUST return the categorical safe_message, NOT the
