@@ -288,6 +288,130 @@ within daily 100K quota.
 
 ---
 
+### 3.4 Phase 0 band-drift probe (REQUIRED — DEC-P0-063)
+
+> **Scope note:** single-stock options sit outside Track 2's original §1
+> scope table, and §3's strike-radius rule tags stock-option ATM±3 as
+> "(out of Track 2 scope)". **DEC-P0-063** (MIGRATION.md entry #200)
+> formally expands Track 1 INGEST scope to additionally cover **200 NSE
+> F&O single stocks — spot + options across all 4 `expiryCodes`** for
+> the LAKE. The BRUTE-FORCE ENGINE stays at 3 indexes (stocks join India
+> VIX in `REFERENCE_ONLY` per decision #83); stock options sit in the
+> lake awaiting a future brute-force decision. For stock options, this
+> subsection + DEC-P0-063 supersede the §1 + §3 "(out of Track 2 scope)"
+> parentheticals. The §1 scope table is reconciled in a tracked
+> follow-up PR.
+
+**Why a SECOND Phase 0 probe.** §3.2's empirical-floor probe answers
+*how far back does option history go for indexes*. This probe answers
+two different questions: (a) *when a trade pins an absolute strike at
+entry, how often does that strike drift OUT of the fetched ATM±N window
+before exit* — the "band-drift" failure mode that motivates DEC-P0-063's
+de-rolled lake design; and (b) *is next-month single-stock options data
+actually liquid enough to backtest*, sampling whatever Dhan returns for
+stock-options `expiryCode = 1` so future brute-force decisions are
+data-grounded. It is the go/no-go gate for the ~777,000-call, ~9-10
+calendar-day Option A production backfill: **run it FIRST.**
+
+**The mechanic being measured.** Dhan addresses strikes by ATM-relative
+label, but the response's per-bar `strike` array (see §3) records the
+ABSOLUTE strike behind each label at every minute. Fetching all strike
+offsets for one (name, day) reconstructs the full set of absolute
+strikes in-window at every bar — no trade simulation needed. An
+(entry-bar, entry-offset) pair has "drifted out" at a later bar when
+its pinned absolute strike is absent from that in-window set.
+
+**What it fetches.** Near-month (`expiryCode = 0`), 1-minute,
+`drvOptionType = CALL`, via `POST /v2/charts/rollingoption`:
+
+| Cohort | Names | Strike offsets fetched | Expiry codes | Calls |
+|---|---|---|---|---|
+| Volatile NSE stocks (band-drift core) | ~5 high-beta F&O single stocks, incl. **MAX HEALTHCARE INSTITUTE** (the verified band-drift case) | ATM-3 … ATM+3 (7) | `0` | ~35 |
+| Index comparison (band-drift contrast) | 1 index (NIFTY or BANKNIFTY) | ATM-10 … ATM+10 (21) | `0` | ~21 |
+| Next-month stock-liquidity sample (NEW per DEC-P0-063 Option A) | Same ~5 stocks as above | ATM-3 … ATM+3 (7) | `1` | ~35 |
+| | | | **Total** | **~91** |
+
+CALL only: the `strike`-array roll is driven by the underlying, so PUT
+drift is symmetric — CALL is sufficient for a Phase 0 measurement. The
+index cohort uses the full ±10 radius so the probe also answers *would
+±10 have retained the strikes that ±3 dropped* — i.e., it quantifies
+what the narrower stock-options window costs.
+
+**Which stocks / which dates.** Selection criteria (the exact list is
+chosen at probe-run time from a volatility screen — deliberately NOT
+hardcoded here, to avoid stale picks):
+
+- **Stocks:** liquid NSE F&O single stocks with a history of large
+  intraday moves. **MAX HEALTHCARE INSTITUTE** is a mandatory
+  inclusion (it is the name that surfaced band-drift in the prior
+  design session). Mix strike-step sizes (e.g. ₹5 / ₹10 / ₹20 names)
+  so drift is measured in STRIKES, not just rupees.
+- **Dates:** for each name, its largest-range or gap session(s) in the
+  last ~12 months (results-day, news-day) — band-drift is worst
+  exactly on big-move days, so the probe deliberately samples that
+  tail. (Recent sessions are used deliberately, so the probe is
+  unaffected by the unverified stock-options deep-history floor —
+  establishing that floor is a separate later probe.)
+- **Index:** one large-move NIFTY / BANKNIFTY session in the same
+  window.
+
+**What it measures — drift-out rate per strike offset.** For each
+strike offset `o ∈ {ATM-3 … ATM+3}`, over a grid of synthetic entry
+bars spanning the session, the probe computes:
+
+- `drift_out_rate[o]` — fraction of entries at offset `o` whose pinned
+  absolute strike leaves the fetched window before the forced 15:20
+  exit.
+- `median_bars_to_drift[o]` — typical minutes from entry to drift-out.
+- `tier_mix[o]` — share of exits that would resolve as Tier 1 (real
+  OHLC) / Tier 2 (BSM synthetic — a neighbour strike still in-window)
+  / Tier 3 (`band_drift_hole`), per DEC-P0-063's de-rolled-lake model.
+- `pm10_recovery` — index cohort only: of the entries that drift out
+  of ±3, the fraction the full ±10 window would still have covered.
+- `next_month_liquidity[name]` — for each next-month stock-options
+  sample: per-bar OI median + NaN-run distribution + stale-print rate
+  (`close[i] == close[i-1] AND volume == 0` for ≥ N consecutive bars).
+  Used to answer "is `expiryCode = 1` for stock X structurally
+  tradeable, or just thin garbage" (per agent B's NSE-sourced finding
+  that ~90-98% of single-stock-options volume sits in `expiryCode 0`).
+
+**Output.** A `band_drift_probe_report.json` plus a printed table
+keyed by strike offset, plus a one-line per-cohort summary. Cost: ~91
+calls ÷ 3 r/s ≈ 30 s of API time; ~10 min wall including parsing +
+retries; ≈ 0.09 % of the verified 100,000 / day quota.
+
+**Decision rule (operator gate).** The operator reads the table and
+decides:
+
+1. **If the strike offsets we intend to trade are dominated by Tier 1
+   + Tier 2** (Tier-3 holes rare): proceed to the ~777K-call Option A
+   backfill.
+2. **If Tier-3 holes are common**: revisit BEFORE spend — options
+   include narrowing the traded offset set, accepting a higher
+   synthetic share, or re-scoping the universe.
+3. **If next-month single-stock data is structurally untradeable for
+   most names** (matches agent B's prior): the lake still ingests it
+   (for completeness per the zero-data-loss decree in DEC-P0-063 #6),
+   but a future stock-options brute-force decision restricts the
+   tradeable universe to the top-N names that pass the liquidity
+   floor.
+
+The probe also incidentally CONFIRMS, for stock options: the
+`instrument` enum (`OPTSTK`, confirmed by DEC-P0-063 research via Dhan
+SDK), the `exchangeSegment` (expected `NSE_FNO`), the Dhan-enforced
+ATM±3 radius, and that the per-bar `strike` array behaves as documented
+in §3.
+
+**Out of scope for this probe.** It does NOT backfill the lake, build
+the de-roll store, or simulate strategy P&L — it is a measurement-only
+gate. The de-roll ingest, the band-drift 3-tier exit pricing, the
+DTE-floor swept rule axis, two-scenario fills, the ExpiryRule axis, and
+the per-signal strike-selection rules are designed in DEC-P0-063 and
+PARKED until a future stock-options brute-force decision; they ship in
+their own 4-agent-reviewed PRs at that point.
+
+---
+
 ## 4. Timeframes (locked: 1m only)
 
 Track 2 stores **1-minute bars only**. No resampling.

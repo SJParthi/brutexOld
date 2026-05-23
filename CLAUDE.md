@@ -55,6 +55,20 @@ Track 1 spec locked after 4-agent hostile-review pass._
    or the 52-condition vocabulary. 21 timeframes (1m base + 19 derived
    intraday + 1d). Rolling `2021-01-01 → today` range. No futures, no
    options, no F&O contracts. Do not silently expand scope.
+
+   **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry
+   #200):** Track 1's INGEST scope was formally expanded to additionally
+   cover **200 NSE F&O eligible single stocks (spot + options across all
+   4 Dhan `expiryCodes`)** for the LAKE. The **BRUTE-FORCE ENGINE is
+   UNCHANGED** — it still operates only on the 3 brute-force indexes
+   (NIFTY/BANKNIFTY/SENSEX); the 200 stocks join India VIX in
+   `REFERENCE_ONLY` (mirrors decision #83). Stock options sit in the
+   lake ready for future brute-force expansion (separate decision; not
+   authorized here). The "4 index instruments / no F&O contracts"
+   wording above describes the ENGINE; the LAKE is the expanded surface
+   per DEC-P0-063. Full §3 / cross-spec reconciliation across the
+   ~15 remaining stale-text locations is a tracked follow-up PR; until
+   then DEC-P0-063 is authoritative for the stock-options expansion.
 4. **Reproducibility first.** Every run is identified by `sha256(
    strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params
    ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_hash)`. No
