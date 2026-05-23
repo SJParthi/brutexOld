@@ -86,9 +86,15 @@ class TestDefaults:
     def test_ray_is_9265(self) -> None:
         assert DEFAULT_RAY_DASHBOARD_PORT == 9265
 
-    def test_host_bind_is_0_0_0_0(self) -> None:
-        """Default binds to all interfaces for LAN access (phone, tablet)."""
-        assert DEFAULT_HOST_BIND == "0.0.0.0"
+    def test_host_bind_is_localhost(self) -> None:
+        """Default binds to localhost only.
+
+        DEC-P0-070 (2026-05-23): per operator decree the default is
+        locked to ``127.0.0.1`` (single-MacBook deployment, never AWS).
+        Override to ``0.0.0.0`` via ``BRUTEX_HOST_BIND`` env for LAN
+        access (phone / tablet on same WiFi).
+        """
+        assert DEFAULT_HOST_BIND == "127.0.0.1"
 
     def test_all_defaults_in_9xxx_range(self) -> None:
         """Sanity: every BruteX default lives in 9000-9999."""

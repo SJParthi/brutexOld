@@ -15,3 +15,29 @@ name: BruteX CodeQL Config
 paths-ignore:
   - "tests/redteam/fixtures/**"
   - "tests/redteam/fixtures/planted_*.py"
+
+# DEC-P0-070: per-rule exclusions for tests/.
+#
+# `py/unnecessary-delete` fires on `del param` statements that are the
+# established convention in BruteX test fixtures for silencing ruff
+# ARG001 (unused argument) inside Strategy-protocol stub implementations.
+# The pattern is intentional and consistent across the test suite; the
+# alternative (renaming every test-fixture parameter to `_param` form)
+# would touch ~25 test classes for zero behavioral benefit.
+#
+# `py/unused-local-variable` is similarly common in tests where
+# `pytest.raises` is used to assert that constructor-time validation
+# fires — the constructed object is intentionally discarded.
+#
+# Both rules continue to apply to `brutex/` production code unchanged.
+query-filters:
+  - exclude:
+      id:
+        - py/unnecessary-delete
+      paths:
+        - tests/**
+  - exclude:
+      id:
+        - py/unused-local-variable
+      paths:
+        - tests/**
