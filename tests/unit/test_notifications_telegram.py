@@ -16,6 +16,10 @@ access.
 
 from __future__ import annotations
 
+import queue
+import urllib.error
+from unittest.mock import MagicMock, patch
+
 import pytest
 from brutex.notifications.telegram import (
     ENV_BOT_TOKEN,
@@ -328,3 +332,311 @@ class TestNotifierAsync:
             )
             notifier.drain(timeout=1.0)
         assert transport.call_count == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-COV-001 step 17 — surgical backfill of brutex.notifications.telegram
+# Covers the missing lines/branches identified by --cov-report=term-missing:
+#   - _default_transport (308-339): HTTP success / HTTPError / URLError / OSError / disabled
+#   - _start_worker early-return when already running (402)
+#   - stop early-return when not running (414) + 419→exit branch (worker None)
+#   - __enter__ branch (424→426)
+#   - publish queue.Full branch (463-466)
+#   - _worker_loop queue.Empty branch + while-exit (472→exit, 475-476)
+#   - drain synchronous early-return + queue-empty exit (519, 521→exit)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestDefaultTransport:
+    """Exercise the urllib-based default transport's success + error paths."""
+
+    @pytest.fixture
+    def transport_event(self) -> TelegramEvent:
+        return TelegramEvent(
+            kind=TelegramEventKind.RUN_START,
+            severity=TelegramSeverity.INFO,
+            message="hello",
+        )
+
+    def test_disabled_config_returns_false(
+        self, disabled_config: TelegramConfig, transport_event: TelegramEvent
+    ) -> None:
+        """Covers line 308: ``if not config.enabled: return False``."""
+        from brutex.notifications import telegram as telegram_mod
+
+        assert (
+            telegram_mod._default_transport(  # pyright: ignore[reportPrivateUsage]
+                disabled_config, transport_event
+            )
+            is False
+        )
+
+    def test_http_200_returns_true(
+        self, enabled_config: TelegramConfig, transport_event: TelegramEvent
+    ) -> None:
+        """Covers lines 326-330: successful HTTP 200 path."""
+        from brutex.notifications import telegram as telegram_mod
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=None)
+        with patch(
+            "brutex.notifications.telegram.urllib.request.urlopen",
+            return_value=mock_resp,
+        ):
+            assert (
+                telegram_mod._default_transport(  # pyright: ignore[reportPrivateUsage]
+                    enabled_config, transport_event
+                )
+                is True
+            )
+
+    def test_http_error_returns_false(
+        self, enabled_config: TelegramConfig, transport_event: TelegramEvent
+    ) -> None:
+        """Covers lines 331-333: urllib.error.HTTPError caught → False."""
+        from brutex.notifications import telegram as telegram_mod
+
+        http_err = urllib.error.HTTPError(
+            url="https://api.telegram.org/test",
+            code=500,
+            msg="Internal Server Error",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=None,
+        )
+        with patch(
+            "brutex.notifications.telegram.urllib.request.urlopen",
+            side_effect=http_err,
+        ):
+            assert (
+                telegram_mod._default_transport(  # pyright: ignore[reportPrivateUsage]
+                    enabled_config, transport_event
+                )
+                is False
+            )
+
+    def test_url_error_returns_false(
+        self, enabled_config: TelegramConfig, transport_event: TelegramEvent
+    ) -> None:
+        """Covers lines 334-336: urllib.error.URLError caught → False."""
+        from brutex.notifications import telegram as telegram_mod
+
+        with patch(
+            "brutex.notifications.telegram.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("name resolution failed"),
+        ):
+            assert (
+                telegram_mod._default_transport(  # pyright: ignore[reportPrivateUsage]
+                    enabled_config, transport_event
+                )
+                is False
+            )
+
+    def test_os_error_returns_false(
+        self, enabled_config: TelegramConfig, transport_event: TelegramEvent
+    ) -> None:
+        """Covers lines 337-339: OSError / TimeoutError caught → False."""
+        from brutex.notifications import telegram as telegram_mod
+
+        with patch(
+            "brutex.notifications.telegram.urllib.request.urlopen",
+            side_effect=OSError("connection refused"),
+        ):
+            assert (
+                telegram_mod._default_transport(  # pyright: ignore[reportPrivateUsage]
+                    enabled_config, transport_event
+                )
+                is False
+            )
+
+
+class TestNotifierLifecycle:
+    """Exercise the worker thread start/stop + queue-management edges."""
+
+    def test_start_worker_no_op_when_already_running(self, enabled_config: TelegramConfig) -> None:
+        """Covers line 402: ``if self._synchronous or self._running: return``."""
+        notifier = TelegramNotifier(
+            config=enabled_config,
+            transport=RecordingTransport().__call__,
+            synchronous=False,
+        )
+        try:
+            notifier._start_worker()  # pyright: ignore[reportPrivateUsage]
+            first_thread = notifier._worker  # pyright: ignore[reportPrivateUsage]
+            assert first_thread is not None
+            # Second call should be a no-op — worker stays the same instance.
+            notifier._start_worker()  # pyright: ignore[reportPrivateUsage]
+            assert notifier._worker is first_thread  # pyright: ignore[reportPrivateUsage]
+        finally:
+            notifier.stop(timeout=0.5)
+
+    def test_stop_no_op_when_not_running(self, enabled_config: TelegramConfig) -> None:
+        """Covers line 414: ``if not self._running: return``."""
+        notifier = TelegramNotifier(
+            config=enabled_config,
+            transport=RecordingTransport().__call__,
+            synchronous=True,  # synchronous → _running stays False
+        )
+        notifier.stop()  # must not raise
+
+    def test_stop_when_worker_is_none(self, enabled_config: TelegramConfig) -> None:
+        """Covers 419→exit: worker is None, skip the join block."""
+        notifier = TelegramNotifier(
+            config=enabled_config,
+            transport=RecordingTransport().__call__,
+            synchronous=False,
+        )
+        # Force _running=True but _worker=None to exercise that exit branch.
+        notifier._running = True  # pyright: ignore[reportPrivateUsage]
+        notifier._worker = None  # pyright: ignore[reportPrivateUsage]
+        notifier.stop()  # walks the `if self._worker is not None:` False branch
+        assert notifier._running is False  # pyright: ignore[reportPrivateUsage]
+
+    def test_context_manager_no_op_when_already_running(
+        self, enabled_config: TelegramConfig
+    ) -> None:
+        """Covers 424→426: __enter__ skips _start_worker when already running."""
+        notifier = TelegramNotifier(
+            config=enabled_config,
+            transport=RecordingTransport().__call__,
+            synchronous=False,
+        )
+        try:
+            notifier._start_worker()  # pyright: ignore[reportPrivateUsage]
+            # Now __enter__ is called → False branch (synchronous=False but
+            # running=True) → skips _start_worker and returns self.
+            assert notifier.__enter__() is notifier
+        finally:
+            notifier.stop(timeout=0.5)
+
+
+class TestNotifierPublishFull:
+    """Exercise the publish queue.Full path + worker loop queue.Empty path."""
+
+    def test_publish_increments_queue_full_counter(self, enabled_config: TelegramConfig) -> None:
+        """Covers lines 463-466: queue.Full path increments dropped_on_queue_full."""
+        notifier = TelegramNotifier(
+            config=enabled_config,
+            transport=RecordingTransport().__call__,
+            synchronous=False,
+        )
+        try:
+            # Replace the internal queue with a zero-capacity (always-full) one.
+            notifier._queue = queue.Queue(maxsize=1)  # pyright: ignore[reportPrivateUsage]
+            # Fill it.
+            notifier._queue.put_nowait(  # pyright: ignore[reportPrivateUsage]
+                TelegramEvent(
+                    kind=TelegramEventKind.RUN_START,
+                    severity=TelegramSeverity.INFO,
+                    message="filler",
+                )
+            )
+            # This publish triggers queue.Full.
+            notifier.publish(
+                TelegramEvent(
+                    kind=TelegramEventKind.PHASE_PROGRESS,
+                    severity=TelegramSeverity.INFO,
+                    message="should be dropped",
+                )
+            )
+            assert notifier._bucket.dropped_on_queue_full == 1  # pyright: ignore[reportPrivateUsage]
+        finally:
+            notifier.stop(timeout=0.5)
+
+
+class TestWorkerLoopAndDrain:
+    """Exercise the worker loop's queue.Empty branch + drain's edge cases."""
+
+    def test_worker_loop_handles_queue_empty(self, enabled_config: TelegramConfig) -> None:
+        """Covers lines 472→exit + 475-476: queue.Empty triggers continue,
+        then the next iteration's while-check exits when running goes False.
+
+        Tested via the regular start/stop lifecycle — the daemon worker
+        runs with a 0.5s queue.get(timeout=0.5), and when no events are
+        published, the queue.Empty exception fires the `continue` branch.
+        We just need to keep the notifier alive long enough for ONE
+        timeout cycle.
+        """
+        notifier = TelegramNotifier(
+            config=enabled_config,
+            transport=RecordingTransport().__call__,
+            synchronous=False,
+        )
+        try:
+            notifier._start_worker()  # pyright: ignore[reportPrivateUsage]
+            # No publish — let the worker hit at least one queue.Empty.
+            import time as _time
+
+            _time.sleep(0.6)  # > queue.get(timeout=0.5)
+        finally:
+            notifier.stop(timeout=1.0)
+        # Worker should have exited cleanly.
+        assert notifier._running is False  # pyright: ignore[reportPrivateUsage]
+
+    def test_drain_no_op_when_synchronous(self, enabled_config: TelegramConfig) -> None:
+        """Covers line 519: ``if self._synchronous: return``."""
+        notifier = TelegramNotifier(
+            config=enabled_config,
+            transport=RecordingTransport().__call__,
+            synchronous=True,
+        )
+        # No-op + must not raise.
+        notifier.drain(timeout=1.0)
+
+    def test_drain_returns_when_queue_empties(self, enabled_config: TelegramConfig) -> None:
+        """Covers 521→exit: when queue empties before timeout, drain returns."""
+        notifier = TelegramNotifier(
+            config=enabled_config,
+            transport=RecordingTransport().__call__,
+            synchronous=False,
+        )
+        try:
+            notifier._start_worker()  # pyright: ignore[reportPrivateUsage]
+            # Queue is already empty — drain should return immediately.
+            notifier.drain(timeout=2.0)
+        finally:
+            notifier.stop(timeout=0.5)
+
+    def test_worker_loop_exits_when_running_false_at_check(
+        self, enabled_config: TelegramConfig
+    ) -> None:
+        """Covers 472→exit: while-condition False causes loop exit (vs break).
+
+        Direct-call the loop with _running=False to exercise the while-False
+        exit branch. Without this, the only exit path is via the ``break``
+        statement (poison pill), and coverage flags 472→exit as partial.
+        """
+        notifier = TelegramNotifier(
+            config=enabled_config,
+            transport=RecordingTransport().__call__,
+            synchronous=False,
+        )
+        notifier._running = False  # pyright: ignore[reportPrivateUsage]
+        # Direct call — no thread, no queue interaction; loop immediately exits.
+        notifier._worker_loop()  # pyright: ignore[reportPrivateUsage]
+
+    def test_drain_exits_on_deadline(self, enabled_config: TelegramConfig) -> None:
+        """Covers 521→exit: drain's while-condition False (deadline reached).
+
+        Keep the queue non-empty so the ``if self._queue.empty(): return``
+        early-return never fires; let the timeout elapse so the while-check
+        on ``time.monotonic() < deadline`` goes False.
+        """
+        notifier = TelegramNotifier(
+            config=enabled_config,
+            transport=RecordingTransport().__call__,
+            synchronous=False,
+        )
+        # Don't start the worker — that way nothing drains the queue.
+        notifier._queue.put_nowait(  # pyright: ignore[reportPrivateUsage]
+            TelegramEvent(
+                kind=TelegramEventKind.RUN_START,
+                severity=TelegramSeverity.INFO,
+                message="never drained",
+            )
+        )
+        # Tiny timeout so we exit via deadline, not via queue-empty.
+        notifier.drain(timeout=0.05)
+        # Queue still has the event — confirms the deadline-exit path fired.
+        assert notifier._queue.qsize() == 1  # pyright: ignore[reportPrivateUsage]
