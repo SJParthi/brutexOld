@@ -7,7 +7,8 @@
 > - `docs/dashboard/mockups/v29.html` — current locked design
 > - `docs/dashboard/mockups/v28.html` — v24 palette + v25/v26/v27 motion stack
 >
-> **Backend module:** `brutex/dashboard/app.py` (FastAPI + WebSocket fan-out).
+> **Backend module:** `brutex/dashboard/app.py` (FastAPI + REST polling endpoint;
+> see §6.0 for why we do NOT use WebSocket for backtest).
 >
 > **Authority order:**
 > 1. This file (`TRACK1_DASHBOARD_DESIGN.md`) — locks design + data contract
@@ -196,6 +197,39 @@ This rule was added at v26 to support:
 
 Every number on screen MUST come from `DashboardState`. None hardcoded.
 
+### 6.0 Refresh mechanism — REST polling, NOT WebSocket
+
+**Operator decree 2026-05-24:** *"dude here in our backtesting why
+webscoket is needed dude?"*
+
+**Answer: it's NOT needed. The refresh mechanism is HTTP polling.**
+
+Backtest is an **offline research** workload, not a live-trading
+workload. The sweep runs for hours-to-days; survival counts at each
+filter step update on the order of seconds-to-minutes, not
+milliseconds. The dashboard reader is the operator, not a market
+maker — they check status periodically, not continuously.
+
+| Mechanism | Right for backtest? | Why |
+|---|---|---|
+| **HTTP polling** (`fetch('/api/v1/state')` every 2-5 sec) | ✅ **PRIMARY** | Simple, no reconnect logic, trivially testable, browser handles 304-Not-Modified automatically, fresh enough for an hours-to-days sweep. |
+| WebSocket fan-out | ❌ over-engineered | Adds connection state, reconnect logic, message-ordering concerns, fallback handling — all for sub-second freshness that the use case doesn't need. The existing `WS /ws` endpoint in `brutex/dashboard/app.py` is deprecated for backtest use; kept only as optional power-user feature. |
+| Server-Sent Events | ❌ wrong tool | One-way streaming when polling already works fine; same connection-mgmt complexity as WS. |
+| Long polling | ❌ wrong era | Pre-HTTP/2 hack; modern HTTP/2 multiplexing makes plain polling cheap. |
+
+**Polling cadence:**
+- `2 sec` while sweep is RUNNING
+- `30 sec` once sweep is DONE / IDLE (operator viewing static report)
+- `10 sec` if the previous `/api/v1/state` response had `cache-control: max-age=10` (server hints)
+
+**REST endpoints (already in `brutex/dashboard/app.py`):**
+- `GET /api/v1/state` — JSON snapshot of `DashboardState` (the polling endpoint).
+- `GET /api/v1/events` — ring buffer of the last 500 events (for the live log section).
+- `GET /metrics` — Prometheus exposition (out-of-band, scraped separately).
+
+**WebSocket endpoint status:**
+- `WS /ws` exists in the codebase but is documented here as **deprecated for backtest use**. Future cleanup PR can remove it OR leave it for non-backtest extensions (e.g., a live-paper-trading mode that's out of Track 1 scope). Do not add new dashboard features that depend on it.
+
 ### 6.1 Current state schema (`brutex/dashboard/app.py`)
 
 ```python
@@ -293,9 +327,9 @@ When the engine finishes wiring a field, follow this 6-step pattern.
 | Step | Action | Verifiable by |
 |---|---|---|
 | 1 | Extend `DashboardState` schema in `brutex/dashboard/app.py` with the new field (e.g. add `SweepFunnelSnapshot.step_0_all_candidates: int`). | `mypy --strict brutex` passes; `tests/unit/test_dashboard_state.py` extended. |
-| 2 | Wire the WebSocket fan-out + REST endpoint to publish the new field every N seconds. | `tests/integration/test_dashboard_e2e.py` extended. |
-| 3 | Replace the field's hardcoded value in `docs/dashboard/mockups/v29.html` with `<span data-bind="step_0_all_candidates">33B</span>` (the `data-bind` attribute is the JS subscriber's hook; the inner text stays as the fallback if the WS connection drops). | `grep -c "data-bind" docs/dashboard/mockups/v29.html` increases by 1. |
-| 4 | Add JS subscriber that on WS message updates every `[data-bind="X"]` element's `textContent` to `snapshot.X`. The first such subscriber added covers ALL future fields (write once). | E2E test: load page, send WS message with funnel snapshot, assert DOM text updates. |
+| 2 | Ensure the new field is serialized in the `GET /api/v1/state` REST response (the polling endpoint per §6.0). No WebSocket work needed — backtest uses HTTP polling. | `tests/integration/test_dashboard_e2e.py` asserts new field appears in JSON. |
+| 3 | Replace the field's hardcoded value in `docs/dashboard/mockups/v29.html` with `<span data-bind="step_0_all_candidates">33B</span>` (the `data-bind` attribute is the JS poller's hook; the inner text stays as the fallback before the first poll response lands). | `grep -c "data-bind" docs/dashboard/mockups/v29.html` increases by 1. |
+| 4 | Add JS poller that on each `/api/v1/state` response updates every `[data-bind="X"]` element's `textContent` to `snapshot.X`. The first such poller added covers ALL future fields (write once). | E2E test: load page, stub the REST endpoint with funnel snapshot, advance fake timer 2 sec, assert DOM text updates. |
 | 5 | Narrow the PREVIEW DATA badge tooltip: from "Numbers are placeholder MOCKUP" → "Funnel step 0 is LIVE; remaining fields placeholder." Keep narrowing as more fields wire. | Visual check + crosswalk against this spec. |
 | 6 | When ALL fields are live-wired and the tooltip is empty of mockup caveats, remove the PREVIEW DATA badge from the markup entirely. The mockup file becomes the live template (DOM IDs + class names + bindings unchanged from the locked design). | `grep -c "preview-badge" docs/dashboard/mockups/v29.html` returns 0. PR title: "remove PREVIEW DATA badge — all dashboard fields live-wired (DEC-DASHBOARD-LIVE-N)". |
 
@@ -347,16 +381,24 @@ class SweepFunnelSnapshot:
 ```
 
 ```js
-// First subscriber addition (Step 4) — write once, covers all future fields
-ws.onmessage = (evt) => {
-  const snap = JSON.parse(evt.data);
-  document.querySelectorAll('[data-bind]').forEach(el => {
-    const key = el.getAttribute('data-bind');
-    if (snap[key] !== undefined) {
-      el.textContent = formatNumber(snap[key]);  // 33_000_000_000 → "33B"
-    }
-  });
-};
+// First poller addition (Step 4) — write once, covers all future fields.
+// HTTP polling per §6.0 — NOT WebSocket. Backtest doesn't need streaming.
+async function pollState() {
+  try {
+    const res = await fetch('/api/v1/state');
+    if (!res.ok) return;                          // server hiccup; try next tick
+    const snap = await res.json();
+    document.querySelectorAll('[data-bind]').forEach(el => {
+      const key = el.getAttribute('data-bind');
+      if (snap[key] !== undefined) {
+        el.textContent = formatNumber(snap[key]); // 33_000_000_000 → "33B"
+      }
+    });
+  } catch (e) { /* network blip; next tick retries */ }
+}
+// 2s while running, 30s when DONE (per §6.0 polling cadence).
+setInterval(pollState, 2000);
+pollState();  // first call immediate so first paint isn't stale
 ```
 
 After this PR merges:
@@ -439,7 +481,7 @@ the operator can pause to inspect.
 - Visual + animation + layout (this spec + v29.html).
 - Palette + motion-first meaning carriers.
 - Three-mode switching (operator/share/reel).
-- FastAPI backend (`brutex/dashboard/app.py`) with `PhaseSnapshot` + WebSocket fan-out.
+- FastAPI backend (`brutex/dashboard/app.py`) with `PhaseSnapshot` + `GET /api/v1/state` REST polling endpoint (see §6.0 for why polling, not WebSocket).
 - Test coverage on `DashboardState.on_pipeline_event` (in `tests/unit/test_dashboard_state.py`).
 
 **What is PLACEHOLDER MOCKUP in v29:**
@@ -450,7 +492,7 @@ the operator can pause to inspect.
 
 **What is ROADMAP (closes the mockup gap):**
 1. `SweepFunnelSnapshot` data class added to `brutex/dashboard/app.py`.
-2. WebSocket fan-out extended to publish funnel snapshot every 5 sec.
+2. REST `/api/v1/state` extended to include funnel snapshot fields (no WebSocket — see §6.0).
 3. v29.html JS extended to subscribe + replace hardcoded numbers.
 4. PREVIEW DATA badge tooltip narrows scope per section as each wires.
 5. Mockup HTML in `docs/dashboard/mockups/v29.html` stays as the
@@ -504,7 +546,7 @@ filters, explains the winner, and is honest about what's mock vs live.
 ## 13. What this doc does NOT cover
 
 - Dashboard backend deployment (`runbooks/dashboard-deploy.md` — TBD).
-- WebSocket protocol details (subscriber side — TBD when live-wiring lands).
+- Detailed REST API schema for `/api/v1/state` (subscriber side — TBD when live-wiring lands; see §6.0 for the chosen mechanism).
 - Telegram + email + macOS notification routing (separate spec:
   `track2/TRACK2_OBSERVABILITY.md`).
 - The actual brute-force engine + filter pipeline (that's
