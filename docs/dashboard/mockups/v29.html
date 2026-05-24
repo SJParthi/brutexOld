@@ -2473,7 +2473,7 @@
         <h3 style="font-size: 19px; font-weight: 800; letter-spacing: -0.01em;">The funnel · 33 billion candidates collapse to 1 winner</h3>
       </div>
       <div class="funnel-horizontal">
-        <span class="step-num">33B</span><span class="fn-arrow">→</span>
+        <span class="step-num" data-bind="step_0_all_candidates">33B</span><span class="fn-arrow">→</span>
         <span class="step-num">12M</span><span class="fn-arrow">→</span>
         <span class="step-num">1.2M</span><span class="fn-arrow">→</span>
         <span class="step-num">84K</span><span class="fn-arrow">→</span>
@@ -3877,6 +3877,57 @@
           : 'Show mechanics <span class="chev">▾</span>';
       });
     });
+  })();
+
+  // ==================== DEC-DASHBOARD-LIVE-1 — REST poller ====================
+  // Per TRACK1_DASHBOARD_DESIGN.md §6.0 (REST polling, NOT WebSocket —
+  // backtest is offline research, sub-second freshness not needed) and
+  // §6.4 step 4 (write the poller ONCE, all future data-bind fields
+  // ride this same loop — incremental swap-out).
+  //
+  // First field wired: step_0_all_candidates (the 33B at funnel head).
+  // Future PRs (DEC-DASHBOARD-LIVE-2, 3, ...) add data-bind="<field>"
+  // to additional spans — no change needed to this poller.
+  (function () {
+    // Format large integers into compact 33B / 12M / 1.2M / 84K labels.
+    function formatNumber(n) {
+      if (n === null || n === undefined) return '';
+      const abs = Math.abs(n);
+      if (abs >= 1e9) return (n / 1e9).toFixed(abs >= 10e9 ? 0 : 1).replace(/\.0$/, '') + 'B';
+      if (abs >= 1e6) return (n / 1e6).toFixed(abs >= 10e6 ? 0 : 1).replace(/\.0$/, '') + 'M';
+      if (abs >= 1e3) return (n / 1e3).toFixed(abs >= 10e3 ? 0 : 1).replace(/\.0$/, '') + 'K';
+      return String(n);
+    }
+
+    async function pollState() {
+      try {
+        const res = await fetch('/api/v1/state');
+        if (!res.ok) return;  // server hiccup; next tick retries
+        const snap = await res.json();
+        // Sweep funnel may be null when no sweep has started yet —
+        // leave the mockup placeholder values in that case (PREVIEW
+        // DATA badge stays visible per §6.4 step 5).
+        const funnel = snap.sweep_funnel;
+        if (!funnel) return;
+        document.querySelectorAll('[data-bind]').forEach(function (el) {
+          const key = el.getAttribute('data-bind');
+          if (funnel[key] !== undefined && funnel[key] !== null) {
+            el.textContent = formatNumber(funnel[key]);
+          }
+        });
+      } catch (e) { /* network blip; next tick retries */ }
+    }
+
+    // Cadence per §6.0: 2s while running (caller can adjust by reading
+    // snap.run_status later — for now, fixed 2s; static views just
+    // re-fetch the same numbers).
+    // Skip when offline / file:// — the mockup is served standalone
+    // from the docs folder for design review; the poller only matters
+    // when the file is served by the FastAPI app on 127.0.0.1:9080.
+    if (window.location.protocol !== 'file:') {
+      pollState();  // first call immediate so the page is fresh on load
+      setInterval(pollState, 2000);
+    }
   })();
 </script>
 
