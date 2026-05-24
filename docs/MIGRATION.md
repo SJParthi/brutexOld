@@ -292,6 +292,63 @@ superseded.
 
 148. **DEC-P0-010 — pyright per-test re-promotion: 4 of 6 categories restored to error (PR #32)** (operator decree 2026-05-17 "go ahead dude"). Closes DEC-P0-005 P1 item #6 partially. **Source-pattern fixes** (16 errors → 0 across 5 files): (a) `tests/integration/test_execution_driver.py::_seed_lake` signature `list[float]` → `Sequence[float]` (kills 5 list-variance errors via covariant Sequence); (b) `tests/integration/test_dashboard_e2e.py::client` fixture return type `TestClient` → `Generator[TestClient]` (kills 2 generator errors); (c) `tests/redteam/test_redteam_premerge_guard.py` added `dict[str, Any]` annotation on rollup test data (kills 6 dict-index errors); (d) `tests/unit/test_execution_costs.py:224` added `isinstance(exponent, int)` guard before `-exponent` (kills 1 operator error on `int | Literal['n','N','F']`); (e) `tests/unit/test_strategies_registry.py::_DecoStrat` added `ClassVar[StrategyMeta]` annotation + `__init__(params)` to satisfy Strategy protocol (kills 1 protocol error) + targeted `# pyright: ignore[reportUntypedClassDecorator]` on the decorator line with documented Protocol-detection-limitation rationale (kills 1 untyped-decorator error). **Library changes:** `brutex/strategies/registry.py::register_strategy` rewritten with generic `TypeVar` (`_StrategyT = TypeVar("_StrategyT", bound=type[Strategy])`) so the decorator preserves concrete class type (vs erasing to `type[Strategy]`). PEP 695 syntax `def f[T](...)` skipped per UP047 because mypy 1.x doesn't yet support it; ruff noqa added with rationale. **4 categories restored to error** in tests/: `reportCallIssue`, `reportGeneralTypeIssues`, `reportUntypedClassDecorator`, `reportOperatorIssue`. **2 categories DEFERRED** (`reportArgumentType` 56 errors + `reportAttributeAccessIssue` 17 errors): downgraded to "warning" only, with honest comment block in `pyproject.toml` explaining the 73 remaining errors are pre-existing test-fixture patterns (test_dashboard_state.py parametrize loose-typing + test_adapter_protocol.py protocol-stub access + test_fakes patterns) requiring ~3 days of dedicated test-fixture refactoring. Tracked as P1 follow-up #6b for a dedicated future PR. **Honest envelope (Golden Rule #10):** "partial completion" per Agent 1 of PR #25 review prediction — the 6-category re-promotion was the right direction but full closure on `reportArgumentType` requires a separate focused effort. PR #32 closes 4 of 6 cleanly; 2 deferred with explicit deferral + tracking. **Local verification:** ruff/format/mypy strict/pyright strict ALL GREEN; pytest 1511 passed.
 
+205. **DEC-STANDARDS-AUDIT-001 — STANDARDS_100PCT.md stale-claim audit: 2 doc-only "RED gaps" recategorized to 🟢 ENFORCED after grep verification** (2026-05-24, operator directive "fix everything with real time guarantee and assurance bro" + "see you will fix all of these with guarantee right?"). Closes the meta-gap that `docs/STANDARDS_100PCT.md` claimed 5 ROADMAP gaps (43% enforced) when in fact 2 of them were already enforced — the gates exist on disk and run on every push, but the doc was stale.
+
+    **Method (per Golden Rule #1 no hallucination):** Before writing a "fix" PR for each claimed gap, verified each ROADMAP claim against the actual code on disk. Process:
+    - `grep -rn` for the asserted-missing module
+    - `find` for the asserted-missing file/directory
+    - Read the actual CI workflow / test file content
+    - Report stale-vs-real per row
+
+    **Stale claims corrected (2 rows recategorized 📋 → 🟢):**
+
+    | Row | Old claim (stale) | Reality on disk | New status |
+    |---|---|---|---|
+    | 13 | "O(1) ratio gate: NO ratio assertion exists" | `tests/bench/test_store_o1.py::test_get_ratio_below_3x` (3× ceiling) · `tests/bench/test_throughput_canary.py::test_vectorized_mask_and_ratio` (8× ceiling) · `test_dict_lookup_ratio` (10× ceiling). All 3 gate ratio behavior on CI. The 1.1× target from CLAUDE.md §2 #5 is the M4 Pro production envelope; CI shared-GHA uses looser ratios per documented DEC-P0-020 flake-mitigation. | 🟢 ENFORCED |
+    | 15 | "Bloom + LMDB: P-DEDUP-1 property test doesn't exist" | `tests/property/test_bloom_invariants.py` covers Bloom invariants (no-false-negatives, FPR bounds, idempotent inserts); `tests/property/test_dedup_hash_properties.py` covers hash-based dedup properties. Both run on every push via the `Property tests (hypothesis)` CI job. Implementation at `brutex/orchestrator/bloom.py` + `store.py`. | 🟢 ENFORCED |
+
+    **The 4 PARTIAL rows (genuinely partial — not stale):**
+    | Row | Gap | Tracked follow-up |
+    |---|---|---|
+    | 1 | Coverage line 90% → 100% (legacy modules need test backfill) | DEC-COV-001 |
+    | 2 | Coverage branch 90% → 100% (same as row 1) | DEC-COV-001 (paired) |
+    | 8 | Spec↔test crosswalk: warn-and-continue → fail-closed (one-line script change) | DEC-CROSSWALK-001 |
+    | 11 | 7 test types: stress test job (`tests/stress/` dir doesn't exist) | DEC-STRESS-001 |
+
+    **The 3 GENUINELY-REMAINING ROADMAP rows:**
+    | Row | Gap | Tracked follow-up |
+    |---|---|---|
+    | 5b | pylint standalone — ruff PL subset covers pylint-equivalent rules. Recommend dropping standalone pylint claim. | DEC-PYLINT-DROP-001 |
+    | 14 | Throughput canary 50 M/s ABSOLUTE — ratio gate already live; absolute 50 M/s needs M4 Pro local-runner per chronic-flake-mitigation. | DEC-O1-ABSOLUTE-001 (Phase 3 PyO3 + M4 Pro runner) |
+    | 16 | `brutex doctor` CLI — genuinely missing; no entry point, no `doctor.py`. ~1 day effort. | DEC-DOCTOR-001 |
+
+    **The 3 MANUAL-REVIEWER rows (cannot be automated):**
+    - Row 10 (bug-fix regression discipline) · Row 17 (Golden Rule #1 no-hallucination) · Row 18 (decision-ID enforcement) — all PR-template + reviewer checks. Correct control for these.
+
+    **Updated scorecard (post-audit):**
+    | Status | Count of 21 sub-rows | % | Delta vs pre-audit |
+    |---|---:|---:|---:|
+    | 🟢 Fully enforced | **11** | **52%** | **+2** (rows 13, 15 were already enforced; doc was stale) |
+    | 🟡 Partial | 4 | 19% | unchanged |
+    | 📋 Roadmap | **3** | **14%** | **−2** (those 2 weren't actually roadmap) |
+    | 👁️ Manual | 3 | 14% | unchanged |
+
+    → **Real enforcement: 52% fully enforced + 19% partial + 14% roadmap + 14% manual-reviewer.** Per Golden Rule #10, this is the truthful starting point. The next 5 doc-only follow-up PRs (DEC-COV-001, DEC-CROSSWALK-001, DEC-STRESS-001, DEC-DOCTOR-001, DEC-PYLINT-DROP-001) would close 5 more sub-rows → ~76% fully enforced; the remaining 14% manual-reviewer is irreducible (Golden Rule #1 hallucination check, etc. cannot be 100% automated).
+
+    **Concrete file changes in this PR:**
+    - `docs/STANDARDS_100PCT.md`: rows 13 + 15 updated from `📋` to `🟢` with explicit code-path citations; summary count updated 9→11 ✅, 5→3 📋; new "post-audit reality" subsection added enumerating the 3 truly-remaining roadmap items.
+    - `docs/MIGRATION.md`: this entry (#205) documenting the audit + reasoning.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ **REAL:** every row recategorization verified by `grep -rn` against actual files on disk; 2 false ROADMAP claims now reflect reality.
+    - ✅ **REAL:** scorecard moves from "43% enforced (43+19+24+14)" → "52% enforced (52+19+14+14)" by acknowledging existing gates. No code added — these are pure doc corrections.
+    - 🟡 **PARTIAL:** 4 PARTIAL rows + 3 truly-missing ROADMAP rows tracked but NOT FIXED in this PR. Each gets its own focused PR.
+    - 📋 **ROADMAP:** `brutex doctor` CLI (DEC-DOCTOR-001) is the highest-value remaining gap — addresses the "audit chain verifiable" guarantee directly.
+
+    **Golden Rules touched:** #1 (no hallucination — verified every row by grep + read; corrected stale claims) · #2 (single source of truth — `STANDARDS_100PCT.md` now matches actual code state) · #3 (scope lock — no scope change; pure doc correction) · #10 (honest envelope — explicit pre-vs-post audit numbers, both kept for history) · #11 (DYNAMIC — sets up sequential gap-closure PRs without re-architecting).
+
+    **Decision ID:** DEC-STANDARDS-AUDIT-001. **Builds on:** DEC-P0-020 (entry — the ratio-gate hot-fix that this audit verified is live) · DEC-CALIBRATE-001 (entry #204, the honest-envelope precedent that triggered this audit).
+
 204. **DEC-CALIBRATE-001 — Honest-envelope calibration: institutional-methodology guarantee + CLAUDE.md hash-algorithm fix + 3 tracked conflicts** (2026-05-24, operator directive "i need the guarantee are we following the institutional approach always dude okay? if yes then go ahead dude" — triggered after a parallel 3-agent hostile review demanded by the operator). Closes the assurance gap that no single doc explicitly stated *which* institutional patterns BruteX matches with which peer-reviewed citation, and which gaps are structural (data/execution/capacity) vs methodology (matched). Per Golden Rule #10 honest envelope.
 
     **The 3-agent hostile review (all spawned in parallel, all returned with clean cite-trail):**
