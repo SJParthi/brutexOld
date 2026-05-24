@@ -54,11 +54,30 @@ MIGRATION_FILE = ROOT / "docs" / "MIGRATION.md"
 DEC_ID_PATTERN = re.compile(r"\bDEC-[A-Z][A-Z0-9_-]*-\d{3,}\b")
 
 
+def strip_code_spans(text: str) -> str:
+    """Remove markdown code spans (single + triple backticks) so example DEC-IDs
+    in PR-body documentation (``"e.g., DEC-NONEXISTENT-999"``) don't trip the
+    validator. Reviewer judgement still applies to whether a NON-code-span
+    DEC-ID is real.
+    """
+    # Triple-backtick fenced blocks: ```...``` (greedy across newlines)
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    # Single-backtick inline code spans: `...`
+    text = re.sub(r"`[^`]*`", " ", text)
+    return text
+
+
 def extract_dec_ids(text: str) -> list[str]:
-    """Return all unique DEC-IDs found in ``text``, preserving first-appearance order."""
+    """Return all unique DEC-IDs found in ``text``, preserving first-appearance order.
+
+    Strips markdown code spans first so example IDs inside ``backticks`` are not
+    treated as live citations (e.g., PR-body documentation that uses
+    ``DEC-NONEXISTENT-999`` to illustrate the fail case).
+    """
+    stripped = strip_code_spans(text)
     seen: set[str] = set()
     out: list[str] = []
-    for match in DEC_ID_PATTERN.findall(text):
+    for match in DEC_ID_PATTERN.findall(stripped):
         if match not in seen:
             seen.add(match)
             out.append(match)
