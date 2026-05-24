@@ -396,6 +396,18 @@ jobs:
           else
             echo "(brutex.options.strike_grid test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 14 (entry #225): brutex.models — UNDEFERRED.
+          # Step 3 deferred this with "43 branches" worry; actual probe
+          # showed only 1 line missing (BruteXError.__str__ safe_message
+          # branch). 2 surgical tests added in TestErrorHierarchy to
+          # cover that branch — module now at 100% line+branch.
+          # Demonstrates the "deferred" list is NOT permanent — careful
+          # test backfill unblocks ratchet (not API guessing).
+          if compgen -G "tests/unit/test_models.py" > /dev/null; then
+            pytest --cov=brutex.models --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_models.py
+          else
+            echo "(brutex.models test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
