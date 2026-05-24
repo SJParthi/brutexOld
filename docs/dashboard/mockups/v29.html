@@ -2181,7 +2181,7 @@
 <div class="mode-bar">
   <div class="brand-logo">BruteX</div>
   <div class="mode-bar-right">
-    <span class="preview-badge" title="Numbers shown are placeholder MOCKUP data — the brute-force engine + 9-filter statistical pipeline are real and standards-compliant, but the live sweep wiring to this dashboard is still in flight. Methodology is institutional-grade; the specific numbers are NOT from a real sweep yet.">Preview Data</span>
+    <span class="preview-badge" title="Funnel steps 0-3 (33B → 12M → 1.2M → 84K) are LIVE — values come from the brute-force sweep via /api/v1/state every 2s. Remaining sections (steps 4-9 of funnel, top combos table, equity curve) are still placeholder MOCKUP data. Methodology is institutional-grade; PREVIEW DATA badge remains until ALL sections are live-wired.">Preview Data</span>
     <div class="mode-toggle">
       <button data-mode="operator" class="active">⚙ Operator</button>
       <button data-mode="share">✨ Share</button>
@@ -2474,9 +2474,9 @@
       </div>
       <div class="funnel-horizontal">
         <span class="step-num" data-bind="step_0_all_candidates">33B</span><span class="fn-arrow">→</span>
-        <span class="step-num">12M</span><span class="fn-arrow">→</span>
-        <span class="step-num">1.2M</span><span class="fn-arrow">→</span>
-        <span class="step-num">84K</span><span class="fn-arrow">→</span>
+        <span class="step-num" data-bind="step_1_cheap_prefilter">12M</span><span class="fn-arrow">→</span>
+        <span class="step-num" data-bind="step_2_real_edge_test">1.2M</span><span class="fn-arrow">→</span>
+        <span class="step-num" data-bind="step_3_unseen_data">84K</span><span class="fn-arrow">→</span>
         <span class="step-num">2.4K</span><span class="fn-arrow">→</span>
         <span class="step-num">410</span><span class="fn-arrow">→</span>
         <span class="step-num">174</span><span class="fn-arrow">→</span>
