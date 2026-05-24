@@ -109,6 +109,69 @@ class RateLimitPanel:
     recent_429_count: int = 0
 
 
+@dataclass(slots=True)
+class SweepFunnelSnapshot:
+    """One snapshot of the 9-filter survival pipeline.
+
+    See ``docs/TRACK1_DASHBOARD_DESIGN.md §6.2`` for the schema contract
+    and §6.4 for the incremental swap-out pattern that wires individual
+    fields into the dashboard mockup one at a time.
+
+    Every value is dynamic — the 33B / 12M / 1.2M / 84K / 2.4K / 410 /
+    174 / 1 numbers in ``docs/dashboard/mockups/v29.html`` are PLACEHOLDER
+    fallbacks until each field's ``data-bind`` attribute is wired (per
+    spec §6.4 step 3) and the JS poller (per §6.4 step 4) replaces the
+    inner text from a live ``SweepFunnelSnapshot``.
+
+    Attributes
+    ----------
+    step_0_all_candidates
+        Step 0 — total combos tested at the start of the funnel.
+        At Day 1 this is ~12.6M; at Phase 10 it is the 730B target.
+        The dashboard's 33B mockup value is the Phase-10 ceiling, not a
+        hardcoded claim (see ``TRACK1_DASHBOARD_DESIGN.md §6.4 SCALABLE``).
+    step_1_cheap_prefilter
+        Step 1 — survivors of the cheap pre-filter (top-K composite).
+    step_2_real_edge_test
+        Step 2 — real-edge test (corrects for testing N billion ideas).
+    step_3_unseen_data
+        Step 3 — works on data it never saw (walk-forward splits).
+    step_4_best_of_n
+        Step 4 — best-of-N test.
+    step_5_not_overfit
+        Step 5 — not overfit (deflated Sharpe, PBO).
+    step_6_multi_test
+        Step 6 — multi-test correction (Bonferroni / White's reality check).
+    step_7_three_windows
+        Step 7 — 3 time-windows all profitable (rolling + anchored + expanding).
+    step_8_sealed_lockbox
+        Step 8 — 6-month sealed lockbox holdout.
+    step_9_random_shuffle
+        Step 9 — random shuffle test (label permutation).
+    winners_top_n
+        Final winners after all 9 filters (the chosen one(s) at the bottom).
+    sweep_id
+        Unique sweep identifier for audit trail.
+    snapshot_at
+        ISO-8601 timestamp the snapshot was taken (for staleness check
+        in the JS poller — falls back to mockup value if older than 60s).
+    """
+
+    step_0_all_candidates: int = 0
+    step_1_cheap_prefilter: int = 0
+    step_2_real_edge_test: int = 0
+    step_3_unseen_data: int = 0
+    step_4_best_of_n: int = 0
+    step_5_not_overfit: int = 0
+    step_6_multi_test: int = 0
+    step_7_three_windows: int = 0
+    step_8_sealed_lockbox: int = 0
+    step_9_random_shuffle: int = 0
+    winners_top_n: int = 0
+    sweep_id: str = ""
+    snapshot_at: str = ""
+
+
 # ────────────────────────────────────────────────────────────────────────
 # DashboardState — the central in-memory model
 # ────────────────────────────────────────────────────────────────────────
@@ -138,6 +201,13 @@ class DashboardState:
     telegram: TelegramStatsPanel = field(default_factory=TelegramStatsPanel)
     rate_limit: RateLimitPanel = field(default_factory=RateLimitPanel)
     recent_events: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=500))
+    # Sweep funnel snapshot — populated by the brute-force sweep
+    # via :meth:`update_sweep_funnel`. ``None`` until first update;
+    # the JS poller in v29.html falls back to placeholder mockup
+    # values when this is None (PREVIEW DATA badge stays visible).
+    # See ``TRACK1_DASHBOARD_DESIGN.md §6.4`` for the incremental
+    # swap-out contract.
+    sweep_funnel: SweepFunnelSnapshot | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     # ── Event subscription entry point ──────────────────────────────
@@ -242,6 +312,19 @@ class DashboardState:
             self.rate_limit.available_tokens = available_tokens
             self.rate_limit.recent_429_count = recent_429_count
 
+    # ── Sweep funnel passthrough (DEC-DASHBOARD-LIVE-1) ────────────
+
+    def update_sweep_funnel(self, snapshot: SweepFunnelSnapshot) -> None:
+        """Replace the sweep-funnel snapshot.
+
+        Called by the brute-force sweep loop every N seconds. The
+        JS poller in v29.html fetches ``/api/v1/state`` on the same
+        cadence (per ``TRACK1_DASHBOARD_DESIGN.md §6.0``) and updates
+        every ``[data-bind="<field>"]`` element with the new value.
+        """
+        with self._lock:
+            self.sweep_funnel = snapshot
+
     def update_telegram(self, *, stats: dict[str, int | float]) -> None:
         """Update the Telegram panel from a fresh notifier counter snapshot."""
         with self._lock:
@@ -305,6 +388,13 @@ class DashboardState:
                 "telegram": asdict(self.telegram),
                 "rate_limit": asdict(self.rate_limit),
                 "recent_events": list(self.recent_events),
+                # DEC-DASHBOARD-LIVE-1: sweep_funnel is None until the
+                # brute-force loop calls update_sweep_funnel(). The
+                # v29.html mockup falls back to its placeholder
+                # numbers when sweep_funnel is null in the JSON.
+                "sweep_funnel": (
+                    asdict(self.sweep_funnel) if self.sweep_funnel is not None else None
+                ),
             }
 
 
@@ -994,6 +1084,7 @@ __all__ = [
     "DashboardState",
     "PhaseSnapshot",
     "RateLimitPanel",
+    "SweepFunnelSnapshot",
     "TelegramStatsPanel",
     "WorkerRow",
     "build_app",

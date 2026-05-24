@@ -12,6 +12,7 @@ from typing import Any
 from brutex.dashboard.app import (
     DashboardState,
     PhaseSnapshot,
+    SweepFunnelSnapshot,
     snapshot_to_json,
 )
 from brutex.orchestrator.pipeline import PipelineEvent, PipelineEventKind
@@ -258,3 +259,66 @@ class TestSnapshotSerialization:
         raw = snapshot_to_json(state)
         parsed = json.loads(raw)
         assert parsed["run_status"] == "idle"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Sweep funnel — DEC-DASHBOARD-LIVE-1
+# Per TRACK1_DASHBOARD_DESIGN.md §6.2 / §6.4 — incremental swap-out from
+# placeholder MOCKUP numbers to live sweep data.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepFunnel:
+    def test_default_snapshot_is_zeroed(self) -> None:
+        """Empty SweepFunnelSnapshot defaults — used as a sentinel before first sweep."""
+        snap = SweepFunnelSnapshot()
+        assert snap.step_0_all_candidates == 0
+        assert snap.winners_top_n == 0
+        assert snap.sweep_id == ""
+        assert snap.snapshot_at == ""
+
+    def test_state_sweep_funnel_starts_none(self) -> None:
+        """DashboardState.sweep_funnel is None until update_sweep_funnel() is called."""
+        state = DashboardState()
+        assert state.sweep_funnel is None
+
+    def test_update_sweep_funnel_replaces_snapshot(self) -> None:
+        """update_sweep_funnel installs the snapshot under the state lock."""
+        state = DashboardState()
+        snap = SweepFunnelSnapshot(
+            step_0_all_candidates=12_600_000,
+            step_1_cheap_prefilter=1_500_000,
+            winners_top_n=1,
+            sweep_id="sweep-2026-05-24",
+            snapshot_at="2026-05-24T10:30:00Z",
+        )
+        state.update_sweep_funnel(snap)
+        # Bind to local for pyright strict narrowing — instance-attribute
+        # narrowing across `is`/`is not None` is not guaranteed.
+        installed = state.sweep_funnel
+        assert installed is snap
+        assert installed is not None
+        assert installed.step_0_all_candidates == 12_600_000
+
+    def test_to_dict_serializes_sweep_funnel_when_set(self) -> None:
+        """to_dict() includes the sweep_funnel dict when populated."""
+        state = DashboardState()
+        snap = SweepFunnelSnapshot(
+            step_0_all_candidates=33_000_000_000,
+            sweep_id="sweep-phase10",
+            snapshot_at="2026-05-24T10:30:00Z",
+        )
+        state.update_sweep_funnel(snap)
+        out = state.to_dict()
+        assert out["sweep_funnel"] is not None
+        assert out["sweep_funnel"]["step_0_all_candidates"] == 33_000_000_000
+        assert out["sweep_funnel"]["sweep_id"] == "sweep-phase10"
+
+    def test_to_dict_sweep_funnel_is_none_by_default(self) -> None:
+        """to_dict() emits sweep_funnel: None until first update — JS poller
+        falls back to mockup placeholder values (PREVIEW DATA badge stays).
+        """
+        state = DashboardState()
+        out = state.to_dict()
+        assert "sweep_funnel" in out
+        assert out["sweep_funnel"] is None
