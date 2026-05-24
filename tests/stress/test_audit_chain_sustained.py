@@ -31,7 +31,6 @@ import resource
 from pathlib import Path
 
 import pytest
-
 from brutex.orchestrator.audit import AuditWriter, verify_chain
 
 pytestmark = pytest.mark.stress
