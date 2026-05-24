@@ -125,9 +125,7 @@ class TestCheckAuditChain:
         assert result.status == "SKIP"
 
     def test_fail_when_explicit_audit_file_missing(self, tmp_path: Path) -> None:
-        result = check_audit_chain(
-            audit_file=tmp_path / "missing.jsonl", audit_dir=tmp_path
-        )
+        result = check_audit_chain(audit_file=tmp_path / "missing.jsonl", audit_dir=tmp_path)
         assert result.status == "FAIL"
         assert "does not exist" in result.detail
 

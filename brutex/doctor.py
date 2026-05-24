@@ -104,9 +104,19 @@ class DoctorReport:
 
     def format(self) -> str:
         """Format the report as human-readable text."""
+        # Status → display glyph. bandit B105 false-positives "✅" as a
+        # "hardcoded password" because the dict literal looks like
+        # `KEY: "value"`. These are UI characters for the doctor report;
+        # they are not credentials. Same pattern as the 4 other documented
+        # bandit exceptions in brutex/ (DEC-P0-001 nosec convention).
+        status_glyph = {  # nosec B105 — status → display glyph mapping
+            "PASS": "✅",
+            "FAIL": "❌",
+            "SKIP": "⏸",
+        }
         lines = ["brutex doctor — health check report", "=" * 40]
         for c in self.checks:
-            emoji = {"PASS": "✅", "FAIL": "❌", "SKIP": "⏸"}.get(c.status, "?")
+            emoji = status_glyph.get(c.status, "?")
             lines.append(f"{emoji} {c.name:20s} {c.status:5s} {c.detail}")
         lines.append("=" * 40)
         lines.append("OVERALL: " + ("✅ PASS" if self.ok else "❌ FAIL"))
