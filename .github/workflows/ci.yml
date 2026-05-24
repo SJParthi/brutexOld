@@ -380,6 +380,44 @@ jobs:
           else
             echo "(brutex.options.expiry_calendar test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 12 (entry #223): 2-module double-add of the
+          # remaining 100% candidates from this session's probe sweep.
+          # 12a · brutex.options.lot_size_history (26 stmts, 2 branches, 33 tests)
+          #       NSE F&O lot-size history table for Track 2 sizing
+          if compgen -G "tests/unit/test_lot_size_history.py" > /dev/null; then
+            pytest --cov=brutex.options.lot_size_history --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_lot_size_history.py
+          else
+            echo "(brutex.options.lot_size_history test file not present yet — gate inactive)"
+          fi
+          # 12b · brutex.options.strike_grid (14 stmts, 0 branches, 24 tests)
+          #       ATM-relative strike grid generator
+          if compgen -G "tests/unit/test_strike_grid.py" > /dev/null; then
+            pytest --cov=brutex.options.strike_grid --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strike_grid.py
+          else
+            echo "(brutex.options.strike_grid test file not present yet — gate inactive)"
+          fi
+          # DEC-COV-001 step 14 (entry #225): 2-module UNDEFERRAL of
+          # deferred-list veterans via surgical-test backfill.
+          # 14a · brutex.models (94 stmts, 22 branches, 43 tests)
+          #       UNDEFERRED from step 3. Was 98.28% (1 line missing —
+          #       BruteXError.__str__ safe_message branch). 2 surgical
+          #       tests in TestErrorHierarchy close the gap.
+          if compgen -G "tests/unit/test_models.py" > /dev/null; then
+            pytest --cov=brutex.models --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_models.py
+          else
+            echo "(brutex.models test file not present yet — gate inactive)"
+          fi
+          # 14b · brutex.config.ports (117 stmts, 32 branches, 57 tests)
+          #       UNDEFERRED from step 5. Was 94.63% (3 lines + 2 branches:
+          #       docker detection, loopback IP, non-EADDRINUSE OSError,
+          #       no-LAN-IP url path, assert_port_available happy path).
+          #       5 surgical tests across TestDetectEnvironment, TestDetectLanIp,
+          #       TestPortConfigUrls, TestPortBinding close the gap.
+          if compgen -G "tests/unit/test_config_ports.py" > /dev/null; then
+            pytest --cov=brutex.config.ports --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_config_ports.py
+          else
+            echo "(brutex.config.ports test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
