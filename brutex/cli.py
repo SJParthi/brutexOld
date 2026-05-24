@@ -127,6 +127,30 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)")
     dashboard.add_argument("--port", type=int, default=9080, help="Bind port (default 9080)")
 
+    # ── doctor (DEC-DOCTOR-001) ───────────────────────────────────
+    doctor = sub.add_parser(
+        "doctor",
+        help="Run health checks (audit chain + runtime); closes STANDARDS row 16",
+    )
+    doctor.add_argument(
+        "--audit-file",
+        type=Path,
+        default=None,
+        help="Specific audit JSONL to verify (default: latest in --audit-dir)",
+    )
+    doctor.add_argument(
+        "--audit-dir",
+        type=Path,
+        default=None,
+        help="Directory of audit logs (default: ~/.brutex/audit)",
+    )
+    doctor.add_argument(
+        "--runtime-file",
+        type=Path,
+        default=None,
+        help="Path to runtime file (default: ~/.brutex/runtime.json)",
+    )
+
     return parser
 
 
@@ -171,6 +195,22 @@ def cmd_audit_verify(audit_file: Path) -> int:
     return EXIT_OK
 
 
+def cmd_doctor(
+    audit_file: Path | None,
+    audit_dir: Path | None,
+    runtime_file: Path | None,
+) -> int:
+    """Run all doctor health checks and print the report."""
+    from brutex.doctor import DEFAULT_AUDIT_DIR, DEFAULT_RUNTIME_FILE
+    from brutex.doctor import main as doctor_main
+
+    return doctor_main(
+        audit_file=audit_file,
+        audit_dir=audit_dir if audit_dir is not None else DEFAULT_AUDIT_DIR,
+        runtime_file=runtime_file if runtime_file is not None else DEFAULT_RUNTIME_FILE,
+    )
+
+
 def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     """Start the dashboard FastAPI server."""
     try:
@@ -213,6 +253,12 @@ def main(argv: list[str] | None = None) -> int:
             lake_root=args.lake_root,
             host=args.host,
             port=args.port,
+        )
+    if args.command == "doctor":
+        return cmd_doctor(
+            audit_file=args.audit_file,
+            audit_dir=args.audit_dir,
+            runtime_file=args.runtime_file,
         )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits

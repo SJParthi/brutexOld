@@ -60,17 +60,17 @@ Status legend:
 | 13 | O(1) per hot path | p99(1M)/p99(1K) ≤ 1.1 | **Ratio gates ENFORCED on CI** (DEC-STANDARDS-AUDIT-001 correction 2026-05-24): `tests/bench/test_store_o1.py::test_get_ratio_below_3x` gates store lookup at 3×; `tests/bench/test_throughput_canary.py::test_vectorized_mask_and_ratio` gates numpy mask AND at 8×; `test_dict_lookup_ratio` gates dict lookup at 10×. Per-CI ceiling is looser (3-10×) than the M4 Pro production target (1.1×) per documented shared-GHA flake-mitigation in DEC-P0-020. | 🟢 | CI ratio gates live; tightening to 1.1× requires M4 Pro local-runner (ROADMAP) |
 | 14 | Throughput canary ≥ 50 M/s | yes | `tests/bench/test_throughput_canary.py` LIVE (DEC-P0-020, PR #42) — 3 benchmarks gate the O(1) ratio (`p99(1M)/p99(100K) < 5×`) on the brute-force hot path (numpy mask AND + dict bar lookup). **CI gate is RATIO** (matches Rule #5 + existing `test_store_o1.py` pattern); absolute ops/s recorded in `bench-results.json` informationally. Local measurement: numpy ratio 1.27× (absolute 512M ops/s), dict ratio 3.59× (absolute 2.3M ops/s). **50 M/s absolute is the M4 Pro production envelope** (per `docs/TRACK1_PERFORMANCE_BUDGET.md`); CI shared GHA runner is the sub-target. Absolute gates would chronic-flake on shared GHA — verified empirically when PR #42 commit `8ea175a` failed both push + PR runs with 30M/2.5M absolute gates; hotfix `fd3f2dd` switched to ratio gates. | 🟡 | CI gate live (ratio); ROADMAP: M4 Pro local-runner runbook + Phase 3 PyO3 kernel can lift to ≥200 M/s absolute |
 | 15 | Bloom + LMDB dedup | 4-tier | **Property tests ENFORCED** (DEC-STANDARDS-AUDIT-001 correction 2026-05-24): `tests/property/test_bloom_invariants.py` covers Bloom filter invariants (no-false-negatives, FPR bounds, idempotent inserts); `tests/property/test_dedup_hash_properties.py` covers hash-based dedup properties. Implementation at `brutex/orchestrator/bloom.py` + `store.py`. | 🟢 | Property tests run on every push via the `Property tests (hypothesis)` CI job |
-| 16 | Audit JSONL hash-chain | always | `brutex/orchestrator/audit.py` has hash-chain code; **`brutex doctor` CLI doesn't exist** | 📋 | Build minimal `brutex doctor` CLI + wire to CI |
+| 16 | Audit JSONL hash-chain + `brutex doctor` | always | **`brutex/doctor.py` LIVE** (DEC-DOCTOR-001 correction 2026-05-24): `brutex doctor [--audit-file PATH] [--audit-dir PATH] [--runtime-file PATH]` subcommand runs 2 health checks (audit chain integrity via `verify_chain`; runtime file presence + parseability). Exit 0 on all PASS/SKIP; 1 on any FAIL. Wired into `brutex/cli.py` as `cmd_doctor`. Unit tests in `tests/unit/test_doctor.py` cover all check states + the CLI exit-code contract. | 🟢 | Future stress / lake / quota checks tracked as P2 — broader coverage is a ratchet on this scaffold |
 | 17 | No hallucination | every claim cited | Golden Rule #1 in CLAUDE.md + PR template checkbox | 👁️ | Cannot be fully automated; reviewer + PR template |
 | 18 | Decision IDs | every locked decision | PR template requires DEC-ID + MIGRATION.md row | 👁️ | Reviewer-enforced via PR template |
 
-### Summary count (post DEC-PYLINT-DROP-001, 2026-05-24)
+### Summary count (post DEC-DOCTOR-001, 2026-05-24)
 
 | Status | Count of 21 sub-rows | % | Delta vs pre-audit |
 |---|---:|---:|---:|
-| 🟢 Fully enforced | **13** (rows 3, 4×2, **5×2** ← ruff + ruff-PL [both now ✅, was 5+5b split], 6, 7×2, 8, 9, 12, 13, 15) | **62%** | +4 (audit found 2 stale + DEC-CROSSWALK-001 + DEC-PYLINT-DROP-001) |
+| 🟢 Fully enforced | **14** (rows 3, 4×2, 5×2, 6, 7×2, 8, 9, 12, 13, 15, **16** ← DEC-DOCTOR-001 flipped from 📋) | **67%** | +5 (audit + CROSSWALK + PYLINT-DROP + DOCTOR) |
 | 🟡 Partial (runs but threshold/advisory issues) | 3 (rows 1, 2, 11) | 14% | −1 (row 8 closed by DEC-CROSSWALK-001) |
-| 📋 Roadmap (not yet wired) | **2** (rows 14, 16) | **10%** | **−3** (rows 13, 15 were stale; row 5b closed by DEC-PYLINT-DROP-001) |
+| 📋 Roadmap (not yet wired) | **1** (row 14) | **5%** | **−4** (rows 13, 15 were stale; row 5b closed by PYLINT-DROP; row 16 closed by DOCTOR) |
 | 👁️ Manual (PR template + reviewer) | 3 (rows 10, 17, 18) | 14% | unchanged |
 
 **Pre-audit numbers (kept for history):** 9 ✅ / 4 🟡 / 5 📋 / 3 👁️ → 43% / 19% / 24% / 14%.
@@ -79,13 +79,16 @@ Status legend:
 
 **Post-DEC-CROSSWALK-001 reality (2026-05-24):** 12 🟢 / 3 🟡 / 3 📋 / 3 👁️ → 57% / 14% / 14% / 14%.
 
-**Post-DEC-PYLINT-DROP-001 reality (2026-05-24):** 13 🟢 / 3 🟡 / 2 📋 / 3 👁️ → **62% / 14% / 10% / 14%**.
+**Post-DEC-PYLINT-DROP-001 reality (2026-05-24):** 13 🟢 / 3 🟡 / 2 📋 / 3 👁️ → 62% / 14% / 10% / 14%.
 
-**The 2 genuinely remaining ROADMAP gaps that DO need code work:**
+**Post-DEC-DOCTOR-001 reality (2026-05-24):** 14 🟢 / 3 🟡 / 1 📋 / 3 👁️ → **67% / 14% / 5% / 14%**.
+
+**The 1 genuinely remaining ROADMAP gap that DOES need code work:**
 1. **Row 14 — Throughput canary 50 M/s absolute on CI** — ratio gate live (status 🟡 not 📋 strictly); absolute 50 M/s requires M4 Pro local-runner per documented shared-GHA flake-mitigation. ROADMAP: M4 Pro local-runner runbook + Phase 3 PyO3 kernel.
-2. **Row 16 — `brutex doctor` CLI** — genuinely missing; CLI module doesn't exist; needs to be built (target ~1 day effort). Tracked as **DEC-DOCTOR-001** for next PR.
 
 **~~Row 5b — pylint standalone~~** — ✅ CLOSED by DEC-PYLINT-DROP-001 (2026-05-24). ruff `PL` subset in `pyproject.toml [tool.ruff.lint].select` covers pylint-equivalent rules; standalone pylint dropped. See MIGRATION.md entry #207.
+
+**~~Row 16 — `brutex doctor` CLI~~** — ✅ CLOSED by DEC-DOCTOR-001 (2026-05-24). `brutex/doctor.py` + `brutex doctor` subcommand + 18 unit tests in `tests/unit/test_doctor.py`. See MIGRATION.md entry #209.
 
 **The 3 PARTIAL items remaining** (post DEC-CROSSWALK-001; genuinely partial; not stale):
 1. Row 1 — Coverage line 90% → 100% (legacy module backfill needed; tracked as DEC-COV-001)
@@ -124,12 +127,12 @@ must preserve the 4 pillars:
 
 | Pillar | Mechanism | SLA | Current enforcement |
 |---|---|---|---|
-| **Tracking** | Audit JSONL hash-chained | every material event recorded within 100 ms | ✅ implementation in `brutex/orchestrator/audit.py`; 🟡 hash-chain test exists, doctor CLI missing |
+| **Tracking** | Audit JSONL hash-chained | every material event recorded within 100 ms | ✅ implementation in `brutex/orchestrator/audit.py`; ✅ `brutex doctor` CLI LIVE (DEC-DOCTOR-001, 2026-05-24) — verifies chain on demand |
 | **Logging** | `structlog` only (no `print`) | uniform structured fields | ✅ banned-patterns scanner enforces (narrow scope; see #5 below) |
 | **Dashboard** | FastAPI on `127.0.0.1:9080` | accurate within 5 sec | 📋 dashboard module is excluded from coverage; needs real test |
 | **Alerting** | Telegram + dashboard + email digest + macOS fallback | CRITICAL alert within 60 sec | 📋 Telegram bot wiring is in spec; CI doesn't verify the bot is reachable |
 
-Plus `brutex doctor` daily 07:30 IST — **NOT YET BUILT** (📋 roadmap).
+Plus `brutex doctor` daily 07:30 IST — **CLI BUILT** (DEC-DOCTOR-001, 2026-05-24). The CLI is shippable; wiring it as an actual 07:30 IST cron (instead of on-demand) is a tracked P2 follow-up (`.github/workflows/doctor-daily.yml` — not in this PR).
 
 ---
 

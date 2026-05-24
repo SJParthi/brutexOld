@@ -1,0 +1,253 @@
+"""``brutex doctor`` — health-check command (DEC-DOCTOR-001).
+
+Closes STANDARDS_100PCT.md §1 row 16 — the "audit JSONL hash-chain"
+guarantee from Golden Rule #8 was previously aspirational because no
+CLI command verified the chain on demand. This module provides one.
+
+Surface
+-------
+``brutex doctor [--audit-dir PATH] [--audit-file PATH]``
+
+Behaviour
+~~~~~~~~~
+Runs all available health checks and prints a PASS/FAIL summary,
+returning exit code 0 on all green or 1 on any red. Designed to be
+wired into a nightly cron — the daily 07:30 IST observability
+contract from STANDARDS_100PCT.md §2.
+
+Currently implemented checks
+----------------------------
+1. **Audit chain integrity** (NFR-OBS-003). Verifies the
+   ``entry_hash`` chain on the most recent JSONL file in the audit
+   directory (default ``~/.brutex/audit/``). Re-runs
+   :func:`brutex.orchestrator.audit.verify_chain` and surfaces any
+   :exc:`AuditChainCorruption` as a structured failure.
+2. **Runtime file presence** (FR-UI-002). Reads
+   ``~/.brutex/runtime.json`` if present and confirms it parses.
+   Absent file is reported as ``SKIP`` (no live run is a valid
+   state, not a failure).
+
+Future checks (tracked for follow-up PRs, NOT in this PR)
+---------------------------------------------------------
+* Lake directory health — Parquet manifest + DuckDB catalog.
+* Rate-limit budget — quota tracker / Bloom dedup integrity.
+* Hardware envelope — disk space, RAM headroom.
+
+Honest envelope (Golden Rule #10)
+---------------------------------
+This is the **minimum viable** doctor — one chain check + one
+runtime check. It satisfies the "row 16 — CLI missing" gap from
+DEC-STANDARDS-AUDIT-001 (entry #205). Broader health-check
+coverage is a ratchet on top of this scaffold.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from brutex.orchestrator.audit import AuditChainCorruption, verify_chain
+
+# ────────────────────────────────────────────────────────────────────────
+# Defaults
+# ────────────────────────────────────────────────────────────────────────
+
+DEFAULT_BRUTEX_HOME = Path.home() / ".brutex"
+DEFAULT_AUDIT_DIR = DEFAULT_BRUTEX_HOME / "audit"
+DEFAULT_RUNTIME_FILE = DEFAULT_BRUTEX_HOME / "runtime.json"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Report dataclasses
+# ────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    """One health-check outcome.
+
+    Attributes
+    ----------
+    name
+        Short identifier (e.g., ``"audit_chain"``, ``"runtime_file"``).
+    status
+        One of ``"PASS"``, ``"FAIL"``, ``"SKIP"``.
+    detail
+        Human-readable one-line summary.
+    """
+
+    name: str
+    status: str
+    detail: str
+
+
+@dataclass
+class DoctorReport:
+    """Aggregate result of all checks.
+
+    ``ok`` is ``True`` iff no check returned ``FAIL``. ``SKIP`` is
+    not a failure (e.g. no runtime file = no live run, valid state).
+    """
+
+    checks: list[CheckResult] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """True if no FAIL results are present."""
+        return all(c.status != "FAIL" for c in self.checks)
+
+    def add(self, result: CheckResult) -> None:
+        """Append a result to the report."""
+        self.checks.append(result)
+
+    def format(self) -> str:
+        """Format the report as human-readable text."""
+        lines = ["brutex doctor — health check report", "=" * 40]
+        for c in self.checks:
+            emoji = {"PASS": "✅", "FAIL": "❌", "SKIP": "⏸"}.get(c.status, "?")
+            lines.append(f"{emoji} {c.name:20s} {c.status:5s} {c.detail}")
+        lines.append("=" * 40)
+        lines.append("OVERALL: " + ("✅ PASS" if self.ok else "❌ FAIL"))
+        return "\n".join(lines)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Individual checks
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _find_latest_audit_log(audit_dir: Path) -> Path | None:
+    """Return the most-recently-modified ``*.jsonl`` in ``audit_dir``.
+
+    Returns ``None`` if the directory doesn't exist or has no
+    ``*.jsonl`` files.
+    """
+    if not audit_dir.is_dir():
+        return None
+    candidates = sorted(audit_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+    return candidates[-1] if candidates else None
+
+
+def check_audit_chain(audit_file: Path | None, audit_dir: Path) -> CheckResult:
+    """Verify a specific audit file, or the latest in ``audit_dir``.
+
+    * If ``audit_file`` is given, verify it and return.
+    * Else find the most recent ``*.jsonl`` in ``audit_dir``.
+    * If no audit log is found, return ``SKIP`` — a freshly
+      installed BruteX with no ingest runs is a valid state.
+    """
+    target = audit_file or _find_latest_audit_log(audit_dir)
+    if target is None:
+        return CheckResult(
+            name="audit_chain",
+            status="SKIP",
+            detail=f"no audit logs found in {audit_dir}",
+        )
+    if not target.exists():
+        return CheckResult(
+            name="audit_chain",
+            status="FAIL",
+            detail=f"audit file does not exist: {target}",
+        )
+    try:
+        count = verify_chain(target)
+    except AuditChainCorruption as exc:
+        return CheckResult(
+            name="audit_chain",
+            status="FAIL",
+            detail=f"chain corrupt in {target.name}: {exc}",
+        )
+    return CheckResult(
+        name="audit_chain",
+        status="PASS",
+        detail=f"{count} entries verified in {target.name}",
+    )
+
+
+def check_runtime_file(runtime_file: Path) -> CheckResult:
+    """Verify the runtime file parses, if present.
+
+    Absent file = no live run = SKIP (not a failure).
+    Present but malformed = FAIL.
+    """
+    if not runtime_file.exists():
+        return CheckResult(
+            name="runtime_file",
+            status="SKIP",
+            detail=f"no runtime file at {runtime_file} (no live run)",
+        )
+    try:
+        data = json.loads(runtime_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return CheckResult(
+            name="runtime_file",
+            status="FAIL",
+            detail=f"runtime file malformed JSON: {exc}",
+        )
+    if not isinstance(data, dict):
+        return CheckResult(
+            name="runtime_file",
+            status="FAIL",
+            detail=f"runtime file is not a JSON object: got {type(data).__name__}",
+        )
+    return CheckResult(
+        name="runtime_file",
+        status="PASS",
+        detail=f"runtime file parses; {len(data)} keys present",
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Orchestrator
+# ────────────────────────────────────────────────────────────────────────
+
+
+def run_doctor(
+    audit_file: Path | None = None,
+    audit_dir: Path = DEFAULT_AUDIT_DIR,
+    runtime_file: Path = DEFAULT_RUNTIME_FILE,
+) -> DoctorReport:
+    """Run all health checks and return the aggregated report.
+
+    Parameters
+    ----------
+    audit_file
+        Specific audit file to verify. If ``None``, the most recent
+        ``*.jsonl`` in ``audit_dir`` is used.
+    audit_dir
+        Directory to search for audit logs when ``audit_file`` is
+        not supplied. Defaults to ``~/.brutex/audit``.
+    runtime_file
+        Path to the runtime file. Defaults to ``~/.brutex/runtime.json``.
+
+    Returns
+    -------
+    DoctorReport
+        Aggregate report. Call ``.ok`` to test overall PASS/FAIL,
+        ``.format()`` to render as text.
+    """
+    report = DoctorReport()
+    report.add(check_audit_chain(audit_file=audit_file, audit_dir=audit_dir))
+    report.add(check_runtime_file(runtime_file=runtime_file))
+    return report
+
+
+def main(
+    audit_file: Path | None = None,
+    audit_dir: Path = DEFAULT_AUDIT_DIR,
+    runtime_file: Path = DEFAULT_RUNTIME_FILE,
+) -> int:
+    """CLI entry point. Print report to stdout; return 0 on PASS, 1 on FAIL."""
+    report = run_doctor(
+        audit_file=audit_file,
+        audit_dir=audit_dir,
+        runtime_file=runtime_file,
+    )
+    print(report.format())
+    return 0 if report.ok else 1
+
+
+if __name__ == "__main__":  # pragma: no cover — invoked only by CLI
+    sys.exit(main())
