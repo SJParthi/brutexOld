@@ -324,6 +324,14 @@ jobs:
           else
             echo "(brutex.adapters.dhan.constants test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 8 (entry #218): brutex.adapters.dhan.types
+          # — 61-line frozen dataclass, zero branches; new test_dhan_types.py
+          # written FOR 100% coverage (instantiate every Outcome variant).
+          if compgen -G "tests/unit/test_dhan_types.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.types --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_types.py
+          else
+            echo "(brutex.adapters.dhan.types test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML

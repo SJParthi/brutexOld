@@ -302,6 +302,8 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
+218. **DEC-COV-001 step 8 — `brutex.adapters.dhan.types` ratcheted to strict-100%** (2026-05-24, operator directive "while we enhance dashboard, fix and merge PRs"). Strict-100% module count 11 → 12. New `tests/unit/test_dhan_types.py` written specifically for 100% coverage of the 61-line frozen `FetchResult` dataclass (zero branches; just instantiate every Outcome variant). Self-verifying gate. **Decision ID:** DEC-COV-001 step 8. **Builds on:** steps 1-7.
+
 217. **DEC-COV-001 step 7 — `brutex.adapters.dhan.constants` ratcheted to strict-100%** (2026-05-24, operator directive "finish remaining PRs"). Strict-100% module count grows 10 → 11. Single-module conservative add after step 5's lesson on big-module risk. 149 lines, 9 branches, 32 tests in `test_dhan_constants.py` (3.5× test-to-branch ratio — strong coverage signal). Self-verifying gate. **Decision ID:** DEC-COV-001 step 7. **Builds on:** steps 1-6.
 
 216. **DEC-COV-001 step 6 — 3 exception modules ratcheted with dedicated tests written FOR 100%** (2026-05-24, operator directive "finish remaining PRs because I need the guarantee dude"). Strict-100% module count grows 7 → 10 (largest single-PR jump so far).
