@@ -292,23 +292,21 @@ superseded.
 
 148. **DEC-P0-010 — pyright per-test re-promotion: 4 of 6 categories restored to error (PR #32)** (operator decree 2026-05-17 "go ahead dude"). Closes DEC-P0-005 P1 item #6 partially. **Source-pattern fixes** (16 errors → 0 across 5 files): (a) `tests/integration/test_execution_driver.py::_seed_lake` signature `list[float]` → `Sequence[float]` (kills 5 list-variance errors via covariant Sequence); (b) `tests/integration/test_dashboard_e2e.py::client` fixture return type `TestClient` → `Generator[TestClient]` (kills 2 generator errors); (c) `tests/redteam/test_redteam_premerge_guard.py` added `dict[str, Any]` annotation on rollup test data (kills 6 dict-index errors); (d) `tests/unit/test_execution_costs.py:224` added `isinstance(exponent, int)` guard before `-exponent` (kills 1 operator error on `int | Literal['n','N','F']`); (e) `tests/unit/test_strategies_registry.py::_DecoStrat` added `ClassVar[StrategyMeta]` annotation + `__init__(params)` to satisfy Strategy protocol (kills 1 protocol error) + targeted `# pyright: ignore[reportUntypedClassDecorator]` on the decorator line with documented Protocol-detection-limitation rationale (kills 1 untyped-decorator error). **Library changes:** `brutex/strategies/registry.py::register_strategy` rewritten with generic `TypeVar` (`_StrategyT = TypeVar("_StrategyT", bound=type[Strategy])`) so the decorator preserves concrete class type (vs erasing to `type[Strategy]`). PEP 695 syntax `def f[T](...)` skipped per UP047 because mypy 1.x doesn't yet support it; ruff noqa added with rationale. **4 categories restored to error** in tests/: `reportCallIssue`, `reportGeneralTypeIssues`, `reportUntypedClassDecorator`, `reportOperatorIssue`. **2 categories DEFERRED** (`reportArgumentType` 56 errors + `reportAttributeAccessIssue` 17 errors): downgraded to "warning" only, with honest comment block in `pyproject.toml` explaining the 73 remaining errors are pre-existing test-fixture patterns (test_dashboard_state.py parametrize loose-typing + test_adapter_protocol.py protocol-stub access + test_fakes patterns) requiring ~3 days of dedicated test-fixture refactoring. Tracked as P1 follow-up #6b for a dedicated future PR. **Honest envelope (Golden Rule #10):** "partial completion" per Agent 1 of PR #25 review prediction — the 6-category re-promotion was the right direction but full closure on `reportArgumentType` requires a separate focused effort. PR #32 closes 4 of 6 cleanly; 2 deferred with explicit deferral + tracking. **Local verification:** ruff/format/mypy strict/pyright strict ALL GREEN; pytest 1511 passed.
 
+214. **DEC-DEC-ID-VALIDATOR-001 — Partial automation of STANDARDS_100PCT.md §1 row 18 via `scripts/ci/validate_dec_ids.py`** (2026-05-24, operator directive "fix all of these right dude"). Row 18 was 100% 👁️ MANUAL. This entry adds a partial-automation layer that fails CI if a PR body cites a `DEC-FOO-NNN` token but no matching entry exists in `docs/MIGRATION.md`.
+
+    **Scope (per Golden Rule #10 honest envelope):**
+    - ✅ **Caught:** PR cites `DEC-NONEXISTENT-999` but it has no ledger entry → CI fails with actionable message.
+    - 👁️ **Still manual:** "should this PR have cited a DEC-ID at all?" stays reviewer judgement.
+
+    **Implementation:** `scripts/ci/validate_dec_ids.py` (new, regex-based) + `.github/workflows/ci.yml` `dec-id-validator` job + STANDARDS row 18 status update. Pass/fail both verified locally. Env-var escape `DEC_ID_VALIDATOR_ALLOW_MISSING=1` mirrors CROSSWALK_ALLOW_STALE pattern; CI never sets it.
+
+    **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
+
 213. **DEC-COV-001 step 4 — Strict per-module 100% coverage gate ratcheted to include `brutex.strategies.types`** (2026-05-24, operator directive "yes go ahead with everything bro"). Continued progress on STANDARDS_100PCT.md §1 rows 1+2. Strict-100% module count grows 6 → 7.
 
     **Why `brutex.strategies.types` next (per Golden Rule #1):**
     - Module is 110 lines, 3 public classes: `Side` StrEnum, `Signal` frozen dataclass with tz-aware + strength validators, `StrategyState` mutable dataclass with `reset()`.
     - `tests/unit/test_strategies_types.py` (102 lines, ratio 0.93×) has 3 dedicated test classes covering every public symbol + every validator branch.
-
-    **Fail-safe design (Golden Rule #1):** if the module isn't actually at 100%, the CI gate on this PR itself fails and surfaces the gap. Same self-verification that confirmed `brutex.universe` 100% in step 2 (PR #102) and correctly caught `brutex.models` below 100% in step 3 (PR #103).
-
-    **Concrete file changes:**
-    - `.github/workflows/ci.yml` — adds an 8th strict-per-module gate block.
-    - `docs/STANDARDS_100PCT.md` — row 1 module list expanded to 7 modules.
-    - `docs/MIGRATION.md` — this entry (#213) documenting step 4.
-
-    **Honest envelope (Golden Rule #10):**
-    - ✅ **REAL:** `brutex.strategies.types` strict-100% gate added; CI blocks merge on regression.
-    - 🟡 **PARTIAL:** rows 1+2 stay 🟡 (global `fail_under=90` unchanged); strict list 6 → 7.
-    - 📋 **ROADMAP:** ~22 more modules to audit + ratchet.
 
     **Decision ID:** DEC-COV-001 step 4. **Builds on:** step 1 (#210, PR #101) · step 2 (#211, PR #102) · step 3 (#212, PR #103).
 

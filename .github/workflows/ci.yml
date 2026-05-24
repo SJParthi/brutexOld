@@ -1013,6 +1013,30 @@ jobs:
           bash scripts/ci/zplus-pr-guard.sh "$tmp"
 
   # ─────────────────────────────────────────────────────────────────
+  # DEC-ID VALIDATOR — partial automation of STANDARDS row 18
+  # Catches cited DEC-IDs that have no matching MIGRATION.md entry.
+  # ─────────────────────────────────────────────────────────────────
+  dec-id-validator:
+    name: DEC-ID validator (STANDARDS row 18 partial automation)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Validate DEC-IDs cited in PR body against MIGRATION.md
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp)
+          printf '%s\n' "$PR_BODY" > "$tmp"
+          python3 scripts/ci/validate_dec_ids.py "$tmp"
+
+  # ─────────────────────────────────────────────────────────────────
   proof-bundle:
     name: Proof bundle (aggregate CI artifacts)
     runs-on: ubuntu-24.04
@@ -1143,6 +1167,10 @@ jobs:
       # events (no PR body), enforced on pull_request events. Renovate
       # bots with security label are exempted by the guard itself.
       - zplus-pr-guard
+      # DEC-COV-001 step 5 follow-up (entry #214): DEC-ID validator
+      # — partial automation of STANDARDS row 18. Skipped on push
+      # events (no PR body), enforced on pull_request events.
+      - dec-id-validator
       # Still advisory-only (continue-on-error): typos, complexity,
       # fno-math-drift — these are informational scans, not enforcement
       # gates per Golden Rule #12.
@@ -1173,6 +1201,7 @@ jobs:
           echo "  mutation-py:   ${{ needs.mutation-py.result }}"
           echo "  proof-bundle:  ${{ needs.proof-bundle.result }}"
           echo "  zplus-pr-guard:${{ needs.zplus-pr-guard.result }}"
+          echo "  dec-id-validator:${{ needs.dec-id-validator.result }}"
           for result in \
             "${{ needs.lint.result }}" \
             "${{ needs.type.result }}" \
@@ -1194,7 +1223,8 @@ jobs:
             "${{ needs.duplication.result }}" \
             "${{ needs.mutation-py.result }}" \
             "${{ needs.proof-bundle.result }}" \
-            "${{ needs.zplus-pr-guard.result }}"; do
+            "${{ needs.zplus-pr-guard.result }}" \
+            "${{ needs.dec-id-validator.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "❌ A required gate failed or was cancelled"
               exit 1
