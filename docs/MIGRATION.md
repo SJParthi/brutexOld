@@ -302,6 +302,28 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
+233. **DEC-DASHBOARD-LIVE-5/6/7/8/9 — wire remaining horizontal-funnel spans + sweep_id + snapshot_at** (2026-05-24, operator directive: "yes go ahead dude"). Markup-only edits to `docs/dashboard/mockups/v29.html`. Wires the last 3 horizontal-funnel spans + the winner pill + the operator-mode sweep ID/timestamp pill to the existing JS poller (write-once from DEC-DASHBOARD-LIVE-1 / entry #226). `data-bind` count: **4 → 10** (of 13 schema fields, 76% wired):
+
+    - **LIVE-5 · `step_4_best_of_n`** — `<span class="step-num">2.4K</span>` at line 2480.
+    - **LIVE-6 · `step_7_three_windows`** — `<span class="step-num">410</span>` at line 2481.
+    - **LIVE-7 · `step_8_sealed_lockbox`** — `<span class="step-num">174</span>` at line 2482.
+    - **LIVE-8 · `winners_top_n`** — `<span class="step-num winner">1</span>` at line 2483.
+    - **LIVE-9a · `sweep_id`** — `<code>a3f72c8…41b9d</code>` in the operator-mode sweep-id pill at line 2202. Poller's `formatNumber()` returns strings unchanged (`Math.abs("a3f72c8…")` = NaN → falls through to `return String(n)`), so this works without JS change.
+    - **LIVE-9b · `snapshot_at`** — `<span>2026-05-23 17:42 IST</span>` at line 2206. Same string passthrough.
+
+    **PREVIEW DATA tooltip narrowed again** — now reflects all 8 horizontal-funnel spans + sweep_id pill + snapshot_at timestamp as LIVE; remaining placeholders are vertical staircase detail rows, top combos table, equity curve, KPI tiles, podium cards.
+
+    **Schema fields NOT yet wired (3 of 13):** `step_5_not_overfit`, `step_6_multi_test`, `step_9_random_shuffle`. These are collapsed in the horizontal-funnel UI (the 2.4K span maps to step_4 — steps 5/6/9 are vocabulary-only fields without their own UI slot in the current mockup). They'll wire when the vertical-staircase or detail-table UI lands.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: 6 more `data-bind` attrs now in production mockup.
+    - ✅ REAL: PREVIEW DATA tooltip narrows scope precisely (per spec §6.4 step 5 lifecycle).
+    - 🟡 PARTIAL: 3 schema fields still need UI surfaces (step_5/6/9 don't have horizontal-funnel cells).
+    - 🟡 PARTIAL: `brutex.strategies.sweep` STILL doesn't call `update_sweep_funnel()` — producer side is Phase 3 work.
+    - 📋 ROADMAP: surface step_5/6/9 in detail-table UI (separate PR); then badge removal when ALL fields + sweep producer wired.
+
+    **Decision IDs:** DEC-DASHBOARD-LIVE-5/6/7/8/9. **Builds on:** DEC-DASHBOARD-LIVE-1 (#226), LIVE-2/3/4 (#231).
+
 232. **DEC-COV-001 step 17 — `brutex.notifications.telegram` surgical backfill: 85.48% → 100%** (2026-05-24, operator directive: "yes go ahead with these also dude"). Strict-100% module count: **28 → 29**. **Largest single-module backfill so far** — 210 stmts, 38 branches, 27 missing lines + 7 partial branches closed by **15 new surgical tests across 4 new test classes**:
 
     - **`TestDefaultTransport` (5 tests):** exercises the urllib-based `_default_transport` function — disabled config returns False (line 308); HTTP 200 via mocked `urllib.request.urlopen` (lines 326-330); `urllib.error.HTTPError` caught → False (lines 331-333); `urllib.error.URLError` caught → False (lines 334-336); `OSError` caught → False (lines 337-339).
