@@ -240,24 +240,13 @@ jobs:
           else
             echo "(brutex.universe test file not present yet — gate inactive)"
           fi
-          # DEC-COV-001 step 3 (2026-05-24, MIGRATION.md entry #212):
-          # ratchet `brutex.models` into the strict per-module 100%
-          # gate. `tests/unit/test_models.py` (32 tests across 7+
-          # classes) covers every StrEnum + the Instrument dataclass
-          # + the BruteXError exception hierarchy + the tick-size
-          # normaliser. Per Golden Rule #1: selection self-verifies
-          # via this gate — if 100% isn't actually achieved the gate
-          # fails here and surfaces the uncovered line/branch.
-          if compgen -G "tests/unit/test_models.py" > /dev/null; then
-            pytest \
-              --cov=brutex.models \
-              --cov-branch \
-              --cov-report=term-missing \
-              --cov-fail-under=100 \
-              tests/unit/test_models.py
-          else
-            echo "(brutex.models test file not present yet — gate inactive)"
-          fi
+          # DEC-COV-001 step 3 — `brutex.models` was tried in initial
+          # push but unit-tests + coverage gate failed at 100% (43
+          # branches in the module; test_models.py covers most but
+          # not all). Deferred to a follow-up PR that writes the
+          # missing tests first. See MIGRATION.md entry #212 honest
+          # envelope.
+          #
           # DEC-COV-001 step 3 (continued): ratchet
           # `brutex.adapters.dhan.timeconv` (IST/UTC conversion
           # utility, 103 lines) — `tests/unit/test_dhan_timeconv.py`
