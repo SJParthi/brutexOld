@@ -302,6 +302,19 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
+216. **DEC-COV-001 step 6 — 3 exception modules ratcheted with dedicated tests written FOR 100%** (2026-05-24, operator directive "finish remaining PRs because I need the guarantee dude"). Strict-100% module count grows 7 → 10 (largest single-PR jump so far).
+
+    **What was added:**
+    - `brutex.feed.errors` (32 lines, 3 exception classes) — test_feed_errors.py (~30 lines, 6 tests)
+    - `brutex.execution.errors` (36 lines, 4 exception classes) — test_execution_errors.py (~40 lines, 8 tests)
+    - `brutex.strategies.errors` (36 lines, 3 exception classes) — test_strategies_errors.py (~30 lines, 6 tests)
+
+    **Why this batch is safe** (per Golden Rule #1): exception modules have NO branches and NO logic. 100% coverage requires only (a) import each class, (b) raise each at least once with `pytest.raises`. The 3 dedicated test files do exactly that — total ~100 source lines of test code achieving guaranteed 100% on ~100 source lines of module code. Self-verifying gate on this PR confirms.
+
+    **Honest envelope (Golden Rule #10):** rows 1+2 stay 🟡 (global floor unchanged); strict list 7 → 10. Biggest single-PR ratchet so far. ~20 more pure-Python modules remain.
+
+    **Decision ID:** DEC-COV-001 step 6. **Builds on:** steps 1-5 (#210-#215).
+
 215. **DEC-COV-001 step 5 — `brutex.config.ports` ratchet ATTEMPTED but DEFERRED — CI surfaced below-100% coverage** (2026-05-24, operator directive "meanwhile go ahead with the PRs also dude"). **HONEST OUTCOME of self-verifying ratchet:** initial push (commit `b713896`) attempted to ratchet `brutex.config.ports` (465 lines, 52 tests). CI on PR #106 failed the unit-tests + coverage gate — module is below 100% line/branch. Same failure mode as `brutex.models` in step 3. Dropped from this PR. Strict-100% module count remains 7. The deferred module needs test backfill in a follow-up PR before re-ratcheting. **No new modules added — this is step 5 as a "lesson confirmed" entry.**
 
     **Why `brutex.config.ports` next (per Golden Rule #1):**
