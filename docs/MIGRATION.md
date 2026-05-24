@@ -292,6 +292,52 @@ superseded.
 
 148. **DEC-P0-010 — pyright per-test re-promotion: 4 of 6 categories restored to error (PR #32)** (operator decree 2026-05-17 "go ahead dude"). Closes DEC-P0-005 P1 item #6 partially. **Source-pattern fixes** (16 errors → 0 across 5 files): (a) `tests/integration/test_execution_driver.py::_seed_lake` signature `list[float]` → `Sequence[float]` (kills 5 list-variance errors via covariant Sequence); (b) `tests/integration/test_dashboard_e2e.py::client` fixture return type `TestClient` → `Generator[TestClient]` (kills 2 generator errors); (c) `tests/redteam/test_redteam_premerge_guard.py` added `dict[str, Any]` annotation on rollup test data (kills 6 dict-index errors); (d) `tests/unit/test_execution_costs.py:224` added `isinstance(exponent, int)` guard before `-exponent` (kills 1 operator error on `int | Literal['n','N','F']`); (e) `tests/unit/test_strategies_registry.py::_DecoStrat` added `ClassVar[StrategyMeta]` annotation + `__init__(params)` to satisfy Strategy protocol (kills 1 protocol error) + targeted `# pyright: ignore[reportUntypedClassDecorator]` on the decorator line with documented Protocol-detection-limitation rationale (kills 1 untyped-decorator error). **Library changes:** `brutex/strategies/registry.py::register_strategy` rewritten with generic `TypeVar` (`_StrategyT = TypeVar("_StrategyT", bound=type[Strategy])`) so the decorator preserves concrete class type (vs erasing to `type[Strategy]`). PEP 695 syntax `def f[T](...)` skipped per UP047 because mypy 1.x doesn't yet support it; ruff noqa added with rationale. **4 categories restored to error** in tests/: `reportCallIssue`, `reportGeneralTypeIssues`, `reportUntypedClassDecorator`, `reportOperatorIssue`. **2 categories DEFERRED** (`reportArgumentType` 56 errors + `reportAttributeAccessIssue` 17 errors): downgraded to "warning" only, with honest comment block in `pyproject.toml` explaining the 73 remaining errors are pre-existing test-fixture patterns (test_dashboard_state.py parametrize loose-typing + test_adapter_protocol.py protocol-stub access + test_fakes patterns) requiring ~3 days of dedicated test-fixture refactoring. Tracked as P1 follow-up #6b for a dedicated future PR. **Honest envelope (Golden Rule #10):** "partial completion" per Agent 1 of PR #25 review prediction — the 6-category re-promotion was the right direction but full closure on `reportArgumentType` requires a separate focused effort. PR #32 closes 4 of 6 cleanly; 2 deferred with explicit deferral + tracking. **Local verification:** ruff/format/mypy strict/pyright strict ALL GREEN; pytest 1511 passed.
 
+206. **DEC-CROSSWALK-001 — Spec↔test crosswalk: warn-and-continue → fail-closed (one-line script flip + env-var escape hatch)** (2026-05-24, operator directive "ensure to fix and merge all of these with guarantee dude okay?"). Closes the 4th of 4 PARTIAL rows from DEC-STANDARDS-AUDIT-001 (entry #205) — STANDARDS_100PCT.md §1 row 8 (Spec ↔ test crosswalk). Previously `scripts/ci/spec_test_crosswalk.py` printed a warning and moved on if a spec section regex failed to match — meaning if anyone renamed a spec heading and forgot to update the crosswalk regex in the same PR, CI just printed a yellow line nobody read, and the crosswalk silently rotted. Now the script appends to `failures` and exits 1.
+
+    **The one-line behavior flip:**
+    ```python
+    # BEFORE (warn-and-continue — silent drift hazard):
+    if not section_re.search(spec_text):
+        print(f"⚠️  spec section not found: {section_re.pattern}", file=sys.stderr)
+        continue
+
+    # AFTER (fail-closed with documented env-var escape):
+    if not section_re.search(spec_text):
+        if os.environ.get("CROSSWALK_ALLOW_STALE") == "1":
+            print(f"⚠️  ... [CROSSWALK_ALLOW_STALE=1, not failing]", file=sys.stderr)
+            continue
+        failures.append(f"❌ Spec section '{section_re.pattern}' ... — crosswalk regex is stale ...")
+        continue
+    ```
+
+    **Env-var escape hatch (`CROSSWALK_ALLOW_STALE=1`):**
+    - **Purpose:** local script-iteration only — when a dev is editing the crosswalk patterns themselves and the spec hasn't been updated yet, this lets them run the script locally without the new failure mode getting in the way.
+    - **CI never sets it.** No workflow file references the variable. Verified by `grep -rn CROSSWALK_ALLOW_STALE .github/` returning zero hits.
+    - **Failure message** (when escape is NOT set) is explicit + actionable: "crosswalk regex is stale. Either (a) restore the section in the spec, or (b) update the regex in `scripts/ci/spec_test_crosswalk.py` to match the new section heading in the SAME PR. See MIGRATION.md entry #206 (DEC-CROSSWALK-001) for rationale."
+
+    **Why this matters (Golden Rule #1 + Golden Rule #12 #8):**
+    - Golden Rule #1 (no hallucination): if a spec section says "12.7 Long vs Short" must have a test, the CI gate must actually verify the section + test pairing — not just check the test side while silently letting the spec side drift.
+    - Golden Rule #12 requirement #8 (functionality completeness): the discipline is "every spec section with testable behavior must have ≥ 1 test." With warn-and-continue, the discipline was performative; with fail-closed, it's enforced.
+
+    **Concrete file changes in this PR:**
+    - `scripts/ci/spec_test_crosswalk.py`: added `import os`; replaced the warn-and-continue block with the fail-closed + env-var-escape block; added an explanatory docstring comment block above the new branch.
+    - `docs/MIGRATION.md`: this entry (#206) documenting the change.
+
+    **Local verification:**
+    - `python3 -c "import ast; ast.parse(open('scripts/ci/spec_test_crosswalk.py').read())"` → syntax OK.
+    - `python3 scripts/ci/spec_test_crosswalk.py` → `✅ Spec ↔ test crosswalk: all required tests present` (no spec sections currently missing; the change is dormant until a future PR renames a section without updating the regex, at which point it fires).
+    - Manual stale simulation: temporarily renamed a section regex to a non-matching pattern → script exits 1 with the actionable error message. Reverted before commit.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ **REAL:** behavior flip is one block in one script; failure message is explicit + cites this entry; env-var escape is documented + never set by CI.
+    - ✅ **REAL:** STANDARDS_100PCT.md §1 row 8 moves from 🟡 PARTIAL → 🟢 ENFORCED with this PR.
+    - 🟡 **PARTIAL:** the script still only covers `CALCULATOR_SPEC.md` and the 6 hand-curated section patterns inside it. Expanding the crosswalk to additionally cover `TRACK1_BACKTEST_SPEC.md` sections is tracked but NOT done here (separate PR, separate review).
+    - 📋 **ROADMAP:** auto-generating crosswalk regexes from spec heading anchors is a nice-to-have; manual curation is sufficient for the current 4-instrument Track 1 scope.
+
+    **Golden Rules touched:** #1 (no hallucination — gate now actually checks both sides) · #2 (single source of truth — `STANDARDS_100PCT.md` row 8 now matches actual enforcement) · #10 (honest envelope — explicit env-var escape documented + verified CI doesn't set it) · #11 (DYNAMIC — adding a new spec↔test pairing is still a 1-tuple append; behavior change is non-breaking for the existing pairings) · #12 #8 (functionality completeness — discipline enforced, not performative).
+
+    **Decision ID:** DEC-CROSSWALK-001. **Builds on:** DEC-STANDARDS-AUDIT-001 (entry #205) — this closes one of the 4 PARTIAL rows that audit identified. **Lands alongside:** the sequence of 5 follow-up PRs targeting the remaining gaps (DEC-COV-001, DEC-STRESS-001, DEC-DOCTOR-001, DEC-PYLINT-DROP-001, DEC-O1-ABSOLUTE-001) — this is the smallest and lands first.
+
 205. **DEC-STANDARDS-AUDIT-001 — STANDARDS_100PCT.md stale-claim audit: 2 doc-only "RED gaps" recategorized to 🟢 ENFORCED after grep verification** (2026-05-24, operator directive "fix everything with real time guarantee and assurance bro" + "see you will fix all of these with guarantee right?"). Closes the meta-gap that `docs/STANDARDS_100PCT.md` claimed 5 ROADMAP gaps (43% enforced) when in fact 2 of them were already enforced — the gates exist on disk and run on every push, but the doc was stale.
 
     **Method (per Golden Rule #1 no hallucination):** Before writing a "fix" PR for each claimed gap, verified each ROADMAP claim against the actual code on disk. Process:

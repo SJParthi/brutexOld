@@ -18,6 +18,7 @@ Exit codes
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -63,11 +64,33 @@ def main() -> int:
 
         for section_re, expected_test in sections:
             if not section_re.search(spec_text):
-                # Spec section was renamed or removed — log a warning
-                # but don't fail (the crosswalk script needs updating).
-                print(
-                    f"⚠️  spec section not found (crosswalk stale?): {section_re.pattern}",
-                    file=sys.stderr,
+                # FAIL-CLOSED per DEC-CROSSWALK-001 (2026-05-24, MIGRATION.md
+                # entry #206). Previously this was warn-and-continue, which
+                # allowed silent crosswalk drift — if anyone renamed a spec
+                # section, the matching regex stopped matching and CI just
+                # printed a warning nobody read. Now the PR that renames the
+                # spec section MUST also update this script in the same PR.
+                # That's the discipline the operator's Golden Rule #12
+                # "100% standards" decree requires.
+                #
+                # Override during local script-iteration: env var
+                # `CROSSWALK_ALLOW_STALE=1` reverts to warn-and-continue.
+                # CI never sets this var; only local devs editing the
+                # crosswalk patterns themselves use it.
+                if os.environ.get("CROSSWALK_ALLOW_STALE") == "1":
+                    print(
+                        f"⚠️  spec section not found (crosswalk stale?): {section_re.pattern} "
+                        "[CROSSWALK_ALLOW_STALE=1, not failing]",
+                        file=sys.stderr,
+                    )
+                    continue
+                failures.append(
+                    f"❌ Spec section '{section_re.pattern}' in {spec_path.name} "
+                    f"NOT FOUND — crosswalk regex is stale. Either (a) restore "
+                    f"the section in the spec, or (b) update the regex in "
+                    f"`scripts/ci/spec_test_crosswalk.py` to match the new "
+                    f"section heading in the SAME PR. See MIGRATION.md "
+                    f"entry #206 (DEC-CROSSWALK-001) for rationale."
                 )
                 continue
 
