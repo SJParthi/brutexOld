@@ -448,6 +448,39 @@ jobs:
           else
             echo "(brutex.adapters.dhan.types test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 16 (entry #228): 5-module quintuple-add of
+          # safe (non-Dhan-fetch) modules verified at 100% locally
+          # after installing fno_math wheel.
+          # 16a · brutex.execution.types (90 stmts, 16 branches, 16 tests)
+          if compgen -G "tests/unit/test_execution_types.py" > /dev/null; then
+            pytest --cov=brutex.execution.types --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_types.py
+          else
+            echo "(brutex.execution.types test file not present yet — gate inactive)"
+          fi
+          # 16b · brutex.observability.logging (35 stmts, 6 branches, 17 tests)
+          if compgen -G "tests/unit/test_observability_logging.py" > /dev/null; then
+            pytest --cov=brutex.observability.logging --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_logging.py
+          else
+            echo "(brutex.observability.logging test file not present yet — gate inactive)"
+          fi
+          # 16c · brutex.strategies.registry (28 stmts, 4 branches, 15 tests)
+          if compgen -G "tests/unit/test_strategies_registry.py" > /dev/null; then
+            pytest --cov=brutex.strategies.registry --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_registry.py
+          else
+            echo "(brutex.strategies.registry test file not present yet — gate inactive)"
+          fi
+          # 16d · brutex.strategies.combo (55 stmts, 38 branches, 34 tests)
+          if compgen -G "tests/unit/test_strategies_combo.py" > /dev/null; then
+            pytest --cov=brutex.strategies.combo --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_combo.py
+          else
+            echo "(brutex.strategies.combo test file not present yet — gate inactive)"
+          fi
+          # 16e · brutex.vocabulary.conflicts (12 stmts, 4 branches, 65 tests)
+          if compgen -G "tests/unit/test_vocabulary.py" > /dev/null; then
+            pytest --cov=brutex.vocabulary.conflicts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_vocabulary.py
+          else
+            echo "(brutex.vocabulary.conflicts test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
