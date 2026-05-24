@@ -42,8 +42,8 @@ Status legend:
 
 | # | Requirement | Decree target | Current state | Status | Closing path |
 |---|---|---|---|---|---|
-| 1 | Coverage line | 100% on `brutex/` | 72.32% actual; `fail_under=90` global; 100% per-module gate only on `brutex/costs/` (which has no tests yet) | 🟡 | Per-module 100% requires writing tests; legacy modules need backfill |
-| 2 | Coverage branch | 100% | `--cov-branch` flag ON but same 90% threshold applies | 🟡 | Same as #1 |
+| 1 | Coverage line | 100% on `brutex/` | `fail_under=90` global floor; **strict per-module 100% gate ratcheted** (DEC-COV-001 step 1, 2026-05-24): `brutex.costs`, `brutex.engine`, `brutex.doctor` all gated at 100% via dedicated `pytest --cov=<mod> --cov-fail-under=100` passes. Additional modules ratchet in as their tests reach 100% (multi-PR plan; one PR per module batch). | 🟡 | Multi-PR ratchet: each PR adds one or more modules to the strict-100% list. Tracking in MIGRATION entry #210. |
+| 2 | Coverage branch | 100% | `--cov-branch` flag ON; same strict-per-module gate as row 1 (DEC-COV-001) also enforces branch=100% on ratcheted modules. | 🟡 | Same multi-PR ratchet as row 1. |
 | 3 | Mutation testing | ≥ 85% | DEC-P0-001 (2026-05-17): `\|\| true` REMOVED; mutmut junitxml → Python parser enforces gate on `brutex/orchestrator/state.py`. DEC-P0-002 (2026-05-17 same day, REVERTED by DEC-P0-003): briefly lowered to 60% interim; operator decreed "no downgrade — 100% standards". **DEC-P0-003 (2026-05-17): threshold RESTORED to 85%.** | ✅ | If CI fails on this gate, write more `state.py` tests OR extend gate to additional modules (`brutex/costs/calculator.py` at 85% — P1) |
 | 4 | mypy --strict | 0 errors | Configured strict + 6 extra strict flags; pre-existing failures cleared in commit d57efaf + DEC-P0-001 ruff sweep | ✅ | none |
 | 4 | pyright | 0 errors | DEC-P0-001 (2026-05-17): bumped `typeCheckingMode = "strict"`; 3 new narrow silences for strict-only checks (`reportMissingParameterType`, `reportMissingTypeArgument`, `reportUnnecessaryComparison`) on legitimate patterns in test fixtures | ✅ | none |

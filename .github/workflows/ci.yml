@@ -204,6 +204,24 @@ jobs:
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
           fi
+          # DEC-COV-001 (2026-05-24, MIGRATION.md entry #210): ratchet
+          # `brutex.doctor` into the strict per-module 100% gate. The
+          # module was designed in DEC-DOCTOR-001 (PR #100) with 18 unit
+          # tests across 5 classes covering all PASS/FAIL/SKIP paths of
+          # both checks, the aggregator, and the CLI exit-code contract
+          # — explicitly engineered for 100% line + branch coverage.
+          # This is step 1 of the multi-PR ratchet path to lift the
+          # global floor from 90% → 100% (per Golden Rule #12 #1+#2).
+          if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
+            pytest \
+              --cov=brutex.doctor \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_doctor.py
+          else
+            echo "(brutex.doctor test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
