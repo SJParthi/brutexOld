@@ -11,7 +11,6 @@ ports in the 3xxx/6xxx/8xxx/9xxx range via its Docker Compose stack:
 * tv-grafana: 3000
 * tv-api: 3001 (Axum HTTP server)
 * tv-loki: 3100
-* tv-valkey: 6379
 * tv-questdb: 8812, 9000, 9009
 * tv-prometheus: **9090**  ← WOULD COLLIDE with a naive default
 * tv-jaeger: 16686
@@ -94,7 +93,10 @@ TICKVAULT_RESERVED_PORTS: Final[frozenset[int]] = frozenset(
         3000,  # tv-grafana
         3001,  # tv-api (Axum)
         3100,  # tv-loki
-        6379,  # tv-valkey (Redis)
+        # 6379 (tv-valkey/Redis) removed by DEC-CLEANUP-001 (2026-05-24).
+        # BruteX has no co-development relationship with tickvault since
+        # DEC-P0-026 (CLAUDE.md §1). BruteX uses Parquet + DuckDB + LMDB
+        # only — no in-memory cache. See `docs/MIGRATION.md` entry #203.
         8080,  # tv-traefik (dashboard)
         8812,  # tv-questdb (PG-wire)
         9000,  # tv-questdb (HTTP)

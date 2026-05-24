@@ -17,7 +17,10 @@ pub struct ApplicationConfig {
     pub dhan: DhanConfig,
     pub websocket: WebSocketConfig,
     pub questdb: QuestDbConfig,
-    pub valkey: ValkeyConfig,
+    // Note: `valkey` field removed by DEC-CLEANUP-001 (2026-05-24).
+    // ValkeyConfig was tickvault residue from before DEC-P0-026 retired the
+    // co-development layer. BruteX uses Parquet + DuckDB + LMDB only — no
+    // in-memory cache. See `docs/MIGRATION.md` entry #203.
     pub prometheus: PrometheusConfig,
     pub network: NetworkConfig,
     pub token: TokenConfig,
@@ -337,25 +340,8 @@ const fn default_retention_days() -> u32 {
     90
 }
 
-/// Valkey (cache) connection configuration.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ValkeyConfig {
-    /// Valkey Docker hostname.
-    pub host: String,
-    /// Valkey port.
-    pub port: u16,
-    /// Maximum connections in the connection pool.
-    pub max_connections: u32,
-    /// Authentication password (matches `--requirepass` in Valkey server config).
-    /// Empty string = no auth (NOT recommended). Default: "tv-dev-only".
-    #[serde(default = "default_valkey_password")]
-    pub password: String,
-}
-
-/// Default Valkey password — empty (loaded from SSM at boot in production).
-fn default_valkey_password() -> String {
-    String::new()
-}
+// ValkeyConfig + default_valkey_password() removed by DEC-CLEANUP-001
+// (2026-05-24). See `docs/MIGRATION.md` entry #203.
 
 /// Prometheus metrics endpoint configuration.
 #[derive(Debug, Deserialize)]
@@ -1191,12 +1177,7 @@ mod tests {
                 pg_port: 8812,
                 ilp_port: 9009,
             },
-            valkey: ValkeyConfig {
-                host: "tv-valkey".to_string(),
-                port: 6379,
-                max_connections: 16,
-                password: String::new(),
-            },
+            // valkey field removed per DEC-CLEANUP-001
             prometheus: PrometheusConfig {
                 host: "tv-prometheus".to_string(),
                 port: 9090,
