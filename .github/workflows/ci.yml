@@ -293,6 +293,11 @@ jobs:
           else
             echo "(brutex.strategies.types test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 5 — `brutex.config.ports` was tried but
+          # CI surfaced it below 100% (465 lines, 52 tests not enough
+          # for full branch coverage). Deferred to a follow-up PR that
+          # first writes the missing tests. Self-verifying ratchet at
+          # work — same lesson as `brutex.models` in step 3.
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML

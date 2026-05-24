@@ -302,6 +302,25 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
+215. **DEC-COV-001 step 5 — `brutex.config.ports` ratchet ATTEMPTED but DEFERRED — CI surfaced below-100% coverage** (2026-05-24, operator directive "meanwhile go ahead with the PRs also dude"). **HONEST OUTCOME of self-verifying ratchet:** initial push (commit `b713896`) attempted to ratchet `brutex.config.ports` (465 lines, 52 tests). CI on PR #106 failed the unit-tests + coverage gate — module is below 100% line/branch. Same failure mode as `brutex.models` in step 3. Dropped from this PR. Strict-100% module count remains 7. The deferred module needs test backfill in a follow-up PR before re-ratcheting. **No new modules added — this is step 5 as a "lesson confirmed" entry.**
+
+    **Why `brutex.config.ports` next (per Golden Rule #1):**
+    - 465 lines pure-Python config module — reserved-port allocations, validation, conflict detection.
+    - `tests/unit/test_config_ports.py` (52 tests) covers port allocation paths, reserved-list invariants, conflict detection. Strong test coverage signal.
+
+    **Fail-safe design (Golden Rule #1):** if the module isn't actually at 100%, the CI gate on this PR itself fails and surfaces the gap. Same self-verification that confirmed `brutex.universe` 100% (PR #102), `brutex.strategies.types` 100% (PR #104), and correctly caught `brutex.models` below 100% (PR #103).
+
+    **Files changed:**
+    - `.github/workflows/ci.yml` — 9th strict-per-module gate block.
+    - `docs/STANDARDS_100PCT.md` — row 1 module list expanded to 8.
+    - `docs/MIGRATION.md` — this entry (#215).
+
+    **Honest envelope (Golden Rule #10):** rows 1+2 stay 🟡 (global `fail_under=90` unchanged); strict list 7 → 8. ~21 more modules to ratchet.
+
+    **Decision ID:** DEC-COV-001 step 5. **Builds on:** steps 1-4 (#210/#101 · #211/#102 · #212/#103 · #213/#104).
+
+214. **DEC-DEC-ID-VALIDATOR-001 — Partial automation of STANDARDS_100PCT.md §1 row 18** (2026-05-24, PR #105). Already documented above.
+
 213. **DEC-COV-001 step 4 — Strict per-module 100% coverage gate ratcheted to include `brutex.strategies.types`** (2026-05-24, operator directive "yes go ahead with everything bro"). Continued progress on STANDARDS_100PCT.md §1 rows 1+2. Strict-100% module count grows 6 → 7.
 
     **Why `brutex.strategies.types` next (per Golden Rule #1):**
