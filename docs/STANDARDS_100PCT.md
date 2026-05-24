@@ -48,7 +48,7 @@ Status legend:
 | 4 | mypy --strict | 0 errors | Configured strict + 6 extra strict flags; pre-existing failures cleared in commit d57efaf + DEC-P0-001 ruff sweep | ✅ | none |
 | 4 | pyright | 0 errors | DEC-P0-001 (2026-05-17): bumped `typeCheckingMode = "strict"`; 3 new narrow silences for strict-only checks (`reportMissingParameterType`, `reportMissingTypeArgument`, `reportUnnecessaryComparison`) on legitimate patterns in test fixtures | ✅ | none |
 | 5 | ruff lint | E+W+F+I+N | Active; DEC-P0-001 cleared 29 legacy errors (PLR2004/S101/ERA001/SIM110/RUF046/RUF022/N812/SIM108/E741) + applied `ruff format` to 19 files | ✅ | none |
-| 5 | pylint | 10.00/10 | NOT installed, NOT in CI, NOT in pre-commit | 📋 | Either install + wire or remove the claim |
+| 5 | pylint (via ruff PL) | pylint-equivalent rules | **ruff `PL` subset ENFORCED** (DEC-PYLINT-DROP-001 correction 2026-05-24): `pyproject.toml [tool.ruff.lint].select` includes `"PL"` — runs on every push via the `Lint (ruff)` CI job, blocking. 7 specific PL rules are explicitly ignored with documented rationale (PLR0913/0911/0912/0915 for dispatchers/CLIs/adapter boundaries; PLC0415 for lazy imports; PLE0604 for math facade's dynamic `__all__`; PLR2004 in tests/). Standalone pylint dropped — ruff's Rust-based PL is faster + same rule coverage. | 🟢 | none (ruff PL covers pylint-equivalent rules; standalone pylint claim removed) |
 | 6 | bandit security | 0 high/critical | DEC-P0-001 (2026-05-17): kept `-l` (low+ — stricter than `-ll`). S104/S105/S108/S110/S311 removed from project-wide ruff `ignore` (S110 narrowed to `tests/` per-file-ignores); per-line noqa at 4 brutex/ sites with rationale | ✅ | none |
 | 7 | Code duplication | zero | DEC-P0-001 (2026-05-17): `\|\| true` REMOVED; jscpd narrowed to `brutex/` only at 3% threshold (tests/ legitimately repeat fixture patterns) | ✅ | Tighten threshold from 3% → 1% in a follow-up PR |
 | 7 | Dead code | zero | DEC-P0-001 (2026-05-17): `\|\| true` REMOVED; whitelist at `scripts/ci/vulture_whitelist.py` covers context-manager protocol, `__post_init__`, and `audit.verify_chain` | ✅ | Extend whitelist when CI surfaces real false positives |
@@ -64,25 +64,28 @@ Status legend:
 | 17 | No hallucination | every claim cited | Golden Rule #1 in CLAUDE.md + PR template checkbox | 👁️ | Cannot be fully automated; reviewer + PR template |
 | 18 | Decision IDs | every locked decision | PR template requires DEC-ID + MIGRATION.md row | 👁️ | Reviewer-enforced via PR template |
 
-### Summary count (post DEC-CROSSWALK-001, 2026-05-24)
+### Summary count (post DEC-PYLINT-DROP-001, 2026-05-24)
 
 | Status | Count of 21 sub-rows | % | Delta vs pre-audit |
 |---|---:|---:|---:|
-| 🟢 Fully enforced | **12** (rows 3, 4×2, 5, 6, 7×2, **8** ← DEC-CROSSWALK-001 flipped from 🟡, 9, 12, **13** ← was stale 📋, **15** ← was stale 📋) | **57%** | +3 (audit found 2 stale doc claims + DEC-CROSSWALK-001 closed 1 PARTIAL) |
+| 🟢 Fully enforced | **13** (rows 3, 4×2, **5×2** ← ruff + ruff-PL [both now ✅, was 5+5b split], 6, 7×2, 8, 9, 12, 13, 15) | **62%** | +4 (audit found 2 stale + DEC-CROSSWALK-001 + DEC-PYLINT-DROP-001) |
 | 🟡 Partial (runs but threshold/advisory issues) | 3 (rows 1, 2, 11) | 14% | −1 (row 8 closed by DEC-CROSSWALK-001) |
-| 📋 Roadmap (not yet wired) | 3 (rows 5b [pylint standalone — ruff PL subset covers it], 14, 16) | 14% | unchanged |
+| 📋 Roadmap (not yet wired) | **2** (rows 14, 16) | **10%** | **−3** (rows 13, 15 were stale; row 5b closed by DEC-PYLINT-DROP-001) |
 | 👁️ Manual (PR template + reviewer) | 3 (rows 10, 17, 18) | 14% | unchanged |
 
 **Pre-audit numbers (kept for history):** 9 ✅ / 4 🟡 / 5 📋 / 3 👁️ → 43% / 19% / 24% / 14%.
 
 **Post-audit reality (DEC-STANDARDS-AUDIT-001):** 11 🟢 / 4 🟡 / 3 📋 / 3 👁️ → 52% / 19% / 14% / 14%.
 
-**Post-DEC-CROSSWALK-001 reality (2026-05-24):** 12 🟢 / 3 🟡 / 3 📋 / 3 👁️ → **57% / 14% / 14% / 14%**.
+**Post-DEC-CROSSWALK-001 reality (2026-05-24):** 12 🟢 / 3 🟡 / 3 📋 / 3 👁️ → 57% / 14% / 14% / 14%.
 
-**The 3 genuinely remaining ROADMAP gaps that DO need code work:**
-1. **Row 5b — pylint standalone** — ruff PL subset already covers pylint-equivalent rules. Either (a) drop the standalone pylint decree (DEC-PYLINT-DROP-001) or (b) wire standalone pylint anyway. Recommend (a) since ruff PL is faster and more comprehensive.
-2. **Row 14 — Throughput canary 50 M/s absolute on CI** — ratio gate live (status 🟡 not 📋 strictly); absolute 50 M/s requires M4 Pro local-runner per documented shared-GHA flake-mitigation. ROADMAP: M4 Pro local-runner runbook + Phase 3 PyO3 kernel.
-3. **Row 16 — `brutex doctor` CLI** — genuinely missing; CLI module doesn't exist; needs to be built (target ~1 day effort). Tracked as **DEC-DOCTOR-001** for next PR.
+**Post-DEC-PYLINT-DROP-001 reality (2026-05-24):** 13 🟢 / 3 🟡 / 2 📋 / 3 👁️ → **62% / 14% / 10% / 14%**.
+
+**The 2 genuinely remaining ROADMAP gaps that DO need code work:**
+1. **Row 14 — Throughput canary 50 M/s absolute on CI** — ratio gate live (status 🟡 not 📋 strictly); absolute 50 M/s requires M4 Pro local-runner per documented shared-GHA flake-mitigation. ROADMAP: M4 Pro local-runner runbook + Phase 3 PyO3 kernel.
+2. **Row 16 — `brutex doctor` CLI** — genuinely missing; CLI module doesn't exist; needs to be built (target ~1 day effort). Tracked as **DEC-DOCTOR-001** for next PR.
+
+**~~Row 5b — pylint standalone~~** — ✅ CLOSED by DEC-PYLINT-DROP-001 (2026-05-24). ruff `PL` subset in `pyproject.toml [tool.ruff.lint].select` covers pylint-equivalent rules; standalone pylint dropped. See MIGRATION.md entry #207.
 
 **The 3 PARTIAL items remaining** (post DEC-CROSSWALK-001; genuinely partial; not stale):
 1. Row 1 — Coverage line 90% → 100% (legacy module backfill needed; tracked as DEC-COV-001)
