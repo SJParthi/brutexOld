@@ -435,6 +435,19 @@ jobs:
           else
             echo "(brutex.config.ports test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 15 (entry #227): brutex.adapters.dhan.types
+          # UNDEFERRED — the LAST deferred module from step 8 finally lands.
+          # New test file tests/unit/test_dhan_types.py written from
+          # SOURCE-VERIFIED API field shapes (NOT guessed — the discipline
+          # that step 8 missed). Uses real DhanSpotInstrument singletons,
+          # real IntradayChunkRequest / HistoricalDailyRequest / OHLCBar /
+          # DhanError800 constructors. Module is 61 lines of pure
+          # @dataclass(frozen=True, slots=True) code with zero branches.
+          if compgen -G "tests/unit/test_dhan_types.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.types --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_types.py
+          else
+            echo "(brutex.adapters.dhan.types test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
