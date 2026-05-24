@@ -302,6 +302,23 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
+234. **DEC-DASHBOARD-LIVE-FINALE — staircase wiring + remaining 3 schema fields surfaced + tooltip narrowed to "ALL 13 LIVE"** (2026-05-24, operator directive: "whichever is recommended here go ahead dude"). Closes the dashboard wiring loop — **ALL 13 `SweepFunnelSnapshot` schema fields are now `data-bind`-wired in `docs/dashboard/mockups/v29.html`** (`data-bind` count: 10 → 22 — multiple bindings per field since both horizontal funnel + vertical staircase show the same numbers). Per `TRACK1_DASHBOARD_DESIGN.md §6.4`:
+
+    - **7 staircase numeric cells wired:** each `<div class="big">` in `.funnel25-row` got `data-bind` attrs matching the horizontal funnel — step_0_all_candidates (33B row), step_1_cheap_prefilter (12M), step_2_real_edge_test (1.2M), step_3_unseen_data (84K), step_4_best_of_n (2.4K), step_7_three_windows (410), step_8_sealed_lockbox (174).
+    - **3 inline subspans for the previously-hidden fields:** step_5_not_overfit + step_6_multi_test added inline in the "Steps 4-6" row label as muted-color text (`<span style="color:var(--muted)">not-overfit</span>` etc.); step_9_random_shuffle added inline in the Step 8 row label.
+    - **Survivor row split:** `1 of 174` became `<span data-bind="winners_top_n">1</span> of <span data-bind="step_8_sealed_lockbox">174</span>` — both halves now data-bound.
+
+    **PREVIEW DATA tooltip narrowed:** "ALL 13 SweepFunnelSnapshot schema fields are now LIVE — values flow from the brute-force sweep via /api/v1/state every 2s. ONLY remaining placeholder: top combos table P&L, equity curve, KPI tiles, podium cards. Badge stays until brutex/strategies/sweep.py wires update_sweep_funnel() (Phase 3)."
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: dashboard mockup is 13/13 schema fields wired. The data layer is complete.
+    - ✅ REAL: poller's `querySelectorAll('[data-bind]')` automatically picks up multiple bindings per field (e.g., step_0 appears in BOTH horizontal funnel AND staircase — both update on each poll).
+    - 🟡 PARTIAL: `brutex/strategies/sweep.py` STILL doesn't call `update_sweep_funnel()` — when sweep_funnel is None in the REST response, poller leaves placeholders intact (the cold-start fallback per §6.0). Producer side is Phase 3 work.
+    - 🟡 PARTIAL: PREVIEW DATA badge STAYS visible. Per spec §6.4 step 6, the badge can only be removed when sweep_funnel is reliably non-None in production — i.e., when the brute-force sweep loop is actually producing snapshots.
+    - 📋 ROADMAP: top combos table P&L (`+₹84,200` etc.), equity curve points, KPI tiles, podium cards — these are SEPARATE schema additions beyond `SweepFunnelSnapshot` and would need new dataclass + new data-bind round.
+
+    **Decision ID:** DEC-DASHBOARD-LIVE-FINALE. **Builds on:** LIVE-1 (#226), LIVE-2/3/4 (#231), LIVE-5/6/7/8/9 (#233). **Closes:** the SweepFunnelSnapshot wiring loop.
+
 233. **DEC-DASHBOARD-LIVE-5/6/7/8/9 — wire remaining horizontal-funnel spans + sweep_id + snapshot_at** (2026-05-24, operator directive: "yes go ahead dude"). Markup-only edits to `docs/dashboard/mockups/v29.html`. Wires the last 3 horizontal-funnel spans + the winner pill + the operator-mode sweep ID/timestamp pill to the existing JS poller (write-once from DEC-DASHBOARD-LIVE-1 / entry #226). `data-bind` count: **4 → 10** (of 13 schema fields, 76% wired):
 
     - **LIVE-5 · `step_4_best_of_n`** — `<span class="step-num">2.4K</span>` at line 2480.
