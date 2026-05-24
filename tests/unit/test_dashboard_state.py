@@ -293,8 +293,12 @@ class TestSweepFunnel:
             snapshot_at="2026-05-24T10:30:00Z",
         )
         state.update_sweep_funnel(snap)
-        assert state.sweep_funnel is snap
-        assert state.sweep_funnel.step_0_all_candidates == 12_600_000
+        # Bind to local for pyright strict narrowing — instance-attribute
+        # narrowing across `is`/`is not None` is not guaranteed.
+        installed = state.sweep_funnel
+        assert installed is snap
+        assert installed is not None
+        assert installed.step_0_all_candidates == 12_600_000
 
     def test_to_dict_serializes_sweep_funnel_when_set(self) -> None:
         """to_dict() includes the sweep_funnel dict when populated."""
