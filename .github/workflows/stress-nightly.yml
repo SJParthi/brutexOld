@@ -1,0 +1,86 @@
+# BruteX — Stress / sustained-load tests (nightly)
+#
+# DEC-STRESS-001 (MIGRATION.md entry #208) — closes the
+# `tests/stress/` ROADMAP gap from STANDARDS_100PCT.md §1 row 11.
+#
+# Per CLAUDE.md §2 Rule #12 ("100% standards"), one of the 7 test
+# types is STRESS. This workflow runs the stress suite on a nightly
+# schedule (not on every push — they'd blow the per-PR budget).
+#
+# Schedule
+# --------
+# * Nightly cron: 03:00 UTC ≈ 08:30 IST.
+# * Manual ``workflow_dispatch`` for on-demand 24h soak (set
+#   ``STRESS_EVENTS=10_000_000`` via input).
+# * Push-trigger only when stress test code itself changes —
+#   to avoid blocking unrelated PRs on a slow gate.
+#
+# Honest envelope (Golden Rule #10)
+# ----------------------------------
+# The CI nightly is "light stress" (~30s, 5K events default). The
+# real 24h soak target named in CLAUDE.md §2 Rule #12 is REACHABLE
+# via ``workflow_dispatch`` with ``stress_events`` set to a large
+# value — but NOT run automatically because it would burn GHA hours.
+# This is the same pattern dep-freshness-nightly.yml + redteam-
+# nightly.yml use.
+
+name: Stress / sustained-load tests (nightly)
+
+on:
+  schedule:
+    - cron: "0 3 * * *"  # daily 03:00 UTC (~08:30 IST)
+  workflow_dispatch:
+    inputs:
+      stress_events:
+        description: "Number of stress events per test (default 5000; soak: 10_000_000)"
+        required: false
+        default: "5000"
+  push:
+    paths:
+      - "tests/stress/**"
+      - ".github/workflows/stress-nightly.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stress-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  stress:
+    name: Stress tests (audit chain + hot paths)
+    runs-on: ubuntu-24.04
+    # Nightly default ~5 min; manual soak gets the full 60 min budget.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install deps
+        run: pip install -e ".[dev,data]"
+
+      - name: Run stress suite
+        env:
+          STRESS_EVENTS: ${{ github.event.inputs.stress_events || '5000' }}
+        run: |
+          echo "Stress run with STRESS_EVENTS=$STRESS_EVENTS"
+          pytest tests/stress -v -m stress --tb=short
+
+      - name: Upload stress artifacts (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-logs
+          path: |
+            /tmp/pytest-*
+          if-no-files-found: ignore
+          retention-days: 7

@@ -324,6 +324,7 @@ markers = [
     "golden: golden-master tests against recorded fixtures",
     "network: requires outbound network (skipped by default)",
     "smoke: opt-in smoke tests that hit external services (gated by env var)",
+    "stress: sustained-load stress tests (DEC-STRESS-001); run nightly via .github/workflows/stress-nightly.yml — NOT in default unit test run",
 ]
 filterwarnings = [
     "error",
