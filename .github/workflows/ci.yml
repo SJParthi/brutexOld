@@ -276,6 +276,23 @@ jobs:
           else
             echo "(brutex.adapters.dhan.options_constants test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 4 (2026-05-24, MIGRATION.md entry #213):
+          # ratchet `brutex.strategies.types` (110 lines, 3 public
+          # classes: Side StrEnum, Signal frozen dataclass with
+          # tz-aware/strength validators, StrategyState mutable
+          # dataclass with reset). `tests/unit/test_strategies_types.py`
+          # (102 lines, ratio 0.93×) has 3 dedicated test classes
+          # covering every public symbol + every validator branch.
+          if compgen -G "tests/unit/test_strategies_types.py" > /dev/null; then
+            pytest \
+              --cov=brutex.strategies.types \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_strategies_types.py
+          else
+            echo "(brutex.strategies.types test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
