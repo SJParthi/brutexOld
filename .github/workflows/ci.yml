@@ -240,6 +240,53 @@ jobs:
           else
             echo "(brutex.universe test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 3 (2026-05-24, MIGRATION.md entry #212):
+          # ratchet `brutex.models` into the strict per-module 100%
+          # gate. `tests/unit/test_models.py` (32 tests across 7+
+          # classes) covers every StrEnum + the Instrument dataclass
+          # + the BruteXError exception hierarchy + the tick-size
+          # normaliser. Per Golden Rule #1: selection self-verifies
+          # via this gate — if 100% isn't actually achieved the gate
+          # fails here and surfaces the uncovered line/branch.
+          if compgen -G "tests/unit/test_models.py" > /dev/null; then
+            pytest \
+              --cov=brutex.models \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_models.py
+          else
+            echo "(brutex.models test file not present yet — gate inactive)"
+          fi
+          # DEC-COV-001 step 3 (continued): ratchet
+          # `brutex.adapters.dhan.timeconv` (IST/UTC conversion
+          # utility, 103 lines) — `tests/unit/test_dhan_timeconv.py`
+          # has 11 tests covering all conversion paths.
+          if compgen -G "tests/unit/test_dhan_timeconv.py" > /dev/null; then
+            pytest \
+              --cov=brutex.adapters.dhan.timeconv \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_dhan_timeconv.py
+          else
+            echo "(brutex.adapters.dhan.timeconv test file not present yet — gate inactive)"
+          fi
+          # DEC-COV-001 step 3 (continued): ratchet
+          # `brutex.adapters.dhan.options_constants` (lookup
+          # constants module, 99 lines) —
+          # `tests/unit/test_dhan_options_constants.py` has 15 tests
+          # covering every lookup helper.
+          if compgen -G "tests/unit/test_dhan_options_constants.py" > /dev/null; then
+            pytest \
+              --cov=brutex.adapters.dhan.options_constants \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_dhan_options_constants.py
+          else
+            echo "(brutex.adapters.dhan.options_constants test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML

@@ -292,6 +292,32 @@ superseded.
 
 148. **DEC-P0-010 — pyright per-test re-promotion: 4 of 6 categories restored to error (PR #32)** (operator decree 2026-05-17 "go ahead dude"). Closes DEC-P0-005 P1 item #6 partially. **Source-pattern fixes** (16 errors → 0 across 5 files): (a) `tests/integration/test_execution_driver.py::_seed_lake` signature `list[float]` → `Sequence[float]` (kills 5 list-variance errors via covariant Sequence); (b) `tests/integration/test_dashboard_e2e.py::client` fixture return type `TestClient` → `Generator[TestClient]` (kills 2 generator errors); (c) `tests/redteam/test_redteam_premerge_guard.py` added `dict[str, Any]` annotation on rollup test data (kills 6 dict-index errors); (d) `tests/unit/test_execution_costs.py:224` added `isinstance(exponent, int)` guard before `-exponent` (kills 1 operator error on `int | Literal['n','N','F']`); (e) `tests/unit/test_strategies_registry.py::_DecoStrat` added `ClassVar[StrategyMeta]` annotation + `__init__(params)` to satisfy Strategy protocol (kills 1 protocol error) + targeted `# pyright: ignore[reportUntypedClassDecorator]` on the decorator line with documented Protocol-detection-limitation rationale (kills 1 untyped-decorator error). **Library changes:** `brutex/strategies/registry.py::register_strategy` rewritten with generic `TypeVar` (`_StrategyT = TypeVar("_StrategyT", bound=type[Strategy])`) so the decorator preserves concrete class type (vs erasing to `type[Strategy]`). PEP 695 syntax `def f[T](...)` skipped per UP047 because mypy 1.x doesn't yet support it; ruff noqa added with rationale. **4 categories restored to error** in tests/: `reportCallIssue`, `reportGeneralTypeIssues`, `reportUntypedClassDecorator`, `reportOperatorIssue`. **2 categories DEFERRED** (`reportArgumentType` 56 errors + `reportAttributeAccessIssue` 17 errors): downgraded to "warning" only, with honest comment block in `pyproject.toml` explaining the 73 remaining errors are pre-existing test-fixture patterns (test_dashboard_state.py parametrize loose-typing + test_adapter_protocol.py protocol-stub access + test_fakes patterns) requiring ~3 days of dedicated test-fixture refactoring. Tracked as P1 follow-up #6b for a dedicated future PR. **Honest envelope (Golden Rule #10):** "partial completion" per Agent 1 of PR #25 review prediction — the 6-category re-promotion was the right direction but full closure on `reportArgumentType` requires a separate focused effort. PR #32 closes 4 of 6 cleanly; 2 deferred with explicit deferral + tracking. **Local verification:** ruff/format/mypy strict/pyright strict ALL GREEN; pytest 1511 passed.
 
+212. **DEC-COV-001 step 3 — Strict per-module 100% coverage gate ratcheted to include `brutex.models`, `brutex.adapters.dhan.timeconv`, `brutex.adapters.dhan.options_constants`** (2026-05-24, operator directive "go ahead bro"). Continued progress on STANDARDS_100PCT.md §1 rows 1+2. Strict-100% module count grows 4 → 7.
+
+    **Why these 3 modules next (per Golden Rule #1 — verifiable selection):**
+
+    | Module | Lines | Test file | Tests | Notes |
+    |---|---:|---|---:|---|
+    | `brutex.models` | 326 | `tests/unit/test_models.py` (289 lines) | 32 | StrEnums (Exchange, Segment, InstrumentType, OptionSide) + `Instrument` frozen dataclass + `BruteXError` hierarchy + `normalise_tick_size` |
+    | `brutex.adapters.dhan.timeconv` | 103 | `tests/unit/test_dhan_timeconv.py` (94 lines) | 11 | IST/UTC conversion utility — pure-function, deterministic |
+    | `brutex.adapters.dhan.options_constants` | 99 | `tests/unit/test_dhan_options_constants.py` (84 lines) | 15 | Constants + lookup helpers — pure-Python data module |
+
+    Each is pure-Python, isolated (no heavy deps), and has a dedicated test file with comprehensive class structure.
+
+    **Fail-safe design (Golden Rule #1 + the strict gate):** if any of the 3 modules is below 100%, the CI gate on this PR itself will fail and surface the exact uncovered line/branch. Same self-verification pattern that confirmed `brutex.universe` 100% in step 2 (PR #102).
+
+    **What this PR (step 3) does:**
+    - `.github/workflows/ci.yml` — adds 3 new strict-per-module gate blocks (5th, 6th, 7th) mirroring the existing pattern.
+    - `docs/STANDARDS_100PCT.md` — row 1 module list expanded to 7 modules.
+    - `docs/MIGRATION.md` — this entry (#212) documenting step 3.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ **REAL:** 3 new strict-100% gates added; CI blocks merge on coverage regression for any of them.
+    - 🟡 **PARTIAL:** rows 1+2 stay 🟡 because the global `fail_under=90` floor hasn't changed. Strict-per-module list grows 4 → 7.
+    - 📋 **ROADMAP:** ~23 more pure-Python modules to audit + ratchet across follow-up PRs.
+
+    **Decision ID:** DEC-COV-001 step 3. **Builds on:** DEC-COV-001 step 1 (entry #210, PR #101) · DEC-COV-001 step 2 (entry #211, PR #102) — same multi-PR ratchet campaign.
+
 211. **DEC-COV-001 step 2 — Strict per-module 100% coverage gate ratcheted to include `brutex.universe`** (2026-05-24, operator directive "go ahead bro"). Continued progress on STANDARDS_100PCT.md §1 rows 1+2. Strict-100% module count grows 3 → 4 (`brutex.costs`, `brutex.engine`, `brutex.doctor`, **`brutex.universe`**).
 
     **Why `brutex.universe` next (per Golden Rule #1 — verifiable selection):**
