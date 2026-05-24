@@ -50,29 +50,30 @@ import sys
 from pathlib import Path
 
 # Patterns that indicate a bug-fix PR.
-# Title prefixes (conventional commits): "fix:", "fix(scope):", "bugfix:".
-# Body keywords: "bug", "regression", "fixes #", "fixes:", "closes bug".
-# Anchored with word boundaries where it matters so we don't match
-# "prefix" or "configuration" by accident.
+# Title prefix (conventional commits): "fix:", "fix(scope):", "bugfix:",
+# "hotfix:" — anchored to start so "prefix" / "configuration" don't match.
+# Body keyword match was DROPPED 2026-05-24 after PR #120 self-flagged:
+# meta-PRs that DESCRIBE bug-fix concepts (e.g., "Bug-fix regression
+# test scanner") legitimately mention "bug" / "regression" in prose
+# without being bug fixes themselves. Conventional-commit title prefix
+# is the canonical signal; reviewer catches body-only bug fixes.
 BUGFIX_TITLE_PATTERN = re.compile(
     r"^(fix|bugfix|hotfix)(\([^)]*\))?[:!]",
-    re.IGNORECASE,
-)
-BUGFIX_BODY_PATTERN = re.compile(
-    r"\b(bug|regression|fixes\s+#\d+|fixes:|hotfix)\b",
     re.IGNORECASE,
 )
 
 
 def is_bugfix_pr(title: str, body: str) -> bool:
-    """Return True if the PR title or body signals a bug fix.
+    """Return True if the PR title signals a bug fix.
 
-    Title check is anchored (must be a conventional-commit prefix);
-    body check is keyword presence anywhere.
+    Title-only check anchored to a conventional-commit ``fix:``/
+    ``bugfix:``/``hotfix:`` prefix. ``body`` is kept in the signature
+    for forward-compat (a future PR could add stricter body checks)
+    but is currently unused — body keyword matching caused false
+    positives on meta-PRs that describe bug-fix concepts in prose.
     """
-    if BUGFIX_TITLE_PATTERN.match(title.strip()):
-        return True
-    return bool(BUGFIX_BODY_PATTERN.search(body))
+    del body  # currently unused; see module docstring
+    return bool(BUGFIX_TITLE_PATTERN.match(title.strip()))
 
 
 def touches_tests(changed_files: list[str]) -> bool:
