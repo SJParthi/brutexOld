@@ -302,7 +302,7 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
-215. **DEC-COV-001 step 5 — Strict per-module 100% coverage gate ratcheted to include `brutex.config.ports`** (2026-05-24, operator directive "meanwhile go ahead with the PRs also dude"). Continued progress on STANDARDS_100PCT.md §1 rows 1+2. Strict-100% module count grows 7 → 8.
+215. **DEC-COV-001 step 5 — `brutex.config.ports` ratchet ATTEMPTED but DEFERRED — CI surfaced below-100% coverage** (2026-05-24, operator directive "meanwhile go ahead with the PRs also dude"). **HONEST OUTCOME of self-verifying ratchet:** initial push (commit `b713896`) attempted to ratchet `brutex.config.ports` (465 lines, 52 tests). CI on PR #106 failed the unit-tests + coverage gate — module is below 100% line/branch. Same failure mode as `brutex.models` in step 3. Dropped from this PR. Strict-100% module count remains 7. The deferred module needs test backfill in a follow-up PR before re-ratcheting. **No new modules added — this is step 5 as a "lesson confirmed" entry.**
 
     **Why `brutex.config.ports` next (per Golden Rule #1):**
     - 465 lines pure-Python config module — reserved-port allocations, validation, conflict detection.
