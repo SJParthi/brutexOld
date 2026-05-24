@@ -312,7 +312,7 @@ superseded.
     - `cargo build` in `rust/fno-math/`: clean (26.4s build time, no new warnings).
     - `cargo test` in `rust/fno-math/`: **459 unit tests + 1 integration test + 0 doctests = all green**.
     - Python verification: `6379 in TICKVAULT_RESERVED_PORTS → False` (as expected post-cleanup), all 11 other reserved ports unchanged.
-    - `tests/unit/test_config_ports.py::test_valkey_6379_NOT_reserved` (RENAMED + flipped assertion) verifies the removal.
+    - `tests/unit/test_config_ports.py::test_valkey_6379_not_reserved` (RENAMED + flipped assertion) verifies the removal.
 
     **Files changed (4):**
     - `rust/fno-math/src/compat/config.rs` — −16 LOC (struct + field + fixture entry + helper fn) + 3 explanatory comments.

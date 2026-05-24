@@ -137,7 +137,7 @@ class TestTickvaultReservedPorts:
     def test_traefik_8080_reserved(self) -> None:
         assert 8080 in TICKVAULT_RESERVED_PORTS
 
-    def test_valkey_6379_NOT_reserved(self) -> None:
+    def test_valkey_6379_not_reserved(self) -> None:
         # Per DEC-CLEANUP-001 (2026-05-24): Valkey/Redis port 6379 was
         # removed from the reserved set. BruteX has no co-development
         # relationship with tickvault (DEC-P0-026, CLAUDE.md §1) and
