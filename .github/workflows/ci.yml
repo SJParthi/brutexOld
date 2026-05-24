@@ -332,6 +332,17 @@ jobs:
           # step 5 (config.ports) and step 3 (models): verify
           # signatures BEFORE writing the test. Deferred — the gate
           # block is not added; this PR keeps strict-100% list at 11.
+          # DEC-COV-001 step 9 (entry #219): brutex.indicators.pivots
+          # (41 stmts, 4 branches, 18 tests in test_pivots.py).
+          # Pure pivot-level math (PP/R1/R2/R3/S1/S2/S3) with the
+          # existing dedicated test file already at 100% line+branch
+          # — same self-verifying pattern as steps 4/6/7 (existing
+          # comprehensive test file, no new test to guess at).
+          if compgen -G "tests/unit/test_pivots.py" > /dev/null; then
+            pytest --cov=brutex.indicators.pivots --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pivots.py
+          else
+            echo "(brutex.indicators.pivots test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
