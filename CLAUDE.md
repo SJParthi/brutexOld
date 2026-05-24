@@ -69,10 +69,12 @@ Track 1 spec locked after 4-agent hostile-review pass._
    per DEC-P0-063. Full §3 / cross-spec reconciliation across the
    ~15 remaining stale-text locations is a tracked follow-up PR; until
    then DEC-P0-063 is authoritative for the stock-options expansion.
-4. **Reproducibility first.** Every run is identified by `sha256(
+4. **Reproducibility first.** Every run is identified by `blake3(
    strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params
    ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_hash)`. No
-   computation without that hash recorded.
+   computation without that hash recorded. (Was `sha256(...)` pre-DEC-CALIBRATE-001;
+   corrected 2026-05-24 to match `TRACK1_BACKTEST_SPEC.md:654` which has used
+   blake3 since the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
    append must all be O(1). CI gates: `p99(N=1M) / p99(N=1K) ≤ 1.1`
