@@ -124,14 +124,25 @@ def has_citation(paragraph: str) -> bool:
 def find_uncited_external_claims(text: str) -> list[str]:
     """Return paragraphs that mention external systems but lack a citation.
 
-    A paragraph is "uncited" if it contains an EXTERNAL_CLAIM_KEYWORDS
-    match AND no CITATION_PATTERNS match.
+    A paragraph is "uncited" if the STRIPPED version (code spans removed)
+    contains an EXTERNAL_CLAIM_KEYWORDS match AND the ORIGINAL version
+    contains no CITATION_PATTERNS match.
+
+    Citations are checked on the ORIGINAL text (not stripped) because
+    citation markers themselves are often inside backticks — e.g.,
+    ``per `CLAUDE.md §6` `` legitimately wraps the citation as inline
+    code, but the citation IS a citation regardless of its formatting.
+    Keywords are checked on the STRIPPED text so example claims inside
+    backticks (``the scanner looks for `dhan` keyword``) don't trigger.
     """
-    stripped = strip_code_spans(text)
+    paragraphs_original = split_into_paragraphs(text)
+    paragraphs_stripped = split_into_paragraphs(strip_code_spans(text))
+    # Pair them by index (split_into_paragraphs is deterministic — both
+    # versions produce the same paragraph count + order).
     uncited: list[str] = []
-    for para in split_into_paragraphs(stripped):
-        if EXTERNAL_CLAIM_KEYWORDS.search(para) and not has_citation(para):
-            uncited.append(para[:200])  # truncate for output readability
+    for original, stripped in zip(paragraphs_original, paragraphs_stripped, strict=False):
+        if EXTERNAL_CLAIM_KEYWORDS.search(stripped) and not has_citation(original):
+            uncited.append(original[:200])
     return uncited
 
 
