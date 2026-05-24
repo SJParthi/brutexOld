@@ -302,6 +302,24 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
+228. **DEC-COV-001 step 16 — 5-module quintuple-add (largest single-PR ratchet so far): `brutex.execution.types` + `brutex.observability.logging` + `brutex.strategies.registry` + `brutex.strategies.combo` + `brutex.vocabulary.conflicts`** (2026-05-24, operator directive: "if nothing is related to Dhan fetch/pull then go ahead"). Strict-100% module count: **23 → 28**. All 5 candidates verified locally at 100% line + 100% branch with `--cov-fail-under=100` after installing the `fno_math` Rust wheel (required because `brutex.feed.replay` / `brutex.orchestrator.*` transitively import bloom). **All non-Dhan-fetch** per the operator's scope guard — `adapters.dhan.parser`, `orchestrator.dhan_errors`, `orchestrator.quota_tracker` deliberately skipped pending operator approval to touch Dhan-adjacent code:
+
+    - **16a · `brutex.execution.types`** — 90 stmts, 16 branches, 16 tests in `test_execution_types.py`. Execution-domain types: `Order`, `Fill`, `Position`, `Trade` dataclasses + factory funcs for Track 1 signal-only mode.
+    - **16b · `brutex.observability.logging`** — 35 stmts, 6 branches, 17 tests in `test_observability_logging.py`. `structlog` facade — JSON output to stderr + ISO timestamps + log-level config from env. Closes the "no `print` in production" contract.
+    - **16c · `brutex.strategies.registry`** — 28 stmts, 4 branches, 15 tests in `test_strategies_registry.py`. Strategy plugin registry — `@register_strategy` decorator + `get_strategy(name)` lookup + collision detection.
+    - **16d · `brutex.strategies.combo`** — 55 stmts, 38 branches, 34 tests in `test_strategies_combo.py`. `Combo` dataclass (frozen+slots) + dedup hash key + `iter_combos()` Cartesian product. Highest branch density (38) of any module ratcheted so far.
+    - **16e · `brutex.vocabulary.conflicts`** — 12 stmts, 4 branches, 65 tests in `test_vocabulary.py`. Atom-pair conflict vocabulary — defines which atomic conditions (out of the 52-condition u64 mask vocab) cannot co-fire on the same bar.
+
+    Total surface ratcheted in this PR: **220 statements + 68 branches**. Largest single-PR ratchet so far (prior max: step 11 triple-add at 185/36).
+
+    **Probe notes from this session (saved for step 17+ candidates):**
+    - `brutex.orchestrator.retry` — fastbloom_rs Python 3.12 ABI quirk locally; CI may pass.
+    - `brutex.feed.replay` — on `[tool.coverage.run].omit` list (needs polars/pyarrow heavy deps); excluded from coverage entirely until L3 feed test suite is rewritten.
+    - `brutex.adapters.dhan.parser`, `brutex.orchestrator.dhan_errors`, `brutex.orchestrator.quota_tracker` — Dhan-adjacent, deferred to a future PR after operator approval (per the operator's "no Dhan fetch/pull" scope guard).
+    - 4 more partially-covered candidates: `brutex.notifications.telegram` (85.48%), `brutex.indicators.ema` (89.86%), `brutex.indicators.day_extremes` (87.23%), `brutex.indicators.prev_day_ohlc` (93.10%), `brutex.vocabulary.bits` (93.85%), `brutex.vocabulary.evaluator` (95.38%) — all need surgical-test backfill before strict-100% gate (same pattern as step 14 `models` + `config.ports`).
+
+    **Decision ID:** DEC-COV-001 step 16. **Builds on:** steps 1-15.
+
 227. **DEC-COV-001 step 15 — LAST deferred module UNDEFERRED: `brutex.adapters.dhan.types` ratcheted to strict-100%** (2026-05-24, operator directive: "cover and fix everything entirely bro"). **Deferred list is now EMPTY.** Step 8 deferred this module because the original test file guessed `IntradayChunkRequest(security_id=13, ...)` (flat) when the real shape is `IntradayChunkRequest(instrument: DhanSpotInstrument, interval: str, from_date: date, to_date: date)`, and used `OHLCBar(ts_utc=1.0)` when the real field is `timestamp_utc: datetime`. **Step 15 reads the source FIRST**, then writes tests with the verified shapes:
 
     - `IntradayChunkRequest(instrument=NIFTY, interval="1", from_date=date(2026,5,1), to_date=date(2026,5,1))` — using the pre-built `NIFTY` `DhanSpotInstrument` singleton from `brutex.adapters.dhan.constants` + an interval from `SUPPORTED_INTRADAY_INTERVALS = ("1","5","15","25","60")`.
