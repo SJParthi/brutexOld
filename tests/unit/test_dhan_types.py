@@ -187,17 +187,20 @@ class TestFetchResultFrozenContract:
             result.outcome = Outcome.OK_WITH_DATA  # type: ignore[misc]
 
     def test_no_extra_attributes_allowed_by_slots(self) -> None:
-        """slots=True means setattr for an unknown attribute fails."""
+        """slots=True means setattr for an unknown attribute fails.
+
+        Python's frozen+slots dataclass machinery may raise FrozenInstanceError,
+        AttributeError, OR TypeError depending on the interaction between
+        ``__setattr__`` override and slot descriptor lookup. The contract is
+        "no mutation"; the specific exception is a Python internal detail.
+        """
         result = FetchResult(
             request=_intraday_request(),
             outcome=Outcome.OK_EMPTY,
             bars=(),
             error=None,
         )
-        # On a frozen+slots dataclass, attribute assignment is rejected by frozen
-        # before slots even comes into play — but EITHER FrozenInstanceError or
-        # AttributeError is acceptable here; the contract is "no mutation".
-        with pytest.raises((dataclasses.FrozenInstanceError, AttributeError)):
+        with pytest.raises((dataclasses.FrozenInstanceError, AttributeError, TypeError)):
             result.new_field = "x"  # type: ignore[attr-defined]
 
     def test_equality_is_structural(self) -> None:
