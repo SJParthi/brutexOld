@@ -324,6 +324,14 @@ jobs:
           else
             echo "(brutex.adapters.dhan.constants test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 8 — `brutex.adapters.dhan.types` ratchet
+          # ATTEMPTED with a brand-new test_dhan_types.py written from
+          # scratch. CI surfaced multiple type+coverage errors because
+          # I guessed at the IntradayChunkRequest/OHLCBar/DhanRateLimitError
+          # field signatures without reading them first. Same lesson as
+          # step 5 (config.ports) and step 3 (models): verify
+          # signatures BEFORE writing the test. Deferred — the gate
+          # block is not added; this PR keeps strict-100% list at 11.
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
