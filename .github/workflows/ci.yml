@@ -343,6 +343,18 @@ jobs:
           else
             echo "(brutex.indicators.pivots test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 10 (entry #220): brutex.indicators.fib_levels
+          # (67 stmts, 4 branches, 31 tests in test_fib_levels.py + 1 skip).
+          # Pure Fibonacci retracement math on prior-day OHLC anchors —
+          # ratios 0.236/0.382/0.500/0.618/0.786 etc. Existing dedicated
+          # test file at 100% line+branch — same self-verifying pattern
+          # as step 9 (lift an already-passing module into the strict
+          # gate, no new test code).
+          if compgen -G "tests/unit/test_fib_levels.py" > /dev/null; then
+            pytest --cov=brutex.indicators.fib_levels --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fib_levels.py
+          else
+            echo "(brutex.indicators.fib_levels test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
