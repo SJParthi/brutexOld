@@ -363,6 +363,13 @@ operator must HALT the sweep, modify the registry, restart the sweep
 
 ### Stage 4 — Statistical filters (pipeline order matters)
 
+> **Extreme institutional rigor (DEC-EXTREME-001, 2026-05-23):** Stage 4
+> pipeline expanded from 7 → 9 filters to match top-tier quant fund
+> methodology (López de Prado / Bailey / White / Hansen patterns).
+> Added: Reality Check / SPA (#4), WF 3-variants (#7), Monte Carlo
+> permutation final guard (#9). Combined wall-time impact: +1-2 hours
+> on top of current 14-20 hour sweep envelope.
+
 1. **Top-K composite:** keep top 1,000 per (strategy_template, instrument, mode)
    from Stage 3
 2. **Deflated Sharpe Ratio** (Bailey & López de Prado, JPM 2014):
@@ -372,18 +379,101 @@ operator must HALT the sweep, modify the registry, restart the sweep
 3. **CPCV** (López de Prado, Adv ML in Finance 2018, Ch 12):
    S = 16 sub-periods, C(16,8) = 12,870 splits
    Embargo = max indicator lookback bars (NOT 1% of timeline)
-4. **PBO via CSCV** (Bailey-Borwein-LdP-Zhu, JCF 2017)
-5. **Romano-Wolf step-down** (Econometrica 73(4) 2005):
+4. **Reality Check / SPA** (White Econometrica 2000 + Hansen JBES 2005)
+   — **NEW per DEC-EXTREME-001:**
+   Tests the null hypothesis "the best strategy in the pool is no
+   better than random chance, given that we picked best-of-N". Closes
+   the data-snooping bias hole that DSR partially addresses but doesn't
+   eliminate. Two complementary variants run in sequence:
+   - **White's Reality Check:** stationary block bootstrap (Politis-Romano
+     1994), 10,000 resamples, block length L = ⌊1.75 × N^(1/3)⌋ for
+     daily-frequency Sharpe.
+   - **Hansen's SPA (Superior Predictive Ability):** improved variant
+     of Reality Check; addresses White's "irrelevant alternatives" issue
+     by re-centering the null distribution. Same 10,000 resamples.
+   Pass: SPA p-value < 0.05 (one-sided, upper).
+   Position in pipeline: AFTER CPCV (#3), BEFORE PBO (#5) — provides
+   independent confirmation of "real edge" before PBO's overfitting check.
+   Wall-time: ~10-20 minutes for top 1,000 candidates.
+5. **PBO via CSCV** (Bailey-Borwein-LdP-Zhu, JCF 2017)
+6. **Romano-Wolf step-down** (Econometrica 73(4) 2005):
    USE THIS, NOT Bonferroni. At N=10K, Bonferroni gives p ≈ 5×10⁻⁶ →
    rejects everything real.
-6. **Walk-Forward rolling** (NOT anchored):
-   2-year train, 6-month test, 3-month slide
-   ~16 walks across 5 years
-   Keep candidates with positive Sharpe in ≥12 of 16 walks
-7. **Lockbox:** reserve last **6 months** (Dec 2025 - May 2026) by
+7. **Walk-Forward — 3 variants, ALL must pass** (UPGRADED per DEC-EXTREME-001
+   from single-rolling to triple-variant for robustness):
+   - **(a) Rolling (was: single variant, now: variant 1 of 3):**
+     2-year train, 6-month test, 3-month slide
+     ~16 walks across 5 years
+     Pass: positive Sharpe in ≥12 of 16 walks
+   - **(b) Anchored (NEW per DEC-EXTREME-001):**
+     FIXED start at 2021-01-01, train window EXPANDS forward each walk,
+     test window = next 6 months, 3-month slide.
+     ~16 walks; pass criterion same as rolling.
+     Tests: does the strategy work when given progressively MORE training data?
+     If anchored fails but rolling passes → strategy is recency-dependent
+     (curve-fit to recent regime). Reject.
+   - **(c) Expanding (NEW per DEC-EXTREME-001):**
+     Train window starts at 1 year, EXPANDS forward each walk, test
+     window = next 6 months, 3-month slide.
+     ~14 walks; pass criterion same as rolling.
+     Tests: does the strategy require a minimum training window?
+     If expanding fails when train < 18 months but rolling passes →
+     strategy needs specific lookback duration → fragile.
+   - **Hard rule:** a candidate must pass ALL THREE variants (≥12 of 16
+     walks positive for rolling + anchored, ≥10 of 14 for expanding).
+     This is a STRICT AND. Failing any single variant → reject.
+   - Wall-time: 3× the original single-variant WF cost ≈ 30-60 min extra.
+8. **Lockbox:** reserve last **6 months** (Dec 2025 - May 2026) by
    default, NEVER seen by any prior stage. Code-enforced isolation:
-   any access path outside Stage 4.7 raises exception. Top 10
+   any access path outside Stage 4.8 raises exception. Top 10
    candidates tested ONCE.
+
+   **Adaptive window rule (DEC-LOCK-001, REVISED 2026-05-16 evening):**
+   If the default 6-month window has < 500 trades for a given combo,
+   the lockbox window auto-extends BACKWARDS in time (one trading day
+   at a time) until the combo accumulates ≥ 500 trades.
+   - If 500 trades cannot be reached within available history → REJECT
+     combo (insufficient evidence; mark `lockbox_status = "insufficient_n"`).
+   - The extended window is per-combo; different combos may end up
+     with different lockbox start dates.
+   - The "extended" portion is still NEVER seen by Stages 1-3 — the
+     extension consumes data from BEFORE the original training window,
+     not from the training window itself. This preserves the
+     held-out-data invariant.
+
+   Pass criteria:
+   - Lockbox trade count ≥ 500 (hard floor — combos failing this auto-rejected)
+   - Lockbox Sharpe within 30% of training
+   - MDD within 50% of training
+
+   Rationale: 6 months is the institutional standard (López de Prado
+   / Bailey pattern). At our 1-min × signal-driven trade frequency,
+   6 months typically yields ~100 trades → Sharpe SE 0.10 → 30%-drop
+   gate falls in noise → ~25% false-pass. Adaptive extension to ≥500
+   trades brings Sharpe SE below 0.05 without changing the institutional
+   default for high-frequency combos. Operator-preferred design
+   (2026-05-16 evening) — supersedes the earlier "18 months + 500"
+   proposal which was over-conservative.
+9. **Monte Carlo permutation test — final guard** (NEW per
+   DEC-EXTREME-001):
+   For each combo that survives the Lockbox (#8): randomly SHUFFLE the
+   entry signal positions in the test period 1,000 times. For each
+   shuffle, re-run the same exit logic (Mode A SL/TP or Mode B signal-
+   driven). Compute the Sharpe distribution under the null hypothesis
+   "entry signals are random; only the exit logic has edge".
+   - Pass: real-strategy Sharpe must beat ≥99% of shuffled Sharpes
+     (p < 0.01, one-sided upper tail).
+   - Why this matters: closes the "is the entry actually informative,
+     or could random entries with this exit logic look just as good?"
+     question. Surprisingly common failure mode for SL/TP-grid strategies
+     (Mode A) where the EXIT logic is doing all the work and the signal
+     mask is noise. Monte Carlo permutation is the ONLY test that
+     directly answers this.
+   - Wall-time: 1,000 shuffles × top 10 candidates = 10,000 backtests.
+     ~30-60 minutes.
+   - Failure mode: if a combo fails Monte Carlo but passes Lockbox →
+     flag as `signal_edge = "spurious"` — exit logic edge only. Do NOT
+     deploy.
 
    **Adaptive window rule (DEC-LOCK-001, REVISED 2026-05-16 evening):**
    If the default 6-month window has < 500 trades for a given combo,
@@ -757,7 +847,7 @@ Track 1), `metrics_computer`, `result_writer`.
 **VALIDATION GATE 7:**
 - Known-overfit synthetic strategy correctly rejected by DSR + PBO
 - Known-real synthetic strategy correctly accepted
-- Lockbox access from outside Stage 4.7 raises Exception
+- Lockbox access from outside Stage 4.8 raises Exception
 - Save report to `gate7_report.json`
 
 ### Phase 8: Stage 3 Optimizer (Week 14)
