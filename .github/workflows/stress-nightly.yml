@@ -68,6 +68,17 @@ jobs:
       - name: Install deps
         run: pip install -e ".[dev,data]"
 
+      - name: Install Rust toolchain (for fno_math wheel)
+        # `brutex.orchestrator.__init__` transitively imports
+        # `brutex.orchestrator.bloom`, which depends on the Rust-backed
+        # `fno_math` extension. Match the main CI test job's pattern
+        # (DEC-P0-050, ci.yml test job): install Rust stable first,
+        # then pip-install the maturin-built extension.
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install fno_math Rust extension
+        run: pip install ./rust/fno-math
+
       - name: Run stress suite
         env:
           STRESS_EVENTS: ${{ github.event.inputs.stress_events || '5000' }}
