@@ -52,7 +52,7 @@ Status legend:
 | 6 | bandit security | 0 high/critical | DEC-P0-001 (2026-05-17): kept `-l` (low+ — stricter than `-ll`). S104/S105/S108/S110/S311 removed from project-wide ruff `ignore` (S110 narrowed to `tests/` per-file-ignores); per-line noqa at 4 brutex/ sites with rationale | ✅ | none |
 | 7 | Code duplication | zero | DEC-P0-001 (2026-05-17): `\|\| true` REMOVED; jscpd narrowed to `brutex/` only at 3% threshold (tests/ legitimately repeat fixture patterns) | ✅ | Tighten threshold from 3% → 1% in a follow-up PR |
 | 7 | Dead code | zero | DEC-P0-001 (2026-05-17): `\|\| true` REMOVED; whitelist at `scripts/ci/vulture_whitelist.py` covers context-manager protocol, `__post_init__`, and `audit.verify_chain` | ✅ | Extend whitelist when CI surfaces real false positives |
-| 8 | Spec ↔ test crosswalk | spec sections → tests | `scripts/ci/spec_test_crosswalk.py` exists but `warn-and-continue` on missing spec section | 🟡 | Fail-closed: missing section = exit 1 |
+| 8 | Spec ↔ test crosswalk | spec sections → tests | **FAIL-CLOSED** (DEC-CROSSWALK-001 correction 2026-05-24): `scripts/ci/spec_test_crosswalk.py` now exits 1 if a spec-section regex fails to match. Env-var escape `CROSSWALK_ALLOW_STALE=1` for local script-iteration only (CI never sets it; verified `grep -rn CROSSWALK_ALLOW_STALE .github/` = 0). Failure message cites this row + MIGRATION.md entry #206 for actionable next steps. | 🟢 | Expansion to additionally cover `TRACK1_BACKTEST_SPEC.md` sections tracked separately |
 | 9 | Property tests | hypothesis | `tests/property/` runs with `-x` (stops on first fail) | ✅ runs, advisory mode | Add `--hypothesis-seed=0 --derandomize` for CI determinism |
 | 10 | Bug-fix regression test | required | PR template checkbox; no automation | 👁️ | Cannot be fully automated; reviewer discipline + PR template line |
 | 11 | 7 test types | all 7 | unit ✅, integration ✅, property ✅, golden ✅, bench ✅ (no ratio gate), mutation 🟡, stress 📋 | 🟡 | Add stress test job; wire bench ratio gate |
@@ -64,29 +64,32 @@ Status legend:
 | 17 | No hallucination | every claim cited | Golden Rule #1 in CLAUDE.md + PR template checkbox | 👁️ | Cannot be fully automated; reviewer + PR template |
 | 18 | Decision IDs | every locked decision | PR template requires DEC-ID + MIGRATION.md row | 👁️ | Reviewer-enforced via PR template |
 
-### Summary count (post DEC-STANDARDS-AUDIT-001, 2026-05-24)
+### Summary count (post DEC-CROSSWALK-001, 2026-05-24)
 
 | Status | Count of 21 sub-rows | % | Delta vs pre-audit |
 |---|---:|---:|---:|
-| 🟢 Fully enforced | **11** (rows 3, 4×2, 5, 6, 7×2, 9, 12, **13** ← was stale 📋, **15** ← was stale 📋) | **52%** | +2 (audit found 2 stale doc claims; gates were already live) |
-| 🟡 Partial (runs but threshold/advisory issues) | 4 (rows 1, 2, 8, 11) | 19% | unchanged |
-| 📋 Roadmap (not yet wired) | **3** (rows 5b [pylint standalone — ruff PL subset covers it], 14, 16) | **14%** | −2 (after the audit corrections) |
+| 🟢 Fully enforced | **12** (rows 3, 4×2, 5, 6, 7×2, **8** ← DEC-CROSSWALK-001 flipped from 🟡, 9, 12, **13** ← was stale 📋, **15** ← was stale 📋) | **57%** | +3 (audit found 2 stale doc claims + DEC-CROSSWALK-001 closed 1 PARTIAL) |
+| 🟡 Partial (runs but threshold/advisory issues) | 3 (rows 1, 2, 11) | 14% | −1 (row 8 closed by DEC-CROSSWALK-001) |
+| 📋 Roadmap (not yet wired) | 3 (rows 5b [pylint standalone — ruff PL subset covers it], 14, 16) | 14% | unchanged |
 | 👁️ Manual (PR template + reviewer) | 3 (rows 10, 17, 18) | 14% | unchanged |
 
 **Pre-audit numbers (kept for history):** 9 ✅ / 4 🟡 / 5 📋 / 3 👁️ → 43% / 19% / 24% / 14%.
 
-**Post-audit reality (DEC-STANDARDS-AUDIT-001):** 11 🟢 / 4 🟡 / 3 📋 / 3 👁️ → **52% / 19% / 14% / 14%**.
+**Post-audit reality (DEC-STANDARDS-AUDIT-001):** 11 🟢 / 4 🟡 / 3 📋 / 3 👁️ → 52% / 19% / 14% / 14%.
+
+**Post-DEC-CROSSWALK-001 reality (2026-05-24):** 12 🟢 / 3 🟡 / 3 📋 / 3 👁️ → **57% / 14% / 14% / 14%**.
 
 **The 3 genuinely remaining ROADMAP gaps that DO need code work:**
 1. **Row 5b — pylint standalone** — ruff PL subset already covers pylint-equivalent rules. Either (a) drop the standalone pylint decree (DEC-PYLINT-DROP-001) or (b) wire standalone pylint anyway. Recommend (a) since ruff PL is faster and more comprehensive.
 2. **Row 14 — Throughput canary 50 M/s absolute on CI** — ratio gate live (status 🟡 not 📋 strictly); absolute 50 M/s requires M4 Pro local-runner per documented shared-GHA flake-mitigation. ROADMAP: M4 Pro local-runner runbook + Phase 3 PyO3 kernel.
 3. **Row 16 — `brutex doctor` CLI** — genuinely missing; CLI module doesn't exist; needs to be built (target ~1 day effort). Tracked as **DEC-DOCTOR-001** for next PR.
 
-**The 4 PARTIAL items** (genuinely partial; not stale):
+**The 3 PARTIAL items remaining** (post DEC-CROSSWALK-001; genuinely partial; not stale):
 1. Row 1 — Coverage line 90% → 100% (legacy module backfill needed; tracked as DEC-COV-001)
 2. Row 2 — Coverage branch 90% → 100% (same as row 1)
-3. Row 8 — Spec↔test crosswalk warn-and-continue → fail-closed (one-line script change; tracked as DEC-CROSSWALK-001)
-4. Row 11 — 7 test types: stress test job missing (`tests/stress/` dir doesn't exist; tracked as DEC-STRESS-001)
+3. Row 11 — 7 test types: stress test job missing (`tests/stress/` dir doesn't exist; tracked as DEC-STRESS-001)
+
+**~~Row 8 — Spec↔test crosswalk warn-and-continue → fail-closed~~** — ✅ CLOSED by DEC-CROSSWALK-001 (2026-05-24). Row 8 is now 🟢. See MIGRATION.md entry #206.
 
 **The 3 MANUAL-REVIEWER items** cannot be automated (Golden Rule #1 hallucination check, bug-fix regression discipline, decision-ID enforcement); PR template + reviewer is the correct control.
 
@@ -179,7 +182,7 @@ Per Golden Rule #11. Every module obeys all 5:
 | Audit chain | `brutex doctor C2` | green | doctor doesn't exist | 📋 |
 | Conventional commit | scripts/ci/check-conventional-commits.sh | passes | enforced; current HEAD `ci+chore:` is REJECTED (lesson learned) | ✅ blocks |
 | MIGRATION.md entry | reviewer | every locked decision | PR template line | 👁️ |
-| Spec ↔ test crosswalk | scripts/ci/spec_test_crosswalk.py | all sections matched | warn-and-continue on missing section | 🟡 |
+| Spec ↔ test crosswalk | scripts/ci/spec_test_crosswalk.py | all sections matched | **fail-closed** (DEC-CROSSWALK-001, 2026-05-24); env-var `CROSSWALK_ALLOW_STALE=1` for local script-iteration only — CI never sets it | ✅ blocks |
 | Banned patterns | scripts/ci/scan-banned-patterns.sh | clean | narrow scope (e.g. pandas only checked in `brutex/math/`) | 🟡 |
 
 ---
