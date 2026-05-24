@@ -222,6 +222,24 @@ jobs:
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 2 (2026-05-24, MIGRATION.md entry #211):
+          # ratchet `brutex.universe` into the strict per-module 100%
+          # gate. `tests/unit/test_universe.py` has dedicated test
+          # classes for UnderlyingSpec (frozen dataclass), the V1
+          # indices tuple composition, the REFERENCE_ONLY partition,
+          # and the helper predicates (`is_index_underlying`,
+          # `is_in_scope`, `classify_underlying_kind`) — comprehensive
+          # coverage of every public function + every branch.
+          if compgen -G "tests/unit/test_universe.py" > /dev/null; then
+            pytest \
+              --cov=brutex.universe \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_universe.py
+          else
+            echo "(brutex.universe test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
