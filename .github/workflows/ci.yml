@@ -240,6 +240,42 @@ jobs:
           else
             echo "(brutex.universe test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 3 — `brutex.models` was tried in initial
+          # push but unit-tests + coverage gate failed at 100% (43
+          # branches in the module; test_models.py covers most but
+          # not all). Deferred to a follow-up PR that writes the
+          # missing tests first. See MIGRATION.md entry #212 honest
+          # envelope.
+          #
+          # DEC-COV-001 step 3 (continued): ratchet
+          # `brutex.adapters.dhan.timeconv` (IST/UTC conversion
+          # utility, 103 lines) — `tests/unit/test_dhan_timeconv.py`
+          # has 11 tests covering all conversion paths.
+          if compgen -G "tests/unit/test_dhan_timeconv.py" > /dev/null; then
+            pytest \
+              --cov=brutex.adapters.dhan.timeconv \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_dhan_timeconv.py
+          else
+            echo "(brutex.adapters.dhan.timeconv test file not present yet — gate inactive)"
+          fi
+          # DEC-COV-001 step 3 (continued): ratchet
+          # `brutex.adapters.dhan.options_constants` (lookup
+          # constants module, 99 lines) —
+          # `tests/unit/test_dhan_options_constants.py` has 15 tests
+          # covering every lookup helper.
+          if compgen -G "tests/unit/test_dhan_options_constants.py" > /dev/null; then
+            pytest \
+              --cov=brutex.adapters.dhan.options_constants \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_dhan_options_constants.py
+          else
+            echo "(brutex.adapters.dhan.options_constants test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
