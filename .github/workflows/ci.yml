@@ -481,6 +481,18 @@ jobs:
           else
             echo "(brutex.vocabulary.conflicts test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 17 (entry #232): brutex.notifications.telegram
+          # — surgical backfill of 27 missing lines + 7 partial branches.
+          # 15 new tests across 4 new classes (TestDefaultTransport,
+          # TestNotifierLifecycle, TestNotifierPublishFull, TestWorkerLoopAndDrain)
+          # exercise the urllib transport's success+error paths, worker
+          # start/stop lifecycle, queue.Full + queue.Empty branches, and
+          # drain's edge cases. Module: 210 stmts, 38 branches, 34 tests.
+          if compgen -G "tests/unit/test_notifications_telegram.py" > /dev/null; then
+            pytest --cov=brutex.notifications.telegram --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_telegram.py
+          else
+            echo "(brutex.notifications.telegram test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML

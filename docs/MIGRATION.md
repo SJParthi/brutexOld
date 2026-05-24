@@ -302,6 +302,15 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
+232. **DEC-COV-001 step 17 — `brutex.notifications.telegram` surgical backfill: 85.48% → 100%** (2026-05-24, operator directive: "yes go ahead with these also dude"). Strict-100% module count: **28 → 29**. **Largest single-module backfill so far** — 210 stmts, 38 branches, 27 missing lines + 7 partial branches closed by **15 new surgical tests across 4 new test classes**:
+
+    - **`TestDefaultTransport` (5 tests):** exercises the urllib-based `_default_transport` function — disabled config returns False (line 308); HTTP 200 via mocked `urllib.request.urlopen` (lines 326-330); `urllib.error.HTTPError` caught → False (lines 331-333); `urllib.error.URLError` caught → False (lines 334-336); `OSError` caught → False (lines 337-339).
+    - **`TestNotifierLifecycle` (4 tests):** `_start_worker` no-op when already running (line 402); `stop()` no-op when not running (line 414); `stop()` skips join when worker is None (419→exit branch); `__enter__` skips `_start_worker` when already running (424→426 branch).
+    - **`TestNotifierPublishFull` (1 test):** zero-capacity queue + pre-filled queue → publish hits `queue.Full` exception → increments `dropped_on_queue_full` counter (lines 463-466).
+    - **`TestWorkerLoopAndDrain` (5 tests):** worker loop handles `queue.Empty` via continue (lines 475-476); drain no-op when synchronous (line 519); drain returns when queue empties (521→exit happy path); worker loop while-False exit (472→exit) via direct call with `_running=False`; drain timeout-exit (521→exit deadline path) via non-draining queue + tiny timeout.
+
+    All tests use `MagicMock` + `patch` from `unittest.mock` to inject urllib behaviour; private-attr accesses guarded with `# pyright: ignore[reportPrivateUsage]` per DEC-P0-017. Verified locally with `--cov-fail-under=100`: 34 tests pass, module at 100% line + 100% branch coverage. **Decision ID:** DEC-COV-001 step 17. **Builds on:** steps 1-16.
+
 231. **DEC-DASHBOARD-LIVE-2/3/4 — 3 more funnel fields wired + PREVIEW DATA tooltip narrowed** (2026-05-24, operator directive: "go ahead with these also dude"). Per the §6.4 incremental swap-out pattern locked in `TRACK1_DASHBOARD_DESIGN.md`. Wires steps 1, 2, 3 of the horizontal funnel to the existing JS poller (write-once from DEC-DASHBOARD-LIVE-1, MIGRATION entry #226). No new code, no new tests — markup-only edits to `docs/dashboard/mockups/v29.html`:
 
     - **LIVE-2 · `step_1_cheap_prefilter`** — added `data-bind="step_1_cheap_prefilter"` to the `<span class="step-num">12M</span>` (line 2477). When sweep_funnel snapshot is non-null in `/api/v1/state`, the JS poller replaces "12M" with the live `step_1_cheap_prefilter` count.
