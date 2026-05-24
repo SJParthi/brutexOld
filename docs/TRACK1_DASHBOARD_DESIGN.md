@@ -264,6 +264,121 @@ either remove its hardcoded value OR mark the section with a smaller
 PREVIEW DATA badge persists until ALL sections in the current view
 are live-wired.
 
+### 6.4 Incremental swap-out pattern (Golden Rule #11 — frontend CDSA-I)
+
+**Operator decree 2026-05-24:** *"in the future when we do the fetch
+and pull the real data and its concepts design functionalities
+requirements then this frontend and its design should work precisely
+right even then also i will always say it as common dynamic scalable
+incremental approach to always modify and update right dude am i
+right bro?"*
+
+**Answer: YES — locked here as the frontend CDSA-I contract.**
+
+The v29 dashboard is **COMMON · DYNAMIC · SCALABLE · INCREMENTAL** on
+the frontend the same way Golden Rule #11 mandates it for the engine:
+
+| CDSA-I pillar | How v29 satisfies it on the frontend |
+|---|---|
+| **COMMON** | One source of truth chain: this doc → `v29.html` → `app.py`. Every dashboard PR updates the spec + mockup together. No copy-paste between mockup HTML and live HTML (when live wiring lands, the mockup file IS the live template — same DOM IDs + class names). |
+| **DYNAMIC** | Adding a new KPI / funnel step / filter card never re-architects. New `.f25-card` slot = new `<div>` + entry in the `SweepFunnelSnapshot` schema. New rule card = new `.rule-card.v29-collapse` block + entry in the rules array of the state snapshot. The CSS animation vocabulary (v22-v29) is open-ended — `v30+` blocks extend, never rewrite. |
+| **SCALABLE** | Same markup renders Day-1 (12.6M trial space → 1 winner) and Phase-10 (730B → 1). The 33B in the v29 horizontal funnel is the Phase-10 MAXIMUM, not a hardcoded claim — at Day 1 the same `.funnel-horizontal` block renders `12.6M → 1.5M → 150K → 10K → 300 → 8 → 1`. CSS font-size shrink + glow on final winner adapt automatically because they're keyed to position-in-sequence, not value-magnitude. |
+| **INCREMENTAL** | **Swap-out happens one field at a time, never big-bang.** See the 6-step incremental swap-out sequence below. The PREVIEW DATA badge tooltip narrows scope on each step until it can be removed entirely. The mockup file (`docs/dashboard/mockups/v29.html`) stays as the visual reference even after live wiring — the design lock survives the data swap. |
+
+#### Incremental swap-out sequence (per field)
+
+When the engine finishes wiring a field, follow this 6-step pattern.
+**One field at a time, every step verifiable.**
+
+| Step | Action | Verifiable by |
+|---|---|---|
+| 1 | Extend `DashboardState` schema in `brutex/dashboard/app.py` with the new field (e.g. add `SweepFunnelSnapshot.step_0_all_candidates: int`). | `mypy --strict brutex` passes; `tests/unit/test_dashboard_state.py` extended. |
+| 2 | Wire the WebSocket fan-out + REST endpoint to publish the new field every N seconds. | `tests/integration/test_dashboard_e2e.py` extended. |
+| 3 | Replace the field's hardcoded value in `docs/dashboard/mockups/v29.html` with `<span data-bind="step_0_all_candidates">33B</span>` (the `data-bind` attribute is the JS subscriber's hook; the inner text stays as the fallback if the WS connection drops). | `grep -c "data-bind" docs/dashboard/mockups/v29.html` increases by 1. |
+| 4 | Add JS subscriber that on WS message updates every `[data-bind="X"]` element's `textContent` to `snapshot.X`. The first such subscriber added covers ALL future fields (write once). | E2E test: load page, send WS message with funnel snapshot, assert DOM text updates. |
+| 5 | Narrow the PREVIEW DATA badge tooltip: from "Numbers are placeholder MOCKUP" → "Funnel step 0 is LIVE; remaining fields placeholder." Keep narrowing as more fields wire. | Visual check + crosswalk against this spec. |
+| 6 | When ALL fields are live-wired and the tooltip is empty of mockup caveats, remove the PREVIEW DATA badge from the markup entirely. The mockup file becomes the live template (DOM IDs + class names + bindings unchanged from the locked design). | `grep -c "preview-badge" docs/dashboard/mockups/v29.html` returns 0. PR title: "remove PREVIEW DATA badge — all dashboard fields live-wired (DEC-DASHBOARD-LIVE-N)". |
+
+**What this DOESN'T require:**
+- Rewriting the mockup HTML structure.
+- Touching the v22-v29 CSS animation vocabulary.
+- Changing the v26 motion-first meaning rules.
+- Reskinning the v28-hybrid palette tokens.
+- Re-architecting the three-mode rules (operator/share/reel).
+
+**What this DOES require:**
+- One new `data-bind` attribute per field in the mockup HTML.
+- One Python schema field per data point in `app.py`.
+- One JS line of subscriber code per future field (after the first subscriber is added; the loop is `qsa('[data-bind]').forEach(...)`).
+- One MIGRATION.md entry per swap-out PR with the `DEC-DASHBOARD-LIVE-N` ID.
+
+**Forbidden during incremental swap-out:**
+- Replacing the mockup file with a brand-new HTML structure.
+- Swapping all fields at once ("big-bang" — violates the audit-replay contract per Golden Rule #7).
+- Removing the PREVIEW DATA badge while ANY field is still hardcoded.
+- Changing the palette tokens or animation classes during a wiring PR (palette/animation changes go in separate `DEC-DASHBOARD-VNN` PRs).
+
+#### Schema-extension example (hypothetical first swap-out / DEC-DASHBOARD-LIVE-1)
+
+If the next wiring PR wires `SweepFunnelSnapshot.step_0_all_candidates` first:
+
+```python
+# brutex/dashboard/app.py — schema extension (Step 1)
+@dataclass(slots=True)
+class SweepFunnelSnapshot:
+    """Funnel survival counts. INCREMENTAL: fields wire one at a time."""
+    step_0_all_candidates: int    # Step 1 of this swap-out: schema gains the field
+    # Remaining fields commented out until their own swap-out PR.
+    # step_1_cheap_prefilter: int
+    # step_2_real_edge_test: int
+    # ...
+    sweep_id: str
+    snapshot_at: str
+```
+
+```html
+<!-- docs/dashboard/mockups/v29.html — markup binding (Step 3) -->
+<div class="funnel-horizontal">
+  <span class="step-num" data-bind="step_0_all_candidates">33B</span>
+  <span class="fn-arrow">→</span>
+  <span class="step-num">12M</span>  <!-- still hardcoded; future PR -->
+  ...
+</div>
+```
+
+```js
+// First subscriber addition (Step 4) — write once, covers all future fields
+ws.onmessage = (evt) => {
+  const snap = JSON.parse(evt.data);
+  document.querySelectorAll('[data-bind]').forEach(el => {
+    const key = el.getAttribute('data-bind');
+    if (snap[key] !== undefined) {
+      el.textContent = formatNumber(snap[key]);  // 33_000_000_000 → "33B"
+    }
+  });
+};
+```
+
+After this PR merges:
+- Step 0 of the funnel is LIVE.
+- Remaining 7 funnel steps + all combo cards + equity curve still placeholder.
+- PREVIEW DATA badge tooltip narrowed: "Step 0 LIVE; remaining placeholder."
+
+The next wiring PR (`DEC-DASHBOARD-LIVE-2`) repeats the 6-step pattern
+for `step_1_cheap_prefilter`. And so on. **Incremental, never big-bang.**
+
+#### Why this matters
+
+Without this pattern, swap-out would either:
+- **Be one giant PR** that rewrites every dashboard binding in one commit (violates audit-replay; if any field is wrong, the whole dashboard is broken).
+- **Drift the mockup from the live** so the canonical reference rots and `docs/dashboard/mockups/v29.html` becomes a museum piece while the real dashboard diverges.
+
+The 6-step incremental pattern keeps the mockup AS the live template
+(only difference: live has the WS subscriber JS attached). Future
+sessions and reviewers see ONE file as the design truth, with a clear
+audit trail of which fields wired when (one MIGRATION entry per
+swap-out PR).
+
 ---
 
 ## 7. PREVIEW DATA badge (v29.1) — Golden Rule #1
