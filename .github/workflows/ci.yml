@@ -355,6 +355,31 @@ jobs:
           else
             echo "(brutex.indicators.fib_levels test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 11 (entry #221): 3-module batch
+          # following step 6's triple-add precedent (3 errors modules).
+          # All 3 modules already at 100% line+branch in their existing
+          # dedicated test files — no new test code written.
+          # 11a · brutex.calendars.nse (91 stmts, 18 branches, 50 tests)
+          #       NSE market calendar — trading sessions, Diwali muhurat
+          if compgen -G "tests/unit/test_calendar_nse.py" > /dev/null; then
+            pytest --cov=brutex.calendars.nse --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_calendar_nse.py
+          else
+            echo "(brutex.calendars.nse test file not present yet — gate inactive)"
+          fi
+          # 11b · brutex.adapters.dhan.auth (53 stmts, 12 branches, 17 tests)
+          #       Dhan auth header builder + secret redaction
+          if compgen -G "tests/unit/test_dhan_auth.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.auth --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_auth.py
+          else
+            echo "(brutex.adapters.dhan.auth test file not present yet — gate inactive)"
+          fi
+          # 11c · brutex.options.expiry_calendar (41 stmts, 6 branches, 47 tests)
+          #       Weekly + monthly expiry date computation
+          if compgen -G "tests/unit/test_expiry_calendar.py" > /dev/null; then
+            pytest --cov=brutex.options.expiry_calendar --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_expiry_calendar.py
+          else
+            echo "(brutex.options.expiry_calendar test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
