@@ -293,6 +293,21 @@ jobs:
           else
             echo "(brutex.strategies.types test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 5 (2026-05-24, MIGRATION.md entry #215):
+          # ratchet `brutex.config.ports`. 465 lines pure-Python config
+          # module; tests/unit/test_config_ports.py has 52 tests
+          # covering reserved-port allocation, validation, conflict
+          # detection. Self-verifying: if not 100% the gate fails here.
+          if compgen -G "tests/unit/test_config_ports.py" > /dev/null; then
+            pytest \
+              --cov=brutex.config.ports \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_config_ports.py
+          else
+            echo "(brutex.config.ports test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
