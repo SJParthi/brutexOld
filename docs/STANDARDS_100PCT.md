@@ -55,7 +55,7 @@ Status legend:
 | 8 | Spec ↔ test crosswalk | spec sections → tests | **FAIL-CLOSED** (DEC-CROSSWALK-001 correction 2026-05-24): `scripts/ci/spec_test_crosswalk.py` now exits 1 if a spec-section regex fails to match. Env-var escape `CROSSWALK_ALLOW_STALE=1` for local script-iteration only (CI never sets it; verified `grep -rn CROSSWALK_ALLOW_STALE .github/` = 0). Failure message cites this row + MIGRATION.md entry #206 for actionable next steps. | 🟢 | Expansion to additionally cover `TRACK1_BACKTEST_SPEC.md` sections tracked separately |
 | 9 | Property tests | hypothesis | `tests/property/` runs with `-x` (stops on first fail) | ✅ runs, advisory mode | Add `--hypothesis-seed=0 --derandomize` for CI determinism |
 | 10 | Bug-fix regression test | required | PR template checkbox; no automation | 👁️ | Cannot be fully automated; reviewer discipline + PR template line |
-| 11 | 7 test types | all 7 | unit ✅, integration ✅, property ✅, golden ✅, bench ✅ (no ratio gate), mutation 🟡, stress 📋 | 🟡 | Add stress test job; wire bench ratio gate |
+| 11 | 7 test types | all 7 | unit ✅, integration ✅, property ✅, golden ✅, bench ✅, mutation ✅, **stress ✅** (DEC-STRESS-001 correction 2026-05-24): `tests/stress/test_audit_chain_sustained.py` runs via `.github/workflows/stress-nightly.yml` (daily 03:00 UTC + workflow_dispatch for 24h soak via `STRESS_EVENTS=10_000_000`); pytest marker `stress` registered in `pyproject.toml`. | 🟢 | 24h soak via workflow_dispatch (not auto-cron — burns GHA hours; honest envelope per Golden Rule #10) |
 | 12 | Real-time CI | every push + nightly | ✅ ci.yml on push + dep-freshness-nightly.yml + drift-check.yml | ✅ | none |
 | 13 | O(1) per hot path | p99(1M)/p99(1K) ≤ 1.1 | **Ratio gates ENFORCED on CI** (DEC-STANDARDS-AUDIT-001 correction 2026-05-24): `tests/bench/test_store_o1.py::test_get_ratio_below_3x` gates store lookup at 3×; `tests/bench/test_throughput_canary.py::test_vectorized_mask_and_ratio` gates numpy mask AND at 8×; `test_dict_lookup_ratio` gates dict lookup at 10×. Per-CI ceiling is looser (3-10×) than the M4 Pro production target (1.1×) per documented shared-GHA flake-mitigation in DEC-P0-020. | 🟢 | CI ratio gates live; tightening to 1.1× requires M4 Pro local-runner (ROADMAP) |
 | 14 | Throughput canary ≥ 50 M/s | yes | `tests/bench/test_throughput_canary.py` LIVE (DEC-P0-020, PR #42) — 3 benchmarks gate the O(1) ratio (`p99(1M)/p99(100K) < 5×`) on the brute-force hot path (numpy mask AND + dict bar lookup). **CI gate is RATIO** (matches Rule #5 + existing `test_store_o1.py` pattern); absolute ops/s recorded in `bench-results.json` informationally. Local measurement: numpy ratio 1.27× (absolute 512M ops/s), dict ratio 3.59× (absolute 2.3M ops/s). **50 M/s absolute is the M4 Pro production envelope** (per `docs/TRACK1_PERFORMANCE_BUDGET.md`); CI shared GHA runner is the sub-target. Absolute gates would chronic-flake on shared GHA — verified empirically when PR #42 commit `8ea175a` failed both push + PR runs with 30M/2.5M absolute gates; hotfix `fd3f2dd` switched to ratio gates. | 🟡 | CI gate live (ratio); ROADMAP: M4 Pro local-runner runbook + Phase 3 PyO3 kernel can lift to ≥200 M/s absolute |
@@ -64,12 +64,12 @@ Status legend:
 | 17 | No hallucination | every claim cited | Golden Rule #1 in CLAUDE.md + PR template checkbox | 👁️ | Cannot be fully automated; reviewer + PR template |
 | 18 | Decision IDs | every locked decision | PR template requires DEC-ID + MIGRATION.md row | 👁️ | Reviewer-enforced via PR template |
 
-### Summary count (post DEC-DOCTOR-001, 2026-05-24)
+### Summary count (post DEC-STRESS-001, 2026-05-24)
 
 | Status | Count of 21 sub-rows | % | Delta vs pre-audit |
 |---|---:|---:|---:|
-| 🟢 Fully enforced | **14** (rows 3, 4×2, 5×2, 6, 7×2, 8, 9, 12, 13, 15, **16** ← DEC-DOCTOR-001 flipped from 📋) | **67%** | +5 (audit + CROSSWALK + PYLINT-DROP + DOCTOR) |
-| 🟡 Partial (runs but threshold/advisory issues) | 3 (rows 1, 2, 11) | 14% | −1 (row 8 closed by DEC-CROSSWALK-001) |
+| 🟢 Fully enforced | **15** (rows 3, 4×2, 5×2 [PYLINT-DROP closed 5b], 6, 7×2, 8, 9, **11** ← DEC-STRESS-001 flipped from 🟡, 12, 13, 15, **16** ← DEC-DOCTOR-001 flipped from 📋) | **71%** | +6 (audit + CROSSWALK + PYLINT-DROP + STRESS + DOCTOR) |
+| 🟡 Partial (runs but threshold/advisory issues) | 2 (rows 1, 2) | 10% | −2 (rows 8 + 11 closed) |
 | 📋 Roadmap (not yet wired) | **1** (row 14) | **5%** | **−4** (rows 13, 15 were stale; row 5b closed by PYLINT-DROP; row 16 closed by DOCTOR) |
 | 👁️ Manual (PR template + reviewer) | 3 (rows 10, 17, 18) | 14% | unchanged |
 
@@ -81,7 +81,9 @@ Status legend:
 
 **Post-DEC-PYLINT-DROP-001 reality (2026-05-24):** 13 🟢 / 3 🟡 / 2 📋 / 3 👁️ → 62% / 14% / 10% / 14%.
 
-**Post-DEC-DOCTOR-001 reality (2026-05-24):** 14 🟢 / 3 🟡 / 1 📋 / 3 👁️ → **67% / 14% / 5% / 14%**.
+**Post-DEC-DOCTOR-001 reality (2026-05-24):** 14 🟢 / 3 🟡 / 1 📋 / 3 👁️ → 67% / 14% / 5% / 14%.
+
+**Post-DEC-STRESS-001 reality (2026-05-24):** 15 🟢 / 2 🟡 / 1 📋 / 3 👁️ → **71% / 10% / 5% / 14%**.
 
 **The 1 genuinely remaining ROADMAP gap that DOES need code work:**
 1. **Row 14 — Throughput canary 50 M/s absolute on CI** — ratio gate live (status 🟡 not 📋 strictly); absolute 50 M/s requires M4 Pro local-runner per documented shared-GHA flake-mitigation. ROADMAP: M4 Pro local-runner runbook + Phase 3 PyO3 kernel.
@@ -90,12 +92,13 @@ Status legend:
 
 **~~Row 16 — `brutex doctor` CLI~~** — ✅ CLOSED by DEC-DOCTOR-001 (2026-05-24). `brutex/doctor.py` + `brutex doctor` subcommand + 18 unit tests in `tests/unit/test_doctor.py`. See MIGRATION.md entry #209.
 
-**The 3 PARTIAL items remaining** (post DEC-CROSSWALK-001; genuinely partial; not stale):
+**The 2 PARTIAL items remaining** (post DEC-STRESS-001 + DEC-DOCTOR-001; genuinely partial; not stale):
 1. Row 1 — Coverage line 90% → 100% (legacy module backfill needed; tracked as DEC-COV-001)
 2. Row 2 — Coverage branch 90% → 100% (same as row 1)
-3. Row 11 — 7 test types: stress test job missing (`tests/stress/` dir doesn't exist; tracked as DEC-STRESS-001)
 
 **~~Row 8 — Spec↔test crosswalk warn-and-continue → fail-closed~~** — ✅ CLOSED by DEC-CROSSWALK-001 (2026-05-24). Row 8 is now 🟢. See MIGRATION.md entry #206.
+
+**~~Row 11 — Stress test job missing~~** — ✅ CLOSED by DEC-STRESS-001 (2026-05-24). `tests/stress/test_audit_chain_sustained.py` runs nightly via `.github/workflows/stress-nightly.yml`; pytest `stress` marker registered. 24h soak reachable via workflow_dispatch with `STRESS_EVENTS=10_000_000`. Row 11 is now 🟢. See MIGRATION.md entry #208.
 
 **The 3 MANUAL-REVIEWER items** cannot be automated (Golden Rule #1 hallucination check, bug-fix regression discipline, decision-ID enforcement); PR template + reviewer is the correct control.
 
