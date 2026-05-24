@@ -13,28 +13,28 @@ Track 2 (already designed in `docs/track2/`) translates winning signals
 into priced option trades using expired-options data — that's where
 realism + costs land.
 
-BruteX Track 1 targets a **1.095 trillion (1.095 × 10¹²) parameter
-combination** total candidate space (per **DEC-P0-040 Q-01** lock —
-730 B baseline × 1.5 Mode C multiplier per DEC-MODE-001), swept via a
+BruteX Track 1 targets a **730 billion (7.30 × 10¹¹) parameter
+combination** total candidate space (per **DEC-P0-040 Q-01** lock,
+revised by **DEC-MODE-002** entry #201 which removed Mode C), swept via a
 5-stage funnel on a single Apple M4 Pro laptop, with bit-identical
 reproducibility and institutional-grade statistical filtering.
 
-**Trial-count taxonomy (DEC-P0-043 reconciliation):** The "trial" count
-varies by funnel stage and by what is being measured. Three load-bearing
-numbers, in different units:
+**Trial-count taxonomy (DEC-P0-043 reconciliation, revised DEC-MODE-002):**
+The "trial" count varies by funnel stage and by what is being measured.
+Three load-bearing numbers, in different units:
 
 | # | Meaning | Count | Where measured |
 |---|---|---|---|
-| 1 | **Total candidate space** explored across Stages 1A → 1B → 2 → 2.5 → 3 → 4 | **1.095 T** (730 B × 1.5 Mode C) | spec headline + DEC-P0-040 Q-01 |
-| 2 | **Stage 2 hot-path backtests** (where most compute lives) | ~33 B baseline × 1.5 Mode C ≈ **50 B** | `docs/TRACK1_PERFORMANCE_BUDGET.md` SLA math (33 B figures pre-date Mode C; multiply by 1.5 for current envelope) |
+| 1 | **Total candidate space** explored across Stages 1A → 1B → 2 → 2.5 → 3 → 4 | **730 B** (2 modes A+B post-DEC-MODE-002) | spec headline + DEC-P0-040 Q-01 |
+| 2 | **Stage 2 hot-path backtests** (where most compute lives) | **~33 B** | `docs/TRACK1_PERFORMANCE_BUDGET.md` SLA math |
 | 3 | **Final stored Parquet rows** (DSR-passed Stage 4 survivors) | **10² – 10⁴** | `docs/TRACK1_BACKTEST_SPEC.md` Stage 4 lockbox table |
 
-The headline "1.095 T" is the project's total exploration commitment.
-The perf-budget "33 B" was the Stage 2 hot-path figure published before
-Mode C was added; updated estimates should multiply by 1.5 to account for
-Mode C inclusion. The storage estimate of "50-100 GB after compression"
-applies to **stored Parquet rows (final survivors only)**, NOT to the
-total trial space, which would be ~22 TB raw at 200 bytes/trial.
+The headline "730 B" is the project's total exploration commitment
+post-Mode-C-removal (DEC-MODE-002, 2026-05-23). Pre-DEC-MODE-002 the
+spec had a 1.5× Mode C multiplier; that multiplier is now removed.
+The storage estimate of "50-100 GB after compression" applies to
+**stored Parquet rows (final survivors only)**, NOT to the total trial
+space, which would be ~15 TB raw at 200 bytes/trial.
 
 **Timeline expectation: 16 weeks of phased build.** Do not attempt the
 full sweep until Phase 9.5 pilot passes.
@@ -145,15 +145,18 @@ Strategy mask count:
   TOTAL   = 2,893,111 unique masks
 ```
 
-Full trial count:
+Full trial count (post-DEC-MODE-002 — Mode C removed):
 ```
   2,893,111 masks
   ×       2 directions (bull, bear)
   ×       3 instruments (NIFTY 50, BANKNIFTY, SENSEX)
   ×      21 timeframes  (1m, 2-15m every minute, 30m, 60m, 120m, 180m, 240m, 1d)
-  ×       2 modes        (Mode A SL/TP grid, Mode B signal-exit)
-  ×   2,000 SL/TP grid cells (Mode A only; SL ∈ [5,200] paisa × 40 steps,
-                              TP ∈ [10,500] paisa × 50 steps)
+  ×       2 modes        (Mode A SL/TP grid, Mode B signal-exit;
+                          Mode C removed by DEC-MODE-002 2026-05-23)
+  ×   2,001 cells per (mask × mode) on average — Mode A: 2,000 SL/TP grid cells
+                                                  (SL ∈ [5,200] paisa × 40 steps,
+                                                   TP ∈ [10,500] paisa × 50 steps);
+                                                  Mode B: 1 cell (no grid)
   ≈   730 BILLION trials BEFORE any pruning
 ```
 
@@ -235,15 +238,19 @@ spot timeline by timestamp alignment.
   - Total grid: **2,000 cells per mask**
 - **Mode B** — signal-driven exit:
   - Exit on opposite signal, or candle reversal pattern, or forced 15:20 IST.
-- **Mode C** — no-early-exits (NEW 2026-05-16, operator decision):
-  - NO stop-loss, NO take-profit, NO signal-driven exit.
-  - Exit ONLY at forced 15:20 IST.
-  - The "pure ride-to-forced-exit" baseline.
-  - Tests whether early exits help or hurt vs holding to 15:20.
   - Cardinality: 1 cell per mask (no grid).
-  - Brute-force evaluates ALL THREE modes per strategy mask, so each
-    mask produces 3 strategy variants (Mode A grid + Mode B + Mode C).
-  - Logged as DEC-MODE-001 in MIGRATION.md.
+  - May ride a full session if no opposite signal fires (worst-case
+    horizon = 360 bars for 1-minute base).
+- **Mode C — REMOVED (DEC-MODE-002, 2026-05-23):**
+  - Was: NO SL, NO TP, NO signal-exit — ride to forced 15:20 ONLY.
+  - **Removed by operator directive** after review: Mode C is purely
+    time-based with no active risk management between entry and exit,
+    making it incompatible with the operator's stated risk-discipline
+    aims (tight per-trade SL, controlled intra-trade drawdown).
+  - See DEC-MODE-002 (MIGRATION.md entry #201) for the supersession
+    record. DEC-MODE-001 (entry #113) is marked SUPERSEDED.
+- **Brute-force evaluates 2 modes per strategy mask** (was 3 pre-DEC-MODE-002),
+  so each mask produces 2 strategy variants (Mode A grid + Mode B signal-exit).
 
 ## Plugin Add/Remove Policy (NEW 2026-05-16, DEC-PLUGIN-001)
 

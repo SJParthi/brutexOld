@@ -164,8 +164,10 @@ exact replay. Decision **DEC-REPRO-001** added to MIGRATION.md.
 #### 3.2.2 CPCV embargo too small
 
 **Flaw:** Embargo = max indicator lookback misses (i) label horizon
-and (ii) intra-day autocorrelation. For Mode C (ride-to-15:20)
-horizon is 6h = 360 bars.
+and (ii) intra-day autocorrelation. For Mode B ride-to-15:20 when
+no opposite signal fires (Mode C removed by DEC-MODE-002 2026-05-23),
+horizon is 6h = 360 bars — the embargo formula still applies because
+Mode B can run a full session.
 
 **Patch:** `embargo = max(max_indicator_lookback, max_trade_horizon_bars, 1_trading_day_in_bars)`.
 Patched in `TRACK1_BACKTEST_SPEC.md §"Stage 4"`. Decision **DEC-STAT-001**.

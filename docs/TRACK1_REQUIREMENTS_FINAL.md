@@ -23,7 +23,7 @@
 
 | # | Requirement | Verdict | Evidence | Risk if wrong |
 |---|---|---|---|---|
-| C-01 | **Total sweep trial count** | ❌ CONFLICT | TRACK1_BACKTEST_SPEC.md says **730B** (line 138). PERFORMANCE_BUDGET.md + VERIFICATION_PYRAMID.md say **33B**. MIGRATION DEC-MODE-001 adds Mode C → **1.095T**. 22×-33× discrepancy. | Every wall-time / storage / Bloom / SLA number computed against wrong denominator. |
+| C-01 | **Total sweep trial count** | ✅ RESOLVED (DEC-MODE-002, 2026-05-23) | TRACK1_BACKTEST_SPEC.md headline = **730 B** (Mode C removed; was 1.095T = 730B × 1.5 Mode C). PERFORMANCE_BUDGET.md + VERIFICATION_PYRAMID.md "33B" = Stage 2 hot-path subset. Three numbers reconciled: 730B (total) · 33B (Stage 2 hot-path) · 10²-10⁴ (final Parquet rows). DEC-MODE-001 reversed. | Resolved by removing the Mode C 1.5× multiplier per operator directive 2026-05-23. |
 | C-02 | **Storage after Zstd-9 compression** | ❌ CONFLICT | Spec: "~50-100 GB"; MIGRATION #203: "2.5 TB compressed for 33B"; derived: 730B × 200B × 5× = 29 TB. Three numbers; only one can be true. | 8 TB SSD blown by 7× → sweep aborts. |
 | C-03 | **Throughput canary 50 M/s gate** | ❌ CONFLICT | CLAUDE.md §2 rule 12: "throughput canary ≥ 50 M/s". Actual SLA: 80-150K trials/sec (3 orders of magnitude lower). CI: ratio-only ≤ 8.0 (absolute never asserted). | Gate is permanently red OR permanently green (no one reads); headline metric unfalsifiable. |
 | C-04 | **`combo_hash` reproducibility** | ❌ CONFLICT | Spec § Identity mandates 9 inputs: `strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_hash`. Code at `brutex/strategies/combo.py:60-106` hashes only 4: `strategy_id ‖ params ‖ data_snapshot_hash ‖ code_commit_sha`. **Missing 5 of 9.** | Two combos differing only in direction/instrument/tf/mode collide → reproducibility broken on the first cross-axis sweep. |
@@ -114,7 +114,7 @@
 
 | # | Question | Why it matters | Recommendation |
 |---|---|---|---|
-| Q-01 | Lock canonical trial count at **730B** or **33B** or **1.095T**? | Drives every wall-time / storage / Bloom / SLA number | 1.095T (most honest — includes Mode C) |
+| Q-01 | Lock canonical trial count at **730B** or **33B** or **1.095T**? | Drives every wall-time / storage / Bloom / SLA number | ✅ **ANSWERED: 730 B** (DEC-MODE-002, 2026-05-23 — Mode C removed; was 1.095T pre-removal). 33B is the Stage 2 hot-path subset, not the total. |
 | Q-02 | Hash function: **sha256** (current code) or **blake3** (current spec)? | Cross-component byte-equality replay | blake3 (faster, spec-aligned), migrate code |
 | Q-03 | Stage 1B coarse_score: keep next-bar-sign correlation (in-sample peeking) OR rewrite to purged-CV? | DSR contamination risk | Rewrite to purged-CV |
 | Q-04 | DSR effective-N: keep magic `10⁷` or derive from cluster size? | Project rejects everything vs accepts noise | Derive cluster-effective-N (Bailey-Lopez de Prado appendix) |
