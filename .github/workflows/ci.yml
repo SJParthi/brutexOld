@@ -396,6 +396,23 @@ jobs:
           else
             echo "(brutex.options.strike_grid test file not present yet — gate inactive)"
           fi
+          # DEC-COV-001 step 13 (entry #224): 2-module double-add of
+          # SUBSTANTIAL modules from the second-pass probe. Both
+          # verified at 100% with existing dedicated test files.
+          # 13a · brutex.adapters.protocol (54 stmts, 14 branches, 24 tests)
+          #       Adapter protocol — Strategy + signature contracts
+          if compgen -G "tests/unit/test_adapter_protocol.py" > /dev/null; then
+            pytest --cov=brutex.adapters.protocol --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_adapter_protocol.py
+          else
+            echo "(brutex.adapters.protocol test file not present yet — gate inactive)"
+          fi
+          # 13b · brutex.data.partition (79 stmts, 24 branches, 32 tests)
+          #       Lake partition path computation (year/month/symbol/tf)
+          if compgen -G "tests/unit/test_data_partition.py" > /dev/null; then
+            pytest --cov=brutex.data.partition --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_partition.py
+          else
+            echo "(brutex.data.partition test file not present yet — gate inactive)"
+          fi
           # DEC-COV-001 step 14 (entry #225): 2-module UNDEFERRAL of
           # deferred-list veterans via surgical-test backfill.
           # 14a · brutex.models (94 stmts, 22 branches, 43 tests)
