@@ -323,9 +323,12 @@ mod tests {
     #[test]
     fn test_infrastructure_unavailable_has_no_source() {
         use std::error::Error;
+        // Was "Valkey/tv-valkey:6379" before DEC-CLEANUP-001 (2026-05-24).
+        // Service example updated to QuestDB which is still a valid
+        // infrastructure dependency in the compat layer.
         let err = ApplicationError::InfrastructureUnavailable {
-            service: "Valkey".to_string(),
-            endpoint: "tv-valkey:6379".to_string(),
+            service: "QuestDB".to_string(),
+            endpoint: "tv-questdb:8812".to_string(),
         };
         assert!(err.source().is_none());
     }

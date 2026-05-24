@@ -292,8 +292,45 @@ superseded.
 
 148. **DEC-P0-010 — pyright per-test re-promotion: 4 of 6 categories restored to error (PR #32)** (operator decree 2026-05-17 "go ahead dude"). Closes DEC-P0-005 P1 item #6 partially. **Source-pattern fixes** (16 errors → 0 across 5 files): (a) `tests/integration/test_execution_driver.py::_seed_lake` signature `list[float]` → `Sequence[float]` (kills 5 list-variance errors via covariant Sequence); (b) `tests/integration/test_dashboard_e2e.py::client` fixture return type `TestClient` → `Generator[TestClient]` (kills 2 generator errors); (c) `tests/redteam/test_redteam_premerge_guard.py` added `dict[str, Any]` annotation on rollup test data (kills 6 dict-index errors); (d) `tests/unit/test_execution_costs.py:224` added `isinstance(exponent, int)` guard before `-exponent` (kills 1 operator error on `int | Literal['n','N','F']`); (e) `tests/unit/test_strategies_registry.py::_DecoStrat` added `ClassVar[StrategyMeta]` annotation + `__init__(params)` to satisfy Strategy protocol (kills 1 protocol error) + targeted `# pyright: ignore[reportUntypedClassDecorator]` on the decorator line with documented Protocol-detection-limitation rationale (kills 1 untyped-decorator error). **Library changes:** `brutex/strategies/registry.py::register_strategy` rewritten with generic `TypeVar` (`_StrategyT = TypeVar("_StrategyT", bound=type[Strategy])`) so the decorator preserves concrete class type (vs erasing to `type[Strategy]`). PEP 695 syntax `def f[T](...)` skipped per UP047 because mypy 1.x doesn't yet support it; ruff noqa added with rationale. **4 categories restored to error** in tests/: `reportCallIssue`, `reportGeneralTypeIssues`, `reportUntypedClassDecorator`, `reportOperatorIssue`. **2 categories DEFERRED** (`reportArgumentType` 56 errors + `reportAttributeAccessIssue` 17 errors): downgraded to "warning" only, with honest comment block in `pyproject.toml` explaining the 73 remaining errors are pre-existing test-fixture patterns (test_dashboard_state.py parametrize loose-typing + test_adapter_protocol.py protocol-stub access + test_fakes patterns) requiring ~3 days of dedicated test-fixture refactoring. Tracked as P1 follow-up #6b for a dedicated future PR. **Honest envelope (Golden Rule #10):** "partial completion" per Agent 1 of PR #25 review prediction — the 6-category re-promotion was the right direction but full closure on `reportArgumentType` requires a separate focused effort. PR #32 closes 4 of 6 cleanly; 2 deferred with explicit deferral + tracking. **Local verification:** ruff/format/mypy strict/pyright strict ALL GREEN; pytest 1511 passed.
 
-202. **DEC-EXTREME-001 — Stage 4 expanded from 7 → 9 filters: Reality Check / SPA + WF 3-variants + Monte Carlo permutation final guard** (2026-05-23 evening, operator directive "we need to create the same extreme institutional level backtesting approach... similar to quant funds like Renaissance Two Sigma Jane Street"). **Adds three statistical filters to Stage 4** to close the residual gap between BruteX and top-tier quant-fund methodology (López de Prado / Bailey / White / Hansen patterns).
+203. **DEC-CLEANUP-001 — Valkey/Redis residue removed from `rust/fno-math/compat` + `brutex/config/ports.py`** (2026-05-24, operator directive "yes do this cleanup also dude pokay?"). Removes tickvault-era residue that no longer applies to BruteX. Per **DEC-P0-026** (retired the tickvault co-development layer), BruteX is a self-contained Track 1 backtest engine with no co-development relationship to any other repo. Per **CLAUDE.md §5**, the BruteX storage stack is **Parquet + DuckDB + LMDB** — no in-memory cache layer (no Redis, no Valkey, no Memcached).
 
+    **What was leftover (now removed):**
+    - `ValkeyConfig` struct in `rust/fno-math/src/compat/config.rs` (4 fields + `default_valkey_password()` helper).
+    - `valkey: ValkeyConfig` field in the `ApplicationConfig` root struct.
+    - `valkey: ValkeyConfig { ... }` block in the Rust test fixture.
+    - Hardcoded `"Valkey"` + `"tv-valkey:6379"` strings in the `compat/error.rs` test fixture.
+    - `tv-valkey: 6379` doc line in `brutex/config/ports.py` rationale block.
+    - `6379` entry in `TICKVAULT_RESERVED_PORTS` set.
+    - `test_valkey_6379_reserved` assertion in `tests/unit/test_config_ports.py`.
+
+    **What was preserved:**
+    - The rest of `compat/config.rs` (TradingConfig · DhanConfig · WebSocketConfig · QuestDbConfig · PrometheusConfig · etc.) is unchanged.
+    - The 11 other entries in `TICKVAULT_RESERVED_PORTS` (80, 443, 3000, 3001, 3100, 8080, 8812, 9000, 9009, 9090, 16686) all stay.
+    - The `InfrastructureUnavailable` error variant + its test — only the example service name was changed to `"QuestDB"` + `"tv-questdb:8812"`.
+
+    **CI verification:**
+    - `cargo build` in `rust/fno-math/`: clean (26.4s build time, no new warnings).
+    - `cargo test` in `rust/fno-math/`: **459 unit tests + 1 integration test + 0 doctests = all green**.
+    - Python verification: `6379 in TICKVAULT_RESERVED_PORTS → False` (as expected post-cleanup), all 11 other reserved ports unchanged.
+    - `tests/unit/test_config_ports.py::test_valkey_6379_NOT_reserved` (RENAMED + flipped assertion) verifies the removal.
+
+    **Files changed (4):**
+    - `rust/fno-math/src/compat/config.rs` — −16 LOC (struct + field + fixture entry + helper fn) + 3 explanatory comments.
+    - `rust/fno-math/src/compat/error.rs` — 2-line example change + 3 explanatory comments.
+    - `brutex/config/ports.py` — −2 LOC + 4 explanatory comments.
+    - `tests/unit/test_config_ports.py` — assertion flipped + renamed + 5 explanatory comments.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ **REAL:** Rust crate compiles clean; all 459 Rust tests pass; Python port-set verified empirically; no consumer of `ValkeyConfig` exists in `brutex/` (zero grep hits); rationale matches DEC-P0-026 + CLAUDE.md §5 storage stack.
+    - ✅ **REAL:** Inline source comments at every removal site point to this entry (`Removed by DEC-CLEANUP-001 — see docs/MIGRATION.md entry #203`).
+    - 🟡 **PARTIAL:** The rest of `compat/config.rs` still carries tickvault-shaped types (WebSocketConfig, DhanConfig tick stream params, etc.). Scope was narrowed to `ValkeyConfig` only per the operator directive ("Valkey leftover"). Broader compat-layer reduction is a separate decision if/when warranted.
+    - 📋 **ROADMAP:** A follow-on `DEC-CLEANUP-002` could prune more of the compat layer if ops review confirms BruteX never needs any tickvault compat types. For now, kept conservative.
+
+    **Golden Rules touched:** #1 (no hallucination — every cited line/file/struct verified to exist; build + tests prove no broken consumer) · #2 (single source of truth — this entry is the authoritative removal record) · #3 (scope lock — narrows, doesn't expand) · #4 (reproducibility — Rust test fixture behavior identical) · #10 (honest envelope) · #11 (COMMON — removes dead code path; SCALABLE — no hot-path impact; AUTOMATED — CI build + tests catch any future re-introduction).
+
+    **Decision ID:** DEC-CLEANUP-001. **Builds on:** DEC-P0-026 (retired tickvault co-development layer). **Lands alongside:** DEC-EXTREME-001 (entry #202, PR #93) — both reach main in the same session.
+
+202. **DEC-EXTREME-001 — Stage 4 expanded from 7 → 9 filters: Reality Check / SPA + WF 3-variants + Monte Carlo permutation final guard** (2026-05-23 evening, operator directive "we need to create the same extreme institutional level backtesting approach... similar to quant funds like Renaissance Two Sigma Jane Street"). **Adds three statistical filters to Stage 4** to close the residual gap between BruteX and top-tier quant-fund methodology (López de Prado / Bailey / White / Hansen patterns).
     **Honest reality check delivered to operator (Golden Rule #1):** Top quant funds (Renaissance Medallion, Two Sigma, AQR) do NOT win 9 out of 10 trades. Renaissance Medallion's reported trade win rate is ~50.75% per Greg Zuckerman's "The Man Who Solved the Market" (verified Bloomberg-source citation). Their edge comes from massive trade volume × small per-trade edge × ruthless risk management × portfolio of 100+ uncorrelated strategies × ALTERNATIVE DATA we cannot replicate (satellite, credit-card, web-scraping). What we CAN replicate from their playbook is **statistical discipline** — the rigor that filters fluke strategies before deployment. This decision adds the missing layers.
 
     **The 3 additions (pipeline order matters — they go between existing filters):**
