@@ -302,6 +302,29 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
+226. **DEC-DASHBOARD-LIVE-1 — First live data-bind: `SweepFunnelSnapshot` schema + `step_0_all_candidates` wired into the v29 mockup** (2026-05-24, operator directive: "dashboard design need real code real implementation right dude"). First execution of the **incremental swap-out pattern locked in `TRACK1_DASHBOARD_DESIGN.md §6.4`** — exactly the 6-step sequence documented there:
+
+    - **Step 1 — Schema:** Added `SweepFunnelSnapshot` dataclass to `brutex/dashboard/app.py` with all 13 fields per the spec §6.2 (step_0 through step_9 + winners_top_n + sweep_id + snapshot_at). Frozen-by-default? No — `slots=True` only; the orchestrator replaces the whole snapshot each tick (immutable VALUES via replacement, not in-place mutation). Defaults zeroed/empty so partial constructions are allowed during early sweep stages.
+    - **Step 1b — State + update method:** Added `DashboardState.sweep_funnel: SweepFunnelSnapshot | None` (default None) + `update_sweep_funnel(snapshot)` method that installs the snapshot under the state lock (per the existing thread-safe pattern used by `update_rate_limit`, `update_telegram`, `update_worker`).
+    - **Step 2 — Serialization:** `DashboardState.to_dict()` emits `"sweep_funnel": asdict(self.sweep_funnel)` when set, `None` otherwise. The `/api/v1/state` REST endpoint passthrough is unchanged; the new field rides the existing JSONResponse.
+    - **Step 3 — Markup binding:** Added `data-bind="step_0_all_candidates"` attribute to the 33B `<span class="step-num">` in the horizontal funnel block at `docs/dashboard/mockups/v29.html:2476`. Inner text stays as `"33B"` — the fallback before the first poll lands (per §6.4 step 3 + §6.0 cold-start contract).
+    - **Step 4 — JS poller:** Added the **write-once** poller block at the end of v29.html (after the v29 punch-pack JS). Uses `setInterval(pollState, 2000)` per §6.0 cadence (2s while RUNNING). On each tick: `fetch('/api/v1/state')` → `funnel = snap.sweep_funnel` → if non-null, walks `document.querySelectorAll('[data-bind]')` and replaces `textContent` with `formatNumber(funnel[key])`. `formatNumber` compacts to B/M/K (33000000000 → "33B"). **All future DEC-DASHBOARD-LIVE-N PRs add data-bind attrs to more spans — no JS edit needed; this poller covers them automatically** (the loop is data-driven, not field-listed).
+    - **Step 5 — PREVIEW DATA badge:** unchanged in this PR. The badge tooltip will narrow scope in a follow-up doc PR once 2+ fields are wired (e.g., "Step 0 LIVE; remaining placeholder"). Per the §7 contract, the badge stays as long as ANY field is hardcoded.
+    - **Step 6 — Badge removal:** ROADMAP (not this PR) — happens when all 13 fields are wired AND the brute-force sweep actually populates them.
+
+    **Tests added (5 in `tests/unit/test_dashboard_state.py::TestSweepFunnel`):** default snapshot zeroed; state's sweep_funnel starts None; update_sweep_funnel replaces under lock; to_dict serializes when set; to_dict emits None by default.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: schema lives in production code, not mockup.
+    - ✅ REAL: REST endpoint serializes the field.
+    - ✅ REAL: JS poller actually polls (not WebSocket — backtest doesn't need streaming per §6.0).
+    - ✅ REAL: ONE field (step_0_all_candidates) actually data-bound on the mockup.
+    - 🟡 PARTIAL: brute-force sweep loop does NOT yet call `update_sweep_funnel()` — that lives in `brutex/strategies/sweep.py` (Phase 3 work) and arrives via a future PR.
+    - 🟡 PARTIAL: 12 other funnel fields (step_1 through winners_top_n) have schema entries but no data-bind on the mockup yet — DEC-DASHBOARD-LIVE-2/3/... will wire them one at a time.
+    - 📋 ROADMAP: PREVIEW DATA badge tooltip narrowing per field; badge removal when all wired.
+
+    **Decision ID:** DEC-DASHBOARD-LIVE-1. **Builds on:** DEC-DASHBOARD-V29-001 (entry #222). **First execution of:** the §6.4 incremental swap-out pattern. **Locks in:** the data-driven dashboard contract — the 33B is now configurable per sweep, not a hardcoded marketing claim.
+
 225. **DEC-COV-001 step 14 — 2-module UNDEFERRAL via surgical-test backfill: `brutex.models` (from step 3) + `brutex.config.ports` (from step 5)** (2026-05-24, operator directive: "go ahead and fix and implement everything entirely dude don't miss anything dude even no hallucination or illusion"). Strict-100% module count: **+2 (two of the 3 deferred modules unblocked).** **Only 1 deferred module remaining** (`brutex.adapters.dhan.types` from step 8 — needs API field-shape verification before retry).
 
     **14a — `brutex.models` UNDEFERRED:** Reverses step 3's deferral. The original "43 branches" worry was over-stated — actual probe showed module at **98.28% with only 1 line missing** (line 203, the `BruteXError.__str__` branch that returns `safe_message` if set). Added **2 surgical tests** in `tests/unit/test_models.py::TestErrorHierarchy`:
