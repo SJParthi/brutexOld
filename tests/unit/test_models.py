@@ -224,6 +224,14 @@ class TestErrorHierarchy:
     def test_tick_size_format_error_is_brutex_error(self) -> None:
         assert issubclass(TickSizeFormatError, BruteXError)
 
+    def test_brutex_error_str_returns_safe_message_when_set(self) -> None:
+        err = BruteXError("internal detail with PII", safe_message="generic public message")
+        assert str(err) == "generic public message"
+
+    def test_brutex_error_str_falls_back_to_args_when_safe_message_none(self) -> None:
+        err = BruteXError("public-safe arg")
+        assert str(err) == "public-safe arg"
+
 
 # ────────────────────────────────────────────────────────────────────────
 # normalise_tick_size — the format drift handler

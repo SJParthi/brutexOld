@@ -302,6 +302,25 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
+225. **DEC-COV-001 step 14 — 2-module UNDEFERRAL via surgical-test backfill: `brutex.models` (from step 3) + `brutex.config.ports` (from step 5)** (2026-05-24, operator directive: "go ahead and fix and implement everything entirely dude don't miss anything dude even no hallucination or illusion"). Strict-100% module count: **+2 (two of the 3 deferred modules unblocked).** **Only 1 deferred module remaining** (`brutex.adapters.dhan.types` from step 8 — needs API field-shape verification before retry).
+
+    **14a — `brutex.models` UNDEFERRED:** Reverses step 3's deferral. The original "43 branches" worry was over-stated — actual probe showed module at **98.28% with only 1 line missing** (line 203, the `BruteXError.__str__` branch that returns `safe_message` if set). Added **2 surgical tests** in `tests/unit/test_models.py::TestErrorHierarchy`:
+    - `test_brutex_error_str_returns_safe_message_when_set` — constructs `BruteXError("internal", safe_message="public")`, asserts `str(err) == "public"`. Covers line 203.
+    - `test_brutex_error_str_falls_back_to_args_when_safe_message_none` — constructs `BruteXError("arg")`, asserts `str(err) == "arg"`. Pins the false-branch contract.
+    Module now at 100% line + 100% branch (94 stmts, 22 branches, 43 tests).
+
+    **14b — `brutex.config.ports` UNDEFERRED:** Reverses step 5's deferral. Same probe showed module at **94.63% with only 3 lines + 2 partial branches missing**. Added **5 surgical tests** across 4 test classes:
+    - `TestDetectEnvironment::test_generic_docker_when_dockerenv_exists` — mocks `os.path.exists` returning True → DOCKER (covers line 166).
+    - `TestDetectLanIp::test_none_when_loopback_ip` — mocks socket `getsockname` returning `127.0.0.1` → None (covers line 204).
+    - `TestPortBinding::test_assert_port_available_passes_for_free_port` — free port → no exception (covers branch 439→exit).
+    - `TestPortBinding::test_check_port_free_handles_non_eaddrinuse_oserror` — `OSError(EACCES)` → False (covers line 411).
+    - `TestPortConfigUrls::test_dashboard_urls_localhost_only_when_no_lan_ip_detected` — bound 0.0.0.0 + `detect_lan_ip()` returns None + `lan_ip=None` → urls = [localhost only] (covers branch 299→303).
+    Module now at 100% line + 100% branch (117 stmts, 32 branches, 57 tests).
+
+    **Demonstrates the "deferred" list is NOT permanent** — careful test backfill (READ the source, identify the missing lines, write surgical tests for the REAL branches — NOT guessing at API signatures, which is what tripped steps 3/5/8 originally) unblocks the ratchet. **Decision ID:** DEC-COV-001 step 14. **Builds on:** steps 1-13. **Reverses:** step 3's deferral of `brutex.models` + step 5's deferral of `brutex.config.ports`.
+
+(Entries #222 = dashboard lock and #224 = step 13 reserved on parallel branches PR #113 and PR #115; will land on merge.)
+
 223. **DEC-COV-001 step 12 — 2-module double-add: `brutex.options.lot_size_history` + `brutex.options.strike_grid` ratcheted to strict-100%** (2026-05-24, operator directive "Track A — keep ratcheting" via AskUserQuestion). Strict-100% module count grows 16 → 18. Drains the remaining 100%-already candidates from this session's broader probe sweep (the two smaller ones held back from step 11's triple-add). Same conservative pattern as steps 9 / 10 / 11 — lift modules with pre-existing comprehensive test files at 100%, no new test code:
     - **12a · `brutex.options.lot_size_history`** — 26 stmts, 2 branches, 33 tests in `test_lot_size_history.py`. NSE F&O lot-size history table — derives Track 2 position sizing from index/stock + expiry timestamp lookup.
     - **12b · `brutex.options.strike_grid`** — 14 stmts, 0 branches, 24 tests in `test_strike_grid.py`. ATM-relative strike grid generator — produces `"ATM"`, `"ATM±N"` strike addressing per Dhan rolling-options spec (max ±10 index near-expiry, ±3 otherwise per CLAUDE.md §6).

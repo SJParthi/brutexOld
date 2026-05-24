@@ -14,9 +14,10 @@ Covers:
 
 from __future__ import annotations
 
+import errno
 import os
 import socket
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from brutex.config.ports import (
@@ -270,6 +271,12 @@ class TestDetectEnvironment:
         clean_env.setenv("PYCHARM_HOSTED", "1")
         assert detect_environment() == RuntimeEnvironment.CLAUDE_COWORK
 
+    def test_generic_docker_when_dockerenv_exists(self, clean_env: pytest.MonkeyPatch) -> None:
+        """Mock /.dockerenv presence → returns DOCKER (covers line 166)."""
+        with patch("brutex.config.ports.os.path.exists") as mock_exists:
+            mock_exists.return_value = True
+            assert detect_environment() == RuntimeEnvironment.DOCKER
+
 
 # ────────────────────────────────────────────────────────────────────────
 # detect_lan_ip — best-effort, no network assertion
@@ -287,6 +294,15 @@ class TestDetectLanIp:
         with patch("brutex.config.ports.socket.socket") as mock_sock:
             mock_sock.return_value.__enter__.return_value.connect.side_effect = OSError(
                 "fake network error"
+            )
+            assert detect_lan_ip() is None
+
+    def test_none_when_loopback_ip(self) -> None:
+        """Mock getsockname() → loopback 127.x.x.x → returns None (covers line 204)."""
+        with patch("brutex.config.ports.socket.socket") as mock_sock:
+            mock_sock.return_value.__enter__.return_value.getsockname.return_value = (
+                "127.0.0.1",
+                0,
             )
             assert detect_lan_ip() is None
 
@@ -335,6 +351,21 @@ class TestPortConfigUrls:
         )
         urls = cfg.dashboard_urls(lan_ip="192.168.1.42")
         # Bound to loopback → no LAN URL even if LAN IP is available
+        assert urls == ["http://localhost:9080/"]
+
+    def test_dashboard_urls_localhost_only_when_no_lan_ip_detected(self) -> None:
+        """Bound to 0.0.0.0 but neither lan_ip arg nor detect_lan_ip() returns
+        an IP — urls list collapses to localhost only (covers branch 299→303)."""
+        cfg = PortConfig(
+            host_bind="0.0.0.0",
+            dashboard=9080,
+            metrics=9081,
+            jupyter=9888,
+            ray_dashboard=9265,
+            environment=RuntimeEnvironment.TERMINAL,
+        )
+        with patch("brutex.config.ports.detect_lan_ip", return_value=None):
+            urls = cfg.dashboard_urls(lan_ip=None)
         assert urls == ["http://localhost:9080/"]
 
     def test_metrics_url(self) -> None:
@@ -432,6 +463,18 @@ class TestPortBinding:
                 assert_port_available(port=bound_port, service="dashboard", host="127.0.0.1")
         finally:
             s.close()
+
+    def test_assert_port_available_passes_for_free_port(self) -> None:
+        """Happy path — free port → no exception (covers branch 439→exit)."""
+        assert_port_available(port=49153, service="dashboard")
+
+    def test_check_port_free_handles_non_eaddrinuse_oserror(self) -> None:
+        """Permission denied or other OSError → returns False (covers line 411)."""
+        with patch("brutex.config.ports.socket.socket") as mock_sock:
+            ctx = MagicMock()
+            ctx.bind.side_effect = OSError(errno.EACCES, "Permission denied")
+            mock_sock.return_value.__enter__.return_value = ctx
+            assert check_port_free(80) is False
 
 
 # ────────────────────────────────────────────────────────────────────────
