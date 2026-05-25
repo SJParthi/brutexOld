@@ -516,6 +516,18 @@ jobs:
           else
             echo "(brutex.observability.sla test file not present yet — gate inactive)"
           fi
+          # DEC-WATCHDOG-001 (2026-05-25, MIGRATION entry #240):
+          # ratchet brutex.observability.watchdog (the hung-worker
+          # heartbeat detector) into the strict per-module 100% gate.
+          # 20 unit tests use a FakeClock to deterministically cover
+          # the HEALTHY↔HUNG state machine + per-callback exception
+          # isolation. Closes 2026-05-25 audit row 17 (watchdog was
+          # MISSING).
+          if compgen -G "tests/unit/test_observability_watchdog.py" > /dev/null; then
+            pytest --cov=brutex.observability.watchdog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_watchdog.py
+          else
+            echo "(brutex.observability.watchdog test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML

@@ -335,6 +335,38 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+240. **DEC-WATCHDOG-001 — hung-worker detector with heartbeat registry + per-worker hysteresis** (2026-05-25, operator directive: "yes bro defintiely dude" → continue ratcheting). Closes 2026-05-25 audit row 17 (watchdog was MISSING — third of the 5 capabilities CLAUDE.md §11 AUTOMATED rule promises).
+
+    **New module:** `brutex/observability/watchdog.py` (42 stmts, 4 branches, 100% line + branch).
+
+    - **`Watchdog` dataclass** — `(timeout_seconds, on_hung, on_recovery, clock=time.monotonic)`. Tracks per-worker last-heartbeat timestamps in a dict; `check_once()` walks the registry on the caller's cadence.
+    - **`register(name)`** — explicit declaration (sets initial state HEALTHY, last-beat=now). Useful when the operator wants a worker to be eligible for the timeout check before its first real heartbeat.
+    - **`beat(name)`** — record a heartbeat. Auto-registers unknown names. Calling this after a HUNG state ⇒ the next `check_once()` fires the recovery callback.
+    - **`state_of(name)`** — return HEALTHY or HUNG; raises KeyError for unknown names.
+    - **`workers()`** — sorted tuple of registered names (deterministic, useful for tests + audit).
+    - **Hysteresis built-in.** Steady HUNG ⇒ callback fires ONCE on the edge. Operator's Telegram client doesn't get spammed.
+    - **Monotonic clock.** Default is `time.monotonic`; tests inject a `FakeClock` so the suite is fast + deterministic (no `time.sleep` anywhere). Wall-clock backjumps (NTP, DST) can't false-recover a hung worker.
+    - **Golden Rule #10 graceful degradation** — callback exceptions caught + logged.
+    - **Constructor validates `timeout_seconds > 0`** — zero/negative timeouts would mean "always hung" or "never hung", both bug-traps; explicit ValueError.
+
+    **New test file:** `tests/unit/test_observability_watchdog.py` (20 tests across 4 classes):
+
+    - `TestConstruction` (3 tests) — rejects 0 and negative timeouts; no workers initially.
+    - `TestRegistrationAndBeat` (4 tests) — register sets HEALTHY, beat auto-registers, state_of unknown raises, workers() returns sorted.
+    - `TestCheckOnceTransitions` (7 tests) — recent beat → no event, stale beat → HUNG, steady HUNG fires only once, beat-then-check → recovery, oscillation (3 cycles → 3+3 events), multi-worker independence, register-without-beat → eventually HUNG.
+    - `TestCallbackFailuresIsolated` (6 parametrised) — on_hung × OSError/ValueError/RuntimeError + on_recovery × OSError/ValueError/RuntimeError.
+
+    **CI gate:** new strict per-module 100% gate added after the SLA gate.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: hung detection + recovery is now testable + bit-deterministic via FakeClock.
+    - ✅ REAL: 100% line + branch coverage, callback isolation across 6 exception types.
+    - ✅ REAL: monotonic clock prevents wall-clock-jump false recovery.
+    - 🟡 PARTIAL: NO production caller has instantiated `Watchdog` yet. Once a phase-runner step (or a scheduler) hooks `wd.beat(worker_id)` into the existing worker loops, the dead-man's switch is armed.
+    - 📋 ROADMAP: L3 audit-log replay oracle is the last of the 6 solo-closable gaps from the 2026-05-25 audit.
+
+    **Decision ID:** DEC-WATCHDOG-001. **Builds on:** DEC-TELEGRAM-WIRING-001 (#238) + DEC-SLA-DETECTOR-001 (#239) — together they form the AUTOMATED pillar's alerting half. Auto-resume + L3 replay are the remaining halves.
+
 239. **DEC-SLA-DETECTOR-001 — rule-driven SLA breach detector with hysteresis + caller-supplied callbacks** (2026-05-25, operator directive: "yes bro defintiely dude" → continue ratcheting the 4 remaining gaps). Closes 2026-05-25 honest-audit row 19 (SLA alerting was MISSING — no detector watched thresholds, despite NFR-OBS-003 mentioning SLA tracking + CLAUDE.md §11 listing it in the AUTOMATED rule).
 
     **New module:** `brutex/observability/sla.py` (63 stmts, 10 branches, 100% line + branch).
