@@ -115,9 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     changed_files = [f for f in files_blob.splitlines() if f.strip()]
 
     if touches_tests(changed_files):
-        print(
-            f"✅ bug-fix PR '{title[:60]}' touches tests/ — regression test present"
-        )
+        print(f"✅ bug-fix PR '{title[:60]}' touches tests/ — regression test present")
         return 0
 
     # Bug-fix without tests. Fail-closed unless override is set.
