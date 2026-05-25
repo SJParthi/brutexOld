@@ -302,6 +302,23 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
+236. **DEC-M4PRO-ABSOLUTE-001 — M4 Pro absolute-throughput gate stub (`bench-m4pro.yml` + `test_throughput_absolute.py`)** (2026-05-25, operator directive: "Add stub today"). Closes STANDARDS_100PCT.md §1 row 14 partial-status closure path. CLAUDE.md §8 names the M4 Pro 14-core / 48 GB / 8 TB SSD as the production envelope; CLAUDE.md §2 rule 12 + STANDARDS row 14 mandate a **≥ 50 M ops/s** absolute throughput floor. Existing `tests/bench/test_throughput_canary.py` enforces only the **ratio** (p99(N=1M) / p99(N=100K) ≤ 8×) because shared GHA runners chronic-flake any absolute assertion per DEC-P0-020. This entry adds the absolute floor on a self-hosted runner, dormant until the operator registers the M4 Pro runner.
+
+    **Two-file stub:**
+    - `tests/bench/test_throughput_absolute.py` (~210 lines) — `TestM4ProAbsoluteThroughput::test_numpy_mask_and_meets_50m_ops_per_sec` asserts `ops_per_sec >= 50_000_000` only when `BRUTEX_M4PRO_ABS=1` is set; otherwise skips with a clear reason. Also adds `TestGateMachinery` (5 tests, always-run) verifying the env-var decoder is strict: only the literal string `"1"` (after `strip()`) activates the gate, so `BRUTEX_M4PRO_ABS=true|yes|0|false` all leave it dormant. Floor constant `M4PRO_ABSOLUTE_FLOOR_OPS_PER_SEC = 50_000_000` is pinned by a unit test against the operator decree.
+    - `.github/workflows/bench-m4pro.yml` — `runs-on: [self-hosted, macos, m4pro]`, triggers on push (paths-filtered to bench + workflow), pull_request, workflow_dispatch, and daily 11:00 UTC = 16:30 IST post-market. Sets `BRUTEX_M4PRO_ABS=1` in the env. Steps: Python 3.12 setup → pip install dev extras → `maturin develop --release` on `rust/fno-math` → `pytest tests/bench/test_throughput_absolute.py`.
+
+    **Activation path:** Operator registers M4 Pro at GitHub → sjparthi/brutex → Settings → Actions → Runners → "New self-hosted runner" (macOS, labels `self-hosted, macos, m4pro`). Next push or daily cron triggers the workflow; absolute gate activates with no further code change.
+
+    **Verified locally:** 10 gate-machinery tests pass + 1 absolute-gate test (skipped without env, passed when `BRUTEX_M4PRO_ABS=1` set; >50M ops/s achievable even on this Linux container so M4 Pro will easily clear). ruff + mypy strict GREEN.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: stub files land and pass in shared CI today (skip-by-default behaviour proven). Gate decoder is strict per `TestGateMachinery` (no accidental activation via `BRUTEX_M4PRO_ABS=true`).
+    - 🟡 PARTIAL: STANDARDS row 14 remains 🟡 until the runner is registered. The closure-path PR exists; the closure is operator-side.
+    - 📋 ROADMAP: full row 14 close requires (a) runner online, (b) first successful M4 Pro run posted in the audit log.
+
+    **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
+
 235. **DEC-COMBO-HASH-UNIQUENESS-001 — explicit "no duplicate combo emitted" property test for `brutex.strategies.combo.combo_hash`** (2026-05-25, operator directive: "ratchet the 6 solo-closable gaps"). Closes the gap identified in the 2026-05-25 honest-audit table row 13 (uniqueness) — the existing `tests/property/test_dedup_hash_properties.py` exercises the orchestrator's SHA256 `_content_hash` for `WorkItem` ingest dedup, but **never touches the actual 9-field BLAKE3 combo identity hash** mandated by `TRACK1_BACKTEST_SPEC.md §"Identity (hash inputs)"` / FR-BF-003 / NFR-UNIQ-001. Adds `tests/property/test_combo_hash_uniqueness.py` (23 Hypothesis tests across 6 invariant classes):
 
     - **Determinism** (2 tests) — same 9 inputs → same digest, three invocations agree.

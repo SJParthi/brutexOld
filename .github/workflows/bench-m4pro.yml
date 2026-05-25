@@ -1,0 +1,116 @@
+# bench-m4pro.yml — Absolute-throughput gate for the M4 Pro runner.
+#
+# Per CLAUDE.md §8 (hardware envelope: Apple M4 Pro 14-core / 48 GB / 8 TB SSD)
+# and STANDARDS_100PCT.md §1 row 14, the operator's "100% standards" decree
+# targets ≥ 50 M ops/s for the brute-force mask-AND hot path on M4 Pro.
+#
+# Shared GitHub Actions runners have noisy cache-cliff behaviour that
+# chronic-flakes any absolute ops/s assertion (DEC-P0-020 honest envelope).
+# So the absolute gate lives ONLY on the M4 Pro self-hosted runner.
+#
+# Activation
+# ----------
+# This workflow is harmless on a freshly-cloned repo: it requires both a
+# self-hosted runner labelled `m4pro` AND the env var `BRUTEX_M4PRO_ABS=1`.
+# Until the operator registers the runner, every run sits in the GitHub
+# "queued" state and the test would skip anyway via pytest.mark.skipif
+# in tests/bench/test_throughput_absolute.py. Zero impact on shared CI.
+#
+# Once the operator registers the runner per:
+#   GitHub → sjparthi/brutex → Settings → Actions → Runners → "New self-hosted runner"
+#   → macOS → register with labels: self-hosted, macos, m4pro
+# the next push triggers this workflow and the absolute gate activates.
+#
+# Decision: DEC-M4PRO-ABSOLUTE-001 (2026-05-25, MIGRATION #236).
+
+name: bench-m4pro
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+      - "feat/**"
+      - "fix/**"
+    paths:
+      - "tests/bench/test_throughput_absolute.py"
+      - "tests/bench/test_throughput_canary.py"
+      - ".github/workflows/bench-m4pro.yml"
+      - "brutex/vocabulary/**"
+      - "rust/fno-math/**"
+  pull_request:
+    paths:
+      - "tests/bench/test_throughput_absolute.py"
+      - "tests/bench/test_throughput_canary.py"
+      - ".github/workflows/bench-m4pro.yml"
+  workflow_dispatch:
+  schedule:
+    # Daily 11:00 UTC = 16:30 IST (post-market). Catches CPU/OS/thermal
+    # regressions even when no code changed.
+    - cron: "0 11 * * *"
+
+concurrency:
+  group: bench-m4pro-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  m4pro-absolute-throughput:
+    # Gated to the self-hosted M4 Pro runner. If no runner with this label
+    # set is online the job sits in "queued" indefinitely — the operator
+    # can disable the workflow if registration is delayed.
+    runs-on: [self-hosted, macos, m4pro]
+    timeout-minutes: 10
+
+    env:
+      # The literal "1" activates the absolute gate per
+      # tests/bench/test_throughput_absolute.py _m4pro_gate_active().
+      BRUTEX_M4PRO_ABS: "1"
+      PYTHONHASHSEED: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show runner identity
+        run: |
+          echo "::group::Runner info"
+          uname -a
+          sw_vers || true
+          sysctl -n hw.model || true
+          sysctl -n hw.ncpu || true
+          echo "::endgroup::"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install brutex with dev extras
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Build fno_math (Rust kernel)
+        run: |
+          . .venv/bin/activate
+          pip install maturin
+          cd rust/fno-math
+          maturin develop --release
+
+      - name: Run absolute-throughput gate
+        run: |
+          . .venv/bin/activate
+          # -p no:cacheprovider keeps the runner's $HOME clean between runs.
+          pytest tests/bench/test_throughput_absolute.py -q --tb=short -p no:cacheprovider
+
+      - name: Print summary
+        if: always()
+        run: |
+          echo "::notice::M4 Pro absolute-throughput gate ran on ${{ runner.name }}"
+          echo "::notice::Floor: 50 M ops/s (operator decree, STANDARDS row 14)"
