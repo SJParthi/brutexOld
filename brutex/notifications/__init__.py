@@ -18,6 +18,10 @@ from brutex.notifications.telegram import (
     TelegramNotifier,
     TelegramSeverity,
 )
+from brutex.notifications.wiring import (
+    get_or_start_notifier,
+    make_pipeline_event_subscriber,
+)
 
 __all__ = [
     "TelegramBucket",
@@ -26,4 +30,6 @@ __all__ = [
     "TelegramEventKind",
     "TelegramNotifier",
     "TelegramSeverity",
+    "get_or_start_notifier",
+    "make_pipeline_event_subscriber",
 ]

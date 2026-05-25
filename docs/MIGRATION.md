@@ -335,6 +335,31 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+238. **DEC-TELEGRAM-WIRING-001 — wire `TelegramNotifier.publish()` into the orchestrator pipeline via `EventSubscriber` seam** (2026-05-25, operator directive: "yes bro defintiely dude" → continue ratcheting the 4 remaining solo-closable gaps from the 2026-05-25 honest-audit). Closes audit row 16 (Telegram coded but never `.publish()`-ed): the 546-LOC `TelegramNotifier` had ZERO production callers in the orchestrator hot path, despite CLAUDE.md §11 AUTOMATED rule explicitly promising "Release Please + auto-merge + watchdog + Telegram + auto-resume".
+
+    **New module:** `brutex/notifications/wiring.py` (82 stmts, 24 branches, 100% line + branch).
+
+    - **Singleton lifecycle.** `get_or_start_notifier()` reads `TelegramConfig.from_env()` once (thread-safe, idempotent), returns the cached `TelegramNotifier` instance or `None` (when disabled). `TelegramConfigError` + `OSError` are logged + swallowed per Golden Rule #10 (a broken Telegram never crashes the ingest loop).
+    - **Subscriber factory.** `make_pipeline_event_subscriber()` returns an `EventSubscriber` callable (the existing pipeline contract `Callable[[PipelineEvent], None]`). Caller plugs it into `PhaseRunner(subscribers=[...])`.
+    - **PipelineEventKind → TelegramEventKind mapping.** 5 mapped: RUN_START, PHASE_START, PHASE_COMPLETE, RUN_COMPLETE → INFO; PHASE_HALTED → CRITICAL (operator's Telegram pops a louder notification). 2 unmapped (PHASE_PROGRESS, ITEM_COMPLETE) are intentionally dropped — too noisy for the chat, stay in audit log + dashboard.
+    - **TypedDict state container.** `_State` TypedDict holds the singleton state without needing the `global` statement (ruff PLW0603 forbids it).
+
+    **New test file:** `tests/unit/test_notifications_wiring.py` (34 tests across 4 classes):
+
+    - `TestGetOrStartNotifier` (7 tests) — disabled-via-explicit-config, enabled-via-explicit-config + idempotence, caches disabled decision, swallows `TelegramConfigError`, swallows `OSError` from start, `from_env` is called when no explicit config, reset stops running notifier.
+    - `TestMakePipelineEventSubscriber` (10 tests) — per-mapped-kind publish (parametrised × 5), unmapped kinds silently dropped (parametrised × 2), no-op when notifier is None, singleton path when notifier arg is None, severity=CRITICAL for PHASE_HALTED, severity=INFO for RUN_START, dedupe key contains run+phase, dedupe key empty when neither present.
+    - `TestFormatMessage` (11 tests) — every mapped kind's message shape (with + without optional fields) + unknown-kind fallback + no-phase-no-run-id defensive path.
+    - `TestSubscriberSwallowsPublishExceptions` (3 tests parametrised) — OSError, ValueError, RuntimeError all caught and logged (Golden Rule #10).
+
+    **CI gate:** new strict per-module 100% gate added to `.github/workflows/ci.yml` after the existing `brutex.notifications.telegram` gate.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: the publish-no-op contract is now mechanically enforced — 100% line + 100% branch coverage on wiring.py via 34 unit tests.
+    - 🟡 PARTIAL: no PhaseRunner instantiation site has been migrated to use `subscribers=[..., make_pipeline_event_subscriber()]` yet — that's the next ratchet PR (call-site update). Until then, the seam is in place but no real ingest run pushes a Telegram event.
+    - 📋 ROADMAP: SLA breach detector + watchdog (the remaining 3 of the 6 solo-closable gaps) build ON TOP of this wiring — they'll add their own `EventSubscriber`s.
+
+    **Decision ID:** DEC-TELEGRAM-WIRING-001. **Builds on:** DEC-COMBO-HASH-UNIQUENESS-001 (entry #235, sibling audit-gap closure) · existing `EventSubscriber` contract in `brutex/orchestrator/pipeline.py` (FR-ING-013/014).
+
 235. **DEC-COMBO-HASH-UNIQUENESS-001 — explicit "no duplicate combo emitted" property test for `brutex.strategies.combo.combo_hash`** (2026-05-25, operator directive: "ratchet the 6 solo-closable gaps"). Closes the gap identified in the 2026-05-25 honest-audit table row 13 (uniqueness) — the existing `tests/property/test_dedup_hash_properties.py` exercises the orchestrator's SHA256 `_content_hash` for `WorkItem` ingest dedup, but **never touches the actual 9-field BLAKE3 combo identity hash** mandated by `TRACK1_BACKTEST_SPEC.md §"Identity (hash inputs)"` / FR-BF-003 / NFR-UNIQ-001. Adds `tests/property/test_combo_hash_uniqueness.py` (23 Hypothesis tests across 6 invariant classes):
 
     - **Determinism** (2 tests) — same 9 inputs → same digest, three invocations agree.
