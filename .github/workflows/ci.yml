@@ -566,6 +566,23 @@ jobs:
           else
             echo "(brutex.observability.monitor test file not present yet — gate inactive)"
           fi
+          # DEC-STANDARD-MONITOR-001 (2026-05-25, MIGRATION entry #243):
+          # ratchet brutex.observability.standard_monitor (production
+          # composer wiring Telegram + SLA + Watchdog + L3 replay into a
+          # single env-driven MonitorLoop) into the strict per-module
+          # 100% gate. 53 unit tests cover env-parsing helpers (float /
+          # int / bool / path × normal / default / invalid), MonitorConfig
+          # defaults + from_env override, compose factory branches
+          # (replay None / both-paths-set / one-path-only),
+          # SLA + Watchdog callback log-vs-Telegram paths, Telegram
+          # publish exception swallowing (4 exception classes),
+          # ImportError graceful degradation, and replay_check file
+          # absence / present round-trip with blank-line stripping.
+          if compgen -G "tests/unit/test_observability_standard_monitor.py" > /dev/null; then
+            pytest --cov=brutex.observability.standard_monitor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_standard_monitor.py
+          else
+            echo "(brutex.observability.standard_monitor test file not present yet — gate inactive)"
+          fi
           # DEC-L3-REPLAY-ORACLE-001 (2026-05-25, MIGRATION entry #241):
           # ratchet brutex.orchestrator.replay (the L3 audit-log replay
           # oracle) into the strict per-module 100% gate. 18 unit tests

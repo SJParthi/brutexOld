@@ -260,14 +260,33 @@ def cmd_monitor(poll_interval: float, ticks: int) -> int:
     Bounded run (``ticks > 0``): execute exactly N ticks then exit 0.
     Unbounded (``ticks == 0``): run until SIGINT / Ctrl-C.
 
-    No detectors / replay_check are wired in this minimal scaffold —
-    the operator provides them via a Python entry point that imports
-    :class:`brutex.observability.monitor.MonitorLoop` directly. This
-    CLI is a smoke-test surface for the loop infrastructure itself.
+    Uses :func:`brutex.observability.standard_monitor.compose_standard_monitor`
+    (DEC-STANDARD-MONITOR-001) to build the loop with env-driven config:
+    Telegram callback (when ``BRUTEX_TELEGRAM_ENABLED=true``), watchdog
+    timeout (``BRUTEX_WATCHDOG_TIMEOUT_SECONDS``), replay oracle path
+    (``BRUTEX_AUDIT_PATH`` + ``BRUTEX_LIVE_SUBJECTS_FILE``). The
+    operator pre-builds :class:`SLARule` lists in Python; this CLI ships
+    with the empty default (no SLA rules) — see the spec for the next
+    PR that adds a YAML loader.
     """
-    from brutex.observability.monitor import MonitorLoop
+    from brutex.observability.standard_monitor import (
+        MonitorConfig,
+        compose_standard_monitor,
+    )
 
-    loop = MonitorLoop(poll_interval_seconds=poll_interval)
+    # CLI's --poll-interval overrides env, which overrides default.
+    base_cfg = MonitorConfig.from_env()
+    cfg = MonitorConfig(
+        poll_interval_seconds=poll_interval,
+        watchdog_timeout_seconds=base_cfg.watchdog_timeout_seconds,
+        telegram_enabled=base_cfg.telegram_enabled,
+        sla_rules=base_cfg.sla_rules,
+        audit_path=base_cfg.audit_path,
+        live_subjects_file=base_cfg.live_subjects_file,
+        replay_action_filter=base_cfg.replay_action_filter,
+        replay_every_n_ticks=base_cfg.replay_every_n_ticks,
+    )
+    loop = compose_standard_monitor(cfg)
     if ticks > 0:
         for _ in range(ticks):
             loop.tick_once()
