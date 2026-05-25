@@ -335,6 +335,37 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+241. **DEC-L3-REPLAY-ORACLE-001 — L3 audit-log replay oracle (audit JSONL → subjects → diff vs live dedup snapshot)** (2026-05-25, operator directive: "go ahead" → continue ratcheting). Closes 2026-05-25 audit row 14 (L3 dedup replay was UNIMPLEMENTED — last of the 6 solo-closable gaps from the 2026-05-25 audit).
+
+    **New module:** `brutex/orchestrator/replay.py` (29 stmts, 4 branches, 100% line + branch).
+
+    - **`ReplayDiff` frozen dataclass** — `(intersection, missing_from_live, extra_in_live, replayed_count)` + `is_consistent` property.
+    - **`project_subjects(entries, action_filter="add")`** — filters audit entries by action and projects to a `frozenset[str]` of subjects.
+    - **`compute_replay_diff(audit_subjects, live_subjects, replayed_count)`** — pure-function set arithmetic (intersection / difference). Easy to unit-test exhaustively.
+    - **`replay_audit_to_diff(audit_path, live_subjects, action_filter)`** — convenience wrapper: `read_entries` → `project_subjects` → `compute_replay_diff`.
+    - **`assert_dedup_consistent(audit_path, live_subjects, action_filter)`** — strict variant: raises `AuditError` with first-5-samples on mismatch.
+    - **One-way dependency.** `replay` imports `audit` but NOT `bloom`/`store`. Caller passes the live snapshot as a `frozenset[str]` — no coupling to a specific dedup backend.
+
+    **New test file:** `tests/unit/test_orchestrator_replay.py` (17 tests across 5 classes):
+
+    - `TestProjectSubjects` (4) — action filter, empty filter (returns all), duplicate subjects collapse, no matching entries.
+    - `TestComputeReplayDiff` (5) — clean match, missing-from-live, extra-in-live, both, empty sets.
+    - `TestReplayAuditToDiff` (3) — round-trip clean, round-trip with missing, round-trip with custom action filter.
+    - `TestAssertDedupConsistent` (5) — silent on match, raises on missing, raises on extra, raises on both, first-5 sample truncation.
+    - `TestReplayDiffDataclass` (1) — frozen invariant.
+
+    **CI gate:** new strict per-module 100% gate added after the watchdog gate.
+
+    **Diagnostic improvement (sibling change):** added `set -x` to the strict-per-module gate bash script in `.github/workflows/ci.yml` so the CI log echoes each gate command before running. Lets us identify which exact module's gate fails when the bash `set -e` aborts the step (previous PR #126 commits #1-#3 failed on CI but the log gave no per-gate breakdown).
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: 100% line + branch coverage; pure-function arithmetic + integration round-trip via tmp_path audit files.
+    - ✅ REAL: no coupling to bloom/store — the oracle is reusable for any future dedup backend.
+    - 🟡 PARTIAL: no production caller yet invokes `assert_dedup_consistent` periodically. A scheduled job (or a CLI subcommand `brutex doctor --replay-audit`) would close the loop end-to-end.
+    - ✅ COMPLETE: this finishes the 6 solo-closable gaps from the 2026-05-25 honest-audit. Remaining work (Dhan adapter Phase 2, indicator backfills, Phase 3 engine, M4 Pro runner) sits behind operator scope-guards.
+
+    **Decision ID:** DEC-L3-REPLAY-ORACLE-001. **Builds on:** DEC-TELEGRAM-WIRING-001 (#238) + DEC-SLA-DETECTOR-001 (#239) + DEC-WATCHDOG-001 (#240). Together these 4 close the AUTOMATED pillar's observability + reliability surface (alerting + monitoring + replay).
+
 240. **DEC-WATCHDOG-001 — hung-worker detector with heartbeat registry + per-worker hysteresis** (2026-05-25, operator directive: "yes bro defintiely dude" → continue ratcheting). Closes 2026-05-25 audit row 17 (watchdog was MISSING — third of the 5 capabilities CLAUDE.md §11 AUTOMATED rule promises).
 
     **New module:** `brutex/observability/watchdog.py` (42 stmts, 4 branches, 100% line + branch).

@@ -184,6 +184,11 @@ jobs:
         # Add modules to this list as they reach 100%. Legacy modules
         # converge over time under the 90% global floor above.
         run: |
+          # DEC-L3-REPLAY-ORACLE-001 follow-up: enable `set -x` so the
+          # CI log echoes each gate command before running. Lets us
+          # identify which specific module's coverage gate fails when
+          # the bash `set -e` aborts the step.
+          set -x
           if compgen -G "tests/unit/test_costs_*.py" > /dev/null; then
             pytest \
               --cov=brutex.costs \
@@ -527,6 +532,18 @@ jobs:
             pytest --cov=brutex.observability.watchdog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_watchdog.py
           else
             echo "(brutex.observability.watchdog test file not present yet — gate inactive)"
+          fi
+          # DEC-L3-REPLAY-ORACLE-001 (2026-05-25, MIGRATION entry #241):
+          # ratchet brutex.orchestrator.replay (the L3 audit-log replay
+          # oracle) into the strict per-module 100% gate. 17 unit tests
+          # cover project_subjects, compute_replay_diff,
+          # replay_audit_to_diff round-trip, and assert_dedup_consistent
+          # silence/raise/truncate semantics. Closes 2026-05-25 audit
+          # row 14 (L3 replay was UNIMPLEMENTED).
+          if compgen -G "tests/unit/test_orchestrator_replay.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.replay --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_replay.py
+          else
+            echo "(brutex.orchestrator.replay test file not present yet — gate inactive)"
           fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
