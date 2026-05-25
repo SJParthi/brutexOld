@@ -189,6 +189,18 @@ jobs:
           # identify which specific module's coverage gate fails when
           # the bash `set -e` aborts the step.
           set -x
+          # Diagnostic: also write a summary line to GITHUB_STEP_SUMMARY
+          # for each gate that runs. STEP_SUMMARY is visible in the
+          # public job UI without auth, so a failure is identifiable
+          # even when the raw log is gated.
+          echo "## Strict per-module 100% coverage gates" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Each line below shows a pytest invocation in execution order. The bash trace (\`set -x\`) is also visible in the raw log." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          # Trap any failure and surface it in the step summary so we
+          # can identify which exact gate aborted the step when the
+          # raw log is auth-gated.
+          trap 'echo "❌ Last gate failed at: $BASH_COMMAND (exit $?)" >> "$GITHUB_STEP_SUMMARY"' ERR
           if compgen -G "tests/unit/test_costs_*.py" > /dev/null; then
             pytest \
               --cov=brutex.costs \
