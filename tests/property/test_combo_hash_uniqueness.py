@@ -1,0 +1,261 @@
+"""Hypothesis property tests for ``brutex.strategies.combo.combo_hash``.
+
+Closes the gap identified in the 2026-05-25 honest-audit
+(STANDARDS_100PCT_HONEST_AUDIT row 13): the existing
+``test_dedup_hash_properties.py`` exercises the orchestrator's
+SHA256 ``_content_hash`` (WorkItem ingest dedup) but **never touches
+the actual 9-field BLAKE3 combo identity hash** mandated by
+``TRACK1_BACKTEST_SPEC.md`` §"Identity (hash inputs)" / FR-BF-003 /
+NFR-UNIQ-001.
+
+Per CLAUDE.md Golden Rule #4 (reproducibility-first) every Track 1
+run is identified by ``blake3(strategy_id ‖ direction ‖ instrument
+‖ tf ‖ mode ‖ canonical_params ‖ data_snapshot_hash ‖
+indicator_version ‖ code_commit_sha)``. Two combos collide **iff**
+all nine fields collide. This module proves that contract.
+
+Invariants covered
+------------------
+
+1. **Determinism** — same nine inputs → same digest. Reproducibility
+   is the operator-locked oracle for the audit-log replay test
+   (Golden Rule #7).
+2. **Per-field sensitivity** — flipping any single one of the nine
+   fields changes the digest. Proves no field is silently dropped on
+   the wire — a regression here would silently invalidate the dedup
+   contract.
+3. **Params canonicalisation** — dict insertion order does NOT
+   affect the digest (NFR-UNIQ-002 sort_keys=True invariant).
+4. **No-duplicate-combo emission** — drawing N distinct 9-tuples
+   produces N distinct digests. This is the explicit "no duplicate
+   combo emitted" property the audit flagged as missing.
+5. **Digest shape** — 64 lowercase hex chars (BLAKE3-256 output).
+6. **Empty-string rejection** — every required string input must be
+   non-empty; the validator raises ``StrategyError`` (FR-BF-003
+   input-domain contract).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+import pytest
+from brutex.strategies.combo import combo_hash
+from brutex.strategies.errors import StrategyError
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+# ────────────────────────────────────────────────────────────────────────
+# Hypothesis strategies for the 9 fields
+# ────────────────────────────────────────────────────────────────────────
+
+# Lowercase a-z plus digits, 1-12 chars — keeps the search space tight
+# but representative of strategy IDs / instrument symbols / TFs.
+_FIELD_TEXT = st.text(
+    alphabet="abcdefghijklmnopqrstuvwxyz0123456789",
+    min_size=1,
+    max_size=12,
+)
+
+# Direction is constrained to the spec's bull/bear/neutral domain.
+_DIRECTION = st.sampled_from(["bull", "bear", "neutral"])
+
+# Mode is constrained to A/B per DEC-MODE-002 (Mode C was removed).
+_MODE = st.sampled_from(["A", "B"])
+
+# Instrument is constrained to the 4 brute-force-eligible symbols
+# per CLAUDE.md §6 (NIFTY 50 / BANKNIFTY / SENSEX / INDIA VIX) — the
+# spec scope-lock. INDIA VIX is REFERENCE_ONLY so it would not
+# realistically appear in combo_hash inputs but is included here to
+# prove the hasher is symbol-agnostic.
+_INSTRUMENT = st.sampled_from(["NIFTY", "BANKNIFTY", "SENSEX", "INDIA VIX"])
+
+# Timeframe is constrained to a representative subset of the 21 TFs
+# (1m base + 19 derived intraday + 1d per CLAUDE.md §2 rule 3).
+_TF = st.sampled_from(["1m", "5m", "15m", "25m", "60m", "1d"])
+
+# Params dict: keys a-z 1-8 chars, values int / float / short str — the
+# full union of types the canonicaliser accepts (excluding NaN, which
+# is rejected by construction).
+_PARAM_KEY = st.text(
+    alphabet="abcdefghijklmnopqrstuvwxyz",
+    min_size=1,
+    max_size=8,
+)
+_PARAM_VALUE = st.one_of(
+    st.integers(min_value=-(10**6), max_value=10**6),
+    st.floats(allow_nan=False, allow_infinity=False, width=32),
+    st.text(
+        alphabet="abcdefghijklmnopqrstuvwxyz0123456789-_",
+        min_size=0,
+        max_size=8,
+    ),
+)
+_PARAMS = st.dictionaries(keys=_PARAM_KEY, values=_PARAM_VALUE, min_size=0, max_size=6)
+
+
+@st.composite
+def _nine_tuple(draw: st.DrawFn) -> dict[str, Any]:
+    """Draw a complete 9-field combo identity tuple."""
+    return {
+        "strategy_id": draw(_FIELD_TEXT),
+        "direction": draw(_DIRECTION),
+        "instrument": draw(_INSTRUMENT),
+        "tf": draw(_TF),
+        "mode": draw(_MODE),
+        "params": draw(_PARAMS),
+        "data_snapshot_hash": draw(_FIELD_TEXT),
+        "indicator_version": draw(_FIELD_TEXT),
+        "code_commit_sha": draw(_FIELD_TEXT),
+    }
+
+
+def _hash(tup: Mapping[str, Any]) -> str:
+    return combo_hash(**tup)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Invariant 1 — determinism
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestDeterminism:
+    @given(tup=_nine_tuple())
+    @settings(max_examples=200, deadline=None)
+    def test_same_inputs_same_hash(self, tup: dict[str, Any]) -> None:
+        assert _hash(tup) == _hash(tup)
+
+    @given(tup=_nine_tuple())
+    @settings(max_examples=200, deadline=None)
+    def test_three_invocations_same_hash(self, tup: dict[str, Any]) -> None:
+        h1 = _hash(tup)
+        h2 = _hash(dict(tup))
+        h3 = _hash({**tup})
+        assert h1 == h2 == h3
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Invariant 2 — per-field sensitivity (no field silently dropped)
+# ────────────────────────────────────────────────────────────────────────
+
+
+_STRING_FIELDS = (
+    "strategy_id",
+    "direction",
+    "instrument",
+    "tf",
+    "mode",
+    "data_snapshot_hash",
+    "indicator_version",
+    "code_commit_sha",
+)
+
+
+class TestPerFieldSensitivity:
+    @pytest.mark.parametrize("field", _STRING_FIELDS)
+    @given(tup=_nine_tuple())
+    @settings(max_examples=50, deadline=None)
+    def test_mutating_any_string_field_changes_hash(self, field: str, tup: dict[str, Any]) -> None:
+        original = _hash(tup)
+        # Mutate by appending a sentinel character that the alphabet
+        # does not include (so the mutated value is guaranteed different).
+        mutated = dict(tup)
+        mutated[field] = str(tup[field]) + "!"
+        assert _hash(mutated) != original
+
+    @given(tup=_nine_tuple(), extra_key=_PARAM_KEY, extra_val=_PARAM_VALUE)
+    @settings(max_examples=100, deadline=None)
+    def test_adding_param_changes_hash(
+        self, tup: dict[str, Any], extra_key: str, extra_val: Any
+    ) -> None:
+        # Only meaningful if the new key isn't already present.
+        if extra_key in tup["params"]:
+            return
+        original = _hash(tup)
+        mutated = dict(tup)
+        mutated["params"] = {**tup["params"], extra_key: extra_val}
+        assert _hash(mutated) != original
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Invariant 3 — params canonicalisation (order-invariance)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestParamsCanonicalisation:
+    @given(tup=_nine_tuple())
+    @settings(max_examples=200, deadline=None)
+    def test_params_insertion_order_does_not_matter(self, tup: dict[str, Any]) -> None:
+        original = _hash(tup)
+        reversed_params = dict(reversed(list(tup["params"].items())))
+        mutated = {**tup, "params": reversed_params}
+        assert _hash(mutated) == original
+
+    @given(tup=_nine_tuple())
+    @settings(max_examples=100, deadline=None)
+    def test_params_via_sorted_dict_matches(self, tup: dict[str, Any]) -> None:
+        original = _hash(tup)
+        sorted_params = dict(sorted(tup["params"].items()))
+        mutated = {**tup, "params": sorted_params}
+        assert _hash(mutated) == original
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Invariant 4 — no-duplicate-combo emission (the audit-flagged gap)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestNoDuplicateComboEmitted:
+    @given(tuples=st.lists(_nine_tuple(), min_size=2, max_size=20, unique_by=str))
+    @settings(max_examples=50, deadline=None)
+    def test_distinct_tuples_produce_distinct_hashes(self, tuples: list[dict[str, Any]]) -> None:
+        """Drawing N pairwise-distinct 9-tuples must produce N distinct digests.
+
+        This is the explicit "no duplicate combo emitted" property the
+        2026-05-25 honest-audit (STANDARDS_100PCT_HONEST_AUDIT row 13)
+        flagged as missing. The orchestrator's dedup contract assumes
+        ``combo_hash`` is injective on the 9-tuple domain — if two
+        distinct combos hashed to the same digest the L1 Bloom + L2 LMDB
+        layers would silently coalesce them and the dedup invariant
+        would break.
+
+        We use ``unique_by=str`` to ensure the input list is pairwise
+        distinct in the dict's string projection (which canonicalises
+        param-order). Hypothesis shrinks toward minimal collisions.
+        """
+        hashes = [_hash(t) for t in tuples]
+        assert len(hashes) == len(set(hashes)), (
+            f"Collision: {len(hashes) - len(set(hashes))} duplicate hashes "
+            f"emitted from {len(tuples)} distinct 9-tuples"
+        )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Invariant 5 — digest shape
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestDigestShape:
+    @given(tup=_nine_tuple())
+    @settings(max_examples=100, deadline=None)
+    def test_hash_is_64_lower_hex(self, tup: dict[str, Any]) -> None:
+        h = _hash(tup)
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Invariant 6 — empty-string rejection (FR-BF-003 input-domain contract)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestEmptyStringRejection:
+    @pytest.mark.parametrize("field", _STRING_FIELDS)
+    @given(tup=_nine_tuple())
+    @settings(max_examples=20, deadline=None)
+    def test_empty_string_field_raises(self, field: str, tup: dict[str, Any]) -> None:
+        mutated = dict(tup)
+        mutated[field] = ""
+        with pytest.raises(StrategyError, match=field):
+            _hash(mutated)

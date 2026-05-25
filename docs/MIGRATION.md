@@ -302,6 +302,24 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
+235. **DEC-COMBO-HASH-UNIQUENESS-001 — explicit "no duplicate combo emitted" property test for `brutex.strategies.combo.combo_hash`** (2026-05-25, operator directive: "ratchet the 6 solo-closable gaps"). Closes the gap identified in the 2026-05-25 honest-audit table row 13 (uniqueness) — the existing `tests/property/test_dedup_hash_properties.py` exercises the orchestrator's SHA256 `_content_hash` for `WorkItem` ingest dedup, but **never touches the actual 9-field BLAKE3 combo identity hash** mandated by `TRACK1_BACKTEST_SPEC.md §"Identity (hash inputs)"` / FR-BF-003 / NFR-UNIQ-001. Adds `tests/property/test_combo_hash_uniqueness.py` (23 Hypothesis tests across 6 invariant classes):
+
+    - **Determinism** (2 tests) — same 9 inputs → same digest, three invocations agree.
+    - **Per-field sensitivity** (9 tests) — mutating any one of the 8 string fields OR the params dict changes the digest. Proves no field is silently dropped on the wire.
+    - **Params canonicalisation** (2 tests) — dict insertion order does NOT affect the digest (NFR-UNIQ-002 `sort_keys=True` invariant).
+    - **No-duplicate-combo emission** (1 test) — drawing N pairwise-distinct 9-tuples produces N distinct digests. This is the explicit property the audit flagged as missing.
+    - **Digest shape** (1 test) — 64 lowercase hex chars (BLAKE3-256 output).
+    - **Empty-string rejection** (8 tests) — every required string input must be non-empty; the validator raises `StrategyError`.
+
+    **Local verification:** 23 passed in 4.5s under `.venv/bin/pytest`; ruff + mypy strict ALL GREEN. Builds on DEC-P0-060 (combo_hash 9-field BLAKE3) and the DEC-STANDARDS-AUDIT-001 dedup-property-test pattern.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: 23 property tests now lock the 9-field BLAKE3 combo identity contract. Distinct combos → distinct hashes is now an asserted invariant, not an implicit assumption.
+    - 🟡 PARTIAL: Hypothesis collision-resistance is bounded by `unique_by=str` on the input tuples (so the test asserts the canonicaliser doesn't introduce accidental collisions, NOT that BLAKE3 itself is collision-free — that's a cryptographic-strength assumption).
+    - 📋 ROADMAP: a full end-to-end "engine emits ≥ N combos and zero collide" integration test arrives with Phase 3 (sweep producer).
+
+    **Decision ID:** DEC-COMBO-HASH-UNIQUENESS-001. **Builds on:** DEC-P0-060 (combo_hash 9-field BLAKE3, MIGRATION entry #198) · DEC-STANDARDS-AUDIT-001 (dedup property pattern, entry #205). **Closes:** honest-audit table row 13 gap.
+
 234. **DEC-DASHBOARD-LIVE-FINALE — staircase wiring + remaining 3 schema fields surfaced + tooltip narrowed to "ALL 13 LIVE"** (2026-05-24, operator directive: "whichever is recommended here go ahead dude"). Closes the dashboard wiring loop — **ALL 13 `SweepFunnelSnapshot` schema fields are now `data-bind`-wired in `docs/dashboard/mockups/v29.html`** (`data-bind` count: 10 → 22 — multiple bindings per field since both horizontal funnel + vertical staircase show the same numbers). Per `TRACK1_DASHBOARD_DESIGN.md §6.4`:
 
     - **7 staircase numeric cells wired:** each `<div class="big">` in `.funnel25-row` got `data-bind` attrs matching the horizontal funnel — step_0_all_candidates (33B row), step_1_cheap_prefilter (12M), step_2_real_edge_test (1.2M), step_3_unseen_data (84K), step_4_best_of_n (2.4K), step_7_three_windows (410), step_8_sealed_lockbox (174).
