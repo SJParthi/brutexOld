@@ -160,6 +160,7 @@ class MonitorConfig:
 
 
 def _parse_float_env(name: str, default: float) -> float:
+    """Read env var *name* as float; fall back to *default* on missing/invalid."""
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -176,6 +177,7 @@ def _parse_float_env(name: str, default: float) -> float:
 
 
 def _parse_int_env(name: str, default: int) -> int:
+    """Read env var *name* as int; fall back to *default* on missing/invalid."""
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -209,6 +211,7 @@ def _parse_bool_env(name: str, *, default: bool) -> bool:
 
 
 def _parse_path_env(name: str) -> Path | None:
+    """Read env var *name* as a ``Path``; ``None`` if unset, empty, or whitespace."""
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         return None
@@ -282,6 +285,7 @@ def _make_sla_callback(*, telegram_enabled: bool) -> SLAEventCallback:
     """
 
     def _cb(event: SLAEvent) -> None:
+        """SLA transition handler: log + optionally publish to Telegram."""
         message = (
             f"SLA {event.rule_name} → {event.new_state.value} "
             f"(value={event.observed_value}, threshold={event.threshold}, "
@@ -301,7 +305,10 @@ def _make_sla_callback(*, telegram_enabled: bool) -> SLAEventCallback:
 
 
 def _make_watchdog_callback(*, telegram_enabled: bool) -> WorkerEventCallback:
+    """Return a watchdog on-hung / on-recovery callback (Telegram or log-only)."""
+
     def _cb(event: WorkerEvent) -> None:
+        """Watchdog transition handler: log + optionally publish to Telegram."""
         message = (
             f"Watchdog {event.worker_name} → {event.new_state.value} "
             f"(last_beat={event.last_beat_seconds_ago:.1f}s ago, "
@@ -377,6 +384,7 @@ def _make_replay_check(
         return None
 
     def _replay() -> None:
+        """Re-read the live-subjects file and assert L3 dedup consistency."""
         # Local import keeps this module orchestrator-independent at
         # the top level — DEC-TELEGRAM-WIRING-001 PyO3 ABI3 precedent.
         from brutex.orchestrator.replay import assert_dedup_consistent
