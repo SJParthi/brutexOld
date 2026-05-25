@@ -335,6 +335,35 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+239. **DEC-SLA-DETECTOR-001 — rule-driven SLA breach detector with hysteresis + caller-supplied callbacks** (2026-05-25, operator directive: "yes bro defintiely dude" → continue ratcheting the 4 remaining gaps). Closes 2026-05-25 honest-audit row 19 (SLA alerting was MISSING — no detector watched thresholds, despite NFR-OBS-003 mentioning SLA tracking + CLAUDE.md §11 listing it in the AUTOMATED rule).
+
+    **New module:** `brutex/observability/sla.py` (63 stmts, 10 branches, 100% line + branch).
+
+    - **`SLARule` dataclass** — `(name, value_provider: Callable[[], float|None], predicate, threshold, severity, description)`. The `value_provider` is a callable (NOT a metric-name string) so the detector is decoupled from any specific value source — tests pass closures, production callers pass `lambda: registry.gauge_value(...)` or arbitrary queue-depth probes.
+    - **`SLADetector`** — `check_once()` evaluates every rule, evaluates the predicate, and fires the `on_breach` / `on_recovery` callback ONLY on state TRANSITIONS (hysteresis). Steady-state breaches don't spam.
+    - **3 predicates** — GREATER_THAN, LESS_THAN, EQUALS (float-epsilon-safe).
+    - **4 severities** — INFO, WARN, ERROR, CRITICAL (distinct enum from `TelegramSeverity` to keep one-way dependency).
+    - **Caller-supplied callbacks** — operator decides the sink (Telegram via wiring.py, audit log, stdout, dashboard). Detector is sink-agnostic.
+    - **Golden Rule #10 graceful degradation** — value_provider exceptions + callback exceptions are caught + logged (OSError, ValueError, RuntimeError). A buggy provider or sink never crashes the detector.
+
+    **New test file:** `tests/unit/test_observability_sla.py` (32 tests across 5 classes):
+
+    - `TestPredicateHolds` (9 parametrised) — all 3 predicates with above/below/equal value pairs.
+    - `TestConstructionAndState` (4 tests) — initial OK state, add_rule lifecycle, duplicate-name rejection, state_of unknown rule.
+    - `TestCheckOnceTransitions` (8 tests) — no-op when under threshold, breach on first violation, hysteresis (steady breach → 1 event), recovery transition, oscillation (3 cycles → 3+3 events), None-return skips, provider exceptions × 3 swallowed.
+    - `TestCallbackFailuresIsolated` (6 parametrised) — on_breach + on_recovery × OSError/ValueError/RuntimeError all swallowed.
+    - `TestMixedRules` (4 tests) — independent state tracking, severity propagation, LESS_THAN breach, EQUALS breach.
+
+    **CI gate:** new strict per-module 100% gate added to `.github/workflows/ci.yml` after the wiring.py gate.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: 100% line + branch coverage. Hysteresis contract enforced. Callback isolation verified across 6 exception types.
+    - ✅ REAL: pure-detector design — no scheduler / no threads / no I/O. Caller owns cadence.
+    - 🟡 PARTIAL: NO production caller has instantiated `SLADetector` yet. Once a scheduler-thread wires it up with real rules + the Telegram callback from DEC-TELEGRAM-WIRING-001, the alerting loop is closed.
+    - 📋 ROADMAP: watchdog + L3 replay oracle remain (2 of the 6 solo-closable gaps).
+
+    **Decision ID:** DEC-SLA-DETECTOR-001. **Builds on:** DEC-TELEGRAM-WIRING-001 (entry #238) — the SLA callback will fire a Telegram event via `make_pipeline_event_subscriber` once the scheduler call-site lands.
+
 238. **DEC-TELEGRAM-WIRING-001 — wire `TelegramNotifier.publish()` into the orchestrator pipeline via `EventSubscriber` seam** (2026-05-25, operator directive: "yes bro defintiely dude" → continue ratcheting the 4 remaining solo-closable gaps from the 2026-05-25 honest-audit). Closes audit row 16 (Telegram coded but never `.publish()`-ed): the 546-LOC `TelegramNotifier` had ZERO production callers in the orchestrator hot path, despite CLAUDE.md §11 AUTOMATED rule explicitly promising "Release Please + auto-merge + watchdog + Telegram + auto-resume".
 
     **New module:** `brutex/notifications/wiring.py` (82 stmts, 24 branches, 100% line + branch).

@@ -504,6 +504,18 @@ jobs:
           else
             echo "(brutex.notifications.wiring test file not present yet — gate inactive)"
           fi
+          # DEC-SLA-DETECTOR-001 (2026-05-25, MIGRATION entry #239):
+          # ratchet brutex.observability.sla (the rule-driven SLA
+          # breach detector) into the strict per-module 100% gate. 32
+          # unit tests cover construction, hysteresis (no-spam),
+          # per-predicate transitions, value-provider exception
+          # swallowing, callback exception swallowing. Closes 2026-05-25
+          # audit row 19 (SLA alerting was MISSING).
+          if compgen -G "tests/unit/test_observability_sla.py" > /dev/null; then
+            pytest --cov=brutex.observability.sla --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_sla.py
+          else
+            echo "(brutex.observability.sla test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
