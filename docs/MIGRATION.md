@@ -335,6 +335,25 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+244. **DEC-INFRA-OPS-001 — operator infra/env bundle: bootstrap.sh + env-var registry + Telegram smoke-test + live-dedup dump script** (2026-05-25, operator directive: "focus only on infra environment related changes alone"). Closes the operations-readiness gap for the 4 detector modules merged in PRs #126/#129/#131: code is wired, but operators had no scripts to (a) bootstrap a fresh box, (b) discover the env-var schema, (c) verify Telegram end-to-end, (d) dump the live LMDB dedup state for the L3 replay oracle.
+
+    **New files (no application logic — pure operations surface):**
+
+    - **`scripts/setup/bootstrap.sh`** — idempotent fresh-machine setup. Verifies Python 3.12 → creates `.venv` → installs `brutex[dev,data,dhan]` → installs Rust toolchain via rustup if missing → builds + installs `fno_math` via maturin → runs `brutex doctor` smoke. Prints one-screen summary of next steps. Used to onboard a new M4 Pro runner / dev machine / CI image in 2 min.
+    - **`docs/runbooks/ENV_VARS.md`** — hand-maintained operator reference cataloging all 18 `BRUTEX_*` env vars grouped by subsystem (Telegram / Monitor / Ports / Runtime / Dhan / M4 Pro / Safety). Each row cites the source module + default + allowed-values. Matches the auto-discovered output of `scripts/ops/print_env_schema.py`.
+    - **`scripts/ops/print_env_schema.py`** — regex scanner over `brutex/*.py` collecting every `ENV_*: Final[str] = "BRUTEX_..."` declaration. Human or JSON output. Operator runs `python scripts/ops/print_env_schema.py` to drift-check against the runbook.
+    - **`scripts/ops/test_telegram.py`** — end-to-end smoke test for the Telegram channel. Reads env vars → instantiates the production notifier via `get_or_start_notifier` → publishes one TEST event → drains + reports. Exit 0 on success / 1 on env problem / 2 on transport failure. Used after operator follows `docs/runbooks/telegram-setup.md`.
+    - **`scripts/ops/dump_live_subjects.sh`** — operator-runnable LMDB dump script. Reads the dedup store at `${BRUTEX_LMDB_PATH:-~/.brutex/lmdb}` → writes newline-separated keys to `${BRUTEX_LIVE_SUBJECTS_FILE:-~/.brutex/live-subjects.txt}` via atomic rename (no half-written reads). Closes the L3 replay-oracle dormancy: once wired to crontab (every 15 min), `brutex monitor` actually compares the audit log against the live dedup state.
+    - **`docs/runbooks/telegram-setup.md`** — extended (existing 240-line runbook). Added a new "End-to-end verification with `compose_standard_monitor`" section pointing to `scripts/ops/test_telegram.py` per DEC-STANDARD-MONITOR-001.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: all 4 scripts syntactically valid; `print_env_schema.py` discovered 18 env vars on a fresh checkout matching the hand-maintained runbook.
+    - ✅ REAL: `bootstrap.sh` is idempotent — safe to re-run on any machine.
+    - 🟡 PARTIAL: `dump_live_subjects.sh` requires `lmdb` Python package (`pip install -e .[data]`). When the LMDB store doesn't exist yet (fresh box), the script writes an empty file rather than failing.
+    - 📋 ROADMAP: a future PR adds a `scripts/ops/print_env_schema.py --check` mode that fails CI if `docs/runbooks/ENV_VARS.md` drifts from the source scan.
+
+    **Decision ID:** DEC-INFRA-OPS-001. **Builds on:** DEC-MONITOR-LOOP-001 (#242), DEC-STANDARD-MONITOR-001 (#243), DEC-TELEGRAM-WIRING-001 (#238), DEC-L3-REPLAY-ORACLE-001 (#241).
+
 243. **DEC-STANDARD-MONITOR-001 — production composer wiring Telegram + SLA + Watchdog + L3 replay into env-driven `MonitorLoop`** (2026-05-25, operator directive: "Production composer (Recommended)"). Closes the "🟡 PARTIAL: CLI `brutex monitor` constructs an EMPTY MonitorLoop" envelope from DEC-MONITOR-LOOP-001 (entry #242). After this PR `brutex monitor` is operator-runnable with REAL detectors + REAL Telegram callback firing on SLA breach + REAL watchdog heartbeat events.
 
     **New module:** `brutex/observability/standard_monitor.py` (115 stmts, 18 branches, 100% line + branch).

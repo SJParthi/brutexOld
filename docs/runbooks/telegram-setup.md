@@ -237,4 +237,36 @@ get errors and they'll surface in structlog but not affect ingest correctness.
 
 ---
 
-_Last updated: 2026-04-14._
+## End-to-end verification with `compose_standard_monitor` (DEC-STANDARD-MONITOR-001)
+
+After the env vars are set, run the canonical smoke test:
+
+```bash
+python scripts/ops/test_telegram.py
+```
+
+Expected output:
+
+```
+Sending test event to Telegram chat <CHAT_ID> via bot ...
+✓ Telegram event published; check your chat now.
+```
+
+Your phone should receive a message containing
+"BruteX Telegram smoke test — env wired correctly."
+
+If you want to verify the FULL monitor chain (SLA + Watchdog + Telegram):
+
+```bash
+brutex monitor --ticks 3 --poll-interval 0.5
+```
+
+This runs 3 ticks of the production composer (`compose_standard_monitor`),
+which wires the Telegram callback. The default SLA rule list is empty,
+so no alert fires unless you provide explicit `SLARule` objects via a
+Python entry point — see `brutex/observability/standard_monitor.py`
+docstring for the YAML-loader roadmap.
+
+---
+
+_Last updated: 2026-05-25 (added compose_standard_monitor verification per DEC-STANDARD-MONITOR-001)._
