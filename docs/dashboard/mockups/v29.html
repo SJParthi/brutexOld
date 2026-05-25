@@ -2181,7 +2181,7 @@
 <div class="mode-bar">
   <div class="brand-logo">BruteX</div>
   <div class="mode-bar-right">
-    <span class="preview-badge" title="ALL 8 horizontal-funnel spans (33B → 12M → 1.2M → 84K → 2.4K → 410 → 174 → 1) + sweep_id pill + snapshot_at timestamp are LIVE — values come from the brute-force sweep via /api/v1/state every 2s. Remaining sections (vertical staircase detail rows, top combos table, equity curve, KPI tiles, podium cards) are still placeholder MOCKUP data. Methodology is institutional-grade.">Preview Data</span>
+    <span class="preview-badge" title="ALL 13 SweepFunnelSnapshot schema fields are now LIVE (step_0/1/2/3/4/5/6/7/8/9 + winners_top_n + sweep_id + snapshot_at) — values flow from the brute-force sweep via /api/v1/state every 2s. ONLY remaining placeholder: top combos table P&L, equity curve, KPI tiles, podium cards. Methodology is institutional-grade. Badge stays until brutex/strategies/sweep.py wires update_sweep_funnel() (Phase 3).">Preview Data</span>
     <div class="mode-toggle">
       <button data-mode="operator" class="active">⚙ Operator</button>
       <button data-mode="share">✨ Share</button>
@@ -2496,7 +2496,7 @@
           </div>
           <div class="funnel25-bar"><div class="fill" style="--w: 100%; --color: #9D7BFF;"></div></div>
           <div class="funnel25-right">
-            <div class="big">33,000,000,000</div>
+            <div class="big" data-bind="step_0_all_candidates">33,000,000,000</div>
             <div class="dim">100%</div>
           </div>
         </div>
@@ -2507,7 +2507,7 @@
           </div>
           <div class="funnel25-bar"><div class="fill" style="--w: 36%; --color: #5B8DEF;"></div></div>
           <div class="funnel25-right">
-            <div class="big">12,000,000</div>
+            <div class="big" data-bind="step_1_cheap_prefilter">12,000,000</div>
             <div class="dim">0.036%</div>
           </div>
         </div>
@@ -2518,7 +2518,7 @@
           </div>
           <div class="funnel25-bar"><div class="fill" style="--w: 10%; --color: #5B8DEF;"></div></div>
           <div class="funnel25-right">
-            <div class="big">1,200,000</div>
+            <div class="big" data-bind="step_2_real_edge_test">1,200,000</div>
             <div class="dim">0.0036%</div>
           </div>
         </div>
@@ -2529,18 +2529,20 @@
           </div>
           <div class="funnel25-bar"><div class="fill" style="--w: 7%; --color: #5B8DEF;"></div></div>
           <div class="funnel25-right">
-            <div class="big">84,000</div>
+            <div class="big" data-bind="step_3_unseen_data">84,000</div>
             <div class="dim">0.00025%</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.60s">
           <div class="funnel25-left">
             <div class="lab">Steps 4–6</div>
-            <div class="name">Beats luck across all rivals</div>
+            <div class="name">Beats luck across all rivals (also tracked separately:
+              <span data-bind="step_5_not_overfit" style="color:var(--muted)">not-overfit</span>,
+              <span data-bind="step_6_multi_test" style="color:var(--muted)">multi-test</span>)</div>
           </div>
           <div class="funnel25-bar"><div class="fill" style="--w: 4%; --color: #FFC857;"></div></div>
           <div class="funnel25-right">
-            <div class="big">2,400</div>
+            <div class="big" data-bind="step_4_best_of_n">2,400</div>
             <div class="dim">0.0000072%</div>
           </div>
         </div>
@@ -2551,18 +2553,19 @@
           </div>
           <div class="funnel25-bar"><div class="fill" style="--w: 2.5%; --color: #FFC857;"></div></div>
           <div class="funnel25-right">
-            <div class="big">410</div>
+            <div class="big" data-bind="step_7_three_windows">410</div>
             <div class="dim">0.0000012%</div>
           </div>
         </div>
         <div class="funnel25-row" style="--delay: 0.90s">
           <div class="funnel25-left">
             <div class="lab">Step 8</div>
-            <div class="name">6-month sealed lockbox — opened ONCE</div>
+            <div class="name">6-month sealed lockbox — opened ONCE (also tracked:
+              <span data-bind="step_9_random_shuffle" style="color:var(--muted)">random-shuffle</span>)</div>
           </div>
           <div class="funnel25-bar"><div class="fill" style="--w: 1.5%; --color: #FFC857;"></div></div>
           <div class="funnel25-right">
-            <div class="big">174</div>
+            <div class="big" data-bind="step_8_sealed_lockbox">174</div>
             <div class="dim">0.0000005%</div>
           </div>
         </div>
@@ -2573,7 +2576,7 @@
           </div>
           <div class="funnel25-bar"><div class="fill" style="--w: 1%; --color: #FFB74D;"></div></div>
           <div class="funnel25-right">
-            <div class="big gold">1 of 174</div>
+            <div class="big gold"><span data-bind="winners_top_n">1</span> of <span data-bind="step_8_sealed_lockbox">174</span></div>
             <div class="dim">the chosen one</div>
           </div>
         </div>
