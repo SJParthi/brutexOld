@@ -36,12 +36,9 @@ def _write_audit(
 ) -> None:
     """Write a synthetic audit log at *path*. *rows* is a list of
     (action, subject, payload) triples."""
-    writer = AuditWriter(path=path, actor="test")
-    try:
+    with AuditWriter.open(path, actor="test") as writer:
         for action, subject, payload in rows:
             writer.append(action=action, subject=subject, payload=payload)
-    finally:
-        writer.close()
 
 
 # ────────────────────────────────────────────────────────────────────────
