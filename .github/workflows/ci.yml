@@ -554,6 +554,18 @@ jobs:
           else
             echo "(brutex.observability.watchdog test file not present yet — gate inactive)"
           fi
+          # DEC-MONITOR-LOOP-001 (2026-05-25, MIGRATION entry #242):
+          # ratchet brutex.observability.monitor (daemon-thread poller
+          # for SLA + Watchdog + L3 replay oracle) into the strict
+          # per-module 100% gate. 26 unit tests cover construction
+          # validation, deterministic tick_once paths, exception
+          # isolation across all 3 sub-checks, and daemon-thread
+          # lifecycle + context-manager + Event-based stop semantics.
+          if compgen -G "tests/unit/test_observability_monitor.py" > /dev/null; then
+            pytest --cov=brutex.observability.monitor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_monitor.py
+          else
+            echo "(brutex.observability.monitor test file not present yet — gate inactive)"
+          fi
           # DEC-L3-REPLAY-ORACLE-001 (2026-05-25, MIGRATION entry #241):
           # ratchet brutex.orchestrator.replay (the L3 audit-log replay
           # oracle) into the strict per-module 100% gate. 18 unit tests

@@ -203,4 +203,61 @@ __all__ = (
     "WorkerEvent",
     "WorkerEventCallback",
     "WorkerState",
+    "make_heartbeat_subscriber",
 )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Pipeline-integration helper
+# ────────────────────────────────────────────────────────────────────────
+
+# Local import inside the function body so this module stays
+# import-cycle safe: brutex.orchestrator.pipeline transitively imports
+# bloom → fastbloom_rs, and we don't want every Watchdog construction
+# to drag that in unless the caller actually uses the helper.
+
+
+def make_heartbeat_subscriber(
+    watchdog: Watchdog,
+    worker_name: str,
+) -> Callable[[object], None]:
+    """Return a pipeline `EventSubscriber` that beats *watchdog* on every
+    pipeline event.
+
+    The pipeline driver (`brutex.orchestrator.pipeline.PhaseRunner`)
+    fans every `PipelineEvent` out to its registered subscribers. The
+    callable returned here records a heartbeat for ``worker_name`` on
+    EACH event — phase start, per-item complete, phase complete,
+    everything. That keeps the watchdog timer fresh whenever the
+    pipeline is making forward progress; a stall (no events for >
+    ``watchdog.timeout_seconds``) will eventually trip the
+    HEALTHY → HUNG transition.
+
+    Parameters
+    ----------
+    watchdog
+        The :class:`Watchdog` instance to beat.
+    worker_name
+        The name registered (or auto-registered) by the heartbeat.
+
+    Returns
+    -------
+    Callable[[object], None]
+        A `Sequence[EventSubscriber]`-compatible callable. Annotated
+        as ``Callable[[object], None]`` to avoid importing
+        ``PipelineEvent`` at module load time (would trigger the
+        orchestrator package init chain — same fastbloom_rs PyO3 ABI3
+        constraint that DEC-TELEGRAM-WIRING-001 documented).
+
+    Notes
+    -----
+    Exceptions raised by :meth:`Watchdog.beat` would never occur in
+    practice (beat is dict-write only), but Golden Rule #10 says the
+    pipeline must not crash on a misbehaving subscriber — the
+    pipeline's own subscriber fanout already swallows callback errors.
+    """
+
+    def _subscriber(_event: object) -> None:
+        watchdog.beat(worker_name)
+
+    return _subscriber
