@@ -25,7 +25,17 @@
 
 set -uo pipefail  # no -e: don't abort on missing optional artifacts
 
-REPO_ROOT="${CLAUDE_REPO_ROOT:-/home/user/bruteX}"
+# Resolve repo root via (in order): CLAUDE_REPO_ROOT env var, git toplevel
+# from current cwd, then current cwd as final fallback. Hardcoding a path
+# would break the hook on any machine other than the original dev box and
+# would silently turn the hook into a no-op (tests caught this in PR #125).
+if [[ -n "${CLAUDE_REPO_ROOT:-}" ]]; then
+  REPO_ROOT="${CLAUDE_REPO_ROOT}"
+elif REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
+  :
+else
+  REPO_ROOT="$(pwd)"
+fi
 cd "${REPO_ROOT}" 2>/dev/null || exit 0  # silent exit if not a repo
 
 # ────────── header ──────────
