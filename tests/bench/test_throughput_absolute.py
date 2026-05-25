@@ -184,9 +184,7 @@ class TestGateMachinery:
         monkeypatch.delenv(_ENV_M4PRO_ABS, raising=False)
         assert not _m4pro_gate_active()
 
-    def test_gate_active_with_env_set_to_1(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_gate_active_with_env_set_to_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_ENV_M4PRO_ABS, "1")
         assert _m4pro_gate_active()
 
