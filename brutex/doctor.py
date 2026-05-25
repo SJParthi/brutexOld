@@ -176,6 +176,99 @@ def check_audit_chain(audit_file: Path | None, audit_dir: Path) -> CheckResult:
     )
 
 
+def check_audit_replay_consistency(
+    audit_file: Path | None,
+    audit_dir: Path,
+    live_subjects_file: Path | None,
+    action_filter: str = "add",
+) -> CheckResult:
+    """L3 audit-log replay oracle check (DEC-L3-REPLAY-ORACLE-001).
+
+    Verifies the audit log's ``add``-action subjects exactly match the
+    live dedup-snapshot the operator provides via ``live_subjects_file``
+    (a newline-separated text file of subject strings, one per line).
+
+    * If ``live_subjects_file`` is ``None`` (operator opted out),
+      return SKIP. This is the default — replay-oracle is an opt-in
+      check because not every deployment maintains a live-subjects
+      snapshot.
+    * If the file is given but the audit log is missing, return SKIP
+      (mirrors ``check_audit_chain``'s freshly-installed semantics).
+    * If both are present, call
+      :func:`brutex.orchestrator.replay.assert_dedup_consistent`. On
+      ``AuditError`` (missing-from-live or extra-in-live), return FAIL
+      with the truncated diff. On clean match, return PASS.
+
+    Parameters
+    ----------
+    audit_file
+        Specific audit file. ``None`` = latest in ``audit_dir``.
+    audit_dir
+        Audit log directory (used when ``audit_file`` is ``None``).
+    live_subjects_file
+        Newline-separated text file of live-dedup subjects. ``None``
+        opts the check out.
+    action_filter
+        Audit action to project subjects from. Default ``"add"``.
+    """
+    if live_subjects_file is None:
+        return CheckResult(
+            name="audit_replay",
+            status="SKIP",
+            detail="no live_subjects_file given (replay check is opt-in)",
+        )
+    if not live_subjects_file.exists():
+        return CheckResult(
+            name="audit_replay",
+            status="FAIL",
+            detail=f"live_subjects_file does not exist: {live_subjects_file}",
+        )
+
+    target = audit_file or _find_latest_audit_log(audit_dir)
+    if target is None:
+        return CheckResult(
+            name="audit_replay",
+            status="SKIP",
+            detail=f"no audit logs found in {audit_dir}",
+        )
+    if not target.exists():
+        return CheckResult(
+            name="audit_replay",
+            status="FAIL",
+            detail=f"audit file does not exist: {target}",
+        )
+
+    # Local import keeps the doctor module's top-of-file import set lean.
+    from brutex.orchestrator.audit import AuditError
+    from brutex.orchestrator.replay import assert_dedup_consistent
+
+    live_subjects = frozenset(
+        line
+        for raw in live_subjects_file.read_text(encoding="utf-8").splitlines()
+        if (line := raw.strip())
+    )
+    try:
+        assert_dedup_consistent(
+            audit_path=target,
+            live_subjects=live_subjects,
+            action_filter=action_filter,
+        )
+    except AuditError as exc:
+        return CheckResult(
+            name="audit_replay",
+            status="FAIL",
+            detail=str(exc),
+        )
+    return CheckResult(
+        name="audit_replay",
+        status="PASS",
+        detail=(
+            f"{len(live_subjects)} live subjects match audit "
+            f"({target.name}, action={action_filter!r})"
+        ),
+    )
+
+
 def check_runtime_file(runtime_file: Path) -> CheckResult:
     """Verify the runtime file parses, if present.
 
@@ -218,6 +311,8 @@ def run_doctor(
     audit_file: Path | None = None,
     audit_dir: Path = DEFAULT_AUDIT_DIR,
     runtime_file: Path = DEFAULT_RUNTIME_FILE,
+    live_subjects_file: Path | None = None,
+    replay_action_filter: str = "add",
 ) -> DoctorReport:
     """Run all health checks and return the aggregated report.
 
@@ -231,6 +326,14 @@ def run_doctor(
         not supplied. Defaults to ``~/.brutex/audit``.
     runtime_file
         Path to the runtime file. Defaults to ``~/.brutex/runtime.json``.
+    live_subjects_file
+        Optional newline-separated text file of live dedup subjects.
+        When supplied, enables the L3 audit-replay consistency check
+        (DEC-L3-REPLAY-ORACLE-001). When ``None``, that check is
+        SKIP-ped.
+    replay_action_filter
+        Audit action to project subjects from for replay (default
+        ``"add"``).
 
     Returns
     -------
@@ -241,6 +344,14 @@ def run_doctor(
     report = DoctorReport()
     report.add(check_audit_chain(audit_file=audit_file, audit_dir=audit_dir))
     report.add(check_runtime_file(runtime_file=runtime_file))
+    report.add(
+        check_audit_replay_consistency(
+            audit_file=audit_file,
+            audit_dir=audit_dir,
+            live_subjects_file=live_subjects_file,
+            action_filter=replay_action_filter,
+        )
+    )
     return report
 
 
@@ -248,12 +359,16 @@ def main(
     audit_file: Path | None = None,
     audit_dir: Path = DEFAULT_AUDIT_DIR,
     runtime_file: Path = DEFAULT_RUNTIME_FILE,
+    live_subjects_file: Path | None = None,
+    replay_action_filter: str = "add",
 ) -> int:
     """CLI entry point. Print report to stdout; return 0 on PASS, 1 on FAIL."""
     report = run_doctor(
         audit_file=audit_file,
         audit_dir=audit_dir,
         runtime_file=runtime_file,
+        live_subjects_file=live_subjects_file,
+        replay_action_filter=replay_action_filter,
     )
     print(report.format())
     return 0 if report.ok else 1

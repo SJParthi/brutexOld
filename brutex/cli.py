@@ -150,6 +150,45 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to runtime file (default: ~/.brutex/runtime.json)",
     )
+    doctor.add_argument(
+        "--live-subjects-file",
+        type=Path,
+        default=None,
+        help=(
+            "Newline-separated text file of live dedup subjects; enables "
+            "the L3 audit-replay consistency check (DEC-L3-REPLAY-ORACLE-001). "
+            "Omit to skip."
+        ),
+    )
+    doctor.add_argument(
+        "--replay-action-filter",
+        type=str,
+        default="add",
+        help="Audit action to project for replay check (default: 'add')",
+    )
+
+    # ── monitor (DEC-MONITOR-LOOP-001) ────────────────────────────
+    monitor = sub.add_parser(
+        "monitor",
+        help=(
+            "Run the SLA + Watchdog + replay-oracle monitor loop in the foreground (Ctrl-C to stop)"
+        ),
+    )
+    monitor.add_argument(
+        "--poll-interval",
+        type=float,
+        default=30.0,
+        help="Seconds between ticks (default 30.0)",
+    )
+    monitor.add_argument(
+        "--ticks",
+        type=int,
+        default=0,
+        help=(
+            "Run exactly N ticks then exit (default 0 = run until "
+            "Ctrl-C). Useful for tests + cron-style invocation."
+        ),
+    )
 
     return parser
 
@@ -199,6 +238,8 @@ def cmd_doctor(
     audit_file: Path | None,
     audit_dir: Path | None,
     runtime_file: Path | None,
+    live_subjects_file: Path | None = None,
+    replay_action_filter: str = "add",
 ) -> int:
     """Run all doctor health checks and print the report."""
     from brutex.doctor import DEFAULT_AUDIT_DIR, DEFAULT_RUNTIME_FILE
@@ -208,7 +249,42 @@ def cmd_doctor(
         audit_file=audit_file,
         audit_dir=audit_dir if audit_dir is not None else DEFAULT_AUDIT_DIR,
         runtime_file=runtime_file if runtime_file is not None else DEFAULT_RUNTIME_FILE,
+        live_subjects_file=live_subjects_file,
+        replay_action_filter=replay_action_filter,
     )
+
+
+def cmd_monitor(poll_interval: float, ticks: int) -> int:
+    """Run the SLA + Watchdog + replay-oracle monitor loop.
+
+    Bounded run (``ticks > 0``): execute exactly N ticks then exit 0.
+    Unbounded (``ticks == 0``): run until SIGINT / Ctrl-C.
+
+    No detectors / replay_check are wired in this minimal scaffold —
+    the operator provides them via a Python entry point that imports
+    :class:`brutex.observability.monitor.MonitorLoop` directly. This
+    CLI is a smoke-test surface for the loop infrastructure itself.
+    """
+    from brutex.observability.monitor import MonitorLoop
+
+    loop = MonitorLoop(poll_interval_seconds=poll_interval)
+    if ticks > 0:
+        for _ in range(ticks):
+            loop.tick_once()
+        return 0
+    loop.start()
+    try:
+        # Block until the daemon thread reports back via interrupt
+        # (Ctrl-C). We use the standard event-wait pattern so the
+        # foreground command never busy-loops.
+        while loop.is_running:
+            try:
+                loop._thread.join(timeout=1.0)  # type: ignore[union-attr]
+            except KeyboardInterrupt:
+                break
+    finally:
+        loop.stop()
+    return 0
 
 
 def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
@@ -259,6 +335,13 @@ def main(argv: list[str] | None = None) -> int:
             audit_file=args.audit_file,
             audit_dir=args.audit_dir,
             runtime_file=args.runtime_file,
+            live_subjects_file=args.live_subjects_file,
+            replay_action_filter=args.replay_action_filter,
+        )
+    if args.command == "monitor":
+        return cmd_monitor(
+            poll_interval=args.poll_interval,
+            ticks=args.ticks,
         )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits

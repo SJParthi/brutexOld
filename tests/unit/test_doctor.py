@@ -19,6 +19,7 @@ from brutex.doctor import (
     CheckResult,
     DoctorReport,
     check_audit_chain,
+    check_audit_replay_consistency,
     check_runtime_file,
     main,
     run_doctor,
@@ -182,6 +183,114 @@ class TestCheckRuntimeFile:
 # ────────────────────────────────────────────────────────────────────────
 
 
+class TestCheckAuditReplayConsistency:
+    """L3 audit-replay oracle (DEC-L3-REPLAY-ORACLE-001) doctor check."""
+
+    def test_skip_when_no_live_subjects_file(self, tmp_path: Path) -> None:
+        result = check_audit_replay_consistency(
+            audit_file=None,
+            audit_dir=tmp_path,
+            live_subjects_file=None,
+        )
+        assert result.status == "SKIP"
+        assert "opt-in" in result.detail
+
+    def test_fail_when_live_subjects_file_missing(self, tmp_path: Path) -> None:
+        result = check_audit_replay_consistency(
+            audit_file=None,
+            audit_dir=tmp_path,
+            live_subjects_file=tmp_path / "missing.txt",
+        )
+        assert result.status == "FAIL"
+        assert "does not exist" in result.detail
+
+    def test_skip_when_no_audit_log_in_dir(self, tmp_path: Path) -> None:
+        live = tmp_path / "live.txt"
+        live.write_text("subj-a\n", encoding="utf-8")
+        result = check_audit_replay_consistency(
+            audit_file=None,
+            audit_dir=tmp_path / "empty",
+            live_subjects_file=live,
+        )
+        assert result.status == "SKIP"
+        assert "no audit logs found" in result.detail
+
+    def test_fail_when_audit_file_missing(self, tmp_path: Path) -> None:
+        live = tmp_path / "live.txt"
+        live.write_text("subj-a\n", encoding="utf-8")
+        result = check_audit_replay_consistency(
+            audit_file=tmp_path / "ghost.jsonl",
+            audit_dir=tmp_path,
+            live_subjects_file=live,
+        )
+        assert result.status == "FAIL"
+        assert "does not exist" in result.detail
+
+    def test_pass_when_subjects_align(self, good_audit_log: Path, tmp_path: Path) -> None:
+        """Empty audit-add-subjects + empty live snapshot → PASS."""
+        live = tmp_path / "live.txt"
+        live.write_text("", encoding="utf-8")
+        result = check_audit_replay_consistency(
+            audit_file=good_audit_log,
+            audit_dir=tmp_path,
+            live_subjects_file=live,
+        )
+        assert result.status == "PASS"
+        assert "match audit" in result.detail
+
+    def test_pass_with_custom_action_filter(self, good_audit_log: Path, tmp_path: Path) -> None:
+        # good_audit_log has actions RUN_START, PHASE_START, RUN_COMPLETE
+        # with subjects run:test, phase:A, run:test. Use action_filter
+        # to project just RUN_START → {run:test}.
+        live = tmp_path / "live.txt"
+        live.write_text("run:test\n", encoding="utf-8")
+        result = check_audit_replay_consistency(
+            audit_file=good_audit_log,
+            audit_dir=tmp_path,
+            live_subjects_file=live,
+            action_filter="RUN_START",
+        )
+        assert result.status == "PASS"
+
+    def test_fail_on_missing_from_live(self, good_audit_log: Path, tmp_path: Path) -> None:
+        # Audit RUN_START subject is run:test; live is empty → missing.
+        live = tmp_path / "live.txt"
+        live.write_text("", encoding="utf-8")
+        result = check_audit_replay_consistency(
+            audit_file=good_audit_log,
+            audit_dir=tmp_path,
+            live_subjects_file=live,
+            action_filter="RUN_START",
+        )
+        assert result.status == "FAIL"
+        assert "missing_from_live=1" in result.detail
+
+    def test_fail_on_extra_in_live(self, good_audit_log: Path, tmp_path: Path) -> None:
+        live = tmp_path / "live.txt"
+        live.write_text("rogue\n", encoding="utf-8")
+        result = check_audit_replay_consistency(
+            audit_file=good_audit_log,
+            audit_dir=tmp_path,
+            live_subjects_file=live,
+            action_filter="add",  # default; no add-subjects in audit
+        )
+        assert result.status == "FAIL"
+        assert "extra_in_live=1" in result.detail
+
+    def test_blank_lines_in_live_file_are_skipped(
+        self, good_audit_log: Path, tmp_path: Path
+    ) -> None:
+        live = tmp_path / "live.txt"
+        live.write_text("\n\n  \nrun:test\n\n", encoding="utf-8")
+        result = check_audit_replay_consistency(
+            audit_file=good_audit_log,
+            audit_dir=tmp_path,
+            live_subjects_file=live,
+            action_filter="RUN_START",
+        )
+        assert result.status == "PASS"
+
+
 class TestRunDoctor:
     """End-to-end aggregator behaviour."""
 
@@ -192,7 +301,14 @@ class TestRunDoctor:
             runtime_file=tmp_path / "no_runtime.json",
         )
         assert report.ok is True
-        assert len(report.checks) == 2
+        # 3 checks: audit_chain + runtime_file + audit_replay
+        assert len(report.checks) == 3
+        statuses = {c.name: c.status for c in report.checks}
+        assert statuses == {
+            "audit_chain": "SKIP",
+            "runtime_file": "SKIP",
+            "audit_replay": "SKIP",
+        }
 
     def test_audit_pass_runtime_skip(self, good_audit_log: Path, tmp_path: Path) -> None:
         report = run_doctor(
@@ -204,6 +320,7 @@ class TestRunDoctor:
         statuses = {c.name: c.status for c in report.checks}
         assert statuses["audit_chain"] == "PASS"
         assert statuses["runtime_file"] == "SKIP"
+        assert statuses["audit_replay"] == "SKIP"
 
     def test_audit_fail_marks_overall_not_ok(self, tmp_path: Path) -> None:
         report = run_doctor(
@@ -212,6 +329,37 @@ class TestRunDoctor:
             runtime_file=tmp_path / "no_runtime.json",
         )
         assert report.ok is False
+
+    def test_replay_pass_when_subjects_match(self, good_audit_log: Path, tmp_path: Path) -> None:
+        """When live_subjects_file matches the audit's add-subjects,
+        the replay check passes."""
+        # good_audit_log has actions RUN_START / PHASE_START / RUN_COMPLETE,
+        # NOT "add" — so default action_filter="add" projects empty set.
+        # An empty live_subjects_file matches → PASS.
+        live = tmp_path / "live.txt"
+        live.write_text("", encoding="utf-8")
+        report = run_doctor(
+            audit_file=good_audit_log,
+            audit_dir=tmp_path,
+            runtime_file=tmp_path / "no_runtime.json",
+            live_subjects_file=live,
+        )
+        statuses = {c.name: c.status for c in report.checks}
+        assert statuses["audit_replay"] == "PASS"
+
+    def test_replay_fail_when_subjects_mismatch(self, good_audit_log: Path, tmp_path: Path) -> None:
+        # Live snapshot claims a subject the audit log never recorded
+        live = tmp_path / "live.txt"
+        live.write_text("rogue-subject\n", encoding="utf-8")
+        report = run_doctor(
+            audit_file=good_audit_log,
+            audit_dir=tmp_path,
+            runtime_file=tmp_path / "no_runtime.json",
+            live_subjects_file=live,
+        )
+        assert report.ok is False
+        statuses = {c.name: c.status for c in report.checks}
+        assert statuses["audit_replay"] == "FAIL"
 
 
 # ────────────────────────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ from brutex.observability.watchdog import (
     Watchdog,
     WorkerEvent,
     WorkerState,
+    make_heartbeat_subscriber,
 )
 
 # ────────────────────────────────────────────────────────────────────────
@@ -261,3 +262,60 @@ class TestCallbackFailuresIsolated:
         with caplog.at_level(logging.ERROR, logger="brutex.observability.watchdog"):
             wd.check_once()
         assert "callback raised" in caplog.text
+
+
+# ────────────────────────────────────────────────────────────────────────
+# make_heartbeat_subscriber pipeline-integration helper
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestMakeHeartbeatSubscriber:
+    def test_returns_callable(self) -> None:
+        wd = _make_watchdog()
+        subscriber = make_heartbeat_subscriber(wd, "w1")
+        assert callable(subscriber)
+
+    def test_calling_subscriber_records_heartbeat(self) -> None:
+        clk = FakeClock(0.0)
+        wd = _make_watchdog(clock=clk)
+        subscriber = make_heartbeat_subscriber(wd, "w1")
+        # Before any beat, w1 is unknown
+        assert "w1" not in wd.workers()
+        # Calling the subscriber with any "event" payload beats w1
+        subscriber(object())
+        assert wd.state_of("w1") == WorkerState.HEALTHY
+        assert "w1" in wd.workers()
+
+    def test_repeated_calls_keep_worker_healthy(self) -> None:
+        clk = FakeClock(0.0)
+        wd = _make_watchdog(timeout_seconds=10.0, clock=clk)
+        subscriber = make_heartbeat_subscriber(wd, "w1")
+        for _i in range(5):
+            clk.advance(3.0)
+            subscriber(object())
+            assert wd.check_once() == ()  # never trips
+        assert wd.state_of("w1") == WorkerState.HEALTHY
+
+    def test_subscriber_for_different_worker_names_are_independent(self) -> None:
+        wd = _make_watchdog()
+        sub_a = make_heartbeat_subscriber(wd, "alpha")
+        sub_b = make_heartbeat_subscriber(wd, "beta")
+        sub_a(object())
+        sub_b(object())
+        assert wd.workers() == ("alpha", "beta")
+
+    def test_no_beat_eventually_trips_hung(self) -> None:
+        """If the subscriber is never called, the worker is never beaten,
+        so once it's been registered the watchdog can flag it. This test
+        validates the subscriber + register interaction."""
+        clk = FakeClock(0.0)
+        wd = _make_watchdog(timeout_seconds=10.0, clock=clk)
+        # Call subscriber once to register
+        subscriber = make_heartbeat_subscriber(wd, "w1")
+        subscriber(object())
+        # Then advance time WITHOUT further beats
+        clk.advance(15.0)
+        emitted = wd.check_once()
+        assert len(emitted) == 1
+        assert emitted[0].worker_name == "w1"
+        assert emitted[0].new_state == WorkerState.HUNG

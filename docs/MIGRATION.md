@@ -335,6 +335,30 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+242. **DEC-MONITOR-LOOP-001 — make all 4 safety nets OPERATIONAL: MonitorLoop + heartbeat-subscriber helper + doctor replay-consistency check + `brutex monitor` / `brutex doctor --live-subjects-file` CLI** (2026-05-25, operator directive: "Wire all 4 call-sites (Recommended)" → turn the 4 dormant detectors from #238–241 into LIVE protection). Closes the "🟡 PARTIAL — seam built, callers not wired" honest-envelope on every prior MIGRATION entry #238–241.
+
+    **New module:** `brutex/observability/monitor.py` (74 stmts, 16 branches, 100% line + branch). Daemon-thread poller polling `SLADetector.check_once()`, `Watchdog.check_once()`, and an operator-supplied `replay_check` callable on a configurable interval (default 30s). Single-exit `_run()` design + caller-supplied callbacks keep the module dependency-free of the notification stack (one-way). 26 unit tests cover construction validation, deterministic `tick_once()` paths, per-sub-check exception isolation (×3 exception classes × 3 sub-checks), daemon-thread lifecycle, idempotent `start()`, fast `stop()` via `threading.Event.wait`, and context-manager use.
+
+    **Watchdog extension:** `brutex/observability/watchdog.py::make_heartbeat_subscriber(wd, worker_name)` — returns an `EventSubscriber`-compatible callable for the `brutex.orchestrator.pipeline.PhaseRunner` `subscribers=` argument. Calls `wd.beat(worker_name)` on every emitted `PipelineEvent`. Module annotates the parameter as `object` to avoid eager import of `brutex.orchestrator.pipeline.PipelineEvent` (would trigger the orchestrator init chain → fastbloom_rs PyO3 ABI3 collision — DEC-TELEGRAM-WIRING-001 precedent). 5 new unit tests; watchdog module ratchets 20 → 25 tests, still 100% line + branch.
+
+    **Doctor extension:** `brutex/doctor.py::check_audit_replay_consistency(audit_file, audit_dir, live_subjects_file, action_filter)` — new health check wrapping `assert_dedup_consistent()` from DEC-L3-REPLAY-ORACLE-001. Reads `live_subjects_file` (newline-separated text), runs the L3 oracle, and surfaces PASS/SKIP/FAIL with the truncated diff on mismatch. `run_doctor()` now adds this as a third standard check; `main()` accepts `live_subjects_file` + `replay_action_filter` kwargs. 9 new test methods + 4 updated; doctor module ratchets 23 → 32 tests, still 100% line + branch.
+
+    **CLI extensions** (`brutex/cli.py`, omitted from coverage):
+    - `brutex doctor --live-subjects-file PATH [--replay-action-filter ACTION]` — opt-in L3 replay check; SKIP-ped by default per "not every deployment maintains a live-subjects snapshot".
+    - `brutex monitor [--poll-interval SECS] [--ticks N]` — runs `MonitorLoop` in foreground; bounded (`--ticks N`) returns 0 after N ticks (cron-friendly), unbounded (default) blocks until Ctrl-C with graceful stop. Smoke-tested locally (`python -m brutex.cli monitor --ticks 2 --poll-interval 0.01` returns 0).
+
+    **CI gate:** new strict per-module 100% gate added for `brutex.observability.monitor` (slotted between watchdog + replay gates).
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: all 4 production helpers exist, 100% line + branch covered, ruff + mypy + pyright strict ALL GREEN locally.
+    - ✅ REAL: `brutex monitor --ticks N` is operator-runnable today; it's the smoke surface for the loop infrastructure.
+    - ✅ REAL: `brutex doctor --live-subjects-file PATH` is operator-runnable today against any audit JSONL + live-subject text file.
+    - 🟡 PARTIAL: the CLI `monitor` subcommand constructs an EMPTY `MonitorLoop` (no detectors / no replay_check). Real ingest runs will compose their own MonitorLoop with concrete detectors + Telegram callbacks via a Python entry point. This minimal CLI is the smoke surface, not the production entry point.
+    - 🟡 PARTIAL: no PhaseRunner instantiation in production code yet (only test instances) — `make_heartbeat_subscriber()` is the helper future code will use; it can't be wired into "the call site" because the call site doesn't exist until Phase 3.
+    - 📋 ROADMAP: a future PR (after Phase 3 lands or after the Dhan adapter goes live) will provide a higher-level `brutex run-with-monitoring` orchestration command that composes Telegram + SLA rules + watchdog targets + replay check into one config.
+
+    **Decision ID:** DEC-MONITOR-LOOP-001. **Builds on:** DEC-TELEGRAM-WIRING-001 (#238) + DEC-SLA-DETECTOR-001 (#239) + DEC-WATCHDOG-001 (#240) + DEC-L3-REPLAY-ORACLE-001 (#241). **Closes:** the "🟡 PARTIAL: seam built, callers not wired" envelope on all four detectors.
+
 241. **DEC-L3-REPLAY-ORACLE-001 — L3 audit-log replay oracle (audit JSONL → subjects → diff vs live dedup snapshot)** (2026-05-25, operator directive: "go ahead" → continue ratcheting). Closes 2026-05-25 audit row 14 (L3 dedup replay was UNIMPLEMENTED — last of the 6 solo-closable gaps from the 2026-05-25 audit).
 
     **New module:** `brutex/orchestrator/replay.py` (29 stmts, 4 branches, 100% line + branch).
