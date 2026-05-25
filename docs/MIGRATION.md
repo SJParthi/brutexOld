@@ -335,6 +335,42 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+243. **DEC-STANDARD-MONITOR-001 — production composer wiring Telegram + SLA + Watchdog + L3 replay into env-driven `MonitorLoop`** (2026-05-25, operator directive: "Production composer (Recommended)"). Closes the "🟡 PARTIAL: CLI `brutex monitor` constructs an EMPTY MonitorLoop" envelope from DEC-MONITOR-LOOP-001 (entry #242). After this PR `brutex monitor` is operator-runnable with REAL detectors + REAL Telegram callback firing on SLA breach + REAL watchdog heartbeat events.
+
+    **New module:** `brutex/observability/standard_monitor.py` (115 stmts, 18 branches, 100% line + branch).
+
+    - **`MonitorConfig` frozen dataclass** — `(poll_interval_seconds, watchdog_timeout_seconds, telegram_enabled, sla_rules, audit_path, live_subjects_file, replay_action_filter, replay_every_n_ticks)`. Every field has a sane default; explicit arg overrides env; env overrides default.
+    - **`MonitorConfig.from_env()`** — reads `BRUTEX_MONITOR_POLL_INTERVAL`, `BRUTEX_WATCHDOG_TIMEOUT_SECONDS`, `BRUTEX_TELEGRAM_ENABLED`, `BRUTEX_AUDIT_PATH`, `BRUTEX_LIVE_SUBJECTS_FILE`, `BRUTEX_REPLAY_ACTION_FILTER`, `BRUTEX_REPLAY_EVERY_N_TICKS`. Bad values fall back to default with `logger.warning` (Golden Rule #10 — misconfigured env never crashes the loop).
+    - **`_parse_bool_env()` strict decoder** — ONLY literal `"true"` (case-insensitive, trimmed) returns True. Any other value returns False explicitly (env wins). Matches DEC-M4PRO-ABSOLUTE-001 strict pattern.
+    - **`compose_standard_monitor(config)`** — factory returning an assembled (but not started) `MonitorLoop`. Builds: `SLADetector` with caller-supplied rules + on-breach/on-recovery callbacks; `Watchdog` with timeout + on-hung/on-recovery callbacks; `replay_check` closure (only when BOTH `audit_path` + `live_subjects_file` are set).
+    - **SLA + Watchdog callbacks** — when `telegram_enabled=False`, callbacks `logger.info` only (dev / smoke). When `telegram_enabled=True`, attempts Telegram publish via `brutex.notifications.wiring.get_or_start_notifier`. All exceptions (OSError, ValueError, RuntimeError, AttributeError, ImportError) swallowed + logged per Golden Rule #10.
+    - **`brutex monitor` CLI integration** — now uses `compose_standard_monitor()` with `MonitorConfig.from_env()` instead of constructing an empty `MonitorLoop`. `--poll-interval` flag overrides the env-derived value. Smoke-tested: `python -m brutex.cli monitor --ticks 2 --poll-interval 0.01` returns 0.
+
+    **New test file:** `tests/unit/test_observability_standard_monitor.py` (53 tests across 9 classes):
+
+    - `TestParseFloatEnv` (3 tests) — unset / valid / invalid-fallback paths.
+    - `TestParseIntEnv` (3 tests) — same.
+    - `TestParseBoolEnv` (3 parametrized × 13 inputs = 14 cases) — strict decoder semantics: "true" variants activate; non-true (including "1", "yes", "false") returns False explicitly.
+    - `TestParsePathEnv` (5 tests) — unset / empty / whitespace / valid / strip semantics.
+    - `TestMonitorConfig` (4 tests) — defaults, from_env all-defaults, from_env all-overrides, from_env with explicit SLA rules.
+    - `TestComposeStandardMonitor` (7 tests) — instance type, env fallback, replay-check wiring branches (both / audit-only / live-only), cadence propagation, SLA rules propagation.
+    - `TestSLACallback` + `TestWatchdogCallback` (4 tests) — log-only vs Telegram-publish paths.
+    - `TestPublishTelegram` (7 parametrized tests + 2 dedicated) — silent-on-no-notifier, publish success, exception swallowing (4 exception classes), ImportError graceful degradation.
+    - `TestMakeReplayCheck` (5 tests) — None-returning branches, file-absence warning, round-trip happy path, blank-line stripping.
+    - `TestExports` (1 test) — `__all__` integrity.
+
+    **CI gate:** new strict per-module 100% gate added after the monitor gate.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: `brutex monitor` now wires Telegram callback (when `BRUTEX_TELEGRAM_ENABLED=true`), watchdog (300s default timeout), replay oracle (when audit_path + live_subjects_file set), all swallow callback exceptions.
+    - ✅ REAL: 100% line + branch coverage including Telegram exception paths via fake-notifier monkeypatching.
+    - ✅ REAL: ImportError on `brutex.notifications` is gracefully swallowed — no boot-time hard dep on Telegram layer.
+    - 🟡 PARTIAL: default SLA rules list is EMPTY. The metrics-registry schema isn't standardised yet; operator passes explicit `SLARule` list via Python entry point (no YAML/TOML loader in this PR).
+    - 🟡 PARTIAL: no PhaseRunner instantiation in production code yet (only test instances). `make_heartbeat_subscriber()` from DEC-MONITOR-LOOP-001 is the helper future Phase 3 code will use.
+    - 📋 ROADMAP: follow-up PR adds YAML config loader for `MonitorConfig` (`brutex monitor --config FILE`) once Dhan adapter goes live and concrete metric names are settled.
+
+    **Decision ID:** DEC-STANDARD-MONITOR-001. **Builds on:** DEC-MONITOR-LOOP-001 (#242) + DEC-TELEGRAM-WIRING-001 (#238) + DEC-SLA-DETECTOR-001 (#239) + DEC-WATCHDOG-001 (#240) + DEC-L3-REPLAY-ORACLE-001 (#241). **Closes:** the "🟡 PARTIAL — empty MonitorLoop" envelope from entry #242.
+
 242. **DEC-MONITOR-LOOP-001 — make all 4 safety nets OPERATIONAL: MonitorLoop + heartbeat-subscriber helper + doctor replay-consistency check + `brutex monitor` / `brutex doctor --live-subjects-file` CLI** (2026-05-25, operator directive: "Wire all 4 call-sites (Recommended)" → turn the 4 dormant detectors from #238–241 into LIVE protection). Closes the "🟡 PARTIAL — seam built, callers not wired" honest-envelope on every prior MIGRATION entry #238–241.
 
     **New module:** `brutex/observability/monitor.py` (74 stmts, 16 branches, 100% line + branch). Daemon-thread poller polling `SLADetector.check_once()`, `Watchdog.check_once()`, and an operator-supplied `replay_check` callable on a configurable interval (default 30s). Single-exit `_run()` design + caller-supplied callbacks keep the module dependency-free of the notification stack (one-way). 26 unit tests cover construction validation, deterministic `tick_once()` paths, per-sub-check exception isolation (×3 exception classes × 3 sub-checks), daemon-thread lifecycle, idempotent `start()`, fast `stop()` via `threading.Event.wait`, and context-manager use.
