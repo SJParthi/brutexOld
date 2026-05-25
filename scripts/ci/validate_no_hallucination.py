@@ -107,8 +107,7 @@ def strip_code_spans(text: str) -> str:
     backticks don't trip the scanner.
     """
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
-    text = re.sub(r"`[^`]*`", " ", text)
-    return text
+    return re.sub(r"`[^`]*`", " ", text)
 
 
 def split_into_paragraphs(text: str) -> list[str]:
