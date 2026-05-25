@@ -63,8 +63,7 @@ def strip_code_spans(text: str) -> str:
     # Triple-backtick fenced blocks: ```...``` (greedy across newlines)
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     # Single-backtick inline code spans: `...`
-    text = re.sub(r"`[^`]*`", " ", text)
-    return text
+    return re.sub(r"`[^`]*`", " ", text)
 
 
 def extract_dec_ids(text: str) -> list[str]:

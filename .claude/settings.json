@@ -46,6 +46,17 @@
     "PYTHONDONTWRITEBYTECODE": "1"
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c '[ -x .claude/hooks/session-start.sh ] && .claude/hooks/session-start.sh || true'"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Write|Edit",

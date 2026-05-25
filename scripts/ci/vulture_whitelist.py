@@ -1,3 +1,4 @@
+# ruff: noqa: B018, F821
 """Vulture whitelist — suppress only verified false positives.
 
 Per DEC-P0-001 (2026-05-17): the CI vulture job is no longer advisory.

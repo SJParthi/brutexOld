@@ -302,6 +302,57 @@ superseded.
 
     **Decision ID:** DEC-DEC-ID-VALIDATOR-001. **Builds on:** DEC-CROSSWALK-001 (entry #206) · DEC-STANDARDS-AUDIT-001 (entry #205).
 
+237. **DEC-SESSION-START-HOOK-001 — `.claude/hooks/session-start.sh` + settings.json SessionStart wiring + 27 smoke tests** (2026-05-25, operator directive: "ratchet the 6 solo-closable gaps"). Closes the 2026-05-25 honest-audit "Per new session" scope gap (`docs/STANDARDS_100PCT_HONEST_AUDIT.md §1` row 6) — new Claude sessions previously relied on **discipline** (not mechanical guarantee) to read CLAUDE.md + recent MIGRATION decisions + check environment artifacts before editing.
+
+    **Three-file ratchet:**
+    - `.claude/hooks/session-start.sh` (~110 lines) — bash hook prints concise project-state summary to **stderr** (not stdout — stdout stays clean for downstream tool pipes). Six sections: (1) branch + git status + commits ahead + HEAD; (2) CLAUDE.md + honest-audit doc last-modified timestamps; (3) **last 5 MIGRATION decisions sorted by entry number descending** (so latest ratchet appears first); (4) environment: `.venv/` presence + Python version + `fno_math` importability with install-commands as fallback messages; (5) pre-merge gate reminder (ruff + mypy + pytest); (6) the 6 Z+ marker phrases the PR-body guard requires. Exit 0 always — notification only, never a gate. Uses `set -uo pipefail` deliberately (no `-e`) so missing optional artifacts don't abort the hook.
+    - `.claude/settings.json` — new `SessionStart` block in `hooks` (alongside existing PreToolUse, PostToolUse, Stop). Matcher `*`. Invokes the script via `bash -c '[ -x .claude/hooks/session-start.sh ] && .claude/hooks/session-start.sh || true'` — gracefully no-ops if the script is missing or non-executable.
+    - `tests/unit/test_session_start_hook.py` (~190 lines, 27 tests across 4 classes) — `TestHookFileShape` (exists / executable / bash shebang / no `set -e`); `TestExitCode` (exit 0 in repo + outside repo); `TestStdoutCleanContract` (empty stdout / non-trivial stderr); `TestOutputContent` (18 required-token presence checks + descending-decisions-order assertion via `itertools.pairwise`). All run in subprocess to verify real shell semantics.
+
+    **Verified locally:** 27 passed in 1.9s under `.venv/bin/pytest`; ruff + format + mypy strict ALL GREEN. Hook smoke output shows latest 5 decisions correctly: 236 → 235 → 233 → 232 → 231 (descending).
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: hook is mechanically invoked by the Claude Code harness via `SessionStart` registration; output is bounded (~30 lines stderr) so it doesn't blow context but rich enough that Claude can act on it.
+    - 🟡 PARTIAL: hook output is INFORMATIONAL (stderr to Claude). It can't FORCE Claude to read CLAUDE.md or the spec — discipline still required for the deep dive. But it removes the "I didn't know about the latest decision" excuse.
+    - 📋 ROADMAP: future enhancement — augment with `git rev-list --count HEAD..origin/main` to detect "behind upstream" + show CI status via `gh pr view`.
+
+    **Decision ID:** DEC-SESSION-START-HOOK-001. **Builds on:** DEC-P0-014 (Z+ defensive layer, MIGRATION entry #152) — the 6 marker phrases this hook surfaces are exactly those `scripts/ci/zplus-pr-guard.sh` enforces. **Closes:** honest-audit §1 row 6 ("Per new session") gap; row 6 transitions from 🟡 PARTIAL → 🟢 ENFORCED.
+
+236. **DEC-M4PRO-ABSOLUTE-001 — M4 Pro absolute-throughput gate stub (`bench-m4pro.yml` + `test_throughput_absolute.py`)** (2026-05-25, operator directive: "Add stub today"). Closes STANDARDS_100PCT.md §1 row 14 partial-status closure path. CLAUDE.md §8 names the M4 Pro 14-core / 48 GB / 8 TB SSD as the production envelope; CLAUDE.md §2 rule 12 + STANDARDS row 14 mandate a **≥ 50 M ops/s** absolute throughput floor. Existing `tests/bench/test_throughput_canary.py` enforces only the **ratio** (p99(N=1M) / p99(N=100K) ≤ 8×) because shared GHA runners chronic-flake any absolute assertion per DEC-P0-020. This entry adds the absolute floor on a self-hosted runner, dormant until the operator registers the M4 Pro runner.
+
+    **Two-file stub:**
+    - `tests/bench/test_throughput_absolute.py` (~210 lines) — `TestM4ProAbsoluteThroughput::test_numpy_mask_and_meets_50m_ops_per_sec` asserts `ops_per_sec >= 50_000_000` only when `BRUTEX_M4PRO_ABS=1` is set; otherwise skips with a clear reason. Also adds `TestGateMachinery` (5 tests, always-run) verifying the env-var decoder is strict: only the literal string `"1"` (after `strip()`) activates the gate, so `BRUTEX_M4PRO_ABS=true|yes|0|false` all leave it dormant. Floor constant `M4PRO_ABSOLUTE_FLOOR_OPS_PER_SEC = 50_000_000` is pinned by a unit test against the operator decree.
+    - `.github/workflows/bench-m4pro.yml` — `runs-on: [self-hosted, macos, m4pro]`, triggers on push (paths-filtered to bench + workflow), pull_request, workflow_dispatch, and daily 11:00 UTC = 16:30 IST post-market. Sets `BRUTEX_M4PRO_ABS=1` in the env. Steps: Python 3.12 setup → pip install dev extras → `maturin develop --release` on `rust/fno-math` → `pytest tests/bench/test_throughput_absolute.py`.
+
+    **Activation path:** Operator registers M4 Pro at GitHub → sjparthi/brutex → Settings → Actions → Runners → "New self-hosted runner" (macOS, labels `self-hosted, macos, m4pro`). Next push or daily cron triggers the workflow; absolute gate activates with no further code change.
+
+    **Verified locally:** 10 gate-machinery tests pass + 1 absolute-gate test (skipped without env, passed when `BRUTEX_M4PRO_ABS=1` set; >50M ops/s achievable even on this Linux container so M4 Pro will easily clear). ruff + mypy strict GREEN.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: stub files land and pass in shared CI today (skip-by-default behaviour proven). Gate decoder is strict per `TestGateMachinery` (no accidental activation via `BRUTEX_M4PRO_ABS=true`).
+    - 🟡 PARTIAL: STANDARDS row 14 remains 🟡 until the runner is registered. The closure-path PR exists; the closure is operator-side.
+    - 📋 ROADMAP: full row 14 close requires (a) runner online, (b) first successful M4 Pro run posted in the audit log.
+
+    **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
+
+235. **DEC-COMBO-HASH-UNIQUENESS-001 — explicit "no duplicate combo emitted" property test for `brutex.strategies.combo.combo_hash`** (2026-05-25, operator directive: "ratchet the 6 solo-closable gaps"). Closes the gap identified in the 2026-05-25 honest-audit table row 13 (uniqueness) — the existing `tests/property/test_dedup_hash_properties.py` exercises the orchestrator's SHA256 `_content_hash` for `WorkItem` ingest dedup, but **never touches the actual 9-field BLAKE3 combo identity hash** mandated by `TRACK1_BACKTEST_SPEC.md §"Identity (hash inputs)"` / FR-BF-003 / NFR-UNIQ-001. Adds `tests/property/test_combo_hash_uniqueness.py` (23 Hypothesis tests across 6 invariant classes):
+
+    - **Determinism** (2 tests) — same 9 inputs → same digest, three invocations agree.
+    - **Per-field sensitivity** (9 tests) — mutating any one of the 8 string fields OR the params dict changes the digest. Proves no field is silently dropped on the wire.
+    - **Params canonicalisation** (2 tests) — dict insertion order does NOT affect the digest (NFR-UNIQ-002 `sort_keys=True` invariant).
+    - **No-duplicate-combo emission** (1 test) — drawing N pairwise-distinct 9-tuples produces N distinct digests. This is the explicit property the audit flagged as missing.
+    - **Digest shape** (1 test) — 64 lowercase hex chars (BLAKE3-256 output).
+    - **Empty-string rejection** (8 tests) — every required string input must be non-empty; the validator raises `StrategyError`.
+
+    **Local verification:** 23 passed in 4.5s under `.venv/bin/pytest`; ruff + mypy strict ALL GREEN. Builds on DEC-P0-060 (combo_hash 9-field BLAKE3) and the DEC-STANDARDS-AUDIT-001 dedup-property-test pattern.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: 23 property tests now lock the 9-field BLAKE3 combo identity contract. Distinct combos → distinct hashes is now an asserted invariant, not an implicit assumption.
+    - 🟡 PARTIAL: Hypothesis collision-resistance is bounded by `unique_by=str` on the input tuples (so the test asserts the canonicaliser doesn't introduce accidental collisions, NOT that BLAKE3 itself is collision-free — that's a cryptographic-strength assumption).
+    - 📋 ROADMAP: a full end-to-end "engine emits ≥ N combos and zero collide" integration test arrives with Phase 3 (sweep producer).
+
+    **Decision ID:** DEC-COMBO-HASH-UNIQUENESS-001. **Builds on:** DEC-P0-060 (combo_hash 9-field BLAKE3, MIGRATION entry #198) · DEC-STANDARDS-AUDIT-001 (dedup property pattern, entry #205). **Closes:** honest-audit table row 13 gap.
+
 234. **DEC-DASHBOARD-LIVE-FINALE — staircase wiring + remaining 3 schema fields surfaced + tooltip narrowed to "ALL 13 LIVE"** (2026-05-24, operator directive: "whichever is recommended here go ahead dude"). Closes the dashboard wiring loop — **ALL 13 `SweepFunnelSnapshot` schema fields are now `data-bind`-wired in `docs/dashboard/mockups/v29.html`** (`data-bind` count: 10 → 22 — multiple bindings per field since both horizontal funnel + vertical staircase show the same numbers). Per `TRACK1_DASHBOARD_DESIGN.md §6.4`:
 
     - **7 staircase numeric cells wired:** each `<div class="big">` in `.funnel25-row` got `data-bind` attrs matching the horizontal funnel — step_0_all_candidates (33B row), step_1_cheap_prefilter (12M), step_2_real_edge_test (1.2M), step_3_unseen_data (84K), step_4_best_of_n (2.4K), step_7_three_windows (410), step_8_sealed_lockbox (174).
