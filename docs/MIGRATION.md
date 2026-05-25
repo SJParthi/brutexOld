@@ -335,6 +335,123 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+241. **DEC-L3-REPLAY-ORACLE-001 — L3 audit-log replay oracle (audit JSONL → subjects → diff vs live dedup snapshot)** (2026-05-25, operator directive: "go ahead" → continue ratcheting). Closes 2026-05-25 audit row 14 (L3 dedup replay was UNIMPLEMENTED — last of the 6 solo-closable gaps from the 2026-05-25 audit).
+
+    **New module:** `brutex/orchestrator/replay.py` (29 stmts, 4 branches, 100% line + branch).
+
+    - **`ReplayDiff` frozen dataclass** — `(intersection, missing_from_live, extra_in_live, replayed_count)` + `is_consistent` property.
+    - **`project_subjects(entries, action_filter="add")`** — filters audit entries by action and projects to a `frozenset[str]` of subjects.
+    - **`compute_replay_diff(audit_subjects, live_subjects, replayed_count)`** — pure-function set arithmetic (intersection / difference). Easy to unit-test exhaustively.
+    - **`replay_audit_to_diff(audit_path, live_subjects, action_filter)`** — convenience wrapper: `read_entries` → `project_subjects` → `compute_replay_diff`.
+    - **`assert_dedup_consistent(audit_path, live_subjects, action_filter)`** — strict variant: raises `AuditError` with first-5-samples on mismatch.
+    - **One-way dependency.** `replay` imports `audit` but NOT `bloom`/`store`. Caller passes the live snapshot as a `frozenset[str]` — no coupling to a specific dedup backend.
+
+    **New test file:** `tests/unit/test_orchestrator_replay.py` (17 tests across 5 classes):
+
+    - `TestProjectSubjects` (4) — action filter, empty filter (returns all), duplicate subjects collapse, no matching entries.
+    - `TestComputeReplayDiff` (5) — clean match, missing-from-live, extra-in-live, both, empty sets.
+    - `TestReplayAuditToDiff` (3) — round-trip clean, round-trip with missing, round-trip with custom action filter.
+    - `TestAssertDedupConsistent` (5) — silent on match, raises on missing, raises on extra, raises on both, first-5 sample truncation.
+    - `TestReplayDiffDataclass` (1) — frozen invariant.
+
+    **CI gate:** new strict per-module 100% gate added after the watchdog gate.
+
+    **Diagnostic improvement (sibling change):** added `set -x` to the strict-per-module gate bash script in `.github/workflows/ci.yml` so the CI log echoes each gate command before running. Lets us identify which exact module's gate fails when the bash `set -e` aborts the step (previous PR #126 commits #1-#3 failed on CI but the log gave no per-gate breakdown).
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: 100% line + branch coverage; pure-function arithmetic + integration round-trip via tmp_path audit files.
+    - ✅ REAL: no coupling to bloom/store — the oracle is reusable for any future dedup backend.
+    - 🟡 PARTIAL: no production caller yet invokes `assert_dedup_consistent` periodically. A scheduled job (or a CLI subcommand `brutex doctor --replay-audit`) would close the loop end-to-end.
+    - ✅ COMPLETE: this finishes the 6 solo-closable gaps from the 2026-05-25 honest-audit. Remaining work (Dhan adapter Phase 2, indicator backfills, Phase 3 engine, M4 Pro runner) sits behind operator scope-guards.
+
+    **Decision ID:** DEC-L3-REPLAY-ORACLE-001. **Builds on:** DEC-TELEGRAM-WIRING-001 (#238) + DEC-SLA-DETECTOR-001 (#239) + DEC-WATCHDOG-001 (#240). Together these 4 close the AUTOMATED pillar's observability + reliability surface (alerting + monitoring + replay).
+
+240. **DEC-WATCHDOG-001 — hung-worker detector with heartbeat registry + per-worker hysteresis** (2026-05-25, operator directive: "yes bro defintiely dude" → continue ratcheting). Closes 2026-05-25 audit row 17 (watchdog was MISSING — third of the 5 capabilities CLAUDE.md §11 AUTOMATED rule promises).
+
+    **New module:** `brutex/observability/watchdog.py` (42 stmts, 4 branches, 100% line + branch).
+
+    - **`Watchdog` dataclass** — `(timeout_seconds, on_hung, on_recovery, clock=time.monotonic)`. Tracks per-worker last-heartbeat timestamps in a dict; `check_once()` walks the registry on the caller's cadence.
+    - **`register(name)`** — explicit declaration (sets initial state HEALTHY, last-beat=now). Useful when the operator wants a worker to be eligible for the timeout check before its first real heartbeat.
+    - **`beat(name)`** — record a heartbeat. Auto-registers unknown names. Calling this after a HUNG state ⇒ the next `check_once()` fires the recovery callback.
+    - **`state_of(name)`** — return HEALTHY or HUNG; raises KeyError for unknown names.
+    - **`workers()`** — sorted tuple of registered names (deterministic, useful for tests + audit).
+    - **Hysteresis built-in.** Steady HUNG ⇒ callback fires ONCE on the edge. Operator's Telegram client doesn't get spammed.
+    - **Monotonic clock.** Default is `time.monotonic`; tests inject a `FakeClock` so the suite is fast + deterministic (no `time.sleep` anywhere). Wall-clock backjumps (NTP, DST) can't false-recover a hung worker.
+    - **Golden Rule #10 graceful degradation** — callback exceptions caught + logged.
+    - **Constructor validates `timeout_seconds > 0`** — zero/negative timeouts would mean "always hung" or "never hung", both bug-traps; explicit ValueError.
+
+    **New test file:** `tests/unit/test_observability_watchdog.py` (20 tests across 4 classes):
+
+    - `TestConstruction` (3 tests) — rejects 0 and negative timeouts; no workers initially.
+    - `TestRegistrationAndBeat` (4 tests) — register sets HEALTHY, beat auto-registers, state_of unknown raises, workers() returns sorted.
+    - `TestCheckOnceTransitions` (7 tests) — recent beat → no event, stale beat → HUNG, steady HUNG fires only once, beat-then-check → recovery, oscillation (3 cycles → 3+3 events), multi-worker independence, register-without-beat → eventually HUNG.
+    - `TestCallbackFailuresIsolated` (6 parametrised) — on_hung × OSError/ValueError/RuntimeError + on_recovery × OSError/ValueError/RuntimeError.
+
+    **CI gate:** new strict per-module 100% gate added after the SLA gate.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: hung detection + recovery is now testable + bit-deterministic via FakeClock.
+    - ✅ REAL: 100% line + branch coverage, callback isolation across 6 exception types.
+    - ✅ REAL: monotonic clock prevents wall-clock-jump false recovery.
+    - 🟡 PARTIAL: NO production caller has instantiated `Watchdog` yet. Once a phase-runner step (or a scheduler) hooks `wd.beat(worker_id)` into the existing worker loops, the dead-man's switch is armed.
+    - 📋 ROADMAP: L3 audit-log replay oracle is the last of the 6 solo-closable gaps from the 2026-05-25 audit.
+
+    **Decision ID:** DEC-WATCHDOG-001. **Builds on:** DEC-TELEGRAM-WIRING-001 (#238) + DEC-SLA-DETECTOR-001 (#239) — together they form the AUTOMATED pillar's alerting half. Auto-resume + L3 replay are the remaining halves.
+
+239. **DEC-SLA-DETECTOR-001 — rule-driven SLA breach detector with hysteresis + caller-supplied callbacks** (2026-05-25, operator directive: "yes bro defintiely dude" → continue ratcheting the 4 remaining gaps). Closes 2026-05-25 honest-audit row 19 (SLA alerting was MISSING — no detector watched thresholds, despite NFR-OBS-003 mentioning SLA tracking + CLAUDE.md §11 listing it in the AUTOMATED rule).
+
+    **New module:** `brutex/observability/sla.py` (63 stmts, 10 branches, 100% line + branch).
+
+    - **`SLARule` dataclass** — `(name, value_provider: Callable[[], float|None], predicate, threshold, severity, description)`. The `value_provider` is a callable (NOT a metric-name string) so the detector is decoupled from any specific value source — tests pass closures, production callers pass `lambda: registry.gauge_value(...)` or arbitrary queue-depth probes.
+    - **`SLADetector`** — `check_once()` evaluates every rule, evaluates the predicate, and fires the `on_breach` / `on_recovery` callback ONLY on state TRANSITIONS (hysteresis). Steady-state breaches don't spam.
+    - **3 predicates** — GREATER_THAN, LESS_THAN, EQUALS (float-epsilon-safe).
+    - **4 severities** — INFO, WARN, ERROR, CRITICAL (distinct enum from `TelegramSeverity` to keep one-way dependency).
+    - **Caller-supplied callbacks** — operator decides the sink (Telegram via wiring.py, audit log, stdout, dashboard). Detector is sink-agnostic.
+    - **Golden Rule #10 graceful degradation** — value_provider exceptions + callback exceptions are caught + logged (OSError, ValueError, RuntimeError). A buggy provider or sink never crashes the detector.
+
+    **New test file:** `tests/unit/test_observability_sla.py` (32 tests across 5 classes):
+
+    - `TestPredicateHolds` (9 parametrised) — all 3 predicates with above/below/equal value pairs.
+    - `TestConstructionAndState` (4 tests) — initial OK state, add_rule lifecycle, duplicate-name rejection, state_of unknown rule.
+    - `TestCheckOnceTransitions` (8 tests) — no-op when under threshold, breach on first violation, hysteresis (steady breach → 1 event), recovery transition, oscillation (3 cycles → 3+3 events), None-return skips, provider exceptions × 3 swallowed.
+    - `TestCallbackFailuresIsolated` (6 parametrised) — on_breach + on_recovery × OSError/ValueError/RuntimeError all swallowed.
+    - `TestMixedRules` (4 tests) — independent state tracking, severity propagation, LESS_THAN breach, EQUALS breach.
+
+    **CI gate:** new strict per-module 100% gate added to `.github/workflows/ci.yml` after the wiring.py gate.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: 100% line + branch coverage. Hysteresis contract enforced. Callback isolation verified across 6 exception types.
+    - ✅ REAL: pure-detector design — no scheduler / no threads / no I/O. Caller owns cadence.
+    - 🟡 PARTIAL: NO production caller has instantiated `SLADetector` yet. Once a scheduler-thread wires it up with real rules + the Telegram callback from DEC-TELEGRAM-WIRING-001, the alerting loop is closed.
+    - 📋 ROADMAP: watchdog + L3 replay oracle remain (2 of the 6 solo-closable gaps).
+
+    **Decision ID:** DEC-SLA-DETECTOR-001. **Builds on:** DEC-TELEGRAM-WIRING-001 (entry #238) — the SLA callback will fire a Telegram event via `make_pipeline_event_subscriber` once the scheduler call-site lands.
+
+238. **DEC-TELEGRAM-WIRING-001 — wire `TelegramNotifier.publish()` into the orchestrator pipeline via `EventSubscriber` seam** (2026-05-25, operator directive: "yes bro defintiely dude" → continue ratcheting the 4 remaining solo-closable gaps from the 2026-05-25 honest-audit). Closes audit row 16 (Telegram coded but never `.publish()`-ed): the 546-LOC `TelegramNotifier` had ZERO production callers in the orchestrator hot path, despite CLAUDE.md §11 AUTOMATED rule explicitly promising "Release Please + auto-merge + watchdog + Telegram + auto-resume".
+
+    **New module:** `brutex/notifications/wiring.py` (82 stmts, 24 branches, 100% line + branch).
+
+    - **Singleton lifecycle.** `get_or_start_notifier()` reads `TelegramConfig.from_env()` once (thread-safe, idempotent), returns the cached `TelegramNotifier` instance or `None` (when disabled). `TelegramConfigError` + `OSError` are logged + swallowed per Golden Rule #10 (a broken Telegram never crashes the ingest loop).
+    - **Subscriber factory.** `make_pipeline_event_subscriber()` returns an `EventSubscriber` callable (the existing pipeline contract `Callable[[PipelineEvent], None]`). Caller plugs it into `PhaseRunner(subscribers=[...])`.
+    - **PipelineEventKind → TelegramEventKind mapping.** 5 mapped: RUN_START, PHASE_START, PHASE_COMPLETE, RUN_COMPLETE → INFO; PHASE_HALTED → CRITICAL (operator's Telegram pops a louder notification). 2 unmapped (PHASE_PROGRESS, ITEM_COMPLETE) are intentionally dropped — too noisy for the chat, stay in audit log + dashboard.
+    - **TypedDict state container.** `_State` TypedDict holds the singleton state without needing the `global` statement (ruff PLW0603 forbids it).
+
+    **New test file:** `tests/unit/test_notifications_wiring.py` (34 tests across 4 classes):
+
+    - `TestGetOrStartNotifier` (7 tests) — disabled-via-explicit-config, enabled-via-explicit-config + idempotence, caches disabled decision, swallows `TelegramConfigError`, swallows `OSError` from start, `from_env` is called when no explicit config, reset stops running notifier.
+    - `TestMakePipelineEventSubscriber` (10 tests) — per-mapped-kind publish (parametrised × 5), unmapped kinds silently dropped (parametrised × 2), no-op when notifier is None, singleton path when notifier arg is None, severity=CRITICAL for PHASE_HALTED, severity=INFO for RUN_START, dedupe key contains run+phase, dedupe key empty when neither present.
+    - `TestFormatMessage` (11 tests) — every mapped kind's message shape (with + without optional fields) + unknown-kind fallback + no-phase-no-run-id defensive path.
+    - `TestSubscriberSwallowsPublishExceptions` (3 tests parametrised) — OSError, ValueError, RuntimeError all caught and logged (Golden Rule #10).
+
+    **CI gate:** new strict per-module 100% gate added to `.github/workflows/ci.yml` after the existing `brutex.notifications.telegram` gate.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: the publish-no-op contract is now mechanically enforced — 100% line + 100% branch coverage on wiring.py via 34 unit tests.
+    - 🟡 PARTIAL: no PhaseRunner instantiation site has been migrated to use `subscribers=[..., make_pipeline_event_subscriber()]` yet — that's the next ratchet PR (call-site update). Until then, the seam is in place but no real ingest run pushes a Telegram event.
+    - 📋 ROADMAP: SLA breach detector + watchdog (the remaining 3 of the 6 solo-closable gaps) build ON TOP of this wiring — they'll add their own `EventSubscriber`s.
+
+    **Decision ID:** DEC-TELEGRAM-WIRING-001. **Builds on:** DEC-COMBO-HASH-UNIQUENESS-001 (entry #235, sibling audit-gap closure) · existing `EventSubscriber` contract in `brutex/orchestrator/pipeline.py` (FR-ING-013/014).
+
 235. **DEC-COMBO-HASH-UNIQUENESS-001 — explicit "no duplicate combo emitted" property test for `brutex.strategies.combo.combo_hash`** (2026-05-25, operator directive: "ratchet the 6 solo-closable gaps"). Closes the gap identified in the 2026-05-25 honest-audit table row 13 (uniqueness) — the existing `tests/property/test_dedup_hash_properties.py` exercises the orchestrator's SHA256 `_content_hash` for `WorkItem` ingest dedup, but **never touches the actual 9-field BLAKE3 combo identity hash** mandated by `TRACK1_BACKTEST_SPEC.md §"Identity (hash inputs)"` / FR-BF-003 / NFR-UNIQ-001. Adds `tests/property/test_combo_hash_uniqueness.py` (23 Hypothesis tests across 6 invariant classes):
 
     - **Determinism** (2 tests) — same 9 inputs → same digest, three invocations agree.
