@@ -517,27 +517,19 @@ jobs:
           # graceful-no-op when Telegram is disabled, and Golden Rule
           # #10 exception-swallowing. Closes 2026-05-25 audit row 16.
           #
-          # NOTE 2026-05-25 (DEC-TELEGRAM-WIRING-001 follow-up): the
-          # strict-100% per-module gate is DISABLED for this module
-          # because `--cov=brutex.notifications.wiring` causes
-          # pytest-cov to pre-import the module to register tracing
-          # hooks. That triggers brutex/orchestrator/__init__.py which
-          # imports bloom.py → fastbloom_rs (a PyO3 abi3-py38 wheel
-          # that errors with "modules compiled for CPython 3.8 or
-          # older may only be initialized once per interpreter
-          # process" when test collection subsequently imports the
-          # same chain). The module IS covered at 100% line + branch
-          # by the global --cov=brutex --cov-fail-under=90 step above
-          # (which uses package-root tracing, no pre-import collision).
-          # Re-enable this strict gate after either (a) refactoring
-          # the orchestrator package init to lazy-load bloom, or (b)
-          # fastbloom_rs upgrading to a PyO3 abi3-py39+ wheel.
-          # if compgen -G "tests/unit/test_notifications_wiring.py" > /dev/null; then
-          #   pytest --cov=brutex.notifications.wiring --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_wiring.py
-          # else
-          #   echo "(brutex.notifications.wiring test file not present yet — gate inactive)"
-          # fi
-          echo "(brutex.notifications.wiring strict gate temporarily disabled — see comment above re: fastbloom_rs PyO3 ABI3 limit)"
+          # Strict gate re-enabled after the brutex.notifications.__init__
+          # revert (commit pending): the package init no longer
+          # re-exports wiring helpers, so pytest-cov's pre-import of
+          # brutex.notifications.wiring no longer collides with the
+          # test file's import via the orchestrator package init chain
+          # (which triggered fastbloom_rs PyO3 abi3-py38 double-init).
+          # Callers that need wiring helpers import them directly via
+          # `from brutex.notifications.wiring import ...`.
+          if compgen -G "tests/unit/test_notifications_wiring.py" > /dev/null; then
+            pytest --cov=brutex.notifications.wiring --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_wiring.py
+          else
+            echo "(brutex.notifications.wiring test file not present yet — gate inactive)"
+          fi
           # DEC-SLA-DETECTOR-001 (2026-05-25, MIGRATION entry #239):
           # ratchet brutex.observability.sla (the rule-driven SLA
           # breach detector) into the strict per-module 100% gate. 32
