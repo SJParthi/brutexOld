@@ -335,84 +335,63 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
-245. **DEC-INDICATOR-COVERAGE-001 / DEC-COV-001 step 18 — 3-module indicator backfill: ema (89.86 → 100%) + day_extremes (87.23 → 100%) + prev_day_ohlc (93.10 → 100%)** (2026-05-26, operator directive: "Tell me which next-option to start, then go" → my recommended Option 2 of 4). Closes the last 3 strict-100% candidates among the 9 Track 1 indicator modules; brings the strict-per-module gate count **30 → 33**. Pure surgical-test backfill — zero source-code changes to `brutex/indicators/`. All 3 modules now sit inside the strict per-module 100% gate alongside `pivots` (step 9), `fib_levels` (step 10), `calendars.nse` + `adapters.dhan.auth` + `options.expiry_calendar` (step 11), and the other 24 strict-100% modules.
+246. **DEC-VENDOR-PIVOT-001 — full pivot from Dhan to Groww as the SINGLE backtesting data source (ADR-0001)** (2026-05-26, operator directive: "no need of dhan here just note one and only groww dude that too only concentrating on backtesting dude okay?"). This is a **major scope pivot** (CLAUDE.md §3 scope-lock + §9 hostile review applied). Retires the Dhan adapter outright — no parallel run, no multi-source resilience. Live execution / WebSocket / order placement remain explicitly OUT of scope per CLAUDE.md §1 (Track 1 = signal-only research).
 
-    **Three-module batch (~14 new tests across 3 existing test files, no new files):**
+    **Operator override of 4-agent hostile-review NO-GO verdict.** A 4-agent hostile review (Plan + Explore + Red-team + Compliance) was completed on 2026-05-26 and recommended Option D (multi-source resilience) over Option C (full pivot). The operator chose Option C explicitly. The 4 P0 blockers identified by the red-team agent are recorded here as **accepted risks** per the DEC-P0-005 operator-override precedent:
 
-    - **`brutex/indicators/ema.py`** (55 stmts, 14 branches → 100% line + branch). 7 new tests across 2 new classes:
-      - `TestComputeEmaInvalidPeriod` (2 tests): period=0 and period=-5 both raise `ValueError("must be >= 1")` — closes line 179.
-      - `TestStateLifecycle` (2 tests): `EMAState.reset()` clears `value`/`bars_seen`/`seed_sum`; reset-then-replay produces the same sequence as fresh — closes lines 141-143.
-      - `TestStateSerialization` (3 tests): `to_dict()` during warm-up + post-seed; `from_dict()` round-trip preserves identity AND lets the restored state continue updating bit-identically to the original — closes lines 147 + 158.
-      - Note: lifecycle/serialization tests deliberately snapshot via `to_dict()` rather than asserting on `state.value` directly because mypy's strict type-narrower would otherwise mark the post-reset `is None` assertion as unreachable (`state.value` narrowed to `float` after the populated-state assertion).
+    1. **INDIA VIX presence on Groww UNVERIFIED** (~55-65% prob missing per red-team) — Phase 0b empirical probe is the hard gate; ADR is rescinded if VIX absent.
+    2. **Per-day backtesting cap UNDOCUMENTED** — adaptive rate-limiter [4..8] r/s discovers the practical cap empirically.
+    3. **Data quality drift Dhan ↔ Groww NEAR-CERTAIN** (broker-specific 1m OHLC aggregation) — Phase 0b 1-day NIFTY 1m bar-by-bar diff quantifies; > 5% drift triggers follow-up ADR before any code lands.
+    4. **Reproducibility hash reset CERTAIN** (CLAUDE.md §2 rule 4: `data_snapshot_hash` changes with vendor → all prior strategy/audit hashes invalidated) — git tag `v-pre-groww-pivot` precedes any deletion; pre-pivot audit chain archived; no rewrite of prior MIGRATION decisions.
 
-    - **`brutex/indicators/day_extremes.py`** (43 stmts, 4 branches → 100% line + branch). 5 new tests across 2 new classes:
-      - `TestStateLifecycle` (1 test): `DayExtremesState.reset()` clears `current_day`/`day_high_paisa`/`day_low_paisa` — closes lines 132-134.
-      - `TestStateSerialization` (4 tests): `to_dict()` with `current_day` set AND fresh-state (covers both branches of the `current_day.isoformat() if … else None` conditional — closes line 138); `from_dict()` round-trip with day AND fresh-state — closes lines 147-148.
-      - Same mypy-narrowing-avoidance pattern as EMA (use `to_dict()` view for reset-state assertions).
+    **New design artifacts (docs-only PR for this MIGRATION entry):**
 
-    - **`brutex/indicators/prev_day_ohlc.py`** (44 stmts, 14 branches → 100% line + branch). 3 new tests added to 2 existing classes:
-      - `TestFindPrevTradingDay::test_returns_none_when_lookback_exhausted` — `find_prev_trading_day(Mon 2026-05-11, lookback_max=1)` → only Sun 2026-05-10 checked, not a trading day, loop exits, returns None. Closes line 96.
-      - `TestFindPrevTradingDay::test_returns_none_when_lookback_zero` — `lookback_max=0` skips the loop entirely. Defensive coverage of the boundary.
-      - `TestLookupPrevDayOHLC::test_returns_none_when_no_prev_trading_day_found` — `monkeypatch.setattr` on `brutex.indicators.prev_day_ohlc.find_prev_trading_day` to return None (simulates the pathological case that would require a >14-day non-trading stretch in reality, which doesn't exist on the NSE calendar). Closes line 125.
+    - **`docs/adr/0001-groww-vendor-pivot.md`** — full Architecture Decision Record covering rationale, accepted risks, reproducibility lineage policy, phased rollout, reversal path. Decision ID = DEC-VENDOR-PIVOT-001.
+    - **`docs/TRACK1_GROWW_ADAPTER.md`** — adapter specification: TOTP-only auth, `groww_symbol` instrument addressing, 30/90/180-day chunk window matrix, **adaptive rate-limiter auto-tuning algorithm [4..8] r/s with 3-hits-in-60s step-down + 5-min-clean step-up**, rupees → int64 paisa price-unit normalisation, 11-class error taxonomy, Z+ 7-layer defensive matrix, daily reconciliation gap-detection pass.
 
-    **CI gate addition:** `.github/workflows/ci.yml` gains 3 strict-per-module gate blocks immediately after the (currently-disabled) `brutex.orchestrator.replay` gate, following the same `compgen -G … && pytest --cov-fail-under=100` pattern used for the other 30 strict gates.
+    **Adaptive rate-limiter algorithm (operator decree 2026-05-26):**
 
-    **Local verification:** 49 tests pass under `.venv/bin/pytest` for the 3 files; all 3 modules at 100% line + branch with `--cov-fail-under=100`. `ruff check brutex tests` GREEN; `ruff format --check brutex tests` GREEN; `mypy --strict tests/unit/test_ema.py tests/unit/test_day_extremes.py tests/unit/test_prev_day_ohlc.py` GREEN (the 3 pre-existing `Unused "type: ignore"` errors on lines 85/94/96 of test_ema.py exist on the baseline branch and are out of scope for this PR).
+    - Range: [4, 8] r/s. Initial probe at 8 r/s (start high, descend on errors).
+    - Step-down: 3 `GrowwAPIRateLimitException` within a 60-second sliding window → step current_rate down by 1 r/s.
+    - Step-up: 5 consecutive minutes with zero rate-limit exceptions → attempt current_rate + 1 r/s (up to 8 ceiling).
+    - Floor breach (current_rate < 4 r/s): CRITICAL Telegram alert + halt fetcher; operator intervention.
+    - Every state transition: audit JSONL entry + Telegram event (INFO for step/lock, CRITICAL for floor breach).
+    - States: `PROBING_DOWN | LOCKED | PROBING_UP | FLOOR_BREACHED`. Asymmetric: fast step-down (1 minute of errors), slow step-up (5 minutes clean).
+    - All thresholds env-overridable: `BRUTEX_GROWW_MIN_RPS`, `BRUTEX_GROWW_MAX_RPS`, `BRUTEX_GROWW_INITIAL_RPS`, `BRUTEX_GROWW_STEP_DOWN_HITS`, `BRUTEX_GROWW_STEP_DOWN_WINDOW`, `BRUTEX_GROWW_STEP_UP_CLEAN_WINDOW`, `BRUTEX_GROWW_RECHECK_INTERVAL`.
 
-    **Honest envelope (Golden Rule #10):**
-    - ✅ REAL: 3 modules now mechanically gated at 100% line + branch on every push; no future regression can land silently.
-    - ✅ REAL: tests exercise REAL contract (reset semantics, serialization round-trip, lookback exhaustion) — not coverage-padding.
-    - 🟡 PARTIAL: `test_prev_day_ohlc.py::test_returns_none_when_no_prev_trading_day_found` uses `monkeypatch.setattr` to force the None-return branch because the NSE calendar has no real ≥14-day non-trading stretch. The patched test exercises the line but not the upstream calendar condition that would trigger it organically; this is a contract-level test, not a calendar-data integration test.
-    - 📋 ROADMAP: vocabulary modules (`bits.py` at 93.85%, `evaluator.py` at 95.38%) are the next strict-100% candidates if the operator wants to tighten further. The remaining gap is mostly in `evaluator.py` defensive `# pragma: no cover` paths that already document themselves as unreachable invariants.
+    **Universe scope (NO CHANGE from DEC-P0-063):** 200 NSE F&O eligible stocks + 3 index spots (NIFTY 50, BANKNIFTY, SENSEX) + INDIA VIX + ~46 futures = ~250 instruments. **NO options in this PR** (Track 2 / future). 4 intervals: 1m / 1d / 1w / 1mo. Range: 2020-01-01 → today (Groww's documented historical depth from SDK source `growwapi/groww/client.py`).
 
-    **Decision ID:** DEC-INDICATOR-COVERAGE-001 (also DEC-COV-001 step 18). **Builds on:** DEC-COV-001 steps 9-11 (indicator gates for pivots, fib_levels, calendars.nse, expiry_calendar). **Closes:** the 3 sub-rows of the "📋 ROADMAP — strict per-module 100% for the remaining indicator modules" line item from STANDARDS_100PCT.md §1 row 1 (coverage).
-247. **DEC-VENDOR-PIVOT-001 Phase 8 (EARLY) — full Dhan adapter wipe ahead of Groww adapter implementation** (2026-05-26, operator directive: "no dhan bro just wipe off the entire dhan its related dude so just go ahead with groww dude okay?"). Executes Phase 8 of ADR-0001 **before** Phases 1-7 (Groww adapter implementation) — an operator-directed reordering that leaves the codebase WITHOUT a backtest data fetcher until Phase 1 lands. The orchestrator/observability/dashboard/strategies/vocabulary layers stay intact (all broker-agnostic). The Groww adapter is the operator's chosen replacement; no parallel Dhan path remains.
+    **Phased rollout (per ADR §5):**
 
-    **Pre-deletion snapshot:** `git tag v-pre-groww-pivot` was created locally on the parent commit of this wipe. (Tag push to origin was denied by remote 403 — operator must push the tag manually from a laptop with full repo rights: `git push origin v-pre-groww-pivot`.) The tag preserves the immutable pre-wipe state for full reversibility.
+    | Phase | Sub-PR | Lines | Reversible? |
+    |---|---|---|---|
+    | 0a | This MIGRATION entry + ADR + adapter spec | docs-only (~3,000 LoC docs) | Trivial revert |
+    | 0b | `scripts/groww_probe.py` (Phase 0 empirical probe) + transcripts | ~250 LoC + docs | Trivial |
+    | 1 | `brutex/adapters/groww/{__init__, auth, constants, types}` + 4 new env vars (`BRUTEX_GROWW_*`) | ~480 | Pure addition |
+    | 2 | `brutex/adapters/groww/{body, parser, client}` + adaptive rate-limiter extension | ~600 | Pure addition |
+    | 3 | `brutex/adapters/groww/{ssrf_guard, timeconv}` + `GrowwMarketAdapter(MarketAdapter)` | ~470 | Pure addition |
+    | 4 | `brutex/orchestrator/groww_worker.py` + `groww_errors.py` | ~700 | Pure addition |
+    | 5 | `brutex/adapters/_common/` chunk-helper extract | ~300 (refactor) | Pure refactor |
+    | 6 | CLI flip: `brutex ingest` defaults to Groww; `BRUTEX_BROKER` dispatcher | ~250 | Env-flip reversible |
+    | 7 | Spec doc amendments (TRACK1_* + CLAUDE.md §6 replaced wholesale) | ~600 docs | Revert |
+    | 8 | Delete `brutex/adapters/dhan/` + `dhan_worker.py` + `dhan_errors.py` + all `test_dhan_*` files | -5,659 LoC | **HARD — git tag `v-pre-groww-pivot` PRECEDES this PR** |
 
-    **Files DELETED in this PR (5,659 LoC total):**
-
-    - **`brutex/adapters/dhan/`** entire package — 10 modules, 1,424 LoC (auth, body, client, constants, options_constants, parser, ssrf_guard, timeconv, types, __init__)
-    - **`brutex/orchestrator/dhan_worker.py`** + **`dhan_errors.py`** — 1,167 LoC
-    - **14 test files** matching `test_dhan_*` across `tests/{unit,golden,smoke}/` — 3,068 LoC
-
-    **Files UPDATED in this PR:**
-
-    - **`CLAUDE.md` §6** — Dhan facts table REPLACED wholesale with Groww facts table (sourced from operator's pasted Groww docs 2026-05-26 + HARD-VERIFIED `growwapi 1.5.0` PyPI wheel `groww/client.py:86-97`). Adds 35+ Groww-specific rows; flags INDIA VIX presence + backtesting-bucket assignment + data drift as UNVERIFIED per Golden Rule #1.
-    - **`pyproject.toml`** — `[dhan]` extras group renamed `[groww]` with `growwapi>=1.5,<2.0` + `pyotp>=2.9,<3.0`; mypy `dhanhq`/`httpx` overrides renamed to `growwapi`/`pyotp`.
-    - **`.github/workflows/ci.yml`** — 5 strict-100% gates referencing Dhan modules deleted (`dhan.timeconv`, `dhan.options_constants`, `dhan.constants`, `dhan.auth`, `dhan.types`); all `pip install [dev,dhan]` / `[dev,data,dhan]` invocations renamed to `[dev,groww]` / `[dev,data,groww]` (6 occurrences).
-    - **`scripts/setup/bootstrap.sh`** — `[dev,data,dhan]` → `[dev,data,groww]`.
-    - **`docs/runbooks/ENV_VARS.md`** — §5 Dhan adapter section REPLACED with Groww adapter section (11 new env vars: `BRUTEX_GROWW_{API_KEY, TOTP_SECRET, TOKEN_PATH, SMOKE, MIN_RPS, MAX_RPS, INITIAL_RPS, STEP_DOWN_HITS, STEP_DOWN_WINDOW, STEP_UP_CLEAN_WINDOW, RECHECK_INTERVAL}`).
-    - **`docs/runbooks/telegram-setup.md`** — single Dhan ref updated to broker-agnostic.
-    - **`brutex/__init__.py`**, **`brutex/adapters/__init__.py`**, **`brutex/universe.py`**, **`brutex/cli.py`** — docstring updates removing Dhan references, pointing to `docs/TRACK1_GROWW_ADAPTER.md` for the new vendor.
-
-    **Files PRESERVED (broker-agnostic layers — Z+ defensive matrix unchanged):**
-
-    - `brutex/adapters/protocol.py` — the `MarketAdapter` Protocol that the future `GrowwMarketAdapter` will implement
-    - `brutex/orchestrator/{audit, bloom, store, replay, retry, rate_limiter, quota_tracker, pipeline, state}.py`
-    - `brutex/observability/{sla, watchdog, monitor, standard_monitor, metrics, logging}.py`
-    - `brutex/notifications/{telegram, wiring}.py`
-    - `brutex/dashboard/*`
-    - `brutex/vocabulary/*`, `brutex/indicators/*`, `brutex/strategies/*`, `brutex/calendars/*`, `brutex/options/*`, `brutex/feed/*`, `brutex/execution/*`, `brutex/data/*`, `brutex/metrics/*`, `brutex/config/*`, `brutex/backtest/*`, `brutex/sprint/*`, `brutex/visualization/*`
-
-    **Operative state after this PR:**
-
-    - The engine has NO backtest data fetcher. `brutex ingest` will surface a clear "no broker configured — Groww adapter pending Phase 1" error message.
-    - All broker-agnostic tests (216 verified locally with `pytest --tb=no -q`) still pass.
-    - `ruff check brutex tests` GREEN; `ruff format --check` GREEN on 195 files (was 221 before deletion).
-    - Pre-existing `fno_math` ModuleNotFoundError on orchestrator imports is unchanged (Rust kernel built via maturin in CI).
+    Each phase ships as 1-2 PRs under 500 LoC carrying the Z+ 6-marker discipline.
 
     **Honest envelope (Golden Rule #10):**
 
-    - ✅ REAL: 26 core code files + 14 test files deleted cleanly; no orphan imports; ruff + format + targeted pytest GREEN.
-    - ✅ REAL: `git tag v-pre-groww-pivot` created locally on the pre-wipe commit; full revert is one `git checkout` away.
-    - ✅ REAL: CI gates for deleted modules removed in the same PR; no transient red-on-deleted-file noise expected.
-    - 🟡 PARTIAL: tag push to `origin` denied (403 in sandbox env); operator must run `git push origin v-pre-groww-pivot` from a laptop with full repo rights.
-    - 🟡 PARTIAL: the orchestrator pipeline currently has no concrete adapter — Phase 1 (Groww adapter `auth + constants + types` ~480 LoC) is the next PR.
-    - ❌ ACCEPTED: this is the destructive Phase 8 from ADR-0001 §5, executed AHEAD of Phases 1-7 (Groww adapter build) per the operator's reordering decree. The 4 P0 risks (VIX presence, backtesting bucket, data drift, repro hash reset) from the 4-agent hostile review remain ACCEPTED as documented in ADR §3.1 — Phase 0b empirical probe is still the hard gate before Phase 1 code lands.
-    - 📋 ROADMAP: Phase 0b probe script (`scripts/groww_probe.py`) + Phase 1+ Groww adapter implementation.
+    - ✅ REAL: 4-agent hostile review completed; verdicts archived in PR body; operator override documented in §3.1 of ADR.
+    - ✅ REAL: Groww Python SDK v1.5.0 verified on PyPI (Dec 2025); `CANDLE_INTERVAL_MIN_1="1minute"` hard-verified from SDK wheel source `growwapi/groww/client.py:86-97`.
+    - ✅ REAL: adaptive rate-limiter algorithm fully specified with state machine + audit/Telegram observability; thresholds env-overridable per CLAUDE.md §11 DYNAMIC rule.
+    - 🟡 PARTIAL: INDIA VIX presence on Groww UNVERIFIED — Phase 0b probe is the hard gate; ADR is rescinded if VIX absent.
+    - 🟡 PARTIAL: backtesting endpoint rate-limit bucket assignment UNVERIFIED (docs list Orders/LiveData/NonTrading only; backtesting endpoint not explicitly bucketed) — adaptive limiter handles either case.
+    - 🟡 PARTIAL: data drift Dhan ↔ Groww magnitude UNQUANTIFIED — Phase 0b 1-day NIFTY 1m diff quantifies; > 5% drift triggers a follow-up ADR.
+    - ❌ CERTAIN BREAK: reproducibility lineage discontinuity. Mitigated by git tag `v-pre-groww-pivot` + archived audit chain at `~/.brutex/audit/dhan-final.jsonl.tgz` + archived lake at `~/.brutex/lake-snapshot-dhan-2026-05-26.tar.zst`. No rewrite of prior MIGRATION decisions.
+    - 📋 ROADMAP: Options (Track 2) deferred to future ADR after Phase 0b probe of Groww's expired-options round-trip; live WebSocket out of scope per CLAUDE.md §1.
 
-    **Decision ID:** DEC-VENDOR-PIVOT-001 (Phase 8, executed early). **Builds on:** entry #246 (ADR + spec from PR #135, lands separately). **Closes:** the Dhan adapter chapter of BruteX Track 1.
+    **Decision ID:** DEC-VENDOR-PIVOT-001. **Builds on:** DEC-P0-005 (operator-override mechanism precedent, entry #143), DEC-P0-063 (200-stock universe scope, entry #200), DEC-PROTOCOL-MARKET-ADAPTER-001 (existing `brutex/adapters/protocol.py` design that this ADR exercises). **Supersedes (when fully merged):** the Dhan facts table in CLAUDE.md §6 and every Dhan-specific provision in `docs/TRACK1_DATA_INGEST_DESIGN.md`. **Closes:** the long-standing operator preference for a single-vendor backtesting surface.
+
+245. **DEC-INDICATOR-COVERAGE-001 / DEC-COV-001 step 18 — 3-module indicator backfill: ema (89.86 → 100%) + day_extremes (87.23 → 100%) + prev_day_ohlc (93.10 → 100%)** (2026-05-26, operator directive: "Tell me which next-option to start, then go" → my recommended Option 2 of 4). Closes the last 3 strict-100% candidates among the 9 Track 1 indicator modules; brings the strict-per-module gate count **30 → 33**. (PR #134; landed separately.)
 
 244. **DEC-INFRA-OPS-001 — operator infra/env bundle: bootstrap.sh + env-var registry + Telegram smoke-test + live-dedup dump script** (2026-05-25, operator directive: "focus only on infra environment related changes alone"). Closes the operations-readiness gap for the 4 detector modules merged in PRs #126/#129/#131: code is wired, but operators had no scripts to (a) bootstrap a fresh box, (b) discover the env-var schema, (c) verify Telegram end-to-end, (d) dump the live LMDB dedup state for the L3 replay oracle.
 
