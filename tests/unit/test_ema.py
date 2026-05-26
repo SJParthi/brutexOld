@@ -82,7 +82,7 @@ class TestComputeEma:
         assert all(r is None for r in result[:19])
         assert result[19] is not None
         # Seed = SMA(1..20) = (1+2+...+20)/20 = 210/20 = 10.5
-        assert abs(result[19] - 10.5) < 1e-12  # type: ignore[operator]
+        assert abs(result[19] - 10.5) < 1e-12
 
     def test_increasing_sequence_ema_lags_below(self) -> None:
         # EMA should lag below a strictly increasing sequence
@@ -91,9 +91,9 @@ class TestComputeEma:
         # At bar 49 (the last bar), the current value is 50.0
         # The EMA must be < 50.0 (lagging)
         assert result[49] is not None
-        assert result[49] < 50.0  # type: ignore[operator]
+        assert result[49] < 50.0
         # And > 1.0 (above the start)
-        assert result[49] > 1.0  # type: ignore[operator]
+        assert result[49] > 1.0
 
 
 class TestComputeEmaInvalidPeriod:
