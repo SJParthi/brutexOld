@@ -335,6 +335,39 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+249. **DEC-ADAPTIVE-RATE-LIMITER-001 — adaptive 4-state rate-limit machine for the Groww Data API (`[4..8]` r/s with fast step-down + slow step-up)** (2026-05-26 evening, operator directive: "yes dude fix all f them one by one dude" continuation; chronologically follows entries #247 (Telegram-wiring verification) and #248 (audit truth-up)). Implements the algorithm specified in MIGRATION entry #246 §"Adaptive rate-limiter algorithm" but as a **pure state machine** — no HTTP client, no token bucket, no Groww SDK imports. The Groww-adapter wiring lands in Phase 1 after the operator runs the Phase 0b empirical probe.
+
+    **Why this lands now (pre-Phase-1):** the algorithm is logic-only; building it ahead of the empirical probe gives the operator a fully tested rate-decision engine the moment they paste the API key + TOTP. Per the ADR §5 phased rollout, the engine plugs into the Phase 1 adapter via three methods:
+
+    * `record_rate_limit_hit()` — caller invokes when the SDK raises `GrowwAPIRateLimitException`. Advances the step-down sliding-window counter.
+    * `record_clean_call()` — caller invokes on every non-rate-limited success. Advances the step-up clean-window counter.
+    * `tick()` — optional scheduler-driven check so low-traffic conditions still progress through the step-up cadence.
+
+    The caller reads `current_rps` to decide how to space outgoing requests, and listens to `on_transition` to wire audit-log entries + Telegram events per the DEC-VENDOR-PIVOT-001 matrix.
+
+    **What lands:**
+
+    - **`brutex/orchestrator/adaptive_rate_limiter.py`** — new ~330-LoC module exporting `RateLimiterState` (StrEnum: `probing_up | locked | probing_down | floor_breached`), `StateTransition` (frozen dataclass with `from_state / to_state / from_rps / to_rps / timestamp / reason`), `AdaptiveRateLimiterConfig` (frozen dataclass with all 7 env-driven thresholds + `from_env()` classmethod + invariant validation in `__post_init__`), and `AdaptiveRateLimiter` (the state machine itself, thread-safe via internal `threading.Lock`).
+    - **`tests/unit/test_adaptive_rate_limiter.py`** — new ~360-LoC test suite with 9 test classes covering: config validation (all 7 invariants), env-driven config (defaults + overrides + unparseable fallback), initial state (3 cases — at/below ceiling), step-down (3 hits in window, hits outside window pruned, buffer cleared on transition), floor breach (4 step-downs reach floor + terminal state ignores further hits + terminal state ignores step-up), step-up (clean window steps up, repeated steps reach ceiling, partial window no-op, hit-resets-clock), tick scheduler, snapshot serialisation, callback contract (no-callback no-op + exception-propagates), default clock seam.
+
+    **Behavioral semantics (per spec in entry #246):**
+
+    * Range `[min_rps, max_rps]` defaults to `[4.0, 8.0]`. `initial_rps` defaults to `8.0` ("start high, descend on errors").
+    * Step-down: `step_down_hits` (default 3) rate-limit hits within `step_down_window` (default 60s) → `current_rps -= 1.0`; transition fires with `reason="step_down_hits"`. After step-down the hit buffer is cleared so the next step-down requires a fresh count (a single noisy burst can't collapse the rate by multiple steps).
+    * Step-up: `step_up_clean_window` (default 300s = 5 min) of zero pending hits → `current_rps += 1.0`; transition fires with `reason="step_up_clean_window"` or `"ceiling_reached"`.
+    * Floor breach: `current_rps - 1.0 < min_rps` → pin to `min_rps`, state becomes `FLOOR_BREACHED`; transition fires with `reason="floor_breach"`. Terminal — no automatic recovery; operator must rebuild the limiter.
+    * Asymmetry: 60s step-down vs 300s step-up = the rate trends DOWN on trouble and UP on calm. Matches operator's stated risk preference (entry #246).
+
+    **Honest envelope:**
+
+    - ✅ REAL: state machine implemented + unit tests covering all 4 states and every transition path.
+    - ✅ REAL: `mypy --strict` + `ruff check` + `ruff format --check` + `vulture --min-confidence 80` all clean on the new module.
+    - 🟡 PARTIAL: cannot pytest locally because `fno_math` Rust extension is not buildable in the sandbox (same constraint PR #144 landed under). CI will run the tests.
+    - 🟡 PARTIAL: ZERO Groww-adapter wiring lands in this PR — the state machine is logic-only and has no Groww SDK dependency at import time.
+    - 📋 ROADMAP: Phase 1 Groww adapter PR will instantiate `AdaptiveRateLimiter(config=AdaptiveRateLimiterConfig.from_env(), on_transition=publish_telegram_event_for_transition)` and call `record_rate_limit_hit()` / `record_clean_call()` from the HTTP layer; rate-decision becomes the `current_rps` property of the spaced delay.
+
+    **Decision ID:** DEC-ADAPTIVE-RATE-LIMITER-001. **Builds on:** DEC-VENDOR-PIVOT-001 (entry #246, the spec) · DEC-TELEGRAM-WIRING-VERIFICATION-001 (entry #247, the Telegram listener pattern this module's `on_transition` callback will plug into in Phase 1). **Closes:** the spec-vs-code gap on the rate-limiter algorithm (entry #246 documented the algorithm; this PR implements the pure logic ahead of Phase 1).
+
 248. **DEC-AUDIT-TRUTH-RECONCILE-001 — second-pass honest-audit reconciliation: 4 stale 🔴/🟡 gap rows reclassified 🟢 CLOSED** (2026-05-26, operator directive: "yes dude fix all f them one by one dude" after option-1 SessionStart-hook closure recommendation). The honest audit `docs/STANDARDS_100PCT_HONEST_AUDIT.md` was authored on 2026-05-25 from a five-parallel-agent pass against `claude/admiring-knuth-KJiMY`; four §9 gap rows survived as stale because the audit text was never refreshed when their closing decisions landed.
 
     **Stale-row reconciliation (audit text → reality):**
