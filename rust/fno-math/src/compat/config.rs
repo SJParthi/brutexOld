@@ -1154,10 +1154,10 @@ mod tests {
                 rest_api_base_url: "https://api.groww.co/v2".to_string(),
                 sandbox_base_url: "https://sandbox.groww.co/v2".to_string(),
                 auth_base_url: "https://auth.groww.co".to_string(),
-                instrument_csv_url: "https://images.groww.co/api-data/api-scrip-master-detailed.csv"
-                    .to_string(),
-                instrument_csv_fallback_url: "https://images.groww.co/api-data/api-scrip-master.csv"
-                    .to_string(),
+                instrument_csv_url:
+                    "https://images.groww.co/api-data/api-scrip-master-detailed.csv".to_string(),
+                instrument_csv_fallback_url:
+                    "https://images.groww.co/api-data/api-scrip-master.csv".to_string(),
                 max_instruments_per_connection: 5000,
                 max_websocket_connections: 5,
             },

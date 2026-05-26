@@ -249,7 +249,8 @@ mod tests {
 
     #[test]
     fn test_preserves_url_path() {
-        let input = "error for url (https://auth.groww.co/app/generateAccessToken?growwClientId=123)";
+        let input =
+            "error for url (https://auth.groww.co/app/generateAccessToken?growwClientId=123)";
         let output = redact_url_params(input);
         assert!(
             output.contains("/app/generateAccessToken"),

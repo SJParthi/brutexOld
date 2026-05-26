@@ -981,7 +981,8 @@ pub const GROWW_TWENTY_DEPTH_WS_BASE_URL: &str = "wss://depth-api-feed.groww.co/
 /// NOTE: Groww support confirmed (2026-04-10, Ticket #5519522) the correct path is
 /// `/twohundreddepth`. Previous SDK-based root path `/` caused `ResetWithoutClosingHandshake`.
 /// Groww also confirmed: use a Security ID close to current market price (ATM), not far OTM.
-pub const GROWW_TWO_HUNDRED_DEPTH_WS_BASE_URL: &str = "wss://full-depth-api.groww.co/twohundreddepth"; // APPROVED: infrastructure constant — confirmed by Groww support ticket #5519522
+pub const GROWW_TWO_HUNDRED_DEPTH_WS_BASE_URL: &str =
+    "wss://full-depth-api.groww.co/twohundreddepth"; // APPROVED: infrastructure constant — confirmed by Groww support ticket #5519522
 
 // ---------------------------------------------------------------------------
 // Historical Data — Candle Fetch Constants
