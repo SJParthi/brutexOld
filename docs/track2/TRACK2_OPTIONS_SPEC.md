@@ -24,7 +24,7 @@ combinations. The 52-condition vocabulary stays in Track 1.
 Track 2's job is:
 - Ingest historical 1-minute options OHLC for the ATM ± 10 strike band
   around NIFTY / BANKNIFTY / SENSEX.
-- Compute Greeks at every bar (IV from Dhan; delta/gamma/theta/vega
+- Compute Greeks at every bar (IV from Groww; delta/gamma/theta/vega
   from Black-Scholes-Merton).
 - For a Track 1 signal: simulate the options trade with realistic
   brokerage / STT / STO / slippage, returning a P&L vector that
@@ -36,16 +36,16 @@ Track 2's job is:
 
 | In scope | Out of scope |
 |---|---|
-| Indian index options (NIFTY 50, BANKNIFTY, SENSEX) — Dhan `OPTIDX` | All single-stock options (FNO equity) |
+| Indian index options (NIFTY 50, BANKNIFTY, SENSEX) — Groww `OPTIDX` | All single-stock options (FNO equity) |
 | Weekly + monthly expiry cycles (per-underlying, see §6) | LEAPS, quarterly long-dated, exotic structures |
-| ATM ± 10 strike band (Dhan `/charts/rollingoption` enforces this) | Deeper OTM than ATM ± 10 |
+| ATM ± 10 strike band (Groww `/charts/rollingoption` enforces this) | Deeper OTM than ATM ± 10 |
 | 1-minute bars only | Any other timeframe (no resampling) |
-| Greeks: IV (from Dhan) + delta/gamma/theta/vega (computed) | Vanna, charm, color, higher-order Greeks |
+| Greeks: IV (from Groww) + delta/gamma/theta/vega (computed) | Vanna, charm, color, higher-order Greeks |
 | Single-leg long premium (buy CE or buy PE) | Multi-leg structures (straddles, condors, calendars) for first sweep |
 | Brokerage / STT / STO / SEBI / GST cost model | Margin / portfolio-level risk |
 | Slippage as a parameter sweep | Live order placement |
 
-**India VIX is NOT in Track 2.** Dhan does not list options on India VIX
+**India VIX is NOT in Track 2.** Groww does not list options on India VIX
 (NSE doesn't either — VIX is a calculated index, not a tradable
 contract). VIX remains reference-only via Track 1's `vix_at_entry` /
 `vix_at_exit` stamps.
@@ -54,7 +54,7 @@ contract). VIX remains reference-only via Track 1's `vix_at_entry` /
 
 ## 2. Universe (locked)
 
-### Underlyings — Dhan facts (verified 2026-05-15)
+### Underlyings — Groww facts (verified 2026-05-15)
 
 | Underlying | Spot secId | Spot exchange/segment | Options exchange/segment | Trading symbol |
 |---|---|---|---|---|
@@ -62,7 +62,7 @@ contract). VIX remains reference-only via Track 1's `vix_at_entry` /
 | BANKNIFTY | `25` | `IDX_I` / `INDEX` | `NSE_FNO` / `OPTIDX` | `BANKNIFTY` |
 | SENSEX | `51` | `IDX_I` / `INDEX` | `BSE_FNO` / `OPTIDX` | `SENSEX` |
 
-Hardcoded in `brutex/adapters/dhan/options_constants.py` (Phase 2 deliverable).
+Hardcoded in `brutex/adapters/groww/options_constants.py` (Phase 2 deliverable).
 
 ### Strike radius (locked at 21 strikes)
 
@@ -76,7 +76,7 @@ For every (underlying, expiry, day):
 | `ATM+1` … `ATM+10` | progressively further OTM (CE) / further ITM (PE), flip for puts |
 | Total | **21 strikes** × {CE, PE} = **42 series** per (underlying, expiry, day) |
 
-Dhan's `/charts/rollingoption` API enforces `strikePosition ∈ [-10, +10]`.
+Groww's `/charts/rollingoption` API enforces `strikePosition ∈ [-10, +10]`.
 No silent expansion beyond that.
 
 ### Expiry cycle history — 5y backfill window 2021-01-01 → 2026-05-15
@@ -132,7 +132,7 @@ Each stream backfills 21 strikes (ATM ± 10) × 2 types (CALL + PUT) = 42
 series. **Total active series = 6 × 42 = 252.**
 
 Day-of-week regime changes within a stream are NOT separately
-backfilled — Dhan's rolling endpoint automatically follows whatever
+backfilled — Groww's rolling endpoint automatically follows whatever
 day-of-week was the active expiry on each historical date. The
 per-bar `strike` value in the response (see §3) tells us which absolute
 contract each bar refers to, so cross-regime stitching is transparent.
@@ -149,14 +149,14 @@ contract each bar refers to, so cross-regime stitching is transparent.
 >    were listed and ingestible.
 >
 > Resolution: 6 streams with full date gating. Backfill cost: ~15,876
-> Dhan calls / ~88 min wall time / ~5.5 GB storage. Strategy flexibility
+> Groww calls / ~88 min wall time / ~5.5 GB storage. Strategy flexibility
 > gained: full W vs M A/B test capability + BN historical (2021-2024)
 > + complete SENSEX historical (2021-2026). The pre-2023-05-15 SENSEX
 > data is annotated thin — sweep can be configured to skip it, but the
 > bytes are ingested anyway (cheap insurance, no re-backfill needed).
 >
 > An even simpler "current-expiry-only" model (3 streams, one per
-> underlying) was considered and rejected: per the Dhan SDK validator
+> underlying) was considered and rejected: per the Groww SDK validator
 > (`_historical_data.py`) the API requires explicit `expiryFlag`
 > ∈ {WEEK, MONTH} — there is no auto-current mode. See §3. **Phase 1
 > contract test C-2 will verify this against the live HTTP endpoint,
@@ -164,13 +164,13 @@ contract each bar refers to, so cross-regime stitching is transparent.
 
 ---
 
-## 3. Endpoint (locked, corrected 2026-05-15 against Dhan SDK source)
+## 3. Endpoint (locked, corrected 2026-05-15 against Groww SDK source)
 
-### `POST /v2/charts/rollingoption` (Dhan v2; SDK function `expired_options_data`)
+### `POST /v2/charts/rollingoption` (Groww v2; SDK function `expired_options_data`)
 
-Field names verified from the Dhan official Python SDK source
-(`src/dhanhq/_historical_data.py:expired_options_data`) and Dhan v2
-docs at `https://dhanhq.co/docs/v2/expired-options-data/` on 2026-05-15.
+Field names verified from the Groww official Python SDK source
+(`src/growwapi/_historical_data.py:expired_options_data`) and Groww v2
+docs at `https://groww.in/trade-api/docs/docs/v2/expired-options-data/` on 2026-05-15.
 
 #### Request body
 
@@ -190,7 +190,7 @@ docs at `https://dhanhq.co/docs/v2/expired-options-data/` on 2026-05-15.
 }
 ```
 
-**Strike-radius rule (Dhan-enforced):**
+**Strike-radius rule (Groww-enforced):**
 - Index near-expiry: ATM ± 10
 - Index non-near-expiry (`expiryCode ≥ 1`): ATM ± 3 only
 - Stock options: ATM ± 3 (out of Track 2 scope)
@@ -227,15 +227,15 @@ per-bar `strike` value tells us which absolute strike the bar refers to.
 
 #### Coverage window
 
-- Up to **30 days per call** (Dhan-enforced).
+- Up to **30 days per call** (Groww-enforced).
 - **5y backfill** (Track 2 default range): page over 30-day chunks.
 - Per-underlying validity windows (see §2): SENSEX options only exist
   2021-01-01 onwards on Thursday cycle (thin pre-2023-05-15 per BSE Notice 20230327-65); BANKNIFTY-WEEK only exists 2021-01-01 → 2024-11-13.
 
 #### Rate limit
 
-**5 req/s + 100,000/day** (Dhan freshdesk article; same as Track 1
-Data APIs). A newer Dhan support article says "10 r/s for Data APIs"
+**5 req/s + 100,000/day** (Groww freshdesk article; same as Track 1
+Data APIs). A newer Groww support article says "10 r/s for Data APIs"
 but the historical-data subset remained 5 r/s; we use the conservative
 limit. Adapter caps at **3 r/s effective** (5 × 0.6 safety factor,
 shared token bucket with Track 1).
@@ -245,18 +245,18 @@ shared token bucket with Track 1).
 The `securityId` in the request body is the **UNDERLYING's spot id**
 (13 = NIFTY, 25 = BANKNIFTY, 51 = SENSEX), **NOT a per-contract id**.
 No per-strike CSV lookup needed. The constants in
-`brutex/adapters/dhan/constants.py` (already locked per CLAUDE.md §6)
+`brutex/adapters/groww/constants.py` (already locked per CLAUDE.md §6)
 are reusable as-is.
 
-Confirmed via the Dhan SDK signature
+Confirmed via the Groww SDK signature
 (`security_id=13, exchange_segment="NSE_FNO", instrument_type="INDEX"`
-for NIFTY example) on `github.com/dhan-oss/DhanHQ-py`.
+for NIFTY example) on `github.com/groww-oss/Groww-py`.
 
 ### 3.2 Phase 0 empirical floor probe (REQUIRED)
 
-**Marketed coverage:** ~5 years rolling per Dhan docs.
+**Marketed coverage:** ~5 years rolling per Groww docs.
 
-**Community evidence:** a tradingqna.com thread titled "Dhan API for
+**Community evidence:** a tradingqna.com thread titled "Groww API for
 expired F&O data (1-min, **2 years**)" suggests actual reality may be
 ~2 years, not 5.
 
@@ -308,12 +308,12 @@ two different questions: (a) *when a trade pins an absolute strike at
 entry, how often does that strike drift OUT of the fetched ATM±N window
 before exit* — the "band-drift" failure mode that motivates DEC-P0-063's
 de-rolled lake design; and (b) *is next-month single-stock options data
-actually liquid enough to backtest*, sampling whatever Dhan returns for
+actually liquid enough to backtest*, sampling whatever Groww returns for
 stock-options `expiryCode = 1` so future brute-force decisions are
 data-grounded. It is the go/no-go gate for the ~777,000-call, ~9-10
 calendar-day Option A production backfill: **run it FIRST.**
 
-**The mechanic being measured.** Dhan addresses strikes by ATM-relative
+**The mechanic being measured.** Groww addresses strikes by ATM-relative
 label, but the response's per-bar `strike` array (see §3) records the
 ABSOLUTE strike behind each label at every minute. Fetching all strike
 offsets for one (name, day) reconstructs the full set of absolute
@@ -397,8 +397,8 @@ decides:
    floor.
 
 The probe also incidentally CONFIRMS, for stock options: the
-`instrument` enum (`OPTSTK`, confirmed by DEC-P0-063 research via Dhan
-SDK), the `exchangeSegment` (expected `NSE_FNO`), the Dhan-enforced
+`instrument` enum (`OPTSTK`, confirmed by DEC-P0-063 research via Groww
+SDK), the `exchangeSegment` (expected `NSE_FNO`), the Groww-enforced
 ATM±3 radius, and that the per-bar `strike` array behaves as documented
 in §3.
 
@@ -443,7 +443,7 @@ The ATM strike for an underlying at any 1-minute bar is the strike
 | BANKNIFTY | **100 pts** | 49,900 / 50,000 / 50,100 / … |
 | SENSEX | **100 pts** | 80,900 / 81,000 / 81,100 / … |
 
-(Strike steps are Dhan-published; smoke test verifies them quarterly.)
+(Strike steps are Groww-published; smoke test verifies them quarterly.)
 
 ### ATM-relative offsets (sent as a STRING — verified)
 
@@ -687,7 +687,7 @@ identified by name, not index).
 
 | Greek | Source | Why |
 |---|---|---|
-| **IV** (Implied Volatility) | **Dhan** — returned as `iv` array | Dhan computes it from their option pricer; we don't second-guess. **Cross-checked** against our recomputation, 50bp tolerance (§7.7). |
+| **IV** (Implied Volatility) | **Groww** — returned as `iv` array | Groww computes it from their option pricer; we don't second-guess. **Cross-checked** against our recomputation, 50bp tolerance (§7.7). |
 | **Delta** | **Computed** (Black-Scholes-Merton) | Standard; needed for hedge-ratio + ATM definition + R8/R9/R10 strike selection |
 | **Gamma** | **Computed** (BSM) | Needed for risk metrics + early-exit Greek thresholds |
 | **Theta** | **Computed** (BSM) | Daily decay; critical for short premium |
@@ -699,10 +699,10 @@ identified by name, not index).
 | Input | Source |
 |---|---|
 | S (spot) | Track 1's spot bar for the underlying at the same timestamp |
-| K (strike) | Per-bar `strike` array from Dhan response (absolute strike, not offset) |
+| K (strike) | Per-bar `strike` array from Groww response (absolute strike, not offset) |
 | T (time to expiry, in years) | (expiry timestamp at 15:30 IST − bar timestamp) / 365.25 / 86400 |
 | r (risk-free rate) | **91-day T-bill yield, DAILY T+1 snapshot from FBIL** (RBI DBIE weekly auction fallback). See §7.3. |
-| σ (volatility) | Dhan's `iv` for the same bar |
+| σ (volatility) | Groww's `iv` for the same bar |
 | q (dividend yield) | **0 for all 3 indices** with EXPLICIT bias documentation (§7.4) |
 
 ### 7.3 Risk-free rate `r` (REVISED 2026-05-16)
@@ -756,7 +756,7 @@ NIFTY 50 trailing dividend yield ≈ 1.3% (Trendlyne).
 
 The spec sets `q=0` for ALL pricing. This is defensible BECAUSE:
 
-1. Track 2 uses **observed Dhan bar prices for all FILLS** — never
+1. Track 2 uses **observed Groww bar prices for all FILLS** — never
    BSM-theoretical prices. P&L is exactly market-anchored.
 2. BSM is used ONLY for:
    - Delta-bucket strike selection (rules R8/R9/R10)
@@ -806,23 +806,23 @@ VIX > 30 days — the delta floor MUST be enforced regardless.
 
 ### 7.7 IV cross-check (LOCKED 2026-05-16)
 
-Ingest Dhan's `iv` as authoritative. ALSO recompute IV from observed
+Ingest Groww's `iv` as authoritative. ALSO recompute IV from observed
 mid-price using `lets_be_rational` (Jäckel) algorithm. Assert agreement
 within 50 basis points.
 
 ```
 ingest_bar(bar):
-    iv_dhan = bar.iv
+    iv_groww = bar.iv
     iv_recomputed = jaeckel_iv(bar.mid_price, S, K, T, r, q)
-    if abs(iv_dhan - iv_recomputed) > 0.0050:
-        audit_log.append(IV_MISMATCH, bar.timestamp, iv_dhan, iv_recomputed)
-        # but USE iv_dhan for downstream Greek computation
+    if abs(iv_groww - iv_recomputed) > 0.0050:
+        audit_log.append(IV_MISMATCH, bar.timestamp, iv_groww, iv_recomputed)
+        # but USE iv_groww for downstream Greek computation
         # (reproducibility > pedantic correctness)
-    bar.iv_validated = iv_dhan
+    bar.iv_validated = iv_groww
 ```
 
-Why authoritative-Dhan-with-audit instead of replace-on-mismatch:
-strict reproducibility. The audit log lets us spot-check Dhan IV
+Why authoritative-Groww-with-audit instead of replace-on-mismatch:
+strict reproducibility. The audit log lets us spot-check Groww IV
 quality without introducing a second pricing model in the hot path.
 
 ### 7.8 Tick-floor saturation flag (LOCKED 2026-05-16)
@@ -866,9 +866,9 @@ EXACT** — no American early-exercise premium adjustment needed.
 Settlement = T+1 cash credit of intrinsic value × lot × n_lots, where
 intrinsic value uses the §6.2 30-min VWAP settlement price.
 
-### 7.11 Dhan IV computation method (UNVERIFIED)
+### 7.11 Groww IV computation method (UNVERIFIED)
 
-Dhan's public docs don't document HOW `iv` is computed. Industry
+Groww's public docs don't document HOW `iv` is computed. Industry
 standard for Indian platforms (Sensibull, NSE) is iterative root-finding
 on a BSM/Black-76 closed-form against last-traded-price or mid-quote.
 
@@ -876,7 +876,7 @@ NSE's own option chain uses a **fixed r = 10% assumption**, which can
 differ materially from the actual 91-day T-bill yield (6-7% during
 2024-2026).
 
-**Operator action:** open Dhan support ticket to confirm IV
+**Operator action:** open Groww support ticket to confirm IV
 methodology (Newton-Raphson? Mid-price? LTP? `r` assumption?).
 Until then, the §7.7 cross-check at 50bp tolerance catches gross
 discrepancies.
@@ -890,7 +890,7 @@ discrepancies.
 - RBI DBIE database
 - NSE Clearing settlement mechanism
 - Trendlyne NIFTY trailing dividend yield
-- Dhan v2 option chain + expired_options_data docs
+- Groww v2 option chain + expired_options_data docs
 
 ---
 
@@ -898,17 +898,17 @@ discrepancies.
 
 Research agent verified all rates against ClearTax, Zerodha Z-Connect,
 Bajaj Broking, Angel One, NSE, sahi.com, Ventura, PL Capital,
-Chittorgarh, IPOGMPINDIA (2026-05-16). **Dhan's official rate card page
+Chittorgarh, IPOGMPINDIA (2026-05-16). **Groww's official rate card page
 returned HTTP 403 on automated fetch** — numbers below are
-cross-verified from 3+ independent secondary sources that quote Dhan
-directly. Operator must manually verify Dhan's published page before
+cross-verified from 3+ independent secondary sources that quote Groww
+directly. Operator must manually verify Groww's published page before
 final code-lock.
 
 ### 8.1 Verified constants table
 
 | Charge | Rate | Applied to | Side | Source |
 |---|---|---|---|---|
-| Dhan brokerage | **₹20.00 flat per order** | per executed order | both legs | dhan.co/pricing (cross-confirmed: ipogmpindia.com 2026, chittorgarh.com, Zerodha review) |
+| Groww brokerage | **₹20.00 flat per order** | per executed order | both legs | groww.co/pricing (cross-confirmed: ipogmpindia.com 2026, chittorgarh.com, Zerodha review) |
 | STT (Securities Transaction Tax) | **0.10% pre-1-Apr-2026; 0.15% post-1-Apr-2026** | premium | sell side only | ClearTax 2026; Budget 2026 (Finnovate); SEBI raised from 0.0625% on Oct 1, 2024 |
 | NSE F&O exchange charge | **0.03503%** | premium | both sides | NSE post-Oct-1-2024 SEBI "true-to-label" circular |
 | BSE F&O exchange charge | **0.03250%** | premium | both sides | BSE post-Oct-1-2024 (Sensex/Bankex); Angel One verified |
@@ -984,12 +984,12 @@ Source-cites:
 
 ### 8.4 Constants to bake into code
 
-When `brutex/costs/dhan_constants.py` lands (Phase 3 deliverable):
+When `brutex/costs/groww_constants.py` lands (Phase 3 deliverable):
 
 ```python
 # Verified 2026-05-16, see TRACK2_OPTIONS_SPEC.md §8.1 for source-cites.
 
-DHAN_BROKERAGE_INR_PER_ORDER     = 20.00
+GROWW_BROKERAGE_INR_PER_ORDER     = 20.00
 STT_OPTIONS_SELL_PCT_PRE_APR2026 = 0.0010   # 0.10%
 STT_OPTIONS_SELL_PCT_POST_APR2026= 0.0015   # 0.15% (Budget 2026)
 STT_HIKE_EFFECTIVE_DATE          = date(2026, 4, 1)
@@ -1027,7 +1027,7 @@ flat 1-tick adverse on bar-open fills.
 
 | NOT available (and never will be) | Why excluded |
 |---|---|
-| Tick-level bid/ask | Dhan API returns 1m aggregates only |
+| Tick-level bid/ask | Groww API returns 1m aggregates only |
 | Order book depth | Same |
 | Within-bar fill sequence | Same |
 | Per-trade volume profile | Same |
@@ -1091,7 +1091,7 @@ combinatorial space).**
 
 ### 9.7 Future refinement (TickVault Phase 5+)
 
-When TickVault accumulates real Dhan tick data (via live WebSocket,
+When TickVault accumulates real Groww tick data (via live WebSocket,
 NOT historical API), refine to a delta-bucketed or IV-scaled model
 based on **measured** spreads. Until then, flat 1-tick stands.
 
@@ -1111,11 +1111,11 @@ decision to favor honest simplicity over false precision.
 Per CLAUDE.md Golden Rule #1, items the research agent could not verify
 via automated fetch:
 
-1. **Dhan official rate card** (`dhan.co/pricing`, `dhan.co/charges`):
+1. **Groww official rate card** (`groww.co/pricing`, `groww.co/charges`):
    every URL returned HTTP 403 to WebFetch. Numbers in §8.1 are from
    3+ secondary sources (Zerodha, Angel One, Chittorgarh, IPOGMPINDIA)
-   that quote Dhan directly. **Action: operator manually visits the
-   Dhan page in browser + posts a screenshot. If any number differs,
+   that quote Groww directly. **Action: operator manually visits the
+   Groww page in browser + posts a screenshot. If any number differs,
    amend §8.1 before code-lock.**
 
 2. **STT 0.15% post-1-Apr-2026**: Budget 2026 proposed the hike from
@@ -1131,15 +1131,15 @@ via automated fetch:
    Fees page before code-lock.** §8.1 currently uses 0.03250% (Angel
    One verified).
 
-4. **Dhan plan tiers** (Free / Founder / Pro): no evidence found in
+4. **Groww plan tiers** (Free / Founder / Pro): no evidence found in
    2026 sources. Only documented variant is a **50% brokerage discount
-   for women customers** (₹10/order). DhanHQ refers to the API access
+   for women customers** (₹10/order). Groww refers to the API access
    product, not a brokerage tier. **Action: confirm with operator
    account.**
 
 5. **Slippage paisa-level calibration**: agent's numbers in §9.1 are
-   industry-magnitude estimates, NOT measured from Dhan tick data.
-   **Action: final calibration from operator's own Dhan tick history
+   industry-magnitude estimates, NOT measured from Groww tick data.
+   **Action: final calibration from operator's own Groww tick history
    in Phase 2 data ingest.**
 
 6. **NIFTY index-option tick size at 5 paise**: NSE reduced
@@ -1151,7 +1151,7 @@ via automated fetch:
 
 These items are blockers for Phase 3 code-lock but NOT blockers for
 Phase 2 data-ingest. Phase 2 can start as soon as operator provides
-Dhan access token; cost-model verification can run in parallel.
+Groww access token; cost-model verification can run in parallel.
 
 ---
 
@@ -1250,7 +1250,7 @@ time (one conversion per fill, not per bar).
 ## 12. Audit trail (inherits Track 1)
 
 Same audit log as Track 1. Track 2 adds these audit kinds (vocabulary
-`drvOptionType` ∈ `{CALL, PUT}` per Dhan SDK — NOT `CE`/`PE`):
+`drvOptionType` ∈ `{CALL, PUT}` per Groww SDK — NOT `CE`/`PE`):
 
 | audit_kind | Payload (compact) |
 |---|---|
@@ -1301,7 +1301,7 @@ Track 1 ships first. Track 2 connects via:
 |---|---|
 | Phase 0 — Documentation (this PR) | 2-3 days |
 | Phase 1 — Verification scaffolding | 1 week |
-| Phase 2 — Dhan options adapter (BLOCKED on Track 1 Phase 2 ship) | 2 weeks |
+| Phase 2 — Groww options adapter (BLOCKED on Track 1 Phase 2 ship) | 2 weeks |
 | Phase 3 — Backtest engine + cost model | 2-3 weeks |
 | Phase 4 — First sweep + ship | 1 week |
 | **Total Track 2 build** | **6-8 weeks** AFTER Track 1 Phase 2 ships |
@@ -1332,7 +1332,7 @@ Phase 1 (against fakes) can proceed in parallel with Track 1 Phase 1.
 | P-O1 | ATM-rolled rollingoption series has monotonic timestamps within each contract span |
 | P-O2 | Premium ≥ 0 always; volume ≥ 0; OI ≥ 0 |
 | P-O3 | OHLC consistency: `low ≤ open, close ≤ high` |
-| P-O4 | Strike step = published step (50 for NIFTY, 100 for BANKNIFTY/SENSEX) — verified historically against Dhan master CSV snapshots |
+| P-O4 | Strike step = published step (50 for NIFTY, 100 for BANKNIFTY/SENSEX) — verified historically against Groww master CSV snapshots |
 | P-O5 | strikePosition ∈ [-10, +10] |
 | P-O6 | At expiry-day 15:30 IST, time-to-expiry T ≤ 1/(365.25 × 86400); BSM uses clamp(T, 1 min) per §13 expiry-day theta policy |
 | P-O7 | Delta(CALL) ∈ [0, 1]; Delta(PUT) ∈ [-1, 0] |
@@ -1340,7 +1340,7 @@ Phase 1 (against fakes) can proceed in parallel with Track 1 Phase 1.
 | P-O9 | Theta ≤ 0 always (long premium decays) |
 | P-O10 | Put-call parity: \|C − P − (S − K·e^{-rT})\| ≤ `max(₹0.10, 0.1% × min(C,P))`; **skipped** when C<₹0.50 or P<₹0.50 or either is NaN (handles thin SENSEX pre-2023-05-15 window without false RED) |
 | P-O11 | Audit chain unbroken across mixed Track1+Track2 ingest |
-| P-O12 | `strike_api == strike_computed` modulo Dhan tie-break at exact midpoints (`expected_tiebreak_table[underlying]` lookup; deviations must match recorded tie-break rule) |
+| P-O12 | `strike_api == strike_computed` modulo Groww tie-break at exact midpoints (`expected_tiebreak_table[underlying]` lookup; deviations must match recorded tie-break rule) |
 
 **2 Track 2-specific oracle tests:**
 
@@ -1355,8 +1355,8 @@ Phase 1 (against fakes) can proceed in parallel with Track 1 Phase 1.
 
 | Risk | Mitigation |
 |---|---|
-| Dhan changes `/charts/rollingoption` schema | Contract test in Phase 1 detects schema drift before live ingest |
-| Dhan removes ATM-relative endpoint and we have to fall back to per-contract | Phase 2 abstraction layer (`OptionsBackfillStrategy` interface) lets us swap with a 1-week refactor |
+| Groww changes `/charts/rollingoption` schema | Contract test in Phase 1 detects schema drift before live ingest |
+| Groww removes ATM-relative endpoint and we have to fall back to per-contract | Phase 2 abstraction layer (`OptionsBackfillStrategy` interface) lets us swap with a 1-week refactor |
 | SEBI changes expiry cycles again | All expiry-day logic centralized in `brutex/options/expiry_calendar.py` — single-point fix |
 | BSM model insufficient for far-OTM (smile not captured) | First sweep uses ATM ± 5 by default; ATM ± 10 only for stress test of how dependent the strategy is on far-OTM Greeks |
 | Risk-free rate table goes stale | Annual refresh + smoke test "rate < 6 months old" |
@@ -1371,23 +1371,23 @@ These will be appended to `docs/MIGRATION.md` when Phase 0 PR merges:
 - #200: Track 2 = options realism leg of BruteX (post-Track-1)
 - #201: Endpoint `/v2/charts/rollingoption` (ATM-relative, not per-contract)
 - #202: 3 underlyings (NIFTY/BANKNIFTY/SENSEX) — NO India VIX options
-- #203: ATM ± 10 strike radius, hardcoded; rationale = Dhan-enforced
+- #203: ATM ± 10 strike radius, hardcoded; rationale = Groww-enforced
 - #204: 1-minute bars ONLY; no resampling
 - #205: Expiry cycle history reconstructed for 5y window from primary sources (BSE Notice 20230327-65; NSE FAOP/57540, 60011, 64506, 65336, 68747; SEBI master circular 2024-10-01); withdrawn Monday-window 2025-Apr explicitly excluded
 - #206: **6 backfill streams** (NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-WEEK [until 2024-11-13], BANKNIFTY-MONTH, SENSEX-WEEK, SENSEX-MONTH; SENSEX windows extend back to 2021-01-01 per BSE Notice 20230327-65 with thin-liquidity annotation)
-- #207: IV from Dhan; Greeks computed (Black-Scholes-Merton)
+- #207: IV from Groww; Greeks computed (Black-Scholes-Merton)
 - #208: Risk-free rate from 3-month T-bill monthly table (60 rows, 5y)
 - #209: Dividend yield q = 0 for all 3 indices
 - #210: Storage estimate ~5.5 GB for 5.37y window (revised after S1 verification + reality-check trading-day correction)
 - #211: Backfill ~15,876 calls / ~88 min wall time / 15.9% daily quota (revised — chunk count uses ceil; reality-check off-by-one correction)
-- #211a: Two-hash bar integrity — `raw_bar_hash` (Dhan-returned OHLC+IV+spot+strike_api) + `cooked_bar_hash` (raw_bar_hash ‖ Greeks ‖ BSM_KERNEL_VERSION); audit log carries both; replay oracle O-O1 checks both (hostile-review fix)
-- #211b: CALL/PUT vocabulary locked everywhere (SPEC, INGEST, audit, watermark keys, folder names) — never CE/PE (matches Dhan SDK `drvOptionType` validator)
+- #211a: Two-hash bar integrity — `raw_bar_hash` (Groww-returned OHLC+IV+spot+strike_api) + `cooked_bar_hash` (raw_bar_hash ‖ Greeks ‖ BSM_KERNEL_VERSION); audit log carries both; replay oracle O-O1 checks both (hostile-review fix)
+- #211b: CALL/PUT vocabulary locked everywhere (SPEC, INGEST, audit, watermark keys, folder names) — never CE/PE (matches Groww SDK `drvOptionType` validator)
 - #211c: Lot size stored in date-keyed `reference/lot_size_history.parquet`; `volume`/`open_interest` columns are contract counts (lot-size-independent) — handles SEBI lot-size revisions across the 5y window
 - #211d: Audit log appends serialized through single asyncio writer; replay sorts by `(stream, chunk_from)` for asyncio-scheduler determinism
 - #211e: Risk-free rate lookup is step-function (no interpolation) at monthly boundaries
 - #211f: Expiry-day Greeks clamp T at 1 min to avoid theta divergence at 15:29-15:30 bars
-- #211g: `interval=1` integer (not string) per Dhan SDK; CI lint catches `interval='1'` regression
-- #211h: **ATM tie-break rule** — Phase 2 ingests a calibration batch (≥1 month, all 6 streams) and observes Dhan's tie-break behavior at exact spot-midpoint cases. The empirically-observed rule is locked into `EXPECTED_TIEBREAKS[underlying]` and verified by invariant P-O12. Operator signs off on the resulting table before Phase 2 backfill proceeds. (Sensible default if no midpoint case is observed: `round-half-up`.)
+- #211g: `interval=1` integer (not string) per Groww SDK; CI lint catches `interval='1'` regression
+- #211h: **ATM tie-break rule** — Phase 2 ingests a calibration batch (≥1 month, all 6 streams) and observes Groww's tie-break behavior at exact spot-midpoint cases. The empirically-observed rule is locked into `EXPECTED_TIEBREAKS[underlying]` and verified by invariant P-O12. Operator signs off on the resulting table before Phase 2 backfill proceeds. (Sensible default if no midpoint case is observed: `round-half-up`.)
 - #211i: **Token refresh race protection** — single shared `asyncio.Lock` around the auth-renewal call. The first task to hit HTTP 401 acquires the lock, refreshes, then releases; all other 251 tasks waiting at the rate-limiter resume with the new token automatically (token is read from a shared `TokenCell`, not passed per-task). Prevents thundering-herd refresh.
 - #212: Cost model lives at `brutex/options/costs.py`, version-stamped
 - #213: Slippage profile = 5 × 4 × 4 = 80 combos per (signal, strike, expiry)
@@ -1409,10 +1409,10 @@ These will be appended to `docs/MIGRATION.md` when Phase 0 PR merges:
 | Source | Detail |
 |---|---|
 | `docs/TRACK1_BACKTEST_SPEC.md` | Parent spec |
-| Dhan v2 API docs | dhanhq.co/docs/v2/expired-options-data/ |
-| Dhan Python SDK | `dhanhq.sdk.dhanhq.expired_options_data` (source verified 2026-05-15) |
-| Dhan annexure | dhanhq.co/docs/v2/annexure (segment + instrument enums) |
-| Dhan instrument master | `https://images.dhan.co/api-data/api-scrip-master-detailed.csv` |
+| Groww v2 API docs | groww.in/trade-api/docs/docs/v2/expired-options-data/ |
+| Groww Python SDK | `growwapi.sdk.growwapi.expired_options_data` (source verified 2026-05-15) |
+| Groww annexure | groww.in/trade-api/docs/docs/v2/annexure (segment + instrument enums) |
+| Groww instrument master | `https://images.groww.co/api-data/api-scrip-master-detailed.csv` |
 | `py_vollib` | https://github.com/vollib/py_vollib (BSM oracle) |
 
 ### Primary regulatory + exchange sources (per-claim citations)

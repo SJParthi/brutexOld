@@ -47,7 +47,7 @@ can run Phase 1 in parallel with Track 1 Phase 1/2.
 ### Smoke + contract + golden
 
 - [ ] `tests/smoke/test_options_minimal.py` (≤30 sec; verify pipeline against 1-day fake)
-- [ ] `tests/contract/test_rollingoption_schema.py` (recorded responses; catches Dhan schema drift)
+- [ ] `tests/contract/test_rollingoption_schema.py` (recorded responses; catches Groww schema drift)
 - [ ] `tests/golden/options_replay_fixture.json` (pinned synthetic 1-day output)
 
 ### CI

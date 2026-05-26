@@ -97,7 +97,7 @@ The runtime file records the currently-running pipeline's `pid`,
 
 **Adaptive rate limiter:** range [4..8] r/s with auto-tuning state machine. See `docs/TRACK1_GROWW_ADAPTER.md §5` for the full spec.
 
-**Dhan adapter was wiped 2026-05-26 per DEC-VENDOR-PIVOT-001. The pre-wipe state is preserved at `git tag v-pre-groww-pivot`. Previously documented `BRUTEX_DHAN_*` env vars are gone — see MIGRATION.md entry #247.**
+**prior broker adapter wiped 2026-05-26 per DEC-VENDOR-PIVOT-001. The pre-wipe state is preserved at `git tag v-pre-groww-pivot`. Previously documented `BRUTEX_GROWW_*` env vars are gone — see MIGRATION.md entry #247.**
 
 ---
 
@@ -152,4 +152,4 @@ typos).
 * DEC-M4PRO-ABSOLUTE-001 (#236) — strict-bool decoder pattern
 * DEC-TELEGRAM-WIRING-001 (#238) — Telegram env-var layout
 * DEC-PORTS-001 — port config layout
-* DEC-VENDOR-PIVOT-001 — Dhan wipe + Groww adapter TOTP auth contract
+* DEC-VENDOR-PIVOT-001 — prior broker wipe + Groww adapter TOTP auth contract

@@ -139,7 +139,7 @@ option — that requires SPAN+ELM margin and changes the risk profile.)
 ### Stage 5.3 — Per-trade cost + slippage
 
 For each candidate, look up the option's actual minute bars
-(Dhan `/v2/charts/rollingoption` data), then compute the round-trip
+(Groww `/v2/charts/rollingoption` data), then compute the round-trip
 trade and apply the full cost stack per `CALCULATOR_SPEC.md`:
 
 ```
@@ -168,7 +168,7 @@ cost_breakdown = compute_trade_cost(TradeInput(
     exit_bar_open_inr=exit_price_with_slippage,
     side=candidate.side,   # always "long_call" or "long_put" per DEC-EXEC-008
     n_lots=1,
-    broker="dhan",
+    broker="groww",
     gst_split="intra_state",
     trade_outcome="NORMAL_CLOSE",                   # always for Track 2 per DEC-RISK-011
 ))
@@ -467,7 +467,7 @@ These are noted here but DO NOT block Stage 5 spec lock:
    8/9/10 require Greeks; this execution simulator uses pure offset.
 2. **Option-data backfill** — Track 2 Phase 2 must fill the Parquet
    lake with per-strike per-bar OHLC + OI for all 21-offset strikes
-   across 5 years × 3 indices × all expiries. Blocked on Dhan token.
+   across 5 years × 3 indices × all expiries. Blocked on Groww token.
 3. **Stage 4.5 walk-forward on Track 2 results** — apply CSCV /
    Romano-Wolf to the (combo × strike × side) leaderboard before
    declaring winners. Reuses TRACK1_BACKTEST_SPEC.md §"Stage 4" math.
@@ -476,11 +476,11 @@ These are noted here but DO NOT block Stage 5 spec lock:
 
 ## 12. UNVERIFIED items
 
-1. **Per-strike historical OI from Dhan API** — confirmed via
+1. **Per-strike historical OI from Groww API** — confirmed via
    `expired_options_data` endpoint return fields (per CLAUDE.md §6),
    but exact OI granularity (per-bar vs end-of-bar) needs empirical
    probe. Phase 0 task.
-2. **Per-strike bid-ask spread historical reconstruction** — Dhan's
+2. **Per-strike bid-ask spread historical reconstruction** — Groww's
    rolling option data does NOT return bid-ask directly. Must derive
    from market depth API, which has different rate limits. Operator
    action: confirm depth API quota for backfill before Stage 5 code-lock.

@@ -14,11 +14,11 @@ Lockbox) to return the top 3 production candidates per sweep.
 
 ## 🎯 What this is
 
-Given a config-driven instrument universe and a Dhan auth token,
+Given a config-driven instrument universe and a Groww auth token,
 BruteX:
 
 1. **Ingests** historical OHLC bars for the 4 Track 1 indexes from the
-   Dhan Historical Data API (`/v2/charts/intraday` for 1m bars,
+   Groww Trade API (`/v2/charts/intraday` for 1m bars,
    `/v2/charts/historical` for daily). Pulls are **incremental** —
    subsequent runs only fetch new bars since the last successful
    timestamp per (instrument, timeframe).
@@ -49,7 +49,7 @@ to ATM/ITM option fill simulations.
 | Aspect | Value |
 |---|---|
 | **Instruments** | NIFTY 50, BANKNIFTY, SENSEX, India VIX |
-| **Data source** | Dhan Historical Data API |
+| **Data source** | Groww Trade API |
 | **Timeframes** | 21 (1m base + 19 derived intraday + 1d) |
 | **Range** | Rolling `2021-01-01 → today` |
 | **Hardware reference** | Apple M4 Pro (14-core, 10 P-cores allocated) |
@@ -72,7 +72,7 @@ See `docs/TRACK1_BACKTEST_SPEC.md` for the master spec and
 ```
    ┌─────────────────────────────────────────────────────────────┐
    │                                                             │
-   │   Dhan API  ─→  Adapter  ─→  Parser  ─→  Validate  ─→       │
+   │   Groww API  ─→  Adapter  ─→  Parser  ─→  Validate  ─→       │
    │                                                             │
    │   ─→ Parquet (atomic)  ─→  Watermark advance (DuckDB)       │
    │                                                             │
@@ -91,7 +91,7 @@ Layers (broker-agnostic above L1):
 
 | Layer | What | Code |
 |---|---|---|
-| L1 — Adapter | Dhan HTTP client + envelope parser | `brutex/adapters/dhan/` (Phase 2) |
+| L1 — Adapter | Groww HTTP client + envelope parser | `brutex/adapters/groww/` (Phase 2) |
 | L2 — Data lake | Parquet + DuckDB + LMDB | `brutex/data/` |
 | L3 — Feed | Replay + resampler | `brutex/feed/` |
 | L4 — Execution | Signal-only simulator | `brutex/execution/` |
@@ -113,8 +113,8 @@ git clone https://github.com/SJParthi/bruteX.git
 cd bruteX
 pip install -e ".[dev,data]"
 
-# 2. Set your Dhan credentials (Phase 2 — coming soon)
-export BRUTEX_DHAN_ACCESS_TOKEN="<your-token-from-dhan.co>"
+# 2. Set your Groww credentials (Phase 2 — coming soon)
+export BRUTEX_GROWW_ACCESS_TOKEN="<your-token-from-groww.co>"
 export BRUTEX_LAKE_ROOT=/path/to/large/ssd/brutex-lake
 
 # 3. Verify install
@@ -125,7 +125,7 @@ brutex version
 
 ## 🚀 Usage (Phase 2 onward)
 
-The CLI surface lands in Phase 2 with the Dhan adapter. Track 1 plan:
+The CLI surface lands in Phase 2 with the Groww adapter. Track 1 plan:
 
 ```bash
 # Daily incremental pull (only fetches new bars since last run)

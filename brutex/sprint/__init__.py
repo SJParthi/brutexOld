@@ -1,7 +1,7 @@
 """Day 1 (Phase 0.5) sprint orchestrator.
 
 End-to-end runner that wires:
-- Dhan adapter (fetch 5y data)
+- Groww adapter (fetch 5y data)
 - Calendar (NSE 2021-2026)
 - Resampler (1m -> 21 TFs)
 - Indicators (52 conditions)

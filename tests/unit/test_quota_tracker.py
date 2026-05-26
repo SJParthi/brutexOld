@@ -187,8 +187,8 @@ class TestQuotaExhaustion:
             with pytest.raises(DailyQuotaExceeded) as exc_info:
                 tracker.acquire_or_raise()
             # safe_message MUST be categorical — no count, no date.
-            assert str(exc_info.value) == "Daily Dhan API quota exceeded"
-            assert exc_info.value.safe_message == "Daily Dhan API quota exceeded"
+            assert str(exc_info.value) == "Daily Groww API quota exceeded"
+            assert exc_info.value.safe_message == "Daily Groww API quota exceeded"
         finally:
             tracker.close()
 

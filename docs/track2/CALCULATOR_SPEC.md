@@ -6,7 +6,7 @@ build-target spec.
 
 **Scope:** Per-trade cost computation for one round-trip options trade
 (entry + exit) on a single instrument (NIFTY 50 / BANKNIFTY / SENSEX
-options) under a single broker (Dhan). The output of this calculator
+options) under a single broker (Groww). The output of this calculator
 feeds into:
 - Per-trade `net_pnl` (gross PnL − slippage − all charges)
 - Aggregator for annual income tax (see `COSTS_VERIFIED.md §18`)
@@ -17,11 +17,11 @@ feeds into:
 - Dividend / corporate action handling (cash-settled options on indexes)
 - Mark-to-market intraday rebalancing (Track 2 holds positions until exit signal)
 - Carry forward of losses (handled in annual tax module, not per-trade)
-- Multi-broker A/B comparison at scale (only Dhan locked; Zerodha mentioned for comparability sanity-check)
+- Multi-broker A/B comparison at scale (only Groww locked; Zerodha mentioned for comparability sanity-check)
 
 **Single source of truth for verified values:** `COSTS_VERIFIED.md`.
 This document defines the *algorithm*. The *numeric constants* live in
-`COSTS_VERIFIED.md` and (eventually) `brutex/costs/dhan_constants.py`.
+`COSTS_VERIFIED.md` and (eventually) `brutex/costs/groww_constants.py`.
 
 ---
 
@@ -39,7 +39,7 @@ This document defines the *algorithm*. The *numeric constants* live in
 | `exit_bar_open_inr` | `int64` (paisa) | ≥ 5 | Bar OPEN at exit. Slippage applied on top. |
 | `side` | `Literal["long_call", "long_put", "short_call", "short_put"]` | enum | Determines which leg is "buy" (pays STT-no, pays stamp), which is "sell" (pays STT-yes, no stamp). |
 | `n_lots` | `int` | ≥ 1 | Number of lots. Each lot's share-count looked up from `lot_size_history[instrument, entry_dt_ist.date()]`. |
-| `broker` | `Literal["dhan", "zerodha"]` | enum | Brokerage differs. Default `"dhan"`. |
+| `broker` | `Literal["groww", "zerodha"]` | enum | Brokerage differs. Default `"groww"`. |
 | `gst_split` | `Literal["intra_state", "inter_state"]` | enum | `"intra_state"` → CGST 9% + SGST 9% (each rounded separately). `"inter_state"` → IGST 18% (single rounding). Set once per trader account, not per trade. Default `"intra_state"` to match `TRACK2_OPTIONS_SPEC.md §8.2` worked example. |
 | `held_to_expiry_exercise` | `bool` | default `False` | **DEPRECATED 2026-05-16** — superseded by `trade_outcome` enum below. Kept for backward-compat reading old fixtures; new fixtures use `trade_outcome`. |
 | `intrinsic_value_paisa_at_expiry` | `int64` | ≥ 0 | Required only when `trade_outcome` ∈ {`EXPIRY_EXERCISE`, `EXPIRY_ASSIGN`}. Intrinsic value × n_shares. STT computed on this, not on premium. |
@@ -58,7 +58,7 @@ constants module.
 | Symbol | Value | Source |
 |---|---|---|
 | `TICK_PAISA` | `5` (= ₹0.05) | COSTS_VERIFIED §11 |
-| `DHAN_BROKERAGE_PAISA` | `2000` (= ₹20 per executed order) | COSTS_VERIFIED §8.1 |
+| `GROWW_BROKERAGE_PAISA` | `2000` (= ₹20 per executed order) | COSTS_VERIFIED §8.1 |
 | `ZERODHA_BROKERAGE_PAISA` | `2000` (= ₹20 per executed order, also flat for F&O) | COSTS_VERIFIED §8.2 |
 | `STT_RATE_PRE_APR2026` | `0.0010` (= 0.10% of sell premium) | COSTS_VERIFIED §3 |
 | `STT_RATE_POST_APR2026` | `0.0015` (= 0.15% of sell premium) | COSTS_VERIFIED §3 (UNVERIFIED gazette text) |
@@ -140,7 +140,7 @@ buy_notional_paisa  = buy_fill_paisa  * n_shares
 sell_notional_paisa = sell_fill_paisa * n_shares
 
 # ── Step 4: brokerage (₹20 flat per executed order, both legs) ───────────
-brokerage_paisa = (DHAN_BROKERAGE_PAISA if broker == "dhan"
+brokerage_paisa = (GROWW_BROKERAGE_PAISA if broker == "groww"
                    else ZERODHA_BROKERAGE_PAISA) * 2
 # (each leg is one order; flat regardless of premium or lots)
 
@@ -179,7 +179,7 @@ stamp_paisa     = ROUND_TO_NEAREST_RUPEE(stamp_paisa_raw)
 # ── Step 10: GST (on brokerage + exchange + SEBI + IPFT only) ────────────
 # NOT on STT, NOT on stamp duty (those are statutory levies, not services).
 
-per_leg_brokerage = DHAN_BROKERAGE_PAISA  # ₹20 per leg
+per_leg_brokerage = GROWW_BROKERAGE_PAISA  # ₹20 per leg
 buy_gst_base_paisa  = per_leg_brokerage + exch_buy_paisa  + sebi_buy_paisa  + ipft_buy_paisa
 sell_gst_base_paisa = per_leg_brokerage + exch_sell_paisa + sebi_sell_paisa + ipft_sell_paisa
 
@@ -296,9 +296,9 @@ always sets `NORMAL_CLOSE`; the other 3 are forward-compat stubs.
    │ STT = 0.125%/0.15% on      │                       │ STT = 0 (already paid at   │    │ STT = 0                     │
    │   INTRINSIC value          │                       │   sell-open)               │    │   (long: lost premium;      │
    │ brokerage = ₹20 × 1 order  │                       │ brokerage = ₹20 × 1 order  │    │    short: kept premium —    │
-   │   (Dhan auto-settlement)   │                       │   (Dhan auto-settlement)   │    │    STT already paid)        │
+   │   (Groww auto-settlement)   │                       │   (Groww auto-settlement)   │    │    STT already paid)        │
    │ exch/SEBI/IPFT on intrinsic│                       │ exch/SEBI/IPFT = 0         │    │ brokerage = ₹20 × 1 order   │
-   │ stamp duty = 0 (no buy)    │                       │   (no trade event)         │    │   (Dhan-specific: even on   │
+   │ stamp duty = 0 (no buy)    │                       │   (no trade event)         │    │   (Groww-specific: even on   │
    │ GST on brokerage only      │                       │ stamp duty = 0             │    │   worthless OTM — see §4.3) │
    │                            │                       │ GST on brokerage only      │    │ exch/SEBI/IPFT = 0          │
    └────────────────────────────┘                       └────────────────────────────┘    │ stamp duty = 0              │
@@ -320,7 +320,7 @@ match trade_outcome:
     # LONG ITM held to expiry, auto-exercised by exchange
     stt_rate = 0.00125 if exit_dt < STT_HIKE_DATE else 0.0015
     stt = ROUND_TO_RUPEE(intrinsic_value_paisa * stt_rate)
-    brokerage = DHAN_BROKERAGE_PAISA  # ₹20 per executed order (NOT per contract)
+    brokerage = GROWW_BROKERAGE_PAISA  # ₹20 per executed order (NOT per contract)
     exch = ROUND_TO_PAISA(intrinsic_value_paisa * exch_rate)
     sebi = ROUND_TO_PAISA(intrinsic_value_paisa * SEBI_RATE)
     ipft = ROUND_TO_PAISA(intrinsic_value_paisa * ipft_rate)
@@ -332,7 +332,7 @@ match trade_outcome:
     # SHORT ITM assigned at expiry — short pays intrinsic loss from account,
     # but NO separate STT (was paid at sell-open as 0.15% × premium)
     stt = 0
-    brokerage = DHAN_BROKERAGE_PAISA  # ₹20 per order (NOT per contract)
+    brokerage = GROWW_BROKERAGE_PAISA  # ₹20 per order (NOT per contract)
     exch = sebi = ipft = stamp = 0  # no trade event
     gst = ROUND_TO_RUPEE(brokerage * 0.18)
     # CRITICAL: intrinsic loss is a CAPITAL loss (charged to account),
@@ -343,24 +343,24 @@ match trade_outcome:
     # Option expired OTM — long lost premium (no exit transaction)
     # Short kept the premium (STT already paid at sell-open)
     stt = 0
-    brokerage = DHAN_BROKERAGE_PAISA  # ₹20 EVEN on worthless — Dhan gotcha (§4.3)
+    brokerage = GROWW_BROKERAGE_PAISA  # ₹20 EVEN on worthless — Groww gotcha (§4.3)
     exch = sebi = ipft = stamp = 0
     gst = ROUND_TO_RUPEE(brokerage * 0.18)
     return stt + brokerage + gst
 ```
 
-### 4.3 Dhan-specific gotcha — ₹20 brokerage on worthless options
+### 4.3 Groww-specific gotcha — ₹20 brokerage on worthless options
 
-Per agent research 2026-05-16: **Dhan charges ₹20 per executed order
+Per agent research 2026-05-16: **Groww charges ₹20 per executed order
 EVEN when an option expires worthless** (unlike Zerodha, which dropped
-this to ₹0 in June 2024). This is a Dhan-specific overhead that bites
+this to ₹0 in June 2024). This is a Groww-specific overhead that bites
 short-OTM strategies — every short that expires worthless still costs
 ₹20 + 18% GST = ₹23.60.
 
 For long-OTM strategies (buy a put, let it expire worthless), the
 ₹20 still fires on the auto-exercise/exit event.
 
-**Source:** Dhan Freshdesk + Chittorgarh review (cited in agent report).
+**Source:** Groww Freshdesk + Chittorgarh review (cited in agent report).
 
 **Implementation:** if `trade_outcome ∈ {EXPIRY_EXERCISE, EXPIRY_ASSIGN,
 EXPIRY_WORTHLESS}` → brokerage = ₹20 per executed order (NOT per
@@ -369,11 +369,11 @@ contract).
 ### 4.4 Correction: prompt claimed "₹20 per contract" — WRONG
 
 A Claude-chat-generated prompt (operator shared 2026-05-16) claimed
-that Dhan charges "₹20 per assigned/exercised CONTRACT" on expiry,
-not per order. **This is incorrect.** Dhan's actual wording is "₹20
+that Groww charges "₹20 per assigned/exercised CONTRACT" on expiry,
+not per order. **This is incorrect.** Groww's actual wording is "₹20
 per executed order" — verified via:
-- Dhan Freshdesk support article
-- Dhan brokerage calculator
+- Groww Freshdesk support article
+- Groww brokerage calculator
 - Chittorgarh, IPOGMPINDIA secondary sources (all converge)
 
 A 100-lot held-to-expiry exercise costs ₹20 (per order), NOT ₹2,000.
@@ -402,7 +402,7 @@ example and broker contract notes from Zerodha + Angel One.
 
 **Critical:** rupee-rounded items are rounded **per-leg** (per contract
 note / invoice), then summed. This matches §8.2 worked example AND
-real Dhan contract note format.
+real Groww contract note format.
 
 ---
 
@@ -436,7 +436,7 @@ back-end orders. **Each slice = one executed order = ₹20 brokerage**.
 # Calculator must compute order count:
 freeze_lots = FREEZE_LOTS_TABLE[instrument]   # 1755 / 600 / 1000
 n_orders_per_leg = ceil(n_lots / freeze_lots)
-brokerage_paisa = DHAN_BROKERAGE_PAISA * 2 * n_orders_per_leg
+brokerage_paisa = GROWW_BROKERAGE_PAISA * 2 * n_orders_per_leg
 # (× 2 for both buy + sell legs; × n_orders_per_leg for iceberg slices)
 ```
 
@@ -496,7 +496,7 @@ subtract it a second time as a separate line. Output struct exposes
 
 ## 9. Per-broker variants
 
-**Currently locked:** `dhan`.
+**Currently locked:** `groww`.
 
 `zerodha` is wired up for comparability sanity-check only (Phase 6
 "shadow-broker" diagnostic) — same ₹20/order brokerage means net cost
@@ -530,7 +530,7 @@ from typing import Literal
 
 Side       = Literal["long_call", "long_put", "short_call", "short_put"]
 Instrument = Literal["NIFTY", "BANKNIFTY", "SENSEX"]
-Broker     = Literal["dhan", "zerodha"]
+Broker     = Literal["groww", "zerodha"]
 GstSplit   = Literal["intra_state", "inter_state"]
 
 @dataclass(frozen=True)
@@ -545,7 +545,7 @@ class TradeInput:
     entry_bar_open_paisa: int          # int64 paisa
     exit_bar_open_paisa:  int
     n_lots:              int
-    broker:              Broker = "dhan"
+    broker:              Broker = "groww"
     gst_split:           GstSplit = "intra_state"
     trade_outcome:       TradeOutcome = "NORMAL_CLOSE"   # §4.2 state machine
     intrinsic_value_paisa_at_expiry: int = 0     # required when EXPIRY_EXERCISE / EXPIRY_ASSIGN
@@ -609,7 +609,7 @@ Phase 3 build acceptance: 100% pass rate on these fixtures.
 | entry_bar_open_paisa | 9_995 (= ₹99.95, so +1 tick = ₹100.00) |
 | exit_bar_open_paisa | 12_005 (= ₹120.05, so -1 tick = ₹120.00) |
 | n_lots | 1 |
-| broker | dhan |
+| broker | groww |
 | gst_split | intra_state |
 
 Expected output (matches §8.2 worked example):
@@ -805,7 +805,7 @@ concerns:
 | **Margin shortfall penalty** | 0.5%–5%/day on shortfall amount (SEBI 2021 regime) | Event-based ledger; only fires if backtest models capital |
 | **ELM 2% on expiry-day short index** | Margin requirement, not P&L | Out of scope (no margin in Track 2 backtest) |
 | **Peak-margin penalty** | Per random intraday snapshot | Event ledger |
-| **Auto-square-off** | Dhan ₹20/order when RMS-initiated | Event ledger |
+| **Auto-square-off** | Groww ₹20/order when RMS-initiated | Event ledger |
 | **Call & Trade** | Dealer-assisted orders | Event ledger (rare) |
 
 Track 2 calculator does NOT model these — they fire on operational
@@ -882,16 +882,16 @@ still UNVERIFIED (3 original + 5 new):
 
 | # | Item | Source of uncertainty | Impact | Blocker? |
 |---|---|---|---|---|
-| 1 | **Dhan official rate card** (₹20 brokerage etc.) | dhan.co/pricing returns HTTP 403 to all automated WebFetch | If actual brokerage ≠ ₹20, recompute all fixtures | YES |
+| 1 | **Groww official rate card** (₹20 brokerage etc.) | groww.co/pricing returns HTTP 403 to all automated WebFetch | If actual brokerage ≠ ₹20, recompute all fixtures | YES |
 | 2 | **Finance Act 2026 STT 0.15% gazette text** | Multiple secondary sources, no agent could pull final gazette PDF | If 0.15% wrong, recompute all post-Apr-2026 fixtures | YES (but date-switched, easy patch) |
 | 3 | **BSE Bankex options exchange rate** | Conflicting: ₹3,250/cr vs ₹325/cr (10× discrepancy) | Only SENSEX fixture F9 affected | LOW (SENSEX only) |
 | 4 | **STT-on-exercise rate post-Apr-2026** | ClearTax cites 0.15%; Finance Act gazette unconfirmed | Only fires if `held_to_expiry_exercise=True` (Track 2 never sets this) | LOW for Track 2; HIGH if future tracks model held-to-expiry |
 | 5 | **SENSEX freeze quantity post-Mar-2026** | Angel One mentions revision, exact new cap not extracted | Only affects orders > ~1,000 lots SENSEX (rare) | LOW |
-| 6 | **Dhan Call & Trade exact rate** | Secondary sources conflict: ₹20 vs ₹50/order | Event-based, NOT per-trade — but if event ledger built, needs verified rate | LOW for calculator; MEDIUM for event ledger |
-| 7 | **Dhan API-vs-UI brokerage parity** | No source mentions a differential; assumed identical | If algo-API orders incur additional brokerage, ALL fixtures off | LOW (unverified but not flagged anywhere) |
-| 8 | **Dhan auto-SqOff trigger conditions** for short-options NRML overnight | Search snippets imply RMS-initiated only, not scheduled EOD | Only relevant for event ledger; not per-trade calculator | LOW |
+| 6 | **Groww Call & Trade exact rate** | Secondary sources conflict: ₹20 vs ₹50/order | Event-based, NOT per-trade — but if event ledger built, needs verified rate | LOW for calculator; MEDIUM for event ledger |
+| 7 | **Groww API-vs-UI brokerage parity** | No source mentions a differential; assumed identical | If algo-API orders incur additional brokerage, ALL fixtures off | LOW (unverified but not flagged anywhere) |
+| 8 | **Groww auto-SqOff trigger conditions** for short-options NRML overnight | Search snippets imply RMS-initiated only, not scheduled EOD | Only relevant for event ledger; not per-trade calculator | LOW |
 | 15 | **Futures STT 0.05% post-Apr-2026** | Budget 2026 (Finance Bill 2026) per multiple secondary sources | Only matters if futures scope added; Track 2 options-only | LOW (informational; verified by 2026-05-16 agent) |
-| 16 | **Dhan ₹20 brokerage on EXPIRED WORTHLESS options** | Dhan-specific gotcha vs Zerodha which dropped to ₹0 in June 2024 | Track 2 never holds to expiry (15:20 forced exit), but expiry branches must use ₹20 not ₹0 | LOW |
+| 16 | **Groww ₹20 brokerage on EXPIRED WORTHLESS options** | Groww-specific gotcha vs Zerodha which dropped to ₹0 in June 2024 | Track 2 never holds to expiry (15:20 forced exit), but expiry branches must use ₹20 not ₹0 | LOW |
 | 17 | **STT-on-exercise rate 0.125% pre-Apr-2026 vs 0.15% post** | Both rates cited but Finance Act 2026 gazette text not pulled | Only fires for `EXPIRY_EXERCISE` outcome (Track 2 never sets this) | LOW for Track 2; MEDIUM for future tracks |
 
 **Items 1-3:** original 3 from `TRACK2_OPTIONS_SPEC §8b`.
@@ -906,14 +906,14 @@ or related modules.
 
 Operator manual steps before code-lock:
 
-1. [ ] Visit `dhan.co/pricing` in browser, screenshot, confirm ₹20/order.
+1. [ ] Visit `groww.co/pricing` in browser, screenshot, confirm ₹20/order.
 2. [ ] Verify Finance Act 2026 gazette PDF: STT rate + effective date.
 3. [ ] Verify BSE Membership Transaction Fees PDF for Bankex options.
 4. [ ] Verify Finance Act 2026 STT-on-exercise rate (if same as sell-leg STT, single rate).
 5. [ ] Check BSE notice board for SENSEX freeze qty post-Mar-2026.
-6. [ ] Open Dhan support ticket: confirm Call & Trade exact rate.
-7. [ ] Open Dhan support ticket: confirm no brokerage differential for API orders.
-8. [ ] Open Dhan support ticket: confirm auto-SqOff trigger conditions for NRML short index options.
+6. [ ] Open Groww support ticket: confirm Call & Trade exact rate.
+7. [ ] Open Groww support ticket: confirm no brokerage differential for API orders.
+8. [ ] Open Groww support ticket: confirm auto-SqOff trigger conditions for NRML short index options.
 
 Items 1, 2, 4 are CALCULATOR BLOCKERS. Items 3, 5-8 unblock related
 work but calculator can ship without them.
@@ -949,13 +949,13 @@ work but calculator can ship without them.
 | 2026-05-16 | Added §6b freeze quantity / order splitting | NSE freeze quantities: NIFTY 1,800 contracts (1,755 lots), BANKNIFTY 600 lots, SENSEX ~1,000 lots. Above freeze, broker submits iceberg → multiple back-end orders → ₹20 brokerage per slice. Calculator now computes `n_orders_per_leg = ceil(n_lots / freeze_lots)`. Added F17 fixture (2,000-lot NIFTY = 2 slices). |
 | 2026-05-16 | Added §12.7 long-vs-short symmetry table | Three identity classes: (A) same price pair mirror outcomes → DIFFERENT, (B) both profitable same gross → IDENTICAL, (C) both losing same gross → DIFFERENT. Concrete worked examples at n=25. Added F18-F23 fixtures. |
 | 2026-05-16 | Added §12.8 position-side costs NOT in calculator | Margin shortfall, ELM 2%, peak-margin, auto-SqOff, Call & Trade — all event-based, NOT per-trade. Scope-locked. |
-| 2026-05-16 | Expanded §16 from 3 to 8 unverified items | Added: (4) STT-on-exercise rate, (5) SENSEX freeze qty post-Mar-2026, (6) Dhan Call & Trade rate, (7) Dhan API-vs-UI brokerage parity, (8) Dhan auto-SqOff trigger conditions. Items 1-3 are CALCULATOR BLOCKERS; items 4-8 affect related modules. Added 8-step operator verification checklist (§16.1). |
+| 2026-05-16 | Expanded §16 from 3 to 8 unverified items | Added: (4) STT-on-exercise rate, (5) SENSEX freeze qty post-Mar-2026, (6) Groww Call & Trade rate, (7) Groww API-vs-UI brokerage parity, (8) Groww auto-SqOff trigger conditions. Items 1-3 are CALCULATOR BLOCKERS; items 4-8 affect related modules. Added 8-step operator verification checklist (§16.1). |
 | 2026-05-16 | Updated §11 API: 2 new inputs + 2 new outputs | `held_to_expiry_exercise` + `intrinsic_value_paisa_at_expiry` inputs; `used_exercise_branch` + `n_orders_per_leg` outputs for audit. |
 | 2026-05-16 | Acceptance criteria §17: 16 → 23 fixtures | F17 iceberg + F18-F23 long-vs-short symmetry. |
 | 2026-05-16 | §4.2 rewritten as 4-outcome state machine | Operator shared claude-chat-generated prompt 2026-05-16. Adopted prompt's 5-action enum (mapped to 4 outcomes: NORMAL_CLOSE + 3 expiry sub-cases). Backward-compatible via `trade_outcome="NORMAL_CLOSE"` default. |
-| 2026-05-16 | §4.3 Dhan ₹20-on-worthless gotcha documented | Agent confirmed Dhan charges ₹20 even on options expiring worthless (unlike Zerodha which dropped to ₹0 in June 2024). Material for short-OTM held-to-expiry strategies. |
+| 2026-05-16 | §4.3 Groww ₹20-on-worthless gotcha documented | Agent confirmed Groww charges ₹20 even on options expiring worthless (unlike Zerodha which dropped to ₹0 in June 2024). Material for short-OTM held-to-expiry strategies. |
 | 2026-05-16 | §4.4 Prompt-error correction recorded | Claude-chat prompt claimed "₹20 per CONTRACT" for exercise/assignment. Verified WRONG: actual is "per executed ORDER". Would have over-counted 100-lot exercise brokerage by ₹1,980. |
-| 2026-05-16 | §16 expanded to 17 unverified items (added 15, 16, 17) | Futures STT 0.05% (informational), Dhan ₹20-on-worthless, STT-on-exercise rate split. |
+| 2026-05-16 | §16 expanded to 17 unverified items (added 15, 16, 17) | Futures STT 0.05% (informational), Groww ₹20-on-worthless, STT-on-exercise rate split. |
 | 2026-05-16 | TradeOutcome enum added to §11 API | Replaces `held_to_expiry_exercise: bool`. Backward-compat via DEPRECATED label on the bool. New fixtures use enum. |
 
 ---

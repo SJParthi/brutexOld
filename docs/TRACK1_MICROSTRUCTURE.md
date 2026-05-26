@@ -111,7 +111,7 @@ NIFTY 50 is reconstituted semi-annually:
   expiry)
 
 In the 2021-05-15 → 2026-05-15 window, there are **~10 reconstitution
-events**. The index series Dhan publishes is **chain-linked** through
+events**. The index series Groww publishes is **chain-linked** through
 these — the level is continuous, no artificial gap from composition
 change.
 
@@ -244,11 +244,11 @@ Property tests enforce these microstructure constraints:
 |---|---|
 | P-22 | No bar timestamp on any NSE holiday 2021-2026 |
 | P-23 | Every persisted intraday bar has 09:15 ≤ bar_time < 15:30 IST |
-| P-18 | Dhan rate limiter timing |
+| P-18 | Groww rate limiter timing |
 
 Golden corpora (`tests/golden/fixtures/`) include specific edge-case
 dates: Diwali Muhurat, Ram Navami half-session, Holi Monday, election
-holiday. The conversion of these days from Dhan response → canonical
+holiday. The conversion of these days from Groww response → canonical
 Parquet must match the frozen SHA256.
 
 ---

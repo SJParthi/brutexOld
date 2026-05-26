@@ -1,7 +1,7 @@
 """Strike grid + ATM rounding per underlying.
 
 Per `docs/track2/TRACK2_OPTIONS_SPEC.md` §5 — strike steps are
-Dhan-published and verified quarterly.
+Groww-published and verified quarterly.
 
 | Underlying | Strike step | Source |
 |---|---|---|

@@ -66,7 +66,7 @@ fi
 # ── 5. hardcoded broker auth token (any vendor pattern) ──
 if git ls-files 'brutex/**/*.py' 'tests/**/*.py' 2>/dev/null | \
    xargs grep -En '(API_AUTH_TOKEN|ACCESS_TOKEN|API_TOKEN)\s*=\s*["\047][^"\047{]{10,}["\047]' 2>/dev/null; then
-    fail "Hardcoded broker auth token detected. Use environment variable (e.g. BRUTEX_DHAN_ACCESS_TOKEN)."
+    fail "Hardcoded broker auth token detected. Use environment variable (e.g. BRUTEX_GROWW_API_KEY)."
 fi
 
 # ── 6. hardcoded Telegram token pattern (digits:base64-like, length > 30) ──

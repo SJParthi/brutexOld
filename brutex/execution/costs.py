@@ -28,7 +28,7 @@ of state they depend on):
 * **STT option exercise** \u2014 0.125% on intrinsic, needs
   option-exercise state.
 
-A golden test against the Zerodha / Dhan calculator pinning
+A golden test against the Zerodha / Groww calculator pinning
 computed costs to \u00b1\u20b90.01 lives under
 ``tests/golden/test_indian_costs.py`` in a follow-up.
 """

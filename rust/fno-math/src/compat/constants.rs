@@ -4,8 +4,8 @@
 //! If you see a raw number or string literal in application code, it's a bug.
 
 // ---------------------------------------------------------------------------
-// Dhan WebSocket V2 Binary Protocol — Packet Sizes
-// Source: Dhan official API spec; verified in Python SDK v2 (src/dhanhq/marketfeed.py)
+// Groww WebSocket V2 Binary Protocol — Packet Sizes
+// Source: Groww official API spec; verified in Python SDK v2 (src/growwapi/marketfeed.py)
 // All sizes verified against struct.calcsize() in the SDK.
 // ---------------------------------------------------------------------------
 
@@ -37,13 +37,13 @@ pub const MARKET_STATUS_PACKET_SIZE: usize = 8;
 /// SDK format: `<BHBIH`
 pub const DISCONNECT_PACKET_SIZE: usize = 10;
 
-/// Maximum size of a single WebSocket binary frame from Dhan.
+/// Maximum size of a single WebSocket binary frame from Groww.
 pub const MAX_WEBSOCKET_FRAME_SIZE: usize = 65536;
 
 // ---------------------------------------------------------------------------
-// Dhan WebSocket V2 — Connection Limits
+// Groww WebSocket V2 — Connection Limits
 // ---------------------------------------------------------------------------
-// Confirmed by Dhan (Hardik, 2026-04-06 madefortrade.in/t/63542):
+// Confirmed by Groww (Hardik, 2026-04-06 madefortrade.in/t/63542):
 // The limit of 5 is applicable for EACH websocket type INDEPENDENTLY:
 //   - Live Market Feed: 5 connections
 //   - 20-level Depth: 5 connections
@@ -55,15 +55,15 @@ pub const MAX_WEBSOCKET_FRAME_SIZE: usize = 65536;
 /// Maximum instruments per single Live Market Feed WebSocket connection.
 pub const MAX_INSTRUMENTS_PER_WEBSOCKET_CONNECTION: usize = 5000;
 
-/// Maximum concurrent Live Market Feed WebSocket connections per Dhan account.
+/// Maximum concurrent Live Market Feed WebSocket connections per Groww account.
 /// NOTE: This limit is INDEPENDENT from depth connection limits.
 pub const MAX_WEBSOCKET_CONNECTIONS: usize = 5;
 
-/// Maximum concurrent 20-level depth WebSocket connections per Dhan account.
+/// Maximum concurrent 20-level depth WebSocket connections per Groww account.
 /// Independent limit from Live Market Feed and 200-level depth.
 pub const MAX_TWENTY_DEPTH_CONNECTIONS: usize = 5;
 
-/// Maximum concurrent 200-level depth WebSocket connections per Dhan account.
+/// Maximum concurrent 200-level depth WebSocket connections per Groww account.
 /// Independent limit from Live Market Feed and 20-level depth.
 pub const MAX_TWO_HUNDRED_DEPTH_CONNECTIONS: usize = 5;
 
@@ -72,17 +72,17 @@ pub const MAX_TOTAL_SUBSCRIPTIONS: usize =
     MAX_INSTRUMENTS_PER_WEBSOCKET_CONNECTION * MAX_WEBSOCKET_CONNECTIONS;
 
 // ---------------------------------------------------------------------------
-// Dhan WebSocket V2 — Protocol Constants
+// Groww WebSocket V2 — Protocol Constants
 // ---------------------------------------------------------------------------
 
-/// Server ping interval in seconds (Dhan server pings client every 10 seconds).
+/// Server ping interval in seconds (Groww server pings client every 10 seconds).
 /// Client MUST respond with pong. tokio-tungstenite auto-pongs.
 pub const SERVER_PING_INTERVAL_SECS: u64 = 10;
 
 /// Server disconnects if no pong received within this many seconds.
 pub const SERVER_PING_TIMEOUT_SECS: u64 = 40;
 
-/// Maximum instruments per subscription message (Dhan limit).
+/// Maximum instruments per subscription message (Groww limit).
 pub const SUBSCRIPTION_BATCH_SIZE: usize = 100;
 
 /// WebSocket V2 authentication type (always 2 for access token auth).
@@ -92,40 +92,40 @@ pub const WEBSOCKET_AUTH_TYPE: u8 = 2;
 pub const WEBSOCKET_PROTOCOL_VERSION: &str = "2";
 
 // ---------------------------------------------------------------------------
-// Dhan WebSocket V2 — Exchange Segment Codes (Binary Protocol)
-// Source: Dhan official API spec; verified in Python SDK v2 (src/dhanhq/marketfeed.py)
+// Groww WebSocket V2 — Exchange Segment Codes (Binary Protocol)
+// Source: Groww official API spec; verified in Python SDK v2 (src/growwapi/marketfeed.py)
 // CRITICAL: These are binary wire codes, NOT subscription JSON strings.
 // ---------------------------------------------------------------------------
 
-/// IDX_I segment code in Dhan binary protocol.
+/// IDX_I segment code in Groww binary protocol.
 pub const EXCHANGE_SEGMENT_IDX_I: u8 = 0;
 
-/// NSE_EQ segment code in Dhan binary protocol.
+/// NSE_EQ segment code in Groww binary protocol.
 pub const EXCHANGE_SEGMENT_NSE_EQ: u8 = 1;
 
-/// NSE_FNO segment code in Dhan binary protocol.
+/// NSE_FNO segment code in Groww binary protocol.
 pub const EXCHANGE_SEGMENT_NSE_FNO: u8 = 2;
 
-/// NSE_CURRENCY segment code in Dhan binary protocol.
+/// NSE_CURRENCY segment code in Groww binary protocol.
 pub const EXCHANGE_SEGMENT_NSE_CURRENCY: u8 = 3;
 
-/// BSE_EQ segment code in Dhan binary protocol.
+/// BSE_EQ segment code in Groww binary protocol.
 pub const EXCHANGE_SEGMENT_BSE_EQ: u8 = 4;
 
-/// MCX_COMM segment code in Dhan binary protocol.
+/// MCX_COMM segment code in Groww binary protocol.
 pub const EXCHANGE_SEGMENT_MCX_COMM: u8 = 5;
 
-// Note: code 6 is unused/skipped in Dhan's protocol.
+// Note: code 6 is unused/skipped in Groww's protocol.
 
-/// BSE_CURRENCY segment code in Dhan binary protocol.
+/// BSE_CURRENCY segment code in Groww binary protocol.
 pub const EXCHANGE_SEGMENT_BSE_CURRENCY: u8 = 7;
 
-/// BSE_FNO segment code in Dhan binary protocol.
+/// BSE_FNO segment code in Groww binary protocol.
 pub const EXCHANGE_SEGMENT_BSE_FNO: u8 = 8;
 
 // ---------------------------------------------------------------------------
-// Dhan Data API Error Codes (WebSocket disconnect + REST error responses)
-// Source: docs/dhan-ref/08-annexure-enums.md Section 11
+// Groww Data API Error Codes (WebSocket disconnect + REST error responses)
+// Source: docs/groww-ref/08-annexure-enums.md Section 11
 // These codes appear in WebSocket disconnect packets (code 50) and REST
 // error responses. All 12 codes from the reference doc are defined here.
 // ---------------------------------------------------------------------------
@@ -191,8 +191,8 @@ pub const DISCONNECT_ACCESS_TOKEN_INVALID: u16 = DATA_API_ACCESS_TOKEN_INVALID;
 pub const DISCONNECT_CLIENT_ID_INVALID: u16 = 810;
 
 // ---------------------------------------------------------------------------
-// Dhan WebSocket V2 — Response Codes (Binary Protocol)
-// Source: Dhan official API spec; verified in Python SDK v2 (src/dhanhq/marketfeed.py)
+// Groww WebSocket V2 — Response Codes (Binary Protocol)
+// Source: Groww official API spec; verified in Python SDK v2 (src/growwapi/marketfeed.py)
 // ---------------------------------------------------------------------------
 
 /// Response code for index ticker packet (16 bytes).
@@ -203,10 +203,10 @@ pub const RESPONSE_CODE_TICKER: u8 = 2;
 
 /// Response code for market depth standalone packet (112 bytes).
 /// Format: `<BHBIf100s>` — Header(8) + LTP(f32) + Depth(5×20 bytes).
-/// Dhan API (Python SDK ref): `process_market_depth(data)`.
+/// Groww API (Python SDK ref): `process_market_depth(data)`.
 ///
 /// NOTE: Not in annexure Section 3 (gap between Ticker(2) and Quote(4)).
-/// Documented and handled in Dhan API (Python SDK ref) v2 `process_market_depth()`.
+/// Documented and handled in Groww API (Python SDK ref) v2 `process_market_depth()`.
 pub const RESPONSE_CODE_MARKET_DEPTH: u8 = 3;
 
 /// Response code for quote packet (50 bytes).
@@ -228,7 +228,7 @@ pub const RESPONSE_CODE_FULL: u8 = 8;
 pub const RESPONSE_CODE_DISCONNECT: u8 = 50;
 
 // ---------------------------------------------------------------------------
-// Dhan WebSocket V2 — Market Status Codes
+// Groww WebSocket V2 — Market Status Codes
 // ---------------------------------------------------------------------------
 
 /// Market is closed.
@@ -244,8 +244,8 @@ pub const MARKET_STATUS_OPEN: u16 = 2;
 pub const MARKET_STATUS_POST_CLOSE: u16 = 3;
 
 // ---------------------------------------------------------------------------
-// Dhan WebSocket V2 — Subscription Request Codes
-// Source: Dhan official API spec; verified in Python SDK v2 (src/dhanhq/marketfeed.py)
+// Groww WebSocket V2 — Subscription Request Codes
+// Source: Groww official API spec; verified in Python SDK v2 (src/growwapi/marketfeed.py)
 // Subscribe codes: 15 (Ticker), 17 (Quote), 21 (Full).
 // Unsubscribe = subscribe_code + 1: 16 (Ticker), 18 (Quote), 22 (Full).
 // Disconnect = 12 (closes the WebSocket connection).
@@ -259,7 +259,7 @@ pub const FEED_REQUEST_CONNECT: u8 = 11;
 pub const FEED_REQUEST_DISCONNECT: u8 = 12;
 
 // ---------------------------------------------------------------------------
-// Dhan WebSocket V2 — Binary Header
+// Groww WebSocket V2 — Binary Header
 // ---------------------------------------------------------------------------
 
 /// Size of the binary response header in bytes.
@@ -275,7 +275,7 @@ pub const OI_PACKET_SIZE: usize = 12;
 pub const MARKET_DEPTH_LEVEL_SIZE: usize = 20;
 
 // ---------------------------------------------------------------------------
-// Dhan WebSocket V2 — Feed Request Type Codes
+// Groww WebSocket V2 — Feed Request Type Codes
 // ---------------------------------------------------------------------------
 
 /// Subscribe Ticker mode (compact price updates). Unsubscribe = 16.
@@ -305,7 +305,7 @@ pub const MARKET_DEPTH_LEVELS: usize = 5;
 
 // ---------------------------------------------------------------------------
 // Market Depth — Per-Level Field Offsets (within a single 20-byte level)
-// Source: Dhan API (Python SDK ref) `<IIHHff>` format string.
+// Source: Groww API (Python SDK ref) `<IIHHff>` format string.
 // Used in Full (code 8) and Market Depth standalone (code 3) packets.
 // ---------------------------------------------------------------------------
 
@@ -329,7 +329,7 @@ pub const DEPTH_LEVEL_OFFSET_ASK_PRICE: usize = 16;
 
 // ---------------------------------------------------------------------------
 // Deep Depth Protocol — 20-Level & 200-Level WebSocket Feeds
-// Source: Dhan official API spec; verified in Python SDK (src/dhanhq/marketfeed.py), Dhan API docs.
+// Source: Groww official API spec; verified in Python SDK (src/growwapi/marketfeed.py), Groww API docs.
 // Separate WebSocket endpoints from the standard feed.
 // Bid and ask sides arrive as SEPARATE binary packets.
 // ---------------------------------------------------------------------------
@@ -351,7 +351,7 @@ pub const DEEP_DEPTH_LEVEL_SIZE: usize = 16;
 
 // ---------------------------------------------------------------------------
 // Deep Depth — Per-Level Field Offsets (within a single 16-byte level)
-// Source: Dhan API (Python SDK ref) `<dII>` format string in fulldepth.py.
+// Source: Groww API (Python SDK ref) `<dII>` format string in fulldepth.py.
 // ---------------------------------------------------------------------------
 
 /// Price (f64 LE) offset within a deep depth level.
@@ -382,17 +382,17 @@ pub const TWO_HUNDRED_DEPTH_BODY_SIZE: usize = TWO_HUNDRED_DEPTH_LEVELS * DEEP_D
 pub const TWO_HUNDRED_DEPTH_PACKET_SIZE: usize =
     DEEP_DEPTH_HEADER_SIZE + TWO_HUNDRED_DEPTH_BODY_SIZE;
 
-/// Maximum instruments per 20-depth WebSocket connection (Dhan limit).
+/// Maximum instruments per 20-depth WebSocket connection (Groww limit).
 pub const MAX_INSTRUMENTS_PER_TWENTY_DEPTH_CONNECTION: usize = 50;
 
-/// Maximum instruments per 200-depth WebSocket connection (Dhan limit: 1).
+/// Maximum instruments per 200-depth WebSocket connection (Groww limit: 1).
 pub const MAX_INSTRUMENTS_PER_TWO_HUNDRED_DEPTH_CONNECTION: usize = 1;
 
 /// Subscription request code for 20-level depth feed.
 pub const FEED_REQUEST_TWENTY_DEPTH: u8 = 23;
 
 /// Unsubscription request code for full market depth feed (both 20 and 200 level).
-/// Dhan Annexure: UnsubscribeFullDepth = 25. There is NO code 24.
+/// Groww Annexure: UnsubscribeFullDepth = 25. There is NO code 24.
 /// Python SDK (fulldepth.py) also uses 25 for unsubscribe.
 pub const FEED_UNSUBSCRIBE_TWENTY_DEPTH: u8 = 25;
 
@@ -417,7 +417,7 @@ pub const DEEP_DEPTH_HEADER_OFFSET_MSG_SEQUENCE: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Live Order Update WebSocket
-// Source: DhanHQ API docs, Python SDK.
+// Source: Groww API docs, Python SDK.
 // Separate JSON-based WebSocket (NOT binary).
 // ---------------------------------------------------------------------------
 
@@ -429,7 +429,7 @@ pub const ORDER_UPDATE_LOGIN_MSG_CODE: u16 = 42;
 pub const ORDER_UPDATE_READ_TIMEOUT_SECS: u64 = 120;
 
 /// Read timeout for order update WebSocket outside market hours (seconds).
-/// Off-hours: no orders expected, Dhan sends no data. Use 10 minutes to
+/// Off-hours: no orders expected, Groww sends no data. Use 10 minutes to
 /// avoid noisy reconnect loops while still detecting dead connections.
 pub const ORDER_UPDATE_OFF_HOURS_READ_TIMEOUT_SECS: u64 = 600;
 
@@ -467,9 +467,9 @@ pub const OMS_CIRCUIT_BREAKER_FAILURE_THRESHOLD: u32 = 3;
 /// Seconds before the OMS circuit breaker transitions from Open to Half-Open.
 pub const OMS_CIRCUIT_BREAKER_RESET_SECS: u64 = 30;
 
-/// Maximum length for Dhan `correlationId` field.
-/// Dhan spec: max 30 chars, charset `[a-zA-Z0-9 _-]`.
-pub const DHAN_CORRELATION_ID_MAX_LENGTH: usize = 30;
+/// Maximum length for Groww `correlationId` field.
+/// Groww spec: max 30 chars, charset `[a-zA-Z0-9 _-]`.
+pub const GROWW_CORRELATION_ID_MAX_LENGTH: usize = 30;
 
 // ---------------------------------------------------------------------------
 // Risk — Tick Gap Detection Thresholds
@@ -499,17 +499,17 @@ pub const STALE_LTP_THRESHOLD_SECS: u64 = 600;
 /// Base path for all secrets in SSM Parameter Store.
 pub const SSM_SECRET_BASE_PATH: &str = "/dlt";
 
-/// SSM service path segment for Dhan credentials.
-pub const SSM_DHAN_SERVICE: &str = "dhan";
+/// SSM service path segment for Groww credentials.
+pub const SSM_GROWW_SERVICE: &str = "groww";
 
-/// Dhan credentials secret names.
-pub const DHAN_CLIENT_ID_SECRET: &str = "client-id";
-pub const DHAN_CLIENT_SECRET_SECRET: &str = "client-secret";
-pub const DHAN_TOTP_SECRET: &str = "totp-secret";
-/// SSM secret name for Dhan sandbox client ID (DevPortal).
-pub const DHAN_SANDBOX_CLIENT_ID_SECRET: &str = "sandbox-client-id";
-/// SSM secret name for Dhan sandbox access token (DevPortal, 30-day validity).
-pub const DHAN_SANDBOX_TOKEN_SECRET: &str = "sandbox-token";
+/// Groww credentials secret names.
+pub const GROWW_CLIENT_ID_SECRET: &str = "client-id";
+pub const GROWW_CLIENT_SECRET_SECRET: &str = "client-secret";
+pub const GROWW_TOTP_SECRET: &str = "totp-secret";
+/// SSM secret name for Groww sandbox client ID (DevPortal).
+pub const GROWW_SANDBOX_CLIENT_ID_SECRET: &str = "sandbox-client-id";
+/// SSM secret name for Groww sandbox access token (DevPortal, 30-day validity).
+pub const GROWW_SANDBOX_TOKEN_SECRET: &str = "sandbox-token";
 
 // ---------------------------------------------------------------------------
 // SSM Parameter Store — QuestDB Service
@@ -609,11 +609,11 @@ pub const ORDER_EVENT_RING_BUFFER_CAPACITY: usize = 4096;
 // Instrument CSV — Download & Parse
 // ---------------------------------------------------------------------------
 
-/// Minimum expected rows in Dhan instrument CSV (sanity check for row count).
+/// Minimum expected rows in Groww instrument CSV (sanity check for row count).
 pub const INSTRUMENT_CSV_MIN_ROWS: usize = 100_000;
 
 /// Minimum expected bytes for a valid instrument CSV download.
-/// Dhan's CSV is ~40MB; anything under 1MB is suspiciously small.
+/// Groww's CSV is ~40MB; anything under 1MB is suspiciously small.
 pub const INSTRUMENT_CSV_MIN_BYTES: usize = 1_000_000;
 
 /// Expected download time for instrument CSV in seconds.
@@ -872,7 +872,7 @@ pub const BOOT_TIMEOUT_SECS: u64 = 120;
 // Authentication — TOTP Configuration
 // ---------------------------------------------------------------------------
 
-/// TOTP digit count (Dhan uses 6-digit codes).
+/// TOTP digit count (Groww uses 6-digit codes).
 pub const TOTP_DIGITS: usize = 6;
 
 /// TOTP time period in seconds (standard 30-second window).
@@ -887,129 +887,129 @@ pub const TOTP_SKEW: u8 = 1;
 pub const TOTP_MAX_RETRIES: u32 = 2;
 
 // ---------------------------------------------------------------------------
-// Authentication — Dhan REST API Endpoint Paths
+// Authentication — Groww REST API Endpoint Paths
 // ---------------------------------------------------------------------------
 
 /// Path for initial token generation (appended to auth_base_url).
-/// Endpoint: POST <https://auth.dhan.co/app/generateAccessToken>
-pub const DHAN_GENERATE_TOKEN_PATH: &str = "/app/generateAccessToken";
+/// Endpoint: POST <https://auth.groww.co/app/generateAccessToken>
+pub const GROWW_GENERATE_TOKEN_PATH: &str = "/app/generateAccessToken";
 
 /// Path for token renewal (appended to rest_api_base_url).
-/// Endpoint: GET <https://api.dhan.co/v2/RenewToken>
-pub const DHAN_RENEW_TOKEN_PATH: &str = "/RenewToken";
+/// Endpoint: GET <https://api.groww.co/v2/RenewToken>
+pub const GROWW_RENEW_TOKEN_PATH: &str = "/RenewToken";
 
 /// Path for intraday minute candle data (appended to rest_api_base_url).
-/// Endpoint: POST <https://api.dhan.co/v2/charts/intraday>
-pub const DHAN_CHARTS_INTRADAY_PATH: &str = "/charts/intraday";
+/// Endpoint: POST <https://api.groww.co/v2/charts/intraday>
+pub const GROWW_CHARTS_INTRADAY_PATH: &str = "/charts/intraday";
 
 /// Path for daily candle data (appended to rest_api_base_url).
-/// Endpoint: POST <https://api.dhan.co/v2/charts/historical>
-pub const DHAN_CHARTS_HISTORICAL_PATH: &str = "/charts/historical";
+/// Endpoint: POST <https://api.groww.co/v2/charts/historical>
+pub const GROWW_CHARTS_HISTORICAL_PATH: &str = "/charts/historical";
 
 // ---------------------------------------------------------------------------
 // Authentication — User Profile & IP Management Endpoints
 // ---------------------------------------------------------------------------
 
 /// Path for user profile (appended to rest_api_base_url).
-/// Endpoint: GET <https://api.dhan.co/v2/profile>
-pub const DHAN_USER_PROFILE_PATH: &str = "/profile";
+/// Endpoint: GET <https://api.groww.co/v2/profile>
+pub const GROWW_USER_PROFILE_PATH: &str = "/profile";
 
 /// Path to set static IP for order APIs (appended to rest_api_base_url).
-/// Endpoint: POST <https://api.dhan.co/v2/ip/setIP>
-pub const DHAN_SET_IP_PATH: &str = "/ip/setIP";
+/// Endpoint: POST <https://api.groww.co/v2/ip/setIP>
+pub const GROWW_SET_IP_PATH: &str = "/ip/setIP";
 
 /// Path to modify static IP for order APIs (appended to rest_api_base_url).
-/// Endpoint: PUT <https://api.dhan.co/v2/ip/modifyIP>
+/// Endpoint: PUT <https://api.groww.co/v2/ip/modifyIP>
 /// WARNING: 7-day cooldown after modification.
-pub const DHAN_MODIFY_IP_PATH: &str = "/ip/modifyIP";
+pub const GROWW_MODIFY_IP_PATH: &str = "/ip/modifyIP";
 
 /// Path to get current static IP configuration (appended to rest_api_base_url).
-/// Endpoint: GET <https://api.dhan.co/v2/ip/getIP>
-pub const DHAN_GET_IP_PATH: &str = "/ip/getIP";
+/// Endpoint: GET <https://api.groww.co/v2/ip/getIP>
+pub const GROWW_GET_IP_PATH: &str = "/ip/getIP";
 
 // ---------------------------------------------------------------------------
 // Portfolio & Positions — REST API Endpoint Paths
 // ---------------------------------------------------------------------------
 
 /// Path for holdings list (appended to rest_api_base_url).
-/// Endpoint: GET <https://api.dhan.co/v2/holdings>
-pub const DHAN_HOLDINGS_PATH: &str = "/holdings";
+/// Endpoint: GET <https://api.groww.co/v2/holdings>
+pub const GROWW_HOLDINGS_PATH: &str = "/holdings";
 
 /// Path for positions list (appended to rest_api_base_url).
-/// Endpoint: GET <https://api.dhan.co/v2/positions>
-pub const DHAN_POSITIONS_PATH: &str = "/positions";
+/// Endpoint: GET <https://api.groww.co/v2/positions>
+pub const GROWW_POSITIONS_PATH: &str = "/positions";
 
 /// Path for position conversion (appended to rest_api_base_url).
-/// Endpoint: POST <https://api.dhan.co/v2/positions/convert>
-pub const DHAN_POSITIONS_CONVERT_PATH: &str = "/positions/convert";
+/// Endpoint: POST <https://api.groww.co/v2/positions/convert>
+pub const GROWW_POSITIONS_CONVERT_PATH: &str = "/positions/convert";
 
 // ---------------------------------------------------------------------------
 // Funds & Margin — REST API Endpoint Paths
 // ---------------------------------------------------------------------------
 
 /// Path for single-instrument margin calculator (appended to rest_api_base_url).
-/// Endpoint: POST <https://api.dhan.co/v2/margincalculator>
-pub const DHAN_MARGIN_CALCULATOR_PATH: &str = "/margincalculator";
+/// Endpoint: POST <https://api.groww.co/v2/margincalculator>
+pub const GROWW_MARGIN_CALCULATOR_PATH: &str = "/margincalculator";
 
 /// Path for multi-instrument margin calculator (appended to rest_api_base_url).
-/// Endpoint: POST <https://api.dhan.co/v2/margincalculator/multi>
-pub const DHAN_MARGIN_CALCULATOR_MULTI_PATH: &str = "/margincalculator/multi";
+/// Endpoint: POST <https://api.groww.co/v2/margincalculator/multi>
+pub const GROWW_MARGIN_CALCULATOR_MULTI_PATH: &str = "/margincalculator/multi";
 
 /// Path for fund limit query (appended to rest_api_base_url).
-/// Endpoint: GET <https://api.dhan.co/v2/fundlimit>
-pub const DHAN_FUND_LIMIT_PATH: &str = "/fundlimit";
+/// Endpoint: GET <https://api.groww.co/v2/fundlimit>
+pub const GROWW_FUND_LIMIT_PATH: &str = "/fundlimit";
 
 /// Path for kill switch activate/deactivate (appended to rest_api_base_url).
-/// Endpoint: POST <https://api.dhan.co/v2/killswitch?killSwitchStatus=ACTIVATE|DEACTIVATE>
-pub const DHAN_KILL_SWITCH_PATH: &str = "/killswitch";
+/// Endpoint: POST <https://api.groww.co/v2/killswitch?killSwitchStatus=ACTIVATE|DEACTIVATE>
+pub const GROWW_KILL_SWITCH_PATH: &str = "/killswitch";
 
 /// Path for P&L-based exit configuration (appended to rest_api_base_url).
-/// Endpoint: POST/DELETE/GET <https://api.dhan.co/v2/pnlExit>
-pub const DHAN_PNL_EXIT_PATH: &str = "/pnlExit";
+/// Endpoint: POST/DELETE/GET <https://api.groww.co/v2/pnlExit>
+pub const GROWW_PNL_EXIT_PATH: &str = "/pnlExit";
 
 // ---------------------------------------------------------------------------
 // Full Market Depth — WebSocket Base URLs
 // ---------------------------------------------------------------------------
 
 /// 20-level depth WebSocket base URL.
-/// Full URL: `wss://depth-api-feed.dhan.co/twentydepth?token=TOKEN&clientId=CLIENT_ID&authType=2`
-pub const DHAN_TWENTY_DEPTH_WS_BASE_URL: &str = "wss://depth-api-feed.dhan.co/twentydepth"; // APPROVED: infrastructure constant
+/// Full URL: `wss://depth-api-feed.groww.co/twentydepth?token=TOKEN&clientId=CLIENT_ID&authType=2`
+pub const GROWW_TWENTY_DEPTH_WS_BASE_URL: &str = "wss://depth-api-feed.groww.co/twentydepth"; // APPROVED: infrastructure constant
 
 /// 200-level depth WebSocket base URL.
-/// Full URL: `wss://full-depth-api.dhan.co/twohundreddepth?token=TOKEN&clientId=CLIENT_ID&authType=2`
+/// Full URL: `wss://full-depth-api.groww.co/twohundreddepth?token=TOKEN&clientId=CLIENT_ID&authType=2`
 ///
-/// NOTE: Dhan support confirmed (2026-04-10, Ticket #5519522) the correct path is
+/// NOTE: Groww support confirmed (2026-04-10, Ticket #5519522) the correct path is
 /// `/twohundreddepth`. Previous SDK-based root path `/` caused `ResetWithoutClosingHandshake`.
-/// Dhan also confirmed: use a Security ID close to current market price (ATM), not far OTM.
-pub const DHAN_TWO_HUNDRED_DEPTH_WS_BASE_URL: &str = "wss://full-depth-api.dhan.co/twohundreddepth"; // APPROVED: infrastructure constant — confirmed by Dhan support ticket #5519522
+/// Groww also confirmed: use a Security ID close to current market price (ATM), not far OTM.
+pub const GROWW_TWO_HUNDRED_DEPTH_WS_BASE_URL: &str = "wss://full-depth-api.groww.co/twohundreddepth"; // APPROVED: infrastructure constant — confirmed by Groww support ticket #5519522
 
 // ---------------------------------------------------------------------------
 // Historical Data — Candle Fetch Constants
 // ---------------------------------------------------------------------------
 
-/// 1-minute candle interval identifier for Dhan intraday API.
-pub const DHAN_CANDLE_INTERVAL_1MIN: &str = "1";
+/// 1-minute candle interval identifier for Groww intraday API.
+pub const GROWW_CANDLE_INTERVAL_1MIN: &str = "1";
 
-/// 5-minute candle interval identifier for Dhan intraday API.
-pub const DHAN_CANDLE_INTERVAL_5MIN: &str = "5";
+/// 5-minute candle interval identifier for Groww intraday API.
+pub const GROWW_CANDLE_INTERVAL_5MIN: &str = "5";
 
-/// 15-minute candle interval identifier for Dhan intraday API.
-pub const DHAN_CANDLE_INTERVAL_15MIN: &str = "15";
+/// 15-minute candle interval identifier for Groww intraday API.
+pub const GROWW_CANDLE_INTERVAL_15MIN: &str = "15";
 
-/// 25-minute candle interval identifier for Dhan intraday API.
-/// Per docs/dhan-ref/05-historical-data.md: valid intervals are "1", "5", "15", "25", "60".
-pub const DHAN_CANDLE_INTERVAL_25MIN: &str = "25";
+/// 25-minute candle interval identifier for Groww intraday API.
+/// Per docs/groww-ref/05-historical-data.md: valid intervals are "1", "5", "15", "25", "60".
+pub const GROWW_CANDLE_INTERVAL_25MIN: &str = "25";
 
-/// 60-minute (1-hour) candle interval identifier for Dhan intraday API.
-pub const DHAN_CANDLE_INTERVAL_60MIN: &str = "60";
+/// 60-minute (1-hour) candle interval identifier for Groww intraday API.
+pub const GROWW_CANDLE_INTERVAL_60MIN: &str = "60";
 
-/// Maximum days of intraday data per API request (Dhan limit: 90 days).
-pub const DHAN_INTRADAY_MAX_DAYS_PER_REQUEST: u32 = 90;
+/// Maximum days of intraday data per API request (Groww limit: 90 days).
+pub const GROWW_INTRADAY_MAX_DAYS_PER_REQUEST: u32 = 90;
 
 /// NSE continuous trading session start time as HH:MM:SS in IST.
 ///
-/// Used for Dhan historical API `fromDate` and cross-verification baseline.
-/// Dhan's historical intraday API returns candles starting from 09:15 (continuous
+/// Used for Groww historical API `fromDate` and cross-verification baseline.
+/// Groww's historical intraday API returns candles starting from 09:15 (continuous
 /// trading). Pre-market data (09:00–09:14) is only available via live WebSocket.
 ///
 /// For live data collection start, see `data_collection_start` in config (09:00).
@@ -1021,7 +1021,7 @@ pub const MARKET_OPEN_TIME_IST: &str = "09:15:00";
 pub const MARKET_LAST_CANDLE_START_IST: &str = "15:29:00";
 
 /// Market close time for intraday API toDate parameter (exclusive upper bound).
-/// Dhan intraday API uses datetime format: "YYYY-MM-DD 15:30:00" is exclusive,
+/// Groww intraday API uses datetime format: "YYYY-MM-DD 15:30:00" is exclusive,
 /// meaning the last candle returned starts at 15:29.
 pub const MARKET_CLOSE_TIME_IST_EXCLUSIVE: &str = "15:30:00";
 
@@ -1035,7 +1035,7 @@ pub const APP_DAILY_RESET_TIME_IST: &str = "16:00:00";
 /// Number of 1-minute candles in the cross-verification window (09:15 to 15:29 = 375).
 ///
 /// Used by `cross_verify.rs` to validate historical vs live candle coverage.
-/// This covers only the continuous trading session (09:15–15:29) because Dhan's
+/// This covers only the continuous trading session (09:15–15:29) because Groww's
 /// historical intraday API returns data starting from 09:15.
 ///
 /// Live WebSocket data is collected and stored from 09:00 (pre-market), but
@@ -1061,7 +1061,7 @@ pub const TIMEFRAME_60M: &str = "60m";
 /// Timeframe identifier for daily candles in `historical_candles` table.
 pub const TIMEFRAME_1D: &str = "1d";
 
-/// All intraday timeframes to fetch from Dhan API.
+/// All intraday timeframes to fetch from Groww API.
 /// Each tuple: (interval for API request, timeframe label for storage).
 pub const INTRADAY_TIMEFRAMES: &[(&str, &str)] = &[
     ("1", "1m"),
@@ -1089,12 +1089,12 @@ pub const TOKEN_RENEWAL_CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
 /// Circuit breaker reset timeout in seconds (try again after this).
 pub const TOKEN_RENEWAL_CIRCUIT_BREAKER_RESET_SECS: u64 = 60;
 
-/// Dhan `generateAccessToken` cooldown in seconds.
+/// Groww `generateAccessToken` cooldown in seconds.
 ///
-/// Dhan enforces an undocumented 2-minute cooldown between token generation
+/// Groww enforces an undocumented 2-minute cooldown between token generation
 /// requests. We use 125 seconds (2 min + 5 sec safety margin) to ensure
 /// we never hit the rate limit on retry.
-pub const DHAN_TOKEN_GENERATION_COOLDOWN_SECS: u64 = 125;
+pub const GROWW_TOKEN_GENERATION_COOLDOWN_SECS: u64 = 125;
 
 /// Maximum backoff delay for boot-time auth retry in seconds.
 ///
@@ -1102,7 +1102,7 @@ pub const DHAN_TOKEN_GENERATION_COOLDOWN_SECS: u64 = 125;
 pub const AUTH_RETRY_MAX_BACKOFF_SECS: u64 = 300;
 
 // ---------------------------------------------------------------------------
-// Dhan WebSocket V2 — Binary Packet Byte Offsets
+// Groww WebSocket V2 — Binary Packet Byte Offsets
 // Source: SDK struct.unpack format strings, verified against Python SDK.
 // CRITICAL: Quote and Full packets DIVERGE at offset 34.
 // ---------------------------------------------------------------------------
@@ -1234,7 +1234,7 @@ pub const QUESTDB_TABLE_MARKET_DEPTH: &str = "market_depth";
 /// QuestDB table: previous close reference data from code 6 packets.
 pub const QUESTDB_TABLE_PREVIOUS_CLOSE: &str = "previous_close";
 
-/// QuestDB table: multi-timeframe OHLCV candles from Dhan historical API.
+/// QuestDB table: multi-timeframe OHLCV candles from Groww historical API.
 /// Stores 1m, 5m, 15m, 60m intraday candles and daily candles in a single table.
 /// Discriminated by `timeframe` SYMBOL column. DEDUP on `(ts, security_id, timeframe)`.
 pub const QUESTDB_TABLE_HISTORICAL_CANDLES: &str = "historical_candles";
@@ -1281,9 +1281,9 @@ pub const TICK_BUFFER_HIGH_WATERMARK: usize = TICK_BUFFER_CAPACITY * 4 / 5; // 4
 pub const TICK_SPILL_MIN_DISK_SPACE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// OMS HTTP client timeout (seconds). Applied at the client level as a default
-/// for all Dhan order API calls. Individual endpoints may override with shorter
+/// for all Groww order API calls. Individual endpoints may override with shorter
 /// per-request timeouts. 5 seconds covers normal API latency (50-200ms) with
-/// margin for Dhan-side processing spikes.
+/// margin for Groww-side processing spikes.
 pub const OMS_HTTP_TIMEOUT_SECS: u64 = 5;
 
 /// OMS HTTP connect timeout (seconds). TCP + TLS handshake deadline.
@@ -1318,7 +1318,7 @@ pub const ORDER_UPDATE_BROADCAST_CAPACITY: usize = 256;
 ///   as disk spill handles overflow seamlessly.
 pub const CANDLE_BUFFER_CAPACITY: usize = 200_000;
 
-/// Option Chain API minimum request interval in seconds (Dhan limit: 1 req / 3 sec).
+/// Option Chain API minimum request interval in seconds (Groww limit: 1 req / 3 sec).
 pub const OPTION_CHAIN_MIN_REQUEST_INTERVAL_SECS: u64 = 3;
 
 /// Option Chain API HTTP request timeout in seconds.
@@ -1406,7 +1406,7 @@ pub const STOCK_CONTRACTS_PER_EXPIRY: usize =
 pub const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 10;
 
 /// Maximum time to wait for initial token acquisition at startup (seconds).
-/// Prevents indefinite hang if Dhan API is unreachable on boot.
+/// Prevents indefinite hang if Groww API is unreachable on boot.
 pub const TOKEN_INIT_TIMEOUT_SECS: u64 = 300;
 
 /// Maximum consecutive renewal circuit-breaker cycles before the renewal loop
@@ -1415,14 +1415,14 @@ pub const TOKEN_RENEWAL_MAX_CIRCUIT_BREAKER_CYCLES: u32 = 5;
 
 /// Timeout for sending a frame into the tick processor channel (seconds).
 /// Used as backpressure timeout: if channel is full, WS read blocks for
-/// up to this duration. Must be less than Dhan's ping timeout (40s).
+/// up to this duration. Must be less than Groww's ping timeout (40s).
 pub const FRAME_SEND_TIMEOUT_SECS: u64 = 5;
 
 /// Maximum backpressure wait time (seconds) when SPSC channel is full.
 /// If the tick processor is frozen for this long, the frame is lost and a
-/// CRITICAL error is logged. Must be less than Dhan's ping timeout (40s)
+/// CRITICAL error is logged. Must be less than Groww's ping timeout (40s)
 /// to prevent WebSocket disconnection during backpressure.
-/// 30s < 40s (Dhan timeout) gives 10s safety margin.
+/// 30s < 40s (Groww timeout) gives 10s safety margin.
 pub const FRAME_BACKPRESSURE_TIMEOUT_SECS: u64 = 30;
 
 /// SPSC frame channel capacity (WebSocket reader → tick processor).
@@ -1440,7 +1440,7 @@ pub const FRAME_CHANNEL_CAPACITY: usize = 131_072;
 ///
 /// Size = 2^16 = 65,536 slots x 8 bytes = 512 KiB.
 /// Catches exact duplicate ticks (same security_id + timestamp + LTP)
-/// resent by Dhan on WebSocket reconnection.
+/// resent by Groww on WebSocket reconnection.
 ///
 /// False negatives (missed duplicates due to hash collision/eviction) are safe:
 /// QuestDB `DEDUP UPSERT KEYS(ts, security_id)` is the authoritative dedup layer.
@@ -1462,7 +1462,7 @@ pub const MAX_INDICATOR_WARMUP_TICKS: u16 = 30;
 
 /// Maximum number of instruments the indicator engine can track.
 /// Pre-allocated at startup; O(1) index lookup by security_id.
-/// 25,000 covers full Dhan universe (5 connections × 5,000 instruments).
+/// 25,000 covers full Groww universe (5 connections × 5,000 instruments).
 pub const MAX_INDICATOR_INSTRUMENTS: usize = 25_000;
 
 /// Maximum number of strategy FSM instances.
@@ -1597,7 +1597,7 @@ const _: () = assert!(
 
 // ---------------------------------------------------------------------------
 // Compile-Time Assertions — Binary Protocol Offset Chain Verification
-// Source: Dhan API (Python SDK ref) struct.unpack format strings.
+// Source: Groww API (Python SDK ref) struct.unpack format strings.
 // Ensures every offset = previous_offset + previous_field_size.
 // ---------------------------------------------------------------------------
 
@@ -1944,7 +1944,7 @@ mod tests {
 
     #[test]
     fn test_data_api_error_codes_match_annexure_section_11() {
-        // All 12 codes from docs/dhan-ref/08-annexure-enums.md Section 11
+        // All 12 codes from docs/groww-ref/08-annexure-enums.md Section 11
         assert_eq!(DATA_API_INTERNAL_SERVER_ERROR, 800);
         assert_eq!(DATA_API_INSTRUMENTS_EXCEED_LIMIT, 804);
         assert_eq!(DATA_API_EXCEEDED_ACTIVE_CONNECTIONS, 805);
@@ -2208,10 +2208,10 @@ mod tests {
     #[test]
     fn test_ssm_paths_nonempty() {
         assert!(!SSM_SECRET_BASE_PATH.is_empty());
-        assert!(!SSM_DHAN_SERVICE.is_empty());
-        assert!(!DHAN_CLIENT_ID_SECRET.is_empty());
-        assert!(!DHAN_CLIENT_SECRET_SECRET.is_empty());
-        assert!(!DHAN_TOTP_SECRET.is_empty());
+        assert!(!SSM_GROWW_SERVICE.is_empty());
+        assert!(!GROWW_CLIENT_ID_SECRET.is_empty());
+        assert!(!GROWW_CLIENT_SECRET_SECRET.is_empty());
+        assert!(!GROWW_TOTP_SECRET.is_empty());
     }
 
     // --- Market Status Codes ---
@@ -2350,20 +2350,20 @@ mod tests {
     #[test]
     fn test_api_paths_start_with_slash() {
         let paths = [
-            DHAN_GENERATE_TOKEN_PATH,
-            DHAN_RENEW_TOKEN_PATH,
-            DHAN_CHARTS_INTRADAY_PATH,
-            DHAN_CHARTS_HISTORICAL_PATH,
-            DHAN_USER_PROFILE_PATH,
-            DHAN_SET_IP_PATH,
-            DHAN_MODIFY_IP_PATH,
-            DHAN_GET_IP_PATH,
-            DHAN_HOLDINGS_PATH,
-            DHAN_POSITIONS_PATH,
-            DHAN_POSITIONS_CONVERT_PATH,
-            DHAN_MARGIN_CALCULATOR_PATH,
-            DHAN_MARGIN_CALCULATOR_MULTI_PATH,
-            DHAN_FUND_LIMIT_PATH,
+            GROWW_GENERATE_TOKEN_PATH,
+            GROWW_RENEW_TOKEN_PATH,
+            GROWW_CHARTS_INTRADAY_PATH,
+            GROWW_CHARTS_HISTORICAL_PATH,
+            GROWW_USER_PROFILE_PATH,
+            GROWW_SET_IP_PATH,
+            GROWW_MODIFY_IP_PATH,
+            GROWW_GET_IP_PATH,
+            GROWW_HOLDINGS_PATH,
+            GROWW_POSITIONS_PATH,
+            GROWW_POSITIONS_CONVERT_PATH,
+            GROWW_MARGIN_CALCULATOR_PATH,
+            GROWW_MARGIN_CALCULATOR_MULTI_PATH,
+            GROWW_FUND_LIMIT_PATH,
         ];
         for path in paths {
             assert!(

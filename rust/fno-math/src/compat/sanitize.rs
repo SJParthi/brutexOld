@@ -17,7 +17,7 @@
 /// Redacts URL query parameters and known credential patterns from a string.
 ///
 /// Replaces query parameters in URLs (`?key=val&...`) with `?[REDACTED]`.
-/// Also catches standalone `dhanClientId=`, `pin=`, `totp=` patterns
+/// Also catches standalone `growwClientId=`, `pin=`, `totp=` patterns
 /// outside of URLs.
 ///
 /// # Performance
@@ -29,7 +29,7 @@
 /// ```
 /// use fno_math::compat::sanitize::redact_url_params;
 ///
-/// let raw = "error for url (https://auth.dhan.co/app/gen?dhanClientId=123&pin=456)";
+/// let raw = "error for url (https://auth.groww.co/app/gen?growwClientId=123&pin=456)";
 /// let safe = redact_url_params(raw);
 /// assert!(!safe.contains("123"));
 /// assert!(!safe.contains("456"));
@@ -41,7 +41,7 @@ pub fn redact_url_params(input: &str) -> String {
     }
 
     let mut result = redact_urls(input);
-    result = redact_param_value(&result, "dhanClientId=");
+    result = redact_param_value(&result, "growwClientId=");
     result = redact_param_value(&result, "pin=");
     result = redact_param_value(&result, "totp=");
     result
@@ -149,13 +149,13 @@ mod tests {
 
     #[test]
     fn test_url_without_query_params() {
-        let input = "error for url (https://auth.dhan.co/app/generateAccessToken)";
+        let input = "error for url (https://auth.groww.co/app/generateAccessToken)";
         assert_eq!(redact_url_params(input), input);
     }
 
     #[test]
     fn test_url_with_query_params_redacted() {
-        let input = "error sending request for url (https://auth.dhan.co/app/generateAccessToken?dhanClientId=1106656882&pin=785478&totp=782561)";
+        let input = "error sending request for url (https://auth.groww.co/app/generateAccessToken?growwClientId=1106656882&pin=785478&totp=782561)";
         let output = redact_url_params(input);
         assert!(
             !output.contains("1106656882"),
@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn test_exact_reqwest_error_format() {
         // This is the exact format from the Telegram screenshot
-        let input = "generateAccessToken request failed: error sending request for url (https://auth.dhan.co/app/generateAccessToken?dhanClientId=1106656882&pin=785478&totp=772509)";
+        let input = "generateAccessToken request failed: error sending request for url (https://auth.groww.co/app/generateAccessToken?growwClientId=1106656882&pin=785478&totp=772509)";
         let output = redact_url_params(input);
         assert!(!output.contains("1106656882"));
         assert!(!output.contains("785478"));
@@ -215,14 +215,14 @@ mod tests {
     }
 
     #[test]
-    fn test_standalone_dhan_client_id_redacted() {
-        let input = "response contained dhanClientId=1106656882 in body";
+    fn test_standalone_groww_client_id_redacted() {
+        let input = "response contained growwClientId=1106656882 in body";
         let output = redact_url_params(input);
         assert!(
             !output.contains("1106656882"),
             "standalone client ID leaked: {output}"
         );
-        assert!(output.contains("dhanClientId=[REDACTED]"));
+        assert!(output.contains("growwClientId=[REDACTED]"));
     }
 
     #[test]
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_preserves_url_path() {
-        let input = "error for url (https://auth.dhan.co/app/generateAccessToken?dhanClientId=123)";
+        let input = "error for url (https://auth.groww.co/app/generateAccessToken?growwClientId=123)";
         let output = redact_url_params(input);
         assert!(
             output.contains("/app/generateAccessToken"),
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn test_multibyte_utf8_em_dash_does_not_panic() {
         // Exact format from NotificationEvent — contains `—` (em dash, 3 bytes).
-        let input = "attempt 1: Dhan authentication failed: generateAccessToken request failed: error sending request for url (https://auth.dhan.co/app/generateAccessToken?[REDACTED]) — retrying in 0s";
+        let input = "attempt 1: Groww authentication failed: generateAccessToken request failed: error sending request for url (https://auth.groww.co/app/generateAccessToken?[REDACTED]) — retrying in 0s";
         let output = redact_url_params(input);
         assert!(output.contains("—"), "em dash must be preserved: {output}");
         assert!(
@@ -288,13 +288,13 @@ mod tests {
     }
 
     #[test]
-    fn test_dhan_auth_full_error_with_body() {
-        let input = "Dhan authentication failed: generateAccessToken request failed: error sending request for url (https://auth.dhan.co/app/generateAccessToken?dhanClientId=1106656882&pin=785478&totp=772509)";
+    fn test_groww_auth_full_error_with_body() {
+        let input = "Groww authentication failed: generateAccessToken request failed: error sending request for url (https://auth.groww.co/app/generateAccessToken?growwClientId=1106656882&pin=785478&totp=772509)";
         let output = redact_url_params(input);
         assert!(!output.contains("1106656882"));
         assert!(!output.contains("785478"));
         assert!(!output.contains("772509"));
-        assert!(output.contains("Dhan authentication failed"));
+        assert!(output.contains("Groww authentication failed"));
     }
 
     #[test]
@@ -302,7 +302,7 @@ mod tests {
         // Exercises the (Some(h), Some(hs)) branch at line 64 where
         // both http:// and https:// are found in the remaining string.
         let input =
-            "tried http://example.com/api?secret=abc then https://auth.dhan.co/app?token=xyz";
+            "tried http://example.com/api?secret=abc then https://auth.groww.co/app?token=xyz";
         let output = redact_url_params(input);
         assert!(
             !output.contains("secret=abc"),

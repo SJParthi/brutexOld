@@ -194,6 +194,6 @@ NOT part of Track 1; see `docs/TRACK1_BACKTEST_SPEC.md §1` for context.
 
 OR:
 
-**Forward paper trading**: run the top 3 strategies on live Dhan data
+**Forward paper trading**: run the top 3 strategies on live Groww data
 (via WebSocket) for N months, compare paper PnL to backtest projection.
 Out of Track 1 scope; would be Track 2 / Live Track.

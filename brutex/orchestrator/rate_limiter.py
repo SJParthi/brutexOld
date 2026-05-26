@@ -1,7 +1,7 @@
-"""Adaptive token-bucket rate limiter for the Dhan Data API.
+"""Adaptive token-bucket rate limiter for the Groww Data API.
 
-Defaults Dhan-tuned per ``CLAUDE.md §2 rule 6`` + §6 (DEC-P0-030, PR #50c):
-Dhan Data API caps at 5 req/s + 100,000/day; effective adapter cap is
+Defaults Groww-tuned per ``CLAUDE.md §2 rule 6`` + §6 (DEC-P0-030, PR #50c):
+Groww Data API caps at 5 req/s + 100,000/day; effective adapter cap is
 3 r/s (5 × 0.6 safety factor); downshift to 1.5 r/s on consecutive 429s.
 Integrated with :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`
 for the per-day 100K ceiling.
@@ -9,10 +9,10 @@ for the per-day 100K ceiling.
 ## Contract
 
 * **Start at ``DEFAULT_INITIAL_RPS`` req/s** (= 3.0; the
-  ``BRUTEX_OHLC_RATE_LIMIT_RPS`` env-var default — 60% of Dhan's
+  ``BRUTEX_OHLC_RATE_LIMIT_RPS`` env-var default — 60% of Groww's
   verified 5 req/s data-API cap per CLAUDE.md §6).
 * **Auto-downshift to ``DEFAULT_DOWNSHIFT_RPS`` req/s** (= 1.5) after
-  ``DEFAULT_DOWNSHIFT_TRIGGER`` (= 3) consecutive 429 / Dhan-rate-limit
+  ``DEFAULT_DOWNSHIFT_TRIGGER`` (= 3) consecutive 429 / Groww-rate-limit
   exception hits inside ``DEFAULT_DOWNSHIFT_WINDOW`` (= 60) seconds.
 * **Emit a ``rate_limit.downshift`` Telegram event** when downshifting.
 * **Upshift back to ``DEFAULT_INITIAL_RPS``** after
@@ -66,7 +66,7 @@ from brutex.models import BruteXError
 # Constants (tuned per FR-ING-017)
 # ────────────────────────────────────────────────────────────────────────
 
-#: Default steady-state rate (req/s). 60% of Dhan's verified 5 r/s data-API
+#: Default steady-state rate (req/s). 60% of Groww's verified 5 r/s data-API
 #: cap per CLAUDE.md §2 rule 6 + §6. Was 15.0 (calibrated for the deleted
 #: broker's 25 r/s); retuned to 3.0 in DEC-P0-030 (PR #50c).
 DEFAULT_INITIAL_RPS: Final[float] = 3.0
@@ -92,12 +92,13 @@ DEFAULT_UPSHIFT_RECOVERY: Final[float] = 120.0
 #: dropping below the steady-state rate.
 DEFAULT_BURST: Final[int] = 5
 
-#: Dhan's verified per-second hard cap (CLAUDE.md §2 rule 6 + §6). Used as
+#: Legacy hard cap (5 r/s) carried over from the pre-pivot adapter. Kept as
 #: the defense-in-depth ceiling in :meth:`AdaptiveTokenBucket.__post_init__`
-#: per DEC-P0-031 (PR #50d, Agent 2 §D). ``initial_rps > _DHAN_HARD_CAP_RPS``
+#: per DEC-P0-031 (PR #50d, Agent 2 §D). ``initial_rps > _LEGACY_HARD_CAP_RPS``
 #: raises :class:`RateLimiterError` so direct-kwarg construction can't
-#: bypass the env-layer clamp.
-_DHAN_HARD_CAP_RPS: Final[float] = 5.0
+#: bypass the env-layer clamp. The current Groww adapter ships its own
+#: adaptive [4..8] r/s state machine — see `docs/TRACK1_GROWW_ADAPTER.md §5`.
+_LEGACY_HARD_CAP_RPS: Final[float] = 5.0
 
 #: Safety cap on the refill-loop inside :meth:`AdaptiveTokenBucket.acquire`.
 #: Under injected fake clocks, round-off errors can occasionally leave
@@ -145,10 +146,10 @@ class RateLimiterEvent:
 class AdaptiveTokenBucket:
     """Thread-safe adaptive token bucket.
 
-    Create one instance per Dhan adapter. Workers call
+    Create one instance per Groww adapter. Workers call
     :meth:`acquire` before every API call and :meth:`record_rate_limit_hit`
-    if the call returned a Dhan 429 / rate-limit response (codes 805 or
-    DH-904 per the Dhan API error catalog).
+    if the call returned a Groww 429 / rate-limit response (codes 805 or
+    DH-904 per the Groww API error catalog).
 
     Parameters
     ----------
@@ -201,13 +202,13 @@ class AdaptiveTokenBucket:
     def __post_init__(self) -> None:
         if self.initial_rps <= 0:
             raise RateLimiterError(f"initial_rps must be > 0, got {self.initial_rps}")
-        # NOTE: Defense-in-depth clamp `initial_rps <= _DHAN_HARD_CAP_RPS`
+        # NOTE: Defense-in-depth clamp `initial_rps <= _LEGACY_HARD_CAP_RPS`
         # (Agent 2 §D from PR #50d pre-impl review) is intentionally
         # DEFERRED to PR #51. Today there are ZERO production callers
         # of AdaptiveTokenBucket (only test fixtures, per Agent 4
         # PR #50c verification). The env-layer clamp in
         # brutex/config/runtime.py protects the env-var path. When
-        # PR #51 ships the first production caller (Phase 2 Dhan
+        # PR #51 ships the first production caller (Phase 2 Groww
         # adapter), the __post_init__ clamp will land alongside it.
         if self.downshift_rps <= 0:
             raise RateLimiterError(f"downshift_rps must be > 0, got {self.downshift_rps}")

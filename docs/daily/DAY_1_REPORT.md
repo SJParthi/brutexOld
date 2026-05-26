@@ -72,7 +72,7 @@ against operator's AmiBroker screenshot.
 |---|---|---|---|
 | `brutex/calendars/nse.py` | 280 | 35 ✅ | Done |
 | `brutex/indicators/fib_levels.py` | 175 | 17 ✅ | Done |
-| Placeholder skeletons (`backtest`, `metrics`, `ranking`, `sprint`, `visualization`, `adapters/dhan`) | docstring stubs | — | Ready to fill |
+| Placeholder skeletons (`backtest`, `metrics`, `ranking`, `sprint`, `visualization`, `adapters/groww`) | docstring stubs | — | Ready to fill |
 | **Total tests passing** | **52** | | **in 130 ms** |
 
 ### What's still pending (Hours 4-20)
@@ -83,16 +83,16 @@ against operator's AmiBroker screenshot.
 | 4-6 | `brutex/indicators/ema.py` (EMA 20, EMA 200) | ⬜ |
 | 4-6 | `brutex/data/resampler.py` (1m → 21 TFs) | ⬜ |
 | 6-10 | `brutex/indicators/conditions.py` (52 vocab atoms) | ⬜ |
-| 4-6 | `brutex/adapters/dhan/` (HTTP client + token + auto-renew) | ⏸️ pending Dhan token |
-| 4-6 | Real 5y Dhan data fetched + Parquet stored | ⏸️ pending Dhan token |
+| 4-6 | `brutex/adapters/groww/` (HTTP client + token + auto-renew) | ⏸️ pending Groww token |
+| 4-6 | Real 5y Groww data fetched + Parquet stored | ⏸️ pending Groww token |
 | 10-14 | `brutex/backtest/engine.py` (Polars vectorized) | ⬜ |
-| 14-16 | Sweep run (~12.6M trials, ~30-60 min wall) | ⏸️ pending Dhan data |
+| 14-16 | Sweep run (~12.6M trials, ~30-60 min wall) | ⏸️ pending Groww data |
 | 16-18 | `brutex/metrics/calculator.py` (30+ metrics) | ⬜ |
 | 18-20 | `brutex/ranking/composite.py` + PNG charts | ⬜ |
 
 ## What needs operator action
 
-1. ⬜ **Paste Dhan access token** into `~/.brutex/dhan/access_token.json` (~1 min)
+1. ⬜ **Paste Groww access token** into `~/.brutex/groww/access_token.json` (~1 min)
 2. ⬜ **Plug in 8 TB external SSD** at `/Volumes/QuantData` (~30 sec)
 3. ⬜ (Optional) Confirm aiogram 3.x for Telegram (vs python-telegram-bot)
 4. ⬜ (Optional) Confirm FastAPI + Jinja2 + HTMX for Day 1 dashboard

@@ -2,16 +2,16 @@
 
 > **Status:** Locked 2026-05-15 after a 4-agent verification pass.
 > Companion to `TRACK1_BACKTEST_SPEC.md`, `TRACK1_PHASE_PLAN.md`.
-> Implemented in Phase 2 of the build plan (Dhan Adapter + Vocabulary).
+> Implemented in Phase 2 of the build plan (Groww Adapter + Vocabulary).
 >
 > Verified by:
-> - Agent A: India VIX availability + identifiers (from Dhan master CSV)
+> - Agent A: India VIX availability + identifiers (from Groww master CSV)
 > - Agent B: existing storage code audit (`/brutex/data/*.py`)
 > - Agent C: incremental pipeline + state machine design
 > - Agent D: observability + audit layer design
 
 This document defines the end-to-end data ingest pipeline for Track 1:
-fetch raw OHLCV bars from Dhan, resample to 21 timeframes, persist to
+fetch raw OHLCV bars from Groww, resample to 21 timeframes, persist to
 a Parquet+DuckDB+LMDB lake with full O(1) guarantees, hash-chained
 audit, and structlog-based observability.
 
@@ -25,12 +25,12 @@ audit, and structlog-based observability.
 | **Brute-forced (in vocabulary)** | 3: NIFTY 50, BANKNIFTY, SENSEX |
 | **Reference-only** | 1: **India VIX** (context columns only, never in patterns) |
 | **Range** | Rolling: `2021-01-01 → today` |
-| **Native fetched** | 1-min (intraday) + 1-day (historical) from Dhan |
+| **Native fetched** | 1-min (intraday) + 1-day (historical) from Groww |
 | **Resampled** | 19 derived intraday TFs from 1m base |
 | **Total TFs persisted** | **21** (= 1 base + 19 derived + 1 daily) per instrument |
 | **Tradability** | None (signal-only research) |
 | **Brokerage/STT** | NONE (spot indexes don't trade) |
-| **Dhan Data API rate limit** | **5 req/s + 100,000/day** (verified) |
+| **Groww Data API rate limit** | **5 req/s + 100,000/day** (verified) |
 | **Adapter effective cap** | 3 r/s (5 × 0.6 safety factor) |
 
 **Unfrozen from prior spec:**
@@ -42,7 +42,7 @@ See `MIGRATION.md §6` for the ledger entries.
 
 ---
 
-## 2. The 4 Instruments — Verified from Dhan Master CSV
+## 2. The 4 Instruments — Verified from Groww Master CSV
 
 All 4 share the same code path (same endpoints, same segment family,
 same chunking). Adding a 5th later = 1 line in
@@ -52,18 +52,18 @@ same chunking). Adding a 5th later = 1 line in
 |---|---|---|---|---|---|---|---|
 | 1 | `NIFTY 50` | NIFTY 50 | NSE | `IDX_I` | `INDEX` | 1996 | ✅ |
 | 2 | `NIFTY BANK` | BANKNIFTY | NSE | `IDX_I` | `INDEX` | 2003 | ✅ |
-| 3 | `SENSEX` | BSE SENSEX | BSE | `IDX_I` (single Index segment per Dhan annexure) | `INDEX` | 1986 | ✅ |
+| 3 | `SENSEX` | BSE SENSEX | BSE | `IDX_I` (single Index segment per Groww annexure) | `INDEX` | 1986 | ✅ |
 | 4 | `INDIA VIX` | India VIX | NSE | `IDX_I` | `INDEX` | 2008 | ✅ |
 
 ### India VIX specifics (Agent A research)
 
 | Attribute | Value | Source |
 |---|---|---|
-| `SEM_TRADING_SYMBOL` (master CSV) | `INDIA VIX` (with space) | marketcalls/ExpiryFlow mirror of Dhan CSV |
+| `SEM_TRADING_SYMBOL` (master CSV) | `INDIA VIX` (with space) | marketcalls/ExpiryFlow mirror of Groww CSV |
 | `SEM_CUSTOM_SYMBOL` | `India VIX` | same |
 | `SEM_INSTRUMENT_NAME` | `INDEX` | same |
-| `securityId` | `21` (lookup-at-runtime; one community source said `26`) | TradeHull/Dhan-Tradehull, ysrastogi/trado |
-| `exchangeSegment` (API) | `IDX_I` | dhan-oss/DhanHQ-py official SDK |
+| `securityId` | `21` (lookup-at-runtime; one community source said `26`) | TradeHull/Groww-Tradehull, ysrastogi/trado |
+| `exchangeSegment` (API) | `IDX_I` | groww-oss/Groww-py official SDK |
 | Update cadence | every **15 seconds** (NOT tick-by-tick) | NSE official |
 | Calculated from | NIFTY 50 option mid-quotes | NSE / Business Standard |
 | BSE equivalent | NONE — NSE only | confirmed |
@@ -98,9 +98,9 @@ resampled timeframes.
 
 **Total: 21 TFs** = 1 base (1m) + 14 (Group A) + 5 (Group B) + 1 daily.
 
-### 3.3 Why not Dhan's native 5/15/60-minute intervals?
+### 3.3 Why not Groww's native 5/15/60-minute intervals?
 
-Dhan natively supports 1, 5, 15, 25, 60 minute and 1-day. Track 1
+Groww natively supports 1, 5, 15, 25, 60 minute and 1-day. Track 1
 fetches **only 1m** and resamples to all derived TFs from the 1m base.
 This guarantees:
 
@@ -187,11 +187,11 @@ bar_hash = sha256(
     low_paisa_i64        ‖
     close_paisa_i64      ‖
     volume_i64           ‖  0 (always for indexes)
-    data_source_version     "dhan-v2-2026-05-15"
+    data_source_version     "groww-v2-2026-05-15"
 )
 ```
 
-**Property:** same bar from Dhan twice → same hash. Reading + re-writing
+**Property:** same bar from Groww twice → same hash. Reading + re-writing
 the same chunk produces bit-identical Parquet bytes (P-19).
 
 ---
@@ -250,12 +250,12 @@ the same chunk produces bit-identical Parquet bytes (P-19).
 
 ## 5A. Authentication (Manual Paste + Auto-Renew)
 
-Track 1 uses Dhan's **individual trader** access token flow — simplest
+Track 1 uses Groww's **individual trader** access token flow — simplest
 possible first-run experience, automated for the steady state.
 
 ### 5A.1 Token storage
 
-File: `~/.brutex/dhan/access_token.json` (gitignored)
+File: `~/.brutex/groww/access_token.json` (gitignored)
 
 ```json
 {
@@ -268,19 +268,19 @@ File: `~/.brutex/dhan/access_token.json` (gitignored)
 
 Path resolution order (Phase 2 adapter):
 
-1. `$BRUTEX_DHAN_TOKEN_PATH` if set
-2. `~/.brutex/dhan/access_token.json` (default)
+1. `$BRUTEX_GROWW_TOKEN_PATH` if set
+2. `~/.brutex/groww/access_token.json` (default)
 3. ERROR + helpful setup instructions if neither exists
 
 ### 5A.2 First-time setup (manual, once)
 
 ```
    ┌──────────────────────────────────────────────────────────────┐
-   │  1. Login to web.dhan.co                                     │
-   │  2. My Profile → Access DhanHQ APIs                          │
+   │  1. Login to web.groww.co                                     │
+   │  2. My Profile → Access Groww APIs                          │
    │  3. Generate Access Token (24h validity)                     │
    │  4. Copy Client ID + Access Token + Expiry Time              │
-   │  5. Paste into ~/.brutex/dhan/access_token.json              │
+   │  5. Paste into ~/.brutex/groww/access_token.json              │
    │  6. Run `brutex pull` — adapter reads + uses                 │
    └──────────────────────────────────────────────────────────────┘
 ```
@@ -322,20 +322,20 @@ Path resolution order (Phase 2 adapter):
    └──────────────────────────────────────────────────────────────┘
 ```
 
-### 5A.4 Renewal API call (verified from Dhan docs)
+### 5A.4 Renewal API call (verified from Groww docs)
 
 ```
-POST https://api.dhan.co/v2/RenewToken
+POST https://api.groww.co/v2/RenewToken
 Headers:
   access-token: {current JWT}
-  dhanClientId: {client_id}
+  growwClientId: {client_id}
 Body: (none)
 
 Response 200:
 {
-  "dhanClientId":   "1000000401",
-  "dhanClientName": "JOHN DOE",
-  "dhanClientUcc":  "ABCD12345E",
+  "growwClientId":   "1000000401",
+  "growwClientName": "JOHN DOE",
+  "growwClientUcc":  "ABCD12345E",
   "accessToken":    "<new JWT>",
   "expiryTime":     "2026-05-17T15:00:00.000"
 }
@@ -349,41 +349,41 @@ Response error:
 ### 5A.5 Pseudocode
 
 ```python
-# brutex/adapters/dhan/auth.py (Phase 2 deliverable)
+# brutex/adapters/groww/auth.py (Phase 2 deliverable)
 
 @dataclass(frozen=True, slots=True)
-class DhanCredentials:
+class GrowwCredentials:
     client_id: str
     access_token: str
     expiry_time: datetime  # UTC
     last_renewed_at: datetime
 
-def load_credentials(path: Path = DEFAULT_TOKEN_PATH) -> DhanCredentials:
+def load_credentials(path: Path = DEFAULT_TOKEN_PATH) -> GrowwCredentials:
     """Read credentials from JSON. Raises if file missing or malformed."""
     if not path.exists():
         raise AuthConfigError(
-            f"No Dhan credentials at {path}. "
+            f"No Groww credentials at {path}. "
             f"Run `brutex auth setup` for instructions."
         )
     data = json.loads(path.read_text())
-    return DhanCredentials(
+    return GrowwCredentials(
         client_id=data["client_id"],
         access_token=data["access_token"],
         expiry_time=parse_iso8601(data["expiry_time"]),
         last_renewed_at=parse_iso8601(data["last_renewed_at"]),
     )
 
-def needs_renewal(creds: DhanCredentials, *, threshold_minutes: int = 25) -> bool:
+def needs_renewal(creds: GrowwCredentials, *, threshold_minutes: int = 25) -> bool:
     """True if token expires within `threshold_minutes`."""
     return creds.expiry_time - utc_now() < timedelta(minutes=threshold_minutes)
 
-def renew_token(creds: DhanCredentials) -> DhanCredentials:
+def renew_token(creds: GrowwCredentials) -> GrowwCredentials:
     """Call /v2/RenewToken and return fresh credentials."""
     response = httpx.post(
-        "https://api.dhan.co/v2/RenewToken",
+        "https://api.groww.co/v2/RenewToken",
         headers={
             "access-token": creds.access_token,
-            "dhanClientId": creds.client_id,
+            "growwClientId": creds.client_id,
         },
         timeout=10.0,
     )
@@ -392,17 +392,17 @@ def renew_token(creds: DhanCredentials) -> DhanCredentials:
                      status=response.status_code, body=response.text[:500])
         raise AuthRenewalError(
             f"Renewal failed (HTTP {response.status_code}). "
-            f"You must manually regenerate at web.dhan.co."
+            f"You must manually regenerate at web.groww.co."
         )
     body = response.json()
-    return DhanCredentials(
-        client_id=body["dhanClientId"],
+    return GrowwCredentials(
+        client_id=body["growwClientId"],
         access_token=body["accessToken"],
         expiry_time=parse_iso8601(body["expiryTime"]),
         last_renewed_at=utc_now(),
     )
 
-def persist_atomically(creds: DhanCredentials, path: Path) -> None:
+def persist_atomically(creds: GrowwCredentials, path: Path) -> None:
     """Tempfile + rename — never leaves a half-written file."""
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps({
@@ -440,14 +440,14 @@ Renewal adds one event type to the chain:
 
 | Item | File | Status |
 |---|---|---|
-| `DhanCredentials` dataclass | `brutex/adapters/dhan/auth.py` | ⏳ |
-| `load_credentials()` + path resolution | `brutex/adapters/dhan/auth.py` | ⏳ |
-| `needs_renewal()` + `renew_token()` | `brutex/adapters/dhan/auth.py` | ⏳ |
-| `persist_atomically()` (tempfile + rename) | `brutex/adapters/dhan/auth.py` | ⏳ |
-| `get_or_renew()` hot-path helper | `brutex/adapters/dhan/auth.py` | ⏳ |
+| `GrowwCredentials` dataclass | `brutex/adapters/groww/auth.py` | ⏳ |
+| `load_credentials()` + path resolution | `brutex/adapters/groww/auth.py` | ⏳ |
+| `needs_renewal()` + `renew_token()` | `brutex/adapters/groww/auth.py` | ⏳ |
+| `persist_atomically()` (tempfile + rename) | `brutex/adapters/groww/auth.py` | ⏳ |
+| `get_or_renew()` hot-path helper | `brutex/adapters/groww/auth.py` | ⏳ |
 | `brutex auth setup` CLI subcommand with setup instructions | `brutex/cli.py` | ⏳ |
 | `brutex auth status` CLI subcommand (show expiry) | `brutex/cli.py` | ⏳ |
-| Unit tests for renewal logic | `tests/unit/test_dhan_auth.py` (new) | ⏳ |
+| Unit tests for renewal logic | `tests/unit/test_groww_auth.py` (new) | ⏳ |
 
 ---
 
@@ -500,7 +500,7 @@ Proven by the audit-log replay oracle test
 | **L1: Watermark check** | "Already fetched this window?" | DuckDB `WHERE inst=? AND tf=?` → if `last_ts ≥ window.end: skip` | ~10 µs |
 | **L2: Bloom filter** | "Probably seen this chunk-hash?" | `sha256(inst‖tf‖window)` → Bloom probe | ~5 ns |
 | **L3: LMDB confirm** | "Definitely seen this chunk?" (resolves Bloom FP) | LMDB B+tree get | ~50 µs |
-| **L4: Per-bar bar_hash** | "Has Dhan mutated this bar?" | compare new bar_hash vs stored bar_hash | O(1) per bar |
+| **L4: Per-bar bar_hash** | "Has Groww mutated this bar?" | compare new bar_hash vs stored bar_hash | O(1) per bar |
 
 ```
    L1 Watermark            L2 Bloom               L3 LMDB
@@ -569,7 +569,7 @@ for each of the following. Failure = CI red.
 |---|---|---|
 | `RUN_START` | FSM enters RUNNING | run_id, host, instruments, start_ts |
 | `PLAN_GAPS` | gap computation done | gaps[] per (inst, tf), total_chunks |
-| `CHUNK_START` | before Dhan POST | run_id, inst, tf, window |
+| `CHUNK_START` | before Groww POST | run_id, inst, tf, window |
 | `CHUNK_DONE` | after Parquet write + watermark advance | run_id, inst, tf, bars, first/last_ts, chunk_sha |
 | `CHUNK_FAIL` | rate-limit exhaust or validation fail | run_id, error, retries |
 | `WRITE_DONE` | per partition file written | path, raw_hash, row_count |
@@ -603,7 +603,7 @@ later-phase enhancement.
 | WARN | `rate_limit.downshift` | 3 retries in 60s | rps, cap, retries |
 | WARN | `gap.partial` | 1-4 missing 1m bars | inst, tf, missing, window |
 | WARN | `worker.hung` | no heartbeat >120s | worker_id, task |
-| ERROR | `dhan.api_down` | 3+ consecutive 5xx | code, endpoint, retries |
+| ERROR | `groww.api_down` | 3+ consecutive 5xx | code, endpoint, retries |
 | ERROR | `validate.fail` | bad envelope | inst, chunk, error_code |
 | ERROR | `quarantine.new` | chunk quarantined | inst, reason, count |
 | CRITICAL | `audit.chain_break` | SHA verifier mismatch | line, expected, got |
@@ -665,16 +665,16 @@ later-phase enhancement.
 
 ---
 
-## 10A. Dhan API Error Code Map (verified 2026-05-15 from annexure)
+## 10A. Groww API Error Code Map (verified 2026-05-15 from annexure)
 
-Authoritative mapping from Dhan's published error codes to BruteX
+Authoritative mapping from Groww's published error codes to BruteX
 orchestrator outcomes. Used by `brutex/orchestrator/retry.py` (the
 `BROKER_EXCEPTION_CLASSIFICATION` dict) and by the rate-limit
 downshift logic.
 
 ### Data API Errors (we will see these most often)
 
-| Dhan Code | Meaning | BruteX Outcome | Action |
+| Groww Code | Meaning | BruteX Outcome | Action |
 |---|---|---|---|
 | `800` | Internal Server Error | `GENERIC_API_ERROR` | retry with backoff (3 attempts) |
 | `804` | Requested instruments exceeds limit | `FATAL` | code bug — chunk smaller |
@@ -686,12 +686,12 @@ downshift logic.
 | `810` | Client ID invalid | `AUTH_FAILED` | quarantine + alert |
 | `811` | Invalid Expiry Date | `BAD_REQUEST` | quarantine (not used for index spot) |
 | `812` | Invalid Date Format | `BAD_REQUEST` | quarantine + alert (code bug) |
-| `813` | Invalid SecurityId | `BAD_REQUEST` | quarantine + alert (re-verify against `web.dhan.co/Charts?...&secid=X` — code fix to constants.py needed) |
+| `813` | Invalid SecurityId | `BAD_REQUEST` | quarantine + alert (re-verify against `web.groww.co/Charts?...&secid=X` — code fix to constants.py needed) |
 | `814` | Invalid Request | `BAD_REQUEST` | quarantine + alert |
 
 ### Trading API Errors (may surface on mis-call)
 
-| Dhan Code | Meaning | BruteX Outcome | Action |
+| Groww Code | Meaning | BruteX Outcome | Action |
 |---|---|---|---|
 | `DH-901` | Invalid Authentication | `AUTH_FAILED` | quarantine + alert |
 | `DH-902` | No Data API subscription | `FATAL` | operator must subscribe |
@@ -707,13 +707,13 @@ downshift logic.
 ### Retry / Outcome Routing
 
 ```
-HTTP 4xx, Dhan code in {807, 808, 809, 810, DH-901, DH-902, DH-903} → AUTH_FAILED → quarantine + CRITICAL alert
-HTTP 4xx, Dhan code in {811, 812, 813, 814, DH-905, DH-906}         → BAD_REQUEST → quarantine + ERROR alert
-HTTP 4xx, Dhan code in {804, 806}                                    → FATAL      → halt run + CRITICAL alert
-HTTP 4xx, Dhan code in {805, DH-904}                                 → RATE_LIMIT → downshift bucket, retry up to 3x with backoff
-HTTP 5xx OR Dhan code in {800, DH-908, DH-910}                       → GENERIC_API_ERROR → retry with exp backoff (3 attempts)
-Network error (timeout, DNS, connection)  OR Dhan code DH-909        → TIMEOUT    → retry with backoff (3 attempts)
-Dhan code DH-907                                                     → NO_DATA    → advance watermark to chunk_end, do NOT retry
+HTTP 4xx, Groww code in {807, 808, 809, 810, DH-901, DH-902, DH-903} → AUTH_FAILED → quarantine + CRITICAL alert
+HTTP 4xx, Groww code in {811, 812, 813, 814, DH-905, DH-906}         → BAD_REQUEST → quarantine + ERROR alert
+HTTP 4xx, Groww code in {804, 806}                                    → FATAL      → halt run + CRITICAL alert
+HTTP 4xx, Groww code in {805, DH-904}                                 → RATE_LIMIT → downshift bucket, retry up to 3x with backoff
+HTTP 5xx OR Groww code in {800, DH-908, DH-910}                       → GENERIC_API_ERROR → retry with exp backoff (3 attempts)
+Network error (timeout, DNS, connection)  OR Groww code DH-909        → TIMEOUT    → retry with backoff (3 attempts)
+Groww code DH-907                                                     → NO_DATA    → advance watermark to chunk_end, do NOT retry
 ```
 
 ### Exchange Segment Constants (verified)
@@ -749,16 +749,16 @@ def pull_chunk(inst: InstrumentConfig, tf: Literal["1m","1d"],
     audit.append("CHUNK_START", subject=inst.id+":"+tf, payload={"window": window})
     bucket.acquire()  # 10 r/s cap
     try:
-        raw = dhan.post(
+        raw = groww.post(
             "/v2/charts/intraday" if tf == "1m" else "/v2/charts/historical",
             body={"securityId": inst.security_id, "exchangeSegment": inst.segment,
                   "instrument": "INDEX", "fromDate": window[0], "toDate": window[1],
                   "interval": "1" if tf == "1m" else None})
     except RateLimitErr as e:    bucket.downshift(); raise Retryable(e)
     except TimeoutErr as e:                          raise Retryable(e)
-    except (BadRequest, AuthFail) as e: log.error("dhan.api_down", error=e); raise Fatal(e)
+    except (BadRequest, AuthFail) as e: log.error("groww.api_down", error=e); raise Fatal(e)
 
-    bars = parse_dhan_ohlc(raw, tf, native_tz="Asia/Kolkata")
+    bars = parse_groww_ohlc(raw, tf, native_tz="Asia/Kolkata")
     assert_sorted_ascending(bars)
     assert_no_duplicates(bars, key="ts")
     bars = drop_pre_open(bars)
@@ -825,7 +825,7 @@ def advance_watermark(inst, tf, last_bar, chunk_sha):
                              (inst.id, tf)).fetchone()
         if cur is not None and cur[0] >= last_bar.timestamp:
             # Re-run with same data — must be identical
-            assert cur[1] == new_hash, "Dhan bar mutated; quarantine + halt"
+            assert cur[1] == new_hash, "Groww bar mutated; quarantine + halt"
             return  # idempotent no-op
         duckdb.execute("INSERT OR REPLACE INTO watermarks VALUES (?,?,?,?,?,?,?)",
                        (inst.id, tf, last_bar.timestamp, new_hash, chunk_sha,
@@ -859,19 +859,19 @@ def recover(run_id: str):
 
 ## 12. Phase 2 Implementation Checklist
 
-When Phase 2 (Dhan Adapter + Vocabulary) lands, this design becomes
+When Phase 2 (Groww Adapter + Vocabulary) lands, this design becomes
 concrete. Tracking checklist:
 
 | Item | File | Status |
 |---|---|---|
 | `brutex/config/instruments.toml` (dynamic config) | new | ⏳ |
-| `brutex/adapters/dhan/client.py` | new | ⏳ |
-| `brutex/adapters/dhan/constants.py` — 4 hardcoded tuples (NIFTY=13, BANKNIFTY=25, SENSEX=51, INDIAVIX=21; all `IDX_I` + `INDEX`) | new | ⏳ |
-| ~~`brutex/adapters/dhan/instruments.py` (master CSV resolver)~~ — **dropped per 2026-05-15 simplification (4-instrument universe is static)** | — | ❌ not built |
-| `brutex/adapters/dhan/intraday.py` | new | ⏳ |
-| `brutex/adapters/dhan/historical.py` | new | ⏳ |
+| `brutex/adapters/groww/client.py` | new | ⏳ |
+| `brutex/adapters/groww/constants.py` — 4 hardcoded tuples (NIFTY=13, BANKNIFTY=25, SENSEX=51, INDIAVIX=21; all `IDX_I` + `INDEX`) | new | ⏳ |
+| ~~`brutex/adapters/groww/instruments.py` (master CSV resolver)~~ — **dropped per 2026-05-15 simplification (4-instrument universe is static)** | — | ❌ not built |
+| `brutex/adapters/groww/intraday.py` | new | ⏳ |
+| `brutex/adapters/groww/historical.py` | new | ⏳ |
 | `brutex/data/watermark.py` (new DuckDB table) | new | ⏳ |
-| `brutex/data/parser_dhan.py` (replaces Dhan parser) | new | ⏳ |
+| `brutex/data/parser_groww.py` (replaces Groww parser) | new | ⏳ |
 | `brutex/data/partition.py` — extend `VALID_INTERVALS` to 21 TFs | edit | ⏳ |
 | `brutex/data/partition.py` — add `IDX_I` to `VALID_SEGMENTS` (single Index segment for all 4 instruments) | edit | ⏳ |
 | `brutex/feed/resampler.py` — 09:15 IST anchor + 19 TFs | edit | ⏳ |
@@ -914,5 +914,5 @@ The 24 property invariants are catalogued in
 | 77 | Bar identity = sha256(inst, tf, ts, OHLC paisa, vol, source_version) |
 | 78 | Telegram delivery deferred (structlog + dashboard primary for now) |
 | 79 | 4-layer dedup defence (Watermark → Bloom → LMDB → bar_hash) |
-| 80 | All `INDEX`-type instruments use `IDX_I` — the single Index segment in Dhan's annexure (no separate BSE_I) |
+| 80 | All `INDEX`-type instruments use `IDX_I` — the single Index segment in Groww's annexure (no separate BSE_I) |
 

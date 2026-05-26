@@ -7,7 +7,7 @@ Verify primary-source citations marked UNVERIFIED before code-lock.
 simulator. Covers SEBI position limits, margin requirements, tail-risk
 controls, broker auto-square-off behavior, expiry-day rules, and circuit
 breakers. Applies to retail single-client trading of index options on
-NIFTY 50, BANKNIFTY, and SENSEX under Dhan (primary) or Zerodha
+NIFTY 50, BANKNIFTY, and SENSEX under Groww (primary) or Zerodha
 (fallback comparison).
 
 **Out of scope:**
@@ -70,7 +70,7 @@ ban list mechanism. Confirmed via NSE clearing rules.
 
 ### 2.1 Margin stack composition
 
-For any short index option position, Dhan reserves:
+For any short index option position, Groww reserves:
 
 1. **SPAN margin** — worst-case 1-day risk per SPAN methodology, 16
    scenario array, recalibrated 6× intraday by the exchange.
@@ -136,7 +136,7 @@ overnight, across a weekend, or held to expiry under any circumstances.
 
 ### 2A.2 Product type: MIS only
 
-Track 2 simulates **Dhan MIS** (Margin Intraday Square-off) only.
+Track 2 simulates **Groww MIS** (Margin Intraday Square-off) only.
 NRML (Normal / Carry-Forward) product type is NEVER used.
 
 | Product | Used in Track 2? | Reason |
@@ -365,13 +365,13 @@ Reject any signal whose target strike fails either:
 
 2. **Intra-bar range proxy ≤ 5% of close** as a spread surrogate
    (DEC-RISK-014, was "spread > 5% of premium").
-   - Previous spec required bid-ask spread data; Dhan rolling-option
+   - Previous spec required bid-ask spread data; Groww rolling-option
      API does not return it.
    - Replacement proxy: `(bar.high - bar.low) / bar.close ≤ 0.05`
      at the entry bar. A wide intra-bar range correlates with wide
      spreads; an honest proxy from available data.
 
-Both fields are computed from Dhan-fetched OHLC+OI per-minute. They
+Both fields are computed from Groww-fetched OHLC+OI per-minute. They
 appear in the Track 1 vocabulary appendix as `oi_at_entry`,
 `oi_rolling_30m_at_entry`, and `intra_bar_range_pct_at_entry`.
 
@@ -389,24 +389,24 @@ risk/reward becomes asymmetric and liquidity collapses.
 
 ## 5. Broker Auto-Square-Off Behavior
 
-Track 2 simulates Dhan as primary and uses Zerodha as comparison sanity-check.
+Track 2 simulates Groww as primary and uses Zerodha as comparison sanity-check.
 
 | Broker | Product | Auto-SQ time IST | Per-order charge |
 |---|---|---|---|
-| Dhan | MIS (intraday F&O) | 15:20 (admin SQ starts 15:19 NSE / 15:18 BSE) | ₹20 + 18% GST |
-| Dhan | NRML | no auto-SQ; held to expiry | n/a |
+| Groww | MIS (intraday F&O) | 15:20 (admin SQ starts 15:19 NSE / 15:18 BSE) | ₹20 + 18% GST |
+| Groww | NRML | no auto-SQ; held to expiry | n/a |
 | Zerodha | MIS (F&O) | 15:26 (revised 2025; was 15:25 pre-revision) | ₹50 + 18% GST |
 | Zerodha | NRML | no auto-SQ | n/a |
 
-### 5.1 Dhan margin-shortfall auto-close
+### 5.1 Groww margin-shortfall auto-close
 
-Dhan auto-closes positions when margin shortfall > ₹5,000 OR
-mark-to-market risk-of-shortfall is detected. Source: dhan.co/risk-management-policy.
+Groww auto-closes positions when margin shortfall > ₹5,000 OR
+mark-to-market risk-of-shortfall is detected. Source: groww.co/risk-management-policy.
 
 ### 5.2 Implication for Track 1's forced-exit 15:20 lock
 
 Track 1 rule §7 mandates forced exit at 15:20 IST. This aligns
-perfectly with Dhan MIS auto-SQ. For Zerodha MIS, it is conservative
+perfectly with Groww MIS auto-SQ. For Zerodha MIS, it is conservative
 (6 minutes earlier than Zerodha's 15:26 auto-SQ). Backtest must use
 15:20 strict so signals translate cleanly across brokers.
 
@@ -515,12 +515,12 @@ The following risk-management decisions must be logged in
 | DEC-RISK-005 | Full Kelly REJECTED; only half/quarter Kelly | IV estimation error |
 | DEC-RISK-006 | Liquidity floor: OI ≥ 10,000 AND spread ≤ 5% premium | exit-cost protection |
 | DEC-RISK-007 | Gap-down stress: −3%, −6%, −10% mandatory | tail-event sizing |
-| DEC-RISK-008 | Forced exit 15:20 strict (Dhan MIS aligned) | broker portability |
+| DEC-RISK-008 | Forced exit 15:20 strict (Groww MIS aligned) | broker portability |
 | DEC-RISK-009 | Position sizing in FutEq from 2025-10-01 | SEBI rule |
 | DEC-RISK-010 | Circuit-triggered close ≠ forced 15:20 exit | audit distinction |
 | DEC-RISK-011 | INTRADAY ONLY: MIS, NO NRML, NO overnight, NO held-to-expiry; entry window 09:16-15:00 IST; forced exit 15:20 IST | single most important constraint; simplifies cost model + tax model |
 | DEC-RISK-013 | Liquidity OI filter = rolling 30-min trailing as of signal bar (was EOD) | hostile review caught EOD as look-ahead leak |
-| DEC-RISK-014 | Spread filter = (bar.high − bar.low) / bar.close ≤ 0.05 proxy (was bid-ask 5% of premium) | bid-ask data unobtainable from Dhan rolling option API; honest proxy |
+| DEC-RISK-014 | Spread filter = (bar.high − bar.low) / bar.close ≤ 0.05 proxy (was bid-ask 5% of premium) | bid-ask data unobtainable from Groww rolling option API; honest proxy |
 | DEC-RISK-015 | Circuit-triggered close exit price = last traded price + 50 bps slippage penalty (calibrated from 2024-06-04 crash) | resolves circuit-close + 15:20-forced-exit contradiction |
 | DEC-RISK-016 | SENSEX freeze qty corrected: 50 lots per order (= 1,000 contracts at lot size 20); was "1,000 lots" | conflated contracts vs lots; primary source Zerodha + BSE Apr 2025 circular 20250401-8 |
 
@@ -554,8 +554,8 @@ The following risk-management decisions must be logged in
 - NSE circular FAOP68834 / FAOP70616 (Sept 2025) — Quantity Freeze Limits
 - NSE Equity Market Circuit Breakers (`nseindia.com/products-services/equity-market-circuit-breakers`)
 - BSE MWPL page (`bseindia.com/markets/Derivatives/DeriReports/MWPL.html`)
-- Dhan Risk Management Policy (`dhan.co/risk-management-policy`)
-- Dhan Auto Square-Off FAQ (Freshdesk article 82000832236)
+- Groww Risk Management Policy (`groww.co/risk-management-policy`)
+- Groww Auto Square-Off FAQ (Freshdesk article 82000832236)
 - Zerodha Z-Connect — SEBI's new rules for index derivatives
 - Zerodha Bulletin 249809 — latest intraday leverages
 - Business Standard 2025-05-29 — Sebi new OI metric

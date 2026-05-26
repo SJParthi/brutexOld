@@ -23,7 +23,7 @@
 | `RESUME_PROMPT.md` | Exact prompt for a new Claude session to resume work | living |
 | `phase_0_documentation.md` | Phase 0 — Docs + wipe + locked decisions | ✅ DONE |
 | `phase_1_verification_scaffolding.md` | Phase 1 — 9-layer test pyramid + invariants | ☐ Not started |
-| `phase_2_dhan_adapter_vocabulary.md` | Phase 2 — Dhan adapter + 52-vocabulary | ☐ Not started |
+| `phase_2_groww_adapter_vocabulary.md` | Phase 2 — Groww adapter + 52-vocabulary | ☐ Not started |
 | `phase_2_5_bayesian_early_stop.md` | Phase 2.5 — Stage 2.5 early-stop | ☐ Not started |
 | `phase_3_brute_force_engine.md` | Phase 3 — 5-stage funnel engine | ☐ Not started |
 | `phase_3_5_metal_gpu_offload.md` | Phase 3.5 — Apple Metal compute | ☐ Not started |
@@ -37,7 +37,7 @@
 | `- [x]` | Done |
 | `🔄` (in headings) | Currently in progress |
 | `✅` (in headings) | All sub-items checked |
-| `⏸️` (in headings) | Blocked on external dependency (e.g., user must provide Dhan token) |
+| `⏸️` (in headings) | Blocked on external dependency (e.g., user must provide Groww token) |
 
 ## Convention: commit linking
 
@@ -68,7 +68,7 @@ Every phase doc references these. Read them before starting any phase:
 
 | Doc | Purpose |
 |---|---|
-| `../../CLAUDE.md` | Project rules + Dhan facts + 4-agent review pattern |
+| `../../CLAUDE.md` | Project rules + Groww facts + 4-agent review pattern |
 | `../TRACK1_BACKTEST_SPEC.md` | Master spec (signal-only, 21 TFs, 4 inst incl. VIX ref-only) |
 | `../TRACK1_DATA_INGEST_DESIGN.md` | Ingest pipeline + state machine + auth + error map |
 | `../TRACK1_VOCABULARY.md` | 52 atomic conditions, K=2..5 ANDed |

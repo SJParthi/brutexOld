@@ -279,7 +279,7 @@ Estimated occupancy: **70-90%** for branchless integer kernel on M4 Pro
         │     - 24 property invariants stubbed
         │     - 3 oracle test skeletons
         ▼
-   Phase 2     Dhan adapter + Vocabulary (3-4 weeks)
+   Phase 2     Groww adapter + Vocabulary (3-4 weeks)
         │
         ▼
    Phase 2.5   STAGE 2.5 EARLY-STOP (1 week, NEW)

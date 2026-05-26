@@ -17,7 +17,7 @@ Imagine BruteX as a delivery company.
 | Person | Real job | BruteX equivalent |
 |---|---|---|
 | Warehouse | stores boxes | The Parquet lake on disk (spot + options) |
-| Loader | adds new boxes daily | The Dhan adapter (downloads new bars) |
+| Loader | adds new boxes daily | The Groww adapter (downloads new bars) |
 | Picker | finds the right box for an order | The engine (looks up a bar at a timestamp) |
 | Manager | tells you what was delivered + when | The audit log (one line per action, hash-chained) |
 | Dispatcher | makes sure 2 loaders don't grab same box | Watermarks + Bloom + LMDB dedup |
@@ -54,7 +54,7 @@ Every numerical claim in `TRACK2_OPTIONS_SPEC.md` and
 
 | Bucket | Example | How verified |
 |---|---|---|
-| **A — Dhan-published** | "30 days per call" | URL + verified date in spec |
+| **A — Groww-published** | "30 days per call" | URL + verified date in spec |
 | **B — SDK source** | "`expiryFlag` ∈ {WEEK, MONTH}" | GitHub commit hash + filename + line |
 | **C — SEBI/NSE/BSE circular** | "BANKNIFTY weekly killed 2024-11-13" | Circular number + URL |
 | **D — Derived calculation** | "15,876 total backfill calls" | Math shown in tables side-by-side |
@@ -236,7 +236,7 @@ Track 1 dashboard stays primary, Telegram is alert-only).
 |---|---|---|---|---|
 | Audit chain broken | CRITICAL | yes (immediate) | red banner | 1 |
 | Watermark stale > 1 day on active series | HIGH | yes (within 60 sec) | red row | 1 |
-| Dhan API > 5% error rate over 1h | HIGH | yes | yellow row | 0 (warning) |
+| Groww API > 5% error rate over 1h | HIGH | yes | yellow row | 0 (warning) |
 | Backfill rate < 2 r/s for 10 min | MEDIUM | digest (daily) | yellow row | 0 |
 | Put-call parity violation (P-O10) | HIGH | yes | red row | 1 |
 | Doctor C12 OPTIONS_FRESH red | HIGH | yes | red row | 1 |
@@ -330,7 +330,7 @@ Linear scaling. Rate-limit bound at 3 r/s aggregate; no parallelism gain past th
 
 ```
                 ┌──────────────────────────────────────┐
-                │  Dhan Cloud (5 r/s, 100K/day quota)  │
+                │  Groww Cloud (5 r/s, 100K/day quota)  │
                 └────────────────┬─────────────────────┘
                                  │ HTTP/2
                                  ▼
@@ -393,7 +393,7 @@ Linear scaling. Rate-limit bound at 3 r/s aggregate; no parallelism gain past th
 │  Daily quota: 7.3% used  (7,300 / 100,000)                         │
 ├───────────────────────────────────────────────────────────────────┤
 │  Recent alerts (last 24h):                                         │
-│   09:21  ✓ Backfill resumed after 38-sec Dhan 429                  │
+│   09:21  ✓ Backfill resumed after 38-sec Groww 429                  │
 │   06:00  ✓ Daily incremental complete (70 sec, 210 calls)          │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -413,7 +413,7 @@ Linear scaling. Rate-limit bound at 3 r/s aggregate; no parallelism gain past th
    ALERT — C12 OPTIONS_FRESH RED
    Stream: NIFTY-WEEK / ATM-3 / PUT
    last_ok: 2026-05-14 15:35 IST (23 hrs ago)
-   Likely cause: Dhan 5xx on chunk 2026-05-15
+   Likely cause: Groww 5xx on chunk 2026-05-15
    Action: brutex doctor --diagnose c12-nifty-week-atm-3-put
    PR-status: not blocking (single series; 251 others green)
 ```
@@ -455,7 +455,7 @@ specifically try to break each guarantee:
 |---|---|
 | Audit | "Show me one number in this doc without a citation" |
 | Architect | "Show me a state transition that can lose data" |
-| Hostile | "What if Dhan changes the API mid-month? What if the disk fills up between WRITE and audit append?" |
+| Hostile | "What if Groww changes the API mid-month? What if the disk fills up between WRITE and audit append?" |
 | Reality | "Re-derive the 15,876-calls / 88-min / 5.5 GB numbers from raw quantities — do they hold?" |
 
 If any agent finds a hole, this doc gets a follow-up commit before merge.

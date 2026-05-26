@@ -1,7 +1,7 @@
 # BruteX Track 2 — Data Ingest Design
 
 > Storage layout, state machine, error map, and pseudocode for the
-> Dhan options backfill pipeline. Mirrors `TRACK1_DATA_INGEST_DESIGN.md`
+> Groww options backfill pipeline. Mirrors `TRACK1_DATA_INGEST_DESIGN.md`
 > with options-specific extensions.
 
 _Last updated: 2026-05-15._
@@ -78,16 +78,16 @@ $BRUTEX_LAKE/
 | `close` | `int64` (paisa) | |
 | `volume` | `int64` (contracts) | Stored as **number of contracts**, NOT lots — see lot-size hostile-review fix in §13. Lot size at the date is keyed from `reference/lot_size_history.parquet` and applied in the engine. |
 | `open_interest` | `int64` (contracts) | Same lot-size policy as volume. |
-| `iv` | `float64` | Implied volatility from Dhan, fraction (0.2 = 20%) |
+| `iv` | `float64` | Implied volatility from Groww, fraction (0.2 = 20%) |
 | `delta` | `float64` | Computed BSM |
 | `gamma` | `float64` | Computed BSM |
 | `theta` | `float64` | Computed BSM (per-year; convert to per-day in engine) |
 | `vega` | `float64` | Computed BSM |
 | `spot_at_bar` | `int64` (paisa) | NIFTY/BANKNIFTY/SENSEX spot price at same `bar_ts` (foreign-keyed from Track 1 spot lake at ingest time) |
-| `strike_api` | `int64` (paisa) | Absolute strike as **returned by Dhan** in the rollingoption response — the contract that backs this bar. Rolls when ATM shifts. |
-| `strike_computed` | `int64` (paisa) | Engine-recomputed strike = `compute_absolute_strike(spot_at_bar, strikePosition, strike_step)`. **Invariant P-O12**: `strike_api == strike_computed` modulo Dhan's tie-break at midpoints (deviation must match `expected_tiebreak_table`). |
+| `strike_api` | `int64` (paisa) | Absolute strike as **returned by Groww** in the rollingoption response — the contract that backs this bar. Rolls when ATM shifts. |
+| `strike_computed` | `int64` (paisa) | Engine-recomputed strike = `compute_absolute_strike(spot_at_bar, strikePosition, strike_step)`. **Invariant P-O12**: `strike_api == strike_computed` modulo Groww's tie-break at midpoints (deviation must match `expected_tiebreak_table`). |
 | `time_to_expiry_us` | `int64` (microseconds) | (expiry_ts_at_15_30 − bar_ts) |
-| `raw_bar_hash` | `bytes(8)` | SHA256-low-64-bits of (bar_ts ‖ ohlc ‖ iv ‖ spot_at_bar ‖ strike_api). Covers Dhan-returned raw data. Used in audit log for ingest replay. |
+| `raw_bar_hash` | `bytes(8)` | SHA256-low-64-bits of (bar_ts ‖ ohlc ‖ iv ‖ spot_at_bar ‖ strike_api). Covers Groww-returned raw data. Used in audit log for ingest replay. |
 | `cooked_bar_hash` | `bytes(8)` | SHA256-low-64-bits of (raw_bar_hash ‖ delta ‖ gamma ‖ theta ‖ vega ‖ bsm_kernel_version). Covers BSM-derived Greeks. Used in audit log for full-replay (oracle O-O1 checks BOTH hashes). |
 
 Compressed with ZSTD at level 3. Per-row ≈ 50 bytes after compression.
@@ -249,7 +249,7 @@ post-process computes Greeks per bar:
 ```python
 def compute_greeks_for_chunk(chunk_parquet_path):
     df = pl.read_parquet(chunk_parquet_path)
-    # df already contains strike_api (Dhan-returned per-bar strike).
+    # df already contains strike_api (Groww-returned per-bar strike).
     spot_lake = read_track1_spot(df['bar_ts'])           # foreign-key join
     df = df.join(spot_lake, on='bar_ts', how='left')
 
@@ -261,7 +261,7 @@ def compute_greeks_for_chunk(chunk_parquet_path):
         strike_step=STRIKE_STEPS[underlying],
     )
     # P-O12 invariant — strike_api should match strike_computed
-    # modulo Dhan tie-break at exact midpoints. Phase 2 builds the
+    # modulo Groww tie-break at exact midpoints. Phase 2 builds the
     # tie-break exception table from observed midpoint cases.
     assert_strike_invariant(df['strike_api'], df['strike_computed'],
                             tiebreak_table=EXPECTED_TIEBREAKS[underlying])
@@ -281,7 +281,7 @@ def compute_greeks_for_chunk(chunk_parquet_path):
         option_type=…,                                    # 'CALL' or 'PUT'
     )
 
-    # Two hashes — raw covers Dhan-returned bytes, cooked covers Greeks.
+    # Two hashes — raw covers Groww-returned bytes, cooked covers Greeks.
     BSM_KERNEL_VERSION = fno_math.bsm.VERSION             # int, bumped on kernel change
     df['raw_bar_hash'] = sha256_low64(
         df['bar_ts'] ‖ df['open'] ‖ df['high'] ‖ df['low'] ‖ df['close']
@@ -296,7 +296,7 @@ def compute_greeks_for_chunk(chunk_parquet_path):
 ```
 
 Audit log carries BOTH hashes. Replay oracle O-O1:
-- Re-runs ingest from same Dhan input + spot lake → `raw_bar_hash` must match
+- Re-runs ingest from same Groww input + spot lake → `raw_bar_hash` must match
 - Re-runs Greeks compute with same BSM kernel version → `cooked_bar_hash` must match
 - If BSM kernel version is bumped, replay only re-validates raw; cooked is
   reproducible-only-against-the-pinned-version (audit row records the version).
@@ -331,7 +331,7 @@ Audit log carries BOTH hashes. Replay oracle O-O1:
 
 ```python
 # All 6 streams with per-regime date gating (see §1).
-# Vocabulary: optionType ∈ {'CALL','PUT'} per Dhan SDK validator
+# Vocabulary: optionType ∈ {'CALL','PUT'} per Groww SDK validator
 # (drvOptionType field) — NOT 'CE'/'PE'.
 async def backfill_options(global_start, global_end):
     streams = [
@@ -368,7 +368,7 @@ async def backfill_series(underlying, sec_id, segment, cycle, sp, ot,
         chunk_to = min(cursor + timedelta(days=30), end_date)
         try:
             async with rate_limiter:
-                resp = await dhan_client.expired_options_data(
+                resp = await groww_client.expired_options_data(
                     securityId=sec_id,
                     exchangeSegment=segment,
                     instrument='OPTIDX',
@@ -445,8 +445,8 @@ def validate_ohlc(df):
 | Crash after WRITE but before audit append | Audit chain missing latest hash; partition exists | Phase 1 test: detect by chain audit; re-append audit row with replay hash |
 | Crash after audit but before watermark update | Watermark says next chunk = N; partition for N+1 exists | Phase 1 test: scan partitions; reconcile watermark to highest partition + 1 |
 | Disk full | Partition WRITE fails | Audit error row + FROZEN; operator clears space + sets state IDLE |
-| Dhan 429 (rate limit) | HTTP 429 | Backoff per §5 schedule |
-| Dhan 5xx | HTTP 5xx | Backoff per §5 schedule |
+| Groww 429 (rate limit) | HTTP 429 | Backoff per §5 schedule |
+| Groww 5xx | HTTP 5xx | Backoff per §5 schedule |
 | Network timeout | httpx timeout | Treat as transient; backoff |
 | Token expired mid-chunk | HTTP 401 from rollingoption | Trigger Track 1 auto-renew loop (shared); retry chunk with fresh token |
 
@@ -508,7 +508,7 @@ def test_options_smoke():
 - ✗ Multi-leg structures (straddles, condors)
 - ✗ Margin calculation
 - ✗ Greeks beyond delta/gamma/theta/vega
-- ✗ Per-contract (non-rollingoption) backfill — only added if Dhan removes rolling endpoint
+- ✗ Per-contract (non-rollingoption) backfill — only added if Groww removes rolling endpoint
 
 ---
 
@@ -525,7 +525,7 @@ These are ingest-design decisions specifically (will append to MIGRATION.md):
 - **Audit log append serialization (hostile-review fix):** all audit appends pass through a single asyncio writer task — `audit_writer_task` consumes from an `asyncio.Queue` and writes serially. flock is for cross-process protection only. Replay oracle O-O1 sorts replayed rows by `(stream, chunk_from)` to remove asyncio-scheduler nondeterminism.
 - Greeks computed inline at chunk-write time (not lazy); two-hash design (`raw_bar_hash` + `cooked_bar_hash`) ensures replay catches BSM kernel regressions
 - Risk-free rate table: 60-row 5y monthly snapshot in `reference/risk_free_rate.parquet`. **Lookup is step-function (no interpolation)** — bar at `bar_ts` uses the row for `floor(bar_ts, month)`. Replay oracle locks this policy.
-- Strike grid: hardcoded per-underlying in `brutex/options/strike_grid.py` (NIFTY 50, BANKNIFTY 100, SENSEX 100), **with date-keyed override support** (Phase 2 verifies historical stability against Dhan master CSV snapshots; emits ADR if any step changed in 2021-2026)
+- Strike grid: hardcoded per-underlying in `brutex/options/strike_grid.py` (NIFTY 50, BANKNIFTY 100, SENSEX 100), **with date-keyed override support** (Phase 2 verifies historical stability against Groww master CSV snapshots; emits ADR if any step changed in 2021-2026)
 - **Lot size: date-keyed table `reference/lot_size_history.parquet`** — NOT hardcoded per-underlying. SEBI revised NIFTY lot size 50→75 Nov 2024 and BANKNIFTY lot size multiple times in 2022-2024; per-bar `volume`/`open_interest` are stored as **contract count** (independent of lot size), engine looks up lot size for P&L conversion. (Hostile review caught: hardcoded once would silently corrupt P&L reconstruction across lot-size revision dates.)
 - **Expiry-day theta policy:** bars with `time_to_expiry_us < 1 minute` (i.e., the 15:29:00 → 15:30:00 bar on expiry day) **clamp T at 1 minute** for Greeks computation to avoid divergence. Bars themselves are stored (not NaN). This policy is recorded in the audit chain via `BSM_KERNEL_VERSION`.
 - Doctor adds C12 OPTIONS_FRESH check (5 active + 1 dormant for BN-WEEK)

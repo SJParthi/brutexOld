@@ -58,7 +58,7 @@ runs/
 .env.*.local
 secrets/
 **/api_token*
-**/dhan_token*
+**/groww_token*
 **/access_token*
 *_API_AUTH_TOKEN*
 *_ACCESS_TOKEN*

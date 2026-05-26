@@ -15,7 +15,7 @@ from brutex.models import Exchange, Instrument, InstrumentType, Segment
 # Used by orchestrator/data unit tests as generic instrument rows. They
 # include an `internal_trading_symbol` column observed in legacy adapter
 # output; new adapters do not need to expose it. Phase 2 will reshape
-# these fixtures around Dhan's response format.
+# these fixtures around Groww's response format.
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -56,7 +56,7 @@ def raw_index_row_nifty() -> dict[str, Any]:
 def raw_banknifty_ce_row_dec2025() -> dict[str, Any]:
     """Matches the real BANKNIFTY Dec 2025 27000 CE row from the CSV sample.
 
-    lot_size 35 (post-SEBI-revision — see https://dhanhq.co/docs/v2/annexure).
+    lot_size 35 (post-SEBI-revision — see https://groww.in/trade-api/docs/docs/v2/annexure).
     """
     return {
         "exchange": "NSE",

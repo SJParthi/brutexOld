@@ -94,9 +94,9 @@ impl ExchangeSegment {
         }
     }
 
-    /// Returns the binary wire code used in Dhan WebSocket V2 protocol.
+    /// Returns the binary wire code used in exchange WebSocket V2 protocol.
     ///
-    /// Codes sourced from Dhan API (Python SDK ref): IDX_I=0, NSE_EQ=1, NSE_FNO=2,
+    /// Codes sourced from Groww API (Python SDK ref): IDX_I=0, NSE_EQ=1, NSE_FNO=2,
     /// NSE_CURRENCY=3, BSE_EQ=4, MCX_COMM=5, BSE_CURRENCY=7, BSE_FNO=8.
     pub fn binary_code(&self) -> u8 {
         match self {
@@ -113,7 +113,7 @@ impl ExchangeSegment {
 
     /// Converts a binary wire code (from WebSocket packet header byte 3) to an `ExchangeSegment`.
     ///
-    /// Returns `None` for unknown values. Note: there is NO enum 6 in Dhan's mapping
+    /// Returns `None` for unknown values. Note: there is NO enum 6 in Groww's mapping
     /// (gap between MCX_COMM=5 and BSE_CURRENCY=7). Unknown codes must not panic.
     pub fn from_byte(code: u8) -> Option<Self> {
         match code {
@@ -214,12 +214,12 @@ impl InstrumentType {
         }
     }
 
-    /// Returns the Dhan REST API instrument type string for historical data requests.
+    /// Returns the Groww REST API instrument type string for historical data requests.
     ///
-    /// Dhan API uses specific instrument strings (e.g., "FUTIDX", "OPTIDX")
+    /// Groww API uses specific instrument strings (e.g., "FUTIDX", "OPTIDX")
     /// that differ from our internal classification. The `is_index_underlying`
     /// flag disambiguates index vs stock derivatives.
-    pub fn dhan_api_instrument_type(&self, is_index_underlying: bool) -> &'static str {
+    pub fn broker_api_instrument_type(&self, is_index_underlying: bool) -> &'static str {
         match (self, is_index_underlying) {
             (Self::Index, _) => "INDEX",
             (Self::Equity, _) => "EQUITY",
@@ -312,7 +312,7 @@ impl From<&ArchivedOptionType> for OptionType {
     }
 }
 
-/// Unique identifier for a security in the Dhan system.
+/// Unique identifier for a security in the Groww system.
 pub type SecurityId = u32;
 
 // ---------------------------------------------------------------------------
@@ -571,60 +571,60 @@ mod tests {
         assert_eq!(map.get(&ExchangeSegment::IdxI), None);
     }
 
-    // --- InstrumentType::dhan_api_instrument_type ---
+    // --- InstrumentType::broker_api_instrument_type ---
 
     #[test]
-    fn test_dhan_api_instrument_type_index() {
+    fn test_broker_api_instrument_type_index() {
         assert_eq!(
-            InstrumentType::Index.dhan_api_instrument_type(true),
+            InstrumentType::Index.broker_api_instrument_type(true),
             "INDEX"
         );
         assert_eq!(
-            InstrumentType::Index.dhan_api_instrument_type(false),
+            InstrumentType::Index.broker_api_instrument_type(false),
             "INDEX"
         );
     }
 
     #[test]
-    fn test_dhan_api_instrument_type_equity() {
+    fn test_broker_api_instrument_type_equity() {
         assert_eq!(
-            InstrumentType::Equity.dhan_api_instrument_type(true),
+            InstrumentType::Equity.broker_api_instrument_type(true),
             "EQUITY"
         );
         assert_eq!(
-            InstrumentType::Equity.dhan_api_instrument_type(false),
+            InstrumentType::Equity.broker_api_instrument_type(false),
             "EQUITY"
         );
     }
 
     #[test]
-    fn test_dhan_api_instrument_type_futidx() {
+    fn test_broker_api_instrument_type_futidx() {
         assert_eq!(
-            InstrumentType::Future.dhan_api_instrument_type(true),
+            InstrumentType::Future.broker_api_instrument_type(true),
             "FUTIDX"
         );
     }
 
     #[test]
-    fn test_dhan_api_instrument_type_futstk() {
+    fn test_broker_api_instrument_type_futstk() {
         assert_eq!(
-            InstrumentType::Future.dhan_api_instrument_type(false),
+            InstrumentType::Future.broker_api_instrument_type(false),
             "FUTSTK"
         );
     }
 
     #[test]
-    fn test_dhan_api_instrument_type_optidx() {
+    fn test_broker_api_instrument_type_optidx() {
         assert_eq!(
-            InstrumentType::Option.dhan_api_instrument_type(true),
+            InstrumentType::Option.broker_api_instrument_type(true),
             "OPTIDX"
         );
     }
 
     #[test]
-    fn test_dhan_api_instrument_type_optstk() {
+    fn test_broker_api_instrument_type_optstk() {
         assert_eq!(
-            InstrumentType::Option.dhan_api_instrument_type(false),
+            InstrumentType::Option.broker_api_instrument_type(false),
             "OPTSTK"
         );
     }
@@ -697,12 +697,12 @@ mod tests {
 
     #[test]
     fn test_archived_option_type_from_roundtrip() {
-        use crate::compat::instrument_types::{DerivativeContract, DhanInstrumentKind};
+        use crate::compat::instrument_types::{DerivativeContract, BrokerInstrumentKind};
         for opt_type in [OptionType::Call, OptionType::Put] {
             let contract = DerivativeContract {
                 security_id: 1,
                 underlying_symbol: "T".to_string(),
-                instrument_kind: DhanInstrumentKind::OptionIndex,
+                instrument_kind: BrokerInstrumentKind::OptionIndex,
                 exchange_segment: ExchangeSegment::NseFno,
                 expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
                 strike_price: 18000.0,
@@ -739,11 +739,11 @@ mod tests {
         }
     }
 
-    // --- dhan_api_instrument_type: all 6 derivative combinations ---
+    // --- broker_api_instrument_type: all 6 derivative combinations ---
 
     #[test]
-    fn test_dhan_api_instrument_type_all_six_combinations() {
-        // Validates ALL (InstrumentType, is_index_underlying) → Dhan API string mappings:
+    fn test_broker_api_instrument_type_all_six_combinations() {
+        // Validates ALL (InstrumentType, is_index_underlying) → Groww API string mappings:
         // Future + index    → FUTIDX
         // Future + stock    → FUTSTK
         // Option + index    → OPTIDX
@@ -760,9 +760,9 @@ mod tests {
         ];
         for &(inst_type, is_index, expected) in cases {
             assert_eq!(
-                inst_type.dhan_api_instrument_type(is_index),
+                inst_type.broker_api_instrument_type(is_index),
                 expected,
-                "dhan_api_instrument_type({:?}, {}) should be {}",
+                "broker_api_instrument_type({:?}, {}) should be {}",
                 inst_type,
                 is_index,
                 expected,
@@ -771,20 +771,20 @@ mod tests {
     }
 
     #[test]
-    fn test_dhan_api_instrument_type_index_ignores_flag() {
+    fn test_broker_api_instrument_type_index_ignores_flag() {
         // Index type always returns "INDEX" regardless of is_index_underlying flag
         assert_eq!(
-            InstrumentType::Index.dhan_api_instrument_type(true),
-            InstrumentType::Index.dhan_api_instrument_type(false),
+            InstrumentType::Index.broker_api_instrument_type(true),
+            InstrumentType::Index.broker_api_instrument_type(false),
         );
     }
 
     #[test]
-    fn test_dhan_api_instrument_type_equity_ignores_flag() {
+    fn test_broker_api_instrument_type_equity_ignores_flag() {
         // Equity type always returns "EQUITY" regardless of is_index_underlying flag
         assert_eq!(
-            InstrumentType::Equity.dhan_api_instrument_type(true),
-            InstrumentType::Equity.dhan_api_instrument_type(false),
+            InstrumentType::Equity.broker_api_instrument_type(true),
+            InstrumentType::Equity.broker_api_instrument_type(false),
         );
     }
 
@@ -841,14 +841,14 @@ mod tests {
         }
     }
 
-    // --- dhan_api_instrument_type: FUTCOM and FUTCUR are not applicable ---
-    // The function maps (InstrumentType, is_index_underlying) to Dhan API strings.
-    // FUTCOM and FUTCUR are separate Dhan instrument types for commodity/currency
+    // --- broker_api_instrument_type: FUTCOM and FUTCUR are not applicable ---
+    // The function maps (InstrumentType, is_index_underlying) to Groww API strings.
+    // FUTCOM and FUTCUR are separate Groww instrument types for commodity/currency
     // futures, which are not representable via InstrumentType::Future + bool flag.
     // The 6 valid combinations are: INDEX, EQUITY, FUTIDX, FUTSTK, OPTIDX, OPTSTK.
 
     #[test]
-    fn test_dhan_api_instrument_type_returns_static_str() {
+    fn test_broker_api_instrument_type_returns_static_str() {
         // Verify all return values are non-empty &'static str
         let all_cases: &[(InstrumentType, bool)] = &[
             (InstrumentType::Index, true),
@@ -861,17 +861,17 @@ mod tests {
             (InstrumentType::Option, false),
         ];
         for &(inst_type, is_index) in all_cases {
-            let result = inst_type.dhan_api_instrument_type(is_index);
+            let result = inst_type.broker_api_instrument_type(is_index);
             assert!(
                 !result.is_empty(),
-                "dhan_api_instrument_type({:?}, {}) returned empty string",
+                "broker_api_instrument_type({:?}, {}) returned empty string",
                 inst_type,
                 is_index,
             );
-            // All valid Dhan API instrument strings are uppercase ASCII
+            // All valid Groww API instrument strings are uppercase ASCII
             assert!(
                 result.chars().all(|c| c.is_ascii_uppercase()),
-                "dhan_api_instrument_type({:?}, {}) = '{}' is not uppercase ASCII",
+                "broker_api_instrument_type({:?}, {}) = '{}' is not uppercase ASCII",
                 inst_type,
                 is_index,
                 result,
@@ -880,15 +880,15 @@ mod tests {
     }
 
     #[test]
-    fn test_dhan_api_instrument_type_derivative_flag_matters() {
+    fn test_broker_api_instrument_type_derivative_flag_matters() {
         // For Future and Option types, the is_index_underlying flag changes the result
         assert_ne!(
-            InstrumentType::Future.dhan_api_instrument_type(true),
-            InstrumentType::Future.dhan_api_instrument_type(false),
+            InstrumentType::Future.broker_api_instrument_type(true),
+            InstrumentType::Future.broker_api_instrument_type(false),
         );
         assert_ne!(
-            InstrumentType::Option.dhan_api_instrument_type(true),
-            InstrumentType::Option.dhan_api_instrument_type(false),
+            InstrumentType::Option.broker_api_instrument_type(true),
+            InstrumentType::Option.broker_api_instrument_type(false),
         );
     }
 

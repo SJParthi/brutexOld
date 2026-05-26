@@ -1,13 +1,13 @@
-# Phase 2 — Dhan Adapter + Spot-Index Ingest + Vocabulary
+# Phase 2 — Groww Adapter + Spot-Index Ingest + Vocabulary
 
-## Status: ⏸️ Blocked (needs user-provided Dhan token)
+## Status: ⏸️ Blocked (needs user-provided Groww token)
 
 ## Effort: 3-4 weeks
 ## Owner: Claude (entirely — user provides only token + sign-off)
 
 ## Goal
 
-Stand up the Dhan data path (1m + 1d for 4 instruments), the
+Stand up the Groww data path (1m + 1d for 4 instruments), the
 52-condition vocabulary engine, and the indicator precompute pipeline.
 At end of Phase 2, BruteX can pull 5 years of OHLC for all 4 instruments,
 resample to 21 TFs, compute 9 indicators, and evaluate all 52 atomic
@@ -17,39 +17,39 @@ conditions per bar.
 
 - [x] Phase 0 complete (3 PRs on main)
 - [ ] Phase 1 complete (verification scaffolding)
-- [ ] **USER: provide Dhan access token** in `~/.brutex/dhan/access_token.json`:
+- [ ] **USER: provide Groww access token** in `~/.brutex/groww/access_token.json`:
   ```json
   {
     "client_id": "<your-client-id>",
-    "access_token": "<token-from-web.dhan.co>",
+    "access_token": "<token-from-web.groww.co>",
     "expiry_time": "<ISO 8601 expiry>",
     "last_renewed_at": "<ISO 8601 now>"
   }
   ```
-  Get token from `web.dhan.co` → My Profile → Access DhanHQ APIs.
+  Get token from `web.groww.co` → My Profile → Access Groww APIs.
 - [ ] **USER: ensure** `/Volumes/QuantData` SSD is mounted (or set `BRUTEX_LAKE_ROOT`)
 - [ ] Read `docs/TRACK1_DATA_INGEST_DESIGN.md` in full
 
 ## Checklist
 
-### Week 4 — Dhan adapter
+### Week 4 — Groww adapter
 
 #### Constants module
 
-- [ ] `brutex/adapters/dhan/__init__.py`
-- [ ] `brutex/adapters/dhan/constants.py` — the 4 hardcoded tuples per decision #87:
+- [ ] `brutex/adapters/groww/__init__.py`
+- [ ] `brutex/adapters/groww/constants.py` — the 4 hardcoded tuples per decision #87:
   - [ ] `NIFTY = (securityId=13, exchangeSegment="IDX_I", instrument="INDEX", symbol="NIFTY 50")`
   - [ ] `BANKNIFTY = (25, "IDX_I", "INDEX", "NIFTY BANK")`
   - [ ] `SENSEX = (51, "IDX_I", "INDEX", "SENSEX")`
   - [ ] `INDIA_VIX = (21, "IDX_I", "INDEX", "INDIA VIX")` (reference-only)
   - [ ] `RATE_LIMIT_PER_SEC = 5`, `DAILY_QUOTA = 100_000`, `SAFETY_FACTOR = 0.6`
-  - [ ] `BASE_URL = "https://api.dhan.co/v2"`
-  - [ ] `RENEW_URL = "https://api.dhan.co/v2/RenewToken"`
+  - [ ] `BASE_URL = "https://api.groww.co/v2"`
+  - [ ] `RENEW_URL = "https://api.groww.co/v2/RenewToken"`
 
 #### Authentication (decision #86)
 
-- [ ] `brutex/adapters/dhan/auth.py`:
-  - [ ] `DhanCredentials` frozen dataclass
+- [ ] `brutex/adapters/groww/auth.py`:
+  - [ ] `GrowwCredentials` frozen dataclass
   - [ ] `load_credentials(path: Path)` — read JSON, raise if missing
   - [ ] `needs_renewal(creds, threshold_minutes=25)` — boolean
   - [ ] `renew_token(creds)` — call `POST /v2/RenewToken`, return new creds
@@ -61,11 +61,11 @@ conditions per bar.
 
 #### HTTP client
 
-- [ ] `brutex/adapters/dhan/client.py`:
+- [ ] `brutex/adapters/groww/client.py`:
   - [ ] HTTPX async client with token from `auth.get_or_renew()`
   - [ ] Adaptive token bucket at 3 r/s effective (5 × 0.6)
   - [ ] 5xx retry with exponential backoff (3 attempts)
-  - [ ] Map Dhan error codes per `TRACK1_DATA_INGEST_DESIGN.md §10A`:
+  - [ ] Map Groww error codes per `TRACK1_DATA_INGEST_DESIGN.md §10A`:
     - [ ] 805 / DH-904 → RATE_LIMIT → downshift bucket
     - [ ] 807/808/809/810 / DH-901/903 → AUTH_FAILED → quarantine + alert
     - [ ] 811/812/813/814 / DH-905/906 → BAD_REQUEST → quarantine
@@ -78,7 +78,7 @@ conditions per bar.
 
 #### Intraday endpoint
 
-- [ ] `brutex/adapters/dhan/intraday.py`:
+- [ ] `brutex/adapters/groww/intraday.py`:
   - [ ] `fetch_intraday(security_id, from_dt, to_dt, interval=1)` returning list[Bar]
   - [ ] Verify 90-day chunk limit per call
   - [ ] Validate response: timestamps sorted, no duplicates
@@ -88,7 +88,7 @@ conditions per bar.
 
 #### Daily endpoint
 
-- [ ] `brutex/adapters/dhan/historical.py`:
+- [ ] `brutex/adapters/groww/historical.py`:
   - [ ] `fetch_daily(security_id, from_date, to_date)` returning list[Bar]
   - [ ] Same validation as intraday
 
@@ -97,16 +97,16 @@ conditions per bar.
 - [ ] Run `brutex doctor C11` — should be GREEN
 - [ ] `brutex auth status` — shows valid token
 - [ ] Fetch 1 day of NIFTY 1m — verify timestamps in 09:15-15:30 IST range
-- [ ] **Verify all 4 securityIds resolve** via web.dhan.co/Charts URL smoke test
+- [ ] **Verify all 4 securityIds resolve** via web.groww.co/Charts URL smoke test
 - [ ] Verify rate limit isn't tripped at 3 r/s
 
 ### Week 5 — Data lake plumbing
 
 #### Parser
 
-- [ ] `brutex/data/parser_dhan.py`:
-  - [ ] Parse Dhan intraday response → `CandleBar`
-  - [ ] Parse Dhan historical response → `CandleBar` (daily)
+- [ ] `brutex/data/parser_groww.py`:
+  - [ ] Parse Groww intraday response → `CandleBar`
+  - [ ] Parse Groww historical response → `CandleBar` (daily)
   - [ ] Replace `parse_candle_row` calls in lake pipeline (or keep both)
 
 #### Watermark table (decision #76, gap G1)
@@ -170,11 +170,11 @@ conditions per bar.
 
 #### Golden fixtures #1-5 (decision Pyramid §4)
 
-- [ ] `dhan_intraday_2024-01-02_NIFTY.json` (post-budget gap day)
-- [ ] `dhan_intraday_2024-04-12_NIFTY.json` (Ram Navami half-session)
-- [ ] `dhan_intraday_2024-11-01_NIFTY.json` (Diwali Muhurat)
-- [ ] `dhan_intraday_2024-05-20_NIFTY.json` (election holiday)
-- [ ] `dhan_intraday_2025-03-14_NIFTY.json` (Holi)
+- [ ] `groww_intraday_2024-01-02_NIFTY.json` (post-budget gap day)
+- [ ] `groww_intraday_2024-04-12_NIFTY.json` (Ram Navami half-session)
+- [ ] `groww_intraday_2024-11-01_NIFTY.json` (Diwali Muhurat)
+- [ ] `groww_intraday_2024-05-20_NIFTY.json` (election holiday)
+- [ ] `groww_intraday_2025-03-14_NIFTY.json` (Holi)
 
 ### Week 6 — 52-condition vocabulary
 
@@ -225,7 +225,7 @@ conditions per bar.
 
 ## Exit criteria
 
-- [ ] Dhan ingest of 5y × 4 instruments × 21 TFs working end-to-end
+- [ ] Groww ingest of 5y × 4 instruments × 21 TFs working end-to-end
 - [ ] 9 indicators precomputed and cached
 - [ ] 52 atomic conditions evaluable on any bar
 - [ ] Pattern generator emits the conflict-pruned set
@@ -238,13 +238,13 @@ conditions per bar.
 ## Files to create / modify
 
 ```
-brutex/adapters/dhan/__init__.py                   (new)
-brutex/adapters/dhan/constants.py                  (new, 4 hardcoded tuples)
-brutex/adapters/dhan/auth.py                       (new)
-brutex/adapters/dhan/client.py                     (new)
-brutex/adapters/dhan/intraday.py                   (new)
-brutex/adapters/dhan/historical.py                 (new)
-brutex/data/parser_dhan.py                         (new)
+brutex/adapters/groww/__init__.py                   (new)
+brutex/adapters/groww/constants.py                  (new, 4 hardcoded tuples)
+brutex/adapters/groww/auth.py                       (new)
+brutex/adapters/groww/client.py                     (new)
+brutex/adapters/groww/intraday.py                   (new)
+brutex/adapters/groww/historical.py                 (new)
+brutex/data/parser_groww.py                         (new)
 brutex/data/watermark.py                           (new)
 brutex/data/bar_hash.py                            (new)
 brutex/data/partition.py                           (extend VALID_INTERVALS + VALID_SEGMENTS)
@@ -269,8 +269,8 @@ tests/golden/test_condition_vocabulary.py          (full impl)
 
 | Risk | Mitigation |
 |---|---|
-| Dhan API returns IST-shifted epoch (not UTC) | First call validates with timestamp decode test — see decision #16 |
-| Dhan rate limit lower than 5 r/s in practice | Adapter cap at 3 r/s effective; live verification first call |
+| Groww API returns IST-shifted epoch (not UTC) | First call validates with timestamp decode test — see decision #16 |
+| Groww rate limit lower than 5 r/s in practice | Adapter cap at 3 r/s effective; live verification first call |
 | First-call security ID 13/25/51/21 broken | Quarterly smoke test (4 URLs); manual escalation via constants update |
 | Master CSV needed for instrument validation | NOT NEEDED — universe is fixed per decision #87 |
 | Indicator math differs from TradingView pin | Golden fixture has TradingView-derived expected values within 0.5% |
@@ -279,7 +279,7 @@ tests/golden/test_condition_vocabulary.py          (full impl)
 
 ## Decisions to lock (estimated #111-#125)
 
-- #111: Dhan adapter shipped (4-tuple constants, auth, client, intraday, historical)
+- #111: Groww adapter shipped (4-tuple constants, auth, client, intraday, historical)
 - #112: Authentication manual-paste + auto-renew live
 - #113: Watermark table in DuckDB
 - #114: bar_hash function in code
@@ -299,7 +299,7 @@ tests/golden/test_condition_vocabulary.py          (full impl)
 
 | | Before | After |
 |---|---|---|
-| Dhan adapter | none | 5 modules, working |
+| Groww adapter | none | 5 modules, working |
 | Lake data | empty | 5y × 4 inst × 21 TFs (~80 MB Parquet) |
 | Watermark table | absent | 84 rows live |
 | 9 indicators | absent | all in Rust, cached |

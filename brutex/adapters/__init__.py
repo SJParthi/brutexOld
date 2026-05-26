@@ -15,7 +15,7 @@ incrementally across Phase 1+:
 * Phase 2 — :mod:`.body`, :mod:`.parser`, :mod:`.client` + adaptive rate-limiter.
 * Phase 3 — :mod:`.ssrf_guard`, :mod:`.timeconv` + :class:`GrowwMarketAdapter`.
 
-The Dhan adapter was wiped 2026-05-26; pre-wipe state at git tag
+The prior broker adapter was wiped 2026-05-26; pre-wipe state at git tag
 `v-pre-groww-pivot`.
 """
 

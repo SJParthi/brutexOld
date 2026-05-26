@@ -13,7 +13,7 @@
 > co-development relationship to any other repo.
 
 _Last updated: 2026-05-18. DEC-P0-026 (PR #48) retired the tickvault
-co-development layer. 2026-05-15: the broker → Dhan migration;
+co-development layer. 2026-05-15: the broker → Groww migration;
 Track 1 spec locked after 4-agent hostile-review pass._
 
 ---
@@ -26,7 +26,7 @@ Track 1 spec locked after 4-agent hostile-review pass._
   VIX** (volatility index). Track 1 is signal-only research; the
   Options Track translates winning signals to options for execution
   realism.
-- **Data source (Track 1):** **Dhan Historical Data API** — only two
+- **Data source (Track 1):** **Groww Trade API** — only two
   surfaces:
   1. `POST /v2/charts/intraday` (1-minute OHLC; other timeframes
      resampled deterministically from 1m)
@@ -40,7 +40,7 @@ Track 1 spec locked after 4-agent hostile-review pass._
 
 ## 2. Golden Rules (never violate)
 
-1. **No hallucination.** Every factual claim about Dhan, NSE, BSE, NIFTY
+1. **No hallucination.** Every factual claim about Groww, NSE, BSE, NIFTY
    composition, brokerage, taxes, or any external system must be
    traceable to a verified source. If unsure, say "unverified" and stop.
 2. **Single source of truth.** All Track 1 specs live under
@@ -48,7 +48,7 @@ Track 1 spec locked after 4-agent hostile-review pass._
    a section + decision ID from `docs/MIGRATION.md`. The legacy
    `docs/REQUIREMENTS.md` is a retired stub (banner only) — do not
    read or derive new requirements from it.
-3. **Scope lock.** Track 1 = Dhan + spot indexes + India VIX (NIFTY 50,
+3. **Scope lock.** Track 1 = Groww + spot indexes + India VIX (NIFTY 50,
    BANKNIFTY, SENSEX, INDIA VIX). **India VIX is REFERENCE ONLY** — it
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
    every trade, but is NEVER part of brute-force pattern combinations
@@ -59,7 +59,7 @@ Track 1 spec locked after 4-agent hostile-review pass._
    **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry
    #200):** Track 1's INGEST scope was formally expanded to additionally
    cover **200 NSE F&O eligible single stocks (spot + options across all
-   4 Dhan `expiryCodes`)** for the LAKE. The **BRUTE-FORCE ENGINE is
+   4 Groww `expiryCodes`)** for the LAKE. The **BRUTE-FORCE ENGINE is
    UNCHANGED** — it still operates only on the 3 brute-force indexes
    (NIFTY/BANKNIFTY/SENSEX); the 200 stocks join India VIX in
    `REFERENCE_ONLY` (mirrors decision #83). Stock options sit in the
@@ -79,8 +79,8 @@ Track 1 spec locked after 4-agent hostile-review pass._
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
    append must all be O(1). CI gates: `p99(N=1M) / p99(N=1K) ≤ 1.1`
    for each hot path. Any regression fails CI.
-6. **Rate-limit safety.** Dhan Data APIs: **5 req/s** per-second cap +
-   **100,000/day** quota (verified 2026-05-15 from dhanhq.co/docs/v2
+6. **Rate-limit safety.** Groww Data APIs: **5 req/s** per-second cap +
+   **100,000/day** quota (verified 2026-05-15 from groww.in/trade-api/docs/python-sdk
    Rate Limit table). Adapter caps at 3 r/s effective (5 × 0.6 safety
    factor). Never raise without explicit user approval. Track 1's
    typical 92-chunk first-run + 4-chunk daily incremental is < 0.1% of
@@ -155,7 +155,7 @@ Track 1 spec locked after 4-agent hostile-review pass._
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
-  - `feat(adapter/dhan): implement intraday OHLC chunking`
+  - `feat(adapter/groww): implement intraday OHLC chunking`
   - `fix(engine): O(1) regression in bar lookup`
   - `test(property): add DSR effective-N invariant`
   - `chore(claude): update CLAUDE.md rules`
@@ -215,7 +215,7 @@ bruteX/
 │   ├── adr/                        ← architecture decisions
 │   └── runbooks/
 ├── brutex/                         ← Python package
-│   ├── adapters/                   ← Dhan adapter lands in Phase 2
+│   ├── adapters/                   ← Groww adapter lands in Phase 2
 │   ├── data/                       ← Parquet + DuckDB lake (generic)
 │   ├── execution/                  ← signal-only simulator (Track 1)
 │   ├── feed/                       ← replay + resampler
@@ -245,8 +245,8 @@ bruteX/
 
 ## 6. Verified Groww Facts (cite these, don't re-derive)
 
-> **DEC-VENDOR-PIVOT-001 (2026-05-26):** the Dhan facts table that lived
-> here previously was wiped along with the Dhan adapter. Pre-wipe state
+> **DEC-VENDOR-PIVOT-001 (2026-05-26):** the Groww facts table that lived
+> here previously was wiped along with the Groww adapter. Pre-wipe state
 > preserved at `git tag v-pre-groww-pivot`. The Groww facts below
 > originate from the operator's pasted Groww docs (2026-05-26) +
 > HARD-VERIFIED PyPI wheel source code for `growwapi 1.5.0`. See

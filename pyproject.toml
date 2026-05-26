@@ -10,7 +10,7 @@ authors = [
 ]
 
 # Track 1 base dependencies. The Groww adapter (Phase 1, post-DEC-VENDOR-PIVOT-001
-# 2026-05-26) ships behind the `groww` optional extra. Prior Dhan adapter
+# 2026-05-26) ships behind the `groww` optional extra. Prior Groww adapter
 # wiped 2026-05-26 per operator decree.
 #
 # DEC-P0-012 (PR #34, 2026-05-17 "always latest"): upper bounds widened to
@@ -39,7 +39,7 @@ data = [
     "pyarrow>=16,<25",   # was <19; PyPI latest 24.0.0 (DEC-P0-012)
     "pytz>=2024.1",
 ]
-# DEC-VENDOR-PIVOT-001 (2026-05-26): Dhan adapter wiped per operator
+# DEC-VENDOR-PIVOT-001 (2026-05-26): prior broker adapter wiped per operator
 # decree; Groww adapter replaces it. The `groww` extra ships the Groww
 # Python SDK + its TOTP dep. CI installs `[dev,data,groww]` for the
 # full matrix; `tests/smoke/` uses `pytest.importorskip("growwapi")`

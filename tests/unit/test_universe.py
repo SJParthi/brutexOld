@@ -1,6 +1,6 @@
 """Unit tests for brutex.universe — the Track 1 spot-index universe.
 
-Rewritten 2026-05-15 for the Dhan + spot-index pivot. The prior tests
+Rewritten 2026-05-15 for the Groww + spot-index pivot. The prior tests
 expected an 8-named-index F&O universe with futures/options/stock
 contracts; that scope was wiped (see ``docs/MIGRATION.md``). Track 1
 universe is exactly 3 spot indexes.
@@ -79,8 +79,8 @@ class TestV1IndicesComposition:
         for spec in V1_INDICES:
             assert spec.spot_live_since_year < 2021
 
-    def test_display_names_match_dhan(self) -> None:
-        """Display names match Dhan's instrument master conventions."""
+    def test_display_names_match_v1_spec(self) -> None:
+        """Display names match Groww's instrument master conventions."""
         names = {u.display_name for u in V1_INDICES}
         assert names == {"NIFTY 50", "NIFTY BANK", "BSE SENSEX", "India VIX"}
 

@@ -28,7 +28,7 @@ Security
 --------
 The file contains only non-sensitive data: PID, run ID, URLs, phase,
 and a sanitised snapshot of ``BRUTEX_*`` env vars **excluding any
-``*_TOKEN*``/``*_SECRET*`` patterns**. Dhan tokens, Telegram bot
+``*_TOKEN*``/``*_SECRET*`` patterns**. Groww tokens, Telegram bot
 tokens, and any similar credentials are redacted via
 :func:`_redact_env_snapshot`.
 """

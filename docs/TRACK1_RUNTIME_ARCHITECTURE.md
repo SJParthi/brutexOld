@@ -59,7 +59,7 @@
 ## 2. The 4 Instruments × 21 Timeframes — End-to-End Pipeline
 
 ```
-   Dhan API (5 r/s + 100K/day quota)         Lake (8 TB SSD, mmap'd)
+   Groww API (5 r/s + 100K/day quota)         Lake (8 TB SSD, mmap'd)
    ─────────────────────────────────         ─────────────────────────
 
    POST /v2/charts/intraday               →  bars/NSE/IDX/NIFTY/
@@ -205,11 +205,11 @@ bar_hash = sha256(
     low_paisa_i64        ‖
     close_paisa_i64      ‖
     volume_i64           ‖   0
-    data_source_version      "dhan-v2-2026-05-15"
+    data_source_version      "groww-v2-2026-05-15"
 )
 ```
 
-**Same bar from Dhan twice = same hash.** Drives:
+**Same bar from Groww twice = same hash.** Drives:
 - Watermark `last_bar_hash` (mutation detection)
 - `data_snapshot_hash` rollup (sha256 over canonical-sorted `bar_hash` set)
 
@@ -359,7 +359,7 @@ When in DAY mode, the engine auto-applies:
 
 | Time | Command | What runs |
 |---|---|---|
-| 22:00 IST | `brutex pull --night-mode` (cron) | Refresh + auto-renew Dhan token |
+| 22:00 IST | `brutex pull --night-mode` (cron) | Refresh + auto-renew Groww token |
 | 22:30 IST | `brutex sweep --stage 2 --until 07:30` | Full-envelope brute force |
 | 07:30 IST | (auto) `brutex sweep --pause` | Clean checkpoint before you wake |
 | 07:35 IST | `brutex doctor` (cron) | Email/Telegram digest of overnight progress |
@@ -426,7 +426,7 @@ grep -E '^[0-9]+\. \*\*' docs/MIGRATION.md | tail -5
 | Variable | Default | Purpose |
 |---|---|---|
 | `BRUTEX_LAKE_ROOT` | `/Volumes/QuantData/brutex-lake` | Parquet+DuckDB+LMDB root |
-| `BRUTEX_DHAN_TOKEN_PATH` | `~/.brutex/dhan/access_token.json` | Auth token JSON |
+| `BRUTEX_GROWW_TOKEN_PATH` | `~/.brutex/groww/access_token.json` | Auth token JSON |
 | `BRUTEX_RUNTIME_FILE` | `~/.brutex/runtime.json` | Service-discovery file |
 | `BRUTEX_HOST_BIND` | `127.0.0.1` | Dashboard bind interface |
 | `BRUTEX_PORT_DASHBOARD` | `9080` | FastAPI port |
@@ -492,8 +492,8 @@ and (if needed) SLA band is amended in `TRACK1_BACKTEST_SPEC.md §2.1`.
    └─────────────────────────────────────────────────────────────┘
 ```
 
-Cross-task coordination = single `flock` on `~/.brutex/dhan.lock`
-(Dhan 5 r/s quota is global to the user, not the run).
+Cross-task coordination = single `flock` on `~/.brutex/groww.lock`
+(Groww 5 r/s quota is global to the user, not the run).
 
 ---
 
@@ -601,7 +601,7 @@ These three are cheap NOW but expensive later. Should land in Phase 1 alongside 
 | 88 | **Common runtime bootstrap** via `.claude/settings.json` SessionStart hook calling `scripts/ci/session_bootstrap.sh` (Phase 1 deliverable). 5-step, < 5s, read-only. |
 | 89 | **`brutex doctor` CLI** (Phase 1) runs all 10 C1-C10 invariants → single status table; exit 0/1; designed as the first command of any workday. |
 | 90 | **MCP servers**: filesystem + github + duckdb + lmdb + prometheus. Filesystem and prometheus are community servers; duckdb + lmdb are thin Python wrappers (Phase 1 deliverable). |
-| 91 | **Cowork per-task isolation**: git worktree per task + per-run LMDB sub-dir + per-run audit JSONL + global flock on `~/.brutex/dhan.lock` for Dhan rate budget. |
+| 91 | **Cowork per-task isolation**: git worktree per task + per-run LMDB sub-dir + per-run audit JSONL + global flock on `~/.brutex/groww.lock` for Groww rate budget. |
 | 92 | **`combo_hash` signature widening** (Phase 1, gap G6 from runtime audit) — extend `brutex/strategies/combo.py` from 4 inputs to 9 inputs matching spec §14. Cheap now, expensive later. |
 | 93 | **Result Parquet `dataclass`** codified in `brutex/strategies/result.py` (Phase 1, gap G2) — even before engine code lands. Prevents drift like #92. |
 | 94 | **`WorkItem.content_hash` invariant property test** (Phase 1) — asserts `content_hash == sha256(canonical(params))` for every stored item. Catches silent dedup-corruption class. |

@@ -7,7 +7,7 @@ traceable to a verified source" (Golden Rule #1 in CLAUDE.md) was
 must be CORRECT, not just present) requires reviewer judgement,
 this script catches the most common failure mode:
 
-* PR body mentions an external system (Dhan / NSE / BSE / SEBI /
+* PR body mentions an external system (Groww / NSE / BSE / SEBI /
   brokerage / API / rate limit) WITHOUT a nearby citation.
 
 A "citation" is one of:
@@ -16,7 +16,7 @@ A "citation" is one of:
 * An ISO-8601-ish date with "verified" nearby (e.g., ``verified 2026-05-15``)
 * A reference to a tracked doc (``CLAUDE.md §6``, ``MIGRATION.md entry #NNN``,
   ``TRACK1_*.md §...``)
-* A primary-source phrase (``dhanhq.co/docs``, ``nseindia.com``)
+* A primary-source phrase (``groww.in/trade-api/docs/docs``, ``nseindia.com``)
 
 Usage
 -----
@@ -61,7 +61,7 @@ from pathlib import Path
 # is highest (per CLAUDE.md §6 verified-facts table).
 EXTERNAL_CLAIM_KEYWORDS = re.compile(
     r"\b("
-    r"dhan(?:hq)?|"
+    r"groww(?:hq)?|"
     r"nse(?:india)?|"
     r"bse(?:india)?|"
     r"sebi|"
@@ -92,12 +92,12 @@ CITATION_PATTERNS = [
     re.compile(r"MIGRATION\.md\s+(?:entry\s*)?#\d+", re.IGNORECASE),
     re.compile(r"TRACK[12]_[A-Z_]+\.md", re.IGNORECASE),
     re.compile(r"STANDARDS_100PCT\.md\s*§", re.IGNORECASE),
-    re.compile(r"dhanhq\.co/docs", re.IGNORECASE),
+    re.compile(r"groww\.in/trade-api/docs", re.IGNORECASE),
     re.compile(r"nseindia\.com", re.IGNORECASE),
     # Decision IDs (DEC-FOO-NNN) also count — those resolve to ledger entries.
     re.compile(r"\bDEC-[A-Z][A-Z0-9_-]*-\d{3,}\b"),
     # Source-attribution words right next to a claim.
-    re.compile(r"\bper\s+(the\s+)?dhanhq?", re.IGNORECASE),
+    re.compile(r"\bper\s+(the\s+)?groww", re.IGNORECASE),
     re.compile(r"\bcited\s+(in|at)\b", re.IGNORECASE),
 ]
 
@@ -132,7 +132,7 @@ def find_uncited_external_claims(text: str) -> list[str]:
     ``per `CLAUDE.md §6` `` legitimately wraps the citation as inline
     code, but the citation IS a citation regardless of its formatting.
     Keywords are checked on the STRIPPED text so example claims inside
-    backticks (``the scanner looks for `dhan` keyword``) don't trigger.
+    backticks (``the scanner looks for `groww` keyword``) don't trigger.
     """
     paragraphs_original = split_into_paragraphs(text)
     paragraphs_stripped = split_into_paragraphs(strip_code_spans(text))
@@ -184,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         "❌ MERGE BLOCKED — the PR body mentions external systems "
-        "(Dhan / NSE / BSE / etc.) without a nearby citation. "
+        "(Groww / NSE / BSE / etc.) without a nearby citation. "
         "Per CLAUDE.md Golden Rule #1 (no hallucination): every factual "
         "claim about external systems must be traceable to a verified "
         "source.\n"
@@ -201,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         "  - Reference to CLAUDE.md §N or MIGRATION.md entry #NNN\n"
         "  - Reference to TRACK1_*.md / STANDARDS_100PCT.md\n"
         "  - A DEC-FOO-NNN identifier resolving to a ledger entry\n"
-        "  - Primary source (dhanhq.co/docs, nseindia.com)\n"
+        "  - Primary source (groww.in/trade-api/docs/docs, nseindia.com)\n"
         "\nOR re-run with HALLUCINATION_SCAN_ALLOW_MISSING=1 + ADR "
         "if the false-positive is legitimate (e.g., a claim about INTERNAL "
         "BruteX code that happens to mention 'rate_limit' as an internal "

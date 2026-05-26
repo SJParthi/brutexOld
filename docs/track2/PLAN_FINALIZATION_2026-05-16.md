@@ -14,7 +14,7 @@ locked.
 
 | # | Stream | Major finding | Spec impact |
 |---|---|---|---|
-| A | Dhan options data API | `securityId` = UNDERLYING's id (e.g., 13 for NIFTY), NOT per-contract. Marketed 5yr depth, but community evidence suggests ~2yr reality. | §3 simplification + Phase 0 empirical probe |
+| A | Groww options data API | `securityId` = UNDERLYING's id (e.g., 13 for NIFTY), NOT per-contract. Marketed 5yr depth, but community evidence suggests ~2yr reality. | §3 simplification + Phase 0 empirical probe |
 | B | NSE/BSE expiry calendar | Current spec days correct BUT historical changes (Sept 2025, Nov 2024) not modeled. Settlement is 30-min VWAP, not single tick. Holiday shifts to PREVIOUS trading day. | §6 historical effective-date footnotes |
 | C | Risk-free rate `r` | FBIL daily T-bill curve best source. q≠0 is a **modeling error** for price indexes — material 1-4% bias. Monthly snapshot too coarse. | §7 major rewrite |
 | D | BSM Greeks validation | T-floor 10 min; vega-floor 1e-6; |delta|≥0.02 filter; dual oracle (Jäckel + QuantLib); tick-floor saturation flag. q=0 acceptable IF clearly documented + fills are observed (not BSM-priced). | §7 expansion |
@@ -24,25 +24,25 @@ require operator input before code-lock; 5 spec sections need amendment.
 
 ---
 
-## 1. Stream A — Dhan Options Data API
+## 1. Stream A — Groww Options Data API
 
 ### 1.1 Findings (verified)
 
 | Item | Finding | Source |
 |---|---|---|
-| Endpoint | `POST /v2/charts/rollingoption` (SDK: `expired_options_data`) | dhanhq.co/docs/v2/expired-options-data |
+| Endpoint | `POST /v2/charts/rollingoption` (SDK: `expired_options_data`) | groww.in/trade-api/docs/docs/v2/expired-options-data |
 | Fields returned | OHLC + volume + **OI** + **IV** + spot per minute | Same |
 | Greeks | NOT returned — must compute from IV via BSM | Same |
 | Strike addressing | ATM-relative `"ATM"`, `"ATM±N"` — max ±10 for index near-expiry, ±3 otherwise | Same |
 | Rate limit | 5 req/s + 100,000/day (same as spot) | Same |
 | **securityId** | **UNDERLYING's id** (e.g., 13 for NIFTY) — NOT per-strike | SDK source on GitHub |
-| Marketed depth | ~5 years rolling | dhanhq.co docs |
+| Marketed depth | ~5 years rolling | groww.in/trade-api/docs docs |
 
 ### 1.2 CRITICAL UNVERIFIED
 
 | Item | Why it matters | Evidence |
 |---|---|---|
-| Actual historical depth | Track 2 floor of 2021-01-01 may be unachievable | tradingqna.com thread titled "Dhan API for expired F&O data (1-min, **2 years**)" |
+| Actual historical depth | Track 2 floor of 2021-01-01 may be unachievable | tradingqna.com thread titled "Groww API for expired F&O data (1-min, **2 years**)" |
 | SENSEX coverage depth | If shorter, SENSEX scope shrinks | Not enumerated in docs |
 | Per-contract data gaps | Non-idempotent responses suggested by community-built ExpiryFlow having duplicate-detection | Community project, not docs |
 
@@ -58,7 +58,7 @@ require operator input before code-lock; 5 spec sections need amendment.
 - §3 endpoint section: add note "securityId is UNDERLYING's spot id"
 - Add §3.x: "Phase 0 empirical probe to discover real historical floor"
 - §3 unverified items: add SENSEX coverage depth + per-bar duplicates
-- `CLAUDE.md §6 Verified Dhan Facts`: add `rollingoption` endpoint row
+- `CLAUDE.md §6 Verified Groww Facts`: add `rollingoption` endpoint row
 
 ---
 
@@ -142,7 +142,7 @@ broker calculators (Zerodha Varsity) use q=0 for simplicity.
 **OPTION A — Keep q=0 (simplicity):**
 - Pro: matches Zerodha Varsity + most retail platforms
 - Pro: bias mostly cancels for **relative delta ranking** (Track 2 strike selection by delta-bucket)
-- Con: theoretical price differs ~1-4% from market — but Track 2 uses Dhan-observed prices for FILLS, so this doesn't affect P&L directly
+- Con: theoretical price differs ~1-4% from market — but Track 2 uses Groww-observed prices for FILLS, so this doesn't affect P&L directly
 - Con: degrades BSM-derived Greeks slightly (delta off by ~0.005-0.02)
 - **Conditional acceptable** if spec explicitly documents the bias direction + restricts BSM to delta-ranking only
 
@@ -153,7 +153,7 @@ broker calculators (Zerodha Varsity) use q=0 for simplicity.
 - Con: small quarterly refresh maintenance
 
 **Recommendation:** OPTION A (keep q=0) with explicit documentation
-of the bias. Track 2 uses observed Dhan prices for all fills, so the
+of the bias. Track 2 uses observed Groww prices for all fills, so the
 BSM bias only affects delta-strike selection (relative ranking is
 preserved). Defer to OPTION B only if operator wants institutional-grade
 pricing rigor.
@@ -181,7 +181,7 @@ FBIL with RBI weekly auction fallback**". Storage: 1,300 rows × 8 bytes
 |---|---|
 | Option style | All 3 indexes EUROPEAN, cash-settled → BSM closed-form is EXACT (no American adjustment) |
 | Settlement | T+1 cash credit of intrinsic value × lot × n_lots |
-| Dhan IV method | UNVERIFIED. Recommend ingest as-is + cross-check at 50bp tolerance |
+| Groww IV method | UNVERIFIED. Recommend ingest as-is + cross-check at 50bp tolerance |
 | IV stability deep OTM | Newton-Raphson fails when vega→0. Use Jäckel's `lets_be_rational` (rational + Householder) |
 | Strike filters | |delta| ≥ 0.02 AND vega ≥ 1e-6 OR reject from universe |
 | Greeks near expiry | Mathematical divergence as T→0. Hard T-floor of 600 seconds (10 min). Track 2 exits at 15:20 IST → never inside this window. |
@@ -196,16 +196,16 @@ is "stuck" at the ₹0.05 floor. This produces:
 - Theoretical ₹0.0473 → quoted ₹0.05 (5.7% markup, manageable)
 - Theoretical ₹0.0094 → quoted ₹0.05 (5.3× markup, unusable)
 
-Track 2 design (observed Dhan prices for FILLS + BSM-from-Dhan-IV for
+Track 2 design (observed Groww prices for FILLS + BSM-from-Groww-IV for
 GREEKS) is correct. Add safeguard: flag any strike at ₹0.05 floor for
 ≥ N consecutive bars as "tick-floor saturated" and exclude from entry
 universe.
 
 ### 4.3 IV cross-check
 
-Ingest Dhan's `implied_volatility` as authoritative. ALSO recompute IV
+Ingest Groww's `implied_volatility` as authoritative. ALSO recompute IV
 in Rust BSM from observed mid-price. Assert agreement within 50bp.
-If mismatch: flag the bar in audit log but DO NOT replace Dhan's value
+If mismatch: flag the bar in audit log but DO NOT replace Groww's value
 (reproducibility > pedantic correctness).
 
 ### 4.4 Decisions
@@ -235,17 +235,17 @@ Across CALCULATOR_SPEC §16 (8 items) + new from this research:
 
 | # | Item | Stream | Blocker for? |
 |---|---|---|---|
-| 1 | Dhan rate card (₹20 brokerage) | (earlier) | Calculator |
+| 1 | Groww rate card (₹20 brokerage) | (earlier) | Calculator |
 | 2 | Finance Act 2026 STT 0.15% gazette | (earlier) | Calculator post-Apr-2026 |
 | 3 | BSE Bankex options exchange rate | (earlier) | SENSEX only |
 | 4 | STT-on-exercise rate post-Apr-2026 | (earlier) | Held-to-expiry tracks only |
 | 5 | SENSEX freeze qty post-Mar-2026 | (earlier) | High-lot SENSEX |
-| 6 | Dhan Call & Trade exact rate | (earlier) | Event-ledger only |
-| 7 | Dhan API-vs-UI brokerage parity | (earlier) | Blanket assumption |
-| 8 | Dhan auto-SqOff trigger conditions | (earlier) | Event-ledger only |
-| **9** | **Dhan historical depth — does 2021-01-01 floor work?** | **A** | **Entire 2021-2024 backfill** |
-| **10** | **Dhan SENSEX coverage depth** | **A** | **SENSEX backfill** |
-| **11** | **Dhan IV computation methodology** | **D** | **IV reproducibility** |
+| 6 | Groww Call & Trade exact rate | (earlier) | Event-ledger only |
+| 7 | Groww API-vs-UI brokerage parity | (earlier) | Blanket assumption |
+| 8 | Groww auto-SqOff trigger conditions | (earlier) | Event-ledger only |
+| **9** | **Groww historical depth — does 2021-01-01 floor work?** | **A** | **Entire 2021-2024 backfill** |
+| **10** | **Groww SENSEX coverage depth** | **A** | **SENSEX backfill** |
+| **11** | **Groww IV computation methodology** | **D** | **IV reproducibility** |
 | **12** | **FBIL programmatic API availability** | **C** | **Risk-free rate ingest** |
 | **13** | **NIFTY trailing dividend yield series (if Option B chosen)** | **C** | **BSM pricing rigor** |
 | **14** | **Operator decision on q=0 vs q=NIFTY-yield** | **C+D** | **BSM Greeks** |
@@ -260,26 +260,26 @@ Before any code commits, operator must:
 
 ### CRITICAL (block all options work)
 
-- [ ] **9.** Run empirical probe: fetch NIFTY weekly ATM CE for 2020-12-31, 2021-01-01, 2022-01-01, 2023-01-01, 2024-01-01 to discover actual Dhan historical floor
+- [ ] **9.** Run empirical probe: fetch NIFTY weekly ATM CE for 2020-12-31, 2021-01-01, 2022-01-01, 2023-01-01, 2024-01-01 to discover actual Groww historical floor
 - [ ] **10.** Same probe for SENSEX (oldest plausible BSE weekly expiry)
 - [ ] **14.** DECIDE: q=0 (simplicity) OR q=NIFTY-trailing-yield (rigor) for BSM dividend treatment
 
 ### BLOCKERS for calculator (per earlier work)
 
-- [ ] **1.** Visit `dhan.co/pricing` in browser, screenshot, confirm ₹20/order brokerage
+- [ ] **1.** Visit `groww.co/pricing` in browser, screenshot, confirm ₹20/order brokerage
 - [ ] **2.** Verify Finance Act 2026 STT 0.15% gazette
 - [ ] **4.** Same gazette → STT-on-exercise rate
 
 ### MEDIUM (can defer to relevant module)
 
-- [ ] **11.** Open Dhan support ticket: IV computation method (Newton-Raphson? Mid-price? LTP?)
+- [ ] **11.** Open Groww support ticket: IV computation method (Newton-Raphson? Mid-price? LTP?)
 - [ ] **12.** Verify FBIL programmatic API exists (else build HTML scraper)
 - [ ] **13.** IF Option B chosen: identify dividend yield data source
 - [ ] **3.** BSE Bankex options rate (SENSEX only)
 - [ ] **5.** SENSEX freeze qty post-Mar-2026
-- [ ] **6.** Dhan Call & Trade rate
-- [ ] **7.** Dhan API-vs-UI brokerage parity
-- [ ] **8.** Dhan auto-SqOff trigger conditions
+- [ ] **6.** Groww Call & Trade rate
+- [ ] **7.** Groww API-vs-UI brokerage parity
+- [ ] **8.** Groww auto-SqOff trigger conditions
 
 ---
 
@@ -297,7 +297,7 @@ Before any code commits, operator must:
 
 ### What's amended this round
 
-1. §3 Dhan endpoint: securityId clarification + Phase 0 probe
+1. §3 Groww endpoint: securityId clarification + Phase 0 probe
 2. §6 trade horizon: historical effective-date footnotes + settlement formula + holiday shift
 3. §7 Greeks: 7 new subsections (T-floor, vega-floor, dual oracle, tick saturation, IV cross-check, MM→CC conversion, daily snapshot)
 
@@ -328,7 +328,7 @@ for deep verification. 2 parallel agents dispatched. Both returned.
 | # | Claim | Verdict |
 |---|---|---|
 | 1 | Futures STT 0.05% post-Apr-2026 (Budget 2026) | ✅ **VERIFIED** — multiple Q1 2026 sources |
-| 2 | Dhan futures brokerage = min(₹20, 0.03% × turnover) | ✅ **VERIFIED** — same MIS + NRML |
+| 2 | Groww futures brokerage = min(₹20, 0.03% × turnover) | ✅ **VERIFIED** — same MIS + NRML |
 | 3 | Options exercise = ₹20 per CONTRACT | ❌ **CONTRADICTED** — actual is per ORDER. Prompt would over-count 100-lot exercise by ₹1,980 |
 | 4 | Physical settlement = 0.10% of contract value | ✅ **VERIFIED** — stock derivs only; index F&O is cash-settled |
 
@@ -344,9 +344,9 @@ for deep verification. 2 parallel agents dispatched. Both returned.
 All 4 instrument lot sizes match prompt. Freeze quantities for
 FINNIFTY/MIDCPNIFTY/BANKEX are UNVERIFIED (NSE circulars HTTP 403).
 
-### 8.3 Dhan-specific gotcha — ₹20 on worthless options
+### 8.3 Groww-specific gotcha — ₹20 on worthless options
 
-**NEW FINDING:** Dhan charges ₹20 per executed order EVEN when an
+**NEW FINDING:** Groww charges ₹20 per executed order EVEN when an
 option expires worthless. Unlike Zerodha which dropped this to ₹0 in
 June 2024. Material for short-OTM held-to-expiry strategies (each
 worthless short costs ₹23.60 = ₹20 + 18% GST).
@@ -369,7 +369,7 @@ Operator chose "Adopt structure only" (recommended option). Means:
 - §1 inputs: replaced `held_to_expiry_exercise: bool` with
   `trade_outcome: TradeOutcome` enum
 - §4.2 rewritten as 4-outcome state machine
-- §4.3 added: Dhan ₹20-on-worthless gotcha
+- §4.3 added: Groww ₹20-on-worthless gotcha
 - §4.4 added: prompt-error correction recorded (per-contract WRONG)
 - §11 API: TradeOutcome enum added
 - §16 unverified items: 14 → 17 (added items 15-17)
