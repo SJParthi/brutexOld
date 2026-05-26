@@ -399,6 +399,11 @@ class AdaptiveRateLimiter:
         if elapsed < self.config.step_up_clean_window:
             return  # Not enough clean time yet.
 
+        # Drop hit timestamps older than the step-down window before
+        # checking "have we been clean?". Without this, a single stale
+        # hit sitting in the buffer would block step-up forever.
+        self._prune_hits(now)
+
         if self._hit_timestamps:
             # Hits within the step-down window mean we haven't been clean —
             # reset the step-up clock but don't change the rate.
