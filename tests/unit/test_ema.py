@@ -9,7 +9,7 @@ Verified against:
 from __future__ import annotations
 
 import pytest
-from brutex.indicators.ema import alpha, compute_ema, latest_ema
+from brutex.indicators.ema import EMAState, alpha, compute_ema, latest_ema
 
 
 class TestAlpha:
@@ -94,6 +94,87 @@ class TestComputeEma:
         assert result[49] < 50.0  # type: ignore[operator]
         # And > 1.0 (above the start)
         assert result[49] > 1.0  # type: ignore[operator]
+
+
+class TestComputeEmaInvalidPeriod:
+    def test_period_zero_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1"):
+            compute_ema([1.0, 2.0, 3.0], period=0)
+
+    def test_period_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1"):
+            compute_ema([1.0, 2.0, 3.0], period=-5)
+
+
+class TestStateLifecycle:
+    def test_reset_clears_value_and_counters(self) -> None:
+        state = EMAState.new(period=3)
+        state.update(10.0)
+        state.update(20.0)
+        state.update(30.0)
+        # Snapshot via to_dict so we don't narrow state.value to float
+        # — that would make the post-reset `is None` assertion below
+        # unreachable per mypy's strict inference.
+        populated = state.to_dict()
+        assert populated["value"] == 20.0
+        assert populated["bars_seen"] == 3
+        assert populated["seed_sum"] == 60.0
+
+        state.reset()
+        fresh = state.to_dict()
+        assert fresh["value"] is None
+        assert fresh["bars_seen"] == 0
+        assert fresh["seed_sum"] == 0.0
+
+    def test_reset_allows_clean_replay(self) -> None:
+        state = EMAState.new(period=3)
+        for v in [10.0, 20.0, 30.0, 40.0, 50.0]:
+            state.update(v)
+        assert state.to_dict()["value"] == 40.0
+        state.reset()
+        replay = [state.update(v) for v in [10.0, 20.0, 30.0, 40.0, 50.0]]
+        assert replay == [None, None, 20.0, 30.0, 40.0]
+
+
+class TestStateSerialization:
+    def test_to_dict_during_warmup(self) -> None:
+        state = EMAState.new(period=5)
+        state.update(10.0)
+        state.update(20.0)
+        d = state.to_dict()
+        assert d == {
+            "period": 5,
+            "alpha": 2.0 / 6.0,
+            "value": None,
+            "bars_seen": 2,
+            "seed_sum": 30.0,
+        }
+
+    def test_to_dict_post_seed(self) -> None:
+        state = EMAState.new(period=3)
+        for v in [10.0, 20.0, 30.0, 40.0]:
+            state.update(v)
+        d = state.to_dict()
+        assert d["period"] == 3
+        assert d["value"] == 30.0
+        assert d["bars_seen"] == 4
+
+    def test_from_dict_round_trip(self) -> None:
+        original = EMAState.new(period=3)
+        for v in [10.0, 20.0, 30.0, 40.0]:
+            original.update(v)
+
+        snapshot = original.to_dict()
+        restored = EMAState.from_dict(snapshot)
+        assert restored.value == original.value
+        assert restored.bars_seen == original.bars_seen
+        assert restored.seed_sum == original.seed_sum
+        assert restored.period == original.period
+        assert restored.alpha == original.alpha
+
+        next_value_original = original.update(50.0)
+        next_value_restored = restored.update(50.0)
+        assert next_value_original == next_value_restored
 
 
 class TestLatestEma:

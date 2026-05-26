@@ -40,6 +40,17 @@ class TestFindPrevTradingDay:
         result = find_prev_trading_day(date(2024, 1, 29))
         assert result == date(2024, 1, 25)
 
+    def test_returns_none_when_lookback_exhausted(self) -> None:
+        # Mon 2026-05-11 with lookback_max=1: only Sun 2026-05-10 is checked,
+        # which is not a trading day -> loop ends without a hit -> None.
+        result = find_prev_trading_day(date(2026, 5, 11), lookback_max=1)
+        assert result is None
+
+    def test_returns_none_when_lookback_zero(self) -> None:
+        # lookback_max=0 skips the loop entirely.
+        result = find_prev_trading_day(date(2026, 5, 12), lookback_max=0)
+        assert result is None
+
 
 class TestLookupPrevDayOHLC:
     @pytest.fixture
@@ -92,6 +103,19 @@ class TestLookupPrevDayOHLC:
 
     def test_missing_daily_candle_returns_none(self) -> None:
         # Empty dict -> no prev_day lookup possible
+        result = lookup_prev_day_ohlc(date(2026, 5, 12), {})
+        assert result is None
+
+    def test_returns_none_when_no_prev_trading_day_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Simulate the pathological case where find_prev_trading_day exhausts
+        # its lookback window (would require a > 14-day non-trading stretch
+        # in reality, which doesn't exist on the NSE calendar — so we patch).
+        monkeypatch.setattr(
+            "brutex.indicators.prev_day_ohlc.find_prev_trading_day",
+            lambda *_args, **_kwargs: None,
+        )
         result = lookup_prev_day_ohlc(date(2026, 5, 12), {})
         assert result is None
 

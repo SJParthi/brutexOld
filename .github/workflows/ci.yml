@@ -601,6 +601,39 @@ jobs:
           #   echo "(brutex.orchestrator.replay test file not present yet — gate inactive)"
           # fi
           echo "(brutex.orchestrator.replay strict gate temporarily disabled — see notifications.wiring comment for fastbloom_rs PyO3 ABI3 detail)"
+          # DEC-COV-001 step 18: 3-module indicator backfill batch
+          # (DEC-INDICATOR-COVERAGE-001, ratchets the last 3 Track 1
+          # indicator modules below strict-100% up to the gate). Each
+          # got surgical tests for reset() / to_dict() / from_dict() /
+          # validate-period / find-prev-trading-day exhaustion paths.
+          # 18a · brutex.indicators.ema (55 stmts, 14 branches, 22 tests)
+          #       Streaming EMA state — close 89.86 → 100% by covering
+          #       reset, serialize/restore round-trip, zero/neg-period
+          #       ValueError in compute_ema.
+          if compgen -G "tests/unit/test_ema.py" > /dev/null; then
+            pytest --cov=brutex.indicators.ema --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ema.py
+          else
+            echo "(brutex.indicators.ema test file not present yet — gate inactive)"
+          fi
+          # 18b · brutex.indicators.day_extremes (43 stmts, 4 branches, 14 tests)
+          #       Running day_high / day_low state — close 87.23 → 100%
+          #       by covering reset, to_dict with/without current_day,
+          #       from_dict round-trip both branches.
+          if compgen -G "tests/unit/test_day_extremes.py" > /dev/null; then
+            pytest --cov=brutex.indicators.day_extremes --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_day_extremes.py
+          else
+            echo "(brutex.indicators.day_extremes test file not present yet — gate inactive)"
+          fi
+          # 18c · brutex.indicators.prev_day_ohlc (44 stmts, 14 branches, 13 tests)
+          #       Calendar-aware prior trading day OHLC lookup — close
+          #       93.10 → 100% by covering find_prev_trading_day lookback
+          #       exhaustion (lookback_max=0/1) + lookup returns None
+          #       branch via monkeypatch.
+          if compgen -G "tests/unit/test_prev_day_ohlc.py" > /dev/null; then
+            pytest --cov=brutex.indicators.prev_day_ohlc --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_prev_day_ohlc.py
+          else
+            echo "(brutex.indicators.prev_day_ohlc test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
