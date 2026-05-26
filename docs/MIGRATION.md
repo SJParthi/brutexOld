@@ -335,6 +335,38 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+245. **DEC-INDICATOR-COVERAGE-001 / DEC-COV-001 step 18 — 3-module indicator backfill: ema (89.86 → 100%) + day_extremes (87.23 → 100%) + prev_day_ohlc (93.10 → 100%)** (2026-05-26, operator directive: "Tell me which next-option to start, then go" → my recommended Option 2 of 4). Closes the last 3 strict-100% candidates among the 9 Track 1 indicator modules; brings the strict-per-module gate count **30 → 33**. Pure surgical-test backfill — zero source-code changes to `brutex/indicators/`. All 3 modules now sit inside the strict per-module 100% gate alongside `pivots` (step 9), `fib_levels` (step 10), `calendars.nse` + `adapters.dhan.auth` + `options.expiry_calendar` (step 11), and the other 24 strict-100% modules.
+
+    **Three-module batch (~14 new tests across 3 existing test files, no new files):**
+
+    - **`brutex/indicators/ema.py`** (55 stmts, 14 branches → 100% line + branch). 7 new tests across 2 new classes:
+      - `TestComputeEmaInvalidPeriod` (2 tests): period=0 and period=-5 both raise `ValueError("must be >= 1")` — closes line 179.
+      - `TestStateLifecycle` (2 tests): `EMAState.reset()` clears `value`/`bars_seen`/`seed_sum`; reset-then-replay produces the same sequence as fresh — closes lines 141-143.
+      - `TestStateSerialization` (3 tests): `to_dict()` during warm-up + post-seed; `from_dict()` round-trip preserves identity AND lets the restored state continue updating bit-identically to the original — closes lines 147 + 158.
+      - Note: lifecycle/serialization tests deliberately snapshot via `to_dict()` rather than asserting on `state.value` directly because mypy's strict type-narrower would otherwise mark the post-reset `is None` assertion as unreachable (`state.value` narrowed to `float` after the populated-state assertion).
+
+    - **`brutex/indicators/day_extremes.py`** (43 stmts, 4 branches → 100% line + branch). 5 new tests across 2 new classes:
+      - `TestStateLifecycle` (1 test): `DayExtremesState.reset()` clears `current_day`/`day_high_paisa`/`day_low_paisa` — closes lines 132-134.
+      - `TestStateSerialization` (4 tests): `to_dict()` with `current_day` set AND fresh-state (covers both branches of the `current_day.isoformat() if … else None` conditional — closes line 138); `from_dict()` round-trip with day AND fresh-state — closes lines 147-148.
+      - Same mypy-narrowing-avoidance pattern as EMA (use `to_dict()` view for reset-state assertions).
+
+    - **`brutex/indicators/prev_day_ohlc.py`** (44 stmts, 14 branches → 100% line + branch). 3 new tests added to 2 existing classes:
+      - `TestFindPrevTradingDay::test_returns_none_when_lookback_exhausted` — `find_prev_trading_day(Mon 2026-05-11, lookback_max=1)` → only Sun 2026-05-10 checked, not a trading day, loop exits, returns None. Closes line 96.
+      - `TestFindPrevTradingDay::test_returns_none_when_lookback_zero` — `lookback_max=0` skips the loop entirely. Defensive coverage of the boundary.
+      - `TestLookupPrevDayOHLC::test_returns_none_when_no_prev_trading_day_found` — `monkeypatch.setattr` on `brutex.indicators.prev_day_ohlc.find_prev_trading_day` to return None (simulates the pathological case that would require a >14-day non-trading stretch in reality, which doesn't exist on the NSE calendar). Closes line 125.
+
+    **CI gate addition:** `.github/workflows/ci.yml` gains 3 strict-per-module gate blocks immediately after the (currently-disabled) `brutex.orchestrator.replay` gate, following the same `compgen -G … && pytest --cov-fail-under=100` pattern used for the other 30 strict gates.
+
+    **Local verification:** 49 tests pass under `.venv/bin/pytest` for the 3 files; all 3 modules at 100% line + branch with `--cov-fail-under=100`. `ruff check brutex tests` GREEN; `ruff format --check brutex tests` GREEN; `mypy --strict tests/unit/test_ema.py tests/unit/test_day_extremes.py tests/unit/test_prev_day_ohlc.py` GREEN (the 3 pre-existing `Unused "type: ignore"` errors on lines 85/94/96 of test_ema.py exist on the baseline branch and are out of scope for this PR).
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: 3 modules now mechanically gated at 100% line + branch on every push; no future regression can land silently.
+    - ✅ REAL: tests exercise REAL contract (reset semantics, serialization round-trip, lookback exhaustion) — not coverage-padding.
+    - 🟡 PARTIAL: `test_prev_day_ohlc.py::test_returns_none_when_no_prev_trading_day_found` uses `monkeypatch.setattr` to force the None-return branch because the NSE calendar has no real ≥14-day non-trading stretch. The patched test exercises the line but not the upstream calendar condition that would trigger it organically; this is a contract-level test, not a calendar-data integration test.
+    - 📋 ROADMAP: vocabulary modules (`bits.py` at 93.85%, `evaluator.py` at 95.38%) are the next strict-100% candidates if the operator wants to tighten further. The remaining gap is mostly in `evaluator.py` defensive `# pragma: no cover` paths that already document themselves as unreachable invariants.
+
+    **Decision ID:** DEC-INDICATOR-COVERAGE-001 (also DEC-COV-001 step 18). **Builds on:** DEC-COV-001 steps 9-11 (indicator gates for pivots, fib_levels, calendars.nse, expiry_calendar). **Closes:** the 3 sub-rows of the "📋 ROADMAP — strict per-module 100% for the remaining indicator modules" line item from STANDARDS_100PCT.md §1 row 1 (coverage).
+
 244. **DEC-INFRA-OPS-001 — operator infra/env bundle: bootstrap.sh + env-var registry + Telegram smoke-test + live-dedup dump script** (2026-05-25, operator directive: "focus only on infra environment related changes alone"). Closes the operations-readiness gap for the 4 detector modules merged in PRs #126/#129/#131: code is wired, but operators had no scripts to (a) bootstrap a fresh box, (b) discover the env-var schema, (c) verify Telegram end-to-end, (d) dump the live LMDB dedup state for the L3 replay oracle.
 
     **New files (no application logic — pure operations surface):**

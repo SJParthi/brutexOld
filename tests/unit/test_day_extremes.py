@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from brutex.indicators.day_extremes import compute_day_extremes
+from brutex.indicators.day_extremes import DayExtremesState, compute_day_extremes
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -124,6 +124,69 @@ class TestEdgeCases:
         result = compute_day_extremes(bars)
         assert result[0].day_high_paisa == 5400000
         assert result[0].day_low_paisa == 5400000
+
+
+class TestStateLifecycle:
+    def test_reset_clears_state(self) -> None:
+        state = DayExtremesState()
+        state.update(_t(13, 9, 15), 5400000, 5395000)
+        state.update(_t(13, 9, 16), 5410000, 5390000)
+        # Snapshot via to_dict so we don't narrow state.current_day to
+        # `date` — that would make the post-reset `is None` assertion
+        # below unreachable per mypy's strict inference.
+        populated = state.to_dict()
+        assert populated["current_day"] == "2026-05-13"
+        assert populated["day_high_paisa"] == 5410000
+        assert populated["day_low_paisa"] == 5390000
+
+        state.reset()
+        fresh = state.to_dict()
+        assert fresh["current_day"] is None
+        assert fresh["day_high_paisa"] == 0
+        assert fresh["day_low_paisa"] == 0
+
+
+class TestStateSerialization:
+    def test_to_dict_with_current_day(self) -> None:
+        state = DayExtremesState()
+        state.update(_t(13, 9, 15), 5400000, 5395000)
+        d = state.to_dict()
+        assert d == {
+            "current_day": "2026-05-13",
+            "day_high_paisa": 5400000,
+            "day_low_paisa": 5395000,
+        }
+
+    def test_to_dict_fresh_state_emits_none(self) -> None:
+        state = DayExtremesState()
+        d = state.to_dict()
+        assert d == {
+            "current_day": None,
+            "day_high_paisa": 0,
+            "day_low_paisa": 0,
+        }
+
+    def test_from_dict_round_trip_with_day(self) -> None:
+        original = DayExtremesState()
+        original.update(_t(13, 9, 15), 5400000, 5395000)
+        original.update(_t(13, 9, 16), 5410000, 5390000)
+        snapshot = original.to_dict()
+        restored = DayExtremesState.from_dict(snapshot)
+        assert restored.current_day == original.current_day
+        assert restored.day_high_paisa == original.day_high_paisa
+        assert restored.day_low_paisa == original.day_low_paisa
+
+        next_h, next_l = restored.update(_t(13, 9, 17), 5420000, 5380000)
+        assert next_h == 5420000
+        assert next_l == 5380000
+
+    def test_from_dict_round_trip_fresh(self) -> None:
+        original = DayExtremesState()
+        snapshot = original.to_dict()
+        restored = DayExtremesState.from_dict(snapshot)
+        assert restored.current_day is None
+        assert restored.day_high_paisa == 0
+        assert restored.day_low_paisa == 0
 
 
 class TestNoLookAhead:
