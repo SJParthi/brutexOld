@@ -1,0 +1,171 @@
+"""Fast pre-push smoke test — ~30s sanity check before pushing to origin.
+
+Phase 1 Week 1 scaffolding deliverable per ``docs/TRACK1_PHASE_PLAN.md``.
+
+This module is the **fastest meaningful CI subset** an operator can
+run locally before pushing. It exists to catch the noisy-flake class
+of failures (lint, format, basic imports, conventional-commit subject)
+in seconds rather than waiting 10+ minutes for the full CI suite.
+
+## Contract
+
+* All tests in this file MUST complete in well under 30 seconds.
+* Tests MUST NOT require network access, the Groww SDK, or any
+  optional dependency. The smoke test runs on a fresh checkout with
+  only the default Python toolchain.
+* Tests assert on the **environment + repository invariants**, not on
+  the BruteX logic — the full unit + property suites cover that.
+
+## What this catches
+
+* Stray Python syntax errors that ruff missed locally
+* Unformatted code (``ruff format --check`` regressions)
+* Missing ``__init__.py`` in a new test directory
+* Broken core package import (``from brutex import ...``)
+* PR commit subject that violates the conventional-commits regex
+
+What this does NOT catch (delegated to full CI):
+
+* Test failures, type errors, mutation-score regressions
+* Coverage drops, benchmark regressions
+* Anything requiring the Rust ``fno_math`` extension
+
+## Decision
+
+DEC-PHASE1-SMOKE-001 (MIGRATION entry #251).
+"""
+
+from __future__ import annotations
+
+import importlib
+import re
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    """Run ``cmd`` and return the completed process; never raise on non-zero."""
+    return subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=cwd or REPO_ROOT,
+        timeout=30,
+    )
+
+
+# ────────────────────────────────────────────────────────────────────
+# Repository layout invariants
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestRepoLayout:
+    def test_top_level_paths_exist(self) -> None:
+        for name in ("brutex", "tests", "docs", "pyproject.toml", "CLAUDE.md"):
+            assert (REPO_ROOT / name).exists(), f"Missing repo artifact: {name}"
+
+    def test_every_test_dir_has_init(self) -> None:
+        for sub in ("unit", "integration", "property", "golden", "bench", "stress", "smoke"):
+            init = REPO_ROOT / "tests" / sub / "__init__.py"
+            assert init.is_file(), f"Missing tests/{sub}/__init__.py"
+
+    def test_no_pycache_in_git_tracked_dirs(self) -> None:
+        # Caches are gitignored; their presence in git ls-files would be a real bug.
+        result = _run(["git", "ls-files", "**/__pycache__/**"])
+        assert result.returncode == 0
+        assert result.stdout.strip() == "", (
+            f"git is tracking __pycache__ entries: {result.stdout!r}"
+        )
+
+
+# ────────────────────────────────────────────────────────────────────
+# Core package import smoke
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestImportSmoke:
+    def test_brutex_top_level_imports(self) -> None:
+        # If this raises, the package is broken in a way no unit test would
+        # catch (the unit suite imports specific submodules; this one imports
+        # the top-level shim).
+        mod = importlib.import_module("brutex")
+        assert mod is not None
+
+    def test_brutex_vocabulary_imports(self) -> None:
+        # Vocabulary is the hot-path import every strategy worker hits.
+        mod = importlib.import_module("brutex.vocabulary")
+        assert hasattr(mod, "evaluate_atoms")
+
+    def test_brutex_indicators_imports(self) -> None:
+        mod = importlib.import_module("brutex.indicators")
+        assert mod is not None
+
+
+# ────────────────────────────────────────────────────────────────────
+# Lint + format checks (runs ruff against the working tree)
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestLintFormat:
+    def test_ruff_check_clean(self) -> None:
+        result = _run(["ruff", "check", "brutex", "tests"])
+        assert result.returncode == 0, (
+            f"ruff check failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+
+    def test_ruff_format_check_clean(self) -> None:
+        result = _run(["ruff", "format", "--check", "brutex", "tests"])
+        assert result.returncode == 0, (
+            f"ruff format --check failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+
+
+# ────────────────────────────────────────────────────────────────────
+# Conventional commit subject (last commit on the working tree)
+# ────────────────────────────────────────────────────────────────────
+
+
+CONVENTIONAL_COMMIT_REGEX = re.compile(
+    r"^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\([a-z0-9_/-]+\))?!?: .+"
+)
+
+
+class TestConventionalCommit:
+    def test_head_commit_subject_matches(self) -> None:
+        result = _run(["git", "log", "-1", "--format=%s"])
+        if result.returncode != 0:
+            pytest.skip(f"git log failed: {result.stderr}")
+        subject = result.stdout.strip()
+        if not subject:
+            pytest.skip("no commits on this branch yet")
+        assert CONVENTIONAL_COMMIT_REGEX.match(subject), (
+            f"HEAD commit subject violates Conventional Commits: {subject!r}"
+        )
+
+
+# ────────────────────────────────────────────────────────────────────
+# Required CLAUDE.md / MIGRATION.md docs
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestRequiredDocs:
+    def test_claude_md_present(self) -> None:
+        path = REPO_ROOT / "CLAUDE.md"
+        assert path.is_file()
+        # Cheap sanity: file is non-trivial (> 1 KB) — guards against an empty stub.
+        assert path.stat().st_size > 1024
+
+    def test_migration_md_present_and_grows(self) -> None:
+        path = REPO_ROOT / "docs" / "MIGRATION.md"
+        assert path.is_file()
+        # Sanity: file is large (>> 1 KB) — guards against accidental truncation.
+        assert path.stat().st_size > 10_000
+
+    def test_track1_phase_plan_present(self) -> None:
+        path = REPO_ROOT / "docs" / "TRACK1_PHASE_PLAN.md"
+        assert path.is_file()

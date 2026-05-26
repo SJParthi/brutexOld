@@ -84,12 +84,12 @@ Phase 2+ code change is verified from day one.
 | Deliverable | Notes |
 |---|---|
 | `tests/property/test_invariants_catalog.py` — canonical catalog of all 24 invariants (DEC-PHASE1-INVARIANT-CATALOG-001, MIGRATION entry #250) | ✅ landed 2026-05-26 — 24 `test_p_NN_*` functions, each `pytest.skip(...)` with either a pointer to the implementing file or a "Phase N pending" tag. Today: ✅ P-01, P-02, P-05, P-16, P-17 (5 of 24 implemented in sibling files); 📋 P-03..P-04, P-06..P-15, P-18..P-24 awaiting Phase 1.5/2/3 work. |
-| `tests/golden/fixtures/` directory created with placeholder fixtures | Real fixtures filled in Phase 2 |
-| `tests/integration/test_replay_audit_log.py` skeleton | Implementation in Phase 2 |
-| `tests/integration/test_python_rust_parity.py` skeleton | Implementation in Phase 3 |
-| `tests/bench/test_hotpath_o1.py` skeleton with 6 hot-path stubs | Implementation in Phase 3 |
-| `tests/stress/test_24h_sustained.py` skeleton | Implementation in Phase 4 |
-| `tests/smoke/test_pre_push.py` skeleton | Implementation in Phase 2 |
+| `tests/golden/fixtures/` directory created with placeholder fixtures | ✅ landed 2026-05-26 (DEC-PHASE1-SMOKE-AND-SKELETONS-001, MIGRATION entry #251) — placeholder README documents the 9 planned corpora; real fixtures land in Phase 2 ingest pipeline |
+| `tests/integration/test_replay_audit_log.py` skeleton | ✅ landed 2026-05-26 (DEC-PHASE1-SMOKE-AND-SKELETONS-001, MIGRATION entry #251) — 4 `pytest.skip` stubs for the audit-log → Parquet roundtrip (P-20); fills in alongside the Parquet writer in Phase 2 |
+| `tests/integration/test_python_rust_parity.py` skeleton | ✅ landed 2026-05-26 (DEC-PHASE1-SMOKE-AND-SKELETONS-001, MIGRATION entry #251) — 5 `pytest.skip` stubs for the 5 hot-path operations; fills in alongside the Rust ↔ Python parity in Phase 2/3 |
+| `tests/bench/test_hotpath_o1.py` skeleton with 6 hot-path stubs | already landed pre-2026-05-26 — see `tests/bench/test_store_o1.py` + `test_rate_limiter_o1.py` + `test_throughput_canary.py` + `test_throughput_absolute.py` + `test_full_sweep_extrapolation.py` |
+| `tests/stress/test_24h_sustained.py` skeleton | already landed as `tests/stress/test_audit_chain_sustained.py` |
+| `tests/smoke/test_pre_push.py` skeleton | ✅ landed 2026-05-26 (DEC-PHASE1-SMOKE-AND-SKELETONS-001, MIGRATION entry #251) — working smoke test (not a skeleton); 5 test classes, ~30s runtime; catches lint/format/import/conventional-commit/docs regressions |
 
 ### Week 2
 
