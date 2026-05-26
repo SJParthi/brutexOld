@@ -95,12 +95,12 @@ Phase 2+ code change is verified from day one.
 
 | Deliverable | Notes |
 |---|---|
-| `cargo-fuzz` target list under `rust/fno-math/fuzz/` for 7 targets | Empty fuzz targets, will be seeded in Phase 2 |
-| `cargo-mutants` config (`.cargo/mutants.toml`) | Wires the 85% gate |
-| `tests/golden/condition_truth_table.csv` skeleton with 5 example rows | Fully populated in Phase 2 |
-| `.github/workflows/nightly.yml` new — stress + fuzz | |
-| `.github/workflows/weekly.yml` new — mutation testing | |
-| Coverage gate raised in `pyproject.toml`: `fail_under = 100` | But code paths exempted until they land |
+| `cargo-fuzz` target list under `rust/fno-math/fuzz/` for 7 targets | ✅ landed 2026-05-26 (DEC-PHASE1-WEEK2-SCAFFOLDING-001, MIGRATION entry #252) — README directory marker documents the 7 planned targets; Phase 2 runs `cargo fuzz init` + per-target `cargo fuzz add` as each hot-path implementation lands |
+| `cargo-mutants` config (`.cargo/mutants.toml`) | ✅ landed 2026-05-26 (DEC-PHASE1-WEEK2-SCAFFOLDING-001, MIGRATION entry #252) — walks `rust/fno-math/src/math/` + `src/compat/`; excludes generated PyO3 glue + tests + benches; used by existing `.github/workflows/mutation.yml` |
+| `tests/golden/condition_truth_table.csv` skeleton with 5 example rows | ✅ landed 2026-05-26 (DEC-PHASE1-WEEK2-SCAFFOLDING-001, MIGRATION entry #252) — 5-row skeleton covers `bar_bullish` / `bar_bearish` / `close_above_ema20` / `close_below_ema20` / `early_morning`; Phase 2 expands to ≥ 200 rows |
+| `.github/workflows/nightly.yml` new — stress + fuzz | ✅ already covered by `stress-nightly.yml` (DEC-STRESS-001 entry #208) + `redteam-nightly.yml` + `dep-freshness-nightly.yml` — three split workflows beats one mega-workflow |
+| `.github/workflows/weekly.yml` new — mutation testing | ✅ already covered by `mutation.yml` (canonical weekly job per CLAUDE.md §4) |
+| Coverage gate raised in `pyproject.toml`: `fail_under = 100` | 📋 ROADMAP — coverage is gated per-module via the 33 strict-100% module gates today (DEC-INDICATOR-COVERAGE-001 + DEC-COMBO-HASH-UNIQUENESS-001); global `fail_under = 100` requires the remaining ~16 modules to ratchet up first |
 
 ### Week 3
 

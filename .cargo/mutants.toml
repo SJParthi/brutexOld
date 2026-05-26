@@ -1,0 +1,47 @@
+# cargo-mutants configuration for the BruteX Rust hot kernel.
+#
+# Phase 1 Week 2 scaffolding deliverable per docs/TRACK1_PHASE_PLAN.md
+# (DEC-PHASE1-WEEK2-SCAFFOLDING-001, MIGRATION entry #252).
+#
+# cargo-mutants walks the AST, perturbs one literal / comparison /
+# conditional at a time, and runs the Rust test suite against each
+# mutant. Surviving mutants indicate tests don't actually cover that
+# logic branch.
+#
+# Per CLAUDE.md §4 (mutation score ≥ 85% target) and STANDARDS_100PCT.md
+# row 9 (testing coverage), the long-term target is **zero surviving
+# mutants on critical modules**.
+#
+# This config sets defaults that work today; per-module budget knobs
+# are commented in until each module's surface stabilises.
+
+# Top-level test command — same as `cargo test` but pinned to the
+# release profile so mutants exercise the SIMD/optimised paths.
+test_tool = "cargo"
+test_command = ["test", "--release", "--all-features"]
+
+# Time each mutant can spend before being killed. Critical modules
+# typically test in < 30s so 90s is a generous wall clock.
+timeout_multiplier = 3.0
+minimum_test_timeout = 30  # seconds
+
+# Walk the fno-math crate first; fastest feedback during ratchet PRs.
+examine_re = [
+  "rust/fno-math/src/math/",
+  "rust/fno-math/src/compat/",
+]
+
+# Files cargo-mutants must NEVER mutate — generated Rust glue +
+# tests themselves + benchmark harnesses.
+exclude_re = [
+  "rust/fno-math/src/lib\\.rs",          # generated PyO3 module surface
+  "rust/fno-math/python/",               # generated Python bindings
+  "rust/fno-math/target/",               # build artefacts
+  "rust/fno-math/tests/",                # tests can't mutate themselves
+  "rust/fno-math/benches/",              # bench harnesses
+]
+
+# Skip mutations that are guaranteed-noisy (e.g., turning Debug derives
+# into nothing). The default list covers most of these; add per-mutant
+# overrides as the ratchet uncovers false positives.
+# additional_cargo_args = ["--workspace"]
