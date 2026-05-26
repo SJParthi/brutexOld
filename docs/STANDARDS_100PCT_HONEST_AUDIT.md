@@ -255,7 +255,7 @@ Scope auto enforcement:   [████████████░░░░░�
 | **Hash-chained audit log** | Bank passbook where every page is signed by the previous page's hash — tear one page → tampering visible |
 | **O(1) ratio gate** | Speedometer alarm: 60 km/h with 1 passenger should be 60 km/h with 5 passengers; slows → engine sick |
 | **Bloom + LMDB dedup** | Bouncer at door (fast "probably new") → check ID at desk (slow but certain) |
-| **Telegram alerts (STUB)** | Fire alarm installed, speakers tested, **but no wire from smoke sensor to alarm** |
+| **Telegram alerts (PARTIAL)** | Fire alarm installed, speakers tested, **smoke sensors (SLA + Watchdog + Replay) wired and verified end-to-end (DEC-TELEGRAM-WIRING-VERIFICATION-001); pipeline-event sensor still on the bench waiting for Phase 2** |
 | **Watchdog (MISSING)** | No dead-man's switch on the train; driver passes out → nothing stops the train |
 | **Mutation testing** | Pranking the codebase by mutating one operator at a time; if no test catches the prank, you have a coverage hole |
 | **Property tests (Hypothesis)** | A million random inputs probe corner cases your unit tests forgot |
@@ -268,7 +268,7 @@ Listed by severity. Every one has a tracked PR path.
 
 | Severity | Gap | Why I can't 100%-guarantee | Closure path |
 |---|---|---|---|
-| 🔴 HIGH | Telegram alerts not wired | Code exists; nothing calls `.publish()` | Gap #1 ratchet PR (~250 LoC) |
+| 🟡 MID | Telegram alerts: SLA/Watchdog/Replay wired, pipeline path dormant | `compose_standard_monitor` (PR #131) wires SLA + Watchdog + Replay callbacks → `_publish_telegram` → `notifier.publish` (PR #133 added `cmd_monitor` to drive it). End-to-end chain verified by `tests/integration/test_compose_monitor_sla_to_telegram.py` (DEC-TELEGRAM-WIRING-VERIFICATION-001). `make_pipeline_event_subscriber` exists but is dormant — `PhaseRunner` has zero production callers until Phase 2 drivers land. | Pipeline subscriber activates automatically when Phase 2 drivers instantiate `PhaseRunner` with the subscriber list. |
 | 🔴 HIGH | Watchdog missing | No module exists | Gap #2 ratchet PR (~400 LoC) |
 | 🔴 HIGH | SLA breach alerting missing | No detector | Gap #3 ratchet PR (~250 LoC) |
 | 🔴 HIGH | Server-side branch protection 📋 ROADMAP | Setup runbook §1-6 not completed by operator | Operator action (5 mins in GitHub UI) |

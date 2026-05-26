@@ -335,6 +335,24 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+247. **DEC-TELEGRAM-WIRING-VERIFICATION-001 — end-to-end SLA → Telegram wiring proof + honest-audit Gap #1 reclassification 🔴 HIGH → 🟡 MID** (2026-05-26, operator directive: "go ahea ddude" after option-1 recommendation to close honest-audit Gap #1). Closes the verification gap on `docs/STANDARDS_100PCT_HONEST_AUDIT.md` §9 Gap #1 ("Telegram alerts not wired"). The audit row was written before `compose_standard_monitor` (DEC-STANDARD-MONITOR-001, entry #243) + `cmd_monitor` (DEC-INFRA-OPS-001, entry #244) landed; in fact, SLA + Watchdog + Replay → Telegram is already wired through `_publish_telegram` in `brutex/observability/standard_monitor.py`.
+
+    **What lands:**
+
+    - **`tests/integration/test_compose_monitor_sla_to_telegram.py`** — new end-to-end integration test that drives the full chain `SLARule (breach) → SLADetector.check_once → on_breach callback → _publish_telegram → wiring.get_or_start_notifier → TelegramNotifier.publish → recording transport`. 3 test cases: (a) breach + recovery produce 2 publishes; (b) value below threshold produces zero publishes; (c) `telegram_enabled=False` short-circuits even on breach. The test primes the `wiring._state` singleton with a synchronous `TelegramNotifier` + `RecordingTransport` so no env reads, no real HTTP, no thread lifecycle to wait on.
+    - **`docs/STANDARDS_100PCT_HONEST_AUDIT.md` §9** — Gap #1 row reclassified from 🔴 HIGH ("nothing calls .publish()") to 🟡 MID ("SLA/Watchdog/Replay wired and verified; pipeline path dormant until Phase 2 drivers"). The §8 analogy row updated to match.
+
+    **Why this matters (Golden Rule #10 honest envelope):** prior to this PR the honest-audit summary said `1/4` HIGH gaps remained alertable. Reality: SLA + Watchdog + Replay already alerted. Audit was stale. Closing this verification gap **does not invent capability that wasn't there** — it labels existing capability accurately and provides the cite-able test the audit can point at. The pipeline-event subscriber path (`brutex/notifications/wiring.py::make_pipeline_event_subscriber`) remains legitimately dormant until Phase 2 Groww adapter drivers instantiate `PhaseRunner`; that is correctly recorded as the remaining work.
+
+    **Honest envelope:**
+
+    - ✅ REAL: SLA → Telegram chain verified end-to-end by recording-transport assertion.
+    - ✅ REAL: 3 new tests pass; existing 2.0k-test suite unchanged.
+    - 🟡 PARTIAL: pipeline-event subscriber path still has zero production callers (correctly tracked; not claimed closed).
+    - 📋 ROADMAP: when Phase 2 Groww adapter drivers land, `make_pipeline_event_subscriber()` activates automatically on the existing `PhaseRunner` `subscribers=[…]` seam.
+
+    **Decision ID:** DEC-TELEGRAM-WIRING-VERIFICATION-001. **Builds on:** DEC-TELEGRAM-WIRING-001 (entry #238, subscriber factory), DEC-STANDARD-MONITOR-001 (entry #243, `compose_standard_monitor`), DEC-INFRA-OPS-001 (entry #244, `brutex monitor` CLI). **Closes:** honest-audit row 16 verification gap (status row reclassified from 🔴 HIGH to 🟡 MID with cite-able test path).
+
 246. **DEC-VENDOR-PIVOT-001 — full pivot from Dhan to Groww as the SINGLE backtesting data source (ADR-0001)** (2026-05-26, operator directive: "no need of dhan here just note one and only groww dude that too only concentrating on backtesting dude okay?"). This is a **major scope pivot** (CLAUDE.md §3 scope-lock + §9 hostile review applied). Retires the Dhan adapter outright — no parallel run, no multi-source resilience. Live execution / WebSocket / order placement remain explicitly OUT of scope per CLAUDE.md §1 (Track 1 = signal-only research).
 
     **Operator override of 4-agent hostile-review NO-GO verdict.** A 4-agent hostile review (Plan + Explore + Red-team + Compliance) was completed on 2026-05-26 and recommended Option D (multi-source resilience) over Option C (full pivot). The operator chose Option C explicitly. The 4 P0 blockers identified by the red-team agent are recorded here as **accepted risks** per the DEC-P0-005 operator-override precedent:
