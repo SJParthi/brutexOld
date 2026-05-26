@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     fn test_archived_option_type_from_roundtrip() {
-        use crate::compat::instrument_types::{DerivativeContract, BrokerInstrumentKind};
+        use crate::compat::instrument_types::{BrokerInstrumentKind, DerivativeContract};
         for opt_type in [OptionType::Call, OptionType::Put] {
             let contract = DerivativeContract {
                 security_id: 1,

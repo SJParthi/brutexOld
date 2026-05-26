@@ -3,7 +3,7 @@
 **Status:** PROPOSED (docs-only PR; awaiting Phase 0 probe + operator approval before any adapter code lands)
 **Decision ID:** `DEC-VENDOR-PIVOT-001` (ADR-0001)
 **Date:** 2026-05-26
-**Replaces (when merged):** Dhan adapter as the spec-locked backtesting data source
+**Replaces (when merged):** the prior broker adapter as the spec-locked backtesting data source
 
 ---
 
@@ -12,7 +12,7 @@
 This document specifies the Groww Trade API adapter for BruteX Track 1 backtesting. It covers:
 
 1. Authentication (TOTP only)
-2. Instrument addressing (`groww_symbol` strings vs Dhan int securityIds)
+2. Instrument addressing (`groww_symbol` strings vs prior-broker int securityIds)
 3. Historical OHLC fetching (1m, 1d, 1w, 1mo intervals)
 4. Adaptive rate-limiter auto-tuning algorithm
 5. Price-unit normalization (rupees → int64 paisa)
@@ -36,7 +36,7 @@ Per operator decree 2026-05-26 + CLAUDE.md §11 AUTOMATED rule ("ZERO clicks per
 |---|---|---|---|
 | `BRUTEX_GROWW_API_KEY` | string | — | TOTP token (16-byte base32 secret) |
 | `BRUTEX_GROWW_TOTP_SECRET` | string | — | TOTP secret (32-char base32) |
-| `BRUTEX_GROWW_TOKEN_PATH` | path | `~/.brutex/groww/access_token.json` | Cached access_token file (mode 0600, mirrors Dhan pattern) |
+| `BRUTEX_GROWW_TOKEN_PATH` | path | `~/.brutex/groww/access_token.json` | Cached access_token file (mode 0600, mirrors prior-broker pattern) |
 | `BRUTEX_GROWW_SMOKE` | flag | unset (off) | Set to `1` to enable smoke tests against real Groww API |
 
 ### 2.2 Auth lifecycle
@@ -48,7 +48,7 @@ on 401 / GrowwAPIAuthenticationException → regenerate TOTP → refresh access_
 on 3rd consecutive auth failure → CRITICAL Telegram alert + halt fetcher
 ```
 
-Mirrors `brutex/adapters/dhan/auth.py:60` `REQUIRED_FILE_MODE = 0o600` pattern.
+Mirrors the prior-broker `auth.py:60` `REQUIRED_FILE_MODE = 0o600` pattern (file removed in DEC-VENDOR-PIVOT-001 wipe; see MIGRATION.md entry #247).
 
 ---
 
@@ -58,7 +58,7 @@ Groww uses `groww_symbol` STRING tokens, not integer securityIds. The adapter MU
 
 ### 3.1 Track 1 brute-force universe (4 instruments, hardcoded)
 
-| Logical name | Dhan (legacy) | Groww (proposed; pending Phase 0 verification) |
+| Logical name | Prior broker (legacy) | Groww (proposed; pending Phase 0 verification) |
 |---|---|---|
 | NIFTY 50 | securityId=13, IDX_I | `groww_symbol="NSE-NIFTY"`, segment=CASH |
 | BANKNIFTY | securityId=25, IDX_I | `groww_symbol="NSE-BANKNIFTY"`, segment=CASH |
@@ -88,7 +88,7 @@ Groww uses `groww_symbol` STRING tokens, not integer securityIds. The adapter MU
 | 10m / 15m / 30m | 90 days | 90 days |
 | 1h / 4h / 1d / 1w / 1mo | 180 days | 180 days |
 
-Note: this REPLACES the Dhan-specific `INTRADAY_MAX_WINDOW_DAYS = 90` constant.
+Note: this REPLACES the prior-broker `INTRADAY_MAX_WINDOW_DAYS = 90` constant.
 
 ### 4.3 Response shape
 
@@ -292,9 +292,9 @@ Output → `~/.brutex/reconciliation/<date>.json` + Telegram daily summary.
 | 5 | `brutex/adapters/_common/` chunk-helper extract | ~300 (refactor) |
 | 6 | CLI flip + `BRUTEX_BROKER` dispatcher | ~250 |
 | 7 | Spec doc amendments + CLAUDE.md §6 replaced | ~600 docs |
-| 8 | Delete Dhan (5,659 LoC) — gated on git tag `v-pre-groww-pivot` | -5,659 |
+| 8 | Delete prior broker adapter (5,659 LoC) — gated on git tag `v-pre-groww-pivot` | -5,659 |
 
-Total new code: ~3,200 LoC (Groww adapter + tests + workers). Total deleted: 5,659 LoC (Dhan).
+Total new code: ~3,200 LoC (Groww adapter + tests + workers). Total deleted: 5,659 LoC (prior broker).
 
 ---
 
