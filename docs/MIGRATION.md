@@ -335,6 +335,42 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+248. **DEC-AUDIT-TRUTH-RECONCILE-001 — second-pass honest-audit reconciliation: 4 stale 🔴/🟡 gap rows reclassified 🟢 CLOSED** (2026-05-26, operator directive: "yes dude fix all f them one by one dude" after option-1 SessionStart-hook closure recommendation). The honest audit `docs/STANDARDS_100PCT_HONEST_AUDIT.md` was authored on 2026-05-25 from a five-parallel-agent pass against `claude/admiring-knuth-KJiMY`; four §9 gap rows survived as stale because the audit text was never refreshed when their closing decisions landed.
+
+    **Stale-row reconciliation (audit text → reality):**
+
+    - 🔴 HIGH "Watchdog missing — No module exists" → 🟢 CLOSED. Module `brutex/observability/watchdog.py::Watchdog` exists with 25-test 100%-coverage (DEC-WATCHDOG-001, entry #240). Wired into `compose_standard_monitor` via `make_watchdog_callback`; runs under `brutex monitor`.
+    - 🔴 HIGH "SLA breach alerting missing — No detector" → 🟢 CLOSED. Module `brutex/observability/sla.py::SLADetector` exists with state-machine NORMAL ↔ BREACHED transitions + `on_breach` / `on_recovery` callbacks (DEC-SLA-DETECTOR-001, entry #239). Telegram chain verified end-to-end by `tests/integration/test_compose_monitor_sla_to_telegram.py` per DEC-TELEGRAM-WIRING-VERIFICATION-001 (entry #247).
+    - 🟡 MID "L3 audit replay oracle unimplemented" → 🟢 CLOSED. Module `brutex/orchestrator/replay.py::assert_dedup_consistent` exists (DEC-L3-REPLAY-ORACLE-001, entry #241). Wired into `MonitorLoop` via `_make_replay_check` in `compose_standard_monitor`; optional opt-in via `BRUTEX_LIVE_SUBJECTS_FILE` env var.
+    - 🟡 MID "SessionStart hook missing" → 🟢 CLOSED. Script `.claude/hooks/session-start.sh` exists (DEC-SESSION-START-HOOK-001, entry #237), executable, wired via `.claude/settings.json::hooks.SessionStart`. Verified by running the script: prints branch + last 5 MIGRATION decisions + audit-doc freshness + venv/fno_math presence + Z+ 6-marker reminder to stderr.
+
+    **Headline metric adjustments (Golden Rule #10 honest envelope):**
+
+    - §0 "Per-scope auto enforcement" row: `3.5 / 6` → `4.5 / 6` (the `Per new session` scope now has SessionStart hook automation).
+    - §0 "5-pillar decree fully evidenced in code" row: `AUTOMATED ❌ aspirational` → `AUTOMATED 🟡 (ratcheted via DEC-INFRA-OPS-001)`.
+    - §1 "Per new session" cell: rewritten to reference the hook + its outputs.
+    - §1 verdict text: `3.5 of 6 scopes` → `4.5 of 6 scopes`.
+    - §8 "Watchdog (MISSING)" analogy row → "Watchdog (WIRED)" with dead-man's-switch metaphor refreshed.
+
+    **What did NOT change (Golden Rule #10):**
+
+    - No new code lands in this PR — pure audit truth-up. Verified by `git diff --stat`: only `docs/STANDARDS_100PCT_HONEST_AUDIT.md` + `docs/MIGRATION.md` modified.
+    - The 4 reclassified rows pre-existed in the codebase; this PR only labels them correctly.
+    - The `make_pipeline_event_subscriber` dormant-path caveat from entry #247 remains as-stated (subscriber legitimately awaits Phase 2 drivers). This is NOT being claimed closed.
+    - The remaining 🔴 HIGH gap (server-side branch protection) and the remaining 🟡 MID gaps (12/13 dashboard fields awaiting Phase 3 + 6/21 STANDARDS rows partial/manual) are honestly preserved.
+
+    **Why this matters:** prior to this reconciliation a future Claude session would have read the audit and assumed there were 4 unclosed 🔴 HIGH gaps (Telegram + Watchdog + SLA + branch protection) when in fact 3 of the 4 are operationally complete. That gap in audit truth could justify defensive over-engineering (re-implementing what already exists) or missed coverage (assuming the Telegram chain wasn't routed when it is). This PR labels existing capability accurately per Golden Rule #1.
+
+    **Honest envelope:**
+
+    - ✅ REAL: 4 rows reclassified 🟢 CLOSED with cite-able MIGRATION + file-path references.
+    - ✅ REAL: Per-scope metric + 5-pillar metric + §8 analogy refreshed.
+    - 🟡 PARTIAL: §0 "STANDARDS rows fully CI-blocking 15/21" claim NOT re-audited in this pass — that's a different surface (the 21-row CI gate matrix in `docs/STANDARDS_100PCT.md`) and could be stale too; future reconciliation pass will handle it.
+    - 🟡 PARTIAL: §2 14-bracket table NOT re-audited in this pass; future reconciliation pass will handle it.
+    - ❌ NOT MET: server-side branch protection still ROADMAP (operator-action item, not closeable by Claude).
+
+    **Decision ID:** DEC-AUDIT-TRUTH-RECONCILE-001. **Builds on:** DEC-SESSION-START-HOOK-001 (entry #237), DEC-SLA-DETECTOR-001 (entry #239), DEC-WATCHDOG-001 (entry #240), DEC-L3-REPLAY-ORACLE-001 (entry #241), DEC-INFRA-OPS-001 (entry #244), DEC-TELEGRAM-WIRING-VERIFICATION-001 (entry #247). **Closes:** the audit-truth lag across these 4 rows; surfaces remaining 🟡 sections (§2 14-bracket, §0 21-row STANDARDS) as the next reconciliation target.
+
 247. **DEC-TELEGRAM-WIRING-VERIFICATION-001 — end-to-end SLA → Telegram wiring proof + honest-audit Gap #1 reclassification 🔴 HIGH → 🟡 MID** (2026-05-26, operator directive: "go ahea ddude" after option-1 recommendation to close honest-audit Gap #1). Closes the verification gap on `docs/STANDARDS_100PCT_HONEST_AUDIT.md` §9 Gap #1 ("Telegram alerts not wired"). The audit row was written before `compose_standard_monitor` (DEC-STANDARD-MONITOR-001, entry #243) + `cmd_monitor` (DEC-INFRA-OPS-001, entry #244) landed; in fact, SLA + Watchdog + Replay → Telegram is already wired through `_publish_telegram` in `brutex/observability/standard_monitor.py`.
 
     **What lands:**
