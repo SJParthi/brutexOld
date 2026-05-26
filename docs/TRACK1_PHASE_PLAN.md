@@ -83,7 +83,7 @@ Phase 2+ code change is verified from day one.
 
 | Deliverable | Notes |
 |---|---|
-| `tests/property/` skeleton with all 24 invariants stubbed (`@hypothesis.given(...)` with `pytest.skip("Phase 2")` body) | Lets us count invariants in CI even before impl |
+| `tests/property/test_invariants_catalog.py` — canonical catalog of all 24 invariants (DEC-PHASE1-INVARIANT-CATALOG-001, MIGRATION entry #250) | ✅ landed 2026-05-26 — 24 `test_p_NN_*` functions, each `pytest.skip(...)` with either a pointer to the implementing file or a "Phase N pending" tag. Today: ✅ P-01, P-02, P-05, P-16, P-17 (5 of 24 implemented in sibling files); 📋 P-03..P-04, P-06..P-15, P-18..P-24 awaiting Phase 1.5/2/3 work. |
 | `tests/golden/fixtures/` directory created with placeholder fixtures | Real fixtures filled in Phase 2 |
 | `tests/integration/test_replay_audit_log.py` skeleton | Implementation in Phase 2 |
 | `tests/integration/test_python_rust_parity.py` skeleton | Implementation in Phase 3 |
