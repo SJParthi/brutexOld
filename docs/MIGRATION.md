@@ -335,6 +335,33 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+251. **DEC-PHASE1-SMOKE-AND-SKELETONS-001 — Phase 1 Week 1 scaffolding follow-up: smoke test + integration skeletons + golden fixtures directory** (2026-05-26 evening, operator directive: "go ahead with the plan" continuation after the 4-item recommendation closed via PRs #145, #146, #147). Lands the remaining Phase 1 Week 1 scaffolding artifacts the invariant-catalog PR (#147, entry #250) deferred for scope discipline.
+
+    **What lands:**
+
+    - **`tests/smoke/test_pre_push.py`** — new ~170-LoC working smoke test (NOT a skeleton). Tests run in under 30 seconds with zero optional dependencies. Catches: stray syntax errors / unformatted code / missing `__init__.py` / broken core import / non-conventional commit subjects / missing key docs. 5 test classes: `TestRepoLayout` (3 tests on filesystem invariants), `TestImportSmoke` (3 tests on package imports), `TestLintFormat` (2 tests running `ruff check` + `ruff format --check`), `TestConventionalCommit` (1 test on HEAD subject), `TestRequiredDocs` (3 tests on CLAUDE.md + MIGRATION.md + TRACK1_PHASE_PLAN.md presence + minimum-size sanity).
+    - **`tests/integration/test_python_rust_parity.py`** — new ~70-LoC integration-test skeleton with 5 `pytest.skip` stubs covering the 5 hot-path operations (combo_hash, mask_AND, EMA update, pivot resolve, fib resolve). Phase 2/3 work fills these in with hypothesis-driven byte-equal asserts.
+    - **`tests/integration/test_replay_audit_log.py`** — new ~50-LoC integration-test skeleton with 4 `pytest.skip` stubs covering the audit-log → Parquet roundtrip (P-20). The L3 dedup-subject path already exists (DEC-L3-REPLAY-ORACLE-001 entry #241); this skeleton tracks the full Parquet-output projection.
+    - **`tests/golden/fixtures/README.md`** — new placeholder README documenting the 9 planned corpora per `docs/TRACK1_VERIFICATION_PYRAMID.md` so the directory exists in git + the spec has a real path to point at.
+
+    **Honest envelope:**
+
+    - ✅ REAL: `test_pre_push.py` is a working smoke test (not a skeleton). Lands functional pre-push validation operator can run locally today.
+    - ✅ REAL: integration skeletons land with explicit Phase 2 skip messages.
+    - ✅ REAL: ruff check + ruff format clean on all 4 new files.
+    - 🟡 PARTIAL: integration skeletons are `pytest.skip` placeholders — they don't catch regressions until Phase 2 fills them in.
+    - 📋 ROADMAP: remaining Phase 1 Week 2 artifacts (`cargo-fuzz` target list, `cargo-mutants` config, `.github/workflows/nightly.yml`, `.github/workflows/weekly.yml`, `tests/golden/condition_truth_table.csv` skeleton) tracked for a separate Phase 1 Week 2 PR.
+
+    **What did NOT land in this PR (Phase 1 Week 2 scope, separate PR):**
+
+    - `cargo-fuzz` target list under `rust/fno-math/fuzz/` (7 targets)
+    - `cargo-mutants` config (`.cargo/mutants.toml`)
+    - `tests/golden/condition_truth_table.csv` skeleton
+    - `.github/workflows/nightly.yml` (stress + fuzz)
+    - `.github/workflows/weekly.yml` (mutation)
+
+    **Decision ID:** DEC-PHASE1-SMOKE-AND-SKELETONS-001. **Builds on:** DEC-PHASE1-INVARIANT-CATALOG-001 (entry #250, the prior Phase 1 Week 1 deliverable) · `docs/TRACK1_PHASE_PLAN.md §"Phase 1 Week 1"`. **Closes:** Phase 1 Week 1 rows 2-5 (smoke + integration skeletons + golden fixtures directory).
+
 250. **DEC-PHASE1-INVARIANT-CATALOG-001 — canonical catalog of the 24 Track 1 property invariants (Phase 1 Week 1 scaffolding deliverable)** (2026-05-26 evening, operator directive: "yes dude fix all f them one by one dude" — final item of the 4-item recommendation: Phase 1 scaffolding kickoff). Per `docs/TRACK1_PHASE_PLAN.md §"Phase 1 Week 1"`: the property-test surface must have a stub for each of the 24 spec invariants (P-01 .. P-24, enumerated in `docs/TRACK1_VERIFICATION_PYRAMID.md §"Property tests"`) so CI can mechanically count invariants — including the not-yet-implemented ones — even before Phase 2 lands.
 
     **What lands:**
