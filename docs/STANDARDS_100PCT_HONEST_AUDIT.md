@@ -1,4 +1,4 @@
-# BruteX — 100% Standards Honest Audit (2026-05-25)
+# BruteX — 100% Standards Honest Audit (2026-05-26)
 
 > **Authority:** This doc is the operator-facing ground truth for the
 > "100% guarantee" question. It is built from five parallel deep-research
@@ -7,8 +7,16 @@
 > Rule #1 (no hallucination) and Golden Rule #10 (honest envelope), nothing
 > here is rounded up.
 >
-> **Last refresh:** 2026-05-25 evening, after `DEC-COMBO-HASH-UNIQUENESS-001`
-> (commit `2d2cf2a`) landed gap #6 of the 6 solo-closable post-audit gaps.
+> **Last refresh:** 2026-05-26 afternoon, after `DEC-VENDOR-PIVOT-001`
+> closed out: the Dhan adapter is wiped (PR #135–#138), the Groww
+> reference docs are locked (PR #139), the Phase 0b probe script
+> landed (PR #140, commit `1058b57`), and the v29 dashboard +
+> universe-discovery script landed (PR #141, commit `906df19`). The
+> prior refresh point was 2026-05-25 evening after `DEC-COMBO-HASH-UNIQUENESS-001`
+> (commit `2d2cf2a`) closed gap #6 of the 6 solo-closable post-audit
+> gaps. **No new gates were added on 2026-05-26** — the headline
+> metrics below carry over unchanged; what shifted is which decision
+> sits behind each row.
 
 ---
 
