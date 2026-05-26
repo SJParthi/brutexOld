@@ -1,23 +1,23 @@
 # Track 2 Cost Calculator — VERIFIED Design Specification
 
 > **Status:** Locked 2026-05-16, ~95% confidence (citation-grounded via 4-agent deep research).
-> **Outstanding:** Level-1 verification (real Dhan contract note byte-equality) deferred to operator's first trade.
+> **Outstanding:** Level-1 verification (real Groww contract note byte-equality) deferred to operator's first trade.
 > **Decision ledger:** #321-#335 (added in next MIGRATION.md update).
 
 ## 0. Purpose + scope
 
-This document is the **citation-grounded design specification** for the Track 2 options cost calculator. It encodes every per-trade and per-month charge Dhan applies, with rounding rules, calculation order, and worked examples.
+This document is the **citation-grounded design specification** for the Track 2 options cost calculator. It encodes every per-trade and per-month charge Groww applies, with rounding rules, calculation order, and worked examples.
 
-Phase 3 implementation (`brutex/costs/dhan_options.py`) follows this spec exactly. Any future amendment must trace to a verified source URL per `CLAUDE.md` Golden Rule #1.
+Phase 3 implementation (`brutex/costs/groww_options.py`) follows this spec exactly. Any future amendment must trace to a verified source URL per `CLAUDE.md` Golden Rule #1.
 
 ## 1. Research provenance (4-agent deep research, 2026-05-16)
 
 | Agent | Topic | Verdict |
 |---|---|---|
-| A | Triangulation: Dhan vs Zerodha vs Angel One calculators | ~95% rate confidence (30+ secondary sources cross-confirm; primary URLs returned HTTP 403) |
-| B | Forensic search for real Dhan contract notes (Twitter/Reddit/YouTube) | **0 real notes found** publicly; need operator Level-1 verification |
+| A | Triangulation: Groww vs Zerodha vs Angel One calculators | ~95% rate confidence (30+ secondary sources cross-confirm; primary URLs returned HTTP 403) |
+| B | Forensic search for real Groww contract notes (Twitter/Reddit/YouTube) | **0 real notes found** publicly; need operator Level-1 verification |
 | C | Statutory rounding rules (NSE/BSE/SEBI/CGST/Stamp Act/STT Rules) | STT, Stamp, GST round to **nearest rupee**; others round to **paise** |
-| D | Edge cases: tiers, women's discount, multi-lot, Muhurat, DhanHQ API, etc. | **Multi-lot is per-order ₹20 flat** (critical); women's discount discontinued |
+| D | Edge cases: tiers, women's discount, multi-lot, Muhurat, Groww API, etc. | **Multi-lot is per-order ₹20 flat** (critical); women's discount discontinued |
 
 **Combined confidence: ~95%.** Remaining 5% gap fills only after Level-1 contract note verification.
 
@@ -25,7 +25,7 @@ Phase 3 implementation (`brutex/costs/dhan_options.py`) follows this spec exactl
 
 | # | Component | Rate | Applied to | Side | Source |
 |---|---|---|---|---|---|
-| 1 | Dhan brokerage | **₹20.00 flat per executed order** | per order (NOT per lot) | both legs | Dhan pricing page (chittorgarh, ipogmpindia, comparesharebrokers all confirm) |
+| 1 | Groww brokerage | **₹20.00 flat per executed order** | per order (NOT per lot) | both legs | Groww pricing page (chittorgarh, ipogmpindia, comparesharebrokers all confirm) |
 | 2 | STT (pre 1-Apr-2026) | 0.10% on sell premium | sell side only | SEBI/CBDT effective 1-Oct-2024 | ClearTax, Zerodha Z-Connect |
 | 2' | STT (post 1-Apr-2026) | **0.15% on sell premium** | sell side only | Finance Act 2026 | taxguru.in, ICICIdirect, ClearTax |
 | 3 | NSE F&O exchange | **0.03503%** (₹3,503/cr) | premium both sides | per leg | NSE FA64232 / FA56129; SEBI true-to-label circular |
@@ -49,7 +49,7 @@ Phase 3 implementation (`brutex/costs/dhan_options.py`) follows this spec exactl
 | SEBI turnover | Round to paise (no statutory rule) | Industry practice |
 | IPFT | Round to paise (no statutory rule) | Industry practice |
 
-**Corroborated by Dhan-specific statement (Agent B):** "Stamp Duty and STT are rounded off to the nearest rupee and all other charges to the nearest 2 decimals."
+**Corroborated by Groww-specific statement (Agent B):** "Stamp Duty and STT are rounded off to the nearest rupee and all other charges to the nearest 2 decimals."
 
 ## 4. Order of operations
 
@@ -57,7 +57,7 @@ Per industry-published broker examples + Section 170 CGST + Rule 11 STT Rules:
 
 ```
    1. PER LEG, compute each charge at paise precision (no rounding yet):
-        brokerage_leg     = ₹20.00 flat (or min(20, 0.03% × notional) — Dhan uses flat)
+        brokerage_leg     = ₹20.00 flat (or min(20, 0.03% × notional) — Groww uses flat)
         exchange_leg      = notional × exchange_rate (NSE 0.03503% or BSE 0.03250%)
         sebi_leg          = notional × 0.000001 (= ₹10/cr)
         ipft_leg          = notional × 0.000005 (= ₹50/cr) — NSE only
@@ -86,7 +86,7 @@ Per industry-published broker examples + Section 170 CGST + Rule 11 STT Rules:
         # (e.g., ₹50.55 base: correct ₹9, was: 2×round(4.55)=2×5=₹10).
         # Hostile review 2026-05-16 (Agent A finding 7) caught this.
         gst_total         = round_to_rupee(gst_base × 0.18)
-        if intra-state (operator's state == Dhan's state):
+        if intra-state (operator's state == Groww's state):
             cgst          = gst_total // 2       # display only
             sgst          = gst_total - cgst     # display only (avoids parity drift)
             gst           = gst_total
@@ -222,21 +222,21 @@ Same as Example 1 but during Muhurat (e.g., Diwali Nov 1, 2024 evening):
 
 | Case | Why excluded | Documented as |
 |---|---|---|
-| Auto-square-off charge (Dhan RMS) | Track 2 forced 15:20 IST exit prevents | Assertion: `exit_time <= 15:20 IST` |
+| Auto-square-off charge (Groww RMS) | Track 2 forced 15:20 IST exit prevents | Assertion: `exit_time <= 15:20 IST` |
 | Expiry exercise (STT 0.15% on intrinsic) | Track 2 never holds to expiry | Dead-code branch |
 | Call & Trade ₹50 charge | Track 2 uses API only | Document NA |
 | Intraday↔Delivery conversion | Track 2 = INTRADAY only | NA |
 | Securities lending (SLB) | Track 2 = BUY only (no shorts) | NA |
 | Off-market demat transfer | NA | NA |
 | Women's 50% discount | DISCONTINUED July 2024 (SEBI True-to-Label + misuse) | Default `women_discount=False`; future-proof flag |
-| AMC | Dhan = ₹0 lifetime | Document NA |
+| AMC | Groww = ₹0 lifetime | Document NA |
 
 ## 8. Fixed monthly OPEX (separate ledger, NOT per-trade)
 
 | Item | Cost | Reference |
 |---|---|---|
-| **DhanHQ Data API subscription** | **₹499 + 18% GST = ₹588.82 / month** | Required for BruteX historical data fetch |
-| AMC (account maintenance) | ₹0 lifetime | Dhan policy |
+| **Groww Data API subscription** | **₹499 + 18% GST = ₹588.82 / month** | Required for BruteX historical data fetch |
+| AMC (account maintenance) | ₹0 lifetime | Groww policy |
 | Demat / DP charges on F&O | ₹0 | No demat debit on derivatives |
 
 Tracked in `operating_costs.yaml` (separate from per-trade `cost_calculator` output).
@@ -245,13 +245,13 @@ Tracked in `operating_costs.yaml` (separate from per-trade `cost_calculator` out
 
 | # | Item | Why UNVERIFIED | How to verify |
 |---|---|---|---|
-| 1 | Dhan rate card primary page | Direct WebFetch returns HTTP 403 | Operator opens `dhan.co/pricing` in browser + screenshot |
+| 1 | Groww rate card primary page | Direct WebFetch returns HTTP 403 | Operator opens `groww.co/pricing` in browser + screenshot |
 | ~~2~~ | ~~STT 0.15% post-1-Apr-2026~~ | **LOCKED 2026-05-16 (DEC-COST-003)**: VERIFIED via TaxGuru + Wikipedia STT page + 1Finance citing Finance Bill 2026 PDF at indiabudget.gov.in/doc/Finance_Bill.pdf. Rates: options 0.10%→0.15%, futures 0.02%→0.05%, exercise 0.125%→0.15%. | n/a — locked |
 | 3 | BSE Bankex/Sensex IPFT rate | Inconclusive sources (could be 0 or near-zero) | Operator pulls BSE Members Transaction Fees page |
 | 4 | Exact rounding direction (half-up vs half-even) | Stated "nearest" — direction ambiguous | Real contract note reconciliation |
-| 5 | Per-trade vs per-day aggregation timing for STT/GST | Industry practice unverified for Dhan specifically | Real contract note reconciliation |
-| 6 | Women's discount status May 2026 | Sources contradict (Jul 2024 suspension vs 2026 articles) | Direct Dhan support inquiry |
-| 7 | Dhan internal arithmetic precision | No public doc | Real contract note reconciliation |
+| 5 | Per-trade vs per-day aggregation timing for STT/GST | Industry practice unverified for Groww specifically | Real contract note reconciliation |
+| 6 | Women's discount status May 2026 | Sources contradict (Jul 2024 suspension vs 2026 articles) | Direct Groww support inquiry |
+| 7 | Groww internal arithmetic precision | No public doc | Real contract note reconciliation |
 | 8 | NIFTY index-option tick size 5 paise | Could be extended to 1 paise (regulator) | NSE circular monitoring |
 
 ## 10. Level-1 validation workflow (operator action)
@@ -259,12 +259,12 @@ Tracked in `operating_costs.yaml` (separate from per-trade `cost_calculator` out
 Before locking the calculator in Phase 3, operator must:
 
 ```
-   1. Place ONE real Dhan options trade:
+   1. Place ONE real Groww options trade:
       - 1 lot NIFTY ATM call (smallest size for minimum exposure)
       - Intraday entry + exit, same day
       - Use the API (matches Track 2 production path)
 
-   2. Download the contract note PDF from Dhan.
+   2. Download the contract note PDF from Groww.
 
    3. Run BruteX cost_calculator with IDENTICAL inputs:
       - Same lot size, buy/sell premiums, trade date
@@ -309,7 +309,7 @@ For BruteX Track 2 sweep:
 |---|---|
 | When is Muhurat? | One ~1-hour evening session each year on Diwali Laxmi Pujan day. Date list in `TRACK1_MICROSTRUCTURE.md` |
 | 2021-2026 occurrences | ~5 sessions (2021-11-04, 2022-10-24, 2023-11-12, 2024-11-01, 2025-10-21) |
-| Brokerage during Muhurat | ₹0 (Dhan + Zerodha + most brokers waive) |
+| Brokerage during Muhurat | ₹0 (Groww + Zerodha + most brokers waive) |
 | STT during Muhurat | Same as normal (0.10% pre-Apr-2026, 0.15% post) |
 | Exchange charges during Muhurat | Same as normal |
 | GST during Muhurat | 18% on (0 + exchange + SEBI + IPFT) — base shrinks since brokerage is 0 |
@@ -374,10 +374,10 @@ approach is preferred because it:
 """Rate constants. All rates as bps_x100 (basis-points × 100, denominator 1e6).
 Source citations inline. Last verified: 2026-05-16."""
 
-# ─── Brokerage (Dhan) ───────────────────────────────────────────────
-DHAN_BROKERAGE_FUTURES_CAP_PAISA: int = 2000        # ₹20 max per leg
-DHAN_BROKERAGE_FUTURES_BPS_X100:  int = 3000        # 0.03% = 30 bps × 100
-DHAN_BROKERAGE_OPTIONS_FLAT_PAISA: int = 2000       # ₹20 flat per order
+# ─── Brokerage (Groww) ───────────────────────────────────────────────
+GROWW_BROKERAGE_FUTURES_CAP_PAISA: int = 2000        # ₹20 max per leg
+GROWW_BROKERAGE_FUTURES_BPS_X100:  int = 3000        # 0.03% = 30 bps × 100
+GROWW_BROKERAGE_OPTIONS_FLAT_PAISA: int = 2000       # ₹20 flat per order
 
 # ─── STT (3-regime history) ─────────────────────────────────────────
 # Pre-Oct-2024:           0.0625% on options sell premium
@@ -440,7 +440,7 @@ def round_to_rupee(x_paisa_unrounded: int) -> int:
        ├── test_pnl.py
        ├── test_income_tax.py
        └── fixtures/
-           └── dhan_contract_notes.json   # Real Dhan contract notes (Level-1 oracle)
+           └── groww_contract_notes.json   # Real Groww contract notes (Level-1 oracle)
 ```
 
 ### Performance target
@@ -526,14 +526,14 @@ This is the Phase 3 deliverable spec. Implementation follows in
 - ICICI Direct — [STT changes Budget 2026](https://www.icicidirect.com/futures-and-options/articles/stt-changes-in-budget-2026-what-f-o-traders-need-to-know)
 - Angel One — [BSE Sensex/Bankex update](https://www.angelone.in/news/bse-updates-transaction-fees-for-sensex-bankex-options)
 - Bajaj Broking — [NSE/BSE Oct-2024 revisions](https://www.bajajbroking.in/blog/nse-and-bse-revise-transaction-charges-from-october-2024)
-- Chittorgarh — [Dhan brokerage 2026](https://www.chittorgarh.com/brokerage_charges/dhan/176/)
-- IPOGMPINDIA — [Dhan brokerage guide 2026](https://ipogmpindia.com/dhan-brokerage-charges-2026-complete-guide/)
-- Comparesharebrokers — [Dhan 2026](https://comparesharebrokers.com/faq/what-are-dhan-brokerage-charges-in-2026/1113)
+- Chittorgarh — [Groww brokerage 2026](https://www.chittorgarh.com/brokerage_charges/groww/176/)
+- IPOGMPINDIA — [Groww brokerage guide 2026](https://ipogmpindia.com/groww-brokerage-charges-2026-complete-guide/)
+- Comparesharebrokers — [Groww 2026](https://comparesharebrokers.com/faq/what-are-groww-brokerage-charges-in-2026/1113)
 - taxguru.in — [STT hike 1-Apr-2026](https://taxguru.in/income-tax/stt-rates-futures-options-hiked-1st-april-2026.html)
-- Benzinga India — [Dhan women discount discontinued](https://in.benzinga.com/content/39646402/dhan-app-stops-50-discount-for-female-traders-due-to-sebi-circular-and-misuse)
-- MadeForTrade — [women discount discussion](https://madefortrade.in/t/discontinuation-of-50-off-on-brokerage-for-female-traders-on-dhan/27576)
-- Dhan blog — [Muhurat trading](https://dhan.co/muhurat-trading/)
-- Dhan support — [DhanHQ API pricing](https://dhan.co/support/platforms/dhanhq-api/how-does-the-dhanhq-data-api-subscription-work/)
+- Benzinga India — [Groww women discount discontinued](https://in.benzinga.com/content/39646402/groww-app-stops-50-discount-for-female-traders-due-to-sebi-circular-and-misuse)
+- MadeForTrade — [women discount discussion](https://madefortrade.in/t/discontinuation-of-50-off-on-brokerage-for-female-traders-on-groww/27576)
+- Groww blog — [Muhurat trading](https://groww.co/muhurat-trading/)
+- Groww support — [Groww API pricing](https://groww.co/support/platforms/growwapi-api/how-does-the-growwapi-data-api-subscription-work/)
 
 ## 16. Confidence ratings per line item
 
@@ -549,13 +549,13 @@ This is the Phase 3 deliverable spec. Implementation follows in
 | IPFT BSE rate | 0 (assumed) | Not located | UNVERIFIED |
 | Stamp 0.003% buy | YES | Indian Stamp Act 2020 | 98% |
 | GST 18% | YES | CGST Act + ClearTax | 98% |
-| STT round to rupee | YES | Rule 11 STT Rules + Dhan stated rule | 95% |
-| Stamp round to rupee | YES | Indian Stamp Rules 2019 + Dhan stated rule | 95% |
+| STT round to rupee | YES | Rule 11 STT Rules + Groww stated rule | 95% |
+| Stamp round to rupee | YES | Indian Stamp Rules 2019 + Groww stated rule | 95% |
 | GST round per component to rupee | YES | Section 170 CGST + ClearTax | 95% |
-| Industry items round to paise | YES | Dhan stated rule + industry practice | 90% |
+| Industry items round to paise | YES | Groww stated rule + industry practice | 90% |
 | Women's discount discontinued | YES | Benzinga + MadeForTrade | 90% |
-| DhanHQ Data API ₹588.82/mo | YES | Dhan official support page | 95% |
-| Muhurat brokerage = 0 | YES | Dhan + Zerodha pages | 95% |
+| Groww Data API ₹588.82/mo | YES | Groww official support page | 95% |
+| Muhurat brokerage = 0 | YES | Groww + Zerodha pages | 95% |
 
 **Overall calculator confidence: ~95%.** Reaches ~99% after Level-1 contract note verification.
 
@@ -566,10 +566,10 @@ This is the Phase 3 deliverable spec. Implementation follows in
 | 2026-05-16 | Initial draft | 4-agent deep research synthesis |
 | 2026-05-16 | §14 switched from Decimal to int math (`bps_x100`) | Operator cross-verification w/ parallel Claude chat spec; performance target <1µs |
 | 2026-05-16 | Added §18 Income Tax module | Operator cross-verification spec included annual FY 2026-27 tax computation |
-| 2026-05-16 | Slippage model simplified to flat 1-tick | Operator challenge: cannot validate delta-bucketed without tick data (Dhan API only provides 1m bars, no tick stream — ever). Honest simplicity > false precision. Track 2 §9 amended. |
+| 2026-05-16 | Slippage model simplified to flat 1-tick | Operator challenge: cannot validate delta-bucketed without tick data (Groww API only provides 1m bars, no tick stream — ever). Honest simplicity > false precision. Track 2 §9 amended. |
 | _(future)_ | Level-1 verification result | After operator first real trade |
 | _(future)_ | BSE IPFT rate locked | After operator verifies via BSE page |
-| _(future)_ | Dhan rate card primary verification | After operator screenshot dhan.co/pricing |
+| _(future)_ | Groww rate card primary verification | After operator screenshot groww.co/pricing |
 | _(future)_ | GST rounding (rupee vs paise) reconciliation | After Level-1 contract note |
 
 ## 18. Annual Income Tax Module (Phase 4 deliverable)
@@ -674,7 +674,7 @@ conducted. Results:
 | Multi-lot critical (₹20 per ORDER not per lot) | YES (Agent D) | NOT FLAGGED | my spec wins |
 | Muhurat session brokerage=0 | YES (Agent D) | NOT FLAGGED | my spec wins |
 | Women's discount discontinued July 2024 | YES (Agent D) | NOT FLAGGED | my spec wins |
-| DhanHQ Data API ₹588.82/mo OPEX | YES (Agent D) | NOT FLAGGED | my spec wins |
+| Groww Data API ₹588.82/mo OPEX | YES (Agent D) | NOT FLAGGED | my spec wins |
 | BSE charges (SENSEX on BSE_FNO) | YES | NSE-only | my spec wins |
 | 3-regime STT history | YES (covers 2021-2026 backfill) | only post-Apr-2026 | my spec wins |
 | Multi-file `brutex/costs/` structure | NOW INTEGRATED | YES | their spec wins |
@@ -689,8 +689,8 @@ conducted. Results:
 **Resolution decisions (operator confirmed 2026-05-16):**
 
 1. **GST rounding = rupee** (per Section 170 CGST Act citation). Reconcile against real contract note when available.
-2. **Slippage = flat 1-tick adverse on bar-open fills** (Track 2 §9 REVISED 2026-05-16). The previous delta-bucketed model couldn't be validated without tick data (which Dhan API does not provide). Flat 1-tick is the simplest defensible model given 1m OHLCV + OI + IV + strike + spot only.
+2. **Slippage = flat 1-tick adverse on bar-open fills** (Track 2 §9 REVISED 2026-05-16). The previous delta-bucketed model couldn't be validated without tick data (which Groww API does not provide). Flat 1-tick is the simplest defensible model given 1m OHLCV + OI + IV + strike + spot only.
 3. **Integrate Claude chat additions** (multi-file structure, int math, performance target, income tax module).
-4. **Keep my spec's edge cases** (multi-lot, Muhurat, women's discount, DhanHQ API, BSE) — Claude chat missed these.
+4. **Keep my spec's edge cases** (multi-lot, Muhurat, women's discount, Groww API, BSE) — Claude chat missed these.
 
 Net: This spec now contains **EVERYTHING from both sources**, with disagreements resolved per citation strength.

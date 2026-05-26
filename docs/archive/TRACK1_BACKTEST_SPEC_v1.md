@@ -13,7 +13,7 @@
 > - `TRACK1_PHASE_PLAN.md` — 8-12 week build plan
 > - `TRACK1_PERFORMANCE_BUDGET.md` — honest throughput math
 > - `TRACK1_MICROSTRUCTURE.md` — Indian-market edge cases
-> - `MIGRATION.md` — Dhan → Dhan migration log
+> - `MIGRATION.md` — prior-broker → Groww migration log
 
 ---
 
@@ -50,7 +50,7 @@ itself).
 signals into ATM/ITM option fill simulations with IV/theta/spread
 modeling — this is when execution realism (brokerage, STT, slippage)
 re-enters. NOT to be confused with "Phase 2" of the Track 1 build plan
-(see `TRACK1_PHASE_PLAN.md §Phase 2`), which is the Dhan adapter +
+(see `TRACK1_PHASE_PLAN.md §Phase 2`), which is the Groww adapter +
 52-vocabulary work within Track 1.
 
 ---
@@ -151,13 +151,13 @@ projection but requires Phase 3 validation.
 ### 4.1 India VIX — Reference-Only Role
 
 India VIX is **fetched and stored** like the 3 spot indexes — same
-Dhan endpoints, same 1m + 1d intervals, same 21 derived timeframes,
+Groww endpoints, same 1m + 1d intervals, same 21 derived timeframes,
 same audit guarantees — but is **never** an input to the brute-force
 search. Specifically:
 
 | What VIX participates in | Yes / No |
 |---|---|
-| Fetched from Dhan (1m + 1d) | ✅ YES |
+| Fetched from Groww (1m + 1d) | ✅ YES |
 | Stored in Parquet lake (all 21 TFs) | ✅ YES |
 | Watermark tracking, audit chain | ✅ YES |
 | Brute-force pattern combinations | ❌ NO — never |
@@ -180,7 +180,7 @@ the VIX symbol.
 
 ---
 
-## 5. Data Acquisition (Dhan)
+## 5. Data Acquisition (Groww)
 
 ### 5.1 Endpoints
 
@@ -191,7 +191,7 @@ the VIX symbol.
 
 ### 5.2 Native granularity
 
-**Dhan provides 1, 5, 15, 25, 60 minute and 1-day intraday natively.**
+**Groww provides 1, 5, 15, 25, 60 minute and 1-day intraday natively.**
 Track 1 fetches **1-minute only** and deterministically resamples to
 all other timeframes from the 1m base, anchored to 09:15 IST. The 25m
 and 60m natives are NOT used — we resample 1m for full parity across
@@ -208,13 +208,13 @@ all TFs and a single reproducibility hash.
 ### 5.4 securityId resolution — Static (hardcoded for Track 1)
 
 Track 1's universe is permanently locked to 4 instruments. All
-identifiers are **hardcoded** in `brutex/adapters/dhan/constants.py`
+identifiers are **hardcoded** in `brutex/adapters/groww/constants.py`
 (Phase 2 deliverable). The previous "runtime CSV lookup + never
 hardcode" rule is relaxed for this narrow scope — verified once,
 locked forever, quarterly smoke-tested.
 
 **The 4 verified tuples (2026-05-15, user-confirmed via
-`web.dhan.co/Charts?exch=IDX&seg=I&secid=X`):**
+`web.groww.co/Charts?exch=IDX&seg=I&secid=X`):**
 
 | # | Trading Symbol | securityId | exchangeSegment | instrument | Use |
 |---|---|---|---|---|---|
@@ -230,22 +230,22 @@ locked forever, quarterly smoke-tested.
 - Saves a network call + snapshot hash tracking on every run
 - Deterministic — no drift from upstream CSV revisions
 
-**Verification (quarterly smoke test, `tests/smoke/test_dhan_secid_alive.py`):**
+**Verification (quarterly smoke test, `tests/smoke/test_groww_secid_alive.py`):**
 
-For each of the 4 securityIds, GET `web.dhan.co/Charts?exch=IDX&seg=I&secid=X`
+For each of the 4 securityIds, GET `web.groww.co/Charts?exch=IDX&seg=I&secid=X`
 and assert the response is HTTP 200 with the expected symbol in the
-page title. If a securityId is ever invalidated by Dhan (extremely
+page title. If a securityId is ever invalidated by Groww (extremely
 unlikely for index spot), CI nightly catches it.
 
 **The master CSV approach is preserved as a fallback** only — if all 4
-hardcoded values fail simultaneously (catastrophic Dhan re-numbering),
+hardcoded values fail simultaneously (catastrophic Groww re-numbering),
 operators can manually fetch the CSV at
-`https://images.dhan.co/api-data/api-scrip-master-detailed.csv` and
+`https://images.groww.co/api-data/api-scrip-master-detailed.csv` and
 update the constants module.
 
 ### 5.5 Rate limiting
 
-**Verified 2026-05-15 from dhanhq.co/docs/v2 Rate Limit table:**
+**Verified 2026-05-15 from groww.in/trade-api/docs/docs/v2 Rate Limit table:**
 
 | Tier | per-second | per-day |
 |---|---|---|
@@ -262,20 +262,20 @@ update the constants module.
 - Daily incremental: 4 instruments × 1 chunk = 4 requests
 - **Both are < 0.1% of the daily quota** — quota is not the binding constraint.
 
-Constants live in `brutex/adapters/dhan/constants.py` (Phase 2 deliverable).
+Constants live in `brutex/adapters/groww/constants.py` (Phase 2 deliverable).
 
 ### 5.6 Authentication (manual paste + auto-renew)
 
-Track 1 uses Dhan's **individual trader** access token model, NOT the
+Track 1 uses Groww's **individual trader** access token model, NOT the
 TOTP / API-key flow.
 
 **First-time setup (manual, once per user):**
 
-1. User logs into `web.dhan.co`
-2. Navigates: My Profile → Access DhanHQ APIs → Generate Access Token
+1. User logs into `web.groww.co`
+2. Navigates: My Profile → Access Groww APIs → Generate Access Token
 3. Token has 24-hour validity
 4. User copies the token + their Client ID into a JSON file at
-   `~/.brutex/dhan/access_token.json`:
+   `~/.brutex/groww/access_token.json`:
 
 ```json
 {
@@ -286,14 +286,14 @@ TOTP / API-key flow.
 }
 ```
 
-The JSON file path is gitignored (`**/dhan_token*`, `**/access_token*`)
+The JSON file path is gitignored (`**/groww_token*`, `**/access_token*`)
 and never committed.
 
 **Automatic renewal:**
 
 - At adapter startup AND every ~22 hours, BruteX calls
-  `POST https://api.dhan.co/v2/RenewToken` with headers
-  `access-token: <current>` + `dhanClientId: <client_id>`.
+  `POST https://api.groww.co/v2/RenewToken` with headers
+  `access-token: <current>` + `growwClientId: <client_id>`.
 - On success: write new token + new expiry to the JSON file
   atomically (tempfile + rename).
 - On failure (e.g., 24h elapsed, token already expired): structlog
@@ -336,7 +336,7 @@ the chosen-TF Parquet plus the daily-anchor scalar table.
 ### 6.1 Timeframes themselves
 
 All resampled from 1m base, anchored to 09:15 IST. The 1m base + 1d
-daily are fetched directly from Dhan (`/v2/charts/intraday` and
+daily are fetched directly from Groww (`/v2/charts/intraday` and
 `/v2/charts/historical` respectively); the 19 intraday derived TFs are
 resampled in a single-pass cascade.
 
@@ -486,7 +486,7 @@ Signal at bar N → enter at bar (N+1) OPEN.
 Execution realism (brokerage, STT, slippage, spread, IV decay, theta)
 re-enters in the **Options Track** (post-Track-1) when Track 1 winners
 are translated to option contracts. Distinct from Track 1's own
-"Phase 2" build phase (Dhan adapter + vocabulary; see `TRACK1_PHASE_PLAN.md`).
+"Phase 2" build phase (Groww adapter + vocabulary; see `TRACK1_PHASE_PLAN.md`).
 
 ---
 
@@ -667,7 +667,7 @@ Detailed in `TRACK1_PHASE_PLAN.md`. Summary:
 |---|---|---|
 | 0 | This week | Documentation, REQUIREMENTS deprecation, wipe |
 | 1 | 2-3 weeks | Verification scaffolding (9-layer pyramid, 24 invariants, 3 oracle tests) |
-| 2 | 3-4 weeks | Dhan adapter + spot-index ingest + 52-vocabulary |
+| 2 | 3-4 weeks | Groww adapter + spot-index ingest + 52-vocabulary |
 | 3 | 2-3 weeks | Brute-force engine (Stage 1A/1B/2/3) |
 | 4 | 1-2 weeks | Filter cascade (Stage 4) + first production sweep |
 
@@ -681,7 +681,7 @@ The full decision list (85 items, last amended 2026-05-15 evening) is
 mirrored in `MIGRATION.md`. Highlights:
 
 1. Spot indexes + India VIX, signal-only research, no broker theatre
-2. Dhan API; 1m + 1d fetched, 19 additional intraday TFs resampled (21 total)
+2. Groww API; 1m + 1d fetched, 19 additional intraday TFs resampled (21 total)
 3. 9 indicators, no VWAP
 4. 52 atomic conditions, K=2..5 ANDed, conflict-graph pruned
 5. ~1.2-1.5M unique patterns (post-prune) × 2 directions

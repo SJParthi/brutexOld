@@ -11,7 +11,7 @@ _Last updated: 2026-05-15._
 |---|---|---|---|---|
 | **Phase 0** Documentation | 🔄 in progress | 2-3 days | Claude | This PR (`claude/track2-options-design-VXT2A`) |
 | **Phase 1** Test scaffolding | ☐ not started | 1 week | Claude | Mirrors Track 1 Phase 1 — depends on Phase 0 merge |
-| **Phase 2** Dhan options adapter | ⏸️ blocked | 2 weeks | Claude | Blocked on Track 1 Phase 2 complete (data lake ingest live) |
+| **Phase 2** Groww options adapter | ⏸️ blocked | 2 weeks | Claude | Blocked on Track 1 Phase 2 complete (data lake ingest live) |
 | **Phase 3** Backtest engine | ☐ not started | 2-3 weeks | Claude | Depends on Phase 2 + Track 1 Phase 3 engine |
 | **Phase 4** First sweep | ☐ not started | 1 week | Claude + User | Run on a Track 1 winning signal; user signs off top-3 |
 
@@ -22,9 +22,9 @@ Total: 6-8 weeks of build work, starting **after Track 1 Phase 2 ships**.
 | Prereq | Source-of-truth | Why |
 |---|---|---|
 | Track 1 Phase 0 complete | `docs/phases/00_MASTER_CHECKLIST.md` row "Phase 0" | We mirror their patterns |
-| Track 1 Phase 2 complete (Dhan adapter shipped) | `docs/phases/phase_2_dhan_adapter_vocabulary.md` | Reuses auth + rate-limit + audit infra |
+| Track 1 Phase 2 complete (Groww adapter shipped) | `docs/phases/phase_2_groww_adapter_vocabulary.md` | Reuses auth + rate-limit + audit infra |
 | Track 1 rolling window working (5y ingested + daily incremental) | `docs/TRACK1_DATA_INGEST_DESIGN.md` §1-§7 | Options ingest reads spot underlying as a covariate |
-| Dhan access token issued + renew loop green | `docs/TRACK1_DATA_INGEST_DESIGN.md` §5A | Same token works for `/charts/rollingoption` |
+| Groww access token issued + renew loop green | `docs/TRACK1_DATA_INGEST_DESIGN.md` §5A | Same token works for `/charts/rollingoption` |
 | 4-agent hostile review on Track 1 Phase 2 PASS | `docs/runbooks/4-agent-review.md` | Pattern must be proven before Track 2 reuses it |
 
 If ANY of the above is RED, Track 2 implementation stops at the
@@ -38,10 +38,10 @@ proceeds in parallel.
 | 3 underlyings (NIFTY 50, BANKNIFTY, SENSEX) — NO India VIX options | 🔒 locked | This dir's `TRACK2_OPTIONS_SPEC.md` §2 |
 | `/v2/charts/rollingoption` endpoint (ATM-relative, not per-contract) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §3 |
 | 1-minute timeframe ONLY (no resampling) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §4 |
-| ATM ± 10 strike radius (Dhan-enforced) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §5 |
+| ATM ± 10 strike radius (Groww-enforced) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §5 |
 | Current expiry only at sweep time (week + month per underlying) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §6 |
 | **6 backfill streams** with per-regime date gating (NIFTY-WEEK/MONTH 2021→today; BANKNIFTY-WEEK 2021→2024-11-13; BANKNIFTY-MONTH 2021→today; SENSEX-WEEK/MONTH **2021-01-01 → today** — Thursday cycle pre-2023-05-12 per BSE Notice 20230327-65, thin liquidity annotated) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §2 |
-| IV from Dhan; delta/gamma/theta/vega computed by BruteX (Black-Scholes) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §8 |
+| IV from Groww; delta/gamma/theta/vega computed by BruteX (Black-Scholes) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §8 |
 | Storage layout: `options/<exch>/<segment>/<underlying>/<cycle>/ATM<offset>/<type>/<year>/<month>.parquet` | 🔒 locked | `TRACK2_DATA_INGEST_DESIGN.md` §3 |
 | Money: int64 paisa everywhere (same as Track 1) | 🔒 locked | `TRACK2_OPTIONS_SPEC.md` §11 |
 | Brokerage/STT/STO model | ☐ TBD | `phases/phase_3_backtest_engine.md` Week 1 task |
@@ -60,7 +60,7 @@ proceeds in parallel.
 - **Goal:** Add the test pyramid for Track 2 — extends Track 1's 9-layer pyramid.
 - **Exit:** 11 new property invariants (options-specific) + 2 new oracle tests pass against a fake adapter.
 
-### Phase 2 — Dhan options adapter (BLOCKED on Track 1 Phase 2)
+### Phase 2 — Groww options adapter (BLOCKED on Track 1 Phase 2)
 - **Goal:** Real `/v2/charts/rollingoption` calls, **6-stream** backfill (~15,876 calls / ~88 min wall time / ~5.5 GB storage), daily incremental.
 - **Exit:** 5y backfill green; daily incremental + bar_hash audit chain unbroken; `brutex doctor` C12 (options-fresh) added.
 
@@ -76,7 +76,7 @@ proceeds in parallel.
 
 | Doc | Purpose |
 |---|---|
-| `../../CLAUDE.md` | Project rules + Dhan facts |
+| `../../CLAUDE.md` | Project rules + Groww facts |
 | `../TRACK1_BACKTEST_SPEC.md` | Track 1 master spec — Track 2 derives from it |
 | `../TRACK1_DATA_INGEST_DESIGN.md` | Pipeline + state-machine pattern we mirror |
 | `../TRACK1_VERIFICATION_PYRAMID.md` | 9-layer pyramid extends to options |

@@ -91,7 +91,7 @@ should tighten the math stub signatures.
 | MEDIUM | #34 | `pyproject.toml:46` + `.github/workflows/ci.yml:118` | Silent CI version drift: CI uses `pip install -e ".[dev]"` with `cache: pip`. Once mypy 2.x publishes a release matching `<3.0` AND the cache evicts, CI installs mypy 2.x on a non-deps PR. "Verified" claim used local version only. | Filed as follow-up PR #37 (consolidate with Agent 2 HIGH #1+#2). Add `constraints.txt`. |
 | MEDIUM | #35 | `.github/workflows/ci.yml:120` (`pyright brutex`) | False-OK on "full project-wide strict mode" claim: CI runs `pyright brutex` only — NOT `pyright tests`. Strict mode for tests is enforced only by local-dev discipline. | **FIXED IN PR #36** — CI workflow updated to `pyright brutex tests` with rationale comment. |
 | MEDIUM | #35 | `brutex/math/__init__.pyi:30-44` | Type erasure: all 12 symbols declared `(*args: Any, **kwargs: Any) -> Any`. Pyright accepts wrong args / zero args / anything. No production callers exist yet, so impact is roadmap-deferred. | Filed as follow-up PR #38 — tighten signatures once Rust crate surface stabilizes. |
-| MEDIUM | #33 | `tests/integration/test_instrument_store.py:75-79` (`_idx` token fallback map) | Unverified securityIds for non-Track-1 indices: FINNIFTY=27, MIDCPNIFTY=28, NIFTYNXT50=29 not cited from Dhan docs. Track 2 docs explicitly call these "UNVERIFIED". | Filed as follow-up PR #40 (consolidate with Agent 1 LOW #1 + Agent 2 LOW #1). |
+| MEDIUM | #33 | `tests/integration/test_instrument_store.py:75-79` (`_idx` token fallback map) | Unverified securityIds for non-Track-1 indices: FINNIFTY=27, MIDCPNIFTY=28, NIFTYNXT50=29 not cited from Groww docs. Track 2 docs explicitly call these "UNVERIFIED". | Filed as follow-up PR #40 (consolidate with Agent 1 LOW #1 + Agent 2 LOW #1). |
 | LOW | #33 | `tests/integration/test_instrument_store.py:611-621` (TestExpiriesTable + TestContractsTable) | Skip-marked indefinitely; no automated reactivation guard. | Filed as follow-up — replace `skip` with `xfail(strict=True)` when Track 2 Phase 1 starts. |
 | LOW | #34 | PR body / commit message | Honest-envelope drift: claims "renovate.json (95 lines)" but actual is 231 lines. Trivial but a discipline lapse. | **DOCUMENTED** here; no PR-body edit to a merged PR (immutable history). Going-forward template captures the line-count discipline. |
 | LOW | #35 | `tests/unit/test_strategies_registry.py:22-34` (`_make_strategy_class._TestStrat`) | Inconsistent pattern: this inline class STILL uses bare `META = StrategyMeta(...)` without `ClassVar` + `__init__`, while PR #35 added both to 8 other inline test strategies. Pyright doesn't check Protocol conformance here so no error fires, but the divergence is a maintenance hazard. | Filed as follow-up — apply same pattern for consistency. |
@@ -110,7 +110,7 @@ are now honored on the merged history via correction commits.
 | # | Citation | Source | Status |
 |---|---|---|---|
 | 1a-1g | 7 test classes in `test_instrument_store.py` | PR #33 | VERIFIED |
-| 2 | `_idx()` per-symbol token map with verified Dhan IDs | PR #33 | VERIFIED |
+| 2 | `_idx()` per-symbol token map with verified Groww IDs | PR #33 | VERIFIED |
 | 3 | 7 NEW pyproject bounds (structlog, pyarrow, pytest, pytest-cov, pytest-benchmark, mypy, mutmut) | PR #34 | VERIFIED |
 | 4 | renovate.json with 13 packageRules | PR #34 | VERIFIED |
 | 5 | `brutex/math/__init__.pyi` with 12 symbols | PR #35 | VERIFIED |

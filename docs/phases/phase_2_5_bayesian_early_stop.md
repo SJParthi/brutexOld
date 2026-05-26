@@ -16,7 +16,7 @@ from 33B → ~13B (61% expected savings).
 
 - [x] Phase 0 complete
 - [ ] Phase 1 complete (verification scaffolding shipped)
-- [ ] Phase 2 complete (Dhan adapter + 52-vocabulary live)
+- [ ] Phase 2 complete (Groww adapter + 52-vocabulary live)
 - [ ] Read `docs/TRACK1_OPTIMIZATIONS.md §2` in full
 - [ ] User confirms "start Phase 2.5"
 

@@ -19,7 +19,7 @@ from brutex.models import (
 )
 
 # ────────────────────────────────────────────────────────────────────────
-# Enum values — pinned to broker SDK values (https://dhanhq.co/docs/v2/annexure)
+# Enum values — pinned to broker SDK values (https://groww.in/trade-api/docs/docs/v2/annexure)
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -235,7 +235,7 @@ class TestErrorHierarchy:
 
 # ────────────────────────────────────────────────────────────────────────
 # normalise_tick_size — the format drift handler
-# See https://dhanhq.co/docs/v2/annexure
+# See https://groww.in/trade-api/docs/docs/v2/annexure
 # ────────────────────────────────────────────────────────────────────────
 
 

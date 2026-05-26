@@ -87,7 +87,7 @@ START NOW: find the first phase doc with unchecked boxes and begin.
 
 The user will provide:
 - Sign-off at each phase end
-- Dhan access token before Phase 2 starts
+- Groww access token before Phase 2 starts
 - Business judgment on top-3 strategies at Phase 4 ship
 
 The user does NOT need to provide anything else. Everything else is

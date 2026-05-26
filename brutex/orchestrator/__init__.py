@@ -7,7 +7,7 @@ and the Ray-backed workers.
 Structure (being built incrementally):
 
 * :mod:`brutex.orchestrator.state` — work-item state machine (FR-ING-014)
-* :mod:`brutex.orchestrator.retry` — Dhan API exception → Outcome classifier + backoff schedule (FR-ING-008 refined)
+* :mod:`brutex.orchestrator.retry` — Groww API exception → Outcome classifier + backoff schedule (FR-ING-008 refined)
 * :mod:`brutex.orchestrator.audit` — hash-chained JSONL audit log (NFR-OBS-003)
 * ``brutex.orchestrator.pipeline`` — phase pipeline + gating (FR-ING-013) — TBD
 * ``brutex.orchestrator.rate_limiter`` — adaptive token bucket (FR-ING-017) — TBD

@@ -5,7 +5,7 @@ v1 ships:
   with a Prometheus text-format exporter (no ``prometheus_client`` dep)
 * :mod:`brutex.observability.logging` — structlog configuration entry
   point (:func:`configure_logging`). First production callers are the
-  Dhan orchestrator worker + CLI.
+  Groww orchestrator worker + CLI.
 
 Per ``REQUIREMENTS.md §15.1 Metrics (Prometheus)`` and ``NFR-OBS-004``.
 """

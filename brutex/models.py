@@ -5,7 +5,7 @@ Every broker adapter normalises its raw data into these models. Layers L2+
 dicts from `a broker SDK` or any other broker.
 
 See ``docs/REQUIREMENTS.md §6`` for the full data-model specification and
-Dhan API annexure at https://dhanhq.co/docs/v2/annexure for the Dhan-specific mapping.
+Groww API annexure at https://groww.in/trade-api/docs/docs/v2/annexure for the Groww-specific mapping.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ class Exchange(StrEnum):
     NSE = "NSE"
     BSE = "BSE"
     # MCX exists in broker SDK but is out of scope for BruteX v1
-    # (Dhan-backed backtesting does not support COMMODITY segment).
+    # (Groww-backed backtesting does not support COMMODITY segment).
 
 
 class Segment(StrEnum):
@@ -51,7 +51,7 @@ class Segment(StrEnum):
 class InstrumentType(StrEnum):
     """Instrument type — matches broker SDK values verbatim.
 
-    See Dhan API annexure at https://dhanhq.co/docs/v2/annexure for the canonical list.
+    See Groww API annexure at https://groww.in/trade-api/docs/docs/v2/annexure for the canonical list.
 
     .. note::
 
@@ -60,7 +60,7 @@ class InstrumentType(StrEnum):
         4 values — ``EQ`` / ``FUT`` / ``CE`` / ``PE`` — are **Track 2
         reference / forward-compat**, kept in the enum so:
 
-        1. Dhan annexure parity is preserved (broker-CSV roundtrip).
+        1. Groww annexure parity is preserved (broker-CSV roundtrip).
         2. Track 2 options modules + cost calculator can type-check.
         3. Existing test fixtures across 6+ files keep importing them.
 
@@ -94,7 +94,7 @@ class Instrument:
     `the deleted broker adapter`. Downstream
     layers see only this class and never the raw `a broker SDK` dict.
 
-    Field ordering matches Dhan API annexure at https://dhanhq.co/docs/v2/annexure for
+    Field ordering matches Groww API annexure at https://groww.in/trade-api/docs/docs/v2/annexure for
     side-by-side auditability.
     """
 
@@ -129,7 +129,7 @@ class Instrument:
     buy_allowed: bool
     sell_allowed: bool
 
-    # Dhan-specific undocumented field — see https://dhanhq.co/docs/v2/annexure
+    # Groww-specific undocumented field — see https://groww.in/trade-api/docs/docs/v2/annexure
     internal_trading_symbol: str | None = None
 
     # ─────────────────────────────────────────────────────────────────
@@ -208,13 +208,13 @@ class OutOfScopeError(BruteXError):
     """Row belongs to a scope that is explicitly excluded from v1.
 
     Examples: stock options, cash equity rows, commodity segment rows.
-    The adapter raises this when a Dhan row would be ingested that
+    The adapter raises this when a Groww row would be ingested that
     does not match the locked v1 universe (``FD-09a`` / ``FD-09b``).
     """
 
 
 class InstrumentFormatError(BruteXError):
-    """A a Dhan row violates the documented schema.
+    """A a Groww row violates the documented schema.
 
     Raised when required fields are missing, types are wrong, or the
     internal_trading_symbol / trading_symbol equality invariant fails.
@@ -224,7 +224,7 @@ class InstrumentFormatError(BruteXError):
 class TickSizeFormatError(InstrumentFormatError):
     """Raised when ``tick_size`` cannot be normalised to Decimal rupees.
 
-    See Dhan API annexure at https://dhanhq.co/docs/v2/annexure for the format drift
+    See Groww API annexure at https://groww.in/trade-api/docs/docs/v2/annexure for the format drift
     (float rupees in CSV vs integer paise in dict output).
     """
 
@@ -234,7 +234,7 @@ class TickSizeFormatError(InstrumentFormatError):
 # ────────────────────────────────────────────────────────────────────────
 
 #: Minimum value of a tick size when expressed as integer paise (the
-#: dict-output form from Dhan). Below 1 is meaningless (paise < 1 =
+#: dict-output form from Groww). Below 1 is meaningless (paise < 1 =
 #: fractional rupee, should use the float-rupees branch instead).
 MIN_TICK_PAISE: Final[int] = 1
 
@@ -249,10 +249,10 @@ VALID_TICK_SIZES_RUPEES: Final[frozenset[Decimal]] = frozenset(
 
 
 def normalise_tick_size(raw: float | int | Decimal | str) -> Decimal:
-    """Convert a Dhan tick_size value to canonical Decimal rupees.
+    """Convert a Groww tick_size value to canonical Decimal rupees.
 
     Handles the format drift documented in
-    Dhan API annexure at https://dhanhq.co/docs/v2/annexure:
+    Groww API annexure at https://groww.in/trade-api/docs/docs/v2/annexure:
 
     * CSV row: float rupees (``0.05``)
     * Dict output of ``get_instrument_by_vendor_symbol``: integer paise (``5``)

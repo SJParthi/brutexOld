@@ -25,7 +25,7 @@
 | `TRACK2_DATA_INGEST_DESIGN.md` | Storage + state machine + pseudocode | locked |
 | `phases/phase_0_documentation.md` | Phase 0 — Documentation | 🔄 in progress |
 | `phases/phase_1_verification.md` | Phase 1 — Test scaffolding | ☐ |
-| `phases/phase_2_dhan_options_adapter.md` | Phase 2 — Adapter impl | ⏸️ blocked on Track 1 complete |
+| `phases/phase_2_groww_options_adapter.md` | Phase 2 — Adapter impl | ⏸️ blocked on Track 1 complete |
 | `phases/phase_3_backtest_engine.md` | Phase 3 — Engine | ☐ |
 | `phases/phase_4_first_sweep.md` | Phase 4 — First sweep | ☐ |
 
@@ -33,7 +33,7 @@
 
 | Doc | Why it matters for Track 2 |
 |---|---|
-| `../../CLAUDE.md` | Project rules, 4-agent review pattern, Dhan facts |
+| `../../CLAUDE.md` | Project rules, 4-agent review pattern, Groww facts |
 | `../TRACK1_BACKTEST_SPEC.md` | Master spec — Track 2 is the post-Track-1 Options Track |
 | `../TRACK1_DATA_INGEST_DESIGN.md` | Storage + state machine pattern we mirror |
 | `../TRACK1_VERIFICATION_PYRAMID.md` | 9-layer pyramid extends to options |
@@ -60,8 +60,8 @@ Same as Track 1:
 | Endpoint | `/v2/charts/intraday` + `/v2/charts/historical` | `/v2/charts/rollingoption` |
 | Address scheme | securityId per instrument | (underlying_secId, expiryFlag, strikeRelative, type) |
 | Timeframes | 21 (1m + 19 derived + 1d) | **1m only** (no resampling) |
-| Strike model | n/a | ATM ± 10 (Dhan-enforced) |
-| Greeks | n/a | IV from Dhan; delta/gamma/theta computed (Black-Scholes) |
+| Strike model | n/a | ATM ± 10 (Groww-enforced) |
+| Greeks | n/a | IV from Groww; delta/gamma/theta computed (Black-Scholes) |
 | Brokerage / STT | NONE (signal-only) | TBD (Phase 3 — for realistic execution) |
 | Storage | ~80 MB / 5y | ~5.5 GB / 5.37y (6 streams × 42 series × ~25 MB) |
 | Backfill wall time | ~5 min | ~88 min (15,876 calls / 3 r/s) |

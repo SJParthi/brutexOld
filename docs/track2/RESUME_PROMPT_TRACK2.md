@@ -10,14 +10,14 @@
 
 ```
 You are working on BruteX Track 2 — the Options Track that translates
-Track 1 winning spot signals into Indian index options via Dhan's
+Track 1 winning spot signals into Indian index options via Groww's
 /v2/charts/rollingoption endpoint. Resume work from the most recently
 merged main.
 
 STARTUP STEPS (do all of these before writing any code):
 
 1. Read /home/user/bruteX/CLAUDE.md in full. Honor every Golden Rule.
-   Track 2 inherits ALL of them (no AWS, no hallucination, Dhan rate
+   Track 2 inherits ALL of them (no AWS, no hallucination, Groww rate
    limit, no scope expansion, 4-agent review at every phase end).
 
 2. Read /home/user/bruteX/docs/track2/README.md to understand the
@@ -81,7 +81,7 @@ WORK PROTOCOL:
 LOCKED TRACK 2 SCOPE (do NOT silently change):
 
 - 3 underlying universes: NIFTY 50 (secId 13), BANKNIFTY (secId 25),
-  SENSEX (secId 51). NO India VIX options (none exist on Dhan).
+  SENSEX (secId 51). NO India VIX options (none exist on Groww).
 - Endpoint: POST /v2/charts/rollingoption (ATM-relative time-series).
 - Strikes: ATM-10 to ATM+10 (21 strikes), CE + PE = 42 series per
   (underlying, cycle, day).
@@ -94,7 +94,7 @@ LOCKED TRACK 2 SCOPE (do NOT silently change):
 - **6 active backfill streams**: NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-WEEK
   (until 2024-11-13), BANKNIFTY-MONTH, SENSEX-WEEK, SENSEX-MONTH.
 - Timeframe: 1m ONLY (no resampling for options).
-- Greeks: IV from Dhan; delta/gamma/theta/vega computed by BruteX
+- Greeks: IV from Groww; delta/gamma/theta/vega computed by BruteX
   using Black-Scholes-Merton.
 - Storage: ~5.5 GB for 5.37y across all 6 streams.
 - Backfill: ~15,876 API calls, ~88 min wall time, 15.9% of daily quota (one-time).
@@ -102,7 +102,7 @@ LOCKED TRACK 2 SCOPE (do NOT silently change):
 DELIVERY EXPECTATIONS:
 
 - Code: Python 3.12 strict + Rust (Black-Scholes kernel in fno-math)
-- Tests: 100% line + 100% branch on brutex/adapters/dhan/options*
+- Tests: 100% line + 100% branch on brutex/adapters/groww/options*
   and brutex/options/
 - 11 new property invariants (options-specific) on top of Track 1's 26
 - 2 new oracle tests (options replay + Black-Scholes-vs-py_vollib)
@@ -179,10 +179,10 @@ These are LOCKED. The new session must NOT change them without user approval:
 - 3 underlyings (NIFTY 50, BANKNIFTY, SENSEX) — NO India VIX options
 - `/v2/charts/rollingoption` endpoint (ATM-relative, NOT per-contract)
 - 1-minute timeframe ONLY (no resampling)
-- ATM ± 10 strike radius (Dhan-enforced)
+- ATM ± 10 strike radius (Groww-enforced)
 - Current expiry at sweep time (week + month per underlying)
 - **6 backfill streams** (NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-WEEK [active until 2024-11-13, dormant after], BANKNIFTY-MONTH, SENSEX-WEEK, SENSEX-MONTH; SENSEX extends back to 2021-01-01 per BSE Notice 20230327-65 with thin pre-2023-05-15 liquidity)
-- IV from Dhan; delta/gamma/theta/vega computed (Black-Scholes-Merton)
+- IV from Groww; delta/gamma/theta/vega computed (Black-Scholes-Merton)
 - Money: int64 paisa everywhere
 - NO AWS — local M4 Pro only
 - Apple Silicon GPU offload (Phase 3.5 of Track 1 inherits)

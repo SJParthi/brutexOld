@@ -49,8 +49,8 @@ pub enum ApplicationError {
     #[error("TOTP generation failed: {reason}")]
     TotpGenerationFailed { reason: String },
 
-    /// Dhan authentication API call failed.
-    #[error("Dhan authentication failed: {reason}")]
+    /// Groww authentication API call failed.
+    #[error("Groww authentication failed: {reason}")]
     AuthenticationFailed { reason: String },
 
     /// Token renewal failed after all retries.
@@ -87,11 +87,11 @@ mod tests {
     #[test]
     fn test_secret_retrieval_error_display() {
         let err = ApplicationError::SecretRetrieval {
-            path: "/brutex/dev/dhan/client-id".to_string(),
+            path: "/brutex/dev/groww/client-id".to_string(),
             source: anyhow::anyhow!("not found"),
         };
         let msg = err.to_string();
-        assert!(msg.contains("/brutex/dev/dhan/client-id"));
+        assert!(msg.contains("/brutex/dev/groww/client-id"));
         assert!(msg.contains("not found"));
     }
 

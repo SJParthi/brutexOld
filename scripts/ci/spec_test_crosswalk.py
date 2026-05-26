@@ -43,7 +43,7 @@ CROSSWALK: dict[Path, tuple[str, list[tuple[re.Pattern[str], str]]]] = {
                 re.compile(r"## 4\.2 Trade outcome state machine"),
                 "test_trade_outcome_state_machine",
             ),
-            (re.compile(r"## 4\.3 Dhan-specific gotcha"), "test_dhan_worthless_brokerage"),
+            (re.compile(r"## 4\.3 Groww-specific gotcha"), "test_groww_worthless_brokerage"),
         ],
     ),
 }

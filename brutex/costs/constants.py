@@ -35,14 +35,14 @@ specs; COSTS_VERIFIED §11."""
 # Brokerage (per executed order, flat)
 # ─────────────────────────────────────────────────────────────────
 
-DHAN_BROKERAGE_PAISA: Final[int] = 2_000
-"""Dhan: ₹20 per executed order (flat for F&O). Same whether the
+GROWW_BROKERAGE_PAISA: Final[int] = 2_000
+"""Groww: ₹20 per executed order (flat for F&O). Same whether the
 order is 1 lot or 1000 lots. CALCULATOR_SPEC §4.4 corrects an
 earlier wrong "₹20 per contract" claim. Source: COSTS_VERIFIED §8.1."""
 
 ZERODHA_BROKERAGE_PAISA: Final[int] = 2_000
 """Zerodha: ₹20 per executed order (flat for F&O, since June 2024).
-Same flat rate as Dhan for our 1-lot-per-trade simulator design.
+Same flat rate as Groww for our 1-lot-per-trade simulator design.
 Source: COSTS_VERIFIED §8.2."""
 
 
@@ -221,4 +221,4 @@ def brokerage_paisa(broker: str) -> int:
     """
     if broker == "zerodha":
         return ZERODHA_BROKERAGE_PAISA
-    return DHAN_BROKERAGE_PAISA
+    return GROWW_BROKERAGE_PAISA

@@ -353,7 +353,7 @@ class BloomFilter:
         ``False`` — the read is lockless and the writer's bit-flips
         are not atomic across all ``k`` slots. This is acceptable
         because the L2 LMDB layer is ground-truth: the worst case is
-        an extra L2 lookup, never a duplicate fetch reaching the Dhan
+        an extra L2 lookup, never a duplicate fetch reaching the Groww
         API. The 4-tier dedup contract (CLAUDE.md §2 rule 11) tolerates
         this; clients of :class:`BloomFilter` MUST treat ``True`` as
         "maybe" and ``False`` as "very probably not".

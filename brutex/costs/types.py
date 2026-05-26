@@ -11,7 +11,7 @@ Public types:
 - ``TradeCostBreakdown`` — per-component charge breakdown + roll-ups
 - ``TradeSide`` — long_call / long_put / short_call / short_put
 - ``TradeOutcome`` — NORMAL_CLOSE / EXPIRY_EXERCISE / EXPIRY_ASSIGN / EXPIRY_WORTHLESS
-- ``Broker`` — dhan / zerodha
+- ``Broker`` — groww / zerodha
 - ``GstSplit`` — intra_state / inter_state
 
 Track 2 (per DEC-RISK-011 + DEC-EXEC-008) ALWAYS uses:
@@ -57,8 +57,8 @@ TradeSide = Literal["long_call", "long_put", "short_call", "short_put"]
 or long_put (DEC-EXEC-008 BUY-only policy). The short_* values are
 forward-compat stubs."""
 
-Broker = Literal["dhan", "zerodha"]
-"""Brokerage rate selection. Default ``dhan``."""
+Broker = Literal["groww", "zerodha"]
+"""Brokerage rate selection. Default ``groww``."""
 
 GstSplit = Literal["intra_state", "inter_state"]
 """Tax-state split for GST: ``intra_state`` → CGST 9% + SGST 9%
@@ -125,7 +125,7 @@ class TradeInput:
         looked up from the lot-size history per
         ``brutex.options.lot_size_history`` for ``entry_dt_ist.date()``.
     broker : Broker
-        Default ``dhan``.
+        Default ``groww``.
     gst_split : GstSplit
         Default ``intra_state``.
     trade_outcome : TradeOutcome
@@ -147,7 +147,7 @@ class TradeInput:
     exit_bar_open_paisa: int
     side: TradeSide
     n_lots: int = 1
-    broker: Broker = "dhan"
+    broker: Broker = "groww"
     gst_split: GstSplit = "intra_state"
     trade_outcome: TradeOutcome = "NORMAL_CLOSE"
     intrinsic_value_paisa_at_expiry: int = 0
@@ -201,7 +201,7 @@ class TradeCostBreakdown:
     sell_notional_paisa : int
         ``sell_fill_paisa * n_shares``.
     brokerage_paisa : int
-        Round-trip broker fee. For Dhan / Zerodha: ``2 * 2000`` =
+        Round-trip broker fee. For Groww / Zerodha: ``2 * 2000`` =
         ₹40 (₹20 per executed order, NOT per contract — DEC-COST §4.4).
     stt_paisa : int
         STT on sell-side premium per DEC-COST-002 + DEC-COST-003.

@@ -1,7 +1,7 @@
 # fno-math — minimal Rust scaffold for BruteX Phase 2/3 hot kernels.
 #
 # Per CLAUDE.md §4 + §5 + docs/MIGRATION.md Decision #68. BruteX is a
-# Track 1 signal-only backtest over Dhan historical data for 4 Indian
+# Track 1 signal-only backtest over Groww historical data for 4 Indian
 # spot indices (NIFTY 50, BANKNIFTY, SENSEX, INDIA VIX). The Greeks /
 # indicators / strategies / live-tick modules previously here were
 # tickvault-extracted residue, removed per DEC-P0-025 (PR #47).

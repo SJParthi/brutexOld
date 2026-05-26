@@ -13,7 +13,7 @@ documentation) through to the first production sweep.
 
 | Deliverable | Owner | Status |
 |---|---|---|
-| `CLAUDE.md` rewritten for Dhan + Track 1 | this PR | ✅ |
+| `CLAUDE.md` rewritten for Groww + Track 1 | this PR | ✅ |
 | `docs/REQUIREMENTS.md` retired to stub | this PR | ✅ |
 | `docs/TRACK1_BACKTEST_SPEC.md` rewritten | this PR | ✅ |
 | `docs/TRACK1_VERIFICATION_PYRAMID.md` written | this PR | ✅ |
@@ -23,7 +23,7 @@ documentation) through to the first production sweep.
 | `docs/TRACK1_MICROSTRUCTURE.md` written | this PR | (next) |
 | `docs/MIGRATION.md` written | this PR | (next) |
 | broker adapter (deleted) deleted | this PR | ✅ |
-| Dhan test files deleted | this PR | ✅ |
+| Groww test files deleted | this PR | ✅ |
 | `docs/broker-sdk-docs/` deleted | this PR | ✅ |
 | `pyproject.toml` the prior broker dep removed | this PR | ✅ |
 | `brutex/cli.py` stubbed to minimal Track 1 | this PR | ✅ |
@@ -75,28 +75,28 @@ green with all stubs. The verification surface is mapped.
 
 ---
 
-## Phase 2 — Dhan Adapter + Spot-Index Ingest + Vocabulary (3-4 weeks)
+## Phase 2 — Groww Adapter + Spot-Index Ingest + Vocabulary (3-4 weeks)
 
-**Goal:** Stand up the Dhan data path, the 52-condition vocabulary,
+**Goal:** Stand up the Groww data path, the 52-condition vocabulary,
 and the indicator precompute pipeline.
 
 ### Week 4
 
 | Deliverable | Notes |
 |---|---|
-| `brutex/adapters/dhan/__init__.py` | New package |
-| `brutex/adapters/dhan/client.py` | HTTP client with token, rate limit |
-| `brutex/adapters/dhan/instruments.py` | Master CSV fetcher + securityId resolver |
-| `brutex/adapters/dhan/intraday.py` | `POST /v2/charts/intraday` wrapper |
-| `brutex/adapters/dhan/historical.py` | `POST /v2/charts/historical` wrapper |
+| `brutex/adapters/groww/__init__.py` | New package |
+| `brutex/adapters/groww/client.py` | HTTP client with token, rate limit |
+| `brutex/adapters/groww/instruments.py` | Master CSV fetcher + securityId resolver |
+| `brutex/adapters/groww/intraday.py` | `POST /v2/charts/intraday` wrapper |
+| `brutex/adapters/groww/historical.py` | `POST /v2/charts/historical` wrapper |
 | Property tests P-18 (rate limiter) green | |
-| First live call to Dhan verifies rate limit and `securityId` map | |
+| First live call to Groww verifies rate limit and `securityId` map | |
 
 ### Week 5
 
 | Deliverable | Notes |
 |---|---|
-| `brutex/data/parser.py` updated for Dhan response format | Generic candle parser |
+| `brutex/data/parser.py` updated for Groww response format | Generic candle parser |
 | 1m → 14 TFs resampler verified deterministic (P-08) | |
 | Indicators 1-9 implemented in Rust (`rust/fno-math/src/indicators/`) | Extends existing crate |
 | Indicator cache key (`sha256(data_version ‖ indicator_version)`) | |
@@ -119,7 +119,7 @@ and the indicator precompute pipeline.
 | Phase 2 hostile review (4-agent pass) | Catches anything missed |
 | Phase 2 sign-off | User reviews vocabulary + adapter |
 
-**Exit criteria:** Dhan ingest of 5 years × 3 instruments × 15 TFs
+**Exit criteria:** Groww ingest of 5 years × 3 instruments × 15 TFs
 working. 9 indicators precomputed. 52 atomic conditions evaluable. The
 pattern generator emits the pruned set.
 
@@ -210,9 +210,9 @@ Every phase ends with a 4-agent hostile-review gate. Pattern:
 4. Reality-check agent (general) → public-benchmark / hardware-budget sanity
 ```
 
-This pattern caught the major issues on 2026-05-15 (the broker-vs-Dhan
+This pattern caught the major issues on 2026-05-15 (the broker-vs-Groww
 adapter mismatch, 10x throughput claim, spot-index tradability,
-DSR-with-N=33B, basis-point vs absolute-point tolerances, native Dhan
+DSR-with-N=33B, basis-point vs absolute-point tolerances, native Groww
 timeframe count, securityId hardcoding). It is a non-negotiable gate.
 
 See `docs/runbooks/4-agent-review.md` (Phase 1 deliverable) for the
@@ -224,7 +224,7 @@ runbook with exact prompts.
 
 | Risk | Mitigation |
 |---|---|
-| Dhan API rate-limit lower than expected | Cap at 10 r/s; verify on first call; escalate adapter only with user approval |
+| Groww API rate-limit lower than expected | Cap at 10 r/s; verify on first call; escalate adapter only with user approval |
 | Throughput below 80K trials/sec sustained | Phase 3 micro-benchmark gates this; if fails, escalate to larger hardware before Phase 4 |
 | DSR effective-N still rejects everything | Phase 4 dry-run on Phase 3 outputs; if rejects everything, revisit cluster-pruning aggressiveness |
 | Indian market microstructure surprise | Phase 2 hostile review re-checks; calendar tests P-22, P-23 guard the canary |

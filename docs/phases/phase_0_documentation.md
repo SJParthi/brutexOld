@@ -9,7 +9,7 @@
 ## Goal
 
 Lock all design decisions in markdown before any code lands. Retire
-the prior v1.0 spec and pivot to Dhan + spot indexes + India VIX
+the prior v1.0 spec and pivot to Groww + spot indexes + India VIX
 (reference-only) for Track 1.
 
 ## Prerequisites
@@ -26,7 +26,7 @@ the prior v1.0 spec and pivot to Dhan + spot indexes + India VIX
 - [x] Delete prior broker's adapter (8 source files) + SDK docs (4) + tests (11) (commit 852ed1e)
 - [x] Rewrite `brutex/cli.py` (984 → 226 lines) (commit 852ed1e)
 - [x] Rewrite `brutex/universe.py` (8 F&O → 3 spot indexes) (commit 852ed1e)
-- [x] Rewrite `CLAUDE.md` with Dhan facts + 4-agent review pattern (commit 852ed1e)
+- [x] Rewrite `CLAUDE.md` with Groww facts + 4-agent review pattern (commit 852ed1e)
 - [x] Retire `docs/REQUIREMENTS.md` (commit 852ed1e; further compressed in commit bbd155e)
 - [x] Update `pyproject.toml` — drop prior broker SDK, bump to 0.2.0a0 (commit 852ed1e)
 - [x] Write `docs/TRACK1_BACKTEST_SPEC.md` (commit 852ed1e)
@@ -53,8 +53,8 @@ the prior v1.0 spec and pivot to Dhan + spot indexes + India VIX
 - [x] Update `docs/TRACK1_VOCABULARY.md` banner (commit 7236ba8)
 - [x] Add `vix_at_entry` + `vix_at_exit` columns to result row spec (commit 7236ba8)
 - [x] Add 7 new tests for partition (40 total in `test_universe.py`) (commit 7236ba8)
-- [x] Lock Dhan rate limit at verified 5 r/s + 100K/day (commit 7236ba8)
-- [x] Lock Dhan error code map (Data API codes 800-814 + DH-901..910) (commit 7236ba8)
+- [x] Lock Groww rate limit at verified 5 r/s + 100K/day (commit 7236ba8)
+- [x] Lock Groww error code map (Data API codes 800-814 + DH-901..910) (commit 7236ba8)
 - [x] Auth design — manual paste + auto-renew (commit 3dc6bfc)
 - [x] User confirms NIFTY=13, BANKNIFTY=25 securityIds
 - [x] Hardcode all 4 securityIds in spec (commit 852fc3d)
@@ -108,7 +108,7 @@ ledger. Highlights:
 | Range | Theme |
 |---|---|
 | #1-#70 | Data-source + scope pivot, Track 1 scope, vocabulary, exit modes, search pipeline, verification, microstructure, phase plan |
-| #71-#80 | India VIX added, post-merge corrections, Dhan rate limit verified, 4 securityIds hardcoded |
+| #71-#80 | India VIX added, post-merge corrections, Groww rate limit verified, 4 securityIds hardcoded |
 | #81-#87 | Auth design, error map, segment cleanup, single-TF invariant |
 | #88-#96 | Runtime bootstrap, doctor CLI, MCP servers, Cowork isolation, cheap fixes (combo_hash etc.), institutional verdict, day/night envelope |
 | #97-#102 | 3 spec consistency fixes, honest 4-day SLA, Bloom math fix, no-AWS lock, Phase 2.5 + 3.5 designs, combined optimization impact |
@@ -143,6 +143,6 @@ tests/conftest.py                                   (vendor_symbol renamed)
 
 ## What's NOT done yet
 
-Everything code-related — actual Dhan adapter, vocabulary atoms,
+Everything code-related — actual Groww adapter, vocabulary atoms,
 brute-force engine, filter cascade, etc. **All design and locked.
 Phase 1 starts implementation.**

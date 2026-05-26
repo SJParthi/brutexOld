@@ -14,10 +14,10 @@ build schedule — before any code is written. Mirrors Track 1 Phase 0.
 ## Prerequisites
 
 - [x] Track 1 Phase 0 ✅ DONE (commit `225e1f7` merged)
-- [x] User provided Dhan `/charts/rollingoption` API docs
+- [x] User provided Groww `/charts/rollingoption` API docs
 - [x] 3 research agents verified API, storage, state machine
 - [x] User signed off scope: 3 underlyings, NO India VIX options, 1m only,
-      ATM ± 10, current expiry, IV from Dhan + Greeks computed
+      ATM ± 10, current expiry, IV from Groww + Greeks computed
 
 ## Checklist
 
@@ -30,7 +30,7 @@ build schedule — before any code is written. Mirrors Track 1 Phase 0.
 - [x] `docs/track2/TRACK2_DATA_INGEST_DESIGN.md` — storage + state machine (commit: this PR)
 - [x] `docs/track2/phases/phase_0_documentation.md` — this file (commit: this PR)
 - [x] `docs/track2/phases/phase_1_verification.md` — Phase 1 skeleton (commit: this PR)
-- [x] `docs/track2/phases/phase_2_dhan_options_adapter.md` — Phase 2 skeleton (commit: this PR)
+- [x] `docs/track2/phases/phase_2_groww_options_adapter.md` — Phase 2 skeleton (commit: this PR)
 - [x] `docs/track2/phases/phase_3_backtest_engine.md` — Phase 3 skeleton (commit: this PR)
 - [x] `docs/track2/phases/phase_4_first_sweep.md` — Phase 4 skeleton (commit: this PR)
 
@@ -43,7 +43,7 @@ build schedule — before any code is written. Mirrors Track 1 Phase 0.
 - [ ] #204 — 1m timeframe ONLY
 - [ ] #205 — Expiry cycle history reconstructed for 5y window from primary sources (BSE Notice 20230327-65; NSE FAOP/57540, 60011, 64506, 65336, 68747; SEBI master circular 2024-10-01); withdrawn Monday-window 2025-Apr explicitly excluded
 - [ ] #206 — **6 backfill streams** (NIFTY-WEEK, NIFTY-MONTH, BANKNIFTY-WEEK [until 2024-11-13], BANKNIFTY-MONTH, SENSEX-WEEK, SENSEX-MONTH; SENSEX extends back to 2021-01-01 per BSE Notice 20230327-65 with thin-liquidity annotation)
-- [ ] #207 — IV from Dhan; Greeks computed (BSM)
+- [ ] #207 — IV from Groww; Greeks computed (BSM)
 - [ ] #208 — Risk-free rate from 3-month T-bill table
 - [ ] #209 — Dividend yield q = 0
 - [ ] #210 — Storage ~5.5 GB / 5.37y (revised: 6 streams × 42 series × ~25 MB; SENSEX extended back to 2021-01-01; trading-day count corrected 1,250 → 1,342)
@@ -64,8 +64,8 @@ build schedule — before any code is written. Mirrors Track 1 Phase 0.
 ### 4-agent hostile review
 
 - [ ] **Agent 1 — Architect Reviewer:** Walks the spec; finds gaps and inconsistencies between SPEC and DATA_INGEST_DESIGN.
-- [ ] **Agent 2 — Hostile Reviewer:** Tries to break the design (e.g., "what if Dhan removes /rollingoption mid-year?", "what about ATM strike rollover discontinuities?").
-- [ ] **Agent 3 — Reality-check Reviewer:** Cross-references claimed numbers (~15,876 calls, ~88 min wall, ~5.5 GB) against the Dhan rate limit + 30-day chunking math (ceil), with per-regime date gating + 1,342 trading-day count audited.
+- [ ] **Agent 2 — Hostile Reviewer:** Tries to break the design (e.g., "what if Groww removes /rollingoption mid-year?", "what about ATM strike rollover discontinuities?").
+- [ ] **Agent 3 — Reality-check Reviewer:** Cross-references claimed numbers (~15,876 calls, ~88 min wall, ~5.5 GB) against the Groww rate limit + 30-day chunking math (ceil), with per-regime date gating + 1,342 trading-day count audited.
 - [ ] **Agent 4 — Synthesis:** Merges the 3 reviews; produces a findings list.
 - [ ] Operator reviews findings list and either:
   - (a) Accepts as-is + adds notes to spec, OR
@@ -106,7 +106,7 @@ docs/track2/TRACK2_DATA_INGEST_DESIGN.md           (new)
 docs/track2/phases/                                (new directory)
 docs/track2/phases/phase_0_documentation.md        (new, this file)
 docs/track2/phases/phase_1_verification.md         (new)
-docs/track2/phases/phase_2_dhan_options_adapter.md (new)
+docs/track2/phases/phase_2_groww_options_adapter.md (new)
 docs/track2/phases/phase_3_backtest_engine.md      (new)
 docs/track2/phases/phase_4_first_sweep.md          (new)
 docs/MIGRATION.md                                  (modified — append rows #200-#220)
@@ -116,7 +116,7 @@ docs/MIGRATION.md                                  (modified — append rows #20
 
 | Risk | Mitigation |
 |---|---|
-| Dhan `/rollingoption` schema differs from SDK source | Phase 1 contract test before Phase 2 starts |
+| Groww `/rollingoption` schema differs from SDK source | Phase 1 contract test before Phase 2 starts |
 | SEBI changes expiry cycles again mid-Phase 2 | Expiry calendar centralized in `brutex/options/expiry_calendar.py` |
 | BSM model insufficient (smile not captured) | Phase 1 oracle test bounds; Phase 4 first sweep uses ATM ± 5 first |
 | Cost model hallucinated | Phase 3 requires citation per tariff row; CI check enforces |

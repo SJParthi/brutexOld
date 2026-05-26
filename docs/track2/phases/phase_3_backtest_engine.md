@@ -26,7 +26,7 @@ Translate a Track 1 winning spot signal into a realistic options trade:
 ### Week 1 — Cost model + execution clock
 
 - [ ] `brutex/options/costs.py` — versioned cost model
-  - [ ] Dhan brokerage row (cite URL + verified date)
+  - [ ] Groww brokerage row (cite URL + verified date)
   - [ ] STT rates (NSE + BSE circulars cited)
   - [ ] STO (Securities Transaction on Options) rates
   - [ ] SEBI turnover charge rate

@@ -14,7 +14,7 @@ use super::trading_calendar::TradingCalendar;
 #[derive(Debug, Deserialize)]
 pub struct ApplicationConfig {
     pub trading: TradingConfig,
-    pub dhan: DhanConfig,
+    pub groww: GrowwConfig,
     pub websocket: WebSocketConfig,
     pub questdb: QuestDbConfig,
     // Note: `valkey` field removed by DEC-CLEANUP-001 (2026-05-24).
@@ -52,9 +52,9 @@ pub struct ApplicationConfig {
 ///
 /// - `Paper`: Zero HTTP calls. Orders simulated locally with PAPER-{counter} IDs.
 ///   Use for strategy development with real market data.
-/// - `Sandbox`: HTTP calls to `sandbox.dhan.co/v2/`. Orders fill at ₹100 (simulated).
+/// - `Sandbox`: HTTP calls to `sandbox.groww.co/v2/`. Orders fill at ₹100 (simulated).
 ///   Use for API integration testing before going live.
-/// - `Live`: HTTP calls to `api.dhan.co/v2/`. Real exchange orders, real money.
+/// - `Live`: HTTP calls to `api.groww.co/v2/`. Real exchange orders, real money.
 ///   Requires static IP. Use only when ready for production.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -63,14 +63,14 @@ pub enum TradingMode {
     /// Default: safe — never touch real money.
     #[default]
     Paper,
-    /// Dhan sandbox — HTTP to sandbox.dhan.co, orders fill at ₹100.
+    /// Groww sandbox — HTTP to sandbox.groww.co, orders fill at ₹100.
     Sandbox,
-    /// Real trading — HTTP to api.dhan.co, real exchange orders.
+    /// Real trading — HTTP to api.groww.co, real exchange orders.
     Live,
 }
 
 impl TradingMode {
-    /// Returns true if this mode makes real HTTP calls to Dhan (sandbox or live).
+    /// Returns true if this mode makes real HTTP calls to Groww (sandbox or live).
     pub fn is_http_active(self) -> bool {
         matches!(self, Self::Sandbox | Self::Live)
     }
@@ -114,7 +114,7 @@ pub struct StrategyConfig {
     /// DEPRECATED: Use `mode` instead. Kept for backward compatibility.
     #[serde(default = "default_dry_run")]
     pub dry_run: bool,
-    /// Trading execution mode: paper (local sim), sandbox (Dhan DevPortal), live (real).
+    /// Trading execution mode: paper (local sim), sandbox (Groww DevPortal), live (real).
     /// Overrides dry_run when set. Default: paper.
     #[serde(default)]
     pub mode: TradingMode,
@@ -237,9 +237,9 @@ pub struct NseHolidayEntry {
     pub name: String,
 }
 
-/// Dhan API and WebSocket connection configuration.
+/// Groww API and WebSocket connection configuration.
 #[derive(Debug, Clone, Deserialize)]
-pub struct DhanConfig {
+pub struct GrowwConfig {
     /// WebSocket V2 binary feed URL.
     pub websocket_url: String,
     /// Order update WebSocket URL (JSON-based, separate from binary feed).
@@ -251,7 +251,7 @@ pub struct DhanConfig {
     #[serde(default)]
     pub sandbox_base_url: String,
     /// Auth base URL (for token generation — separate from REST API).
-    /// Dhan uses `https://auth.dhan.co` for authentication endpoints.
+    /// Groww uses `https://auth.groww.co` for authentication endpoints.
     pub auth_base_url: String,
     /// Primary instrument CSV download URL.
     pub instrument_csv_url: String,
@@ -266,7 +266,7 @@ pub struct DhanConfig {
 /// WebSocket keep-alive and reconnection configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WebSocketConfig {
-    /// Expected server ping interval in seconds (Dhan server pings every 10s).
+    /// Expected server ping interval in seconds (Groww server pings every 10s).
     pub ping_interval_secs: u64,
     /// Server disconnects after this many seconds with no pong.
     pub pong_timeout_secs: u64,
@@ -278,10 +278,10 @@ pub struct WebSocketConfig {
     pub reconnect_max_delay_ms: u64,
     /// Maximum reconnection attempts before giving up.
     pub reconnect_max_attempts: u32,
-    /// Maximum instruments per subscription message (Dhan limit: 100).
+    /// Maximum instruments per subscription message (Groww limit: 100).
     pub subscription_batch_size: usize,
     /// Delay in milliseconds between spawning successive WebSocket connections.
-    /// Prevents all connections from hitting Dhan's server simultaneously at startup.
+    /// Prevents all connections from hitting Groww's server simultaneously at startup.
     /// 0 = no stagger (all spawn immediately). Only affects initial startup, not reconnects.
     pub connection_stagger_ms: u64,
 }
@@ -492,7 +492,7 @@ impl Default for ObservabilityConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SubscriptionConfig {
     /// Feed mode for all subscriptions. Always Full for maximum data (LTP, OI, depth).
-    /// IDX_I instruments are forced to Ticker at connection level (Dhan limitation).
+    /// IDX_I instruments are forced to Ticker at connection level (Groww limitation).
     /// Valid values: "Ticker", "Quote", "Full".
     pub feed_mode: String,
 
@@ -571,14 +571,14 @@ impl SubscriptionConfig {
 
 /// Historical data fetching configuration.
 ///
-/// Controls automated fetching of 1-minute OHLCV candles from Dhan's
+/// Controls automated fetching of 1-minute OHLCV candles from Groww's
 /// intraday charts API for cross-verification with live tick data.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HistoricalDataConfig {
     /// Enable automated historical candle fetching after market close.
     pub enabled: bool,
     /// Number of past trading days to fetch on startup for cross-verification.
-    /// Dhan allows up to 90 days per request.
+    /// Groww allows up to 90 days per request.
     pub lookback_days: u32,
     /// HTTP request timeout in seconds for historical data API calls.
     pub request_timeout_secs: u64,
@@ -697,11 +697,11 @@ pub struct GreeksConfig {
     #[serde(default = "default_iv_solver_tolerance")]
     pub iv_solver_tolerance: f64,
     /// Day count divisor for theta conversion (365.0 = calendar, 252.0 = trading days).
-    /// Calibrated to match Dhan's computation. Default: 365.0.
+    /// Calibrated to match Groww's computation. Default: 365.0.
     #[serde(default = "default_day_count")]
     pub day_count: f64,
-    /// Rate mode: "dhan" = fixed 10% (match Dhan/NSE), "theoretical" = RBI repo rate lookup.
-    /// Default: "dhan".
+    /// Rate mode: "groww" = fixed 10% (match Groww/NSE), "theoretical" = RBI repo rate lookup.
+    /// Default: "groww".
     #[serde(default = "default_rate_mode")]
     pub rate_mode: String,
 }
@@ -729,13 +729,13 @@ const fn default_greeks_fetch_interval_secs() -> u64 {
     60
 }
 
-// Calibrated against Dhan's live option chain data (2026-03-23).
-// Dhan's theta best matches at r ≈ 0.10. Gamma/vega insensitive to rate for short-dated.
+// Calibrated against Groww's live option chain data (2026-03-23).
+// Groww's theta best matches at r ≈ 0.10. Gamma/vega insensitive to rate for short-dated.
 const fn default_risk_free_rate() -> f64 {
     0.10
 }
 
-// Calibrated: Dhan uses q=0.0 for index options (no continuous dividend).
+// Calibrated: Groww uses q=0.0 for index options (no continuous dividend).
 const fn default_dividend_yield() -> f64 {
     0.0
 }
@@ -753,7 +753,7 @@ const fn default_day_count() -> f64 {
 }
 
 fn default_rate_mode() -> String {
-    String::from("dhan")
+    String::from("groww")
 }
 
 // ---------------------------------------------------------------------------
@@ -869,7 +869,7 @@ impl ApplicationConfig {
             bail!("websocket.ping_interval_secs must be > 0");
         }
 
-        // WebSocket: subscription batch must be in [1, 100] (Dhan limit).
+        // WebSocket: subscription batch must be in [1, 100] (Groww limit).
         if self.websocket.subscription_batch_size == 0
             || self.websocket.subscription_batch_size > super::constants::SUBSCRIPTION_BATCH_SIZE
         {
@@ -883,9 +883,9 @@ impl ApplicationConfig {
         // WebSocket: reconnect_max_attempts == 0 means infinite retries (production default).
         // No validation needed — 0 is a valid sentinel for "never give up".
 
-        // Dhan: max_websocket_connections must be positive (prevents division-by-zero in pool).
-        if self.dhan.max_websocket_connections == 0 {
-            bail!("dhan.max_websocket_connections must be > 0");
+        // Groww: max_websocket_connections must be positive (prevents division-by-zero in pool).
+        if self.groww.max_websocket_connections == 0 {
+            bail!("groww.max_websocket_connections must be > 0");
         }
 
         // WebSocket: pong_timeout_secs must be positive (used in read timeout calculation).
@@ -893,7 +893,7 @@ impl ApplicationConfig {
             bail!("websocket.pong_timeout_secs must be > 0");
         }
 
-        // WebSocket: computed read timeout must be reasonable relative to Dhan's
+        // WebSocket: computed read timeout must be reasonable relative to Groww's
         // 40s server timeout. We allow up to 2× the server timeout as an upper
         // bound — beyond that, the config is likely misconfigured.
         let computed_read_timeout = self
@@ -905,7 +905,7 @@ impl ApplicationConfig {
         if computed_read_timeout > max_reasonable_timeout {
             bail!(
                 "websocket read timeout ({}s = ping_interval × (max_failures+1) + pong_timeout) \
-                 exceeds {}s — Dhan server disconnects at {}s",
+                 exceeds {}s — Groww server disconnects at {}s",
                 computed_read_timeout,
                 max_reasonable_timeout,
                 super::constants::SERVER_PING_TIMEOUT_SECS
@@ -926,11 +926,11 @@ impl ApplicationConfig {
         if self.historical.enabled {
             if self.historical.lookback_days == 0
                 || self.historical.lookback_days
-                    > super::constants::DHAN_INTRADAY_MAX_DAYS_PER_REQUEST
+                    > super::constants::GROWW_INTRADAY_MAX_DAYS_PER_REQUEST
             {
                 bail!(
                     "historical.lookback_days must be in [1, {}], got {}",
-                    super::constants::DHAN_INTRADAY_MAX_DAYS_PER_REQUEST,
+                    super::constants::GROWW_INTRADAY_MAX_DAYS_PER_REQUEST,
                     self.historical.lookback_days
                 );
             }
@@ -984,27 +984,27 @@ impl ApplicationConfig {
         };
 
         validate_url(
-            "dhan.rest_api_base_url",
-            &self.dhan.rest_api_base_url,
+            "groww.rest_api_base_url",
+            &self.groww.rest_api_base_url,
             "https://",
         )?;
-        validate_url("dhan.auth_base_url", &self.dhan.auth_base_url, "https://")?;
-        validate_url("dhan.websocket_url", &self.dhan.websocket_url, "wss://")?;
+        validate_url("groww.auth_base_url", &self.groww.auth_base_url, "https://")?;
+        validate_url("groww.websocket_url", &self.groww.websocket_url, "wss://")?;
         validate_url(
-            "dhan.order_update_websocket_url",
-            &self.dhan.order_update_websocket_url,
+            "groww.order_update_websocket_url",
+            &self.groww.order_update_websocket_url,
             "wss://",
         )?;
         validate_url(
-            "dhan.instrument_csv_url",
-            &self.dhan.instrument_csv_url,
+            "groww.instrument_csv_url",
+            &self.groww.instrument_csv_url,
             "https://",
         )?;
         // sandbox_base_url is optional (empty when mode=paper).
-        if !self.dhan.sandbox_base_url.is_empty() {
+        if !self.groww.sandbox_base_url.is_empty() {
             validate_url(
-                "dhan.sandbox_base_url",
-                &self.dhan.sandbox_base_url,
+                "groww.sandbox_base_url",
+                &self.groww.sandbox_base_url,
                 "https://",
             )?;
         }
@@ -1148,15 +1148,15 @@ mod tests {
                 }],
                 nse_mock_trading_dates: vec![],
             },
-            dhan: DhanConfig {
-                websocket_url: "wss://api-feed.dhan.co".to_string(),
-                order_update_websocket_url: "wss://api-order-update.dhan.co".to_string(),
-                rest_api_base_url: "https://api.dhan.co/v2".to_string(),
-                sandbox_base_url: "https://sandbox.dhan.co/v2".to_string(),
-                auth_base_url: "https://auth.dhan.co".to_string(),
-                instrument_csv_url: "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
+            groww: GrowwConfig {
+                websocket_url: "wss://api-feed.groww.co".to_string(),
+                order_update_websocket_url: "wss://api-order-update.groww.co".to_string(),
+                rest_api_base_url: "https://api.groww.co/v2".to_string(),
+                sandbox_base_url: "https://sandbox.groww.co/v2".to_string(),
+                auth_base_url: "https://auth.groww.co".to_string(),
+                instrument_csv_url: "https://images.groww.co/api-data/api-scrip-master-detailed.csv"
                     .to_string(),
-                instrument_csv_fallback_url: "https://images.dhan.co/api-data/api-scrip-master.csv"
+                instrument_csv_fallback_url: "https://images.groww.co/api-data/api-scrip-master.csv"
                     .to_string(),
                 max_instruments_per_connection: 5000,
                 max_websocket_connections: 5,
@@ -1484,9 +1484,9 @@ mod tests {
     }
 
     #[test]
-    fn test_dhan_zero_max_websocket_connections_fails() {
+    fn test_groww_zero_max_websocket_connections_fails() {
         let mut config = make_valid_config();
-        config.dhan.max_websocket_connections = 0;
+        config.groww.max_websocket_connections = 0;
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("max_websocket_connections"));
     }
@@ -1826,7 +1826,7 @@ mod tests {
         assert_eq!(config.iv_solver_max_iterations, 50);
         assert!((config.iv_solver_tolerance - 1e-8).abs() < f64::EPSILON);
         assert!((config.day_count - 365.0).abs() < f64::EPSILON);
-        assert_eq!(config.rate_mode, "dhan");
+        assert_eq!(config.rate_mode, "groww");
     }
 
     #[test]
@@ -1991,8 +1991,8 @@ mod tests {
     }
 
     #[test]
-    fn test_subscription_config_depth_max_instruments_matches_dhan_limit() {
-        // Dhan docs: max 50 instruments per 20-level depth connection
+    fn test_subscription_config_depth_max_instruments_matches_groww_limit() {
+        // Groww docs: max 50 instruments per 20-level depth connection
         let config = SubscriptionConfig::default();
         assert!(config.twenty_depth_max_instruments <= 50);
     }

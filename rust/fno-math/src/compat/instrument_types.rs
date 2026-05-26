@@ -58,7 +58,7 @@ impl fmt::Display for UnderlyingKind {
     }
 }
 
-/// Classification of a derivative instrument as it appears in the Dhan CSV.
+/// Classification of a derivative instrument as it appears in the Groww CSV.
 #[derive(
     Debug,
     Clone,
@@ -73,7 +73,7 @@ impl fmt::Display for UnderlyingKind {
     rkyv::Deserialize,
 )]
 #[rkyv(compare(PartialEq))]
-pub enum DhanInstrumentKind {
+pub enum BrokerInstrumentKind {
     /// Index future (FUTIDX).
     FutureIndex,
     /// Stock future (FUTSTK).
@@ -84,7 +84,7 @@ pub enum DhanInstrumentKind {
     OptionStock,
 }
 
-impl DhanInstrumentKind {
+impl BrokerInstrumentKind {
     /// Returns the canonical string representation for storage and display.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -95,17 +95,17 @@ impl DhanInstrumentKind {
         }
     }
 
-    /// S5-A2: Returns the Dhan REST API enum value for the `instrument`
+    /// S5-A2: Returns the Groww REST API enum value for the `instrument`
     /// request field on `/v2/charts/intraday` and `/v2/charts/historical`.
     ///
-    /// These are the exact strings Dhan expects per
-    /// `docs/dhan-ref/05-historical-data.md`:
+    /// These are the exact strings Groww expects per
+    /// `docs/groww-ref/05-historical-data.md`:
     ///   - `"FUTIDX"`: Index future (e.g., NIFTY 30-JAN-26)
     ///   - `"FUTSTK"`: Stock future (e.g., RELIANCE 30-JAN-26)
     ///   - `"OPTIDX"`: Index option (e.g., NIFTY 22000 CE 30-JAN-26)
     ///   - `"OPTSTK"`: Stock option (e.g., RELIANCE 2800 PE 30-JAN-26)
     // TEST-EXEMPT: trivial 4-arm match; covered indirectly by the backfill integration tests (test_backfill_worker_happy_path, test_backfill_worker_handles_empty_fetch) which exercise the full hint pass-through chain
-    pub fn as_dhan_api_string(&self) -> &'static str {
+    pub fn as_broker_api_string(&self) -> &'static str {
         match self {
             Self::FutureIndex => "FUTIDX",
             Self::FutureStock => "FUTSTK",
@@ -115,19 +115,19 @@ impl DhanInstrumentKind {
     }
 }
 
-impl fmt::Display for DhanInstrumentKind {
+impl fmt::Display for BrokerInstrumentKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Expiry Code (Dhan Annexure Section 9)
+// Expiry Code (Groww Annexure Section 9)
 // ---------------------------------------------------------------------------
 
 /// Expiry code for derivative historical data requests.
 ///
-/// Dhan API `expiryCode` field — exactly 3 values per Annexure Section 9:
+/// Groww API `expiryCode` field — exactly 3 values per Annexure Section 9:
 /// `0` = Current/Near, `1` = Next, `2` = Far.
 ///
 /// Serializes as a bare integer (0, 1, 2) for JSON request bodies.
@@ -294,13 +294,13 @@ impl From<&ArchivedUnderlyingKind> for UnderlyingKind {
     }
 }
 
-impl From<&ArchivedDhanInstrumentKind> for DhanInstrumentKind {
-    fn from(archived: &ArchivedDhanInstrumentKind) -> Self {
+impl From<&ArchivedBrokerInstrumentKind> for BrokerInstrumentKind {
+    fn from(archived: &ArchivedBrokerInstrumentKind) -> Self {
         match archived {
-            ArchivedDhanInstrumentKind::FutureIndex => Self::FutureIndex,
-            ArchivedDhanInstrumentKind::FutureStock => Self::FutureStock,
-            ArchivedDhanInstrumentKind::OptionIndex => Self::OptionIndex,
-            ArchivedDhanInstrumentKind::OptionStock => Self::OptionStock,
+            ArchivedBrokerInstrumentKind::FutureIndex => Self::FutureIndex,
+            ArchivedBrokerInstrumentKind::FutureStock => Self::FutureStock,
+            ArchivedBrokerInstrumentKind::OptionIndex => Self::OptionIndex,
+            ArchivedBrokerInstrumentKind::OptionStock => Self::OptionStock,
         }
     }
 }
@@ -409,7 +409,7 @@ pub struct DerivativeContract {
     pub underlying_symbol: String,
 
     /// Kind of derivative instrument.
-    pub instrument_kind: DhanInstrumentKind,
+    pub instrument_kind: BrokerInstrumentKind,
 
     /// Exchange segment (NseFno or BseFno).
     pub exchange_segment: ExchangeSegment,
@@ -549,7 +549,7 @@ pub enum InstrumentInfo {
     Derivative {
         security_id: SecurityId,
         underlying_symbol: String,
-        instrument_kind: DhanInstrumentKind,
+        instrument_kind: BrokerInstrumentKind,
         exchange_segment: ExchangeSegment,
         #[rkyv(with = NaiveDateAsI32)]
         expiry_date: NaiveDate,
@@ -1022,33 +1022,33 @@ mod tests {
         assert_eq!(original, deserialized);
     }
 
-    // --- DhanInstrumentKind ---
+    // --- BrokerInstrumentKind ---
 
     #[test]
-    fn test_dhan_instrument_kind_as_str_all_variants() {
-        assert_eq!(DhanInstrumentKind::FutureIndex.as_str(), "FutureIndex");
-        assert_eq!(DhanInstrumentKind::FutureStock.as_str(), "FutureStock");
-        assert_eq!(DhanInstrumentKind::OptionIndex.as_str(), "OptionIndex");
-        assert_eq!(DhanInstrumentKind::OptionStock.as_str(), "OptionStock");
+    fn test_broker_instrument_kind_as_str_all_variants() {
+        assert_eq!(BrokerInstrumentKind::FutureIndex.as_str(), "FutureIndex");
+        assert_eq!(BrokerInstrumentKind::FutureStock.as_str(), "FutureStock");
+        assert_eq!(BrokerInstrumentKind::OptionIndex.as_str(), "OptionIndex");
+        assert_eq!(BrokerInstrumentKind::OptionStock.as_str(), "OptionStock");
     }
 
     #[test]
-    fn test_dhan_instrument_kind_display() {
+    fn test_broker_instrument_kind_display() {
         assert_eq!(
-            format!("{}", DhanInstrumentKind::FutureIndex),
+            format!("{}", BrokerInstrumentKind::FutureIndex),
             "FutureIndex"
         );
         assert_eq!(
-            format!("{}", DhanInstrumentKind::OptionStock),
+            format!("{}", BrokerInstrumentKind::OptionStock),
             "OptionStock"
         );
     }
 
     #[test]
-    fn test_dhan_instrument_kind_serde_roundtrip() {
-        let original = DhanInstrumentKind::OptionIndex;
+    fn test_broker_instrument_kind_serde_roundtrip() {
+        let original = BrokerInstrumentKind::OptionIndex;
         let json = serde_json::to_string(&original).unwrap();
-        let deserialized: DhanInstrumentKind = serde_json::from_str(&json).unwrap();
+        let deserialized: BrokerInstrumentKind = serde_json::from_str(&json).unwrap();
         assert_eq!(original, deserialized);
     }
 
@@ -1134,16 +1134,16 @@ mod tests {
     }
 
     #[test]
-    fn test_dhan_instrument_kind_serde_roundtrip_all_variants() {
+    fn test_broker_instrument_kind_serde_roundtrip_all_variants() {
         let variants = [
-            DhanInstrumentKind::FutureIndex,
-            DhanInstrumentKind::FutureStock,
-            DhanInstrumentKind::OptionIndex,
-            DhanInstrumentKind::OptionStock,
+            BrokerInstrumentKind::FutureIndex,
+            BrokerInstrumentKind::FutureStock,
+            BrokerInstrumentKind::OptionIndex,
+            BrokerInstrumentKind::OptionStock,
         ];
         for variant in variants {
             let json = serde_json::to_string(&variant).unwrap();
-            let deserialized: DhanInstrumentKind = serde_json::from_str(&json).unwrap();
+            let deserialized: BrokerInstrumentKind = serde_json::from_str(&json).unwrap();
             assert_eq!(
                 variant, deserialized,
                 "Serde roundtrip failed for {:?}",
@@ -1328,7 +1328,7 @@ mod tests {
             DerivativeContract {
                 security_id: 49001,
                 underlying_symbol: "RELIANCE".to_string(),
-                instrument_kind: DhanInstrumentKind::FutureStock,
+                instrument_kind: BrokerInstrumentKind::FutureStock,
                 exchange_segment: ExchangeSegment::NseFno,
                 expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
                 strike_price: 0.0,
@@ -1344,7 +1344,7 @@ mod tests {
             DerivativeContract {
                 security_id: 49002,
                 underlying_symbol: "RELIANCE".to_string(),
-                instrument_kind: DhanInstrumentKind::OptionStock,
+                instrument_kind: BrokerInstrumentKind::OptionStock,
                 exchange_segment: ExchangeSegment::NseFno,
                 expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
                 strike_price: 3000.0,
@@ -1360,7 +1360,7 @@ mod tests {
             DerivativeContract {
                 security_id: 50001,
                 underlying_symbol: "NIFTY".to_string(),
-                instrument_kind: DhanInstrumentKind::FutureIndex,
+                instrument_kind: BrokerInstrumentKind::FutureIndex,
                 exchange_segment: ExchangeSegment::NseFno,
                 expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
                 strike_price: 0.0,
@@ -1400,7 +1400,7 @@ mod tests {
             InstrumentInfo::Derivative {
                 security_id: 49001,
                 underlying_symbol: "RELIANCE".to_string(),
-                instrument_kind: DhanInstrumentKind::FutureStock,
+                instrument_kind: BrokerInstrumentKind::FutureStock,
                 exchange_segment: ExchangeSegment::NseFno,
                 expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
                 strike_price: 0.0,
@@ -1591,7 +1591,7 @@ mod tests {
             InstrumentInfo::Derivative {
                 security_id: 49001,
                 underlying_symbol: "HDFCBANK".to_string(),
-                instrument_kind: DhanInstrumentKind::FutureStock,
+                instrument_kind: BrokerInstrumentKind::FutureStock,
                 exchange_segment: ExchangeSegment::NseFno,
                 expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 4, 24).unwrap(),
                 strike_price: 0.0,
@@ -1643,7 +1643,7 @@ mod tests {
         let original = DerivativeContract {
             security_id: 49001,
             underlying_symbol: "NIFTY".to_string(),
-            instrument_kind: DhanInstrumentKind::FutureIndex,
+            instrument_kind: BrokerInstrumentKind::FutureIndex,
             exchange_segment: ExchangeSegment::NseFno,
             expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
             strike_price: 0.0,
@@ -1765,8 +1765,8 @@ mod tests {
     }
 
     #[test]
-    fn test_archived_dhan_instrument_kind_from_all_variants() {
-        let make_contract = |kind: DhanInstrumentKind| DerivativeContract {
+    fn test_archived_broker_instrument_kind_from_all_variants() {
+        let make_contract = |kind: BrokerInstrumentKind| DerivativeContract {
             security_id: 49001,
             underlying_symbol: "TEST".to_string(),
             instrument_kind: kind,
@@ -1781,16 +1781,16 @@ mod tests {
         };
 
         for kind in [
-            DhanInstrumentKind::FutureIndex,
-            DhanInstrumentKind::FutureStock,
-            DhanInstrumentKind::OptionIndex,
-            DhanInstrumentKind::OptionStock,
+            BrokerInstrumentKind::FutureIndex,
+            BrokerInstrumentKind::FutureStock,
+            BrokerInstrumentKind::OptionIndex,
+            BrokerInstrumentKind::OptionStock,
         ] {
             let contract = make_contract(kind);
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&contract).unwrap();
             let archived =
                 rkyv::access::<ArchivedDerivativeContract, rkyv::rancor::Error>(&bytes).unwrap();
-            assert_eq!(DhanInstrumentKind::from(&archived.instrument_kind), kind);
+            assert_eq!(BrokerInstrumentKind::from(&archived.instrument_kind), kind);
         }
     }
 
@@ -1866,25 +1866,25 @@ mod tests {
     }
 
     // =====================================================================
-    // DhanInstrumentKind Display for all variants
+    // BrokerInstrumentKind Display for all variants
     // =====================================================================
 
     #[test]
-    fn test_dhan_instrument_kind_display_all_variants() {
+    fn test_broker_instrument_kind_display_all_variants() {
         assert_eq!(
-            format!("{}", DhanInstrumentKind::FutureIndex),
+            format!("{}", BrokerInstrumentKind::FutureIndex),
             "FutureIndex"
         );
         assert_eq!(
-            format!("{}", DhanInstrumentKind::FutureStock),
+            format!("{}", BrokerInstrumentKind::FutureStock),
             "FutureStock"
         );
         assert_eq!(
-            format!("{}", DhanInstrumentKind::OptionIndex),
+            format!("{}", BrokerInstrumentKind::OptionIndex),
             "OptionIndex"
         );
         assert_eq!(
-            format!("{}", DhanInstrumentKind::OptionStock),
+            format!("{}", BrokerInstrumentKind::OptionStock),
             "OptionStock"
         );
     }
@@ -2286,7 +2286,7 @@ mod tests {
         let contract = DerivativeContract {
             security_id: 49001,
             underlying_symbol: "NIFTY".to_string(),
-            instrument_kind: DhanInstrumentKind::OptionIndex,
+            instrument_kind: BrokerInstrumentKind::OptionIndex,
             exchange_segment: ExchangeSegment::NseFno,
             expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
             strike_price: 24000.0,
@@ -2378,7 +2378,7 @@ mod tests {
         let info = InstrumentInfo::Derivative {
             security_id: 49001,
             underlying_symbol: "NIFTY".to_string(),
-            instrument_kind: DhanInstrumentKind::OptionIndex,
+            instrument_kind: BrokerInstrumentKind::OptionIndex,
             exchange_segment: ExchangeSegment::NseFno,
             expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
             strike_price: 24000.0,
@@ -2501,7 +2501,7 @@ mod tests {
         let original = DerivativeContract {
             security_id: 1,
             underlying_symbol: "X".to_string(),
-            instrument_kind: DhanInstrumentKind::FutureIndex,
+            instrument_kind: BrokerInstrumentKind::FutureIndex,
             exchange_segment: ExchangeSegment::NseFno,
             expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
             strike_price: 0.0,
@@ -2646,7 +2646,7 @@ mod tests {
             let contract = DerivativeContract {
                 security_id: 1,
                 underlying_symbol: "TEST".to_string(),
-                instrument_kind: DhanInstrumentKind::FutureIndex,
+                instrument_kind: BrokerInstrumentKind::FutureIndex,
                 exchange_segment: ExchangeSegment::NseFno,
                 expiry_date: date,
                 strike_price: 0.0,
@@ -2783,7 +2783,7 @@ mod tests {
         let info = InstrumentInfo::Derivative {
             security_id: 49001,
             underlying_symbol: "RELIANCE".to_string(),
-            instrument_kind: DhanInstrumentKind::OptionStock,
+            instrument_kind: BrokerInstrumentKind::OptionStock,
             exchange_segment: ExchangeSegment::NseFno,
             expiry_date: chrono::NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
             strike_price: 3000.0,
@@ -2798,7 +2798,7 @@ mod tests {
             InstrumentInfo::Derivative {
                 security_id: 49001,
                 ref underlying_symbol,
-                instrument_kind: DhanInstrumentKind::OptionStock,
+                instrument_kind: BrokerInstrumentKind::OptionStock,
                 exchange_segment: ExchangeSegment::NseFno,
                 option_type: Some(OptionType::Call),
                 ..
@@ -2847,13 +2847,13 @@ mod tests {
     }
 
     #[test]
-    fn test_dhan_instrument_kind_display_matches_as_str() {
+    fn test_broker_instrument_kind_display_matches_as_str() {
         // Verify Display output matches as_str() for all variants
         let variants = [
-            DhanInstrumentKind::FutureIndex,
-            DhanInstrumentKind::FutureStock,
-            DhanInstrumentKind::OptionIndex,
-            DhanInstrumentKind::OptionStock,
+            BrokerInstrumentKind::FutureIndex,
+            BrokerInstrumentKind::FutureStock,
+            BrokerInstrumentKind::OptionIndex,
+            BrokerInstrumentKind::OptionStock,
         ];
         for variant in variants {
             assert_eq!(format!("{variant}"), variant.as_str());
@@ -3196,8 +3196,8 @@ mod tests {
     }
 
     #[test]
-    fn test_dhan_instrument_kind_clone_and_copy() {
-        let kind = DhanInstrumentKind::OptionIndex;
+    fn test_broker_instrument_kind_clone_and_copy() {
+        let kind = BrokerInstrumentKind::OptionIndex;
         let cloned = kind;
         let copied = kind;
         assert_eq!(kind, cloned);
@@ -3233,13 +3233,13 @@ mod tests {
     }
 
     #[test]
-    fn test_dhan_instrument_kind_hash_all_distinct() {
+    fn test_broker_instrument_kind_hash_all_distinct() {
         use std::collections::HashSet;
         let mut set = HashSet::new();
-        set.insert(DhanInstrumentKind::FutureIndex);
-        set.insert(DhanInstrumentKind::FutureStock);
-        set.insert(DhanInstrumentKind::OptionIndex);
-        set.insert(DhanInstrumentKind::OptionStock);
+        set.insert(BrokerInstrumentKind::FutureIndex);
+        set.insert(BrokerInstrumentKind::FutureStock);
+        set.insert(BrokerInstrumentKind::OptionIndex);
+        set.insert(BrokerInstrumentKind::OptionStock);
         assert_eq!(set.len(), 4);
     }
 
@@ -3375,7 +3375,7 @@ mod tests {
         let contract = DerivativeContract {
             security_id: 49081,
             underlying_symbol: "NIFTY".to_string(),
-            instrument_kind: DhanInstrumentKind::OptionIndex,
+            instrument_kind: BrokerInstrumentKind::OptionIndex,
             exchange_segment: ExchangeSegment::NseFno,
             expiry_date: NaiveDate::from_ymd_opt(2026, 3, 27).unwrap(),
             strike_price: 23500.0,

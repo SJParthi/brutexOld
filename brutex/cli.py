@@ -10,7 +10,7 @@ After ``pip install -e .``, the ``brutex`` command is on PATH.
 ## Status
 
 This CLI was rewritten on 2026-05-15 and re-baselined on 2026-05-26
-(DEC-VENDOR-PIVOT-001) when the Dhan adapter was wiped in favour of
+(DEC-VENDOR-PIVOT-001) when the prior broker adapter was wiped in favour of
 Groww. Legacy ingest subcommands were vendor-specific and are dropped.
 Track 1 will reintroduce ``brutex track1 ingest`` once the Groww
 adapter lands in Phase 1+ of the post-pivot phase plan (see

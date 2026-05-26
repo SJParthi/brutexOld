@@ -52,7 +52,7 @@ def _make_trade(
     exit_open_paisa: int = 12_005,
     side: TradeSide = "long_call",
     n_lots: int = 1,
-    broker: Broker = "dhan",
+    broker: Broker = "groww",
     gst_split: GstSplit = "intra_state",
     trade_outcome: TradeOutcome = "NORMAL_CLOSE",
 ) -> TradeInput:
@@ -331,11 +331,11 @@ def test_fixture_f11_pre_jul_2021_lot_75() -> None:
 
 
 def test_zerodha_broker_same_brokerage() -> None:
-    """Zerodha and Dhan both charge ₹20 flat per executed order."""
-    r_dhan = compute_trade_cost(_make_trade(broker="dhan"))
+    """Zerodha and Groww both charge ₹20 flat per executed order."""
+    r_groww = compute_trade_cost(_make_trade(broker="groww"))
     r_zerodha = compute_trade_cost(_make_trade(broker="zerodha"))
 
-    assert r_dhan.brokerage_paisa == r_zerodha.brokerage_paisa == 4_000
+    assert r_groww.brokerage_paisa == r_zerodha.brokerage_paisa == 4_000
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -502,8 +502,8 @@ def test_ipft_sensex_bse_zero() -> None:
     assert constants.ipft_bps_x100("SENSEX") == 0
 
 
-def test_brokerage_dhan() -> None:
-    assert constants.brokerage_paisa("dhan") == constants.DHAN_BROKERAGE_PAISA
+def test_brokerage_groww() -> None:
+    assert constants.brokerage_paisa("groww") == constants.GROWW_BROKERAGE_PAISA
 
 
 def test_brokerage_zerodha() -> None:
@@ -619,15 +619,15 @@ def test_trade_outcome_state_machine() -> None:
         assert trade.trade_outcome == outcome
 
 
-def test_dhan_worthless_brokerage() -> None:
-    """Anchor for CALCULATOR_SPEC §4.3 'Dhan-specific gotcha'.
+def test_groww_worthless_brokerage() -> None:
+    """Anchor for CALCULATOR_SPEC §4.3 'broker-flat-brokerage gotcha'.
 
-    §4.3 prescribes that Dhan's flat brokerage applies even when an
+    §4.3 prescribes that the broker's flat brokerage applies even when an
     option expires worthless. Uses trade_outcome=EXPIRY_WORTHLESS with
     valid exit price (≥ 1 tick = 5 paise per TradeInput validation).
     """
     worthless = _make_trade(
-        broker="dhan",
+        broker="groww",
         trade_outcome="EXPIRY_WORTHLESS",
     )
     breakdown = compute_trade_cost(worthless)

@@ -34,8 +34,8 @@ Every material action emits one line to `audit/runs/<run_id>.jsonl`.
 
 | Event class | Examples | Frequency |
 |---|---|---|
-| `ingest.chunk` | one Dhan chunk fetched + persisted | ~92/day initial, ~4/day incremental |
-| `ingest.error` | Dhan API error or quarantine | rare |
+| `ingest.chunk` | one Groww chunk fetched + persisted | ~92/day initial, ~4/day incremental |
+| `ingest.error` | Groww API error or quarantine | rare |
 | `combo.run.start` | brute-force combo evaluation begins | ~33B over a sweep |
 | `combo.run.complete` | combo evaluation finishes with metrics | ~33B over a sweep |
 | `combo.skip` | combo deduplicated by Bloom or LMDB | varies |
@@ -193,7 +193,7 @@ Per `TRACK2_OPERATIONAL_GUARANTEES §8`:
 | `brutex_ingest_chunks_total{instrument,tf}` | counter | chunks fetched per series |
 | `brutex_ingest_errors_total{kind}` | counter | ingest errors by kind |
 | `brutex_throughput_trials_per_sec` | gauge | current sweep throughput |
-| `brutex_rate_limiter_tokens_available` | gauge | Dhan rate-limit headroom |
+| `brutex_rate_limiter_tokens_available` | gauge | Groww rate-limit headroom |
 | `brutex_audit_chain_intact` | gauge (0/1) | chain integrity check result |
 | `brutex_watermark_seconds_behind{instrument,tf}` | gauge | staleness per series |
 | `brutex_storage_bytes_used` | gauge | Parquet lake size |
@@ -204,7 +204,7 @@ Per `TRACK2_OPERATIONAL_GUARANTEES §8`:
 | Metric | Description |
 |---|---|
 | `brutex_combo_eval_duration_seconds` | per-combo eval time |
-| `brutex_ingest_chunk_duration_seconds` | per-Dhan-chunk fetch time |
+| `brutex_ingest_chunk_duration_seconds` | per-Groww-chunk fetch time |
 | `brutex_dashboard_request_duration_seconds` | per-API-request latency |
 | `brutex_cost_calc_duration_seconds` | per-trade cost-stack compute time |
 
@@ -245,7 +245,7 @@ Locked at `TRACK2_OPERATIONAL_GUARANTEES §6.1`. Reproduced here:
 |---|---|---|---|---|
 | Audit chain broken | CRITICAL | immediate | red banner | 1 |
 | Watermark stale > 1 day on active series | HIGH | within 60s | red row | 1 |
-| Dhan API > 5% error rate over 1h | HIGH | within 60s | yellow row | 0 (warn) |
+| Groww API > 5% error rate over 1h | HIGH | within 60s | yellow row | 0 (warn) |
 | Backfill rate < 2 r/s for 10 min | MEDIUM | daily digest | yellow row | 0 |
 | Put-call parity violation (P-O10) | HIGH | within 60s | red row | 1 |
 | Doctor C12 OPTIONS_FRESH red | HIGH | within 60s | red row | 1 |
@@ -302,7 +302,7 @@ The 10 (now 12) C-checks every workday morning at 07:30 IST.
 | C4 | `lmdb.consistency` — work_items table consistent | HIGH |
 | C5 | `parquet.partitions` — no missing partitions | HIGH |
 | C6 | `storage.headroom` — free disk ≥ 200 GB | MEDIUM |
-| C7 | `dhan.rate_limit_headroom` — token bucket ≥ 50% | LOW |
+| C7 | `groww.rate_limit_headroom` — token bucket ≥ 50% | LOW |
 | C8 | `combo_hash.invariant` — content-hash spot-check | HIGH |
 | C9 | `telegram.delivery` — Telegram bot reachable | MEDIUM |
 | C10 | `code_commit_match` — running version matches last released | LOW |

@@ -3,7 +3,7 @@
 //! Minimal Rust scaffold reserved for BruteX Phase 2/3 hot kernels
 //! (per `CLAUDE.md` §4 + §5 + `docs/MIGRATION.md` Decision #68).
 //!
-//! BruteX is a **Track 1 signal-only backtest** over Dhan historical
+//! BruteX is a **Track 1 signal-only backtest** over Groww historical
 //! data for 4 Indian spot indices (NIFTY 50, BANKNIFTY, SENSEX, INDIA
 //! VIX). The crate currently contains only the `compat` types module
 //! (Exchange / ExchangeSegment / NSE trading calendar) used by Python

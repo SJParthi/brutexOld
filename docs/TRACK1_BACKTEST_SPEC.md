@@ -209,7 +209,7 @@ the indicator precompute (Stage 1A) and the bitmask AND (Stage 1B).
 
 ## Data Source
 
-**Dhan Historical Data API:**
+**Groww Historical Data API:**
 - `POST /v2/charts/intraday` (`interval=1` only — fetch 1-min, resample locally)
 - `POST /v2/charts/historical` (daily, for PDH/PDL reference)
 - Rate limit: **5 req/s, 100K req/day** (operator caps at 3 r/s effective)
@@ -714,7 +714,7 @@ rebuilds all of this properly.
 **Day 1 hour-by-hour:**
 
 ```
-Hour 0-2   ──  Python skeleton + Dhan token wired + first 1m batch fetched
+Hour 0-2   ──  Python skeleton + Groww token wired + first 1m batch fetched
 Hour 2-4   ──  Full 5y data for all 3 instruments (5 min API time after token works)
                Stored as Parquet + ZSTD
 Hour 4-6   ──  Resample 1m → all 21 TFs (Polars groupby + agg)
@@ -753,7 +753,7 @@ Hour 18-20 ──  Generate PnL curves (matplotlib), output JSON + 10 PNG charts
 - 100% test coverage gates (Day 1 = sanity tests on 10 hand-coded scenarios)
 
 **Prerequisites the operator must provide before Phase 0.5 starts:**
-- ⬜ `DHAN_ACCESS_TOKEN` environment variable set (Dhan account + token issued)
+- ⬜ `GROWW_API_KEY` environment variable set (Groww account + token issued)
 - ⬜ `/Volumes/QuantData` mounted (or alternative path specified)
 
 If both green → Day 1 sprint executes in one continuous session.
@@ -762,7 +762,7 @@ If both green → Day 1 sprint executes in one continuous session.
 
 ### Phase 1: Foundation (Week 1-2)
 - Rust workspace skeleton + Python package via PyO3
-- Dhan API client with 5 req/s rate limit, exponential backoff on 429
+- Groww API client with 5 req/s rate limit, exponential backoff on 429
 - Fetch 5-year 1-minute data for **NIFTY, BANKNIFTY, SENSEX** (all 3)
 - Resample to **all 21 timeframes** anchored to 09:15 IST
 - Store as Parquet+Zstd9 at `/Volumes/QuantData/raw/{instrument}/`
@@ -1055,7 +1055,7 @@ Operator approved 2026-05-16 ("go ahead"). Implementation proceeds with:
 
 1. ✅ Folder structure (per Phase 0 PR proposal)
 2. ✅ Cargo.toml + pyproject.toml + uv.lock approach (per Phase 0 PR proposal)
-3. ✅ Dhan API test call (per `scripts/dhan_test_call.sh`)
+3. ✅ Groww API test call (per `scripts/groww_test_call.sh`)
 4. ✅ 90-day chunking + rate limit handler (per design above + `TRACK1_DATA_INGEST_DESIGN.md`)
 5. ✅ 8TB SSD partition plan (per `Storage Layout` section)
 6. ✅ Validation harness skeleton for Phase 1 (per `brutex/validation/gate1.py` design)

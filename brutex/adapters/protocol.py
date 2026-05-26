@@ -1,13 +1,13 @@
 """Market-neutral adapter contract.
 
 This module defines the abstract contract every BruteX market adapter
-must satisfy, so adding a new market (Polygon, Binance, Dhan, Zerodha,
+must satisfy, so adding a new market (Polygon, Binance, Groww, Zerodha,
 IBKR, Coinbase, …) is a **one-file job** — not a rewrite.
 
 ## Why a market-neutral protocol?
 
 In PR #1 we shipped :class:`the deleted broker adapter`,
-whose method names were lifted verbatim from the Dhan API
+whose method names were lifted verbatim from the Groww API
 (``get_expiries``, ``get_contracts``, ``get_historical_candles``). That's
 fine when BruteX only knows about the prior broker. But:
 
@@ -88,11 +88,11 @@ hard plumbing (rate limit, dedup, audit) keeps working unchanged.
 
 ::
 
-    brutex/adapters/dhan/          # Dhan v2 historical-data API (Track 1 spot indices)
+    brutex/adapters/groww/          # Groww v2 historical-data API (Track 1 spot indices)
 
 ## Future markets (out-of-scope for Track 1 — illustrative only)
 
-Per CLAUDE.md §3 scope-lock, Track 1 is locked to the Dhan adapter for
+Per CLAUDE.md §3 scope-lock, Track 1 is locked to the Groww adapter for
 4 Indian spot indices (NIFTY 50 / BANKNIFTY / SENSEX / INDIA VIX). The
 adapter Protocol is broker-neutral so future tracks could add::
 
@@ -266,7 +266,7 @@ class DerivativeContract:
 class MarketAdapter(Protocol):
     """Market-neutral adapter interface.
 
-    Every BruteX adapter (Dhan, Polygon, Binance, …) implements
+    Every BruteX adapter (Groww, Polygon, Binance, …) implements
     this protocol. The orchestrator talks ONLY through these methods —
     no market-specific code leaks upstream.
 
@@ -338,7 +338,7 @@ class MarketAdapter(Protocol):
 
         * Converting the market's native timezone to UTC
         * Chunking the date range if the upstream SDK has per-call
-          limits (Dhan has 30/90/180 day limits by interval)
+          limits (Groww has 30/90/180 day limits by interval)
         * Retrying transient errors (429, timeout, 5xx) via the
           adapter's own rate limiter + retry policy
         * Raising :class:`~brutex.models.OutOfScopeError` if the symbol

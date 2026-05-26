@@ -1,7 +1,7 @@
-"""Daily quota tracker for the Dhan Data API (100,000 calls/day).
+"""Daily quota tracker for the Groww Data API (100,000 calls/day).
 
-Per CLAUDE.md §2 rule 6 (Dhan Data APIs: 5 req/s + 100,000/day verified) and
-MIGRATION.md item 91 (quota is global to the Dhan API key, not per-run, hence
+Per CLAUDE.md §2 rule 6 (Groww Data APIs: 5 req/s + 100,000/day verified) and
+MIGRATION.md item 91 (quota is global to the Groww API key, not per-run, hence
 persisted at ``~/.brutex/quota/quota.lmdb/``).
 
 The IST-midnight day-boundary policy is locked by DEC-P0-028 (PR #50a
@@ -57,7 +57,7 @@ import lmdb
 
 from brutex.models import BruteXError
 
-#: Dhan Data API daily quota verified from dhanhq.co/docs/v2 Rate Limit
+#: Groww Data API daily quota verified from groww.in/trade-api/docs/docs/v2 Rate Limit
 #: table on 2026-05-15. Locked in CLAUDE.md §2 rule 6 + §6.
 DAILY_QUOTA_LIMIT: Final[int] = 100_000
 
@@ -91,11 +91,11 @@ _DEFAULT_MAP_SIZE_BYTES: Final[int] = 1 * 1024 * 1024
 def _default_quota_path() -> Path:
     """Return the per-user quota LMDB env path.
 
-    Per MIGRATION.md item 91, the Dhan daily quota is global to the API
+    Per MIGRATION.md item 91, the Groww daily quota is global to the API
     key (not per-run), so the persistence lives in the user home — not
     under ``data/runs/<run_id>/``. The ``~/.brutex/`` convention matches
-    other per-user state in this codebase (e.g., ``~/.brutex/dhan/`` for
-    the Dhan access token per ``docs/TRACK1_DATA_INGEST_DESIGN.md``).
+    other per-user state in this codebase (e.g., ``~/.brutex/groww/`` for
+    the Groww access token per ``docs/TRACK1_DATA_INGEST_DESIGN.md``).
     """
     return Path.home() / ".brutex" / "quota" / "quota.lmdb"
 
@@ -132,7 +132,7 @@ class DailyQuotaExceeded(BruteXError):
     def __init__(self, detailed_message: str = "") -> None:
         super().__init__(
             detailed_message,
-            safe_message="Daily Dhan API quota exceeded",
+            safe_message="Daily Groww API quota exceeded",
         )
 
 
@@ -189,7 +189,7 @@ class DailyQuotaTracker:
     ----------
     daily_limit
         Maximum API calls allowed per IST calendar day. Default is the
-        Dhan Data API documented limit (100,000). Lower values useful in
+        Groww Data API documented limit (100,000). Lower values useful in
         tests.
     store_path
         Filesystem path for the LMDB env (a directory because

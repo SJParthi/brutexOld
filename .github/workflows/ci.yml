@@ -264,9 +264,9 @@ jobs:
           # missing tests first. See MIGRATION.md entry #212 honest
           # envelope.
           #
-          # DEC-VENDOR-PIVOT-001 (2026-05-26): the dhan.timeconv +
-          # dhan.options_constants strict-100% gate blocks that lived
-          # here were deleted as part of the Dhan wipe. Replacements
+          # DEC-VENDOR-PIVOT-001 (2026-05-26): the groww.timeconv +
+          # groww.options_constants strict-100% gate blocks that lived
+          # here were deleted as part of the Groww wipe. Replacements
           # for Groww adapter modules will land in Phase 1+ PRs.
           # DEC-COV-001 step 4 (2026-05-24, MIGRATION.md entry #213):
           # ratchet `brutex.strategies.types` (110 lines, 3 public
@@ -309,9 +309,9 @@ jobs:
           else
             echo "(brutex.strategies.errors test file not present yet — gate inactive)"
           fi
-          # DEC-VENDOR-PIVOT-001 (2026-05-26): dhan.constants strict-100%
-          # gate deleted with the Dhan wipe. The legacy step 8 deferral
-          # for dhan.types is no longer relevant — the Dhan adapter is
+          # DEC-VENDOR-PIVOT-001 (2026-05-26): groww.constants strict-100%
+          # gate deleted with the Groww wipe. The legacy step 8 deferral
+          # for groww.types is no longer relevant — the Groww adapter is
           # gone. Equivalent Groww constants gate will land in Phase 1.
           # DEC-COV-001 step 9 (entry #219): brutex.indicators.pivots
           # (41 stmts, 4 branches, 18 tests in test_pivots.py).
@@ -347,8 +347,8 @@ jobs:
           else
             echo "(brutex.calendars.nse test file not present yet — gate inactive)"
           fi
-          # 11b · DEC-VENDOR-PIVOT-001: dhan.auth strict-100% gate
-          #        deleted with the Dhan wipe. Groww auth gate lands in
+          # 11b · DEC-VENDOR-PIVOT-001: groww.auth strict-100% gate
+          #        deleted with the Groww wipe. Groww auth gate lands in
           #        Phase 1.
           # 11c · brutex.options.expiry_calendar (41 stmts, 6 branches, 47 tests)
           #       Weekly + monthly expiry date computation
@@ -412,8 +412,8 @@ jobs:
           else
             echo "(brutex.config.ports test file not present yet — gate inactive)"
           fi
-          # DEC-VENDOR-PIVOT-001: dhan.types strict-100% gate deleted
-          # with the Dhan wipe. Groww types gate lands in Phase 1.
+          # DEC-VENDOR-PIVOT-001: groww.types strict-100% gate deleted
+          # with the Groww wipe. Groww types gate lands in Phase 1.
           # DEC-COV-001 step 16 (entry #228): 5-module quintuple-add of
           # safe (broker-agnostic) modules verified at 100% locally
           # after installing fno_math wheel.

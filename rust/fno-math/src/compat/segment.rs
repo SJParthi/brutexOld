@@ -11,8 +11,8 @@ use super::constants::{
 
 /// Maps the binary exchange_segment_code to a human-readable symbol name.
 ///
-/// Uses the same mapping as the Dhan API (Python SDK ref).
-/// Note: code 6 is unused/skipped in Dhan's protocol.
+/// Uses the same mapping as the Groww API (Python SDK ref).
+/// Note: code 6 is unused/skipped in Groww's protocol.
 pub fn segment_code_to_str(code: u8) -> &'static str {
     match code {
         EXCHANGE_SEGMENT_IDX_I => "IDX_I",
@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn test_segment_code_to_str_unknown_code() {
-        assert_eq!(segment_code_to_str(6), "UNKNOWN"); // Code 6 is unused in Dhan protocol
+        assert_eq!(segment_code_to_str(6), "UNKNOWN"); // Code 6 is unused in Groww protocol
         assert_eq!(segment_code_to_str(9), "UNKNOWN");
         assert_eq!(segment_code_to_str(255), "UNKNOWN");
     }

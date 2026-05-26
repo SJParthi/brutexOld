@@ -1,4 +1,4 @@
-"""Unit tests for brutex.data.parser — the Dhan candle row → CandleBar."""
+"""Unit tests for brutex.data.parser — the Groww candle row → CandleBar."""
 
 from __future__ import annotations
 

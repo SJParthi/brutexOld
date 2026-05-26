@@ -79,9 +79,9 @@ CME SPAN canonical PDF, CFTC review.
 We can replicate offline using daily SPAN Risk Parameter File +
 the 16-scenario algorithm. Patched in `TRACK2_RISK_MGMT.md §2.3`.
 
-### 2.5 Dhan per-strike OI — ✅ LOCKED
+### 2.5 Groww per-strike OI — ✅ LOCKED
 
-Verified via Dhan v2 docs + DhanHQ-py GitHub + Dhan support:
+Verified via Groww v2 docs + Groww-py GitHub + Groww support:
 
 - **OI is per-MINUTE, NOT EOD** (each minute bar carries `oi` field)
 - Exchange updates OI every **1-3 minutes** depending on scrip
@@ -143,7 +143,7 @@ and `TRACK2_EXECUTION_SIMULATOR.md §437`. Decision **DEC-RISK-013**.
 #### 3.1.4 Spread filter unimplementable from 1-min OHLC
 
 **Flaw:** Spec locks "spread > 5% premium" gate but admits bid-ask
-data unobtainable (Dhan rolling-option doesn't return it).
+data unobtainable (Groww rolling-option doesn't return it).
 
 **Patch:** Replace with **intra-bar range proxy:** reject if
 `(bar.high - bar.low) / bar.close > 0.05`. Honest proxy from
@@ -238,12 +238,12 @@ price; held_overnight stays false. Patched in
 
 #### 3.3.4 VIX data quality fallback
 
-**Flaw:** Dhan 1-min VIX has gaps and 1-tick lag. Risk-mgmt
+**Flaw:** Groww 1-min VIX has gaps and 1-tick lag. Risk-mgmt
 volatility-targeting reads `vix_at_entry` directly.
 
 **Patch:** Compute synthetic VIX from NIFTY 30-day ATM IV
-(Dhan returns IV per strike) as fallback. Document
-`vix_source ∈ {dhan_native, computed}` per result row.
+(Groww returns IV per strike) as fallback. Document
+`vix_source ∈ {groww_native, computed}` per result row.
 Patched in `TRACK2_OBSERVABILITY.md §2.2`. Decision **DEC-OBS-009**.
 
 #### 3.3.5 `indicator_version` auto-hash

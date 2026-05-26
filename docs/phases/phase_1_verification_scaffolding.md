@@ -63,11 +63,11 @@ cheap Phase 1 fixes flagged in the runtime audit.
 
 - [ ] Create `tests/golden/fixtures/` directory
 - [ ] Add placeholder fixtures (filled in Phase 2):
-  - [ ] `dhan_intraday_2024-01-02_NIFTY.json` (placeholder)
-  - [ ] `dhan_intraday_2024-04-12_NIFTY.json` (Ram Navami half-session)
-  - [ ] `dhan_intraday_2024-11-01_NIFTY.json` (Diwali Muhurat)
-  - [ ] `dhan_intraday_2024-05-20_NIFTY.json` (election holiday)
-  - [ ] `dhan_intraday_2025-03-14_NIFTY.json` (Holi)
+  - [ ] `groww_intraday_2024-01-02_NIFTY.json` (placeholder)
+  - [ ] `groww_intraday_2024-04-12_NIFTY.json` (Ram Navami half-session)
+  - [ ] `groww_intraday_2024-11-01_NIFTY.json` (Diwali Muhurat)
+  - [ ] `groww_intraday_2024-05-20_NIFTY.json` (election holiday)
+  - [ ] `groww_intraday_2025-03-14_NIFTY.json` (Holi)
   - [ ] `indicator_2024-06-03_NIFTY_1m.json` (TradingView pin)
   - [ ] `condition_truth_table.csv` (skeleton with 5 example rows)
   - [ ] `paper_pnl_12fill.csv` (skeleton with exact-paisa expected)
@@ -291,4 +291,4 @@ These will become #103-#110 (estimated):
 | MCP servers | github only | + filesystem + duckdb + lmdb + prometheus |
 | MIGRATION decisions | 102 | ~110 |
 | Coverage gate | 90% | 100% (on covered modules) |
-| Phase 2 readiness | n/a | READY (just needs Dhan token) |
+| Phase 2 readiness | n/a | READY (just needs Groww token) |
