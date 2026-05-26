@@ -335,6 +335,33 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+250. **DEC-PHASE1-INVARIANT-CATALOG-001 — canonical catalog of the 24 Track 1 property invariants (Phase 1 Week 1 scaffolding deliverable)** (2026-05-26 evening, operator directive: "yes dude fix all f them one by one dude" — final item of the 4-item recommendation: Phase 1 scaffolding kickoff). Per `docs/TRACK1_PHASE_PLAN.md §"Phase 1 Week 1"`: the property-test surface must have a stub for each of the 24 spec invariants (P-01 .. P-24, enumerated in `docs/TRACK1_VERIFICATION_PYRAMID.md §"Property tests"`) so CI can mechanically count invariants — including the not-yet-implemented ones — even before Phase 2 lands.
+
+    **What lands:**
+
+    - **`tests/property/test_invariants_catalog.py`** — new ~200-LoC file with exactly 24 `test_p_NN_*` functions, one per invariant ID. Each function body is either `pytest.skip("implemented in tests/property/test_X.py")` (for invariants already covered by a sibling file) or `pytest.skip("Phase N implementation pending (subject Y)")` (for invariants awaiting future work). The file passes via skip + gives CI a single source-of-truth count.
+    - **`docs/TRACK1_PHASE_PLAN.md §"Phase 1 Week 1"`** — first row updated from "to do" to ✅ landed 2026-05-26 with the implementation summary (5 of 24 invariants covered today via sibling files).
+
+    **Why this matters (Golden Rule #10 honest envelope):** prior to this PR a future Claude session would have no single place to ask "how many of the 24 invariants are implemented today?" — the answer would have required re-grepping all 5 existing property test files against the spec. The catalog mechanises this: CI's skip-summary shows "5 IMPLEMENTED, 19 ROADMAP" without anyone re-reading the spec. When a future PR lands one of the ROADMAP invariants, the catalog's pointer is the place to update.
+
+    **Honesty discipline (Golden Rule #1):** the catalog explicitly states in its docstring that an invariant pointing to a non-existent test function in a sibling file is a hallucination. Verified by manual cross-check on 2026-05-26: each "implemented in X" pointer maps to an actual test in X that asserts that invariant. The 5 implemented invariants are:
+
+    - P-01 / P-02 (combo-hash permutation invariance + one-byte propagation) → `tests/property/test_combo_hash_uniqueness.py`
+    - P-05 (Bloom filter zero false-negatives) → `tests/property/test_bloom_invariants.py`
+    - P-16 / P-17 (audit chain count + tamper detection) → `tests/property/test_audit_chain_properties.py`
+
+    **What did NOT land in this PR (Phase 1 scaffolding scope discipline):** the spec also calls for `tests/golden/fixtures/` directory, `tests/integration/test_replay_audit_log.py`, `tests/integration/test_python_rust_parity.py`, `tests/smoke/test_pre_push.py`, the `cargo-fuzz` target list, the `cargo-mutants` config, etc. (~10 additional scaffolding artifacts across Week 1 + Week 2). Each is a separate focused PR; bundling all of Phase 1 in one PR would violate the operator's "small focused PRs that pass each Z+ check individually" pattern.
+
+    **Honest envelope:**
+
+    - ✅ REAL: 24-invariant catalog file lands; each function is a real pytest test that runs (and skips) under CI.
+    - ✅ REAL: pointer cross-check verified manually for the 5 IMPLEMENTED invariants.
+    - 🟡 PARTIAL: 19 of 24 invariants are still ROADMAP — the catalog accurately surfaces this; future PRs swap `skip` for `assert` as each Phase N harness lands.
+    - 🟡 PARTIAL: Phase 1 Week 1 has ~10 OTHER scaffolding artifacts (golden fixtures, integration skeletons, smoke test, fuzz config, mutants config); only the invariant-catalog item lands here.
+    - 📋 ROADMAP: subsequent Phase 1 scaffolding PRs will deliver the remaining Week 1 + Week 2 items per `docs/TRACK1_PHASE_PLAN.md`.
+
+    **Decision ID:** DEC-PHASE1-INVARIANT-CATALOG-001. **Builds on:** `docs/TRACK1_VERIFICATION_PYRAMID.md` (the 24-invariant spec itself) · DEC-INDICATOR-COVERAGE-001 (entry #245, the pattern of "implemented in sibling file" pointers) · `docs/TRACK1_PHASE_PLAN.md §"Phase 1 Week 1"`. **Closes:** Phase 1 Week 1 row 1 ("`tests/property/` skeleton with all 24 invariants stubbed").
+
 249. **DEC-ADAPTIVE-RATE-LIMITER-001 — adaptive 4-state rate-limit machine for the Groww Data API (`[4..8]` r/s with fast step-down + slow step-up)** (2026-05-26 evening, operator directive: "yes dude fix all f them one by one dude" continuation; chronologically follows entries #247 (Telegram-wiring verification) and #248 (audit truth-up)). Implements the algorithm specified in MIGRATION entry #246 §"Adaptive rate-limiter algorithm" but as a **pure state machine** — no HTTP client, no token bucket, no Groww SDK imports. The Groww-adapter wiring lands in Phase 1 after the operator runs the Phase 0b empirical probe.
 
     **Why this lands now (pre-Phase-1):** the algorithm is logic-only; building it ahead of the empirical probe gives the operator a fully tested rate-decision engine the moment they paste the API key + TOTP. Per the ADR §5 phased rollout, the engine plugs into the Phase 1 adapter via three methods:
