@@ -34,6 +34,46 @@ documentation) through to the first production sweep.
 
 ---
 
+## Phase 0b — Empirical Probe (HARD GATE before Phase 1 adapter code)
+
+> **Added 2026-05-26** post-merge of `DEC-VENDOR-PIVOT-001`
+> (`MIGRATION.md` entry #246). Inserted between the original Phase 0
+> doc-lock and Phase 1 scaffolding because the 4-agent hostile review
+> on the Dhan → Groww pivot accepted 4 P0 risks **on condition** that
+> empirical evidence land before any Groww adapter code does. The
+> probe script merged on PR #140 (commit `1058b57`) is the evidence
+> collector; this section is its checklist.
+
+**Goal:** Collect first-hand empirical evidence on Groww's data
+surface before any `brutex/adapters/groww/` code lands. Eliminates
+the 4 accepted-risk items in `docs/adr/0001-groww-vendor-pivot.md §3.1`.
+
+| Deliverable | Owner | Status |
+|---|---|---|
+| `scripts/groww_probe.py` (4 sub-probes, ZERO `brutex/` imports) | PR #140 | ✅ merged 2026-05-26 |
+| `scripts/groww_universe_discovery.py` (Phase 0c companion) | PR #141 | ✅ merged 2026-05-26 |
+| Groww Trade API subscription (₹499/mo) | operator | ⏳ pending |
+| `BRUTEX_GROWW_API_KEY` + `BRUTEX_GROWW_TOTP_SECRET` env vars | operator | ⏳ pending |
+| Probe 1 transcript — `docs/groww/probe/01_vix_csv_grep.json` | operator-run | ⏳ pending (**HARD GATE**) |
+| Probe 2 transcript — `docs/groww/probe/02_vix_1m_candle.json` | operator-run | ⏳ pending |
+| Probe 3 transcript — `docs/groww/probe/03_rate_limit_probe.json` | operator-run | ⏳ pending |
+| Probe 4 transcript — `docs/groww/probe/04_nifty_1m_dayrun.json` | operator-run | ⏳ pending |
+| Universe inventory transcripts — `docs/groww/universe/0[1-5]_*.json` | operator-run | ⏳ pending |
+
+**HARD GATE on Probe 1 (INDIA VIX presence):** if VIX absent from
+the Groww instruments CSV (exit code 5), the operator MUST write
+`docs/adr/0002-groww-vendor-pivot-RESCIND.md` and the rest of Phase 0b
++ all of Phase 1 are blocked until alternate broker decision lands.
+See `docs/TRACK1_GROWW_ADAPTER.md §3` for the no-VIX contingency tree.
+
+**Exit criteria:** all 4 probe transcripts committed to
+`docs/groww/probe/`, all 5 universe inventories committed to
+`docs/groww/universe/`, Probe 1 confirms VIX present, Probe 3
+confirms rate-limit bucket allows ≥ 4 r/s sustained. Then Phase 1
+adapter code may land.
+
+---
+
 ## Phase 1 — Verification Scaffolding (2-3 weeks)
 
 **Goal:** Build the 9-layer test pyramid as empty shells so every
