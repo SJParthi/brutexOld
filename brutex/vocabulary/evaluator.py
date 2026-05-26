@@ -131,13 +131,6 @@ def _is_near(close_paisa: int, level_paisa: int, bps: int) -> bool:
     return abs(close_paisa - level_paisa) <= tolerance
 
 
-def _set_bit(mask: int, bit: int, value: bool) -> int:
-    """Set or clear `bit` in `mask` based on `value`."""
-    if value:
-        return mask | (1 << bit)
-    return mask & ~(1 << bit)
-
-
 # ────── The 52-condition evaluator ──────
 
 

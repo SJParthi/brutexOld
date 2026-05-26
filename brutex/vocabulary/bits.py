@@ -156,11 +156,24 @@ BIT_TO_NAME: Final[dict[int, str]] = {v: k for k, v in NAME_TO_BIT.items()}
 # nothing in this module consumes it directly.
 ALL_CONDITION_NAMES: Final[tuple[str, ...]] = tuple(NAME_TO_BIT.keys())
 
+
+def _check_invariants(name_to_bit: dict[str, int], total: int) -> None:
+    """Validate the bit-table invariants at module import.
+
+    Extracted as a function so the two `raise AssertionError` branches
+    are reachable from tests (call with a tampered mapping).
+
+    Raises:
+        AssertionError: when the mapping has the wrong count, or when
+        the bit positions don't form a dense 0..total-1 range.
+    """
+    if len(name_to_bit) != total:
+        raise AssertionError(f"Expected {total} conditions, got {len(name_to_bit)}")
+    if set(name_to_bit.values()) != set(range(total)):
+        raise AssertionError(
+            f"Bit positions must be 0..{total - 1} with no gaps, got {sorted(name_to_bit.values())}"
+        )
+
+
 # Compile-time invariants
-if len(NAME_TO_BIT) != TOTAL_CONDITIONS:
-    raise AssertionError(f"Expected {TOTAL_CONDITIONS} conditions, got {len(NAME_TO_BIT)}")
-if set(NAME_TO_BIT.values()) != set(range(TOTAL_CONDITIONS)):
-    raise AssertionError(
-        f"Bit positions must be 0..{TOTAL_CONDITIONS - 1} with no gaps, "
-        f"got {sorted(NAME_TO_BIT.values())}"
-    )
+_check_invariants(NAME_TO_BIT, TOTAL_CONDITIONS)
