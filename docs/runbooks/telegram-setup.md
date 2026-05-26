@@ -191,7 +191,7 @@ Once wired, you'll start receiving messages automatically. Typical Phase D
 - ~288 × `phase.progress` (every 5 minutes during Phase D)
 - ~144 × `run.heartbeat` (every 10 minutes)
 - 0-20 × `quarantine.new` if anything goes wrong
-- 0-5 × `rate_limit.downshift` during Dhan peak load
+- 0-5 × `rate_limit.downshift` during broker peak load (Groww adaptive [4..8] r/s)
 - 1 × `run.complete`
 
 If that's too chatty, you can mute the chat in Telegram (long-press → mute)

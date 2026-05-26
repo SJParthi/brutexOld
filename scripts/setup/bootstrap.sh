@@ -8,7 +8,7 @@
 #
 # 1. Verifies Python 3.12 is available (CLAUDE.md §4 mandate).
 # 2. Creates a `.venv/` if missing.
-# 3. Installs `brutex[dev,data,dhan]` editable from the working tree.
+# 3. Installs `brutex[dev,data,groww]` editable from the working tree.
 # 4. Installs the Rust toolchain via rustup if `cargo` is not on PATH.
 # 5. Builds + installs the `fno_math` Rust extension via maturin.
 # 6. Verifies `brutex doctor` exits 0 (audit chain + runtime + replay checks).
@@ -51,10 +51,10 @@ fi
 . .venv/bin/activate
 
 # ────────── 3. Python deps ──────────
-_step "Step 3/6 — install brutex[dev,data,dhan] editable"
+_step "Step 3/6 — install brutex[dev,data,groww] editable"
 pip install -q --upgrade pip
-if pip install -q -e ".[dev,data,dhan]" 2>&1 | tail -2; then
-  _ok "dev + data + dhan extras installed"
+if pip install -q -e ".[dev,data,groww]" 2>&1 | tail -2; then
+  _ok "dev + data + groww extras installed"
 else
   _err "pip install failed — see output above"
   exit 1

@@ -9,12 +9,12 @@ After ``pip install -e .``, the ``brutex`` command is on PATH.
 
 ## Status
 
-This CLI was rewritten on 2026-05-15 as part of the Dhan → Dhan migration
-(see ``docs/MIGRATION.md``). The legacy ingest subcommands (instruments,
-expiries, contracts, candles) were Dhan-specific and have been dropped.
-Track 1 (Dhan + spot indexes + 52-condition vocabulary) will reintroduce
-``brutex track1 ingest`` once the Dhan adapter lands in Phase 2 of the
-Track 1 phase plan (see ``docs/TRACK1_PHASE_PLAN.md``).
+This CLI was rewritten on 2026-05-15 and re-baselined on 2026-05-26
+(DEC-VENDOR-PIVOT-001) when the Dhan adapter was wiped in favour of
+Groww. Legacy ingest subcommands were vendor-specific and are dropped.
+Track 1 will reintroduce ``brutex track1 ingest`` once the Groww
+adapter lands in Phase 1+ of the post-pivot phase plan (see
+``docs/TRACK1_GROWW_ADAPTER.md``).
 
 ## Commands (Track 1 minimum)
 

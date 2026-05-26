@@ -366,6 +366,53 @@ superseded.
     - 📋 ROADMAP: vocabulary modules (`bits.py` at 93.85%, `evaluator.py` at 95.38%) are the next strict-100% candidates if the operator wants to tighten further. The remaining gap is mostly in `evaluator.py` defensive `# pragma: no cover` paths that already document themselves as unreachable invariants.
 
     **Decision ID:** DEC-INDICATOR-COVERAGE-001 (also DEC-COV-001 step 18). **Builds on:** DEC-COV-001 steps 9-11 (indicator gates for pivots, fib_levels, calendars.nse, expiry_calendar). **Closes:** the 3 sub-rows of the "📋 ROADMAP — strict per-module 100% for the remaining indicator modules" line item from STANDARDS_100PCT.md §1 row 1 (coverage).
+247. **DEC-VENDOR-PIVOT-001 Phase 8 (EARLY) — full Dhan adapter wipe ahead of Groww adapter implementation** (2026-05-26, operator directive: "no dhan bro just wipe off the entire dhan its related dude so just go ahead with groww dude okay?"). Executes Phase 8 of ADR-0001 **before** Phases 1-7 (Groww adapter implementation) — an operator-directed reordering that leaves the codebase WITHOUT a backtest data fetcher until Phase 1 lands. The orchestrator/observability/dashboard/strategies/vocabulary layers stay intact (all broker-agnostic). The Groww adapter is the operator's chosen replacement; no parallel Dhan path remains.
+
+    **Pre-deletion snapshot:** `git tag v-pre-groww-pivot` was created locally on the parent commit of this wipe. (Tag push to origin was denied by remote 403 — operator must push the tag manually from a laptop with full repo rights: `git push origin v-pre-groww-pivot`.) The tag preserves the immutable pre-wipe state for full reversibility.
+
+    **Files DELETED in this PR (5,659 LoC total):**
+
+    - **`brutex/adapters/dhan/`** entire package — 10 modules, 1,424 LoC (auth, body, client, constants, options_constants, parser, ssrf_guard, timeconv, types, __init__)
+    - **`brutex/orchestrator/dhan_worker.py`** + **`dhan_errors.py`** — 1,167 LoC
+    - **14 test files** matching `test_dhan_*` across `tests/{unit,golden,smoke}/` — 3,068 LoC
+
+    **Files UPDATED in this PR:**
+
+    - **`CLAUDE.md` §6** — Dhan facts table REPLACED wholesale with Groww facts table (sourced from operator's pasted Groww docs 2026-05-26 + HARD-VERIFIED `growwapi 1.5.0` PyPI wheel `groww/client.py:86-97`). Adds 35+ Groww-specific rows; flags INDIA VIX presence + backtesting-bucket assignment + data drift as UNVERIFIED per Golden Rule #1.
+    - **`pyproject.toml`** — `[dhan]` extras group renamed `[groww]` with `growwapi>=1.5,<2.0` + `pyotp>=2.9,<3.0`; mypy `dhanhq`/`httpx` overrides renamed to `growwapi`/`pyotp`.
+    - **`.github/workflows/ci.yml`** — 5 strict-100% gates referencing Dhan modules deleted (`dhan.timeconv`, `dhan.options_constants`, `dhan.constants`, `dhan.auth`, `dhan.types`); all `pip install [dev,dhan]` / `[dev,data,dhan]` invocations renamed to `[dev,groww]` / `[dev,data,groww]` (6 occurrences).
+    - **`scripts/setup/bootstrap.sh`** — `[dev,data,dhan]` → `[dev,data,groww]`.
+    - **`docs/runbooks/ENV_VARS.md`** — §5 Dhan adapter section REPLACED with Groww adapter section (11 new env vars: `BRUTEX_GROWW_{API_KEY, TOTP_SECRET, TOKEN_PATH, SMOKE, MIN_RPS, MAX_RPS, INITIAL_RPS, STEP_DOWN_HITS, STEP_DOWN_WINDOW, STEP_UP_CLEAN_WINDOW, RECHECK_INTERVAL}`).
+    - **`docs/runbooks/telegram-setup.md`** — single Dhan ref updated to broker-agnostic.
+    - **`brutex/__init__.py`**, **`brutex/adapters/__init__.py`**, **`brutex/universe.py`**, **`brutex/cli.py`** — docstring updates removing Dhan references, pointing to `docs/TRACK1_GROWW_ADAPTER.md` for the new vendor.
+
+    **Files PRESERVED (broker-agnostic layers — Z+ defensive matrix unchanged):**
+
+    - `brutex/adapters/protocol.py` — the `MarketAdapter` Protocol that the future `GrowwMarketAdapter` will implement
+    - `brutex/orchestrator/{audit, bloom, store, replay, retry, rate_limiter, quota_tracker, pipeline, state}.py`
+    - `brutex/observability/{sla, watchdog, monitor, standard_monitor, metrics, logging}.py`
+    - `brutex/notifications/{telegram, wiring}.py`
+    - `brutex/dashboard/*`
+    - `brutex/vocabulary/*`, `brutex/indicators/*`, `brutex/strategies/*`, `brutex/calendars/*`, `brutex/options/*`, `brutex/feed/*`, `brutex/execution/*`, `brutex/data/*`, `brutex/metrics/*`, `brutex/config/*`, `brutex/backtest/*`, `brutex/sprint/*`, `brutex/visualization/*`
+
+    **Operative state after this PR:**
+
+    - The engine has NO backtest data fetcher. `brutex ingest` will surface a clear "no broker configured — Groww adapter pending Phase 1" error message.
+    - All broker-agnostic tests (216 verified locally with `pytest --tb=no -q`) still pass.
+    - `ruff check brutex tests` GREEN; `ruff format --check` GREEN on 195 files (was 221 before deletion).
+    - Pre-existing `fno_math` ModuleNotFoundError on orchestrator imports is unchanged (Rust kernel built via maturin in CI).
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 26 core code files + 14 test files deleted cleanly; no orphan imports; ruff + format + targeted pytest GREEN.
+    - ✅ REAL: `git tag v-pre-groww-pivot` created locally on the pre-wipe commit; full revert is one `git checkout` away.
+    - ✅ REAL: CI gates for deleted modules removed in the same PR; no transient red-on-deleted-file noise expected.
+    - 🟡 PARTIAL: tag push to `origin` denied (403 in sandbox env); operator must run `git push origin v-pre-groww-pivot` from a laptop with full repo rights.
+    - 🟡 PARTIAL: the orchestrator pipeline currently has no concrete adapter — Phase 1 (Groww adapter `auth + constants + types` ~480 LoC) is the next PR.
+    - ❌ ACCEPTED: this is the destructive Phase 8 from ADR-0001 §5, executed AHEAD of Phases 1-7 (Groww adapter build) per the operator's reordering decree. The 4 P0 risks (VIX presence, backtesting bucket, data drift, repro hash reset) from the 4-agent hostile review remain ACCEPTED as documented in ADR §3.1 — Phase 0b empirical probe is still the hard gate before Phase 1 code lands.
+    - 📋 ROADMAP: Phase 0b probe script (`scripts/groww_probe.py`) + Phase 1+ Groww adapter implementation.
+
+    **Decision ID:** DEC-VENDOR-PIVOT-001 (Phase 8, executed early). **Builds on:** entry #246 (ADR + spec from PR #135, lands separately). **Closes:** the Dhan adapter chapter of BruteX Track 1.
 
 244. **DEC-INFRA-OPS-001 — operator infra/env bundle: bootstrap.sh + env-var registry + Telegram smoke-test + live-dedup dump script** (2026-05-25, operator directive: "focus only on infra environment related changes alone"). Closes the operations-readiness gap for the 4 detector modules merged in PRs #126/#129/#131: code is wired, but operators had no scripts to (a) bootstrap a fresh box, (b) discover the env-var schema, (c) verify Telegram end-to-end, (d) dump the live LMDB dedup state for the L3 replay oracle.
 

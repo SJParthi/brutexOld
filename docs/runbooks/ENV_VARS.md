@@ -77,16 +77,27 @@ The runtime file records the currently-running pipeline's `pid`,
 
 ---
 
-## 5. Dhan adapter (DEC-P0-033 — scope-guarded)
+## 5. Groww adapter (DEC-VENDOR-PIVOT-001 — scope-guarded)
 
 | Env var | Default | Allowed | Module |
 |---|---|---|---|
-| `BRUTEX_DHAN_TOKEN_PATH` | `~/.brutex/dhan.token` | path | `brutex.adapters.dhan.auth` |
-| `BRUTEX_DHAN_ACCESS_TOKEN` | — (path takes priority) | token string | `brutex.adapters.dhan.auth` |
+| `BRUTEX_GROWW_API_KEY` | — | TOTP token (16-byte base32) | `brutex.adapters.groww.auth` (Phase 1) |
+| `BRUTEX_GROWW_TOTP_SECRET` | — | 32-char base32 | `brutex.adapters.groww.auth` (Phase 1) |
+| `BRUTEX_GROWW_TOKEN_PATH` | `~/.brutex/groww/access_token.json` | path (mode 0600) | `brutex.adapters.groww.auth` (Phase 1) |
+| `BRUTEX_GROWW_SMOKE` | unset | `1` to enable | `tests/smoke/test_groww_*` (Phase 1) |
+| `BRUTEX_GROWW_MIN_RPS` | `4.0` | float | `brutex.adapters.groww.client` (Phase 2) |
+| `BRUTEX_GROWW_MAX_RPS` | `8.0` | float | `brutex.adapters.groww.client` (Phase 2) |
+| `BRUTEX_GROWW_INITIAL_RPS` | `8.0` | float | `brutex.adapters.groww.client` (Phase 2) |
+| `BRUTEX_GROWW_STEP_DOWN_HITS` | `3` | int | `brutex.adapters.groww.client` (Phase 2) |
+| `BRUTEX_GROWW_STEP_DOWN_WINDOW` | `60.0` | float (sec) | `brutex.adapters.groww.client` (Phase 2) |
+| `BRUTEX_GROWW_STEP_UP_CLEAN_WINDOW` | `300.0` | float (sec) | `brutex.adapters.groww.client` (Phase 2) |
+| `BRUTEX_GROWW_RECHECK_INTERVAL` | `3600.0` | float (sec) | `brutex.adapters.groww.client` (Phase 2) |
 
-**Path takes priority:** if `BRUTEX_DHAN_TOKEN_PATH` exists, its
-contents win over `BRUTEX_DHAN_ACCESS_TOKEN`. The path file must be
-mode `0600` (owner-only readable) per DEC-DHAN-AUTH-001.
+**Auth model:** TOTP flow (Groww Approach 2) — no daily approval click. See `docs/TRACK1_GROWW_ADAPTER.md §2` for the full lifecycle.
+
+**Adaptive rate limiter:** range [4..8] r/s with auto-tuning state machine. See `docs/TRACK1_GROWW_ADAPTER.md §5` for the full spec.
+
+**Dhan adapter was wiped 2026-05-26 per DEC-VENDOR-PIVOT-001. The pre-wipe state is preserved at `git tag v-pre-groww-pivot`. Previously documented `BRUTEX_DHAN_*` env vars are gone — see MIGRATION.md entry #247.**
 
 ---
 
@@ -141,4 +152,4 @@ typos).
 * DEC-M4PRO-ABSOLUTE-001 (#236) — strict-bool decoder pattern
 * DEC-TELEGRAM-WIRING-001 (#238) — Telegram env-var layout
 * DEC-PORTS-001 — port config layout
-* DEC-DHAN-AUTH-001 — Dhan token secrecy contract
+* DEC-VENDOR-PIVOT-001 — Dhan wipe + Groww adapter TOTP auth contract

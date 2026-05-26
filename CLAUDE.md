@@ -243,38 +243,54 @@ bruteX/
 
 ---
 
-## 6. Verified Dhan Facts (cite these, don't re-derive)
+## 6. Verified Groww Facts (cite these, don't re-derive)
+
+> **DEC-VENDOR-PIVOT-001 (2026-05-26):** the Dhan facts table that lived
+> here previously was wiped along with the Dhan adapter. Pre-wipe state
+> preserved at `git tag v-pre-groww-pivot`. The Groww facts below
+> originate from the operator's pasted Groww docs (2026-05-26) +
+> HARD-VERIFIED PyPI wheel source code for `growwapi 1.5.0`. See
+> `docs/TRACK1_GROWW_ADAPTER.md` for the full adapter specification and
+> `docs/adr/0001-groww-vendor-pivot.md` for the pivot rationale.
 
 | Fact | Value | Source |
 |------|-------|--------|
-| Historical intraday endpoint | `POST /v2/charts/intraday` | dhanhq.co/docs/v2 |
-| Historical daily endpoint | `POST /v2/charts/historical` | dhanhq.co/docs/v2 |
-| **Expired/rolling options endpoint** | `POST /v2/charts/rollingoption` (SDK: `expired_options_data`) | dhanhq.co/docs/v2/expired-options-data (verified 2026-05-16) |
-| Native intraday timeframes | **1, 5, 15, 25, 60 minute** ONLY | dhanhq.co/docs/v2 |
-| Chunk window (intraday) | 90 days per call | dhanhq.co/docs/v2 |
-| **Chunk window (rollingoption)** | **30 days per call** | dhanhq.co/docs/v2/expired-options-data |
-| Index segment (ALL indexes) | `IDX_I` enum 0 — single segment for NIFTY 50, BANKNIFTY, SENSEX, India VIX | dhanhq.co/docs/v2/annexure (verified 2026-05-15) |
-| Instrument type (all 4 Track 1 instruments) | `INDEX` | dhanhq.co/docs/v2/annexure |
-| **Options segment** | `NSE_FNO` (NIFTY/BANKNIFTY) or `BSE_FNO` (SENSEX) | dhanhq.co/docs/v2/annexure (verified 2026-05-16) |
-| **Options instrument** | `OPTIDX` (index options) | dhanhq.co/docs/v2/expired-options-data |
-| **Options drvOptionType** | `CALL` or `PUT` (NOT `CE`/`PE`) | Dhan SDK source |
-| **Options strike addressing** | ATM-relative string: `"ATM"`, `"ATM±N"` (max ±10 index near-expiry, ±3 otherwise) | dhanhq.co/docs/v2/expired-options-data |
-| **Options securityId rule** | **UNDERLYING's spot id (13/25/51) — NOT per-contract** | Dhan SDK `expired_options_data` signature (verified 2026-05-16) |
-| **Options fields returned** | OHLC + volume + OI + IV + spot per minute | dhanhq.co/docs/v2/expired-options-data |
-| **Options Greeks** | NOT returned — must compute via BSM | dhanhq.co/docs/v2/expired-options-data |
-| **Options marketed depth** | ~5 years rolling | dhanhq.co docs |
-| **Options ACTUAL depth (UNVERIFIED)** | Community evidence suggests ~2 years; **Phase 0 empirical probe REQUIRED** before locking 2021-01-01 floor | tradingqna.com "Dhan API for expired F&O data (1-min, 2 years)" thread |
-| India VIX trading symbol | `INDIA VIX` (with space) | Dhan master CSV |
-| India VIX update cadence | every 15 seconds (NOT tick) | NSE |
-| Instrument master URL | `https://images.dhan.co/api-data/api-scrip-master-detailed.csv` | dhan.co |
-| Time format | IST market times (convert to UTC at ingest) | dhanhq.co/docs/v2 |
-| Rate limit (Data APIs) | **5 req/s + 100,000/day** verified | dhanhq.co/docs/v2 Rate Limit table |
-| Adapter effective cap | 3 r/s (5 × 0.6 safety factor) | this file §2 rule 6 |
-| securityId — NIFTY 50 | **`13`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=13 |
-| securityId — BANKNIFTY | **`25`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=25 |
-| securityId — SENSEX | **`51`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=51 |
-| securityId — India VIX | **`21`** verified | web.dhan.co/Charts?exch=IDX&seg=I&secid=21 |
-| securityId policy | **Hardcoded for Track 1's 4-instrument universe** (rationale: 4-tuple is permanently locked; runtime CSV lookup adds complexity for no benefit). File lives at `brutex/adapters/dhan/constants.py` (landed in PR #51 / DEC-P0-033 Phase 2 Dhan adapter PR #1). Smoke test (`tests/smoke/test_dhan_securityid_verification.py`) verifies quarterly against web.dhan.co URLs (gated by `BRUTEX_DHAN_SMOKE=1`). **For Track 2 options: SAME 4 securityIds reused — no per-strike CSV lookup** (verified 2026-05-16). | this file §2 |
+| Python SDK | `growwapi` 1.5.0 (3 Dec 2025) | pypi.org/project/growwapi/ |
+| Historical OHLC method | `groww.get_historical_candles(exchange, segment, groww_symbol, start_time, end_time, candle_interval)` | groww.in/trade-api/docs/python-sdk/backtesting |
+| Expiry-discovery method | `groww.get_expiries(exchange, underlying_symbol, year, month)` | groww.in/trade-api/docs/python-sdk/backtesting |
+| Contract-discovery method | `groww.get_contracts(exchange, underlying_symbol, expiry_date)` | groww.in/trade-api/docs/python-sdk/backtesting |
+| Backtesting segments | **CASH and FNO only** (no MCX in backtest) | groww.in/trade-api/docs/python-sdk/backtesting |
+| Historical depth | **From 2020** for Equities, Indices, FNO | groww.in/trade-api/docs/python-sdk/backtesting |
+| Native intraday candle constants (12 total) | `MIN_1, MIN_2, MIN_3, MIN_5, MIN_10, MIN_15, MIN_30, HOUR_1, HOUR_4, DAY, WEEK, MONTH` | growwapi/groww/client.py:86-97 (HARD-VERIFIED from PyPI wheel) |
+| 1-minute candle support | **`CANDLE_INTERVAL_MIN_1 = "1minute"`** HARD-VERIFIED | growwapi/groww/client.py:86-97 |
+| Chunk window — 1m/2m/3m/5m | **30 days per call** | groww.in/trade-api/docs/python-sdk/backtesting |
+| Chunk window — 10m/15m/30m | 90 days per call | groww.in/trade-api/docs/python-sdk/backtesting |
+| Chunk window — 1h/4h/1d/1w/1mo | 180 days per call | groww.in/trade-api/docs/python-sdk/backtesting |
+| Candle response shape | `[timestamp_str, open, high, low, close, volume, oi_or_null]` | groww.in/trade-api/docs/python-sdk/backtesting |
+| **Price unit** | **RUPEES (float)** — adapter MUST × 100 at parse boundary to preserve int64 paisa | groww.in/trade-api/docs/python-sdk/backtesting "All prices in rupees" |
+| Symbol format — indices | `NSE-NIFTY`, `BSE-SENSEX`, `NSE-INDIAVIX` (Phase 0 verification pending) | groww.in/trade-api/docs/python-sdk/backtesting |
+| Symbol format — options | `NSE-NIFTY-02Jan25-28500-PE` (absolute strike, NOT ATM-relative) | groww.in/trade-api/docs/python-sdk/backtesting |
+| Options instrument type | `CE` / `PE` (NOT `CALL`/`PUT`) | growwapi annexures |
+| Exchanges | NSE, BSE, MCX | groww.in/trade-api/docs/python-sdk |
+| Rate limit — Orders | 10 r/s, 250/min, no per-day cap documented | groww.in/trade-api/docs/python-sdk Rate Limits |
+| Rate limit — Live Data (Quote/LTP/OHLC) | 10 r/s, 300/min, no per-day cap documented | groww.in/trade-api/docs/python-sdk Rate Limits |
+| Rate limit — Non Trading | 20 r/s, 500/min, no per-day cap documented | groww.in/trade-api/docs/python-sdk Rate Limits |
+| Rate limit — Backtesting bucket | **UNVERIFIED** — docs only enumerate Orders / Live Data / Non Trading; backtesting endpoints not explicitly listed | empirical probe required |
+| Rate-limit grouping | **Type-level shared** — one API exhausted = all APIs of that type rate-limited | groww.in/trade-api/docs/python-sdk Rate Limits |
+| Live feed subscription cap | 1000 instruments at one time | groww.in/trade-api/docs/python-sdk |
+| Adapter effective cap | **Adaptive [4..8] r/s** (auto-tune via state machine — see `docs/TRACK1_GROWW_ADAPTER.md §5`) | this file §2 rule 6 + operator decree 2026-05-26 |
+| Auth approach 1 — API Key + Secret | **REFUSED** (requires daily approval on Groww Cloud Console — violates §11 AUTOMATED) | groww.in/trade-api/docs/python-sdk Step 3 |
+| Auth approach 2 — TOTP | **ACCEPTED** (no expiry per docs; TOTP secret stored mode-0600) | groww.in/trade-api/docs/python-sdk Step 3 |
+| Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` | groww.in/trade-api/docs/python-sdk/instruments |
+| Instrument master schema | `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, ...` | groww.in/trade-api/docs/python-sdk/instruments |
+| Exception classes | 11 total: `GrowwBaseException`, `GrowwAPIException`, `GrowwAPI{Authentication,Authorisation,BadRequest,NotFound,RateLimit,Timeout}Exception`, `GrowwFeed{,Connection,NotSubscribed}Exception` | groww.in/trade-api/docs/python-sdk/exceptions |
+| Time format | IST market times (convert to UTC at ingest) | unchanged from prior spec |
+| INDIA VIX presence | **UNVERIFIED** — Phase 0b empirical probe is the gate before any Groww adapter code lands. If VIX absent → DEC-VENDOR-PIVOT-001 is rescinded. | red-team agent 2026-05-26 |
+| Data drift Groww-vs-NSE-official | **UNQUANTIFIED** — Phase 0b probe will measure | red-team agent 2026-05-26 |
+| Track 1 brute-force universe — NIFTY 50 | `groww_symbol="NSE-NIFTY"`, segment=CASH | Phase 0b verification pending |
+| Track 1 brute-force universe — BANKNIFTY | `groww_symbol="NSE-BANKNIFTY"`, segment=CASH | Phase 0b verification pending |
+| Track 1 brute-force universe — SENSEX | `groww_symbol="BSE-SENSEX"`, segment=CASH | Phase 0b verification pending |
+| Track 1 brute-force universe — INDIA VIX | `groww_symbol="NSE-INDIAVIX"` (or alt), segment=CASH | Phase 0b HARD-GATE verification pending |
 
 ---
 
