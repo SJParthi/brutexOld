@@ -611,3 +611,157 @@ class TestPriorBarHistory:
         for f in [True, False, True, True]:  # last two same
             h.update(f)
         assert not h.alternating()
+
+
+# ────── Strict-100% coverage backfill (DEC-INDICATOR-COVERAGE-001 follow-up) ──────
+
+
+class TestBitsInvariants:
+    """Coverage for `brutex.vocabulary.bits._check_invariants`.
+
+    The two `raise AssertionError` branches are unreachable from the
+    real `NAME_TO_BIT` constant, so coverage needs a direct call with
+    tampered inputs.
+    """
+
+    def test_correct_inputs_return_none(self) -> None:
+        # The real constants pass — already executed at import, but exercise
+        # the happy path explicitly for branch coverage symmetry. The function
+        # signature is `-> None`; mypy strict rejects an `is None` assertion
+        # on a guaranteed-None return, so we just confirm it doesn't raise.
+        B._check_invariants(B.NAME_TO_BIT, B.TOTAL_CONDITIONS)
+
+    def test_wrong_count_raises(self) -> None:
+        bad = {"only_one": 0}
+        with pytest.raises(AssertionError, match=r"Expected 52 conditions, got 1"):
+            B._check_invariants(bad, B.TOTAL_CONDITIONS)
+
+    def test_bit_position_gap_raises(self) -> None:
+        # Right count (52) but bit 0 missing — uses 1..52 instead.
+        bad = {f"cond_{i}": i for i in range(1, B.TOTAL_CONDITIONS + 1)}
+        with pytest.raises(AssertionError, match=r"Bit positions must be 0\.\.51 with no gaps"):
+            B._check_invariants(bad, B.TOTAL_CONDITIONS)
+
+
+class TestEvaluatorEdgeCases:
+    """Coverage for evaluator branches the per-bit tests don't hit.
+
+    - `_is_near` guard for `close_paisa <= 0` (evaluator.py:129).
+    - Pivot R2 / S3 proximity hits (evaluator.py:191, 197).
+    - `total_range == 0` skip in Group 5 (evaluator.py: 262→280).
+    - `day_range == 0` skip in Group 7 (evaluator.py: 293→302).
+    - `pdc <= 0` skip in Group 9 (evaluator.py: 315→323).
+    """
+
+    def test_close_zero_returns_no_near_bits(self) -> None:
+        # close=0 trips `_is_near` guard → all near_* bits stay 0.
+        s = _make_snapshot(close_paisa=0)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        for bit in (
+            B.BIT_NEAR_PIVOT_P,
+            B.BIT_NEAR_PIVOT_R1,
+            B.BIT_NEAR_PIVOT_R2,
+            B.BIT_NEAR_PIVOT_R3,
+            B.BIT_NEAR_PIVOT_S1,
+            B.BIT_NEAR_PIVOT_S2,
+            B.BIT_NEAR_PIVOT_S3,
+            B.BIT_NEAR_PDH,
+            B.BIT_NEAR_PDL,
+            B.BIT_NEAR_FIB_50,
+            B.BIT_NEAR_FIB_618,
+        ):
+            assert not _bit(m, bit), f"Bit {bit} should not fire with close=0"
+
+    def test_near_pivot_r3_fires(self) -> None:
+        # Standard pivot math: PDH=24_050, PDL=23_950, PDC=24_000 →
+        # P=24_000, range=100 → R3 = PDH + 2*(P-PDL) = 24_050 + 2*50 = 24_150.
+        s = _make_snapshot(close_paisa=24_150_00)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert _bit(m, B.BIT_NEAR_PIVOT_R3)
+
+    def test_near_pivot_s3_fires(self) -> None:
+        # S3 = PDL - 2*(PDH-P) = 23_950 - 2*50 = 23_850.
+        s = _make_snapshot(close_paisa=23_850_00)
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert _bit(m, B.BIT_NEAR_PIVOT_S3)
+
+    def test_zero_range_bar_skips_candle_shape_branches(self) -> None:
+        # open == high == low == close → total_range = 0 → skip Group 5
+        # body / wick checks (branch 262→280). Doji also requires
+        # total_range > 0, so it must NOT fire either.
+        s = _make_snapshot(
+            open_paisa=24_000_00,
+            high_paisa=24_000_00,
+            low_paisa=24_000_00,
+            close_paisa=24_000_00,
+        )
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        for bit in (
+            B.BIT_BAR_BULLISH,
+            B.BIT_BAR_BEARISH,
+            B.BIT_BAR_DOJI,
+            B.BIT_BAR_LARGE_BODY,
+            B.BIT_BAR_SMALL_BODY,
+            B.BIT_LONG_UPPER_WICK,
+            B.BIT_LONG_LOWER_WICK,
+        ):
+            assert not _bit(m, bit), f"Bit {bit} should not fire when total_range=0"
+
+    def test_zero_day_range_skips_position_in_day(self) -> None:
+        # day_high == day_low → day_range = 0 → skip Group 7 upper/lower
+        # third bits (branch 293→302). The at-high / at-low bits still
+        # fire because close == day_high == day_low.
+        s = _make_snapshot(
+            close_paisa=24_000_00,
+            day_high_paisa=24_000_00,
+            day_low_paisa=24_000_00,
+        )
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert _bit(m, B.BIT_CLOSE_AT_DAY_HIGH)
+        assert _bit(m, B.BIT_CLOSE_AT_DAY_LOW)
+        assert not _bit(m, B.BIT_CLOSE_IN_UPPER_THIRD)
+        assert not _bit(m, B.BIT_CLOSE_IN_LOWER_THIRD)
+
+    def test_zero_pdc_skips_gap_bits(self) -> None:
+        # pdc=0 → Group 9 gap-up / gap-down branch (308→316) is skipped.
+        # `compute_pivot_levels` rejects pdc=0 (data-corruption guard), so
+        # build the PivotLevels manually with pdc_paisa=0 to exercise the
+        # downstream evaluator branch.
+        from datetime import date
+
+        from brutex.indicators.pivots import PivotLevels
+
+        pdh, pdl = 24_050_00, 23_950_00
+        zero_pdc_pivots = PivotLevels(
+            trading_day=date(2026, 5, 13),
+            pdh_paisa=pdh,
+            pdl_paisa=pdl,
+            pdc_paisa=0,
+            r4_paisa=0,
+            r3_paisa=0,
+            r2_paisa=0,
+            r1_paisa=0,
+            p_paisa=0,
+            s1_paisa=0,
+            s2_paisa=0,
+            s3_paisa=0,
+            s4_paisa=0,
+        )
+        base = _make_snapshot()
+        s = IndicatorSnapshot(
+            timestamp_ist=base.timestamp_ist,
+            open_paisa=base.open_paisa,
+            high_paisa=base.high_paisa,
+            low_paisa=base.low_paisa,
+            close_paisa=base.close_paisa,
+            ema20_paisa=base.ema20_paisa,
+            ema200_paisa=base.ema200_paisa,
+            pivots=zero_pdc_pivots,
+            fib=base.fib,
+            day_high_paisa=base.day_high_paisa,
+            day_low_paisa=base.day_low_paisa,
+            open_of_day_paisa=24_000_00,
+        )
+        m = evaluate_atoms(s, _default_proximity(), _empty_history())
+        assert not _bit(m, B.BIT_GAP_UP_DAY)
+        assert not _bit(m, B.BIT_GAP_DOWN_DAY)
