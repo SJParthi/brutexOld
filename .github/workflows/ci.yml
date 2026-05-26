@@ -113,7 +113,7 @@ jobs:
           cache: pip
       - name: Install deps
         run: |
-          pip install -e ".[dev,dhan]"
+          pip install -e ".[dev,groww]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-050: required by pyright's strict mode which walks
         # `tests/unit/test_fno_math_bridge.py` and needs the module
@@ -150,7 +150,7 @@ jobs:
         # pyarrow are installed in CI. Without these, ~6 tests in
         # tests/unit/test_tf_resampler.py and tests/integration/test_data_lake_real.py
         # fail at collection time, suppressing real coverage of the data lake.
-        run: pip install -e ".[dev,data,dhan]"
+        run: pip install -e ".[dev,data,groww]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-050 (PR-K): the fno-math Rust extension is built via
         # maturin (PEP 517) at install time. ubuntu-24.04's pre-installed
@@ -264,35 +264,10 @@ jobs:
           # missing tests first. See MIGRATION.md entry #212 honest
           # envelope.
           #
-          # DEC-COV-001 step 3 (continued): ratchet
-          # `brutex.adapters.dhan.timeconv` (IST/UTC conversion
-          # utility, 103 lines) — `tests/unit/test_dhan_timeconv.py`
-          # has 11 tests covering all conversion paths.
-          if compgen -G "tests/unit/test_dhan_timeconv.py" > /dev/null; then
-            pytest \
-              --cov=brutex.adapters.dhan.timeconv \
-              --cov-branch \
-              --cov-report=term-missing \
-              --cov-fail-under=100 \
-              tests/unit/test_dhan_timeconv.py
-          else
-            echo "(brutex.adapters.dhan.timeconv test file not present yet — gate inactive)"
-          fi
-          # DEC-COV-001 step 3 (continued): ratchet
-          # `brutex.adapters.dhan.options_constants` (lookup
-          # constants module, 99 lines) —
-          # `tests/unit/test_dhan_options_constants.py` has 15 tests
-          # covering every lookup helper.
-          if compgen -G "tests/unit/test_dhan_options_constants.py" > /dev/null; then
-            pytest \
-              --cov=brutex.adapters.dhan.options_constants \
-              --cov-branch \
-              --cov-report=term-missing \
-              --cov-fail-under=100 \
-              tests/unit/test_dhan_options_constants.py
-          else
-            echo "(brutex.adapters.dhan.options_constants test file not present yet — gate inactive)"
-          fi
+          # DEC-VENDOR-PIVOT-001 (2026-05-26): the dhan.timeconv +
+          # dhan.options_constants strict-100% gate blocks that lived
+          # here were deleted as part of the Dhan wipe. Replacements
+          # for Groww adapter modules will land in Phase 1+ PRs.
           # DEC-COV-001 step 4 (2026-05-24, MIGRATION.md entry #213):
           # ratchet `brutex.strategies.types` (110 lines, 3 public
           # classes: Side StrEnum, Signal frozen dataclass with
@@ -334,21 +309,10 @@ jobs:
           else
             echo "(brutex.strategies.errors test file not present yet — gate inactive)"
           fi
-          # DEC-COV-001 step 7 (entry #217): brutex.adapters.dhan.constants
-          # (149 lines, 9 branches, 32 tests = 3.5× test-to-branch ratio).
-          if compgen -G "tests/unit/test_dhan_constants.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_constants.py
-          else
-            echo "(brutex.adapters.dhan.constants test file not present yet — gate inactive)"
-          fi
-          # DEC-COV-001 step 8 — `brutex.adapters.dhan.types` ratchet
-          # ATTEMPTED with a brand-new test_dhan_types.py written from
-          # scratch. CI surfaced multiple type+coverage errors because
-          # I guessed at the IntradayChunkRequest/OHLCBar/DhanRateLimitError
-          # field signatures without reading them first. Same lesson as
-          # step 5 (config.ports) and step 3 (models): verify
-          # signatures BEFORE writing the test. Deferred — the gate
-          # block is not added; this PR keeps strict-100% list at 11.
+          # DEC-VENDOR-PIVOT-001 (2026-05-26): dhan.constants strict-100%
+          # gate deleted with the Dhan wipe. The legacy step 8 deferral
+          # for dhan.types is no longer relevant — the Dhan adapter is
+          # gone. Equivalent Groww constants gate will land in Phase 1.
           # DEC-COV-001 step 9 (entry #219): brutex.indicators.pivots
           # (41 stmts, 4 branches, 18 tests in test_pivots.py).
           # Pure pivot-level math (PP/R1/R2/R3/S1/S2/S3) with the
@@ -383,13 +347,9 @@ jobs:
           else
             echo "(brutex.calendars.nse test file not present yet — gate inactive)"
           fi
-          # 11b · brutex.adapters.dhan.auth (53 stmts, 12 branches, 17 tests)
-          #       Dhan auth header builder + secret redaction
-          if compgen -G "tests/unit/test_dhan_auth.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.auth --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_auth.py
-          else
-            echo "(brutex.adapters.dhan.auth test file not present yet — gate inactive)"
-          fi
+          # 11b · DEC-VENDOR-PIVOT-001: dhan.auth strict-100% gate
+          #        deleted with the Dhan wipe. Groww auth gate lands in
+          #        Phase 1.
           # 11c · brutex.options.expiry_calendar (41 stmts, 6 branches, 47 tests)
           #       Weekly + monthly expiry date computation
           if compgen -G "tests/unit/test_expiry_calendar.py" > /dev/null; then
@@ -452,21 +412,10 @@ jobs:
           else
             echo "(brutex.config.ports test file not present yet — gate inactive)"
           fi
-          # DEC-COV-001 step 15 (entry #227): brutex.adapters.dhan.types
-          # UNDEFERRED — the LAST deferred module from step 8 finally lands.
-          # New test file tests/unit/test_dhan_types.py written from
-          # SOURCE-VERIFIED API field shapes (NOT guessed — the discipline
-          # that step 8 missed). Uses real DhanSpotInstrument singletons,
-          # real IntradayChunkRequest / HistoricalDailyRequest / OHLCBar /
-          # DhanError800 constructors. Module is 61 lines of pure
-          # @dataclass(frozen=True, slots=True) code with zero branches.
-          if compgen -G "tests/unit/test_dhan_types.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.types --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_types.py
-          else
-            echo "(brutex.adapters.dhan.types test file not present yet — gate inactive)"
-          fi
+          # DEC-VENDOR-PIVOT-001: dhan.types strict-100% gate deleted
+          # with the Dhan wipe. Groww types gate lands in Phase 1.
           # DEC-COV-001 step 16 (entry #228): 5-module quintuple-add of
-          # safe (non-Dhan-fetch) modules verified at 100% locally
+          # safe (broker-agnostic) modules verified at 100% locally
           # after installing fno_math wheel.
           # 16a · brutex.execution.types (90 stmts, 16 branches, 16 tests)
           if compgen -G "tests/unit/test_execution_types.py" > /dev/null; then
@@ -659,7 +608,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev,dhan]"
+        run: pip install -e ".[dev,groww]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
         # at module load time. Every Python job that imports any
@@ -695,7 +644,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev,dhan]"
+        run: pip install -e ".[dev,groww]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
         uses: dtolnay/rust-toolchain@stable
@@ -742,7 +691,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev,dhan]"
+        run: pip install -e ".[dev,groww]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
         uses: dtolnay/rust-toolchain@stable
@@ -1192,7 +1141,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev,dhan]"
+        run: pip install -e ".[dev,groww]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
         # at module load; mutmut runs pytest which imports orchestrator.

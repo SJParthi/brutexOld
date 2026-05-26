@@ -1,9 +1,11 @@
 """BruteX Track 1 universe — Indian spot indexes + India VIX.
 
-**STATUS (2026-05-15):** rewritten for Track 1 / Dhan migration. The
-prior universe (8 F&O indices + dynamic stock-derivative discovery) is
-out of scope for Track 1. India VIX added after 4-agent verification on
-2026-05-15 (late-day scope expansion, see
+**STATUS (2026-05-26):** universe definitions are vendor-agnostic. Post
+DEC-VENDOR-PIVOT-001 the Groww adapter consumes these definitions
+(prior Dhan adapter wiped). The prior universe (8 F&O indices + dynamic
+stock-derivative discovery) is out of scope for Track 1. India VIX
+added after 4-agent verification on 2026-05-15 (late-day scope
+expansion, see
 ``docs/TRACK1_DATA_INGEST_DESIGN.md`` §2 and ``docs/MIGRATION.md``
 decisions #71-72).
 
