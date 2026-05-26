@@ -335,6 +335,35 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+252. **DEC-PHASE1-WEEK2-SCAFFOLDING-001 — Phase 1 Week 2 scaffolding: truth-table CSV skeleton + cargo-fuzz directory + cargo-mutants config** (2026-05-26 evening, operator directive: "go ahead with the plan" continuation after Week 1 closed via PRs #147 + #148). Closes the remaining Phase 1 Week 2 scaffolding gaps; the nightly + weekly workflow slots are already covered by named-differently-but-functionally-equivalent files that landed earlier (`stress-nightly.yml`, `redteam-nightly.yml`, `dep-freshness-nightly.yml`, `mutation.yml`).
+
+    **What lands:**
+
+    - **`tests/golden/condition_truth_table.csv`** — new 5-row skeleton CSV with columns `snippet_id, condition_name, bit_position, expected_bool, description`. Each row asserts a specific 52-vocabulary bit on a hand-built scenario (bar_bullish, close_above_ema20, early_morning, plus their mutually-exclusive negatives). Phase 2 expands to ≥ 200 rows per `docs/TRACK1_VERIFICATION_PYRAMID.md §G9` + the corresponding Phase 2 loader-and-asserter harness.
+    - **`rust/fno-math/fuzz/README.md`** — new directory marker + README documenting the 7 planned fuzz targets (combo_hash, mask_and, ema_update, pivot_resolve, fib_resolve, audit_chain, parquet_reader). Each Phase 2 target activates by running `cargo fuzz init` + `cargo fuzz add <target>` against this existing directory. No Cargo.toml lands yet — `cargo-fuzz` itself generates one on `init`.
+    - **`.cargo/mutants.toml`** — new top-level Cargo config for `cargo-mutants`. Walks `rust/fno-math/src/math/` + `rust/fno-math/src/compat/` (the modules that exist today + are mutation-test-relevant); excludes generated PyO3 glue + tests + benches. Timeout multiplier 3.0 + minimum 30s for `cargo test --release`. Used by the existing `.github/workflows/mutation.yml` weekly job.
+
+    **What was already done (named differently, no new file needed):**
+
+    - `.github/workflows/nightly.yml` slot — covered by `stress-nightly.yml` (DEC-STRESS-001 entry #208) + `redteam-nightly.yml` + `dep-freshness-nightly.yml`. Three nightly workflows split by concern beats one mega-workflow.
+    - `.github/workflows/weekly.yml` slot — covered by `mutation.yml` (the canonical weekly job per CLAUDE.md §4 mutation-score guarantee).
+
+    **Honest envelope:**
+
+    - ✅ REAL: 3 new scaffolding artifacts land on disk (CSV + fuzz dir README + cargo-mutants config).
+    - ✅ REAL: The 4th and 5th Phase 1 Week 2 spec items (nightly.yml + weekly.yml) are already covered by sibling workflows that landed in prior decisions; no duplicate workflows land.
+    - 🟡 PARTIAL: 5-row truth table is the spec's "Phase 1 Week 1 skeleton with 5 example rows"; Phase 2 expands to ≥ 200 rows.
+    - 🟡 PARTIAL: `rust/fno-math/fuzz/` has only a README — the actual fuzz harness lands when the first Phase 2 target activates.
+    - 📋 ROADMAP: Phase 1 deliverables that AREN'T scaffolding (the actual hot-path implementations the scaffolding skeletons stand in for) continue to be tracked in the phase plan.
+
+    **What did NOT land in this PR:**
+
+    - The 200+ row truth table population (Phase 2 work — needs the 52-vocabulary engine + reference snippets).
+    - Each of the 7 cargo-fuzz targets (Phase 2 work — each target needs the corresponding Rust hot-path implementation in place first).
+    - Any new workflow files (existing nightly + weekly workflows cover the spec slots).
+
+    **Decision ID:** DEC-PHASE1-WEEK2-SCAFFOLDING-001. **Builds on:** DEC-PHASE1-SMOKE-AND-SKELETONS-001 (entry #251, the Phase 1 Week 1 follow-up) · DEC-PHASE1-INVARIANT-CATALOG-001 (entry #250, the original Phase 1 Week 1 deliverable) · DEC-STRESS-001 (entry #208, the nightly workflow precedent) · `docs/TRACK1_PHASE_PLAN.md §"Phase 1 Week 2"`. **Closes:** Phase 1 Week 2 row 1 (cargo-fuzz target list), row 2 (cargo-mutants config), row 3 (condition_truth_table.csv skeleton). Rows 4 + 5 (nightly + weekly workflows) already closed by sibling decisions.
+
 251. **DEC-PHASE1-SMOKE-AND-SKELETONS-001 — Phase 1 Week 1 scaffolding follow-up: smoke test + integration skeletons + golden fixtures directory** (2026-05-26 evening, operator directive: "go ahead with the plan" continuation after the 4-item recommendation closed via PRs #145, #146, #147). Lands the remaining Phase 1 Week 1 scaffolding artifacts the invariant-catalog PR (#147, entry #250) deferred for scope discipline.
 
     **What lands:**

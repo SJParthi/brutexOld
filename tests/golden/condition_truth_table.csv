@@ -1,0 +1,6 @@
+snippet_id,condition_name,bit_position,expected_bool,description
+SNIP-001,bar_bullish,30,true,"close > open on synthetic bar (open=24000, close=24050)"
+SNIP-001,bar_bearish,31,false,"close > open → bearish bit MUST not fire (mutually exclusive with bullish)"
+SNIP-002,close_above_ema20,0,true,"close=24100, ema20=24050 — close strictly above EMA20"
+SNIP-002,close_below_ema20,1,false,"close > ema20 → below-EMA20 bit MUST not fire"
+SNIP-003,early_morning,44,true,"timestamp 09:30 IST falls inside [09:16, 10:00) early-morning bucket"
