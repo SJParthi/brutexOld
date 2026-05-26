@@ -39,6 +39,7 @@ import threading
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
 from brutex.orchestrator.pipeline import (
@@ -624,7 +625,7 @@ def build_app(
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
         """GET / — inline HTML dashboard with embedded JS WebSocket client."""
-        return _render_index_html(instruments_enabled=instrument_store is not None)
+        return _render_index_html()
 
     # WebSocket handler — defined at module scope below to sidestep
     # the `from __future__ import annotations` closure-annotation
@@ -782,24 +783,52 @@ def _query_instruments(
     ]
 
 
-def _render_index_html(*, instruments_enabled: bool = False) -> str:
-    """Return the single-page dashboard HTML.
+_V29_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "v29.html"
+_V29_TEMPLATE_CACHE: str | None = None
 
-    Inline CSS + inline JS, zero build step. Connects to /ws, parses
-    JSON, updates the DOM every 500ms. If WebSocket is unavailable,
-    falls back to polling /api/v1/state once per second.
 
-    When *instruments_enabled* is ``True``, also renders an
-    Instruments Browser panel that calls ``/api/v1/instruments/stats``
-    and ``/api/v1/instruments`` to show the FNO universe that Phase A
-    pulled. When ``False``, that panel stays hidden and the page only
-    shows the live pipeline progress.
+def _load_v29_template() -> str:
+    """Load the v29 dashboard template once and cache.
+
+    The polished v29 design (per DEC-DASHBOARD-LIVE-FINALE) ships as a
+    package-relative resource at ``brutex/dashboard/templates/v29.html``.
+    Loaded once at first access, then served verbatim by ``GET /``.
+
+    The template embeds its own JS poller that fetches
+    ``/api/v1/state`` every 2 seconds and updates every element with a
+    ``data-bind`` attribute. When the producer fields are ``None``
+    (engine not yet running), the poller leaves placeholder values
+    intact — operator sees the polished design with mockup numbers
+    until real data starts flowing.
+
+    Returns:
+        The full v29 HTML+CSS+JS as a single string.
     """
-    instruments_block = _INSTRUMENTS_HTML_BLOCK if instruments_enabled else ""
-    instruments_js = _INSTRUMENTS_JS_BLOCK if instruments_enabled else ""
-    return _INDEX_HTML_TEMPLATE.replace("<!--INSTRUMENTS_BLOCK-->", instruments_block).replace(
-        "/*INSTRUMENTS_JS*/", instruments_js
-    )
+    global _V29_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module-level cache
+    if _V29_TEMPLATE_CACHE is None:
+        _V29_TEMPLATE_CACHE = _V29_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _V29_TEMPLATE_CACHE
+
+
+def _render_index_html() -> str:
+    """Return the polished v29 dashboard HTML (per DEC-DASHBOARD-LIVE-FINALE).
+
+    The v29 mockup is the locked design spec from DEC-DASHBOARD-LIVE-FINALE
+    (MIGRATION.md entry #234). It has all 13 ``SweepFunnelSnapshot`` fields
+    wired via ``data-bind`` attributes, plus a built-in JS poller that
+    fetches ``/api/v1/state`` every 2 seconds and updates every bound element.
+
+    The Instruments Browser panel (formerly conditionally injected by an
+    ``instruments_enabled`` switch) remains available as a separate concern
+    via the ``/api/v1/instruments`` REST endpoint.
+
+    Returns:
+        The v29 HTML+CSS+JS template (~214 KB) ready for FastAPI
+        ``HTMLResponse``. The template renders identically whether
+        the data producer (Phase 3 engine) is online or not — placeholder
+        mockup values stay visible until the poller receives real data.
+    """
+    return _load_v29_template()
 
 
 _INSTRUMENTS_HTML_BLOCK = """\

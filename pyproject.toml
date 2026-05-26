@@ -76,6 +76,12 @@ build-backend = "setuptools.build_meta"
 include = ["brutex*"]
 exclude = ["tests*"]
 
+# DEC-DASHBOARD-LIVE-FINALE: ship the v29 dashboard template
+# (brutex/dashboard/templates/v29.html) inside the installed wheel so
+# `_load_v29_template()` can read it from package-relative path.
+[tool.setuptools.package-data]
+"brutex.dashboard" = ["templates/*.html"]
+
 # ────────────────────────────────────────────────────────────────────────
 # Tooling config — every gate required by REQUIREMENTS.md §17 is wired here
 # ────────────────────────────────────────────────────────────────────────
