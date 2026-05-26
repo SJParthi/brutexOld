@@ -7,16 +7,19 @@
 > Rule #1 (no hallucination) and Golden Rule #10 (honest envelope), nothing
 > here is rounded up.
 >
-> **Last refresh:** 2026-05-26 afternoon, after `DEC-VENDOR-PIVOT-001`
-> closed out: the Dhan adapter is wiped (PR #135–#138), the Groww
-> reference docs are locked (PR #139), the Phase 0b probe script
-> landed (PR #140, commit `1058b57`), and the v29 dashboard +
-> universe-discovery script landed (PR #141, commit `906df19`). The
-> prior refresh point was 2026-05-25 evening after `DEC-COMBO-HASH-UNIQUENESS-001`
-> (commit `2d2cf2a`) closed gap #6 of the 6 solo-closable post-audit
-> gaps. **No new gates were added on 2026-05-26** — the headline
-> metrics below carry over unchanged; what shifted is which decision
-> sits behind each row.
+> **Last refresh:** 2026-05-26 evening — second-pass reconciliation
+> (DEC-AUDIT-TRUTH-RECONCILE-001, MIGRATION entry #248). Four §9 gap
+> rows that were still labeled 🔴 HIGH / 🟡 MID as `unimplemented` /
+> `missing module` are reclassified 🟢 CLOSED: Watchdog (entry #240),
+> SLA detector (entry #239), L3 replay oracle (entry #241), SessionStart
+> hook (entry #237). All four landed via DEC-INFRA-OPS-001 (entry #244)
+> + companion decisions but the audit text wasn't refreshed at the
+> time. §0 "per-scope" metric ratchets 3.5/6 → 4.5/6 and §0 5-pillar
+> AUTOMATED row ratchets ❌ → 🟡 to reflect this. **No new code or
+> tests landed in this refresh — it is pure audit truth-up.** The
+> earlier 2026-05-26 afternoon refresh recorded the DEC-VENDOR-PIVOT-001
+> cascade (PRs #135–#141); the 2026-05-25 evening refresh recorded
+> `DEC-COMBO-HASH-UNIQUENESS-001` (commit `2d2cf2a`).
 
 ---
 
@@ -30,10 +33,10 @@ would violate Golden Rule #1. The codebase itself documents the gap.
 | **STANDARDS rows fully CI-blocking** | 15 / 21 (71%) | 21 / 21 | 4 partial + 3 manual rows |
 | **Z+ defensive layers mechanically enforced** | 5 / 7 | 7 / 7 | RECOVER + COOLDOWN remain manual |
 | **Z+ 6-marker PR-body guard** | ✅ FAIL-CLOSED | — | Marker PRESENCE checked; CONTENT quality is reviewer |
-| **5-pillar decree fully evidenced in code** | 2 / 5 | 5 / 5 | COMMON 🟡, SCALABLE 🟡, AUTOMATED ❌ aspirational |
+| **5-pillar decree fully evidenced in code** | 2 / 5 | 5 / 5 | COMMON 🟡, SCALABLE 🟡, AUTOMATED 🟡 (was ❌; ratcheted via DEC-INFRA-OPS-001) |
 | **14 bracket items fully enforced** | 8 / 14 | 14 / 14 | 4 partial + 2 manual |
 | **Real-time capabilities truly continuous** | 6 / 12 | — | 3 nightly + 1 batched + 2 not-wired |
-| **Per-scope auto enforcement** (PR/sub-PR/task/sub-task/cur-session/new-session) | 3.5 / 6 | 6 / 6 | Pre-commit install + session-start discipline gaps |
+| **Per-scope auto enforcement** (PR/sub-PR/task/sub-task/cur-session/new-session) | 4.5 / 6 | 6 / 6 | Pre-commit install discipline + branch-protection ROADMAP (was 3.5/6 pre-DEC-SESSION-START-HOOK-001) |
 
 **One-sentence verdict:** ~70% of the decreed defense surface is mechanically
 enforced on every PR today. The remaining 30% is partial, manual, or stub.
@@ -50,12 +53,13 @@ Every gap is tracked in `docs/MIGRATION.md` with a decision ID.
 | **Per task (git commit)** | Pre-commit hooks | 13 fast gates: ruff fix/format, mypy strict, cargo fmt/clippy, gitleaks, banned patterns, conventional commits | One-time `pre-commit install` required; can be bypassed with `--no-verify` (forbidden by CLAUDE.md §3 without operator instruction) | `.pre-commit-config.yaml:1-99` |
 | **Per sub-task (mid-edit save)** | PostToolUse hook | `ruff check --fix` auto-runs on every Python file Write/Edit | YAML/JSON/Markdown saves have NO post-edit check; ruff is fix-only, not test/coverage | `.claude/settings.json:60-70` |
 | **Per current session** | Harness auto-load | `CLAUDE.md` auto-loaded (12 Golden Rules + 18-requirement decree), `.claude/settings.json` env+permissions+hooks active, PreToolUse blocks direct edits on `main` | Reading `TRACK1_BACKTEST_SPEC.md` + `MIGRATION.md` recent decisions = Claude discipline, not a hook | `CLAUDE.md:1-149`, `.claude/settings.json:48-82` |
-| **Per new session** | Fresh harness init | Same as current session | **No SessionStart hook today** — gap #5 of the 6-gap ratchet. Pre-commit install state does NOT persist across containers. | Same as above; no SessionStart in `.claude/settings.json` |
+| **Per new session** | Fresh harness init | Same as current session **PLUS** `.claude/hooks/session-start.sh` prints branch + last 5 MIGRATION decisions + audit-doc freshness + venv/fno_math presence + Z+ 6-marker reminder to stderr on every session start (DEC-SESSION-START-HOOK-001, MIGRATION entry #237) | Pre-commit install state does NOT persist across containers (operator must `pre-commit install` once per fresh checkout). | `.claude/hooks/session-start.sh`, `.claude/settings.json::hooks.SessionStart` |
 
-**Verdict:** 3.5 of 6 scopes have full automatic enforcement; 2.5 rely
-significantly on discipline. The critical gap is **server-side branch
-protection** (still 📋 ROADMAP per the setup runbook); without it, a single
-discipline lapse could let a red PR merge.
+**Verdict:** 4.5 of 6 scopes have full automatic enforcement; 1.5 rely
+significantly on discipline (was 3.5/6 pre-DEC-SESSION-START-HOOK-001). The
+remaining critical gap is **server-side branch protection** (still 📋 ROADMAP
+per the setup runbook); without it, a single discipline lapse could let a
+red PR merge.
 
 ---
 
@@ -256,7 +260,7 @@ Scope auto enforcement:   [████████████░░░░░�
 | **O(1) ratio gate** | Speedometer alarm: 60 km/h with 1 passenger should be 60 km/h with 5 passengers; slows → engine sick |
 | **Bloom + LMDB dedup** | Bouncer at door (fast "probably new") → check ID at desk (slow but certain) |
 | **Telegram alerts (PARTIAL)** | Fire alarm installed, speakers tested, **smoke sensors (SLA + Watchdog + Replay) wired and verified end-to-end (DEC-TELEGRAM-WIRING-VERIFICATION-001); pipeline-event sensor still on the bench waiting for Phase 2** |
-| **Watchdog (MISSING)** | No dead-man's switch on the train; driver passes out → nothing stops the train |
+| **Watchdog (WIRED)** | Dead-man's switch installed on the train: `brutex.observability.watchdog.Watchdog` (DEC-WATCHDOG-001, MIGRATION entry #240) wakes on `make_heartbeat_subscriber` beats, fires Telegram on `on_hung` callback when no beat for `BRUTEX_WATCHDOG_TIMEOUT_SECONDS` (default 300s) |
 | **Mutation testing** | Pranking the codebase by mutating one operator at a time; if no test catches the prank, you have a coverage hole |
 | **Property tests (Hypothesis)** | A million random inputs probe corner cases your unit tests forgot |
 
@@ -269,13 +273,13 @@ Listed by severity. Every one has a tracked PR path.
 | Severity | Gap | Why I can't 100%-guarantee | Closure path |
 |---|---|---|---|
 | 🟡 MID | Telegram alerts: SLA/Watchdog/Replay wired, pipeline path dormant | `compose_standard_monitor` (PR #131) wires SLA + Watchdog + Replay callbacks → `_publish_telegram` → `notifier.publish` (PR #133 added `cmd_monitor` to drive it). End-to-end chain verified by `tests/integration/test_compose_monitor_sla_to_telegram.py` (DEC-TELEGRAM-WIRING-VERIFICATION-001). `make_pipeline_event_subscriber` exists but is dormant — `PhaseRunner` has zero production callers until Phase 2 drivers land. | Pipeline subscriber activates automatically when Phase 2 drivers instantiate `PhaseRunner` with the subscriber list. |
-| 🔴 HIGH | Watchdog missing | No module exists | Gap #2 ratchet PR (~400 LoC) |
-| 🔴 HIGH | SLA breach alerting missing | No detector | Gap #3 ratchet PR (~250 LoC) |
+| 🟢 CLOSED | Watchdog implemented + wired | `brutex/observability/watchdog.py::Watchdog` (DEC-WATCHDOG-001, MIGRATION entry #240) + `make_heartbeat_subscriber` for `PhaseRunner` integration + `on_hung` Telegram routing in `compose_standard_monitor`. Module is 25-test 100%-coverage and runs under `brutex monitor`. | Activates on first Phase 2 worker that subscribes via `make_heartbeat_subscriber`. |
+| 🟢 CLOSED | SLA breach alerting implemented + wired | `brutex/observability/sla.py::SLADetector` (DEC-SLA-DETECTOR-001, MIGRATION entry #239) with state-machine NORMAL ↔ BREACHED transitions + `on_breach` / `on_recovery` callbacks. Telegram path verified end-to-end by `tests/integration/test_compose_monitor_sla_to_telegram.py` (DEC-TELEGRAM-WIRING-VERIFICATION-001). | Operator declares rules via `MonitorConfig(sla_rules=...)`; loop runs under `brutex monitor`. |
 | 🔴 HIGH | Server-side branch protection 📋 ROADMAP | Setup runbook §1-6 not completed by operator | Operator action (5 mins in GitHub UI) |
 | 🟡 MID | 12/13 dashboard fields still mock | Sweep producer not wired (needs Phase 3) | Phase 3 engine work |
-| 🟡 MID | L3 audit replay oracle unimplemented | Dedup correctness layer | Gap #4 ratchet PR (~300 LoC) |
+| 🟢 CLOSED | L3 audit replay oracle implemented | `brutex/orchestrator/replay.py::assert_dedup_consistent` (DEC-L3-REPLAY-ORACLE-001, MIGRATION entry #241) re-projects the audit log + verifies the LMDB dedup set is consistent with the replayed subjects. Wired into `MonitorLoop` via `_make_replay_check` in `compose_standard_monitor`. Optional opt-in via `BRUTEX_LIVE_SUBJECTS_FILE` env var. | Operator sets the live-subjects file path to enable continuous L3 verification. |
 | 🟡 MID | 6 of 21 STANDARDS rows partial/manual | Coverage strict-100% × 2, throughput absolute, content-quality marker, regression-test quality, citation correctness | Multi-PR ratchet over coming sessions |
-| 🟡 MID | SessionStart hook missing | New Claude sessions rely on discipline | Gap #5 ratchet PR (~50 LoC) |
+| 🟢 CLOSED | SessionStart hook implemented | `.claude/hooks/session-start.sh` (DEC-SESSION-START-HOOK-001, MIGRATION entry #237) wired via `.claude/settings.json::hooks.SessionStart`. Prints branch / last 5 MIGRATION DEC-IDs / docs freshness / venv + fno_math presence / Z+ 6-marker reminder to stderr on every session start. | Operator sees the same context on every session — zero discipline burden. |
 | 🟢 LOW | Per-PR "review quality" not measurable | Marker presence ≠ matrix depth | Manual reviewer judgement always |
 
 ---
