@@ -399,3 +399,64 @@ class TestMarkToMarket:
         point = sim.equity_curve[-1]
         assert point.positions_value == Decimal("110")
         assert point.total_equity == point.cash + point.positions_value
+
+
+# \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+# Coverage backfill \u2014 lines 229-230, 240, 247, 312, 342
+# \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+
+class TestCoverageBackfill:
+    """Cover the remaining branches that close 93.67\u2192100% per
+    DEC-COV-BACKFILL-004 (MIGRATION entry #260)."""
+
+    # NOTE: Line 247 (`raise InvalidLotSizeError(f"order qty must be
+    # positive...")`) is structurally unreachable from public API:
+    # ExecutionSimulator.__init__ rejects `default_qty <= 0` at line
+    # 120-121 (ValueError), and the only caller `execute()` uses
+    # `self._default_qty` (already validated > 0). Source-level
+    # `# pragma: no cover` documents this; defensive code kept in
+    # place for future-proofing.
+
+    def test_mark_zero_qty_position_zeros_unrealized(self, idx_meta: InstrumentMeta) -> None:
+        """Cover lines 229-230 + 342: mark_to_market on a position that
+        was opened then fully closed (qty == 0) sets last_mark_price
+        and zeros unrealized_pnl. The _compute_positions_value loop
+        also continues past the zero-qty entry (line 342)."""
+        sim = _make_sim(idx_meta, cash=Decimal("10000"), slippage_bps=Decimal("0"))
+        # Open
+        sim.execute(_signal(Side.BUY), _bar(100))
+        # Fully close \u2014 partial close where signed_delta exactly cancels
+        sim.execute(_signal(Side.SELL), _bar(110))
+        pos = sim.positions["NSE-NIFTY"]
+        assert pos.qty == 0
+        # Now mark on the zero-qty position (covers 229-230)
+        sim.mark_to_market(
+            symbol="NSE-NIFTY",
+            price=Decimal("120"),
+            timestamp=datetime(2024, 1, 2, 9, 17, tzinfo=UTC),
+        )
+        assert pos.last_mark_price == Decimal("120")
+        assert pos.unrealized_pnl == Decimal("0")
+        # And the positions_value summing loop skipped this zero-qty
+        # entry (covers line 342). Last equity point's positions_value
+        # should be zero.
+        assert sim.equity_curve[-1].positions_value == Decimal("0")
+
+    def test_snapshot_returns_equity_point(self, idx_meta: InstrumentMeta) -> None:
+        """Cover line 240: ``snapshot()`` delegates to ``_snapshot_equity``
+        and returns the appended EquityPoint."""
+        sim = _make_sim(idx_meta, cash=Decimal("10000"))
+        ts = datetime(2024, 1, 2, 9, 15, tzinfo=UTC)
+        point = sim.snapshot(ts)
+        assert point.timestamp == ts
+        assert point.cash == Decimal("10000")
+        assert point.positions_value == Decimal("0")
+        assert sim.equity_curve[-1] is point
+
+    # NOTE: Line 312 (`if pos.qty == 0: pos.avg_price = Decimal("0")`
+    # inside the partial-close branch) is structurally unreachable:
+    # the partial-close branch requires `|signed_delta| < |pos.qty|`
+    # (strict inequality), so after `pos.qty += signed_delta` the new
+    # qty cannot be zero. Source-level `# pragma: no branch` documents
+    # this; defensive code kept in place for future-proofing.

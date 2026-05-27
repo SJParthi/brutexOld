@@ -785,6 +785,28 @@ jobs:
           else
             echo "(brutex.config.runtime test file not present yet — gate inactive)"
           fi
+          # DEC-COV-BACKFILL-004 (entry #260, 2026-05-27): 1-module
+          # backfill — close execution/simulator gap via 2 source-level
+          # `# pragma: no cover — defensive` markers on structurally
+          # unreachable paths (line 247 + 312). Lifts strict-100% gate
+          # count 50 → 51.
+          # 23a · brutex.execution.simulator (114 stmts post-pragma, 36 branches,
+          #       25 tests). Closes 93.67→100% via 2 `# pragma: no cover
+          #       — defensive` markers:
+          #       - Line 247 (`if qty <= 0: raise InvalidLotSizeError`):
+          #         structurally unreachable from public API — __init__
+          #         validates default_qty > 0 at line 120-121; execute()
+          #         uses self._default_qty so qty <= 0 is impossible
+          #         without bypassing the constructor.
+          #       - Line 312 (`if pos.qty == 0: pos.avg_price = ...`)
+          #         inside the partial-close branch: unreachable because
+          #         partial close requires strict |signed_delta| < |pos.qty|,
+          #         so pos.qty cannot reach 0 after the += signed_delta.
+          if compgen -G "tests/unit/test_execution_simulator.py" > /dev/null; then
+            pytest --cov=brutex.execution.simulator --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_simulator.py
+          else
+            echo "(brutex.execution.simulator test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
