@@ -193,6 +193,24 @@ The 4 S-01..S-04 items were materially rewritten by **DEC-VENDOR-PIVOT-001** (20
 
 ### §10.5 Open items (not addressed in this addendum)
 
-C-02 · C-03 · C-06 · C-07 · C-08 · C-10 · C-12 · P-02 · P-03 · P-04 · P-05 · P-06 · P-07 · P-08 · G-01 · G-02 · G-03 · G-04 · G-05 · G-06 · G-08 · G-09 · G-10 · G-12 · G-13 · G-14 · G-15 — these remain as captured in §1–§3 (no closure decision recorded since 2026-05-18 review). Many are Phase 2+ engine-build work or operator-decision items in §6.
+C-02 · C-03 · C-06 · C-07 · C-08 · C-10 · P-02 · P-03 · P-04 · P-05 · P-06 · P-07 · P-08 · G-01 · G-02 · G-03 · G-04 · G-05 · G-06 · G-08 · G-09 · G-10 · G-12 · G-13 · G-14 · G-15 — these remain as captured in §1–§3 (no closure decision recorded since 2026-05-18 review). Many are Phase 2+ engine-build work or operator-decision items in §6. (**C-12 removed from this list 2026-05-27** — already RESOLVED per §10.1 row added in DEC-SPEC-CONSISTENCY-001 entry #263; bookkeeping fix.)
 
-**Decision ID:** DEC-REQS-FINAL-RECONCILE-001 (2026-05-27). **Builds on:** DEC-STANDARDS-AUDIT-001 (entry #205) · DEC-CROSSWALK-001 (#206) · DEC-PYLINT-DROP-001 (#207) · DEC-STRESS-001 (#208) · DEC-DOCTOR-001 (#209) · DEC-COV-001 (#210-#232) · DEC-COV-RATCHET-001 (#256) · DEC-COV-BACKFILL-001/002/003/004 (#257-#260) · DEC-COV-BACKFILL-LIMIT-001 (#261) · DEC-MODE-002 (entry #196) · DEC-P0-060 (#198) · DEC-COMBO-HASH-UNIQUENESS-001 · DEC-CALIBRATE-001 · DEC-VENDOR-PIVOT-001 (#246) · DEC-P0-063 (#200). **Closes:** the citation-staleness gap between TRACK1_REQUIREMENTS_FINAL.md's 2026-05-18 snapshot and the current state of the repo on 2026-05-27. **Does NOT close:** the open items listed in §10.5 — those remain genuine open work.
+### §10.6 Track 1 spec-consistency follow-up wave (2026-05-27)
+
+Per CLAUDE.md §3's tracked follow-up note ("Full §3 / cross-spec reconciliation across the ~15 remaining stale-text locations is a tracked follow-up PR"), a single-session ratchet wave landed 7 surgical amendments bringing locked Track 1 specs into alignment with DEC-P0-063 (entry #200) engine-vs-lake distinction + Option B coverage closure. **8 of CLAUDE.md §3's ~15 stale-text locations now reconciled.** Pattern: each PR amends a single spec section with a 1-paragraph "AMENDED 2026-05-22 per DEC-P0-063" note that mirrors locked text in CLAUDE.md §3 + MIGRATION entry #200 — no new claims; engine-vs-lake distinction made explicit; "what NOT to touch" inventory protects the engine description.
+
+| # | DEC-ID | MIGRATION entry | File:Section | Closes |
+|---|---|---|---|---|
+| 1 | DEC-SPEC-CONSISTENCY-001 | #263 | TRACK1_PHASE_PLAN.md:162 + TRACK1_BACKTEST_SPEC.md:718 + §10.1 C-12 row | 2 inline ingest-scope lines + C-12 citation gap |
+| 2 | DEC-SPEC-CONSISTENCY-002 | #264 | TRACK1_BACKTEST_SPEC.md §"Scope Lock" | Most prominent scope-statement in the spec |
+| 3 | DEC-SPEC-CONSISTENCY-003 | #265 | TRACK1_DATA_INGEST_DESIGN.md §1 "Scope" | Most prominent scope-statement in the ingest-design spec |
+| 4 | DEC-SPEC-CONSISTENCY-004 | #266 | TRACK1_RUNTIME_ARCHITECTURE.md §2 | Runtime-architecture pipeline section |
+| 5 | DEC-SPEC-CONSISTENCY-005 | #267 | TRACK1_PHASE_PLAN.md Phase 2 header | Phase-plan deliverable section |
+| 6 | DEC-SPEC-CONSISTENCY-006 | #268 | TRACK1_BACKTEST_SPEC.md §"Decision Ledger Linkage" #301 | Decision-ledger historical entry (additive, preserves audit trail) |
+| 7 | DEC-SPEC-CONSISTENCY-007 | #269 | TRACK1_PHASE_PLAN.md Week 2 coverage-gate row | Stale module count (33 → 51) + DEC-ID list update |
+
+**Closure pattern: 1-paragraph amendment + 1 MIGRATION entry + 8-decision builds-on chain per PR + 1-agent hostile self-review per runbook trigger matrix (`docs/runbooks/4-agent-review.md §3`).**
+
+**~7 stale-text locations still remain** per CLAUDE.md §3's "~15" estimate. Future PRs can address them with the same pattern, OR the operator can declare the wave's residual gap acceptable and move on to Option D / Phase 2 work.
+
+**Decision ID:** DEC-REQS-FINAL-RECONCILE-001 (2026-05-27, **extended 2026-05-27 with §10.6 wave summary + §10.5 C-12 bookkeeping fix**). **Builds on:** DEC-STANDARDS-AUDIT-001 (entry #205) · DEC-CROSSWALK-001 (#206) · DEC-PYLINT-DROP-001 (#207) · DEC-STRESS-001 (#208) · DEC-DOCTOR-001 (#209) · DEC-COV-001 (#210-#232) · DEC-COV-RATCHET-001 (#256) · DEC-COV-BACKFILL-001/002/003/004 (#257-#260) · DEC-COV-BACKFILL-LIMIT-001 (#261) · DEC-MODE-002 (entry #196) · DEC-P0-060 (#198) · DEC-COMBO-HASH-UNIQUENESS-001 · DEC-CALIBRATE-001 · DEC-VENDOR-PIVOT-001 (#246) · DEC-P0-063 (#200). **Closes:** the citation-staleness gap between TRACK1_REQUIREMENTS_FINAL.md's 2026-05-18 snapshot and the current state of the repo on 2026-05-27. **Does NOT close:** the open items listed in §10.5 — those remain genuine open work.
