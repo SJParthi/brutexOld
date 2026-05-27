@@ -678,6 +678,46 @@ jobs:
           # fastbloom_rs which can only be initialized once per interpreter
           # process. Module IS covered at 100% line + branch by the global
           # --cov=brutex step; standalone strict gate is a follow-up.
+          # DEC-COV-BACKFILL-001 (entry #257, 2026-05-27): 3-module
+          # backfill ratchet — modules previously 95-99% pushed to 100%
+          # via surgical test additions + 1 dead-code removal + 1 defensive
+          # pragma. Lifts strict-100% gate count 42 → 45.
+          # 20a · brutex.observability.metrics (97 stmts, 28 branches, 30 tests)
+          #       Closes 95.20→100% by adding 4 surgical tests in
+          #       TestPrometheusExporter for: empty gauge → "<name> 0"
+          #       line (line 407); histogram with +inf observation (line 463
+          #       positive branch); histogram with -inf observation (line 463
+          #       negative branch); histogram with NaN observation (line 465).
+          if compgen -G "tests/unit/test_observability_metrics.py" > /dev/null; then
+            pytest --cov=brutex.observability.metrics --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_metrics.py
+          else
+            echo "(brutex.observability.metrics test file not present yet — gate inactive)"
+          fi
+          # 20b · brutex.feed.resampler (49 stmts, 20 branches; covered by
+          #       test_strategies_library.py via TestResamplerEdgeCases)
+          #       Closes 98.55→100% by adding `# pragma: no branch — defensive`
+          #       to the post-loop `if bucket:` guard at line 166. That branch
+          #       is provably unreachable: line 143-144 early-returns on empty
+          #       input, and the loop always appends to bucket. Pragma is the
+          #       honest mark — code remains defensive in case the guard at
+          #       143-144 is removed in the future.
+          if compgen -G "tests/unit/test_feed_resampler.py" > /dev/null; then
+            pytest --cov=brutex.feed.resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feed_resampler.py
+          else
+            echo "(brutex.feed.resampler test file not present yet — gate inactive)"
+          fi
+          # 20c · brutex.strategies.library.donchian_breakout (44 stmts,
+          #       10 branches; same test file as 19l/19m/19n). Closes
+          #       98.25→100% by deleting the unused `_bar_close_decimal`
+          #       helper (was dead code per `grep _bar_close_decimal
+          #       brutex/strategies/library/donchian_breakout.py` returning
+          #       only the definition; never called). Also removed the
+          #       now-unused `from decimal import Decimal` import.
+          if compgen -G "tests/unit/test_strategies_library.py" > /dev/null; then
+            pytest --cov=brutex.strategies.library.donchian_breakout --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_library.py
+          else
+            echo "(brutex.strategies.library.donchian_breakout test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML

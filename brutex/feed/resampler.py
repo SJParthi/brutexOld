@@ -163,7 +163,7 @@ def resample_bars(
         else:
             bucket.append(bar)
 
-    if bucket:
+    if bucket:  # pragma: no branch — defensive; line 143-144 guarantees non-empty bucket after loop
         out.append(_aggregate(bucket, current_bucket_start))
 
     return out

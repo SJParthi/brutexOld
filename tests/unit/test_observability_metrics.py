@@ -207,6 +207,38 @@ class TestPrometheusExporter:
         # Expect backslash-escaped quotes
         assert 'x_total{msg="hello \\"world\\""} 1' in out
 
+    def test_empty_gauge_renders_zero(self) -> None:
+        """Cover line 407: gauge with no set values emits ``<name> 0``."""
+        r = MetricRegistry()
+        r.gauge("g_empty", "empty gauge")
+        out = render_prometheus(r)
+        assert "# TYPE g_empty gauge" in out
+        assert "g_empty 0" in out
+
+    def test_histogram_value_positive_infinity(self) -> None:
+        """Cover line 463 (positive branch): observe value rendering ``+Inf``."""
+        r = MetricRegistry()
+        r.histogram("h_inf", "h", buckets=(1.0, math.inf))
+        r.observe("h_inf", math.inf)
+        out = render_prometheus(r)
+        assert "h_inf_sum +Inf" in out
+
+    def test_histogram_value_negative_infinity(self) -> None:
+        """Cover line 463 (negative branch): observe negative-inf rendering ``-Inf``."""
+        r = MetricRegistry()
+        r.histogram("h_ninf", "h", buckets=(1.0, math.inf))
+        r.observe("h_ninf", -math.inf)
+        out = render_prometheus(r)
+        assert "h_ninf_sum -Inf" in out
+
+    def test_histogram_value_nan(self) -> None:
+        """Cover line 465: observe NaN value rendering ``NaN``."""
+        r = MetricRegistry()
+        r.histogram("h_nan", "h", buckets=(1.0, math.inf))
+        r.observe("h_nan", math.nan)
+        out = render_prometheus(r)
+        assert "h_nan_sum NaN" in out
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Global registry
