@@ -63,7 +63,7 @@ ALL_TF_MINUTES: Final[tuple[int, ...]] = (
     INTRADAY_MINUTE_TFS + INTRADAY_MULTIMINUTE_TFS + (DAILY_TF_MINUTES,)
 )
 
-if len(ALL_TF_MINUTES) != EXPECTED_TF_COUNT:
+if len(ALL_TF_MINUTES) != EXPECTED_TF_COUNT:  # pragma: no cover — defensive module-load assertion
     raise AssertionError(
         f"Expected {EXPECTED_TF_COUNT} timeframes per spec, got {len(ALL_TF_MINUTES)}"
     )
@@ -94,7 +94,9 @@ TF_LABELS: Final[dict[int, str]] = {
     375: "1d",
 }
 
-if set(TF_LABELS.keys()) != set(ALL_TF_MINUTES):
+if set(TF_LABELS.keys()) != set(
+    ALL_TF_MINUTES
+):  # pragma: no cover — defensive module-load assertion
     raise AssertionError("TF_LABELS keys must match ALL_TF_MINUTES exactly")
 
 

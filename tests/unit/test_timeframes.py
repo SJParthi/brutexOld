@@ -85,6 +85,11 @@ class TestIsIntraday:
     def test_daily_is_not_intraday(self) -> None:
         assert not is_intraday(375)
 
+    def test_unsupported_tf_raises(self) -> None:
+        """Cover line 140: unsupported TF raises ValueError."""
+        with pytest.raises(ValueError, match="Unsupported timeframe"):
+            is_intraday(17)  # 17 is not in TF_LABELS
+
 
 class TestIsMultiple:
     @pytest.mark.parametrize(
