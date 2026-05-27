@@ -335,6 +335,51 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+273. **DEC-G13-RESOLUTION-001 — TRACK1_REQUIREMENTS_FINAL.md §10.3 G-13 (half-day session list) added as RESOLVED-with-honest-envelope row + §10.5 bookkeeping (11th-of-~15 stale-text locations effectively reconciled)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — eleventh iteration of Track-1-only docs ratchet wave). The G-13 gap cited stale evidence: "`SessionType.HALF_DAY` enum exists, no date list". Verified-current code at `brutex/calendars/nse.py:485-497` shows an **explicit honest envelope block** documenting that no qualifying half-day sessions exist in the 2021-2026 window (post-2010 NSE trading-hours unification removed pre-festival half-days; Muhurat ~1hr is the only short session and is handled by `MUHURAT_SESSIONS` separately; Budget-Day Saturday sessions like 2025-02-01 are NOT half-day — regular 09:15-15:30 hours apply).
+
+    **What this fixes:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.3` — added G-13 RESOLVED-with-honest-envelope row with full verification chain:
+      - Cited evidence: stale "`SessionType.HALF_DAY` enum exists, no date list"
+      - Current code: `brutex/calendars/nse.py:485-497` explicitly documents the zero-qualifying-event status
+      - Closing reasoning: Per Golden Rule #10 honest envelope, this is correctly documented as a zero-qualifying-event window rather than a missing list
+      - Muhurat sessions handled separately by `MUHURAT_SESSIONS`
+      - Forward-compat: `SessionType.HALF_DAY` enum kept for future use
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.5` — removed G-13 from open-items list with explicit bookkeeping note.
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No edits to `brutex/calendars/nse.py` (already correct + has honest envelope).
+    - No new code, tests, or workflows.
+    - No edits to §1–§4 of TRACK1_REQUIREMENTS_FINAL.md (preserves 2026-05-18 review snapshot).
+    - No edits to §10.6 wave summary (preserved exactly).
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.3` — new G-13 RESOLVED row.
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.5` — 1-line bookkeeping update (remove G-13).
+    - `docs/MIGRATION.md` — this entry #273.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: code state at `brutex/calendars/nse.py:485-497` verified via grep — explicit "NSE does NOT run pre-festival 'half-day' sessions in modern era" + Muhurat handled separately + forward-compat enum kept.
+    - ✅ REAL: G-13 resolution is "no list because no qualifying events" — explicitly documented in code, not silently missing.
+    - 🟡 PARTIAL: 11 of ~15 stale-text locations effectively reconciled (running total: 7 spec amendments via the wave + C-12 + C-08 + §10.6 wave-summary + G-13 = 11).
+    - 📋 ROADMAP: ~4 more stale-text locations remain.
+
+    **What did NOT land in this PR:**
+
+    - No edits to `brutex/calendars/nse.py` (already correct).
+    - No edits to §1–§4 tables.
+    - No new spec amendments.
+
+    **4-agent hostile review:** Pure-docs §10 addendum extension (G-13 RESOLVED row + §10.5 bookkeeping). Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) the G-13 RESOLVED row accurately reflects the current `brutex/calendars/nse.py:485-497` honest envelope; (2) the "no list because no qualifying events" reasoning is explicit in code (not silent); (3) Muhurat sessions handled separately by `MUHURAT_SESSIONS`; (4) forward-compat `SessionType.HALF_DAY` enum kept; (5) the §10.5 bookkeeping removes G-13 cleanly.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-G13-RESOLUTION-001. **Builds on:** DEC-P0-070 (entry #272, the retroactive ledger entry that taught the validator pattern) · DEC-C08-RESOLUTION-001 (entry #271, sibling §10 RESOLVED-via-code-verification pattern) · DEC-SPEC-CONSISTENCY-WAVE-SUMMARY-001 (entry #270) · DEC-REQS-FINAL-RECONCILE-001 (entry #262) · `brutex/calendars/nse.py:485-497` (the honest envelope) · CLAUDE.md §3. **Closes:** G-13 stale-evidence citation gap; §10.5 bookkeeping. **Does NOT close:** the remaining ~4 stale-text locations.
+
 272. **DEC-P0-070 — RETROACTIVE LEDGER ENTRY: Dashboard default bind locked to `127.0.0.1` (was `0.0.0.0`)** (operator directive 2026-05-23 via Q-06 of the 12-decision lock at MIGRATION.md entry near #189; code change shipped 2026-05-23 in `brutex/config/ports.py` but the ledger entry was never written — retroactively written 2026-05-27 as 📋 ROADMAP follow-up flagged in DEC-C08-RESOLUTION-001 entry #271). Honest envelope: this entry is **retroactive** — the code change predates this ledger entry by 4 days; the operator's Q-06 of the 12-decision lock IS the upstream authority and the code comment at `brutex/config/ports.py:55-62` carries the DEC-P0-070 label. This retroactive entry closes the ledger gap and unblocks the DEC-ID validator on PR #168 + future PRs that cite DEC-P0-070.
 
     **The decision (verbatim from Q-06):** "Dashboard default bind = **127.0.0.1** (match docs); 0.0.0.0 only with explicit auth-required flag."
