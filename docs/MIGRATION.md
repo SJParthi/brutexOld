@@ -335,6 +335,45 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+267. **DEC-SPEC-CONSISTENCY-005 — TRACK1_PHASE_PLAN.md Phase 2 header amended with DEC-P0-063 engine-vs-lake note (6th-of-~15 stale-text locations reconciled)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — sixth iteration of Track-1-only docs ratchet wave). The Phase 2 header "Phase 2 — Groww Adapter + Spot-Index Ingest + Vocabulary (3-4 weeks)" predates DEC-P0-063 entry #200 — describes Phase 2 INGEST scope as "Spot-Index" only with no acknowledgement of the 200-stock LAKE expansion.
+
+    **What this fixes:**
+
+    - `docs/TRACK1_PHASE_PLAN.md` Phase 2 section header — added a 1-paragraph "AMENDED 2026-05-22 per DEC-P0-063" note immediately after the header explicitly stating that the "Spot-Index Ingest" scope below describes the **core 4-instrument surface**, while the LAKE expansion uses the **same Groww adapter primitives** for both surfaces (per COMMON · DYNAMIC · SCALABLE rules in CLAUDE.md §11). Phase 2's Week 4-7 deliverables are NOT re-scoped — the deliverable table is the 4-instrument core, and the 200-stock universe joins on the same code path.
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No edits to Week 4-7 deliverable tables (those describe the 4-instrument core and stay UNCHANGED).
+    - No edits to securityId references (Phase 0b verification pending per CLAUDE.md §6 — separate decision).
+    - No edits to any other phase in TRACK1_PHASE_PLAN.md (Phase 0, 0b, 1, 3, 4 unchanged).
+    - No edits to any other TRACK1_*.md file.
+    - No new code, tests, or workflows.
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_PHASE_PLAN.md` Phase 2 — 1-paragraph amendment note (~6 lines).
+    - `docs/MIGRATION.md` — this entry #267.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: every claim mirrors locked text in CLAUDE.md §3 + MIGRATION entry #200 + DEC-SPEC-CONSISTENCY-002/003/004 (entries #264/265/266); no new factual claims introduced.
+    - ✅ REAL: Week 4-7 deliverable tables explicitly preserved as the 4-instrument core; 200-stock LAKE expansion uses same code path (no new work added).
+    - 🟡 PARTIAL: 6 of CLAUDE.md §3's "~15 remaining stale-text locations" now reconciled (running total: §1 DATA_INGEST + §"Scope Lock" + 2 inline ingest lines + RUNTIME §2 + PHASE_PLAN Phase 2 = 6).
+    - 📋 ROADMAP: ~9 more stale-text locations remain.
+
+    **What did NOT land in this PR:**
+
+    - No edits to TRACK1_VOCABULARY.md, TRACK1_PERFORMANCE_BUDGET.md, TRACK1_MICROSTRUCTURE.md, TRACK1_VERIFICATION_PYRAMID.md, TRACK1_DASHBOARD_DESIGN.md, TRACK1_GROWW_ADAPTER.md, TRACK1_OPTIMIZATIONS.md.
+    - No edits to other phases in TRACK1_PHASE_PLAN.md.
+    - No edits to securityId values.
+
+    **4-agent hostile review:** Pure-docs 1-paragraph amendment that mirrors locked text in CLAUDE.md §3 + MIGRATION entry #200 + sibling DEC-SPEC-CONSISTENCY entries. Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) the amendment note is a faithful mirror of locked text; (2) the Week 4-7 deliverable tables are preserved exactly; (3) the engine-vs-lake distinction is explicit; (4) cross-references to sibling DEC-SPEC-CONSISTENCY entries (#264/265/266) resolve; (5) no new external claims about Groww/NSE/options markets introduced.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-SPEC-CONSISTENCY-005. **Builds on:** DEC-SPEC-CONSISTENCY-004 (entry #266, sibling RUNTIME §2 amendment) · DEC-SPEC-CONSISTENCY-003 (entry #265, sibling DATA_INGEST §1 amendment) · DEC-SPEC-CONSISTENCY-002 (entry #264, BACKTEST_SPEC §"Scope Lock" amendment) · DEC-SPEC-CONSISTENCY-001 (entry #263) · DEC-REQS-FINAL-RECONCILE-001 (entry #262) · DEC-P0-063 (entry #200) · DEC-P0-029 · CLAUDE.md §3. **Closes:** TRACK1_PHASE_PLAN.md Phase 2 header — the phase-plan deliverable section — now reflects DEC-P0-063. **Does NOT close:** the other ~9 stale-text locations across remaining TRACK1_*.md files.
+
 266. **DEC-SPEC-CONSISTENCY-004 — TRACK1_RUNTIME_ARCHITECTURE.md §2 amended with DEC-P0-063 engine-vs-lake note (5th-of-~15 stale-text locations reconciled)** (operator directive 2026-05-27 "once again lust ne the track 1 dude okay?" — fifth iteration of the Track-1-only docs ratchet wave). The §2 "The 4 Instruments × 21 Timeframes — End-to-End Pipeline" section was locked 2026-05-15 evening (before DEC-P0-063 entry #200 from 2026-05-22) — describes the core 4-instrument pipeline diagram but with no acknowledgement of the LAKE expansion to 200 stocks (spot + options).
 
     **What this fixes:**
