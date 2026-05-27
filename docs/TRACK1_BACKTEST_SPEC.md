@@ -39,15 +39,22 @@ space, which would be ~15 TB raw at 200 bytes/trial.
 **Timeline expectation: 16 weeks of phased build.** Do not attempt the
 full sweep until Phase 9.5 pilot passes.
 
-## Scope Lock (Confirmed 2026-05-16)
+## Scope Lock (Confirmed 2026-05-16; **AMENDED 2026-05-22 per DEC-P0-063**)
 
-- **In scope:** Spot indices only (NIFTY 50, BANKNIFTY, SENSEX) +
+- **BRUTE-FORCE ENGINE — in scope (UNCHANGED since 2026-05-16):** Spot indices only (NIFTY 50, BANKNIFTY, SENSEX) +
   India VIX (reference-only). Signal research → top-10 candidates →
   handed off to Track 2 for options-priced realism.
-- **NOT in scope:** Futures execution (futures lack daily volume on
-  these indices — operator decision 2026-05-16). Options costs
+- **LAKE / INGEST — expanded scope (DEC-P0-063, 2026-05-22, MIGRATION.md entry #200):**
+  additionally covers **200 NSE F&O eligible single stocks (spot + options across all 4 Groww `expiryCodes`)**.
+  The 200 stocks join India VIX in `REFERENCE_ONLY` (mirrors decision #83 pattern). Stock options sit in the lake
+  ready for future brute-force expansion (separate decision; not authorized here).
+- **NOT in scope:** Futures execution on the indices (futures lack daily volume on
+  these indices — operator decision 2026-05-16). Options costs in Track 1
   (handled by Track 2). Live order placement (out of scope for both
   tracks).
+- **Engine-vs-lake distinction:** wording like "4 index instruments / no F&O contracts" elsewhere in this spec
+  describes the BRUTE-FORCE ENGINE; the LAKE is the expanded surface per DEC-P0-063. See CLAUDE.md §3 +
+  MIGRATION.md entry #200 for the locked decision.
 
 ## ⭐ Operating Principle: COMMON · DYNAMIC · SCALABLE · AUTOMATED (NON-NEGOTIABLE, LOCKED 2026-05-16)
 

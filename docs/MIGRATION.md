@@ -335,6 +335,49 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+264. **DEC-SPEC-CONSISTENCY-002 — TRACK1_BACKTEST_SPEC.md §"Scope Lock" amended to reflect DEC-P0-063 LAKE expansion (engine-vs-lake distinction made explicit at the source of authority)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — Option B post-merge follow-through, third iteration). The §"Scope Lock" section was locked 2026-05-16 (before DEC-P0-063 entry #200 from 2026-05-22) — it described scope as "Spot indices only (NIFTY 50, BANKNIFTY, SENSEX) + India VIX (reference-only)" with no acknowledgement of the LAKE expansion. CLAUDE.md §3 already encodes the engine-vs-lake distinction; this PR brings the spec's most prominent scope-statement into alignment.
+
+    **What this fixes:**
+
+    - `docs/TRACK1_BACKTEST_SPEC.md` §"Scope Lock" (~10-line section) — restructured into 4 sub-bullets:
+      1. **BRUTE-FORCE ENGINE — in scope (UNCHANGED since 2026-05-16):** 3 indexes + India VIX REFERENCE_ONLY.
+      2. **LAKE / INGEST — expanded scope (DEC-P0-063):** additionally covers 200 NSE F&O eligible stocks (spot + options across all 4 Groww `expiryCodes`); 200 stocks join India VIX in `REFERENCE_ONLY` (mirrors decision #83); stock options sit in lake awaiting future brute-force expansion (separate decision, not authorized here).
+      3. **NOT in scope:** futures execution on indices · options costs in Track 1 · live order placement.
+      4. **Engine-vs-lake distinction:** explicit statement that "4 index instruments / no F&O contracts" wording elsewhere describes the ENGINE; LAKE is the expanded surface per DEC-P0-063 + CLAUDE.md §3 + MIGRATION.md entry #200.
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No edits to any other TRACK1_*.md file beyond `TRACK1_BACKTEST_SPEC.md`.
+    - No edits to brute-force trial-multiplication / engine-context lines (those describe the ENGINE which is UNCHANGED).
+    - No new code, tests, or workflows.
+    - No edits to STANDARDS_100PCT.md or §10 of REQUIREMENTS_FINAL.md.
+    - No re-derivation or expansion of DEC-P0-063 itself — this PR mirrors the locked CLAUDE.md §3 + MIGRATION entry #200 wording exactly.
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_BACKTEST_SPEC.md` — Scope Lock section restructured (~10 lines).
+    - `docs/MIGRATION.md` — this entry #264.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: every claim mirrors locked text in CLAUDE.md §3 + MIGRATION entry #200 (DEC-P0-063); no new factual claims about Groww/NSE/200-stock universe introduced.
+    - ✅ REAL: engine-vs-lake distinction explicitly stated; protects future spec readers from misreading scope.
+    - 🟡 PARTIAL: this is 1 of CLAUDE.md §3's "~15 remaining stale-text locations" (combined with DEC-SPEC-CONSISTENCY-001 entry #263 fixing 2 others, the running total is 3 of ~15). Full reconciliation across all ~15 locations remains tracked per CLAUDE.md §3.
+    - 📋 ROADMAP: ~12 more stale-text locations remain in TRACK1_*.md files; each gets a separate decision PR or batched follow-up.
+
+    **What did NOT land in this PR:**
+
+    - No edits to TRACK1_PHASE_PLAN.md, TRACK1_VOCABULARY.md, TRACK1_PERFORMANCE_BUDGET.md, TRACK1_MICROSTRUCTURE.md, TRACK1_VERIFICATION_PYRAMID.md, TRACK1_DASHBOARD_DESIGN.md.
+    - No edits to docs/track2/* files.
+    - No expansion of DEC-P0-063's authorization (still: lake-only; engine unchanged).
+
+    **4-agent hostile review:** Pure-docs ~10-line scope-statement amendment that mirrors locked text in CLAUDE.md §3 + MIGRATION entry #200. Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) the new §"Scope Lock" wording is a faithful mirror of CLAUDE.md §3 + MIGRATION entry #200 (no new claims); (2) the engine-vs-lake distinction is explicit (no ambiguity about what the LAKE covers); (3) the "AMENDED 2026-05-22 per DEC-P0-063" header carries provenance + date; (4) no new external claims about Groww/NSE/options markets introduced.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-SPEC-CONSISTENCY-002. **Builds on:** DEC-SPEC-CONSISTENCY-001 (entry #263, the 2-line ingest-scope fix this PR extends) · DEC-REQS-FINAL-RECONCILE-001 (entry #262) · DEC-P0-063 (entry #200, the locked LAKE expansion decision this PR mirrors) · DEC-P0-029 (VIX as 4th REFERENCE_ONLY instrument) · CLAUDE.md §3 (scope-statement source of truth). **Closes:** TRACK1_BACKTEST_SPEC.md §"Scope Lock" — the most prominent scope-statement in the spec — now reflects DEC-P0-063. **Does NOT close:** the other ~12 stale-text locations across TRACK1_*.md / track2 files — those remain genuine open work for future decision PRs.
+
 263. **DEC-SPEC-CONSISTENCY-001 — 2-line ingest-scope spec consistency fix (PHASE_PLAN.md Week 7 exit criteria + BACKTEST_SPEC.md Day-1 hour-by-hour) + §10.1 C-12 resolution row** (operator directive 2026-05-27 "make it ready for merge ... and then go ahead with the plan okay?" — Option B post-merge follow-through, second iteration). Two stale-text lines that misstated the INGEST surface as "3 instruments" instead of "4 instruments (NIFTY 50, BANKNIFTY, SENSEX, INDIA VIX)" — both contradict CLAUDE.md §3 + TRACK1_BACKTEST_SPEC.md:217 which lock the INGEST surface at 4 instruments since DEC-P0-029. Also adds C-12 (Ram Navami fixture mislabel) to TRACK1_REQUIREMENTS_FINAL.md §10.1 since the fix was already in place (DEC-P0-042) but un-cited in the resolution addendum.
 
     **What this fixes:**
