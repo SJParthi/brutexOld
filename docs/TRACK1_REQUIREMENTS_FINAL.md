@@ -153,3 +153,44 @@ Each agent's full output is preserved in:
 - `/tmp/.../tasks/af039581e7ec42e90.output` — Agent 4 (Ops/Cite-path/Sanity, R-300 through R-319)
 
 Synthesised by Claude (Opus 4.7) on 2026-05-18.
+
+---
+
+## §10. Post-2026-05-18 resolution status (as of 2026-05-27)
+
+**Purpose:** The §1–§4 tables above are a static snapshot from 2026-05-18. Several items have been closed by subsequent decisions, and their evidence-citations point to text that no longer exists. This section maps each resolved item to its closing decision so operators reading §1–§4 don't chase stale citations.
+
+**Method:** This is purely additive. The original §1–§4 tables are preserved unchanged to maintain the audit trail of what the 4-agent hostile review found at the 2026-05-18 baseline.
+
+### §10.1 Conflicts RESOLVED since 2026-05-18
+
+| Original | Status | Closing decision | Notes |
+|---|---|---|---|
+| **C-01** Total sweep trial count | ✅ RESOLVED | DEC-MODE-002 (2026-05-23) | Mode C removed → 730B (total) / 33B (Stage 2 hot-path); already annotated inline in §1 row 26 |
+| **C-04** `combo_hash` 9 inputs | ✅ RESOLVED | DEC-P0-060 (MIGRATION entry #198) + DEC-COMBO-HASH-UNIQUENESS-001 | `brutex/strategies/combo.py` now hashes the 9-field BLAKE3 composition; dedup property test added |
+| **C-05** sha256 vs blake3 | ✅ RESOLVED | DEC-CALIBRATE-001 (CLAUDE.md Golden Rule #4 corrected note, 2026-05-24) | Spec + code both on `blake3` |
+| **C-09** Coverage gate "100% line + branch" | 🟡 PARTIALLY RESOLVED | DEC-COV-001 (entries #210-#232) + DEC-COV-RATCHET-001 (#256) + DEC-COV-BACKFILL-001/002/003/004 (#257-#260) + DEC-COV-BACKFILL-LIMIT-001 (#261, Option B operator-accepted limit 2026-05-27) | Cited evidence "STANDARDS row 1 says '72.32% actual'" is **stale**. Current STANDARDS row 1: "strict per-module 100% gate at 51 modules" + "🟡 (51/~71 strict-gated; 100% via global cov)". Residual gap: 8 orchestrator modules blocked by `fastbloom_rs` PyO3 ABI3 single-init; covered at 100% via global cov, blocked from standalone gating. 3 ROADMAP closure paths in entry #261 |
+| **C-11** 92-chunk first-run math | ✅ RESOLVED | (Inline in `TRACK1_BACKTEST_SPEC.md:217`) | Cited evidence "spec line 195 says '3 instruments + 60 calls'" is **stale**. Current spec line 217: "5 years × **4 instruments** (NIFTY 50, BANKNIFTY, SENSEX, INDIA VIX...) × 90-day chunks ≈ **92 API calls + 4 daily calls**" |
+
+### §10.2 PARTIAL items moved since 2026-05-18
+
+| Original | Status | Closing decision | Notes |
+|---|---|---|---|
+| **P-01** "100% standards / 18 requirements" → "Real coverage: ~22%" | 🟡 SIGNIFICANTLY IMPROVED | DEC-STANDARDS-AUDIT-001 + DEC-CROSSWALK-001 + DEC-PYLINT-DROP-001 + DEC-STRESS-001 + DEC-DOCTOR-001 (entries #205-#209) + DEC-COV-001 sequence | Cited "9 of 21 sub-rows ✅ ENFORCED" is **stale**. Current STANDARDS_100PCT.md §1 summary: **15 of 21 sub-rows 🟢 (71%)** + 2 🟡 + 1 📋 + 3 👁️. Decree-vs-reality gap closed from ~78% → ~29%. Residual 2 🟡 (rows 1+2, coverage per-module) explicitly tracked under DEC-COV-BACKFILL-LIMIT-001 ratchet |
+
+### §10.3 GAPS closed since 2026-05-18
+
+| Original | Status | Closing decision |
+|---|---|---|
+| **G-07** `brutex doctor` CLI | ✅ CLOSED | DEC-DOCTOR-001 (MIGRATION entry #209, PR #100) — `brutex/doctor.py` + `brutex doctor` subcommand + 18 unit tests at 100% line+branch |
+| **G-11** Stress / 24h soak test directory | ✅ CLOSED | DEC-STRESS-001 (MIGRATION entry #208, PR #99) — `tests/stress/test_audit_chain_sustained.py` + nightly workflow `.github/workflows/stress-nightly.yml` + 24h soak via `workflow_dispatch` |
+
+### §10.4 SCOPE-CREEP residuals — status note
+
+The 4 S-01..S-04 items were materially rewritten by **DEC-VENDOR-PIVOT-001** (2026-05-26, MIGRATION entry #246) which wiped the Groww adapter and reset the vendor surface. Track-2 references in `brutex/options/`, `models.py` (`FUT`/`CE`/`PE` / `Segment.FNO`) now serve the formally-authorized DEC-P0-063 expansion (200 NSE F&O stocks + spot + options across all 4 expiryCodes in the **LAKE**; brute-force engine unchanged). Per CLAUDE.md §3 (DEC-P0-063 entry), these items are no longer scope-creep — they are authorized lake-layer scope. Cross-spec reconciliation of the remaining ~15 stale-text locations is a tracked follow-up PR per CLAUDE.md §3.
+
+### §10.5 Open items (not addressed in this addendum)
+
+C-02 · C-03 · C-06 · C-07 · C-08 · C-10 · C-12 · P-02 · P-03 · P-04 · P-05 · P-06 · P-07 · P-08 · G-01 · G-02 · G-03 · G-04 · G-05 · G-06 · G-08 · G-09 · G-10 · G-12 · G-13 · G-14 · G-15 — these remain as captured in §1–§3 (no closure decision recorded since 2026-05-18 review). Many are Phase 2+ engine-build work or operator-decision items in §6.
+
+**Decision ID:** DEC-REQS-FINAL-RECONCILE-001 (2026-05-27). **Builds on:** DEC-STANDARDS-AUDIT-001 (entry #205) · DEC-CROSSWALK-001 (#206) · DEC-PYLINT-DROP-001 (#207) · DEC-STRESS-001 (#208) · DEC-DOCTOR-001 (#209) · DEC-COV-001 (#210-#232) · DEC-COV-RATCHET-001 (#256) · DEC-COV-BACKFILL-001/002/003/004 (#257-#260) · DEC-COV-BACKFILL-LIMIT-001 (#261) · DEC-MODE-002 (entry #196) · DEC-P0-060 (#198) · DEC-COMBO-HASH-UNIQUENESS-001 · DEC-CALIBRATE-001 · DEC-VENDOR-PIVOT-001 (#246) · DEC-P0-063 (#200). **Closes:** the citation-staleness gap between TRACK1_REQUIREMENTS_FINAL.md's 2026-05-18 snapshot and the current state of the repo on 2026-05-27. **Does NOT close:** the open items listed in §10.5 — those remain genuine open work.
