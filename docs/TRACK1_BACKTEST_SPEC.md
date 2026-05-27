@@ -1046,6 +1046,7 @@ This spec adds the following decision rows to `docs/MIGRATION.md`
 
 - #300 — Track 1 v2 spec adopted (this doc); v1 archived to `docs/archive/`
 - #301 — Track 1 = signal-only, NO futures, NO costs (operator 2026-05-16)
+  - **AMENDED by #200 (DEC-P0-063, 2026-05-22):** LAKE expanded to include 200 NSE F&O eligible stocks + ~46 futures contracts (REFERENCE_ONLY); BRUTE-FORCE ENGINE unchanged. The "NO futures, NO costs" wording remains correct for the ENGINE; the LAKE now ingests futures for future brute-force expansion (separate decision, not yet authorized). See `MIGRATION.md` entry #200 + this spec's §"Scope Lock" (per DEC-SPEC-CONSISTENCY-002, entry #264).
 - #302 — Phase 9.5 pilot inserted (~52B, all 3 inst × all 21 TFs, K=2..4, 700 SL/TP cells)
 - #303 — Tech stack version locks (Rust 1.78, Polars 1.18, Optuna 4.1, pycma 3.4, etc.)
 - #304 — Stage 1B coarse-score formula locked
