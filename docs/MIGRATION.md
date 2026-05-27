@@ -335,6 +335,20 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+272. **DEC-P0-070 — RETROACTIVE LEDGER ENTRY: Dashboard default bind locked to `127.0.0.1` (was `0.0.0.0`)** (operator directive 2026-05-23 via Q-06 of the 12-decision lock at MIGRATION.md entry near #189; code change shipped 2026-05-23 in `brutex/config/ports.py` but the ledger entry was never written — retroactively written 2026-05-27 as 📋 ROADMAP follow-up flagged in DEC-C08-RESOLUTION-001 entry #271). Honest envelope: this entry is **retroactive** — the code change predates this ledger entry by 4 days; the operator's Q-06 of the 12-decision lock IS the upstream authority and the code comment at `brutex/config/ports.py:55-62` carries the DEC-P0-070 label. This retroactive entry closes the ledger gap and unblocks the DEC-ID validator on PR #168 + future PRs that cite DEC-P0-070.
+
+    **The decision (verbatim from Q-06):** "Dashboard default bind = **127.0.0.1** (match docs); 0.0.0.0 only with explicit auth-required flag."
+
+    **Code state (verified 2026-05-27 via grep):** `brutex/config/ports.py:62`: `DEFAULT_HOST_BIND: Final[str] = "127.0.0.1"`. Comment block at lines 55-62 documents the decision. Env-var opt-in path `BRUTEX_HOST_BIND=0.0.0.0` is the explicit-flag mechanism Q-06 required.
+
+    **What this fixes:** the missing ledger entry for a 2026-05-23 code-shipped decision; the DEC-ID validator (`scripts/ci/validate_dec_ids.py` per STANDARDS row 18 partial automation) was correctly flagging PR #168 as citing a DEC-ID that didn't exist in MIGRATION.md.
+
+    **What this does NOT change:** no code state changes (the code has been at `127.0.0.1` since 2026-05-23); no spec changes; no SLA changes. This is a paper-trail completion only.
+
+    **4-agent hostile review:** Pure-docs retroactive ledger entry — N/A; this entry IS the ledger entry being added. Self-review: validator failure on PR #168 caught the gap; this retroactive entry resolves it. Honest envelope explicitly notes the retroactive framing.
+
+    **Decision ID:** DEC-P0-070. **Builds on:** Q-06 of operator's 12-decision lock (MIGRATION.md ~line 2974, the upstream authority) · `brutex/config/ports.py:55-62` (the implementation) · DEC-C08-RESOLUTION-001 (entry #271, the PR that surfaced this ledger gap). **Closes:** the missing-ledger-entry gap; unblocks the DEC-ID validator on PR #168.
+
 271. **DEC-C08-RESOLUTION-001 — TRACK1_REQUIREMENTS_FINAL.md §10.1 C-08 (dashboard default bind) added as RESOLVED row + §10.5 C-08 bookkeeping removal (10th-of-~15 stale-text locations effectively reconciled)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — tenth iteration of Track-1-only docs ratchet wave). The C-08 conflict cited stale evidence: "`DEFAULT_HOST_BIND = '0.0.0.0'` with `# nosec — intentional LAN bind`". Verified-current code at `brutex/config/ports.py:55-62` shows `DEFAULT_HOST_BIND: Final[str] = "127.0.0.1"` per DEC-P0-070 (2026-05-23) — matching Q-06 of the operator's 2026-05-18 12-decision lock.
 
     **What this fixes:**
