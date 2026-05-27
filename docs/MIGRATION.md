@@ -335,6 +335,45 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+268. **DEC-SPEC-CONSISTENCY-006 — TRACK1_BACKTEST_SPEC.md Decision Ledger Linkage §"#301" amended with DEC-P0-063 cross-reference (7th-of-~15 stale-text locations reconciled)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — seventh iteration of Track-1-only docs ratchet wave). The decision-ledger entry `#301 — Track 1 = signal-only, NO futures, NO costs (operator 2026-05-16)` predates DEC-P0-063 (entry #200, 2026-05-22) which expanded the LAKE to include ~46 futures contracts. The "NO futures" wording is technically stale relative to DEC-P0-063's LAKE expansion.
+
+    **What this fixes:**
+
+    - `docs/TRACK1_BACKTEST_SPEC.md` §"Decision Ledger Linkage" — added a sub-bullet under #301 explicitly noting it is "AMENDED by #200 (DEC-P0-063, 2026-05-22)" with full context: LAKE expanded to include 200 NSE F&O eligible stocks + ~46 futures (REFERENCE_ONLY); BRUTE-FORCE ENGINE unchanged. The "NO futures, NO costs" wording remains correct for the ENGINE; the LAKE now ingests futures for future brute-force expansion (separate decision, not yet authorized). Cross-references MIGRATION.md entry #200 + the spec's §"Scope Lock" (per DEC-SPEC-CONSISTENCY-002, entry #264).
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No edits to decision-ledger entry #301 itself (preserves historical record per audit-trail discipline).
+    - No edits to other decision-ledger entries (#300, #302–#309 unchanged).
+    - No edits to any other TRACK1_*.md file.
+    - No new code, tests, or workflows.
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_BACKTEST_SPEC.md` §"Decision Ledger Linkage" — 1-bullet amendment note (~3 lines).
+    - `docs/MIGRATION.md` — this entry #268.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: amendment is purely additive (preserves the 2026-05-16 #301 historical wording exactly; adds a sub-bullet under it).
+    - ✅ REAL: every claim mirrors locked text in CLAUDE.md §3 + MIGRATION entry #200 + DEC-SPEC-CONSISTENCY-002/003/004/005 (entries #264/265/266/267); no new factual claims introduced.
+    - ✅ REAL: engine-vs-lake distinction explicitly stated in the sub-bullet.
+    - 🟡 PARTIAL: 7 of CLAUDE.md §3's "~15 remaining stale-text locations" now reconciled (running total: §1 DATA_INGEST + §"Scope Lock" + 2 inline ingest lines + RUNTIME §2 + PHASE_PLAN Phase 2 + BACKTEST_SPEC ledger #301 = 7).
+    - 📋 ROADMAP: ~8 more stale-text locations remain.
+
+    **What did NOT land in this PR:**
+
+    - No revision of #301's original wording (preserves historical accuracy of the 2026-05-16 decision).
+    - No edits to other decision-ledger entries.
+    - No edits to any other TRACK1_*.md file.
+
+    **4-agent hostile review:** Pure-docs 1-bullet ledger-amendment that mirrors locked text in CLAUDE.md §3 + MIGRATION entry #200 + sibling DEC-SPEC-CONSISTENCY entries. Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) the amendment note is a faithful mirror of locked text; (2) the original #301 wording is preserved exactly (additive only); (3) the engine-vs-lake distinction is explicit in the sub-bullet; (4) cross-references to MIGRATION entry #200 + DEC-SPEC-CONSISTENCY-002 (#264) resolve; (5) no new external claims about Groww/NSE/options markets introduced.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-SPEC-CONSISTENCY-006. **Builds on:** DEC-SPEC-CONSISTENCY-005 (entry #267, sibling PHASE_PLAN Phase 2 amendment) · DEC-SPEC-CONSISTENCY-004 (entry #266) · DEC-SPEC-CONSISTENCY-003 (entry #265) · DEC-SPEC-CONSISTENCY-002 (entry #264) · DEC-SPEC-CONSISTENCY-001 (entry #263) · DEC-REQS-FINAL-RECONCILE-001 (entry #262) · DEC-P0-063 (entry #200, the locked LAKE expansion this PR mirrors) · CLAUDE.md §3. **Closes:** TRACK1_BACKTEST_SPEC.md §"Decision Ledger Linkage" #301 entry — historical wording preserved, amendment cross-reference added. **Does NOT close:** the other ~8 stale-text locations across remaining TRACK1_*.md files.
+
 267. **DEC-SPEC-CONSISTENCY-005 — TRACK1_PHASE_PLAN.md Phase 2 header amended with DEC-P0-063 engine-vs-lake note (6th-of-~15 stale-text locations reconciled)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — sixth iteration of Track-1-only docs ratchet wave). The Phase 2 header "Phase 2 — Groww Adapter + Spot-Index Ingest + Vocabulary (3-4 weeks)" predates DEC-P0-063 entry #200 — describes Phase 2 INGEST scope as "Spot-Index" only with no acknowledgement of the 200-stock LAKE expansion.
 
     **What this fixes:**
