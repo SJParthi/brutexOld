@@ -335,6 +335,46 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+265. **DEC-SPEC-CONSISTENCY-003 — TRACK1_DATA_INGEST_DESIGN.md §1 "Scope" amended to reflect DEC-P0-063 LAKE expansion (4th-of-~15 stale-text locations reconciled)** (operator directive 2026-05-27 "no issues go ahead with the current track it loosk fine right dude? ... once again lust ne the track 1 dude okay?" — Option B post-merge follow-through, fourth iteration; user confirmed Track-1-only docs ratchet wave). The §1 "Scope" table was locked 2026-05-15 / 2026-05-16 (before DEC-P0-063 entry #200 from 2026-05-22) and described scope as "4 instruments fetched" with no acknowledgement of the LAKE expansion to 200 NSE F&O stocks (spot + options). CLAUDE.md §3 + MIGRATION entry #200 already encode the engine-vs-lake distinction; this PR brings the ingest-design spec into alignment with the same engine-vs-lake structure now in TRACK1_BACKTEST_SPEC.md §"Scope Lock" (per DEC-SPEC-CONSISTENCY-002 entry #264).
+
+    **What this fixes:**
+
+    - `docs/TRACK1_DATA_INGEST_DESIGN.md §1 "Scope"` — restructured into 2 sub-sections:
+      1. **§1.1 Core 4-instrument scope (UNCHANGED since 2026-05-16):** the original 4-instrument table preserved exactly as-is.
+      2. **§1.2 LAKE expansion (DEC-P0-063, 2026-05-22):** new paragraph mirroring CLAUDE.md §3's locked text — 200 NSE F&O eligible stocks (spot + options across all 4 Groww expiryCodes) added to LAKE; 200 stocks join REFERENCE_ONLY; BRUTE-FORCE ENGINE UNCHANGED; same instrument-store/partition/dedup/audit primitives (per COMMON · DYNAMIC · SCALABLE rules in CLAUDE.md §11). Explicit forward-reference to §§2-12 below as describing the 4-instrument core surface, AND cross-references to CLAUDE.md §3 + MIGRATION entry #200 + DEC-SPEC-CONSISTENCY-002 (entry #264, TRACK1_BACKTEST_SPEC.md §"Scope Lock" amendment).
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No edits to §§2-12 of TRACK1_DATA_INGEST_DESIGN.md (those describe the 4-instrument core surface and stay UNCHANGED).
+    - No edits to any other TRACK1_*.md file beyond `TRACK1_DATA_INGEST_DESIGN.md`.
+    - No new code, tests, or workflows.
+    - No re-derivation or expansion of DEC-P0-063 itself — this PR mirrors the locked CLAUDE.md §3 + MIGRATION entry #200 wording.
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_DATA_INGEST_DESIGN.md` — §1 Scope section restructured (~25 lines, 2 sub-sections).
+    - `docs/MIGRATION.md` — this entry #265.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: every claim mirrors locked text in CLAUDE.md §3 + MIGRATION entry #200 (DEC-P0-063) + DEC-SPEC-CONSISTENCY-002 (entry #264); no new factual claims about Groww/NSE/200-stock universe introduced.
+    - ✅ REAL: engine-vs-lake distinction explicitly stated; protects future spec readers from misreading scope.
+    - 🟡 PARTIAL: 4 of CLAUDE.md §3's "~15 remaining stale-text locations" now reconciled (this PR adds 1: TRACK1_DATA_INGEST_DESIGN.md §1; running total: §1 DATA_INGEST + §"Scope Lock" + 2 ingest-scope inline lines = 4 of ~15).
+    - 📋 ROADMAP: ~11 more stale-text locations remain in TRACK1_*.md / track2 files; each gets a separate decision PR or batched follow-up.
+
+    **What did NOT land in this PR:**
+
+    - No edits to TRACK1_PHASE_PLAN.md, TRACK1_VOCABULARY.md, TRACK1_PERFORMANCE_BUDGET.md, TRACK1_MICROSTRUCTURE.md, TRACK1_VERIFICATION_PYRAMID.md, TRACK1_DASHBOARD_DESIGN.md.
+    - No edits to docs/track2/* files.
+    - No expansion of DEC-P0-063's authorization (still: lake-only; engine unchanged).
+
+    **4-agent hostile review:** Pure-docs ~25-line scope-section restructure that mirrors locked text in CLAUDE.md §3 + MIGRATION entry #200 + DEC-SPEC-CONSISTENCY-002. Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) the new §1 wording is a faithful mirror of CLAUDE.md §3 + MIGRATION entry #200; (2) the 4-instrument core table is preserved exactly as-is (no scope shrinkage); (3) the engine-vs-lake distinction is explicit in §1.2; (4) cross-references to CLAUDE.md §3, MIGRATION entry #200, and DEC-SPEC-CONSISTENCY-002 (entry #264) resolve; (5) no new external claims about Groww/NSE/options markets introduced.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-SPEC-CONSISTENCY-003. **Builds on:** DEC-SPEC-CONSISTENCY-002 (entry #264, the §"Scope Lock" amendment this PR mirrors in §1 of the sibling ingest-design doc) · DEC-SPEC-CONSISTENCY-001 (entry #263) · DEC-REQS-FINAL-RECONCILE-001 (entry #262) · DEC-P0-063 (entry #200, the locked LAKE expansion decision this PR mirrors) · DEC-P0-029 (VIX as 4th REFERENCE_ONLY instrument) · CLAUDE.md §3 (scope-statement source of truth). **Closes:** TRACK1_DATA_INGEST_DESIGN.md §1 "Scope" — the most prominent scope-statement in the ingest-design spec — now reflects DEC-P0-063. **Does NOT close:** the other ~11 stale-text locations across TRACK1_*.md / track2 files — those remain genuine open work.
+
 264. **DEC-SPEC-CONSISTENCY-002 — TRACK1_BACKTEST_SPEC.md §"Scope Lock" amended to reflect DEC-P0-063 LAKE expansion (engine-vs-lake distinction made explicit at the source of authority)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — Option B post-merge follow-through, third iteration). The §"Scope Lock" section was locked 2026-05-16 (before DEC-P0-063 entry #200 from 2026-05-22) — it described scope as "Spot indices only (NIFTY 50, BANKNIFTY, SENSEX) + India VIX (reference-only)" with no acknowledgement of the LAKE expansion. CLAUDE.md §3 already encodes the engine-vs-lake distinction; this PR brings the spec's most prominent scope-statement into alignment.
 
     **What this fixes:**
