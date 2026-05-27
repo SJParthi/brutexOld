@@ -159,7 +159,7 @@ and the indicator precompute pipeline.
 | Phase 2 hostile review (4-agent pass) | Catches anything missed |
 | Phase 2 sign-off | User reviews vocabulary + adapter |
 
-**Exit criteria:** Groww ingest of 5 years × 3 instruments × 15 TFs
+**Exit criteria:** Groww ingest of 5 years × 4 instruments (NIFTY 50, BANKNIFTY, SENSEX, INDIA VIX) × 21 TFs
 working. 9 indicators precomputed. 52 atomic conditions evaluable. The
 pattern generator emits the pruned set.
 
