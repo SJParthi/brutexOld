@@ -27,7 +27,6 @@ of an indicator formula occurs here.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from decimal import Decimal
 from typing import Any, ClassVar
 
 from brutex.feed.replay import FeedEvent
@@ -135,14 +134,3 @@ class DonchianBreakout:
                 f"type {type(window).__name__}"
             )
         return window
-
-
-def _bar_close_decimal(event: FeedEvent) -> Decimal:
-    """Return ``event.bar.close`` typed as :class:`Decimal` explicitly.
-
-    Mostly documentation helper \u2014 :class:`CandleBar.close` is already
-    :class:`Decimal`, but pyright's inferred type on subscript access
-    widens to ``object`` through the scratch dict, so a tiny named
-    helper keeps the strategy code reading cleanly.
-    """
-    return event.bar.close
