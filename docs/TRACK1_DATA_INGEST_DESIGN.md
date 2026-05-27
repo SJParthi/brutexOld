@@ -17,11 +17,13 @@ audit, and structlog-based observability.
 
 ---
 
-## 1. Scope (after 2026-05-15 unfreeze)
+## 1. Scope (after 2026-05-15 unfreeze; **AMENDED 2026-05-22 per DEC-P0-063**)
+
+### 1.1 Core 4-instrument scope (UNCHANGED since 2026-05-16)
 
 | Aspect | Track 1 Value |
 |---|---|
-| **Total instruments fetched** | 4: NIFTY 50, BANKNIFTY, SENSEX + India VIX |
+| **Total instruments fetched (core)** | 4: NIFTY 50, BANKNIFTY, SENSEX + India VIX |
 | **Brute-forced (in vocabulary)** | 3: NIFTY 50, BANKNIFTY, SENSEX |
 | **Reference-only** | 1: **India VIX** (context columns only, never in patterns) |
 | **Range** | Rolling: `2021-01-01 → today` |
@@ -32,6 +34,10 @@ audit, and structlog-based observability.
 | **Brokerage/STT** | NONE (spot indexes don't trade) |
 | **Groww Data API rate limit** | **5 req/s + 100,000/day** (verified) |
 | **Adapter effective cap** | 3 r/s (5 × 0.6 safety factor) |
+
+### 1.2 LAKE expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry #200)
+
+The LAKE additionally covers **200 NSE F&O eligible single stocks (spot + options across all 4 Groww `expiryCodes`)**. The 200 stocks join India VIX in `REFERENCE_ONLY` (mirrors decision #83 pattern). Stock options sit in the lake ready for future brute-force expansion (separate decision; not authorized here). **The BRUTE-FORCE ENGINE is UNCHANGED** — it still operates only on the 3 brute-force indexes (NIFTY/BANKNIFTY/SENSEX); §§2-12 below describe the 4-instrument core surface that drove the original ingest design. The 200-stock expansion uses the same instrument-store / partition / dedup / audit primitives without re-architecting (per CLAUDE.md §11 "DYNAMIC" + "SCALABLE" rules). See CLAUDE.md §3 + MIGRATION.md entry #200 + `docs/TRACK1_BACKTEST_SPEC.md §"Scope Lock"` (amended per DEC-SPEC-CONSISTENCY-002, MIGRATION entry #264) for the full locked wording.
 
 **Unfrozen from prior spec:**
 - Decision #2 (3 instruments → 4)
