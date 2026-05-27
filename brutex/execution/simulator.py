@@ -243,7 +243,9 @@ class ExecutionSimulator:
 
     def _validate_order(self, *, qty: int, meta: InstrumentMeta) -> None:
         """Enforce FR-EXEC-004 and FR-EXEC-005 before touching state."""
-        if qty <= 0:
+        if (
+            qty <= 0
+        ):  # pragma: no cover — defensive; ExecutionSimulator.__init__ rejects default_qty <= 0 (line 120-121) so the only caller execute() cannot pass qty <= 0
             raise InvalidLotSizeError(f"order qty must be positive, got {qty}")
         if qty % meta.lot_size != 0:
             raise InvalidLotSizeError(
@@ -308,8 +310,10 @@ class ExecutionSimulator:
         if abs(signed_delta) < abs(pos.qty):
             # Partial close \u2014 avg_price unchanged, qty shrinks.
             pos.qty += signed_delta
-            if pos.qty == 0:
-                pos.avg_price = Decimal("0")
+            if (
+                pos.qty == 0
+            ):  # pragma: no cover \u2014 defensive; partial-close branch requires strict |signed_delta| < |pos.qty|, so pos.qty cannot reach 0 here
+                pos.avg_price = Decimal("0")  # pragma: no cover \u2014 same rationale
             return
 
         # Full close or reversal.

@@ -335,6 +335,35 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+260. **DEC-COV-BACKFILL-004 — 1-module coverage backfill: `brutex.execution.simulator` 93.67→100% via 2 source-level `# pragma: no cover — defensive` markers on structurally unreachable defensive paths** (2026-05-27, operator directive: continuation of "go ahead with the plan" after PR #156 closed Option B step 4). Closes the next non-orchestrator gap.
+
+    **Module backfilled:**
+
+    | # | Module | Pre | Post | How |
+    |---|---|---:|---:|---|
+    | 23a | `brutex.execution.simulator` | 93.67% | 100% | 2 `# pragma: no cover — defensive` markers on structurally unreachable defensive paths: (1) line 247 `if qty <= 0: raise InvalidLotSizeError` — unreachable from public API because `__init__` validates `default_qty > 0` at line 120-121 and the only caller `execute()` uses `self._default_qty`; (2) line 312 `if pos.qty == 0: pos.avg_price = Decimal("0")` inside the partial-close branch — unreachable because partial close requires strict `|signed_delta| < |pos.qty|`, so `pos.qty` cannot reach 0 after the `+= signed_delta`. Pragmas are honest — the algebraic invariants in the source comments document why these paths are dead. |
+
+    **Total: 114 stmts + 36 branches now protected by per-module strict-100% gate.**
+
+    **Verification:** `.venv/bin/pytest --cov=brutex.execution.simulator --cov-branch --cov-fail-under=100 tests/unit/test_execution_simulator.py -q` → 25 passed, 100% line + branch.
+
+    **Source-code changes:** 4 lines modified in `brutex/execution/simulator.py` (two `# pragma: no cover — defensive` comments + their continuation comments). Zero behavior change. `tests/unit/test_execution_simulator.py` adds 2 `TestCoverageBackfill` tests + 2 commentary blocks explaining the unreachable paths.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 5 file changes (2 source/test + 3 docs); 1 module genuinely at 100% line + branch.
+    - ✅ REAL: verified standalone via `pytest --cov=brutex.execution.simulator --cov-fail-under=100` returning success.
+    - ✅ REAL: count refresh (50 → 51) mechanically verifiable via `grep -oE "pytest --cov=brutex\.[a-z_.]+" .github/workflows/ci.yml | sort -u | wc -l`.
+    - 🟡 PARTIAL: 2 pragmas added are on TRULY UNREACHABLE defensive paths. This is the honest choice — both paths have algebraic invariants documented in the source comments that make them structurally dead in normal code. The defensive code is kept in place for future-proofing.
+    - 🟡 PARTIAL: ~20 modules remain below strict-100%. The 9 orchestrator modules continue blocked by fastbloom_rs PyO3 ABI3 limitation; remaining non-orchestrator gaps are `strategies.{runner,sweep}` (substantial gaps requiring more substantial test work).
+    - 📋 ROADMAP: orchestrator standalone gates remain blocked by the fastbloom_rs PyO3 ABI3 limitation; `strategies.{runner,sweep}` need substantial new tests (separate PR scope).
+
+    **4-agent hostile review:** Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only — small focused PR adding 2 pragmas + 2 well-bounded tests). Self-review by reviewing Claude: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: are the pragmas honest? Yes — each marks a defensive path with a documented algebraic invariant in the source comment proving unreachability. Are the 2 new positive-path tests well-formed? Yes — `test_mark_zero_qty_position_zeros_unrealized` opens then fully closes a position then marks (covers lines 229-230 + 342); `test_snapshot_returns_equity_point` calls the public `snapshot()` method (covers line 240). No new factual claims about external systems.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-COV-BACKFILL-004. **Builds on:** DEC-COV-BACKFILL-003 (entry #259, prior backfill that surfaced this module as the next-biggest non-orchestrator gap) · DEC-COV-BACKFILL-002 (entry #258) · DEC-COV-BACKFILL-001 (entry #257) · DEC-COV-RATCHET-001 (entry #256) · DEC-COV-001 (entries #210-#232) · DEC-AUDIT-RECONCILE-002 (entry #254). **Closes:** Option B step 5 — backfill biggest remaining non-orchestrator gap; strict-100% count 50 → 51 (+1); remaining gap drops 21 → 20. **Does NOT close:** orchestrator-package standalone gates (blocked by fastbloom_rs PyO3 ABI3); `strategies.{runner,sweep}` (separate PRs).
+
 259. **DEC-COV-BACKFILL-003 — 1-module coverage backfill: `brutex.config.runtime` 92.25→100% via 6 surgical OSError-branch tests** (2026-05-27, operator directive: continuation of "go ahead with the plan" after PR #155 closed Option B step 3 — 49→50 strict-100% modules). Closes the biggest non-orchestrator gap left after PRs #153/#154/#155: the runtime service-discovery module's OSError + PermissionError + generic-OSError-with-non-ESRCH-errno branches.
 
     **Module backfilled:**
