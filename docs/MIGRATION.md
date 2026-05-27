@@ -335,6 +335,49 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+269. **DEC-SPEC-CONSISTENCY-007 — TRACK1_PHASE_PLAN.md Week 2 coverage-gate row updated with current strict-100% module count + ratchet chain (8th-of-~15 stale-text locations reconciled)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — eighth iteration of Track-1-only docs ratchet wave). The Week 2 "Coverage gate raised" row cited stale count `33 strict-100% module gates today (DEC-INDICATOR-COVERAGE-001 + DEC-COMBO-HASH-UNIQUENESS-001)` — after the Option B ratchet arc (PRs #153-#158), the count is **51 modules** and there are several more DEC IDs.
+
+    **What this fixes:**
+
+    - `docs/TRACK1_PHASE_PLAN.md` Phase 1 Week 2 — coverage-gate row updated:
+      - Module count: `33` → `51`
+      - DEC-ID list: `(DEC-INDICATOR-COVERAGE-001 + DEC-COMBO-HASH-UNIQUENESS-001)` → full ratchet chain `(DEC-COV-001 + DEC-COV-RATCHET-001 + DEC-COV-BACKFILL-001/002/003/004 entries #210-#232 + #256-#260)`
+      - Closure status: added `closed per DEC-COV-BACKFILL-LIMIT-001 entry #261 with operator-accepted limit on the 8 remaining brutex/orchestrator/ modules blocked by fastbloom_rs PyO3 ABI3 single-init — all 8 covered at 100% via global --cov=brutex run`
+      - Remaining-modules count: `~16` → `~20`
+      - Added: `3 ROADMAP closure paths in entry #261: vendor swap, per-test-subprocess CI harness, or lazy-import refactor`
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No edits to any other row in the Week 1 / Week 2 / Week 3 tables (only the single coverage-gate row).
+    - No edits to any other phase in TRACK1_PHASE_PLAN.md.
+    - No edits to any other TRACK1_*.md file.
+    - No new code, tests, or workflows.
+    - No edits to STANDARDS_100PCT.md (its row 1 was already updated in PR #158 to cite the full ratchet chain).
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_PHASE_PLAN.md` Phase 1 Week 2 — 1-row update (stale count + DEC-ID list).
+    - `docs/MIGRATION.md` — this entry #269.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: every claim grep-verifiable against current STANDARDS row 1 + MIGRATION entries #256-#261; no new factual claims introduced.
+    - ✅ REAL: cited closing decision (DEC-COV-BACKFILL-LIMIT-001 entry #261) accurately captures Option B's operator-accepted limit.
+    - 🟡 PARTIAL: 8 of CLAUDE.md §3's "~15 remaining stale-text locations" now reconciled (running total: §1 DATA_INGEST + §"Scope Lock" + 2 inline ingest lines + RUNTIME §2 + PHASE_PLAN Phase 2 + BACKTEST_SPEC ledger #301 + PHASE_PLAN Week 2 coverage row = 8).
+    - 📋 ROADMAP: ~7 more stale-text locations remain.
+
+    **What did NOT land in this PR:**
+
+    - No edits to other Phase 1 / Phase 2 / Phase 3 / Phase 4 deliverable rows.
+    - No edits to any other TRACK1_*.md file.
+
+    **4-agent hostile review:** Pure-docs 1-row count + DEC-ID list update that brings stale text into alignment with current STANDARDS row 1 (already current post-PR-#158). Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) module count `51` matches current STANDARDS row 1 + MIGRATION entry #261; (2) cited DEC-ID list covers the full Option B ratchet arc (#210-#232 + #256-#261); (3) "~20" remaining-modules count is consistent with "71 total brutex/ modules - 51 gated = 20"; (4) cross-references to DEC-COV-BACKFILL-LIMIT-001 entry #261 resolve; (5) no new external claims about Groww/NSE/options markets introduced.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-SPEC-CONSISTENCY-007. **Builds on:** DEC-SPEC-CONSISTENCY-006 (entry #268, sibling BACKTEST_SPEC ledger #301 amendment) · DEC-SPEC-CONSISTENCY-005 (entry #267) · DEC-SPEC-CONSISTENCY-004 (entry #266) · DEC-SPEC-CONSISTENCY-003 (entry #265) · DEC-SPEC-CONSISTENCY-002 (entry #264) · DEC-SPEC-CONSISTENCY-001 (entry #263) · DEC-REQS-FINAL-RECONCILE-001 (entry #262) · DEC-COV-BACKFILL-LIMIT-001 (entry #261, Option B closure this PR cites) · DEC-COV-001 (entries #210-#232) · DEC-COV-RATCHET-001 (#256) · DEC-COV-BACKFILL-001/002/003/004 (#257-#260). **Closes:** TRACK1_PHASE_PLAN.md Week 2 coverage-gate row stale count + DEC-ID list. **Does NOT close:** the other ~7 stale-text locations.
+
 268. **DEC-SPEC-CONSISTENCY-006 — TRACK1_BACKTEST_SPEC.md Decision Ledger Linkage §"#301" amended with DEC-P0-063 cross-reference (7th-of-~15 stale-text locations reconciled)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — seventh iteration of Track-1-only docs ratchet wave). The decision-ledger entry `#301 — Track 1 = signal-only, NO futures, NO costs (operator 2026-05-16)` predates DEC-P0-063 (entry #200, 2026-05-22) which expanded the LAKE to include ~46 futures contracts. The "NO futures" wording is technically stale relative to DEC-P0-063's LAKE expansion.
 
     **What this fixes:**
