@@ -718,6 +718,54 @@ jobs:
           else
             echo "(brutex.strategies.library.donchian_breakout test file not present yet — gate inactive)"
           fi
+          # DEC-COV-BACKFILL-002 (entry #258, 2026-05-27): 4-module
+          # backfill ratchet — second batch of small-gap non-orchestrator
+          # modules pushed to 100% via surgical tests + module-load
+          # defensive-assertion pragmas. Lifts strict-100% gate count 45 → 49.
+          # 21a · brutex.data.parser (55 stmts, 14 branches, 15 tests)
+          #       Closes 92.75→100% via 3 surgical tests in
+          #       TestDecimalCoercion: Decimal-passthrough (line 145),
+          #       string-input parse (line 149), tz-aware ISO timestamp
+          #       skips IST-attach branch (82→84).
+          if compgen -G "tests/unit/test_data_parser.py" > /dev/null; then
+            pytest --cov=brutex.data.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_parser.py
+          else
+            echo "(brutex.data.parser test file not present yet — gate inactive)"
+          fi
+          # 21b · brutex.data.timeframes (22 stmts post-pragma, 8 branches,
+          #       34 tests). Closes 84.21→100% via 1 surgical test
+          #       (`test_unsupported_tf_raises` covers line 140 ValueError)
+          #       + 2 `# pragma: no cover — defensive module-load assertion`
+          #       on the EXPECTED_TF_COUNT + TF_LABELS-key integrity checks
+          #       (lines 66-69 + 97-98). Pragmas are honest — those
+          #       assertions fire only if module constants are corrupted
+          #       at import time, which is impossible to reach in normal
+          #       test paths without monkey-patching pre-import.
+          if compgen -G "tests/unit/test_timeframes.py" > /dev/null; then
+            pytest --cov=brutex.data.timeframes --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframes.py
+          else
+            echo "(brutex.data.timeframes test file not present yet — gate inactive)"
+          fi
+          # 21c · brutex.data.tf_resampler (26 stmts, 12 branches, 16 tests)
+          #       Closes 94.74→100% via 1 surgical test
+          #       (`test_non_dataframe_input_raises_typeerror` covers line
+          #       77 TypeError for non-polars.DataFrame input).
+          if compgen -G "tests/unit/test_tf_resampler.py" > /dev/null; then
+            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py
+          else
+            echo "(brutex.data.tf_resampler test file not present yet — gate inactive)"
+          fi
+          # 21d · brutex.options.strike_rules (41 stmts post-pragma, 10 branches,
+          #       33 tests). Closes 93.22→100% via 2 `# pragma: no cover
+          #       — defensive module-load assertion` on the rule-count +
+          #       rule-name-uniqueness integrity checks (lines 117-118 +
+          #       122-123). Same pattern as 21b timeframes — defensives
+          #       at module import time only fire on corrupted source.
+          if compgen -G "tests/unit/test_strike_rules.py" > /dev/null; then
+            pytest --cov=brutex.options.strike_rules --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strike_rules.py
+          else
+            echo "(brutex.options.strike_rules test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML

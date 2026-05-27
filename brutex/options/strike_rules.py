@@ -114,12 +114,16 @@ ALL_STRIKE_RULES: Final[tuple[StrikeRule, ...]] = (
     StrikeRule("delta_target_015", StrikeRuleKind.DELTA_TARGET, 0.15, True),
 )
 
-if len(ALL_STRIKE_RULES) != _EXPECTED_RULE_COUNT:
+if (
+    len(ALL_STRIKE_RULES) != _EXPECTED_RULE_COUNT
+):  # pragma: no cover — defensive module-load assertion
     raise AssertionError(
         f"Expected {_EXPECTED_RULE_COUNT} strike rules per Track 2 spec §6b, "
         f"got {len(ALL_STRIKE_RULES)}"
     )
-if len({r.name for r in ALL_STRIKE_RULES}) != _EXPECTED_RULE_COUNT:
+if (
+    len({r.name for r in ALL_STRIKE_RULES}) != _EXPECTED_RULE_COUNT
+):  # pragma: no cover — defensive module-load assertion
     raise AssertionError("rule names must be unique")
 
 # Convenience lookups (re-exported via brutex.options package __init__ +

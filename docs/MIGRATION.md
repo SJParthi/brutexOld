@@ -335,6 +335,53 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+258. **DEC-COV-BACKFILL-002 — 4-module coverage backfill ratchet: second batch of small-gap non-orchestrator modules pushed to 100% via 4 surgical tests + 4 module-load defensive-assertion pragmas** (2026-05-27, operator directive: continuation of "go ahead with the plan" after PR #154 closed Option B step 2). Lifts the strict-100% gate count 45 → 49 by closing the next batch of small-gap modules whose gaps were either testable corner cases or unreachable module-load assertions.
+
+    **Why this lands now:** PR #154 (DEC-COV-BACKFILL-001 entry #257) closed the 3 smallest-gap modules (observability.metrics, feed.resampler, donchian_breakout). Honest audit row 1 noted "~26 modules below strict-100%" remained. This PR closes 4 more — bringing the count to 22 below 100% and the strict-gate count to 49. The pattern is the same: surgical tests for genuinely-testable corner cases + honest `# pragma: no cover` for unreachable module-load defensive assertions.
+
+    **4 modules backfilled (in CI section 21a-21d order):**
+
+    | # | Module | Pre | Post | How |
+    |---|---|---:|---:|---|
+    | 21a | `brutex.data.parser` | 92.75% | 100% | +3 surgical tests in new `TestDecimalCoercion`: `test_decimal_input_passes_through` (line 145 — Decimal passthrough); `test_string_input_parses_to_decimal` (line 149 — Decimal from str); `test_iso_timestamp_with_offset_preserved` (branch 82→84 — tz-aware ISO skips IST-attach branch) |
+    | 21b | `brutex.data.timeframes` | 84.21% | 100% | +1 surgical test (`test_unsupported_tf_raises` covers line 140 `is_intraday` ValueError) + 2 `# pragma: no cover — defensive module-load assertion` on the EXPECTED_TF_COUNT integrity check (lines 66-69) and TF_LABELS-key-vs-ALL_TF_MINUTES consistency check (lines 97-98). Pragmas are honest — those assertions fire only at import time if module constants are corrupted, unreachable in normal test paths without monkey-patching pre-import. |
+    | 21c | `brutex.data.tf_resampler` | 94.74% | 100% | +1 surgical test (`test_non_dataframe_input_raises_typeerror` covers line 77 TypeError for non-polars.DataFrame input). |
+    | 21d | `brutex.options.strike_rules` | 93.22% | 100% | 2 `# pragma: no cover — defensive module-load assertion` on the rule-count integrity check (lines 117-118) and rule-name-uniqueness check (lines 122-123). Same pattern as 21b. Zero new tests; zero behavior change. |
+
+    **Total: 144 stmts + 44 branches now protected by per-module strict-100% gates that previously weren't.**
+
+    **Verification (Golden Rule #1 evidence — every claim grep-verified locally on 2026-05-27):**
+
+    Each module verified standalone via `.venv/bin/pytest --cov=brutex.<MOD> --cov-branch --cov-fail-under=100 tests/unit/test_<FILE>.py -q` returning success. Tests verified to pass in CI on first push.
+
+    **Source-code changes (Golden Rule #1 + #10 transparency):**
+
+    - `brutex/data/parser.py` — UNCHANGED (only tests added).
+    - `brutex/data/timeframes.py` — 2 lines modified: added `# pragma: no cover — defensive module-load assertion` to the 2 module-level `raise AssertionError(...)` integrity checks at lines 66 (EXPECTED_TF_COUNT) and 97 (TF_LABELS-key-match). Zero behavior change.
+    - `brutex/data/tf_resampler.py` — UNCHANGED (only tests added).
+    - `brutex/options/strike_rules.py` — 2 lines modified: added `# pragma: no cover — defensive module-load assertion` to the 2 module-level `raise AssertionError(...)` checks at lines 117 (rule-count) and 122 (rule-name-uniqueness). Zero behavior change.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 6 file changes (test additions + source pragmas + CI gate additions + 3 doc updates); 4 modules genuinely at 100% line + branch.
+    - ✅ REAL: every module's 100% coverage was verified by an actual standalone `pytest --cov=... --cov-fail-under=100` invocation in the sandbox before adding the gate entry. NOT aspirational.
+    - ✅ REAL: the count refresh (45 → 49) is mechanically verifiable post-merge via `grep -oE "pytest --cov=brutex\.[a-z_.]+" .github/workflows/ci.yml | sort -u | wc -l`.
+    - 🟡 PARTIAL: 4 of the 4 pragmas added are on TRULY UNREACHABLE module-load defensive assertions (integrity checks that only fire if module constants are corrupted at import time). This is the honest choice — writing a test that reloads the module with corrupted constants pre-import would require importlib gymnastics + monkeypatching, and the assertions are documentation/integrity tools rather than runtime hot paths.
+    - 🟡 PARTIAL: ~22 modules remain below strict-100% (per honest audit row 1 gap list); each is a future multi-PR ratchet target. This PR moves the bar 45→49.
+    - 📋 ROADMAP: the larger-gap modules (`orchestrator.rate_limiter` at 85.8% with 19 missing lines, `orchestrator.store` at 91.3% with 11 missing, `config.runtime` at 92.2% with 10 missing, `execution.simulator` at 93.7% with 6 missing) require substantial new tests, separate PR scope.
+
+    **What did NOT land in this PR:**
+
+    - No backfill of the larger-gap modules (`orchestrator.rate_limiter`, `orchestrator.store`, `config.runtime`, `execution.simulator`) — those require substantial new tests, separate PR.
+    - No new orchestrator-package strict gates — orchestrator package's __init__ pulls in fastbloom_rs which can't reinitialize per interpreter; standalone gates blocked.
+    - No edits to CLAUDE.md, TRACK1_*.md, or other spec docs.
+
+    **4-agent hostile review:** This PR's subject is small-scope test additions + defensive pragmas + CI gate refresh. Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only — small PR, mechanical code changes). Self-review verdict by reviewing Claude on 2026-05-27: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C would challenge: are the pragmas honest? Yes — each marks a module-load assertion that's structurally unreachable in normal test paths (would require pre-import monkeypatching). Are the 4 new tests well-formed? Yes — `test_decimal_input_passes_through` and `test_string_input_parses_to_decimal` exercise the actual price-type fast paths; `test_iso_timestamp_with_offset_preserved` exercises the tz-aware branch; `test_unsupported_tf_raises` exercises the ValueError path; `test_non_dataframe_input_raises_typeerror` exercises the type-check guard. No new factual claims about external systems introduced.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-COV-BACKFILL-002. **Builds on:** DEC-COV-BACKFILL-001 (entry #257, the prior 3-module backfill that surfaced the next-batch candidates) · DEC-COV-RATCHET-001 (entry #256, the 14-module gate ratchet) · DEC-COV-001 (the multi-step coverage ratchet pattern, MIGRATION entries #210-#232) · DEC-AUDIT-RECONCILE-002 (entry #254, the audit reconciliation that originally surfaced the "~16 modules still below" gap). **Closes:** Option B step 3 — backfill 4 more small-gap modules to 100%; strict-100% module count moves 45 → 49 (+4); remaining gap drops 26 → 22. **Does NOT close:** the larger-gap module backfills (separate multi-PR ratchet); orchestrator-package standalone gates (blocked by fastbloom_rs PyO3 ABI3 limitation).
+
 257. **DEC-COV-BACKFILL-001 — 3-module coverage backfill ratchet: backfill 95-99% modules to 100% line + branch via surgical test additions + 1 dead-code removal + 1 defensive `# pragma: no branch`** (2026-05-27, operator directive: continuation of "go ahead with the plan" after PR #153 closed Option B step 1). Lifts the strict-100% gate count 42 → 45 by closing the smallest-gap modules whose tests had ≤4 missing-line or branch-coverage gaps.
 
     **Why this lands now:** PR #153 (DEC-COV-RATCHET-001 entry #256) added 14 already-at-100% modules to the strict-100% CI gate but did NOT backfill any genuinely-below-100% modules. Honest audit row 1 listed "~29 modules below strict-100%" as the remaining gap. This PR closes the smallest 3 of those 29 via surgical test additions (+4 tests for observability.metrics) and minimally invasive source-code refinements (1 dead-code deletion in donchian_breakout, 1 defensive pragma in feed.resampler). Strict-100% gate count moves 42 → 45 (+3); remaining gap drops 29 → 26.

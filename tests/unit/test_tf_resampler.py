@@ -55,6 +55,12 @@ def _make_1m_session(
 
 
 class TestSchemaValidation:
+    def test_non_dataframe_input_raises_typeerror(self) -> None:
+        """Cover line 77: non-DataFrame input raises TypeError with the
+        type name in the message."""
+        with pytest.raises(TypeError, match="Expected polars.DataFrame"):
+            resample_1m_to_tf([1, 2, 3], 5)  # type: ignore[arg-type]
+
     def test_missing_column_raises(self) -> None:
         df = pl.DataFrame(
             {

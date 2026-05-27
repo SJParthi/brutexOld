@@ -104,3 +104,64 @@ class TestErrorPaths:
         # surfaces that as CandleRowError.
         with pytest.raises(CandleRowError, match="high"):
             parse_candle_row(["2024-01-25T09:15:00", 100.0, 99.0, 100.0, 100.0, 0, None])
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Decimal-coercion paths (closes lines 145, 149 of _to_decimal)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestDecimalCoercion:
+    """Cover the Decimal-passthrough and string-input paths of
+    ``_to_decimal``, plus the tz-aware timestamp branch where the input
+    already carries a timezone offset (branch 82→84)."""
+
+    def test_decimal_input_passes_through(self) -> None:
+        """Cover line 145: when the raw price is already ``Decimal``,
+        ``_to_decimal`` returns it unchanged (no str() round-trip)."""
+        from decimal import Decimal
+
+        bar = parse_candle_row(
+            [
+                "2024-01-25T09:15:00",
+                Decimal("100.05"),  # already Decimal
+                Decimal("100.05"),
+                Decimal("100.05"),
+                Decimal("100.05"),
+                0,
+                None,
+            ]
+        )
+        assert bar.open == Decimal("100.05")
+        assert bar.close == Decimal("100.05")
+
+    def test_string_input_parses_to_decimal(self) -> None:
+        """Cover line 149: when the raw price is a ``str``, ``_to_decimal``
+        constructs Decimal directly from the string."""
+        from decimal import Decimal
+
+        bar = parse_candle_row(
+            [
+                "2024-01-25T09:15:00",
+                "100.05",  # string price
+                "100.05",
+                "100.05",
+                "100.05",
+                0,
+                None,
+            ]
+        )
+        assert bar.open == Decimal("100.05")
+        assert bar.close == Decimal("100.05")
+
+    def test_iso_timestamp_with_offset_preserved(self) -> None:
+        """Cover branch 82→84: timestamp string with explicit timezone
+        offset skips the IST-attach branch and goes straight to
+        ``astimezone(UTC)``."""
+        # IST is UTC+05:30; offset-aware ISO should parse + convert.
+        bar = parse_candle_row(
+            ["2024-01-25T09:15:00+05:30", 100.05, 100.05, 100.05, 100.05, 0, None]
+        )
+        # IST 09:15 == UTC 03:45
+        assert bar.timestamp.hour == 3
+        assert bar.timestamp.minute == 45
