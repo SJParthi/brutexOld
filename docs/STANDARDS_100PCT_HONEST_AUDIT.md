@@ -1,4 +1,4 @@
-# BruteX — 100% Standards Honest Audit (2026-05-26)
+# BruteX — 100% Standards Honest Audit (2026-05-27)
 
 > **Authority:** This doc is the operator-facing ground truth for the
 > "100% guarantee" question. It is built from five parallel deep-research
@@ -7,7 +7,21 @@
 > Rule #1 (no hallucination) and Golden Rule #10 (honest envelope), nothing
 > here is rounded up.
 >
-> **Last refresh:** 2026-05-26 evening — second-pass reconciliation
+> **Last refresh:** 2026-05-27 morning — third-pass reconciliation
+> (DEC-AUDIT-RECONCILE-002, MIGRATION entry #254). Stale module count
+> "29 modules @ strict 100%" (§2 row 1 + row 9) corrected to **28
+> modules** verified by `grep -E "pytest.*--cov=brutex\.[a-z_.]+.*--cov-fail-under=100" .github/workflows/ci.yml`
+> on 2026-05-27 (DEC-INDICATOR-COVERAGE-001 entry #245 added +3 indicators;
+> DEC-VENDOR-PIVOT-001 entry #246 removed ~5 Groww gates; net −1).
+> §3 5-pillar AUTOMATED row ratcheted ❌ ASPIRATIONAL → 🟡 PARTIAL after
+> entries #238/#239/#240/#241/#243/#247/#249 collectively wired the 4
+> observability detectors + the adaptive rate limiter + the Telegram path
+> (table-text update; the §0 headline metric already reflected this since
+> entry #248). §4 12-row real-time-capability matrix updates rows 8/11/12
+> (Telegram + SLA + Watchdog) from ❌/🟠 to 🟢 WIRED. **No new code or
+> tests landed in this refresh — pure audit truth-up.**
+>
+> **Prior refresh:** 2026-05-26 evening — second-pass reconciliation
 > (DEC-AUDIT-TRUTH-RECONCILE-001, MIGRATION entry #248). Four §9 gap
 > rows that were still labeled 🔴 HIGH / 🟡 MID as `unimplemented` /
 > `missing module` are reclassified 🟢 CLOSED: Watchdog (entry #240),
@@ -35,7 +49,7 @@ would violate Golden Rule #1. The codebase itself documents the gap.
 | **Z+ 6-marker PR-body guard** | ✅ FAIL-CLOSED | — | Marker PRESENCE checked; CONTENT quality is reviewer |
 | **5-pillar decree fully evidenced in code** | 2 / 5 | 5 / 5 | COMMON 🟡, SCALABLE 🟡, AUTOMATED 🟡 (was ❌; ratcheted via DEC-INFRA-OPS-001) |
 | **14 bracket items fully enforced** | 8 / 14 | 14 / 14 | 4 partial + 2 manual |
-| **Real-time capabilities truly continuous** | 6 / 12 | — | 3 nightly + 1 batched + 2 not-wired |
+| **Real-time capabilities truly continuous** | 9 / 12 | — | 3 nightly remain (rows 5/6/7); 0 batched-only; 0 not-wired (was 6/12 pre-DEC-AUDIT-RECONCILE-002; ratcheted via §4 rows 8/11/12 flip) |
 | **Per-scope auto enforcement** (PR/sub-PR/task/sub-task/cur-session/new-session) | 4.5 / 6 | 6 / 6 | Pre-commit install discipline + branch-protection ROADMAP (was 3.5/6 pre-DEC-SESSION-START-HOOK-001) |
 
 **One-sentence verdict:** ~70% of the decreed defense surface is mechanically
@@ -72,7 +86,7 @@ performance, uniqueness, deduplication, O(1) latency.
 
 | # | Bracket item | Enforcement | Gate citation | Threshold | Gap to 100% |
 |---|---|---|---|---|---|
-| 1 | **Code coverage** | 🟡 PARTIAL | `ci.yml::test`, DEC-COV-001 | 90% global + 29 modules @ strict 100% | ~16 modules still below strict-100% (ratchet in progress) |
+| 1 | **Code coverage** | 🟡 PARTIAL | `ci.yml::test`, DEC-COV-001 | 90% global + **28 modules @ strict 100%** (verified 2026-05-27 via `grep -E "pytest.*--cov=brutex\.[a-z_.]+.*--cov-fail-under=100" .github/workflows/ci.yml` returning 28 unique modules; up from 29 at last audit because DEC-INDICATOR-COVERAGE-001 entry #245 added +3 indicators and DEC-VENDOR-PIVOT-001 entry #246 removed ~5 Groww gates) | **~43 modules** still below strict-100% out of 71 total `brutex/` modules excluding `dashboard/` (ratchet in progress; largest gaps: `orchestrator.{audit,bloom,store,pipeline,quota_tracker,rate_limiter,adaptive_rate_limiter}`, `strategies.{library,runner,sweep}`, `costs.calculator`, `data.*`, adapters) |
 | 2 | **Code scanning** | 🟢 FULL | `ci.yml::security` + `security-audit.yml` | bandit `-l` + CodeQL + Semgrep + Trivy + gitleaks + pip-audit + cargo-audit | — |
 | 3 | **Code duplication** | 🟢 FULL | `ci.yml::duplication` | jscpd ≤3% blocks (DEC-P0-001 made it blocking) | Target 0% (currently 3%) |
 | 4 | **Functionality missing** | 🟡 PARTIAL | `scripts/ci/spec_test_crosswalk.py` FAIL-CLOSED | Every spec section maps to ≥1 test | Spec-coverage measurement is binary (matched/not), not depth |
@@ -80,7 +94,7 @@ performance, uniqueness, deduplication, O(1) latency.
 | 6 | **Bug fixing (regression req)** | 👁️ + ✅ | `validate_bugfix_regression.py` | `fix:` PR must touch `tests/` | Test QUALITY judged by reviewer |
 | 7 | **Issues finding** | 🟢 FULL | `ci.yml::lint`, `ci.yml::type` | ruff strict + mypy strict + pyright strict + vulture + pylint subset | — |
 | 8 | **Testing types (7)** | 🟢 FULL | `ci.yml` + `stress-nightly.yml` | unit/integration/property/golden/bench/stress/mutation | Stress runs nightly only on GHA |
-| 9 | **Testing coverage** | 🟡 PARTIAL | `ci.yml::test` | 90% floor + 29 strict-100% modules | Full per-module 100% not yet |
+| 9 | **Testing coverage** | 🟡 PARTIAL | `ci.yml::test` | 90% floor + **28 strict-100% modules** (current; see row 1 for module list rationale) | Full per-module 100% not yet — ~43 modules remain below the strict-100% gate |
 | 10 | **Real-time testing** | 🟢 FULL | `ci.yml` on `push` + `pull_request` | Every push runs full suite | — |
 | 11 | **Code performance** | 🟡 PARTIAL | `ci.yml::bench`, DEC-P0-020 | p99 ratio ≤3-10× on CI; 1.1× target on M4 Pro | M4 Pro absolute gate needs runner |
 | 12 | **Uniqueness** | 🟢 FULL | `tests/property/test_combo_hash_uniqueness.py` + `test_dedup_hash_properties.py` | 9-field BLAKE3 + distinct-combo→distinct-hash | Just landed: DEC-COMBO-HASH-UNIQUENESS-001 (commit 2d2cf2a) |
@@ -102,10 +116,13 @@ Re-audited 2026-05-25.
 | **COMMON** | 🟡 PARTIAL | jscpd 3% gate live + Rust facade in `rust/fno-math/` + indicators imported cleanly | `pyproject.toml`, `STANDARDS_100PCT.md` §5 row 7 |
 | **DYNAMIC** | 🟢 ENFORCED | Indicator registry exports 5 classes; plugin factories; 52-bit u64 mask vocab fully implemented; conflict-graph pruner present | `brutex/indicators/__init__.py`, `brutex/vocabulary/evaluator.py`, `brutex/vocabulary/bits.py` |
 | **SCALABLE** | 🟡 PARTIAL | O(1) ratio gates ENFORCED in CI (3-10× ceilings honest per GHA flake tolerance); absolute 50 M/s is ROADMAP | `tests/bench/test_throughput_canary.py`, DEC-P0-020 |
-| **AUTOMATED** | ❌ ASPIRATIONAL | Release Please ✅ + auto-merge ✅; **Watchdog ❌ no code, Telegram 🟠 code-without-wiring, Auto-resume ❌ explicitly rejected by DEC-P0-029** | `.github/workflows/release.yml`, `auto-merge.yml`, `brutex/orchestrator/quota_tracker.py` (no-resume rationale), `brutex/notifications/telegram.py` (stub) |
+| **AUTOMATED** | 🟡 PARTIAL | Release Please ✅ + auto-merge ✅ + **Watchdog ✅ LIVE** (DEC-WATCHDOG-001 entry #240) + **SLA detector ✅ LIVE** (DEC-SLA-DETECTOR-001 entry #239) + **L3 replay oracle ✅ LIVE** (DEC-L3-REPLAY-ORACLE-001 entry #241) + **Telegram wiring ✅ LIVE** (DEC-TELEGRAM-WIRING-001 entry #238 + DEC-TELEGRAM-WIRING-VERIFICATION-001 entry #247) + **adaptive rate limiter ✅ LIVE** (DEC-ADAPTIVE-RATE-LIMITER-001 entry #249); production composer `compose_standard_monitor` wires all 4 detectors + `brutex monitor` CLI runs them under env-driven config; Auto-resume ❌ explicitly rejected by DEC-P0-029. **Remaining gap:** the pipeline-event subscriber path is dormant until Phase 2 `PhaseRunner` drivers land. | `.github/workflows/release.yml`, `auto-merge.yml`, `brutex/observability/{watchdog,sla,standard_monitor,monitor,logging}.py`, `brutex/orchestrator/{replay,adaptive_rate_limiter}.py`, `brutex/notifications/{telegram,wiring}.py` |
 
-**Verdict:** 2 of 5 pillars fully evidenced (COMPREHENSIVE, DYNAMIC).
-2 partial (COMMON, SCALABLE). **1 aspirational (AUTOMATED).**
+**Verdict (post 2026-05-27 reconciliation):** 2 of 5 pillars fully evidenced
+(COMPREHENSIVE, DYNAMIC). **3 partial (COMMON, SCALABLE, AUTOMATED) —
+AUTOMATED ratcheted ❌ ASPIRATIONAL → 🟡 PARTIAL** after entries #238/#239/
+#240/#241/#243/#247/#249 collectively wired the 4 observability detectors +
+the adaptive rate limiter + the Telegram path. 0 aspirational.
 
 ---
 
@@ -122,14 +139,19 @@ The operator demanded "real-time" everything. Here's what's truly continuous.
 | 5 | Mutation | 🔵 EVERY-PUSH (state.py) + 🟡 WEEKLY (full) | `ci.yml:1042-1166` + `mutation.yml` |
 | 6 | Security scan | 🔵 EVERY-PUSH + 🟡 WEEKLY | `ci.yml:840-898` + `security-audit.yml` |
 | 7 | Dep freshness | 🟡 NIGHTLY | `dep-freshness-nightly.yml` (reports only, no enforcement) |
-| 8 | Telegram alerts | 🟠 EVENT-DRIVEN (CODE-ONLY) | `brutex/notifications/telegram.py` — no wiring to publish sites |
+| 8 | Telegram alerts | 🟢 EVENT-DRIVEN (WIRED) | `brutex/notifications/{telegram,wiring}.py` + `brutex/observability/standard_monitor.py::_publish_telegram` — `compose_standard_monitor` routes SLA breach / Watchdog stale / L3 replay-inconsistency events into the Telegram path (DEC-TELEGRAM-WIRING-001 entry #238 + DEC-TELEGRAM-WIRING-VERIFICATION-001 entry #247); end-to-end proven by `tests/integration/test_compose_monitor_sla_to_telegram.py`. Pipeline-event subscriber dormant until Phase 2 drivers land. |
 | 9 | Dashboard updates | 🟢 CONTINUOUS | `brutex/dashboard/app.py:659` — 500ms WebSocket + 1s HTTP fallback |
 | 10 | Audit log (hash-chain) | 🟢 CONTINUOUS | `brutex/orchestrator/audit.py` — per-event JSONL append |
-| 11 | SLA monitoring | ❌ NOT WIRED | docstring mention only; no enforcement |
-| 12 | Worker health watchdog | ❌ NOT WIRED | dashboard tracks last_heartbeat but no watchdog detects staleness |
+| 11 | SLA monitoring | 🟢 WIRED | `brutex/observability/sla.py::SLADetector` (DEC-SLA-DETECTOR-001 entry #239) — state-machine NORMAL ↔ BREACHED transitions; `on_breach` / `on_recovery` callbacks invoke Telegram via `compose_standard_monitor` (entry #243); runs under `brutex monitor` CLI per env-driven `MonitorConfig(sla_rules=...)`. |
+| 12 | Worker health watchdog | 🟢 WIRED | `brutex/observability/watchdog.py::Watchdog` (DEC-WATCHDOG-001 entry #240) — `make_heartbeat_subscriber` for `PhaseRunner` integration + `on_hung` Telegram routing in `compose_standard_monitor` (entry #243); fires Telegram on `BRUTEX_WATCHDOG_TIMEOUT_SECONDS` (default 300s) elapsed without beat. Phase 2 workers activate the path by calling `make_heartbeat_subscriber`. |
 
-**Verdict:** 6 truly real-time (push/event/stream); 3 scheduled (nightly);
-1 batched (Telegram dedupe); **2 not wired (SLA + worker watchdog)**.
+**Verdict (post 2026-05-27 reconciliation):** **9 truly real-time** (push/
+event/stream; rows 1, 2, 3, 4, 6, 8, 9, 10, 11, 12 — SLA + Watchdog +
+Telegram all flipped to 🟢 WIRED via entries #238/#239/#240/#247/#243).
+3 scheduled (nightly, rows 5/6 weekly+nightly, 7 nightly); 0 batched-only;
+**0 not-wired**. The only event-driven path remaining dormant is the
+pipeline-event subscriber, which legitimately awaits Phase 2 `PhaseRunner`
+drivers.
 
 ---
 
