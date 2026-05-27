@@ -335,6 +335,52 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+270. **DEC-SPEC-CONSISTENCY-WAVE-SUMMARY-001 — TRACK1_REQUIREMENTS_FINAL.md §10.5 C-12 bookkeeping fix + §10.6 cumulative spec-consistency wave summary table (9th-of-~15 stale-text locations reconciled + wave consolidation)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — ninth iteration of Track-1-only docs ratchet wave; this PR consolidates the 8-PR wave into a single discoverable summary at §10.6). **Two changes:** (1) bug fix — C-12 was listed in BOTH §10.1 (RESOLVED per DEC-SPEC-CONSISTENCY-001 entry #263) AND §10.5 (Open items); removed from §10.5 with explicit bookkeeping note. (2) new §10.6 — 7-row table summarizing the spec-consistency wave (PRs #160-#166 / DEC-SPEC-CONSISTENCY-001..007 / MIGRATION entries #263-#269) plus the closure pattern + remaining count.
+
+    **What this fixes:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.5` — removed `C-12` from the open-items list (it was already RESOLVED per §10.1 row added in DEC-SPEC-CONSISTENCY-001 entry #263); added explicit bookkeeping note: "(**C-12 removed from this list 2026-05-27** — already RESOLVED per §10.1 row added in DEC-SPEC-CONSISTENCY-001 entry #263; bookkeeping fix.)"
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.6` — new section "Track 1 spec-consistency follow-up wave (2026-05-27)" with:
+      - 1-paragraph context citing CLAUDE.md §3's tracked follow-up note
+      - 7-row table mapping each wave PR to its DEC-ID + MIGRATION entry + File:Section + Closes
+      - Closure-pattern statement (1-paragraph amendment + MIGRATION entry + 8-decision builds-on chain + 1-agent hostile self-review per runbook)
+      - Honest progress statement: 8 of ~15 reconciled; ~7 remain
+      - Decision-ID extension note: DEC-REQS-FINAL-RECONCILE-001 (2026-05-27, extended 2026-05-27 with §10.6 wave summary + §10.5 C-12 bookkeeping fix)
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No edits to §10.1–§10.4 content (preserved exactly).
+    - No new amendments to any TRACK1_*.md spec section (this PR consolidates the wave; doesn't extend it).
+    - No edits to any code, test, workflow.
+    - No expansion of DEC-P0-063's authorization.
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.5` — 1-line bookkeeping fix.
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.6` — new section (~25 lines, 7-row table + context).
+    - `docs/MIGRATION.md` — this entry #270.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: every wave-table row grep-verifiable against MIGRATION.md entries #263-#269 + current main branch state.
+    - ✅ REAL: bookkeeping fix corrects a real internal inconsistency in §10 (C-12 appearing in both RESOLVED and Open lists).
+    - 🟡 PARTIAL: 8 of ~15 stale-text locations reconciled (running total — 7 amendments via the wave + 1 C-12 row added in DEC-SPEC-CONSISTENCY-001 = 8); ~7 stale-text locations remain (per the ~15 estimate in CLAUDE.md §3).
+    - 📋 ROADMAP: ~7 more stale-text locations remain; operator can choose to address them in future PRs OR declare the wave's residual gap acceptable and move to Option D / Phase 2.
+
+    **What did NOT land in this PR:**
+
+    - No edits to §1–§4 tables (original 2026-05-18 review snapshot preserved).
+    - No edits to §10.1–§10.4 content.
+    - No new spec amendments.
+    - No edits to any other TRACK1_*.md file.
+
+    **4-agent hostile review:** Pure-docs §10 addendum extension (bookkeeping fix + cumulative wave summary table). Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) the C-12 bookkeeping fix corrects a real internal inconsistency (C-12 in both §10.1 RESOLVED + §10.5 Open) — verified via grep before fix; (2) the §10.6 7-row table accurately maps each wave PR to its DEC-ID + MIGRATION entry — verified via `grep -nE "^DEC-SPEC-CONSISTENCY|^26[3-9]\\." docs/MIGRATION.md`; (3) the cited closure pattern matches the actual pattern used across PRs #160-#166; (4) the "8 of ~15 reconciled" count matches the running total across the wave; (5) no new external claims about Groww/NSE/options markets introduced.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-SPEC-CONSISTENCY-WAVE-SUMMARY-001. **Builds on (the full wave it consolidates):** DEC-SPEC-CONSISTENCY-007 (entry #269) · DEC-SPEC-CONSISTENCY-006 (entry #268) · DEC-SPEC-CONSISTENCY-005 (entry #267) · DEC-SPEC-CONSISTENCY-004 (entry #266) · DEC-SPEC-CONSISTENCY-003 (entry #265) · DEC-SPEC-CONSISTENCY-002 (entry #264) · DEC-SPEC-CONSISTENCY-001 (entry #263) · DEC-REQS-FINAL-RECONCILE-001 (entry #262, the §10 addendum this PR extends) · DEC-P0-063 (entry #200) · CLAUDE.md §3. **Closes:** §10.5 internal inconsistency (C-12 bug fix) + §10.6 cumulative wave-summary discoverability gap. **Does NOT close:** the remaining ~7 stale-text locations across TRACK1_*.md / track2 files.
+
 269. **DEC-SPEC-CONSISTENCY-007 — TRACK1_PHASE_PLAN.md Week 2 coverage-gate row updated with current strict-100% module count + ratchet chain (8th-of-~15 stale-text locations reconciled)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — eighth iteration of Track-1-only docs ratchet wave). The Week 2 "Coverage gate raised" row cited stale count `33 strict-100% module gates today (DEC-INDICATOR-COVERAGE-001 + DEC-COMBO-HASH-UNIQUENESS-001)` — after the Option B ratchet arc (PRs #153-#158), the count is **51 modules** and there are several more DEC IDs.
 
     **What this fixes:**
