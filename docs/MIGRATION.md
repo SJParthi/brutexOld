@@ -335,6 +335,44 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+263. **DEC-SPEC-CONSISTENCY-001 — 2-line ingest-scope spec consistency fix (PHASE_PLAN.md Week 7 exit criteria + BACKTEST_SPEC.md Day-1 hour-by-hour) + §10.1 C-12 resolution row** (operator directive 2026-05-27 "make it ready for merge ... and then go ahead with the plan okay?" — Option B post-merge follow-through, second iteration). Two stale-text lines that misstated the INGEST surface as "3 instruments" instead of "4 instruments (NIFTY 50, BANKNIFTY, SENSEX, INDIA VIX)" — both contradict CLAUDE.md §3 + TRACK1_BACKTEST_SPEC.md:217 which lock the INGEST surface at 4 instruments since DEC-P0-029. Also adds C-12 (Ram Navami fixture mislabel) to TRACK1_REQUIREMENTS_FINAL.md §10.1 since the fix was already in place (DEC-P0-042) but un-cited in the resolution addendum.
+
+    **What this fixes:**
+
+    - `docs/TRACK1_PHASE_PLAN.md:162` — Week 7 "Exit criteria" line was "5 years × 3 instruments × 15 TFs" → updated to "5 years × 4 instruments (NIFTY 50, BANKNIFTY, SENSEX, INDIA VIX) × 21 TFs" (matches CLAUDE.md §3 + spec line 217 + locked TF count from `brutex/data/timeframes.py:28-69`).
+    - `docs/TRACK1_BACKTEST_SPEC.md:718` — "Day 1 hour-by-hour" line was "Full 5y data for all 3 instruments" → updated to "Full 5y data for all 4 instruments (NIFTY 50, BANKNIFTY, SENSEX, INDIA VIX — 5 min API time after token works)" (same alignment with spec line 217).
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.1` — adds C-12 RESOLVED row + a "(spec consistency)" row documenting which "3 instruments" lines were updated AND which were INTENTIONALLY LEFT at "3 instruments" (the brute-force trial-multiplication lines at 152, 314, 688, 881 — those describe the brute-force ENGINE which excludes REFERENCE_ONLY VIX per CLAUDE.md §3 + DEC-P0-029).
+
+    **What this PR does NOT fix (deliberately scoped narrow):** The brute-force ENGINE lines (`TRACK1_BACKTEST_SPEC.md:152` "× 3 instruments (NIFTY 50, BANKNIFTY, SENSEX)" in the trial-multiplication formula; `:314` "63 matrices (3 instruments × 21 TFs)"; `:688` "Phase 1 (Week 1-2) covers ALL 3 instruments × ALL 21 timeframes"; `:881` "Pilot must cover all 3 instruments") — those are FACTUALLY CORRECT in the brute-force engine context because VIX is REFERENCE_ONLY per CLAUDE.md §3 + DEC-P0-029 (VIX is NEVER part of brute-force pattern combinations or the 52-condition vocabulary; it is fetched + stored and stamped as `vix_at_entry`/`vix_at_exit` on every trade only). Touching them would BREAK the engine-vs-lake distinction.
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_PHASE_PLAN.md` — 1-line edit (line 162).
+    - `docs/TRACK1_BACKTEST_SPEC.md` — 1-line edit (line 718).
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md` — 2 new rows added to §10.1 table.
+    - `docs/MIGRATION.md` — this entry #263.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 4 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: every "stale text" claim references a current source-of-truth line that contradicts the stale line (CLAUDE.md §3 + spec line 217 + `brutex/data/timeframes.py:28-69`).
+    - ✅ REAL: explicit "what NOT to touch" inventory protects the engine-vs-lake distinction (brute-force engine lines stay at 3).
+    - 🟡 PARTIAL: this fixes 2 of the ~5 genuinely-stale `3 instruments`-context lines (the other 4 are brute-force-engine context and CORRECT at 3). Coverage of CLAUDE.md §3's "Full §3 / cross-spec reconciliation across the ~15 remaining stale-text locations is a tracked follow-up PR" is incremental, not complete.
+    - 📋 ROADMAP: full §3 reconciliation across all ~15 stale-text locations remains tracked per CLAUDE.md §3.
+
+    **What did NOT land in this PR:**
+
+    - No edits to brute-force engine `3 instruments` lines (correct as-is per CLAUDE.md §3 + DEC-P0-029).
+    - No edits to `docs/track2/` files (Track 2 scope; separate decision PR).
+    - No new code, tests, or workflows.
+    - No edits to STANDARDS_100PCT.md or the 21 sub-row matrix.
+
+    **4-agent hostile review:** Pure-docs 2-line spec consistency fix + 2-row addendum update. Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) both edits align with CLAUDE.md §3 + spec line 217 (the source of truth); (2) the brute-force engine lines (152, 314, 688, 881) are correctly LEFT UNCHANGED (engine-vs-lake distinction preserved); (3) C-12 closing decision DEC-P0-042 is verifiable in VERIFICATION_PYRAMID.md:86; (4) no new external claims introduced.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-SPEC-CONSISTENCY-001. **Builds on:** DEC-REQS-FINAL-RECONCILE-001 (entry #262, the §10 addendum this PR extends) · DEC-P0-029 (VIX added as 4th instrument REFERENCE_ONLY) · DEC-P0-042 (Ram Navami fixture date fix in VERIFICATION_PYRAMID.md) · CLAUDE.md §3 (Track 1 INGEST scope = 4 instruments). **Closes:** 2 stale-text lines in TRACK1_PHASE_PLAN.md + TRACK1_BACKTEST_SPEC.md that misstated INGEST scope; C-12 citation gap in §10.1. **Does NOT close:** the other ~13 stale-text locations tracked under CLAUDE.md §3 "follow-up PR" — those remain genuine open work.
+
 262. **DEC-REQS-FINAL-RECONCILE-001 — TRACK1_REQUIREMENTS_FINAL.md §10 post-2026-05-18 resolution-status addendum: closes citation-staleness gap between the 2026-05-18 4-agent hostile review snapshot and the current state of the repo on 2026-05-27** (operator directive 2026-05-27 "make it ready for merge monitor it until it gets meregd if any conflicts or issues reoslve and again mefrge it dude and then go ahead with the plan okay?" — Option B post-merge follow-through). Pure-docs additive PR: §1–§4 snapshot tables are preserved unchanged to maintain audit trail; new §10 maps each resolved item to its closing decision so operators reading §1–§4 don't chase stale citations.
 
     **What this closes:**

@@ -715,7 +715,7 @@ rebuilds all of this properly.
 
 ```
 Hour 0-2   ──  Python skeleton + Groww token wired + first 1m batch fetched
-Hour 2-4   ──  Full 5y data for all 3 instruments (5 min API time after token works)
+Hour 2-4   ──  Full 5y data for all 4 instruments (NIFTY 50, BANKNIFTY, SENSEX, INDIA VIX — 5 min API time after token works)
                Stored as Parquet + ZSTD
 Hour 4-6   ──  Resample 1m → all 21 TFs (Polars groupby + agg)
                Build calendar module (holidays, Muhurat, pre-open)
