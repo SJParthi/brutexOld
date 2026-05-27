@@ -766,6 +766,25 @@ jobs:
           else
             echo "(brutex.options.strike_rules test file not present yet — gate inactive)"
           fi
+          # DEC-COV-BACKFILL-003 (entry #259, 2026-05-27): 1-module
+          # backfill — close the biggest non-orchestrator gap via 6
+          # surgical tests in TestOSErrorPaths covering the OSError
+          # branches of write/read/delete + the PermissionError + generic
+          # OSError branches of is_pid_alive. Lifts strict-100% gate
+          # count 49 → 50.
+          # 22a · brutex.config.runtime (111 stmts, 18 branches, 37 tests).
+          #       Closes 92.25→100% via TestOSErrorPaths (6 new tests
+          #       using monkeypatch to inject OSError into Path.replace
+          #       (line 269-271 atomic-rename failure), Path.read_text
+          #       (line 298-299 read failure), Path.unlink (line 316-317
+          #       delete failure), os.kill (line 342 PermissionError, line
+          #       345-349 generic OSError with errno != ESRCH branch +
+          #       errno == ESRCH branch).
+          if compgen -G "tests/unit/test_config_runtime.py" > /dev/null; then
+            pytest --cov=brutex.config.runtime --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_config_runtime.py
+          else
+            echo "(brutex.config.runtime test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
