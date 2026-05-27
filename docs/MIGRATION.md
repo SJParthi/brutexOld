@@ -335,6 +335,45 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+266. **DEC-SPEC-CONSISTENCY-004 — TRACK1_RUNTIME_ARCHITECTURE.md §2 amended with DEC-P0-063 engine-vs-lake note (5th-of-~15 stale-text locations reconciled)** (operator directive 2026-05-27 "once again lust ne the track 1 dude okay?" — fifth iteration of the Track-1-only docs ratchet wave). The §2 "The 4 Instruments × 21 Timeframes — End-to-End Pipeline" section was locked 2026-05-15 evening (before DEC-P0-063 entry #200 from 2026-05-22) — describes the core 4-instrument pipeline diagram but with no acknowledgement of the LAKE expansion to 200 stocks (spot + options).
+
+    **What this fixes:**
+
+    - `docs/TRACK1_RUNTIME_ARCHITECTURE.md §2` — added a 1-paragraph "AMENDED 2026-05-22 per DEC-P0-063" note at the start of the section explicitly stating that the pipeline below describes the **core 4-instrument surface**, while the LAKE expansion uses the same Groww API endpoints + same lake layout + same DuckDB catalog + same LMDB work_items + same Audit JSONL chain — no architectural changes (per COMMON · DYNAMIC · SCALABLE rules in CLAUDE.md §11). Explicit note that "the critical asymmetry note at the end of this section is correct for the ENGINE; the LAKE has the broader DEC-P0-063 surface."
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No edits to the actual pipeline diagram inside §2 (the 4-instrument core pipeline is correct as-is).
+    - No edits to the "critical asymmetry" note (the engine truly only uses 3 brute-force instruments).
+    - No edits to securityId values inside the diagram (those are Phase 0 verification pending per CLAUDE.md §6 — separate decision).
+    - No edits to any other TRACK1_*.md file.
+    - No new code, tests, or workflows.
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_RUNTIME_ARCHITECTURE.md §2` — 1-paragraph amendment note (~6 lines).
+    - `docs/MIGRATION.md` — this entry #266.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: every claim mirrors locked text in CLAUDE.md §3 + MIGRATION entry #200 + DEC-SPEC-CONSISTENCY-002 (#264) + DEC-SPEC-CONSISTENCY-003 (#265); no new factual claims introduced.
+    - ✅ REAL: pipeline diagram + critical-asymmetry note explicitly preserved as the ENGINE description; LAKE distinction added without touching engine accuracy.
+    - 🟡 PARTIAL: 5 of CLAUDE.md §3's "~15 remaining stale-text locations" now reconciled.
+    - 📋 ROADMAP: ~10 more stale-text locations remain; each gets a separate decision PR or batched follow-up.
+
+    **What did NOT land in this PR:**
+
+    - No edits to TRACK1_PHASE_PLAN.md, TRACK1_VOCABULARY.md, TRACK1_PERFORMANCE_BUDGET.md, TRACK1_MICROSTRUCTURE.md, TRACK1_VERIFICATION_PYRAMID.md, TRACK1_DASHBOARD_DESIGN.md, TRACK1_GROWW_ADAPTER.md, TRACK1_OPTIMIZATIONS.md.
+    - No edits to securityId values (Phase 0 verification pending per CLAUDE.md §6).
+    - No edits to the pipeline diagram itself.
+
+    **4-agent hostile review:** Pure-docs 1-paragraph amendment that mirrors locked text in CLAUDE.md §3 + MIGRATION entry #200 + sibling DEC-SPEC-CONSISTENCY entries. Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) the amendment note is a faithful mirror of locked text; (2) the pipeline diagram is preserved exactly; (3) the engine-vs-lake distinction is explicit; (4) cross-references to sibling DEC-SPEC-CONSISTENCY entries resolve; (5) no new external claims about Groww/NSE/options markets introduced.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-SPEC-CONSISTENCY-004. **Builds on:** DEC-SPEC-CONSISTENCY-003 (entry #265, sibling DATA_INGEST §1 amendment) · DEC-SPEC-CONSISTENCY-002 (entry #264, BACKTEST_SPEC §"Scope Lock" amendment) · DEC-SPEC-CONSISTENCY-001 (entry #263) · DEC-REQS-FINAL-RECONCILE-001 (entry #262) · DEC-P0-063 (entry #200, the locked LAKE expansion this PR mirrors) · DEC-P0-029 (VIX as 4th REFERENCE_ONLY instrument) · CLAUDE.md §3 (scope-statement source of truth). **Closes:** TRACK1_RUNTIME_ARCHITECTURE.md §2 — the runtime-architecture pipeline section — now reflects DEC-P0-063. **Does NOT close:** the other ~10 stale-text locations across remaining TRACK1_*.md files.
+
 265. **DEC-SPEC-CONSISTENCY-003 — TRACK1_DATA_INGEST_DESIGN.md §1 "Scope" amended to reflect DEC-P0-063 LAKE expansion (4th-of-~15 stale-text locations reconciled)** (operator directive 2026-05-27 "no issues go ahead with the current track it loosk fine right dude? ... once again lust ne the track 1 dude okay?" — Option B post-merge follow-through, fourth iteration; user confirmed Track-1-only docs ratchet wave). The §1 "Scope" table was locked 2026-05-15 / 2026-05-16 (before DEC-P0-063 entry #200 from 2026-05-22) and described scope as "4 instruments fetched" with no acknowledgement of the LAKE expansion to 200 NSE F&O stocks (spot + options). CLAUDE.md §3 + MIGRATION entry #200 already encode the engine-vs-lake distinction; this PR brings the ingest-design spec into alignment with the same engine-vs-lake structure now in TRACK1_BACKTEST_SPEC.md §"Scope Lock" (per DEC-SPEC-CONSISTENCY-002 entry #264).
 
     **What this fixes:**

@@ -58,6 +58,8 @@
 
 ## 2. The 4 Instruments × 21 Timeframes — End-to-End Pipeline
 
+> **AMENDED 2026-05-22 per DEC-P0-063 (MIGRATION.md entry #200):** the pipeline below describes the **core 4-instrument surface** (NIFTY 50 / BANKNIFTY / SENSEX / INDIA VIX). DEC-P0-063 expanded the LAKE to additionally cover **200 NSE F&O eligible single stocks (spot + options across all 4 Groww `expiryCodes`)** using the **same Groww API endpoints, same lake layout, same DuckDB catalog, same LMDB work_items, same Audit JSONL chain** — no architectural changes (per COMMON · DYNAMIC · SCALABLE rules in CLAUDE.md §11). The 200 stocks join INDIAVIX in REFERENCE_ONLY (engine excluded). The "critical asymmetry" note at the end of this section is correct for the ENGINE; the LAKE has the broader DEC-P0-063 surface. See CLAUDE.md §3 + `TRACK1_BACKTEST_SPEC.md §"Scope Lock"` (per DEC-SPEC-CONSISTENCY-002, entry #264) + `TRACK1_DATA_INGEST_DESIGN.md §1` (per DEC-SPEC-CONSISTENCY-003, entry #265) for the full locked wording.
+
 ```
    Groww API (5 r/s + 100K/day quota)         Lake (8 TB SSD, mmap'd)
    ─────────────────────────────────         ─────────────────────────
