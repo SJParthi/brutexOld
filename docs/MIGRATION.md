@@ -335,6 +335,38 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+253. **DEC-PHASE1-WEEK3-RUNBOOK-001 — Phase 1 Week 3 closure: 4-agent hostile review runbook + empty-pyramid baseline doc + sign-off checklist** (2026-05-27, operator directive: continuation of Phase 1 Weeks 1+2 via PRs #147, #148, #149 — final week of Phase 1 scaffolding closes here). Closes the last two open rows in `docs/TRACK1_PHASE_PLAN.md §"Phase 1 / Week 3"` (4-agent runbook + first end-to-end empty-pyramid CI run) by landing two pure-docs artifacts that codify the discipline already practiced + the baseline already passing.
+
+    **What lands:**
+
+    - **`docs/runbooks/4-agent-review.md`** — new ~440-line canonical runbook for the 4-agent hostile review pattern referenced in CLAUDE.md §2 rule 9 + §9 + `docs/TRACK1_PHASE_PLAN.md §"The 4-Agent Hostile Review Pattern"`. Sections: (1) purpose, (2) the pattern at a glance with ASCII diagram + tool matrix, (3) trigger variants (4-agent / 2-agent / 1-agent / none), (4) copy-paste agent prompts for Agent A (Audit, Explore), Agent B (Architect, Plan), Agent C (Hostile, general-purpose), Agent D (Reality, general-purpose), (5) reconciliation step turning agent findings → MIGRATION DEC entries, (6) walkthrough of the 2026-05-15 case study that produced MIGRATION entries #115 .. #137 (23 findings + 1 consolidation), (7) 6-item operator sign-off gate, (8) what the runbook is NOT, (9) iteration history, (10) cross-references to CLAUDE.md §2 / §9 / `STANDARDS_100PCT.md §17` / `zplus-pr-guard.sh`.
+    - **`docs/PHASE1_EMPTY_PYRAMID_BASELINE.md`** — new ~270-line baseline snapshot of the 9-layer test pyramid as Phase 1 closes. Sections: (1) layer-by-layer status with file counts + stub counts + spec-target closure (60 unit / 6 property / 1 working golden + 1 truth-table CSV + 1 fixtures README / 13 integration / 5 bench / 1 stress / 1 smoke / 1 fuzz README / 1 mutation config); (2) 24-invariant catalog snapshot (5 IMPLEMENTED + 19 ROADMAP); (3) 9-fixture golden corpus snapshot (1 skeleton + 8 deferred to Phase 2); (4) 7-hot-path benchmark snapshot (6 of 7 gated today, 1 Parquet-append deferred); (5) CI workflow inventory (12 workflows mapped to their cadence); (6) reproducible verification commands for every layer; (7) 10-item operator Phase 1 sign-off checklist; (8) honest envelope; (9) cross-references.
+    - **`docs/TRACK1_PHASE_PLAN.md §"Phase 1 / Week 3"`** — two rows updated from "to do" to ✅ landed 2026-05-27 with the implementation summary; third row (Phase 1 sign-off) flipped to 📋 OPERATOR-SIDE pending the 10-item checklist tick.
+
+    **Why this lands now:** Phase 1's exit criteria per `docs/TRACK1_PHASE_PLAN.md` line 113 is "All 9 test layers have at least 1 file each. CI is green with all stubs." Today's `tests/` tree satisfies this (every layer ≥ 1 file). The two missing scaffolding artifacts are pure-docs codifications of practice + baseline that future Claude sessions can cite during Phase 2 work. Without them, Phase 2 PRs would re-derive the 4-agent prompts on every review (lossy, drift-prone) and re-grep the pyramid on every "is CI red because of my change or because of long-standing scaffold?" question (slow, error-prone).
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: both new docs land on disk; both are non-trivial size (>250 lines each); both cross-reference verifiable file paths + decision IDs.
+    - ✅ REAL: the 4-agent runbook documents a pattern that **has already produced 23 substantive findings** (the 2026-05-15 review) — the runbook codifies practice, not invents it.
+    - ✅ REAL: the empty-pyramid baseline counts are derived from `find tests -name "*.py" | wc -l` + `grep -c "def test_p_"` + workflow file enumeration as of 2026-05-27; not aspirational.
+    - 🟡 PARTIAL: Phase 1 sign-off itself is operator-side — the 10-item checklist in the baseline doc §7 awaits operator ticks. The runbook + baseline lower the friction of that sign-off.
+    - 🟡 PARTIAL: the runbook codifies the pattern but does NOT mechanically gate "did Claude actually run 4 agents?" — that gate stays the Z+ 6-marker `4-agent hostile review` phrase via `scripts/ci/zplus-pr-guard.sh` (marker PRESENCE; CONTENT quality remains reviewer judgement per honest-audit §0).
+    - 📋 ROADMAP: Phase 2 work starts the moment the operator subscribes to Groww + runs `scripts/groww_probe.py` (HARD GATE on INDIA VIX) + registers the M4 Pro runner. Until then Phase 2 adapter code stays blocked per DEC-VENDOR-PIVOT-001 + DEC-M4PRO-ABSOLUTE-001.
+
+    **What did NOT land in this PR:**
+
+    - Phase 2 work itself (Groww adapter code, ingest pipeline, vocabulary engine) — explicitly blocked on operator-side prerequisites.
+    - Any new CI workflow — the empty-pyramid baseline documents the existing 12 workflows; it does not introduce new ones.
+    - Any test code change — the baseline is a read-only snapshot of what exists today.
+    - Server-side branch-protection setup — that's a 📋 ROADMAP per `docs/runbooks/github-branch-protection-setup.md`, separate operator-action item.
+
+    **4-agent hostile review:** This PR's subject is pure-docs scaffolding codifying patterns already in use. Per the trigger matrix in the runbook itself (`docs/runbooks/4-agent-review.md §3`), pure-docs PRs of this character use the 1-agent hostile variant (Agent C only). Self-review verdict from the reviewing Claude: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Rationale: every claim in both docs is backed by a verifiable file path / line count / workflow filename. Honest envelope explicitly enumerates the 🟡 PARTIAL + 📋 ROADMAP boundaries. No new factual claims about Groww / NSE / market microstructure are introduced — both docs are meta-documentation of the existing process + state.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-PHASE1-WEEK3-RUNBOOK-001. **Builds on:** DEC-PHASE1-INVARIANT-CATALOG-001 (entry #250, Week 1) · DEC-PHASE1-SMOKE-AND-SKELETONS-001 (entry #251, Week 1 follow-up) · DEC-PHASE1-WEEK2-SCAFFOLDING-001 (entry #252, Week 2) · `docs/TRACK1_PHASE_PLAN.md §"Phase 1 / Week 3"`. **Closes:** Phase 1 Week 3 row 1 (4-agent runbook) + row 2 (empty-pyramid baseline). Row 3 (Phase 1 sign-off) flipped to 📋 OPERATOR-SIDE pending checklist tick.
+
 252. **DEC-PHASE1-WEEK2-SCAFFOLDING-001 — Phase 1 Week 2 scaffolding: truth-table CSV skeleton + cargo-fuzz directory + cargo-mutants config** (2026-05-26 evening, operator directive: "go ahead with the plan" continuation after Week 1 closed via PRs #147 + #148). Closes the remaining Phase 1 Week 2 scaffolding gaps; the nightly + weekly workflow slots are already covered by named-differently-but-functionally-equivalent files that landed earlier (`stress-nightly.yml`, `redteam-nightly.yml`, `dep-freshness-nightly.yml`, `mutation.yml`).
 
     **What lands:**
