@@ -254,6 +254,117 @@ class TestWriteReadRoundTrip:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# OS-error paths (closes lines 269-271, 298-299, 316-317, 342, 345-349)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestOSErrorPaths:
+    """Cover the OSError branches in write/read/delete + the
+    PermissionError + generic-OSError branches in is_pid_alive."""
+
+    def test_write_oserror_unlinks_temp_and_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        sample_info: RuntimeInfo,
+    ) -> None:
+        """Cover lines 269-271: tmp_path.replace() raises OSError ⇒
+        the temp file is unlinked and RuntimeFileError is raised."""
+        target = tmp_path / "runtime.json"
+        monkeypatch.setenv(ENV_RUNTIME_FILE, str(target))
+
+        # Make Path.replace raise OSError to simulate a cross-device move
+        # or permission failure on the atomic-rename step.
+        real_replace = Path.replace
+
+        def fail_replace(self, *args, **kwargs):
+            raise OSError("simulated atomic-rename failure")
+
+        monkeypatch.setattr(Path, "replace", fail_replace)
+        with pytest.raises(RuntimeFileError, match="Failed to write"):
+            write_runtime_file(sample_info)
+        # Verify no leftover *.tmp files in the target directory.
+        assert not list(tmp_path.glob(".runtime.*.json.tmp"))
+        # Restore for safety even though monkeypatch handles teardown.
+        monkeypatch.setattr(Path, "replace", real_replace)
+
+    def test_read_oserror_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sample_info: RuntimeInfo
+    ) -> None:
+        """Cover lines 298-299: source.read_text() raises OSError ⇒
+        RuntimeFileError with the path in the message."""
+        target = tmp_path / "runtime.json"
+        monkeypatch.setenv(ENV_RUNTIME_FILE, str(target))
+        write_runtime_file(sample_info)
+
+        def fail_read_text(self, *args, **kwargs):
+            raise OSError("simulated I/O failure")
+
+        monkeypatch.setattr(Path, "read_text", fail_read_text)
+        with pytest.raises(RuntimeFileError, match="Failed to read"):
+            read_runtime_file()
+
+    def test_delete_oserror_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sample_info: RuntimeInfo
+    ) -> None:
+        """Cover lines 316-317: target.unlink() raises non-FileNotFoundError
+        OSError ⇒ RuntimeFileError with the path in the message."""
+        target = tmp_path / "runtime.json"
+        monkeypatch.setenv(ENV_RUNTIME_FILE, str(target))
+        write_runtime_file(sample_info)
+
+        def fail_unlink(self, *args, **kwargs):
+            raise PermissionError("simulated permission denied")
+
+        monkeypatch.setattr(Path, "unlink", fail_unlink)
+        with pytest.raises(RuntimeFileError, match="Failed to delete"):
+            delete_runtime_file()
+
+    def test_is_pid_alive_permission_error_returns_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cover line 342: os.kill raises PermissionError ⇒ True
+        (process exists but we lack permission to signal it)."""
+
+        def fail_kill(pid: int, sig: int) -> None:
+            raise PermissionError("operation not permitted")
+
+        monkeypatch.setattr(os, "kill", fail_kill)
+        assert is_pid_alive(12345) is True
+
+    def test_is_pid_alive_generic_oserror_non_esrch_returns_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cover lines 345-349 (errno != ESRCH branch): generic OSError
+        with non-ESRCH errno ⇒ treated as alive (conservative — don't
+        delete a possibly-valid runtime file)."""
+        import errno
+
+        def fail_kill(pid: int, sig: int) -> None:
+            exc = OSError("simulated I/O error")
+            exc.errno = errno.EIO  # not ESRCH
+            raise exc
+
+        monkeypatch.setattr(os, "kill", fail_kill)
+        assert is_pid_alive(12345) is True
+
+    def test_is_pid_alive_generic_oserror_esrch_returns_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cover lines 345-349 (errno == ESRCH branch): generic OSError
+        with ESRCH errno ⇒ dead (no such process)."""
+        import errno
+
+        def fail_kill(pid: int, sig: int) -> None:
+            exc = OSError("no such process")
+            exc.errno = errno.ESRCH
+            raise exc
+
+        monkeypatch.setattr(os, "kill", fail_kill)
+        assert is_pid_alive(12345) is False
+
+
+# ────────────────────────────────────────────────────────────────────────
 # is_pid_alive
 # ────────────────────────────────────────────────────────────────────────
 

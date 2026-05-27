@@ -335,6 +335,34 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+259. **DEC-COV-BACKFILL-003 — 1-module coverage backfill: `brutex.config.runtime` 92.25→100% via 6 surgical OSError-branch tests** (2026-05-27, operator directive: continuation of "go ahead with the plan" after PR #155 closed Option B step 3 — 49→50 strict-100% modules). Closes the biggest non-orchestrator gap left after PRs #153/#154/#155: the runtime service-discovery module's OSError + PermissionError + generic-OSError-with-non-ESRCH-errno branches.
+
+    **Module backfilled:**
+
+    | # | Module | Pre | Post | How |
+    |---|---|---:|---:|---|
+    | 22a | `brutex.config.runtime` | 92.25% | 100% | +6 surgical tests in new `TestOSErrorPaths` using `monkeypatch` to inject OSError into: `Path.replace` (line 269-271 atomic-rename failure ⇒ tmp_path unlink + RuntimeFileError); `Path.read_text` (line 298-299 read failure ⇒ RuntimeFileError); `Path.unlink` (line 316-317 delete failure ⇒ RuntimeFileError); `os.kill` (line 342 PermissionError ⇒ True; lines 345-349 generic OSError with errno != ESRCH ⇒ True branch + errno == ESRCH ⇒ False branch). |
+
+    **Total: 111 stmts + 18 branches now protected by per-module strict-100% gate.**
+
+    **Verification:** `.venv/bin/pytest --cov=brutex.config.runtime --cov-branch --cov-fail-under=100 tests/unit/test_config_runtime.py -q` → 37 passed, 100% line + branch.
+
+    **Source-code changes:** UNCHANGED — only tests added. `brutex/config/runtime.py` untouched; all 6 new tests use monkeypatch to simulate OS-level failures.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 4 file changes (test additions + CI gate addition + 3 doc updates); 1 module genuinely at 100% line + branch.
+    - ✅ REAL: verified standalone via `pytest --cov=brutex.config.runtime --cov-fail-under=100 tests/unit/test_config_runtime.py` returning success.
+    - ✅ REAL: count refresh (49 → 50) mechanically verifiable via `grep -oE "pytest --cov=brutex\.[a-z_.]+" .github/workflows/ci.yml | sort -u | wc -l`.
+    - 🟡 PARTIAL: ~21 modules remain below strict-100%. The remaining non-orchestrator gaps are `execution.simulator` (93.7%, 6 missing) and `strategies.{runner,sweep}` (substantial gaps). The 9 orchestrator modules (`audit`, `bloom`, `store`, `pipeline`, `quota_tracker`, `rate_limiter`, `adaptive_rate_limiter`, `retry`, `state`) are blocked by fastbloom_rs PyO3 ABI3 limitation when run as standalone strict gates — they ARE covered at 100% line + branch by the global `--cov=brutex` step.
+    - 📋 ROADMAP: orchestrator standalone gates require a different test harness (e.g. running each test file in its own pytest subprocess to reset the Python interpreter and clear the fastbloom_rs PyO3 ABI3 init state).
+
+    **4-agent hostile review:** Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only — small focused PR adding 6 well-bounded tests). Self-review by reviewing Claude: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: are the monkeypatches scoped to the test? Yes — pytest's monkeypatch fixture auto-restores after each test. Are the simulated OSError exceptions realistic? Yes — `Path.replace` cross-device EXDEV, `Path.read_text` permission denial, `Path.unlink` permission denial, `os.kill` PermissionError (different UID), `os.kill` generic OSError with EIO vs ESRCH errnos. No new factual claims about external systems.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-COV-BACKFILL-003. **Builds on:** DEC-COV-BACKFILL-002 (entry #258, prior 4-module backfill that surfaced this module as next-biggest non-orchestrator gap) · DEC-COV-BACKFILL-001 (entry #257) · DEC-COV-RATCHET-001 (entry #256) · DEC-COV-001 (entries #210-#232) · DEC-AUDIT-RECONCILE-002 (entry #254). **Closes:** Option B step 4 — backfill biggest non-orchestrator gap; strict-100% count 49 → 50 (+1); remaining gap drops 22 → 21. **Does NOT close:** orchestrator-package standalone gates (blocked by fastbloom_rs PyO3 ABI3); `execution.simulator` + `strategies.{runner,sweep}` (separate PRs).
+
 258. **DEC-COV-BACKFILL-002 — 4-module coverage backfill ratchet: second batch of small-gap non-orchestrator modules pushed to 100% via 4 surgical tests + 4 module-load defensive-assertion pragmas** (2026-05-27, operator directive: continuation of "go ahead with the plan" after PR #154 closed Option B step 2). Lifts the strict-100% gate count 45 → 49 by closing the next batch of small-gap modules whose gaps were either testable corner cases or unreachable module-load assertions.
 
     **Why this lands now:** PR #154 (DEC-COV-BACKFILL-001 entry #257) closed the 3 smallest-gap modules (observability.metrics, feed.resampler, donchian_breakout). Honest audit row 1 noted "~26 modules below strict-100%" remained. This PR closes 4 more — bringing the count to 22 below 100% and the strict-gate count to 49. The pattern is the same: surgical tests for genuinely-testable corner cases + honest `# pragma: no cover` for unreachable module-load defensive assertions.
