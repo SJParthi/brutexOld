@@ -335,6 +335,69 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+272. **DEC-P0-070 — RETROACTIVE LEDGER ENTRY: Dashboard default bind locked to `127.0.0.1` (was `0.0.0.0`)** (operator directive 2026-05-23 via Q-06 of the 12-decision lock at MIGRATION.md entry near #189; code change shipped 2026-05-23 in `brutex/config/ports.py` but the ledger entry was never written — retroactively written 2026-05-27 as 📋 ROADMAP follow-up flagged in DEC-C08-RESOLUTION-001 entry #271). Honest envelope: this entry is **retroactive** — the code change predates this ledger entry by 4 days; the operator's Q-06 of the 12-decision lock IS the upstream authority and the code comment at `brutex/config/ports.py:55-62` carries the DEC-P0-070 label. This retroactive entry closes the ledger gap and unblocks the DEC-ID validator on PR #168 + future PRs that cite DEC-P0-070.
+
+    **The decision (verbatim from Q-06):** "Dashboard default bind = **127.0.0.1** (match docs); 0.0.0.0 only with explicit auth-required flag."
+
+    **Code state (verified 2026-05-27 via grep):** `brutex/config/ports.py:62`: `DEFAULT_HOST_BIND: Final[str] = "127.0.0.1"`. Comment block at lines 55-62 documents the decision. Env-var opt-in path `BRUTEX_HOST_BIND=0.0.0.0` is the explicit-flag mechanism Q-06 required.
+
+    **What this fixes:** the missing ledger entry for a 2026-05-23 code-shipped decision; the DEC-ID validator (`scripts/ci/validate_dec_ids.py` per STANDARDS row 18 partial automation) was correctly flagging PR #168 as citing a DEC-ID that didn't exist in MIGRATION.md.
+
+    **What this does NOT change:** no code state changes (the code has been at `127.0.0.1` since 2026-05-23); no spec changes; no SLA changes. This is a paper-trail completion only.
+
+    **4-agent hostile review:** Pure-docs retroactive ledger entry — N/A; this entry IS the ledger entry being added. Self-review: validator failure on PR #168 caught the gap; this retroactive entry resolves it. Honest envelope explicitly notes the retroactive framing.
+
+    **Decision ID:** DEC-P0-070. **Builds on:** Q-06 of operator's 12-decision lock (MIGRATION.md ~line 2974, the upstream authority) · `brutex/config/ports.py:55-62` (the implementation) · DEC-C08-RESOLUTION-001 (entry #271, the PR that surfaced this ledger gap). **Closes:** the missing-ledger-entry gap; unblocks the DEC-ID validator on PR #168.
+
+271. **DEC-C08-RESOLUTION-001 — TRACK1_REQUIREMENTS_FINAL.md §10.1 C-08 (dashboard default bind) added as RESOLVED row + §10.5 C-08 bookkeeping removal (10th-of-~15 stale-text locations effectively reconciled)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — tenth iteration of Track-1-only docs ratchet wave). The C-08 conflict cited stale evidence: "`DEFAULT_HOST_BIND = '0.0.0.0'` with `# nosec — intentional LAN bind`". Verified-current code at `brutex/config/ports.py:55-62` shows `DEFAULT_HOST_BIND: Final[str] = "127.0.0.1"` per DEC-P0-070 (2026-05-23) — matching Q-06 of the operator's 2026-05-18 12-decision lock.
+
+    **What this fixes:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.1` — added C-08 RESOLVED row with full verification chain:
+      - Cited evidence: stale "`DEFAULT_HOST_BIND = '0.0.0.0'` with `# nosec — intentional LAN bind`"
+      - Current code: `DEFAULT_HOST_BIND: Final[str] = "127.0.0.1"` (verifiable via `grep -nE "DEFAULT_HOST_BIND" brutex/config/ports.py`)
+      - Closing decision: DEC-P0-070 (2026-05-23, in code comment) + Q-06 of operator's 12-decision lock (2026-05-18)
+      - 0.0.0.0 LAN-exposure path is gated by explicit `BRUTEX_HOST_BIND=0.0.0.0` env-var opt-in only
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.5` — removed C-08 from open-items list with explicit bookkeeping note: "(**C-12 + C-08 removed from this list 2026-05-27** — both RESOLVED per §10.1 rows added in DEC-SPEC-CONSISTENCY-001 entry #263 and DEC-C08-RESOLUTION-001 entry #271 respectively; bookkeeping.)"
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No edits to `brutex/config/ports.py` (already correct).
+    - No edits to §1–§4 of TRACK1_REQUIREMENTS_FINAL.md (preserves 2026-05-18 review snapshot).
+    - No edits to §10.6 wave summary (preserved exactly).
+    - No new spec amendments.
+    - No new code, tests, or workflows.
+    - No assumption that DEC-P0-070 has its own MIGRATION.md entry (it doesn't — only appears in code comment; this PR doesn't create one because the operator's Q-06 lock IS the upstream authority).
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.1` — new C-08 RESOLVED row.
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.5` — 1-line bookkeeping update (remove C-08).
+    - `docs/MIGRATION.md` — this entry #271.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: code state at `brutex/config/ports.py:62` verified via grep — `DEFAULT_HOST_BIND: Final[str] = "127.0.0.1"`.
+    - ✅ REAL: code comment block at lines 55-62 cites DEC-P0-070 (2026-05-23) — verifiable in current file.
+    - ✅ REAL: Q-06 of the operator's 12-decision lock cited as the upstream authority (verifiable at MIGRATION.md line 2974 within the entry near 2960).
+    - 🟡 PARTIAL: DEC-P0-070 itself does not appear as its own MIGRATION.md entry — the code carries the decision-ID label but the ledger entry was never written. Per Golden Rule #10 honest envelope, this is a `📋 ROADMAP` follow-up (write the DEC-P0-070 ledger entry retroactively) but NOT in scope for this PR which is only the §10.1 row addition.
+    - 🟡 PARTIAL: 10 of ~15 stale-text locations effectively reconciled (running total: 7 spec amendments via the wave + 1 C-12 row + 1 C-08 row + 1 wave-summary §10.6 = 10).
+    - 📋 ROADMAP: ~5 more stale-text locations remain; operator can choose to address them in future PRs OR declare the residual gap acceptable.
+
+    **What did NOT land in this PR:**
+
+    - No retroactive write of a DEC-P0-070 MIGRATION.md entry (tracked as the 🟡 PARTIAL in honest envelope).
+    - No edits to §1–§4 tables.
+    - No new spec amendments.
+    - No edits to `brutex/config/ports.py` (already correct).
+
+    **4-agent hostile review:** Pure-docs §10 addendum extension (C-08 RESOLVED row + §10.5 bookkeeping). Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) the C-08 RESOLVED row accurately reflects the current `brutex/config/ports.py:62` code state — verified via grep; (2) the cited DEC-P0-070 + Q-06 chain is consistent with code comment + operator's 12-decision lock at MIGRATION.md ~line 2974; (3) the honest envelope explicitly acknowledges the missing DEC-P0-070 MIGRATION.md entry (📋 ROADMAP); (4) the §10.5 bookkeeping fix removes C-08 cleanly; (5) no new external claims about Groww/NSE/options markets introduced.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-C08-RESOLUTION-001. **Builds on:** DEC-SPEC-CONSISTENCY-WAVE-SUMMARY-001 (entry #270, the §10.6 wave summary this PR extends) · DEC-SPEC-CONSISTENCY-001..007 (entries #263-#269, the wave it consolidates) · DEC-REQS-FINAL-RECONCILE-001 (entry #262, the §10 addendum this PR extends) · DEC-P0-070 (in code comment at `brutex/config/ports.py:55-62`; no MIGRATION.md entry — tracked as 📋 ROADMAP) · Q-06 of operator's 12-decision lock (2026-05-18 entry near 2960). **Closes:** C-08 stale-evidence citation gap; §10.5 internal bookkeeping. **Does NOT close:** DEC-P0-070 retroactive ledger entry (📋 ROADMAP) + the remaining ~5 stale-text locations.
+
 270. **DEC-SPEC-CONSISTENCY-WAVE-SUMMARY-001 — TRACK1_REQUIREMENTS_FINAL.md §10.5 C-12 bookkeeping fix + §10.6 cumulative spec-consistency wave summary table (9th-of-~15 stale-text locations reconciled + wave consolidation)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — ninth iteration of Track-1-only docs ratchet wave; this PR consolidates the 8-PR wave into a single discoverable summary at §10.6). **Two changes:** (1) bug fix — C-12 was listed in BOTH §10.1 (RESOLVED per DEC-SPEC-CONSISTENCY-001 entry #263) AND §10.5 (Open items); removed from §10.5 with explicit bookkeeping note. (2) new §10.6 — 7-row table summarizing the spec-consistency wave (PRs #160-#166 / DEC-SPEC-CONSISTENCY-001..007 / MIGRATION entries #263-#269) plus the closure pattern + remaining count.
 
     **What this fixes:**
