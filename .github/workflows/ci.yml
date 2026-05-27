@@ -583,6 +583,101 @@ jobs:
           else
             echo "(brutex.indicators.prev_day_ohlc test file not present yet — gate inactive)"
           fi
+          # DEC-COV-RATCHET-001 (entry #256, 2026-05-27): 14-module
+          # strict-100% ratchet of modules already at 100% line + branch
+          # coverage that weren't yet protected by the per-module CI gate.
+          # Locks in their current state so future regressions fail CI.
+          # 19a · brutex.vocabulary.evaluator (179 stmts, 118 branches, 74 tests)
+          if compgen -G "tests/unit/test_vocabulary.py" > /dev/null; then
+            pytest --cov=brutex.vocabulary.evaluator --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_vocabulary.py
+          else
+            echo "(brutex.vocabulary.evaluator test file not present yet — gate inactive)"
+          fi
+          # 19b · brutex.vocabulary.bits (63 stmts, 4 branches; same test file)
+          if compgen -G "tests/unit/test_vocabulary.py" > /dev/null; then
+            pytest --cov=brutex.vocabulary.bits --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_vocabulary.py
+          else
+            echo "(brutex.vocabulary.bits test file not present yet — gate inactive)"
+          fi
+          # 19c · brutex.doctor (85 stmts, 20 branches, 32 tests)
+          if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
+            pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py
+          else
+            echo "(brutex.doctor test file not present yet — gate inactive)"
+          fi
+          # 19d · brutex.costs.types (70 stmts, 10 branches, 37 tests)
+          if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
+            pytest --cov=brutex.costs.types --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py
+          else
+            echo "(brutex.costs.types test file not present yet — gate inactive)"
+          fi
+          # 19e · brutex.costs.constants (59 stmts, 12 branches; same test)
+          if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
+            pytest --cov=brutex.costs.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py
+          else
+            echo "(brutex.costs.constants test file not present yet — gate inactive)"
+          fi
+          # 19f · brutex.costs.calculator (51 stmts, 4 branches; same test)
+          if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
+            pytest --cov=brutex.costs.calculator --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py
+          else
+            echo "(brutex.costs.calculator test file not present yet — gate inactive)"
+          fi
+          # 19g · brutex.execution.costs (57 stmts, 20 branches, 27 tests)
+          if compgen -G "tests/unit/test_execution_costs.py" > /dev/null; then
+            pytest --cov=brutex.execution.costs --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_costs.py
+          else
+            echo "(brutex.execution.costs test file not present yet — gate inactive)"
+          fi
+          # 19h · brutex.data.models (54 stmts, 24 branches, 21 tests)
+          if compgen -G "tests/unit/test_data_models.py" > /dev/null; then
+            pytest --cov=brutex.data.models --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_models.py
+          else
+            echo "(brutex.data.models test file not present yet — gate inactive)"
+          fi
+          # 19i · brutex.engine.combo_mask (44 stmts, 18 branches, 48 tests)
+          if compgen -G "tests/unit/test_engine_combo_mask.py" > /dev/null; then
+            pytest --cov=brutex.engine.combo_mask --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_combo_mask.py
+          else
+            echo "(brutex.engine.combo_mask test file not present yet — gate inactive)"
+          fi
+          # 19j · brutex.strategies.types (31 stmts, 4 branches, 10 tests)
+          if compgen -G "tests/unit/test_strategies_types.py" > /dev/null; then
+            pytest --cov=brutex.strategies.types --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_types.py
+          else
+            echo "(brutex.strategies.types test file not present yet — gate inactive)"
+          fi
+          # 19k · brutex.strategies.protocol (28 stmts, 8 branches, 15 tests)
+          if compgen -G "tests/unit/test_strategies_registry.py" > /dev/null; then
+            pytest --cov=brutex.strategies.protocol --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_registry.py
+          else
+            echo "(brutex.strategies.protocol test file not present yet — gate inactive)"
+          fi
+          # 19l · brutex.strategies.library.opening_range_breakout (53 stmts, 10 branches)
+          if compgen -G "tests/unit/test_strategies_library.py" > /dev/null; then
+            pytest --cov=brutex.strategies.library.opening_range_breakout --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_library.py
+          else
+            echo "(brutex.strategies.library.opening_range_breakout test file not present yet — gate inactive)"
+          fi
+          # 19m · brutex.strategies.library.close_previous_momentum (48 stmts, 12 branches)
+          if compgen -G "tests/unit/test_strategies_library.py" > /dev/null; then
+            pytest --cov=brutex.strategies.library.close_previous_momentum --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_library.py
+          else
+            echo "(brutex.strategies.library.close_previous_momentum test file not present yet — gate inactive)"
+          fi
+          # 19n · brutex.strategies.library.buy_and_hold (16 stmts, 2 branches)
+          if compgen -G "tests/unit/test_strategies_library.py" > /dev/null; then
+            pytest --cov=brutex.strategies.library.buy_and_hold --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_library.py
+          else
+            echo "(brutex.strategies.library.buy_and_hold test file not present yet — gate inactive)"
+          fi
+          # NOTE 2026-05-27: brutex.orchestrator.retry (26 stmts) excluded
+          # from this ratchet — same fastbloom_rs PyO3 ABI3 limitation as
+          # brutex.orchestrator.replay + brutex.notifications.wiring; the
+          # orchestrator package's __init__ transitively imports bloom →
+          # fastbloom_rs which can only be initialized once per interpreter
+          # process. Module IS covered at 100% line + branch by the global
+          # --cov=brutex step; standalone strict gate is a follow-up.
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
