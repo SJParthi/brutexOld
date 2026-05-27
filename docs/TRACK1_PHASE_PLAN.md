@@ -100,7 +100,7 @@ Phase 2+ code change is verified from day one.
 | `tests/golden/condition_truth_table.csv` skeleton with 5 example rows | ✅ landed 2026-05-26 (DEC-PHASE1-WEEK2-SCAFFOLDING-001, MIGRATION entry #252) — 5-row skeleton covers `bar_bullish` / `bar_bearish` / `close_above_ema20` / `close_below_ema20` / `early_morning`; Phase 2 expands to ≥ 200 rows |
 | `.github/workflows/nightly.yml` new — stress + fuzz | ✅ already covered by `stress-nightly.yml` (DEC-STRESS-001 entry #208) + `redteam-nightly.yml` + `dep-freshness-nightly.yml` — three split workflows beats one mega-workflow |
 | `.github/workflows/weekly.yml` new — mutation testing | ✅ already covered by `mutation.yml` (canonical weekly job per CLAUDE.md §4) |
-| Coverage gate raised in `pyproject.toml`: `fail_under = 100` | 📋 ROADMAP — coverage is gated per-module via the 33 strict-100% module gates today (DEC-INDICATOR-COVERAGE-001 + DEC-COMBO-HASH-UNIQUENESS-001); global `fail_under = 100` requires the remaining ~16 modules to ratchet up first |
+| Coverage gate raised in `pyproject.toml`: `fail_under = 100` | 📋 ROADMAP — coverage is gated per-module via the **51 strict-100% module gates** today (DEC-COV-001 + DEC-COV-RATCHET-001 + DEC-COV-BACKFILL-001/002/003/004 entries #210-#232 + #256-#260; closed per **DEC-COV-BACKFILL-LIMIT-001 entry #261** with operator-accepted limit on the 8 remaining `brutex/orchestrator/` modules blocked by `fastbloom_rs` PyO3 ABI3 single-init — all 8 covered at 100% via global `--cov=brutex` run); global `fail_under = 100` requires the remaining ~20 modules to ratchet up first (3 ROADMAP closure paths in entry #261: vendor swap, per-test-subprocess CI harness, or lazy-import refactor) |
 
 ### Week 3
 
