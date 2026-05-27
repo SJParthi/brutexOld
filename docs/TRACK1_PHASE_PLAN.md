@@ -117,6 +117,8 @@ green with all stubs. The verification surface is mapped.
 
 ## Phase 2 — Groww Adapter + Spot-Index Ingest + Vocabulary (3-4 weeks)
 
+> **AMENDED 2026-05-22 per DEC-P0-063 (MIGRATION.md entry #200):** the "Spot-Index Ingest" scope below describes the **core 4-instrument surface** (NIFTY 50 / BANKNIFTY / SENSEX / INDIA VIX). DEC-P0-063 expanded the LAKE to additionally cover **200 NSE F&O eligible single stocks (spot + options across all 4 Groww `expiryCodes`)**. The 200 stocks join INDIAVIX in REFERENCE_ONLY (BRUTE-FORCE ENGINE excluded — engine stays at the 3 brute-force indexes). Phase 2's Week 4-7 deliverables use the same Groww adapter primitives for both surfaces (per COMMON · DYNAMIC · SCALABLE rules in CLAUDE.md §11); no Phase 2 work needs to be re-scoped — the deliverable table below is the 4-instrument core, and the 200-stock universe joins on the same code path. See CLAUDE.md §3 + `TRACK1_BACKTEST_SPEC.md §"Scope Lock"` (per DEC-SPEC-CONSISTENCY-002, entry #264) + `TRACK1_DATA_INGEST_DESIGN.md §1` (per DEC-SPEC-CONSISTENCY-003, entry #265) + `TRACK1_RUNTIME_ARCHITECTURE.md §2` (per DEC-SPEC-CONSISTENCY-004, entry #266) for the full locked wording.
+
 **Goal:** Stand up the Groww data path, the 52-condition vocabulary,
 and the indicator precompute pipeline.
 
