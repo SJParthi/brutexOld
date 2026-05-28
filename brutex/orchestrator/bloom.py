@@ -110,11 +110,32 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Final
 
-import fno_math
 import structlog
 from fastbloom_rs import BloomFilter as _RustBloomFilter
 
 from brutex.models import BruteXError
+
+
+def _popcount_bytes(raw: bytes) -> int:
+    """Count the set bits in *raw* (total population count).
+
+    DEC-CLONE-RUN-001: the Rust hot-kernel wheel ``fno_math`` (built from
+    ``rust/fno-math`` via maturin) is an OPTIONAL accelerator — it is not a
+    pip dependency, so a plain ``pip install brutex`` (clone-and-run) does
+    not provide it. When present, the ~25× faster ``fno_math.popcount_bytes``
+    popcnt kernel is used (DEC-P0-057); otherwise this falls back to an exact
+    pure-Python ``int.bit_count()`` so the orchestrator — and hence the
+    ``brutex`` CLI + dashboard — import and run without a Rust toolchain.
+    Both paths return identical counts; only the constant factor differs, and
+    ``unique_count_estimate`` is explicitly off the hot path. CI always builds
+    ``fno_math``, so the fallback is unexercised there.
+    """
+    try:
+        import fno_math
+    except ModuleNotFoundError:  # pragma: no cover - exercised only without the Rust kernel
+        return int.from_bytes(raw, "little").bit_count()
+    return int(fno_math.popcount_bytes(raw))
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Sizing constants (locked by 4-agent Reality-check lens, DEC-P0-047)
@@ -420,6 +441,9 @@ class BloomFilter:
         ``fno_math`` wheel had no bundled type stubs; DEC-P0-055
         (PR-N+2) shipped the stubs and DEC-P0-056 closed the
         un-draft-after-CI-green auto-merge gap, unblocking this PR.
+        DEC-CLONE-RUN-001: the scan now goes through :func:`_popcount_bytes`,
+        which uses the Rust kernel when installed and an exact pure-Python
+        fallback otherwise, so the dashboard runs on a plain ``pip install``.
 
         Returns
         -------
@@ -428,7 +452,7 @@ class BloomFilter:
             upper-bounded by ``capacity`` (clipped).
         """
         raw = self._impl.get_bytes()
-        bits_set = fno_math.popcount_bytes(bytes(raw))
+        bits_set = _popcount_bytes(bytes(raw))
         if bits_set == 0:
             return 0
         if bits_set >= self._m_bits:

@@ -107,18 +107,36 @@ in `brutex/adapters/protocol.py`. Everything else works unchanged.
 
 ## ⚙️ Setup
 
+### Clone and run (one command)
+
 ```bash
-# 1. Clone + install
 git clone https://github.com/SJParthi/bruteX.git
 cd bruteX
-pip install -e ".[dev,data]"
+make run            # installs runtime deps (.[data,ui]) + starts the dashboard
+```
 
-# 2. Set your Groww credentials (Phase 2 — coming soon)
+Then open **http://127.0.0.1:9080** in a browser. Equivalent without `make`:
+
+```bash
+pip install -e ".[data,ui]"
+brutex run          # alias for `brutex dashboard`; also: python -m brutex run
+```
+
+> The dashboard runs with **no Groww login and no data** — you'll see the
+> live UI with the pipeline `idle` and placeholder figures (the brute-force
+> engine and a populated lake fill in real numbers later). The Rust hot
+> kernel (`fno_math`) is an optional accelerator, not required to run.
+
+### Full dev install (contributors)
+
+```bash
+pip install -e ".[dev,data,ui]"   # + all test/type/lint tooling
+
+# Optional: Groww credentials (Phase 2 — coming soon)
 export BRUTEX_GROWW_ACCESS_TOKEN="<your-token-from-groww.co>"
 export BRUTEX_LAKE_ROOT=/path/to/large/ssd/brutex-lake
 
-# 3. Verify install
-brutex version
+brutex version                    # verify install
 ```
 
 ---
@@ -137,17 +155,20 @@ brutex status
 # Verify audit chain integrity
 brutex audit verify audit/audit.jsonl
 
-# Dashboard (FastAPI)
+# Dashboard (FastAPI) with the data browser wired to a populated lake
 brutex dashboard --lake-root $BRUTEX_LAKE_ROOT
 ```
 
-Current Phase 0 CLI exposes only:
+Current Phase 0 CLI exposes:
 
 ```bash
 brutex version
 brutex status
 brutex audit verify <file>
-brutex dashboard
+brutex dashboard [--lake-root <dir>] [--host ...] [--port ...]
+brutex run        # alias for `brutex dashboard` (clone-and-run entry point)
+brutex doctor     # audit-chain + runtime health checks
+brutex monitor    # SLA + watchdog monitor loop
 ```
 
 ---

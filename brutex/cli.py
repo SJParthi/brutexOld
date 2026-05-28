@@ -29,7 +29,12 @@ adapter lands in Phase 1+ of the post-pivot phase plan (see
         Replay the audit chain and assert integrity (NFR-OBS-003).
 
     brutex dashboard [--lake-root <dir>] [--host 127.0.0.1] [--port 9080]
-        Start the BruteX dashboard FastAPI server.
+    brutex run       [--lake-root <dir>] [--host 127.0.0.1] [--port 9080]
+        Start the BruteX dashboard FastAPI server. ``run`` is the
+        clone-and-run alias (DEC-CLONE-RUN-001); both also work as
+        ``python -m brutex dashboard`` / ``python -m brutex run``.
+        Requires the ``ui`` extra (``pip install -e ".[ui]"`` or
+        ``make run``).
 
 ## Design
 
@@ -109,10 +114,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a JSONL audit-log file",
     )
 
-    # ── dashboard ─────────────────────────────────────────────────
+    # ── dashboard (alias: run) ────────────────────────────────────
+    # DEC-CLONE-RUN-001: `brutex run` is the clone-and-run alias for
+    # `brutex dashboard` — from the operator's view the dashboard *is*
+    # the app, so `brutex run` / `python -m brutex run` start it.
     dashboard = sub.add_parser(
         "dashboard",
-        help="Start the BruteX dashboard FastAPI server",
+        aliases=["run"],
+        help="Start the BruteX dashboard FastAPI server (alias: run)",
     )
     dashboard.add_argument(
         "--lake-root",
@@ -314,13 +323,15 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         from brutex.dashboard.app import DashboardState, build_app
     except ImportError as exc:
         print(
-            f"[brutex] dashboard requires fastapi+uvicorn — pip install brutex[data]: {exc}",
+            "[brutex] dashboard requires the UI extra — install with "
+            f'`pip install -e ".[ui]"` (or `make run`): {exc}',
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
 
     state = DashboardState()
     app = build_app(state, instrument_store=lake_root)
+    print(f"[brutex] dashboard serving at http://{host}:{port}  (Ctrl-C to stop)")
     uvicorn.run(app, host=host, port=port)
     return EXIT_OK
 
@@ -343,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.audit_command != "verify":
             parser.error(f"unknown audit subcommand: {args.audit_command}")
         return cmd_audit_verify(audit_file=args.audit_file)
-    if args.command == "dashboard":
+    if args.command in ("dashboard", "run"):
         return cmd_dashboard(
             lake_root=args.lake_root,
             host=args.host,

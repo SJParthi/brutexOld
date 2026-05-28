@@ -1,10 +1,15 @@
 # BruteX — development Makefile
 # Every target maps directly to a CI gate in REQUIREMENTS.md §17.
 
-.PHONY: help install fmt lint type test test-unit test-cov audit bench clean all
+.PHONY: help install run fmt lint type test test-unit test-cov audit bench clean all
+
+# Dashboard bind — override on the command line, e.g. `make run PORT=8000`.
+HOST ?= 127.0.0.1
+PORT ?= 9080
 
 help:
 	@echo "BruteX development targets:"
+	@echo "  run        — one command: install runtime deps + launch the dashboard"
 	@echo "  install    — install package + dev dependencies via pip"
 	@echo "  fmt        — run ruff format"
 	@echo "  lint       — run ruff check"
@@ -19,6 +24,13 @@ help:
 
 install:
 	pip install -e ".[dev]"
+
+# Clone-and-run entry point (DEC-CLONE-RUN-001). Installs only the runtime
+# extras the dashboard needs (data lake browser + FastAPI/uvicorn UI), then
+# starts the server. Open http://$(HOST):$(PORT) in a browser.
+run:
+	pip install -e ".[data,ui]"
+	brutex dashboard --host $(HOST) --port $(PORT)
 
 fmt:
 	ruff format brutex tests
