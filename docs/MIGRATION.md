@@ -335,6 +335,21 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+279. **DEC-CLONE-RUN-002 — turnkey `make run`/`make setup`: venv + all libs + `fno_math` kernel auto-built; `ui` extra added to bootstrap** (operator directive 2026-05-28 "fully completely comprehensively automated — just run application and everything should be entirely visible ... libs and all other needed everything should be automatically included"). Extends DEC-CLONE-RUN-001 (entry #278): the prior `make run` installed `.[data,ui]` then launched the dashboard, but it (a) used whatever Python happened to be active (no venv), and (b) never built the maturin `fno_math` Rust kernel — so any import of `brutex.strategies.combo` (top-level `import fno_math` at `combo.py:64`) crashed `ModuleNotFoundError` on a clean clone. Separately, `scripts/setup/bootstrap.sh` installed `[dev,data,groww]` but **omitted `ui`**, so a post-bootstrap `python -m brutex dashboard` failed for missing fastapi/uvicorn.
+
+    **What this fixes:**
+
+    - **`make run` is now self-contained + idempotent** — creates `.venv/` (if absent), upgrades pip, installs `.[data,ui]`, then builds the `fno_math` kernel via `maturin develop --release` *only when it is not importable* (needs `cargo`), then launches the dashboard. Re-running skips work already done.
+    - **`make setup`** added — turnkey full dev env; delegates to `scripts/setup/bootstrap.sh` (single source of truth per CLAUDE.md §11 COMMON — no recipe copy-paste).
+    - **`bootstrap.sh` now installs `.[dev,data,ui,groww]`** (was missing `ui`).
+    - **README §Setup** updated to describe the venv + kernel-build flow honestly (Golden Rule #1).
+
+    **Verification (this PR, fresh `.venv`, py3.12, `cargo` 1.94 present):** `pip install -e .[data,ui]` pulled fastapi 0.136 / uvicorn 0.48 / polars 1.41 / duckdb 1.5 / pyarrow 24 etc.; `maturin develop --release` built `fno_math` (release, ~29 s); `import fno_math` and the previously-crashing `import brutex.strategies.combo` both succeed; `make run` brings up the live server — `GET /` → 200 (214 515 B HTML), `/api/v1/state` → 200 (1 196 B), `/metrics` → 200, `/api/v1/instruments` → 503 (no lake, expected per #278 envelope); banner `[brutex] dashboard → http://127.0.0.1:9080` printed.
+
+    **Honest envelope (Golden Rule #10):** build/run-automation only — no engine scope, no new CI gate, no coverage-gated module touched. The kernel build requires a working `cargo` toolchain on the operator's box (present in CI + the reference M4 Pro); without it `make run` still launches but `brutex.strategies.combo` stays unimportable. `make run` launches the *placeholder* dashboard — real numbers need the lake + engine (Phase 2), unchanged from #278. The SessionStart hook's ".venv/fno_math MISSING" hints were left unchanged to avoid churn on its 27 smoke tests (DEC-SESSION-START-HOOK-001); `make setup` supersedes them as the recommended one-liner.
+
+    **Decision ID:** DEC-CLONE-RUN-002. **Builds on:** DEC-CLONE-RUN-001 (entry #278), DEC-INFRA-OPS-001 (entry #244 — the decision that introduced `scripts/setup/bootstrap.sh`), DEC-P0-055 (maturin mixed Python+Rust layout / `fno_math` build). **Closes:** the "fresh clone doesn't fully run — libs + Rust kernel not auto-included" gap.
+
 278. **DEC-CLONE-RUN-001 — clone-and-run repair: `ui` extra + `python -m brutex` launcher + Makefile `run` target + `fno_math`-optional Bloom import** (operator directive 2026-05-28 "my job is only cloning and running the app directly ... the webpages and dashboards should be visible and checkable"). A fresh `git clone` + install could not launch the dashboard: four independent blockers, each fixed here.
 
     **What this fixes:**

@@ -14,7 +14,7 @@
 # 6. Verifies `brutex doctor` exits 0 (audit chain + runtime + replay checks).
 # 7. Prints a one-screen summary of env-var + CLI command surface.
 #
-# Decision: DEC-BOOTSTRAP-001 (MIGRATION entry #244).
+# Decision: DEC-INFRA-OPS-001 (MIGRATION entry #244).
 
 set -uo pipefail
 
@@ -51,10 +51,13 @@ fi
 . .venv/bin/activate
 
 # ────────── 3. Python deps ──────────
-_step "Step 3/6 — install brutex[dev,data,groww] editable"
+# DEC-CLONE-RUN-002: include the `ui` extra so the dashboard (fastapi +
+# uvicorn) runs immediately after a bootstrap — it was previously omitted,
+# so `python -m brutex dashboard` failed for missing fastapi/uvicorn.
+_step "Step 3/6 — install brutex[dev,data,ui,groww] editable"
 pip install -q --upgrade pip
-if pip install -q -e ".[dev,data,groww]" 2>&1 | tail -2; then
-  _ok "dev + data + groww extras installed"
+if pip install -q -e ".[dev,data,ui,groww]" 2>&1 | tail -2; then
+  _ok "dev + data + ui + groww extras installed"
 else
   _err "pip install failed — see output above"
   exit 1

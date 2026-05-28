@@ -112,16 +112,26 @@ in `brutex/adapters/protocol.py`. Everything else works unchanged.
 ```bash
 git clone https://github.com/SJParthi/bruteX.git
 cd bruteX
-make run            # installs the [data,ui] extras + launches the server
+make run            # turnkey: venv + libs + Rust kernel + launches the server
 #   → open http://127.0.0.1:9080
 ```
 
-`make run` is shorthand for:
+`make run` is self-contained and idempotent (DEC-CLONE-RUN-002). From a
+clean clone it: creates a `.venv/`, installs the `[data,ui]` runtime
+extras, builds the `fno_math` Rust kernel if it is not importable (needs
+`cargo`; the engine's `brutex.strategies.combo` imports it at module top),
+then launches the dashboard. Re-running skips work already done. It is
+roughly equivalent to:
 
 ```bash
+python3.12 -m venv .venv && . .venv/bin/activate
 pip install -e ".[data,ui]"
-python -m brutex dashboard      # alias: brutex run
+( cd rust/fno-math && maturin develop --release )   # build fno_math kernel
+python -m brutex dashboard                           # alias: brutex run
 ```
+
+For a full development environment (all extras + Rust toolchain + the
+`brutex doctor` smoke), run `make setup` (wraps `scripts/setup/bootstrap.sh`).
 
 > **What you'll see today:** the **Strategy Report** dashboard renders
 > immediately, but its numbers are **placeholders**. Real values appear
