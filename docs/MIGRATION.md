@@ -335,6 +335,47 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+275. **DEC-G08-RESOLUTION-001 — TRACK1_REQUIREMENTS_FINAL.md §10.3 G-08 (SLA validator `test_full_sweep_extrapolation.py`) added as RESOLVED-v1-scaffold row + §10.5 bookkeeping (13th-of-~15 stale-text locations effectively reconciled)** (operator directive 2026-05-28 "make it ready for merge ... go ahead with the plan okay?" — thirteenth iteration of Track-1-only docs ratchet wave). The G-08 gap cited stale evidence: "`tests/bench/test_full_sweep_extrapolation.py` — SOLE SLA validator per PERFORMANCE_BUDGET §8 — doesn't exist". Verified-current code shows the file EXISTS per DEC-P0-062 (MIGRATION entry #199) with 4 test functions.
+
+    **What this fixes:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.3` — added G-08 RESOLVED-v1-scaffold row: file exists with `test_projected_33b_within_sla` (hard SLA gate — microbench proxy → 33B projection → ≤ hardware-SLA assertion), `test_per_trial_kernel_regression_floor`, `test_per_trial_proxy_stable_across_runs`. Honest envelope: the hard SLA gate is `xfail(strict=True)` for v1 (flips to PASS the day the real `count_supermasks_u64s` kernel + engine ship); the scaffold structure runs in CI today.
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.5` — removed G-08 from open-items list with bookkeeping note.
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No edits to `tests/bench/test_full_sweep_extrapolation.py` (already exists per DEC-P0-062).
+    - No promotion of the `xfail(strict=True)` hard SLA gate to a live gate (that flips when the real kernel ships — separate Phase 2/3 work).
+    - No edits to §1–§4 of TRACK1_REQUIREMENTS_FINAL.md.
+    - No new code, tests, or workflows.
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.3` — new G-08 RESOLVED row.
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.5` — 1-line bookkeeping update.
+    - `docs/MIGRATION.md` — this entry #275.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: file existence + 4 test functions verified via grep (`grep -nE "def test_" tests/bench/test_full_sweep_extrapolation.py`).
+    - ✅ REAL: the `xfail(strict=True)` v1-scaffold status faithfully reflected (NOT overstated as a live hard gate).
+    - 🟡 PARTIAL: G-08 gap "doesn't exist" is RESOLVED, but the hard SLA gate is xfail-pending the real kernel — honestly flagged as v1 scaffold per DEC-P0-062.
+    - 🟡 PARTIAL: 13 of ~15 stale-text locations effectively reconciled.
+    - 📋 ROADMAP: ~2 more stale-text locations remain + the xfail→hard-gate promotion (Phase 2/3 when the kernel ships).
+
+    **What did NOT land in this PR:**
+
+    - No edits to `tests/bench/test_full_sweep_extrapolation.py` (already exists).
+    - No xfail→hard-gate promotion.
+    - No edits to §1–§4 tables.
+
+    **4-agent hostile review:** Pure-docs §10 addendum extension (G-08 RESOLVED row + §10.5 bookkeeping). Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) the G-08 RESOLVED row accurately reflects the file existing with 4 test functions; (2) the `xfail(strict=True)` v1-scaffold status is faithfully reflected (not overstated); (3) DEC-P0-062 closing chain (entry #199) is consistent; (4) the §10.5 bookkeeping removes G-08 cleanly; (5) the xfail→hard-gate promotion is correctly flagged as separate deferred work.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-G08-RESOLUTION-001. **Builds on:** DEC-G12-RESOLUTION-001 (entry #274, sibling §10.3 RESOLVED-via-code-verification pattern) · DEC-G13-RESOLUTION-001 (entry #273) · DEC-C08-RESOLUTION-001 (entry #271) · DEC-REQS-FINAL-RECONCILE-001 (entry #262) · DEC-P0-062 (entry #199, the SLA-validator scaffold decision) · `tests/bench/test_full_sweep_extrapolation.py` (the implementation) · `docs/TRACK1_PERFORMANCE_BUDGET.md §8` (the spec gate). **Closes:** G-08 stale-evidence citation gap; §10.5 bookkeeping. **Does NOT close:** the `xfail(strict=True)` → hard-gate promotion (Phase 2/3) + the remaining ~2 stale-text locations.
+
 274. **DEC-G12-RESOLUTION-001 — TRACK1_REQUIREMENTS_FINAL.md §10.3 G-12 (NIFTY 50 rebalance handling) added as RESOLVED row + §10.5 bookkeeping (12th-of-~15 stale-text locations effectively reconciled)** (operator directive 2026-05-27/28 "make it ready for merge ... go ahead with the plan okay?" — twelfth iteration of Track-1-only docs ratchet wave). The G-12 gap cited stale evidence: "`brutex/calendars/nse.py` has no rebalance dates". Verified-current code at `brutex/calendars/nse.py:307-465` shows `NIFTY50_REBALANCE_EVENTS` (semi-annual events 2021→2025) + `is_nifty_rebalance_day(d)` accessor, implemented per DEC-P0-046 + Q-09 of the operator's 2026-05-18 12-decision lock ("hardcode dates ~10 events 2021-2026 + flag in audit").
 
     **What this fixes:**
