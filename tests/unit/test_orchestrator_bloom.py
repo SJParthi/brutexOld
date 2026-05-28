@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import sys
 import threading
 from unittest.mock import patch
 
@@ -38,6 +39,7 @@ from brutex.orchestrator.bloom import (
     BloomFilter,
     BloomTooLargeError,
     _compute_m_bytes,
+    _popcount_bytes,
 )
 
 # ────────────────────────────────────────────────────────────────────────
@@ -455,3 +457,53 @@ class TestEmpiricalFprAtScale:
             f"FPR breach: observed {observed} > {fpr_target * 5} on "
             f"{probe_count} probes at capacity={capacity}"
         )
+
+
+class TestPopcountFallback:
+    """Regression: Bloom must not hard-require the optional ``fno_math`` kernel.
+
+    Before DEC-CLONE-RUN-001 (MIGRATION.md entry #278) ``bloom.py``
+    imported ``fno_math`` at module top, so every ``brutex`` command
+    crashed on a plain ``pip install`` that lacked the maturin-built Rust
+    wheel. :func:`_popcount_bytes` now imports it lazily and falls back to
+    a pure-Python ``int.bit_count()`` path. These tests pin the fallback's
+    exactness so the regression cannot return.
+    """
+
+    @staticmethod
+    def _reference_popcount(raw: bytes) -> int:
+        """Naive set-bit count, independent of the implementation."""
+        return sum(byte.bit_count() for byte in raw)
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            b"",
+            b"\x00",
+            b"\xff",
+            b"\x0f\xf0",
+            b"\x80\x01\x7f",
+            bytes(range(256)),
+        ],
+    )
+    def test_fallback_matches_reference_without_fno_math(
+        self, raw: bytes, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With ``fno_math`` forced absent, the stdlib fallback is exact."""
+        # A ``None`` entry in sys.modules makes ``import fno_math`` raise
+        # ImportError (CPython contract), forcing the fallback branch even
+        # in CI where the Rust wheel is built.
+        monkeypatch.setitem(sys.modules, "fno_math", None)
+        assert _popcount_bytes(raw) == self._reference_popcount(raw)
+
+    def test_unique_count_estimate_works_without_fno_math(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: the public estimator works on the fallback path."""
+        monkeypatch.setitem(sys.modules, "fno_math", None)
+        bf = BloomFilter(capacity=1000, fpr_target=1e-6)
+        for i in range(100):
+            bf.add(hashlib.sha256(f"k:{i}".encode()).digest())
+        # The Swamidass-Baldi estimator is approximate; 100 unique inserts
+        # must land in a sane band (not exact-equal).
+        assert 50 <= bf.unique_count_estimate <= 200

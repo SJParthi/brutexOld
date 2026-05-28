@@ -127,7 +127,7 @@ def _popcount_bytes(raw: bytes) -> int:
     """
     try:
         import fno_math
-    except ImportError:  # pragma: no cover - optional kernel not built (CI always builds fno_math)
+    except ImportError:
         return int.from_bytes(raw, "big").bit_count()
     return int(fno_math.popcount_bytes(raw))
 
