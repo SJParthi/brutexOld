@@ -335,6 +335,47 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+276. **DEC-G14-RESOLUTION-001 — TRACK1_REQUIREMENTS_FINAL.md §10.3 G-14 (`indicator_version` threading) added as RESOLVED row + §10.5 bookkeeping (14th-of-~15 stale-text locations effectively reconciled)** (operator directive 2026-05-28 "make it ready for merge ... go ahead with the plan okay?" — fourteenth iteration of Track-1-only docs ratchet wave). The G-14 gap cited stale evidence: "`grep -rn indicator_version brutex/` returns zero". Verified-current code: `grep -rnE "indicator_version" brutex/` returns 5 hits; `combo_hash(...)` at `brutex/strategies/combo.py:100` takes `indicator_version: str` as 1 of the 9 identity fields per DEC-P0-060 (combo_hash 9-field BLAKE3 migration, MIGRATION entry #197).
+
+    **What this fixes:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.3` — added G-14 RESOLVED row: `combo_hash` 9-field identity (`strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_sha`) now threads `indicator_version`. Honest envelope: the **reproducibility-hash threading** (the cited gap) is RESOLVED; the broader plugin add/remove *policy* (hot-reload semantics) remains Phase 2/3 engine work tracked separately.
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.5` — removed G-14 from open-items list with bookkeeping note.
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No edits to `brutex/strategies/combo.py` (already threads indicator_version per DEC-P0-060).
+    - No claim that the full plugin add/remove hot-reload policy is implemented (only the hash threading — the cited gap — is RESOLVED).
+    - No edits to §1–§4 of TRACK1_REQUIREMENTS_FINAL.md.
+    - No new code, tests, or workflows.
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.3` — new G-14 RESOLVED row.
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.5` — 1-line bookkeeping update.
+    - `docs/MIGRATION.md` — this entry #276.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: `indicator_version` threading verified via grep — `combo.py:100` parameter + 5 total hits.
+    - ✅ REAL: the distinction between "hash threading (RESOLVED)" vs "plugin hot-reload policy (still Phase 2/3)" faithfully stated — not overstated.
+    - 🟡 PARTIAL: G-14's cited gap (zero grep hits) is RESOLVED; the broader plugin policy is a separate concern, honestly flagged.
+    - 🟡 PARTIAL: 14 of ~15 stale-text locations effectively reconciled.
+    - 📋 ROADMAP: ~1 more stale-text location remains + the plugin hot-reload policy (Phase 2/3).
+
+    **What did NOT land in this PR:**
+
+    - No edits to `brutex/strategies/combo.py` (already correct).
+    - No plugin hot-reload policy implementation.
+    - No edits to §1–§4 tables.
+
+    **4-agent hostile review:** Pure-docs §10 addendum extension (G-14 RESOLVED row + §10.5 bookkeeping). Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) the G-14 RESOLVED row accurately reflects `combo.py:100` threading `indicator_version`; (2) the distinction between hash-threading (resolved) vs plugin-policy (Phase 2/3) is faithful, not overstated; (3) DEC-P0-060 closing chain (entry #197) is consistent; (4) the §10.5 bookkeeping removes G-14 cleanly; (5) the plugin hot-reload policy is correctly flagged as separate deferred work.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-G14-RESOLUTION-001. **Builds on:** DEC-G08-RESOLUTION-001 (entry #275, sibling §10.3 RESOLVED-via-code-verification pattern) · DEC-G12-RESOLUTION-001 (entry #274) · DEC-G13-RESOLUTION-001 (entry #273) · DEC-C08-RESOLUTION-001 (entry #271) · DEC-REQS-FINAL-RECONCILE-001 (entry #262) · DEC-P0-060 (entry #197, the combo_hash 9-field migration that threaded indicator_version) · `brutex/strategies/combo.py:100` (the implementation). **Closes:** G-14 stale-evidence citation gap; §10.5 bookkeeping. **Does NOT close:** the plugin add/remove hot-reload policy (Phase 2/3) + the remaining ~1 stale-text location.
+
 275. **DEC-G08-RESOLUTION-001 — TRACK1_REQUIREMENTS_FINAL.md §10.3 G-08 (SLA validator `test_full_sweep_extrapolation.py`) added as RESOLVED-v1-scaffold row + §10.5 bookkeeping (13th-of-~15 stale-text locations effectively reconciled)** (operator directive 2026-05-28 "make it ready for merge ... go ahead with the plan okay?" — thirteenth iteration of Track-1-only docs ratchet wave). The G-08 gap cited stale evidence: "`tests/bench/test_full_sweep_extrapolation.py` — SOLE SLA validator per PERFORMANCE_BUDGET §8 — doesn't exist". Verified-current code shows the file EXISTS per DEC-P0-062 (MIGRATION entry #199) with 4 test functions.
 
     **What this fixes:**
