@@ -29,9 +29,16 @@ adapter lands in Phase 1+ of the post-pivot phase plan (see
         Replay the audit chain and assert integrity (NFR-OBS-003).
 
     brutex dashboard [--lake-root <dir>] [--host 127.0.0.1] [--port 9080]
-    brutex run [...]            # `run` is an alias for `dashboard`
         Start the BruteX dashboard FastAPI server. Requires the ``ui``
         extra: ``pip install -e ".[ui]"`` (or just ``make run``).
+
+    brutex run [--lake-root <dir>] [--host ...] [--port ...] [--no-browser]
+        One-click launch (DEC-ONECLICK-RUN-001): resolve the lake root,
+        open the browser, then start the dashboard. This is what
+        ``make run`` / ``python -m brutex run`` / the IDE Run target invoke.
+
+    brutex fetch [--dry-run] [--inspect] [...]
+        Fetch historical candles into the lake (Groww adapter).
 
 ## Design
 
@@ -46,8 +53,11 @@ adapter lands in Phase 1+ of the post-pivot phase plan (see
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from brutex import __version__
 from brutex.config.runtime import read_runtime_file
@@ -114,8 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ── dashboard ─────────────────────────────────────────────────
     dashboard = sub.add_parser(
         "dashboard",
-        aliases=["run"],
-        help="Start the BruteX dashboard FastAPI server (alias: run)",
+        help="Start the BruteX dashboard FastAPI server",
     )
     dashboard.add_argument(
         "--lake-root",
@@ -129,6 +138,71 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dashboard.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)")
     dashboard.add_argument("--port", type=int, default=9080, help="Bind port (default 9080)")
+
+    # ── run (DEC-ONECLICK-RUN-001) — the one-click entry point ────
+    run = sub.add_parser(
+        "run",
+        help="One-click: start the BruteX dashboard + open the browser (the IDE Run target)",
+    )
+    run.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root dir (default: $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    run.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)")
+    run.add_argument("--port", type=int, default=9080, help="Bind port (default 9080)")
+    run.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do NOT auto-open the browser (for headless / CI runs)",
+    )
+
+    # ── fetch (DEC-GROWW-INGEST-001) — pull candles into the lake ──
+    fetch = sub.add_parser(
+        "fetch",
+        help="Fetch historical candles into the lake (indices first; --dry-run for offline sample data)",
+    )
+    fetch.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root dir (default: $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    fetch.add_argument(
+        "--start", type=str, default=None, help="Start date/ISO (default: Jan 1 of this year, UTC)"
+    )
+    fetch.add_argument("--end", type=str, default=None, help="End date/ISO (default: now, UTC)")
+    fetch.add_argument(
+        "--interval",
+        default="all",
+        help="Candle interval, or 'all' for every Groww native timeframe (default: all)",
+    )
+    fetch.add_argument(
+        "--window-days",
+        type=int,
+        default=None,
+        help="Override the chunk window (default: by interval)",
+    )
+    fetch.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Use synthetic candles (no Groww creds) — proves the pipe + writes sample lake data",
+    )
+    fetch.add_argument(
+        "--inspect",
+        action="store_true",
+        help=(
+            "Probe mode: collect in memory (no Parquet) and print a per-timeframe "
+            "report — pre/regular/post-market bar counts (IST) + timestamp grid-alignment"
+        ),
+    )
+    fetch.add_argument(
+        "--rows-per-chunk",
+        type=int,
+        default=5,
+        help="Synthetic rows per chunk in --dry-run mode (default 5)",
+    )
 
     # ── doctor (DEC-DOCTOR-001) ───────────────────────────────────
     doctor = sub.add_parser(
@@ -329,6 +403,152 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     return EXIT_OK
 
 
+def _open_browser(url: str) -> None:  # pragma: no cover — opens a real browser
+    """Open *url* in the default web browser (best-effort, never raises)."""
+    import webbrowser
+
+    webbrowser.open(url)
+
+
+def cmd_run(
+    lake_root: Path | None,
+    host: str,
+    port: int,
+    *,
+    open_browser: bool,
+) -> int:
+    """One-click entry point: start the dashboard + open the browser.
+
+    This is what ``python -m brutex run``, ``make run`` and the committed
+    IntelliJ run configuration invoke (DEC-ONECLICK-RUN-001) — clone the
+    repo, click ▶ Run, and the live dashboard opens. It resolves the lake
+    root (``--lake-root`` → ``$BRUTEX_LAKE_ROOT`` → ``~/.brutex/lake``),
+    prints a startup banner, optionally opens the browser, then delegates
+    to :func:`cmd_dashboard`.
+
+    The browser is opened best-effort *before* the server finishes binding,
+    so it may need one refresh on a cold start — acceptable for a local
+    dev launch. Pass ``open_browser=False`` (``--no-browser``) for headless
+    or CI invocations.
+    """
+    resolved_lake = lake_root
+    if resolved_lake is None:
+        env_lake = os.environ.get("BRUTEX_LAKE_ROOT")
+        resolved_lake = Path(env_lake) if env_lake else Path.home() / ".brutex" / "lake"
+
+    url = f"http://{host}:{port}"
+    print(f"[brutex] BruteX dashboard → {url}  (lake: {resolved_lake})", file=sys.stderr)
+    if open_browser:
+        _open_browser(url)
+    return cmd_dashboard(lake_root=resolved_lake, host=host, port=port)
+
+
+def _parse_dt(value: str) -> datetime:
+    """Parse a ``YYYY-MM-DD`` or full-ISO string to a UTC-aware datetime."""
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _resolve_lake_root(lake_root: Path | None) -> Path:
+    """``--lake-root`` → ``$BRUTEX_LAKE_ROOT`` → ``~/.brutex/lake``."""
+    if lake_root is not None:
+        return lake_root
+    env_lake = os.environ.get("BRUTEX_LAKE_ROOT")
+    return Path(env_lake) if env_lake else Path.home() / ".brutex" / "lake"
+
+
+def _build_live_fetcher(sink: Any) -> tuple[Any, Any]:  # pragma: no cover — live Groww creds + SDK
+    """Wire the real auth + candle fetcher → (PersistingFetcher, reauth hook)."""
+    from growwapi.groww.exceptions import BaseGrowwException
+
+    from brutex.adapters.groww.auth import GrowwAuth
+    from brutex.adapters.groww.client import GrowwCandleFetcher
+    from brutex.adapters.groww.persist import PersistingFetcher
+    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
+
+    auth = GrowwAuth.from_env()
+    groww = GrowwCandleFetcher(
+        sdk=auth.session(),
+        bucket=AdaptiveTokenBucket(),
+        base_exception=BaseGrowwException,
+        reauth_fn=auth.refresh,
+    )
+    return PersistingFetcher(inner=groww, sink=sink), groww.reauth
+
+
+def cmd_fetch(
+    lake_root: Path | None,
+    start: str | None,
+    end: str | None,
+    interval: str,
+    *,
+    window_days: int | None,
+    dry_run: bool,
+    inspect: bool,
+    rows_per_chunk: int,
+) -> int:
+    """Fetch candles for the 3 brute-force indices into the lake (§13.9 step 3).
+
+    ``--dry-run`` uses :class:`SyntheticCandleFetcher` so the full
+    parse → OHLC-guard → sink pipeline runs offline (no Groww creds).
+    ``--inspect`` collects in memory (no Parquet) and prints a per-timeframe
+    pre/regular/post-market + timestamp-alignment report — the operator's
+    "does Groww give pre/post-market + precise timestamps?" probe.
+    """
+    from brutex.adapters.groww.chunks import ALL_GROWW_INTERVALS
+    from brutex.adapters.groww.ingest import (
+        BRUTE_FORCE_INDEX_SYMBOLS,
+        SyntheticCandleFetcher,
+        run_ingest,
+    )
+    from brutex.adapters.groww.inspect import CollectingBarSink
+    from brutex.adapters.groww.persist import PersistingFetcher
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+    from brutex.data.watermark import FetchWatermark
+
+    resolved = _resolve_lake_root(lake_root)
+    intervals = list(ALL_GROWW_INTERVALS) if interval == "all" else [interval]
+    start_dt = _parse_dt(start) if start else datetime(datetime.now(UTC).year, 1, 1, tzinfo=UTC)
+    end_dt = _parse_dt(end) if end else datetime.now(UTC)
+
+    collecting = CollectingBarSink() if inspect else None
+    sink: Any = collecting or ParquetBarSink(writer=ParquetWriter(lake_root=resolved))
+    watermark = FetchWatermark()
+
+    if dry_run:
+        fetcher: object = PersistingFetcher(
+            inner=SyntheticCandleFetcher(rows_per_chunk=rows_per_chunk), sink=sink
+        )
+        reauth = None
+        print("[brutex] fetch --dry-run → synthetic candles", file=sys.stderr)
+    else:
+        fetcher, reauth = _build_live_fetcher(sink)
+        print("[brutex] fetch (live Groww)", file=sys.stderr)
+
+    report = run_ingest(
+        fetcher,  # type: ignore[arg-type]
+        BRUTE_FORCE_INDEX_SYMBOLS,
+        intervals,
+        start_dt,
+        end_dt,
+        watermark,
+        window_days=window_days,
+        reauth=reauth,
+    )
+    print(
+        f"[brutex] fetch done — completed={report.completed} no_data={report.no_data} "
+        f"failed={report.failed} skipped={report.skipped}"
+    )
+    if collecting is not None:
+        print("[brutex] --- Groww data-shape probe (IST session 09:15-15:30) ---")
+        for inspection in collecting.inspections():
+            print(f"[brutex]   {inspection.summary()}")
+    else:
+        print(f"[brutex] lake: {resolved}")
+    return EXIT_OK if report.failed == 0 else EXIT_INTERNAL_ERROR
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Main dispatcher
 # ────────────────────────────────────────────────────────────────────────
@@ -347,11 +567,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.audit_command != "verify":
             parser.error(f"unknown audit subcommand: {args.audit_command}")
         return cmd_audit_verify(audit_file=args.audit_file)
-    if args.command in ("dashboard", "run"):
+    if args.command == "dashboard":
         return cmd_dashboard(
             lake_root=args.lake_root,
             host=args.host,
             port=args.port,
+        )
+    if args.command == "run":
+        return cmd_run(
+            lake_root=args.lake_root,
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_browser,
+        )
+    if args.command == "fetch":
+        return cmd_fetch(
+            lake_root=args.lake_root,
+            start=args.start,
+            end=args.end,
+            interval=args.interval,
+            window_days=args.window_days,
+            dry_run=args.dry_run,
+            inspect=args.inspect,
+            rows_per_chunk=args.rows_per_chunk,
         )
     if args.command == "doctor":
         return cmd_doctor(

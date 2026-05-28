@@ -124,19 +124,40 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
         return df_1m.clone()
 
     if is_intraday(target_tf_minutes):
-        # Minute-multiple bucketing.
+        # Minute-multiple bucketing, anchored PER TRADING SESSION to the
+        # 09:15 IST open (DEC-RESAMPLE-ANCHOR-001).
+        #
+        # Plain group_by_dynamic anchors buckets to the UTC epoch, which is
+        # wrong for any timeframe that does not evenly divide the 225-minute
+        # offset between UTC-midnight and the 09:15-IST open. The two-minute
+        # timeframe landed its first bucket at 09:14 IST instead of 09:15;
+        # only the three, five, nine and fifteen minute timeframes aligned by
+        # luck. Grouping by the IST trading-day plus start_by datapoint
+        # re-anchors EACH session to its own first bar at 09:15.
         bucket_str = f"{target_tf_minutes}m"
-        return df_1m.group_by_dynamic(
-            index_column="ts_utc",
-            every=bucket_str,
-            closed="left",
-            label="left",
-        ).agg(
-            pl.col("open").first().alias("open"),
-            pl.col("high").max().alias("high"),
-            pl.col("low").min().alias("low"),
-            pl.col("close").last().alias("close"),
-            pl.col("volume").sum().alias("volume"),
+        return (
+            df_1m.with_columns(
+                (pl.col("ts_utc") + pl.duration(hours=5, minutes=30))
+                .dt.date()
+                .alias("_trading_day")
+            )
+            .group_by_dynamic(
+                index_column="ts_utc",
+                every=bucket_str,
+                closed="left",
+                label="left",
+                group_by="_trading_day",
+                start_by="datapoint",
+            )
+            .agg(
+                pl.col("open").first().alias("open"),
+                pl.col("high").max().alias("high"),
+                pl.col("low").min().alias("low"),
+                pl.col("close").last().alias("close"),
+                pl.col("volume").sum().alias("volume"),
+            )
+            .drop("_trading_day")
+            .sort("ts_utc")
         )
 
     # Daily TF (375 minutes). Group by trading-day IST date.

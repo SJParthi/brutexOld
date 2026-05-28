@@ -26,19 +26,25 @@ India VIX is a volatility index calculated from NIFTY 50 option mid-
 quotes. It updates every 15 seconds (NOT tick-by-tick) and shares the
 NSE trading window (09:15-15:30 IST) with the spot indexes.
 
-## Scope filter
+## Scope filters — two tiers (DEC-FETCH-ALL-001)
 
-``is_in_scope(instrument)`` accepts a row iff:
+The project fetches a BROAD lake but brute-forces a NARROW engine:
 
-1. ``instrument.instrument_type == IDX`` (spot index, not a derivative)
-2. ``(exchange, trading_symbol)`` is one of the three Track 1 indexes.
+* **FETCH tier** — ``is_in_fetch_scope(instrument, fno_eligible)``: every
+  NSE index + every NSE F&O futures/option + every F&O-eligible NSE cash
+  equity + BSE SENSEX. This is what gets downloaded + stored.
+* **BRUTE-FORCE tier** — ``is_in_brute_force_scope(instrument)``: only the
+  3 swept indexes (NIFTY 50, BANKNIFTY, SENSEX; India VIX excluded).
 
-All cash equity, all F&O derivatives, all non-Track-1 indices, and all
-commodities are rejected.
+The legacy ``is_in_scope(instrument)`` is the original narrow index
+filter (the 4 named indexes incl. India VIX) and is unchanged for
+backwards compatibility — ``instrument_type == IDX`` AND
+``(exchange, trading_symbol)`` in :data:`INDEX_UNDERLYINGS`.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final
 
@@ -183,15 +189,122 @@ def classify_underlying_kind(instrument: Instrument) -> str:
     return "index"
 
 
+# ────────────────────────────────────────────────────────────────────────
+# Two-tier scope (DEC-FETCH-ALL-001) — FETCH tier vs BRUTE-FORCE tier
+# ────────────────────────────────────────────────────────────────────────
+#
+# Per CLAUDE.md §3 + DEC-FETCH-ALL-001 the project fetches a BROAD lake
+# (all NSE F&O spot + futures + options + all NSE indices + BSE SENSEX)
+# while the brute-force ENGINE stays on the 3 indexes. These two filters
+# encode that split:
+#
+#   * ``is_in_fetch_scope``       — the broad LAKE tier (what we download)
+#   * ``is_in_brute_force_scope`` — the narrow ENGINE tier (what we sweep)
+#
+# ``is_in_scope`` (above) remains the legacy 4-index filter and is
+# unchanged for backwards compatibility.
+
+
+#: Derivative instrument types (futures + both option sides).
+_DERIVATIVE_TYPES: Final[frozenset[InstrumentType]] = frozenset(
+    {InstrumentType.FUT, InstrumentType.CE, InstrumentType.PE}
+)
+
+#: The only BSE instrument in the fetch universe is the SENSEX index.
+_BSE_FETCH_INDEX_SYMBOL: Final[str] = "SENSEX"
+
+
+#: ``(exchange, symbol)`` pairs for the 3 brute-forced indexes (excludes
+#: India VIX, which is reference-only and never swept).
+BRUTE_FORCE_INDEX_UNDERLYINGS: Final[frozenset[tuple[Exchange, str]]] = frozenset(
+    (u.exchange, u.underlying_symbol) for u in BRUTE_FORCE_INDICES
+)
+
+
+def is_in_brute_force_scope(instrument: Instrument) -> bool:
+    """Return True if *instrument* is one of the 3 brute-forced indexes.
+
+    The brute-force ENGINE tier: NIFTY 50, BANKNIFTY (NSE) + SENSEX (BSE).
+    India VIX is excluded (reference-only). Everything else — stocks,
+    futures, options, other indices — is rejected from the engine even
+    though it may live in the fetch lake.
+    """
+    return (
+        instrument.instrument_type == InstrumentType.IDX
+        and (instrument.exchange, instrument.trading_symbol) in BRUTE_FORCE_INDEX_UNDERLYINGS
+    )
+
+
+def build_fno_eligible_underlyings(
+    instruments: Iterable[Instrument],
+) -> frozenset[tuple[Exchange, str]]:
+    """Return the set of ``(exchange, underlying_symbol)`` that have NSE F&O.
+
+    A cash equity is "F&O-eligible" iff at least one NSE futures or option
+    contract names it as the underlying. This set is derived by scanning
+    the full instrument master once, then passed to
+    :func:`is_in_fetch_scope` so equity rows can be admitted only when a
+    derivative on the same underlying exists.
+    """
+    eligible: set[tuple[Exchange, str]] = set()
+    for inst in instruments:
+        underlying = inst.underlying_symbol
+        if inst.is_derivative and inst.exchange == Exchange.NSE and underlying is not None:
+            eligible.add((inst.exchange, underlying))
+    return frozenset(eligible)
+
+
+def is_in_fetch_scope(
+    instrument: Instrument,
+    fno_eligible_underlyings: frozenset[tuple[Exchange, str]],
+) -> bool:
+    """Return True if *instrument* belongs to the broad fetch / lake tier.
+
+    The fetch tier (DEC-FETCH-ALL-001) admits, by instrument type:
+
+    * **IDX** — every NSE index; from BSE only SENSEX.
+    * **FUT / CE / PE** — every NSE futures + option contract (no BSE
+      derivatives — BSE contributes only the SENSEX index).
+    * **EQ** — an NSE cash equity only if it is an F&O-eligible underlying
+      (i.e. ``(NSE, trading_symbol)`` is in *fno_eligible_underlyings*,
+      typically built via :func:`build_fno_eligible_underlyings`).
+
+    Parameters
+    ----------
+    instrument
+        The candidate instrument-master row.
+    fno_eligible_underlyings
+        The set of NSE F&O-eligible ``(exchange, symbol)`` pairs.
+    """
+    instrument_type = instrument.instrument_type
+    exchange = instrument.exchange
+    if instrument_type == InstrumentType.IDX:
+        # All NSE indices; from BSE only SENSEX.
+        return exchange == Exchange.NSE or instrument.trading_symbol == _BSE_FETCH_INDEX_SYMBOL
+    if instrument_type in _DERIVATIVE_TYPES:
+        # All NSE futures + options; no BSE derivatives.
+        return exchange == Exchange.NSE
+    # Remaining type is cash equity (EQ): in scope only if it is an
+    # F&O-eligible NSE underlying.
+    return (
+        exchange == Exchange.NSE
+        and (exchange, instrument.trading_symbol) in fno_eligible_underlyings
+    )
+
+
 __all__ = [
     "ALLOWED_UNDERLYINGS",
+    "BRUTE_FORCE_INDEX_UNDERLYINGS",
     "BRUTE_FORCE_INDICES",
     "INDEX_UNDERLYINGS",
     "REFERENCE_ONLY_INDICES",
     "V1_INDICES",
     "V1_UNDERLYINGS",
     "UnderlyingSpec",
+    "build_fno_eligible_underlyings",
     "classify_underlying_kind",
+    "is_in_brute_force_scope",
+    "is_in_fetch_scope",
     "is_in_scope",
     "is_index_underlying",
 ]

@@ -30,12 +30,19 @@ htmlcov/
 .mypy_cache/
 .pyre/
 .pytype/
+# pytest-benchmark JSON artifact (CI writes + uploads it; never tracked)
+bench-results.json
 
 # Tooling
 .DS_Store
 *.swp
 *.swo
 .idea/
+# …but DO track the shared run configuration so "clone → click ▶ Run"
+# works out of the box (DEC-ONECLICK-RUN-001).
+!.idea/
+.idea/*
+!.idea/runConfigurations/
 .vscode/
 *.code-workspace
 

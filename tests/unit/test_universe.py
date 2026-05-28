@@ -8,19 +8,24 @@ universe is exactly 3 spot indexes.
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.universe import (
     ALLOWED_UNDERLYINGS,
+    BRUTE_FORCE_INDEX_UNDERLYINGS,
     BRUTE_FORCE_INDICES,
     INDEX_UNDERLYINGS,
     REFERENCE_ONLY_INDICES,
     V1_INDICES,
     V1_UNDERLYINGS,
     UnderlyingSpec,
+    build_fno_eligible_underlyings,
     classify_underlying_kind,
+    is_in_brute_force_scope,
+    is_in_fetch_scope,
     is_in_scope,
     is_index_underlying,
 )
@@ -300,3 +305,134 @@ class TestClassifyUnderlyingKind:
         inst = _make_idx(Exchange.NSE, "FINNIFTY")
         with pytest.raises(ValueError, match="not in Track 1 scope"):
             classify_underlying_kind(inst)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Two-tier scope (DEC-FETCH-ALL-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _make_derivative(
+    exchange: Exchange,
+    instrument_type: InstrumentType,
+    underlying: str,
+    *,
+    trading_symbol: str | None = None,
+) -> Instrument:
+    """Build a FUT / CE / PE derivative Instrument for fetch-scope testing."""
+    is_option = instrument_type in (InstrumentType.CE, InstrumentType.PE)
+    return Instrument(
+        exchange=exchange,
+        exchange_token=hash((underlying, instrument_type)) % 100_000,
+        trading_symbol=trading_symbol or f"{underlying}-DERIV",
+        vendor_symbol=f"{exchange}-{underlying}-{instrument_type}",
+        name=underlying,
+        instrument_type=instrument_type,
+        segment=Segment.FNO,
+        series=None,
+        isin=None,
+        underlying_symbol=underlying,
+        underlying_exchange_token=None,
+        lot_size=50,
+        tick_size=Decimal("0.05"),
+        freeze_quantity=None,
+        expiry_date=date(2025, 1, 30),
+        strike_price=Decimal("28500") if is_option else None,
+        is_reserved=False,
+        buy_allowed=True,
+        sell_allowed=True,
+    )
+
+
+class TestIsInBruteForceScope:
+    """The narrow ENGINE tier — only the 3 swept indexes."""
+
+    @pytest.mark.parametrize(
+        ("exchange", "symbol"),
+        [
+            (Exchange.NSE, "NIFTY"),
+            (Exchange.NSE, "BANKNIFTY"),
+            (Exchange.BSE, "SENSEX"),
+        ],
+    )
+    def test_three_swept_indices_in_scope(self, exchange: Exchange, symbol: str) -> None:
+        assert is_in_brute_force_scope(_make_idx(exchange, symbol)) is True
+
+    def test_india_vix_excluded(self) -> None:
+        """India VIX is reference-only — never brute-forced."""
+        assert is_in_brute_force_scope(_make_idx(Exchange.NSE, "INDIAVIX")) is False
+
+    def test_equity_rejected_by_type(self) -> None:
+        assert is_in_brute_force_scope(_make_equity(Exchange.NSE, "RELIANCE")) is False
+
+    def test_non_swept_index_rejected_by_membership(self) -> None:
+        assert is_in_brute_force_scope(_make_idx(Exchange.NSE, "FINNIFTY")) is False
+
+    def test_underlyings_set_excludes_vix(self) -> None:
+        assert (Exchange.NSE, "INDIAVIX") not in BRUTE_FORCE_INDEX_UNDERLYINGS
+        assert (Exchange.NSE, "NIFTY") in BRUTE_FORCE_INDEX_UNDERLYINGS
+        assert len(BRUTE_FORCE_INDEX_UNDERLYINGS) == 3
+
+
+class TestBuildFnoEligibleUnderlyings:
+    """Derive the F&O-eligible underlying set from the instrument master."""
+
+    def test_collects_nse_derivative_underlyings(self) -> None:
+        instruments = [
+            _make_derivative(Exchange.NSE, InstrumentType.FUT, "RELIANCE"),
+            _make_derivative(Exchange.NSE, InstrumentType.CE, "TCS"),
+        ]
+        eligible = build_fno_eligible_underlyings(instruments)
+        assert eligible == frozenset({(Exchange.NSE, "RELIANCE"), (Exchange.NSE, "TCS")})
+
+    def test_skips_non_derivatives(self) -> None:
+        instruments = [
+            _make_idx(Exchange.NSE, "NIFTY"),
+            _make_equity(Exchange.NSE, "RELIANCE"),
+        ]
+        assert build_fno_eligible_underlyings(instruments) == frozenset()
+
+    def test_empty_iterable(self) -> None:
+        assert build_fno_eligible_underlyings([]) == frozenset()
+
+
+class TestIsInFetchScope:
+    """The broad LAKE tier — everything we download."""
+
+    _NO_EQUITIES: frozenset[tuple[Exchange, str]] = frozenset()
+
+    def test_all_nse_indices_in_scope(self) -> None:
+        # Even non-swept NSE indices (FINNIFTY etc.) are fetched.
+        assert is_in_fetch_scope(_make_idx(Exchange.NSE, "FINNIFTY"), self._NO_EQUITIES) is True
+        assert is_in_fetch_scope(_make_idx(Exchange.NSE, "NIFTY"), self._NO_EQUITIES) is True
+
+    def test_bse_sensex_in_scope(self) -> None:
+        assert is_in_fetch_scope(_make_idx(Exchange.BSE, "SENSEX"), self._NO_EQUITIES) is True
+
+    def test_bse_non_sensex_index_rejected(self) -> None:
+        assert is_in_fetch_scope(_make_idx(Exchange.BSE, "BSE500"), self._NO_EQUITIES) is False
+
+    @pytest.mark.parametrize(
+        "instrument_type",
+        [InstrumentType.FUT, InstrumentType.CE, InstrumentType.PE],
+    )
+    def test_nse_derivatives_in_scope(self, instrument_type: InstrumentType) -> None:
+        deriv = _make_derivative(Exchange.NSE, instrument_type, "RELIANCE")
+        assert is_in_fetch_scope(deriv, self._NO_EQUITIES) is True
+
+    def test_bse_derivative_rejected(self) -> None:
+        deriv = _make_derivative(Exchange.BSE, InstrumentType.FUT, "SENSEX")
+        assert is_in_fetch_scope(deriv, self._NO_EQUITIES) is False
+
+    def test_fno_eligible_equity_in_scope(self) -> None:
+        eligible = frozenset({(Exchange.NSE, "RELIANCE")})
+        assert is_in_fetch_scope(_make_equity(Exchange.NSE, "RELIANCE"), eligible) is True
+
+    def test_non_fno_equity_rejected(self) -> None:
+        eligible = frozenset({(Exchange.NSE, "RELIANCE")})
+        # SOMEPENNY has no derivative → not eligible → rejected.
+        assert is_in_fetch_scope(_make_equity(Exchange.NSE, "SOMEPENNY"), eligible) is False
+
+    def test_bse_equity_rejected(self) -> None:
+        eligible = frozenset({(Exchange.BSE, "RELIANCE")})
+        assert is_in_fetch_scope(_make_equity(Exchange.BSE, "RELIANCE"), eligible) is False

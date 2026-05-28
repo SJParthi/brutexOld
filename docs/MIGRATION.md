@@ -335,20 +335,426 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
-279. **DEC-CLONE-RUN-002 — turnkey `make run`/`make setup`: venv + all libs + `fno_math` kernel auto-built; `ui` extra added to bootstrap** (operator directive 2026-05-28 "fully completely comprehensively automated — just run application and everything should be entirely visible ... libs and all other needed everything should be automatically included"). Extends DEC-CLONE-RUN-001 (entry #278): the prior `make run` installed `.[data,ui]` then launched the dashboard, but it (a) used whatever Python happened to be active (no venv), and (b) never built the maturin `fno_math` Rust kernel — so any import of `brutex.strategies.combo` (top-level `import fno_math` at `combo.py:64`) crashed `ModuleNotFoundError` on a clean clone. Separately, `scripts/setup/bootstrap.sh` installed `[dev,data,groww]` but **omitted `ui`**, so a post-bootstrap `python -m brutex dashboard` failed for missing fastapi/uvicorn.
+297. **DEC-CLONE-RUN-002 — turnkey `make run`/`make setup`: venv + all libs + `fno_math` kernel auto-built; `ui` extra added to bootstrap** (operator directive 2026-05-28 "fully completely comprehensively automated — just run application and everything should be entirely visible ... libs and all other needed everything should be automatically included"). *(Renumbered #279 → #297 on 2026-05-28 when this entry was reconciled into the #174 branch: `main`'s DEC-CLONE-RUN-002 had taken #279, which collided with this branch's DEC-RESAMPLE-ANCHOR-001 (#279); re-seated as the next free number, newest-first.)* Extends DEC-CLONE-RUN-001 (entry #278): the prior `make run` installed `.[data,ui]` then launched the dashboard, but it (a) used whatever Python happened to be active (no venv), and (b) never built the maturin `fno_math` Rust kernel — so any import of `brutex.strategies.combo` (top-level `import fno_math` at `combo.py:64`) crashed `ModuleNotFoundError` on a clean clone. Separately, `scripts/setup/bootstrap.sh` installed `[dev,data,groww]` but **omitted `ui`**, so a post-bootstrap `python -m brutex dashboard` failed for missing fastapi/uvicorn.
 
     **What this fixes:**
 
-    - **`make run` is now self-contained + idempotent** — creates `.venv/` (if absent), upgrades pip, installs `.[data,ui]`, then builds the `fno_math` kernel via `maturin develop --release` *only when it is not importable* (needs `cargo`), then launches the dashboard. Re-running skips work already done.
+    - **`make run` is now self-contained + idempotent** — creates `.venv/` (if absent), upgrades pip, installs `.[data,ui]`, then builds the `fno_math` kernel via `maturin develop --release` *only when it is not importable* (needs `cargo`), then launches the one-click `brutex run`. Re-running skips work already done.
     - **`make setup`** added — turnkey full dev env; delegates to `scripts/setup/bootstrap.sh` (single source of truth per CLAUDE.md §11 COMMON — no recipe copy-paste).
     - **`bootstrap.sh` now installs `.[dev,data,ui,groww]`** (was missing `ui`).
     - **README §Setup** updated to describe the venv + kernel-build flow honestly (Golden Rule #1).
 
-    **Verification (this PR, fresh `.venv`, py3.12, `cargo` 1.94 present):** `pip install -e .[data,ui]` pulled fastapi 0.136 / uvicorn 0.48 / polars 1.41 / duckdb 1.5 / pyarrow 24 etc.; `maturin develop --release` built `fno_math` (release, ~29 s); `import fno_math` and the previously-crashing `import brutex.strategies.combo` both succeed; `make run` brings up the live server — `GET /` → 200 (214 515 B HTML), `/api/v1/state` → 200 (1 196 B), `/metrics` → 200, `/api/v1/instruments` → 503 (no lake, expected per #278 envelope); banner `[brutex] dashboard → http://127.0.0.1:9080` printed.
+    **Verification (fresh `.venv`, py3.12, `cargo` 1.94):** `pip install -e .[data,ui]` pulled fastapi 0.136 / uvicorn 0.48 / polars 1.41 / duckdb 1.5 / pyarrow 24; `maturin develop --release` built `fno_math` (~29 s); `import fno_math` + the previously-crashing `import brutex.strategies.combo` both succeed; `make run` served `GET /` → 200 (214 515 B), `/api/v1/state` → 200, `/metrics` → 200, `/api/v1/instruments` → 503 (no lake, expected).
 
-    **Honest envelope (Golden Rule #10):** build/run-automation only — no engine scope, no new CI gate, no coverage-gated module touched. The kernel build requires a working `cargo` toolchain on the operator's box (present in CI + the reference M4 Pro); without it `make run` still launches but `brutex.strategies.combo` stays unimportable. `make run` launches the *placeholder* dashboard — real numbers need the lake + engine (Phase 2), unchanged from #278. The SessionStart hook's ".venv/fno_math MISSING" hints were left unchanged to avoid churn on its 27 smoke tests (DEC-SESSION-START-HOOK-001); `make setup` supersedes them as the recommended one-liner.
+    **Honest envelope (Golden Rule #10):** build/run-automation only — no engine scope, no new CI gate, no coverage-gated module touched. The kernel build needs a working `cargo` toolchain (present in CI + the reference M4 Pro). `make run` launches the *placeholder* dashboard — real numbers need the lake + engine (Phase 2).
 
-    **Decision ID:** DEC-CLONE-RUN-002. **Builds on:** DEC-CLONE-RUN-001 (entry #278), DEC-INFRA-OPS-001 (entry #244 — the decision that introduced `scripts/setup/bootstrap.sh`), DEC-P0-055 (maturin mixed Python+Rust layout / `fno_math` build). **Closes:** the "fresh clone doesn't fully run — libs + Rust kernel not auto-included" gap.
+    **Decision ID:** DEC-CLONE-RUN-002. **Builds on:** DEC-CLONE-RUN-001 (entry #278), DEC-INFRA-OPS-001 (entry #244 — introduced `scripts/setup/bootstrap.sh`), DEC-P0-055 (maturin mixed Python+Rust layout / `fno_math` build). **Closes:** the "fresh clone doesn't fully run — libs + Rust kernel not auto-included" gap.
+
+296. **DEC-FETCH-ALL-001 — two-tier universe: FETCH lake = ALL NSE F&O (spot + futures + options) + all NSE indices + BSE SENSEX; BRUTE-FORCE engine = 3 indexes (UNCHANGED)** (operator directive 2026-05-28 "yes we need all fno spot equities futures options everything dude" + "as of now our plan is to run brute force for 3 instruments alone only dude but our plan is to fetch everything dude" — operator clarified the fetch-vs-engine split across two turns). **Formal scope expansion per Golden Rule #3** (no silent expansion). This EXTENDS DEC-P0-063 (entry #200, which expanded the lake to 200 stocks + spot/options but said "NO options yet" in the Groww-adapter Q&A): the lake now covers the FULL NSE F&O universe + options + all NSE indices. *(Renumbered #278 → #296 on 2026-05-28 when this branch merged `main`: `main`'s DEC-CLONE-RUN-001 had taken #278; this scope-expansion decision is re-seated as the next free number, newest-first.)*
+
+    **The two tiers (the core of this decision):**
+
+    - **FETCH / LAKE tier (broad):** every NSE index + every NSE F&O futures/option contract + every F&O-eligible NSE cash equity + BSE SENSEX. This is what gets downloaded + stored.
+    - **BRUTE-FORCE / ENGINE tier (narrow, UNCHANGED):** only the 3 swept indexes (NIFTY 50, BANKNIFTY, SENSEX). India VIX stays reference-only. The 730B-trial sweep math, the 52-condition vocabulary, the 5-stage funnel, and the SLA are ALL UNCHANGED — the engine does not grow.
+
+    **Why the split matters (Golden Rule #10 honest envelope):** the operator initially indicated the engine should also expand, but on review chose engine = 3 only. This is the feasible design: fetching + storing is cheap (disk + bounded API calls), while brute-forcing all F&O + options would explode the trial count into the trillions/quadrillions and is NOT feasible on the M4 Pro hardware envelope. By keeping the engine at 3 indexes, the backtest docs need no rewrite; the extra data sits in the lake ready for a future (separately-authorized) engine expansion.
+
+    **What lands in THIS PR (the first code step):**
+
+    - `brutex/universe.py` — two-tier scope filter added (the data model in `brutex/models.py` already supports EQ/IDX/FUT/CE/PE, so no model change needed):
+      - `is_in_fetch_scope(instrument, fno_eligible_underlyings)` — the broad lake filter (NSE indices + NSE F&O derivatives + F&O-eligible NSE equities + BSE SENSEX).
+      - `is_in_brute_force_scope(instrument)` — the narrow engine filter (3 indexes; VIX excluded).
+      - `build_fno_eligible_underlyings(instruments)` — derives the F&O-eligible NSE underlying set from the instrument master (a cash equity is in fetch scope iff a derivative names it).
+      - `BRUTE_FORCE_INDEX_UNDERLYINGS` frozenset.
+      - Legacy `is_in_scope` (4-index filter) kept UNCHANGED for backwards-compat (still used by `instrument_store.py:752`).
+    - `tests/unit/test_universe.py` — 3 new test classes + a `_make_derivative` helper; `brutex.universe` stays at **100% line + branch** (strict-gated module); 60 tests pass; ruff + mypy strict + pyright all green.
+
+    **What this PR does NOT do (deliberately scoped narrow + honest):**
+
+    - **No live Groww fetch.** The actual Groww adapter (`brutex/adapters/groww/`) is still PROPOSED + does not exist; it is Phase 2 work gated by the Phase 0b empirical-probe HARD-GATE + TOTP credentials (neither available in CI). This PR only teaches the SCOPE FILTER the two tiers — the foundation the fetcher will consume.
+    - **No engine change.** `is_in_brute_force_scope` returns the same 3 indexes; the sweep is untouched.
+    - **No backtest-doc rewrite.** Engine unchanged → 730B math + vocabulary + funnel + SLA all stand.
+    - **No instrument_store / catalog / parquet changes.** Those land when the fetcher is built.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: `brutex/universe.py` two-tier scope filter — code written, 100% covered, ruff + mypy strict + pyright green, 60 tests pass (verified locally via `.venv/bin/pytest --cov=brutex.universe --cov-branch --cov-fail-under=100`).
+    - ✅ REAL: the data model already supports all instrument types — no model change needed.
+    - 🟡 PARTIAL: this is the SCOPE-FILTER foundation only. The end-to-end fetch (download → check → lake → resample) is the larger Phase 2 build that follows.
+    - 📋 ROADMAP: the Groww adapter (live fetch), the F&O-eligible-set wiring into the ingest pipeline, the expiry/contract discovery loop, and the per-instrument OHLC fetch — all Phase 2, gated by Phase 0b + credentials.
+
+    **4-agent hostile review:** Engine is UNCHANGED (the catastrophic trillion-trial expansion is explicitly NOT happening), so this is a lake/ingest scope-filter extension of the established DEC-P0-063 pattern, not a from-scratch architecture. Per the runbook trigger matrix (`docs/runbooks/4-agent-review.md §3`) this qualifies for the **1-agent hostile variant** (Agent C). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) engine scope genuinely unchanged (`is_in_brute_force_scope` = 3 indexes, VIX excluded, asserted by `TestIsInBruteForceScope`); (2) the fetch filter's branches are all covered (NSE/BSE indices, NSE/BSE derivatives, F&O-eligible/non-eligible equities — `TestIsInFetchScope`); (3) no live-fetch claim made (the fetcher does not exist yet — honestly flagged); (4) the model already supported all types (no silent model change); (5) Golden Rule #3 satisfied — this entry formalizes the expansion before code merges.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-FETCH-ALL-001. **Builds on:** DEC-P0-063 (entry #200, the 200-stock lake expansion this extends) · DEC-VENDOR-PIVOT-001 (entry #246, the Groww pivot) · CLAUDE.md §3 (scope lock) + Golden Rule #3 (no silent expansion) + Golden Rule #10 (honest limits — engine stays 3 for feasibility). **Closes:** the universe scope-filter gap (the code now distinguishes fetch tier from brute-force tier). **Does NOT close:** the live Groww fetcher (Phase 2, gated by Phase 0b + credentials) + the ingest-pipeline wiring of the F&O-eligible set.
+
+295. **DEC-GROWW-CATALOG-DRIVER-001 — `brutex/adapters/groww/catalog.py`: full-F&O catalog driver (expiries→contracts over the universe) + a fetch-loop STRESS test wired into CI + strict gate → 61 → 62 modules** (operator directive 2026-05-28 "do both" — the catalog driver AND closing test-type gaps). Steps 4–5 of §13.9.
+
+    **What it does — `run_catalog(expiry_fetcher, contract_fetcher, underlyings, years)`:** for each `(exchange, underlying)` (from `build_fno_eligible_underlyings` on the Surface-B master) × year → pull expiries (Surface C) → for each expiry pull contracts (Surface D); aggregate into a `CatalogReport(underlyings, expiries, contracts, expiry_failures, contract_failures)`. **Resilient:** a single underlying/year or expiry that fails (a neutral `VendorSdkError`) is counted + skipped + logged — one bad underlying never aborts the whole catalog. Pure orchestration (fetchers injected) → standalone 100% gated.
+
+    **Closing the test-type gaps (the "both"):**
+    - **Stress test** (`tests/stress/test_groww_fetch_sustained.py`, NEW): drives `run_ingest` over the 3 indices × all 12 timeframes × N years (hundreds of chunks through parse→guard→sink→watermark, synthetic). Asserts every chunk settles (`failed==0`), real work happened, and **resume at scale** (re-run with the same watermark → all `skipped`, `second.completed==0`). Bounded `BRUTEX_STRESS_YEARS=2` for CI (<2 s), env-overridable for soak.
+    - **CI wiring:** `tests/stress` is now RUN by the CI `property` job (it was previously present but never executed — the existing `test_audit_chain_sustained.py` was dormant; both now run).
+    - **Mutation (honest):** NOT done this round. The `mutation-py` CI job pins `mutmut==2.5.1` (2.x CLI); the local venv has mutmut 3.x (incompatible CLI), so a Groww module's mutation score can't be verified locally without env risk — and wiring a *blocking* ≥98% gate without a pre-verified score risks a surprise CI failure. Tracked as a follow-up (run pinned 2.5.1 → verify → wire). The property/fuzz suite + 100% branch coverage are the delivered floor.
+
+    **What lands in THIS PR:** `brutex/adapters/groww/catalog.py` (NEW) + `tests/unit/test_groww_catalog.py` (NEW, 5 tests, 100%) + `tests/stress/test_groww_fetch_sustained.py` (NEW) + `.github/workflows/ci.yml` (+1 strict gate → **61 → 62**; +`tests/stress` run in the property job) + this entry. **All gates 100%; ruff + mypy strict + pyright green; stress test < 1 s locally.**
+
+    **What this PR does NOT do (honest):** the catalog driver isn't yet wired into a CLI command + isn't run live (needs creds + the master loaded); the candle-fetch-of-discovered-contracts is the candle stack (already built — the driver produces the symbols it consumes); mutation gate deferred (above); the live data-shape verdict still needs the probe.
+
+    **Honest envelope:** ✅ REAL — the catalog driver loops + aggregates + survives per-item failures (asserted), and the stress test proves the loop+watermark hold at scale + resume. 🟡 PARTIAL — not CLI-wired, not run live; mutation not extended to Groww modules. 📋 ROADMAP — `brutex catalog` CLI, the live run, mutmut-2.5.1 mutation verification.
+
+    **Decision ID:** DEC-GROWW-CATALOG-DRIVER-001. **Builds on:** DEC-GROWW-CATALOG-001 (#293, the C/D fetchers it drives) · DEC-GROWW-INSTRUMENTS-001 (#290, the universe source) · DEC-GROWW-FUZZ-001 (#294) · DEC-GROWW-INGEST-001 (#291, the stress test's `run_ingest`). **Closes:** §13.9 steps 4–5 (catalog driver) + the stress-test-CI-wiring gap. **Does NOT close:** the `brutex catalog` CLI, the live run, the mutation gate.
+
+294. **DEC-GROWW-FUZZ-001 — property + fuzz hardening of the Groww data boundaries (parser · chunk planner · contract-symbol parser) + a real parser bug fix** (operator directive 2026-05-28: *"are you really sure you covered ALL extreme worst cases?"* — honest answer was "no, not the fuzz/extreme cases yet"; this closes that gap for the pure boundaries).
+
+    **The bug the fuzz found (real):** `parse_candle_row` accepted **non-finite prices** — `float('inf')`/`float('nan')` round-trip through `Decimal` as `Infinity`/`NaN` with no parse error, so garbage could have entered the lake. Also `int(float('inf'))` raises `OverflowError`, which `_to_int` did not catch (it caught only `ValueError`). Fixes: `_to_price` now rejects non-finite (`CandleParseError`), `_to_int` now catches `OverflowError`. Both fixes carry new unit tests so the parser's strict gate stays 100%.
+
+    **What it adds (3 new property/fuzz files, run by the CI `property` job):**
+    - `test_groww_parser_properties.py` — well-formed rows parse with exact Decimal prices + correct IST→UTC; **fuzz invariant**: for ANY arbitrary input (text/ints/floats incl. nan/inf/bytes/lists/None), `parse_candle_row` returns a `CandleBar` or raises ONLY `CandleParseError`/`ValueError` — never an unhandled exception; non-finite prices always rejected.
+    - `test_groww_chunks_properties.py` — over random ranges × every interval, `plan_chunks` windows **tile the range exactly**: first starts at `start`, last ends at `end`, contiguous (`earlier.end == later.start`), non-overlapping, each ≤ the Groww limit, deterministic — the "no missing / no double-pulled data" invariant.
+    - `test_groww_contracts_properties.py` — `parse_contract_symbol` never crashes on arbitrary strings (returns `None` or a well-typed `(InstrumentType, strike)`; FUT↔no-strike, CE/PE↔strike); well-formed symbols parse to the right type/strike.
+
+    **What lands in THIS PR:** the 3 property files (NEW) + `brutex/adapters/groww/parser.py` (non-finite + OverflowError hardening) + `tests/unit/test_groww_parser.py` (+3 guard tests; gate stays 100%) + this entry. **ruff + mypy strict green; parser gate 100%; 11 property/fuzz examples-sets pass.**
+
+    **Honest envelope (directly answering the operator's question):** ✅ REAL — the PURE data boundaries (parser, chunk planner, contract-symbol parser) are now fuzz-hardened, and the fuzz caught + fixed a real non-finite-price gap. 🟡 PARTIAL — property/fuzz covers the pure parsers; it does NOT cover the I/O surfaces' live behavior. ❌ NOT DONE (honestly): **stress/soak tests are not CI-wired** (`tests/stress` isn't run by any job — a separate infra task); **mutation testing** not run on the new modules; and the **biggest gap remains zero live Groww runs** — real rate-limits, real error codes, real pre/post-market + data drift are still unverified until the operator runs the live probe with TOTP creds. 100% line+branch + fuzz on the pure code is a strong floor, NOT "every extreme real-world case."
+
+    **Decision ID:** DEC-GROWW-FUZZ-001. **Builds on:** DEC-FETCH-PARSER-001 (#285) · DEC-FETCH-CHUNKS-001 (#284) · DEC-GROWW-CATALOG-001 (#293) · `CLAUDE.md §12` (7 test types — property/fuzz). **Closes:** fuzz/property coverage of the pure Groww boundaries + the non-finite-price bug. **Does NOT close:** stress/soak CI wiring, mutation testing, the live-run validation.
+
+293. **DEC-GROWW-CATALOG-001 — `brutex/adapters/groww/expiries.py` (Surface C) + `contracts.py` (Surface D): the full F&O discovery catalog + 2 strict gates → 59 → 61 modules** (operator directive 2026-05-28 "yes go" + "for all FNO entirely pull all contracts and all expiries"). The two SDK wrappers the store's `ExpiryRecord`/`ContractRecord` shelves were waiting for.
+
+    **What it does:**
+    - **`ExpiryFetcher.fetch(underlying, exchange, *, year, month=None)`** — wraps `get_expiries`, validates the year is in `[2020, current+1]` up front (a request below 2020 → local `bad_request`, no wasted quota), turns `{"expiries": [...]}` into `ExpiryRecord` rows, skips + counts a malformed date (never aborts the underlying), `upsert_expiries`. Returns `ExpiryFetchResult(records, skipped_dates)`.
+    - **`ContractFetcher.fetch(underlying, exchange, expiry_date)`** — wraps `get_contracts`. The honest catch: `get_contracts` returns **only symbol strings**, but `ContractRecord` needs `lot_size`/`tick_size`/`freeze_quantity`. So it parses `instrument_type` + `strike` from the symbol (`parse_contract_symbol`) and **enriches** lot/tick/freeze via an injected `metadata_lookup` (production = the Surface-B master). A malformed symbol → `skipped_malformed`; a symbol with no metadata (e.g. an expired historical contract absent from today's master) → `skipped_no_metadata` (its candles are still fetchable — only the catalog row is deferred). Returns `ContractFetchResult(records, skipped_malformed, skipped_no_metadata)`.
+    - Both reuse the candle client's pace → call → translate spine — refactored `client._neutral_for` into the shared module functions **`to_neutral_exc`** + **`is_rate_limit`** (CLAUDE.md §11 COMMON — one translator across all 3 SDK surfaces); rate-limit errors feed the bucket's down-shift; the year/exchange/response guards all map to neutral `Vendor*` so a caller can classify them.
+
+    **What lands in THIS PR:** `brutex/adapters/groww/expiries.py` (NEW) + `contracts.py` (NEW) + `tests/unit/test_groww_{expiries,contracts}.py` (NEW, 11 + 16 tests, 100% each) + `brutex/adapters/groww/client.py` (extracted `to_neutral_exc`/`is_rate_limit`, gate stays 100%) + `tests/unit/test_groww_client.py` (unchanged — still covers the translation via `fetch_chunk`) + `.github/workflows/ci.yml` (+2 strict gates → **59 → 61**) + this entry. **100% line+branch standalone on both; ruff + mypy strict + pyright green.**
+
+    **What this PR does NOT do (honest):** no live discovery (needs creds); does NOT yet ORCHESTRATE the full-F&O sweep (loop over every underlying × expiry with retry/quota — that's the catalog-driver step that consumes the Surface-B master's F&O-eligible set); historical-contract metadata enrichment is gapped (skipped+counted) pending a Phase-0b source; whether `get_expiries`/`get_contracts` return PAST-dated data is still the Phase-0b hard-gate (§13.10).
+
+    **Honest envelope:** ✅ REAL — both wrappers parse/validate/enrich/upsert with the full guard set (year range, unknown exchange, malformed response/date/symbol, rate-limit translation) asserted. 🟡 PARTIAL — not wired into a full-F&O catalog driver; live behavior + historical-metadata unverified. 📋 ROADMAP — the catalog-driver orchestration, the live run, Phase-0b past-date verification.
+
+    **Decision ID:** DEC-GROWW-CATALOG-001. **Builds on:** DEC-GROWW-ADAPTER-DESIGN-001 (#288 §13.4/§13.5) · DEC-GROWW-INSTRUMENTS-001 (#290, the metadata source) · DEC-FETCH-CLIENT-001 (#286, the spine + shared translator) · `brutex/data/instrument_store.py` (`ExpiryRecord`/`ContractRecord` + upserts) · `docs/groww/api-reference/03-backtesting.md`. **Closes:** Surfaces C + D of the §13.9 sequence. **Does NOT close:** the catalog-driver, the live run, Phase 0b.
+
+292. **DEC-GROWW-PROBE-001 — `brutex/adapters/groww/inspect.py` + `brutex fetch --inspect`: the candle-shape data probe (pre/post-market + timestamp precision) + strict gate → 58 → 59 modules** (operator directive 2026-05-28: *"initially when I run the app I want to see whether it contains pre-market post-market and even whether timeframes/timestamps are precisely provided by Groww"*). Makes the first-run index pull actually SHOW the operator what Groww provides.
+
+    **What it does:** `inspect_bars(symbol, interval, bars) -> CandleInspection` — a pure classifier that converts each bar's UTC timestamp to IST and buckets it **pre-market** (`< 09:15 IST`), **regular** (`09:15–15:30 IST`), or **post-market** (`> 15:30 IST`) (NSE session, `CLAUDE.md §7`), reports the IST time-of-day range, and — for intraday minute intervals — checks every regular-session bar lands on the interval grid from 09:15 (the **timestamp-precision** answer). `CollectingBarSink` is a `BarSink` that accumulates bars in memory (no Parquet) so `brutex fetch --inspect` can examine what was fetched and print a per-timeframe report:
+
+        NSE-NIFTY  1minute bars=N pre=.. reg=.. post=.. ist[hh:mm..hh:mm] aligned|MISALIGNED
+
+    **Why it matters:** the operator's first-run question — *does Groww include pre/post-market bars, and are the timestamps precise across all timeframes?* — is now answerable directly from `brutex fetch --inspect` (offline `--dry-run` proves the report; the **live** run reveals Groww's real data shape — the Phase-0b data probe, finally actionable).
+
+    **Bug caught + fixed in the same change:** the alignment check keyed `_INTERVAL_MINUTES` by the fetch layer's SHORT names (`"1m"`), but the sink passes the lake-canonical LONG names (`"1minute"`) — so in the real flow the lookup missed and alignment was silently never checked (always "aligned"). Re-keyed to the long names (what actually flows through the sink); the unit suite asserts misalignment detection fires (a 09:17 bar on the 5-minute grid → `MISALIGNED`).
+
+    **What lands in THIS PR:** `brutex/adapters/groww/inspect.py` (NEW, pure → standalone-gateable) + `tests/unit/test_groww_inspect.py` (NEW, 9 tests, 100%) + `brutex/cli.py` (`fetch --inspect` flag + report printing) + `.github/workflows/ci.yml` (+1 strict gate → **58 → 59**) + this entry. **100% line+branch standalone; ruff + mypy strict + pyright green; 107 groww tests pass; the `--dry-run --inspect` probe verified to print the report.**
+
+    **What this PR does NOT do (honest):** the probe's pre/post-market + precision verdict is only as real as the data — `--dry-run` shows synthetic bars (all classified pre-market here, since the synthetic clock starts at midnight), so the TRUE answer needs the **live** run with TOTP creds; alignment is checked for regular-session intraday bars only (day/week/month + pre/post bars report counts but no grid check); does NOT yet pull expiries/contracts (Surfaces C/D — still the next step for the full F&O catalog).
+
+    **Honest envelope:** ✅ REAL — pre/regular/post-market IST bucketing + intraday grid-alignment + the in-memory probe sink all built + asserted; the CLI prints the report (verified offline). 🟡 PARTIAL — the verdict on Groww's ACTUAL pre/post-market + precision awaits the live run (creds). 📋 ROADMAP — live probe run, Surfaces C/D.
+
+    **Decision ID:** DEC-GROWW-PROBE-001. **Builds on:** DEC-GROWW-INGEST-001 (#291, the fetch path it inspects) · DEC-FETCH-PARSER-001 (#285, the IST→UTC bars) · `CLAUDE.md §7` (NSE session times). **Closes:** the operator's "show me what Groww provides" first-run requirement (the probe machinery). **Does NOT close:** the live data-shape verdict (creds), Surfaces C/D.
+
+291. **DEC-GROWW-INGEST-001 — `brutex/adapters/groww/ingest.py` + `brutex fetch` CLI: end-to-end candle ingest for the 3 indices across ALL timeframes (§13.9 step 3) + the short↔long interval-vocabulary bridge fix** (operator directive 2026-05-28: "first step = NIFTY/SENSEX/BANKNIFTY spot, entire timeframes, this year"). Ties auth + the candle stack into a runnable command — proven end-to-end offline.
+
+    **What it does:**
+    - **`ingest.run_ingest(fetcher, symbols, intervals, start, end, watermark, …)`** — for each `(symbol, interval)`: `plan_chunks` → `run_fetch` (resilient loop) → aggregate into an `IngestReport` (completed/no_data/failed/skipped). Pure orchestration (fetcher/watermark/sleep/backoff injected) → fake-tested.
+    - **`SyntheticCandleFetcher`** — emits valid synthetic rows so `brutex fetch --dry-run` runs the FULL pipe (parse → OHLC-guard → Parquet sink → watermark) offline with **no creds**, producing real logs + sample lake data for verification.
+    - **`brutex fetch` CLI** (coverage-omitted glue) — defaults per the operator's re-scope: the **3 brute-force index spots** (NIFTY/BANKNIFTY/SENSEX), **all 12 Groww native timeframes** (`--interval all`), **this year** (`Jan 1 → now`). `--dry-run` uses the synthetic fetcher; the live path wires `GrowwAuth.from_env` + `GrowwCandleFetcher` + `PersistingFetcher` + `ParquetBarSink` (`pragma no cover`).
+
+    **The bug this fixes (found by the dry-run):** the fetch layer (`chunks`/`client`) works in SHORT interval keys (`"1m"`, `"1h"`, `"1mo"`) but the lake partition layer (`data/partition.py::VALID_INTERVALS`) requires Groww's LONG names (`"1minute"`, `"1hour"`, `"1month"`) — same 12 intervals, different spelling. The unmapped `"1m"` hit `_validate_interval` → `PartitionError` → which (not being a `Vendor*` exception) reached `classify_exception` → `UnknownExceptionError` → **crashed the whole run**. Fixes:
+    - **`chunks.GROWW_INTERVAL_TO_PARTITION`** (NEW, the one-source short→long bridge) + **`ALL_GROWW_INTERVALS`** (the 12-native fetch set). A `test_groww_chunks.py` assertion pins `GROWW_INTERVAL_TO_PARTITION.values() == partition.VALID_INTERVALS` so the two vocabularies can never silently drift.
+    - **`PersistingFetcher`** now translates `key.interval` → the lake-canonical name before `sink.append`, AND guards the write with `except DataLakeError → bad_request` so a lake-write failure quarantines that chunk instead of crashing the loop (the resilience invariant: no non-`Vendor*` exception ever reaches the classifier).
+
+    **Proven (offline):** `brutex fetch --dry-run` over a 4-day window wrote **36 Parquet files** (3 indices × 12 timeframes), `completed=36 failed=0`, under the canonical `bars/<exch>/<seg>/<symbol>/<interval>/<yyyy>/<mm>.parquet` layout with correct long interval names + structured per-pair logs. The IST→UTC conversion is visible (midnight-IST rows → prior-day-UTC partition) — working as designed.
+
+    **What lands in THIS PR:** `brutex/adapters/groww/ingest.py` (NEW) + `tests/unit/test_groww_ingest.py` (NEW, 6 tests, 100%) + `brutex/adapters/groww/chunks.py` (+interval bridge + 3 new vocab-pin tests, gate stays 100%) + `brutex/adapters/groww/persist.py` (interval translation + sink-error guard + 2 new tests, gate stays 100%) + `brutex/cli.py` (+`fetch` subcommand) + `tests/unit/test_groww_{chunks,persist}.py` + this entry. **All gates 100%; ruff + mypy strict + pyright green; 98 groww tests pass.** (ingest.py is global-cov only — it imports `run_fetch` → orchestrator/fastbloom taint, per DEC-COV-BACKFILL-LIMIT-001; covered by its own test in the global run, no standalone gate.)
+
+    **What this PR does NOT do (honest):** no live fetch (the live path needs TOTP creds); does NOT persist the **resampled** 21 engine TFs (it stores the 12 fetched NATIVE intervals; resampling is the engine's job); does NOT yet pull **expiries + contracts** (Surfaces C/D — the operator's "pull all contracts + expiries for the whole F&O" — that's the next step); catalog upsert is off (sink writes Parquet without the DuckDB catalog for now); no quota-stop/resume wiring.
+
+    **Honest envelope:** ✅ REAL — the full candle pipe runs end-to-end offline and writes verifiable Parquet + logs across all 12 timeframes for the 3 indices; the interval-mismatch crash is fixed + pinned by a drift test. 🟡 PARTIAL — live fetch unproven (creds); catalog + quota wiring pending. 📋 ROADMAP — Surfaces C/D (expiries/contracts catalog), live run, Phase 0b data-shape verification (the operator's "see what timeframes/timestamps Groww actually provides" — the live `brutex fetch` IS that probe).
+
+    **Decision ID:** DEC-GROWW-INGEST-001. **Builds on:** DEC-GROWW-INSTRUMENTS-001 (#290) · DEC-GROWW-AUTH-001 (#289) · DEC-GROWW-ADAPTER-DESIGN-001 (#288 §13.9) · DEC-FETCH-{PERSIST #287, CLIENT #286, PARSER #285, CHUNKS #284, LOOP #283, WATERMARK #282}-001 · `brutex/data/{sink,parquet_writer,partition}.py`. **Closes:** §13.9 step 3 (indices end-to-end) + the interval-vocabulary mismatch. **Does NOT close:** Surfaces C/D, the live run, the catalog/quota wiring.
+
+290. **DEC-GROWW-INSTRUMENTS-001 — `brutex/adapters/groww/instruments.py`: instrument-master CSV fetch (Surface B) + strict gate → 57 → 58 modules** (operator approved §13 + "check both in parallel" 2026-05-28; second build step of the §13.9 sequence). The store already persists; this is the missing **download + parse + normalise**.
+
+    **What it does — `InstrumentMasterFetcher.refresh` (per §13.3):** GET the Groww instrument CSV (`growwapi-assets.groww.in/instruments/instrument.csv`, 19 columns) → validate header → parse each row → `Instrument` → tag fetch-scope → `store.upsert_many`. Worst-case handling (§13.7 B1–B6):
+    - **Schema drift** (a required column missing) → `InstrumentFormatError`, **abort + keep the last good snapshot** (asserted: store NOT called). Never a half-load.
+    - **One bad row** (unparseable / fails `Instrument` validation — e.g. an invalid `tick_size`) → quarantine that row (counted), keep the rest (asserted: 1 bad row quarantined, 5 good parsed).
+    - **Out-of-scope exchange** (MCX) → filtered (counted, not an error).
+    - **Price/unit** — CSV `tick_size` is float rupees → `normalise_tick_size` canonicalises; NaN cells → `None` (non-derivative fields); float-formatted ints (`"75.0"`) tolerated.
+    - **Scope tag** — `in_scope` computed at write via `is_in_fetch_scope(inst, build_fno_eligible_underlyings(parsed))` (two-tier universe; asserted an NSE index → in scope).
+
+    **Testability:** `http_get` + the store are injected (the store via a local `_InstrumentSink` Protocol — no `duckdb` at import), so the module imports + unit-tests run with no network + no DuckDB → standalone 100% gateable. `from_env` wires the real **SSRF-guarded** fetch (https + host-allowlist `growwapi-assets.groww.in`) + `InstrumentStore` (`pragma no cover` — live network).
+
+    **What lands in THIS PR:** `brutex/adapters/groww/instruments.py` (NEW) + `tests/unit/test_groww_instruments.py` (NEW, 7 tests, 100% standalone) + `.github/workflows/ci.yml` (+1 strict gate → **57 → 58**) + this entry. **100% line+branch standalone; ruff + mypy strict + pyright green.**
+
+    **What this PR does NOT do (honest):** no live download (needs network + the real store); **TTL-gating + stale-fallback-on-network-failure are the caller's policy** (the orchestrator/CLI decides *when* to refresh and what to do on a failed download — they need store-freshness introspection; kept out of the pure fetcher) — a §13.3 refinement noted here; index rows whose CSV `lot_size`/`tick_size` fail `Instrument` validation are quarantined (surfaced) — whether Groww populates those for indices is a Phase-0b question (the 3 brute-force indices stay addressable via their hardcoded symbols regardless).
+
+    **Honest envelope:** ✅ REAL — CSV→Instrument parse + schema-drift abort + bad-row quarantine + exchange filter + fetch-scope tag all built + asserted against a realistic 7-row CSV. 🟡 PARTIAL — unproven against the live CSV (column drift / index lot/tick are Phase-0b); TTL/stale-fallback deferred to the caller. 📋 ROADMAP — `brutex fetch` wiring, Phase 0b CSV verification.
+
+    **Decision ID:** DEC-GROWW-INSTRUMENTS-001. **Builds on:** DEC-GROWW-ADAPTER-DESIGN-001 (#288 §13.3) · DEC-GROWW-AUTH-001 (#289) · `brutex/data/instrument_store.py::InstrumentStore.upsert_many` · `brutex/models.py::Instrument` + `normalise_tick_size` · `brutex/universe.py::is_in_fetch_scope` · `docs/groww/api-reference/02-instruments.md`. **Closes:** Surface B (instruments) of the §13.9 sequence. **Does NOT close:** the `brutex fetch` CLI, Surfaces C/D (expiries/contracts), Phase 0b.
+
+289. **DEC-GROWW-AUTH-001 — `brutex/adapters/groww/auth.py`: hardened TOTP auth (Surface A) + strict gate → 56 → 57 modules** (operator approved §13 design 2026-05-28 "go ahead"; first build step of the §13.9 sequence). Extracts + hardens the auth that was inline in `client.from_env`.
+
+    **What it does — `GrowwAuth` (per §13.2):** owns the access-token lifecycle — `session()` (reuse in-memory → on-disk cache → mint) + `refresh()` (the loop's `reauth` hook). Hardening over the inline version:
+    - **Token-file cache (mode 0600):** minted token cached to `BRUTEX_GROWW_TOKEN_PATH`; written 0600 + `chmod` enforced even over a pre-existing file, so a process restart reuses the token (TOTP "No Expiry" per the docs) without re-minting.
+    - **Insecure-file refusal:** a world/group-readable token file (`mode & 0o077`) is REFUSED (raises `GrowwAuthError` — possible secret leak surfaced, never silently reused). A corrupt/missing-key cache → re-mint (self-heal).
+    - **Clock-skew retry:** a TOTP code minted at the edge of its 30 s window can land expired; on an auth error the mint waits one window + re-mints with a fresh code ONCE before raising `GrowwAuthError` (→ HALT).
+    - **Secret hygiene:** `GrowwAuthError` carries a redacted `safe_message`, so no token/secret reaches logs/audit (asserted: the leaked token never appears in `str(exc)`).
+    - **Concurrency:** `refresh`/`session` guarded by a lock (no duplicate-mint thundering herd).
+
+    **Testability:** every SDK-facing op is an injected callable (`mint_token` / `build_session` / `totp_now` / `auth_error` / `sleep`), so the module imports + unit-tests run with NO `growwapi`/`pyotp` installed. `from_env` wires the real SDK (`pragma no cover` — live network).
+
+    **What lands in THIS PR:** `brutex/adapters/groww/auth.py` (NEW, pure runtime imports → standalone-gateable) + `tests/unit/test_groww_auth.py` (NEW, 9 tests, 100% standalone) + `.github/workflows/ci.yml` (+1 strict gate → **56 → 57**) + this entry. **100% line+branch standalone; ruff + mypy strict + pyright green.**
+
+    **What this PR does NOT do (honest):** no live mint (needs creds + `BRUTEX_GROWW_SMOKE`); `client.from_env` not yet re-pointed at `GrowwAuth` (a follow-up wiring step — both coexist); the "3-consecutive-failure → CRITICAL Telegram" wrap is the loop-integration follow-up (Telegram unplugged); the 6 AM-rollover question stays Phase-0b-gated (handled reactively via `refresh`).
+
+    **Honest envelope:** ✅ REAL — token caching + mode-0600 enforcement + insecure-refusal + clock-skew retry + secret redaction all built + asserted. 🟡 PARTIAL — not yet wired into the client/loop; live mint unproven offline. 📋 ROADMAP — `from_env` re-point, Telegram-on-halt, Phase 0b token-expiry probe.
+
+    **Decision ID:** DEC-GROWW-AUTH-001. **Builds on:** DEC-GROWW-ADAPTER-DESIGN-001 (#288 §13.2, the approved design) · DEC-FETCH-CLIENT-001 (#286, the inline auth it extracts) · `TRACK1_GROWW_ADAPTER.md §2`. **Closes:** Surface A (auth) of the §13.9 sequence. **Does NOT close:** Surface B (instruments) + the client re-point + Phase 0b.
+
+288. **DEC-GROWW-ADAPTER-DESIGN-001 — comprehensive per-surface adapter design (`TRACK1_GROWW_ADAPTER.md §13`): all 5 Groww surfaces + the full 34-failure-mode matrix + per-surface Z+ mapping, docs-only, PENDING operator approval before further code** (operator directive 2026-05-28: *"instruments, authentication, contracts, expiries, candle historical fetch entirely … worst-case scenarios, errors, exceptions … everything should be taken care of, only then go ahead with precise design and implementation"*; operator chose "written design doc first" via AskUserQuestion).
+
+    **What it adds (docs-only, no code):** `TRACK1_GROWW_ADAPTER.md §13` — a precise, reviewable design covering all five surfaces:
+    - **§13.0 the unified spine** — the key decision: we do NOT write 5 error stacks; every surface is a thin fetcher riding ONE proven spine (pacer + retry/backoff + `Vendor*` error-translation + watermark + audit + quota + sink/store), all already built. "Handle every worst-case" = "wrap the call + route through the spine."
+    - **§13.1 status reconciliation** — A (auth) thin/inline, B (instruments) store-built-fetcher-missing, C (expiries) + D (contracts) schema-built-fetcher-missing, E (candles) DONE (#282–#287).
+    - **§13.2–13.6 per-surface module designs** — `auth.py` (token cache mode-0600 + reactive reauth + clock-skew), `instruments.py` (SSRF-guarded CSV fetch + schema-validate + 24h TTL + stale-fallback), `expiries.py`, `contracts.py` (both mirror the candle client's pace→call→translate), and the candle template.
+    - **§13.7 the full 34-failure-mode matrix** — 5 (auth) + 6 (instruments) + 6 (expiries) + 5 (contracts) + 12 (candles); every row → a spine outcome (RETRY/QUARANTINE/NO_DATA/REAUTH/HALT/PREVENT) + a Z+ layer.
+    - **§13.8 per-surface Z+ mapping** — L4/L5/L6/L7 inherited from the spine; only L1/L2/L3 differ per surface.
+    - **§13.9 build sequence** — auth → instruments → `brutex fetch` (3 indices, end-to-end visible) → expiries → contracts → quota wiring. (Indices are CASH → need NO expiries/contracts; F&O lake needs C+D.)
+    - **§13.10 honest hard-gates** — the 4 facts (backtesting rate bucket · INDIA VIX presence · token 6 AM · historical get_contracts) that NO design can close without live creds; the design only makes the system survive whichever way each resolves. **§13.11 decision record.**
+
+    **What lands in THIS PR:** `docs/TRACK1_GROWW_ADAPTER.md` (+§13 + a design-update banner) + this entry. **Docs-only — zero code, zero coverage impact.**
+
+    **What this PR does NOT do (honest):** implements nothing — §13 is PENDING operator approval; the 4 Phase-0b hard-gates remain (need TOTP creds + the live probe).
+
+    **Honest envelope:** ✅ REAL — every surface + every catalogued worst-case has a defined handling + Z+ layer, grounded in the actual codebase state (2-agent research pass) and the Groww docs (re-read 2026-05-28). 🟡 PARTIAL — it's a design, not an implementation; the spine it leans on is real + tested, the 4 fetchers are not built. 📋 ROADMAP — §13.9 sequence, gated on this approval + Phase 0b.
+
+    **Decision ID:** DEC-GROWW-ADAPTER-DESIGN-001. **Builds on:** DEC-VENDOR-PIVOT-001 (the §1–§12 spec) · DEC-FETCH-{WATERMARK #282, LOOP #283, CHUNKS #284, PARSER #285, CLIENT #286, PERSIST #287}-001 · DEC-FETCH-ALL-001 (#296). **Closes:** the "design everything precisely first" requirement. **Does NOT close:** the A–D fetcher implementations + the Phase-0b probe.
+
+287. **DEC-FETCH-PERSIST-001 — `brutex/adapters/groww/persist.py`: the fetch → parse → lake link (`PersistingFetcher` decorator) + strict gate → 55 → 56 modules** (operator directive 2026-05-28 "go ahead"; closes the "downloaded candles actually land in the lake" gap the client PR explicitly left open).
+
+    **What it does:** `PersistingFetcher` is itself a `CandleFetcher` that wraps an inner one (the real `GrowwCandleFetcher`) so `run_fetch` drives it **UNCHANGED**. On each non-empty chunk it (1) parses every raw row → validated `CandleBar` via `parse_candle_row`, (2) appends the bars to a `BarSink` (`ParquetBarSink` in prod) with partition coords derived from the symbol (shared `symbol_to_exchange_segment`), and (3) returns the raw rows so the loop's truthiness check still settles COMPLETED/NO_DATA exactly as before. A corrupt row (parser `CandleParseError` or `CandleBar` OHLC-sanity `ValueError`) is re-raised as a neutral `BAD_REQUEST` → the loop QUARANTINES that chunk (surfaced for review, never silently dropped or written) — the operator's "no data mismatch" rule at the persistence boundary.
+
+    **Decorator, not a loop change:** zero edits to `run_fetch` or its tests — the composition is `PersistingFetcher(inner=GrowwCandleFetcher, sink=ParquetBarSink)`. Dependency-light: runtime imports are pure (client + parser + models + watermark); `BarSink` / `CandleFetcher` are `TYPE_CHECKING`-only, so the module imports — and unit-tests with a fake sink — without `polars` / `duckdb` / the orchestrator chain → standalone 100% gateable.
+
+    **What lands in THIS PR:** `brutex/adapters/groww/persist.py` (NEW) + `brutex/adapters/groww/client.py` (extracted public `symbol_to_exchange_segment` + `bad_request` so the rule + the terminal-quarantine twin live in ONE place — CLAUDE.md §11 COMMON) + `tests/unit/test_groww_persist.py` (NEW, 8 tests, 100% standalone) + `.github/workflows/ci.yml` (+1 strict gate → **55 → 56**) + this entry. **100% line+branch standalone; ruff + mypy strict + pyright green; client+persist+integration = 31 tests pass.**
+
+    **What this PR does NOT do (honest):** no live fetch (needs creds); does NOT yet wire the `brutex fetch` CLI that composes plan_chunks → GrowwCandleFetcher → PersistingFetcher → run_fetch; the instrument-master / expiries / contracts surfaces (the F&O-eligible lake universe) are still un-wrapped — see the comprehensive-adapter design the operator requested 2026-05-28 (the full instruments + auth + expiries + contracts + candles surface with per-surface worst-case/error/Z+ coverage). That design discussion precedes those implementations.
+
+    **Honest envelope:** ✅ REAL — the parse+persist link works end-to-end against a fake sink; the mismatch guard quarantines corrupt rows. 🟡 PARTIAL — composes with the real client + real `ParquetBarSink`, but unproven against a live `ParquetBarSink` write in this PR (the sink itself is separately tested). 📋 ROADMAP — `brutex fetch` CLI, the instruments/expiries/contracts surfaces, Phase 0b probe.
+
+    **Decision ID:** DEC-FETCH-PERSIST-001. **Builds on:** DEC-FETCH-CLIENT-001 (#286, the inner fetcher) · DEC-FETCH-PARSER-001 (#285, the row parser) · `brutex/data/sink.py::BarSink` (the write interface) · DEC-FETCH-LOOP-001 (#283, the loop this composes with). **Closes:** the fetch→lake gap (data now persists). **Does NOT close:** the `brutex fetch` CLI, the instruments/expiries/contracts surfaces, the Phase 0b probe.
+
+286. **DEC-FETCH-CLIENT-001 — `brutex/adapters/groww/client.py`: the REAL `CandleFetcher` (TOTP + `growwapi.get_historical_candles` wrapper) + strict gate → 54 → 55 modules** (operator directive 2026-05-28 "go ahead" + "respect rate limit, date chunks, everything per Groww docs"; the "phone line to Groww" the resilient loop drives). Fifth + final skeleton piece — the thing the watermark/loop/chunks/parser were all waiting for.
+
+    **What it does:** `GrowwCandleFetcher.fetch_chunk(ChunkKey) -> Sequence[object]` — pace → call → extract → translate:
+    - **Rate-limit respect (CLAUDE.md §2 rule 6):** every SDK call goes through an injected token-bucket `Pacer` (`AdaptiveTokenBucket` in prod) — `acquire()` blocks until a token frees, `record_success`/`record_rate_limit_hit` drive its adaptive up/down-shift. Re-confirmed against `docs/groww/api-reference/01-introduction.md`: documented buckets are Orders (10 r/s), **Live Data Quote/LTP/OHLC (10 r/s, 300/min)**, Non-Trading (20 r/s); the **backtesting bucket is NOT separately enumerated** (the standing UNVERIFIED gap — Phase 0b probe is the hard gate before any raise; bucket defaults conservatively to [4..8] r/s adaptive).
+    - **Date-chunk respect:** receives one already-windowed `ChunkKey` (30/90/180-day windows from `chunks.WINDOW_DAYS`, re-verified against `03-backtesting.md §"Backtesting Data Limits"`) and never widens it.
+    - **Request mapping:** `ChunkKey` → `get_historical_candles` kwargs — exchange from the `EXCHANGE-` prefix, segment = FNO for `-FUT`/`-CE`/`-PE` else CASH, interval via `getattr(sdk, CANDLE_INTERVAL_*)` (read the SDK's own constant, don't re-derive — Golden Rule #1), start/end as **epoch seconds** (timezone-unambiguous; docs allow it).
+    - **Broker-neutral error boundary:** `growwapi` raises `Groww*Exception`; `classify_exception` keys off BruteX's neutral `Vendor*` vocabulary. The client translates each caught SDK exception to its neutral twin via a one-shot `Groww`→`Vendor` prefix swap (verified 1:1 against all 11 names in `docs/groww/api-reference/05-exceptions.md`), so the loop routes retry/re-auth/quarantine without importing the SDK. A malformed `{"candles": …}` body → neutral generic API error; an unmappable chunk → neutral BAD_REQUEST (quarantine that chunk, never crash the run).
+    - **Token rollover:** `reauth()` swaps in a freshly-authenticated SDK (the loop's `reauth=` hook); `from_env()` (pragma no-cover — live network) builds the prod SDK via TOTP per `TRACK1_GROWW_ADAPTER.md §2`.
+
+    **What lands in THIS PR:** `brutex/adapters/groww/client.py` (NEW, pure — imports only `models` + `data.watermark` + a local `Pacer` Protocol → no orchestrator/fastbloom taint → standalone-gateable) + `tests/unit/test_groww_client.py` (NEW, 19 tests, 100% standalone) + `tests/integration/test_groww_client_integration.py` (NEW, 4 tests — proves the translated `Vendor*` names actually route through the real `run_fetch` + `classify_exception`; would fail loudly with `UnknownExceptionError` if a name were wrong) + `.github/workflows/ci.yml` (+1 strict gate → **54 → 55**) + this entry. **100% line+branch standalone; ruff + mypy strict + pyright green; 23 tests pass.**
+
+    **What this PR does NOT do (honest):** no live Groww calls (`from_env` is pragma-no-cover; needs real TOTP creds + the `BRUTEX_GROWW_SMOKE` probe); does NOT persist bars to the lake (the `BarSink` wiring — fetch → parse → write — is the next piece; `run_fetch` currently records chunk STATUS, not the rows); does NOT yet wire a `brutex fetch` CLI subcommand or the daily quota stop/resume; the epoch-vs-IST-string request format + the backtesting rate-limit bucket both remain Phase-0b-probe-verified.
+
+    **Honest envelope:** ✅ REAL — the client paces every call through the bucket, maps chunks faithfully, and the exception translation is proven end-to-end through the real classifier (integration test). 🟡 PARTIAL — the 5-piece fetch skeleton (watermark + loop + chunks + parser + client) is complete, but nothing is wired into a runnable command yet, and bars aren't persisted. 📋 ROADMAP — `BarSink` (parse+write), `brutex fetch` CLI, Phase 0b probe (token-expiry timing, INDIA VIX presence, backtesting rate-limit bucket, request-time format).
+
+    **4-agent hostile review:** new module + comprehensive unit + integration tests + 1 CI-gate addition. Per the runbook trigger matrix, **1-agent hostile variant** (Agent C). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) every error path re-raises a neutral `Vendor*` exception the loop can classify (no bare error reaches `classify_exception` → no `UnknownExceptionError` crash) — proven by the integration test; (2) rate-limit hits (only) drive `record_rate_limit_hit` — asserted; (3) the 11-name `Groww`→`Vendor` swap matches the classifier table 1:1 — cross-checked against `05-exceptions.md` + `retry.py`; (4) `from_env` (live auth) is pragma-no-cover and the rest is 100% standalone; (5) the new gate runs + passes 100% locally.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-FETCH-CLIENT-001. **Builds on:** DEC-FETCH-PARSER-001 (#285) · DEC-FETCH-CHUNKS-001 (#284) · DEC-FETCH-LOOP-001 (#283, the loop this client feeds) · DEC-FETCH-WATERMARK-001 (#282, the `ChunkKey`) · `orchestrator/retry.py` (the neutral `Vendor*` classifier) · `orchestrator/rate_limiter.py::AdaptiveTokenBucket` (the prod `Pacer`) · `docs/groww/api-reference/{01-introduction,03-backtesting,05-exceptions}.md` (re-verified this PR) · `TRACK1_GROWW_ADAPTER.md §2/§6`. **Closes:** the real `CandleFetcher` gap — the resilient-fetch skeleton is now end-to-end wireable. **Does NOT close:** the `BarSink` (persistence), the `brutex fetch` CLI, the Phase 0b empirical probe.
+
+285. **DEC-FETCH-PARSER-001 — `brutex/adapters/groww/parser.py`: Groww candle-row → validated `CandleBar` (IST→UTC + exact-Decimal price rules) + strict gate → 53 → 54 modules** (operator directive 2026-05-28 "go ahead"; directly serves the operator's "no data mismatch" + timeframe/timestamp focus). Fourth resilient-fetch piece — the layer the real `CandleFetcher` will call to turn raw Groww rows into bars.
+
+    **What it does (pure, the two correctness rules):** `parse_candle_row([ts, o, h, l, c, vol, oi])` →  `CandleBar`:
+    - **Timestamps** — Groww emits naive IST market times (`CLAUDE.md §6`: "convert to UTC at ingest"). Parses `"yyyy-MM-dd HH:mm:ss"` / ISO, localizes naive values to Asia/Kolkata, converts to UTC (matches the resampler's `ts_utc`). Already-aware values normalized to UTC. **09:15 IST → 03:45 UTC** asserted.
+    - **Prices** — `Decimal(str(x))` (no binary-float drift; `NFR-DET-001`).
+    - **Data-mismatch guard** — the `CandleBar` constructor validates OHLC sanity (`high >= low`, open/close in range, non-negative vol/OI), so a corrupt row **raises** rather than silently entering the lake. The parser also guards row length (==7), bad/non-string timestamps, unparseable prices, and bool/non-numeric volumes — every guard tested.
+
+    **What lands in THIS PR:** `brutex/adapters/groww/parser.py` (NEW, pure) + `tests/unit/test_groww_parser.py` (NEW, 18 tests) + `.github/workflows/ci.yml` (+1 strict gate → **53 → 54**) + this entry. **100% line+branch standalone; ruff + mypy strict + pyright green; 18 tests pass.**
+
+    **What this PR does NOT do (honest):** no live Groww calls (it parses rows the real client will supply); the paisa-vs-Decimal question is deferred to the model (CandleBar uses Decimal rupees; any paisa conversion is a downstream PnL concern, not the parse boundary).
+
+    **Honest envelope:** ✅ REAL — pure parser, 100% standalone-gated, all gates green; IST→UTC + Decimal-exact + OHLC-guard all asserted. 🟡 PARTIAL — the parser + planner + loop + watermark are the fetch skeleton; the real client + Phase 0b probe remain. 📋 ROADMAP — real `CandleFetcher` (TOTP client + `get_historical_candles`), Phase 0b probe.
+
+    **4-agent hostile review:** pure parser + comprehensive tests + 1 CI-gate addition. Per the runbook trigger matrix, **1-agent hostile variant** (Agent C). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) 09:15 IST → 03:45 UTC (+ ISO + aware paths) — asserted; (2) prices exact Decimal — asserted; (3) OHLC-sanity ValueError propagates (high<low, negative vol) — asserted; (4) every parse guard (length, non-string ts, unparseable price, bool/non-numeric vol) — asserted; (5) the new gate runs + passes 100% locally.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-FETCH-PARSER-001. **Builds on:** DEC-FETCH-CHUNKS-001 (#284) · DEC-FETCH-LOOP-001 (#283) · `brutex/data/models.py::CandleBar` (the validated target) · `CLAUDE.md §6` (IST→UTC ingest rule). **Closes:** the candle-parse correctness layer (timestamps + prices + mismatch guard) + ratchets 1 strict gate (53→54). **Does NOT close:** the real Groww client + the Phase 0b probe.
+
+284. **DEC-FETCH-CHUNKS-001 — `brutex/adapters/groww/chunks.py` window planner + 2 new strict-100% CI gates (watermark + chunks) → 51 → 53 modules** (operator directive 2026-05-28 "go ahead"; the non-calendar planner the operator explicitly OK'd — the watermark settles NO_DATA holiday windows, so calendar-skip is unnecessary). Third resilient-fetch piece; feeds `run_fetch` (DEC-FETCH-LOOP-001 #283).
+
+    **What it does (pure, fully testable):** `plan_chunks(groww_symbol, interval, start, end, *, window_days=None)` tiles `[start, end)` into contiguous, non-overlapping `ChunkKey` windows each no wider than the interval's Groww limit (`WINDOW_DAYS`: 1–5m → 30d, 10–30m → 90d, 1h/4h/1d/1w/1mo → 180d, per `docs/groww/api-reference/03-backtesting.md`). Empty range → `[]`; final window clipped to `end`; unknown interval (no override) or non-positive `window_days` → `ValueError`.
+
+    **Lazy-import hygiene (a step toward DEC-COV-BACKFILL-LIMIT-001 closure path D):** `brutex/adapters/groww/__init__.py` was made **minimal** (no eager `fetch_loop` re-export). `fetch_loop` transitively imports the orchestrator → `fastbloom_rs`, whose PyO3 ABI3 single-init taints standalone coverage. With a bare `__init__`, the **pure** submodules (`chunks`) import cleanly → standalone-gateable. Callers use full paths (`from brutex.adapters.groww.chunks import plan_chunks`).
+
+    **2 new strict-100% CI gates** added to `.github/workflows/ci.yml` (the strict per-module block): `brutex.data.watermark` (the #282 module) + `brutex.adapters.groww.chunks`. **Strict-gate count 51 → 53.** (`fetch_loop` is NOT gated standalone — fastbloom ABI3 taint via its orchestrator import; it stays 100% via the global `--cov=brutex` run, like the 8 orchestrator modules.)
+
+    **What lands in THIS PR:** `brutex/adapters/groww/chunks.py` (NEW, pure) + `brutex/adapters/groww/__init__.py` (minimal) + `tests/unit/test_groww_chunks.py` (NEW, 11 tests) + `.github/workflows/ci.yml` (+2 strict gates) + this entry. **chunks + watermark each 100% line+branch standalone; ruff + mypy strict + pyright green; 11 chunk tests pass; 22 groww tests pass together.**
+
+    **What this PR does NOT do (honest):** no calendar-awareness (skipped per operator — watermark handles NO_DATA); no live Groww client yet (the real `CandleFetcher` impl + Phase 0b probe are next); the planner emits ISO-string windows — the caller converts datetimes.
+
+    **Honest envelope:** ✅ REAL — pure planner, 100% standalone-gated (now in CI), all gates green; the minimal-`__init__` un-taints pure-submodule coverage. 🟡 PARTIAL — planner + loop + watermark are the resilient-fetch skeleton; the real client + probe remain. 📋 ROADMAP — real `CandleFetcher` (TOTP client + `get_historical_candles`), Phase 0b probe (token-expiry + historical-get_contracts), persistence wiring.
+
+    **4-agent hostile review:** pure window-math module + tests + 2 CI-gate additions. Per the runbook trigger matrix, **1-agent hostile variant** (Agent C). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) windows are contiguous + non-overlapping + final-clipped — asserted; (2) empty range + reversed range → `[]` — asserted; (3) unknown interval + non-positive window → `ValueError` — asserted; (4) the 2 new gates run + pass at 100% locally; (5) the minimal `__init__` doesn't break the `fetch_loop` import (its test imports the full path).
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-FETCH-CHUNKS-001. **Builds on:** DEC-FETCH-LOOP-001 (#283, consumes these chunks) · DEC-FETCH-WATERMARK-001 (#282, the ChunkKey type) · DEC-COV-BACKFILL-LIMIT-001 (#261, the fastbloom taint the minimal `__init__` sidesteps) · `docs/groww/api-reference/03-backtesting.md` (the window limits). **Closes:** the chunk-planning gap + ratchets 2 strict gates (51→53). **Does NOT close:** the real Groww client + the Phase 0b probe.
+
+283. **DEC-FETCH-LOOP-001 — `brutex/adapters/groww/fetch_loop.py`: the resilient historical-candle fetch loop ("always fetch, never lose") wiring retry + backoff + watermark + TOTP auto-refresh** (operator directive 2026-05-28: "it should retry and fetch until successful, never fail"; operator said skip the calendar-aware planner — the watermark settles NO_DATA holiday windows so proactive calendar-skip is unnecessary). Second resilient-fetch piece, built on the watermark (DEC-FETCH-WATERMARK-001, #282).
+
+    **What it does (pure orchestration — no SDK import, no real sleep; both injected):** `run_fetch(fetcher, keys, watermark, *, max_retries, reauth, sleep_fn, delay_fn)` drives a thin `CandleFetcher` Protocol and turns "pull the data" into an unattended, crash-safe, quota-safe loop:
+
+    | Situation | Behaviour |
+    |---|---|
+    | already-settled chunk | skip (resume — re-fetch nothing done) |
+    | success w/ bars | record COMPLETED |
+    | success empty / NOT_FOUND | record NO_DATA + settle (G-10 anti-loop) |
+    | transient (rate-limit / timeout / generic) | `sleep(backoff_delay(n))` + retry up to `max_retries`, then quarantine |
+    | **auth expiry (the daily/6 AM token rollover)** | call `reauth()` once → retry — the self-healing TOTP refresh; absent/already-used → quarantine |
+    | terminal (bad-request / authz / fatal) | record FAILED (quarantine, operator attention) |
+
+    Reuses the existing primitives: `classify_exception` (the 11-Groww-exception → Outcome triage) + `backoff_delay` (deterministic with injected RNG) + the watermark. Never raises on a known Groww error — a 100%-quarantined run still returns a `FetchOutcome` summary (`completed/no_data/failed/skipped`).
+
+    **What lands in THIS PR:** `brutex/adapters/groww/__init__.py` + `brutex/adapters/groww/fetch_loop.py` (NEW, ~90 lines) + `tests/unit/test_groww_fetch_loop.py` (NEW, 11 tests — fake fetcher simulates rate-limit-then-success, retry-exhaustion, NO_DATA, not-found, auth-reauth-success, auth-no-reauth, auth-fails-after-reauth, terminal, resume-skip, mixed-run). **100% line+branch in the global `--cov=brutex` run; ruff + mypy strict + pyright green; 11 tests pass.**
+
+    **Coverage note (DEC-COV-BACKFILL-LIMIT-001):** a STANDALONE `--cov=brutex.adapters.groww.fetch_loop` gate fails with the known `fastbloom_rs` PyO3 ABI3 single-init error (the loop imports `orchestrator.retry` → `orchestrator.state` → the orchestrator package pulls fastbloom). It is fully covered (100%) via the GLOBAL run where fastbloom initialises once — same accepted limit as the 8 orchestrator modules. So NO standalone strict gate is added for it.
+
+    **What this PR does NOT do (honest):** no live Groww calls (the real `CandleFetcher` impl — TOTP client + `get_historical_candles` wrapper — is gated by Phase 0b + creds + the SDK, not in CI). No chunk planner yet (the loop takes a `keys` iterable; the basic 30/90/180-day window splitter + the real client + the Phase 0b probe are the next pieces). The `reauth` callback is injected — the actual TOTP re-auth implementation lands with the client.
+
+    **Honest envelope:** ✅ REAL — pure resilient loop, 100% covered (global), all gates green, every failure path asserted by the fake-client suite. 🟡 PARTIAL — it's the orchestration; the real client + chunk planner + Phase 0b probe follow. 📋 ROADMAP — real `CandleFetcher` (TOTP client), chunk planner, Phase 0b probe (token-expiry + historical-get_contracts), persistence wiring of the watermark.
+
+    **4-agent hostile review:** pure orchestration module + comprehensive fake-client tests closing audited resilience gaps. Per the runbook trigger matrix, **1-agent hostile variant** (Agent C). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) NO_DATA/NOT_FOUND settle (no re-request) — asserted; (2) transient retries bounded by max_retries then quarantine (no infinite hammer) — asserted; (3) auth-expiry → reauth-once-then-retry, and reauth-exhausted → quarantine — both asserted; (4) resume skips settled chunks (fetcher never called) — asserted; (5) the loop never raises on a known error (returns a summary). Builds on the 2-agent resilience audit's checklist.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-FETCH-LOOP-001. **Builds on:** DEC-FETCH-WATERMARK-001 (#282, the state tracker this loop drives) · `orchestrator/retry.py` (classify_exception + backoff_delay) · `orchestrator/state.py` (Outcome) · the 2-agent resilience audit (2026-05-28) · `TRACK1_GROWW_ADAPTER.md §2.2` (the TOTP auto-refresh lifecycle the `reauth` hook implements). **Closes:** the resilient-fetch orchestration (retry + backoff + NO_DATA-settle + auth-refresh + quarantine + resume). **Does NOT close:** the real Groww client (`CandleFetcher` impl), the chunk planner, the Phase 0b probe.
+
+282. **DEC-FETCH-WATERMARK-001 — `brutex/data/watermark.py`: per-chunk fetch-status tracker closing G-10 (NO_DATA infinite-loop / quota-burn) — the first zero-data-loss core of the resilient fetcher** (operator directive 2026-05-28: "it should retry and fetch until successful ... cant tolerate a single data mismatch", refined by the 2-agent deep resilience audit that flagged G-10 as the #1 CRITICAL gap — *"zero-data-loss is marketing fiction without it"*). First buildable, fully-testable piece of the resilient Groww fetcher.
+
+    **The bug it closes (G-10, `TRACK1_REQUIREMENTS_FINAL.md §3`):** an empty historical-candle window (pre-listing / trading-halt / holiday / sparse-F&O minute) has no forward-progress marker, so every resume re-requests it forever → silently burns the 100K/day quota → the fetch never reliably "succeeds." `brutex/data/watermark.py` did not exist.
+
+    **What it does (pure, no I/O, no heavy deps):**
+
+    - `ChunkStatus` enum: `COMPLETED` / `NO_DATA` / `PARTIAL` / `FAILED`.
+    - `ChunkKey` frozen dataclass: `(groww_symbol, interval, start, end)` — one fetch window.
+    - `FetchWatermark`: `record` / `get` / `is_settled` (COMPLETED|NO_DATA → never re-request — the G-10 guard) / `needs_fetch` (unrecorded or PARTIAL) / `pending(all_keys)` (resume = exactly the unsettled) / `quarantined()` (FAILED, operator attention, NOT auto-fetched) / `summary()` / `to_rows`+`from_rows` (serialize/restore for JSON/DuckDB/LMDB persistence — the COMPREHENSIVE rule).
+    - **Resume semantics:** crash → `pending()` returns exactly the chunks still needing fetch; done work never re-fetched, nothing lost. **Anti-loop:** NO_DATA settles forever. **Anti-hammer:** FAILED quarantines (no auto-retry).
+
+    **What lands in THIS PR:** `brutex/data/watermark.py` (NEW, pure, ~80 lines) + `tests/unit/test_watermark.py` (NEW, 23 tests) + this entry. **100% line+branch coverage; ruff + mypy strict + pyright green; 23 tests pass** (verified locally).
+
+    **What this PR does NOT do (honest):** the watermark is the *state tracker*; the **fetch loop that USES it** (wires retry + backoff + rate-limit + quota + TOTP auto-refresh + chunk-atomic commits) is the next piece. No live Groww calls (SDK + creds not in CI). The persistence backend (which store writes `to_rows`) is the caller's choice, not wired here.
+
+    **Honest envelope:** ✅ REAL — pure module, 100% covered, all gates green; closes the G-10 anti-loop + resume semantics the audit demanded. 🟡 PARTIAL — it's one piece of the resilient fetcher (the loop + calendar-aware planner + chunk-atomic writes follow). 📋 ROADMAP — calendar-aware chunk planner, the resilient fetch loop, chunk-atomic sink, Phase 0b probe (token-expiry + historical-get_contracts).
+
+    **4-agent hostile review:** single pure-module + tests, closing an audited CRITICAL gap. Per the runbook trigger matrix, **1-agent hostile variant** (Agent C). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) `is_settled` returns True for NO_DATA (the G-10 anti-loop) — asserted; (2) `pending` excludes settled + quarantined, includes PARTIAL + fresh — asserted; (3) FAILED is quarantined not auto-fetched — asserted; (4) serialize/restore roundtrip preserves all state — asserted; (5) 100% branch coverage incl. the `needs_fetch` None-vs-PARTIAL `or` branches.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-FETCH-WATERMARK-001. **Builds on:** the 2-agent resilience audit (2026-05-28) · `orchestrator/retry.py` (the retry classifier the loop will pair with this) · `TRACK1_REQUIREMENTS_FINAL.md §3` G-10 · CLAUDE.md §11 (COMPREHENSIVE serialize/restore). **Closes:** G-10 (the NO_DATA infinite-loop / quota-burn) at the state-tracking layer. **Does NOT close:** the resilient fetch loop that consumes the watermark (next PR) + the persistence wiring.
+
+281. **DEC-GUARANTEE-CHARTER-001 — `docs/GUARANTEE_CHARTER.md`: single honest scoreboard mapping EVERY operator demand (code quality, testing, automation, runtime, GPU, hardware, infra, environment, Claude-session access, AWS) to its real status (🟢 guaranteed by a CI gate / 🟡 partial / 🔴 promise / 👁️ human) + the closing PR** (operator directive 2026-05-28: "yes i need the guarantee assurance even our gpu runs everything dude even along with hardware requirements infra environment everything dude"). Operator repeatedly demanded "100% guaranteed, automated, with proof, no hallucination"; this doc is the anti-illusion answer.
+
+    **The core reframe (Golden Rule #10):** a guarantee = a **fail-closed CI gate that is green**, not my word. Words hallucinate; gates block merges. So the charter marks a row 🟢 ONLY when a gate enforces it; everything else is honestly 🔴 PROMISE or 🟡 PARTIAL.
+
+    **What it honestly reports (grounded in the 3-agent + 2-agent audits run this session):**
+
+    - 🟢 GUARANTEED today (~71% of code-quality demands): ruff, mypy+pyright, security scans (bandit/CodeQL/Semgrep/Trivy/gitleaks), jscpd, vulture, docstring, dedup (Bloom L1–L3), unit/property/golden/bench tests, auto-merge, audit hash-chain, SessionStart hook, embedded-DB (no server), no-Docker decision, blake3 reproducibility.
+    - 🟡 PARTIAL: coverage (90% + 51 modules @100%), mutation, bug-fix regression, stress, O(1) absolute, one-click run (PR #174 landing).
+    - 🔴 PROMISE (NOT built — explicitly flagged, no illusion): live monitoring/Telegram (code exists, UNPLUGGED), auto-ingest/sweep/resume, scheduled runs, logs-to-file, **GPU/Metal (the single biggest gap — Phase 3.5, Rust kernel is an empty stub G-01/G-05)**, Claude-session auto-access to logs/DBs (no MCP bridge), AWS runtime (zero AWS code; Mac-only).
+
+    **The honest GPU truth (because the operator specifically asked):** "our GPU runs everything" is 🔴 — there is **no GPU acceleration today**. The Metal kernel is designed (`TRACK1_OPTIMIZATIONS.md §3`) but depends on the Rust hot kernel (Phase 3) which is a scaffold. Claiming the GPU runs the sweep today would be an illusion.
+
+    **The ratchet (the only honest path to the operator's 100%):** each 🔴/🟡 row becomes a gate or a shipped+tested capability via its own PR; when it flips 🟢 it is provably guaranteed forever, on every future PR (incl. Claude-session PRs). The charter ships with a closing-PR backlog so the operator watches the table climb.
+
+    **What lands in THIS PR:** `docs/GUARANTEE_CHARTER.md` (NEW, ~150 lines, 6 sections + closing-PR backlog) + this MIGRATION entry. Pure docs.
+
+    **Honest envelope:** ✅ REAL — every 🟢 row corresponds to a real CI gate (cross-checked against `ci.yml` + the session audits); every 🔴 row names what's missing. 🟡 PARTIAL — the charter is a snapshot; it must be updated as rows flip (each touching-PR updates its row). 📋 ROADMAP — the closing-PR backlog (log-sink, monitor-wiring, fetcher, launchd, MCP bridge, Rust kernel→Metal GPU, M4 Pro runner, AWS).
+
+    **4-agent hostile review:** pure-docs honest-scoreboard. Per the runbook trigger matrix, **1-agent hostile variant** (Agent C). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) no row marked 🟢 without a real enforcing gate; (2) GPU + AWS + Claude-auto-access honestly marked 🔴 (not built); (3) the ~71% figure traces to the session audits; (4) the "guarantee = green gate, not my word" reframe is stated; (5) no hallucinated capability.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-GUARANTEE-CHARTER-001. **Builds on:** `docs/STANDARDS_100PCT.md` (the CI-gate matrix) · `docs/STANDARDS_100PCT_HONEST_AUDIT.md` · DEC-ONECLICK-RUN-001 (#280) · the 3-agent + 2-agent session audits · CLAUDE.md §8 (hardware) + §10 (honest limits) + §11 (AUTOMATED). **Closes:** the "where do all my 100%/automation/GPU/infra demands actually stand?" discoverability gap. **Does NOT close:** any of the 🔴/🟡 rows themselves — those are the tracked closing-PR backlog.
+
+280. **DEC-ONECLICK-RUN-001 — one-click launch: `python -m brutex run` / `make run` / committed IntelliJ Run config boot the dashboard on a fresh clone (no Docker, no DB server, no manual steps)** (operator directive 2026-05-28: "after cloning this repo in intellij just click run and everything should be visible in front end ... nowhere we should run manually ... do we need docker"). Operator wants clone → click ▶ Run → live dashboard, fully automated, on the Mac.
+
+    **Honest framing (Golden Rule #10):** this delivers the **one-click LAUNCH of the visible dashboard** — the realistic, achievable core of the request. It does NOT (yet) make the app *run itself* (auto-ingest / auto-sweep / live Telegram alerts) — those need the monitor wired into the run path + the fetcher built, tracked as the immediate follow-up (DEC-ONECLICK-RUN-002, monitor-wiring). Audited current state before building: a 2-agent audit found ~15% one-click readiness (8 manual steps; no `__main__.py`, no `make run`, no IDE config; fastapi/uvicorn were not even declared deps) — this PR closes that launch gap.
+
+    **No Docker (deliberate):** Docker on Mac cannot reach Apple **Metal GPU** (Phase 3.5 sweep accel) and adds CPU + filesystem overhead that would break the O(1)/throughput SLAs. The storage is **embedded** (DuckDB + LMDB + Parquet files) — there is NO database server to containerize. Native venv + one entrypoint is simpler, faster, and GPU-capable. Docker is reserved for a future cloud/AWS deploy (does not exist).
+
+    **What lands in THIS PR:**
+
+    - `brutex/__main__.py` (NEW) — `python -m brutex` boots the CLI; the IDE Run target.
+    - `brutex/cli.py` — new `run` subcommand + `cmd_run()` + `_open_browser()`. `brutex run` resolves the lake root (`--lake-root` → `$BRUTEX_LAKE_ROOT` → `~/.brutex/lake`), prints a startup banner, opens the browser (unless `--no-browser`), then starts the dashboard. (cli.py is coverage-omitted per pyproject; `cmd_run` is unit-tested anyway for quality in `tests/unit/test_cli_run.py`.)
+    - `pyproject.toml` — new `ui` extra declaring `fastapi` + `uvicorn` (previously only lazy-imported + undeclared → silent failure on a fresh clone).
+    - `Makefile` — `run` target: `pip install -e ".[data,ui]" && python -m brutex run`.
+    - `.idea/runConfigurations/BruteX.xml` (NEW) — committed IntelliJ/PyCharm run config: after clone, ▶ Run is just there, runs `python -m brutex run`.
+    - `tests/unit/test_main_entrypoint.py` (NEW) — covers `brutex/__main__.py` importable top-level (the `if __name__` guard is coverage-excluded).
+    - `tests/unit/test_cli_run.py` (NEW) — 4 tests: explicit lake-root + browser-open, `--no-browser`, env fallback, home-default fallback.
+
+    **What this PR does NOT do (honest):**
+
+    - **No live monitoring/Telegram firing.** `brutex run` starts the dashboard only; the watchdog/Telegram/StandardMonitor remain UNPLUGGED (fire only via manual `brutex monitor`). Wiring them into `run` is DEC-ONECLICK-RUN-002 (needs careful concurrency: monitor thread + blocking uvicorn; and the dashboard installable to test end-to-end).
+    - **No auto-ingest / auto-sweep / auto-resume.** Those are Phase 2/3 (fetcher + engine don't exist yet).
+    - **Could not run the dashboard live in CI/sandbox** — `fastapi`/`uvicorn` are not installed here, so `cmd_run`'s dashboard-boot path is mock-tested; the operator's `make run` on the Mac (with the `ui` extra) is the real exercise.
+
+    **Honest envelope:**
+
+    - ✅ REAL: `__main__.py` + `run` command + `ui` extra + `make run` + IntelliJ config + tests; ruff + mypy strict + pyright green; global coverage 98.57% (≥90 floor); 1849 unit tests pass (verified locally).
+    - ✅ REAL: embedded DB (no server) + no-Docker rationale grounded in the Metal-GPU + SLA constraints.
+    - 🟡 PARTIAL: "click Run → dashboard visible" works after this PR; "app runs itself + alerts" does NOT (monitor-wiring is DEC-ONECLICK-RUN-002).
+    - 📋 ROADMAP: monitor-wiring into `run`; auto-ingest/sweep/resume; macOS launchd for scheduled runs; an MCP bridge for Claude-session auto-access to logs/DBs (none exist).
+
+    **4-agent hostile review:** Launch-plumbing PR (new entrypoint + deps + IDE config). Grounded in a 2-agent readiness audit (one-click ~15%, runtime auto ~0%). Per the runbook trigger matrix this is the **1-agent hostile variant** (Agent C). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) `brutex run` delegates to the existing dashboard (no new server logic); (2) lake-root resolution order + browser-open decision are unit-tested; (3) the honest "launch yes / runs-itself no" envelope is explicit; (4) no Docker added (Metal-GPU + SLA rationale); (5) fastapi/uvicorn now declared so the fresh-clone silent-failure is fixed.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-ONECLICK-RUN-001. **Builds on:** `brutex/cli.py` (existing `dashboard` command) · `brutex/dashboard/app.py` (the FastAPI frontend) · CLAUDE.md §11 (AUTOMATED rule). **Closes:** the clone→click-Run→dashboard launch gap (8 manual steps → one click). **Does NOT close:** monitor-wiring (DEC-ONECLICK-RUN-002) · auto-ingest/sweep/resume · launchd scheduling · Claude-session auto-access bridge.
+
+279. **DEC-RESAMPLE-ANCHOR-001 — CORRECTNESS BUG FIX: 1m→TF resampler was anchoring buckets to the UTC epoch, not the 09:15 IST session open — most intraday timeframes were misaligned** (operator-reported 2026-05-28: "in backtesting i saw the data ... instead of 9.15 am and 9.17 or 9.18 am as per timeframes timestamp"). The operator spotted that resampled bars were NOT starting at the session open. **Confirmed real + serious.**
+
+    **The bug:** `brutex/data/tf_resampler.py::resample_1m_to_tf` called `pl.DataFrame.group_by_dynamic(every=..., closed="left", label="left")` with **no `offset` and no `start_by`**. Polars then anchors buckets to the **UTC epoch (1970-01-01 00:00 UTC)**, NOT to the session open. The IST open 09:15 = 03:45 UTC = **225 minutes** past UTC-midnight. A timeframe only aligns if it evenly divides 225 (i.e. 3, 5, 9, 15, 25, 45, 75 min). Every other intraday TF was mis-anchored:
+
+    | TF | Buggy first bucket (IST) | Correct |
+    |---|---|---|
+    | 2m | **09:14** | 09:15 |
+    | 4m | **09:14** | 09:15 |
+    | 3m / 5m / 15m | 09:15 (by luck) | 09:15 |
+
+    Affected (mis-anchored): **2, 4, 6, 7, 8, 10, 11, 12, 13, 14, 30, 60, 120, 180, 240 min** — the MAJORITY of the 21 timeframes. Impact: every indicator + condition computed on those TFs was folding the WRONG minutes together (e.g. the "09:14" 2m bar mixed only the 09:15 bar, then 09:16+09:17, …) — a silent correctness corruption of the backtest inputs.
+
+    **Empirically proven** (not just reasoned): a probe resampling a 09:15-anchored session to 2m printed `['09:14','09:16','09:18',...]` before the fix and `['09:15','09:17','09:19',...]` after.
+
+    **The fix:** group by the IST trading-day + `start_by="datapoint"` so each session re-anchors to its own first bar (09:15). Verified across single-day AND multi-day input (each day re-anchors independently; the overnight gap no longer carries the misalignment forward).
+
+    **Why it slipped through:** the only timestamp-anchoring test (`TestBucketTimestamps`) checked **5m only** — which aligns by luck. No 2m/4m test existed.
+
+    **What lands in this PR:**
+
+    - `brutex/data/tf_resampler.py` — intraday branch fixed (per-day group + `start_by="datapoint"`); daily branch unchanged. 100% line+branch coverage held (strict-gated module).
+    - `tests/unit/test_tf_resampler.py` — 4 new regression tests: `test_2m_anchored_to_0915_not_0914`, `test_4m_anchored_to_0915_not_0914`, `test_3m_and_15m_still_anchored_after_fix`, `test_2m_reanchors_each_trading_day`. These would have caught the bug. 20 tests pass; ruff + mypy strict + pyright green.
+
+    **SECOND bug found (same root cause, NOT fixed in this PR — honest disclosure):** `brutex/feed/resampler.py::_bucket_start` does `bucket_epoch = (epoch_s // bucket_seconds) * bucket_seconds` — identical UTC-epoch flooring. It is on the **replay → engine path** (`brutex/feed/replay.py`), which is NOT yet active (the Phase 3 engine that consumes replay does not exist), so it is a **latent** bug, not currently producing wrong live output. It needs the same session-anchoring fix + a test rewrite (its existing tests assert epoch-bucketing). Tracked as the IMMEDIATE follow-up (DEC-RESAMPLE-ANCHOR-002) — split out to avoid rushing a second strict-gated module's semantics change in the same PR.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: bug confirmed empirically (before/after probe output) + fixed + 4 regression tests + 100% coverage held + ruff/mypy/pyright green (verified locally via `.venv/bin/pytest --cov=brutex.data.tf_resampler --cov-branch --cov-fail-under=100`).
+    - ✅ REAL: fix verified on single-day AND multi-day input.
+    - 🟡 PARTIAL: `feed/resampler.py` has the same root-cause bug — confirmed but NOT fixed here (latent; replay path not yet active). Tracked as DEC-RESAMPLE-ANCHOR-002 immediate follow-up.
+    - 📋 ROADMAP: a deeper question — WHY are there two resamplers (tf_resampler batch + feed/resampler streaming) for the same purpose? Per CLAUDE.md COMMON rule there should be one source of truth. Consolidation is a separate tracked decision.
+    - Honest edge case: `start_by="datapoint"` anchors to each day's first PRESENT bar. In the normal case that is 09:15; if a session's 09:15 bar is genuinely missing (halt/gap, quarantined by the ingest gap-detector), the day anchors to its first available bar. Acceptable for v1; noted for the gap-handling design.
+
+    **4-agent hostile review:** Single-module correctness fix with empirical proof + regression tests. Per the runbook trigger matrix (`docs/runbooks/4-agent-review.md §3`) this is the **1-agent hostile variant** (Agent C). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) the bug is real (empirical probe output cited); (2) the fix anchors all TFs to 09:15 (regression tests assert 2m/4m + multi-day); (3) the TFs that worked by luck still work (3m/15m test); (4) coverage held at 100%; (5) the second bug in feed/resampler.py is honestly disclosed, not hidden.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-RESAMPLE-ANCHOR-001. **Builds on:** `brutex/data/tf_resampler.py` (the resampler) · CLAUDE.md §7 (09:15-15:30 IST session) + Golden Rule #1 (the docstring claimed 09:15 anchoring but the code did not — a hallucinated comment this fix makes true). **Closes:** the intraday-bucket-anchoring correctness bug in the lake resampler. **Does NOT close:** the same bug in `feed/resampler.py` (DEC-RESAMPLE-ANCHOR-002, immediate follow-up) + the two-resampler consolidation question.
 
 278. **DEC-CLONE-RUN-001 — clone-and-run repair: `ui` extra + `python -m brutex` launcher + Makefile `run` target + `fno_math`-optional Bloom import** (operator directive 2026-05-28 "my job is only cloning and running the app directly ... the webpages and dashboards should be visible and checkable"). A fresh `git clone` + install could not launch the dashboard: four independent blockers, each fixed here.
 
