@@ -1,11 +1,12 @@
 # BruteX — development Makefile
 # Every target maps directly to a CI gate in REQUIREMENTS.md §17.
 
-.PHONY: help install fmt lint type test test-unit test-cov audit bench clean all
+.PHONY: help install run fmt lint type test test-unit test-cov audit bench clean all
 
 help:
 	@echo "BruteX development targets:"
 	@echo "  install    — install package + dev dependencies via pip"
+	@echo "  run        — install [data,ui] extras + launch the dashboard at http://127.0.0.1:9080"
 	@echo "  fmt        — run ruff format"
 	@echo "  lint       — run ruff check"
 	@echo "  type       — run mypy --strict + pyright"
@@ -19,6 +20,12 @@ help:
 
 install:
 	pip install -e ".[dev]"
+
+# One-command clone-and-run (DEC-CLONE-RUN-001). Installs the dashboard
+# runtime extras then launches the server; open http://127.0.0.1:9080.
+run:
+	pip install -e ".[data,ui]"
+	python -m brutex dashboard
 
 fmt:
 	ruff format brutex tests

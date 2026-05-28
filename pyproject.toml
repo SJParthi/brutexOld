@@ -39,6 +39,15 @@ data = [
     "pyarrow>=16,<25",   # was <19; PyPI latest 24.0.0 (DEC-P0-012)
     "pytz>=2024.1",
 ]
+# DEC-CLONE-RUN-001 (2026-05-28): dashboard runtime deps. The dashboard
+# imports FastAPI lazily so unit tests don't need it; this extra makes
+# `pip install -e ".[ui]"` (or `make run`) launch the server. uvicorn's
+# `standard` extra pulls websockets so the /ws live-update socket works
+# (a polling fallback covers environments without it).
+ui = [
+    "fastapi>=0.110,<1.0",
+    "uvicorn[standard]>=0.29,<1.0",
+]
 # DEC-VENDOR-PIVOT-001 (2026-05-26): prior broker adapter wiped per operator
 # decree; Groww adapter replaces it. The `groww` extra ships the Groww
 # Python SDK + its TOTP dep. CI installs `[dev,data,groww]` for the
@@ -352,6 +361,9 @@ omit = [
     # automated coverage comes in a follow-up PR alongside a CLI
     # snapshot-test harness.
     "brutex/cli.py",
+    # `python -m brutex` launcher — a 3-line shim delegating to cli.main;
+    # exercised manually, same rationale as cli.py above.
+    "brutex/__main__.py",
     # Dashboard FastAPI app — requires fastapi+uvicorn at runtime;
     # the DashboardState model is fully covered by unit tests.
     "brutex/dashboard/app.py",

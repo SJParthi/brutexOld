@@ -335,6 +335,21 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+278. **DEC-CLONE-RUN-001 — clone-and-run repair: `ui` extra + `python -m brutex` launcher + Makefile `run` target + `fno_math`-optional Bloom import** (operator directive 2026-05-28 "my job is only cloning and running the app directly ... the webpages and dashboards should be visible and checkable"). A fresh `git clone` + install could not launch the dashboard: four independent blockers, each fixed here.
+
+    **What this fixes:**
+
+    - **`bloom.py` hard-imported `fno_math`** (the maturin-built Rust kernel, not on PyPI) at module top → every `brutex` command crashed on a plain `pip install`. Now a module-private `_popcount_bytes` helper imports `fno_math` lazily and falls back to stdlib `int.bit_count()` (bit-identical; verified vs a naive reference on 2 000 random inputs + the 42 existing Bloom unit/golden tests pass with the kernel absent). Hot-path callers are unaffected — `unique_count_estimate` is an on-demand audit/dashboard read, not a per-bar path.
+    - **No installable `ui` extra** → `fastapi`/`uvicorn` were undeclared, so `pip install ".[ui]"` failed. Added `[project.optional-dependencies].ui = [fastapi, uvicorn[standard]]` (`standard` pulls `websockets` so `/ws` works).
+    - **No `python -m brutex`** → added `brutex/__main__.py` (3-line shim → `cli.main`; coverage-omitted like `cli.py`).
+    - **No `make run`** → added the `run` target (`pip install -e ".[data,ui]"` + `python -m brutex dashboard`) and a `run` alias on the `dashboard` subcommand. Fixed the misleading `pip install brutex[data]` hint (→ `.[ui]`) and added a startup URL banner.
+
+    **Verification (fresh py3.12 venv, `fno_math` absent):** `python -m brutex version`/`run --help` and the `brutex` console script all work; in-process `TestClient` confirms `/` → 200 (213 KB HTML), `/api/v1/state` → 200, `/metrics` → 200, `/api/v1/events` → 200, `/api/v1/instruments` → 503 (no lake), `/ws` → connected with a state frame.
+
+    **Honest envelope (Golden Rule #10):** this makes the dashboard *launch and render* from a clean clone — it does **not** populate it. The Strategy-Report numbers stay placeholders until (a) data lands in the lake (Groww adapter, Phase 2, operator-blocked on the Phase 0b HARD-GATE) and (b) the brute-force engine runs. README §Setup states this plainly. `cli.py`, `__main__.py`, and `dashboard/app.py` remain coverage-omitted (manual/runtime layer); no strict-100% gate touched. The `fno_math`-present path stays the default in CI (kernel always built there), so the fallback branch is `pragma: no cover`.
+
+    **Decision ID:** DEC-CLONE-RUN-001. **Builds on:** DEC-P0-057 (the `fno_math.popcount_bytes` delegation, entry-referenced in `bloom.py`) · DEC-VENDOR-PIVOT-001 (CLI re-baseline). **Closes:** the clone-and-run usability gap; the dashboard is now launchable + checkable per the operator directive.
+
 277. **DEC-REQS-RESIDUAL-STATUS-001 — TRACK1_REQUIREMENTS_FINAL.md §10.7 verifiable-closure sub-wave summary + §10.8 honest residual-status / stopping-point note (closes the 2-sub-wave arc)** (operator directive 2026-05-28 "make it ready for merge ... go ahead with the plan okay?" — fifteenth iteration; this PR is the honest punctuation mark closing the Track-1 docs ratchet arc per Golden Rule #10). Two new subsections consolidate the full session arc and honestly classify the residual.
 
     **What this adds:**

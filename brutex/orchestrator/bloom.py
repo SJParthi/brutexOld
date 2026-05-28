@@ -110,11 +110,27 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Final
 
-import fno_math
 import structlog
 from fastbloom_rs import BloomFilter as _RustBloomFilter
 
 from brutex.models import BruteXError
+
+
+def _popcount_bytes(raw: bytes) -> int:
+    """Count set bits in ``raw``.
+
+    Prefers the Rust ``fno_math.popcount_bytes`` kernel (popcnt per
+    8-byte chunk, ~25× the per-byte Python loop). Falls back to the
+    stdlib ``int.bit_count`` when the optional kernel is not built —
+    e.g. a plain ``pip install`` without the maturin-built wheel — so
+    the CLI + dashboard import cleanly. Both paths are bit-identical.
+    """
+    try:
+        import fno_math
+    except ImportError:  # pragma: no cover - optional kernel not built (CI always builds fno_math)
+        return int.from_bytes(raw, "big").bit_count()
+    return int(fno_math.popcount_bytes(raw))
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Sizing constants (locked by 4-agent Reality-check lens, DEC-P0-047)
@@ -428,7 +444,7 @@ class BloomFilter:
             upper-bounded by ``capacity`` (clipped).
         """
         raw = self._impl.get_bytes()
-        bits_set = fno_math.popcount_bytes(bytes(raw))
+        bits_set = _popcount_bytes(bytes(raw))
         if bits_set == 0:
             return 0
         if bits_set >= self._m_bits:

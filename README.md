@@ -107,18 +107,36 @@ in `brutex/adapters/protocol.py`. Everything else works unchanged.
 
 ## ⚙️ Setup
 
+**Clone and run the dashboard — one command:**
+
 ```bash
-# 1. Clone + install
 git clone https://github.com/SJParthi/bruteX.git
 cd bruteX
-pip install -e ".[dev,data]"
+make run            # installs the [data,ui] extras + launches the server
+#   → open http://127.0.0.1:9080
+```
 
-# 2. Set your Groww credentials (Phase 2 — coming soon)
+`make run` is shorthand for:
+
+```bash
+pip install -e ".[data,ui]"
+python -m brutex dashboard      # alias: brutex run
+```
+
+> **What you'll see today:** the **Strategy Report** dashboard renders
+> immediately, but its numbers are **placeholders**. Real values appear
+> only after (a) data is fetched into the lake (needs Groww credentials,
+> Phase 2) and (b) the brute-force engine runs. The page, the live
+> `/api/v1/state` poller, `/metrics`, and the `/ws` socket are all wired
+> and working; the data-browser routes (`/api/v1/instruments` etc.)
+> return `503` until you start with `--lake-root <populated-lake>`.
+
+**Optional — Groww credentials for live data pulls (Phase 2):**
+
+```bash
 export BRUTEX_GROWW_ACCESS_TOKEN="<your-token-from-groww.co>"
 export BRUTEX_LAKE_ROOT=/path/to/large/ssd/brutex-lake
-
-# 3. Verify install
-brutex version
+brutex version      # verify install
 ```
 
 ---
@@ -137,8 +155,8 @@ brutex status
 # Verify audit chain integrity
 brutex audit verify audit/audit.jsonl
 
-# Dashboard (FastAPI)
-brutex dashboard --lake-root $BRUTEX_LAKE_ROOT
+# Dashboard (FastAPI; needs the [ui] extra — `make run` installs it)
+brutex dashboard --lake-root $BRUTEX_LAKE_ROOT      # alias: brutex run
 ```
 
 Current Phase 0 CLI exposes only:
@@ -147,7 +165,7 @@ Current Phase 0 CLI exposes only:
 brutex version
 brutex status
 brutex audit verify <file>
-brutex dashboard
+brutex dashboard          # alias: brutex run
 ```
 
 ---
