@@ -219,3 +219,29 @@ Per CLAUDE.md §3's tracked follow-up note ("Full §3 / cross-spec reconciliatio
 **~7 stale-text locations still remain** per CLAUDE.md §3's "~15" estimate. Future PRs can address them with the same pattern, OR the operator can declare the wave's residual gap acceptable and move on to Option D / Phase 2 work.
 
 **Decision ID:** DEC-REQS-FINAL-RECONCILE-001 (2026-05-27, **extended 2026-05-27 with §10.6 wave summary + §10.5 C-12 bookkeeping fix**). **Builds on:** DEC-STANDARDS-AUDIT-001 (entry #205) · DEC-CROSSWALK-001 (#206) · DEC-PYLINT-DROP-001 (#207) · DEC-STRESS-001 (#208) · DEC-DOCTOR-001 (#209) · DEC-COV-001 (#210-#232) · DEC-COV-RATCHET-001 (#256) · DEC-COV-BACKFILL-001/002/003/004 (#257-#260) · DEC-COV-BACKFILL-LIMIT-001 (#261) · DEC-MODE-002 (entry #196) · DEC-P0-060 (#198) · DEC-COMBO-HASH-UNIQUENESS-001 · DEC-CALIBRATE-001 · DEC-VENDOR-PIVOT-001 (#246) · DEC-P0-063 (#200). **Closes:** the citation-staleness gap between TRACK1_REQUIREMENTS_FINAL.md's 2026-05-18 snapshot and the current state of the repo on 2026-05-27. **Does NOT close:** the open items listed in §10.5 — those remain genuine open work.
+
+### §10.7 Requirements-review verifiable-closure sub-wave (2026-05-27/28)
+
+Parallel to the §10.6 spec-consistency wave, a second sub-wave verified that **5 of the 2026-05-18 review's flagged "gaps/conflicts" had already been closed by code that shipped between the review date and 2026-05-28** — their cited evidence pointed at code states that no longer exist. Each closure was verified by `grep` against the live code, NOT by re-implementing anything. Pattern: read the cited stale evidence → grep the current code → if the gap is closed, add a §10.1/§10.3 RESOLVED row with the verification chain + honest envelope, and remove from §10.5.
+
+| # | DEC-ID | MIGRATION entry | Item | Verified-current code state |
+|---|---|---|---|---|
+| 1 | DEC-C08-RESOLUTION-001 | #271 | C-08 dashboard bind | `brutex/config/ports.py:62` → `DEFAULT_HOST_BIND = "127.0.0.1"` (per DEC-P0-070 #272 + Q-06) |
+| 2 | DEC-G13-RESOLUTION-001 | #273 | G-13 half-day session list | `brutex/calendars/nse.py:485-497` honest envelope (zero qualifying events in window) |
+| 3 | DEC-G12-RESOLUTION-001 | #274 | G-12 NIFTY rebalance | `brutex/calendars/nse.py:307-465` `NIFTY50_REBALANCE_EVENTS` + `is_nifty_rebalance_day` (per DEC-P0-046) |
+| 4 | DEC-G08-RESOLUTION-001 | #275 | G-08 SLA validator | `tests/bench/test_full_sweep_extrapolation.py` exists, v1 scaffold (per DEC-P0-062) |
+| 5 | DEC-G14-RESOLUTION-001 | #276 | G-14 indicator_version threading | `brutex/strategies/combo.py:100` 9-field combo_hash (per DEC-P0-060) |
+
+Plus the retroactive **DEC-P0-070 (#272)** ledger entry that paper-trailed a 2026-05-23 code-shipped decision the validator flagged as un-ledgered.
+
+### §10.8 Residual status + honest stopping point (2026-05-28)
+
+After both sub-waves, the §10.5 open list is down to: **C-02 · C-03 · C-06 · C-07 · C-10 · P-02..P-08 · G-01 · G-02 · G-03 · G-04 · G-05 · G-06 · G-09 · G-10 · G-15**. Per Golden Rule #10 (honest limits), these are **NOT doc-closeable by verification** — they fall into 3 buckets:
+
+1. **Phase 2/3 engine-build work** (G-01 Rust kernel · G-02 Bloom · G-03 Stage 1A/1B/2/3/4 funnel · G-04 Stage 2.5 · G-05 Metal GPU · G-06 GrowwWorker · C-03 throughput canary · C-06 Stage 1B contamination · C-07 Bloom sizing · P-02/P-03/P-06/P-07/P-08) — blocked on Phase 0b empirical probe + operator authorization to start Phase 2 (see `TRACK1_PHASE_PLAN.md` Phase 0b HARD-GATE).
+2. **Operator-decision / analysis items** (C-02 storage budget reconciliation · C-10 phase-plan honest rebaseline [Q-12 authorized but needs a current-state audit] · P-04 safety-factor wiring · P-05 token redaction hardening) — tractable but each needs a focused decision, not a verification pass.
+3. **Security / infra hardening** (G-09 TLS SPKI pinning · G-10 DH-907 watermark · G-15 P-25/P-26 property tests) — real code work, Phase 2-adjacent.
+
+**The verifiable-resolution vein is exhausted.** Continuing the ratchet would mean either (a) starting Phase 2 engine work (operator-blocked), (b) a C-10 phase-plan honest-rebaseline PR (doc-closeable, needs a careful current-state audit first), or (c) the operator declaring the residual acceptable and pausing. This §10.8 note is the honest punctuation mark per Golden Rule #10.
+
+**Decision ID:** DEC-REQS-RESIDUAL-STATUS-001 (2026-05-28).

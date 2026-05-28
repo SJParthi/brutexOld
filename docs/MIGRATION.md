@@ -335,6 +335,49 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+277. **DEC-REQS-RESIDUAL-STATUS-001 — TRACK1_REQUIREMENTS_FINAL.md §10.7 verifiable-closure sub-wave summary + §10.8 honest residual-status / stopping-point note (closes the 2-sub-wave arc)** (operator directive 2026-05-28 "make it ready for merge ... go ahead with the plan okay?" — fifteenth iteration; this PR is the honest punctuation mark closing the Track-1 docs ratchet arc per Golden Rule #10). Two new subsections consolidate the full session arc and honestly classify the residual.
+
+    **What this adds:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.7` — "Requirements-review verifiable-closure sub-wave" 5-row table mapping the 5 grep-verified closures (DEC-C08/G13/G12/G08/G14-RESOLUTION-001, entries #271/273/274/275/276) + the retroactive DEC-P0-070 (#272) ledger entry. Documents the pattern: read cited stale evidence → grep current code → add RESOLVED row if gap closed → remove from §10.5. NO re-implementation.
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.8` — "Residual status + honest stopping point" classifying the remaining §10.5 items into 3 buckets: (1) Phase 2/3 engine-build work (operator-blocked on Phase 0b HARD-GATE), (2) operator-decision/analysis items (C-02, C-10, P-04, P-05), (3) security/infra hardening (G-09, G-10, G-15). Explicit Golden Rule #10 statement that the verifiable-resolution vein is exhausted + the 3 forward options (start Phase 2 / C-10 rebaseline PR / declare residual acceptable).
+
+    **Why this PR (honest envelope, Golden Rule #10):** after 15 ratchet PRs this session (#158-#172 + this), the "verify-already-resolved" pattern has harvested every item where shipped code had outpaced the 2026-05-18 review's stale citations. The honest thing is to mark the stopping point explicitly rather than manufacture marginal PRs against items that genuinely require Phase 2 engine work or operator decisions. This consolidation makes the arc's end-state discoverable for the next session/operator.
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No new verifiable-closure claims (all 5 closures already landed in #271-#276; this PR only summarizes them).
+    - No C-10 phase-plan rebaseline (flagged as doc-closeable-but-needs-audit; NOT done here).
+    - No Phase 2 engine work (operator-blocked).
+    - No edits to §1–§4 of TRACK1_REQUIREMENTS_FINAL.md.
+    - No new code, tests, or workflows.
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.7 + §10.8` — 2 new subsections (~30 lines).
+    - `docs/MIGRATION.md` — this entry #277.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: §10.7 table rows all grep-verifiable against MIGRATION entries #271-#276.
+    - ✅ REAL: §10.8 3-bucket classification is honest — explicitly states the residual is NOT doc-closeable by verification + names the operator-block (Phase 0b HARD-GATE).
+    - ✅ REAL: explicitly names the 3 forward options without claiming any is "done".
+    - 🟡 PARTIAL: the arc closed 6 review items (C-08/C-12/G-08/G-12/G-13/G-14) + 7 spec-consistency amendments; the residual ~16 items remain genuinely open (Phase 2 / operator-decision).
+    - 📋 ROADMAP: C-10 phase-plan honest-rebaseline is the one remaining doc-closeable item (Q-12 authorized; needs current-state audit); everything else is Phase 2+.
+
+    **What did NOT land in this PR:**
+
+    - No C-10 rebaseline (needs a current-state phase audit — separate PR if the operator wants it).
+    - No Phase 2 engine work.
+    - No new RESOLVED rows (this is a summary, not a new closure).
+
+    **4-agent hostile review:** Pure-docs §10 consolidation + honest stopping-point note. Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) §10.7's 5-row table maps to real MIGRATION entries #271-#276; (2) §10.8's 3-bucket classification accurately reflects which items need engine work vs decisions vs hardening; (3) the "verifiable-resolution vein exhausted" claim is honest (the recent closures were all verify-not-implement); (4) the 3 forward options are accurately stated without false "done" claims; (5) no new external claims about Groww/NSE/options markets introduced.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-REQS-RESIDUAL-STATUS-001. **Builds on:** DEC-G14-RESOLUTION-001 (entry #276) · DEC-G08-RESOLUTION-001 (#275) · DEC-G12-RESOLUTION-001 (#274) · DEC-G13-RESOLUTION-001 (#273) · DEC-P0-070 (#272) · DEC-C08-RESOLUTION-001 (#271) · DEC-SPEC-CONSISTENCY-WAVE-SUMMARY-001 (#270) · DEC-SPEC-CONSISTENCY-001..007 (#263-#269) · DEC-REQS-FINAL-RECONCILE-001 (#262) · CLAUDE.md §3 + Golden Rule #10. **Closes:** the discoverability gap for the 2-sub-wave arc; provides the honest stopping point. **Does NOT close:** the residual §10.5 items (Phase 2 engine work + operator-decision items + the C-10 doc-closeable rebaseline).
+
 276. **DEC-G14-RESOLUTION-001 — TRACK1_REQUIREMENTS_FINAL.md §10.3 G-14 (`indicator_version` threading) added as RESOLVED row + §10.5 bookkeeping (14th-of-~15 stale-text locations effectively reconciled)** (operator directive 2026-05-28 "make it ready for merge ... go ahead with the plan okay?" — fourteenth iteration of Track-1-only docs ratchet wave). The G-14 gap cited stale evidence: "`grep -rn indicator_version brutex/` returns zero". Verified-current code: `grep -rnE "indicator_version" brutex/` returns 5 hits; `combo_hash(...)` at `brutex/strategies/combo.py:100` takes `indicator_version: str` as 1 of the 9 identity fields per DEC-P0-060 (combo_hash 9-field BLAKE3 migration, MIGRATION entry #197).
 
     **What this fixes:**
