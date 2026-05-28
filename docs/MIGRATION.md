@@ -335,6 +335,48 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+274. **DEC-G12-RESOLUTION-001 — TRACK1_REQUIREMENTS_FINAL.md §10.3 G-12 (NIFTY 50 rebalance handling) added as RESOLVED row + §10.5 bookkeeping (12th-of-~15 stale-text locations effectively reconciled)** (operator directive 2026-05-27/28 "make it ready for merge ... go ahead with the plan okay?" — twelfth iteration of Track-1-only docs ratchet wave). The G-12 gap cited stale evidence: "`brutex/calendars/nse.py` has no rebalance dates". Verified-current code at `brutex/calendars/nse.py:307-465` shows `NIFTY50_REBALANCE_EVENTS` (semi-annual events 2021→2025) + `is_nifty_rebalance_day(d)` accessor, implemented per DEC-P0-046 + Q-09 of the operator's 2026-05-18 12-decision lock ("hardcode dates ~10 events 2021-2026 + flag in audit").
+
+    **What this fixes:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.3` — added G-12 RESOLVED row with verification chain: `NIFTY50_REBALANCE_EVENTS` tuple + `is_nifty_rebalance_day(d)` accessor; per-event `added`/`removed`/`verified` flags; honest envelope distinguishing `verified=True` (independent financial-news source quoting NSE Indices circular) from `verified=False` (pattern-derived; cross-check deferred to Phase 1 Validation Gate 1).
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.5` — removed G-12 from open-items list with bookkeeping note.
+
+    **What this PR does NOT do (deliberately scoped narrow):**
+
+    - No edits to `brutex/calendars/nse.py` (already correct + has honest envelope).
+    - No edits to §1–§4 of TRACK1_REQUIREMENTS_FINAL.md.
+    - No edits to §10.6 wave summary.
+    - No new code, tests, or workflows.
+    - No cross-check of the `verified=False` pattern-derived dates (explicitly deferred to Phase 1 Validation Gate 1 per the code's own honest envelope — NOT in scope here).
+
+    **What lands in this PR:**
+
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.3` — new G-12 RESOLVED row.
+    - `docs/TRACK1_REQUIREMENTS_FINAL.md §10.5` — 1-line bookkeeping update.
+    - `docs/MIGRATION.md` — this entry #274.
+
+    **Honest envelope (Golden Rule #10):**
+
+    - ✅ REAL: 2 file changes; pure docs; no code, no test, no workflow.
+    - ✅ REAL: code state at `brutex/calendars/nse.py:307-465` verified via grep — `NIFTY50_REBALANCE_EVENTS` + `is_nifty_rebalance_day`.
+    - ✅ REAL: the code's own `verified=True/False` flag is faithfully reflected in the §10.3 row (NOT overstated as fully verified).
+    - 🟡 PARTIAL: some rebalance events are `verified=False` (pattern-derived) — the gap is "no dates" → RESOLVED, but the dates' independent verification is a separate Phase 1 Validation Gate 1 task, honestly flagged.
+    - 🟡 PARTIAL: 12 of ~15 stale-text locations effectively reconciled.
+    - 📋 ROADMAP: ~3 more stale-text locations remain + the `verified=False` cross-check (Phase 1 Validation Gate 1).
+
+    **What did NOT land in this PR:**
+
+    - No edits to `brutex/calendars/nse.py` (already correct).
+    - No cross-check of pattern-derived dates (deferred to Phase 1 Validation Gate 1).
+    - No edits to §1–§4 tables.
+
+    **4-agent hostile review:** Pure-docs §10 addendum extension (G-12 RESOLVED row + §10.5 bookkeeping). Per the runbook's trigger matrix (`docs/runbooks/4-agent-review.md §3`), this is the **1-agent hostile variant** (Agent C only). Self-review: 0 CRITICAL / 0 HIGH / 0 MID / 0 LOW. Agent C verifies: (1) the G-12 RESOLVED row accurately reflects `brutex/calendars/nse.py:307-465`; (2) the `verified=True/False` honest envelope is faithfully reflected (not overstated); (3) DEC-P0-046 + Q-09 closing chain is consistent; (4) the §10.5 bookkeeping removes G-12 cleanly; (5) the `verified=False` cross-check is correctly flagged as a separate deferred task, not silently claimed done.
+
+    **Z+ 15-row matrix · Z+ 7-row resilience matrix · Z+ 7-layer audit** — see PR body markers.
+
+    **Decision ID:** DEC-G12-RESOLUTION-001. **Builds on:** DEC-G13-RESOLUTION-001 (entry #273, sibling §10.3 RESOLVED-via-code-verification pattern) · DEC-C08-RESOLUTION-001 (entry #271) · DEC-REQS-FINAL-RECONCILE-001 (entry #262) · DEC-P0-046 (the rebalance-dates implementation decision) + Q-09 of operator's 12-decision lock (the upstream authority) · `brutex/calendars/nse.py:307-465` (the implementation) · `CLAUDE.md §7` (market-microstructure source). **Closes:** G-12 stale-evidence citation gap; §10.5 bookkeeping. **Does NOT close:** the `verified=False` pattern-derived date cross-check (Phase 1 Validation Gate 1) + the remaining ~3 stale-text locations.
+
 273. **DEC-G13-RESOLUTION-001 — TRACK1_REQUIREMENTS_FINAL.md §10.3 G-13 (half-day session list) added as RESOLVED-with-honest-envelope row + §10.5 bookkeeping (11th-of-~15 stale-text locations effectively reconciled)** (operator directive 2026-05-27 "make it ready for merge ... go ahead with the plan okay?" — eleventh iteration of Track-1-only docs ratchet wave). The G-13 gap cited stale evidence: "`SessionType.HALF_DAY` enum exists, no date list". Verified-current code at `brutex/calendars/nse.py:485-497` shows an **explicit honest envelope block** documenting that no qualifying half-day sessions exist in the 2021-2026 window (post-2010 NSE trading-hours unification removed pre-festival half-days; Muhurat ~1hr is the only short session and is handled by `MUHURAT_SESSIONS` separately; Budget-Day Saturday sessions like 2025-02-01 are NOT half-day — regular 09:15-15:30 hours apply).
 
     **What this fixes:**
