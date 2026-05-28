@@ -348,7 +348,7 @@ superseded.
 
     **Honest envelope (Golden Rule #10):** build/run-automation only — no engine scope, no new CI gate, no coverage-gated module touched. The kernel build requires a working `cargo` toolchain on the operator's box (present in CI + the reference M4 Pro); without it `make run` still launches but `brutex.strategies.combo` stays unimportable. `make run` launches the *placeholder* dashboard — real numbers need the lake + engine (Phase 2), unchanged from #278. The SessionStart hook's ".venv/fno_math MISSING" hints were left unchanged to avoid churn on its 27 smoke tests (DEC-SESSION-START-HOOK-001); `make setup` supersedes them as the recommended one-liner.
 
-    **Decision ID:** DEC-CLONE-RUN-002. **Builds on:** DEC-CLONE-RUN-001 (entry #278), DEC-BOOTSTRAP-001 (entry #244, the bootstrap script), DEC-P0-055 (maturin mixed Python+Rust layout / `fno_math` build). **Closes:** the "fresh clone doesn't fully run — libs + Rust kernel not auto-included" gap.
+    **Decision ID:** DEC-CLONE-RUN-002. **Builds on:** DEC-CLONE-RUN-001 (entry #278), DEC-INFRA-OPS-001 (entry #244 — the decision that introduced `scripts/setup/bootstrap.sh`), DEC-P0-055 (maturin mixed Python+Rust layout / `fno_math` build). **Closes:** the "fresh clone doesn't fully run — libs + Rust kernel not auto-included" gap.
 
 278. **DEC-CLONE-RUN-001 — clone-and-run repair: `ui` extra + `python -m brutex` launcher + Makefile `run` target + `fno_math`-optional Bloom import** (operator directive 2026-05-28 "my job is only cloning and running the app directly ... the webpages and dashboards should be visible and checkable"). A fresh `git clone` + install could not launch the dashboard: four independent blockers, each fixed here.
 

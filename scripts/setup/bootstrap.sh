@@ -14,7 +14,7 @@
 # 6. Verifies `brutex doctor` exits 0 (audit chain + runtime + replay checks).
 # 7. Prints a one-screen summary of env-var + CLI command surface.
 #
-# Decision: DEC-BOOTSTRAP-001 (MIGRATION entry #244).
+# Decision: DEC-INFRA-OPS-001 (MIGRATION entry #244).
 
 set -uo pipefail
 
