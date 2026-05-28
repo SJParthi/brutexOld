@@ -212,3 +212,49 @@ class TestBucketTimestamps:
         first_ts = result.row(0, named=True)["ts_utc"]
         # Polars Datetime comparison
         assert first_ts.replace(tzinfo=None) == session_open
+
+    def _bucket_starts_ist(self, df: pl.DataFrame, tf: int) -> list[str]:
+        """Return resampled bucket-start timestamps as HH:MM IST strings."""
+        result = resample_1m_to_tf(df, tf)
+        return [
+            (row + timedelta(hours=5, minutes=30)).strftime("%H:%M")
+            for row in result["ts_utc"].to_list()
+        ]
+
+    def test_2m_anchored_to_0915_not_0914(self) -> None:
+        """DEC-RESAMPLE-ANCHOR-001 regression: 2m must start 09:15, not 09:14.
+
+        Before the fix, group_by_dynamic anchored to the UTC epoch and the
+        first 2m bucket landed at 09:14 IST (225 min from UTC-midnight is
+        odd, so 09:15 was mid-bucket on the even-minute epoch grid).
+        """
+        df = _make_1m_session(datetime(2026, 5, 13, 3, 45), n_bars=12)
+        assert self._bucket_starts_ist(df, 2)[:4] == ["09:15", "09:17", "09:19", "09:21"]
+
+    def test_4m_anchored_to_0915_not_0914(self) -> None:
+        """DEC-RESAMPLE-ANCHOR-001 regression: 4m must start 09:15, not 09:14."""
+        df = _make_1m_session(datetime(2026, 5, 13, 3, 45), n_bars=16)
+        assert self._bucket_starts_ist(df, 4)[:3] == ["09:15", "09:19", "09:23"]
+
+    def test_3m_and_15m_still_anchored_after_fix(self) -> None:
+        """The TFs that aligned by luck must still anchor to 09:15."""
+        df = _make_1m_session(datetime(2026, 5, 13, 3, 45), n_bars=30)
+        assert self._bucket_starts_ist(df, 3)[:3] == ["09:15", "09:18", "09:21"]
+        assert self._bucket_starts_ist(df, 15)[:2] == ["09:15", "09:30"]
+
+    def test_2m_reanchors_each_trading_day(self) -> None:
+        """Multi-day input: every session re-anchors to its own 09:15.
+
+        A naive global epoch grid would carry the misalignment across the
+        overnight gap; per-day anchoring resets it.
+        """
+        day1 = _make_1m_session(datetime(2026, 5, 13, 3, 45), n_bars=6, base_price=100.0)
+        day2 = _make_1m_session(datetime(2026, 5, 14, 3, 45), n_bars=6, base_price=200.0)
+        df = pl.concat([day1, day2])
+        result = resample_1m_to_tf(df, 2)
+        stamps = [
+            (row + timedelta(hours=5, minutes=30)).strftime("%m-%d %H:%M")
+            for row in result["ts_utc"].to_list()
+        ]
+        assert stamps[:3] == ["05-13 09:15", "05-13 09:17", "05-13 09:19"]
+        assert stamps[3:6] == ["05-14 09:15", "05-14 09:17", "05-14 09:19"]

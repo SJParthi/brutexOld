@@ -807,6 +807,94 @@ jobs:
           else
             echo "(brutex.execution.simulator test file not present yet — gate inactive)"
           fi
+          # DEC-FETCH-WATERMARK-001 (entry #282): strict gate on the pure
+          # per-chunk fetch-status tracker (the G-10 anti-loop core).
+          if compgen -G "tests/unit/test_watermark.py" > /dev/null; then
+            pytest --cov=brutex.data.watermark --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_watermark.py
+          else
+            echo "(brutex.data.watermark test file not present yet — gate inactive)"
+          fi
+          # DEC-FETCH-LOOP-001 (entry #283): strict gate on the pure chunk
+          # planner. (fetch_loop itself is global-cov only — fastbloom_rs
+          # ABI3 taint via orchestrator import, per DEC-COV-BACKFILL-LIMIT-001.)
+          if compgen -G "tests/unit/test_groww_chunks.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.chunks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_chunks.py
+          else
+            echo "(brutex.adapters.groww.chunks test file not present yet — gate inactive)"
+          fi
+          # DEC-FETCH-PARSER-001 (entry #285): strict gate on the pure
+          # Groww candle-row parser (IST→UTC + exact-Decimal price rules).
+          if compgen -G "tests/unit/test_groww_parser.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_parser.py
+          else
+            echo "(brutex.adapters.groww.parser test file not present yet — gate inactive)"
+          fi
+          # DEC-FETCH-CLIENT-001 (entry #286): strict gate on the real Groww
+          # candle fetcher (TOTP + SDK wrapper). Standalone-gateable because it
+          # depends only on pure modules (models + watermark + a local Pacer
+          # Protocol) — no orchestrator import, no fastbloom taint. The
+          # loop+classifier round-trip is proven in the global-cov integration
+          # test (tests/integration/test_groww_client_integration.py).
+          if compgen -G "tests/unit/test_groww_client.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.client --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_client.py
+          else
+            echo "(brutex.adapters.groww.client test file not present yet — gate inactive)"
+          fi
+          # DEC-FETCH-PERSIST-001 (entry #287): strict gate on the fetch→parse→
+          # lake decorator. Standalone-gateable — runtime imports are pure
+          # (client + parser + models + watermark); the BarSink / CandleFetcher
+          # types are TYPE_CHECKING-only (no polars/duckdb/orchestrator at import).
+          if compgen -G "tests/unit/test_groww_persist.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.persist --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_persist.py
+          else
+            echo "(brutex.adapters.groww.persist test file not present yet — gate inactive)"
+          fi
+          # DEC-GROWW-AUTH-001 (entry #289): strict gate on the hardened TOTP
+          # auth (Surface A). Standalone-gateable — pure runtime imports
+          # (stdlib + models); growwapi/pyotp wired only in from_env (no cover).
+          if compgen -G "tests/unit/test_groww_auth.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.auth --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_auth.py
+          else
+            echo "(brutex.adapters.groww.auth test file not present yet — gate inactive)"
+          fi
+          # DEC-GROWW-INSTRUMENTS-001 (entry #290): strict gate on the
+          # instrument-master CSV fetch (Surface B). Standalone-gateable — the
+          # store is a local Protocol (no duckdb at import); from_env wires the
+          # real SSRF-guarded fetch + InstrumentStore (no cover).
+          if compgen -G "tests/unit/test_groww_instruments.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.instruments --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_instruments.py
+          else
+            echo "(brutex.adapters.groww.instruments test file not present yet — gate inactive)"
+          fi
+          # DEC-GROWW-PROBE-001 (entry #292): strict gate on the candle-shape
+          # inspection probe (pre/post-market + timestamp-alignment classifier).
+          # Pure (CandleBar + stdlib) → standalone-gateable.
+          if compgen -G "tests/unit/test_groww_inspect.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.inspect --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_inspect.py
+          else
+            echo "(brutex.adapters.groww.inspect test file not present yet — gate inactive)"
+          fi
+          # DEC-GROWW-CATALOG-001 (entry #293): strict gates on expiries (C) +
+          # contracts (D) discovery. Standalone-gateable — the store is a local
+          # Protocol + DuckDB is lazy in instrument_store, so no native dep at import.
+          if compgen -G "tests/unit/test_groww_expiries.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.expiries --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_expiries.py
+          else
+            echo "(brutex.adapters.groww.expiries test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_groww_contracts.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.contracts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_contracts.py
+          else
+            echo "(brutex.adapters.groww.contracts test file not present yet — gate inactive)"
+          fi
+          # DEC-GROWW-CATALOG-DRIVER-001 (entry #295): strict gate on the
+          # full-F&O catalog driver. Pure orchestration (fetchers injected) — no
+          # run_fetch/orchestrator import, so standalone-gateable.
+          if compgen -G "tests/unit/test_groww_catalog.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.catalog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_catalog.py
+          else
+            echo "(brutex.adapters.groww.catalog test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
@@ -846,6 +934,15 @@ jobs:
             pytest tests/property -x --hypothesis-show-statistics
           else
             echo "⏸  tests/property does not exist yet — skipping"
+          fi
+      - name: pytest stress tests (bounded)
+        # DEC-GROWW-CATALOG-DRIVER-001: wire tests/stress into CI (bounded N;
+        # soak via BRUTEX_STRESS_YEARS / STRESS_EVENTS on workflow_dispatch).
+        run: |
+          if [ -d tests/stress ]; then
+            pytest tests/stress -q
+          else
+            echo "⏸  tests/stress does not exist yet — skipping"
           fi
 
   # ─────────────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ help:
 	@echo "BruteX development targets:"
 	@echo "  setup      — turnkey full env: venv + all libs + Rust kernel (scripts/setup/bootstrap.sh)"
 	@echo "  install    — install package + dev dependencies via pip (into the active env)"
-	@echo "  run        — turnkey: venv + [data,ui] libs + build fno_math kernel + launch dashboard (http://127.0.0.1:9080)"
+	@echo "  run        — turnkey one-click: venv + [data,ui] libs + fno_math kernel + launch (opens browser, http://127.0.0.1:9080)"
 	@echo "  fmt        — run ruff format"
 	@echo "  lint       — run ruff check"
 	@echo "  type       — run mypy --strict + pyright"
@@ -37,10 +37,11 @@ install:
 setup:
 	bash scripts/setup/bootstrap.sh
 
-# One-command clone-and-run (DEC-CLONE-RUN-001 -> -002). Creates the venv,
-# installs the dashboard runtime libs ([data,ui]), builds the fno_math Rust
-# kernel when it is not importable (brutex.strategies.combo imports it at
-# module top, combo.py:64), then launches the server. Idempotent: re-running
+# One-command clone-and-run (DEC-CLONE-RUN-002 + DEC-ONECLICK-RUN-001). Creates
+# the venv, installs the dashboard runtime libs ([data,ui]), builds the fno_math
+# Rust kernel when it is not importable (brutex.strategies.combo imports it at
+# module top, combo.py:64), then launches the one-click `brutex run` (resolves
+# the lake root, opens the browser, boots the server). Idempotent: re-running
 # skips work already done. Open http://127.0.0.1:9080.
 run:
 	@test -d $(VENV) || $(PY) -m venv $(VENV)
@@ -51,7 +52,7 @@ run:
 		$(VPIP) install maturin; \
 		cd rust/fno-math && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
 	}
-	$(VPY) -m brutex dashboard
+	$(VPY) -m brutex run
 
 fmt:
 	ruff format brutex tests
