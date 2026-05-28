@@ -66,3 +66,7 @@ secrets/
 # Rust (future P3)
 target/
 Cargo.lock
+
+# Claude Code — transient isolated sub-agent worktrees (not project content;
+# created/cleaned up by the harness). Keep the rest of .claude/ tracked.
+.claude/worktrees/
