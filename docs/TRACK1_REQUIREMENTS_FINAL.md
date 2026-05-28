@@ -187,6 +187,7 @@ Synthesised by Claude (Opus 4.7) on 2026-05-18.
 |---|---|---|
 | **G-07** `brutex doctor` CLI | ✅ CLOSED | DEC-DOCTOR-001 (MIGRATION entry #209, PR #100) — `brutex/doctor.py` + `brutex doctor` subcommand + 18 unit tests at 100% line+branch |
 | **G-11** Stress / 24h soak test directory | ✅ CLOSED | DEC-STRESS-001 (MIGRATION entry #208, PR #99) — `tests/stress/test_audit_chain_sustained.py` + nightly workflow `.github/workflows/stress-nightly.yml` + 24h soak via `workflow_dispatch` |
+| **G-13** Half-day session list | ✅ RESOLVED with honest envelope | Inline in `brutex/calendars/nse.py:485-497` (market-microstructure facts per `CLAUDE.md §7` + `TRACK1_MICROSTRUCTURE.md`) — cited "gap" is **stale**. Code explicitly documents: "NSE does NOT run pre-festival 'half-day' sessions in modern era (post-2010 trading-hours unification). Muhurat (Diwali ~1 hr evening, since 2025 ~1 hr afternoon) is the only short session and is handled by `MUHURAT_SESSIONS` above. The `SessionType.HALF_DAY` enum is kept for forward-compat." Special weekend Budget-Day sessions (e.g., 2025-02-01) are flagged as **NOT half-day** — regular 09:15-15:30 hours apply. Per Golden Rule #10 honest envelope, this is correctly documented as a zero-qualifying-event window rather than a missing list. |
 
 ### §10.4 SCOPE-CREEP residuals — status note
 
@@ -194,7 +195,7 @@ The 4 S-01..S-04 items were materially rewritten by **DEC-VENDOR-PIVOT-001** (20
 
 ### §10.5 Open items (not addressed in this addendum)
 
-C-02 · C-03 · C-06 · C-07 · C-10 · P-02 · P-03 · P-04 · P-05 · P-06 · P-07 · P-08 · G-01 · G-02 · G-03 · G-04 · G-05 · G-06 · G-08 · G-09 · G-10 · G-12 · G-13 · G-14 · G-15 — these remain as captured in §1–§3 (no closure decision recorded since 2026-05-18 review). Many are Phase 2+ engine-build work or operator-decision items in §6. (**C-12 + C-08 removed from this list 2026-05-27** — both RESOLVED per §10.1 rows added in DEC-SPEC-CONSISTENCY-001 entry #263 and DEC-C08-RESOLUTION-001 entry #271 respectively; bookkeeping.)
+C-02 · C-03 · C-06 · C-07 · C-10 · P-02 · P-03 · P-04 · P-05 · P-06 · P-07 · P-08 · G-01 · G-02 · G-03 · G-04 · G-05 · G-06 · G-08 · G-09 · G-10 · G-12 · G-14 · G-15 — these remain as captured in §1–§3 (no closure decision recorded since 2026-05-18 review). Many are Phase 2+ engine-build work or operator-decision items in §6. (**C-12 + C-08 + G-13 removed from this list 2026-05-27** — all RESOLVED per §10.1 + §10.3 rows added in DEC-SPEC-CONSISTENCY-001 entry #263 + DEC-C08-RESOLUTION-001 entry #271 + DEC-G13-RESOLUTION-001 entry #273 respectively; bookkeeping.)
 
 ### §10.6 Track 1 spec-consistency follow-up wave (2026-05-27)
 
