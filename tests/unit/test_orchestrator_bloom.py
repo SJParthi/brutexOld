@@ -507,3 +507,24 @@ class TestPopcountFallback:
         # The Swamidass-Baldi estimator is approximate; 100 unique inserts
         # must land in a sane band (not exact-equal).
         assert 50 <= bf.unique_count_estimate <= 200
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            b"",
+            b"\x00",
+            b"\xff",
+            b"\x0f\xf0",
+            b"\x80\x01\x7f",
+            bytes(range(256)),
+        ],
+    )
+    def test_fallback_equals_rust_kernel_when_present(self, raw: bytes) -> None:
+        """Pin fallback ≡ Rust: where the kernel IS built, the pure-Python
+        popcount must equal ``fno_math.popcount_bytes`` byte-for-byte — the
+        bit-exactness DEC-CLONE-RUN-001 relies on. Skipped where absent.
+        """
+        fno_math = pytest.importorskip("fno_math")
+        rust = int(fno_math.popcount_bytes(raw))
+        python = int.from_bytes(raw, "big").bit_count()
+        assert rust == python == self._reference_popcount(raw)
