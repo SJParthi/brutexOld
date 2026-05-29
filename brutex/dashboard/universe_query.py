@@ -159,10 +159,13 @@ def list_underlyings(
     """Return the explorer's instrument rows, optionally filtered by *kind*.
 
     Each returned row is the JSON-friendly shape the ``/universe`` page's
-    instruments column renders: symbol, display name, kind, exchange and
-    a contract-count placeholder (``"spot"`` for an index that the
-    explorer treats as spot-only; the real per-underlying contract count
-    is fetched lazily via ``/api/v1/contracts`` when the row is clicked).
+    instruments column renders: ``symbol`` (bare ``trading_symbol`` for
+    display), ``pull_symbol`` (the exchange-prefixed ``vendor_symbol``
+    — e.g. ``NSE-NIFTY`` / ``BSE-SENSEX`` — that the spot pull button
+    POSTs so :func:`brutex.adapters.groww.client.symbol_to_exchange_segment`
+    can split the leading exchange token), display name, kind, and
+    exchange. The real per-underlying contract count is fetched lazily
+    via ``/api/v1/contracts`` when the row is clicked.
 
     Parameters
     ----------
@@ -198,6 +201,7 @@ def list_underlyings(
         rows.append(
             {
                 "symbol": instrument.trading_symbol,
+                "pull_symbol": instrument.vendor_symbol,
                 "name": instrument.name or instrument.trading_symbol,
                 "kind": classified,
                 "exchange": str(instrument.exchange),

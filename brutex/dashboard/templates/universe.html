@@ -165,9 +165,22 @@
    selected instrument's spot, while clicking the future row or a CE/PE
    option-chain cell pulls THAT contract via the same /pull endpoint. */
 let filter = "index";          // active tab kind
-let UNIV = [];                 // [{symbol,name,kind,exchange}]
-let selInst = null;            // selected symbol
+let UNIV = [];                 // [{symbol,pull_symbol,name,kind,exchange}]
+let selInst = null;            // selected instrument's display symbol (trading_symbol)
+let selPullSymbol = null;      // selected instrument's exchange-prefixed Groww symbol
 let selExp = null;             // selected expiry ISO date
+
+/* Escape broker-sourced free text (instrument name/symbol/contract_symbol)
+   before it is interpolated into innerHTML — these are instrument-master
+   strings, never trust them as markup (XSS sink). */
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 const TABS = [["index","Index","#9D7BFF"],["stock","Stocks","#5B8DEF"]];
 const tabsEl = document.getElementById("tabs");
@@ -240,19 +253,19 @@ function renderInstruments() {
     const d = document.createElement("div");
     d.className = "inst" + (selInst === i.symbol ? " sel" : "");
     d.style.animationDelay = (ix * 0.03) + "s";
-    d.innerHTML = `<span class="chip ${i.kind}">${i.kind}</span>`
-      + `<div><div class="sym">${i.symbol}</div><div class="nm">${i.name}</div></div>`
-      + `<span class="cc">${i.exchange}</span>`;
+    d.innerHTML = `<span class="chip ${esc(i.kind)}">${esc(i.kind)}</span>`
+      + `<div><div class="sym">${esc(i.symbol)}</div><div class="nm">${esc(i.name)}</div></div>`
+      + `<span class="cc">${esc(i.exchange)}</span>`;
     d.onclick = () => selectInstrument(i);
     el.appendChild(d);
   });
 }
 
 async function selectInstrument(i) {
-  selInst = i.symbol; selExp = null;
+  selInst = i.symbol; selPullSymbol = i.pull_symbol; selExp = null;
   renderInstruments();
   document.getElementById("pulllead").innerHTML =
-    `Ready to pull <b>${i.symbol}</b> spot — or click a future / option contract below`;
+    `Ready to pull <b>${esc(i.symbol)}</b> spot — or click a future / option contract below`;
   document.getElementById("pullbtn").disabled = false;
   const ex = document.getElementById("expiries");
   ex.innerHTML = '<div class="empty">loading…</div>';
@@ -297,7 +310,7 @@ async function renderContracts(symbol, expiry) {
       const fr = document.createElement("div");
       fr.className = "futrow";
       fr.innerHTML = `<span class="ftag">FUT</span>`
-        + `<span class="fsym">${fut.contract_symbol}</span>`
+        + `<span class="fsym">${esc(fut.contract_symbol)}</span>`
         + `<span class="cc" style="margin-left:auto;font-size:11px;color:var(--muted)">⤓ pull this future</span>`;
       fr.onclick = () => runPull(fut.contract_symbol, `${fut.contract_symbol} (future)`);
       c.appendChild(fr);
@@ -361,28 +374,39 @@ async function runPull(symbol, label) {
     const tfs = report.timeframes || [];
     grid.innerHTML = "";
     tfs.forEach(tf => {
+      const cls = tf.failed > 0 ? "failed" : (tf.completed > 0 ? "done" : "");
       const d = document.createElement("div");
-      d.className = "tf " + (tf.failed > 0 ? "failed" : "done");
-      d.textContent = tf.interval;
+      d.className = "tf " + cls;
+      d.textContent = esc(tf.interval);
       grid.appendChild(d);
     });
+    const completed = report.total_completed || 0;
     document.getElementById("counter").textContent =
-      (report.total_completed || 0).toLocaleString('en-IN');
-    const verb = report.dry_run ? "preview-pulled (synthetic)" : "pulled";
-    document.getElementById("pulltitle").innerHTML =
-      `<span class="spark">✓</span> ${label} ${verb} — ${tfs.length} timeframes`;
+      completed.toLocaleString('en-IN');
+    if (completed === 0) {
+      // No chunk persisted across any timeframe → the vendor returned no
+      // data (or every chunk was already settled). Don't show a green ✓.
+      document.getElementById("pulltitle").innerHTML =
+        `<span style="color:var(--yellow)">∅</span> ${esc(label)} — no data returned`;
+    } else {
+      const verb = report.dry_run ? "preview-pulled (synthetic)" : "pulled";
+      document.getElementById("pulltitle").innerHTML =
+        `<span class="spark">✓</span> ${esc(label)} ${verb} — ${tfs.length} timeframes`;
+    }
   } catch (e) {
     document.getElementById("pulltitle").innerHTML =
-      `<span style="color:var(--red)">✕</span> pull failed: ${e.message}`;
+      `<span style="color:var(--red)">✕</span> pull failed: ${esc(e.message)}`;
   } finally {
     btn.disabled = false;
   }
 }
 
-/* The spot pull button pulls the selected instrument's spot symbol. */
+/* The spot pull button pulls the selected instrument's spot using its
+   exchange-prefixed Groww symbol (pull_symbol, e.g. "NSE-NIFTY") so the
+   backend can split the exchange token — NOT the bare display symbol. */
 document.getElementById("pullbtn").onclick = () => {
-  if (!selInst) return;
-  runPull(selInst, `${selInst} spot`);
+  if (!selPullSymbol) return;
+  runPull(selPullSymbol, `${selInst} spot`);
 };
 
 loadSummary().then(loadInstruments);

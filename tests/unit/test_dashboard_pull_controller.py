@@ -19,6 +19,7 @@ from brutex.adapters.groww.ingest import SyntheticCandleFetcher
 from brutex.dashboard.pull_controller import (
     PullCandlesReport,
     TimeframeResult,
+    groww_creds_present,
     pull_candles,
 )
 from brutex.data.watermark import ChunkKey
@@ -41,6 +42,20 @@ class _FailingFetcher:
         raise VendorAPIBadRequestException(f"boom for {key.interval}")
 
 
+class _EmptyFetcher:
+    """A :class:`CandleFetcher` that returns no rows for every chunk.
+
+    Drives the fetch loop's NO_DATA branch — the vendor returned an empty
+    candle set, so nothing is persisted (completed stays 0) while no_data
+    increments. Exercises the N1 ``total_no_data`` aggregation + the
+    UI's "no data" (not green ✓) display path.
+    """
+
+    def fetch_chunk(self, key: ChunkKey) -> Sequence[object]:
+        """Return an empty sequence — the NO_DATA outcome for that chunk."""
+        return []
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Dataclass surface
 # ────────────────────────────────────────────────────────────────────────
@@ -53,25 +68,73 @@ class TestPullCandlesReport:
             year=2026,
             dry_run=True,
             timeframes=[
-                TimeframeResult(interval="1m", completed=3, failed=0),
-                TimeframeResult(interval="5m", completed=2, failed=1),
+                TimeframeResult(interval="1m", completed=3, failed=0, no_data=1, skipped=2),
+                TimeframeResult(interval="5m", completed=2, failed=1, no_data=4, skipped=5),
             ],
         )
         assert report.total_completed == 5
         assert report.total_failed == 1
+        assert report.total_no_data == 5
+        assert report.total_skipped == 7
         d = report.to_dict()
         assert d["symbol"] == "NSE-NIFTY"
         assert d["year"] == 2026
         assert d["dry_run"] is True
         assert d["total_completed"] == 5
         assert d["total_failed"] == 1
-        assert d["timeframes"][1] == {"interval": "5m", "completed": 2, "failed": 1}
+        assert d["total_no_data"] == 5
+        assert d["total_skipped"] == 7
+        assert d["timeframes"][1] == {
+            "interval": "5m",
+            "completed": 2,
+            "failed": 1,
+            "no_data": 4,
+            "skipped": 5,
+        }
 
     def test_empty_timeframes_default(self) -> None:
         report = PullCandlesReport(symbol="X", year=2026, dry_run=True)
         assert report.timeframes == []
         assert report.total_completed == 0
         assert report.total_failed == 0
+        assert report.total_no_data == 0
+        assert report.total_skipped == 0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# groww_creds_present — testable creds/dry-run safety gate (H1)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestGrowwCredsPresent:
+    def test_both_present_is_true(self) -> None:
+        env = {
+            "BRUTEX_GROWW_API_KEY": "k",
+            "BRUTEX_GROWW_TOTP_SECRET": "s",
+        }
+        assert groww_creds_present(env) is True
+
+    def test_both_absent_is_false(self) -> None:
+        assert groww_creds_present({}) is False
+
+    def test_api_key_missing_is_false(self) -> None:
+        assert groww_creds_present({"BRUTEX_GROWW_TOTP_SECRET": "s"}) is False
+
+    def test_totp_missing_is_false(self) -> None:
+        assert groww_creds_present({"BRUTEX_GROWW_API_KEY": "k"}) is False
+
+    def test_blank_value_is_false(self) -> None:
+        env = {"BRUTEX_GROWW_API_KEY": "k", "BRUTEX_GROWW_TOTP_SECRET": ""}
+        assert groww_creds_present(env) is False
+
+    def test_defaults_to_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Default env=None reads os.environ. Clear both vars → False branch.
+        monkeypatch.delenv("BRUTEX_GROWW_API_KEY", raising=False)
+        monkeypatch.delenv("BRUTEX_GROWW_TOTP_SECRET", raising=False)
+        assert groww_creds_present() is False
+        monkeypatch.setenv("BRUTEX_GROWW_API_KEY", "k")
+        monkeypatch.setenv("BRUTEX_GROWW_TOTP_SECRET", "s")
+        assert groww_creds_present() is True
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -99,6 +162,34 @@ class TestPullCandlesDryRun:
     def test_blank_symbol_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="non-empty"):
             pull_candles("   ", lake_root=tmp_path, dry_run=True)
+
+    def test_unprefixed_symbol_raises(self, tmp_path: Path) -> None:
+        # L1: a bare trading_symbol (no NSE-/BSE- prefix) is rejected — it
+        # would break symbol_to_exchange_segment. Guards B1 regressions.
+        with pytest.raises(ValueError, match="exchange-prefixed"):
+            pull_candles("NIFTY", lake_root=tmp_path, dry_run=True)
+
+    def test_bse_prefixed_symbol_passes(self, tmp_path: Path) -> None:
+        # SENSEX is BSE-; the BSE- prefix branch must pass the L1 guard.
+        report = pull_candles("BSE-SENSEX", lake_root=tmp_path, year=2026, dry_run=True)
+        assert report.total_completed > 0
+
+    def test_no_data_and_skipped_propagate(self, tmp_path: Path) -> None:
+        # N1: a fetcher that returns no rows surfaces no_data, and zero
+        # completed → the UI shows "no data" rather than a green ✓.
+        report = pull_candles(
+            "NSE-NIFTY",
+            lake_root=tmp_path,
+            year=2026,
+            dry_run=True,
+            fetcher_factory=lambda _root: (_EmptyFetcher(), None),
+        )
+        assert report.total_completed == 0
+        assert report.total_failed == 0
+        assert report.total_no_data > 0
+        d = report.to_dict()
+        assert d["total_no_data"] == report.total_no_data
+        assert d["total_skipped"] == report.total_skipped
 
 
 # ────────────────────────────────────────────────────────────────────────

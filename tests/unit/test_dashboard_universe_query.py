@@ -217,13 +217,32 @@ class TestListUnderlyings:
         assert rows[0]["name"] == "NIFTY"
 
     def test_row_shape(self) -> None:
-        rows = list_underlyings([_index("NIFTY", name="NIFTY 50")])
+        inst = _index("NIFTY", name="NIFTY 50")
+        rows = list_underlyings([inst])
         assert rows[0] == {
             "symbol": "NIFTY",
+            "pull_symbol": inst.vendor_symbol,
             "name": "NIFTY 50",
             "kind": KIND_INDEX,
             "exchange": "NSE",
         }
+
+    def test_pull_symbol_is_exchange_prefixed(self) -> None:
+        # B1: the spot pull must POST the exchange-prefixed Groww symbol
+        # (vendor_symbol) so symbol_to_exchange_segment can split the
+        # leading exchange token — a bare trading_symbol would break it.
+        snapshot = [
+            _index("NIFTY", exchange=Exchange.NSE),
+            _index("SENSEX", exchange=Exchange.BSE),
+            _equity("RELIANCE"),
+            _option("RELIANCE"),
+        ]
+        rows = list_underlyings(snapshot)
+        assert rows  # non-empty
+        for row in rows:
+            assert row["pull_symbol"].startswith(("NSE-", "BSE-")), row
+            # pull_symbol carries the exchange prefix; display symbol does not.
+            assert row["pull_symbol"].endswith(row["symbol"])
 
     def test_invalid_kind_raises(self) -> None:
         with pytest.raises(ValueError, match="kind must be one of"):

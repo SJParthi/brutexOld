@@ -42,7 +42,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from brutex.dashboard.pull_controller import pull_candles
+from brutex.dashboard.pull_controller import groww_creds_present, pull_candles
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
@@ -669,15 +669,16 @@ def build_app(
         may be a spot index/stock OR a contract's groww_symbol (a future
         or a CE/PE option) — the controller is instrument-agnostic.
         ``dry_run`` is forced ``True`` automatically when Groww
-        credentials are not present in the environment (mirrors the CLI's
-        offline default), so the page never attempts a live network call
-        without creds.
+        credentials are not present in the environment (via the testable
+        :func:`brutex.dashboard.pull_controller.groww_creds_present`
+        gate, mirroring the CLI's offline default), so the page never
+        attempts a live network call without creds.
         """
-        dry_run = not _groww_creds_present()
+        dry_run = not groww_creds_present()
         try:
             report = pull_candles(
                 symbol,
-                lake_root=_resolve_pull_lake_root(instrument_store),
+                lake_root=_resolve_pull_lake_root(instrument_store, dry_run=dry_run),
                 year=year,
                 dry_run=dry_run,
             )
@@ -703,32 +704,43 @@ def build_app(
     return app
 
 
-def _groww_creds_present() -> bool:
-    """Return ``True`` iff both Groww TOTP env vars are set (live pull possible).
+def _resolve_pull_lake_root(instrument_store: Any, *, dry_run: bool) -> Path:
+    """Resolve the lake root for the pull sink.
 
-    Mirrors :meth:`brutex.adapters.groww.auth.GrowwAuth.from_env`'s
-    required vars. When either is missing the pull route forces
-    ``dry_run`` so the page works offline with synthetic data.
-    """
-    import os
+    The live (``# pragma: no cover``) pull path writes Parquet into the
+    store's on-disk parent directory; the dry-run synthetic fetcher
+    ignores the path entirely. To avoid silently scattering a live pull
+    into a guessed ``~/.brutex/lake`` (M1), the live path REQUIRES a
+    resolvable store path and raises a clear error otherwise. The
+    dry-run path tolerates a missing store (the synthetic fetcher never
+    touches disk), returning a placeholder.
 
-    return bool(os.environ.get("BRUTEX_GROWW_API_KEY")) and bool(
-        os.environ.get("BRUTEX_GROWW_TOTP_SECRET")
-    )
+    Parameters
+    ----------
+    instrument_store
+        The wired :class:`~brutex.data.instrument_store.InstrumentStore`,
+        or ``None``.
+    dry_run
+        Whether the pull is offline/synthetic. When ``True`` the lake
+        root is unused, so a missing store path is tolerated.
 
-
-def _resolve_pull_lake_root(instrument_store: Any) -> Path:
-    """Best-effort lake root for the live pull sink.
-
-    Uses the store's on-disk path parent when a real store is wired;
-    falls back to ``~/.brutex/lake``. Only the live (``# pragma: no
-    cover``) pull path writes Parquet here — the dry-run synthetic
-    fetcher ignores it.
+    Raises
+    ------
+    RuntimeError
+        On the LIVE path when no lake root can be derived from the store.
     """
     store_path = getattr(instrument_store, "path", None)
     if isinstance(store_path, Path):
         return store_path.parent
-    return Path.home() / ".brutex" / "lake"
+    if dry_run:
+        return Path.home() / ".brutex" / "lake"
+    raise RuntimeError(  # pragma: no cover — live-only: needs creds + a wired store
+        "Cannot resolve a lake root for a LIVE pull: no InstrumentStore "
+        "path is wired. Start the dashboard with "
+        "`brutex dashboard --lake-root <path>` so live pulls have a "
+        "Parquet sink, or run without Groww creds for the offline "
+        "synthetic preview."
+    )
 
 
 def _make_ws_handler(state: DashboardState) -> Any:

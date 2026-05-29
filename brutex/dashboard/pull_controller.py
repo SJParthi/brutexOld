@@ -39,7 +39,8 @@ separately-authorised engine expansion.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,6 +55,39 @@ from brutex.data.watermark import FetchWatermark
 
 _LOG = structlog.get_logger(__name__)
 
+#: Exchange prefixes a valid Groww symbol may start with. A spot index/
+#: stock is ``NSE-…`` / ``BSE-…``; every FUT / CE / PE contract symbol is
+#: likewise exchange-prefixed. Used by :func:`pull_candles` (L1 guard) so a
+#: bare ``trading_symbol`` (e.g. ``"NIFTY"``) is rejected before it can
+#: break :func:`brutex.adapters.groww.client.symbol_to_exchange_segment`.
+_KNOWN_EXCHANGE_PREFIXES: tuple[str, ...] = ("NSE-", "BSE-")
+
+
+def groww_creds_present(env: Mapping[str, str] | None = None) -> bool:
+    """Return ``True`` iff both Groww TOTP env vars are present.
+
+    Mirrors the required vars of
+    :meth:`brutex.adapters.groww.auth.GrowwAuth.from_env`
+    (``BRUTEX_GROWW_API_KEY`` AND ``BRUTEX_GROWW_TOTP_SECRET``). When
+    either is missing/blank a live pull is impossible, so the dashboard
+    pull route forces ``dry_run`` and serves synthetic data offline.
+
+    Parameters
+    ----------
+    env
+        Environment mapping to inspect. Defaults to
+        :data:`os.environ`. Injected by tests to exercise both branches
+        without mutating the real process environment.
+
+    Returns
+    -------
+    bool
+        ``True`` only when both env vars are present AND non-empty.
+    """
+    source = os.environ if env is None else env
+    return bool(source.get("BRUTEX_GROWW_API_KEY")) and bool(source.get("BRUTEX_GROWW_TOTP_SECRET"))
+
+
 #: A factory that builds the ``(fetcher, reauth)`` pair given the lake
 #: root. The default builds the offline synthetic pair; the live path
 #: injects :func:`_build_live_pull_fetcher`.
@@ -62,11 +96,13 @@ FetcherFactory = Callable[[Path], tuple[CandleFetcher, Callable[[], None] | None
 
 @dataclass(frozen=True, slots=True)
 class TimeframeResult:
-    """Per-timeframe completed / failed counts for one pull."""
+    """Per-timeframe completed / failed / no-data / skipped counts for one pull."""
 
     interval: str
     completed: int
     failed: int
+    no_data: int = 0
+    skipped: int = 0
 
 
 @dataclass(slots=True)
@@ -105,6 +141,16 @@ class PullCandlesReport:
         """Total chunks that failed terminally across all timeframes."""
         return sum(tf.failed for tf in self.timeframes)
 
+    @property
+    def total_no_data(self) -> int:
+        """Total chunks the vendor reported empty (NO_DATA) across all timeframes."""
+        return sum(tf.no_data for tf in self.timeframes)
+
+    @property
+    def total_skipped(self) -> int:
+        """Total chunks skipped as already-settled (resume) across all timeframes."""
+        return sum(tf.skipped for tf in self.timeframes)
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dict for the ``/api/v1/universe/pull`` route."""
         return {
@@ -113,11 +159,15 @@ class PullCandlesReport:
             "dry_run": self.dry_run,
             "total_completed": self.total_completed,
             "total_failed": self.total_failed,
+            "total_no_data": self.total_no_data,
+            "total_skipped": self.total_skipped,
             "timeframes": [
                 {
                     "interval": tf.interval,
                     "completed": tf.completed,
                     "failed": tf.failed,
+                    "no_data": tf.no_data,
+                    "skipped": tf.skipped,
                 }
                 for tf in self.timeframes
             ],
@@ -217,10 +267,20 @@ def pull_candles(
     Raises
     ------
     ValueError
-        If *symbol* is empty / blank.
+        If *symbol* is empty / blank, or does not start with a known
+        Groww exchange prefix (:data:`_KNOWN_EXCHANGE_PREFIXES` —
+        ``NSE-`` / ``BSE-``). The latter guards against a bare
+        ``trading_symbol`` (e.g. ``"NIFTY"``) reaching the ingest spine,
+        which would mis-derive the exchange in
+        :func:`brutex.adapters.groww.client.symbol_to_exchange_segment`.
     """
     if not symbol.strip():
         raise ValueError("symbol must be a non-empty Groww symbol")
+    if not symbol.startswith(_KNOWN_EXCHANGE_PREFIXES):
+        raise ValueError(
+            "symbol must be an exchange-prefixed Groww symbol "
+            f"(one of {_KNOWN_EXCHANGE_PREFIXES}), got {symbol!r}"
+        )
 
     resolved_year = year if year is not None else datetime.now(UTC).year
     start = datetime(resolved_year, 1, 1, tzinfo=UTC)
@@ -254,6 +314,8 @@ def pull_candles(
             interval=interval,
             completed=report.outcomes[symbol, interval].completed,
             failed=report.outcomes[symbol, interval].failed,
+            no_data=report.outcomes[symbol, interval].no_data,
+            skipped=report.outcomes[symbol, interval].skipped,
         )
         for interval in ALL_GROWW_INTERVALS
     ]
@@ -278,5 +340,6 @@ __all__ = [
     "FetcherFactory",
     "PullCandlesReport",
     "TimeframeResult",
+    "groww_creds_present",
     "pull_candles",
 ]
