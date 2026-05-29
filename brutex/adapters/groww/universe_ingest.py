@@ -26,22 +26,67 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 import structlog
 
-if TYPE_CHECKING:
-    from brutex.adapters.groww.contracts import ContractFetchResult
-    from brutex.adapters.groww.expiries import ExpiryFetchResult
-    from brutex.adapters.groww.instruments import InstrumentRefreshResult
-
 _LOG = structlog.get_logger(__name__)
+
+
+class _InstrumentRefreshResultLike(Protocol):
+    """The instrument-refresh result surface the orchestrator reads + re-exports.
+
+    Members are read-only so frozen dataclasses (the real
+    ``InstrumentRefreshResult``) and plain test fakes both conform.
+    """
+
+    @property
+    def parsed(self) -> int:
+        """Count of instruments parsed + upserted."""
+        ...
+
+    @property
+    def filtered(self) -> int:
+        """Count of rows skipped as out of scope."""
+        ...
+
+    @property
+    def quarantined(self) -> int:
+        """Count of rows that failed to parse + were dropped."""
+        ...
+
+
+class _ExpiryRecordLike(Protocol):
+    """One expiry record — the orchestrator only reads its date."""
+
+    @property
+    def expiry_date(self) -> date:
+        """The expiry calendar date."""
+        ...
+
+
+class _ExpiryResultLike(Protocol):
+    """The expiry-fetch result surface — a read-only sequence of expiry records."""
+
+    @property
+    def records(self) -> Sequence[_ExpiryRecordLike]:
+        """The discovered expiry records."""
+        ...
+
+
+class _ContractResultLike(Protocol):
+    """The contract-fetch result surface — a read-only sequence of contract records."""
+
+    @property
+    def records(self) -> Sequence[object]:
+        """The discovered contract records."""
+        ...
 
 
 class _InstrumentRefresher(Protocol):
     """The slice of :class:`InstrumentMasterFetcher` used by the orchestrator."""
 
-    def refresh(self) -> InstrumentRefreshResult:
+    def refresh(self) -> _InstrumentRefreshResultLike:
         """Download + parse + upsert the instrument master; return the result."""
         ...
 
@@ -49,7 +94,7 @@ class _InstrumentRefresher(Protocol):
 class _ExpiryDiscoverer(Protocol):
     """The slice of :class:`ExpiryFetcher` used by the orchestrator."""
 
-    def fetch(self, underlying: str, exchange: str, *, year: int) -> ExpiryFetchResult:
+    def fetch(self, underlying: str, exchange: str, *, year: int) -> _ExpiryResultLike:
         """Discover + upsert the expiry dates for *underlying* in *year*."""
         ...
 
@@ -57,7 +102,7 @@ class _ExpiryDiscoverer(Protocol):
 class _ContractDiscoverer(Protocol):
     """The slice of :class:`ContractFetcher` used by the orchestrator."""
 
-    def fetch(self, underlying: str, exchange: str, expiry_date: date) -> ContractFetchResult:
+    def fetch(self, underlying: str, exchange: str, expiry_date: date) -> _ContractResultLike:
         """Discover + enrich + upsert the contracts for one ``(underlying, expiry)``."""
         ...
 
@@ -78,7 +123,7 @@ class UniverseIngestReport:
         Total contract rows discovered + enriched across all expiries.
     """
 
-    instruments: InstrumentRefreshResult
+    instruments: _InstrumentRefreshResultLike
     underlyings: int
     expiries: int
     contracts: int
