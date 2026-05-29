@@ -42,6 +42,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from brutex.dashboard.pull_controller import pull_spot
+from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
     PipelineEventKind,
@@ -622,6 +624,69 @@ def build_app(
             }
         )
 
+    # ── F&O Universe Explorer (DEC-UNIVERSE-DASHBOARD-001) ───────────
+
+    @app.get("/api/v1/universe/summary")
+    async def api_universe_summary() -> JSONResponse:
+        """GET /api/v1/universe/summary — index_count / stock_count / total.
+
+        Thin wrapper over
+        :func:`brutex.dashboard.universe_query.universe_summary`. All
+        classification logic lives in that (coverage-tested) module.
+        """
+        store = _require_store()
+        snapshot = store.load_snapshot(in_scope_only=False)
+        return JSONResponse(universe_summary(snapshot))
+
+    @app.get("/api/v1/universe/instruments")
+    async def api_universe_instruments(
+        kind: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """GET /api/v1/universe/instruments?kind=index|stock — explorer rows.
+
+        Thin wrapper over
+        :func:`brutex.dashboard.universe_query.list_underlyings`. The
+        drill into expiries / contracts reuses ``/api/v1/expiries`` +
+        ``/api/v1/contracts`` (no duplication).
+        """
+        store = _require_store()
+        snapshot = store.load_snapshot(in_scope_only=False)
+        try:
+            rows = list_underlyings(snapshot, kind=kind)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"instruments": rows, "kind": kind})
+
+    @app.post("/api/v1/universe/pull")
+    async def api_universe_pull(
+        symbol: str = Query(...),
+        year: int | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull — ingest one instrument's spot OHLC.
+
+        Thin wrapper over
+        :func:`brutex.dashboard.pull_controller.pull_spot`. ``dry_run``
+        is forced ``True`` automatically when Groww credentials are not
+        present in the environment (mirrors the CLI's offline default),
+        so the page never attempts a live network call without creds.
+        """
+        dry_run = not _groww_creds_present()
+        try:
+            report = pull_spot(
+                symbol,
+                lake_root=_resolve_pull_lake_root(instrument_store),
+                year=year,
+                dry_run=dry_run,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(report.to_dict())
+
+    @app.get("/universe", response_class=HTMLResponse)
+    async def universe_page() -> str:
+        """GET /universe — the F&O Universe Explorer page (DEC-UNIVERSE-DASHBOARD-001)."""
+        return _render_universe_html()
+
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
         """GET / — inline HTML dashboard with embedded JS WebSocket client."""
@@ -633,6 +698,34 @@ def build_app(
     app.add_api_websocket_route("/ws", _make_ws_handler(state))
 
     return app
+
+
+def _groww_creds_present() -> bool:
+    """Return ``True`` iff both Groww TOTP env vars are set (live pull possible).
+
+    Mirrors :meth:`brutex.adapters.groww.auth.GrowwAuth.from_env`'s
+    required vars. When either is missing the pull route forces
+    ``dry_run`` so the page works offline with synthetic data.
+    """
+    import os
+
+    return bool(os.environ.get("BRUTEX_GROWW_API_KEY")) and bool(
+        os.environ.get("BRUTEX_GROWW_TOTP_SECRET")
+    )
+
+
+def _resolve_pull_lake_root(instrument_store: Any) -> Path:
+    """Best-effort lake root for the live pull sink.
+
+    Uses the store's on-disk path parent when a real store is wired;
+    falls back to ``~/.brutex/lake``. Only the live (``# pragma: no
+    cover``) pull path writes Parquet here — the dry-run synthetic
+    fetcher ignores it.
+    """
+    store_path = getattr(instrument_store, "path", None)
+    if isinstance(store_path, Path):
+        return store_path.parent
+    return Path.home() / ".brutex" / "lake"
 
 
 def _make_ws_handler(state: DashboardState) -> Any:
@@ -829,6 +922,30 @@ def _render_index_html() -> str:
         mockup values stay visible until the poller receives real data.
     """
     return _load_v29_template()
+
+
+_UNIVERSE_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "universe.html"
+_UNIVERSE_TEMPLATE_CACHE: str | None = None
+
+
+def _load_universe_template() -> str:
+    """Load + cache the F&O Universe Explorer page template.
+
+    Ships as a package-relative resource at
+    ``brutex/dashboard/templates/universe.html`` (DEC-UNIVERSE-DASHBOARD-001).
+    Ported from ``docs/dashboard/mockups/universe-explorer-v1.html`` with
+    the synthetic JS data swapped for ``fetch()`` calls to the real
+    ``/api/v1/universe/*`` endpoints. Loaded once, then served verbatim.
+    """
+    global _UNIVERSE_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _UNIVERSE_TEMPLATE_CACHE is None:
+        _UNIVERSE_TEMPLATE_CACHE = _UNIVERSE_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _UNIVERSE_TEMPLATE_CACHE
+
+
+def _render_universe_html() -> str:
+    """Return the F&O Universe Explorer page HTML (DEC-UNIVERSE-DASHBOARD-001)."""
+    return _load_universe_template()
 
 
 _INSTRUMENTS_HTML_BLOCK = """\
@@ -1117,5 +1234,8 @@ __all__ = [
     "TelegramStatsPanel",
     "WorkerRow",
     "build_app",
+    "list_underlyings",
+    "pull_spot",
     "snapshot_to_json",
+    "universe_summary",
 ]
