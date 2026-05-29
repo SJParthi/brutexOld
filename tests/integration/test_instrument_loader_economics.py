@@ -90,7 +90,7 @@ def _make_http_get(body: str) -> Any:
 
 def _build_store(tmp_path: Path) -> InstrumentStore:
     """Open a fresh on-disk InstrumentStore under *tmp_path*."""
-    duckdb = pytest.importorskip("duckdb")  # noqa: F841 — gate on the data extra
+    pytest.importorskip("duckdb")  # gate on the data extra
     return InstrumentStore.open(tmp_path / "instruments.duckdb")
 
 
