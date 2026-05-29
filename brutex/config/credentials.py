@@ -217,9 +217,7 @@ def load_groww_credentials(*, path: Path | None = None) -> GrowwCredentials | No
         try:
             raw = json.loads(handle.read())
         except (OSError, json.JSONDecodeError) as exc:
-            raise CredentialsError(
-                f"credentials file {target} is corrupt or unreadable"
-            ) from exc
+            raise CredentialsError(f"credentials file {target} is corrupt or unreadable") from exc
 
     if not isinstance(raw, dict):
         raise CredentialsError(f"credentials file {target} has an invalid shape")
