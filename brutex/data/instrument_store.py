@@ -721,8 +721,21 @@ class InstrumentStore:
         run_id: str,
         csv_source_sha256: str,
         in_scope_of: Any = None,
+        replace_snapshot: bool = False,
     ) -> UpsertResult:
         """Insert or replace rows for *snapshot_date*.
+
+        ``replace_snapshot`` (DEC-LEAN-REINGEST-FIX-001): when ``True`` the
+        entire *snapshot_date* is wiped before insert, so the resulting rows
+        are EXACTLY the incoming set — any pre-existing rows for that day
+        that are NOT in the incoming batch (e.g. FUT/CE/PE legs or non-F&O
+        equities left by an older, pre-lean ingest) are removed. The
+        instrument master IS the full snapshot for a day, so the
+        :class:`InstrumentMasterFetcher` passes ``True`` to guarantee a
+        clean lean lake on every refresh. When ``False`` (default) only the
+        rows whose ``(vendor_symbol, snapshot_date)`` PK matches an incoming
+        row are replaced (the historical per-key upsert semantics, preserved
+        for the 27 integration tests + any partial-batch caller).
 
         Wrapped in a single transaction so partial failures roll
         back cleanly. Re-running with the same
@@ -797,25 +810,40 @@ class InstrumentStore:
                 self._conn.register("_brutex_instr_bulk", pa.table(columns))
                 try:
                     cols = ", ".join(_INSTR_COLUMNS)
-                    # Count, then delete, the pre-existing rows whose PK matches
-                    # an incoming row — via a semi-join on the registered table.
-                    count_row = self._conn.execute(
-                        "SELECT COUNT(*) FROM instruments i "
-                        "WHERE i.snapshot_date = ? AND EXISTS ("
-                        "  SELECT 1 FROM _brutex_instr_bulk b "
-                        "  WHERE b.vendor_symbol = i.vendor_symbol"
-                        ")",
-                        [snapshot_date],
-                    ).fetchone()
-                    rows_replaced = int(count_row[0]) if count_row else 0
-                    self._conn.execute(
-                        "DELETE FROM instruments i "
-                        "WHERE i.snapshot_date = ? AND EXISTS ("
-                        "  SELECT 1 FROM _brutex_instr_bulk b "
-                        "  WHERE b.vendor_symbol = i.vendor_symbol"
-                        ")",
-                        [snapshot_date],
-                    )
+                    if replace_snapshot:
+                        # Full-snapshot replace: wipe the whole day, then insert
+                        # only the incoming set. Removes stale legs / non-lean
+                        # rows from a prior ingest (DEC-LEAN-REINGEST-FIX-001).
+                        count_row = self._conn.execute(
+                            "SELECT COUNT(*) FROM instruments WHERE snapshot_date = ?",
+                            [snapshot_date],
+                        ).fetchone()
+                        rows_replaced = int(count_row[0]) if count_row else 0
+                        self._conn.execute(
+                            "DELETE FROM instruments WHERE snapshot_date = ?",
+                            [snapshot_date],
+                        )
+                    else:
+                        # Per-key upsert: count, then delete, only the
+                        # pre-existing rows whose PK matches an incoming row —
+                        # via a semi-join on the registered table.
+                        count_row = self._conn.execute(
+                            "SELECT COUNT(*) FROM instruments i "
+                            "WHERE i.snapshot_date = ? AND EXISTS ("
+                            "  SELECT 1 FROM _brutex_instr_bulk b "
+                            "  WHERE b.vendor_symbol = i.vendor_symbol"
+                            ")",
+                            [snapshot_date],
+                        ).fetchone()
+                        rows_replaced = int(count_row[0]) if count_row else 0
+                        self._conn.execute(
+                            "DELETE FROM instruments i "
+                            "WHERE i.snapshot_date = ? AND EXISTS ("
+                            "  SELECT 1 FROM _brutex_instr_bulk b "
+                            "  WHERE b.vendor_symbol = i.vendor_symbol"
+                            ")",
+                            [snapshot_date],
+                        )
                     # ONE vectorised bulk insert from the same registered table.
                     self._conn.execute(
                         f"INSERT INTO instruments ({cols}) "  # noqa: S608  # nosec B608 — cols is the fixed _INSTR_COLUMNS constant
@@ -1332,6 +1360,21 @@ class InstrumentStore:
         params: list[Any] = [as_of] if as_of is not None else []
         rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_instrument(row) for row in rows]
+
+    def has_derivative_legs(self) -> bool:
+        """Return ``True`` if any FUT/CE/PE leg is persisted — the non-lean fingerprint.
+
+        Lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001) never persists option/
+        future legs, so their presence means the lake was populated by an
+        older, pre-lean build. The on-run auto-heal uses this to trigger a
+        clean lean re-ingest (DEC-LEAN-REINGEST-FIX-001) instead of serving
+        stale, over-counted data. One indexed ``EXISTS`` probe — O(1)-ish.
+        """
+        self._ensure_open()
+        row = self._conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM instruments WHERE instrument_type IN ('FUT', 'CE', 'PE'))"
+        ).fetchone()
+        return bool(row[0]) if row else False
 
     def list_futures(
         self,
