@@ -16,26 +16,32 @@ from brutex.dashboard.auto_pull import (
 
 
 @pytest.mark.parametrize(
-    ("index_count", "stock_count", "expected"),
+    ("index_count", "stock_count", "legs_present", "expected"),
     [
         # Wholly empty lake (fresh) → reload.
-        (0, 0, True),
+        (0, 0, False, True),
         # Stale lake: stocks present but ZERO indices (pre-fix build) → reload.
-        (0, 211, True),
-        # Healthy lake: indices present → skip (no reload).
-        (30, 211, False),
-        # Indices present, no stocks (degenerate but valid) → skip.
-        (30, 0, False),
+        (0, 211, False, True),
+        # Healthy LEAN lake: indices present, no legs → skip (no reload).
+        (25, 211, False, False),
+        # Indices present, no stocks (degenerate but valid), no legs → skip.
+        (30, 0, False, False),
+        # Non-lean lake: legs still present (pre-DEC-INSTRUMENT-UNIVERSE-FAST-001
+        # build) → reload to purge them, even though indices+stocks look fine.
+        (25, 211, True, True),
+        # Legs present even on an otherwise-empty lake → reload.
+        (0, 0, True, True),
     ],
 )
 def test_should_reload_instrument_master(
-    index_count: int, stock_count: int, expected: bool
+    index_count: int, stock_count: int, legs_present: bool, expected: bool
 ) -> None:
-    """Reload on an empty OR stale (indices-missing) lake; skip when indices exist."""
+    """Reload on empty OR indices-missing OR non-lean (legs present); else skip."""
     assert (
         should_reload_instrument_master(
             index_count=index_count,
             stock_count=stock_count,
+            legs_present=legs_present,
         )
         is expected
     )

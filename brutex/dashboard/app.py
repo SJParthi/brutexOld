@@ -42,6 +42,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from brutex.dashboard.db_view import sample_rows, table_summary
 from brutex.dashboard.pull_controller import groww_creds_present, pull_candles
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
@@ -50,6 +52,24 @@ from brutex.orchestrator.pipeline import (
     PipelineEventKind,
 )
 from brutex.orchestrator.state import IngestPhase
+
+
+class CredentialsIn(BaseModel):
+    """Request body for ``POST /api/v1/credentials``.
+
+    Defined at **module scope** (not inside :func:`build_app`) so FastAPI
+    correctly resolves it as a request-BODY model. A function-local Pydantic
+    model is not recognised as a body by FastAPI's parameter analysis — it
+    is mis-classified as a query parameter (``loc: ["query", "body"]``),
+    which made every POST return 422 (DEC-CREDS-422-FIX-001). The fields are
+    accepted in the BODY (never as query params, which leak into access
+    logs) and are passed straight to
+    :func:`brutex.config.credentials.save_groww_credentials` — never logged.
+    """
+
+    api_key: str
+    totp_secret: str
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Snapshot dataclasses
@@ -725,20 +745,8 @@ def build_app(
         return JSONResponse(report.to_dict())
 
     # ── Credentials store (DEC-CREDENTIALS-STORE-001) ───────────────
-
-    from pydantic import BaseModel
-
-    class CredentialsIn(BaseModel):
-        """Request body for ``POST /api/v1/credentials``.
-
-        Accepted in the BODY (never as query params, which get logged).
-        The values are passed straight to
-        :func:`brutex.config.credentials.save_groww_credentials` and are
-        never logged.
-        """
-
-        api_key: str
-        totp_secret: str
+    # CredentialsIn is module-scope (see top of file) so FastAPI resolves
+    # it as a request body, not a query param (DEC-CREDS-422-FIX-001).
 
     @app.post("/api/v1/credentials")
     async def api_credentials_set(body: CredentialsIn) -> JSONResponse:

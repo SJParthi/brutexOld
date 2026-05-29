@@ -60,6 +60,7 @@ class _FakeStore:
         run_id: str,
         csv_source_sha256: str,
         in_scope_of: Any = None,
+        replace_snapshot: bool = False,
     ) -> dict[str, int]:
         items = list(instruments)
         self.calls.append(
@@ -69,6 +70,7 @@ class _FakeStore:
                 "run_id": run_id,
                 "csv_source_sha256": csv_source_sha256,
                 "in_scope_of": in_scope_of,
+                "replace_snapshot": replace_snapshot,
             }
         )
         return {"rows_written": len(items)}
@@ -131,6 +133,13 @@ class TestRefresh:
         saved = store.calls[0]["instruments"]
         assert all(i.segment.value != "COMMODITY" for i in saved)
         assert {i.vendor_symbol for i in saved} == {"NSE-NIFTY"}
+
+    def test_refresh_uses_full_snapshot_replace(self) -> None:
+        """The master refresh must request a full-snapshot replace so a re-ingest
+        purges stale legs from an older pre-lean pull (DEC-LEAN-REINGEST-FIX-001)."""
+        fetcher, store = _fetcher(_csv())
+        fetcher.refresh()
+        assert store.calls[0]["replace_snapshot"] is True
 
     def test_in_scope_callable_uses_fetch_scope(self) -> None:
         fetcher, store = _fetcher(_csv())

@@ -113,6 +113,32 @@ def _idx(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
     )
 
 
+def _eq(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
+    """Build a minimal valid cash-equity (EQ) instrument."""
+    token = zlib.crc32(f"EQ-{symbol}".encode()) & 0x7FFFFFFF
+    return Instrument(
+        exchange=exchange,
+        exchange_token=token,
+        trading_symbol=symbol,
+        vendor_symbol=f"{exchange}-{symbol}",
+        name=f"{symbol} Ltd",
+        instrument_type=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=None,
+        underlying_exchange_token=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        freeze_quantity=None,
+        expiry_date=None,
+        strike_price=None,
+        is_reserved=False,
+        buy_allowed=True,
+        sell_allowed=True,
+    )
+
+
 def _option(
     *,
     underlying: str,
@@ -866,3 +892,73 @@ class TestIdempotenceStress:
         assert report.is_clean is True
         assert report.raw_hash_mismatches == 0
         assert report.pk_duplicates == 0
+
+
+class TestLeanReingestAndLegsDetection:
+    """has_derivative_legs() + upsert_many(replace_snapshot=...) — DEC-LEAN-REINGEST-FIX-001."""
+
+    def test_has_derivative_legs_false_for_lean_lake(self, tmp_path: Path) -> None:
+        """A lean lake (only IDX + EQ) reports no derivative legs."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY"), _eq("RELIANCE")],
+                snapshot_date=date(2026, 5, 29),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            assert s.has_derivative_legs() is False
+
+    def test_has_derivative_legs_true_when_leg_present(self, tmp_path: Path) -> None:
+        """A lake holding any FUT/CE/PE leg is flagged non-lean."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [
+                    _idx("NIFTY"),
+                    _option(
+                        underlying="NIFTY",
+                        strike=24000,
+                        side=InstrumentType.CE,
+                        expiry=date(2026, 6, 25),
+                    ),
+                ],
+                snapshot_date=date(2026, 5, 29),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            assert s.has_derivative_legs() is True
+
+    def test_replace_snapshot_purges_stale_legs(self, tmp_path: Path) -> None:
+        """A full-snapshot replace re-ingest drops legs left by a prior pull."""
+        snap = date(2026, 5, 29)
+        with InstrumentStore.open(tmp_path / "db") as s:
+            # Prior (pre-lean) ingest: index + a stale option leg.
+            s.upsert_many(
+                [
+                    _idx("NIFTY"),
+                    _option(
+                        underlying="NIFTY",
+                        strike=24000,
+                        side=InstrumentType.CE,
+                        expiry=date(2026, 6, 25),
+                    ),
+                ],
+                snapshot_date=snap,
+                run_id="old",
+                csv_source_sha256=_csv_hash("old"),
+            )
+            assert s.has_derivative_legs() is True
+            assert s.count(in_scope_only=False) == 2
+
+            # Lean re-ingest with replace_snapshot=True → wipes the day, keeps
+            # only the lean set (the index); the stale leg is purged.
+            result = s.upsert_many(
+                [_idx("NIFTY")],
+                snapshot_date=snap,
+                run_id="lean",
+                csv_source_sha256=_csv_hash("lean"),
+                replace_snapshot=True,
+            )
+            assert result.rows_replaced == 2  # both prior rows wiped
+            assert result.rows_written == 1
+            assert s.count(in_scope_only=False) == 1
+            assert s.has_derivative_legs() is False

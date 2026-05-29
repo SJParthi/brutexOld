@@ -510,13 +510,15 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
             from brutex.dashboard.universe_query import universe_summary
 
             summary = universe_summary(store.load_snapshot(in_scope_only=False))
-            # Auto-heal: reload when the lake is empty OR stale (has stocks but
-            # zero indices — the fingerprint of a pre-DEC-INDEX-PARSE-FIX-001
-            # lake that quarantined every index). The master upsert dedups on
-            # vendor_symbol, so a redundant reload is an idempotent no-op write.
+            # Auto-heal: reload when the lake is empty, missing indices (the
+            # pre-DEC-INDEX-PARSE-FIX-001 fingerprint), OR still holds FUT/CE/PE
+            # legs (the pre-lean fingerprint — DEC-LEAN-REINGEST-FIX-001). The
+            # lean refresh does a full-snapshot replace, so a reload purges the
+            # stale ~101k-row dump down to the ~236 universe underlyings.
             if should_reload_instrument_master(
                 index_count=summary["index_count"],
                 stock_count=summary["stock_count"],
+                legs_present=store.has_derivative_legs(),
             ):
                 counts = load_instrument_master(store)
                 print(

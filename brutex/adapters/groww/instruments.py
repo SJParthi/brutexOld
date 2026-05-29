@@ -280,6 +280,7 @@ class _InstrumentSink(Protocol):
         run_id: str,
         csv_source_sha256: str,
         in_scope_of: Callable[[Instrument], bool] | None = ...,
+        replace_snapshot: bool = ...,
     ) -> Any:
         """Upsert *instruments* for this snapshot; return the store's result."""
         ...
@@ -357,6 +358,11 @@ class InstrumentMasterFetcher:
             run_id=self.run_id_factory(),
             csv_source_sha256=csv_sha256,
             in_scope_of=lambda inst: is_in_fetch_scope(inst, fno_eligible),
+            # Full-snapshot replace (DEC-LEAN-REINGEST-FIX-001): the master IS
+            # the full snapshot for the day, so wipe-and-insert guarantees a
+            # clean lean lake — any stale FUT/CE/PE legs or non-F&O equities
+            # left by an older pre-lean ingest for the same day are purged.
+            replace_snapshot=True,
         )
         return InstrumentRefreshResult(
             parsed=len(instruments),

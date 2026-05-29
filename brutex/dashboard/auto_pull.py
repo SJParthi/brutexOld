@@ -23,17 +23,24 @@ populated. Both conditions are required.
 from __future__ import annotations
 
 
-def should_reload_instrument_master(*, index_count: int, stock_count: int) -> bool:
+def should_reload_instrument_master(
+    *, index_count: int, stock_count: int, legs_present: bool = False
+) -> bool:
     """Return whether the keyless instrument master should be (re)loaded on run.
 
-    The master is re-fetched on startup not only when the lake is wholly
-    empty, but also when it is **stale** — specifically when it holds
-    stocks yet **zero indices**. That exact state is the fingerprint of a
-    lake populated by a pre-DEC-INDEX-PARSE-FIX-001 build (which quarantined
-    all 30 index rows; CLAUDE.md §6), so a plain "non-empty → skip" check
-    would pin the operator to stale, index-less data forever. Re-loading is
-    safe and idempotent: the master upsert dedups on ``vendor_symbol``
-    (DEC-INDEX-PARSE-FIX-001), so a redundant reload is a no-op write.
+    Reloads when the lake is in any of three known-bad states:
+
+    * **empty** — nothing loaded yet (``index_count == stock_count == 0``);
+    * **indices missing** — holds stocks yet **zero indices**, the fingerprint
+      of a pre-DEC-INDEX-PARSE-FIX-001 build that quarantined every index row;
+    * **non-lean** — still holds FUT/CE/PE legs (``legs_present``), the
+      fingerprint of a pre-DEC-INSTRUMENT-UNIVERSE-FAST-001 build that stored
+      the full ~101k-row master. The lean refresh does a full-snapshot replace
+      (DEC-LEAN-REINGEST-FIX-001), so reloading purges the stale dump down to
+      the ~236 universe underlyings instead of serving over-counted data.
+
+    Re-loading is safe + idempotent: the lean refresh replaces the whole
+    snapshot deterministically.
 
     Parameters
     ----------
@@ -41,19 +48,19 @@ def should_reload_instrument_master(*, index_count: int, stock_count: int) -> bo
         Indices currently in the lake snapshot.
     stock_count
         F&O-eligible stocks currently in the lake snapshot.
+    legs_present
+        ``True`` iff the lake still contains any FUT/CE/PE leg (a pre-lean
+        lake). Cheaply probed via
+        :meth:`~brutex.data.instrument_store.InstrumentStore.has_derivative_legs`.
 
     Returns
     -------
     bool
-        ``True`` iff the lake is missing indices (``index_count == 0``) —
-        which covers both a wholly empty lake (``stock_count`` also 0) and
-        a stale lake that an old build populated with stocks but no indices.
-        ``stock_count`` is accepted for an explicit, self-documenting
-        signature even though the index count alone decides the gate.
+        ``True`` iff the lake is empty, missing indices, OR non-lean.
     """
     lake_is_empty = index_count == 0 and stock_count == 0
     indices_missing = index_count == 0
-    return lake_is_empty or indices_missing
+    return lake_is_empty or indices_missing or legs_present
 
 
 def should_auto_pull_universe(*, credentials_present: bool, instrument_total: int) -> bool:
