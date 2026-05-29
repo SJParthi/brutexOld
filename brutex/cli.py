@@ -462,9 +462,13 @@ def cmd_run(
         resolved_lake = Path(env_lake) if env_lake else Path.home() / ".brutex" / "lake"
 
     url = f"http://{host}:{port}"
+    universe_url = f"{url}/universe"
     print(f"[brutex] BruteX dashboard → {url}  (lake: {resolved_lake})", file=sys.stderr)
+    print(f"[brutex] opening F&O Universe Explorer → {universe_url}", file=sys.stderr)
     if open_browser:
-        _open_browser(url)
+        # Open the Universe Explorer directly (DEC-DASHBOARD-AUTOOPEN-001) —
+        # the operator's working surface for browsing + pulling instruments.
+        _open_browser(universe_url)
     return cmd_dashboard(lake_root=resolved_lake, host=host, port=port)
 
 
