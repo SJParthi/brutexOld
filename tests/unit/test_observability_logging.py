@@ -212,6 +212,19 @@ class TestFileSink:
         assert payload["code"] == 7
         assert payload["level"] == "warning"
 
+    def test_event_logged_exactly_once_in_file(self, tmp_path: Path) -> None:
+        """A single emit produces exactly ONE file line — guards the duplicate-line
+        risk if a second file handler ever stacked (hostile-review NIT-2)."""
+        target = tmp_path / "brutex.log"
+        configure_logging(level="INFO", json_renderer=True, log_file=target)
+        structlog.get_logger("oncetest").warning("once_event", code=42)
+        for h in logging.getLogger().handlers:
+            h.flush()
+        matches = [
+            ln for ln in target.read_text(encoding="utf-8").splitlines() if "once_event" in ln
+        ]
+        assert len(matches) == 1
+
     def test_repeated_calls_do_not_stack_file_handlers(self, tmp_path: Path) -> None:
         target = tmp_path / "brutex.log"
         configure_logging(level="INFO", json_renderer=True, log_file=target)

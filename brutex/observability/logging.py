@@ -221,6 +221,14 @@ def configure_logging(
     Idempotent for identical arguments. Subsequent calls with different
     arguments override the prior config (last-call-wins). The file sink is
     guarded so repeated calls replace (never stack) the BruteX file handler.
+
+    Call this **once per process**, ideally before any logger is first used.
+    structlog caches the logger factory on a logger's first *use*
+    (``cache_logger_on_first_use=True``), so enabling the file sink *after* a
+    logger has already emitted will not retro-route that cached logger's events
+    to the file — call :func:`reset_configuration` first if you must
+    reconfigure mid-process. (The one production caller, ``cli.cmd_dashboard``,
+    configures once at startup before any request-path logger fires.)
     """
     file_enabled = enable_file or log_file is not None
     resolved_file = resolve_log_file(log_file) if file_enabled else None
