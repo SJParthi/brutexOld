@@ -107,6 +107,14 @@ class TestPullCandlesReport:
 
 
 class TestGrowwCredsPresent:
+    """``groww_creds_present`` now delegates to the credentials store.
+
+    Each test that expects ``False`` with the env vars absent points
+    ``BRUTEX_CREDENTIALS_FILE`` at a nonexistent path so a developer's real
+    ``~/.brutex/credentials.json`` can never contaminate the result
+    (DEC-CREDENTIALS-STORE-001 hermeticity).
+    """
+
     def test_both_present_is_true(self) -> None:
         env = {
             "BRUTEX_GROWW_API_KEY": "k",
@@ -114,21 +122,36 @@ class TestGrowwCredsPresent:
         }
         assert groww_creds_present(env) is True
 
-    def test_both_absent_is_false(self) -> None:
-        assert groww_creds_present({}) is False
-
-    def test_api_key_missing_is_false(self) -> None:
-        assert groww_creds_present({"BRUTEX_GROWW_TOTP_SECRET": "s"}) is False
-
-    def test_totp_missing_is_false(self) -> None:
-        assert groww_creds_present({"BRUTEX_GROWW_API_KEY": "k"}) is False
-
-    def test_blank_value_is_false(self) -> None:
-        env = {"BRUTEX_GROWW_API_KEY": "k", "BRUTEX_GROWW_TOTP_SECRET": ""}
+    def test_both_absent_is_false(self, tmp_path: Path) -> None:
+        env = {"BRUTEX_CREDENTIALS_FILE": str(tmp_path / "nonexistent.json")}
         assert groww_creds_present(env) is False
 
-    def test_defaults_to_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Default env=None reads os.environ. Clear both vars → False branch.
+    def test_api_key_missing_is_false(self, tmp_path: Path) -> None:
+        env = {
+            "BRUTEX_GROWW_TOTP_SECRET": "s",
+            "BRUTEX_CREDENTIALS_FILE": str(tmp_path / "nonexistent.json"),
+        }
+        assert groww_creds_present(env) is False
+
+    def test_totp_missing_is_false(self, tmp_path: Path) -> None:
+        env = {
+            "BRUTEX_GROWW_API_KEY": "k",
+            "BRUTEX_CREDENTIALS_FILE": str(tmp_path / "nonexistent.json"),
+        }
+        assert groww_creds_present(env) is False
+
+    def test_blank_value_is_false(self, tmp_path: Path) -> None:
+        env = {
+            "BRUTEX_GROWW_API_KEY": "k",
+            "BRUTEX_GROWW_TOTP_SECRET": "",
+            "BRUTEX_CREDENTIALS_FILE": str(tmp_path / "nonexistent.json"),
+        }
+        assert groww_creds_present(env) is False
+
+    def test_defaults_to_os_environ(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        # Default env=None reads os.environ. Clear both vars + point the
+        # credentials file at a nonexistent path → hermetic False branch.
+        monkeypatch.setenv("BRUTEX_CREDENTIALS_FILE", str(tmp_path / "nonexistent.json"))
         monkeypatch.delenv("BRUTEX_GROWW_API_KEY", raising=False)
         monkeypatch.delenv("BRUTEX_GROWW_TOTP_SECRET", raising=False)
         assert groww_creds_present() is False

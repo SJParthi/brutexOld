@@ -39,7 +39,6 @@ separately-authorised engine expansion.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -64,13 +63,17 @@ _KNOWN_EXCHANGE_PREFIXES: tuple[str, ...] = ("NSE-", "BSE-")
 
 
 def groww_creds_present(env: Mapping[str, str] | None = None) -> bool:
-    """Return ``True`` iff both Groww TOTP env vars are present.
+    """Return ``True`` iff Groww credentials resolve from env vars OR the saved file.
 
-    Mirrors the required vars of
+    Delegates to :func:`brutex.config.credentials.credentials_present`
+    (DEC-CREDENTIALS-STORE-001), so a one-time ``brutex auth set`` (or the
+    dashboard Credentials page) now satisfies the gate without re-exporting
+    ``BRUTEX_GROWW_*`` every session. Mirrors the per-field resolution of
     :meth:`brutex.adapters.groww.auth.GrowwAuth.from_env`
     (``BRUTEX_GROWW_API_KEY`` AND ``BRUTEX_GROWW_TOTP_SECRET``). When
-    either is missing/blank a live pull is impossible, so the dashboard
-    pull route forces ``dry_run`` and serves synthetic data offline.
+    neither source provides both fields a live pull is impossible, so the
+    dashboard pull route forces ``dry_run`` and serves synthetic data
+    offline.
 
     Parameters
     ----------
@@ -82,10 +85,12 @@ def groww_creds_present(env: Mapping[str, str] | None = None) -> bool:
     Returns
     -------
     bool
-        ``True`` only when both env vars are present AND non-empty.
+        ``True`` only when both credentials resolve (from env OR the saved
+        file) AND are non-empty.
     """
-    source = os.environ if env is None else env
-    return bool(source.get("BRUTEX_GROWW_API_KEY")) and bool(source.get("BRUTEX_GROWW_TOTP_SECRET"))
+    from brutex.config.credentials import credentials_present
+
+    return credentials_present(env)
 
 
 #: A factory that builds the ``(fetcher, reauth)`` pair given the lake
