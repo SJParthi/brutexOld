@@ -316,7 +316,16 @@ class InstrumentMasterFetcher:
                 url, timeout=30
             ) as resp:
                 raw: bytes = resp.read()
+            try:
                 return raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                # A truncated / non-UTF-8 / binary gateway-error body is a
+                # parse failure, not an OSError. Re-raise as the typed parse
+                # error so callers (the keyless load-instruments route) map it
+                # to HTTP 502 rather than leaking an uncaught 500.
+                raise InstrumentFormatError(
+                    f"instrument CSV body was not valid UTF-8 ({exc})"
+                ) from exc
 
         return cls(
             http_get=_ssrf_guarded_get,

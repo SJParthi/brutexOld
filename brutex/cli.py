@@ -211,6 +211,15 @@ def build_parser() -> argparse.ArgumentParser:
             "before candles (LAKE surface, DEC-P0-063)"
         ),
     )
+    fetch.add_argument(
+        "--instruments",
+        action="store_true",
+        help=(
+            "ONLY load the keyless public instrument master (no Groww keys), "
+            "print the index/stock counts, and exit — populates the /universe "
+            "list without auth (DEC-INSTRUMENT-LOAD-001)"
+        ),
+    )
 
     # ── doctor (DEC-DOCTOR-001) ───────────────────────────────────
     doctor = sub.add_parser(
@@ -653,6 +662,30 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
         store.close()
 
 
+def _run_instrument_master_load(  # pragma: no cover — opens DuckDB store + live network
+    lake_root: Path,
+) -> dict[str, Any]:
+    """Keylessly load the public Groww instrument master into the lake.
+
+    Opens the real :class:`~brutex.data.instrument_store.InstrumentStore` and
+    delegates to the testable
+    :func:`brutex.dashboard.instrument_loader.load_instrument_master` with NO
+    injected ``http_get`` — i.e. the real SSRF-guarded public-CSV fetch, which
+    needs NO Groww API keys (DEC-INSTRUMENT-LOAD-001). Marked ``no cover``: the
+    DuckDB store transitively imports the ``fno_math`` Rust kernel and the
+    fetch hits the live network, so this runs only on a fully-built, online
+    environment; the pure loader core is unit-tested with a fake ``http_get``.
+    """
+    from brutex.dashboard.instrument_loader import load_instrument_master
+    from brutex.data.instrument_store import InstrumentStore
+
+    store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    try:
+        return load_instrument_master(store)
+    finally:
+        store.close()
+
+
 def cmd_fetch(
     lake_root: Path | None,
     start: str | None,
@@ -664,6 +697,7 @@ def cmd_fetch(
     inspect: bool,
     rows_per_chunk: int,
     universe: bool = False,
+    instruments: bool = False,
 ) -> int:
     """Fetch candles for the 3 brute-force indices into the lake (§13.9 step 3).
 
@@ -675,7 +709,24 @@ def cmd_fetch(
     ``--universe`` first ingests the instrument master + expiries + contracts
     into the lake (the LAKE surface authorised by DEC-P0-063) BEFORE the index
     candle pull — the turnkey "pull everything" command.
+    ``--instruments`` loads ONLY the keyless public instrument master (no Groww
+    keys), prints the index/stock counts, and exits — it populates the
+    ``/universe`` list without auth (DEC-INSTRUMENT-LOAD-001). Expiries /
+    contracts / candles still need keys, separately.
     """
+    resolved_instruments = _resolve_lake_root(lake_root)
+    if instruments:
+        print("[brutex] fetch --instruments → keyless public instrument master (no keys)")
+        counts = _run_instrument_master_load(resolved_instruments)
+        print(
+            f"[brutex] instruments loaded — parsed={counts['parsed']} "
+            f"filtered={counts['filtered']} quarantined={counts['quarantined']} "
+            f"· indices={counts['index_count']} stocks={counts['stock_count']} "
+            f"total={counts['total']}"
+        )
+        print(f"[brutex] lake: {resolved_instruments}")
+        return EXIT_OK
+
     from brutex.adapters.groww.chunks import ALL_GROWW_INTERVALS
     from brutex.adapters.groww.ingest import (
         BRUTE_FORCE_INDEX_SYMBOLS,
@@ -786,6 +837,7 @@ def main(argv: list[str] | None = None) -> int:
             inspect=args.inspect,
             rows_per_chunk=args.rows_per_chunk,
             universe=args.universe,
+            instruments=args.instruments,
         )
     if args.command == "doctor":
         return cmd_doctor(
