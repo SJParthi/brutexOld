@@ -15,7 +15,7 @@ from brutex import cli
 
 
 def test_run_resolves_explicit_lake_root_and_opens_browser() -> None:
-    """--lake-root is honoured; browser opens; dashboard gets the lake."""
+    """--lake-root is honoured; browser opens to /universe; dashboard gets the lake."""
     with (
         mock.patch.object(cli, "cmd_dashboard", return_value=0) as dash,
         mock.patch.object(cli, "_open_browser") as opener,
@@ -23,7 +23,9 @@ def test_run_resolves_explicit_lake_root_and_opens_browser() -> None:
         rc = cli.cmd_run(Path("/tmp/lake"), "127.0.0.1", 9080, open_browser=True)
 
     assert rc == 0
-    opener.assert_called_once_with("http://127.0.0.1:9080")
+    # DEC-DASHBOARD-AUTOOPEN-001: cmd_run now opens the Universe Explorer
+    # surface directly, not the bare dashboard root.
+    opener.assert_called_once_with("http://127.0.0.1:9080/universe")
     dash.assert_called_once_with(lake_root=Path("/tmp/lake"), host="127.0.0.1", port=9080)
 
 
