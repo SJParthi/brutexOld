@@ -54,7 +54,7 @@ from collections.abc import Iterable
 from typing import Any, Final
 
 from brutex.models import Exchange, Instrument, InstrumentType
-from brutex.universe import build_fno_eligible_underlyings
+from brutex.universe import build_fno_eligible_underlyings, is_universe_underlying
 
 #: Classification of an ``IDX`` instrument.
 KIND_INDEX: Final[str] = "index"
@@ -95,19 +95,19 @@ def classify_instrument(
         Set of NSE F&O-eligible ``(exchange, symbol)`` pairs, typically
         built once via
         :func:`brutex.universe.build_fno_eligible_underlyings`.
+
+    Notes
+    -----
+    The admit/reject decision is delegated to
+    :func:`brutex.universe.is_universe_underlying` so the index-vs-leg /
+    F&O-eligibility rule lives in exactly ONE place (CLAUDE.md §11 COMMON,
+    DEC-INSTRUMENT-UNIVERSE-FAST-001). This function only adds the
+    KIND label (``"index"`` vs ``"stock"``) on top of that single rule:
+    an admitted ``IDX`` → ``"index"``; an admitted ``EQ`` → ``"stock"``.
     """
-    if instrument.instrument_type == InstrumentType.IDX:
-        return KIND_INDEX
-    if (
-        instrument.instrument_type == InstrumentType.EQ
-        and (
-            instrument.exchange,
-            instrument.trading_symbol,
-        )
-        in fno_eligible_underlyings
-    ):
-        return KIND_STOCK
-    return None
+    if not is_universe_underlying(instrument, fno_eligible_underlyings):
+        return None
+    return KIND_INDEX if instrument.instrument_type == InstrumentType.IDX else KIND_STOCK
 
 
 def _iter_instruments(snapshot: Iterable[Instrument]) -> list[Instrument]:
@@ -115,7 +115,11 @@ def _iter_instruments(snapshot: Iterable[Instrument]) -> list[Instrument]:
     return list(snapshot)
 
 
-def universe_summary(snapshot: Iterable[Instrument]) -> dict[str, int]:
+def universe_summary(
+    snapshot: Iterable[Instrument],
+    *,
+    fno_eligible: frozenset[tuple[Exchange, str]] | None = None,
+) -> dict[str, int]:
     """Return headline counts for the explorer's KPI band.
 
     Scans *snapshot* once to build the F&O-eligible set, then once more
@@ -132,10 +136,21 @@ def universe_summary(snapshot: Iterable[Instrument]) -> dict[str, int]:
     ----------
     snapshot
         Any iterable of :class:`~brutex.models.Instrument` — typically
-        a :class:`~brutex.data.instrument_store.InstrumentSnapshot`.
+        a :class:`~brutex.data.instrument_store.InstrumentSnapshot`, OR
+        (fast path) just the IDX + EQ candidate rows from
+        :meth:`~brutex.data.instrument_store.InstrumentStore.list_index_equity_instruments`.
+    fno_eligible
+        Pre-computed NSE F&O-eligible ``(exchange, symbol)`` set. When
+        ``None`` (default) it is derived from *snapshot* itself (the
+        snapshot must then carry the derivative legs). Supplying it lets
+        callers pass a *candidates-only* snapshot (IDX + EQ) plus the
+        cheaply-queried eligible set, avoiding materialising every leg
+        (DEC-INSTRUMENT-UNIVERSE-FAST-001) — the classification rule is
+        unchanged either way.
     """
     instruments = _iter_instruments(snapshot)
-    fno_eligible = build_fno_eligible_underlyings(instruments)
+    if fno_eligible is None:
+        fno_eligible = build_fno_eligible_underlyings(instruments)
     index_count = 0
     stock_count = 0
     for instrument in instruments:
@@ -155,6 +170,7 @@ def list_underlyings(
     snapshot: Iterable[Instrument],
     *,
     kind: str | None = None,
+    fno_eligible: frozenset[tuple[Exchange, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return the explorer's instrument rows, optionally filtered by *kind*.
 
@@ -174,6 +190,14 @@ def list_underlyings(
     kind
         ``"index"`` / ``"stock"`` to filter, or ``None`` for both.
         Any other value raises :class:`ValueError`.
+    fno_eligible
+        Pre-computed NSE F&O-eligible ``(exchange, symbol)`` set. When
+        ``None`` (default) it is derived from *snapshot* itself (the
+        snapshot must then carry the derivative legs). Supplying it lets
+        callers pass a *candidates-only* snapshot (IDX + EQ) plus the
+        cheaply-queried eligible set, avoiding materialising every leg
+        (DEC-INSTRUMENT-UNIVERSE-FAST-001) — the classification rule is
+        unchanged either way.
 
     Returns
     -------
@@ -190,7 +214,8 @@ def list_underlyings(
         raise ValueError(f"kind must be one of {EXPLORER_KINDS} or None, got {kind!r}")
 
     instruments = _iter_instruments(snapshot)
-    fno_eligible = build_fno_eligible_underlyings(instruments)
+    if fno_eligible is None:
+        fno_eligible = build_fno_eligible_underlyings(instruments)
     rows: list[dict[str, Any]] = []
     for instrument in instruments:
         classified = classify_instrument(instrument, fno_eligible)

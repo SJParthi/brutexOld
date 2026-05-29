@@ -254,6 +254,67 @@ def build_fno_eligible_underlyings(
     return frozenset(eligible)
 
 
+def is_universe_underlying(
+    instrument: Instrument,
+    fno_eligible_underlyings: frozenset[tuple[Exchange, str]],
+) -> bool:
+    """Return True if *instrument* is a UNIVERSE underlying worth persisting.
+
+    The lean-ingest predicate (DEC-INSTRUMENT-UNIVERSE-FAST-001): the
+    ``instruments`` table stores ONLY the unique universe underlyings —
+    every admitted index plus every F&O-eligible single-stock equity — and
+    NEVER the ~tens-of-thousands of FUT / CE / PE option/future legs. The
+    legs are still parsed in-memory (they are how
+    :func:`build_fno_eligible_underlyings` discovers which equities are
+    F&O-eligible) and then DISCARDED rather than upserted; their economics
+    are recoverable on demand via ``get_contracts`` (CONTRACTS surface).
+
+    The accept rule is the union of the two existing
+    :func:`is_in_fetch_scope` clauses that admit a *non-derivative* row, and
+    mirrors them exactly so the universe stays single-source (CLAUDE.md §11
+    COMMON):
+
+    * **IDX** — admitted by the same index rule as :func:`is_in_fetch_scope`:
+      every NSE index; from BSE only SENSEX.
+    * **EQ** — admitted iff it is an F&O-eligible NSE underlying, i.e.
+      ``(exchange, trading_symbol)`` is in *fno_eligible_underlyings*
+      (identical to the equity clause of :func:`is_in_fetch_scope`).
+
+    Every derivative leg (FUT / CE / PE) returns ``False`` here — that is
+    the whole point of the lean ingest — even though it is in the broad
+    *fetch* scope.
+
+    Parameters
+    ----------
+    instrument
+        The candidate instrument-master row.
+    fno_eligible_underlyings
+        The set of NSE F&O-eligible ``(exchange, symbol)`` pairs, typically
+        built once via :func:`build_fno_eligible_underlyings`.
+
+    Returns
+    -------
+    bool
+        ``True`` iff *instrument* is an admitted index or an F&O-eligible
+        equity; ``False`` for every derivative leg or out-of-universe row.
+    """
+    instrument_type = instrument.instrument_type
+    if instrument_type == InstrumentType.IDX:
+        # Same IDX rule as is_in_fetch_scope: all NSE indices; BSE only SENSEX.
+        return (
+            instrument.exchange == Exchange.NSE
+            or instrument.trading_symbol == _BSE_FETCH_INDEX_SYMBOL
+        )
+    if instrument_type == InstrumentType.EQ:
+        # Same EQ rule as is_in_fetch_scope: an F&O-eligible NSE underlying.
+        return (
+            instrument.exchange == Exchange.NSE
+            and (instrument.exchange, instrument.trading_symbol) in fno_eligible_underlyings
+        )
+    # Every derivative leg (FUT / CE / PE) — parsed for eligibility, never stored.
+    return False
+
+
 def is_in_fetch_scope(
     instrument: Instrument,
     fno_eligible_underlyings: frozenset[tuple[Exchange, str]],
@@ -307,4 +368,5 @@ __all__ = [
     "is_in_fetch_scope",
     "is_in_scope",
     "is_index_underlying",
+    "is_universe_underlying",
 ]

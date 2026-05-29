@@ -147,4 +147,10 @@ def test_synthetic_instrument_csv_has_required_header() -> None:
     )
     result = fetcher.refresh(snapshot_date=date(2025, 1, 1))
     assert result.parsed == 2
-    assert len(captured) == 2
+    # Lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001): the NIFTY IDX row is a
+    # universe underlying and persists; the CE leg is parsed-for-eligibility
+    # then dropped, so only 1 row reaches the sink.
+    assert result.persisted == 1
+    assert result.legs_dropped == 1
+    assert len(captured) == 1
+    assert captured[0].vendor_symbol == "NSE-NIFTY"

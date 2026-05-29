@@ -140,12 +140,24 @@ def table_summary(conn: Any) -> list[dict[str, Any]]:
     return summary
 
 
-def sample_rows(conn: Any, table: str, *, limit: int) -> dict[str, Any]:
-    """Return up to *limit* sample rows from one allowlisted *table*.
+def clamp_offset(n: int) -> int:
+    """Clamp a requested row offset to a non-negative integer.
 
-    Read-only: issues a single ``SELECT * FROM <table> LIMIT ?`` with
-    the limit parameter-bound. *table* MUST be an exact member of
-    :data:`KNOWN_TABLES`; any other value (including an injection
+    A hostile / malformed ``?offset=-5`` (or a Python ``int`` from a query
+    string) must never produce a negative ``OFFSET`` (DuckDB would error).
+    Returns ``max(0, n)``.
+    """
+    return max(0, n)
+
+
+def sample_rows(conn: Any, table: str, *, limit: int, offset: int = 0) -> dict[str, Any]:
+    """Return one *limit*-sized page of rows from an allowlisted *table*.
+
+    Read-only and bounded: issues an indexed ``SELECT COUNT(*)`` for the
+    total then a single ``SELECT * FROM <table> LIMIT ? OFFSET ?`` with the
+    page parameter-bound — it NEVER materialises the whole table (a 89k-row
+    legs table would be a page of at most 500 rows). *table* MUST be an exact
+    member of :data:`KNOWN_TABLES`; any other value (including an injection
     payload such as ``"instruments; DROP TABLE contracts"``) raises
     :class:`ValueError` before any SQL is built or executed.
 
@@ -156,14 +168,17 @@ def sample_rows(conn: Any, table: str, *, limit: int) -> dict[str, Any]:
     table
         The table to sample. Must be in :data:`KNOWN_TABLES`.
     limit
-        Maximum rows to return; clamped to ``[1, 500]`` via
-        :func:`clamp_limit`.
+        Page size; clamped to ``[1, 500]`` via :func:`clamp_limit`.
+    offset
+        Page start (0-based); clamped to ``>= 0`` via :func:`clamp_offset`.
 
     Returns
     -------
     dict[str, Any]
         ``{"table": <name>, "columns": [<col>, ...],
-        "rows": [[<cell>, ...], ...]}`` with every cell JSON-safe.
+        "rows": [[<cell>, ...], ...], "total": <int>, "limit": <int>,
+        "offset": <int>}`` with every cell JSON-safe. ``total`` is the
+        indexed full-table row count (for the pager), NOT the page size.
 
     Raises
     ------
@@ -173,18 +188,32 @@ def sample_rows(conn: Any, table: str, *, limit: int) -> dict[str, Any]:
     if table not in KNOWN_TABLES:
         raise ValueError(f"unknown table {table!r}; allowed tables are {KNOWN_TABLES}")
     safe_limit = clamp_limit(limit)
+    safe_offset = clamp_offset(offset)
     # `table` is validated against the KNOWN_TABLES allowlist above, so
-    # interpolating it here is safe; the row limit is parameter-bound.
-    cursor = conn.execute(f"SELECT * FROM {table} LIMIT ?", [safe_limit])  # noqa: S608  # nosec B608 - table is allowlist-validated against KNOWN_TABLES above; limit is parameter-bound
+    # interpolating it here is safe; the page bounds are parameter-bound.
+    total_row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608  # nosec B608 - table is allowlist-validated against KNOWN_TABLES above
+    total = int(total_row[0]) if total_row else 0
+    cursor = conn.execute(
+        f"SELECT * FROM {table} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - table is allowlist-validated against KNOWN_TABLES above; page bounds are parameter-bound
+        [safe_limit, safe_offset],
+    )
     description = cursor.description or []
     columns = [str(col[0]) for col in description]
     rows = [[_json_safe(cell) for cell in row] for row in cursor.fetchall()]
-    return {"table": table, "columns": columns, "rows": rows}
+    return {
+        "table": table,
+        "columns": columns,
+        "rows": rows,
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
 
 
 __all__ = [
     "KNOWN_TABLES",
     "clamp_limit",
+    "clamp_offset",
     "sample_rows",
     "table_summary",
 ]

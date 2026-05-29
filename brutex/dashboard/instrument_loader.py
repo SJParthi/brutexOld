@@ -65,11 +65,12 @@ def load_instrument_master(
     Returns
     -------
     dict[str, Any]
-        ``{"parsed", "filtered", "quarantined", "index_count",
-        "stock_count", "total"}`` where ``parsed`` / ``filtered`` /
-        ``quarantined`` come from the refresh result and ``index_count`` /
-        ``stock_count`` / ``total`` come from re-summarising the stored
-        snapshot via :func:`universe_summary`.
+        ``{"parsed", "persisted", "legs_dropped", "filtered", "quarantined",
+        "index_count", "stock_count", "total"}`` where ``parsed`` /
+        ``persisted`` / ``legs_dropped`` / ``filtered`` / ``quarantined``
+        come from the refresh result and ``index_count`` / ``stock_count`` /
+        ``total`` come from summarising the stored universe underlyings via
+        :func:`universe_summary` (the fast IDX + EQ candidate path).
 
     Raises
     ------
@@ -88,11 +89,20 @@ def load_instrument_master(
 
     result = fetcher.refresh()
 
-    snapshot = store.load_snapshot(in_scope_only=False)
-    summary = universe_summary(snapshot)
+    # Fast + lean-store-correct path (DEC-INSTRUMENT-UNIVERSE-FAST-001): the
+    # store now holds ONLY the universe underlyings (no option/future legs),
+    # so summarise from the IDX + EQ candidates plus the SQL-derived eligible
+    # set rather than a full snapshot (which would carry no legs to infer
+    # eligibility from). Both paths use the COMMON ``universe_summary``
+    # classifier — no re-derivation of the index-vs-stock split.
+    eligible = store.fno_eligible_underlyings()
+    candidates = store.list_index_equity_instruments()
+    summary = universe_summary(candidates, fno_eligible=eligible)
 
     return {
         "parsed": result.parsed,
+        "persisted": result.persisted,
+        "legs_dropped": result.legs_dropped,
         "filtered": result.filtered,
         "quarantined": result.quarantined,
         "index_count": summary["index_count"],

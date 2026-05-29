@@ -69,6 +69,16 @@ Track 1 spec locked after 4-agent hostile-review pass._
    per DEC-P0-063. Full §3 / cross-spec reconciliation across the
    ~15 remaining stale-text locations is a tracked follow-up PR; until
    then DEC-P0-063 is authoritative for the stock-options expansion.
+
+   **Amended by DEC-INSTRUMENT-UNIVERSE-FAST-001 (2026-05-29, MIGRATION.md
+   entry #160):** lean ingest — the `instruments` table now persists ONLY
+   the ~241 unique universe underlyings (every admitted index + every
+   F&O-eligible single-stock equity); the ~89,000 FUT/CE/PE legs are
+   PARSED for eligibility then DISCARDED, recoverable on demand via
+   `get_contracts` (contracts inherit lot/tick/freeze from the underlying
+   row). The BRUTE-FORCE ENGINE is UNAFFECTED. So "the LAKE is the expanded
+   surface" is narrowed: the lake = the universe underlyings; the legs are
+   derived/recoverable, not stored.
 4. **Reproducibility first.** Every run is identified by `blake3(
    strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params
    ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_hash)`. No

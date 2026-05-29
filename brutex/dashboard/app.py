@@ -634,10 +634,16 @@ def build_app(
         Thin wrapper over
         :func:`brutex.dashboard.universe_query.universe_summary`. All
         classification logic lives in that (coverage-tested) module.
+
+        Fast path (DEC-INSTRUMENT-UNIVERSE-FAST-001): the eligible set is
+        a SQL ``DISTINCT`` and the candidates are only the IDX + EQ rows, so
+        neither this route nor the query helper ever materialises the
+        ~tens-of-thousands of option/future legs.
         """
         store = _require_store()
-        snapshot = store.load_snapshot(in_scope_only=False)
-        return JSONResponse(universe_summary(snapshot))
+        eligible = store.fno_eligible_underlyings()
+        candidates = store.list_index_equity_instruments()
+        return JSONResponse(universe_summary(candidates, fno_eligible=eligible))
 
     @app.get("/api/v1/universe/instruments")
     async def api_universe_instruments(
@@ -649,11 +655,16 @@ def build_app(
         :func:`brutex.dashboard.universe_query.list_underlyings`. The
         drill into expiries / contracts reuses ``/api/v1/expiries`` +
         ``/api/v1/contracts`` (no duplication).
+
+        Fast path (DEC-INSTRUMENT-UNIVERSE-FAST-001): the eligible set is
+        a SQL ``DISTINCT`` and the candidates are only the IDX + EQ rows, so
+        the option/future legs are never materialised here.
         """
         store = _require_store()
-        snapshot = store.load_snapshot(in_scope_only=False)
+        eligible = store.fno_eligible_underlyings()
+        candidates = store.list_index_equity_instruments()
         try:
-            rows = list_underlyings(snapshot, kind=kind)
+            rows = list_underlyings(candidates, kind=kind, fno_eligible=eligible)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"instruments": rows, "kind": kind})
@@ -801,17 +812,21 @@ def build_app(
     async def api_db_table(
         name: str,
         limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
     ) -> JSONResponse:
-        """GET /api/v1/db/table/{name}?limit=N — sample rows of one table.
+        """GET /api/v1/db/table/{name}?limit=N&offset=M — one page of a table.
 
-        Thin wrapper over :func:`brutex.dashboard.db_view.sample_rows`.
-        The table-name allowlist + limit clamp + read-only SELECT live
-        in that (coverage-tested) module; an unknown / injection-y table
-        name raises ``ValueError`` there, mapped to HTTP 400 here.
+        Thin wrapper over :func:`brutex.dashboard.db_view.sample_rows`. Pages
+        via ``LIMIT ? OFFSET ?`` over an indexed ``COUNT(*)`` so even the
+        ~89k-row legs table (when present) never materialises in full
+        (DEC-INSTRUMENT-UNIVERSE-FAST-001). The table-name allowlist + page
+        clamps + read-only SELECT live in that (coverage-tested) module; an
+        unknown / injection-y table name raises ``ValueError`` there, mapped
+        to HTTP 400 here.
         """
         store = _require_store()
         try:
-            payload = sample_rows(store.connection, name, limit=limit)
+            payload = sample_rows(store.connection, name, limit=limit, offset=offset)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)

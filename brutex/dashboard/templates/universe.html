@@ -146,8 +146,25 @@
   <header>
     <div class="logo">BruteX</div>
     <div class="sub">F&amp;O Universe Explorer</div>
+    <nav class="topnav" style="margin-left:18px; display:flex; gap:14px; font-size:13px;">
+      <a href="/credentials" style="color:var(--blue); text-decoration:none;">Credentials</a>
+      <span style="color:var(--muted);">·</span>
+      <a href="/db" style="color:var(--blue); text-decoration:none;">Database</a>
+      <span style="color:var(--muted);">·</span>
+      <a href="/logs" style="color:var(--blue); text-decoration:none;">Logs</a>
+    </nav>
     <div class="badge" id="previewBadge">● PREVIEW · synthetic data</div>
   </header>
+
+  <div id="credBanner" style="display:none; margin:8px 24px 4px; padding:12px 18px;
+       background:linear-gradient(90deg, rgba(255,183,77,.10), rgba(255,183,77,.03));
+       border:1px solid var(--yellow); border-radius:12px; display:none;
+       align-items:center; gap:12px;">
+    <span style="font-weight:700; color:var(--yellow);">⚠ Set Groww credentials to auto-pull expiries &amp; contracts</span>
+    <a href="/credentials" style="color:var(--blue); text-decoration:none; font-weight:700;">Set credentials →</a>
+    <button id="credBannerDismiss" title="Dismiss" style="margin-left:auto; background:transparent;
+         border:none; color:var(--muted); cursor:pointer; font-size:16px; line-height:1;">✕</button>
+  </div>
 
   <div class="band" id="tabs"></div>
 
@@ -493,6 +510,27 @@ document.getElementById("pullbtn").onclick = () => {
   if (!selPullSymbol) return;
   runPull(selPullSymbol, `${selInst} spot`);
 };
+
+/* ── Credentials banner (DEC-INSTRUMENT-UNIVERSE-FAST-001) ──
+   Shown only when GET /api/v1/credentials/status reports creds absent, so the
+   operator knows expiry/contract auto-pull needs keys. Dismissible per page
+   load (no persistence — a fresh load re-checks status). */
+async function checkCredentialsBanner() {
+  const banner = document.getElementById('credBanner');
+  if (!banner) return;
+  try {
+    const r = await fetch('/api/v1/credentials/status');
+    if (!r.ok) return;
+    const body = await r.json();
+    banner.style.display = body && body.present ? 'none' : 'flex';
+  } catch (e) { /* offline — leave hidden */ }
+}
+const credDismiss = document.getElementById('credBannerDismiss');
+if (credDismiss) credDismiss.addEventListener('click', () => {
+  const b = document.getElementById('credBanner');
+  if (b) b.style.display = 'none';
+});
+checkCredentialsBanner();
 
 loadSummary().then(loadInstruments);
 </script>

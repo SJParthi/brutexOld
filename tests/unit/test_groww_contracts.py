@@ -13,6 +13,8 @@ from brutex.adapters.groww.contracts import (
     ContractFetcher,
     ContractMeta,
     parse_contract_symbol,
+    store_metadata_lookup,
+    underlying_symbol_of,
 )
 from brutex.data.instrument_store import ContractRecord
 from brutex.models import InstrumentType
@@ -155,6 +157,86 @@ class TestGuardsAndErrors:
             fetcher.fetch("NIFTY", "NSE", date(2025, 1, 30))
         assert type(ei.value).__name__ == "VendorAPIException"
         bucket.record_rate_limit_hit.assert_not_called()
+
+
+class TestUnderlyingSymbolOf:
+    """Recover the underlying vendor_symbol prefix from a contract symbol."""
+
+    def test_option_symbol(self) -> None:
+        assert underlying_symbol_of("NSE-NIFTY-30Jan25-24650-CE") == "NSE-NIFTY"
+
+    def test_future_symbol(self) -> None:
+        assert underlying_symbol_of("NSE-RELIANCE-30Jan25-FUT") == "NSE-RELIANCE"
+
+    def test_bse_symbol(self) -> None:
+        assert underlying_symbol_of("BSE-SENSEX-30Jan25-FUT") == "BSE-SENSEX"
+
+    def test_too_few_tokens_is_none(self) -> None:
+        assert underlying_symbol_of("NIFTY") is None
+
+
+class _UnderlyingRow:
+    """Minimal stand-in for an instrument-master row's metadata fields."""
+
+    def __init__(self, lot_size: int, tick_size: Decimal, freeze_quantity: int | None) -> None:
+        self.lot_size = lot_size
+        self.tick_size = tick_size
+        self.freeze_quantity = freeze_quantity
+
+
+class _FakeMetaStore:
+    """Records get() calls + returns a canned underlying row (or None)."""
+
+    def __init__(self, row: _UnderlyingRow | None) -> None:
+        self._row = row
+        self.calls: list[tuple[str, object]] = []
+
+    def get(self, vendor_symbol: str, *, as_of: object = None) -> _UnderlyingRow | None:
+        self.calls.append((vendor_symbol, as_of))
+        return self._row
+
+
+class TestStoreMetadataLookup:
+    """The contract metadata_lookup that inherits lot/tick/freeze from the underlying."""
+
+    def test_inherits_from_underlying(self) -> None:
+        store = _FakeMetaStore(_UnderlyingRow(75, Decimal("0.05"), 1800))
+        lookup = store_metadata_lookup(store)
+        meta = lookup("NSE-NIFTY-30Jan25-24650-CE")
+        assert meta == ContractMeta(lot_size=75, tick_size=Decimal("0.05"), freeze_quantity=1800)
+        # Resolved the underlying vendor_symbol, not the leg symbol.
+        assert store.calls == [("NSE-NIFTY", None)]
+
+    def test_unresolvable_symbol_is_none(self) -> None:
+        store = _FakeMetaStore(_UnderlyingRow(75, Decimal("0.05"), 1800))
+        lookup = store_metadata_lookup(store)
+        assert lookup("NIFTY") is None  # too few tokens → no underlying
+        assert store.calls == []  # short-circuits before any store hit
+
+    def test_missing_underlying_is_none(self) -> None:
+        store = _FakeMetaStore(None)  # underlying absent from the master
+        lookup = store_metadata_lookup(store)
+        assert lookup("NSE-NIFTY-30Jan25-24650-CE") is None
+        assert store.calls == [("NSE-NIFTY", None)]
+
+    def test_as_of_is_forwarded(self) -> None:
+        store = _FakeMetaStore(_UnderlyingRow(50, Decimal("0.10"), None))
+        lookup = store_metadata_lookup(store, as_of=date(2025, 1, 1))
+        meta = lookup("NSE-BANKNIFTY-30Jan25-FUT")
+        assert meta is not None and meta.freeze_quantity is None
+        assert store.calls == [("NSE-BANKNIFTY", date(2025, 1, 1))]
+
+    def test_drives_a_real_fetch(self) -> None:
+        # End-to-end: the inherited lookup feeds the ContractFetcher and the
+        # written record carries the underlying's economics.
+        store = _FakeMetaStore(_UnderlyingRow(250, Decimal("0.05"), 5000))
+        sdk = _FakeSDK(result={"contracts": ["NSE-RELIANCE-30Jan25-1200-CE"]})
+        fetcher, _bucket, upserted = _fetcher(sdk, lookup=store_metadata_lookup(store))
+        result = fetcher.fetch("RELIANCE", "NSE", date(2025, 1, 30))
+        assert len(result.records) == 1
+        assert result.records[0].lot_size == 250
+        assert result.records[0].tick_size == Decimal("0.05")
+        assert upserted[0] == result.records
 
 
 class TestDefaults:

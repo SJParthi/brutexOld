@@ -28,6 +28,7 @@ from brutex.universe import (
     is_in_fetch_scope,
     is_in_scope,
     is_index_underlying,
+    is_universe_underlying,
 )
 
 # ────────────────────────────────────────────────────────────────────────
@@ -436,3 +437,47 @@ class TestIsInFetchScope:
     def test_bse_equity_rejected(self) -> None:
         eligible = frozenset({(Exchange.BSE, "RELIANCE")})
         assert is_in_fetch_scope(_make_equity(Exchange.BSE, "RELIANCE"), eligible) is False
+
+
+class TestIsUniverseUnderlying:
+    """Lean-ingest predicate (DEC-INSTRUMENT-UNIVERSE-FAST-001): persist only
+    universe underlyings — admitted indices + F&O-eligible equities — never
+    the derivative legs."""
+
+    _NO_EQUITIES: frozenset[tuple[Exchange, str]] = frozenset()
+
+    def test_all_nse_indices_admitted(self) -> None:
+        assert (
+            is_universe_underlying(_make_idx(Exchange.NSE, "FINNIFTY"), self._NO_EQUITIES) is True
+        )
+        assert is_universe_underlying(_make_idx(Exchange.NSE, "NIFTY"), self._NO_EQUITIES) is True
+
+    def test_bse_sensex_admitted(self) -> None:
+        assert is_universe_underlying(_make_idx(Exchange.BSE, "SENSEX"), self._NO_EQUITIES) is True
+
+    def test_bse_non_sensex_index_rejected(self) -> None:
+        assert is_universe_underlying(_make_idx(Exchange.BSE, "BSE500"), self._NO_EQUITIES) is False
+
+    def test_fno_eligible_equity_admitted(self) -> None:
+        eligible = frozenset({(Exchange.NSE, "RELIANCE")})
+        assert is_universe_underlying(_make_equity(Exchange.NSE, "RELIANCE"), eligible) is True
+
+    def test_non_fno_equity_rejected(self) -> None:
+        eligible = frozenset({(Exchange.NSE, "RELIANCE")})
+        assert is_universe_underlying(_make_equity(Exchange.NSE, "SOMEPENNY"), eligible) is False
+
+    def test_bse_equity_rejected(self) -> None:
+        eligible = frozenset({(Exchange.BSE, "RELIANCE")})
+        assert is_universe_underlying(_make_equity(Exchange.BSE, "RELIANCE"), eligible) is False
+
+    @pytest.mark.parametrize(
+        "instrument_type",
+        [InstrumentType.FUT, InstrumentType.CE, InstrumentType.PE],
+    )
+    def test_every_derivative_leg_rejected(self, instrument_type: InstrumentType) -> None:
+        # The whole point of lean ingest: legs are parsed for eligibility,
+        # never persisted — even an NSE leg that IS in the broad fetch scope.
+        deriv = _make_derivative(Exchange.NSE, instrument_type, "RELIANCE")
+        assert is_universe_underlying(deriv, self._NO_EQUITIES) is False
+        # ...and it is still in the broad fetch tier (the two filters differ).
+        assert is_in_fetch_scope(deriv, self._NO_EQUITIES) is True

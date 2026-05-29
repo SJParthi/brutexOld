@@ -75,6 +75,9 @@ credentials.json
 *.credentials.json
 .brutex/
 
+# In-repo log redirect target (make run LOG_DIR=./.brutex-logs → BRUTEX_LOG_DIR)
+.brutex-logs/
+
 # Rust (future P3)
 target/
 Cargo.lock
