@@ -505,11 +505,19 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         # network failure (the public CSV needs internet, no keys) must NOT stop
         # the dashboard from serving.
         try:  # pragma: no cover — live network + server path (cli.py coverage-excluded)
+            from brutex.dashboard.auto_pull import should_reload_instrument_master
             from brutex.dashboard.instrument_loader import load_instrument_master
             from brutex.dashboard.universe_query import universe_summary
 
             summary = universe_summary(store.load_snapshot(in_scope_only=False))
-            if summary["total"] == 0:
+            # Auto-heal: reload when the lake is empty OR stale (has stocks but
+            # zero indices — the fingerprint of a pre-DEC-INDEX-PARSE-FIX-001
+            # lake that quarantined every index). The master upsert dedups on
+            # vendor_symbol, so a redundant reload is an idempotent no-op write.
+            if should_reload_instrument_master(
+                index_count=summary["index_count"],
+                stock_count=summary["stock_count"],
+            ):
                 counts = load_instrument_master(store)
                 print(
                     f"[brutex] auto-loaded instrument master → "

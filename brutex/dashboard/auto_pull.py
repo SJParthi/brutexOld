@@ -23,6 +23,39 @@ populated. Both conditions are required.
 from __future__ import annotations
 
 
+def should_reload_instrument_master(*, index_count: int, stock_count: int) -> bool:
+    """Return whether the keyless instrument master should be (re)loaded on run.
+
+    The master is re-fetched on startup not only when the lake is wholly
+    empty, but also when it is **stale** — specifically when it holds
+    stocks yet **zero indices**. That exact state is the fingerprint of a
+    lake populated by a pre-DEC-INDEX-PARSE-FIX-001 build (which quarantined
+    all 30 index rows; CLAUDE.md §6), so a plain "non-empty → skip" check
+    would pin the operator to stale, index-less data forever. Re-loading is
+    safe and idempotent: the master upsert dedups on ``vendor_symbol``
+    (DEC-INDEX-PARSE-FIX-001), so a redundant reload is a no-op write.
+
+    Parameters
+    ----------
+    index_count
+        Indices currently in the lake snapshot.
+    stock_count
+        F&O-eligible stocks currently in the lake snapshot.
+
+    Returns
+    -------
+    bool
+        ``True`` iff the lake is missing indices (``index_count == 0``) —
+        which covers both a wholly empty lake (``stock_count`` also 0) and
+        a stale lake that an old build populated with stocks but no indices.
+        ``stock_count`` is accepted for an explicit, self-documenting
+        signature even though the index count alone decides the gate.
+    """
+    lake_is_empty = index_count == 0 and stock_count == 0
+    indices_missing = index_count == 0
+    return lake_is_empty or indices_missing
+
+
 def should_auto_pull_universe(*, credentials_present: bool, instrument_total: int) -> bool:
     """Return whether the background expiries/contracts pull should run.
 

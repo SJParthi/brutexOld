@@ -9,7 +9,36 @@ auto-pull (DEC-AUTO-UNIVERSE-001) across all four
 from __future__ import annotations
 
 import pytest
-from brutex.dashboard.auto_pull import should_auto_pull_universe
+from brutex.dashboard.auto_pull import (
+    should_auto_pull_universe,
+    should_reload_instrument_master,
+)
+
+
+@pytest.mark.parametrize(
+    ("index_count", "stock_count", "expected"),
+    [
+        # Wholly empty lake (fresh) → reload.
+        (0, 0, True),
+        # Stale lake: stocks present but ZERO indices (pre-fix build) → reload.
+        (0, 211, True),
+        # Healthy lake: indices present → skip (no reload).
+        (30, 211, False),
+        # Indices present, no stocks (degenerate but valid) → skip.
+        (30, 0, False),
+    ],
+)
+def test_should_reload_instrument_master(
+    index_count: int, stock_count: int, expected: bool
+) -> None:
+    """Reload on an empty OR stale (indices-missing) lake; skip when indices exist."""
+    assert (
+        should_reload_instrument_master(
+            index_count=index_count,
+            stock_count=stock_count,
+        )
+        is expected
+    )
 
 
 @pytest.mark.parametrize(
