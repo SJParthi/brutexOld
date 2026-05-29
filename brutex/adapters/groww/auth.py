@@ -182,14 +182,17 @@ class GrowwAuth:
         from growwapi import GrowwAPI
         from growwapi.groww.exceptions import GrowwAPIAuthenticationException
 
+        from brutex.config.credentials import resolve_groww_credentials
+
         token_path = Path(os.environ.get("BRUTEX_GROWW_TOKEN_PATH", str(_DEFAULT_TOKEN_PATH)))
+        creds = resolve_groww_credentials()
 
         def _mint(api_key: str, code: str) -> str:
             return str(GrowwAPI.get_access_token(api_key=api_key, totp=code))
 
         return cls(
-            api_key=os.environ["BRUTEX_GROWW_API_KEY"],
-            totp_secret=os.environ["BRUTEX_GROWW_TOTP_SECRET"],
+            api_key=creds.api_key,
+            totp_secret=creds.totp_secret,
             token_path=token_path,
             mint_token=_mint,
             build_session=GrowwAPI,

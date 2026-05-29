@@ -713,6 +713,59 @@ def build_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(report.to_dict())
 
+    # ── Credentials store (DEC-CREDENTIALS-STORE-001) ───────────────
+
+    from pydantic import BaseModel
+
+    class CredentialsIn(BaseModel):
+        """Request body for ``POST /api/v1/credentials``.
+
+        Accepted in the BODY (never as query params, which get logged).
+        The values are passed straight to
+        :func:`brutex.config.credentials.save_groww_credentials` and are
+        never logged.
+        """
+
+        api_key: str
+        totp_secret: str
+
+    @app.post("/api/v1/credentials")
+    async def api_credentials_set(body: CredentialsIn) -> JSONResponse:
+        """POST /api/v1/credentials — save the Groww credentials (mode 0600).
+
+        Accepts the API key + TOTP secret in the request BODY (never query
+        params, which leak into access logs). The body is NOT logged. On a
+        validation error (blank field) the credentials store raises
+        :class:`CredentialsError`, mapped here to HTTP 400 with a message
+        that names the offending field but NEVER its value. Returns only
+        ``{"present": true}`` — never echoes a value back.
+        """
+        from brutex.config.credentials import (
+            CredentialsError,
+            GrowwCredentials,
+            save_groww_credentials,
+        )
+
+        try:
+            save_groww_credentials(
+                GrowwCredentials(api_key=body.api_key, totp_secret=body.totp_secret)
+            )
+        except CredentialsError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"present": True})
+
+    @app.get("/api/v1/credentials/status")
+    async def api_credentials_status() -> JSONResponse:
+        """GET /api/v1/credentials/status — boolean presence only (no values)."""
+        from brutex.config.credentials import credentials_present
+
+        return JSONResponse({"present": credentials_present()})
+
+    @app.get("/credentials", response_class=HTMLResponse)
+    async def credentials_page() -> str:
+        """GET /credentials — the Credentials page (DEC-CREDENTIALS-STORE-001)."""
+        return _render_credentials_html()
+
     @app.get("/api/v1/logs")
     async def api_logs(
         lines: int = Query(default=200),
@@ -1048,6 +1101,30 @@ def _load_universe_template() -> str:
 def _render_universe_html() -> str:
     """Return the F&O Universe Explorer page HTML (DEC-UNIVERSE-DASHBOARD-001)."""
     return _load_universe_template()
+
+
+_CREDENTIALS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "credentials.html"
+_CREDENTIALS_TEMPLATE_CACHE: str | None = None
+
+
+def _load_credentials_template() -> str:
+    """Load + cache the Credentials page template (DEC-CREDENTIALS-STORE-001).
+
+    Ships as a package-relative resource at
+    ``brutex/dashboard/templates/credentials.html``. The page POSTs the API
+    key + TOTP secret to ``/api/v1/credentials`` (body, never query) and
+    GETs ``/api/v1/credentials/status`` for a boolean status line — it
+    never displays a secret value. Loaded once, then served verbatim.
+    """
+    global _CREDENTIALS_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _CREDENTIALS_TEMPLATE_CACHE is None:
+        _CREDENTIALS_TEMPLATE_CACHE = _CREDENTIALS_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _CREDENTIALS_TEMPLATE_CACHE
+
+
+def _render_credentials_html() -> str:
+    """Return the Credentials page HTML (DEC-CREDENTIALS-STORE-001)."""
+    return _load_credentials_template()
 
 
 _LOGS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "logs.html"

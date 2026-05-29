@@ -121,6 +121,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a JSONL audit-log file",
     )
 
+    # ── auth (DEC-CREDENTIALS-STORE-001) — set/status/clear creds ──
+    auth = sub.add_parser(
+        "auth",
+        help="Manage the stored Groww credentials (set once, auto-load every session)",
+    )
+    auth_sub = auth.add_subparsers(dest="auth_command", required=True)
+    auth_sub.add_parser(
+        "set",
+        help="Interactively prompt (no echo) for the Groww API key + TOTP secret and save them",
+    )
+    auth_sub.add_parser(
+        "status",
+        help="Print whether Groww credentials are stored (booleans only; never values)",
+    )
+    auth_sub.add_parser(
+        "clear",
+        help="Delete the stored Groww credentials file",
+    )
+
     # ── dashboard ─────────────────────────────────────────────────
     dashboard = sub.add_parser(
         "dashboard",
@@ -325,6 +344,56 @@ def cmd_audit_verify(audit_file: Path) -> int:
         print(f"[brutex] AUDIT CHAIN CORRUPT: {exc}", file=sys.stderr)
         return EXIT_INTERNAL_ERROR
     print(f"[brutex] audit chain OK — {count} entries verified")
+    return EXIT_OK
+
+
+def cmd_auth_set() -> int:  # pragma: no cover — interactive getpass prompts
+    """Interactively prompt (no echo) for the Groww creds and save them.
+
+    Reads the API key and TOTP secret via :func:`getpass.getpass` so neither
+    is echoed to the terminal or recorded in shell history. The values are
+    NEVER accepted as argv flags (they would leak via ``ps`` / shell
+    history). Prints only the destination path + mode — never a value.
+    """
+    import getpass
+
+    from brutex.config.credentials import (
+        CredentialsError,
+        GrowwCredentials,
+        save_groww_credentials,
+    )
+
+    api_key = getpass.getpass("Groww API key (input hidden): ")
+    totp_secret = getpass.getpass("Groww TOTP secret (input hidden): ")
+    try:
+        path = save_groww_credentials(GrowwCredentials(api_key=api_key, totp_secret=totp_secret))
+    except CredentialsError as exc:
+        print(f"[brutex] could not save credentials: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    print(f"[brutex] credentials saved to {path} (mode 0600)")
+    return EXIT_OK
+
+
+def cmd_auth_status() -> int:  # pragma: no cover — thin print wrapper
+    """Print whether Groww credentials are stored (booleans only, no values)."""
+    from brutex.config.credentials import credentials_path, credentials_present
+
+    present = credentials_present()
+    print(f"[brutex] credentials: {'set' if present else 'not set'}")
+    print(f"[brutex] path: {credentials_path()}")
+    return EXIT_OK
+
+
+def cmd_auth_clear() -> int:  # pragma: no cover — thin print wrapper
+    """Delete the stored Groww credentials file (if any)."""
+    from brutex.config.credentials import clear_groww_credentials, credentials_path
+
+    removed = clear_groww_credentials()
+    path = credentials_path()
+    if removed:
+        print(f"[brutex] credentials removed: {path}")
+    else:
+        print(f"[brutex] no credentials file to remove: {path}")
     return EXIT_OK
 
 
@@ -813,6 +882,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.audit_command != "verify":
             parser.error(f"unknown audit subcommand: {args.audit_command}")
         return cmd_audit_verify(audit_file=args.audit_file)
+    if args.command == "auth":  # pragma: no cover — interactive / thin print shims
+        if args.auth_command == "set":
+            return cmd_auth_set()
+        if args.auth_command == "status":
+            return cmd_auth_status()
+        if args.auth_command == "clear":
+            return cmd_auth_clear()
+        parser.error(f"unknown auth subcommand: {args.auth_command}")
     if args.command == "dashboard":
         return cmd_dashboard(
             lake_root=args.lake_root,
