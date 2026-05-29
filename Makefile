@@ -49,7 +49,9 @@ setup:
 	bash scripts/setup/bootstrap.sh
 
 # One-command clone-and-run (DEC-CLONE-RUN-002 + DEC-ONECLICK-RUN-001). Creates
-# the venv, installs the dashboard runtime libs ([data,ui]), builds the fno_math
+# the venv, installs the dashboard runtime libs + the Groww SDK ([data,ui,groww]
+# — the groww extra is REQUIRED so the live expiries/contracts/candles pull works;
+# without it every pull dies with "No module named 'growwapi'"), builds the fno_math
 # Rust kernel when it is not importable (brutex.strategies.combo imports it at
 # module top, combo.py:64), then launches the one-click `brutex run` (resolves
 # the lake root, opens the browser, boots the server). Idempotent: re-running
@@ -63,7 +65,7 @@ preflight:
 run: preflight
 	@test -d $(VENV) || $(PY) -m venv $(VENV)
 	$(VPIP) install --upgrade pip
-	$(VPIP) install -e ".[data,ui]"
+	$(VPIP) install -e ".[data,ui,groww]"
 	@$(VPY) -c "import fno_math" 2>/dev/null || { \
 		echo "==> fno_math kernel not importable — building it (one-time; needs cargo)"; \
 		$(VPIP) install maturin; \
