@@ -157,6 +157,21 @@ Track 1 spec locked after 4-agent hostile-review pass._
     status. See `docs/TRACK1_REQUIREMENTS_FINAL.md` §2 (DEC-P0-040)
     for the full enumeration.
 
+13. **MERGE-READINESS CHARTER** (operator decree 2026-05-29,
+    DEC-MERGE-GUARANTEE-001). Every PR / sub-PR / task / sub-task — in
+    this session and every new session — obeys
+    `docs/MERGE_READINESS_GUARANTEE.md`: the priority law
+    (Correctness > Reliability > Recoverability > Observability >
+    Performance > Scalability), the §3 merge-ready gate matrix, and the
+    §4 Definition of Done. Two hard invariants: (a) **never merge over a
+    red or pending gate** — `mergeable_state` must be `clean` and every
+    ✅ gate green, verified not assumed; (b) **honesty** — per Golden
+    Rule #10, never claim "100% / fully / guaranteed" for a 🟡/📋/🚫
+    tier row; state what is green, partial, and out of scope. The
+    charter is enforced on every surface via §8 (this file for sessions,
+    `.github/PULL_REQUEST_TEMPLATE.md` for PRs, the `CI OK` required
+    check for merges).
+
 ---
 
 ## 3. Branching and Commits
