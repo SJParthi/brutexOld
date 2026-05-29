@@ -140,6 +140,17 @@ class TestClassifyInstrument:
         eligible = build_fno_eligible_underlyings(instruments)
         assert classify_instrument(_option("RELIANCE"), eligible) is None
 
+    def test_bse_non_sensex_index_is_none(self) -> None:
+        # Now that classify delegates to is_universe_underlying
+        # (DEC-INSTRUMENT-UNIVERSE-FAST-001), a BSE non-SENSEX index is NOT a
+        # universe underlying → unclassified (it is never persisted anyway).
+        eligible = frozenset()
+        assert classify_instrument(_index("BSE500", exchange=Exchange.BSE), eligible) is None
+
+    def test_bse_sensex_index_is_index(self) -> None:
+        eligible = frozenset()
+        assert classify_instrument(_index("SENSEX", exchange=Exchange.BSE), eligible) == KIND_INDEX
+
 
 # ────────────────────────────────────────────────────────────────────────
 # universe_summary
@@ -160,6 +171,17 @@ class TestUniverseSummary:
 
     def test_empty_snapshot(self) -> None:
         assert universe_summary([]) == {"index_count": 0, "stock_count": 0, "total": 0}
+
+    def test_precomputed_fno_eligible_candidates_only(self) -> None:
+        # Fast path: candidates-only (IDX + EQ, no legs) + precomputed eligible
+        # set still tallies the stock correctly (DEC-INSTRUMENT-UNIVERSE-FAST-001).
+        candidates = [_index("NIFTY"), _index("BANKNIFTY"), _equity("RELIANCE")]
+        eligible = frozenset({(Exchange.NSE, "RELIANCE")})
+        assert universe_summary(candidates, fno_eligible=eligible) == {
+            "index_count": 2,
+            "stock_count": 1,
+            "total": 3,
+        }
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -243,6 +265,26 @@ class TestListUnderlyings:
             assert row["pull_symbol"].startswith(("NSE-", "BSE-")), row
             # pull_symbol carries the exchange prefix; display symbol does not.
             assert row["pull_symbol"].endswith(row["symbol"])
+
+    def test_precomputed_fno_eligible_candidates_only(self) -> None:
+        # Fast path (DEC-INSTRUMENT-UNIVERSE-FAST-001): pass a candidates-only
+        # snapshot (IDX + EQ, NO derivative legs) plus a precomputed eligible
+        # set — RELIANCE must still classify as a stock even though no leg is
+        # present to derive eligibility from.
+        candidates = [_index("NIFTY", name="NIFTY 50"), _equity("RELIANCE")]
+        eligible = frozenset({(Exchange.NSE, "RELIANCE")})
+        rows = list_underlyings(candidates, fno_eligible=eligible)
+        assert {(r["symbol"], r["kind"]) for r in rows} == {
+            ("NIFTY", KIND_INDEX),
+            ("RELIANCE", KIND_STOCK),
+        }
+
+    def test_precomputed_fno_eligible_empty_drops_equity(self) -> None:
+        # With an explicit empty eligible set, an EQ candidate is NOT a stock
+        # (the precomputed set is authoritative; no rebuild from the snapshot).
+        candidates = [_index("NIFTY"), _equity("RELIANCE"), _option("RELIANCE")]
+        rows = list_underlyings(candidates, fno_eligible=frozenset())
+        assert {r["symbol"] for r in rows} == {"NIFTY"}
 
     def test_invalid_kind_raises(self) -> None:
         with pytest.raises(ValueError, match="kind must be one of"):

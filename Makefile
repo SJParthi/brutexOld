@@ -27,6 +27,16 @@ VENV ?= .venv
 VPY  := $(VENV)/bin/python
 VPIP := $(VENV)/bin/pip
 
+# Optional log-redirect knob (DEC-INSTRUMENT-UNIVERSE-FAST-001). `make run
+# LOG_DIR=./.brutex-logs` exports BRUTEX_LOG_DIR so the rotating log lands in
+# the repo tree where IntelliJ/IDEA can tail it (and the /logs web viewer reads
+# the same file). Unset by default → the runtime keeps its ~/.brutex/logs
+# default (resolve_log_file()). ./.brutex-logs/ is .gitignored.
+LOG_DIR ?=
+ifneq ($(LOG_DIR),)
+export BRUTEX_LOG_DIR := $(LOG_DIR)
+endif
+
 install:
 	pip install -e ".[dev]"
 

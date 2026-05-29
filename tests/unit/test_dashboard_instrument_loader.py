@@ -64,8 +64,12 @@ def test_loads_and_summarises_keyless(tmp_path: Path) -> None:
     assert result["parsed"] == 4
     assert result["filtered"] == 1
     assert result["quarantined"] == 0
-    # Snapshot re-summary: NIFTY + BANKNIFTY → 2 indices, RELIANCE
-    # (F&O-eligible) → 1 stock.
+    # Lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001): NIFTY + BANKNIFTY (IDX)
+    # + RELIANCE (F&O-eligible EQ) persist (3); the RELIANCE CE leg is dropped.
+    assert result["persisted"] == 3
+    assert result["legs_dropped"] == 1
+    # Summary over the persisted universe underlyings: 2 indices, 1 stock.
+    # The eligible set survives the leg-drop via the persisted-EQ UNION arm.
     assert result["index_count"] == 2
     assert result["stock_count"] == 1
     assert result["total"] == 3
@@ -93,6 +97,8 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     result = load_instrument_master(store, http_get=lambda _url: _csv([]))
     assert result == {
         "parsed": 0,
+        "persisted": 0,
+        "legs_dropped": 0,
         "filtered": 0,
         "quarantined": 0,
         "index_count": 0,

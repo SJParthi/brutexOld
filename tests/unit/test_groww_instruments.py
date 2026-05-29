@@ -92,9 +92,20 @@ class TestRefresh:
         assert result.parsed == 5
         assert result.filtered == 1  # MCX
         assert result.quarantined == 1  # tick_size 0.07 invalid
+        # Lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001): only the universe
+        # underlyings are persisted — NIFTY (IDX) + SENSEX (IDX). The NIFTY
+        # FUT + CE legs are dropped, and RELIANCE (EQ with no derivatives →
+        # not F&O-eligible) is dropped too. parsed == persisted + legs_dropped.
+        assert result.persisted == 2
+        assert result.legs_dropped == 3
+        assert result.parsed == result.persisted + result.legs_dropped
         assert len(result.csv_sha256) == 64
         assert len(store.calls) == 1
-        assert len(store.calls[0]["instruments"]) == 5
+        assert len(store.calls[0]["instruments"]) == 2
+        assert {i.vendor_symbol for i in store.calls[0]["instruments"]} == {
+            "NSE-NIFTY",
+            "BSE-SENSEX",
+        }
         assert store.calls[0]["run_id"] == "run-xyz"
 
     def test_nse_commodity_is_filtered_not_quarantined(self) -> None:
@@ -133,12 +144,27 @@ class TestRefresh:
         assert in_scope_of(nifty) is True  # an NSE index is in the broad fetch tier
 
     def test_parsed_instruments_are_typed(self) -> None:
-        fetcher, store = _fetcher(_csv())
+        # Add a RELIANCE future so RELIANCE (EQ) becomes F&O-eligible and is
+        # persisted as a universe underlying (the legs themselves are dropped
+        # by lean ingest, so we assert on the persisted underlyings instead).
+        rel_fut = (
+            "NSE,2885001,RELIANCEFUT,NSE-RELIANCE-30Jan25-FUT,Reliance Fut,FUT,FNO,"
+            "NaN,NaN,RELIANCE,2885,2025-01-30,NaN,250,0.05,5000,0,1,1"
+        )
+        fetcher, store = _fetcher(_csv([*_ROWS, rel_fut]))
         fetcher.refresh()
         instruments = store.calls[0]["instruments"]
         assert all(isinstance(i, Instrument) for i in instruments)
-        ce = next(i for i in instruments if i.vendor_symbol == "NSE-NIFTY-30Jan25-24650-CE")
-        assert ce.strike_price is not None and ce.expiry_date == date(2025, 1, 30)
+        # Persisted = NIFTY + SENSEX (indices) + RELIANCE (now F&O-eligible EQ).
+        assert {i.vendor_symbol for i in instruments} == {
+            "NSE-NIFTY",
+            "BSE-SENSEX",
+            "NSE-RELIANCE",
+        }
+        reliance = next(i for i in instruments if i.vendor_symbol == "NSE-RELIANCE")
+        assert reliance.instrument_type == InstrumentType.EQ
+        # No derivative leg leaked into the persisted set.
+        assert all(not i.is_derivative for i in instruments)
 
     def test_snapshot_date_override(self) -> None:
         fetcher, store = _fetcher(_csv())
@@ -220,15 +246,22 @@ class TestRealIndexRows:
         assert result.quarantined == 0
         instruments = store.calls[0]["instruments"]
         vendor_symbols = {i.vendor_symbol for i in instruments}
+        # Lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001): every NSE index
+        # persists; from BSE only SENSEX. The 24 NSE indices + SENSEX = 25
+        # universe underlyings; the 5 other BSE indices (e.g. BANKEX) are
+        # dropped (mirrors is_in_fetch_scope's "BSE only SENSEX" IDX rule).
+        assert result.persisted == 25
+        assert result.legs_dropped == 5
         for expected in (
             "NSE-NIFTY",
             "NSE-BANKNIFTY",
             "BSE-SENSEX",
             "NSE-INDIAVIX",
-            "BSE-BANKEX",
             "NSE-FINNIFTY",
         ):
             assert expected in vendor_symbols
+        # A BSE non-SENSEX index is NOT a universe underlying → dropped.
+        assert "BSE-BANKEX" not in vendor_symbols
         # A non-numeric-token index (NIFTYMETAL) → exchange_token 0; SENSEX
         # carries the numeric token 1; blank economics → lot 0 / tick 0.
         metal = next(i for i in instruments if i.vendor_symbol == "NSE-NIFTYMETAL")

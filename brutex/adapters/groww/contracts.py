@@ -85,6 +85,84 @@ def parse_contract_symbol(symbol: str) -> tuple[InstrumentType, Decimal | None] 
     return None
 
 
+#: Minimum ``-``-split tokens to recover the underlying vendor_symbol
+#: (``EXCHANGE-UNDERLYING`` = 2) from a contract symbol.
+_MIN_UNDERLYING_TOKENS: Final[int] = 2
+
+
+def underlying_symbol_of(contract_symbol: str) -> str | None:
+    """Return the underlying's vendor_symbol from a *contract_symbol*, or ``None``.
+
+    A Groww contract symbol is ``EXCHANGE-UNDERLYING-EXPIRY-…`` (e.g.
+    ``NSE-NIFTY-30Jan25-24650-CE`` or ``NSE-NIFTY-30Jan25-FUT``); its
+    underlying instrument-master row is keyed by the ``EXCHANGE-UNDERLYING``
+    prefix (``NSE-NIFTY``). This recovers that prefix so the contract can
+    inherit the underlying's economics now that the legs themselves are no
+    longer persisted (DEC-INSTRUMENT-UNIVERSE-FAST-001).
+
+    Returns ``None`` for a symbol with too few tokens to carry an underlying.
+    """
+    tokens = contract_symbol.split("-")
+    if len(tokens) < _MIN_UNDERLYING_TOKENS:
+        return None
+    return "-".join(tokens[:_MIN_UNDERLYING_TOKENS])
+
+
+class _MetadataStore(Protocol):
+    """The slice of :class:`~brutex.data.instrument_store.InstrumentStore` a
+    store-backed :func:`store_metadata_lookup` reads (one point lookup)."""
+
+    def get(self, vendor_symbol: str, *, as_of: date | None = ...) -> Any:
+        """Return the instrument-master row for *vendor_symbol*, or ``None``."""
+        ...
+
+
+def store_metadata_lookup(
+    store: _MetadataStore,
+    *,
+    as_of: date | None = None,
+) -> Callable[[str], ContractMeta | None]:
+    """Build a ``metadata_lookup`` that inherits a leg's economics from its underlying.
+
+    Since the lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001) no longer stores
+    the FUT / CE / PE legs, a contract's ``lot_size`` / ``tick_size`` /
+    ``freeze_quantity`` can no longer be read from the leg's own row. They are
+    instead inherited from the UNDERLYING's instrument-master row, which IS
+    persisted (an F&O-eligible equity, or an index). The returned callable:
+
+    * recovers the underlying vendor_symbol via :func:`underlying_symbol_of`;
+    * does ONE :meth:`InstrumentStore.get` point lookup (O(1) on the PK);
+    * returns the underlying's ``(lot_size, tick_size, freeze_quantity)`` as a
+      :class:`ContractMeta`, or ``None`` when the symbol has no recoverable
+      underlying / the underlying is absent from the master (the
+      :class:`ContractFetcher` then skips + counts that leg, exactly as
+      before).
+
+    Parameters
+    ----------
+    store
+        Anything exposing :meth:`InstrumentStore.get` (the real store, or a
+        fake in tests).
+    as_of
+        Optional temporal cutoff forwarded to :meth:`InstrumentStore.get`.
+    """
+
+    def _lookup(contract_symbol: str) -> ContractMeta | None:
+        underlying = underlying_symbol_of(contract_symbol)
+        if underlying is None:
+            return None
+        row = store.get(underlying, as_of=as_of)
+        if row is None:
+            return None
+        return ContractMeta(
+            lot_size=row.lot_size,
+            tick_size=row.tick_size,
+            freeze_quantity=row.freeze_quantity,
+        )
+
+    return _lookup
+
+
 class _ContractSink(Protocol):
     """The slice of :class:`~brutex.data.instrument_store.InstrumentStore` used here."""
 
@@ -190,4 +268,6 @@ __all__ = [
     "ContractFetcher",
     "ContractMeta",
     "parse_contract_symbol",
+    "store_metadata_lookup",
+    "underlying_symbol_of",
 ]

@@ -48,7 +48,11 @@ from brutex.models import (
     TickSizeFormatError,
     normalise_tick_size,
 )
-from brutex.universe import build_fno_eligible_underlyings, is_in_fetch_scope
+from brutex.universe import (
+    build_fno_eligible_underlyings,
+    is_in_fetch_scope,
+    is_universe_underlying,
+)
 
 #: The Groww instrument-master CSV (docs/groww/api-reference/02-instruments.md).
 DEFAULT_CSV_URL: Final[str] = "https://growwapi-assets.groww.in/instruments/instrument.csv"
@@ -231,7 +235,20 @@ class InstrumentRefreshResult:
     Attributes
     ----------
     parsed
-        Instruments successfully built + upserted.
+        Instruments successfully built from the CSV (every in-scope row that
+        validated). NOTE: this counts ALL parsed rows including the
+        derivative legs used only to compute F&O-eligibility — it is NOT the
+        number upserted. The persisted count is :attr:`persisted`.
+    persisted
+        Universe underlyings actually upserted into the store — every
+        admitted index + every F&O-eligible equity
+        (:func:`brutex.universe.is_universe_underlying`). The ~tens of
+        thousands of FUT / CE / PE legs are NOT here (lean ingest,
+        DEC-INSTRUMENT-UNIVERSE-FAST-001).
+    legs_dropped
+        Parsed rows that were intentionally DISCARDED rather than persisted:
+        every derivative leg (FUT / CE / PE) plus any non-F&O-eligible equity.
+        ``parsed == persisted + legs_dropped`` always holds.
     filtered
         Rows skipped as out of scope: a foreign exchange (e.g. MCX) OR a Groww
         internal test instrument (``NSETEST`` / negative strike).
@@ -244,6 +261,8 @@ class InstrumentRefreshResult:
     """
 
     parsed: int
+    persisted: int
+    legs_dropped: int
     filtered: int
     quarantined: int
     csv_sha256: str
@@ -322,10 +341,18 @@ class InstrumentMasterFetcher:
             except _ROW_ERRORS:
                 quarantined += 1
 
+        # Compute F&O-eligibility from the FULL parsed set (the derivative
+        # legs are the evidence), then keep ONLY the universe underlyings —
+        # every admitted index + every F&O-eligible equity — and DISCARD the
+        # ~tens-of-thousands of FUT / CE / PE legs rather than upsert them
+        # (lean ingest, DEC-INSTRUMENT-UNIVERSE-FAST-001). The legs remain
+        # recoverable on demand via get_contracts (CONTRACTS surface), so the
+        # lake stays ~241 rows for the real master instead of ~89,000.
         fno_eligible = build_fno_eligible_underlyings(instruments)
+        persisted = [i for i in instruments if is_universe_underlying(i, fno_eligible)]
         csv_sha256 = hashlib.sha256(csv_text.encode("utf-8")).hexdigest()
         upsert = self.store.upsert_many(
-            instruments,
+            persisted,
             snapshot_date=snapshot_date or self.clock().date(),
             run_id=self.run_id_factory(),
             csv_source_sha256=csv_sha256,
@@ -333,6 +360,8 @@ class InstrumentMasterFetcher:
         )
         return InstrumentRefreshResult(
             parsed=len(instruments),
+            persisted=len(persisted),
+            legs_dropped=len(instruments) - len(persisted),
             filtered=filtered,
             quarantined=quarantined,
             csv_sha256=csv_sha256,

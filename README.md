@@ -195,6 +195,24 @@ brutex audit verify <file>
 brutex dashboard          # alias: brutex run
 ```
 
+### Logs — the `/logs` web viewer + `LOG_DIR` knob
+
+The dashboard ships a live log viewer at **`http://127.0.0.1:9080/logs`**
+(also reachable from the nav bar on `/universe`, `/db`, `/credentials`). It
+tails the same rotating JSON log file the runtime writes.
+
+By default that file lives at `~/.brutex/logs/brutex.log`. To redirect it
+**into the repo tree** so an IDE such as IntelliJ/IDEA can tail it, pass the
+`LOG_DIR` knob — it exports `BRUTEX_LOG_DIR` for the run:
+
+```bash
+make run LOG_DIR=./.brutex-logs   # log → ./.brutex-logs/brutex.log
+```
+
+`./.brutex-logs/` is git-ignored. The knob is opt-in only — omitting it keeps
+the `~/.brutex/logs` default unchanged. (`BRUTEX_LOG_FILE` overrides the full
+path directly if you need a specific filename.)
+
 ---
 
 ## 📐 Guarantees

@@ -26,6 +26,7 @@ from brutex.dashboard.db_view import (
     KNOWN_TABLES,
     _json_safe,
     clamp_limit,
+    clamp_offset,
     sample_rows,
     table_summary,
 )
@@ -93,6 +94,15 @@ def _seed(store: InstrumentStore) -> None:
 def test_clamp_limit(raw: int, expected: int) -> None:
     """clamp_limit pins any requested limit into [1, 500]."""
     assert clamp_limit(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(0, 0), (-1, 0), (-9999, 0), (1, 1), (250, 250)],
+)
+def test_clamp_offset(raw: int, expected: int) -> None:
+    """clamp_offset pins any requested offset to a non-negative integer."""
+    assert clamp_offset(raw) == expected
 
 
 # ── _json_safe ───────────────────────────────────────────────────────
@@ -206,6 +216,40 @@ def test_sample_rows_limit_clamped_high(tmp_path: Path) -> None:
     _seed(store)
     # only 2 rows exist, but the query must not error on a huge limit
     out = sample_rows(store.connection, "instruments", limit=10**9)
+    assert len(out["rows"]) == 2
+
+
+def test_sample_rows_reports_total_and_page_bounds(tmp_path: Path) -> None:
+    """sample_rows returns the indexed full-table total + the resolved page bounds."""
+    store = _open_empty(tmp_path)
+    _seed(store)
+    out = sample_rows(store.connection, "instruments", limit=50)
+    # total is the full row count (for the pager), NOT the page size.
+    assert out["total"] == 2
+    assert out["limit"] == 50
+    assert out["offset"] == 0
+
+
+def test_sample_rows_pages_via_offset(tmp_path: Path) -> None:
+    """Paging with LIMIT/OFFSET returns disjoint pages, never the whole table."""
+    store = _open_empty(tmp_path)
+    _seed(store)
+    page1 = sample_rows(store.connection, "instruments", limit=1, offset=0)
+    page2 = sample_rows(store.connection, "instruments", limit=1, offset=1)
+    page3 = sample_rows(store.connection, "instruments", limit=1, offset=2)
+    assert len(page1["rows"]) == 1
+    assert len(page2["rows"]) == 1
+    assert page1["rows"] != page2["rows"]  # disjoint pages
+    assert page3["rows"] == []  # past the end → empty, not an error
+    assert page1["total"] == page2["total"] == 2
+
+
+def test_sample_rows_negative_offset_clamped(tmp_path: Path) -> None:
+    """A hostile negative offset is clamped to 0 (DuckDB would error otherwise)."""
+    store = _open_empty(tmp_path)
+    _seed(store)
+    out = sample_rows(store.connection, "instruments", limit=50, offset=-10)
+    assert out["offset"] == 0
     assert len(out["rows"]) == 2
 
 

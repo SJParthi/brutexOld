@@ -1240,6 +1240,99 @@ class InstrumentStore:
             instrument_type=InstrumentType.IDX,
         )
 
+    def fno_eligible_underlyings(
+        self, *, as_of: date | None = None
+    ) -> frozenset[tuple[Exchange, str]]:
+        """Return the NSE F&O-eligible ``(exchange, underlying_symbol)`` set in SQL.
+
+        The SQL-pushed-down equivalent of
+        :func:`brutex.universe.build_fno_eligible_underlyings` (same rule:
+        an underlying is eligible iff at least one NSE derivative — FUT / CE
+        / PE — names it), computed with a ``DISTINCT`` aggregate so it
+        returns only the ~hundreds of distinct underlyings instead of
+        materialising every option/future leg as a Python object
+        (DEC-INSTRUMENT-UNIVERSE-FAST-001).
+
+        Lean-store robustness (DEC-INSTRUMENT-UNIVERSE-FAST-001): because the
+        lean ingest no longer persists the FUT / CE / PE legs, scanning for
+        them alone would return an empty set on a real lean store. The result
+        is therefore the UNION of two equivalent sources:
+
+        * every NSE underlying NAMED by a persisted NSE derivative leg (the
+          full-master / with-legs case), AND
+        * every persisted NSE ``EQ`` row's own ``(exchange, trading_symbol)``
+          — which, on a lean store, is F&O-eligible *by construction* (a
+          non-eligible equity is never persisted; see
+          :func:`brutex.universe.is_universe_underlying`).
+
+        On a full with-legs snapshot the second source is a subset of the
+        first (every persisted EQ is F&O-eligible there too), so the union
+        equals :func:`build_fno_eligible_underlyings`. An equivalence
+        property test (`test_universe_query`) pins this on full-master data,
+        keeping the classification rule single-source. Latest-snapshot-per-
+        symbol semantics match ``load_snapshot(in_scope_only=False)``.
+        """
+        self._ensure_open()
+        as_of_clause = " AND snapshot_date <= ?" if as_of is not None else ""
+        # Only the static as_of_clause literal is interpolated; the ? is bound.
+        latest = (
+            "JOIN ("  # noqa: S608  # nosec B608 — static as_of_clause literal only; ? is bound
+            "    SELECT vendor_symbol, MAX(snapshot_date) AS snap "
+            f"    FROM instruments WHERE TRUE{as_of_clause} "
+            "    GROUP BY vendor_symbol"
+            ") latest ON i.vendor_symbol = latest.vendor_symbol "
+            "AND i.snapshot_date = latest.snap "
+        )
+        sql = (
+            # (a) underlyings named by a persisted NSE derivative leg
+            "SELECT DISTINCT i.exchange, i.underlying_symbol "  # noqa: S608  # nosec B608 — only the static as_of_clause literal is concatenated; all values are bound
+            f"FROM instruments i {latest}"
+            "WHERE i.instrument_type IN ('FUT', 'CE', 'PE') "
+            "AND i.exchange = 'NSE' "
+            "AND i.underlying_symbol IS NOT NULL "
+            "UNION "
+            # (b) every persisted NSE EQ row (F&O-eligible by construction)
+            "SELECT DISTINCT i.exchange, i.trading_symbol "
+            f"FROM instruments i {latest}"
+            "WHERE i.instrument_type = 'EQ' AND i.exchange = 'NSE'"
+        )
+        params: list[Any] = []
+        if as_of is not None:
+            # ``latest`` (with its ``as_of`` ?) appears twice — once per UNION arm.
+            params = [as_of, as_of]
+        rows = self._conn.execute(sql, params).fetchall()
+        return frozenset((Exchange(row[0]), row[1]) for row in rows)
+
+    def list_index_equity_instruments(self, *, as_of: date | None = None) -> list[Instrument]:
+        """Return only IDX + EQ rows (the explorer candidates) — never the legs.
+
+        The ``/universe`` explorer shows exactly indices (IDX) and F&O-eligible
+        equities (EQ); the ~tens-of-thousands of option/future legs never
+        appear there. This fetches only the IDX + EQ rows (latest snapshot
+        per symbol, matching ``load_snapshot(in_scope_only=False)``) so the
+        dashboard materialises only those ~hundreds of rows, not the whole
+        master (DEC-INSTRUMENT-UNIVERSE-FAST-001). Pair with
+        :meth:`fno_eligible_underlyings` and feed both to
+        :func:`brutex.dashboard.universe_query.list_underlyings` /
+        ``universe_summary`` (which keep the classification rule).
+        """
+        self._ensure_open()
+        as_of_clause = " AND snapshot_date <= ?" if as_of is not None else ""
+        sql = (
+            "SELECT i.* FROM instruments i "  # noqa: S608  # nosec B608 — only the static as_of_clause literal is concatenated; all values are bound
+            "JOIN ("
+            "    SELECT vendor_symbol, MAX(snapshot_date) AS snap "
+            f"    FROM instruments WHERE TRUE{as_of_clause} "
+            "    GROUP BY vendor_symbol"
+            ") latest ON i.vendor_symbol = latest.vendor_symbol "
+            "AND i.snapshot_date = latest.snap "
+            "WHERE i.instrument_type IN ('IDX', 'EQ') "
+            "ORDER BY i.vendor_symbol"
+        )
+        params: list[Any] = [as_of] if as_of is not None else []
+        rows = self._conn.execute(sql, params).fetchall()
+        return [_row_to_instrument(row) for row in rows]
+
     def list_futures(
         self,
         *,
