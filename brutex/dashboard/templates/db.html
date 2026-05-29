@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BruteX — Database</title>
+<style>
+  :root {
+    /* v28-hybrid locked palette (TRACK1_DASHBOARD_DESIGN.md §3) */
+    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
+    --border: #1E222D; --border-strong: #2B313F;
+    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
+    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
+    --red: #FF5C5C;
+    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    color: var(--text); min-height: 100vh; display: flex; flex-direction: column;
+    background:
+      radial-gradient(ellipse at top, rgba(91,141,239,0.06), transparent 50%),
+      radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%),
+      var(--bg);
+  }
+  @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+
+  header {
+    display:flex; align-items:center; gap:14px; padding:16px 24px;
+    border-bottom:1px solid var(--border); animation: fadeInDown .5s ease both;
+  }
+  .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
+    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .sub { color:var(--muted); font-size:12px; }
+  .dbpath { margin-left:auto; font-size:11px; color:var(--muted);
+    font-family:"SF Mono",Menlo,Consolas,monospace;
+    background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:6px 10px; }
+
+  .band { display:flex; align-items:center; gap:12px; padding:12px 24px; flex-wrap:wrap;
+    border-bottom:1px solid var(--border); animation: fadeInDown .6s .05s ease both; }
+  .band label { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; }
+  select, button {
+    background:var(--surface); color:var(--text); border:1px solid var(--border-strong);
+    border-radius:9px; padding:8px 12px; font-size:13px; cursor:pointer; transition:.16s;
+  }
+  select:hover, button:hover { border-color:var(--blue); }
+
+  .wrap { flex:1; display:grid; grid-template-columns:280px 1fr; gap:14px;
+    padding:14px 24px 24px; min-height:0; animation: fadeInUp .5s ease both; }
+
+  /* ── Left: table list ── */
+  #tables { background:var(--surface); border:1px solid var(--border); border-radius:14px;
+    padding:10px; overflow:auto; }
+  #tables h3 { margin:6px 8px 10px; font-size:12px; text-transform:uppercase;
+    letter-spacing:1px; color:var(--muted); }
+  .tbl { display:flex; align-items:center; gap:10px; padding:11px 12px; border-radius:10px;
+    cursor:pointer; border:1px solid transparent; transition:.16s; }
+  .tbl:hover { background:var(--surface-2); box-shadow:0 0 22px rgba(91,141,239,.18); }
+  .tbl.sel { background:var(--surface-3); border-color:var(--blue); }
+  .tbl .nm { font-weight:700; font-family:"SF Mono",Menlo,Consolas,monospace; font-size:13px; }
+  .tbl .badge { margin-left:auto; font-size:11px; font-weight:700; padding:2px 9px;
+    border-radius:20px; color:var(--green); background:rgba(38,217,176,.13);
+    font-family:"SF Mono",Menlo,Consolas,monospace; }
+  .tbl .badge.zero { color:var(--muted); background:rgba(120,123,134,.13); }
+
+  /* ── Right: rows grid ── */
+  #data { background:var(--surface); border:1px solid var(--border); border-radius:14px;
+    padding:0; overflow:auto; min-height:0; display:flex; flex-direction:column; }
+  .datahead { display:flex; align-items:center; gap:12px; padding:14px 16px;
+    border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  .datahead .dt { font-weight:700; font-family:"SF Mono",Menlo,Consolas,monospace; font-size:14px; }
+  .gridwrap { flex:1; overflow:auto; }
+  table { width:100%; border-collapse:collapse;
+    font-family:"SF Mono",Menlo,Consolas,monospace; font-size:12px; }
+  th, td { text-align:left; padding:7px 12px; border-bottom:1px solid var(--border);
+    white-space:nowrap; }
+  thead th { position:sticky; top:0; background:var(--surface-2); color:var(--muted);
+    font-weight:700; z-index:1; }
+  tbody tr:hover { background:var(--surface-2); }
+  td.nullcell { color:var(--muted); font-style:italic; }
+  .empty { color:var(--muted); font-size:13px; padding:28px 16px; text-align:center; }
+  .empty b { color:var(--text); }
+</style>
+</head>
+<body>
+  <header>
+    <div class="logo">BruteX</div>
+    <div class="sub">Database — DuckDB instrument master (read-only)</div>
+    <span class="dbpath" id="dbpath">5 tables · click a table to browse</span>
+  </header>
+
+  <div class="band">
+    <label>Sample rows:
+      <select id="limit">
+        <option value="10">10</option>
+        <option value="50" selected>50</option>
+        <option value="200">200</option>
+      </select>
+    </label>
+    <button id="refresh">Refresh</button>
+  </div>
+
+  <div class="wrap">
+    <div id="tables"><h3>Tables</h3><div class="empty">loading…</div></div>
+    <div id="data"><div class="empty">Select a table on the left to browse its columns &amp; sample rows.</div></div>
+  </div>
+
+<script>
+/* ── BruteX database viewer (DEC-DB-VIEWER-001) ──
+   Read-only browse of the 5 DuckDB tables. Every column name + cell is
+   escaped before it touches innerHTML — values come from the
+   instrument-master CSV (broker-supplied), so they are never trusted as
+   markup (same XSS lesson as the logs + universe pages). */
+const tablesEl = document.getElementById("tables");
+const dataEl = document.getElementById("data");
+const limitSel = document.getElementById("limit");
+const refreshBtn = document.getElementById("refresh");
+
+let selected = null;
+let counts = {};
+
+/* Escape free text before interpolation into innerHTML (XSS sink). */
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/* Animated count-up from 0 → target for the row-count badges. */
+function countUp(el, target) {
+  target = Number(target) || 0;
+  if (target <= 0) { el.textContent = "0"; return; }
+  const steps = 24;
+  let i = 0;
+  const tick = () => {
+    i++;
+    const v = Math.round(target * i / steps);
+    el.textContent = v.toLocaleString();
+    if (i < steps) requestAnimationFrame(tick);
+    else el.textContent = target.toLocaleString();
+  };
+  requestAnimationFrame(tick);
+}
+
+async function loadTables() {
+  try {
+    const r = await fetch("/api/v1/db/tables");
+    if (!r.ok) { tablesEl.innerHTML = '<h3>Tables</h3><div class="empty">error ' + r.status + '</div>'; return; }
+    const body = await r.json();
+    const tables = body.tables || [];
+    counts = {};
+    tables.forEach(t => { counts[t.table] = t.row_count; });
+    tablesEl.innerHTML = '<h3>Tables</h3>' + tables.map(t => {
+      const zero = (t.row_count || 0) === 0 ? " zero" : "";
+      return '<div class="tbl" data-table="' + esc(t.table) + '">'
+        + '<span class="nm">' + esc(t.table) + '</span>'
+        + '<span class="badge' + zero + '" data-count="' + (t.row_count || 0) + '">0</span>'
+        + '</div>';
+    }).join("");
+    tablesEl.querySelectorAll(".badge").forEach(b => countUp(b, b.getAttribute("data-count")));
+    tablesEl.querySelectorAll(".tbl").forEach(el => {
+      el.addEventListener("click", () => selectTable(el.getAttribute("data-table")));
+    });
+    if (selected && counts[selected] !== undefined) markSelected(selected);
+  } catch (e) {
+    tablesEl.innerHTML = '<h3>Tables</h3><div class="empty">offline</div>';
+  }
+}
+
+function markSelected(name) {
+  tablesEl.querySelectorAll(".tbl").forEach(el => {
+    el.classList.toggle("sel", el.getAttribute("data-table") === name);
+  });
+}
+
+async function selectTable(name) {
+  selected = name;
+  markSelected(name);
+  if ((counts[name] || 0) === 0) {
+    dataEl.innerHTML = '<div class="datahead"><span class="dt">' + esc(name) + '</span>'
+      + '<span class="sub">0 rows</span></div>'
+      + '<div class="empty"><b>' + esc(name) + '</b> is empty — pull data to populate it.<br>'
+      + 'The lake fills after a Groww ingest run (network-gated).</div>';
+    return;
+  }
+  dataEl.innerHTML = '<div class="empty">loading ' + esc(name) + '…</div>';
+  try {
+    const lim = encodeURIComponent(limitSel.value);
+    const r = await fetch("/api/v1/db/table/" + encodeURIComponent(name) + "?limit=" + lim);
+    if (!r.ok) {
+      dataEl.innerHTML = '<div class="empty">error ' + r.status + ' loading ' + esc(name) + '</div>';
+      return;
+    }
+    const body = await r.json();
+    renderRows(body);
+  } catch (e) {
+    dataEl.innerHTML = '<div class="empty">offline</div>';
+  }
+}
+
+function renderRows(body) {
+  const cols = body.columns || [];
+  const rows = body.rows || [];
+  const head = '<div class="datahead">'
+    + '<span class="dt">' + esc(body.table) + '</span>'
+    + '<span class="sub">' + cols.length + ' columns · showing ' + rows.length + ' of '
+    + (counts[body.table] || 0).toLocaleString() + ' rows</span></div>';
+  if (!rows.length) {
+    dataEl.innerHTML = head + '<div class="empty">no rows</div>';
+    return;
+  }
+  const thead = '<thead><tr>' + cols.map(c => '<th>' + esc(c) + '</th>').join("") + '</tr></thead>';
+  const tbody = '<tbody>' + rows.map(row =>
+    '<tr>' + row.map(cell =>
+      cell == null
+        ? '<td class="nullcell">null</td>'
+        : '<td>' + esc(cell) + '</td>'
+    ).join("") + '</tr>'
+  ).join("") + '</tbody>';
+  dataEl.innerHTML = head + '<div class="gridwrap"><table>' + thead + tbody + '</table></div>';
+}
+
+limitSel.addEventListener("change", () => { if (selected) selectTable(selected); });
+refreshBtn.addEventListener("click", () => {
+  loadTables();
+  if (selected) selectTable(selected);
+});
+
+loadTables();
+</script>
+</body>
+</html>

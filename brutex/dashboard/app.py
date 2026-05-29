@@ -42,6 +42,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from brutex.dashboard.db_view import sample_rows, table_summary
 from brutex.dashboard.pull_controller import groww_creds_present, pull_candles
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.orchestrator.pipeline import (
@@ -705,6 +706,42 @@ def build_app(
         records = tail_records(path, max_lines=lines)
         return JSONResponse({"lines": records, "path": str(path)})
 
+    # ── Database viewer (DEC-DB-VIEWER-001) ─────────────────────────
+
+    @app.get("/api/v1/db/tables")
+    async def api_db_tables() -> JSONResponse:
+        """GET /api/v1/db/tables — row counts for every known DuckDB table.
+
+        Thin wrapper over :func:`brutex.dashboard.db_view.table_summary`.
+        Tolerates a missing table (count 0) so a fresh/empty store works.
+        """
+        store = _require_store()
+        return JSONResponse({"tables": table_summary(store.connection)})
+
+    @app.get("/api/v1/db/table/{name}")
+    async def api_db_table(
+        name: str,
+        limit: int = Query(default=50),
+    ) -> JSONResponse:
+        """GET /api/v1/db/table/{name}?limit=N — sample rows of one table.
+
+        Thin wrapper over :func:`brutex.dashboard.db_view.sample_rows`.
+        The table-name allowlist + limit clamp + read-only SELECT live
+        in that (coverage-tested) module; an unknown / injection-y table
+        name raises ``ValueError`` there, mapped to HTTP 400 here.
+        """
+        store = _require_store()
+        try:
+            payload = sample_rows(store.connection, name, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
+    @app.get("/db", response_class=HTMLResponse)
+    async def db_page() -> str:
+        """GET /db — read-only DuckDB browser page (DEC-DB-VIEWER-001)."""
+        return _render_db_html()
+
     @app.get("/logs", response_class=HTMLResponse)
     async def logs_page() -> str:
         """GET /logs — live log viewer page (DEC-LOGS-VIEWER-001)."""
@@ -1009,6 +1046,32 @@ def _load_logs_template() -> str:
 def _render_logs_html() -> str:
     """Return the live log-viewer page HTML (DEC-LOGS-VIEWER-001)."""
     return _load_logs_template()
+
+
+_DB_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "db.html"
+_DB_TEMPLATE_CACHE: str | None = None
+
+
+def _load_db_template() -> str:
+    """Load + cache the read-only DuckDB browser page template.
+
+    Ships as a package-relative resource at
+    ``brutex/dashboard/templates/db.html`` (DEC-DB-VIEWER-001). The
+    template fetches ``/api/v1/db/tables`` for the table list + row
+    counts, then ``/api/v1/db/table/{name}`` when a table is clicked,
+    escaping every column name + cell via an ``esc()`` helper before it
+    touches innerHTML (XSS — values originate from the instrument-master
+    CSV). Loaded once, then served verbatim.
+    """
+    global _DB_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _DB_TEMPLATE_CACHE is None:
+        _DB_TEMPLATE_CACHE = _DB_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _DB_TEMPLATE_CACHE
+
+
+def _render_db_html() -> str:
+    """Return the read-only DuckDB browser page HTML (DEC-DB-VIEWER-001)."""
+    return _load_db_template()
 
 
 _INSTRUMENTS_HTML_BLOCK = """\
