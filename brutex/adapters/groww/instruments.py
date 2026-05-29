@@ -87,6 +87,13 @@ _SUPPORTED_EXCHANGES: Final[frozenset[str]] = frozenset({"NSE", "BSE"})
 #: CSV cell values that mean "absent" (Groww emits NaN for non-derivative fields).
 _BLANK_VALUES: Final[frozenset[str]] = frozenset({"", "nan", "none", "null"})
 
+#: Groww seeds the instrument master with internal *test* instruments — e.g.
+#: ``031NSETEST36DECFUT`` / ``061NSETEST…`` (underlying ``…NSETEST``, expiry
+#: 2036-11-27, strike ``-0.01``, freeze_quantity 100001). They are not tradable
+#: and must never enter the lake. Verified against the operator's real
+#: ``instrument.csv`` export (2026-05-29). Match is substring + case-insensitive.
+_TEST_INSTRUMENT_MARKER: Final[str] = "NSETEST"
+
 #: Per-row parse failures that quarantine ONE row rather than aborting the file.
 _ROW_ERRORS: Final[tuple[type[Exception], ...]] = (
     ValueError,
@@ -131,6 +138,23 @@ def _to_bool(value: str | None) -> bool:
     return not _blank(value) and value.strip().lower() in {"1", "true", "yes", "y"}  # type: ignore[union-attr]
 
 
+def _is_test_instrument_row(row: dict[str, str]) -> bool:
+    """True if *row* is a Groww internal test instrument (never lake-bound).
+
+    Two markers, both observed in the real master (2026-05-29): the
+    ``NSETEST`` token in any identifying column, or a negative ``strike_price``
+    (invalid for any real contract). Checked on the raw CSV row so a test row
+    is skipped before any parse attempt.
+    """
+    blob = " ".join(
+        (row.get(col) or "")
+        for col in ("trading_symbol", "groww_symbol", "underlying_symbol", "name")
+    ).upper()
+    if _TEST_INSTRUMENT_MARKER in blob:
+        return True
+    return (row.get("strike_price") or "").strip().startswith("-")
+
+
 def _row_to_instrument(row: dict[str, str]) -> Instrument:
     """Map one CSV row to a validated :class:`Instrument` (raises on a bad row)."""
     return Instrument(
@@ -166,7 +190,8 @@ class InstrumentRefreshResult:
     parsed
         Instruments successfully built + upserted.
     filtered
-        Rows skipped because their exchange is out of Track 1 scope (e.g. MCX).
+        Rows skipped as out of scope: a foreign exchange (e.g. MCX) OR a Groww
+        internal test instrument (``NSETEST`` / negative strike).
     quarantined
         Rows that failed to parse / validate and were dropped (counted, surfaced).
     csv_sha256
@@ -239,6 +264,9 @@ class InstrumentMasterFetcher:
         quarantined = 0
         for row in reader:
             if (row.get("exchange") or "").strip() not in _SUPPORTED_EXCHANGES:
+                filtered += 1
+                continue
+            if _is_test_instrument_row(row):
                 filtered += 1
                 continue
             try:

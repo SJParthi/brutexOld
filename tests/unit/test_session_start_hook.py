@@ -147,6 +147,15 @@ REQUIRED_OUTPUT_TOKENS = (
     "CLAUDE.md:",
     "MIGRATION decisions",
     "Environment:",
+    # Automation & live-state section (DEC-SESSION-HOOK-LIVESTATE-001) — these
+    # labels are printed unconditionally so a session always sees the live
+    # surface even when the venv / CLI / logs are absent.
+    "Automation & live state",
+    "DEC-SESSION-HOOK-LIVESTATE-001",
+    "Pipeline status:",
+    "Audit chain:",
+    "Alerting (Telegram):",
+    "Automation commands:",
     "Pre-merge gates",
     "Z+ 6-marker",
     "Z+ 15-row matrix",

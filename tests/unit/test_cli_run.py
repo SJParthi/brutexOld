@@ -63,3 +63,33 @@ def test_run_falls_back_to_home_default_when_no_env() -> None:
     dash.assert_called_once_with(
         lake_root=Path("/home/op/.brutex/lake"), host="127.0.0.1", port=9080
     )
+
+
+def test_fetch_universe_flag_defaults_false() -> None:
+    """``brutex fetch`` parses --universe (default False, store_true when present)."""
+    parser = cli.build_parser()
+    without = parser.parse_args(["fetch", "--dry-run"])
+    with_flag = parser.parse_args(["fetch", "--dry-run", "--universe"])
+
+    assert without.universe is False
+    assert with_flag.universe is True
+
+
+def test_main_dispatch_threads_universe_into_cmd_fetch() -> None:
+    """``main`` forwards ``args.universe`` to ``cmd_fetch`` as the ``universe`` kwarg."""
+    with mock.patch.object(cli, "cmd_fetch", return_value=0) as fetch:
+        rc = cli.main(["fetch", "--dry-run", "--universe"])
+
+    assert rc == 0
+    _, kwargs = fetch.call_args
+    assert kwargs["universe"] is True
+    assert kwargs["dry_run"] is True
+
+
+def test_main_dispatch_universe_defaults_false_without_flag() -> None:
+    """Without --universe, ``main`` passes ``universe=False`` to ``cmd_fetch``."""
+    with mock.patch.object(cli, "cmd_fetch", return_value=0) as fetch:
+        cli.main(["fetch", "--dry-run"])
+
+    _, kwargs = fetch.call_args
+    assert kwargs["universe"] is False
