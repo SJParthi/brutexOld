@@ -84,6 +84,14 @@ _REQUIRED_COLUMNS: Final[frozenset[str]] = frozenset(
 #: Exchanges in Track 1 scope; any other (MCX, …) is filtered, not quarantined.
 _SUPPORTED_EXCHANGES: Final[frozenset[str]] = frozenset({"NSE", "BSE"})
 
+#: Segments in Track 1 scope — CASH (spot indices + equities) and FNO
+#: (equity/index futures + options). COMMODITY (NSE/BSE GOLD / CRUDEOIL /
+#: SILVER derivatives) is explicitly OUT of scope (CLAUDE.md §3) and is
+#: FILTERED here — a deliberate scope skip, NOT a parse failure — so it
+#: never reaches the quarantine path or the lake. (Groww's backtesting
+#: surface is CASH + FNO only; CLAUDE.md §6.)
+_SUPPORTED_SEGMENTS: Final[frozenset[str]] = frozenset({"CASH", "FNO"})
+
 #: CSV cell values that mean "absent" (Groww emits NaN for non-derivative fields).
 _BLANK_VALUES: Final[frozenset[str]] = frozenset({"", "nan", "none", "null"})
 
@@ -116,6 +124,23 @@ def _opt_str(value: str | None) -> str | None:
 def _req_int(value: str) -> int:
     """Parse a required int, tolerating float-formatted ints (``"75.0"``)."""
     return int(float(value.strip()))  # tolerate float-formatted ints ("75.0")
+
+
+def _req_int_or_zero(value: str) -> int:
+    """Parse an int, returning ``0`` for a non-numeric / blank token.
+
+    Used for ``exchange_token`` ONLY, which is metadata (NOT the dedup key —
+    ``vendor_symbol`` / ``groww_symbol`` is the primary key). In the real
+    Groww master, NSE index rows carry a SYMBOL string in this column
+    (e.g. ``"NIFTYMETAL"``) rather than a numeric token, so a numeric parse
+    fails; we map any non-numeric token to ``0`` rather than quarantine the
+    row. In practice only index rows hit the non-numeric branch (stocks /
+    options always carry a numeric token).
+    """
+    try:
+        return int(float(value.strip()))
+    except (ValueError, InvalidOperation):
+        return 0
 
 
 def _opt_int(value: str | None) -> int | None:
@@ -156,21 +181,39 @@ def _is_test_instrument_row(row: dict[str, str]) -> bool:
 
 
 def _row_to_instrument(row: dict[str, str]) -> Instrument:
-    """Map one CSV row to a validated :class:`Instrument` (raises on a bad row)."""
+    """Map one CSV row to a validated :class:`Instrument` (raises on a bad row).
+
+    Index (``IDX``) rows are reference instruments — never directly tradable
+    (``brutex/universe.py``), so the real Groww master legitimately leaves
+    their economics absent: ``lot_size`` and ``tick_size`` are BLANK and
+    ``exchange_token`` carries a non-numeric SYMBOL string for NSE indices.
+    The three field parses below tolerate that for indices ONLY; EQ / FUT /
+    CE / PE stay strict (a blank lot/tick or bad token still quarantines a
+    non-index row). ``exchange_token`` is tolerant for ALL rows since it is
+    metadata, but only index rows hit the non-numeric branch in practice.
+    """
+    itype = InstrumentType(row["instrument_type"].strip())
+    is_index = itype == InstrumentType.IDX
+    lot_size = 0 if (is_index and _blank(row["lot_size"])) else _req_int(row["lot_size"])
+    tick_size = (
+        Decimal("0")
+        if (is_index and _blank(row["tick_size"]))
+        else normalise_tick_size(row["tick_size"].strip())
+    )
     return Instrument(
         exchange=Exchange(row["exchange"].strip()),
-        exchange_token=_req_int(row["exchange_token"]),
+        exchange_token=_req_int_or_zero(row["exchange_token"]),
         trading_symbol=row["trading_symbol"].strip(),
         vendor_symbol=row["groww_symbol"].strip(),
         name=_opt_str(row["name"]),
-        instrument_type=InstrumentType(row["instrument_type"].strip()),
+        instrument_type=itype,
         segment=Segment(row["segment"].strip()),
         series=_opt_str(row["series"]),
         isin=_opt_str(row["isin"]),
         underlying_symbol=_opt_str(row["underlying_symbol"]),
         underlying_exchange_token=_opt_int(row["underlying_exchange_token"]),
-        lot_size=_req_int(row["lot_size"]),
-        tick_size=normalise_tick_size(row["tick_size"].strip()),
+        lot_size=lot_size,
+        tick_size=tick_size,
         freeze_quantity=_opt_int(row["freeze_quantity"]),
         expiry_date=_opt_date(row["expiry_date"]),
         strike_price=_opt_decimal(row["strike_price"]),
@@ -264,6 +307,11 @@ class InstrumentMasterFetcher:
         quarantined = 0
         for row in reader:
             if (row.get("exchange") or "").strip() not in _SUPPORTED_EXCHANGES:
+                filtered += 1
+                continue
+            if (row.get("segment") or "").strip() not in _SUPPORTED_SEGMENTS:
+                # COMMODITY (GOLD / CRUDEOIL / SILVER …) — out of Track 1
+                # scope; a deliberate filter, never a quarantine.
                 filtered += 1
                 continue
             if _is_test_instrument_row(row):

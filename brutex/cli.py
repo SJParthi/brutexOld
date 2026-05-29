@@ -499,6 +499,35 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         from brutex.data.instrument_store import InstrumentStore
 
         store = InstrumentStore.open(lake_root / "instruments.duckdb")
+
+        # Auto-populate the keyless instrument master on startup so /universe is
+        # never empty on a fresh lake (DEC-INDEX-PARSE-FIX-001). Best-effort: a
+        # network failure (the public CSV needs internet, no keys) must NOT stop
+        # the dashboard from serving.
+        try:  # pragma: no cover — live network + server path (cli.py coverage-excluded)
+            from brutex.dashboard.instrument_loader import load_instrument_master
+            from brutex.dashboard.universe_query import universe_summary
+
+            summary = universe_summary(store.load_snapshot(in_scope_only=False))
+            if summary["total"] == 0:
+                counts = load_instrument_master(store)
+                print(
+                    f"[brutex] auto-loaded instrument master → "
+                    f"{counts['index_count']} indices · {counts['stock_count']} stocks",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[brutex] instrument master present → "
+                    f"{summary['index_count']} indices · {summary['stock_count']} stocks",
+                    file=sys.stderr,
+                )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            print(
+                f"[brutex] instrument auto-load skipped ({exc}); "
+                f"use the Load instruments button once online",
+                file=sys.stderr,
+            )
     app = build_app(state, instrument_store=store)
     print(f"[brutex] dashboard → http://{host}:{port}  (Ctrl-C to stop)")
     print(f"[brutex] logs → {log_path}  ·  live viewer: http://{host}:{port}/logs")

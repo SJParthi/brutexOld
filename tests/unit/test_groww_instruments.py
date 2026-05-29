@@ -9,12 +9,24 @@ header schema drift — all with no network and no DuckDB (the store is a fake).
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
 import pytest
-from brutex.adapters.groww.instruments import InstrumentMasterFetcher
-from brutex.models import Instrument, InstrumentFormatError, InstrumentType
+from brutex.adapters.groww.instruments import (
+    InstrumentMasterFetcher,
+    _req_int_or_zero,
+)
+from brutex.models import (
+    Instrument,
+    InstrumentFormatError,
+    InstrumentType,
+    TickSizeFormatError,
+)
+
+_REAL_IDX_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "groww_idx_rows_real.csv"
 
 _HEADER = (
     "exchange,exchange_token,trading_symbol,groww_symbol,name,instrument_type,segment,"
@@ -84,6 +96,30 @@ class TestRefresh:
         assert len(store.calls) == 1
         assert len(store.calls[0]["instruments"]) == 5
         assert store.calls[0]["run_id"] == "run-xyz"
+
+    def test_nse_commodity_is_filtered_not_quarantined(self) -> None:
+        """An NSE/BSE COMMODITY row is a scope FILTER, never a quarantine.
+
+        Groww's master carries NSE/BSE COMMODITY derivatives (GOLD /
+        CRUDEOIL / SILVER) out of Track 1 scope (CLAUDE.md §3). They must
+        count as ``filtered`` (a deliberate scope skip), NOT ``quarantined``
+        (a parse failure), and never reach the store. A valid NIFTY row is
+        placed AFTER the commodity row so the filter ``continue`` is
+        exercised mid-iteration (covers the segment-filter branch).
+        """
+        rows = [
+            # NSE COMMODITY option — well-formed, but out of scope → filtered.
+            "NSE,77001,GOLDCE,NSE-GOLD-29Jan27-170100-CE,Gold CE,CE,COMMODITY,NaN,NaN,"
+            "GOLD,77000,2027-01-29,170100,100,0.05,1800,0,1,1",
+            # A valid in-scope index AFTER it → the filter `continue` lands here.
+            "NSE,26000,NIFTY,NSE-NIFTY,Nifty 50,IDX,CASH,NaN,NaN,NaN,NaN,NaN,NaN,1,0.05,NaN,0,1,1",
+        ]
+        fetcher, store = _fetcher(_csv(rows))
+        result = fetcher.refresh()
+        assert (result.parsed, result.filtered, result.quarantined) == (1, 1, 0)
+        saved = store.calls[0]["instruments"]
+        assert all(i.segment.value != "COMMODITY" for i in saved)
+        assert {i.vendor_symbol for i in saved} == {"NSE-NIFTY"}
 
     def test_in_scope_callable_uses_fetch_scope(self) -> None:
         fetcher, store = _fetcher(_csv())
@@ -165,3 +201,95 @@ class TestSchemaDrift:
         with pytest.raises(InstrumentFormatError, match="missing required columns"):
             fetcher.refresh()
         assert store.calls == []  # store keeps its last good snapshot
+
+
+class TestRealIndexRows:
+    """Regression for DEC-INDEX-PARSE-FIX-001.
+
+    The operator's REAL Groww ``instrument.csv`` carries 30 ``IDX`` rows with
+    BLANK ``lot_size`` / ``tick_size`` and a non-numeric ``exchange_token``
+    (a SYMBOL string for NSE indices). Before the fix all 30 quarantined and
+    the dashboard showed "0 INDEX". They must now all parse.
+    """
+
+    def test_real_index_rows_all_parse(self) -> None:
+        csv_text = _REAL_IDX_FIXTURE.read_text(encoding="utf-8")
+        fetcher, store = _fetcher(csv_text)
+        result = fetcher.refresh()
+        assert result.parsed == 30
+        assert result.quarantined == 0
+        instruments = store.calls[0]["instruments"]
+        vendor_symbols = {i.vendor_symbol for i in instruments}
+        for expected in (
+            "NSE-NIFTY",
+            "NSE-BANKNIFTY",
+            "BSE-SENSEX",
+            "NSE-INDIAVIX",
+            "BSE-BANKEX",
+            "NSE-FINNIFTY",
+        ):
+            assert expected in vendor_symbols
+        # A non-numeric-token index (NIFTYMETAL) → exchange_token 0; SENSEX
+        # carries the numeric token 1; blank economics → lot 0 / tick 0.
+        metal = next(i for i in instruments if i.vendor_symbol == "NSE-NIFTYMETAL")
+        assert metal.exchange_token == 0
+        assert metal.lot_size == 0
+        assert metal.tick_size == Decimal("0")
+        sensex = next(i for i in instruments if i.vendor_symbol == "BSE-SENSEX")
+        assert sensex.exchange_token == 1
+
+
+class TestReqIntOrZero:
+    """The new tolerant ``exchange_token`` helper (index symbol-token → 0)."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("26000", 26000),
+            ("NIFTYMETAL", 0),
+            ("1", 1),
+            ("75.0", 75),
+            ("", 0),
+        ],
+    )
+    def test_parse(self, raw: str, expected: int) -> None:
+        assert _req_int_or_zero(raw) == expected
+
+
+class TestIndexToleranceIsIndexOnly:
+    """Index-tolerance must NOT loosen strictness for EQ / option rows.
+
+    Covers BOTH branches of each new ``if is_index`` guard in
+    ``_row_to_instrument`` so the module stays 100% line + branch.
+    """
+
+    def test_blank_lot_size_on_eq_still_quarantines(self) -> None:
+        # EQ row (non-index) with a BLANK lot_size → _req_int("") → quarantine.
+        bad = (
+            "NSE,3001,BADLOT,NSE-BADLOT,Bad,EQ,CASH,EQ,INE000000000,NaN,NaN,NaN,NaN,,0.05,NaN,0,1,1"
+        )
+        fetcher, _store = _fetcher(_csv([bad]))
+        result = fetcher.refresh()
+        assert result.parsed == 0
+        assert result.quarantined == 1
+
+    def test_blank_tick_size_on_eq_still_quarantines(self) -> None:
+        # EQ row (non-index) with a BLANK tick_size → normalise_tick_size("")
+        # → TickSizeFormatError → quarantine.
+        bad = (
+            "NSE,3002,BADTICK,NSE-BADTICK,Bad,EQ,CASH,EQ,INE000000001,NaN,NaN,NaN,NaN,1,,NaN,0,1,1"
+        )
+        fetcher, _store = _fetcher(_csv([bad]))
+        result = fetcher.refresh()
+        assert result.parsed == 0
+        assert result.quarantined == 1
+
+    def test_blank_economics_on_eq_raises_tick_error(self) -> None:
+        # Sanity: a blank tick on EQ raises TickSizeFormatError (the error
+        # type quarantine relies on) — keeps the strict path explicit.
+        from brutex.adapters.groww.instruments import _row_to_instrument
+
+        raw = "NSE,3,X,NSE-X,X,EQ,CASH,EQ,I,NaN,NaN,NaN,NaN,1,,NaN,0,1,1"
+        row: dict[str, str] = dict(zip(_HEADER.split(","), raw.split(","), strict=True))
+        with pytest.raises(TickSizeFormatError):
+            _row_to_instrument(row)
