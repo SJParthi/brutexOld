@@ -97,6 +97,30 @@ class TestRefresh:
         assert len(store.calls[0]["instruments"]) == 5
         assert store.calls[0]["run_id"] == "run-xyz"
 
+    def test_nse_commodity_is_filtered_not_quarantined(self) -> None:
+        """An NSE/BSE COMMODITY row is a scope FILTER, never a quarantine.
+
+        Groww's master carries NSE/BSE COMMODITY derivatives (GOLD /
+        CRUDEOIL / SILVER) out of Track 1 scope (CLAUDE.md §3). They must
+        count as ``filtered`` (a deliberate scope skip), NOT ``quarantined``
+        (a parse failure), and never reach the store. A valid NIFTY row is
+        placed AFTER the commodity row so the filter ``continue`` is
+        exercised mid-iteration (covers the segment-filter branch).
+        """
+        rows = [
+            # NSE COMMODITY option — well-formed, but out of scope → filtered.
+            "NSE,77001,GOLDCE,NSE-GOLD-29Jan27-170100-CE,Gold CE,CE,COMMODITY,NaN,NaN,"
+            "GOLD,77000,2027-01-29,170100,100,0.05,1800,0,1,1",
+            # A valid in-scope index AFTER it → the filter `continue` lands here.
+            "NSE,26000,NIFTY,NSE-NIFTY,Nifty 50,IDX,CASH,NaN,NaN,NaN,NaN,NaN,NaN,1,0.05,NaN,0,1,1",
+        ]
+        fetcher, store = _fetcher(_csv(rows))
+        result = fetcher.refresh()
+        assert (result.parsed, result.filtered, result.quarantined) == (1, 1, 0)
+        saved = store.calls[0]["instruments"]
+        assert all(i.segment.value != "COMMODITY" for i in saved)
+        assert {i.vendor_symbol for i in saved} == {"NSE-NIFTY"}
+
     def test_in_scope_callable_uses_fetch_scope(self) -> None:
         fetcher, store = _fetcher(_csv())
         fetcher.refresh()
@@ -266,6 +290,6 @@ class TestIndexToleranceIsIndexOnly:
         from brutex.adapters.groww.instruments import _row_to_instrument
 
         raw = "NSE,3,X,NSE-X,X,EQ,CASH,EQ,I,NaN,NaN,NaN,NaN,1,,NaN,0,1,1"
-        row = dict(zip(_HEADER.split(","), raw.split(","), strict=True))
+        row: dict[str, str] = dict(zip(_HEADER.split(","), raw.split(","), strict=True))
         with pytest.raises(TickSizeFormatError):
             _row_to_instrument(row)
