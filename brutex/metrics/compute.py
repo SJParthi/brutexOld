@@ -48,6 +48,13 @@ __all__ = ["Moments", "ResultMetrics", "compute_metrics"]
 #: ``None``. Variance needs >= 2 samples; skewness >= 2; kurtosis >= 2.
 _MIN_SAMPLES_VARIANCE: Final[int] = 2
 
+#: Finite cap for the annualised CAGR (%). Tiny backtest spans annualise to
+#: meaningless magnitudes (a sub-day window can even overflow float64 in the
+#: ``growth ** (1/span)`` step); capping keeps the result row inf-free
+#: (spec line 746) and ranking-stable — the Stage-4 z-score is clamped to
+#: [-3, +3] regardless. Recorded in DEC-METRICS-001 (MIGRATION #305).
+_CAGR_CAP_PCT: Final[float] = 1.0e9
+
 
 @dataclass(frozen=True, slots=True)
 class Moments:
@@ -473,7 +480,15 @@ def compute_metrics(
         cagr_pct = -100.0
     else:
         growth = end_equity / equity.start_equity_paisa
-        cagr_pct = 100.0 * (growth ** (1.0 / equity.span_years) - 1.0)
+        # Annualisation explodes for tiny spans (a sub-day backtest annualises
+        # to a meaningless magnitude and can raise OverflowError). Guard the
+        # overflow and clamp to a finite cap so the row stays inf-free
+        # (spec line 746); the Stage-4 z-score clamp [-3, +3] absorbs the rest.
+        try:
+            annualised_growth = growth ** (1.0 / equity.span_years)
+        except OverflowError:
+            annualised_growth = math.inf
+        cagr_pct = max(-100.0, min(100.0 * (annualised_growth - 1.0), _CAGR_CAP_PCT))
 
     # ── Drawdown (spec lines 547-555) ────────────────────────────────
     max_dd_paisa, max_dd_pct, max_dd_bars, ulcer = _drawdown_stats(equity)
@@ -488,8 +503,9 @@ def compute_metrics(
     profit_factor = _safe_ratio(float(gross_profit), float(gross_loss_abs))
     avg_win = gross_profit // winners if winners else 0
     avg_loss_abs = gross_loss_abs // losers if losers else 0
-    # win_loss_ratio = avg_win / avg_loss (spec line 565). None when no losers.
-    win_loss_ratio = _safe_ratio(float(avg_win), float(avg_loss_abs)) if losers else None
+    # win_loss_ratio = avg_win / avg_loss (spec line 565). _safe_ratio already
+    # yields None when avg_loss_abs == 0 (which holds iff there are no losers).
+    win_loss_ratio = _safe_ratio(float(avg_win), float(avg_loss_abs))
     # expectancy_paisa = money per trade (spec line 566) = net P&L / n.
     expectancy = net_pnl // n_trades
     avg_mfe = sum_mfe // n_trades
@@ -523,12 +539,16 @@ def compute_metrics(
     # mar = Calmar alternative (spec line 543). Identical definition
     # (CAGR / MaxDD%); kept as a distinct column per the schema.
     mar = calmar
-    # information_ratio = excess return vs buy-and-hold (spec line 544).
-    # Excess total return divided by the tracking-error (std of per-trade
-    # returns). None when std is 0/undefined.
-    excess_return_pct = total_return_pct - benchmark_return_pct
+    # information_ratio = excess return vs buy-and-hold (spec line 544), kept on
+    # a per-trade horizon so it stays comparable across results with different
+    # trade counts: (mean per-trade return − per-trade share of the buy-and-hold
+    # return) / per-trade-return std. With the default zero benchmark it
+    # collapses to the Sharpe ratio. None when std is 0/undefined. (DEC-METRICS-001.)
+    benchmark_per_trade = (benchmark_return_pct / 100.0) / n_trades
     information = (
-        None if std_dev is None or std_dev == 0.0 else (excess_return_pct / 100.0) / std_dev
+        None
+        if std_dev is None or std_dev == 0.0
+        else (moments.mean - benchmark_per_trade) / std_dev
     )
     # omega_ratio at 0% threshold (spec line 545): Σ gains / Σ |losses|
     # over the return series, with the threshold at zero. Equivalent to

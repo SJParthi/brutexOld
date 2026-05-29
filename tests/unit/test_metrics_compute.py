@@ -451,14 +451,40 @@ def test_omega_equals_profit_factor_at_zero_threshold() -> None:
 
 
 def test_information_ratio_uses_benchmark() -> None:
-    """Information ratio subtracts the buy-and-hold benchmark return."""
+    """Information ratio = (mean per-trade return − per-trade benchmark) / std.
+
+    Per-trade horizon (DEC-METRICS-001): the buy-and-hold benchmark is shared
+    out per trade so the ratio is comparable across results with different
+    trade counts.
+    """
     trades = [_trade(20_000), _trade(-10_000), _trade(30_000)]
     rets = [0.02, -0.01, 0.03]
     mean = sum(rets) / 3
     std = math.sqrt(sum((r - mean) ** 2 for r in rets) / 3)
-    # total_return_pct = 4.0; benchmark 1.0 -> excess 3.0% = 0.03 fraction.
+    benchmark_per_trade = (1.0 / 100.0) / 3  # 1.0% buy-and-hold, shared per trade
     m = compute_metrics(trades, _curve([1_000_000]), total_bars=10, benchmark_return_pct=1.0)
-    assert m.information_ratio == pytest.approx(0.03 / std)
+    assert m.information_ratio == pytest.approx((mean - benchmark_per_trade) / std)
+
+
+def test_information_ratio_zero_benchmark_equals_sharpe() -> None:
+    """With the default zero benchmark, IR collapses to the Sharpe ratio."""
+    trades = [_trade(20_000), _trade(-10_000), _trade(30_000)]
+    m = compute_metrics(trades, _curve([1_000_000]), total_bars=10)
+    assert m.information_ratio == pytest.approx(m.sharpe_ratio)
+
+
+def test_cagr_tiny_span_stays_finite_and_capped() -> None:
+    """A sub-day span annualises to a huge magnitude; it must NOT overflow or
+    return inf — it is clamped to the finite CAGR cap (B1 regression,
+    spec line 746 no-inf gate)."""
+    trades = [_trade(50_000)]
+    # A near-instant span makes growth ** (1/span) overflow float64; the guard
+    # must catch the OverflowError and clamp instead of crashing.
+    m = compute_metrics(trades, _curve([1_000_000], span=1.0e-6), total_bars=10)
+    assert math.isfinite(m.cagr_pct)
+    assert m.cagr_pct == pytest.approx(1.0e9)  # clamped to _CAGR_CAP_PCT
+    # calmar (cagr / MDD%) must also stay finite.
+    assert m.calmar_ratio is None or math.isfinite(m.calmar_ratio)
 
 
 # ── Distribution ────────────────────────────────────────────────────
