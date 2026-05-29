@@ -3,8 +3,9 @@
 These exercise the pure orchestration core (:func:`run_universe_ingest`) with
 fakes (no DuckDB, no SDK, no network), plus the synthetic sources that power
 ``brutex fetch --universe --dry-run``. The module must import without the
-``fno_math`` Rust kernel (it uses ``TYPE_CHECKING`` for the result types), so
-these tests collect even when the kernel is not built.
+``fno_math`` Rust kernel (it depends only on structural ``Protocol`` types, not
+the heavy concrete result classes), so these tests collect even when the kernel
+is not built.
 """
 
 from __future__ import annotations
