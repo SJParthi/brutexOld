@@ -528,6 +528,64 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
                 f"use the Load instruments button once online",
                 file=sys.stderr,
             )
+
+        # Auto-pull expiries + contracts for the full universe once credentials
+        # are present (DEC-AUTO-UNIVERSE-001). The keyless instrument master
+        # loads above; expiries/contracts need Groww auth (CLAUDE.md §6), so
+        # this is gated on credentials_present() AND a non-empty instrument
+        # master — the pure decision lives in should_auto_pull_universe(). Runs
+        # in a BACKGROUND daemon thread so a long live pull (≈250 underlyings)
+        # never blocks the dashboard from serving; candles remain a manual
+        # pull. The thread REUSES the dashboard's already-open store (single
+        # DuckDB writer — no second read-write handle). Best-effort: never
+        # crashes the server.
+        try:  # pragma: no cover — live network + server + thread path
+            from brutex.config.credentials import credentials_present
+            from brutex.dashboard.auto_pull import should_auto_pull_universe
+            from brutex.dashboard.universe_query import universe_summary
+
+            gate_summary = universe_summary(store.load_snapshot(in_scope_only=False))
+            if should_auto_pull_universe(
+                credentials_present=credentials_present(),
+                instrument_total=gate_summary["total"],
+            ):
+                import threading
+                from datetime import UTC, datetime
+
+                def _auto_universe_pull() -> None:
+                    try:
+                        year = datetime.now(UTC).year
+                        report = _run_live_universe_ingest(lake_root, years=[year], store=store)
+                        print(
+                            f"[brutex] auto-pulled universe → {report.underlyings} "
+                            f"underlyings · {report.expiries} expiries · "
+                            f"{report.contracts} contracts",
+                            file=sys.stderr,
+                        )
+                    except Exception as exc:  # pylint: disable=broad-exception-caught
+                        print(
+                            f"[brutex] universe auto-pull skipped ({exc})",
+                            file=sys.stderr,
+                        )
+
+                threading.Thread(
+                    target=_auto_universe_pull,
+                    name="brutex-universe-pull",
+                    daemon=True,
+                ).start()
+                print(
+                    "[brutex] credentials present → auto-pulling expiries/contracts in background…",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "[brutex] no Groww credentials yet → skipping expiries/contracts "
+                    "auto-pull (set via `brutex auth set` or the Credentials page; the "
+                    "keyless instrument list is already loaded)",
+                    file=sys.stderr,
+                )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            print(f"[brutex] universe auto-pull setup skipped ({exc})", file=sys.stderr)
     app = build_app(state, instrument_store=store)
     print(f"[brutex] dashboard → http://{host}:{port}  (Ctrl-C to stop)")
     print(f"[brutex] logs → {log_path}  ·  live viewer: http://{host}:{port}/logs")
@@ -710,9 +768,18 @@ def _run_dry_run_universe_ingest(  # pragma: no cover — needs DuckDB store + f
 
 
 def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + DuckDB
-    lake_root: Path, *, years: list[int]
+    lake_root: Path, *, years: list[int], store: Any = None
 ) -> Any:
-    """Run the universe ingest against live Groww (the real instrument/expiry/contract SDK)."""
+    """Run the universe ingest against live Groww (the real instrument/expiry/contract SDK).
+
+    When ``store`` is ``None`` (the default — ``fetch --universe`` path) this
+    opens its own :class:`~brutex.data.instrument_store.InstrumentStore` on
+    ``lake_root/"instruments.duckdb"`` and closes it in ``finally``. When an
+    already-open ``store`` is injected (the dashboard background-pull path,
+    DEC-AUTO-UNIVERSE-001) it is REUSED and NOT closed — this shares the single
+    DuckDB writer the dashboard already holds, so the on-run auto-pull never
+    opens a second read-write handle to the same file.
+    """
     from growwapi.groww.exceptions import BaseGrowwException
 
     from brutex.adapters.groww.auth import GrowwAuth
@@ -723,7 +790,9 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
     from brutex.data.instrument_store import InstrumentStore
     from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 
-    store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    owns_store = store is None
+    if store is None:
+        store = InstrumentStore.open(lake_root / "instruments.duckdb")
     try:
         sdk = GrowwAuth.from_env().session()
         bucket = AdaptiveTokenBucket()
@@ -757,7 +826,8 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
             instrument_fetcher, expiry_fetcher, contract_fetcher, underlyings, years
         )
     finally:
-        store.close()
+        if owns_store:
+            store.close()
 
 
 def _run_instrument_master_load(  # pragma: no cover — opens DuckDB store + live network
