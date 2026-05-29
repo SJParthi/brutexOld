@@ -17,14 +17,18 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
+from pathlib import Path
 from typing import Any
 
 import pytest
 import structlog
 from brutex.observability.logging import (
+    _FILE_HANDLER_TAG,
     _level_to_int,
     configure_logging,
     reset_configuration,
+    resolve_log_file,
 )
 
 
@@ -132,3 +136,112 @@ class TestResetConfiguration:
         configure_logging(level="INFO", json_renderer=True)
         # If we got here without error, reset path is exercised.
         assert len(logging.getLogger().handlers) == 1
+
+
+class TestResolveLogFile:
+    """Path resolution order: explicit → BRUTEX_LOG_FILE → BRUTEX_LOG_DIR → default."""
+
+    def test_explicit_path_wins(self, tmp_path: Path) -> None:
+        target = tmp_path / "custom" / "x.log"
+        assert resolve_log_file(target) == target
+
+    def test_explicit_str_path_expanded(self) -> None:
+        # ``~`` is expanded for a string argument too.
+        out = resolve_log_file("~/somewhere/y.log")
+        assert out == Path.home() / "somewhere" / "y.log"
+
+    def test_env_log_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        target = tmp_path / "envfile.log"
+        monkeypatch.setenv("BRUTEX_LOG_FILE", str(target))
+        monkeypatch.delenv("BRUTEX_LOG_DIR", raising=False)
+        assert resolve_log_file() == target
+
+    def test_env_log_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("BRUTEX_LOG_FILE", raising=False)
+        monkeypatch.setenv("BRUTEX_LOG_DIR", str(tmp_path))
+        assert resolve_log_file() == tmp_path / "brutex.log"
+
+    def test_default_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("BRUTEX_LOG_FILE", raising=False)
+        monkeypatch.delenv("BRUTEX_LOG_DIR", raising=False)
+        assert resolve_log_file() == Path.home() / ".brutex" / "logs" / "brutex.log"
+
+
+class TestFileSink:
+    """The opt-in rotating file handler writes alongside the console."""
+
+    def test_disabled_by_default(self) -> None:
+        ret = configure_logging(level="INFO", json_renderer=True)
+        assert ret is None
+        handlers = logging.getLogger().handlers
+        assert not any(getattr(h, _FILE_HANDLER_TAG, False) for h in handlers)
+
+    def test_enable_file_adds_rotating_handler(self, tmp_path: Path) -> None:
+        target = tmp_path / "logs" / "brutex.log"
+        ret = configure_logging(level="INFO", json_renderer=True, log_file=target)
+        assert ret == target
+        # Parent dir was created.
+        assert target.parent.is_dir()
+        handlers = logging.getLogger().handlers
+        file_handlers = [h for h in handlers if getattr(h, _FILE_HANDLER_TAG, False)]
+        assert len(file_handlers) == 1
+        assert isinstance(file_handlers[0], logging.handlers.RotatingFileHandler)
+        # Console handler still present (console is not broken).
+        assert len(handlers) == 2
+
+    def test_enable_file_via_flag_uses_env_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BRUTEX_LOG_FILE", raising=False)
+        monkeypatch.setenv("BRUTEX_LOG_DIR", str(tmp_path))
+        ret = configure_logging(level="INFO", json_renderer=True, enable_file=True)
+        assert ret == tmp_path / "brutex.log"
+
+    def test_file_receives_json_lines(self, tmp_path: Path) -> None:
+        target = tmp_path / "brutex.log"
+        configure_logging(level="INFO", json_renderer=False, log_file=target)
+        log = structlog.get_logger("filetest")
+        log.warning("file_event", code=7)
+        # Flush handlers so the file is written.
+        for h in logging.getLogger().handlers:
+            h.flush()
+        text = target.read_text(encoding="utf-8").strip()
+        last = text.split("\n")[-1]
+        payload = json.loads(last)  # file sink is always JSON even in console mode
+        assert payload["event"] == "file_event"
+        assert payload["code"] == 7
+        assert payload["level"] == "warning"
+
+    def test_repeated_calls_do_not_stack_file_handlers(self, tmp_path: Path) -> None:
+        target = tmp_path / "brutex.log"
+        configure_logging(level="INFO", json_renderer=True, log_file=target)
+        reset_configuration()
+        configure_logging(level="DEBUG", json_renderer=True, log_file=target)
+        handlers = logging.getLogger().handlers
+        file_handlers = [h for h in handlers if getattr(h, _FILE_HANDLER_TAG, False)]
+        assert len(file_handlers) == 1
+
+    def test_idempotent_with_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "brutex.log"
+        configure_logging(level="INFO", json_renderer=True, log_file=target)
+        before = id(logging.getLogger().handlers[0])
+        # Identical args → no-op, returns resolved path without rebuilding.
+        ret = configure_logging(level="INFO", json_renderer=True, log_file=target)
+        assert ret == target
+        after = id(logging.getLogger().handlers[0])
+        assert before == after
+
+    def test_custom_rotation_params(self, tmp_path: Path) -> None:
+        target = tmp_path / "brutex.log"
+        configure_logging(
+            level="INFO",
+            json_renderer=True,
+            log_file=target,
+            max_bytes=1024,
+            backup_count=2,
+        )
+        handlers = logging.getLogger().handlers
+        fh = next(h for h in handlers if getattr(h, _FILE_HANDLER_TAG, False))
+        assert isinstance(fh, logging.handlers.RotatingFileHandler)
+        assert fh.maxBytes == 1024
+        assert fh.backupCount == 2

@@ -404,9 +404,16 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         )
         return EXIT_USER_ERROR
 
+    # Persist logs to a rotating file (in addition to the console) so a
+    # `make run` session has a viewable log trail — DEC-LOGS-VIEWER-001.
+    from brutex.observability.logging import configure_logging
+
+    log_path = configure_logging(json_renderer=True, enable_file=True)
+
     state = DashboardState()
     app = build_app(state, instrument_store=lake_root)
     print(f"[brutex] dashboard → http://{host}:{port}  (Ctrl-C to stop)")
+    print(f"[brutex] logs → {log_path}  ·  live viewer: http://{host}:{port}/logs")
     uvicorn.run(app, host=host, port=port)
     return EXIT_OK
 
