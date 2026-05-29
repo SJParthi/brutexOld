@@ -34,7 +34,7 @@ import csv
 import hashlib
 import io
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final, Protocol
@@ -49,7 +49,9 @@ from brutex.models import (
     normalise_tick_size,
 )
 from brutex.universe import (
+    UnderlyingEconomics,
     build_fno_eligible_underlyings,
+    build_underlying_economics,
     is_in_fetch_scope,
     is_universe_underlying,
 )
@@ -228,6 +230,33 @@ def _row_to_instrument(row: dict[str, str]) -> Instrument:
     )
 
 
+def _backfill_economics(
+    instrument: Instrument,
+    economics: dict[tuple[Exchange, str], UnderlyingEconomics],
+) -> Instrument:
+    """Return *instrument* with its economics overridden from its legs, if known.
+
+    The persisted universe underlyings (IDX / EQ) carry BLANK / placeholder
+    ``lot_size`` / ``tick_size`` / ``freeze_quantity`` in the Groww master — the
+    real values live only on the derivative legs (DEC-UNDERLYING-ECONOMICS-001).
+    For a candidate underlying we look up ``(exchange, trading_symbol)`` in the
+    leg-derived *economics* map and, when present, rebuild the frozen
+    :class:`Instrument` with the real lot / tick / freeze. When the underlying
+    has no legs (e.g. a non-F&O index like NIFTY100) the map has no entry and the
+    instrument is returned UNCHANGED — its own master values stand.
+    """
+    found = economics.get((instrument.exchange, instrument.trading_symbol))
+    if found is None:
+        return instrument
+    lot_size, tick_size, freeze_quantity = found
+    return replace(
+        instrument,
+        lot_size=lot_size,
+        tick_size=tick_size,
+        freeze_quantity=freeze_quantity,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class InstrumentRefreshResult:
     """Outcome of one :meth:`InstrumentMasterFetcher.refresh`.
@@ -350,7 +379,18 @@ class InstrumentMasterFetcher:
         # recoverable on demand via get_contracts (CONTRACTS surface), so the
         # lake stays ~241 rows for the real master instead of ~89,000.
         fno_eligible = build_fno_eligible_underlyings(instruments)
-        persisted = [i for i in instruments if is_universe_underlying(i, fno_eligible)]
+        # Harvest the REAL lot/tick/freeze from the derivative legs (the only
+        # rows that carry them) BEFORE the legs are discarded, then back-fill
+        # each persisted IDX/EQ underlying from that map so the lean lake stores
+        # true economics instead of the master's blank placeholders
+        # (DEC-UNDERLYING-ECONOMICS-001). Same single in-memory pass that powers
+        # F&O-eligibility — no extra scan of the ~tens-of-thousands of legs.
+        economics = build_underlying_economics(instruments)
+        persisted = [
+            _backfill_economics(i, economics)
+            for i in instruments
+            if is_universe_underlying(i, fno_eligible)
+        ]
         csv_sha256 = hashlib.sha256(csv_text.encode("utf-8")).hexdigest()
         upsert = self.store.upsert_many(
             persisted,

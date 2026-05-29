@@ -28,11 +28,23 @@ every non-pragma line + branch in this module is covered offline.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import Any
 
 from brutex.adapters.groww.instruments import InstrumentMasterFetcher
 from brutex.dashboard.universe_query import universe_summary
+
+#: Serialises concurrent keyless loads (DEC-UNDERLYING-ECONOMICS-001). Two
+#: overlapping ``load-instruments`` POSTs each do an ``upsert_many(...,
+#: replace_snapshot=True)`` which wipes the whole snapshot_date before
+#: re-inserting; interleaving a wipe between another call's wipe and insert left
+#: the lake with indices but 0 stocks ("25 indices · 0 stocks"). This module-
+#: level lock makes the download+parse+upsert+read-back atomic w.r.t. other
+#: loads in the same process, so a wipe can never interleave another load's
+#: insert. The client-side in-flight guard (universe.html) prevents the races at
+#: the source; this lock is the server-side belt-and-braces.
+_LOAD_LOCK: threading.Lock = threading.Lock()
 
 
 def load_instrument_master(
@@ -87,17 +99,21 @@ def load_instrument_master(
             run_id_factory=run_id_factory or (lambda: "instruments-load"),
         )
 
-    result = fetcher.refresh()
+    # Serialise the whole refresh + read-back under the module lock so two
+    # concurrent loads cannot interleave a snapshot wipe with another's insert
+    # (DEC-UNDERLYING-ECONOMICS-001 — the "25 indices · 0 stocks" corruption).
+    with _LOAD_LOCK:
+        result = fetcher.refresh()
 
-    # Fast + lean-store-correct path (DEC-INSTRUMENT-UNIVERSE-FAST-001): the
-    # store now holds ONLY the universe underlyings (no option/future legs),
-    # so summarise from the IDX + EQ candidates plus the SQL-derived eligible
-    # set rather than a full snapshot (which would carry no legs to infer
-    # eligibility from). Both paths use the COMMON ``universe_summary``
-    # classifier — no re-derivation of the index-vs-stock split.
-    eligible = store.fno_eligible_underlyings()
-    candidates = store.list_index_equity_instruments()
-    summary = universe_summary(candidates, fno_eligible=eligible)
+        # Fast + lean-store-correct path (DEC-INSTRUMENT-UNIVERSE-FAST-001): the
+        # store now holds ONLY the universe underlyings (no option/future legs),
+        # so summarise from the IDX + EQ candidates plus the SQL-derived
+        # eligible set rather than a full snapshot (which would carry no legs to
+        # infer eligibility from). Both paths use the COMMON ``universe_summary``
+        # classifier — no re-derivation of the index-vs-stock split.
+        eligible = store.fno_eligible_underlyings()
+        candidates = store.list_index_equity_instruments()
+        summary = universe_summary(candidates, fno_eligible=eligible)
 
     return {
         "parsed": result.parsed,
