@@ -1,7 +1,7 @@
 # BruteX — development Makefile
 # Every target maps directly to a CI gate in REQUIREMENTS.md §17.
 
-.PHONY: help setup install run fmt lint type test test-unit test-cov audit bench clean all
+.PHONY: help setup install run preflight fmt lint type test test-unit test-cov audit bench clean all
 
 help:
 	@echo "BruteX development targets:"
@@ -43,7 +43,13 @@ setup:
 # module top, combo.py:64), then launches the one-click `brutex run` (resolves
 # the lake root, opens the browser, boots the server). Idempotent: re-running
 # skips work already done. Open http://127.0.0.1:9080.
-run:
+# Verify the three host tools `run` depends on (python3.12 / make / cargo)
+# BEFORE doing any work, so a missing tool yields a clear one-line fix instead
+# of a cryptic downstream crash (DEC-RUN-PREFLIGHT-001).
+preflight:
+	@PY="$(PY)" bash scripts/run/preflight.sh
+
+run: preflight
 	@test -d $(VENV) || $(PY) -m venv $(VENV)
 	$(VPIP) install --upgrade pip
 	$(VPIP) install -e ".[data,ui]"

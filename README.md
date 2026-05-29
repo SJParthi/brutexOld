@@ -133,6 +133,23 @@ python -m brutex dashboard                           # alias: brutex run
 For a full development environment (all extras + Rust toolchain + the
 `brutex doctor` smoke), run `make setup` (wraps `scripts/setup/bootstrap.sh`).
 
+Every run starts with a **preflight** (`scripts/run/preflight.sh`,
+DEC-RUN-PREFLIGHT-001) that verifies the three host tools `make run` is built
+on — `python3.12`, `make`, `cargo` — and, if one is missing, prints the exact
+one-line install command for your OS instead of crashing. Everything the
+project owns (venv, libraries, Rust kernel) is then installed automatically.
+The only manual step that can ever exist is installing one of those three base
+tools on a bare machine — a process cannot install the interpreter it runs on.
+
+**In IntelliJ IDEA / PyCharm — one click, nothing to configure:** open the
+cloned folder and pick **`brutex (one-click · make run)`** from the Run
+dropdown (top-right ▶). It ships with the repo (`.idea/runConfigurations/`)
+and runs `make run` in a terminal tab — venv, libs, Rust kernel, and the
+dashboard are all built/launched for you. Prerequisites on the machine:
+`python3.12`, `make`, and `cargo` (for the one-time kernel build). The older
+`BruteX` Python config also exists, but it assumes the interpreter + deps are
+already set up — use the one-click for a fresh clone.
+
 > **What you'll see today:** the **Strategy Report** dashboard renders
 > immediately, but its numbers are **placeholders**. Real values appear
 > only after (a) data is fetched into the lake (needs Groww credentials,

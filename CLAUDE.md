@@ -186,6 +186,12 @@ Track 1 spec locked after 4-agent hostile-review pass._
   or Rust.
 - **No look-ahead** — at bar N, the engine may only access bars 0..N.
   Property P-06 (instrumented bar accessor) enforces this.
+- **Money display = 2 decimals, money-only** (DEC-MONEY-2DP-001) — every
+  paisa→rupee display goes through `brutex.money` (`format_inr` /
+  `round_money` / `paisa_to_rupees`); rounding happens at the display
+  boundary only. NEVER round statistical metrics (Sharpe, DSR, p-values,
+  CPCV) — they keep full precision or strategy ranking breaks. Internal
+  storage stays int64 paisa.
 
 ---
 

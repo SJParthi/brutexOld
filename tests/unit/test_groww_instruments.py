@@ -127,6 +127,37 @@ class TestRefresh:
         assert store.calls[0]["instruments"] == []
 
 
+class TestTestInstrumentFilter:
+    """Groww internal test instruments (NSETEST / negative strike) are filtered."""
+
+    def test_nsetest_rows_are_filtered(self) -> None:
+        junk = (
+            "NSE,36691,031NSETEST36DECFUT,NSE-031NSETEST-27Nov36-FUT,,FUT,FNO,"
+            "NaN,NaN,031NSETEST,14753,2036-11-27,-0.01,50,0.05,100001,0,1,1"
+        )
+        fetcher, store = _fetcher(_csv([*_ROWS, junk]))
+        result = fetcher.refresh()
+        # baseline: 5 parsed / 1 filtered (MCX) / 1 quarantined; the junk row adds 1 filtered
+        assert result.parsed == 5
+        assert result.filtered == 2
+        # no NSETEST instrument reached the store
+        assert all(
+            "NSETEST" not in (inst.trading_symbol or "").upper()
+            for inst in store.calls[0]["instruments"]
+        )
+
+    def test_negative_strike_row_is_filtered(self) -> None:
+        # No NSETEST marker — isolates the negative-strike branch.
+        junk = (
+            "NSE,77777,WEIRDCE,NSE-WEIRD-30Jan25-100-CE,Weird,CE,FNO,"
+            "NaN,NaN,WEIRD,26000,2025-01-30,-5,75,0.05,1800,0,1,1"
+        )
+        fetcher, _store = _fetcher(_csv([*_ROWS, junk]))
+        result = fetcher.refresh()
+        assert result.parsed == 5
+        assert result.filtered == 2  # MCX + negative-strike junk
+
+
 class TestSchemaDrift:
     def test_missing_required_column_aborts_without_upsert(self) -> None:
         bad_header = _HEADER.replace("tick_size,", "")  # drop a required column
