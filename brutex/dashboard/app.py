@@ -686,6 +686,30 @@ def build_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(report.to_dict())
 
+    @app.get("/api/v1/logs")
+    async def api_logs(
+        lines: int = Query(default=200),
+    ) -> JSONResponse:
+        """GET /api/v1/logs?lines=N — tail of the rotating log file (DEC-LOGS-VIEWER-001).
+
+        Thin wrapper over
+        :func:`brutex.observability.log_tail.tail_records`. ``lines`` is
+        clamped to ``[1, 2000]`` inside the (coverage-tested) reader, so a
+        hostile / malformed query string can never trigger an unbounded
+        read. Returns parsed JSON-log records plus the resolved file path.
+        """
+        from brutex.observability.log_tail import tail_records
+        from brutex.observability.logging import resolve_log_file
+
+        path = resolve_log_file()
+        records = tail_records(path, max_lines=lines)
+        return JSONResponse({"lines": records, "path": str(path)})
+
+    @app.get("/logs", response_class=HTMLResponse)
+    async def logs_page() -> str:
+        """GET /logs — live log viewer page (DEC-LOGS-VIEWER-001)."""
+        return _render_logs_html()
+
     @app.get("/universe", response_class=HTMLResponse)
     async def universe_page() -> str:
         """GET /universe — the F&O Universe Explorer page (DEC-UNIVERSE-DASHBOARD-001)."""
@@ -961,6 +985,30 @@ def _load_universe_template() -> str:
 def _render_universe_html() -> str:
     """Return the F&O Universe Explorer page HTML (DEC-UNIVERSE-DASHBOARD-001)."""
     return _load_universe_template()
+
+
+_LOGS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "logs.html"
+_LOGS_TEMPLATE_CACHE: str | None = None
+
+
+def _load_logs_template() -> str:
+    """Load + cache the live log-viewer page template.
+
+    Ships as a package-relative resource at
+    ``brutex/dashboard/templates/logs.html`` (DEC-LOGS-VIEWER-001). The
+    template polls ``/api/v1/logs`` every 2 seconds, escapes every
+    interpolated log string before insertion (XSS), colour-codes the level,
+    and auto-scrolls to the newest line. Loaded once, then served verbatim.
+    """
+    global _LOGS_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _LOGS_TEMPLATE_CACHE is None:
+        _LOGS_TEMPLATE_CACHE = _LOGS_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _LOGS_TEMPLATE_CACHE
+
+
+def _render_logs_html() -> str:
+    """Return the live log-viewer page HTML (DEC-LOGS-VIEWER-001)."""
+    return _load_logs_template()
 
 
 _INSTRUMENTS_HTML_BLOCK = """\
