@@ -405,7 +405,17 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         return EXIT_USER_ERROR
 
     state = DashboardState()
-    app = build_app(state, instrument_store=lake_root)
+    # Open a real InstrumentStore so the F&O Universe Explorer routes can call
+    # store.load_snapshot(...). Passing the bare lake_root Path here was the
+    # cause of the `'PosixPath' object has no attribute 'load_snapshot'` 500.
+    # InstrumentStore.open() runs CREATE TABLE IF NOT EXISTS, so a fresh/empty
+    # lake yields a valid empty store (universe shows 0 instruments, no crash).
+    store: Any = None
+    if lake_root is not None:
+        from brutex.data.instrument_store import InstrumentStore
+
+        store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    app = build_app(state, instrument_store=store)
     print(f"[brutex] dashboard → http://{host}:{port}  (Ctrl-C to stop)")
     uvicorn.run(app, host=host, port=port)
     return EXIT_OK
