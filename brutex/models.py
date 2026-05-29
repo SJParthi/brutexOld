@@ -116,8 +116,8 @@ class Instrument:
     underlying_exchange_token: int | None
 
     # Contract economics
-    lot_size: int
-    tick_size: Decimal  # ALWAYS in rupees, normalised from paise if needed
+    lot_size: int  # 0 for indices (not directly tradable)
+    tick_size: Decimal  # rupees, normalised; 0 for indices (not directly tradable)
     freeze_quantity: int | None
 
     # Derivatives-only fields
@@ -151,6 +151,11 @@ class Instrument:
         return self.instrument_type in {InstrumentType.CE, InstrumentType.PE}
 
     @property
+    def is_index(self) -> bool:
+        """True for IDX only (reference instruments — not directly tradable)."""
+        return self.instrument_type == InstrumentType.IDX
+
+    @property
     def option_side(self) -> OptionSide | None:
         """CALL / PUT for options, None for non-options."""
         if self.instrument_type == InstrumentType.CE:
@@ -169,10 +174,16 @@ class Instrument:
             raise ValueError(f"Option {self.vendor_symbol} must have strike_price")
         if self.is_option and self.strike_price is not None and self.strike_price <= 0:
             raise ValueError(f"Option {self.vendor_symbol} strike_price must be positive")
-        if self.lot_size <= 0:
-            raise ValueError(f"{self.vendor_symbol} lot_size must be positive")
-        if self.tick_size <= 0:
-            raise ValueError(f"{self.vendor_symbol} tick_size must be positive")
+        if self.is_index:
+            if self.lot_size < 0:
+                raise ValueError(f"{self.vendor_symbol} lot_size must not be negative")
+            if self.tick_size < 0:
+                raise ValueError(f"{self.vendor_symbol} tick_size must not be negative")
+        else:
+            if self.lot_size <= 0:
+                raise ValueError(f"{self.vendor_symbol} lot_size must be positive")
+            if self.tick_size <= 0:
+                raise ValueError(f"{self.vendor_symbol} tick_size must be positive")
 
 
 # ────────────────────────────────────────────────────────────────────────

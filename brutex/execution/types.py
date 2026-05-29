@@ -75,7 +75,17 @@ class InstrumentMeta:
     freeze_quantity: int | None = None
 
     def __post_init__(self) -> None:
-        if self.lot_size <= 0:
+        # Indices (IDX) are reference instruments — never directly tradable
+        # (brutex/universe.py) — so the Groww master legitimately carries no
+        # lot_size for them (parsed as 0; see DEC-INDEX-PARSE-FIX-001). The
+        # execution simulator never sizes an order against an index, so a
+        # zero lot is tolerated for IDX only; every tradable type stays strict.
+        if self.instrument_type == InstrumentType.IDX:
+            if self.lot_size < 0:
+                raise ValueError(
+                    f"InstrumentMeta.lot_size must not be negative, got {self.lot_size}"
+                )
+        elif self.lot_size <= 0:
             raise ValueError(f"InstrumentMeta.lot_size must be positive, got {self.lot_size}")
         if self.freeze_quantity is not None and self.freeze_quantity <= 0:
             raise ValueError(

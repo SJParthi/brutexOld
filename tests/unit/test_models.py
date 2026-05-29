@@ -127,6 +127,7 @@ class TestInstrumentClassification:
         i = _minimal_equity()
         assert i.is_derivative is False
         assert i.is_option is False
+        assert i.is_index is False
         assert i.option_side is None
 
     def test_future_is_derivative_not_option(self) -> None:
@@ -165,6 +166,7 @@ class TestInstrumentClassification:
         )
         assert i.is_derivative is False
         assert i.is_option is False
+        assert i.is_index is True  # DEC-INDEX-PARSE-FIX-001
         assert i.option_side is None
 
 

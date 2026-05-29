@@ -26,9 +26,14 @@ _HEADER = (
 )
 # One NSE index (IDX), one F&O-eligible stock (RELIANCE EQ) + a RELIANCE
 # derivative (CE) that makes the stock F&O-eligible, plus one out-of-scope
-# MCX row that must be filtered (not parsed).
+# MCX row that must be filtered (not parsed). The second IDX row
+# (BANKNIFTY) is REAL-STYLE per DEC-INDEX-PARSE-FIX-001 — BLANK lot_size /
+# tick_size and a non-numeric exchange_token (the NSE index SYMBOL string).
+# Before the fix it quarantined (index_count was 1); now it parses, so the
+# expected index_count is 2.
 _ROWS = [
     "NSE,26000,NIFTY,NSE-NIFTY,Nifty 50,IDX,CASH,NaN,NaN,NaN,NaN,NaN,NaN,1,0.05,NaN,0,1,1",
+    "NSE,BANKNIFTY,BANKNIFTY,NSE-BANKNIFTY,NIFTY Bank,IDX,CASH,,,,,,,,,,0,0,",
     "NSE,2885,RELIANCE,NSE-RELIANCE,Reliance,EQ,CASH,EQ,INE002A01018,NaN,NaN,NaN,NaN,1,0.05,NaN,0,1,1",
     "NSE,55002,RELIANCECE,NSE-RELIANCE-30Jan25-1200-CE,Reliance CE,CE,FNO,NaN,NaN,RELIANCE,2885,2025-01-30,1200,250,0.05,1800,0,1,1",
     "MCX,9999,GOLD,MCX-GOLD,Gold,FUT,FNO,NaN,NaN,GOLD,9999,2025-02-05,NaN,100,1.00,NaN,0,1,1",
@@ -53,22 +58,25 @@ def test_loads_and_summarises_keyless(tmp_path: Path) -> None:
         http_get=lambda _url: _csv(_ROWS),
         run_id_factory=lambda: "test-load",
     )
-    # NIFTY idx + RELIANCE eq + RELIANCE CE = 3 parsed; MCX filtered.
-    assert result["parsed"] == 3
+    # NIFTY idx + BANKNIFTY idx (real-style) + RELIANCE eq + RELIANCE CE = 4
+    # parsed; MCX filtered. The real-style BANKNIFTY row (blank economics,
+    # non-numeric token) now parses too (DEC-INDEX-PARSE-FIX-001).
+    assert result["parsed"] == 4
     assert result["filtered"] == 1
     assert result["quarantined"] == 0
-    # Snapshot re-summary: NIFTY → index, RELIANCE (F&O-eligible) → stock.
-    assert result["index_count"] == 1
+    # Snapshot re-summary: NIFTY + BANKNIFTY → 2 indices, RELIANCE
+    # (F&O-eligible) → 1 stock.
+    assert result["index_count"] == 2
     assert result["stock_count"] == 1
-    assert result["total"] == 2
+    assert result["total"] == 3
 
 
 def test_default_run_id_factory(tmp_path: Path) -> None:
     """Omitting ``run_id_factory`` uses the built-in default and still loads."""
     store = _store(tmp_path)
     result = load_instrument_master(store, http_get=lambda _url: _csv(_ROWS))
-    assert result["parsed"] == 3
-    assert result["total"] == 2
+    assert result["parsed"] == 4
+    assert result["total"] == 3
 
 
 def test_malformed_header_raises(tmp_path: Path) -> None:

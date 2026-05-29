@@ -66,6 +66,27 @@ class TestInstrumentMetaValidation:
         )
         assert meta.freeze_quantity is None
 
+    def test_index_zero_lot_size_allowed(self) -> None:
+        # DEC-INDEX-PARSE-FIX-001 — indices are reference-only (never sized),
+        # so the Groww master's blank lot_size (parsed as 0) is tolerated here.
+        meta = InstrumentMeta(
+            symbol="NSE-NIFTY",
+            segment=Segment.CASH,
+            instrument_type=InstrumentType.IDX,
+            lot_size=0,
+        )
+        assert meta.lot_size == 0
+
+    def test_index_negative_lot_size_rejected(self) -> None:
+        # Tolerance is zero-or-positive only — a NEGATIVE lot is still invalid.
+        with pytest.raises(ValueError, match="lot_size must not be negative"):
+            InstrumentMeta(
+                symbol="NSE-NIFTY",
+                segment=Segment.CASH,
+                instrument_type=InstrumentType.IDX,
+                lot_size=-1,
+            )
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Fill validation + derived properties
