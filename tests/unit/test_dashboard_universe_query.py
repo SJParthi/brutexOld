@@ -117,6 +117,14 @@ class TestClassifyInstrument:
         eligible = frozenset()
         assert classify_instrument(_index("NIFTY"), eligible) == KIND_INDEX
 
+    def test_non_fno_sectoral_index_is_index(self) -> None:
+        # A non-F&O / non-brute sectoral index (NIFTY IT) is still an IDX
+        # instrument → classifies as "index". Locks the all-NSE-indices
+        # behaviour (Refinement B): the Index tab is NOT limited to the 3
+        # F&O / brute-force indices.
+        eligible = frozenset()
+        assert classify_instrument(_index("NIFTYIT"), eligible) == KIND_INDEX
+
     def test_fno_eligible_equity_is_stock(self) -> None:
         instruments = [_equity("RELIANCE"), _option("RELIANCE")]
         eligible = build_fno_eligible_underlyings(instruments)
@@ -182,6 +190,21 @@ class TestListUnderlyings:
     def test_filter_index(self) -> None:
         rows = list_underlyings(self._snapshot(), kind=KIND_INDEX)
         assert {r["symbol"] for r in rows} == {"NIFTY", "BANKNIFTY"}
+        assert all(r["kind"] == KIND_INDEX for r in rows)
+
+    def test_non_fno_sectoral_index_listed_under_index_kind(self) -> None:
+        # Refinement B: a non-F&O sectoral index (NIFTY IT) must appear in
+        # the Index tab alongside the brute-force indices — the explorer
+        # surfaces ALL NSE indices, not just the 3 F&O ones. NIFTY IT has
+        # no derivatives in the snapshot (spot-only), proving non-F&O
+        # indices are still listed.
+        snapshot = [
+            _index("NIFTY", name="NIFTY 50"),
+            _index("NIFTYIT", name="NIFTY IT"),
+            _equity("WIPRO"),  # non-F&O equity → excluded, not the index
+        ]
+        rows = list_underlyings(snapshot, kind=KIND_INDEX)
+        assert {r["symbol"] for r in rows} == {"NIFTY", "NIFTYIT"}
         assert all(r["kind"] == KIND_INDEX for r in rows)
 
     def test_filter_stock(self) -> None:

@@ -1,9 +1,14 @@
-"""Click-to-pull controller — ingest ONE instrument's spot OHLC.
+"""Click-to-pull controller — ingest ONE instrument's candle data.
 
-Powers the F&O Universe Explorer's "⤓ Pull spot — all timeframes"
-button (DEC-UNIVERSE-DASHBOARD-001). When the operator clicks a row and
-hits pull, :func:`pull_spot` ingests that single instrument's SPOT OHLC
-across every Groww native timeframe
+Powers the F&O Universe Explorer's "⤓ Pull — all timeframes" button
+(DEC-UNIVERSE-DASHBOARD-001). The controller is **instrument-agnostic**:
+it pulls **spot / future / option** candle data for ANY Groww symbol —
+a spot index/stock (``"NSE-NIFTY"``, ``"NSE-RELIANCE"``), a futures leg
+(``"NSE-NIFTY-30Jan25-FUT"``), or an option contract's groww_symbol
+(``"NSE-NIFTY-30Jan25-28500-CE"``). When the operator clicks a row, an
+expiry's future, or an option-chain CE/PE cell and hits pull,
+:func:`pull_candles` ingests that single contract's candle data across
+every Groww native timeframe
 (:data:`~brutex.adapters.groww.chunks.ALL_GROWW_INTERVALS`) for the
 requested year, reusing the proven
 :func:`~brutex.adapters.groww.ingest.run_ingest` orchestration core
@@ -24,11 +29,12 @@ exercised end-to-end through the dry-run path.
 ## Scope (Golden Rule #3)
 
 This is a LAKE-surface action authorised by DEC-P0-063 (#200) +
-DEC-FETCH-UNIVERSE-001 (#299): pulling spot OHLC for any index OR
-F&O-eligible stock into the lake. The BRUTE-FORCE ENGINE is unchanged —
-it still sweeps only the 3 indices. Pulling a stock's spot here puts it
-in the lake (REFERENCE_ONLY), ready for a future, separately-authorised
-engine expansion.
+DEC-FETCH-UNIVERSE-001 (#299): pulling candle data (spot / future /
+option) for any index OR F&O-eligible stock — or any of its FUT / CE /
+PE contracts — into the lake. The BRUTE-FORCE ENGINE is unchanged — it
+still sweeps only the 3 indices. Pulling a stock's spot or any contract
+here puts it in the lake (REFERENCE_ONLY), ready for a future,
+separately-authorised engine expansion.
 """
 
 from __future__ import annotations
@@ -64,13 +70,15 @@ class TimeframeResult:
 
 
 @dataclass(slots=True)
-class PullSpotReport:
-    """Result of a single :func:`pull_spot` call.
+class PullCandlesReport:
+    """Result of a single :func:`pull_candles` call.
 
     Attributes
     ----------
     symbol
-        The Groww spot symbol that was pulled (e.g. ``"NSE-NIFTY"``).
+        The Groww symbol that was pulled — a spot index/stock
+        (e.g. ``"NSE-NIFTY"``), a future, or an option contract's
+        groww_symbol (e.g. ``"NSE-NIFTY-30Jan25-28500-CE"``).
     year
         The calendar year the pull covered ``[Jan 1, Jan 1 next year)``.
     dry_run
@@ -160,18 +168,21 @@ def _build_live_pull_fetcher(  # pragma: no cover — live Groww creds + SDK + n
     return PersistingFetcher(inner=groww, sink=sink), groww.reauth
 
 
-def pull_spot(
+def pull_candles(
     symbol: str,
     *,
     lake_root: Path,
     year: int | None = None,
     dry_run: bool,
     fetcher_factory: FetcherFactory | None = None,
-) -> PullSpotReport:
-    """Ingest *symbol*'s spot OHLC across every timeframe for *year*.
+) -> PullCandlesReport:
+    """Ingest *symbol*'s spot / future / option candles for *year*.
 
-    Plans + drives one :func:`~brutex.adapters.groww.ingest.run_ingest`
-    pass over the single *symbol* and ALL
+    Instrument-agnostic: *symbol* may be a spot index/stock, a future,
+    or an option contract's groww_symbol — the chunk/fetch spine is the
+    same for any Groww symbol. Plans + drives one
+    :func:`~brutex.adapters.groww.ingest.run_ingest` pass over the single
+    *symbol* and ALL
     :data:`~brutex.adapters.groww.chunks.ALL_GROWW_INTERVALS`, covering
     ``[Jan 1 year, Jan 1 year+1)`` in UTC. Idempotent + resumable via a
     fresh :class:`~brutex.data.watermark.FetchWatermark`.
@@ -179,7 +190,9 @@ def pull_spot(
     Parameters
     ----------
     symbol
-        Groww spot symbol, e.g. ``"NSE-NIFTY"`` or ``"NSE-RELIANCE"``.
+        Groww symbol — a spot index/stock (e.g. ``"NSE-NIFTY"`` /
+        ``"NSE-RELIANCE"``), a future, or an option contract's
+        groww_symbol (e.g. ``"NSE-NIFTY-30Jan25-28500-CE"``).
     lake_root
         Lake directory the live sink writes Parquet into. Unused by the
         dry-run synthetic fetcher (which emits rows directly).
@@ -198,7 +211,7 @@ def pull_spot(
 
     Returns
     -------
-    PullSpotReport
+    PullCandlesReport
         Per-timeframe completed / failed counts + the ``dry_run`` flag.
 
     Raises
@@ -207,7 +220,7 @@ def pull_spot(
         If *symbol* is empty / blank.
     """
     if not symbol.strip():
-        raise ValueError("symbol must be a non-empty Groww spot symbol")
+        raise ValueError("symbol must be a non-empty Groww symbol")
 
     resolved_year = year if year is not None else datetime.now(UTC).year
     start = datetime(resolved_year, 1, 1, tzinfo=UTC)
@@ -244,7 +257,7 @@ def pull_spot(
         )
         for interval in ALL_GROWW_INTERVALS
     ]
-    pull_report = PullSpotReport(
+    pull_report = PullCandlesReport(
         symbol=symbol,
         year=resolved_year,
         dry_run=dry_run,
@@ -263,7 +276,7 @@ def pull_spot(
 
 __all__ = [
     "FetcherFactory",
-    "PullSpotReport",
+    "PullCandlesReport",
     "TimeframeResult",
-    "pull_spot",
+    "pull_candles",
 ]

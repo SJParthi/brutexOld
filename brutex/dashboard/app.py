@@ -42,7 +42,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from brutex.dashboard.pull_controller import pull_spot
+from brutex.dashboard.pull_controller import pull_candles
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
@@ -662,17 +662,20 @@ def build_app(
         symbol: str = Query(...),
         year: int | None = Query(default=None),
     ) -> JSONResponse:
-        """POST /api/v1/universe/pull — ingest one instrument's spot OHLC.
+        """POST /api/v1/universe/pull — ingest one instrument's candles.
 
         Thin wrapper over
-        :func:`brutex.dashboard.pull_controller.pull_spot`. ``dry_run``
-        is forced ``True`` automatically when Groww credentials are not
-        present in the environment (mirrors the CLI's offline default),
-        so the page never attempts a live network call without creds.
+        :func:`brutex.dashboard.pull_controller.pull_candles`. ``symbol``
+        may be a spot index/stock OR a contract's groww_symbol (a future
+        or a CE/PE option) — the controller is instrument-agnostic.
+        ``dry_run`` is forced ``True`` automatically when Groww
+        credentials are not present in the environment (mirrors the CLI's
+        offline default), so the page never attempts a live network call
+        without creds.
         """
         dry_run = not _groww_creds_present()
         try:
-            report = pull_spot(
+            report = pull_candles(
                 symbol,
                 lake_root=_resolve_pull_lake_root(instrument_store),
                 year=year,
@@ -1235,7 +1238,7 @@ __all__ = [
     "WorkerRow",
     "build_app",
     "list_underlyings",
-    "pull_spot",
+    "pull_candles",
     "snapshot_to_json",
     "universe_summary",
 ]

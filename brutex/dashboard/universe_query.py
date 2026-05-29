@@ -13,9 +13,19 @@ the real logic here so it is 100% unit-testable offline.
 The F&O Universe Explorer (``docs/dashboard/mockups/universe-explorer-v1.html``)
 shows exactly **two** instrument kinds:
 
-* ``"index"``  — an ``IDX`` instrument (NIFTY / BANKNIFTY / SENSEX /
-  INDIA VIX). These are the brute-force universe (+ India VIX
-  reference-only) per CLAUDE.md §3.
+* ``"index"``  — **ANY** ``IDX`` instrument, i.e. **every NSE index**,
+  not only the 3 F&O / brute-force indices. This includes:
+
+  - broad-market indices (e.g. NIFTY 50, NIFTY 100, NIFTY 500),
+  - sectoral indices (e.g. NIFTY IT, NIFTY AUTO, NIFTY PHARMA),
+  - the volatility index (INDIA VIX),
+  - the brute-force universe (NIFTY / BANKNIFTY / SENSEX).
+
+  The brute-force universe (+ India VIX reference-only) per CLAUDE.md §3
+  is a *subset* of this kind — the explorer deliberately surfaces every
+  index. Non-F&O indices are **spot-only**: they have no expiries /
+  contracts, so the expiry / option-chain drill is simply empty for
+  them (a sectoral index has no derivatives to list).
 * ``"stock"``  — an **F&O-eligible single-stock underlying**. A
   "stock" here means an equity (``EQ``) whose ``(exchange, symbol)``
   appears as the underlying of at least one NSE futures / option in
@@ -62,10 +72,17 @@ def classify_instrument(
 ) -> str | None:
     """Classify *instrument* into an explorer kind, or ``None``.
 
+    ``"index"`` is returned for **ANY** ``IDX`` instrument — every NSE
+    index, not just the 3 F&O / brute-force indices. A sectoral index
+    (e.g. NIFTY IT / AUTO / PHARMA), a broad-market index (e.g. NIFTY
+    100 / 500) and INDIA VIX all classify as ``"index"`` exactly like
+    NIFTY / BANKNIFTY / SENSEX. Non-F&O indices are spot-only (they have
+    no expiries / contracts).
+
     Returns
     -------
     str | None
-        ``"index"`` for an ``IDX`` instrument; ``"stock"`` for an
+        ``"index"`` for any ``IDX`` instrument; ``"stock"`` for an
         ``EQ`` instrument whose ``(exchange, trading_symbol)`` is in
         *fno_eligible_underlyings*; ``None`` for everything else (a
         derivative leg, or a non-F&O-eligible equity).

@@ -92,7 +92,16 @@
   .cell { padding:7px 10px; border-radius:8px; font-size:13px; text-align:center; animation: fadeInUp .3s ease both; }
   .ce { background:rgba(38,217,176,.10); color:var(--green); }
   .pe { background:rgba(255,92,92,.10); color:var(--red); }
+  .cell.live { cursor:pointer; }
+  .cell.live:hover { box-shadow:0 0 16px rgba(91,141,239,.35); transform:translateY(-1px); }
   .strike { text-align:center; color:var(--muted); font-weight:700; }
+  .futrow { display:flex; align-items:center; gap:10px; margin:4px 0 12px; padding:10px 13px;
+    background:rgba(91,141,239,.08); border:1px solid var(--border-strong); border-radius:10px;
+    cursor:pointer; transition:.16s; animation: fadeInScale .35s ease both; }
+  .futrow:hover { border-color:var(--blue); box-shadow:0 0 18px rgba(91,141,239,.25); }
+  .futrow .ftag { font-size:10px; font-weight:700; padding:2px 8px; border-radius:20px;
+    color:var(--blue); background:rgba(91,141,239,.16); }
+  .futrow .fsym { font-weight:700; font-size:13px; }
 
   .empty { color:var(--muted); font-size:13px; padding:24px 8px; text-align:center; }
 
@@ -133,7 +142,7 @@
   <div class="band" id="tabs"></div>
 
   <div class="pullbar">
-    <div class="lead" id="pulllead">Select an instrument to pull its spot data</div>
+    <div class="lead" id="pulllead">Select an instrument to pull its spot — or click a future / option contract to pull that contract</div>
     <button class="pullbtn" id="pullbtn" disabled>⤓ Pull spot — all timeframes</button>
   </div>
 
@@ -151,7 +160,10 @@
 
 <script>
 /* ── F&O Universe Explorer — real data via /api/v1/universe/* ── */
-/* Two kinds only: Index + Stock (F&O-eligible). No non-F&O cash-equity tab. */
+/* Two browse kinds: Index (ALL NSE indices) + Stock (F&O-eligible).
+   The pull endpoint is instrument-agnostic — the spot button pulls the
+   selected instrument's spot, while clicking the future row or a CE/PE
+   option-chain cell pulls THAT contract via the same /pull endpoint. */
 let filter = "index";          // active tab kind
 let UNIV = [];                 // [{symbol,name,kind,exchange}]
 let selInst = null;            // selected symbol
@@ -240,7 +252,7 @@ async function selectInstrument(i) {
   selInst = i.symbol; selExp = null;
   renderInstruments();
   document.getElementById("pulllead").innerHTML =
-    `Ready to pull <b>${i.symbol}</b> spot — all timeframes`;
+    `Ready to pull <b>${i.symbol}</b> spot — or click a future / option contract below`;
   document.getElementById("pullbtn").disabled = false;
   const ex = document.getElementById("expiries");
   ex.innerHTML = '<div class="empty">loading…</div>';
@@ -278,7 +290,19 @@ async function renderContracts(symbol, expiry) {
     const body = await r.json();
     const contracts = body.contracts || [];
     if (!contracts.length) { c.innerHTML = '<div class="empty">no contracts in the lake for this expiry</div>'; return; }
-    // Group by strike → {ce, pe}
+    c.innerHTML = "";
+    // The future leg (if any) for this expiry → its own clickable pull row.
+    const fut = contracts.find(ct => ct.instrument_type === "FUT");
+    if (fut && fut.contract_symbol) {
+      const fr = document.createElement("div");
+      fr.className = "futrow";
+      fr.innerHTML = `<span class="ftag">FUT</span>`
+        + `<span class="fsym">${fut.contract_symbol}</span>`
+        + `<span class="cc" style="margin-left:auto;font-size:11px;color:var(--muted)">⤓ pull this future</span>`;
+      fr.onclick = () => runPull(fut.contract_symbol, `${fut.contract_symbol} (future)`);
+      c.appendChild(fr);
+    }
+    // Group options by strike → {ce, pe} groww_symbols.
     const byStrike = {};
     contracts.forEach(ct => {
       const s = ct.strike_price || "—";
@@ -287,31 +311,51 @@ async function renderContracts(symbol, expiry) {
       else if (ct.instrument_type === "PE") byStrike[s].pe = ct.contract_symbol;
     });
     const strikes = Object.keys(byStrike).sort((a, b) => parseFloat(a) - parseFloat(b));
-    let h = '<div class="ladder"><div class="hd">CALL (CE)</div><div class="hd">Strike</div><div class="hd">PUT (PE)</div>';
+    const ladder = document.createElement("div");
+    ladder.className = "ladder";
+    ladder.innerHTML = '<div class="hd">CALL (CE)</div><div class="hd">Strike</div><div class="hd">PUT (PE)</div>';
     strikes.forEach((s, ix) => {
       const row = byStrike[s];
-      h += `<div class="cell ce" style="animation-delay:${ix * 0.02}s">${row.ce ? "CE" : "—"}</div>`
-        + `<div class="strike">${s}</div>`
-        + `<div class="cell pe" style="animation-delay:${ix * 0.02}s">${row.pe ? "PE" : "—"}</div>`;
+      ladder.appendChild(optionCell("ce", row.ce, ix));
+      const st = document.createElement("div");
+      st.className = "strike"; st.textContent = s;
+      ladder.appendChild(st);
+      ladder.appendChild(optionCell("pe", row.pe, ix));
     });
-    h += '</div>';
-    c.innerHTML = h;
+    c.appendChild(ladder);
   } catch (e) { c.innerHTML = '<div class="empty">error loading contracts</div>'; }
 }
 
+/* Build one CE/PE option-chain cell; clickable (pulls THAT contract) when present. */
+function optionCell(side, contractSymbol, ix) {
+  const cell = document.createElement("div");
+  cell.className = "cell " + side + (contractSymbol ? " live" : "");
+  cell.style.animationDelay = (ix * 0.02) + "s";
+  cell.textContent = contractSymbol ? side.toUpperCase() : "—";
+  if (contractSymbol) {
+    cell.title = "⤓ pull " + contractSymbol;
+    cell.onclick = () => runPull(contractSymbol, `${contractSymbol} (${side.toUpperCase()})`);
+  }
+  return cell;
+}
+
 /* ── click-to-pull (real POST /api/v1/universe/pull) ── */
-document.getElementById("pullbtn").onclick = async () => {
-  if (!selInst) return;
+/* Instrument-agnostic: pulls candles for a spot, a future, OR a CE/PE
+   contract via the SAME endpoint. `label` is a human-friendly tag shown
+   in the animation panel so the operator sees exactly which symbol — the
+   spot or the contract — is being pulled. */
+async function runPull(symbol, label) {
+  if (!symbol) return;
   const btn = document.getElementById("pullbtn");
   const panel = document.getElementById("pullpanel");
   panel.classList.add("on");
   btn.disabled = true;
-  document.getElementById("pulltitle").textContent = `Pulling ${selInst} spot · all timeframes`;
+  document.getElementById("pulltitle").textContent = `Pulling ${label} · all timeframes`;
   const grid = document.getElementById("tfgrid");
   grid.innerHTML = "";
   document.getElementById("counter").textContent = "0";
   try {
-    const r = await fetch('/api/v1/universe/pull?symbol=' + encodeURIComponent(selInst), {method: 'POST'});
+    const r = await fetch('/api/v1/universe/pull?symbol=' + encodeURIComponent(symbol), {method: 'POST'});
     const report = await r.json();
     document.getElementById("previewBadge").classList.toggle("on", !!report.dry_run);
     const tfs = report.timeframes || [];
@@ -326,13 +370,19 @@ document.getElementById("pullbtn").onclick = async () => {
       (report.total_completed || 0).toLocaleString('en-IN');
     const verb = report.dry_run ? "preview-pulled (synthetic)" : "pulled";
     document.getElementById("pulltitle").innerHTML =
-      `<span class="spark">✓</span> ${selInst} spot ${verb} — ${tfs.length} timeframes`;
+      `<span class="spark">✓</span> ${label} ${verb} — ${tfs.length} timeframes`;
   } catch (e) {
     document.getElementById("pulltitle").innerHTML =
       `<span style="color:var(--red)">✕</span> pull failed: ${e.message}`;
   } finally {
     btn.disabled = false;
   }
+}
+
+/* The spot pull button pulls the selected instrument's spot symbol. */
+document.getElementById("pullbtn").onclick = () => {
+  if (!selInst) return;
+  runPull(selInst, `${selInst} spot`);
 };
 
 loadSummary().then(loadInstruments);

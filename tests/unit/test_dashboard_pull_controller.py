@@ -17,9 +17,9 @@ from brutex.adapters.groww.chunks import ALL_GROWW_INTERVALS
 from brutex.adapters.groww.fetch_loop import CandleFetcher
 from brutex.adapters.groww.ingest import SyntheticCandleFetcher
 from brutex.dashboard.pull_controller import (
-    PullSpotReport,
+    PullCandlesReport,
     TimeframeResult,
-    pull_spot,
+    pull_candles,
 )
 from brutex.data.watermark import ChunkKey
 
@@ -46,9 +46,9 @@ class _FailingFetcher:
 # ────────────────────────────────────────────────────────────────────────
 
 
-class TestPullSpotReport:
+class TestPullCandlesReport:
     def test_totals_and_to_dict(self) -> None:
-        report = PullSpotReport(
+        report = PullCandlesReport(
             symbol="NSE-NIFTY",
             year=2026,
             dry_run=True,
@@ -68,45 +68,45 @@ class TestPullSpotReport:
         assert d["timeframes"][1] == {"interval": "5m", "completed": 2, "failed": 1}
 
     def test_empty_timeframes_default(self) -> None:
-        report = PullSpotReport(symbol="X", year=2026, dry_run=True)
+        report = PullCandlesReport(symbol="X", year=2026, dry_run=True)
         assert report.timeframes == []
         assert report.total_completed == 0
         assert report.total_failed == 0
 
 
 # ────────────────────────────────────────────────────────────────────────
-# pull_spot — dry-run (default factory exercises ``_build_dry_run_fetcher``)
+# pull_candles — dry-run (default factory exercises ``_build_dry_run_fetcher``)
 # ────────────────────────────────────────────────────────────────────────
 
 
-class TestPullSpotDryRun:
+class TestPullCandlesDryRun:
     def test_default_year_is_current_utc_year(self, tmp_path: Path) -> None:
-        report = pull_spot("NSE-NIFTY", lake_root=tmp_path, dry_run=True)
+        report = pull_candles("NSE-NIFTY", lake_root=tmp_path, dry_run=True)
         assert report.year == datetime.now(UTC).year
         assert report.dry_run is True
 
     def test_covers_all_intervals(self, tmp_path: Path) -> None:
-        report = pull_spot("NSE-NIFTY", lake_root=tmp_path, year=2026, dry_run=True)
+        report = pull_candles("NSE-NIFTY", lake_root=tmp_path, year=2026, dry_run=True)
         assert [tf.interval for tf in report.timeframes] == list(ALL_GROWW_INTERVALS)
         # Synthetic fetcher always succeeds → some completed, zero failed.
         assert report.total_failed == 0
         assert report.total_completed > 0
 
     def test_explicit_year(self, tmp_path: Path) -> None:
-        report = pull_spot("NSE-BANKNIFTY", lake_root=tmp_path, year=2024, dry_run=True)
+        report = pull_candles("NSE-BANKNIFTY", lake_root=tmp_path, year=2024, dry_run=True)
         assert report.year == 2024
 
     def test_blank_symbol_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="non-empty"):
-            pull_spot("   ", lake_root=tmp_path, dry_run=True)
+            pull_candles("   ", lake_root=tmp_path, dry_run=True)
 
 
 # ────────────────────────────────────────────────────────────────────────
-# pull_spot — injected factory (covers the non-default-factory branch)
+# pull_candles — injected factory (covers the non-default-factory branch)
 # ────────────────────────────────────────────────────────────────────────
 
 
-class TestPullSpotInjectedFactory:
+class TestPullCandlesInjectedFactory:
     def test_factory_overrides_dry_run_false(self, tmp_path: Path) -> None:
         seen: dict[str, Path] = {}
 
@@ -114,7 +114,7 @@ class TestPullSpotInjectedFactory:
             seen["lake_root"] = lake_root
             return SyntheticCandleFetcher(rows_per_chunk=2), None
 
-        report = pull_spot(
+        report = pull_candles(
             "NSE-NIFTY",
             lake_root=tmp_path,
             year=2026,
@@ -127,7 +127,7 @@ class TestPullSpotInjectedFactory:
         assert report.total_completed > 0
 
     def test_failing_fetcher_reports_failures(self, tmp_path: Path) -> None:
-        report = pull_spot(
+        report = pull_candles(
             "NSE-NIFTY",
             lake_root=tmp_path,
             year=2026,
