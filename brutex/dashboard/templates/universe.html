@@ -141,6 +141,27 @@
 
   <div class="band" id="tabs"></div>
 
+  <div id="emptyBanner" style="display:none; margin:8px 24px 4px; padding:16px 20px;
+       background:linear-gradient(90deg, rgba(255,183,77,.10), rgba(255,183,77,.03));
+       border:1px solid var(--yellow); border-radius:14px;">
+    <div style="font-weight:800; color:var(--yellow); margin-bottom:6px;">⚠ No data yet — the lake is empty (this is expected, not a bug)</div>
+    <div style="font-size:13px; color:var(--text); line-height:1.6;">
+      The dashboard works, but there are <b>0 instruments</b> because nothing has been ingested.
+      To fill it:
+      <b>1)</b> unblock Groww — allow the Groww hosts in your network policy and set
+      <code>BRUTEX_GROWW_API_KEY</code> + <code>BRUTEX_GROWW_TOTP_SECRET</code>;
+      <b>2)</b> then run <code>brutex fetch --universe</code> (pulls instruments + expiries + contracts),
+      or click an instrument here and hit <b>⤓ Pull</b>.
+    </div>
+    <div style="font-size:12px; color:var(--muted); margin-top:10px;">
+      Paths — lake: <code>~/.brutex/lake</code> · DB: <code>~/.brutex/lake/instruments.duckdb</code> ·
+      logs: <code>~/.brutex/logs/brutex.log</code> &nbsp;|&nbsp;
+      Other views: <a href="/" style="color:var(--blue)">Report</a> ·
+      <a href="/logs" style="color:var(--blue)">Logs</a> ·
+      <a href="/db" style="color:var(--blue)">Database</a>
+    </div>
+  </div>
+
   <div class="pullbar">
     <div class="lead" id="pulllead">Select an instrument to pull its spot — or click a future / option contract to pull that contract</div>
     <button class="pullbtn" id="pullbtn" disabled>⤓ Pull spot — all timeframes</button>
@@ -224,12 +245,20 @@ function countUp() {
   });
 }
 
+function toggleEmptyBanner(summary) {
+  const total = (summary.index_count || 0) + (summary.stock_count || 0);
+  const banner = document.getElementById('emptyBanner');
+  if (banner) banner.style.display = total === 0 ? 'block' : 'none';
+}
+
 async function loadSummary() {
   try {
     const r = await fetch('/api/v1/universe/summary');
-    if (!r.ok) { buildTabs({index_count:0, stock_count:0}); return; }
-    buildTabs(await r.json());
-  } catch (e) { buildTabs({index_count:0, stock_count:0}); }
+    if (!r.ok) { const z = {index_count:0, stock_count:0}; buildTabs(z); toggleEmptyBanner(z); return; }
+    const s = await r.json();
+    buildTabs(s);
+    toggleEmptyBanner(s);
+  } catch (e) { const z = {index_count:0, stock_count:0}; buildTabs(z); toggleEmptyBanner(z); }
 }
 
 async function loadInstruments() {
