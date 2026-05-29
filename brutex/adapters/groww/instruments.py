@@ -84,6 +84,14 @@ _REQUIRED_COLUMNS: Final[frozenset[str]] = frozenset(
 #: Exchanges in Track 1 scope; any other (MCX, …) is filtered, not quarantined.
 _SUPPORTED_EXCHANGES: Final[frozenset[str]] = frozenset({"NSE", "BSE"})
 
+#: Segments in Track 1 scope — CASH (spot indices + equities) and FNO
+#: (equity/index futures + options). COMMODITY (NSE/BSE GOLD / CRUDEOIL /
+#: SILVER derivatives) is explicitly OUT of scope (CLAUDE.md §3) and is
+#: FILTERED here — a deliberate scope skip, NOT a parse failure — so it
+#: never reaches the quarantine path or the lake. (Groww's backtesting
+#: surface is CASH + FNO only; CLAUDE.md §6.)
+_SUPPORTED_SEGMENTS: Final[frozenset[str]] = frozenset({"CASH", "FNO"})
+
 #: CSV cell values that mean "absent" (Groww emits NaN for non-derivative fields).
 _BLANK_VALUES: Final[frozenset[str]] = frozenset({"", "nan", "none", "null"})
 
@@ -299,6 +307,11 @@ class InstrumentMasterFetcher:
         quarantined = 0
         for row in reader:
             if (row.get("exchange") or "").strip() not in _SUPPORTED_EXCHANGES:
+                filtered += 1
+                continue
+            if (row.get("segment") or "").strip() not in _SUPPORTED_SEGMENTS:
+                # COMMODITY (GOLD / CRUDEOIL / SILVER …) — out of Track 1
+                # scope; a deliberate filter, never a quarantine.
                 filtered += 1
                 continue
             if _is_test_instrument_row(row):
