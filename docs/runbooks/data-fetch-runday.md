@@ -103,21 +103,46 @@ Defaults for the index pull (no flags needed for the run-day ask):
 
 ## 4. Universe ingest (instruments + expiries + contracts)
 
-> Status: a single turnkey command (`brutex fetch --universe`) is being added
-> on branch `claude/automation-coverage-strategy-Zj7HD` (DEC-SESSION-HOOK-…
-> sibling work). Until merged, the universe is ingested via the standalone
-> discovery script + adapter primitives:
+A single turnkey command pulls the **entire** lake surface — instrument
+master + all expiries + all contracts — and then the 3 index candle series,
+all in one invocation (DEC-FETCH-UNIVERSE-001, MIGRATION #299):
 
 ```bash
-# Public CSV → JSON inventories of the COMPLETE NSE+BSE universe (no auth):
-.venv/bin/python scripts/groww_universe_discovery.py
-#   → docs/groww/universe/0[1-5]_*.json
-#     (all NSE indices, all BSE indices, ~200 F&O stocks, F&O indices, summary)
+# LIVE (Groww-auth gated): instruments → expiries → contracts → index candles
+.venv/bin/python -m brutex fetch --universe
+
+# OFFLINE proof (no creds, no network): synthetic instruments/expiries/contracts
+# through the REAL parse + sink pipeline, then synthetic index candles:
+.venv/bin/python -m brutex fetch --universe --dry-run
 ```
 
-Expiries + contracts ingest into the lake are library-level
-(`ExpiryFetcher` / `ContractFetcher`) and run live (Groww-auth gated);
-they are exercised by the turnkey command once it lands.
+`--universe` runs the LAKE-surface discovery pass **before** the candle
+ingest, reusing the adapter primitives (`InstrumentMasterFetcher` →
+`ExpiryFetcher` → `ContractFetcher` via `universe_ingest.run_universe_ingest`):
+
+| Surface | Primitive | Source |
+|---------|-----------|--------|
+| Instrument master | `InstrumentMasterFetcher` (`instruments.py`) | public CSV, no auth |
+| Expiries (per underlying / year) | `ExpiryFetcher` (`expiries.py`) | Groww `get_expiries`, FNO from 2020 |
+| Contracts (per expiry) | `ContractFetcher` (`contracts.py`) | Groww `get_contracts` + master enrichment |
+
+Scope (Golden Rule #3): this populates the **LAKE only** — the brute-force
+ENGINE stays the 3 indices; the discovered F&O universe is `REFERENCE_ONLY`
+(DEC-P0-063, MIGRATION #200).
+
+> Honest envelope: the LIVE `--universe` path needs the §1 operator unblock
+> (network policy + TOTP creds). The `--dry-run` path additionally needs the
+> `fno_math` kernel built (`make setup`) because the DuckDB `InstrumentStore`
+> imports it transitively. The pure orchestration core is unit-tested offline
+> in `tests/unit/test_groww_universe_ingest.py`.
+
+Optionally, the standalone discovery script still emits JSON inventories of
+the complete NSE+BSE universe (no auth, no lake write) for a quick eyeball:
+
+```bash
+.venv/bin/python scripts/groww_universe_discovery.py
+#   → docs/groww/universe/0[1-5]_*.json
+```
 
 ---
 

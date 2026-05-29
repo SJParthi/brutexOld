@@ -203,6 +203,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="Synthetic rows per chunk in --dry-run mode (default 5)",
     )
+    fetch.add_argument(
+        "--universe",
+        action="store_true",
+        help=(
+            "also ingest instrument master + expiries + contracts into the lake "
+            "before candles (LAKE surface, DEC-P0-063)"
+        ),
+    )
 
     # ── doctor (DEC-DOCTOR-001) ───────────────────────────────────
     doctor = sub.add_parser(
@@ -476,6 +484,154 @@ def _build_live_fetcher(sink: Any) -> tuple[Any, Any]:  # pragma: no cover — l
     return PersistingFetcher(inner=groww, sink=sink), groww.reauth
 
 
+def _run_dry_run_universe_ingest(  # pragma: no cover — needs DuckDB store + fno_math kernel
+    lake_root: Path, *, years: list[int]
+) -> Any:
+    """Run the universe ingest offline with synthetic sources (``--universe --dry-run``).
+
+    Builds the real :class:`~brutex.data.instrument_store.InstrumentStore` (the
+    lake sink) but wires synthetic instrument-CSV / expiry / contract sources so
+    the whole instruments → expiries → contracts orchestration runs with NO
+    network and NO Groww creds — the dry-run proof of the LAKE pipe (DEC-P0-063).
+
+    Marked ``no cover``: the DuckDB store transitively imports the ``fno_math``
+    Rust kernel, so this path runs only on a fully-built environment (``make
+    setup``). The pure orchestration core (:func:`run_universe_ingest`) is
+    unit-tested with fakes in ``tests/unit/test_groww_universe_ingest.py``.
+    """
+    from dataclasses import dataclass, field
+    from datetime import date as date_t
+    from decimal import Decimal
+
+    from brutex.adapters.groww.contracts import ContractFetchResult
+    from brutex.adapters.groww.expiries import ExpiryFetchResult
+    from brutex.adapters.groww.instruments import InstrumentMasterFetcher
+    from brutex.adapters.groww.universe_ingest import (
+        SYNTHETIC_INSTRUMENT_CSV,
+        run_universe_ingest,
+    )
+    from brutex.data.instrument_store import (
+        ContractRecord,
+        ExpiryRecord,
+        InstrumentStore,
+    )
+    from brutex.models import InstrumentType
+
+    @dataclass(slots=True)
+    class _SyntheticExpirySource:
+        """Emits + upserts one synthetic expiry per (underlying, year)."""
+
+        sink: Any
+        expiry: date_t = field(default_factory=lambda: date_t(2025, 1, 30))
+
+        def fetch(self, underlying: str, exchange: str, *, year: int) -> ExpiryFetchResult:
+            """Return + upsert a single synthetic expiry record."""
+            record = ExpiryRecord(
+                exchange=exchange,
+                underlying_symbol=underlying,
+                expiry_date=self.expiry,
+                snapshot_date=self.expiry,
+                pulled_year=year,
+                fetched_at=datetime.now(UTC),
+                run_id="synthetic-expiries",
+            )
+            self.sink.upsert_expiries([record])
+            return ExpiryFetchResult(records=[record], skipped_dates=0)
+
+    @dataclass(slots=True)
+    class _SyntheticContractSource:
+        """Emits + upserts one synthetic CE contract per expiry."""
+
+        sink: Any
+
+        def fetch(self, underlying: str, exchange: str, expiry_date: date_t) -> ContractFetchResult:
+            """Return + upsert a single synthetic CE contract record."""
+            record = ContractRecord(
+                exchange=exchange,
+                underlying_symbol=underlying,
+                expiry_date=expiry_date,
+                contract_symbol=f"{exchange}-{underlying}-{expiry_date:%d%b%y}-24650-CE",
+                snapshot_date=expiry_date,
+                instrument_type=InstrumentType.CE,
+                strike_price=Decimal("24650"),
+                lot_size=75,
+                freeze_quantity=1800,
+                tick_size=Decimal("0.05"),
+                fetched_at=datetime.now(UTC),
+                run_id="synthetic-contracts",
+            )
+            self.sink.upsert_contracts([record])
+            return ContractFetchResult(records=[record], skipped_malformed=0, skipped_no_metadata=0)
+
+    store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    try:
+        instrument_fetcher = InstrumentMasterFetcher(
+            http_get=lambda _url: SYNTHETIC_INSTRUMENT_CSV,
+            store=store,
+            run_id_factory=lambda: "synthetic-instruments",
+        )
+        return run_universe_ingest(
+            instrument_fetcher,
+            _SyntheticExpirySource(sink=store),
+            _SyntheticContractSource(sink=store),
+            [("NIFTY", "NSE")],
+            years,
+        )
+    finally:
+        store.close()
+
+
+def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + DuckDB
+    lake_root: Path, *, years: list[int]
+) -> Any:
+    """Run the universe ingest against live Groww (the real instrument/expiry/contract SDK)."""
+    from growwapi.groww.exceptions import BaseGrowwException
+
+    from brutex.adapters.groww.auth import GrowwAuth
+    from brutex.adapters.groww.contracts import ContractFetcher, ContractMeta
+    from brutex.adapters.groww.expiries import ExpiryFetcher
+    from brutex.adapters.groww.instruments import InstrumentMasterFetcher
+    from brutex.adapters.groww.universe_ingest import run_universe_ingest
+    from brutex.data.instrument_store import InstrumentStore
+    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
+
+    store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    try:
+        sdk = GrowwAuth.from_env().session()
+        bucket = AdaptiveTokenBucket()
+        instrument_fetcher = InstrumentMasterFetcher.from_env(store)
+        expiry_fetcher = ExpiryFetcher(
+            sdk=sdk, bucket=bucket, base_exception=BaseGrowwException, store=store
+        )
+
+        def _meta_lookup(symbol: str) -> ContractMeta | None:
+            inst = store.get(symbol)
+            if inst is None:
+                return None
+            return ContractMeta(
+                lot_size=inst.lot_size,
+                tick_size=inst.tick_size,
+                freeze_quantity=inst.freeze_quantity,
+            )
+
+        contract_fetcher = ContractFetcher(
+            sdk=sdk,
+            bucket=bucket,
+            base_exception=BaseGrowwException,
+            store=store,
+            metadata_lookup=_meta_lookup,
+        )
+        underlyings = [
+            (inst.underlying_symbol or inst.trading_symbol, inst.exchange.value)
+            for inst in store.list_indices()
+        ]
+        return run_universe_ingest(
+            instrument_fetcher, expiry_fetcher, contract_fetcher, underlyings, years
+        )
+    finally:
+        store.close()
+
+
 def cmd_fetch(
     lake_root: Path | None,
     start: str | None,
@@ -486,6 +642,7 @@ def cmd_fetch(
     dry_run: bool,
     inspect: bool,
     rows_per_chunk: int,
+    universe: bool = False,
 ) -> int:
     """Fetch candles for the 3 brute-force indices into the lake (§13.9 step 3).
 
@@ -494,6 +651,9 @@ def cmd_fetch(
     ``--inspect`` collects in memory (no Parquet) and prints a per-timeframe
     pre/regular/post-market + timestamp-alignment report — the operator's
     "does Groww give pre/post-market + precise timestamps?" probe.
+    ``--universe`` first ingests the instrument master + expiries + contracts
+    into the lake (the LAKE surface authorised by DEC-P0-063) BEFORE the index
+    candle pull — the turnkey "pull everything" command.
     """
     from brutex.adapters.groww.chunks import ALL_GROWW_INTERVALS
     from brutex.adapters.groww.ingest import (
@@ -511,6 +671,20 @@ def cmd_fetch(
     intervals = list(ALL_GROWW_INTERVALS) if interval == "all" else [interval]
     start_dt = _parse_dt(start) if start else datetime(datetime.now(UTC).year, 1, 1, tzinfo=UTC)
     end_dt = _parse_dt(end) if end else datetime.now(UTC)
+
+    if universe:
+        years = list(range(start_dt.year, end_dt.year + 1))
+        if dry_run:
+            print("[brutex] fetch --universe --dry-run → synthetic instruments/expiries/contracts")
+            uni_report = _run_dry_run_universe_ingest(resolved, years=years)
+        else:
+            print("[brutex] fetch --universe (live Groww) → instruments/expiries/contracts")
+            uni_report = _run_live_universe_ingest(resolved, years=years)
+        print(
+            f"[brutex] universe done — instruments parsed={uni_report.instruments.parsed} "
+            f"underlyings={uni_report.underlyings} expiries={uni_report.expiries} "
+            f"contracts={uni_report.contracts}"
+        )
 
     collecting = CollectingBarSink() if inspect else None
     sink: Any = collecting or ParquetBarSink(writer=ParquetWriter(lake_root=resolved))
@@ -590,6 +764,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             inspect=args.inspect,
             rows_per_chunk=args.rows_per_chunk,
+            universe=args.universe,
         )
     if args.command == "doctor":
         return cmd_doctor(
