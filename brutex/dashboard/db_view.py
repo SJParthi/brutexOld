@@ -131,7 +131,7 @@ def table_summary(conn: Any) -> list[dict[str, Any]]:
     for name in KNOWN_TABLES:
         # name is a hardcoded allowlist literal, never caller input.
         try:
-            row = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()  # noqa: S608
+            row = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()  # noqa: S608  # nosec B608 - name is a hardcoded KNOWN_TABLES literal, never caller input
         except Exception:
             count = 0
         else:
@@ -175,7 +175,7 @@ def sample_rows(conn: Any, table: str, *, limit: int) -> dict[str, Any]:
     safe_limit = clamp_limit(limit)
     # `table` is validated against the KNOWN_TABLES allowlist above, so
     # interpolating it here is safe; the row limit is parameter-bound.
-    cursor = conn.execute(f"SELECT * FROM {table} LIMIT ?", [safe_limit])  # noqa: S608
+    cursor = conn.execute(f"SELECT * FROM {table} LIMIT ?", [safe_limit])  # noqa: S608  # nosec B608 - table is allowlist-validated against KNOWN_TABLES above; limit is parameter-bound
     description = cursor.description or []
     columns = [str(col[0]) for col in description]
     rows = [[_json_safe(cell) for cell in row] for row in cursor.fetchall()]
