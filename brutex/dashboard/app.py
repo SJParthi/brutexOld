@@ -658,6 +658,32 @@ def build_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"instruments": rows, "kind": kind})
 
+    @app.post("/api/v1/universe/load-instruments")
+    async def api_universe_load_instruments() -> JSONResponse:
+        """POST /api/v1/universe/load-instruments — keylessly populate the list.
+
+        Thin wrapper over
+        :func:`brutex.dashboard.instrument_loader.load_instrument_master`.
+        The instrument master is a PUBLIC CSV needing NO Groww keys, so this
+        endpoint can fill the empty ``/universe`` list without authentication
+        (expiries / contracts / candles still need keys, separately). On any
+        network / parse failure (the live fetch can't reach the Groww asset
+        host, or the CSV header drifted) it maps to **HTTP 502** with a short
+        message the UI surfaces.
+        """
+        from brutex.dashboard.instrument_loader import load_instrument_master
+        from brutex.models import InstrumentFormatError
+
+        store = _require_store()
+        try:
+            counts = load_instrument_master(store)
+        except (InstrumentFormatError, OSError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"couldn't reach Groww asset host / parse instrument master: {exc}",
+            ) from exc
+        return JSONResponse(counts)
+
     @app.post("/api/v1/universe/pull")
     async def api_universe_pull(
         symbol: str = Query(...),

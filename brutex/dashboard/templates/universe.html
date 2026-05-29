@@ -115,6 +115,16 @@
     box-shadow:0 0 18px rgba(255,183,77,.4); transition:.15s; }
   .pullbtn:hover { transform:translateY(-1px); box-shadow:0 0 26px rgba(255,183,77,.7); }
   .pullbtn:disabled { opacity:.5; cursor:default; box-shadow:none; }
+  .loadbtn { cursor:pointer; border:1px solid var(--border-strong); border-radius:10px;
+    padding:11px 18px; font-weight:800; color:var(--text-bright); background:var(--surface-2);
+    transition:.15s; }
+  .loadbtn:hover { border-color:var(--blue); box-shadow:0 0 18px rgba(91,141,239,.3);
+    transform:translateY(-1px); }
+  .loadbtn:disabled { opacity:.5; cursor:default; box-shadow:none; transform:none; }
+  .loadbtn.busy { color:var(--yellow); border-color:var(--yellow); }
+  .loadmsg { font-size:12px; padding:8px 0; }
+  .loadmsg.err { color:var(--red); }
+  .empty .loadbtn { margin-top:12px; }
 
   #pullpanel { margin:0 24px 28px; padding:18px; border:1px solid var(--border); border-radius:14px;
     background:var(--surface); display:none; position:relative; overflow:hidden; }
@@ -164,8 +174,10 @@
 
   <div class="pullbar">
     <div class="lead" id="pulllead">Select an instrument to pull its spot — or click a future / option contract to pull that contract</div>
+    <button class="loadbtn" id="loadbtn" title="Download the public Groww instrument master — no keys needed">⟳ Load instruments</button>
     <button class="pullbtn" id="pullbtn" disabled>⤓ Pull spot — all timeframes</button>
   </div>
+  <div class="loadmsg" id="loadmsg" style="margin:-4px 24px 8px;"></div>
 
   <div id="pullpanel">
     <div class="beam"></div>
@@ -251,6 +263,36 @@ function toggleEmptyBanner(summary) {
   if (banner) banner.style.display = total === 0 ? 'block' : 'none';
 }
 
+/* ── Keyless "Load instruments" (POST /api/v1/universe/load-instruments) ──
+   The instrument master is a PUBLIC CSV — NO Groww keys required. On success
+   we re-run loadSummary() + loadInstruments() so the ~200 instruments appear.
+   `msgId` targets either the pullbar message slot or the empty-banner one. */
+async function loadInstrumentMaster(msgId) {
+  const btns = document.querySelectorAll('.loadbtn');
+  const msg = document.getElementById(msgId || "loadmsg");
+  btns.forEach(b => { b.disabled = true; b.classList.add("busy"); });
+  if (msg) { msg.classList.remove("err"); msg.textContent = "loading instrument master… (no keys needed)"; }
+  try {
+    const r = await fetch('/api/v1/universe/load-instruments', {method: 'POST'});
+    const body = await r.json();
+    if (!r.ok) {
+      const detail = body && body.detail ? body.detail : ('HTTP ' + r.status);
+      throw new Error(detail);
+    }
+    if (msg) {
+      msg.textContent = `Loaded ${body.total} instruments `
+        + `(${body.index_count} indices · ${body.stock_count} stocks).`;
+    }
+    await loadSummary();
+    await loadInstruments();
+  } catch (e) {
+    if (msg) { msg.classList.add("err"); msg.textContent = "couldn't load instruments: " + esc(e.message); }
+  } finally {
+    btns.forEach(b => { b.disabled = false; b.classList.remove("busy"); });
+  }
+}
+document.getElementById("loadbtn").onclick = () => loadInstrumentMaster("loadmsg");
+
 async function loadSummary() {
   try {
     const r = await fetch('/api/v1/universe/summary');
@@ -277,7 +319,20 @@ function renderInstruments() {
   const list = UNIV.filter(i => i.symbol.toUpperCase().includes(q)
     || (i.name || "").toUpperCase().includes(q));
   const el = document.getElementById("instruments");
-  el.innerHTML = list.length ? "" : '<div class="empty">no matches</div>';
+  if (!list.length) {
+    // Empty banner: when the whole universe is empty (not merely a search
+    // miss), offer the keyless "Load instruments" button right here so the
+    // operator can populate the public master without leaving the page.
+    el.innerHTML = UNIV.length
+      ? '<div class="empty">no matches</div>'
+      : '<div class="empty">No instruments loaded yet — the master is a public list (no Groww keys needed).'
+        + '<br><button class="loadbtn" id="loadbtn-empty">⟳ Load instruments</button>'
+        + '<div class="loadmsg" id="loadmsg-empty"></div></div>';
+    const be = document.getElementById("loadbtn-empty");
+    if (be) be.onclick = () => loadInstrumentMaster("loadmsg-empty");
+    return;
+  }
+  el.innerHTML = "";
   list.forEach((i, ix) => {
     const d = document.createElement("div");
     d.className = "inst" + (selInst === i.symbol ? " sel" : "");
