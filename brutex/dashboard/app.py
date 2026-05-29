@@ -721,7 +721,7 @@ def build_app(
     @app.get("/api/v1/db/table/{name}")
     async def api_db_table(
         name: str,
-        limit: int = Query(default=50),
+        limit: int = Query(default=50, ge=1, le=500),
     ) -> JSONResponse:
         """GET /api/v1/db/table/{name}?limit=N — sample rows of one table.
 

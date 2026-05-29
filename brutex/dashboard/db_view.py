@@ -32,6 +32,7 @@ trigger an unbounded read.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Final
 
 #: The ONLY tables the viewer may touch — the 5 real tables created by
@@ -93,8 +94,13 @@ def _json_safe(value: Any) -> Any:
     """
     if value is None:
         return None
-    if isinstance(value, bool | int | float | str):
+    if isinstance(value, bool | int | str):
         return value
+    if isinstance(value, float):
+        # NaN / ±inf are not JSON-safe under Starlette's allow_nan=False;
+        # stringify them so the viewer never 500s if a future migration
+        # adds a DOUBLE column to an allow-listed table (hostile-review LOW).
+        return value if math.isfinite(value) else str(value)
     if isinstance(value, bytes):
         # bytes are not JSON-safe; decode best-effort for display.
         return value.decode("utf-8", errors="replace")

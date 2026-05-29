@@ -238,3 +238,12 @@ def test_sample_rows_json_safe_handles_none(tmp_path: Path) -> None:
     expiry_idx = out["columns"].index("expiry_date")
     # indices have no expiry → that column is None in every seeded row
     assert all(row[expiry_idx] is None for row in out["rows"])
+
+
+def test_json_safe_non_finite_floats_are_stringified() -> None:
+    """NaN/±inf are stringified — Starlette's JSONResponse rejects them
+    (hostile-review LOW: guards a future DOUBLE column from a 500)."""
+    assert _json_safe(1.5) == 1.5  # finite float passes through unchanged
+    assert _json_safe(float("nan")) == "nan"
+    assert _json_safe(float("inf")) == "inf"
+    assert _json_safe(float("-inf")) == "-inf"
