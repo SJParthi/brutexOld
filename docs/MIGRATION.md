@@ -335,6 +335,26 @@ superseded.
 
     **Decision ID:** DEC-M4PRO-ABSOLUTE-001. **Builds on:** DEC-P0-020 (throughput canary honest envelope, MIGRATION entry #158) · CLAUDE.md §8 (hardware envelope). **Closes:** STANDARDS row 14 partial-status closure path; row activates 🟢 once runner is live.
 
+298. **DEC-SESSION-HOOK-LIVESTATE-001 — SessionStart hook now auto-surfaces live pipeline / audit / alerting state on every Claude session** (operator directive 2026-05-29 "every new or existing Claude code session ... should automatically do everything as an automated process always ... access logs queries dbs ... entirely accessible as an automated process"). Extends DEC-SESSION-START-HOOK-001 (entry #237): the prior hook printed *repo* state (branch, last-5 decisions, CLAUDE.md freshness, venv/fno_math presence) but said nothing about what the **system** is doing right now. This entry adds an **"Automation & live state"** section to `.claude/hooks/session-start.sh` so each session inherits the live operational surface without the operator running anything by hand:
+
+    - **Pipeline status** — runs `brutex status` (reads the runtime file; cheap; always run when a `.venv/` python is present, else prints a `make setup` hint).
+    - **Audit chain** — counts JSONL logs in `${BRUTEX_AUDIT_DIR:-~/.brutex/audit}` and points at `brutex doctor` for full hash-chain verification (cheap directory probe; always run).
+    - **Alerting (Telegram)** — reports whether alerts are armed by checking `BRUTEX_TELEGRAM_ENABLED` + `BRUTEX_TELEGRAM_BOT_TOKEN` **presence only** (the secret value is never printed).
+    - **Doctor (full health check)** — opt-in via `BRUTEX_SESSION_HOOK_DOCTOR=1`; runs `brutex doctor` and tails the summary. Off by default so session startup stays fast.
+    - **Automation commands** — one-line menu (`make run · brutex status · brutex doctor · brutex monitor · brutex dashboard`).
+
+    **Safety contract (unchanged from DEC-SESSION-START-HOOK-001):** notification-only, exit 0 always, all output → stderr (stdout stays clean for downstream pipes), no `set -e`. Every probe is time-boxed (`timeout`/`gtimeout` 8s, cross-platform for the macOS M4 Pro envelope where `timeout` is absent) and `|| true`-guarded, so a missing venv / CLI / log directory degrades to a one-line skip rather than a hard failure. Section labels are printed unconditionally so the output contract holds regardless of environment.
+
+    **Tests:** `tests/unit/test_session_start_hook.py::TestOutputContent` extended with 6 new required tokens (`Automation & live state`, `DEC-SESSION-HOOK-LIVESTATE-001`, `Pipeline status:`, `Audit chain:`, `Alerting (Telegram):`, `Automation commands:`). Existing exit-code / stdout-clean / descending-decisions contracts unchanged. Verified locally: `bash -n` clean; manual run → exit 0, stdout 0 bytes, all 6 tokens present, graceful skips when venv/logs absent; `ruff check` on the test file GREEN.
+
+    **Honest envelope (Golden Rule #10):**
+    - ✅ REAL: cheap probes (status read, audit-dir count, alerting-presence) run on every session today; section labels always present; contract test extended.
+    - 🟡 PARTIAL: the heavy full health check (`brutex doctor`) is opt-in (`BRUTEX_SESSION_HOOK_DOCTOR=1`), not always-on, to keep startup latency low — a deliberate honest trade, not always-running "everything".
+    - 📋 ROADMAP: auto-emitting the session summary to Telegram (vs. stderr only) and a daily cron wrapper for `brutex doctor` remain follow-ups (the alerting wiring exists per DEC-TELEGRAM-WIRING-001 but is not invoked from the hook).
+    - ❌ NOT DONE: no AWS / remote-DB access — out of Track 1 scope (operator chose "keep local-only" 2026-05-29); pytest was not run locally (no venv in the authoring container) — CI is the gate.
+
+    **Decision ID:** DEC-SESSION-HOOK-LIVESTATE-001. **Builds on:** DEC-SESSION-START-HOOK-001 (entry #237, the base hook) · DEC-DOCTOR-001 (`brutex doctor` CLI) · DEC-MONITOR-LOOP-001 (`brutex monitor`) · DEC-TELEGRAM-WIRING-001 (alerting transport). **Scope note (Golden Rule #3):** surfacing-only — no new engine behaviour, no scope expansion.
+
 297. **DEC-CLONE-RUN-002 — turnkey `make run`/`make setup`: venv + all libs + `fno_math` kernel auto-built; `ui` extra added to bootstrap** (operator directive 2026-05-28 "fully completely comprehensively automated — just run application and everything should be entirely visible ... libs and all other needed everything should be automatically included"). *(Renumbered #279 → #297 on 2026-05-28 when this entry was reconciled into the #174 branch: `main`'s DEC-CLONE-RUN-002 had taken #279, which collided with this branch's DEC-RESAMPLE-ANCHOR-001 (#279); re-seated as the next free number, newest-first.)* Extends DEC-CLONE-RUN-001 (entry #278): the prior `make run` installed `.[data,ui]` then launched the dashboard, but it (a) used whatever Python happened to be active (no venv), and (b) never built the maturin `fno_math` Rust kernel — so any import of `brutex.strategies.combo` (top-level `import fno_math` at `combo.py:64`) crashed `ModuleNotFoundError` on a clean clone. Separately, `scripts/setup/bootstrap.sh` installed `[dev,data,groww]` but **omitted `ui`**, so a post-bootstrap `python -m brutex dashboard` failed for missing fastapi/uvicorn.
 
     **What this fixes:**

@@ -93,6 +93,66 @@ cd "${REPO_ROOT}" 2>/dev/null || exit 0  # silent exit if not a repo
   fi
   echo ""
 
+  # ────────── automation & live state (DEC-SESSION-HOOK-LIVESTATE-001) ──────────
+  # Surface live pipeline / audit / alerting state on every session so each
+  # Claude session auto-inherits "what is the system doing right now" without
+  # the operator running anything by hand. Every probe is best-effort: it is
+  # time-boxed and `|| true`-guarded so the hook still exits 0 when the venv,
+  # CLI, or logs are absent. The heavy full health check (`brutex doctor`) is
+  # opt-in via BRUTEX_SESSION_HOOK_DOCTOR=1 to keep startup fast (Golden Rule
+  # #10 honest envelope — cheap probes always-on, expensive one a flag away).
+  echo "  Automation & live state (DEC-SESSION-HOOK-LIVESTATE-001):"
+
+  # Pick a python that can run the CLI (prefer the project venv).
+  HOOK_PY=""
+  if [[ -x ".venv/bin/python" ]]; then
+    HOOK_PY=".venv/bin/python"
+  fi
+  # Cross-platform time-box (macOS lacks `timeout`; coreutils ships `gtimeout`).
+  HOOK_TO=""
+  if command -v timeout >/dev/null 2>&1; then
+    HOOK_TO="timeout 8"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    HOOK_TO="gtimeout 8"
+  fi
+
+  # Pipeline status — reads the runtime file (cheap; always run).
+  echo "    Pipeline status:"
+  if [[ -n "${HOOK_PY}" ]]; then
+    ${HOOK_TO} "${HOOK_PY}" -m brutex status 2>&1 | head -5 | sed 's/^/      /' || true
+  else
+    echo "      (skipped — .venv not present; run: make setup)"
+  fi
+
+  # Audit chain / logs surface — count log files (cheap; always run).
+  AUDIT_DIR="${BRUTEX_AUDIT_DIR:-${HOME}/.brutex/audit}"
+  echo "    Audit chain:"
+  if [[ -d "${AUDIT_DIR}" ]]; then
+    AUDIT_N=$(find "${AUDIT_DIR}" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')
+    echo "      ${AUDIT_N} log(s) in ${AUDIT_DIR} (full verify: brutex doctor)"
+  else
+    echo "      no audit logs yet (${AUDIT_DIR} absent)"
+  fi
+
+  # Alerting config visibility — presence only, never print the secret token.
+  echo "    Alerting (Telegram):"
+  if [[ "${BRUTEX_TELEGRAM_ENABLED:-}" == "true" && -n "${BRUTEX_TELEGRAM_BOT_TOKEN:-}" ]]; then
+    echo "      ENABLED — alerts will fire (token present)"
+  elif [[ -n "${BRUTEX_TELEGRAM_BOT_TOKEN:-}" ]]; then
+    echo "      token present but BRUTEX_TELEGRAM_ENABLED != true (alerts dormant)"
+  else
+    echo "      dormant — set BRUTEX_TELEGRAM_ENABLED=true + BRUTEX_TELEGRAM_BOT_TOKEN to arm"
+  fi
+
+  # Opt-in full health check (heavier; off by default for fast startup).
+  if [[ "${BRUTEX_SESSION_HOOK_DOCTOR:-}" == "1" && -n "${HOOK_PY}" ]]; then
+    echo "    Doctor (full health check):"
+    ${HOOK_TO} "${HOOK_PY}" -m brutex doctor 2>&1 | tail -8 | sed 's/^/      /' || true
+  fi
+
+  echo "    Automation commands: make run · brutex status · brutex doctor · brutex monitor · brutex dashboard"
+  echo ""
+
   # ────────── reminder ──────────
   echo "  Pre-merge gates per CLAUDE.md §10:"
   echo "    .venv/bin/ruff check brutex tests && .venv/bin/mypy brutex && .venv/bin/pytest -q"
