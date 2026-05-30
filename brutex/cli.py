@@ -55,12 +55,12 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from brutex import __version__
+from brutex.adapters.groww.remint_guard import RemintGuard
 from brutex.config.paths import resolve_lake_root
 from brutex.config.runtime import read_runtime_file
 from brutex.orchestrator.audit import AuditChainCorruption, verify_chain
@@ -1212,58 +1212,27 @@ def _build_universe_fetchers(  # pragma: no cover — live creds + SDK
     return expiry_fetcher, contract_fetcher, auth
 
 
-class _SdkRemintGuard:  # pragma: no cover — exercised only on the live SDK path
-    """Thread-safe shared-SDK access + one-shot auth re-mint for a phase run.
+def _build_remint_guard(  # pragma: no cover — live SDK rebind (smoke path only)
+    expiry_fetcher: Any, contract_fetcher: Any, auth: Any
+) -> RemintGuard:
+    """Build the concurrency-safe re-mint guard for a phase's shared fetchers.
 
-    Two hostile-review findings (CLAUDE.md §9) motivate this:
-
-    * **#6 shared SDK across N pool workers** — one ``growwapi.GrowwAPI`` is
-      shared by every :class:`PoolRunParallel` worker; ``requests``-backed SDKs
-      are not safe for concurrent calls. :meth:`call` serializes every SDK call
-      behind a lock. The cost is ~nil: the 8 r/s token bucket already nearly
-      serialises the calls, so the lock just makes the existing near-serial
-      access correct.
-    * **#2 dropped auth re-mint** — a long phase outlives one short-lived Groww
-      token (resets 6 AM IST, CLAUDE.md §6). On an auth error :meth:`call`
-      re-mints ONCE (``auth.refresh()``), rebinds both fetchers' ``.sdk`` under
-      the lock, and retries the call. The single-flight `_PHASE_LOCK` means only
-      one phase runs at a time, so rebinding both fetchers here is race-free.
-
-    Idempotent + bounded: at most one re-mint per call; a still-failing auth
-    error after the re-mint propagates (the cell/job is recorded failed and, per
-    the incremental skip, retried on the next click).
+    The Groww SDK is thread-safe (every call is its own module-level
+    ``requests.get`` with no shared session — see
+    :mod:`brutex.adapters.groww.remint_guard`), so SDK calls run LOCK-FREE and
+    the :class:`~brutex.orchestrator.parallel.PoolRunParallel` workers fetch
+    truly concurrently. The guard serializes ONLY the one-shot token re-mint on
+    an auth failure: ``auth.refresh()`` returns the fresh SDK, rebound onto both
+    fetchers. (DEC-UNIVERSE-PULL-CONCURRENCY-001 — replaces the prior whole-call
+    lock that pinned the pull to ~3 r/s sequential.)
     """
 
-    def __init__(self, expiry_fetcher: Any, contract_fetcher: Any, auth: Any) -> None:
-        self._expiry = expiry_fetcher
-        self._contract = contract_fetcher
-        self._auth = auth
-        self._lock = __import__("threading").Lock()
-        self._log = __import__("structlog").get_logger("brutex.universe")
+    def _rebind() -> None:
+        new_sdk = auth.refresh()
+        expiry_fetcher.sdk = new_sdk
+        contract_fetcher.sdk = new_sdk
 
-    @staticmethod
-    def _is_auth_error(exc: BaseException) -> bool:
-        """True for a Groww token-expiry / invalid-token failure (re-mintable)."""
-        blob = f"{type(exc).__name__} {exc}".lower()
-        return any(
-            t in blob for t in ("authentication", "token", "expired", "invalid", "401", "403")
-        )
-
-    def call[T](self, fn: Callable[[], T]) -> T:
-        """Run *fn* (an SDK fetch) under the lock; on an auth error re-mint once + retry."""
-        with self._lock:
-            try:
-                return fn()
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                if not self._is_auth_error(exc):
-                    raise
-                # Token rolled mid-phase — re-mint once + rebind both fetchers,
-                # still holding the lock so no other worker sees a half-swapped SDK.
-                new_sdk = self._auth.refresh()
-                self._expiry.sdk = new_sdk
-                self._contract.sdk = new_sdk
-                self._log.warning("universe.phase.auth.reminted")
-                return fn()
+    return RemintGuard(_rebind)
 
 
 def _run_expiries_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB + threads
@@ -1309,7 +1278,7 @@ def _run_expiries_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB
         store = InstrumentStore.open(lake_root / "instruments.duckdb")
     try:
         expiry_fetcher, contract_fetcher, auth = _build_universe_fetchers(store)
-        guard = _SdkRemintGuard(expiry_fetcher, contract_fetcher, auth)
+        guard = _build_remint_guard(expiry_fetcher, contract_fetcher, auth)
         log.info("universe.expiries.master.refreshing")
         InstrumentMasterFetcher.from_env(store).refresh()
         underlyings = derive_lake_underlyings(store.list_index_equity_instruments())
@@ -1439,7 +1408,7 @@ def _run_contracts_phase(  # pragma: no cover — live Groww creds + SDK + DuckD
         store = InstrumentStore.open(lake_root / "instruments.duckdb")
     try:
         expiry_fetcher, contract_fetcher, auth = _build_universe_fetchers(store)
-        guard = _SdkRemintGuard(expiry_fetcher, contract_fetcher, auth)
+        guard = _build_remint_guard(expiry_fetcher, contract_fetcher, auth)
 
         # Phase 2 reads ONLY persisted expiries — the ordering guarantee across
         # clicks. Distinct (exchange, underlying, expiry) is the job universe.

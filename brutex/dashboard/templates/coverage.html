@@ -99,7 +99,7 @@
     <div class="kpi"><span class="v" id="pct">—%</span><span class="l">coverage</span></div>
     <div class="kpi"><span class="v" id="attempted">— / —</span><span class="l">pulled so far</span></div>
     <div class="kpi"><span class="v bad" id="failed">—</span><span class="l">failed (real errors)</span></div>
-    <div class="kpi"><span class="v warn" id="pending">—</span><span class="l">pending (no F&amp;O)</span></div>
+    <div class="kpi"><span class="v warn" id="pending">—</span><span class="l">no F&amp;O (no data)</span></div>
     <div class="kpi"><span class="v" id="missing">—</span><span class="l">not pulled yet</span></div>
     <button id="repull" class="go">Re-pull gaps</button>
     <span id="status"></span>
@@ -135,7 +135,7 @@ function esc(s) {
     .replace(/'/g, "&#39;");
 }
 
-const MARK = { complete: "✓", expiries_only: "◐", failed: "⚠", pending: "…", missing: "—" };
+const MARK = { complete: "✓", expiries_only: "◐", failed: "⚠", pending: "○", missing: "—" };
 
 function shortTs(ts) {
   if (!ts) return "";
@@ -155,7 +155,7 @@ function renderRows(rows) {
       + '<td><span class="sym">' + esc(r.underlying) + "</span></td>"
       + "<td>" + esc(r.exchange) + "</td>"
       + "<td>" + esc(r.year) + "</td>"
-      + '<td><span class="st ' + esc(st) + '">' + (MARK[st] || "") + " " + esc(st) + "</span></td>"
+      + '<td><span class="st ' + esc(st) + '">' + (MARK[st] || "") + " " + esc(st === "pending" ? "no F&O" : st) + "</span></td>"
       + "<td>" + esc(r.expiries_pulled) + "</td>"
       + "<td>" + esc(r.contracts_pulled) + "</td>"
       + "<td>" + esc(shortTs(r.last_fetched_at)) + "</td>"
