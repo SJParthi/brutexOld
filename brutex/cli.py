@@ -1081,6 +1081,12 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
         pull_started = time.monotonic()
         api_calls = 0
         rate_log_every = 25
+        # Window trackers for a TRUE recent r/s (the operator asked "per second
+        # how many requests" — the cumulative average alone hides the current
+        # rate). We log BOTH: lifetime `achieved_rps` + `window_rps` over just
+        # the last `rate_log_every` cells.
+        last_window_at = pull_started
+        last_window_calls = 0
         try:
             pull_workers = max(1, int(os.environ.get("BRUTEX_UNIVERSE_PULL_WORKERS", "8")))
         except ValueError:
@@ -1163,14 +1169,22 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
                 # than assume a fixed rate (the adaptive bucket oscillates
                 # 4–8 r/s, so wall-clock is a range, not a constant).
                 if cell_index % rate_log_every == 0 or cell_index == cell_total:
-                    elapsed = max(time.monotonic() - pull_started, 1e-9)
+                    now = time.monotonic()
+                    elapsed = max(now - pull_started, 1e-9)
                     cells_per_sec = cell_index / elapsed
                     eta_min = (cell_total - cell_index) / cells_per_sec / 60.0
+                    # Recent r/s over just the cells since the last readout —
+                    # the true "right now" rate, vs the lifetime average.
+                    window_elapsed = max(now - last_window_at, 1e-9)
+                    window_rps = (api_calls - last_window_calls) / window_elapsed
+                    last_window_at = now
+                    last_window_calls = api_calls
                     log.info(
                         "universe.pull.rate",
                         progress=f"{cell_index}/{cell_total}",
                         api_calls=api_calls,
                         achieved_rps=round(api_calls / elapsed, 2),
+                        window_rps=round(window_rps, 2),
                         eta_min=round(eta_min, 1),
                     )
         log.info(

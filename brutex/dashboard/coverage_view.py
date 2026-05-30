@@ -120,14 +120,35 @@ def coverage_headline(summary: CoverageSummary) -> dict[str, Any]:
     Returns
     -------
     dict[str, Any]
-        ``{"complete", "total", "incomplete", "failed", "pending",
-        "missing", "percent", "is_complete"}`` — ``percent`` is the
-        integer-rounded completion percentage (``100`` when nothing is
-        expected, since an empty grid is vacuously complete).
+        ``{"complete", "total", "attempted", "not_pulled", "incomplete",
+        "failed", "pending", "missing", "percent", "is_complete"}``.
+
+        ``percent`` is the integer-rounded completion percentage (``100``
+        when nothing is expected, since an empty grid is vacuously
+        complete).
+
+        **Honesty (the "894 missing looks like errors" fix):** a cell is
+        ``missing`` only because the pull has *not reached it yet* — it is
+        NOT an error. The two added fields name this plainly so the
+        dashboard can lead with progress instead of a scary gap count:
+
+        * ``attempted`` = ``complete + failed + pending`` — cells that have
+          a persisted ledger row (the pull has touched them). This is the
+          honest "how far has the run got" numerator.
+        * ``not_pulled`` = ``missing`` — cells with no row yet (queued /
+          in-progress), an alias named so the UI never implies an error.
+
+        ``failed`` remains the ONLY count that means a real, recorded error
+        (per :func:`~brutex.data.coverage_ledger.classify_cell`); a cell
+        that ran and found zero expiries is ``pending`` (legitimately
+        derivative-free that year), not a failure.
     """
+    attempted = summary.complete + summary.failed + summary.pending
     return {
         "complete": summary.complete,
         "total": summary.total_expected,
+        "attempted": attempted,
+        "not_pulled": summary.missing,
         "incomplete": summary.incomplete,
         "failed": summary.failed,
         "pending": summary.pending,

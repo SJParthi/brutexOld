@@ -96,9 +96,10 @@
   <div class="band">
     <div class="kpi"><span class="v" id="headline">— / —</span><span class="l">complete</span></div>
     <div class="kpi"><span class="v" id="pct">—%</span><span class="l">coverage</span></div>
-    <div class="kpi"><span class="v bad" id="failed">—</span><span class="l">failed</span></div>
-    <div class="kpi"><span class="v warn" id="pending">—</span><span class="l">pending</span></div>
-    <div class="kpi"><span class="v" id="missing">—</span><span class="l">missing</span></div>
+    <div class="kpi"><span class="v" id="attempted">— / —</span><span class="l">pulled so far</span></div>
+    <div class="kpi"><span class="v bad" id="failed">—</span><span class="l">failed (real errors)</span></div>
+    <div class="kpi"><span class="v warn" id="pending">—</span><span class="l">pending (no F&amp;O)</span></div>
+    <div class="kpi"><span class="v" id="missing">—</span><span class="l">not pulled yet</span></div>
     <button id="repull" class="go">Re-pull gaps</button>
     <span id="status"></span>
   </div>
@@ -116,6 +117,7 @@
 const panel = document.getElementById("panel");
 const headlineEl = document.getElementById("headline");
 const pctEl = document.getElementById("pct");
+const attemptedEl = document.getElementById("attempted");
 const failedEl = document.getElementById("failed");
 const pendingEl = document.getElementById("pending");
 const missingEl = document.getElementById("missing");
@@ -175,11 +177,21 @@ async function poll() {
     headlineEl.textContent = (h.complete ?? "—") + " / " + (h.total ?? "—");
     pctEl.textContent = (h.percent ?? "—") + "%";
     pctEl.className = "v " + (h.is_complete ? "ok" : (h.percent >= 50 ? "warn" : "bad"));
+    // "pulled so far" = attempted / total: the honest in-progress signal. A
+    // high "not pulled yet" early in a run is NORMAL (the pull walks the grid),
+    // not an error — only "failed" is a real error (DEC-PULL-ERROR-VISIBILITY-001).
+    attemptedEl.textContent = (h.attempted ?? "—") + " / " + (h.total ?? "—");
     failedEl.textContent = h.failed ?? "—";
+    failedEl.className = "v " + ((h.failed ?? 0) > 0 ? "bad" : "ok");
     pendingEl.textContent = h.pending ?? "—";
-    missingEl.textContent = h.missing ?? "—";
+    missingEl.textContent = (h.not_pulled ?? h.missing) ?? "—";
+    const attempted = h.attempted ?? 0;
+    const total = h.total ?? 0;
+    const inProgress = total > 0 && attempted < total;
     renderRows(body.rows || []);
-    liveTxt.textContent = "live · " + (body.rows || []).length + " cells";
+    liveTxt.textContent = inProgress
+      ? "pulling · " + attempted + " / " + total + " cells"
+      : "live · " + (body.rows || []).length + " cells";
   } catch (e) {
     liveTxt.textContent = "offline";
   }
