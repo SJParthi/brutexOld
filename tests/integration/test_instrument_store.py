@@ -1069,6 +1069,77 @@ class TestPlaceholderEconomicsAndPrune:
             assert s.prune_to_latest_snapshot() == 0
 
 
+class TestThreadSafety:
+    """Concurrent read/write must not corrupt the shared connection — DEC-STORE-THREADSAFE-001.
+
+    Reproduces the operator's ``/coverage`` 500 (``ValueError: not enough values
+    to unpack (expected 26, got 1)``): the background universe-pull thread
+    mutates ``instruments`` (upsert + prune) on the SAME DuckDB connection that a
+    request thread reads via ``list_index_equity_instruments``. Without the
+    per-store lock the two interleave on the single result cursor and garble
+    rows; with it every read returns a clean, fully-formed row.
+    """
+
+    def test_concurrent_read_during_upsert_prune_never_corrupts(self, tmp_path: Path) -> None:
+        import threading
+
+        with InstrumentStore.open(tmp_path / "db") as s:
+            # Seed so the first reads have rows.
+            s.upsert_many(
+                [_idx("NIFTY"), _eq("RELIANCE")],
+                snapshot_date=date(2026, 5, 29),
+                run_id="seed",
+                csv_source_sha256=_csv_hash("seed"),
+            )
+
+            errors: list[Exception] = []
+            stop = threading.Event()
+
+            def _writer() -> None:
+                # The pull thread's hot path: refresh-style upsert + prune,
+                # stamping a NEW snapshot_date each round (the cross-day churn).
+                day = 1
+                try:
+                    while not stop.is_set():
+                        s.upsert_many(
+                            [_idx("NIFTY"), _eq("RELIANCE")],
+                            snapshot_date=date(2026, 6, (day % 28) + 1),
+                            run_id=f"w{day}",
+                            csv_source_sha256=_csv_hash(f"w{day}"),
+                        )
+                        s.prune_to_latest_snapshot()
+                        day += 1
+                except Exception as exc:
+                    errors.append(exc)
+
+            def _reader() -> None:
+                # The /coverage request path: read the lean candidate set.
+                try:
+                    for _ in range(200):
+                        for inst in s.list_index_equity_instruments():
+                            # Touch a field — a garbled row would have raised on
+                            # construction already, but assert the shape too.
+                            assert inst.vendor_symbol
+                        s.has_placeholder_stock_economics()
+                        s.list_coverage()
+                except Exception as exc:
+                    errors.append(exc)
+
+            writer = threading.Thread(target=_writer, name="writer")
+            readers = [threading.Thread(target=_reader, name=f"reader{i}") for i in range(3)]
+            writer.start()
+            for r in readers:
+                r.start()
+            for r in readers:
+                r.join(timeout=30)
+            stop.set()
+            writer.join(timeout=30)
+
+            assert not errors, errors
+            # Lake stayed lean + clean throughout the churn.
+            assert s.verify_integrity().is_clean is True
+
+
 class TestCoverageLedger:
     """coverage_ledger table CRUD + status transitions — DEC-COVERAGE-LEDGER-001."""
 

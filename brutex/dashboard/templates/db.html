@@ -83,6 +83,15 @@
   td.nullcell { color:var(--muted); font-style:italic; }
   .empty { color:var(--muted); font-size:13px; padding:28px 16px; text-align:center; }
   .empty b { color:var(--text); }
+  .pager { display:flex; align-items:center; gap:14px; padding:10px 16px;
+    border-top:1px solid var(--border); }
+  .pager button { background:var(--surface-2); color:var(--text);
+    border:1px solid var(--border-strong); border-radius:6px; padding:6px 14px;
+    font-size:13px; cursor:pointer; }
+  .pager button:hover:not(:disabled) { border-color:var(--blue); }
+  .pager button:disabled { opacity:.4; cursor:not-allowed; }
+  .pager .prange { color:var(--muted); font-size:12px;
+    font-family:"SF Mono",Menlo,Consolas,monospace; }
 </style>
 </head>
 <body>
@@ -130,6 +139,7 @@ const refreshBtn = document.getElementById("refresh");
 
 let selected = null;
 let counts = {};
+let dbOffset = 0;  /* current page offset for the selected table (DEC-DB-PAGINATION-001) */
 
 /* Escape free text before interpolation into innerHTML (XSS sink). */
 function esc(s) {
@@ -188,8 +198,9 @@ function markSelected(name) {
   });
 }
 
-async function selectTable(name) {
+async function selectTable(name, keepOffset = false) {
   selected = name;
+  if (!keepOffset) dbOffset = 0;  /* switching tables / changing page size → page 1 */
   markSelected(name);
   if ((counts[name] || 0) === 0) {
     dataEl.innerHTML = '<div class="datahead"><span class="dt">' + esc(name) + '</span>'
@@ -201,7 +212,8 @@ async function selectTable(name) {
   dataEl.innerHTML = '<div class="empty">loading ' + esc(name) + '…</div>';
   try {
     const lim = encodeURIComponent(limitSel.value);
-    const r = await fetch("/api/v1/db/table/" + encodeURIComponent(name) + "?limit=" + lim);
+    const r = await fetch("/api/v1/db/table/" + encodeURIComponent(name)
+      + "?limit=" + lim + "&offset=" + encodeURIComponent(dbOffset));
     if (!r.ok) {
       dataEl.innerHTML = '<div class="empty">error ' + r.status + ' loading ' + esc(name) + '</div>';
       return;
@@ -216,12 +228,17 @@ async function selectTable(name) {
 function renderRows(body) {
   const cols = body.columns || [];
   const rows = body.rows || [];
+  const total = Number(body.total != null ? body.total : (counts[body.table] || 0));
+  const off = Number(body.offset || 0);
+  const lim = Number(body.limit || rows.length || 50);
+  const from = total === 0 ? 0 : off + 1;
+  const to = off + rows.length;
   const head = '<div class="datahead">'
     + '<span class="dt">' + esc(body.table) + '</span>'
-    + '<span class="sub">' + cols.length + ' columns · showing ' + rows.length + ' of '
-    + (counts[body.table] || 0).toLocaleString() + ' rows</span></div>';
+    + '<span class="sub">' + cols.length + ' columns · rows ' + from.toLocaleString() + '–'
+    + to.toLocaleString() + ' of ' + total.toLocaleString() + '</span></div>';
   if (!rows.length) {
-    dataEl.innerHTML = head + '<div class="empty">no rows</div>';
+    dataEl.innerHTML = head + '<div class="empty">no rows on this page</div>';
     return;
   }
   const thead = '<thead><tr>' + cols.map(c => '<th>' + esc(c) + '</th>').join("") + '</tr></thead>';
@@ -232,7 +249,24 @@ function renderRows(body) {
         : '<td>' + esc(cell) + '</td>'
     ).join("") + '</tr>'
   ).join("") + '</tbody>';
-  dataEl.innerHTML = head + '<div class="gridwrap"><table>' + thead + tbody + '</table></div>';
+  /* Prev/Next pager — the grid (.gridwrap) already scrolls horizontally so all
+     26 columns are reachable; the pager walks every row (DEC-DB-PAGINATION-001). */
+  const hasPrev = off > 0;
+  const hasNext = to < total;
+  const pager = '<div class="pager">'
+    + '<button id="dbprev"' + (hasPrev ? '' : ' disabled') + '>‹ Prev</button>'
+    + '<span class="prange">' + from.toLocaleString() + '–' + to.toLocaleString()
+    + ' / ' + total.toLocaleString() + '</span>'
+    + '<button id="dbnext"' + (hasNext ? '' : ' disabled') + '>Next ›</button></div>';
+  dataEl.innerHTML = head + '<div class="gridwrap"><table>' + thead + tbody + '</table></div>' + pager;
+  const prevBtn = document.getElementById("dbprev");
+  const nextBtn = document.getElementById("dbnext");
+  if (prevBtn) prevBtn.addEventListener("click", () => {
+    dbOffset = Math.max(0, off - lim); selectTable(selected, true);
+  });
+  if (nextBtn) nextBtn.addEventListener("click", () => {
+    dbOffset = off + lim; selectTable(selected, true);
+  });
 }
 
 limitSel.addEventListener("change", () => { if (selected) selectTable(selected); });

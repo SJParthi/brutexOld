@@ -1238,8 +1238,11 @@ def _start_coverage_repull(store: Any) -> bool:
         from brutex.cli import _run_live_universe_ingest
 
         try:
-            year = _dt.now(_UTC).year
-            _run_live_universe_ingest(store_path.parent, years=[year], store=store, resume=True)
+            # Re-pull the gaps across ALL years from Jan 2020 → now
+            # (DEC-UNIVERSE-PULL-2020-001) — resume only touches the incomplete
+            # cells, so this fills every missing expiry/contract from 2020.
+            years = list(range(2020, _dt.now(_UTC).year + 1))
+            _run_live_universe_ingest(store_path.parent, years=years, store=store, resume=True)
         except Exception:  # pylint: disable=broad-exception-caught
             # Best-effort background pull — never crash the server; the ledger
             # itself records per-cell failures inside the ingest.

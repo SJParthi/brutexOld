@@ -496,6 +496,54 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     log_path = configure_logging(json_renderer=False, enable_file=True)
     _log = structlog.get_logger("brutex.dashboard")
 
+    # Mirror RAW stdout (the Groww SDK's "Ready to Groww!" + any third-party
+    # print) into the rotating JSON log too, so EVERY line the operator sees in
+    # the terminal is also captured in .brutex-logs/brutex.log for copy/paste
+    # ("capture every nook and corner" — DEC-RUN-LOG-CAPTURE-001). Routed to a
+    # file-ONLY logger (propagate=False) so it lands in the file without
+    # double-printing to the console. Best-effort: never break stdout.
+    import logging as _logging
+
+    _file_handlers = [
+        h for h in _logging.getLogger().handlers if getattr(h, "_brutex_file_handler", False)
+    ]
+    if _file_handlers:
+        _stdout_log = _logging.getLogger("brutex.stdout")
+        _stdout_log.handlers = list(_file_handlers)
+        _stdout_log.propagate = False
+        _stdout_log.setLevel(_logging.INFO)
+
+        class _StdoutMirror:
+            """Tee stdout to the original stream AND the file-only log (line-buffered)."""
+
+            def __init__(self, stream: Any) -> None:
+                self._stream = stream
+                self._buf = ""
+
+            def write(self, data: str) -> int:
+                """Write to the real stream + mirror each complete line to the file log."""
+                self._stream.write(data)
+                self._buf += data
+                while "\n" in self._buf:
+                    line, self._buf = self._buf.split("\n", 1)
+                    if line.strip():
+                        _stdout_log.info(line.rstrip())
+                return len(data)
+
+            def flush(self) -> None:
+                """Flush the underlying stream (the file handler flushes itself)."""
+                self._stream.flush()
+
+            def isatty(self) -> bool:
+                """Proxy ``isatty`` so colour/TTY detection still sees the real terminal."""
+                return bool(getattr(self._stream, "isatty", lambda: False)())
+
+            def fileno(self) -> int:
+                """Proxy ``fileno`` so libraries that need the real fd keep working."""
+                return int(self._stream.fileno())
+
+        sys.stdout = _StdoutMirror(sys.stdout)
+
     state = DashboardState()
     # Open a real InstrumentStore so the F&O Universe Explorer routes can call
     # store.load_snapshot(...). Passing the bare lake_root Path here was the
@@ -583,8 +631,13 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
 
                 def _auto_universe_pull() -> None:
                     try:
-                        year = datetime.now(UTC).year
-                        report = _run_live_universe_ingest(lake_root, years=[year], store=store)
+                        # Fully-automated, ALL years from Jan 2020 → now
+                        # (DEC-UNIVERSE-PULL-2020-001): for every underlying,
+                        # every year, every expiry → all contracts. Groww serves
+                        # F&O from 2020 (CLAUDE.md §6).
+                        now_year = datetime.now(UTC).year
+                        years = list(range(2020, now_year + 1))
+                        report = _run_live_universe_ingest(lake_root, years=years, store=store)
                         _log.info(
                             "universe.autopull.done",
                             underlyings=report.underlyings,
@@ -835,6 +888,7 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
     """
     from datetime import UTC, datetime
 
+    import structlog
     from growwapi.groww.exceptions import BaseGrowwException
 
     from brutex.adapters.groww.auth import GrowwAuth
@@ -852,11 +906,14 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
     from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
     from brutex.universe import derive_lake_underlyings
 
+    log = structlog.get_logger("brutex.universe")
+
     owns_store = store is None
     if store is None:
         store = InstrumentStore.open(lake_root / "instruments.duckdb")
     try:
-        sdk = GrowwAuth.from_env().session()
+        auth = GrowwAuth.from_env()
+        sdk = auth.session()
         bucket = AdaptiveTokenBucket()
         instrument_fetcher = InstrumentMasterFetcher.from_env(store)
         expiry_fetcher = ExpiryFetcher(
@@ -881,10 +938,55 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
             metadata_lookup=_meta_lookup,
         )
 
+        def _is_auth_error(exc: BaseException) -> bool:
+            """True for a Groww token-expiry / invalid-token failure (re-mintable)."""
+            blob = f"{type(exc).__name__} {exc}".lower()
+            return any(
+                token in blob
+                for token in ("authentication", "token", "expired", "invalid", "401", "403")
+            )
+
+        def _remint() -> None:
+            """Re-mint the Groww access token mid-pull + rebind the fetchers.
+
+            Groww access tokens are short-lived + reset daily at 6 AM IST
+            (CLAUDE.md §6), so a long ALL-underlyings × 2020→now pull outlives
+            one token. On an auth error we re-mint ONCE and continue instead of
+            failing every remaining cell (DEC-UNIVERSE-PULL-2020-001).
+            """
+            new_sdk = auth.refresh()
+            expiry_fetcher.sdk = new_sdk
+            contract_fetcher.sdk = new_sdk
+            log.warning("universe.auth.reminted")
+
+        def _pull_cell(exchange: str, underlying: str, year: int) -> tuple[int, int]:
+            """Pull every expiry for ``(underlying, year)`` + all contracts per expiry."""
+            expiry_result = expiry_fetcher.fetch(underlying, exchange, year=year)
+            cell_expiries = len(expiry_result.records)
+            cell_contracts = 0
+            for record in expiry_result.records:
+                contract_result = contract_fetcher.fetch(underlying, exchange, record.expiry_date)
+                cell_contracts += len(contract_result.records)
+                log.info(
+                    "universe.contracts.pulled",
+                    underlying=underlying,
+                    exchange=exchange,
+                    year=year,
+                    expiry=str(record.expiry_date),
+                    contracts=len(contract_result.records),
+                )
+            return cell_expiries, cell_contracts
+
         # Refresh the master first (the contract fetcher's metadata enrichment
         # depends on a fresh master), then derive the FULL lake underlying set.
+        log.info("universe.master.refreshing")
         inst_result = instrument_fetcher.refresh()
         underlyings = derive_lake_underlyings(store.list_index_equity_instruments())
+        log.info(
+            "universe.master.refreshed",
+            parsed=inst_result.parsed,
+            persisted=inst_result.persisted,
+        )
 
         # Resume: re-pull only the incomplete cells per the persisted ledger.
         run_id = datetime.now(UTC).strftime("universe-%Y%m%dT%H%M%SZ")
@@ -897,20 +999,42 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
         underlying_count = len({(sym, ex) for ex, sym, _ in todo})
         expiry_total = 0
         contract_total = 0
-        for exchange, underlying, year in todo:
+        cell_total = len(todo)
+        log.info(
+            "universe.pull.start",
+            run_id=run_id,
+            underlyings=underlying_count,
+            years=sorted({yr for _, _, yr in todo}),
+            cells=cell_total,
+        )
+        for cell_index, (exchange, underlying, year) in enumerate(todo, start=1):
             fetched_at = datetime.now(UTC)
+            log.info(
+                "universe.cell.start",
+                underlying=underlying,
+                exchange=exchange,
+                year=year,
+                progress=f"{cell_index}/{cell_total}",
+            )
             try:
-                expiry_result = expiry_fetcher.fetch(underlying, exchange, year=year)
-                cell_expiries = len(expiry_result.records)
-                cell_contracts = 0
-                for record in expiry_result.records:
-                    contract_result = contract_fetcher.fetch(
-                        underlying, exchange, record.expiry_date
-                    )
-                    cell_contracts += len(contract_result.records)
+                try:
+                    cell_expiries, cell_contracts = _pull_cell(exchange, underlying, year)
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    # Token expired mid-pull → re-mint once + retry this cell.
+                    if not _is_auth_error(exc):
+                        raise
+                    _remint()
+                    cell_expiries, cell_contracts = _pull_cell(exchange, underlying, year)
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                # One underlying's failure must not abort the rest — record a
+                # One cell's failure must not abort the rest — record a
                 # ``failed`` cell with the error and continue (recoverable).
+                log.warning(
+                    "universe.cell.failed",
+                    underlying=underlying,
+                    exchange=exchange,
+                    year=year,
+                    error=str(exc),
+                )
                 store.upsert_coverage(
                     CoverageRecord(
                         exchange=exchange,
@@ -925,6 +1049,14 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
                     )
                 )
                 continue
+            log.info(
+                "universe.cell.done",
+                underlying=underlying,
+                exchange=exchange,
+                year=year,
+                expiries=cell_expiries,
+                contracts=cell_contracts,
+            )
             expiry_total += cell_expiries
             contract_total += cell_contracts
             store.upsert_coverage(
@@ -940,6 +1072,13 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
                     error_message=None,
                 )
             )
+        log.info(
+            "universe.pull.done",
+            run_id=run_id,
+            underlyings=underlying_count,
+            expiries=expiry_total,
+            contracts=contract_total,
+        )
 
         return UniverseIngestReport(
             instruments=inst_result,

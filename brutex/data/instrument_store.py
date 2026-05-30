@@ -70,7 +70,9 @@ module stays importable without the ``[data]`` extras.
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import threading
 from collections.abc import Iterator, Sequence
 from contextlib import closing
 from dataclasses import dataclass
@@ -654,38 +656,144 @@ class IntegrityReport:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Thread-safety (DEC-STORE-THREADSAFE-001)
+# ────────────────────────────────────────────────────────────────────────
+#
+# The dashboard shares ONE InstrumentStore (one DuckDB connection) across the
+# uvicorn request threads AND the background universe-pull thread
+# (DEC-AUTO-UNIVERSE-001 deliberately reuses the single writer). A DuckDB
+# connection has ONE result cursor, so two threads interleaving
+# ``execute()`` + ``fetch*()`` corrupt each other's rows — the operator hit a
+# ``ValueError: not enough values to unpack (expected 26, got 1)`` 500 on
+# ``/coverage`` when a poll read ``instruments`` mid-``refresh()``. We serialize
+# every public method behind a per-store re-entrant lock so each
+# execute→fetch is atomic; reads from the background pull and the request
+# handlers can no longer overlap on the connection.
+
+
+def _synchronized(method: Any) -> Any:
+    """Wrap a public store method so its whole body runs under ``self._lock``."""
+
+    @functools.wraps(method)
+    def _wrapper(self: InstrumentStore, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return _wrapper
+
+
+class _StoreMeta(type):
+    """Metaclass that serializes every PUBLIC :class:`InstrumentStore` method.
+
+    Wraps each callable whose name does not start with ``_`` (and which is not
+    a ``property`` / ``staticmethod`` / ``classmethod``) in :func:`_synchronized`
+    at class-creation time, so the per-store ``threading.RLock`` is acquired for
+    the full execute→fetch of every read/write — no per-method decorator churn,
+    and a future method added to the class is thread-safe by default.
+    """
+
+    def __new__(mcs, name: str, bases: tuple[type, ...], namespace: dict[str, Any]) -> _StoreMeta:
+        for attr_name, attr in list(namespace.items()):
+            if (
+                callable(attr)
+                and not attr_name.startswith("_")
+                and not isinstance(attr, staticmethod | classmethod | property)
+            ):
+                namespace[attr_name] = _synchronized(attr)
+        return super().__new__(mcs, name, bases, namespace)
+
+
+class _LockedReadConn:
+    """Read-only DuckDB connection view that serializes ``execute → fetch``.
+
+    Returned by :attr:`InstrumentStore.connection` so whitebox readers (the
+    ``/db`` viewer in :mod:`brutex.dashboard.db_view`) hold the SAME store lock
+    for the full ``execute()`` → ``description`` → ``fetch*()`` window and thus
+    cannot race the background pull's writes (DEC-STORE-THREADSAFE-001). It
+    supports exactly the read pattern db_view uses; mutation still goes through
+    the store's typed, locked methods.
+    """
+
+    def __init__(self, conn: Any, lock: threading.RLock) -> None:
+        self._conn = conn
+        self._lock = lock
+        self._result: Any = None
+
+    def execute(self, sql: str, parameters: Any = None) -> _LockedReadConn:
+        """Acquire the store lock and execute *sql*; lock is held until fetch."""
+        self._lock.acquire()
+        try:
+            self._result = (
+                self._conn.execute(sql)
+                if parameters is None
+                else self._conn.execute(sql, parameters)
+            )
+        except BaseException:
+            self._lock.release()
+            raise
+        return self
+
+    @property
+    def description(self) -> Any:
+        """Column metadata of the last executed statement (lock still held)."""
+        return self._result.description
+
+    def fetchone(self) -> Any:
+        """Fetch one row, then release the store lock."""
+        try:
+            return self._result.fetchone()
+        finally:
+            self._lock.release()
+
+    def fetchall(self) -> Any:
+        """Fetch all rows, then release the store lock."""
+        try:
+            return self._result.fetchall()
+        finally:
+            self._lock.release()
+
+
+# ────────────────────────────────────────────────────────────────────────
 # InstrumentStore
 # ────────────────────────────────────────────────────────────────────────
 
 
-class InstrumentStore:
+class InstrumentStore(metaclass=_StoreMeta):
     """Temporal instrument master on DuckDB.
 
     Context-manager shaped for symmetry with
     :class:`~brutex.data.catalog.Catalog`. Open once per process,
     share the handle across phases, close on shutdown.
+
+    Thread-safe (DEC-STORE-THREADSAFE-001): every public method is serialized
+    behind a per-store re-entrant lock via :class:`_StoreMeta`, so the
+    dashboard request threads and the background universe-pull thread can share
+    the single DuckDB connection without corrupting each other's result cursor.
     """
 
     def __init__(self, *, conn: Any, path: Path) -> None:
+        # Re-entrant so a locked method may call another locked method on the
+        # same thread without self-deadlock.
+        self._lock = threading.RLock()
         self._conn = conn
         self._path = path
         self._closed = False
 
     @property
     def connection(self) -> Any:
-        """Public read-only access to the underlying DuckDB connection.
+        """Lock-serialized read-only view of the underlying DuckDB connection.
 
-        Exposed for whitebox consumers (`brutex/dashboard/app.py` stats
-        queries) that need raw connection access without touching the
-        private ``_conn`` attribute. Per DEC-P0-017 (PR #39): added to
-        enable narrowing pyright's `reportPrivateUsage` from "none" to
-        "warning" without per-call-site ignore comments.
+        Exposed for whitebox consumers (the ``/db`` viewer) that need raw
+        read access. Returns a :class:`_LockedReadConn` that holds the store
+        lock across ``execute → fetch`` (DEC-STORE-THREADSAFE-001), so a
+        ``/db`` read can never race the background pull's writes. Per
+        DEC-P0-017 (PR #39) it avoids per-call-site private-access ignores.
 
         Treat as read-only — any state mutation MUST go through the
         InstrumentStore's typed methods (upsert_many, verify_integrity,
         etc.) to preserve audit + idempotence guarantees.
         """
-        return self._conn
+        return _LockedReadConn(self._conn, self._lock)
 
     @classmethod
     def open(cls, path: Path) -> Self:
@@ -732,12 +840,15 @@ class InstrumentStore:
     @property
     def schema_version(self) -> int:
         """Return the schema version recorded in ``schema_meta``."""
-        self._ensure_open()
-        row = self._conn.execute(
-            "SELECT value FROM schema_meta WHERE key = ?",
-            ["schema_version"],
-        ).fetchone()
-        return int(row[0]) if row else SCHEMA_VERSION
+        # A property, so _StoreMeta does not wrap it — lock explicitly so its
+        # execute→fetch can't race the background pull (DEC-STORE-THREADSAFE-001).
+        with self._lock:
+            self._ensure_open()
+            row = self._conn.execute(
+                "SELECT value FROM schema_meta WHERE key = ?",
+                ["schema_version"],
+            ).fetchone()
+            return int(row[0]) if row else SCHEMA_VERSION
 
     # ── Write side ────────────────────────────────────────────────
 
