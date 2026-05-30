@@ -66,6 +66,19 @@ def _key(symbol: str = "NSE-NIFTY", interval: str = "1m") -> ChunkKey:
     return ChunkKey(symbol, interval, "2021-01-01T09:15:00+00:00", "2021-01-31T09:15:00+00:00")
 
 
+def _bars_of(sink: _FakeSink, call: int = 0) -> list[CandleBar]:
+    """Narrow a recorded sink call's ``bars`` (typed ``object``) to a bar list.
+
+    The fake records each append as ``dict[str, object]``; the parsed bars are
+    always a ``list[CandleBar]`` (see :meth:`_FakeSink.append`). This helper
+    asserts that and hands back a precisely-typed list so ``len(...)`` /
+    indexing type-check (``pyright``) without a per-assertion ``isinstance``.
+    """
+    bars = sink.calls[call]["bars"]
+    assert isinstance(bars, list)
+    return bars
+
+
 def _fetcher(inner: _FakeInner) -> tuple[PersistingFetcher, _FakeSink]:
     sink = _FakeSink()
     return PersistingFetcher(inner=inner, sink=sink), sink
@@ -141,7 +154,7 @@ class TestRowResilience:
             out = fetcher.fetch_chunk(_key())
         assert out  # COMPLETED — the one bad row did NOT nuke the chunk
         assert len(sink.calls) == 1
-        assert len(sink.calls[0]["bars"]) == 2  # both good rows persisted
+        assert len(_bars_of(sink)) == 2  # both good rows persisted
         q = next(e for e in logs if e["event"] == "candle.rows.quarantined")
         assert q["quarantined"] == 1
         assert q["kept"] == 2
@@ -186,7 +199,7 @@ class TestEmptyBarHandling:
         with capture_logs() as logs:
             out = fetcher.fetch_chunk(_key())
         assert out  # COMPLETED — the good bar survives
-        assert len(sink.calls[0]["bars"]) == 1
+        assert len(_bars_of(sink)) == 1
         info = next(e for e in logs if e["event"] == "candle.rows.empty_skipped")
         assert info["empty"] == 1
         assert info["kept"] == 1
@@ -199,7 +212,7 @@ class TestEmptyBarHandling:
         with capture_logs() as logs:
             out = fetcher.fetch_chunk(_key())
         assert out  # COMPLETED — the good bar survives
-        assert len(sink.calls[0]["bars"]) == 1
+        assert len(_bars_of(sink)) == 1
         q = next(e for e in logs if e["event"] == "candle.rows.quarantined")
         assert q["quarantined"] == 1  # the malformed row
         assert q["empty"] == 1  # the no-data row
