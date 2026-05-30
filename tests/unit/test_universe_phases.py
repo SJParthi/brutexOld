@@ -43,7 +43,7 @@ def _sync_run_parallel[ItemT, ResultT](
     for item in items:
         try:
             result = fn(item)
-        except Exception as exc:  # noqa: BLE001 — test fake mirrors prod capture
+        except Exception as exc:
             out.append(ItemResult(item=item, ok=False, result=None, exc=exc))
         else:
             out.append(ItemResult(item=item, ok=True, result=result, exc=None))
