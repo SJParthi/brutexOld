@@ -22,6 +22,8 @@ from brutex.orchestrator.universe_phases import (
     contract_jobs_to_pull,
     phase1_cells,
     run_two_phase,
+    settled_contract_jobs,
+    settled_expiry_cells,
 )
 
 # ────────────────────────────────────────────────────────────────────────
@@ -374,6 +376,79 @@ class TestItemResult:
         exc = RuntimeError("x")
         r: ItemResult[str, int] = ItemResult(item="x", ok=False, result=None, exc=exc)
         assert not r.ok and r.exc is exc
+
+
+# ────────────────────────────────────────────────────────────────────────
+# settled_expiry_cells — build the Phase-1 skip-set from coverage rows
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSettledExpiryCells:
+    def test_complete_and_pending_are_settled(self) -> None:
+        rows = [
+            ("NSE", "A", 2023, "complete"),
+            ("NSE", "B", 2023, "pending"),
+        ]
+        assert settled_expiry_cells(rows) == frozenset({("NSE", "A", 2023), ("NSE", "B", 2023)})
+
+    def test_failed_is_excluded(self) -> None:
+        # A failed cell must NOT be settled → it always retries.
+        rows = [("NSE", "C", 2023, "failed")]
+        assert settled_expiry_cells(rows) == frozenset()
+
+    def test_unknown_status_excluded(self) -> None:
+        assert settled_expiry_cells([("NSE", "A", 2023, "missing")]) == frozenset()
+
+    def test_empty(self) -> None:
+        assert settled_expiry_cells([]) == frozenset()
+
+    def test_result_is_frozenset(self) -> None:
+        # O(1) membership downstream requires a frozenset (hashable, immutable).
+        out = settled_expiry_cells([("NSE", "A", 2023, "complete")])
+        assert isinstance(out, frozenset)
+
+    def test_feeds_cells_to_pull(self) -> None:
+        # End-to-end: the builder's output drives the Phase-1 skip.
+        settled = settled_expiry_cells([("NSE", "A", 2023, "complete")])
+        cells = [("NSE", "A", 2023), ("NSE", "A", 2025)]
+        assert cells_to_pull(cells, settled=settled, current_year=2025) == [("NSE", "A", 2025)]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# settled_contract_jobs — build the Phase-2 skip-set from contract rows
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSettledContractJobs:
+    def test_builds_triple_set(self) -> None:
+        rows = [
+            ("NSE", "A", _D(2024, 1, 25)),
+            ("NSE", "A", _D(2024, 2, 29)),
+        ]
+        assert settled_contract_jobs(rows) == frozenset(
+            {("NSE", "A", _D(2024, 1, 25)), ("NSE", "A", _D(2024, 2, 29))}
+        )
+
+    def test_dedupes_repeated_triples(self) -> None:
+        # Many contract legs share one (exchange, underlying, expiry) → one entry.
+        same = ("NSE", "A", _D(2024, 1, 25))
+        assert settled_contract_jobs([same, same, same]) == frozenset({same})
+
+    def test_empty(self) -> None:
+        assert settled_contract_jobs([]) == frozenset()
+
+    def test_result_is_frozenset(self) -> None:
+        out = settled_contract_jobs([("NSE", "A", _D(2024, 1, 25))])
+        assert isinstance(out, frozenset)
+
+    def test_feeds_contract_jobs_to_pull(self) -> None:
+        # End-to-end: expired + settled → skipped; future + settled → re-pulled.
+        past = ("NSE", "A", _D(2024, 1, 25))
+        future = ("NSE", "A", _D(2026, 12, 31))
+        settled = settled_contract_jobs([past, future])
+        assert contract_jobs_to_pull([past, future], settled=settled, today=_D(2026, 5, 30)) == [
+            future
+        ]
 
 
 if __name__ == "__main__":  # pragma: no cover

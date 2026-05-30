@@ -269,6 +269,64 @@ def contract_jobs_to_pull(
     return [job for job in jobs if not (job[2] < today and job in settled)]
 
 
+#: Coverage statuses that mean a Phase-1 cell reached a FINAL state for its
+#: year — its expiry calendar will not change. ``failed`` is deliberately
+#: EXCLUDED so a previously-errored cell is always re-attempted; ``missing`` is
+#: not a persisted status (a never-attempted cell has no row at all).
+_SETTLED_STATUSES: frozenset[str] = frozenset({"complete", "pending"})
+
+
+def settled_expiry_cells(
+    rows: Iterable[tuple[str, str, int, str]],
+) -> frozenset[ExpiryCell]:
+    """Build the Phase-1 *settled* skip-set for :func:`cells_to_pull` from coverage rows.
+
+    Each row is ``(exchange, underlying, year, status)`` — exactly the columns
+    the caller projects from ``store.list_coverage()``. A cell counts as settled
+    iff its status is ``complete`` or ``pending`` (:data:`_SETTLED_STATUSES` — it
+    ran and reached a final state); a ``failed`` row is EXCLUDED so failures
+    always retry. Pairing this with :func:`cells_to_pull` (which only skips a
+    settled *past* year) gives the operator's "re-click pulls only new work" with
+    a daily current-year refresh.
+
+    The result is a :class:`frozenset` so the downstream membership test is O(1)
+    per cell (CLAUDE.md §5). Building it is one O(R) pass over R coverage rows.
+
+    Returns
+    -------
+    frozenset[ExpiryCell]
+        The settled ``(exchange, underlying, year)`` cells.
+    """
+    return frozenset(
+        (exchange, underlying, year)
+        for exchange, underlying, year, status in rows
+        if status in _SETTLED_STATUSES
+    )
+
+
+def settled_contract_jobs(
+    rows: Iterable[tuple[str, str, date]],
+) -> frozenset[ContractJob]:
+    """Build the Phase-2 *settled* skip-set for :func:`contract_jobs_to_pull`.
+
+    Each row is ``(exchange, underlying, expiry_date)`` — the distinct
+    ``(exchange, underlying_symbol, expiry_date)`` triples the caller projects
+    from ``store.list_contracts()`` (a persisted contract for that expiry means
+    its leg-set was already pulled). :func:`contract_jobs_to_pull` then skips a
+    job only when it is BOTH in this set AND already expired, so a not-yet-
+    expired expiry is always re-pulled (new strikes).
+
+    The result is a :class:`frozenset` so the downstream membership test is O(1)
+    per job (CLAUDE.md §5).
+
+    Returns
+    -------
+    frozenset[ContractJob]
+        The already-pulled ``(exchange, underlying, expiry)`` jobs.
+    """
+    return frozenset(rows)
+
+
 def run_two_phase(
     cells: Sequence[ExpiryCell],
     *,
@@ -375,4 +433,6 @@ __all__ = [
     "contract_jobs_to_pull",
     "phase1_cells",
     "run_two_phase",
+    "settled_contract_jobs",
+    "settled_expiry_cells",
 ]
