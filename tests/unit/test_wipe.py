@@ -9,37 +9,17 @@ hostile override matrix (``BRUTEX_LAKE_ROOT=$HOME`` etc. must be REFUSED).
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from brutex.wipe import (
     OVERRIDE_ENV_VARS,
     UnsafeWipeError,
     WipeTarget,
-    _is_within,
     assert_safe,
     execute_wipe,
     server_is_running,
     wipe_targets,
 )
-
-# ── _is_within ───────────────────────────────────────────────────────────
-
-
-def test_is_within_identity(tmp_path: Path) -> None:
-    """A path is within itself."""
-    assert _is_within(tmp_path, tmp_path) is True
-
-
-def test_is_within_nested(tmp_path: Path) -> None:
-    """A nested child is within its parent."""
-    assert _is_within(tmp_path / "a" / "b", tmp_path) is True
-
-
-def test_is_within_outside(tmp_path: Path) -> None:
-    """A sibling is NOT within."""
-    assert _is_within(tmp_path / "a", tmp_path / "b") is False
-
 
 # ── wipe_targets ─────────────────────────────────────────────────────────
 
@@ -68,6 +48,12 @@ def test_wipe_targets_skips_override_inside_home(tmp_path: Path) -> None:
     """An override INSIDE the home dir is skipped (removing home covers it)."""
     inside = tmp_path / ".brutex" / "logs"
     targets = wipe_targets({"BRUTEX_LOG_DIR": str(inside)}, home=tmp_path)
+    assert [t.path for t in targets] == [tmp_path / ".brutex"]
+
+
+def test_wipe_targets_skips_override_equal_to_home(tmp_path: Path) -> None:
+    """An override pointing exactly AT the home dir is skipped (already covered)."""
+    targets = wipe_targets({"BRUTEX_LOG_DIR": str(tmp_path / ".brutex")}, home=tmp_path)
     assert [t.path for t in targets] == [tmp_path / ".brutex"]
 
 
@@ -251,12 +237,10 @@ def test_server_is_running_no_runtime() -> None:
 
 
 def test_server_is_running_live_pid() -> None:
-    """A runtime file with a live pid → running."""
-    info = SimpleNamespace(pid=4321)
-    assert server_is_running(info, pid_alive=lambda pid: pid == 4321) is True
+    """A recorded pid that is alive → running."""
+    assert server_is_running(4321, pid_alive=lambda pid: pid == 4321) is True
 
 
 def test_server_is_running_dead_pid() -> None:
-    """A runtime file with a dead pid → not running."""
-    info = SimpleNamespace(pid=4321)
-    assert server_is_running(info, pid_alive=lambda _pid: False) is False
+    """A recorded pid that is dead → not running."""
+    assert server_is_running(4321, pid_alive=lambda _pid: False) is False

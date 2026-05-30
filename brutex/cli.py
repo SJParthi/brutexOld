@@ -1699,7 +1699,8 @@ def cmd_wipe(*, execute: bool, assume_yes: bool) -> int:  # pragma: no cover —
     targets = wipe_targets(os.environ, home=home, cwd=cwd)
 
     # PREVENT: never wipe an open lake out from under a live dashboard.
-    if server_is_running(read_runtime_file(), pid_alive=is_pid_alive):
+    _runtime = read_runtime_file()
+    if server_is_running(_runtime.pid if _runtime is not None else None, pid_alive=is_pid_alive):
         print(
             "[brutex] a BruteX dashboard is RUNNING — stop it first, then re-run "
             "`brutex wipe` (it holds the lake open on disk).",

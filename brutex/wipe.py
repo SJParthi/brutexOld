@@ -28,7 +28,7 @@ import shutil
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Final
 
 from brutex.config.paths import ENV_LAKE_ROOT, brutex_home
 from brutex.models import BruteXError
@@ -54,19 +54,6 @@ _REPO_LOG_DIR_NAME: Final[str] = ".brutex-logs"
 #: to be wipeable — refuses ``/`` and top-level dirs like ``/data`` (too broad
 #: to be a BruteX-owned leaf). ``$HOME/.brutex`` clears it on every real OS.
 _MIN_DEPTH_BELOW_ANCHOR: Final[int] = 2
-
-
-class _HasPid(Protocol):
-    """Structural type for the runtime snapshot — only the OS ``pid`` is read.
-
-    A read-only property (not a bare attribute) so a ``frozen`` dataclass such
-    as :class:`~brutex.config.runtime.RuntimeInfo` satisfies it.
-    """
-
-    @property
-    def pid(self) -> int:
-        """The OS process id of the running BruteX dashboard."""
-        ...
 
 
 class UnsafeWipeError(BruteXError):
@@ -283,23 +270,23 @@ def execute_wipe(
     return WipeReport(tuple(removed), tuple(absent), tuple(failed), dry_run)
 
 
-def server_is_running(runtime_info: _HasPid | None, *, pid_alive: Callable[[int], bool]) -> bool:
+def server_is_running(pid: int | None, *, pid_alive: Callable[[int], bool]) -> bool:
     """True if a live BruteX dashboard owns the lake (so a CLI wipe must refuse).
 
     Parameters
     ----------
-    runtime_info
-        The parsed service-discovery snapshot, or ``None`` when no runtime file
-        exists (no server was started).
+    pid
+        The OS pid recorded in the service-discovery runtime file, or ``None``
+        when no runtime file exists (no server was started).
     pid_alive
         Liveness probe for an OS pid (production: ``os.kill(pid, 0)``).
 
     Returns
     -------
     bool
-        ``True`` only when a runtime file exists AND its pid is alive.
+        ``True`` only when a pid is present AND alive.
     """
-    return runtime_info is not None and pid_alive(runtime_info.pid)
+    return pid is not None and pid_alive(pid)
 
 
 __all__ = [
