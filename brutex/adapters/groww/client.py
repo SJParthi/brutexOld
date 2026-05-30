@@ -39,11 +39,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Final, Protocol, cast
+from zoneinfo import ZoneInfo
 
 from brutex.data.watermark import ChunkKey
 from brutex.models import BruteXError
+
+#: India Standard Time — Groww's historical-candle ``start_time`` / ``end_time``
+#: are IST market-time strings (symmetric with the response side, which
+#: ``brutex.adapters.groww.parser`` reads back as Asia/Kolkata — CLAUDE.md §6).
+_IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
 
 
 class GrowwFetchError(BruteXError):
@@ -191,16 +197,25 @@ def symbol_to_exchange_segment(groww_symbol: str) -> tuple[str, str]:
     return exchange, segment
 
 
-def _to_epoch(iso_ts: str) -> int:
-    """Convert a watermark ISO timestamp to integer epoch seconds.
+def _to_groww_time(iso_ts: str) -> str:
+    """Format a watermark ISO timestamp as Groww's ``"yyyy-MM-dd HH:mm:ss"``.
 
-    Groww's ``start_time`` / ``end_time`` accept ``"yyyy-MM-dd HH:mm:ss"`` OR
-    epoch seconds (backtesting doc Request Schema). Epoch is timezone-
-    unambiguous, so we pass it rather than re-deriving an IST wall-clock
-    string. The chunk boundaries are tz-aware UTC (from the chunk planner),
-    so ``.timestamp()`` yields the correct instant.
+    The growwapi SDK's ``get_historical_candles`` documents ``start_time`` /
+    ``end_time`` as **``"yyyy-MM-dd HH:mm:ss"`` strings** (HARD-VERIFIED from
+    the wheel docstring), and Groww candle times are IST market times — the
+    response parser localises them as ``Asia/Kolkata`` (``parser.py`` /
+    CLAUDE.md §6). So the chunk boundary (tz-aware UTC from the planner) is
+    converted to IST wall-clock and formatted — symmetric with the parse path.
+
+    The prior implementation sent an **integer epoch** ("epoch is also
+    accepted" was an UNVERIFIED claim); against live Groww that was rejected
+    for every chunk (``completed=0 failed=N``), so this restores the documented
+    string contract (DEC-PULL-CANDLE-TIME-FORMAT-001).
     """
-    return int(datetime.fromisoformat(iso_ts).timestamp())
+    parsed = datetime.fromisoformat(iso_ts)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(_IST).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class Pacer(Protocol):
@@ -295,8 +310,8 @@ class GrowwCandleFetcher:
             "exchange": getattr(self.sdk, f"EXCHANGE_{exchange_code}"),
             "segment": getattr(self.sdk, f"SEGMENT_{segment}"),
             "groww_symbol": symbol,
-            "start_time": _to_epoch(key.start),
-            "end_time": _to_epoch(key.end),
+            "start_time": _to_groww_time(key.start),
+            "end_time": _to_groww_time(key.end),
             "candle_interval": getattr(self.sdk, _INTERVAL_ATTR[key.interval]),
         }
 
