@@ -537,3 +537,93 @@ def test_query_candles_paging_clamps(store: InstrumentStore, tmp_path: Path) -> 
     )
     assert out["limit"] == 500
     assert out["offset"] == 0
+
+
+def test_query_candles_date_bound_is_utc_not_session_tz(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # A bar at 23:30 UTC on 2024-03-02 is genuinely on the 2nd in UTC but the
+    # 3rd in IST. With a naive session-tz cast it would be DROPPED from
+    # end="2024-03-02"; the UTC-anchored bound must INCLUDE it regardless of
+    # the ambient DuckDB session TimeZone (the operator runs Asia/Kolkata).
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        bars=[_bar(datetime(2024, 3, 2, 23, 30, tzinfo=UTC), "100.5")],
+    )
+    store.connection.execute("SET TimeZone='Asia/Kolkata'")
+    out = query_candles(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        start="2024-03-02",
+        end="2024-03-02",
+        limit=50,
+    )
+    assert out["total"] == 1
+
+
+@pytest.mark.parametrize("bad", ["20240302", "2024-W09-6", "2024/03/01"])
+def test_query_candles_rejects_nonstrict_date(
+    store: InstrumentStore, tmp_path: Path, bad: str
+) -> None:
+    _write_candles(tmp_path)
+    with pytest.raises(ValueError, match="start must be ISO"):
+        query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            start=bad,
+            limit=50,
+        )
+
+
+def test_query_candles_rejects_impossible_but_well_shaped_date(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Matches YYYY-MM-DD but is not a real calendar date → fromisoformat raises
+    # (covers the second guard inside _parse_iso_date).
+    _write_candles(tmp_path)
+    with pytest.raises(ValueError, match="end must be ISO"):
+        query_candles(
+            store.connection,
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            end="2024-13-45",
+            limit=50,
+        )
+
+
+def test_query_table_contains_escapes_underscore_wildcard(store: InstrumentStore) -> None:
+    # "NI_TY" must match literally — the LIKE `_` wildcard would otherwise let
+    # it match "NIFTY". Escaped → zero matches.
+    out = query_table(
+        store.connection,
+        "instruments",
+        filters=(("trading_symbol", "contains", "NI_TY"),),
+        limit=50,
+    )
+    assert out["total"] == 0
+
+
+def test_query_table_contains_escapes_percent_wildcard(store: InstrumentStore) -> None:
+    # A literal "%" matches none of the seeded symbols (would match ALL if the
+    # wildcard leaked through).
+    out = query_table(
+        store.connection,
+        "instruments",
+        filters=(("trading_symbol", "contains", "%"),),
+        limit=50,
+    )
+    assert out["total"] == 0

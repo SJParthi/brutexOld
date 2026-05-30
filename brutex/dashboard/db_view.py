@@ -94,6 +94,12 @@ CANDLE_COLUMNS: Final = (
 #: ``NSE-NIFTY-30Jan25-28500-CE``); ``..`` is rejected separately.
 _SYMBOL_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 
+#: Strict ISO calendar-date shape. ``date.fromisoformat`` (py3.11+) also
+#: accepts ``YYYYMMDD`` and ``YYYY-Www-D`` ordinal/week forms; the candle
+#: viewer's contract is the plain ``YYYY-MM-DD`` a ``<input type="date">``
+#: emits, so anything else is rejected up front.
+_ISO_DATE_RE: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 #: Lower inclusive bound for the sample-row ``limit``.
 _LIMIT_MIN: Final = 1
 
@@ -324,8 +330,18 @@ def _build_where(
             raise ValueError(f"unknown filter column {column!r}; allowed: {sorted(valid_columns)}")
         if op not in ALLOWED_OPERATORS:
             raise ValueError(f"unknown operator {op!r}; allowed: {sorted(ALLOWED_OPERATORS)}")
-        clauses.append(f"{_quote_ident(column)} {ALLOWED_OPERATORS[op]} ?")
-        params.append(f"%{value}%" if op == "contains" else value)
+        ident = _quote_ident(column)
+        if op == "contains":
+            # Literal substring match: escape the LIKE metacharacters (\ % _)
+            # in the value + declare ESCAPE, so a value containing % or _ is
+            # matched literally rather than as a wildcard (the "like" operator
+            # is the escape hatch when the operator wants raw patterns).
+            esc_v = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append(f"{ident} LIKE ? ESCAPE '\\'")
+            params.append(f"%{esc_v}%")
+        else:
+            clauses.append(f"{ident} {ALLOWED_OPERATORS[op]} ?")
+            params.append(value)
     return " WHERE " + " AND ".join(clauses), params
 
 
@@ -534,9 +550,13 @@ def query_candles(
     Reads the Parquet lake directly via DuckDB ``read_parquet`` over the
     partition glob ``<lake>/bars/<exch>/<seg>/<symbol>/<interval>/**/*.parquet``
     — no data duplication, the lake stays the single source of truth.
-    Partition pruning + ``LIMIT`` keep a page read bounded regardless of how
-    many years are stored. *start* / *end* are inclusive ISO ``YYYY-MM-DD``
-    bounds on ``timestamp`` (``end`` covers its whole day). Returns an empty
+    The glob is scoped to ONE ``(symbol, interval)`` (its whole-year/month
+    files only), and the page is ``LIMIT``-bounded — so a click never
+    materialises more than ``limit`` rows in Python regardless of how many
+    years are stored (DuckDB additionally skips row-groups via min/max stats;
+    this is engine cost, not directory pruning). *start* / *end* are inclusive
+    ISO ``YYYY-MM-DD`` bounds matched against the bar's UTC calendar date.
+    Returns an empty
     page (never raises) when the partition set has no Parquet files yet.
 
     Parameters
@@ -575,14 +595,18 @@ def query_candles(
 
     where_clauses: list[str] = []
     where_params: list[Any] = []
+    # Compare the bar's UTC *calendar date* — `"timestamp"` is TIMESTAMPTZ
+    # (parquet_writer stores time_zone="UTC"); `AT TIME ZONE 'UTC'` pins the
+    # wall-clock to UTC and `::DATE` truncates, so the bound comparison is
+    # independent of the ambient DuckDB session `TimeZone` (the operator runs
+    # Asia/Kolkata). Both bounds inclusive (Golden Rule #7 — same UTC date in
+    # → same rows out, regardless of session tz).
     if start is not None:
-        where_clauses.append('"timestamp" >= ?')
+        where_clauses.append("(\"timestamp\" AT TIME ZONE 'UTC')::DATE >= ?")
         where_params.append(_parse_iso_date(start, "start").isoformat())
     if end is not None:
-        # Inclusive end → strictly-less-than the day after.
-        end_excl = date.fromordinal(_parse_iso_date(end, "end").toordinal() + 1)
-        where_clauses.append('"timestamp" < ?')
-        where_params.append(end_excl.isoformat())
+        where_clauses.append("(\"timestamp\" AT TIME ZONE 'UTC')::DATE <= ?")
+        where_params.append(_parse_iso_date(end, "end").isoformat())
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
     glob = (
@@ -631,7 +655,13 @@ def query_candles(
 
 
 def _parse_iso_date(value: str, field_name: str) -> date:
-    """Parse an ISO ``YYYY-MM-DD`` string, re-raising with the field name."""
+    """Parse a strict ``YYYY-MM-DD`` string, re-raising with the field name.
+
+    Rejects the looser forms ``date.fromisoformat`` accepts (``YYYYMMDD``,
+    ISO week dates) so the contract matches what the date-picker emits.
+    """
+    if not _ISO_DATE_RE.match(value):
+        raise ValueError(f"{field_name} must be ISO YYYY-MM-DD, got {value!r}")
     try:
         return date.fromisoformat(value)
     except ValueError as exc:
