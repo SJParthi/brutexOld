@@ -92,6 +92,28 @@
   .pager button:disabled { opacity:.4; cursor:not-allowed; }
   .pager .prange { color:var(--muted); font-size:12px;
     font-family:"SF Mono",Menlo,Consolas,monospace; }
+
+  /* ── Query controls (DEC-DB-QUERY-001) ── */
+  .qbar { display:flex; flex-direction:column; gap:8px; padding:12px 16px;
+    border-bottom:1px solid var(--border); background:var(--surface-2); }
+  .qrow { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .qrow .lab { font-size:11px; text-transform:uppercase; letter-spacing:.6px;
+    color:var(--muted); min-width:64px; }
+  .qbar input, .qbar select { background:var(--surface); color:var(--text);
+    border:1px solid var(--border-strong); border-radius:7px; padding:6px 9px; font-size:12px;
+    font-family:"SF Mono",Menlo,Consolas,monospace; }
+  .qbar button { font-size:12px; padding:6px 12px; }
+  .qbar button.apply { background:var(--green-dim); border-color:var(--green-dim);
+    color:var(--text-bright); font-weight:700; }
+  .qbar button.apply:hover { border-color:var(--green-bright); }
+  .colbox { display:flex; flex-wrap:wrap; gap:4px 12px; max-height:74px; overflow:auto;
+    padding:6px 8px; border:1px solid var(--border); border-radius:8px; background:var(--surface);
+    flex:1; }
+  .colbox label { font-size:11.5px; color:var(--text); display:flex; align-items:center; gap:5px;
+    font-family:"SF Mono",Menlo,Consolas,monospace; }
+  .frow { display:flex; align-items:center; gap:6px; }
+  .frow .rm { color:var(--red); padding:6px 10px; }
+  .qerr { color:var(--red); font-size:12px; }
 </style>
 </head>
 <body>
@@ -140,6 +162,16 @@ const refreshBtn = document.getElementById("refresh");
 let selected = null;
 let counts = {};
 let dbOffset = 0;  /* current page offset for the selected table (DEC-DB-PAGINATION-001) */
+let mode = "table";  /* "table" | "candles" */
+
+/* Per-table structured-query state (DEC-DB-QUERY-001). cols=null → all. */
+const qstate = {};  /* { table: {allCols:[], cols:Set|null, filters:[{c,op,v}], orderBy:"", desc:false} } */
+/* Candle-viewer state. */
+const cstate = { datasets: [], key: null, start: "", end: "", cols: null, desc: false, offset: 0 };
+
+/* Friendly labels for the allowlisted query operators (mirrors
+   db_view.ALLOWED_OPERATORS — the backend is the source of truth + re-validates). */
+const OPS = [["eq","="],["ne","≠"],["lt","<"],["le","≤"],["gt",">"],["ge","≥"],["like","LIKE"],["contains","contains"]];
 
 /* Escape free text before interpolation into innerHTML (XSS sink). */
 function esc(s) {
@@ -175,18 +207,29 @@ async function loadTables() {
     const tables = body.tables || [];
     counts = {};
     tables.forEach(t => { counts[t.table] = t.row_count; });
-    tablesEl.innerHTML = '<h3>Tables</h3>' + tables.map(t => {
+    const tableRows = tables.map(t => {
       const zero = (t.row_count || 0) === 0 ? " zero" : "";
       return '<div class="tbl" data-table="' + esc(t.table) + '">'
         + '<span class="nm">' + esc(t.table) + '</span>'
         + '<span class="badge' + zero + '" data-count="' + (t.row_count || 0) + '">0</span>'
         + '</div>';
     }).join("");
-    tablesEl.querySelectorAll(".badge").forEach(b => countUp(b, b.getAttribute("data-count")));
-    tablesEl.querySelectorAll(".tbl").forEach(el => {
+    /* Candle/OHLCV lake lives in Parquet (not a DuckDB table) — surface it as
+       its own browsable dataset (DEC-DB-QUERY-001). */
+    const candleRow = '<div class="tbl" data-candles="1">'
+      + '<span class="nm">📈 candles</span>'
+      + '<span class="badge" style="color:var(--purple);background:rgba(157,123,255,.13)">OHLCV</span>'
+      + '</div>';
+    tablesEl.innerHTML = '<h3>Tables</h3>' + tableRows
+      + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow;
+    tablesEl.querySelectorAll(".badge[data-count]").forEach(b => countUp(b, b.getAttribute("data-count")));
+    tablesEl.querySelectorAll(".tbl[data-table]").forEach(el => {
       el.addEventListener("click", () => selectTable(el.getAttribute("data-table")));
     });
-    if (selected && counts[selected] !== undefined) markSelected(selected);
+    const cEl = tablesEl.querySelector(".tbl[data-candles]");
+    if (cEl) cEl.addEventListener("click", () => selectCandles());
+    if (mode === "candles") markCandles();
+    else if (selected && counts[selected] !== undefined) markSelected(selected);
   } catch (e) {
     tablesEl.innerHTML = '<h3>Tables</h3><div class="empty">offline</div>';
   }
@@ -198,81 +241,252 @@ function markSelected(name) {
   });
 }
 
-async function selectTable(name, keepOffset = false) {
-  selected = name;
-  if (!keepOffset) dbOffset = 0;  /* switching tables / changing page size → page 1 */
-  markSelected(name);
-  if ((counts[name] || 0) === 0) {
-    dataEl.innerHTML = '<div class="datahead"><span class="dt">' + esc(name) + '</span>'
-      + '<span class="sub">0 rows</span></div>'
-      + '<div class="empty"><b>' + esc(name) + '</b> is empty — pull data to populate it.<br>'
-      + 'The lake fills after a Groww ingest run (network-gated).</div>';
-    return;
+function markCandles() {
+  tablesEl.querySelectorAll(".tbl").forEach(el => {
+    el.classList.toggle("sel", el.hasAttribute("data-candles"));
+  });
+}
+
+const CANDLE_COLS = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"];
+
+/* Shared grid + Prev/Next pager HTML (used by both table + candle views).
+   The pager buttons get ids dbprev/dbnext; each view wires its own offset. */
+function gridAndPager(cols, rows, total, off, lim) {
+  const from = total === 0 ? 0 : off + 1;
+  const to = off + rows.length;
+  let html = "";
+  if (!rows.length) {
+    html += '<div class="empty">no rows on this page</div>';
+  } else {
+    const thead = '<thead><tr>' + cols.map(c => '<th>' + esc(c) + '</th>').join("") + '</tr></thead>';
+    const tbody = '<tbody>' + rows.map(row =>
+      '<tr>' + row.map(cell =>
+        cell == null ? '<td class="nullcell">null</td>' : '<td>' + esc(cell) + '</td>'
+      ).join("") + '</tr>'
+    ).join("") + '</tbody>';
+    html += '<div class="gridwrap"><table>' + thead + tbody + '</table></div>';
   }
+  const hasPrev = off > 0, hasNext = to < total;
+  html += '<div class="pager">'
+    + '<button id="dbprev"' + (hasPrev ? "" : " disabled") + '>‹ Prev</button>'
+    + '<span class="prange">' + from.toLocaleString() + '–' + to.toLocaleString()
+    + ' / ' + total.toLocaleString() + '</span>'
+    + '<button id="dbnext"' + (hasNext ? "" : " disabled") + '>Next ›</button></div>';
+  return html;
+}
+
+/* ── Table mode (structured query) ── */
+async function selectTable(name) {
+  mode = "table";
+  selected = name;
+  dbOffset = 0;
+  markSelected(name);
+  if (!qstate[name]) qstate[name] = { allCols: [], cols: null, filters: [], orderBy: "", desc: false };
+  if (!qstate[name].allCols.length) {
+    try {
+      const rc = await fetch("/api/v1/db/columns/" + encodeURIComponent(name));
+      if (rc.ok) qstate[name].allCols = (await rc.json()).columns || [];
+    } catch (e) { /* offline — controls degrade to none */ }
+  }
+  runTableQuery(name);
+}
+
+function buildTableUrl(name) {
+  const st = qstate[name];
+  let u = "/api/v1/db/query/" + encodeURIComponent(name)
+    + "?limit=" + encodeURIComponent(limitSel.value) + "&offset=" + encodeURIComponent(dbOffset);
+  if (st.cols) st.cols.forEach(c => { u += "&column=" + encodeURIComponent(c); });
+  st.filters.forEach(f => { if (f.c && f.op) u += "&f=" + encodeURIComponent(f.c + ":" + f.op + ":" + f.v); });
+  if (st.orderBy) u += "&order_by=" + encodeURIComponent(st.orderBy) + "&desc=" + (st.desc ? "true" : "false");
+  return u;
+}
+
+async function runTableQuery(name) {
   dataEl.innerHTML = '<div class="empty">loading ' + esc(name) + '…</div>';
   try {
-    const lim = encodeURIComponent(limitSel.value);
-    const r = await fetch("/api/v1/db/table/" + encodeURIComponent(name)
-      + "?limit=" + lim + "&offset=" + encodeURIComponent(dbOffset));
-    if (!r.ok) {
-      dataEl.innerHTML = '<div class="empty">error ' + r.status + ' loading ' + esc(name) + '</div>';
-      return;
-    }
+    const r = await fetch(buildTableUrl(name));
     const body = await r.json();
-    renderRows(body);
+    if (!r.ok) { renderTableView(name, null, body.detail || ("error " + r.status)); return; }
+    renderTableView(name, body, null);
   } catch (e) {
     dataEl.innerHTML = '<div class="empty">offline</div>';
   }
 }
 
-function renderRows(body) {
-  const cols = body.columns || [];
-  const rows = body.rows || [];
-  const total = Number(body.total != null ? body.total : (counts[body.table] || 0));
-  const off = Number(body.offset || 0);
-  const lim = Number(body.limit || rows.length || 50);
-  const from = total === 0 ? 0 : off + 1;
-  const to = off + rows.length;
-  const head = '<div class="datahead">'
-    + '<span class="dt">' + esc(body.table) + '</span>'
-    + '<span class="sub">' + cols.length + ' columns · rows ' + from.toLocaleString() + '–'
-    + to.toLocaleString() + ' of ' + total.toLocaleString() + '</span></div>';
-  if (!rows.length) {
-    dataEl.innerHTML = head + '<div class="empty">no rows on this page</div>';
-    return;
-  }
-  const thead = '<thead><tr>' + cols.map(c => '<th>' + esc(c) + '</th>').join("") + '</tr></thead>';
-  const tbody = '<tbody>' + rows.map(row =>
-    '<tr>' + row.map(cell =>
-      cell == null
-        ? '<td class="nullcell">null</td>'
-        : '<td>' + esc(cell) + '</td>'
-    ).join("") + '</tr>'
-  ).join("") + '</tbody>';
-  /* Prev/Next pager — the grid (.gridwrap) already scrolls horizontally so all
-     26 columns are reachable; the pager walks every row (DEC-DB-PAGINATION-001). */
-  const hasPrev = off > 0;
-  const hasNext = to < total;
-  const pager = '<div class="pager">'
-    + '<button id="dbprev"' + (hasPrev ? '' : ' disabled') + '>‹ Prev</button>'
-    + '<span class="prange">' + from.toLocaleString() + '–' + to.toLocaleString()
-    + ' / ' + total.toLocaleString() + '</span>'
-    + '<button id="dbnext"' + (hasNext ? '' : ' disabled') + '>Next ›</button></div>';
-  dataEl.innerHTML = head + '<div class="gridwrap"><table>' + thead + tbody + '</table></div>' + pager;
-  const prevBtn = document.getElementById("dbprev");
-  const nextBtn = document.getElementById("dbnext");
-  if (prevBtn) prevBtn.addEventListener("click", () => {
-    dbOffset = Math.max(0, off - lim); selectTable(selected, true);
-  });
-  if (nextBtn) nextBtn.addEventListener("click", () => {
-    dbOffset = off + lim; selectTable(selected, true);
-  });
+function tableControlsHtml(name) {
+  const st = qstate[name];
+  const cols = st.allCols;
+  const colChecks = cols.map(c => {
+    const on = st.cols === null || st.cols.has(c);
+    return '<label><input type="checkbox" class="qcol" value="' + esc(c) + '"' + (on ? " checked" : "") + '>' + esc(c) + '</label>';
+  }).join("");
+  const opOpts = OPS.map(o => '<option value="' + o[0] + '">' + esc(o[1]) + '</option>').join("");
+  const filterRows = st.filters.map(f =>
+    '<div class="frow">'
+    + '<select class="fcol"><option value="">column…</option>'
+    + cols.map(c => '<option value="' + esc(c) + '"' + (c === f.c ? " selected" : "") + '>' + esc(c) + '</option>').join("") + '</select>'
+    + '<select class="fop">' + OPS.map(o => '<option value="' + o[0] + '"' + (o[0] === f.op ? " selected" : "") + '>' + esc(o[1]) + '</option>').join("") + '</select>'
+    + '<input class="fval" placeholder="value" value="' + esc(f.v) + '">'
+    + '<button class="rm" title="remove filter">✕</button></div>'
+  ).join("");
+  return '<div class="qbar">'
+    + '<div class="qrow"><span class="lab">Columns</span><div class="colbox">' + colChecks + '</div></div>'
+    + '<div class="qrow"><span class="lab">Filters</span>'
+    + '<div id="filters" style="display:flex;flex-direction:column;gap:6px">' + filterRows + '</div>'
+    + '<button id="addf">+ filter</button></div>'
+    + '<div class="qrow"><span class="lab">Sort</span>'
+    + '<select id="sortcol"><option value="">— none —</option>'
+    + cols.map(c => '<option value="' + esc(c) + '">' + esc(c) + '</option>').join("") + '</select>'
+    + '<select id="sortdir"><option value="asc">asc</option><option value="desc">desc</option></select>'
+    + '<button class="apply" id="applyq">Apply query</button></div>'
+    + '</div>';
 }
 
-limitSel.addEventListener("change", () => { if (selected) selectTable(selected); });
+function readControlsInto(name) {
+  const st = qstate[name];
+  const checked = Array.from(document.querySelectorAll(".qcol:checked")).map(c => c.value);
+  const all = document.querySelectorAll(".qcol").length;
+  st.cols = checked.length === 0 || checked.length === all ? null : new Set(checked);
+  st.filters = Array.from(document.querySelectorAll("#filters .frow")).map(row => ({
+    c: row.querySelector(".fcol").value,
+    op: row.querySelector(".fop").value,
+    v: row.querySelector(".fval").value,
+  }));
+  const sc = document.getElementById("sortcol");
+  const sd = document.getElementById("sortdir");
+  st.orderBy = sc ? sc.value : "";
+  st.desc = sd ? sd.value === "desc" : false;
+}
+
+function renderTableView(name, body, err) {
+  const st = qstate[name];
+  const sub = body ? ((body.columns || []).length + " cols · " + Number(body.total || 0).toLocaleString() + " rows match") : "";
+  const head = '<div class="datahead"><span class="dt">' + esc(name) + '</span><span class="sub">' + sub + '</span></div>';
+  const grid = err
+    ? '<div class="empty qerr">' + esc(err) + '</div>'
+    : gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 50));
+  dataEl.innerHTML = head + tableControlsHtml(name) + grid;
+  const sc = document.getElementById("sortcol"); if (sc) sc.value = st.orderBy || "";
+  const sd = document.getElementById("sortdir"); if (sd) sd.value = st.desc ? "desc" : "asc";
+  const off = body ? Number(body.offset || 0) : 0, lim = body ? Number(body.limit || 50) : 50;
+  const addf = document.getElementById("addf");
+  if (addf) addf.addEventListener("click", () => { readControlsInto(name); st.filters.push({ c: "", op: "eq", v: "" }); renderTableView(name, body, err); });
+  document.querySelectorAll("#filters .rm").forEach((b, i) => b.addEventListener("click", () => { readControlsInto(name); st.filters.splice(i, 1); renderTableView(name, body, err); }));
+  const ap = document.getElementById("applyq");
+  if (ap) ap.addEventListener("click", () => { readControlsInto(name); dbOffset = 0; runTableQuery(name); });
+  const prev = document.getElementById("dbprev"), next = document.getElementById("dbnext");
+  if (prev) prev.addEventListener("click", () => { dbOffset = Math.max(0, off - lim); runTableQuery(name); });
+  if (next) next.addEventListener("click", () => { dbOffset = off + lim; runTableQuery(name); });
+}
+
+/* ── Candle mode (Parquet lake via read_parquet) ── */
+function dsKey(d) { return [d.exchange, d.segment, d.symbol, d.interval].join("|"); }
+function curDataset() { return cstate.datasets.find(d => dsKey(d) === cstate.key) || null; }
+
+async function selectCandles() {
+  mode = "candles";
+  selected = null;
+  markCandles();
+  dataEl.innerHTML = '<div class="empty">loading candle datasets…</div>';
+  try {
+    const r = await fetch("/api/v1/db/candles/datasets");
+    const body = await r.json();
+    cstate.datasets = body.datasets || [];
+    cstate.offset = 0;
+    if (!curDataset() && cstate.datasets.length) cstate.key = dsKey(cstate.datasets[0]);
+    if (cstate.datasets.length) runCandleQuery();
+    else renderCandleView(null, "No candle data yet — pull an instrument's timeframes on /universe first.");
+  } catch (e) {
+    dataEl.innerHTML = '<div class="empty">offline</div>';
+  }
+}
+
+function buildCandleUrl() {
+  const d = curDataset();
+  if (!d) return null;
+  let u = "/api/v1/db/candles?exchange=" + encodeURIComponent(d.exchange)
+    + "&segment=" + encodeURIComponent(d.segment) + "&symbol=" + encodeURIComponent(d.symbol)
+    + "&interval=" + encodeURIComponent(d.interval)
+    + "&limit=" + encodeURIComponent(limitSel.value) + "&offset=" + encodeURIComponent(cstate.offset)
+    + "&desc=" + (cstate.desc ? "true" : "false");
+  if (cstate.start) u += "&start=" + encodeURIComponent(cstate.start);
+  if (cstate.end) u += "&end=" + encodeURIComponent(cstate.end);
+  if (cstate.cols) cstate.cols.forEach(c => { u += "&column=" + encodeURIComponent(c); });
+  return u;
+}
+
+async function runCandleQuery() {
+  const u = buildCandleUrl();
+  if (!u) { renderCandleView(null, "pick a dataset"); return; }
+  dataEl.innerHTML = '<div class="empty">loading candles…</div>';
+  try {
+    const r = await fetch(u);
+    const body = await r.json();
+    if (!r.ok) { renderCandleView(null, body.detail || ("error " + r.status)); return; }
+    renderCandleView(body, null);
+  } catch (e) {
+    dataEl.innerHTML = '<div class="empty">offline</div>';
+  }
+}
+
+function candleControlsHtml() {
+  const dsOpts = cstate.datasets.map(d => {
+    const k = dsKey(d);
+    return '<option value="' + esc(k) + '"' + (k === cstate.key ? " selected" : "") + '>'
+      + esc(d.exchange + "·" + d.segment + "·" + d.symbol + "·" + d.interval) + '</option>';
+  }).join("");
+  const colChecks = CANDLE_COLS.map(c => {
+    const on = cstate.cols === null || cstate.cols.has(c);
+    return '<label><input type="checkbox" class="ccol" value="' + c + '"' + (on ? " checked" : "") + '>' + c + '</label>';
+  }).join("");
+  return '<div class="qbar">'
+    + '<div class="qrow"><span class="lab">Dataset</span><select id="cds">' + dsOpts + '</select>'
+    + '<span class="lab">From</span><input type="date" id="cstart" min="2020-01-01" value="' + esc(cstate.start) + '">'
+    + '<span class="lab">To</span><input type="date" id="cend" min="2020-01-01" value="' + esc(cstate.end) + '"></div>'
+    + '<div class="qrow"><span class="lab">Columns</span><div class="colbox">' + colChecks + '</div></div>'
+    + '<div class="qrow"><span class="lab">Sort</span>'
+    + '<select id="cdir"><option value="asc">timestamp asc</option><option value="desc">timestamp desc</option></select>'
+    + '<button class="apply" id="capply">Apply query</button></div>'
+    + '</div>';
+}
+
+function readCandleControls() {
+  const ds = document.getElementById("cds"); if (ds) cstate.key = ds.value;
+  const s = document.getElementById("cstart"); cstate.start = s ? s.value : "";
+  const e = document.getElementById("cend"); cstate.end = e ? e.value : "";
+  const checked = Array.from(document.querySelectorAll(".ccol:checked")).map(c => c.value);
+  cstate.cols = checked.length === 0 || checked.length === CANDLE_COLS.length ? null : new Set(checked);
+  const dir = document.getElementById("cdir"); cstate.desc = dir ? dir.value === "desc" : false;
+}
+
+function renderCandleView(body, err) {
+  const d = curDataset();
+  const sub = body ? (Number(body.total || 0).toLocaleString() + " bars match") : "";
+  const title = d ? esc(d.symbol + " · " + d.interval) : "candles";
+  const head = '<div class="datahead"><span class="dt">📈 ' + title + '</span><span class="sub">' + sub + '</span></div>';
+  const grid = err
+    ? '<div class="empty qerr">' + esc(err) + '</div>'
+    : gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100));
+  dataEl.innerHTML = head + candleControlsHtml() + grid;
+  const dir = document.getElementById("cdir"); if (dir) dir.value = cstate.desc ? "desc" : "asc";
+  const off = body ? Number(body.offset || 0) : 0, lim = body ? Number(body.limit || 100) : 100;
+  const ap = document.getElementById("capply");
+  if (ap) ap.addEventListener("click", () => { readCandleControls(); cstate.offset = 0; runCandleQuery(); });
+  const ds = document.getElementById("cds");
+  if (ds) ds.addEventListener("change", () => { readCandleControls(); cstate.offset = 0; runCandleQuery(); });
+  const prev = document.getElementById("dbprev"), next = document.getElementById("dbnext");
+  if (prev) prev.addEventListener("click", () => { cstate.offset = Math.max(0, off - lim); runCandleQuery(); });
+  if (next) next.addEventListener("click", () => { cstate.offset = off + lim; runCandleQuery(); });
+}
+
+limitSel.addEventListener("change", () => {
+  if (mode === "candles") { cstate.offset = 0; runCandleQuery(); }
+  else if (selected) selectTable(selected);
+});
 refreshBtn.addEventListener("click", () => {
   loadTables();
-  if (selected) selectTable(selected);
+  if (mode === "candles") selectCandles();
+  else if (selected) selectTable(selected);
 });
 
 loadTables();

@@ -33,7 +33,16 @@ trigger an unbounded read.
 from __future__ import annotations
 
 import math
+import re
+from datetime import date
+from pathlib import Path
 from typing import Any, Final
+
+from brutex.data.partition import (
+    VALID_EXCHANGES,
+    VALID_INTERVALS,
+    VALID_SEGMENTS,
+)
 
 #: The ONLY tables the viewer may touch — the 5 real tables created by
 #: :meth:`brutex.data.instrument_store.InstrumentStore.open`. A
@@ -46,6 +55,44 @@ KNOWN_TABLES: Final = (
     "contracts",
     "schema_meta",
 )
+
+#: Structured-query operators (DEC-DB-QUERY-001). Each maps a stable UI
+#: token to a (SQL operator, value-transform) pair. The SQL operator is a
+#: hardcoded literal from this fixed table — NEVER caller text — and the
+#: comparison value is ALWAYS parameter-bound (``?``), so the WHERE clause
+#: carries zero SQL-injection surface. ``contains`` wraps the bound value
+#: in ``%…%`` for a substring LIKE; ``like`` passes the operator's pattern
+#: through verbatim (the operator types their own ``%``).
+ALLOWED_OPERATORS: Final[dict[str, str]] = {
+    "eq": "=",
+    "ne": "!=",
+    "lt": "<",
+    "le": "<=",
+    "gt": ">",
+    "ge": ">=",
+    "like": "LIKE",
+    "contains": "LIKE",
+}
+
+#: The 7 canonical OHLCV columns every candle Parquet partition carries
+#: (``brutex/data/parquet_writer.py`` ``_render_bytes`` schema). Used to
+#: validate a candle-viewer column selection without touching disk.
+CANDLE_COLUMNS: Final = (
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "open_interest",
+)
+
+#: A candle symbol must match this allowlist before it is ever joined into
+#: a lake path / ``read_parquet`` glob — defence-in-depth against path
+#: traversal even though discovered symbols come from our own directory
+#: scan. Groww symbols are alnum + ``-`` + ``_`` + ``.`` (e.g.
+#: ``NSE-NIFTY-30Jan25-28500-CE``); ``..`` is rejected separately.
+_SYMBOL_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 
 #: Lower inclusive bound for the sample-row ``limit``.
 _LIMIT_MIN: Final = 1
@@ -210,10 +257,397 @@ def sample_rows(conn: Any, table: str, *, limit: int, offset: int = 0) -> dict[s
     }
 
 
+def _quote_ident(name: str) -> str:
+    """Double-quote a SQL identifier, rejecting any embedded double-quote.
+
+    The *name* is always validated against a known column set BEFORE this
+    is called, so the reject branch is belt-and-braces: a column literally
+    containing ``"`` could otherwise break out of the quoted identifier.
+    """
+    if '"' in name:
+        raise ValueError(f"illegal identifier {name!r}")
+    return f'"{name}"'
+
+
+def list_columns(conn: Any, table: str) -> list[str]:
+    """Return the column names of an allowlisted *table*.
+
+    Issues a zero-row ``SELECT * FROM <table> LIMIT 0`` and reads the
+    cursor description — no data is materialised. Powers the column
+    picker in the structured-query UI.
+
+    Parameters
+    ----------
+    conn
+        A DuckDB connection (see :func:`table_summary`).
+    table
+        Must be an exact member of :data:`KNOWN_TABLES`.
+
+    Returns
+    -------
+    list[str]
+        Column names in declaration order.
+
+    Raises
+    ------
+    ValueError
+        If *table* is not in :data:`KNOWN_TABLES`.
+    """
+    if table not in KNOWN_TABLES:
+        raise ValueError(f"unknown table {table!r}; allowed tables are {KNOWN_TABLES}")
+    cursor = conn.execute(f"SELECT * FROM {table} LIMIT 0")  # noqa: S608  # nosec B608 - table is allowlist-validated above
+    return [str(col[0]) for col in (cursor.description or [])]
+
+
+def _build_where(
+    filters: tuple[tuple[str, str, str], ...],
+    valid_columns: frozenset[str],
+) -> tuple[str, list[Any]]:
+    """Build a parameter-bound ``WHERE`` clause from validated *filters*.
+
+    Each filter is ``(column, op_token, value)``. The column must be in
+    *valid_columns* and the op_token in :data:`ALLOWED_OPERATORS`; the
+    value is always returned as a bound parameter (never interpolated).
+    Returns ``("", [])`` when *filters* is empty.
+
+    Raises
+    ------
+    ValueError
+        On an unknown column or an unknown operator token.
+    """
+    if not filters:
+        return "", []
+    clauses: list[str] = []
+    params: list[Any] = []
+    for column, op, value in filters:
+        if column not in valid_columns:
+            raise ValueError(f"unknown filter column {column!r}; allowed: {sorted(valid_columns)}")
+        if op not in ALLOWED_OPERATORS:
+            raise ValueError(f"unknown operator {op!r}; allowed: {sorted(ALLOWED_OPERATORS)}")
+        clauses.append(f"{_quote_ident(column)} {ALLOWED_OPERATORS[op]} ?")
+        params.append(f"%{value}%" if op == "contains" else value)
+    return " WHERE " + " AND ".join(clauses), params
+
+
+def _build_order_by(
+    order_by: str | None,
+    descending: bool,
+    valid_columns: frozenset[str],
+) -> str:
+    """Build a validated ``ORDER BY`` clause, or ``""`` when not requested.
+
+    Raises
+    ------
+    ValueError
+        If *order_by* is given but not a member of *valid_columns*.
+    """
+    if order_by is None:
+        return ""
+    if order_by not in valid_columns:
+        raise ValueError(f"unknown order column {order_by!r}; allowed: {sorted(valid_columns)}")
+    direction = "DESC" if descending else "ASC"
+    return f" ORDER BY {_quote_ident(order_by)} {direction}"
+
+
+def _select_list(columns: tuple[str, ...] | None, valid_columns: frozenset[str]) -> str:
+    """Return a quoted, validated select list — or ``"*"`` when *columns* is None.
+
+    Raises
+    ------
+    ValueError
+        If any requested column is not a member of *valid_columns*, or if
+        *columns* is an empty tuple (a select of zero columns is invalid).
+    """
+    if columns is None:
+        return "*"
+    if not columns:
+        raise ValueError("columns, when given, must name at least one column")
+    for column in columns:
+        if column not in valid_columns:
+            raise ValueError(f"unknown column {column!r}; allowed: {sorted(valid_columns)}")
+    return ", ".join(_quote_ident(c) for c in columns)
+
+
+def query_table(
+    conn: Any,
+    table: str,
+    *,
+    columns: tuple[str, ...] | None = None,
+    filters: tuple[tuple[str, str, str], ...] = (),
+    order_by: str | None = None,
+    descending: bool = False,
+    limit: int,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Structured, read-only query of an allowlisted *table* (DEC-DB-QUERY-001).
+
+    The power-user surface behind the ``/db`` query controls: choose which
+    *columns* to show, filter rows with *filters* (``(column, op, value)``
+    where ``op`` is an :data:`ALLOWED_OPERATORS` token), *order_by* a
+    column, and page with *limit* / *offset*. Safe by construction: the
+    table is allowlist-checked, every column / order column / filter column
+    is validated against the table's REAL columns (so a non-existent or
+    injection-shaped name raises before any SQL runs), operators come from a
+    fixed map, and **all values are parameter-bound**. ``total`` reflects the
+    filtered row count so the pager is correct.
+
+    Parameters
+    ----------
+    conn
+        A DuckDB connection (see :func:`table_summary`).
+    table
+        Must be an exact member of :data:`KNOWN_TABLES`.
+    columns
+        Columns to project, or ``None`` for all (``SELECT *``). An empty
+        tuple is rejected.
+    filters
+        Zero or more ``(column, op_token, value)`` triples, AND-combined.
+    order_by, descending
+        Optional sort column + direction.
+    limit, offset
+        Page bounds; clamped via :func:`clamp_limit` / :func:`clamp_offset`.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"table", "columns", "rows", "total", "limit", "offset"}`` —
+        same shape as :func:`sample_rows`, with the filtered ``total``.
+
+    Raises
+    ------
+    ValueError
+        On an unknown table / column / order column / operator, or an empty
+        explicit column tuple.
+    """
+    valid_columns = frozenset(list_columns(conn, table))
+    select = _select_list(columns, valid_columns)
+    where_sql, where_params = _build_where(filters, valid_columns)
+    order_sql = _build_order_by(order_by, descending, valid_columns)
+    safe_limit = clamp_limit(limit)
+    safe_offset = clamp_offset(offset)
+
+    # table is allowlisted; select/where/order identifiers are all validated
+    # against valid_columns above; every value is parameter-bound.
+    total_row = conn.execute(
+        f"SELECT COUNT(*) FROM {table}{where_sql}",  # noqa: S608  # nosec B608 - allowlisted table + validated identifiers; values bound
+        where_params,
+    ).fetchone()
+    total = int(total_row[0]) if total_row else 0
+    cursor = conn.execute(
+        f"SELECT {select} FROM {table}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - allowlisted table + validated identifiers; values bound
+        [*where_params, safe_limit, safe_offset],
+    )
+    description = cursor.description or []
+    out_columns = [str(col[0]) for col in description]
+    rows = [[_json_safe(cell) for cell in row] for row in cursor.fetchall()]
+    return {
+        "table": table,
+        "columns": out_columns,
+        "rows": rows,
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
+
+
+def _validate_candle_coords(exchange: str, segment: str, symbol: str, interval: str) -> None:
+    """Validate the four candle-partition coordinates, else raise ValueError.
+
+    Mirrors the partition-layer allowlists (``VALID_EXCHANGES`` /
+    ``VALID_SEGMENTS`` / ``VALID_INTERVALS``) and applies a strict symbol
+    allowlist (:data:`_SYMBOL_RE`, plus a ``..`` reject) so a coordinate can
+    never traverse outside ``<lake>/bars`` when joined into the glob.
+    """
+    if exchange not in VALID_EXCHANGES:
+        raise ValueError(f"unknown exchange {exchange!r}; allowed: {sorted(VALID_EXCHANGES)}")
+    if segment not in VALID_SEGMENTS:
+        raise ValueError(f"unknown segment {segment!r}; allowed: {sorted(VALID_SEGMENTS)}")
+    if interval not in VALID_INTERVALS:
+        raise ValueError(f"unknown interval {interval!r}; allowed: {sorted(VALID_INTERVALS)}")
+    if ".." in symbol or not _SYMBOL_RE.match(symbol):
+        raise ValueError(f"illegal candle symbol {symbol!r}")
+
+
+def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
+    """Discover which ``(exchange, segment, symbol, interval)`` candle sets exist.
+
+    Walks ``<lake_root>/bars/<exchange>/<segment>/<symbol>/<interval>/`` and
+    returns one entry per interval directory that holds at least one
+    ``.parquet`` file. Directory names that are not valid coordinates are
+    skipped (a foreign / partially-written tree never raises). A missing
+    ``bars`` directory yields ``[]``.
+
+    Parameters
+    ----------
+    lake_root
+        Top-level lake directory (the parent of ``bars/``).
+
+    Returns
+    -------
+    list[dict[str, str]]
+        ``[{"exchange", "segment", "symbol", "interval"}]`` sorted by all
+        four keys — the candle-viewer dataset picker.
+    """
+    bars = lake_root / "bars"
+    if not bars.is_dir():
+        return []
+    found: list[dict[str, str]] = []
+    for exch_dir in sorted(p for p in bars.iterdir() if p.is_dir()):
+        if exch_dir.name not in VALID_EXCHANGES:
+            continue
+        for seg_dir in sorted(p for p in exch_dir.iterdir() if p.is_dir()):
+            if seg_dir.name not in VALID_SEGMENTS:
+                continue
+            for sym_dir in sorted(p for p in seg_dir.iterdir() if p.is_dir()):
+                for tf_dir in sorted(p for p in sym_dir.iterdir() if p.is_dir()):
+                    if tf_dir.name not in VALID_INTERVALS:
+                        continue
+                    if any(tf_dir.rglob("*.parquet")):
+                        found.append(
+                            {
+                                "exchange": exch_dir.name,
+                                "segment": seg_dir.name,
+                                "symbol": sym_dir.name,
+                                "interval": tf_dir.name,
+                            }
+                        )
+    return found
+
+
+def query_candles(
+    conn: Any,
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    interval: str,
+    start: str | None = None,
+    end: str | None = None,
+    columns: tuple[str, ...] | None = None,
+    descending: bool = False,
+    limit: int,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Read one page of OHLCV candles for a partition set (DEC-DB-QUERY-001).
+
+    Reads the Parquet lake directly via DuckDB ``read_parquet`` over the
+    partition glob ``<lake>/bars/<exch>/<seg>/<symbol>/<interval>/**/*.parquet``
+    — no data duplication, the lake stays the single source of truth.
+    Partition pruning + ``LIMIT`` keep a page read bounded regardless of how
+    many years are stored. *start* / *end* are inclusive ISO ``YYYY-MM-DD``
+    bounds on ``timestamp`` (``end`` covers its whole day). Returns an empty
+    page (never raises) when the partition set has no Parquet files yet.
+
+    Parameters
+    ----------
+    conn
+        A DuckDB connection.
+    lake_root
+        Top-level lake directory (parent of ``bars/``).
+    exchange, segment, symbol, interval
+        Partition coordinates; validated against the partition allowlists.
+    start, end
+        Inclusive ISO ``YYYY-MM-DD`` bounds on the bar timestamp, or ``None``.
+    columns
+        OHLCV columns to project (subset of :data:`CANDLE_COLUMNS`), or
+        ``None`` for all. An empty tuple is rejected.
+    descending, limit, offset
+        Sort direction on ``timestamp`` + page bounds (clamped).
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"symbol", "interval", "columns", "rows", "total", "limit",
+        "offset"}`` with every cell JSON-safe.
+
+    Raises
+    ------
+    ValueError
+        On an invalid coordinate, an unknown column, an empty column tuple,
+        or a malformed ISO date bound.
+    """
+    _validate_candle_coords(exchange, segment, symbol, interval)
+    valid_columns = frozenset(CANDLE_COLUMNS)
+    select = _select_list(columns, valid_columns)
+    safe_limit = clamp_limit(limit)
+    safe_offset = clamp_offset(offset)
+
+    where_clauses: list[str] = []
+    where_params: list[Any] = []
+    if start is not None:
+        where_clauses.append('"timestamp" >= ?')
+        where_params.append(_parse_iso_date(start, "start").isoformat())
+    if end is not None:
+        # Inclusive end → strictly-less-than the day after.
+        end_excl = date.fromordinal(_parse_iso_date(end, "end").toordinal() + 1)
+        where_clauses.append('"timestamp" < ?')
+        where_params.append(end_excl.isoformat())
+    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    glob = (
+        lake_root / "bars" / exchange / segment / symbol / interval
+    ).as_posix() + "/**/*.parquet"
+    # Empty / not-yet-pulled partition set → return an empty page instead of
+    # letting read_parquet raise "No files found".
+    base = lake_root / "bars" / exchange / segment / symbol / interval
+    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        return {
+            "symbol": symbol,
+            "interval": interval,
+            "columns": list(columns) if columns is not None else list(CANDLE_COLUMNS),
+            "rows": [],
+            "total": 0,
+            "limit": safe_limit,
+            "offset": safe_offset,
+        }
+
+    # The glob is built from coordinates validated above (no free user text),
+    # so interpolating it is safe; the source is given to read_parquet as a
+    # bound parameter and every date/page value is parameter-bound.
+    source = "read_parquet(?, union_by_name=true)"
+    order_sql = ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC")
+    total_row = conn.execute(
+        f"SELECT COUNT(*) FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
+        [glob, *where_params],
+    ).fetchone()
+    total = int(total_row[0]) if total_row else 0
+    cursor = conn.execute(
+        f"SELECT {select} FROM {source}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
+        [glob, *where_params, safe_limit, safe_offset],
+    )
+    description = cursor.description or []
+    out_columns = [str(col[0]) for col in description]
+    rows = [[_json_safe(cell) for cell in row] for row in cursor.fetchall()]
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "columns": out_columns,
+        "rows": rows,
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
+
+
+def _parse_iso_date(value: str, field_name: str) -> date:
+    """Parse an ISO ``YYYY-MM-DD`` string, re-raising with the field name."""
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be ISO YYYY-MM-DD, got {value!r}") from exc
+
+
 __all__ = [
+    "ALLOWED_OPERATORS",
+    "CANDLE_COLUMNS",
     "KNOWN_TABLES",
     "clamp_limit",
     "clamp_offset",
+    "list_candle_datasets",
+    "list_columns",
+    "query_candles",
+    "query_table",
     "sample_rows",
     "table_summary",
 ]

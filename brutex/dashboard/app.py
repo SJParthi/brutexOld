@@ -48,7 +48,14 @@ import structlog
 from pydantic import BaseModel
 
 from brutex.dashboard.coverage_view import build_coverage_payload
-from brutex.dashboard.db_view import sample_rows, table_summary
+from brutex.dashboard.db_view import (
+    list_candle_datasets,
+    list_columns,
+    query_candles,
+    query_table,
+    sample_rows,
+    table_summary,
+)
 from brutex.dashboard.pull_controller import groww_creds_present, pull_candles
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.orchestrator.pipeline import (
@@ -62,6 +69,10 @@ from brutex.universe import derive_lake_underlyings
 #: fails) lands in the same ``.brutex-logs/brutex.log`` JSONL the operator
 #: reads, so a 400 is never a silent dead-end (DEC-PULL-ERROR-VISIBILITY-001).
 _LOG = structlog.get_logger("brutex.dashboard")
+
+#: A structured-query filter is the 3-token form ``column:op:value`` (the
+#: value may itself contain ``:``). Named to avoid a PLR2004 magic number.
+_FILTER_TOKEN_COUNT = 3
 
 
 class CredentialsIn(BaseModel):
@@ -1043,6 +1054,143 @@ def build_app(
         store = _require_store()
         try:
             payload = sample_rows(store.connection, name, limit=limit, offset=offset)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
+    # ── Structured query + candle viewer (DEC-DB-QUERY-001) ──────────
+    # Thin wrappers over the 100%-tested db_view helpers. All identifier
+    # validation (table/column/operator/coordinate allowlists) + value
+    # parameter-binding live there; a bad request raises ValueError there,
+    # mapped to HTTP 400 here. Read-only GETs (no CSRF surface).
+
+    def _parse_filters(raw: list[str]) -> tuple[tuple[str, str, str], ...]:
+        """Parse repeated ``f=col:op:value`` query params into filter triples.
+
+        Splits on the FIRST two ``:`` so a value may itself contain ``:``
+        (e.g. a timestamp). A token without two ``:`` is rejected 400.
+        """
+        out: list[tuple[str, str, str]] = []
+        for item in raw:
+            parts = item.split(":", 2)
+            if len(parts) != _FILTER_TOKEN_COUNT:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"filter must be 'column:op:value', got {item!r}",
+                )
+            out.append((parts[0], parts[1], parts[2]))
+        return tuple(out)
+
+    @app.get("/api/v1/db/columns/{name}")
+    async def api_db_columns(name: str) -> JSONResponse:
+        """GET /api/v1/db/columns/{name} — column names of an allowlisted table.
+
+        Powers the structured-query column picker. Delegates to
+        :func:`brutex.dashboard.db_view.list_columns`.
+        """
+        store = _require_store()
+        try:
+            return JSONResponse({"table": name, "columns": list_columns(store.connection, name)})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/v1/db/query/{name}")
+    async def api_db_query(
+        name: str,
+        # FastAPI list query params require a `Query()` default; the `Annotated`
+        # form is runtime-broken under `from __future__ import annotations`, and a
+        # shared module-level singleton can't carry per-param aliases — so the
+        # in-signature Query() is the only working spelling. Default is immutable
+        # `None` (coalesced below); B008's mutable-typed-param heuristic is a
+        # false positive here.
+        column: list[str] | None = Query(default=None),  # noqa: B008
+        f: list[str] | None = Query(default=None),  # noqa: B008
+        order_by: str | None = Query(default=None),
+        desc: bool = Query(default=False),
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> JSONResponse:
+        """GET /api/v1/db/query/{name} — structured, filtered, column-picked page.
+
+        Query params: repeatable ``column=`` (projection), repeatable
+        ``f=col:op:value`` (WHERE, AND-combined; ``op`` is an
+        :data:`~brutex.dashboard.db_view.ALLOWED_OPERATORS` token),
+        ``order_by`` + ``desc``, and ``limit`` / ``offset``. Thin wrapper over
+        :func:`brutex.dashboard.db_view.query_table` — every identifier is
+        allowlist-validated + every value parameter-bound there.
+        """
+        store = _require_store()
+        try:
+            payload = query_table(
+                store.connection,
+                name,
+                columns=tuple(column) if column else None,
+                filters=_parse_filters(f or []),
+                order_by=order_by,
+                descending=desc,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
+    @app.get("/api/v1/db/candles/datasets")
+    async def api_db_candle_datasets() -> JSONResponse:
+        """GET /api/v1/db/candles/datasets — discovered ``(exch, seg, symbol, interval)`` sets.
+
+        Lists every candle Parquet partition set in the lake so the viewer
+        can offer a dataset picker. Delegates to
+        :func:`brutex.dashboard.db_view.list_candle_datasets`.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse({"datasets": []})
+        return JSONResponse({"datasets": list_candle_datasets(lake_root.parent)})
+
+    @app.get("/api/v1/db/candles")
+    async def api_db_candles(
+        exchange: str = Query(...),
+        segment: str = Query(...),
+        symbol: str = Query(...),
+        interval: str = Query(...),
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+        # See the api_db_query note — list query param needs an in-signature
+        # Query() default; immutable None coalesced below (B008 false positive).
+        column: list[str] | None = Query(default=None),  # noqa: B008
+        desc: bool = Query(default=False),
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> JSONResponse:
+        """GET /api/v1/db/candles — one page of OHLCV candles from the Parquet lake.
+
+        Reads ``<lake>/bars/<exch>/<seg>/<symbol>/<interval>/**/*.parquet`` via
+        DuckDB ``read_parquet`` (partition-pruned + ``LIMIT``-bounded). ``start``
+        / ``end`` are inclusive ISO ``YYYY-MM-DD`` bounds. Thin wrapper over
+        :func:`brutex.dashboard.db_view.query_candles`; an invalid coordinate /
+        column / date raises ``ValueError`` there → HTTP 400 here.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake root wired for candle reads")
+        try:
+            payload = query_candles(
+                store.connection,
+                lake_root.parent,
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                start=start,
+                end=end,
+                columns=tuple(column) if column else None,
+                descending=desc,
+                limit=limit,
+                offset=offset,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)
