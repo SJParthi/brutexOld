@@ -194,6 +194,8 @@
 
   <div class="pullbar">
     <div class="lead" id="pulllead">Select an instrument to pull its spot — or click a future / option contract to pull that contract</div>
+    <label style="color:var(--muted); font-size:12px;" title="Inclusive start date — blank pulls from 2020 (Groww's earliest history).">from <input type="date" id="fromDate" min="2020-01-01" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
+    <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — blank pulls up to today.">to <input type="date" id="toDate" min="2020-01-01" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
     <button class="loadbtn" id="loadbtn" title="Download the public Groww instrument master — no keys needed">⟳ Load instruments</button>
     <button class="pullbtn" id="pullbtn" disabled>⤓ Pull spot — all timeframes</button>
   </div>
@@ -504,13 +506,30 @@ async function runPull(symbol, label) {
   const panel = document.getElementById("pullpanel");
   panel.classList.add("on");
   btn.disabled = true;
-  document.getElementById("pulltitle").textContent = `Pulling ${label} · all timeframes`;
+  /* The from/to date picker scopes EVERY pull path (spot / future / CE-PE).
+     Blank ends default server-side to 2020-01-01 / today and are clamped
+     into the Groww-served window, so a malformed range can't waste quota. */
+  const fromDate = document.getElementById("fromDate").value;
+  const toDate = document.getElementById("toDate").value;
+  let qs = '/api/v1/universe/pull?symbol=' + encodeURIComponent(symbol);
+  if (fromDate) qs += '&from_date=' + encodeURIComponent(fromDate);
+  if (toDate) qs += '&to_date=' + encodeURIComponent(toDate);
+  const range = (fromDate || toDate)
+    ? ` · ${fromDate || "2020-01-01"} → ${toDate || "today"}`
+    : "";
+  document.getElementById("pulltitle").textContent = `Pulling ${label} · all timeframes${range}`;
   const grid = document.getElementById("tfgrid");
   grid.innerHTML = "";
   document.getElementById("counter").textContent = "0";
   try {
-    const r = await fetch('/api/v1/universe/pull?symbol=' + encodeURIComponent(symbol), {method: 'POST'});
+    const r = await fetch(qs, {method: 'POST'});
     const report = await r.json();
+    if (!r.ok) {
+      // The route returns 400 {detail: "..."} for a malformed / inverted
+      // range (DEC-PULL-ERROR-VISIBILITY-001) — show the real reason, not
+      // a misleading "no data".
+      throw new Error(report.detail || ('HTTP ' + r.status));
+    }
     document.getElementById("previewBadge").classList.toggle("on", !!report.dry_run);
     const tfs = report.timeframes || [];
     grid.innerHTML = "";
@@ -531,8 +550,11 @@ async function runPull(symbol, label) {
         `<span style="color:var(--yellow)">∅</span> ${esc(label)} — no data returned`;
     } else {
       const verb = report.dry_run ? "preview-pulled (synthetic)" : "pulled";
+      const win = (report.start_date && report.end_date)
+        ? ` (${esc(report.start_date)} → ${esc(report.end_date)})`
+        : "";
       document.getElementById("pulltitle").innerHTML =
-        `<span class="spark">✓</span> ${esc(label)} ${verb} — ${tfs.length} timeframes`;
+        `<span class="spark">✓</span> ${esc(label)} ${verb} — ${tfs.length} timeframes${win}`;
     }
   } catch (e) {
     document.getElementById("pulltitle").innerHTML =

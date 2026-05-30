@@ -17,10 +17,12 @@ from brutex.adapters.groww.chunks import ALL_GROWW_INTERVALS
 from brutex.adapters.groww.fetch_loop import CandleFetcher
 from brutex.adapters.groww.ingest import SyntheticCandleFetcher
 from brutex.dashboard.pull_controller import (
+    GROWW_HISTORY_FLOOR,
     PullCandlesReport,
     TimeframeResult,
     groww_creds_present,
     pull_candles,
+    resolve_candle_range,
 )
 from brutex.data.watermark import ChunkKey
 
@@ -250,3 +252,135 @@ class TestPullCandlesInjectedFactory:
         )
         assert report.total_completed == 0
         assert report.total_failed > 0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# resolve_candle_range — pure [start, end) resolver (the from/to picker core)
+# ────────────────────────────────────────────────────────────────────────
+
+_NOW = datetime(2026, 5, 30, 12, 0, tzinfo=UTC)  # the context "today"
+
+
+class TestResolveCandleRange:
+    """The pure, O(1) window resolver behind the from/to-date candle picker."""
+
+    def test_no_dates_no_year_uses_current_utc_year(self) -> None:
+        # Default mode 3 — neither date nor year → current UTC calendar year.
+        start, end = resolve_candle_range(from_date=None, to_date=None, year=None, now=_NOW)
+        assert start == datetime(2026, 1, 1, tzinfo=UTC)
+        assert end == datetime(2027, 1, 1, tzinfo=UTC)
+
+    def test_no_dates_explicit_year(self) -> None:
+        # Mode 2 — year given, no dates → that full calendar year.
+        start, end = resolve_candle_range(from_date=None, to_date=None, year=2023, now=_NOW)
+        assert start == datetime(2023, 1, 1, tzinfo=UTC)
+        assert end == datetime(2024, 1, 1, tzinfo=UTC)
+
+    def test_explicit_from_and_to_are_day_inclusive(self) -> None:
+        # Mode 1 — both ends inclusive; end is the midnight after to_date.
+        start, end = resolve_candle_range(
+            from_date="2024-02-01", to_date="2024-02-15", year=None, now=_NOW
+        )
+        assert start == datetime(2024, 2, 1, tzinfo=UTC)
+        assert end == datetime(2024, 2, 16, tzinfo=UTC)
+
+    def test_from_only_runs_to_today(self) -> None:
+        start, end = resolve_candle_range(from_date="2026-05-01", to_date=None, year=None, now=_NOW)
+        assert start == datetime(2026, 5, 1, tzinfo=UTC)
+        assert end == datetime(2026, 5, 31, tzinfo=UTC)  # today (05-30) + 1 day
+
+    def test_to_only_starts_at_history_floor(self) -> None:
+        start, end = resolve_candle_range(from_date=None, to_date="2020-03-10", year=None, now=_NOW)
+        assert start == datetime(GROWW_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)
+        assert end == datetime(2020, 3, 11, tzinfo=UTC)
+
+    def test_from_before_floor_is_clamped_up(self) -> None:
+        start, _ = resolve_candle_range(
+            from_date="2018-06-01", to_date="2021-01-01", year=None, now=_NOW
+        )
+        assert start == datetime(2020, 1, 1, tzinfo=UTC)
+
+    def test_to_after_today_is_clamped_down(self) -> None:
+        _, end = resolve_candle_range(
+            from_date="2026-01-01", to_date="2099-12-31", year=None, now=_NOW
+        )
+        assert end == datetime(2026, 5, 31, tzinfo=UTC)  # today + 1 day
+
+    def test_year_is_ignored_when_a_date_is_given(self) -> None:
+        # A date present → mode 1; the year argument must not leak in.
+        start, end = resolve_candle_range(from_date="2024-07-01", to_date=None, year=2099, now=_NOW)
+        assert start == datetime(2024, 7, 1, tzinfo=UTC)
+        assert end == datetime(2026, 5, 31, tzinfo=UTC)
+
+    def test_from_after_to_raises(self) -> None:
+        with pytest.raises(ValueError, match="after to_date"):
+            resolve_candle_range(from_date="2025-06-01", to_date="2025-05-01", year=None, now=_NOW)
+
+    def test_future_from_date_raises(self) -> None:
+        # from_date in the future + to=None (today) → from > to → refused.
+        with pytest.raises(ValueError, match="after to_date"):
+            resolve_candle_range(from_date="2027-01-01", to_date=None, year=None, now=_NOW)
+
+    def test_malformed_from_date_raises(self) -> None:
+        with pytest.raises(ValueError, match="from_date must be ISO"):
+            resolve_candle_range(from_date="2024/02/01", to_date=None, year=None, now=_NOW)
+
+    def test_malformed_to_date_raises(self) -> None:
+        with pytest.raises(ValueError, match="to_date must be ISO"):
+            resolve_candle_range(from_date=None, to_date="not-a-date", year=None, now=_NOW)
+
+    def test_empty_string_dates_behave_as_omitted(self) -> None:
+        # A bare ?from_date=&to_date= (or blank pickers) must behave exactly
+        # like omitted bounds → fall through to year/default mode, NOT raise
+        # a malformed-date error. Worst-case input hardening.
+        start, end = resolve_candle_range(from_date="", to_date="", year=2023, now=_NOW)
+        assert start == datetime(2023, 1, 1, tzinfo=UTC)
+        assert end == datetime(2024, 1, 1, tzinfo=UTC)
+
+    def test_whitespace_from_date_is_treated_as_omitted(self) -> None:
+        # Whitespace-only from_date → floor; explicit mode still entered
+        # because to_date is a real bound.
+        start, end = resolve_candle_range(
+            from_date="   ", to_date="2024-02-15", year=None, now=_NOW
+        )
+        assert start == datetime(GROWW_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)
+        assert end == datetime(2024, 2, 16, tzinfo=UTC)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# pull_candles — from/to date range threading (the picker, end to end)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPullCandlesDateRange:
+    def test_year_mode_stamps_start_and_end_dates(self, tmp_path: Path) -> None:
+        # Even in legacy year mode the report now carries the resolved window.
+        report = pull_candles("NSE-NIFTY", lake_root=tmp_path, year=2024, dry_run=True)
+        assert report.start_date == "2024-01-01"
+        assert report.end_date == "2024-12-31"
+        d = report.to_dict()
+        assert d["start_date"] == "2024-01-01"
+        assert d["end_date"] == "2024-12-31"
+
+    def test_explicit_range_is_pulled_and_reported(self, tmp_path: Path) -> None:
+        report = pull_candles(
+            "NSE-NIFTY",
+            lake_root=tmp_path,
+            from_date="2024-03-01",
+            to_date="2024-03-31",
+            dry_run=True,
+        )
+        assert report.start_date == "2024-03-01"
+        assert report.end_date == "2024-03-31"
+        assert report.year == 2024
+        assert report.total_completed > 0
+
+    def test_inverted_range_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="after to_date"):
+            pull_candles(
+                "NSE-NIFTY",
+                lake_root=tmp_path,
+                from_date="2024-05-01",
+                to_date="2024-04-01",
+                dry_run=True,
+            )

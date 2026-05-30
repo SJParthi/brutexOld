@@ -41,9 +41,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import structlog
 
@@ -60,6 +60,97 @@ _LOG = structlog.get_logger(__name__)
 #: bare ``trading_symbol`` (e.g. ``"NIFTY"``) is rejected before it can
 #: break :func:`brutex.adapters.groww.client.symbol_to_exchange_segment`.
 _KNOWN_EXCHANGE_PREFIXES: tuple[str, ...] = ("NSE-", "BSE-")
+
+#: Earliest calendar date Groww serves historical candles for equities,
+#: indices and F&O (CLAUDE.md §6 "Historical depth — From 2020"). Any
+#: ``from_date`` below this floor is clamped up to it so a too-early pick
+#: can never waste quota on a window the vendor has no data for.
+GROWW_HISTORY_FLOOR: Final[date] = date(2020, 1, 1)
+
+
+def resolve_candle_range(
+    *,
+    from_date: str | None,
+    to_date: str | None,
+    year: int | None,
+    now: datetime,
+) -> tuple[datetime, datetime]:
+    """Resolve the half-open ``[start, end)`` UTC window a pull must cover.
+
+    O(1): pure date arithmetic, no I/O. Three modes, in priority order:
+
+    1. **Explicit range** — when *from_date* and/or *to_date* is given.
+       Each is an ISO ``YYYY-MM-DD`` calendar date; both ends are
+       **day-inclusive** (``to_date``'s whole day is fetched, so *end* is
+       the midnight that starts the next day). A missing *from_date*
+       defaults to :data:`GROWW_HISTORY_FLOOR`; a missing *to_date*
+       defaults to today (``now``'s UTC date). The pair is then clamped to
+       ``[GROWW_HISTORY_FLOOR, today]`` so a too-early or future pick can
+       never waste quota — and the future is never requested.
+    2. **Year** — when neither date is given but *year* is: the full
+       calendar year ``[Jan 1 year, Jan 1 year+1)`` (the legacy behaviour).
+    3. **Default** — neither date nor year: the current UTC calendar year.
+
+    Parameters
+    ----------
+    from_date, to_date
+        Inclusive ISO ``YYYY-MM-DD`` bounds, or ``None``.
+    year
+        Calendar year, used only when both dates are ``None``.
+    now
+        The reference "current" instant (injected for testability). Its
+        UTC date is the upper clamp and the default-year source.
+
+    Returns
+    -------
+    tuple[datetime, datetime]
+        ``(start, end)`` — timezone-aware UTC, half-open, ``start < end``.
+
+    Raises
+    ------
+    ValueError
+        If a date string is not ISO ``YYYY-MM-DD``, or if the resolved
+        ``from`` is after the resolved ``to`` (e.g. a future *from_date*,
+        or ``from_date > to_date``).
+    """
+    # Normalise empty / whitespace-only inputs to ``None`` so a bare
+    # ``?from_date=`` query param (or a blank picker) behaves exactly like
+    # an omitted bound, not as a malformed date — one obvious semantics for
+    # "no bound given" across the UI and any direct API caller.
+    from_date = (from_date or "").strip() or None
+    to_date = (to_date or "").strip() or None
+
+    if from_date is None and to_date is None:
+        resolved_year = year if year is not None else now.year
+        start = datetime(resolved_year, 1, 1, tzinfo=UTC)
+        end = datetime(resolved_year + 1, 1, 1, tzinfo=UTC)
+        return start, end
+
+    today = now.astimezone(UTC).date()
+    start_date = _parse_iso_date(from_date, "from_date") if from_date else GROWW_HISTORY_FLOOR
+    end_date = _parse_iso_date(to_date, "to_date") if to_date else today
+
+    # Clamp into the vendor-served window; never request the future.
+    start_date = max(start_date, GROWW_HISTORY_FLOOR)
+    end_date = min(end_date, today)
+    if start_date > end_date:
+        raise ValueError(
+            f"from_date ({start_date.isoformat()}) is after to_date "
+            f"({end_date.isoformat()}) — nothing to pull"
+        )
+
+    start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=UTC)
+    # End is exclusive; add a day so the whole of ``end_date`` is fetched.
+    end = datetime(end_date.year, end_date.month, end_date.day, tzinfo=UTC) + timedelta(days=1)
+    return start, end
+
+
+def _parse_iso_date(value: str, field_name: str) -> date:
+    """Parse an ISO ``YYYY-MM-DD`` string, re-raising with the field name."""
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be ISO YYYY-MM-DD, got {value!r}") from exc
 
 
 def groww_creds_present(env: Mapping[str, str] | None = None) -> bool:
@@ -121,7 +212,14 @@ class PullCandlesReport:
         (e.g. ``"NSE-NIFTY"``), a future, or an option contract's
         groww_symbol (e.g. ``"NSE-NIFTY-30Jan25-28500-CE"``).
     year
-        The calendar year the pull covered ``[Jan 1, Jan 1 next year)``.
+        The calendar year the pull *started* in. For a full-year pull this
+        is the year covered; for an explicit ``from``/``to`` range it is
+        ``start_date``'s year (kept for backward compatibility — read
+        ``start_date`` / ``end_date`` for the exact window).
+    start_date, end_date
+        The inclusive ISO ``YYYY-MM-DD`` bounds actually pulled, after the
+        :func:`resolve_candle_range` clamp. The ``/universe`` page shows
+        these so the operator sees the real window, not just the year.
     dry_run
         ``True`` when synthetic data was used (no creds / no network).
         The ``/universe`` page shows a "PREVIEW · synthetic" badge in
@@ -134,6 +232,8 @@ class PullCandlesReport:
     symbol: str
     year: int
     dry_run: bool
+    start_date: str = ""
+    end_date: str = ""
     timeframes: list[TimeframeResult] = field(default_factory=list)
 
     @property
@@ -161,6 +261,8 @@ class PullCandlesReport:
         return {
             "symbol": self.symbol,
             "year": self.year,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
             "dry_run": self.dry_run,
             "total_completed": self.total_completed,
             "total_failed": self.total_failed,
@@ -228,19 +330,24 @@ def pull_candles(
     *,
     lake_root: Path,
     year: int | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
     dry_run: bool,
     fetcher_factory: FetcherFactory | None = None,
 ) -> PullCandlesReport:
-    """Ingest *symbol*'s spot / future / option candles for *year*.
+    """Ingest *symbol*'s spot / future / option candles over a date range.
 
     Instrument-agnostic: *symbol* may be a spot index/stock, a future,
     or an option contract's groww_symbol — the chunk/fetch spine is the
     same for any Groww symbol. Plans + drives one
     :func:`~brutex.adapters.groww.ingest.run_ingest` pass over the single
     *symbol* and ALL
-    :data:`~brutex.adapters.groww.chunks.ALL_GROWW_INTERVALS`, covering
-    ``[Jan 1 year, Jan 1 year+1)`` in UTC. Idempotent + resumable via a
-    fresh :class:`~brutex.data.watermark.FetchWatermark`.
+    :data:`~brutex.adapters.groww.chunks.ALL_GROWW_INTERVALS`. The window
+    is resolved by :func:`resolve_candle_range`: an explicit
+    *from_date* / *to_date* range (day-inclusive, clamped to
+    ``[2020-01-01, today]``) when either is given, else the full calendar
+    *year*. Idempotent + resumable via a fresh
+    :class:`~brutex.data.watermark.FetchWatermark`.
 
     Parameters
     ----------
@@ -252,8 +359,13 @@ def pull_candles(
         Lake directory the live sink writes Parquet into. Unused by the
         dry-run synthetic fetcher (which emits rows directly).
     year
-        Calendar year to pull. ``None`` (default) uses the current UTC
-        year.
+        Calendar year to pull when no explicit range is given. ``None``
+        (default) uses the current UTC year. Ignored when *from_date* or
+        *to_date* is supplied.
+    from_date, to_date
+        Inclusive ISO ``YYYY-MM-DD`` bounds for an explicit range. Either
+        may be ``None`` (defaults to the Groww history floor / today
+        respectively). When both are ``None`` the *year* mode applies.
     dry_run
         When ``True``, use the offline synthetic fetcher (no creds /
         network). When ``False``, build the live Groww fetcher via
@@ -278,6 +390,8 @@ def pull_candles(
         ``trading_symbol`` (e.g. ``"NIFTY"``) reaching the ingest spine,
         which would mis-derive the exchange in
         :func:`brutex.adapters.groww.client.symbol_to_exchange_segment`.
+        Also raised by :func:`resolve_candle_range` for a malformed date
+        string or a ``from`` after ``to`` (incl. a future ``from_date``).
     """
     if not symbol.strip():
         raise ValueError("symbol must be a non-empty Groww symbol")
@@ -287,9 +401,15 @@ def pull_candles(
             f"(one of {_KNOWN_EXCHANGE_PREFIXES}), got {symbol!r}"
         )
 
-    resolved_year = year if year is not None else datetime.now(UTC).year
-    start = datetime(resolved_year, 1, 1, tzinfo=UTC)
-    end = datetime(resolved_year + 1, 1, 1, tzinfo=UTC)
+    start, end = resolve_candle_range(
+        from_date=from_date,
+        to_date=to_date,
+        year=year,
+        now=datetime.now(UTC),
+    )
+    resolved_year = start.year
+    # Inclusive end label = the last day actually fetched (end is exclusive).
+    end_label = (end - timedelta(days=1)).date().isoformat()
 
     if fetcher_factory is None:
         fetcher_factory = _build_dry_run_fetcher if dry_run else _build_live_pull_fetcher
@@ -299,6 +419,8 @@ def pull_candles(
         "universe.pull.start",
         symbol=symbol,
         year=resolved_year,
+        start_date=start.date().isoformat(),
+        end_date=end_label,
         dry_run=dry_run,
         intervals=len(ALL_GROWW_INTERVALS),
     )
@@ -327,6 +449,8 @@ def pull_candles(
     pull_report = PullCandlesReport(
         symbol=symbol,
         year=resolved_year,
+        start_date=start.date().isoformat(),
+        end_date=end_label,
         dry_run=dry_run,
         timeframes=timeframes,
     )
@@ -334,6 +458,8 @@ def pull_candles(
         "universe.pull.done",
         symbol=symbol,
         year=resolved_year,
+        start_date=start.date().isoformat(),
+        end_date=end_label,
         dry_run=dry_run,
         completed=pull_report.total_completed,
         failed=pull_report.total_failed,
@@ -342,9 +468,11 @@ def pull_candles(
 
 
 __all__ = [
+    "GROWW_HISTORY_FLOOR",
     "FetcherFactory",
     "PullCandlesReport",
     "TimeframeResult",
     "groww_creds_present",
     "pull_candles",
+    "resolve_candle_range",
 ]
