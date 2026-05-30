@@ -302,7 +302,15 @@ def list_columns(conn: Any, table: str) -> list[str]:
     if table not in KNOWN_TABLES:
         raise ValueError(f"unknown table {table!r}; allowed tables are {KNOWN_TABLES}")
     cursor = conn.execute(f"SELECT * FROM {table} LIMIT 0")  # noqa: S608  # nosec B608 - table is allowlist-validated above
-    return [str(col[0]) for col in (cursor.description or [])]
+    columns = [str(col[0]) for col in (cursor.description or [])]
+    # CRITICAL (DEC-STORE-LOCK-LEAK-FIX-001): the production connection is a
+    # store ``_LockedReadConn`` that holds the store lock from ``execute()``
+    # until a ``fetch*()``. Reading ``.description`` alone does NOT release it —
+    # so we MUST fetch (the ``LIMIT 0`` result is empty) to free the lock, or
+    # the background universe-pull's writes deadlock against this read (the
+    # live "Fetch all expiries" 26-minute hang). Harmless on a raw cursor.
+    cursor.fetchall()
+    return columns
 
 
 def _build_where(
