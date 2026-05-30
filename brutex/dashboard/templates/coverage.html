@@ -135,7 +135,7 @@ function esc(s) {
     .replace(/'/g, "&#39;");
 }
 
-const MARK = { complete: "✓", expiries_only: "◐", failed: "⚠", pending: "…", missing: "—" };
+const MARK = { complete: "✓", expiries_only: "◐", failed: "⚠", pending: "○", missing: "—" };
 
 function shortTs(ts) {
   if (!ts) return "";
