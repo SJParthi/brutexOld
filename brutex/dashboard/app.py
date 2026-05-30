@@ -814,6 +814,7 @@ def build_app(
             )
 
         def _worker(lake_root: Path) -> object:  # pragma: no cover — live thread
+            """Background body — run the Phase-1 expiries pull for ``lake_root``."""
             from brutex.cli import (
                 _run_expiries_phase,  # pyright: ignore[reportPrivateUsage]
             )
@@ -842,6 +843,7 @@ def build_app(
             )
 
         def _worker(lake_root: Path) -> object:  # pragma: no cover — live thread
+            """Background body — run the Phase-2 contracts pull for ``lake_root``."""
             from brutex.cli import (
                 _run_contracts_phase,  # pyright: ignore[reportPrivateUsage]
             )
