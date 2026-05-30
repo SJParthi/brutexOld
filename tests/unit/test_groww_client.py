@@ -98,7 +98,7 @@ class TestSuccess:
 
 
 class TestRequestMapping:
-    def test_index_maps_to_cash_nse_and_epoch(self) -> None:
+    def test_index_maps_to_cash_nse_and_ist_time(self) -> None:
         sdk = _FakeSDK(result={"candles": []})
         fetcher, _ = _fetcher(sdk)
         fetcher.fetch_chunk(_key("NSE-NIFTY", "1m"))
@@ -108,8 +108,10 @@ class TestRequestMapping:
         assert kw["segment"] == "SEG_CASH"
         assert kw["groww_symbol"] == "NSE-NIFTY"
         assert kw["candle_interval"] == "CI_MIN_1"
-        # 2021-01-04 09:15 UTC == 1609751700 epoch
-        assert kw["start_time"] == 1609751700
+        # The SDK documents start/end as "yyyy-MM-dd HH:mm:ss" IST strings —
+        # NOT an integer epoch. 2021-01-04 09:15 UTC == 14:45 IST.
+        assert kw["start_time"] == "2021-01-04 14:45:00"
+        assert kw["end_time"] == "2021-02-03 14:45:00"
 
     def test_sensex_maps_to_bse(self) -> None:
         sdk = _FakeSDK(result={"candles": []})
@@ -221,3 +223,20 @@ class TestReauth:
         fetcher, _ = _fetcher(_FakeSDK(result={"candles": []}), reauth_fn=None)
         with pytest.raises(GrowwFetchError, match="no reauth_fn"):
             fetcher.reauth()
+
+
+class TestToGrowwTime:
+    """`_to_groww_time` formats the chunk boundary as Groww's documented IST
+    "yyyy-MM-dd HH:mm:ss" string (DEC-PULL-CANDLE-TIME-FORMAT-001)."""
+
+    def test_tz_aware_utc_to_ist_string(self) -> None:
+        from brutex.adapters.groww.client import _to_groww_time
+
+        # 09:15 UTC + 5:30 == 14:45 IST.
+        assert _to_groww_time("2021-01-04T09:15:00+00:00") == "2021-01-04 14:45:00"
+
+    def test_naive_is_treated_as_utc(self) -> None:
+        from brutex.adapters.groww.client import _to_groww_time
+
+        # A naive ISO string is assumed UTC, then converted to IST.
+        assert _to_groww_time("2021-01-04T09:15:00") == "2021-01-04 14:45:00"
