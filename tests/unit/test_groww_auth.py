@@ -152,9 +152,7 @@ class TestClearCachedToken:
         monkeypatch.setenv("BRUTEX_GROWW_TOKEN_PATH", str(target))
         assert default_token_path() == target
 
-    def test_default_token_path_falls_back_to_home(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_default_token_path_falls_back_to_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from brutex.adapters.groww.auth import default_token_path
 
         monkeypatch.delenv("BRUTEX_GROWW_TOKEN_PATH", raising=False)
