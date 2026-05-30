@@ -886,13 +886,20 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
     (:func:`brutex.data.coverage_ledger.cells_to_repull` over the reconciled
     ledger) are re-pulled — a recoverable, idempotent re-run.
     """
-    from datetime import UTC, datetime
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from datetime import UTC, date, datetime
 
     import structlog
     from growwapi.groww.exceptions import BaseGrowwException
 
     from brutex.adapters.groww.auth import GrowwAuth
-    from brutex.adapters.groww.contracts import ContractFetcher, store_metadata_lookup
+    from brutex.adapters.groww.client import VendorSdkError
+    from brutex.adapters.groww.contracts import (
+        ContractFetcher,
+        ContractFetchResult,
+        store_metadata_lookup,
+    )
     from brutex.adapters.groww.expiries import ExpiryFetcher
     from brutex.adapters.groww.instruments import InstrumentMasterFetcher
     from brutex.adapters.groww.universe_ingest import UniverseIngestReport
@@ -904,6 +911,7 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
     )
     from brutex.data.instrument_store import InstrumentStore
     from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
+    from brutex.orchestrator.retry import retry_call
     from brutex.universe import derive_lake_underlyings
 
     log = structlog.get_logger("brutex.universe")
@@ -914,7 +922,17 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
     try:
         auth = GrowwAuth.from_env()
         sdk = auth.session()
-        bucket = AdaptiveTokenBucket()
+        # Start at 8 r/s (operator decree 2026-05-30). The binding Groww cap is
+        # PER-MINUTE: IF the backtesting endpoints meter as Non-Trading
+        # (500/min ⇒ ~8.3 r/s sustained — docs/groww/api-reference/01-introduction.md;
+        # the backtesting bucket itself is UNVERIFIED per CLAUDE.md §6), a
+        # sustained 8 r/s ≈ 480/min (≤485/min incl. the 5-token burst) sits just
+        # under it, so sustaining >8 is futile. The bucket never upshifts above
+        # initial_rps; on sustained throttling it steps down to 4 r/s then
+        # recovers — so if the real bucket is stricter, the adaptive downshift +
+        # retry self-correct. Sequential pulls were latency-bound at ~3 r/s; the
+        # parallel fan-out below is what saturates this budget.
+        bucket = AdaptiveTokenBucket(initial_rps=8.0, downshift_rps=4.0)
         instrument_fetcher = InstrumentMasterFetcher.from_env(store)
         expiry_fetcher = ExpiryFetcher(
             sdk=sdk, bucket=bucket, base_exception=BaseGrowwException, store=store
@@ -956,13 +974,52 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
             contract_fetcher.sdk = new_sdk
             log.warning("universe.auth.reminted")
 
-        def _pull_cell(exchange: str, underlying: str, year: int) -> tuple[int, int]:
-            """Pull every expiry for ``(underlying, year)`` + all contracts per expiry."""
-            expiry_result = expiry_fetcher.fetch(underlying, exchange, year=year)
+        def _pull_cell(
+            exchange: str, underlying: str, year: int, pool: ThreadPoolExecutor
+        ) -> tuple[int, int]:
+            """Pull every expiry for ``(underlying, year)`` + all contracts per expiry.
+
+            The per-expiry contract pulls fan out across *pool* (a bounded worker
+            set) all sharing the ONE adaptive token bucket — the global 8→4 r/s
+            governor — and the thread-safe store (DEC-STORE-THREADSAFE-001).
+            Sequential was round-trip-latency-bound at ~3 r/s; the fan-out
+            saturates the rate budget. Every call is retried through transient
+            failures (:func:`retry_call` — never give up); a permanent error
+            propagates to the cell-level handler (auth → re-mint + retry cell).
+            """
+            expiry_result = retry_call(
+                lambda: expiry_fetcher.fetch(underlying, exchange, year=year),
+                retry_on=VendorSdkError,
+            )
             cell_expiries = len(expiry_result.records)
             cell_contracts = 0
-            for record in expiry_result.records:
-                contract_result = contract_fetcher.fetch(underlying, exchange, record.expiry_date)
+
+            def _pull_one(expiry_date: date) -> ContractFetchResult:
+                return retry_call(
+                    lambda: contract_fetcher.fetch(underlying, exchange, expiry_date),
+                    retry_on=VendorSdkError,
+                )
+
+            futures = {
+                pool.submit(_pull_one, rec.expiry_date): rec for rec in expiry_result.records
+            }
+            # Drain EVERY future before returning/raising. A worker reads
+            # contract_fetcher.sdk; the cell-level handler re-mints (rebinds)
+            # that sdk on an auth error. Surfacing the first failure while
+            # siblings are still in flight would let the re-mint race a mid-call
+            # worker. Draining first guarantees zero in-flight workers when the
+            # outer loop re-mints + retries the cell (sequential cells ⇒ no
+            # other cell's workers exist either). Idempotent upserts make the
+            # retry safe.
+            first_error: BaseException | None = None
+            for fut in as_completed(futures):
+                rec = futures[fut]
+                try:
+                    contract_result = fut.result()
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    if first_error is None:
+                        first_error = exc
+                    continue
                 persisted = len(contract_result.records)
                 raw_count = (
                     persisted
@@ -981,12 +1038,14 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
                     underlying=underlying,
                     exchange=exchange,
                     year=year,
-                    expiry=str(record.expiry_date),
+                    expiry=str(rec.expiry_date),
                     contracts=persisted,
                     raw=raw_count,
                     skipped_no_metadata=contract_result.skipped_no_metadata,
                     skipped_malformed=contract_result.skipped_malformed,
                 )
+            if first_error is not None:
+                raise first_error
             return cell_expiries, cell_contracts
 
         # Refresh the master first (the contract fetcher's metadata enrichment
@@ -1019,71 +1078,101 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
             years=sorted({yr for _, _, yr in todo}),
             cells=cell_total,
         )
-        for cell_index, (exchange, underlying, year) in enumerate(todo, start=1):
-            fetched_at = datetime.now(UTC)
-            log.info(
-                "universe.cell.start",
-                underlying=underlying,
-                exchange=exchange,
-                year=year,
-                progress=f"{cell_index}/{cell_total}",
+        pull_started = time.monotonic()
+        api_calls = 0
+        rate_log_every = 25
+        try:
+            pull_workers = max(1, int(os.environ.get("BRUTEX_UNIVERSE_PULL_WORKERS", "8")))
+        except ValueError:
+            log.warning(
+                "universe.pull.bad_workers_env",
+                value=os.environ.get("BRUTEX_UNIVERSE_PULL_WORKERS"),
             )
-            try:
-                try:
-                    cell_expiries, cell_contracts = _pull_cell(exchange, underlying, year)
-                except Exception as exc:  # pylint: disable=broad-exception-caught
-                    # Token expired mid-pull → re-mint once + retry this cell.
-                    if not _is_auth_error(exc):
-                        raise
-                    _remint()
-                    cell_expiries, cell_contracts = _pull_cell(exchange, underlying, year)
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                # One cell's failure must not abort the rest — record a
-                # ``failed`` cell with the error and continue (recoverable).
-                log.warning(
-                    "universe.cell.failed",
+            pull_workers = 8
+        # A handful of in-flight requests keeps the 8 r/s bucket saturated
+        # (round-trip ~0.3 s ⇒ ~3 concurrent fills the budget); the bucket —
+        # not the pool — stays the rate governor, so over-sizing is harmless.
+        with ThreadPoolExecutor(max_workers=pull_workers) as pool:
+            for cell_index, (exchange, underlying, year) in enumerate(todo, start=1):
+                fetched_at = datetime.now(UTC)
+                log.info(
+                    "universe.cell.start",
                     underlying=underlying,
                     exchange=exchange,
                     year=year,
-                    error=str(exc),
+                    progress=f"{cell_index}/{cell_total}",
                 )
+                try:
+                    try:
+                        cell_expiries, cell_contracts = _pull_cell(exchange, underlying, year, pool)
+                    except Exception as exc:  # pylint: disable=broad-exception-caught
+                        # Token expired mid-pull → re-mint once + retry this cell.
+                        if not _is_auth_error(exc):
+                            raise
+                        _remint()
+                        cell_expiries, cell_contracts = _pull_cell(exchange, underlying, year, pool)
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    # One cell's failure must not abort the rest — record a
+                    # ``failed`` cell with the error and continue (recoverable).
+                    log.warning(
+                        "universe.cell.failed",
+                        underlying=underlying,
+                        exchange=exchange,
+                        year=year,
+                        error=str(exc),
+                    )
+                    store.upsert_coverage(
+                        CoverageRecord(
+                            exchange=exchange,
+                            underlying_symbol=underlying,
+                            year=year,
+                            expiries_pulled=0,
+                            contracts_pulled=0,
+                            status=classify_cell(0, 0, str(exc)),
+                            last_run_id=run_id,
+                            last_fetched_at=fetched_at,
+                            error_message=str(exc),
+                        )
+                    )
+                    continue
+                log.info(
+                    "universe.cell.done",
+                    underlying=underlying,
+                    exchange=exchange,
+                    year=year,
+                    expiries=cell_expiries,
+                    contracts=cell_contracts,
+                )
+                expiry_total += cell_expiries
+                contract_total += cell_contracts
+                api_calls += 1 + cell_expiries
                 store.upsert_coverage(
                     CoverageRecord(
                         exchange=exchange,
                         underlying_symbol=underlying,
                         year=year,
-                        expiries_pulled=0,
-                        contracts_pulled=0,
-                        status=classify_cell(0, 0, str(exc)),
+                        expiries_pulled=cell_expiries,
+                        contracts_pulled=cell_contracts,
+                        status=classify_cell(cell_expiries, cell_contracts, None),
                         last_run_id=run_id,
                         last_fetched_at=fetched_at,
-                        error_message=str(exc),
+                        error_message=None,
                     )
                 )
-                continue
-            log.info(
-                "universe.cell.done",
-                underlying=underlying,
-                exchange=exchange,
-                year=year,
-                expiries=cell_expiries,
-                contracts=cell_contracts,
-            )
-            expiry_total += cell_expiries
-            contract_total += cell_contracts
-            store.upsert_coverage(
-                CoverageRecord(
-                    exchange=exchange,
-                    underlying_symbol=underlying,
-                    year=year,
-                    expiries_pulled=cell_expiries,
-                    contracts_pulled=cell_contracts,
-                    status=classify_cell(cell_expiries, cell_contracts, None),
-                    last_run_id=run_id,
-                    last_fetched_at=fetched_at,
-                    error_message=None,
-                )
-            )
+                # Live rate readout — measure the achieved r/s + ETA rather
+                # than assume a fixed rate (the adaptive bucket oscillates
+                # 4–8 r/s, so wall-clock is a range, not a constant).
+                if cell_index % rate_log_every == 0 or cell_index == cell_total:
+                    elapsed = max(time.monotonic() - pull_started, 1e-9)
+                    cells_per_sec = cell_index / elapsed
+                    eta_min = (cell_total - cell_index) / cells_per_sec / 60.0
+                    log.info(
+                        "universe.pull.rate",
+                        progress=f"{cell_index}/{cell_total}",
+                        api_calls=api_calls,
+                        achieved_rps=round(api_calls / elapsed, 2),
+                        eta_min=round(eta_min, 1),
+                    )
         log.info(
             "universe.pull.done",
             run_id=run_id,
