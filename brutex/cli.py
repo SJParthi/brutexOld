@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Any
 
 from brutex import __version__
+from brutex.config.paths import resolve_lake_root
 from brutex.config.runtime import read_runtime_file
 from brutex.orchestrator.audit import AuditChainCorruption, verify_chain
 
@@ -302,6 +303,24 @@ def build_parser() -> argparse.ArgumentParser:
             "Run exactly N ticks then exit (default 0 = run until "
             "Ctrl-C). Useful for tests + cron-style invocation."
         ),
+    )
+
+    wipe = sub.add_parser(
+        "wipe",
+        help=(
+            "Delete ALL persisted BruteX data (lake, credentials, token, audit, "
+            "logs) under ~/.brutex + any BRUTEX_* override. Dry-run by default."
+        ),
+    )
+    wipe.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually delete. Without this flag, wipe only PREVIEWS the plan (dry-run).",
+    )
+    wipe.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive typed-'WIPE' confirmation (for non-interactive / CI use).",
     )
 
     return parser
@@ -655,10 +674,7 @@ def cmd_run(
     dev launch. Pass ``open_browser=False`` (``--no-browser``) for headless
     or CI invocations.
     """
-    resolved_lake = lake_root
-    if resolved_lake is None:
-        env_lake = os.environ.get("BRUTEX_LAKE_ROOT")
-        resolved_lake = Path(env_lake) if env_lake else Path.home() / ".brutex" / "lake"
+    resolved_lake = lake_root if lake_root is not None else resolve_lake_root()
 
     url = f"http://{host}:{port}"
     universe_url = f"{url}/universe"
@@ -678,11 +694,10 @@ def _parse_dt(value: str) -> datetime:
 
 
 def _resolve_lake_root(lake_root: Path | None) -> Path:
-    """``--lake-root`` → ``$BRUTEX_LAKE_ROOT`` → ``~/.brutex/lake``."""
+    """``--lake-root`` → ``$BRUTEX_LAKE_ROOT`` → ``~/.brutex/lake`` (via config.paths)."""
     if lake_root is not None:
         return lake_root
-    env_lake = os.environ.get("BRUTEX_LAKE_ROOT")
-    return Path(env_lake) if env_lake else Path.home() / ".brutex" / "lake"
+    return resolve_lake_root()
 
 
 def _build_live_fetcher(sink: Any) -> tuple[Any, Any]:  # pragma: no cover — live Groww creds + SDK
@@ -1663,6 +1678,74 @@ def cmd_fetch(
     return EXIT_OK if report.failed == 0 else EXIT_INTERNAL_ERROR
 
 
+def cmd_wipe(*, execute: bool, assume_yes: bool) -> int:  # pragma: no cover — interactive + real FS
+    """Delete all persisted BruteX data — dry-run by default, typed-confirm to execute.
+
+    Z+ defensive layers (DEC-DATA-WIPE-001): DETECT (dry-run preview), PREVENT
+    (live-dashboard guard + strict-allowlist refusal + typed ``WIPE`` confirm),
+    VERIFY (:func:`brutex.wipe.assert_safe` re-checks every target at delete
+    time), RECONCILE/RECOVER (``WipeReport`` removed/absent/failed,
+    continue-past-failure), AUDIT (the plan is printed + structlog-logged before
+    any deletion). The pure decision core is the 100%-tested :mod:`brutex.wipe`.
+    """
+    import structlog
+
+    from brutex.config.runtime import is_pid_alive, read_runtime_file
+    from brutex.wipe import execute_wipe, server_is_running, wipe_targets
+
+    log = structlog.get_logger("brutex.wipe")
+    home = Path.home()
+    cwd = Path.cwd()
+    targets = wipe_targets(os.environ, home=home, cwd=cwd)
+
+    # PREVENT: never wipe an open lake out from under a live dashboard.
+    if server_is_running(read_runtime_file(), pid_alive=is_pid_alive):
+        print(
+            "[brutex] a BruteX dashboard is RUNNING — stop it first, then re-run "
+            "`brutex wipe` (it holds the lake open on disk).",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+
+    # DETECT + AUDIT: show + log the plan before touching anything.
+    preview = execute_wipe(targets, home=home, cwd=cwd, dry_run=True)
+    print("[brutex] wipe plan (existing targets will be deleted):", file=sys.stderr)
+    for path in preview.removed:
+        print(f"  - DELETE   {path}", file=sys.stderr)
+    for path in preview.absent:
+        print(f"  - (absent) {path}", file=sys.stderr)
+    for path, reason in preview.failed:
+        print(f"  - REFUSED  {path}  ({reason})", file=sys.stderr)
+    log.info("wipe.plan", to_delete=[str(p) for p in preview.removed], execute=execute)
+
+    if not execute:
+        print(
+            "[brutex] DRY-RUN — nothing deleted. Re-run with `--execute` to delete.",
+            file=sys.stderr,
+        )
+        return EXIT_OK
+
+    # PREVENT: irreversible → require a typed confirmation on an interactive TTY.
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            print("[brutex] refusing to wipe non-interactively without --yes.", file=sys.stderr)
+            return EXIT_USER_ERROR
+        if input("Type WIPE to permanently delete the above: ").strip() != "WIPE":
+            print("[brutex] aborted (confirmation was not 'WIPE').", file=sys.stderr)
+            return EXIT_USER_ERROR
+
+    report = execute_wipe(targets, home=home, cwd=cwd, dry_run=False)
+    log.info(
+        "wipe.done",
+        removed=[str(p) for p in report.removed],
+        failed=[str(p) for p, _ in report.failed],
+    )
+    print(f"[brutex] wiped {len(report.removed)} target(s).", file=sys.stderr)
+    for path, reason in report.failed:
+        print(f"[brutex] FAILED {path}: {reason}", file=sys.stderr)
+    return EXIT_INTERNAL_ERROR if report.failed else EXIT_OK
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Main dispatcher
 # ────────────────────────────────────────────────────────────────────────
@@ -1728,6 +1811,8 @@ def main(argv: list[str] | None = None) -> int:
             poll_interval=args.poll_interval,
             ticks=args.ticks,
         )
+    if args.command == "wipe":
+        return cmd_wipe(execute=args.execute, assume_yes=args.yes)
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits
 

@@ -1,7 +1,7 @@
 # BruteX — development Makefile
 # Every target maps directly to a CI gate in REQUIREMENTS.md §17.
 
-.PHONY: help setup install run preflight fmt lint type test test-unit test-cov audit bench clean all
+.PHONY: help setup install run preflight fmt lint type test test-unit test-cov audit bench clean wipe wipe-dry all
 
 help:
 	@echo "BruteX development targets:"
@@ -105,3 +105,15 @@ all: fmt lint type test-cov audit
 clean:
 	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage htmlcov build dist *.egg-info
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+# Total-wipe of ALL persisted BruteX data — the lake (instruments / expiries /
+# contracts), saved credentials, cached token, audit log, and run logs under
+# ~/.brutex (+ any BRUTEX_* override). This is what deleting the repo folder
+# does NOT do (data lives in the home dir, not the repo). `make wipe-dry`
+# PREVIEWS the plan; `make wipe` deletes after a typed-WIPE confirmation
+# (refuses while a dashboard is running). DEC-DATA-WIPE-001.
+wipe-dry:
+	$(VPY) -m brutex wipe
+
+wipe:
+	$(VPY) -m brutex wipe --execute
