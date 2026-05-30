@@ -521,6 +521,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
                 self._buf = ""
 
             def write(self, data: str) -> int:
+                """Write to the real stream + mirror each complete line to the file log."""
                 self._stream.write(data)
                 self._buf += data
                 while "\n" in self._buf:
@@ -530,13 +531,16 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
                 return len(data)
 
             def flush(self) -> None:
+                """Flush the underlying stream (the file handler flushes itself)."""
                 self._stream.flush()
 
             def isatty(self) -> bool:
+                """Proxy ``isatty`` so colour/TTY detection still sees the real terminal."""
                 return bool(getattr(self._stream, "isatty", lambda: False)())
 
             def fileno(self) -> int:
-                return self._stream.fileno()
+                """Proxy ``fileno`` so libraries that need the real fd keep working."""
+                return int(self._stream.fileno())
 
         sys.stdout = _StdoutMirror(sys.stdout)
 
