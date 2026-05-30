@@ -778,7 +778,7 @@ def _run_dry_run_universe_ingest(  # pragma: no cover — needs DuckDB store + f
 
 
 def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + DuckDB
-    lake_root: Path, *, years: list[int], store: Any = None
+    lake_root: Path, *, years: list[int], store: Any = None, resume: bool = False
 ) -> Any:
     """Run the universe ingest against live Groww (the real instrument/expiry/contract SDK).
 
@@ -789,16 +789,40 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
     DEC-AUTO-UNIVERSE-001) it is REUSED and NOT closed — this shares the single
     DuckDB writer the dashboard already holds, so the on-run auto-pull never
     opens a second read-write handle to the same file.
+
+    **Lake scope (DEC-COVERAGE-LEDGER-001 Part A):** the per-underlying
+    expiries/contracts fan-out now covers ALL lake underlyings — every index
+    PLUS every F&O-eligible single stock (``list_index_equity_instruments`` →
+    :func:`brutex.universe.derive_lake_underlyings`) per DEC-P0-063 — not just
+    the ~25 indices. The brute-force ENGINE is unchanged (still 3 indices).
+
+    **Completeness ledger + resume (Parts C/D):** each ``(underlying, year)``
+    pull is wrapped so one underlying's failure records a ``failed`` coverage
+    cell and continues instead of aborting the rest; on success a
+    ``complete`` / ``pending`` cell (status from
+    :func:`brutex.data.coverage_ledger.classify_cell`) is recorded. When
+    ``resume`` is ``True`` only the incomplete cells
+    (:func:`brutex.data.coverage_ledger.cells_to_repull` over the reconciled
+    ledger) are re-pulled — a recoverable, idempotent re-run.
     """
+    from datetime import UTC, datetime
+
     from growwapi.groww.exceptions import BaseGrowwException
 
     from brutex.adapters.groww.auth import GrowwAuth
     from brutex.adapters.groww.contracts import ContractFetcher, ContractMeta
     from brutex.adapters.groww.expiries import ExpiryFetcher
     from brutex.adapters.groww.instruments import InstrumentMasterFetcher
-    from brutex.adapters.groww.universe_ingest import run_universe_ingest
+    from brutex.adapters.groww.universe_ingest import UniverseIngestReport
+    from brutex.data.coverage_ledger import (
+        CoverageRecord,
+        cells_to_repull,
+        classify_cell,
+        reconcile_coverage,
+    )
     from brutex.data.instrument_store import InstrumentStore
     from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
+    from brutex.universe import derive_lake_underlyings
 
     owns_store = store is None
     if store is None:
@@ -828,12 +852,72 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
             store=store,
             metadata_lookup=_meta_lookup,
         )
-        underlyings = [
-            (inst.underlying_symbol or inst.trading_symbol, inst.exchange.value)
-            for inst in store.list_indices()
-        ]
-        return run_universe_ingest(
-            instrument_fetcher, expiry_fetcher, contract_fetcher, underlyings, years
+
+        # Refresh the master first (the contract fetcher's metadata enrichment
+        # depends on a fresh master), then derive the FULL lake underlying set.
+        inst_result = instrument_fetcher.refresh()
+        underlyings = derive_lake_underlyings(store.list_index_equity_instruments())
+
+        # Resume: re-pull only the incomplete cells per the persisted ledger.
+        run_id = datetime.now(UTC).strftime("universe-%Y%m%dT%H%M%SZ")
+        if resume:
+            summary = reconcile_coverage(underlyings, years, store.list_coverage())
+            todo = list(cells_to_repull(summary))
+        else:
+            todo = [(ex, sym, yr) for sym, ex in underlyings for yr in years]
+
+        underlying_count = len({(sym, ex) for ex, sym, _ in todo})
+        expiry_total = 0
+        contract_total = 0
+        for exchange, underlying, year in todo:
+            fetched_at = datetime.now(UTC)
+            try:
+                expiry_result = expiry_fetcher.fetch(underlying, exchange, year=year)
+                cell_expiries = len(expiry_result.records)
+                cell_contracts = 0
+                for record in expiry_result.records:
+                    contract_result = contract_fetcher.fetch(
+                        underlying, exchange, record.expiry_date
+                    )
+                    cell_contracts += len(contract_result.records)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                # One underlying's failure must not abort the rest — record a
+                # ``failed`` cell with the error and continue (recoverable).
+                store.upsert_coverage(
+                    CoverageRecord(
+                        exchange=exchange,
+                        underlying_symbol=underlying,
+                        year=year,
+                        expiries_pulled=0,
+                        contracts_pulled=0,
+                        status=classify_cell(0, 0, str(exc)),
+                        last_run_id=run_id,
+                        last_fetched_at=fetched_at,
+                        error_message=str(exc),
+                    )
+                )
+                continue
+            expiry_total += cell_expiries
+            contract_total += cell_contracts
+            store.upsert_coverage(
+                CoverageRecord(
+                    exchange=exchange,
+                    underlying_symbol=underlying,
+                    year=year,
+                    expiries_pulled=cell_expiries,
+                    contracts_pulled=cell_contracts,
+                    status=classify_cell(cell_expiries, cell_contracts, None),
+                    last_run_id=run_id,
+                    last_fetched_at=fetched_at,
+                    error_message=None,
+                )
+            )
+
+        return UniverseIngestReport(
+            instruments=inst_result,
+            underlyings=underlying_count,
+            expiries=expiry_total,
+            contracts=contract_total,
         )
     finally:
         if owns_store:

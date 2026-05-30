@@ -44,6 +44,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from brutex.dashboard.coverage_view import build_coverage_payload
 from brutex.dashboard.db_view import sample_rows, table_summary
 from brutex.dashboard.pull_controller import groww_creds_present, pull_candles
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
@@ -52,6 +53,7 @@ from brutex.orchestrator.pipeline import (
     PipelineEventKind,
 )
 from brutex.orchestrator.state import IngestPhase
+from brutex.universe import derive_lake_underlyings
 
 
 class CredentialsIn(BaseModel):
@@ -744,6 +746,55 @@ def build_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(report.to_dict())
 
+    # ── Completeness ledger / Coverage (DEC-COVERAGE-LEDGER-001) ────
+
+    @app.get("/api/v1/coverage")
+    async def api_coverage() -> JSONResponse:
+        """GET /api/v1/coverage — headline + per-cell coverage rows.
+
+        Thin wrapper over
+        :func:`brutex.dashboard.coverage_view.build_coverage_payload`. The
+        expected universe×years grid is derived from the lake's IDX + EQ
+        candidates (:func:`brutex.universe.derive_lake_underlyings`) × the
+        Groww F&O history window (2020 → current year); the actual rows come
+        from ``store.list_coverage()`` (indexed read). All projection logic
+        lives in the (coverage-tested) ``coverage_view`` module.
+        """
+        store = _require_store()
+        # derive_lake_underlyings yields (underlying, exchange) (the order the
+        # universe ingest fan-out wants); the coverage reconciler / view want
+        # (exchange, underlying) — swap so the expected grid keys line up with
+        # the persisted ledger's (exchange, underlying_symbol, year) PK.
+        expected = [
+            (exchange, underlying)
+            for underlying, exchange in derive_lake_underlyings(
+                store.list_index_equity_instruments()
+            )
+        ]
+        years = _coverage_years()
+        return JSONResponse(build_coverage_payload(store.list_coverage(), expected, years))
+
+    @app.post("/api/v1/coverage/repull")
+    async def api_coverage_repull() -> JSONResponse:
+        """POST /api/v1/coverage/repull — kick a resumable re-pull of the gaps.
+
+        Launches the resumable universe re-pull (only the incomplete cells,
+        per the persisted ledger) in a BACKGROUND daemon thread, mirroring the
+        ``cmd_dashboard`` auto-pull pattern (DEC-AUTO-UNIVERSE-001) so a long
+        live pull never blocks the request. Best-effort: when creds are
+        absent or the live SDK can't be reached, the thread records the
+        failure into the ledger and exits — the endpoint itself never crashes
+        and always returns ``{"started": bool}``.
+        """
+        store = _require_store()
+        started = _start_coverage_repull(store)
+        return JSONResponse({"started": started})
+
+    @app.get("/coverage", response_class=HTMLResponse)
+    async def coverage_page() -> str:
+        """GET /coverage — the completeness-ledger page (DEC-COVERAGE-LEDGER-001)."""
+        return _render_coverage_html()
+
     # ── Credentials store (DEC-CREDENTIALS-STORE-001) ───────────────
     # CredentialsIn is module-scope (see top of file) so FastAPI resolves
     # it as a request body, not a query param (DEC-CREDS-422-FIX-001).
@@ -1124,6 +1175,67 @@ def _load_universe_template() -> str:
 def _render_universe_html() -> str:
     """Return the F&O Universe Explorer page HTML (DEC-UNIVERSE-DASHBOARD-001)."""
     return _load_universe_template()
+
+
+_COVERAGE_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "coverage.html"
+_COVERAGE_TEMPLATE_CACHE: str | None = None
+
+
+def _load_coverage_template() -> str:
+    """Load + cache the completeness-ledger page template (DEC-COVERAGE-LEDGER-001).
+
+    Ships as a package-relative resource at
+    ``brutex/dashboard/templates/coverage.html``. The page polls
+    ``/api/v1/coverage`` for the headline + per-cell table and POSTs
+    ``/api/v1/coverage/repull`` from the "Re-pull gaps" button. Loaded once,
+    then served verbatim.
+    """
+    global _COVERAGE_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _COVERAGE_TEMPLATE_CACHE is None:
+        _COVERAGE_TEMPLATE_CACHE = _COVERAGE_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _COVERAGE_TEMPLATE_CACHE
+
+
+def _render_coverage_html() -> str:
+    """Return the completeness-ledger page HTML (DEC-COVERAGE-LEDGER-001)."""
+    return _load_coverage_template()
+
+
+def _coverage_years() -> list[int]:
+    """Return the expected coverage years — Groww serves F&O from 2020 → now."""
+    return list(range(2020, datetime.now(UTC).year + 1))
+
+
+def _start_coverage_repull(store: Any) -> bool:
+    """Launch the resumable universe re-pull in a background daemon thread.
+
+    Mirrors ``cmd_dashboard``'s auto-pull thread (DEC-AUTO-UNIVERSE-001): the
+    live Groww SDK glue lives in :func:`brutex.cli._run_live_universe_ingest`
+    (``# pragma: no cover``) which, with ``resume=True``, re-pulls ONLY the
+    incomplete ledger cells and records each cell's outcome. Best-effort:
+    any failure is swallowed (logged via the thread body's own print), so the
+    request handler never crashes. Returns whether the thread was started.
+    """
+    store_path = getattr(store, "path", None)
+    if not isinstance(store_path, Path):  # pragma: no cover — needs a wired store path
+        return False
+
+    def _repull() -> None:  # pragma: no cover — live SDK + network + thread
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+
+        from brutex.cli import _run_live_universe_ingest
+
+        try:
+            year = _dt.now(_UTC).year
+            _run_live_universe_ingest(store_path.parent, years=[year], store=store, resume=True)
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Best-effort background pull — never crash the server; the ledger
+            # itself records per-cell failures inside the ingest.
+            return
+
+    threading.Thread(target=_repull, name="brutex-coverage-repull", daemon=True).start()
+    return True
 
 
 _CREDENTIALS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "credentials.html"

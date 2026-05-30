@@ -895,6 +895,22 @@ jobs:
           else
             echo "(brutex.adapters.groww.catalog test file not present yet — gate inactive)"
           fi
+          # DEC-COVERAGE-LEDGER-001 (entry #165): strict gates on the two pure
+          # completeness-ledger modules. Both are import-light (brutex.data /
+          # brutex.dashboard package inits do NOT pull in fastbloom_rs), so they
+          # are standalone-gateable — unlike any brutex.orchestrator.* submodule,
+          # which is why coverage_ledger lives under brutex.data, not
+          # brutex.orchestrator (see the module docstring + MIGRATION entry #165).
+          if compgen -G "tests/unit/test_coverage_ledger.py" > /dev/null; then
+            pytest --cov=brutex.data.coverage_ledger --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_coverage_ledger.py
+          else
+            echo "(brutex.data.coverage_ledger test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_coverage_view.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.coverage_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_coverage_view.py
+          else
+            echo "(brutex.dashboard.coverage_view test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
