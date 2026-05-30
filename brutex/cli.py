@@ -892,7 +892,7 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
     from growwapi.groww.exceptions import BaseGrowwException
 
     from brutex.adapters.groww.auth import GrowwAuth
-    from brutex.adapters.groww.contracts import ContractFetcher, ContractMeta
+    from brutex.adapters.groww.contracts import ContractFetcher, store_metadata_lookup
     from brutex.adapters.groww.expiries import ExpiryFetcher
     from brutex.adapters.groww.instruments import InstrumentMasterFetcher
     from brutex.adapters.groww.universe_ingest import UniverseIngestReport
@@ -920,22 +920,19 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
             sdk=sdk, bucket=bucket, base_exception=BaseGrowwException, store=store
         )
 
-        def _meta_lookup(symbol: str) -> ContractMeta | None:
-            inst = store.get(symbol)
-            if inst is None:
-                return None
-            return ContractMeta(
-                lot_size=inst.lot_size,
-                tick_size=inst.tick_size,
-                freeze_quantity=inst.freeze_quantity,
-            )
-
         contract_fetcher = ContractFetcher(
             sdk=sdk,
             bucket=bucket,
             base_exception=BaseGrowwException,
             store=store,
-            metadata_lookup=_meta_lookup,
+            # DEC-INSTRUMENT-UNIVERSE-FAST-001: the lean store persists only the
+            # underlyings, NOT the FUT/CE/PE legs — so a leg's economics are
+            # inherited from its UNDERLYING's row. store_metadata_lookup reduces
+            # the contract symbol to its underlying (underlying_symbol_of) before
+            # the O(1) point lookup. The prior inline lookup queried the FULL leg
+            # symbol, which is never in the lean store, so EVERY contract was
+            # dropped as skipped_no_metadata → contracts=0 on every cell.
+            metadata_lookup=store_metadata_lookup(store),
         )
 
         def _is_auth_error(exc: BaseException) -> bool:
@@ -966,14 +963,29 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
             cell_contracts = 0
             for record in expiry_result.records:
                 contract_result = contract_fetcher.fetch(underlying, exchange, record.expiry_date)
-                cell_contracts += len(contract_result.records)
+                persisted = len(contract_result.records)
+                raw_count = (
+                    persisted
+                    + contract_result.skipped_malformed
+                    + contract_result.skipped_no_metadata
+                )
+                cell_contracts += persisted
+                # Log the WHOLE truth, not just the persisted count: `raw` is how
+                # many symbols Groww returned, and the two `skipped_*` fields say
+                # exactly where any shortfall went (malformed symbol vs. no
+                # underlying metadata). A 0 with raw>0 means a drop, not an empty
+                # vendor response — so the operator can tell the two apart from
+                # the log alone (DEC-RUN-LOG-CAPTURE-001).
                 log.info(
                     "universe.contracts.pulled",
                     underlying=underlying,
                     exchange=exchange,
                     year=year,
                     expiry=str(record.expiry_date),
-                    contracts=len(contract_result.records),
+                    contracts=persisted,
+                    raw=raw_count,
+                    skipped_no_metadata=contract_result.skipped_no_metadata,
+                    skipped_malformed=contract_result.skipped_malformed,
                 )
             return cell_expiries, cell_contracts
 
