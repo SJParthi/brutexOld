@@ -1092,7 +1092,7 @@ class TestThreadSafety:
                 csv_source_sha256=_csv_hash("seed"),
             )
 
-            errors: list[BaseException] = []
+            errors: list[Exception] = []
             stop = threading.Event()
 
             def _writer() -> None:
@@ -1109,7 +1109,7 @@ class TestThreadSafety:
                         )
                         s.prune_to_latest_snapshot()
                         day += 1
-                except BaseException as exc:
+                except Exception as exc:
                     errors.append(exc)
 
             def _reader() -> None:
@@ -1122,7 +1122,7 @@ class TestThreadSafety:
                             assert inst.vendor_symbol
                         s.has_placeholder_stock_economics()
                         s.list_coverage()
-                except BaseException as exc:
+                except Exception as exc:
                     errors.append(exc)
 
             writer = threading.Thread(target=_writer, name="writer")
