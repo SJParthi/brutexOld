@@ -894,6 +894,7 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
     from growwapi.groww.exceptions import BaseGrowwException
 
     from brutex.adapters.groww.auth import GrowwAuth
+    from brutex.adapters.groww.client import VendorSdkError
     from brutex.adapters.groww.contracts import (
         ContractFetcher,
         ContractFetchResult,
@@ -1103,17 +1104,13 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
                 )
                 try:
                     try:
-                        cell_expiries, cell_contracts = _pull_cell(
-                            exchange, underlying, year, pool
-                        )
+                        cell_expiries, cell_contracts = _pull_cell(exchange, underlying, year, pool)
                     except Exception as exc:  # pylint: disable=broad-exception-caught
                         # Token expired mid-pull → re-mint once + retry this cell.
                         if not _is_auth_error(exc):
                             raise
                         _remint()
-                        cell_expiries, cell_contracts = _pull_cell(
-                            exchange, underlying, year, pool
-                        )
+                        cell_expiries, cell_contracts = _pull_cell(exchange, underlying, year, pool)
                 except Exception as exc:  # pylint: disable=broad-exception-caught
                     # One cell's failure must not abort the rest — record a
                     # ``failed`` cell with the error and continue (recoverable).
