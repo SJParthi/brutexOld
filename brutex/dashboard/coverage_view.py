@@ -132,18 +132,20 @@ def coverage_headline(summary: CoverageSummary) -> dict[str, Any]:
         NOT an error. The two added fields name this plainly so the
         dashboard can lead with progress instead of a scary gap count:
 
-        * ``attempted`` = ``complete + failed + pending`` — cells that have
-          a persisted ledger row (the pull has touched them). This is the
-          honest "how far has the run got" numerator.
+        * ``attempted`` = ``complete + failed + pending + expiries_only`` —
+          cells that have a persisted ledger row (the pull has touched them).
+          This is the honest "how far has the run got" numerator.
         * ``not_pulled`` = ``missing`` — cells with no row yet (queued /
           in-progress), an alias named so the UI never implies an error.
 
         ``failed`` remains the ONLY count that means a real, recorded error
         (per :func:`~brutex.data.coverage_ledger.classify_cell`); a cell
         that ran and found zero expiries is ``pending`` (legitimately
-        derivative-free that year), not a failure.
+        derivative-free that year), not a failure. ``expiries_only`` (Phase 1
+        done, contracts pending — DEC-UNIVERSE-PULL-PHASED-001) is reported
+        separately so a 0-contract F&O cell is NEVER counted as ``complete``.
     """
-    attempted = summary.complete + summary.failed + summary.pending
+    attempted = summary.complete + summary.failed + summary.pending + summary.expiries_only
     return {
         "complete": summary.complete,
         "total": summary.total_expected,
@@ -152,6 +154,7 @@ def coverage_headline(summary: CoverageSummary) -> dict[str, Any]:
         "incomplete": summary.incomplete,
         "failed": summary.failed,
         "pending": summary.pending,
+        "expiries_only": summary.expiries_only,
         "missing": summary.missing,
         "percent": round(summary.complete_fraction * 100),
         "is_complete": summary.is_complete,

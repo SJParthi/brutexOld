@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from brutex.data.coverage_ledger import (
     COVERAGE_STATUSES,
     STATUS_COMPLETE,
+    STATUS_EXPIRIES_ONLY,
     STATUS_FAILED,
     STATUS_PENDING,
     CoverageRecord,
@@ -51,7 +52,12 @@ def _record(
 
 class TestConstants:
     def test_statuses_tuple_ordering(self) -> None:
-        assert COVERAGE_STATUSES == (STATUS_COMPLETE, STATUS_FAILED, STATUS_PENDING)
+        assert COVERAGE_STATUSES == (
+            STATUS_COMPLETE,
+            STATUS_EXPIRIES_ONLY,
+            STATUS_FAILED,
+            STATUS_PENDING,
+        )
 
     def test_status_string_values(self) -> None:
         assert STATUS_COMPLETE == "complete"
@@ -184,6 +190,24 @@ class TestReconcileCoverage:
         assert summary.pending == 1
         assert summary.missing == 0
         assert summary.to_repull == (("NSE", "B", 2024), ("NSE", "C", 2024))
+
+    def test_expiries_only_counted_separately_and_not_repulled(self) -> None:
+        # DEC-UNIVERSE-PULL-PHASED-001: an expiries_only cell (Phase 1 done,
+        # contracts pending) is NOT complete, NOT re-pulled by a Phase-1 resume
+        # (its expiry calendar is captured), and counted in its own bucket.
+        expected = [("NSE", "A"), ("NSE", "B")]
+        years = [2024]
+        actual = [
+            _record(underlying="A", year=2024),  # complete
+            _record(underlying="B", year=2024, status="expiries_only"),
+        ]
+        summary = reconcile_coverage(expected, years, actual)
+        assert summary.complete == 1
+        assert summary.expiries_only == 1
+        assert summary.pending == 0
+        assert summary.failed == 0
+        assert summary.to_repull == ()  # expiries_only is NOT re-pulled
+        assert summary.is_complete is False  # but the universe isn't "complete"
 
     def test_extra_actual_rows_outside_expected_are_ignored(self) -> None:
         expected = [("NSE", "NIFTY")]

@@ -270,10 +270,16 @@ def contract_jobs_to_pull(
 
 
 #: Coverage statuses that mean a Phase-1 cell reached a FINAL state for its
-#: year — its expiry calendar will not change. ``failed`` is deliberately
+#: year — its EXPIRY calendar will not change. ``complete`` (combined pull) and
+#: ``expiries_only`` (Phase-1-only — expiries done, contracts a separate phase)
+#: both mean the expiries are captured; ``pending`` means it ran + found zero
+#: expiries (a derivative-free year, immutable). ``failed`` is deliberately
 #: EXCLUDED so a previously-errored cell is always re-attempted; ``missing`` is
-#: not a persisted status (a never-attempted cell has no row at all).
-_SETTLED_STATUSES: frozenset[str] = frozenset({"complete", "pending"})
+#: not a persisted status (a never-attempted cell has no row at all). NOTE this
+#: is the PHASE-1 (expiry) settled set — a settled past year is skipped on a
+#: re-click of "Fetch all expiries"; contract completeness is Phase 2's own
+#: skip (``settled_contract_jobs``), independent of this.
+_SETTLED_STATUSES: frozenset[str] = frozenset({"complete", "expiries_only", "pending"})
 
 
 def settled_expiry_cells(

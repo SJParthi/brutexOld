@@ -1216,7 +1216,12 @@ def _run_expiries_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB
 
     from brutex.adapters.groww.client import VendorSdkError
     from brutex.adapters.groww.instruments import InstrumentMasterFetcher
-    from brutex.data.coverage_ledger import CoverageRecord, classify_cell
+    from brutex.data.coverage_ledger import (
+        STATUS_EXPIRIES_ONLY,
+        STATUS_PENDING,
+        CoverageRecord,
+        classify_cell,
+    )
     from brutex.data.instrument_store import InstrumentStore
     from brutex.orchestrator.parallel import PoolRunParallel
     from brutex.orchestrator.retry import retry_call
@@ -1243,7 +1248,12 @@ def _run_expiries_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB
             (r.exchange, r.underlying_symbol, r.year, r.status) for r in store.list_coverage()
         )
         current_year = datetime.now(UTC).year
-        all_cells = phase1_cells(underlyings, years)
+        # derive_lake_underlyings yields (underlying, exchange); phase1_cells
+        # unpacks (exchange, underlying) — swap so the cell tuple is
+        # (exchange, underlying, year), matching the coverage-ledger PK + the
+        # skip-set built from list_coverage above. (The legacy pull did the same
+        # swap inline at `[(ex, sym, yr) for sym, ex in underlyings]`.)
+        all_cells = phase1_cells(((ex, sym) for sym, ex in underlyings), years)
         todo = cells_to_pull(all_cells, settled=settled, current_year=current_year)
         run_id = datetime.now(UTC).strftime("expiries-%Y%m%dT%H%M%SZ")
         log.info(
@@ -1270,6 +1280,13 @@ def _run_expiries_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB
             if outcome.ok:
                 n = outcome.result or 0
                 discovered += n
+                # Phase-1 honesty (DEC-UNIVERSE-PULL-PHASED-001): a cell with
+                # expiries is NOT "complete" — its contracts are a separate
+                # phase. Mark it ``expiries_only`` so /coverage never shows a
+                # 0-contract F&O cell as done. A cell with zero expiries is a
+                # genuinely derivative-free underlying for that year → ``pending``
+                # (nothing more to pull), matching classify_cell's rule.
+                status = STATUS_EXPIRIES_ONLY if n > 0 else STATUS_PENDING
                 store.upsert_coverage(
                     CoverageRecord(
                         exchange=exchange,
@@ -1277,7 +1294,7 @@ def _run_expiries_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB
                         year=year,
                         expiries_pulled=n,
                         contracts_pulled=0,
-                        status=classify_cell(n, 0, None),
+                        status=status,
                         last_run_id=run_id,
                         last_fetched_at=fetched_at,
                         error_message=None,
@@ -1333,6 +1350,7 @@ def _run_contracts_phase(  # pragma: no cover — live Groww creds + SDK + DuckD
     import structlog
 
     from brutex.adapters.groww.client import VendorSdkError
+    from brutex.data.coverage_ledger import STATUS_COMPLETE, CoverageRecord
     from brutex.data.instrument_store import InstrumentStore
     from brutex.orchestrator.parallel import PoolRunParallel
     from brutex.orchestrator.retry import retry_call
@@ -1351,10 +1369,13 @@ def _run_contracts_phase(  # pragma: no cover — live Groww creds + SDK + DuckD
 
         # Phase 2 reads ONLY persisted expiries — the ordering guarantee across
         # clicks. Distinct (exchange, underlying, expiry) is the job universe.
+        # Map each job → its coverage cell's year (pulled_year) so a cell can be
+        # upgraded expiries_only → complete once its contracts are in.
         expiry_rows = store.list_expiries()
-        all_jobs: list[ContractJob] = sorted(
-            {(r.exchange, r.underlying_symbol, r.expiry_date) for r in expiry_rows}
-        )
+        job_year: dict[ContractJob, int] = {
+            (r.exchange, r.underlying_symbol, r.expiry_date): r.pulled_year for r in expiry_rows
+        }
+        all_jobs: list[ContractJob] = sorted(job_year)
         if not all_jobs:
             log.warning("universe.contracts.no_expiries")
             return {
@@ -1390,21 +1411,54 @@ def _run_contracts_phase(  # pragma: no cover — live Groww creds + SDK + DuckD
 
         persisted = 0
         failures = 0
+        # Cells (exchange, underlying, year) whose contracts were pulled OK this
+        # run — upgraded expiries_only → complete after the loop so /coverage
+        # only reads "complete" once BOTH phases are done for the cell.
+        completed_cells: set[tuple[str, str, int]] = set()
         for outcome in PoolRunParallel()(_fetch, todo):
+            exchange, underlying, _expiry = outcome.item
             if outcome.ok:
                 n = outcome.result or 0
                 persisted += n
+                completed_cells.add((exchange, underlying, job_year[outcome.item]))
                 log.info("universe.contracts.pulled", job=outcome.item, contracts=n)
             else:
                 failures += 1
                 log.warning(
                     "universe.contracts.job.failed", job=outcome.item, error=str(outcome.exc)
                 )
+
+        # Upgrade each touched cell expiries_only → complete (idempotent upsert;
+        # preserves the cell's expiries_pulled count, sets a contracts marker).
+        upgraded = 0
+        if completed_cells:
+            cov_by_cell = {
+                (c.exchange, c.underlying_symbol, c.year): c for c in store.list_coverage()
+            }
+            for cell in completed_cells:
+                cov = cov_by_cell.get(cell)
+                if cov is None or cov.status == STATUS_COMPLETE:
+                    continue
+                store.upsert_coverage(
+                    CoverageRecord(
+                        exchange=cov.exchange,
+                        underlying_symbol=cov.underlying_symbol,
+                        year=cov.year,
+                        expiries_pulled=cov.expiries_pulled,
+                        contracts_pulled=max(cov.contracts_pulled, 1),
+                        status=STATUS_COMPLETE,
+                        last_run_id=run_id,
+                        last_fetched_at=datetime.now(UTC),
+                        error_message=None,
+                    )
+                )
+                upgraded += 1
         summary = {
             "jobs_total": len(all_jobs),
             "jobs_pulled": len(todo),
             "jobs_skipped": len(all_jobs) - len(todo),
             "contracts_persisted": persisted,
+            "cells_completed": upgraded,
             "failures": failures,
             "needs_expiries_first": 0,
         }
