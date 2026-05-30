@@ -9,10 +9,7 @@ auto-pull (DEC-AUTO-UNIVERSE-001) across all four
 from __future__ import annotations
 
 import pytest
-from brutex.dashboard.auto_pull import (
-    should_auto_pull_universe,
-    should_reload_instrument_master,
-)
+from brutex.dashboard.auto_pull import should_reload_instrument_master
 
 
 @pytest.mark.parametrize(
@@ -67,28 +64,6 @@ def test_should_reload_defaults_stale_economics_false() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("credentials_present", "instrument_total", "expected"),
-    [
-        # Both preconditions hold → pull.
-        (True, 1, True),
-        (True, 12345, True),
-        # Credentials present but the instrument master is empty → skip.
-        (True, 0, False),
-        # Instruments loaded but no credentials → skip.
-        (False, 1, False),
-        # Neither precondition holds → skip.
-        (False, 0, False),
-    ],
-)
-def test_should_auto_pull_universe(
-    credentials_present: bool, instrument_total: int, expected: bool
-) -> None:
-    """The pull runs iff credentials are present AND instruments are loaded."""
-    assert (
-        should_auto_pull_universe(
-            credentials_present=credentials_present,
-            instrument_total=instrument_total,
-        )
-        is expected
-    )
+# NOTE: test_should_auto_pull_universe removed alongside the function in
+# DEC-UNIVERSE-PULL-PHASED-001 (Stage 2) — the startup auto-pull is retired in
+# favour of the two manual /universe buttons, so the gate has no caller.

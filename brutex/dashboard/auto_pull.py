@@ -82,29 +82,10 @@ def should_reload_instrument_master(
     return lake_is_empty or indices_missing or legs_present or stale_economics
 
 
-def should_auto_pull_universe(*, credentials_present: bool, instrument_total: int) -> bool:
-    """Return whether the background expiries/contracts pull should run.
-
-    The auto-pull is launched only when **both** preconditions hold:
-
-    * ``credentials_present`` — Groww auth is configured (env vars or the
-      saved 0600 credentials file), since expiries/contracts go through
-      the authenticated SDK (CLAUDE.md §6). The keyless instrument
-      master does not satisfy this.
-    * ``instrument_total > 0`` — the instrument master is already loaded,
-      so there are underlyings to fan out expiries/contracts for.
-
-    Parameters
-    ----------
-    credentials_present
-        ``True`` iff Groww credentials resolve from the environment or
-        the saved credentials file.
-    instrument_total
-        Total instruments currently in the lake snapshot.
-
-    Returns
-    -------
-    bool
-        ``True`` iff the background universe pull should be launched.
-    """
-    return credentials_present and instrument_total > 0
+# NOTE: ``should_auto_pull_universe`` was removed in DEC-UNIVERSE-PULL-PHASED-001
+# (Stage 2) when the startup auto-pull was retired in favour of the two manual
+# /universe buttons ("Fetch all expiries" / "Fetch all contracts"). The pull is
+# now operator-triggered, so the auto-pull gate has no caller; it was deleted
+# rather than left as tested-but-unreachable code (Golden Rule #10 / §12).
+# ``should_reload_instrument_master`` above is unaffected — the keyless master
+# still auto-loads on run.

@@ -1402,13 +1402,27 @@ def _start_phase(name: str, store: Any, worker: Callable[[Path], object]) -> str
     def _run() -> None:  # pragma: no cover — live SDK + network + thread
         try:
             worker(store_path.parent)
-        except Exception:  # pylint: disable=broad-exception-caught
-            return  # best-effort; per-item failures are already recorded
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # NEVER silent (DEC-PULL-ERROR-VISIBILITY-001): a setup/creds-runtime
+            # failure BEFORE the per-item loop (bad token mint, master refresh)
+            # would otherwise vanish — the operator clicks, the button re-enables,
+            # and /logs shows nothing. Log the full reason to the JSONL file.
+            _LOG.exception(
+                "universe.phase.failed", phase=name, error_type=type(exc).__name__, error=str(exc)
+            )
         finally:
             with _PHASE_LOCK:
                 _PHASE_RUNNING[name] = False
 
-    threading.Thread(target=_run, name=f"brutex-phase-{name}", daemon=True).start()
+    try:
+        threading.Thread(target=_run, name=f"brutex-phase-{name}", daemon=True).start()
+    except RuntimeError:  # pragma: no cover — OS thread exhaustion
+        # If the thread can't even start, clear the flag we just set so the
+        # button isn't latched disabled forever (the _run finally never fires).
+        with _PHASE_LOCK:
+            _PHASE_RUNNING[name] = False
+        _LOG.exception("universe.phase.thread_start_failed", phase=name)
+        return "no_store"
     return "started"
 
 
