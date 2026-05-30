@@ -197,6 +197,12 @@
     <button class="loadbtn" id="loadbtn" title="Download the public Groww instrument master — no keys needed">⟳ Load instruments</button>
     <button class="pullbtn" id="pullbtn" disabled>⤓ Pull spot — all timeframes</button>
   </div>
+  <div class="pullbar" style="border-top:1px solid var(--line); padding-top:10px;">
+    <div class="lead" id="phaselead">Two-phase universe pull — <b>1.</b> fetch all expiries, then <b>2.</b> fetch all contracts. Re-click any day: only new rows are pulled (already-pulled history is skipped).</div>
+    <button class="loadbtn" id="fetchExpiriesBtn" title="Phase 1 — pull every NEW expiry across the whole universe (2020→now). Settled past years are skipped.">① Fetch all expiries</button>
+    <button class="loadbtn" id="fetchContractsBtn" title="Phase 2 — pull contracts for every persisted expiry. Run 'Fetch all expiries' first.">② Fetch all contracts</button>
+  </div>
+  <div class="loadmsg" id="phasemsg" style="margin:-4px 24px 8px; color:var(--muted);"></div>
   <div class="loadmsg" id="loadmsg" style="margin:-4px 24px 8px;"></div>
 
   <div id="pullpanel">
@@ -570,6 +576,71 @@ async function bootstrap() {
   await maybeAutoLoad(summary || {index_count: 0, stock_count: 0});
 }
 bootstrap();
+
+/* ── Two-phase manual pull buttons (DEC-UNIVERSE-PULL-PHASED-001) ──
+   Each button POSTs to start its phase in the background, then the page polls
+   /phase-status to enable/disable while a phase runs. Progress is in /coverage
+   + /logs. esc() reuses the page's escaping if present; falls back inline. */
+const phaseMsg = document.getElementById('phasemsg');
+const fetchExpiriesBtn = document.getElementById('fetchExpiriesBtn');
+const fetchContractsBtn = document.getElementById('fetchContractsBtn');
+
+function phaseEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function startPhase(kind, btn) {
+  const path = kind === 'expiries'
+    ? '/api/v1/universe/fetch-expiries' : '/api/v1/universe/fetch-contracts';
+  const label = kind === 'expiries' ? 'expiries' : 'contracts';
+  btn.disabled = true;
+  phaseMsg.textContent = 'Starting ' + label + ' pull…';
+  try {
+    const r = await fetch(path, {method: 'POST'});
+    if (r.status === 400) {
+      const body = await r.json().catch(() => ({}));
+      phaseMsg.innerHTML = '⚠ ' + phaseEsc(body.detail || 'credentials required');
+      btn.disabled = false;
+      return;
+    }
+    const body = await r.json();
+    if (body.status === 'started') {
+      phaseMsg.textContent = '▶ ' + label + ' pull running in the background — watch /coverage + /logs.';
+    } else if (body.status === 'already_running') {
+      phaseMsg.textContent = '… ' + label + ' pull is already running.';
+    } else {
+      phaseMsg.textContent = 'Could not start ' + label + ' pull (' + phaseEsc(body.status) + ').';
+    }
+  } catch (e) {
+    phaseMsg.textContent = 'Request failed — is the server reachable?';
+    btn.disabled = false;
+  }
+  pollPhaseStatus();
+}
+
+async function pollPhaseStatus() {
+  try {
+    const r = await fetch('/api/v1/universe/phase-status');
+    if (!r.ok) return;
+    const s = await r.json();
+    /* While a phase runs its button stays disabled; the OTHER button stays
+       usable (the two phases are independent). */
+    fetchExpiriesBtn.disabled = !!s.expiries_running;
+    fetchContractsBtn.disabled = !!s.contracts_running;
+    if (s.expiries_running || s.contracts_running) {
+      setTimeout(pollPhaseStatus, 3000);  /* keep watching until both idle */
+    }
+  } catch (e) { /* offline — leave buttons as-is */ }
+}
+
+if (fetchExpiriesBtn) {
+  fetchExpiriesBtn.addEventListener('click', () => startPhase('expiries', fetchExpiriesBtn));
+}
+if (fetchContractsBtn) {
+  fetchContractsBtn.addEventListener('click', () => startPhase('contracts', fetchContractsBtn));
+}
+pollPhaseStatus();  /* on load: reflect any in-flight phase */
 </script>
 </body>
 </html>

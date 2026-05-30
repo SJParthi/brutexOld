@@ -603,75 +603,17 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         except Exception as exc:  # pylint: disable=broad-exception-caught
             _log.warning("instrument_master.autoload_skipped", error=str(exc))
 
-        # Auto-pull expiries + contracts for the full universe once credentials
-        # are present (DEC-AUTO-UNIVERSE-001). The keyless instrument master
-        # loads above; expiries/contracts need Groww auth (CLAUDE.md §6), so
-        # this is gated on credentials_present() AND a non-empty instrument
-        # master — the pure decision lives in should_auto_pull_universe(). Runs
-        # in a BACKGROUND daemon thread so a long live pull (≈250 underlyings)
-        # never blocks the dashboard from serving; candles remain a manual
-        # pull. The thread REUSES the dashboard's already-open store (single
-        # DuckDB writer — no second read-write handle). Best-effort: never
-        # crashes the server.
-        try:  # pragma: no cover — live network + server + thread path
-            from brutex.config.credentials import credentials_present
-            from brutex.dashboard.auto_pull import should_auto_pull_universe
-            from brutex.dashboard.universe_query import universe_summary
-
-            gate_summary = universe_summary(
-                store.list_index_equity_instruments(),
-                fno_eligible=store.fno_eligible_underlyings(),
-            )
-            if should_auto_pull_universe(
-                credentials_present=credentials_present(),
-                instrument_total=gate_summary["total"],
-            ):
-                import threading
-                from datetime import UTC, datetime
-
-                def _auto_universe_pull() -> None:
-                    try:
-                        # Fully-automated, ALL years from Jan 2020 → now
-                        # (DEC-UNIVERSE-PULL-2020-001): for every underlying,
-                        # every year, every expiry → all contracts. Groww serves
-                        # F&O from 2020 (CLAUDE.md §6).
-                        now_year = datetime.now(UTC).year
-                        years = list(range(2020, now_year + 1))
-                        report = _run_live_universe_ingest(lake_root, years=years, store=store)
-                        _log.info(
-                            "universe.autopull.done",
-                            underlyings=report.underlyings,
-                            expiries=report.expiries,
-                            contracts=report.contracts,
-                        )
-                    except Exception as exc:  # pylint: disable=broad-exception-caught
-                        # The common cause is Groww rejecting the token mint
-                        # (HTTP 400) — an expired/stale TOTP Token. Surface an
-                        # ACTIONABLE hint to the file + console instead of an
-                        # opaque "Bad Request" (DEC-RUN-LOG-CAPTURE-001).
-                        _log.warning(
-                            "universe.autopull.failed",
-                            error=str(exc),
-                            hint=(
-                                "Groww auth/token mint rejected — regenerate the TOTP Token at "
-                                "groww.in/trade-api (API keys reset daily at 6 AM IST) and re-save "
-                                "it on the Credentials page; the keyless instrument list is unaffected"
-                            ),
-                        )
-
-                threading.Thread(
-                    target=_auto_universe_pull,
-                    name="brutex-universe-pull",
-                    daemon=True,
-                ).start()
-                _log.info("universe.autopull.started")
-            else:
-                _log.info(
-                    "universe.autopull.skipped_no_credentials",
-                    hint="set Groww credentials on the Credentials page; the keyless list is loaded",
-                )
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            _log.warning("universe.autopull.setup_skipped", error=str(exc))
+        # NO auto-pull of expiries/contracts on startup (DEC-UNIVERSE-PULL-
+        # PHASED-001, operator decree 2026-05-30: "remove the auto pull"). The
+        # universe pull is now driven by the two MANUAL /universe buttons —
+        # "Fetch all expiries" (Phase 1) then "Fetch all contracts" (Phase 2) —
+        # so nothing hits Groww until the operator clicks. The keyless
+        # instrument master still auto-loads above (it needs no auth) so the
+        # /universe list is populated and the buttons have something to pull.
+        _log.info(
+            "universe.autopull.disabled",
+            hint="use the 'Fetch all expiries' / 'Fetch all contracts' buttons on /universe",
+        )
     app = build_app(state, instrument_store=store)
     print(f"[brutex] dashboard → http://{host}:{port}  (Ctrl-C to stop)")
     print(f"[brutex] logs → {log_path}  ·  live viewer: http://{host}:{port}/logs")
