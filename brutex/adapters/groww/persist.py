@@ -33,12 +33,16 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import structlog
+
 from brutex.adapters.groww.chunks import GROWW_INTERVAL_TO_PARTITION
 from brutex.adapters.groww.client import bad_request, symbol_to_exchange_segment
-from brutex.adapters.groww.parser import CandleParseError, parse_candle_row
+from brutex.adapters.groww.parser import CandleParseError, EmptyCandleRow, parse_candle_row
 from brutex.data.errors import DataLakeError
 from brutex.data.models import CandleBar
 from brutex.data.watermark import ChunkKey
+
+_LOG = structlog.get_logger("brutex.persist")
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only, no runtime import
     from brutex.adapters.groww.fetch_loop import CandleFetcher
@@ -81,10 +85,52 @@ class PersistingFetcher:
         if lake_interval is None:
             raise bad_request(f"no lake-partition interval for {key.interval!r}")
 
-        try:
-            bars = [self.parse(row) for row in _as_rows(rows)]
-        except (CandleParseError, ValueError) as exc:
-            raise bad_request(f"corrupt candle in {key.groww_symbol!r}: {exc}") from exc
+        # Per-row resilience: a single corrupt bar (e.g. one null-field row)
+        # must NOT quarantine the whole 30/90/180-day chunk — that previously
+        # discarded every good bar in the window. Skip the bad row, keep the
+        # rest, and NEVER silently: log one summary line with the count + a
+        # sample reason (visibility, not log-spam) so the operator sees what
+        # was dropped and why.
+        bars: list[CandleBar] = []
+        quarantined = 0
+        empty = 0
+        sample_error: str | None = None
+        for row in _as_rows(rows):
+            try:
+                bars.append(self.parse(row))
+            except EmptyCandleRow:
+                # No-trade / halted / unlisted bar — legitimately has no OHLC.
+                # A graceful, expected skip (counted, not alarmed). MUST be
+                # caught BEFORE CandleParseError (it is a subclass).
+                empty += 1
+            except (CandleParseError, ValueError) as exc:
+                quarantined += 1
+                if sample_error is None:
+                    sample_error = str(exc)
+        if quarantined:
+            _LOG.warning(
+                "candle.rows.quarantined",
+                symbol=key.groww_symbol,
+                interval=key.interval,
+                quarantined=quarantined,
+                empty=empty,
+                kept=len(bars),
+                sample_error=sample_error,
+            )
+        elif empty:
+            # Only no-data bars were dropped — info, not a warning (expected).
+            _LOG.info(
+                "candle.rows.empty_skipped",
+                symbol=key.groww_symbol,
+                interval=key.interval,
+                empty=empty,
+                kept=len(bars),
+            )
+        if not bars:
+            # Every row was unparseable → nothing to persist. Return [] so the
+            # fetch loop settles NO_DATA (the warning above says exactly why),
+            # instead of a false COMPLETED on a chunk that wrote zero bars.
+            return []
 
         exchange, segment = symbol_to_exchange_segment(key.groww_symbol)
         try:

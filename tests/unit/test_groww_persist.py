@@ -2,10 +2,11 @@
 
 A fake inner fetcher + fake sink + the REAL parser prove `PersistingFetcher`
 parses each chunk's rows, hands the bars to the sink with the right partition
-coordinates, settles empty chunks without writing, and quarantines a corrupt
-row (parse error / OHLC-sanity violation) as a terminal BAD_REQUEST rather than
-dropping or writing it. Kept orchestrator-free so the module stays
-standalone-coverage-gateable.
+coordinates, settles empty chunks without writing, and is row-resilient — a
+single corrupt row (parse error / OHLC-sanity violation) is skipped + logged,
+NOT fatal to the whole chunk; an all-corrupt chunk settles NO_DATA. An
+unmappable interval / lake-write failure is still a terminal BAD_REQUEST. Kept
+orchestrator-free so the module stays standalone-coverage-gateable.
 """
 
 from __future__ import annotations
@@ -65,6 +66,19 @@ def _key(symbol: str = "NSE-NIFTY", interval: str = "1m") -> ChunkKey:
     return ChunkKey(symbol, interval, "2021-01-01T09:15:00+00:00", "2021-01-31T09:15:00+00:00")
 
 
+def _bars_of(sink: _FakeSink, call: int = 0) -> list[CandleBar]:
+    """Narrow a recorded sink call's ``bars`` (typed ``object``) to a bar list.
+
+    The fake records each append as ``dict[str, object]``; the parsed bars are
+    always a ``list[CandleBar]`` (see :meth:`_FakeSink.append`). This helper
+    asserts that and hands back a precisely-typed list so ``len(...)`` /
+    indexing type-check (``pyright``) without a per-assertion ``isinstance``.
+    """
+    bars = sink.calls[call]["bars"]
+    assert isinstance(bars, list)
+    return bars
+
+
 def _fetcher(inner: _FakeInner) -> tuple[PersistingFetcher, _FakeSink]:
     sink = _FakeSink()
     return PersistingFetcher(inner=inner, sink=sink), sink
@@ -102,24 +116,112 @@ class TestPersist:
         assert sink.calls[0]["exchange"] == "BSE"
 
 
-class TestMismatchGuard:
-    def test_unparseable_row_quarantines(self) -> None:
-        bad = _good_row(ts="not-a-date")
-        fetcher, sink = _fetcher(_FakeInner(rows=[bad]))
-        with pytest.raises(VendorSdkError) as ei:
-            fetcher.fetch_chunk(_key())
-        assert type(ei.value).__name__ == "VendorAPIBadRequestException"
-        assert sink.calls == []  # nothing written on a mismatch
+class TestRowResilience:
+    """A single corrupt row is skipped + logged, never fatal to the chunk
+    (DEC-CANDLE-PARSE-RESILIENCE-001) — the prior behaviour quarantined every
+    good bar in the 30-day window on the first bad row."""
 
-    def test_ohlc_violation_quarantines(self) -> None:
-        # high (98) < low (99) → CandleBar.__post_init__ ValueError.
+    def test_corrupt_only_rows_settle_no_data_not_raise(self) -> None:
+        from structlog.testing import capture_logs
+
+        # TWO bad rows → the 2nd keeps the 1st's sample_error (covers the
+        # "already have a sample" branch) + proves the count aggregates.
+        bad1 = _good_row(ts="not-a-date")
+        bad2 = _good_row(ts="also-bad")
+        fetcher, sink = _fetcher(_FakeInner(rows=[bad1, bad2]))
+        with capture_logs() as logs:
+            out = fetcher.fetch_chunk(_key())
+        assert out == []  # all rows corrupt → NO_DATA (settled), never raises
+        assert sink.calls == []  # nothing written
+        q = next(e for e in logs if e["event"] == "candle.rows.quarantined")
+        assert q["quarantined"] == 2
+        assert q["kept"] == 0
+        assert "unparseable" in q["sample_error"]
+
+    def test_ohlc_violation_row_is_quarantined_not_fatal(self) -> None:
+        # high (98) < low (99) → CandleBar.__post_init__ ValueError → skipped.
         bad: list[object] = ["2021-01-04 09:15:00", 100.0, 98.0, 99.0, 100.5, 1000, None]
         fetcher, sink = _fetcher(_FakeInner(rows=[bad]))
-        with pytest.raises(VendorSdkError) as ei:
-            fetcher.fetch_chunk(_key())
-        assert type(ei.value).__name__ == "VendorAPIBadRequestException"
+        assert fetcher.fetch_chunk(_key()) == []
         assert sink.calls == []
 
+    def test_one_bad_row_among_good_keeps_the_good(self) -> None:
+        from structlog.testing import capture_logs
+
+        rows = [_good_row(), _good_row(ts="not-a-date"), _good_row("2021-01-04 09:16:00")]
+        fetcher, sink = _fetcher(_FakeInner(rows=rows))
+        with capture_logs() as logs:
+            out = fetcher.fetch_chunk(_key())
+        assert out  # COMPLETED — the one bad row did NOT nuke the chunk
+        assert len(sink.calls) == 1
+        assert len(_bars_of(sink)) == 2  # both good rows persisted
+        q = next(e for e in logs if e["event"] == "candle.rows.quarantined")
+        assert q["quarantined"] == 1
+        assert q["kept"] == 2
+
+    def test_index_null_volume_persists_as_zero(self) -> None:
+        # Spot INDEX: Groww returns volume=null → bar persists with volume 0,
+        # never quarantined (the actual NSE-NIFTY pull bug).
+        idx_row: list[object] = ["2021-01-04 09:15:00", 100.0, 101.0, 99.0, 100.5, None, None]
+        fetcher, sink = _fetcher(_FakeInner(rows=[idx_row]))
+        out = fetcher.fetch_chunk(_key("NSE-NIFTY", "1m"))
+        assert out  # COMPLETED
+        bars = sink.calls[0]["bars"]
+        assert isinstance(bars, list)
+        assert len(bars) == 1
+        assert bars[0].volume == 0
+
+
+_EMPTY_ROW: list[object] = ["2021-01-04 09:15:00", None, None, None, None, None, None]
+
+
+class TestEmptyBarHandling:
+    """No-data (no-trade / halted / unlisted) bars are skipped GRACEFULLY at
+    info level — distinct from a malformed-row warning (DEC-CANDLE-EMPTY-BAR-001)."""
+
+    def test_empty_only_rows_settle_no_data_with_info_not_warning(self) -> None:
+        from structlog.testing import capture_logs
+
+        fetcher, sink = _fetcher(_FakeInner(rows=[_EMPTY_ROW, _EMPTY_ROW]))
+        with capture_logs() as logs:
+            out = fetcher.fetch_chunk(_key())
+        assert out == []  # NO_DATA — nothing to persist
+        assert sink.calls == []
+        info = next(e for e in logs if e["event"] == "candle.rows.empty_skipped")
+        assert info["empty"] == 2
+        assert info["kept"] == 0
+        assert not [e for e in logs if e["event"] == "candle.rows.quarantined"]
+
+    def test_good_plus_empty_keeps_good_logs_info(self) -> None:
+        from structlog.testing import capture_logs
+
+        fetcher, sink = _fetcher(_FakeInner(rows=[_good_row(), _EMPTY_ROW]))
+        with capture_logs() as logs:
+            out = fetcher.fetch_chunk(_key())
+        assert out  # COMPLETED — the good bar survives
+        assert len(_bars_of(sink)) == 1
+        info = next(e for e in logs if e["event"] == "candle.rows.empty_skipped")
+        assert info["empty"] == 1
+        assert info["kept"] == 1
+
+    def test_corrupt_and_empty_warns_with_both_counts(self) -> None:
+        from structlog.testing import capture_logs
+
+        rows = [_good_row(), _EMPTY_ROW, _good_row(ts="not-a-date")]
+        fetcher, sink = _fetcher(_FakeInner(rows=rows))
+        with capture_logs() as logs:
+            out = fetcher.fetch_chunk(_key())
+        assert out  # COMPLETED — the good bar survives
+        assert len(_bars_of(sink)) == 1
+        q = next(e for e in logs if e["event"] == "candle.rows.quarantined")
+        assert q["quarantined"] == 1  # the malformed row
+        assert q["empty"] == 1  # the no-data row
+        assert q["kept"] == 1
+        # When anything was malformed it's a single warning (no separate info).
+        assert not [e for e in logs if e["event"] == "candle.rows.empty_skipped"]
+
+
+class TestMismatchGuard:
     def test_unmappable_interval_quarantines(self) -> None:
         fetcher, sink = _fetcher(_FakeInner(rows=[_good_row()]))
         with pytest.raises(VendorSdkError) as ei:
