@@ -63,6 +63,41 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def default_token_path() -> Path:
+    """Resolve the cached access-token path (``BRUTEX_GROWW_TOKEN_PATH`` or default)."""
+    return Path(os.environ.get("BRUTEX_GROWW_TOKEN_PATH", str(_DEFAULT_TOKEN_PATH)))
+
+
+def clear_cached_token(*, path: Path | None = None) -> bool:
+    """Delete the cached Groww access token, if present; return whether one existed.
+
+    Called whenever credentials are (re)saved (DEC-CREDS-NORMALISE-001) so a
+    corrected API key / TOTP secret takes effect on the NEXT session instead of
+    being shadowed by a stale token minted from the OLD credentials. Groww resets
+    API keys daily at 6 AM IST, so a token cached before the reset would otherwise
+    keep failing the first call with an opaque error. Idempotent + safe when no
+    token file exists (returns ``False``).
+
+    Parameters
+    ----------
+    path
+        Token file to remove. Defaults to :func:`default_token_path`.
+
+    Returns
+    -------
+    bool
+        ``True`` if a cached token file was removed, ``False`` if none existed.
+    """
+    target = default_token_path() if path is None else path
+    # unlink-then-catch (not exists-then-unlink) so a concurrent removal can't
+    # race between the check and the call — mirrors clear_groww_credentials.
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 @dataclass(slots=True)
 class GrowwAuth:
     """TOTP access-token lifecycle for the Groww adapter.
@@ -204,4 +239,6 @@ class GrowwAuth:
 __all__ = [
     "GrowwAuth",
     "GrowwAuthError",
+    "clear_cached_token",
+    "default_token_path",
 ]

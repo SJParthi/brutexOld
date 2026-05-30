@@ -34,6 +34,7 @@ refresh the Telegram panel.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 from collections import deque
@@ -810,9 +811,11 @@ def build_app(
         that names the offending field but NEVER its value. Returns only
         ``{"present": true}`` — never echoes a value back.
         """
+        from brutex.adapters.groww.auth import clear_cached_token
         from brutex.config.credentials import (
             CredentialsError,
             GrowwCredentials,
+            credentials_preview,
             save_groww_credentials,
         )
 
@@ -822,14 +825,22 @@ def build_app(
             )
         except CredentialsError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse({"present": True})
+        # Invalidate any token minted from the OLD credentials so the corrected
+        # paste takes effect on the next session (DEC-CREDS-NORMALISE-001) —
+        # Groww resets API keys daily at 6 AM IST, so a stale cache would keep
+        # failing. Best-effort: never block a successful save on cleanup.
+        with contextlib.suppress(OSError):
+            clear_cached_token()
+        # Echo back the masked preview so the page can confirm the paste landed
+        # (right value/length, not empty) — never a usable secret.
+        return JSONResponse(credentials_preview())
 
     @app.get("/api/v1/credentials/status")
     async def api_credentials_status() -> JSONResponse:
-        """GET /api/v1/credentials/status — boolean presence only (no values)."""
-        from brutex.config.credentials import credentials_present
+        """GET /api/v1/credentials/status — presence + a masked, non-secret preview."""
+        from brutex.config.credentials import credentials_preview
 
-        return JSONResponse({"present": credentials_present()})
+        return JSONResponse(credentials_preview())
 
     @app.get("/credentials", response_class=HTMLResponse)
     async def credentials_page() -> str:

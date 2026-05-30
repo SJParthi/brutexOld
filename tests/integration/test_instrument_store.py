@@ -965,6 +965,110 @@ class TestLeanReingestAndLegsDetection:
             assert s.has_derivative_legs() is False
 
 
+class TestPlaceholderEconomicsAndPrune:
+    """has_placeholder_stock_economics() + prune_to_latest_snapshot() —
+    DEC-STALE-ECONOMICS-HEAL-001 + DEC-INSTRUMENT-LEAN-SNAPSHOT-001."""
+
+    @staticmethod
+    def _enriched_eq(symbol: str, *, lot_size: int = 500, freeze: int = 5000) -> Instrument:
+        """An EQ row carrying REAL (leg-derived) economics — lot_size > 1."""
+        from dataclasses import replace
+
+        return replace(_eq(symbol), lot_size=lot_size, freeze_quantity=freeze)
+
+    def test_placeholder_true_for_unenriched_equity(self, tmp_path: Path) -> None:
+        """An EQ still at the master's placeholder lot_size=1 is flagged stale."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY"), _eq("RELIANCE")],  # _eq builds lot_size=1
+                snapshot_date=date(2026, 5, 29),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            assert s.has_placeholder_stock_economics() is True
+
+    def test_placeholder_false_when_equity_enriched(self, tmp_path: Path) -> None:
+        """An EQ back-filled with a real F&O lot (>1) is NOT stale."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY"), self._enriched_eq("RELIANCE")],
+                snapshot_date=date(2026, 5, 29),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            assert s.has_placeholder_stock_economics() is False
+
+    def test_placeholder_false_on_index_only_lake(self, tmp_path: Path) -> None:
+        """An IDX-only lake has no equity fingerprint (index lot=1 doesn't count)."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY")],
+                snapshot_date=date(2026, 5, 29),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            assert s.has_placeholder_stock_economics() is False
+
+    def test_placeholder_false_on_empty_lake(self, tmp_path: Path) -> None:
+        """An empty lake has nothing stale to heal."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            assert s.has_placeholder_stock_economics() is False
+
+    def test_placeholder_only_considers_latest_snapshot(self, tmp_path: Path) -> None:
+        """A stale OLD snapshot is ignored once the NEWEST snapshot is enriched."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("RELIANCE")],  # placeholder lot=1
+                snapshot_date=date(2026, 5, 28),
+                run_id="d1",
+                csv_source_sha256=_csv_hash("d1"),
+            )
+            s.upsert_many(
+                [self._enriched_eq("RELIANCE")],  # enriched lot=500
+                snapshot_date=date(2026, 5, 29),
+                run_id="d2",
+                csv_source_sha256=_csv_hash("d2"),
+            )
+            # The newest snapshot per symbol is the enriched one → not stale.
+            assert s.has_placeholder_stock_economics() is False
+
+    def test_prune_collapses_to_latest_snapshot(self, tmp_path: Path) -> None:
+        """Two daily snapshots → prune keeps only the newest (236→472 fix)."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            for d, rid in ((date(2026, 5, 28), "d1"), (date(2026, 5, 29), "d2")):
+                s.upsert_many(
+                    [_idx("NIFTY"), _eq("RELIANCE")],
+                    snapshot_date=d,
+                    run_id=rid,
+                    csv_source_sha256=_csv_hash(str(d)),
+                )
+            assert s.count(in_scope_only=False) == 4  # 2 snapshots × 2 rows
+            deleted = s.prune_to_latest_snapshot()
+            assert deleted == 2  # the older day's 2 rows
+            assert s.count(in_scope_only=False) == 2
+            assert s.snapshot_dates() == [date(2026, 5, 29)]
+            # The live universe is intact + clean.
+            assert s.verify_integrity().is_clean is True
+
+    def test_prune_idempotent_on_single_snapshot(self, tmp_path: Path) -> None:
+        """Pruning an already-lean (single-snapshot) lake deletes nothing."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY"), _eq("RELIANCE")],
+                snapshot_date=date(2026, 5, 29),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            assert s.prune_to_latest_snapshot() == 0
+            assert s.prune_to_latest_snapshot() == 0  # still idempotent
+            assert s.count(in_scope_only=False) == 2
+
+    def test_prune_safe_on_empty_lake(self, tmp_path: Path) -> None:
+        """Pruning an empty lake is a no-op returning 0."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            assert s.prune_to_latest_snapshot() == 0
+
+
 class TestCoverageLedger:
     """coverage_ledger table CRUD + status transitions — DEC-COVERAGE-LEDGER-001."""
 

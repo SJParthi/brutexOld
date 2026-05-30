@@ -484,9 +484,17 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
 
     # Persist logs to a rotating file (in addition to the console) so a
     # `make run` session has a viewable log trail — DEC-LOGS-VIEWER-001.
+    # json_renderer=False keeps the console human-readable; the file sink is
+    # ALWAYS JSON (the /logs viewer parses it). Combined with log_config=None on
+    # uvicorn.run below, this finally routes uvicorn's HTTP/startup logs AND our
+    # own milestones through the rotating file — the previously-empty /logs page
+    # fix (DEC-RUN-LOG-CAPTURE-001).
+    import structlog
+
     from brutex.observability.logging import configure_logging
 
-    log_path = configure_logging(json_renderer=True, enable_file=True)
+    log_path = configure_logging(json_renderer=False, enable_file=True)
+    _log = structlog.get_logger("brutex.dashboard")
 
     state = DashboardState()
     # Open a real InstrumentStore so the F&O Universe Explorer routes can call
@@ -509,35 +517,43 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
             from brutex.dashboard.instrument_loader import load_instrument_master
             from brutex.dashboard.universe_query import universe_summary
 
-            summary = universe_summary(store.load_snapshot(in_scope_only=False))
+            # Lean-correct counts (DEC-INSTRUMENT-UNIVERSE-FAST-001): summarise
+            # the IDX+EQ candidates plus the SQL-derived F&O-eligible set, so an
+            # EQ is classed as a "stock". The bare load_snapshot path carried no
+            # derivative legs, so every equity fell through unclassified — the
+            # "25 indices · 0 stocks" message the operator hit (the data was fine;
+            # only the startup tally was wrong).
+            summary = universe_summary(
+                store.list_index_equity_instruments(),
+                fno_eligible=store.fno_eligible_underlyings(),
+            )
             # Auto-heal: reload when the lake is empty, missing indices (the
-            # pre-DEC-INDEX-PARSE-FIX-001 fingerprint), OR still holds FUT/CE/PE
-            # legs (the pre-lean fingerprint — DEC-LEAN-REINGEST-FIX-001). The
-            # lean refresh does a full-snapshot replace, so a reload purges the
-            # stale ~101k-row dump down to the ~236 universe underlyings.
+            # pre-DEC-INDEX-PARSE-FIX-001 fingerprint), still holds FUT/CE/PE
+            # legs (the pre-lean fingerprint — DEC-LEAN-REINGEST-FIX-001), OR
+            # carries placeholder stock economics (lot_size=1, the pre-back-fill
+            # fingerprint — DEC-STALE-ECONOMICS-HEAL-001). The lean refresh does a
+            # full-snapshot replace + prune-to-latest, so a reload purges the
+            # stale dump down to the ~236 enriched universe underlyings.
             if should_reload_instrument_master(
                 index_count=summary["index_count"],
                 stock_count=summary["stock_count"],
                 legs_present=store.has_derivative_legs(),
+                stale_economics=store.has_placeholder_stock_economics(),
             ):
                 counts = load_instrument_master(store)
-                print(
-                    f"[brutex] auto-loaded instrument master → "
-                    f"{counts['index_count']} indices · {counts['stock_count']} stocks",
-                    file=sys.stderr,
+                _log.info(
+                    "instrument_master.autoloaded",
+                    indices=counts["index_count"],
+                    stocks=counts["stock_count"],
                 )
             else:
-                print(
-                    f"[brutex] instrument master present → "
-                    f"{summary['index_count']} indices · {summary['stock_count']} stocks",
-                    file=sys.stderr,
+                _log.info(
+                    "instrument_master.present",
+                    indices=summary["index_count"],
+                    stocks=summary["stock_count"],
                 )
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            print(
-                f"[brutex] instrument auto-load skipped ({exc}); "
-                f"use the Load instruments button once online",
-                file=sys.stderr,
-            )
+            _log.warning("instrument_master.autoload_skipped", error=str(exc))
 
         # Auto-pull expiries + contracts for the full universe once credentials
         # are present (DEC-AUTO-UNIVERSE-001). The keyless instrument master
@@ -554,7 +570,10 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
             from brutex.dashboard.auto_pull import should_auto_pull_universe
             from brutex.dashboard.universe_query import universe_summary
 
-            gate_summary = universe_summary(store.load_snapshot(in_scope_only=False))
+            gate_summary = universe_summary(
+                store.list_index_equity_instruments(),
+                fno_eligible=store.fno_eligible_underlyings(),
+            )
             if should_auto_pull_universe(
                 credentials_present=credentials_present(),
                 instrument_total=gate_summary["total"],
@@ -566,16 +585,25 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
                     try:
                         year = datetime.now(UTC).year
                         report = _run_live_universe_ingest(lake_root, years=[year], store=store)
-                        print(
-                            f"[brutex] auto-pulled universe → {report.underlyings} "
-                            f"underlyings · {report.expiries} expiries · "
-                            f"{report.contracts} contracts",
-                            file=sys.stderr,
+                        _log.info(
+                            "universe.autopull.done",
+                            underlyings=report.underlyings,
+                            expiries=report.expiries,
+                            contracts=report.contracts,
                         )
                     except Exception as exc:  # pylint: disable=broad-exception-caught
-                        print(
-                            f"[brutex] universe auto-pull skipped ({exc})",
-                            file=sys.stderr,
+                        # The common cause is Groww rejecting the token mint
+                        # (HTTP 400) — an expired/stale TOTP Token. Surface an
+                        # ACTIONABLE hint to the file + console instead of an
+                        # opaque "Bad Request" (DEC-RUN-LOG-CAPTURE-001).
+                        _log.warning(
+                            "universe.autopull.failed",
+                            error=str(exc),
+                            hint=(
+                                "Groww auth/token mint rejected — regenerate the TOTP Token at "
+                                "groww.in/trade-api (API keys reset daily at 6 AM IST) and re-save "
+                                "it on the Credentials page; the keyless instrument list is unaffected"
+                            ),
                         )
 
                 threading.Thread(
@@ -583,23 +611,23 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
                     name="brutex-universe-pull",
                     daemon=True,
                 ).start()
-                print(
-                    "[brutex] credentials present → auto-pulling expiries/contracts in background…",
-                    file=sys.stderr,
-                )
+                _log.info("universe.autopull.started")
             else:
-                print(
-                    "[brutex] no Groww credentials yet → skipping expiries/contracts "
-                    "auto-pull (set via `brutex auth set` or the Credentials page; the "
-                    "keyless instrument list is already loaded)",
-                    file=sys.stderr,
+                _log.info(
+                    "universe.autopull.skipped_no_credentials",
+                    hint="set Groww credentials on the Credentials page; the keyless list is loaded",
                 )
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            print(f"[brutex] universe auto-pull setup skipped ({exc})", file=sys.stderr)
+            _log.warning("universe.autopull.setup_skipped", error=str(exc))
     app = build_app(state, instrument_store=store)
     print(f"[brutex] dashboard → http://{host}:{port}  (Ctrl-C to stop)")
     print(f"[brutex] logs → {log_path}  ·  live viewer: http://{host}:{port}/logs")
-    uvicorn.run(app, host=host, port=port)
+    _log.info("dashboard.ready", host=host, port=port, log_file=str(log_path))
+    # log_config=None lets uvicorn's access/error loggers PROPAGATE into our
+    # root handlers (console + rotating JSON file) instead of uvicorn's own
+    # isolated stderr handlers — so the file (and the /logs page) finally
+    # capture the full HTTP + startup trail (DEC-RUN-LOG-CAPTURE-001).
+    uvicorn.run(app, host=host, port=port, log_config=None)
     return EXIT_OK
 
 

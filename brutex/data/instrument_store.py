@@ -1479,6 +1479,88 @@ class InstrumentStore:
         ).fetchone()
         return bool(row[0]) if row else False
 
+    def has_placeholder_stock_economics(self) -> bool:
+        """Return ``True`` if any latest-snapshot NSE equity still has placeholder economics.
+
+        The pre-economics-backfill fingerprint (DEC-STALE-ECONOMICS-HEAL-001):
+        every persisted NSE ``EQ`` row is an F&O-eligible underlying by
+        construction (lean ingest only stores F&O-eligible equities;
+        :func:`brutex.universe.is_universe_underlying`), so after the
+        leg-derived back-fill (DEC-UNDERLYING-ECONOMICS-001) it MUST carry a
+        real F&O ``lot_size`` (always > 1 — e.g. RELIANCE 500, the smallest
+        real lots are still in the hundreds). A lake loaded BEFORE that
+        back-fill landed instead carries the master's placeholder
+        ``lot_size = 1``. This probe — an indexed ``EXISTS`` over the latest
+        snapshot per symbol (matching ``list_index_equity_instruments`` /
+        ``load_snapshot`` semantics) — is therefore ``True`` iff the lake holds
+        stale, un-enriched stock economics and should be re-loaded.
+
+        It is the auto-heal trigger that closes the gap the operator hit:
+        ``should_reload_instrument_master`` previously reloaded only on an
+        empty / index-less / non-lean lake, so a lake populated by a
+        pre-back-fill build kept serving ``lot_size = 1`` forever. A clean
+        re-load enriches every stock, after which this returns ``False``
+        (idempotent — no perpetual reloads).
+
+        Returns
+        -------
+        bool
+            ``True`` iff at least one latest-snapshot NSE ``EQ`` row has
+            ``lot_size <= 1``; ``False`` on a fully-enriched (or stock-less) lake.
+        """
+        self._ensure_open()
+        sql = (
+            "SELECT EXISTS ("
+            "  SELECT 1 FROM instruments i "
+            "  JOIN ("
+            "    SELECT vendor_symbol, MAX(snapshot_date) AS snap "
+            "    FROM instruments GROUP BY vendor_symbol"
+            "  ) latest ON i.vendor_symbol = latest.vendor_symbol "
+            "  AND i.snapshot_date = latest.snap "
+            "  WHERE i.instrument_type = 'EQ' AND i.exchange = 'NSE' AND i.lot_size <= 1"
+            ")"
+        )
+        row = self._conn.execute(sql).fetchone()
+        return bool(row[0]) if row else False
+
+    def prune_to_latest_snapshot(self) -> int:
+        """Delete every instrument row except those of the newest ``snapshot_date``.
+
+        The instrument master is a CURRENT-STATE surface — Track 1 wants only
+        the latest ~241 universe underlyings, NOT a daily-growing pile of
+        historical copies (DEC-INSTRUMENT-LEAN-SNAPSHOT-001). Each keyless
+        reload stamps a new ``snapshot_date`` (the UTC pull date), and
+        :meth:`upsert_many` with ``replace_snapshot=True`` only wipes the SAME
+        day, so without this prune the table accumulates one full ~236-row copy
+        per UTC day: the operator saw the ``instruments`` table grow 236 → 472
+        after a second-day reload, which read as a broken dedup guarantee.
+        Collapsing to the newest snapshot keeps the lake lean + unique and makes
+        the read-only ``/db`` view show exactly the live universe.
+
+        Latest-snapshot reads (:meth:`load_snapshot`,
+        :meth:`list_index_equity_instruments`) are unaffected — they already
+        select ``MAX(snapshot_date)`` per symbol, so this only removes rows that
+        were already shadowed. Idempotent: a single-snapshot (already-lean)
+        table deletes nothing; safe on an empty table.
+
+        Returns
+        -------
+        int
+            The number of stale (non-latest-snapshot) rows deleted.
+        """
+        self._ensure_open()
+        latest_row = self._conn.execute("SELECT MAX(snapshot_date) FROM instruments").fetchone()
+        if latest_row is None or latest_row[0] is None:
+            return 0
+        latest = latest_row[0]
+        stale_row = self._conn.execute(
+            "SELECT COUNT(*) FROM instruments WHERE snapshot_date <> ?", [latest]
+        ).fetchone()
+        stale = int(stale_row[0]) if stale_row else 0
+        if stale:
+            self._conn.execute("DELETE FROM instruments WHERE snapshot_date <> ?", [latest])
+        return stale
+
     def list_futures(
         self,
         *,
