@@ -87,7 +87,7 @@ def truncate_lake_tables(
     for table in tables:
         try:
             rows = count(table)
-            execute(f"DELETE FROM {table}")  # noqa: S608 - table from a fixed allowlist, not user input
+            execute(f"DELETE FROM {table}")  # noqa: S608  # nosec B608 — table from the fixed LAKE_DATA_TABLES allowlist, not user input
         except Exception as exc:
             failed.append((table, str(exc)))
             continue

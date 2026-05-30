@@ -1913,7 +1913,7 @@ class InstrumentStore(metaclass=_StoreMeta):
         """
 
         def _count(table: str) -> int:
-            row = self._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608
+            row = self._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608  # nosec B608 — table from the fixed LAKE_DATA_TABLES allowlist
             return int(row[0]) if row is not None else 0
 
         return truncate_lake_tables(self._conn.execute, count=_count)
