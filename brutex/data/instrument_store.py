@@ -719,10 +719,21 @@ class _LockedReadConn:
         self._conn = conn
         self._lock = lock
         self._result: Any = None
+        # Tracks whether THIS view currently holds the store lock, so release is
+        # idempotent — a caller that reads only ``description`` (no fetch) can
+        # free the lock via ``close()`` / a ``with`` block instead of leaking it
+        # and deadlocking the background writer (DEC-STORE-LOCK-LEAK-FIX-001).
+        self._held = False
 
     def execute(self, sql: str, parameters: Any = None) -> _LockedReadConn:
-        """Acquire the store lock and execute *sql*; lock is held until fetch."""
+        """Acquire the store lock and execute *sql*; lock is held until fetch/close."""
+        # Drop any lock still held from a PRIOR execute on this same view (a
+        # caller that re-executed without fetching) before re-acquiring, so a
+        # re-execute can never leak an extra acquisition — at most one hold per
+        # view, always balanced by the next fetch/close (DEC-STORE-LOCK-LEAK-FIX-001).
+        self._release()
         self._lock.acquire()
+        self._held = True
         try:
             self._result = (
                 self._conn.execute(sql)
@@ -730,7 +741,7 @@ class _LockedReadConn:
                 else self._conn.execute(sql, parameters)
             )
         except BaseException:
-            self._lock.release()
+            self._release()
             raise
         return self
 
@@ -744,14 +755,34 @@ class _LockedReadConn:
         try:
             return self._result.fetchone()
         finally:
-            self._lock.release()
+            self._release()
 
     def fetchall(self) -> Any:
         """Fetch all rows, then release the store lock."""
         try:
             return self._result.fetchall()
         finally:
+            self._release()
+
+    def _release(self) -> None:
+        """Release the store lock iff this view holds it (idempotent)."""
+        if self._held:
+            self._held = False
             self._lock.release()
+
+    def close(self) -> None:
+        """Release the store lock if still held (idempotent, fetch-or-not safe).
+
+        Lets a description-only reader free the lock without a fetch, so the
+        fragile ``execute → fetch`` contract can never leak into a deadlock.
+        """
+        self._release()
+
+    def __enter__(self) -> _LockedReadConn:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._release()
 
 
 # ────────────────────────────────────────────────────────────────────────

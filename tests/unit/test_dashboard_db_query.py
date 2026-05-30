@@ -10,6 +10,7 @@ real Parquet partitions written by the production
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -627,3 +628,95 @@ def test_query_table_contains_escapes_percent_wildcard(store: InstrumentStore) -
         limit=50,
     )
     assert out["total"] == 0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Store-lock leak regression (DEC-STORE-LOCK-LEAK-FIX-001)
+#
+# The production read conn (_LockedReadConn) holds the store RLock from
+# execute() until a fetch. A description-only reader (list_columns) used to
+# leak it → the background universe-pull's writes deadlocked (the live
+# "Fetch all expiries" 26-minute hang). These are CONCURRENCY tests: they
+# prove a DIFFERENT thread can take the lock after each read pattern.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _lock_free(store: InstrumentStore, timeout: float = 2.0) -> bool:
+    """True iff a SEPARATE thread can acquire the store lock (it isn't leaked)."""
+    got: list[bool] = []
+
+    def _try() -> None:
+        acquired = store._lock.acquire(timeout=timeout)
+        got.append(acquired)
+        if acquired:
+            store._lock.release()
+
+    t = threading.Thread(target=_try)
+    t.start()
+    t.join()
+    return got == [True]
+
+
+def test_list_columns_releases_store_lock(store: InstrumentStore) -> None:
+    # The actual production deadlock: list_columns reads .description; before
+    # the fix it never fetched → leaked the store lock forever.
+    list_columns(store.connection, "instruments")
+    assert _lock_free(store)
+
+
+def test_locked_conn_context_manager_releases_without_fetch(store: InstrumentStore) -> None:
+    # A `with` block releases the lock even if the caller only reads description.
+    with store.connection.execute("SELECT * FROM instruments LIMIT 0") as cur:
+        assert cur.description is not None
+    assert _lock_free(store)
+
+
+def test_locked_conn_close_is_idempotent(store: InstrumentStore) -> None:
+    cur = store.connection.execute("SELECT * FROM instruments LIMIT 0")
+    cur.close()
+    cur.close()  # idempotent — second close is a no-op, not a double-release
+    assert _lock_free(store)
+
+
+def test_locked_conn_fetchall_releases(store: InstrumentStore) -> None:
+    store.connection.execute("SELECT * FROM instruments LIMIT 0").fetchall()
+    assert _lock_free(store)
+
+
+def test_locked_conn_execute_error_releases_lock(store: InstrumentStore) -> None:
+    # A failed execute must NOT leak the lock (the except → _release path).
+    with pytest.raises(Exception, match="(?i)nonexistent|catalog|table"):
+        store.connection.execute("SELECT * FROM nonexistent_table_xyz")
+    assert _lock_free(store)
+
+
+def test_concurrent_read_then_write_does_not_deadlock(store: InstrumentStore) -> None:
+    # End-to-end shape of the live bug: a /db read (list_columns) followed by a
+    # store WRITE from another thread (mirrors the background expiries pull).
+    list_columns(store.connection, "instruments")
+    done: list[bool] = []
+
+    def _writer() -> None:
+        store.upsert_many(
+            [_idx("SBIN", "State Bank")],
+            snapshot_date=date.today(),
+            run_id="lock-regression",
+            csv_source_sha256="1" * 64,
+        )
+        done.append(True)
+
+    t = threading.Thread(target=_writer)
+    t.start()
+    t.join(timeout=5.0)
+    assert done == [True]  # the write completed — no deadlock
+
+
+def test_locked_conn_reexecute_without_fetch_does_not_leak(store: InstrumentStore) -> None:
+    # Worst case (hostile-review LOW): re-execute on the SAME view without an
+    # intervening fetch must not leak an extra acquisition — execute() drops the
+    # prior hold first, so the final fetch frees the lock completely.
+    cur = store.connection
+    cur.execute("SELECT * FROM instruments LIMIT 0")
+    cur.execute("SELECT * FROM instruments LIMIT 0")  # re-execute, no fetch between
+    cur.fetchall()
+    assert _lock_free(store)
