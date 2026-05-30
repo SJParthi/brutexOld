@@ -113,6 +113,13 @@ def resolve_candle_range(
         ``from`` is after the resolved ``to`` (e.g. a future *from_date*,
         or ``from_date > to_date``).
     """
+    # Normalise empty / whitespace-only inputs to ``None`` so a bare
+    # ``?from_date=`` query param (or a blank picker) behaves exactly like
+    # an omitted bound, not as a malformed date — one obvious semantics for
+    # "no bound given" across the UI and any direct API caller.
+    from_date = (from_date or "").strip() or None
+    to_date = (to_date or "").strip() or None
+
     if from_date is None and to_date is None:
         resolved_year = year if year is not None else now.year
         start = datetime(resolved_year, 1, 1, tzinfo=UTC)

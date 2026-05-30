@@ -329,6 +329,23 @@ class TestResolveCandleRange:
         with pytest.raises(ValueError, match="to_date must be ISO"):
             resolve_candle_range(from_date=None, to_date="not-a-date", year=None, now=_NOW)
 
+    def test_empty_string_dates_behave_as_omitted(self) -> None:
+        # A bare ?from_date=&to_date= (or blank pickers) must behave exactly
+        # like omitted bounds → fall through to year/default mode, NOT raise
+        # a malformed-date error. Worst-case input hardening.
+        start, end = resolve_candle_range(from_date="", to_date="", year=2023, now=_NOW)
+        assert start == datetime(2023, 1, 1, tzinfo=UTC)
+        assert end == datetime(2024, 1, 1, tzinfo=UTC)
+
+    def test_whitespace_from_date_is_treated_as_omitted(self) -> None:
+        # Whitespace-only from_date → floor; explicit mode still entered
+        # because to_date is a real bound.
+        start, end = resolve_candle_range(
+            from_date="   ", to_date="2024-02-15", year=None, now=_NOW
+        )
+        assert start == datetime(GROWW_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)
+        assert end == datetime(2024, 2, 16, tzinfo=UTC)
+
 
 # ────────────────────────────────────────────────────────────────────────
 # pull_candles — from/to date range threading (the picker, end to end)
