@@ -1509,15 +1509,16 @@ class InstrumentStore:
             ``lot_size <= 1``; ``False`` on a fully-enriched (or stock-less) lake.
         """
         self._ensure_open()
+        # A master load (replace_snapshot=True) writes EVERY universe symbol for
+        # ONE snapshot_date, and prune_to_latest_snapshot() collapses to it — so
+        # the newest snapshot is the whole live universe and ``snapshot_date =
+        # MAX(snapshot_date)`` is exactly the latest-per-symbol view here, while
+        # hitting the PK index instead of a GROUP BY full scan.
         sql = (
             "SELECT EXISTS ("
-            "  SELECT 1 FROM instruments i "
-            "  JOIN ("
-            "    SELECT vendor_symbol, MAX(snapshot_date) AS snap "
-            "    FROM instruments GROUP BY vendor_symbol"
-            "  ) latest ON i.vendor_symbol = latest.vendor_symbol "
-            "  AND i.snapshot_date = latest.snap "
-            "  WHERE i.instrument_type = 'EQ' AND i.exchange = 'NSE' AND i.lot_size <= 1"
+            "  SELECT 1 FROM instruments "
+            "  WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM instruments) "
+            "  AND instrument_type = 'EQ' AND exchange = 'NSE' AND lot_size <= 1"
             ")"
         )
         row = self._conn.execute(sql).fetchone()
@@ -1549,17 +1550,15 @@ class InstrumentStore:
             The number of stale (non-latest-snapshot) rows deleted.
         """
         self._ensure_open()
-        latest_row = self._conn.execute("SELECT MAX(snapshot_date) FROM instruments").fetchone()
-        if latest_row is None or latest_row[0] is None:
-            return 0
-        latest = latest_row[0]
-        stale_row = self._conn.execute(
-            "SELECT COUNT(*) FROM instruments WHERE snapshot_date <> ?", [latest]
+        # Single statement: DuckDB returns the deleted-row count, and a
+        # correlated ``MAX(snapshot_date)`` sub-select makes this a no-op on an
+        # empty table (``<> NULL`` matches nothing) and on a single-snapshot
+        # lake (nothing is older than the max) — no redundant COUNT pre-scan.
+        deleted = self._conn.execute(
+            "DELETE FROM instruments "
+            "WHERE snapshot_date <> (SELECT MAX(snapshot_date) FROM instruments)"
         ).fetchone()
-        stale = int(stale_row[0]) if stale_row else 0
-        if stale:
-            self._conn.execute("DELETE FROM instruments WHERE snapshot_date <> ?", [latest])
-        return stale
+        return int(deleted[0]) if deleted else 0
 
     def list_futures(
         self,
