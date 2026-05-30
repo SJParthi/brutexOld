@@ -17,7 +17,9 @@ from brutex.orchestrator.universe_phases import (
     ExpiryCell,
     ItemResult,
     TwoPhaseReport,
+    cells_to_pull,
     contract_jobs_from,
+    contract_jobs_to_pull,
     phase1_cells,
     run_two_phase,
 )
@@ -152,7 +154,6 @@ class TestRunTwoPhase:
             fetch_expiries=fetch_expiries,
             fetch_contracts=fetch_contracts,
             run_parallel=_sync_run_parallel,
-            run_parallel_contracts=_sync_run_parallel,
             on_expiry_cell=lambda *_: None,
             on_contract=lambda *_: None,
         )
@@ -231,7 +232,6 @@ class TestRunTwoPhase:
             fetch_expiries=fetch_expiries,
             fetch_contracts=fetch_contracts,
             run_parallel=_sync_run_parallel,
-            run_parallel_contracts=_sync_run_parallel,
             on_expiry_cell=lambda c, e, x: seen_expiry.append((c, len(e), x is None)),
             on_contract=lambda j, n, x: seen_contract.append((j, n, x is None)),
         )
@@ -246,11 +246,113 @@ class TestRunTwoPhase:
             fetch_expiries=lambda _c: (_ for _ in ()).throw(RuntimeError("boom")),
             fetch_contracts=lambda _j: 0,
             run_parallel=_sync_run_parallel,
-            run_parallel_contracts=_sync_run_parallel,
             on_expiry_cell=lambda _c, e, x: captured.append((len(e), x is not None)),
             on_contract=lambda *_: None,
         )
         assert captured == [(0, True)]  # empty expiries + exc present
+
+
+# ────────────────────────────────────────────────────────────────────────
+# cells_to_pull — Phase-1 incremental skip (immutable past years)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestCellsToPull:
+    def test_skips_settled_past_year(self) -> None:
+        cells = [("NSE", "NIFTY", 2023), ("NSE", "NIFTY", 2025)]
+        settled = frozenset({("NSE", "NIFTY", 2023)})
+        # 2023 settled + past → skipped; 2025 (current) always pulled.
+        assert cells_to_pull(cells, settled=settled, current_year=2025) == [("NSE", "NIFTY", 2025)]
+
+    def test_current_year_always_pulled_even_if_settled(self) -> None:
+        cells = [("NSE", "NIFTY", 2025)]
+        settled = frozenset({("NSE", "NIFTY", 2025)})
+        # New expiries appear as the year runs → never skip the current year.
+        assert cells_to_pull(cells, settled=settled, current_year=2025) == cells
+
+    def test_unsettled_past_year_pulled(self) -> None:
+        cells = [("NSE", "NIFTY", 2022)]
+        # Not in settled (e.g. missing, or a failed cell the caller excluded).
+        assert cells_to_pull(cells, settled=frozenset(), current_year=2025) == cells
+
+    def test_order_preserved(self) -> None:
+        cells = [("NSE", "Z", 2025), ("NSE", "A", 2025)]
+        assert cells_to_pull(cells, settled=frozenset(), current_year=2025) == cells
+
+    def test_empty(self) -> None:
+        assert cells_to_pull([], settled=frozenset(), current_year=2025) == []
+
+
+# ────────────────────────────────────────────────────────────────────────
+# contract_jobs_to_pull — Phase-2 incremental skip (immutable expired expiries)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestContractJobsToPull:
+    def test_skips_settled_expired(self) -> None:
+        past = ("NSE", "NIFTY", _D(2024, 1, 25))
+        future = ("NSE", "NIFTY", _D(2026, 12, 31))
+        settled = frozenset({past, future})
+        # past expiry settled → skipped; future expiry always re-pulled.
+        assert contract_jobs_to_pull([past, future], settled=settled, today=_D(2026, 5, 30)) == [
+            future
+        ]
+
+    def test_unsettled_expired_pulled_once(self) -> None:
+        past = ("NSE", "NIFTY", _D(2024, 1, 25))
+        # Expired but never captured → must be pulled.
+        assert contract_jobs_to_pull([past], settled=frozenset(), today=_D(2026, 5, 30)) == [past]
+
+    def test_future_expiry_always_pulled_even_if_settled(self) -> None:
+        fut = ("NSE", "NIFTY", _D(2026, 6, 26))
+        settled = frozenset({fut})
+        # New strikes get listed as the underlying moves → never skip live edge.
+        assert contract_jobs_to_pull([fut], settled=settled, today=_D(2026, 5, 30)) == [fut]
+
+    def test_today_exactly_on_expiry_is_live(self) -> None:
+        # expiry == today is NOT < today → still live, pulled even if settled.
+        same = ("NSE", "NIFTY", _D(2026, 5, 30))
+        settled = frozenset({same})
+        assert contract_jobs_to_pull([same], settled=settled, today=_D(2026, 5, 30)) == [same]
+
+    def test_empty(self) -> None:
+        assert contract_jobs_to_pull([], settled=frozenset(), today=_D(2026, 5, 30)) == []
+
+
+class TestRunTwoPhaseContractSkip:
+    """The Phase-2 skip wired through run_two_phase (contract_skip + today)."""
+
+    def test_contract_skip_drops_expired_settled_job(self) -> None:
+        cells = [("NSE", "A", 2024)]
+        expiries = {("NSE", "A", 2024): [_D(2024, 1, 25)]}
+        pulled: list[ContractJob] = []
+
+        run_two_phase(
+            cells,
+            fetch_expiries=lambda c: expiries[c],
+            fetch_contracts=lambda j: (pulled.append(j), 9)[1],
+            run_parallel=_sync_run_parallel,
+            on_expiry_cell=lambda *_: None,
+            on_contract=lambda *_: None,
+            contract_skip=frozenset({("NSE", "A", _D(2024, 1, 25))}),
+            today=_D(2026, 5, 30),
+        )
+        # The single discovered expiry is expired + settled → never fetched.
+        assert pulled == []
+
+    def test_no_skip_when_contract_skip_empty(self) -> None:
+        cells = [("NSE", "A", 2024)]
+        expiries = {("NSE", "A", 2024): [_D(2024, 1, 25)]}
+        report = run_two_phase(
+            cells,
+            fetch_expiries=lambda c: expiries[c],
+            fetch_contracts=lambda _j: 4,
+            run_parallel=_sync_run_parallel,
+            on_expiry_cell=lambda *_: None,
+            on_contract=lambda *_: None,
+        )
+        assert report.contract_jobs == 1
+        assert report.contracts_persisted == 4
 
 
 # ────────────────────────────────────────────────────────────────────────
