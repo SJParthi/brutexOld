@@ -1262,7 +1262,9 @@ def _run_expiries_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB
         classify_cell,
     )
     from brutex.data.instrument_store import InstrumentStore
-    from brutex.orchestrator.parallel import PoolRunParallel
+    from brutex.orchestrator.adaptive_rate_limiter import AdaptiveRateLimiterConfig
+    from brutex.orchestrator.parallel import PoolRunParallel, workers_to_saturate
+    from brutex.orchestrator.phase_throughput import PhaseThroughput
     from brutex.orchestrator.retry import retry_call
     from brutex.orchestrator.universe_phases import (
         ExpiryCell,
@@ -1304,19 +1306,33 @@ def _run_expiries_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB
             cells_skipped=len(all_cells) - len(todo),
         )
 
+        # Size the pool to SATURATE the rate bucket (DEC-UNIVERSE-PULL-8RPS-001):
+        # at ~3 s/call, 8 r/s needs ~24 calls in flight, not 8 — fewer leaves the
+        # workers idle-waiting on the network (the 2.75 r/s the live run hit). The
+        # bucket still caps the rate at ≤ max_rps (Rule #6); more workers only
+        # fill idle latency. `throughput` measures the achieved r/s so the log
+        # proves where the rate actually landed.
+        max_rps = AdaptiveRateLimiterConfig.from_env().max_rps
+        pool = PoolRunParallel(workers_to_saturate(max_rps))
+        throughput = PhaseThroughput()
+
         def _fetch(cell: ExpiryCell) -> int:
             exchange, underlying, year = cell
-            # guard.call serializes the shared SDK across workers (#6) + re-mints
-            # once on an auth error (#2); retry_call adds transient backoff.
-            result = retry_call(
-                lambda: guard.call(lambda: expiry_fetcher.fetch(underlying, exchange, year=year)),
-                retry_on=VendorSdkError,
-            )
+            # guard.call runs the (thread-safe) SDK call WITHOUT a lock + re-mints
+            # once on an auth error (#2); retry_call adds transient backoff. The
+            # `track()` block times the round-trip + counts in-flight concurrency.
+            with throughput.track():
+                result = retry_call(
+                    lambda: guard.call(
+                        lambda: expiry_fetcher.fetch(underlying, exchange, year=year)
+                    ),
+                    retry_on=VendorSdkError,
+                )
             return len(result.records)
 
         discovered = 0
         failures = 0
-        for outcome in PoolRunParallel()(_fetch, todo):
+        for outcome in pool(_fetch, todo):
             exchange, underlying, year = outcome.item
             fetched_at = datetime.now(UTC)
             if outcome.ok:
@@ -1366,7 +1382,16 @@ def _run_expiries_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB
             "expiries_discovered": discovered,
             "failures": failures,
         }
-        log.info("universe.expiries.done", run_id=run_id, **summary)
+        # Throughput telemetry (achieved_rps / latency / peak_in_flight) rides the
+        # done line — NOT the returned int summary — so the operator sees exactly
+        # where the rate landed vs the max_rps ceiling each run.
+        log.info(
+            "universe.expiries.done",
+            run_id=run_id,
+            target_rps=max_rps,
+            **summary,
+            **throughput.snapshot().as_log_fields(),
+        )
         return summary
     finally:
         if owns_store:
@@ -1394,7 +1419,9 @@ def _run_contracts_phase(  # pragma: no cover — live Groww creds + SDK + DuckD
     from brutex.adapters.groww.client import VendorSdkError
     from brutex.data.coverage_ledger import STATUS_COMPLETE, CoverageRecord
     from brutex.data.instrument_store import InstrumentStore
-    from brutex.orchestrator.parallel import PoolRunParallel
+    from brutex.orchestrator.adaptive_rate_limiter import AdaptiveRateLimiterConfig
+    from brutex.orchestrator.parallel import PoolRunParallel, workers_to_saturate
+    from brutex.orchestrator.phase_throughput import PhaseThroughput
     from brutex.orchestrator.retry import retry_call
     from brutex.orchestrator.universe_phases import (
         ContractJob,
@@ -1444,14 +1471,25 @@ def _run_contracts_phase(  # pragma: no cover — live Groww creds + SDK + DuckD
             jobs_skipped=len(all_jobs) - len(todo),
         )
 
+        # Saturate the rate bucket (DEC-UNIVERSE-PULL-8RPS-001) — this is the big
+        # phase (~19 k jobs), where latency-bound 2.75 r/s vs rate-bound 8 r/s is
+        # ~115 min vs ~40 min. The bucket still caps at ≤ max_rps (Rule #6).
+        max_rps = AdaptiveRateLimiterConfig.from_env().max_rps
+        pool = PoolRunParallel(workers_to_saturate(max_rps))
+        throughput = PhaseThroughput()
+
         def _fetch(job: ContractJob) -> int:
             exchange, underlying, expiry = job
-            # guard.call serializes the shared SDK across workers (#6) + re-mints
-            # once on an auth error (#2); retry_call adds transient backoff.
-            result = retry_call(
-                lambda: guard.call(lambda: contract_fetcher.fetch(underlying, exchange, expiry)),
-                retry_on=VendorSdkError,
-            )
+            # guard.call runs the (thread-safe) SDK call WITHOUT a lock + re-mints
+            # once on an auth error (#2); retry_call adds transient backoff. The
+            # `track()` block times the round-trip + counts in-flight concurrency.
+            with throughput.track():
+                result = retry_call(
+                    lambda: guard.call(
+                        lambda: contract_fetcher.fetch(underlying, exchange, expiry)
+                    ),
+                    retry_on=VendorSdkError,
+                )
             return len(result.records)
 
         persisted = 0
@@ -1460,7 +1498,7 @@ def _run_contracts_phase(  # pragma: no cover — live Groww creds + SDK + DuckD
         # run — upgraded expiries_only → complete after the loop so /coverage
         # only reads "complete" once BOTH phases are done for the cell.
         completed_cells: set[tuple[str, str, int]] = set()
-        for outcome in PoolRunParallel()(_fetch, todo):
+        for outcome in pool(_fetch, todo):
             exchange, underlying, _expiry = outcome.item
             if outcome.ok:
                 n = outcome.result or 0
@@ -1507,7 +1545,13 @@ def _run_contracts_phase(  # pragma: no cover — live Groww creds + SDK + DuckD
             "failures": failures,
             "needs_expiries_first": 0,
         }
-        log.info("universe.contracts.done", run_id=run_id, **summary)
+        log.info(
+            "universe.contracts.done",
+            run_id=run_id,
+            target_rps=max_rps,
+            **summary,
+            **throughput.snapshot().as_log_fields(),
+        )
         return summary
     finally:
         if owns_store:

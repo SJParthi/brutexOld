@@ -17,15 +17,71 @@ records it and moves on).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Final
 
 from brutex.orchestrator.universe_phases import ItemResult
 
-#: Default worker count — matches the adapter's start-8 r/s budget
-#: (DEC-UNIVERSE-PULL-PARALLEL-001): a handful of in-flight requests saturates
-#: the shared token bucket, which (not the pool) is the rate governor.
+#: Default worker count when callers do not size the pool to the rate budget.
+#: NOTE (DEC-UNIVERSE-PULL-8RPS-001): 8 workers does NOT imply 8 r/s. Throughput
+#: is ``in_flight / latency`` (Little's law) capped by the token bucket; a slow
+#: per-call latency leaves 8 workers idle-waiting, so the achieved rate sits
+#: *below* the bucket ceiling (the live expiries run measured 2.75 r/s at an
+#: 8 r/s ceiling, ~2.9 s/call). Use :func:`workers_to_saturate` to size the pool
+#: to the bucket ceiling; this default is the fallback for callers that don't.
 DEFAULT_MAX_WORKERS = 8
+
+#: Hard ceiling on pool fan-out — bounds the count of concurrent open sockets to
+#: the vendor regardless of the latency budget. The token bucket caps the *rate*
+#: (≤ ``max_rps``, Rule #6) independent of fan-out, so this only limits how many
+#: requests are simultaneously *in flight*, never how many per second.
+MAX_FANOUT: Final[int] = 32
+
+#: Conservative per-call latency budget (seconds) used to size the pool. Set
+#: from the live 2026-05-30 expiries run (~2.9 s mean ``get_expiries``
+#: round-trip); the :mod:`~brutex.orchestrator.phase_throughput` telemetry now
+#: measures the real value each run so this can be tuned from evidence.
+DEFAULT_LATENCY_BUDGET_S: Final[float] = 3.0
+
+
+def workers_to_saturate(
+    max_rps: float,
+    latency_budget_s: float = DEFAULT_LATENCY_BUDGET_S,
+    *,
+    cap: int = MAX_FANOUT,
+) -> int:
+    """Pool width that keeps the rate bucket — not network latency — the governor.
+
+    Little's law: to *sustain* ``max_rps`` calls per second when each call takes
+    ``latency_budget_s`` to return, ``max_rps × latency_budget_s`` calls must be
+    in flight at once. Fewer workers than that and the pool is the bottleneck
+    (latency-bound, achieved rate < ceiling); at or above it the token bucket is
+    (rate-bound, achieved rate ≈ ceiling). The result is clamped to
+    ``[1, cap]`` — never zero (always make progress), never more than ``cap``
+    concurrent sockets. The bucket still enforces ``≤ max_rps`` (Rule #6), so
+    over-provisioning workers only fills idle latency, never exceeds the rate.
+
+    Parameters
+    ----------
+    max_rps
+        The token bucket's target/ceiling rate (e.g. the adaptive limiter's
+        ``max_rps``). A non-positive value sizes to a single worker.
+    latency_budget_s
+        Assumed per-call round-trip seconds. Non-positive sizes to one worker.
+    cap
+        Upper bound on concurrent in-flight requests (default :data:`MAX_FANOUT`).
+
+    Returns
+    -------
+    int
+        Worker count in ``[1, cap]``.
+    """
+    if max_rps <= 0.0 or latency_budget_s <= 0.0:
+        return 1
+    needed = math.ceil(max_rps * latency_budget_s)
+    return max(1, min(cap, needed))
 
 
 class PoolRunParallel:
@@ -76,4 +132,10 @@ class PoolRunParallel:
                     yield ItemResult(item=item, ok=True, result=result, exc=None)
 
 
-__all__ = ["DEFAULT_MAX_WORKERS", "PoolRunParallel"]
+__all__ = [
+    "DEFAULT_LATENCY_BUDGET_S",
+    "DEFAULT_MAX_WORKERS",
+    "MAX_FANOUT",
+    "PoolRunParallel",
+    "workers_to_saturate",
+]
