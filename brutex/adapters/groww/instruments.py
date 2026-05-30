@@ -33,6 +33,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
@@ -61,6 +62,93 @@ DEFAULT_CSV_URL: Final[str] = "https://growwapi-assets.groww.in/instruments/inst
 
 #: The host the production fetch is locked to (SSRF guard in ``from_env``).
 _ALLOWED_HOST: Final[str] = "growwapi-assets.groww.in"
+
+#: Total wall-clock deadline (seconds) for the instrument-master download. A
+#: per-socket ``urlopen`` timeout alone CANNOT bound a slow-trickle server:
+#: each individual read beats the socket timeout while the whole transfer
+#: stalls for minutes, which previously hung the "Fetch all expiries" phase
+#: indefinitely (the phase worker's ``finally`` never ran, so its single-flight
+#: lock never released and the button stayed disabled forever). This caps the
+#: WHOLE transfer so a stall RAISES instead of hanging.
+MASTER_DOWNLOAD_DEADLINE_S: Final[float] = 60.0
+
+#: Hard cap on the downloaded body. The real master CSV is a few MB; this
+#: guards against an unbounded / runaway body exhausting memory.
+MASTER_DOWNLOAD_MAX_BYTES: Final[int] = 256 * 1024 * 1024  # 256 MiB
+
+#: Per-read chunk size for the bounded download (1 MiB).
+_DOWNLOAD_CHUNK_BYTES: Final[int] = 1 << 20
+
+
+class InstrumentDownloadError(Exception):
+    """The instrument-master download exceeded its time deadline or size cap.
+
+    A typed error (not a bare hang) so the phase worker's ``except`` logs the
+    reason + its ``finally`` releases the single-flight lock — the operator
+    sees ``universe.phase.failed`` and can retry instead of a stuck button.
+    """
+
+
+def read_with_deadline(
+    resp: Any,
+    *,
+    deadline_s: float = MASTER_DOWNLOAD_DEADLINE_S,
+    max_bytes: int = MASTER_DOWNLOAD_MAX_BYTES,
+    chunk_bytes: int = _DOWNLOAD_CHUNK_BYTES,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> bytes:
+    """Read *resp* to EOF in chunks, bounded by a total deadline + size cap.
+
+    Reads ``resp.read(chunk_bytes)`` repeatedly until EOF (empty read). Before
+    each read it checks the elapsed wall-clock against *deadline_s*, and after
+    each it checks the accumulated size against *max_bytes* — so a stalled or
+    runaway download RAISES :class:`InstrumentDownloadError` instead of hanging
+    the caller. Pure + injectable (*monotonic* + a file-like *resp*) so the
+    deadline / size-cap logic is fully unit-testable offline, even though the
+    real network wiring in :meth:`InstrumentMasterFetcher.from_env` is not.
+
+    Parameters
+    ----------
+    resp
+        A file-like with ``read(n) -> bytes`` (e.g. an ``http.client``
+        response); ``b""`` signals EOF.
+    deadline_s
+        Total wall-clock budget for the whole transfer.
+    max_bytes
+        Maximum accumulated body size before aborting.
+    chunk_bytes
+        Bytes requested per ``read`` call.
+    monotonic
+        Monotonic clock source (injected in tests).
+
+    Returns
+    -------
+    bytes
+        The full body.
+
+    Raises
+    ------
+    InstrumentDownloadError
+        If the elapsed time exceeds *deadline_s* or the body exceeds
+        *max_bytes*.
+    """
+    start = monotonic()
+    buf = bytearray()
+    while True:
+        if monotonic() - start > deadline_s:
+            raise InstrumentDownloadError(
+                f"instrument-master download exceeded {deadline_s:.0f}s deadline "
+                f"after {len(buf)} bytes"
+            )
+        chunk = resp.read(chunk_bytes)
+        if not chunk:
+            return bytes(buf)
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            raise InstrumentDownloadError(
+                f"instrument-master download exceeded {max_bytes}-byte cap (got {len(buf)} bytes)"
+            )
+
 
 #: Columns that MUST be present in the CSV header; a missing one = schema drift.
 _REQUIRED_COLUMNS: Final[frozenset[str]] = frozenset(
@@ -451,7 +539,10 @@ class InstrumentMasterFetcher:
             with urllib.request.urlopen(  # nosec B310 — scheme==https + host allow-listed above (SSRF-guarded)  # noqa: S310
                 url, timeout=30
             ) as resp:
-                raw: bytes = resp.read()
+                # Bound the WHOLE transfer (not just each socket op) so a
+                # slow-trickle stall raises instead of hanging the expiries
+                # phase forever (DEC-PULL-TIMEOUT-DEFER-001 closure).
+                raw: bytes = read_with_deadline(resp)
             try:
                 return raw.decode("utf-8")
             except UnicodeDecodeError as exc:
@@ -472,6 +563,10 @@ class InstrumentMasterFetcher:
 
 __all__ = [
     "DEFAULT_CSV_URL",
+    "MASTER_DOWNLOAD_DEADLINE_S",
+    "MASTER_DOWNLOAD_MAX_BYTES",
+    "InstrumentDownloadError",
     "InstrumentMasterFetcher",
     "InstrumentRefreshResult",
+    "read_with_deadline",
 ]
