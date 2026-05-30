@@ -13,13 +13,16 @@ import pytest
 from brutex.orchestrator.retry import (
     BACKOFF_SCHEDULE_SECONDS,
     BROKER_EXCEPTION_CLASSIFICATION,
+    DEFAULT_MAX_ATTEMPTS,
     JITTER_FRACTION,
     REQUIRED_EXCEPTION_NAMES,
+    RETRYABLE_OUTCOMES,
     UnknownExceptionError,
     backoff_delay,
     classify_exception,
     classify_exception_name,
     outcome_severity,
+    retry_call,
 )
 from brutex.orchestrator.state import Outcome
 
@@ -329,3 +332,137 @@ class TestOutcomeSeverity:
             assert sev in ("info", "warn", "error"), (
                 f"{outcome} returned unexpected severity {sev!r}"
             )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# retry_call — bounded "never give up on a recoverable error" driver
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestRetryCall:
+    """Transient → backoff + retry; permanent → surface at once; non-vendor
+    → never caught. Deterministic via injected ``sleep`` recorder + seeded RNG.
+    """
+
+    def test_retryable_outcomes_are_the_warn_tier(self) -> None:
+        assert (
+            frozenset({Outcome.RATE_LIMIT, Outcome.TIMEOUT, Outcome.GENERIC_API_ERROR})
+            == RETRYABLE_OUTCOMES
+        )
+
+    def test_default_max_attempts_matches_backoff_ladder(self) -> None:
+        assert len(BACKOFF_SCHEDULE_SECONDS) == DEFAULT_MAX_ATTEMPTS
+
+    def test_returns_first_success_without_sleeping(self) -> None:
+        sleeps: list[float] = []
+        result = retry_call(lambda: "ok", retry_on=VendorBaseException, sleep=sleeps.append)
+        assert result == "ok"
+        assert sleeps == []
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_max_attempts_below_one_raises(self, bad: int) -> None:
+        with pytest.raises(ValueError, match="max_attempts must be >= 1"):
+            retry_call(lambda: "ok", retry_on=VendorBaseException, max_attempts=bad)
+
+    def test_permanent_error_propagates_without_retry(self) -> None:
+        sleeps: list[float] = []
+
+        def _boom() -> str:
+            raise VendorAPIBadRequestException("nope")
+
+        with pytest.raises(VendorAPIBadRequestException):
+            retry_call(_boom, retry_on=VendorBaseException, sleep=sleeps.append)
+        assert sleeps == []  # BAD_REQUEST is not retryable — surfaces at once
+
+    def test_not_found_propagates_without_retry(self) -> None:
+        sleeps: list[float] = []
+
+        def _missing() -> str:
+            raise VendorAPINotFoundException("gone")
+
+        with pytest.raises(VendorAPINotFoundException):
+            retry_call(_missing, retry_on=VendorBaseException, sleep=sleeps.append)
+        assert sleeps == []
+
+    def test_transient_then_success(self) -> None:
+        calls = {"n": 0}
+
+        def _flaky() -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise VendorAPIRateLimitException("429")
+            return "recovered"
+
+        sleeps: list[float] = []
+        result = retry_call(
+            _flaky, retry_on=VendorBaseException, sleep=sleeps.append, rng=random.Random(7)
+        )
+        assert result == "recovered"
+        assert calls["n"] == 2
+        assert len(sleeps) == 1
+
+    def test_generic_api_error_is_retryable(self) -> None:
+        calls = {"n": 0}
+
+        def _flaky() -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise VendorAPIException("blip")
+            return "ok"
+
+        sleeps: list[float] = []
+        result = retry_call(
+            _flaky, retry_on=VendorBaseException, sleep=sleeps.append, rng=random.Random(1)
+        )
+        assert result == "ok"
+        assert len(sleeps) == 1
+
+    def test_transient_backoff_schedule_is_deterministic(self) -> None:
+        """Sleeps follow backoff_delay(1), backoff_delay(2), … with the injected
+        RNG — exact + replayable (no reliance on real timing)."""
+        seed = 42
+
+        def _always() -> str:
+            raise VendorAPITimeoutException("slow")
+
+        sleeps: list[float] = []
+        with pytest.raises(VendorAPITimeoutException):
+            retry_call(
+                _always,
+                retry_on=VendorBaseException,
+                max_attempts=3,
+                sleep=sleeps.append,
+                rng=random.Random(seed),
+            )
+        replay = random.Random(seed)
+        expected = [backoff_delay(1, rng=replay), backoff_delay(2, rng=replay)]
+        assert sleeps == expected  # 2 sleeps (before attempts 2 and 3); none on the final raise
+
+    def test_transient_exhausts_attempts_and_raises(self) -> None:
+        calls = {"n": 0}
+
+        def _always() -> str:
+            calls["n"] += 1
+            raise VendorAPIRateLimitException("429")
+
+        sleeps: list[float] = []
+        with pytest.raises(VendorAPIRateLimitException):
+            retry_call(
+                _always,
+                retry_on=VendorBaseException,
+                max_attempts=4,
+                sleep=sleeps.append,
+                rng=random.Random(3),
+            )
+        assert calls["n"] == 4  # tried exactly max_attempts times
+        assert len(sleeps) == 3  # slept between attempts, never after the last
+
+    def test_non_vendor_exception_is_never_caught(self) -> None:
+        sleeps: list[float] = []
+
+        def _bug() -> str:
+            raise KeyError("not a vendor error")
+
+        with pytest.raises(KeyError):
+            retry_call(_bug, retry_on=VendorBaseException, sleep=sleeps.append)
+        assert sleeps == []  # a non-vendor bug must surface, never spin

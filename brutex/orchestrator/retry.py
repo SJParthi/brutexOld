@@ -36,6 +36,8 @@ Usage from the worker loop::
 from __future__ import annotations
 
 import random
+import time
+from collections.abc import Callable
 from typing import Final
 
 from brutex.models import BruteXError
@@ -240,6 +242,88 @@ def backoff_delay(
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Bounded retry driver — "never give up on a recoverable error"
+# ────────────────────────────────────────────────────────────────────────
+
+#: Outcomes worth retrying — the transient ("warn") tier. Everything else is
+#: either already a success (``OK_*`` / ``NOT_FOUND``) or a permanent client
+#: failure (``BAD_REQUEST`` / ``AUTH_FAILED`` / ``AUTHZ_FAILED``) that must
+#: surface at once — retrying a deterministic 400/401 would loop forever,
+#: which is a hang, not resilience.
+RETRYABLE_OUTCOMES: Final[frozenset[Outcome]] = frozenset(
+    {Outcome.RATE_LIMIT, Outcome.TIMEOUT, Outcome.GENERIC_API_ERROR}
+)
+
+#: Default attempt ceiling for one recoverable call. Matches the 10-slot
+#: backoff ladder; the caller treats exhaustion as a hard failure.
+DEFAULT_MAX_ATTEMPTS: Final[int] = 10
+
+
+def retry_call[T](
+    fn: Callable[[], T],
+    *,
+    retry_on: type[BaseException],
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    sleep: Callable[[float], None] = time.sleep,
+    rng: random.Random | None = None,
+) -> T:
+    """Invoke *fn*, retrying transient Groww failures with exponential backoff.
+
+    Per the operator decree (2026-05-30) the universe pull must "never give up
+    as long as a proper successful response is reachable": a transient failure
+    (:data:`RETRYABLE_OUTCOMES` — rate-limit / timeout / generic) is retried up
+    to *max_attempts*, spaced by :func:`backoff_delay`. A permanent failure
+    (bad-request / auth / authz / not-found) re-raises on the first occurrence —
+    looping on a deterministic error is a hang, not resilience.
+
+    Only *retry_on* (the neutral vendor base
+    :class:`~brutex.adapters.groww.client.VendorSdkError` in production) is
+    caught + classified; any other exception propagates untouched (a non-vendor
+    error is a programmer bug, never a recoverable API condition).
+
+    Parameters
+    ----------
+    fn
+        Zero-arg thunk performing one API call; its return value passes through
+        unchanged on success.
+    retry_on
+        Exception base to catch + classify (production:
+        :class:`~brutex.adapters.groww.client.VendorSdkError`).
+    max_attempts
+        Hard ceiling on total attempts (``>= 1``). Exhaustion re-raises the last
+        transient exception.
+    sleep
+        Delay primitive (injected ``time.sleep``). Tests pass a recorder to
+        assert the backoff schedule without real waits.
+    rng
+        Optional seeded RNG forwarded to :func:`backoff_delay` for deterministic
+        jitter under test.
+
+    Returns
+    -------
+    _T
+        The value returned by *fn* on its first successful call.
+
+    Raises
+    ------
+    ValueError
+        If *max_attempts* < 1.
+    """
+    if max_attempts < 1:
+        raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
+    attempts = 0
+    while True:
+        try:
+            return fn()
+        except retry_on as exc:
+            attempts += 1
+            outcome = classify_exception(exc)
+            if outcome not in RETRYABLE_OUTCOMES or attempts >= max_attempts:
+                raise
+            sleep(backoff_delay(attempts, rng=rng))
+
+
+# ────────────────────────────────────────────────────────────────────────
 # High-level classification summary — used by dashboards / audit log
 # ────────────────────────────────────────────────────────────────────────
 
@@ -262,11 +346,14 @@ def outcome_severity(outcome: Outcome) -> str:
 __all__ = [
     "BACKOFF_SCHEDULE_SECONDS",
     "BROKER_EXCEPTION_CLASSIFICATION",
+    "DEFAULT_MAX_ATTEMPTS",
     "JITTER_FRACTION",
     "REQUIRED_EXCEPTION_NAMES",
+    "RETRYABLE_OUTCOMES",
     "UnknownExceptionError",
     "backoff_delay",
     "classify_exception",
     "classify_exception_name",
     "outcome_severity",
+    "retry_call",
 ]
