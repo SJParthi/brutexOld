@@ -44,6 +44,40 @@ class CandleParseError(BruteXError):
     """A Groww candle row violates the documented shape or value rules."""
 
 
+class EmptyCandleRow(CandleParseError):
+    """A candle row carries NO OHLC data (every price absent or zero).
+
+    A no-trade / halted / not-yet-listed / illiquid period legitimately returns
+    a bar with null/empty/zero OHLC — there is simply no price to store. This is
+    a GRACEFUL skip (the bar carries no information), explicitly distinct from a
+    partially-malformed bar (some prices present, some broken / out of range)
+    which stays a plain :class:`CandleParseError`. Callers (``persist``) drop an
+    empty bar quietly (info-level count) and quarantine a malformed one
+    (warning) — neither is ever fatal to the chunk (DEC-CANDLE-EMPTY-BAR-001).
+    """
+
+
+def _is_absent(value: object) -> bool:
+    """True for a vendor "no value" cell — ``None`` or an empty/whitespace string."""
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _has_no_price(value: object) -> bool:
+    """True when a price cell carries no tradeable information: absent OR zero.
+
+    A traded Indian instrument's price is never 0 (tick size ≥ 0.05, prices in
+    rupees), so an absent / empty / 0 OHLC value means "no trade in this bar".
+    An unparseable non-zero value returns ``False`` here so the strict
+    :func:`_to_price` flags it (a malformed bar, not an empty one).
+    """
+    if _is_absent(value):
+        return True
+    try:
+        return Decimal(str(value)) == 0
+    except (InvalidOperation, ValueError):
+        return False
+
+
 def _parse_timestamp(raw: object) -> datetime:
     """Parse a Groww candle timestamp to a UTC tz-aware datetime.
 
@@ -110,19 +144,30 @@ def parse_candle_row(row: Sequence[object]) -> CandleBar:
             f"[ts, o, h, l, c, vol, oi], got {len(row)}: {row!r}"
         )
     ts_raw, open_raw, high_raw, low_raw, close_raw, vol_raw, oi_raw = row
-    open_interest = None if oi_raw is None else _to_int(oi_raw, "open_interest")
+    # No-data bar: EVERY OHLC price absent/empty/zero → a no-trade / halted /
+    # unlisted period. Signal a graceful skip rather than fighting it field by
+    # field (a malformed bar with SOME real prices still falls through to the
+    # strict _to_price checks below). DEC-CANDLE-EMPTY-BAR-001.
+    if all(_has_no_price(v) for v in (open_raw, high_raw, low_raw, close_raw)):
+        raise EmptyCandleRow("candle has no OHLC data (no-trade / halted / unlisted bar)")
+    open_interest = None if _is_absent(oi_raw) else _to_int(oi_raw, "open_interest")
     return CandleBar(
         timestamp=_parse_timestamp(ts_raw),
         open=_to_price(open_raw, "open"),
         high=_to_price(high_raw, "high"),
         low=_to_price(low_raw, "low"),
         close=_to_price(close_raw, "close"),
-        volume=_to_int(vol_raw, "volume"),
+        # Spot INDICES carry no traded volume — Groww returns ``volume: null``
+        # for them (CLAUDE.md §12 "no volume on spot"; the backtesting doc's
+        # volume column is populated only for equities/F&O). An absent volume
+        # (null / empty) maps to 0 rather than quarantining the row.
+        volume=0 if _is_absent(vol_raw) else _to_int(vol_raw, "volume"),
         open_interest=open_interest,
     )
 
 
 __all__ = [
     "CandleParseError",
+    "EmptyCandleRow",
     "parse_candle_row",
 ]

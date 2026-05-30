@@ -10,7 +10,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from brutex.adapters.groww.parser import CandleParseError, parse_candle_row
+from brutex.adapters.groww.parser import (
+    CandleParseError,
+    EmptyCandleRow,
+    parse_candle_row,
+)
 
 
 def _row(
@@ -88,6 +92,12 @@ class TestVolumeAndOI:
         bar = parse_candle_row(_row(vol=735060))
         assert bar.volume == 735060
 
+    def test_index_null_volume_maps_to_zero(self) -> None:
+        # Spot INDICES carry no traded volume — Groww returns volume=null
+        # (CLAUDE.md §12). A null volume is a valid bar → 0, not a parse error.
+        bar = parse_candle_row(_row(vol=None))
+        assert bar.volume == 0
+
     def test_bool_volume_rejected(self) -> None:
         with pytest.raises(CandleParseError, match="volume must be an integer"):
             parse_candle_row(_row(vol=True))
@@ -125,3 +135,35 @@ class TestOHLCValidationGuard:
     def test_negative_volume_propagates_value_error(self) -> None:
         with pytest.raises(ValueError, match="volume must be non-negative"):
             parse_candle_row(_row(vol=-5))
+
+
+class TestEmptyBar:
+    """No-data bars (null/empty/zero OHLC) are a GRACEFUL skip (EmptyCandleRow),
+    distinct from a partially-malformed bar (DEC-CANDLE-EMPTY-BAR-001)."""
+
+    def test_all_null_ohlc_is_empty_candle(self) -> None:
+        with pytest.raises(EmptyCandleRow):
+            parse_candle_row(_row(o=None, h=None, low=None, c=None, vol=None))
+
+    def test_all_empty_string_ohlc_is_empty_candle(self) -> None:
+        with pytest.raises(EmptyCandleRow):
+            parse_candle_row(_row(o="", h="  ", low="", c=""))
+
+    def test_all_zero_ohlc_is_empty_candle(self) -> None:
+        # A traded Indian instrument never prices at 0 → all-zero == no trade.
+        with pytest.raises(EmptyCandleRow):
+            parse_candle_row(_row(o=0, h=0.0, low="0", c=0))
+
+    def test_partial_null_ohlc_is_malformed_not_empty(self) -> None:
+        # open absent but high/low/close present → a MALFORMED bar (warned),
+        # NOT an empty one (EmptyCandleRow is a CandleParseError subclass).
+        with pytest.raises(CandleParseError) as ei:
+            parse_candle_row(_row(o=None))
+        assert not isinstance(ei.value, EmptyCandleRow)
+        assert "unparseable open price" in str(ei.value)
+
+    def test_empty_string_volume_maps_to_zero(self) -> None:
+        assert parse_candle_row(_row(vol="")).volume == 0
+
+    def test_empty_string_oi_is_none(self) -> None:
+        assert parse_candle_row(_row(oi="  ")).open_interest is None
