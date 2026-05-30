@@ -741,6 +741,8 @@ def build_app(
     async def api_universe_pull(
         symbol: str = Query(...),
         year: int | None = Query(default=None),
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull — ingest one instrument's candles.
 
@@ -748,6 +750,12 @@ def build_app(
         :func:`brutex.dashboard.pull_controller.pull_candles`. ``symbol``
         may be a spot index/stock OR a contract's groww_symbol (a future
         or a CE/PE option) — the controller is instrument-agnostic.
+        ``from_date`` / ``to_date`` are optional inclusive ISO
+        ``YYYY-MM-DD`` bounds (the from/to candle picker); when either is
+        given they select an explicit, clamped ``[2020-01-01, today]``
+        range, otherwise the full calendar ``year`` is pulled. A malformed
+        date or a ``from`` after ``to`` surfaces as a 400 with the real
+        reason (DEC-PULL-ERROR-VISIBILITY-001).
         ``dry_run`` is forced ``True`` automatically when Groww
         credentials are not present in the environment (via the testable
         :func:`brutex.dashboard.pull_controller.groww_creds_present`
@@ -755,12 +763,21 @@ def build_app(
         attempts a live network call without creds.
         """
         dry_run = not groww_creds_present()
-        _LOG.info("universe.pull.requested", symbol=symbol, year=year, dry_run=dry_run)
+        _LOG.info(
+            "universe.pull.requested",
+            symbol=symbol,
+            year=year,
+            from_date=from_date,
+            to_date=to_date,
+            dry_run=dry_run,
+        )
         try:
             report = pull_candles(
                 symbol,
                 lake_root=_resolve_pull_lake_root(instrument_store, dry_run=dry_run),
                 year=year,
+                from_date=from_date,
+                to_date=to_date,
                 dry_run=dry_run,
             )
         except Exception as exc:  # surface the REAL reason, never swallow it
