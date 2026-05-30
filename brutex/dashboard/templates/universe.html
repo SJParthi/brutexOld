@@ -541,10 +541,18 @@ async function runPull(symbol, label) {
       grid.appendChild(d);
     });
     const completed = report.total_completed || 0;
+    const failed = report.total_failed || 0;
     document.getElementById("counter").textContent =
       completed.toLocaleString('en-IN');
-    if (completed === 0) {
-      // No chunk persisted across any timeframe → the vendor returned no
+    if (completed === 0 && failed > 0) {
+      // Chunks ERRORED (vendor rejected the request) — this is NOT "no data".
+      // Tell the operator the truth + where the real reason is logged, so a
+      // 100%-failed pull (e.g. a wrong segment for an index) is never mistaken
+      // for an empty range. The per-chunk reason is in /logs (ingest.chunk.failed).
+      document.getElementById("pulltitle").innerHTML =
+        `<span style="color:var(--red)">✕</span> ${esc(label)} — ${failed.toLocaleString('en-IN')} chunk(s) failed across ${tfs.length} timeframes · see <a href="/logs" style="color:var(--blue)">/logs</a> (ingest.chunk.failed) for the reason`;
+    } else if (completed === 0) {
+      // No chunk persisted AND none failed → the vendor genuinely returned no
       // data (or every chunk was already settled). Don't show a green ✓.
       document.getElementById("pulltitle").innerHTML =
         `<span style="color:var(--yellow)">∅</span> ${esc(label)} — no data returned`;

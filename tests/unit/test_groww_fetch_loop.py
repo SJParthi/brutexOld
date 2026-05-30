@@ -169,3 +169,56 @@ class TestMixedRun:
             wm,
         )
         assert (out.completed, out.no_data, out.failed, out.skipped) == (1, 1, 1, 0)
+
+
+class TestFailureVisibility:
+    """Every quarantined chunk must surface its REAL vendor reason (not just a
+    count) — the silent 100%-failed pull was indistinguishable from no-data
+    before this. DEC-PULL-ERROR-VISIBILITY-001 / observability."""
+
+    def test_terminal_failure_logs_the_real_reason(self) -> None:
+        from structlog.testing import capture_logs
+
+        wm = FetchWatermark()
+        fetcher = _FakeFetcher(
+            [VendorAPIBadRequestException("400: invalid segment CASH for index NSE-NIFTY")]
+        )
+        with capture_logs() as logs:
+            out = _run(fetcher, [_key()], wm)
+        assert out.failed == 1
+        failed = [e for e in logs if e["event"] == "ingest.chunk.failed"]
+        assert len(failed) == 1
+        rec = failed[0]
+        assert rec["symbol"] == "NSE-NIFTY"
+        assert rec["interval"] == "1m"
+        assert rec["error_type"] == "VendorAPIBadRequestException"
+        assert "invalid segment" in rec["error"]
+        assert rec["retries_exhausted"] is None
+        assert rec["log_level"] == "warning"
+
+    def test_transient_exhaustion_logs_with_retries_exhausted(self) -> None:
+        from structlog.testing import capture_logs
+
+        wm = FetchWatermark()
+        # max_retries=1 → one retry then quarantine; needs two rate-limit hits.
+        fetcher = _FakeFetcher(
+            [
+                VendorAPIRateLimitException("429 too many"),
+                VendorAPIRateLimitException("429 too many"),
+            ]
+        )
+        with capture_logs() as logs:
+            out = _run(fetcher, [_key()], wm, max_retries=1)
+        assert out.failed == 1
+        rec = next(e for e in logs if e["event"] == "ingest.chunk.failed")
+        assert rec["outcome"] == "RATE_LIMIT"
+        assert rec["retries_exhausted"] == 1
+        assert "429" in rec["error"]
+
+    def test_no_data_and_success_do_not_log_failure(self) -> None:
+        from structlog.testing import capture_logs
+
+        wm = FetchWatermark()
+        with capture_logs() as logs:
+            _run(_FakeFetcher([["bar"], []]), [_key("A"), _key("B")], wm)
+        assert not [e for e in logs if e["event"] == "ingest.chunk.failed"]

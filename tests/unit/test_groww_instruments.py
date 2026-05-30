@@ -350,3 +350,47 @@ class TestIndexToleranceIsIndexOnly:
         row: dict[str, str] = dict(zip(_HEADER.split(","), raw.split(","), strict=True))
         with pytest.raises(TickSizeFormatError):
             _row_to_instrument(row)
+
+
+class TestReadWithDeadline:
+    """`read_with_deadline` bounds the master download by a TOTAL wall-clock
+    deadline + size cap, so a slow-trickle stall raises instead of hanging the
+    expiries phase forever (the per-socket urlopen timeout cannot catch this).
+    """
+
+    class _FakeResp:
+        """A file-like returning queued chunks; ``b""`` is EOF."""
+
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = list(chunks)
+
+        def read(self, _n: int) -> bytes:
+            return self._chunks.pop(0) if self._chunks else b""
+
+    def test_reads_all_chunks_to_eof(self) -> None:
+        from brutex.adapters.groww.instruments import read_with_deadline
+
+        resp = self._FakeResp([b"abc", b"def", b"gh"])
+        assert read_with_deadline(resp, monotonic=lambda: 0.0) == b"abcdefgh"
+
+    def test_raises_on_deadline_exceeded(self) -> None:
+        from brutex.adapters.groww.instruments import (
+            InstrumentDownloadError,
+            read_with_deadline,
+        )
+
+        # monotonic: start=0 (loop1 check 0 ok), loop2 check=100 > 10 deadline.
+        ticks = iter([0.0, 0.0, 100.0])
+        resp = self._FakeResp([b"partial", b"more"])
+        with pytest.raises(InstrumentDownloadError, match="exceeded 10s deadline"):
+            read_with_deadline(resp, deadline_s=10.0, monotonic=lambda: next(ticks))
+
+    def test_raises_on_size_cap_exceeded(self) -> None:
+        from brutex.adapters.groww.instruments import (
+            InstrumentDownloadError,
+            read_with_deadline,
+        )
+
+        resp = self._FakeResp([b"way-too-big-body"])
+        with pytest.raises(InstrumentDownloadError, match="byte cap"):
+            read_with_deadline(resp, max_bytes=4, monotonic=lambda: 0.0)

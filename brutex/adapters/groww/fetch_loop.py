@@ -28,9 +28,13 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final, Protocol
 
+import structlog
+
 from brutex.data.watermark import ChunkKey, ChunkStatus, FetchWatermark
 from brutex.orchestrator.retry import backoff_delay, classify_exception
 from brutex.orchestrator.state import Outcome
+
+_LOG = structlog.get_logger("brutex.fetch")
 
 #: Outcomes that are transient → backoff + retry.
 _TRANSIENT: Final[frozenset[Outcome]] = frozenset(
@@ -58,6 +62,34 @@ class FetchOutcome:
     no_data: int
     failed: int
     skipped: int  # already-settled chunks skipped on resume
+
+
+def _log_chunk_failure(
+    key: ChunkKey,
+    outcome: Outcome,
+    exc: BaseException,
+    *,
+    retries_exhausted: int | None,
+) -> None:
+    """Emit one ``ingest.chunk.failed`` warning carrying the REAL vendor error.
+
+    Before this, a quarantined chunk only bumped a counter — so a 100%-failed
+    pull (e.g. a wrong segment for an index) looked like a silent "no data".
+    Logging the ``outcome`` + exception type + message turns every failure
+    into a diagnosable, real-time signal (Golden Rule #8 audit trail +
+    observability) without changing the quarantine behaviour.
+    """
+    _LOG.warning(
+        "ingest.chunk.failed",
+        symbol=key.groww_symbol,
+        interval=key.interval,
+        start=key.start,
+        end=key.end,
+        outcome=outcome.name,
+        error_type=type(exc).__name__,
+        error=str(exc),
+        retries_exhausted=retries_exhausted,
+    )
 
 
 def run_fetch(
@@ -117,6 +149,10 @@ def run_fetch(
                         sleep_fn(delay_fn(retry_count))
                         retry_count += 1
                         continue
+                    # Retries exhausted → quarantine. Surface the REAL vendor
+                    # reason (never swallow it — DEC-PULL-ERROR-VISIBILITY-001)
+                    # so the operator sees WHY a chunk failed, not just a count.
+                    _log_chunk_failure(key, outcome, exc, retries_exhausted=max_retries)
                     watermark.record(key, ChunkStatus.FAILED)
                     failed += 1
                     break
@@ -129,6 +165,8 @@ def run_fetch(
                     reauth_used = True
                     continue
                 # Terminal: bad-request / authz / fatal / un-refreshable auth.
+                # Log the real reason before quarantining (visibility, as above).
+                _log_chunk_failure(key, outcome, exc, retries_exhausted=None)
                 watermark.record(key, ChunkStatus.FAILED)
                 failed += 1
                 break
