@@ -81,6 +81,18 @@ class CredentialsIn(BaseModel):
     totp_secret: str
 
 
+class WipeConfirmIn(BaseModel):
+    """Request body for ``POST /api/v1/db/wipe`` — the typed-confirm guard.
+
+    Module-scope (like :class:`CredentialsIn`) so FastAPI resolves it as a
+    request BODY, not a query param. The operator must send
+    ``{"confirm": "WIPE"}``; any other value is rejected 400 before a single
+    row is deleted (DEC-DASHBOARD-WIPE-001).
+    """
+
+    confirm: str
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Snapshot dataclasses
 # ────────────────────────────────────────────────────────────────────────
@@ -473,7 +485,7 @@ def build_app(
         server of choice.
     """
     try:
-        from fastapi import FastAPI, HTTPException, Query
+        from fastapi import FastAPI, HTTPException, Query, Request
         from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
     except ImportError as exc:
         raise RuntimeError(
@@ -1017,6 +1029,47 @@ def build_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)
+
+    @app.post("/api/v1/db/wipe")
+    async def api_db_wipe(body: WipeConfirmIn, request: Request) -> JSONResponse:
+        """POST /api/v1/db/wipe — delete ALL ingested data (truncate lake tables).
+
+        The dashboard "Delete all ingested data" executor (DEC-DASHBOARD-WIPE-001).
+        Guards (all in the 100%-tested :mod:`brutex.dashboard.wipe_view`):
+        same-origin (CSRF), typed ``{"confirm": "WIPE"}``, and refuse while a
+        pull phase is mid-write. Truncates via
+        :meth:`~brutex.data.instrument_store.InstrumentStore.wipe_lake_tables`
+        (atomic under the store lock — no close/reopen, so concurrent ``/db``
+        reads can't crash). Empties ROWS only: the file is reused (DuckDB
+        doesn't shrink on DELETE) and credentials / token are NOT touched — for
+        a file-level wipe, stop the server and run ``make wipe``.
+        """
+        from brutex.dashboard.wipe_view import (
+            is_same_origin,
+            parse_wipe_confirmation,
+            wipe_refusal_reason,
+            wipe_report_payload,
+        )
+
+        if not is_same_origin(request.headers.get("origin"), request.headers.get("host")):
+            raise HTTPException(status_code=403, detail="cross-origin wipe refused")
+        if not parse_wipe_confirmation(body.confirm):
+            raise HTTPException(status_code=400, detail="type WIPE to confirm")
+        reason = wipe_refusal_reason(
+            expiries_running=_phase_busy("expiries"),
+            contracts_running=_phase_busy("contracts"),
+        )
+        if reason is not None:
+            raise HTTPException(status_code=409, detail=reason)
+        store = _require_store()
+        _LOG.info("dashboard.wipe.requested")
+        report = store.wipe_lake_tables()
+        _LOG.info(
+            "dashboard.wipe.done",
+            deleted=[[table, rows] for table, rows in report.deleted],
+            failed=[table for table, _ in report.failed],
+        )
+        return JSONResponse(wipe_report_payload(report))
 
     @app.get("/db", response_class=HTMLResponse)
     async def db_page() -> str:

@@ -203,6 +203,11 @@
     <button class="loadbtn" id="fetchContractsBtn" title="Phase 2 — pull contracts for every persisted expiry. Run 'Fetch all expiries' first.">② Fetch all contracts</button>
   </div>
   <div class="loadmsg" id="phasemsg" style="margin:-4px 24px 8px; color:var(--muted);"></div>
+  <div class="pullbar" style="border-top:1px solid var(--line); padding-top:10px;">
+    <div class="lead">Danger zone — <b>delete all ingested data</b> (instruments · expiries · contracts · coverage) from the live lake. Credentials are kept; the file is reused — to reclaim disk, stop the server then run <code>make wipe</code>.</div>
+    <button class="loadbtn" id="wipeDataBtn" style="border-color:#e5484d; color:#e5484d;" title="Empties every lake data table via the open connection — /db updates instantly, no restart needed.">🗑 Delete all ingested data</button>
+  </div>
+  <div class="loadmsg" id="wipemsg" style="margin:-4px 24px 8px; color:var(--muted);"></div>
   <div class="loadmsg" id="loadmsg" style="margin:-4px 24px 8px;"></div>
 
   <div id="pullpanel">
@@ -641,6 +646,41 @@ if (fetchContractsBtn) {
   fetchContractsBtn.addEventListener('click', () => startPhase('contracts', fetchContractsBtn));
 }
 pollPhaseStatus();  /* on load: reflect any in-flight phase */
+
+/* ── Danger zone: delete all ingested data (DEC-DASHBOARD-WIPE-001) ── */
+const wipeDataBtn = document.getElementById('wipeDataBtn');
+const wipeMsg = document.getElementById('wipemsg');
+function wipeEsc(s){ const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+if (wipeDataBtn) {
+  wipeDataBtn.addEventListener('click', async () => {
+    const typed = window.prompt('This permanently deletes ALL ingested data (instruments, expiries, contracts, coverage). Type WIPE to confirm:');
+    if (typed === null) return;                 /* cancelled */
+    if (typed !== 'WIPE') { wipeMsg.innerHTML = '✖ not deleted — type WIPE exactly to confirm.'; return; }
+    wipeDataBtn.disabled = true;
+    wipeMsg.innerHTML = 'Deleting all ingested data…';
+    try {
+      const res = await fetch('/api/v1/db/wipe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: 'WIPE' }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        wipeMsg.innerHTML = '✖ ' + wipeEsc(data.detail || ('HTTP ' + res.status));
+      } else {
+        const rows = (data.deleted || []).reduce((a, d) => a + (d.rows || 0), 0);
+        const failed = (data.failed || []).length;
+        wipeMsg.innerHTML = '✓ deleted ' + rows.toLocaleString() + ' rows across '
+          + (data.deleted || []).length + ' table(s)'
+          + (failed ? (' · ' + failed + ' failed') : '') + '. Refresh /db to confirm.';
+      }
+    } catch (e) {
+      wipeMsg.innerHTML = '✖ ' + wipeEsc(e);
+    } finally {
+      wipeDataBtn.disabled = false;
+    }
+  });
+}
 </script>
 </body>
 </html>
