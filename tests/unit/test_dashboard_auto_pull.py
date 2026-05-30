@@ -16,34 +16,54 @@ from brutex.dashboard.auto_pull import (
 
 
 @pytest.mark.parametrize(
-    ("index_count", "stock_count", "legs_present", "expected"),
+    ("index_count", "stock_count", "legs_present", "stale_economics", "expected"),
     [
         # Wholly empty lake (fresh) → reload.
-        (0, 0, False, True),
+        (0, 0, False, False, True),
         # Stale lake: stocks present but ZERO indices (pre-fix build) → reload.
-        (0, 211, False, True),
-        # Healthy LEAN lake: indices present, no legs → skip (no reload).
-        (25, 211, False, False),
+        (0, 211, False, False, True),
+        # Healthy LEAN + enriched lake: indices present, no legs, real
+        # economics → skip (no reload).
+        (25, 211, False, False, False),
         # Indices present, no stocks (degenerate but valid), no legs → skip.
-        (30, 0, False, False),
+        (30, 0, False, False, False),
         # Non-lean lake: legs still present (pre-DEC-INSTRUMENT-UNIVERSE-FAST-001
         # build) → reload to purge them, even though indices+stocks look fine.
-        (25, 211, True, True),
+        (25, 211, True, False, True),
         # Legs present even on an otherwise-empty lake → reload.
-        (0, 0, True, True),
+        (0, 0, True, False, True),
+        # Stale economics: a healthy-looking lean lake whose stocks still carry
+        # the master's placeholder lot_size=1 (pre-back-fill build) → reload to
+        # enrich (DEC-STALE-ECONOMICS-HEAL-001).
+        (25, 211, False, True, True),
+        # Stale economics takes priority even with legs absent + counts fine.
+        (30, 100, False, True, True),
     ],
 )
 def test_should_reload_instrument_master(
-    index_count: int, stock_count: int, legs_present: bool, expected: bool
+    index_count: int,
+    stock_count: int,
+    legs_present: bool,
+    stale_economics: bool,
+    expected: bool,
 ) -> None:
-    """Reload on empty OR indices-missing OR non-lean (legs present); else skip."""
+    """Reload on empty OR indices-missing OR non-lean OR stale-economics; else skip."""
     assert (
         should_reload_instrument_master(
             index_count=index_count,
             stock_count=stock_count,
             legs_present=legs_present,
+            stale_economics=stale_economics,
         )
         is expected
+    )
+
+
+def test_should_reload_defaults_stale_economics_false() -> None:
+    """``stale_economics`` defaults to False (back-compat with 3-arg callers)."""
+    assert (
+        should_reload_instrument_master(index_count=25, stock_count=211, legs_present=False)
+        is False
     )
 
 

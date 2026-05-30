@@ -314,6 +314,10 @@ class _InstrumentSink(Protocol):
         """Upsert *instruments* for this snapshot; return the store's result."""
         ...
 
+    def prune_to_latest_snapshot(self) -> int:
+        """Collapse the instrument table to its newest snapshot; return rows pruned."""
+        ...
+
 
 @dataclass(slots=True)
 class InstrumentMasterFetcher:
@@ -404,6 +408,15 @@ class InstrumentMasterFetcher:
             # left by an older pre-lean ingest for the same day are purged.
             replace_snapshot=True,
         )
+        # Collapse to the newest snapshot (DEC-INSTRUMENT-LEAN-SNAPSHOT-001).
+        # ``replace_snapshot`` only wipes the SAME UTC day; a refresh on a later
+        # day would otherwise leave yesterday's full ~236-row copy behind (the
+        # operator saw 236 → 472 across days). Pruning HERE — at the single
+        # download+parse+upsert chokepoint every caller funnels through (the
+        # keyless dashboard load AND the live `fetch --universe` / background
+        # auto-pull) — guarantees no write path can re-accumulate snapshots.
+        # Idempotent: a no-op on an already-single-snapshot lake.
+        self.store.prune_to_latest_snapshot()
         return InstrumentRefreshResult(
             parsed=len(instruments),
             persisted=len(persisted),

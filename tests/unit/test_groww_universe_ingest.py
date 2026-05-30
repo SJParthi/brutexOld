@@ -140,6 +140,9 @@ def test_synthetic_instrument_csv_has_required_header() -> None:
         def upsert_many(self, instruments: Any, **_: Any) -> None:
             captured.extend(instruments)
 
+        def prune_to_latest_snapshot(self) -> int:
+            return 0
+
     fetcher = InstrumentMasterFetcher(
         http_get=lambda _url: SYNTHETIC_INSTRUMENT_CSV,
         store=_FakeSink(),

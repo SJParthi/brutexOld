@@ -253,6 +253,9 @@ class _InterleaveProbeStore:
 
         return _Up()
 
+    def prune_to_latest_snapshot(self) -> int:
+        return 0
+
     def fno_eligible_underlyings(self) -> frozenset[tuple[Any, str]]:
         return frozenset()
 

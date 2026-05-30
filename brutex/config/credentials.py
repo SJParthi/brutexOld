@@ -74,6 +74,35 @@ class CredentialsError(Exception):
     """
 
 
+def normalise_api_key(api_key: str) -> str:
+    """Return *api_key* with surrounding whitespace stripped.
+
+    A copy-pasted Groww API key very often carries a trailing newline or
+    stray spaces (clipboard / password-manager artefacts). The SDK puts the
+    raw value straight into an ``Authorization: Bearer <key>`` header, so a
+    trailing ``\\n`` produces a malformed header and Groww rejects the
+    token mint with **HTTP 400** (DEC-CREDS-NORMALISE-001). Stripping the
+    outer whitespace removes that whole class of opaque 400s. Internal
+    characters are left untouched (an API key is an opaque token).
+    """
+    return api_key.strip()
+
+
+def normalise_totp_secret(totp_secret: str) -> str:
+    """Return *totp_secret* canonicalised for ``pyotp`` (all whitespace removed, upper-cased).
+
+    Groww (and most authenticator setups) display a base32 TOTP secret in
+    space-separated groups — e.g. ``"ABCD EFGH IJKL MNOP"``. ``pyotp`` feeds
+    the secret straight to :func:`base64.b32decode`, which treats an embedded
+    space as an invalid byte: the code it then generates does not match what
+    Groww expects, so the token mint fails with **HTTP 400**
+    (DEC-CREDS-NORMALISE-001). Removing **all** whitespace (not just the ends)
+    and upper-casing yields the canonical base32 the decoder expects. base32
+    is case-insensitive, so upper-casing is loss-free.
+    """
+    return "".join(totp_secret.split()).upper()
+
+
 @dataclass(frozen=True, slots=True)
 class GrowwCredentials:
     """An immutable pair of Groww credentials.
@@ -145,11 +174,18 @@ def save_groww_credentials(creds: GrowwCredentials, *, path: Path | None = None)
     if not creds.totp_secret.strip():
         raise CredentialsError("totp_secret must not be blank")
 
+    # Persist the CANONICAL form (DEC-CREDS-NORMALISE-001) so a paste with a
+    # trailing newline / spaced-out base32 secret never reaches the Groww
+    # token mint as a malformed Bearer header / undecodable TOTP secret (the
+    # opaque "Groww API Error 400" the operator hit).
+    api_key = normalise_api_key(creds.api_key)
+    totp_secret = normalise_totp_secret(creds.totp_secret)
+
     target = credentials_path() if path is None else path
     parent = target.parent
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-    payload = json.dumps({"groww": {"api_key": creds.api_key, "totp_secret": creds.totp_secret}})
+    payload = json.dumps({"groww": {"api_key": api_key, "totp_secret": totp_secret}})
     # Atomic, never-world-readable write: NamedTemporaryFile in the SAME
     # dir as the target (so os.replace is atomic), chmod 0600 before the
     # rename, then os.replace. No predictable-name temp file and no
@@ -287,7 +323,15 @@ def resolve_groww_credentials(
         missing.append(ENV_TOTP_SECRET)
     if api_key is None or totp_secret is None:
         raise CredentialsError(f"missing Groww credentials: {', '.join(missing)}; {_HOW_TO_SET}")
-    return GrowwCredentials(api_key=api_key, totp_secret=totp_secret)
+    # Canonicalise at the resolution boundary (DEC-CREDS-NORMALISE-001) so the
+    # auth layer always gets a clean Bearer key + decodable base32 secret —
+    # whether the value came from the saved file OR a ``BRUTEX_GROWW_*`` env
+    # var (an exported value can carry the same paste whitespace). Idempotent
+    # on already-canonical values.
+    return GrowwCredentials(
+        api_key=normalise_api_key(api_key),
+        totp_secret=normalise_totp_secret(totp_secret),
+    )
 
 
 def credentials_present(env: Mapping[str, str] | None = None, *, path: Path | None = None) -> bool:
@@ -313,6 +357,59 @@ def credentials_present(env: Mapping[str, str] | None = None, *, path: Path | No
     except CredentialsError:
         return False
     return True
+
+
+def _mask_secret(value: str, *, head: int, tail: int) -> str:
+    """Mask *value* to ``head…tail`` (or a full bullet-fill when too short to split).
+
+    Used by :func:`credentials_preview` to show ENOUGH of a stored secret for the
+    operator to recognise their own paste (right value, right length) without the
+    dashboard ever echoing a usable secret. A value short enough that ``head +
+    tail`` would reveal it whole is returned as bullets only.
+    """
+    if len(value) <= head + tail:
+        return "•" * len(value)
+    return f"{value[:head]}…{value[-tail:]}"
+
+
+def credentials_preview(
+    env: Mapping[str, str] | None = None, *, path: Path | None = None
+) -> dict[str, object]:
+    """Return a NON-SECRET preview of the stored Groww credentials for the operator.
+
+    The operator hit an opaque Groww 400 and could not tell whether BruteX had
+    actually stored their paste or was sending empty values — and the credentials
+    file lives outside the repo, so it is invisible in the IDE. This surfaces, on
+    the dashboard Credentials page, a masked ``head…tail`` preview + character
+    length of each resolved field so the paste can be VERIFIED at a glance
+    (DEC-CREDS-PREVIEW-001). It NEVER returns (or logs) a full secret.
+
+    Parameters
+    ----------
+    env
+        Environment mapping. Defaults to :data:`os.environ`.
+    path
+        Credentials file. Defaults to :func:`credentials_path`.
+
+    Returns
+    -------
+    dict[str, object]
+        ``{"present": False}`` when credentials do not resolve, else
+        ``{"present": True, "api_key_preview", "api_key_len",
+        "totp_secret_preview", "totp_secret_len"}`` — masked previews + lengths
+        of the normalised values, never the raw secrets.
+    """
+    try:
+        creds = resolve_groww_credentials(env, path=path)
+    except CredentialsError:
+        return {"present": False}
+    return {
+        "present": True,
+        "api_key_preview": _mask_secret(creds.api_key, head=6, tail=4),
+        "api_key_len": len(creds.api_key),
+        "totp_secret_preview": _mask_secret(creds.totp_secret, head=2, tail=2),
+        "totp_secret_len": len(creds.totp_secret),
+    }
 
 
 def clear_groww_credentials(*, path: Path | None = None) -> bool:
@@ -347,7 +444,10 @@ __all__ = [
     "clear_groww_credentials",
     "credentials_path",
     "credentials_present",
+    "credentials_preview",
     "load_groww_credentials",
+    "normalise_api_key",
+    "normalise_totp_secret",
     "resolve_groww_credentials",
     "save_groww_credentials",
 ]

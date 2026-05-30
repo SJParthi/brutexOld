@@ -138,3 +138,48 @@ class TestClockSkewRetry:
         assert "check API key" in str(ei.value)
         sleep.assert_called_once()
         assert mint.call_count == 2
+
+
+class TestClearCachedToken:
+    """clear_cached_token() + default_token_path() — DEC-CREDS-NORMALISE-001."""
+
+    def test_default_token_path_uses_env_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from brutex.adapters.groww.auth import default_token_path
+
+        target = tmp_path / "tok.json"
+        monkeypatch.setenv("BRUTEX_GROWW_TOKEN_PATH", str(target))
+        assert default_token_path() == target
+
+    def test_default_token_path_falls_back_to_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.adapters.groww.auth import default_token_path
+
+        monkeypatch.delenv("BRUTEX_GROWW_TOKEN_PATH", raising=False)
+        assert default_token_path() == Path.home() / ".brutex" / "groww" / "access_token.json"
+
+    def test_clear_removes_existing_token(self, tmp_path: Path) -> None:
+        from brutex.adapters.groww.auth import clear_cached_token
+
+        path = tmp_path / "groww" / "access_token.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{}")
+        assert clear_cached_token(path=path) is True
+        assert not path.exists()
+
+    def test_clear_returns_false_when_absent(self, tmp_path: Path) -> None:
+        from brutex.adapters.groww.auth import clear_cached_token
+
+        assert clear_cached_token(path=tmp_path / "absent.json") is False
+
+    def test_clear_uses_default_path_when_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from brutex.adapters.groww.auth import clear_cached_token
+
+        target = tmp_path / "tok.json"
+        monkeypatch.setenv("BRUTEX_GROWW_TOKEN_PATH", str(target))
+        assert clear_cached_token() is False
+        target.write_text("{}")
+        assert clear_cached_token() is True
+        assert not target.exists()

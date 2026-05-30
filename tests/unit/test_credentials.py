@@ -24,7 +24,10 @@ from brutex.config.credentials import (
     clear_groww_credentials,
     credentials_path,
     credentials_present,
+    credentials_preview,
     load_groww_credentials,
+    normalise_api_key,
+    normalise_totp_secret,
     resolve_groww_credentials,
     save_groww_credentials,
 )
@@ -292,13 +295,16 @@ class TestResolve:
         assert creds.totp_secret == FAKE_TOTP_SECRET  # file fills the other
 
     def test_env_overrides_file_for_both(self, tmp_path: Path) -> None:
+        # TOTP secrets are normalised to canonical (upper-case, whitespace-free)
+        # base32 on resolve (DEC-CREDS-NORMALISE-001), so use canonical values
+        # here — the env value still wins over the file value for both fields.
         path = tmp_path / "credentials.json"
         save_groww_credentials(
-            GrowwCredentials(api_key="file-key", totp_secret="file-secret"), path=path
+            GrowwCredentials(api_key="file-key", totp_secret="FILESECRET"), path=path
         )
-        env = {ENV_API_KEY: "env-key", ENV_TOTP_SECRET: "env-secret"}
+        env = {ENV_API_KEY: "env-key", ENV_TOTP_SECRET: "ENVSECRET"}
         creds = resolve_groww_credentials(env, path=path)
-        assert creds == GrowwCredentials(api_key="env-key", totp_secret="env-secret")
+        assert creds == GrowwCredentials(api_key="env-key", totp_secret="ENVSECRET")
 
     def test_blank_env_field_falls_back_to_file(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
@@ -417,3 +423,79 @@ class TestClear:
         save_groww_credentials(GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET))
         assert clear_groww_credentials() is True
         assert not target.exists()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# normalise_api_key / normalise_totp_secret — DEC-CREDS-NORMALISE-001
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestNormalise:
+    def test_api_key_strips_surrounding_whitespace(self) -> None:
+        # A paste with a trailing newline → "Bearer <key>\n" → Groww 400.
+        assert normalise_api_key("  eyJraWQ.payload.sig \n") == "eyJraWQ.payload.sig"
+
+    def test_api_key_keeps_internal_chars(self) -> None:
+        # JWTs contain dots/dashes/underscores — only the ENDS are trimmed.
+        assert normalise_api_key("a.b-c_d") == "a.b-c_d"
+
+    def test_totp_secret_removes_all_whitespace_and_uppercases(self) -> None:
+        # Groww shows base32 in spaced groups; pyotp needs it contiguous + valid.
+        assert normalise_totp_secret(" mpb2 aawm 5hzf \n") == "MPB2AAWM5HZF"
+
+    def test_totp_secret_idempotent_on_canonical(self) -> None:
+        assert normalise_totp_secret("JBSWY3DPEHPK3PXP") == "JBSWY3DPEHPK3PXP"
+
+    def test_save_persists_normalised_values(self, tmp_path: Path) -> None:
+        """A whitespace-laden paste is stored CANONICAL (the 400 root-cause fix)."""
+        path = tmp_path / "credentials.json"
+        save_groww_credentials(
+            GrowwCredentials(api_key="  key.tok \n", totp_secret=" jbsw y3dp ehpk 3pxp "),
+            path=path,
+        )
+        stored = json.loads(path.read_text())["groww"]
+        assert stored["api_key"] == "key.tok"
+        assert stored["totp_secret"] == "JBSWY3DPEHPK3PXP"
+
+    def test_resolve_normalises_env_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Even env-sourced creds (an exported paste) are canonicalised."""
+        monkeypatch.setenv(ENV_API_KEY, "  envkey \n")
+        monkeypatch.setenv(ENV_TOTP_SECRET, " jbsw y3dp ")
+        creds = resolve_groww_credentials(path=Path("/nonexistent/creds.json"))
+        assert creds.api_key == "envkey"
+        assert creds.totp_secret == "JBSWY3DP"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# credentials_preview — DEC-CREDS-PREVIEW-001 (masked, never a usable secret)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPreview:
+    def test_absent_returns_present_false_only(self, tmp_path: Path) -> None:
+        assert credentials_preview(path=tmp_path / "nope.json") == {"present": False}
+
+    def test_present_returns_masked_previews_and_lengths(self, tmp_path: Path) -> None:
+        path = tmp_path / "credentials.json"
+        api_key = "eyJraWQabcdefghij1234WXYZ"  # 25 chars
+        save_groww_credentials(
+            GrowwCredentials(api_key=api_key, totp_secret="JBSWY3DPEHPK3PXP"), path=path
+        )
+        preview = credentials_preview(env={}, path=path)
+        assert preview["present"] is True
+        # Masked head…tail — never the full secret.
+        assert preview["api_key_preview"] == "eyJraW…WXYZ"
+        assert preview["api_key_len"] == len(api_key)
+        assert preview["totp_secret_preview"] == "JB…XP"
+        assert preview["totp_secret_len"] == 16
+        # The full secret never appears in the preview payload.
+        assert api_key not in str(preview)
+
+    def test_short_secret_is_fully_bulleted(self, tmp_path: Path) -> None:
+        """A value too short to split head…tail is bulleted, never revealed."""
+        path = tmp_path / "credentials.json"
+        # totp 'ABCD' (4 chars) ≤ head(2)+tail(2) → fully masked.
+        save_groww_credentials(GrowwCredentials(api_key="key12345", totp_secret="ABCD"), path=path)
+        preview = credentials_preview(env={}, path=path)
+        assert preview["totp_secret_preview"] == "••••"
+        assert preview["totp_secret_len"] == 4
