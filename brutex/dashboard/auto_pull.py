@@ -42,8 +42,9 @@ def should_reload_instrument_master(
       the full ~101k-row master. The lean refresh does a full-snapshot replace
       (DEC-LEAN-REINGEST-FIX-001), so reloading purges the stale dump down to
       the ~236 universe underlyings instead of serving over-counted data;
-    * **stale economics** — holds stocks with the master's placeholder
-      ``lot_size = 1`` / blank ``freeze_quantity`` (``stale_economics``), the
+    * **stale economics** — holds stocks at the master's placeholder
+      ``lot_size = 1`` (``stale_economics``; the probe keys on ``lot_size`` —
+      every real NSE F&O stock lot is well above 1), the
       fingerprint of a lake loaded BEFORE the leg-derived back-fill landed
       (DEC-UNDERLYING-ECONOMICS-001). Without this trigger the auto-heal kept
       serving ``lot_size = 1`` forever, because the placeholder economics did

@@ -51,6 +51,7 @@ def _csv(rows: list[str] = _ROWS) -> str:
 class _FakeStore:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.prune_calls = 0
 
     def upsert_many(
         self,
@@ -74,6 +75,12 @@ class _FakeStore:
             }
         )
         return {"rows_written": len(items)}
+
+    def prune_to_latest_snapshot(self) -> int:
+        # refresh() prunes to the newest snapshot at the single upsert chokepoint
+        # (DEC-INSTRUMENT-LEAN-SNAPSHOT-001) — record that it was invoked.
+        self.prune_calls += 1
+        return 0
 
 
 def _fetcher(csv_text: str) -> tuple[InstrumentMasterFetcher, _FakeStore]:
@@ -140,6 +147,14 @@ class TestRefresh:
         fetcher, store = _fetcher(_csv())
         fetcher.refresh()
         assert store.calls[0]["replace_snapshot"] is True
+
+    def test_refresh_prunes_to_latest_snapshot(self) -> None:
+        """refresh() prunes to the newest snapshot at the single upsert chokepoint,
+        so EVERY caller (keyless load + live fetch --universe / auto-pull) keeps
+        the lake lean across UTC days (DEC-INSTRUMENT-LEAN-SNAPSHOT-001)."""
+        fetcher, store = _fetcher(_csv())
+        fetcher.refresh()
+        assert store.prune_calls == 1
 
     def test_in_scope_callable_uses_fetch_scope(self) -> None:
         fetcher, store = _fetcher(_csv())

@@ -103,15 +103,11 @@ def load_instrument_master(
     # concurrent loads cannot interleave a snapshot wipe with another's insert
     # (DEC-UNDERLYING-ECONOMICS-001 — the "25 indices · 0 stocks" corruption).
     with _LOAD_LOCK:
+        # refresh() now also prunes to the newest snapshot at the single
+        # download+parse+upsert chokepoint (DEC-INSTRUMENT-LEAN-SNAPSHOT-001), so
+        # the lake stays lean ~241 rows on every load path without each caller
+        # remembering to prune.
         result = fetcher.refresh()
-
-        # Collapse to the newest snapshot (DEC-INSTRUMENT-LEAN-SNAPSHOT-001) so a
-        # reload on a later UTC day cannot accumulate a second full ~236-row copy
-        # (the operator saw the instruments table grow 236 → 472 across days).
-        # ``replace_snapshot=True`` only wipes the same day; this removes every
-        # older day so the lake stays lean + unique. Idempotent (deletes nothing
-        # on an already-single-snapshot lake).
-        store.prune_to_latest_snapshot()
 
         # Fast + lean-store-correct path (DEC-INSTRUMENT-UNIVERSE-FAST-001): the
         # store now holds ONLY the universe underlyings (no option/future legs),
