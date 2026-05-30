@@ -8,7 +8,13 @@ fetcher never propagates (it is captured so the phase can't abort).
 
 from __future__ import annotations
 
-from brutex.orchestrator.parallel import DEFAULT_MAX_WORKERS, PoolRunParallel
+from brutex.orchestrator.parallel import (
+    DEFAULT_LATENCY_BUDGET_S,
+    DEFAULT_MAX_WORKERS,
+    MAX_FANOUT,
+    PoolRunParallel,
+    workers_to_saturate,
+)
 from brutex.orchestrator.universe_phases import ItemResult
 
 
@@ -59,3 +65,41 @@ class TestPoolRunParallel:
         pool = PoolRunParallel()
         results = list(pool(lambda x: x.upper(), ["nifty"]))
         assert results == [ItemResult(item="nifty", ok=True, result="NIFTY", exc=None)]
+
+
+class TestWorkersToSaturate:
+    """Little's law pool sizing (DEC-UNIVERSE-PULL-8RPS-001): enough in-flight
+    workers that the rate bucket, not network latency, governs the achieved r/s."""
+
+    def test_sizes_to_rate_times_latency(self) -> None:
+        # 8 r/s x 3 s/call = 24 calls in flight to keep the bucket saturated.
+        assert workers_to_saturate(8.0, 3.0) == 24
+
+    def test_ceils_fractional_latency(self) -> None:
+        # 8 x 2.9 = 23.2 → 24 (round UP, never under-provision the pool).
+        assert workers_to_saturate(8.0, 2.9) == 24
+
+    def test_uses_default_latency_budget(self) -> None:
+        assert workers_to_saturate(8.0) == 24
+        assert DEFAULT_LATENCY_BUDGET_S == 3.0
+
+    def test_clamped_to_cap(self) -> None:
+        # A high rate x latency would over-fan-out; the socket cap bounds it.
+        assert workers_to_saturate(100.0, 3.0) == MAX_FANOUT
+        assert MAX_FANOUT == 32
+
+    def test_custom_cap(self) -> None:
+        assert workers_to_saturate(8.0, 3.0, cap=10) == 10
+
+    def test_non_positive_rate_sizes_to_one(self) -> None:
+        assert workers_to_saturate(0.0, 3.0) == 1
+        assert workers_to_saturate(-5.0, 3.0) == 1
+
+    def test_non_positive_latency_sizes_to_one(self) -> None:
+        # rate > 0 but latency <= 0 → still one worker (covers the OR's 2nd term).
+        assert workers_to_saturate(8.0, 0.0) == 1
+        assert workers_to_saturate(8.0, -1.0) == 1
+
+    def test_tiny_positive_product_floors_to_one(self) -> None:
+        # ceil(0.5 x 0.5)=ceil(0.25)=1 — never zero, always makes progress.
+        assert workers_to_saturate(0.5, 0.5) == 1
