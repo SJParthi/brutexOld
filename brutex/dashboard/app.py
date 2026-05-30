@@ -43,6 +43,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import structlog
 from pydantic import BaseModel
 
 from brutex.dashboard.coverage_view import build_coverage_payload
@@ -55,6 +56,11 @@ from brutex.orchestrator.pipeline import (
 )
 from brutex.orchestrator.state import IngestPhase
 from brutex.universe import derive_lake_underlyings
+
+#: Module logger — every material dashboard action (especially a pull that
+#: fails) lands in the same ``.brutex-logs/brutex.log`` JSONL the operator
+#: reads, so a 400 is never a silent dead-end (DEC-PULL-ERROR-VISIBILITY-001).
+_LOG = structlog.get_logger("brutex.dashboard")
 
 
 class CredentialsIn(BaseModel):
@@ -736,6 +742,7 @@ def build_app(
         attempts a live network call without creds.
         """
         dry_run = not groww_creds_present()
+        _LOG.info("universe.pull.requested", symbol=symbol, year=year, dry_run=dry_run)
         try:
             report = pull_candles(
                 symbol,
@@ -743,8 +750,34 @@ def build_app(
                 year=year,
                 dry_run=dry_run,
             )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # surface the REAL reason, never swallow it
+            # A blank "no data returned" 400 was hiding the actual failure
+            # (the route only caught ValueError, but the live path raises
+            # VendorSdkError / RuntimeError too). Log the full type + message
+            # to the operator's JSONL log so a 400 is never a dead-end, and
+            # return the real reason in the response body
+            # (DEC-PULL-ERROR-VISIBILITY-001).
+            _LOG.exception(
+                "universe.pull.failed",
+                symbol=symbol,
+                year=year,
+                dry_run=dry_run,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"{type(exc).__name__}: {exc}",
+            ) from exc
+        _LOG.info(
+            "universe.pull.ok",
+            symbol=symbol,
+            year=year,
+            dry_run=dry_run,
+            completed=report.total_completed,
+            failed=report.total_failed,
+            no_data=report.total_no_data,
+        )
         return JSONResponse(report.to_dict())
 
     # ── Completeness ledger / Coverage (DEC-COVERAGE-LEDGER-001) ────

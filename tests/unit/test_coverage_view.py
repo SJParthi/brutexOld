@@ -121,6 +121,8 @@ class TestCoverageHeadline:
         assert headline == {
             "complete": 2,
             "total": 4,
+            "attempted": 2,
+            "not_pulled": 2,
             "incomplete": 2,
             "failed": 0,
             "pending": 0,
@@ -128,6 +130,25 @@ class TestCoverageHeadline:
             "percent": 50,
             "is_complete": False,
         }
+
+    def test_headline_attempted_and_not_pulled_are_honest(self) -> None:
+        # attempted = complete + failed + pending (cells the pull has touched);
+        # not_pulled = missing (queued / in-progress) — NOT an error. The only
+        # real-error count is `failed`. attempted + not_pulled == total.
+        summary = reconcile_coverage(
+            [("NSE", "C"), ("NSE", "F"), ("NSE", "P"), ("NSE", "M1"), ("NSE", "M2")],
+            [2024],
+            [
+                _record(underlying="C"),
+                _record(underlying="F", expiries=0, contracts=0, error="boom"),
+                _record(underlying="P", expiries=0, contracts=0),
+            ],
+        )
+        headline = coverage_headline(summary)
+        assert headline["attempted"] == 3  # C(complete) + F(failed) + P(pending)
+        assert headline["not_pulled"] == 2  # M1, M2 never reached (== missing)
+        assert headline["failed"] == 1  # the ONLY real-error count
+        assert headline["attempted"] + headline["not_pulled"] == headline["total"]
 
     def test_all_complete_headline(self) -> None:
         summary = reconcile_coverage([("NSE", "A")], [2024], [_record(underlying="A")])
