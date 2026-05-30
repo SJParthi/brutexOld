@@ -80,6 +80,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, Self
 
+from brutex.data.coverage_ledger import CoverageRecord
 from brutex.data.errors import CatalogError
 from brutex.execution.types import InstrumentMeta as ExecutionInstrumentMeta
 from brutex.models import (
@@ -92,7 +93,13 @@ from brutex.models import (
 #: Bump when the schema changes. New columns go in a follow-up DDL
 #: block guarded by ``schema_meta.value`` comparison; never by a
 #: destructive ``DROP TABLE``.
-SCHEMA_VERSION: Final[int] = 1
+#:
+#: v2 (DEC-COVERAGE-LEDGER-001): added the ``coverage_ledger`` table — one
+#: row per ``(exchange, underlying_symbol, year)`` recording how many
+#: expiries/contracts were pulled + the cell's completeness status. Purely
+#: additive (``CREATE TABLE IF NOT EXISTS``), so an existing v1 store
+#: upgrades in place on next open with no history rewrite.
+SCHEMA_VERSION: Final[int] = 2
 
 #: Default DuckDB file name inside the configured lake root.
 DEFAULT_DB_NAME: Final[str] = "instruments.duckdb"
@@ -195,6 +202,23 @@ CREATE TABLE IF NOT EXISTS contracts (
 );
 """
 
+_DDL_COVERAGE_LEDGER: Final[str] = """
+CREATE TABLE IF NOT EXISTS coverage_ledger (
+    exchange          VARCHAR NOT NULL,
+    underlying_symbol VARCHAR NOT NULL,
+    year              INTEGER NOT NULL,
+
+    expiries_pulled   INTEGER NOT NULL,
+    contracts_pulled  INTEGER NOT NULL,
+    status            VARCHAR NOT NULL,   -- pending | complete | failed
+    last_run_id       VARCHAR NOT NULL,
+    last_fetched_at   TIMESTAMP WITH TIME ZONE NOT NULL,
+    error_message     VARCHAR,
+
+    PRIMARY KEY (exchange, underlying_symbol, year)
+);
+"""
+
 _DDL_SCHEMA_META: Final[str] = """
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   VARCHAR PRIMARY KEY,
@@ -215,6 +239,9 @@ _DDL_INDEXES: Final[tuple[str, ...]] = (
     "CREATE INDEX IF NOT EXISTS idx_con_underlying_expiry "
     "ON contracts (underlying_symbol, expiry_date, snapshot_date);",
     "CREATE INDEX IF NOT EXISTS idx_con_expiry ON contracts (expiry_date, snapshot_date);",
+    # Coverage ledger: the /coverage page asks "every incomplete cell"
+    # (DEC-COVERAGE-LEDGER-001) — an indexed status scan, never a full table scan.
+    "CREATE INDEX IF NOT EXISTS idx_cov_status ON coverage_ledger (status);",
 )
 
 _INSTR_COLUMNS: Final[tuple[str, ...]] = (
@@ -684,6 +711,7 @@ class InstrumentStore:
             conn.execute(_DDL_EXPIRIES)
             conn.execute(_DDL_CONTRACTS)
             conn.execute(_DDL_INSTRUMENT_RUNS)
+            conn.execute(_DDL_COVERAGE_LEDGER)
             conn.execute(_DDL_SCHEMA_META)
             for index_sql in _DDL_INDEXES:
                 conn.execute(index_sql)
@@ -990,6 +1018,81 @@ class InstrumentStore:
             self._conn.execute("ROLLBACK")
             raise
         return len(contracts)
+
+    # ── Coverage ledger (DEC-COVERAGE-LEDGER-001) ──────────────────
+
+    def upsert_coverage(self, record: CoverageRecord) -> None:
+        """Insert or replace one ``coverage_ledger`` cell — O(1), idempotent.
+
+        Keyed by ``(exchange, underlying_symbol, year)`` (the table PK), so a
+        re-pull of the same cell replaces it in place. Mirrors the
+        DELETE+INSERT style of :meth:`upsert_expiries` / :meth:`upsert_contracts`
+        so the latest attempt's counts + status + error always win
+        deterministically.
+        """
+        self._ensure_open()
+        self._conn.execute(
+            "DELETE FROM coverage_ledger WHERE exchange = ? AND underlying_symbol = ? AND year = ?",
+            [record.exchange, record.underlying_symbol, record.year],
+        )
+        self._conn.execute(
+            "INSERT INTO coverage_ledger ("
+            "exchange, underlying_symbol, year, expiries_pulled, contracts_pulled, "
+            "status, last_run_id, last_fetched_at, error_message"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                record.exchange,
+                record.underlying_symbol,
+                record.year,
+                record.expiries_pulled,
+                record.contracts_pulled,
+                record.status,
+                record.last_run_id,
+                record.last_fetched_at,
+                record.error_message,
+            ],
+        )
+
+    def get_coverage(
+        self, exchange: str, underlying_symbol: str, year: int
+    ) -> CoverageRecord | None:
+        """Return one cell by ``(exchange, underlying_symbol, year)``, O(1) via PK."""
+        self._ensure_open()
+        row = self._conn.execute(
+            "SELECT exchange, underlying_symbol, year, expiries_pulled, "
+            "contracts_pulled, status, last_run_id, last_fetched_at, error_message "
+            "FROM coverage_ledger "
+            "WHERE exchange = ? AND underlying_symbol = ? AND year = ?",
+            [exchange, underlying_symbol, year],
+        ).fetchone()
+        return _row_to_coverage(row) if row is not None else None
+
+    def list_coverage(self) -> list[CoverageRecord]:
+        """Return every coverage cell in a stable ``(exchange, underlying, year)`` order."""
+        self._ensure_open()
+        rows = self._conn.execute(
+            "SELECT exchange, underlying_symbol, year, expiries_pulled, "
+            "contracts_pulled, status, last_run_id, last_fetched_at, error_message "
+            "FROM coverage_ledger "
+            "ORDER BY exchange, underlying_symbol, year"
+        ).fetchall()
+        return [_row_to_coverage(row) for row in rows]
+
+    def list_incomplete_coverage(self) -> list[CoverageRecord]:
+        """Return every cell whose status is NOT ``'complete'`` — the re-pull set.
+
+        Indexed status scan (``idx_cov_status``), never a full table scan
+        (CLAUDE.md §5 O(1) discipline / Merge Charter §7).
+        """
+        self._ensure_open()
+        rows = self._conn.execute(
+            "SELECT exchange, underlying_symbol, year, expiries_pulled, "
+            "contracts_pulled, status, last_run_id, last_fetched_at, error_message "
+            "FROM coverage_ledger "
+            "WHERE status != 'complete' "
+            "ORDER BY exchange, underlying_symbol, year"
+        ).fetchall()
+        return [_row_to_coverage(row) for row in rows]
 
     # ── Phase B / Phase C readers ──────────────────────────────────
 
@@ -1769,6 +1872,25 @@ def _row_to_instrument(row: Sequence[Any]) -> Instrument:
     )
 
 
+def _row_to_coverage(row: Sequence[Any]) -> CoverageRecord:
+    """Invert the ``coverage_ledger`` SELECT into a :class:`CoverageRecord`.
+
+    Column order matches the SELECT list in :meth:`InstrumentStore.get_coverage`
+    / :meth:`list_coverage` / :meth:`list_incomplete_coverage`.
+    """
+    return CoverageRecord(
+        exchange=row[0],
+        underlying_symbol=row[1],
+        year=int(row[2]),
+        expiries_pulled=int(row[3]),
+        contracts_pulled=int(row[4]),
+        status=row[5],
+        last_run_id=row[6],
+        last_fetched_at=row[7],
+        error_message=row[8],
+    )
+
+
 def _row_to_instrument_run(row: Sequence[Any]) -> InstrumentRun:
     """Invert the ``instrument_runs`` INSERT into an :class:`InstrumentRun`."""
     return InstrumentRun(
@@ -1794,6 +1916,7 @@ __all__ = [
     "DEFAULT_DB_NAME",
     "SCHEMA_VERSION",
     "ContractRecord",
+    "CoverageRecord",
     "ExpiryRecord",
     "InstrumentRun",
     "InstrumentSnapshot",

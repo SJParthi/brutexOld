@@ -26,6 +26,7 @@ from brutex.universe import (
     build_fno_eligible_underlyings,
     build_underlying_economics,
     classify_underlying_kind,
+    derive_lake_underlyings,
     is_in_brute_force_scope,
     is_in_fetch_scope,
     is_in_scope,
@@ -658,3 +659,74 @@ def test_economics_skips_leg_without_underlying() -> None:
         freeze_quantity = 1800
 
     assert build_underlying_economics([_FakeLeg()]) == {}  # type: ignore[list-item]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# derive_lake_underlyings (DEC-COVERAGE-LEDGER-001 Part A)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _make_idx_no_underlying(exchange: Exchange, symbol: str) -> Instrument:
+    """Build an IDX row whose ``underlying_symbol`` is None (the real master shape)."""
+    return Instrument(
+        exchange=exchange,
+        exchange_token=hash(symbol) % 100_000,
+        trading_symbol=symbol,
+        vendor_symbol=f"{exchange.value}-{symbol}",
+        name=symbol,
+        instrument_type=InstrumentType.IDX,
+        segment=Segment.CASH,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_exchange_token=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        freeze_quantity=None,
+        expiry_date=None,
+        strike_price=None,
+        is_reserved=False,
+        buy_allowed=False,
+        sell_allowed=False,
+    )
+
+
+class TestDeriveLakeUnderlyings:
+    """The lake-pull scope fix: fan out over IDX + EQ, not just indices."""
+
+    def test_includes_indices_and_stocks(self) -> None:
+        instruments = [
+            _make_idx(Exchange.NSE, "NIFTY"),
+            _make_idx(Exchange.BSE, "SENSEX"),
+            _make_equity(Exchange.NSE, "RELIANCE"),
+            _make_equity(Exchange.NSE, "INFY"),
+        ]
+        result = derive_lake_underlyings(instruments)
+        assert result == [
+            ("INFY", "NSE"),
+            ("NIFTY", "NSE"),
+            ("RELIANCE", "NSE"),
+            ("SENSEX", "BSE"),
+        ]
+
+    def test_uses_underlying_symbol_when_present(self) -> None:
+        # _make_idx sets underlying_symbol == trading_symbol; pick that branch.
+        result = derive_lake_underlyings([_make_idx(Exchange.NSE, "NIFTY")])
+        assert result == [("NIFTY", "NSE")]
+
+    def test_falls_back_to_trading_symbol_when_no_underlying(self) -> None:
+        # underlying_symbol is None → uses trading_symbol.
+        result = derive_lake_underlyings([_make_idx_no_underlying(Exchange.NSE, "BANKNIFTY")])
+        assert result == [("BANKNIFTY", "NSE")]
+
+    def test_dedup_and_sorted(self) -> None:
+        instruments = [
+            _make_idx(Exchange.NSE, "NIFTY"),
+            _make_idx(Exchange.NSE, "NIFTY"),  # duplicate
+            _make_equity(Exchange.NSE, "AAA"),
+        ]
+        result = derive_lake_underlyings(instruments)
+        assert result == [("AAA", "NSE"), ("NIFTY", "NSE")]
+
+    def test_empty(self) -> None:
+        assert derive_lake_underlyings([]) == []

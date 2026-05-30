@@ -29,6 +29,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from brutex.data.coverage_ledger import CoverageRecord, classify_cell
 from brutex.data.errors import CatalogError
 from brutex.data.instrument_store import (
     SCHEMA_VERSION,
@@ -962,3 +963,128 @@ class TestLeanReingestAndLegsDetection:
             assert result.rows_written == 1
             assert s.count(in_scope_only=False) == 1
             assert s.has_derivative_legs() is False
+
+
+class TestCoverageLedger:
+    """coverage_ledger table CRUD + status transitions — DEC-COVERAGE-LEDGER-001."""
+
+    @staticmethod
+    def _cov(
+        *,
+        exchange: str = "NSE",
+        underlying: str = "NIFTY",
+        year: int = 2024,
+        expiries: int = 2,
+        contracts: int = 20,
+        error: str | None = None,
+        run_id: str = "run-1",
+    ) -> CoverageRecord:
+        return CoverageRecord(
+            exchange=exchange,
+            underlying_symbol=underlying,
+            year=year,
+            expiries_pulled=expiries,
+            contracts_pulled=contracts,
+            status=classify_cell(expiries, contracts, error),
+            last_run_id=run_id,
+            last_fetched_at=datetime(2026, 5, 30, 9, 15, tzinfo=UTC),
+            error_message=error,
+        )
+
+    def test_schema_version_is_two(self, tmp_path: Path) -> None:
+        with InstrumentStore.open(tmp_path / "db") as s:
+            assert s.schema_version == 2
+            assert SCHEMA_VERSION == 2
+
+    def test_upsert_and_get_roundtrip(self, tmp_path: Path) -> None:
+        with InstrumentStore.open(tmp_path / "db") as s:
+            rec = self._cov()
+            s.upsert_coverage(rec)
+            got = s.get_coverage("NSE", "NIFTY", 2024)
+        assert got is not None
+        assert got.exchange == "NSE"
+        assert got.underlying_symbol == "NIFTY"
+        assert got.year == 2024
+        assert got.expiries_pulled == 2
+        assert got.contracts_pulled == 20
+        assert got.status == "complete"
+        assert got.last_run_id == "run-1"
+        assert got.error_message is None
+
+    def test_get_missing_returns_none(self, tmp_path: Path) -> None:
+        with InstrumentStore.open(tmp_path / "db") as s:
+            assert s.get_coverage("NSE", "NOPE", 2024) is None
+
+    def test_upsert_same_cell_100_times_is_idempotent(self, tmp_path: Path) -> None:
+        rec = self._cov()
+        with InstrumentStore.open(tmp_path / "db") as s:
+            for _ in range(100):
+                s.upsert_coverage(rec)
+            assert len(s.list_coverage()) == 1
+
+    def test_list_coverage_is_sorted(self, tmp_path: Path) -> None:
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_coverage(self._cov(exchange="NSE", underlying="ZED", year=2024))
+            s.upsert_coverage(self._cov(exchange="NSE", underlying="ABLE", year=2024))
+            s.upsert_coverage(self._cov(exchange="BSE", underlying="SENSEX", year=2024))
+            rows = s.list_coverage()
+        keys = [(r.exchange, r.underlying_symbol, r.year) for r in rows]
+        assert keys == [
+            ("BSE", "SENSEX", 2024),
+            ("NSE", "ABLE", 2024),
+            ("NSE", "ZED", 2024),
+        ]
+
+    def test_list_incomplete_excludes_complete(self, tmp_path: Path) -> None:
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_coverage(self._cov(underlying="DONE", expiries=3))  # complete
+            s.upsert_coverage(
+                self._cov(underlying="FAIL", expiries=0, contracts=0, error="boom")
+            )  # failed
+            s.upsert_coverage(self._cov(underlying="WAIT", expiries=0, contracts=0))  # pending
+            incomplete = s.list_incomplete_coverage()
+        symbols = {r.underlying_symbol: r.status for r in incomplete}
+        assert symbols == {"FAIL": "failed", "WAIT": "pending"}
+
+    def test_status_transition_failed_then_complete(self, tmp_path: Path) -> None:
+        """A failed cell re-pulled successfully flips to complete (in place)."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_coverage(self._cov(expiries=0, contracts=0, error="network down", run_id="r1"))
+            failed = s.get_coverage("NSE", "NIFTY", 2024)
+            assert failed is not None
+            assert failed.status == "failed"
+            assert len(s.list_incomplete_coverage()) == 1
+
+            # Resume pull succeeds → same PK, new counts, no error.
+            s.upsert_coverage(self._cov(expiries=4, contracts=40, run_id="r2"))
+            got = s.get_coverage("NSE", "NIFTY", 2024)
+        assert got is not None
+        assert got.status == "complete"
+        assert got.expiries_pulled == 4
+        assert got.last_run_id == "r2"
+        assert got.error_message is None
+
+    def test_pending_then_failed_then_complete(self, tmp_path: Path) -> None:
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_coverage(self._cov(expiries=0, contracts=0))  # pending
+            pending = s.get_coverage("NSE", "NIFTY", 2024)
+            assert pending is not None
+            assert pending.status == "pending"
+            s.upsert_coverage(self._cov(expiries=0, contracts=0, error="boom"))  # failed
+            failed = s.get_coverage("NSE", "NIFTY", 2024)
+            assert failed is not None
+            assert failed.status == "failed"
+            s.upsert_coverage(self._cov(expiries=1, contracts=5))  # complete
+            complete = s.get_coverage("NSE", "NIFTY", 2024)
+            assert complete is not None
+            assert complete.status == "complete"
+            assert s.list_incomplete_coverage() == []
+
+    def test_coverage_persists_across_reopen(self, tmp_path: Path) -> None:
+        db = tmp_path / "db"
+        with InstrumentStore.open(db) as s:
+            s.upsert_coverage(self._cov())
+        with InstrumentStore.open(db) as s:
+            got = s.get_coverage("NSE", "NIFTY", 2024)
+        assert got is not None
+        assert got.status == "complete"

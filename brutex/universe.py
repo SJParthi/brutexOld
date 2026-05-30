@@ -312,6 +312,51 @@ def build_underlying_economics(
     return economics
 
 
+def derive_lake_underlyings(
+    instruments: Iterable[Instrument],
+) -> list[tuple[str, str]]:
+    """Return ``(underlying_symbol, exchange)`` pairs to pull the lake for.
+
+    The lake-pull scope fix (DEC-COVERAGE-LEDGER-001, Part A): the live
+    universe ingest must fan expiries/contracts out over **every** lake
+    underlying — all ~25 indices PLUS every F&O-eligible single stock (per
+    DEC-P0-063) — not just the ~25 indices. The caller passes the IDX + EQ
+    candidate rows (from
+    :meth:`~brutex.data.instrument_store.InstrumentStore.list_index_equity_instruments`),
+    and this projects each to the ``(symbol, exchange)`` pair the
+    :func:`~brutex.adapters.groww.universe_ingest.run_universe_ingest`
+    fan-out expects.
+
+    The brute-force ENGINE is UNAFFECTED — it still sweeps only the 3
+    indices; this only widens the LAKE pull.
+
+    Rules
+    -----
+    * The symbol is ``underlying_symbol`` when present, else
+      ``trading_symbol`` (IDX rows carry no ``underlying_symbol``; an EQ row
+      may carry its own as ``underlying_symbol`` or only as
+      ``trading_symbol``).
+    * The exchange is the row's ``exchange.value`` token (e.g. ``"NSE"``).
+    * Duplicates are collapsed and the result is sorted for determinism, so
+      a resumable re-pull iterates a stable order.
+
+    Parameters
+    ----------
+    instruments
+        The IDX + EQ candidate rows (never the FUT/CE/PE legs).
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        Deterministic, de-duplicated ``(symbol, exchange)`` pairs.
+    """
+    pairs: set[tuple[str, str]] = set()
+    for inst in instruments:
+        symbol = inst.underlying_symbol or inst.trading_symbol
+        pairs.add((symbol, inst.exchange.value))
+    return sorted(pairs)
+
+
 def is_universe_underlying(
     instrument: Instrument,
     fno_eligible_underlyings: frozenset[tuple[Exchange, str]],
@@ -424,6 +469,7 @@ __all__ = [
     "build_fno_eligible_underlyings",
     "build_underlying_economics",
     "classify_underlying_kind",
+    "derive_lake_underlyings",
     "is_in_brute_force_scope",
     "is_in_fetch_scope",
     "is_in_scope",
