@@ -70,6 +70,7 @@
   .sym { font-weight:700; color:var(--text-bright); }
   .st { font-weight:700; }
   .st.complete { color:var(--green); }
+  .st.expiries_only { color:var(--blue); }
   .st.failed { color:var(--red); }
   .st.pending { color:var(--yellow); }
   .st.missing { color:var(--muted); }
@@ -134,7 +135,7 @@ function esc(s) {
     .replace(/'/g, "&#39;");
 }
 
-const MARK = { complete: "✓", failed: "⚠", pending: "…", missing: "—" };
+const MARK = { complete: "✓", expiries_only: "◐", failed: "⚠", pending: "…", missing: "—" };
 
 function shortTs(ts) {
   if (!ts) return "";

@@ -56,14 +56,21 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
-#: The three terminal states a coverage cell can hold.
+#: The terminal states a coverage cell can hold.
 STATUS_COMPLETE: Final[str] = "complete"
 STATUS_FAILED: Final[str] = "failed"
 STATUS_PENDING: Final[str] = "pending"
+#: Phase-1-only state (DEC-UNIVERSE-PULL-PHASED-001): expiries were discovered
+#: but contracts have NOT been pulled yet (the two buttons run independently).
+#: Distinct from ``complete`` (combined pull, contracts done) and from
+#: ``pending`` (ran, found zero expiries) so the /coverage page never claims a
+#: 0-contract F&O cell is "complete" after "Fetch all expiries" alone.
+STATUS_EXPIRIES_ONLY: Final[str] = "expiries_only"
 
 #: Every admissible status, in display order (complete first).
 COVERAGE_STATUSES: Final[tuple[str, ...]] = (
     STATUS_COMPLETE,
+    STATUS_EXPIRIES_ONLY,
     STATUS_FAILED,
     STATUS_PENDING,
 )
@@ -133,10 +140,19 @@ class CoverageSummary:
         Count of expected cells that have NO persisted ledger row at all
         (never attempted). These are a subset of "incomplete" and are
         always included in :attr:`to_repull`.
+    expiries_only
+        Count of cells whose status is ``"expiries_only"`` — Phase 1 captured
+        the expiries but Phase 2 (contracts) has not run yet
+        (DEC-UNIVERSE-PULL-PHASED-001). NOT counted as ``complete`` (the
+        cell isn't fully pulled) but also NOT re-pulled by a Phase-1 resume
+        (its expiry calendar is done) — so it is excluded from
+        :attr:`to_repull`. Defaults to ``0`` for back-compat with callers that
+        predate the phased pull.
     to_repull
         The deterministic, sorted list of ``(exchange, underlying, year)``
-        cells that are not ``"complete"`` — every missing, pending, or
-        failed cell — i.e. exactly what a resume pass must re-pull.
+        cells a Phase-1 resume must re-pull — every missing, pending, or
+        failed cell. ``complete`` AND ``expiries_only`` cells are excluded
+        (their expiries are captured).
     """
 
     total_expected: int
@@ -145,16 +161,29 @@ class CoverageSummary:
     pending: int
     missing: int
     to_repull: tuple[tuple[str, str, int], ...]
+    expiries_only: int = 0
 
     @property
     def incomplete(self) -> int:
-        """Return the number of expected cells that are not ``"complete"``."""
-        return len(self.to_repull)
+        """Return the number of expected cells that are not ``"complete"``.
+
+        Includes the ``expiries_only`` cells (expiries done, contracts pending):
+        they are NOT in :attr:`to_repull` (a Phase-1 resume must skip them) but
+        they ARE incomplete (Phase 2 still owes them contracts). So this is
+        ``len(to_repull) + expiries_only``, decoupling "not fully done" from
+        "what Phase 1 re-pulls" (DEC-UNIVERSE-PULL-PHASED-001).
+        """
+        return len(self.to_repull) + self.expiries_only
 
     @property
     def is_complete(self) -> bool:
-        """Return ``True`` iff every expected cell is ``"complete"``."""
-        return not self.to_repull
+        """Return ``True`` iff every expected cell is ``"complete"``.
+
+        An ``expiries_only`` cell is NOT complete (contracts pending), so a grid
+        with any such cell is not complete even though it has nothing to
+        Phase-1-re-pull.
+        """
+        return not self.to_repull and self.expiries_only == 0
 
     @property
     def complete_fraction(self) -> float:
@@ -256,6 +285,7 @@ def reconcile_coverage(
     failed = 0
     pending = 0
     missing = 0
+    expiries_only = 0
     repull: list[tuple[str, str, int]] = []
     for cell in expected:
         persisted = by_cell.get(cell)
@@ -265,6 +295,12 @@ def reconcile_coverage(
             continue
         if persisted.status == STATUS_COMPLETE:
             complete += 1
+            continue
+        if persisted.status == STATUS_EXPIRIES_ONLY:
+            # Expiries captured, contracts pending — NOT complete, but a Phase-1
+            # resume must NOT re-pull it (its expiry calendar is done). So it is
+            # counted separately and kept OUT of to_repull.
+            expiries_only += 1
             continue
         if persisted.status == STATUS_FAILED:
             failed += 1
@@ -279,6 +315,7 @@ def reconcile_coverage(
         pending=pending,
         missing=missing,
         to_repull=tuple(sorted(repull)),
+        expiries_only=expiries_only,
     )
 
 
@@ -307,6 +344,7 @@ def cells_to_repull(summary: CoverageSummary) -> tuple[tuple[str, str, int], ...
 __all__ = [
     "COVERAGE_STATUSES",
     "STATUS_COMPLETE",
+    "STATUS_EXPIRIES_ONLY",
     "STATUS_FAILED",
     "STATUS_PENDING",
     "CoverageRecord",

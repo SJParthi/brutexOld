@@ -55,6 +55,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -603,75 +604,17 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         except Exception as exc:  # pylint: disable=broad-exception-caught
             _log.warning("instrument_master.autoload_skipped", error=str(exc))
 
-        # Auto-pull expiries + contracts for the full universe once credentials
-        # are present (DEC-AUTO-UNIVERSE-001). The keyless instrument master
-        # loads above; expiries/contracts need Groww auth (CLAUDE.md §6), so
-        # this is gated on credentials_present() AND a non-empty instrument
-        # master — the pure decision lives in should_auto_pull_universe(). Runs
-        # in a BACKGROUND daemon thread so a long live pull (≈250 underlyings)
-        # never blocks the dashboard from serving; candles remain a manual
-        # pull. The thread REUSES the dashboard's already-open store (single
-        # DuckDB writer — no second read-write handle). Best-effort: never
-        # crashes the server.
-        try:  # pragma: no cover — live network + server + thread path
-            from brutex.config.credentials import credentials_present
-            from brutex.dashboard.auto_pull import should_auto_pull_universe
-            from brutex.dashboard.universe_query import universe_summary
-
-            gate_summary = universe_summary(
-                store.list_index_equity_instruments(),
-                fno_eligible=store.fno_eligible_underlyings(),
-            )
-            if should_auto_pull_universe(
-                credentials_present=credentials_present(),
-                instrument_total=gate_summary["total"],
-            ):
-                import threading
-                from datetime import UTC, datetime
-
-                def _auto_universe_pull() -> None:
-                    try:
-                        # Fully-automated, ALL years from Jan 2020 → now
-                        # (DEC-UNIVERSE-PULL-2020-001): for every underlying,
-                        # every year, every expiry → all contracts. Groww serves
-                        # F&O from 2020 (CLAUDE.md §6).
-                        now_year = datetime.now(UTC).year
-                        years = list(range(2020, now_year + 1))
-                        report = _run_live_universe_ingest(lake_root, years=years, store=store)
-                        _log.info(
-                            "universe.autopull.done",
-                            underlyings=report.underlyings,
-                            expiries=report.expiries,
-                            contracts=report.contracts,
-                        )
-                    except Exception as exc:  # pylint: disable=broad-exception-caught
-                        # The common cause is Groww rejecting the token mint
-                        # (HTTP 400) — an expired/stale TOTP Token. Surface an
-                        # ACTIONABLE hint to the file + console instead of an
-                        # opaque "Bad Request" (DEC-RUN-LOG-CAPTURE-001).
-                        _log.warning(
-                            "universe.autopull.failed",
-                            error=str(exc),
-                            hint=(
-                                "Groww auth/token mint rejected — regenerate the TOTP Token at "
-                                "groww.in/trade-api (API keys reset daily at 6 AM IST) and re-save "
-                                "it on the Credentials page; the keyless instrument list is unaffected"
-                            ),
-                        )
-
-                threading.Thread(
-                    target=_auto_universe_pull,
-                    name="brutex-universe-pull",
-                    daemon=True,
-                ).start()
-                _log.info("universe.autopull.started")
-            else:
-                _log.info(
-                    "universe.autopull.skipped_no_credentials",
-                    hint="set Groww credentials on the Credentials page; the keyless list is loaded",
-                )
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            _log.warning("universe.autopull.setup_skipped", error=str(exc))
+        # NO auto-pull of expiries/contracts on startup (DEC-UNIVERSE-PULL-
+        # PHASED-001, operator decree 2026-05-30: "remove the auto pull"). The
+        # universe pull is now driven by the two MANUAL /universe buttons —
+        # "Fetch all expiries" (Phase 1) then "Fetch all contracts" (Phase 2) —
+        # so nothing hits Groww until the operator clicks. The keyless
+        # instrument master still auto-loads above (it needs no auth) so the
+        # /universe list is populated and the buttons have something to pull.
+        _log.info(
+            "universe.autopull.disabled",
+            hint="use the 'Fetch all expiries' / 'Fetch all contracts' buttons on /universe",
+        )
     app = build_app(state, instrument_store=store)
     print(f"[brutex] dashboard → http://{host}:{port}  (Ctrl-C to stop)")
     print(f"[brutex] logs → {log_path}  ·  live viewer: http://{host}:{port}/logs")
@@ -1201,6 +1144,387 @@ def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + 
             expiries=expiry_total,
             contracts=contract_total,
         )
+    finally:
+        if owns_store:
+            store.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Two-phase manual pull (DEC-UNIVERSE-PULL-PHASED-001) — the live runners the
+# two /universe buttons drive. Phase 1 ("Fetch all expiries") and Phase 2
+# ("Fetch all contracts") are INDEPENDENT: Phase 2 reads the expiries Phase 1
+# persisted, so contracts can never be pulled for an expiry the engine never
+# saw. Both apply the O(1) incremental skip (don't re-fetch immutable data) and
+# fan out via PoolRunParallel under the shared 8→4 r/s token bucket.
+#
+# Coverage-excluded (`# pragma: no cover`): live Groww creds + SDK + DuckDB +
+# threads. The *decision* logic (ordering barrier, skip, dedup) lives in the
+# 100%-tested brutex.orchestrator.universe_phases; these are thin live wires.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _build_universe_fetchers(  # pragma: no cover — live creds + SDK
+    store: Any,
+) -> tuple[Any, Any, Any]:
+    """Build the shared ``(expiry_fetcher, contract_fetcher, auth)`` for a phase run.
+
+    Mirrors the fetcher setup of :func:`_run_live_universe_ingest` (one source of
+    truth would ideally be extracted; kept inline here so the two-phase runners
+    are self-contained while the legacy auto-pull is retired). Starts the rate
+    bucket at 8 r/s (DEC-UNIVERSE-PULL-PARALLEL-001) and wires the lean-store
+    leg→underlying metadata lookup (DEC-INSTRUMENT-UNIVERSE-FAST-001).
+    """
+    from growwapi.groww.exceptions import BaseGrowwException
+
+    from brutex.adapters.groww.auth import GrowwAuth
+    from brutex.adapters.groww.contracts import ContractFetcher, store_metadata_lookup
+    from brutex.adapters.groww.expiries import ExpiryFetcher
+    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
+
+    auth = GrowwAuth.from_env()
+    sdk = auth.session()
+    bucket = AdaptiveTokenBucket(initial_rps=8.0, downshift_rps=4.0)
+    expiry_fetcher = ExpiryFetcher(
+        sdk=sdk, bucket=bucket, base_exception=BaseGrowwException, store=store
+    )
+    contract_fetcher = ContractFetcher(
+        sdk=sdk,
+        bucket=bucket,
+        base_exception=BaseGrowwException,
+        store=store,
+        metadata_lookup=store_metadata_lookup(store),
+    )
+    return expiry_fetcher, contract_fetcher, auth
+
+
+class _SdkRemintGuard:  # pragma: no cover — exercised only on the live SDK path
+    """Thread-safe shared-SDK access + one-shot auth re-mint for a phase run.
+
+    Two hostile-review findings (CLAUDE.md §9) motivate this:
+
+    * **#6 shared SDK across N pool workers** — one ``growwapi.GrowwAPI`` is
+      shared by every :class:`PoolRunParallel` worker; ``requests``-backed SDKs
+      are not safe for concurrent calls. :meth:`call` serializes every SDK call
+      behind a lock. The cost is ~nil: the 8 r/s token bucket already nearly
+      serialises the calls, so the lock just makes the existing near-serial
+      access correct.
+    * **#2 dropped auth re-mint** — a long phase outlives one short-lived Groww
+      token (resets 6 AM IST, CLAUDE.md §6). On an auth error :meth:`call`
+      re-mints ONCE (``auth.refresh()``), rebinds both fetchers' ``.sdk`` under
+      the lock, and retries the call. The single-flight `_PHASE_LOCK` means only
+      one phase runs at a time, so rebinding both fetchers here is race-free.
+
+    Idempotent + bounded: at most one re-mint per call; a still-failing auth
+    error after the re-mint propagates (the cell/job is recorded failed and, per
+    the incremental skip, retried on the next click).
+    """
+
+    def __init__(self, expiry_fetcher: Any, contract_fetcher: Any, auth: Any) -> None:
+        self._expiry = expiry_fetcher
+        self._contract = contract_fetcher
+        self._auth = auth
+        self._lock = __import__("threading").Lock()
+        self._log = __import__("structlog").get_logger("brutex.universe")
+
+    @staticmethod
+    def _is_auth_error(exc: BaseException) -> bool:
+        """True for a Groww token-expiry / invalid-token failure (re-mintable)."""
+        blob = f"{type(exc).__name__} {exc}".lower()
+        return any(
+            t in blob for t in ("authentication", "token", "expired", "invalid", "401", "403")
+        )
+
+    def call[T](self, fn: Callable[[], T]) -> T:
+        """Run *fn* (an SDK fetch) under the lock; on an auth error re-mint once + retry."""
+        with self._lock:
+            try:
+                return fn()
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                if not self._is_auth_error(exc):
+                    raise
+                # Token rolled mid-phase — re-mint once + rebind both fetchers,
+                # still holding the lock so no other worker sees a half-swapped SDK.
+                new_sdk = self._auth.refresh()
+                self._expiry.sdk = new_sdk
+                self._contract.sdk = new_sdk
+                self._log.warning("universe.phase.auth.reminted")
+                return fn()
+
+
+def _run_expiries_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB + threads
+    lake_root: Path, *, years: list[int], store: Any = None
+) -> dict[str, int]:
+    """Phase 1 — "Fetch all expiries": pull every NEW ``(underlying, year)`` expiry cell.
+
+    Refreshes the instrument master, derives the full lake underlying set, builds
+    the O(1) skip-set from the coverage ledger (``settled_expiry_cells`` —
+    complete/pending past years are immutable + skipped; the current year + any
+    failed cell always re-pull), and fans the expiry fetches out via
+    :class:`~brutex.orchestrator.parallel.PoolRunParallel`. Each cell's outcome is
+    persisted as a coverage row. Contracts are NOT touched (that is Phase 2).
+
+    Returns a small summary dict for the route + log.
+    """
+    from datetime import UTC, datetime
+
+    import structlog
+
+    from brutex.adapters.groww.client import VendorSdkError
+    from brutex.adapters.groww.instruments import InstrumentMasterFetcher
+    from brutex.data.coverage_ledger import (
+        STATUS_EXPIRIES_ONLY,
+        STATUS_PENDING,
+        CoverageRecord,
+        classify_cell,
+    )
+    from brutex.data.instrument_store import InstrumentStore
+    from brutex.orchestrator.parallel import PoolRunParallel
+    from brutex.orchestrator.retry import retry_call
+    from brutex.orchestrator.universe_phases import (
+        ExpiryCell,
+        cells_to_pull,
+        phase1_cells,
+        settled_expiry_cells,
+    )
+    from brutex.universe import derive_lake_underlyings
+
+    log = structlog.get_logger("brutex.universe")
+    owns_store = store is None
+    if store is None:
+        store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    try:
+        expiry_fetcher, contract_fetcher, auth = _build_universe_fetchers(store)
+        guard = _SdkRemintGuard(expiry_fetcher, contract_fetcher, auth)
+        log.info("universe.expiries.master.refreshing")
+        InstrumentMasterFetcher.from_env(store).refresh()
+        underlyings = derive_lake_underlyings(store.list_index_equity_instruments())
+
+        # O(1) skip: drop settled past-year cells; keep current year + failures.
+        settled = settled_expiry_cells(
+            (r.exchange, r.underlying_symbol, r.year, r.status) for r in store.list_coverage()
+        )
+        current_year = datetime.now(UTC).year
+        # derive_lake_underlyings yields (underlying, exchange); phase1_cells
+        # unpacks (exchange, underlying) — swap so the cell tuple is
+        # (exchange, underlying, year), matching the coverage-ledger PK + the
+        # skip-set built from list_coverage above. (The legacy pull did the same
+        # swap inline at `[(ex, sym, yr) for sym, ex in underlyings]`.)
+        all_cells = phase1_cells(((ex, sym) for sym, ex in underlyings), years)
+        todo = cells_to_pull(all_cells, settled=settled, current_year=current_year)
+        run_id = datetime.now(UTC).strftime("expiries-%Y%m%dT%H%M%SZ")
+        log.info(
+            "universe.expiries.start",
+            run_id=run_id,
+            cells_total=len(all_cells),
+            cells_to_pull=len(todo),
+            cells_skipped=len(all_cells) - len(todo),
+        )
+
+        def _fetch(cell: ExpiryCell) -> int:
+            exchange, underlying, year = cell
+            # guard.call serializes the shared SDK across workers (#6) + re-mints
+            # once on an auth error (#2); retry_call adds transient backoff.
+            result = retry_call(
+                lambda: guard.call(lambda: expiry_fetcher.fetch(underlying, exchange, year=year)),
+                retry_on=VendorSdkError,
+            )
+            return len(result.records)
+
+        discovered = 0
+        failures = 0
+        for outcome in PoolRunParallel()(_fetch, todo):
+            exchange, underlying, year = outcome.item
+            fetched_at = datetime.now(UTC)
+            if outcome.ok:
+                n = outcome.result or 0
+                discovered += n
+                # Phase-1 honesty (DEC-UNIVERSE-PULL-PHASED-001): a cell with
+                # expiries is NOT "complete" — its contracts are a separate
+                # phase. Mark it ``expiries_only`` so /coverage never shows a
+                # 0-contract F&O cell as done. A cell with zero expiries is a
+                # genuinely derivative-free underlying for that year → ``pending``
+                # (nothing more to pull), matching classify_cell's rule.
+                status = STATUS_EXPIRIES_ONLY if n > 0 else STATUS_PENDING
+                store.upsert_coverage(
+                    CoverageRecord(
+                        exchange=exchange,
+                        underlying_symbol=underlying,
+                        year=year,
+                        expiries_pulled=n,
+                        contracts_pulled=0,
+                        status=status,
+                        last_run_id=run_id,
+                        last_fetched_at=fetched_at,
+                        error_message=None,
+                    )
+                )
+            else:
+                failures += 1
+                err = str(outcome.exc)
+                log.warning("universe.expiries.cell.failed", cell=outcome.item, error=err)
+                store.upsert_coverage(
+                    CoverageRecord(
+                        exchange=exchange,
+                        underlying_symbol=underlying,
+                        year=year,
+                        expiries_pulled=0,
+                        contracts_pulled=0,
+                        status=classify_cell(0, 0, err),
+                        last_run_id=run_id,
+                        last_fetched_at=fetched_at,
+                        error_message=err,
+                    )
+                )
+        summary = {
+            "cells_total": len(all_cells),
+            "cells_pulled": len(todo),
+            "cells_skipped": len(all_cells) - len(todo),
+            "expiries_discovered": discovered,
+            "failures": failures,
+        }
+        log.info("universe.expiries.done", run_id=run_id, **summary)
+        return summary
+    finally:
+        if owns_store:
+            store.close()
+
+
+def _run_contracts_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB + threads
+    lake_root: Path, *, store: Any = None
+) -> dict[str, int]:
+    """Phase 2 — "Fetch all contracts": pull contracts for every NEW persisted expiry.
+
+    Reads the expiries Phase 1 already persisted (``store.list_expiries``) — so it
+    is structurally impossible to pull contracts for an expiry the engine never
+    discovered. Builds the O(1) skip-set from the persisted contracts
+    (``settled_contract_jobs``); ``contract_jobs_to_pull`` then skips only
+    EXPIRED + already-pulled jobs (their leg-set is immutable) while always
+    re-pulling a not-yet-expired expiry (new strikes). Fans out via
+    :class:`PoolRunParallel`. If no expiries are persisted yet, returns a no-op
+    summary telling the operator to run "Fetch all expiries" first.
+    """
+    from datetime import UTC, datetime
+
+    import structlog
+
+    from brutex.adapters.groww.client import VendorSdkError
+    from brutex.data.coverage_ledger import STATUS_COMPLETE, CoverageRecord
+    from brutex.data.instrument_store import InstrumentStore
+    from brutex.orchestrator.parallel import PoolRunParallel
+    from brutex.orchestrator.retry import retry_call
+    from brutex.orchestrator.universe_phases import (
+        ContractJob,
+        contract_jobs_to_pull,
+        settled_contract_jobs,
+    )
+
+    log = structlog.get_logger("brutex.universe")
+    owns_store = store is None
+    if store is None:
+        store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    try:
+        expiry_fetcher, contract_fetcher, auth = _build_universe_fetchers(store)
+        guard = _SdkRemintGuard(expiry_fetcher, contract_fetcher, auth)
+
+        # Phase 2 reads ONLY persisted expiries — the ordering guarantee across
+        # clicks. Distinct (exchange, underlying, expiry) is the job universe.
+        # Map each job → its coverage cell's year (pulled_year) so a cell can be
+        # upgraded expiries_only → complete once its contracts are in.
+        expiry_rows = store.list_expiries()
+        job_year: dict[ContractJob, int] = {
+            (r.exchange, r.underlying_symbol, r.expiry_date): r.pulled_year for r in expiry_rows
+        }
+        all_jobs: list[ContractJob] = sorted(job_year)
+        if not all_jobs:
+            log.warning("universe.contracts.no_expiries")
+            return {
+                "jobs_total": 0,
+                "jobs_pulled": 0,
+                "jobs_skipped": 0,
+                "contracts_persisted": 0,
+                "failures": 0,
+                "needs_expiries_first": 1,
+            }
+
+        settled = settled_contract_jobs(
+            (r.exchange, r.underlying_symbol, r.expiry_date) for r in store.list_contracts()
+        )
+        today = datetime.now(UTC).date()
+        todo = contract_jobs_to_pull(all_jobs, settled=settled, today=today)
+        run_id = datetime.now(UTC).strftime("contracts-%Y%m%dT%H%M%SZ")
+        log.info(
+            "universe.contracts.start",
+            run_id=run_id,
+            jobs_total=len(all_jobs),
+            jobs_to_pull=len(todo),
+            jobs_skipped=len(all_jobs) - len(todo),
+        )
+
+        def _fetch(job: ContractJob) -> int:
+            exchange, underlying, expiry = job
+            # guard.call serializes the shared SDK across workers (#6) + re-mints
+            # once on an auth error (#2); retry_call adds transient backoff.
+            result = retry_call(
+                lambda: guard.call(lambda: contract_fetcher.fetch(underlying, exchange, expiry)),
+                retry_on=VendorSdkError,
+            )
+            return len(result.records)
+
+        persisted = 0
+        failures = 0
+        # Cells (exchange, underlying, year) whose contracts were pulled OK this
+        # run — upgraded expiries_only → complete after the loop so /coverage
+        # only reads "complete" once BOTH phases are done for the cell.
+        completed_cells: set[tuple[str, str, int]] = set()
+        for outcome in PoolRunParallel()(_fetch, todo):
+            exchange, underlying, _expiry = outcome.item
+            if outcome.ok:
+                n = outcome.result or 0
+                persisted += n
+                completed_cells.add((exchange, underlying, job_year[outcome.item]))
+                log.info("universe.contracts.pulled", job=outcome.item, contracts=n)
+            else:
+                failures += 1
+                log.warning(
+                    "universe.contracts.job.failed", job=outcome.item, error=str(outcome.exc)
+                )
+
+        # Upgrade each touched cell expiries_only → complete (idempotent upsert;
+        # preserves the cell's expiries_pulled count, sets a contracts marker).
+        upgraded = 0
+        if completed_cells:
+            cov_by_cell = {
+                (c.exchange, c.underlying_symbol, c.year): c for c in store.list_coverage()
+            }
+            for cell in completed_cells:
+                cov = cov_by_cell.get(cell)
+                if cov is None or cov.status == STATUS_COMPLETE:
+                    continue
+                store.upsert_coverage(
+                    CoverageRecord(
+                        exchange=cov.exchange,
+                        underlying_symbol=cov.underlying_symbol,
+                        year=cov.year,
+                        expiries_pulled=cov.expiries_pulled,
+                        contracts_pulled=max(cov.contracts_pulled, 1),
+                        status=STATUS_COMPLETE,
+                        last_run_id=run_id,
+                        last_fetched_at=datetime.now(UTC),
+                        error_message=None,
+                    )
+                )
+                upgraded += 1
+        summary = {
+            "jobs_total": len(all_jobs),
+            "jobs_pulled": len(todo),
+            "jobs_skipped": len(all_jobs) - len(todo),
+            "contracts_persisted": persisted,
+            "cells_completed": upgraded,
+            "failures": failures,
+            "needs_expiries_first": 0,
+        }
+        log.info("universe.contracts.done", run_id=run_id, **summary)
+        return summary
     finally:
         if owns_store:
             store.close()

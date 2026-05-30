@@ -38,6 +38,7 @@ import contextlib
 import json
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -780,6 +781,89 @@ def build_app(
         )
         return JSONResponse(report.to_dict())
 
+    # ── Two-phase manual pull (DEC-UNIVERSE-PULL-PHASED-001) ────────
+    # The two /universe buttons. Each kicks its phase off in a background
+    # daemon thread (single-flight guarded) and returns immediately —
+    # progress is read from /coverage + /logs. Phase 2 ("contracts") reads
+    # ONLY the expiries Phase 1 persisted, so contracts can never precede
+    # expiries across clicks. Credentials are required (the live SDK), so a
+    # keyless page returns 400 with an actionable message instead of a
+    # silent no-op.
+
+    def _phase_lake_years() -> list[int]:
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+
+        return list(range(2020, _dt.now(_UTC).year + 1))
+
+    @app.post("/api/v1/universe/fetch-expiries")
+    async def api_fetch_expiries() -> JSONResponse:
+        """POST — Phase 1: fetch ALL new expiries across the universe (2020→now).
+
+        Launches :func:`brutex.cli._run_expiries_phase` in the background. The
+        O(1) incremental skip means a re-click only pulls the current year +
+        any previously-failed cell; settled past years are skipped before the
+        network call. Returns ``{"phase": "expiries", "status": ...}`` where
+        status is ``started`` / ``already_running`` / ``no_store``.
+        """
+        store = _require_store()
+        if not groww_creds_present():
+            raise HTTPException(
+                status_code=400,
+                detail="Groww credentials required — set them on the Credentials page, then retry.",
+            )
+
+        def _worker(lake_root: Path) -> object:  # pragma: no cover — live thread
+            """Background body — run the Phase-1 expiries pull for ``lake_root``."""
+            from brutex.cli import (
+                _run_expiries_phase,  # pyright: ignore[reportPrivateUsage]
+            )
+
+            return _run_expiries_phase(lake_root, years=_phase_lake_years(), store=store)
+
+        status = _start_phase("expiries", store, _worker)
+        _LOG.info("universe.fetch_expiries.requested", status=status)
+        return JSONResponse({"phase": "expiries", "status": status})
+
+    @app.post("/api/v1/universe/fetch-contracts")
+    async def api_fetch_contracts() -> JSONResponse:
+        """POST — Phase 2: fetch ALL new contracts for every persisted expiry.
+
+        Launches :func:`brutex.cli._run_contracts_phase` in the background. It
+        reads ONLY the expiries Phase 1 persisted (so you must run "Fetch all
+        expiries" first); the O(1) skip re-pulls only not-yet-expired expiries
+        + any uncaptured expired one. Returns the same status shape as
+        fetch-expiries.
+        """
+        store = _require_store()
+        if not groww_creds_present():
+            raise HTTPException(
+                status_code=400,
+                detail="Groww credentials required — set them on the Credentials page, then retry.",
+            )
+
+        def _worker(lake_root: Path) -> object:  # pragma: no cover — live thread
+            """Background body — run the Phase-2 contracts pull for ``lake_root``."""
+            from brutex.cli import (
+                _run_contracts_phase,  # pyright: ignore[reportPrivateUsage]
+            )
+
+            return _run_contracts_phase(lake_root, store=store)
+
+        status = _start_phase("contracts", store, _worker)
+        _LOG.info("universe.fetch_contracts.requested", status=status)
+        return JSONResponse({"phase": "contracts", "status": status})
+
+    @app.get("/api/v1/universe/phase-status")
+    async def api_phase_status() -> JSONResponse:
+        """GET — whether each phase is currently running (for button enable/disable)."""
+        return JSONResponse(
+            {
+                "expiries_running": _phase_busy("expiries"),
+                "contracts_running": _phase_busy("contracts"),
+            }
+        )
+
     # ── Completeness ledger / Coverage (DEC-COVERAGE-LEDGER-001) ────
 
     @app.get("/api/v1/coverage")
@@ -1283,6 +1367,65 @@ def _start_coverage_repull(store: Any) -> bool:
 
     threading.Thread(target=_repull, name="brutex-coverage-repull", daemon=True).start()
     return True
+
+
+# ── Two-phase manual pull (DEC-UNIVERSE-PULL-PHASED-001) ────────────────────
+# Single-flight state for the two /universe buttons: a phase already running
+# must not be double-launched by an impatient second click. A plain dict +
+# lock is sufficient (the dashboard is single-process); the flag is cleared in
+# the worker's finally so a crashed phase can always be retried.
+_PHASE_LOCK = threading.Lock()
+_PHASE_RUNNING: dict[str, bool] = {"expiries": False, "contracts": False}
+
+
+def _phase_busy(name: str) -> bool:
+    """Return whether *name* phase ('expiries' | 'contracts') is currently running."""
+    with _PHASE_LOCK:
+        return _PHASE_RUNNING.get(name, False)
+
+
+def _start_phase(name: str, store: Any, worker: Callable[[Path], object]) -> str:
+    """Launch *worker* in a daemon thread under the single-flight guard.
+
+    Returns one of: ``"started"`` (a fresh run kicked off), ``"already_running"``
+    (a click while the same phase is in flight — ignored), or ``"no_store"`` (no
+    wired lake path; the offline/dry page can't run a live phase). Best-effort:
+    the worker body swallows its own exceptions (the ledger/logs record per-item
+    failures) so the request handler never crashes.
+    """
+    store_path = getattr(store, "path", None)
+    if not isinstance(store_path, Path):  # pragma: no cover — needs a wired store path
+        return "no_store"
+    with _PHASE_LOCK:
+        if _PHASE_RUNNING.get(name, False):
+            return "already_running"
+        _PHASE_RUNNING[name] = True
+
+    def _run() -> None:  # pragma: no cover — live SDK + network + thread
+        try:
+            worker(store_path.parent)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # NEVER silent (DEC-PULL-ERROR-VISIBILITY-001): a setup/creds-runtime
+            # failure BEFORE the per-item loop (bad token mint, master refresh)
+            # would otherwise vanish — the operator clicks, the button re-enables,
+            # and /logs shows nothing. Log the full reason to the JSONL file.
+            _LOG.exception(
+                "universe.phase.failed", phase=name, error_type=type(exc).__name__, error=str(exc)
+            )
+        finally:
+            with _PHASE_LOCK:
+                _PHASE_RUNNING[name] = False
+
+    try:
+        threading.Thread(target=_run, name=f"brutex-phase-{name}", daemon=True).start()
+    except RuntimeError:  # pragma: no cover — OS thread exhaustion
+        # If the thread can't even start, clear the flag we just set so the
+        # button isn't latched disabled forever (the _run finally never fires).
+        with _PHASE_LOCK:
+            _PHASE_RUNNING[name] = False
+        _LOG.exception("universe.phase.thread_start_failed", phase=name)
+        return "no_store"
+    return "started"
 
 
 _CREDENTIALS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "credentials.html"

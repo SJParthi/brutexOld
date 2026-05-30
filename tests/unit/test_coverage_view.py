@@ -33,6 +33,7 @@ def _record(
     expiries: int = 2,
     contracts: int = 20,
     error: str | None = None,
+    status: str | None = None,
 ) -> CoverageRecord:
     return CoverageRecord(
         exchange=exchange,
@@ -40,7 +41,7 @@ def _record(
         year=year,
         expiries_pulled=expiries,
         contracts_pulled=contracts,
-        status=classify_cell(expiries, contracts, error),
+        status=status if status is not None else classify_cell(expiries, contracts, error),
         last_run_id="run-1",
         last_fetched_at=_FETCHED_AT,
         error_message=error,
@@ -126,10 +127,29 @@ class TestCoverageHeadline:
             "incomplete": 2,
             "failed": 0,
             "pending": 0,
+            "expiries_only": 0,
             "missing": 2,
             "percent": 50,
             "is_complete": False,
         }
+
+    def test_headline_expiries_only_not_counted_complete(self) -> None:
+        # A Phase-1-only cell (expiries_only) must NOT inflate "complete" and
+        # must NOT read as 100% (DEC-UNIVERSE-PULL-PHASED-001).
+        summary = reconcile_coverage(
+            [("NSE", "A"), ("NSE", "B")],
+            [2024],
+            [
+                _record(underlying="A"),  # complete
+                _record(underlying="B", expiries=3, contracts=0, status="expiries_only"),
+            ],
+        )
+        headline = coverage_headline(summary)
+        assert headline["complete"] == 1
+        assert headline["expiries_only"] == 1
+        assert headline["attempted"] == 2  # complete + expiries_only
+        assert headline["is_complete"] is False  # expiries_only ≠ done
+        assert headline["percent"] == 50
 
     def test_headline_attempted_and_not_pulled_are_honest(self) -> None:
         # attempted = complete + failed + pending (cells the pull has touched);
