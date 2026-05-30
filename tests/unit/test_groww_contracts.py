@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 
 import pytest
@@ -237,6 +237,64 @@ class TestStoreMetadataLookup:
         assert result.records[0].lot_size == 250
         assert result.records[0].tick_size == Decimal("0.05")
         assert upserted[0] == result.records
+
+
+class _DictStore:
+    """Underlyings-only store (the lean-store shape): ``get`` hits ONLY exact keys.
+
+    Mirrors DEC-INSTRUMENT-UNIVERSE-FAST-001 — the instrument master persists the
+    underlyings, never the FUT/CE/PE legs. A leg symbol is therefore never a key.
+    """
+
+    def __init__(self, rows: dict[str, _UnderlyingRow]) -> None:
+        self._rows = rows
+
+    def get(self, vendor_symbol: str, *, as_of: object = None) -> _UnderlyingRow | None:
+        """Exact-key lookup — returns ``None`` for any non-underlying symbol."""
+        return self._rows.get(vendor_symbol)
+
+
+class TestContractsMetaFixRegression:
+    """DEC-CONTRACTS-META-FIX-001 — the ``contracts: 0`` regression guard.
+
+    The lean store holds only underlyings, so a ``metadata_lookup`` keyed on the
+    FULL leg symbol (the pre-fix ``cli._meta_lookup``) always misses → every
+    contract is dropped as ``skipped_no_metadata`` (the operator's live
+    ``contracts: 0`` on every cell). ``store_metadata_lookup`` reduces the leg to
+    its underlying FIRST, so the economics are recovered.
+    """
+
+    _LEGS: ClassVar[list[str]] = ["NSE-NIFTY-30Jan25-24650-CE", "NSE-NIFTY-30Jan25-FUT"]
+
+    def test_full_leg_symbol_lookup_drops_every_contract(self) -> None:
+        # Reproduces the bug: query the full leg symbol against a store that
+        # holds only the underlying → both legs dropped, contracts=0.
+        store = _DictStore({"NSE-NIFTY": _UnderlyingRow(50, Decimal("0.05"), 1800)})
+
+        def buggy_lookup(symbol: str) -> ContractMeta | None:
+            row = store.get(symbol)  # the FULL leg symbol — never in the lean store
+            if row is None:
+                return None
+            return ContractMeta(row.lot_size, row.tick_size, row.freeze_quantity)
+
+        sdk = _FakeSDK(result={"contracts": self._LEGS})
+        fetcher, _bucket, _up = _fetcher(sdk, lookup=buggy_lookup)
+        result = fetcher.fetch("NIFTY", "NSE", date(2025, 1, 30))
+        assert result.records == []
+        assert result.skipped_no_metadata == 2
+
+    def test_underlying_reduction_recovers_every_contract(self) -> None:
+        # The fix: store_metadata_lookup reduces NSE-NIFTY-...-CE → NSE-NIFTY.
+        store = _DictStore({"NSE-NIFTY": _UnderlyingRow(50, Decimal("0.05"), 1800)})
+        sdk = _FakeSDK(result={"contracts": self._LEGS})
+        fetcher, _bucket, _up = _fetcher(sdk, lookup=store_metadata_lookup(store))
+        result = fetcher.fetch("NIFTY", "NSE", date(2025, 1, 30))
+        assert len(result.records) == 2
+        assert result.skipped_no_metadata == 0
+        assert {r.instrument_type for r in result.records} == {
+            InstrumentType.CE,
+            InstrumentType.FUT,
+        }
 
 
 class TestDefaults:
