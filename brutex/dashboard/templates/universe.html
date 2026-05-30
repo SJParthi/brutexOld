@@ -284,8 +284,21 @@ function toggleEmptyBanner(summary) {
 /* ── Keyless "Load instruments" (POST /api/v1/universe/load-instruments) ──
    The instrument master is a PUBLIC CSV — NO Groww keys required. On success
    we re-run loadSummary() + loadInstruments() so the ~200 instruments appear.
-   `msgId` targets either the pullbar message slot or the empty-banner one. */
+   `msgId` targets either the pullbar message slot or the empty-banner one.
+
+   FIX (DEC-UNDERLYING-ECONOMICS-001): this 22 MB CSV download must fire AT MOST
+   ONCE per page load and NEVER from a render / tab-switch / countUp / summary
+   path. It is triggered ONLY by (a) an explicit button click, or (b) the single
+   auto-load when the universe is empty (maybeAutoLoad below). `loadInFlight`
+   makes a second click while one is running a no-op so concurrent POSTs can't
+   race a wipe+insert on the server (the root cause of the "25 indices · 0
+   stocks" corruption). */
+let loadInFlight = false;        // true while a load-instruments POST is running
+let autoLoadAttempted = false;   // the one-shot empty-universe auto-load fired?
+
 async function loadInstrumentMaster(msgId) {
+  if (loadInFlight) return;      // in-flight guard — a second click is a no-op
+  loadInFlight = true;
   const btns = document.querySelectorAll('.loadbtn');
   const msg = document.getElementById(msgId || "loadmsg");
   btns.forEach(b => { b.disabled = true; b.classList.add("busy"); });
@@ -306,19 +319,32 @@ async function loadInstrumentMaster(msgId) {
   } catch (e) {
     if (msg) { msg.classList.add("err"); msg.textContent = "couldn't load instruments: " + esc(e.message); }
   } finally {
+    loadInFlight = false;
     btns.forEach(b => { b.disabled = false; b.classList.remove("busy"); });
   }
 }
 document.getElementById("loadbtn").onclick = () => loadInstrumentMaster("loadmsg");
 
+/* One-shot auto-load: fire the keyless load EXACTLY ONCE per page load, and
+   only when the lake is genuinely empty. Never re-fires (autoLoadAttempted),
+   never loops, and yields to an already-running load (loadInFlight). */
+async function maybeAutoLoad(summary) {
+  if (autoLoadAttempted || loadInFlight) return;
+  const total = (summary.index_count || 0) + (summary.stock_count || 0);
+  if (total > 0) return;
+  autoLoadAttempted = true;
+  await loadInstrumentMaster("loadmsg");
+}
+
 async function loadSummary() {
   try {
     const r = await fetch('/api/v1/universe/summary');
-    if (!r.ok) { const z = {index_count:0, stock_count:0}; buildTabs(z); toggleEmptyBanner(z); return; }
+    if (!r.ok) { const z = {index_count:0, stock_count:0}; buildTabs(z); toggleEmptyBanner(z); return z; }
     const s = await r.json();
     buildTabs(s);
     toggleEmptyBanner(s);
-  } catch (e) { const z = {index_count:0, stock_count:0}; buildTabs(z); toggleEmptyBanner(z); }
+    return s;
+  } catch (e) { const z = {index_count:0, stock_count:0}; buildTabs(z); toggleEmptyBanner(z); return z; }
 }
 
 async function loadInstruments() {
@@ -532,7 +558,16 @@ if (credDismiss) credDismiss.addEventListener('click', () => {
 });
 checkCredentialsBanner();
 
-loadSummary().then(loadInstruments);
+/* Initial page render uses the already-loaded GET endpoints only. The keyless
+   load-instruments POST fires at most ONCE here (maybeAutoLoad) and only when
+   the universe is empty — normal renders, tab switches and searches never POST
+   (DEC-UNDERLYING-ECONOMICS-001). */
+async function bootstrap() {
+  const summary = await loadSummary();
+  await loadInstruments();
+  await maybeAutoLoad(summary || {index_count: 0, stock_count: 0});
+}
+bootstrap();
 </script>
 </body>
 </html>

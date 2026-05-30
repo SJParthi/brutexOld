@@ -46,6 +46,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Final
 
 from brutex.models import Exchange, Instrument, InstrumentType
@@ -254,6 +255,63 @@ def build_fno_eligible_underlyings(
     return frozenset(eligible)
 
 
+#: One underlying's contract economics derived from its derivative legs:
+#: ``(lot_size, tick_size, freeze_quantity)``.
+UnderlyingEconomics = tuple[int, Decimal, int | None]
+
+
+def build_underlying_economics(
+    instruments: Iterable[Instrument],
+) -> dict[tuple[Exchange, str], UnderlyingEconomics]:
+    """Map ``(exchange, underlying_symbol)`` to leg-derived contract economics.
+
+    In the Groww instrument master, IDX and EQ rows carry BLANK / placeholder
+    economics — ``lot_size`` defaults to ``1`` (or ``0`` for indices),
+    ``freeze_quantity`` is absent. The REAL ``lot_size`` / ``tick_size`` /
+    ``freeze_quantity`` for an underlying live only on its derivative legs
+    (e.g. ``RELIANCE`` options carry ``lot_size=500``; NIFTY options carry
+    ``lot_size=75``). The lean ingest already parses every FUT / CE / PE leg
+    in-memory to compute F&O-eligibility
+    (:func:`build_fno_eligible_underlyings`) before discarding them; this
+    helper rides that same single pass to also harvest the economics so each
+    persisted IDX / EQ underlying can be back-filled with its real values
+    (DEC-UNDERLYING-ECONOMICS-001).
+
+    Rules
+    -----
+    * Only derivative legs (FUT / CE / PE) contribute — they are the rows that
+      carry the authoritative economics. Non-derivative rows are ignored.
+    * A leg with no ``underlying_symbol`` is skipped (derivatives always have
+      one in a well-formed master, but the guard keeps this pure + total).
+    * The FIRST leg seen for a given ``(exchange, underlying_symbol)`` wins, so
+      the result is deterministic and order-stable for any fixed input ordering.
+
+    Parameters
+    ----------
+    instruments
+        The fully parsed instrument set (the same iterable fed to
+        :func:`build_fno_eligible_underlyings`), including the derivative legs.
+
+    Returns
+    -------
+    dict[tuple[Exchange, str], UnderlyingEconomics]
+        ``{(exchange, underlying_symbol): (lot_size, tick_size,
+        freeze_quantity)}`` for every underlying that has at least one
+        derivative leg. Underlyings with no legs (e.g. a non-F&O index such
+        as NIFTY100) are absent — callers keep the master row's own values.
+    """
+    economics: dict[tuple[Exchange, str], UnderlyingEconomics] = {}
+    for inst in instruments:
+        underlying = inst.underlying_symbol
+        if not inst.is_derivative or underlying is None:
+            continue
+        key = (inst.exchange, underlying)
+        if key in economics:
+            continue
+        economics[key] = (inst.lot_size, inst.tick_size, inst.freeze_quantity)
+    return economics
+
+
 def is_universe_underlying(
     instrument: Instrument,
     fno_eligible_underlyings: frozenset[tuple[Exchange, str]],
@@ -361,8 +419,10 @@ __all__ = [
     "REFERENCE_ONLY_INDICES",
     "V1_INDICES",
     "V1_UNDERLYINGS",
+    "UnderlyingEconomics",
     "UnderlyingSpec",
     "build_fno_eligible_underlyings",
+    "build_underlying_economics",
     "classify_underlying_kind",
     "is_in_brute_force_scope",
     "is_in_fetch_scope",
