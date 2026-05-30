@@ -29,16 +29,21 @@ from brutex.orchestrator.universe_phases import (
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _sync_run_parallel(
-    fn: Callable[[object], object],
-    items: Sequence[object],
-) -> list[ItemResult[object, object]]:
-    """Map *fn* over *items* in order, capturing each result/exception."""
-    out: list[ItemResult[object, object]] = []
+def _sync_run_parallel[ItemT, ResultT](
+    fn: Callable[[ItemT], ResultT],
+    items: Sequence[ItemT],
+) -> list[ItemResult[ItemT, ResultT]]:
+    """Map *fn* over *items* in order, capturing each result/exception.
+
+    Generic (PEP 695) so it structurally satisfies the generic-method
+    :class:`~brutex.orchestrator.universe_phases.RunParallel` Protocol that
+    ``run_two_phase`` expects — both under mypy --strict and pyright.
+    """
+    out: list[ItemResult[ItemT, ResultT]] = []
     for item in items:
         try:
             result = fn(item)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — test fake mirrors prod capture
             out.append(ItemResult(item=item, ok=False, result=None, exc=exc))
         else:
             out.append(ItemResult(item=item, ok=True, result=result, exc=None))
