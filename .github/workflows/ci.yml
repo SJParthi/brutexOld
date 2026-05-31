@@ -953,6 +953,11 @@ jobs:
           else
             echo "(brutex.adapters.dhan.instrument_loader test file not present yet — gate inactive)"
           fi
+          if compgen -G "tests/unit/test_dhan_instrument_refresh.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.instrument_refresh --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_instrument_refresh.py
+          else
+            echo "(brutex.adapters.dhan.instrument_refresh test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_adapter.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.adapter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_adapter.py
           else
