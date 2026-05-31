@@ -19,7 +19,12 @@ from collections.abc import Callable, Sequence
 from typing import cast
 
 from brutex.adapters.dhan.constants import INSTRUMENT_MASTER_DETAILED_URL
-from brutex.adapters.dhan.instruments import DhanInstrumentError, select_universe, validate_header
+from brutex.adapters.dhan.instruments import (
+    DhanInstrumentError,
+    UniverseReport,
+    select_universe_report,
+    validate_header,
+)
 from brutex.models import Instrument
 
 #: A CSV fetcher: ``url → decoded CSV text``.
@@ -32,22 +37,14 @@ _ALLOWED_HOST: str = "images.dhan.co"
 _DOWNLOAD_TIMEOUT: float = 60.0
 
 
-def load_universe(
+def load_universe_report(
     http_get: HttpGet, *, url: str = INSTRUMENT_MASTER_DETAILED_URL
-) -> list[Instrument]:
-    """Download + parse the detailed scrip master into the brute-force universe.
+) -> UniverseReport:
+    """Download + parse the detailed scrip master into a :class:`UniverseReport`.
 
-    Parameters
-    ----------
-    http_get
-        ``url → CSV text`` callable (injected; the real one is SSRF-guarded).
-    url
-        Scrip-master URL (defaults to the verified detailed-CSV URL).
-
-    Returns
-    -------
-    list[Instrument]
-        All NSE indices + BSE SENSEX + every F&O-eligible single-stock SPOT.
+    Returns the selected universe (all NSE indices + BSE SENSEX + every
+    F&O-eligible single-stock SPOT) plus parse accounting (parsed / persisted
+    / legs_dropped / filtered).
 
     Raises
     ------
@@ -61,7 +58,14 @@ def load_universe(
     # validate_header raised if fieldnames was None/incomplete → safe to narrow.
     fieldnames = cast(Sequence[str], reader.fieldnames)
     rows = [{name: (row.get(name) or "") for name in fieldnames} for row in reader]
-    return select_universe(rows)
+    return select_universe_report(rows)
+
+
+def load_universe(
+    http_get: HttpGet, *, url: str = INSTRUMENT_MASTER_DETAILED_URL
+) -> list[Instrument]:
+    """Download + parse the detailed scrip master into the brute-force universe list."""
+    return load_universe_report(http_get, url=url).universe
 
 
 def urllib_http_get(url: str) -> str:  # pragma: no cover — SSRF-guarded network shim
@@ -85,5 +89,6 @@ def urllib_http_get(url: str) -> str:  # pragma: no cover — SSRF-guarded netwo
 __all__ = [
     "HttpGet",
     "load_universe",
+    "load_universe_report",
     "urllib_http_get",
 ]

@@ -17,6 +17,7 @@ from brutex.adapters.dhan.instruments import (
     fno_underlying_symbols,
     parse_instrument_row,
     select_universe,
+    select_universe_report,
     validate_header,
 )
 from brutex.models import Exchange, InstrumentType, Segment
@@ -207,3 +208,15 @@ class TestUniverse:
         assert symbols == ["NIFTY", "RELIANCE", "SENSEX"]
         # Non-F&O equity dropped; option legs dropped; MCX skipped.
         assert all(i.instrument_type in {InstrumentType.IDX, InstrumentType.EQ} for i in universe)
+
+    def test_select_universe_report_accounting(self) -> None:
+        report = select_universe_report(self._rows())
+        # In-scope NSE/BSE rows: NIFTY, SENSEX, RELIANCE, TINYCO, RELIANCE-OPT.
+        assert report.parsed == 5
+        # Persisted universe: NIFTY, SENSEX, RELIANCE.
+        assert report.persisted == 3
+        assert sorted(i.trading_symbol for i in report.universe) == ["NIFTY", "RELIANCE", "SENSEX"]
+        # Dropped in-scope: TINYCO (non-F&O equity) + RELIANCE-OPT (option leg).
+        assert report.legs_dropped == 2
+        # Out-of-scope: the MCX GOLD future.
+        assert report.filtered == 1
