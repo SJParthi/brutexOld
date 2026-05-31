@@ -32,7 +32,7 @@ from brutex.models import Instrument
 #: Pacing hook invoked once before each window fetch (e.g. token-bucket acquire).
 Pacer = Callable[[], None]
 
-_INTRADAY: str = "1minute"
+#: Canonical daily interval — the only interval not tiled/session-filtered.
 _DAILY: str = "1day"
 
 
