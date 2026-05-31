@@ -34,28 +34,55 @@ Dhan supports three auth paths:
 > "One active token at a time — generating a new token invalidates the
 > old one."
 
-## Programmatic (TOTP) flow — the AUTOMATED path
+## The three token mechanisms (official, verbatim params)
 
-`POST https://auth.dhan.co/app/generateAccessToken` with
-`dhanClientId`, PIN, and the current TOTP code returns a fresh 24-hour
-access token.
+**1. Manual access token (web.dhan.co):** Login → My Profile → "Access
+DhanHQ APIs" → generate a 24-hour token (optional Postback URL). Needs a
+human click.
 
-## §11 AUTOMATED compliance (CLAUDE.md)
+**2. `generateAccessToken` (TOTP) — requires TOTP enabled:**
 
-- The **TOTP path is ACCEPTED** — it requires **no daily manual
-  Cloud-Console approval**, so "ZERO clicks per day" holds: a stored
-  TOTP secret + PIN regenerates the 24-hour token unattended.
-- The **manual web-regeneration path is REFUSED** for production
-  automation (it needs a daily human click), exactly as the Groww
-  "Approach 1 daily approval" was refused.
-- Secrets (TOTP secret, PIN, client id) are stored **mode-0600** under
-  `~/.brutex/dhan/`, never logged, never committed — mirrors the Groww
-  credential handling that `brutex/config/credentials.py` already
-  implements (to be re-pinned Groww→Dhan in the adapter-flip commit).
+```
+POST https://auth.dhan.co/app/generateAccessToken?dhanClientId={id}&pin={pin}&totp={code}
+```
 
-## Honest-envelope flags
+Query params: `dhanClientId`, `pin` (6-digit), `totp` (authenticator
+code). Response: `{ dhanClientId, dhanClientName, dhanClientUcc,
+givenPowerOfAttorney, accessToken, expiryTime }` (expiry = 24h). **This
+endpoint IS the TOTP path — it requires the `totp` param; it is not a
+non-TOTP alternative.**
 
-- The 24-hour token expiry means the automation MUST refresh daily;
-  the orchestrator's existing token-refresh hook (built for Groww
-  TOTP) is reused. A refresh failure must hard-stop the pull, not
-  silently serve stale 401s.
+**3. `RenewToken` — refresh an active token (+24h), NO TOTP:**
+
+```
+POST https://api.dhan.co/v2/RenewToken
+  header: access-token: {JWT}
+  header: dhanClientId: {id}
+```
+
+> "This only renews tokens which are **active**. If you try to renew an
+> **expired** token, it will return an error." Also: renews only tokens
+> **generated from Dhan Web**.
+
+## DEFAULT auth path (operator decision 2026-05-31): manual token + RenewToken
+
+`brutex/adapters/dhan/auth.py` implements: read the manual 24-h token +
+client id from env (`BRUTEX_DHAN_ACCESS_TOKEN` / `BRUTEX_DHAN_CLIENT_ID`),
+and **`renew_token()`** to extend it via `RenewToken` while active. TOTP
+`generateAccessToken` stays a documented alternative for unattended runs.
+
+## §11 AUTOMATED — honest envelope (Golden Rule #10)
+
+- **`RenewToken` is NOT fully zero-touch:** it only extends an *active*,
+  *web-generated* token; once expired it errors and a fresh token must be
+  generated manually. So the default path is "automated while active,
+  manual on expiry" — fine for operator-run research, but it does **not**
+  meet §11 "ZERO clicks/day" on its own.
+- **`generateAccessToken` (TOTP) IS the gap-proof unattended path** — it
+  mints a fresh token from `pin`+`totp` anytime, even after expiry. It is
+  the option for true §11 compliance.
+- A refresh failure (expired token, `RenewToken` error) must **hard-stop +
+  alert**, never silently serve 401s (mapped to `DhanAuthError`, terminal
+  / non-retryable per `errors.is_retryable`).
+- Secrets (token, client id, optional PIN/TOTP secret) live in env or a
+  mode-0600 file; never logged, never committed.

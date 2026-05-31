@@ -36,6 +36,9 @@ ENDPOINT_HISTORICAL: Final[str] = "charts/historical"
 #: Expired-options rolling OHLC — the ONLY option source (``docs/dhan-ref/06``).
 ENDPOINT_ROLLING_OPTION: Final[str] = "charts/rollingoption"
 
+#: Renew an active (web-generated) access token for another 24h (``docs/dhan-ref/02``).
+ENDPOINT_RENEW_TOKEN: Final[str] = "RenewToken"  # noqa: S105  # endpoint path, not a secret
+
 # ── Instrument master CSVs (``docs/dhan-ref/09``) ────────────────────────
 #: Compact scrip master.
 INSTRUMENT_MASTER_COMPACT_URL: Final[str] = "https://images.dhan.co/api-data/api-scrip-master.csv"
@@ -104,6 +107,7 @@ __all__ = [
     "DRV_OPTION_TYPES",
     "ENDPOINT_HISTORICAL",
     "ENDPOINT_INTRADAY",
+    "ENDPOINT_RENEW_TOKEN",
     "ENDPOINT_ROLLING_OPTION",
     "EXCHANGE_SEGMENTS",
     "EXPIRY_FLAGS",

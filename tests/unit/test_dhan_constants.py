@@ -25,6 +25,9 @@ class TestEndpoints:
     def test_options_endpoint(self) -> None:
         assert c.ENDPOINT_ROLLING_OPTION == "charts/rollingoption"
 
+    def test_renew_token_endpoint(self) -> None:
+        assert c.ENDPOINT_RENEW_TOKEN == "RenewToken"
+
 
 class TestInstrumentMaster:
     def test_detailed_master_required_for_fno(self) -> None:
