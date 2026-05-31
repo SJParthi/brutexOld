@@ -31,7 +31,11 @@ from typing import Final, Protocol
 import structlog
 
 from brutex.data.watermark import ChunkKey, ChunkStatus, FetchWatermark
-from brutex.orchestrator.retry import backoff_delay, classify_exception
+from brutex.orchestrator.retry import (
+    UnknownExceptionError,
+    backoff_delay,
+    classify_exception,
+)
 from brutex.orchestrator.state import Outcome
 
 _LOG = structlog.get_logger("brutex.fetch")
@@ -143,7 +147,29 @@ def run_fetch(
             try:
                 bars = fetcher.fetch_chunk(key)
             except Exception as exc:
-                outcome = classify_exception(exc)
+                try:
+                    outcome = classify_exception(exc)
+                except UnknownExceptionError:
+                    # A non-vendor exception reached the loop — a programmer
+                    # bug or an unexpected runtime error (corrupt watermark
+                    # row, chunk-planning slip, …). NEVER let one chunk crash
+                    # the whole pull: quarantine it with the REAL type +
+                    # message logged at error level so it's diagnosable, then
+                    # move on (the same blast-radius containment that turned
+                    # the retry-count ValueError from a pull-killer into a
+                    # logged failure). DEC-PULL-CHUNK-CONTAINMENT-001.
+                    _LOG.error(
+                        "ingest.chunk.unexpected_error",
+                        symbol=key.groww_symbol,
+                        interval=key.interval,
+                        start=key.start,
+                        end=key.end,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    watermark.record(key, ChunkStatus.FAILED)
+                    failed += 1
+                    break
                 if outcome in _TRANSIENT:
                     if retry_count < max_retries:
                         # Increment BEFORE computing the delay: ``delay_fn``

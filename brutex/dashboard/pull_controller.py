@@ -87,9 +87,13 @@ def resolve_candle_range(
        defaults to today (``now``'s UTC date). The pair is then clamped to
        ``[GROWW_HISTORY_FLOOR, today]`` so a too-early or future pick can
        never waste quota — and the future is never requested.
-    2. **Year** — when neither date is given but *year* is: the full
-       calendar year ``[Jan 1 year, Jan 1 year+1)`` (the legacy behaviour).
-    3. **Default** — neither date nor year: the current UTC calendar year.
+    2. **Year** — when neither date is given but *year* is: that full
+       calendar year, **clamped to ``[GROWW_HISTORY_FLOOR, today]``** like
+       mode 1. A past year resolves to the whole year; the current year
+       stops at today (never the future); a wholly-future or pre-2020 year
+       raises "nothing to pull".
+    3. **Default** — neither date nor year: the current UTC calendar year,
+       same clamp as mode 2 (so it runs ``[Jan 1, today]``, never ahead).
 
     Parameters
     ----------
@@ -120,17 +124,29 @@ def resolve_candle_range(
     from_date = (from_date or "").strip() or None
     to_date = (to_date or "").strip() or None
 
-    if from_date is None and to_date is None:
-        resolved_year = year if year is not None else now.year
-        start = datetime(resolved_year, 1, 1, tzinfo=UTC)
-        end = datetime(resolved_year + 1, 1, 1, tzinfo=UTC)
-        return start, end
-
     today = now.astimezone(UTC).date()
-    start_date = _parse_iso_date(from_date, "from_date") if from_date else GROWW_HISTORY_FLOOR
-    end_date = _parse_iso_date(to_date, "to_date") if to_date else today
 
-    # Clamp into the vendor-served window; never request the future.
+    if from_date is None and to_date is None:
+        # Mode 2/3 — an explicit *year* (or, absent that, the current UTC
+        # year) → that full calendar year as a date pair, which then falls
+        # through the SAME clamp as the explicit-range mode below. This
+        # branch used to return ``[year-01-01, (year+1)-01-01)`` UNCLAMPED —
+        # so the current or a future year produced a window whose tail ran
+        # past today, and the vendor rejected the very first future chunk
+        # with "Invalid start time. Start time cannot be in the future",
+        # crashing the whole pull (DEC-PULL-FUTURE-WINDOW-001). Routing it
+        # through the clamp makes the current year stop at today and a
+        # wholly-future / pre-2020 year raise "nothing to pull" instead.
+        resolved_year = year if year is not None else now.year
+        start_date = date(resolved_year, 1, 1)
+        end_date = date(resolved_year, 12, 31)
+    else:
+        start_date = _parse_iso_date(from_date, "from_date") if from_date else GROWW_HISTORY_FLOOR
+        end_date = _parse_iso_date(to_date, "to_date") if to_date else today
+
+    # Clamp into the vendor-served window; never request the future. Applies
+    # to EVERY mode now (the year/default branch above was previously the one
+    # unclamped path — the live-crash root cause).
     start_date = max(start_date, GROWW_HISTORY_FLOOR)
     end_date = min(end_date, today)
     if start_date > end_date:

@@ -264,17 +264,42 @@ _NOW = datetime(2026, 5, 30, 12, 0, tzinfo=UTC)  # the context "today"
 class TestResolveCandleRange:
     """The pure, O(1) window resolver behind the from/to-date candle picker."""
 
-    def test_no_dates_no_year_uses_current_utc_year(self) -> None:
-        # Default mode 3 — neither date nor year → current UTC calendar year.
+    def test_no_dates_no_year_clamps_current_year_to_today(self) -> None:
+        # Default mode 3 — neither date nor year → current UTC calendar year,
+        # but clamped to today: it must NEVER return a future window (the
+        # live-crash root cause was the unclamped [2026-01-01, 2027-01-01)).
+        # DEC-PULL-FUTURE-WINDOW-001.
         start, end = resolve_candle_range(from_date=None, to_date=None, year=None, now=_NOW)
         assert start == datetime(2026, 1, 1, tzinfo=UTC)
-        assert end == datetime(2027, 1, 1, tzinfo=UTC)
+        assert end == datetime(2026, 5, 31, tzinfo=UTC)  # today (05-30) + 1 day, NOT 2027
 
-    def test_no_dates_explicit_year(self) -> None:
-        # Mode 2 — year given, no dates → that full calendar year.
+    def test_no_dates_explicit_past_year_is_full_year(self) -> None:
+        # Mode 2 — a PAST year, no dates → that full calendar year (the tail
+        # is before today, so the clamp is a no-op).
         start, end = resolve_candle_range(from_date=None, to_date=None, year=2023, now=_NOW)
         assert start == datetime(2023, 1, 1, tzinfo=UTC)
         assert end == datetime(2024, 1, 1, tzinfo=UTC)
+
+    def test_no_dates_current_year_clamps_to_today(self) -> None:
+        # Mode 2 — the CURRENT year explicitly → clamped to today, never the
+        # rest of the year (this is exactly the live failure: year=2026 on
+        # 2026-05-30 must stop at today, not run to 2026-12-31).
+        start, end = resolve_candle_range(from_date=None, to_date=None, year=2026, now=_NOW)
+        assert start == datetime(2026, 1, 1, tzinfo=UTC)
+        assert end == datetime(2026, 5, 31, tzinfo=UTC)
+
+    def test_no_dates_future_year_raises(self) -> None:
+        # Mode 2 — a wholly-future year has nothing to pull (start > clamped
+        # end) → refused, never a future request to the vendor.
+        with pytest.raises(ValueError, match="nothing to pull"):
+            resolve_candle_range(from_date=None, to_date=None, year=2027, now=_NOW)
+
+    def test_no_dates_pre_floor_year_raises(self) -> None:
+        # Mode 2 — a year wholly before the 2020 history floor: start clamps
+        # up to the floor, end stays in the pre-floor year → start > end →
+        # refused (Groww has no data before 2020).
+        with pytest.raises(ValueError, match="nothing to pull"):
+            resolve_candle_range(from_date=None, to_date=None, year=2018, now=_NOW)
 
     def test_explicit_from_and_to_are_day_inclusive(self) -> None:
         # Mode 1 — both ends inclusive; end is the midnight after to_date.

@@ -199,6 +199,46 @@ class TestTerminal:
         assert wm.get(_key()) == ChunkStatus.FAILED
 
 
+class TestUnexpectedErrorContainment:
+    """A NON-vendor exception (one classify_exception can't map) must never
+    crash the whole pull — it is quarantined per-chunk with the real type +
+    message logged at error level, and the loop moves on.
+    DEC-PULL-CHUNK-CONTAINMENT-001."""
+
+    def test_non_vendor_exception_quarantines_not_crashes(self) -> None:
+        wm = FetchWatermark()
+        # A bare RuntimeError is NOT in BROKER_EXCEPTION_CLASSIFICATION, so
+        # classify_exception raises UnknownExceptionError inside the loop.
+        out = _run(_FakeFetcher([RuntimeError("corrupt watermark row")]), [_key()], wm)
+        assert out.failed == 1
+        assert wm.get(_key()) == ChunkStatus.FAILED
+
+    def test_unexpected_error_logs_real_type_and_message(self) -> None:
+        from structlog.testing import capture_logs
+
+        wm = FetchWatermark()
+        with capture_logs() as logs:
+            _run(_FakeFetcher([KeyError("interval")]), [_key()], wm)
+        rec = next(e for e in logs if e["event"] == "ingest.chunk.unexpected_error")
+        assert rec["error_type"] == "KeyError"
+        assert "interval" in rec["error"]
+        assert rec["symbol"] == "NSE-NIFTY"
+        assert rec["log_level"] == "error"
+
+    def test_one_bad_chunk_does_not_abort_the_rest(self) -> None:
+        # The blast-radius guarantee: a mid-run unexpected error on chunk B
+        # must not stop chunks A (already done) or C (still to go).
+        wm = FetchWatermark()
+        k1, k2, k3 = _key("A"), _key("B"), _key("C")
+        out = _run(
+            _FakeFetcher([["bar"], ValueError("boom"), ["bar"]]),
+            [k1, k2, k3],
+            wm,
+        )
+        assert (out.completed, out.failed) == (2, 1)
+        assert wm.get(k3) == ChunkStatus.COMPLETED
+
+
 class TestMixedRun:
     def test_counts_across_multiple_chunks(self) -> None:
         wm = FetchWatermark()
