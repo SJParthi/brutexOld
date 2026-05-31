@@ -115,6 +115,8 @@ class TestLoadUniverse:
         assert report.persisted == 3
         assert report.legs_dropped == 2  # TINYCO + RELIANCE-OPT
         assert report.filtered == 0
+        # Accounting invariant: every in-scope row is either persisted or dropped.
+        assert report.parsed == report.persisted + report.legs_dropped
 
     def test_passes_default_url_to_http_get(self) -> None:
         seen: list[str] = []

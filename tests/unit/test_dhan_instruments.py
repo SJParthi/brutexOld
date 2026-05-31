@@ -220,3 +220,5 @@ class TestUniverse:
         assert report.legs_dropped == 2
         # Out-of-scope: the MCX GOLD future.
         assert report.filtered == 1
+        # Accounting invariant: every in-scope row is either persisted or dropped.
+        assert report.parsed == report.persisted + report.legs_dropped
