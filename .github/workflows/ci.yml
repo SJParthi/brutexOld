@@ -928,6 +928,11 @@ jobs:
           else
             echo "(brutex.adapters.dhan.errors test file not present yet — gate inactive)"
           fi
+          if compgen -G "tests/unit/test_dhan_client.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.client --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_client.py
+          else
+            echo "(brutex.adapters.dhan.client test file not present yet — gate inactive)"
+          fi
           # DEC-COVERAGE-LEDGER-001 (entry #165): strict gates on the two pure
           # completeness-ledger modules. Both are import-light (brutex.data /
           # brutex.dashboard package inits do NOT pull in fastbloom_rs), so they
