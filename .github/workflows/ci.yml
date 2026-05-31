@@ -908,6 +908,11 @@ jobs:
           else
             echo "(brutex.data.session test file not present yet — gate inactive)"
           fi
+          if compgen -G "tests/unit/test_spot_features.py" > /dev/null; then
+            pytest --cov=brutex.data.spot_features --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_spot_features.py
+          else
+            echo "(brutex.data.spot_features test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_constants.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_constants.py
           else
