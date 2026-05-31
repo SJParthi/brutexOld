@@ -895,6 +895,24 @@ jobs:
           else
             echo "(brutex.adapters.groww.catalog test file not present yet — gate inactive)"
           fi
+          # DEC-GROWW-DHAN-REVERT-001 (#341): strict gates on the Dhan adapter
+          # modules + the shared candle-field rules. Import-light (pure data /
+          # parser over brutex.data.models), so standalone-gateable.
+          if compgen -G "tests/unit/test_candle_fields.py" > /dev/null; then
+            pytest --cov=brutex.data.candle_fields --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_candle_fields.py
+          else
+            echo "(brutex.data.candle_fields test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_constants.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_constants.py
+          else
+            echo "(brutex.adapters.dhan.constants test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_parser.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_parser.py
+          else
+            echo "(brutex.adapters.dhan.parser test file not present yet — gate inactive)"
+          fi
           # DEC-COVERAGE-LEDGER-001 (entry #165): strict gates on the two pure
           # completeness-ledger modules. Both are import-light (brutex.data /
           # brutex.dashboard package inits do NOT pull in fastbloom_rs), so they

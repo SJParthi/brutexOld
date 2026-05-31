@@ -5,77 +5,35 @@ Groww's ``get_historical_candles`` returns each bar as a 7-element row
 
     [timestamp, open, high, low, close, volume, open_interest_or_null]
 
-This module converts one such row into the canonical
-:class:`~brutex.data.models.CandleBar`, applying the two correctness
-rules the operator cares most about ("no data mismatch"):
+The field-level rules (Decimal prices, empty-bar detection, int volume/OI,
+OHLC sanity) live ONCE in :mod:`brutex.data.candle_fields` (CLAUDE.md §11
+COMMON) and are shared with the Dhan parser. This module keeps only the
+Groww-specific glue: the 7-element row shape and the **IST→UTC** timestamp
+rule (``CLAUDE.md §6``: "convert to UTC at ingest").
 
-* **Timestamps** — Groww emits IST market times (``CLAUDE.md §6``:
-  "convert to UTC at ingest"). A naive ``"yyyy-MM-dd HH:mm:ss"`` /
-  ISO string is localized to Asia/Kolkata then converted to UTC, so the
-  whole lake is UTC (matching the resampler's ``ts_utc`` convention).
-* **Prices** — parsed as :class:`~decimal.Decimal` via ``str(...)`` to
-  avoid binary-float drift (``NFR-DET-001`` bit-exactness).
-
-The :class:`CandleBar` constructor itself validates OHLC sanity
-(``high >= low``, ``open``/``close`` within ``[low, high]``, non-negative
-volume/OI) — so a corrupt row raises rather than silently entering the
-lake. That validation IS a mismatch guard, not just a convenience.
+:class:`CandleParseError` and :class:`EmptyCandleRow` are re-exported here
+so existing importers (``persist``, tests) keep working unchanged.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
 from typing import Final
 from zoneinfo import ZoneInfo
 
+from brutex.data.candle_fields import (
+    CandleParseError,
+    EmptyCandleRow,
+    assemble_candle,
+)
 from brutex.data.models import CandleBar
-from brutex.models import BruteXError
 
 #: India Standard Time — Groww candle timestamps are IST market times.
 _IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
 
 #: A Groww candle row has exactly 7 fields.
 _ROW_LEN: Final[int] = 7
-
-
-class CandleParseError(BruteXError):
-    """A Groww candle row violates the documented shape or value rules."""
-
-
-class EmptyCandleRow(CandleParseError):
-    """A candle row carries NO OHLC data (every price absent or zero).
-
-    A no-trade / halted / not-yet-listed / illiquid period legitimately returns
-    a bar with null/empty/zero OHLC — there is simply no price to store. This is
-    a GRACEFUL skip (the bar carries no information), explicitly distinct from a
-    partially-malformed bar (some prices present, some broken / out of range)
-    which stays a plain :class:`CandleParseError`. Callers (``persist``) drop an
-    empty bar quietly (info-level count) and quarantine a malformed one
-    (warning) — neither is ever fatal to the chunk (DEC-CANDLE-EMPTY-BAR-001).
-    """
-
-
-def _is_absent(value: object) -> bool:
-    """True for a vendor "no value" cell — ``None`` or an empty/whitespace string."""
-    return value is None or (isinstance(value, str) and value.strip() == "")
-
-
-def _has_no_price(value: object) -> bool:
-    """True when a price cell carries no tradeable information: absent OR zero.
-
-    A traded Indian instrument's price is never 0 (tick size ≥ 0.05, prices in
-    rupees), so an absent / empty / 0 OHLC value means "no trade in this bar".
-    An unparseable non-zero value returns ``False`` here so the strict
-    :func:`_to_price` flags it (a malformed bar, not an empty one).
-    """
-    if _is_absent(value):
-        return True
-    try:
-        return Decimal(str(value)) == 0
-    except (InvalidOperation, ValueError):
-        return False
 
 
 def _parse_timestamp(raw: object) -> datetime:
@@ -96,36 +54,6 @@ def _parse_timestamp(raw: object) -> datetime:
     return parsed.replace(tzinfo=_IST).astimezone(UTC)
 
 
-def _to_price(raw: object, field: str) -> Decimal:
-    """Parse a price field to exact Decimal rupees (via str, no float drift).
-
-    Rejects non-finite values: ``float('inf')`` / ``float('nan')`` round-trip
-    through ``Decimal`` as ``Infinity`` / ``NaN`` (no parse error), so we guard
-    explicitly — a non-finite price is a data mismatch, never a valid bar.
-    """
-    try:
-        value = Decimal(str(raw))
-    except (InvalidOperation, ValueError) as exc:
-        raise CandleParseError(f"unparseable {field} price: {raw!r}") from exc
-    if not value.is_finite():
-        raise CandleParseError(f"non-finite {field} price: {raw!r}")
-    return value
-
-
-def _to_int(raw: object, field: str) -> int:
-    """Parse an integer field (volume / OI); reject bools + non-numerics."""
-    if isinstance(raw, bool):  # bool is an int subclass — reject explicitly
-        raise CandleParseError(f"{field} must be an integer, got bool: {raw!r}")
-    if not isinstance(raw, (int, float, str)):
-        raise CandleParseError(f"unparseable {field}: {raw!r}")
-    try:
-        return int(raw)
-    except (ValueError, OverflowError) as exc:
-        # OverflowError covers ``int(float('inf'))``; ValueError covers
-        # ``int('xyz')`` / ``int(float('nan'))``.
-        raise CandleParseError(f"unparseable {field}: {raw!r}") from exc
-
-
 def parse_candle_row(row: Sequence[object]) -> CandleBar:
     """Convert one Groww candle row to a validated :class:`CandleBar`.
 
@@ -133,10 +61,10 @@ def parse_candle_row(row: Sequence[object]) -> CandleBar:
     ------
     CandleParseError
         If the row is the wrong length, or any field is unparseable.
+    EmptyCandleRow
+        If every OHLC price is absent / empty / zero (graceful skip).
     ValueError
-        Propagated from :class:`CandleBar` when OHLC values are
-        internally inconsistent (high < low, open/close out of range,
-        negative volume/OI) — a data-mismatch guard.
+        Propagated from :class:`CandleBar` on inconsistent OHLC.
     """
     if len(row) != _ROW_LEN:
         raise CandleParseError(
@@ -144,29 +72,20 @@ def parse_candle_row(row: Sequence[object]) -> CandleBar:
             f"[ts, o, h, l, c, vol, oi], got {len(row)}: {row!r}"
         )
     ts_raw, open_raw, high_raw, low_raw, close_raw, vol_raw, oi_raw = row
-    # No-data bar: EVERY OHLC price absent/empty/zero → a no-trade / halted /
-    # unlisted period. Signal a graceful skip rather than fighting it field by
-    # field (a malformed bar with SOME real prices still falls through to the
-    # strict _to_price checks below). DEC-CANDLE-EMPTY-BAR-001.
-    if all(_has_no_price(v) for v in (open_raw, high_raw, low_raw, close_raw)):
-        raise EmptyCandleRow("candle has no OHLC data (no-trade / halted / unlisted bar)")
-    open_interest = None if _is_absent(oi_raw) else _to_int(oi_raw, "open_interest")
-    return CandleBar(
-        timestamp=_parse_timestamp(ts_raw),
-        open=_to_price(open_raw, "open"),
-        high=_to_price(high_raw, "high"),
-        low=_to_price(low_raw, "low"),
-        close=_to_price(close_raw, "close"),
-        # Spot INDICES carry no traded volume — Groww returns ``volume: null``
-        # for them (CLAUDE.md §12 "no volume on spot"; the backtesting doc's
-        # volume column is populated only for equities/F&O). An absent volume
-        # (null / empty) maps to 0 rather than quarantining the row.
-        volume=0 if _is_absent(vol_raw) else _to_int(vol_raw, "volume"),
-        open_interest=open_interest,
+    return assemble_candle(
+        ts_raw=ts_raw,
+        parse_timestamp=_parse_timestamp,
+        open_=open_raw,
+        high=high_raw,
+        low=low_raw,
+        close=close_raw,
+        volume=vol_raw,
+        open_interest=oi_raw,
     )
 
 
 __all__ = [
+    "CandleBar",
     "CandleParseError",
     "EmptyCandleRow",
     "parse_candle_row",
