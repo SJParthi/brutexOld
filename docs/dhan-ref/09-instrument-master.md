@@ -16,11 +16,17 @@ change the file.
 
 ## Detailed CSV column schema (order)
 
+**VERIFIED complete column set** (extracted from the operator's actual
+`api-scrip-master-detailed` 2026-05-31 — 31 columns, nothing dropped):
+
 ```
-EXCH_ID, SEGMENT, SECURITY_ID, ISIN, INSTRUMENT,
-UNDERLYING_SECURITY_ID, UNDERLYING_SYMBOL, SYMBOL_NAME, DISPLAY_NAME,
-INSTRUMENT_TYPE, SERIES, LOT_SIZE, SM_EXPIRY_DATE, STRIKE_PRICE,
-OPTION_TYPE, TICK_SIZE, EXPIRY_FLAG, ASM_GSM_FLAG, MTF_LEVERAGE
+EXCH_ID, SEGMENT, SECURITY_ID, ISIN, INSTRUMENT, UNDERLYING_SECURITY_ID,
+UNDERLYING_SYMBOL, SYMBOL_NAME, DISPLAY_NAME, INSTRUMENT_TYPE, SERIES,
+LOT_SIZE, SM_EXPIRY_DATE, STRIKE_PRICE, OPTION_TYPE, TICK_SIZE, EXPIRY_FLAG,
+BRACKET_FLAG, COVER_FLAG, ASM_GSM_FLAG, ASM_GSM_CATEGORY, BUY_SELL_INDICATOR,
+BUY_CO_MIN_MARGIN_PER, BUY_CO_SL_RANGE_MAX_PERC, BUY_CO_SL_RANGE_MIN_PERC,
+BUY_BO_MIN_MARGIN_PER, BUY_BO_PROFIT_RANGE_MAX_PERC, BUY_BO_PROFIT_RANGE_MIN_PERC,
+MTF_LEVERAGE, SM_UPPER_LIMIT, SM_LOWER_LIMIT, SM_FREEZE_QTY
 ```
 
 | Field | Meaning |
@@ -32,6 +38,28 @@ OPTION_TYPE, TICK_SIZE, EXPIRY_FLAG, ASM_GSM_FLAG, MTF_LEVERAGE
 | `OPTION_TYPE` | `CE` / `PE` |
 | `EXPIRY_FLAG` | `M` (monthly) / `W` (weekly) |
 | `LOT_SIZE`, `TICK_SIZE`, `STRIKE_PRICE`, `SM_EXPIRY_DATE` | contract economics |
+| **`SM_FREEZE_QTY`** | **freeze quantity** (max single-order qty) |
+| `SM_UPPER_LIMIT` / `SM_LOWER_LIMIT` | price bands (DPR) |
+| `MTF_LEVERAGE` | MTF multiplier (equity) |
+| `ASM_GSM_FLAG` / `ASM_GSM_CATEGORY` | surveillance status |
+| `BRACKET_FLAG` / `COVER_FLAG` / `BUY_SELL_INDICATOR` | order-type permissions |
+| `BUY_CO_*` / `BUY_BO_*` | cover/bracket-order margin + range params |
+
+> **Nothing missed:** the `instruments` catalog table persists the **full
+> 31-column row**; the vendor-neutral `brutex.models.Instrument` carries the
+> engine-relevant subset (identity, classification, **lot/tick/freeze**,
+> expiry, strike, underlying). Parser: `brutex/adapters/dhan/instruments.py`.
+
+## Tables (storage layout)
+
+- **`instruments`** (DuckDB catalog) — one row per universe underlying
+  (lean-ingest per DEC-INSTRUMENT-UNIVERSE-FAST-001), keyed by
+  `SECURITY_ID` (BIGINT PK → O(1)); full 31-col fidelity + provenance
+  (`vendor='dhan'`, `snapshot_date`, `csv_sha256`).
+- **spot bars** (Parquet) — `bars/<exch>/<seg>/<security_id>/<interval>/<yyyy>/<mm>.parquet`,
+  schema `timestamp,open,high,low,close,volume,open_interest`; 1m + 1d.
+- **expired-options bars** (Parquet) — `options/<underlying_security_id>/<expiry_flag>/<expiry_code>/<strike_rel>/<CE|PE>/<interval>/<yyyy>/<mm>.parquet`;
+  adds `iv,oi,strike,spot`; 1m only.
 
 ## SecurityId rule (HARD)
 
