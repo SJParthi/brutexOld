@@ -59,7 +59,7 @@ def load_universe(
     reader = csv.DictReader(io.StringIO(text), restval="")
     validate_header(reader.fieldnames)
     # validate_header raised if fieldnames was None/incomplete → safe to narrow.
-    fieldnames = cast("Sequence[str]", reader.fieldnames)
+    fieldnames = cast(Sequence[str], reader.fieldnames)
     rows = [{name: (row.get(name) or "") for name in fieldnames} for row in reader]
     return select_universe(rows)
 
