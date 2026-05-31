@@ -24,6 +24,7 @@ demand. This module is pure (no I/O); the CSV download lives in the loader.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Final
@@ -213,32 +214,61 @@ def fno_underlying_symbols(rows: Iterable[Mapping[str, str]]) -> frozenset[str]:
     return frozenset(eligible)
 
 
-def select_universe(rows: Sequence[Mapping[str, str]]) -> list[Instrument]:
-    """Select the brute-force universe: every index + every F&O-stock SPOT.
+@dataclass(frozen=True, slots=True)
+class UniverseReport:
+    """The selected universe + parse accounting (for dashboard/cli summaries)."""
 
-    Two-pass: first collect the F&O-eligible underlying symbols, then keep
-    (a) all NSE/BSE **index** rows and (b) all **equity SPOT** rows whose
-    symbol is F&O-eligible. Derivative legs are excluded from the lean
-    universe (recoverable on demand). Rows on out-of-scope exchanges are
-    skipped silently.
+    universe: list[Instrument]
+    parsed: int  # in-scope (NSE/BSE) rows seen
+    persisted: int  # universe size = index + F&O-stock SPOT
+    legs_dropped: int  # in-scope rows not in the universe (derivative legs + non-F&O equity)
+    filtered: int  # out-of-scope rows skipped (MCX, etc.)
+
+
+def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
+    """Select the brute-force universe and report the parse accounting.
+
+    Two-pass: collect the F&O-eligible underlying symbols, then keep (a) all
+    NSE/BSE **index** rows and (b) all **equity SPOT** rows whose symbol is
+    F&O-eligible. Derivative legs + non-F&O equities are counted as
+    ``legs_dropped`` (excluded from the lean universe, recoverable on demand);
+    out-of-scope-exchange rows are counted as ``filtered``.
     """
     eligible = fno_underlying_symbols(rows)
     universe: list[Instrument] = []
+    parsed = 0
+    filtered = 0
     for row in rows:
         if row.get("EXCH_ID", "").strip().upper() not in (Exchange.NSE, Exchange.BSE):
+            filtered += 1
             continue
+        parsed += 1
         itype = row.get("INSTRUMENT_TYPE", "").strip().upper()
         if itype in _INDEX_TYPES or (
             itype in _EQUITY_TYPES and row.get("SYMBOL_NAME", "").strip() in eligible
         ):
             universe.append(parse_instrument_row(row))
-    return universe
+    persisted = len(universe)
+    return UniverseReport(
+        universe=universe,
+        parsed=parsed,
+        persisted=persisted,
+        legs_dropped=parsed - persisted,
+        filtered=filtered,
+    )
+
+
+def select_universe(rows: Sequence[Mapping[str, str]]) -> list[Instrument]:
+    """Select the brute-force universe (index + F&O-stock SPOT); see :func:`select_universe_report`."""
+    return select_universe_report(rows).universe
 
 
 __all__ = [
     "DhanInstrumentError",
+    "UniverseReport",
     "fno_underlying_symbols",
     "parse_instrument_row",
     "select_universe",
+    "select_universe_report",
     "validate_header",
 ]

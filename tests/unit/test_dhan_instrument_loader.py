@@ -11,7 +11,7 @@ import io
 
 import pytest
 from brutex.adapters.dhan.constants import INSTRUMENT_MASTER_DETAILED_URL
-from brutex.adapters.dhan.instrument_loader import load_universe
+from brutex.adapters.dhan.instrument_loader import load_universe, load_universe_report
 from brutex.adapters.dhan.instruments import DhanInstrumentError
 
 _HEADER = [
@@ -106,6 +106,17 @@ class TestLoadUniverse:
         universe = load_universe(lambda _url: text)
         symbols = sorted(i.trading_symbol for i in universe)
         assert symbols == ["NIFTY", "RELIANCE", "SENSEX"]
+
+    def test_report_carries_parse_accounting(self) -> None:
+        text = _csv(_universe_rows())
+        report = load_universe_report(lambda _url: text)
+        assert sorted(i.trading_symbol for i in report.universe) == ["NIFTY", "RELIANCE", "SENSEX"]
+        assert report.parsed == 5  # all NSE/BSE rows (incl. TINYCO + option leg)
+        assert report.persisted == 3
+        assert report.legs_dropped == 2  # TINYCO + RELIANCE-OPT
+        assert report.filtered == 0
+        # Accounting invariant: every in-scope row is either persisted or dropped.
+        assert report.parsed == report.persisted + report.legs_dropped
 
     def test_passes_default_url_to_http_get(self) -> None:
         seen: list[str] = []

@@ -22,7 +22,7 @@ from datetime import date
 from typing import Protocol
 
 from brutex.adapters.dhan.constants import INSTRUMENT_MASTER_DETAILED_URL
-from brutex.adapters.dhan.instrument_loader import HttpGet, load_universe
+from brutex.adapters.dhan.instrument_loader import HttpGet, load_universe_report
 from brutex.models import Instrument
 
 
@@ -50,7 +50,10 @@ class InstrumentSink(Protocol):
 class RefreshResult:
     """Outcome of an :func:`refresh_instruments` run."""
 
-    parsed: int
+    parsed: int  # in-scope (NSE/BSE) rows seen
+    persisted: int  # universe rows upserted (index + F&O-stock SPOT)
+    legs_dropped: int  # in-scope rows not persisted (derivative legs + non-F&O equity)
+    filtered: int  # out-of-scope rows skipped (MCX, etc.)
     snapshot_date: date
     csv_sha256: str
     pruned: int
@@ -72,9 +75,9 @@ def refresh_instruments(
     """
     text = http_get(url)
     csv_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    universe = load_universe(lambda _url: text, url=url)
+    report = load_universe_report(lambda _url: text, url=url)
     store.upsert_many(
-        universe,
+        report.universe,
         snapshot_date=snapshot_date,
         run_id=run_id,
         csv_source_sha256=csv_sha256,
@@ -82,7 +85,13 @@ def refresh_instruments(
     )
     pruned = store.prune_to_latest_snapshot()
     return RefreshResult(
-        parsed=len(universe), snapshot_date=snapshot_date, csv_sha256=csv_sha256, pruned=pruned
+        parsed=report.parsed,
+        persisted=report.persisted,
+        legs_dropped=report.legs_dropped,
+        filtered=report.filtered,
+        snapshot_date=snapshot_date,
+        csv_sha256=csv_sha256,
+        pruned=pruned,
     )
 
 

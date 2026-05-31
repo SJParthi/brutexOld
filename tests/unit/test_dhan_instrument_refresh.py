@@ -133,7 +133,10 @@ def test_refresh_persists_universe_full_snapshot() -> None:
     ]  # option leg dropped
     assert store.prune_calls == 1
     assert result == RefreshResult(
-        parsed=2,
+        parsed=3,  # NSE/BSE rows seen: NIFTY + RELIANCE + RELIANCE-OPT leg
+        persisted=2,  # universe upserted: NIFTY + RELIANCE
+        legs_dropped=1,  # the option leg, not persisted in the lean universe
+        filtered=0,  # no out-of-scope (MCX) rows here
         snapshot_date=date(2026, 5, 31),
         csv_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         pruned=7,
