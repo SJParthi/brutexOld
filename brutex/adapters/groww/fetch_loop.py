@@ -146,8 +146,14 @@ def run_fetch(
                 outcome = classify_exception(exc)
                 if outcome in _TRANSIENT:
                     if retry_count < max_retries:
-                        sleep_fn(delay_fn(retry_count))
+                        # Increment BEFORE computing the delay: ``delay_fn``
+                        # (``backoff_delay``) is 1-based — it requires
+                        # ``retry_count >= 1`` and raises ``ValueError`` on 0.
+                        # Passing the pre-increment 0 on the first retry crashed
+                        # the whole pull instead of backing off (regression
+                        # guarded in tests/unit/test_groww_fetch_loop.py).
                         retry_count += 1
+                        sleep_fn(delay_fn(retry_count))
                         continue
                     # Retries exhausted → quarantine. Surface the REAL vendor
                     # reason (never swallow it — DEC-PULL-ERROR-VISIBILITY-001)

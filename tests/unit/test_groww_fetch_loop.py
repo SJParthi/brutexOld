@@ -96,6 +96,46 @@ class TestTransientRetry:
         assert out.completed == 1
         sleep.assert_called_once()  # backed off exactly once before retry
 
+    def test_first_retry_passes_one_based_count_to_delay_fn(self) -> None:
+        # Regression (DEC-PULL-RETRY-OFFBYONE-001): the first retry passed the
+        # pre-increment ``retry_count=0`` to ``delay_fn``, but ``backoff_delay``
+        # is 1-based and raises ``ValueError`` on 0 — crashing the whole pull
+        # the instant any transient error occurred. The delay count must start
+        # at 1 and climb, never 0.
+        wm = FetchWatermark()
+        recorded: list[int] = []
+
+        def _record_delay(retry_count: int) -> float:
+            recorded.append(retry_count)
+            return 0.0
+
+        out = run_fetch(
+            _FakeFetcher([VendorAPIRateLimitException(), VendorAPIRateLimitException(), ["bar"]]),
+            [_key()],
+            wm,
+            sleep_fn=mock.Mock(),
+            delay_fn=_record_delay,
+        )
+        assert out.completed == 1
+        assert recorded == [1, 2]  # one-based, monotonic — never 0
+
+    def test_real_backoff_delay_does_not_crash_on_first_retry(self) -> None:
+        # The bug surfaced only with the PRODUCTION ``backoff_delay`` (the test
+        # stub ignored its arg). Drive the loop with the real one to prove a
+        # transient error backs off + retries instead of raising ``ValueError``.
+        from brutex.orchestrator.retry import backoff_delay
+
+        wm = FetchWatermark()
+        out = run_fetch(
+            _FakeFetcher([VendorAPIRateLimitException(), ["bar"]]),
+            [_key()],
+            wm,
+            sleep_fn=mock.Mock(),
+            delay_fn=backoff_delay,
+        )
+        assert out.completed == 1
+        assert wm.get(_key()) == ChunkStatus.COMPLETED
+
     def test_exhausts_retries_then_quarantines(self) -> None:
         wm = FetchWatermark()
         actions: list[object] = [VendorAPIRateLimitException() for _ in range(3)]

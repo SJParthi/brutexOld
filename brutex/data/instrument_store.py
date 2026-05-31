@@ -84,7 +84,6 @@ from typing import Any, Final, Self
 
 from brutex.data.coverage_ledger import CoverageRecord
 from brutex.data.errors import CatalogError
-from brutex.data.lake_wipe import LakeWipeReport, truncate_lake_tables
 from brutex.execution.types import InstrumentMeta as ExecutionInstrumentMeta
 from brutex.models import (
     Exchange,
@@ -1927,27 +1926,6 @@ class InstrumentStore(metaclass=_StoreMeta):
             "ORDER BY fetched_at DESC LIMIT 1"
         ).fetchone()
         return _row_to_instrument_run(row) if row else None
-
-    # ── Data wipe (DEC-DASHBOARD-WIPE-001) ───────────────────────
-
-    def wipe_lake_tables(self) -> LakeWipeReport:
-        """Empty every lake DATA table (``DELETE FROM``); return per-table counts.
-
-        The executor behind the dashboard "Delete all ingested data" button. As
-        a public method it runs under the per-store ``_StoreMeta`` lock, so the
-        whole truncate is ATOMIC against concurrent ``/db`` reads — a reader
-        sees the full table or the empty table, never a freed connection. It
-        does NOT close/reopen the connection (that path can segfault DuckDB),
-        and does NOT touch ``schema_meta`` or any non-lake file. The decision
-        logic (which tables, per-table failure) lives in the 100%-tested
-        :func:`brutex.data.lake_wipe.truncate_lake_tables`.
-        """
-
-        def _count(table: str) -> int:
-            row = self._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()  # noqa: S608  # nosec B608 — table from the fixed LAKE_DATA_TABLES allowlist
-            return int(row[0]) if row is not None else 0
-
-        return truncate_lake_tables(self._conn.execute, count=_count)
 
     # ── Lifecycle ────────────────────────────────────────────────
 
