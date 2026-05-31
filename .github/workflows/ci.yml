@@ -903,6 +903,11 @@ jobs:
           else
             echo "(brutex.data.candle_fields test file not present yet — gate inactive)"
           fi
+          if compgen -G "tests/unit/test_session.py" > /dev/null; then
+            pytest --cov=brutex.data.session --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_session.py
+          else
+            echo "(brutex.data.session test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_constants.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_constants.py
           else
@@ -952,6 +957,11 @@ jobs:
             pytest --cov=brutex.adapters.dhan.adapter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_adapter.py
           else
             echo "(brutex.adapters.dhan.adapter test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_ingest.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_ingest.py
+          else
+            echo "(brutex.adapters.dhan.ingest test file not present yet — gate inactive)"
           fi
           # DEC-COVERAGE-LEDGER-001 (entry #165): strict gates on the two pure
           # completeness-ledger modules. Both are import-light (brutex.data /
