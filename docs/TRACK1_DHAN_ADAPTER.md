@@ -22,9 +22,14 @@ EDIS / Full Market Depth are OUT (CLAUDE.md §1).
 
 | BruteX need | Dhan surface | Notes |
 |---|---|---|
-| Spot intraday OHLC | `POST /v2/charts/intraday` | interval `"1"` only (Track 1), 90-day window |
-| Spot daily OHLC (PDH/PDL) | `POST /v2/charts/historical` | to inception |
-| Expired option OHLC | `POST /v2/charts/rollingoption` | ALL options (every contract is expired in a backtest) |
+| Spot intraday OHLC | `POST /v2/charts/intraday` | interval `"1"` (1-minute) **only** (DEC-DHAN-1M-ONLY-001), 90-day window |
+| Spot daily OHLC (PDH/PDL) | `POST /v2/charts/historical` | **1-day** only, to inception |
+| Expired option OHLC | `POST /v2/charts/rollingoption` | ALL options, interval `"1"` (1-minute) **only** (DEC-DHAN-1M-ONLY-001); every contract is expired in a backtest |
+
+**1-minute-only fetch set (DEC-DHAN-1M-ONLY-001, #343):** spot pulls
+1m intraday + 1d daily; options pull 1m only. Dhan's native 5/15/25/60
+intervals are **never fetched** — all 19 derived intraday timeframes are
+resampled from the 1m base (`brutex/feed/resampler.py`).
 | Instrument universe | scrip-master CSV (`images.dhan.co`) | `SECURITY_ID` numeric key |
 
 **Spot/options split (locked):** the two `charts/*` historical
