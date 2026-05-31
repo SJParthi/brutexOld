@@ -19,9 +19,17 @@ enforce this by:
 4. Computing ``sha256`` of the written bytes and returning it in the
    result so callers can record the raw_hash in the catalog.
 
-If the destination already exists and its content hash differs from
-the hash of the new file, we raise :class:`WriterError`. Callers
-must first delete the old file or resolve the conflict explicitly.
+## Merge-on-write (DEC-LAKE-MERGE-WRITE-001)
+
+A fetch chunk (30/90 days) straddles month boundaries, so one month
+partition is written by several chunks, each carrying only part of the
+month. Rather than reject a partial re-write as a conflict, :meth:`write`
+UNIONS the incoming bars into the existing partition keyed by timestamp
+(O(1) dedup per bar): a new timestamp is appended, an identical one is a
+no-op, and only a SAME timestamp with DIFFERENT OHLCV raises
+:class:`WriterError` (a genuine vendor-data conflict, never silently
+overwritten). Incremental month-filling and full re-pulls are therefore
+idempotent — the completed partition is byte-stable across runs.
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -133,7 +142,8 @@ class ParquetWriter:
         ------
         WriterError
             If *bars* is empty, spans multiple partitions, or the
-            destination exists with conflicting content.
+            destination already stores the SAME timestamp with DIFFERENT
+            OHLCV (a true data conflict — see merge-on-write above).
         """
         if not bars:
             raise WriterError("ParquetWriter.write called with an empty bars list")
@@ -162,28 +172,78 @@ class ParquetWriter:
         )
         dest.parent.mkdir(parents=True, exist_ok=True)
 
-        content_bytes = self._render_bytes(sorted_bars)
-        new_hash = hashlib.sha256(content_bytes).hexdigest()
-
+        # MERGE-on-write: a 30/90-day fetch chunk straddles month boundaries,
+        # so a single month partition is touched by more than one chunk — each
+        # carrying only PART of the month. The old "byte-hash must match or
+        # raise" rule rejected every such partial write as a conflict (the
+        # BAD_REQUEST flood on re-pull). Instead, UNION the incoming bars into
+        # the existing partition keyed by timestamp (O(1) dict dedup per bar):
+        # a never-seen timestamp is added, an identical one is a no-op, and only
+        # a SAME timestamp with DIFFERENT OHLCV is a true conflict (real vendor
+        # drift) → raise. This makes incremental month-filling + re-pulls
+        # idempotent (DEC-LAKE-MERGE-WRITE-001).
         if dest.exists():
-            existing_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
-            if existing_hash != new_hash:
-                raise WriterError(
-                    f"partition {dest} exists with different content "
-                    f"(existing_hash={existing_hash}, new_hash={new_hash}); "
-                    f"re-ingesting the same partition with different bars "
-                    f"is not allowed — resolve the conflict and retry"
-                )
-            # Idempotent rewrite — bytes match. No-op.
-        else:
-            self._atomic_write(dest, content_bytes)
+            return self._merge_write(dest, sorted_bars)
 
+        content_bytes = self._render_bytes(sorted_bars)
+        self._atomic_write(dest, content_bytes)
         return WriteResult(
             path=dest,
             row_count=len(sorted_bars),
-            raw_hash=new_hash,
+            raw_hash=hashlib.sha256(content_bytes).hexdigest(),
             first_ts=first_ts,
             last_ts=last_ts,
+            bytes_written=len(content_bytes),
+        )
+
+    def _merge_write(self, dest: Path, new_bars: list[CandleBar]) -> WriteResult:
+        """Union *new_bars* into the existing partition at *dest*, idempotently.
+
+        Reads the stored bars, merges the incoming ones keyed by timestamp
+        (O(1) per bar), and rewrites the full month only if at least one new
+        timestamp was added. A timestamp already present with identical OHLCV
+        is a silent no-op; a same-timestamp/different-value bar raises
+        :class:`WriterError` (a real data conflict — never silently overwritten).
+        """
+        merged = self._read_existing_bars(dest)
+        added = 0
+        for bar in new_bars:
+            prev = merged.get(bar.timestamp)
+            if prev is None:
+                merged[bar.timestamp] = bar
+                added += 1
+            elif not self._bar_values_equal(prev, bar):
+                raise WriterError(
+                    f"partition {dest} has a CONFLICTING bar at "
+                    f"{bar.timestamp.isoformat()}: existing O/H/L/C/V/OI="
+                    f"{prev.open}/{prev.high}/{prev.low}/{prev.close}/"
+                    f"{prev.volume}/{prev.open_interest}, new="
+                    f"{bar.open}/{bar.high}/{bar.low}/{bar.close}/"
+                    f"{bar.volume}/{bar.open_interest}; the vendor returned "
+                    f"different values for an already-stored timestamp — "
+                    f"resolve the conflict and retry"
+                )
+
+        merged_sorted = sorted(merged.values(), key=lambda b: b.timestamp)
+        if added == 0:
+            # Every incoming bar is already stored identically → no rewrite.
+            return WriteResult(
+                path=dest,
+                row_count=len(merged_sorted),
+                raw_hash=hashlib.sha256(dest.read_bytes()).hexdigest(),
+                first_ts=merged_sorted[0].timestamp,
+                last_ts=merged_sorted[-1].timestamp,
+                bytes_written=dest.stat().st_size,
+            )
+
+        content_bytes = self._render_bytes(merged_sorted)
+        self._atomic_write(dest, content_bytes)
+        return WriteResult(
+            path=dest,
+            row_count=len(merged_sorted),
+            raw_hash=hashlib.sha256(content_bytes).hexdigest(),
+            first_ts=merged_sorted[0].timestamp,
+            last_ts=merged_sorted[-1].timestamp,
             bytes_written=len(content_bytes),
         )
 
@@ -217,6 +277,56 @@ class ParquetWriter:
         )
 
     # ── Private ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _read_existing_bars(dest: Path) -> dict[datetime, CandleBar]:
+        """Read a stored partition back into ``{timestamp: CandleBar}``.
+
+        Decimals are reconstructed via ``Decimal(str(float))`` — Python's
+        shortest-round-trip float repr recovers the original price exactly for
+        the ≤4-decimal Indian-market prices we store, so a re-render of an
+        unchanged bar is byte-identical (idempotence preserved).
+        """
+        try:
+            import polars as pl
+        except ImportError as exc:  # pragma: no cover — same guard as _render_bytes
+            raise WriterError(
+                "ParquetWriter requires 'polars' — install with "
+                "'pip install -e .[data]' to enable the P2 data lake"
+            ) from exc
+
+        df = pl.read_parquet(dest)
+        out: dict[datetime, CandleBar] = {}
+        for row in df.iter_rows(named=True):
+            oi = row["open_interest"]
+            bar = CandleBar(
+                timestamp=row["timestamp"],
+                open=Decimal(str(row["open"])),
+                high=Decimal(str(row["high"])),
+                low=Decimal(str(row["low"])),
+                close=Decimal(str(row["close"])),
+                volume=int(row["volume"]),
+                open_interest=None if oi is None else int(oi),
+            )
+            out[bar.timestamp] = bar
+        return out
+
+    @staticmethod
+    def _bar_values_equal(a: CandleBar, b: CandleBar) -> bool:
+        """True if two bars carry identical OHLCV+OI (the timestamp is the key).
+
+        Decimal ``==`` is numeric, so ``Decimal("12187.30") == Decimal("12187.3")``
+        — a reconstructed price equals the parser's value with/without trailing
+        zeros.
+        """
+        return (
+            a.open == b.open
+            and a.high == b.high
+            and a.low == b.low
+            and a.close == b.close
+            and a.volume == b.volume
+            and a.open_interest == b.open_interest
+        )
 
     @staticmethod
     def _render_bytes(sorted_bars: list[CandleBar]) -> bytes:

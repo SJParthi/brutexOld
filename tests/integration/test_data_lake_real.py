@@ -184,8 +184,12 @@ class TestRealParquetRoundTrip:
         assert r1.raw_hash == r2.raw_hash
         assert r1.path == r2.path
 
-    def test_hash_conflict_raises(self, tmp_path: Path) -> None:
-        """Rewriting with different bars must raise WriterError."""
+    def test_same_timestamp_different_value_raises(self, tmp_path: Path) -> None:
+        """A SAME-timestamp bar with DIFFERENT OHLCV is a true conflict (raises).
+
+        DEC-LAKE-MERGE-WRITE-001: merge-on-write only rejects a genuine value
+        conflict at an already-stored timestamp, not a partial re-write.
+        """
         writer = ParquetWriter(lake_root=tmp_path)
         writer.write(
             exchange="NSE",
@@ -194,14 +198,70 @@ class TestRealParquetRoundTrip:
             interval="1minute",
             bars=[_bar(25, open_price=22000.0)],
         )
-        with pytest.raises(WriterError, match="different content"):
+        with pytest.raises(WriterError, match="CONFLICTING bar"):
             writer.write(
                 exchange="NSE",
                 segment="FNO",
                 symbol="NSE-NIFTY",
                 interval="1minute",
-                bars=[_bar(25, open_price=99999.0)],  # different price
+                bars=[_bar(25, open_price=99999.0)],  # same ts, different price
             )
+
+    def test_merge_disjoint_days_accumulates_the_month(self, tmp_path: Path) -> None:
+        """Two writes of DIFFERENT days in one month union into the partition.
+
+        This is the chunk-straddles-month scenario: each fetch chunk carries a
+        partial slice of the month; merge-on-write accumulates them instead of
+        conflicting (the BAD_REQUEST flood). DEC-LAKE-MERGE-WRITE-001.
+        """
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(10, open_price=100.0), _bar(11, open_price=101.0)],
+        )
+        r2 = writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(12, open_price=102.0), _bar(13, open_price=103.0)],
+        )
+        assert r2.row_count == 4  # all four days now present
+        df = pl.read_parquet(r2.path)
+        assert df["timestamp"].dt.day().to_list() == [10, 11, 12, 13]
+
+    def test_merge_overlap_identical_is_noop(self, tmp_path: Path) -> None:
+        """Re-writing days already stored identically adds nothing (idempotent)."""
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(10, open_price=100.0), _bar(11, open_price=101.0)],
+        )
+        # Overlapping re-pull: day 11 already present (identical) + new day 12.
+        r2 = writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(11, open_price=101.0), _bar(12, open_price=102.0)],
+        )
+        assert r2.row_count == 3  # 10, 11, 12 — day 11 not duplicated
+        # A pure subset re-write is a no-op that preserves the prior hash.
+        r3 = writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(10, open_price=100.0)],
+        )
+        assert r3.row_count == 3
+        assert r3.raw_hash == r2.raw_hash  # no rewrite — byte-stable
 
     def test_reject_multi_partition_input(self, tmp_path: Path) -> None:
         """Writer rejects a batch that spans multiple (year, month) partitions."""
