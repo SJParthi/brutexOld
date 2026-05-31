@@ -197,7 +197,7 @@
     <label style="color:var(--muted); font-size:12px;" title="Inclusive start date — blank pulls from 2020 (Groww's earliest history).">from <input type="date" id="fromDate" min="2020-01-01" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
     <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — blank pulls up to today.">to <input type="date" id="toDate" min="2020-01-01" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
     <button class="loadbtn" id="loadbtn" title="Download the public Groww instrument master — no keys needed">⟳ Load instruments</button>
-    <button class="pullbtn" id="pullbtn" disabled>⤓ Pull spot — all timeframes</button>
+    <button class="pullbtn" id="pullbtn" disabled>⤓ Pull spot — 1-minute</button>
   </div>
   <div class="pullbar" style="border-top:1px solid var(--line); padding-top:10px;">
     <div class="lead" id="phaselead">Two-phase universe pull — <b>1.</b> fetch all expiries, then <b>2.</b> fetch all contracts. Re-click any day: only new rows are pulled (already-pulled history is skipped).</div>
@@ -512,7 +512,7 @@ async function runPull(symbol, label) {
   const range = (fromDate || toDate)
     ? ` · ${fromDate || "2020-01-01"} → ${toDate || "today"}`
     : "";
-  document.getElementById("pulltitle").textContent = `Pulling ${label} · all timeframes${range}`;
+  document.getElementById("pulltitle").textContent = `Pulling ${label} · 1-minute${range}`;
   const grid = document.getElementById("tfgrid");
   grid.innerHTML = "";
   document.getElementById("counter").textContent = "0";

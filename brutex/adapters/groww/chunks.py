@@ -62,22 +62,14 @@ GROWW_INTERVAL_TO_PARTITION: Final[dict[str, str]] = {
     "1mo": "1month",
 }
 
-#: All 12 Groww native intervals in ascending order — the full fetch set used
-#: by ``brutex fetch`` for the "entire timeframes" index probe.
-ALL_GROWW_INTERVALS: Final[tuple[str, ...]] = (
-    "1m",
-    "2m",
-    "3m",
-    "5m",
-    "10m",
-    "15m",
-    "30m",
-    "1h",
-    "4h",
-    "1d",
-    "1w",
-    "1mo",
-)
+#: The fetch set — **1-minute ONLY** (DEC-CANONICAL-1M-SOURCE-001, operator
+#: 2026-05-31). Groww's native higher timeframes are NOT fetched: only the 1m
+#: bar is trusted (broker-tape; the native 2m/5m/15m/… aggregations are
+#: untrusted and were unstable across re-pulls), and every other timeframe is
+#: derived from 1m by deterministic resampling — never pulled from the vendor.
+#: ``WINDOW_DAYS`` / ``GROWW_INTERVAL_TO_PARTITION`` retain the full interval
+#: maps (still valid lookups; only ``"1m"`` is iterated for the pull).
+ALL_GROWW_INTERVALS: Final[tuple[str, ...]] = ("1m",)
 
 
 def plan_chunks(

@@ -86,6 +86,10 @@ class TestIntervalVocabulary:
     def test_mapping_keys_cover_every_window_interval(self) -> None:
         assert set(GROWW_INTERVAL_TO_PARTITION) == set(WINDOW_DAYS)
 
-    def test_all_intervals_is_the_full_native_set(self) -> None:
-        assert set(ALL_GROWW_INTERVALS) == set(WINDOW_DAYS)
-        assert len(ALL_GROWW_INTERVALS) == 12
+    def test_all_intervals_is_one_minute_only(self) -> None:
+        # DEC-CANONICAL-1M-SOURCE-001: the fetch set is 1m ONLY — every other
+        # timeframe is derived from 1m, never pulled from Groww. The full
+        # WINDOW_DAYS / GROWW_INTERVAL_TO_PARTITION maps are kept (valid
+        # lookups), but only "1m" is iterated for the pull.
+        assert ALL_GROWW_INTERVALS == ("1m",)
+        assert "1m" in WINDOW_DAYS  # the one fetched interval still has a window
