@@ -25,6 +25,11 @@ stock options**.
 > `/charts/intraday` or `/charts/historical` (those are **spot
 > underlying only**, see `05-historical-data.md`). Spot ⇒
 > intraday/historical; options ⇒ rollingoption. No exceptions.
+>
+> **1-minute only (DEC-DHAN-1M-ONLY-001, MIGRATION #343):** Track 1
+> pulls options at `interval = "1"` (1-minute) **only**; the 5/15/25/60
+> values are never requested. Higher timeframes are resampled from the
+> 1m base, never fetched.
 
 ## Request body
 
