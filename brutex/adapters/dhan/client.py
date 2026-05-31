@@ -49,7 +49,6 @@ class Transport(Protocol):
         self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
     ) -> tuple[int, bytes]:
         """Send a POST and return ``(http_status, response_body_bytes)``."""
-        ...
 
 
 def _guard_url(url: str) -> None:
