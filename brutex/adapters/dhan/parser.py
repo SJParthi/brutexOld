@@ -32,12 +32,6 @@ from brutex.data.candle_fields import (
 )
 from brutex.data.models import CandleBar
 
-#: Columns that MUST be present + index-aligned in a candle payload.
-_REQUIRED_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close", "timestamp")
-
-#: Columns that MAY be absent (indices: no volume; spot: no OI).
-_OPTIONAL_COLUMNS: tuple[str, ...] = ("volume", "open_interest")
-
 
 def _parse_timestamp_epoch(raw: object) -> datetime:
     """Parse a Dhan UNIX-epoch timestamp (UTC seconds) to a tz-aware UTC datetime."""
@@ -59,20 +53,26 @@ def _parse_timestamp_epoch(raw: object) -> datetime:
         raise CandleParseError(f"out-of-range candle timestamp: {raw!r}") from exc
 
 
-def _column(payload: Mapping[str, object], name: str, *, required: bool) -> Sequence[object] | None:
-    """Return the named column as a sequence, or ``None`` if absent & optional.
-
-    Raises :class:`CandleParseError` if a required column is missing, or if
-    a present column is not a list/tuple.
-    """
-    if name not in payload:
-        if required:
-            raise CandleParseError(f"missing required candle column {name!r}")
-        return None
+def _as_array(payload: Mapping[str, object], name: str) -> Sequence[object]:
+    """Return present column ``name`` as a sequence, else raise CandleParseError."""
     col = payload[name]
     if not isinstance(col, (list, tuple)):
         raise CandleParseError(f"candle column {name!r} must be an array, got {type(col).__name__}")
     return col
+
+
+def _require_column(payload: Mapping[str, object], name: str) -> Sequence[object]:
+    """Return a required column as a sequence; raise if missing or non-array."""
+    if name not in payload:
+        raise CandleParseError(f"missing required candle column {name!r}")
+    return _as_array(payload, name)
+
+
+def _optional_column(payload: Mapping[str, object], name: str) -> Sequence[object] | None:
+    """Return an optional column as a sequence, or ``None`` if absent."""
+    if name not in payload:
+        return None
+    return _as_array(payload, name)
 
 
 def parse_candle_columns(payload: Mapping[str, object]) -> list[CandleBar]:
@@ -97,11 +97,24 @@ def parse_candle_columns(payload: Mapping[str, object]) -> list[CandleBar]:
         On a missing/non-array required column, a length mismatch, or any
         unparseable (non-empty) field.
     """
-    required = {name: _column(payload, name, required=True) for name in _REQUIRED_COLUMNS}
-    optional = {name: _column(payload, name, required=False) for name in _OPTIONAL_COLUMNS}
+    timestamps = _require_column(payload, "timestamp")
+    opens = _require_column(payload, "open")
+    highs = _require_column(payload, "high")
+    lows = _require_column(payload, "low")
+    closes = _require_column(payload, "close")
+    volumes = _optional_column(payload, "volume")
+    open_interests = _optional_column(payload, "open_interest")
 
-    n = len(required["timestamp"])  # type: ignore[arg-type]  # required → never None
-    for name, col in {**required, **optional}.items():
+    n = len(timestamps)
+    columns: tuple[tuple[str, Sequence[object] | None], ...] = (
+        ("open", opens),
+        ("high", highs),
+        ("low", lows),
+        ("close", closes),
+        ("volume", volumes),
+        ("open_interest", open_interests),
+    )
+    for name, col in columns:
         if col is not None and len(col) != n:
             raise CandleParseError(
                 f"candle column {name!r} length {len(col)} != timestamp length {n}"
@@ -111,16 +124,14 @@ def parse_candle_columns(payload: Mapping[str, object]) -> list[CandleBar]:
     for i in range(n):
         try:
             bar = assemble_candle(
-                ts_raw=required["timestamp"][i],  # type: ignore[index]
+                ts_raw=timestamps[i],
                 parse_timestamp=_parse_timestamp_epoch,
-                open_=required["open"][i],  # type: ignore[index]
-                high=required["high"][i],  # type: ignore[index]
-                low=required["low"][i],  # type: ignore[index]
-                close=required["close"][i],  # type: ignore[index]
-                volume=None if optional["volume"] is None else optional["volume"][i],
-                open_interest=(
-                    None if optional["open_interest"] is None else optional["open_interest"][i]
-                ),
+                open_=opens[i],
+                high=highs[i],
+                low=lows[i],
+                close=closes[i],
+                volume=None if volumes is None else volumes[i],
+                open_interest=None if open_interests is None else open_interests[i],
             )
         except EmptyCandleRow:
             continue  # graceful skip — no-trade / null-side minute
