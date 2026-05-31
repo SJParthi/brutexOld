@@ -46,6 +46,7 @@ class DhanBodyError(BruteXError):
 
 
 def _validate(value: str, allowed: frozenset[str] | tuple[str, ...], field: str) -> str:
+    """Return *value* if it is in *allowed*, else raise :class:`DhanBodyError`."""
     if value not in allowed:
         raise DhanBodyError(f"invalid {field} {value!r}; allowed: {sorted(allowed)}")
     return value
