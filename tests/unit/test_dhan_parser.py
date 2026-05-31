@@ -14,7 +14,11 @@ from brutex.adapters.dhan.parser import (
     CandleParseError,
     parse_candle_columns,
 )
-from brutex.adapters.dhan.parser import _parse_timestamp_epoch as parse_ts
+
+
+def _ts_payload(ts: object) -> dict[str, object]:
+    """A single non-empty candle with the given timestamp (exercises the epoch parser)."""
+    return {"open": [100.0], "high": [110.0], "low": [90.0], "close": [105.0], "timestamp": [ts]}
 
 
 def _payload(**overrides: object) -> dict[str, object]:
@@ -31,34 +35,41 @@ def _payload(**overrides: object) -> dict[str, object]:
     return base
 
 
-class TestParseTimestampEpoch:
+class TestTimestampEpoch:
+    """Epoch-parsing edge cases, exercised through the public parser."""
+
     def test_int_epoch(self) -> None:
-        assert parse_ts(1609733100) == datetime(2021, 1, 4, 4, 5, tzinfo=UTC)
+        bars = parse_candle_columns(_ts_payload(1609733100))
+        assert bars[0].timestamp == datetime(2021, 1, 4, 4, 5, tzinfo=UTC)
 
     def test_float_and_string_epoch(self) -> None:
-        assert parse_ts(1609733100.0) == datetime(2021, 1, 4, 4, 5, tzinfo=UTC)
-        assert parse_ts("1609733100") == datetime(2021, 1, 4, 4, 5, tzinfo=UTC)
+        assert parse_candle_columns(_ts_payload(1609733100.0))[0].timestamp == datetime(
+            2021, 1, 4, 4, 5, tzinfo=UTC
+        )
+        assert parse_candle_columns(_ts_payload("1609733100"))[0].timestamp == datetime(
+            2021, 1, 4, 4, 5, tzinfo=UTC
+        )
 
     def test_bool_rejected(self) -> None:
         with pytest.raises(CandleParseError, match="got bool"):
-            parse_ts(True)
+            parse_candle_columns(_ts_payload(True))
 
     def test_wrong_type_rejected(self) -> None:
         with pytest.raises(CandleParseError, match="must be epoch seconds"):
-            parse_ts([1])
+            parse_candle_columns(_ts_payload([1]))
 
     def test_unparseable_string_rejected(self) -> None:
         with pytest.raises(CandleParseError, match="unparseable candle timestamp"):
-            parse_ts("not-a-number")
+            parse_candle_columns(_ts_payload("not-a-number"))
 
     @pytest.mark.parametrize("value", [float("inf"), float("nan")])
     def test_non_finite_rejected(self, value: float) -> None:
         with pytest.raises(CandleParseError, match="non-finite candle timestamp"):
-            parse_ts(value)
+            parse_candle_columns(_ts_payload(value))
 
     def test_out_of_range_rejected(self) -> None:
         with pytest.raises(CandleParseError, match="out-of-range candle timestamp"):
-            parse_ts(10**30)
+            parse_candle_columns(_ts_payload(10**30))
 
 
 class TestParseCandleColumns:

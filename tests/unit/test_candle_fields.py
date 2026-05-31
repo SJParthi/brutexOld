@@ -19,6 +19,7 @@ from brutex.data.candle_fields import (
     to_int,
     to_price,
 )
+from brutex.data.models import CandleBar
 
 _TS = datetime(2021, 1, 4, 3, 45, tzinfo=UTC)
 
@@ -89,19 +90,26 @@ class TestToInt:
 
 
 class TestAssembleCandle:
-    def _call(self, **overrides: object) -> object:
-        kwargs: dict[str, object] = {
-            "ts_raw": "ignored",
-            "parse_timestamp": _fixed_ts,
-            "open_": "100",
-            "high": "110",
-            "low": "90",
-            "close": "105",
-            "volume": "1000",
-            "open_interest": "50",
-        }
-        kwargs.update(overrides)
-        return assemble_candle(**kwargs)  # type: ignore[arg-type]
+    def _call(
+        self,
+        *,
+        open_: object = "100",
+        high: object = "110",
+        low: object = "90",
+        close: object = "105",
+        volume: object = "1000",
+        open_interest: object = "50",
+    ) -> CandleBar:
+        return assemble_candle(
+            ts_raw="ignored",
+            parse_timestamp=_fixed_ts,
+            open_=open_,
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+            open_interest=open_interest,
+        )
 
     def test_happy_path(self) -> None:
         bar = self._call()
