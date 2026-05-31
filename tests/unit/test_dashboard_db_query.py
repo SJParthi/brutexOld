@@ -19,6 +19,7 @@ import pytest
 from brutex.dashboard.db_view import (
     ALLOWED_OPERATORS,
     CANDLE_COLUMNS,
+    _format_candle_timestamp,
     _quote_ident,
     list_candle_datasets,
     list_columns,
@@ -421,6 +422,48 @@ def test_query_candles_start_only(store: InstrumentStore, tmp_path: Path) -> Non
         limit=50,
     )
     assert out["total"] == 1
+
+
+def test_format_candle_timestamp_tz_aware_converts_to_ist() -> None:
+    # A UTC TIMESTAMPTZ cell → IST wall-clock, no offset (03:30Z → 09:00 IST).
+    assert (
+        _format_candle_timestamp(datetime(2026, 5, 29, 3, 30, tzinfo=UTC)) == "2026-05-29 09:00:00"
+    )
+
+
+def test_format_candle_timestamp_naive_datetime_kept_as_is() -> None:
+    # Defensive branch: a naive datetime (DuckDB returns tz-aware in practice)
+    # is formatted as-is, still without an offset suffix.
+    assert _format_candle_timestamp(datetime(2024, 3, 1, 14, 45, 0)) == "2024-03-01 14:45:00"
+
+
+def test_format_candle_timestamp_non_datetime_falls_back() -> None:
+    # A non-datetime cell (never the real timestamp column) falls back to the
+    # generic JSON coercion path.
+    assert _format_candle_timestamp(None) is None
+    assert _format_candle_timestamp("already-a-string") == "already-a-string"
+
+
+def test_query_candles_timestamp_is_clean_ist_no_offset(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # The bar timestamp must render as a clean IST wall-clock string with NO
+    # +05:30 offset suffix (operator: "it should be clean"). The fixture bars
+    # are 09:15 UTC → 14:45 IST. Deterministic regardless of session TimeZone.
+    _write_candles(tmp_path)
+    out = query_candles(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        columns=("timestamp",),
+        limit=50,
+    )
+    stamps = sorted(str(r[0]) for r in out["rows"])
+    assert stamps == ["2024-03-01 14:45:00", "2024-03-02 14:45:00"]
+    assert all("+" not in s and "T" not in s for s in stamps)
 
 
 def test_query_candles_descending(store: InstrumentStore, tmp_path: Path) -> None:

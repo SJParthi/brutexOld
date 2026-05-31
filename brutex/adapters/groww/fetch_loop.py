@@ -31,7 +31,11 @@ from typing import Final, Protocol
 import structlog
 
 from brutex.data.watermark import ChunkKey, ChunkStatus, FetchWatermark
-from brutex.orchestrator.retry import backoff_delay, classify_exception
+from brutex.orchestrator.retry import (
+    UnknownExceptionError,
+    backoff_delay,
+    classify_exception,
+)
 from brutex.orchestrator.state import Outcome
 
 _LOG = structlog.get_logger("brutex.fetch")
@@ -143,11 +147,39 @@ def run_fetch(
             try:
                 bars = fetcher.fetch_chunk(key)
             except Exception as exc:
-                outcome = classify_exception(exc)
+                try:
+                    outcome = classify_exception(exc)
+                except UnknownExceptionError:
+                    # A non-vendor exception reached the loop — a programmer
+                    # bug or an unexpected runtime error (corrupt watermark
+                    # row, chunk-planning slip, …). NEVER let one chunk crash
+                    # the whole pull: quarantine it with the REAL type +
+                    # message logged at error level so it's diagnosable, then
+                    # move on (the same blast-radius containment that turned
+                    # the retry-count ValueError from a pull-killer into a
+                    # logged failure). DEC-PULL-CHUNK-CONTAINMENT-001.
+                    _LOG.error(
+                        "ingest.chunk.unexpected_error",
+                        symbol=key.groww_symbol,
+                        interval=key.interval,
+                        start=key.start,
+                        end=key.end,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    watermark.record(key, ChunkStatus.FAILED)
+                    failed += 1
+                    break
                 if outcome in _TRANSIENT:
                     if retry_count < max_retries:
-                        sleep_fn(delay_fn(retry_count))
+                        # Increment BEFORE computing the delay: ``delay_fn``
+                        # (``backoff_delay``) is 1-based — it requires
+                        # ``retry_count >= 1`` and raises ``ValueError`` on 0.
+                        # Passing the pre-increment 0 on the first retry crashed
+                        # the whole pull instead of backing off (regression
+                        # guarded in tests/unit/test_groww_fetch_loop.py).
                         retry_count += 1
+                        sleep_fn(delay_fn(retry_count))
                         continue
                     # Retries exhausted → quarantine. Surface the REAL vendor
                     # reason (never swallow it — DEC-PULL-ERROR-VISIBILITY-001)

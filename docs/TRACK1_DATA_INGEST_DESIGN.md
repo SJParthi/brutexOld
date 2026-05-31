@@ -116,6 +116,34 @@ This guarantees:
 
 The 25-minute native is dropped (no equivalent derived TF in our 21).
 
+**Data-quality rationale — why 1m is the ONLY trustable source (operator,
+2026-05-31; DEC-CANONICAL-1M-SOURCE-001).** Beyond reproducibility, there is a
+vendor-trust reason this rule is non-negotiable. Groww's historical candles are
+assembled from its **own broker-level executed-trade tape** — they are NOT
+back-filled or reconciled against the NSE/BSE-direct consolidated feed, and they
+are NOT back-adjusted (contrast Dhan, which reconstructs every minute from the
+official exchange feed). Empirically the **1-minute** bar (the ~09:00→close
+intraday series) is the one timeframe we can treat as a faithful record of what
+printed; Groww's NATIVE higher timeframes (5/15/25/60-min) are that same
+imperfect tape re-aggregated by Groww with alignment/timestamp semantics we
+cannot verify. So Track 1 trusts **only 1m** and builds every other TF itself,
+bit-for-bit. (Honest envelope, CLAUDE.md §6 + Golden Rule #1: the exact
+Groww-vs-NSE drift is still **UNQUANTIFIED** — the Phase 0b drift probe measures
+it; the broker-tape characterisation is the operator's domain knowledge, not a
+Groww-published fact. The 3 brute-force INDEXES are index-dissemination values,
+not traded prints, so the tape concern bites hardest on the single
+stocks/options, where illiquid-minute null/zero bars are already skipped per
+DEC-CANDLE-EMPTY-BAR-001 / DEC-CANDLE-PARSE-RESILIENCE-001.)
+
+> **Implementation status (drift to fix):** the live pull currently fetches
+> Groww's **12 native intervals** (`ALL_GROWW_INTERVALS` in
+> `brutex/adapters/groww/chunks.py` = `1m,2m,3m,5m,10m,15m,30m,1h,4h,1d,1w,1mo`)
+> directly — **violating this spec**. The resampler already exists
+> (`brutex/feed/resampler.py`, `brutex/data/tf_resampler.py`); the corrective
+> change (ingest **1m-only** + resample the rest, plus a 1m gap/completeness
+> guard against the session grid) is tracked under DEC-CANONICAL-1M-SOURCE-001
+> as the authorised follow-up — no code in the entry that records this decision.
+
 ### 3.4 Resampling rules (from `TRACK1_BACKTEST_SPEC.md §5.3`)
 
 | Rule | Value |

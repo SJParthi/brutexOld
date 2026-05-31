@@ -34,9 +34,10 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 from brutex.data.partition import (
     VALID_EXCHANGES,
@@ -124,6 +125,30 @@ def clamp_limit(n: int) -> int:
         ``1`` and at most ``500``.
     """
     return max(_LIMIT_MIN, min(_LIMIT_MAX, n))
+
+
+#: IST — the market wall-clock the candle viewer renders bar times in. The
+#: lake stores bar time as a UTC ``TIMESTAMPTZ``; we display the Indian-market
+#: local time explicitly (not the ambient DuckDB session ``TimeZone``) so the
+#: rendered string is deterministic regardless of where the server runs.
+_IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
+
+
+def _format_candle_timestamp(value: Any) -> Any:
+    """Render a candle bar timestamp as a clean IST wall-clock string.
+
+    Drops the ``+05:30`` offset suffix (operator: "it should be clean") — a
+    bar stored as ``2026-05-29T03:30:00Z`` renders ``2026-05-29 09:00:00``
+    (IST), never ``2026-05-29 09:00:00+05:30``. Converting to :data:`_IST`
+    explicitly keeps the output identical whether the DuckDB session runs in
+    UTC (CI) or Asia/Kolkata (the operator's box). Non-datetime cells (a
+    column subset that excludes ``timestamp`` never reaches here) fall back to
+    :func:`_json_safe`.
+    """
+    if isinstance(value, datetime):
+        ist = value.astimezone(_IST) if value.tzinfo is not None else value
+        return ist.strftime("%Y-%m-%d %H:%M:%S")
+    return _json_safe(value)
 
 
 def _json_safe(value: Any) -> Any:
@@ -650,7 +675,16 @@ def query_candles(
     )
     description = cursor.description or []
     out_columns = [str(col[0]) for col in description]
-    rows = [[_json_safe(cell) for cell in row] for row in cursor.fetchall()]
+    # Render the bar timestamp as a clean IST wall-clock (no +05:30 suffix);
+    # every other cell goes through the generic JSON coercion.
+    ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
+    rows = [
+        [
+            _format_candle_timestamp(cell) if i == ts_idx else _json_safe(cell)
+            for i, cell in enumerate(row)
+        ]
+        for row in cursor.fetchall()
+    ]
     return {
         "symbol": symbol,
         "interval": interval,

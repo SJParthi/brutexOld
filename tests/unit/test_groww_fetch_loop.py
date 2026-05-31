@@ -96,6 +96,46 @@ class TestTransientRetry:
         assert out.completed == 1
         sleep.assert_called_once()  # backed off exactly once before retry
 
+    def test_first_retry_passes_one_based_count_to_delay_fn(self) -> None:
+        # Regression (DEC-PULL-RETRY-OFFBYONE-001): the first retry passed the
+        # pre-increment ``retry_count=0`` to ``delay_fn``, but ``backoff_delay``
+        # is 1-based and raises ``ValueError`` on 0 — crashing the whole pull
+        # the instant any transient error occurred. The delay count must start
+        # at 1 and climb, never 0.
+        wm = FetchWatermark()
+        recorded: list[int] = []
+
+        def _record_delay(retry_count: int) -> float:
+            recorded.append(retry_count)
+            return 0.0
+
+        out = run_fetch(
+            _FakeFetcher([VendorAPIRateLimitException(), VendorAPIRateLimitException(), ["bar"]]),
+            [_key()],
+            wm,
+            sleep_fn=mock.Mock(),
+            delay_fn=_record_delay,
+        )
+        assert out.completed == 1
+        assert recorded == [1, 2]  # one-based, monotonic — never 0
+
+    def test_real_backoff_delay_does_not_crash_on_first_retry(self) -> None:
+        # The bug surfaced only with the PRODUCTION ``backoff_delay`` (the test
+        # stub ignored its arg). Drive the loop with the real one to prove a
+        # transient error backs off + retries instead of raising ``ValueError``.
+        from brutex.orchestrator.retry import backoff_delay
+
+        wm = FetchWatermark()
+        out = run_fetch(
+            _FakeFetcher([VendorAPIRateLimitException(), ["bar"]]),
+            [_key()],
+            wm,
+            sleep_fn=mock.Mock(),
+            delay_fn=backoff_delay,
+        )
+        assert out.completed == 1
+        assert wm.get(_key()) == ChunkStatus.COMPLETED
+
     def test_exhausts_retries_then_quarantines(self) -> None:
         wm = FetchWatermark()
         actions: list[object] = [VendorAPIRateLimitException() for _ in range(3)]
@@ -157,6 +197,46 @@ class TestTerminal:
         out = _run(_FakeFetcher([VendorAPIBadRequestException()]), [_key()], wm)
         assert out.failed == 1
         assert wm.get(_key()) == ChunkStatus.FAILED
+
+
+class TestUnexpectedErrorContainment:
+    """A NON-vendor exception (one classify_exception can't map) must never
+    crash the whole pull — it is quarantined per-chunk with the real type +
+    message logged at error level, and the loop moves on.
+    DEC-PULL-CHUNK-CONTAINMENT-001."""
+
+    def test_non_vendor_exception_quarantines_not_crashes(self) -> None:
+        wm = FetchWatermark()
+        # A bare RuntimeError is NOT in BROKER_EXCEPTION_CLASSIFICATION, so
+        # classify_exception raises UnknownExceptionError inside the loop.
+        out = _run(_FakeFetcher([RuntimeError("corrupt watermark row")]), [_key()], wm)
+        assert out.failed == 1
+        assert wm.get(_key()) == ChunkStatus.FAILED
+
+    def test_unexpected_error_logs_real_type_and_message(self) -> None:
+        from structlog.testing import capture_logs
+
+        wm = FetchWatermark()
+        with capture_logs() as logs:
+            _run(_FakeFetcher([KeyError("interval")]), [_key()], wm)
+        rec = next(e for e in logs if e["event"] == "ingest.chunk.unexpected_error")
+        assert rec["error_type"] == "KeyError"
+        assert "interval" in rec["error"]
+        assert rec["symbol"] == "NSE-NIFTY"
+        assert rec["log_level"] == "error"
+
+    def test_one_bad_chunk_does_not_abort_the_rest(self) -> None:
+        # The blast-radius guarantee: a mid-run unexpected error on chunk B
+        # must not stop chunks A (already done) or C (still to go).
+        wm = FetchWatermark()
+        k1, k2, k3 = _key("A"), _key("B"), _key("C")
+        out = _run(
+            _FakeFetcher([["bar"], ValueError("boom"), ["bar"]]),
+            [k1, k2, k3],
+            wm,
+        )
+        assert (out.completed, out.failed) == (2, 1)
+        assert wm.get(k3) == ChunkStatus.COMPLETED
 
 
 class TestMixedRun:
