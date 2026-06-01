@@ -56,8 +56,9 @@ regresses, the change is blocked. Nothing ships on trust.
 | **Pull · watermark** — O(1) fetch-coverage ledger (skip pulled windows) | no wasted Dhan hit | ✅ merged |
 | **Pull · throttle** — adaptive [3..5] r/s controller, live on the spot pull | rate-limit safety | ✅ merged |
 | **Pull · options** — `pull_options` controller (IDX→OPTIDX±10 / EQ→OPTSTK±3) | options buttons ②④⑥⑧ | ✅ merged |
-| **Pull · routes** — `/pull-all` + `/pull-options` routes + pure target selector | all 8 buttons have a backend | ⏳ merging |
-| **Pull · live buttons** — animated dashboard HTML + SSE progress (replace mockup) | one-click universe | 🔜 next |
+| **Pull · routes** — `/pull-all` + `/pull-options` routes + pure target selector | all 8 buttons have a backend | ✅ merged |
+| **Pull · live buttons** — animated "Pull the Universe" panel wired into `/universe` | one-click universe (all 8 live) | ⏳ merging |
+| **Pull · SSE progress** — per-window streaming live feed | token-by-token progress | 🔜 next |
 | **Flip · final** — delete Groww (residual code + deps + docs) | Groww fully gone | 🔜 |
 
 **Honest note:** Groww is **still present** until the final phase — deliberately last,
