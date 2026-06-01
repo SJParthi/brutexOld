@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from brutex.data.models import OptionBar
 from brutex.data.option_dedup import OptionDedupIndex
-from brutex.data.option_sink import OptionBarSink
+from brutex.data.option_sink import NullOptionBarSink, OptionBarSink
 
 
 def _bar(*, side: str = "CE", strike: str = "17500", minute: int = 0) -> OptionBar:
@@ -154,3 +154,34 @@ def test_distinct_series_never_collapse_even_with_none_strike() -> None:
         "NSE_FNO|13|WEEK|0|ATM|CALL",
         "NSE_FNO|13|WEEK|0|ATM+1|CALL",
     }
+
+
+class TestNullOptionBarSink:
+    """The options dry-run sink — counts but discards (DEC-VENDOR-PIVOT-001)."""
+
+    def test_counts_bars_without_persisting(self) -> None:
+        sink = NullOptionBarSink()
+        n = sink.append_option_bars(
+            security_id="13",
+            exchange_segment="NSE_FNO",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            bars=[_bar(minute=0), _bar(minute=1)],
+        )
+        assert n == 2
+
+    def test_empty_bars_is_zero(self) -> None:
+        assert (
+            NullOptionBarSink().append_option_bars(
+                security_id="13",
+                exchange_segment="NSE_FNO",
+                expiry_flag="MONTH",
+                expiry_code=1,
+                strike="ATM",
+                drv_option_type="PUT",
+                bars=[],
+            )
+            == 0
+        )
