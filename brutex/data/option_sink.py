@@ -10,15 +10,17 @@ unit-testable without a real lake or audit file; the in-memory dedup tier can
 be swapped for the LMDB tier (:class:`~brutex.data.lmdb_membership.LmdbMembership`)
 with no change here.
 
-**Dedup identity (collision-safe).** A bar's key is
-``(security_id, expiry_flag:expiry_code, resolved_strike, side, epoch)``
-(:func:`~brutex.data.option_dedup.key_for_option_bar`). On any given trading
-day a given ``(flag, code)`` resolves to exactly one actual expiry, and the
-full-timestamp ``epoch`` (date + minute) disambiguates the same ``(flag,
-code)`` across weeks — so two genuinely-different contracts can never collapse
-to one key, and a re-pull of the *same* contract/minute always dedups. The
-**resolved** per-bar strike (not the relative ``ATM±N`` request) is used, so
-distinct strikes never share a key.
+**Dedup identity (collision-safe).** A bar's key is the **full series
+coordinate** ``(exchange_segment | security_id | expiry_flag | expiry_code |
+strike | drv_option_type)`` PLUS the per-bar ``(resolved_strike, side,
+epoch)`` (:func:`~brutex.data.option_dedup.key_for_option_bar`). Folding the
+whole series coordinate in means two **different series** (e.g. ``ATM`` vs
+``ATM+1``) can never alias — even if a side omits the resolved strike and
+leaves ``bar.strike`` ``None``. Within a series, a given ``(flag, code)``
+resolves to one actual expiry per trading day and the full-timestamp ``epoch``
+(date + minute) disambiguates the same ``(flag, code)`` across weeks — so a
+re-pull of the *same* contract/minute always dedups while genuinely-new bars
+never do.
 
 Idempotent: a duplicate re-pull yields zero survivors → no write, no audit
 row (CLAUDE.md §2 Rule 7). O(1) per bar (one dedup probe + one append).
@@ -100,13 +102,18 @@ class OptionBarSink:
         A duplicate re-pull (all bars already seen) is a no-op: no write, no
         audit row (idempotent). Returns the number of newly-written bars.
         """
-        expiry = f"{expiry_flag}:{expiry_code}"
-        survivors = unique_option_bars(bars, self._index, underlying=security_id, expiry=expiry)
-        if not survivors:
-            return 0
+        # The dedup identity is the FULL series coordinate (so two distinct
+        # series can never alias — even if a side omits the resolved strike,
+        # leaving bar.strike None) PLUS the per-bar (resolved strike, side,
+        # epoch). The partition key IS that series identity.
         partition_key = _KEY_SEP.join(
             [exchange_segment, security_id, expiry_flag, str(expiry_code), strike, drv_option_type]
         )
+        survivors = unique_option_bars(
+            bars, self._index, underlying=security_id, expiry=partition_key
+        )
+        if not survivors:
+            return 0
         written = self._writer.write(partition_key=partition_key, bars=survivors)
         if self._audit is not None:
             self._audit.append(

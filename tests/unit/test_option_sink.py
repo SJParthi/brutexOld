@@ -112,3 +112,45 @@ def test_audit_optional_none_branch() -> None:
     sink = _sink(writer, audit=None)  # no audit sink injected
     assert _append(sink, [_bar(minute=0)]) == 1
     assert len(writer.calls) == 1  # write still happens, no audit
+
+
+def _none_strike_bar(minute: int = 0) -> OptionBar:
+    return OptionBar(
+        timestamp=datetime(2021, 1, 4, 4, minute, tzinfo=UTC),
+        open=Decimal("100"),
+        high=Decimal("110"),
+        low=Decimal("90"),
+        close=Decimal("105"),
+        volume=250,
+        open_interest=1200,
+        side="CE",
+        strike=None,  # side omitted the resolved strike
+        spot=Decimal("17480.5"),
+        iv=Decimal("0.15"),
+    )
+
+
+def _append_strike(sink: OptionBarSink, strike: str, bars: list[OptionBar]) -> int:
+    return sink.append_option_bars(
+        security_id="13",
+        exchange_segment="NSE_FNO",
+        expiry_flag="WEEK",
+        expiry_code=0,
+        strike=strike,
+        drv_option_type="CALL",
+        bars=bars,
+    )
+
+
+def test_distinct_series_never_collapse_even_with_none_strike() -> None:
+    # Two DIFFERENT series (ATM vs ATM+1), same minute, same side, both with a
+    # None resolved strike: the full series coordinate keeps their keys apart,
+    # so neither bar is falsely deduped against the other.
+    writer = _FakeWriter()
+    sink = _sink(writer, _FakeAudit())
+    assert _append_strike(sink, "ATM", [_none_strike_bar()]) == 1
+    assert _append_strike(sink, "ATM+1", [_none_strike_bar()]) == 1  # not deduped vs ATM
+    assert {pk for pk, _ in writer.calls} == {
+        "NSE_FNO|13|WEEK|0|ATM|CALL",
+        "NSE_FNO|13|WEEK|0|ATM+1|CALL",
+    }
