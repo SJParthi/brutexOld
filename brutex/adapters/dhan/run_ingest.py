@@ -19,7 +19,7 @@ over the same range is a no-op on already-stored bars (CLAUDE.md §2 Rule 7).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
 
@@ -83,6 +83,8 @@ def run_dhan_spot_ingest(
     end: date,
     pace: Pacer | None = None,
     coverage: FetchCoverage | None = None,
+    on_rate_limit: Callable[[], None] | None = None,
+    on_success: Callable[[], None] | None = None,
 ) -> DhanIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -104,6 +106,10 @@ def run_dhan_spot_ingest(
         threaded into every pair — a window already pulled is skipped before
         the vendor call, so a re-pull never re-burns the Dhan budget on data
         already in the lake (DEC-FETCH-COVERAGE-001).
+    on_rate_limit, on_success
+        Optional rate-controller feedback hooks threaded into every pair — a
+        rate-limit 429 steps the rate down, a clean window recovers it
+        (DEC-DHAN-ADAPTIVE-RPS-001).
 
     Returns
     -------
@@ -126,6 +132,8 @@ def run_dhan_spot_ingest(
                     end=end,
                     pace=pace,
                     coverage=coverage,
+                    on_rate_limit=on_rate_limit,
+                    on_success=on_success,
                 )
             except DhanError as exc:
                 failures.append(

@@ -220,3 +220,50 @@ class TestIngestSpotCoverage:
         assert second.skipped_windows == 3
         assert second.bars_appended == 0
         assert sink2.appends == []  # nothing re-fetched / re-written
+
+
+class TestIngestSpotRateFeedback:
+    """The rate-controller feedback hooks (DEC-DHAN-ADAPTIVE-RPS-001)."""
+
+    def test_on_rate_limit_fires_on_429(self) -> None:
+        hits: list[int] = []
+        ok: list[int] = []
+        report = ingest_spot(
+            _adapter(status=429),  # DhanRateLimitError — retryable + is_rate_limit
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            on_rate_limit=lambda: hits.append(1),
+            on_success=lambda: ok.append(1),
+        )
+        assert report.transient_failures == 1
+        assert hits == [1]  # the 429 stepped the controller
+        assert ok == []  # no clean window
+
+    def test_on_rate_limit_not_fired_on_non_ratelimit_retryable(self) -> None:
+        hits: list[int] = []
+        ingest_spot(
+            _adapter(status=500),  # DhanServerError — retryable but NOT rate-limit
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            on_rate_limit=lambda: hits.append(1),
+        )
+        assert hits == []  # a 5xx is transient but not a rate-limit signal
+
+    def test_on_success_fires_on_clean_window(self) -> None:
+        ok: list[int] = []
+        ingest_spot(
+            _adapter(),  # clean 200
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            on_success=lambda: ok.append(1),
+        )
+        assert ok == [1]  # one clean window → one recovery signal
