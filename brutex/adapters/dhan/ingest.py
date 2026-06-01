@@ -3,8 +3,8 @@
 The thin orchestration the cli/dashboard call to fill the lake for one spot
 instrument: plan the fetch windows (1-minute → 90-day tiles via
 :func:`~brutex.adapters.dhan.chunks.plan_spot_intraday_windows`; 1-day → one
-call), fetch each via :meth:`DhanMarketAdapter.fetch_ohlcv`, and append the
-parsed bars to a :class:`~brutex.data.sink.BarSink` partitioned by
+call), fetch each via :meth:`~brutex.adapters.protocol.MarketAdapter.fetch_ohlcv`,
+and append the parsed bars to a :class:`~brutex.data.sink.BarSink` partitioned by
 ``(exchange, segment, security_id, interval)``.
 
 Pacing is injected (``pace`` — the orchestrator's adaptive-token-bucket
@@ -22,9 +22,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time
 
-from brutex.adapters.dhan.adapter import DhanMarketAdapter
 from brutex.adapters.dhan.chunks import plan_spot_intraday_windows
 from brutex.adapters.dhan.errors import DhanError, is_retryable
+from brutex.adapters.protocol import MarketAdapter
 from brutex.data.session import filter_intraday_session
 from brutex.data.sink import BarSink
 from brutex.models import Instrument
@@ -56,7 +56,7 @@ def _windows(interval: str, start: date, end: date) -> list[tuple[date, date]]:
 
 
 def ingest_spot(
-    adapter: DhanMarketAdapter,
+    adapter: MarketAdapter,
     sink: BarSink,
     *,
     instrument: Instrument,
