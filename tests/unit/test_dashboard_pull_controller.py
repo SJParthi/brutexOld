@@ -302,11 +302,11 @@ class TestResolveCandleRange:
             resolve_candle_range(from_date=None, to_date=None, year=2027, now=_NOW)
 
     def test_no_dates_pre_floor_year_raises(self) -> None:
-        # Mode 2 — a year wholly before the 2020 history floor: start clamps
-        # up to the floor, end stays in the pre-floor year → start > end →
-        # refused (Dhan has no data before 2020).
+        # Mode 2 — a year wholly before the 2021 Track-1 floor (DEC-DHAN-PULL-SCOPE-001):
+        # start clamps up to the floor, end stays in the pre-floor year → start > end →
+        # refused. 2020 is now BEFORE the floor (the operator starts at 2021 for safety).
         with pytest.raises(ValueError, match="nothing to pull"):
-            resolve_candle_range(from_date=None, to_date=None, year=2018, now=_NOW)
+            resolve_candle_range(from_date=None, to_date=None, year=2020, now=_NOW)
 
     def test_explicit_from_and_to_are_day_inclusive(self) -> None:
         # Mode 1 — both ends inclusive; end is the midnight after to_date.
@@ -322,15 +322,16 @@ class TestResolveCandleRange:
         assert end == datetime(2026, 5, 31, tzinfo=UTC)  # today (05-30) + 1 day
 
     def test_to_only_starts_at_history_floor(self) -> None:
-        start, end = resolve_candle_range(from_date=None, to_date="2020-03-10", year=None, now=_NOW)
-        assert start == datetime(DHAN_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)
-        assert end == datetime(2020, 3, 11, tzinfo=UTC)
+        # to_date must be on/after the 2021 floor or there's nothing to pull.
+        start, end = resolve_candle_range(from_date=None, to_date="2021-03-10", year=None, now=_NOW)
+        assert start == datetime(DHAN_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)  # 2021-01-01
+        assert end == datetime(2021, 3, 11, tzinfo=UTC)
 
     def test_from_before_floor_is_clamped_up(self) -> None:
         start, _ = resolve_candle_range(
-            from_date="2018-06-01", to_date="2021-01-01", year=None, now=_NOW
+            from_date="2018-06-01", to_date="2021-06-01", year=None, now=_NOW
         )
-        assert start == datetime(2020, 1, 1, tzinfo=UTC)
+        assert start == datetime(2021, 1, 1, tzinfo=UTC)  # clamped up to the 2021 floor
 
     def test_to_after_today_is_clamped_down(self) -> None:
         _, end = resolve_candle_range(

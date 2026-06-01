@@ -1729,6 +1729,7 @@ def cmd_fetch(
 
     from brutex.adapters.dhan.run_ingest import run_dhan_spot_ingest
     from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
+    from brutex.dashboard.pull_controller import DHAN_HISTORY_FLOOR
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import NullBarSink, ParquetBarSink
     from brutex.universe import BRUTE_FORCE_INDICES
@@ -1739,7 +1740,12 @@ def cmd_fetch(
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
-    start_dt = _parse_dt(start) if start else datetime(datetime.now(UTC).year, 1, 1, tzinfo=UTC)
+    # Default the start to the Track-1 2021-01-01 pull floor (DEC-DHAN-PULL-SCOPE-001)
+    # so a bare `brutex fetch` pulls the full locked "2021-01-01 → today" history.
+    floor_dt = datetime(
+        DHAN_HISTORY_FLOOR.year, DHAN_HISTORY_FLOOR.month, DHAN_HISTORY_FLOOR.day, tzinfo=UTC
+    )
+    start_dt = _parse_dt(start) if start else floor_dt
     end_dt = _parse_dt(end) if end else datetime.now(UTC)
     if window_days is not None:
         print(
