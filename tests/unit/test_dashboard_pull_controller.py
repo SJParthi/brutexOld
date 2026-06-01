@@ -491,3 +491,22 @@ class TestPullAllSpot:
         assert report.total_symbols == 3
         d = report.to_dict()
         assert d["total_symbols"] == 3 and len(d["symbols"]) == 3
+
+    def test_on_progress_forwarded_per_pair(self, tmp_path: Path) -> None:
+        """pull_all_spot threads on_progress → fires per (symbol, interval) pair."""
+        events: list[tuple[str, int, bool]] = []
+        pull_all_spot(
+            [_index("13"), _index("25")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
+        )
+        # 2 symbols × 2 fetched intervals (1m + 1d) = 4 progress events, all clean.
+        assert [e[0] for e in events] == [
+            "13 1minute",
+            "13 1day",
+            "25 1minute",
+            "25 1day",
+        ]
+        assert all(failed is False for _, _, failed in events)

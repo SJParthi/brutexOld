@@ -30,6 +30,12 @@ from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.sink import BarSink
 from brutex.models import Instrument
 
+#: Live-progress hook fired once per ``(symbol, interval)`` pair after it is
+#: processed: ``(label, bars_appended, failed)``. Lets a caller stream
+#: real-time progress (e.g. into a ``PullProgress`` tracker) without coupling
+#: this layer to the dashboard. ``bars_appended`` is 0 for a quarantined pair.
+ProgressHook = Callable[[str, int, bool], None]
+
 
 @dataclass(frozen=True, slots=True)
 class PairFailure:
@@ -85,6 +91,7 @@ def run_dhan_spot_ingest(
     coverage: FetchCoverage | None = None,
     on_rate_limit: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
+    on_progress: ProgressHook | None = None,
 ) -> DhanIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -110,6 +117,11 @@ def run_dhan_spot_ingest(
         Optional rate-controller feedback hooks threaded into every pair — a
         rate-limit 429 steps the rate down, a clean window recovers it
         (DEC-DHAN-ADAPTIVE-RPS-001).
+    on_progress
+        Optional live-progress hook fired once per ``(symbol, interval)`` pair
+        after it is processed: ``(label, bars_appended, failed)``. A
+        quarantined pair fires with ``bars=0, failed=True``. Lets the dashboard
+        stream real-time progress (DEC-PULL-PROGRESS-TRACKER-001).
 
     Returns
     -------
@@ -122,8 +134,9 @@ def run_dhan_spot_ingest(
     failures: list[PairFailure] = []
     for instrument in instruments:
         for interval in intervals:
+            label = f"{instrument.vendor_symbol} {interval}"
             try:
-                pairs[instrument.vendor_symbol, interval] = ingest_spot(
+                report = ingest_spot(
                     adapter,
                     sink,
                     instrument=instrument,
@@ -139,11 +152,18 @@ def run_dhan_spot_ingest(
                 failures.append(
                     PairFailure(symbol=instrument.vendor_symbol, interval=interval, error=str(exc))
                 )
+                if on_progress is not None:
+                    on_progress(label, 0, True)
+                continue
+            pairs[instrument.vendor_symbol, interval] = report
+            if on_progress is not None:
+                on_progress(label, report.bars_appended, False)
     return DhanIngestReport(pairs=pairs, failures=tuple(failures))
 
 
 __all__ = [
     "DhanIngestReport",
     "PairFailure",
+    "ProgressHook",
     "run_dhan_spot_ingest",
 ]
