@@ -124,7 +124,33 @@ class OptionBarSink:
         return written
 
 
+class NullOptionBarSink:
+    """An :class:`OptionBarSink` that counts but discards — the options dry-run sink.
+
+    The options analog of :class:`~brutex.data.sink.NullBarSink`: it reports the
+    bar count (so dry-run totals are non-zero) without any dedup / write / audit
+    side effects, so the offline options pull runs with zero dependencies
+    (DEC-VENDOR-PIVOT-001).
+    """
+
+    def append_option_bars(
+        self,
+        *,
+        security_id: str,
+        exchange_segment: str,
+        expiry_flag: str,
+        expiry_code: int,
+        strike: str,
+        drv_option_type: str,
+        bars: Sequence[OptionBar],
+    ) -> int:
+        """Discard *bars* and report the count — no persistence side effects."""
+        del security_id, exchange_segment, expiry_flag, expiry_code, strike, drv_option_type
+        return len(bars)
+
+
 __all__ = [
+    "NullOptionBarSink",
     "OptionAuditSink",
     "OptionBarSink",
     "OptionPartitionWriter",
