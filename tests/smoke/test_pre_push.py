@@ -143,6 +143,14 @@ class TestConventionalCommit:
         subject = result.stdout.strip()
         if not subject:
             pytest.skip("no commits on this branch yet")
+        # Merge commits are auto-generated and exempt from Conventional
+        # Commits (exactly as commitlint's defaultIgnores treats them). On PR
+        # CI, actions/checkout's shallow clone of the `refs/pull/N/merge` ref
+        # makes the merge commit a graft boundary, so `--format=%P` reports
+        # ZERO parents — a parent-count check is unreliable. The subject
+        # prefix is the robust signal: GitHub writes "Merge <sha> into <sha>".
+        if subject.startswith("Merge "):
+            pytest.skip("HEAD is a merge commit — exempt from Conventional Commits")
         assert CONVENTIONAL_COMMIT_REGEX.match(subject), (
             f"HEAD commit subject violates Conventional Commits: {subject!r}"
         )

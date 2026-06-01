@@ -364,31 +364,19 @@ omit = [
     # `python -m brutex` launcher — a 3-line shim delegating to cli.main;
     # exercised manually, same rationale as cli.py above.
     "brutex/__main__.py",
-    # Dashboard FastAPI app — requires fastapi+uvicorn at runtime;
-    # the DashboardState model is fully covered by unit tests.
-    "brutex/dashboard/app.py",
-    # P2 data lake heavy deps — require polars / duckdb / pyarrow
-    # installed via `pip install -e .[data]`. Unit-test-only runs
-    # don't pull these in; coverage for these modules is tracked
-    # separately in the data-lake test suite.
+    # DEC-DASHBOARD-OMIT-AUDIT-001 (2026-06-01): the 5-agent verification
+    # found the old "needs [data]/[ui] extras, not installed in CI" rationale
+    # was STALE — [data] (DEC-P0-001) and [ui] (DEC-DASHBOARD-CI-UNMASK-001,
+    # #279) are BOTH installed in the CI test job, and tests/integration runs
+    # there. So feed/replay (100%), strategies/sweep (99%), strategies/runner
+    # (98%), data/sink (96%), data/parquet_writer (93%), and dashboard/app.py
+    # (~75%, exercised by the now-un-skipped dashboard suite) were UN-OMITTED;
+    # their coverage now counts toward the 90% floor (verified aggregate
+    # 97.70%). The 3 modules below stay omitted — still below the 90% floor
+    # (data/catalog ~86%, data/instrument_store ~87%, execution/driver ~83%)
+    # until dedicated tests land (tracked follow-up).
     "brutex/data/catalog.py",
-    "brutex/data/parquet_writer.py",
-    "brutex/data/sink.py",
     "brutex/data/instrument_store.py",
-    # L3 feed layer — ReplayFeed transitively needs polars/pyarrow
-    # via Catalog.get_bars. The pure pieces (FeedEvent dataclass,
-    # errors, resampler) stay in scope and are already at 100%.
-    "brutex/feed/replay.py",
-    # P3 strategy engine runtime — StrategyRunner needs a real
-    # ReplayFeed and ComboSweep / ComboCache need lmdb. The pure
-    # pieces (types, protocol, registry, combo, errors) stay in
-    # scope and are already at 100%.
-    "brutex/strategies/runner.py",
-    "brutex/strategies/sweep.py",
-    # P4 execution simulator driver \u2014 BacktestDriver needs a real
-    # ReplayFeed (polars/duckdb) to exercise. The simulator, cost
-    # model, and dataclass types are all in scope and already at
-    # or near 100%.
     "brutex/execution/driver.py",
 ]
 
