@@ -13,7 +13,7 @@
 | **Daily setup** | Re-login + re-approve **every day** (breaks automation) | Token auto-renews → **runs untouched, zero clicks/day** |
 | **How far back** | Ad-hoc | **Full history from 2021-01-01 → today**, every trading minute (the safe, locked range) |
 | **Market coverage** | Piecemeal, per-contract | **Every** NSE index + BSE SENSEX + **every** F&O-eligible single-stock spot, **and every option** (CE + PE, with strike + spot + IV) |
-| **Options depth** | Manual, per-strike | **Auto fan-out**: indices **ATM ± 10** strikes, stocks **ATM ± 3**, **CE + PE**, **weekly + monthly** (all 4 expiry cycles), every minute — each bar **mapped to its underlying's live spot** |
+| **Options depth** | Manual, per-strike | **Auto fan-out**: indices **ATM ± 10** strikes, stocks **ATM ± 3**, **CE + PE**, **weekly + monthly** (3 expiry depths: near/next/far), every minute — each bar **mapped to its underlying's live spot** |
 | **Timeframes** | Fetch each one separately | Pull **1-minute once** → the other **19** intraday TFs auto-derived (2m…15m, 30m, 1h, 2h, 3h, 4h) |
 | **Trading hours** | Mixed in pre/post-market noise | **Only 09:15 → 15:30 IST** — never any off-session data |
 | **Prices** | Raw, inconsistent | **Money always 2 decimals**; Sharpe / IV / % kept **full precision** so strategy ranking never lies |

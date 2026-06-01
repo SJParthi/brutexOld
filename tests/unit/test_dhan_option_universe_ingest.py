@@ -142,7 +142,7 @@ def test_full_fanout_cardinality_and_bars() -> None:
         start=date(2021, 1, 4),
         end=date(2021, 1, 5),
     )
-    # 3 strikes × 2 flags × 4 codes × 2 types = 48 series.
+    # 3 strikes × 2 flags × 3 codes (1,2,3) × 2 types = 36 series.
     expected = 3 * 2 * len(DEFAULT_EXPIRY_CODES) * 2
     assert report.series_count == expected
     assert report.failed_series == 0
