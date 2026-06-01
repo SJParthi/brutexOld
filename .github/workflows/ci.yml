@@ -948,6 +948,11 @@ jobs:
           else
             echo "(brutex.adapters.dhan.option_ingest test file not present yet — gate inactive)"
           fi
+          if compgen -G "tests/unit/test_dhan_option_universe_ingest.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.option_universe_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_option_universe_ingest.py
+          else
+            echo "(brutex.adapters.dhan.option_universe_ingest test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_run_ingest.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.run_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_run_ingest.py
           else
