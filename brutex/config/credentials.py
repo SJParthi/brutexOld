@@ -1,9 +1,16 @@
-"""Secure local credentials store for the Groww adapter (DEC-CREDENTIALS-STORE-001).
+"""Secure local credentials store for the Dhan adapter (DEC-CREDENTIALS-STORE-001).
 
-The operator sets their Groww **API key** + **TOTP secret** ONCE — via
+The operator sets their Dhan **access token** + **client id** ONCE — via
 ``brutex auth set``, the dashboard Credentials page, or the
-``BRUTEX_GROWW_*`` env vars — and they auto-load every session, satisfying
+``BRUTEX_DHAN_*`` env vars — and they auto-load every session, satisfying
 ``CLAUDE.md §11`` AUTOMATED (no ``export`` per shell, zero clicks per day).
+
+This is the file-backed half of the Dhan credential resolution
+(DEC-DHAN-CREDS-WIRING-001): the adapter's env-first resolver
+(:func:`brutex.adapters.dhan.auth.resolve_dhan_credentials`) falls back to the
+file this module writes, so creds saved on the dashboard **actually enable a
+live pull** — closing the prior Groww-store-vs-Dhan-env disconnect that forced
+every dashboard pull to dry-run.
 
 ## Security model (the only thing this module is for)
 
@@ -16,21 +23,19 @@ The operator sets their Groww **API key** + **TOTP secret** ONCE — via
   parent dir is created mode 0700.
 * **Insecure-perms refusal on read.** A file whose mode has any group /
   world bits (``mode & 0o077 != 0``) is REFUSED with a
-  :class:`CredentialsError` telling the operator to ``chmod 600`` — the
-  same ``_INSECURE_MODE_BITS = 0o077`` philosophy as the token loader in
-  :mod:`brutex.adapters.groww.auth`.
+  :class:`CredentialsError` telling the operator to ``chmod 600``.
 * **Never serialized into runtime state.** Status surfaces return ONLY
-  booleans (:func:`credentials_present`); secret values never enter
-  ``DashboardState`` or ``~/.brutex/runtime.json``.
+  booleans (:func:`credentials_present`) + masked previews; secret values
+  never enter ``DashboardState`` or ``~/.brutex/runtime.json``.
 * **Outside the repo.** The default path is ``~/.brutex/credentials.json``,
   outside the git tree (a ``.gitignore`` safety net guards the repo too).
 
 ## Resolution order
 
-:func:`resolve_groww_credentials` is **per-field env-first, file-fallback**:
-each of ``api_key`` / ``totp_secret`` is taken from its env var when
-non-empty, else from the saved file. This lets an operator override a
-single field from the environment without rewriting the file.
+:func:`resolve_dhan_file_credentials` is **per-field env-first, file-fallback**:
+each of ``access_token`` / ``client_id`` is taken from its env var when
+non-empty, else from the saved file. This lets an operator override a single
+field from the environment without rewriting the file.
 """
 
 from __future__ import annotations
@@ -47,21 +52,23 @@ from typing import Final
 #: Env var that overrides the credentials file location (path, not a secret).
 ENV_CREDENTIALS_FILE: Final[str] = "BRUTEX_CREDENTIALS_FILE"
 
-#: Env var holding the Groww API key (this is the env var NAME, not the value).
-ENV_API_KEY: Final[str] = "BRUTEX_GROWW_API_KEY"
+#: Env var holding the Dhan access token (the env var NAME, not the value).
+ENV_ACCESS_TOKEN: Final[str] = "BRUTEX_DHAN_ACCESS_TOKEN"  # noqa: S105  # env var name, not a secret
 
-#: Env var holding the Groww TOTP secret (env var NAME, not the value).
-ENV_TOTP_SECRET: Final[str] = "BRUTEX_GROWW_TOTP_SECRET"  # noqa: S105  # env var name, not a secret
+#: Env var holding the Dhan client id (env var NAME, not the value).
+ENV_CLIENT_ID: Final[str] = "BRUTEX_DHAN_CLIENT_ID"
 
 #: Permission bits that, if set, mean the file is group / world accessible.
-#: Mirrors ``brutex.adapters.groww.auth._INSECURE_MODE_BITS``.
 _INSECURE_MODE_BITS: Final[int] = 0o077
+
+#: JSON top-level section the credentials live under.
+_SECTION: Final[str] = "dhan"
 
 #: How to set credentials, appended to "missing field" errors. Names the
 #: three supported mechanisms; contains NO secret values.
 _HOW_TO_SET: Final[str] = (
     "run `brutex auth set`, use the dashboard Credentials page, or export "
-    "BRUTEX_GROWW_API_KEY / BRUTEX_GROWW_TOTP_SECRET"
+    "BRUTEX_DHAN_ACCESS_TOKEN / BRUTEX_DHAN_CLIENT_ID"
 )
 
 
@@ -74,49 +81,34 @@ class CredentialsError(Exception):
     """
 
 
-def normalise_api_key(api_key: str) -> str:
-    """Return *api_key* with surrounding whitespace stripped.
+def normalise_token(value: str) -> str:
+    """Return *value* with surrounding whitespace stripped.
 
-    A copy-pasted Groww API key very often carries a trailing newline or
-    stray spaces (clipboard / password-manager artefacts). The SDK puts the
-    raw value straight into an ``Authorization: Bearer <key>`` header, so a
-    trailing ``\\n`` produces a malformed header and Groww rejects the
-    token mint with **HTTP 400** (DEC-CREDS-NORMALISE-001). Stripping the
-    outer whitespace removes that whole class of opaque 400s. Internal
-    characters are left untouched (an API key is an opaque token).
+    A copy-pasted Dhan access token / client id very often carries a trailing
+    newline or stray spaces (clipboard / password-manager artefacts). The
+    client puts the access token straight into an ``access-token`` header, so a
+    trailing ``\\n`` produces a malformed header and Dhan rejects the request
+    with **HTTP 401** (DEC-CREDS-NORMALISE-001). Stripping the outer whitespace
+    removes that whole class of opaque auth failures. Internal characters are
+    left untouched (the token is an opaque JWT).
     """
-    return api_key.strip()
-
-
-def normalise_totp_secret(totp_secret: str) -> str:
-    """Return *totp_secret* canonicalised for ``pyotp`` (all whitespace removed, upper-cased).
-
-    Groww (and most authenticator setups) display a base32 TOTP secret in
-    space-separated groups — e.g. ``"ABCD EFGH IJKL MNOP"``. ``pyotp`` feeds
-    the secret straight to :func:`base64.b32decode`, which treats an embedded
-    space as an invalid byte: the code it then generates does not match what
-    Groww expects, so the token mint fails with **HTTP 400**
-    (DEC-CREDS-NORMALISE-001). Removing **all** whitespace (not just the ends)
-    and upper-casing yields the canonical base32 the decoder expects. base32
-    is case-insensitive, so upper-casing is loss-free.
-    """
-    return "".join(totp_secret.split()).upper()
+    return value.strip()
 
 
 @dataclass(frozen=True, slots=True)
-class GrowwCredentials:
-    """An immutable pair of Groww credentials.
+class DhanFileCredentials:
+    """An immutable pair of Dhan credentials as stored on disk.
 
     Attributes
     ----------
-    api_key
-        The Groww API key (``BRUTEX_GROWW_API_KEY``).
-    totp_secret
-        The base32 TOTP secret (``BRUTEX_GROWW_TOTP_SECRET``).
+    access_token
+        The Dhan access token (``BRUTEX_DHAN_ACCESS_TOKEN``).
+    client_id
+        The Dhan client id (``BRUTEX_DHAN_CLIENT_ID``).
     """
 
-    api_key: str
-    totp_secret: str
+    access_token: str
+    client_id: str
 
 
 def credentials_path(env: Mapping[str, str] | None = None) -> Path:
@@ -141,7 +133,7 @@ def credentials_path(env: Mapping[str, str] | None = None) -> Path:
     return Path.home() / ".brutex" / "credentials.json"
 
 
-def save_groww_credentials(creds: GrowwCredentials, *, path: Path | None = None) -> Path:
+def save_dhan_credentials(creds: DhanFileCredentials, *, path: Path | None = None) -> Path:
     """Atomically write *creds* to *path* at mode 0600 (parent dir 0700).
 
     Parameters
@@ -159,7 +151,7 @@ def save_groww_credentials(creds: GrowwCredentials, *, path: Path | None = None)
     Raises
     ------
     CredentialsError
-        If ``api_key`` or ``totp_secret`` is blank (after strip). The
+        If ``access_token`` or ``client_id`` is blank (after strip). The
         message names the field, never its value.
 
     Notes
@@ -169,23 +161,22 @@ def save_groww_credentials(creds: GrowwCredentials, *, path: Path | None = None)
     over *path* — so the file never exists world-readable, even briefly.
     On any failure the temp file is removed.
     """
-    if not creds.api_key.strip():
-        raise CredentialsError("api_key must not be blank")
-    if not creds.totp_secret.strip():
-        raise CredentialsError("totp_secret must not be blank")
+    if not creds.access_token.strip():
+        raise CredentialsError("access_token must not be blank")
+    if not creds.client_id.strip():
+        raise CredentialsError("client_id must not be blank")
 
-    # Persist the CANONICAL form (DEC-CREDS-NORMALISE-001) so a paste with a
-    # trailing newline / spaced-out base32 secret never reaches the Groww
-    # token mint as a malformed Bearer header / undecodable TOTP secret (the
-    # opaque "Groww API Error 400" the operator hit).
-    api_key = normalise_api_key(creds.api_key)
-    totp_secret = normalise_totp_secret(creds.totp_secret)
+    # Persist the CANONICAL (stripped) form (DEC-CREDS-NORMALISE-001) so a paste
+    # with a trailing newline never reaches the Dhan ``access-token`` header
+    # malformed (the opaque 401 the operator would otherwise hit).
+    access_token = normalise_token(creds.access_token)
+    client_id = normalise_token(creds.client_id)
 
     target = credentials_path() if path is None else path
     parent = target.parent
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-    payload = json.dumps({"groww": {"api_key": api_key, "totp_secret": totp_secret}})
+    payload = json.dumps({_SECTION: {"access_token": access_token, "client_id": client_id}})
     # Atomic, never-world-readable write: NamedTemporaryFile in the SAME
     # dir as the target (so os.replace is atomic), chmod 0600 before the
     # rename, then os.replace. No predictable-name temp file and no
@@ -207,7 +198,7 @@ def save_groww_credentials(creds: GrowwCredentials, *, path: Path | None = None)
     return target
 
 
-def load_groww_credentials(*, path: Path | None = None) -> GrowwCredentials | None:
+def load_dhan_credentials(*, path: Path | None = None) -> DhanFileCredentials | None:
     """Load saved credentials, or ``None`` when the file is absent.
 
     Parameters
@@ -217,7 +208,7 @@ def load_groww_credentials(*, path: Path | None = None) -> GrowwCredentials | No
 
     Returns
     -------
-    GrowwCredentials | None
+    DhanFileCredentials | None
         The stored credentials, or ``None`` when *path* does not exist.
 
     Raises
@@ -257,21 +248,21 @@ def load_groww_credentials(*, path: Path | None = None) -> GrowwCredentials | No
 
     if not isinstance(raw, dict):
         raise CredentialsError(f"credentials file {target} has an invalid shape")
-    groww = raw.get("groww")
-    if not isinstance(groww, dict):
-        raise CredentialsError(f"credentials file {target} is missing the 'groww' section")
-    api_key = groww.get("api_key")
-    totp_secret = groww.get("totp_secret")
-    if not isinstance(api_key, str) or not api_key.strip():
-        raise CredentialsError(f"credentials file {target} has a missing or blank api_key")
-    if not isinstance(totp_secret, str) or not totp_secret.strip():
-        raise CredentialsError(f"credentials file {target} has a missing or blank totp_secret")
-    return GrowwCredentials(api_key=api_key, totp_secret=totp_secret)
+    section = raw.get(_SECTION)
+    if not isinstance(section, dict):
+        raise CredentialsError(f"credentials file {target} is missing the '{_SECTION}' section")
+    access_token = section.get("access_token")
+    client_id = section.get("client_id")
+    if not isinstance(access_token, str) or not access_token.strip():
+        raise CredentialsError(f"credentials file {target} has a missing or blank access_token")
+    if not isinstance(client_id, str) or not client_id.strip():
+        raise CredentialsError(f"credentials file {target} has a missing or blank client_id")
+    return DhanFileCredentials(access_token=access_token, client_id=client_id)
 
 
-def resolve_groww_credentials(
+def resolve_dhan_file_credentials(
     env: Mapping[str, str] | None = None, *, path: Path | None = None
-) -> GrowwCredentials:
+) -> DhanFileCredentials:
     """Resolve credentials per-field: env-first, saved-file fallback.
 
     Each field is taken from its env var when non-blank, otherwise from the
@@ -287,7 +278,7 @@ def resolve_groww_credentials(
 
     Returns
     -------
-    GrowwCredentials
+    DhanFileCredentials
         The resolved credentials.
 
     Raises
@@ -295,47 +286,46 @@ def resolve_groww_credentials(
     CredentialsError
         If either field cannot be resolved from env or file. The message
         names WHICH field(s) are missing and how to set them — never a
-        value. Also propagated from :func:`load_groww_credentials` for an
+        value. Also propagated from :func:`load_dhan_credentials` for an
         insecure / corrupt file.
     """
     source = os.environ if env is None else env
-    stored = load_groww_credentials(path=path)
+    stored = load_dhan_credentials(path=path)
 
-    env_api_key = source.get(ENV_API_KEY)
-    env_totp = source.get(ENV_TOTP_SECRET)
+    env_token = source.get(ENV_ACCESS_TOKEN)
+    env_client = source.get(ENV_CLIENT_ID)
 
-    api_key: str | None = None
-    if env_api_key is not None and env_api_key.strip():
-        api_key = env_api_key
+    access_token: str | None = None
+    if env_token is not None and env_token.strip():
+        access_token = env_token
     elif stored is not None:
-        api_key = stored.api_key
+        access_token = stored.access_token
 
-    totp_secret: str | None = None
-    if env_totp is not None and env_totp.strip():
-        totp_secret = env_totp
+    client_id: str | None = None
+    if env_client is not None and env_client.strip():
+        client_id = env_client
     elif stored is not None:
-        totp_secret = stored.totp_secret
+        client_id = stored.client_id
 
     missing: list[str] = []
-    if api_key is None:
-        missing.append(ENV_API_KEY)
-    if totp_secret is None:
-        missing.append(ENV_TOTP_SECRET)
-    if api_key is None or totp_secret is None:
-        raise CredentialsError(f"missing Groww credentials: {', '.join(missing)}; {_HOW_TO_SET}")
+    if access_token is None:
+        missing.append(ENV_ACCESS_TOKEN)
+    if client_id is None:
+        missing.append(ENV_CLIENT_ID)
+    if access_token is None or client_id is None:
+        raise CredentialsError(f"missing Dhan credentials: {', '.join(missing)}; {_HOW_TO_SET}")
     # Canonicalise at the resolution boundary (DEC-CREDS-NORMALISE-001) so the
-    # auth layer always gets a clean Bearer key + decodable base32 secret —
-    # whether the value came from the saved file OR a ``BRUTEX_GROWW_*`` env
-    # var (an exported value can carry the same paste whitespace). Idempotent
-    # on already-canonical values.
-    return GrowwCredentials(
-        api_key=normalise_api_key(api_key),
-        totp_secret=normalise_totp_secret(totp_secret),
+    # auth layer always gets a clean ``access-token`` header value — whether the
+    # value came from the saved file OR a ``BRUTEX_DHAN_*`` env var (an exported
+    # value can carry the same paste whitespace). Idempotent on clean values.
+    return DhanFileCredentials(
+        access_token=normalise_token(access_token),
+        client_id=normalise_token(client_id),
     )
 
 
 def credentials_present(env: Mapping[str, str] | None = None, *, path: Path | None = None) -> bool:
-    """Return ``True`` iff :func:`resolve_groww_credentials` would succeed.
+    """Return ``True`` iff :func:`resolve_dhan_file_credentials` would succeed.
 
     Parameters
     ----------
@@ -353,7 +343,7 @@ def credentials_present(env: Mapping[str, str] | None = None, *, path: Path | No
         raising (so a status surface degrades gracefully).
     """
     try:
-        resolve_groww_credentials(env, path=path)
+        resolve_dhan_file_credentials(env, path=path)
     except CredentialsError:
         return False
     return True
@@ -375,14 +365,11 @@ def _mask_secret(value: str, *, head: int, tail: int) -> str:
 def credentials_preview(
     env: Mapping[str, str] | None = None, *, path: Path | None = None
 ) -> dict[str, object]:
-    """Return a NON-SECRET preview of the stored Groww credentials for the operator.
+    """Return a NON-SECRET preview of the stored Dhan credentials for the operator.
 
-    The operator hit an opaque Groww 400 and could not tell whether BruteX had
-    actually stored their paste or was sending empty values — and the credentials
-    file lives outside the repo, so it is invisible in the IDE. This surfaces, on
-    the dashboard Credentials page, a masked ``head…tail`` preview + character
-    length of each resolved field so the paste can be VERIFIED at a glance
-    (DEC-CREDS-PREVIEW-001). It NEVER returns (or logs) a full secret.
+    Surfaces, on the dashboard Credentials page, a masked ``head…tail`` preview +
+    character length of each resolved field so the paste can be VERIFIED at a
+    glance (DEC-CREDS-PREVIEW-001). It NEVER returns (or logs) a full secret.
 
     Parameters
     ----------
@@ -395,24 +382,24 @@ def credentials_preview(
     -------
     dict[str, object]
         ``{"present": False}`` when credentials do not resolve, else
-        ``{"present": True, "api_key_preview", "api_key_len",
-        "totp_secret_preview", "totp_secret_len"}`` — masked previews + lengths
+        ``{"present": True, "access_token_preview", "access_token_len",
+        "client_id_preview", "client_id_len"}`` — masked previews + lengths
         of the normalised values, never the raw secrets.
     """
     try:
-        creds = resolve_groww_credentials(env, path=path)
+        creds = resolve_dhan_file_credentials(env, path=path)
     except CredentialsError:
         return {"present": False}
     return {
         "present": True,
-        "api_key_preview": _mask_secret(creds.api_key, head=6, tail=4),
-        "api_key_len": len(creds.api_key),
-        "totp_secret_preview": _mask_secret(creds.totp_secret, head=2, tail=2),
-        "totp_secret_len": len(creds.totp_secret),
+        "access_token_preview": _mask_secret(creds.access_token, head=6, tail=4),
+        "access_token_len": len(creds.access_token),
+        "client_id_preview": _mask_secret(creds.client_id, head=2, tail=2),
+        "client_id_len": len(creds.client_id),
     }
 
 
-def clear_groww_credentials(*, path: Path | None = None) -> bool:
+def clear_dhan_credentials(*, path: Path | None = None) -> bool:
     """Delete the credentials file if present.
 
     Parameters
@@ -436,18 +423,17 @@ def clear_groww_credentials(*, path: Path | None = None) -> bool:
 
 
 __all__ = [
-    "ENV_API_KEY",
+    "ENV_ACCESS_TOKEN",
+    "ENV_CLIENT_ID",
     "ENV_CREDENTIALS_FILE",
-    "ENV_TOTP_SECRET",
     "CredentialsError",
-    "GrowwCredentials",
-    "clear_groww_credentials",
+    "DhanFileCredentials",
+    "clear_dhan_credentials",
     "credentials_path",
     "credentials_present",
     "credentials_preview",
-    "load_groww_credentials",
-    "normalise_api_key",
-    "normalise_totp_secret",
-    "resolve_groww_credentials",
-    "save_groww_credentials",
+    "load_dhan_credentials",
+    "normalise_token",
+    "resolve_dhan_file_credentials",
+    "save_dhan_credentials",
 ]

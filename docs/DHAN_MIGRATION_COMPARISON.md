@@ -61,11 +61,12 @@ regresses, the change is blocked. Nothing ships on trust.
 | **Pull · progress core** — O(1) thread-safe `PullProgress` tracker | the live-feed foundation | ✅ merged |
 | **Pull · progress wiring** — `on_progress` threaded through drivers + controllers | per-unit progress emits | ✅ merged |
 | **Pull · LIVE feed** — background job + `/pull-progress` route + JS that ticks counters | real-time window-by-window | ✅ merged |
-| **Pull · options watermark** — coverage ledger skips already-pulled option windows | no wasted Dhan hit (options) | ⏳ merging |
-| **Flip · final** — credentials → Dhan, then delete Groww (code + deps + docs) | Groww fully gone | 🔜 (Stage 1 next) |
+| **Pull · options watermark** — coverage ledger skips already-pulled option windows | no wasted Dhan hit (options) | ✅ merged |
+| **Flip · credentials** — page → Dhan (access-token + client-id), env-first/file-fallback | **live pulls actually enable from the UI** | ⏳ merging |
+| **Flip · delete Groww** — remove the `brutex/adapters/groww/` package + tests + legacy two-phase pull | Groww code gone | ⏳ merging |
+| **Flip · deps** — drop the `groww` extra + `growwapi`/`pyotp` from pyproject/Makefile | `make run` stops installing growwapi | 🔜 follow-up |
 
-**Honest note:** Groww is **still present** until the final phase — deliberately last,
-so the switch lands on a fully-built, fully-proven Dhan stack with nothing half-done.
+**Honest note:** after this cutover the credentials page is Dhan and the Groww **adapter/tests/legacy-pull are deleted**; the only Groww residue is the *unused* `groww` dependency extra (nothing imports it) + a few cosmetic docstring refs — both removed in the next small follow-up.
 
 ---
 

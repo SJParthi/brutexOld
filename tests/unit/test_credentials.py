@@ -1,10 +1,10 @@
-"""Tests for :mod:`brutex.config.credentials` — secure Groww credential store.
+"""Tests for :mod:`brutex.config.credentials` — secure Dhan credential store.
 
 Exhaustive line + branch coverage of the save / load / resolve / present /
-clear surface (DEC-CREDENTIALS-STORE-001). Every test uses FAKE values
-(``fake-api-key`` / ``JBSWY3DPEHPK3PXP``) — no real secret ever appears. The
-suite asserts the security invariants directly: mode 0600 file, mode 0700
-parent, atomic write (no temp left behind), insecure-perms refusal on read,
+clear surface (DEC-CREDENTIALS-STORE-001, DEC-DHAN-CREDS-WIRING-001). Every
+test uses FAKE values — no real secret ever appears. The suite asserts the
+security invariants directly: mode 0600 file, mode 0700 parent, atomic write
+(no temp left behind), insecure-perms refusal on read, symlink refusal,
 corrupt-file refusal, and that NO error message ever echoes a secret VALUE.
 """
 
@@ -16,30 +16,33 @@ from pathlib import Path
 
 import pytest
 from brutex.config.credentials import (
-    ENV_API_KEY,
+    ENV_ACCESS_TOKEN,
+    ENV_CLIENT_ID,
     ENV_CREDENTIALS_FILE,
-    ENV_TOTP_SECRET,
     CredentialsError,
-    GrowwCredentials,
-    clear_groww_credentials,
+    DhanFileCredentials,
+    clear_dhan_credentials,
     credentials_path,
     credentials_present,
     credentials_preview,
-    load_groww_credentials,
-    normalise_api_key,
-    normalise_totp_secret,
-    resolve_groww_credentials,
-    save_groww_credentials,
+    load_dhan_credentials,
+    normalise_token,
+    resolve_dhan_file_credentials,
+    save_dhan_credentials,
 )
 
 # FAKE constants — never real secrets. The whole suite uses only these.
-FAKE_API_KEY = "fake-api-key"
-FAKE_TOTP_SECRET = "JBSWY3DPEHPK3PXP"  # well-known RFC base32 test vector, not a secret
+FAKE_TOKEN = "eyJraWQ.fake-access-token.signature"
+FAKE_CLIENT_ID = "1100123456"
 
 
 def _mode(path: Path) -> int:
     """Return the permission bits of *path*."""
     return stat.S_IMODE(path.stat().st_mode)
+
+
+def _creds(token: str = FAKE_TOKEN, client_id: str = FAKE_CLIENT_ID) -> DhanFileCredentials:
+    return DhanFileCredentials(access_token=token, client_id=client_id)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -68,15 +71,14 @@ class TestCredentialsPath:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# save_groww_credentials
+# save_dhan_credentials
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestSave:
     def test_writes_0600_and_parent_0700_and_shape(self, tmp_path: Path) -> None:
         path = tmp_path / "nest" / "credentials.json"
-        creds = GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET)
-        written = save_groww_credentials(creds, path=path)
+        written = save_dhan_credentials(_creds(), path=path)
 
         assert written == path
         assert _mode(path) == 0o600
@@ -84,36 +86,32 @@ class TestSave:
         assert _mode(path) & 0o077 == 0
 
         payload = json.loads(path.read_text(encoding="utf-8"))
-        assert payload == {"groww": {"api_key": FAKE_API_KEY, "totp_secret": FAKE_TOTP_SECRET}}
+        assert payload == {"dhan": {"access_token": FAKE_TOKEN, "client_id": FAKE_CLIENT_ID}}
 
     def test_leaves_no_temp_file_behind(self, tmp_path: Path) -> None:
-        creds = GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET)
-        save_groww_credentials(creds, path=tmp_path / "credentials.json")
+        save_dhan_credentials(_creds(), path=tmp_path / "credentials.json")
         leftovers = [p.name for p in tmp_path.iterdir() if p.name != "credentials.json"]
         assert leftovers == []
 
-    def test_blank_api_key_raises_without_value(self, tmp_path: Path) -> None:
-        creds = GrowwCredentials(api_key="   ", totp_secret=FAKE_TOTP_SECRET)
+    def test_blank_access_token_raises_without_value(self, tmp_path: Path) -> None:
         with pytest.raises(CredentialsError) as exc:
-            save_groww_credentials(creds, path=tmp_path / "c.json")
-        assert "api_key" in str(exc.value)
-        assert FAKE_TOTP_SECRET not in str(exc.value)
+            save_dhan_credentials(_creds(token="   "), path=tmp_path / "c.json")
+        assert "access_token" in str(exc.value)
+        assert FAKE_CLIENT_ID not in str(exc.value)
         assert not (tmp_path / "c.json").exists()
 
-    def test_blank_totp_secret_raises_without_value(self, tmp_path: Path) -> None:
-        creds = GrowwCredentials(api_key=FAKE_API_KEY, totp_secret="")
+    def test_blank_client_id_raises_without_value(self, tmp_path: Path) -> None:
         with pytest.raises(CredentialsError) as exc:
-            save_groww_credentials(creds, path=tmp_path / "c.json")
-        assert "totp_secret" in str(exc.value)
-        assert FAKE_API_KEY not in str(exc.value)
+            save_dhan_credentials(_creds(client_id=""), path=tmp_path / "c.json")
+        assert "client_id" in str(exc.value)
+        assert FAKE_TOKEN not in str(exc.value)
 
     def test_default_path_used_when_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         target = tmp_path / "home" / "credentials.json"
         monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(target))
-        creds = GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET)
-        written = save_groww_credentials(creds)
+        written = save_dhan_credentials(_creds())
         assert written == target
         assert target.exists()
 
@@ -128,46 +126,40 @@ class TestSave:
             raise OSError("disk full")
 
         monkeypatch.setattr(mod.os, "replace", _boom)
-        creds = GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET)
         with pytest.raises(OSError, match="disk full"):
-            save_groww_credentials(creds, path=tmp_path / "credentials.json")
-        leftovers = list(tmp_path.iterdir())
-        assert leftovers == []
+            save_dhan_credentials(_creds(), path=tmp_path / "credentials.json")
+        assert list(tmp_path.iterdir()) == []
 
 
 # ────────────────────────────────────────────────────────────────────────
-# load_groww_credentials
+# load_dhan_credentials
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestLoad:
     def test_round_trip(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        original = GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET)
-        save_groww_credentials(original, path=path)
-        loaded = load_groww_credentials(path=path)
-        assert loaded == original
+        save_dhan_credentials(_creds(), path=path)
+        assert load_dhan_credentials(path=path) == _creds()
 
     def test_missing_file_returns_none(self, tmp_path: Path) -> None:
-        assert load_groww_credentials(path=tmp_path / "nope.json") is None
+        assert load_dhan_credentials(path=tmp_path / "nope.json") is None
 
     def test_default_path_when_none(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         target = tmp_path / "credentials.json"
         monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(target))
-        assert load_groww_credentials() is None
-        save_groww_credentials(GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET))
-        loaded = load_groww_credentials()
+        assert load_dhan_credentials() is None
+        save_dhan_credentials(_creds())
+        loaded = load_dhan_credentials()
         assert loaded is not None
-        assert loaded.api_key == FAKE_API_KEY
+        assert loaded.access_token == FAKE_TOKEN
 
     def test_insecure_perms_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_groww_credentials(
-            GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET), path=path
-        )
+        save_dhan_credentials(_creds(), path=path)
         path.chmod(0o644)
         with pytest.raises(CredentialsError) as exc:
-            load_groww_credentials(path=path)
+            load_dhan_credentials(path=path)
         assert "chmod 600" in str(exc.value)
         assert "insecure permissions" in str(exc.value)
 
@@ -175,192 +167,168 @@ class TestLoad:
         # A symlinked credentials path is refused (O_NOFOLLOW) rather than
         # followed — closes the perms-check/read TOCTOU via a swapped symlink.
         real = tmp_path / "real.json"
-        save_groww_credentials(
-            GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET), path=real
-        )
+        save_dhan_credentials(_creds(), path=real)
         link = tmp_path / "credentials.json"
         link.symlink_to(real)
         with pytest.raises(CredentialsError) as exc:
-            load_groww_credentials(path=link)
+            load_dhan_credentials(path=link)
         assert "symlink" in str(exc.value)
-        # the error names neither secret value
-        assert FAKE_API_KEY not in str(exc.value)
-        assert FAKE_TOTP_SECRET not in str(exc.value)
+        assert FAKE_TOKEN not in str(exc.value)
+        assert FAKE_CLIENT_ID not in str(exc.value)
 
     def test_corrupt_json_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
         path.write_text("{not valid json", encoding="utf-8")
         path.chmod(0o600)
         with pytest.raises(CredentialsError, match="corrupt or unreadable"):
-            load_groww_credentials(path=path)
+            load_dhan_credentials(path=path)
 
     def test_non_dict_top_level_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
         path.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
         path.chmod(0o600)
         with pytest.raises(CredentialsError, match="invalid shape"):
-            load_groww_credentials(path=path)
+            load_dhan_credentials(path=path)
 
-    def test_missing_groww_section_refused(self, tmp_path: Path) -> None:
+    def test_missing_dhan_section_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
         path.write_text(json.dumps({"other": {}}), encoding="utf-8")
         path.chmod(0o600)
-        with pytest.raises(CredentialsError, match="missing the 'groww' section"):
-            load_groww_credentials(path=path)
+        with pytest.raises(CredentialsError, match="missing the 'dhan' section"):
+            load_dhan_credentials(path=path)
 
-    def test_groww_section_not_dict_refused(self, tmp_path: Path) -> None:
+    def test_dhan_section_not_dict_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        path.write_text(json.dumps({"groww": "scalar"}), encoding="utf-8")
+        path.write_text(json.dumps({"dhan": "scalar"}), encoding="utf-8")
         path.chmod(0o600)
-        with pytest.raises(CredentialsError, match="missing the 'groww' section"):
-            load_groww_credentials(path=path)
+        with pytest.raises(CredentialsError, match="missing the 'dhan' section"):
+            load_dhan_credentials(path=path)
 
-    def test_missing_api_key_refused(self, tmp_path: Path) -> None:
+    def test_missing_access_token_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        path.write_text(json.dumps({"groww": {"totp_secret": FAKE_TOTP_SECRET}}), encoding="utf-8")
-        path.chmod(0o600)
-        with pytest.raises(CredentialsError) as exc:
-            load_groww_credentials(path=path)
-        assert "api_key" in str(exc.value)
-        assert FAKE_TOTP_SECRET not in str(exc.value)
-
-    def test_blank_api_key_value_refused(self, tmp_path: Path) -> None:
-        path = tmp_path / "credentials.json"
-        path.write_text(
-            json.dumps({"groww": {"api_key": "  ", "totp_secret": FAKE_TOTP_SECRET}}),
-            encoding="utf-8",
-        )
-        path.chmod(0o600)
-        with pytest.raises(CredentialsError, match="api_key"):
-            load_groww_credentials(path=path)
-
-    def test_non_string_api_key_refused(self, tmp_path: Path) -> None:
-        path = tmp_path / "credentials.json"
-        path.write_text(
-            json.dumps({"groww": {"api_key": 123, "totp_secret": FAKE_TOTP_SECRET}}),
-            encoding="utf-8",
-        )
-        path.chmod(0o600)
-        with pytest.raises(CredentialsError, match="api_key"):
-            load_groww_credentials(path=path)
-
-    def test_missing_totp_secret_refused(self, tmp_path: Path) -> None:
-        path = tmp_path / "credentials.json"
-        path.write_text(json.dumps({"groww": {"api_key": FAKE_API_KEY}}), encoding="utf-8")
+        path.write_text(json.dumps({"dhan": {"client_id": FAKE_CLIENT_ID}}), encoding="utf-8")
         path.chmod(0o600)
         with pytest.raises(CredentialsError) as exc:
-            load_groww_credentials(path=path)
-        assert "totp_secret" in str(exc.value)
-        assert FAKE_API_KEY not in str(exc.value)
+            load_dhan_credentials(path=path)
+        assert "access_token" in str(exc.value)
+        assert FAKE_CLIENT_ID not in str(exc.value)
 
-    def test_blank_totp_secret_value_refused(self, tmp_path: Path) -> None:
+    def test_blank_access_token_value_refused(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
         path.write_text(
-            json.dumps({"groww": {"api_key": FAKE_API_KEY, "totp_secret": ""}}),
+            json.dumps({"dhan": {"access_token": "  ", "client_id": FAKE_CLIENT_ID}}),
             encoding="utf-8",
         )
         path.chmod(0o600)
-        with pytest.raises(CredentialsError, match="totp_secret"):
-            load_groww_credentials(path=path)
+        with pytest.raises(CredentialsError, match="access_token"):
+            load_dhan_credentials(path=path)
+
+    def test_non_string_access_token_refused(self, tmp_path: Path) -> None:
+        path = tmp_path / "credentials.json"
+        path.write_text(
+            json.dumps({"dhan": {"access_token": 123, "client_id": FAKE_CLIENT_ID}}),
+            encoding="utf-8",
+        )
+        path.chmod(0o600)
+        with pytest.raises(CredentialsError, match="access_token"):
+            load_dhan_credentials(path=path)
+
+    def test_missing_client_id_refused(self, tmp_path: Path) -> None:
+        path = tmp_path / "credentials.json"
+        path.write_text(json.dumps({"dhan": {"access_token": FAKE_TOKEN}}), encoding="utf-8")
+        path.chmod(0o600)
+        with pytest.raises(CredentialsError) as exc:
+            load_dhan_credentials(path=path)
+        assert "client_id" in str(exc.value)
+        assert FAKE_TOKEN not in str(exc.value)
+
+    def test_blank_client_id_value_refused(self, tmp_path: Path) -> None:
+        path = tmp_path / "credentials.json"
+        path.write_text(
+            json.dumps({"dhan": {"access_token": FAKE_TOKEN, "client_id": ""}}),
+            encoding="utf-8",
+        )
+        path.chmod(0o600)
+        with pytest.raises(CredentialsError, match="client_id"):
+            load_dhan_credentials(path=path)
 
 
 # ────────────────────────────────────────────────────────────────────────
-# resolve_groww_credentials
+# resolve_dhan_file_credentials
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestResolve:
     def test_env_only(self, tmp_path: Path) -> None:
-        env = {ENV_API_KEY: FAKE_API_KEY, ENV_TOTP_SECRET: FAKE_TOTP_SECRET}
-        creds = resolve_groww_credentials(env, path=tmp_path / "absent.json")
-        assert creds == GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET)
+        env = {ENV_ACCESS_TOKEN: FAKE_TOKEN, ENV_CLIENT_ID: FAKE_CLIENT_ID}
+        assert resolve_dhan_file_credentials(env, path=tmp_path / "absent.json") == _creds()
 
     def test_file_only(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_groww_credentials(
-            GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET), path=path
-        )
-        creds = resolve_groww_credentials({}, path=path)
-        assert creds.api_key == FAKE_API_KEY
-        assert creds.totp_secret == FAKE_TOTP_SECRET
+        save_dhan_credentials(_creds(), path=path)
+        creds = resolve_dhan_file_credentials({}, path=path)
+        assert creds.access_token == FAKE_TOKEN
+        assert creds.client_id == FAKE_CLIENT_ID
 
-    def test_per_field_mix_env_key_file_secret(self, tmp_path: Path) -> None:
+    def test_per_field_mix_env_token_file_client(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_groww_credentials(
-            GrowwCredentials(api_key="file-key", totp_secret=FAKE_TOTP_SECRET), path=path
-        )
-        env = {ENV_API_KEY: "env-key"}
-        creds = resolve_groww_credentials(env, path=path)
-        assert creds.api_key == "env-key"  # env wins for this field
-        assert creds.totp_secret == FAKE_TOTP_SECRET  # file fills the other
+        save_dhan_credentials(_creds(token="file-token"), path=path)
+        creds = resolve_dhan_file_credentials({ENV_ACCESS_TOKEN: "env-token"}, path=path)
+        assert creds.access_token == "env-token"  # env wins for this field
+        assert creds.client_id == FAKE_CLIENT_ID  # file fills the other
 
     def test_env_overrides_file_for_both(self, tmp_path: Path) -> None:
-        # TOTP secrets are normalised to canonical (upper-case, whitespace-free)
-        # base32 on resolve (DEC-CREDS-NORMALISE-001), so use canonical values
-        # here — the env value still wins over the file value for both fields.
         path = tmp_path / "credentials.json"
-        save_groww_credentials(
-            GrowwCredentials(api_key="file-key", totp_secret="FILESECRET"), path=path
-        )
-        env = {ENV_API_KEY: "env-key", ENV_TOTP_SECRET: "ENVSECRET"}
-        creds = resolve_groww_credentials(env, path=path)
-        assert creds == GrowwCredentials(api_key="env-key", totp_secret="ENVSECRET")
+        save_dhan_credentials(_creds(token="file-token", client_id="file-client"), path=path)
+        env = {ENV_ACCESS_TOKEN: "env-token", ENV_CLIENT_ID: "env-client"}
+        creds = resolve_dhan_file_credentials(env, path=path)
+        assert creds == DhanFileCredentials(access_token="env-token", client_id="env-client")
 
     def test_blank_env_field_falls_back_to_file(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_groww_credentials(
-            GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET), path=path
-        )
-        env = {ENV_API_KEY: "   ", ENV_TOTP_SECRET: ""}
-        creds = resolve_groww_credentials(env, path=path)
-        assert creds.api_key == FAKE_API_KEY
-        assert creds.totp_secret == FAKE_TOTP_SECRET
+        save_dhan_credentials(_creds(), path=path)
+        env = {ENV_ACCESS_TOKEN: "   ", ENV_CLIENT_ID: ""}
+        creds = resolve_dhan_file_credentials(env, path=path)
+        assert creds.access_token == FAKE_TOKEN
+        assert creds.client_id == FAKE_CLIENT_ID
 
     def test_neither_raises_naming_both(self, tmp_path: Path) -> None:
         with pytest.raises(CredentialsError) as exc:
-            resolve_groww_credentials({}, path=tmp_path / "absent.json")
+            resolve_dhan_file_credentials({}, path=tmp_path / "absent.json")
         msg = str(exc.value)
-        assert ENV_API_KEY in msg
-        assert ENV_TOTP_SECRET in msg
+        assert ENV_ACCESS_TOKEN in msg
+        assert ENV_CLIENT_ID in msg
         assert "brutex auth set" in msg
 
-    def test_only_api_key_missing(self, tmp_path: Path) -> None:
-        env = {ENV_TOTP_SECRET: FAKE_TOTP_SECRET}
+    def test_only_access_token_missing(self, tmp_path: Path) -> None:
+        env = {ENV_CLIENT_ID: FAKE_CLIENT_ID}
         with pytest.raises(CredentialsError) as exc:
-            resolve_groww_credentials(env, path=tmp_path / "absent.json")
-        msg = str(exc.value)
-        # The "missing:" list (before the how-to text, which names both env
-        # vars) names ONLY the api_key field.
-        missing_part = msg.split(";", maxsplit=1)[0]
-        assert ENV_API_KEY in missing_part
-        assert ENV_TOTP_SECRET not in missing_part
-        assert FAKE_TOTP_SECRET not in msg
+            resolve_dhan_file_credentials(env, path=tmp_path / "absent.json")
+        missing_part = str(exc.value).split(";", maxsplit=1)[0]
+        assert ENV_ACCESS_TOKEN in missing_part
+        assert ENV_CLIENT_ID not in missing_part
 
-    def test_only_totp_missing(self, tmp_path: Path) -> None:
-        env = {ENV_API_KEY: FAKE_API_KEY}
+    def test_only_client_id_missing(self, tmp_path: Path) -> None:
+        env = {ENV_ACCESS_TOKEN: FAKE_TOKEN}
         with pytest.raises(CredentialsError) as exc:
-            resolve_groww_credentials(env, path=tmp_path / "absent.json")
-        msg = str(exc.value)
-        missing_part = msg.split(";", maxsplit=1)[0]
-        assert ENV_TOTP_SECRET in missing_part
-        assert ENV_API_KEY not in missing_part
-        assert FAKE_API_KEY not in msg
+            resolve_dhan_file_credentials(env, path=tmp_path / "absent.json")
+        missing_part = str(exc.value).split(";", maxsplit=1)[0]
+        assert ENV_CLIENT_ID in missing_part
+        assert ENV_ACCESS_TOKEN not in missing_part
+        assert FAKE_TOKEN not in str(exc.value)
 
     def test_defaults_to_os_environ(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "absent.json"))
-        monkeypatch.setenv(ENV_API_KEY, FAKE_API_KEY)
-        monkeypatch.setenv(ENV_TOTP_SECRET, FAKE_TOTP_SECRET)
-        creds = resolve_groww_credentials()
-        assert creds.api_key == FAKE_API_KEY
+        monkeypatch.setenv(ENV_ACCESS_TOKEN, FAKE_TOKEN)
+        monkeypatch.setenv(ENV_CLIENT_ID, FAKE_CLIENT_ID)
+        assert resolve_dhan_file_credentials().access_token == FAKE_TOKEN
 
     def test_insecure_file_propagates(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_groww_credentials(
-            GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET), path=path
-        )
+        save_dhan_credentials(_creds(), path=path)
         path.chmod(0o644)
         with pytest.raises(CredentialsError, match="chmod 600"):
-            resolve_groww_credentials({}, path=path)
+            resolve_dhan_file_credentials({}, path=path)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -370,14 +338,12 @@ class TestResolve:
 
 class TestPresent:
     def test_true_from_env(self, tmp_path: Path) -> None:
-        env = {ENV_API_KEY: FAKE_API_KEY, ENV_TOTP_SECRET: FAKE_TOTP_SECRET}
+        env = {ENV_ACCESS_TOKEN: FAKE_TOKEN, ENV_CLIENT_ID: FAKE_CLIENT_ID}
         assert credentials_present(env, path=tmp_path / "absent.json") is True
 
     def test_true_from_file(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_groww_credentials(
-            GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET), path=path
-        )
+        save_dhan_credentials(_creds(), path=path)
         assert credentials_present({}, path=path) is True
 
     def test_false_when_absent(self, tmp_path: Path) -> None:
@@ -385,85 +351,70 @@ class TestPresent:
 
     def test_false_on_insecure_file(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_groww_credentials(
-            GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET), path=path
-        )
+        save_dhan_credentials(_creds(), path=path)
         path.chmod(0o644)
-        # Insecure perms → caught → False (does NOT raise).
         assert credentials_present({}, path=path) is False
 
     def test_defaults_to_os_environ(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "absent.json"))
-        monkeypatch.delenv(ENV_API_KEY, raising=False)
-        monkeypatch.delenv(ENV_TOTP_SECRET, raising=False)
+        monkeypatch.delenv(ENV_ACCESS_TOKEN, raising=False)
+        monkeypatch.delenv(ENV_CLIENT_ID, raising=False)
         assert credentials_present() is False
 
 
 # ────────────────────────────────────────────────────────────────────────
-# clear_groww_credentials
+# clear_dhan_credentials
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestClear:
     def test_removes_existing(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        save_groww_credentials(
-            GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET), path=path
-        )
-        assert clear_groww_credentials(path=path) is True
+        save_dhan_credentials(_creds(), path=path)
+        assert clear_dhan_credentials(path=path) is True
         assert not path.exists()
 
     def test_returns_false_when_absent(self, tmp_path: Path) -> None:
-        assert clear_groww_credentials(path=tmp_path / "absent.json") is False
+        assert clear_dhan_credentials(path=tmp_path / "absent.json") is False
 
     def test_default_path_when_none(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         target = tmp_path / "credentials.json"
         monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(target))
-        assert clear_groww_credentials() is False
-        save_groww_credentials(GrowwCredentials(api_key=FAKE_API_KEY, totp_secret=FAKE_TOTP_SECRET))
-        assert clear_groww_credentials() is True
+        assert clear_dhan_credentials() is False
+        save_dhan_credentials(_creds())
+        assert clear_dhan_credentials() is True
         assert not target.exists()
 
 
 # ────────────────────────────────────────────────────────────────────────
-# normalise_api_key / normalise_totp_secret — DEC-CREDS-NORMALISE-001
+# normalise_token — DEC-CREDS-NORMALISE-001
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestNormalise:
-    def test_api_key_strips_surrounding_whitespace(self) -> None:
-        # A paste with a trailing newline → "Bearer <key>\n" → Groww 400.
-        assert normalise_api_key("  eyJraWQ.payload.sig \n") == "eyJraWQ.payload.sig"
+    def test_strips_surrounding_whitespace(self) -> None:
+        # A paste with a trailing newline → "access-token: <tok>\n" → Dhan 401.
+        assert normalise_token("  eyJraWQ.payload.sig \n") == "eyJraWQ.payload.sig"
 
-    def test_api_key_keeps_internal_chars(self) -> None:
+    def test_keeps_internal_chars(self) -> None:
         # JWTs contain dots/dashes/underscores — only the ENDS are trimmed.
-        assert normalise_api_key("a.b-c_d") == "a.b-c_d"
-
-    def test_totp_secret_removes_all_whitespace_and_uppercases(self) -> None:
-        # Groww shows base32 in spaced groups; pyotp needs it contiguous + valid.
-        assert normalise_totp_secret(" mpb2 aawm 5hzf \n") == "MPB2AAWM5HZF"
-
-    def test_totp_secret_idempotent_on_canonical(self) -> None:
-        assert normalise_totp_secret("JBSWY3DPEHPK3PXP") == "JBSWY3DPEHPK3PXP"
+        assert normalise_token("a.b-c_d") == "a.b-c_d"
 
     def test_save_persists_normalised_values(self, tmp_path: Path) -> None:
-        """A whitespace-laden paste is stored CANONICAL (the 400 root-cause fix)."""
+        """A whitespace-laden paste is stored CANONICAL (the 401 root-cause fix)."""
         path = tmp_path / "credentials.json"
-        save_groww_credentials(
-            GrowwCredentials(api_key="  key.tok \n", totp_secret=" jbsw y3dp ehpk 3pxp "),
-            path=path,
-        )
-        stored = json.loads(path.read_text())["groww"]
-        assert stored["api_key"] == "key.tok"
-        assert stored["totp_secret"] == "JBSWY3DPEHPK3PXP"
+        save_dhan_credentials(_creds(token="  tok.en \n", client_id=" 110099 "), path=path)
+        stored = json.loads(path.read_text())["dhan"]
+        assert stored["access_token"] == "tok.en"
+        assert stored["client_id"] == "110099"
 
     def test_resolve_normalises_env_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Even env-sourced creds (an exported paste) are canonicalised."""
-        monkeypatch.setenv(ENV_API_KEY, "  envkey \n")
-        monkeypatch.setenv(ENV_TOTP_SECRET, " jbsw y3dp ")
-        creds = resolve_groww_credentials(path=Path("/nonexistent/creds.json"))
-        assert creds.api_key == "envkey"
-        assert creds.totp_secret == "JBSWY3DP"
+        monkeypatch.setenv(ENV_ACCESS_TOKEN, "  envtok \n")
+        monkeypatch.setenv(ENV_CLIENT_ID, " 110099 ")
+        creds = resolve_dhan_file_credentials(path=Path("/nonexistent/creds.json"))
+        assert creds.access_token == "envtok"
+        assert creds.client_id == "110099"
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -477,25 +428,22 @@ class TestPreview:
 
     def test_present_returns_masked_previews_and_lengths(self, tmp_path: Path) -> None:
         path = tmp_path / "credentials.json"
-        api_key = "eyJraWQabcdefghij1234WXYZ"  # 25 chars
-        save_groww_credentials(
-            GrowwCredentials(api_key=api_key, totp_secret="JBSWY3DPEHPK3PXP"), path=path
-        )
+        token = "eyJraWQabcdefghij1234WXYZ"  # 25 chars
+        save_dhan_credentials(_creds(token=token, client_id="1100123456"), path=path)
         preview = credentials_preview(env={}, path=path)
         assert preview["present"] is True
         # Masked head…tail — never the full secret.
-        assert preview["api_key_preview"] == "eyJraW…WXYZ"
-        assert preview["api_key_len"] == len(api_key)
-        assert preview["totp_secret_preview"] == "JB…XP"
-        assert preview["totp_secret_len"] == 16
-        # The full secret never appears in the preview payload.
-        assert api_key not in str(preview)
+        assert preview["access_token_preview"] == "eyJraW…WXYZ"
+        assert preview["access_token_len"] == len(token)
+        assert preview["client_id_preview"] == "11…56"
+        assert preview["client_id_len"] == 10
+        assert token not in str(preview)
 
     def test_short_secret_is_fully_bulleted(self, tmp_path: Path) -> None:
         """A value too short to split head…tail is bulleted, never revealed."""
         path = tmp_path / "credentials.json"
-        # totp 'ABCD' (4 chars) ≤ head(2)+tail(2) → fully masked.
-        save_groww_credentials(GrowwCredentials(api_key="key12345", totp_secret="ABCD"), path=path)
+        # client_id 'ABCD' (4 chars) ≤ head(2)+tail(2) → fully masked.
+        save_dhan_credentials(_creds(token="tok12345", client_id="ABCD"), path=path)
         preview = credentials_preview(env={}, path=path)
-        assert preview["totp_secret_preview"] == "••••"
-        assert preview["totp_secret_len"] == 4
+        assert preview["client_id_preview"] == "••••"
+        assert preview["client_id_len"] == 4

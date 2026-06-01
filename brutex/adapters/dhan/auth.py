@@ -21,7 +21,6 @@ so every branch is unit-testable without a network.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Final
@@ -54,21 +53,24 @@ class TokenInfo:
 
 
 def resolve_dhan_credentials(env: Mapping[str, str] | None = None) -> DhanCredentials:
-    """Resolve credentials from the environment.
+    """Resolve credentials env-first, then the saved credentials file.
 
     Reads :data:`ENV_ACCESS_TOKEN` + :data:`ENV_CLIENT_ID` from *env*
-    (defaults to :data:`os.environ`). Raises :class:`DhanAuthError` naming
-    every missing variable.
+    (defaults to :data:`os.environ`); for any field blank in the environment,
+    falls back to the file written by the dashboard Credentials page / ``brutex
+    auth set`` (:func:`brutex.config.credentials.resolve_dhan_file_credentials`).
+    This is what makes a dashboard-saved credential actually enable a live pull
+    (DEC-DHAN-CREDS-WIRING-001) — without it, creds set in the UI were ignored
+    and every pull silently ran dry-run. Raises :class:`DhanAuthError` naming
+    the missing variable(s) when neither env nor file supplies a field.
     """
-    source = os.environ if env is None else env
-    token = source.get(ENV_ACCESS_TOKEN, "").strip()
-    client_id = source.get(ENV_CLIENT_ID, "").strip()
-    missing = [
-        name for name, val in ((ENV_ACCESS_TOKEN, token), (ENV_CLIENT_ID, client_id)) if not val
-    ]
-    if missing:
-        raise DhanAuthError(f"missing Dhan credentials in env: {missing}")
-    return DhanCredentials(access_token=token, client_id=client_id)
+    from brutex.config.credentials import CredentialsError, resolve_dhan_file_credentials
+
+    try:
+        creds = resolve_dhan_file_credentials(env)
+    except CredentialsError as exc:
+        raise DhanAuthError(str(exc)) from exc
+    return DhanCredentials(access_token=creds.access_token, client_id=creds.client_id)
 
 
 def renew_token(client: DhanClient) -> TokenInfo:
@@ -92,17 +94,17 @@ def with_token(creds: DhanCredentials, token: TokenInfo) -> DhanCredentials:
 
 
 def dhan_creds_present(env: Mapping[str, str] | None = None) -> bool:
-    """True iff both Dhan credential env vars are set + non-empty.
+    """True iff Dhan credentials resolve — from env **or** the saved file.
 
     The dry-run gate the dashboard/cli use — no credentials means a live pull
-    is impossible, so the caller forces ``dry_run`` (the Dhan analog of the
-    legacy ``groww_creds_present``). A pure predicate: never raises (unlike
-    :func:`resolve_dhan_credentials`, which raises naming the missing vars).
+    is impossible, so the caller forces ``dry_run``. Reads env-first then the
+    dashboard-saved file (DEC-DHAN-CREDS-WIRING-001), so saving creds on the
+    Credentials page flips the spot/options pull buttons to LIVE. A pure
+    predicate: never raises (unlike :func:`resolve_dhan_credentials`).
     """
-    source = os.environ if env is None else env
-    has_token = bool(source.get(ENV_ACCESS_TOKEN, "").strip())
-    has_client = bool(source.get(ENV_CLIENT_ID, "").strip())
-    return has_token and has_client
+    from brutex.config.credentials import credentials_present
+
+    return credentials_present(env)
 
 
 __all__ = [
