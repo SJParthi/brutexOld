@@ -1,61 +1,90 @@
-"""Unit tests for :mod:`brutex.dashboard.pull_controller`.
+"""Unit tests for :mod:`brutex.dashboard.pull_controller` (Dhan model).
 
 Offline only — exercises the dry-run synthetic path (no creds / network)
-and the injected-factory path. The live Groww builder
-(:func:`_build_live_pull_fetcher`) is ``# pragma: no cover`` because it
-needs real credentials + the ``growwapi`` SDK, both absent in CI.
+and the injected-factory path. The live Dhan builder
+(:func:`_build_live_pull_adapter`) is ``# pragma: no cover`` because it needs
+a real token + the ``urllib`` transport, both absent in CI
+(DEC-VENDOR-PIVOT-001).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from brutex.adapters.groww.chunks import ALL_GROWW_INTERVALS
-from brutex.adapters.groww.fetch_loop import CandleFetcher
-from brutex.adapters.groww.ingest import SyntheticCandleFetcher
+from brutex.adapters.dhan.errors import DhanBadRequestError
+from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
 from brutex.dashboard.pull_controller import (
-    GROWW_HISTORY_FLOOR,
+    DHAN_FETCH_INTERVALS,
+    DHAN_HISTORY_FLOOR,
     PullCandlesReport,
     TimeframeResult,
-    groww_creds_present,
+    dhan_creds_present,
     pull_candles,
     resolve_candle_range,
 )
-from brutex.data.watermark import ChunkKey
+from brutex.data.models import CandleBar
+from brutex.data.sink import BarSink, NullBarSink
+from brutex.models import Exchange, Instrument, InstrumentType, Segment
 
 
-class VendorAPIBadRequestException(Exception):
-    """Stub whose name matches the retry classifier's BAD_REQUEST entry.
+def _index(vendor_symbol: str = "13") -> Instrument:
+    """Build a minimal spot index :class:`Instrument` keyed by *vendor_symbol*."""
+    return Instrument(
+        exchange=Exchange.NSE,
+        exchange_token=1,
+        trading_symbol="NIFTY",
+        vendor_symbol=vendor_symbol,
+        name=None,
+        instrument_type=InstrumentType.IDX,
+        segment=Segment.CASH,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_exchange_token=None,
+        lot_size=0,
+        tick_size=Decimal("0"),
+        freeze_quantity=None,
+        expiry_date=None,
+        strike_price=None,
+        is_reserved=False,
+        buy_allowed=True,
+        sell_allowed=True,
+    )
 
-    The fetch loop classifies caught exceptions by class ``__name__``
-    (see ``brutex.orchestrator.retry.classify_exception``); this name maps
-    to a terminal BAD_REQUEST → the chunk is quarantined as FAILED.
+
+class _EmptyAdapter(SyntheticDhanAdapter):
+    """A :class:`MarketAdapter` whose every fetch returns no bars (NO_DATA).
+
+    Drives the per-interval ``no_data`` branch — the vendor ran cleanly but
+    returned an empty candle set, so ``bars_appended == 0`` and the UI shows
+    "no data" rather than a green ✓.
     """
 
-
-class _FailingFetcher:
-    """A :class:`CandleFetcher` that raises a terminal Groww-style error."""
-
-    def fetch_chunk(self, key: ChunkKey) -> Sequence[object]:
-        """Always raise — drives the fetch loop's terminal-failure branch."""
-        raise VendorAPIBadRequestException(f"boom for {key.interval}")
-
-
-class _EmptyFetcher:
-    """A :class:`CandleFetcher` that returns no rows for every chunk.
-
-    Drives the fetch loop's NO_DATA branch — the vendor returned an empty
-    candle set, so nothing is persisted (completed stays 0) while no_data
-    increments. Exercises the N1 ``total_no_data`` aggregation + the
-    UI's "no data" (not green ✓) display path.
-    """
-
-    def fetch_chunk(self, key: ChunkKey) -> Sequence[object]:
-        """Return an empty sequence — the NO_DATA outcome for that chunk."""
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        """Return an empty list — the NO_DATA outcome for every window."""
+        del symbol, exchange, interval, start, end
         return []
+
+
+class _FailingAdapter(SyntheticDhanAdapter):
+    """A :class:`MarketAdapter` whose every fetch raises a terminal Dhan error.
+
+    ``DhanBadRequestError`` is non-retryable (``is_retryable`` → False), so
+    :func:`ingest_spot` re-raises and :func:`run_dhan_spot_ingest` quarantines
+    the ``(symbol, interval)`` pair into ``failures`` → the ``failed`` branch.
+    """
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        """Always raise a terminal Dhan error — drives the failure branch."""
+        del symbol, exchange, start, end
+        raise DhanBadRequestError(f"boom for {interval}")
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -66,12 +95,12 @@ class _EmptyFetcher:
 class TestPullCandlesReport:
     def test_totals_and_to_dict(self) -> None:
         report = PullCandlesReport(
-            symbol="NSE-NIFTY",
+            symbol="13",
             year=2026,
             dry_run=True,
             timeframes=[
                 TimeframeResult(interval="1m", completed=3, failed=0, no_data=1, skipped=2),
-                TimeframeResult(interval="5m", completed=2, failed=1, no_data=4, skipped=5),
+                TimeframeResult(interval="1d", completed=2, failed=1, no_data=4, skipped=5),
             ],
         )
         assert report.total_completed == 5
@@ -79,7 +108,7 @@ class TestPullCandlesReport:
         assert report.total_no_data == 5
         assert report.total_skipped == 7
         d = report.to_dict()
-        assert d["symbol"] == "NSE-NIFTY"
+        assert d["symbol"] == "13"
         assert d["year"] == 2026
         assert d["dry_run"] is True
         assert d["total_completed"] == 5
@@ -87,7 +116,7 @@ class TestPullCandlesReport:
         assert d["total_no_data"] == 5
         assert d["total_skipped"] == 7
         assert d["timeframes"][1] == {
-            "interval": "5m",
+            "interval": "1d",
             "completed": 2,
             "failed": 1,
             "no_data": 4,
@@ -104,117 +133,90 @@ class TestPullCandlesReport:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# groww_creds_present — testable creds/dry-run safety gate (H1)
+# dhan_creds_present — testable creds / dry-run safety gate (re-export, H1)
 # ────────────────────────────────────────────────────────────────────────
 
 
-class TestGrowwCredsPresent:
-    """``groww_creds_present`` now delegates to the credentials store.
+class TestDhanCredsPresent:
+    """The dry-run gate re-exported from ``brutex.adapters.dhan.auth``.
 
-    Each test that expects ``False`` with the env vars absent points
-    ``BRUTEX_CREDENTIALS_FILE`` at a nonexistent path so a developer's real
-    ``~/.brutex/credentials.json`` can never contaminate the result
-    (DEC-CREDENTIALS-STORE-001 hermeticity).
+    Reads ``BRUTEX_DHAN_ACCESS_TOKEN`` + ``BRUTEX_DHAN_CLIENT_ID`` directly
+    from the env mapping; never raises (DEC-VENDOR-PIVOT-001).
     """
 
     def test_both_present_is_true(self) -> None:
-        env = {
-            "BRUTEX_GROWW_API_KEY": "k",
-            "BRUTEX_GROWW_TOTP_SECRET": "s",
-        }
-        assert groww_creds_present(env) is True
+        env = {"BRUTEX_DHAN_ACCESS_TOKEN": "t", "BRUTEX_DHAN_CLIENT_ID": "c"}
+        assert dhan_creds_present(env) is True
 
-    def test_both_absent_is_false(self, tmp_path: Path) -> None:
-        env = {"BRUTEX_CREDENTIALS_FILE": str(tmp_path / "nonexistent.json")}
-        assert groww_creds_present(env) is False
+    def test_both_absent_is_false(self) -> None:
+        assert dhan_creds_present({}) is False
 
-    def test_api_key_missing_is_false(self, tmp_path: Path) -> None:
-        env = {
-            "BRUTEX_GROWW_TOTP_SECRET": "s",
-            "BRUTEX_CREDENTIALS_FILE": str(tmp_path / "nonexistent.json"),
-        }
-        assert groww_creds_present(env) is False
+    def test_token_missing_is_false(self) -> None:
+        assert dhan_creds_present({"BRUTEX_DHAN_CLIENT_ID": "c"}) is False
 
-    def test_totp_missing_is_false(self, tmp_path: Path) -> None:
-        env = {
-            "BRUTEX_GROWW_API_KEY": "k",
-            "BRUTEX_CREDENTIALS_FILE": str(tmp_path / "nonexistent.json"),
-        }
-        assert groww_creds_present(env) is False
+    def test_client_missing_is_false(self) -> None:
+        assert dhan_creds_present({"BRUTEX_DHAN_ACCESS_TOKEN": "t"}) is False
 
-    def test_blank_value_is_false(self, tmp_path: Path) -> None:
-        env = {
-            "BRUTEX_GROWW_API_KEY": "k",
-            "BRUTEX_GROWW_TOTP_SECRET": "",
-            "BRUTEX_CREDENTIALS_FILE": str(tmp_path / "nonexistent.json"),
-        }
-        assert groww_creds_present(env) is False
+    def test_blank_value_is_false(self) -> None:
+        env = {"BRUTEX_DHAN_ACCESS_TOKEN": "t", "BRUTEX_DHAN_CLIENT_ID": "   "}
+        assert dhan_creds_present(env) is False
 
-    def test_defaults_to_os_environ(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        # Default env=None reads os.environ. Clear both vars + point the
-        # credentials file at a nonexistent path → hermetic False branch.
-        monkeypatch.setenv("BRUTEX_CREDENTIALS_FILE", str(tmp_path / "nonexistent.json"))
-        monkeypatch.delenv("BRUTEX_GROWW_API_KEY", raising=False)
-        monkeypatch.delenv("BRUTEX_GROWW_TOTP_SECRET", raising=False)
-        assert groww_creds_present() is False
-        monkeypatch.setenv("BRUTEX_GROWW_API_KEY", "k")
-        monkeypatch.setenv("BRUTEX_GROWW_TOTP_SECRET", "s")
-        assert groww_creds_present() is True
+    def test_defaults_to_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Default env=None reads os.environ.
+        monkeypatch.delenv("BRUTEX_DHAN_ACCESS_TOKEN", raising=False)
+        monkeypatch.delenv("BRUTEX_DHAN_CLIENT_ID", raising=False)
+        assert dhan_creds_present() is False
+        monkeypatch.setenv("BRUTEX_DHAN_ACCESS_TOKEN", "t")
+        monkeypatch.setenv("BRUTEX_DHAN_CLIENT_ID", "c")
+        assert dhan_creds_present() is True
 
 
 # ────────────────────────────────────────────────────────────────────────
-# pull_candles — dry-run (default factory exercises ``_build_dry_run_fetcher``)
+# pull_candles — dry-run (default factory exercises ``_build_dry_run_adapter``)
 # ────────────────────────────────────────────────────────────────────────
 
 
 class TestPullCandlesDryRun:
     def test_default_year_is_current_utc_year(self, tmp_path: Path) -> None:
-        report = pull_candles("NSE-NIFTY", lake_root=tmp_path, dry_run=True)
+        report = pull_candles(_index(), lake_root=tmp_path, dry_run=True)
         assert report.year == datetime.now(UTC).year
         assert report.dry_run is True
+        assert report.symbol == "13"
 
-    def test_covers_all_intervals(self, tmp_path: Path) -> None:
-        report = pull_candles("NSE-NIFTY", lake_root=tmp_path, year=2026, dry_run=True)
-        assert [tf.interval for tf in report.timeframes] == list(ALL_GROWW_INTERVALS)
-        # Synthetic fetcher always succeeds → some completed, zero failed.
+    def test_covers_fetched_intervals(self, tmp_path: Path) -> None:
+        report = pull_candles(_index(), lake_root=tmp_path, year=2024, dry_run=True)
+        # Dhan fetches 1m + 1d only (the 19 derived TFs are resampled, not
+        # fetched — DEC-DHAN-1M-ONLY-001); the grid shows two cells.
+        assert [tf.interval for tf in report.timeframes] == ["1m", "1d"]
+        assert len(DHAN_FETCH_INTERVALS) == 2
+        # Synthetic adapter always returns bars → some completed, zero failed.
         assert report.total_failed == 0
         assert report.total_completed > 0
 
     def test_explicit_year(self, tmp_path: Path) -> None:
-        report = pull_candles("NSE-BANKNIFTY", lake_root=tmp_path, year=2024, dry_run=True)
+        report = pull_candles(_index("25"), lake_root=tmp_path, year=2024, dry_run=True)
         assert report.year == 2024
 
     def test_blank_symbol_raises(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="non-empty"):
-            pull_candles("   ", lake_root=tmp_path, dry_run=True)
+        with pytest.raises(ValueError, match="non-empty Dhan SECURITY_ID"):
+            pull_candles(_index("   "), lake_root=tmp_path, dry_run=True)
 
-    def test_unprefixed_symbol_raises(self, tmp_path: Path) -> None:
-        # L1: a bare trading_symbol (no NSE-/BSE- prefix) is rejected — it
-        # would break symbol_to_exchange_segment. Guards B1 regressions.
-        with pytest.raises(ValueError, match="exchange-prefixed"):
-            pull_candles("NIFTY", lake_root=tmp_path, dry_run=True)
-
-    def test_bse_prefixed_symbol_passes(self, tmp_path: Path) -> None:
-        # SENSEX is BSE-; the BSE- prefix branch must pass the L1 guard.
-        report = pull_candles("BSE-SENSEX", lake_root=tmp_path, year=2026, dry_run=True)
-        assert report.total_completed > 0
-
-    def test_no_data_and_skipped_propagate(self, tmp_path: Path) -> None:
-        # N1: a fetcher that returns no rows surfaces no_data, and zero
-        # completed → the UI shows "no data" rather than a green ✓.
+    def test_no_data_propagates(self, tmp_path: Path) -> None:
+        # An adapter that returns no rows surfaces no_data, and zero completed
+        # → the UI shows "no data" rather than a green ✓.
         report = pull_candles(
-            "NSE-NIFTY",
+            _index(),
             lake_root=tmp_path,
-            year=2026,
+            year=2024,
             dry_run=True,
-            fetcher_factory=lambda _root: (_EmptyFetcher(), None),
+            adapter_factory=lambda _root, _inst: (_EmptyAdapter(), NullBarSink()),
         )
         assert report.total_completed == 0
         assert report.total_failed == 0
-        assert report.total_no_data > 0
+        assert report.total_no_data == 2  # both fetched intervals empty
         d = report.to_dict()
         assert d["total_no_data"] == report.total_no_data
-        assert d["total_skipped"] == report.total_skipped
+        assert d["total_skipped"] == 0
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -224,34 +226,39 @@ class TestPullCandlesDryRun:
 
 class TestPullCandlesInjectedFactory:
     def test_factory_overrides_dry_run_false(self, tmp_path: Path) -> None:
-        seen: dict[str, Path] = {}
+        seen: dict[str, object] = {}
 
-        def factory(lake_root: Path) -> tuple[CandleFetcher, Callable[[], None] | None]:
+        def factory(
+            lake_root: Path, instrument: Instrument
+        ) -> tuple[SyntheticDhanAdapter, BarSink]:
             seen["lake_root"] = lake_root
-            return SyntheticCandleFetcher(rows_per_chunk=2), None
+            seen["vendor_symbol"] = instrument.vendor_symbol
+            return SyntheticDhanAdapter(), NullBarSink()
 
         report = pull_candles(
-            "NSE-NIFTY",
+            _index(),
             lake_root=tmp_path,
-            year=2026,
+            year=2024,
             dry_run=False,
-            fetcher_factory=factory,
+            adapter_factory=factory,
         )
-        # Factory got the lake root, dry_run flag is recorded as passed (False).
+        # Factory got the lake root + the instrument; dry_run flag recorded as
+        # passed (False).
         assert seen["lake_root"] == tmp_path
+        assert seen["vendor_symbol"] == "13"
         assert report.dry_run is False
         assert report.total_completed > 0
 
-    def test_failing_fetcher_reports_failures(self, tmp_path: Path) -> None:
+    def test_failing_adapter_reports_failures(self, tmp_path: Path) -> None:
         report = pull_candles(
-            "NSE-NIFTY",
+            _index(),
             lake_root=tmp_path,
-            year=2026,
+            year=2024,
             dry_run=True,
-            fetcher_factory=lambda _root: (_FailingFetcher(), None),
+            adapter_factory=lambda _root, _inst: (_FailingAdapter(), NullBarSink()),
         )
         assert report.total_completed == 0
-        assert report.total_failed > 0
+        assert report.total_failed == 2  # both fetched intervals quarantined
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -297,7 +304,7 @@ class TestResolveCandleRange:
     def test_no_dates_pre_floor_year_raises(self) -> None:
         # Mode 2 — a year wholly before the 2020 history floor: start clamps
         # up to the floor, end stays in the pre-floor year → start > end →
-        # refused (Groww has no data before 2020).
+        # refused (Dhan has no data before 2020).
         with pytest.raises(ValueError, match="nothing to pull"):
             resolve_candle_range(from_date=None, to_date=None, year=2018, now=_NOW)
 
@@ -316,7 +323,7 @@ class TestResolveCandleRange:
 
     def test_to_only_starts_at_history_floor(self) -> None:
         start, end = resolve_candle_range(from_date=None, to_date="2020-03-10", year=None, now=_NOW)
-        assert start == datetime(GROWW_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)
+        assert start == datetime(DHAN_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)
         assert end == datetime(2020, 3, 11, tzinfo=UTC)
 
     def test_from_before_floor_is_clamped_up(self) -> None:
@@ -368,7 +375,7 @@ class TestResolveCandleRange:
         start, end = resolve_candle_range(
             from_date="   ", to_date="2024-02-15", year=None, now=_NOW
         )
-        assert start == datetime(GROWW_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)
+        assert start == datetime(DHAN_HISTORY_FLOOR.year, 1, 1, tzinfo=UTC)
         assert end == datetime(2024, 2, 16, tzinfo=UTC)
 
 
@@ -380,7 +387,7 @@ class TestResolveCandleRange:
 class TestPullCandlesDateRange:
     def test_year_mode_stamps_start_and_end_dates(self, tmp_path: Path) -> None:
         # Even in legacy year mode the report now carries the resolved window.
-        report = pull_candles("NSE-NIFTY", lake_root=tmp_path, year=2024, dry_run=True)
+        report = pull_candles(_index(), lake_root=tmp_path, year=2024, dry_run=True)
         assert report.start_date == "2024-01-01"
         assert report.end_date == "2024-12-31"
         d = report.to_dict()
@@ -389,7 +396,7 @@ class TestPullCandlesDateRange:
 
     def test_explicit_range_is_pulled_and_reported(self, tmp_path: Path) -> None:
         report = pull_candles(
-            "NSE-NIFTY",
+            _index(),
             lake_root=tmp_path,
             from_date="2024-03-01",
             to_date="2024-03-31",
@@ -403,7 +410,7 @@ class TestPullCandlesDateRange:
     def test_inverted_range_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="after to_date"):
             pull_candles(
-                "NSE-NIFTY",
+                _index(),
                 lake_root=tmp_path,
                 from_date="2024-05-01",
                 to_date="2024-04-01",

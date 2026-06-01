@@ -1,45 +1,44 @@
-"""Click-to-pull controller — ingest ONE instrument's candle data.
+"""Click-to-pull controller — ingest ONE instrument's candle data (Dhan).
 
-Powers the F&O Universe Explorer's "⤓ Pull — all timeframes" button
-(DEC-UNIVERSE-DASHBOARD-001). The controller is **instrument-agnostic**:
-it pulls **spot / future / option** candle data for ANY Groww symbol —
-a spot index/stock (``"NSE-NIFTY"``, ``"NSE-RELIANCE"``), a futures leg
-(``"NSE-NIFTY-30Jan25-FUT"``), or an option contract's groww_symbol
-(``"NSE-NIFTY-30Jan25-28500-CE"``). When the operator clicks a row, an
-expiry's future, or an option-chain CE/PE cell and hits pull,
-:func:`pull_candles` ingests that single contract's candle data across
-every Groww native timeframe
-(:data:`~brutex.adapters.groww.chunks.ALL_GROWW_INTERVALS`) for the
-requested year, reusing the proven
-:func:`~brutex.adapters.groww.ingest.run_ingest` orchestration core
-(CLAUDE.md §11 COMMON — no copy-paste of the chunk/fetch spine).
+Powers the F&O Universe Explorer's "⤓ Pull" button
+(DEC-UNIVERSE-DASHBOARD-001). The controller is **instrument-agnostic**: it
+pulls spot OHLCV for any resolved :class:`~brutex.models.Instrument` — a spot
+index/stock or (lake-side) a contract — keyed by ``vendor_symbol`` (the Dhan
+``SECURITY_ID``). When the operator clicks a universe row and hits pull,
+:func:`pull_candles` ingests that instrument's candles across the Dhan
+**fetched** base timeframes
+(:data:`DHAN_FETCH_INTERVALS` — ``1minute`` + ``1day``; the 19 intraday
+timeframes are resampled from the 1-minute base, never fetched, per
+DEC-DHAN-1M-ONLY-001), reusing the proven
+:func:`~brutex.adapters.dhan.run_ingest.run_dhan_spot_ingest` orchestration
+core (CLAUDE.md §11 COMMON — no copy-paste of the fan-out/quarantine spine).
 
 ## Offline-first
 
 The default and the CI-tested path is **dry-run**: a
-:class:`~brutex.adapters.groww.ingest.SyntheticCandleFetcher` emits valid
-synthetic candle rows so the whole parse → guard → sink pipeline runs
-with NO Groww credentials and NO network. The LIVE Groww wiring lives in
-:func:`_build_live_pull_fetcher`, which is ``# pragma: no cover`` because
-it needs real credentials + the ``growwapi`` SDK (mirrors
-``brutex.cli._build_live_fetcher``). The network is blocked in CI, so the
-live path is intentionally not unit-covered — its pure orchestration is
-exercised end-to-end through the dry-run path.
+:class:`~brutex.adapters.dhan.synthetic_adapter.SyntheticDhanAdapter` emits
+valid in-session candle rows into a
+:class:`~brutex.data.sink.NullBarSink` so the whole fetch → session-filter →
+sink pipeline runs with NO Dhan credentials and NO network. The LIVE Dhan
+wiring lives in :func:`_build_live_pull_adapter`, which is ``# pragma: no
+cover`` because it needs a real token + the ``urllib`` transport. The network
+is blocked in CI, so the live path is intentionally not unit-covered — its
+pure orchestration is exercised end-to-end through the dry-run path
+(DEC-VENDOR-PIVOT-001).
 
-## Scope (Golden Rule #3)
+## Scope (Golden Rule §3)
 
 This is a LAKE-surface action authorised by DEC-P0-063 (#200) +
-DEC-FETCH-UNIVERSE-001 (#299): pulling candle data (spot / future /
-option) for any index OR F&O-eligible stock — or any of its FUT / CE /
-PE contracts — into the lake. The BRUTE-FORCE ENGINE is unchanged — it
-still sweeps only the 3 indices. Pulling a stock's spot or any contract
-here puts it in the lake (REFERENCE_ONLY), ready for a future,
-separately-authorised engine expansion.
+DEC-FETCH-UNIVERSE-001 (#299): pulling spot candle data for any index OR
+F&O-eligible stock into the lake. The BRUTE-FORCE ENGINE is unchanged — it
+still sweeps only the 3 indices. Pulling a stock's spot here puts it in the
+lake (REFERENCE_ONLY), ready for a future, separately-authorised engine
+expansion.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -47,25 +46,35 @@ from typing import Any, Final
 
 import structlog
 
-from brutex.adapters.groww.chunks import ALL_GROWW_INTERVALS
-from brutex.adapters.groww.fetch_loop import CandleFetcher
-from brutex.adapters.groww.ingest import SyntheticCandleFetcher, run_ingest
-from brutex.data.watermark import FetchWatermark
+from brutex.adapters.dhan.auth import dhan_creds_present
+from brutex.adapters.dhan.run_ingest import run_dhan_spot_ingest
+from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
+from brutex.adapters.protocol import MarketAdapter
+from brutex.data.sink import BarSink, NullBarSink
+from brutex.models import Instrument
 
 _LOG = structlog.get_logger(__name__)
 
-#: Exchange prefixes a valid Groww symbol may start with. A spot index/
-#: stock is ``NSE-…`` / ``BSE-…``; every FUT / CE / PE contract symbol is
-#: likewise exchange-prefixed. Used by :func:`pull_candles` (L1 guard) so a
-#: bare ``trading_symbol`` (e.g. ``"NIFTY"``) is rejected before it can
-#: break :func:`brutex.adapters.groww.client.symbol_to_exchange_segment`.
-_KNOWN_EXCHANGE_PREFIXES: tuple[str, ...] = ("NSE-", "BSE-")
+#: Earliest calendar date Dhan serves historical candles for equities,
+#: indices and F&O (DhanMarketAdapter capabilities ``earliest_history`` =
+#: 2020-01-01; CLAUDE.md §6 "Historical depth — From 2020"). Any ``from_date``
+#: below this floor is clamped up to it so a too-early pick can never waste
+#: quota on a window the vendor has no data for.
+DHAN_HISTORY_FLOOR: Final[date] = date(2020, 1, 1)
 
-#: Earliest calendar date Groww serves historical candles for equities,
-#: indices and F&O (CLAUDE.md §6 "Historical depth — From 2020"). Any
-#: ``from_date`` below this floor is clamped up to it so a too-early pick
-#: can never waste quota on a window the vendor has no data for.
-GROWW_HISTORY_FLOOR: Final[date] = date(2020, 1, 1)
+#: The base timeframes Track 1 actually FETCHES from Dhan: 1-minute (every
+#: intraday timeframe is resampled from it) + 1-day (PDH/PDL anchors). The 19
+#: derived intraday timeframes are produced from the stored 1-minute base by
+#: the resampler, never fetched (DEC-DHAN-1M-ONLY-001). Order = display order.
+DHAN_FETCH_INTERVALS: Final[tuple[str, ...]] = ("1minute", "1day")
+
+#: Dhan canonical interval → lake ``TF_LABELS`` display label, so the
+#: ``/universe`` grid shows ``1m`` / ``1d`` (consistent with the rest of the
+#: dashboard) rather than the vendor's ``1minute`` / ``1day``.
+_FETCH_INTERVAL_LABELS: Final[tuple[tuple[str, str], ...]] = (
+    ("1minute", "1m"),
+    ("1day", "1d"),
+)
 
 
 def resolve_candle_range(
@@ -83,12 +92,12 @@ def resolve_candle_range(
        Each is an ISO ``YYYY-MM-DD`` calendar date; both ends are
        **day-inclusive** (``to_date``'s whole day is fetched, so *end* is
        the midnight that starts the next day). A missing *from_date*
-       defaults to :data:`GROWW_HISTORY_FLOOR`; a missing *to_date*
+       defaults to :data:`DHAN_HISTORY_FLOOR`; a missing *to_date*
        defaults to today (``now``'s UTC date). The pair is then clamped to
-       ``[GROWW_HISTORY_FLOOR, today]`` so a too-early or future pick can
+       ``[DHAN_HISTORY_FLOOR, today]`` so a too-early or future pick can
        never waste quota — and the future is never requested.
     2. **Year** — when neither date is given but *year* is: that full
-       calendar year, **clamped to ``[GROWW_HISTORY_FLOOR, today]``** like
+       calendar year, **clamped to ``[DHAN_HISTORY_FLOOR, today]``** like
        mode 1. A past year resolves to the whole year; the current year
        stops at today (never the future); a wholly-future or pre-2020 year
        raises "nothing to pull".
@@ -129,25 +138,21 @@ def resolve_candle_range(
     if from_date is None and to_date is None:
         # Mode 2/3 — an explicit *year* (or, absent that, the current UTC
         # year) → that full calendar year as a date pair, which then falls
-        # through the SAME clamp as the explicit-range mode below. This
-        # branch used to return ``[year-01-01, (year+1)-01-01)`` UNCLAMPED —
-        # so the current or a future year produced a window whose tail ran
-        # past today, and the vendor rejected the very first future chunk
-        # with "Invalid start time. Start time cannot be in the future",
-        # crashing the whole pull (DEC-PULL-FUTURE-WINDOW-001). Routing it
-        # through the clamp makes the current year stop at today and a
-        # wholly-future / pre-2020 year raise "nothing to pull" instead.
+        # through the SAME clamp as the explicit-range mode below, so the
+        # current year stops at today and a wholly-future / pre-2020 year
+        # raises "nothing to pull" instead of requesting a window the vendor
+        # rejects (DEC-PULL-FUTURE-WINDOW-001).
         resolved_year = year if year is not None else now.year
         start_date = date(resolved_year, 1, 1)
         end_date = date(resolved_year, 12, 31)
     else:
-        start_date = _parse_iso_date(from_date, "from_date") if from_date else GROWW_HISTORY_FLOOR
+        start_date = _parse_iso_date(from_date, "from_date") if from_date else DHAN_HISTORY_FLOOR
         end_date = _parse_iso_date(to_date, "to_date") if to_date else today
 
     # Clamp into the vendor-served window; never request the future. Applies
-    # to EVERY mode now (the year/default branch above was previously the one
-    # unclamped path — the live-crash root cause).
-    start_date = max(start_date, GROWW_HISTORY_FLOOR)
+    # to EVERY mode (the year/default branch was previously the one unclamped
+    # path — the live-crash root cause).
+    start_date = max(start_date, DHAN_HISTORY_FLOOR)
     end_date = min(end_date, today)
     if start_date > end_date:
         raise ValueError(
@@ -169,41 +174,11 @@ def _parse_iso_date(value: str, field_name: str) -> date:
         raise ValueError(f"{field_name} must be ISO YYYY-MM-DD, got {value!r}") from exc
 
 
-def groww_creds_present(env: Mapping[str, str] | None = None) -> bool:
-    """Return ``True`` iff Groww credentials resolve from env vars OR the saved file.
-
-    Delegates to :func:`brutex.config.credentials.credentials_present`
-    (DEC-CREDENTIALS-STORE-001), so a one-time ``brutex auth set`` (or the
-    dashboard Credentials page) now satisfies the gate without re-exporting
-    ``BRUTEX_GROWW_*`` every session. Mirrors the per-field resolution of
-    :meth:`brutex.adapters.groww.auth.GrowwAuth.from_env`
-    (``BRUTEX_GROWW_API_KEY`` AND ``BRUTEX_GROWW_TOTP_SECRET``). When
-    neither source provides both fields a live pull is impossible, so the
-    dashboard pull route forces ``dry_run`` and serves synthetic data
-    offline.
-
-    Parameters
-    ----------
-    env
-        Environment mapping to inspect. Defaults to
-        :data:`os.environ`. Injected by tests to exercise both branches
-        without mutating the real process environment.
-
-    Returns
-    -------
-    bool
-        ``True`` only when both credentials resolve (from env OR the saved
-        file) AND are non-empty.
-    """
-    from brutex.config.credentials import credentials_present
-
-    return credentials_present(env)
-
-
-#: A factory that builds the ``(fetcher, reauth)`` pair given the lake
-#: root. The default builds the offline synthetic pair; the live path
-#: injects :func:`_build_live_pull_fetcher`.
-FetcherFactory = Callable[[Path], tuple[CandleFetcher, Callable[[], None] | None]]
+#: A factory that builds the ``(adapter, sink)`` pair the Dhan ingest spine
+#: needs, given the lake root + the instrument being pulled. The default
+#: builds the offline synthetic pair; the live path injects
+#: :func:`_build_live_pull_adapter`.
+AdapterFactory = Callable[[Path, Instrument], tuple[MarketAdapter, BarSink]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,9 +199,7 @@ class PullCandlesReport:
     Attributes
     ----------
     symbol
-        The Groww symbol that was pulled — a spot index/stock
-        (e.g. ``"NSE-NIFTY"``), a future, or an option contract's
-        groww_symbol (e.g. ``"NSE-NIFTY-30Jan25-28500-CE"``).
+        The Dhan ``vendor_symbol`` (``SECURITY_ID``) that was pulled.
     year
         The calendar year the pull *started* in. For a full-year pull this
         is the year covered; for an explicit ``from``/``to`` range it is
@@ -241,8 +214,10 @@ class PullCandlesReport:
         The ``/universe`` page shows a "PREVIEW · synthetic" badge in
         this case.
     timeframes
-        One :class:`TimeframeResult` per interval, in
-        :data:`~brutex.adapters.groww.chunks.ALL_GROWW_INTERVALS` order.
+        One :class:`TimeframeResult` per **fetched** interval, in
+        :data:`DHAN_FETCH_INTERVALS` order (``1m`` then ``1d``). The 19
+        derived intraday timeframes are resampled from the 1-minute base
+        downstream, not fetched here (DEC-DHAN-1M-ONLY-001).
     """
 
     symbol: str
@@ -254,22 +229,22 @@ class PullCandlesReport:
 
     @property
     def total_completed(self) -> int:
-        """Total chunks fetched + persisted across all timeframes."""
+        """Total intervals that fetched + persisted at least one bar."""
         return sum(tf.completed for tf in self.timeframes)
 
     @property
     def total_failed(self) -> int:
-        """Total chunks that failed terminally across all timeframes."""
+        """Total intervals that failed terminally (quarantined)."""
         return sum(tf.failed for tf in self.timeframes)
 
     @property
     def total_no_data(self) -> int:
-        """Total chunks the vendor reported empty (NO_DATA) across all timeframes."""
+        """Total intervals the vendor returned empty (NO_DATA)."""
         return sum(tf.no_data for tf in self.timeframes)
 
     @property
     def total_skipped(self) -> int:
-        """Total chunks skipped as already-settled (resume) across all timeframes."""
+        """Total intervals skipped as already-settled (always 0 — see field doc)."""
         return sum(tf.skipped for tf in self.timeframes)
 
     def to_dict(self) -> dict[str, Any]:
@@ -297,125 +272,115 @@ class PullCandlesReport:
         }
 
 
-def _build_dry_run_fetcher(
+def _build_dry_run_adapter(
     _lake_root: Path,
-) -> tuple[CandleFetcher, Callable[[], None] | None]:
-    """Build the offline ``(SyntheticCandleFetcher, None)`` pair.
+    _instrument: Instrument,
+) -> tuple[MarketAdapter, BarSink]:
+    """Build the offline ``(SyntheticDhanAdapter, NullBarSink)`` pair.
 
-    The synthetic fetcher emits valid candle rows directly (no sink /
-    Parquet) so the pull runs with zero dependencies — the dry-run proof
-    that the spine works. ``reauth`` is ``None`` because synthetic data
-    never expires a session.
+    The synthetic adapter emits valid in-session bars and the null sink
+    counts-but-discards them, so the pull runs with zero dependencies — the
+    dry-run proof the spine works (DEC-VENDOR-PIVOT-001).
     """
-    return SyntheticCandleFetcher(), None
+    return SyntheticDhanAdapter(), NullBarSink()
 
 
-def _build_live_pull_fetcher(  # pragma: no cover — live Groww creds + SDK + network
+def _build_live_pull_adapter(  # pragma: no cover — live Dhan token + transport + network
     lake_root: Path,
-) -> tuple[CandleFetcher, Callable[[], None] | None]:
-    """Wire the real Groww auth + persisting candle fetcher.
+    instrument: Instrument,
+) -> tuple[MarketAdapter, BarSink]:
+    """Wire the real Dhan client + persisting Parquet sink.
 
-    Mirrors :func:`brutex.cli._build_live_fetcher`: builds a
-    ``ParquetBarSink`` over *lake_root*, authenticates via
-    :class:`~brutex.adapters.groww.auth.GrowwAuth`, and returns the
-    ``(PersistingFetcher, reauth)`` pair. ``# pragma: no cover`` — needs
-    real credentials and network, both absent in CI.
+    Builds a token-authenticated :class:`~brutex.adapters.dhan.client.DhanClient`
+    over the real ``urllib`` transport, a :class:`~brutex.adapters.dhan.adapter.DhanMarketAdapter`
+    carrying the single pulled *instrument* (its O(1) index must contain the
+    symbol it fetches), and a :class:`~brutex.data.sink.ParquetBarSink` over
+    *lake_root*. ``# pragma: no cover`` — needs real credentials + network,
+    both absent in CI (DEC-VENDOR-PIVOT-001).
     """
-    from growwapi.groww.exceptions import BaseGrowwException
-
-    from brutex.adapters.groww.auth import GrowwAuth
-    from brutex.adapters.groww.client import GrowwCandleFetcher
-    from brutex.adapters.groww.persist import PersistingFetcher
+    from brutex.adapters.dhan.adapter import DhanMarketAdapter
+    from brutex.adapters.dhan.auth import resolve_dhan_credentials
+    from brutex.adapters.dhan.client import DhanClient, urllib_transport
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
-    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 
-    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
-    auth = GrowwAuth.from_env()
-    groww = GrowwCandleFetcher(
-        sdk=auth.session(),
-        bucket=AdaptiveTokenBucket(),
-        base_exception=BaseGrowwException,
-        reauth_fn=auth.refresh,
+    creds = resolve_dhan_credentials()
+    client = DhanClient(
+        access_token=creds.access_token,
+        client_id=creds.client_id,
+        transport=urllib_transport,
     )
-    return PersistingFetcher(inner=groww, sink=sink), groww.reauth
+    adapter = DhanMarketAdapter(client=client, instruments=(instrument,))
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    return adapter, sink
 
 
 def pull_candles(
-    symbol: str,
+    instrument: Instrument,
     *,
     lake_root: Path,
     year: int | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
     dry_run: bool,
-    fetcher_factory: FetcherFactory | None = None,
+    adapter_factory: AdapterFactory | None = None,
 ) -> PullCandlesReport:
-    """Ingest *symbol*'s spot / future / option candles over a date range.
+    """Ingest *instrument*'s spot candles over a date range (Dhan model).
 
-    Instrument-agnostic: *symbol* may be a spot index/stock, a future,
-    or an option contract's groww_symbol — the chunk/fetch spine is the
-    same for any Groww symbol. Plans + drives one
-    :func:`~brutex.adapters.groww.ingest.run_ingest` pass over the single
-    *symbol* and ALL
-    :data:`~brutex.adapters.groww.chunks.ALL_GROWW_INTERVALS`. The window
-    is resolved by :func:`resolve_candle_range`: an explicit
-    *from_date* / *to_date* range (day-inclusive, clamped to
-    ``[2020-01-01, today]``) when either is given, else the full calendar
-    *year*. Idempotent + resumable via a fresh
-    :class:`~brutex.data.watermark.FetchWatermark`.
+    Plans + drives one
+    :func:`~brutex.adapters.dhan.run_ingest.run_dhan_spot_ingest` pass over
+    the single *instrument* and the Dhan **fetched** base intervals
+    (:data:`DHAN_FETCH_INTERVALS` — ``1minute`` + ``1day``; the 19 derived
+    intraday timeframes are resampled from the 1-minute base downstream,
+    never fetched, per DEC-DHAN-1M-ONLY-001). The window is resolved by
+    :func:`resolve_candle_range`: an explicit *from_date* / *to_date* range
+    (day-inclusive, clamped to ``[2020-01-01, today]``) when either is given,
+    else the full calendar *year*. Idempotent + rerun-safe — the sink append
+    is a no-op on already-stored bars (CLAUDE.md §2 Rule 7).
 
     Parameters
     ----------
-    symbol
-        Groww symbol — a spot index/stock (e.g. ``"NSE-NIFTY"`` /
-        ``"NSE-RELIANCE"``), a future, or an option contract's
-        groww_symbol (e.g. ``"NSE-NIFTY-30Jan25-28500-CE"``).
+    instrument
+        The resolved spot instrument to pull; ``vendor_symbol`` is the Dhan
+        ``SECURITY_ID`` and ``exchange`` / ``segment`` drive the sink
+        partition. Resolved by the route from the instrument store.
     lake_root
         Lake directory the live sink writes Parquet into. Unused by the
-        dry-run synthetic fetcher (which emits rows directly).
+        dry-run null sink.
     year
         Calendar year to pull when no explicit range is given. ``None``
         (default) uses the current UTC year. Ignored when *from_date* or
         *to_date* is supplied.
     from_date, to_date
         Inclusive ISO ``YYYY-MM-DD`` bounds for an explicit range. Either
-        may be ``None`` (defaults to the Groww history floor / today
+        may be ``None`` (defaults to the Dhan history floor / today
         respectively). When both are ``None`` the *year* mode applies.
     dry_run
-        When ``True``, use the offline synthetic fetcher (no creds /
-        network). When ``False``, build the live Groww fetcher via
-        *fetcher_factory*.
-    fetcher_factory
-        Override the ``(fetcher, reauth)`` builder. Defaults to the
-        offline synthetic builder when *dry_run* is ``True`` and to the
-        live Groww builder otherwise. Tests inject a fake factory to
-        exercise the non-dry-run branch without network.
+        When ``True``, use the offline synthetic adapter (no creds /
+        network). When ``False``, build the live Dhan adapter via
+        *adapter_factory*.
+    adapter_factory
+        Override the ``(adapter, sink)`` builder. Defaults to the offline
+        synthetic builder when *dry_run* is ``True`` and to the live Dhan
+        builder otherwise. Tests inject a fake factory to exercise the
+        non-dry-run branch and the per-interval outcomes without network.
 
     Returns
     -------
     PullCandlesReport
-        Per-timeframe completed / failed counts + the ``dry_run`` flag.
+        Per-fetched-interval completed / failed / no-data counts + the
+        ``dry_run`` flag.
 
     Raises
     ------
     ValueError
-        If *symbol* is empty / blank, or does not start with a known
-        Groww exchange prefix (:data:`_KNOWN_EXCHANGE_PREFIXES` —
-        ``NSE-`` / ``BSE-``). The latter guards against a bare
-        ``trading_symbol`` (e.g. ``"NIFTY"``) reaching the ingest spine,
-        which would mis-derive the exchange in
-        :func:`brutex.adapters.groww.client.symbol_to_exchange_segment`.
-        Also raised by :func:`resolve_candle_range` for a malformed date
-        string or a ``from`` after ``to`` (incl. a future ``from_date``).
+        If *instrument*'s ``vendor_symbol`` is empty / blank, or by
+        :func:`resolve_candle_range` for a malformed date string or a
+        ``from`` after ``to`` (incl. a future ``from_date``).
     """
+    symbol = instrument.vendor_symbol
     if not symbol.strip():
-        raise ValueError("symbol must be a non-empty Groww symbol")
-    if not symbol.startswith(_KNOWN_EXCHANGE_PREFIXES):
-        raise ValueError(
-            "symbol must be an exchange-prefixed Groww symbol "
-            f"(one of {_KNOWN_EXCHANGE_PREFIXES}), got {symbol!r}"
-        )
+        raise ValueError("instrument.vendor_symbol must be a non-empty Dhan SECURITY_ID")
 
     start, end = resolve_candle_range(
         from_date=from_date,
@@ -427,9 +392,9 @@ def pull_candles(
     # Inclusive end label = the last day actually fetched (end is exclusive).
     end_label = (end - timedelta(days=1)).date().isoformat()
 
-    if fetcher_factory is None:
-        fetcher_factory = _build_dry_run_fetcher if dry_run else _build_live_pull_fetcher
-    fetcher, reauth = fetcher_factory(lake_root)
+    if adapter_factory is None:
+        adapter_factory = _build_dry_run_adapter if dry_run else _build_live_pull_adapter
+    adapter, sink = adapter_factory(lake_root, instrument)
 
     _LOG.info(
         "universe.pull.start",
@@ -438,30 +403,31 @@ def pull_candles(
         start_date=start.date().isoformat(),
         end_date=end_label,
         dry_run=dry_run,
-        intervals=len(ALL_GROWW_INTERVALS),
+        intervals=len(DHAN_FETCH_INTERVALS),
     )
 
-    watermark = FetchWatermark()
-    report = run_ingest(
-        fetcher,
-        [symbol],
-        ALL_GROWW_INTERVALS,
-        start,
-        end,
-        watermark,
-        reauth=reauth,
+    report = run_dhan_spot_ingest(
+        adapter,
+        sink,
+        instruments=[instrument],
+        intervals=DHAN_FETCH_INTERVALS,
+        start=start.date(),
+        end=end.date(),
     )
 
-    timeframes = [
-        TimeframeResult(
-            interval=interval,
-            completed=report.outcomes[symbol, interval].completed,
-            failed=report.outcomes[symbol, interval].failed,
-            no_data=report.outcomes[symbol, interval].no_data,
-            skipped=report.outcomes[symbol, interval].skipped,
-        )
-        for interval in ALL_GROWW_INTERVALS
-    ]
+    failure_keys = {(f.symbol, f.interval) for f in report.failures}
+    timeframes: list[TimeframeResult] = []
+    for fetch_interval, label in _FETCH_INTERVAL_LABELS:
+        key = (symbol, fetch_interval)
+        if key in failure_keys:
+            # Terminal Dhan error — quarantined, never in report.pairs.
+            timeframes.append(TimeframeResult(interval=label, completed=0, failed=1))
+        elif report.pairs[key].bars_appended > 0:
+            timeframes.append(TimeframeResult(interval=label, completed=1, failed=0))
+        else:
+            # Ran cleanly but the vendor returned no bars for the window.
+            timeframes.append(TimeframeResult(interval=label, completed=0, failed=0, no_data=1))
+
     pull_report = PullCandlesReport(
         symbol=symbol,
         year=resolved_year,
@@ -484,11 +450,12 @@ def pull_candles(
 
 
 __all__ = [
-    "GROWW_HISTORY_FLOOR",
-    "FetcherFactory",
+    "DHAN_FETCH_INTERVALS",
+    "DHAN_HISTORY_FLOOR",
+    "AdapterFactory",
     "PullCandlesReport",
     "TimeframeResult",
-    "groww_creds_present",
+    "dhan_creds_present",
     "pull_candles",
     "resolve_candle_range",
 ]
