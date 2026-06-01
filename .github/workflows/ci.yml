@@ -184,6 +184,17 @@ jobs:
             --cov-fail-under=90 \
             --ignore=tests/bench \
             tests/unit tests/integration tests/property
+      - name: Smoke + red-team gates (DEC-DASHBOARD-OMIT-AUDIT-001)
+        # The 5-agent verification (2026-06-01) found two test classes that
+        # never gated merges: tests/smoke (12 pre-push smoke tests, wired into
+        # NO workflow) and tests/redteam (32 gate-integrity meta-tests that
+        # assert each CI gate actually catches a planted bug — previously
+        # nightly-only, not in the `CI OK` aggregate). Wire both into the
+        # per-PR `test` job so a smoke break or a gate-detection regression
+        # fails the PR at merge time, not just nightly. Both are fast
+        # (<5s combined) and the [dev,data,ui] env satisfies their tool
+        # guards (ruff / mypy / bandit installed).
+        run: pytest -q tests/smoke tests/redteam
       - name: Strict per-module 100% coverage gate (Golden Rule #12)
         # New modules ship at 100% line + 100% branch from the start.
         # Add modules to this list as they reach 100%. Legacy modules
