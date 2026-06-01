@@ -57,8 +57,9 @@ regresses, the change is blocked. Nothing ships on trust.
 | **Pull · throttle** — adaptive [3..5] r/s controller, live on the spot pull | rate-limit safety | ✅ merged |
 | **Pull · options** — `pull_options` controller (IDX→OPTIDX±10 / EQ→OPTSTK±3) | options buttons ②④⑥⑧ | ✅ merged |
 | **Pull · routes** — `/pull-all` + `/pull-options` routes + pure target selector | all 8 buttons have a backend | ✅ merged |
-| **Pull · live buttons** — animated "Pull the Universe" panel wired into `/universe` | one-click universe (all 8 live) | ⏳ merging |
-| **Pull · SSE progress** — per-window streaming live feed | token-by-token progress | 🔜 next |
+| **Pull · live buttons** — animated "Pull the Universe" panel wired into `/universe` | one-click universe (all 8 live) | ✅ merged |
+| **Pull · progress core** — O(1) thread-safe `PullProgress` tracker | the live-feed foundation | ⏳ merging |
+| **Pull · SSE progress** — thread `on_progress` + stream per-window to the dashboard | token-by-token live feed | 🔜 next |
 | **Flip · final** — delete Groww (residual code + deps + docs) | Groww fully gone | 🔜 |
 
 **Honest note:** Groww is **still present** until the final phase — deliberately last,
