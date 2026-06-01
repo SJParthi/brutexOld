@@ -1,12 +1,14 @@
 """Tests for ``brutex.dashboard.instrument_loader`` — keyless instrument load.
 
-Injects a fake ``http_get`` returning a small valid instrument CSV against a
-REAL temp :class:`~brutex.data.instrument_store.InstrumentStore` and asserts
-the loader parses/filters correctly, re-summarises the stored snapshot into
+Injects a fake ``http_get`` returning a small valid **Dhan detailed scrip
+master** CSV against a REAL temp
+:class:`~brutex.data.instrument_store.InstrumentStore` and asserts the loader
+parses/filters correctly, re-summarises the stored snapshot into
 ``index_count`` / ``stock_count``, aborts on a malformed header, and handles
-an empty CSV. NO Groww auth / creds anywhere — the master is a public CSV.
+an empty CSV. NO Dhan token / creds anywhere — the master is a public CSV
+(DEC-VENDOR-PIVOT-001).
 
-CSV patterns follow ``tests/unit/test_groww_instruments.py``; the real store
+CSV patterns follow ``tests/unit/test_dhan_instruments.py``; the real store
 usage follows ``tests/integration/test_universe_explorer_store.py``.
 """
 
@@ -19,29 +21,28 @@ from brutex.dashboard.instrument_loader import load_instrument_master
 from brutex.data.instrument_store import InstrumentStore
 from brutex.models import InstrumentFormatError
 
+# Dhan detailed scrip-master header (the columns the parser requires + the
+# optional ones these rows use).
 _HEADER = (
-    "exchange,exchange_token,trading_symbol,groww_symbol,name,instrument_type,segment,"
-    "series,isin,underlying_symbol,underlying_exchange_token,expiry_date,strike_price,"
-    "lot_size,tick_size,freeze_quantity,is_reserved,buy_allowed,sell_allowed"
+    "EXCH_ID,SECURITY_ID,INSTRUMENT_TYPE,SYMBOL_NAME,DISPLAY_NAME,LOT_SIZE,TICK_SIZE,"
+    "SM_FREEZE_QTY,UNDERLYING_SYMBOL,OPTION_TYPE,STRIKE_PRICE,SM_EXPIRY_DATE,SERIES,ISIN,"
+    "UNDERLYING_SECURITY_ID,ASM_GSM_FLAG"
 )
-# One NSE index (IDX), one F&O-eligible stock (RELIANCE EQ) + a RELIANCE
-# derivative (CE) that makes the stock F&O-eligible, plus one out-of-scope
-# MCX row that must be filtered (not parsed). The second IDX row
-# (BANKNIFTY) is REAL-STYLE per DEC-INDEX-PARSE-FIX-001 — BLANK lot_size /
-# tick_size and a non-numeric exchange_token (the NSE index SYMBOL string).
-# Before the fix it quarantined (index_count was 1); now it parses, so the
-# expected index_count is 2.
+# Two NSE indices (lot/tick 0), one F&O-eligible stock (RELIANCE) + a RELIANCE
+# option leg that makes the stock F&O-eligible, plus one out-of-scope MCX row
+# that must be filtered (not parsed). The lean universe persists the 2 indices
+# + RELIANCE (3); the option leg is dropped; MCX is filtered.
 _ROWS = [
-    "NSE,26000,NIFTY,NSE-NIFTY,Nifty 50,IDX,CASH,NaN,NaN,NaN,NaN,NaN,NaN,1,0.05,NaN,0,1,1",
-    "NSE,BANKNIFTY,BANKNIFTY,NSE-BANKNIFTY,NIFTY Bank,IDX,CASH,,,,,,,,,,0,0,",
-    "NSE,2885,RELIANCE,NSE-RELIANCE,Reliance,EQ,CASH,EQ,INE002A01018,NaN,NaN,NaN,NaN,1,0.05,NaN,0,1,1",
-    "NSE,55002,RELIANCECE,NSE-RELIANCE-30Jan25-1200-CE,Reliance CE,CE,FNO,NaN,NaN,RELIANCE,2885,2025-01-30,1200,250,0.05,1800,0,1,1",
-    "MCX,9999,GOLD,MCX-GOLD,Gold,FUT,FNO,NaN,NaN,GOLD,9999,2025-02-05,NaN,100,1.00,NaN,0,1,1",
+    "NSE,13,INDEX,NIFTY,Nifty 50,0,0,,,,,,,,,",
+    "NSE,25,INDEX,BANKNIFTY,Nifty Bank,0,0,,,,,,,,,",
+    "NSE,2885,EQUITY,RELIANCE,Reliance,1,0.05,,,,,,EQ,INE002A01018,,",
+    "NSE,3001,OPTSTK,RELIANCE-OPT,Reliance CE,250,0.05,1800,RELIANCE,CE,2600,2025-01-30,,,2885,",
+    "MCX,7777,FUTCOM,GOLD,Gold,100,1,,GOLD,,,,,,7777,",
 ]
 
 
 def _csv(rows: list[str]) -> str:
-    """Join *rows* under the canonical header into a CSV text blob."""
+    """Join *rows* under the canonical Dhan header into a CSV text blob."""
     return "\n".join([_HEADER, *rows]) + "\n"
 
 
@@ -58,18 +59,17 @@ def test_loads_and_summarises_keyless(tmp_path: Path) -> None:
         http_get=lambda _url: _csv(_ROWS),
         run_id_factory=lambda: "test-load",
     )
-    # NIFTY idx + BANKNIFTY idx (real-style) + RELIANCE eq + RELIANCE CE = 4
-    # parsed; MCX filtered. The real-style BANKNIFTY row (blank economics,
-    # non-numeric token) now parses too (DEC-INDEX-PARSE-FIX-001).
+    # NIFTY idx + BANKNIFTY idx + RELIANCE eq + RELIANCE option = 4 in-scope
+    # rows parsed; the MCX row is out-of-scope → filtered.
     assert result["parsed"] == 4
     assert result["filtered"] == 1
-    assert result["quarantined"] == 0
-    # Lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001): NIFTY + BANKNIFTY (IDX)
-    # + RELIANCE (F&O-eligible EQ) persist (3); the RELIANCE CE leg is dropped.
+    assert result["quarantined"] == 0  # Dhan fails closed — no quarantine bucket
+    # Lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001): NIFTY + BANKNIFTY (INDEX)
+    # + RELIANCE (F&O-eligible EQUITY) persist (3); the RELIANCE option leg is
+    # dropped.
     assert result["persisted"] == 3
     assert result["legs_dropped"] == 1
     # Summary over the persisted universe underlyings: 2 indices, 1 stock.
-    # The eligible set survives the leg-drop via the persisted-EQ UNION arm.
     assert result["index_count"] == 2
     assert result["stock_count"] == 1
     assert result["total"] == 3
@@ -86,7 +86,7 @@ def test_default_run_id_factory(tmp_path: Path) -> None:
 def test_malformed_header_raises(tmp_path: Path) -> None:
     """A CSV missing a required column aborts with InstrumentFormatError."""
     store = _store(tmp_path)
-    bad_header = _HEADER.replace("tick_size,", "")  # drop a required column
+    bad_header = _HEADER.replace("TICK_SIZE,", "")  # drop a required column
     with pytest.raises(InstrumentFormatError, match="missing required columns"):
         load_instrument_master(store, http_get=lambda _url: bad_header + "\n")
 

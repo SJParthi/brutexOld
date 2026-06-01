@@ -716,10 +716,10 @@ def build_app(
 
         Thin wrapper over
         :func:`brutex.dashboard.instrument_loader.load_instrument_master`.
-        The instrument master is a PUBLIC CSV needing NO Groww keys, so this
+        The instrument master is a PUBLIC CSV needing NO Dhan token, so this
         endpoint can fill the empty ``/universe`` list without authentication
-        (expiries / contracts / candles still need keys, separately). On any
-        network / parse failure (the live fetch can't reach the Groww asset
+        (options / candles still need the token, separately). On any
+        network / parse failure (the live fetch can't reach the Dhan asset
         host, or the CSV header drifted) it maps to **HTTP 502** with a short
         message the UI surfaces.
         """
@@ -732,7 +732,7 @@ def build_app(
         except (InstrumentFormatError, OSError) as exc:
             raise HTTPException(
                 status_code=502,
-                detail=f"couldn't reach Groww asset host / parse instrument master: {exc}",
+                detail=f"couldn't reach Dhan asset host / parse instrument master: {exc}",
             ) from exc
         return JSONResponse(counts)
 

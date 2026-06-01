@@ -225,7 +225,7 @@ class OutOfScopeError(BruteXError):
 
 
 class InstrumentFormatError(BruteXError):
-    """A a Groww row violates the documented schema.
+    """A scrip-master row violates the documented schema.
 
     Raised when required fields are missing, types are wrong, or the
     internal_trading_symbol / trading_symbol equality invariant fails.
