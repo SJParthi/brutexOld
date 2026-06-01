@@ -70,6 +70,14 @@ _REQUIRED_MASK: int = reduce(operator.or_, (1 << b for b in _REQUIRED_MASK_BITS)
 # Deterministic RNG for reproducibility (Golden Rule #4).
 _SEED: int = 42
 
+# Best-of-N timing repeats (DEC-CANARY-MINTIME-001): each ratio side is timed
+# this many times and the MIN is taken — the minimum is the least-jitter-
+# contaminated estimate of the true per-element/per-call cost, so a single
+# noisy shared-GHA scheduler slice can no longer skew the ratio past the gate.
+# The ratio threshold itself is UNCHANGED (no downgrade) — this only de-noises
+# the measurement (cf. timeit.repeat → min).
+_TIMING_REPEATS: int = 7
+
 # Ratio gate ceiling — matches `test_store_o1.py:162` pattern (5× ratio
 # allows for CI jitter; a real O(n) regression would show ratio >> 5×).
 # Ratio ceiling — bumped from 5.0 → 8.0 per PR #46 hotfix.
@@ -135,12 +143,22 @@ class TestThroughputCanary:
 
         def _time_per_elem(n: int) -> float:
             arr = _make_bar_bits_array(n)
-            t0 = time.perf_counter_ns()
-            for _ in range(5):
-                _ = (arr & _REQUIRED_MASK) == _REQUIRED_MASK
-            t1 = time.perf_counter_ns()
-            # 5 iterations × n elements.
-            return (t1 - t0) / (5 * n)
+            # Best-of-N (min) timing — the minimum observed time is the
+            # least-jitter-contaminated estimate of the true per-element cost
+            # (standard micro-bench practice, cf. timeit.repeat → min). A single
+            # shared-GHA scheduler slice could otherwise skew one side and trip
+            # the ratio gate even though the op is genuinely O(1) (the chronic
+            # flake DEC-P0-020 / PR #46 fought with a ceiling bump). Min over
+            # repeats keeps the gate honest (ratio threshold unchanged) while
+            # removing the noise. DEC-CANARY-MINTIME-001.
+            best = float("inf")
+            for _ in range(_TIMING_REPEATS):
+                t0 = time.perf_counter_ns()
+                for _ in range(5):
+                    _ = (arr & _REQUIRED_MASK) == _REQUIRED_MASK
+                t1 = time.perf_counter_ns()
+                best = min(best, (t1 - t0) / (5 * n))  # 5 iterations × n elements
+            return best
 
         t_small = _time_per_elem(small_n)
         t_large = _time_per_elem(large_n)
@@ -215,11 +233,15 @@ class TestThroughputCanary:
             # Warm cache.
             for k in keys[:50]:
                 _ = d[k]
-            t0 = time.perf_counter_ns()
-            for k in keys:
-                _ = d[k]
-            t1 = time.perf_counter_ns()
-            return (t1 - t0) / len(keys)
+            # Best-of-N (min) — robust to shared-runner jitter (DEC-CANARY-MINTIME-001).
+            best = float("inf")
+            for _ in range(_TIMING_REPEATS):
+                t0 = time.perf_counter_ns()
+                for k in keys:
+                    _ = d[k]
+                t1 = time.perf_counter_ns()
+                best = min(best, (t1 - t0) / len(keys))
+            return best
 
         t_small = _time_lookups(small_dict, small_keys)
         t_large = _time_lookups(large_dict, large_keys)
@@ -330,15 +352,19 @@ class TestEvaluateAtomsCanary:
             _ = evaluate_atoms(snap, proximity, prior_history)
 
         def _time_per_call(snapshots: list[IndicatorSnapshot]) -> float:
-            t0 = time.perf_counter_ns()
-            total_mask = 0
-            for snap in snapshots:
-                total_mask |= evaluate_atoms(snap, proximity, prior_history)
-            t1 = time.perf_counter_ns()
-            # Sanity: at least SOME conditions fired across the sample
-            # (else the benchmark might be optimizing the call away).
-            assert total_mask != 0
-            return (t1 - t0) / len(snapshots)
+            # Best-of-N (min) — robust to shared-runner jitter (DEC-CANARY-MINTIME-001).
+            best = float("inf")
+            for _ in range(_TIMING_REPEATS):
+                t0 = time.perf_counter_ns()
+                total_mask = 0
+                for snap in snapshots:
+                    total_mask |= evaluate_atoms(snap, proximity, prior_history)
+                t1 = time.perf_counter_ns()
+                # Sanity: at least SOME conditions fired across the sample
+                # (else the benchmark might be optimizing the call away).
+                assert total_mask != 0
+                best = min(best, (t1 - t0) / len(snapshots))
+            return best
 
         t_small = _time_per_call(small_snapshots)
         t_large = _time_per_call(large_snapshots)

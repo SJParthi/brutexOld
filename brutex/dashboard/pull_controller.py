@@ -38,7 +38,7 @@ expansion.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -287,18 +287,19 @@ def _build_dry_run_adapter(
     return SyntheticDhanAdapter(), NullBarSink()
 
 
-def _build_live_pull_adapter(  # pragma: no cover — live Dhan token + transport + network
+def _build_live_spot_adapter(  # pragma: no cover — live Dhan token + transport + network
     lake_root: Path,
-    instrument: Instrument,
+    instruments: Sequence[Instrument],
 ) -> tuple[MarketAdapter, BarSink]:
-    """Wire the real Dhan client + persisting Parquet sink.
+    """Wire the real Dhan client + a :class:`DhanMarketAdapter` over *instruments*.
 
-    Builds a token-authenticated :class:`~brutex.adapters.dhan.client.DhanClient`
-    over the real ``urllib`` transport, a :class:`~brutex.adapters.dhan.adapter.DhanMarketAdapter`
-    carrying the single pulled *instrument* (its O(1) index must contain the
-    symbol it fetches), and a :class:`~brutex.data.sink.ParquetBarSink` over
-    *lake_root*. ``# pragma: no cover`` — needs real credentials + network,
-    both absent in CI (DEC-VENDOR-PIVOT-001).
+    The single source of the live spot wiring (CLAUDE.md §11 COMMON) — shared
+    by the single-instrument and bulk builders. Builds a token-authenticated
+    :class:`~brutex.adapters.dhan.client.DhanClient` over the real ``urllib``
+    transport, a :class:`~brutex.adapters.dhan.adapter.DhanMarketAdapter`
+    carrying every *instrument* (its O(1) index must contain each symbol it
+    fetches), and a :class:`~brutex.data.sink.ParquetBarSink` over *lake_root*.
+    ``# pragma: no cover`` — needs real credentials + network, absent in CI.
     """
     from brutex.adapters.dhan.adapter import DhanMarketAdapter
     from brutex.adapters.dhan.auth import resolve_dhan_credentials
@@ -312,9 +313,199 @@ def _build_live_pull_adapter(  # pragma: no cover — live Dhan token + transpor
         client_id=creds.client_id,
         transport=urllib_transport,
     )
-    adapter = DhanMarketAdapter(client=client, instruments=(instrument,))
+    adapter = DhanMarketAdapter(client=client, instruments=tuple(instruments))
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
     return adapter, sink
+
+
+def _build_live_pull_adapter(  # pragma: no cover — thin single-instrument wrapper
+    lake_root: Path,
+    instrument: Instrument,
+) -> tuple[MarketAdapter, BarSink]:
+    """Live ``(adapter, sink)`` for a single-instrument pull (wraps the shared builder)."""
+    return _build_live_spot_adapter(lake_root, (instrument,))
+
+
+#: A factory that builds the ``(adapter, sink)`` pair for a BULK pull, given
+#: the lake root + ALL the instruments being pulled (the live adapter's O(1)
+#: index must contain every symbol it fetches).
+BulkAdapterFactory = Callable[[Path, Sequence[Instrument]], tuple[MarketAdapter, BarSink]]
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolPullResult:
+    """Per-symbol completed / failed / no-data interval counts for a bulk pull."""
+
+    symbol: str
+    completed: int
+    failed: int
+    no_data: int
+
+
+@dataclass(slots=True)
+class BulkSpotReport:
+    """Result of a :func:`pull_all_spot` call (the one-click bulk-spot button).
+
+    Aggregates the per-symbol outcome across the two fetched intervals
+    (``1m`` + ``1d``) over the full ``[2021-01-01, today]`` range
+    (DEC-DHAN-PULL-SCOPE-001).
+    """
+
+    dry_run: bool
+    start_date: str
+    end_date: str
+    symbols: list[SymbolPullResult] = field(default_factory=list)
+
+    @property
+    def total_symbols(self) -> int:
+        """Number of instruments pulled."""
+        return len(self.symbols)
+
+    @property
+    def total_completed(self) -> int:
+        """Total ``(symbol, interval)`` pairs that fetched at least one bar."""
+        return sum(s.completed for s in self.symbols)
+
+    @property
+    def total_failed(self) -> int:
+        """Total pairs quarantined on a terminal error."""
+        return sum(s.failed for s in self.symbols)
+
+    @property
+    def total_no_data(self) -> int:
+        """Total pairs the vendor returned empty."""
+        return sum(s.no_data for s in self.symbols)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly dict for the ``/api/v1/universe/pull-all`` route."""
+        return {
+            "dry_run": self.dry_run,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "total_symbols": self.total_symbols,
+            "total_completed": self.total_completed,
+            "total_failed": self.total_failed,
+            "total_no_data": self.total_no_data,
+            "symbols": [
+                {
+                    "symbol": s.symbol,
+                    "completed": s.completed,
+                    "failed": s.failed,
+                    "no_data": s.no_data,
+                }
+                for s in self.symbols
+            ],
+        }
+
+
+def _build_dry_run_bulk_adapter(
+    _lake_root: Path,
+    _instruments: Sequence[Instrument],
+) -> tuple[MarketAdapter, BarSink]:
+    """Build the offline ``(SyntheticDhanAdapter, NullBarSink)`` pair for a bulk pull."""
+    return SyntheticDhanAdapter(), NullBarSink()
+
+
+def _build_live_bulk_adapter(  # pragma: no cover — thin bulk wrapper
+    lake_root: Path,
+    instruments: Sequence[Instrument],
+) -> tuple[MarketAdapter, BarSink]:
+    """Live ``(adapter, sink)`` for a bulk pull (wraps the shared builder over all instruments)."""
+    return _build_live_spot_adapter(lake_root, instruments)
+
+
+def pull_all_spot(
+    instruments: Sequence[Instrument],
+    *,
+    lake_root: Path,
+    dry_run: bool,
+    now: datetime | None = None,
+    adapter_factory: BulkAdapterFactory | None = None,
+) -> BulkSpotReport:
+    """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, today]`` range.
+
+    The one-click "⤓ Pull ALL indices / stocks spot" button core: one
+    :func:`~brutex.adapters.dhan.run_ingest.run_dhan_spot_ingest` pass over
+    the whole *instruments* list and the fetched base intervals
+    (:data:`DHAN_FETCH_INTERVALS` — ``1m`` + ``1d``), so the live adapter is
+    built ONCE with the full universe (O(1) index) and the fan-out quarantines
+    a bad symbol without sinking the rest. An empty list is a clean no-op.
+
+    Parameters
+    ----------
+    instruments
+        Every index (or stock) spot :class:`Instrument` to pull.
+    lake_root
+        Lake directory the live sink writes Parquet into.
+    dry_run
+        When ``True`` use the offline synthetic adapter (no creds / network).
+    now
+        Injected "current" instant (defaults to :func:`datetime.now`) — its
+        UTC date is the upper bound of the full ``[2021-01-01, today]`` window.
+    adapter_factory
+        Override the bulk ``(adapter, sink)`` builder; defaults to the
+        synthetic builder when *dry_run* else the live builder.
+
+    Returns
+    -------
+    BulkSpotReport
+        Per-symbol completed / failed / no-data counts + the aggregate totals.
+    """
+    instruments = list(instruments)
+    start, end = resolve_candle_range(
+        from_date=DHAN_HISTORY_FLOOR.isoformat(),
+        to_date=None,
+        year=None,
+        now=now if now is not None else datetime.now(UTC),
+    )
+    if adapter_factory is None:
+        adapter_factory = _build_dry_run_bulk_adapter if dry_run else _build_live_bulk_adapter
+    adapter, sink = adapter_factory(lake_root, instruments)
+
+    _LOG.info(
+        "universe.pull_all.start",
+        instruments=len(instruments),
+        start_date=start.date().isoformat(),
+        dry_run=dry_run,
+    )
+    report = run_dhan_spot_ingest(
+        adapter,
+        sink,
+        instruments=instruments,
+        intervals=DHAN_FETCH_INTERVALS,
+        start=start.date(),
+        end=end.date(),
+    )
+    failure_keys = {(f.symbol, f.interval) for f in report.failures}
+    results: list[SymbolPullResult] = []
+    for instrument in instruments:
+        symbol = instrument.vendor_symbol
+        completed = failed = no_data = 0
+        for fetch_interval, _label in _FETCH_INTERVAL_LABELS:
+            key = (symbol, fetch_interval)
+            if key in failure_keys:
+                failed += 1
+            elif report.pairs[key].bars_appended > 0:
+                completed += 1
+            else:
+                no_data += 1
+        results.append(
+            SymbolPullResult(symbol=symbol, completed=completed, failed=failed, no_data=no_data)
+        )
+    bulk = BulkSpotReport(
+        dry_run=dry_run,
+        start_date=start.date().isoformat(),
+        end_date=(end - timedelta(days=1)).date().isoformat(),
+        symbols=results,
+    )
+    _LOG.info(
+        "universe.pull_all.done",
+        instruments=bulk.total_symbols,
+        completed=bulk.total_completed,
+        failed=bulk.total_failed,
+        dry_run=dry_run,
+    )
+    return bulk
 
 
 def pull_candles(
@@ -455,9 +646,13 @@ __all__ = [
     "DHAN_FETCH_INTERVALS",
     "DHAN_HISTORY_FLOOR",
     "AdapterFactory",
+    "BulkAdapterFactory",
+    "BulkSpotReport",
     "PullCandlesReport",
+    "SymbolPullResult",
     "TimeframeResult",
     "dhan_creds_present",
+    "pull_all_spot",
     "pull_candles",
     "resolve_candle_range",
 ]

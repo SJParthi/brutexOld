@@ -19,9 +19,11 @@ from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
 from brutex.dashboard.pull_controller import (
     DHAN_FETCH_INTERVALS,
     DHAN_HISTORY_FLOOR,
+    BulkSpotReport,
     PullCandlesReport,
     TimeframeResult,
     dhan_creds_present,
+    pull_all_spot,
     pull_candles,
     resolve_candle_range,
 )
@@ -417,3 +419,75 @@ class TestPullCandlesDateRange:
                 to_date="2024-04-01",
                 dry_run=True,
             )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# pull_all_spot — the one-click bulk-spot button core (DEC-DHAN-PULL-SCOPE-001)
+# ────────────────────────────────────────────────────────────────────────
+
+_BULK_NOW = datetime(2026, 5, 30, 12, 0, tzinfo=UTC)
+
+
+class TestPullAllSpot:
+    def test_dry_run_bulk_pulls_every_symbol(self, tmp_path: Path) -> None:
+        report = pull_all_spot(
+            [_index("13"), _index("25")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW
+        )
+        assert isinstance(report, BulkSpotReport)
+        assert report.dry_run is True
+        assert report.total_symbols == 2
+        # full 2021 → today window (DEC-DHAN-PULL-SCOPE-001).
+        assert report.start_date == "2021-01-01"
+        assert report.end_date == "2026-05-30"
+        # both fetched intervals (1m + 1d) completed for each symbol → 4 pairs.
+        assert report.total_completed == 4
+        assert report.total_failed == 0
+        assert report.total_no_data == 0
+
+    def test_empty_universe_is_clean_noop(self, tmp_path: Path) -> None:
+        report = pull_all_spot([], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert report.total_symbols == 0
+        assert report.total_completed == 0
+        assert report.to_dict()["symbols"] == []
+
+    def test_no_data_and_failure_branches(self, tmp_path: Path) -> None:
+        # An adapter returning no rows → no_data for both intervals of the symbol.
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
+        )
+        assert report.total_no_data == 2
+        assert report.total_completed == 0
+        assert report.symbols[0].symbol == "13"
+        # A failing adapter → both intervals quarantined.
+        failed = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=lambda _root, _insts: (_FailingAdapter(), NullBarSink()),
+        )
+        assert failed.total_failed == 2
+        assert failed.dry_run is False
+
+    def test_factory_receives_the_full_instrument_list(self, tmp_path: Path) -> None:
+        seen: dict[str, int] = {}
+
+        def factory(lake_root: Path, instruments: object) -> tuple[SyntheticDhanAdapter, BarSink]:
+            seen["count"] = len(list(instruments))  # type: ignore[arg-type]
+            return SyntheticDhanAdapter(), NullBarSink()
+
+        report = pull_all_spot(
+            [_index("13"), _index("25"), _index("99")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            adapter_factory=factory,
+        )
+        assert seen["count"] == 3  # the live adapter must carry every symbol
+        assert report.total_symbols == 3
+        d = report.to_dict()
+        assert d["total_symbols"] == 3 and len(d["symbols"]) == 3

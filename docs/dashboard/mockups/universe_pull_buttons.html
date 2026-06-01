@@ -1,0 +1,227 @@
+<!doctype html>
+<!--
+  BruteX — F&O Universe Explorer · ANIMATED pull-dashboard mockup
+  (DEC-DHAN-PULL-SCOPE-001). Visual design reference for the 8-button pull
+  matrix + the full searchable universe list. Animated KPI count-ups, live
+  progress beam, moving bar-chart, staggered row reveal. Static mockup — the
+  stock list is ILLUSTRATIVE (the live universe loads from the Dhan
+  scrip-master); no live data, no code paths.
+  Spot = 1m + 1d (2021-01-01 → today); options = 1-minute only
+  (ATM±10 idx / ATM±3 stk, WEEK+MONTH × 4 expiryCodes, CE+PE).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BruteX — F&O Universe Explorer</title>
+<style>
+  :root{
+    --bg:#0a0a0c; --panel:#151517; --panel2:#1b1b1f; --border:#2a2a30; --line:#222;
+    --text:#d8d8dd; --bright:#f5f5f7; --muted:#8a8a93;
+    --yellow:#ffb74d; --green:#4ade80; --blue:#60a5fa; --violet:#c084fc; --red:#f87171; --cyan:#22d3ee;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:radial-gradient(1200px 600px at 80% -10%,#16131f 0%,var(--bg) 55%);
+    color:var(--text); font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    min-height:100vh; overflow-x:hidden}
+
+  /* header */
+  header{padding:18px 26px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:14px; position:relative; overflow:hidden}
+  header::after{content:""; position:absolute; left:-30%; top:0; height:2px; width:30%;
+    background:linear-gradient(90deg,transparent,var(--yellow),var(--cyan),transparent);
+    animation:sweep 4s linear infinite}
+  @keyframes sweep{to{left:130%}}
+  .logo{font-size:19px; font-weight:800; color:var(--bright); letter-spacing:.3px}
+  .logo .spark{display:inline-block; animation:pulse 1.8s ease-in-out infinite}
+  @keyframes pulse{0%,100%{transform:scale(1);filter:drop-shadow(0 0 0 rgba(255,183,77,0))}
+    50%{transform:scale(1.18);filter:drop-shadow(0 0 8px rgba(255,183,77,.8))}}
+  .pill{font-size:11px; padding:4px 10px; border-radius:999px; border:1px solid var(--border); color:var(--muted)}
+  .pill.scope{color:var(--yellow); border-color:#4d3a17; background:#1f1810}
+  .pill.o1{color:var(--violet); border-color:#3a2a4d; background:#170f1f}
+  .pill.live{color:var(--green); border-color:#1f4d33; background:#0f1f17}
+  .dot{display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--green);
+    margin-right:5px; box-shadow:0 0 0 0 rgba(74,222,128,.7); animation:beat 1.6s infinite}
+  @keyframes beat{0%{box-shadow:0 0 0 0 rgba(74,222,128,.6)}70%{box-shadow:0 0 0 7px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
+
+  /* KPI tiles */
+  .kpis{display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin:18px 26px 4px}
+  .kpi{background:linear-gradient(180deg,var(--panel2),var(--panel)); border:1px solid var(--border);
+    border-radius:13px; padding:13px 15px; animation:rise .6s both}
+  .kpi .n{font-size:23px; font-weight:800; color:var(--bright); font-variant-numeric:tabular-nums}
+  .kpi .l{font-size:11px; color:var(--muted); margin-top:2px}
+  .kpi .n.y{color:var(--yellow)} .kpi .n.g{color:var(--green)} .kpi .n.b{color:var(--blue)}
+  .kpi .n.v{color:var(--violet)} .kpi .n.c{color:var(--cyan)}
+  @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+
+  .stitle{margin:22px 26px 11px; font-size:12px; letter-spacing:.13em; text-transform:uppercase; color:var(--muted)}
+
+  /* bulk cards */
+  .bulkgrid{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:0 26px}
+  .bulkcard{background:linear-gradient(180deg,var(--panel2),var(--panel)); border:1px solid var(--border);
+    border-radius:15px; padding:18px; position:relative; overflow:hidden; animation:rise .7s both}
+  .bulkcard::before{content:""; position:absolute; inset:0; border-radius:15px; padding:1px;
+    background:linear-gradient(120deg,transparent,rgba(255,183,77,.25),transparent);
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor; mask-composite:exclude; opacity:0; transition:opacity .3s}
+  .bulkcard:hover::before{opacity:1}
+  .bc-row{display:flex; align-items:center; gap:11px; margin-bottom:13px}
+  .ico{width:36px; height:36px; border-radius:10px; display:grid; place-items:center; font-size:17px}
+  .ico.idx{background:#10231a; color:var(--green)} .ico.stk{background:#0f1a2b; color:var(--blue)}
+  .bulkcard h3{margin:0; font-size:14px; color:var(--bright)} .bulkcard .sub{font-size:11.5px; color:var(--muted)}
+  .btnrow{display:flex; gap:10px}
+  .bigbtn{flex:1; cursor:pointer; border:none; border-radius:11px; padding:13px 10px; font-weight:700;
+    font-size:13px; color:#1a1205; background:linear-gradient(135deg,#ffd089,var(--yellow));
+    box-shadow:0 6px 20px rgba(255,183,77,.22); transition:transform .14s,box-shadow .14s; position:relative; overflow:hidden}
+  .bigbtn:hover{transform:translateY(-2px); box-shadow:0 10px 28px rgba(255,183,77,.45)}
+  .bigbtn::after{content:""; position:absolute; top:0; left:-60%; width:40%; height:100%;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.45),transparent); transform:skewX(-20deg); animation:shimmer 3.5s infinite}
+  @keyframes shimmer{0%{left:-60%}55%,100%{left:140%}}
+  .bigbtn.opt{background:linear-gradient(135deg,#d8b3ff,var(--violet)); color:#1a0f24; box-shadow:0 6px 20px rgba(192,132,252,.22)}
+  .bigbtn.opt:hover{box-shadow:0 10px 28px rgba(192,132,252,.45)}
+  .bigbtn small{display:block; font-weight:500; font-size:10.5px; opacity:.82; margin-top:3px}
+
+  /* live progress */
+  .prog{margin:16px 26px 0; background:var(--panel); border:1px solid var(--border); border-radius:13px; padding:15px 17px}
+  .prog .top{display:flex; align-items:center; gap:10px; margin-bottom:9px}
+  .prog .top b{color:var(--bright)}
+  .bar{height:7px; background:#202024; border-radius:7px; overflow:hidden; position:relative}
+  .bar>i{display:block; height:100%; width:0; border-radius:7px;
+    background:linear-gradient(90deg,var(--yellow),var(--green),var(--cyan)); background-size:200% 100%;
+    animation:grow 3.4s ease-out forwards, flow 2s linear infinite}
+  @keyframes grow{to{width:68%}} @keyframes flow{to{background-position:200% 0}}
+  .pstats{display:flex; gap:20px; margin-top:10px; font-size:12px; color:var(--muted); flex-wrap:wrap}
+  .pstats b{color:var(--green); font-variant-numeric:tabular-nums}
+  .spark{display:flex; align-items:flex-end; gap:3px; height:34px; margin-left:auto}
+  .spark i{width:5px; background:linear-gradient(180deg,var(--cyan),var(--blue)); border-radius:2px; animation:eq 1s ease-in-out infinite}
+  @keyframes eq{0%,100%{height:20%}50%{height:100%}}
+
+  /* universe table */
+  .tablewrap{margin:10px 26px 30px; border:1px solid var(--border); border-radius:13px; overflow:hidden}
+  .tbar{display:flex; align-items:center; gap:12px; padding:12px 14px; border-bottom:1px solid var(--line); background:var(--panel)}
+  .tbar .cnt{font-size:12px; color:var(--muted)} .tbar .cnt b{color:var(--yellow)}
+  .search{margin-left:auto; background:#101013; border:1px solid var(--border); border-radius:9px;
+    padding:7px 11px; color:var(--text); font-size:12.5px; width:240px; outline:none}
+  .search:focus{border-color:var(--yellow)}
+  .scroll{max-height:360px; overflow-y:auto}
+  table{width:100%; border-collapse:collapse; font-size:13px}
+  thead th{position:sticky; top:0; background:#111114; color:var(--muted); font-size:11px; letter-spacing:.06em;
+    text-transform:uppercase; text-align:left; padding:9px 14px; border-bottom:1px solid var(--line); z-index:1}
+  td{padding:9px 14px; border-bottom:1px solid #1c1c20}
+  tbody tr{animation:rise .5s both}
+  tbody tr:hover{background:#15151a}
+  .sym{color:var(--bright); font-weight:600} .kind{font-size:11px; color:var(--muted); margin-left:6px}
+  .tag{font-size:10px; padding:2px 7px; border-radius:6px; border:1px solid var(--border); color:var(--muted)}
+  .tag.IDX{color:var(--green); border-color:#1f4d33} .tag.EQ{color:var(--blue); border-color:#1d3a5c}
+  .rowbtn{cursor:pointer; border:1px solid var(--border); background:var(--panel2); color:var(--text);
+    border-radius:8px; padding:6px 11px; font-size:12px; font-weight:600; transition:.14s}
+  .rowbtn:hover{border-color:var(--yellow); color:var(--yellow); transform:translateY(-1px)}
+  .rowbtn.opt:hover{border-color:var(--violet); color:var(--violet)}
+  .sdot{display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px}
+  .sdot.ok{background:var(--green)} .sdot.idle{background:#3a3a40}
+  .foot{margin:0 26px 34px; font-size:11.5px; color:var(--muted)} code{color:var(--yellow)}
+</style>
+</head>
+<body>
+  <header>
+    <span class="logo"><span class="spark">⚡</span> BruteX — F&amp;O Universe Explorer</span>
+    <span class="pill scope">Range 2021-01-01 → today</span>
+    <span class="pill o1">O(1) dedup · zero data loss</span>
+    <span class="pill live"><span class="dot"></span>Dhan creds set — LIVE</span>
+  </header>
+
+  <div class="kpis">
+    <div class="kpi" style="animation-delay:.02s"><div class="n y" data-to="204">0</div><div class="l">Instruments</div></div>
+    <div class="kpi" style="animation-delay:.06s"><div class="n g" data-to="4">0</div><div class="l">Indices</div></div>
+    <div class="kpi" style="animation-delay:.10s"><div class="n b" data-to="200">0</div><div class="l">F&amp;O stocks</div></div>
+    <div class="kpi" style="animation-delay:.14s"><div class="n v" data-to="21">0</div><div class="l">Timeframes</div></div>
+    <div class="kpi" style="animation-delay:.18s"><div class="n c" data-to="1730" data-suffix="d">0</div><div class="l">Days of history</div></div>
+    <div class="kpi" style="animation-delay:.22s"><div class="n" data-to="284" data-suffix="M">0</div><div class="l">Bars in lake</div></div>
+  </div>
+
+  <div class="stitle">Bulk pull — one click pulls the whole universe</div>
+  <div class="bulkgrid">
+    <div class="bulkcard" style="animation-delay:.05s">
+      <div class="bc-row"><div class="ico idx">📈</div><div><h3>All indices</h3><div class="sub">NIFTY · BANKNIFTY · SENSEX · INDIA VIX</div></div></div>
+      <div class="btnrow">
+        <button class="bigbtn">① Pull ALL indices spot<small>1-minute + 1-day</small></button>
+        <button class="bigbtn opt">② Pull ALL indices options<small>1m · ATM±10 · CE+PE · WK+MN×4</small></button>
+      </div>
+    </div>
+    <div class="bulkcard" style="animation-delay:.12s">
+      <div class="bc-row"><div class="ico stk">🏦</div><div><h3>All F&amp;O stocks</h3><div class="sub">~200 NSE F&amp;O-eligible single stocks</div></div></div>
+      <div class="btnrow">
+        <button class="bigbtn">③ Pull ALL stocks spot<small>1-minute + 1-day</small></button>
+        <button class="bigbtn opt">④ Pull ALL stocks options<small>1m · ATM±3 · CE+PE · WK+MN×4</small></button>
+      </div>
+    </div>
+  </div>
+
+  <div class="prog">
+    <div class="top"><b>Pulling ALL indices spot…</b><span class="pill">NIFTY · 1m · 2023</span>
+      <div class="spark" id="spark"></div></div>
+    <div class="bar"><i></i></div>
+    <div class="pstats">
+      <span>symbols <b id="k1">0</b>/4</span><span>bars <b id="k2">0</b></span>
+      <span>completed <b id="k3">0</b></span><span>no-data <b>0</b></span>
+      <span>failed <b>0</b></span><span>O(1) dedup <b>live</b></span>
+      <span>rate <b id="k4">0</b>/s</span>
+    </div>
+  </div>
+
+  <div class="stitle">Per-symbol pull — full universe, click any row (⑤–⑧)</div>
+  <div class="tablewrap">
+    <div class="tbar">
+      <span class="cnt"><b id="shown">204</b> of <b>204</b> instruments</span>
+      <input class="search" id="q" placeholder="🔍 Search symbol (NIFTY, RELIANCE, …)" oninput="render(this.value)">
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Symbol</th><th>Type</th><th>Spot (1m + 1d)</th><th>Expired options (1m)</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="foot">
+    Every button → <code>2021-01-01 → today</code> · spot <code>1m + 1d</code> (19 TFs auto-derived),
+    options <code>1-minute</code> only · session <code>09:15–15:30 IST</code> · each option bar mapped to its
+    underlying's live <b>spot</b> + resolved <b>strike</b> · <b>O(1)</b> dedup (blake3 → Bloom → exact-confirm) ·
+    one bad symbol <b>quarantined</b>, the rest keep flowing · dry-run preview when no token, live when creds set.
+    <br>Stock list is illustrative — the live universe is loaded from the Dhan scrip-master.
+  </div>
+
+<script>
+  // count-up KPI tiles
+  document.querySelectorAll('.kpi .n').forEach(el=>{
+    const to=+el.dataset.to, suf=el.dataset.suffix||'', t0=performance.now(), dur=1400;
+    (function tick(t){const p=Math.min(1,(t-t0)/dur), e=1-Math.pow(1-p,3);
+      el.textContent=Math.round(to*e).toLocaleString()+suf; if(p<1)requestAnimationFrame(tick);})(t0);
+  });
+  // live progress counters
+  function ramp(id,to,suf=''){const el=document.getElementById(id),t0=performance.now(),dur=3200;
+    (function tick(t){const p=Math.min(1,(t-t0)/dur),e=1-Math.pow(1-p,3);
+      el.textContent=(to>=1e6?(to*e/1e6).toFixed(2)+' M':Math.round(to*e).toLocaleString())+suf; if(p<1)requestAnimationFrame(tick);})(t0);}
+  ramp('k1',3); ramp('k2',4210000); ramp('k3',6); ramp('k4',52,' M');
+  // spark equaliser
+  const sp=document.getElementById('spark'); for(let i=0;i<14;i++){const b=document.createElement('i');
+    b.style.animationDelay=(i*0.07)+'s'; b.style.height=(20+Math.random()*70)+'%'; sp.appendChild(b);}
+  // full universe (4 indices + ~200 F&O stocks — illustrative)
+  const IDX=[['NIFTY','NSE index'],['BANKNIFTY','NSE index'],['SENSEX','BSE index'],['INDIAVIX','NSE index (ref)']];
+  const STK=("RELIANCE HDFCBANK ICICIBANK INFY TCS SBIN AXISBANK KOTAKBANK ITC LT BHARTIARTL HINDUNILVR BAJFINANCE MARUTI ASIANPAINT HCLTECH WIPRO SUNPHARMA TATAMOTORS TATASTEEL ADANIENT ADANIPORTS ULTRACEMCO TITAN NESTLEIND POWERGRID NTPC ONGC COALINDIA JSWSTEEL GRASIM TECHM BAJAJFINSV DRREDDY CIPLA DIVISLAB EICHERMOT HEROMOTOCO BRITANNIA BPCL IOC HINDALCO M&M SHREECEM UPL APOLLOHOSP BAJAJ-AUTO INDUSINDBK SBILIFE HDFCLIFE DLF DABUR GAIL HAVELLS PIDILITIND SIEMENS BANKBARODA PNB CANBK GODREJCP MARICO BERGEPAINT AMBUJACEM ACC VEDL TATACONSUM LTIM ICICIGI ICICIPRULI SBICARD MUTHOOTFIN BAJAJHLDNG BOSCHLTD ABB CHOLAFIN NAUKRI ZOMATO PAYTM DMART TRENT JUBLFOOD PAGEIND BALKRISIND COFORGE PERSISTENT MPHASIS LTTS TVSMOTOR ASHOKLEY MOTHERSON BHARATFORG CUMMINSIND ABCAPITAL RECLTD PFC IRCTC IRFC HAL BEL MAZDOCK GMRINFRA IDEA INDHOTEL").trim().split(/\s+/);
+  const ALL=IDX.map(([s,k])=>({s,k,t:'IDX'})).concat(STK.map(s=>({s,k:'NSE F&O stock',t:'EQ'})));
+  document.querySelector('.tbar .cnt b').textContent=ALL.length;
+  function render(q=''){q=q.trim().toUpperCase(); const rows=document.getElementById('rows'); rows.innerHTML='';
+    const list=ALL.filter(r=>r.s.includes(q)); document.getElementById('shown').textContent=list.length;
+    list.slice(0,400).forEach((r,i)=>{const tr=document.createElement('tr'); tr.style.animationDelay=(Math.min(i,30)*0.012)+'s';
+      const w=r.t==='IDX'?'ATM±10':'ATM±3'; const sp=r.t==='IDX'?'⑤':'⑦', op=r.t==='IDX'?'⑥':'⑧';
+      tr.innerHTML=`<td><span class="sdot ${i%7?'idle':'ok'}"></span><span class="sym">${r.s}</span><span class="kind">${r.k}</span></td>
+        <td><span class="tag ${r.t}">${r.t}</span></td>
+        <td><button class="rowbtn">${sp} ⤓ Spot 1m+1d</button></td>
+        <td><button class="rowbtn opt">${op} ⤓ Options ${w}</button></td>`;
+      rows.appendChild(tr);});}
+  render();
+</script>
+</body>
+</html>
