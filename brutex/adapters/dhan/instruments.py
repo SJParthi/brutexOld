@@ -6,8 +6,11 @@ Maps a row of Dhan's ``api-scrip-master-detailed.csv``
 the rest of BruteX consumes). The full verified column set is captured in
 ``docs/dhan-ref/09``; every field BruteX needs — identity, classification,
 **lot size, tick size, freeze quantity**, expiry, strike, underlying
-linkage — is mapped here. ``SECURITY_ID`` is the numeric key (never
-hardcoded; resolved from the CSV).
+linkage — is mapped here. The raw Dhan ``SECURITY_ID`` (unique only within
+an exchange-segment) is kept as the numeric ``exchange_token`` for the
+candle API; the GLOBAL key ``vendor_symbol`` is exchange-prefixed
+(``f"{exchange}-{trading_symbol}"``) so an NSE row and a BSE row that share
+a numeric id never collide (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
 
 The **brute-force universe** is selected by :func:`select_universe`:
 - every **index** (NSE indices + BSE SENSEX + INDIA VIX), and
@@ -175,9 +178,12 @@ def parse_instrument_row(row: Mapping[str, str]) -> Instrument:
     """Convert one detailed-CSV row to a normalised :class:`Instrument`.
 
     Indices carry ``lot_size``/``tick_size`` of 0 (not directly tradable);
-    options/futures carry expiry + strike. ``SECURITY_ID`` becomes both the
-    numeric ``exchange_token`` and the string ``vendor_symbol`` (the Dhan
-    API key).
+    options/futures carry expiry + strike. The raw Dhan ``SECURITY_ID``
+    becomes the numeric ``exchange_token`` (the id the candle API needs);
+    ``vendor_symbol`` is the exchange-prefixed GLOBAL key
+    ``f"{exchange}-{trading_symbol}"`` (``SECURITY_ID`` is unique only within
+    an exchange-segment, so it is unsafe as a global key — see
+    DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
 
     Raises
     ------
@@ -207,11 +213,22 @@ def parse_instrument_row(row: Mapping[str, str]) -> Instrument:
     trading_symbol = (
         underlying if (itype is InstrumentType.EQ and underlying is not None) else symbol_name
     )
+    # ``vendor_symbol`` is the GLOBALLY-UNIQUE instrument key the store PK +
+    # adapter index rely on. Dhan ``SECURITY_ID`` is unique only WITHIN an
+    # exchange-segment (an NSE row and a BSE row can share the same numeric
+    # id — e.g. ``13`` on both), so it is NOT safe as a global key: keying on
+    # it alone caused a PRIMARY-KEY collision (duplicate ``"13"``) on load.
+    # We follow the proven tickvault identity model — an instrument is keyed by
+    # its (exchange-segment, security_id) pair, never the bare id — and the
+    # BruteX-wide contract that ``vendor_symbol`` is exchange-prefixed
+    # (``"NSE-NIFTY"`` / ``"BSE-SENSEX"``; see ``test_pull_symbol_is_exchange_prefixed``).
+    # The RAW Dhan id the candle API needs is preserved separately in
+    # ``exchange_token`` (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
     return Instrument(
         exchange=Exchange(exch),
         exchange_token=_to_int(security_id, "SECURITY_ID"),
         trading_symbol=trading_symbol,
-        vendor_symbol=security_id,
+        vendor_symbol=f"{exch}-{trading_symbol}",
         name=_opt_str(row.get("DISPLAY_NAME")),
         instrument_type=itype,
         segment=segment,

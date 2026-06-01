@@ -69,8 +69,8 @@ class TestParseRow:
     def test_equity_spot(self) -> None:
         inst = parse_instrument_row(_row(SM_FREEZE_QTY="100000"))
         assert inst.exchange is Exchange.NSE
-        assert inst.exchange_token == 13
-        assert inst.vendor_symbol == "13"
+        assert inst.exchange_token == 13  # raw Dhan SECURITY_ID (for the candle API)
+        assert inst.vendor_symbol == "NSE-RELIANCE"  # exchange-prefixed GLOBAL key
         assert inst.trading_symbol == "RELIANCE"
         assert inst.instrument_type is InstrumentType.EQ
         assert inst.segment is Segment.CASH
@@ -136,6 +136,25 @@ class TestParseRow:
 
     def test_lot_size_accepts_float_string(self) -> None:
         assert parse_instrument_row(_row(LOT_SIZE="50.0")).lot_size == 50
+
+    def test_vendor_symbol_is_exchange_prefixed_global_key(self) -> None:
+        # Regression for the live "duplicate key 13" crash
+        # (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001): Dhan SECURITY_ID is unique only
+        # within an exchange-segment, so an NSE row and a BSE row can share the
+        # same numeric id. vendor_symbol must therefore be exchange-prefixed
+        # (the global store/index key), while exchange_token keeps the raw id.
+        nse = parse_instrument_row(
+            _row(INSTRUMENT="INDEX", EXCH_ID="NSE", SYMBOL_NAME="NIFTY", SECURITY_ID="13")
+        )
+        bse = parse_instrument_row(
+            _row(INSTRUMENT="INDEX", EXCH_ID="BSE", SYMBOL_NAME="SENSEX", SECURITY_ID="13")
+        )
+        # Same raw SECURITY_ID on both exchanges …
+        assert nse.exchange_token == bse.exchange_token == 13
+        # … but DISTINCT global keys → no PRIMARY KEY collision on upsert.
+        assert nse.vendor_symbol == "NSE-NIFTY"
+        assert bse.vendor_symbol == "BSE-SENSEX"
+        assert nse.vendor_symbol != bse.vendor_symbol
 
     def test_reserved_from_asm_flag(self) -> None:
         assert parse_instrument_row(_row(ASM_GSM_FLAG="ASM")).is_reserved is True
@@ -351,6 +370,7 @@ class TestClassifyOffInstrumentColumn:
         ]
         report = select_universe_report(rows)
         assert [i.trading_symbol for i in report.universe] == ["RELIANCE"]
-        assert [i.vendor_symbol for i in report.universe] == [
-            "2885"
-        ]  # the real spot, not the decoy
+        # the real spot (raw SECURITY_ID 2885), not the decoy (55555); the
+        # global key is exchange-prefixed (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
+        assert [i.exchange_token for i in report.universe] == [2885]
+        assert [i.vendor_symbol for i in report.universe] == ["NSE-RELIANCE"]
