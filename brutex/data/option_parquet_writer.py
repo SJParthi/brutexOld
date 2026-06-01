@@ -43,9 +43,6 @@ from brutex.money import round_money
 
 if TYPE_CHECKING:
     import polars as pl
-    from polars.datatypes import DataType, DataTypeClass
-
-    type _PolarsDType = DataTypeClass | DataType
 
 #: Subdirectory under the lake root holding the expired-options table.
 _OPTIONS_SUBDIR: str = "options"
@@ -173,20 +170,15 @@ def _render_df(bars: Sequence[OptionBar]) -> pl.DataFrame:
         "spot": [_opt_money(b.spot) for b in bars],
         "iv": [None if b.iv is None else float(b.iv) for b in bars],  # NOT money — full precision
     }
-    schema: dict[str, _PolarsDType] = {
-        "timestamp": pl.Datetime(time_unit="us", time_zone="UTC"),
-        "open": pl.Float64,
-        "high": pl.Float64,
-        "low": pl.Float64,
-        "close": pl.Float64,
-        "volume": pl.Int64,
-        "open_interest": pl.Int64,
-        "side": pl.Utf8,
-        "strike": pl.Float64,
-        "spot": pl.Float64,
-        "iv": pl.Float64,
-    }
-    return pl.DataFrame(rows, schema=schema)
+    # polars infers timestamp→Datetime(us, UTC), prices→Float64, side→Utf8.
+    # An all-None batch infers a column as Null, so pin the nullable fields to
+    # their stable lake dtypes (cast is a no-op when already typed).
+    return pl.DataFrame(rows).with_columns(
+        pl.col("open_interest").cast(pl.Int64),
+        pl.col("strike").cast(pl.Float64),
+        pl.col("spot").cast(pl.Float64),
+        pl.col("iv").cast(pl.Float64),
+    )
 
 
 def _atomic_write_parquet(dest: Path, df: pl.DataFrame) -> None:
