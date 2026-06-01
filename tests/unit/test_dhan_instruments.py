@@ -554,7 +554,7 @@ class TestTickvaultParity:
 
 
 class TestIndexAllowList:
-    """Only the curated headline indices are admitted — the 30 NSE Index-tab
+    """Only the curated headline indices are admitted — the 31 NSE Index-tab
     symbols + BSE SENSEX — NOT all ~194 INDEX rows (DEC-DHAN-INDEX-ALLOWLIST-001).
     """
 
@@ -587,3 +587,16 @@ class TestIndexAllowList:
         assert _is_admitted_index("BSE", "SENSEX") is True
         assert _is_admitted_index("BSE", "BANKEX") is False
         assert _is_admitted_index("MCX", "GOLD") is False  # neither NSE nor BSE
+
+    def test_nifty_midcap100_admitted_31_nse(self) -> None:
+        # DEC-DHAN-INDEX-ALLOWLIST-002 (tickvault parity): Nifty Midcap 100 is
+        # admitted → 31 NSE tokens + BSE SENSEX = 32 total.
+        from brutex.adapters.dhan.instruments import (
+            _ADMITTED_BSE_INDEX_SYMBOLS,
+            _ADMITTED_NSE_INDEX_SYMBOLS,
+            _is_admitted_index,
+        )
+
+        assert _is_admitted_index("NSE", "NIFTY MID100 FREE") is True
+        assert len(_ADMITTED_NSE_INDEX_SYMBOLS) == 31
+        assert len(_ADMITTED_NSE_INDEX_SYMBOLS | _ADMITTED_BSE_INDEX_SYMBOLS) == 32
