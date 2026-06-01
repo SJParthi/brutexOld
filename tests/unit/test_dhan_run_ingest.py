@@ -283,3 +283,25 @@ def test_rate_feedback_hooks_threaded(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     # Both pairs got the same hooks.
     assert seen == [(rl, ok), (rl, ok)]
+
+
+def test_on_progress_fires_per_pair_success_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """on_progress fires once per pair: (label, bars, failed) — both branches."""
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+        if instrument.vendor_symbol == "BAD":
+            raise DhanNotFoundError("DH-902 gone")
+        return IngestReport(windows=1, bars_appended=7, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    events: list[tuple[str, int, bool]] = []
+    run_dhan_spot_ingest(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        instruments=[_index("13"), _index("BAD")],
+        intervals=["1minute"],
+        start=_START,
+        end=_END,
+        on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
+    )
+    assert events == [("13 1minute", 7, False), ("BAD 1minute", 0, True)]

@@ -47,7 +47,7 @@ from typing import Any, Final
 import structlog
 
 from brutex.adapters.dhan.auth import dhan_creds_present
-from brutex.adapters.dhan.run_ingest import run_dhan_spot_ingest
+from brutex.adapters.dhan.run_ingest import ProgressHook, run_dhan_spot_ingest
 from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.sink import BarSink, NullBarSink
@@ -451,6 +451,7 @@ def pull_all_spot(
     dry_run: bool,
     now: datetime | None = None,
     adapter_factory: BulkAdapterFactory | None = None,
+    on_progress: ProgressHook | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, today]`` range.
 
@@ -510,6 +511,7 @@ def pull_all_spot(
         pace=pace,
         on_rate_limit=on_rate_limit,
         on_success=on_success,
+        on_progress=on_progress,
     )
     failure_keys = {(f.symbol, f.interval) for f in report.failures}
     results: list[SymbolPullResult] = []
@@ -552,6 +554,7 @@ def pull_candles(
     to_date: str | None = None,
     dry_run: bool,
     adapter_factory: AdapterFactory | None = None,
+    on_progress: ProgressHook | None = None,
 ) -> PullCandlesReport:
     """Ingest *instrument*'s spot candles over a date range (Dhan model).
 
@@ -646,6 +649,7 @@ def pull_candles(
         pace=pace,
         on_rate_limit=on_rate_limit,
         on_success=on_success,
+        on_progress=on_progress,
     )
 
     failure_keys = {(f.symbol, f.interval) for f in report.failures}

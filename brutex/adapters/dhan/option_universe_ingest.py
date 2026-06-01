@@ -24,7 +24,7 @@ brute-force engine still sweeps only the 3 indices (CLAUDE.md §3; DEC-P0-063).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 
@@ -57,6 +57,12 @@ DEFAULT_EXPIRY_CODES: tuple[int, ...] = (1, 2, 3)
 
 #: The report key for one fanned-out series.
 SeriesKey = tuple[str, str, int, str, str]
+
+#: Live-progress hook fired once per **underlying** after its whole fan-out is
+#: done: ``(label, bars_appended, any_failed)``. Lets a caller stream real-time
+#: progress (e.g. into a ``PullProgress`` tracker) without coupling this layer
+#: to the dashboard (DEC-PULL-PROGRESS-TRACKER-001).
+ProgressHook = Callable[[str, int, bool], None]
 
 
 def strike_window(offsets: int) -> list[str]:
@@ -155,6 +161,7 @@ def run_dhan_options_ingest(
     option_types: Sequence[str] = DRV_OPTION_TYPES,
     required_data: Sequence[str] = ALL_REQUIRED_DATA,
     pace: Pacer | None = None,
+    on_progress: ProgressHook | None = None,
 ) -> OptionsUniverseReport:
     """Fan out the rolling-option pull over the whole options universe.
 
@@ -180,6 +187,10 @@ def run_dhan_options_ingest(
         Fields to request (defaults to every documented field).
     pace
         Optional per-window pacing hook, threaded into each series.
+    on_progress
+        Optional live-progress hook fired once per **underlying** after its
+        whole fan-out completes: ``(security_id, bars_appended, any_failed)``.
+        Lets the dashboard stream real-time progress (DEC-PULL-PROGRESS-TRACKER-001).
 
     Returns
     -------
@@ -191,6 +202,8 @@ def run_dhan_options_ingest(
     failures: list[OptionSeriesFailure] = []
     for underlying in underlyings:
         strikes = strike_window(underlying.strike_offsets)
+        underlying_bars = 0
+        underlying_failed = False
         for expiry_flag in expiry_flags:
             for expiry_code in expiry_codes:
                 for strike in strikes:
@@ -203,7 +216,7 @@ def run_dhan_options_ingest(
                             drv_option_type,
                         )
                         try:
-                            series[key] = ingest_rolling_option_series(
+                            report = ingest_rolling_option_series(
                                 client,
                                 sink,
                                 security_id=underlying.security_id,
@@ -229,6 +242,13 @@ def run_dhan_options_ingest(
                                     error=str(exc),
                                 )
                             )
+                            underlying_failed = True
+                            continue
+                        series[key] = report
+                        underlying_bars += report.bars_appended
+        # Fire the live-progress hook once the WHOLE underlying fan-out is done.
+        if on_progress is not None:
+            on_progress(underlying.security_id, underlying_bars, underlying_failed)
     return OptionsUniverseReport(series=series, failures=tuple(failures))
 
 
@@ -239,6 +259,7 @@ __all__ = [
     "OptionSeriesFailure",
     "OptionUnderlying",
     "OptionsUniverseReport",
+    "ProgressHook",
     "SeriesKey",
     "run_dhan_options_ingest",
     "strike_window",

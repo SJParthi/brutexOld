@@ -199,3 +199,38 @@ def test_custom_axes_narrow_the_fanout() -> None:
     assert client.calls == 1
     key = ("13", "MONTH", 0, "ATM", "CALL")
     assert key in report.series
+
+
+def test_on_progress_fires_per_underlying_success() -> None:
+    """on_progress fires once per underlying with (id, bars, any_failed=False)."""
+    events: list[tuple[str, int, bool]] = []
+    run_dhan_options_ingest(
+        _OkClient(),
+        _Sink(),
+        underlyings=[_index("13", offsets=0)],
+        start=date(2021, 1, 4),
+        end=date(2021, 1, 5),
+        expiry_flags=("WEEK",),
+        expiry_codes=(1,),
+        option_types=("CALL",),
+        on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
+    )
+    # 1 series × 1 in-session CE bar → 1 bar appended, nothing failed.
+    assert events == [("13", 1, False)]
+
+
+def test_on_progress_flags_failed_underlying() -> None:
+    """A wholly-failing underlying fires on_progress with (id, 0, True)."""
+    events: list[tuple[str, int, bool]] = []
+    run_dhan_options_ingest(
+        _FailClient(),
+        _Sink(),
+        underlyings=[_index("13", offsets=0)],
+        start=date(2021, 1, 4),
+        end=date(2021, 1, 5),
+        expiry_flags=("WEEK",),
+        expiry_codes=(1,),
+        option_types=("CALL",),
+        on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
+    )
+    assert events == [("13", 0, True)]

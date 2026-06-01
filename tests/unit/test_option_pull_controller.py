@@ -231,6 +231,23 @@ class TestPullOptions:
         )
         assert report.symbols[0].series_completed == 21  # 21 strikes × 1 × 1 × 1
 
+    def test_on_progress_forwarded_to_driver(self) -> None:
+        """pull_options threads on_progress → fires once per underlying (dry-run)."""
+        events: list[tuple[str, int, bool]] = []
+        pull_options(
+            [_index(symbol="13"), _stock(symbol="1333")],
+            lake_root=Path("/unused"),
+            dry_run=True,
+            now=_NOW,
+            expiry_flags=("WEEK",),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+            on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
+        )
+        # One event per underlying, in order, each with bars>0 and not failed.
+        assert [e[0] for e in events] == ["13", "1333"]
+        assert all(bars > 0 and failed is False for _, bars, failed in events)
+
     def test_now_defaults_to_wall_clock(self) -> None:
         """Omitting *now* uses the real clock — the window still starts at the floor."""
         report = pull_options(
