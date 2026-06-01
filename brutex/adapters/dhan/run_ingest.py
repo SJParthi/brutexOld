@@ -23,9 +23,9 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
 
-from brutex.adapters.dhan.adapter import DhanMarketAdapter
 from brutex.adapters.dhan.errors import DhanError
 from brutex.adapters.dhan.ingest import IngestReport, Pacer, ingest_spot
+from brutex.adapters.protocol import MarketAdapter
 from brutex.data.sink import BarSink
 from brutex.models import Instrument
 
@@ -68,7 +68,7 @@ class DhanIngestReport:
 
 
 def run_dhan_spot_ingest(
-    adapter: DhanMarketAdapter,
+    adapter: MarketAdapter,
     sink: BarSink,
     *,
     instruments: Iterable[Instrument],

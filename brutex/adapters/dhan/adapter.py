@@ -36,6 +36,7 @@ from brutex.adapters.protocol import (
     DerivativeContract,
     InstrumentPage,
     MarketCapabilities,
+    single_instrument_page,
 )
 from brutex.data.models import CandleBar
 from brutex.models import Exchange, Instrument, InstrumentType, OutOfScopeError
@@ -85,9 +86,7 @@ class DhanMarketAdapter:
 
     def list_instruments(self, *, cursor: str | None = None) -> InstrumentPage:
         """Return the whole static universe in one page (paginated cursors exhausted)."""
-        if cursor is not None:
-            return InstrumentPage(instruments=(), next_cursor=None)
-        return InstrumentPage(instruments=self.instruments, next_cursor=None)
+        return single_instrument_page(self.instruments, cursor)
 
     def list_derivatives(
         self, *, underlying_symbol: str, exchange: Exchange
