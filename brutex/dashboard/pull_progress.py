@@ -1,0 +1,197 @@
+"""Live pull-progress tracker — O(1) thread-safe state for the real-time feed.
+
+The shared progress state the dashboard's **live** pull view reads while a
+``pull_all_spot`` / ``pull_options`` run is in flight (DEC-UNIVERSE-DASHBOARD-BUTTONS-001
+follow-up). A background pull worker pushes O(1) updates
+(:meth:`PullProgress.start` → :meth:`PullProgress.advance` × N →
+:meth:`PullProgress.finish` / :meth:`PullProgress.fail`); the SSE / polling
+route reads an immutable :class:`ProgressSnapshot` via :meth:`PullProgress.snapshot`.
+
+Every mutation + read is **O(1)** (a handful of integer writes under one
+lock — no scans, no per-unit allocation) so the tracker never becomes the
+bottleneck of a 200-symbol universe pull (CLAUDE.md §2 Rule 5). It is
+**thread-safe** (a single :class:`threading.Lock` guards the counters) so the
+worker thread and the reader request can never observe a torn update, and the
+``clock`` is injected so the timestamps are deterministic under test.
+
+State machine (one pull job): ``idle → running → done`` (clean) or
+``idle → running → error`` (terminal failure). ``start`` resets to ``running``
+so the **same** tracker instance is reusable across re-clicks (idempotent —
+CLAUDE.md §2 Rule 7).
+"""
+
+from __future__ import annotations
+
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Final
+
+#: The four lifecycle states a pull job moves through.
+STATE_IDLE: Final[str] = "idle"
+STATE_RUNNING: Final[str] = "running"
+STATE_DONE: Final[str] = "done"
+STATE_ERROR: Final[str] = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressSnapshot:
+    """An immutable point-in-time view of a pull job's progress.
+
+    Attributes
+    ----------
+    state
+        One of :data:`STATE_IDLE` / :data:`STATE_RUNNING` / :data:`STATE_DONE`
+        / :data:`STATE_ERROR`.
+    total
+        Total units of work (symbols for a spot pull, underlyings for an
+        options fan-out). ``0`` before the first :meth:`PullProgress.start`.
+    completed, failed
+        Units finished cleanly / quarantined so far (``completed`` counts both
+        clean and failed units — it is the units *processed*).
+    bars
+        Running total of bars/rows appended so far.
+    current
+        Label of the unit most recently processed (e.g. the symbol).
+    detail
+        Free-text status / error message (empty unless set).
+    updated_at
+        The injected clock's value at the last mutation.
+    """
+
+    state: str
+    total: int
+    completed: int
+    failed: int
+    bars: int
+    current: str
+    detail: str
+    updated_at: float
+
+    @property
+    def percent(self) -> float:
+        """Completion percentage in ``[0, 100]`` — ``0.0`` when *total* is 0."""
+        if self.total <= 0:
+            return 0.0
+        return min(100.0, round(self.completed / self.total * 100.0, 1))
+
+    @property
+    def running(self) -> bool:
+        """``True`` iff the job is currently in flight."""
+        return self.state == STATE_RUNNING
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly dict for the SSE / polling progress route."""
+        return {
+            "state": self.state,
+            "total": self.total,
+            "completed": self.completed,
+            "failed": self.failed,
+            "bars": self.bars,
+            "current": self.current,
+            "detail": self.detail,
+            "percent": self.percent,
+            "running": self.running,
+            "updated_at": self.updated_at,
+        }
+
+
+def _monotonic() -> float:
+    """Default clock — the monotonic wall clock (injected for testability)."""
+    import time
+
+    return time.monotonic()
+
+
+class PullProgress:
+    """Thread-safe, O(1) progress state for one live pull job.
+
+    Parameters
+    ----------
+    clock
+        Zero-arg time source stamped on every mutation (defaults to
+        :func:`time.monotonic`). Injected so tests are deterministic.
+    """
+
+    def __init__(self, *, clock: Callable[[], float] = _monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._state = STATE_IDLE
+        self._total = 0
+        self._completed = 0
+        self._failed = 0
+        self._bars = 0
+        self._current = ""
+        self._detail = ""
+        self._updated_at = 0.0
+
+    def start(self, *, total: int, detail: str = "") -> None:
+        """Begin a job of *total* units — resets all counters to ``running``.
+
+        Reusable: calling :meth:`start` again resets the same instance for a
+        fresh pull (idempotent re-click, CLAUDE.md §2 Rule 7). A negative
+        *total* is clamped to ``0``. O(1).
+        """
+        with self._lock:
+            self._state = STATE_RUNNING
+            self._total = max(0, total)
+            self._completed = 0
+            self._failed = 0
+            self._bars = 0
+            self._current = ""
+            self._detail = detail
+            self._updated_at = self._clock()
+
+    def advance(self, *, current: str = "", bars: int = 0, failed: bool = False) -> None:
+        """Record one processed unit — O(1).
+
+        Increments ``completed`` (clamped to ``total``), adds *bars* to the
+        running total, bumps ``failed`` when *failed* is true, and stamps
+        *current* as the most-recent label.
+        """
+        with self._lock:
+            self._completed = min(self._total, self._completed + 1)
+            self._bars += max(0, bars)
+            if failed:
+                self._failed += 1
+            if current:
+                self._current = current
+            self._updated_at = self._clock()
+
+    def finish(self, *, detail: str = "") -> None:
+        """Mark the job cleanly complete (``done``) — O(1)."""
+        with self._lock:
+            self._state = STATE_DONE
+            self._detail = detail
+            self._updated_at = self._clock()
+
+    def fail(self, detail: str) -> None:
+        """Mark the job terminally failed (``error``) with a reason — O(1)."""
+        with self._lock:
+            self._state = STATE_ERROR
+            self._detail = detail
+            self._updated_at = self._clock()
+
+    def snapshot(self) -> ProgressSnapshot:
+        """Return an immutable, consistent O(1) view of the current state."""
+        with self._lock:
+            return ProgressSnapshot(
+                state=self._state,
+                total=self._total,
+                completed=self._completed,
+                failed=self._failed,
+                bars=self._bars,
+                current=self._current,
+                detail=self._detail,
+                updated_at=self._updated_at,
+            )
+
+
+__all__ = [
+    "STATE_DONE",
+    "STATE_ERROR",
+    "STATE_IDLE",
+    "STATE_RUNNING",
+    "ProgressSnapshot",
+    "PullProgress",
+]
