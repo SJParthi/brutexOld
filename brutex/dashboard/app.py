@@ -860,6 +860,7 @@ def build_app(
         _LOG.info("universe.pull_all.requested", kind=kind, count=len(instruments), dry_run=dry_run)
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: bulk-pull every selected spot symbol, streaming progress."""
             return pull_all_spot(
                 instruments, lake_root=lake_root, dry_run=dry_run, on_progress=on_progress
             )
@@ -911,6 +912,7 @@ def build_app(
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: fan the options pull over the targets, streaming progress."""
             return pull_options(
                 instruments, lake_root=lake_root, dry_run=dry_run, on_progress=on_progress
             )
