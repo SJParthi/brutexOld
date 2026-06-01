@@ -58,6 +58,7 @@ from brutex.dashboard.db_view import (
 )
 from brutex.dashboard.option_pull_controller import pull_options
 from brutex.dashboard.pull_controller import dhan_creds_present, pull_all_spot, pull_candles
+from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.models import Instrument
@@ -836,59 +837,53 @@ def build_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # The single-flight background pull job that powers the LIVE feed
+    # (DEC-PULL-PROGRESS-LIVE-001): one universe pull at a time across the whole
+    # server; the page polls /pull-progress for the per-unit tick. Owned by this
+    # app instance (no module-global mutable state — CLAUDE.md §4).
+    _pull_job = BackgroundPullJob()
+
     @app.post("/api/v1/universe/pull-all")
     async def api_universe_pull_all(kind: str = Query(...)) -> JSONResponse:
-        """POST /api/v1/universe/pull-all?kind=index|stock — bulk SPOT pull.
+        """POST /api/v1/universe/pull-all?kind=index|stock — start a bulk SPOT pull.
 
-        The one-click "⤓ Pull ALL indices / stocks spot" buttons (① / ③). Thin
-        wrapper over :func:`brutex.dashboard.pull_controller.pull_all_spot`: it
-        selects every admitted spot underlying of *kind* and fans the 1m + 1d
-        pull over the full ``[2021-01-01, today]`` range in one pass.
-        ``dry_run`` is forced ``True`` when Dhan creds are absent (offline
-        preview), mirroring the per-symbol pull.
+        The one-click "⤓ Pull ALL indices / stocks spot" buttons (① / ③). Launches
+        :func:`brutex.dashboard.pull_controller.pull_all_spot` (full
+        ``[2021-01-01, today]`` 1m + 1d) on the **background job** so the request
+        returns at once and the page polls ``/pull-progress`` for the live tick.
+        Single-flight: a second start while one runs returns ``{"started": false}``.
+        ``dry_run`` is forced ``True`` when Dhan creds are absent (offline preview).
         """
         dry_run = not dhan_creds_present()
         instruments = _select_bulk_targets(kind)
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
         _LOG.info("universe.pull_all.requested", kind=kind, count=len(instruments), dry_run=dry_run)
-        try:
-            report = pull_all_spot(
-                instruments,
-                lake_root=_resolve_pull_lake_root(instrument_store, dry_run=dry_run),
-                dry_run=dry_run,
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            return pull_all_spot(
+                instruments, lake_root=lake_root, dry_run=dry_run, on_progress=on_progress
             )
-        except Exception as exc:  # surface the REAL reason (DEC-PULL-ERROR-VISIBILITY-001)
-            _LOG.exception(
-                "universe.pull_all.failed",
-                kind=kind,
-                dry_run=dry_run,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
-        _LOG.info(
-            "universe.pull_all.ok",
-            kind=kind,
-            dry_run=dry_run,
-            symbols=report.total_symbols,
-            completed=report.total_completed,
-            failed=report.total_failed,
+
+        # total = symbols × the 2 fetched intervals (1m + 1d) — the unit the hook fires on.
+        started = _pull_job.start(_work, total=len(instruments) * 2, detail=f"{kind} spot")
+        return JSONResponse(
+            {"started": started, "kind": kind, "total": len(instruments) * 2, "dry_run": dry_run}
         )
-        return JSONResponse(report.to_dict())
 
     @app.post("/api/v1/universe/pull-options")
     async def api_universe_pull_options(
         kind: str | None = Query(default=None),
         symbol: str | None = Query(default=None),
     ) -> JSONResponse:
-        """POST /api/v1/universe/pull-options — bulk OR per-symbol OPTIONS pull.
+        """POST /api/v1/universe/pull-options — start a bulk OR per-symbol OPTIONS pull.
 
-        Backs the options buttons (② ④ bulk-by-kind, ⑥ ⑧ per-symbol). Thin
-        wrapper over
-        :func:`brutex.dashboard.option_pull_controller.pull_options`: when
-        ``symbol`` is given it fans options for that one underlying
-        (IDX→OPTIDX±10 / EQ→OPTSTK±3); otherwise it bulk-fans every admitted
-        underlying of ``kind``. Exactly one of ``symbol`` / ``kind`` is
-        required. ``dry_run`` is forced ``True`` when Dhan creds are absent.
+        Backs the options buttons (② ④ bulk-by-kind, ⑥ ⑧ per-symbol). Launches
+        :func:`brutex.dashboard.option_pull_controller.pull_options` on the
+        **background job** (returns at once; poll ``/pull-progress``). When
+        ``symbol`` is given it fans that one underlying (IDX→OPTIDX±10 /
+        EQ→OPTSTK±3); else it bulk-fans every admitted underlying of ``kind``.
+        Exactly one of ``symbol`` / ``kind`` is required. Single-flight + forced
+        ``dry_run`` when Dhan creds are absent, exactly like the spot bulk pull.
         """
         dry_run = not dhan_creds_present()
         if symbol is not None:
@@ -906,6 +901,7 @@ def build_app(
             raise HTTPException(
                 status_code=400, detail="pull-options requires either ?symbol=... or ?kind=..."
             )
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
         _LOG.info(
             "universe.pull_options.requested",
             kind=kind,
@@ -913,33 +909,35 @@ def build_app(
             count=len(instruments),
             dry_run=dry_run,
         )
-        try:
-            report = pull_options(
-                instruments,
-                lake_root=_resolve_pull_lake_root(instrument_store, dry_run=dry_run),
-                dry_run=dry_run,
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            return pull_options(
+                instruments, lake_root=lake_root, dry_run=dry_run, on_progress=on_progress
             )
-        except Exception as exc:  # surface the REAL reason (DEC-PULL-ERROR-VISIBILITY-001)
-            _LOG.exception(
-                "universe.pull_options.failed",
-                kind=kind,
-                symbol=symbol,
-                dry_run=dry_run,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
-        _LOG.info(
-            "universe.pull_options.ok",
-            kind=kind,
-            symbol=symbol,
-            dry_run=dry_run,
-            symbols=report.total_symbols,
-            series_completed=report.total_series_completed,
-            series_failed=report.total_series_failed,
-            bars=report.total_bars,
+
+        # total = one progress tick per underlying (the options hook fires per underlying).
+        started = _pull_job.start(_work, total=len(instruments), detail=f"{kind or symbol} options")
+        return JSONResponse(
+            {
+                "started": started,
+                "kind": kind,
+                "symbol": symbol,
+                "total": len(instruments),
+                "dry_run": dry_run,
+            }
         )
-        return JSONResponse(report.to_dict())
+
+    @app.get("/api/v1/universe/pull-progress")
+    async def api_universe_pull_progress() -> JSONResponse:
+        """GET /api/v1/universe/pull-progress — the LIVE per-unit pull snapshot.
+
+        Returns the background job's O(1)
+        :meth:`brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot` — ``state``
+        (idle/running/done/error), ``total`` / ``completed`` / ``failed`` /
+        ``bars`` / ``percent`` / ``current``. The page polls this while a pull
+        runs to tick the counters window-by-window (DEC-PULL-PROGRESS-LIVE-001).
+        """
+        return JSONResponse(_pull_job.snapshot().to_dict())
 
     # ── Two-phase manual pull (DEC-UNIVERSE-PULL-PHASED-001) ────────
     # The two /universe buttons. Each kicks its phase off in a background
