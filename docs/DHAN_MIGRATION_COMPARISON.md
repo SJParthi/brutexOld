@@ -59,8 +59,8 @@ regresses, the change is blocked. Nothing ships on trust.
 | **Pull · routes** — `/pull-all` + `/pull-options` routes + pure target selector | all 8 buttons have a backend | ✅ merged |
 | **Pull · live buttons** — animated "Pull the Universe" panel wired into `/universe` | one-click universe (all 8 live) | ✅ merged |
 | **Pull · progress core** — O(1) thread-safe `PullProgress` tracker | the live-feed foundation | ✅ merged |
-| **Pull · progress wiring** — `on_progress` threaded through drivers + controllers | per-unit progress now emits | ⏳ merging |
-| **Pull · SSE route + JS** — subscribe a per-request tracker, tick counters live | token-by-token live feed | 🔜 next |
+| **Pull · progress wiring** — `on_progress` threaded through drivers + controllers | per-unit progress emits | ✅ merged |
+| **Pull · LIVE feed** — background job + `/pull-progress` route + JS that ticks counters | real-time window-by-window | ⏳ merging |
 | **Flip · final** — delete Groww (residual code + deps + docs) | Groww fully gone | 🔜 |
 
 **Honest note:** Groww is **still present** until the final phase — deliberately last,

@@ -1,0 +1,119 @@
+"""Background pull job — run a pull off the request thread, stream live progress.
+
+The glue between a long-running universe pull and the dashboard's **live**
+progress view (DEC-PULL-PROGRESS-WIRING-001 follow-up). A :class:`BackgroundPullJob`
+owns one :class:`~brutex.dashboard.pull_progress.PullProgress` and runs the pull
+work in a background thread, so the HTTP route returns immediately and the page
+polls :meth:`BackgroundPullJob.snapshot` (O(1)) for the per-window tick.
+
+**Single-flight** (CLAUDE.md §2 Rule 7 idempotence at the job level): while a
+pull is running, a second :meth:`start` is a no-op returning ``False`` — two
+universe pulls can never race the same lake. The running flag flips under a
+:class:`threading.Lock`, so the "already running?" check + the reader's
+``running`` read are O(1) and torn-state-free.
+
+The pull *work* is injected as ``Callable[[ProgressHook], object]`` — it
+receives the positional progress hook the ingest drivers already emit
+(``(label, bars, failed)`` — DEC-PULL-PROGRESS-WIRING-001) and the job adapts
+it onto the tracker. **Any** exception in the worker is captured and surfaced as
+the job's ``error`` state (never lost, never crashes the server thread) — the
+one place a broad catch is correct, mirroring the route layer. The thread
+spawner is injected so the whole engine is unit-testable synchronously with no
+real threads.
+"""
+
+from __future__ import annotations
+
+import threading
+from collections.abc import Callable
+
+from brutex.dashboard.pull_progress import ProgressSnapshot, PullProgress
+
+#: The positional progress hook the ingest drivers emit (``label, bars, failed``)
+#: — identical to ``brutex.adapters.dhan.run_ingest.ProgressHook`` but redeclared
+#: here so this layer carries no import from the adapter package.
+ProgressHook = Callable[[str, int, bool], None]
+
+#: The injected pull work — given the progress hook, run the pull (return ignored).
+PullWork = Callable[[ProgressHook], object]
+
+#: The injected thread spawner — runs *fn* off the caller's thread. The default
+#: spawns a daemon thread; tests inject a synchronous runner for determinism.
+Spawner = Callable[[Callable[[], None]], None]
+
+
+def _daemon_spawn(fn: Callable[[], None]) -> None:  # pragma: no cover — real-thread default
+    """Run *fn* in a fire-and-forget daemon thread (the live default)."""
+    threading.Thread(target=fn, daemon=True).start()
+
+
+class BackgroundPullJob:
+    """A single-flight background pull with an O(1) live-progress snapshot.
+
+    Parameters
+    ----------
+    progress
+        The :class:`PullProgress` tracker to drive (a fresh one by default).
+    spawn
+        Thread spawner (defaults to a daemon thread). Inject a synchronous
+        runner in tests for determinism.
+    """
+
+    def __init__(
+        self,
+        *,
+        progress: PullProgress | None = None,
+        spawn: Spawner = _daemon_spawn,
+    ) -> None:
+        self._progress = progress if progress is not None else PullProgress()
+        self._spawn = spawn
+        self._lock = threading.Lock()
+        self._running = False
+
+    def start(self, work: PullWork, *, total: int, detail: str = "") -> bool:
+        """Launch *work* in the background over *total* units; return whether it started.
+
+        Single-flight: returns ``True`` and starts the job when idle; returns
+        ``False`` (a no-op) when a pull is already running. O(1).
+        """
+        with self._lock:
+            if self._running:
+                return False
+            self._running = True
+        self._progress.start(total=total, detail=detail)
+        self._spawn(lambda: self._run(work))
+        return True
+
+    def _run(self, work: PullWork) -> None:
+        """Worker body: run *work*, then mark the tracker done / errored."""
+        try:
+            work(self._on_progress)
+        except Exception as exc:  # report ANY failure to the live feed, never crash the thread
+            self._progress.fail(f"{type(exc).__name__}: {exc}")
+        else:
+            self._progress.finish(detail="done")
+        finally:
+            with self._lock:
+                self._running = False
+
+    def _on_progress(self, label: str, bars: int, failed: bool) -> None:
+        """Adapt the drivers' positional hook onto the tracker's kw advance."""
+        self._progress.advance(current=label, bars=bars, failed=failed)
+
+    @property
+    def running(self) -> bool:
+        """``True`` while a pull is in flight — O(1)."""
+        with self._lock:
+            return self._running
+
+    def snapshot(self) -> ProgressSnapshot:
+        """Return the current O(1) progress snapshot for the polling route."""
+        return self._progress.snapshot()
+
+
+__all__ = [
+    "BackgroundPullJob",
+    "ProgressHook",
+    "PullWork",
+    "Spawner",
+]

@@ -651,10 +651,10 @@ document.getElementById("pullbtn").onclick = () => {
 
 /* ── Per-symbol OPTIONS pull (buttons ⑥ ⑧ — POST /pull-options?symbol=) ──
    Fans the selected underlying's whole option grid (ATM window · CE+PE ·
-   weekly+monthly · near/next/far, 1-minute) via the same animated panel. */
+   weekly+monthly · near/next/far, 1-minute) via the live progress panel. */
 document.getElementById("optbtn").onclick = () => {
   if (!selPullSymbol) return;
-  runOptionsPull('/api/v1/universe/pull-options?symbol=' + encodeURIComponent(selPullSymbol),
+  startAndPoll('/api/v1/universe/pull-options?symbol=' + encodeURIComponent(selPullSymbol),
     `${selInst} options chain`);
 };
 
@@ -677,88 +677,97 @@ BULK_BTNS.forEach(btn => {
       ? '/api/v1/universe/pull-options?kind=' + encodeURIComponent(kind)
       : '/api/v1/universe/pull-all?kind=' + encodeURIComponent(kind);
     const noun = kind === 'index' ? 'indices' : 'stocks';
-    const label = `ALL ${noun} ${surface}`;
-    if (surface === 'options') runOptionsPull(path, label);
-    else runBulkSpot(path, label);
+    startAndPoll(path, `ALL ${noun} ${surface}`);
   });
 });
 
-/* Render the animated pull panel for a BULK SPOT report (pull_all_spot). */
-async function runBulkSpot(path, label) {
-  const panel = document.getElementById('pullpanel');
-  panel.classList.add('on');
-  setBulkDisabled(true);
-  document.getElementById('pulltitle').textContent = `Pulling ${label} · 1m + 1d · 2021 → today`;
-  document.getElementById('tfgrid').innerHTML = '';
-  document.getElementById('counter').textContent = '0';
-  try {
-    const r = await fetch(path, {method: 'POST'});
-    const rep = await r.json();
-    if (!r.ok) throw new Error(rep.detail || ('HTTP ' + r.status));
-    document.getElementById('previewBadge').classList.toggle('on', !!rep.dry_run);
-    document.getElementById('counter').textContent =
-      (rep.total_completed || 0).toLocaleString('en-IN');
-    renderBulkStats([
-      ['symbols', rep.total_symbols, ''],
-      ['completed', rep.total_completed, 'ok'],
-      ['no-data', rep.total_no_data, ''],
-      ['failed', rep.total_failed, (rep.total_failed ? 'bad' : '')],
-    ]);
-    const verb = rep.dry_run ? 'preview-pulled (synthetic)' : 'pulled';
-    document.getElementById('pulltitle').innerHTML =
-      `<span class="spark">✓</span> ${esc(label)} ${verb} — `
-      + `${(rep.total_symbols||0).toLocaleString('en-IN')} symbols (${esc(rep.start_date)} → ${esc(rep.end_date)})`;
-  } catch (e) {
-    document.getElementById('pulltitle').innerHTML =
-      `<span style="color:var(--red)">✕</span> ${esc(label)} failed: ${esc(e.message)}`;
-  } finally {
-    setBulkDisabled(false);
-  }
-}
+/* ── The LIVE feed: start a background pull, then poll /pull-progress ──
+   The pull runs off the request thread (DEC-PULL-PROGRESS-LIVE-001); we POST to
+   start it, then poll the O(1) snapshot every PROGRESS_MS and tick the counter +
+   percentage + stat row in real time until state is done/error. Single-flight:
+   the server returns {started:false} if a pull is already running. */
+const PROGRESS_MS = 600;
+let pollTimer = null;
 
-/* Render the animated pull panel for an OPTIONS report (pull_options) —
-   used by both the bulk options buttons (② ④) and per-symbol (⑥ ⑧). */
-async function runOptionsPull(path, label) {
+async function startAndPoll(path, label) {
   const panel = document.getElementById('pullpanel');
   panel.classList.add('on');
   setBulkDisabled(true);
   document.getElementById('optbtn').disabled = true;
-  document.getElementById('pulltitle').textContent = `Fanning ${label} · CE+PE · WK+MN · 1-minute`;
+  document.getElementById('pulltitle').textContent = `Starting ${label}…`;
   document.getElementById('tfgrid').innerHTML = '';
   document.getElementById('counter').textContent = '0';
   try {
     const r = await fetch(path, {method: 'POST'});
-    const rep = await r.json();
-    if (!r.ok) throw new Error(rep.detail || ('HTTP ' + r.status));
-    document.getElementById('previewBadge').classList.toggle('on', !!rep.dry_run);
-    document.getElementById('counter').textContent =
-      (rep.total_bars || 0).toLocaleString('en-IN');
-    renderBulkStats([
-      ['underlyings', rep.total_symbols, ''],
-      ['series ok', rep.total_series_completed, 'ok'],
-      ['series failed', rep.total_series_failed, (rep.total_series_failed ? 'bad' : '')],
-      ['option bars', rep.total_bars, 'ok'],
-    ]);
-    const verb = rep.dry_run ? 'preview-fanned (synthetic)' : 'fanned';
-    document.getElementById('pulltitle').innerHTML =
-      `<span class="spark">✓</span> ${esc(label)} ${verb} — `
-      + `${(rep.total_series_completed||0).toLocaleString('en-IN')} series · `
-      + `${(rep.total_bars||0).toLocaleString('en-IN')} bars (${esc(rep.start_date)} → ${esc(rep.end_date)})`;
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.detail || ('HTTP ' + r.status));
+    if (!body.started) {
+      document.getElementById('pulltitle').innerHTML =
+        `<span style="color:var(--yellow)">…</span> a universe pull is already running — watch it below`;
+      pollProgress(label);
+      return;
+    }
+    document.getElementById('previewBadge').classList.toggle('on', !!body.dry_run);
+    document.getElementById('pulltitle').textContent =
+      `Pulling ${label} · ${(body.total||0).toLocaleString('en-IN')} units · live`;
+    pollProgress(label);
   } catch (e) {
     document.getElementById('pulltitle').innerHTML =
       `<span style="color:var(--red)">✕</span> ${esc(label)} failed: ${esc(e.message)}`;
-  } finally {
-    setBulkDisabled(false);
-    document.getElementById('optbtn').disabled = !selPullSymbol;
+    finishLive();
   }
 }
 
-/* Render a row of big animated stat counters under the pull panel. */
-function renderBulkStats(stats) {
+/* Poll the O(1) progress snapshot and tick the panel until the job ends. */
+async function pollProgress(label) {
+  if (pollTimer) clearTimeout(pollTimer);
+  try {
+    const r = await fetch('/api/v1/universe/pull-progress');
+    const s = await r.json();
+    document.getElementById('counter').textContent =
+      (s.completed || 0).toLocaleString('en-IN') + ' / ' + (s.total || 0).toLocaleString('en-IN');
+    renderLiveStats(s);
+    if (s.state === 'running') {
+      document.getElementById('pulltitle').textContent =
+        `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${esc(s.current || '…')}`;
+      pollTimer = setTimeout(() => pollProgress(label), PROGRESS_MS);
+      return;
+    }
+    if (s.state === 'error') {
+      document.getElementById('pulltitle').innerHTML =
+        `<span style="color:var(--red)">✕</span> ${esc(label)} failed: ${esc(s.detail || 'error')}`;
+    } else {  // done (or idle, if nothing ran)
+      document.getElementById('pulltitle').innerHTML =
+        `<span class="spark">✓</span> ${esc(label)} complete — `
+        + `${(s.completed||0).toLocaleString('en-IN')} units · `
+        + `${(s.bars||0).toLocaleString('en-IN')} bars`
+        + (s.failed ? ` · <span style="color:var(--red)">${s.failed} failed</span>` : '');
+    }
+    finishLive();
+  } catch (e) {
+    document.getElementById('pulltitle').innerHTML =
+      `<span style="color:var(--red)">✕</span> lost the live feed: ${esc(e.message)}`;
+    finishLive();
+  }
+}
+
+function finishLive() {
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  setBulkDisabled(false);
+  document.getElementById('optbtn').disabled = !selPullSymbol;
+}
+
+/* Render the live stat row (units done/total · failed · bars) from a snapshot. */
+function renderLiveStats(s) {
   const grid = document.getElementById('tfgrid');
   grid.innerHTML = '<div class="bulkrow" id="bulkrow"></div>';
   const row = document.getElementById('bulkrow');
-  stats.forEach(([k, v, cls]) => {
+  [
+    ['units done', s.completed, 'ok'],
+    ['of total', s.total, ''],
+    ['failed', s.failed, (s.failed ? 'bad' : '')],
+    ['bars', s.bars, 'ok'],
+  ].forEach(([k, v, cls]) => {
     const d = document.createElement('div');
     d.className = 'bstat ' + (cls || '');
     d.innerHTML = `<span class="bv">${(v || 0).toLocaleString('en-IN')}</span>`
