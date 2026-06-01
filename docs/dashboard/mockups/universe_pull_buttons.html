@@ -1,0 +1,153 @@
+<!doctype html>
+<!--
+  BruteX — F&O Universe Explorer · Pull-button mockup (DEC-DHAN-PULL-SCOPE-001).
+  Visual design reference for the 8-button pull matrix:
+    Bulk:       ① indices spot   ② indices options   ③ stocks spot   ④ stocks options
+    Per-symbol: ⑤ index spot     ⑥ index options     ⑦ stock spot    ⑧ stock options
+  Spot = 1m + 1d (2021-01-01 → today); options = 1-minute only (ATM±10 idx / ATM±3 stk,
+  WEEK+MONTH × 4 expiryCodes, CE+PE). Static mockup — no live data.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BruteX — F&O Universe Explorer (pull buttons)</title>
+<style>
+  :root {
+    --bg:#0d0d0f; --panel:#161618; --panel2:#1c1c1f; --border:#2a2a2e; --line:#242428;
+    --text:#d7d7da; --text-bright:#f4f4f6; --muted:#8a8a92; --yellow:#ffb74d;
+    --green:#4ade80; --blue:#60a5fa; --violet:#c084fc; --red:#f87171;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  header { padding:20px 24px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:14px; }
+  header h1 { font-size:18px; margin:0; color:var(--text-bright); letter-spacing:.3px; }
+  .pill { font-size:11px; padding:3px 9px; border-radius:999px; border:1px solid var(--border);
+    color:var(--muted); }
+  .pill.live { color:var(--green); border-color:#1f4d33; background:#0f1f17; }
+  .pill.scope { color:var(--yellow); border-color:#4d3a17; background:#1f1810; }
+  .pill.o1 { color:var(--violet); border-color:#3a2a4d; background:#170f1f; }
+
+  .section-title { margin:22px 24px 10px; font-size:12px; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--muted); }
+
+  /* ── Bulk pull grid (4 big buttons) ── */
+  .bulkgrid { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:0 24px; }
+  .bulkcard { background:linear-gradient(180deg,var(--panel2),var(--panel));
+    border:1px solid var(--border); border-radius:14px; padding:18px 18px 16px; }
+  .bulkcard .row { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+  .bulkcard .ico { width:34px; height:34px; border-radius:9px; display:grid; place-items:center;
+    font-size:16px; }
+  .ico.idx { background:#10231a; color:var(--green); }
+  .ico.stk { background:#0f1a2b; color:var(--blue); }
+  .bulkcard h3 { margin:0; font-size:14px; color:var(--text-bright); }
+  .bulkcard .sub { font-size:11.5px; color:var(--muted); }
+  .btnrow { display:flex; gap:10px; }
+  .bigbtn { flex:1; cursor:pointer; border:none; border-radius:10px; padding:12px 10px;
+    font-weight:700; font-size:13px; color:#1a1205; background:var(--yellow);
+    box-shadow:0 0 18px rgba(255,183,77,.28); transition:transform .12s; }
+  .bigbtn:hover { transform:translateY(-1px); }
+  .bigbtn.opt { background:#c084fc; color:#1a0f24; box-shadow:0 0 18px rgba(192,132,252,.28); }
+  .bigbtn small { display:block; font-weight:500; font-size:10.5px; opacity:.8; margin-top:2px; }
+
+  /* ── Live progress panel ── */
+  .progress { margin:16px 24px 0; background:var(--panel); border:1px solid var(--border);
+    border-radius:12px; padding:14px 16px; }
+  .progress .top { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+  .progress .top b { color:var(--text-bright); }
+  .bar { height:6px; background:#222; border-radius:6px; overflow:hidden; }
+  .bar > i { display:block; height:100%; width:62%;
+    background:linear-gradient(90deg,var(--yellow),var(--green)); }
+  .progress .stats { display:flex; gap:18px; margin-top:9px; font-size:12px; color:var(--muted); }
+  .progress .stats b { color:var(--green); }
+
+  /* ── Instruments table with per-symbol buttons ── */
+  table { width:calc(100% - 48px); margin:10px 24px 30px; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; font-size:11px; letter-spacing:.06em; text-transform:uppercase; }
+  td .sym { color:var(--text-bright); font-weight:600; }
+  td .kind { font-size:11px; color:var(--muted); }
+  .tag { font-size:10px; padding:2px 7px; border-radius:6px; border:1px solid var(--border); color:var(--muted); }
+  .tag.IDX { color:var(--green); border-color:#1f4d33; }
+  .tag.EQ { color:var(--blue); border-color:#1d3a5c; }
+  .rowbtn { cursor:pointer; border:1px solid var(--border); background:var(--panel2);
+    color:var(--text); border-radius:8px; padding:6px 11px; font-size:12px; font-weight:600; }
+  .rowbtn:hover { border-color:var(--yellow); color:var(--yellow); }
+  .rowbtn.opt:hover { border-color:var(--violet); color:var(--violet); }
+  .rowbtns { display:flex; gap:8px; }
+  .foot { margin:0 24px 30px; font-size:11.5px; color:var(--muted); }
+  code { color:var(--yellow); }
+</style>
+</head>
+<body>
+  <header>
+    <h1>⚡ BruteX — F&amp;O Universe Explorer</h1>
+    <span class="pill scope">Range 2021-01-01 → today</span>
+    <span class="pill o1">O(1) dedup · zero data loss</span>
+    <span class="pill live">● Dhan creds set — LIVE</span>
+  </header>
+
+  <div class="section-title">Bulk pull — one click pulls the whole universe</div>
+  <div class="bulkgrid">
+    <div class="bulkcard">
+      <div class="row"><div class="ico idx">📈</div>
+        <div><h3>All indices</h3><div class="sub">NIFTY · BANKNIFTY · SENSEX · INDIA VIX</div></div></div>
+      <div class="btnrow">
+        <button class="bigbtn">① Pull ALL indices spot<small>1-minute + 1-day</small></button>
+        <button class="bigbtn opt">② Pull ALL indices options<small>1m · ATM±10 · CE+PE · WK+MN×4</small></button>
+      </div>
+    </div>
+    <div class="bulkcard">
+      <div class="row"><div class="ico stk">🏦</div>
+        <div><h3>All F&amp;O stocks</h3><div class="sub">~200 NSE F&amp;O-eligible single stocks</div></div></div>
+      <div class="btnrow">
+        <button class="bigbtn">③ Pull ALL stocks spot<small>1-minute + 1-day</small></button>
+        <button class="bigbtn opt">④ Pull ALL stocks options<small>1m · ATM±3 · CE+PE · WK+MN×4</small></button>
+      </div>
+    </div>
+  </div>
+
+  <div class="progress">
+    <div class="top"><b>Pulling ALL indices spot…</b>
+      <span class="pill">NIFTY · 1m · 2023</span></div>
+    <div class="bar"><i></i></div>
+    <div class="stats">
+      <span>symbols <b>3 / 4</b></span><span>bars <b>4.21 M</b></span>
+      <span>completed <b>6</b></span><span>no-data <b>0</b></span>
+      <span>failed <b>0</b></span><span>O(1) dedup <b>live</b></span>
+    </div>
+  </div>
+
+  <div class="section-title">Per-symbol pull — click any row (⑤–⑧)</div>
+  <table>
+    <thead><tr><th>Symbol</th><th>Type</th><th>Spot</th><th>Expired options</th></tr></thead>
+    <tbody>
+      <tr><td><span class="sym">NIFTY</span> <span class="kind">NSE index</span></td>
+        <td><span class="tag IDX">IDX</span></td>
+        <td><button class="rowbtn">⑤ ⤓ Spot 1m+1d</button></td>
+        <td><button class="rowbtn opt">⑥ ⤓ Options ATM±10</button></td></tr>
+      <tr><td><span class="sym">BANKNIFTY</span> <span class="kind">NSE index</span></td>
+        <td><span class="tag IDX">IDX</span></td>
+        <td><button class="rowbtn">⑤ ⤓ Spot 1m+1d</button></td>
+        <td><button class="rowbtn opt">⑥ ⤓ Options ATM±10</button></td></tr>
+      <tr><td><span class="sym">RELIANCE</span> <span class="kind">NSE F&amp;O stock</span></td>
+        <td><span class="tag EQ">EQ</span></td>
+        <td><button class="rowbtn">⑦ ⤓ Spot 1m+1d</button></td>
+        <td><button class="rowbtn opt">⑧ ⤓ Options ATM±3</button></td></tr>
+      <tr><td><span class="sym">HDFCBANK</span> <span class="kind">NSE F&amp;O stock</span></td>
+        <td><span class="tag EQ">EQ</span></td>
+        <td><button class="rowbtn">⑦ ⤓ Spot 1m+1d</button></td>
+        <td><button class="rowbtn opt">⑧ ⤓ Options ATM±3</button></td></tr>
+    </tbody>
+  </table>
+
+  <div class="foot">
+    Every button → <code>2021-01-01 → today</code> · spot <code>1m + 1d</code> (19 TFs auto-derived),
+    options <code>1-minute</code> only · session <code>09:15–15:30 IST</code> · each option bar mapped to its
+    underlying's live <b>spot</b> + resolved <b>strike</b> · <b>O(1)</b> dedup (blake3 → Bloom → exact-confirm) ·
+    one bad symbol <b>quarantined</b>, the rest keep flowing · dry-run preview when no token, live when creds set.
+  </div>
+</body>
+</html>
