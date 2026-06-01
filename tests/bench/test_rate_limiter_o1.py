@@ -56,11 +56,22 @@ class FakeClock:
 
 
 def _fresh_bucket(clock: FakeClock) -> AdaptiveTokenBucket:
-    """A bucket with plenty of capacity — acquire() never blocks."""
+    """A bucket with plenty of capacity — acquire() never blocks.
+
+    The burst is deliberately enormous (1e9). ``pytest-benchmark`` auto-calibrates
+    its iteration count to the runner's speed and, for a sub-microsecond op like
+    ``acquire``, can invoke ``_call`` *millions* of times within its time budget.
+    Because the ``FakeClock`` never advances during those calls, no tokens refill,
+    so a merely "large" burst (e.g. 1e6) could be drained on a fast runner — at
+    which point ``acquire`` correctly returns a tiny non-zero throttle wait and the
+    exact ``== 0.0`` assertions below flake. A 1e9 burst sits ~1000× above any
+    feasible benchmark iteration count, keeping the fast path deterministically at
+    zero wait.
+    """
     return AdaptiveTokenBucket(
         initial_rps=10_000.0,
         downshift_rps=5_000.0,
-        burst=1_000_000,  # absurdly large so we never block
+        burst=1_000_000_000,  # ≫ any pytest-benchmark iteration count → never blocks
         clock=clock.now,
         sleep=clock.sleep,
     )
