@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pytest
 from brutex.data.models import CandleBar
-from brutex.data.session import filter_intraday_session, in_session
+from brutex.data.session import filter_intraday_session, in_session, is_session_exempt
 
 
 def _bar(hh: int, mm: int) -> CandleBar:
@@ -57,3 +57,23 @@ class TestFilterIntradaySession:
 
     def test_empty(self) -> None:
         assert filter_intraday_session([]) == []
+
+
+class TestSessionExempt:
+    """GIFT Nifty is exempt from the NSE 09:15–15:30 filter (DEC-DHAN-GIFTNIFTY-SESSION-001)."""
+
+    @pytest.mark.parametrize(
+        ("symbol", "expected"),
+        [
+            ("GIFTNIFTY", True),
+            ("giftnifty", True),  # case-insensitive
+            ("  GIFTNIFTY  ", True),  # whitespace-tolerant
+            ("NIFTY", False),
+            ("BANKNIFTY", False),
+            ("SENSEX", False),
+            ("", False),
+            (None, False),
+        ],
+    )
+    def test_is_session_exempt(self, symbol: str | None, expected: bool) -> None:
+        assert is_session_exempt(symbol) is expected

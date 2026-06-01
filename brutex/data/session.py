@@ -35,6 +35,17 @@ SESSION_OPEN: Final[time] = time(9, 15)
 #: Regular session close — 15:30:00 IST (exclusive).
 SESSION_CLOSE: Final[time] = time(15, 30)
 
+#: Trading symbols EXEMPT from the 09:15–15:30 IST session filter. **GIFT Nifty**
+#: trades on NSE IX (GIFT City) for ~21 hours, far outside the NSE regular
+#: session, so applying the NSE window would drop almost all of its bars. Its
+#: full-day intraday series is kept verbatim (DEC-DHAN-GIFTNIFTY-SESSION-001).
+SESSION_EXEMPT_SYMBOLS: Final[frozenset[str]] = frozenset({"GIFTNIFTY"})
+
+
+def is_session_exempt(trading_symbol: str | None) -> bool:
+    """True iff *trading_symbol* is exempt from the NSE session filter (GIFT Nifty)."""
+    return (trading_symbol or "").strip().upper() in SESSION_EXEMPT_SYMBOLS
+
 
 def in_session(timestamp: datetime) -> bool:
     """True iff *timestamp* (UTC, tz-aware) falls in ``[09:15, 15:30)`` IST."""
@@ -54,7 +65,9 @@ def filter_intraday_session(bars: Sequence[CandleBar]) -> list[CandleBar]:
 __all__ = [
     "IST",
     "SESSION_CLOSE",
+    "SESSION_EXEMPT_SYMBOLS",
     "SESSION_OPEN",
     "filter_intraday_session",
     "in_session",
+    "is_session_exempt",
 ]

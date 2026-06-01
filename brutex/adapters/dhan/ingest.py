@@ -26,7 +26,7 @@ from brutex.adapters.dhan.chunks import plan_spot_intraday_windows
 from brutex.adapters.dhan.errors import DhanError, is_rate_limit, is_retryable
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
-from brutex.data.session import filter_intraday_session
+from brutex.data.session import filter_intraday_session, is_session_exempt
 from brutex.data.sink import BarSink
 from brutex.models import Instrument
 
@@ -150,7 +150,9 @@ def ingest_spot(
             raise
         # Drop pre-open / post-close bars before they enter the lake — intraday
         # only (a daily bar has no intraday time). DEC-SESSION-FILTER-001.
-        if interval != _DAILY:
+        # GIFT Nifty trades ~21h on NSE IX, so it is EXEMPT — its full-day
+        # series is kept verbatim (DEC-DHAN-GIFTNIFTY-SESSION-001).
+        if interval != _DAILY and not is_session_exempt(instrument.trading_symbol):
             bars = filter_intraday_session(bars)
         result = sink.append(
             exchange=instrument.exchange.value,
