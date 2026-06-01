@@ -263,6 +263,26 @@ def fno_underlying_symbols(rows: Iterable[Mapping[str, str]]) -> frozenset[str]:
     return frozenset(eligible)
 
 
+def fno_underlying_security_ids(rows: Iterable[Mapping[str, str]]) -> frozenset[int]:
+    """Collect the canonical spot ``SECURITY_ID``s that F&O derivatives point to.
+
+    Each futures/option leg carries ``UNDERLYING_SECURITY_ID`` — the id of the
+    ONE real spot row it derives from (tickvault's underlying resolution). When
+    the vendor lists a ticker under several equity rows (e.g. an old + a current
+    listing of the same company, both with ``UNDERLYING_SYMBOL="MOTHERSON"`` but
+    different ``SECURITY_ID``s), this set identifies the **canonical** spot so
+    the deduper keeps the right one (DEC-DHAN-UNIVERSE-DEDUP-001).
+    """
+    ids: set[int] = set()
+    for row in rows:
+        itype = row.get("INSTRUMENT", "").strip().upper()
+        if itype in _FUTURE_TYPES or itype in _OPTION_TYPES:
+            usid = _opt_int(row.get("UNDERLYING_SECURITY_ID"))
+            if usid is not None:
+                ids.add(usid)
+    return frozenset(ids)
+
+
 @dataclass(frozen=True, slots=True)
 class UniverseReport:
     """The selected universe + parse accounting (for dashboard/cli summaries)."""
@@ -284,9 +304,19 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
     + non-F&O equities are counted as ``legs_dropped`` (excluded from the lean
     universe, recoverable on demand); out-of-scope-exchange rows are counted
     as ``filtered``.
+    The vendor lists some F&O tickers under MORE THAN ONE equity row (e.g. an
+    old + a current listing of the same company — both ``MOTHERSON`` — with
+    different ``SECURITY_ID``s). Both produce the same exchange-prefixed
+    ``vendor_symbol`` (``"NSE-MOTHERSON"``), which would collide on the store
+    PK. We therefore **deduplicate to ONE canonical spot per key** (O(1) via a
+    dict), preferring — exactly like tickvault's underlying resolver — the row
+    a derivative's ``UNDERLYING_SECURITY_ID`` points to; absent that link we
+    keep the first seen. This guarantees a unique global key with no count
+    regression (DEC-DHAN-UNIVERSE-DEDUP-001).
     """
     eligible = fno_underlying_symbols(rows)
-    universe: list[Instrument] = []
+    canonical_ids = fno_underlying_security_ids(rows)
+    by_key: dict[str, Instrument] = {}
     parsed = 0
     filtered = 0
     for row in rows:
@@ -298,7 +328,17 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
         if itype in _INDEX_TYPES or (
             itype in _EQUITY_TYPES and _opt_str(row.get("UNDERLYING_SYMBOL")) in eligible
         ):
-            universe.append(parse_instrument_row(row))
+            inst = parse_instrument_row(row)
+            existing = by_key.get(inst.vendor_symbol)
+            # First row for this key wins; a later row replaces it only when it
+            # is the canonical spot (its SECURITY_ID is a derivative underlying)
+            # and the incumbent is not — tickvault's UNDERLYING_SECURITY_ID rule.
+            if existing is None or (
+                inst.exchange_token in canonical_ids
+                and existing.exchange_token not in canonical_ids
+            ):
+                by_key[inst.vendor_symbol] = inst
+    universe = list(by_key.values())
     persisted = len(universe)
     return UniverseReport(
         universe=universe,
@@ -317,6 +357,7 @@ def select_universe(rows: Sequence[Mapping[str, str]]) -> list[Instrument]:
 __all__ = [
     "DhanInstrumentError",
     "UniverseReport",
+    "fno_underlying_security_ids",
     "fno_underlying_symbols",
     "parse_instrument_row",
     "select_universe",

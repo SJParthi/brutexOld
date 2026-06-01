@@ -14,6 +14,7 @@ from decimal import Decimal
 import pytest
 from brutex.adapters.dhan.instruments import (
     DhanInstrumentError,
+    fno_underlying_security_ids,
     fno_underlying_symbols,
     parse_instrument_row,
     select_universe,
@@ -374,3 +375,80 @@ class TestClassifyOffInstrumentColumn:
         # global key is exchange-prefixed (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
         assert [i.exchange_token for i in report.universe] == [2885]
         assert [i.vendor_symbol for i in report.universe] == ["NSE-RELIANCE"]
+
+
+class TestUniverseDedup:
+    """Regression for the live `duplicate key "NSE-MOTHERSON"` crash
+    (DEC-DHAN-UNIVERSE-DEDUP-001).
+
+    The real Dhan master lists some F&O tickers under MORE THAN ONE NSE equity
+    row (an old + a current listing of the same company, different SECURITY_IDs)
+    — both resolve to the same exchange-prefixed `vendor_symbol`, which used to
+    collide on the store PK. Selection must admit exactly ONE canonical spot per
+    key, mirroring tickvault's `UNDERLYING_SECURITY_ID` → spot resolution.
+    """
+
+    def _opt(self, **over: str) -> dict[str, str]:
+        base = {
+            "INSTRUMENT": "OPTSTK",
+            "OPTION_TYPE": "CE",
+            "SYMBOL_NAME": "MOTHERSON26JAN100CE",
+            "UNDERLYING_SYMBOL": "MOTHERSON",
+            "STRIKE_PRICE": "100",
+            "SM_EXPIRY_DATE": "2026-01-29",
+        }
+        base.update(over)
+        return _row(**base)
+
+    def test_underlying_security_ids_collects_canonical_spot_ids(self) -> None:
+        rows = [self._opt(SECURITY_ID="40001", UNDERLYING_SECURITY_ID="4204")]
+        assert fno_underlying_security_ids(rows) == frozenset({4204})
+        # An option with no UNDERLYING_SECURITY_ID contributes nothing.
+        assert fno_underlying_security_ids([self._opt(SECURITY_ID="40002")]) == frozenset()
+
+    def test_duplicate_listing_dedups_to_canonical_spot(self) -> None:
+        # The derivative points at the canonical spot id 4204; the duplicate
+        # listing (99999) is admitted first, then REPLACED by the canonical one.
+        rows = [
+            _row(
+                INSTRUMENT="EQUITY",
+                SYMBOL_NAME="SAMVRDHNA MTHRSN INTL LTD",
+                UNDERLYING_SYMBOL="MOTHERSON",
+                SECURITY_ID="99999",
+            ),
+            _row(
+                INSTRUMENT="EQUITY",
+                SYMBOL_NAME="SAMVARDHANA MOTHERSON INT",
+                UNDERLYING_SYMBOL="MOTHERSON",
+                SECURITY_ID="4204",
+            ),
+            self._opt(SECURITY_ID="40001", UNDERLYING_SECURITY_ID="4204"),
+        ]
+        report = select_universe_report(rows)
+        # ONE spot admitted (no PK collision), and it is the canonical 4204.
+        assert [i.vendor_symbol for i in report.universe] == ["NSE-MOTHERSON"]
+        assert [i.exchange_token for i in report.universe] == [4204]
+        assert report.persisted == 1
+        assert report.legs_dropped == 2  # the duplicate listing + the option leg
+
+    def test_duplicate_listing_keeps_first_when_no_canonical_link(self) -> None:
+        # No UNDERLYING_SECURITY_ID on the derivative → no canonical hint →
+        # first-seen wins, still exactly ONE spot (no collision, no count loss).
+        rows = [
+            _row(
+                INSTRUMENT="EQUITY",
+                SYMBOL_NAME="MOTHERSON A",
+                UNDERLYING_SYMBOL="MOTHERSON",
+                SECURITY_ID="111",
+            ),
+            _row(
+                INSTRUMENT="EQUITY",
+                SYMBOL_NAME="MOTHERSON B",
+                UNDERLYING_SYMBOL="MOTHERSON",
+                SECURITY_ID="222",
+            ),
+            self._opt(SECURITY_ID="40001"),
+        ]
+        report = select_universe_report(rows)
+        assert [i.exchange_token for i in report.universe] == [111]
+        assert report.persisted == 1
