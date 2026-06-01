@@ -13,7 +13,7 @@ candle API; the GLOBAL key ``vendor_symbol`` is exchange-prefixed
 a numeric id never collide (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
 
 The **brute-force universe** is selected by :func:`select_universe`:
-- the **curated headline indices** — the 30 NSE Index-tab symbols + BSE SENSEX
+- the **curated headline indices** — the 31 NSE Index-tab symbols + BSE SENSEX
   (DEC-DHAN-INDEX-ALLOWLIST-001), NOT all ~194 ``INDEX`` rows, and
 - every **F&O-eligible single-stock SPOT** equity — i.e. an ``EQUITY`` row
   whose **own ``UNDERLYING_SYMBOL`` ticker** also appears as a derivatives
@@ -103,7 +103,7 @@ def _is_test_scrip(symbol_name: str | None, underlying_symbol: str | None) -> bo
 #: The CURATED index allow-list (operator decree 2026-06-01, DEC-DHAN-INDEX-ALLOWLIST-001):
 #: admit ONLY the headline indices Dhan shows in its **Index** tab — NOT all ~194
 #: ``INDEX`` rows in the master (the "100+ indices" the operator rejected). The
-#: 30 NSE tokens below are the EXACT ``SYMBOL_NAME`` values in the real Dhan
+#: 31 NSE tokens below are the EXACT ``SYMBOL_NAME`` values in the real Dhan
 #: ``api-scrip-master-detailed`` (verified 2026-06-01 against the decoded master)
 #: — abbreviated, not the web display names (``NIFTYIT`` not "Nifty IT"). Plus the
 #: single BSE index **SENSEX**. Matching is exact on upper-cased ``SYMBOL_NAME``;
@@ -121,6 +121,7 @@ _ADMITTED_NSE_INDEX_SYMBOLS: Final[frozenset[str]] = frozenset(
         "NIFTY 200",
         "NIFTY 500",
         "NIFTYMCAP50",  # Nifty Mid Cap 50
+        "NIFTY MID100 FREE",  # Nifty Midcap 100 (DEC-DHAN-INDEX-ALLOWLIST-002, tickvault parity)
         "NIFTY MIDCAP 150",
         "NIFTY SMALLCAP 50",
         "NIFTY SMALLCAP 100",
@@ -151,7 +152,7 @@ def _is_admitted_index(exchange: str, symbol_name: str | None) -> bool:
     """Return ``True`` if this ``INDEX`` row is on the curated allow-list.
 
     Indices are NOT exchange-gated like stocks — but only the headline set is
-    kept: the 30 NSE Index-tab symbols + BSE SENSEX (DEC-DHAN-INDEX-ALLOWLIST-001).
+    kept: the 31 NSE Index-tab symbols + BSE SENSEX (DEC-DHAN-INDEX-ALLOWLIST-001/-002).
     """
     symbol = (symbol_name or "").strip().upper()
     if exchange == Exchange.NSE:
@@ -394,7 +395,7 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
     """Select the brute-force universe and report the parse accounting.
 
     Two-pass: collect the F&O-eligible underlying tickers, then keep (a) the
-    **curated headline indices** — the 30 NSE Index-tab symbols + BSE SENSEX
+    **curated headline indices** — the 31 NSE Index-tab symbols + BSE SENSEX
     (DEC-DHAN-INDEX-ALLOWLIST-001), every other ``INDEX`` row dropped — and
     (b) every **NSE equity SPOT** whose own
     ``UNDERLYING_SYMBOL`` ticker is F&O-eligible (NOT ``SYMBOL_NAME`` — that is
@@ -426,7 +427,7 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
             continue
         parsed += 1
         itype = row.get("INSTRUMENT", "").strip().upper()
-        # Indices: ONLY the curated headline allow-list — the 30 NSE Index-tab
+        # Indices: ONLY the curated headline allow-list — the 31 NSE Index-tab
         # symbols + BSE SENSEX — NOT all ~194 INDEX rows (DEC-DHAN-INDEX-ALLOWLIST-001).
         # Stocks: an F&O-eligible **NSE** equity SPOT (BSE single stocks are out of
         # scope), excluding TEST scrips — tickvault's NSE_EQ-only stock universe
