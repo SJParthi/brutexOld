@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 
 from brutex.adapters.dhan.chunks import plan_spot_intraday_windows
-from brutex.adapters.dhan.errors import DhanError, is_retryable
+from brutex.adapters.dhan.errors import DhanError, is_rate_limit, is_retryable
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.session import filter_intraday_session
@@ -70,6 +70,8 @@ def ingest_spot(
     end: date,
     pace: Pacer | None = None,
     coverage: FetchCoverage | None = None,
+    on_rate_limit: Callable[[], None] | None = None,
+    on_success: Callable[[], None] | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink*.
 
@@ -92,6 +94,11 @@ def ingest_spot(
         is marked complete after a successful fetch + append. ``None`` (default)
         keeps the always-fetch behaviour — the idempotent sink already makes a
         re-pull safe; coverage makes it quota-frugal too.
+    on_rate_limit, on_success
+        Optional rate-controller feedback hooks (DEC-DHAN-ADAPTIVE-RPS-001).
+        ``on_rate_limit`` fires on a **rate-limit** 429 (``is_rate_limit``) so
+        the controller can step the rate down; ``on_success`` fires after each
+        clean window so it can recover. Both default ``None`` (no feedback).
 
     Returns
     -------
@@ -134,6 +141,10 @@ def ingest_spot(
             )
         except DhanError as exc:
             if is_retryable(exc):
+                # A rate-limit 429 feeds the controller so it steps the rate
+                # down under sustained pressure (DEC-DHAN-ADAPTIVE-RPS-001).
+                if on_rate_limit is not None and is_rate_limit(exc):
+                    on_rate_limit()
                 transient += 1
                 continue
             raise
@@ -152,6 +163,9 @@ def ingest_spot(
         # The window pulled cleanly — record it so a re-pull skips it.
         if coverage is not None:
             coverage.mark_complete(key)
+        # Signal a clean window so the controller can recover the rate.
+        if on_success is not None:
+            on_success()
     return IngestReport(
         windows=len(windows),
         bars_appended=bars_appended,
