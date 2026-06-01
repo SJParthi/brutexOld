@@ -34,11 +34,9 @@ refresh the Telegram panel.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import threading
 from collections import deque
-from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -89,11 +87,11 @@ class CredentialsIn(BaseModel):
     which made every POST return 422 (DEC-CREDS-422-FIX-001). The fields are
     accepted in the BODY (never as query params, which leak into access
     logs) and are passed straight to
-    :func:`brutex.config.credentials.save_groww_credentials` — never logged.
+    :func:`brutex.config.credentials.save_dhan_credentials` — never logged.
     """
 
-    api_key: str
-    totp_secret: str
+    access_token: str
+    client_id: str
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -941,89 +939,6 @@ def build_app(
         """
         return JSONResponse(_pull_job.snapshot().to_dict())
 
-    # ── Two-phase manual pull (DEC-UNIVERSE-PULL-PHASED-001) ────────
-    # The two /universe buttons. Each kicks its phase off in a background
-    # daemon thread (single-flight guarded) and returns immediately —
-    # progress is read from /coverage + /logs. Phase 2 ("contracts") reads
-    # ONLY the expiries Phase 1 persisted, so contracts can never precede
-    # expiries across clicks. Credentials are required (the live SDK), so a
-    # keyless page returns 400 with an actionable message instead of a
-    # silent no-op.
-
-    def _phase_lake_years() -> list[int]:
-        from datetime import UTC as _UTC
-        from datetime import datetime as _dt
-
-        return list(range(2020, _dt.now(_UTC).year + 1))
-
-    @app.post("/api/v1/universe/fetch-expiries")
-    async def api_fetch_expiries() -> JSONResponse:
-        """POST — Phase 1: fetch ALL new expiries across the universe (2020→now).
-
-        Launches :func:`brutex.cli._run_expiries_phase` in the background. The
-        O(1) incremental skip means a re-click only pulls the current year +
-        any previously-failed cell; settled past years are skipped before the
-        network call. Returns ``{"phase": "expiries", "status": ...}`` where
-        status is ``started`` / ``already_running`` / ``no_store``.
-        """
-        store = _require_store()
-        if not dhan_creds_present():
-            raise HTTPException(
-                status_code=400,
-                detail="Dhan credentials required — set them on the Credentials page, then retry.",
-            )
-
-        def _worker(lake_root: Path) -> object:  # pragma: no cover — live thread
-            """Background body — run the Phase-1 expiries pull for ``lake_root``."""
-            from brutex.cli import (
-                _run_expiries_phase,  # pyright: ignore[reportPrivateUsage]
-            )
-
-            return _run_expiries_phase(lake_root, years=_phase_lake_years(), store=store)
-
-        status = _start_phase("expiries", store, _worker)
-        _LOG.info("universe.fetch_expiries.requested", status=status)
-        return JSONResponse({"phase": "expiries", "status": status})
-
-    @app.post("/api/v1/universe/fetch-contracts")
-    async def api_fetch_contracts() -> JSONResponse:
-        """POST — Phase 2: fetch ALL new contracts for every persisted expiry.
-
-        Launches :func:`brutex.cli._run_contracts_phase` in the background. It
-        reads ONLY the expiries Phase 1 persisted (so you must run "Fetch all
-        expiries" first); the O(1) skip re-pulls only not-yet-expired expiries
-        + any uncaptured expired one. Returns the same status shape as
-        fetch-expiries.
-        """
-        store = _require_store()
-        if not dhan_creds_present():
-            raise HTTPException(
-                status_code=400,
-                detail="Dhan credentials required — set them on the Credentials page, then retry.",
-            )
-
-        def _worker(lake_root: Path) -> object:  # pragma: no cover — live thread
-            """Background body — run the Phase-2 contracts pull for ``lake_root``."""
-            from brutex.cli import (
-                _run_contracts_phase,  # pyright: ignore[reportPrivateUsage]
-            )
-
-            return _run_contracts_phase(lake_root, store=store)
-
-        status = _start_phase("contracts", store, _worker)
-        _LOG.info("universe.fetch_contracts.requested", status=status)
-        return JSONResponse({"phase": "contracts", "status": status})
-
-    @app.get("/api/v1/universe/phase-status")
-    async def api_phase_status() -> JSONResponse:
-        """GET — whether each phase is currently running (for button enable/disable)."""
-        return JSONResponse(
-            {
-                "expiries_running": _phase_busy("expiries"),
-                "contracts_running": _phase_busy("contracts"),
-            }
-        )
-
     # ── Completeness ledger / Coverage (DEC-COVERAGE-LEDGER-001) ────
 
     @app.get("/api/v1/coverage")
@@ -1052,22 +967,6 @@ def build_app(
         years = _coverage_years()
         return JSONResponse(build_coverage_payload(store.list_coverage(), expected, years))
 
-    @app.post("/api/v1/coverage/repull")
-    async def api_coverage_repull() -> JSONResponse:
-        """POST /api/v1/coverage/repull — kick a resumable re-pull of the gaps.
-
-        Launches the resumable universe re-pull (only the incomplete cells,
-        per the persisted ledger) in a BACKGROUND daemon thread, mirroring the
-        ``cmd_dashboard`` auto-pull pattern (DEC-AUTO-UNIVERSE-001) so a long
-        live pull never blocks the request. Best-effort: when creds are
-        absent or the live SDK can't be reached, the thread records the
-        failure into the ledger and exits — the endpoint itself never crashes
-        and always returns ``{"started": bool}``.
-        """
-        store = _require_store()
-        started = _start_coverage_repull(store)
-        return JSONResponse({"started": started})
-
     @app.get("/coverage", response_class=HTMLResponse)
     async def coverage_page() -> str:
         """GET /coverage — the completeness-ledger page (DEC-COVERAGE-LEDGER-001)."""
@@ -1079,35 +978,31 @@ def build_app(
 
     @app.post("/api/v1/credentials")
     async def api_credentials_set(body: CredentialsIn) -> JSONResponse:
-        """POST /api/v1/credentials — save the Groww credentials (mode 0600).
+        """POST /api/v1/credentials — save the Dhan credentials (mode 0600).
 
-        Accepts the API key + TOTP secret in the request BODY (never query
+        Accepts the access token + client id in the request BODY (never query
         params, which leak into access logs). The body is NOT logged. On a
         validation error (blank field) the credentials store raises
         :class:`CredentialsError`, mapped here to HTTP 400 with a message
         that names the offending field but NEVER its value. Returns only
-        ``{"present": true}`` — never echoes a value back.
+        the masked preview — never echoes a value back. Saving here ENABLES
+        live pulls: the Dhan adapter resolver reads this file (env-first,
+        file-fallback) so the spot/options buttons flip to live
+        (DEC-DHAN-CREDS-WIRING-001).
         """
-        from brutex.adapters.groww.auth import clear_cached_token
         from brutex.config.credentials import (
             CredentialsError,
-            GrowwCredentials,
+            DhanFileCredentials,
             credentials_preview,
-            save_groww_credentials,
+            save_dhan_credentials,
         )
 
         try:
-            save_groww_credentials(
-                GrowwCredentials(api_key=body.api_key, totp_secret=body.totp_secret)
+            save_dhan_credentials(
+                DhanFileCredentials(access_token=body.access_token, client_id=body.client_id)
             )
         except CredentialsError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        # Invalidate any token minted from the OLD credentials so the corrected
-        # paste takes effect on the next session (DEC-CREDS-NORMALISE-001) —
-        # Groww resets API keys daily at 6 AM IST, so a stale cache would keep
-        # failing. Best-effort: never block a successful save on cleanup.
-        with contextlib.suppress(OSError):
-            clear_cached_token()
         # Echo back the masked preview so the page can confirm the paste landed
         # (right value/length, not empty) — never a usable secret.
         return JSONResponse(credentials_preview())
@@ -1629,100 +1524,6 @@ def _render_coverage_html() -> str:
 def _coverage_years() -> list[int]:
     """Return the expected coverage years — Groww serves F&O from 2020 → now."""
     return list(range(2020, datetime.now(UTC).year + 1))
-
-
-def _start_coverage_repull(store: Any) -> bool:
-    """Launch the resumable universe re-pull in a background daemon thread.
-
-    Mirrors ``cmd_dashboard``'s auto-pull thread (DEC-AUTO-UNIVERSE-001): the
-    live Groww SDK glue lives in :func:`brutex.cli._run_live_universe_ingest`
-    (``# pragma: no cover``) which, with ``resume=True``, re-pulls ONLY the
-    incomplete ledger cells and records each cell's outcome. Best-effort:
-    any failure is swallowed (logged via the thread body's own print), so the
-    request handler never crashes. Returns whether the thread was started.
-    """
-    store_path = getattr(store, "path", None)
-    if not isinstance(store_path, Path):  # pragma: no cover — needs a wired store path
-        return False
-
-    def _repull() -> None:  # pragma: no cover — live SDK + network + thread
-        from datetime import UTC as _UTC
-        from datetime import datetime as _dt
-
-        from brutex.cli import _run_live_universe_ingest
-
-        try:
-            # Re-pull the gaps across ALL years from Jan 2020 → now
-            # (DEC-UNIVERSE-PULL-2020-001) — resume only touches the incomplete
-            # cells, so this fills every missing expiry/contract from 2020.
-            years = list(range(2020, _dt.now(_UTC).year + 1))
-            _run_live_universe_ingest(store_path.parent, years=years, store=store, resume=True)
-        except Exception:  # pylint: disable=broad-exception-caught
-            # Best-effort background pull — never crash the server; the ledger
-            # itself records per-cell failures inside the ingest.
-            return
-
-    threading.Thread(target=_repull, name="brutex-coverage-repull", daemon=True).start()
-    return True
-
-
-# ── Two-phase manual pull (DEC-UNIVERSE-PULL-PHASED-001) ────────────────────
-# Single-flight state for the two /universe buttons: a phase already running
-# must not be double-launched by an impatient second click. A plain dict +
-# lock is sufficient (the dashboard is single-process); the flag is cleared in
-# the worker's finally so a crashed phase can always be retried.
-_PHASE_LOCK = threading.Lock()
-_PHASE_RUNNING: dict[str, bool] = {"expiries": False, "contracts": False}
-
-
-def _phase_busy(name: str) -> bool:
-    """Return whether *name* phase ('expiries' | 'contracts') is currently running."""
-    with _PHASE_LOCK:
-        return _PHASE_RUNNING.get(name, False)
-
-
-def _start_phase(name: str, store: Any, worker: Callable[[Path], object]) -> str:
-    """Launch *worker* in a daemon thread under the single-flight guard.
-
-    Returns one of: ``"started"`` (a fresh run kicked off), ``"already_running"``
-    (a click while the same phase is in flight — ignored), or ``"no_store"`` (no
-    wired lake path; the offline/dry page can't run a live phase). Best-effort:
-    the worker body swallows its own exceptions (the ledger/logs record per-item
-    failures) so the request handler never crashes.
-    """
-    store_path = getattr(store, "path", None)
-    if not isinstance(store_path, Path):  # pragma: no cover — needs a wired store path
-        return "no_store"
-    with _PHASE_LOCK:
-        if _PHASE_RUNNING.get(name, False):
-            return "already_running"
-        _PHASE_RUNNING[name] = True
-
-    def _run() -> None:  # pragma: no cover — live SDK + network + thread
-        try:
-            worker(store_path.parent)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            # NEVER silent (DEC-PULL-ERROR-VISIBILITY-001): a setup/creds-runtime
-            # failure BEFORE the per-item loop (bad token mint, master refresh)
-            # would otherwise vanish — the operator clicks, the button re-enables,
-            # and /logs shows nothing. Log the full reason to the JSONL file.
-            _LOG.exception(
-                "universe.phase.failed", phase=name, error_type=type(exc).__name__, error=str(exc)
-            )
-        finally:
-            with _PHASE_LOCK:
-                _PHASE_RUNNING[name] = False
-
-    try:
-        threading.Thread(target=_run, name=f"brutex-phase-{name}", daemon=True).start()
-    except RuntimeError:  # pragma: no cover — OS thread exhaustion
-        # If the thread can't even start, clear the flag we just set so the
-        # button isn't latched disabled forever (the _run finally never fires).
-        with _PHASE_LOCK:
-            _PHASE_RUNNING[name] = False
-        _LOG.exception("universe.phase.thread_start_failed", phase=name)
-        return "no_store"
-    return "started"
 
 
 _CREDENTIALS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "credentials.html"

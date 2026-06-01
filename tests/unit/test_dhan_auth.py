@@ -1,12 +1,15 @@
 """Tests for `brutex.adapters.dhan.auth` — credentials + RenewToken refresh.
 
-100% line+branch: env resolution (happy, missing each var, default os.environ
-branch), RenewToken success + malformed responses, and token application.
+100% line+branch: env-first/file-fallback resolution (env, saved file, missing
+each var), RenewToken success + malformed responses, and token application.
+The credentials FILE is isolated to a per-test tmp path (DEC-DHAN-CREDS-WIRING-001)
+so the file-fallback is hermetic — env-only tests see an empty file by default.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 
 import pytest
 from brutex.adapters.dhan.auth import (
@@ -21,6 +24,27 @@ from brutex.adapters.dhan.auth import (
 )
 from brutex.adapters.dhan.client import DhanClient
 from brutex.adapters.dhan.errors import DhanAuthError
+from brutex.config.credentials import (
+    ENV_CREDENTIALS_FILE,
+    DhanFileCredentials,
+    save_dhan_credentials,
+)
+
+
+@pytest.fixture(autouse=True)
+def creds_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point the credentials file at an (initially absent) tmp path for every test.
+
+    `resolve_dhan_credentials`/`dhan_creds_present` now fall back to the saved
+    file via `credentials_path()` (which reads ``os.environ``). Isolating it here
+    keeps the env-only tests hermetic (empty file) and lets file-fallback tests
+    write to a known path.
+    """
+    target = tmp_path / "credentials.json"
+    monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(target))
+    monkeypatch.delenv(ENV_ACCESS_TOKEN, raising=False)
+    monkeypatch.delenv(ENV_CLIENT_ID, raising=False)
+    return target
 
 
 class _Transport:
@@ -65,6 +89,16 @@ class TestResolveCredentials:
         creds = resolve_dhan_credentials()
         assert creds == DhanCredentials(access_token="envjwt", client_id="envcid")
 
+    def test_file_fallback_enables_resolution(self, creds_file: Path) -> None:
+        # The CORE fix (DEC-DHAN-CREDS-WIRING-001): with NO env vars, creds saved
+        # to the file (as the dashboard does) resolve successfully → live pulls work.
+        save_dhan_credentials(
+            DhanFileCredentials(access_token="filetok", client_id="fileclient"),
+            path=creds_file,
+        )
+        creds = resolve_dhan_credentials({})
+        assert creds == DhanCredentials(access_token="filetok", client_id="fileclient")
+
 
 class TestRenewToken:
     def test_success(self) -> None:
@@ -102,6 +136,14 @@ class TestDhanCredsPresent:
 
     def test_whitespace_only_is_false(self) -> None:
         assert dhan_creds_present({ENV_ACCESS_TOKEN: "  ", ENV_CLIENT_ID: "cid"}) is False
+
+    def test_true_from_saved_file_without_env(self, creds_file: Path) -> None:
+        # The gate flips to live when creds are saved on the dashboard (file),
+        # even with NO env vars — the disconnect fix (DEC-DHAN-CREDS-WIRING-001).
+        save_dhan_credentials(
+            DhanFileCredentials(access_token="tok", client_id="cid"), path=creds_file
+        )
+        assert dhan_creds_present({}) is True
 
     def test_defaults_to_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ENV_ACCESS_TOKEN, "tok")

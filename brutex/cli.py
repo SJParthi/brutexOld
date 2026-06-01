@@ -60,7 +60,6 @@ from pathlib import Path
 from typing import Any
 
 from brutex import __version__
-from brutex.adapters.groww.remint_guard import RemintGuard
 from brutex.config.paths import resolve_lake_root
 from brutex.config.runtime import read_runtime_file
 from brutex.orchestrator.audit import AuditChainCorruption, verify_chain
@@ -126,20 +125,20 @@ def build_parser() -> argparse.ArgumentParser:
     # ── auth (DEC-CREDENTIALS-STORE-001) — set/status/clear creds ──
     auth = sub.add_parser(
         "auth",
-        help="Manage the stored Groww credentials (set once, auto-load every session)",
+        help="Manage the stored Dhan credentials (set once, auto-load every session)",
     )
     auth_sub = auth.add_subparsers(dest="auth_command", required=True)
     auth_sub.add_parser(
         "set",
-        help="Interactively prompt (no echo) for the Groww API key + TOTP secret and save them",
+        help="Interactively prompt (no echo) for the Dhan access token + client id and save them",
     )
     auth_sub.add_parser(
         "status",
-        help="Print whether Groww credentials are stored (booleans only; never values)",
+        help="Print whether Dhan credentials are stored (booleans only; never values)",
     )
     auth_sub.add_parser(
         "clear",
-        help="Delete the stored Groww credentials file",
+        help="Delete the stored Dhan credentials file",
     )
 
     # ── dashboard ─────────────────────────────────────────────────
@@ -372,9 +371,9 @@ def cmd_audit_verify(audit_file: Path) -> int:
 
 
 def cmd_auth_set() -> int:  # pragma: no cover — interactive getpass prompts
-    """Interactively prompt (no echo) for the Groww creds and save them.
+    """Interactively prompt (no echo) for the Dhan creds and save them.
 
-    Reads the API key and TOTP secret via :func:`getpass.getpass` so neither
+    Reads the access token and client id via :func:`getpass.getpass` so neither
     is echoed to the terminal or recorded in shell history. The values are
     NEVER accepted as argv flags (they would leak via ``ps`` / shell
     history). Prints only the destination path + mode — never a value.
@@ -383,14 +382,16 @@ def cmd_auth_set() -> int:  # pragma: no cover — interactive getpass prompts
 
     from brutex.config.credentials import (
         CredentialsError,
-        GrowwCredentials,
-        save_groww_credentials,
+        DhanFileCredentials,
+        save_dhan_credentials,
     )
 
-    api_key = getpass.getpass("Groww API key (input hidden): ")
-    totp_secret = getpass.getpass("Groww TOTP secret (input hidden): ")
+    access_token = getpass.getpass("Dhan access token (input hidden): ")
+    client_id = getpass.getpass("Dhan client id (input hidden): ")
     try:
-        path = save_groww_credentials(GrowwCredentials(api_key=api_key, totp_secret=totp_secret))
+        path = save_dhan_credentials(
+            DhanFileCredentials(access_token=access_token, client_id=client_id)
+        )
     except CredentialsError as exc:
         print(f"[brutex] could not save credentials: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -399,7 +400,7 @@ def cmd_auth_set() -> int:  # pragma: no cover — interactive getpass prompts
 
 
 def cmd_auth_status() -> int:  # pragma: no cover — thin print wrapper
-    """Print whether Groww credentials are stored (booleans only, no values)."""
+    """Print whether Dhan credentials are stored (booleans only, no values)."""
     from brutex.config.credentials import credentials_path, credentials_present
 
     present = credentials_present()
@@ -409,10 +410,10 @@ def cmd_auth_status() -> int:  # pragma: no cover — thin print wrapper
 
 
 def cmd_auth_clear() -> int:  # pragma: no cover — thin print wrapper
-    """Delete the stored Groww credentials file (if any)."""
-    from brutex.config.credentials import clear_groww_credentials, credentials_path
+    """Delete the stored Dhan credentials file (if any)."""
+    from brutex.config.credentials import clear_dhan_credentials, credentials_path
 
-    removed = clear_groww_credentials()
+    removed = clear_dhan_credentials()
     path = credentials_path()
     if removed:
         print(f"[brutex] credentials removed: {path}")
@@ -823,845 +824,6 @@ def _build_live_dhan_spot(  # pragma: no cover — live Dhan token + transport +
     return adapter, sink
 
 
-def _run_dry_run_universe_ingest(  # pragma: no cover — needs DuckDB store + fno_math kernel
-    lake_root: Path, *, years: list[int]
-) -> Any:
-    """Run the universe ingest offline with synthetic sources (``--universe --dry-run``).
-
-    Builds the real :class:`~brutex.data.instrument_store.InstrumentStore` (the
-    lake sink) but wires synthetic instrument-CSV / expiry / contract sources so
-    the whole instruments → expiries → contracts orchestration runs with NO
-    network and NO Groww creds — the dry-run proof of the LAKE pipe (DEC-P0-063).
-
-    Marked ``no cover``: the DuckDB store transitively imports the ``fno_math``
-    Rust kernel, so this path runs only on a fully-built environment (``make
-    setup``). The pure orchestration core (:func:`run_universe_ingest`) is
-    unit-tested with fakes in ``tests/unit/test_groww_universe_ingest.py``.
-    """
-    from dataclasses import dataclass, field
-    from datetime import date as date_t
-    from decimal import Decimal
-
-    from brutex.adapters.groww.contracts import ContractFetchResult
-    from brutex.adapters.groww.expiries import ExpiryFetchResult
-    from brutex.adapters.groww.instruments import InstrumentMasterFetcher
-    from brutex.adapters.groww.universe_ingest import (
-        SYNTHETIC_INSTRUMENT_CSV,
-        run_universe_ingest,
-    )
-    from brutex.data.instrument_store import (
-        ContractRecord,
-        ExpiryRecord,
-        InstrumentStore,
-    )
-    from brutex.models import InstrumentType
-
-    @dataclass(slots=True)
-    class _SyntheticExpirySource:
-        """Emits + upserts one synthetic expiry per (underlying, year)."""
-
-        sink: Any
-        expiry: date_t = field(default_factory=lambda: date_t(2025, 1, 30))
-
-        def fetch(self, underlying: str, exchange: str, *, year: int) -> ExpiryFetchResult:
-            """Return + upsert a single synthetic expiry record."""
-            record = ExpiryRecord(
-                exchange=exchange,
-                underlying_symbol=underlying,
-                expiry_date=self.expiry,
-                snapshot_date=self.expiry,
-                pulled_year=year,
-                fetched_at=datetime.now(UTC),
-                run_id="synthetic-expiries",
-            )
-            self.sink.upsert_expiries([record])
-            return ExpiryFetchResult(records=[record], skipped_dates=0)
-
-    @dataclass(slots=True)
-    class _SyntheticContractSource:
-        """Emits + upserts one synthetic CE contract per expiry."""
-
-        sink: Any
-
-        def fetch(self, underlying: str, exchange: str, expiry_date: date_t) -> ContractFetchResult:
-            """Return + upsert a single synthetic CE contract record."""
-            record = ContractRecord(
-                exchange=exchange,
-                underlying_symbol=underlying,
-                expiry_date=expiry_date,
-                contract_symbol=f"{exchange}-{underlying}-{expiry_date:%d%b%y}-24650-CE",
-                snapshot_date=expiry_date,
-                instrument_type=InstrumentType.CE,
-                strike_price=Decimal("24650"),
-                lot_size=75,
-                freeze_quantity=1800,
-                tick_size=Decimal("0.05"),
-                fetched_at=datetime.now(UTC),
-                run_id="synthetic-contracts",
-            )
-            self.sink.upsert_contracts([record])
-            return ContractFetchResult(records=[record], skipped_malformed=0, skipped_no_metadata=0)
-
-    store = InstrumentStore.open(lake_root / "instruments.duckdb")
-    try:
-        instrument_fetcher = InstrumentMasterFetcher(
-            http_get=lambda _url: SYNTHETIC_INSTRUMENT_CSV,
-            store=store,
-            run_id_factory=lambda: "synthetic-instruments",
-        )
-        return run_universe_ingest(
-            instrument_fetcher,
-            _SyntheticExpirySource(sink=store),
-            _SyntheticContractSource(sink=store),
-            [("NIFTY", "NSE")],
-            years,
-        )
-    finally:
-        store.close()
-
-
-def _run_live_universe_ingest(  # pragma: no cover — live Groww creds + SDK + DuckDB
-    lake_root: Path, *, years: list[int], store: Any = None, resume: bool = False
-) -> Any:
-    """Run the universe ingest against live Groww (the real instrument/expiry/contract SDK).
-
-    When ``store`` is ``None`` (the default — ``fetch --universe`` path) this
-    opens its own :class:`~brutex.data.instrument_store.InstrumentStore` on
-    ``lake_root/"instruments.duckdb"`` and closes it in ``finally``. When an
-    already-open ``store`` is injected (the dashboard background-pull path,
-    DEC-AUTO-UNIVERSE-001) it is REUSED and NOT closed — this shares the single
-    DuckDB writer the dashboard already holds, so the on-run auto-pull never
-    opens a second read-write handle to the same file.
-
-    **Lake scope (DEC-COVERAGE-LEDGER-001 Part A):** the per-underlying
-    expiries/contracts fan-out now covers ALL lake underlyings — every index
-    PLUS every F&O-eligible single stock (``list_index_equity_instruments`` →
-    :func:`brutex.universe.derive_lake_underlyings`) per DEC-P0-063 — not just
-    the ~25 indices. The brute-force ENGINE is unchanged (still 3 indices).
-
-    **Completeness ledger + resume (Parts C/D):** each ``(underlying, year)``
-    pull is wrapped so one underlying's failure records a ``failed`` coverage
-    cell and continues instead of aborting the rest; on success a
-    ``complete`` / ``pending`` cell (status from
-    :func:`brutex.data.coverage_ledger.classify_cell`) is recorded. When
-    ``resume`` is ``True`` only the incomplete cells
-    (:func:`brutex.data.coverage_ledger.cells_to_repull` over the reconciled
-    ledger) are re-pulled — a recoverable, idempotent re-run.
-    """
-    import time
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from datetime import UTC, date, datetime
-
-    import structlog
-    from growwapi.groww.exceptions import BaseGrowwException
-
-    from brutex.adapters.groww.auth import GrowwAuth
-    from brutex.adapters.groww.client import VendorSdkError
-    from brutex.adapters.groww.contracts import (
-        ContractFetcher,
-        ContractFetchResult,
-        store_metadata_lookup,
-    )
-    from brutex.adapters.groww.expiries import ExpiryFetcher
-    from brutex.adapters.groww.instruments import InstrumentMasterFetcher
-    from brutex.adapters.groww.universe_ingest import UniverseIngestReport
-    from brutex.data.coverage_ledger import (
-        CoverageRecord,
-        cells_to_repull,
-        classify_cell,
-        reconcile_coverage,
-    )
-    from brutex.data.instrument_store import InstrumentStore
-    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
-    from brutex.orchestrator.retry import retry_call
-    from brutex.universe import derive_lake_underlyings
-
-    log = structlog.get_logger("brutex.universe")
-
-    owns_store = store is None
-    if store is None:
-        store = InstrumentStore.open(lake_root / "instruments.duckdb")
-    try:
-        auth = GrowwAuth.from_env()
-        sdk = auth.session()
-        # Start at 8 r/s (operator decree 2026-05-30). The binding Groww cap is
-        # PER-MINUTE: IF the backtesting endpoints meter as Non-Trading
-        # (500/min ⇒ ~8.3 r/s sustained — docs/groww/api-reference/01-introduction.md;
-        # the backtesting bucket itself is UNVERIFIED per CLAUDE.md §6), a
-        # sustained 8 r/s ≈ 480/min (≤485/min incl. the 5-token burst) sits just
-        # under it, so sustaining >8 is futile. The bucket never upshifts above
-        # initial_rps; on sustained throttling it steps down to 4 r/s then
-        # recovers — so if the real bucket is stricter, the adaptive downshift +
-        # retry self-correct. Sequential pulls were latency-bound at ~3 r/s; the
-        # parallel fan-out below is what saturates this budget.
-        bucket = AdaptiveTokenBucket(initial_rps=8.0, downshift_rps=4.0)
-        instrument_fetcher = InstrumentMasterFetcher.from_env(store)
-        expiry_fetcher = ExpiryFetcher(
-            sdk=sdk, bucket=bucket, base_exception=BaseGrowwException, store=store
-        )
-
-        contract_fetcher = ContractFetcher(
-            sdk=sdk,
-            bucket=bucket,
-            base_exception=BaseGrowwException,
-            store=store,
-            # DEC-INSTRUMENT-UNIVERSE-FAST-001: the lean store persists only the
-            # underlyings, NOT the FUT/CE/PE legs — so a leg's economics are
-            # inherited from its UNDERLYING's row. store_metadata_lookup reduces
-            # the contract symbol to its underlying (underlying_symbol_of) before
-            # the O(1) point lookup. The prior inline lookup queried the FULL leg
-            # symbol, which is never in the lean store, so EVERY contract was
-            # dropped as skipped_no_metadata → contracts=0 on every cell.
-            metadata_lookup=store_metadata_lookup(store),
-        )
-
-        def _is_auth_error(exc: BaseException) -> bool:
-            """True for a Groww token-expiry / invalid-token failure (re-mintable)."""
-            blob = f"{type(exc).__name__} {exc}".lower()
-            return any(
-                token in blob
-                for token in ("authentication", "token", "expired", "invalid", "401", "403")
-            )
-
-        def _remint() -> None:
-            """Re-mint the Groww access token mid-pull + rebind the fetchers.
-
-            Groww access tokens are short-lived + reset daily at 6 AM IST
-            (CLAUDE.md §6), so a long ALL-underlyings × 2020→now pull outlives
-            one token. On an auth error we re-mint ONCE and continue instead of
-            failing every remaining cell (DEC-UNIVERSE-PULL-2020-001).
-            """
-            new_sdk = auth.refresh()
-            expiry_fetcher.sdk = new_sdk
-            contract_fetcher.sdk = new_sdk
-            log.warning("universe.auth.reminted")
-
-        def _pull_cell(
-            exchange: str, underlying: str, year: int, pool: ThreadPoolExecutor
-        ) -> tuple[int, int]:
-            """Pull every expiry for ``(underlying, year)`` + all contracts per expiry.
-
-            The per-expiry contract pulls fan out across *pool* (a bounded worker
-            set) all sharing the ONE adaptive token bucket — the global 8→4 r/s
-            governor — and the thread-safe store (DEC-STORE-THREADSAFE-001).
-            Sequential was round-trip-latency-bound at ~3 r/s; the fan-out
-            saturates the rate budget. Every call is retried through transient
-            failures (:func:`retry_call` — never give up); a permanent error
-            propagates to the cell-level handler (auth → re-mint + retry cell).
-            """
-            expiry_result = retry_call(
-                lambda: expiry_fetcher.fetch(underlying, exchange, year=year),
-                retry_on=VendorSdkError,
-            )
-            cell_expiries = len(expiry_result.records)
-            cell_contracts = 0
-
-            def _pull_one(expiry_date: date) -> ContractFetchResult:
-                return retry_call(
-                    lambda: contract_fetcher.fetch(underlying, exchange, expiry_date),
-                    retry_on=VendorSdkError,
-                )
-
-            futures = {
-                pool.submit(_pull_one, rec.expiry_date): rec for rec in expiry_result.records
-            }
-            # Drain EVERY future before returning/raising. A worker reads
-            # contract_fetcher.sdk; the cell-level handler re-mints (rebinds)
-            # that sdk on an auth error. Surfacing the first failure while
-            # siblings are still in flight would let the re-mint race a mid-call
-            # worker. Draining first guarantees zero in-flight workers when the
-            # outer loop re-mints + retries the cell (sequential cells ⇒ no
-            # other cell's workers exist either). Idempotent upserts make the
-            # retry safe.
-            first_error: BaseException | None = None
-            for fut in as_completed(futures):
-                rec = futures[fut]
-                try:
-                    contract_result = fut.result()
-                except Exception as exc:  # pylint: disable=broad-exception-caught
-                    if first_error is None:
-                        first_error = exc
-                    continue
-                persisted = len(contract_result.records)
-                raw_count = (
-                    persisted
-                    + contract_result.skipped_malformed
-                    + contract_result.skipped_no_metadata
-                )
-                cell_contracts += persisted
-                # Log the WHOLE truth, not just the persisted count: `raw` is how
-                # many symbols Groww returned, and the two `skipped_*` fields say
-                # exactly where any shortfall went (malformed symbol vs. no
-                # underlying metadata). A 0 with raw>0 means a drop, not an empty
-                # vendor response — so the operator can tell the two apart from
-                # the log alone (DEC-RUN-LOG-CAPTURE-001).
-                log.info(
-                    "universe.contracts.pulled",
-                    underlying=underlying,
-                    exchange=exchange,
-                    year=year,
-                    expiry=str(rec.expiry_date),
-                    contracts=persisted,
-                    raw=raw_count,
-                    skipped_no_metadata=contract_result.skipped_no_metadata,
-                    skipped_malformed=contract_result.skipped_malformed,
-                )
-            if first_error is not None:
-                raise first_error
-            return cell_expiries, cell_contracts
-
-        # Refresh the master first (the contract fetcher's metadata enrichment
-        # depends on a fresh master), then derive the FULL lake underlying set.
-        log.info("universe.master.refreshing")
-        inst_result = instrument_fetcher.refresh()
-        underlyings = derive_lake_underlyings(store.list_index_equity_instruments())
-        log.info(
-            "universe.master.refreshed",
-            parsed=inst_result.parsed,
-            persisted=inst_result.persisted,
-        )
-
-        # Resume: re-pull only the incomplete cells per the persisted ledger.
-        run_id = datetime.now(UTC).strftime("universe-%Y%m%dT%H%M%SZ")
-        if resume:
-            summary = reconcile_coverage(underlyings, years, store.list_coverage())
-            todo = list(cells_to_repull(summary))
-        else:
-            todo = [(ex, sym, yr) for sym, ex in underlyings for yr in years]
-
-        underlying_count = len({(sym, ex) for ex, sym, _ in todo})
-        expiry_total = 0
-        contract_total = 0
-        cell_total = len(todo)
-        log.info(
-            "universe.pull.start",
-            run_id=run_id,
-            underlyings=underlying_count,
-            years=sorted({yr for _, _, yr in todo}),
-            cells=cell_total,
-        )
-        pull_started = time.monotonic()
-        api_calls = 0
-        rate_log_every = 25
-        # Window trackers for a TRUE recent r/s (the operator asked "per second
-        # how many requests" — the cumulative average alone hides the current
-        # rate). We log BOTH: lifetime `achieved_rps` + `window_rps` over just
-        # the last `rate_log_every` cells.
-        last_window_at = pull_started
-        last_window_calls = 0
-        try:
-            pull_workers = max(1, int(os.environ.get("BRUTEX_UNIVERSE_PULL_WORKERS", "8")))
-        except ValueError:
-            log.warning(
-                "universe.pull.bad_workers_env",
-                value=os.environ.get("BRUTEX_UNIVERSE_PULL_WORKERS"),
-            )
-            pull_workers = 8
-        # A handful of in-flight requests keeps the 8 r/s bucket saturated
-        # (round-trip ~0.3 s ⇒ ~3 concurrent fills the budget); the bucket —
-        # not the pool — stays the rate governor, so over-sizing is harmless.
-        with ThreadPoolExecutor(max_workers=pull_workers) as pool:
-            for cell_index, (exchange, underlying, year) in enumerate(todo, start=1):
-                fetched_at = datetime.now(UTC)
-                log.info(
-                    "universe.cell.start",
-                    underlying=underlying,
-                    exchange=exchange,
-                    year=year,
-                    progress=f"{cell_index}/{cell_total}",
-                )
-                try:
-                    try:
-                        cell_expiries, cell_contracts = _pull_cell(exchange, underlying, year, pool)
-                    except Exception as exc:  # pylint: disable=broad-exception-caught
-                        # Token expired mid-pull → re-mint once + retry this cell.
-                        if not _is_auth_error(exc):
-                            raise
-                        _remint()
-                        cell_expiries, cell_contracts = _pull_cell(exchange, underlying, year, pool)
-                except Exception as exc:  # pylint: disable=broad-exception-caught
-                    # One cell's failure must not abort the rest — record a
-                    # ``failed`` cell with the error and continue (recoverable).
-                    log.warning(
-                        "universe.cell.failed",
-                        underlying=underlying,
-                        exchange=exchange,
-                        year=year,
-                        error=str(exc),
-                    )
-                    store.upsert_coverage(
-                        CoverageRecord(
-                            exchange=exchange,
-                            underlying_symbol=underlying,
-                            year=year,
-                            expiries_pulled=0,
-                            contracts_pulled=0,
-                            status=classify_cell(0, 0, str(exc)),
-                            last_run_id=run_id,
-                            last_fetched_at=fetched_at,
-                            error_message=str(exc),
-                        )
-                    )
-                    continue
-                log.info(
-                    "universe.cell.done",
-                    underlying=underlying,
-                    exchange=exchange,
-                    year=year,
-                    expiries=cell_expiries,
-                    contracts=cell_contracts,
-                )
-                expiry_total += cell_expiries
-                contract_total += cell_contracts
-                api_calls += 1 + cell_expiries
-                store.upsert_coverage(
-                    CoverageRecord(
-                        exchange=exchange,
-                        underlying_symbol=underlying,
-                        year=year,
-                        expiries_pulled=cell_expiries,
-                        contracts_pulled=cell_contracts,
-                        status=classify_cell(cell_expiries, cell_contracts, None),
-                        last_run_id=run_id,
-                        last_fetched_at=fetched_at,
-                        error_message=None,
-                    )
-                )
-                # Live rate readout — measure the achieved r/s + ETA rather
-                # than assume a fixed rate (the adaptive bucket oscillates
-                # 4–8 r/s, so wall-clock is a range, not a constant).
-                if cell_index % rate_log_every == 0 or cell_index == cell_total:
-                    now = time.monotonic()
-                    elapsed = max(now - pull_started, 1e-9)
-                    cells_per_sec = cell_index / elapsed
-                    eta_min = (cell_total - cell_index) / cells_per_sec / 60.0
-                    # Recent r/s over just the cells since the last readout —
-                    # the true "right now" rate, vs the lifetime average.
-                    window_elapsed = max(now - last_window_at, 1e-9)
-                    window_rps = (api_calls - last_window_calls) / window_elapsed
-                    last_window_at = now
-                    last_window_calls = api_calls
-                    log.info(
-                        "universe.pull.rate",
-                        progress=f"{cell_index}/{cell_total}",
-                        api_calls=api_calls,
-                        achieved_rps=round(api_calls / elapsed, 2),
-                        window_rps=round(window_rps, 2),
-                        eta_min=round(eta_min, 1),
-                    )
-        log.info(
-            "universe.pull.done",
-            run_id=run_id,
-            underlyings=underlying_count,
-            expiries=expiry_total,
-            contracts=contract_total,
-        )
-
-        return UniverseIngestReport(
-            instruments=inst_result,
-            underlyings=underlying_count,
-            expiries=expiry_total,
-            contracts=contract_total,
-        )
-    finally:
-        if owns_store:
-            store.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Two-phase manual pull (DEC-UNIVERSE-PULL-PHASED-001) — the live runners the
-# two /universe buttons drive. Phase 1 ("Fetch all expiries") and Phase 2
-# ("Fetch all contracts") are INDEPENDENT: Phase 2 reads the expiries Phase 1
-# persisted, so contracts can never be pulled for an expiry the engine never
-# saw. Both apply the O(1) incremental skip (don't re-fetch immutable data) and
-# fan out via PoolRunParallel under the shared 8→4 r/s token bucket.
-#
-# Coverage-excluded (`# pragma: no cover`): live Groww creds + SDK + DuckDB +
-# threads. The *decision* logic (ordering barrier, skip, dedup) lives in the
-# 100%-tested brutex.orchestrator.universe_phases; these are thin live wires.
-# ─────────────────────────────────────────────────────────────────────────
-
-
-def _build_universe_fetchers(  # pragma: no cover — live creds + SDK
-    store: Any,
-) -> tuple[Any, Any, Any]:
-    """Build the shared ``(expiry_fetcher, contract_fetcher, auth)`` for a phase run.
-
-    Mirrors the fetcher setup of :func:`_run_live_universe_ingest` (one source of
-    truth would ideally be extracted; kept inline here so the two-phase runners
-    are self-contained while the legacy auto-pull is retired). Starts the rate
-    bucket at 8 r/s (DEC-UNIVERSE-PULL-PARALLEL-001) and wires the lean-store
-    leg→underlying metadata lookup (DEC-INSTRUMENT-UNIVERSE-FAST-001).
-    """
-    from growwapi.groww.exceptions import BaseGrowwException
-
-    from brutex.adapters.groww.auth import GrowwAuth
-    from brutex.adapters.groww.contracts import ContractFetcher, store_metadata_lookup
-    from brutex.adapters.groww.expiries import ExpiryFetcher
-    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
-
-    auth = GrowwAuth.from_env()
-    sdk = auth.session()
-    bucket = AdaptiveTokenBucket(initial_rps=8.0, downshift_rps=4.0)
-    expiry_fetcher = ExpiryFetcher(
-        sdk=sdk, bucket=bucket, base_exception=BaseGrowwException, store=store
-    )
-    contract_fetcher = ContractFetcher(
-        sdk=sdk,
-        bucket=bucket,
-        base_exception=BaseGrowwException,
-        store=store,
-        metadata_lookup=store_metadata_lookup(store),
-    )
-    return expiry_fetcher, contract_fetcher, auth
-
-
-def _build_remint_guard(  # pragma: no cover — live SDK rebind (smoke path only)
-    expiry_fetcher: Any, contract_fetcher: Any, auth: Any
-) -> RemintGuard:
-    """Build the concurrency-safe re-mint guard for a phase's shared fetchers.
-
-    The Groww SDK is thread-safe (every call is its own module-level
-    ``requests.get`` with no shared session — see
-    :mod:`brutex.adapters.groww.remint_guard`), so SDK calls run LOCK-FREE and
-    the :class:`~brutex.orchestrator.parallel.PoolRunParallel` workers fetch
-    truly concurrently. The guard serializes ONLY the one-shot token re-mint on
-    an auth failure: ``auth.refresh()`` returns the fresh SDK, rebound onto both
-    fetchers. (DEC-UNIVERSE-PULL-CONCURRENCY-001 — replaces the prior whole-call
-    lock that pinned the pull to ~3 r/s sequential.)
-    """
-
-    def _rebind() -> None:
-        new_sdk = auth.refresh()
-        expiry_fetcher.sdk = new_sdk
-        contract_fetcher.sdk = new_sdk
-
-    return RemintGuard(_rebind)
-
-
-def _run_expiries_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB + threads
-    lake_root: Path, *, years: list[int], store: Any = None
-) -> dict[str, int]:
-    """Phase 1 — "Fetch all expiries": pull every NEW ``(underlying, year)`` expiry cell.
-
-    Refreshes the instrument master, derives the full lake underlying set, builds
-    the O(1) skip-set from the coverage ledger (``settled_expiry_cells`` —
-    complete/pending past years are immutable + skipped; the current year + any
-    failed cell always re-pull), and fans the expiry fetches out via
-    :class:`~brutex.orchestrator.parallel.PoolRunParallel`. Each cell's outcome is
-    persisted as a coverage row. Contracts are NOT touched (that is Phase 2).
-
-    Returns a small summary dict for the route + log.
-    """
-    from datetime import UTC, datetime
-
-    import structlog
-
-    from brutex.adapters.groww.client import VendorSdkError
-    from brutex.adapters.groww.instruments import InstrumentMasterFetcher
-    from brutex.data.coverage_ledger import (
-        STATUS_EXPIRIES_ONLY,
-        STATUS_PENDING,
-        CoverageRecord,
-        classify_cell,
-    )
-    from brutex.data.instrument_store import InstrumentStore
-    from brutex.orchestrator.adaptive_rate_limiter import AdaptiveRateLimiterConfig
-    from brutex.orchestrator.parallel import PoolRunParallel, workers_to_saturate
-    from brutex.orchestrator.phase_throughput import PhaseThroughput
-    from brutex.orchestrator.retry import retry_call
-    from brutex.orchestrator.universe_phases import (
-        ExpiryCell,
-        cells_to_pull,
-        phase1_cells,
-        settled_expiry_cells,
-    )
-    from brutex.universe import derive_lake_underlyings
-
-    log = structlog.get_logger("brutex.universe")
-    owns_store = store is None
-    if store is None:
-        store = InstrumentStore.open(lake_root / "instruments.duckdb")
-    try:
-        expiry_fetcher, contract_fetcher, auth = _build_universe_fetchers(store)
-        guard = _build_remint_guard(expiry_fetcher, contract_fetcher, auth)
-        log.info("universe.expiries.master.refreshing")
-        InstrumentMasterFetcher.from_env(store).refresh()
-        underlyings = derive_lake_underlyings(store.list_index_equity_instruments())
-
-        # O(1) skip: drop settled past-year cells; keep current year + failures.
-        settled = settled_expiry_cells(
-            (r.exchange, r.underlying_symbol, r.year, r.status) for r in store.list_coverage()
-        )
-        current_year = datetime.now(UTC).year
-        # derive_lake_underlyings yields (underlying, exchange); phase1_cells
-        # unpacks (exchange, underlying) — swap so the cell tuple is
-        # (exchange, underlying, year), matching the coverage-ledger PK + the
-        # skip-set built from list_coverage above. (The legacy pull did the same
-        # swap inline at `[(ex, sym, yr) for sym, ex in underlyings]`.)
-        all_cells = phase1_cells(((ex, sym) for sym, ex in underlyings), years)
-        todo = cells_to_pull(all_cells, settled=settled, current_year=current_year)
-        run_id = datetime.now(UTC).strftime("expiries-%Y%m%dT%H%M%SZ")
-        log.info(
-            "universe.expiries.start",
-            run_id=run_id,
-            cells_total=len(all_cells),
-            cells_to_pull=len(todo),
-            cells_skipped=len(all_cells) - len(todo),
-        )
-
-        # Size the pool to SATURATE the rate bucket (DEC-UNIVERSE-PULL-8RPS-001):
-        # at ~3 s/call, 8 r/s needs ~24 calls in flight, not 8 — fewer leaves the
-        # workers idle-waiting on the network (the 2.75 r/s the live run hit). The
-        # bucket still caps the rate at ≤ max_rps (Rule #6); more workers only
-        # fill idle latency. `throughput` measures the achieved r/s so the log
-        # proves where the rate actually landed.
-        max_rps = AdaptiveRateLimiterConfig.from_env().max_rps
-        pool = PoolRunParallel(workers_to_saturate(max_rps))
-        throughput = PhaseThroughput()
-
-        def _fetch(cell: ExpiryCell) -> int:
-            exchange, underlying, year = cell
-            # guard.call runs the (thread-safe) SDK call WITHOUT a lock + re-mints
-            # once on an auth error (#2); retry_call adds transient backoff. The
-            # `track()` block times the round-trip + counts in-flight concurrency.
-            with throughput.track():
-                result = retry_call(
-                    lambda: guard.call(
-                        lambda: expiry_fetcher.fetch(underlying, exchange, year=year)
-                    ),
-                    retry_on=VendorSdkError,
-                )
-            return len(result.records)
-
-        discovered = 0
-        failures = 0
-        for outcome in pool(_fetch, todo):
-            exchange, underlying, year = outcome.item
-            fetched_at = datetime.now(UTC)
-            if outcome.ok:
-                n = outcome.result or 0
-                discovered += n
-                # Phase-1 honesty (DEC-UNIVERSE-PULL-PHASED-001): a cell with
-                # expiries is NOT "complete" — its contracts are a separate
-                # phase. Mark it ``expiries_only`` so /coverage never shows a
-                # 0-contract F&O cell as done. A cell with zero expiries is a
-                # genuinely derivative-free underlying for that year → ``pending``
-                # (nothing more to pull), matching classify_cell's rule.
-                status = STATUS_EXPIRIES_ONLY if n > 0 else STATUS_PENDING
-                store.upsert_coverage(
-                    CoverageRecord(
-                        exchange=exchange,
-                        underlying_symbol=underlying,
-                        year=year,
-                        expiries_pulled=n,
-                        contracts_pulled=0,
-                        status=status,
-                        last_run_id=run_id,
-                        last_fetched_at=fetched_at,
-                        error_message=None,
-                    )
-                )
-            else:
-                failures += 1
-                err = str(outcome.exc)
-                log.warning("universe.expiries.cell.failed", cell=outcome.item, error=err)
-                store.upsert_coverage(
-                    CoverageRecord(
-                        exchange=exchange,
-                        underlying_symbol=underlying,
-                        year=year,
-                        expiries_pulled=0,
-                        contracts_pulled=0,
-                        status=classify_cell(0, 0, err),
-                        last_run_id=run_id,
-                        last_fetched_at=fetched_at,
-                        error_message=err,
-                    )
-                )
-        summary = {
-            "cells_total": len(all_cells),
-            "cells_pulled": len(todo),
-            "cells_skipped": len(all_cells) - len(todo),
-            "expiries_discovered": discovered,
-            "failures": failures,
-        }
-        # Throughput telemetry (achieved_rps / latency / peak_in_flight) rides the
-        # done line — NOT the returned int summary — so the operator sees exactly
-        # where the rate landed vs the max_rps ceiling each run.
-        log.info(
-            "universe.expiries.done",
-            run_id=run_id,
-            target_rps=max_rps,
-            **summary,
-            **throughput.snapshot().as_log_fields(),
-        )
-        return summary
-    finally:
-        if owns_store:
-            store.close()
-
-
-def _run_contracts_phase(  # pragma: no cover — live Groww creds + SDK + DuckDB + threads
-    lake_root: Path, *, store: Any = None
-) -> dict[str, int]:
-    """Phase 2 — "Fetch all contracts": pull contracts for every NEW persisted expiry.
-
-    Reads the expiries Phase 1 already persisted (``store.list_expiries``) — so it
-    is structurally impossible to pull contracts for an expiry the engine never
-    discovered. Builds the O(1) skip-set from the persisted contracts
-    (``settled_contract_jobs``); ``contract_jobs_to_pull`` then skips only
-    EXPIRED + already-pulled jobs (their leg-set is immutable) while always
-    re-pulling a not-yet-expired expiry (new strikes). Fans out via
-    :class:`PoolRunParallel`. If no expiries are persisted yet, returns a no-op
-    summary telling the operator to run "Fetch all expiries" first.
-    """
-    from datetime import UTC, datetime
-
-    import structlog
-
-    from brutex.adapters.groww.client import VendorSdkError
-    from brutex.data.coverage_ledger import STATUS_COMPLETE, CoverageRecord
-    from brutex.data.instrument_store import InstrumentStore
-    from brutex.orchestrator.adaptive_rate_limiter import AdaptiveRateLimiterConfig
-    from brutex.orchestrator.parallel import PoolRunParallel, workers_to_saturate
-    from brutex.orchestrator.phase_throughput import PhaseThroughput
-    from brutex.orchestrator.retry import retry_call
-    from brutex.orchestrator.universe_phases import (
-        ContractJob,
-        contract_jobs_to_pull,
-        settled_contract_jobs,
-    )
-
-    log = structlog.get_logger("brutex.universe")
-    owns_store = store is None
-    if store is None:
-        store = InstrumentStore.open(lake_root / "instruments.duckdb")
-    try:
-        expiry_fetcher, contract_fetcher, auth = _build_universe_fetchers(store)
-        guard = _build_remint_guard(expiry_fetcher, contract_fetcher, auth)
-
-        # Phase 2 reads ONLY persisted expiries — the ordering guarantee across
-        # clicks. Distinct (exchange, underlying, expiry) is the job universe.
-        # Map each job → its coverage cell's year (pulled_year) so a cell can be
-        # upgraded expiries_only → complete once its contracts are in.
-        expiry_rows = store.list_expiries()
-        job_year: dict[ContractJob, int] = {
-            (r.exchange, r.underlying_symbol, r.expiry_date): r.pulled_year for r in expiry_rows
-        }
-        all_jobs: list[ContractJob] = sorted(job_year)
-        if not all_jobs:
-            log.warning("universe.contracts.no_expiries")
-            return {
-                "jobs_total": 0,
-                "jobs_pulled": 0,
-                "jobs_skipped": 0,
-                "contracts_persisted": 0,
-                "failures": 0,
-                "needs_expiries_first": 1,
-            }
-
-        settled = settled_contract_jobs(
-            (r.exchange, r.underlying_symbol, r.expiry_date) for r in store.list_contracts()
-        )
-        today = datetime.now(UTC).date()
-        todo = contract_jobs_to_pull(all_jobs, settled=settled, today=today)
-        run_id = datetime.now(UTC).strftime("contracts-%Y%m%dT%H%M%SZ")
-        log.info(
-            "universe.contracts.start",
-            run_id=run_id,
-            jobs_total=len(all_jobs),
-            jobs_to_pull=len(todo),
-            jobs_skipped=len(all_jobs) - len(todo),
-        )
-
-        # Saturate the rate bucket (DEC-UNIVERSE-PULL-8RPS-001) — this is the big
-        # phase (~19 k jobs), where latency-bound 2.75 r/s vs rate-bound 8 r/s is
-        # ~115 min vs ~40 min. The bucket still caps at ≤ max_rps (Rule #6).
-        max_rps = AdaptiveRateLimiterConfig.from_env().max_rps
-        pool = PoolRunParallel(workers_to_saturate(max_rps))
-        throughput = PhaseThroughput()
-
-        def _fetch(job: ContractJob) -> int:
-            exchange, underlying, expiry = job
-            # guard.call runs the (thread-safe) SDK call WITHOUT a lock + re-mints
-            # once on an auth error (#2); retry_call adds transient backoff. The
-            # `track()` block times the round-trip + counts in-flight concurrency.
-            with throughput.track():
-                result = retry_call(
-                    lambda: guard.call(
-                        lambda: contract_fetcher.fetch(underlying, exchange, expiry)
-                    ),
-                    retry_on=VendorSdkError,
-                )
-            return len(result.records)
-
-        persisted = 0
-        failures = 0
-        # Cells (exchange, underlying, year) whose contracts were pulled OK this
-        # run — upgraded expiries_only → complete after the loop so /coverage
-        # only reads "complete" once BOTH phases are done for the cell.
-        completed_cells: set[tuple[str, str, int]] = set()
-        for outcome in pool(_fetch, todo):
-            exchange, underlying, _expiry = outcome.item
-            if outcome.ok:
-                n = outcome.result or 0
-                persisted += n
-                completed_cells.add((exchange, underlying, job_year[outcome.item]))
-                log.info("universe.contracts.pulled", job=outcome.item, contracts=n)
-            else:
-                failures += 1
-                log.warning(
-                    "universe.contracts.job.failed", job=outcome.item, error=str(outcome.exc)
-                )
-
-        # Upgrade each touched cell expiries_only → complete (idempotent upsert;
-        # preserves the cell's expiries_pulled count, sets a contracts marker).
-        upgraded = 0
-        if completed_cells:
-            cov_by_cell = {
-                (c.exchange, c.underlying_symbol, c.year): c for c in store.list_coverage()
-            }
-            for cell in completed_cells:
-                cov = cov_by_cell.get(cell)
-                if cov is None or cov.status == STATUS_COMPLETE:
-                    continue
-                store.upsert_coverage(
-                    CoverageRecord(
-                        exchange=cov.exchange,
-                        underlying_symbol=cov.underlying_symbol,
-                        year=cov.year,
-                        expiries_pulled=cov.expiries_pulled,
-                        contracts_pulled=max(cov.contracts_pulled, 1),
-                        status=STATUS_COMPLETE,
-                        last_run_id=run_id,
-                        last_fetched_at=datetime.now(UTC),
-                        error_message=None,
-                    )
-                )
-                upgraded += 1
-        summary = {
-            "jobs_total": len(all_jobs),
-            "jobs_pulled": len(todo),
-            "jobs_skipped": len(all_jobs) - len(todo),
-            "contracts_persisted": persisted,
-            "cells_completed": upgraded,
-            "failures": failures,
-            "needs_expiries_first": 0,
-        }
-        log.info(
-            "universe.contracts.done",
-            run_id=run_id,
-            target_rps=max_rps,
-            **summary,
-            **throughput.snapshot().as_log_fields(),
-        )
-        return summary
-    finally:
-        if owns_store:
-            store.close()
-
-
 def _run_instrument_master_load(  # pragma: no cover — opens DuckDB store + live network
     lake_root: Path,
 ) -> dict[str, Any]:
@@ -1754,18 +916,18 @@ def cmd_fetch(
         )
 
     if universe:
-        years = list(range(start_dt.year, end_dt.year + 1))
-        if dry_run:
-            print("[brutex] fetch --universe --dry-run → synthetic instruments/expiries/contracts")
-            uni_report = _run_dry_run_universe_ingest(resolved, years=years)
-        else:
-            print("[brutex] fetch --universe (live) → instruments/expiries/contracts")
-            uni_report = _run_live_universe_ingest(resolved, years=years)
+        # The legacy Groww instruments→expiries→contracts universe ingest was
+        # removed with the Groww adapter (DEC-DHAN-FINALIZE-001). The Dhan path
+        # loads the instrument master keylessly via `fetch --instruments`, and
+        # options/contracts are pulled on demand through the dashboard
+        # rolling-option fan-out — there is no Groww three-phase ingest.
         print(
-            f"[brutex] universe done — instruments parsed={uni_report.instruments.parsed} "
-            f"underlyings={uni_report.underlyings} expiries={uni_report.expiries} "
-            f"contracts={uni_report.contracts}"
+            "[brutex] --universe is retired (Groww three-phase ingest removed); "
+            "use `brutex fetch --instruments` to load the master, then the "
+            "/universe dashboard buttons to pull spot + options",
+            file=sys.stderr,
         )
+        return EXIT_USER_ERROR
 
     if inspect:
         print(

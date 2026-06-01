@@ -1,7 +1,7 @@
 """Integration tests for the dashboard coverage-ledger endpoints.
 
-Exercises the ``/api/v1/coverage``, ``/api/v1/coverage/repull`` and
-``/coverage`` routes (DEC-COVERAGE-LEDGER-001) via FastAPI's
+Exercises the ``/api/v1/coverage`` + ``/coverage`` routes
+(DEC-COVERAGE-LEDGER-001) via FastAPI's
 :class:`TestClient` with a real wired :class:`InstrumentStore`, plus the
 unwired-store 503 path. These cover the app.py glue (coverage-omit in the
 unit run) end-to-end.
@@ -25,7 +25,6 @@ from brutex.dashboard.app import (
     DashboardState,
     _coverage_years,
     _render_coverage_html,
-    _start_coverage_repull,
     build_app,
 )
 from brutex.data.coverage_ledger import CoverageRecord, classify_cell
@@ -122,24 +121,11 @@ class TestCoverageApi:
         resp = client.get("/api/v1/coverage")
         assert resp.status_code == 503
 
-    def test_repull_started_with_wired_store(self, store: InstrumentStore) -> None:
-        client = TestClient(build_app(DashboardState(), instrument_store=store))
-        resp = client.post("/api/v1/coverage/repull")
-        assert resp.status_code == 200
-        # A wired store with a real path → background thread started.
-        assert resp.json() == {"started": True}
-
-    def test_repull_503_when_store_unwired(self) -> None:
-        client = TestClient(build_app(DashboardState(), instrument_store=None))
-        resp = client.post("/api/v1/coverage/repull")
-        assert resp.status_code == 503
-
     def test_coverage_page_renders_html(self, store: InstrumentStore) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         resp = client.get("/coverage")
         assert resp.status_code == 200
         assert "Coverage" in resp.text
-        assert "Re-pull gaps" in resp.text
         assert 'href="/coverage"' in resp.text
 
 
@@ -154,10 +140,3 @@ class TestCoverageHelpers:
         html = _render_coverage_html()
         assert "/coverage" in html
         assert "Underlying" in html
-        assert "Re-pull gaps" in html
-
-    def test_start_repull_returns_false_without_store_path(self) -> None:
-        class _NoPath:
-            pass
-
-        assert _start_coverage_repull(_NoPath()) is False
