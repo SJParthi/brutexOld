@@ -219,6 +219,28 @@ def test_on_progress_fires_per_underlying_success() -> None:
     assert events == [("13", 1, False)]
 
 
+def test_skipped_windows_aggregate_after_repull() -> None:
+    """A re-pull with the same coverage ledger skips every window (aggregate)."""
+    from brutex.data.fetch_coverage import FetchCoverage
+
+    cov = FetchCoverage()
+    underlyings = [_index("13", offsets=0)]  # 1 strike → 1 series
+    kwargs: dict[str, object] = {
+        "underlyings": underlyings,
+        "start": date(2021, 1, 4),
+        "end": date(2021, 1, 5),  # one window per series
+        "expiry_flags": ("WEEK",),
+        "expiry_codes": (1,),
+        "option_types": ("CALL",),
+    }
+    first = run_dhan_options_ingest(_OkClient(), _Sink(), coverage=cov, **kwargs)  # type: ignore[arg-type]
+    assert first.skipped_windows == 0
+    # Re-pull → the one window is already complete → skipped across the aggregate.
+    second = run_dhan_options_ingest(_OkClient(), _Sink(), coverage=cov, **kwargs)  # type: ignore[arg-type]
+    assert second.skipped_windows == 1
+    assert second.bars_appended == 0
+
+
 def test_on_progress_flags_failed_underlying() -> None:
     """A wholly-failing underlying fires on_progress with (id, 0, True)."""
     events: list[tuple[str, int, bool]] = []

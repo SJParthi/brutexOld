@@ -38,6 +38,7 @@ from brutex.adapters.dhan.option_ingest import (
     Pacer,
     ingest_rolling_option_series,
 )
+from brutex.data.fetch_coverage import FetchCoverage
 
 #: ATM strike-window half-widths (DEC-DHAN-PULL-SCOPE-001) — the documented
 #: Dhan rolling-option bounds (``docs/dhan-ref/06``): indices ATM±10 (21
@@ -139,6 +140,11 @@ class OptionsUniverseReport:
         return sum(r.transient_failures for r in self.series.values())
 
     @property
+    def skipped_windows(self) -> int:
+        """Total windows skipped as already-pulled across all series (DEC-FETCH-COVERAGE-001)."""
+        return sum(r.skipped_windows for r in self.series.values())
+
+    @property
     def series_count(self) -> int:
         """Number of series that completed (non-quarantined)."""
         return len(self.series)
@@ -162,6 +168,7 @@ def run_dhan_options_ingest(
     required_data: Sequence[str] = ALL_REQUIRED_DATA,
     pace: Pacer | None = None,
     on_progress: ProgressHook | None = None,
+    coverage: FetchCoverage | None = None,
 ) -> OptionsUniverseReport:
     """Fan out the rolling-option pull over the whole options universe.
 
@@ -230,6 +237,7 @@ def run_dhan_options_ingest(
                                 end=end,
                                 required_data=required_data,
                                 pace=pace,
+                                coverage=coverage,
                             )
                         except DhanError as exc:
                             failures.append(

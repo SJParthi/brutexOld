@@ -38,6 +38,7 @@ from brutex.adapters.dhan.chunks import plan_option_windows
 from brutex.adapters.dhan.constants import ENDPOINT_ROLLING_OPTION, TRACK1_OPTIONS_INTERVAL
 from brutex.adapters.dhan.errors import DhanError, is_retryable
 from brutex.adapters.dhan.option_parser import parse_rolling_option_sides
+from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.models import OptionBar
 from brutex.data.session import in_session
 
@@ -85,6 +86,10 @@ class OptionBarSink(Protocol):
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
+#: Namespace stamped on every option coverage key's ``market`` field.
+_COVERAGE_MARKET: str = "dhan-option"
+
+
 @dataclass(frozen=True, slots=True)
 class OptionIngestReport:
     """Outcome of an :func:`ingest_rolling_option_series` run."""
@@ -92,6 +97,35 @@ class OptionIngestReport:
     windows: int
     bars_appended: int
     transient_failures: int
+    skipped_windows: int = 0
+
+
+def _coverage_key(
+    *,
+    exchange_segment: str,
+    security_id: str,
+    expiry_flag: str,
+    expiry_code: int,
+    strike: str,
+    drv_option_type: str,
+    window_start: date,
+    window_end: date,
+) -> WindowKey:
+    """Build the O(1) coverage key for one rolling-option fetch window.
+
+    The full series coordinate (flag / code / strike / type) is folded into the
+    ``interval`` field so two different series never collide and the reusable
+    :class:`~brutex.data.fetch_coverage.WindowKey` stays the single COMMON key
+    type (CLAUDE.md §11).
+    """
+    series = f"OPT|{expiry_flag}|{expiry_code}|{strike}|{drv_option_type}"
+    return WindowKey(
+        market=_COVERAGE_MARKET,
+        security_id=security_id + "|" + exchange_segment,
+        interval=series,
+        start=window_start,
+        end=window_end,
+    )
 
 
 def _window_dates(start: date, end: date) -> list[tuple[date, date]]:
@@ -115,6 +149,7 @@ def ingest_rolling_option_series(
     end: date,
     required_data: Sequence[str] = ALL_REQUIRED_DATA,
     pace: Pacer | None = None,
+    coverage: FetchCoverage | None = None,
 ) -> OptionIngestReport:
     """Pull one expired-option series' 1-minute OHLC over ``[start, end)``.
 
@@ -154,8 +189,23 @@ def ingest_rolling_option_series(
     """
     bars_appended = 0
     transient = 0
+    skipped = 0
     windows = _window_dates(start, end)
     for window_start, window_end in windows:
+        key = _coverage_key(
+            exchange_segment=exchange_segment,
+            security_id=security_id,
+            expiry_flag=expiry_flag,
+            expiry_code=expiry_code,
+            strike=strike,
+            drv_option_type=drv_option_type,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        # Skip a window already pulled — no wasted Dhan hit (DEC-FETCH-COVERAGE-001).
+        if coverage is not None and coverage.is_complete(key):
+            skipped += 1
+            continue
         if pace is not None:
             pace()
         body = build_rolling_option_body(
@@ -191,8 +241,14 @@ def ingest_rolling_option_series(
             drv_option_type=drv_option_type,
             bars=bars,
         )
+        # Mark the window pulled only after a clean fetch + append.
+        if coverage is not None:
+            coverage.mark_complete(key)
     return OptionIngestReport(
-        windows=len(windows), bars_appended=bars_appended, transient_failures=transient
+        windows=len(windows),
+        bars_appended=bars_appended,
+        transient_failures=transient,
+        skipped_windows=skipped,
     )
 
 
