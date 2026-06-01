@@ -50,9 +50,14 @@ regresses, the change is blocked. Nothing ships on trust.
 | **Flip · prereq** — Dhan credentials gate (`dhan_creds_present`) | unblocks the rewire | ✅ merged |
 | **Flip · prereq** — synthetic dry-run source + adapter (offline, zero-creds) | the dry-run proof | ✅ merged |
 | **Flip · cutover 1/3** — dashboard instrument loader → Dhan | the universe browser | ✅ merged |
-| **Flip · cutover 2/3** — dashboard "⤓ Pull" → Dhan model | the pull button | ⏳ merging |
-| **Flip · cutover 3/3** — rewire the CLI to Dhan | command-line ingest | 🔜 next |
-| **Flip · final** — delete Groww (code + deps + docs) | Groww fully gone | 🔜 |
+| **Flip · cutover 2/3** — dashboard "⤓ Pull" → Dhan model | the pull button | ✅ merged |
+| **Flip · cutover 3/3** — rewire the CLI to Dhan | command-line ingest | ✅ merged |
+| **Pull · spot** — `pull_candles` (per-symbol) + `pull_all_spot` (bulk) | spot buttons ①③⑤⑦ | ✅ merged |
+| **Pull · watermark** — O(1) fetch-coverage ledger (skip pulled windows) | no wasted Dhan hit | ✅ merged |
+| **Pull · throttle** — adaptive [3..5] r/s controller, live on the spot pull | rate-limit safety | ✅ merged |
+| **Pull · options** — `pull_options` controller (IDX→OPTIDX±10 / EQ→OPTSTK±3) | options buttons ②④⑥⑧ | ⏳ merging |
+| **Pull · routes + live buttons** — `/pull-options` route + animated dashboard wiring | one-click universe | 🔜 next |
+| **Flip · final** — delete Groww (residual code + deps + docs) | Groww fully gone | 🔜 |
 
 **Honest note:** Groww is **still present** until the final phase — deliberately last,
 so the switch lands on a fully-built, fully-proven Dhan stack with nothing half-done.
