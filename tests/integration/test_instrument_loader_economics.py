@@ -29,7 +29,7 @@ from brutex.data.instrument_store import InstrumentStore
 
 # Dhan detailed scrip-master header (required columns + the optional ones used).
 _HEADER = (
-    "EXCH_ID,SECURITY_ID,INSTRUMENT_TYPE,SYMBOL_NAME,DISPLAY_NAME,LOT_SIZE,TICK_SIZE,"
+    "EXCH_ID,SECURITY_ID,INSTRUMENT,SYMBOL_NAME,DISPLAY_NAME,LOT_SIZE,TICK_SIZE,"
     "SM_FREEZE_QTY,UNDERLYING_SYMBOL,OPTION_TYPE,STRIKE_PRICE,SM_EXPIRY_DATE,SERIES,ISIN,"
     "UNDERLYING_SECURITY_ID,ASM_GSM_FLAG"
 )
@@ -127,10 +127,13 @@ def _economics_csv() -> str:
             lot_size="75",
         ),
         # F&O stock: the EQUITY row carries its own lot/tick/freeze (lot 1).
+        # Real CSV: SYMBOL_NAME = long company name, UNDERLYING_SYMBOL = ticker
+        # (the F&O join key — DEC-DHAN-FNO-JOIN-KEY-001).
         _row(
             security_id="2885",
             instrument_type="EQUITY",
-            symbol_name="RELIANCE",
+            symbol_name="RELIANCE INDUSTRIES LTD",
+            underlying_symbol="RELIANCE",
             lot_size="1",
             tick_size="0.05",
             freeze_quantity="5000",
