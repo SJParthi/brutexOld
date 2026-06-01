@@ -1,0 +1,206 @@
+"""Dhan rolling-option ingest — pull one expired-option series into the lake.
+
+The thin orchestration the cli/dashboard call to fill the lake for ONE
+expired-option series (one ``exchangeSegment`` / ``instrument`` /
+``expiryFlag`` / ``expiryCode`` / ``strike`` (``ATM±N``) / ``drvOptionType``):
+tile ``[start, end)`` into 30-day windows
+(:func:`~brutex.adapters.dhan.chunks.plan_option_windows`), fetch each from
+``/charts/rollingoption``, parse the per-side ``ce``/``pe`` columnar payload
+(:func:`~brutex.adapters.dhan.option_parser.parse_rolling_option_sides`),
+**session-filter** to ``[09:15, 15:30)`` IST
+(:func:`~brutex.data.session.in_session` — the COMMON primitive, §11), and
+append the :class:`~brutex.data.models.OptionBar` rows to an injected sink.
+
+Track 1 pulls options at **1-minute only** (DEC-DHAN-1M-ONLY-001); higher
+timeframes are resampled downstream, never fetched. Every documented field
+is requested (``required_data`` defaults to the full set) so the lake loses
+nothing (operator decree 2026-05-31 "capture EVERYTHING").
+
+Both the JSON poster (the ``post_json`` surface of
+:class:`~brutex.adapters.dhan.client.DhanClient`) and the sink are
+**injected** :class:`~typing.Protocol` seams, so this is 100% unit-testable
+without a network or a real lake. Pacing is injected too (``pace`` — the
+orchestrator's token-bucket ``acquire`` hook), keeping the **5 req/s /
+100k-day** limit honoured without coupling the limiter in here. A
+**transient** (retryable) error on a window is counted and skipped (the
+orchestrator re-queues it); a **terminal** error propagates.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, time
+from typing import Protocol
+
+from brutex.adapters.dhan.body import build_rolling_option_body
+from brutex.adapters.dhan.chunks import plan_option_windows
+from brutex.adapters.dhan.constants import ENDPOINT_ROLLING_OPTION, TRACK1_OPTIONS_INTERVAL
+from brutex.adapters.dhan.errors import DhanError, is_retryable
+from brutex.adapters.dhan.option_parser import parse_rolling_option_sides
+from brutex.data.models import OptionBar
+from brutex.data.session import in_session
+
+#: Pacing hook invoked once before each window fetch (e.g. token-bucket acquire).
+Pacer = Callable[[], None]
+
+#: Default ``requiredData`` — every documented field, so the lake keeps the
+#: full option record (OHLC + iv + volume + oi + resolved strike + spot).
+ALL_REQUIRED_DATA: tuple[str, ...] = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "oi",
+    "strike",
+    "spot",
+    "iv",
+)
+
+
+class JsonPoster(Protocol):
+    """The ``post_json`` slice of :class:`DhanClient` the ingest needs."""
+
+    def post_json(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
+        """POST *body* to *endpoint* and return the parsed JSON object."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+class OptionBarSink(Protocol):
+    """Write-side seam for parsed :class:`OptionBar` rows (one series)."""
+
+    def append_option_bars(
+        self,
+        *,
+        security_id: str,
+        exchange_segment: str,
+        expiry_flag: str,
+        expiry_code: int,
+        strike: str,
+        drv_option_type: str,
+        bars: Sequence[OptionBar],
+    ) -> int:
+        """Persist *bars* for this series; return the count appended."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+@dataclass(frozen=True, slots=True)
+class OptionIngestReport:
+    """Outcome of an :func:`ingest_rolling_option_series` run."""
+
+    windows: int
+    bars_appended: int
+    transient_failures: int
+
+
+def _window_dates(start: date, end: date) -> list[tuple[date, date]]:
+    """Tile ``[start, end)`` into 30-day rolling-option fetch windows."""
+    planned = plan_option_windows(datetime.combine(start, time()), datetime.combine(end, time()))
+    return [(date.fromisoformat(w.start[:10]), date.fromisoformat(w.end[:10])) for w in planned]
+
+
+def ingest_rolling_option_series(
+    client: JsonPoster,
+    sink: OptionBarSink,
+    *,
+    security_id: str,
+    exchange_segment: str,
+    instrument: str,
+    expiry_flag: str,
+    expiry_code: int,
+    strike: str,
+    drv_option_type: str,
+    start: date,
+    end: date,
+    required_data: Sequence[str] = ALL_REQUIRED_DATA,
+    pace: Pacer | None = None,
+) -> OptionIngestReport:
+    """Pull one expired-option series' 1-minute OHLC over ``[start, end)``.
+
+    Parameters
+    ----------
+    client, sink
+        The JSON poster (Dhan client) and the injected :class:`OptionBar`
+        write sink.
+    security_id
+        The **underlying** Dhan ``SECURITY_ID`` (rolling option resolves
+        strikes relative to this underlying's spot).
+    exchange_segment, instrument
+        e.g. ``"NSE_FNO"`` and ``"OPTIDX"`` / ``"OPTSTK"``.
+    expiry_flag, expiry_code
+        ``"WEEK"`` / ``"MONTH"`` and the expiry selector.
+    strike
+        Relative strike (``"ATM"``, ``"ATM+1"`` … per the rolling-option doc).
+    drv_option_type
+        ``"CALL"`` or ``"PUT"``.
+    start, end
+        Half-open date range.
+    required_data
+        Fields to request — defaults to :data:`ALL_REQUIRED_DATA`.
+    pace
+        Optional per-window pacing hook (rate-limit acquire).
+
+    Returns
+    -------
+    OptionIngestReport
+        Window count, total bars appended (session-filtered), and
+        transient-failure count.
+
+    Raises
+    ------
+    DhanError
+        On a terminal (non-retryable) fetch error.
+    """
+    bars_appended = 0
+    transient = 0
+    windows = _window_dates(start, end)
+    for window_start, window_end in windows:
+        if pace is not None:
+            pace()
+        body = build_rolling_option_body(
+            security_id=security_id,
+            exchange_segment=exchange_segment,
+            instrument=instrument,
+            expiry_flag=expiry_flag,
+            expiry_code=expiry_code,
+            strike=strike,
+            drv_option_type=drv_option_type,
+            required_data=required_data,
+            from_date=datetime.combine(window_start, time()),
+            to_date=datetime.combine(window_end, time()),
+            interval=TRACK1_OPTIONS_INTERVAL,
+        )
+        try:
+            payload = client.post_json(ENDPOINT_ROLLING_OPTION, body)
+        except DhanError as exc:
+            if is_retryable(exc):
+                transient += 1
+                continue
+            raise
+        data = payload.get("data")
+        source = data if isinstance(data, Mapping) else payload
+        # Options are intraday 1m → drop pre-open / post-close before the lake.
+        bars = [bar for bar in parse_rolling_option_sides(source) if in_session(bar.timestamp)]
+        bars_appended += sink.append_option_bars(
+            security_id=security_id,
+            exchange_segment=exchange_segment,
+            expiry_flag=expiry_flag,
+            expiry_code=expiry_code,
+            strike=strike,
+            drv_option_type=drv_option_type,
+            bars=bars,
+        )
+    return OptionIngestReport(
+        windows=len(windows), bars_appended=bars_appended, transient_failures=transient
+    )
+
+
+__all__ = [
+    "ALL_REQUIRED_DATA",
+    "JsonPoster",
+    "OptionBarSink",
+    "OptionIngestReport",
+    "Pacer",
+    "ingest_rolling_option_series",
+]
