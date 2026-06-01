@@ -56,8 +56,11 @@ from brutex.dashboard.db_view import (
     sample_rows,
     table_summary,
 )
-from brutex.dashboard.pull_controller import dhan_creds_present, pull_candles
+from brutex.dashboard.option_pull_controller import pull_options
+from brutex.dashboard.pull_controller import dhan_creds_present, pull_all_spot, pull_candles
+from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
+from brutex.models import Instrument
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
     PipelineEventKind,
@@ -815,6 +818,126 @@ def build_app(
             completed=report.total_completed,
             failed=report.total_failed,
             no_data=report.total_no_data,
+        )
+        return JSONResponse(report.to_dict())
+
+    def _select_bulk_targets(kind: str) -> list[Instrument]:
+        """Resolve every admitted spot underlying of *kind* (index / stock).
+
+        Reuses the cheap candidates-only fast path + the single COMMON
+        classifier (DEC-INSTRUMENT-UNIVERSE-FAST-001) so a bulk pull selects
+        exactly the universe the grid shows. A bad *kind* surfaces as a 400.
+        """
+        store = _require_store()
+        eligible = store.fno_eligible_underlyings()
+        candidates = store.list_index_equity_instruments()
+        try:
+            return select_pull_instruments(candidates, kind=kind, fno_eligible=eligible)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/v1/universe/pull-all")
+    async def api_universe_pull_all(kind: str = Query(...)) -> JSONResponse:
+        """POST /api/v1/universe/pull-all?kind=index|stock — bulk SPOT pull.
+
+        The one-click "⤓ Pull ALL indices / stocks spot" buttons (① / ③). Thin
+        wrapper over :func:`brutex.dashboard.pull_controller.pull_all_spot`: it
+        selects every admitted spot underlying of *kind* and fans the 1m + 1d
+        pull over the full ``[2021-01-01, today]`` range in one pass.
+        ``dry_run`` is forced ``True`` when Dhan creds are absent (offline
+        preview), mirroring the per-symbol pull.
+        """
+        dry_run = not dhan_creds_present()
+        instruments = _select_bulk_targets(kind)
+        _LOG.info("universe.pull_all.requested", kind=kind, count=len(instruments), dry_run=dry_run)
+        try:
+            report = pull_all_spot(
+                instruments,
+                lake_root=_resolve_pull_lake_root(instrument_store, dry_run=dry_run),
+                dry_run=dry_run,
+            )
+        except Exception as exc:  # surface the REAL reason (DEC-PULL-ERROR-VISIBILITY-001)
+            _LOG.exception(
+                "universe.pull_all.failed",
+                kind=kind,
+                dry_run=dry_run,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+        _LOG.info(
+            "universe.pull_all.ok",
+            kind=kind,
+            dry_run=dry_run,
+            symbols=report.total_symbols,
+            completed=report.total_completed,
+            failed=report.total_failed,
+        )
+        return JSONResponse(report.to_dict())
+
+    @app.post("/api/v1/universe/pull-options")
+    async def api_universe_pull_options(
+        kind: str | None = Query(default=None),
+        symbol: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull-options — bulk OR per-symbol OPTIONS pull.
+
+        Backs the options buttons (② ④ bulk-by-kind, ⑥ ⑧ per-symbol). Thin
+        wrapper over
+        :func:`brutex.dashboard.option_pull_controller.pull_options`: when
+        ``symbol`` is given it fans options for that one underlying
+        (IDX→OPTIDX±10 / EQ→OPTSTK±3); otherwise it bulk-fans every admitted
+        underlying of ``kind``. Exactly one of ``symbol`` / ``kind`` is
+        required. ``dry_run`` is forced ``True`` when Dhan creds are absent.
+        """
+        dry_run = not dhan_creds_present()
+        if symbol is not None:
+            store = _require_store()
+            instrument = store.get(symbol)
+            if instrument is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown security_id {symbol!r} — not in the instrument store",
+                )
+            instruments = [instrument]
+        elif kind is not None:
+            instruments = _select_bulk_targets(kind)
+        else:
+            raise HTTPException(
+                status_code=400, detail="pull-options requires either ?symbol=... or ?kind=..."
+            )
+        _LOG.info(
+            "universe.pull_options.requested",
+            kind=kind,
+            symbol=symbol,
+            count=len(instruments),
+            dry_run=dry_run,
+        )
+        try:
+            report = pull_options(
+                instruments,
+                lake_root=_resolve_pull_lake_root(instrument_store, dry_run=dry_run),
+                dry_run=dry_run,
+            )
+        except Exception as exc:  # surface the REAL reason (DEC-PULL-ERROR-VISIBILITY-001)
+            _LOG.exception(
+                "universe.pull_options.failed",
+                kind=kind,
+                symbol=symbol,
+                dry_run=dry_run,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
+        _LOG.info(
+            "universe.pull_options.ok",
+            kind=kind,
+            symbol=symbol,
+            dry_run=dry_run,
+            symbols=report.total_symbols,
+            series_completed=report.total_series_completed,
+            series_failed=report.total_series_failed,
+            bars=report.total_bars,
         )
         return JSONResponse(report.to_dict())
 
@@ -1963,7 +2086,10 @@ __all__ = [
     "WorkerRow",
     "build_app",
     "list_underlyings",
+    "pull_all_spot",
     "pull_candles",
+    "pull_options",
+    "select_pull_instruments",
     "snapshot_to_json",
     "universe_summary",
 ]
