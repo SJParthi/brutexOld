@@ -40,7 +40,7 @@ stock options**.
 | `securityId` | string | underlying exchange id |
 | `instrument` | enum string | e.g. `OPTIDX` |
 | `expiryFlag` | enum string | `WEEK` or `MONTH` |
-| `expiryCode` | enum int | expiry selector |
+| `expiryCode` | enum int | expiry selector — **Allowed values: `1`, `2`, `3`** (Near / Next / Far) per the endpoint doc; the general Annexure indexes the same three depths `0`/`1`/`2` (DEC-DHAN-EXPIRY-CODES-001) |
 | `strike` | enum string | `ATM`; up to `ATM±10` (index near-expiry), `ATM±3` (others) |
 | `drvOptionType` | enum string | `CALL` or `PUT` |
 | `requiredData` | array | any of `open high low close iv volume strike oi spot` |

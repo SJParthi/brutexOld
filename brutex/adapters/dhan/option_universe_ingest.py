@@ -45,12 +45,15 @@ from brutex.adapters.dhan.option_ingest import (
 INDEX_STRIKE_OFFSETS: int = 10
 STOCK_STRIKE_OFFSETS: int = 3
 
-#: Full expiry depth per flag — the locked DEC-P0-063 "all 4 expiryCodes"
-#: (operator choice 2026-06-01). The exact valid Dhan ``expiryCode`` range is a
-#: Phase-0b empirical question (``docs/dhan-ref/06`` documents it only as an
-#: "expiry selector"); requesting an invalid code is **safe** because the
-#: per-series quarantine records it and the run continues (never fatal).
-DEFAULT_EXPIRY_CODES: tuple[int, ...] = (0, 1, 2, 3)
+#: The expiry depths the rolling-option endpoint serves — Near, Next, Far
+#: (DEC-DHAN-EXPIRY-CODES-001). `/charts/rollingoption` documents
+#: ``expiryCode`` **Allowed values: 1, 2, 3** (1-indexed for this endpoint;
+#: the general Annexure indexes the same three depths 0/1/2). Verified from the
+#: operator's 2026-06-01 Dhan docs + live 200-OK probes — this supersedes the
+#: earlier unverified "4 expiryCodes" assumption (a Groww carryover). A code the
+#: vendor rejects is still **safe**: the per-series quarantine records it and the
+#: run continues (never fatal).
+DEFAULT_EXPIRY_CODES: tuple[int, ...] = (1, 2, 3)
 
 #: The report key for one fanned-out series.
 SeriesKey = tuple[str, str, int, str, str]
