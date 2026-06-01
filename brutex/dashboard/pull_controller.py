@@ -55,12 +55,14 @@ from brutex.models import Instrument
 
 _LOG = structlog.get_logger(__name__)
 
-#: Earliest calendar date Dhan serves historical candles for equities,
-#: indices and F&O (DhanMarketAdapter capabilities ``earliest_history`` =
-#: 2020-01-01; CLAUDE.md §6 "Historical depth — From 2020"). Any ``from_date``
-#: below this floor is clamped up to it so a too-early pick can never waste
-#: quota on a window the vendor has no data for.
-DHAN_HISTORY_FLOOR: Final[date] = date(2020, 1, 1)
+#: The Track-1 **operational** pull floor — the start of the locked
+#: "Rolling 2021-01-01 → today" range (CLAUDE.md §3). Dhan's vendor capability
+#: reaches back to 2020-01-01 (``DhanMarketAdapter.earliest_history``; CLAUDE.md
+#: §6 "Historical depth — From 2020"), but the operator deliberately starts the
+#: pull at 2021-01-01 for the safer case — the 2020 edge's data quality is
+#: unverified (DEC-DHAN-PULL-SCOPE-001). Any ``from_date`` below this floor is
+#: clamped up to it so a too-early pick can never waste quota.
+DHAN_HISTORY_FLOOR: Final[date] = date(2021, 1, 1)
 
 #: The base timeframes Track 1 actually FETCHES from Dhan: 1-minute (every
 #: intraday timeframe is resampled from it) + 1-day (PDH/PDL anchors). The 19
@@ -99,7 +101,7 @@ def resolve_candle_range(
     2. **Year** — when neither date is given but *year* is: that full
        calendar year, **clamped to ``[DHAN_HISTORY_FLOOR, today]``** like
        mode 1. A past year resolves to the whole year; the current year
-       stops at today (never the future); a wholly-future or pre-2020 year
+       stops at today (never the future); a wholly-future or pre-2021 year
        raises "nothing to pull".
     3. **Default** — neither date nor year: the current UTC calendar year,
        same clamp as mode 2 (so it runs ``[Jan 1, today]``, never ahead).
@@ -139,7 +141,7 @@ def resolve_candle_range(
         # Mode 2/3 — an explicit *year* (or, absent that, the current UTC
         # year) → that full calendar year as a date pair, which then falls
         # through the SAME clamp as the explicit-range mode below, so the
-        # current year stops at today and a wholly-future / pre-2020 year
+        # current year stops at today and a wholly-future / pre-2021 year
         # raises "nothing to pull" instead of requesting a window the vendor
         # rejects (DEC-PULL-FUTURE-WINDOW-001).
         resolved_year = year if year is not None else now.year
@@ -334,7 +336,7 @@ def pull_candles(
     intraday timeframes are resampled from the 1-minute base downstream,
     never fetched, per DEC-DHAN-1M-ONLY-001). The window is resolved by
     :func:`resolve_candle_range`: an explicit *from_date* / *to_date* range
-    (day-inclusive, clamped to ``[2020-01-01, today]``) when either is given,
+    (day-inclusive, clamped to ``[2021-01-01, today]``) when either is given,
     else the full calendar *year*. Idempotent + rerun-safe — the sink append
     is a no-op on already-stored bars (CLAUDE.md §2 Rule 7).
 
