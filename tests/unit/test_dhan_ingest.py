@@ -132,6 +132,65 @@ class TestIngestSpot:
         )
         assert calls["n"] == 3
 
+    def test_giftnifty_keeps_out_of_session_bars(self) -> None:
+        # GIFT Nifty (NSE IX, ~21h) is EXEMPT from the 09:15-15:30 filter, so an
+        # out-of-session bar (17:30 IST = 12:00 UTC) is KEPT (DEC-DHAN-GIFTNIFTY-SESSION-001).
+        out_of_session = {**_CANDLES, "timestamp": [1609761600]}  # 2021-01-04 17:30 IST
+        gift = Instrument(
+            exchange=Exchange.NSE,
+            exchange_token=37,
+            trading_symbol="GIFTNIFTY",
+            vendor_symbol="NSE-GIFTNIFTY",
+            name="GIFT Nifty",
+            instrument_type=InstrumentType.IDX,
+            segment=Segment.CASH,
+            series=None,
+            isin=None,
+            underlying_symbol=None,
+            underlying_exchange_token=None,
+            lot_size=0,
+            tick_size=Decimal("0"),
+            freeze_quantity=None,
+            expiry_date=None,
+            strike_price=None,
+            is_reserved=False,
+            buy_allowed=True,
+            sell_allowed=True,
+        )
+        client = DhanClient(
+            access_token="t",
+            client_id="c",
+            transport=_Transport(payload=out_of_session),  # type: ignore[arg-type]
+            base_url="https://api.dhan.co/v2/",
+        )
+        adapter = DhanMarketAdapter(client=client, instruments=(gift,))
+        sink = _Sink()
+        report = ingest_spot(
+            adapter,
+            sink,
+            instrument=gift,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 2),  # 1 window
+        )
+        assert report.bars_appended == 1  # the out-of-session bar is KEPT
+        assert sink.appends == [1]
+
+    def test_non_exempt_drops_out_of_session_bars(self) -> None:
+        # A normal symbol (NIFTY) still has out-of-session bars dropped.
+        out_of_session = {**_CANDLES, "timestamp": [1609761600]}  # 17:30 IST
+        sink = _Sink()
+        report = ingest_spot(
+            _adapter(payload=out_of_session),
+            sink,
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 2),
+        )
+        assert report.bars_appended == 0  # dropped by the session filter
+        assert sink.appends == [0]
+
     def test_transient_error_counted_and_skipped(self) -> None:
         sink = _Sink()
         report = ingest_spot(
