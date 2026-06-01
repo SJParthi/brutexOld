@@ -145,12 +145,17 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-      - name: Install deps (includes [data] extras per DEC-P0-001)
+      - name: Install deps (includes [data] + [ui] extras)
         # DEC-P0-001 (2026-05-17): added `[data]` extra so polars + duckdb +
         # pyarrow are installed in CI. Without these, ~6 tests in
         # tests/unit/test_tf_resampler.py and tests/integration/test_data_lake_real.py
         # fail at collection time, suppressing real coverage of the data lake.
-        run: pip install -e ".[dev,data]"
+        # DEC-DASHBOARD-CI-UNMASK-001 (2026-06-01): added `[ui]` (FastAPI +
+        # uvicorn) + httpx/httpx2 (in [dev]) so the 4 dashboard HTTP test files
+        # — previously SILENTLY SKIPPED on CI via importorskip("fastapi"/"httpx")
+        # — now actually RUN and gate. This closes the masking hole that let a
+        # broken dashboard PR auto-merge green.
+        run: pip install -e ".[dev,data,ui]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-050 (PR-K): the fno-math Rust extension is built via
         # maturin (PEP 517) at install time. ubuntu-24.04's pre-installed

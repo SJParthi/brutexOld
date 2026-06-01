@@ -67,6 +67,13 @@ dev = [
     "mutmut>=2.5,<4.0",             # was <3.0; PyPI latest 3.5.0 (DEC-P0-012)
     "interrogate>=1.7,<2.0",
     "pip-licenses>=5.0,<6.0",
+    # DEC-DASHBOARD-CI-UNMASK-001 (2026-06-01): the FastAPI dashboard HTTP
+    # suite uses Starlette's TestClient, which imports `httpx2` (the modern
+    # Starlette HTTP backend) and is guarded by `pytest.importorskip("httpx")`.
+    # Both must be installed for the dashboard tests to actually RUN (not skip)
+    # on CI — paired with installing the `[ui]` extra in the CI test job.
+    "httpx>=0.27,<1.0",
+    "httpx2>=2.0,<3.0",
 ]
 
 [project.scripts]
