@@ -187,11 +187,16 @@ def client_without_store() -> TestClient:
 
 
 class TestInstrumentsEnabled:
-    def test_index_html_has_instruments_card(self, client_with_store: TestClient) -> None:
+    def test_index_decouples_instruments_to_rest(self, client_with_store: TestClient) -> None:
+        # Per locked design DEC-DASHBOARD-LIVE-FINALE (MIGRATION.md #234) the
+        # Instruments Browser is no longer injected into the index page — it is
+        # a separate concern served by the /api/v1/instruments REST endpoint.
+        # The index therefore never embeds the card, even with a store wired.
         r = client_with_store.get("/")
         assert r.status_code == 200
-        assert "instruments-card" in r.text
-        assert "Instruments Browser" in r.text
+        assert "instruments-card" not in r.text
+        rest = client_with_store.get("/api/v1/instruments")
+        assert rest.status_code == 200
 
     def test_stats_endpoint_returns_totals(self, client_with_store: TestClient) -> None:
         r = client_with_store.get("/api/v1/instruments/stats")
