@@ -114,7 +114,11 @@ class OptionParquetWriter:
 
         if dest.exists():
             existing = pl.read_parquet(dest)
-            before = existing.height
+            # int() coercion keeps the return concretely int even in the CI
+            # type-check env where polars is NOT installed (`[dev,groww]` only)
+            # — there `.height` is Any (ignore_missing_imports) and an un-coerced
+            # return would trip mypy --strict's no-any-return.
+            before = int(existing.height)
             combined = (
                 pl.concat([existing, new_df])
                 .unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
@@ -125,7 +129,7 @@ class OptionParquetWriter:
             combined = new_df.unique(
                 subset=["side", "timestamp"], keep="first", maintain_order=True
             ).sort(["side", "timestamp"])
-        added = combined.height - before
+        added = int(combined.height) - before
         if added > 0:
             dest.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write_parquet(dest, combined)
