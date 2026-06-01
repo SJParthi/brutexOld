@@ -124,6 +124,24 @@ def test_pace_threaded_through(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [sentinel]
 
 
+def test_non_dhan_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Only DhanError is quarantined; a genuine bug (e.g. ValueError) must NOT
+    # be swallowed — it propagates so the orchestrator never hides a defect.
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, pace=None):
+        raise ValueError("a real bug, not a vendor error")
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    with pytest.raises(ValueError, match="a real bug"):
+        run_dhan_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("13")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+        )
+
+
 def test_empty_universe_yields_empty_report() -> None:
     report = run_dhan_spot_ingest(
         object(),  # type: ignore[arg-type]
