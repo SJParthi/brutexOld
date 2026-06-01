@@ -113,7 +113,7 @@ jobs:
           cache: pip
       - name: Install deps
         run: |
-          pip install -e ".[dev,groww]"
+          pip install -e ".[dev]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-050: required by pyright's strict mode which walks
         # `tests/unit/test_fno_math_bridge.py` and needs the module
@@ -150,7 +150,7 @@ jobs:
         # pyarrow are installed in CI. Without these, ~6 tests in
         # tests/unit/test_tf_resampler.py and tests/integration/test_data_lake_real.py
         # fail at collection time, suppressing real coverage of the data lake.
-        run: pip install -e ".[dev,data,groww]"
+        run: pip install -e ".[dev,data]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-050 (PR-K): the fno-math Rust extension is built via
         # maturin (PEP 517) at install time. ubuntu-24.04's pre-installed
@@ -1109,7 +1109,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev,groww]"
+        run: pip install -e ".[dev]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
         # at module load time. Every Python job that imports any
@@ -1154,7 +1154,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev,groww]"
+        run: pip install -e ".[dev]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
         uses: dtolnay/rust-toolchain@stable
@@ -1201,7 +1201,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev,groww]"
+        run: pip install -e ".[dev]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
         uses: dtolnay/rust-toolchain@stable
@@ -1651,7 +1651,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev,groww]"
+        run: pip install -e ".[dev]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
         # at module load; mutmut runs pytest which imports orchestrator.

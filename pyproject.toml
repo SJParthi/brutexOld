@@ -9,9 +9,9 @@ authors = [
     { name = "SJParthi" },
 ]
 
-# Track 1 base dependencies. The Groww adapter (Phase 1, post-DEC-VENDOR-PIVOT-001
-# 2026-05-26) ships behind the `groww` optional extra. Prior Groww adapter
-# wiped 2026-05-26 per operator decree.
+# Track 1 base dependencies. BruteX is Dhan-only (DEC-DHAN-FINALIZE-001,
+# 2026-06-01): the Dhan adapter speaks plain REST over the injected urllib
+# transport — no vendor SDK dependency, no TOTP dep.
 #
 # DEC-P0-012 (PR #34, 2026-05-17 "always latest"): upper bounds widened to
 # include the latest stable major published on PyPI as of branch date. New
@@ -48,15 +48,10 @@ ui = [
     "fastapi>=0.110,<1.0",
     "uvicorn[standard]>=0.29,<1.0",
 ]
-# DEC-VENDOR-PIVOT-001 (2026-05-26): prior broker adapter wiped per operator
-# decree; Groww adapter replaces it. The `groww` extra ships the Groww
-# Python SDK + its TOTP dep. CI installs `[dev,data,groww]` for the
-# full matrix; `tests/smoke/` uses `pytest.importorskip("growwapi")`
-# so missing-extra environments skip rather than fail.
-groww = [
-    "growwapi>=1.5,<2.0",
-    "pyotp>=2.9,<3.0",
-]
+# DEC-DHAN-FINALIZE-001 (2026-06-01): the `groww` optional extra (growwapi +
+# pyotp) was REMOVED with the Groww adapter — BruteX is Dhan-only. Dhan auth is
+# a manual access-token + client-id (no vendor SDK, no TOTP dep); the Dhan
+# adapter speaks plain REST via the injected urllib transport.
 dev = [
     "pytest>=8.0,<10.0",            # was <9.0; PyPI latest 9.0.3 (DEC-P0-012)
     "pytest-cov>=5.0,<8.0",         # was <6.0; PyPI latest 7.1.0 (DEC-P0-012)
@@ -229,8 +224,6 @@ module = [
     "fastapi", "fastapi.*",
     "uvicorn", "uvicorn.*",
     "fno_math_py", "fno_math_py.*",
-    "growwapi", "growwapi.*",  # DEC-VENDOR-PIVOT-001 — Track 1 Groww adapter (Phase 1 dep)
-    "pyotp", "pyotp.*",  # DEC-VENDOR-PIVOT-001 — TOTP for Groww auth
     "structlog", "structlog.*",  # DEC-P0-038: structlog runtime dep — type stubs not yet packaged
     "fastbloom_rs", "fastbloom_rs.*",  # DEC-P0-047: PyO3-backed Rust Bloom — no Python stubs published
     # DEC-P0-055 (PR-N+2): `fno_math` removed — wheel now ships bundled
