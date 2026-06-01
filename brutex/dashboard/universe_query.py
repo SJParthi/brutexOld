@@ -176,10 +176,9 @@ def list_underlyings(
 
     Each returned row is the JSON-friendly shape the ``/universe`` page's
     instruments column renders: ``symbol`` (bare ``trading_symbol`` for
-    display), ``pull_symbol`` (the exchange-prefixed ``vendor_symbol``
-    — e.g. ``NSE-NIFTY`` / ``BSE-SENSEX`` — that the spot pull button
-    POSTs so :func:`brutex.adapters.groww.client.symbol_to_exchange_segment`
-    can split the leading exchange token), display name, kind, and
+    display), ``pull_symbol`` (the ``vendor_symbol`` — the Dhan
+    ``SECURITY_ID`` — that the spot pull button POSTs to resolve the
+    instrument via the store), display name, kind, and
     exchange. The real per-underlying contract count is fetched lazily
     via ``/api/v1/contracts`` when the row is clicked.
 

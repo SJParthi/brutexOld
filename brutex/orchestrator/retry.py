@@ -276,8 +276,7 @@ def retry_call[T](
     (bad-request / auth / authz / not-found) re-raises on the first occurrence —
     looping on a deterministic error is a hang, not resilience.
 
-    Only *retry_on* (the neutral vendor base
-    :class:`~brutex.adapters.groww.client.VendorSdkError` in production) is
+    Only *retry_on* (the injected neutral vendor base exception) is
     caught + classified; any other exception propagates untouched (a non-vendor
     error is a programmer bug, never a recoverable API condition).
 
@@ -287,8 +286,7 @@ def retry_call[T](
         Zero-arg thunk performing one API call; its return value passes through
         unchanged on success.
     retry_on
-        Exception base to catch + classify (production:
-        :class:`~brutex.adapters.groww.client.VendorSdkError`).
+        Exception base to catch + classify (the injected vendor base exception).
     max_attempts
         Hard ceiling on total attempts (``>= 1``). Exhaustion re-raises the last
         transient exception.

@@ -323,9 +323,10 @@ def derive_lake_underlyings(
     DEC-P0-063) — not just the ~25 indices. The caller passes the IDX + EQ
     candidate rows (from
     :meth:`~brutex.data.instrument_store.InstrumentStore.list_index_equity_instruments`),
-    and this projects each to the ``(symbol, exchange)`` pair the
-    :func:`~brutex.adapters.groww.universe_ingest.run_universe_ingest`
-    fan-out expects.
+    and this projects each to the ``(symbol, exchange)`` pair the Dhan options
+    rolling fan-out
+    (:func:`~brutex.adapters.dhan.option_universe_ingest.run_dhan_options_ingest`)
+    expects.
 
     The brute-force ENGINE is UNAFFECTED — it still sweeps only the 3
     indices; this only widens the LAKE pull.
