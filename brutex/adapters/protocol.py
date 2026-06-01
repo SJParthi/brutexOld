@@ -222,6 +222,21 @@ class InstrumentPage:
     next_cursor: str | None
 
 
+def single_instrument_page(
+    instruments: tuple[Instrument, ...], cursor: str | None
+) -> InstrumentPage:
+    """Return *instruments* as one page; a non-``None`` *cursor* is exhausted.
+
+    The static-universe ``list_instruments`` idiom shared by every single-page
+    adapter (CLAUDE.md §11 COMMON) — markets that surface their whole universe
+    in one shot have no real cursor, so any non-``None`` cursor is already
+    past the (single) page and yields an empty, terminal page.
+    """
+    if cursor is not None:
+        return InstrumentPage(instruments=(), next_cursor=None)
+    return InstrumentPage(instruments=instruments, next_cursor=None)
+
+
 @dataclass(frozen=True, slots=True)
 class DerivativeContract:
     """One contract in a derivative chain.
@@ -356,4 +371,5 @@ __all__ = [
     "InstrumentPage",
     "MarketAdapter",
     "MarketCapabilities",
+    "single_instrument_page",
 ]

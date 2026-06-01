@@ -23,13 +23,30 @@ from brutex.adapters.protocol import (
     InstrumentPage,
     MarketAdapter,
     MarketCapabilities,
+    single_instrument_page,
 )
-from brutex.models import Exchange
+from brutex.models import Exchange, Instrument
 
 from tests.fakes.demo_crypto_adapter import (
     DemoPerpCryptoAdapter,
     DemoSpotCryptoAdapter,
 )
+
+
+class TestSingleInstrumentPage:
+    """The shared static-universe ``list_instruments`` idiom (CLAUDE.md §11)."""
+
+    def test_first_page_returns_all_instruments(
+        self, nifty_option_instance: Instrument
+    ) -> None:
+        page = single_instrument_page((nifty_option_instance,), None)
+        assert page.instruments == (nifty_option_instance,)
+        assert page.next_cursor is None
+
+    def test_non_none_cursor_is_exhausted(self, nifty_option_instance: Instrument) -> None:
+        page = single_instrument_page((nifty_option_instance,), "next")
+        assert page.instruments == ()
+        assert page.next_cursor is None
 
 # ────────────────────────────────────────────────────────────────────────
 # MarketCapabilities validation
