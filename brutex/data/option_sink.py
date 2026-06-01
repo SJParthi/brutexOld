@@ -1,0 +1,124 @@
+"""Concrete expired-option sink — O(1)-dedup → write → hash-chained audit.
+
+The write-side component the rolling-option ingest streams into
+(:class:`brutex.adapters.dhan.option_ingest.OptionBarSink` protocol): it
+applies the **O(1) dedup guard** (:class:`~brutex.data.option_dedup.OptionDedupIndex`),
+delegates the surviving bars to an injected partition writer, and appends one
+**hash-chained audit row** per material write (Golden Rule #8). The dedup
+index + its writer + its audit sink are all injected, so this is 100%
+unit-testable without a real lake or audit file; the in-memory dedup tier can
+be swapped for the LMDB tier (:class:`~brutex.data.lmdb_membership.LmdbMembership`)
+with no change here.
+
+**Dedup identity (collision-safe).** A bar's key is
+``(security_id, expiry_flag:expiry_code, resolved_strike, side, epoch)``
+(:func:`~brutex.data.option_dedup.key_for_option_bar`). On any given trading
+day a given ``(flag, code)`` resolves to exactly one actual expiry, and the
+full-timestamp ``epoch`` (date + minute) disambiguates the same ``(flag,
+code)`` across weeks — so two genuinely-different contracts can never collapse
+to one key, and a re-pull of the *same* contract/minute always dedups. The
+**resolved** per-bar strike (not the relative ``ATM±N`` request) is used, so
+distinct strikes never share a key.
+
+Idempotent: a duplicate re-pull yields zero survivors → no write, no audit
+row (CLAUDE.md §2 Rule 7). O(1) per bar (one dedup probe + one append).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Protocol
+
+from brutex.data.models import OptionBar
+from brutex.data.option_dedup import OptionDedupIndex, unique_option_bars
+
+#: Field separator for the descriptive partition key (mirrors the dedup sep).
+_KEY_SEP: str = "|"
+
+#: Audit action stamped on every material option-bar write.
+_AUDIT_ACTION: str = "OPTION_BARS_WRITTEN"
+
+
+class OptionPartitionWriter(Protocol):
+    """Write-side seam: persist a deduped batch of bars for one series."""
+
+    def write(self, *, partition_key: str, bars: Sequence[OptionBar]) -> int:
+        """Persist *bars* under *partition_key*; return the count written."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+class OptionAuditSink(Protocol):
+    """The ``append`` slice of the hash-chained audit writer the sink uses."""
+
+    def append(self, *, action: str, subject: str, payload: dict[str, object]) -> object:
+        """Append one audit entry; return the writer's result."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+class OptionBarSink:
+    """Dedup + write + audit for expired-option bars (one series per call).
+
+    Implements the :class:`OptionBarSink` protocol the rolling-option ingest
+    expects (``append_option_bars(...) -> int``).
+
+    Parameters
+    ----------
+    index
+        The O(1) dedup index (in-memory or LMDB-backed exact tier).
+    writer
+        The injected partition writer (the concrete Parquet/DuckDB
+        expired-options table is a later piece).
+    audit
+        Optional hash-chained audit sink; when given, one row is appended per
+        non-empty write (the material action).
+    """
+
+    def __init__(
+        self,
+        *,
+        index: OptionDedupIndex,
+        writer: OptionPartitionWriter,
+        audit: OptionAuditSink | None = None,
+    ) -> None:
+        self._index = index
+        self._writer = writer
+        self._audit = audit
+
+    def append_option_bars(
+        self,
+        *,
+        security_id: str,
+        exchange_segment: str,
+        expiry_flag: str,
+        expiry_code: int,
+        strike: str,
+        drv_option_type: str,
+        bars: Sequence[OptionBar],
+    ) -> int:
+        """Dedup *bars*, write the survivors, audit the write; return the count.
+
+        A duplicate re-pull (all bars already seen) is a no-op: no write, no
+        audit row (idempotent). Returns the number of newly-written bars.
+        """
+        expiry = f"{expiry_flag}:{expiry_code}"
+        survivors = unique_option_bars(bars, self._index, underlying=security_id, expiry=expiry)
+        if not survivors:
+            return 0
+        partition_key = _KEY_SEP.join(
+            [exchange_segment, security_id, expiry_flag, str(expiry_code), strike, drv_option_type]
+        )
+        written = self._writer.write(partition_key=partition_key, bars=survivors)
+        if self._audit is not None:
+            self._audit.append(
+                action=_AUDIT_ACTION,
+                subject=partition_key,
+                payload={"written": written, "deduped": len(bars) - written},
+            )
+        return written
+
+
+__all__ = [
+    "OptionAuditSink",
+    "OptionBarSink",
+    "OptionPartitionWriter",
+]
