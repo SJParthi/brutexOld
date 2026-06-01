@@ -76,7 +76,13 @@ _SEED: int = 42
 # noisy shared-GHA scheduler slice can no longer skew the ratio past the gate.
 # The ratio threshold itself is UNCHANGED (no downgrade) — this only de-noises
 # the measurement (cf. timeit.repeat → min).
-_TIMING_REPEATS: int = 7
+#
+# Raised 7 → 15 (DEC-CANARY-MINTIME-001, 2026-06-01): best-of-7 still tripped on
+# one of two parallel shared-GHA runs of the SAME commit (the twin run passed —
+# definitively jitter, not an O(n) regression). More samples tighten the min
+# estimate so a contended runner needs ALL 15 slices to be slow before the gate
+# trips — still no threshold change, purely more de-noising.
+_TIMING_REPEATS: int = 15
 
 # Ratio gate ceiling — matches `test_store_o1.py:162` pattern (5× ratio
 # allows for CI jitter; a real O(n) regression would show ratio >> 5×).
