@@ -14,7 +14,10 @@ Pacing / chunking / retry stay in the orchestrator (the chunk planner is
 `brutex.adapters.dhan.chunks`; retry semantics are `errors.is_retryable`):
 ``fetch_ohlcv`` performs **one** within-window request and returns parsed
 bars. The universe (an immutable tuple of :class:`Instrument`) is indexed
-by ``vendor_symbol`` (= Dhan ``SECURITY_ID``) for O(1) lookup.
+by ``vendor_symbol`` — the exchange-prefixed GLOBAL key (``"NSE-NIFTY"``),
+NOT the raw ``SECURITY_ID`` (which is unique only within an exchange-segment)
+— for O(1) lookup; the raw id the candle API needs lives in ``exchange_token``
+(DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
 """
 
 from __future__ import annotations
@@ -76,7 +79,7 @@ class DhanMarketAdapter:
     _index: dict[str, Instrument] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Index the universe by ``vendor_symbol`` (Dhan SECURITY_ID) for O(1) lookup."""
+        """Index the universe by ``vendor_symbol`` (the exchange-prefixed global key) for O(1) lookup."""
         object.__setattr__(self, "_index", {i.vendor_symbol: i for i in self.instruments})
 
     @property
@@ -118,13 +121,18 @@ class DhanMarketAdapter:
             raise OutOfScopeError(f"symbol {symbol!r} not in the Dhan universe")
         del exchange  # the instrument's own exchange is authoritative
         exchange_segment = f"{instrument.exchange.value}_EQ"
+        # ``symbol`` is the GLOBAL ``vendor_symbol`` (exchange-prefixed, e.g.
+        # ``"NSE-NIFTY"``); the Dhan candle API needs the RAW numeric
+        # ``SECURITY_ID``, preserved on the instrument as ``exchange_token``
+        # (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
+        raw_security_id = str(instrument.exchange_token)
         dhan_instrument = _dhan_instrument(instrument)
         from_dt = datetime.combine(start, time())
         to_dt = datetime.combine(end, time())
         if interval == _INTERVAL_INTRADAY:
             endpoint = ENDPOINT_INTRADAY
             body = build_intraday_body(
-                security_id=symbol,
+                security_id=raw_security_id,
                 exchange_segment=exchange_segment,
                 instrument=dhan_instrument,
                 from_date=from_dt,
@@ -134,7 +142,7 @@ class DhanMarketAdapter:
         elif interval == _INTERVAL_DAILY:
             endpoint = ENDPOINT_HISTORICAL
             body = build_historical_body(
-                security_id=symbol,
+                security_id=raw_security_id,
                 exchange_segment=exchange_segment,
                 instrument=dhan_instrument,
                 from_date=from_dt,
