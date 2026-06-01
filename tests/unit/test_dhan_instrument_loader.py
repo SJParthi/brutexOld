@@ -17,6 +17,7 @@ from brutex.adapters.dhan.instruments import DhanInstrumentError
 _HEADER = [
     "EXCH_ID",
     "SECURITY_ID",
+    "INSTRUMENT",
     "INSTRUMENT_TYPE",
     "SYMBOL_NAME",
     "DISPLAY_NAME",
@@ -52,22 +53,23 @@ def _universe_rows() -> list[dict[str, str]]:
         _row(
             EXCH_ID="NSE",
             SECURITY_ID="13",
-            INSTRUMENT_TYPE="INDEX",
+            INSTRUMENT="INDEX",
             SYMBOL_NAME="NIFTY",
             DISPLAY_NAME="Nifty 50",
         ),
         _row(
             EXCH_ID="BSE",
             SECURITY_ID="51",
-            INSTRUMENT_TYPE="INDEX",
+            INSTRUMENT="INDEX",
             SYMBOL_NAME="SENSEX",
             DISPLAY_NAME="BSE Sensex",
         ),
         _row(
             EXCH_ID="NSE",
             SECURITY_ID="2885",
-            INSTRUMENT_TYPE="EQUITY",
-            SYMBOL_NAME="RELIANCE",
+            INSTRUMENT="EQUITY",
+            SYMBOL_NAME="RELIANCE INDUSTRIES LTD",  # long company name
+            UNDERLYING_SYMBOL="RELIANCE",  # ticker → the F&O join key
             DISPLAY_NAME="Reliance",
             SERIES="EQ",
             ISIN="INE002A01018",
@@ -77,16 +79,16 @@ def _universe_rows() -> list[dict[str, str]]:
         _row(
             EXCH_ID="NSE",
             SECURITY_ID="9999",
-            INSTRUMENT_TYPE="EQUITY",
-            SYMBOL_NAME="TINYCO",
+            INSTRUMENT="EQUITY",
+            SYMBOL_NAME="TINY CO LTD",
             DISPLAY_NAME="Tiny Co",
             LOT_SIZE="1",
             TICK_SIZE="0.05",
-        ),  # not F&O eligible
+        ),  # not F&O eligible (no UNDERLYING_SYMBOL)
         _row(
             EXCH_ID="NSE",
             SECURITY_ID="3001",
-            INSTRUMENT_TYPE="OPTSTK",
+            INSTRUMENT="OPTSTK",
             SYMBOL_NAME="RELIANCE-OPT",
             DISPLAY_NAME="Reliance CE",
             LOT_SIZE="250",
@@ -138,7 +140,7 @@ class TestLoadUniverse:
                     _row(
                         EXCH_ID="NSE",
                         SECURITY_ID="13",
-                        INSTRUMENT_TYPE="INDEX",
+                        INSTRUMENT="INDEX",
                         SYMBOL_NAME="NIFTY",
                         DISPLAY_NAME="Nifty 50",
                     )
@@ -159,6 +161,7 @@ class TestLoadUniverse:
         # as an index (lot/tick empty → 0). Exercises the `or ""` empty branch.
         text = _csv([_row()], header=_HEADER)  # all-empty row
         short = text.split("\n")
-        short[1] = "NSE,13,INDEX,NIFTY,Nifty 50"  # truncate the data row's trailing cells
+        # Columns now: EXCH_ID,SECURITY_ID,INSTRUMENT,INSTRUMENT_TYPE,SYMBOL_NAME,…
+        short[1] = "NSE,13,INDEX,INDEX,NIFTY"  # truncate the data row's trailing cells
         universe = load_universe(lambda _url: "\n".join(short))
         assert [i.trading_symbol for i in universe] == ["NIFTY"]

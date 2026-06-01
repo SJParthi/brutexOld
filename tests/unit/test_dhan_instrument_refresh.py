@@ -18,6 +18,7 @@ from brutex.models import Instrument
 _HEADER = [
     "EXCH_ID",
     "SECURITY_ID",
+    "INSTRUMENT",
     "INSTRUMENT_TYPE",
     "SYMBOL_NAME",
     "DISPLAY_NAME",
@@ -50,15 +51,16 @@ def _rows() -> list[dict[str, str]]:
         _row(
             EXCH_ID="NSE",
             SECURITY_ID="13",
-            INSTRUMENT_TYPE="INDEX",
+            INSTRUMENT="INDEX",
             SYMBOL_NAME="NIFTY",
             DISPLAY_NAME="Nifty 50",
         ),
         _row(
             EXCH_ID="NSE",
             SECURITY_ID="2885",
-            INSTRUMENT_TYPE="EQUITY",
-            SYMBOL_NAME="RELIANCE",
+            INSTRUMENT="EQUITY",
+            SYMBOL_NAME="RELIANCE INDUSTRIES LTD",  # long name
+            UNDERLYING_SYMBOL="RELIANCE",  # ticker → F&O join key + trading_symbol
             DISPLAY_NAME="Reliance",
             LOT_SIZE="1",
             TICK_SIZE="0.05",
@@ -66,7 +68,7 @@ def _rows() -> list[dict[str, str]]:
         _row(
             EXCH_ID="NSE",
             SECURITY_ID="3001",
-            INSTRUMENT_TYPE="OPTSTK",
+            INSTRUMENT="OPTSTK",
             SYMBOL_NAME="RELIANCE-OPT",
             DISPLAY_NAME="Rel CE",
             LOT_SIZE="250",

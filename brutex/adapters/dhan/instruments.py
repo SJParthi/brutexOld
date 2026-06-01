@@ -12,9 +12,22 @@ hardcoded; resolved from the CSV).
 The **brute-force universe** is selected by :func:`select_universe`:
 - every **index** (NSE indices + BSE SENSEX + INDIA VIX), and
 - every **F&O-eligible single-stock SPOT** equity — i.e. an ``EQUITY`` row
-  whose symbol also appears as a derivatives ``UNDERLYING_SYMBOL`` (a
-  two-pass set membership, since F&O-eligibility can't be read off a lone
-  spot row).
+  whose **own ``UNDERLYING_SYMBOL`` ticker** also appears as a derivatives
+  ``UNDERLYING_SYMBOL`` (a two-pass set membership, since F&O-eligibility
+  can't be read off a lone spot row).
+
+  **Join key (DEC-DHAN-FNO-JOIN-KEY-001):** the F&O-eligibility match is on
+  the equity row's ``UNDERLYING_SYMBOL`` (the ticker, e.g. ``"RELIANCE"``),
+  NOT its ``SYMBOL_NAME`` (the long company name, e.g.
+  ``"RELIANCE INDUSTRIES LTD"``). In the real detailed CSV an equity carries
+  the long name in ``SYMBOL_NAME`` and the ticker in ``UNDERLYING_SYMBOL`` /
+  ``DISPLAY_NAME``, while a derivative leg carries the underlying ticker in
+  ``UNDERLYING_SYMBOL`` — so keying on ``SYMBOL_NAME`` matched only ~19/229
+  underlyings and the universe collapsed toward "1 stock". For the same
+  reason the admitted equity's ``trading_symbol`` is taken from its
+  ``UNDERLYING_SYMBOL`` ticker so a stock's identity matches how its F&O
+  legs reference it (ground truth: real Dhan ``api-scrip-master-detailed``,
+  219,082 rows, decoded 2026-06-01; 229 F&O underlyings).
 
 Derivative legs (options/futures) are parsed for eligibility then dropped
 from the lean universe (DEC-INSTRUMENT-UNIVERSE-FAST-001), recoverable on
@@ -32,11 +45,20 @@ from typing import Final
 from brutex.models import BruteXError, Exchange, Instrument, InstrumentType, Segment
 
 #: Detailed-CSV columns this parser requires (schema-drift guard).
+#:
+#: Classification reads the **``INSTRUMENT``** column (the long vocabulary —
+#: ``INDEX`` / ``EQUITY`` / ``FUTSTK`` / ``OPTSTK`` / ``FUTIDX`` / ``OPTIDX`` …),
+#: NOT ``INSTRUMENT_TYPE`` (the short codes ``INDEX`` / ``ES`` / ``OP`` / ``FUT``).
+#: Reading ``INSTRUMENT_TYPE`` was the "120 indices / 1 stock" bug: option/future
+#: legs carry ``INSTRUMENT_TYPE`` ``OP`` / ``FUT`` which match no derivative
+#: vocabulary, so the F&O-eligible set came out empty and no stock was admitted
+#: (DEC-DHAN-INSTRUMENT-CLASSIFY-001; mirrors the proven tickvault parser which
+#: classifies off ``INSTRUMENT``).
 _REQUIRED_COLUMNS: Final[frozenset[str]] = frozenset(
     {
         "EXCH_ID",
         "SECURITY_ID",
-        "INSTRUMENT_TYPE",
+        "INSTRUMENT",
         "SYMBOL_NAME",
         "DISPLAY_NAME",
         "LOT_SIZE",
@@ -46,10 +68,10 @@ _REQUIRED_COLUMNS: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Dhan ``INSTRUMENT_TYPE`` → neutral :class:`InstrumentType`. Options resolve
-#: to CE/PE via ``OPTION_TYPE``.
+#: Dhan ``INSTRUMENT`` → neutral :class:`InstrumentType`. Options resolve to
+#: CE/PE via ``OPTION_TYPE``. These are the ``INSTRUMENT`` column's long codes.
 _INDEX_TYPES: Final[frozenset[str]] = frozenset({"INDEX"})
-_EQUITY_TYPES: Final[frozenset[str]] = frozenset({"EQUITY", "ES"})
+_EQUITY_TYPES: Final[frozenset[str]] = frozenset({"EQUITY"})
 _FUTURE_TYPES: Final[frozenset[str]] = frozenset({"FUTIDX", "FUTSTK", "FUTCOM", "FUTCUR"})
 _OPTION_TYPES: Final[frozenset[str]] = frozenset({"OPTIDX", "OPTSTK", "OPTFUT", "OPTCUR"})
 
@@ -129,7 +151,7 @@ def _opt_expiry(value: str | None) -> date | None:
 
 
 def _instrument_type(raw_type: str, option_type: str | None) -> InstrumentType:
-    """Map Dhan ``INSTRUMENT_TYPE`` (+ ``OPTION_TYPE``) → neutral type."""
+    """Map Dhan ``INSTRUMENT`` (+ ``OPTION_TYPE``) → neutral type."""
     key = raw_type.strip().upper()
     if key in _INDEX_TYPES:
         return InstrumentType.IDX
@@ -146,7 +168,7 @@ def _instrument_type(raw_type: str, option_type: str | None) -> InstrumentType:
         raise DhanInstrumentError(
             f"option row {raw_type!r} has invalid OPTION_TYPE {option_type!r}"
         )
-    raise DhanInstrumentError(f"unknown INSTRUMENT_TYPE {raw_type!r}")
+    raise DhanInstrumentError(f"unknown INSTRUMENT {raw_type!r}")
 
 
 def parse_instrument_row(row: Mapping[str, str]) -> Instrument:
@@ -166,7 +188,7 @@ def parse_instrument_row(row: Mapping[str, str]) -> Instrument:
     exch = row["EXCH_ID"].strip().upper()
     if exch not in (Exchange.NSE, Exchange.BSE):
         raise DhanInstrumentError(f"out-of-scope exchange {exch!r} (Track 1 = NSE/BSE)")
-    itype = _instrument_type(row["INSTRUMENT_TYPE"], row.get("OPTION_TYPE"))
+    itype = _instrument_type(row["INSTRUMENT"], row.get("OPTION_TYPE"))
     security_id = row["SECURITY_ID"].strip()
     if not security_id:
         raise DhanInstrumentError("row missing SECURITY_ID")
@@ -175,17 +197,27 @@ def parse_instrument_row(row: Mapping[str, str]) -> Instrument:
         if itype in {InstrumentType.FUT, InstrumentType.CE, InstrumentType.PE}
         else Segment.CASH
     )
+    underlying = _opt_str(row.get("UNDERLYING_SYMBOL"))
+    # An F&O-eligible equity carries the long company name in SYMBOL_NAME and
+    # the ticker in UNDERLYING_SYMBOL; prefer the ticker so the spot's identity
+    # matches how its derivative legs reference it (DEC-DHAN-FNO-JOIN-KEY-001).
+    # Indices + non-F&O equities have no UNDERLYING_SYMBOL → keep SYMBOL_NAME;
+    # derivative legs keep their own contract SYMBOL_NAME, not the underlying.
+    symbol_name = row["SYMBOL_NAME"].strip()
+    trading_symbol = (
+        underlying if (itype is InstrumentType.EQ and underlying is not None) else symbol_name
+    )
     return Instrument(
         exchange=Exchange(exch),
         exchange_token=_to_int(security_id, "SECURITY_ID"),
-        trading_symbol=row["SYMBOL_NAME"].strip(),
+        trading_symbol=trading_symbol,
         vendor_symbol=security_id,
         name=_opt_str(row.get("DISPLAY_NAME")),
         instrument_type=itype,
         segment=segment,
         series=_opt_str(row.get("SERIES")),
         isin=_opt_str(row.get("ISIN")),
-        underlying_symbol=_opt_str(row.get("UNDERLYING_SYMBOL")),
+        underlying_symbol=underlying,
         underlying_exchange_token=_opt_int(row.get("UNDERLYING_SECURITY_ID")),
         lot_size=_to_int(row["LOT_SIZE"], "LOT_SIZE"),
         tick_size=_to_decimal(row["TICK_SIZE"], "TICK_SIZE"),
@@ -206,7 +238,7 @@ def fno_underlying_symbols(rows: Iterable[Mapping[str, str]]) -> frozenset[str]:
     """
     eligible: set[str] = set()
     for row in rows:
-        itype = row.get("INSTRUMENT_TYPE", "").strip().upper()
+        itype = row.get("INSTRUMENT", "").strip().upper()
         if itype in _FUTURE_TYPES or itype in _OPTION_TYPES:
             underlying = _opt_str(row.get("UNDERLYING_SYMBOL"))
             if underlying is not None:
@@ -228,11 +260,13 @@ class UniverseReport:
 def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
     """Select the brute-force universe and report the parse accounting.
 
-    Two-pass: collect the F&O-eligible underlying symbols, then keep (a) all
-    NSE/BSE **index** rows and (b) all **equity SPOT** rows whose symbol is
-    F&O-eligible. Derivative legs + non-F&O equities are counted as
-    ``legs_dropped`` (excluded from the lean universe, recoverable on demand);
-    out-of-scope-exchange rows are counted as ``filtered``.
+    Two-pass: collect the F&O-eligible underlying tickers, then keep (a) all
+    NSE/BSE **index** rows and (b) all **equity SPOT** rows whose own
+    ``UNDERLYING_SYMBOL`` ticker is F&O-eligible (NOT ``SYMBOL_NAME`` — that
+    is the long company name; see DEC-DHAN-FNO-JOIN-KEY-001). Derivative legs
+    + non-F&O equities are counted as ``legs_dropped`` (excluded from the lean
+    universe, recoverable on demand); out-of-scope-exchange rows are counted
+    as ``filtered``.
     """
     eligible = fno_underlying_symbols(rows)
     universe: list[Instrument] = []
@@ -243,9 +277,9 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
             filtered += 1
             continue
         parsed += 1
-        itype = row.get("INSTRUMENT_TYPE", "").strip().upper()
+        itype = row.get("INSTRUMENT", "").strip().upper()
         if itype in _INDEX_TYPES or (
-            itype in _EQUITY_TYPES and row.get("SYMBOL_NAME", "").strip() in eligible
+            itype in _EQUITY_TYPES and _opt_str(row.get("UNDERLYING_SYMBOL")) in eligible
         ):
             universe.append(parse_instrument_row(row))
     persisted = len(universe)
