@@ -14,6 +14,7 @@ from brutex.adapters.dhan.auth import (
     ENV_CLIENT_ID,
     DhanCredentials,
     TokenInfo,
+    dhan_creds_present,
     renew_token,
     resolve_dhan_credentials,
     with_token,
@@ -85,3 +86,24 @@ class TestWithToken:
         creds = DhanCredentials(access_token="old", client_id="cid")
         updated = with_token(creds, TokenInfo(access_token="new", expiry_time="t"))
         assert updated == DhanCredentials(access_token="new", client_id="cid")
+
+
+class TestDhanCredsPresent:
+    def test_both_present_is_true(self) -> None:
+        env = {ENV_ACCESS_TOKEN: "tok", ENV_CLIENT_ID: "cid"}
+        assert dhan_creds_present(env) is True
+
+    def test_access_token_missing_is_false(self) -> None:
+        assert dhan_creds_present({ENV_CLIENT_ID: "cid"}) is False
+
+    def test_client_id_missing_is_false(self) -> None:
+        # token present, client id absent — exercises the second predicate.
+        assert dhan_creds_present({ENV_ACCESS_TOKEN: "tok"}) is False
+
+    def test_whitespace_only_is_false(self) -> None:
+        assert dhan_creds_present({ENV_ACCESS_TOKEN: "  ", ENV_CLIENT_ID: "cid"}) is False
+
+    def test_defaults_to_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(ENV_ACCESS_TOKEN, "tok")
+        monkeypatch.setenv(ENV_CLIENT_ID, "cid")
+        assert dhan_creds_present() is True
