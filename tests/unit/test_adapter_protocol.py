@@ -36,9 +36,7 @@ from tests.fakes.demo_crypto_adapter import (
 class TestSingleInstrumentPage:
     """The shared static-universe ``list_instruments`` idiom (CLAUDE.md §11)."""
 
-    def test_first_page_returns_all_instruments(
-        self, nifty_option_instance: Instrument
-    ) -> None:
+    def test_first_page_returns_all_instruments(self, nifty_option_instance: Instrument) -> None:
         page = single_instrument_page((nifty_option_instance,), None)
         assert page.instruments == (nifty_option_instance,)
         assert page.next_cursor is None
@@ -47,6 +45,7 @@ class TestSingleInstrumentPage:
         page = single_instrument_page((nifty_option_instance,), "next")
         assert page.instruments == ()
         assert page.next_cursor is None
+
 
 # ────────────────────────────────────────────────────────────────────────
 # MarketCapabilities validation
