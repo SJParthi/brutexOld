@@ -452,3 +452,138 @@ class TestUniverseDedup:
         report = select_universe_report(rows)
         assert [i.exchange_token for i in report.universe] == [111]
         assert report.persisted == 1
+
+
+class TestTickvaultParity:
+    """tickvault-faithful gates (DEC-DHAN-UNIVERSE-TICKVAULT-PARITY-001): the
+    F&O-stock universe is built ONLY from NSE FUTSTK/OPTSTK rows, TEST scrips are
+    excluded, BSE single-stock F&O is out of scope — while indices keep all-NSE
+    + BSE SENSEX.
+    """
+
+    def test_test_scrip_excluded_from_eligibility(self) -> None:
+        rows = [
+            _row(
+                INSTRUMENT="OPTSTK",
+                EXCH_ID="NSE",
+                SYMBOL_NAME="11NSETEST",
+                UNDERLYING_SYMBOL="11NSETEST",
+                UNDERLYING_SECURITY_ID="555",
+                SECURITY_ID="40001",
+            ),
+        ]
+        assert fno_underlying_symbols(rows) == frozenset()
+        assert fno_underlying_security_ids(rows) == frozenset()
+
+    def test_bse_stock_derivative_not_eligible(self) -> None:
+        # BSE single-stock F&O is out of scope — its ticker must NOT become eligible.
+        rows = [
+            _row(
+                INSTRUMENT="OPTSTK",
+                EXCH_ID="BSE",
+                SYMBOL_NAME="XYZOPT",
+                UNDERLYING_SYMBOL="XYZ",
+                UNDERLYING_SECURITY_ID="900",
+                SECURITY_ID="40002",
+            ),
+        ]
+        assert fno_underlying_symbols(rows) == frozenset()
+        assert fno_underlying_security_ids(rows) == frozenset()
+
+    def test_bse_equity_not_admitted_as_stock_spot(self) -> None:
+        # An NSE OPTSTK makes RELIANCE eligible; only the NSE equity spot is
+        # admitted — the BSE equity listing is dropped (NSE_EQ-only stock universe).
+        rows = [
+            _row(
+                INSTRUMENT="OPTSTK",
+                EXCH_ID="NSE",
+                SYMBOL_NAME="RELOPT",
+                UNDERLYING_SYMBOL="RELIANCE",
+                UNDERLYING_SECURITY_ID="2885",
+                SECURITY_ID="40003",
+            ),
+            _row(
+                INSTRUMENT="EQUITY",
+                EXCH_ID="BSE",
+                SYMBOL_NAME="RELIANCE INDUSTRIES LTD",
+                UNDERLYING_SYMBOL="RELIANCE",
+                SECURITY_ID="500325",
+            ),
+            _row(
+                INSTRUMENT="EQUITY",
+                EXCH_ID="NSE",
+                SYMBOL_NAME="RELIANCE INDUSTRIES LTD",
+                UNDERLYING_SYMBOL="RELIANCE",
+                SECURITY_ID="2885",
+            ),
+        ]
+        report = select_universe_report(rows)
+        assert [i.vendor_symbol for i in report.universe] == ["NSE-RELIANCE"]
+        assert [i.exchange_token for i in report.universe] == [2885]
+
+    def test_test_scrip_equity_not_admitted(self) -> None:
+        # Ticker ABC is eligible (real NSE OPTSTK), but the equity row is a TEST
+        # scrip → excluded from admission by the test-scrip guard.
+        rows = [
+            _row(
+                INSTRUMENT="OPTSTK",
+                EXCH_ID="NSE",
+                SYMBOL_NAME="ABCOPT",
+                UNDERLYING_SYMBOL="ABC",
+                UNDERLYING_SECURITY_ID="700",
+                SECURITY_ID="40005",
+            ),
+            _row(
+                INSTRUMENT="EQUITY",
+                EXCH_ID="NSE",
+                SYMBOL_NAME="ABC11NSETEST",
+                UNDERLYING_SYMBOL="ABC",
+                SECURITY_ID="700",
+            ),
+        ]
+        assert select_universe_report(rows).universe == []
+
+    def test_bse_sensex_index_still_admitted(self) -> None:
+        # Indices are NOT gated to NSE — BSE SENSEX is a brute-force index.
+        rows = [
+            _row(INSTRUMENT="INDEX", EXCH_ID="NSE", SYMBOL_NAME="NIFTY", SECURITY_ID="13"),
+            _row(INSTRUMENT="INDEX", EXCH_ID="BSE", SYMBOL_NAME="SENSEX", SECURITY_ID="51"),
+        ]
+        report = select_universe_report(rows)
+        assert sorted(i.vendor_symbol for i in report.universe) == ["BSE-SENSEX", "NSE-NIFTY"]
+
+
+class TestIndexAllowList:
+    """Only the curated headline indices are admitted — the 30 NSE Index-tab
+    symbols + BSE SENSEX — NOT all ~194 INDEX rows (DEC-DHAN-INDEX-ALLOWLIST-001).
+    """
+
+    def test_obscure_nse_index_dropped(self) -> None:
+        # NIFTY is admitted; an obscure NSE index is dropped (not on the list).
+        rows = [
+            _row(INSTRUMENT="INDEX", EXCH_ID="NSE", SYMBOL_NAME="NIFTY", SECURITY_ID="13"),
+            _row(
+                INSTRUMENT="INDEX", EXCH_ID="NSE", SYMBOL_NAME="NIFTY ALPHA 50", SECURITY_ID="900"
+            ),
+        ]
+        report = select_universe_report(rows)
+        assert [i.vendor_symbol for i in report.universe] == ["NSE-NIFTY"]
+
+    def test_bse_non_sensex_index_dropped(self) -> None:
+        # Only BSE SENSEX is admitted; other BSE indices (e.g. BANKEX) are dropped.
+        rows = [
+            _row(INSTRUMENT="INDEX", EXCH_ID="BSE", SYMBOL_NAME="SENSEX", SECURITY_ID="51"),
+            _row(INSTRUMENT="INDEX", EXCH_ID="BSE", SYMBOL_NAME="BANKEX", SECURITY_ID="52"),
+        ]
+        report = select_universe_report(rows)
+        assert [i.vendor_symbol for i in report.universe] == ["BSE-SENSEX"]
+
+    def test_is_admitted_index_helper(self) -> None:
+        from brutex.adapters.dhan.instruments import _is_admitted_index
+
+        assert _is_admitted_index("NSE", "NIFTY") is True
+        assert _is_admitted_index("NSE", "niftyit") is True  # case-insensitive
+        assert _is_admitted_index("NSE", "NIFTY ALPHA 50") is False
+        assert _is_admitted_index("BSE", "SENSEX") is True
+        assert _is_admitted_index("BSE", "BANKEX") is False
+        assert _is_admitted_index("MCX", "GOLD") is False  # neither NSE nor BSE
