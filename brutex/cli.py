@@ -1777,6 +1777,9 @@ def cmd_fetch(
     adapter: Any
     sink: Any
     fetch_instruments: list[Any]
+    pace: Any = None
+    on_rate_limit: Any = None
+    on_success: Any = None
     if dry_run:
         fetch_instruments = [_synthetic_index_instrument(spec) for spec in BRUTE_FORCE_INDICES]
         adapter = SyntheticDhanAdapter(bars_per_window=rows_per_chunk)
@@ -1789,6 +1792,11 @@ def cmd_fetch(
         adapter, sink = _build_live_dhan_spot(resolved, fetch_instruments)
         if inspect:
             sink = NullBarSink()
+        # Adaptive [3..5] r/s throttle for the live pull (DEC-DHAN-ADAPTIVE-RPS-001).
+        from brutex.adapters.dhan.rate_control import DhanRateController
+
+        _rate = DhanRateController()
+        pace, on_rate_limit, on_success = _rate.pace, _rate.on_rate_limit, _rate.on_success
         print("[brutex] fetch (live Dhan)", file=sys.stderr)
 
     report = run_dhan_spot_ingest(
@@ -1798,6 +1806,9 @@ def cmd_fetch(
         intervals=intervals,
         start=start_dt.date(),
         end=end_dt.date(),
+        pace=pace,
+        on_rate_limit=on_rate_limit,
+        on_success=on_success,
     )
     print(
         f"[brutex] fetch done — windows={report.windows} bars_appended={report.bars_appended} "

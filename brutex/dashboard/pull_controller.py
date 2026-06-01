@@ -414,6 +414,36 @@ def _build_live_bulk_adapter(  # pragma: no cover — thin bulk wrapper
     return _build_live_spot_adapter(lake_root, instruments)
 
 
+#: The "no rate controller" feedback triple (dry-run / injected-factory pulls).
+_NO_RATE_HOOKS: tuple[None, None, None] = (None, None, None)
+
+_RateHooks = tuple[Callable[[], None] | None, Callable[[], None] | None, Callable[[], None] | None]
+
+
+def _build_live_rate_hooks() -> _RateHooks:  # pragma: no cover — live Dhan rate controller
+    """Construct the adaptive [3..5] r/s controller and return its feedback hooks.
+
+    The real live pull paces at 5 r/s and steps 5→4→3 under sustained 429s,
+    recovering toward 5 — `pace` throttles each window, `on_rate_limit` /
+    `on_success` feed the ladder (DEC-DHAN-ADAPTIVE-RPS-001).
+    """
+    from brutex.adapters.dhan.rate_control import DhanRateController
+
+    controller = DhanRateController()
+    return controller.pace, controller.on_rate_limit, controller.on_success
+
+
+def _live_rate_hooks(use_live_rate: bool) -> _RateHooks:
+    """Return the live rate-controller hooks for a real live pull, else a None-triple.
+
+    Only the **default live** pull (no injected factory + not dry-run) gets the
+    adaptive controller; dry-run and injected-factory pulls need no throttle.
+    """
+    if not use_live_rate:
+        return _NO_RATE_HOOKS
+    return _build_live_rate_hooks()  # pragma: no cover — live only
+
+
 def pull_all_spot(
     instruments: Sequence[Instrument],
     *,
@@ -458,6 +488,7 @@ def pull_all_spot(
         year=None,
         now=now if now is not None else datetime.now(UTC),
     )
+    use_live_rate = adapter_factory is None and not dry_run
     if adapter_factory is None:
         adapter_factory = _build_dry_run_bulk_adapter if dry_run else _build_live_bulk_adapter
     adapter, sink = adapter_factory(lake_root, instruments)
@@ -468,6 +499,7 @@ def pull_all_spot(
         start_date=start.date().isoformat(),
         dry_run=dry_run,
     )
+    pace, on_rate_limit, on_success = _live_rate_hooks(use_live_rate)
     report = run_dhan_spot_ingest(
         adapter,
         sink,
@@ -475,6 +507,9 @@ def pull_all_spot(
         intervals=DHAN_FETCH_INTERVALS,
         start=start.date(),
         end=end.date(),
+        pace=pace,
+        on_rate_limit=on_rate_limit,
+        on_success=on_success,
     )
     failure_keys = {(f.symbol, f.interval) for f in report.failures}
     results: list[SymbolPullResult] = []
@@ -585,6 +620,7 @@ def pull_candles(
     # Inclusive end label = the last day actually fetched (end is exclusive).
     end_label = (end - timedelta(days=1)).date().isoformat()
 
+    use_live_rate = adapter_factory is None and not dry_run
     if adapter_factory is None:
         adapter_factory = _build_dry_run_adapter if dry_run else _build_live_pull_adapter
     adapter, sink = adapter_factory(lake_root, instrument)
@@ -599,6 +635,7 @@ def pull_candles(
         intervals=len(DHAN_FETCH_INTERVALS),
     )
 
+    pace, on_rate_limit, on_success = _live_rate_hooks(use_live_rate)
     report = run_dhan_spot_ingest(
         adapter,
         sink,
@@ -606,6 +643,9 @@ def pull_candles(
         intervals=DHAN_FETCH_INTERVALS,
         start=start.date(),
         end=end.date(),
+        pace=pace,
+        on_rate_limit=on_rate_limit,
+        on_success=on_success,
     )
 
     failure_keys = {(f.symbol, f.interval) for f in report.failures}
