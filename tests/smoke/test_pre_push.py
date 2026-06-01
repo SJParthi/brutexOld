@@ -137,20 +137,20 @@ CONVENTIONAL_COMMIT_REGEX = re.compile(
 
 class TestConventionalCommit:
     def test_head_commit_subject_matches(self) -> None:
-        # Merge commits (2+ parents) are auto-generated — by GitHub's PR
-        # `refs/pull/N/merge` ref on CI, or a local `git merge` — and are
-        # exempt from Conventional Commits (as commitlint et al. treat them).
-        # Without this guard, the smoke suite fails on every PR CI run, whose
-        # checked-out HEAD is the ephemeral "Merge <sha> into <sha>" commit.
-        parents = _run(["git", "log", "-1", "--format=%P"])
-        if parents.returncode == 0 and len(parents.stdout.split()) > 1:
-            pytest.skip("HEAD is a merge commit — exempt from Conventional Commits")
         result = _run(["git", "log", "-1", "--format=%s"])
         if result.returncode != 0:
             pytest.skip(f"git log failed: {result.stderr}")
         subject = result.stdout.strip()
         if not subject:
             pytest.skip("no commits on this branch yet")
+        # Merge commits are auto-generated and exempt from Conventional
+        # Commits (exactly as commitlint's defaultIgnores treats them). On PR
+        # CI, actions/checkout's shallow clone of the `refs/pull/N/merge` ref
+        # makes the merge commit a graft boundary, so `--format=%P` reports
+        # ZERO parents — a parent-count check is unreliable. The subject
+        # prefix is the robust signal: GitHub writes "Merge <sha> into <sha>".
+        if subject.startswith("Merge "):
+            pytest.skip("HEAD is a merge commit — exempt from Conventional Commits")
         assert CONVENTIONAL_COMMIT_REGEX.match(subject), (
             f"HEAD commit subject violates Conventional Commits: {subject!r}"
         )
