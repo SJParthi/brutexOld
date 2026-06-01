@@ -56,7 +56,7 @@ from brutex.dashboard.db_view import (
     sample_rows,
     table_summary,
 )
-from brutex.dashboard.pull_controller import groww_creds_present, pull_candles
+from brutex.dashboard.pull_controller import dhan_creds_present, pull_candles
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
@@ -746,22 +746,24 @@ def build_app(
         """POST /api/v1/universe/pull — ingest one instrument's candles.
 
         Thin wrapper over
-        :func:`brutex.dashboard.pull_controller.pull_candles`. ``symbol``
-        may be a spot index/stock OR a contract's groww_symbol (a future
-        or a CE/PE option) — the controller is instrument-agnostic.
+        :func:`brutex.dashboard.pull_controller.pull_candles`. ``symbol`` is
+        the Dhan ``SECURITY_ID`` (``vendor_symbol``) the universe grid sends;
+        it is resolved to an :class:`~brutex.models.Instrument` via the
+        instrument store (the controller is instrument-agnostic). An unknown
+        ``symbol`` surfaces as a 400 (DEC-PULL-ERROR-VISIBILITY-001).
         ``from_date`` / ``to_date`` are optional inclusive ISO
         ``YYYY-MM-DD`` bounds (the from/to candle picker); when either is
         given they select an explicit, clamped ``[2020-01-01, today]``
         range, otherwise the full calendar ``year`` is pulled. A malformed
         date or a ``from`` after ``to`` surfaces as a 400 with the real
         reason (DEC-PULL-ERROR-VISIBILITY-001).
-        ``dry_run`` is forced ``True`` automatically when Groww
+        ``dry_run`` is forced ``True`` automatically when Dhan
         credentials are not present in the environment (via the testable
-        :func:`brutex.dashboard.pull_controller.groww_creds_present`
+        :func:`brutex.dashboard.pull_controller.dhan_creds_present`
         gate, mirroring the CLI's offline default), so the page never
         attempts a live network call without creds.
         """
-        dry_run = not groww_creds_present()
+        dry_run = not dhan_creds_present()
         _LOG.info(
             "universe.pull.requested",
             symbol=symbol,
@@ -770,9 +772,16 @@ def build_app(
             to_date=to_date,
             dry_run=dry_run,
         )
+        store = _require_store()
+        instrument = store.get(symbol)
+        if instrument is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown security_id {symbol!r} — not in the instrument store",
+            )
         try:
             report = pull_candles(
-                symbol,
+                instrument,
                 lake_root=_resolve_pull_lake_root(instrument_store, dry_run=dry_run),
                 year=year,
                 from_date=from_date,
@@ -835,10 +844,10 @@ def build_app(
         status is ``started`` / ``already_running`` / ``no_store``.
         """
         store = _require_store()
-        if not groww_creds_present():
+        if not dhan_creds_present():
             raise HTTPException(
                 status_code=400,
-                detail="Groww credentials required — set them on the Credentials page, then retry.",
+                detail="Dhan credentials required — set them on the Credentials page, then retry.",
             )
 
         def _worker(lake_root: Path) -> object:  # pragma: no cover — live thread
@@ -864,10 +873,10 @@ def build_app(
         fetch-expiries.
         """
         store = _require_store()
-        if not groww_creds_present():
+        if not dhan_creds_present():
             raise HTTPException(
                 status_code=400,
-                detail="Groww credentials required — set them on the Credentials page, then retry.",
+                detail="Dhan credentials required — set them on the Credentials page, then retry.",
             )
 
         def _worker(lake_root: Path) -> object:  # pragma: no cover — live thread
