@@ -91,11 +91,26 @@ def with_token(creds: DhanCredentials, token: TokenInfo) -> DhanCredentials:
     return replace(creds, access_token=token.access_token)
 
 
+def dhan_creds_present(env: Mapping[str, str] | None = None) -> bool:
+    """True iff both Dhan credential env vars are set + non-empty.
+
+    The dry-run gate the dashboard/cli use — no credentials means a live pull
+    is impossible, so the caller forces ``dry_run`` (the Dhan analog of the
+    legacy ``groww_creds_present``). A pure predicate: never raises (unlike
+    :func:`resolve_dhan_credentials`, which raises naming the missing vars).
+    """
+    source = os.environ if env is None else env
+    has_token = bool(source.get(ENV_ACCESS_TOKEN, "").strip())
+    has_client = bool(source.get(ENV_CLIENT_ID, "").strip())
+    return has_token and has_client
+
+
 __all__ = [
     "ENV_ACCESS_TOKEN",
     "ENV_CLIENT_ID",
     "DhanCredentials",
     "TokenInfo",
+    "dhan_creds_present",
     "renew_token",
     "resolve_dhan_credentials",
     "with_token",
