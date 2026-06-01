@@ -54,8 +54,29 @@ def open_gap_pct(bars: Sequence[CandleBar], prev_day_close: Decimal) -> Decimal 
     return pct_change(open_bar.open, prev_day_close)
 
 
+def open_pct_series(bars: Sequence[CandleBar]) -> list[Decimal | None]:
+    """Return each bar's **open_pct** — the extra per-candle column.
+
+    ``open_pct = (bar.close − today's 09:15 open) / today's 09:15 open × 100``
+    — the intraday twin of :func:`open_gap_pct` (DEC-DHAN-OPEN-PCT-COLUMN-001):
+    where the gap uses the *previous* day's close as the base, this uses the
+    **same** day's 09:15:00 IST session open. The result is a list aligned 1:1
+    with *bars*. When the day's 09:15 bar is absent there is no anchor, so every
+    entry is ``None``; an individual entry is ``None`` only if the 09:15 open is 0.
+
+    Full precision — a statistical metric, **never money-rounded** (CLAUDE.md
+    §4). *bars* must be a SINGLE trading day's series (the caller groups by day),
+    so the 09:15 anchor is unambiguous.
+    """
+    open_bar = session_open_bar(bars)
+    if open_bar is None:
+        return [None] * len(bars)
+    return [pct_change(bar.close, open_bar.open) for bar in bars]
+
+
 __all__ = [
     "open_gap_pct",
+    "open_pct_series",
     "pct_change",
     "session_open_bar",
 ]
