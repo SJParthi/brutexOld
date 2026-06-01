@@ -998,6 +998,11 @@ jobs:
           else
             echo "(brutex.data.option_parquet_writer test file not present yet — gate inactive)"
           fi
+          if compgen -G "tests/unit/test_option_pull_controller.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.option_pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_pull_controller.py
+          else
+            echo "(brutex.dashboard.option_pull_controller test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_chunks.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.chunks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_chunks.py
           else
