@@ -76,8 +76,11 @@ class TestHttpRoutes:
         assert r.headers["content-type"].startswith("text/html")
         body = r.text
         assert "BruteX" in body
-        # Basic sanity — the inline JS connects to /ws
-        assert "/ws" in body
+        # Per locked design DEC-DASHBOARD-LIVE-FINALE (MIGRATION.md #234) the
+        # index drives live updates via a /api/v1/state poller (every 2s), not
+        # an inline /ws socket — the /ws route still exists and is exercised by
+        # the websocket tests below.
+        assert "/api/v1/state" in body
 
     def test_api_state_returns_json(self, client: TestClient, state: DashboardState) -> None:
         r = client.get("/api/v1/state")
