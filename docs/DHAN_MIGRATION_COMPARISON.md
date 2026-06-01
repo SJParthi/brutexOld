@@ -60,8 +60,9 @@ regresses, the change is blocked. Nothing ships on trust.
 | **Pull · live buttons** — animated "Pull the Universe" panel wired into `/universe` | one-click universe (all 8 live) | ✅ merged |
 | **Pull · progress core** — O(1) thread-safe `PullProgress` tracker | the live-feed foundation | ✅ merged |
 | **Pull · progress wiring** — `on_progress` threaded through drivers + controllers | per-unit progress emits | ✅ merged |
-| **Pull · LIVE feed** — background job + `/pull-progress` route + JS that ticks counters | real-time window-by-window | ⏳ merging |
-| **Flip · final** — delete Groww (residual code + deps + docs) | Groww fully gone | 🔜 |
+| **Pull · LIVE feed** — background job + `/pull-progress` route + JS that ticks counters | real-time window-by-window | ✅ merged |
+| **Pull · options watermark** — coverage ledger skips already-pulled option windows | no wasted Dhan hit (options) | ⏳ merging |
+| **Flip · final** — credentials → Dhan, then delete Groww (code + deps + docs) | Groww fully gone | 🔜 (Stage 1 next) |
 
 **Honest note:** Groww is **still present** until the final phase — deliberately last,
 so the switch lands on a fully-built, fully-proven Dhan stack with nothing half-done.

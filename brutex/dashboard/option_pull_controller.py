@@ -62,6 +62,7 @@ from brutex.adapters.dhan.option_universe_ingest import (
     run_dhan_options_ingest,
 )
 from brutex.dashboard.pull_controller import DHAN_HISTORY_FLOOR, resolve_candle_range
+from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.option_sink import NullOptionBarSink
 from brutex.models import Instrument, InstrumentType
 
@@ -273,6 +274,7 @@ def pull_options(
     option_types: Sequence[str] = DRV_OPTION_TYPES,
     client_factory: OptionClientFactory | None = None,
     on_progress: ProgressHook | None = None,
+    coverage: FetchCoverage | None = None,
 ) -> OptionsPullReport:
     """Fan-out-pull the option universe for *instruments* over ``[2021-01-01, today]``.
 
@@ -348,6 +350,7 @@ def pull_options(
         required_data=ALL_REQUIRED_DATA,
         pace=pace,
         on_progress=on_progress,
+        coverage=coverage,
     )
 
     # Aggregate the per-series reports + quarantined failures by underlying.

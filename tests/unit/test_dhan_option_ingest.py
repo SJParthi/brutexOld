@@ -175,3 +175,44 @@ def test_terminal_error_propagates() -> None:
     sink = _FakeSink()
     with pytest.raises(DhanBadRequestError):
         _run(client, sink)
+
+
+def _run_cov(client: _FakeClient, sink: _FakeSink, coverage: object) -> OptionIngestReport:
+    """Drive a single-window series with a coverage ledger (DEC-FETCH-COVERAGE-001)."""
+    return ingest_rolling_option_series(
+        client,
+        sink,
+        security_id="13",
+        exchange_segment="NSE_FNO",
+        instrument="OPTIDX",
+        expiry_flag="WEEK",
+        expiry_code=1,
+        strike="ATM",
+        drv_option_type="CALL",
+        start=date(2021, 1, 4),
+        end=date(2021, 1, 5),  # 1-day range → exactly one rolling window
+        coverage=coverage,  # type: ignore[arg-type]
+    )
+
+
+def test_coverage_marks_then_skips_already_pulled_window() -> None:
+    """First pull marks the window complete; a re-pull skips it with no client call."""
+    from brutex.data.fetch_coverage import FetchCoverage
+
+    cov = FetchCoverage()
+    sink = _FakeSink()
+    first = _run_cov(_FakeClient([{"data": {"ce": _side(), "pe": None}}]), sink, cov)
+    assert first.windows == 1
+    assert first.bars_appended == 1  # one in-session bar survived the filter
+    assert first.skipped_windows == 0
+    assert cov.completed_count == 1
+
+    # Re-pull with the SAME ledger → the window is already complete → skipped.
+    # The client has ZERO responses, so any vendor call would IndexError (proving
+    # the skip happens BEFORE the network hit — no wasted Dhan budget).
+    second_client = _FakeClient([])
+    second = _run_cov(second_client, sink, cov)
+    assert second.windows == 1
+    assert second.skipped_windows == 1
+    assert second.bars_appended == 0
+    assert second_client.calls == []  # never hit the vendor
