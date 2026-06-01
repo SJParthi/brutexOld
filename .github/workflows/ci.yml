@@ -938,6 +938,11 @@ jobs:
           else
             echo "(brutex.data.option_dedup test file not present yet — gate inactive)"
           fi
+          if compgen -G "tests/unit/test_lmdb_membership.py" > /dev/null; then
+            pytest --cov=brutex.data.lmdb_membership --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_lmdb_membership.py
+          else
+            echo "(brutex.data.lmdb_membership test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_chunks.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.chunks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_chunks.py
           else
