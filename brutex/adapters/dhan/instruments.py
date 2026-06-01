@@ -13,7 +13,8 @@ candle API; the GLOBAL key ``vendor_symbol`` is exchange-prefixed
 a numeric id never collide (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
 
 The **brute-force universe** is selected by :func:`select_universe`:
-- every **index** (NSE indices + BSE SENSEX + INDIA VIX), and
+- the **curated headline indices** — the 30 NSE Index-tab symbols + BSE SENSEX
+  (DEC-DHAN-INDEX-ALLOWLIST-001), NOT all ~194 ``INDEX`` rows, and
 - every **F&O-eligible single-stock SPOT** equity — i.e. an ``EQUITY`` row
   whose **own ``UNDERLYING_SYMBOL`` ticker** also appears as a derivatives
   ``UNDERLYING_SYMBOL`` (a two-pass set membership, since F&O-eligibility
@@ -77,6 +78,87 @@ _INDEX_TYPES: Final[frozenset[str]] = frozenset({"INDEX"})
 _EQUITY_TYPES: Final[frozenset[str]] = frozenset({"EQUITY"})
 _FUTURE_TYPES: Final[frozenset[str]] = frozenset({"FUTIDX", "FUTSTK", "FUTCOM", "FUTCUR"})
 _OPTION_TYPES: Final[frozenset[str]] = frozenset({"OPTIDX", "OPTSTK", "OPTFUT", "OPTCUR"})
+
+#: Single-stock derivative ``INSTRUMENT`` codes — the ONLY rows that make an
+#: equity F&O-eligible. tickvault's ``STOCK_DERIVATIVE_PREFIXES`` (index/currency/
+#: commodity derivatives reference index/curr/comm underlyings, never an equity
+#: spot). F&O single stocks + their spots are **NSE** only — BSE single-stock F&O
+#: is out of scope (only the BSE SENSEX *index* is admitted). DEC-DHAN-UNIVERSE-TICKVAULT-PARITY-001.
+_STOCK_DERIVATIVE_TYPES: Final[frozenset[str]] = frozenset({"FUTSTK", "OPTSTK"})
+
+#: Substring marking a Dhan placeholder TEST scrip (e.g. ``"11NSETEST"``). Such
+#: rows are excluded from the universe so they never pollute it (tickvault's
+#: ``CSV_TEST_SYMBOL_MARKER`` exclusion). DEC-DHAN-UNIVERSE-TICKVAULT-PARITY-001.
+_TEST_SCRIP_MARKER: Final[str] = "NSETEST"
+
+
+def _is_test_scrip(symbol_name: str | None, underlying_symbol: str | None) -> bool:
+    """Return ``True`` if either symbol carries the Dhan TEST-scrip marker."""
+    return (
+        _TEST_SCRIP_MARKER in (symbol_name or "").upper()
+        or _TEST_SCRIP_MARKER in (underlying_symbol or "").upper()
+    )
+
+
+#: The CURATED index allow-list (operator decree 2026-06-01, DEC-DHAN-INDEX-ALLOWLIST-001):
+#: admit ONLY the headline indices Dhan shows in its **Index** tab — NOT all ~194
+#: ``INDEX`` rows in the master (the "100+ indices" the operator rejected). The
+#: 30 NSE tokens below are the EXACT ``SYMBOL_NAME`` values in the real Dhan
+#: ``api-scrip-master-detailed`` (verified 2026-06-01 against the decoded master)
+#: — abbreviated, not the web display names (``NIFTYIT`` not "Nifty IT"). Plus the
+#: single BSE index **SENSEX**. Matching is exact on upper-cased ``SYMBOL_NAME``;
+#: every other ``INDEX`` row is dropped. Edit this one set to add/remove an index.
+_ADMITTED_NSE_INDEX_SYMBOLS: Final[frozenset[str]] = frozenset(
+    {
+        "NIFTY",  # Nifty 50
+        "BANKNIFTY",  # Nifty Bank
+        "FINNIFTY",  # Fin Nifty
+        "MIDCPNIFTY",  # Nifty Midcap Select
+        "NIFTY NEXT 50",
+        "GIFTNIFTY",  # GIFT Nifty
+        "INDIA VIX",
+        "NIFTY 100",
+        "NIFTY 200",
+        "NIFTY 500",
+        "NIFTYMCAP50",  # Nifty Mid Cap 50
+        "NIFTY MIDCAP 150",
+        "NIFTY SMALLCAP 50",
+        "NIFTY SMALLCAP 100",
+        "NIFTY SMALLCAP 250",
+        "NIFTY MICROCAP250",
+        "NIFTY AUTO",
+        "NIFTYIT",  # Nifty IT
+        "NIFTY MEDIA",
+        "NIFTY METAL",
+        "NIFTY PHARMA",
+        "NIFTY PSU BANK",
+        "NIFTY PVT BANK",  # Nifty Private Bank
+        "NIFTY REALTY",
+        "NIFTY FMCG",
+        "NIFTY ENERGY",
+        "NIFTYINFRA",  # Nifty Infra
+        "NIFTY MNC",
+        "NIFTY CONSUMPTION",
+        "NIFTY SERV SECTOR",  # Nifty Services Sector
+    }
+)
+
+#: The only BSE index admitted (operator: "one more index which is BSE SENSEX").
+_ADMITTED_BSE_INDEX_SYMBOLS: Final[frozenset[str]] = frozenset({"SENSEX"})
+
+
+def _is_admitted_index(exchange: str, symbol_name: str | None) -> bool:
+    """Return ``True`` if this ``INDEX`` row is on the curated allow-list.
+
+    Indices are NOT exchange-gated like stocks — but only the headline set is
+    kept: the 30 NSE Index-tab symbols + BSE SENSEX (DEC-DHAN-INDEX-ALLOWLIST-001).
+    """
+    symbol = (symbol_name or "").strip().upper()
+    if exchange == Exchange.NSE:
+        return symbol in _ADMITTED_NSE_INDEX_SYMBOLS
+    if exchange == Exchange.BSE:
+        return symbol in _ADMITTED_BSE_INDEX_SYMBOLS
+    return False
 
 
 class DhanInstrumentError(BruteXError):
@@ -255,12 +337,24 @@ def fno_underlying_symbols(rows: Iterable[Mapping[str, str]]) -> frozenset[str]:
     """
     eligible: set[str] = set()
     for row in rows:
-        itype = row.get("INSTRUMENT", "").strip().upper()
-        if itype in _FUTURE_TYPES or itype in _OPTION_TYPES:
-            underlying = _opt_str(row.get("UNDERLYING_SYMBOL"))
-            if underlying is not None:
-                eligible.add(underlying)
+        if not _is_nse_stock_derivative(row):
+            continue
+        underlying = _opt_str(row.get("UNDERLYING_SYMBOL"))
+        if underlying is not None and not _is_test_scrip(row.get("SYMBOL_NAME"), underlying):
+            eligible.add(underlying)
     return frozenset(eligible)
+
+
+def _is_nse_stock_derivative(row: Mapping[str, str]) -> bool:
+    """Return ``True`` for an NSE single-stock futures/option row (FUTSTK/OPTSTK).
+
+    The F&O-eligible stock universe is built ONLY from these — tickvault's
+    NSE-only ``STOCK_DERIVATIVE_PREFIXES`` gate (DEC-DHAN-UNIVERSE-TICKVAULT-PARITY-001).
+    """
+    return (
+        row.get("INSTRUMENT", "").strip().upper() in _STOCK_DERIVATIVE_TYPES
+        and row.get("EXCH_ID", "").strip().upper() == Exchange.NSE
+    )
 
 
 def fno_underlying_security_ids(rows: Iterable[Mapping[str, str]]) -> frozenset[int]:
@@ -275,11 +369,13 @@ def fno_underlying_security_ids(rows: Iterable[Mapping[str, str]]) -> frozenset[
     """
     ids: set[int] = set()
     for row in rows:
-        itype = row.get("INSTRUMENT", "").strip().upper()
-        if itype in _FUTURE_TYPES or itype in _OPTION_TYPES:
-            usid = _opt_int(row.get("UNDERLYING_SECURITY_ID"))
-            if usid is not None:
-                ids.add(usid)
+        if not _is_nse_stock_derivative(row):
+            continue
+        if _is_test_scrip(row.get("SYMBOL_NAME"), row.get("UNDERLYING_SYMBOL")):
+            continue
+        usid = _opt_int(row.get("UNDERLYING_SECURITY_ID"))
+        if usid is not None:
+            ids.add(usid)
     return frozenset(ids)
 
 
@@ -297,13 +393,17 @@ class UniverseReport:
 def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
     """Select the brute-force universe and report the parse accounting.
 
-    Two-pass: collect the F&O-eligible underlying tickers, then keep (a) all
-    NSE/BSE **index** rows and (b) all **equity SPOT** rows whose own
-    ``UNDERLYING_SYMBOL`` ticker is F&O-eligible (NOT ``SYMBOL_NAME`` — that
-    is the long company name; see DEC-DHAN-FNO-JOIN-KEY-001). Derivative legs
-    + non-F&O equities are counted as ``legs_dropped`` (excluded from the lean
-    universe, recoverable on demand); out-of-scope-exchange rows are counted
-    as ``filtered``.
+    Two-pass: collect the F&O-eligible underlying tickers, then keep (a) the
+    **curated headline indices** — the 30 NSE Index-tab symbols + BSE SENSEX
+    (DEC-DHAN-INDEX-ALLOWLIST-001), every other ``INDEX`` row dropped — and
+    (b) every **NSE equity SPOT** whose own
+    ``UNDERLYING_SYMBOL`` ticker is F&O-eligible (NOT ``SYMBOL_NAME`` — that is
+    the long company name; see DEC-DHAN-FNO-JOIN-KEY-001). Per tickvault parity
+    (DEC-DHAN-UNIVERSE-TICKVAULT-PARITY-001) the F&O-stock universe is NSE-only
+    (BSE single-stock F&O is out of scope) and Dhan TEST scrips are excluded.
+    Derivative legs + non-F&O / out-of-scope equities are counted as
+    ``legs_dropped`` (excluded from the lean universe, recoverable on demand);
+    out-of-scope-exchange rows are counted as ``filtered``.
     The vendor lists some F&O tickers under MORE THAN ONE equity row (e.g. an
     old + a current listing of the same company — both ``MOTHERSON`` — with
     different ``SECURITY_ID``s). Both produce the same exchange-prefixed
@@ -320,14 +420,25 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
     parsed = 0
     filtered = 0
     for row in rows:
-        if row.get("EXCH_ID", "").strip().upper() not in (Exchange.NSE, Exchange.BSE):
+        exch = row.get("EXCH_ID", "").strip().upper()
+        if exch not in (Exchange.NSE, Exchange.BSE):
             filtered += 1
             continue
         parsed += 1
         itype = row.get("INSTRUMENT", "").strip().upper()
-        if itype in _INDEX_TYPES or (
-            itype in _EQUITY_TYPES and _opt_str(row.get("UNDERLYING_SYMBOL")) in eligible
-        ):
+        # Indices: ONLY the curated headline allow-list — the 30 NSE Index-tab
+        # symbols + BSE SENSEX — NOT all ~194 INDEX rows (DEC-DHAN-INDEX-ALLOWLIST-001).
+        # Stocks: an F&O-eligible **NSE** equity SPOT (BSE single stocks are out of
+        # scope), excluding TEST scrips — tickvault's NSE_EQ-only stock universe
+        # (DEC-DHAN-UNIVERSE-TICKVAULT-PARITY-001).
+        is_index = itype in _INDEX_TYPES and _is_admitted_index(exch, row.get("SYMBOL_NAME"))
+        is_fno_stock = (
+            itype in _EQUITY_TYPES
+            and exch == Exchange.NSE
+            and _opt_str(row.get("UNDERLYING_SYMBOL")) in eligible
+            and not _is_test_scrip(row.get("SYMBOL_NAME"), row.get("UNDERLYING_SYMBOL"))
+        )
+        if is_index or is_fno_stock:
             inst = parse_instrument_row(row)
             existing = by_key.get(inst.vendor_symbol)
             # First row for this key wins; a later row replaces it only when it

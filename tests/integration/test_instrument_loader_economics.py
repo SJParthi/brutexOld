@@ -97,7 +97,7 @@ def _build_store(tmp_path: Path) -> InstrumentStore:
 
 def _economics_csv() -> str:
     """Dhan-shaped CSV: a F&O index (NIFTY) + its FUT/CE legs, a F&O stock
-    (RELIANCE) + its option leg, and a no-leg index (NIFTY100)."""
+    (RELIANCE) + its option leg, and a no-leg index (BANKNIFTY)."""
     return _csv(
         _row(
             security_id="13",
@@ -155,7 +155,7 @@ def _economics_csv() -> str:
         _row(
             security_id="99",
             instrument_type="INDEX",
-            symbol_name="NIFTY100",
+            symbol_name="BANKNIFTY",
             lot_size="0",
             tick_size="0",
         ),
@@ -168,7 +168,7 @@ def test_persists_underlying_economics(tmp_path: Path) -> None:
     result = load_instrument_master(
         store, http_get=_make_http_get(_economics_csv()), run_id_factory=lambda: "t"
     )
-    assert result["index_count"] == 2  # NIFTY + NIFTY100
+    assert result["index_count"] == 2  # NIFTY + BANKNIFTY (both allow-listed)
     assert result["stock_count"] == 1  # RELIANCE
     assert result["persisted"] == 3
     assert result["legs_dropped"] == 3  # NIFTY FUT + NIFTY CE + RELIANCE option
@@ -188,7 +188,7 @@ def test_persists_underlying_economics(tmp_path: Path) -> None:
     assert nifty is not None
     assert nifty.lot_size == 0
 
-    n100 = store.get("NSE-NIFTY100")
+    n100 = store.get("NSE-BANKNIFTY")
     assert n100 is not None
     assert n100.lot_size == 0
 
