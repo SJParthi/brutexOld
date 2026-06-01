@@ -6,8 +6,12 @@ inspect them without installing P2 data-lake dependencies.
 
 ## Types
 
-* :class:`CandleBar` — one OHLCV bar, matches the Groww historical
-  candle row layout defined in Groww historical data API docs.
+* :class:`CandleBar` — one OHLCV bar (spot underlying), columnar
+  layout per ``docs/dhan-ref/05-historical-data.md``.
+* :class:`OptionBar` — one expired-option OHLC bar (one ``ce`` / ``pe``
+  side) from ``/charts/rollingoption``, per
+  ``docs/dhan-ref/06-expired-options-data.md``; carries the resolved
+  ``strike`` / ``spot`` / ``iv`` the rolling endpoint stamps per bar.
 * :class:`CatalogEntry` — one row in the DuckDB catalog, defined per
   ``FR-CAT-002``.
 """
@@ -18,6 +22,47 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Final
+
+
+def _validate_price_bar(
+    *,
+    owner: str,
+    timestamp: datetime,
+    open_: Decimal,
+    high: Decimal,
+    low: Decimal,
+    close: Decimal,
+    volume: int,
+    open_interest: int | None,
+) -> None:
+    """Validate the OHLCV invariants shared by every price bar (§11 COMMON).
+
+    One source of truth for "is this a well-formed bar?" so
+    :class:`CandleBar` and :class:`OptionBar` cannot drift. *owner* is the
+    calling class name, woven into each message so errors read naturally.
+
+    Raises
+    ------
+    ValueError
+        Naive timestamp, negative volume / open interest, or OHLC that is
+        not ``low <= open, close <= high`` (``high >= low``).
+    """
+    if timestamp.tzinfo is None:
+        raise ValueError(
+            f"{owner}.timestamp must be timezone-aware, got naive datetime {timestamp!r}"
+        )
+    if volume < 0:
+        raise ValueError(f"{owner}.volume must be non-negative, got {volume}")
+    if open_interest is not None and open_interest < 0:
+        raise ValueError(f"{owner}.open_interest must be non-negative or None, got {open_interest}")
+    # Price ordering sanity — allow equal (limit-locked bars).
+    if high < low:
+        raise ValueError(f"{owner}: high ({high}) must be >= low ({low})")
+    if not (low <= open_ <= high):
+        raise ValueError(f"{owner}: open ({open_}) must be in [low={low}, high={high}]")
+    if not (low <= close <= high):
+        raise ValueError(f"{owner}: close ({close}) must be in [low={low}, high={high}]")
+
 
 #: sha256 hex digest length (64 chars = 256 bits / 4 bits per nibble).
 SHA256_HEX_LEN: Final[int] = 64
@@ -65,27 +110,92 @@ class CandleBar:
     open_interest: int | None
 
     def __post_init__(self) -> None:
-        if self.timestamp.tzinfo is None:
+        _validate_price_bar(
+            owner="CandleBar",
+            timestamp=self.timestamp,
+            open_=self.open,
+            high=self.high,
+            low=self.low,
+            close=self.close,
+            volume=self.volume,
+            open_interest=self.open_interest,
+        )
+
+
+#: The two option legs the rolling-option endpoint returns per call.
+OPTION_SIDES: Final[frozenset[str]] = frozenset({"CE", "PE"})
+
+
+@dataclass(frozen=True, slots=True)
+class OptionBar:
+    """One expired-option OHLC bar from ``/charts/rollingoption`` (one side).
+
+    Track 1 / lake (DEC-P0-063) options live ONLY on the rolling endpoint
+    (``docs/dhan-ref/06-expired-options-data.md``) — every backtest contract
+    is already expired. The endpoint returns per-side (``ce`` / ``pe``)
+    columnar arrays and stamps, per bar, the **resolved** ``strike`` (the
+    relative ``ATM±N`` selector resolved to an absolute strike), the
+    underlying ``spot``, and the implied volatility ``iv``. We keep all three
+    so the lake loses nothing (operator decree 2026-05-31 — "capture
+    EVERYTHING").
+
+    Prices (``open``/``high``/``low``/``close``/``strike``/``spot``) are exact
+    :class:`~decimal.Decimal` rupees, mirroring :class:`CandleBar` (the
+    paisa ``× 100`` happens at the lake-write boundary, never here).
+
+    Attributes
+    ----------
+    timestamp
+        UTC timezone-aware datetime at the bar's open.
+    open, high, low, close
+        Decimal price fields (rupees).
+    volume
+        Integer traded volume.
+    open_interest
+        Integer open interest, or ``None`` when the side omits it.
+    side
+        ``"CE"`` or ``"PE"`` — which leg this bar belongs to.
+    strike
+        Resolved absolute strike (rupees), or ``None`` if the side omits it.
+    spot
+        Underlying spot at the bar (rupees), or ``None`` if omitted.
+    iv
+        Implied volatility, or ``None`` if omitted.
+    """
+
+    timestamp: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: int
+    open_interest: int | None
+    side: str
+    strike: Decimal | None
+    spot: Decimal | None
+    iv: Decimal | None
+
+    def __post_init__(self) -> None:
+        _validate_price_bar(
+            owner="OptionBar",
+            timestamp=self.timestamp,
+            open_=self.open,
+            high=self.high,
+            low=self.low,
+            close=self.close,
+            volume=self.volume,
+            open_interest=self.open_interest,
+        )
+        if self.side not in OPTION_SIDES:
             raise ValueError(
-                f"CandleBar.timestamp must be timezone-aware, got naive datetime {self.timestamp!r}"
+                f"OptionBar.side must be one of {sorted(OPTION_SIDES)}, got {self.side!r}"
             )
-        if self.volume < 0:
-            raise ValueError(f"CandleBar.volume must be non-negative, got {self.volume}")
-        if self.open_interest is not None and self.open_interest < 0:
-            raise ValueError(
-                f"CandleBar.open_interest must be non-negative or None, got {self.open_interest}"
-            )
-        # Price ordering sanity — allow equal (limit-locked bars).
-        if self.high < self.low:
-            raise ValueError(f"CandleBar: high ({self.high}) must be >= low ({self.low})")
-        if not (self.low <= self.open <= self.high):
-            raise ValueError(
-                f"CandleBar: open ({self.open}) must be in [low={self.low}, high={self.high}]"
-            )
-        if not (self.low <= self.close <= self.high):
-            raise ValueError(
-                f"CandleBar: close ({self.close}) must be in [low={self.low}, high={self.high}]"
-            )
+        if self.strike is not None and self.strike <= 0:
+            raise ValueError(f"OptionBar.strike must be positive or None, got {self.strike}")
+        if self.spot is not None and self.spot <= 0:
+            raise ValueError(f"OptionBar.spot must be positive or None, got {self.spot}")
+        if self.iv is not None and self.iv < 0:
+            raise ValueError(f"OptionBar.iv must be non-negative or None, got {self.iv}")
 
 
 @dataclass(frozen=True, slots=True)

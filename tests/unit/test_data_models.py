@@ -1,4 +1,4 @@
-"""Unit tests for brutex.data.models — CandleBar + CatalogEntry."""
+"""Unit tests for brutex.data.models — CandleBar + OptionBar + CatalogEntry."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from brutex.data.models import CandleBar, CatalogEntry
+from brutex.data.models import CandleBar, CatalogEntry, OptionBar
 
 # ────────────────────────────────────────────────────────────────────────
 # CandleBar
@@ -143,6 +143,75 @@ class TestCandleBarValidation:
         )
         with pytest.raises((AttributeError, TypeError)):
             bar.volume = 42  # type: ignore[misc]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# OptionBar
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _option(**overrides: object) -> OptionBar:
+    defaults: dict[str, object] = {
+        "timestamp": _ts(),
+        "open": Decimal("100"),
+        "high": Decimal("110"),
+        "low": Decimal("90"),
+        "close": Decimal("105"),
+        "volume": 250,
+        "open_interest": 1200,
+        "side": "CE",
+        "strike": Decimal("17500"),
+        "spot": Decimal("17480.5"),
+        "iv": Decimal("0.15"),
+    }
+    defaults.update(overrides)
+    return OptionBar(**defaults)  # type: ignore[arg-type]
+
+
+class TestOptionBarHappyPath:
+    def test_full_fields(self) -> None:
+        bar = _option()
+        assert bar.side == "CE"
+        assert bar.strike == Decimal("17500")
+        assert bar.spot == Decimal("17480.5")
+        assert bar.iv == Decimal("0.15")
+
+    def test_pe_side_with_none_extras(self) -> None:
+        bar = _option(side="PE", strike=None, spot=None, iv=None, open_interest=None)
+        assert bar.side == "PE"
+        assert bar.strike is None and bar.spot is None and bar.iv is None
+        assert bar.open_interest is None
+
+    def test_zero_iv_allowed(self) -> None:
+        assert _option(iv=Decimal("0")).iv == Decimal("0")
+
+
+class TestOptionBarValidation:
+    def test_shared_ohlc_invariant_uses_option_owner(self) -> None:
+        # The shared validator stamps the OptionBar owner in its message.
+        with pytest.raises(ValueError, match="OptionBar.timestamp"):
+            _option(timestamp=datetime(2024, 1, 25, 9, 15, 0))  # naive
+
+    def test_rejects_unknown_side(self) -> None:
+        with pytest.raises(ValueError, match="side must be one of"):
+            _option(side="CALL")
+
+    def test_rejects_non_positive_strike(self) -> None:
+        with pytest.raises(ValueError, match="strike must be positive"):
+            _option(strike=Decimal("0"))
+
+    def test_rejects_non_positive_spot(self) -> None:
+        with pytest.raises(ValueError, match="spot must be positive"):
+            _option(spot=Decimal("-1"))
+
+    def test_rejects_negative_iv(self) -> None:
+        with pytest.raises(ValueError, match="iv must be non-negative"):
+            _option(iv=Decimal("-0.01"))
+
+    def test_is_frozen(self) -> None:
+        bar = _option()
+        with pytest.raises((AttributeError, TypeError)):
+            bar.side = "PE"  # type: ignore[misc]
 
 
 # ────────────────────────────────────────────────────────────────────────

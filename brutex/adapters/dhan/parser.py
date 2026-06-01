@@ -33,8 +33,12 @@ from brutex.data.candle_fields import (
 from brutex.data.models import CandleBar
 
 
-def _parse_timestamp_epoch(raw: object) -> datetime:
-    """Parse a Dhan UNIX-epoch timestamp (UTC seconds) to a tz-aware UTC datetime."""
+def parse_timestamp_epoch(raw: object) -> datetime:
+    """Parse a Dhan UNIX-epoch timestamp (UTC seconds) to a tz-aware UTC datetime.
+
+    Public so the rolling-option parser shares the exact same timestamp rule
+    (CLAUDE.md §11 COMMON) instead of re-deriving it.
+    """
     if isinstance(raw, bool):  # bool is an int subclass — reject explicitly
         raise CandleParseError(f"candle timestamp must be epoch seconds, got bool: {raw!r}")
     if not isinstance(raw, (int, float, str)):
@@ -125,7 +129,7 @@ def parse_candle_columns(payload: Mapping[str, object]) -> list[CandleBar]:
         try:
             bar = assemble_candle(
                 ts_raw=timestamps[i],
-                parse_timestamp=_parse_timestamp_epoch,
+                parse_timestamp=parse_timestamp_epoch,
                 open_=opens[i],
                 high=highs[i],
                 low=lows[i],
@@ -143,4 +147,5 @@ __all__ = [
     "CandleParseError",
     "EmptyCandleRow",
     "parse_candle_columns",
+    "parse_timestamp_epoch",
 ]
