@@ -180,3 +180,43 @@ class TestIngestSpot:
                 start=date(2021, 1, 1),
                 end=date(2021, 2, 1),
             )
+
+
+class TestIngestSpotCoverage:
+    """The fetch-coverage watermark — skip already-pulled windows (DEC-FETCH-COVERAGE-001)."""
+
+    def test_coverage_marks_then_skips_on_repull(self) -> None:
+        from brutex.data.fetch_coverage import FetchCoverage
+
+        cov = FetchCoverage()
+        # First pull (empty coverage) → fetches all 3 windows + marks them.
+        first = ingest_spot(
+            _adapter(),
+            _Sink(),
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),  # ~212 days → 3 windows
+            coverage=cov,
+        )
+        assert first.windows == 3
+        assert first.bars_appended == 3
+        assert first.skipped_windows == 0
+        assert cov.completed_count == 3
+
+        # Re-pull with the SAME coverage → every window is skipped before the
+        # vendor call: no fetch, no append, skipped_windows == 3.
+        sink2 = _Sink()
+        second = ingest_spot(
+            _adapter(),
+            sink2,
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            coverage=cov,
+        )
+        assert second.windows == 3
+        assert second.skipped_windows == 3
+        assert second.bars_appended == 0
+        assert sink2.appends == []  # nothing re-fetched / re-written

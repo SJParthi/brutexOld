@@ -25,6 +25,7 @@ from datetime import date, datetime, time
 from brutex.adapters.dhan.chunks import plan_spot_intraday_windows
 from brutex.adapters.dhan.errors import DhanError, is_retryable
 from brutex.adapters.protocol import MarketAdapter
+from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.session import filter_intraday_session
 from brutex.data.sink import BarSink
 from brutex.models import Instrument
@@ -35,6 +36,9 @@ Pacer = Callable[[], None]
 #: Canonical daily interval — the only interval not tiled/session-filtered.
 _DAILY: str = "1day"
 
+#: The data-source namespace stamped on every coverage :class:`WindowKey`.
+_MARKET: str = "dhan"
+
 
 @dataclass(frozen=True, slots=True)
 class IngestReport:
@@ -43,6 +47,7 @@ class IngestReport:
     windows: int
     bars_appended: int
     transient_failures: int
+    skipped_windows: int = 0
 
 
 def _windows(interval: str, start: date, end: date) -> list[tuple[date, date]]:
@@ -64,6 +69,7 @@ def ingest_spot(
     start: date,
     end: date,
     pace: Pacer | None = None,
+    coverage: FetchCoverage | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink*.
 
@@ -79,11 +85,19 @@ def ingest_spot(
         Half-open date range.
     pace
         Optional per-window pacing hook (rate-limit acquire).
+    coverage
+        Optional :class:`~brutex.data.fetch_coverage.FetchCoverage` ledger
+        (DEC-FETCH-COVERAGE-001). When given, a window already marked complete
+        is **skipped before the vendor call** (no wasted Dhan hit), and a window
+        is marked complete after a successful fetch + append. ``None`` (default)
+        keeps the always-fetch behaviour — the idempotent sink already makes a
+        re-pull safe; coverage makes it quota-frugal too.
 
     Returns
     -------
     IngestReport
-        Window count, total bars appended, and transient-failure count.
+        Window count, total bars appended, transient-failure count, and the
+        count of windows skipped as already-complete.
 
     Raises
     ------
@@ -92,8 +106,22 @@ def ingest_spot(
     """
     bars_appended = 0
     transient = 0
+    skipped = 0
     windows = _windows(interval, start, end)
     for window_start, window_end in windows:
+        key = WindowKey(
+            market=_MARKET,
+            security_id=instrument.vendor_symbol,
+            interval=interval,
+            start=window_start,
+            end=window_end,
+        )
+        # Already pulled? Skip the vendor call entirely — no wasted Dhan hit
+        # (DEC-FETCH-COVERAGE-001). The idempotent sink would no-op the write
+        # anyway, so skipping is a pure quota/latency win, never a data risk.
+        if coverage is not None and coverage.is_complete(key):
+            skipped += 1
+            continue
         if pace is not None:
             pace()
         try:
@@ -121,8 +149,14 @@ def ingest_spot(
             bars=bars,
         )
         bars_appended += result.bars_appended
+        # The window pulled cleanly — record it so a re-pull skips it.
+        if coverage is not None:
+            coverage.mark_complete(key)
     return IngestReport(
-        windows=len(windows), bars_appended=bars_appended, transient_failures=transient
+        windows=len(windows),
+        bars_appended=bars_appended,
+        transient_failures=transient,
+        skipped_windows=skipped,
     )
 
 

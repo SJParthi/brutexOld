@@ -26,6 +26,7 @@ from datetime import date
 from brutex.adapters.dhan.errors import DhanError
 from brutex.adapters.dhan.ingest import IngestReport, Pacer, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
+from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.sink import BarSink
 from brutex.models import Instrument
 
@@ -62,6 +63,11 @@ class DhanIngestReport:
         return sum(r.transient_failures for r in self.pairs.values())
 
     @property
+    def skipped_windows(self) -> int:
+        """Total windows skipped as already-complete across all pairs (DEC-FETCH-COVERAGE-001)."""
+        return sum(r.skipped_windows for r in self.pairs.values())
+
+    @property
     def failed_pairs(self) -> int:
         """Number of ``(symbol, interval)`` pairs quarantined on a terminal error."""
         return len(self.failures)
@@ -76,6 +82,7 @@ def run_dhan_spot_ingest(
     start: date,
     end: date,
     pace: Pacer | None = None,
+    coverage: FetchCoverage | None = None,
 ) -> DhanIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -92,6 +99,11 @@ def run_dhan_spot_ingest(
     pace
         Optional per-window pacing hook (rate-limit acquire), threaded into
         each :func:`ingest_spot` call.
+    coverage
+        Optional :class:`~brutex.data.fetch_coverage.FetchCoverage` ledger
+        threaded into every pair — a window already pulled is skipped before
+        the vendor call, so a re-pull never re-burns the Dhan budget on data
+        already in the lake (DEC-FETCH-COVERAGE-001).
 
     Returns
     -------
@@ -113,6 +125,7 @@ def run_dhan_spot_ingest(
                     start=start,
                     end=end,
                     pace=pace,
+                    coverage=coverage,
                 )
             except DhanError as exc:
                 failures.append(
