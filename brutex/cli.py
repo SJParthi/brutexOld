@@ -197,18 +197,22 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument(
         "--interval",
         default="all",
-        help="Candle interval, or 'all' for every Groww native timeframe (default: all)",
+        help=(
+            "Candle interval: 1minute / 1day (aliases 1m / 1d), or 'all' for both "
+            "(default). Dhan fetches 1m + 1d only — the 19 intraday timeframes are "
+            "resampled from the 1-minute base (DEC-DHAN-1M-ONLY-001)"
+        ),
     )
     fetch.add_argument(
         "--window-days",
         type=int,
         default=None,
-        help="Override the chunk window (default: by interval)",
+        help="Legacy Groww chunk-window override — ignored on Dhan (tiled internally)",
     )
     fetch.add_argument(
         "--dry-run",
         action="store_true",
-        help="Use synthetic candles (no Groww creds) — proves the pipe + writes sample lake data",
+        help="Use synthetic candles (no Dhan creds) — proves the pipe + writes sample lake data",
     )
     fetch.add_argument(
         "--inspect",
@@ -236,7 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--instruments",
         action="store_true",
         help=(
-            "ONLY load the keyless public instrument master (no Groww keys), "
+            "ONLY load the keyless public instrument master (no Dhan keys), "
             "print the index/stock counts, and exit — populates the /universe "
             "list without auth (DEC-INSTRUMENT-LOAD-001)"
         ),
@@ -700,23 +704,123 @@ def _resolve_lake_root(lake_root: Path | None) -> Path:
     return resolve_lake_root()
 
 
-def _build_live_fetcher(sink: Any) -> tuple[Any, Any]:  # pragma: no cover — live Groww creds + SDK
-    """Wire the real auth + candle fetcher → (PersistingFetcher, reauth hook)."""
-    from growwapi.groww.exceptions import BaseGrowwException
+def _resolve_dhan_fetch_intervals(interval: str) -> list[str]:
+    """Map the ``--interval`` flag to the Dhan FETCHED intervals.
 
-    from brutex.adapters.groww.auth import GrowwAuth
-    from brutex.adapters.groww.client import GrowwCandleFetcher
-    from brutex.adapters.groww.persist import PersistingFetcher
-    from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
+    Dhan fetches only ``1minute`` + ``1day`` (the 19 intraday timeframes are
+    resampled from the 1-minute base — DEC-DHAN-1M-ONLY-001). ``all`` →
+    both; ``1m``/``1minute`` and ``1d``/``1day`` → that one; anything else
+    raises :class:`ValueError` (a non-fetched timeframe).
+    """
+    from brutex.dashboard.pull_controller import DHAN_FETCH_INTERVALS
 
-    auth = GrowwAuth.from_env()
-    groww = GrowwCandleFetcher(
-        sdk=auth.session(),
-        bucket=AdaptiveTokenBucket(),
-        base_exception=BaseGrowwException,
-        reauth_fn=auth.refresh,
+    if interval == "all":
+        return list(DHAN_FETCH_INTERVALS)
+    canonical = {
+        "1m": "1minute",
+        "1minute": "1minute",
+        "1d": "1day",
+        "1day": "1day",
+    }.get(interval)
+    if canonical is None:
+        raise ValueError(
+            f"--interval {interval!r} is not fetched on Dhan — fetch 1minute/1day only "
+            "(the 19 intraday timeframes are resampled from the 1-minute base). "
+            "Use --interval 1minute, 1day, or all."
+        )
+    return [canonical]
+
+
+def _synthetic_index_instrument(spec: Any) -> Any:
+    """Build a placeholder spot index ``Instrument`` from a brute-force spec.
+
+    The dry-run :class:`SyntheticDhanAdapter` ignores the symbol when
+    generating bars, so the ``vendor_symbol`` is the index's own name — a
+    real ``InstrumentStore`` (with numeric Dhan SECURITY_IDs) is not required
+    for an offline ``fetch --dry-run`` (DEC-VENDOR-PIVOT-001).
+    """
+    from decimal import Decimal
+
+    from brutex.models import Instrument, InstrumentType, Segment
+
+    return Instrument(
+        exchange=spec.exchange,
+        exchange_token=0,
+        trading_symbol=spec.underlying_symbol,
+        vendor_symbol=spec.underlying_symbol,
+        name=spec.display_name,
+        instrument_type=InstrumentType.IDX,
+        segment=Segment.CASH,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_exchange_token=None,
+        lot_size=0,
+        tick_size=Decimal("0"),
+        freeze_quantity=None,
+        expiry_date=None,
+        strike_price=None,
+        is_reserved=False,
+        buy_allowed=False,
+        sell_allowed=False,
     )
-    return PersistingFetcher(inner=groww, sink=sink), groww.reauth
+
+
+def _resolve_brute_force_instruments(  # pragma: no cover — opens DuckDB store + fno_math kernel
+    lake_root: Path,
+) -> list[Any]:
+    """Resolve the 3 brute-force index ``Instrument``s from the populated store.
+
+    The live pull needs the real Dhan ``SECURITY_ID`` for each index, which
+    lands in the store via ``fetch --instruments`` / ``--universe``. Filters
+    the store's index/equity rows to the brute-force indices (NIFTY /
+    BANKNIFTY / SENSEX); raises if the store is empty (operator must load the
+    instrument master first).
+    """
+    from brutex.data.instrument_store import InstrumentStore
+    from brutex.universe import is_in_brute_force_scope
+
+    store = InstrumentStore.open(lake_root / "instruments.duckdb")
+    try:
+        resolved = [
+            inst for inst in store.list_index_equity_instruments() if is_in_brute_force_scope(inst)
+        ]
+    finally:
+        store.close()
+    if not resolved:
+        raise ValueError(
+            "no brute-force indices in the instrument store — run "
+            "`brutex fetch --instruments` (or `--universe`) first to load the master."
+        )
+    return resolved
+
+
+def _build_live_dhan_spot(  # pragma: no cover — live Dhan token + transport + network
+    lake_root: Path, instruments: list[Any]
+) -> tuple[Any, Any]:
+    """Wire the real Dhan client + persisting Parquet sink → ``(adapter, sink)``.
+
+    Mirrors :func:`brutex.dashboard.pull_controller._build_live_pull_adapter`
+    (CLAUDE.md §11 COMMON): a token-authenticated ``DhanClient`` over the real
+    ``urllib`` transport, a ``DhanMarketAdapter`` carrying the resolved
+    instruments (its O(1) index must contain every symbol it fetches), and a
+    ``ParquetBarSink`` over *lake_root*.
+    """
+    from brutex.adapters.dhan.adapter import DhanMarketAdapter
+    from brutex.adapters.dhan.auth import resolve_dhan_credentials
+    from brutex.adapters.dhan.client import DhanClient, urllib_transport
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+
+    creds = resolve_dhan_credentials()
+    client = DhanClient(
+        access_token=creds.access_token,
+        client_id=creds.client_id,
+        transport=urllib_transport,
+    )
+    adapter = DhanMarketAdapter(client=client, instruments=tuple(instruments))
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    return adapter, sink
 
 
 def _run_dry_run_universe_ingest(  # pragma: no cover — needs DuckDB store + fno_math kernel
@@ -1597,18 +1701,18 @@ def cmd_fetch(
 ) -> int:
     """Fetch candles for the 3 brute-force indices into the lake (§13.9 step 3).
 
-    ``--dry-run`` uses :class:`SyntheticCandleFetcher` so the full
-    parse → OHLC-guard → sink pipeline runs offline (no Groww creds).
-    ``--inspect`` collects in memory (no Parquet) and prints a per-timeframe
-    pre/regular/post-market + timestamp-alignment report — the operator's
-    "does Groww give pre/post-market + precise timestamps?" probe.
-    ``--universe`` first ingests the instrument master + expiries + contracts
-    into the lake (the LAKE surface authorised by DEC-P0-063) BEFORE the index
-    candle pull — the turnkey "pull everything" command.
-    ``--instruments`` loads ONLY the keyless public instrument master (no Groww
-    keys), prints the index/stock counts, and exits — it populates the
-    ``/universe`` list without auth (DEC-INSTRUMENT-LOAD-001). Expiries /
-    contracts / candles still need keys, separately.
+    Drives the Dhan spot spine (:func:`~brutex.adapters.dhan.run_ingest.run_dhan_spot_ingest`):
+    Dhan fetches only ``1minute`` + ``1day`` and the 19 intraday timeframes are
+    resampled from the 1-minute base (DEC-DHAN-1M-ONLY-001), so ``--interval all``
+    pulls the two base timeframes. ``--dry-run`` uses
+    :class:`~brutex.adapters.dhan.synthetic_adapter.SyntheticDhanAdapter` so the
+    full fetch → session-filter → sink pipeline runs offline (no Dhan creds);
+    the live path resolves the brute-force index ``Instrument``s from the store.
+    ``--universe`` first ingests the instrument master into the lake (the LAKE
+    surface authorised by DEC-P0-063) BEFORE the index candle pull — the turnkey
+    "pull everything" command. ``--instruments`` loads ONLY the keyless public
+    instrument master (no Dhan keys), prints the index/stock counts, and exits —
+    it populates the ``/universe`` list without auth (DEC-INSTRUMENT-LOAD-001).
     """
     resolved_instruments = _resolve_lake_root(lake_root)
     if instruments:
@@ -1623,22 +1727,25 @@ def cmd_fetch(
         print(f"[brutex] lake: {resolved_instruments}")
         return EXIT_OK
 
-    from brutex.adapters.groww.chunks import ALL_GROWW_INTERVALS
-    from brutex.adapters.groww.ingest import (
-        BRUTE_FORCE_INDEX_SYMBOLS,
-        SyntheticCandleFetcher,
-        run_ingest,
-    )
-    from brutex.adapters.groww.inspect import CollectingBarSink
-    from brutex.adapters.groww.persist import PersistingFetcher
+    from brutex.adapters.dhan.run_ingest import run_dhan_spot_ingest
+    from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
     from brutex.data.parquet_writer import ParquetWriter
-    from brutex.data.sink import ParquetBarSink
-    from brutex.data.watermark import FetchWatermark
+    from brutex.data.sink import NullBarSink, ParquetBarSink
+    from brutex.universe import BRUTE_FORCE_INDICES
 
     resolved = _resolve_lake_root(lake_root)
-    intervals = list(ALL_GROWW_INTERVALS) if interval == "all" else [interval]
+    try:
+        intervals = _resolve_dhan_fetch_intervals(interval)
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     start_dt = _parse_dt(start) if start else datetime(datetime.now(UTC).year, 1, 1, tzinfo=UTC)
     end_dt = _parse_dt(end) if end else datetime.now(UTC)
+    if window_days is not None:
+        print(
+            "[brutex] --window-days is ignored on Dhan (1-minute is tiled internally)",
+            file=sys.stderr,
+        )
 
     if universe:
         years = list(range(start_dt.year, end_dt.year + 1))
@@ -1646,7 +1753,7 @@ def cmd_fetch(
             print("[brutex] fetch --universe --dry-run → synthetic instruments/expiries/contracts")
             uni_report = _run_dry_run_universe_ingest(resolved, years=years)
         else:
-            print("[brutex] fetch --universe (live Groww) → instruments/expiries/contracts")
+            print("[brutex] fetch --universe (live) → instruments/expiries/contracts")
             uni_report = _run_live_universe_ingest(resolved, years=years)
         print(
             f"[brutex] universe done — instruments parsed={uni_report.instruments.parsed} "
@@ -1654,41 +1761,44 @@ def cmd_fetch(
             f"contracts={uni_report.contracts}"
         )
 
-    collecting = CollectingBarSink() if inspect else None
-    sink: Any = collecting or ParquetBarSink(writer=ParquetWriter(lake_root=resolved))
-    watermark = FetchWatermark()
-
-    if dry_run:
-        fetcher: object = PersistingFetcher(
-            inner=SyntheticCandleFetcher(rows_per_chunk=rows_per_chunk), sink=sink
+    if inspect:
+        print(
+            "[brutex] --inspect is not yet ported to the Dhan adapter — "
+            "running to a NullBarSink (no persistence)",
+            file=sys.stderr,
         )
-        reauth = None
+
+    adapter: Any
+    sink: Any
+    fetch_instruments: list[Any]
+    if dry_run:
+        fetch_instruments = [_synthetic_index_instrument(spec) for spec in BRUTE_FORCE_INDICES]
+        adapter = SyntheticDhanAdapter(bars_per_window=rows_per_chunk)
+        sink = (
+            NullBarSink() if inspect else ParquetBarSink(writer=ParquetWriter(lake_root=resolved))
+        )
         print("[brutex] fetch --dry-run → synthetic candles", file=sys.stderr)
     else:
-        fetcher, reauth = _build_live_fetcher(sink)
-        print("[brutex] fetch (live Groww)", file=sys.stderr)
+        fetch_instruments = _resolve_brute_force_instruments(resolved)
+        adapter, sink = _build_live_dhan_spot(resolved, fetch_instruments)
+        if inspect:
+            sink = NullBarSink()
+        print("[brutex] fetch (live Dhan)", file=sys.stderr)
 
-    report = run_ingest(
-        fetcher,  # type: ignore[arg-type]
-        BRUTE_FORCE_INDEX_SYMBOLS,
-        intervals,
-        start_dt,
-        end_dt,
-        watermark,
-        window_days=window_days,
-        reauth=reauth,
+    report = run_dhan_spot_ingest(
+        adapter,
+        sink,
+        instruments=fetch_instruments,
+        intervals=intervals,
+        start=start_dt.date(),
+        end=end_dt.date(),
     )
     print(
-        f"[brutex] fetch done — completed={report.completed} no_data={report.no_data} "
-        f"failed={report.failed} skipped={report.skipped}"
+        f"[brutex] fetch done — windows={report.windows} bars_appended={report.bars_appended} "
+        f"failed_pairs={report.failed_pairs} transient={report.transient_failures}"
     )
-    if collecting is not None:
-        print("[brutex] --- Groww data-shape probe (IST session 09:15-15:30) ---")
-        for inspection in collecting.inspections():
-            print(f"[brutex]   {inspection.summary()}")
-    else:
-        print(f"[brutex] lake: {resolved}")
-    return EXIT_OK if report.failed == 0 else EXIT_INTERNAL_ERROR
+    print(f"[brutex] lake: {resolved}")
+    return EXIT_OK if report.failed_pairs == 0 else EXIT_INTERNAL_ERROR
 
 
 def cmd_wipe(*, execute: bool, assume_yes: bool) -> int:  # pragma: no cover — interactive + real FS
