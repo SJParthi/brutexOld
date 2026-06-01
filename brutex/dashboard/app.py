@@ -59,7 +59,7 @@ from brutex.dashboard.pull_controller import dhan_creds_present, pull_all_spot, 
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
-from brutex.models import Instrument
+from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
     PipelineEventKind,
@@ -474,7 +474,7 @@ def build_app(
         Optional :class:`~brutex.data.instrument_store.InstrumentStore`
         handle. When supplied, the app exposes read-only instruments /
         expiries / contracts / stats endpoints + an HTML browser
-        section so a user can literally see what Groww ingest
+        section so a user can literally see what Dhan ingest
         pulled. When ``None`` (the default), those endpoints return
         503 and the HTML section stays hidden \u2014 the pipeline
         progress cards still work.
@@ -949,20 +949,27 @@ def build_app(
         :func:`brutex.dashboard.coverage_view.build_coverage_payload`. The
         expected universe×years grid is derived from the lake's IDX + EQ
         candidates (:func:`brutex.universe.derive_lake_underlyings`) × the
-        Groww F&O history window (2020 → current year); the actual rows come
+        Dhan history window (2021 → current year); the actual rows come
         from ``store.list_coverage()`` (indexed read). All projection logic
         lives in the (coverage-tested) ``coverage_view`` module.
         """
         store = _require_store()
+        # Scope guard (DEC-DHAN-COVERAGE-RESCOPE-001): keep every index (incl.
+        # BSE SENSEX) but only NSE equities — BSE single-stock F&O is out of
+        # scope (DEC-DHAN-UNIVERSE-TICKVAULT-PARITY-001). This drops stale
+        # BSE-equity rows a pre-rescope lake may still carry so the coverage
+        # grid matches the live universe even before a fresh re-load.
+        candidates = [
+            inst
+            for inst in store.list_index_equity_instruments()
+            if inst.instrument_type is InstrumentType.IDX or inst.exchange is Exchange.NSE
+        ]
         # derive_lake_underlyings yields (underlying, exchange) (the order the
         # universe ingest fan-out wants); the coverage reconciler / view want
         # (exchange, underlying) — swap so the expected grid keys line up with
         # the persisted ledger's (exchange, underlying_symbol, year) PK.
         expected = [
-            (exchange, underlying)
-            for underlying, exchange in derive_lake_underlyings(
-                store.list_index_equity_instruments()
-            )
+            (exchange, underlying) for underlying, exchange in derive_lake_underlyings(candidates)
         ]
         years = _coverage_years()
         return JSONResponse(build_coverage_payload(store.list_coverage(), expected, years))
@@ -1211,9 +1218,14 @@ def build_app(
         return JSONResponse(payload)
 
     @app.get("/db", response_class=HTMLResponse)
-    async def db_page() -> str:
-        """GET /db — read-only DuckDB browser page (DEC-DB-VIEWER-001)."""
-        return _render_db_html()
+    async def db_page() -> HTMLResponse:
+        """GET /db — read-only DuckDB browser page (DEC-DB-VIEWER-001).
+
+        ``Cache-Control: no-store`` so a redeployed page is never shadowed by a
+        browser-cached older ``db.html`` whose click handler no longer matches
+        the API (DEC-DB-VIEWER-NOSTORE-001).
+        """
+        return HTMLResponse(_render_db_html(), headers={"Cache-Control": "no-store"})
 
     @app.get("/logs", response_class=HTMLResponse)
     async def logs_page() -> str:
@@ -1272,7 +1284,7 @@ def _resolve_pull_lake_root(instrument_store: Any, *, dry_run: bool) -> Path:
         "Cannot resolve a lake root for a LIVE pull: no InstrumentStore "
         "path is wired. Start the dashboard with "
         "`brutex dashboard --lake-root <path>` so live pulls have a "
-        "Parquet sink, or run without Groww creds for the offline "
+        "Parquet sink, or run without Dhan creds for the offline "
         "synthetic preview."
     )
 
@@ -1522,8 +1534,12 @@ def _render_coverage_html() -> str:
 
 
 def _coverage_years() -> list[int]:
-    """Return the expected coverage years — Groww serves F&O from 2020 → now."""
-    return list(range(2020, datetime.now(UTC).year + 1))
+    """Return the expected coverage years — Dhan Track-1 history floor 2021 → now.
+
+    The operational floor is **2021-01-01** (DEC-DHAN-PULL-SCOPE-001); the
+    2020 floor was a stale Groww-era carryover (DEC-DHAN-COVERAGE-RESCOPE-001).
+    """
+    return list(range(2021, datetime.now(UTC).year + 1))
 
 
 _CREDENTIALS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "credentials.html"
@@ -1575,24 +1591,23 @@ def _render_logs_html() -> str:
 
 
 _DB_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "db.html"
-_DB_TEMPLATE_CACHE: str | None = None
 
 
 def _load_db_template() -> str:
-    """Load + cache the read-only DuckDB browser page template.
+    """Read the read-only DuckDB browser page template **fresh** each call.
 
     Ships as a package-relative resource at
     ``brutex/dashboard/templates/db.html`` (DEC-DB-VIEWER-001). The
-    template fetches ``/api/v1/db/tables`` for the table list + row
-    counts, then ``/api/v1/db/table/{name}`` when a table is clicked,
-    escaping every column name + cell via an ``esc()`` helper before it
-    touches innerHTML (XSS — values originate from the instrument-master
-    CSV). Loaded once, then served verbatim.
+    template fetches ``/api/v1/db/tables`` for the table list + row counts,
+    then ``/api/v1/db/columns/{name}`` + ``/api/v1/db/query/{name}`` when a
+    table is clicked, escaping every column name + cell via an ``esc()``
+    helper before it touches innerHTML (XSS — values originate from the
+    instrument-master CSV). **Read fresh** (no module cache) so a redeployed
+    template takes effect on the next request without a server restart — the
+    load-once cache was why a clicked table showed nothing after a deploy
+    (DEC-DB-VIEWER-NOSTORE-001).
     """
-    global _DB_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
-    if _DB_TEMPLATE_CACHE is None:
-        _DB_TEMPLATE_CACHE = _DB_TEMPLATE_PATH.read_text(encoding="utf-8")
-    return _DB_TEMPLATE_CACHE
+    return _DB_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
 def _render_db_html() -> str:

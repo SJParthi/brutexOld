@@ -91,7 +91,7 @@ CANDLE_COLUMNS: Final = (
 #: A candle symbol must match this allowlist before it is ever joined into
 #: a lake path / ``read_parquet`` glob — defence-in-depth against path
 #: traversal even though discovered symbols come from our own directory
-#: scan. Groww symbols are alnum + ``-`` + ``_`` + ``.`` (e.g.
+#: scan. Dhan symbols are alnum + ``-`` + ``_`` + ``.`` (e.g.
 #: ``NSE-NIFTY-30Jan25-28500-CE``); ``..`` is rejected separately.
 _SYMBOL_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 

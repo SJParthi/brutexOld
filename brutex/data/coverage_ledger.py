@@ -1,7 +1,7 @@
 """Completeness-ledger reconciliation — pure, dependency-light core.
 
 This module makes the operator question *"did we pull ALL expiries +
-contracts from 2020 for every underlying?"* **provable** and
+contracts from 2021 for every underlying?"* **provable** and
 **recoverable**. It is the testable heart of DEC-COVERAGE-LEDGER-001: it
 holds the per-``(exchange, underlying, year)`` cell record, the rule that
 classifies a cell as ``complete`` / ``failed`` / ``pending``, and the
@@ -11,7 +11,7 @@ reconciliation that diffs the *expected* universe×years grid against the
 ## Why this is a separate, pure module (CLAUDE.md §11 COMMON + DYNAMIC)
 
 The DuckDB ``coverage_ledger`` table (persistence) lives in
-:mod:`brutex.data.instrument_store`; the live Groww pull glue lives in
+:mod:`brutex.data.instrument_store`; the live Dhan pull glue lives in
 :mod:`brutex.cli` (``# pragma: no cover`` — needs creds + SDK + network);
 the dashboard routes live in :mod:`brutex.dashboard.app` (FastAPI /
 coverage-omit). All three delegate the *decisions* here so the
@@ -94,7 +94,7 @@ class CoverageRecord:
     underlying_symbol
         The underlying the expiries/contracts were pulled for.
     year
-        Calendar year of the pull (Groww serves F&O from 2020).
+        Calendar year of the pull (Dhan historical depth from 2021).
     expiries_pulled
         Count of expiry dates discovered for ``(underlying, year)``.
     contracts_pulled
