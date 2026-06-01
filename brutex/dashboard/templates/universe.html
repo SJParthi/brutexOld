@@ -140,6 +140,48 @@
   .tf.active { background:rgba(255,183,77,.16); border-color:var(--yellow); color:var(--yellow); }
   .counter { font-size:28px; font-weight:800; color:var(--green-bright); }
   .spark { display:inline-block; animation: popIn .5s ease both; }
+
+  /* ── Zone 0: the one-click "Pull the Universe" hero (8-button matrix) ── */
+  @keyframes shimmer { 0% { background-position:-200% 0; } 100% { background-position:200% 0; } }
+  @keyframes glowPulse { 0%,100% { box-shadow:0 0 14px rgba(91,141,239,.25); } 50% { box-shadow:0 0 28px rgba(91,141,239,.55); } }
+  .universe-hero { margin:14px 24px 4px; padding:18px 20px; border-radius:16px;
+    border:1px solid var(--border-strong); position:relative; overflow:hidden;
+    background:linear-gradient(120deg, rgba(157,123,255,.07), rgba(91,141,239,.05), rgba(38,217,176,.06));
+    animation: fadeInUp .5s ease both; }
+  .universe-hero .htitle { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
+  .universe-hero .htitle b { font-size:15px; color:var(--text-bright); letter-spacing:.3px; }
+  .universe-hero .hsub { font-size:12px; color:var(--muted); margin-bottom:14px; line-height:1.5; }
+  .bulkgrid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+  @media (max-width:880px){ .bulkgrid { grid-template-columns:repeat(2,1fr); } }
+  .bulkbtn { position:relative; overflow:hidden; cursor:pointer; border:1px solid var(--border-strong);
+    border-radius:14px; padding:16px 14px; background:var(--surface-2); transition:.18s;
+    display:flex; flex-direction:column; gap:6px; align-items:flex-start; text-align:left;
+    animation: fadeInScale .4s ease both; }
+  .bulkbtn:hover { transform:translateY(-2px); animation: glowPulse 1.6s ease-in-out infinite; }
+  .bulkbtn:disabled { opacity:.45; cursor:default; transform:none; animation:none; }
+  .bulkbtn .bnum { position:absolute; top:10px; right:12px; font-size:11px; font-weight:800;
+    color:var(--muted); opacity:.7; }
+  .bulkbtn .bicon { font-size:20px; }
+  .bulkbtn .blabel { font-size:13px; font-weight:800; color:var(--text-bright); }
+  .bulkbtn .bmeta { font-size:11px; color:var(--muted); }
+  .bulkbtn.idx { border-color:rgba(157,123,255,.4); }
+  .bulkbtn.idx:hover { box-shadow:0 0 24px rgba(157,123,255,.45); }
+  .bulkbtn.stk { border-color:rgba(91,141,239,.4); }
+  .bulkbtn.opt .blabel::after { content:" ⛓"; color:var(--green); }
+  .bulkbtn .shine { position:absolute; inset:0; background:linear-gradient(110deg,
+    transparent 30%, rgba(255,255,255,.06) 50%, transparent 70%); background-size:200% 100%;
+    animation: shimmer 3.2s linear infinite; pointer-events:none; }
+  .optbtn { cursor:pointer; border:1px solid rgba(38,217,176,.5); border-radius:10px;
+    padding:11px 16px; font-weight:800; color:var(--green-bright); background:rgba(38,217,176,.10);
+    transition:.15s; }
+  .optbtn:hover { box-shadow:0 0 22px rgba(38,217,176,.4); transform:translateY(-1px); }
+  .optbtn:disabled { opacity:.45; cursor:default; box-shadow:none; transform:none; }
+  .bulkrow { display:flex; gap:18px; flex-wrap:wrap; margin-top:8px; }
+  .bstat { display:flex; flex-direction:column; }
+  .bstat .bv { font-size:22px; font-weight:800; color:var(--text-bright); }
+  .bstat .bk { font-size:10px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); }
+  .bstat.ok .bv { color:var(--green-bright); }
+  .bstat.bad .bv { color:var(--red); }
 </style>
 </head>
 <body>
@@ -162,13 +204,44 @@
        background:linear-gradient(90deg, rgba(255,183,77,.10), rgba(255,183,77,.03));
        border:1px solid var(--yellow); border-radius:12px; display:none;
        align-items:center; gap:12px;">
-    <span style="font-weight:700; color:var(--yellow);">⚠ Set Groww credentials to auto-pull expiries &amp; contracts</span>
+    <span style="font-weight:700; color:var(--yellow);">⚠ Set Dhan credentials to auto-pull expiries &amp; contracts</span>
     <a href="/credentials" style="color:var(--blue); text-decoration:none; font-weight:700;">Set credentials →</a>
     <button id="credBannerDismiss" title="Dismiss" style="margin-left:auto; background:transparent;
          border:none; color:var(--muted); cursor:pointer; font-size:16px; line-height:1;">✕</button>
   </div>
 
   <div class="band" id="tabs"></div>
+
+  <!-- ── Zone 0: one-click "Pull the Universe" hero — the 8-button matrix ── -->
+  <div class="universe-hero" id="universeHero">
+    <div class="shine"></div>
+    <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
+    <div class="hsub">Spot pulls <b>1-minute + 1-day</b> from <b>2021-01-01 → today</b>; options fan
+      <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1-minute.
+      Re-click any time — already-pulled windows are skipped (no wasted Dhan hit).</div>
+    <div class="bulkgrid">
+      <button class="bulkbtn idx" id="bulkIdxSpot" data-surface="spot" data-kind="index">
+        <span class="shine"></span><span class="bnum">①</span>
+        <span class="bicon">📈</span><span class="blabel">Indices · Spot</span>
+        <span class="bmeta">all index 1m + 1d</span>
+      </button>
+      <button class="bulkbtn idx opt" id="bulkIdxOpt" data-surface="options" data-kind="index">
+        <span class="shine"></span><span class="bnum">②</span>
+        <span class="bicon">🧩</span><span class="blabel">Indices · Options</span>
+        <span class="bmeta">ATM±10 · CE/PE · WK+MN</span>
+      </button>
+      <button class="bulkbtn stk" id="bulkStkSpot" data-surface="spot" data-kind="stock">
+        <span class="shine"></span><span class="bnum">③</span>
+        <span class="bicon">📊</span><span class="blabel">Stocks · Spot</span>
+        <span class="bmeta">all F&amp;O stock 1m + 1d</span>
+      </button>
+      <button class="bulkbtn stk opt" id="bulkStkOpt" data-surface="options" data-kind="stock">
+        <span class="shine"></span><span class="bnum">④</span>
+        <span class="bicon">🔗</span><span class="blabel">Stocks · Options</span>
+        <span class="bmeta">ATM±3 · CE/PE · WK+MN</span>
+      </button>
+    </div>
+  </div>
 
   <div id="emptyBanner" style="display:none; margin:8px 24px 4px; padding:16px 20px;
        background:linear-gradient(90deg, rgba(255,183,77,.10), rgba(255,183,77,.03));
@@ -177,10 +250,9 @@
     <div style="font-size:13px; color:var(--text); line-height:1.6;">
       The dashboard works, but there are <b>0 instruments</b> because nothing has been ingested.
       To fill it:
-      <b>1)</b> unblock Groww — allow the Groww hosts in your network policy and set
-      <code>BRUTEX_GROWW_API_KEY</code> + <code>BRUTEX_GROWW_TOTP_SECRET</code>;
-      <b>2)</b> then run <code>brutex fetch --universe</code> (pulls instruments + expiries + contracts),
-      or click an instrument here and hit <b>⤓ Pull</b>.
+      <b>1)</b> click <b>⟳ Load instruments</b> above (the instrument master is a public list — no keys needed);
+      <b>2)</b> for live candle pulls set <code>BRUTEX_DHAN_ACCESS_TOKEN</code> + <code>BRUTEX_DHAN_CLIENT_ID</code>,
+      then hit any <b>⚡ Pull the Universe</b> button — without keys it runs an offline synthetic preview.
     </div>
     <div style="font-size:12px; color:var(--muted); margin-top:10px;">
       Paths — lake: <code>~/.brutex/lake</code> · DB: <code>~/.brutex/lake/instruments.duckdb</code> ·
@@ -194,9 +266,10 @@
 
   <div class="pullbar">
     <div class="lead" id="pulllead">Select an instrument to pull its spot — or click a future / option contract to pull that contract</div>
-    <label style="color:var(--muted); font-size:12px;" title="Inclusive start date — blank pulls from 2020 (Groww's earliest history).">from <input type="date" id="fromDate" min="2020-01-01" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
-    <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — blank pulls up to today.">to <input type="date" id="toDate" min="2020-01-01" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
-    <button class="loadbtn" id="loadbtn" title="Download the public Groww instrument master — no keys needed">⟳ Load instruments</button>
+    <label style="color:var(--muted); font-size:12px;" title="Inclusive start date — blank pulls from 2021-01-01 (Track 1 history floor).">from <input type="date" id="fromDate" min="2021-01-01" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
+    <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — blank pulls up to today.">to <input type="date" id="toDate" min="2021-01-01" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
+    <button class="loadbtn" id="loadbtn" title="Download the public Dhan instrument master — no keys needed">⟳ Load instruments</button>
+    <button class="optbtn" id="optbtn" title="Pull this underlying's full option grid (ATM window · CE+PE · weekly+monthly · near/next/far, 1-minute)" disabled>⛓ Pull options chain</button>
     <button class="pullbtn" id="pullbtn" disabled>⤓ Pull spot — 1-minute</button>
   </div>
   <div class="pullbar" style="border-top:1px solid var(--line); padding-top:10px;">
@@ -228,7 +301,7 @@
 let filter = "index";          // active tab kind
 let UNIV = [];                 // [{symbol,pull_symbol,name,kind,exchange}]
 let selInst = null;            // selected instrument's display symbol (trading_symbol)
-let selPullSymbol = null;      // selected instrument's exchange-prefixed Groww symbol
+let selPullSymbol = null;      // selected instrument's vendor symbol (Dhan SECURITY_ID)
 let selExp = null;             // selected expiry ISO date
 
 /* Escape broker-sourced free text (instrument name/symbol/contract_symbol)
@@ -292,7 +365,7 @@ function toggleEmptyBanner(summary) {
 }
 
 /* ── Keyless "Load instruments" (POST /api/v1/universe/load-instruments) ──
-   The instrument master is a PUBLIC CSV — NO Groww keys required. On success
+   The instrument master is a PUBLIC CSV — NO Dhan keys required. On success
    we re-run loadSummary() + loadInstruments() so the ~200 instruments appear.
    `msgId` targets either the pullbar message slot or the empty-banner one.
 
@@ -379,7 +452,7 @@ function renderInstruments() {
     // operator can populate the public master without leaving the page.
     el.innerHTML = UNIV.length
       ? '<div class="empty">no matches</div>'
-      : '<div class="empty">No instruments loaded yet — the master is a public list (no Groww keys needed).'
+      : '<div class="empty">No instruments loaded yet — the master is a public list (no Dhan keys needed).'
         + '<br><button class="loadbtn" id="loadbtn-empty">⟳ Load instruments</button>'
         + '<div class="loadmsg" id="loadmsg-empty"></div></div>';
     const be = document.getElementById("loadbtn-empty");
@@ -403,8 +476,9 @@ async function selectInstrument(i) {
   selInst = i.symbol; selPullSymbol = i.pull_symbol; selExp = null;
   renderInstruments();
   document.getElementById("pulllead").innerHTML =
-    `Ready to pull <b>${esc(i.symbol)}</b> spot — or click a future / option contract below`;
+    `Ready to pull <b>${esc(i.symbol)}</b> spot / options — or click a future / option contract below`;
   document.getElementById("pullbtn").disabled = false;
+  document.getElementById("optbtn").disabled = false;
   const ex = document.getElementById("expiries");
   ex.innerHTML = '<div class="empty">loading…</div>';
   document.getElementById("contracts").innerHTML = '<div class="empty">pick an expiry →</div>';
@@ -453,7 +527,7 @@ async function renderContracts(symbol, expiry) {
       fr.onclick = () => runPull(fut.contract_symbol, `${fut.contract_symbol} (future)`);
       c.appendChild(fr);
     }
-    // Group options by strike → {ce, pe} groww_symbols.
+    // Group options by strike → {ce, pe} contract symbols.
     const byStrike = {};
     contracts.forEach(ct => {
       const s = ct.strike_price || "—";
@@ -502,15 +576,15 @@ async function runPull(symbol, label) {
   panel.classList.add("on");
   btn.disabled = true;
   /* The from/to date picker scopes EVERY pull path (spot / future / CE-PE).
-     Blank ends default server-side to 2020-01-01 / today and are clamped
-     into the Groww-served window, so a malformed range can't waste quota. */
+     Blank ends default server-side to 2021-01-01 / today and are clamped
+     into the Dhan-served window, so a malformed range can't waste quota. */
   const fromDate = document.getElementById("fromDate").value;
   const toDate = document.getElementById("toDate").value;
   let qs = '/api/v1/universe/pull?symbol=' + encodeURIComponent(symbol);
   if (fromDate) qs += '&from_date=' + encodeURIComponent(fromDate);
   if (toDate) qs += '&to_date=' + encodeURIComponent(toDate);
   const range = (fromDate || toDate)
-    ? ` · ${fromDate || "2020-01-01"} → ${toDate || "today"}`
+    ? ` · ${fromDate || "2021-01-01"} → ${toDate || "today"}`
     : "";
   document.getElementById("pulltitle").textContent = `Pulling ${label} · 1-minute${range}`;
   const grid = document.getElementById("tfgrid");
@@ -568,12 +642,130 @@ async function runPull(symbol, label) {
 }
 
 /* The spot pull button pulls the selected instrument's spot using its
-   exchange-prefixed Groww symbol (pull_symbol, e.g. "NSE-NIFTY") so the
-   backend can split the exchange token — NOT the bare display symbol. */
+   vendor symbol (pull_symbol — the Dhan SECURITY_ID) so the backend
+   resolves the instrument — NOT the bare display symbol. */
 document.getElementById("pullbtn").onclick = () => {
   if (!selPullSymbol) return;
   runPull(selPullSymbol, `${selInst} spot`);
 };
+
+/* ── Per-symbol OPTIONS pull (buttons ⑥ ⑧ — POST /pull-options?symbol=) ──
+   Fans the selected underlying's whole option grid (ATM window · CE+PE ·
+   weekly+monthly · near/next/far, 1-minute) via the same animated panel. */
+document.getElementById("optbtn").onclick = () => {
+  if (!selPullSymbol) return;
+  runOptionsPull('/api/v1/universe/pull-options?symbol=' + encodeURIComponent(selPullSymbol),
+    `${selInst} options chain`);
+};
+
+/* ── Bulk pull (buttons ① ② ③ ④) — one click fans the whole kind ──
+   surface=spot → /pull-all?kind=…   ·   surface=options → /pull-options?kind=…
+   Disables every bulk button while one runs so two universe pulls can't race. */
+const BULK_BTNS = ['bulkIdxSpot','bulkIdxOpt','bulkStkSpot','bulkStkOpt']
+  .map(id => document.getElementById(id));
+
+function setBulkDisabled(on) {
+  BULK_BTNS.forEach(b => { if (b) b.disabled = on; });
+}
+
+BULK_BTNS.forEach(btn => {
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const surface = btn.dataset.surface;       // "spot" | "options"
+    const kind = btn.dataset.kind;             // "index" | "stock"
+    const path = surface === 'options'
+      ? '/api/v1/universe/pull-options?kind=' + encodeURIComponent(kind)
+      : '/api/v1/universe/pull-all?kind=' + encodeURIComponent(kind);
+    const noun = kind === 'index' ? 'indices' : 'stocks';
+    const label = `ALL ${noun} ${surface}`;
+    if (surface === 'options') runOptionsPull(path, label);
+    else runBulkSpot(path, label);
+  });
+});
+
+/* Render the animated pull panel for a BULK SPOT report (pull_all_spot). */
+async function runBulkSpot(path, label) {
+  const panel = document.getElementById('pullpanel');
+  panel.classList.add('on');
+  setBulkDisabled(true);
+  document.getElementById('pulltitle').textContent = `Pulling ${label} · 1m + 1d · 2021 → today`;
+  document.getElementById('tfgrid').innerHTML = '';
+  document.getElementById('counter').textContent = '0';
+  try {
+    const r = await fetch(path, {method: 'POST'});
+    const rep = await r.json();
+    if (!r.ok) throw new Error(rep.detail || ('HTTP ' + r.status));
+    document.getElementById('previewBadge').classList.toggle('on', !!rep.dry_run);
+    document.getElementById('counter').textContent =
+      (rep.total_completed || 0).toLocaleString('en-IN');
+    renderBulkStats([
+      ['symbols', rep.total_symbols, ''],
+      ['completed', rep.total_completed, 'ok'],
+      ['no-data', rep.total_no_data, ''],
+      ['failed', rep.total_failed, (rep.total_failed ? 'bad' : '')],
+    ]);
+    const verb = rep.dry_run ? 'preview-pulled (synthetic)' : 'pulled';
+    document.getElementById('pulltitle').innerHTML =
+      `<span class="spark">✓</span> ${esc(label)} ${verb} — `
+      + `${(rep.total_symbols||0).toLocaleString('en-IN')} symbols (${esc(rep.start_date)} → ${esc(rep.end_date)})`;
+  } catch (e) {
+    document.getElementById('pulltitle').innerHTML =
+      `<span style="color:var(--red)">✕</span> ${esc(label)} failed: ${esc(e.message)}`;
+  } finally {
+    setBulkDisabled(false);
+  }
+}
+
+/* Render the animated pull panel for an OPTIONS report (pull_options) —
+   used by both the bulk options buttons (② ④) and per-symbol (⑥ ⑧). */
+async function runOptionsPull(path, label) {
+  const panel = document.getElementById('pullpanel');
+  panel.classList.add('on');
+  setBulkDisabled(true);
+  document.getElementById('optbtn').disabled = true;
+  document.getElementById('pulltitle').textContent = `Fanning ${label} · CE+PE · WK+MN · 1-minute`;
+  document.getElementById('tfgrid').innerHTML = '';
+  document.getElementById('counter').textContent = '0';
+  try {
+    const r = await fetch(path, {method: 'POST'});
+    const rep = await r.json();
+    if (!r.ok) throw new Error(rep.detail || ('HTTP ' + r.status));
+    document.getElementById('previewBadge').classList.toggle('on', !!rep.dry_run);
+    document.getElementById('counter').textContent =
+      (rep.total_bars || 0).toLocaleString('en-IN');
+    renderBulkStats([
+      ['underlyings', rep.total_symbols, ''],
+      ['series ok', rep.total_series_completed, 'ok'],
+      ['series failed', rep.total_series_failed, (rep.total_series_failed ? 'bad' : '')],
+      ['option bars', rep.total_bars, 'ok'],
+    ]);
+    const verb = rep.dry_run ? 'preview-fanned (synthetic)' : 'fanned';
+    document.getElementById('pulltitle').innerHTML =
+      `<span class="spark">✓</span> ${esc(label)} ${verb} — `
+      + `${(rep.total_series_completed||0).toLocaleString('en-IN')} series · `
+      + `${(rep.total_bars||0).toLocaleString('en-IN')} bars (${esc(rep.start_date)} → ${esc(rep.end_date)})`;
+  } catch (e) {
+    document.getElementById('pulltitle').innerHTML =
+      `<span style="color:var(--red)">✕</span> ${esc(label)} failed: ${esc(e.message)}`;
+  } finally {
+    setBulkDisabled(false);
+    document.getElementById('optbtn').disabled = !selPullSymbol;
+  }
+}
+
+/* Render a row of big animated stat counters under the pull panel. */
+function renderBulkStats(stats) {
+  const grid = document.getElementById('tfgrid');
+  grid.innerHTML = '<div class="bulkrow" id="bulkrow"></div>';
+  const row = document.getElementById('bulkrow');
+  stats.forEach(([k, v, cls]) => {
+    const d = document.createElement('div');
+    d.className = 'bstat ' + (cls || '');
+    d.innerHTML = `<span class="bv">${(v || 0).toLocaleString('en-IN')}</span>`
+      + `<span class="bk">${esc(k)}</span>`;
+    row.appendChild(d);
+  });
+}
 
 /* ── Credentials banner (DEC-INSTRUMENT-UNIVERSE-FAST-001) ──
    Shown only when GET /api/v1/credentials/status reports creds absent, so the
