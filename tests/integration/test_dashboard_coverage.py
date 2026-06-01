@@ -130,11 +130,13 @@ class TestCoverageApi:
 
 
 class TestCoverageHelpers:
-    def test_coverage_years_starts_2020(self) -> None:
+    def test_coverage_years_starts_2021(self) -> None:
+        # Floor is 2021-01-01 (DEC-DHAN-PULL-SCOPE-001); the old 2020 floor was a
+        # stale Groww-era carryover (DEC-DHAN-COVERAGE-RESCOPE-001).
         years = _coverage_years()
-        assert years[0] == 2020
+        assert years[0] == 2021
         assert years[-1] == datetime.now(UTC).year
-        assert years == list(range(2020, datetime.now(UTC).year + 1))
+        assert years == list(range(2021, datetime.now(UTC).year + 1))
 
     def test_render_coverage_html_has_nav_and_table(self) -> None:
         html = _render_coverage_html()
