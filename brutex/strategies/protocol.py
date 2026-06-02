@@ -37,11 +37,11 @@ class StrategyMeta:
         versions are allowed to differ without the reproducibility
         gate firing.
     symbols
-        Ordered tuple of Groww trading symbols the strategy consumes. The
-        runner uses this to build the :class:`ReplayFeed`'s
+        Ordered tuple of canonical (Dhan) trading symbols the strategy
+        consumes. The runner uses this to build the :class:`ReplayFeed`'s
         ``symbols`` argument.
     interval
-        One of the the Groww interval names (e.g. ``"1minute"``). The
+        One of the canonical interval names (e.g. ``"1minute"``). The
         runner refuses to drive a feed at a different interval.
     params_schema
         Mapping of parameter name → default value. Used by the

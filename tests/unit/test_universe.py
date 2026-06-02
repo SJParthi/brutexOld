@@ -89,7 +89,7 @@ class TestV1IndicesComposition:
             assert spec.spot_live_since_year < 2021
 
     def test_display_names_match_v1_spec(self) -> None:
-        """Display names match Groww's instrument master conventions."""
+        """Display names match the Dhan instrument master conventions."""
         names = {u.display_name for u in V1_INDICES}
         assert names == {"NIFTY 50", "NIFTY BANK", "BSE SENSEX", "India VIX"}
 

@@ -1,7 +1,7 @@
 """BruteX Track 1 universe — Indian spot indexes + India VIX.
 
 **STATUS (2026-05-26):** universe definitions are vendor-agnostic. Post
-DEC-VENDOR-PIVOT-001 the Groww adapter consumes these definitions
+DEC-VENDOR-PIVOT-001 the Dhan adapter consumes these definitions
 (prior broker adapter wiped). The prior universe (8 F&O indices + dynamic
 stock-derivative discovery) is out of scope for Track 1. India VIX
 added after 4-agent verification on 2026-05-15 (late-day scope
@@ -265,7 +265,7 @@ def build_underlying_economics(
 ) -> dict[tuple[Exchange, str], UnderlyingEconomics]:
     """Map ``(exchange, underlying_symbol)`` to leg-derived contract economics.
 
-    In the Groww instrument master, IDX and EQ rows carry BLANK / placeholder
+    In the Dhan instrument master, IDX and EQ rows carry BLANK / placeholder
     economics — ``lot_size`` defaults to ``1`` (or ``0`` for indices),
     ``freeze_quantity`` is absent. The REAL ``lot_size`` / ``tick_size`` /
     ``freeze_quantity`` for an underlying live only on its derivative legs

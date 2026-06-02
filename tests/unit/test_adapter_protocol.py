@@ -10,7 +10,7 @@ market-neutral — the same contract can be satisfied by:
 
 If these tests pass, the protocol is architecturally sound for
 adding Polygon (US equities + options), Binance (crypto perps),
-Groww/Zerodha (Indian F&O, second source), IBKR, Coinbase, …
+Dhan/Zerodha (Indian F&O), IBKR, Coinbase, …
 """
 
 from __future__ import annotations

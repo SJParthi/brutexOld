@@ -10,11 +10,11 @@ After ``pip install -e .``, the ``brutex`` command is on PATH.
 ## Status
 
 This CLI was rewritten on 2026-05-15 and re-baselined on 2026-05-26
-(DEC-VENDOR-PIVOT-001) when the prior broker adapter was wiped in favour of
-Groww. Legacy ingest subcommands were vendor-specific and are dropped.
-Track 1 will reintroduce ``brutex track1 ingest`` once the Groww
-adapter lands in Phase 1+ of the post-pivot phase plan (see
-``docs/TRACK1_GROWW_ADAPTER.md``).
+(DEC-VENDOR-PIVOT-001). Per DEC-GROWW-DHAN-REVERT-001 / ADR-0002 the live
+vendor is the Dhan Data API v2. Legacy ingest subcommands were
+vendor-specific and are dropped. Track 1 will reintroduce
+``brutex track1 ingest`` once the Dhan adapter lands in Phase 1+ of the
+phase plan (see ``brutex/adapters/dhan/``).
 
 ## Commands (Track 1 minimum)
 
@@ -38,7 +38,7 @@ adapter lands in Phase 1+ of the post-pivot phase plan (see
         ``make run`` / ``python -m brutex run`` / the IDE Run target invoke.
 
     brutex fetch [--dry-run] [--inspect] [...]
-        Fetch historical candles into the lake (Groww adapter).
+        Fetch historical candles into the lake (Dhan adapter).
 
 ## Design
 
@@ -206,7 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--window-days",
         type=int,
         default=None,
-        help="Legacy Groww chunk-window override — ignored on Dhan (tiled internally)",
+        help="Legacy chunk-window override — ignored on Dhan (tiled internally)",
     )
     fetch.add_argument(
         "--dry-run",
@@ -521,8 +521,8 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     log_path = configure_logging(json_renderer=False, enable_file=True)
     _log = structlog.get_logger("brutex.dashboard")
 
-    # Mirror RAW stdout (the Groww SDK's "Ready to Groww!" + any third-party
-    # print) into the rotating JSON log too, so EVERY line the operator sees in
+    # Mirror RAW stdout (any third-party / vendor print) into the rotating
+    # JSON log too, so EVERY line the operator sees in
     # the terminal is also captured in .brutex-logs/brutex.log for copy/paste
     # ("capture every nook and corner" — DEC-RUN-LOG-CAPTURE-001). Routed to a
     # file-ONLY logger (propagate=False) so it lands in the file without
@@ -632,7 +632,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         # PHASED-001, operator decree 2026-05-30: "remove the auto pull"). The
         # universe pull is now driven by the two MANUAL /universe buttons —
         # "Fetch all expiries" (Phase 1) then "Fetch all contracts" (Phase 2) —
-        # so nothing hits Groww until the operator clicks. The keyless
+        # so nothing hits Dhan until the operator clicks. The keyless
         # instrument master still auto-loads above (it needs no auth) so the
         # /universe list is populated and the buttons have something to pull.
         _log.info(
@@ -827,13 +827,13 @@ def _build_live_dhan_spot(  # pragma: no cover — live Dhan token + transport +
 def _run_instrument_master_load(  # pragma: no cover — opens DuckDB store + live network
     lake_root: Path,
 ) -> dict[str, Any]:
-    """Keylessly load the public Groww instrument master into the lake.
+    """Keylessly load the public Dhan instrument master into the lake.
 
     Opens the real :class:`~brutex.data.instrument_store.InstrumentStore` and
     delegates to the testable
     :func:`brutex.dashboard.instrument_loader.load_instrument_master` with NO
     injected ``http_get`` — i.e. the real SSRF-guarded public-CSV fetch, which
-    needs NO Groww API keys (DEC-INSTRUMENT-LOAD-001). Marked ``no cover``: the
+    needs NO Dhan API keys (DEC-INSTRUMENT-LOAD-001). Marked ``no cover``: the
     DuckDB store transitively imports the ``fno_math`` Rust kernel and the
     fetch hits the live network, so this runs only on a fully-built, online
     environment; the pure loader core is unit-tested with a fake ``http_get``.
@@ -916,13 +916,14 @@ def cmd_fetch(
         )
 
     if universe:
-        # The legacy Groww instruments→expiries→contracts universe ingest was
-        # removed with the Groww adapter (DEC-DHAN-FINALIZE-001). The Dhan path
-        # loads the instrument master keylessly via `fetch --instruments`, and
-        # options/contracts are pulled on demand through the dashboard
-        # rolling-option fan-out — there is no Groww three-phase ingest.
+        # The legacy instruments→expiries→contracts universe ingest was
+        # removed with the pre-pivot Groww adapter (DEC-DHAN-FINALIZE-001).
+        # The Dhan path loads the instrument master keylessly via
+        # `fetch --instruments`, and options/contracts are pulled on demand
+        # through the dashboard rolling-option fan-out — there is no
+        # three-phase ingest.
         print(
-            "[brutex] --universe is retired (Groww three-phase ingest removed); "
+            "[brutex] --universe is retired (legacy three-phase ingest removed); "
             "use `brutex fetch --instruments` to load the master, then the "
             "/universe dashboard buttons to pull spot + options",
             file=sys.stderr,
