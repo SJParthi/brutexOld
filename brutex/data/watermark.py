@@ -6,7 +6,7 @@ F&O minute) would otherwise be re-requested forever on every resume,
 silently burning the 100K/day Dhan quota.
 
 A **chunk** is one historical-candle fetch window:
-``(groww_symbol, interval, start, end)``. After every fetch attempt the
+``(vendor_symbol, interval, start, end)``. After every fetch attempt the
 loop records the outcome here so that:
 
 * **COMPLETED / NO_DATA** chunks are *settled* — never re-requested
@@ -50,7 +50,7 @@ _SETTLED: Final[frozenset[ChunkStatus]] = frozenset({ChunkStatus.COMPLETED, Chun
 class ChunkKey:
     """Identity of one historical-candle fetch window (hashable)."""
 
-    groww_symbol: str
+    vendor_symbol: str
     interval: str
     start: str  # ISO-8601 string (caller formats datetimes deterministically)
     end: str  # ISO-8601 string
@@ -107,7 +107,7 @@ class FetchWatermark:
         """Serialize to a list of flat dict rows (JSON / DuckDB friendly)."""
         return [
             {
-                "groww_symbol": key.groww_symbol,
+                "vendor_symbol": key.vendor_symbol,
                 "interval": key.interval,
                 "start": key.start,
                 "end": key.end,
@@ -123,7 +123,7 @@ class FetchWatermark:
         for row in rows:
             watermark.record(
                 ChunkKey(
-                    groww_symbol=row["groww_symbol"],
+                    vendor_symbol=row["vendor_symbol"],
                     interval=row["interval"],
                     start=row["start"],
                     end=row["end"],

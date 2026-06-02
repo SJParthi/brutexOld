@@ -115,7 +115,7 @@ class OptionParquetWriter:
         if dest.exists():
             existing = pl.read_parquet(dest)
             # int() coercion keeps the return concretely int even in the CI
-            # type-check env where polars is NOT installed (`[dev,groww]` only)
+            # type-check env where polars is NOT installed (`[dev]`-only env, without the `[data]` extra)
             # — there `.height` is Any (ignore_missing_imports) and an un-coerced
             # return would trip mypy --strict's no-any-return.
             before = int(existing.height)
