@@ -222,7 +222,14 @@ Track 1 spec locked after 4-agent hostile-review pass._
 - **No `pandas` in hot paths** — use `polars` or `numpy` + `numba`
   or Rust.
 - **No look-ahead** — at bar N, the engine may only access bars 0..N.
-  Property P-06 (instrumented bar accessor) enforces this.
+  Enforced TODAY by a runtime feed-boundary guard
+  (`ReplayFeed.ensure_no_lookahead`, raises `LookAheadError`; wired into the
+  strategy runner + execution driver, integration-tested). The named
+  **Property P-06 (instrumented bar accessor)** — an accessor that records
+  every bar index `evaluate(N)` touches and asserts all ≤ N — is the
+  **Phase-2 strengthening** (currently a `pytest.skip` ROADMAP stub, not yet
+  the live enforcer). Corrected per DEC-WORKSPACE-VERIFY-001 entry #398 D2 /
+  DEC-DOC-DRIFT-RECONCILE-001.
 - **Money display = 2 decimals, money-only** (DEC-MONEY-2DP-001) — every
   paisa→rupee display goes through `brutex.money` (`format_inr` /
   `round_money` / `paisa_to_rupees`). NEVER round statistical metrics (Sharpe,

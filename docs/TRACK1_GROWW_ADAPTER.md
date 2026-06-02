@@ -1,8 +1,15 @@
 # Track 1 — Groww Adapter Specification
 
-**Status:** PROPOSED (docs-only PR; awaiting Phase 0 probe + operator approval before any adapter code lands)
-**Decision ID:** `DEC-VENDOR-PIVOT-001` (ADR-0001)
-**Date:** 2026-05-26
+> **⛔ SUPERSEDED (2026-05-31, ADR-0002 / DEC-GROWW-DHAN-REVERT-001).** The
+> Groww vendor pivot was REVERTED: the live Track 1 vendor is **Dhan Data
+> API v2**. This spec is retained for history only — the authoritative
+> adapter spec is **`docs/TRACK1_DHAN_ADAPTER.md`**. Do NOT build against
+> this document. (Banner added per DEC-WORKSPACE-VERIFY-001 entry #398 D6 /
+> DEC-DOC-DRIFT-RECONCILE-001.)
+
+**Status:** SUPERSEDED by ADR-0002 (was: PROPOSED). Live vendor is Dhan — see `docs/TRACK1_DHAN_ADAPTER.md`.
+**Decision ID:** `DEC-VENDOR-PIVOT-001` (ADR-0001, SUPERSEDED by ADR-0002)
+**Date:** 2026-05-26 (superseded 2026-05-31)
 **Replaces (when merged):** the prior broker adapter as the spec-locked backtesting data source
 
 > **Design update — 2026-05-28 (DEC-GROWW-ADAPTER-DESIGN-001):** §1–§12 are the
