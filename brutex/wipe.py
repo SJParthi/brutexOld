@@ -38,8 +38,8 @@ from brutex.models import BruteXError
 #: silently forgotten by the wiper (CLAUDE.md §11 COMMON). Order is stable.
 OVERRIDE_ENV_VARS: Final[tuple[str, ...]] = (
     ENV_LAKE_ROOT,  # lake root DIR (holds .duckdb + .wal + .tmp)
-    "BRUTEX_CREDENTIALS_FILE",  # saved Groww API key + TOTP secret
-    "BRUTEX_GROWW_TOKEN_PATH",  # cached Groww access token
+    "BRUTEX_CREDENTIALS_FILE",  # saved Dhan API key + TOTP secret
+    "BRUTEX_DHAN_TOKEN_PATH",  # cached Dhan access token
     "BRUTEX_LOG_DIR",  # rotating run-log dir (make run → ./.brutex-logs)
     "BRUTEX_LOG_FILE",  # explicit run-log file
     "BRUTEX_RUNTIME_FILE",  # service-discovery runtime.json

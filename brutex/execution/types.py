@@ -54,7 +54,7 @@ class InstrumentMeta:
     Attributes
     ----------
     symbol
-        Groww trading symbol, e.g. ``"NSE-NIFTY-02Jan25-24000-CE"``.
+        Canonical (Dhan) trading symbol, e.g. ``"NSE-NIFTY-02Jan25-24000-CE"``.
     segment
         :class:`~brutex.models.Segment` \u2014 ``CASH`` or ``FNO``.
     instrument_type
@@ -76,7 +76,7 @@ class InstrumentMeta:
 
     def __post_init__(self) -> None:
         # Indices (IDX) are reference instruments — never directly tradable
-        # (brutex/universe.py) — so the Groww master legitimately carries no
+        # (brutex/universe.py) — so the Dhan master legitimately carries no
         # lot_size for them (parsed as 0; see DEC-INDEX-PARSE-FIX-001). The
         # execution simulator never sizes an order against an index, so a
         # zero lot is tolerated for IDX only; every tradable type stays strict.
@@ -160,7 +160,7 @@ class Fill:
     Attributes
     ----------
     symbol
-        Groww trading symbol the fill is for.
+        Canonical (Dhan) trading symbol the fill is for.
     side
         ``BUY`` or ``SELL``. ``HOLD`` is never recorded as a fill.
     qty
@@ -230,7 +230,7 @@ class Position:
     Attributes
     ----------
     symbol
-        Groww trading symbol this position belongs to.
+        Canonical (Dhan) trading symbol this position belongs to.
     qty
         Signed integer exposure. ``0`` means the position is flat.
     avg_price

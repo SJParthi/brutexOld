@@ -167,7 +167,7 @@ class TestTransitionSuccess:
         assert result.quarantine_reason is None
 
     def test_in_flight_not_found_to_no_data(self) -> None:
-        """NotFound is NOT quarantined — it is recorded as 'Groww says
+        """NotFound is NOT quarantined — it is recorded as 'Dhan says
         nothing here'. This is the core of the never-skip guarantee.
         """
         item = _in_flight_item()
@@ -186,7 +186,7 @@ class TestTransitionSuccess:
         assert result.quarantine_reason is None
 
     def test_fatal_outcome_quarantines_with_fatal_error_reason(self) -> None:
-        """FATAL outcome (Groww 804/806/DH-902) → QUARANTINED with FATAL_ERROR.
+        """FATAL outcome (Dhan terminal client error) → QUARANTINED with FATAL_ERROR.
 
         Pipeline-level halt logic outside transition() reads this state
         and marks the phase HALTED on its next scan. DEC-P0-028.

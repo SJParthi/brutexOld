@@ -1,11 +1,12 @@
-"""Adaptive rate-limit state machine for the Groww Data API.
+"""Adaptive rate-limit state machine for the Dhan Data API.
 
-Per ``docs/MIGRATION.md`` entry #246 (DEC-VENDOR-PIVOT-001) the Groww
-Data API's per-day backtesting cap is UNDOCUMENTED. The published
-per-second caps cover Orders (10 r/s), Live Data (10 r/s) and
-Non-Trading (20 r/s) but the backtesting endpoints are not enumerated.
-Rather than guess, this module **discovers the practical sustainable
-rate empirically** via a 4-state machine:
+Per ``docs/MIGRATION.md`` entry #246 (DEC-VENDOR-PIVOT-001) the Dhan
+Data API caps at **5 req/s + 100,000/day** (single Data bucket;
+``brutex/adapters/dhan/constants.py`` ``DATA_RATE_LIMIT_RPS = 5``). The
+adapter runs an adaptive **[3..5] r/s** token bucket
+(``brutex/adapters/dhan/rate_control.py``). This module is the
+orchestrator-side analog that **trends the rate within ``[min, max]``**
+via a 4-state machine:
 
 * ``PROBING_UP`` — actively trying to raise the rate by 1 r/s every
   ``step_up_clean_window`` seconds of zero rate-limit hits.
@@ -29,9 +30,10 @@ The module is a **pure state machine** — it owns no HTTP client, no
 token bucket, no I/O. The caller drives it via three methods:
 
 * :meth:`AdaptiveRateLimiter.record_rate_limit_hit` — called by the
-  HTTP layer whenever the Groww SDK raises ``GrowwAPIRateLimitException``
-  (or any caller-defined equivalent). Advances the step-down counter
-  and may trigger a transition.
+  HTTP layer whenever the Dhan adapter raises ``DhanRateLimitError``
+  (``brutex/adapters/dhan/errors.py``; or any caller-defined
+  equivalent). Advances the step-down counter and may trigger a
+  transition.
 * :meth:`AdaptiveRateLimiter.record_clean_call` — called by the HTTP
   layer on every successful (non-rate-limited) request. Advances the
   step-up clean-window counter.
@@ -45,15 +47,16 @@ how to space outgoing requests, and listens to :attr:`on_transition`
 to wire audit-log entries + Telegram events per the DEC-VENDOR-PIVOT-001
 matrix.
 
-All thresholds are env-overridable per MIGRATION entry #246:
+All thresholds are env-overridable per MIGRATION entry #246. Defaults
+match the Dhan ``[3..5]`` r/s envelope (cap 5 r/s):
 
-* ``BRUTEX_GROWW_MIN_RPS`` (default ``4.0``)
-* ``BRUTEX_GROWW_MAX_RPS`` (default ``8.0``)
-* ``BRUTEX_GROWW_INITIAL_RPS`` (default ``8.0`` — start high, descend on errors)
-* ``BRUTEX_GROWW_STEP_DOWN_HITS`` (default ``3``)
-* ``BRUTEX_GROWW_STEP_DOWN_WINDOW`` (default ``60.0`` seconds)
-* ``BRUTEX_GROWW_STEP_UP_CLEAN_WINDOW`` (default ``300.0`` seconds = 5 min)
-* ``BRUTEX_GROWW_RECHECK_INTERVAL`` (default ``60.0`` seconds — informational)
+* ``BRUTEX_DHAN_MIN_RPS`` (default ``3.0``)
+* ``BRUTEX_DHAN_MAX_RPS`` (default ``5.0``)
+* ``BRUTEX_DHAN_INITIAL_RPS`` (default ``5.0`` — start at cap, descend on errors)
+* ``BRUTEX_DHAN_STEP_DOWN_HITS`` (default ``3``)
+* ``BRUTEX_DHAN_STEP_DOWN_WINDOW`` (default ``60.0`` seconds)
+* ``BRUTEX_DHAN_STEP_UP_CLEAN_WINDOW`` (default ``300.0`` seconds = 5 min)
+* ``BRUTEX_DHAN_RECHECK_INTERVAL`` (default ``60.0`` seconds — informational)
 
 ## Testability
 
@@ -63,7 +66,7 @@ synthetic clock so all timing is deterministic + side-effect-free.
 ## Decision
 
 DEC-ADAPTIVE-RATE-LIMITER-001 (MIGRATION entry #249). Pure-logic
-module; the Groww-adapter wiring lands in Phase 1 after the operator
+module; the Dhan-adapter wiring lands in Phase 1 after the operator
 runs the Phase 0b empirical probe (DEC-VENDOR-PIVOT-001 hard gate).
 """
 
@@ -132,9 +135,9 @@ TransitionCallback = Callable[[StateTransition], None]
 # Default thresholds (env-overridable per MIGRATION entry #246)
 # ────────────────────────────────────────────────────────────────────────
 
-DEFAULT_MIN_RPS: Final[float] = 4.0
-DEFAULT_MAX_RPS: Final[float] = 8.0
-DEFAULT_INITIAL_RPS: Final[float] = 8.0  # start high, descend on errors
+DEFAULT_MIN_RPS: Final[float] = 3.0
+DEFAULT_MAX_RPS: Final[float] = 5.0
+DEFAULT_INITIAL_RPS: Final[float] = 5.0  # start at the Dhan cap, descend on errors
 DEFAULT_STEP_DOWN_HITS: Final[int] = 3
 DEFAULT_STEP_DOWN_WINDOW: Final[float] = 60.0
 DEFAULT_STEP_UP_CLEAN_WINDOW: Final[float] = 300.0  # 5 minutes
@@ -193,27 +196,27 @@ class AdaptiveRateLimiterConfig:
 
     @classmethod
     def from_env(cls) -> AdaptiveRateLimiterConfig:
-        """Build from ``BRUTEX_GROWW_*`` env vars; defaults on missing / bad."""
+        """Build from ``BRUTEX_DHAN_*`` env vars; defaults on missing / bad."""
         return cls(
-            min_rps=_parse_float_env("BRUTEX_GROWW_MIN_RPS", DEFAULT_MIN_RPS),
-            max_rps=_parse_float_env("BRUTEX_GROWW_MAX_RPS", DEFAULT_MAX_RPS),
-            initial_rps=_parse_float_env("BRUTEX_GROWW_INITIAL_RPS", DEFAULT_INITIAL_RPS),
-            step_down_hits=_parse_int_env("BRUTEX_GROWW_STEP_DOWN_HITS", DEFAULT_STEP_DOWN_HITS),
+            min_rps=_parse_float_env("BRUTEX_DHAN_MIN_RPS", DEFAULT_MIN_RPS),
+            max_rps=_parse_float_env("BRUTEX_DHAN_MAX_RPS", DEFAULT_MAX_RPS),
+            initial_rps=_parse_float_env("BRUTEX_DHAN_INITIAL_RPS", DEFAULT_INITIAL_RPS),
+            step_down_hits=_parse_int_env("BRUTEX_DHAN_STEP_DOWN_HITS", DEFAULT_STEP_DOWN_HITS),
             step_down_window=_parse_float_env(
-                "BRUTEX_GROWW_STEP_DOWN_WINDOW", DEFAULT_STEP_DOWN_WINDOW
+                "BRUTEX_DHAN_STEP_DOWN_WINDOW", DEFAULT_STEP_DOWN_WINDOW
             ),
             step_up_clean_window=_parse_float_env(
-                "BRUTEX_GROWW_STEP_UP_CLEAN_WINDOW", DEFAULT_STEP_UP_CLEAN_WINDOW
+                "BRUTEX_DHAN_STEP_UP_CLEAN_WINDOW", DEFAULT_STEP_UP_CLEAN_WINDOW
             ),
             recheck_interval=_parse_float_env(
-                "BRUTEX_GROWW_RECHECK_INTERVAL", DEFAULT_RECHECK_INTERVAL
+                "BRUTEX_DHAN_RECHECK_INTERVAL", DEFAULT_RECHECK_INTERVAL
             ),
         )
 
 
 @dataclass(slots=True)
 class AdaptiveRateLimiter:
-    """4-state adaptive rate limiter for the Groww Data API.
+    """4-state adaptive rate limiter for the Dhan Data API.
 
     See module docstring for the full state machine specification.
 

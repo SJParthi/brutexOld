@@ -40,9 +40,9 @@ class _FakeClock:
 
 def _config(
     *,
-    min_rps: float = 4.0,
-    max_rps: float = 8.0,
-    initial_rps: float = 8.0,
+    min_rps: float = 3.0,
+    max_rps: float = 5.0,
+    initial_rps: float = 5.0,
     step_down_hits: int = 3,
     step_down_window: float = 60.0,
     step_up_clean_window: float = 300.0,
@@ -104,32 +104,32 @@ class TestConfigValidation:
 class TestFromEnv:
     def test_defaults_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for var in (
-            "BRUTEX_GROWW_MIN_RPS",
-            "BRUTEX_GROWW_MAX_RPS",
-            "BRUTEX_GROWW_INITIAL_RPS",
-            "BRUTEX_GROWW_STEP_DOWN_HITS",
-            "BRUTEX_GROWW_STEP_DOWN_WINDOW",
-            "BRUTEX_GROWW_STEP_UP_CLEAN_WINDOW",
-            "BRUTEX_GROWW_RECHECK_INTERVAL",
+            "BRUTEX_DHAN_MIN_RPS",
+            "BRUTEX_DHAN_MAX_RPS",
+            "BRUTEX_DHAN_INITIAL_RPS",
+            "BRUTEX_DHAN_STEP_DOWN_HITS",
+            "BRUTEX_DHAN_STEP_DOWN_WINDOW",
+            "BRUTEX_DHAN_STEP_UP_CLEAN_WINDOW",
+            "BRUTEX_DHAN_RECHECK_INTERVAL",
         ):
             monkeypatch.delenv(var, raising=False)
         cfg = AdaptiveRateLimiterConfig.from_env()
-        assert cfg.min_rps == 4.0
-        assert cfg.max_rps == 8.0
-        assert cfg.initial_rps == 8.0
+        assert cfg.min_rps == 3.0
+        assert cfg.max_rps == 5.0
+        assert cfg.initial_rps == 5.0
         assert cfg.step_down_hits == 3
         assert cfg.step_down_window == 60.0
         assert cfg.step_up_clean_window == 300.0
         assert cfg.recheck_interval == 60.0
 
     def test_overrides_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("BRUTEX_GROWW_MIN_RPS", "2.0")
-        monkeypatch.setenv("BRUTEX_GROWW_MAX_RPS", "6.0")
-        monkeypatch.setenv("BRUTEX_GROWW_INITIAL_RPS", "5.0")
-        monkeypatch.setenv("BRUTEX_GROWW_STEP_DOWN_HITS", "5")
-        monkeypatch.setenv("BRUTEX_GROWW_STEP_DOWN_WINDOW", "30")
-        monkeypatch.setenv("BRUTEX_GROWW_STEP_UP_CLEAN_WINDOW", "120")
-        monkeypatch.setenv("BRUTEX_GROWW_RECHECK_INTERVAL", "15")
+        monkeypatch.setenv("BRUTEX_DHAN_MIN_RPS", "2.0")
+        monkeypatch.setenv("BRUTEX_DHAN_MAX_RPS", "6.0")
+        monkeypatch.setenv("BRUTEX_DHAN_INITIAL_RPS", "5.0")
+        monkeypatch.setenv("BRUTEX_DHAN_STEP_DOWN_HITS", "5")
+        monkeypatch.setenv("BRUTEX_DHAN_STEP_DOWN_WINDOW", "30")
+        monkeypatch.setenv("BRUTEX_DHAN_STEP_UP_CLEAN_WINDOW", "120")
+        monkeypatch.setenv("BRUTEX_DHAN_RECHECK_INTERVAL", "15")
         cfg = AdaptiveRateLimiterConfig.from_env()
         assert cfg.min_rps == 2.0
         assert cfg.max_rps == 6.0
@@ -140,12 +140,12 @@ class TestFromEnv:
         assert cfg.recheck_interval == 15.0
 
     def test_unparseable_float_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("BRUTEX_GROWW_MIN_RPS", "not-a-float")
+        monkeypatch.setenv("BRUTEX_DHAN_MIN_RPS", "not-a-float")
         cfg = AdaptiveRateLimiterConfig.from_env()
-        assert cfg.min_rps == 4.0
+        assert cfg.min_rps == 3.0
 
     def test_unparseable_int_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("BRUTEX_GROWW_STEP_DOWN_HITS", "not-an-int")
+        monkeypatch.setenv("BRUTEX_DHAN_STEP_DOWN_HITS", "not-an-int")
         cfg = AdaptiveRateLimiterConfig.from_env()
         assert cfg.step_down_hits == 3
 
@@ -159,16 +159,16 @@ class TestInitialState:
     def test_starts_at_initial_rps(self) -> None:
         clock = _FakeClock()
         limiter = AdaptiveRateLimiter(config=_config(), clock=clock)
-        assert limiter.current_rps == 8.0
+        assert limiter.current_rps == 5.0
 
     def test_starts_locked_when_initial_equals_max(self) -> None:
         clock = _FakeClock()
-        limiter = AdaptiveRateLimiter(config=_config(initial_rps=8.0), clock=clock)
+        limiter = AdaptiveRateLimiter(config=_config(initial_rps=5.0), clock=clock)
         assert limiter.state is RateLimiterState.LOCKED
 
     def test_starts_probing_up_when_below_ceiling(self) -> None:
         clock = _FakeClock()
-        limiter = AdaptiveRateLimiter(config=_config(initial_rps=6.0), clock=clock)
+        limiter = AdaptiveRateLimiter(config=_config(initial_rps=4.0), clock=clock)
         assert limiter.state is RateLimiterState.PROBING_UP
 
 
@@ -189,7 +189,7 @@ class TestStepDown:
         for _ in range(3):
             limiter.record_rate_limit_hit()
             clock.advance(5.0)
-        assert limiter.current_rps == 7.0
+        assert limiter.current_rps == 4.0
         assert limiter.state is RateLimiterState.PROBING_DOWN
         assert len(transitions) == 1
         assert transitions[0].reason == "step_down_hits"
@@ -202,7 +202,7 @@ class TestStepDown:
         for _ in range(2):
             limiter.record_rate_limit_hit()
             clock.advance(5.0)
-        assert limiter.current_rps == 8.0  # unchanged
+        assert limiter.current_rps == 5.0  # unchanged
         assert limiter.state is RateLimiterState.LOCKED  # unchanged
 
     def test_hits_outside_window_are_pruned(self) -> None:
@@ -214,7 +214,7 @@ class TestStepDown:
         clock.advance(5.0)
         limiter.record_rate_limit_hit()
         # Only 2 hits in the current window — not enough
-        assert limiter.current_rps == 8.0
+        assert limiter.current_rps == 5.0
 
     def test_step_down_clears_hit_buffer(self) -> None:
         clock = _FakeClock()
@@ -232,8 +232,8 @@ class TestStepDown:
 
 
 class TestFloorBreach:
-    def test_four_step_downs_from_eight_reach_floor(self) -> None:
-        # 8 → 7 → 6 → 5 → 4 (4 step-downs); 5th step-down breaches floor.
+    def test_step_downs_from_max_reach_floor(self) -> None:
+        # 5 → 4 → 3 (2 step-downs); the next step-down breaches the floor.
         clock = _FakeClock()
         transitions: list[StateTransition] = []
         limiter = AdaptiveRateLimiter(
@@ -246,7 +246,7 @@ class TestFloorBreach:
                 limiter.record_rate_limit_hit()
                 clock.advance(1.0)
         assert limiter.state is RateLimiterState.FLOOR_BREACHED
-        assert limiter.current_rps == 4.0  # pinned at floor
+        assert limiter.current_rps == 3.0  # pinned at floor
         # Last transition should be floor_breach.
         assert transitions[-1].reason == "floor_breach"
         assert transitions[-1].to_state is RateLimiterState.FLOOR_BREACHED
@@ -284,7 +284,7 @@ class TestFloorBreach:
         clock.advance(10_000.0)
         limiter.record_clean_call()
         assert limiter.state is RateLimiterState.FLOOR_BREACHED
-        assert limiter.current_rps == 4.0
+        assert limiter.current_rps == 3.0
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -297,7 +297,7 @@ class TestStepUp:
         clock = _FakeClock()
         transitions: list[StateTransition] = []
         limiter = AdaptiveRateLimiter(
-            config=_config(),  # starts at LOCKED (initial=max=8)
+            config=_config(),  # starts at LOCKED (initial=max=5)
             clock=clock,
             on_transition=transitions.append,
         )
@@ -305,36 +305,36 @@ class TestStepUp:
         limiter.record_clean_call()
         # Still locked at ceiling — no transition fired.
         assert limiter.state is RateLimiterState.LOCKED
-        assert limiter.current_rps == 8.0
+        assert limiter.current_rps == 5.0
         assert transitions == []
 
     def test_clean_window_below_ceiling_steps_up(self) -> None:
         clock = _FakeClock()
         transitions: list[StateTransition] = []
         limiter = AdaptiveRateLimiter(
-            config=_config(initial_rps=5.0),
+            config=_config(initial_rps=4.0),
             clock=clock,
             on_transition=transitions.append,
         )
         clock.advance(301.0)  # > 300 step-up clean window
         limiter.record_clean_call()
-        assert limiter.current_rps == 6.0
-        assert limiter.state is RateLimiterState.PROBING_UP
+        assert limiter.current_rps == 5.0
+        assert limiter.state is RateLimiterState.LOCKED
         assert len(transitions) == 1
-        assert transitions[0].reason == "step_up_clean_window"
+        assert transitions[0].reason == "ceiling_reached"
 
     def test_repeated_step_ups_reach_ceiling(self) -> None:
         clock = _FakeClock()
         transitions: list[StateTransition] = []
         limiter = AdaptiveRateLimiter(
-            config=_config(initial_rps=5.0),
+            config=_config(initial_rps=3.0),
             clock=clock,
             on_transition=transitions.append,
         )
-        for _ in range(3):  # 5 → 6 → 7 → 8
+        for _ in range(2):  # 3 → 4 → 5
             clock.advance(301.0)
             limiter.record_clean_call()
-        assert limiter.current_rps == 8.0
+        assert limiter.current_rps == 5.0
         assert limiter.state is RateLimiterState.LOCKED
         # Last transition should be ceiling_reached.
         assert transitions[-1].reason == "ceiling_reached"
@@ -342,14 +342,14 @@ class TestStepUp:
 
     def test_partial_clean_window_no_op(self) -> None:
         clock = _FakeClock()
-        limiter = AdaptiveRateLimiter(config=_config(initial_rps=5.0), clock=clock)
+        limiter = AdaptiveRateLimiter(config=_config(initial_rps=4.0), clock=clock)
         clock.advance(100.0)  # < 300 window
         limiter.record_clean_call()
-        assert limiter.current_rps == 5.0  # unchanged
+        assert limiter.current_rps == 4.0  # unchanged
 
     def test_hit_in_window_resets_step_up_clock(self) -> None:
         clock = _FakeClock()
-        limiter = AdaptiveRateLimiter(config=_config(initial_rps=5.0), clock=clock)
+        limiter = AdaptiveRateLimiter(config=_config(initial_rps=4.0), clock=clock)
         clock.advance(250.0)  # close to step-up
         limiter.record_rate_limit_hit()  # one hit — not enough to step down
         # But the hit IS in the window — step-up should be deferred.
@@ -361,17 +361,17 @@ class TestStepUp:
         # so the buffer prunes it and step-up proceeds.
         # That's intentional: after a single isolated hit + long clean,
         # the limiter recovers.
-        assert limiter.current_rps == 6.0
+        assert limiter.current_rps == 5.0
 
     def test_hit_pending_in_window_blocks_step_up(self) -> None:
         clock = _FakeClock()
-        limiter = AdaptiveRateLimiter(config=_config(initial_rps=5.0), clock=clock)
+        limiter = AdaptiveRateLimiter(config=_config(initial_rps=4.0), clock=clock)
         clock.advance(301.0)  # establish baseline clean window
         limiter.record_rate_limit_hit()
         clock.advance(10.0)  # hit still in window (10s < 60s step-down window)
         limiter.record_clean_call()
         # Hit still pending → step-up blocked, but clock resets.
-        assert limiter.current_rps == 5.0
+        assert limiter.current_rps == 4.0
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -384,13 +384,13 @@ class TestTick:
         clock = _FakeClock()
         transitions: list[StateTransition] = []
         limiter = AdaptiveRateLimiter(
-            config=_config(initial_rps=5.0),
+            config=_config(initial_rps=3.0),
             clock=clock,
             on_transition=transitions.append,
         )
         clock.advance(301.0)
         limiter.tick()
-        assert limiter.current_rps == 6.0
+        assert limiter.current_rps == 4.0
         assert len(transitions) == 1
 
     def test_tick_at_ceiling_no_op(self) -> None:
@@ -428,13 +428,13 @@ class TestTick:
 class TestSnapshot:
     def test_snapshot_shape(self) -> None:
         clock = _FakeClock()
-        limiter = AdaptiveRateLimiter(config=_config(initial_rps=6.0), clock=clock)
+        limiter = AdaptiveRateLimiter(config=_config(initial_rps=4.0), clock=clock)
         snap = limiter.snapshot()
         assert snap == {
             "state": "probing_up",
-            "current_rps": 6.0,
-            "min_rps": 4.0,
-            "max_rps": 8.0,
+            "current_rps": 4.0,
+            "min_rps": 3.0,
+            "max_rps": 5.0,
             "recent_hit_count": 0,
             "last_hit_at": None,
         }
@@ -461,7 +461,7 @@ class TestTransitionCallback:
         for _ in range(3):
             limiter.record_rate_limit_hit()
             clock.advance(1.0)
-        assert limiter.current_rps == 7.0
+        assert limiter.current_rps == 4.0
 
     def test_callback_exception_propagates(self) -> None:
         # Programmer-error callbacks should fail loudly (not silently
@@ -498,7 +498,7 @@ class TestDefaultClock:
         # Just verify the limiter constructs + the snapshot reports a
         # finite last_step_up_check baseline (proxy: no crash + valid float).
         limiter = AdaptiveRateLimiter(config=_config())
-        assert limiter.current_rps == 8.0
+        assert limiter.current_rps == 5.0
         # Sanity: hit + clean ops execute without error.
         limiter.record_rate_limit_hit()
         limiter.record_clean_call()

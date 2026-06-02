@@ -1,11 +1,12 @@
 """Core domain models — BruteX's broker-neutral internal representation.
 
 Every broker adapter normalises its raw data into these models. Layers L2+
-(data lake, feed, engine, etc.) see ONLY these types, never the raw SDK
-dicts from `a broker SDK` or any other broker.
+(data lake, feed, engine, etc.) see ONLY these types, never the raw vendor
+payloads from the Dhan Data API v2 or any other broker.
 
-See ``docs/REQUIREMENTS.md §6`` for the full data-model specification and
-Groww API annexure at https://groww.in/trade-api/docs/docs/v2/annexure for the Groww-specific mapping.
+See ``docs/TRACK1_BACKTEST_SPEC.md`` for the full data-model specification.
+The canonical instrument fields map to the Dhan instrument-master schema
+(``brutex/adapters/dhan/instruments.py``; CLAUDE.md §6).
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ class Exchange(StrEnum):
     NSE = "NSE"
     BSE = "BSE"
     # MCX exists in broker SDK but is out of scope for BruteX v1
-    # (Groww-backed backtesting does not support COMMODITY segment).
+    # (Dhan-backed backtesting does not support COMMODITY segment).
 
 
 class Segment(StrEnum):
@@ -51,7 +52,8 @@ class Segment(StrEnum):
 class InstrumentType(StrEnum):
     """Instrument type — matches broker SDK values verbatim.
 
-    See Groww API annexure at https://groww.in/trade-api/docs/docs/v2/annexure for the canonical list.
+    See the Dhan instrument-master schema (CLAUDE.md §6;
+    ``brutex/adapters/dhan/instruments.py``) for the canonical list.
 
     .. note::
 
@@ -60,7 +62,7 @@ class InstrumentType(StrEnum):
         4 values — ``EQ`` / ``FUT`` / ``CE`` / ``PE`` — are **Track 2
         reference / forward-compat**, kept in the enum so:
 
-        1. Groww annexure parity is preserved (broker-CSV roundtrip).
+        1. Vendor instrument-master parity is preserved (broker-CSV roundtrip).
         2. Track 2 options modules + cost calculator can type-check.
         3. Existing test fixtures across 6+ files keep importing them.
 
@@ -94,8 +96,8 @@ class Instrument:
     `the deleted broker adapter`. Downstream
     layers see only this class and never the raw `a broker SDK` dict.
 
-    Field ordering matches Groww API annexure at https://groww.in/trade-api/docs/docs/v2/annexure for
-    side-by-side auditability.
+    Field ordering matches the Dhan instrument-master schema (CLAUDE.md §6)
+    for side-by-side auditability.
     """
 
     # Identity
@@ -129,7 +131,8 @@ class Instrument:
     buy_allowed: bool
     sell_allowed: bool
 
-    # Groww-specific undocumented field — see https://groww.in/trade-api/docs/docs/v2/annexure
+    # Vendor-specific undocumented field — see the Dhan instrument-master
+    # schema (CLAUDE.md §6).
     internal_trading_symbol: str | None = None
 
     # ─────────────────────────────────────────────────────────────────
@@ -219,7 +222,7 @@ class OutOfScopeError(BruteXError):
     """Row belongs to a scope that is explicitly excluded from v1.
 
     Examples: stock options, cash equity rows, commodity segment rows.
-    The adapter raises this when a Groww row would be ingested that
+    The adapter raises this when a Dhan row would be ingested that
     does not match the locked v1 universe (``FD-09a`` / ``FD-09b``).
     """
 
@@ -235,8 +238,8 @@ class InstrumentFormatError(BruteXError):
 class TickSizeFormatError(InstrumentFormatError):
     """Raised when ``tick_size`` cannot be normalised to Decimal rupees.
 
-    See Groww API annexure at https://groww.in/trade-api/docs/docs/v2/annexure for the format drift
-    (float rupees in CSV vs integer paise in dict output).
+    See the Dhan instrument-master schema (CLAUDE.md §6) for the format
+    drift (float rupees in CSV vs integer paise in dict output).
     """
 
 
@@ -245,7 +248,7 @@ class TickSizeFormatError(InstrumentFormatError):
 # ────────────────────────────────────────────────────────────────────────
 
 #: Minimum value of a tick size when expressed as integer paise (the
-#: dict-output form from Groww). Below 1 is meaningless (paise < 1 =
+#: dict-output form from the vendor). Below 1 is meaningless (paise < 1 =
 #: fractional rupee, should use the float-rupees branch instead).
 MIN_TICK_PAISE: Final[int] = 1
 
@@ -260,10 +263,10 @@ VALID_TICK_SIZES_RUPEES: Final[frozenset[Decimal]] = frozenset(
 
 
 def normalise_tick_size(raw: float | int | Decimal | str) -> Decimal:
-    """Convert a Groww tick_size value to canonical Decimal rupees.
+    """Convert a vendor tick_size value to canonical Decimal rupees.
 
-    Handles the format drift documented in
-    Groww API annexure at https://groww.in/trade-api/docs/docs/v2/annexure:
+    Handles the format drift documented in the Dhan instrument-master
+    schema (CLAUDE.md §6):
 
     * CSV row: float rupees (``0.05``)
     * Dict output of ``get_instrument_by_vendor_symbol``: integer paise (``5``)

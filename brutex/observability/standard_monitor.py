@@ -34,7 +34,7 @@ The :func:`compose_standard_monitor` factory:
 
 YAML is a heavy dep (PyYAML pulls in libyaml C lib). For this PR we
 stay stdlib-only — env vars + caller-supplied SLARule list. The next
-ratchet (post-Groww-adapter-live) can add a YAML or TOML loader that
+ratchet (post-Dhan-adapter-live) can add a YAML or TOML loader that
 constructs :class:`MonitorConfig` from a file.
 
 ## Decision: DEC-STANDARD-MONITOR-001 (MIGRATION entry #243).
