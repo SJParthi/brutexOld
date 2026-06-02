@@ -750,7 +750,7 @@ def _synthetic_index_instrument(spec: Any) -> Any:
         symbol_name=spec.underlying_symbol,
         display_name=spec.display_name,
         instrument=InstrumentType.IDX,
-        segment=Segment.CASH,
+        segment=Segment.INDEX,
         series=None,
         isin=None,
         underlying_symbol=None,

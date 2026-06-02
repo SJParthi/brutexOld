@@ -113,7 +113,13 @@ from brutex.models import (
 #: ``option_type`` / ``expiry_flag`` added. This is a NON-additive shape
 #: change: :meth:`InstrumentStore.open` DROPs + recreates an older-version
 #: store (the instrument master is rebuildable from one CSV pull).
-SCHEMA_VERSION: Final[int] = 3
+#:
+#: v4 (DEC-INDEX-SEGMENT-PK-FIX-001, 2026-06-02): indices now persist with
+#: ``segment='INDEX'`` instead of ``'CASH'`` so they no longer collide on
+#: the ``(security_id, exch_id, segment, snapshot_date)`` PK with a cash
+#: equity sharing a numeric SECURITY_ID. The bump forces any v3 store
+#: (which may hold mis-segmented index rows) to DROP + rebuild from the CSV.
+SCHEMA_VERSION: Final[int] = 4
 
 #: Default DuckDB file name inside the configured lake root.
 DEFAULT_DB_NAME: Final[str] = "instruments.duckdb"
@@ -1095,7 +1101,7 @@ class InstrumentStore(metaclass=_StoreMeta):
             raise
 
         return UpsertResult(
-            rows_written=len(instruments),
+            rows_written=len(rows),
             rows_replaced=rows_replaced,
             snapshot_date=snapshot_date,
             run_id=run_id,

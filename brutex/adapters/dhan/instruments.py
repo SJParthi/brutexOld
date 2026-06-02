@@ -283,11 +283,19 @@ def parse_instrument_row(row: Mapping[str, str]) -> Instrument:
     security_id = row["SECURITY_ID"].strip()
     if not security_id:
         raise DhanInstrumentError("row missing SECURITY_ID")
-    segment = (
-        Segment.FNO
-        if itype in {InstrumentType.FUT, InstrumentType.CE, InstrumentType.PE}
-        else Segment.CASH
-    )
+    # Segment mirrors Dhan's exchangeSegment family (DEC-DHAN-IDX-SEGMENT-001):
+    # an INDEX lives in the cross-exchange IDX_I segment, NOT NSE_EQ/BSE_EQ.
+    # Assigning indices a distinct ``INDEX`` segment (not ``CASH``) is what
+    # keeps the (security_id, exch_id, segment, snapshot_date) PK unique when
+    # an index and a cash equity share a numeric SECURITY_ID across Dhan's
+    # distinct IDX_I vs NSE_EQ segments (e.g. id 13 = NIFTY in IDX_I AND an
+    # NSE_EQ stock) — DEC-INDEX-SEGMENT-PK-FIX-001.
+    if itype in {InstrumentType.FUT, InstrumentType.CE, InstrumentType.PE}:
+        segment = Segment.FNO
+    elif itype is InstrumentType.IDX:
+        segment = Segment.INDEX
+    else:
+        segment = Segment.CASH
     underlying = _opt_str(row.get("UNDERLYING_SYMBOL"))
     # An F&O-eligible equity carries the long company name in SYMBOL_NAME and
     # the ticker in UNDERLYING_SYMBOL; prefer the ticker so the spot's identity

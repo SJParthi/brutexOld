@@ -1054,3 +1054,105 @@ def test_open_migrates_older_schema_version_drops_renamed_tables(tmp_path: Path)
     # 3. Re-open → the migration drops the renamed tables → the old row is gone.
     with InstrumentStore.open(db) as store:
         assert "NIFTY" not in store.load_snapshot(in_scope_only=False)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-INDEX-SEGMENT-PK-FIX-001 — index/equity sharing a SECURITY_ID + the
+# defensive duplicate-PK collapse in upsert_many.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _instr(
+    *,
+    security_id: int,
+    symbol_name: str,
+    itype: InstrumentType,
+    segment: Segment,
+    exchange: Exchange = Exchange.NSE,
+) -> Instrument:
+    """Build a minimal valid instrument with an explicit segment."""
+    return Instrument(
+        exch_id=exchange,
+        security_id=security_id,
+        symbol_name=symbol_name,
+        display_name=symbol_name,
+        instrument=itype,
+        segment=segment,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+class TestIndexSegmentPkFix:
+    """The schema-v3 PK collapsed indices + cash equities to ``CASH``; a
+    NIFTY index and a cash equity that share a numeric ``SECURITY_ID`` then
+    collided on ``(security_id, exch_id, segment, snapshot_date)`` and crashed
+    the instrument-master load. Indices now use ``segment='INDEX'``."""
+
+    def test_index_and_equity_sharing_security_id_both_persist(self, tmp_path: Path) -> None:
+        # security_id 13 = NIFTY in Dhan's IDX_I segment; a NSE_EQ stock can
+        # carry the same numeric id. Different segment ⇒ distinct PK ⇒ both
+        # persist (this raised a ConstraintException before the fix).
+        idx = _instr(
+            security_id=13,
+            symbol_name="NIFTY",
+            itype=InstrumentType.IDX,
+            segment=Segment.INDEX,
+        )
+        eq = _instr(
+            security_id=13,
+            symbol_name="SOMEEQ",
+            itype=InstrumentType.EQ,
+            segment=Segment.CASH,
+        )
+        with InstrumentStore.open(tmp_path / "db") as s:
+            result = s.upsert_many(
+                [idx, eq],
+                snapshot_date=date(2026, 6, 2),
+                run_id="r1",
+                csv_source_sha256=_csv_hash(),
+                replace_snapshot=True,
+            )
+            assert result.rows_written == 2
+            assert s.count(in_scope_only=False) == 2
+            got_idx = s.get("NIFTY")
+            got_eq = s.get("SOMEEQ")
+            assert got_idx is not None and got_idx.segment is Segment.INDEX
+            assert got_eq is not None and got_eq.segment is Segment.CASH
+
+    def test_duplicate_pk_in_one_batch_is_collapsed_not_crashed(self, tmp_path: Path) -> None:
+        # Two rows that share the FULL live PK (security_id, exch_id, segment)
+        # in one batch must be collapsed (keep last), never crash the ingest.
+        first = _instr(
+            security_id=13,
+            symbol_name="NIFTY",
+            itype=InstrumentType.IDX,
+            segment=Segment.INDEX,
+        )
+        dup = _instr(
+            security_id=13,
+            symbol_name="NIFTY_RESTATED",
+            itype=InstrumentType.IDX,
+            segment=Segment.INDEX,
+        )
+        with InstrumentStore.open(tmp_path / "db") as s:
+            result = s.upsert_many(
+                [first, dup],
+                snapshot_date=date(2026, 6, 2),
+                run_id="r1",
+                csv_source_sha256=_csv_hash(),
+                replace_snapshot=True,
+            )
+            # Collapsed to one row; the LAST occurrence wins.
+            assert result.rows_written == 1
+            assert s.count(in_scope_only=False) == 1
+            assert s.get("NIFTY_RESTATED") is not None
+            assert s.get("NIFTY") is None

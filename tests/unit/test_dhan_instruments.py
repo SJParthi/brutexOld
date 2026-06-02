@@ -431,12 +431,16 @@ class TestUniverseDedup:
         assert report.legs_dropped == 2  # the duplicate listing + the option leg
 
     def test_same_security_id_under_two_symbol_names_collapses_to_one(self) -> None:
-        # The live `13, NSE, CASH` crash (DEC-DHAN-UNIVERSE-PK-DEDUP-001): the
-        # vendor lists ONE security_id under TWO admitted SYMBOL_NAMEs (NIFTY id
-        # 13 as both "NIFTY" and "BANKNIFTY"-shaped names here). They survive the
-        # (exch_id, symbol_name) dedup (different names) but share the table
+        # DEC-DHAN-UNIVERSE-PK-DEDUP-001: the vendor lists ONE security_id under
+        # TWO admitted SYMBOL_NAMEs of the SAME instrument type (here the NIFTY
+        # index id 13 as both "NIFTY" and "BANKNIFTY"-shaped names). They survive
+        # the (exch_id, symbol_name) dedup (different names) but share the table
         # identity (security_id, exch_id, segment) and would crash the bulk
-        # INSERT. The second collapse must merge them to exactly ONE row.
+        # INSERT. The second collapse must merge them to exactly ONE row. (Both
+        # are INDEX → segment INDEX per DEC-INDEX-SEGMENT-PK-FIX-001 #406, so the
+        # identity is genuinely shared and the collapse is correct — contrast
+        # TestIndexEquitySharedSecurityId, where an INDEX + an EQUITY share the
+        # id but have DISTINCT segments and must BOTH survive.)
         rows = [
             _row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY", SECURITY_ID="13", LOT_SIZE="0"),
             _row(INSTRUMENT="INDEX", SYMBOL_NAME="BANKNIFTY", SECURITY_ID="13", LOT_SIZE="0"),
@@ -444,7 +448,7 @@ class TestUniverseDedup:
         report = select_universe_report(rows)
         # ONE row, the canonical identity, no PK collision possible downstream.
         assert [(i.security_id, i.exch_id.value, i.segment.value) for i in report.universe] == [
-            (13, "NSE", "CASH")
+            (13, "NSE", "INDEX")
         ]
         assert report.persisted == 1
         assert report.legs_dropped == 1  # the duplicate-identity row
@@ -621,3 +625,70 @@ class TestIndexAllowList:
         assert _is_admitted_index("NSE", "NIFTY MID100 FREE") is True
         assert len(_ADMITTED_NSE_INDEX_SYMBOLS) == 31
         assert len(_ADMITTED_NSE_INDEX_SYMBOLS | _ADMITTED_BSE_INDEX_SYMBOLS) == 32
+
+
+class TestIndexEquitySharedSecurityId:
+    """Regression for DEC-INDEX-SEGMENT-PK-FIX-001 (#406).
+
+    In the real Dhan master, NSE ``SECURITY_ID 13`` is TWO genuinely
+    different instruments — NIFTY 50 (INDEX, Dhan ``IDX_I``) AND ABB India
+    (EQUITY, ``NSE_EQ``) — because Dhan reuses the numeric id across its
+    distinct exchange-segments. ``segment='INDEX'`` for indices keeps their
+    identity ``(13, NSE, INDEX)`` distinct from the equity's ``(13, NSE,
+    CASH)``, so the universe-level identity collapse (#405) does NOT drop one
+    of them. Without the distinct segment both are ``CASH`` → the identity
+    dedup silently drops one (data loss: NIFTY 50 or ABB vanishes)."""
+
+    def _rows(self) -> list[dict[str, str]]:
+        return [
+            # NIFTY 50 — INDEX, security_id 13 (Dhan IDX_I).
+            _row(
+                INSTRUMENT="INDEX",
+                INSTRUMENT_TYPE="INDEX",
+                EXCH_ID="NSE",
+                SECURITY_ID="13",
+                SYMBOL_NAME="NIFTY",
+                UNDERLYING_SYMBOL="NIFTY",
+                LOT_SIZE="1",
+                TICK_SIZE="0.05",
+            ),
+            # ABB India — EQUITY, ALSO security_id 13 (Dhan NSE_EQ), F&O-eligible.
+            _row(
+                INSTRUMENT="EQUITY",
+                INSTRUMENT_TYPE="ES",
+                EXCH_ID="NSE",
+                SECURITY_ID="13",
+                SYMBOL_NAME="ABB INDIA LIMITED",
+                UNDERLYING_SYMBOL="ABB",
+                LOT_SIZE="1",
+                TICK_SIZE="0.05",
+            ),
+            # ABB FUTSTK leg → makes ABB F&O-eligible (admitted to the universe).
+            _row(
+                INSTRUMENT="FUTSTK",
+                INSTRUMENT_TYPE="FUT",
+                EXCH_ID="NSE",
+                SECURITY_ID="90001",
+                SYMBOL_NAME="ABB-Jun2026-FUT",
+                UNDERLYING_SYMBOL="ABB",
+                LOT_SIZE="125",
+                TICK_SIZE="0.05",
+                SM_EXPIRY_DATE="2026-06-25",
+            ),
+        ]
+
+    def test_index_and_equity_sharing_security_id_both_survive(self) -> None:
+        universe = select_universe_report(self._rows()).universe
+        by_sym = {i.symbol_name: i for i in universe}
+        # BOTH id-13 instruments survive — no data loss.
+        assert "NIFTY" in by_sym, "NIFTY 50 (id 13 INDEX) was dropped from the universe"
+        assert "ABB" in by_sym, "ABB (id 13 EQUITY) was dropped from the universe"
+        nifty = by_sym["NIFTY"]
+        abb = by_sym["ABB"]
+        # Same numeric SECURITY_ID, distinct segment → distinct PK identity.
+        assert nifty.security_id == 13
+        assert abb.security_id == 13
+        assert nifty.segment is Segment.INDEX
+        assert abb.segment is Segment.CASH
+        assert nifty.instrument is InstrumentType.IDX
+        assert abb.instrument is InstrumentType.EQ
