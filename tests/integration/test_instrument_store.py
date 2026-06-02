@@ -1158,12 +1158,15 @@ class TestCoverageLedger:
             error_message=error,
         )
 
-    def test_schema_version_is_three(self, tmp_path: Path) -> None:
-        # v3: Dhan-native instrument-master rename + (security_id, exch_id,
-        # segment) identity (ADR-0003 / DEC-DHAN-NATIVE-SCHEMA-001).
+    def test_schema_version_is_four(self, tmp_path: Path) -> None:
+        # v4: indices persist with segment='INDEX' (not 'CASH') so they no
+        # longer collide on the (security_id, exch_id, segment, snapshot_date)
+        # PK with a cash equity sharing a numeric SECURITY_ID
+        # (DEC-INDEX-SEGMENT-PK-FIX-001). v3 was the Dhan-native rename
+        # (ADR-0003 / DEC-DHAN-NATIVE-SCHEMA-001).
         with InstrumentStore.open(tmp_path / "db") as s:
-            assert s.schema_version == 3
-            assert SCHEMA_VERSION == 3
+            assert s.schema_version == 4
+            assert SCHEMA_VERSION == 4
 
     def test_upsert_and_get_roundtrip(self, tmp_path: Path) -> None:
         with InstrumentStore.open(tmp_path / "db") as s:

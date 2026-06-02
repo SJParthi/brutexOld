@@ -36,14 +36,24 @@ class Segment(StrEnum):
 
     .. note::
 
-        **Track 1 scope (CLAUDE.md §3):** only ``CASH`` is used in the
-        signal-only spot-index brute-force backtest. ``FNO`` is **Track 2
-        reference** — kept in the enum so Track 2 modules and forward-compat
-        tests can construct it, but no Track 1 code path writes ``FNO``.
-        Per DEC-P0-040 Q-08, this enum value is annotated rather than
-        deleted to avoid cascading test breaks across 6+ test files.
+        **Track 1 scope (CLAUDE.md §3):** the signal-only spot-index
+        brute-force backtest uses ``INDEX`` (the 3 brute-force indices +
+        India VIX live in Dhan's cross-exchange ``IDX_I`` segment, per
+        DEC-DHAN-IDX-SEGMENT-001). ``CASH`` is the spot-equity segment
+        (F&O-eligible single-stock SPOT rows in the lean lake). ``FNO`` is
+        **Track 2 reference** — kept in the enum so Track 2 modules and
+        forward-compat tests can construct it, but no Track 1 code path
+        writes ``FNO``.
+
+        ``INDEX`` was added by DEC-INDEX-SEGMENT-PK-FIX-001 (2026-06-02):
+        before it, indices were mis-assigned ``CASH``, so an index and a
+        cash equity that share a numeric ``SECURITY_ID`` across Dhan's
+        distinct ``IDX_I`` vs ``NSE_EQ`` segments (e.g. ``13``) collided on
+        the ``(security_id, exch_id, segment, snapshot_date)`` PK and
+        crashed the instrument-master load.
     """
 
+    INDEX = "INDEX"  # Dhan IDX_I — Track 1 brute-force indices + India VIX
     CASH = "CASH"
     FNO = "FNO"  # Track 2 reference — out of scope for Track 1 signal-only mode
     # COMMODITY exists in broker SDK but is out of scope for BruteX v1.
