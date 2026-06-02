@@ -14,12 +14,12 @@ Lockbox) to return the top 3 production candidates per sweep.
 
 ## 🎯 What this is
 
-Given a config-driven instrument universe and a Groww auth token,
+Given a config-driven instrument universe and a Dhan access token,
 BruteX:
 
 1. **Ingests** historical OHLC bars for the 4 Track 1 indexes from the
-   Groww Trade API (`/v2/charts/intraday` for 1m bars,
-   `/v2/charts/historical` for daily). Pulls are **incremental** —
+   Dhan Data API v2 (`POST /v2/charts/intraday` for 1m bars,
+   `POST /v2/charts/historical` for daily). Pulls are **incremental** —
    subsequent runs only fetch new bars since the last successful
    timestamp per (instrument, timeframe).
 2. **Resamples** the 1-minute base into 19 derived intraday timeframes
@@ -49,7 +49,7 @@ to ATM/ITM option fill simulations.
 | Aspect | Value |
 |---|---|
 | **Instruments** | NIFTY 50, BANKNIFTY, SENSEX, India VIX |
-| **Data source** | Groww Trade API |
+| **Data source** | Dhan Data API v2 |
 | **Timeframes** | 21 (1m base + 19 derived intraday + 1d) |
 | **Range** | Rolling `2021-01-01 → today` |
 | **Hardware reference** | Apple M4 Pro (14-core, 10 P-cores allocated) |
@@ -72,7 +72,7 @@ See `docs/TRACK1_BACKTEST_SPEC.md` for the master spec and
 ```
    ┌─────────────────────────────────────────────────────────────┐
    │                                                             │
-   │   Groww API  ─→  Adapter  ─→  Parser  ─→  Validate  ─→       │
+   │   Dhan API   ─→  Adapter  ─→  Parser  ─→  Validate  ─→       │
    │                                                             │
    │   ─→ Parquet (atomic)  ─→  Watermark advance (DuckDB)       │
    │                                                             │
@@ -91,7 +91,7 @@ Layers (broker-agnostic above L1):
 
 | Layer | What | Code |
 |---|---|---|
-| L1 — Adapter | Groww HTTP client + envelope parser | `brutex/adapters/groww/` (Phase 2) |
+| L1 — Adapter | Dhan HTTP client + envelope parser | `brutex/adapters/dhan/` |
 | L2 — Data lake | Parquet + DuckDB + LMDB | `brutex/data/` |
 | L3 — Feed | Replay + resampler | `brutex/feed/` |
 | L4 — Execution | Signal-only simulator | `brutex/execution/` |
@@ -152,16 +152,17 @@ already set up — use the one-click for a fresh clone.
 
 > **What you'll see today:** the **Strategy Report** dashboard renders
 > immediately, but its numbers are **placeholders**. Real values appear
-> only after (a) data is fetched into the lake (needs Groww credentials,
-> Phase 2) and (b) the brute-force engine runs. The page, the live
+> only after (a) data is fetched into the lake (needs Dhan
+> credentials) and (b) the brute-force engine runs. The page, the live
 > `/api/v1/state` poller, `/metrics`, and the `/ws` socket are all wired
 > and working; the data-browser routes (`/api/v1/instruments` etc.)
 > return `503` until you start with `--lake-root <populated-lake>`.
 
-**Optional — Groww credentials for live data pulls (Phase 2):**
+**Optional — Dhan credentials for live data pulls:**
 
 ```bash
-export BRUTEX_GROWW_ACCESS_TOKEN="<your-token-from-groww.co>"
+export BRUTEX_DHAN_ACCESS_TOKEN="<access-token-from-web.dhan.co>"
+export BRUTEX_DHAN_CLIENT_ID="<your-dhan-client-id>"
 export BRUTEX_LAKE_ROOT=/path/to/large/ssd/brutex-lake
 brutex version      # verify install
 ```
@@ -170,7 +171,7 @@ brutex version      # verify install
 
 ## 🚀 Usage (Phase 2 onward)
 
-The CLI surface lands in Phase 2 with the Groww adapter. Track 1 plan:
+The CLI surface lands in Phase 2 with the Dhan adapter. Track 1 plan:
 
 ```bash
 # Daily incremental pull (only fetches new bars since last run)

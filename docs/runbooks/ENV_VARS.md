@@ -77,27 +77,37 @@ The runtime file records the currently-running pipeline's `pid`,
 
 ---
 
-## 5. Groww adapter (DEC-VENDOR-PIVOT-001 — scope-guarded)
+## 5. Dhan adapter — live data-pull credentials (DEC-GROWW-DHAN-REVERT-001, ADR-0002)
+
+The live vendor is **Dhan Data API v2** (plain REST, no vendor SDK — CLAUDE.md §6).
+The pull authenticates with a manual web-generated access token + client id,
+read from the environment (file fallback: the saved-credentials store in
+`brutex.config.credentials`):
 
 | Env var | Default | Allowed | Module |
 |---|---|---|---|
-| `BRUTEX_GROWW_API_KEY` | — | TOTP token (16-byte base32) | `brutex.adapters.groww.auth` (Phase 1) |
-| `BRUTEX_GROWW_TOTP_SECRET` | — | 32-char base32 | `brutex.adapters.groww.auth` (Phase 1) |
-| `BRUTEX_GROWW_TOKEN_PATH` | `~/.brutex/groww/access_token.json` | path (mode 0600) | `brutex.adapters.groww.auth` (Phase 1) |
-| `BRUTEX_GROWW_SMOKE` | unset | `1` to enable | `tests/smoke/test_groww_*` (Phase 1) |
-| `BRUTEX_GROWW_MIN_RPS` | `4.0` | float | `brutex.adapters.groww.client` (Phase 2) |
-| `BRUTEX_GROWW_MAX_RPS` | `8.0` | float | `brutex.adapters.groww.client` (Phase 2) |
-| `BRUTEX_GROWW_INITIAL_RPS` | `8.0` | float | `brutex.adapters.groww.client` (Phase 2) |
-| `BRUTEX_GROWW_STEP_DOWN_HITS` | `3` | int | `brutex.adapters.groww.client` (Phase 2) |
-| `BRUTEX_GROWW_STEP_DOWN_WINDOW` | `60.0` | float (sec) | `brutex.adapters.groww.client` (Phase 2) |
-| `BRUTEX_GROWW_STEP_UP_CLEAN_WINDOW` | `300.0` | float (sec) | `brutex.adapters.groww.client` (Phase 2) |
-| `BRUTEX_GROWW_RECHECK_INTERVAL` | `3600.0` | float (sec) | `brutex.adapters.groww.client` (Phase 2) |
+| `BRUTEX_DHAN_ACCESS_TOKEN` | — (required for a live pull) | JWT access token from web.dhan.co (24h) | `brutex.adapters.dhan.auth` |
+| `BRUTEX_DHAN_CLIENT_ID` | — (required for a live pull) | numeric Dhan client id (`dhanClientId`) | `brutex.adapters.dhan.auth` |
 
-**Auth model:** TOTP flow (Groww Approach 2) — no daily approval click. See `docs/TRACK1_GROWW_ADAPTER.md §2` for the full lifecycle.
+**Auth model:** manual web-generated access token + client id (operator default,
+2026-05-31). Sent as the `access-token` (JWT, 24h) + `dhanClientId` headers. A
+TOTP alternative (`POST https://auth.dhan.co/app/generateAccessToken`) exists for
+unattended renewal. See CLAUDE.md §6 (verified Dhan facts) + `docs/TRACK1_DHAN_ADAPTER.md`.
 
-**Adaptive rate limiter:** range [4..8] r/s with auto-tuning state machine. See `docs/TRACK1_GROWW_ADAPTER.md §5` for the full spec.
+**Adaptive rate limiter (live Dhan pull):** throttled by the **[3..5] r/s**
+adaptive token bucket in `brutex.adapters.dhan.rate_control` (starts at 5, steps
+5→4→3 on HTTP 429; cap = Dhan's 5 r/s Data-API limit, `constants.py:86`
+`DATA_RATE_LIMIT_RPS=5`, 100,000/day). These bounds are **code constants, not env vars.**
 
-**prior broker adapter wiped 2026-05-26 per DEC-VENDOR-PIVOT-001. The pre-wipe state is preserved at `git tag v-pre-groww-pivot`. Previously documented `BRUTEX_GROWW_*` env vars are gone — see MIGRATION.md entry #247.**
+**Honest envelope (Golden Rule #10):** the pre-revert
+`brutex.orchestrator.adaptive_rate_limiter` ([4..8] r/s) still reads the legacy
+`BRUTEX_GROWW_MIN_RPS` / `_MAX_RPS` / `_INITIAL_RPS` / `_STEP_DOWN_HITS` /
+`_STEP_DOWN_WINDOW` / `_STEP_UP_CLEAN_WINDOW` / `_RECHECK_INTERVAL` vars
+(`adaptive_rate_limiter.py:50-56`), and `brutex.wipe` reads
+`BRUTEX_GROWW_TOKEN_PATH` (`wipe.py:42`) — these are pre-Dhan residue **NOT on the
+live Dhan pull path** (which uses `rate_control` above). Retiring/renaming that
+module is a tracked follow-up (DEC-DHAN-DOC-RECONCILE-001). A live pull needs ONLY
+the two `BRUTEX_DHAN_*` vars above.
 
 ---
 
@@ -152,4 +162,5 @@ typos).
 * DEC-M4PRO-ABSOLUTE-001 (#236) — strict-bool decoder pattern
 * DEC-TELEGRAM-WIRING-001 (#238) — Telegram env-var layout
 * DEC-PORTS-001 — port config layout
-* DEC-VENDOR-PIVOT-001 — prior broker wipe + Groww adapter TOTP auth contract
+* DEC-GROWW-DHAN-REVERT-001 (ADR-0002) — live vendor reverted to Dhan; §5 Dhan auth contract
+* DEC-VENDOR-PIVOT-001 — prior broker wipe (historical; superseded by the Dhan revert)

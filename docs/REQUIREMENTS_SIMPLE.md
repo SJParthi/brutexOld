@@ -4,7 +4,7 @@
 > v1.0 spec, which was itself retired in `docs/REQUIREMENTS.md`.
 >
 > The legacy v1.0 scope (8 F&O indices + ~215 stocks via the prior
-> broker's API) no longer applies. Active scope is Groww + Indian spot
+> broker's API) no longer applies. Active scope is Dhan + Indian spot
 > indexes (NIFTY 50, BANKNIFTY, SENSEX) + India VIX (reference-only).
 >
 > Plain-English explainers for the current scope live inside the
