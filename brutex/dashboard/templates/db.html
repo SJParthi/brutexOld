@@ -166,7 +166,9 @@ let mode = "table";  /* "table" | "candles" */
 
 /* Per-table structured-query state (DEC-DB-QUERY-001). cols=null → all. */
 const qstate = {};  /* { table: {allCols:[], cols:Set|null, filters:[{c,op,v}], orderBy:"", desc:false} } */
-/* Candle-viewer state. */
+/* Candle-viewer state. `datasets` holds BOTH spot (kind="spot") and expired-
+   option (kind="option") datasets; the selected one's `kind` drives which API
+   + column set is used (DEC-DB-QUERY-001 / options-in-db-viewer). */
 const cstate = { datasets: [], key: null, start: "", end: "", cols: null, desc: false, offset: 0 };
 
 /* Friendly labels for the allowlisted query operators (mirrors
@@ -214,11 +216,13 @@ async function loadTables() {
         + '<span class="badge' + zero + '" data-count="' + (t.row_count || 0) + '">0</span>'
         + '</div>';
     }).join("");
-    /* Candle/OHLCV lake lives in Parquet (not a DuckDB table) — surface it as
-       its own browsable dataset (DEC-DB-QUERY-001). */
+    /* The candle/OHLCV lake (spot bars/ + expired-option options/) lives in
+       Parquet, not a DuckDB table — surface it as its own browsable dataset
+       (DEC-DB-QUERY-001 / options-in-db-viewer). The picker inside lists both
+       spot and option datasets, labelled. */
     const candleRow = '<div class="tbl" data-candles="1">'
       + '<span class="nm">📈 candles</span>'
-      + '<span class="badge" style="color:var(--purple);background:rgba(157,123,255,.13)">OHLCV</span>'
+      + '<span class="badge" style="color:var(--purple);background:rgba(157,123,255,.13)">spot + options</span>'
       + '</div>';
     tablesEl.innerHTML = '<h3>Tables</h3>' + tableRows
       + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow;
@@ -248,6 +252,9 @@ function markCandles() {
 }
 
 const CANDLE_COLS = ["timestamp", "open", "high", "low", "close", "volume", "open_interest"];
+/* Expired-option columns: OHLCV+OI PLUS the per-bar option stamps (mirrors
+   db_view.OPTION_CANDLE_COLUMNS — the backend re-validates). */
+const OPTION_COLS = ["timestamp", "open", "high", "low", "close", "volume", "open_interest", "side", "strike", "spot", "iv"];
 
 /* Shared grid + Prev/Next pager HTML (used by both table + candle views).
    The pager buttons get ids dbprev/dbnext; each view wires its own offset. */
@@ -380,8 +387,16 @@ function renderTableView(name, body, err) {
 }
 
 /* ── Candle mode (Parquet lake via read_parquet) ── */
-function dsKey(d) { return [d.exchange, d.segment, d.symbol, d.interval].join("|"); }
+/* A dataset key is "kind:coords" so spot (bars/) and option (options/) sets
+   never alias. Spot coords are exchange|segment|symbol|interval; option coord
+   is the on-disk series segment. */
+function dsKey(d) {
+  if (d.kind === "option") return "option:" + d.series;
+  return "spot:" + [d.exchange, d.segment, d.symbol, d.interval].join("|");
+}
 function curDataset() { return cstate.datasets.find(d => dsKey(d) === cstate.key) || null; }
+/* Columns available for the currently-selected dataset (option vs spot). */
+function curCols() { const d = curDataset(); return d && d.kind === "option" ? OPTION_COLS : CANDLE_COLS; }
 
 async function selectCandles() {
   mode = "candles";
@@ -391,7 +406,10 @@ async function selectCandles() {
   try {
     const r = await fetch("/api/v1/db/candles/datasets");
     const body = await r.json();
-    cstate.datasets = body.datasets || [];
+    /* Merge spot + option datasets into one list, each tagged with its kind. */
+    const spots = (body.datasets || []).map(d => ({ kind: "spot", ...d }));
+    const opts = (body.options || []).map(d => ({ kind: "option", ...d }));
+    cstate.datasets = spots.concat(opts);
     cstate.offset = 0;
     if (!curDataset() && cstate.datasets.length) cstate.key = dsKey(cstate.datasets[0]);
     if (cstate.datasets.length) runCandleQuery();
@@ -404,10 +422,15 @@ async function selectCandles() {
 function buildCandleUrl() {
   const d = curDataset();
   if (!d) return null;
-  let u = "/api/v1/db/candles?exchange=" + encodeURIComponent(d.exchange)
-    + "&segment=" + encodeURIComponent(d.segment) + "&symbol=" + encodeURIComponent(d.symbol)
-    + "&interval=" + encodeURIComponent(d.interval)
-    + "&limit=" + encodeURIComponent(limitSel.value) + "&offset=" + encodeURIComponent(cstate.offset)
+  let u;
+  if (d.kind === "option") {
+    u = "/api/v1/db/options?series=" + encodeURIComponent(d.series);
+  } else {
+    u = "/api/v1/db/candles?exchange=" + encodeURIComponent(d.exchange)
+      + "&segment=" + encodeURIComponent(d.segment) + "&symbol=" + encodeURIComponent(d.symbol)
+      + "&interval=" + encodeURIComponent(d.interval);
+  }
+  u += "&limit=" + encodeURIComponent(limitSel.value) + "&offset=" + encodeURIComponent(cstate.offset)
     + "&desc=" + (cstate.desc ? "true" : "false");
   if (cstate.start) u += "&start=" + encodeURIComponent(cstate.start);
   if (cstate.end) u += "&end=" + encodeURIComponent(cstate.end);
@@ -432,10 +455,13 @@ async function runCandleQuery() {
 function candleControlsHtml() {
   const dsOpts = cstate.datasets.map(d => {
     const k = dsKey(d);
+    const label = d.kind === "option"
+      ? "[option] " + d.series + "·" + d.interval
+      : "[spot] " + d.exchange + "·" + d.segment + "·" + d.symbol + "·" + d.interval;
     return '<option value="' + esc(k) + '"' + (k === cstate.key ? " selected" : "") + '>'
-      + esc(d.exchange + "·" + d.segment + "·" + d.symbol + "·" + d.interval) + '</option>';
+      + esc(label) + '</option>';
   }).join("");
-  const colChecks = CANDLE_COLS.map(c => {
+  const colChecks = curCols().map(c => {
     const on = cstate.cols === null || cstate.cols.has(c);
     return '<label><input type="checkbox" class="ccol" value="' + c + '"' + (on ? " checked" : "") + '>' + c + '</label>';
   }).join("");
@@ -451,19 +477,28 @@ function candleControlsHtml() {
 }
 
 function readCandleControls() {
-  const ds = document.getElementById("cds"); if (ds) cstate.key = ds.value;
+  const ds = document.getElementById("cds");
+  /* On a dataset switch the on-page column checkboxes still reflect the OLD
+     dataset's columns, so reset the projection to "all" and skip reading them
+     (the next render rebuilds the checkboxes for the new dataset's columns). */
+  const switched = ds && ds.value !== cstate.key;
+  if (ds) cstate.key = ds.value;
   const s = document.getElementById("cstart"); cstate.start = s ? s.value : "";
   const e = document.getElementById("cend"); cstate.end = e ? e.value : "";
-  const checked = Array.from(document.querySelectorAll(".ccol:checked")).map(c => c.value);
-  cstate.cols = checked.length === 0 || checked.length === CANDLE_COLS.length ? null : new Set(checked);
   const dir = document.getElementById("cdir"); cstate.desc = dir ? dir.value === "desc" : false;
+  if (switched) { cstate.cols = null; return; }
+  const all = curCols().length;
+  const checked = Array.from(document.querySelectorAll(".ccol:checked")).map(c => c.value);
+  cstate.cols = checked.length === 0 || checked.length === all ? null : new Set(checked);
 }
 
 function renderCandleView(body, err) {
   const d = curDataset();
   const sub = body ? (Number(body.total || 0).toLocaleString() + " bars match") : "";
-  const title = d ? esc(d.symbol + " · " + d.interval) : "candles";
-  const head = '<div class="datahead"><span class="dt">📈 ' + title + '</span><span class="sub">' + sub + '</span></div>';
+  let title = "candles", icon = "📈";
+  if (d && d.kind === "option") { title = esc(d.series + " · " + d.interval); icon = "🅾"; }
+  else if (d) { title = esc(d.symbol + " · " + d.interval); }
+  const head = '<div class="datahead"><span class="dt">' + icon + ' ' + title + '</span><span class="sub">' + sub + '</span></div>';
   const grid = err
     ? '<div class="empty qerr">' + esc(err) + '</div>'
     : gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100));

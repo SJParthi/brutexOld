@@ -19,18 +19,22 @@ import pytest
 from brutex.dashboard.db_view import (
     ALLOWED_OPERATORS,
     CANDLE_COLUMNS,
+    OPTION_CANDLE_COLUMNS,
     _format_candle_timestamp,
     _quote_ident,
     list_candle_datasets,
     list_columns,
+    list_option_datasets,
     query_candles,
+    query_option_candles,
     query_table,
 )
 from brutex.data.instrument_store import Instrument, InstrumentStore
+from brutex.data.option_parquet_writer import OptionParquetWriter
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.models import Exchange, InstrumentType, Segment
 
-from brutex.data.models import CandleBar  # isort: skip  (kept near other data imports)
+from brutex.data.models import CandleBar, OptionBar  # isort: skip  (kept near other data imports)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -100,6 +104,42 @@ def _write_candles(lake_root: Path, symbol: str = "NSE-NIFTY", interval: str = "
         bars=[
             _bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4"),
             _bar(datetime(2024, 3, 2, 9, 15, tzinfo=UTC), "100.8"),
+        ],
+    )
+
+
+#: The filesystem-safe series segment the writer derives from this PK
+#: (``|`` → ``__``). Used by the option-dataset + option-query tests.
+_OPT_PK = "NSE_FNO|13|WEEK|0|ATM|CALL"
+_OPT_SERIES = "NSE_FNO__13__WEEK__0__ATM__CALL"
+
+
+def _obar(ts: datetime, side: str, close: str, *, iv: str = "0.1523") -> OptionBar:
+    """One expired-option bar (full-precision iv, 2dp money like the writer)."""
+    return OptionBar(
+        timestamp=ts,
+        open=Decimal("100.005"),
+        high=Decimal("110.10"),
+        low=Decimal("90.00"),
+        close=Decimal(close),
+        volume=250,
+        open_interest=1200,
+        side=side,
+        strike=Decimal("17500.005"),
+        spot=Decimal("17480.567"),
+        iv=Decimal(iv),
+    )
+
+
+def _write_options(lake_root: Path, partition_key: str = _OPT_PK) -> None:
+    """Write a CE+PE option pair across two trading days via the real writer."""
+    OptionParquetWriter(lake_root=lake_root).write(
+        partition_key=partition_key,
+        bars=[
+            _obar(datetime(2024, 3, 1, 4, 0, tzinfo=UTC), "CE", "105.004"),
+            _obar(datetime(2024, 3, 1, 4, 0, tzinfo=UTC), "PE", "95.5"),
+            _obar(datetime(2024, 3, 2, 4, 0, tzinfo=UTC), "CE", "106.2"),
+            _obar(datetime(2024, 3, 2, 4, 0, tzinfo=UTC), "PE", "96.1"),
         ],
     )
 
@@ -336,7 +376,13 @@ def test_list_candle_datasets_skips_foreign_and_empty_dirs(tmp_path: Path) -> No
     (bars / "NSE" / "CASH" / "EMPTY" / "1minute").mkdir(parents=True)
     found = list_candle_datasets(tmp_path)
     assert found == [
-        {"exchange": "NSE", "segment": "CASH", "symbol": "NSE-NIFTY", "interval": "1minute"}
+        {
+            "kind": "spot",
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+        }
     ]
 
 
@@ -671,6 +717,253 @@ def test_query_table_contains_escapes_percent_wildcard(store: InstrumentStore) -
         limit=50,
     )
     assert out["total"] == 0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# list_option_datasets — the expired-options lake (options-in-db-viewer)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_list_option_datasets_missing_options_dir(tmp_path: Path) -> None:
+    assert list_option_datasets(tmp_path) == []
+
+
+def test_list_option_datasets_finds_written_series(tmp_path: Path) -> None:
+    _write_options(tmp_path)
+    _write_options(tmp_path, partition_key="NSE_FNO|99|MONTH|1|ATM_P1|PUT")
+    found = list_option_datasets(tmp_path)
+    assert {d["series"] for d in found} == {
+        _OPT_SERIES,
+        "NSE_FNO__99__MONTH__1__ATM_P1__PUT",
+    }
+    # every entry is tagged kind=option + the rolled 1-minute interval.
+    assert all(d["kind"] == "option" and d["interval"] == "1minute" for d in found)
+
+
+def test_list_option_datasets_skips_foreign_and_empty_dirs(tmp_path: Path) -> None:
+    options = tmp_path / "options"
+    # Valid series (written via the real writer).
+    _write_options(tmp_path)
+    # A series dir with NO parquet inside (skipped — empty).
+    (options / "NSE_FNO__1__WEEK__0__ATM__PUT").mkdir(parents=True)
+    # A traversal-shaped dir name (skipped — fails the safe-segment grammar).
+    (options / "..evil").mkdir(parents=True)
+    # A separator-shaped dir name (skipped).
+    (options / "bad series!").mkdir(parents=True)
+    found = list_option_datasets(tmp_path)
+    assert found == [{"kind": "option", "series": _OPT_SERIES, "interval": "1minute"}]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# query_option_candles — read the expired-options lake
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_query_option_candles_returns_all_rows(store: InstrumentStore, tmp_path: Path) -> None:
+    _write_options(tmp_path)
+    out = query_option_candles(store.connection, tmp_path, series=_OPT_SERIES, limit=50)
+    assert out["total"] == 4  # CE+PE across two days
+    assert out["columns"] == list(OPTION_CANDLE_COLUMNS)
+    assert out["series"] == _OPT_SERIES
+    assert out["interval"] == "1minute"
+
+
+def test_query_option_candles_surfaces_option_columns(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    _write_options(tmp_path)
+    out = query_option_candles(store.connection, tmp_path, series=_OPT_SERIES, limit=50)
+    # the option-specific stamps are present in the projected columns.
+    for extra in ("side", "strike", "spot", "iv"):
+        assert extra in out["columns"]
+    side_idx = out["columns"].index("side")
+    assert {str(r[side_idx]) for r in out["rows"]} == {"CE", "PE"}
+
+
+def test_query_option_candles_iv_full_precision(store: InstrumentStore, tmp_path: Path) -> None:
+    # iv is NOT money (mirrors option_parquet_writer): it must keep full
+    # precision, NOT be 2dp-rounded like the price columns.
+    OptionParquetWriter(lake_root=tmp_path).write(
+        partition_key=_OPT_PK,
+        bars=[_obar(datetime(2024, 3, 1, 4, 0, tzinfo=UTC), "CE", "105.004", iv="0.123456")],
+    )
+    out = query_option_candles(
+        store.connection,
+        tmp_path,
+        series=_OPT_SERIES,
+        columns=("iv",),
+        limit=50,
+    )
+    assert out["columns"] == ["iv"]
+    # float round-trip of 0.123456 — well beyond 2dp, so rounding would corrupt.
+    assert out["rows"] == [[pytest.approx(0.123456)]]
+
+
+def test_query_option_candles_column_subset(store: InstrumentStore, tmp_path: Path) -> None:
+    _write_options(tmp_path)
+    out = query_option_candles(
+        store.connection,
+        tmp_path,
+        series=_OPT_SERIES,
+        columns=("timestamp", "side", "strike"),
+        limit=50,
+    )
+    assert out["columns"] == ["timestamp", "side", "strike"]
+    assert all(len(r) == 3 for r in out["rows"])
+
+
+def test_query_option_candles_empty_columns_tuple_raises(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    _write_options(tmp_path)
+    with pytest.raises(ValueError, match="at least one column"):
+        query_option_candles(store.connection, tmp_path, series=_OPT_SERIES, columns=(), limit=50)
+
+
+def test_query_option_candles_unknown_column_raises(store: InstrumentStore, tmp_path: Path) -> None:
+    _write_options(tmp_path)
+    with pytest.raises(ValueError, match="unknown column"):
+        query_option_candles(
+            store.connection, tmp_path, series=_OPT_SERIES, columns=("delta",), limit=50
+        )
+
+
+def test_query_option_candles_date_range_end_inclusive(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    _write_options(tmp_path)
+    out = query_option_candles(
+        store.connection,
+        tmp_path,
+        series=_OPT_SERIES,
+        start="2024-03-02",
+        end="2024-03-02",
+        limit=50,
+    )
+    assert out["total"] == 2  # only the 2nd-day CE+PE
+
+
+def test_query_option_candles_start_only(store: InstrumentStore, tmp_path: Path) -> None:
+    _write_options(tmp_path)
+    out = query_option_candles(
+        store.connection, tmp_path, series=_OPT_SERIES, start="2024-03-02", limit=50
+    )
+    assert out["total"] == 2
+
+
+def test_query_option_candles_timestamp_clean_ist_no_offset(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # 04:00 UTC → 09:30 IST; clean wall-clock, no +05:30 / T separator.
+    _write_options(tmp_path)
+    out = query_option_candles(
+        store.connection, tmp_path, series=_OPT_SERIES, columns=("timestamp",), limit=50
+    )
+    stamps = sorted(str(r[0]) for r in out["rows"])
+    assert stamps == [
+        "2024-03-01 09:30:00",
+        "2024-03-01 09:30:00",
+        "2024-03-02 09:30:00",
+        "2024-03-02 09:30:00",
+    ]
+    assert all("+" not in s and "T" not in s for s in stamps)
+
+
+def test_query_option_candles_descending(store: InstrumentStore, tmp_path: Path) -> None:
+    _write_options(tmp_path)
+    out = query_option_candles(
+        store.connection,
+        tmp_path,
+        series=_OPT_SERIES,
+        columns=("timestamp",),
+        descending=True,
+        limit=50,
+    )
+    stamps = [r[0] for r in out["rows"]]
+    assert stamps == sorted(stamps, reverse=True)
+
+
+def test_query_option_candles_empty_series_returns_empty_page(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # No parquet written for this series → empty page, never raises.
+    out = query_option_candles(
+        store.connection,
+        tmp_path,
+        series="NSE_FNO__1__WEEK__0__ATM__CALL",
+        columns=("timestamp", "iv"),
+        limit=50,
+    )
+    assert out["total"] == 0
+    assert out["rows"] == []
+    assert out["columns"] == ["timestamp", "iv"]
+
+
+def test_query_option_candles_empty_series_default_columns(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    out = query_option_candles(
+        store.connection, tmp_path, series="NSE_FNO__1__WEEK__0__ATM__CALL", limit=50
+    )
+    assert out["columns"] == list(OPTION_CANDLE_COLUMNS)
+
+
+@pytest.mark.parametrize("bad", ["../etc/passwd", "bad series!", "has/slash", "..", "NSE_FNO|raw"])
+def test_query_option_candles_illegal_series_raises(
+    store: InstrumentStore, tmp_path: Path, bad: str
+) -> None:
+    with pytest.raises(ValueError, match="illegal option series"):
+        query_option_candles(store.connection, tmp_path, series=bad, limit=50)
+
+
+@pytest.mark.parametrize("field", ["start", "end"])
+def test_query_option_candles_malformed_date_raises(
+    store: InstrumentStore, tmp_path: Path, field: str
+) -> None:
+    _write_options(tmp_path)
+    kwargs = {"start": None, "end": None} | {field: "2024/03/01"}
+    with pytest.raises(ValueError, match=f"{field} must be ISO"):
+        query_option_candles(
+            store.connection,
+            tmp_path,
+            series=_OPT_SERIES,
+            limit=50,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+
+def test_query_option_candles_paging_clamps(store: InstrumentStore, tmp_path: Path) -> None:
+    _write_options(tmp_path)
+    out = query_option_candles(
+        store.connection,
+        tmp_path,
+        series=_OPT_SERIES,
+        limit=10**9,
+        offset=-3,
+    )
+    assert out["limit"] == 500
+    assert out["offset"] == 0
+
+
+def test_query_option_candles_date_bound_is_utc_not_session_tz(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # A bar at 23:30 UTC on 2024-03-02 is on the 2nd in UTC but the 3rd in IST.
+    # The UTC-anchored bound must INCLUDE it regardless of session TimeZone.
+    OptionParquetWriter(lake_root=tmp_path).write(
+        partition_key=_OPT_PK,
+        bars=[_obar(datetime(2024, 3, 2, 23, 30, tzinfo=UTC), "CE", "105.0")],
+    )
+    store.connection.execute("SET TimeZone='Asia/Kolkata'")
+    out = query_option_candles(
+        store.connection,
+        tmp_path,
+        series=_OPT_SERIES,
+        start="2024-03-02",
+        end="2024-03-02",
+        limit=50,
+    )
+    assert out["total"] == 1
 
 
 # ────────────────────────────────────────────────────────────────────────
