@@ -357,6 +357,15 @@ jobs:
           else
             echo "(brutex.indicators.fib_levels test file not present yet — gate inactive)"
           fi
+          # DEC-COVERAGE-DRIVER-001 (2026-06-02): brutex.execution.driver
+          # un-omitted at 100% line+branch. Reaching 100% needs BOTH the
+          # edge-case unit tests (guard/error branches via light fakes) AND
+          # the integration test (happy-path run() over a real lake).
+          if compgen -G "tests/unit/test_execution_driver_edges.py" > /dev/null; then
+            pytest --cov=brutex.execution.driver --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_driver_edges.py tests/integration/test_execution_driver.py
+          else
+            echo "(brutex.execution.driver edge test file not present yet — gate inactive)"
+          fi
           # DEC-COV-001 step 11 (entry #221): 3-module batch
           # following step 6's triple-add precedent (3 errors modules).
           # All 3 modules already at 100% line+branch in their existing
