@@ -175,13 +175,14 @@ jobs:
         run: pip install ./rust/fno-math
       - name: pytest with coverage gate
         run: |
-          # Coverage floor is 90% for P1. The [tool.coverage.run].omit
-          # list is now just the CLI layer (cli.py / __main__.py, pending a
-          # CLI snapshot harness) + data/instrument_store.py (~87%, dedicated
-          # harness is the next follow-up). data/catalog.py was un-omitted at
-          # 100% (DEC-COVERAGE-CATALOG-001); dashboard / parquet_writer / sink
-          # were un-omitted in DEC-DASHBOARD-OMIT-AUDIT-001 (#377). The floor
-          # is progressively raised to 100% as the remaining gaps get tests.
+          # Coverage floor is 90% for P1. The [tool.coverage.run].omit list
+          # is now JUST the CLI layer (cli.py / __main__.py, pending a CLI
+          # snapshot harness). All three former below-floor modules are
+          # un-omitted at 100% + per-module-gated: execution/driver
+          # (DEC-COVERAGE-DRIVER-001), data/catalog (DEC-COVERAGE-CATALOG-001),
+          # data/instrument_store (DEC-COVERAGE-INSTRUMENT-STORE-001);
+          # dashboard / parquet_writer / sink were un-omitted in #377.
+          # Aggregate ~97.9%; the floor rises to 100% as the CLI harness lands.
           pytest \
             --cov=brutex \
             --cov-branch \
@@ -377,6 +378,21 @@ jobs:
             pytest --cov=brutex.data.catalog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_data_lake_real.py tests/integration/test_catalog.py
           else
             echo "(brutex.data.catalog edge test file not present yet — gate inactive)"
+          fi
+          # DEC-COVERAGE-INSTRUMENT-STORE-001: brutex.data.instrument_store
+          # un-omitted at 100% line+branch. Reaching 100% needs BOTH the
+          # main DuckDB round-trip suite (test_instrument_store.py — open /
+          # upsert / dedup / temporal / snapshot / coverage-ledger) AND the
+          # edge/guard suite (test_instrument_store_edges.py — InstrumentRun
+          # validation, the _LockedReadConn whitebox read view, open() missing
+          # -duckdb ImportError, custom in_scope_of + empty-batch + ROLLBACK
+          # upsert paths, the Track-2-shaped Phase B/C expiries+contracts
+          # writers/readers, fno_eligible_underlyings UNION arms, list_*
+          # filtered scans, raw-hash-mismatch integrity + assert_clean).
+          if compgen -G "tests/integration/test_instrument_store_edges.py" > /dev/null; then
+            pytest --cov=brutex.data.instrument_store --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_instrument_store.py tests/integration/test_instrument_store_edges.py
+          else
+            echo "(brutex.data.instrument_store edge test file not present yet — gate inactive)"
           fi
           # DEC-COV-001 step 11 (entry #221): 3-module batch
           # following step 6's triple-add precedent (3 errors modules).
