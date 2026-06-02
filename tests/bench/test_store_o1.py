@@ -1,7 +1,8 @@
 """O(1) benchmarks for WorkItemStore lookup + dedup probe.
 
-Enforces ``NFR-PERF-002`` (work-item lookup) and ``NFR-PERF-003``
-(combo dedup) from ``docs/REQUIREMENTS.md §5.1``.
+Enforces the work-item-lookup + combo-dedup O(1) NFR from
+``docs/TRACK1_PERFORMANCE_BUDGET.md`` + ``docs/STANDARDS_100PCT.md`` §1 row 13
+(the prior ``docs/REQUIREMENTS.md`` reference is a retired stub — CLAUDE.md §5).
 
 The guarantee we want to prove: the latency of ``store.get`` and
 ``store.exists_terminal`` is **independent of the number of items
@@ -15,7 +16,9 @@ LMDB is a B+tree so strictly speaking lookup is O(log n). But with
 a dense working set the tree fits in a small number of pages and
 the cost becomes dominated by the hash prefix comparison, which is
 O(1) per lookup. We enforce this empirically: **lookup latency at
-10k items must not exceed 3× the lookup latency at 1k items**.
+10k items must not exceed the CI ratio ceiling vs 1k items** — `5×` on
+the shared GHA runner, tightened to the strict `1.1×` M4-Pro tier via
+`tests/bench/_o1_tiers.py::ratio_ceiling` (DEC-O1-STRICT-TIER-001).
 
 If a regression makes the store behave linearly (e.g., accidentally
 introducing a scan), the ratio blows up and this test fails.
@@ -130,12 +133,13 @@ class TestGetIsO1:
         assert result is not None
         assert result.state == WorkItemState.SUCCESS
 
-    def test_get_ratio_below_3x(self, tmp_path: Path) -> None:
-        """Empirical latency ratio at 10k / 1k must be < 3×.
+    def test_get_ratio_below_ceiling(self, tmp_path: Path) -> None:
+        """Empirical latency ratio at 10k / 1k must be < the CI ceiling.
 
-        Any accidental linear scan would blow the ratio past that
-        bound and fail this test. This is the explicit NFR-PERF-002
-        enforcement gate.
+        The ceiling is `ratio_ceiling(5.0)` — 5× on the shared GHA runner,
+        tightened to the strict 1.1× M4-Pro tier (DEC-O1-STRICT-TIER-001).
+        Any accidental linear scan would blow the ratio past that bound and
+        fail this test — the explicit O(1) work-item-lookup enforcement gate.
         """
         import time
 
@@ -160,10 +164,10 @@ class TestGetIsO1:
         ratio = t_10k / max(t_1k, 1.0)
 
         # O(1) in practice: B+tree depth barely grows, ratio should be
-        # well under 3×. Leave some headroom for CI jitter.
+        # well under the ceiling. Leave headroom for CI jitter.
         assert ratio < ratio_ceiling(5.0), (
-            f"lookup latency ratio {ratio:.2f}× (10k vs 1k) exceeds "
-            f"3× — store.get may have regressed to a linear scan. "
+            f"lookup latency ratio {ratio:.2f}× (10k vs 1k) exceeds the "
+            f"5× CI ceiling — store.get may have regressed to a linear scan. "
             f"t_1k={t_1k:.0f}ns, t_10k={t_10k:.0f}ns."
         )
 
@@ -174,9 +178,9 @@ class TestGetIsO1:
 
 
 class TestExistsTerminalIsO1:
-    """The adapter calls ``exists_terminal`` before every Groww API call.
+    """The adapter calls ``exists_terminal`` before every Dhan API call.
     It must be as fast as ``get`` on the hot path, since it's the
-    gate that saves the Groww API budget.
+    gate that saves the Dhan API budget.
     """
 
     def test_exists_terminal_at_1k(self, benchmark, store_1k) -> None:
@@ -230,8 +234,8 @@ class TestPutManyBatchIsLinear:
             benchmark(_bulk_insert)
 
     def test_put_many_per_item_cost_stable(self, tmp_path: Path) -> None:
-        """Per-item write cost at batch=1000 should be within 3× of
-        batch=100. Verifies no quadratic behaviour inside put_many.
+        """Per-item write cost at batch=1000 should be within the CI ceiling
+        (5×) of batch=100. Verifies no quadratic behaviour inside put_many.
         """
         import time
 
@@ -248,6 +252,6 @@ class TestPutManyBatchIsLinear:
         per_item_1000 = _measure(1_000)
         ratio = per_item_1000 / max(per_item_100, 1.0)
         assert ratio < ratio_ceiling(5.0), (
-            f"put_many per-item cost ratio {ratio:.2f}× exceeds 3× — "
+            f"put_many per-item cost ratio {ratio:.2f}× exceeds the 5× CI ceiling — "
             f"batch write may have a quadratic regression."
         )
