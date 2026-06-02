@@ -20,6 +20,7 @@ network, no GitHub API — and assert the wiring is present.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -28,7 +29,7 @@ CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 AUTO_MERGE_YML = REPO_ROOT / ".github" / "workflows" / "auto-merge.yml"
 
 
-def _load_jobs(path: Path) -> dict[str, object]:
+def _load_jobs(path: Path) -> dict[str, Any]:
     """Return the ``jobs:`` mapping of a workflow YAML file."""
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     jobs = data["jobs"]
