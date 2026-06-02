@@ -66,6 +66,7 @@ from brutex.data.coverage_ledger import CoverageRecord
 from brutex.data.errors import CatalogError
 from brutex.data.instrument_store import (
     _INSTR_COLUMNS,
+    SCHEMA_VERSION,
     ContractRecord,
     ExpiryRecord,
     InstrumentRun,
@@ -96,50 +97,44 @@ def _csv_hash(tag: str = "fixture") -> str:
 def _idx(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
     """Build a minimal valid IDX instrument (NULL underlying)."""
     return Instrument(
-        exchange=exchange,
-        exchange_token=zlib.crc32(symbol.encode()) & 0x7FFFFFFF,
-        trading_symbol=symbol,
-        vendor_symbol=f"{exchange}-{symbol}",
-        name=f"{symbol} 50",
-        instrument_type=InstrumentType.IDX,
+        exch_id=exchange,
+        security_id=zlib.crc32(symbol.encode()) & 0x7FFFFFFF,
+        symbol_name=symbol,
+        display_name=f"{symbol} 50",
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
 def _eq(symbol: str, *, exchange: Exchange = Exchange.NSE, lot_size: int = 500) -> Instrument:
     """Build a minimal valid cash-equity (EQ) instrument."""
     return Instrument(
-        exchange=exchange,
-        exchange_token=zlib.crc32(f"EQ-{symbol}".encode()) & 0x7FFFFFFF,
-        trading_symbol=symbol,
-        vendor_symbol=f"{exchange}-{symbol}",
-        name=f"{symbol} Ltd",
-        instrument_type=InstrumentType.EQ,
+        exch_id=exchange,
+        security_id=zlib.crc32(f"EQ-{symbol}".encode()) & 0x7FFFFFFF,
+        symbol_name=symbol,
+        display_name=f"{symbol} Ltd",
+        instrument=InstrumentType.EQ,
         segment=Segment.CASH,
         series="EQ",
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=lot_size,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -155,25 +150,22 @@ def _option(
     """Build a minimal valid option leg (CE/PE) on *underlying*."""
     tag = f"{exchange}-{underlying}-{expiry.strftime('%d%b%y')}-{strike}-{side.value}"
     return Instrument(
-        exchange=exchange,
-        exchange_token=zlib.crc32(tag.encode()) & 0x7FFFFFFF,
-        trading_symbol=tag.replace(f"{exchange}-", ""),
-        vendor_symbol=tag,
-        name=f"{underlying} {strike}",
-        instrument_type=side,
+        exch_id=exchange,
+        security_id=zlib.crc32(tag.encode()) & 0x7FFFFFFF,
+        symbol_name=tag.replace(f"{exchange}-", ""),
+        display_name=f"{underlying} {strike}",
+        instrument=side,
         segment=Segment.FNO,
         series=None,
         isin=None,
         underlying_symbol=underlying,
-        underlying_exchange_token=26000,
+        underlying_security_id=26000,
         lot_size=lot_size,
         tick_size=Decimal("0.05"),
-        freeze_quantity=1800,
-        expiry_date=expiry,
+        sm_freeze_qty=1800,
+        sm_expiry_date=expiry,
         strike_price=Decimal(str(strike)),
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -187,25 +179,22 @@ def _future(
     """Build a minimal valid futures leg (FUT) on *underlying*."""
     tag = f"{exchange}-{underlying}-{expiry.strftime('%d%b%y')}-FUT"
     return Instrument(
-        exchange=exchange,
-        exchange_token=zlib.crc32(tag.encode()) & 0x7FFFFFFF,
-        trading_symbol=tag.replace(f"{exchange}-", ""),
-        vendor_symbol=tag,
-        name=f"{underlying} FUT",
-        instrument_type=InstrumentType.FUT,
+        exch_id=exchange,
+        security_id=zlib.crc32(tag.encode()) & 0x7FFFFFFF,
+        symbol_name=tag.replace(f"{exchange}-", ""),
+        display_name=f"{underlying} FUT",
+        instrument=InstrumentType.FUT,
         segment=Segment.FNO,
         series=None,
         isin=None,
         underlying_symbol=underlying,
-        underlying_exchange_token=26000,
+        underlying_security_id=26000,
         lot_size=lot_size,
         tick_size=Decimal("0.05"),
-        freeze_quantity=1800,
-        expiry_date=expiry,
+        sm_freeze_qty=1800,
+        sm_expiry_date=expiry,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -279,10 +268,10 @@ class TestSnapshotReadSurface:
         snap = InstrumentSnapshot([ce, pe, idx], snapshot_date=date(2025, 5, 29))
 
         legs = snap.by_underlying("NIFTY")
-        assert {i.vendor_symbol for i in legs} == {ce.vendor_symbol, pe.vendor_symbol}
+        assert {i.symbol_name for i in legs} == {ce.symbol_name, pe.symbol_name}
         assert snap.underlyings() == ("NIFTY",)
         # IDX (no underlying) is absent from by_underlying but present overall.
-        assert idx.vendor_symbol in {i.vendor_symbol for i in snap}
+        assert idx.symbol_name in {i.symbol_name for i in snap}
 
     def test_snapshot_date_property_echoes_constructor_arg(self) -> None:
         """``snapshot_date`` returns the as-of the snapshot was built for (577)."""
@@ -295,22 +284,22 @@ class TestSnapshotReadSurface:
         """Membership / iteration / sizing surface (585, 593) over a real set."""
         a, b = _idx("NIFTY"), _idx("BANKNIFTY")
         snap = InstrumentSnapshot([a, b])
-        assert a.vendor_symbol in snap  # __contains__ (585)
+        assert a.symbol_name in snap  # __contains__ (585)
         assert "NOPE" not in snap
         assert len(snap) == 2
-        assert {i.vendor_symbol for i in snap} == {
-            a.vendor_symbol,
-            b.vendor_symbol,
+        assert {i.symbol_name for i in snap} == {
+            a.symbol_name,
+            b.symbol_name,
         }  # __iter__ (593)
-        assert set(snap.symbols()) == {a.vendor_symbol, b.vendor_symbol}
+        assert set(snap.symbols()) == {a.symbol_name, b.symbol_name}
 
     def test_meta_lookup_present_and_missing(self) -> None:
         """``meta()`` returns the InstrumentMeta for a known symbol, ``None`` else (613)."""
         idx = _idx("NIFTY")
         snap = InstrumentSnapshot([idx])
-        meta = snap.meta(idx.vendor_symbol)
+        meta = snap.meta(idx.symbol_name)
         assert meta is not None
-        assert meta.symbol == idx.vendor_symbol
+        assert meta.symbol == idx.symbol_name
         assert meta.lot_size == 1
         assert snap.meta("NOPE") is None
 
@@ -381,11 +370,11 @@ class TestLockedReadConnection:
                 csv_source_sha256=_csv_hash(),
             )
             conn = s.connection
-            cursor = conn.execute("SELECT vendor_symbol FROM instruments ORDER BY vendor_symbol")
+            cursor = conn.execute("SELECT symbol_name FROM instruments ORDER BY symbol_name")
             cols = [c[0] for c in cursor.description]
-            assert cols == ["vendor_symbol"]
+            assert cols == ["symbol_name"]
             rows = cursor.fetchall()
-            assert [r[0] for r in rows] == ["NSE-BANKNIFTY", "NSE-NIFTY"]
+            assert [r[0] for r in rows] == ["BANKNIFTY", "NIFTY"]
 
     def test_execute_with_parameters(self, tmp_path: Path) -> None:
         """The ``parameters is not None`` arm binds placeholders (737-741)."""
@@ -398,8 +387,8 @@ class TestLockedReadConnection:
             )
             conn = s.connection
             row = conn.execute(
-                "SELECT COUNT(*) FROM instruments WHERE vendor_symbol = ?",
-                ["NSE-NIFTY"],
+                "SELECT COUNT(*) FROM instruments WHERE symbol_name = ?",
+                ["NIFTY"],
             ).fetchone()
             assert row[0] == 1
 
@@ -592,9 +581,9 @@ def _exp(
     exchange: str = "NSE",
 ) -> ExpiryRecord:
     return ExpiryRecord(
-        exchange=exchange,
+        exch_id=exchange,
         underlying_symbol=underlying,
-        expiry_date=expiry,
+        sm_expiry_date=expiry,
         snapshot_date=snapshot,
         pulled_year=expiry.year,
         fetched_at=datetime(snapshot.year, snapshot.month, snapshot.day, tzinfo=UTC),
@@ -635,7 +624,7 @@ class TestExpiriesWriterReader:
             assert s.count_expiries() == 1
             rows = s.list_expiries(underlying_symbol="NIFTY")
             assert len(rows) == 1
-            assert rows[0].expiry_date == date(2025, 5, 29)
+            assert rows[0].sm_expiry_date == date(2025, 5, 29)
             assert rows[0].pulled_year == 2025
 
     def test_list_expiries_unfiltered_and_as_of(self, tmp_path: Path) -> None:
@@ -720,15 +709,15 @@ def _contract(
     label = "FUT" if strike is None else f"{strike}-{side.value}"
     symbol = f"NSE-{underlying}-{expiry.strftime('%d%b%y')}-{label}"
     return ContractRecord(
-        exchange="NSE",
+        exch_id="NSE",
         underlying_symbol=underlying,
-        expiry_date=expiry,
-        contract_symbol=symbol,
+        sm_expiry_date=expiry,
+        symbol_name=symbol,
         snapshot_date=snapshot,
-        instrument_type=side,
+        instrument=side,
         strike_price=Decimal(str(strike)) if strike is not None else None,
         lot_size=25,
-        freeze_quantity=1800 if strike is not None else None,
+        sm_freeze_qty=1800 if strike is not None else None,
         tick_size=Decimal("0.05"),
         fetched_at=datetime(snapshot.year, snapshot.month, snapshot.day, tzinfo=UTC),
         run_id=run_id,
@@ -750,10 +739,10 @@ class TestContractsWriterReader:
             for _ in range(5):
                 assert s.upsert_contracts([c]) == 1
             assert s.count_contracts() == 1
-            rows = s.list_contracts(underlying_symbol="NIFTY", expiry_date=date(2025, 5, 29))
+            rows = s.list_contracts(underlying_symbol="NIFTY", sm_expiry_date=date(2025, 5, 29))
             assert len(rows) == 1
             assert rows[0].strike_price == Decimal("24000.0000")
-            assert rows[0].instrument_type == InstrumentType.CE
+            assert rows[0].instrument == InstrumentType.CE
 
     def test_fut_leg_roundtrips_with_null_strike(self, tmp_path: Path) -> None:
         """A FUT leg stores/reads ``strike_price=None`` + ``freeze=None`` (1372-1378 None arms)."""
@@ -768,8 +757,8 @@ class TestContractsWriterReader:
             rows = s.list_contracts()
             assert len(rows) == 1
             assert rows[0].strike_price is None
-            assert rows[0].freeze_quantity is None
-            assert rows[0].instrument_type == InstrumentType.FUT
+            assert rows[0].sm_freeze_qty is None
+            assert rows[0].instrument == InstrumentType.FUT
 
     def test_list_contracts_unfiltered_and_as_of(self, tmp_path: Path) -> None:
         """No-filter list returns all legs; ``as_of`` picks the latest snapshot (1324-1365)."""
@@ -887,7 +876,7 @@ class TestFilteredScans:
         with InstrumentStore.open(tmp_path / "db") as s:
             self._seed_fno(s)
             ce = s.list_in_scope(instrument_type=InstrumentType.CE, underlying_symbol="NIFTY")
-            assert [i.instrument_type for i in ce] == [InstrumentType.CE]
+            assert [i.instrument for i in ce] == [InstrumentType.CE]
 
     def test_list_in_scope_as_of_param(self, tmp_path: Path) -> None:
         """An ``as_of`` cutoff pushes the snapshot param into the query (1503-1504)."""
@@ -903,11 +892,11 @@ class TestFilteredScans:
         with InstrumentStore.open(tmp_path / "db") as s:
             self._seed_fno(s)
             futs = s.list_futures(underlying="NIFTY")
-            assert [i.instrument_type for i in futs] == [InstrumentType.FUT]
+            assert [i.instrument for i in futs] == [InstrumentType.FUT]
             opts = s.list_options(underlying="NIFTY")
             # CE+PE merged, sorted by vendor_symbol.
-            assert {i.instrument_type for i in opts} == {InstrumentType.CE, InstrumentType.PE}
-            assert [i.vendor_symbol for i in opts] == sorted(i.vendor_symbol for i in opts)
+            assert {i.instrument for i in opts} == {InstrumentType.CE, InstrumentType.PE}
+            assert [i.symbol_name for i in opts] == sorted(i.symbol_name for i in opts)
 
     def test_universe_as_of_delegates_to_list_in_scope(self, tmp_path: Path) -> None:
         """``universe_as_of`` returns the in-scope set as of a date (1744)."""
@@ -972,8 +961,8 @@ class TestIntegrityTampering:
             # Direct-SQL tamper: change a hashed field WITHOUT recomputing
             # raw_hash, exactly the corruption verify_integrity() guards.
             s.connection.execute(
-                "UPDATE instruments SET name = 'TAMPERED' WHERE vendor_symbol = ?",
-                ["NSE-NIFTY"],
+                "UPDATE instruments SET display_name = 'TAMPERED' WHERE symbol_name = ?",
+                ["NIFTY"],
             ).fetchall()
             report = s.verify_integrity()
             assert report.raw_hash_mismatches == 1
@@ -991,7 +980,7 @@ class TestCoverageLedgerSugar:
     def test_open_sugar_and_incomplete_listing(self, tmp_path: Path) -> None:
         """``open_instrument_store`` yields a live store; incomplete listing works."""
         rec = CoverageRecord(
-            exchange="NSE",
+            exch_id="NSE",
             underlying_symbol="NIFTY",
             year=2024,
             expiries_pulled=0,
@@ -1009,3 +998,37 @@ class TestCoverageLedgerSugar:
         # The sugar closed the store on block exit.
         with pytest.raises(CatalogError, match="closed"):
             captured.list_coverage()
+
+
+def test_open_migrates_older_schema_version_drops_renamed_tables(tmp_path: Path) -> None:
+    """An older on-disk ``SCHEMA_VERSION`` triggers the drop+recreate migration.
+
+    DEC-DHAN-NATIVE-SCHEMA-001: when the persisted ``schema_version`` is below
+    the current one, ``InstrumentStore.open`` drops the renamed tables (the
+    ``_DDL_DROP_RENAMED`` loop) before recreating them — they are 100%
+    re-derivable from the Dhan CSV. A row written under the old shape therefore
+    does NOT survive the upgrade. Pins the migration branch deterministically
+    (it was only incidentally covered via test-ordering before).
+    """
+    import duckdb
+
+    db = tmp_path / "instruments.duckdb"
+    # 1. Seed a store with one instrument at the current schema version.
+    with InstrumentStore.open(db) as store:
+        store.upsert_many(
+            [_idx("NIFTY")],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r1",
+            csv_source_sha256=_csv_hash(),
+        )
+        assert "NIFTY" in store.load_snapshot(in_scope_only=False)
+    # 2. Force the on-disk schema_version OLDER than the current one.
+    conn = duckdb.connect(str(db))
+    conn.execute(
+        "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+        [str(SCHEMA_VERSION - 1)],
+    )
+    conn.close()
+    # 3. Re-open → the migration drops the renamed tables → the old row is gone.
+    with InstrumentStore.open(db) as store:
+        assert "NIFTY" not in store.load_snapshot(in_scope_only=False)

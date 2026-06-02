@@ -194,7 +194,10 @@ def test_universe_selection_golden() -> None:
     report = select_universe_report(list(reader))
 
     # EXACT admitted universe (the golden lock): 3 indices + 3 stocks.
-    assert sorted(i.vendor_symbol for i in report.universe) == [
+    # ADR-0003 dropped ``vendor_symbol``; the exchange-prefixed global key is
+    # reconstructed from the new ``exch_id`` + ``symbol_name`` fields (identically
+    # equal to the old ``f"{exch}-{trading_symbol}"``).
+    assert sorted(f"{i.exch_id.value}-{i.symbol_name}" for i in report.universe) == [
         "BSE-SENSEX",
         "NSE-BANKNIFTY",
         "NSE-MOTHERSON",
@@ -203,14 +206,14 @@ def test_universe_selection_golden() -> None:
         "NSE-TCS",
     ]
 
-    by_sym = {i.vendor_symbol: i for i in report.universe}
+    by_sym = {f"{i.exch_id.value}-{i.symbol_name}": i for i in report.universe}
     # MOTHERSON collapses to the canonical spot (the derivative's underlying id).
-    assert by_sym["NSE-MOTHERSON"].exchange_token == 4204
+    assert by_sym["NSE-MOTHERSON"].security_id == 4204
     # Indices carry IDX type; stocks carry EQ.
-    assert by_sym["BSE-SENSEX"].instrument_type.value == "IDX"
-    assert by_sym["NSE-RELIANCE"].instrument_type.value == "EQ"
+    assert by_sym["BSE-SENSEX"].instrument.value == "IDX"
+    assert by_sym["NSE-RELIANCE"].instrument.value == "EQ"
     # Every global key is unique (no PRIMARY-KEY collision on upsert).
-    keys = [i.vendor_symbol for i in report.universe]
+    keys = [f"{i.exch_id.value}-{i.symbol_name}" for i in report.universe]
     assert len(keys) == len(set(keys))
     # MCX row filtered (out of scope); everything else is parsed.
     assert report.filtered == 1

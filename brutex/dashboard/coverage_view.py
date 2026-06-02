@@ -67,7 +67,7 @@ def build_coverage_rows(
         (ISO-8601 string or ``None``), and ``error`` (string or ``None``).
     """
     by_cell: dict[tuple[str, str, int], CoverageRecord] = {
-        (r.exchange, r.underlying_symbol, r.year): r for r in records
+        (r.exch_id, r.underlying_symbol, r.year): r for r in records
     }
 
     expected: set[tuple[str, str, int]] = set()
@@ -96,7 +96,7 @@ def build_coverage_rows(
         rows.append(
             {
                 "underlying": record.underlying_symbol,
-                "exchange": record.exchange,
+                "exchange": record.exch_id,
                 "year": record.year,
                 "status": record.status,
                 "expiries_pulled": record.expiries_pulled,

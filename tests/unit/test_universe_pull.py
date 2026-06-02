@@ -18,75 +18,66 @@ from brutex.models import Exchange, Instrument, InstrumentType, Segment
 def _index(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
     """An NSE/BSE spot index (IDX → classified ``index``)."""
     return Instrument(
-        exchange=exchange,
-        exchange_token=hash(symbol) % 100000,
-        trading_symbol=symbol,
-        vendor_symbol=f"{exchange.value}-{symbol}",
-        name=symbol,
-        instrument_type=InstrumentType.IDX,
+        exch_id=exchange,
+        security_id=hash(symbol) % 100000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=0,
         tick_size=Decimal("0"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
 def _equity(symbol: str) -> Instrument:
     """An NSE cash equity (EQ → classified ``stock`` iff F&O-eligible)."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=hash(symbol) % 100000,
-        trading_symbol=symbol,
-        vendor_symbol=f"NSE-{symbol}",
-        name=symbol,
-        instrument_type=InstrumentType.EQ,
+        exch_id=Exchange.NSE,
+        security_id=hash(symbol) % 100000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
         segment=Segment.CASH,
         series="EQ",
         isin=f"INE{abs(hash(symbol)) % 10000:04d}A01010",
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=550,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
 def _option_leg(underlying: str) -> Instrument:
     """A CE leg on *underlying* — makes the equity F&O-eligible; itself excluded."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=hash(underlying + "CE") % 100000,
-        trading_symbol=f"{underlying}25MAR1000CE",
-        vendor_symbol=f"NSE-{underlying}-27Mar25-1000-CE",
-        name=None,
-        instrument_type=InstrumentType.CE,
+        exch_id=Exchange.NSE,
+        security_id=hash(underlying + "CE") % 100000,
+        symbol_name=f"{underlying}25MAR1000CE",
+        display_name=None,
+        instrument=InstrumentType.CE,
         segment=Segment.FNO,
         series=None,
         isin=None,
         underlying_symbol=underlying,
-        underlying_exchange_token=hash(underlying) % 100000,
+        underlying_security_id=hash(underlying) % 100000,
         lot_size=550,
         tick_size=Decimal("0.05"),
-        freeze_quantity=7200,
-        expiry_date=date(2025, 3, 27),
+        sm_freeze_qty=7200,
+        sm_expiry_date=date(2025, 3, 27),
         strike_price=Decimal("1000"),
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -103,15 +94,15 @@ def _full_snapshot() -> list[Instrument]:
 
 def test_selects_only_indices() -> None:
     selected = select_pull_instruments(_full_snapshot(), kind="index")
-    assert [i.trading_symbol for i in selected] == ["BANKNIFTY", "NIFTY"]  # sorted
-    assert all(i.instrument_type is InstrumentType.IDX for i in selected)
+    assert [i.symbol_name for i in selected] == ["BANKNIFTY", "NIFTY"]  # sorted
+    assert all(i.instrument is InstrumentType.IDX for i in selected)
 
 
 def test_selects_only_fno_eligible_stocks() -> None:
     selected = select_pull_instruments(_full_snapshot(), kind="stock")
     # Only HDFCBANK (has a leg); NONFNOCO is excluded (no derivative).
-    assert [i.trading_symbol for i in selected] == ["HDFCBANK"]
-    assert selected[0].instrument_type is InstrumentType.EQ
+    assert [i.symbol_name for i in selected] == ["HDFCBANK"]
+    assert selected[0].instrument is InstrumentType.EQ
 
 
 def test_injected_fno_eligible_skips_derivation() -> None:
@@ -120,13 +111,13 @@ def test_injected_fno_eligible_skips_derivation() -> None:
     candidates = [_index("NIFTY"), _equity("HDFCBANK")]
     eligible = frozenset({(Exchange.NSE, "HDFCBANK")})
     selected = select_pull_instruments(candidates, kind="stock", fno_eligible=eligible)
-    assert [i.trading_symbol for i in selected] == ["HDFCBANK"]
+    assert [i.symbol_name for i in selected] == ["HDFCBANK"]
 
 
 def test_sort_is_stable_alphabetical() -> None:
     snapshot = [_index("SENSEX", exchange=Exchange.BSE), _index("AXISIDX"), _index("NIFTY")]
     selected = select_pull_instruments(snapshot, kind="index")
-    assert [i.trading_symbol for i in selected] == ["AXISIDX", "NIFTY", "SENSEX"]
+    assert [i.symbol_name for i in selected] == ["AXISIDX", "NIFTY", "SENSEX"]
 
 
 def test_empty_snapshot_is_empty() -> None:

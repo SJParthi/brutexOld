@@ -19,28 +19,25 @@ from brutex.data.sink import NullBarSink
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 
 
-def _instrument(vendor_symbol: str = "13") -> Instrument:
-    """Build a minimal spot index instrument keyed by *vendor_symbol*."""
+def _instrument(symbol: str = "13") -> Instrument:
+    """Build a minimal spot index instrument keyed by *symbol* (``symbol_name``)."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=1,
-        trading_symbol="NIFTY",
-        vendor_symbol=vendor_symbol,
-        name=None,
-        instrument_type=InstrumentType.IDX,
+        exch_id=Exchange.NSE,
+        security_id=1,
+        symbol_name=symbol,
+        display_name=None,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=0,
         tick_size=Decimal("0"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 

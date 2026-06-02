@@ -14,10 +14,9 @@ Pacing / chunking / retry stay in the orchestrator (the chunk planner is
 `brutex.adapters.dhan.chunks`; retry semantics are `errors.is_retryable`):
 ``fetch_ohlcv`` performs **one** within-window request and returns parsed
 bars. The universe (an immutable tuple of :class:`Instrument`) is indexed
-by ``vendor_symbol`` — the exchange-prefixed GLOBAL key (``"NSE-NIFTY"``),
-NOT the raw ``SECURITY_ID`` (which is unique only within an exchange-segment)
-— for O(1) lookup; the raw id the candle API needs lives in ``exchange_token``
-(DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
+by ``symbol_name`` — the bare engine symbol (``"NIFTY"``) — for O(1) lookup;
+the raw id the candle API needs lives in ``security_id`` (ADR-0003 dropped
+the old exchange-prefixed ``vendor_symbol``).
 """
 
 from __future__ import annotations
@@ -67,7 +66,7 @@ _DHAN_CAPABILITIES: MarketCapabilities = MarketCapabilities(
 
 def _dhan_instrument(instrument: Instrument) -> str:
     """Map a spot instrument's type → Dhan ``instrument`` enum (INDEX/EQUITY)."""
-    return "INDEX" if instrument.instrument_type is InstrumentType.IDX else "EQUITY"
+    return "INDEX" if instrument.instrument is InstrumentType.IDX else "EQUITY"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,8 +78,8 @@ class DhanMarketAdapter:
     _index: dict[str, Instrument] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Index the universe by ``vendor_symbol`` (the exchange-prefixed global key) for O(1) lookup."""
-        object.__setattr__(self, "_index", {i.vendor_symbol: i for i in self.instruments})
+        """Index the universe by ``symbol_name`` (the bare engine symbol) for O(1) lookup."""
+        object.__setattr__(self, "_index", {i.symbol_name: i for i in self.instruments})
 
     @property
     def capabilities(self) -> MarketCapabilities:
@@ -124,13 +123,12 @@ class DhanMarketAdapter:
         # on NSE, SENSEX on BSE, INDIA VIX) — Dhan rejects / returns empty for
         # an index addressed under ``NSE_EQ`` / ``BSE_EQ``. Real EQUITY/stock
         # spot keeps the ``<exchange>_EQ`` cash segment.
-        is_index = instrument.instrument_type is InstrumentType.IDX
-        exchange_segment = "IDX_I" if is_index else f"{instrument.exchange.value}_EQ"
-        # ``symbol`` is the GLOBAL ``vendor_symbol`` (exchange-prefixed, e.g.
-        # ``"NSE-NIFTY"``); the Dhan candle API needs the RAW numeric
-        # ``SECURITY_ID``, preserved on the instrument as ``exchange_token``
-        # (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
-        raw_security_id = str(instrument.exchange_token)
+        is_index = instrument.instrument is InstrumentType.IDX
+        exchange_segment = "IDX_I" if is_index else f"{instrument.exch_id.value}_EQ"
+        # ``symbol`` is the bare engine ``symbol_name`` (e.g. ``"NIFTY"``);
+        # the Dhan candle API needs the RAW numeric ``SECURITY_ID``, preserved
+        # on the instrument as ``security_id`` (ADR-0003).
+        raw_security_id = str(instrument.security_id)
         dhan_instrument = _dhan_instrument(instrument)
         from_dt = datetime.combine(start, time())
         # Dhan's ``toDate`` is NON-INCLUSIVE (``docs/dhan-ref/05`` + ``06``): a

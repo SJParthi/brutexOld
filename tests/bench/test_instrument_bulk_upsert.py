@@ -62,25 +62,22 @@ _FRESH_CEILING_SECONDS: Final[float] = 30.0
 def _mk(i: int) -> Instrument:
     """Construct a deterministic in-scope equity row keyed on *i*."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=i,
-        trading_symbol=f"SYM{i}",
-        vendor_symbol=f"NSE-SYM{i}",
-        name=f"Name {i}",
-        instrument_type=InstrumentType.EQ,
+        exch_id=Exchange.NSE,
+        security_id=i,
+        symbol_name=f"SYM{i}",
+        display_name=f"Name {i}",
+        instrument=InstrumentType.EQ,
         segment=Segment.CASH,
         series="EQ",
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 

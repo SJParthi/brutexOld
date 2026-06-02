@@ -107,7 +107,7 @@ def classify_instrument(
     """
     if not is_universe_underlying(instrument, fno_eligible_underlyings):
         return None
-    return KIND_INDEX if instrument.instrument_type == InstrumentType.IDX else KIND_STOCK
+    return KIND_INDEX if instrument.instrument == InstrumentType.IDX else KIND_STOCK
 
 
 def _iter_instruments(snapshot: Iterable[Instrument]) -> list[Instrument]:
@@ -175,10 +175,10 @@ def list_underlyings(
     """Return the explorer's instrument rows, optionally filtered by *kind*.
 
     Each returned row is the JSON-friendly shape the ``/universe`` page's
-    instruments column renders: ``symbol`` (bare ``trading_symbol`` for
-    display), ``pull_symbol`` (the ``vendor_symbol`` — the Dhan
-    ``SECURITY_ID`` — that the spot pull button POSTs to resolve the
-    instrument via the store), display name, kind, and
+    instruments column renders: ``symbol`` (the bare ``symbol_name`` for
+    display), ``pull_symbol`` (also ``symbol_name`` — the key the spot pull
+    button POSTs to resolve the instrument via the store; ADR-0003 dropped
+    the old exchange-prefixed ``vendor_symbol``), display name, kind, and
     exchange. The real per-underlying contract count is fetched lazily
     via ``/api/v1/contracts`` when the row is clicked.
 
@@ -224,11 +224,11 @@ def list_underlyings(
             continue
         rows.append(
             {
-                "symbol": instrument.trading_symbol,
-                "pull_symbol": instrument.vendor_symbol,
-                "name": instrument.name or instrument.trading_symbol,
+                "symbol": instrument.symbol_name,
+                "pull_symbol": instrument.symbol_name,
+                "name": instrument.display_name or instrument.symbol_name,
                 "kind": classified,
-                "exchange": str(instrument.exchange),
+                "exchange": str(instrument.exch_id),
             }
         )
     rows.sort(key=lambda row: (EXPLORER_KINDS.index(row["kind"]), row["symbol"]))

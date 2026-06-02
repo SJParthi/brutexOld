@@ -92,48 +92,50 @@ class OptionSide(StrEnum):
 class Instrument:
     """Canonical representation of one tradable contract.
 
-    Every broker CSV row is normalised into one ``Instrument`` by
-    `the deleted broker adapter`. Downstream
-    layers see only this class and never the raw `a broker SDK` dict.
+    Every Dhan instrument-master CSV row is normalised into one
+    ``Instrument`` by :mod:`brutex.adapters.dhan.instruments`. Downstream
+    layers see only this class and never the raw vendor dict.
 
-    Field ordering matches the Dhan instrument-master schema (CLAUDE.md §6)
-    for side-by-side auditability.
+    Field names + ordering mirror the Dhan instrument-master schema
+    (CLAUDE.md §6 / ``docs/adr/0003-dhan-native-instrument-schema.md``):
+    Dhan's lower_snake column names, BruteX's engine-ready VALUES (e.g.
+    ``instrument`` keeps ``IDX``/``EQ``/``FUT``/``CE``/``PE``; ``segment``
+    keeps ``CASH``/``FNO``). Identity is ``(security_id, exch_id)`` — the
+    exchange-prefixed ``vendor_symbol`` of the old schema was dropped
+    (ADR-0003); ``symbol_name`` is the engine's primary symbol for
+    in-memory lookup / lake partitioning.
     """
 
     # Identity
-    exchange: Exchange
-    exchange_token: int
-    trading_symbol: str
-    vendor_symbol: str  # primary key — O(1) lookup
-    name: str | None
+    exch_id: Exchange  # was exchange
+    security_id: int  # was exchange_token (the numeric Dhan SECURITY_ID)
+    symbol_name: str  # was trading_symbol — the engine's primary symbol
+    display_name: str | None  # was name (Dhan DISPLAY_NAME)
 
     # Classification
-    instrument_type: InstrumentType
+    instrument: InstrumentType  # was instrument_type (values IDX/EQ/FUT/CE/PE)
     segment: Segment
     series: str | None  # EQ, A, B, … (NSE cash only)
     isin: str | None
 
     # Underlying linkage (derivatives only)
     underlying_symbol: str | None
-    underlying_exchange_token: int | None
+    underlying_security_id: int | None  # was underlying_exchange_token
 
     # Contract economics
     lot_size: int  # 0 for indices (not directly tradable)
     tick_size: Decimal  # rupees, normalised; 0 for indices (not directly tradable)
-    freeze_quantity: int | None
+    sm_freeze_qty: int | None  # was freeze_quantity
 
     # Derivatives-only fields
-    expiry_date: date | None
+    sm_expiry_date: date | None  # was expiry_date
     strike_price: Decimal | None
+    option_type: str | None = None  # NEW — the raw CE/PE Dhan OPTION_TYPE
+    expiry_flag: str | None = None  # NEW — the raw M/W Dhan EXPIRY_FLAG
 
-    # Permissions
-    is_reserved: bool
-    buy_allowed: bool
-    sell_allowed: bool
-
-    # Vendor-specific undocumented field — see the Dhan instrument-master
-    # schema (CLAUDE.md §6).
-    internal_trading_symbol: str | None = None
+    # Reservation / surveillance flag (KEEP the working bool value; name is
+    # the Dhan-faithful change — was is_reserved).
+    asm_gsm_flag: bool = False
 
     # ─────────────────────────────────────────────────────────────────
     # Derived properties
@@ -142,7 +144,7 @@ class Instrument:
     @property
     def is_derivative(self) -> bool:
         """True for FUT / CE / PE, False for EQ / IDX."""
-        return self.instrument_type in {
+        return self.instrument in {
             InstrumentType.FUT,
             InstrumentType.CE,
             InstrumentType.PE,
@@ -151,42 +153,42 @@ class Instrument:
     @property
     def is_option(self) -> bool:
         """True for CE / PE only."""
-        return self.instrument_type in {InstrumentType.CE, InstrumentType.PE}
+        return self.instrument in {InstrumentType.CE, InstrumentType.PE}
 
     @property
     def is_index(self) -> bool:
         """True for IDX only (reference instruments — not directly tradable)."""
-        return self.instrument_type == InstrumentType.IDX
+        return self.instrument == InstrumentType.IDX
 
     @property
     def option_side(self) -> OptionSide | None:
         """CALL / PUT for options, None for non-options."""
-        if self.instrument_type == InstrumentType.CE:
+        if self.instrument == InstrumentType.CE:
             return OptionSide.CALL
-        if self.instrument_type == InstrumentType.PE:
+        if self.instrument == InstrumentType.PE:
             return OptionSide.PUT
         return None
 
     def __post_init__(self) -> None:  # pragma: no cover — dataclass init guard
         # Integrity invariants — catch adapter bugs at construction time
         if self.is_derivative and self.underlying_symbol is None:
-            raise ValueError(f"Derivative {self.vendor_symbol} must have underlying_symbol")
-        if self.is_derivative and self.expiry_date is None:
-            raise ValueError(f"Derivative {self.vendor_symbol} must have expiry_date")
+            raise ValueError(f"Derivative {self.symbol_name} must have underlying_symbol")
+        if self.is_derivative and self.sm_expiry_date is None:
+            raise ValueError(f"Derivative {self.symbol_name} must have sm_expiry_date")
         if self.is_option and self.strike_price is None:
-            raise ValueError(f"Option {self.vendor_symbol} must have strike_price")
+            raise ValueError(f"Option {self.symbol_name} must have strike_price")
         if self.is_option and self.strike_price is not None and self.strike_price <= 0:
-            raise ValueError(f"Option {self.vendor_symbol} strike_price must be positive")
+            raise ValueError(f"Option {self.symbol_name} strike_price must be positive")
         if self.is_index:
             if self.lot_size < 0:
-                raise ValueError(f"{self.vendor_symbol} lot_size must not be negative")
+                raise ValueError(f"{self.symbol_name} lot_size must not be negative")
             if self.tick_size < 0:
-                raise ValueError(f"{self.vendor_symbol} tick_size must not be negative")
+                raise ValueError(f"{self.symbol_name} tick_size must not be negative")
         else:
             if self.lot_size <= 0:
-                raise ValueError(f"{self.vendor_symbol} lot_size must be positive")
+                raise ValueError(f"{self.symbol_name} lot_size must be positive")
             if self.tick_size <= 0:
-                raise ValueError(f"{self.vendor_symbol} tick_size must be positive")
+                raise ValueError(f"{self.symbol_name} tick_size must be positive")
 
 
 # ────────────────────────────────────────────────────────────────────────

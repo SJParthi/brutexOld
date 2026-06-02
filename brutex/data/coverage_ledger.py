@@ -80,16 +80,17 @@ COVERAGE_STATUSES: Final[tuple[str, ...]] = (
 class CoverageRecord:
     """One persisted coverage-ledger cell, mirroring the DuckDB table.
 
-    A cell is uniquely keyed by ``(exchange, underlying_symbol, year)`` —
+    A cell is uniquely keyed by ``(exch_id, underlying_symbol, year)`` —
     the same primary key as the ``coverage_ledger`` table. It records how
     many expiries + contracts were pulled for that underlying in that
     calendar year, the cell's :data:`COVERAGE_STATUSES` status, the run id
     + timestamp of the last attempt, and the error message of the last
-    failure (``None`` when the cell never failed).
+    failure (``None`` when the cell never failed). Column / field names are
+    Dhan-faithful (ADR-0003); values are unchanged.
 
     Attributes
     ----------
-    exchange
+    exch_id
         Exchange token (e.g. ``"NSE"`` / ``"BSE"``).
     underlying_symbol
         The underlying the expiries/contracts were pulled for.
@@ -110,7 +111,7 @@ class CoverageRecord:
         The last failure's message, or ``None`` if the cell never failed.
     """
 
-    exchange: str
+    exch_id: str
     underlying_symbol: str
     year: int
     expiries_pulled: int
@@ -277,7 +278,7 @@ def reconcile_coverage(
 
     by_cell: dict[tuple[str, str, int], CoverageRecord] = {}
     for record in actual:
-        key = (record.exchange, record.underlying_symbol, record.year)
+        key = (record.exch_id, record.underlying_symbol, record.year)
         if key in expected:
             by_cell[key] = record
 

@@ -253,10 +253,8 @@ class TestSpotCryptoAdapter:
             page = adapter.list_instruments(cursor=cursor)
             pages += 1
             for inst in page.instruments:
-                assert inst.trading_symbol not in seen, (
-                    f"duplicate {inst.trading_symbol} across pages"
-                )
-                seen.add(inst.trading_symbol)
+                assert inst.symbol_name not in seen, f"duplicate {inst.symbol_name} across pages"
+                seen.add(inst.symbol_name)
             cursor = page.next_cursor
             if cursor is None:
                 break

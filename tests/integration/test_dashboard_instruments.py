@@ -43,7 +43,7 @@ from fastapi.testclient import TestClient
 
 
 def _make_instrument(
-    vendor_symbol: str = "NSE-NIFTY",
+    symbol: str = "NSE-NIFTY",
     *,
     instrument_type: InstrumentType = InstrumentType.IDX,
     segment: Segment = Segment.CASH,
@@ -52,26 +52,26 @@ def _make_instrument(
     strike: Decimal | None = None,
 ) -> Instrument:
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=26000,
-        trading_symbol="NIFTY",
-        vendor_symbol=vendor_symbol,
-        name="Nifty 50",
-        instrument_type=instrument_type,
+        exch_id=Exchange.NSE,
+        # Derive a per-symbol id so the IDX / FUT / CE rows are distinct under
+        # the (security_id, exch_id, segment, snapshot_date) PK
+        # (DEC-INSTRUMENT-PK-SEGMENT-001 / ADR-0003) — a shared fixed id
+        # collided the two FNO legs.
+        security_id=26000 + (abs(hash(symbol)) % 100_000),
+        symbol_name=symbol,
+        display_name="Nifty 50",
+        instrument=instrument_type,
         segment=segment,
         series=None,
         isin=None,
         underlying_symbol=underlying,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=25,
         tick_size=Decimal("0.05"),
-        freeze_quantity=1800,
-        expiry_date=expiry,
+        sm_freeze_qty=1800,
+        sm_expiry_date=expiry,
         strike_price=strike,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
-        internal_trading_symbol=None,
+        asm_gsm_flag=False,
     )
 
 
@@ -109,9 +109,9 @@ def populated_store(tmp_path: Path):
     store.upsert_expiries(
         [
             ExpiryRecord(
-                exchange="NSE",
+                exch_id="NSE",
                 underlying_symbol="NIFTY",
-                expiry_date=date(2025, 1, 30),
+                sm_expiry_date=date(2025, 1, 30),
                 snapshot_date=snap_date,
                 pulled_year=2024,
                 fetched_at=datetime(2024, 1, 2, 12, tzinfo=UTC),
@@ -124,15 +124,15 @@ def populated_store(tmp_path: Path):
     store.upsert_contracts(
         [
             ContractRecord(
-                exchange="NSE",
+                exch_id="NSE",
                 underlying_symbol="NIFTY",
-                expiry_date=date(2025, 1, 30),
-                contract_symbol="NSE-NIFTY25JAN24000CE",
+                sm_expiry_date=date(2025, 1, 30),
+                symbol_name="NSE-NIFTY25JAN24000CE",
                 snapshot_date=snap_date,
-                instrument_type=InstrumentType.CE,
+                instrument=InstrumentType.CE,
                 strike_price=Decimal("24000"),
                 lot_size=25,
-                freeze_quantity=1800,
+                sm_freeze_qty=1800,
                 tick_size=Decimal("0.05"),
                 fetched_at=datetime(2024, 1, 2, 12, tzinfo=UTC),
                 run_id="test-run",
@@ -225,7 +225,7 @@ class TestInstrumentsEnabled:
         assert r.status_code == 200
         body = r.json()
         assert len(body["instruments"]) == 1
-        assert body["instruments"][0]["instrument_type"].endswith("CE")
+        assert body["instruments"][0]["instrument"].endswith("CE")
 
     def test_instruments_list_filter_by_segment(self, client_with_store: TestClient) -> None:
         r = client_with_store.get("/api/v1/instruments?segment=FNO")

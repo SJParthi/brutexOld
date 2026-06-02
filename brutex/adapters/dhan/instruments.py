@@ -7,10 +7,11 @@ the rest of BruteX consumes). The full verified column set is captured in
 ``docs/dhan-ref/09``; every field BruteX needs — identity, classification,
 **lot size, tick size, freeze quantity**, expiry, strike, underlying
 linkage — is mapped here. The raw Dhan ``SECURITY_ID`` (unique only within
-an exchange-segment) is kept as the numeric ``exchange_token`` for the
-candle API; the GLOBAL key ``vendor_symbol`` is exchange-prefixed
-(``f"{exchange}-{trading_symbol}"``) so an NSE row and a BSE row that share
-a numeric id never collide (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
+an exchange-segment) is kept as the numeric ``security_id`` for the candle
+API; identity is the ``(security_id, exch_id)`` pair (an NSE row and a BSE
+row that share a numeric id are distinct rows — ADR-0003 dropped the old
+exchange-prefixed ``vendor_symbol`` synthesis; ``symbol_name`` is the bare
+engine symbol).
 
 The **brute-force universe** is selected by :func:`select_universe`:
 - the **curated headline indices** — the 31 NSE Index-tab symbols + BSE SENSEX
@@ -28,7 +29,7 @@ The **brute-force universe** is selected by :func:`select_universe`:
   ``DISPLAY_NAME``, while a derivative leg carries the underlying ticker in
   ``UNDERLYING_SYMBOL`` — so keying on ``SYMBOL_NAME`` matched only ~19/229
   underlyings and the universe collapsed toward "1 stock". For the same
-  reason the admitted equity's ``trading_symbol`` is taken from its
+  reason the admitted equity's ``symbol_name`` is taken from its
   ``UNDERLYING_SYMBOL`` ticker so a stock's identity matches how its F&O
   legs reference it (ground truth: real Dhan ``api-scrip-master-detailed``,
   219,082 rows, decoded 2026-06-01; 229 F&O underlyings).
@@ -262,11 +263,12 @@ def parse_instrument_row(row: Mapping[str, str]) -> Instrument:
 
     Indices carry ``lot_size``/``tick_size`` of 0 (not directly tradable);
     options/futures carry expiry + strike. The raw Dhan ``SECURITY_ID``
-    becomes the numeric ``exchange_token`` (the id the candle API needs);
-    ``vendor_symbol`` is the exchange-prefixed GLOBAL key
-    ``f"{exchange}-{trading_symbol}"`` (``SECURITY_ID`` is unique only within
-    an exchange-segment, so it is unsafe as a global key — see
-    DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
+    becomes the numeric ``security_id`` (the id the candle API needs);
+    identity is the ``(security_id, exch_id)`` pair (``SECURITY_ID`` is
+    unique only within an exchange-segment, so the exchange disambiguates a
+    shared numeric id — ADR-0003 dropped the old ``vendor_symbol`` synthesis).
+    ``symbol_name`` is the bare engine symbol; the raw ``OPTION_TYPE`` /
+    ``EXPIRY_FLAG`` are now stored verbatim (``option_type`` / ``expiry_flag``).
 
     Raises
     ------
@@ -292,41 +294,33 @@ def parse_instrument_row(row: Mapping[str, str]) -> Instrument:
     # matches how its derivative legs reference it (DEC-DHAN-FNO-JOIN-KEY-001).
     # Indices + non-F&O equities have no UNDERLYING_SYMBOL → keep SYMBOL_NAME;
     # derivative legs keep their own contract SYMBOL_NAME, not the underlying.
-    symbol_name = row["SYMBOL_NAME"].strip()
-    trading_symbol = (
-        underlying if (itype is InstrumentType.EQ and underlying is not None) else symbol_name
+    raw_symbol_name = row["SYMBOL_NAME"].strip()
+    symbol_name = (
+        underlying if (itype is InstrumentType.EQ and underlying is not None) else raw_symbol_name
     )
-    # ``vendor_symbol`` is the GLOBALLY-UNIQUE instrument key the store PK +
-    # adapter index rely on. Dhan ``SECURITY_ID`` is unique only WITHIN an
-    # exchange-segment (an NSE row and a BSE row can share the same numeric
-    # id — e.g. ``13`` on both), so it is NOT safe as a global key: keying on
-    # it alone caused a PRIMARY-KEY collision (duplicate ``"13"``) on load.
-    # We follow the proven tickvault identity model — an instrument is keyed by
-    # its (exchange-segment, security_id) pair, never the bare id — and the
-    # BruteX-wide contract that ``vendor_symbol`` is exchange-prefixed
-    # (``"NSE-NIFTY"`` / ``"BSE-SENSEX"``; see ``test_pull_symbol_is_exchange_prefixed``).
-    # The RAW Dhan id the candle API needs is preserved separately in
-    # ``exchange_token`` (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
+    # Identity is ``(security_id, exch_id)`` (ADR-0003). Dhan ``SECURITY_ID``
+    # is unique only WITHIN an exchange-segment (an NSE row and a BSE row can
+    # share the same numeric id — e.g. ``13`` on both), so the exchange is the
+    # disambiguator. ``symbol_name`` is the bare engine symbol (NIFTY, RELIANCE).
     return Instrument(
-        exchange=Exchange(exch),
-        exchange_token=_to_int(security_id, "SECURITY_ID"),
-        trading_symbol=trading_symbol,
-        vendor_symbol=f"{exch}-{trading_symbol}",
-        name=_opt_str(row.get("DISPLAY_NAME")),
-        instrument_type=itype,
+        exch_id=Exchange(exch),
+        security_id=_to_int(security_id, "SECURITY_ID"),
+        symbol_name=symbol_name,
+        display_name=_opt_str(row.get("DISPLAY_NAME")),
+        instrument=itype,
         segment=segment,
         series=_opt_str(row.get("SERIES")),
         isin=_opt_str(row.get("ISIN")),
         underlying_symbol=underlying,
-        underlying_exchange_token=_opt_int(row.get("UNDERLYING_SECURITY_ID")),
+        underlying_security_id=_opt_int(row.get("UNDERLYING_SECURITY_ID")),
         lot_size=_to_int(row["LOT_SIZE"], "LOT_SIZE"),
         tick_size=_to_decimal(row["TICK_SIZE"], "TICK_SIZE"),
-        freeze_quantity=_opt_int(row.get("SM_FREEZE_QTY")),
-        expiry_date=_opt_expiry(row.get("SM_EXPIRY_DATE")),
+        sm_freeze_qty=_opt_int(row.get("SM_FREEZE_QTY")),
+        sm_expiry_date=_opt_expiry(row.get("SM_EXPIRY_DATE")),
         strike_price=_opt_decimal(row.get("STRIKE_PRICE")),
-        is_reserved=bool(_opt_str(row.get("ASM_GSM_FLAG"))),
-        buy_allowed=True,
-        sell_allowed=True,
+        option_type=_opt_str(row.get("OPTION_TYPE")),
+        expiry_flag=_opt_str(row.get("EXPIRY_FLAG")),
+        asm_gsm_flag=bool(_opt_str(row.get("ASM_GSM_FLAG"))),
     )
 
 
@@ -407,17 +401,17 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
     out-of-scope-exchange rows are counted as ``filtered``.
     The vendor lists some F&O tickers under MORE THAN ONE equity row (e.g. an
     old + a current listing of the same company — both ``MOTHERSON`` — with
-    different ``SECURITY_ID``s). Both produce the same exchange-prefixed
-    ``vendor_symbol`` (``"NSE-MOTHERSON"``), which would collide on the store
-    PK. We therefore **deduplicate to ONE canonical spot per key** (O(1) via a
-    dict), preferring — exactly like tickvault's underlying resolver — the row
-    a derivative's ``UNDERLYING_SECURITY_ID`` points to; absent that link we
-    keep the first seen. This guarantees a unique global key with no count
-    regression (DEC-DHAN-UNIVERSE-DEDUP-001).
+    different ``SECURITY_ID``s). Both produce the same ``(exch_id, symbol_name)``
+    pair (``"NSE"``, ``"MOTHERSON"``), which would collide. We therefore
+    **deduplicate to ONE canonical spot per key** (O(1) via a dict), preferring
+    — exactly like tickvault's underlying resolver — the row a derivative's
+    ``UNDERLYING_SECURITY_ID`` points to; absent that link we keep the first
+    seen. This guarantees a unique key with no count regression
+    (DEC-DHAN-UNIVERSE-DEDUP-001).
     """
     eligible = fno_underlying_symbols(rows)
     canonical_ids = fno_underlying_security_ids(rows)
-    by_key: dict[str, Instrument] = {}
+    by_key: dict[tuple[Exchange, str], Instrument] = {}
     parsed = 0
     filtered = 0
     for row in rows:
@@ -441,15 +435,15 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
         )
         if is_index or is_fno_stock:
             inst = parse_instrument_row(row)
-            existing = by_key.get(inst.vendor_symbol)
+            key = (inst.exch_id, inst.symbol_name)
+            existing = by_key.get(key)
             # First row for this key wins; a later row replaces it only when it
             # is the canonical spot (its SECURITY_ID is a derivative underlying)
             # and the incumbent is not — tickvault's UNDERLYING_SECURITY_ID rule.
             if existing is None or (
-                inst.exchange_token in canonical_ids
-                and existing.exchange_token not in canonical_ids
+                inst.security_id in canonical_ids and existing.security_id not in canonical_ids
             ):
-                by_key[inst.vendor_symbol] = inst
+                by_key[key] = inst
     universe = list(by_key.values())
     persisted = len(universe)
     return UniverseReport(

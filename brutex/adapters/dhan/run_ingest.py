@@ -100,7 +100,7 @@ def run_dhan_spot_ingest(
     adapter, sink
         The Dhan adapter (data source) and the lake write sink.
     instruments
-        Spot instruments to pull (``vendor_symbol`` = Dhan ``SECURITY_ID``).
+        Spot instruments to pull (``symbol_name`` = engine symbol; raw id in ``security_id``).
     intervals
         Canonical intervals (``"1minute"`` / ``"1day"``); others are resampled.
     start, end
@@ -134,7 +134,7 @@ def run_dhan_spot_ingest(
     failures: list[PairFailure] = []
     for instrument in instruments:
         for interval in intervals:
-            label = f"{instrument.vendor_symbol} {interval}"
+            label = f"{instrument.symbol_name} {interval}"
             try:
                 report = ingest_spot(
                     adapter,
@@ -150,12 +150,12 @@ def run_dhan_spot_ingest(
                 )
             except DhanError as exc:
                 failures.append(
-                    PairFailure(symbol=instrument.vendor_symbol, interval=interval, error=str(exc))
+                    PairFailure(symbol=instrument.symbol_name, interval=interval, error=str(exc))
                 )
                 if on_progress is not None:
                     on_progress(label, 0, True)
                 continue
-            pairs[instrument.vendor_symbol, interval] = report
+            pairs[instrument.symbol_name, interval] = report
             if on_progress is not None:
                 on_progress(label, report.bars_appended, False)
     return DhanIngestReport(pairs=pairs, failures=tuple(failures))

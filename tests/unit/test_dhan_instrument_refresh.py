@@ -129,7 +129,7 @@ def test_refresh_persists_universe_full_snapshot() -> None:
     assert up["csv_source_sha256"] == hashlib.sha256(text.encode("utf-8")).hexdigest()
     persisted = up["instruments"]
     assert isinstance(persisted, list)
-    assert sorted(i.trading_symbol for i in persisted) == [
+    assert sorted(i.symbol_name for i in persisted) == [
         "NIFTY",
         "RELIANCE",
     ]  # option leg dropped

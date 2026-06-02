@@ -32,28 +32,25 @@ from brutex.data.sink import BarSink, NullBarSink
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 
 
-def _index(vendor_symbol: str = "13") -> Instrument:
-    """Build a minimal spot index :class:`Instrument` keyed by *vendor_symbol*."""
+def _index(symbol: str = "13") -> Instrument:
+    """Build a minimal spot index :class:`Instrument` keyed by *symbol* (``symbol_name``)."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=1,
-        trading_symbol="NIFTY",
-        vendor_symbol=vendor_symbol,
-        name=None,
-        instrument_type=InstrumentType.IDX,
+        exch_id=Exchange.NSE,
+        security_id=1,
+        symbol_name=symbol,
+        display_name=None,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=0,
         tick_size=Decimal("0"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -204,7 +201,7 @@ class TestPullCandlesDryRun:
         assert report.year == 2024
 
     def test_blank_symbol_raises(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="non-empty Dhan SECURITY_ID"):
+        with pytest.raises(ValueError, match="non-empty engine symbol"):
             pull_candles(_index("   "), lake_root=tmp_path, dry_run=True)
 
     def test_no_data_propagates(self, tmp_path: Path) -> None:
@@ -238,7 +235,7 @@ class TestPullCandlesInjectedFactory:
             lake_root: Path, instrument: Instrument
         ) -> tuple[SyntheticDhanAdapter, BarSink]:
             seen["lake_root"] = lake_root
-            seen["vendor_symbol"] = instrument.vendor_symbol
+            seen["symbol_name"] = instrument.symbol_name
             return SyntheticDhanAdapter(), NullBarSink()
 
         report = pull_candles(
@@ -251,7 +248,7 @@ class TestPullCandlesInjectedFactory:
         # Factory got the lake root + the instrument; dry_run flag recorded as
         # passed (False).
         assert seen["lake_root"] == tmp_path
-        assert seen["vendor_symbol"] == "13"
+        assert seen["symbol_name"] == "13"
         assert report.dry_run is False
         assert report.total_completed > 0
 

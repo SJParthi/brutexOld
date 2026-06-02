@@ -28,11 +28,17 @@ process and every downstream layer re-parses the CSV from disk.
 
 ## Design guarantees
 
-**Uniqueness** \u2014 primary key ``(vendor_symbol, snapshot_date)``.
-DuckDB's B+tree enforces it; duplicate inserts are physically
-impossible. Two snapshots of the same symbol on the same day
-upsert to one row, but two snapshots on different days live as
-two rows (that is the temporal history).
+**Uniqueness** \u2014 primary key
+``(security_id, exch_id, segment, snapshot_date)``. ``segment`` is
+PART of the key because Dhan's instrument identity is the pair
+``(securityId, exchangeSegment)`` (DEC-INSTRUMENT-PK-SEGMENT-001): a
+``security_id`` is unique only WITHIN an ``(exch_id, segment)`` \u2014 the
+same numeric id can recur across NSE vs BSE AND across CASH vs FNO, so
+omitting ``segment`` would collapse two genuinely distinct instruments
+into one row. DuckDB's B+tree enforces it; duplicate inserts are
+physically impossible. Two snapshots of the same instrument on the
+same day upsert to one row, but two snapshots on different days live
+as two rows (that is the temporal history).
 
 **Deduplication on re-run** \u2014 :meth:`upsert_many` wraps every
 write in a DELETE+INSERT inside a transaction. Pulling Phase A
@@ -92,16 +98,22 @@ from brutex.models import (
     Segment,
 )
 
-#: Bump when the schema changes. New columns go in a follow-up DDL
-#: block guarded by ``schema_meta.value`` comparison; never by a
-#: destructive ``DROP TABLE``.
+#: Bump when the schema changes.
 #:
 #: v2 (DEC-COVERAGE-LEDGER-001): added the ``coverage_ledger`` table — one
-#: row per ``(exchange, underlying_symbol, year)`` recording how many
-#: expiries/contracts were pulled + the cell's completeness status. Purely
-#: additive (``CREATE TABLE IF NOT EXISTS``), so an existing v1 store
-#: upgrades in place on next open with no history rewrite.
-SCHEMA_VERSION: Final[int] = 2
+#: row per ``(exch_id, underlying_symbol, year)`` recording how many
+#: expiries/contracts were pulled + the cell's completeness status.
+#:
+#: v3 (ADR-0003 — Dhan-native instrument-master schema rename): the
+#: ``instruments`` / ``expiries`` / ``contracts`` / ``coverage_ledger``
+#: tables were renamed to Dhan-doc lower_snake column names (KEEPING
+#: BruteX's engine-ready VALUES); identity moved to ``(security_id,
+#: exch_id)``; the old ``vendor_symbol`` / ``internal_trading_symbol`` /
+#: ``buy_allowed`` / ``sell_allowed`` columns were dropped and
+#: ``option_type`` / ``expiry_flag`` added. This is a NON-additive shape
+#: change: :meth:`InstrumentStore.open` DROPs + recreates an older-version
+#: store (the instrument master is rebuildable from one CSV pull).
+SCHEMA_VERSION: Final[int] = 3
 
 #: Default DuckDB file name inside the configured lake root.
 DEFAULT_DB_NAME: Final[str] = "instruments.duckdb"
@@ -116,36 +128,37 @@ SHA256_HEX_LEN: Final[int] = 64
 
 _DDL_INSTRUMENTS: Final[str] = """
 CREATE TABLE IF NOT EXISTS instruments (
-    vendor_symbol           VARCHAR NOT NULL,
-    snapshot_date          DATE NOT NULL,
-
-    exchange               VARCHAR NOT NULL,
-    exchange_token         INTEGER,
-    trading_symbol         VARCHAR NOT NULL,
-    name                   VARCHAR,
-    instrument_type        VARCHAR NOT NULL,
+    security_id            BIGINT  NOT NULL,
+    exch_id                VARCHAR NOT NULL,
     segment                VARCHAR NOT NULL,
-    series                 VARCHAR,
     isin                   VARCHAR,
+    instrument             VARCHAR NOT NULL,
+    underlying_security_id BIGINT,
     underlying_symbol      VARCHAR,
-    underlying_token       INTEGER,
+    symbol_name            VARCHAR NOT NULL,
+    display_name           VARCHAR,
+    series                 VARCHAR,
     lot_size               INTEGER NOT NULL,
-    expiry_date            DATE,
+    sm_expiry_date         DATE,
     strike_price           DECIMAL(18, 4),
+    option_type            VARCHAR,
     tick_size              DECIMAL(18, 4) NOT NULL,
-    freeze_quantity        INTEGER,
-    is_reserved            BOOLEAN NOT NULL DEFAULT FALSE,
-    buy_allowed            BOOLEAN NOT NULL DEFAULT TRUE,
-    sell_allowed           BOOLEAN NOT NULL DEFAULT TRUE,
-    internal_trading_symbol VARCHAR,
+    expiry_flag            VARCHAR,
+    asm_gsm_flag           BOOLEAN NOT NULL DEFAULT FALSE,
+    sm_freeze_qty          INTEGER,
 
+    snapshot_date          DATE NOT NULL,
     in_scope               BOOLEAN NOT NULL,
     raw_hash               VARCHAR NOT NULL,
     fetched_at             TIMESTAMP WITH TIME ZONE NOT NULL,
     run_id                 VARCHAR NOT NULL,
     csv_source_sha256      VARCHAR NOT NULL,
 
-    PRIMARY KEY (vendor_symbol, snapshot_date)
+    -- Dhan identity is (securityId, exchangeSegment) — a security_id is
+    -- unique only WITHIN an (exch_id, segment); the same id recurs across
+    -- NSE/BSE and CASH/FNO, so segment is PART of the PK
+    -- (DEC-INSTRUMENT-PK-SEGMENT-001 / ADR-0003).
+    PRIMARY KEY (security_id, exch_id, segment, snapshot_date)
 );
 """
 
@@ -171,42 +184,42 @@ CREATE TABLE IF NOT EXISTS instrument_runs (
 
 _DDL_EXPIRIES: Final[str] = """
 CREATE TABLE IF NOT EXISTS expiries (
-    exchange          VARCHAR NOT NULL,
+    exch_id           VARCHAR NOT NULL,
     underlying_symbol VARCHAR NOT NULL,
-    expiry_date       DATE    NOT NULL,
+    sm_expiry_date    DATE    NOT NULL,
     snapshot_date     DATE    NOT NULL,
 
     pulled_year       INTEGER NOT NULL,
     fetched_at        TIMESTAMP WITH TIME ZONE NOT NULL,
     run_id            VARCHAR NOT NULL,
 
-    PRIMARY KEY (exchange, underlying_symbol, expiry_date, snapshot_date)
+    PRIMARY KEY (exch_id, underlying_symbol, sm_expiry_date, snapshot_date)
 );
 """
 
 _DDL_CONTRACTS: Final[str] = """
 CREATE TABLE IF NOT EXISTS contracts (
-    exchange          VARCHAR NOT NULL,
+    exch_id           VARCHAR NOT NULL,
     underlying_symbol VARCHAR NOT NULL,
-    expiry_date       DATE    NOT NULL,
-    contract_symbol   VARCHAR NOT NULL,   -- full Dhan contract symbol of the leg
+    sm_expiry_date    DATE    NOT NULL,
+    symbol_name       VARCHAR NOT NULL,   -- full Dhan contract symbol of the leg
     snapshot_date     DATE    NOT NULL,
 
-    instrument_type   VARCHAR NOT NULL,   -- FUT | CE | PE
+    instrument        VARCHAR NOT NULL,   -- FUT | CE | PE
     strike_price      DECIMAL(18, 4),     -- NULL for FUT
     lot_size          INTEGER NOT NULL,
-    freeze_quantity   INTEGER,
+    sm_freeze_qty     INTEGER,
     tick_size         DECIMAL(18, 4) NOT NULL,
     fetched_at        TIMESTAMP WITH TIME ZONE NOT NULL,
     run_id            VARCHAR NOT NULL,
 
-    PRIMARY KEY (contract_symbol, snapshot_date)
+    PRIMARY KEY (symbol_name, snapshot_date)
 );
 """
 
 _DDL_COVERAGE_LEDGER: Final[str] = """
 CREATE TABLE IF NOT EXISTS coverage_ledger (
-    exchange          VARCHAR NOT NULL,
+    exch_id           VARCHAR NOT NULL,
     underlying_symbol VARCHAR NOT NULL,
     year              INTEGER NOT NULL,
 
@@ -217,7 +230,7 @@ CREATE TABLE IF NOT EXISTS coverage_ledger (
     last_fetched_at   TIMESTAMP WITH TIME ZONE NOT NULL,
     error_message     VARCHAR,
 
-    PRIMARY KEY (exchange, underlying_symbol, year)
+    PRIMARY KEY (exch_id, underlying_symbol, year)
 );
 """
 
@@ -228,46 +241,58 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 );
 """
 
+#: Tables dropped when an older-``schema_version`` store is opened (ADR-0003).
+#: The v3 rename is a non-additive shape change; these four tables are
+#: rebuildable from one CSV pull, so they are recreated at the current shape.
+#: ``instrument_runs`` + ``schema_meta`` (pure bookkeeping) are NOT dropped.
+_DDL_DROP_RENAMED: Final[tuple[str, ...]] = (
+    "DROP TABLE IF EXISTS instruments;",
+    "DROP TABLE IF EXISTS expiries;",
+    "DROP TABLE IF EXISTS contracts;",
+    "DROP TABLE IF EXISTS coverage_ledger;",
+)
+
 _DDL_INDEXES: Final[tuple[str, ...]] = (
     "CREATE INDEX IF NOT EXISTS idx_instr_segment ON instruments (segment, snapshot_date);",
     "CREATE INDEX IF NOT EXISTS idx_instr_underlying "
     "ON instruments (underlying_symbol, snapshot_date);",
-    "CREATE INDEX IF NOT EXISTS idx_instr_type ON instruments (instrument_type, snapshot_date);",
-    "CREATE INDEX IF NOT EXISTS idx_instr_expiry ON instruments (expiry_date, snapshot_date);",
+    "CREATE INDEX IF NOT EXISTS idx_instr_type ON instruments (instrument, snapshot_date);",
+    "CREATE INDEX IF NOT EXISTS idx_instr_expiry ON instruments (sm_expiry_date, snapshot_date);",
     "CREATE INDEX IF NOT EXISTS idx_instr_in_scope ON instruments (in_scope, snapshot_date);",
     # Expiries fan-out: Phase C asks "every expiry for NIFTY"
     "CREATE INDEX IF NOT EXISTS idx_exp_underlying ON expiries (underlying_symbol, snapshot_date);",
     # Contracts fan-out: Phase D asks "every leg for (NIFTY, 2025-05-29)"
     "CREATE INDEX IF NOT EXISTS idx_con_underlying_expiry "
-    "ON contracts (underlying_symbol, expiry_date, snapshot_date);",
-    "CREATE INDEX IF NOT EXISTS idx_con_expiry ON contracts (expiry_date, snapshot_date);",
+    "ON contracts (underlying_symbol, sm_expiry_date, snapshot_date);",
+    "CREATE INDEX IF NOT EXISTS idx_con_expiry ON contracts (sm_expiry_date, snapshot_date);",
     # Coverage ledger: the /coverage page asks "every incomplete cell"
     # (DEC-COVERAGE-LEDGER-001) — an indexed status scan, never a full table scan.
     "CREATE INDEX IF NOT EXISTS idx_cov_status ON coverage_ledger (status);",
 )
 
+#: ``instruments`` column order — used by :func:`_instrument_to_params`,
+#: :func:`_row_to_instrument`, the Arrow bulk-upsert, and ``_build_insert_sql``.
+#: Mirrors the ``_DDL_INSTRUMENTS`` declaration order exactly.
 _INSTR_COLUMNS: Final[tuple[str, ...]] = (
-    "vendor_symbol",
-    "snapshot_date",
-    "exchange",
-    "exchange_token",
-    "trading_symbol",
-    "name",
-    "instrument_type",
+    "security_id",
+    "exch_id",
     "segment",
-    "series",
     "isin",
+    "instrument",
+    "underlying_security_id",
     "underlying_symbol",
-    "underlying_token",
+    "symbol_name",
+    "display_name",
+    "series",
     "lot_size",
-    "expiry_date",
+    "sm_expiry_date",
     "strike_price",
+    "option_type",
     "tick_size",
-    "freeze_quantity",
-    "is_reserved",
-    "buy_allowed",
-    "sell_allowed",
-    "internal_trading_symbol",
+    "expiry_flag",
+    "asm_gsm_flag",
+    "sm_freeze_qty",
+    "snapshot_date",
     "in_scope",
     "raw_hash",
     "fetched_at",
@@ -331,17 +356,18 @@ class UpsertResult:
 
 @dataclass(frozen=True, slots=True)
 class ExpiryRecord:
-    """One expiry row \u2014 output of Phase B per ``(exchange, underlying)``.
+    """One expiry row \u2014 output of Phase B per ``(exch_id, underlying)``.
 
     Composite primary key in the table is
-    ``(exchange, underlying_symbol, expiry_date, snapshot_date)`` so
+    ``(exch_id, underlying_symbol, sm_expiry_date, snapshot_date)`` so
     the same expiry pulled on different days is a new row (temporal
-    history); pulling twice on the same day upserts in place.
+    history); pulling twice on the same day upserts in place. Column names
+    are Dhan-faithful (ADR-0003); values are unchanged.
     """
 
-    exchange: str
+    exch_id: str
     underlying_symbol: str
-    expiry_date: date
+    sm_expiry_date: date
     snapshot_date: date
     pulled_year: int
     fetched_at: datetime
@@ -352,21 +378,22 @@ class ExpiryRecord:
 class ContractRecord:
     """One contract leg \u2014 output of Phase C per ``(underlying, expiry)``.
 
-    Primary key is ``(contract_symbol, snapshot_date)`` \u2014
-    ``contract_symbol`` is the full Dhan contract symbol (e.g.
-    ``NSE-NIFTY-29May25-24000-CE``) which is globally unique, and
-    ``snapshot_date`` gives temporal history.
+    Primary key is ``(symbol_name, snapshot_date)`` \u2014 ``symbol_name`` is
+    the full Dhan contract symbol (e.g. ``NSE-NIFTY-29May25-24000-CE``)
+    which is globally unique, and ``snapshot_date`` gives temporal history.
+    Column names are Dhan-faithful (ADR-0003); ``instrument`` keeps the
+    FUT/CE/PE value.
     """
 
-    exchange: str
+    exch_id: str
     underlying_symbol: str
-    expiry_date: date
-    contract_symbol: str
+    sm_expiry_date: date
+    symbol_name: str
     snapshot_date: date
-    instrument_type: InstrumentType
+    instrument: InstrumentType
     strike_price: Decimal | None
     lot_size: int
-    freeze_quantity: int | None
+    sm_freeze_qty: int | None
     tick_size: Decimal
     fetched_at: datetime
     run_id: str
@@ -409,26 +436,24 @@ def compute_raw_hash(instrument: Instrument) -> str:
     the hash; ``None`` fields become the literal ``"None"``.
     """
     parts = (
-        instrument.vendor_symbol,
-        str(instrument.exchange),
-        str(instrument.exchange_token),
-        instrument.trading_symbol,
-        str(instrument.name),
-        str(instrument.instrument_type),
+        str(instrument.security_id),
+        str(instrument.exch_id),
         str(instrument.segment),
-        str(instrument.series),
         str(instrument.isin),
+        str(instrument.instrument),
+        str(instrument.underlying_security_id),
         str(instrument.underlying_symbol),
-        str(instrument.underlying_exchange_token),
+        instrument.symbol_name,
+        str(instrument.display_name),
+        str(instrument.series),
         str(instrument.lot_size),
-        str(instrument.expiry_date),
+        str(instrument.sm_expiry_date),
         _canonical_decimal(instrument.strike_price),
+        str(instrument.option_type),
         _canonical_decimal(instrument.tick_size),
-        str(instrument.freeze_quantity),
-        str(instrument.is_reserved),
-        str(instrument.buy_allowed),
-        str(instrument.sell_allowed),
-        str(instrument.internal_trading_symbol),
+        str(instrument.expiry_flag),
+        str(instrument.asm_gsm_flag),
+        str(instrument.sm_freeze_qty),
     )
     payload = "|".join(parts)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -471,9 +496,9 @@ class InstrumentSnapshot:
 
     ## Guarantees verified at construction
 
-    * **No duplicates** \u2014 every ``(vendor_symbol, snapshot_date)``
-      pair appears exactly once. Violation raises :class:`CatalogError`
-      before the snapshot becomes visible.
+    * **No duplicates** \u2014 every ``symbol_name`` appears exactly once.
+      Violation raises :class:`CatalogError` before the snapshot
+      becomes visible.
     * **Non-empty** \u2014 a caller who loads an empty snapshot gets a
       valid (but empty) object; no exceptions.
     * **Thread-safety** \u2014 the snapshot is frozen. All internal
@@ -485,7 +510,7 @@ class InstrumentSnapshot:
 
     by_symbol
         The master dict. Every :class:`Instrument` the snapshot
-        covers, keyed by its ``vendor_symbol``.
+        covers, keyed by its ``symbol_name``.
     by_segment
         Pre-indexed ``{Segment: tuple[Instrument, ...]}`` so sweep
         filters like "every FNO row" skip the per-call scan.
@@ -524,16 +549,16 @@ class InstrumentSnapshot:
 
         Verifies uniqueness at construction time so callers never
         observe a duplicate-bearing snapshot. Raises
-        :class:`CatalogError` on duplicate ``vendor_symbol``.
+        :class:`CatalogError` on duplicate ``symbol_name``.
         """
         by_symbol: dict[str, Instrument] = {}
         for instr in instruments:
-            if instr.vendor_symbol in by_symbol:
+            if instr.symbol_name in by_symbol:
                 raise CatalogError(
-                    "InstrumentSnapshot: duplicate vendor_symbol "
-                    f"{instr.vendor_symbol!r} in input (uniqueness invariant)"
+                    "InstrumentSnapshot: duplicate symbol_name "
+                    f"{instr.symbol_name!r} in input (uniqueness invariant)"
                 )
-            by_symbol[instr.vendor_symbol] = instr
+            by_symbol[instr.symbol_name] = instr
 
         self._by_symbol: dict[str, Instrument] = by_symbol
         self._snapshot_date: date | None = snapshot_date
@@ -547,15 +572,15 @@ class InstrumentSnapshot:
 
         for instr in by_symbol.values():
             by_segment.setdefault(instr.segment, []).append(instr)
-            by_type.setdefault(instr.instrument_type, []).append(instr)
+            by_type.setdefault(instr.instrument, []).append(instr)
             if instr.underlying_symbol is not None:
                 by_underlying.setdefault(instr.underlying_symbol, []).append(instr)
-            meta_by_symbol[instr.vendor_symbol] = ExecutionInstrumentMeta(
-                symbol=instr.vendor_symbol,
+            meta_by_symbol[instr.symbol_name] = ExecutionInstrumentMeta(
+                symbol=instr.symbol_name,
                 segment=instr.segment,
-                instrument_type=instr.instrument_type,
+                instrument_type=instr.instrument,
                 lot_size=instr.lot_size,
-                freeze_quantity=instr.freeze_quantity,
+                freeze_quantity=instr.sm_freeze_qty,
             )
 
         self._by_segment: dict[Segment, tuple[Instrument, ...]] = {
@@ -576,13 +601,13 @@ class InstrumentSnapshot:
         """Return the ``as_of`` date the snapshot was built for."""
         return self._snapshot_date
 
-    def get(self, vendor_symbol: str) -> Instrument | None:
-        """O(1) lookup by ``vendor_symbol`` \u2014 the hot-path entry point."""
-        return self._by_symbol.get(vendor_symbol)
+    def get(self, symbol_name: str) -> Instrument | None:
+        """O(1) lookup by ``symbol_name`` \u2014 the hot-path entry point."""
+        return self._by_symbol.get(symbol_name)
 
-    def __contains__(self, vendor_symbol: object) -> bool:
+    def __contains__(self, symbol_name: object) -> bool:
         """Membership test \u2014 also O(1)."""
-        return vendor_symbol in self._by_symbol
+        return symbol_name in self._by_symbol
 
     def __len__(self) -> int:
         """Return the number of unique symbols in the snapshot."""
@@ -608,9 +633,9 @@ class InstrumentSnapshot:
         """Return every instrument of *instrument_type*, O(1)."""
         return self._by_instrument_type.get(instrument_type, ())
 
-    def meta(self, vendor_symbol: str) -> ExecutionInstrumentMeta | None:
-        """Return the :class:`InstrumentMeta` for *vendor_symbol*, O(1)."""
-        return self._meta_by_symbol.get(vendor_symbol)
+    def meta(self, symbol_name: str) -> ExecutionInstrumentMeta | None:
+        """Return the :class:`InstrumentMeta` for *symbol_name*, O(1)."""
+        return self._meta_by_symbol.get(symbol_name)
 
     def meta_map(self) -> dict[str, ExecutionInstrumentMeta]:
         """Return a copy of the full ``{symbol: InstrumentMeta}`` map.
@@ -830,10 +855,21 @@ class InstrumentStore(metaclass=_StoreMeta):
     def open(cls, path: Path) -> Self:
         """Open or create an instrument store at *path*.
 
-        The parent directory is created on first open. The full
-        schema (table + indexes + schema_meta row) is applied
-        idempotently via ``CREATE ... IF NOT EXISTS`` so repeated
-        opens converge to the same shape.
+        The parent directory is created on first open. The full schema
+        (tables + indexes + schema_meta row) is applied idempotently via
+        ``CREATE ... IF NOT EXISTS`` so repeated opens converge to the same
+        shape.
+
+        **Schema-version drop+recreate (ADR-0003).** The v3 Dhan-native
+        rename is a NON-additive column-shape change, so a store stamped at
+        an OLDER ``schema_version`` cannot be migrated in place by additive
+        DDL. The instrument master is fully rebuildable from one CSV pull,
+        so on an older-version store the renamed tables (``instruments`` /
+        ``expiries`` / ``contracts`` / ``coverage_ledger``) are DROPped and
+        recreated at the current shape; the pure-bookkeeping
+        ``instrument_runs`` / ``schema_meta`` tables are preserved. A fresh
+        store (no recorded version) and an already-current store both skip
+        the drop.
         """
         try:
             import duckdb
@@ -846,15 +882,26 @@ class InstrumentStore(metaclass=_StoreMeta):
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             conn = duckdb.connect(str(path))
+            # schema_meta first so we can read the existing version before
+            # touching the renamed tables.
+            conn.execute(_DDL_SCHEMA_META)
+            existing = conn.execute(
+                "SELECT value FROM schema_meta WHERE key = ?",
+                ["schema_version"],
+            ).fetchone()
+            if existing is not None and int(existing[0]) < SCHEMA_VERSION:
+                # Older shape \u2014 drop the renamed tables (rebuildable from CSV);
+                # keep instrument_runs + schema_meta bookkeeping.
+                for drop_sql in _DDL_DROP_RENAMED:
+                    conn.execute(drop_sql)
             conn.execute(_DDL_INSTRUMENTS)
             conn.execute(_DDL_EXPIRIES)
             conn.execute(_DDL_CONTRACTS)
             conn.execute(_DDL_INSTRUMENT_RUNS)
             conn.execute(_DDL_COVERAGE_LEDGER)
-            conn.execute(_DDL_SCHEMA_META)
             for index_sql in _DDL_INDEXES:
                 conn.execute(index_sql)
-            # Record the schema version if absent. Idempotent.
+            # Stamp the current schema version (idempotent).
             conn.execute(
                 "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
                 ["schema_version", str(SCHEMA_VERSION)],
@@ -903,14 +950,15 @@ class InstrumentStore(metaclass=_StoreMeta):
         instrument master IS the full snapshot for a day, so the
         :class:`InstrumentMasterFetcher` passes ``True`` to guarantee a
         clean lean lake on every refresh. When ``False`` (default) only the
-        rows whose ``(vendor_symbol, snapshot_date)`` PK matches an incoming
-        row are replaced (the historical per-key upsert semantics, preserved
-        for the 27 integration tests + any partial-batch caller).
+        rows whose ``(security_id, exch_id, segment, snapshot_date)`` PK
+        matches an incoming row are replaced (the historical per-key upsert
+        semantics, preserved for the integration tests + any partial-batch
+        caller).
 
         Wrapped in a single transaction so partial failures roll
         back cleanly. Re-running with the same
-        ``(vendor_symbol, snapshot_date)`` replaces in place; the
-        ``raw_hash`` will match on byte-for-byte identical inputs.
+        ``(security_id, exch_id, segment, snapshot_date)`` replaces in place;
+        the ``raw_hash`` will match on byte-for-byte identical inputs.
 
         Parameters
         ----------
@@ -947,8 +995,8 @@ class InstrumentStore(metaclass=_StoreMeta):
         # Arrow table and ``INSERT … SELECT`` from it — a single vectorised
         # bulk load (measured ≈250k rows/s, ~0.4s for 100k rows, ~800× the
         # per-row loop). Prior semantics are preserved exactly: the
-        # (vendor_symbol, snapshot_date) PK still dedups O(1); a re-pull of
-        # the same symbols replaces in place (idempotent, raw_hash unchanged);
+        # (security_id, exch_id, segment, snapshot_date) PK still dedups O(1); a
+        # re-pull of the same symbols replaces in place (idempotent, raw_hash unchanged);
         # ``rows_replaced`` still reports the pre-existing overwritten count;
         # all wrapped in one transaction that rolls back atomically.
         rows = [
@@ -996,12 +1044,17 @@ class InstrumentStore(metaclass=_StoreMeta):
                     else:
                         # Per-key upsert: count, then delete, only the
                         # pre-existing rows whose PK matches an incoming row —
-                        # via a semi-join on the registered table.
+                        # via a semi-join on the registered table. The match
+                        # includes ``segment`` so it mirrors the full
+                        # (security_id, exch_id, segment, snapshot_date) PK
+                        # (DEC-INSTRUMENT-PK-SEGMENT-001): an id present in two
+                        # segments is replaced per-segment, never collapsed.
                         count_row = self._conn.execute(
                             "SELECT COUNT(*) FROM instruments i "
                             "WHERE i.snapshot_date = ? AND EXISTS ("
                             "  SELECT 1 FROM _brutex_instr_bulk b "
-                            "  WHERE b.vendor_symbol = i.vendor_symbol"
+                            "  WHERE b.security_id = i.security_id AND b.exch_id = i.exch_id "
+                            "  AND b.segment = i.segment"
                             ")",
                             [snapshot_date],
                         ).fetchone()
@@ -1010,7 +1063,8 @@ class InstrumentStore(metaclass=_StoreMeta):
                             "DELETE FROM instruments i "
                             "WHERE i.snapshot_date = ? AND EXISTS ("
                             "  SELECT 1 FROM _brutex_instr_bulk b "
-                            "  WHERE b.vendor_symbol = i.vendor_symbol"
+                            "  WHERE b.security_id = i.security_id AND b.exch_id = i.exch_id "
+                            "  AND b.segment = i.segment"
                             ")",
                             [snapshot_date],
                         )
@@ -1087,24 +1141,24 @@ class InstrumentStore(metaclass=_StoreMeta):
             for exp in expiries:
                 self._conn.execute(
                     "DELETE FROM expiries "
-                    "WHERE exchange = ? AND underlying_symbol = ? "
-                    "AND expiry_date = ? AND snapshot_date = ?",
+                    "WHERE exch_id = ? AND underlying_symbol = ? "
+                    "AND sm_expiry_date = ? AND snapshot_date = ?",
                     [
-                        exp.exchange,
+                        exp.exch_id,
                         exp.underlying_symbol,
-                        exp.expiry_date,
+                        exp.sm_expiry_date,
                         exp.snapshot_date,
                     ],
                 )
                 self._conn.execute(
                     "INSERT INTO expiries ("
-                    "exchange, underlying_symbol, expiry_date, snapshot_date, "
+                    "exch_id, underlying_symbol, sm_expiry_date, snapshot_date, "
                     "pulled_year, fetched_at, run_id"
                     ") VALUES (?, ?, ?, ?, ?, ?, ?)",
                     [
-                        exp.exchange,
+                        exp.exch_id,
                         exp.underlying_symbol,
-                        exp.expiry_date,
+                        exp.sm_expiry_date,
                         exp.snapshot_date,
                         exp.pulled_year,
                         exp.fetched_at,
@@ -1131,25 +1185,25 @@ class InstrumentStore(metaclass=_StoreMeta):
             self._conn.execute("BEGIN")
             for c in contracts:
                 self._conn.execute(
-                    "DELETE FROM contracts WHERE contract_symbol = ? AND snapshot_date = ?",
-                    [c.contract_symbol, c.snapshot_date],
+                    "DELETE FROM contracts WHERE symbol_name = ? AND snapshot_date = ?",
+                    [c.symbol_name, c.snapshot_date],
                 )
                 self._conn.execute(
                     "INSERT INTO contracts ("
-                    "exchange, underlying_symbol, expiry_date, contract_symbol, "
-                    "snapshot_date, instrument_type, strike_price, lot_size, "
-                    "freeze_quantity, tick_size, fetched_at, run_id"
+                    "exch_id, underlying_symbol, sm_expiry_date, symbol_name, "
+                    "snapshot_date, instrument, strike_price, lot_size, "
+                    "sm_freeze_qty, tick_size, fetched_at, run_id"
                     ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
-                        c.exchange,
+                        c.exch_id,
                         c.underlying_symbol,
-                        c.expiry_date,
-                        c.contract_symbol,
+                        c.sm_expiry_date,
+                        c.symbol_name,
                         c.snapshot_date,
-                        str(c.instrument_type),
+                        str(c.instrument),
                         c.strike_price,
                         c.lot_size,
-                        c.freeze_quantity,
+                        c.sm_freeze_qty,
                         c.tick_size,
                         c.fetched_at,
                         c.run_id,
@@ -1174,16 +1228,16 @@ class InstrumentStore(metaclass=_StoreMeta):
         """
         self._ensure_open()
         self._conn.execute(
-            "DELETE FROM coverage_ledger WHERE exchange = ? AND underlying_symbol = ? AND year = ?",
-            [record.exchange, record.underlying_symbol, record.year],
+            "DELETE FROM coverage_ledger WHERE exch_id = ? AND underlying_symbol = ? AND year = ?",
+            [record.exch_id, record.underlying_symbol, record.year],
         )
         self._conn.execute(
             "INSERT INTO coverage_ledger ("
-            "exchange, underlying_symbol, year, expiries_pulled, contracts_pulled, "
+            "exch_id, underlying_symbol, year, expiries_pulled, contracts_pulled, "
             "status, last_run_id, last_fetched_at, error_message"
             ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                record.exchange,
+                record.exch_id,
                 record.underlying_symbol,
                 record.year,
                 record.expiries_pulled,
@@ -1196,27 +1250,27 @@ class InstrumentStore(metaclass=_StoreMeta):
         )
 
     def get_coverage(
-        self, exchange: str, underlying_symbol: str, year: int
+        self, exch_id: str, underlying_symbol: str, year: int
     ) -> CoverageRecord | None:
-        """Return one cell by ``(exchange, underlying_symbol, year)``, O(1) via PK."""
+        """Return one cell by ``(exch_id, underlying_symbol, year)``, O(1) via PK."""
         self._ensure_open()
         row = self._conn.execute(
-            "SELECT exchange, underlying_symbol, year, expiries_pulled, "
+            "SELECT exch_id, underlying_symbol, year, expiries_pulled, "
             "contracts_pulled, status, last_run_id, last_fetched_at, error_message "
             "FROM coverage_ledger "
-            "WHERE exchange = ? AND underlying_symbol = ? AND year = ?",
-            [exchange, underlying_symbol, year],
+            "WHERE exch_id = ? AND underlying_symbol = ? AND year = ?",
+            [exch_id, underlying_symbol, year],
         ).fetchone()
         return _row_to_coverage(row) if row is not None else None
 
     def list_coverage(self) -> list[CoverageRecord]:
-        """Return every coverage cell in a stable ``(exchange, underlying, year)`` order."""
+        """Return every coverage cell in a stable ``(exch_id, underlying, year)`` order."""
         self._ensure_open()
         rows = self._conn.execute(
-            "SELECT exchange, underlying_symbol, year, expiries_pulled, "
+            "SELECT exch_id, underlying_symbol, year, expiries_pulled, "
             "contracts_pulled, status, last_run_id, last_fetched_at, error_message "
             "FROM coverage_ledger "
-            "ORDER BY exchange, underlying_symbol, year"
+            "ORDER BY exch_id, underlying_symbol, year"
         ).fetchall()
         return [_row_to_coverage(row) for row in rows]
 
@@ -1228,11 +1282,11 @@ class InstrumentStore(metaclass=_StoreMeta):
         """
         self._ensure_open()
         rows = self._conn.execute(
-            "SELECT exchange, underlying_symbol, year, expiries_pulled, "
+            "SELECT exch_id, underlying_symbol, year, expiries_pulled, "
             "contracts_pulled, status, last_run_id, last_fetched_at, error_message "
             "FROM coverage_ledger "
             "WHERE status != 'complete' "
-            "ORDER BY exchange, underlying_symbol, year"
+            "ORDER BY exch_id, underlying_symbol, year"
         ).fetchall()
         return [_row_to_coverage(row) for row in rows]
 
@@ -1246,7 +1300,7 @@ class InstrumentStore(metaclass=_StoreMeta):
     ) -> list[ExpiryRecord]:
         """Return every expiry row, optionally filtered.
 
-        ``as_of`` is interpreted per-``(exchange, underlying, expiry)``
+        ``as_of`` is interpreted per-``(exch_id, underlying, sm_expiry_date)``
         triplet: for each unique triplet, the latest
         ``snapshot_date <= as_of`` is returned. Used by Phase C to
         enumerate "which expiries were known as of a given ingest
@@ -1274,32 +1328,32 @@ class InstrumentStore(metaclass=_StoreMeta):
         # from a fixed set of literal column names above, not from
         # user input \u2014 no SQL-injection vector here.
         base_sql = (
-            "SELECT e.exchange, e.underlying_symbol, e.expiry_date, "
+            "SELECT e.exch_id, e.underlying_symbol, e.sm_expiry_date, "
             "e.snapshot_date, e.pulled_year, e.fetched_at, e.run_id "
             "FROM expiries e "
             "JOIN ("
-            "    SELECT exchange, underlying_symbol, expiry_date, "
+            "    SELECT exch_id, underlying_symbol, sm_expiry_date, "
             "    MAX(snapshot_date) AS snap "
             "    FROM expiries "
         )
         sub_sql = f"    WHERE 1 = 1{as_of_clause} "
         join_sql = (
-            "    GROUP BY exchange, underlying_symbol, expiry_date"
+            "    GROUP BY exch_id, underlying_symbol, sm_expiry_date"
             ") latest "
-            "ON e.exchange = latest.exchange "
+            "ON e.exch_id = latest.exch_id "
             "AND e.underlying_symbol = latest.underlying_symbol "
-            "AND e.expiry_date = latest.expiry_date "
+            "AND e.sm_expiry_date = latest.sm_expiry_date "
             "AND e.snapshot_date = latest.snap"
         )
-        order_sql = " ORDER BY e.underlying_symbol, e.expiry_date"
+        order_sql = " ORDER BY e.underlying_symbol, e.sm_expiry_date"
         sql = f"{base_sql}{sub_sql}{join_sql}{outer_where_sql}{order_sql}"  # nosec B608
         params = sub_params + outer_params
         rows = self._conn.execute(sql, params).fetchall()
         return [
             ExpiryRecord(
-                exchange=row[0],
+                exch_id=row[0],
                 underlying_symbol=row[1],
-                expiry_date=row[2],
+                sm_expiry_date=row[2],
                 snapshot_date=row[3],
                 pulled_year=int(row[4]),
                 fetched_at=row[5],
@@ -1312,12 +1366,12 @@ class InstrumentStore(metaclass=_StoreMeta):
         self,
         *,
         underlying_symbol: str | None = None,
-        expiry_date: date | None = None,
+        sm_expiry_date: date | None = None,
         as_of: date | None = None,
     ) -> list[ContractRecord]:
         """Return every contract leg, optionally filtered.
 
-        O(log n) via the ``(underlying_symbol, expiry_date, snapshot_date)``
+        O(log n) via the ``(underlying_symbol, sm_expiry_date, snapshot_date)``
         composite index when both filters are supplied \u2014 exactly the
         access pattern Phase D needs when it builds candle requests.
         """
@@ -1334,45 +1388,45 @@ class InstrumentStore(metaclass=_StoreMeta):
         if underlying_symbol is not None:
             outer_where.append("c.underlying_symbol = ?")
             outer_params.append(underlying_symbol)
-        if expiry_date is not None:
-            outer_where.append("c.expiry_date = ?")
-            outer_params.append(expiry_date)
+        if sm_expiry_date is not None:
+            outer_where.append("c.sm_expiry_date = ?")
+            outer_params.append(sm_expiry_date)
         outer_where_sql = (" WHERE " + " AND ".join(outer_where)) if outer_where else ""
 
         # See ``list_expiries`` \u2014 same parameter-binding + literal
         # concat story; this is not an injection vector.
         base_sql = (
-            "SELECT c.exchange, c.underlying_symbol, c.expiry_date, "
-            "c.contract_symbol, c.snapshot_date, c.instrument_type, "
-            "c.strike_price, c.lot_size, c.freeze_quantity, c.tick_size, "
+            "SELECT c.exch_id, c.underlying_symbol, c.sm_expiry_date, "
+            "c.symbol_name, c.snapshot_date, c.instrument, "
+            "c.strike_price, c.lot_size, c.sm_freeze_qty, c.tick_size, "
             "c.fetched_at, c.run_id "
             "FROM contracts c "
             "JOIN ("
-            "    SELECT contract_symbol, MAX(snapshot_date) AS snap "
+            "    SELECT symbol_name, MAX(snapshot_date) AS snap "
             "    FROM contracts "
         )
         sub_sql = f"    WHERE 1 = 1{as_of_clause} "
         join_sql = (
-            "    GROUP BY contract_symbol"
+            "    GROUP BY symbol_name"
             ") latest "
-            "ON c.contract_symbol = latest.contract_symbol "
+            "ON c.symbol_name = latest.symbol_name "
             "AND c.snapshot_date = latest.snap"
         )
-        order_sql = " ORDER BY c.contract_symbol"
+        order_sql = " ORDER BY c.symbol_name"
         sql = f"{base_sql}{sub_sql}{join_sql}{outer_where_sql}{order_sql}"  # nosec B608
         params = sub_params + outer_params
         rows = self._conn.execute(sql, params).fetchall()
         return [
             ContractRecord(
-                exchange=row[0],
+                exch_id=row[0],
                 underlying_symbol=row[1],
-                expiry_date=row[2],
-                contract_symbol=row[3],
+                sm_expiry_date=row[2],
+                symbol_name=row[3],
                 snapshot_date=row[4],
-                instrument_type=InstrumentType(row[5]),
+                instrument=InstrumentType(row[5]),
                 strike_price=(Decimal(str(row[6])) if row[6] is not None else None),
                 lot_size=int(row[7]),
-                freeze_quantity=int(row[8]) if row[8] is not None else None,
+                sm_freeze_qty=int(row[8]) if row[8] is not None else None,
                 tick_size=Decimal(str(row[9])),
                 fetched_at=row[10],
                 run_id=row[11],
@@ -1386,14 +1440,14 @@ class InstrumentStore(metaclass=_StoreMeta):
         if as_of is None:
             row = self._conn.execute(
                 "SELECT COUNT(*) FROM ("
-                "  SELECT DISTINCT exchange, underlying_symbol, expiry_date "
+                "  SELECT DISTINCT exch_id, underlying_symbol, sm_expiry_date "
                 "  FROM expiries"
                 ")"
             ).fetchone()
         else:
             row = self._conn.execute(
                 "SELECT COUNT(*) FROM ("
-                "  SELECT DISTINCT exchange, underlying_symbol, expiry_date "
+                "  SELECT DISTINCT exch_id, underlying_symbol, sm_expiry_date "
                 "  FROM expiries WHERE snapshot_date <= ?"
                 ")",
                 [as_of],
@@ -1404,12 +1458,10 @@ class InstrumentStore(metaclass=_StoreMeta):
         """Return the total number of distinct contracts known as of *as_of*."""
         self._ensure_open()
         if as_of is None:
-            row = self._conn.execute(
-                "SELECT COUNT(DISTINCT contract_symbol) FROM contracts"
-            ).fetchone()
+            row = self._conn.execute("SELECT COUNT(DISTINCT symbol_name) FROM contracts").fetchone()
         else:
             row = self._conn.execute(
-                "SELECT COUNT(DISTINCT contract_symbol) FROM contracts WHERE snapshot_date <= ?",
+                "SELECT COUNT(DISTINCT symbol_name) FROM contracts WHERE snapshot_date <= ?",
                 [as_of],
             ).fetchone()
         return int(row[0]) if row else 0
@@ -1418,36 +1470,36 @@ class InstrumentStore(metaclass=_StoreMeta):
 
     def get(
         self,
-        vendor_symbol: str,
+        symbol_name: str,
         *,
         as_of: date | None = None,
     ) -> Instrument | None:
-        """Return *vendor_symbol*'s state, optionally as-of *as_of*.
+        """Return *symbol_name*'s state, optionally as-of *as_of*.
 
-        O(1) via the primary-key B+tree when ``as_of`` is a known
-        snapshot; O(log n) when the caller asks for a historical
-        state that requires a ``MAX(snapshot_date)`` lookup.
+        Looks up by the engine symbol (``symbol_name``); the most recent
+        ``snapshot_date`` (≤ *as_of* when given) wins. O(log n) via the
+        ``snapshot_date``-ordered scan.
         """
         self._ensure_open()
         if as_of is None:
             row = self._conn.execute(
                 "SELECT * FROM instruments "
-                "WHERE vendor_symbol = ? "
+                "WHERE symbol_name = ? "
                 "ORDER BY snapshot_date DESC LIMIT 1",
-                [vendor_symbol],
+                [symbol_name],
             ).fetchone()
         else:
             row = self._conn.execute(
                 "SELECT * FROM instruments "
-                "WHERE vendor_symbol = ? AND snapshot_date <= ? "
+                "WHERE symbol_name = ? AND snapshot_date <= ? "
                 "ORDER BY snapshot_date DESC LIMIT 1",
-                [vendor_symbol, as_of],
+                [symbol_name, as_of],
             ).fetchone()
         return _row_to_instrument(row) if row is not None else None
 
-    def exists(self, vendor_symbol: str, *, as_of: date | None = None) -> bool:
-        """Return ``True`` iff *vendor_symbol* has at least one row <= *as_of*."""
-        return self.get(vendor_symbol, as_of=as_of) is not None
+    def exists(self, symbol_name: str, *, as_of: date | None = None) -> bool:
+        """Return ``True`` iff *symbol_name* has at least one row <= *as_of*."""
+        return self.get(symbol_name, as_of=as_of) is not None
 
     # ── Filtered scans ────────────────────────────────────────────
 
@@ -1461,22 +1513,26 @@ class InstrumentStore(metaclass=_StoreMeta):
     ) -> list[Instrument]:
         """Return every in-scope instrument matching the filters.
 
-        Uses the latest-snapshot semantics: for each vendor_symbol,
-        returns the most recent snapshot <= *as_of* (or latest of
-        all time if *as_of* is ``None``).
+        Uses the latest-snapshot semantics: for each ``(security_id,
+        exch_id)`` identity, returns the most recent snapshot <= *as_of*
+        (or latest of all time if *as_of* is ``None``).
         """
         self._ensure_open()
         as_of_clause = " AND snapshot_date <= ?" if as_of is not None else ""
         extras: list[str] = []
         extras_params: list[Any] = []
         if segment is not None:
-            extras.append("segment = ?")
+            # Qualify with the ``i`` alias: the ``latest`` subquery now also
+            # selects ``segment`` (it is part of the PK identity —
+            # DEC-INSTRUMENT-PK-SEGMENT-001), so an unqualified ``segment`` in
+            # the outer WHERE is an ambiguous reference (ADR-0003).
+            extras.append("i.segment = ?")
             extras_params.append(str(segment))
         if instrument_type is not None:
-            extras.append("instrument_type = ?")
+            extras.append("i.instrument = ?")
             extras_params.append(str(instrument_type))
         if underlying_symbol is not None:
-            extras.append("underlying_symbol = ?")
+            extras.append("i.underlying_symbol = ?")
             extras_params.append(underlying_symbol)
         extras_sql = (" AND " + " AND ".join(extras)) if extras else ""
 
@@ -1486,18 +1542,20 @@ class InstrumentStore(metaclass=_StoreMeta):
         base_sql = (
             "SELECT i.* FROM instruments i "
             "JOIN ("
-            "    SELECT vendor_symbol, MAX(snapshot_date) AS snap "
+            "    SELECT security_id, exch_id, segment, MAX(snapshot_date) AS snap "
             "    FROM instruments "
         )
         sub_sql = f"    WHERE in_scope = TRUE{as_of_clause} "
         join_sql = (
-            "    GROUP BY vendor_symbol"
+            "    GROUP BY security_id, exch_id, segment"
             ") latest "
-            "ON i.vendor_symbol = latest.vendor_symbol "
+            "ON i.security_id = latest.security_id "
+            "AND i.exch_id = latest.exch_id "
+            "AND i.segment = latest.segment "
             "AND i.snapshot_date = latest.snap "
         )
         outer_sql = f"WHERE i.in_scope = TRUE{extras_sql} "
-        order_sql = "ORDER BY i.vendor_symbol"
+        order_sql = "ORDER BY i.symbol_name"
         sql = f"{base_sql}{sub_sql}{join_sql}{outer_sql}{order_sql}"  # nosec B608
         params: list[Any] = []
         if as_of is not None:
@@ -1533,7 +1591,7 @@ class InstrumentStore(metaclass=_StoreMeta):
 
         * every NSE underlying NAMED by a persisted NSE derivative leg (the
           full-master / with-legs case), AND
-        * every persisted NSE ``EQ`` row's own ``(exchange, trading_symbol)``
+        * every persisted NSE ``EQ`` row's own ``(exch_id, symbol_name)``
           — which, on a lean store, is F&O-eligible *by construction* (a
           non-eligible equity is never persisted; see
           :func:`brutex.universe.is_universe_underlying`).
@@ -1550,24 +1608,26 @@ class InstrumentStore(metaclass=_StoreMeta):
         # Only the static as_of_clause literal is interpolated; the ? is bound.
         latest = (
             "JOIN ("  # noqa: S608  # nosec B608 — static as_of_clause literal only; ? is bound
-            "    SELECT vendor_symbol, MAX(snapshot_date) AS snap "
+            "    SELECT security_id, exch_id, segment, MAX(snapshot_date) AS snap "
             f"    FROM instruments WHERE TRUE{as_of_clause} "
-            "    GROUP BY vendor_symbol"
-            ") latest ON i.vendor_symbol = latest.vendor_symbol "
+            "    GROUP BY security_id, exch_id, segment"
+            ") latest ON i.security_id = latest.security_id "
+            "AND i.exch_id = latest.exch_id "
+            "AND i.segment = latest.segment "
             "AND i.snapshot_date = latest.snap "
         )
         sql = (
             # (a) underlyings named by a persisted NSE derivative leg
-            "SELECT DISTINCT i.exchange, i.underlying_symbol "  # noqa: S608  # nosec B608 — only the static as_of_clause literal is concatenated; all values are bound
+            "SELECT DISTINCT i.exch_id, i.underlying_symbol "  # noqa: S608  # nosec B608 — only the static as_of_clause literal is concatenated; all values are bound
             f"FROM instruments i {latest}"
-            "WHERE i.instrument_type IN ('FUT', 'CE', 'PE') "
-            "AND i.exchange = 'NSE' "
+            "WHERE i.instrument IN ('FUT', 'CE', 'PE') "
+            "AND i.exch_id = 'NSE' "
             "AND i.underlying_symbol IS NOT NULL "
             "UNION "
             # (b) every persisted NSE EQ row (F&O-eligible by construction)
-            "SELECT DISTINCT i.exchange, i.trading_symbol "
+            "SELECT DISTINCT i.exch_id, i.symbol_name "
             f"FROM instruments i {latest}"
-            "WHERE i.instrument_type = 'EQ' AND i.exchange = 'NSE'"
+            "WHERE i.instrument = 'EQ' AND i.exch_id = 'NSE'"
         )
         params: list[Any] = []
         if as_of is not None:
@@ -1594,13 +1654,15 @@ class InstrumentStore(metaclass=_StoreMeta):
         sql = (
             "SELECT i.* FROM instruments i "  # noqa: S608  # nosec B608 — only the static as_of_clause literal is concatenated; all values are bound
             "JOIN ("
-            "    SELECT vendor_symbol, MAX(snapshot_date) AS snap "
+            "    SELECT security_id, exch_id, segment, MAX(snapshot_date) AS snap "
             f"    FROM instruments WHERE TRUE{as_of_clause} "
-            "    GROUP BY vendor_symbol"
-            ") latest ON i.vendor_symbol = latest.vendor_symbol "
+            "    GROUP BY security_id, exch_id, segment"
+            ") latest ON i.security_id = latest.security_id "
+            "AND i.exch_id = latest.exch_id "
+            "AND i.segment = latest.segment "
             "AND i.snapshot_date = latest.snap "
-            "WHERE i.instrument_type IN ('IDX', 'EQ') "
-            "ORDER BY i.vendor_symbol"
+            "WHERE i.instrument IN ('IDX', 'EQ') "
+            "ORDER BY i.symbol_name"
         )
         params: list[Any] = [as_of] if as_of is not None else []
         rows = self._conn.execute(sql, params).fetchall()
@@ -1617,7 +1679,7 @@ class InstrumentStore(metaclass=_StoreMeta):
         """
         self._ensure_open()
         row = self._conn.execute(
-            "SELECT EXISTS (SELECT 1 FROM instruments WHERE instrument_type IN ('FUT', 'CE', 'PE'))"
+            "SELECT EXISTS (SELECT 1 FROM instruments WHERE instrument IN ('FUT', 'CE', 'PE'))"
         ).fetchone()
         return bool(row[0]) if row else False
 
@@ -1660,7 +1722,7 @@ class InstrumentStore(metaclass=_StoreMeta):
             "SELECT EXISTS ("
             "  SELECT 1 FROM instruments "
             "  WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM instruments) "
-            "  AND instrument_type = 'EQ' AND exchange = 'NSE' AND lot_size <= 1"
+            "  AND instrument = 'EQ' AND exch_id = 'NSE' AND lot_size <= 1"
             ")"
         )
         row = self._conn.execute(sql).fetchone()
@@ -1725,7 +1787,7 @@ class InstrumentStore(metaclass=_StoreMeta):
 
         Results merged from two secondary-index scans (one for CE,
         one for PE) so the filtered list is a single flat list in
-        vendor_symbol order.
+        symbol_name order.
         """
         calls = self.list_in_scope(
             as_of=as_of,
@@ -1737,7 +1799,7 @@ class InstrumentStore(metaclass=_StoreMeta):
             instrument_type=InstrumentType.PE,
             underlying_symbol=underlying,
         )
-        return sorted(calls + puts, key=lambda i: i.vendor_symbol)
+        return sorted(calls + puts, key=lambda i: i.symbol_name)
 
     def universe_as_of(self, as_of_date: date) -> list[Instrument]:
         """Return every in-scope instrument as it existed on *as_of_date*."""
@@ -1832,13 +1894,15 @@ class InstrumentStore(metaclass=_StoreMeta):
                 for row in self._conn.execute(
                     "SELECT i.* FROM instruments i "
                     "JOIN ("
-                    "    SELECT vendor_symbol, MAX(snapshot_date) AS snap "
+                    "    SELECT security_id, exch_id, segment, MAX(snapshot_date) AS snap "
                     "    FROM instruments "
                     "    WHERE (? IS NULL OR snapshot_date <= ?) "
-                    "    GROUP BY vendor_symbol"
-                    ") latest ON i.vendor_symbol = latest.vendor_symbol "
+                    "    GROUP BY security_id, exch_id, segment"
+                    ") latest ON i.security_id = latest.security_id "
+                    "AND i.exch_id = latest.exch_id "
+                    "AND i.segment = latest.segment "
                     "AND i.snapshot_date = latest.snap "
-                    "ORDER BY i.vendor_symbol",
+                    "ORDER BY i.symbol_name",
                     [as_of, as_of],
                 ).fetchall()
             ]
@@ -1853,11 +1917,10 @@ class InstrumentStore(metaclass=_StoreMeta):
         Returns an :class:`IntegrityReport` the operator can print
         or assert on. Catches:
 
-        * **Duplicate primary keys** \u2014
-          ``COUNT(*) vs COUNT(DISTINCT (vendor_symbol, snapshot_date))``.
-          DuckDB's PK constraint makes this impossible via normal
-          writes, but this check defends against direct-SQL
-          tampering.
+        * **Duplicate primary keys** \u2014 ``COUNT(*) vs COUNT(DISTINCT
+          (security_id, exch_id, segment, snapshot_date))``. DuckDB's PK
+          constraint makes this impossible via normal writes, but this
+          check defends against direct-SQL tampering.
         * **Raw-hash drift** \u2014 recomputes
           :func:`compute_raw_hash` for every row and compares it
           to the stored ``raw_hash``. Any mismatch means either
@@ -1871,7 +1934,8 @@ class InstrumentStore(metaclass=_StoreMeta):
         self._ensure_open()
         total_row = self._conn.execute("SELECT COUNT(*) FROM instruments").fetchone()
         distinct_row = self._conn.execute(
-            "SELECT COUNT(*) FROM (  SELECT DISTINCT vendor_symbol, snapshot_date FROM instruments)"
+            "SELECT COUNT(*) FROM ("
+            "  SELECT DISTINCT security_id, exch_id, segment, snapshot_date FROM instruments)"
         ).fetchone()
         total_rows = int(total_row[0]) if total_row else 0
         distinct_pk_count = int(distinct_row[0]) if distinct_row else 0
@@ -2005,30 +2069,31 @@ def _instrument_to_params(
     fetched_at: datetime,
     in_scope: bool,
 ) -> list[Any]:
-    """Project *instrument* into the column tuple the INSERT expects."""
+    """Project *instrument* into the column tuple the INSERT expects.
+
+    Column order matches :data:`_INSTR_COLUMNS` exactly.
+    """
     raw_hash = compute_raw_hash(instrument)
     return [
-        instrument.vendor_symbol,
-        snapshot_date,
-        str(instrument.exchange),
-        instrument.exchange_token,
-        instrument.trading_symbol,
-        instrument.name,
-        str(instrument.instrument_type),
+        instrument.security_id,
+        str(instrument.exch_id),
         str(instrument.segment),
-        instrument.series,
         instrument.isin,
+        str(instrument.instrument),
+        instrument.underlying_security_id,
         instrument.underlying_symbol,
-        instrument.underlying_exchange_token,
+        instrument.symbol_name,
+        instrument.display_name,
+        instrument.series,
         instrument.lot_size,
-        instrument.expiry_date,
+        instrument.sm_expiry_date,
         instrument.strike_price,
+        instrument.option_type,
         instrument.tick_size,
-        instrument.freeze_quantity,
-        instrument.is_reserved,
-        instrument.buy_allowed,
-        instrument.sell_allowed,
-        instrument.internal_trading_symbol,
+        instrument.expiry_flag,
+        instrument.asm_gsm_flag,
+        instrument.sm_freeze_qty,
+        snapshot_date,
         in_scope,
         raw_hash,
         fetched_at,
@@ -2044,27 +2109,25 @@ def _row_to_instrument(row: Sequence[Any]) -> Instrument:
     tuple unpacking here stays in sync with the writer.
     """
     (
-        vendor_symbol,
-        _snapshot_date,
-        exchange,
-        exchange_token,
-        trading_symbol,
-        name,
-        instrument_type,
+        security_id,
+        exch_id,
         segment,
-        series,
         isin,
+        instrument,
+        underlying_security_id,
         underlying_symbol,
-        underlying_token,
+        symbol_name,
+        display_name,
+        series,
         lot_size,
-        expiry_date,
+        sm_expiry_date,
         strike_price,
+        option_type,
         tick_size,
-        freeze_quantity,
-        is_reserved,
-        buy_allowed,
-        sell_allowed,
-        internal_trading_symbol,
+        expiry_flag,
+        asm_gsm_flag,
+        sm_freeze_qty,
+        _snapshot_date,
         _in_scope,
         _raw_hash,
         _fetched_at,
@@ -2072,26 +2135,26 @@ def _row_to_instrument(row: Sequence[Any]) -> Instrument:
         _csv_sha,
     ) = row
     return Instrument(
-        exchange=Exchange(exchange),
-        exchange_token=int(exchange_token) if exchange_token is not None else 0,
-        trading_symbol=trading_symbol,
-        vendor_symbol=vendor_symbol,
-        name=name,
-        instrument_type=InstrumentType(instrument_type),
+        exch_id=Exchange(exch_id),
+        security_id=int(security_id) if security_id is not None else 0,
+        symbol_name=symbol_name,
+        display_name=display_name,
+        instrument=InstrumentType(instrument),
         segment=Segment(segment),
         series=series,
         isin=isin,
         underlying_symbol=underlying_symbol,
-        underlying_exchange_token=(int(underlying_token) if underlying_token is not None else None),
+        underlying_security_id=(
+            int(underlying_security_id) if underlying_security_id is not None else None
+        ),
         lot_size=int(lot_size),
         tick_size=Decimal(str(tick_size)),
-        freeze_quantity=int(freeze_quantity) if freeze_quantity is not None else None,
-        expiry_date=expiry_date,
+        sm_freeze_qty=int(sm_freeze_qty) if sm_freeze_qty is not None else None,
+        sm_expiry_date=sm_expiry_date,
         strike_price=(Decimal(str(strike_price)) if strike_price is not None else None),
-        is_reserved=bool(is_reserved),
-        buy_allowed=bool(buy_allowed),
-        sell_allowed=bool(sell_allowed),
-        internal_trading_symbol=internal_trading_symbol,
+        option_type=option_type,
+        expiry_flag=expiry_flag,
+        asm_gsm_flag=bool(asm_gsm_flag),
     )
 
 
@@ -2102,7 +2165,7 @@ def _row_to_coverage(row: Sequence[Any]) -> CoverageRecord:
     / :meth:`list_coverage` / :meth:`list_incomplete_coverage`.
     """
     return CoverageRecord(
-        exchange=row[0],
+        exch_id=row[0],
         underlying_symbol=row[1],
         year=int(row[2]),
         expiries_pulled=int(row[3]),

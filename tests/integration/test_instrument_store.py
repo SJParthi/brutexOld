@@ -92,25 +92,22 @@ def _idx(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
     """
     token = _TRACK1_TOKEN_MAP.get(symbol, zlib.crc32(symbol.encode()) & 0xFFFFFFFF)
     return Instrument(
-        exchange=exchange,
-        exchange_token=token,
-        trading_symbol=symbol,
-        vendor_symbol=f"{exchange}-{symbol}",
-        name=f"{symbol} 50",
-        instrument_type=InstrumentType.IDX,
+        exch_id=exchange,
+        security_id=token,
+        symbol_name=symbol,
+        display_name=f"{symbol} 50",
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -118,25 +115,22 @@ def _eq(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
     """Build a minimal valid cash-equity (EQ) instrument."""
     token = zlib.crc32(f"EQ-{symbol}".encode()) & 0x7FFFFFFF
     return Instrument(
-        exchange=exchange,
-        exchange_token=token,
-        trading_symbol=symbol,
-        vendor_symbol=f"{exchange}-{symbol}",
-        name=f"{symbol} Ltd",
-        instrument_type=InstrumentType.EQ,
+        exch_id=exchange,
+        security_id=token,
+        symbol_name=symbol,
+        display_name=f"{symbol} Ltd",
+        instrument=InstrumentType.EQ,
         segment=Segment.CASH,
         series="EQ",
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -152,25 +146,23 @@ def _option(
     """Build a minimal valid option instrument."""
     tag = f"{exchange}-{underlying}-{expiry.strftime('%d%b%y')}-{strike}-{side.value}"
     return Instrument(
-        exchange=exchange,
-        exchange_token=hash(tag) & 0x7FFFFFFF,
-        trading_symbol=tag.replace(f"{exchange}-", ""),
-        vendor_symbol=tag,
-        name=f"{underlying} {strike}",
-        instrument_type=side,
+        exch_id=exchange,
+        security_id=hash(tag) & 0x7FFFFFFF,
+        symbol_name=tag.replace(f"{exchange}-", ""),
+        display_name=f"{underlying} {strike}",
+        instrument=side,
         segment=Segment.FNO,
         series=None,
         isin=None,
         underlying_symbol=underlying,
-        underlying_exchange_token=26000,
+        underlying_security_id=26000,
         lot_size=lot_size,
         tick_size=Decimal("0.05"),
-        freeze_quantity=1800,
-        expiry_date=expiry,
+        sm_freeze_qty=1800,
+        sm_expiry_date=expiry,
         strike_price=Decimal(str(strike)),
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        option_type=side.value,
+        asm_gsm_flag=False,
     )
 
 
@@ -260,7 +252,7 @@ class TestUniquenessAndDedup:
             # Exactly one row survived.
             assert s.count(in_scope_only=False) == 1
             # raw_hash is unchanged across pulls \u2014 idempotent.
-            fetched = s.get("NSE-NIFTY")
+            fetched = s.get("NIFTY")
             assert fetched is not None
             assert compute_raw_hash(fetched) == compute_raw_hash(nifty)
 
@@ -333,7 +325,7 @@ class TestReadAPI:
                     run_id=f"r-{d}",
                     csv_source_sha256=_csv_hash(str(d)),
                 )
-            fetched = s.get("NSE-NIFTY")
+            fetched = s.get("NIFTY")
             assert fetched is not None
 
     def test_get_as_of_returns_temporal_state(self, tmp_path: Path) -> None:
@@ -351,7 +343,7 @@ class TestReadAPI:
                 csv_source_sha256=_csv_hash("2025-04-15"),
             )
             # as_of 2025-02-01 should return the Jan snapshot.
-            result = s.get("NSE-NIFTY", as_of=date(2025, 2, 1))
+            result = s.get("NIFTY", as_of=date(2025, 2, 1))
             assert result is not None
 
     def test_get_missing_returns_none(self, tmp_path: Path) -> None:
@@ -375,7 +367,7 @@ class TestReadAPI:
             )
             cash = s.list_in_scope(segment=Segment.CASH)
             assert len(cash) == 2
-            assert {i.trading_symbol for i in cash} == {"NIFTY", "BANKNIFTY"}
+            assert {i.symbol_name for i in cash} == {"NIFTY", "BANKNIFTY"}
 
     def test_list_indices_returns_only_idx(self, tmp_path: Path) -> None:
         """DEC-P0-011: rewrite from mixed IDX+FNO → Track 1's 4 in-scope indices."""
@@ -393,7 +385,7 @@ class TestReadAPI:
             )
             indices = s.list_indices()
             assert len(indices) == 4
-            assert {i.trading_symbol for i in indices} == {
+            assert {i.symbol_name for i in indices} == {
                 "NIFTY",
                 "BANKNIFTY",
                 "SENSEX",
@@ -472,9 +464,9 @@ class TestInstrumentSnapshot:
             )
             snapshot = s.load_snapshot()
         for instr in instruments:
-            fetched = snapshot.get(instr.vendor_symbol)
+            fetched = snapshot.get(instr.symbol_name)
             assert fetched is not None
-            assert fetched.vendor_symbol == instr.vendor_symbol
+            assert fetched.symbol_name == instr.symbol_name
 
     def test_snapshot_by_segment_is_pre_indexed(self, tmp_path: Path) -> None:
         """All 4 Track 1 indices are CASH segment (no FNO in Track 1 scope)."""
@@ -519,7 +511,7 @@ class TestInstrumentSnapshot:
 
     def test_snapshot_rejects_duplicates_at_construction(self) -> None:
         nifty = _idx("NIFTY")
-        with pytest.raises(CatalogError, match="duplicate vendor_symbol"):
+        with pytest.raises(CatalogError, match="duplicate symbol_name"):
             InstrumentSnapshot([nifty, nifty])
 
     def test_snapshot_is_frozen(self, tmp_path: Path) -> None:
@@ -533,7 +525,7 @@ class TestInstrumentSnapshot:
             )
             snap = s.load_snapshot()
         # No public mutator exists; __slots__ excludes attribute assignment.
-        assert snap.get("NSE-NIFTY") is not None
+        assert snap.get("NIFTY") is not None
         with pytest.raises(AttributeError):
             snap.foo = "bar"  # type: ignore[attr-defined]
 
@@ -637,7 +629,7 @@ class TestClosedStore:
         s = InstrumentStore.open(tmp_path / "db")
         s.close()
         with pytest.raises(CatalogError, match="closed"):
-            s.get("NSE-NIFTY")
+            s.get("NIFTY")
         with pytest.raises(CatalogError, match="closed"):
             s.upsert_many(
                 [_idx("NIFTY")],
@@ -682,9 +674,9 @@ class TestExpiriesTable:
         exchange: str = "NSE",
     ) -> ExpiryRecord:
         return ExpiryRecord(
-            exchange=exchange,
+            exch_id=exchange,
             underlying_symbol=underlying,
-            expiry_date=expiry,
+            sm_expiry_date=expiry,
             snapshot_date=snapshot,
             pulled_year=expiry.year,
             fetched_at=datetime(snapshot.year, snapshot.month, snapshot.day, tzinfo=UTC),
@@ -725,7 +717,7 @@ class TestExpiriesTable:
             banknifty = s.list_expiries(underlying_symbol="BANKNIFTY")
         assert len(nifty) == 2
         assert len(banknifty) == 1
-        assert sorted(e.expiry_date for e in nifty) == [
+        assert sorted(e.sm_expiry_date for e in nifty) == [
             date(2025, 5, 29),
             date(2025, 6, 26),
         ]
@@ -782,15 +774,15 @@ class TestContractsTable:
     ) -> ContractRecord:
         symbol = f"NSE-{underlying}-{expiry.strftime('%d%b%y')}-{strike}-{side.value}"
         return ContractRecord(
-            exchange="NSE",
+            exch_id="NSE",
             underlying_symbol=underlying,
-            expiry_date=expiry,
-            contract_symbol=symbol,
+            sm_expiry_date=expiry,
+            symbol_name=symbol,
             snapshot_date=snapshot,
-            instrument_type=side,
+            instrument=side,
             strike_price=Decimal(str(strike)),
             lot_size=25,
-            freeze_quantity=1800,
+            sm_freeze_qty=1800,
             tick_size=Decimal("0.05"),
             fetched_at=datetime(snapshot.year, snapshot.month, snapshot.day, tzinfo=UTC),
             run_id=run_id,
@@ -807,7 +799,7 @@ class TestContractsTable:
             for _ in range(100):
                 s.upsert_contracts([c])
             assert s.count_contracts() == 1
-            result = s.list_contracts(underlying_symbol="NIFTY", expiry_date=date(2025, 5, 29))
+            result = s.list_contracts(underlying_symbol="NIFTY", sm_expiry_date=date(2025, 5, 29))
             assert len(result) == 1
             assert result[0].strike_price == Decimal("24000.0000")
 
@@ -834,15 +826,15 @@ class TestContractsTable:
             s.upsert_contracts(contracts)
             nifty = s.list_contracts(
                 underlying_symbol="NIFTY",
-                expiry_date=date(2025, 5, 29),
+                sm_expiry_date=date(2025, 5, 29),
             )
             banknifty = s.list_contracts(
                 underlying_symbol="BANKNIFTY",
-                expiry_date=date(2025, 5, 29),
+                sm_expiry_date=date(2025, 5, 29),
             )
         assert len(nifty) == 3
         assert len(banknifty) == 1
-        assert all(c.instrument_type == InstrumentType.CE for c in nifty)
+        assert all(c.instrument == InstrumentType.CE for c in nifty)
 
     def test_list_contracts_all_returns_everything(self, tmp_path: Path) -> None:
         with InstrumentStore.open(tmp_path / "db") as s:
@@ -974,7 +966,7 @@ class TestPlaceholderEconomicsAndPrune:
         """An EQ row carrying REAL (leg-derived) economics — lot_size > 1."""
         from dataclasses import replace
 
-        return replace(_eq(symbol), lot_size=lot_size, freeze_quantity=freeze)
+        return replace(_eq(symbol), lot_size=lot_size, sm_freeze_qty=freeze)
 
     def test_placeholder_true_for_unenriched_equity(self, tmp_path: Path) -> None:
         """An EQ still at the master's placeholder lot_size=1 is flagged stale."""
@@ -1119,7 +1111,7 @@ class TestThreadSafety:
                         for inst in s.list_index_equity_instruments():
                             # Touch a field — a garbled row would have raised on
                             # construction already, but assert the shape too.
-                            assert inst.vendor_symbol
+                            assert inst.symbol_name
                         s.has_placeholder_stock_economics()
                         s.list_coverage()
                 except Exception as exc:
@@ -1155,7 +1147,7 @@ class TestCoverageLedger:
         run_id: str = "run-1",
     ) -> CoverageRecord:
         return CoverageRecord(
-            exchange=exchange,
+            exch_id=exchange,
             underlying_symbol=underlying,
             year=year,
             expiries_pulled=expiries,
@@ -1166,10 +1158,12 @@ class TestCoverageLedger:
             error_message=error,
         )
 
-    def test_schema_version_is_two(self, tmp_path: Path) -> None:
+    def test_schema_version_is_three(self, tmp_path: Path) -> None:
+        # v3: Dhan-native instrument-master rename + (security_id, exch_id,
+        # segment) identity (ADR-0003 / DEC-DHAN-NATIVE-SCHEMA-001).
         with InstrumentStore.open(tmp_path / "db") as s:
-            assert s.schema_version == 2
-            assert SCHEMA_VERSION == 2
+            assert s.schema_version == 3
+            assert SCHEMA_VERSION == 3
 
     def test_upsert_and_get_roundtrip(self, tmp_path: Path) -> None:
         with InstrumentStore.open(tmp_path / "db") as s:
@@ -1177,7 +1171,7 @@ class TestCoverageLedger:
             s.upsert_coverage(rec)
             got = s.get_coverage("NSE", "NIFTY", 2024)
         assert got is not None
-        assert got.exchange == "NSE"
+        assert got.exch_id == "NSE"
         assert got.underlying_symbol == "NIFTY"
         assert got.year == 2024
         assert got.expiries_pulled == 2
@@ -1203,7 +1197,7 @@ class TestCoverageLedger:
             s.upsert_coverage(self._cov(exchange="NSE", underlying="ABLE", year=2024))
             s.upsert_coverage(self._cov(exchange="BSE", underlying="SENSEX", year=2024))
             rows = s.list_coverage()
-        keys = [(r.exchange, r.underlying_symbol, r.year) for r in rows]
+        keys = [(r.exch_id, r.underlying_symbol, r.year) for r in rows]
         assert keys == [
             ("BSE", "SENSEX", 2024),
             ("NSE", "ABLE", 2024),

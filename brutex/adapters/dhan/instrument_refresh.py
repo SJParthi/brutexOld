@@ -5,8 +5,8 @@ download the detailed scrip master, select the brute-force universe
 (:func:`~brutex.adapters.dhan.instrument_loader.load_universe`), and
 **full-snapshot upsert** it into the vendor-neutral
 :class:`~brutex.data.instrument_store.InstrumentStore` keyed by
-``(vendor_symbol=SECURITY_ID, snapshot_date)``, then prune to the newest
-snapshot (lean lake — DEC-INSTRUMENT-UNIVERSE-FAST-001).
+``(security_id, exch_id, snapshot_date)`` (ADR-0003), then prune to the
+newest snapshot (lean lake — DEC-INSTRUMENT-UNIVERSE-FAST-001).
 
 ``http_get`` and the ``store`` are injected, so this is fully unit-testable
 without a network or a real DuckDB. ``snapshot_date`` + ``run_id`` are

@@ -3,8 +3,8 @@
 Powers the F&O Universe Explorer's "⤓ Pull" button
 (DEC-UNIVERSE-DASHBOARD-001). The controller is **instrument-agnostic**: it
 pulls spot OHLCV for any resolved :class:`~brutex.models.Instrument` — a spot
-index/stock or (lake-side) a contract — keyed by ``vendor_symbol`` (the Dhan
-``SECURITY_ID``). When the operator clicks a universe row and hits pull,
+index/stock or (lake-side) a contract — keyed by ``symbol_name`` (the engine
+symbol; ADR-0003). When the operator clicks a universe row and hits pull,
 :func:`pull_candles` ingests that instrument's candles across the Dhan
 **fetched** base timeframes
 (:data:`DHAN_FETCH_INTERVALS` — ``1minute`` + ``1day``; the 19 intraday
@@ -228,7 +228,7 @@ class PullCandlesReport:
     Attributes
     ----------
     symbol
-        The Dhan ``vendor_symbol`` (``SECURITY_ID``) that was pulled.
+        The engine ``symbol_name`` that was pulled (ADR-0003).
     year
         The calendar year the pull *started* in. For a full-year pull this
         is the year covered; for an explicit ``from``/``to`` range it is
@@ -544,7 +544,7 @@ def pull_all_spot(
     failure_keys = {(f.symbol, f.interval) for f in report.failures}
     results: list[SymbolPullResult] = []
     for instrument in instruments:
-        symbol = instrument.vendor_symbol
+        symbol = instrument.symbol_name
         completed = failed = no_data = 0
         for fetch_interval, _label in _FETCH_INTERVAL_LABELS:
             key = (symbol, fetch_interval)
@@ -603,9 +603,9 @@ def pull_candles(
     Parameters
     ----------
     instrument
-        The resolved spot instrument to pull; ``vendor_symbol`` is the Dhan
-        ``SECURITY_ID`` and ``exchange`` / ``segment`` drive the sink
-        partition. Resolved by the route from the instrument store.
+        The resolved spot instrument to pull; ``symbol_name`` is the engine
+        symbol (the partition key) and ``exch_id`` / ``segment`` drive the
+        sink partition. Resolved by the route from the instrument store.
     lake_root
         Lake directory the live sink writes Parquet into. Unused by the
         dry-run null sink.
@@ -639,13 +639,13 @@ def pull_candles(
     Raises
     ------
     ValueError
-        If *instrument*'s ``vendor_symbol`` is empty / blank, or by
+        If *instrument*'s ``symbol_name`` is empty / blank, or by
         :func:`resolve_candle_range` for a malformed date string or a
         ``from`` after ``to`` (incl. a future ``from_date``).
     """
-    symbol = instrument.vendor_symbol
+    symbol = instrument.symbol_name
     if not symbol.strip():
-        raise ValueError("instrument.vendor_symbol must be a non-empty Dhan SECURITY_ID")
+        raise ValueError("instrument.symbol_name must be a non-empty engine symbol")
 
     start, end = resolve_candle_range(
         from_date=from_date,

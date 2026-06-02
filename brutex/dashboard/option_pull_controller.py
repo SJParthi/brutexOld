@@ -76,8 +76,9 @@ def instrument_to_option_underlying(instrument: Instrument) -> OptionUnderlying:
     with the wide ATM±10 window; an **equity** (``EQ``) as ``OPTSTK`` with the
     ATM±3 window (DEC-DHAN-PULL-SCOPE-001). The exchange-segment is the
     underlying's exchange in the F&O segment (``NSE_FNO`` / ``BSE_FNO``), and
-    the underlying's NUMERIC ``exchange_token`` (the Dhan ``SECURITY_ID``) is the
-    rolling option's resolution anchor — NOT the ``vendor_symbol`` string.
+    the underlying's NUMERIC ``security_id`` (the Dhan ``SECURITY_ID``; the
+    renamed numeric id field, ADR-0003) is the rolling option's resolution
+    anchor — NOT the engine ``symbol_name`` string.
 
     Parameters
     ----------
@@ -93,34 +94,34 @@ def instrument_to_option_underlying(instrument: Instrument) -> OptionUnderlying:
     Raises
     ------
     ValueError
-        If *instrument*'s ``exchange_token`` is not a positive ``SECURITY_ID``,
+        If *instrument*'s ``security_id`` is not a positive ``SECURITY_ID``,
         or its type is neither ``IDX`` nor ``EQ`` (a derivative leg is never a
         fan-out underlying).
     """
     # The rolling-option API addresses the underlying by its NUMERIC Dhan
-    # SECURITY_ID (e.g. "13"), held on the instrument as ``exchange_token`` — NOT
-    # the exchange-prefixed ``vendor_symbol`` ("NSE-NIFTY", the engine lookup
-    # key). Sending the symbol string made Dhan reject EVERY series — the live
+    # SECURITY_ID (e.g. 13), held on the instrument as ``security_id`` (the
+    # renamed numeric id field, ADR-0003) — NOT the engine ``symbol_name``
+    # ("NIFTY"). Sending the symbol made Dhan reject EVERY series — the live
     # "252 failed / 0 bars" symptom (DEC-OPTION-SECURITY-ID-FIX-001). The spot
-    # adapter already uses ``exchange_token``; the options path now matches.
-    if instrument.exchange_token <= 0:
+    # adapter already uses ``security_id``; the options path now matches.
+    if instrument.security_id <= 0:
         raise ValueError(
-            f"{instrument.vendor_symbol} has no valid numeric SECURITY_ID "
-            f"(exchange_token={instrument.exchange_token})"
+            f"{instrument.symbol_name} has no valid numeric SECURITY_ID "
+            f"(security_id={instrument.security_id})"
         )
-    security_id = str(instrument.exchange_token)
-    if instrument.instrument_type is InstrumentType.IDX:
+    numeric_id = str(instrument.security_id)
+    if instrument.instrument is InstrumentType.IDX:
         instrument_name, offsets = "OPTIDX", INDEX_STRIKE_OFFSETS
-    elif instrument.instrument_type is InstrumentType.EQ:
+    elif instrument.instrument is InstrumentType.EQ:
         instrument_name, offsets = "OPTSTK", STOCK_STRIKE_OFFSETS
     else:
         raise ValueError(
-            f"{instrument.vendor_symbol} is a {instrument.instrument_type.value} — only "
+            f"{instrument.symbol_name} is a {instrument.instrument.value} — only "
             "IDX / EQ underlyings have an options fan-out"
         )
     return OptionUnderlying(
-        security_id=security_id,
-        exchange_segment=f"{instrument.exchange.value}_FNO",
+        security_id=numeric_id,
+        exchange_segment=f"{instrument.exch_id.value}_FNO",
         instrument=instrument_name,
         strike_offsets=offsets,
     )
@@ -326,7 +327,7 @@ def pull_options(
     ------
     ValueError
         Via :func:`instrument_to_option_underlying` for a blank
-        ``vendor_symbol`` or a non-``IDX``/``EQ`` instrument.
+        ``symbol_name`` or a non-``IDX``/``EQ`` instrument.
     """
     instruments = list(instruments)
     underlyings = [instrument_to_option_underlying(i) for i in instruments]
