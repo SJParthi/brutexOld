@@ -225,12 +225,14 @@ Track 1 spec locked after 4-agent hostile-review pass._
   Property P-06 (instrumented bar accessor) enforces this.
 - **Money display = 2 decimals, money-only** (DEC-MONEY-2DP-001) — every
   paisa→rupee display goes through `brutex.money` (`format_inr` /
-  `round_money` / `paisa_to_rupees`); rounding happens at the display
-  boundary only. NEVER round statistical metrics (Sharpe, DSR, p-values,
-  CPCV) — they keep full precision or strategy ranking breaks. Money amounts
-  (costs + display) are int64 paisa; OHLC/spot/option **prices** are stored as
-  exact Decimal rupees (Parquet Float64), NOT paisa — see §6
-  (DEC-PAISA-DOC-RECONCILE-001).
+  `round_money` / `paisa_to_rupees`). NEVER round statistical metrics (Sharpe,
+  DSR, p-values, CPCV) or `iv` — they keep full precision or strategy ranking
+  breaks. Money amounts (costs + display) are int64 paisa; OHLC/spot/option
+  **prices** are stored as Decimal rupees (Parquet Float64), NOT paisa — and
+  **snapped to the 2-decimal tick grid at the lake-write boundary**
+  (`round_money`, `ROUND_HALF_UP` — never truncation; spot mirrors options) so
+  the lake never holds vendor float-noise like `14020.7999`
+  (DEC-SPOT-PRICE-2DP-001). See §6 (DEC-PAISA-DOC-RECONCILE-001).
 
 ---
 

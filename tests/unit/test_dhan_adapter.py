@@ -201,6 +201,48 @@ class TestFetchOhlcv:
         assert isinstance(body, dict)
         assert body["exchangeSegment"] == "IDX_I"
 
+    def test_index_volume_is_ignored(self) -> None:
+        """An INDEX has no traded volume — Dhan's junk ``volume`` array (here a
+        stray ``-2``) is ignored outright, so the index bar's volume is 0
+        (DEC-VENDOR-VOLUME-NORMALIZE-001)."""
+        payload = {
+            "open": [100.0],
+            "high": [110.0],
+            "low": [90.0],
+            "close": [105.0],
+            "timestamp": [1609733100],
+            "volume": [-2],
+        }
+        adapter, _ = _adapter(payload=payload)
+        bars = adapter.fetch_ohlcv(
+            symbol="13",
+            exchange=Exchange.NSE,
+            interval="1minute",
+            start=date(2021, 1, 4),
+            end=date(2021, 1, 5),
+        )
+        assert bars[0].volume == 0
+
+    def test_equity_volume_is_kept(self) -> None:
+        """A real EQUITY keeps its traded volume (``drop_volume`` is False)."""
+        payload = {
+            "open": [100.0],
+            "high": [110.0],
+            "low": [90.0],
+            "close": [105.0],
+            "timestamp": [1609733100],
+            "volume": [555],
+        }
+        adapter, _ = _adapter(payload=payload)
+        bars = adapter.fetch_ohlcv(
+            symbol="2885",
+            exchange=Exchange.NSE,
+            interval="1minute",
+            start=date(2021, 1, 4),
+            end=date(2021, 1, 5),
+        )
+        assert bars[0].volume == 555
+
     def test_data_wrapper_unwrapped(self) -> None:
         adapter, _ = _adapter(payload={"data": _CANDLES})
         bars = adapter.fetch_ohlcv(

@@ -157,3 +157,17 @@ class TestAssembleCandle:
         bar = self._call(open_="100", high="110", low="90", close="105")
         assert bar.high == Decimal("110")
         assert bar.low == Decimal("90")
+
+    def test_negative_volume_clamps_to_zero(self) -> None:
+        """Vendor quirk: a negative volume (Dhan's index ``-2``) clamps to 0.
+
+        DEC-VENDOR-VOLUME-NORMALIZE-001 — the live failure
+        (``volume must be non-negative, got -2``) must NOT crash the pull.
+        """
+        bar = self._call(volume="-2")
+        assert bar.volume == 0
+
+    def test_negative_open_interest_clamps_to_zero(self) -> None:
+        """A negative open-interest clamps to 0 (same DEC-VENDOR-VOLUME-NORMALIZE-001)."""
+        bar = self._call(open_interest="-5")
+        assert bar.open_interest == 0

@@ -79,7 +79,9 @@ def _optional_column(payload: Mapping[str, object], name: str) -> Sequence[objec
     return _as_array(payload, name)
 
 
-def parse_candle_columns(payload: Mapping[str, object]) -> list[CandleBar]:
+def parse_candle_columns(
+    payload: Mapping[str, object], *, drop_volume: bool = False
+) -> list[CandleBar]:
     """Transpose a Dhan columnar candle payload into validated rows.
 
     Parameters
@@ -88,6 +90,13 @@ def parse_candle_columns(payload: Mapping[str, object]) -> list[CandleBar]:
         A mapping with the ``open/high/low/close/timestamp`` arrays (and
         optionally ``volume`` / ``open_interest``). For ``rollingoption``
         pass one side's object (``data["ce"]`` or ``data["pe"]``).
+    drop_volume
+        When ``True`` the ``volume`` column is ignored outright (every bar's
+        volume → 0). An **index** (NIFTY / BANKNIFTY / SENSEX / INDIA VIX) has
+        NO traded volume, yet Dhan still returns a junk ``volume`` array (mostly
+        0, occasionally a stray negative). The adapter passes
+        ``drop_volume=instrument.is_index`` so an index bar's volume is 0 by
+        construction, not merely clamped (DEC-VENDOR-VOLUME-NORMALIZE-001).
 
     Returns
     -------
@@ -106,7 +115,10 @@ def parse_candle_columns(payload: Mapping[str, object]) -> list[CandleBar]:
     highs = _require_column(payload, "high")
     lows = _require_column(payload, "low")
     closes = _require_column(payload, "close")
-    volumes = _optional_column(payload, "volume")
+    # Indices carry no real volume — ignore the column outright for them
+    # (DEC-VENDOR-VOLUME-NORMALIZE-001); otherwise the junk array (incl. stray
+    # negatives) would only be clamped to 0 by ``assemble_candle``.
+    volumes = None if drop_volume else _optional_column(payload, "volume")
     open_interests = _optional_column(payload, "open_interest")
 
     n = len(timestamps)

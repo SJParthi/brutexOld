@@ -132,7 +132,17 @@ def assemble_candle(
     """
     if all(has_no_price(v) for v in (open_, high, low, close)):
         raise EmptyCandleRow("candle has no OHLC data (no-trade / halted / unlisted bar)")
-    oi = None if is_absent(open_interest) else to_int(open_interest, "open_interest")
+    # Vendor count-field normalization (DEC-VENDOR-VOLUME-NORMALIZE-001, sibling
+    # of the OHLC clamp below): an IMPOSSIBLE negative volume / open-interest
+    # must NEVER crash a multi-year pull on the strict ``CandleBar`` invariant.
+    # Dhan emits a stray negative (e.g. ``-2``) on the ``volume`` array of an
+    # INDEX (indices have no traded volume at all — the array is junk), and the
+    # observed live failure was exactly ``volume must be non-negative, got -2``.
+    # A count's only valid floor is 0, so clamp to 0 — never raise, never lose
+    # the bar's authoritative OHLC price. (Indices additionally have ``volume``
+    # IGNORED outright upstream — the spot parser's ``drop_volume`` — so an index
+    # bar is always 0 regardless of the junk Dhan sends.)
+    oi = None if is_absent(open_interest) else max(0, to_int(open_interest, "open_interest"))
     open_price = to_price(open_, "open")
     high_price = to_price(high, "high")
     low_price = to_price(low, "low")
@@ -153,7 +163,7 @@ def assemble_candle(
         high=max(prices),
         low=min(prices),
         close=close_price,
-        volume=0 if is_absent(volume) else to_int(volume, "volume"),
+        volume=0 if is_absent(volume) else max(0, to_int(volume, "volume")),
         open_interest=oi,
     )
 
