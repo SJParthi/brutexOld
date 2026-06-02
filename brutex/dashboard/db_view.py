@@ -88,6 +88,39 @@ CANDLE_COLUMNS: Final = (
     "open_interest",
 )
 
+#: The 11 columns every expired-option Parquet partition carries
+#: (``brutex/data/option_parquet_writer.py`` ``_render_df`` schema): the 7
+#: OHLCV columns above PLUS the per-bar option stamps ``side`` / ``strike`` /
+#: ``spot`` / ``iv`` (the rolling-option endpoint surface). Used to validate an
+#: option-candle column selection without touching disk.
+OPTION_CANDLE_COLUMNS: Final = (
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "open_interest",
+    "side",
+    "strike",
+    "spot",
+    "iv",
+)
+
+#: The subdirectory under the lake root holding the expired-options table
+#: (``<lake>/options/<series>/<YYYY>-<MM>.parquet``). Mirrors
+#: ``brutex.data.option_parquet_writer._OPTIONS_SUBDIR`` (kept in lockstep) so
+#: the read-side viewer never traverses outside ``<lake>/options``.
+OPTIONS_DIR_NAME: Final = "options"
+
+#: A filesystem-safe option series segment is the writer's ``_safe_segment``
+#: output: a ``|``-joined series key with ``|`` rewritten to ``__``. The real
+#: parts are alnum + ``.`` + ``-`` (Dhan coordinates) joined by ``__``; we
+#: allow exactly that grammar so a discovered directory name can never carry a
+#: traversal/separator character into the read glob (``..`` rejected
+#: separately, matching the writer's own guard).
+_OPTION_SEGMENT_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
+
 #: A candle symbol must match this allowlist before it is ever joined into
 #: a lake path / ``read_parquet`` glob — defence-in-depth against path
 #: traversal even though discovered symbols come from our own directory
@@ -554,12 +587,73 @@ def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
                     if any(tf_dir.rglob("*.parquet")):
                         found.append(
                             {
+                                "kind": "spot",
                                 "exchange": exch_dir.name,
                                 "segment": seg_dir.name,
                                 "symbol": sym_dir.name,
                                 "interval": tf_dir.name,
                             }
                         )
+    return found
+
+
+def _validate_option_segment(series: str) -> None:
+    """Validate a discovered option-series directory name, else raise ValueError.
+
+    The on-disk segment is the writer's filesystem-safe ``_safe_segment`` output
+    (``brutex.data.option_parquet_writer``): a ``|``-joined series coordinate
+    with ``|`` → ``__``. We re-validate it against :data:`_OPTION_SEGMENT_RE`
+    (plus a ``..`` reject) so a hand-crafted / foreign directory name can never
+    traverse outside ``<lake>/options`` when joined into the read glob — the
+    options-side analog of :func:`_validate_candle_coords`.
+    """
+    if ".." in series or not _OPTION_SEGMENT_RE.match(series):
+        raise ValueError(f"illegal option series {series!r}")
+
+
+def list_option_datasets(lake_root: Path) -> list[dict[str, str]]:
+    """Discover which expired-option series exist under ``<lake>/options/``.
+
+    Walks ``<lake_root>/options/<series>/`` (the layout
+    :class:`~brutex.data.option_parquet_writer.OptionParquetWriter` writes) and
+    returns one entry per series directory that holds at least one ``.parquet``
+    file. Directory names that are not safe option segments are skipped (a
+    foreign / partially-written tree never raises). A missing ``options``
+    directory yields ``[]``.
+
+    The expired-option lake has no ``(exchange, segment, symbol, interval)``
+    coordinates the way the spot ``bars/`` tree does — one series IS one
+    partition key (``exchange_segment|security_id|expiry_flag|expiry_code|
+    strike|drv_option_type``, ``|`` → ``__`` on disk). The whole series rolls a
+    1-minute table, so we surface the ``series`` segment as the dataset
+    coordinate and stamp ``"1minute"`` as the interval for a uniform picker.
+
+    Parameters
+    ----------
+    lake_root
+        Top-level lake directory (the parent of ``options/``).
+
+    Returns
+    -------
+    list[dict[str, str]]
+        ``[{"kind": "option", "series", "interval"}]`` sorted by series — the
+        candle-viewer's option-dataset picker entries.
+    """
+    options = lake_root / OPTIONS_DIR_NAME
+    if not options.is_dir():
+        return []
+    found: list[dict[str, str]] = []
+    for series_dir in sorted(p for p in options.iterdir() if p.is_dir()):
+        if ".." in series_dir.name or not _OPTION_SEGMENT_RE.match(series_dir.name):
+            continue
+        if any(series_dir.glob("*.parquet")):
+            found.append(
+                {
+                    "kind": "option",
+                    "series": series_dir.name,
+                    "interval": "1minute",
+                }
+            )
     return found
 
 
@@ -626,20 +720,13 @@ def query_candles(
     safe_limit = clamp_limit(limit)
     safe_offset = clamp_offset(offset)
 
-    where_clauses: list[str] = []
-    where_params: list[Any] = []
     # Compare the bar's UTC *calendar date* — `"timestamp"` is TIMESTAMPTZ
-    # (parquet_writer stores time_zone="UTC"); `AT TIME ZONE 'UTC'` pins the
-    # wall-clock to UTC and `::DATE` truncates, so the bound comparison is
+    # (parquet_writer stores time_zone="UTC"); the shared `_date_bounds` pins
+    # the wall-clock to UTC and truncates, so the bound comparison is
     # independent of the ambient DuckDB session `TimeZone` (the operator runs
     # Asia/Kolkata). Both bounds inclusive (Golden Rule #7 — same UTC date in
     # → same rows out, regardless of session tz).
-    if start is not None:
-        where_clauses.append("(\"timestamp\" AT TIME ZONE 'UTC')::DATE >= ?")
-        where_params.append(_parse_iso_date(start, "start").isoformat())
-    if end is not None:
-        where_clauses.append("(\"timestamp\" AT TIME ZONE 'UTC')::DATE <= ?")
-        where_params.append(_parse_iso_date(end, "end").isoformat())
+    where_clauses, where_params = _date_bounds(start, end)
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
     glob = (
@@ -676,18 +763,165 @@ def query_candles(
     description = cursor.description or []
     out_columns = [str(col[0]) for col in description]
     # Render the bar timestamp as a clean IST wall-clock (no +05:30 suffix);
-    # every other cell goes through the generic JSON coercion.
+    # every other cell goes through the generic JSON coercion (shared helper).
+    rows = _render_candle_rows(cursor, out_columns)
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "columns": out_columns,
+        "rows": rows,
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
+
+
+def _date_bounds(start: str | None, end: str | None) -> tuple[list[str], list[Any]]:
+    """Build the inclusive UTC-date ``WHERE`` fragments shared by both readers.
+
+    Returns ``(clauses, params)`` where each clause compares the bar's UTC
+    *calendar date* (``("timestamp" AT TIME ZONE 'UTC')::DATE``) against a bound
+    ISO date — independent of the ambient DuckDB session ``TimeZone`` (the
+    operator runs Asia/Kolkata). Both bounds inclusive (Golden Rule #7). A
+    ``None`` bound contributes nothing.
+
+    Raises
+    ------
+    ValueError
+        On a malformed ISO date bound (via :func:`_parse_iso_date`).
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if start is not None:
+        clauses.append("(\"timestamp\" AT TIME ZONE 'UTC')::DATE >= ?")
+        params.append(_parse_iso_date(start, "start").isoformat())
+    if end is not None:
+        clauses.append("(\"timestamp\" AT TIME ZONE 'UTC')::DATE <= ?")
+        params.append(_parse_iso_date(end, "end").isoformat())
+    return clauses, params
+
+
+def _render_candle_rows(cursor: Any, out_columns: list[str]) -> list[list[Any]]:
+    """Render a candle/option cursor's rows with a clean IST ``timestamp``.
+
+    The ``timestamp`` cell (if projected) is rendered as a clean IST wall-clock
+    string (no ``+05:30`` suffix) via :func:`_format_candle_timestamp`; every
+    other cell goes through the generic :func:`_json_safe` coercion. Shared by
+    :func:`query_candles` (spot) and :func:`query_option_candles` (options).
+    """
     ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
-    rows = [
+    return [
         [
             _format_candle_timestamp(cell) if i == ts_idx else _json_safe(cell)
             for i, cell in enumerate(row)
         ]
         for row in cursor.fetchall()
     ]
+
+
+def query_option_candles(
+    conn: Any,
+    lake_root: Path,
+    *,
+    series: str,
+    start: str | None = None,
+    end: str | None = None,
+    columns: tuple[str, ...] | None = None,
+    descending: bool = False,
+    limit: int,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Read one page of expired-option bars for a series (DEC-DB-QUERY-001).
+
+    The options-lake analog of :func:`query_candles`: reads the Parquet lake
+    directly via DuckDB ``read_parquet`` over the series glob
+    ``<lake>/options/<series>/*.parquet`` (the layout
+    :class:`~brutex.data.option_parquet_writer.OptionParquetWriter` writes) — no
+    data duplication, the lake stays the single source of truth. *series* is the
+    filesystem-safe segment from :func:`list_option_datasets` and is validated
+    against :func:`_validate_option_segment` (NO free user text in the glob,
+    same path/SQL-injection guard as the spot reader). The page is
+    ``LIMIT``-bounded so a click never materialises more than *limit* rows.
+
+    Projects the 11 :data:`OPTION_CANDLE_COLUMNS` — the OHLCV+OI set PLUS the
+    per-bar option stamps ``side`` / ``strike`` / ``spot`` / ``iv``. *start* /
+    *end* are inclusive ISO ``YYYY-MM-DD`` bounds matched against the bar's UTC
+    calendar date. Returns an empty page (never raises) when the series has no
+    Parquet files yet.
+
+    Parameters
+    ----------
+    conn
+        A DuckDB connection.
+    lake_root
+        Top-level lake directory (parent of ``options/``).
+    series
+        The option-series segment; validated against the safe-segment grammar.
+    start, end
+        Inclusive ISO ``YYYY-MM-DD`` bounds on the bar timestamp, or ``None``.
+    columns
+        Option columns to project (subset of :data:`OPTION_CANDLE_COLUMNS`), or
+        ``None`` for all. An empty tuple is rejected.
+    descending, limit, offset
+        Sort direction on ``timestamp`` + page bounds (clamped).
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"series", "interval", "columns", "rows", "total", "limit",
+        "offset"}`` with every cell JSON-safe (``iv`` kept full-precision —
+        it is a volatility metric, NOT money, mirroring the writer).
+
+    Raises
+    ------
+    ValueError
+        On an illegal series, an unknown column, an empty column tuple, or a
+        malformed ISO date bound.
+    """
+    _validate_option_segment(series)
+    valid_columns = frozenset(OPTION_CANDLE_COLUMNS)
+    select = _select_list(columns, valid_columns)
+    safe_limit = clamp_limit(limit)
+    safe_offset = clamp_offset(offset)
+
+    where_clauses, where_params = _date_bounds(start, end)
+    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    base = lake_root / OPTIONS_DIR_NAME / series
+    glob = base.as_posix() + "/*.parquet"
+    # Empty / not-yet-pulled series → return an empty page instead of letting
+    # read_parquet raise "No files found" (mirrors query_candles).
+    if not (base.is_dir() and any(base.glob("*.parquet"))):
+        return {
+            "series": series,
+            "interval": "1minute",
+            "columns": list(columns) if columns is not None else list(OPTION_CANDLE_COLUMNS),
+            "rows": [],
+            "total": 0,
+            "limit": safe_limit,
+            "offset": safe_offset,
+        }
+
+    # The glob is built from the validated series segment (no free user text),
+    # so interpolating it is safe; the source is given to read_parquet as a
+    # bound parameter and every date/page value is parameter-bound.
+    source = "read_parquet(?, union_by_name=true)"
+    order_sql = ' ORDER BY "timestamp" ' + ("DESC" if descending else "ASC")
+    total_row = conn.execute(
+        f"SELECT COUNT(*) FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
+        [glob, *where_params],
+    ).fetchone()
+    total = int(total_row[0]) if total_row else 0
+    cursor = conn.execute(
+        f"SELECT {select} FROM {source}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
+        [glob, *where_params, safe_limit, safe_offset],
+    )
+    description = cursor.description or []
+    out_columns = [str(col[0]) for col in description]
+    rows = _render_candle_rows(cursor, out_columns)
     return {
-        "symbol": symbol,
-        "interval": interval,
+        "series": series,
+        "interval": "1minute",
         "columns": out_columns,
         "rows": rows,
         "total": total,
@@ -714,11 +948,15 @@ __all__ = [
     "ALLOWED_OPERATORS",
     "CANDLE_COLUMNS",
     "KNOWN_TABLES",
+    "OPTIONS_DIR_NAME",
+    "OPTION_CANDLE_COLUMNS",
     "clamp_limit",
     "clamp_offset",
     "list_candle_datasets",
     "list_columns",
+    "list_option_datasets",
     "query_candles",
+    "query_option_candles",
     "query_table",
     "sample_rows",
     "table_summary",

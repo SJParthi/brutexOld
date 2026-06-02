@@ -49,7 +49,9 @@ from brutex.dashboard.coverage_view import build_coverage_payload
 from brutex.dashboard.db_view import (
     list_candle_datasets,
     list_columns,
+    list_option_datasets,
     query_candles,
+    query_option_candles,
     query_table,
     sample_rows,
     table_summary,
@@ -1166,17 +1168,26 @@ def build_app(
 
     @app.get("/api/v1/db/candles/datasets")
     async def api_db_candle_datasets() -> JSONResponse:
-        """GET /api/v1/db/candles/datasets — discovered ``(exch, seg, symbol, interval)`` sets.
+        """GET /api/v1/db/candles/datasets — discovered candle + option datasets.
 
-        Lists every candle Parquet partition set in the lake so the viewer
-        can offer a dataset picker. Delegates to
-        :func:`brutex.dashboard.db_view.list_candle_datasets`.
+        Lists every spot candle Parquet partition set (``<lake>/bars/…``, each
+        stamped ``kind="spot"``) AND every expired-option series
+        (``<lake>/options/…``, each ``kind="option"``) so the viewer can offer a
+        single dataset picker that distinguishes the two. Delegates to
+        :func:`brutex.dashboard.db_view.list_candle_datasets` +
+        :func:`brutex.dashboard.db_view.list_option_datasets`.
         """
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
-            return JSONResponse({"datasets": []})
-        return JSONResponse({"datasets": list_candle_datasets(lake_root.parent)})
+            return JSONResponse({"datasets": [], "options": []})
+        lake = lake_root.parent
+        return JSONResponse(
+            {
+                "datasets": list_candle_datasets(lake),
+                "options": list_option_datasets(lake),
+            }
+        )
 
     @app.get("/api/v1/db/candles")
     async def api_db_candles(
@@ -1213,6 +1224,47 @@ def build_app(
                 segment=segment,
                 symbol=symbol,
                 interval=interval,
+                start=start,
+                end=end,
+                columns=tuple(column) if column else None,
+                descending=desc,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(payload)
+
+    @app.get("/api/v1/db/options")
+    async def api_db_options(
+        series: str = Query(...),
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+        # See the api_db_query note — list query param needs an in-signature
+        # Query() default; immutable None coalesced below (B008 false positive).
+        column: list[str] | None = Query(default=None),  # noqa: B008
+        desc: bool = Query(default=False),
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> JSONResponse:
+        """GET /api/v1/db/options — one page of expired-option bars from the lake.
+
+        Reads ``<lake>/options/<series>/*.parquet`` via DuckDB ``read_parquet``
+        (``LIMIT``-bounded). Projects OHLCV+OI PLUS the option stamps
+        ``side`` / ``strike`` / ``spot`` / ``iv``. ``start`` / ``end`` are
+        inclusive ISO ``YYYY-MM-DD`` bounds. Thin wrapper over
+        :func:`brutex.dashboard.db_view.query_option_candles`; an invalid
+        series / column / date raises ``ValueError`` there → HTTP 400 here.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake root wired for option reads")
+        try:
+            payload = query_option_candles(
+                store.connection,
+                lake_root.parent,
+                series=series,
                 start=start,
                 end=end,
                 columns=tuple(column) if column else None,
