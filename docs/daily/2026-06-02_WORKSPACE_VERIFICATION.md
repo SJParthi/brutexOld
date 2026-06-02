@@ -59,10 +59,13 @@ in the per-PR `test` job (landed #280). This is a genuinely broad, real gate.
    per-bar / per-mask / dedup / rate-limit **primitives** exist and are
    O(1)-gated; the cascade is Phase 3. The 33B-trial / 2–4-day SLA is an
    `xfail` target until then.
-3. **pyright masked gate:** the CI `type` job installs only `.[dev]` (no `[ui]`),
-   so `brutex/dashboard/` is not faithfully type-checked in CI; with `[ui]`
-   installed, pyright surfaces 1 `reportUntypedBaseClass` in `dashboard/app.py:80`.
-   Same shape as the #376 test-masking finding. **Tracked follow-up.**
+3. **pyright masked gate:** the CI `type` job installed only `.[dev]` (no `[ui]`),
+   so `brutex/dashboard/` + the data paths were not faithfully type-checked in CI.
+   Same shape as the #376 test-masking finding. **✅ CLOSED by DEC-PYRIGHT-UNMASK-001
+   (#379):** the type job now installs `[dev,data,ui]`; the 10 surfaced errors
+   (1 pydantic `reportUntypedBaseClass` + 9 Hypothesis `@composite` false-positives)
+   are silenced per-site/per-file with rationale, and a regression guard prevents
+   re-masking. `pyright brutex tests` = 0 errors.
 4. **"int64 paisa storage" is overstated:** OHLC + PnL are stored as `Decimal`
    rupees (Parquet `Float64`); int64 paisa lives in the costs calculator +
    money display. Numerically safe; the doc claim in CLAUDE.md §6 / `money.py`

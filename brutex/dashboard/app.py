@@ -77,7 +77,10 @@ _LOG = structlog.get_logger("brutex.dashboard")
 _FILTER_TOKEN_COUNT = 3
 
 
-class CredentialsIn(BaseModel):
+# pydantic v2 BaseModel trips pyright strict `reportUntypedBaseClass` — a known
+# false positive (the base IS typed); silence per-site so the gate stays honest
+# everywhere else (DEC-PYRIGHT-UNMASK-001).
+class CredentialsIn(BaseModel):  # pyright: ignore[reportUntypedBaseClass]
     """Request body for ``POST /api/v1/credentials``.
 
     Defined at **module scope** (not inside :func:`build_app`) so FastAPI
