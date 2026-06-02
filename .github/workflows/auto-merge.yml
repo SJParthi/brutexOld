@@ -26,7 +26,10 @@
 #   b. Check trusted actor (SJParthi, dependabot[bot], renovate[bot],
 #      or any branch with head ref starting `claude/`).
 #   c. Check that the `CI OK (aggregate gate)` check run is success.
-#   d. Squash-merge + delete branch + post audit comment.
+#   d. Check GitHub mergeability — refuse `dirty` (conflict) / `behind`
+#      (stale base) / `mergeable == false` (DEC-AUTOMERGE-SAFETY-001 / G1,
+#      per docs/MERGE_READINESS_GUARANTEE.md §3).
+#   e. Squash-merge + delete branch + post audit comment.
 #
 # If any precondition fails the workflow exits cleanly — never
 # half-merges.
@@ -195,8 +198,69 @@ jobs:
           fi
           echo "green=true" >> "$GITHUB_OUTPUT"
 
-      - name: Squash-merge + delete branch
+      - name: Verify PR is mergeable (no conflict / not behind base)
+        id: mergeable-check
         if: steps.ci-check.outputs.green == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.find-pr.outputs.pr_number }}
+        # DEC-AUTOMERGE-SAFETY-001 (G1): the previous version merged on a
+        # green `CI OK` check alone and NEVER consulted GitHub's own
+        # mergeability. docs/MERGE_READINESS_GUARANTEE.md §3 (line 75)
+        # mandates `mergeable_state == clean` before merge. The 5-agent
+        # verification (DEC-WORKSPACE-VERIFY-001, MIGRATION.md #398) found
+        # this gap: PR #302 reached a `dirty` (conflicting) state with a
+        # green CI-OK and would have been auto-merged over the conflict.
+        #
+        # Honest envelope (Golden Rule #10): a strict `clean` requirement
+        # is only reachable once server-side branch protection (G2) is
+        # applied — without it GitHub reports `unstable` for every PR
+        # (no required checks server-side), which is the NORMAL,
+        # safe-to-merge state here. So this gate REJECTS the genuinely
+        # dangerous states — `dirty` (merge conflict) and `behind` (base
+        # advanced; squash would merge a stale tree) — and any
+        # `mergeable == false`, while allowing `clean` / `unstable` /
+        # `has_hooks`. `mergeable`/`mergeable_state` are computed async by
+        # GitHub, so poll until non-null. Once G2 lands, tighten the
+        # allow-list to `clean` only (tracked in the same DEC-ID).
+        run: |
+          set -euo pipefail
+          mergeable=""
+          state=""
+          for attempt in 1 2 3 4 5 6; do
+            read -r mergeable state < <(
+              gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+                --jq '[.mergeable, .mergeable_state] | @tsv'
+            )
+            echo "attempt ${attempt}: mergeable=${mergeable:-null} mergeable_state=${state:-null}"
+            if [[ "${mergeable}" != "null" && -n "${mergeable}" ]]; then
+              break
+            fi
+            sleep 5
+          done
+          if [[ "${mergeable}" == "null" || -z "${mergeable}" ]]; then
+            echo "::notice::GitHub has not computed mergeability yet; skipping this run (a later trigger will retry)"
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "${mergeable}" != "true" ]]; then
+            echo "::error::PR #${PR_NUMBER} is not mergeable (mergeable=${mergeable}, state=${state}); refusing to merge over a conflict"
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "${state}" in
+            dirty|behind|blocked|unknown)
+              echo "::error::PR #${PR_NUMBER} mergeable_state=${state}; refusing to merge (conflict / stale base / blocked)"
+              echo "safe=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          echo "PR #${PR_NUMBER} is mergeable (mergeable=true, state=${state})"
+          echo "safe=true" >> "$GITHUB_OUTPUT"
+
+      - name: Squash-merge + delete branch
+        if: steps.ci-check.outputs.green == 'true' && steps.mergeable-check.outputs.safe == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}

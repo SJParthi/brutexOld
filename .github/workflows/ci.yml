@@ -2092,6 +2092,12 @@ jobs:
       # citation scanner — partial automation of STANDARDS row 17.
       # Skipped on push events.
       - no-hallucination-scan
+      # DEC-AUTOMERGE-SAFETY-001 (G3): the conv-commits job RAN on every
+      # PR but was absent from ci-ok.needs, so a non-conforming commit
+      # message could not actually block merge despite the job being red.
+      # Wired in now. Skipped on push events (no PR head/base), which
+      # ci-ok already accepts as a pass-equivalent.
+      - conv-commits
       # Still advisory-only (continue-on-error): typos, complexity,
       # fno-math-drift — these are informational scans, not enforcement
       # gates per Golden Rule #12.
@@ -2125,6 +2131,7 @@ jobs:
           echo "  dec-id-validator:${{ needs.dec-id-validator.result }}"
           echo "  bugfix-regression-scan:${{ needs.bugfix-regression-scan.result }}"
           echo "  no-hallucination-scan:${{ needs.no-hallucination-scan.result }}"
+          echo "  conv-commits:  ${{ needs.conv-commits.result }}"
           for result in \
             "${{ needs.lint.result }}" \
             "${{ needs.type.result }}" \
@@ -2149,7 +2156,8 @@ jobs:
             "${{ needs.zplus-pr-guard.result }}" \
             "${{ needs.dec-id-validator.result }}" \
             "${{ needs.bugfix-regression-scan.result }}" \
-            "${{ needs.no-hallucination-scan.result }}"; do
+            "${{ needs.no-hallucination-scan.result }}" \
+            "${{ needs.conv-commits.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "❌ A required gate failed or was cancelled"
               exit 1
