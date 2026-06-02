@@ -34,9 +34,9 @@ def _index(symbol: str = "13", exchange: Exchange = Exchange.NSE) -> Instrument:
     """A spot index underlying (IDX → OPTIDX / ATM±10)."""
     return Instrument(
         exchange=exchange,
-        exchange_token=26000,
+        exchange_token=int(symbol),
         trading_symbol="NIFTY",
-        vendor_symbol=symbol,
+        vendor_symbol=f"{exchange.value}-NIFTY",
         name="NIFTY",
         instrument_type=InstrumentType.IDX,
         segment=Segment.CASH,
@@ -59,9 +59,9 @@ def _stock(symbol: str = "1333") -> Instrument:
     """A spot equity underlying (EQ → OPTSTK / ATM±3)."""
     return Instrument(
         exchange=Exchange.NSE,
-        exchange_token=1333,
+        exchange_token=int(symbol),
         trading_symbol="HDFCBANK",
-        vendor_symbol=symbol,
+        vendor_symbol="NSE-HDFCBANK",
         name="HDFCBANK",
         instrument_type=InstrumentType.EQ,
         segment=Segment.CASH,
@@ -110,8 +110,14 @@ def _option_leg() -> Instrument:
 
 class TestInstrumentToOptionUnderlying:
     def test_index_maps_to_optidx_wide_window(self) -> None:
-        u = instrument_to_option_underlying(_index(symbol="13", exchange=Exchange.NSE))
+        inst = _index(symbol="13", exchange=Exchange.NSE)
+        u = instrument_to_option_underlying(inst)
+        # security_id is the NUMERIC exchange_token (Dhan SECURITY_ID), NOT the
+        # vendor_symbol string — the 252-failed root cause
+        # (DEC-OPTION-SECURITY-ID-FIX-001).
         assert u.security_id == "13"
+        assert u.security_id == str(inst.exchange_token)
+        assert u.security_id != inst.vendor_symbol
         assert u.instrument == "OPTIDX"
         assert u.exchange_segment == "NSE_FNO"
         assert u.strike_offsets == 10
@@ -126,9 +132,9 @@ class TestInstrumentToOptionUnderlying:
         assert u.exchange_segment == "NSE_FNO"
         assert u.strike_offsets == 3
 
-    def test_blank_symbol_raises(self) -> None:
-        with pytest.raises(ValueError, match="non-empty Dhan SECURITY_ID"):
-            instrument_to_option_underlying(_index(symbol="   "))
+    def test_nonpositive_security_id_raises(self) -> None:
+        with pytest.raises(ValueError, match="valid numeric SECURITY_ID"):
+            instrument_to_option_underlying(_index(symbol="0"))
 
     def test_derivative_leg_is_not_an_underlying(self) -> None:
         with pytest.raises(ValueError, match="only IDX / EQ"):

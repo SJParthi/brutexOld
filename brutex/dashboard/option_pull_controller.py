@@ -76,8 +76,8 @@ def instrument_to_option_underlying(instrument: Instrument) -> OptionUnderlying:
     with the wide ATM±10 window; an **equity** (``EQ``) as ``OPTSTK`` with the
     ATM±3 window (DEC-DHAN-PULL-SCOPE-001). The exchange-segment is the
     underlying's exchange in the F&O segment (``NSE_FNO`` / ``BSE_FNO``), and
-    the underlying's ``vendor_symbol`` (Dhan ``SECURITY_ID``) is the rolling
-    option's resolution anchor.
+    the underlying's NUMERIC ``exchange_token`` (the Dhan ``SECURITY_ID``) is the
+    rolling option's resolution anchor — NOT the ``vendor_symbol`` string.
 
     Parameters
     ----------
@@ -93,23 +93,33 @@ def instrument_to_option_underlying(instrument: Instrument) -> OptionUnderlying:
     Raises
     ------
     ValueError
-        If *instrument*'s ``vendor_symbol`` is blank, or its type is neither
-        ``IDX`` nor ``EQ`` (a derivative leg is never a fan-out underlying).
+        If *instrument*'s ``exchange_token`` is not a positive ``SECURITY_ID``,
+        or its type is neither ``IDX`` nor ``EQ`` (a derivative leg is never a
+        fan-out underlying).
     """
-    symbol = instrument.vendor_symbol
-    if not symbol.strip():
-        raise ValueError("instrument.vendor_symbol must be a non-empty Dhan SECURITY_ID")
+    # The rolling-option API addresses the underlying by its NUMERIC Dhan
+    # SECURITY_ID (e.g. "13"), held on the instrument as ``exchange_token`` — NOT
+    # the exchange-prefixed ``vendor_symbol`` ("NSE-NIFTY", the engine lookup
+    # key). Sending the symbol string made Dhan reject EVERY series — the live
+    # "252 failed / 0 bars" symptom (DEC-OPTION-SECURITY-ID-FIX-001). The spot
+    # adapter already uses ``exchange_token``; the options path now matches.
+    if instrument.exchange_token <= 0:
+        raise ValueError(
+            f"{instrument.vendor_symbol} has no valid numeric SECURITY_ID "
+            f"(exchange_token={instrument.exchange_token})"
+        )
+    security_id = str(instrument.exchange_token)
     if instrument.instrument_type is InstrumentType.IDX:
         instrument_name, offsets = "OPTIDX", INDEX_STRIKE_OFFSETS
     elif instrument.instrument_type is InstrumentType.EQ:
         instrument_name, offsets = "OPTSTK", STOCK_STRIKE_OFFSETS
     else:
         raise ValueError(
-            f"{symbol} is a {instrument.instrument_type.value} — only IDX / EQ "
-            "underlyings have an options fan-out"
+            f"{instrument.vendor_symbol} is a {instrument.instrument_type.value} — only "
+            "IDX / EQ underlyings have an options fan-out"
         )
     return OptionUnderlying(
-        security_id=symbol,
+        security_id=security_id,
         exchange_segment=f"{instrument.exchange.value}_FNO",
         instrument=instrument_name,
         strike_offsets=offsets,
@@ -355,8 +365,10 @@ def pull_options(
 
     # Aggregate the per-series reports + quarantined failures by underlying.
     failed_by_symbol: dict[str, int] = {}
+    error_counts: dict[str, int] = {}
     for failure in report.failures:
         failed_by_symbol[failure.security_id] = failed_by_symbol.get(failure.security_id, 0) + 1
+        error_counts[failure.error] = error_counts.get(failure.error, 0) + 1
     completed_by_symbol: dict[str, tuple[int, int, int]] = {}
     for (security_id, *_rest), series_report in report.series.items():
         prev_count, prev_bars, prev_windows = completed_by_symbol.get(security_id, (0, 0, 0))
@@ -387,6 +399,18 @@ def pull_options(
         end_date=(end - timedelta(days=1)).date().isoformat(),
         symbols=results,
     )
+    # Surface WHY series failed (the silent-failure logging gap the operator
+    # flagged): a bare ``series_failed=N`` count hides the cause. Log the
+    # distinct terminal-error messages with counts so the failure is
+    # diagnosable in one glance (DEC-OPTION-SECURITY-ID-FIX-001).
+    if error_counts:
+        top_errors = sorted(error_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        _LOG.warning(
+            "universe.pull_options.failures",
+            total_failed=pull_report.total_series_failed,
+            distinct_errors=len(error_counts),
+            top_errors=[{"error": err[:300], "count": cnt} for err, cnt in top_errors],
+        )
     _LOG.info(
         "universe.pull_options.done",
         underlyings=pull_report.total_symbols,

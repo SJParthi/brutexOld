@@ -186,9 +186,17 @@ async function poll() {
     missingEl.textContent = (h.not_pulled ?? h.missing) ?? "—";
     const attempted = h.attempted ?? 0;
     const total = h.total ?? 0;
-    const inProgress = total > 0 && attempted < total;
     renderRows(body.rows || []);
-    liveTxt.textContent = inProgress
+    // The badge says "pulling" ONLY when a pull job is ACTUALLY running — never
+    // merely because coverage is incomplete (which would read "pulling" forever
+    // after a finished or all-failed pull — the operator's perpetual-loading
+    // symptom). DEC-OPTION-SECURITY-ID-FIX-001.
+    let running = false;
+    try {
+      const pr = await fetch('/api/v1/universe/pull-progress');
+      if (pr.ok) running = ((await pr.json()).state || "") === "running";
+    } catch (e) { running = false; }
+    liveTxt.textContent = running
       ? "pulling · " + attempted + " / " + total + " cells"
       : "live · " + (body.rows || []).length + " cells";
   } catch (e) {
