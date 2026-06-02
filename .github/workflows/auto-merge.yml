@@ -13,7 +13,12 @@
 # merge-ready state:
 #
 #   1. `workflow_run` (CI completed) — the original case. When CI
-#      finishes green on a non-draft PR's head commit, merge.
+#      finishes green on a non-draft PR's head commit, merge. Accepts
+#      BOTH `pull_request`- and `push`-event CI completions
+#      (DEC-AUTOMERGE-RACE-FIX-001): a branch with an open PR often has
+#      two concurrent CI runs, and the old `pull_request`-only filter let
+#      a green PR sit un-merged when only the `push` run's completion was
+#      seen (observed on PR #304).
 #   2. `pull_request: ready_for_review` — DEC-P0-056 fix. When a draft
 #      PR is undrafted AFTER CI already completed, the workflow_run
 #      trigger has already fired + skipped (because draft). This
@@ -22,7 +27,9 @@
 #   3. `workflow_dispatch` — manual escape hatch with optional PR number.
 #
 # In every path the chain is the same:
-#   a. Resolve the PR + head SHA.
+#   a. Resolve the PR; then re-resolve its CURRENT head SHA (not the
+#      trigger's SHA) so the gates check the commit that will be merged
+#      (DEC-AUTOMERGE-RACE-FIX-001).
 #   b. Check trusted actor (SJParthi, dependabot[bot], renovate[bot],
 #      or any branch with head ref starting `claude/`).
 #   c. Check that the `CI OK (aggregate gate)` check run is success.
@@ -81,7 +88,8 @@ jobs:
     if: |
       github.event_name == 'workflow_dispatch' || (
         github.event_name == 'workflow_run' &&
-        github.event.workflow_run.event == 'pull_request' &&
+        (github.event.workflow_run.event == 'pull_request' ||
+         github.event.workflow_run.event == 'push') &&
         github.event.workflow_run.conclusion == 'success'
       ) || (
         github.event_name == 'pull_request' &&
@@ -174,25 +182,38 @@ jobs:
           echo "::notice::Author ${AUTHOR} on branch ${HEAD_REF} is NOT trusted; skipping"
           echo "trusted=false" >> "$GITHUB_OUTPUT"
 
-      - name: Verify ci-ok aggregate is green
+      - name: Verify ci-ok aggregate is green (on the PR's CURRENT head)
         id: ci-check
         if: steps.trust-check.outputs.trusted == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          # Workflow_run + pull_request events expose head SHA in
-          # different places. Fall through to whichever populated it.
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ steps.find-pr.outputs.pr_number }}
+        # DEC-AUTOMERGE-RACE-FIX-001 (2026-06-02): gate on the PR's CURRENT
+        # head, re-resolved via `gh pr view`, NOT the triggering event's
+        # head_sha. The 5-agent verification follow-up (MIGRATION.md #398)
+        # found PR #304 sitting green-but-unmerged: its branch had TWO
+        # concurrent CI runs (a `push` run + a `pull_request` run); the old
+        # `if` filtered out the `push`-run completion, and `ci-check` keyed
+        # off the trigger's head_sha rather than the PR head — so no run
+        # ever merged it. Re-resolving the PR head here (plus accepting
+        # push-event CI completions above) makes the gate robust to which
+        # run completed and to a slightly stale trigger SHA.
         run: |
           set -euo pipefail
+          # Re-resolve the PR's current head so the gate always checks the
+          # commit that would actually be merged (not the trigger's SHA).
+          HEAD_SHA=$(gh pr view "${PR_NUMBER}" --repo "${REPO}" \
+            --json headRefOid --jq .headRefOid)
+          echo "PR #${PR_NUMBER} current head: ${HEAD_SHA}"
           # The ci-ok job produces a check run of the same name.
-          # It must exist AND be in conclusion=success.
+          # It must exist AND be in conclusion=success on the current head.
           conclusion=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" \
             --jq '.check_runs[] | select(.name == "CI OK (aggregate gate)") | .conclusion' \
             | head -1)
           echo "ci-ok conclusion: ${conclusion:-<missing>}"
           if [[ "${conclusion}" != "success" ]]; then
-            echo "::notice::ci-ok is not green (${conclusion:-missing}); skipping merge"
+            echo "::notice::ci-ok is not green (${conclusion:-missing}) on ${HEAD_SHA}; skipping merge"
             echo "green=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -228,7 +249,7 @@ jobs:
           set -euo pipefail
           mergeable=""
           state=""
-          for attempt in 1 2 3 4 5 6; do
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
             read -r mergeable state < <(
               gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
                 --jq '[.mergeable, .mergeable_state] | @tsv'
@@ -240,8 +261,17 @@ jobs:
             sleep 5
           done
           if [[ "${mergeable}" == "null" || -z "${mergeable}" ]]; then
-            echo "::notice::GitHub has not computed mergeability yet; skipping this run (a later trigger will retry)"
-            echo "safe=false" >> "$GITHUB_OUTPUT"
+            # DEC-AUTOMERGE-RACE-FIX-001: GitHub still hasn't computed
+            # mergeability after ~50s. The OLD behaviour set safe=false and
+            # relied on "a later trigger" — but if no later CI/PR event
+            # comes, the green PR is STRANDED needing a manual merge (the
+            # exact failure that needed a hand-merge on #304). Instead,
+            # DEFER to `gh pr merge` itself: GitHub's merge endpoint is the
+            # final arbiter and will REFUSE a real conflict. We lose only
+            # the pre-emptive `behind` check in this rare null window — a
+            # squash of a merely-behind (conflict-free) PR is safe.
+            echo "::warning::mergeability still null after polling; deferring conflict-check to the merge API (will refuse a real conflict)"
+            echo "safe=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [[ "${mergeable}" != "true" ]]; then
@@ -268,11 +298,12 @@ jobs:
         run: |
           set -euo pipefail
           echo "Merging PR #${PR_NUMBER} (ci-ok is green)"
+          HEAD_SHA=$(gh pr view "${PR_NUMBER}" --repo "${REPO}" \
+            --json headRefOid --jq .headRefOid)
           gh pr merge "${PR_NUMBER}" \
             --repo "${REPO}" \
             --squash \
             --delete-branch \
             --subject "$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json title --jq .title) (#${PR_NUMBER})"
-          HEAD_SHA="${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}"
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body \
             "🤖 Auto-merged (CI OK aggregate was green on head commit ${HEAD_SHA})."
