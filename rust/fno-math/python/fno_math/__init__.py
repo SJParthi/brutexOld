@@ -19,6 +19,8 @@ from ._fno_math import (
     bitand_count_u64s,
     bitcount_u64s,
     blake3_hash,
+    count_supermask_u64s,
+    count_supermasks_u64s,
     popcount_bytes,
 )
 
@@ -28,5 +30,7 @@ __all__ = [
     "bitand_count_u64s",
     "bitcount_u64s",
     "blake3_hash",
+    "count_supermask_u64s",
+    "count_supermasks_u64s",
     "popcount_bytes",
 ]

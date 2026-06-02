@@ -40,6 +40,24 @@ def blake3_hash(data: bytes) -> bytes:
     """Return the 32-byte BLAKE3 digest of `data`."""
     ...
 
+def count_supermask_u64s(bar_bits: list[int], mask: int) -> int:
+    """Count bars that are a SUPERSET of a single `mask`.
+
+    Returns the number of `bar` in `bar_bits` with `(bar & mask) == mask`.
+    `mask == 0` matches every bar (returns `len(bar_bits)`).
+    """
+    ...
+
+def count_supermasks_u64s(bar_bits: list[int], masks: list[int]) -> list[int]:
+    """Batched per-mask SUPERSET count — the Stage-2 hot kernel.
+
+    Returns a list of length `len(masks)` where `out[j]` is the number of
+    `bar` in `bar_bits` with `(bar & masks[j]) == masks[j]`. Positionally
+    aligned with `masks`. Empty `masks` → `[]`; empty `bar_bits` → `0` per
+    mask.
+    """
+    ...
+
 def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
     ...

@@ -47,14 +47,18 @@ swap to a faster algorithm without breaking callers.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from itertools import combinations
+
+import fno_math
 
 __all__ = [
     "MAX_VOCAB_BITS",
     "VOCAB_BITS",
     "bits_to_mask",
     "count_combos",
+    "count_supermasks",
+    "count_supermasks_reference",
     "evaluate_mask",
     "iter_masks_k_of_n",
     "mask_to_bits",
@@ -219,6 +223,96 @@ def evaluate_mask(bar_bits: int, required_mask: int) -> bool:
     True
     """
     return (bar_bits & required_mask) == required_mask
+
+
+# ─────────────────────────────────────────────────────────────────
+# Batched SUPERSET count — the Stage-2 hot kernel
+# ─────────────────────────────────────────────────────────────────
+
+
+def count_supermasks_reference(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]:
+    """Reference (numpy) per-mask SUPERSET count — the parity oracle.
+
+    For each ``mask`` in ``masks`` count the bars in ``bar_bits`` that are a
+    superset of it (``(bar & mask) == mask``). This is the pure-Python/numpy
+    implementation of the Stage-2 hot op (see ``evaluate_mask``); it is kept
+    as the **bit-exact oracle** that the Rust kernel (:func:`count_supermasks`)
+    is verified against in ``tests/property``.
+
+    Each per-mask pass is a numpy-vectorised
+    ``((bar_arr & mask) == mask).sum()`` — bars resident, masks streamed —
+    mirroring the loop structure of the Rust kernel.
+
+    Parameters
+    ----------
+    bar_bits : Sequence[int]
+        Per-bar packed u64 condition bitsets.
+    masks : Sequence[int]
+        Strategy masks to evaluate. Each ``out[j]`` aligns with ``masks[j]``.
+
+    Returns
+    -------
+    list[int]
+        Hit count per mask. Empty ``masks`` → ``[]``; empty ``bar_bits`` →
+        ``0`` per mask. ``mask == 0`` matches every bar.
+
+    Examples
+    --------
+    >>> count_supermasks_reference([0b11, 0b111, 0b1000, 0], [0b11, 0b1000, 0])
+    [2, 1, 4]
+    >>> count_supermasks_reference([], [0b1, 0b11])
+    [0, 0]
+    >>> count_supermasks_reference([0b1, 0b10], [])
+    []
+    """
+    if len(masks) == 0:
+        return []
+    if len(bar_bits) == 0:
+        return [0] * len(masks)
+    # numpy uint64 — the lake's native bar_bits dtype. Pure-integer, so the
+    # result is bit-exact and reduction-order independent (Golden Rule #4).
+    import numpy as np
+
+    bar_arr = np.asarray(bar_bits, dtype=np.uint64)
+    return [int(((bar_arr & np.uint64(mask)) == np.uint64(mask)).sum()) for mask in masks]
+
+
+def count_supermasks(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]:
+    """Batched per-mask SUPERSET count — the Stage-2 brute-force accelerator.
+
+    For each ``mask`` in ``masks`` return the number of bars in ``bar_bits``
+    that satisfy ``(bar & mask) == mask``. ``out[j]`` aligns with ``masks[j]``.
+
+    Delegates to the Rust hot kernel ``fno_math.count_supermasks_u64s``
+    (ADR-0004 "Rust CPU kernel first"; a single fused branchless loop,
+    masks-outer/bars-inner, memory-bandwidth-bound). The numpy reference
+    :func:`count_supermasks_reference` is the parity oracle the kernel is
+    verified against bit-for-bit in ``tests/property`` and remains the
+    drop-in fallback (identical signature + semantics).
+
+    Parameters
+    ----------
+    bar_bits : Sequence[int]
+        Per-bar packed u64 condition bitsets.
+    masks : Sequence[int]
+        Strategy masks to evaluate.
+
+    Returns
+    -------
+    list[int]
+        Hit count per mask. Empty ``masks`` → ``[]``; empty ``bar_bits`` →
+        ``0`` per mask. ``mask == 0`` matches every bar.
+
+    Examples
+    --------
+    >>> count_supermasks([0b11, 0b111, 0b1000, 0], [0b11, 0b1000, 0])
+    [2, 1, 4]
+    >>> count_supermasks([], [0b1, 0b11])
+    [0, 0]
+    >>> count_supermasks([0b1, 0b10], [])
+    []
+    """
+    return list(fno_math.count_supermasks_u64s(list(bar_bits), list(masks)))
 
 
 # ─────────────────────────────────────────────────────────────────

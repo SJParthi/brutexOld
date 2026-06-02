@@ -23,6 +23,8 @@ from brutex.engine.combo_mask import (
     VOCAB_BITS,
     bits_to_mask,
     count_combos,
+    count_supermasks,
+    count_supermasks_reference,
     evaluate_mask,
     iter_masks_k_of_n,
     mask_to_bits,
@@ -341,3 +343,71 @@ def test_count_combos_uses_exact_arithmetic() -> None:
     for n in range(10):
         for k in range(n + 1):
             assert count_combos(k, n=n) == comb(n, k)
+
+
+# ─────────────────────────────────────────────────────────────────
+# count_supermasks — Rust kernel + numpy reference oracle
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_count_supermasks_reference_empty_masks() -> None:
+    """Empty masks → empty list (both impls)."""
+    assert count_supermasks_reference([0b1, 0b10], []) == []
+    assert count_supermasks([0b1, 0b10], []) == []
+
+
+def test_count_supermasks_reference_empty_bars() -> None:
+    """Empty bars → zero per mask (both impls)."""
+    assert count_supermasks_reference([], [0b1, 0b11, 0]) == [0, 0, 0]
+    assert count_supermasks([], [0b1, 0b11, 0]) == [0, 0, 0]
+
+
+def test_count_supermasks_mask_zero_matches_all() -> None:
+    """mask == 0 requires nothing → every bar matches."""
+    bars = [0b0001, 0b1010, 0b1111]
+    assert count_supermasks_reference(bars, [0]) == [3]
+    assert count_supermasks(bars, [0]) == [3]
+
+
+def test_count_supermasks_all_match() -> None:
+    """Every bar a superset of the mask → count == len(bars)."""
+    bars = [0b0011, 0b0111, 0b1111, 0b1011]
+    assert count_supermasks(bars, [0b0011]) == [4]
+
+
+def test_count_supermasks_none_match() -> None:
+    """No bar has the required bit → count 0."""
+    bars = [0b0001, 0b0010, 0b0100, 0b0111]
+    assert count_supermasks(bars, [0b1000]) == [0]
+
+
+def test_count_supermasks_partial_match() -> None:
+    """Only bars with all required bits count."""
+    bars = [0b0011, 0b0001, 0b0010, 0b1011, 0b0100]
+    assert count_supermasks(bars, [0b0011]) == [2]
+
+
+def test_count_supermasks_multi_mask_aligned() -> None:
+    """out[j] aligns with masks[j]; matches the reference oracle."""
+    bars = [0b0011, 0b0111, 0b1000, 0b1011, 0b0000]
+    masks = [0b0011, 0b1000, 0b1111, 0]
+    expected = [3, 2, 0, 5]
+    assert count_supermasks(bars, masks) == expected
+    assert count_supermasks_reference(bars, masks) == expected
+
+
+def test_count_supermasks_high_bit() -> None:
+    """Bit 63 (full u64 width) handled correctly."""
+    top = 1 << 63
+    bars = [top, top | 1, 0, 1]
+    assert count_supermasks(bars, [top]) == [2]
+    assert count_supermasks_reference(bars, [top]) == [2]
+
+
+def test_count_supermasks_matches_reference_via_evaluate_mask() -> None:
+    """Both impls agree with the per-bar evaluate_mask ground truth."""
+    bars = [0, 1, 0b1011, 0b1111, 1 << 40, 0xDEAD_BEEF]
+    masks = [0, 1, 0b1010, 1 << 40, 0xFFFF_FFFF_FFFF_FFFF]
+    truth = [sum(evaluate_mask(b, m) for b in bars) for m in masks]
+    assert count_supermasks(bars, masks) == truth
+    assert count_supermasks_reference(bars, masks) == truth

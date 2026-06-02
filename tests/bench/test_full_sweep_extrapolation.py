@@ -22,9 +22,10 @@ def test_projected_33b_within_sla(benchmark):
     assert projected_33b_seconds <= 4 * 86400
 ```
 
-Instead, this v1 microbenchmarks the **per-trial kernel proxy** that
-every Stage 2 trial WILL consume — ``bitand_count_u64s`` + ``blake3_hash``
-— measures the wall time, projects to 33B trials, and:
+Instead, this microbenchmarks the **per-trial kernel proxy** that
+every Stage 2 trial WILL consume — the Stage-2 SUPERSET op
+``count_supermask_u64s`` (shipped DEC-RUST-SUPERMASK-KERNEL-001) +
+``blake3_hash`` — measures the wall time, projects to 33B trials, and:
 
 1. **PRINTS the projection** to stdout + bench-results.json so the
    operator can read the absolute envelope from CI logs.
@@ -41,24 +42,28 @@ every Stage 2 trial WILL consume — ``bitand_count_u64s`` + ``blake3_hash``
 
 ## Per-trial proxy composition
 
-| Op | Cost (CI, ubuntu-24.04 measured) | Why representative |
+| Op | Cost (measured) | Why representative |
 |---|---|---|
-| ``bitand_count_u64s`` over 50K u64s | ~2.6 ms | Stage 2's AND-count over a 5-year × 15m bar window |
+| ``count_supermask_u64s`` over 50K u64s | ~1.0 ms/trial (incl. blake3) | Stage 2's SUPERSET test over a 5-year × 15m bar window |
 | ``blake3_hash`` over 200-byte payload | ~3 µs | per-trial combo_hash (DEC-P0-060 9-field BLAKE3) |
 
 The proxy is **pessimistic** — it includes Python list → Rust Vec
-allocation overhead that real Stage 2 will eliminate via numpy buffer
-pass-through or Rust-native loops. Real M4 Pro Stage 2 expectation per
-PERFORMANCE_BUDGET §5: 80-150K trials/sec = 6-13 µs/trial. The proxy
-overshoots by ~200-400×.
+allocation overhead PER CALL that real Stage 2 will eliminate via numpy
+buffer pass-through / Rust-native loops + bars resident across masks. The
+kernel's batched best case (bars resident) measures ~60 µs/trial. Real
+M4 Pro Stage 2 expectation per PERFORMANCE_BUDGET §5: 80-150K trials/sec
+= 6-13 µs/trial. The per-call proxy overshoots by ~80-160×.
 
 ## Honest envelope (Golden Rule #10)
 
 - **REAL:** the regression-floor gate fires on any 4× kernel slowdown.
   The first production caller of the AND-count kernel exists
   (DEC-P0-057 Bloom popcount); regressions there would surface here.
-- **PARTIAL:** the 4-day SLA assertion is XFAIL until the
-  ``count_supermasks`` kernel + Stage 1A/1B/2/3/4 engine land. The
+- **PARTIAL:** the 4-day SLA assertion is XFAIL until the Stage
+  1A/1B/2/3/4 engine lands. The ``count_supermasks_u64s`` kernel itself
+  HAS shipped (DEC-RUST-SUPERMASK-KERNEL-001) and is wired into the
+  proxy below, but it is only one part — the full SLA additionally needs
+  Stage 1A/1B trial pruning + resident bar buffers + the trade-sim. The
   gate-name + the failing assertion remind every PR author that the
   spec's headline claim is unverified — the operator agreed to ship
   the gate FAILING-FOR-NOW per Golden Rule #10 honesty over an
@@ -66,10 +71,14 @@ overshoots by ~200-400×.
 - **PARTIAL:** no benchmark-vs-target-hardware calibration — the
   hardware factor (M4 Pro vs GH ubuntu-24.04) is approximated at 5×
   per the chronic-flake history; Phase 6 will derive it empirically.
-- **ROADMAP:** when ``count_supermasks_u64s`` ships in
-  ``rust/fno-math/`` (Stage 1A scaffold prerequisite), swap the
-  ``bitand_count_u64s`` proxy here. Drop the XFAIL marker the day the
-  projection drops under 4 days × 5 = 20 days CI.
+- **DONE:** ``count_supermasks_u64s`` / ``count_supermask_u64s`` shipped
+  in ``rust/fno-math/`` (DEC-RUST-SUPERMASK-KERNEL-001); the proxy below
+  now uses the SUPERSET kernel instead of ``bitand_count_u64s``.
+- **ROADMAP:** drop the XFAIL marker the day the projection drops under
+  4 days × 5 = 20 days CI — i.e. once Stage 1A/1B pruning + resident bar
+  buffers + the trade-sim land (G-03), not before. Measured today: the
+  best-case batched kernel still projects ~23 days raw, so the gate
+  stays HONEST-XFAIL.
 """
 
 from __future__ import annotations
@@ -123,18 +132,19 @@ def _measure_per_trial_seconds() -> float:
     """Microbenchmark the per-trial hot-path proxy.
 
     Returns the wall-time in seconds for one trial-equivalent of work:
-    one ``bitand_count_u64s`` over the 50K-u64 bar window + one
+    one ``count_supermask_u64s`` (the Stage-2 SUPERSET op,
+    DEC-RUST-SUPERMASK-KERNEL-001) over the 50K-u64 bar window + one
     ``blake3_hash`` of a 200-byte combo_hash payload. Calibrated by
     repeated sampling so the result is stable to within ±10% under
     typical CI noise.
     """
     bar_window: list[int] = [0xDEADBEEFCAFEBABE + i for i in range(_BAR_WINDOW_U64S)]
-    strategy_mask: list[int] = [0xFFFFFFFFFFFFFFFF] * _BAR_WINDOW_U64S
+    strategy_mask: int = 0xFFFFFFFFFFFFFFFF
     payload: bytes = b"x" * 200
 
     # Warm caches + allocator (PyO3 has no JIT but the wheel-side
     # allocator benefits from one preflight call).
-    fno_math.bitand_count_u64s(bar_window, strategy_mask)
+    fno_math.count_supermask_u64s(bar_window, strategy_mask)
     fno_math.blake3_hash(payload)
 
     # Time N trial-equivalents, divide. N chosen so total wall is
@@ -142,7 +152,7 @@ def _measure_per_trial_seconds() -> float:
     n_iters: int = 50
     start = time.perf_counter()
     for _ in range(n_iters):
-        fno_math.bitand_count_u64s(bar_window, strategy_mask)
+        fno_math.count_supermask_u64s(bar_window, strategy_mask)
         fno_math.blake3_hash(payload)
     elapsed = time.perf_counter() - start
     return elapsed / n_iters
@@ -160,9 +170,10 @@ def _project_sweep_envelope() -> tuple[float, float, str, float]:
 def test_per_trial_kernel_regression_floor() -> None:
     """Per-trial proxy ≤ 10 ms — catches 4× kernel regressions.
 
-    This is the REAL gate v1 ships. Today's baseline on ubuntu-24.04
-    is ~2.6 ms/trial; a regression to 10 ms+ means either:
-      (a) the AND-count kernel (DEC-P0-051) shipped a slowdown,
+    This is the REAL gate v1 ships. With the SUPERSET kernel wired in
+    (DEC-RUST-SUPERMASK-KERNEL-001) the baseline is ~1.0 ms/trial; a
+    regression to 10 ms+ means either:
+      (a) the SUPERSET kernel (DEC-RUST-SUPERMASK-KERNEL-001) regressed,
       (b) the BLAKE3 kernel (DEC-P0-052) shipped a slowdown, or
       (c) the maturin wheel build pipeline broke PyO3's release-mode
           optimisations (e.g., LTO disabled, debug symbols inflating
@@ -179,10 +190,10 @@ def test_per_trial_kernel_regression_floor() -> None:
     assert per_trial <= _REGRESSION_FLOOR_SECONDS_PER_TRIAL, (
         f"Per-trial proxy {per_trial * 1e3:.2f} ms exceeds the "
         f"{_REGRESSION_FLOOR_SECONDS_PER_TRIAL * 1e3:.0f} ms regression floor. "
-        f"Either the AND-count kernel (DEC-P0-051), the BLAKE3 kernel "
-        f"(DEC-P0-052), or the maturin wheel build pipeline regressed. "
-        f"Check bench-results.json + the fno-math Rust profile (LTO + "
-        f"opt-level=3 must hold)."
+        f"Either the SUPERSET kernel (DEC-RUST-SUPERMASK-KERNEL-001), the "
+        f"BLAKE3 kernel (DEC-P0-052), or the maturin wheel build pipeline "
+        f"regressed. Check bench-results.json + the fno-math Rust profile "
+        f"(LTO + opt-level=3 must hold)."
     )
 
 
@@ -190,11 +201,19 @@ def test_per_trial_kernel_regression_floor() -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "v1 proxy is pessimistic: includes Python list → Rust Vec allocation "
-        "overhead per call (Hostile P9 from DEC-P0-060 pre-impl review). "
-        "Hard 4-day SLA gate flips to PASS the day the engine ships "
-        "`count_supermasks_u64s` + numpy/Rust-side bar-window buffers. "
-        "Tracked as DEC-P0-062 ROADMAP."
+        "`count_supermasks_u64s` NOW SHIPS (DEC-RUST-SUPERMASK-KERNEL-001) — "
+        "measured ~1.7× faster than the numpy reference on a 94k-bar × 10k-mask "
+        "workload (1583 vs 931 M mask·bar/s; 0.63 ns per bar·mask), and the "
+        "per-trial proxy here dropped ~2.4× (≈2.5 ms → ≈1.0 ms/trial). But the "
+        "proxy is STILL pessimistic: it pays the Python list → Rust Vec "
+        "marshalling of the full bar window PER CALL (Hostile P9 from "
+        "DEC-P0-060). Even the kernel's best-case batched figure (bars "
+        "resident across masks, no per-trial blake3) projects to ~23 days raw "
+        "for 33B trials — over the 4-day M4 Pro SLA and the 20-day CI cap. The "
+        "kernel is one part; the full SLA additionally needs Stage 1A/1B trial "
+        "pruning + numpy/Rust-side resident bar buffers + the trade-sim, none "
+        "of which exist yet (G-03). HONEST-XFAIL per Golden Rule #10 until the "
+        "full engine lands. Tracked as DEC-P0-062 / DEC-RUST-SUPERMASK-KERNEL-001."
     ),
 )
 def test_projected_33b_within_sla() -> None:
