@@ -13,7 +13,7 @@ from brutex.data.watermark import ChunkKey, ChunkStatus, FetchWatermark
 
 def _key(symbol: str = "NSE-NIFTY", interval: str = "1m") -> ChunkKey:
     return ChunkKey(
-        groww_symbol=symbol,
+        vendor_symbol=symbol,
         interval=interval,
         start="2021-01-01T09:15:00",
         end="2021-01-31T15:30:00",
@@ -25,7 +25,7 @@ class TestChunkKey:
         k = _key()
         assert hash(k) == hash(_key())
         with pytest.raises(Exception):  # FrozenInstanceError
-            k.groww_symbol = "X"  # type: ignore[misc]
+            k.vendor_symbol = "X"  # type: ignore[misc]
 
     def test_distinct_windows_differ(self) -> None:
         assert _key(symbol="NSE-NIFTY") != _key(symbol="NSE-BANKNIFTY")
@@ -112,7 +112,7 @@ class TestQuarantined:
         wm.record(_key(symbol="B"), ChunkStatus.COMPLETED)
         wm.record(_key(symbol="C"), ChunkStatus.FAILED)
         q = wm.quarantined()
-        assert {k.groww_symbol for k in q} == {"A", "C"}
+        assert {k.vendor_symbol for k in q} == {"A", "C"}
 
     def test_empty_when_none_failed(self) -> None:
         wm = FetchWatermark()
@@ -165,7 +165,7 @@ class TestSerializeRestore:
         rows = wm.to_rows()
         assert rows == [
             {
-                "groww_symbol": "NSE-NIFTY",
+                "vendor_symbol": "NSE-NIFTY",
                 "interval": "1m",
                 "start": "2021-01-01T09:15:00",
                 "end": "2021-01-31T15:30:00",

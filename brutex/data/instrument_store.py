@@ -3,7 +3,7 @@
 THE single source of truth for every tradable symbol BruteX knows
 about. Every downstream phase (expiries / contracts / candles /
 strategies / sweep / execution / dashboard) reads from this store
-instead of re-parsing the Groww instrument master CSV or holding its own copy.
+instead of re-parsing the Dhan instrument master CSV or holding its own copy.
 
 ## Why this exists
 
@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS contracts (
     exchange          VARCHAR NOT NULL,
     underlying_symbol VARCHAR NOT NULL,
     expiry_date       DATE    NOT NULL,
-    contract_symbol   VARCHAR NOT NULL,   -- full Groww trading symbol of the leg
+    contract_symbol   VARCHAR NOT NULL,   -- full Dhan contract symbol of the leg
     snapshot_date     DATE    NOT NULL,
 
     instrument_type   VARCHAR NOT NULL,   -- FUT | CE | PE
@@ -288,7 +288,7 @@ class InstrumentRun:
     Written to ``instrument_runs`` table by
     :meth:`InstrumentStore.record_run` after the upsert completes.
     Lets the dashboard and audit layer reconstruct the full history
-    of ingest attempts without replaying the Groww instrument master CSV.
+    of ingest attempts without replaying the Dhan instrument master CSV.
     """
 
     run_id: str
@@ -353,7 +353,7 @@ class ContractRecord:
     """One contract leg \u2014 output of Phase C per ``(underlying, expiry)``.
 
     Primary key is ``(contract_symbol, snapshot_date)`` \u2014
-    ``contract_symbol`` is the full Groww trading symbol (e.g.
+    ``contract_symbol`` is the full Dhan contract symbol (e.g.
     ``NSE-NIFTY-29May25-24000-CE``) which is globally unique, and
     ``snapshot_date`` gives temporal history.
     """
@@ -918,7 +918,7 @@ class InstrumentStore(metaclass=_StoreMeta):
             Normalised :class:`Instrument` objects, typically the
             full filtered output of Phase A.
         snapshot_date
-            Calendar date the Groww instrument master CSV was pulled for. Part of
+            Calendar date the Dhan instrument master CSV was pulled for. Part of
             the primary key.
         run_id
             Ingest run UUID. Recorded on every row for audit.
@@ -940,7 +940,7 @@ class InstrumentStore(metaclass=_StoreMeta):
 
         # Ultra-fast bulk path (DEC-INSTRUMENT-BULK-UPSERT-001). The original
         # implementation issued one DELETE + one INSERT per row (~2·N SQL
-        # round-trips for an N-row master; ≈300k for the ~150k-row Groww CSV)
+        # round-trips for an N-row master; ≈300k for the large detailed instrument-master CSV)
         # which took MINUTES. DuckDB ``executemany`` is still a per-row loop
         # internally (measured ≈320 rows/s — no better), so the real fix is
         # DuckDB's columnar Arrow path: register the incoming rows as one
@@ -1866,7 +1866,7 @@ class InstrumentStore(metaclass=_StoreMeta):
         * **CSV source drift** \u2014 returns a per-date map of
           distinct ``csv_source_sha256`` counts. Anything other
           than ``1`` means two pulls on the same day saw
-          different CSV content \u2014 Groww master CSV drift in-flight.
+          different CSV content \u2014 Dhan master CSV drift in-flight.
         """
         self._ensure_open()
         total_row = self._conn.execute("SELECT COUNT(*) FROM instruments").fetchone()

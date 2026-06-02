@@ -1,12 +1,12 @@
-"""Parse raw the Groww candle rows into :class:`CandleBar` instances.
+"""Parse raw 7-element candle rows into :class:`CandleBar` instances.
 
-Groww's ``POST /v2/charts/historical`` returns rows as 7-element arrays::
+The legacy 7-element row candle format is::
 
     [timestamp_iso, open, high, low, close, volume, open_interest_or_none]
 
 * ``timestamp_iso`` — ``YYYY-MM-DDTHH:mm:ss`` (no timezone suffix, but
-  per Groww historical data API docs these are **IST** market
-  times and the adapter MUST convert to UTC on ingest).
+  these are **IST** market times and the adapter MUST convert to UTC
+  on ingest).
 * ``open/high/low/close`` — floats (price in rupees).
 * ``volume`` — integer trade volume.
 * ``open_interest`` — integer OI for F&O instruments, ``None`` for cash
@@ -15,6 +15,10 @@ Groww's ``POST /v2/charts/historical`` returns rows as 7-element arrays::
 This module is **pure** — no imports of polars / duckdb / pyarrow —
 so it participates in the unit-test suite without the P2 data-lake
 dependency extras installed.
+
+Note: the live Dhan path uses the columnar parser in
+``brutex/adapters/dhan/parser.py``; this row parser is the
+canonical/legacy 7-field shape.
 """
 
 from __future__ import annotations
@@ -30,14 +34,13 @@ from brutex.data.models import CandleBar
 #: India Standard Time offset (+05:30). No DST — IST is fixed.
 _IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30), name="IST")
 
-#: Number of fields in a Groww historical candle row. See
-#: Groww historical data API docs: 7-tuple
+#: Number of fields in a 7-element candle row: 7-tuple
 #: ``[timestamp, open, high, low, close, volume, open_interest]``.
 BROKER_CANDLE_ROW_FIELDS: Final[int] = 7
 
 
 class CandleRowError(DataLakeError):
-    """Raised when a raw the Groww candle row cannot be parsed.
+    """Raised when a raw 7-element candle row cannot be parsed.
 
     The error message always names the offending field so debugging
     a bad upstream payload is a single log-line lookup.
@@ -45,7 +48,7 @@ class CandleRowError(DataLakeError):
 
 
 def parse_candle_row(row: Sequence[Any]) -> CandleBar:
-    """Convert one raw the Groww candle row into a :class:`CandleBar`.
+    """Convert one raw 7-element candle row into a :class:`CandleBar`.
 
     Parameters
     ----------
@@ -65,7 +68,7 @@ def parse_candle_row(row: Sequence[Any]) -> CandleBar:
     """
     if len(row) != BROKER_CANDLE_ROW_FIELDS:
         raise CandleRowError(
-            f"the Groww candle row must have {BROKER_CANDLE_ROW_FIELDS} elements "
+            f"the candle row must have {BROKER_CANDLE_ROW_FIELDS} elements "
             f"[ts, o, h, l, c, v, oi], got {len(row)}: {row!r}"
         )
     ts_raw, open_raw, high_raw, low_raw, close_raw, vol_raw, oi_raw = row
@@ -74,11 +77,11 @@ def parse_candle_row(row: Sequence[Any]) -> CandleBar:
     if not isinstance(ts_raw, str):
         raise CandleRowError(f"timestamp must be an ISO string, got {type(ts_raw).__name__}")
     try:
-        # Groww uses 'T' separator; fromisoformat handles both 'T' and ' '.
+        # The row uses 'T' separator; fromisoformat handles both 'T' and ' '.
         naive = datetime.fromisoformat(ts_raw)
     except ValueError as exc:
         raise CandleRowError(f"timestamp {ts_raw!r} is not valid ISO-8601") from exc
-    # Groww omits the offset; attach IST then convert to UTC.
+    # The row omits the offset; attach IST then convert to UTC.
     if naive.tzinfo is None:
         naive = naive.replace(tzinfo=_IST)
     ts_utc = naive.astimezone(UTC)
@@ -125,7 +128,7 @@ def parse_candle_row(row: Sequence[Any]) -> CandleBar:
 def parse_candle_rows(
     rows: Sequence[Sequence[Any]],
 ) -> list[CandleBar]:
-    """Parse a list of the Groww candle rows, raising on the first error.
+    """Parse a list of 7-element candle rows, raising on the first error.
 
     The driver should call this inside a try/except so a single
     malformed row doesn't crash the whole batch — it can be routed

@@ -77,16 +77,16 @@ MONTHS_PER_YEAR: Final[int] = 12
 class CandleBar:
     """One OHLCV bar row as written to Parquet.
 
-    Matches the 7-tuple layout returned by Groww's
-    ``get_historical_candles``:
+    Matches the canonical 7-field candle tuple
+    (open/high/low/close/volume/timestamp/open_interest):
 
     ``[timestamp, open, high, low, close, volume, open_interest_or_none]``
 
     We use ``Decimal`` for price fields to keep round-trip equality
     exact (float arithmetic introduces rounding drift which would
     fail the byte-for-byte reproducibility check in
-    ``NFR-DET-001``). Volume and open interest are integers since
-    Groww always delivers them as integer shares/contracts.
+    ``NFR-DET-001``). Volume and open-interest are integer
+    shares/contracts.
 
     Attributes
     ----------
@@ -216,9 +216,9 @@ class CatalogEntry:
     segment
         CASH or FNO.
     symbol
-        Full Groww trading symbol, e.g. ``NSE-NIFTY-02Jan25-28500-PE``.
+        Full Dhan/canonical contract symbol, e.g. ``NSE-NIFTY-02Jan25-28500-PE``.
     interval
-        the Groww interval name, e.g. ``1minute``, ``1day``.
+        the canonical interval name, e.g. ``1minute``, ``1day``.
     year, month
         Partition key — calendar year/month of the bars in the file.
     raw_hash

@@ -13,7 +13,7 @@ class PartitionError(DataLakeError):
     """Raised when a partition path cannot be computed or parsed.
 
     Examples:
-    * An interval name not in the the Groww native intervals table
+    * An interval name not in the canonical intervals table
     * A symbol with an illegal character for the filesystem
     * A malformed partition path passed to :func:`parse_partition_path`
     """
