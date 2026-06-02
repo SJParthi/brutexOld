@@ -33,8 +33,6 @@ from brutex.data.coverage_ledger import CoverageRecord, classify_cell
 from brutex.data.errors import CatalogError
 from brutex.data.instrument_store import (
     SCHEMA_VERSION,
-    ContractRecord,
-    ExpiryRecord,
     InstrumentRun,
     InstrumentSnapshot,
     InstrumentStore,
@@ -653,204 +651,6 @@ class TestClosedStore:
 # ────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.skip(  # pyright: ignore[reportUntypedClassDecorator]
-    reason=(
-        "DEC-P0-011 (PR #33): Track 2 F&O functionality. The expiries table "
-        "stores option expiry dates per (exchange, underlying, year) \u2014 meaningless "
-        "for Track 1 spot indexes which don't have expiries. Revisit in Phase 2 "
-        "when Track 2 options pipeline lands."
-    ),
-)
-class TestExpiriesTable:
-    """Phase B persistence \u2014 expiries per (exchange, underlying, year)."""
-
-    @staticmethod
-    def _exp(
-        *,
-        underlying: str = "NIFTY",
-        expiry: date,
-        snapshot: date,
-        run_id: str = "r1",
-        exchange: str = "NSE",
-    ) -> ExpiryRecord:
-        return ExpiryRecord(
-            exch_id=exchange,
-            underlying_symbol=underlying,
-            sm_expiry_date=expiry,
-            snapshot_date=snapshot,
-            pulled_year=expiry.year,
-            fetched_at=datetime(snapshot.year, snapshot.month, snapshot.day, tzinfo=UTC),
-            run_id=run_id,
-        )
-
-    def test_upsert_same_expiry_100_times_is_idempotent(self, tmp_path: Path) -> None:
-        exp = self._exp(expiry=date(2025, 5, 29), snapshot=date(2025, 4, 15))
-        with InstrumentStore.open(tmp_path / "db") as s:
-            for _ in range(100):
-                s.upsert_expiries([exp])
-            assert s.count_expiries() == 1
-            results = s.list_expiries(underlying_symbol="NIFTY")
-            assert len(results) == 1
-
-    def test_list_expiries_filters_underlying(self, tmp_path: Path) -> None:
-        with InstrumentStore.open(tmp_path / "db") as s:
-            s.upsert_expiries(
-                [
-                    self._exp(
-                        underlying="NIFTY",
-                        expiry=date(2025, 5, 29),
-                        snapshot=date(2025, 4, 15),
-                    ),
-                    self._exp(
-                        underlying="BANKNIFTY",
-                        expiry=date(2025, 5, 29),
-                        snapshot=date(2025, 4, 15),
-                    ),
-                    self._exp(
-                        underlying="NIFTY",
-                        expiry=date(2025, 6, 26),
-                        snapshot=date(2025, 4, 15),
-                    ),
-                ]
-            )
-            nifty = s.list_expiries(underlying_symbol="NIFTY")
-            banknifty = s.list_expiries(underlying_symbol="BANKNIFTY")
-        assert len(nifty) == 2
-        assert len(banknifty) == 1
-        assert sorted(e.sm_expiry_date for e in nifty) == [
-            date(2025, 5, 29),
-            date(2025, 6, 26),
-        ]
-
-    def test_temporal_history_preserved(self, tmp_path: Path) -> None:
-        """Same expiry on two different snapshot_dates \u2192 two rows."""
-        with InstrumentStore.open(tmp_path / "db") as s:
-            s.upsert_expiries(
-                [
-                    self._exp(
-                        expiry=date(2025, 5, 29),
-                        snapshot=date(2025, 4, 10),
-                        run_id="r1",
-                    ),
-                ]
-            )
-            s.upsert_expiries(
-                [
-                    self._exp(
-                        expiry=date(2025, 5, 29),
-                        snapshot=date(2025, 4, 15),
-                        run_id="r2",
-                    ),
-                ]
-            )
-            # count_expiries() counts DISTINCT (exch, underlying, expiry) triplets,
-            # so the two snapshots on the same triplet collapse to 1.
-            assert s.count_expiries() == 1
-            # as_of(2025-04-11) returns the 2025-04-10 snapshot.
-            rows = s.list_expiries(underlying_symbol="NIFTY", as_of=date(2025, 4, 11))
-            assert len(rows) == 1
-            assert rows[0].snapshot_date == date(2025, 4, 10)
-
-
-@pytest.mark.skip(  # pyright: ignore[reportUntypedClassDecorator]
-    reason=(
-        "DEC-P0-011 (PR #33): Track 2 F&O functionality. The contracts table "
-        "stores option contract legs per (underlying, expiry) \u2014 meaningless for "
-        "Track 1 spot indexes. Revisit in Phase 2."
-    ),
-)
-class TestContractsTable:
-    """Phase C persistence \u2014 contract legs per (underlying, expiry)."""
-
-    @staticmethod
-    def _contract(
-        *,
-        underlying: str = "NIFTY",
-        expiry: date,
-        strike: int,
-        side: InstrumentType,
-        snapshot: date,
-        run_id: str = "r1",
-    ) -> ContractRecord:
-        symbol = f"NSE-{underlying}-{expiry.strftime('%d%b%y')}-{strike}-{side.value}"
-        return ContractRecord(
-            exch_id="NSE",
-            underlying_symbol=underlying,
-            sm_expiry_date=expiry,
-            symbol_name=symbol,
-            snapshot_date=snapshot,
-            instrument=side,
-            strike_price=Decimal(str(strike)),
-            lot_size=25,
-            sm_freeze_qty=1800,
-            tick_size=Decimal("0.05"),
-            fetched_at=datetime(snapshot.year, snapshot.month, snapshot.day, tzinfo=UTC),
-            run_id=run_id,
-        )
-
-    def test_upsert_same_contract_100_times_is_idempotent(self, tmp_path: Path) -> None:
-        c = self._contract(
-            expiry=date(2025, 5, 29),
-            strike=24000,
-            side=InstrumentType.CE,
-            snapshot=date(2025, 4, 15),
-        )
-        with InstrumentStore.open(tmp_path / "db") as s:
-            for _ in range(100):
-                s.upsert_contracts([c])
-            assert s.count_contracts() == 1
-            result = s.list_contracts(underlying_symbol="NIFTY", sm_expiry_date=date(2025, 5, 29))
-            assert len(result) == 1
-            assert result[0].strike_price == Decimal("24000.0000")
-
-    def test_list_contracts_by_underlying_and_expiry(self, tmp_path: Path) -> None:
-        contracts = [
-            self._contract(
-                underlying="NIFTY",
-                expiry=date(2025, 5, 29),
-                strike=s,
-                side=InstrumentType.CE,
-                snapshot=date(2025, 4, 15),
-            )
-            for s in (23900, 24000, 24100)
-        ] + [
-            self._contract(
-                underlying="BANKNIFTY",
-                expiry=date(2025, 5, 29),
-                strike=52000,
-                side=InstrumentType.PE,
-                snapshot=date(2025, 4, 15),
-            ),
-        ]
-        with InstrumentStore.open(tmp_path / "db") as s:
-            s.upsert_contracts(contracts)
-            nifty = s.list_contracts(
-                underlying_symbol="NIFTY",
-                sm_expiry_date=date(2025, 5, 29),
-            )
-            banknifty = s.list_contracts(
-                underlying_symbol="BANKNIFTY",
-                sm_expiry_date=date(2025, 5, 29),
-            )
-        assert len(nifty) == 3
-        assert len(banknifty) == 1
-        assert all(c.instrument == InstrumentType.CE for c in nifty)
-
-    def test_list_contracts_all_returns_everything(self, tmp_path: Path) -> None:
-        with InstrumentStore.open(tmp_path / "db") as s:
-            contracts = [
-                self._contract(
-                    expiry=date(2025, 5, 29),
-                    strike=s,
-                    side=InstrumentType.CE,
-                    snapshot=date(2025, 4, 15),
-                )
-                for s in (24000, 24050, 24100)
-            ]
-            s.upsert_contracts(contracts)
-            assert len(s.list_contracts()) == 3
-
-
 class TestIdempotenceStress:
     """DEC-P0-011 (PR #33): rewritten from FNO chains → 4 Track 1 indices."""
 
@@ -1158,15 +958,15 @@ class TestCoverageLedger:
             error_message=error,
         )
 
-    def test_schema_version_is_four(self, tmp_path: Path) -> None:
-        # v4: indices persist with segment='INDEX' (not 'CASH') so they no
-        # longer collide on the (security_id, exch_id, segment, snapshot_date)
-        # PK with a cash equity sharing a numeric SECURITY_ID
-        # (DEC-INDEX-SEGMENT-PK-FIX-001). v3 was the Dhan-native rename
+    def test_schema_version_is_five(self, tmp_path: Path) -> None:
+        # v5: the empty/redundant expiries + contracts tables were dropped;
+        # the dedicated expired-options Parquet table superseded them
+        # (DEC-EXPIRED-OPTIONS-TABLE-001). v4 was the index segment='INDEX'
+        # PK fix (DEC-INDEX-SEGMENT-PK-FIX-001); v3 the Dhan-native rename
         # (ADR-0003 / DEC-DHAN-NATIVE-SCHEMA-001).
         with InstrumentStore.open(tmp_path / "db") as s:
-            assert s.schema_version == 4
-            assert SCHEMA_VERSION == 4
+            assert s.schema_version == 5
+            assert SCHEMA_VERSION == 5
 
     def test_upsert_and_get_roundtrip(self, tmp_path: Path) -> None:
         with InstrumentStore.open(tmp_path / "db") as s:

@@ -47,15 +47,17 @@ from brutex.data.partition import (
 )
 from brutex.data.spot_features import pct_change
 
-#: The ONLY tables the viewer may touch — the 5 real tables created by
+#: The ONLY tables the viewer may touch — the real DuckDB tables created by
 #: :meth:`brutex.data.instrument_store.InstrumentStore.open`. A
 #: caller-supplied table name is checked against this allowlist before
-#: it is interpolated into any SQL string (SQL-injection guard).
+#: it is interpolated into any SQL string (SQL-injection guard). The retired
+#: ``expiries`` / ``contracts`` tables were dropped in
+#: DEC-EXPIRED-OPTIONS-TABLE-001 — the expired-options Parquet lake
+#: (``<lake>/options/…``, browsed via :func:`list_option_datasets` +
+#: :func:`query_option_candles`) is their replacement.
 KNOWN_TABLES: Final = (
     "instruments",
     "instrument_runs",
-    "expiries",
-    "contracts",
     "schema_meta",
 )
 
@@ -90,12 +92,24 @@ CANDLE_COLUMNS: Final = (
     "open_interest",
 )
 
-#: The 11 columns every expired-option Parquet partition carries
-#: (``brutex/data/option_parquet_writer.py`` ``_render_df`` schema): the 7
-#: OHLCV columns above PLUS the per-bar option stamps ``side`` / ``strike`` /
-#: ``spot`` / ``iv`` (the rolling-option endpoint surface). Used to validate an
-#: option-candle column selection without touching disk.
+#: The 18 columns every expired-option Parquet partition carries
+#: (``brutex/data/option_parquet_writer.py`` ``_render_df`` schema,
+#: DEC-EXPIRED-OPTIONS-TABLE-001): the 7 series-addressing columns promoted
+#: from the partition path (``exch_id`` / ``exchange_segment`` /
+#: ``security_id`` / ``underlying_symbol`` / ``expiry_flag`` / ``expiry_code``
+#: / ``strike_offset``) PLUS the per-bar ``side`` and the OHLCV+OI value set
+#: PLUS the per-bar option stamps ``strike`` / ``spot`` / ``iv`` (the
+#: rolling-option endpoint surface). Used to validate an option-candle column
+#: selection without touching disk.
 OPTION_CANDLE_COLUMNS: Final = (
+    "exch_id",
+    "exchange_segment",
+    "security_id",
+    "underlying_symbol",
+    "expiry_flag",
+    "expiry_code",
+    "side",
+    "strike_offset",
     "timestamp",
     "open",
     "high",
@@ -103,7 +117,6 @@ OPTION_CANDLE_COLUMNS: Final = (
     "close",
     "volume",
     "open_interest",
-    "side",
     "strike",
     "spot",
     "iv",
@@ -761,6 +774,72 @@ def list_option_datasets(lake_root: Path) -> list[dict[str, str]]:
     return found
 
 
+def list_option_series(
+    conn: Any,
+    lake_root: Path,
+    *,
+    underlying_symbol: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return the DISTINCT expired-option series in the lake (DEC-EXPIRED-OPTIONS-TABLE-001).
+
+    Replaces the dropped ``expiries`` / ``contracts`` DuckDB tables as the
+    UI's option-series source: reads the expired-options Parquet lake
+    (``<lake>/options/**/*.parquet``) and returns one entry per distinct
+    ``(exchange, underlying_symbol, expiry_flag, expiry_code, strike_offset,
+    side, strike)`` tuple, derived from the real addressing columns now
+    promoted onto every bar. Filters by *underlying_symbol* when supplied.
+
+    A missing / empty ``options`` directory yields ``[]`` (never raises),
+    mirroring :func:`list_option_datasets`.
+
+    Parameters
+    ----------
+    conn
+        A DuckDB connection.
+    lake_root
+        Top-level lake directory (the parent of ``options/``).
+    underlying_symbol
+        Restrict to one underlying (e.g. ``"NIFTY"``), or ``None`` for all.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        ``[{"exchange", "underlying_symbol", "expiry_flag", "expiry_code",
+        "strike_offset", "side", "strike"}]`` sorted for a stable UI order.
+    """
+    options = lake_root / OPTIONS_DIR_NAME
+    if not options.is_dir() or not any(options.rglob("*.parquet")):
+        return []
+    glob = options.as_posix() + "/**/*.parquet"
+    where_sql = ""
+    params: list[Any] = [glob]
+    if underlying_symbol is not None:
+        where_sql = " WHERE underlying_symbol = ?"
+        params.append(underlying_symbol)
+    # read_parquet path + every value parameter-bound; the SELECT column list
+    # is the fixed addressing-column set (no free user text) — no injection.
+    rows = conn.execute(
+        "SELECT DISTINCT exch_id, underlying_symbol, expiry_flag, expiry_code, "  # noqa: S608  # nosec B608 - bound path + fixed columns
+        "strike_offset, side, strike "
+        "FROM read_parquet(?, union_by_name=true)"
+        f"{where_sql} "
+        "ORDER BY underlying_symbol, expiry_flag, expiry_code, strike_offset, side, strike",
+        params,
+    ).fetchall()
+    return [
+        {
+            "exchange": row[0],
+            "underlying_symbol": row[1],
+            "expiry_flag": row[2],
+            "expiry_code": int(row[3]) if row[3] is not None else None,
+            "strike_offset": row[4],
+            "side": row[5],
+            "strike": float(row[6]) if row[6] is not None else None,
+        }
+        for row in rows
+    ]
+
+
 def query_candles(
     conn: Any,
     lake_root: Path,
@@ -1196,6 +1275,7 @@ __all__ = [
     "list_candle_datasets",
     "list_columns",
     "list_option_datasets",
+    "list_option_series",
     "query_candles",
     "query_option_candles",
     "query_table",

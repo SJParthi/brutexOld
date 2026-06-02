@@ -24,11 +24,11 @@ pytest.importorskip("duckdb")
 
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.data.instrument_store import (
-    ContractRecord,
-    ExpiryRecord,
     InstrumentRun,
     InstrumentStore,
 )
+from brutex.data.models import OptionBar
+from brutex.data.option_parquet_writer import OptionParquetWriter, OptionSeriesCoordinate
 from brutex.models import (
     Exchange,
     Instrument,
@@ -105,39 +105,35 @@ def populated_store(tmp_path: Path):
         csv_source_sha256="a" * 64,
     )
 
-    # 1 expiry row
-    store.upsert_expiries(
-        [
-            ExpiryRecord(
-                exch_id="NSE",
-                underlying_symbol="NIFTY",
-                sm_expiry_date=date(2025, 1, 30),
-                snapshot_date=snap_date,
-                pulled_year=2024,
-                fetched_at=datetime(2024, 1, 2, 12, tzinfo=UTC),
-                run_id="test-run",
+    # 1 expired-option series (CE) in the lake — the dropped expiries/contracts
+    # DuckDB tables were replaced by the expired-options Parquet lake
+    # (DEC-EXPIRED-OPTIONS-TABLE-001). Lake root = the store's parent dir.
+    OptionParquetWriter(lake_root=store.path.parent).write(
+        partition_key="NSE_FNO|13|WEEK|0|ATM|CALL",
+        coordinate=OptionSeriesCoordinate(
+            exch_id="NSE",
+            exchange_segment="NSE_FNO",
+            security_id=13,
+            underlying_symbol="NIFTY",
+            expiry_flag="WEEK",
+            expiry_code=0,
+            strike_offset="ATM",
+        ),
+        bars=[
+            OptionBar(
+                timestamp=datetime(2024, 3, 1, 4, 0, tzinfo=UTC),
+                open=Decimal("100"),
+                high=Decimal("110"),
+                low=Decimal("90"),
+                close=Decimal("105"),
+                volume=250,
+                open_interest=1200,
+                side="CE",
+                strike=Decimal("24000"),
+                spot=Decimal("17480.5"),
+                iv=Decimal("0.15"),
             )
-        ]
-    )
-
-    # 1 contract row
-    store.upsert_contracts(
-        [
-            ContractRecord(
-                exch_id="NSE",
-                underlying_symbol="NIFTY",
-                sm_expiry_date=date(2025, 1, 30),
-                symbol_name="NSE-NIFTY25JAN24000CE",
-                snapshot_date=snap_date,
-                instrument=InstrumentType.CE,
-                strike_price=Decimal("24000"),
-                lot_size=25,
-                sm_freeze_qty=1800,
-                tick_size=Decimal("0.05"),
-                fetched_at=datetime(2024, 1, 2, 12, tzinfo=UTC),
-                run_id="test-run",
-            )
-        ]
+        ],
     )
 
     # 1 instrument_runs row
@@ -249,12 +245,15 @@ class TestInstrumentsEnabled:
         assert body["offset"] == 0
 
     def test_expiries_endpoint(self, client_with_store: TestClient) -> None:
+        # Repointed to the expired-options lake: an "expiry" is now a distinct
+        # (flag, code) series (DEC-EXPIRED-OPTIONS-TABLE-001).
         r = client_with_store.get("/api/v1/expiries")
         assert r.status_code == 200
         body = r.json()
         assert len(body["expiries"]) == 1
         assert body["expiries"][0]["underlying_symbol"] == "NIFTY"
-        assert body["expiries"][0]["expiry_date"] == "2025-01-30"
+        assert body["expiries"][0]["expiry_flag"] == "WEEK"
+        assert body["expiries"][0]["expiry_code"] == 0
 
     def test_expiries_filter_by_underlying(self, client_with_store: TestClient) -> None:
         r = client_with_store.get("/api/v1/expiries?underlying=BANKNIFTY")
@@ -267,19 +266,22 @@ class TestInstrumentsEnabled:
         body = r.json()
         assert len(body["contracts"]) == 1
         c = body["contracts"][0]
-        assert c["contract_symbol"] == "NSE-NIFTY25JAN24000CE"
-        assert Decimal(c["strike_price"]) == Decimal("24000")
-        assert c["lot_size"] == 25
+        assert c["underlying_symbol"] == "NIFTY"
+        assert c["side"] == "CE"
+        assert c["strike_offset"] == "ATM"
+        assert Decimal(str(c["strike"])) == Decimal("24000")
 
-    def test_contracts_filter_by_expiry(self, client_with_store: TestClient) -> None:
-        r = client_with_store.get("/api/v1/contracts?underlying=NIFTY&expiry=2025-01-30")
+    def test_contracts_filter_by_expiry_code(self, client_with_store: TestClient) -> None:
+        r = client_with_store.get("/api/v1/contracts?underlying=NIFTY&expiry_code=0")
         body = r.json()
         assert len(body["contracts"]) == 1
 
-    def test_contracts_rejects_malformed_expiry(self, client_with_store: TestClient) -> None:
-        r = client_with_store.get("/api/v1/contracts?expiry=not-a-date")
-        assert r.status_code == 400
-        assert "YYYY-MM-DD" in r.json()["detail"]
+    def test_contracts_filter_by_other_expiry_code_empty(
+        self, client_with_store: TestClient
+    ) -> None:
+        r = client_with_store.get("/api/v1/contracts?underlying=NIFTY&expiry_code=2")
+        body = r.json()
+        assert len(body["contracts"]) == 0
 
 
 # ────────────────────────────────────────────────────────────────────────

@@ -38,7 +38,7 @@ import json
 import threading
 from collections import deque
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,7 @@ from brutex.dashboard.db_view import (
     list_candle_datasets,
     list_columns,
     list_option_datasets,
+    list_option_series,
     query_candles,
     query_option_candles,
     query_table,
@@ -593,86 +594,84 @@ def build_app(
     async def api_expiries_list(
         underlying: str | None = Query(default=None),
     ) -> JSONResponse:
-        """GET /api/v1/expiries — every expiry row for the latest snapshot.
+        """GET /api/v1/expiries - distinct expired-option (flag, code) series.
 
-        Filters by ``underlying`` if supplied. Returns the full list
-        (no pagination) because one underlying rarely has > 100
-        expiries worth of history.
+        Repointed (DEC-EXPIRED-OPTIONS-TABLE-001) from the dropped
+        ``expiries`` DuckDB table to the expired-options Parquet lake
+        (``<lake>/options/...``): returns the DISTINCT ``(expiry_flag,
+        expiry_code)`` series present in the lake, filtered by ``underlying``
+        when supplied. Returns ``[]`` when no lake root is wired or the lake
+        is empty.
         """
         store = _require_store()
-        records = store.list_expiries(underlying_symbol=underlying)
-        return JSONResponse(
-            {
-                "expiries": [
-                    {
-                        "exchange": r.exch_id,
-                        "underlying_symbol": r.underlying_symbol,
-                        "expiry_date": r.sm_expiry_date.isoformat(),
-                        "snapshot_date": r.snapshot_date.isoformat(),
-                        "pulled_year": r.pulled_year,
-                    }
-                    for r in records
-                ]
-            }
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse({"expiries": []})
+        series = list_option_series(
+            store.connection, lake_root.parent, underlying_symbol=underlying
         )
+        seen: set[tuple[str, str, int | None]] = set()
+        expiries: list[dict[str, Any]] = []
+        for s in series:
+            key = (s["underlying_symbol"], s["expiry_flag"], s["expiry_code"])
+            if key in seen:
+                continue
+            seen.add(key)
+            expiries.append(
+                {
+                    "exchange": s["exchange"],
+                    "underlying_symbol": s["underlying_symbol"],
+                    "expiry_flag": s["expiry_flag"],
+                    "expiry_code": s["expiry_code"],
+                }
+            )
+        return JSONResponse({"expiries": expiries})
 
     @app.get("/api/v1/contracts")
     async def api_contracts_list(
         underlying: str | None = Query(default=None),
-        expiry: str | None = Query(default=None),
+        expiry_code: int | None = Query(default=None),
         limit: int = Query(default=500, ge=1, le=5000),
     ) -> JSONResponse:
-        """GET /api/v1/contracts — filterable contracts list.
+        """GET /api/v1/contracts - distinct expired-option series (the chain).
+
+        Repointed (DEC-EXPIRED-OPTIONS-TABLE-001) from the dropped
+        ``contracts`` DuckDB table to the expired-options Parquet lake: returns
+        the DISTINCT ``(strike_offset, side, strike)`` series for the requested
+        ``underlying`` (optionally narrowed to one ``expiry_code``), derived
+        from the addressing columns now stamped on every bar. Returns ``[]``
+        when no lake root is wired or the lake is empty.
 
         Query parameters
         ----------------
         underlying
-            Filter by underlying symbol (e.g. ``NIFTY``). Required
-            for any interesting query \u2014 full universe is tens of
-            thousands of rows.
-        expiry
-            ISO date string (``YYYY-MM-DD``). When supplied alongside
-            ``underlying``, the query hits the composite index and
-            returns in microseconds.
+            Filter by underlying symbol (e.g. ``NIFTY``).
+        expiry_code
+            Narrow to one expiry selector (Near/Next/Far).
         limit
-            Server-side cap. Defaults to 500 so a typical option
-            chain (~150 strikes per expiry) fits comfortably.
+            Server-side cap on returned series rows.
         """
         store = _require_store()
-        expiry_parsed: date | None = None
-        if expiry is not None:
-            try:
-                expiry_parsed = date.fromisoformat(expiry)
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"expiry must be YYYY-MM-DD, got {expiry!r}",
-                ) from exc
-        records = store.list_contracts(
-            underlying_symbol=underlying,
-            sm_expiry_date=expiry_parsed,
-        )[:limit]
-        return JSONResponse(
-            {
-                "contracts": [
-                    {
-                        "exchange": r.exch_id,
-                        "underlying_symbol": r.underlying_symbol,
-                        "expiry_date": r.sm_expiry_date.isoformat(),
-                        "contract_symbol": r.symbol_name,
-                        "instrument_type": str(r.instrument),
-                        "strike_price": (
-                            str(r.strike_price) if r.strike_price is not None else None
-                        ),
-                        "lot_size": r.lot_size,
-                        "freeze_quantity": r.sm_freeze_qty,
-                        "tick_size": str(r.tick_size),
-                    }
-                    for r in records
-                ],
-                "limit": limit,
-            }
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse({"contracts": [], "limit": limit})
+        series = list_option_series(
+            store.connection, lake_root.parent, underlying_symbol=underlying
         )
+        rows = [
+            {
+                "exchange": s["exchange"],
+                "underlying_symbol": s["underlying_symbol"],
+                "expiry_flag": s["expiry_flag"],
+                "expiry_code": s["expiry_code"],
+                "strike_offset": s["strike_offset"],
+                "side": s["side"],
+                "strike": s["strike"],
+            }
+            for s in series
+            if expiry_code is None or s["expiry_code"] == expiry_code
+        ][:limit]
+        return JSONResponse({"contracts": rows, "limit": limit})
 
     # ── F&O Universe Explorer (DEC-UNIVERSE-DASHBOARD-001) ───────────
 
@@ -1420,9 +1419,11 @@ def _collect_store_stats(store: Any) -> dict[str, Any]:
     """Collect summary tile numbers from an :class:`InstrumentStore`.
 
     Returns a dict with the headline counts every dashboard user
-    wants to see on landing: total rows in each of the three core
-    tables plus the per-underlying instrument breakdown. Called by
-    the ``/api/v1/instruments/stats`` endpoint.
+    wants to see on landing: total instrument rows, the distinct
+    expired-option ``(flag, code)`` series + total option series in the lake
+    (repointed from the dropped ``expiries`` / ``contracts`` tables —
+    DEC-EXPIRED-OPTIONS-TABLE-001), and the per-underlying instrument
+    breakdown. Called by the ``/api/v1/instruments/stats`` endpoint.
     """
     # DEC-P0-017 (PR #39): use public InstrumentStore.connection property
     # instead of touching the private _conn attribute (pyright
@@ -1431,8 +1432,6 @@ def _collect_store_stats(store: Any) -> dict[str, Any]:
     # PR #39 pre-impl review recommendation).
     conn = store.connection
     row_instruments = conn.execute("SELECT COUNT(*) FROM instruments").fetchone()
-    row_expiries = conn.execute("SELECT COUNT(*) FROM expiries").fetchone()
-    row_contracts = conn.execute("SELECT COUNT(*) FROM contracts").fetchone()
     row_runs = conn.execute("SELECT COUNT(*) FROM instrument_runs").fetchone()
     by_underlying = conn.execute(
         "SELECT underlying_symbol, COUNT(*) FROM instruments "
@@ -1444,11 +1443,23 @@ def _collect_store_stats(store: Any) -> dict[str, Any]:
     by_type = conn.execute(
         "SELECT instrument, COUNT(*) FROM instruments GROUP BY instrument"
     ).fetchall()
+    # Expired-option series counts come from the Parquet lake, not a DuckDB
+    # table (DEC-EXPIRED-OPTIONS-TABLE-001). "expiries" = distinct
+    # (underlying, flag, code); "contracts" = distinct option series.
+    expiries = 0
+    contracts = 0
+    lake_root = getattr(store, "path", None)
+    if isinstance(lake_root, Path):
+        series = list_option_series(conn, lake_root.parent)
+        contracts = len(series)
+        expiries = len(
+            {(s["underlying_symbol"], s["expiry_flag"], s["expiry_code"]) for s in series}
+        )
     return {
         "totals": {
             "instruments": int(row_instruments[0]) if row_instruments else 0,
-            "expiries": int(row_expiries[0]) if row_expiries else 0,
-            "contracts": int(row_contracts[0]) if row_contracts else 0,
+            "expiries": expiries,
+            "contracts": contracts,
             "runs": int(row_runs[0]) if row_runs else 0,
         },
         "by_underlying": [{"underlying": str(u), "count": int(c)} for u, c in by_underlying],

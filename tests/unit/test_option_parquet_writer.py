@@ -15,9 +15,23 @@ from pathlib import Path
 import polars as pl
 import pytest
 from brutex.data.models import OptionBar
-from brutex.data.option_parquet_writer import OptionParquetWriter, OptionWriterError
+from brutex.data.option_parquet_writer import (
+    OptionParquetWriter,
+    OptionSeriesCoordinate,
+    OptionWriterError,
+)
 
 _PK = "NSE_FNO|13|WEEK|0|ATM|CALL"
+
+_COORD = OptionSeriesCoordinate(
+    exch_id="NSE",
+    exchange_segment="NSE_FNO",
+    security_id=13,
+    underlying_symbol="NIFTY",
+    expiry_flag="WEEK",
+    expiry_code=0,
+    strike_offset="ATM",
+)
 
 
 def _bar(
@@ -50,7 +64,7 @@ def _read(tmp_path: Path, segment: str = "NSE_FNO__13__WEEK__0__ATM__CALL") -> p
 class TestWrite:
     def test_write_rounds_money_keeps_iv_precision(self, tmp_path: Path) -> None:
         w = _writer(tmp_path)
-        n = w.write(partition_key=_PK, bars=[_bar(minute=0)])
+        n = w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
         assert n == 1
         df = _read(tmp_path)
         assert df["open"][0] == 100.01  # 100.005 → 100.01 (half-up, 2dp)
@@ -60,34 +74,80 @@ class TestWrite:
         assert df["iv"][0] == pytest.approx(0.1523)  # NOT rounded — full precision
         assert df["side"][0] == "CE"
 
+    def test_addressing_columns_written(self, tmp_path: Path) -> None:
+        # DEC-EXPIRED-OPTIONS-TABLE-001: every series-addressing field is a
+        # real, self-describing column on every bar (promoted from the path).
+        w = _writer(tmp_path)
+        w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
+        df = _read(tmp_path)
+        # Final column order is the full 18-column expired-options schema.
+        assert df.columns == [
+            "exch_id",
+            "exchange_segment",
+            "security_id",
+            "underlying_symbol",
+            "expiry_flag",
+            "expiry_code",
+            "side",
+            "strike_offset",
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "open_interest",
+            "strike",
+            "spot",
+            "iv",
+        ]
+        assert df["exch_id"][0] == "NSE"
+        assert df["exchange_segment"][0] == "NSE_FNO"
+        assert df["security_id"][0] == 13
+        assert df["security_id"].dtype == pl.Int64
+        assert df["underlying_symbol"][0] == "NIFTY"
+        assert df["expiry_flag"][0] == "WEEK"
+        assert df["expiry_code"][0] == 0
+        assert df["expiry_code"].dtype == pl.Int64
+        assert df["strike_offset"][0] == "ATM"  # requested selector, distinct from strike
+
     def test_empty_bars_returns_zero(self, tmp_path: Path) -> None:
-        assert _writer(tmp_path).write(partition_key=_PK, bars=[]) == 0
+        written = _writer(tmp_path).write(partition_key=_PK, coordinate=_COORD, bars=[])
+        assert written == 0
 
     def test_idempotent_repull_writes_nothing(self, tmp_path: Path) -> None:
         w = _writer(tmp_path)
         bars = [_bar(minute=0), _bar(minute=1)]
-        assert w.write(partition_key=_PK, bars=bars) == 2
-        assert w.write(partition_key=_PK, bars=bars) == 0  # all dup → no new rows
+        first = w.write(partition_key=_PK, coordinate=_COORD, bars=bars)
+        assert first == 2
+        second = w.write(partition_key=_PK, coordinate=_COORD, bars=bars)
+        assert second == 0  # all dup → no new rows
         assert _read(tmp_path).height == 2
 
     def test_partial_merge_adds_only_new(self, tmp_path: Path) -> None:
         w = _writer(tmp_path)
-        w.write(partition_key=_PK, bars=[_bar(minute=0)])
-        added = w.write(partition_key=_PK, bars=[_bar(minute=0), _bar(minute=1)])
+        w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
+        added = w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0), _bar(minute=1)])
         assert added == 1  # minute 0 dup, minute 1 new
         assert _read(tmp_path).height == 2
 
     def test_ce_and_pe_same_minute_both_kept(self, tmp_path: Path) -> None:
         w = _writer(tmp_path)
         added = w.write(
-            partition_key=_PK, bars=[_bar(side="CE", minute=0), _bar(side="PE", minute=0)]
+            partition_key=_PK,
+            coordinate=_COORD,
+            bars=[_bar(side="CE", minute=0), _bar(side="PE", minute=0)],
         )
         assert added == 2  # distinct side → distinct (side, ts) key
         assert _read(tmp_path).height == 2
 
     def test_bars_split_across_months(self, tmp_path: Path) -> None:
         w = _writer(tmp_path)
-        added = w.write(partition_key=_PK, bars=[_bar(month=1, minute=0), _bar(month=2, minute=0)])
+        added = w.write(
+            partition_key=_PK,
+            coordinate=_COORD,
+            bars=[_bar(month=1, minute=0), _bar(month=2, minute=0)],
+        )
         assert added == 2
         files = sorted((tmp_path / "options" / "NSE_FNO__13__WEEK__0__ATM__CALL").glob("*.parquet"))
         assert [f.name for f in files] == ["2021-01.parquet", "2021-02.parquet"]
@@ -108,7 +168,8 @@ class TestWrite:
             spot=None,
             iv=None,
         )
-        assert w.write(partition_key=_PK, bars=[bar]) == 1
+        written = w.write(partition_key=_PK, coordinate=_COORD, bars=[bar])
+        assert written == 1
         df = _read(tmp_path)
         assert df["strike"][0] is None
         assert df["open_interest"][0] is None
@@ -128,7 +189,7 @@ class TestAtomicWriteCleanup:
         monkeypatch.setattr(mod.os, "replace", _boom)
         w = _writer(tmp_path)
         with pytest.raises(OSError, match="disk full"):
-            w.write(partition_key=_PK, bars=[_bar(minute=0)])
+            w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=0)])
         # No orphan tmp file left behind.
         leftovers = list((tmp_path / "options").rglob("*.tmp"))
         assert leftovers == []
@@ -137,12 +198,12 @@ class TestAtomicWriteCleanup:
 class TestPathSafety:
     def test_empty_partition_key_raises(self, tmp_path: Path) -> None:
         with pytest.raises(OptionWriterError, match="non-empty"):
-            _writer(tmp_path).write(partition_key="", bars=[_bar()])
+            _writer(tmp_path).write(partition_key="", coordinate=_COORD, bars=[_bar()])
 
     @pytest.mark.parametrize("bad", ["a/b", "a\\b", ".."])
     def test_unsafe_partition_key_raises(self, tmp_path: Path, bad: str) -> None:
         with pytest.raises(OptionWriterError, match="unsafe"):
-            _writer(tmp_path).write(partition_key=bad, bars=[_bar()])
+            _writer(tmp_path).write(partition_key=bad, coordinate=_COORD, bars=[_bar()])
 
     def test_lake_root_property(self, tmp_path: Path) -> None:
         assert _writer(tmp_path).lake_root == tmp_path

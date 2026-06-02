@@ -33,6 +33,7 @@ from typing import Protocol
 
 from brutex.data.models import OptionBar
 from brutex.data.option_dedup import OptionDedupIndex, unique_option_bars
+from brutex.data.option_parquet_writer import OptionSeriesCoordinate
 
 #: Field separator for the descriptive partition key (mirrors the dedup sep).
 _KEY_SEP: str = "|"
@@ -44,8 +45,14 @@ _AUDIT_ACTION: str = "OPTION_BARS_WRITTEN"
 class OptionPartitionWriter(Protocol):
     """Write-side seam: persist a deduped batch of bars for one series."""
 
-    def write(self, *, partition_key: str, bars: Sequence[OptionBar]) -> int:
-        """Persist *bars* under *partition_key*; return the count written."""
+    def write(
+        self,
+        *,
+        partition_key: str,
+        coordinate: OptionSeriesCoordinate,
+        bars: Sequence[OptionBar],
+    ) -> int:
+        """Persist *bars* under *partition_key* + *coordinate*; return count written."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -90,6 +97,8 @@ class OptionBarSink:
         self,
         *,
         security_id: str,
+        exch_id: str,
+        underlying_symbol: str,
         exchange_segment: str,
         expiry_flag: str,
         expiry_code: int,
@@ -101,6 +110,10 @@ class OptionBarSink:
 
         A duplicate re-pull (all bars already seen) is a no-op: no write, no
         audit row (idempotent). Returns the number of newly-written bars.
+
+        The requested relative ``strike`` selector (e.g. ``"ATM"`` / ``"ATM+3"``)
+        is recorded as the ``strike_offset`` column (DEC-EXPIRED-OPTIONS-TABLE-001),
+        distinct from each bar's RESOLVED absolute ``strike``.
         """
         # The dedup identity is the FULL series coordinate (so two distinct
         # series can never alias — even if a side omits the resolved strike,
@@ -114,7 +127,18 @@ class OptionBarSink:
         )
         if not survivors:
             return 0
-        written = self._writer.write(partition_key=partition_key, bars=survivors)
+        coordinate = OptionSeriesCoordinate(
+            exch_id=exch_id,
+            exchange_segment=exchange_segment,
+            security_id=int(security_id),
+            underlying_symbol=underlying_symbol,
+            expiry_flag=expiry_flag,
+            expiry_code=expiry_code,
+            strike_offset=strike,
+        )
+        written = self._writer.write(
+            partition_key=partition_key, coordinate=coordinate, bars=survivors
+        )
         if self._audit is not None:
             self._audit.append(
                 action=_AUDIT_ACTION,
@@ -137,6 +161,8 @@ class NullOptionBarSink:
         self,
         *,
         security_id: str,
+        exch_id: str,
+        underlying_symbol: str,
         exchange_segment: str,
         expiry_flag: str,
         expiry_code: int,
@@ -145,7 +171,8 @@ class NullOptionBarSink:
         bars: Sequence[OptionBar],
     ) -> int:
         """Discard *bars* and report the count — no persistence side effects."""
-        del security_id, exchange_segment, expiry_flag, expiry_code, strike, drv_option_type
+        del security_id, exch_id, underlying_symbol, exchange_segment
+        del expiry_flag, expiry_code, strike, drv_option_type
         return len(bars)
 
 

@@ -33,13 +33,14 @@ from brutex.dashboard.db_view import (
     list_candle_datasets,
     list_columns,
     list_option_datasets,
+    list_option_series,
     query_candles,
     query_option_candles,
     query_table,
     summarize_spot_datasets,
 )
 from brutex.data.instrument_store import Instrument, InstrumentStore
-from brutex.data.option_parquet_writer import OptionParquetWriter
+from brutex.data.option_parquet_writer import OptionParquetWriter, OptionSeriesCoordinate
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.models import Exchange, InstrumentType, Segment
 
@@ -136,10 +137,33 @@ def _obar(ts: datetime, side: str, close: str, *, iv: str = "0.1523") -> OptionB
     )
 
 
-def _write_options(lake_root: Path, partition_key: str = _OPT_PK) -> None:
+def _coord_for(partition_key: str, *, underlying_symbol: str = "NIFTY") -> OptionSeriesCoordinate:
+    """Build a series coordinate from a ``|``-joined partition key (test helper)."""
+    seg, sec, flag, code, offset, _typ = partition_key.split("|")
+    return OptionSeriesCoordinate(
+        exch_id="NSE",
+        exchange_segment=seg,
+        security_id=int(sec),
+        underlying_symbol=underlying_symbol,
+        expiry_flag=flag,
+        expiry_code=int(code),
+        strike_offset=offset,
+    )
+
+
+_OPT_COORD = _coord_for(_OPT_PK)
+
+
+def _write_options(
+    lake_root: Path,
+    partition_key: str = _OPT_PK,
+    *,
+    underlying_symbol: str = "NIFTY",
+) -> None:
     """Write a CE+PE option pair across two trading days via the real writer."""
     OptionParquetWriter(lake_root=lake_root).write(
         partition_key=partition_key,
+        coordinate=_coord_for(partition_key, underlying_symbol=underlying_symbol),
         bars=[
             _obar(datetime(2024, 3, 1, 4, 0, tzinfo=UTC), "CE", "105.004"),
             _obar(datetime(2024, 3, 1, 4, 0, tzinfo=UTC), "PE", "95.5"),
@@ -784,6 +808,45 @@ def test_list_option_datasets_skips_foreign_and_empty_dirs(tmp_path: Path) -> No
 
 
 # ────────────────────────────────────────────────────────────────────────
+# list_option_series — distinct addressing tuples (DEC-EXPIRED-OPTIONS-TABLE-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_list_option_series_empty_lake_returns_empty(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    assert list_option_series(store.connection, tmp_path) == []
+
+
+def test_list_option_series_distinct_addressing(store: InstrumentStore, tmp_path: Path) -> None:
+    _write_options(tmp_path)  # NIFTY ATM CALL series, CE+PE bars
+    rows = list_option_series(store.connection, tmp_path)
+    # One distinct (strike, side) tuple per side, both with the same addressing.
+    assert {r["side"] for r in rows} == {"CE", "PE"}
+    for r in rows:
+        assert r["exchange"] == "NSE"
+        assert r["underlying_symbol"] == "NIFTY"
+        assert r["expiry_flag"] == "WEEK"
+        assert r["expiry_code"] == 0
+        assert r["strike_offset"] == "ATM"  # the REQUESTED selector
+        assert r["strike"] == pytest.approx(17500.01)  # the RESOLVED strike (2dp)
+
+
+def test_list_option_series_filters_by_underlying(store: InstrumentStore, tmp_path: Path) -> None:
+    _write_options(tmp_path, underlying_symbol="NIFTY")
+    _write_options(
+        tmp_path,
+        partition_key="NSE_FNO|99|MONTH|1|ATM+1|PUT",
+        underlying_symbol="BANKNIFTY",
+    )
+    nifty = list_option_series(store.connection, tmp_path, underlying_symbol="NIFTY")
+    assert {r["underlying_symbol"] for r in nifty} == {"NIFTY"}
+    banknifty = list_option_series(store.connection, tmp_path, underlying_symbol="BANKNIFTY")
+    assert {r["underlying_symbol"] for r in banknifty} == {"BANKNIFTY"}
+    assert {r["strike_offset"] for r in banknifty} == {"ATM+1"}
+
+
+# ────────────────────────────────────────────────────────────────────────
 # query_option_candles — read the expired-options lake
 # ────────────────────────────────────────────────────────────────────────
 
@@ -795,6 +858,27 @@ def test_query_option_candles_returns_all_rows(store: InstrumentStore, tmp_path:
     assert out["columns"] == list(OPTION_CANDLE_COLUMNS)
     assert out["series"] == _OPT_SERIES
     assert out["interval"] == "1minute"
+
+
+def test_query_option_candles_surfaces_addressing_columns(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # DEC-EXPIRED-OPTIONS-TABLE-001: the 7 promoted addressing columns are now
+    # part of the projected option-candle column set.
+    _write_options(tmp_path)
+    out = query_option_candles(store.connection, tmp_path, series=_OPT_SERIES, limit=50)
+    for addr in (
+        "exch_id",
+        "exchange_segment",
+        "security_id",
+        "underlying_symbol",
+        "expiry_flag",
+        "expiry_code",
+        "strike_offset",
+    ):
+        assert addr in out["columns"]
+    ul_idx = out["columns"].index("underlying_symbol")
+    assert {str(r[ul_idx]) for r in out["rows"]} == {"NIFTY"}
 
 
 def test_query_option_candles_surfaces_option_columns(
@@ -814,6 +898,7 @@ def test_query_option_candles_iv_full_precision(store: InstrumentStore, tmp_path
     # precision, NOT be 2dp-rounded like the price columns.
     OptionParquetWriter(lake_root=tmp_path).write(
         partition_key=_OPT_PK,
+        coordinate=_OPT_COORD,
         bars=[_obar(datetime(2024, 3, 1, 4, 0, tzinfo=UTC), "CE", "105.004", iv="0.123456")],
     )
     out = query_option_candles(
@@ -981,6 +1066,7 @@ def test_query_option_candles_date_bound_is_utc_not_session_tz(
     # The UTC-anchored bound must INCLUDE it regardless of session TimeZone.
     OptionParquetWriter(lake_root=tmp_path).write(
         partition_key=_OPT_PK,
+        coordinate=_OPT_COORD,
         bars=[_obar(datetime(2024, 3, 2, 23, 30, tzinfo=UTC), "CE", "105.0")],
     )
     store.connection.execute("SET TimeZone='Asia/Kolkata'")

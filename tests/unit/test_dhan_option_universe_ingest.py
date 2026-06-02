@@ -79,6 +79,8 @@ class _Sink:
         self,
         *,
         security_id: str,
+        exch_id: str,
+        underlying_symbol: str,
         exchange_segment: str,
         expiry_flag: str,
         expiry_code: int,
@@ -86,7 +88,8 @@ class _Sink:
         drv_option_type: str,
         bars: Sequence[OptionBar],
     ) -> int:
-        del security_id, exchange_segment, expiry_flag, expiry_code, strike, drv_option_type
+        del security_id, exch_id, underlying_symbol, exchange_segment
+        del expiry_flag, expiry_code, strike, drv_option_type
         self.series += 1
         return len(bars)
 
@@ -94,6 +97,8 @@ class _Sink:
 def _index(security_id: str = "13", offsets: int = INDEX_STRIKE_OFFSETS) -> OptionUnderlying:
     return OptionUnderlying(
         security_id=security_id,
+        exch_id="NSE",
+        underlying_symbol="NIFTY",
         exchange_segment="NSE_FNO",
         instrument="OPTIDX",
         strike_offsets=offsets,
