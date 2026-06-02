@@ -4,10 +4,11 @@ DEC-VENDOR-PIVOT-001 + DEC-INSTRUMENT-UNIVERSE-FAST-001:
 
 * **Lean universe** — only the universe underlyings (every index + every
   F&O-eligible single-stock SPOT) persist; the FUT/CE/PE legs are parsed for
-  eligibility then dropped (recoverable on demand). The persisted underlying
-  carries **its own** scrip-master economics (lot/tick/freeze); the F&O lot
-  lives on the option contract, recovered on demand — there is no leg
-  back-fill (that was a Groww-adapter quirk, gone with the pivot).
+  eligibility then dropped (recoverable on demand). Each persisted underlying
+  is stamped with its **tradable F&O lot + freeze** from the nearest-expiry
+  derivative leg (DEC-UNDERLYING-LEG-ECONOMICS-001) — RELIANCE 500, NIFTY 75 —
+  superseding the EQUITY/INDEX row's cash lot (1 / 0); the spot ``tick_size``
+  is kept (an index spot tick differs from its future's).
 * **Concurrency (FIX 3)** — concurrent ``load_instrument_master`` calls are
   serialised by a module-level lock so a snapshot wipe can never interleave
   another load's insert (the "25 indices · 0 stocks" corruption).
@@ -114,6 +115,7 @@ def _economics_csv() -> str:
             underlying_security_id="13",
             expiry_date="2025-01-30",
             lot_size="75",
+            freeze_quantity="1800",
         ),
         _row(
             security_id="40002",
@@ -150,6 +152,7 @@ def _economics_csv() -> str:
             strike_price="3000",
             expiry_date="2025-01-30",
             lot_size="500",
+            freeze_quantity="10000",
         ),
         # Non-F&O index: no legs.
         _row(
@@ -173,21 +176,26 @@ def test_persists_underlying_economics(tmp_path: Path) -> None:
     assert result["persisted"] == 3
     assert result["legs_dropped"] == 3  # NIFTY FUT + NIFTY CE + RELIANCE option
 
-    # The persisted underlyings carry their own scrip-master economics — the
-    # F&O lot lives on the (dropped) option contract, recovered on demand. The
+    # Each persisted underlying is stamped with its TRADABLE F&O lot + freeze
+    # from the nearest-expiry derivative leg (DEC-UNDERLYING-LEG-ECONOMICS-001):
+    # RELIANCE → 500 (its OPTSTK leg), NIFTY → 75 (its FUTIDX leg). The EQUITY/
+    # INDEX row's own cash lot (1 / 0) + freeze are SUPERSEDED by the leg's; the
+    # ``tick_size`` is NOT (an index spot tick differs from its future's). The
     # store is keyed by ``symbol_name`` (the engine symbol); the numeric Dhan id
     # lives in ``security_id`` (ADR-0003 dropped the exchange-prefixed key).
     rel = store.get("RELIANCE")
     assert rel is not None
     assert rel.security_id == 2885
-    assert rel.lot_size == 1
-    assert str(rel.tick_size) == "0.0500"
-    assert rel.sm_freeze_qty == 5000
+    assert rel.lot_size == 500  # F&O lot from the OPTSTK leg (was cash 1)
+    assert str(rel.tick_size) == "0.0500"  # spot tick PRESERVED (not the leg's)
+    assert rel.sm_freeze_qty == 10000  # freeze from the leg (was the EQ row's 5000)
 
     nifty = store.get("NIFTY")
     assert nifty is not None
-    assert nifty.lot_size == 0
+    assert nifty.lot_size == 75  # F&O lot from the FUTIDX leg (was index 0)
+    assert nifty.sm_freeze_qty == 1800
 
+    # BANKNIFTY has NO F&O leg in this fixture → keeps its cash index lot (0).
     n100 = store.get("BANKNIFTY")
     assert n100 is not None
     assert n100.lot_size == 0
@@ -207,7 +215,9 @@ def test_two_sequential_refreshes_deterministic(tmp_path: Path) -> None:
     assert (second["index_count"], second["stock_count"]) == (2, 1)
     assert store.has_derivative_legs() is False
     rel = store.get("RELIANCE")
-    assert rel is not None and rel.lot_size == 1
+    assert (
+        rel is not None and rel.lot_size == 500
+    )  # enriched F&O lot, deterministic across re-ingest
     store.close()
 
 

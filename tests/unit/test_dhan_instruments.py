@@ -14,6 +14,7 @@ from decimal import Decimal
 import pytest
 from brutex.adapters.dhan.instruments import (
     DhanInstrumentError,
+    build_leg_economics,
     fno_underlying_security_ids,
     fno_underlying_symbols,
     parse_instrument_row,
@@ -692,3 +693,104 @@ class TestIndexEquitySharedSecurityId:
         assert abb.segment is Segment.CASH
         assert nifty.instrument is InstrumentType.IDX
         assert abb.instrument is InstrumentType.EQ
+
+
+class TestBuildLegEconomics:
+    """Full branch coverage for ``build_leg_economics`` (DEC-UNDERLYING-LEG-ECONOMICS-001)."""
+
+    def test_nearest_expiry_leg_wins_and_keys_by_underlying(self) -> None:
+        rows = [
+            # Far-month FUTSTK first, near-month second → near must win (lot can
+            # differ across months; first-seen would be wrong).
+            _row(
+                INSTRUMENT="FUTSTK",
+                UNDERLYING_SYMBOL="TCS",
+                SYMBOL_NAME="TCS-Sep",
+                SECURITY_ID="1",
+                LOT_SIZE="225",
+                SM_EXPIRY_DATE="2026-09-24",
+                SM_FREEZE_QTY="9000",
+            ),
+            _row(
+                INSTRUMENT="FUTSTK",
+                UNDERLYING_SYMBOL="TCS",
+                SYMBOL_NAME="TCS-Jun",
+                SECURITY_ID="2",
+                LOT_SIZE="175",
+                SM_EXPIRY_DATE="2026-06-25",
+                SM_FREEZE_QTY="8925",
+            ),
+        ]
+        econ = build_leg_economics(rows)
+        assert econ[(Exchange.NSE, "TCS")] == (175, 8925)  # nearest-expiry lot+freeze
+
+    def test_non_leg_bad_exchange_no_underlying_and_nonpositive_lot_skipped(self) -> None:
+        rows = [
+            _row(INSTRUMENT="EQUITY", UNDERLYING_SYMBOL="ABB", SECURITY_ID="1"),  # not a leg
+            _row(
+                INSTRUMENT="FUTCOM",
+                EXCH_ID="MCX",
+                UNDERLYING_SYMBOL="GOLD",
+                SECURITY_ID="2",
+                LOT_SIZE="1",
+            ),  # not an FNO leg type AND bad exchange
+            _row(
+                INSTRUMENT="FUTSTK",
+                EXCH_ID="MCX",
+                UNDERLYING_SYMBOL="X",
+                SECURITY_ID="3",
+                LOT_SIZE="10",
+            ),  # leg but out-of-scope exchange
+            _row(
+                INSTRUMENT="FUTSTK",
+                UNDERLYING_SYMBOL="",
+                SYMBOL_NAME="orphan",
+                SECURITY_ID="4",
+                LOT_SIZE="10",
+            ),  # leg, no underlying
+            _row(
+                INSTRUMENT="FUTSTK",
+                UNDERLYING_SYMBOL="ZERO",
+                SECURITY_ID="5",
+                LOT_SIZE="0",
+            ),  # leg, non-positive lot
+        ]
+        assert build_leg_economics(rows) == {}
+
+    def test_nonpositive_freeze_becomes_none_and_no_expiry_sorts_last(self) -> None:
+        rows = [
+            # Dated leg with a real freeze.
+            _row(
+                INSTRUMENT="OPTSTK",
+                UNDERLYING_SYMBOL="INFY",
+                SECURITY_ID="1",
+                LOT_SIZE="400",
+                SM_EXPIRY_DATE="2026-06-25",
+                SM_FREEZE_QTY="20000",
+            ),
+            # Undated leg (sorts LAST) with a non-positive freeze → freeze None;
+            # it must NOT override the dated near leg above.
+            _row(
+                INSTRUMENT="OPTSTK",
+                UNDERLYING_SYMBOL="INFY",
+                SECURITY_ID="2",
+                LOT_SIZE="999",
+                SM_EXPIRY_DATE="",
+                SM_FREEZE_QTY="0",
+            ),
+        ]
+        assert build_leg_economics(rows)[(Exchange.NSE, "INFY")] == (400, 20000)
+
+    def test_undated_leg_used_when_only_option(self) -> None:
+        rows = [
+            _row(
+                INSTRUMENT="OPTIDX",
+                UNDERLYING_SYMBOL="NIFTY",
+                SECURITY_ID="1",
+                LOT_SIZE="65",
+                SM_EXPIRY_DATE="",
+                SM_FREEZE_QTY="0",
+            ),
+        ]
+        # Only leg → used despite no expiry; freeze 0 → None.
+        assert build_leg_economics(rows)[(Exchange.NSE, "NIFTY")] == (65, None)

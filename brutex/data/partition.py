@@ -83,8 +83,13 @@ VALID_INTERVALS: Final[frozenset[str]] = frozenset(
 VALID_EXCHANGES: Final[frozenset[str]] = frozenset({"NSE", "BSE"})
 
 
-#: Segments BruteX stores bars for.
-VALID_SEGMENTS: Final[frozenset[str]] = frozenset({"CASH", "FNO"})
+#: Segments BruteX stores bars for. ``INDEX`` (Dhan ``IDX_I``) was added by
+#: DEC-INDEX-SEGMENT-PK-FIX-001 (#406) — index instruments now carry
+#: ``segment='INDEX'``, so a spot-candle pull for NIFTY/BANKNIFTY/SENSEX routes
+#: an ``INDEX`` segment into the partition path; without it the lake-write
+#: rejected every index spot pull (the live ``segment must be one of
+#: ['CASH','FNO'], got 'INDEX'`` crash). DEC-PARTITION-INDEX-SEGMENT-001.
+VALID_SEGMENTS: Final[frozenset[str]] = frozenset({"INDEX", "CASH", "FNO"})
 
 
 #: Characters that would break filesystem paths on Linux / macOS /

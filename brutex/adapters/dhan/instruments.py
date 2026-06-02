@@ -42,7 +42,7 @@ demand. This module is pure (no I/O); the CSV download lives in the loader.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Final
@@ -393,6 +393,59 @@ class UniverseReport:
     filtered: int  # out-of-scope rows skipped (MCX, etc.)
 
 
+#: F&O leg ``INSTRUMENT`` codes whose lot/freeze define the TRADABLE contract
+#: size of their underlying — single-stock (FUTSTK/OPTSTK) + index (FUTIDX/OPTIDX).
+#: (Commodity/currency legs reference non-equity/non-index underlyings.)
+_FNO_LEG_TYPES: Final[frozenset[str]] = frozenset({"FUTSTK", "OPTSTK", "FUTIDX", "OPTIDX"})
+
+
+def build_leg_economics(
+    rows: Iterable[Mapping[str, str]],
+) -> dict[tuple[Exchange, str], tuple[int, int | None]]:
+    """Map ``(exchange, underlying_symbol)`` → ``(lot_size, freeze_qty)`` from F&O legs.
+
+    The Dhan master's EQUITY/INDEX rows carry the **cash** lot (1 / 0); the real
+    **F&O lot** (RELIANCE 500, NIFTY 65, BANKNIFTY 30) lives on the derivative
+    legs. This harvests that lot + freeze per underlying so the live universe
+    underlying can be stamped with its tradable contract size
+    (DEC-UNDERLYING-LEG-ECONOMICS-001) — the same detailed CSV is the COMMON
+    single source (Golden Rule #2), validated row-for-row against the NSE
+    ``fo_mktlots`` file.
+
+    The **nearest** ``SM_EXPIRY_DATE`` leg wins (lots can differ across far
+    months — e.g. TCS 175 near vs 225 far — so first-seen is non-deterministic
+    and wrong; nearest-expiry is the live contract). A leg with no expiry sorts
+    last. ``freeze`` ≤ 0 → ``None`` (a count's only valid floor; keeps
+    ``InstrumentMeta`` happy). Keyed on the underlying TICKER (``UNDERLYING_SYMBOL``)
+    — which equals the admitted equity's ``symbol_name`` (DEC-DHAN-FNO-JOIN-KEY-001)
+    AND the admitted index's ``symbol_name`` (a FUTIDX's ``UNDERLYING_SYMBOL`` is
+    the index symbol, e.g. ``"NIFTY"``).
+    """
+    best: dict[tuple[Exchange, str], tuple[date, int, int | None]] = {}
+    for row in rows:
+        if row.get("INSTRUMENT", "").strip().upper() not in _FNO_LEG_TYPES:
+            continue
+        exch = row.get("EXCH_ID", "").strip().upper()
+        if exch not in (Exchange.NSE, Exchange.BSE):
+            continue
+        underlying = _opt_str(row.get("UNDERLYING_SYMBOL"))
+        if underlying is None:
+            continue
+        lot = _to_int(row.get("LOT_SIZE", ""), "LOT_SIZE")
+        if lot <= 0:
+            continue
+        freeze = _opt_int(row.get("SM_FREEZE_QTY"))
+        if freeze is not None and freeze <= 0:
+            freeze = None
+        # No expiry → sort LAST (date.max) so any dated leg is preferred.
+        expiry = _opt_expiry(row.get("SM_EXPIRY_DATE")) or date.max
+        key = (Exchange(exch), underlying.upper())
+        incumbent = best.get(key)
+        if incumbent is None or expiry < incumbent[0]:
+            best[key] = (expiry, lot, freeze)
+    return {key: (lot, freeze) for key, (_expiry, lot, freeze) in best.items()}
+
+
 def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
     """Select the brute-force universe and report the parse accounting.
 
@@ -468,7 +521,21 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
         identity = (inst.security_id, inst.exch_id, inst.segment)
         if identity not in by_identity:
             by_identity[identity] = inst
-    universe = list(by_identity.values())
+    # Enrich each admitted underlying with its TRADABLE F&O lot + freeze from the
+    # nearest-expiry derivative leg (DEC-UNDERLYING-LEG-ECONOMICS-001). The EQUITY/
+    # INDEX row carries only the cash lot (1 / 0); the real lot lives on the legs.
+    # Keyed on ``symbol_name`` (== the underlying ticker for both admitted stocks
+    # AND indices). ``tick_size`` is NOT overridden — an index spot's tick (0.05)
+    # differs from its future's (10.0); only lot + freeze come from the leg. An
+    # underlying with no leg (reference indices like INDIA VIX / NIFTY 100) keeps
+    # its cash row value.
+    leg_economics = build_leg_economics(rows)
+    universe = [
+        replace(inst, lot_size=econ[0], sm_freeze_qty=econ[1])
+        if (econ := leg_economics.get((inst.exch_id, inst.symbol_name.upper()))) is not None
+        else inst
+        for inst in by_identity.values()
+    ]
     persisted = len(universe)
     return UniverseReport(
         universe=universe,
