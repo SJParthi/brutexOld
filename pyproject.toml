@@ -372,12 +372,13 @@ omit = [
     # (98%), data/sink (96%), data/parquet_writer (93%), and dashboard/app.py
     # (~75%, exercised by the now-un-skipped dashboard suite) were UN-OMITTED;
     # their coverage now counts toward the 90% floor (verified aggregate
-    # 97.70%). The 3 modules below stay omitted — still below the 90% floor
-    # (data/catalog ~86%, data/instrument_store ~87%, execution/driver ~83%)
-    # until dedicated tests land (tracked follow-up).
+    # 97.70%). `execution/driver.py` was UN-OMITTED at 100% line+branch
+    # (DEC-COVERAGE-DRIVER-001 — tests/unit/test_execution_driver_edges.py +
+    # tests/integration/test_execution_driver.py). The 2 modules below stay
+    # omitted — still below the 90% floor (data/catalog ~86%,
+    # data/instrument_store ~87%) until dedicated tests land (tracked follow-up).
     "brutex/data/catalog.py",
     "brutex/data/instrument_store.py",
-    "brutex/execution/driver.py",
 ]
 
 [tool.coverage.report]
