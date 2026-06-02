@@ -38,11 +38,15 @@ on:
       - ".github/workflows/bench-m4pro.yml"
       - "brutex/vocabulary/**"
       - "rust/fno-math/**"
-  pull_request:
-    paths:
-      - "tests/bench/test_throughput_absolute.py"
-      - "tests/bench/test_throughput_canary.py"
-      - ".github/workflows/bench-m4pro.yml"
+  # NOTE (DEC-M4PRO-PR-TRIGGER-001): intentionally NO `pull_request` trigger.
+  # This job runs on the self-hosted M4-Pro runner, which queues indefinitely
+  # while offline — a PR trigger would hang every bench-touching PR's mergeable
+  # state and emit a false "MERGE BLOCKED (pending)" pre-merge verdict (observed
+  # on PR #284). PRs use the shared-CI robust O(1) tier (in `ci.yml`); the strict
+  # 1.1× + absolute tiers run on push-to-main + nightly + manual dispatch, where
+  # a perpetually-queued run is harmless (no PR to block). Re-add a paths-filtered
+  # `pull_request:` here once the runner is registered if pre-merge strict checks
+  # are wanted.
   workflow_dispatch:
   schedule:
     # Daily 11:00 UTC = 16:30 IST (post-market). Catches CPU/OS/thermal
