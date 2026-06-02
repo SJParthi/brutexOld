@@ -68,6 +68,9 @@ jobs:
       # The literal "1" activates the absolute gate per
       # tests/bench/test_throughput_absolute.py _m4pro_gate_active().
       BRUTEX_M4PRO_ABS: "1"
+      # Activates the strict 1.1x O(1) ratio tier (DEC-O1-STRICT-TIER-001) via
+      # tests/bench/_o1_tiers.py ratio_ceiling() — only on this quiet runner.
+      BRUTEX_M4PRO_STRICT: "1"
       PYTHONHASHSEED: "0"
       PYTHONDONTWRITEBYTECODE: "1"
 
@@ -108,6 +111,16 @@ jobs:
           . .venv/bin/activate
           # -p no:cacheprovider keeps the runner's $HOME clean between runs.
           pytest tests/bench/test_throughput_absolute.py -q --tb=short -p no:cacheprovider
+
+      - name: Run strict 1.1x O(1) ratio tier
+        run: |
+          . .venv/bin/activate
+          # BRUTEX_M4PRO_STRICT=1 (job env) tightens every O(1) ratio gate to the
+          # decreed 1.1x ceiling (DEC-O1-STRICT-TIER-001) — meaningful only on
+          # this quiet self-hosted runner; shared CI keeps the robust 3-10x tier.
+          pytest tests/bench/test_store_o1.py tests/bench/test_option_dedup_o1.py \
+            tests/bench/test_lmdb_membership_o1.py tests/bench/test_rate_limiter_o1.py \
+            tests/bench/test_throughput_canary.py -q --tb=short -p no:cacheprovider
 
       - name: Print summary
         if: always()

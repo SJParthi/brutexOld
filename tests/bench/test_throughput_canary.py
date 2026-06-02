@@ -62,6 +62,8 @@ from brutex.vocabulary.evaluator import (
     evaluate_atoms,
 )
 
+from tests.bench._o1_tiers import ratio_ceiling
+
 # Required-mask: 4 bits set out of 64 — matches the canonical strategy
 # combo size in `docs/TRACK1_VOCABULARY.md` (5-6 conditions per strategy).
 _REQUIRED_MASK_BITS: tuple[int, ...] = (3, 17, 33, 47)
@@ -96,7 +98,7 @@ _TIMING_REPEATS: int = 15
 # and matches the cache-cliff-aware ceiling pattern PR #45 established for
 # the dict test (10× via `dict_ratio_ceiling` local). evaluate_atoms ratio
 # stays healthy at 3.7× headroom under 8×.
-_RATIO_CEILING: float = 8.0
+_RATIO_CEILING: float = ratio_ceiling(8.0)
 
 
 def _make_bar_bits_array(n: int) -> np.ndarray:
@@ -262,7 +264,7 @@ class TestThroughputCanary:
         )
 
         # Cache-hierarchy-tolerant ceiling (see docstring rationale).
-        dict_ratio_ceiling = 10.0
+        dict_ratio_ceiling = ratio_ceiling(10.0)
         assert ratio < dict_ratio_ceiling, (
             f"dict lookup ratio {ratio:.2f}× (1M dict vs 100K dict) exceeds "
             f"{dict_ratio_ceiling}× — possible hash-collision/linear-scan regression. "
