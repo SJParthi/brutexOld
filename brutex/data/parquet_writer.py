@@ -50,6 +50,7 @@ from brutex.data.partition import (
     build_partition_path,
     partition_for_timestamp,
 )
+from brutex.money import round_money
 
 if TYPE_CHECKING:  # pragma: no cover
     pass
@@ -61,6 +62,29 @@ ROW_GROUP_SIZE: Final[int] = 100_000
 
 #: zstd compression level — deterministic across zstd >= 1.5.
 ZSTD_LEVEL: Final[int] = 3
+
+
+def _tick_round(bar: CandleBar) -> CandleBar:
+    """Snap a bar's OHLC to the 2-decimal rupee tick grid (DEC-SPOT-PRICE-2DP-001).
+
+    Dhan returns float-noise prices (``14020.7999``) but the real index / equity
+    tick is 2dp (``14020.80``). The spot lake rounds at the write boundary with
+    the SAME ``round_money`` (``ROUND_HALF_UP``, never truncation) the option
+    writer already uses — so the spot and option lakes match and ``/db`` shows
+    clean 2dp everywhere. Applied to BOTH incoming and stored-read bars, so a
+    re-pull compares grid-vs-grid and stays bit-idempotent. Rounding is monotone,
+    so ``low <= open, close <= high`` is preserved (no ``CandleBar`` violation).
+    Volume / OI / timestamp are untouched.
+    """
+    return CandleBar(
+        timestamp=bar.timestamp,
+        open=round_money(bar.open),
+        high=round_money(bar.high),
+        low=round_money(bar.low),
+        close=round_money(bar.close),
+        volume=bar.volume,
+        open_interest=bar.open_interest,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +171,11 @@ class ParquetWriter:
         """
         if not bars:
             raise WriterError("ParquetWriter.write called with an empty bars list")
+
+        # Snap every incoming bar to the 2dp tick grid first, so the lake stores
+        # clean 2dp prices AND a re-pull compares grid-vs-grid (idempotent — no
+        # false conflict against already-rounded stored bars). DEC-SPOT-PRICE-2DP-001.
+        bars = [_tick_round(b) for b in bars]
 
         # Group by (year, month) — must all be in one partition.
         partitions = {partition_for_timestamp(b.timestamp) for b in bars}
@@ -282,10 +311,11 @@ class ParquetWriter:
     def _read_existing_bars(dest: Path) -> dict[datetime, CandleBar]:
         """Read a stored partition back into ``{timestamp: CandleBar}``.
 
-        Decimals are reconstructed via ``Decimal(str(float))`` — Python's
-        shortest-round-trip float repr recovers the original price exactly for
-        the ≤4-decimal Indian-market prices we store, so a re-render of an
-        unchanged bar is byte-identical (idempotence preserved).
+        Decimals are reconstructed via ``Decimal(str(float))`` and then snapped
+        to the 2dp tick grid (``_tick_round``) — so a stored bar compares equal
+        to a freshly-rounded incoming bar even if the partition predates
+        DEC-SPOT-PRICE-2DP-001 (any 4-decimal remnant rounds to the same 2dp),
+        keeping re-pulls idempotent and converging the lake to clean 2dp.
         """
         try:
             import polars as pl
@@ -299,14 +329,16 @@ class ParquetWriter:
         out: dict[datetime, CandleBar] = {}
         for row in df.iter_rows(named=True):
             oi = row["open_interest"]
-            bar = CandleBar(
-                timestamp=row["timestamp"],
-                open=Decimal(str(row["open"])),
-                high=Decimal(str(row["high"])),
-                low=Decimal(str(row["low"])),
-                close=Decimal(str(row["close"])),
-                volume=int(row["volume"]),
-                open_interest=None if oi is None else int(oi),
+            bar = _tick_round(
+                CandleBar(
+                    timestamp=row["timestamp"],
+                    open=Decimal(str(row["open"])),
+                    high=Decimal(str(row["high"])),
+                    low=Decimal(str(row["low"])),
+                    close=Decimal(str(row["close"])),
+                    volume=int(row["volume"]),
+                    open_interest=None if oi is None else int(oi),
+                )
             )
             out[bar.timestamp] = bar
         return out

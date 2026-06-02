@@ -124,3 +124,16 @@ class TestParseCandleColumns:
     def test_malformed_price_propagates(self) -> None:
         with pytest.raises(CandleParseError, match="unparseable open price"):
             parse_candle_columns(_payload(open=["abc", 101.0]))
+
+    def test_drop_volume_ignores_volume_column(self) -> None:
+        """drop_volume=True ignores the volume column outright (indices have none).
+
+        DEC-VENDOR-VOLUME-NORMALIZE-001 — even a junk negative is never read.
+        """
+        bars = parse_candle_columns(_payload(volume=[5, -2]), drop_volume=True)
+        assert [b.volume for b in bars] == [0, 0]
+
+    def test_drop_volume_default_keeps_volume(self) -> None:
+        """drop_volume defaults False — a real instrument's volume is honored."""
+        bars = parse_candle_columns(_payload(volume=[5, 7]))
+        assert [b.volume for b in bars] == [5, 7]

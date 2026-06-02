@@ -124,11 +124,8 @@ class DhanMarketAdapter:
         # on NSE, SENSEX on BSE, INDIA VIX) — Dhan rejects / returns empty for
         # an index addressed under ``NSE_EQ`` / ``BSE_EQ``. Real EQUITY/stock
         # spot keeps the ``<exchange>_EQ`` cash segment.
-        exchange_segment = (
-            "IDX_I"
-            if instrument.instrument_type is InstrumentType.IDX
-            else f"{instrument.exchange.value}_EQ"
-        )
+        is_index = instrument.instrument_type is InstrumentType.IDX
+        exchange_segment = "IDX_I" if is_index else f"{instrument.exchange.value}_EQ"
         # ``symbol`` is the GLOBAL ``vendor_symbol`` (exchange-prefixed, e.g.
         # ``"NSE-NIFTY"``); the Dhan candle API needs the RAW numeric
         # ``SECURITY_ID``, preserved on the instrument as ``exchange_token``
@@ -173,7 +170,9 @@ class DhanMarketAdapter:
         payload = self.client.post_json(endpoint, body)
         candles = payload.get("data")
         source = candles if isinstance(candles, dict) else payload
-        return parse_candle_columns(source)
+        # Indices have no traded volume — ignore Dhan's junk ``volume`` array so
+        # an index bar is always 0 (DEC-VENDOR-VOLUME-NORMALIZE-001).
+        return parse_candle_columns(source, drop_volume=is_index)
 
 
 __all__ = ["DhanMarketAdapter"]
