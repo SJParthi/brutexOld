@@ -112,15 +112,16 @@ class TestWrite:
         assert df["strike_offset"][0] == "ATM"  # requested selector, distinct from strike
 
     def test_empty_bars_returns_zero(self, tmp_path: Path) -> None:
-        assert _writer(tmp_path).write(partition_key=_PK, coordinate=_COORD, bars=[]) == 0
+        written = _writer(tmp_path).write(partition_key=_PK, coordinate=_COORD, bars=[])
+        assert written == 0
 
     def test_idempotent_repull_writes_nothing(self, tmp_path: Path) -> None:
         w = _writer(tmp_path)
         bars = [_bar(minute=0), _bar(minute=1)]
-        assert w.write(partition_key=_PK, coordinate=_COORD, bars=bars) == 2
-        assert (
-            w.write(partition_key=_PK, coordinate=_COORD, bars=bars) == 0
-        )  # all dup → no new rows
+        first = w.write(partition_key=_PK, coordinate=_COORD, bars=bars)
+        assert first == 2
+        second = w.write(partition_key=_PK, coordinate=_COORD, bars=bars)
+        assert second == 0  # all dup → no new rows
         assert _read(tmp_path).height == 2
 
     def test_partial_merge_adds_only_new(self, tmp_path: Path) -> None:
@@ -167,7 +168,8 @@ class TestWrite:
             spot=None,
             iv=None,
         )
-        assert w.write(partition_key=_PK, coordinate=_COORD, bars=[bar]) == 1
+        written = w.write(partition_key=_PK, coordinate=_COORD, bars=[bar])
+        assert written == 1
         df = _read(tmp_path)
         assert df["strike"][0] is None
         assert df["open_interest"][0] is None
