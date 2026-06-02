@@ -130,6 +130,88 @@ pub fn blake3_hash(py: Python<'_>, data: &[u8]) -> Py<PyBytes> {
     PyBytes::new(py, hash.as_bytes()).into()
 }
 
+/// Count, for a single strategy mask, how many bars are a SUPERSET of it.
+///
+/// A bar (its packed u64 condition bitset) **matches** the mask iff
+/// every required bit in `mask` is also set in the bar:
+///
+/// ```text
+/// (bar & mask) == mask
+/// ```
+///
+/// This is the SUPERSET / superset-membership test — distinct from the
+/// `bitand_count_u64s` AND-popcount (which sums *bit overlaps*, not
+/// whole-bar matches). It is the literal Stage-2 hot op described in
+/// `brutex/engine/combo_mask.py:189-221` (`evaluate_mask`).
+///
+/// Branchless: the inner test `(bar & mask) == mask` yields a `bool`
+/// which is added as `u64` (`0`/`1`) with no branch, so the loop is a
+/// straight linear scan the compiler can auto-vectorise at
+/// `-C opt-level=3`.
+///
+/// Edge case: `mask == 0` requires nothing, so **every** bar matches
+/// (`(bar & 0) == 0` always) — count == `bar_bits.len()`. This mirrors
+/// `evaluate_mask(bar, 0) is True`.
+#[pyfunction]
+pub fn count_supermask_u64s(bar_bits: Vec<u64>, mask: u64) -> u64 {
+    bar_bits
+        .iter()
+        .map(|&bar| u64::from((bar & mask) == mask))
+        .sum()
+}
+
+/// Batched per-mask SUPERSET count — the Stage-2 brute-force accelerator.
+///
+/// For each `mask` in `masks`, return how many bars in `bar_bits` satisfy
+/// `(bar & mask) == mask` (the bar is a superset of the mask). The result
+/// is a `Vec<u64>` of length `masks.len()`, positionally aligned with
+/// `masks` — `out[j]` is the hit count for `masks[j]`.
+///
+/// This is THE Stage-2 hot kernel (ADR-0004 "Rust CPU kernel first"):
+/// the 33-billion-trial sweep evaluates one strategy mask against the
+/// full precomputed per-bar condition bitset column. Today the Python
+/// path in `brutex.engine.combo_mask.count_supermasks` does this with a
+/// numpy vectorised `((bar_bits & mask) == mask).sum()` per mask; this
+/// kernel replaces the inner numpy pass with a single fused Rust loop.
+///
+/// ## Memory-bandwidth-bound (ADR-0004 finding 2)
+///
+/// The inner op is a branchless integer `AND` + `CMP` + conditional add
+/// — all single-cycle on M4 Pro / x86. The kernel is therefore **memory-
+/// bandwidth-bound, not compute-bound**: throughput is governed by how
+/// fast `bar_bits` streams from cache/RAM, not by the ALU. The loop is
+/// structured **masks outer / bars inner** so that the (smaller, reused)
+/// `mask` scalar stays in a register while the (large) `bar_bits` slice
+/// streams linearly — cache-friendly and SIMD-eligible. For the common
+/// case where `bar_bits` fits in L2 (~94 K u64 = ~750 KiB), it is
+/// resident across all masks, so only the first mask pays the cold-cache
+/// cost. GPU offload (ADR-0004) buys only ~1.2-2.3× on the M4 Pro's
+/// SHARED memory pool, which is why this CPU kernel ships first.
+///
+/// ## Determinism (Golden Rule #4)
+///
+/// Pure integer arithmetic — no floats, no reduction-order ambiguity.
+/// Same `(bar_bits, masks)` → bit-identical output on every device, so
+/// the result feeds the blake3 reproducibility hash unchanged.
+///
+/// Empty inputs are valid: empty `masks` → empty `Vec`; empty `bar_bits`
+/// → a zero per mask.
+#[pyfunction]
+pub fn count_supermasks_u64s(bar_bits: Vec<u64>, masks: Vec<u64>) -> Vec<u64> {
+    masks
+        .iter()
+        .map(|&mask| {
+            // bars inner — `bar_bits` streams linearly, `mask` is register-
+            // resident. Branchless: `bool as u64` is 0/1, summed with no
+            // branch in the hot loop.
+            bar_bits
+                .iter()
+                .map(|&bar| u64::from((bar & mask) == mask))
+                .sum()
+        })
+        .collect()
+}
+
 /// Return the total number of set bits across a raw byte slice.
 ///
 /// DEC-P0-053 (PR-N). Used by
@@ -163,4 +245,113 @@ pub fn popcount_bytes(data: &[u8]) -> u64 {
         .sum();
     let tail_bits: u64 = tail.iter().map(|b| u64::from(b.count_ones())).sum();
     body + tail_bits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{count_supermask_u64s, count_supermasks_u64s};
+
+    // ── count_supermask_u64s (single mask) ──
+
+    #[test]
+    fn single_empty_bars_is_zero() {
+        assert_eq!(count_supermask_u64s(vec![], 0b1011), 0);
+    }
+
+    #[test]
+    fn single_mask_zero_matches_all_bars() {
+        // (bar & 0) == 0 for every bar — mirrors evaluate_mask(bar, 0) is True.
+        let bars = vec![0u64, 1, 0xFFFF_FFFF_FFFF_FFFF, 0xDEAD_BEEF];
+        assert_eq!(count_supermask_u64s(bars.clone(), 0), bars.len() as u64);
+    }
+
+    #[test]
+    fn single_all_match() {
+        // Every bar is a superset of mask 0b0011.
+        let bars = vec![0b0011, 0b0111, 0b1111, 0b1011];
+        assert_eq!(count_supermask_u64s(bars, 0b0011), 4);
+    }
+
+    #[test]
+    fn single_none_match() {
+        // No bar has bit 3 set, so none is a superset of 0b1000.
+        let bars = vec![0b0001, 0b0010, 0b0100, 0b0111];
+        assert_eq!(count_supermask_u64s(bars, 0b1000), 0);
+    }
+
+    #[test]
+    fn single_partial_match() {
+        // mask requires bits 0 and 1; only bars with BOTH set count.
+        let bars = vec![0b0011, 0b0001, 0b0010, 0b1011, 0b0100];
+        assert_eq!(count_supermask_u64s(bars, 0b0011), 2);
+    }
+
+    #[test]
+    fn single_high_bit_mask() {
+        let top = 1u64 << 63;
+        let bars = vec![top, top | 1, 0, 1];
+        assert_eq!(count_supermask_u64s(bars, top), 2);
+    }
+
+    // ── count_supermasks_u64s (batched) ──
+
+    #[test]
+    fn batch_empty_masks_is_empty() {
+        assert_eq!(
+            count_supermasks_u64s(vec![1, 2, 3], vec![]),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn batch_empty_bars_is_zero_per_mask() {
+        assert_eq!(
+            count_supermasks_u64s(vec![], vec![0b1, 0b11, 0]),
+            vec![0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn batch_mask_zero_matches_all() {
+        let bars = vec![0b0001, 0b1010, 0b1111];
+        assert_eq!(count_supermasks_u64s(bars, vec![0]), vec![3]);
+    }
+
+    #[test]
+    fn batch_multi_mask_mixed() {
+        let bars = vec![0b0011, 0b0111, 0b1000, 0b1011, 0b0000];
+        // mask 0b0011 → bars {0b0011,0b0111,0b1011} = 3
+        // mask 0b1000 → bars {0b1000,0b1011}        = 2
+        // mask 0b1111 → none                        = 0
+        // mask 0      → all                         = 5
+        let out = count_supermasks_u64s(bars, vec![0b0011, 0b1000, 0b1111, 0]);
+        assert_eq!(out, vec![3, 2, 0, 5]);
+    }
+
+    #[test]
+    fn batch_positional_alignment() {
+        // out[j] must align with masks[j]; reordering masks reorders output.
+        let bars = vec![0b0001, 0b0010, 0b0011];
+        assert_eq!(
+            count_supermasks_u64s(bars.clone(), vec![0b0001, 0b0010]),
+            vec![2, 2]
+        );
+        assert_eq!(
+            count_supermasks_u64s(bars, vec![0b0010, 0b0001]),
+            vec![2, 2]
+        );
+    }
+
+    #[test]
+    fn batch_matches_single_kernel() {
+        // The batched kernel must agree with the single-mask kernel element-wise.
+        let bars = vec![0u64, 1, 0b1011, 0b1111, 1u64 << 40, 0xDEAD_BEEF];
+        let masks = vec![0u64, 1, 0b1010, 1u64 << 40, 0xFFFF_FFFF_FFFF_FFFF];
+        let batched = count_supermasks_u64s(bars.clone(), masks.clone());
+        let one_by_one: Vec<u64> = masks
+            .iter()
+            .map(|&m| count_supermask_u64s(bars.clone(), m))
+            .collect();
+        assert_eq!(batched, one_by_one);
+    }
 }
