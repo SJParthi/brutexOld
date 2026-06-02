@@ -57,6 +57,7 @@ from __future__ import annotations
 import hashlib
 import sys
 import zlib
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -544,6 +545,27 @@ class TestUpsertManyEdges:
             assert result.rows_replaced == 0
             assert s.count(in_scope_only=False) == 0
             # The store is still healthy after the no-row transaction.
+            assert s.verify_integrity().is_clean is True
+
+    def test_duplicate_identity_batch_is_deduped_not_crashed(self, tmp_path: Path) -> None:
+        """Two rows sharing (security_id, exch_id, segment) collapse to ONE — the
+        store never crashes on a PK violation regardless of caller hygiene
+        (DEC-DHAN-UNIVERSE-PK-DEDUP-001; the live ``13, NSE, CASH`` crash)."""
+        nifty_a = _idx("NIFTY")
+        # Same identity (security_id, exch_id, segment), DIFFERENT symbol_name —
+        # the Dhan duplicate-listing shape that blew up the bulk INSERT.
+        nifty_b = replace(nifty_a, symbol_name="NIFTY 50", display_name="Nifty 50 (dup)")
+        assert nifty_a.security_id == nifty_b.security_id  # same identity by construction
+        with InstrumentStore.open(tmp_path / "db") as s:
+            result = s.upsert_many(
+                [nifty_a, nifty_b],
+                snapshot_date=date(2025, 4, 15),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+            )
+            # Collapsed to one (last-seen wins), not crashed; exactly one row stored.
+            assert result.rows_written == 1
+            assert s.count(in_scope_only=False) == 1
             assert s.verify_integrity().is_clean is True
 
     def test_failed_bulk_insert_rolls_back_and_reraises(self, tmp_path: Path) -> None:

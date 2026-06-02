@@ -444,7 +444,23 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
                 inst.security_id in canonical_ids and existing.security_id not in canonical_ids
             ):
                 by_key[key] = inst
-    universe = list(by_key.values())
+    # Second collapse — by the table's IDENTITY ``(security_id, exch_id, segment)``,
+    # the ``instruments`` PRIMARY KEY minus ``snapshot_date`` (DEC-INSTRUMENT-PK-SEGMENT-001).
+    # The first dedup above keys on ``(exch_id, symbol_name)`` (the MOTHERSON case:
+    # same name, different SECURITY_ID → keep canonical). But the vendor ALSO lists
+    # one ``security_id`` under MORE THAN ONE ``SYMBOL_NAME`` (e.g. NIFTY id=13 as
+    # both "Nifty 50" and "NIFTY") — different name-keys, so BOTH survive the first
+    # pass yet share the same identity and would violate the PK on bulk INSERT
+    # (the live `13, NSE, CASH` crash). A ``security_id`` is unique within an
+    # exchange-segment, so collapsing here only merges genuine duplicates — never
+    # two distinct instruments — with no count regression (DEC-DHAN-UNIVERSE-PK-DEDUP-001).
+    # O(1) per row via a dict; first-seen wins (deterministic, follows CSV order).
+    by_identity: dict[tuple[int, Exchange, Segment], Instrument] = {}
+    for inst in by_key.values():
+        identity = (inst.security_id, inst.exch_id, inst.segment)
+        if identity not in by_identity:
+            by_identity[identity] = inst
+    universe = list(by_identity.values())
     persisted = len(universe)
     return UniverseReport(
         universe=universe,

@@ -430,6 +430,25 @@ class TestUniverseDedup:
         assert report.persisted == 1
         assert report.legs_dropped == 2  # the duplicate listing + the option leg
 
+    def test_same_security_id_under_two_symbol_names_collapses_to_one(self) -> None:
+        # The live `13, NSE, CASH` crash (DEC-DHAN-UNIVERSE-PK-DEDUP-001): the
+        # vendor lists ONE security_id under TWO admitted SYMBOL_NAMEs (NIFTY id
+        # 13 as both "NIFTY" and "BANKNIFTY"-shaped names here). They survive the
+        # (exch_id, symbol_name) dedup (different names) but share the table
+        # identity (security_id, exch_id, segment) and would crash the bulk
+        # INSERT. The second collapse must merge them to exactly ONE row.
+        rows = [
+            _row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY", SECURITY_ID="13", LOT_SIZE="0"),
+            _row(INSTRUMENT="INDEX", SYMBOL_NAME="BANKNIFTY", SECURITY_ID="13", LOT_SIZE="0"),
+        ]
+        report = select_universe_report(rows)
+        # ONE row, the canonical identity, no PK collision possible downstream.
+        assert [(i.security_id, i.exch_id.value, i.segment.value) for i in report.universe] == [
+            (13, "NSE", "CASH")
+        ]
+        assert report.persisted == 1
+        assert report.legs_dropped == 1  # the duplicate-identity row
+
     def test_duplicate_listing_keeps_first_when_no_canonical_link(self) -> None:
         # No UNDERLYING_SECURITY_ID on the derivative → no canonical hint →
         # first-seen wins, still exactly ONE spot (no collision, no count loss).
