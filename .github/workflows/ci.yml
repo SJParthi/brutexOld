@@ -175,12 +175,13 @@ jobs:
         run: pip install ./rust/fno-math
       - name: pytest with coverage gate
         run: |
-          # Coverage floor is 90% for P1 — heavy-dep modules (cli,
-          # dashboard, data/catalog, data/parquet_writer, data/sink)
-          # are excluded in [tool.coverage.run].omit because they need
-          # the [data] extras or a running dashboard harness. The
-          # target is progressively raised to 100% in follow-up PRs
-          # as the remaining coverage gaps get dedicated tests.
+          # Coverage floor is 90% for P1. The [tool.coverage.run].omit
+          # list is now just the CLI layer (cli.py / __main__.py, pending a
+          # CLI snapshot harness) + data/instrument_store.py (~87%, dedicated
+          # harness is the next follow-up). data/catalog.py was un-omitted at
+          # 100% (DEC-COVERAGE-CATALOG-001); dashboard / parquet_writer / sink
+          # were un-omitted in DEC-DASHBOARD-OMIT-AUDIT-001 (#377). The floor
+          # is progressively raised to 100% as the remaining gaps get tests.
           pytest \
             --cov=brutex \
             --cov-branch \
@@ -365,6 +366,17 @@ jobs:
             pytest --cov=brutex.execution.driver --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_driver_edges.py tests/integration/test_execution_driver.py
           else
             echo "(brutex.execution.driver edge test file not present yet — gate inactive)"
+          fi
+          # DEC-COVERAGE-CATALOG-001 (2026-06-02): brutex.data.catalog
+          # un-omitted at 100% line+branch. Reaching 100% needs BOTH the
+          # real-lake happy-path suite (test_data_lake_real.py) AND the
+          # edge/guard suite (test_catalog.py — closed guards, path getter,
+          # upsert ROLLBACK, list_partitions None-bound partials, get_bars +
+          # open() missing-dependency ImportError, open_catalog, naive-tz).
+          if compgen -G "tests/integration/test_catalog.py" > /dev/null; then
+            pytest --cov=brutex.data.catalog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_data_lake_real.py tests/integration/test_catalog.py
+          else
+            echo "(brutex.data.catalog edge test file not present yet — gate inactive)"
           fi
           # DEC-COV-001 step 11 (entry #221): 3-module batch
           # following step 6's triple-add precedent (3 errors modules).
