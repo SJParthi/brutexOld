@@ -35,6 +35,13 @@ Invariants covered
    input-domain contract).
 """
 
+# pyright: reportCallIssue=false
+# Rationale (DEC-PYRIGHT-UNMASK-001): the Hypothesis `@st.composite` strategies
+# below (e.g. `_nine_tuple`) are called WITHOUT the `draw` argument — Hypothesis
+# injects it at runtime. pyright does not model the `@composite` signature
+# transform and reports a false "Argument missing for parameter draw" at every
+# `@given(...=_strategy())` site. The strategies are correct (the suite passes).
+# Scoped to this file only; `reportCallIssue` stays a hard error everywhere else.
 from __future__ import annotations
 
 from collections.abc import Mapping

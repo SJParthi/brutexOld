@@ -112,8 +112,13 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
+        # DEC-PYRIGHT-UNMASK-001: install the [data,ui] runtime extras too, so
+        # pyright type-checks brutex/dashboard/ + the data paths against REAL
+        # fastapi/pydantic/polars/duckdb types (not Unknown). Previously [dev]-only,
+        # which silently masked dashboard type errors (mirror of the #376/#280
+        # test-masking finding).
         run: |
-          pip install -e ".[dev]"
+          pip install -e ".[dev,data,ui]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-050: required by pyright's strict mode which walks
         # `tests/unit/test_fno_math_bridge.py` and needs the module
