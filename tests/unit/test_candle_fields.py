@@ -134,3 +134,26 @@ class TestAssembleCandle:
     def test_malformed_price_propagates(self) -> None:
         with pytest.raises(CandleParseError, match="unparseable open price"):
             self._call(open_="abc")
+
+    def test_normalizes_open_above_vendor_high(self) -> None:
+        """Vendor quirk: open above the reported high → high clamped to open.
+
+        DEC-OHLC-VENDOR-NORMALIZE-001 — the live Dhan failure
+        (open 17289.0 > reported high 17287.0996) must NOT crash the pull.
+        """
+        bar = self._call(open_="17289.0", high="17287.0996", low="17264.8496", close="17270.0")
+        assert bar.open == Decimal("17289.0")
+        assert bar.high == Decimal("17289.0")  # clamped up to bound the traded open
+        assert bar.low == Decimal("17264.8496")  # already the min — unchanged
+
+    def test_normalizes_close_below_vendor_low(self) -> None:
+        """A close below the reported low → low clamped down to bound the close."""
+        bar = self._call(open_="100", high="110", low="95", close="90")
+        assert bar.low == Decimal("90")  # clamped down to the traded close
+        assert bar.high == Decimal("110")
+
+    def test_consistent_bar_passes_through_unchanged(self) -> None:
+        """A well-formed bar's reported high/low are left untouched."""
+        bar = self._call(open_="100", high="110", low="90", close="105")
+        assert bar.high == Decimal("110")
+        assert bar.low == Decimal("90")
