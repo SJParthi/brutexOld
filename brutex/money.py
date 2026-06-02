@@ -1,15 +1,20 @@
 """Money formatting — the single source of truth for rupee display.
 
-Track 1 stores every price as int64 **paisa** (CLAUDE.md §6: Dhan emits
-prices as rupee floats; the adapter multiplies by 100 at the parse boundary to
-keep an exact integer). This module is the only place that converts paisa back
-to a human-facing rupee value, and it enforces the operator rule (2026-05-29,
-``DEC-MONEY-2DP-001``): **money is displayed with at most two decimal places.**
+Money amounts at the **cost + display boundary** are int64 **paisa** (an exact
+integer; 1 rupee = 100 paisa) — see ``brutex.costs``. This module is the only
+place that converts paisa back to a human-facing rupee value, and it enforces
+the operator rule (2026-05-29, ``DEC-MONEY-2DP-001``): **money is displayed with
+at most two decimal places.**
 
-The rule applies to MONEY ONLY. Statistical metrics (Sharpe, Deflated Sharpe,
-p-values, CPCV scores) keep full precision — rounding them would corrupt
-strategy ranking (Golden Rule #10). Internal storage stays int64 paisa; only
-the display boundary rounds.
+Price storage is separate (``DEC-PAISA-DOC-RECONCILE-001``): OHLC / spot /
+option **prices** in the lake are exact :class:`~decimal.Decimal` rupees, NOT
+paisa (``data/candle_fields.to_price`` -> ``CandleBar``; Parquet ``Float64``;
+see ``brutex/data/models.py``). int64 paisa is the unit of the costs calculator
+plus this display module, never of price storage.
+
+The 2dp rule applies to MONEY ONLY. Statistical metrics (Sharpe, Deflated
+Sharpe, p-values, CPCV scores) keep full precision — rounding them would corrupt
+strategy ranking (Golden Rule #10).
 """
 
 from __future__ import annotations

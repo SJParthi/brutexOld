@@ -227,8 +227,10 @@ Track 1 spec locked after 4-agent hostile-review pass._
   paisa→rupee display goes through `brutex.money` (`format_inr` /
   `round_money` / `paisa_to_rupees`); rounding happens at the display
   boundary only. NEVER round statistical metrics (Sharpe, DSR, p-values,
-  CPCV) — they keep full precision or strategy ranking breaks. Internal
-  storage stays int64 paisa.
+  CPCV) — they keep full precision or strategy ranking breaks. Money amounts
+  (costs + display) are int64 paisa; OHLC/spot/option **prices** are stored as
+  exact Decimal rupees (Parquet Float64), NOT paisa — see §6
+  (DEC-PAISA-DOC-RECONCILE-001).
 
 ---
 
@@ -314,7 +316,7 @@ bruteX/
 | Chunk window — options | **30 days per call** | `dhan/constants.py:96`; `dhan-ref/06...:18` |
 | Candle response shape — spot | **Columnar parallel arrays** `{open[],high[],low[],close[],volume[],timestamp[],open_interest[]}` (NOT row-arrays) | `dhan/parser.py:5-15`; `dhan-ref/05...:54-63` |
 | Candle response shape — options | **Per-side columnar** `{ce:{iv[],oi[],strike[],spot[],open[],...}, pe:null}` (null side allowed) | `dhan-ref/06...:54-62` |
-| **Price unit** | **RUPEES (float)** — parser MUST × 100 at parse boundary to preserve int64 paisa | `dhan/parser.py:61-64`; `dhan-ref/05...:72-73` |
+| **Price unit** | **RUPEES (float)** from Dhan — kept as exact `Decimal` rupees through the lake (Parquet `Float64`); int64 paisa is the cost/display unit only, NOT price storage (DEC-PAISA-DOC-RECONCILE-001) | `data/candle_fields.py` (`to_price`→`Decimal`); `data/models.py:142-144`; `dhan-ref/05...:72-73` |
 | Timestamp unit | **UNIX epoch (UTC seconds)** — store UTC, convert to IST at display only | `dhan/parser.py:36-57`; `dhan-ref/05...:74-76` |
 | Symbol/key format | **`SECURITY_ID` (numeric, from CSV) — NEVER hardcode**; lookup Symbol/ISIN → CSV row → SECURITY_ID | `dhan/instruments.py:64-73`; `dhan-ref/09...:64-72` |
 | Options strike addressing | **Relative-to-spot ATM±N** (ATM±10 index near-expiry, ATM±3 other), NOT absolute strikes | `dhan-ref/06...:43-44` |
