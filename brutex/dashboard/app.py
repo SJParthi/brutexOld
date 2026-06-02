@@ -758,10 +758,13 @@ def build_app(
         ``symbol`` surfaces as a 400 (DEC-PULL-ERROR-VISIBILITY-001).
         ``from_date`` / ``to_date`` are optional inclusive ISO
         ``YYYY-MM-DD`` bounds (the from/to candle picker); when either is
-        given they select an explicit, clamped ``[2020-01-01, today]``
-        range, otherwise the full calendar ``year`` is pulled. A malformed
-        date or a ``from`` after ``to`` surfaces as a 400 with the real
-        reason (DEC-PULL-ERROR-VISIBILITY-001).
+        given they select an explicit, clamped ``[2021-01-01, today]``
+        range (a blank ``to_date`` defaults to the previous day — today is
+        included only via an explicit ``to_date`` reaching it), otherwise
+        the full calendar ``year``, else (no dates, no year) the full
+        Track-1 history ``[2021-01-01, previous day]``. A malformed date or
+        a ``from`` after ``to`` surfaces as a 400 with the real reason
+        (DEC-PULL-ERROR-VISIBILITY-001).
         ``dry_run`` is forced ``True`` automatically when Dhan
         credentials are not present in the environment (via the testable
         :func:`brutex.dashboard.pull_controller.dhan_creds_present`
@@ -850,7 +853,8 @@ def build_app(
 
         The one-click "⤓ Pull ALL indices / stocks spot" buttons (① / ③). Launches
         :func:`brutex.dashboard.pull_controller.pull_all_spot` (full
-        ``[2021-01-01, today]`` 1m + 1d) on the **background job** so the request
+        ``[2021-01-01, previous day]`` 1m + 1d; the current session is
+        excluded by default) on the **background job** so the request
         returns at once and the page polls ``/pull-progress`` for the live tick.
         Single-flight: a second start while one runs returns ``{"started": false}``.
         ``dry_run`` is forced ``True`` when Dhan creds are absent (offline preview).

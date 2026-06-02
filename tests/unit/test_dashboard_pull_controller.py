@@ -179,9 +179,13 @@ class TestDhanCredsPresent:
 
 
 class TestPullCandlesDryRun:
-    def test_default_year_is_current_utc_year(self, tmp_path: Path) -> None:
+    def test_default_no_dates_no_year_pulls_full_history(self, tmp_path: Path) -> None:
+        # No dates, no year → the FULL Track-1 history (2021-01-01 → previous
+        # day), so the report's start year is the 2021 floor, NOT the current
+        # year (FIX 4 — blank pickers default to the full history floor).
         report = pull_candles(_index(), lake_root=tmp_path, dry_run=True)
-        assert report.year == datetime.now(UTC).year
+        assert report.year == DHAN_HISTORY_FLOOR.year
+        assert report.start_date == DHAN_HISTORY_FLOOR.isoformat()
         assert report.dry_run is True
         assert report.symbol == "13"
 
@@ -273,14 +277,14 @@ _NOW = datetime(2026, 5, 30, 12, 0, tzinfo=UTC)  # the context "today"
 class TestResolveCandleRange:
     """The pure, O(1) window resolver behind the from/to-date candle picker."""
 
-    def test_no_dates_no_year_clamps_current_year_to_today(self) -> None:
-        # Default mode 3 — neither date nor year → current UTC calendar year,
-        # but clamped to today: it must NEVER return a future window (the
-        # live-crash root cause was the unclamped [2026-01-01, 2027-01-01)).
-        # DEC-PULL-FUTURE-WINDOW-001.
+    def test_no_dates_no_year_pulls_full_history_to_yesterday(self) -> None:
+        # Default mode 3 — neither date nor year → the FULL Track-1 history
+        # (2021-01-01 → previous day), NOT the current year (FIX 4). The end is
+        # the previous day (05-29), exclusive-end midnight 05-30, so the current
+        # session (today, 05-30) is excluded by default (FIX 5).
         start, end = resolve_candle_range(from_date=None, to_date=None, year=None, now=_NOW)
-        assert start == datetime(2026, 1, 1, tzinfo=UTC)
-        assert end == datetime(2026, 5, 31, tzinfo=UTC)  # today (05-30) + 1 day, NOT 2027
+        assert start == datetime(2021, 1, 1, tzinfo=UTC)  # the 2021 floor, not 2026
+        assert end == datetime(2026, 5, 30, tzinfo=UTC)  # yesterday (05-29) + 1 day
 
     def test_no_dates_explicit_past_year_is_full_year(self) -> None:
         # Mode 2 — a PAST year, no dates → that full calendar year (the tail
@@ -289,13 +293,14 @@ class TestResolveCandleRange:
         assert start == datetime(2023, 1, 1, tzinfo=UTC)
         assert end == datetime(2024, 1, 1, tzinfo=UTC)
 
-    def test_no_dates_current_year_clamps_to_today(self) -> None:
-        # Mode 2 — the CURRENT year explicitly → clamped to today, never the
-        # rest of the year (this is exactly the live failure: year=2026 on
-        # 2026-05-30 must stop at today, not run to 2026-12-31).
+    def test_no_dates_current_year_clamps_to_previous_day(self) -> None:
+        # Mode 2 — the CURRENT year explicitly → clamped to the previous day
+        # (no explicit to_date), never the rest of the year and never today's
+        # in-progress session (year=2026 on 2026-05-30 stops at 05-29, not
+        # 2026-12-31 and not 05-30).
         start, end = resolve_candle_range(from_date=None, to_date=None, year=2026, now=_NOW)
         assert start == datetime(2026, 1, 1, tzinfo=UTC)
-        assert end == datetime(2026, 5, 31, tzinfo=UTC)
+        assert end == datetime(2026, 5, 30, tzinfo=UTC)  # yesterday (05-29) + 1 day
 
     def test_no_dates_future_year_raises(self) -> None:
         # Mode 2 — a wholly-future year has nothing to pull (start > clamped
@@ -318,10 +323,12 @@ class TestResolveCandleRange:
         assert start == datetime(2024, 2, 1, tzinfo=UTC)
         assert end == datetime(2024, 2, 16, tzinfo=UTC)
 
-    def test_from_only_runs_to_today(self) -> None:
+    def test_from_only_runs_to_previous_day(self) -> None:
+        # from_date given, to_date omitted → default end is the previous day
+        # (today's in-progress session excluded by default; FIX 5).
         start, end = resolve_candle_range(from_date="2026-05-01", to_date=None, year=None, now=_NOW)
         assert start == datetime(2026, 5, 1, tzinfo=UTC)
-        assert end == datetime(2026, 5, 31, tzinfo=UTC)  # today (05-30) + 1 day
+        assert end == datetime(2026, 5, 30, tzinfo=UTC)  # yesterday (05-29) + 1 day
 
     def test_to_only_starts_at_history_floor(self) -> None:
         # to_date must be on/after the 2021 floor or there's nothing to pull.
@@ -336,16 +343,29 @@ class TestResolveCandleRange:
         assert start == datetime(2021, 1, 1, tzinfo=UTC)  # clamped up to the 2021 floor
 
     def test_to_after_today_is_clamped_down(self) -> None:
+        # An EXPLICIT to_date may reach today, so the clamp ceiling is today
+        # (not the previous day) → 2099 clamps down to today (FIX 5 exception).
         _, end = resolve_candle_range(
             from_date="2026-01-01", to_date="2099-12-31", year=None, now=_NOW
         )
-        assert end == datetime(2026, 5, 31, tzinfo=UTC)  # today + 1 day
+        assert end == datetime(2026, 5, 31, tzinfo=UTC)  # today (05-30) + 1 day
+
+    def test_explicit_today_to_date_includes_today(self) -> None:
+        # FIX 5 exception: an explicit to_date reaching today IS honoured — the
+        # operator can deliberately include the current session. Here to_date ==
+        # today (05-30) → exclusive end is 05-31, so today's day is fetched.
+        start, end = resolve_candle_range(
+            from_date="2026-05-01", to_date="2026-05-30", year=None, now=_NOW
+        )
+        assert start == datetime(2026, 5, 1, tzinfo=UTC)
+        assert end == datetime(2026, 5, 31, tzinfo=UTC)  # today (05-30) + 1 day
 
     def test_year_is_ignored_when_a_date_is_given(self) -> None:
-        # A date present → mode 1; the year argument must not leak in.
+        # A date present → mode 1; the year argument must not leak in. to_date
+        # omitted → default end is the previous day (FIX 5).
         start, end = resolve_candle_range(from_date="2024-07-01", to_date=None, year=2099, now=_NOW)
         assert start == datetime(2024, 7, 1, tzinfo=UTC)
-        assert end == datetime(2026, 5, 31, tzinfo=UTC)
+        assert end == datetime(2026, 5, 30, tzinfo=UTC)  # yesterday (05-29) + 1 day
 
     def test_from_after_to_raises(self) -> None:
         with pytest.raises(ValueError, match="after to_date"):
@@ -436,9 +456,10 @@ class TestPullAllSpot:
         assert isinstance(report, BulkSpotReport)
         assert report.dry_run is True
         assert report.total_symbols == 2
-        # full 2021 → today window (DEC-DHAN-PULL-SCOPE-001).
+        # full 2021 → previous day window (DEC-DHAN-PULL-SCOPE-001); the bulk
+        # pull passes no explicit to_date so the current session is excluded.
         assert report.start_date == "2021-01-01"
-        assert report.end_date == "2026-05-30"
+        assert report.end_date == "2026-05-29"  # previous day (now=05-30)
         # both fetched intervals (1m + 1d) completed for each symbol → 4 pairs.
         assert report.total_completed == 4
         assert report.total_failed == 0

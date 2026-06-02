@@ -95,16 +95,25 @@ def resolve_candle_range(
        **day-inclusive** (``to_date``'s whole day is fetched, so *end* is
        the midnight that starts the next day). A missing *from_date*
        defaults to :data:`DHAN_HISTORY_FLOOR`; a missing *to_date*
-       defaults to today (``now``'s UTC date). The pair is then clamped to
-       ``[DHAN_HISTORY_FLOOR, today]`` so a too-early or future pick can
+       defaults to the **previous day** (``today - 1``), so a pull never
+       grabs the still-forming current session by default. An EXPLICIT
+       *to_date* IS honoured (clamped to ``today``), so the operator can
+       deliberately include today by picking it. The pair is then clamped
+       to ``[DHAN_HISTORY_FLOOR, today]`` so a too-early or future pick can
        never waste quota — and the future is never requested.
     2. **Year** — when neither date is given but *year* is: that full
-       calendar year, **clamped to ``[DHAN_HISTORY_FLOOR, today]``** like
-       mode 1. A past year resolves to the whole year; the current year
-       stops at today (never the future); a wholly-future or pre-2021 year
-       raises "nothing to pull".
-    3. **Default** — neither date nor year: the current UTC calendar year,
-       same clamp as mode 2 (so it runs ``[Jan 1, today]``, never ahead).
+       calendar year, **clamped to ``[DHAN_HISTORY_FLOOR, yesterday]``**.
+       A past year resolves to the whole year; the current year stops at
+       the previous day (never today / the future); a wholly-future or
+       pre-2021 year raises "nothing to pull".
+    3. **Default** — neither date nor year: the FULL Track-1 history,
+       ``[DHAN_HISTORY_FLOOR (2021-01-01), previous day]``. (Previously
+       this defaulted to the current calendar year — corrected so a blank
+       picker pulls the whole locked range, not just this year.)
+
+    The default upper bound is the **previous day** (``today - 1``) so a
+    routine pull never includes the in-progress current session; today is
+    included ONLY when an explicit *to_date* reaching today is selected.
 
     Parameters
     ----------
@@ -114,7 +123,8 @@ def resolve_candle_range(
         Calendar year, used only when both dates are ``None``.
     now
         The reference "current" instant (injected for testability). Its
-        UTC date is the upper clamp and the default-year source.
+        UTC date drives the upper clamp (``today``) and the default end
+        (``yesterday``).
 
     Returns
     -------
@@ -136,26 +146,43 @@ def resolve_candle_range(
     to_date = (to_date or "").strip() or None
 
     today = now.astimezone(UTC).date()
+    # Default upper bound = the PREVIOUS day, so a routine pull never grabs the
+    # still-forming current session. An EXPLICIT to_date overrides this and may
+    # reach today (clamped below). yesterday < DHAN_HISTORY_FLOOR is impossible
+    # in practice (today is well past 2021) but the start>end guard covers it.
+    yesterday = today - timedelta(days=1)
+
+    # An EXPLICIT to_date may reach today; every other mode (year / default /
+    # missing to_date) stops at the previous day so a routine pull never grabs
+    # the still-forming current session. ``ceiling`` is the upper clamp.
+    explicit_to = to_date is not None
+    ceiling = today if explicit_to else yesterday
 
     if from_date is None and to_date is None:
-        # Mode 2/3 — an explicit *year* (or, absent that, the current UTC
-        # year) → that full calendar year as a date pair, which then falls
-        # through the SAME clamp as the explicit-range mode below, so the
-        # current year stops at today and a wholly-future / pre-2021 year
-        # raises "nothing to pull" instead of requesting a window the vendor
-        # rejects (DEC-PULL-FUTURE-WINDOW-001).
-        resolved_year = year if year is not None else now.year
-        start_date = date(resolved_year, 1, 1)
-        end_date = date(resolved_year, 12, 31)
+        # Mode 2/3 — an explicit *year* picks that full calendar year; absent a
+        # year the default is the FULL Track-1 history (2021-01-01 → previous
+        # day), NOT the current year. Both fall through the SAME clamp below so
+        # the window never reaches today/the future and a wholly-future /
+        # pre-2021 year raises "nothing to pull" (DEC-PULL-FUTURE-WINDOW-001).
+        if year is not None:
+            start_date = date(year, 1, 1)
+            end_date = date(year, 12, 31)
+        else:
+            start_date = DHAN_HISTORY_FLOOR
+            end_date = yesterday
     else:
         start_date = _parse_iso_date(from_date, "from_date") if from_date else DHAN_HISTORY_FLOOR
-        end_date = _parse_iso_date(to_date, "to_date") if to_date else today
+        # An explicit to_date is honoured (clamped to today via ``ceiling`` —
+        # explicit today IS allowed); a missing to_date defaults to the
+        # previous day.
+        end_date = _parse_iso_date(to_date, "to_date") if to_date else yesterday
 
-    # Clamp into the vendor-served window; never request the future. Applies
-    # to EVERY mode (the year/default branch was previously the one unclamped
-    # path — the live-crash root cause).
+    # Clamp into the vendor-served window; never request the future. Applies to
+    # EVERY mode (the year/default branch was previously the one unclamped path
+    # — the live-crash root cause). Only an explicit to_date may reach today;
+    # otherwise the ceiling is the previous day.
     start_date = max(start_date, DHAN_HISTORY_FLOOR)
-    end_date = min(end_date, today)
+    end_date = min(end_date, ceiling)
     if start_date > end_date:
         raise ValueError(
             f"from_date ({start_date.isoformat()}) is after to_date "
@@ -347,8 +374,8 @@ class BulkSpotReport:
     """Result of a :func:`pull_all_spot` call (the one-click bulk-spot button).
 
     Aggregates the per-symbol outcome across the two fetched intervals
-    (``1m`` + ``1d``) over the full ``[2021-01-01, today]`` range
-    (DEC-DHAN-PULL-SCOPE-001).
+    (``1m`` + ``1d``) over the full ``[2021-01-01, previous day]`` range
+    (DEC-DHAN-PULL-SCOPE-001) — the current session is excluded by default.
     """
 
     dry_run: bool
@@ -453,7 +480,7 @@ def pull_all_spot(
     adapter_factory: BulkAdapterFactory | None = None,
     on_progress: ProgressHook | None = None,
 ) -> BulkSpotReport:
-    """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, today]`` range.
+    """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, previous day]`` range.
 
     The one-click "⤓ Pull ALL indices / stocks spot" button core: one
     :func:`~brutex.adapters.dhan.run_ingest.run_dhan_spot_ingest` pass over
@@ -472,7 +499,8 @@ def pull_all_spot(
         When ``True`` use the offline synthetic adapter (no creds / network).
     now
         Injected "current" instant (defaults to :func:`datetime.now`) — its
-        UTC date is the upper bound of the full ``[2021-01-01, today]`` window.
+        UTC date drives the upper bound (the previous day) of the full
+        ``[2021-01-01, previous day]`` window; the current session is excluded.
     adapter_factory
         Override the bulk ``(adapter, sink)`` builder; defaults to the
         synthetic builder when *dry_run* else the live builder.
@@ -566,8 +594,11 @@ def pull_candles(
     never fetched, per DEC-DHAN-1M-ONLY-001). The window is resolved by
     :func:`resolve_candle_range`: an explicit *from_date* / *to_date* range
     (day-inclusive, clamped to ``[2021-01-01, today]``) when either is given,
-    else the full calendar *year*. Idempotent + rerun-safe — the sink append
-    is a no-op on already-stored bars (CLAUDE.md §2 Rule 7).
+    else the full calendar *year*, else (no dates, no year) the full Track-1
+    history ``[2021-01-01, previous day]``. The default end is the previous
+    day — today is pulled only via an explicit *to_date* reaching it.
+    Idempotent + rerun-safe — the sink append is a no-op on already-stored
+    bars (CLAUDE.md §2 Rule 7).
 
     Parameters
     ----------
@@ -580,12 +611,15 @@ def pull_candles(
         dry-run null sink.
     year
         Calendar year to pull when no explicit range is given. ``None``
-        (default) uses the current UTC year. Ignored when *from_date* or
+        (default) pulls the full Track-1 history (2021-01-01 → previous
+        day), NOT just the current year. Ignored when *from_date* or
         *to_date* is supplied.
     from_date, to_date
         Inclusive ISO ``YYYY-MM-DD`` bounds for an explicit range. Either
-        may be ``None`` (defaults to the Dhan history floor / today
-        respectively). When both are ``None`` the *year* mode applies.
+        may be ``None`` (*from_date* defaults to the Dhan history floor;
+        *to_date* defaults to the previous day — an explicit *to_date* may
+        reach today). When both are ``None`` the *year* / full-history mode
+        applies.
     dry_run
         When ``True``, use the offline synthetic adapter (no creds /
         network). When ``False``, build the live Dhan adapter via

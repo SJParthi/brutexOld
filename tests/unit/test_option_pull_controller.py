@@ -143,7 +143,9 @@ class TestPullOptions:
         report = pull_options([_index()], lake_root=Path("/unused"), dry_run=True, now=_NOW)
         assert report.dry_run is True
         assert report.start_date == "2021-01-01"
-        assert report.end_date == "2021-01-06"
+        # No explicit to_date → default end is the previous day (now=01-06 →
+        # 01-05); the in-progress current session is excluded by default (FIX 5).
+        assert report.end_date == "2021-01-05"
         assert report.total_symbols == 1
         # 21 strikes × 2 flags × 3 codes × 2 types = 252 series, all complete.
         assert report.symbols[0].series_completed == 21 * 2 * 3 * 2

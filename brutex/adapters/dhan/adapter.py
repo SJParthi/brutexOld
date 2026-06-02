@@ -120,7 +120,15 @@ class DhanMarketAdapter:
         if instrument is None:
             raise OutOfScopeError(f"symbol {symbol!r} not in the Dhan universe")
         del exchange  # the instrument's own exchange is authoritative
-        exchange_segment = f"{instrument.exchange.value}_EQ"
+        # Indices live in the cross-exchange ``IDX_I`` segment (NIFTY/BANKNIFTY
+        # on NSE, SENSEX on BSE, INDIA VIX) — Dhan rejects / returns empty for
+        # an index addressed under ``NSE_EQ`` / ``BSE_EQ``. Real EQUITY/stock
+        # spot keeps the ``<exchange>_EQ`` cash segment.
+        exchange_segment = (
+            "IDX_I"
+            if instrument.instrument_type is InstrumentType.IDX
+            else f"{instrument.exchange.value}_EQ"
+        )
         # ``symbol`` is the GLOBAL ``vendor_symbol`` (exchange-prefixed, e.g.
         # ``"NSE-NIFTY"``); the Dhan candle API needs the RAW numeric
         # ``SECURITY_ID``, preserved on the instrument as ``exchange_token``
@@ -128,6 +136,15 @@ class DhanMarketAdapter:
         raw_security_id = str(instrument.exchange_token)
         dhan_instrument = _dhan_instrument(instrument)
         from_dt = datetime.combine(start, time())
+        # Dhan's ``toDate`` is NON-INCLUSIVE (``docs/dhan-ref/05`` + ``06``): a
+        # candle is returned only if its timestamp is strictly before ``toDate``.
+        # ``end`` here is the EXCLUSIVE half-open window boundary — the chunk
+        # planner tiles ``[start, end)`` contiguously and the dashboard's
+        # ``resolve_candle_range`` already maps the operator's INCLUSIVE end day
+        # ``D`` to ``end = D + 1`` (the midnight that starts the next day). So
+        # sending ``toDate = end`` fetches the whole inclusive end day ``D``
+        # without dropping it AND without overlapping the next tile (whose
+        # ``fromDate`` is exactly this ``end``).
         to_dt = datetime.combine(end, time())
         if interval == _INTERVAL_INTRADAY:
             endpoint = ENDPOINT_INTRADAY

@@ -133,10 +133,33 @@ class TestFetchOhlcv:
         body = sent["body"]
         assert isinstance(body, dict)
         assert body["securityId"] == "13"
-        assert body["exchangeSegment"] == "NSE_EQ"
+        # An INDEX is addressed under the cross-exchange IDX_I segment, NOT
+        # NSE_EQ (Dhan rejects / returns empty for an index under _EQ).
+        assert body["exchangeSegment"] == "IDX_I"
         assert body["instrument"] == "INDEX"
         assert body["interval"] == "1"
+        # OI is requested by default (operator wants Open Interest ON).
+        assert body["oi"] is True
         assert body["fromDate"] == "2021-01-04 00:00:00"
+
+    def test_intraday_index_todate_is_exclusive_end(self) -> None:
+        # FIX 3 regression: Dhan's toDate is NON-INCLUSIVE, so the window's
+        # exclusive end boundary (the midnight that STARTS the day after the
+        # operator's inclusive end) is what's sent — fetching the whole
+        # inclusive end day without dropping it. Here the half-open window is
+        # [2021-01-04, 2021-01-05): toDate == the 05 midnight, so all of the
+        # 04 session is returned and the 04 day is NOT lost.
+        adapter, t = _adapter()
+        adapter.fetch_ohlcv(
+            symbol="13",
+            exchange=Exchange.NSE,
+            interval="1minute",
+            start=date(2021, 1, 4),
+            end=date(2021, 1, 5),
+        )
+        body = t.calls[0]["body"]
+        assert isinstance(body, dict)
+        assert body["toDate"] == "2021-01-05 00:00:00"
 
     def test_daily_equity(self) -> None:
         adapter, t = _adapter()
@@ -153,11 +176,19 @@ class TestFetchOhlcv:
         body = sent["body"]
         assert isinstance(body, dict)
         assert body["instrument"] == "EQUITY"
+        # A real EQUITY keeps the <exchange>_EQ cash segment (only indices move
+        # to IDX_I).
         assert body["exchangeSegment"] == "NSE_EQ"
         assert "interval" not in body
+        assert body["oi"] is True
         assert body["fromDate"] == "2021-01-04"
+        # FIX 3: daily toDate is the exclusive end day (non-inclusive Dhan), so
+        # the inclusive end day 01-04 is fetched.
+        assert body["toDate"] == "2021-01-05"
 
-    def test_bse_segment(self) -> None:
+    def test_bse_index_segment_is_idx_i(self) -> None:
+        # SENSEX is a BSE INDEX → IDX_I (the cross-exchange index segment),
+        # NOT BSE_EQ.
         adapter, t = _adapter()
         adapter.fetch_ohlcv(
             symbol="51",
@@ -168,7 +199,7 @@ class TestFetchOhlcv:
         )
         body = t.calls[0]["body"]
         assert isinstance(body, dict)
-        assert body["exchangeSegment"] == "BSE_EQ"
+        assert body["exchangeSegment"] == "IDX_I"
 
     def test_data_wrapper_unwrapped(self) -> None:
         adapter, _ = _adapter(payload={"data": _CANDLES})

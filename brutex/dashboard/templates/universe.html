@@ -216,7 +216,7 @@
   <div class="universe-hero" id="universeHero">
     <div class="shine"></div>
     <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
-    <div class="hsub">Spot pulls <b>1-minute + 1-day</b> from <b>2021-01-01 → today</b>; options fan
+    <div class="hsub">Spot pulls <b>1-minute + 1-day</b> from <b>2021-01-01 → previous trading day</b>; options fan
       <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1-minute.
       Re-click any time — already-pulled windows are skipped (no wasted Dhan hit).</div>
     <div class="bulkgrid">
@@ -267,7 +267,7 @@
   <div class="pullbar">
     <div class="lead" id="pulllead">Select an instrument to pull its spot — or click a future / option contract to pull that contract</div>
     <label style="color:var(--muted); font-size:12px;" title="Inclusive start date — blank pulls from 2021-01-01 (Track 1 history floor).">from <input type="date" id="fromDate" min="2021-01-01" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
-    <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — blank pulls up to today.">to <input type="date" id="toDate" min="2021-01-01" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
+    <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — blank pulls up to the previous trading day (pick today to include it).">to <input type="date" id="toDate" min="2021-01-01" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
     <button class="loadbtn" id="loadbtn" title="Download the public Dhan instrument master — no keys needed">⟳ Load instruments</button>
     <button class="optbtn" id="optbtn" title="Pull this underlying's full option grid (ATM window · CE+PE · weekly+monthly · near/next/far, 1-minute)" disabled>⛓ Pull options chain</button>
     <button class="pullbtn" id="pullbtn" disabled>⤓ Pull spot — 1-minute</button>
@@ -570,7 +570,7 @@ async function runPull(symbol, label) {
   panel.classList.add("on");
   btn.disabled = true;
   /* The from/to date picker scopes EVERY pull path (spot / future / CE-PE).
-     Blank ends default server-side to 2021-01-01 / today and are clamped
+     Blank ends default server-side to 2021-01-01 / previous trading day and are clamped
      into the Dhan-served window, so a malformed range can't waste quota. */
   const fromDate = document.getElementById("fromDate").value;
   const toDate = document.getElementById("toDate").value;
@@ -578,7 +578,7 @@ async function runPull(symbol, label) {
   if (fromDate) qs += '&from_date=' + encodeURIComponent(fromDate);
   if (toDate) qs += '&to_date=' + encodeURIComponent(toDate);
   const range = (fromDate || toDate)
-    ? ` · ${fromDate || "2021-01-01"} → ${toDate || "today"}`
+    ? ` · ${fromDate || "2021-01-01"} → ${toDate || "prev day"}`
     : "";
   document.getElementById("pulltitle").textContent = `Pulling ${label} · 1-minute${range}`;
   const grid = document.getElementById("tfgrid");

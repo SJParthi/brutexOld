@@ -60,13 +60,22 @@ def build_intraday_body(
     from_date: datetime,
     to_date: datetime,
     interval: str = TRACK1_SPOT_INTRADAY_INTERVAL,
+    oi: bool = True,
 ) -> dict[str, object]:
-    """Build the ``/charts/intraday`` request body (SPOT underlying only)."""
+    """Build the ``/charts/intraday`` request body (SPOT underlying only).
+
+    ``oi`` requests the Open-Interest series (default ``True`` — the operator
+    wants OI ON). Indices return an empty OI array (harmless); futures /
+    stocks / options populate it. The ``interval`` value stays the ``"1"``
+    string per the Dhan REST doc JSON example.
+    """
     return {
         "securityId": str(security_id),
         "exchangeSegment": _validate(exchange_segment, EXCHANGE_SEGMENTS, "exchangeSegment"),
         "instrument": _validate(instrument, INSTRUMENT_TYPES, "instrument"),
+        # TODO(DEC pending): SDK sends int; REST doc shows "1" string — verify
         "interval": _validate(interval, SUPPORTED_INTRADAY_INTERVALS, "interval"),
+        "oi": oi,
         "fromDate": from_date.strftime(_INTRADAY_FMT),
         "toDate": to_date.strftime(_INTRADAY_FMT),
     }
@@ -79,12 +88,19 @@ def build_historical_body(
     instrument: str,
     from_date: datetime,
     to_date: datetime,
+    oi: bool = True,
 ) -> dict[str, object]:
-    """Build the ``/charts/historical`` (daily) request body (SPOT only)."""
+    """Build the ``/charts/historical`` (daily) request body (SPOT only).
+
+    ``oi`` requests the Open-Interest series (default ``True`` — the operator
+    wants OI ON). Indices return an empty OI array (harmless); futures /
+    stocks / options populate it.
+    """
     return {
         "securityId": str(security_id),
         "exchangeSegment": _validate(exchange_segment, EXCHANGE_SEGMENTS, "exchangeSegment"),
         "instrument": _validate(instrument, INSTRUMENT_TYPES, "instrument"),
+        "oi": oi,
         "fromDate": from_date.strftime(_DAILY_FMT),
         "toDate": to_date.strftime(_DAILY_FMT),
     }
