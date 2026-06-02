@@ -21,6 +21,7 @@ from brutex.dashboard.db_view import (
     CANDLE_COLUMNS,
     OPTION_CANDLE_COLUMNS,
     _format_candle_timestamp,
+    _ist_date,
     _quote_ident,
     list_candle_datasets,
     list_columns,
@@ -28,6 +29,7 @@ from brutex.dashboard.db_view import (
     query_candles,
     query_option_candles,
     query_table,
+    summarize_spot_datasets,
 )
 from brutex.data.instrument_store import Instrument, InstrumentStore
 from brutex.data.option_parquet_writer import OptionParquetWriter
@@ -1056,3 +1058,57 @@ def test_locked_conn_reexecute_without_fetch_does_not_leak(store: InstrumentStor
     cur.execute("SELECT * FROM instruments LIMIT 0")  # re-execute, no fetch between
     cur.fetchall()
     assert _lock_free(store)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# _ist_date + summarize_spot_datasets (DEC-COVERAGE-SPOT-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_ist_date_tz_aware_converts_to_ist_date() -> None:
+    # 2024-03-01 20:30Z → 2024-03-02 02:00 IST → the IST calendar date rolls.
+    assert _ist_date(datetime(2024, 3, 1, 20, 30, tzinfo=UTC)) == "2024-03-02"
+    # 2024-03-01 09:15Z → 2024-03-01 14:45 IST → same date.
+    assert _ist_date(datetime(2024, 3, 1, 9, 15, tzinfo=UTC)) == "2024-03-01"
+
+
+def test_ist_date_naive_datetime_kept_as_is() -> None:
+    # Defensive branch: a naive datetime is used as-is (DuckDB returns tz-aware).
+    assert _ist_date(datetime(2024, 3, 1, 14, 45, 0)) == "2024-03-01"
+
+
+def test_ist_date_non_datetime_is_none() -> None:
+    # A SQL NULL MIN/MAX over an empty partition surfaces as None → None.
+    assert _ist_date(None) is None
+    assert _ist_date("not-a-datetime") is None
+
+
+def test_summarize_spot_datasets_empty_lake(store: InstrumentStore, tmp_path: Path) -> None:
+    assert summarize_spot_datasets(store.connection, tmp_path) == []
+
+
+def test_summarize_spot_datasets_reports_bars_and_date_span(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    _write_candles(tmp_path)
+    rows = summarize_spot_datasets(store.connection, tmp_path)
+    assert rows == [
+        {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+            "bars": 2,
+            "first_date": "2024-03-01",
+            "last_date": "2024-03-02",
+        }
+    ]
+
+
+def test_summarize_spot_datasets_multiple_sets(store: InstrumentStore, tmp_path: Path) -> None:
+    _write_candles(tmp_path, symbol="NSE-NIFTY")
+    _write_candles(tmp_path, symbol="NSE-BANKNIFTY")
+    rows = summarize_spot_datasets(store.connection, tmp_path)
+    symbols = [r["symbol"] for r in rows]
+    assert symbols == ["NSE-BANKNIFTY", "NSE-NIFTY"]  # list_candle_datasets is sorted
+    assert all(r["bars"] == 2 for r in rows)

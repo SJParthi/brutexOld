@@ -185,9 +185,56 @@ def build_coverage_payload(
     }
 
 
+def spot_coverage_headline(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Return the spot-coverage KPI headline — dataset + bar totals.
+
+    Pure derivation off the per-dataset stats from
+    :func:`brutex.dashboard.db_view.summarize_spot_datasets`.
+
+    **Honest envelope (Golden Rule #10):** a dataset PRESENT in the lake counts
+    as *pulled*. This headline reports HOW MANY spot datasets exist and their
+    total bar count; it does NOT assert any date range is complete —
+    partial-date-range detection is an explicit follow-up (DEC-COVERAGE-SPOT-001).
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"datasets": <int>, "total_bars": <int>}``.
+    """
+    return {
+        "datasets": len(rows),
+        "total_bars": sum(int(row["bars"]) for row in rows),
+    }
+
+
+def build_spot_coverage_payload(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Return the full ``/api/v1/coverage/spot`` payload — headline + rows.
+
+    Composer mirroring :func:`build_coverage_payload` for the SPOT section of
+    the ``/coverage`` page (DEC-COVERAGE-SPOT-001). *rows* are the per-dataset
+    stats from :func:`brutex.dashboard.db_view.summarize_spot_datasets`
+    (``exchange`` · ``segment`` · ``symbol`` · ``interval`` · ``bars`` ·
+    ``first_date`` · ``last_date``). Pure projection: materialise once, derive
+    the headline, pass the rows through unchanged — so the FastAPI route stays a
+    thin delegating wrapper and this surface is 100% unit-testable offline.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"headline": {"datasets", "total_bars"}, "rows": [...]}``.
+    """
+    materialised = list(rows)
+    return {
+        "headline": spot_coverage_headline(materialised),
+        "rows": materialised,
+    }
+
+
 __all__ = [
     "STATUS_MISSING",
     "build_coverage_payload",
     "build_coverage_rows",
+    "build_spot_coverage_payload",
     "coverage_headline",
+    "spot_coverage_headline",
 ]

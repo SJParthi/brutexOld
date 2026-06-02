@@ -14,7 +14,9 @@ from brutex.dashboard.coverage_view import (
     STATUS_MISSING,
     build_coverage_payload,
     build_coverage_rows,
+    build_spot_coverage_payload,
     coverage_headline,
+    spot_coverage_headline,
 )
 from brutex.data.coverage_ledger import (
     CoverageRecord,
@@ -216,3 +218,47 @@ class TestBuildCoveragePayload:
         payload = build_coverage_payload(records, [("NSE", "NIFTY")], [2024])
         assert payload["headline"]["complete"] == 1
         assert payload["rows"][0]["status"] == "complete"
+
+
+# ── Spot coverage (DEC-COVERAGE-SPOT-001) ────────────────────────────
+
+
+def _spot(symbol: str = "NSE-NIFTY", *, bars: int = 2) -> dict[str, object]:
+    """One per-dataset stats dict shaped like ``summarize_spot_datasets``."""
+    return {
+        "exchange": "NSE",
+        "segment": "CASH",
+        "symbol": symbol,
+        "interval": "1minute",
+        "bars": bars,
+        "first_date": "2024-03-01",
+        "last_date": "2024-03-02",
+    }
+
+
+class TestSpotCoverageHeadline:
+    def test_empty_is_zero(self) -> None:
+        # No datasets → vacuously zero, never raises.
+        assert spot_coverage_headline([]) == {"datasets": 0, "total_bars": 0}
+
+    def test_sums_bars_across_datasets(self) -> None:
+        head = spot_coverage_headline([_spot("NSE-NIFTY", bars=2), _spot("NSE-BANKNIFTY", bars=5)])
+        assert head == {"datasets": 2, "total_bars": 7}
+
+
+class TestBuildSpotCoveragePayload:
+    def test_payload_has_headline_and_rows(self) -> None:
+        payload = build_spot_coverage_payload([_spot("NSE-NIFTY", bars=2)])
+        assert set(payload) == {"headline", "rows"}
+        assert payload["headline"] == {"datasets": 1, "total_bars": 2}
+        assert payload["rows"][0]["symbol"] == "NSE-NIFTY"
+
+    def test_payload_empty(self) -> None:
+        payload = build_spot_coverage_payload([])
+        assert payload == {"headline": {"datasets": 0, "total_bars": 0}, "rows": []}
+
+    def test_payload_accepts_iterator_once(self) -> None:
+        # An iterator (single-use) must still produce both headline + rows.
+        payload = build_spot_coverage_payload(iter([_spot("NSE-NIFTY", bars=3)]))
+        assert payload["headline"]["total_bars"] == 3
+        assert payload["rows"][0]["symbol"] == "NSE-NIFTY"
