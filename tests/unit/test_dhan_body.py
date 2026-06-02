@@ -35,9 +35,21 @@ class TestIntradayBody:
             "exchangeSegment": "NSE_EQ",
             "instrument": "INDEX",
             "interval": "1",
+            "oi": True,
             "fromDate": "2021-08-01 09:15:00",
             "toDate": "2021-09-01 15:30:00",
         }
+
+    def test_oi_can_be_disabled(self) -> None:
+        body = build_intraday_body(
+            security_id=13,
+            exchange_segment="NSE_EQ",
+            instrument="INDEX",
+            from_date=_FROM,
+            to_date=_TO,
+            oi=False,
+        )
+        assert body["oi"] is False
 
     def test_security_id_string_passthrough(self) -> None:
         body = build_intraday_body(
@@ -83,9 +95,21 @@ class TestHistoricalBody:
             "securityId": "51",
             "exchangeSegment": "BSE_EQ",
             "instrument": "INDEX",
+            "oi": True,
             "fromDate": "2021-08-01",
             "toDate": "2021-09-01",
         }
+
+    def test_oi_can_be_disabled(self) -> None:
+        body = build_historical_body(
+            security_id=51,
+            exchange_segment="BSE_EQ",
+            instrument="INDEX",
+            from_date=_FROM,
+            to_date=_TO,
+            oi=False,
+        )
+        assert body["oi"] is False
 
     def test_rejects_bad_segment(self) -> None:
         with pytest.raises(DhanBodyError, match="invalid exchangeSegment"):

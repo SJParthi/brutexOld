@@ -306,7 +306,7 @@ bruteX/
 | Base URL | `https://api.dhan.co/v2/` | `dhan/constants.py:24`; `dhan-ref/01...:13` |
 | Historical OHLC — spot | `POST /v2/charts/intraday` (1m) + `POST /v2/charts/historical` (1d) | `dhan/constants.py:31-34`; `dhan-ref/05...:22-25` |
 | Expired-options method | `POST /v2/charts/rollingoption` — **ONLY** option source (spot endpoints never used for options) | `dhan/constants.py:37`; `dhan-ref/06...:11-13` |
-| Backtesting segments | `NSE_EQ`, `NSE_FNO`, `BSE_EQ`, `BSE_FNO` | `dhan/constants.py:70`; `dhan-ref/09...:76-78` |
+| Backtesting segments | `IDX_I` (indices — NIFTY/BANKNIFTY/SENSEX/India VIX), `NSE_EQ`, `NSE_FNO`, `BSE_EQ`, `BSE_FNO` | `dhan/constants.py:76`; `dhan-ref/09...:76-78` (DEC-DHAN-IDX-SEGMENT-001) |
 | Instrument types | `INDEX, EQUITY, OPTIDX, OPTSTK, FUTIDX, FUTSTK` | `dhan/constants.py:74-76` |
 | Historical depth — intraday | **5 years** | `dhan/constants.py:99`; `dhan-ref/05...:82` |
 | Historical depth — daily | **back to instrument inception** | `dhan-ref/05...:84` |
@@ -333,7 +333,7 @@ bruteX/
 | Exception hierarchy | `DhanError, DhanAuthError, DhanRateLimitError, DhanBadRequest, DhanNotFound, DhanServerError` + `is_retryable()` | `dhan/errors.py:1-103` |
 | F&O-eligible stock detection | EQUITY rows whose `UNDERLYING_SYMBOL` appears in FUTSTK/OPTSTK set (DEC-DHAN-FNO-JOIN-KEY-001) | `dhan/instruments.py:15-34,361-421` |
 | Index allow-list | **31 NSE + {SENSEX} BSE = 32** (`_ADMITTED_NSE/BSE_INDEX_SYMBOLS`); India VIX in NSE list | `dhan/instruments.py:113-148` |
-| Track 1 brute-force universe | NIFTY (`NSE_EQ`,INDEX), BANKNIFTY (`NSE_EQ`,INDEX), SENSEX (`BSE_EQ`,INDEX) — resolved to SECURITY_ID via CSV | `dhan/instruments.py:113-148` |
+| Track 1 brute-force universe | NIFTY (`IDX_I`,INDEX), BANKNIFTY (`IDX_I`,INDEX), SENSEX (`IDX_I`,INDEX) — **indices use the cross-exchange `IDX_I` segment, NOT `*_EQ`** (DEC-DHAN-IDX-SEGMENT-001); resolved to SECURITY_ID via CSV | `dhan/instruments.py:113-148`; `dhan/adapter.py:128` |
 | INDIA VIX presence on historical endpoint | **UNVERIFIED** — Phase 0 HARD-GATE empirical probe | `dhan/instruments.py:119`; `dhan-ref/01...:49-57` |
 | Index SECURITY_ID values (NIFTY/BANKNIFTY/SENSEX) | **UNVERIFIED** — not in docs; resolve from detailed CSV at Phase 0 | `dhan-ref/09...:80-90` |
 | Expiry-code numbering | **DISCREPANCY** — rolling-option uses 1/2/3 (Near/Next/Far); Annexure uses 0/1/2 (DEC-DHAN-EXPIRY-CODES-001 open) | `dhan-ref/06...:43` |

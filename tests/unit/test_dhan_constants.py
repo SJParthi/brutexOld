@@ -63,6 +63,12 @@ class TestEnums:
     def test_exchange_segments(self) -> None:
         assert {"NSE_EQ", "NSE_FNO", "BSE_EQ"} <= c.EXCHANGE_SEGMENTS
 
+    def test_index_segment_idx_i_is_admitted(self) -> None:
+        # Indices are addressed under the cross-exchange IDX_I segment
+        # (NIFTY/BANKNIFTY/SENSEX/INDIA VIX), not _EQ — the official SDK's
+        # INDEX='IDX_I'. Without IDX_I the body validator would reject it.
+        assert "IDX_I" in c.EXCHANGE_SEGMENTS
+
     def test_instrument_types(self) -> None:
         assert {"INDEX", "EQUITY", "OPTIDX"} <= c.INSTRUMENT_TYPES
 

@@ -66,8 +66,15 @@ TRACK1_SPOT_INTRADAY_INTERVAL: Final[str] = "1"
 TRACK1_OPTIONS_INTERVAL: Final[str] = "1"
 
 # ── Enums (``docs/dhan-ref/06,09``) ──────────────────────────────────────
-#: Exchange-segment enum values used by the Data APIs.
-EXCHANGE_SEGMENTS: Final[frozenset[str]] = frozenset({"NSE_EQ", "NSE_FNO", "BSE_EQ", "BSE_FNO"})
+#: Exchange-segment enum values used by the Data APIs. ``IDX_I`` is the
+#: cross-exchange INDEX segment — every spot index (NIFTY/BANKNIFTY on NSE,
+#: SENSEX on BSE, INDIA VIX) is addressed under ``IDX_I``, NOT ``NSE_EQ`` /
+#: ``BSE_EQ`` (those are cash-equity only). The official DhanHQ SDK sets
+#: ``INDEX='IDX_I'`` and every index candle example uses ``IDX_I``; sending an
+#: ``_EQ`` segment for an index is rejected / returns empty.
+EXCHANGE_SEGMENTS: Final[frozenset[str]] = frozenset(
+    {"IDX_I", "NSE_EQ", "NSE_FNO", "BSE_EQ", "BSE_FNO"}
+)
 
 #: Instrument-type enum values (Track 1 uses INDEX + EQUITY for spot,
 #: OPTIDX/OPTSTK for the lake options surface).
