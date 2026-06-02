@@ -1142,6 +1142,16 @@ jobs:
           else
             echo "(brutex.dashboard.pull_jobs test file not present yet — gate inactive)"
           fi
+          # DEC-DB-CANDLE-DERIVED-001 (#401): the read-only DuckDB /db viewer —
+          # table summaries + structured query + spot/option candle readers,
+          # the date-only daily timestamp renderer, and the per-bar derived
+          # change_pct + open_gap_pct columns (vs the previous trading day's 1d
+          # close). 100% line+branch across both viewer test files.
+          if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py
+          else
+            echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML

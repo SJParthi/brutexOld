@@ -11,7 +11,7 @@ real Parquet partitions written by the production
 from __future__ import annotations
 
 import threading
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,9 +20,16 @@ from brutex.dashboard.db_view import (
     ALLOWED_OPERATORS,
     CANDLE_COLUMNS,
     OPTION_CANDLE_COLUMNS,
+    SPOT_DERIVED_COLUMNS,
+    _bar_ist_date,
+    _bar_ist_time,
+    _daily_close_by_date,
     _format_candle_timestamp,
     _ist_date,
+    _prev_trading_close,
     _quote_ident,
+    _spot_derived_rows,
+    _to_decimal,
     list_candle_datasets,
     list_columns,
     list_option_datasets,
@@ -401,7 +408,8 @@ def test_query_candles_returns_all_rows(store: InstrumentStore, tmp_path: Path) 
         limit=50,
     )
     assert out["total"] == 2
-    assert out["columns"] == list(CANDLE_COLUMNS)
+    # The two server-computed derived %-columns are appended (DEC-DB-CANDLE-DERIVED-001).
+    assert out["columns"] == [*CANDLE_COLUMNS, "change_pct", "open_gap_pct"]
     assert out["symbol"] == "NSE-NIFTY"
 
 
@@ -417,8 +425,9 @@ def test_query_candles_column_subset(store: InstrumentStore, tmp_path: Path) -> 
         columns=("timestamp", "close"),
         limit=50,
     )
-    assert out["columns"] == ["timestamp", "close"]
-    assert all(len(r) == 2 for r in out["rows"])
+    # Projection + the two appended derived %-columns (DEC-DB-CANDLE-DERIVED-001).
+    assert out["columns"] == ["timestamp", "close", "change_pct", "open_gap_pct"]
+    assert all(len(r) == 4 for r in out["rows"])
 
 
 def test_query_candles_empty_columns_tuple_raises(store: InstrumentStore, tmp_path: Path) -> None:
@@ -471,21 +480,42 @@ def test_query_candles_start_only(store: InstrumentStore, tmp_path: Path) -> Non
 def test_format_candle_timestamp_tz_aware_converts_to_ist() -> None:
     # A UTC TIMESTAMPTZ cell → IST wall-clock, no offset (03:30Z → 09:00 IST).
     assert (
-        _format_candle_timestamp(datetime(2026, 5, 29, 3, 30, tzinfo=UTC)) == "2026-05-29 09:00:00"
+        _format_candle_timestamp(datetime(2026, 5, 29, 3, 30, tzinfo=UTC), "1minute")
+        == "2026-05-29 09:00:00"
     )
+
+
+def test_format_candle_timestamp_daily_is_date_only() -> None:
+    # For the 1day interval the bar renders DATE-ONLY — the 00:00:00 is noise
+    # (DEC-DB-CANDLE-DERIVED-001). A daily bar at 18:30Z is 00:00 IST next day.
+    assert (
+        _format_candle_timestamp(datetime(2026, 5, 28, 18, 30, tzinfo=UTC), "1day") == "2026-05-29"
+    )
+    # A tz-aware mid-session daily stamp still collapses to its IST date.
+    assert (
+        _format_candle_timestamp(datetime(2026, 5, 29, 3, 30, tzinfo=UTC), "1day") == "2026-05-29"
+    )
+
+
+def test_format_candle_timestamp_naive_daily_is_date_only() -> None:
+    # A naive datetime (defensive) under the 1day interval is also date-only.
+    assert _format_candle_timestamp(datetime(2024, 3, 1, 0, 0, 0), "1day") == "2024-03-01"
 
 
 def test_format_candle_timestamp_naive_datetime_kept_as_is() -> None:
     # Defensive branch: a naive datetime (DuckDB returns tz-aware in practice)
     # is formatted as-is, still without an offset suffix.
-    assert _format_candle_timestamp(datetime(2024, 3, 1, 14, 45, 0)) == "2024-03-01 14:45:00"
+    assert (
+        _format_candle_timestamp(datetime(2024, 3, 1, 14, 45, 0), "1minute")
+        == "2024-03-01 14:45:00"
+    )
 
 
 def test_format_candle_timestamp_non_datetime_falls_back() -> None:
     # A non-datetime cell (never the real timestamp column) falls back to the
-    # generic JSON coercion path.
-    assert _format_candle_timestamp(None) is None
-    assert _format_candle_timestamp("already-a-string") == "already-a-string"
+    # generic JSON coercion path, regardless of interval.
+    assert _format_candle_timestamp(None, "1minute") is None
+    assert _format_candle_timestamp("already-a-string", "1day") == "already-a-string"
 
 
 def test_query_candles_timestamp_is_clean_ist_no_offset(
@@ -543,7 +573,8 @@ def test_query_candles_empty_partition_set_returns_empty_page(
     )
     assert out["total"] == 0
     assert out["rows"] == []
-    assert out["columns"] == ["timestamp", "close"]
+    # Even an empty partition exposes the stable derived-column set.
+    assert out["columns"] == ["timestamp", "close", "change_pct", "open_gap_pct"]
 
 
 def test_query_candles_empty_partition_default_columns(
@@ -558,7 +589,7 @@ def test_query_candles_empty_partition_default_columns(
         interval="1minute",
         limit=50,
     )
-    assert out["columns"] == list(CANDLE_COLUMNS)
+    assert out["columns"] == [*CANDLE_COLUMNS, "change_pct", "open_gap_pct"]
 
 
 @pytest.mark.parametrize(
@@ -1108,3 +1139,312 @@ def test_summarize_spot_datasets_multiple_sets(store: InstrumentStore, tmp_path:
     symbols = [r["symbol"] for r in rows]
     assert symbols == ["NSE-BANKNIFTY", "NSE-NIFTY"]  # list_candle_datasets is sorted
     assert all(r["bars"] == 2 for r in rows)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Derived %-change columns (DEC-DB-CANDLE-DERIVED-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _ocbar(ts: datetime, *, open_: str, high: str, low: str, close: str) -> CandleBar:
+    """A spot bar with explicit OHLC (the gap test needs a known open)."""
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(open_),
+        high=Decimal(high),
+        low=Decimal(low),
+        close=Decimal(close),
+        volume=10,
+        open_interest=None,
+    )
+
+
+# ── _to_decimal ──────────────────────────────────────────────────────
+
+
+def test_to_decimal_passthrough_and_coerce() -> None:
+    d = Decimal("100.5")
+    assert _to_decimal(d) is d  # a Decimal passes through untouched
+    # a DuckDB float is coerced exactly via its str() repr
+    assert _to_decimal(100.5) == Decimal("100.5")
+    assert _to_decimal(0.0) == Decimal("0.0")
+
+
+# ── _bar_ist_date / _bar_ist_time ────────────────────────────────────
+
+
+def test_bar_ist_date_tz_aware_and_naive() -> None:
+    # 18:30Z is 00:00 IST the NEXT calendar day → the IST trading date rolls.
+    assert _bar_ist_date(datetime(2024, 2, 29, 18, 30, tzinfo=UTC)) == date(2024, 3, 1)
+    # 03:45Z is 09:15 IST same day.
+    assert _bar_ist_date(datetime(2024, 3, 4, 3, 45, tzinfo=UTC)) == date(2024, 3, 4)
+    # naive (defensive) is read as-is.
+    assert _bar_ist_date(datetime(2024, 3, 1, 0, 0, 0)) == date(2024, 3, 1)
+
+
+def test_bar_ist_time_tz_aware_and_naive() -> None:
+    assert _bar_ist_time(datetime(2024, 3, 4, 3, 45, tzinfo=UTC)) == time(9, 15)
+    assert _bar_ist_time(datetime(2024, 3, 4, 9, 15, 0)) == time(9, 15)  # naive as-is
+
+
+# ── _daily_close_by_date ─────────────────────────────────────────────
+
+
+def test_daily_close_by_date_missing_partition_is_empty(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    out = _daily_close_by_date(
+        store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="NSE-NIFTY"
+    )
+    assert out == {}
+
+
+def test_daily_close_by_date_reads_closes_keyed_by_ist_date(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1day",
+        bars=[
+            _ocbar(
+                datetime(2024, 3, 1, 3, 45, tzinfo=UTC),
+                open_="100",
+                high="101",
+                low="99",
+                close="100",
+            ),
+            _ocbar(
+                datetime(2024, 3, 4, 3, 45, tzinfo=UTC),
+                open_="110",
+                high="111",
+                low="109",
+                close="110",
+            ),
+        ],
+    )
+    out = _daily_close_by_date(
+        store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="NSE-NIFTY"
+    )
+    assert set(out) == {date(2024, 3, 1), date(2024, 3, 4)}
+    assert out[date(2024, 3, 1)] == Decimal("100.0")
+    assert out[date(2024, 3, 4)] == Decimal("110.0")
+
+
+# ── _prev_trading_close ──────────────────────────────────────────────
+
+
+def test_prev_trading_close_empty() -> None:
+    assert _prev_trading_close({}) == {}
+
+
+def test_prev_trading_close_maps_each_day_to_prior_close() -> None:
+    daily = {
+        date(2024, 3, 1): Decimal("100"),
+        date(2024, 3, 4): Decimal("110"),
+        date(2024, 3, 5): Decimal("120"),
+    }
+    # first day absent (no predecessor); each later day → the prior day's close.
+    assert _prev_trading_close(daily) == {
+        date(2024, 3, 4): Decimal("100"),
+        date(2024, 3, 5): Decimal("110"),
+    }
+
+
+# ── _spot_derived_rows (every branch) ────────────────────────────────
+
+_ALL: list[str] = list(CANDLE_COLUMNS)  # timestamp, open, high, low, close, volume, open_interest
+_PREV = {date(2024, 3, 4): Decimal("100")}
+
+
+def _row(ts: object, *, open_: object = "105", close: object = "110") -> tuple[object, ...]:
+    """A raw candle row aligned to _ALL (timestamp, open, high, low, close, vol, oi)."""
+    return (ts, open_, "112", "104", close, 10, None)
+
+
+def test_spot_derived_915_bar_has_change_and_gap() -> None:
+    ts = datetime(2024, 3, 4, 3, 45, tzinfo=UTC)  # 09:15 IST on a day in _PREV
+    [(change, gap)] = _spot_derived_rows([_row(ts)], _ALL, _PREV)
+    assert float(change) == pytest.approx(10.0)  # (110-100)/100*100
+    assert float(gap) == pytest.approx(5.0)  # (105-100)/100*100
+
+
+def test_spot_derived_non_open_bar_has_change_only() -> None:
+    ts = datetime(2024, 3, 4, 3, 46, tzinfo=UTC)  # 09:16 IST → not the gap anchor
+    [(change, gap)] = _spot_derived_rows([_row(ts)], _ALL, _PREV)
+    assert float(change) == pytest.approx(10.0)
+    assert gap is None
+
+
+def test_spot_derived_date_absent_from_prev_map_is_blank() -> None:
+    ts = datetime(2024, 3, 1, 3, 45, tzinfo=UTC)  # date not in _PREV (first day)
+    assert _spot_derived_rows([_row(ts)], _ALL, _PREV) == [(None, None)]
+
+
+def test_spot_derived_non_datetime_timestamp_is_blank() -> None:
+    # A non-datetime ts cell (never the real column) → both blank.
+    assert _spot_derived_rows([_row("not-a-dt")], _ALL, _PREV) == [(None, None)]
+
+
+def test_spot_derived_no_timestamp_column_is_blank() -> None:
+    # Projection without "timestamp" → no date → both blank.
+    cols = ["open", "close"]
+    assert _spot_derived_rows([("105", "110")], cols, _PREV) == [(None, None)]
+
+
+def test_spot_derived_no_close_column_keeps_gap_only() -> None:
+    # timestamp+open but NO close → change blank, gap still computed on the 09:15 bar.
+    cols = ["timestamp", "open"]
+    ts = datetime(2024, 3, 4, 3, 45, tzinfo=UTC)
+    [(change, gap)] = _spot_derived_rows([(ts, "105")], cols, _PREV)
+    assert change is None
+    assert float(gap) == pytest.approx(5.0)
+
+
+def test_spot_derived_no_open_column_keeps_change_only() -> None:
+    # timestamp+close but NO open → gap blank even on the 09:15 bar; change set.
+    cols = ["timestamp", "close"]
+    ts = datetime(2024, 3, 4, 3, 45, tzinfo=UTC)
+    [(change, gap)] = _spot_derived_rows([(ts, "110")], cols, _PREV)
+    assert float(change) == pytest.approx(10.0)
+    assert gap is None
+
+
+def test_spot_derived_zero_prev_close_is_blank() -> None:
+    # A zero previous close must not divide-by-zero (pct_change returns None).
+    prev = {date(2024, 3, 4): Decimal("0")}
+    ts = datetime(2024, 3, 4, 3, 45, tzinfo=UTC)
+    assert _spot_derived_rows([_row(ts)], _ALL, prev) == [(None, None)]
+
+
+# ── query_candles end-to-end with the derived columns ────────────────
+
+
+def test_query_candles_derived_columns_end_to_end(store: InstrumentStore, tmp_path: Path) -> None:
+    # Daily closes: 2024-03-01 → 100, 2024-03-04 → 110 (prev of 03-04 is 100).
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1day",
+        bars=[
+            _ocbar(
+                datetime(2024, 3, 1, 3, 45, tzinfo=UTC),
+                open_="100",
+                high="101",
+                low="99",
+                close="100",
+            ),
+            _ocbar(
+                datetime(2024, 3, 4, 3, 45, tzinfo=UTC),
+                open_="110",
+                high="111",
+                low="109",
+                close="110",
+            ),
+        ],
+    )
+    # Minute bars on 2024-03-04: the 09:15 IST open bar + a later bar.
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        bars=[
+            _ocbar(
+                datetime(2024, 3, 4, 3, 45, tzinfo=UTC),
+                open_="105",
+                high="112",
+                low="104",
+                close="110",
+            ),
+            _ocbar(
+                datetime(2024, 3, 4, 3, 46, tzinfo=UTC),
+                open_="110",
+                high="122",
+                low="109",
+                close="121",
+            ),
+        ],
+    )
+    out = query_candles(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        limit=50,
+    )
+    assert out["columns"][-2:] == list(SPOT_DERIVED_COLUMNS)
+    ts_i = out["columns"].index("timestamp")
+    chg_i = out["columns"].index("change_pct")
+    gap_i = out["columns"].index("open_gap_pct")
+    by_ts = {r[ts_i]: r for r in out["rows"]}
+    open_row = by_ts["2024-03-04 09:15:00"]
+    later_row = by_ts["2024-03-04 09:16:00"]
+    assert float(open_row[chg_i]) == pytest.approx(10.0)  # (110-100)/100*100
+    assert float(open_row[gap_i]) == pytest.approx(5.0)  # (105-100)/100*100
+    assert float(later_row[chg_i]) == pytest.approx(21.0)  # (121-100)/100*100
+    assert later_row[gap_i] is None  # gap only on the 09:15 bar
+
+
+def test_query_candles_daily_interval_is_date_only_with_change(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1day",
+        bars=[
+            _ocbar(
+                datetime(2024, 3, 1, 3, 45, tzinfo=UTC),
+                open_="100",
+                high="101",
+                low="99",
+                close="100",
+            ),
+            _ocbar(
+                datetime(2024, 3, 4, 3, 45, tzinfo=UTC),
+                open_="110",
+                high="111",
+                low="109",
+                close="110",
+            ),
+        ],
+    )
+    out = query_candles(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1day",
+        limit=50,
+    )
+    ts_i = out["columns"].index("timestamp")
+    chg_i = out["columns"].index("change_pct")
+    rows = {r[ts_i]: r for r in out["rows"]}
+    # DATE-ONLY render for the 1day interval (no 00:00:00 / HH:MM:SS noise).
+    assert set(rows) == {"2024-03-01", "2024-03-04"}
+    assert rows["2024-03-01"][chg_i] is None  # first day → no previous close
+    assert float(rows["2024-03-04"][chg_i]) == pytest.approx(10.0)
+
+
+def test_query_candles_no_daily_data_blank_derived(store: InstrumentStore, tmp_path: Path) -> None:
+    # Minute bars but NO 1day partition → derived columns present but all blank.
+    _write_candles(tmp_path, symbol="NSE-NIFTY", interval="1minute")
+    out = query_candles(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        limit=50,
+    )
+    chg_i = out["columns"].index("change_pct")
+    gap_i = out["columns"].index("open_gap_pct")
+    assert all(r[chg_i] is None and r[gap_i] is None for r in out["rows"])

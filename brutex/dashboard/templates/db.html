@@ -175,6 +175,25 @@ const cstate = { datasets: [], key: null, start: "", end: "", cols: null, desc: 
    db_view.ALLOWED_OPERATORS — the backend is the source of truth + re-validates). */
 const OPS = [["eq","="],["ne","≠"],["lt","<"],["le","≤"],["gt",">"],["ge","≥"],["like","LIKE"],["contains","contains"]];
 
+/* Server-computed derived %-columns appended to every spot candle page
+   (DEC-DB-CANDLE-DERIVED-001): previous-day % change + the 09:15 overnight gap.
+   They are NOT real Parquet columns (never in the column picker / CANDLE_COLS);
+   the backend joins them per bar from the symbol's 1d daily closes. Values
+   arrive FULL PRECISION (statistical metrics, never money-rounded — CLAUDE.md
+   §4); we render 2 decimals at DISPLAY only via fmtCell. */
+const PCT_COLS = new Set(["change_pct", "open_gap_pct"]);
+
+/* Display formatter: the two derived %-columns render to exactly 2 decimals
+   (display-only rounding); every other cell renders verbatim. A blank (null)
+   cell is handled by the caller before fmtCell is reached. */
+function fmtCell(col, cell) {
+  if (PCT_COLS.has(col)) {
+    const n = Number(cell);
+    return Number.isFinite(n) ? n.toFixed(2) : cell;
+  }
+  return cell;
+}
+
 /* Escape free text before interpolation into innerHTML (XSS sink). */
 function esc(s) {
   return String(s == null ? "" : s)
@@ -267,8 +286,8 @@ function gridAndPager(cols, rows, total, off, lim) {
   } else {
     const thead = '<thead><tr>' + cols.map(c => '<th>' + esc(c) + '</th>').join("") + '</tr></thead>';
     const tbody = '<tbody>' + rows.map(row =>
-      '<tr>' + row.map(cell =>
-        cell == null ? '<td class="nullcell">null</td>' : '<td>' + esc(cell) + '</td>'
+      '<tr>' + row.map((cell, i) =>
+        cell == null ? '<td class="nullcell">null</td>' : '<td>' + esc(fmtCell(cols[i], cell)) + '</td>'
       ).join("") + '</tr>'
     ).join("") + '</tbody>';
     html += '<div class="gridwrap"><table>' + thead + tbody + '</table></div>';

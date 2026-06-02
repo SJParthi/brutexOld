@@ -34,7 +34,8 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import date, datetime
+from datetime import date, datetime, time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -44,6 +45,7 @@ from brutex.data.partition import (
     VALID_INTERVALS,
     VALID_SEGMENTS,
 )
+from brutex.data.spot_features import pct_change
 
 #: The ONLY tables the viewer may touch — the 5 real tables created by
 #: :meth:`brutex.data.instrument_store.InstrumentStore.open`. A
@@ -166,8 +168,23 @@ def clamp_limit(n: int) -> int:
 #: rendered string is deterministic regardless of where the server runs.
 _IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
 
+#: The daily-bar partition interval — its bars render DATE-ONLY (no noise
+#: ``00:00:00`` suffix) in the candle viewer (DEC-DB-CANDLE-DERIVED-001).
+_DAILY_INTERVAL: Final[str] = "1day"
 
-def _format_candle_timestamp(value: Any) -> Any:
+#: 09:15:00 IST — the regular NSE/BSE session open. The overnight ``open_gap_pct``
+#: derived column (DEC-DB-CANDLE-DERIVED-001) is computed ONLY for the bar at
+#: this instant; mirrors ``brutex.data.spot_features._SESSION_OPEN`` (§11 COMMON).
+_SESSION_OPEN_IST: Final[time] = time(9, 15)
+
+#: The two server-computed derived columns appended to every spot candle page
+#: (DEC-DB-CANDLE-DERIVED-001): previous-day % change + the 09:15 overnight gap.
+#: They are NOT real Parquet columns (never selectable in the column picker);
+#: the viewer computes them per bar from the symbol's 1d daily closes.
+SPOT_DERIVED_COLUMNS: Final = ("change_pct", "open_gap_pct")
+
+
+def _format_candle_timestamp(value: Any, interval: str) -> Any:
     """Render a candle bar timestamp as a clean IST wall-clock string.
 
     Drops the ``+05:30`` offset suffix (operator: "it should be clean") — a
@@ -177,10 +194,16 @@ def _format_candle_timestamp(value: Any) -> Any:
     UTC (CI) or Asia/Kolkata (the operator's box). Non-datetime cells (a
     column subset that excludes ``timestamp`` never reaches here) fall back to
     :func:`_json_safe`.
+
+    For the ``"1day"`` *interval* the bar is rendered **DATE-ONLY**
+    (``2026-05-29``) — the ``00:00:00`` time component is noise for a daily bar
+    (DEC-DB-CANDLE-DERIVED-001); every intraday interval keeps the full
+    ``YYYY-MM-DD HH:MM:SS`` wall-clock.
     """
     if isinstance(value, datetime):
         ist = value.astimezone(_IST) if value.tzinfo is not None else value
-        return ist.strftime("%Y-%m-%d %H:%M:%S")
+        fmt = "%Y-%m-%d" if interval == _DAILY_INTERVAL else "%Y-%m-%d %H:%M:%S"
+        return ist.strftime(fmt)
     return _json_safe(value)
 
 
@@ -817,10 +840,14 @@ def query_candles(
     # letting read_parquet raise "No files found".
     base = lake_root / "bars" / exchange / segment / symbol / interval
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        empty_cols = list(columns) if columns is not None else list(CANDLE_COLUMNS)
         return {
             "symbol": symbol,
             "interval": interval,
-            "columns": list(columns) if columns is not None else list(CANDLE_COLUMNS),
+            # The two derived %-change columns (DEC-DB-CANDLE-DERIVED-001) are
+            # ALWAYS appended so the viewer's column set is stable across an
+            # empty vs populated partition.
+            "columns": [*empty_cols, *SPOT_DERIVED_COLUMNS],
             "rows": [],
             "total": 0,
             "limit": safe_limit,
@@ -843,13 +870,28 @@ def query_candles(
     )
     description = cursor.description or []
     out_columns = [str(col[0]) for col in description]
-    # Render the bar timestamp as a clean IST wall-clock (no +05:30 suffix);
-    # every other cell goes through the generic JSON coercion (shared helper).
-    rows = _render_candle_rows(cursor, out_columns)
+    # Fetch ONCE: the rendered rows AND the derived %-change columns are both
+    # built from the same page (DEC-DB-CANDLE-DERIVED-001).
+    raw_rows = cursor.fetchall()
+    # Render the bar timestamp as a clean IST wall-clock (no +05:30 suffix,
+    # DATE-ONLY for 1day); every other cell goes through the generic JSON
+    # coercion (shared helper).
+    rendered = _render_candle_rows(raw_rows, out_columns, interval)
+    # Read the symbol's 1d daily closes once → previous-trading-day close map
+    # (O(1) per-bar lookup, CLAUDE.md §5), then join the two derived %-change
+    # columns per bar (full precision; 2dp is display-only in db.html).
+    prev_close = _prev_trading_close(
+        _daily_close_by_date(conn, lake_root, exchange=exchange, segment=segment, symbol=symbol)
+    )
+    derived = _spot_derived_rows(raw_rows, out_columns, prev_close)
+    rows = [
+        [*rendered_row, change, gap]
+        for rendered_row, (change, gap) in zip(rendered, derived, strict=True)
+    ]
     return {
         "symbol": symbol,
         "interval": interval,
-        "columns": out_columns,
+        "columns": [*out_columns, *SPOT_DERIVED_COLUMNS],
         "rows": rows,
         "total": total,
         "limit": safe_limit,
@@ -882,22 +924,137 @@ def _date_bounds(start: str | None, end: str | None) -> tuple[list[str], list[An
     return clauses, params
 
 
-def _render_candle_rows(cursor: Any, out_columns: list[str]) -> list[list[Any]]:
-    """Render a candle/option cursor's rows with a clean IST ``timestamp``.
+def _render_candle_rows(
+    raw_rows: list[tuple[Any, ...]], out_columns: list[str], interval: str
+) -> list[list[Any]]:
+    """Render already-fetched candle/option rows with a clean IST ``timestamp``.
 
     The ``timestamp`` cell (if projected) is rendered as a clean IST wall-clock
-    string (no ``+05:30`` suffix) via :func:`_format_candle_timestamp`; every
-    other cell goes through the generic :func:`_json_safe` coercion. Shared by
+    string (no ``+05:30`` suffix) via :func:`_format_candle_timestamp` — DATE-ONLY
+    for the ``"1day"`` *interval* (DEC-DB-CANDLE-DERIVED-001); every other cell
+    goes through the generic :func:`_json_safe` coercion. *raw_rows* is the
+    already-fetched cursor result (the caller fetches once so the spot reader can
+    also derive the %-change columns from the same rows). Shared by
     :func:`query_candles` (spot) and :func:`query_option_candles` (options).
     """
     ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
     return [
         [
-            _format_candle_timestamp(cell) if i == ts_idx else _json_safe(cell)
+            _format_candle_timestamp(cell, interval) if i == ts_idx else _json_safe(cell)
             for i, cell in enumerate(row)
         ]
-        for row in cursor.fetchall()
+        for row in raw_rows
     ]
+
+
+def _to_decimal(value: Any) -> Decimal:
+    """Coerce a DuckDB price cell to an exact :class:`~decimal.Decimal`.
+
+    Spot OHLC is stored Parquet ``Float64`` (DuckDB returns ``float``); a
+    pre-existing ``Decimal`` passes through untouched. Used only for the
+    derived %-change metrics — full precision, never money-rounded (CLAUDE.md §4).
+    """
+    return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
+def _bar_ist_date(ts: datetime) -> date:
+    """Return the IST calendar date of *ts* (the bar's trading day).
+
+    IST-anchored (not UTC) so it aligns intraday bars (09:15–15:30 IST) with the
+    1d daily bars regardless of whether the daily bar is stamped at IST midnight
+    or at a session instant (DEC-DB-CANDLE-DERIVED-001). A naive datetime
+    (defensive — DuckDB returns tz-aware) is read as-is.
+    """
+    return (ts.astimezone(_IST) if ts.tzinfo is not None else ts).date()
+
+
+def _bar_ist_time(ts: datetime) -> time:
+    """Return the IST wall-clock time-of-day of *ts* (for the 09:15 gap anchor)."""
+    return (ts.astimezone(_IST) if ts.tzinfo is not None else ts).time()
+
+
+def _daily_close_by_date(
+    conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
+) -> dict[date, Decimal]:
+    """Read the symbol's 1d daily closes ONCE into a ``{ist_date: close}`` dict.
+
+    Reads ``<lake>/bars/<exch>/<seg>/<symbol>/1day/**/*.parquet`` via a bound
+    DuckDB ``read_parquet`` glob (the coordinates are already validated by
+    :func:`_validate_candle_coords` in the caller — no free user text). Keyed by
+    the bar's IST date (:func:`_bar_ist_date`). Returns ``{}`` when the symbol
+    has no daily partition yet, so the derived columns degrade to blank rather
+    than raising (DEC-DB-CANDLE-DERIVED-001). One read per page → O(1) per-bar
+    lookup downstream (CLAUDE.md §5).
+    """
+    base = lake_root / "bars" / exchange / segment / symbol / _DAILY_INTERVAL
+    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        return {}
+    glob = base.as_posix() + "/**/*.parquet"
+    # glob is built from validated coordinates (no free user text); the path is
+    # given to read_parquet as a bound parameter.
+    cursor = conn.execute(
+        'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true)',
+        [glob],
+    )
+    return {_bar_ist_date(ts): _to_decimal(close) for ts, close in cursor.fetchall()}
+
+
+def _prev_trading_close(daily: dict[date, Decimal]) -> dict[date, Decimal]:
+    """Map each trading date to the PREVIOUS trading day's 1d close.
+
+    Built once from the ``{date: close}`` daily dict by walking the dates in
+    sorted order, so a per-bar lookup is O(1) (DEC-DB-CANDLE-DERIVED-001). The
+    earliest daily date has no predecessor and is therefore absent from the
+    result (its bars get a blank %-change).
+    """
+    out: dict[date, Decimal] = {}
+    prev: date | None = None
+    for day in sorted(daily):
+        if prev is not None:
+            out[day] = daily[prev]
+        prev = day
+    return out
+
+
+def _spot_derived_rows(
+    raw_rows: list[tuple[Any, ...]],
+    out_columns: list[str],
+    prev_close_by_date: dict[date, Decimal],
+) -> list[tuple[Any, Any]]:
+    """Compute the per-bar ``(change_pct, open_gap_pct)`` derived pair.
+
+    For each bar (DEC-DB-CANDLE-DERIVED-001):
+
+    * ``change_pct = (close − prev_day_1d_close) / prev_day_1d_close × 100`` —
+      the previous trading day's 1d close (O(1) lookup in *prev_close_by_date*);
+    * ``open_gap_pct = (open − prev_day_1d_close) / prev_day_1d_close × 100`` —
+      the overnight gap, computed ONLY for the day's 09:15:00 IST market-open
+      bar; ``None`` (blank) on every other bar.
+
+    Both reuse the COMMON :func:`brutex.data.spot_features.pct_change` primitive
+    (CLAUDE.md §11) and stay full precision — statistical metrics, never
+    money-rounded (CLAUDE.md §4); the 2dp is a *display*-only concern in
+    ``db.html``. A bar whose IST date is absent from *prev_close_by_date* (the
+    first trading day, or a symbol with no 1d lake) gets ``(None, None)``; a zero
+    previous close yields ``None`` (no divide-by-zero, via ``pct_change``).
+    """
+    ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
+    open_idx = out_columns.index("open") if "open" in out_columns else -1
+    close_idx = out_columns.index("close") if "close" in out_columns else -1
+    derived: list[tuple[Any, Any]] = []
+    for row in raw_rows:
+        change: Decimal | None = None
+        gap: Decimal | None = None
+        ts = row[ts_idx] if ts_idx >= 0 else None
+        if isinstance(ts, datetime):
+            prev = prev_close_by_date.get(_bar_ist_date(ts))
+            if prev is not None:
+                if close_idx >= 0:
+                    change = pct_change(_to_decimal(row[close_idx]), prev)
+                if open_idx >= 0 and _bar_ist_time(ts) == _SESSION_OPEN_IST:
+                    gap = pct_change(_to_decimal(row[open_idx]), prev)
+        derived.append((_json_safe(change), _json_safe(gap)))
+    return derived
 
 
 def query_option_candles(
@@ -999,7 +1156,9 @@ def query_option_candles(
     )
     description = cursor.description or []
     out_columns = [str(col[0]) for col in description]
-    rows = _render_candle_rows(cursor, out_columns)
+    # Options roll a 1-minute table, so the bar always renders full HH:MM:SS (no
+    # date-only collapse); options carry no spot derived %-columns.
+    rows = _render_candle_rows(cursor.fetchall(), out_columns, "1minute")
     return {
         "series": series,
         "interval": "1minute",
@@ -1031,6 +1190,7 @@ __all__ = [
     "KNOWN_TABLES",
     "OPTIONS_DIR_NAME",
     "OPTION_CANDLE_COLUMNS",
+    "SPOT_DERIVED_COLUMNS",
     "clamp_limit",
     "clamp_offset",
     "list_candle_datasets",
