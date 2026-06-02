@@ -184,6 +184,22 @@ def _format_candle_timestamp(value: Any) -> Any:
     return _json_safe(value)
 
 
+def _ist_date(value: Any) -> str | None:
+    """Render a bar timestamp as its IST calendar date (``YYYY-MM-DD``), or ``None``.
+
+    The lake stores bar time as a UTC ``TIMESTAMPTZ``; the spot-coverage summary
+    reports the Indian-market wall-clock *date* (converting to :data:`_IST`) so
+    the first/last coverage date matches the trading day an operator expects —
+    the date-level analog of :func:`_format_candle_timestamp`. A non-datetime
+    cell (e.g. ``MIN``/``MAX`` over a partition that happens to hold zero rows
+    returns SQL ``NULL`` → ``None``) yields ``None``.
+    """
+    if isinstance(value, datetime):
+        ist = value.astimezone(_IST) if value.tzinfo is not None else value
+        return ist.date().isoformat()
+    return None
+
+
 def _json_safe(value: Any) -> Any:
     """Coerce one DuckDB cell value into a JSON-serialisable form.
 
@@ -597,6 +613,71 @@ def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
     return found
 
 
+def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
+    """Summarise every spot candle dataset in the lake for the coverage page.
+
+    Discovers each ``(exchange, segment, symbol, interval)`` partition set via
+    :func:`list_candle_datasets`, then reads ONE aggregate row per set
+    (``COUNT(*)`` + ``MIN`` / ``MAX`` of the bar ``timestamp``) straight from the
+    Parquet lake via DuckDB ``read_parquet`` over the partition glob — no data
+    duplication, the lake stays the single source of truth (CLAUDE.md §11
+    COMMON). Read-only by construction: a single ``SELECT`` aggregate per set, no
+    write path. A click never materialises bar rows — only the three aggregate
+    scalars — so cost is bounded regardless of how many years are stored
+    (DuckDB skips row-groups via Parquet min/max stats).
+
+    **Honest envelope (Golden Rule #10):** a dataset PRESENT in the lake counts
+    as *pulled*; ``bars`` / ``first_date`` / ``last_date`` describe WHAT is
+    stored, NOT whether the full ``2021 → today`` range is complete.
+    Partial-date-range detection is an explicit follow-up, not claimed here.
+
+    Parameters
+    ----------
+    conn
+        A DuckDB connection (see :func:`table_summary`).
+    lake_root
+        Top-level lake directory (the parent of ``bars/``).
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One row per discovered dataset, in :func:`list_candle_datasets` order::
+
+            {"exchange", "segment", "symbol", "interval",
+             "bars": <int>, "first_date": <YYYY-MM-DD|None>,
+             "last_date": <YYYY-MM-DD|None>}
+    """
+    rows: list[dict[str, Any]] = []
+    for dataset in list_candle_datasets(lake_root):
+        exchange = dataset["exchange"]
+        segment = dataset["segment"]
+        symbol = dataset["symbol"]
+        interval = dataset["interval"]
+        glob = (
+            lake_root / "bars" / exchange / segment / symbol / interval
+        ).as_posix() + "/**/*.parquet"
+        # The glob is built from list_candle_datasets coordinates (each already
+        # validated against the partition allowlists during discovery), never
+        # free user text; the path is given to read_parquet as a bound parameter.
+        agg = conn.execute(
+            'SELECT COUNT(*), MIN("timestamp"), MAX("timestamp") '
+            "FROM read_parquet(?, union_by_name=true)",
+            [glob],
+        ).fetchone()
+        rows.append(
+            {
+                "exchange": exchange,
+                "segment": segment,
+                "symbol": symbol,
+                "interval": interval,
+                "bars": int(agg[0]) if agg else 0,
+                "first_date": _ist_date(agg[1]) if agg else None,
+                "last_date": _ist_date(agg[2]) if agg else None,
+            }
+        )
+    return rows
+
+
 def _validate_option_segment(series: str) -> None:
     """Validate a discovered option-series directory name, else raise ValueError.
 
@@ -959,5 +1040,6 @@ __all__ = [
     "query_option_candles",
     "query_table",
     "sample_rows",
+    "summarize_spot_datasets",
     "table_summary",
 ]

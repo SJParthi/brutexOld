@@ -45,7 +45,7 @@ from typing import Any
 import structlog
 from pydantic import BaseModel
 
-from brutex.dashboard.coverage_view import build_coverage_payload
+from brutex.dashboard.coverage_view import build_coverage_payload, build_spot_coverage_payload
 from brutex.dashboard.db_view import (
     list_candle_datasets,
     list_columns,
@@ -54,6 +54,7 @@ from brutex.dashboard.db_view import (
     query_option_candles,
     query_table,
     sample_rows,
+    summarize_spot_datasets,
     table_summary,
 )
 from brutex.dashboard.option_pull_controller import pull_options
@@ -982,6 +983,30 @@ def build_app(
         ]
         years = _coverage_years()
         return JSONResponse(build_coverage_payload(store.list_coverage(), expected, years))
+
+    @app.get("/api/v1/coverage/spot")
+    async def api_coverage_spot() -> JSONResponse:
+        """GET /api/v1/coverage/spot — per-spot-dataset bar counts + date span.
+
+        Surfaces SPOT coverage alongside the options completeness ledger on the
+        ``/coverage`` page (DEC-COVERAGE-SPOT-001). Discovers every spot candle
+        partition set in the lake and reports its bar count + first/last date,
+        delegating to :func:`brutex.dashboard.db_view.summarize_spot_datasets`
+        (the lake read) + :func:`brutex.dashboard.coverage_view.build_spot_coverage_payload`
+        (the pure projection). READ-ONLY — no pull logic.
+
+        **Honest envelope (Golden Rule #10):** a dataset present in the lake
+        counts as *pulled*; partial-date-range detection is an explicit
+        follow-up, not claimed here. When no lake root is wired (a store opened
+        without a filesystem path) the payload is an empty summary, never a 500.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse(build_spot_coverage_payload([]))
+        return JSONResponse(
+            build_spot_coverage_payload(summarize_spot_datasets(store.connection, lake_root.parent))
+        )
 
     @app.get("/coverage", response_class=HTMLResponse)
     async def coverage_page() -> str:

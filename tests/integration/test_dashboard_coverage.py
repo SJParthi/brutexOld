@@ -29,6 +29,8 @@ from brutex.dashboard.app import (
 )
 from brutex.data.coverage_ledger import CoverageRecord, classify_cell
 from brutex.data.instrument_store import InstrumentStore
+from brutex.data.models import CandleBar
+from brutex.data.parquet_writer import ParquetWriter
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi.testclient import TestClient
 
@@ -127,6 +129,69 @@ class TestCoverageApi:
         assert resp.status_code == 200
         assert "Coverage" in resp.text
         assert 'href="/coverage"' in resp.text
+
+
+def _bar(ts: datetime, close: str) -> CandleBar:
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal("100"),
+        high=Decimal("101"),
+        low=Decimal("99"),
+        close=Decimal(close),
+        volume=10,
+        open_interest=None,
+    )
+
+
+class TestSpotCoverageApi:
+    """The SPOT coverage section of /coverage (DEC-COVERAGE-SPOT-001)."""
+
+    def test_spot_empty_lake_is_zero(self, store: InstrumentStore) -> None:
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        resp = client.get("/api/v1/coverage/spot")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == {"headline": {"datasets": 0, "total_bars": 0}, "rows": []}
+
+    def test_spot_reports_written_datasets(self, store: InstrumentStore, tmp_path: Path) -> None:
+        # store.path is tmp_path/instruments.duckdb → lake root is tmp_path.
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[
+                _bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4"),
+                _bar(datetime(2024, 3, 2, 9, 15, tzinfo=UTC), "100.8"),
+            ],
+        )
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/coverage/spot").json()
+        assert body["headline"] == {"datasets": 1, "total_bars": 2}
+        assert body["rows"] == [
+            {
+                "exchange": "NSE",
+                "segment": "CASH",
+                "symbol": "NSE-NIFTY",
+                "interval": "1minute",
+                "bars": 2,
+                "first_date": "2024-03-01",
+                "last_date": "2024-03-02",
+            }
+        ]
+
+    def test_spot_503_when_store_unwired(self) -> None:
+        client = TestClient(build_app(DashboardState(), instrument_store=None))
+        assert client.get("/api/v1/coverage/spot").status_code == 503
+
+    def test_spot_empty_payload_when_no_lake_root(self) -> None:
+        # A store whose `path` is not a filesystem Path → empty payload, never 500.
+        from types import SimpleNamespace
+
+        fake = SimpleNamespace(path=None)
+        client = TestClient(build_app(DashboardState(), instrument_store=fake))
+        body = client.get("/api/v1/coverage/spot").json()
+        assert body == {"headline": {"datasets": 0, "total_bars": 0}, "rows": []}
 
 
 class TestCoverageHelpers:
