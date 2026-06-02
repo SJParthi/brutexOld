@@ -63,7 +63,8 @@ stock options**.
 ```
 
 Per-side (`ce` / `pe`) columnar parallel arrays — same transpose +
-`× 100` (rupees→paisa) + UTC-epoch handling as `05-historical-data.md`.
+exact-`Decimal`-rupee prices (NO `× 100`) + UTC-epoch handling as
+`05-historical-data.md` (DEC-PAISA-DOC-RECONCILE-001).
 A null side (`"pe": null`) means no data for that leg/window.
 
 ## Honest-envelope flags

@@ -67,10 +67,11 @@ All arrays are index-aligned: `open[i] … timestamp[i]` is one candle.
 This **differs from Groww's row-of-arrays** (`[ts, o, h, l, c, v, oi]`
 per candle) — the Dhan parser transposes columns → `CandleBar` rows.
 
-## Units & time (CRITICAL for the int64-paisa boundary)
+## Units & time
 
-- **Prices are RUPEES (float).** The parser MUST `× 100` at the parse
-  boundary to preserve `int64` paisa (CLAUDE.md §4 money rule).
+- **Prices are RUPEES (float).** The parser keeps them as exact `Decimal`
+  rupees (NO `× 100`); int64 paisa is the cost/display unit only, never
+  price storage (DEC-PAISA-DOC-RECONCILE-001; CLAUDE.md §4 / §6).
 - **Timestamps are UNIX epoch UTC seconds.** Convert to IST
   (`+5:30`) only at the display boundary; store UTC. Daily bars stamp
   IST-midnight (`18:30` UTC of the prior day).
