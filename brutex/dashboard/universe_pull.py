@@ -79,7 +79,7 @@ def select_pull_instruments(
         for instrument in instruments
         if classify_instrument(instrument, fno_eligible) == kind
     ]
-    selected.sort(key=lambda instrument: instrument.trading_symbol)
+    selected.sort(key=lambda instrument: instrument.symbol_name)
     return selected
 
 

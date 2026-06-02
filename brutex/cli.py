@@ -736,7 +736,7 @@ def _synthetic_index_instrument(spec: Any) -> Any:
     """Build a placeholder spot index ``Instrument`` from a brute-force spec.
 
     The dry-run :class:`SyntheticDhanAdapter` ignores the symbol when
-    generating bars, so the ``vendor_symbol`` is the index's own name — a
+    generating bars, so the ``symbol_name`` is the index's own name — a
     real ``InstrumentStore`` (with numeric Dhan SECURITY_IDs) is not required
     for an offline ``fetch --dry-run`` (DEC-VENDOR-PIVOT-001).
     """
@@ -745,25 +745,22 @@ def _synthetic_index_instrument(spec: Any) -> Any:
     from brutex.models import Instrument, InstrumentType, Segment
 
     return Instrument(
-        exchange=spec.exchange,
-        exchange_token=0,
-        trading_symbol=spec.underlying_symbol,
-        vendor_symbol=spec.underlying_symbol,
-        name=spec.display_name,
-        instrument_type=InstrumentType.IDX,
+        exch_id=spec.exchange,
+        security_id=0,
+        symbol_name=spec.underlying_symbol,
+        display_name=spec.display_name,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=0,
         tick_size=Decimal("0"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=False,
-        sell_allowed=False,
+        asm_gsm_flag=False,
     )
 
 

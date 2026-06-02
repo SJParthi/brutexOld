@@ -43,26 +43,22 @@ def test_empty_store_snapshot_yields_zero_universe(tmp_path: Path) -> None:
 def _idx(symbol: str, name: str) -> Instrument:
     """Build a minimal NSE index (IDX) instrument-master row."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=hash(symbol) % 100_000,
-        trading_symbol=symbol,
-        vendor_symbol=f"NSE-{symbol}",
-        name=name,
-        instrument_type=InstrumentType.IDX,
+        exch_id=Exchange.NSE,
+        security_id=hash(symbol) % 100_000,
+        symbol_name=symbol,
+        display_name=name,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
-        internal_trading_symbol=None,
+        asm_gsm_flag=False,
     )
 
 
@@ -87,52 +83,48 @@ def test_seeded_indices_appear_in_universe(tmp_path: Path) -> None:
 def _eq(symbol: str) -> Instrument:
     """Build a minimal NSE cash-equity (EQ) instrument-master row."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=hash(symbol) % 100_000,
-        trading_symbol=symbol,
-        vendor_symbol=f"NSE-{symbol}",
-        name=symbol,
-        instrument_type=InstrumentType.EQ,
+        exch_id=Exchange.NSE,
+        security_id=hash(symbol) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
         segment=Segment.CASH,
         series="EQ",
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
-        internal_trading_symbol=None,
+        asm_gsm_flag=False,
     )
 
 
 def _ce(underlying: str, n: int) -> Instrument:
     """Build a minimal NSE CE option leg naming *underlying*."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=500_000 + n,
-        trading_symbol=f"{underlying}CE{n}",
-        vendor_symbol=f"NSE-{underlying}-30Jan25-{n}-CE",
-        name=f"{underlying} CE",
-        instrument_type=InstrumentType.CE,
+        exch_id=Exchange.NSE,
+        # Unique per (underlying, n) leg — the new PK is
+        # (security_id, exch_id, segment, snapshot_date), so two legs sharing
+        # only ``n`` (e.g. RELIANCE-1 vs TCS-1) must NOT collide on security_id.
+        security_id=500_000 + abs(hash(f"{underlying}CE{n}")) % 400_000,
+        symbol_name=f"{underlying}CE{n}",
+        display_name=f"{underlying} CE",
+        instrument=InstrumentType.CE,
         segment=Segment.FNO,
         series=None,
         isin=None,
         underlying_symbol=underlying,
-        underlying_exchange_token=hash(underlying) % 100_000,
+        underlying_security_id=hash(underlying) % 100_000,
         lot_size=75,
         tick_size=Decimal("0.05"),
-        freeze_quantity=1800,
-        expiry_date=date(2025, 1, 30),
+        sm_freeze_qty=1800,
+        sm_expiry_date=date(2025, 1, 30),
         strike_price=Decimal(str(20000 + n)),
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
-        internal_trading_symbol=None,
+        option_type="CE",
+        asm_gsm_flag=False,
     )
 
 

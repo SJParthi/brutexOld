@@ -80,7 +80,8 @@ def ingest_spot(
     adapter, sink
         The Dhan adapter (data source) and the lake write sink.
     instrument
-        The spot instrument; ``vendor_symbol`` is the Dhan ``SECURITY_ID``.
+        The spot instrument; ``symbol_name`` is the engine symbol, the raw
+        Dhan ``SECURITY_ID`` lives in ``security_id``.
     interval
         Canonical interval — ``"1minute"`` (90-day tiles) or ``"1day"``.
     start, end
@@ -118,7 +119,7 @@ def ingest_spot(
     for window_start, window_end in windows:
         key = WindowKey(
             market=_MARKET,
-            security_id=instrument.vendor_symbol,
+            security_id=instrument.symbol_name,
             interval=interval,
             start=window_start,
             end=window_end,
@@ -133,8 +134,8 @@ def ingest_spot(
             pace()
         try:
             bars = adapter.fetch_ohlcv(
-                symbol=instrument.vendor_symbol,
-                exchange=instrument.exchange,
+                symbol=instrument.symbol_name,
+                exchange=instrument.exch_id,
                 interval=interval,
                 start=window_start,
                 end=window_end,
@@ -152,12 +153,12 @@ def ingest_spot(
         # only (a daily bar has no intraday time). DEC-SESSION-FILTER-001.
         # GIFT Nifty trades ~21h on NSE IX, so it is EXEMPT — its full-day
         # series is kept verbatim (DEC-DHAN-GIFTNIFTY-SESSION-001).
-        if interval != _DAILY and not is_session_exempt(instrument.trading_symbol):
+        if interval != _DAILY and not is_session_exempt(instrument.symbol_name):
             bars = filter_intraday_session(bars)
         result = sink.append(
-            exchange=instrument.exchange.value,
+            exchange=instrument.exch_id.value,
             segment=instrument.segment.value,
-            symbol=instrument.vendor_symbol,
+            symbol=instrument.symbol_name,
             interval=interval,
             bars=bars,
         )

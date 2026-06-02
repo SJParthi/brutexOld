@@ -167,8 +167,8 @@ def is_in_scope(instrument: Instrument) -> bool:
     :data:`INDEX_UNDERLYINGS`. Everything else (cash equity, derivatives,
     non-Track-1 indices, commodities) is rejected.
     """
-    if instrument.instrument_type == InstrumentType.IDX:
-        return (instrument.exchange, instrument.trading_symbol) in INDEX_UNDERLYINGS
+    if instrument.instrument == InstrumentType.IDX:
+        return (instrument.exch_id, instrument.symbol_name) in INDEX_UNDERLYINGS
     return False
 
 
@@ -184,7 +184,7 @@ def classify_underlying_kind(instrument: Instrument) -> str:
     """
     if not is_in_scope(instrument):
         raise ValueError(
-            f"{instrument.trading_symbol}: not in Track 1 scope — "
+            f"{instrument.symbol_name}: not in Track 1 scope — "
             f"only NIFTY, BANKNIFTY, SENSEX, INDIAVIX are accepted"
         )
     return "index"
@@ -231,8 +231,8 @@ def is_in_brute_force_scope(instrument: Instrument) -> bool:
     though it may live in the fetch lake.
     """
     return (
-        instrument.instrument_type == InstrumentType.IDX
-        and (instrument.exchange, instrument.trading_symbol) in BRUTE_FORCE_INDEX_UNDERLYINGS
+        instrument.instrument == InstrumentType.IDX
+        and (instrument.exch_id, instrument.symbol_name) in BRUTE_FORCE_INDEX_UNDERLYINGS
     )
 
 
@@ -250,8 +250,8 @@ def build_fno_eligible_underlyings(
     eligible: set[tuple[Exchange, str]] = set()
     for inst in instruments:
         underlying = inst.underlying_symbol
-        if inst.is_derivative and inst.exchange == Exchange.NSE and underlying is not None:
-            eligible.add((inst.exchange, underlying))
+        if inst.is_derivative and inst.exch_id == Exchange.NSE and underlying is not None:
+            eligible.add((inst.exch_id, underlying))
     return frozenset(eligible)
 
 
@@ -305,10 +305,10 @@ def build_underlying_economics(
         underlying = inst.underlying_symbol
         if not inst.is_derivative or underlying is None:
             continue
-        key = (inst.exchange, underlying)
+        key = (inst.exch_id, underlying)
         if key in economics:
             continue
-        economics[key] = (inst.lot_size, inst.tick_size, inst.freeze_quantity)
+        economics[key] = (inst.lot_size, inst.tick_size, inst.sm_freeze_qty)
     return economics
 
 
@@ -353,8 +353,8 @@ def derive_lake_underlyings(
     """
     pairs: set[tuple[str, str]] = set()
     for inst in instruments:
-        symbol = inst.underlying_symbol or inst.trading_symbol
-        pairs.add((symbol, inst.exchange.value))
+        symbol = inst.underlying_symbol or inst.symbol_name
+        pairs.add((symbol, inst.exch_id.value))
     return sorted(pairs)
 
 
@@ -402,18 +402,17 @@ def is_universe_underlying(
         ``True`` iff *instrument* is an admitted index or an F&O-eligible
         equity; ``False`` for every derivative leg or out-of-universe row.
     """
-    instrument_type = instrument.instrument_type
+    instrument_type = instrument.instrument
     if instrument_type == InstrumentType.IDX:
         # Same IDX rule as is_in_fetch_scope: all NSE indices; BSE only SENSEX.
         return (
-            instrument.exchange == Exchange.NSE
-            or instrument.trading_symbol == _BSE_FETCH_INDEX_SYMBOL
+            instrument.exch_id == Exchange.NSE or instrument.symbol_name == _BSE_FETCH_INDEX_SYMBOL
         )
     if instrument_type == InstrumentType.EQ:
         # Same EQ rule as is_in_fetch_scope: an F&O-eligible NSE underlying.
         return (
-            instrument.exchange == Exchange.NSE
-            and (instrument.exchange, instrument.trading_symbol) in fno_eligible_underlyings
+            instrument.exch_id == Exchange.NSE
+            and (instrument.exch_id, instrument.symbol_name) in fno_eligible_underlyings
         )
     # Every derivative leg (FUT / CE / PE) — parsed for eligibility, never stored.
     return False
@@ -441,19 +440,18 @@ def is_in_fetch_scope(
     fno_eligible_underlyings
         The set of NSE F&O-eligible ``(exchange, symbol)`` pairs.
     """
-    instrument_type = instrument.instrument_type
-    exchange = instrument.exchange
+    instrument_type = instrument.instrument
+    exchange = instrument.exch_id
     if instrument_type == InstrumentType.IDX:
         # All NSE indices; from BSE only SENSEX.
-        return exchange == Exchange.NSE or instrument.trading_symbol == _BSE_FETCH_INDEX_SYMBOL
+        return exchange == Exchange.NSE or instrument.symbol_name == _BSE_FETCH_INDEX_SYMBOL
     if instrument_type in _DERIVATIVE_TYPES:
         # All NSE futures + options; no BSE derivatives.
         return exchange == Exchange.NSE
     # Remaining type is cash equity (EQ): in scope only if it is an
     # F&O-eligible NSE underlying.
     return (
-        exchange == Exchange.NSE
-        and (exchange, instrument.trading_symbol) in fno_eligible_underlyings
+        exchange == Exchange.NSE and (exchange, instrument.symbol_name) in fno_eligible_underlyings
     )
 
 

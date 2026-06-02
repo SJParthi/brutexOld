@@ -605,9 +605,9 @@ def build_app(
             {
                 "expiries": [
                     {
-                        "exchange": r.exchange,
+                        "exchange": r.exch_id,
                         "underlying_symbol": r.underlying_symbol,
-                        "expiry_date": r.expiry_date.isoformat(),
+                        "expiry_date": r.sm_expiry_date.isoformat(),
                         "snapshot_date": r.snapshot_date.isoformat(),
                         "pulled_year": r.pulled_year,
                     }
@@ -650,22 +650,22 @@ def build_app(
                 ) from exc
         records = store.list_contracts(
             underlying_symbol=underlying,
-            expiry_date=expiry_parsed,
+            sm_expiry_date=expiry_parsed,
         )[:limit]
         return JSONResponse(
             {
                 "contracts": [
                     {
-                        "exchange": r.exchange,
+                        "exchange": r.exch_id,
                         "underlying_symbol": r.underlying_symbol,
-                        "expiry_date": r.expiry_date.isoformat(),
-                        "contract_symbol": r.contract_symbol,
-                        "instrument_type": str(r.instrument_type),
+                        "expiry_date": r.sm_expiry_date.isoformat(),
+                        "contract_symbol": r.symbol_name,
+                        "instrument_type": str(r.instrument),
                         "strike_price": (
                             str(r.strike_price) if r.strike_price is not None else None
                         ),
                         "lot_size": r.lot_size,
-                        "freeze_quantity": r.freeze_quantity,
+                        "freeze_quantity": r.sm_freeze_qty,
                         "tick_size": str(r.tick_size),
                     }
                     for r in records
@@ -755,10 +755,11 @@ def build_app(
 
         Thin wrapper over
         :func:`brutex.dashboard.pull_controller.pull_candles`. ``symbol`` is
-        the Dhan ``SECURITY_ID`` (``vendor_symbol``) the universe grid sends;
-        it is resolved to an :class:`~brutex.models.Instrument` via the
-        instrument store (the controller is instrument-agnostic). An unknown
-        ``symbol`` surfaces as a 400 (DEC-PULL-ERROR-VISIBILITY-001).
+        the engine ``symbol_name`` the universe grid sends (ADR-0003 dropped
+        the old exchange-prefixed ``vendor_symbol``); it is resolved to an
+        :class:`~brutex.models.Instrument` via the instrument store (the
+        controller is instrument-agnostic). An unknown ``symbol`` surfaces as
+        a 400 (DEC-PULL-ERROR-VISIBILITY-001).
         ``from_date`` / ``to_date`` are optional inclusive ISO
         ``YYYY-MM-DD`` bounds (the from/to candle picker); when either is
         given they select an explicit, clamped ``[2021-01-01, today]``
@@ -972,7 +973,7 @@ def build_app(
         candidates = [
             inst
             for inst in store.list_index_equity_instruments()
-            if inst.instrument_type is InstrumentType.IDX or inst.exchange is Exchange.NSE
+            if inst.instrument is InstrumentType.IDX or inst.exch_id is Exchange.NSE
         ]
         # derive_lake_underlyings yields (underlying, exchange) (the order the
         # universe ingest fan-out wants); the coverage reconciler / view want
@@ -1441,7 +1442,7 @@ def _collect_store_stats(store: Any) -> dict[str, Any]:
         "LIMIT 20"
     ).fetchall()
     by_type = conn.execute(
-        "SELECT instrument_type, COUNT(*) FROM instruments GROUP BY instrument_type"
+        "SELECT instrument, COUNT(*) FROM instruments GROUP BY instrument"
     ).fetchall()
     return {
         "totals": {
@@ -1480,11 +1481,11 @@ def _query_instruments(
     clauses: list[str] = []
     params: list[Any] = []
     if underlying is not None:
-        clauses.append("(underlying_symbol = ? OR trading_symbol = ?)")
+        clauses.append("(underlying_symbol = ? OR symbol_name = ?)")
         params.append(underlying)
         params.append(underlying)
     if instrument_type is not None:
-        clauses.append("instrument_type = ?")
+        clauses.append("instrument = ?")
         params.append(instrument_type)
     if segment is not None:
         clauses.append("segment = ?")
@@ -1493,27 +1494,27 @@ def _query_instruments(
     # Clauses are fixed-literal WHERE fragments; every user value is
     # parameter-bound via DuckDB "?" placeholders. Not an injection vector.
     base_select = (
-        "SELECT vendor_symbol, exchange, trading_symbol, instrument_type, "
-        "segment, underlying_symbol, expiry_date, strike_price, lot_size, "
-        "freeze_quantity, tick_size, snapshot_date FROM instruments"
+        "SELECT security_id, exch_id, symbol_name, instrument, "
+        "segment, underlying_symbol, sm_expiry_date, strike_price, lot_size, "
+        "sm_freeze_qty, tick_size, snapshot_date FROM instruments"
     )
-    order_limit = " ORDER BY vendor_symbol LIMIT ? OFFSET ?"
+    order_limit = " ORDER BY symbol_name LIMIT ? OFFSET ?"
     sql = base_select + where_sql + order_limit  # nosec B608
     params.append(limit)
     params.append(offset)
     rows = conn.execute(sql, params).fetchall()
     return [
         {
-            "vendor_symbol": r[0],
-            "exchange": r[1],
-            "trading_symbol": r[2],
-            "instrument_type": str(r[3]),
+            "security_id": r[0],
+            "exch_id": r[1],
+            "symbol_name": r[2],
+            "instrument": str(r[3]),
             "segment": str(r[4]),
             "underlying_symbol": r[5],
-            "expiry_date": r[6].isoformat() if r[6] is not None else None,
+            "sm_expiry_date": r[6].isoformat() if r[6] is not None else None,
             "strike_price": str(r[7]) if r[7] is not None else None,
             "lot_size": r[8],
-            "freeze_quantity": r[9],
+            "sm_freeze_qty": r[9],
             "tick_size": str(r[10]) if r[10] is not None else None,
             "snapshot_date": r[11].isoformat() if r[11] is not None else None,
         }
@@ -1761,14 +1762,14 @@ _INSTRUMENTS_HTML_BLOCK = """\
   <table id="ins-table">
     <thead>
       <tr>
-        <th>vendor_symbol</th>
-        <th>type</th>
+        <th>symbol_name</th>
+        <th>instrument</th>
         <th>segment</th>
         <th>underlying</th>
-        <th>expiry</th>
+        <th>sm_expiry_date</th>
         <th>strike</th>
         <th>lot</th>
-        <th>freeze</th>
+        <th>sm_freeze_qty</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -1808,14 +1809,14 @@ async function loadInstruments() {
     const tb = document.querySelector('#ins-table tbody');
     tb.innerHTML = rows.map(i =>
       `<tr>
-        <td>${i.vendor_symbol}</td>
-        <td>${i.instrument_type}</td>
+        <td>${i.symbol_name}</td>
+        <td>${i.instrument}</td>
         <td>${i.segment}</td>
         <td>${i.underlying_symbol || '-'}</td>
-        <td>${i.expiry_date || '-'}</td>
+        <td>${i.sm_expiry_date || '-'}</td>
         <td>${i.strike_price || '-'}</td>
         <td>${i.lot_size || '-'}</td>
-        <td>${i.freeze_quantity || '-'}</td>
+        <td>${i.sm_freeze_qty || '-'}</td>
       </tr>`
     ).join('');
     status.textContent = rows.length + ' rows';

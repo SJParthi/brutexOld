@@ -47,26 +47,22 @@ from brutex.data.models import CandleBar, OptionBar  # isort: skip  (kept near o
 def _idx(symbol: str, name: str) -> Instrument:
     """Minimal NSE index instrument-master row (mirrors the db_view tests)."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=hash(symbol) % 100_000,
-        trading_symbol=symbol,
-        vendor_symbol=f"NSE-{symbol}",
-        name=name,
-        instrument_type=InstrumentType.IDX,
+        exch_id=Exchange.NSE,
+        security_id=hash(symbol) % 100_000,
+        symbol_name=symbol,
+        display_name=name,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
-        internal_trading_symbol=None,
+        asm_gsm_flag=False,
     )
 
 
@@ -167,8 +163,8 @@ def test_quote_ident_rejects_embedded_doublequote() -> None:
 
 def test_list_columns_returns_real_columns(store: InstrumentStore) -> None:
     cols = list_columns(store.connection, "instruments")
-    assert "trading_symbol" in cols
-    assert "exchange" in cols
+    assert "symbol_name" in cols
+    assert "exch_id" in cols
 
 
 def test_list_columns_unknown_table_raises(store: InstrumentStore) -> None:
@@ -184,7 +180,7 @@ def test_list_columns_unknown_table_raises(store: InstrumentStore) -> None:
 def test_query_table_all_columns_default(store: InstrumentStore) -> None:
     out = query_table(store.connection, "instruments", limit=50)
     assert out["total"] == 3
-    assert "trading_symbol" in out["columns"]
+    assert "symbol_name" in out["columns"]
     assert len(out["rows"]) == 3
 
 
@@ -192,10 +188,10 @@ def test_query_table_specific_columns_in_order(store: InstrumentStore) -> None:
     out = query_table(
         store.connection,
         "instruments",
-        columns=("trading_symbol", "name"),
+        columns=("symbol_name", "display_name"),
         limit=50,
     )
-    assert out["columns"] == ["trading_symbol", "name"]
+    assert out["columns"] == ["symbol_name", "display_name"]
     assert all(len(r) == 2 for r in out["rows"])
 
 
@@ -223,7 +219,7 @@ def test_query_table_eq_filter_narrows_and_total_reflects(store: InstrumentStore
     out = query_table(
         store.connection,
         "instruments",
-        filters=(("trading_symbol", "eq", "NIFTY"),),
+        filters=(("symbol_name", "eq", "NIFTY"),),
         limit=50,
     )
     assert out["total"] == 1
@@ -235,7 +231,7 @@ def test_query_table_contains_filter(store: InstrumentStore) -> None:
     out = query_table(
         store.connection,
         "instruments",
-        filters=(("trading_symbol", "contains", "NIFTY"),),
+        filters=(("symbol_name", "contains", "NIFTY"),),
         limit=50,
     )
     assert out["total"] == 2
@@ -245,7 +241,7 @@ def test_query_table_like_filter_pattern(store: InstrumentStore) -> None:
     out = query_table(
         store.connection,
         "instruments",
-        filters=(("trading_symbol", "like", "BANK%"),),
+        filters=(("symbol_name", "like", "BANK%"),),
         limit=50,
     )
     assert out["total"] == 1
@@ -259,7 +255,7 @@ def test_query_table_every_operator_executes(store: InstrumentStore, op: str) ->
     out = query_table(
         store.connection,
         "instruments",
-        filters=(("trading_symbol", op, value),),
+        filters=(("symbol_name", op, value),),
         limit=50,
     )
     assert "total" in out
@@ -280,7 +276,7 @@ def test_query_table_unknown_operator_raises(store: InstrumentStore) -> None:
         query_table(
             store.connection,
             "instruments",
-            filters=(("trading_symbol", "regexp", "x"),),
+            filters=(("symbol_name", "regexp", "x"),),
             limit=50,
         )
 
@@ -294,8 +290,8 @@ def test_query_table_order_by_ascending(store: InstrumentStore) -> None:
     out = query_table(
         store.connection,
         "instruments",
-        columns=("trading_symbol",),
-        order_by="trading_symbol",
+        columns=("symbol_name",),
+        order_by="symbol_name",
         limit=50,
     )
     symbols = [r[0] for r in out["rows"]]
@@ -306,8 +302,8 @@ def test_query_table_order_by_descending(store: InstrumentStore) -> None:
     out = query_table(
         store.connection,
         "instruments",
-        columns=("trading_symbol",),
-        order_by="trading_symbol",
+        columns=("symbol_name",),
+        order_by="symbol_name",
         descending=True,
         limit=50,
     )
@@ -324,8 +320,8 @@ def test_query_table_paging_clamps_and_offsets(store: InstrumentStore) -> None:
     page = query_table(
         store.connection,
         "instruments",
-        columns=("trading_symbol",),
-        order_by="trading_symbol",
+        columns=("symbol_name",),
+        order_by="symbol_name",
         limit=999_999,  # clamped to 500
         offset=-5,  # clamped to 0
     )
@@ -336,8 +332,8 @@ def test_query_table_paging_clamps_and_offsets(store: InstrumentStore) -> None:
     window = query_table(
         store.connection,
         "instruments",
-        columns=("trading_symbol",),
-        order_by="trading_symbol",
+        columns=("symbol_name",),
+        order_by="symbol_name",
         limit=1,
         offset=1,
     )
@@ -703,7 +699,7 @@ def test_query_table_contains_escapes_underscore_wildcard(store: InstrumentStore
     out = query_table(
         store.connection,
         "instruments",
-        filters=(("trading_symbol", "contains", "NI_TY"),),
+        filters=(("symbol_name", "contains", "NI_TY"),),
         limit=50,
     )
     assert out["total"] == 0
@@ -715,7 +711,7 @@ def test_query_table_contains_escapes_percent_wildcard(store: InstrumentStore) -
     out = query_table(
         store.connection,
         "instruments",
-        filters=(("trading_symbol", "contains", "%"),),
+        filters=(("symbol_name", "contains", "%"),),
         limit=50,
     )
     assert out["total"] == 0

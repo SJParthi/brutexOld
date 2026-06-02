@@ -69,24 +69,23 @@ class TestValidateHeader:
 class TestParseRow:
     def test_equity_spot(self) -> None:
         inst = parse_instrument_row(_row(SM_FREEZE_QTY="100000"))
-        assert inst.exchange is Exchange.NSE
-        assert inst.exchange_token == 13  # raw Dhan SECURITY_ID (for the candle API)
-        assert inst.vendor_symbol == "NSE-RELIANCE"  # exchange-prefixed GLOBAL key
-        assert inst.trading_symbol == "RELIANCE"
-        assert inst.instrument_type is InstrumentType.EQ
+        assert inst.exch_id is Exchange.NSE
+        assert inst.security_id == 13  # raw Dhan SECURITY_ID (identity = security_id + exch_id)
+        assert inst.symbol_name == "RELIANCE"
+        assert inst.instrument is InstrumentType.EQ
         assert inst.segment is Segment.CASH
         assert inst.lot_size == 1
         assert inst.tick_size == Decimal("0.05")
-        assert inst.freeze_quantity == 100000
+        assert inst.sm_freeze_qty == 100000
 
     def test_index_zero_lot_tick(self) -> None:
         inst = parse_instrument_row(
             _row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY", LOT_SIZE="", TICK_SIZE="")
         )
-        assert inst.instrument_type is InstrumentType.IDX
+        assert inst.instrument is InstrumentType.IDX
         assert inst.lot_size == 0
         assert inst.tick_size == Decimal("0")
-        assert inst.freeze_quantity is None
+        assert inst.sm_freeze_qty is None
 
     def test_option_row(self) -> None:
         inst = parse_instrument_row(
@@ -103,11 +102,11 @@ class TestParseRow:
                 TICK_SIZE="0.05",
             )
         )
-        assert inst.instrument_type is InstrumentType.CE
+        assert inst.instrument is InstrumentType.CE
         assert inst.segment is Segment.FNO
-        assert inst.expiry_date == date(2025, 1, 2)
+        assert inst.sm_expiry_date == date(2025, 1, 2)
         assert inst.strike_price == Decimal("28500")
-        assert inst.underlying_exchange_token == 13
+        assert inst.underlying_security_id == 13
 
     def test_put_option(self) -> None:
         inst = parse_instrument_row(
@@ -120,7 +119,7 @@ class TestParseRow:
                 LOT_SIZE="250",
             )
         )
-        assert inst.instrument_type is InstrumentType.PE
+        assert inst.instrument is InstrumentType.PE
 
     def test_future_row(self) -> None:
         inst = parse_instrument_row(
@@ -131,19 +130,19 @@ class TestParseRow:
                 LOT_SIZE="250",
             )
         )
-        assert inst.instrument_type is InstrumentType.FUT
+        assert inst.instrument is InstrumentType.FUT
         assert inst.segment is Segment.FNO
-        assert inst.expiry_date == date(2025, 1, 30)
+        assert inst.sm_expiry_date == date(2025, 1, 30)
 
     def test_lot_size_accepts_float_string(self) -> None:
         assert parse_instrument_row(_row(LOT_SIZE="50.0")).lot_size == 50
 
-    def test_vendor_symbol_is_exchange_prefixed_global_key(self) -> None:
-        # Regression for the live "duplicate key 13" crash
-        # (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001): Dhan SECURITY_ID is unique only
+    def test_identity_is_security_id_plus_exch_id(self) -> None:
+        # Regression for the live "duplicate key 13" crash (ADR-0003 successor
+        # to DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001): Dhan SECURITY_ID is unique only
         # within an exchange-segment, so an NSE row and a BSE row can share the
-        # same numeric id. vendor_symbol must therefore be exchange-prefixed
-        # (the global store/index key), while exchange_token keeps the raw id.
+        # same numeric id. Identity is the (security_id, exch_id) PAIR, so the
+        # shared id is disambiguated by exchange — no PRIMARY KEY collision.
         nse = parse_instrument_row(
             _row(INSTRUMENT="INDEX", EXCH_ID="NSE", SYMBOL_NAME="NIFTY", SECURITY_ID="13")
         )
@@ -151,15 +150,15 @@ class TestParseRow:
             _row(INSTRUMENT="INDEX", EXCH_ID="BSE", SYMBOL_NAME="SENSEX", SECURITY_ID="13")
         )
         # Same raw SECURITY_ID on both exchanges …
-        assert nse.exchange_token == bse.exchange_token == 13
-        # … but DISTINCT global keys → no PRIMARY KEY collision on upsert.
-        assert nse.vendor_symbol == "NSE-NIFTY"
-        assert bse.vendor_symbol == "BSE-SENSEX"
-        assert nse.vendor_symbol != bse.vendor_symbol
+        assert nse.security_id == bse.security_id == 13
+        # … but DISTINCT (security_id, exch_id) identities → no PK collision.
+        assert (nse.security_id, nse.exch_id) == (13, Exchange.NSE)
+        assert (bse.security_id, bse.exch_id) == (13, Exchange.BSE)
+        assert (nse.security_id, nse.exch_id) != (bse.security_id, bse.exch_id)
 
     def test_reserved_from_asm_flag(self) -> None:
-        assert parse_instrument_row(_row(ASM_GSM_FLAG="ASM")).is_reserved is True
-        assert parse_instrument_row(_row(ASM_GSM_FLAG="")).is_reserved is False
+        assert parse_instrument_row(_row(ASM_GSM_FLAG="ASM")).asm_gsm_flag is True
+        assert parse_instrument_row(_row(ASM_GSM_FLAG="")).asm_gsm_flag is False
 
     def test_absent_optional_columns_become_none(self) -> None:
         row = _row()
@@ -167,7 +166,7 @@ class TestParseRow:
         del row["DISPLAY_NAME"]
         inst = parse_instrument_row(row)
         assert inst.series is None
-        assert inst.name is None
+        assert inst.display_name is None
 
     @pytest.mark.parametrize(
         ("overrides", "match"),
@@ -237,10 +236,10 @@ class TestUniverse:
 
     def test_select_universe_keeps_indices_and_fno_spot(self) -> None:
         universe = select_universe(self._rows())
-        symbols = sorted(i.trading_symbol for i in universe)
+        symbols = sorted(i.symbol_name for i in universe)
         assert symbols == ["NIFTY", "RELIANCE", "SENSEX"]
         # Non-F&O equity dropped; option legs dropped; MCX skipped.
-        assert all(i.instrument_type in {InstrumentType.IDX, InstrumentType.EQ} for i in universe)
+        assert all(i.instrument in {InstrumentType.IDX, InstrumentType.EQ} for i in universe)
 
     def test_select_universe_report_accounting(self) -> None:
         report = select_universe_report(self._rows())
@@ -248,7 +247,7 @@ class TestUniverse:
         assert report.parsed == 5
         # Persisted universe: NIFTY, SENSEX, RELIANCE.
         assert report.persisted == 3
-        assert sorted(i.trading_symbol for i in report.universe) == ["NIFTY", "RELIANCE", "SENSEX"]
+        assert sorted(i.symbol_name for i in report.universe) == ["NIFTY", "RELIANCE", "SENSEX"]
         # Dropped in-scope: TINYCO (non-F&O equity) + RELIANCE-OPT (option leg).
         assert report.legs_dropped == 2
         # Out-of-scope: the MCX GOLD future.
@@ -325,7 +324,7 @@ class TestClassifyOffInstrumentColumn:
 
     def test_universe_admits_the_fno_stocks(self) -> None:
         report = select_universe_report(self._real_shape_rows())
-        symbols = sorted(i.trading_symbol for i in report.universe)
+        symbols = sorted(i.symbol_name for i in report.universe)
         # 1 index + 2 F&O stocks admitted (NOT "1 stock"); NOFNO + 2 legs dropped.
         # trading_symbol resolves to the TICKER (UNDERLYING_SYMBOL), not the
         # long SYMBOL_NAME ("RELIANCE INDUSTRIES LTD").
@@ -370,11 +369,11 @@ class TestClassifyOffInstrumentColumn:
             ),
         ]
         report = select_universe_report(rows)
-        assert [i.trading_symbol for i in report.universe] == ["RELIANCE"]
-        # the real spot (raw SECURITY_ID 2885), not the decoy (55555); the
-        # global key is exchange-prefixed (DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001).
-        assert [i.exchange_token for i in report.universe] == [2885]
-        assert [i.vendor_symbol for i in report.universe] == ["NSE-RELIANCE"]
+        assert [i.symbol_name for i in report.universe] == ["RELIANCE"]
+        # the real spot (raw SECURITY_ID 2885), not the decoy (55555); identity
+        # is the (security_id, exch_id) pair (ADR-0003).
+        assert [i.security_id for i in report.universe] == [2885]
+        assert [(i.exch_id.value, i.symbol_name) for i in report.universe] == [("NSE", "RELIANCE")]
 
 
 class TestUniverseDedup:
@@ -383,7 +382,7 @@ class TestUniverseDedup:
 
     The real Dhan master lists some F&O tickers under MORE THAN ONE NSE equity
     row (an old + a current listing of the same company, different SECURITY_IDs)
-    — both resolve to the same exchange-prefixed `vendor_symbol`, which used to
+    — both resolve to the same `(exch_id, symbol_name)` key, which used to
     collide on the store PK. Selection must admit exactly ONE canonical spot per
     key, mirroring tickvault's `UNDERLYING_SECURITY_ID` → spot resolution.
     """
@@ -426,8 +425,8 @@ class TestUniverseDedup:
         ]
         report = select_universe_report(rows)
         # ONE spot admitted (no PK collision), and it is the canonical 4204.
-        assert [i.vendor_symbol for i in report.universe] == ["NSE-MOTHERSON"]
-        assert [i.exchange_token for i in report.universe] == [4204]
+        assert [(i.exch_id.value, i.symbol_name) for i in report.universe] == [("NSE", "MOTHERSON")]
+        assert [i.security_id for i in report.universe] == [4204]
         assert report.persisted == 1
         assert report.legs_dropped == 2  # the duplicate listing + the option leg
 
@@ -450,7 +449,7 @@ class TestUniverseDedup:
             self._opt(SECURITY_ID="40001"),
         ]
         report = select_universe_report(rows)
-        assert [i.exchange_token for i in report.universe] == [111]
+        assert [i.security_id for i in report.universe] == [111]
         assert report.persisted == 1
 
 
@@ -518,8 +517,8 @@ class TestTickvaultParity:
             ),
         ]
         report = select_universe_report(rows)
-        assert [i.vendor_symbol for i in report.universe] == ["NSE-RELIANCE"]
-        assert [i.exchange_token for i in report.universe] == [2885]
+        assert [(i.exch_id.value, i.symbol_name) for i in report.universe] == [("NSE", "RELIANCE")]
+        assert [i.security_id for i in report.universe] == [2885]
 
     def test_test_scrip_equity_not_admitted(self) -> None:
         # Ticker ABC is eligible (real NSE OPTSTK), but the equity row is a TEST
@@ -550,7 +549,10 @@ class TestTickvaultParity:
             _row(INSTRUMENT="INDEX", EXCH_ID="BSE", SYMBOL_NAME="SENSEX", SECURITY_ID="51"),
         ]
         report = select_universe_report(rows)
-        assert sorted(i.vendor_symbol for i in report.universe) == ["BSE-SENSEX", "NSE-NIFTY"]
+        assert sorted((i.exch_id.value, i.symbol_name) for i in report.universe) == [
+            ("BSE", "SENSEX"),
+            ("NSE", "NIFTY"),
+        ]
 
 
 class TestIndexAllowList:
@@ -567,7 +569,7 @@ class TestIndexAllowList:
             ),
         ]
         report = select_universe_report(rows)
-        assert [i.vendor_symbol for i in report.universe] == ["NSE-NIFTY"]
+        assert [(i.exch_id.value, i.symbol_name) for i in report.universe] == [("NSE", "NIFTY")]
 
     def test_bse_non_sensex_index_dropped(self) -> None:
         # Only BSE SENSEX is admitted; other BSE indices (e.g. BANKEX) are dropped.
@@ -576,7 +578,7 @@ class TestIndexAllowList:
             _row(INSTRUMENT="INDEX", EXCH_ID="BSE", SYMBOL_NAME="BANKEX", SECURITY_ID="52"),
         ]
         report = select_universe_report(rows)
-        assert [i.vendor_symbol for i in report.universe] == ["BSE-SENSEX"]
+        assert [(i.exch_id.value, i.symbol_name) for i in report.universe] == [("BSE", "SENSEX")]
 
     def test_is_admitted_index_helper(self) -> None:
         from brutex.adapters.dhan.instruments import _is_admitted_index

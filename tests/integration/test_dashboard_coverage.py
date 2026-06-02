@@ -37,25 +37,22 @@ from fastapi.testclient import TestClient
 
 def _idx(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
     return Instrument(
-        exchange=exchange,
-        exchange_token=abs(hash(symbol)) % 100_000,
-        trading_symbol=symbol,
-        vendor_symbol=f"{exchange.value}-{symbol}",
-        name=symbol,
-        instrument_type=InstrumentType.IDX,
+        exch_id=exchange,
+        security_id=abs(hash(symbol)) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -75,7 +72,7 @@ def store(tmp_path: Path):
 
 def _cov(year: int, *, error: str | None = None, expiries: int = 2) -> CoverageRecord:
     return CoverageRecord(
-        exchange="NSE",
+        exch_id="NSE",
         underlying_symbol="NIFTY",
         year=year,
         expiries_pulled=expiries,

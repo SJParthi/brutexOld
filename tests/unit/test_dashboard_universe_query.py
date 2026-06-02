@@ -33,50 +33,44 @@ def _index(
 ) -> Instrument:
     """Build an IDX instrument fixture."""
     return Instrument(
-        exchange=exchange,
-        exchange_token=1,
-        trading_symbol=symbol,
-        vendor_symbol=f"{exchange}-{symbol}",
-        name=name,
-        instrument_type=InstrumentType.IDX,
+        exch_id=exchange,
+        security_id=1,
+        symbol_name=symbol,
+        display_name=name,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
 def _equity(symbol: str, *, name: str | None = None) -> Instrument:
     """Build an NSE EQ instrument fixture."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=2,
-        trading_symbol=symbol,
-        vendor_symbol=f"NSE-{symbol}",
-        name=name,
-        instrument_type=InstrumentType.EQ,
+        exch_id=Exchange.NSE,
+        security_id=2,
+        symbol_name=symbol,
+        display_name=name,
+        instrument=InstrumentType.EQ,
         segment=Segment.CASH,
         series="EQ",
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -85,25 +79,22 @@ def _option(
 ) -> Instrument:
     """Build an NSE option leg fixture naming *underlying*."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=3,
-        trading_symbol=f"{underlying}25JAN{strike}{side}",
-        vendor_symbol=f"NSE-{underlying}-30Jan25-{strike}-{side}",
-        name=None,
-        instrument_type=side,
+        exch_id=Exchange.NSE,
+        security_id=3,
+        symbol_name=f"{underlying}25JAN{strike}{side}",
+        display_name=None,
+        instrument=side,
         segment=Segment.FNO,
         series=None,
         isin=None,
         underlying_symbol=underlying,
-        underlying_exchange_token=2,
+        underlying_security_id=2,
         lot_size=50,
         tick_size=Decimal("0.05"),
-        freeze_quantity=1800,
-        expiry_date=date(2025, 1, 30),
+        sm_freeze_qty=1800,
+        sm_expiry_date=date(2025, 1, 30),
         strike_price=Decimal(strike),
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -243,16 +234,17 @@ class TestListUnderlyings:
         rows = list_underlyings([inst])
         assert rows[0] == {
             "symbol": "NIFTY",
-            "pull_symbol": inst.vendor_symbol,
+            "pull_symbol": inst.symbol_name,
             "name": "NIFTY 50",
             "kind": KIND_INDEX,
             "exchange": "NSE",
         }
 
-    def test_pull_symbol_is_exchange_prefixed(self) -> None:
-        # B1: the spot pull must POST the exchange-prefixed Groww symbol
-        # (vendor_symbol) so symbol_to_exchange_segment can split the
-        # leading exchange token — a bare trading_symbol would break it.
+    def test_pull_symbol_is_bare_engine_symbol(self) -> None:
+        # ADR-0003: the Dhan-native schema dropped the exchange-prefixed
+        # vendor_symbol. ``pull_symbol`` is now the bare engine ``symbol_name``
+        # (the spot pull resolves the numeric SECURITY_ID from the instrument's
+        # own ``security_id``; the segment from ``exch_id`` + instrument type).
         snapshot = [
             _index("NIFTY", exchange=Exchange.NSE),
             _index("SENSEX", exchange=Exchange.BSE),
@@ -262,9 +254,9 @@ class TestListUnderlyings:
         rows = list_underlyings(snapshot)
         assert rows  # non-empty
         for row in rows:
-            assert row["pull_symbol"].startswith(("NSE-", "BSE-")), row
-            # pull_symbol carries the exchange prefix; display symbol does not.
-            assert row["pull_symbol"].endswith(row["symbol"])
+            # pull_symbol equals the bare display symbol — no exchange prefix.
+            assert row["pull_symbol"] == row["symbol"], row
+            assert not row["pull_symbol"].startswith(("NSE-", "BSE-")), row
 
     def test_precomputed_fno_eligible_candidates_only(self) -> None:
         # Fast path (DEC-INSTRUMENT-UNIVERSE-FAST-001): pass a candidates-only

@@ -97,26 +97,22 @@ class DemoSpotCryptoAdapter:
 
         instruments = tuple(
             Instrument(
-                exchange=Exchange.NSE,  # stand-in
-                exchange_token=start_idx + i,
-                trading_symbol=pair,
-                vendor_symbol=f"CRYPTO-{pair}",
-                name=pair,
-                instrument_type=InstrumentType.EQ,  # closest fit
+                exch_id=Exchange.NSE,  # stand-in
+                security_id=start_idx + i,
+                symbol_name=pair,
+                display_name=pair,
+                instrument=InstrumentType.EQ,  # closest fit
                 segment=Segment.CASH,
                 series=None,
                 isin=None,
                 underlying_symbol=None,
-                underlying_exchange_token=None,
+                underlying_security_id=None,
                 lot_size=1,
                 tick_size=Decimal("0.00000001"),
-                freeze_quantity=None,
-                expiry_date=None,
+                sm_freeze_qty=None,
+                sm_expiry_date=None,
                 strike_price=None,
-                is_reserved=False,
-                buy_allowed=True,
-                sell_allowed=True,
-                internal_trading_symbol=pair,
+                asm_gsm_flag=False,
             )
             for i, pair in enumerate(page_pairs)
         )

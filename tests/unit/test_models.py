@@ -72,25 +72,22 @@ class TestOptionSide:
 
 def _minimal_equity(**overrides: object) -> Instrument:
     defaults: dict[str, object] = {
-        "exchange": Exchange.NSE,
-        "exchange_token": 1,
-        "trading_symbol": "RELIANCE",
-        "vendor_symbol": "NSE-RELIANCE",
-        "name": "Reliance",
-        "instrument_type": InstrumentType.EQ,
+        "exch_id": Exchange.NSE,
+        "security_id": 1,
+        "symbol_name": "RELIANCE",
+        "display_name": "Reliance",
+        "instrument": InstrumentType.EQ,
         "segment": Segment.CASH,
         "series": "EQ",
         "isin": "INE002A01018",
         "underlying_symbol": None,
-        "underlying_exchange_token": None,
+        "underlying_security_id": None,
         "lot_size": 1,
         "tick_size": Decimal("0.05"),
-        "freeze_quantity": None,
-        "expiry_date": None,
+        "sm_freeze_qty": None,
+        "sm_expiry_date": None,
         "strike_price": None,
-        "is_reserved": False,
-        "buy_allowed": True,
-        "sell_allowed": True,
+        "asm_gsm_flag": False,
     }
     defaults.update(overrides)
     return Instrument(**defaults)  # type: ignore[arg-type]
@@ -98,25 +95,24 @@ def _minimal_equity(**overrides: object) -> Instrument:
 
 def _minimal_option(**overrides: object) -> Instrument:
     defaults: dict[str, object] = {
-        "exchange": Exchange.NSE,
-        "exchange_token": 1,
-        "trading_symbol": "NIFTY25MAR29050PE",
-        "vendor_symbol": "NSE-NIFTY-27Mar25-29050-PE",
-        "name": None,
-        "instrument_type": InstrumentType.PE,
+        "exch_id": Exchange.NSE,
+        "security_id": 1,
+        "symbol_name": "NIFTY25MAR29050PE",
+        "display_name": None,
+        "instrument": InstrumentType.PE,
         "segment": Segment.FNO,
         "series": None,
         "isin": None,
         "underlying_symbol": "NIFTY",
-        "underlying_exchange_token": 26000,
+        "underlying_security_id": 26000,
         "lot_size": 25,
         "tick_size": Decimal("0.05"),
-        "freeze_quantity": 7200,
-        "expiry_date": date(2025, 3, 27),
+        "sm_freeze_qty": 7200,
+        "sm_expiry_date": date(2025, 3, 27),
         "strike_price": Decimal("29050"),
-        "is_reserved": False,
-        "buy_allowed": True,
-        "sell_allowed": True,
+        "option_type": "PE",
+        "expiry_flag": "W",
+        "asm_gsm_flag": False,
     }
     defaults.update(overrides)
     return Instrument(**defaults)  # type: ignore[arg-type]
@@ -132,10 +128,9 @@ class TestInstrumentClassification:
 
     def test_future_is_derivative_not_option(self) -> None:
         i = _minimal_option(
-            instrument_type=InstrumentType.FUT,
+            instrument=InstrumentType.FUT,
             strike_price=None,
-            trading_symbol="NIFTY25MARFUT",
-            vendor_symbol="NSE-NIFTY-27Mar25-FUT",
+            symbol_name="NIFTY25MARFUT",
         )
         assert i.is_derivative is True
         assert i.is_option is False
@@ -143,9 +138,8 @@ class TestInstrumentClassification:
 
     def test_call_option(self) -> None:
         i = _minimal_option(
-            instrument_type=InstrumentType.CE,
-            trading_symbol="NIFTY25MAR29050CE",
-            vendor_symbol="NSE-NIFTY-27Mar25-29050-CE",
+            instrument=InstrumentType.CE,
+            symbol_name="NIFTY25MAR29050CE",
         )
         assert i.is_derivative is True
         assert i.is_option is True
@@ -159,10 +153,9 @@ class TestInstrumentClassification:
 
     def test_index_is_not_derivative_not_option(self) -> None:
         i = _minimal_equity(
-            instrument_type=InstrumentType.IDX,
+            instrument=InstrumentType.IDX,
             segment=Segment.CASH,
-            trading_symbol="NIFTY",
-            vendor_symbol="NSE-NIFTY",
+            symbol_name="NIFTY",
         )
         assert i.is_derivative is False
         assert i.is_option is False
@@ -174,7 +167,7 @@ class TestInstrumentInvariants:
     def test_future_requires_underlying(self) -> None:
         with pytest.raises(ValueError, match="underlying_symbol"):
             _minimal_option(
-                instrument_type=InstrumentType.FUT,
+                instrument=InstrumentType.FUT,
                 underlying_symbol=None,
                 strike_price=None,
             )
@@ -196,10 +189,10 @@ class TestInstrumentInvariants:
             _minimal_equity(tick_size=Decimal("0"))
 
     def test_future_requires_expiry(self) -> None:
-        with pytest.raises(ValueError, match="expiry_date"):
+        with pytest.raises(ValueError, match="sm_expiry_date"):
             _minimal_option(
-                instrument_type=InstrumentType.FUT,
-                expiry_date=None,
+                instrument=InstrumentType.FUT,
+                sm_expiry_date=None,
                 strike_price=None,
             )
 
@@ -208,7 +201,7 @@ class TestInstrumentImmutability:
     def test_frozen_dataclass(self) -> None:
         i = _minimal_equity()
         with pytest.raises(Exception):  # FrozenInstanceError is dataclasses-specific
-            i.trading_symbol = "OTHER"  # type: ignore[misc]
+            i.symbol_name = "OTHER"  # type: ignore[misc]
 
     def test_hashable(self) -> None:
         i1 = _minimal_equity()

@@ -174,21 +174,21 @@ def test_persists_underlying_economics(tmp_path: Path) -> None:
     assert result["legs_dropped"] == 3  # NIFTY FUT + NIFTY CE + RELIANCE option
 
     # The persisted underlyings carry their own scrip-master economics — the
-    # F&O lot lives on the (dropped) option contract, recovered on demand.
-    # vendor_symbol is the exchange-prefixed global key (the raw SECURITY_ID
-    # lives in exchange_token) — DEC-DHAN-VENDOR-SYMBOL-UNIQUE-001.
-    rel = store.get("NSE-RELIANCE")
+    # F&O lot lives on the (dropped) option contract, recovered on demand. The
+    # store is keyed by ``symbol_name`` (the engine symbol); the numeric Dhan id
+    # lives in ``security_id`` (ADR-0003 dropped the exchange-prefixed key).
+    rel = store.get("RELIANCE")
     assert rel is not None
-    assert rel.exchange_token == 2885
+    assert rel.security_id == 2885
     assert rel.lot_size == 1
     assert str(rel.tick_size) == "0.0500"
-    assert rel.freeze_quantity == 5000
+    assert rel.sm_freeze_qty == 5000
 
-    nifty = store.get("NSE-NIFTY")
+    nifty = store.get("NIFTY")
     assert nifty is not None
     assert nifty.lot_size == 0
 
-    n100 = store.get("NSE-BANKNIFTY")
+    n100 = store.get("BANKNIFTY")
     assert n100 is not None
     assert n100.lot_size == 0
 
@@ -206,7 +206,7 @@ def test_two_sequential_refreshes_deterministic(tmp_path: Path) -> None:
     assert (first["index_count"], first["stock_count"]) == (2, 1)
     assert (second["index_count"], second["stock_count"]) == (2, 1)
     assert store.has_derivative_legs() is False
-    rel = store.get("NSE-RELIANCE")
+    rel = store.get("RELIANCE")
     assert rel is not None and rel.lot_size == 1
     store.close()
 

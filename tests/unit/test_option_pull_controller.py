@@ -33,75 +33,66 @@ _NOW = datetime(2021, 1, 6, tzinfo=UTC)  # tiny window so the synthetic fan-out 
 def _index(symbol: str = "13", exchange: Exchange = Exchange.NSE) -> Instrument:
     """A spot index underlying (IDX → OPTIDX / ATM±10)."""
     return Instrument(
-        exchange=exchange,
-        exchange_token=int(symbol),
-        trading_symbol="NIFTY",
-        vendor_symbol=f"{exchange.value}-NIFTY",
-        name="NIFTY",
-        instrument_type=InstrumentType.IDX,
+        exch_id=exchange,
+        security_id=int(symbol),
+        symbol_name="NIFTY",
+        display_name="NIFTY",
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=0,
         tick_size=Decimal("0"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
 def _stock(symbol: str = "1333") -> Instrument:
     """A spot equity underlying (EQ → OPTSTK / ATM±3)."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=int(symbol),
-        trading_symbol="HDFCBANK",
-        vendor_symbol="NSE-HDFCBANK",
-        name="HDFCBANK",
-        instrument_type=InstrumentType.EQ,
+        exch_id=Exchange.NSE,
+        security_id=int(symbol),
+        symbol_name="HDFCBANK",
+        display_name="HDFCBANK",
+        instrument=InstrumentType.EQ,
         segment=Segment.CASH,
         series="EQ",
         isin="INE040A01034",
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=550,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
 def _option_leg() -> Instrument:
     """A CE leg — never a valid options fan-out *underlying*."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=35044,
-        trading_symbol="NIFTY25MAR29050CE",
-        vendor_symbol="NSE-NIFTY-27Mar25-29050-CE",
-        name=None,
-        instrument_type=InstrumentType.CE,
+        exch_id=Exchange.NSE,
+        security_id=35044,
+        symbol_name="NIFTY25MAR29050CE",
+        display_name=None,
+        instrument=InstrumentType.CE,
         segment=Segment.FNO,
         series=None,
         isin=None,
         underlying_symbol="NIFTY",
-        underlying_exchange_token=26000,
+        underlying_security_id=26000,
         lot_size=25,
         tick_size=Decimal("0.05"),
-        freeze_quantity=7200,
-        expiry_date=date(2025, 3, 27),
+        sm_freeze_qty=7200,
+        sm_expiry_date=date(2025, 3, 27),
         strike_price=Decimal("29050"),
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -112,12 +103,12 @@ class TestInstrumentToOptionUnderlying:
     def test_index_maps_to_optidx_wide_window(self) -> None:
         inst = _index(symbol="13", exchange=Exchange.NSE)
         u = instrument_to_option_underlying(inst)
-        # security_id is the NUMERIC exchange_token (Dhan SECURITY_ID), NOT the
-        # vendor_symbol string — the 252-failed root cause
-        # (DEC-OPTION-SECURITY-ID-FIX-001).
+        # security_id is the NUMERIC Dhan SECURITY_ID, NOT the engine
+        # symbol_name string — the 252-failed root cause
+        # (DEC-OPTION-SECURITY-ID-FIX-001 / ADR-0003: vendor_symbol dropped).
         assert u.security_id == "13"
-        assert u.security_id == str(inst.exchange_token)
-        assert u.security_id != inst.vendor_symbol
+        assert u.security_id == str(inst.security_id)
+        assert u.security_id != inst.symbol_name
         assert u.instrument == "OPTIDX"
         assert u.exchange_segment == "NSE_FNO"
         assert u.strike_offsets == 10

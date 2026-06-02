@@ -106,13 +106,13 @@ class TestLoadUniverse:
     def test_happy_path_selects_indices_and_fno_spot(self) -> None:
         text = _csv(_universe_rows())
         universe = load_universe(lambda _url: text)
-        symbols = sorted(i.trading_symbol for i in universe)
+        symbols = sorted(i.symbol_name for i in universe)
         assert symbols == ["NIFTY", "RELIANCE", "SENSEX"]
 
     def test_report_carries_parse_accounting(self) -> None:
         text = _csv(_universe_rows())
         report = load_universe_report(lambda _url: text)
-        assert sorted(i.trading_symbol for i in report.universe) == ["NIFTY", "RELIANCE", "SENSEX"]
+        assert sorted(i.symbol_name for i in report.universe) == ["NIFTY", "RELIANCE", "SENSEX"]
         assert report.parsed == 5  # all NSE/BSE rows (incl. TINYCO + option leg)
         assert report.persisted == 3
         assert report.legs_dropped == 2  # TINYCO + RELIANCE-OPT
@@ -164,4 +164,4 @@ class TestLoadUniverse:
         # Columns now: EXCH_ID,SECURITY_ID,INSTRUMENT,INSTRUMENT_TYPE,SYMBOL_NAME,…
         short[1] = "NSE,13,INDEX,INDEX,NIFTY"  # truncate the data row's trailing cells
         universe = load_universe(lambda _url: "\n".join(short))
-        assert [i.trading_symbol for i in universe] == ["NIFTY"]
+        assert [i.symbol_name for i in universe] == ["NIFTY"]

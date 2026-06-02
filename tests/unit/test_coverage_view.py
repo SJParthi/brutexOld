@@ -38,7 +38,7 @@ def _record(
     status: str | None = None,
 ) -> CoverageRecord:
     return CoverageRecord(
-        exchange=exchange,
+        exch_id=exchange,
         underlying_symbol=underlying,
         year=year,
         expiries_pulled=expiries,

@@ -27,25 +27,22 @@ _END = date(2021, 2, 1)
 
 def _index(symbol: str, *, token: int = 1) -> Instrument:
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=token,
-        trading_symbol=f"SYM{symbol}",
-        vendor_symbol=symbol,
-        name=None,
-        instrument_type=InstrumentType.IDX,
+        exch_id=Exchange.NSE,
+        security_id=token,
+        symbol_name=symbol,
+        display_name=None,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=0,
         tick_size=Decimal("0"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -65,7 +62,7 @@ def test_fan_out_all_pairs_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
         on_rate_limit=None,
         on_success=None,
     ):
-        calls.append((instrument.vendor_symbol, interval))
+        calls.append((instrument.symbol_name, interval))
         return IngestReport(windows=2, bars_appended=10, transient_failures=1)
 
     monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
@@ -105,7 +102,7 @@ def test_terminal_error_quarantines_pair_and_continues(monkeypatch: pytest.Monke
         on_rate_limit=None,
         on_success=None,
     ):
-        if instrument.vendor_symbol == "BAD":
+        if instrument.symbol_name == "BAD":
             raise DhanNotFoundError("HTTP 404 unknown security")
         return IngestReport(windows=1, bars_appended=5, transient_failures=0)
 
@@ -289,7 +286,7 @@ def test_on_progress_fires_per_pair_success_and_failure(monkeypatch: pytest.Monk
     """on_progress fires once per pair: (label, bars, failed) — both branches."""
 
     def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
-        if instrument.vendor_symbol == "BAD":
+        if instrument.symbol_name == "BAD":
             raise DhanNotFoundError("DH-902 gone")
         return IngestReport(windows=1, bars_appended=7, transient_failures=0)
 

@@ -42,26 +42,22 @@ def _open_empty(tmp_path: Path) -> InstrumentStore:
 def _idx(symbol: str, name: str) -> Instrument:
     """Build a minimal NSE index (IDX) instrument-master row."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=hash(symbol) % 100_000,
-        trading_symbol=symbol,
-        vendor_symbol=f"NSE-{symbol}",
-        name=name,
-        instrument_type=InstrumentType.IDX,
+        exch_id=Exchange.NSE,
+        security_id=hash(symbol) % 100_000,
+        symbol_name=symbol,
+        display_name=name,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
-        internal_trading_symbol=None,
+        asm_gsm_flag=False,
     )
 
 
@@ -179,7 +175,7 @@ def test_sample_rows_returns_columns_and_rows(tmp_path: Path) -> None:
     _seed(store)
     out = sample_rows(store.connection, "instruments", limit=50)
     assert out["table"] == "instruments"
-    assert "trading_symbol" in out["columns"]
+    assert "symbol_name" in out["columns"]
     assert len(out["rows"]) == 2
     # every cell is JSON-safe: None, bool, int, float, or str
     for row in out["rows"]:
@@ -275,11 +271,11 @@ def test_sample_rows_injection_rejected_not_executed(tmp_path: Path) -> None:
 
 
 def test_sample_rows_json_safe_handles_none(tmp_path: Path) -> None:
-    """A NULL cell (e.g. expiry_date for an index) stays JSON null."""
+    """A NULL cell (e.g. sm_expiry_date for an index) stays JSON null."""
     store = _open_empty(tmp_path)
     _seed(store)
     out = sample_rows(store.connection, "instruments", limit=50)
-    expiry_idx = out["columns"].index("expiry_date")
+    expiry_idx = out["columns"].index("sm_expiry_date")
     # indices have no expiry → that column is None in every seeded row
     assert all(row[expiry_idx] is None for row in out["rows"])
 

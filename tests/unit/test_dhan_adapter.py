@@ -46,25 +46,22 @@ def _inst(
 ) -> Instrument:
     is_idx = itype is InstrumentType.IDX
     return Instrument(
-        exchange=exch,
-        exchange_token=int(symbol),
-        trading_symbol=trading,
-        vendor_symbol=symbol,
-        name=trading,
-        instrument_type=itype,
+        exch_id=exch,
+        security_id=int(symbol),
+        symbol_name=trading,
+        display_name=trading,
+        instrument=itype,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=0 if is_idx else 1,
         tick_size=Decimal("0") if is_idx else Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -120,7 +117,7 @@ class TestFetchOhlcv:
     def test_intraday_index(self) -> None:
         adapter, t = _adapter()
         bars = adapter.fetch_ohlcv(
-            symbol="13",
+            symbol="NIFTY",
             exchange=Exchange.NSE,
             interval="1minute",
             start=date(2021, 1, 4),
@@ -151,7 +148,7 @@ class TestFetchOhlcv:
         # 04 session is returned and the 04 day is NOT lost.
         adapter, t = _adapter()
         adapter.fetch_ohlcv(
-            symbol="13",
+            symbol="NIFTY",
             exchange=Exchange.NSE,
             interval="1minute",
             start=date(2021, 1, 4),
@@ -164,7 +161,7 @@ class TestFetchOhlcv:
     def test_daily_equity(self) -> None:
         adapter, t = _adapter()
         bars = adapter.fetch_ohlcv(
-            symbol="2885",
+            symbol="RELIANCE",
             exchange=Exchange.NSE,
             interval="1day",
             start=date(2021, 1, 4),
@@ -191,7 +188,7 @@ class TestFetchOhlcv:
         # NOT BSE_EQ.
         adapter, t = _adapter()
         adapter.fetch_ohlcv(
-            symbol="51",
+            symbol="SENSEX",
             exchange=Exchange.BSE,
             interval="1day",
             start=date(2021, 1, 4),
@@ -215,7 +212,7 @@ class TestFetchOhlcv:
         }
         adapter, _ = _adapter(payload=payload)
         bars = adapter.fetch_ohlcv(
-            symbol="13",
+            symbol="NIFTY",
             exchange=Exchange.NSE,
             interval="1minute",
             start=date(2021, 1, 4),
@@ -235,7 +232,7 @@ class TestFetchOhlcv:
         }
         adapter, _ = _adapter(payload=payload)
         bars = adapter.fetch_ohlcv(
-            symbol="2885",
+            symbol="RELIANCE",
             exchange=Exchange.NSE,
             interval="1minute",
             start=date(2021, 1, 4),
@@ -246,7 +243,7 @@ class TestFetchOhlcv:
     def test_data_wrapper_unwrapped(self) -> None:
         adapter, _ = _adapter(payload={"data": _CANDLES})
         bars = adapter.fetch_ohlcv(
-            symbol="13",
+            symbol="NIFTY",
             exchange=Exchange.NSE,
             interval="1minute",
             start=date(2021, 1, 4),
@@ -269,7 +266,7 @@ class TestFetchOhlcv:
         adapter, _ = _adapter()
         with pytest.raises(OutOfScopeError, match="is not fetched"):
             adapter.fetch_ohlcv(
-                symbol="13",
+                symbol="NIFTY",
                 exchange=Exchange.NSE,
                 interval="5minute",
                 start=date(2021, 1, 4),

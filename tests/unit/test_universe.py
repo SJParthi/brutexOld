@@ -211,50 +211,44 @@ class TestIsIndexUnderlying:
 def _make_idx(exchange: Exchange, symbol: str) -> Instrument:
     """Build a minimal IDX-type Instrument for scope testing."""
     return Instrument(
-        exchange=exchange,
-        exchange_token=hash(symbol) % 100_000,
-        trading_symbol=symbol,
-        vendor_symbol=symbol,
-        name=symbol,
-        instrument_type=InstrumentType.IDX,
+        exch_id=exchange,
+        security_id=hash(symbol) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=symbol,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=False,
-        sell_allowed=False,
+        asm_gsm_flag=False,
     )
 
 
 def _make_equity(exchange: Exchange, symbol: str) -> Instrument:
     """Build a cash-equity Instrument (out of scope for Track 1)."""
     return Instrument(
-        exchange=exchange,
-        exchange_token=hash(symbol) % 100_000,
-        trading_symbol=symbol,
-        vendor_symbol=symbol,
-        name=symbol,
-        instrument_type=InstrumentType.EQ,
+        exch_id=exchange,
+        security_id=hash(symbol) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
         segment=Segment.CASH,
         series="EQ",
         isin=None,
         underlying_symbol=symbol,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -326,25 +320,22 @@ def _make_derivative(
     """Build a FUT / CE / PE derivative Instrument for fetch-scope testing."""
     is_option = instrument_type in (InstrumentType.CE, InstrumentType.PE)
     return Instrument(
-        exchange=exchange,
-        exchange_token=hash((underlying, instrument_type)) % 100_000,
-        trading_symbol=trading_symbol or f"{underlying}-DERIV",
-        vendor_symbol=f"{exchange}-{underlying}-{instrument_type}",
-        name=underlying,
-        instrument_type=instrument_type,
+        exch_id=exchange,
+        security_id=hash((underlying, instrument_type)) % 100_000,
+        symbol_name=trading_symbol or f"{underlying}-DERIV",
+        display_name=underlying,
+        instrument=instrument_type,
         segment=Segment.FNO,
         series=None,
         isin=None,
         underlying_symbol=underlying,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=50,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=date(2025, 1, 30),
+        sm_freeze_qty=None,
+        sm_expiry_date=date(2025, 1, 30),
         strike_price=Decimal("28500") if is_option else None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -497,50 +488,44 @@ class TestIsUniverseUnderlying:
 def _econ_idx(symbol: str, *, exchange: Exchange = Exchange.NSE) -> Instrument:
     """Build a minimal IDX row (blank economics, as the master ships)."""
     return Instrument(
-        exchange=exchange,
-        exchange_token=0,
-        trading_symbol=symbol,
-        vendor_symbol=f"{exchange}-{symbol}",
-        name=symbol,
-        instrument_type=InstrumentType.IDX,
+        exch_id=exchange,
+        security_id=0,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=0,
         tick_size=Decimal("0"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
 def _econ_eq(symbol: str, *, lot_size: int = 1) -> Instrument:
     """Build a minimal EQ underlying row (blank economics, as the master ships)."""
     return Instrument(
-        exchange=Exchange.NSE,
-        exchange_token=1,
-        trading_symbol=symbol,
-        vendor_symbol=f"NSE-{symbol}",
-        name=symbol,
-        instrument_type=InstrumentType.EQ,
+        exch_id=Exchange.NSE,
+        security_id=1,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
         segment=Segment.CASH,
         series="EQ",
         isin="INE000A01000",
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=lot_size,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -557,25 +542,22 @@ def _econ_leg(
 ) -> Instrument:
     """Build a derivative leg carrying explicit economics."""
     return Instrument(
-        exchange=exchange,
-        exchange_token=2,
-        trading_symbol=symbol,
-        vendor_symbol=f"{exchange}-{symbol}",
-        name=symbol,
-        instrument_type=itype,
+        exch_id=exchange,
+        security_id=2,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=itype,
         segment=Segment.FNO,
         series=None,
         isin=None,
         underlying_symbol=underlying,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=lot_size,
         tick_size=tick_size,
-        freeze_quantity=freeze_quantity,
-        expiry_date=date(2025, 1, 30),
+        sm_freeze_qty=freeze_quantity,
+        sm_expiry_date=date(2025, 1, 30),
         strike_price=strike,
-        is_reserved=False,
-        buy_allowed=True,
-        sell_allowed=True,
+        asm_gsm_flag=False,
     )
 
 
@@ -653,10 +635,10 @@ def test_economics_skips_leg_without_underlying() -> None:
     class _FakeLeg:
         underlying_symbol = None
         is_derivative = True
-        exchange = Exchange.NSE
+        exch_id = Exchange.NSE
         lot_size = 75
         tick_size = Decimal("0.05")
-        freeze_quantity = 1800
+        sm_freeze_qty = 1800
 
     assert build_underlying_economics([_FakeLeg()]) == {}  # type: ignore[list-item]
 
@@ -669,25 +651,22 @@ def test_economics_skips_leg_without_underlying() -> None:
 def _make_idx_no_underlying(exchange: Exchange, symbol: str) -> Instrument:
     """Build an IDX row whose ``underlying_symbol`` is None (the real master shape)."""
     return Instrument(
-        exchange=exchange,
-        exchange_token=hash(symbol) % 100_000,
-        trading_symbol=symbol,
-        vendor_symbol=f"{exchange.value}-{symbol}",
-        name=symbol,
-        instrument_type=InstrumentType.IDX,
+        exch_id=exchange,
+        security_id=hash(symbol) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
         segment=Segment.CASH,
         series=None,
         isin=None,
         underlying_symbol=None,
-        underlying_exchange_token=None,
+        underlying_security_id=None,
         lot_size=1,
         tick_size=Decimal("0.05"),
-        freeze_quantity=None,
-        expiry_date=None,
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
         strike_price=None,
-        is_reserved=False,
-        buy_allowed=False,
-        sell_allowed=False,
+        asm_gsm_flag=False,
     )
 
 

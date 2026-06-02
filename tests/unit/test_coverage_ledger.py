@@ -38,7 +38,7 @@ def _record(
 ) -> CoverageRecord:
     resolved_status = status if status is not None else classify_cell(expiries, contracts, error)
     return CoverageRecord(
-        exchange=exchange,
+        exch_id=exchange,
         underlying_symbol=underlying,
         year=year,
         expiries_pulled=expiries,
