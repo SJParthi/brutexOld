@@ -374,10 +374,12 @@ omit = [
     # their coverage now counts toward the 90% floor (verified aggregate
     # 97.70%). `execution/driver.py` was UN-OMITTED at 100% line+branch
     # (DEC-COVERAGE-DRIVER-001 — tests/unit/test_execution_driver_edges.py +
-    # tests/integration/test_execution_driver.py). The 2 modules below stay
-    # omitted — still below the 90% floor (data/catalog ~86%,
-    # data/instrument_store ~87%) until dedicated tests land (tracked follow-up).
-    "brutex/data/catalog.py",
+    # tests/integration/test_execution_driver.py); `data/catalog.py` was
+    # UN-OMITTED at 100% line+branch (DEC-COVERAGE-CATALOG-001 —
+    # tests/integration/test_data_lake_real.py + tests/integration/test_catalog.py).
+    # The 1 module below stays omitted — still below the 90% floor
+    # (data/instrument_store ~87%) until its dedicated harness lands
+    # (tracked follow-up).
     "brutex/data/instrument_store.py",
 ]
 
