@@ -986,6 +986,20 @@ class InstrumentStore(metaclass=_StoreMeta):
 
         fetched_at = datetime.now(UTC)
 
+        # Defensive identity-dedup (DEC-DHAN-UNIVERSE-PK-DEDUP-001). Within one
+        # snapshot the table identity is (security_id, exch_id, segment) — the
+        # PRIMARY KEY minus snapshot_date. A caller that hands us two rows sharing
+        # that identity (e.g. the Dhan master listing one security_id under two
+        # SYMBOL_NAMEs — the live "13, NSE, CASH" crash) would otherwise blow up
+        # the single bulk INSERT on a PK violation. Collapse to one row per
+        # identity here, O(1) per row via a dict (last-seen wins), so the store is
+        # crash-proof at the write boundary regardless of caller hygiene
+        # (belt-and-braces: select_universe already dedups upstream).
+        identity_deduped: dict[tuple[int, Exchange, Segment], Instrument] = {}
+        for instr in instruments:
+            identity_deduped[(instr.security_id, instr.exch_id, instr.segment)] = instr
+        instruments = list(identity_deduped.values())
+
         # Ultra-fast bulk path (DEC-INSTRUMENT-BULK-UPSERT-001). The original
         # implementation issued one DELETE + one INSERT per row (~2·N SQL
         # round-trips for an N-row master; ≈300k for the large detailed instrument-master CSV)
