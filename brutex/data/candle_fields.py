@@ -124,17 +124,35 @@ def assemble_candle(
     CandleParseError
         Any field unparseable, or the timestamp invalid.
     ValueError
-        Propagated from :class:`CandleBar` on inconsistent OHLC.
+        Propagated from :class:`CandleBar` on a naive timestamp or a
+        negative volume / open-interest. Inconsistent OHLC (a vendor
+        ``open`` / ``close`` outside the reported ``[low, high]``) is
+        **normalized** here — ``high`` / ``low`` are clamped to bound all
+        four prices (DEC-OHLC-VENDOR-NORMALIZE-001) — never raised.
     """
     if all(has_no_price(v) for v in (open_, high, low, close)):
         raise EmptyCandleRow("candle has no OHLC data (no-trade / halted / unlisted bar)")
     oi = None if is_absent(open_interest) else to_int(open_interest, "open_interest")
+    open_price = to_price(open_, "open")
+    high_price = to_price(high, "high")
+    low_price = to_price(low, "low")
+    close_price = to_price(close, "close")
+    # Vendor OHLC normalization (DEC-OHLC-VENDOR-NORMALIZE-001): ``open`` and
+    # ``close`` are authoritative traded prices, so the bar's true high/low
+    # MUST bound them. Dhan occasionally under-reports ``high`` (or over-
+    # reports ``low``) by a tick — a single such quirk bar would otherwise
+    # crash an entire multi-year pull on the strict ``CandleBar`` invariant
+    # (``low <= open, close <= high``). Clamp to enclose all four prices
+    # (``high = max``, ``low = min``) — the mathematically-correct bound (a
+    # traded open of 17289 implies the true high >= 17289), never data loss.
+    # The ``CandleBar`` invariant stays strict for any non-assembler path.
+    prices = (open_price, high_price, low_price, close_price)
     return CandleBar(
         timestamp=parse_timestamp(ts_raw),
-        open=to_price(open_, "open"),
-        high=to_price(high, "high"),
-        low=to_price(low, "low"),
-        close=to_price(close, "close"),
+        open=open_price,
+        high=max(prices),
+        low=min(prices),
+        close=close_price,
         volume=0 if is_absent(volume) else to_int(volume, "volume"),
         open_interest=oi,
     )
