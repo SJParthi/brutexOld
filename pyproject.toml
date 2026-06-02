@@ -377,10 +377,11 @@ omit = [
     # tests/integration/test_execution_driver.py); `data/catalog.py` was
     # UN-OMITTED at 100% line+branch (DEC-COVERAGE-CATALOG-001 —
     # tests/integration/test_data_lake_real.py + tests/integration/test_catalog.py).
-    # The 1 module below stays omitted — still below the 90% floor
-    # (data/instrument_store ~87%) until its dedicated harness lands
-    # (tracked follow-up).
-    "brutex/data/instrument_store.py",
+    # `data/instrument_store.py` was UN-OMITTED at 100% line+branch
+    # (DEC-COVERAGE-INSTRUMENT-STORE-001, MIGRATION.md #392 —
+    # tests/integration/test_instrument_store.py +
+    # tests/integration/test_instrument_store_edges.py); its coverage now
+    # counts toward the 90% floor.
 ]
 
 [tool.coverage.report]
