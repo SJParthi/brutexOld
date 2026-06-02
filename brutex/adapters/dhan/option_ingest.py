@@ -75,6 +75,8 @@ class OptionBarSink(Protocol):
         self,
         *,
         security_id: str,
+        exch_id: str,
+        underlying_symbol: str,
         exchange_segment: str,
         expiry_flag: str,
         expiry_code: int,
@@ -139,6 +141,8 @@ def ingest_rolling_option_series(
     sink: OptionBarSink,
     *,
     security_id: str,
+    exch_id: str,
+    underlying_symbol: str,
     exchange_segment: str,
     instrument: str,
     expiry_flag: str,
@@ -161,6 +165,10 @@ def ingest_rolling_option_series(
     security_id
         The **underlying** Dhan ``SECURITY_ID`` (rolling option resolves
         strikes relative to this underlying's spot).
+    exch_id, underlying_symbol
+        The underlying's exchange id (``"NSE"`` / ``"BSE"``) and engine symbol
+        (``"NIFTY"``) — promoted onto every persisted bar as real
+        expired-options columns (DEC-EXPIRED-OPTIONS-TABLE-001).
     exchange_segment, instrument
         e.g. ``"NSE_FNO"`` and ``"OPTIDX"`` / ``"OPTSTK"``.
     expiry_flag, expiry_code
@@ -234,6 +242,8 @@ def ingest_rolling_option_series(
         bars = [bar for bar in parse_rolling_option_sides(source) if in_session(bar.timestamp)]
         bars_appended += sink.append_option_bars(
             security_id=security_id,
+            exch_id=exch_id,
+            underlying_symbol=underlying_symbol,
             exchange_segment=exchange_segment,
             expiry_flag=expiry_flag,
             expiry_code=expiry_code,

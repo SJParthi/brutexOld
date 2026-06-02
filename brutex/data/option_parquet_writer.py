@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -46,6 +47,47 @@ if TYPE_CHECKING:
 
 #: Subdirectory under the lake root holding the expired-options table.
 _OPTIONS_SUBDIR: str = "options"
+
+
+@dataclass(frozen=True, slots=True)
+class OptionSeriesCoordinate:
+    """The series addressing one rolling-option pull resolves to.
+
+    DEC-EXPIRED-OPTIONS-TABLE-001: the rolling-option request coordinate is
+    promoted from the partition *path* into real, self-describing columns on
+    every persisted bar. The physical partition path is unchanged
+    (``options/<series>/<YYYY>-<MM>.parquet``) — these fields are simply
+    written alongside each bar so the expired-options table is queryable
+    without decoding the path.
+
+    Attributes
+    ----------
+    exch_id
+        Exchange id (e.g. ``"NSE"``).
+    exchange_segment
+        Dhan ``exchangeSegment`` (e.g. ``"NSE_FNO"``).
+    security_id
+        The **underlying** Dhan ``SECURITY_ID`` (numeric).
+    underlying_symbol
+        The underlying's engine symbol (e.g. ``"NIFTY"``).
+    expiry_flag
+        ``"WEEK"`` / ``"MONTH"``.
+    expiry_code
+        The expiry selector (Near/Next/Far).
+    strike_offset
+        The **requested** relative strike selector label (``"ATM"``,
+        ``"ATM+3"``, ``"ATM-2"``) — distinct from the per-bar resolved
+        absolute ``strike``.
+    """
+
+    exch_id: str
+    exchange_segment: str
+    security_id: int
+    underlying_symbol: str
+    expiry_flag: str
+    expiry_code: int
+    strike_offset: str
+
 
 #: Characters in a partition key replaced to make a filesystem-safe segment.
 _UNSAFE: str = "|"
@@ -87,12 +129,23 @@ class OptionParquetWriter:
         """Return the configured top-level lake directory."""
         return self._lake_root
 
-    def write(self, *, partition_key: str, bars: Sequence[OptionBar]) -> int:
+    def write(
+        self,
+        *,
+        partition_key: str,
+        coordinate: OptionSeriesCoordinate,
+        bars: Sequence[OptionBar],
+    ) -> int:
         """Persist *bars* for one series; return the count of newly-written rows.
 
         Bars are split into ``(year, month)`` partitions and each group is
         merged into its partition file keyed by ``(side, timestamp)``. A pure
         re-pull (every bar already stored) writes nothing and returns 0.
+
+        *coordinate* (DEC-EXPIRED-OPTIONS-TABLE-001) carries the series
+        addressing fields that are written as real columns on every bar, so
+        the expired-options table is self-describing without decoding the
+        partition path.
         """
         if not bars:
             return 0
@@ -104,12 +157,14 @@ class OptionParquetWriter:
         added_total = 0
         for (year, month), group in sorted(groups.items()):
             dest = self._lake_root / _OPTIONS_SUBDIR / segment / f"{year:04d}-{month:02d}.parquet"
-            added_total += self._merge_partition(dest, group)
+            added_total += self._merge_partition(dest, coordinate, group)
         return added_total
 
-    def _merge_partition(self, dest: Path, new_bars: list[OptionBar]) -> int:
+    def _merge_partition(
+        self, dest: Path, coordinate: OptionSeriesCoordinate, new_bars: list[OptionBar]
+    ) -> int:
         """Union *new_bars* into *dest* keyed by ``(side, timestamp)``; return new rows."""
-        new_df = _render_df(new_bars)  # validates the polars import
+        new_df = _render_df(coordinate, new_bars)  # validates the polars import
         import polars as pl
 
         if dest.exists():
@@ -146,8 +201,13 @@ def _opt_money(value: Decimal | None) -> float | None:
     return None if value is None else _money(value)
 
 
-def _render_df(bars: Sequence[OptionBar]) -> pl.DataFrame:
-    """Build a typed polars DataFrame from *bars*.
+def _render_df(coordinate: OptionSeriesCoordinate, bars: Sequence[OptionBar]) -> pl.DataFrame:
+    """Build a typed polars DataFrame from *coordinate* + *bars*.
+
+    The 7 series-addressing columns (``exch_id`` / ``exchange_segment`` /
+    ``security_id`` / ``underlying_symbol`` / ``expiry_flag`` / ``expiry_code``
+    / ``strike_offset``) are promoted from the partition path onto every bar
+    (DEC-EXPIRED-OPTIONS-TABLE-001), constant within a partition file.
 
     Money fields (``open``/``high``/``low``/``close``/``strike``/``spot``) are
     rounded to **2 decimals** (DEC-MONEY-2DP-001, CLAUDE.md §4). ``iv`` is a
@@ -161,7 +221,18 @@ def _render_df(bars: Sequence[OptionBar]) -> pl.DataFrame:
             "OptionParquetWriter requires 'polars' — install '.[data]' for the lake"
         ) from exc
 
+    count = len(bars)
     rows = {
+        # ── series addressing (promoted from the partition path) ──
+        "exch_id": [coordinate.exch_id] * count,
+        "exchange_segment": [coordinate.exchange_segment] * count,
+        "security_id": [coordinate.security_id] * count,
+        "underlying_symbol": [coordinate.underlying_symbol] * count,
+        "expiry_flag": [coordinate.expiry_flag] * count,
+        "expiry_code": [coordinate.expiry_code] * count,
+        "side": [b.side for b in bars],
+        "strike_offset": [coordinate.strike_offset] * count,
+        # ── per-bar value fields ──
         "timestamp": [b.timestamp for b in bars],
         "open": [_money(b.open) for b in bars],
         "high": [_money(b.high) for b in bars],
@@ -169,7 +240,6 @@ def _render_df(bars: Sequence[OptionBar]) -> pl.DataFrame:
         "close": [_money(b.close) for b in bars],
         "volume": [b.volume for b in bars],
         "open_interest": [b.open_interest for b in bars],
-        "side": [b.side for b in bars],
         "strike": [_opt_money(b.strike) for b in bars],
         "spot": [_opt_money(b.spot) for b in bars],
         "iv": [None if b.iv is None else float(b.iv) for b in bars],  # NOT money — full precision
@@ -178,6 +248,8 @@ def _render_df(bars: Sequence[OptionBar]) -> pl.DataFrame:
     # An all-None batch infers a column as Null, so pin the nullable fields to
     # their stable lake dtypes (cast is a no-op when already typed).
     return pl.DataFrame(rows).with_columns(
+        pl.col("security_id").cast(pl.Int64),
+        pl.col("expiry_code").cast(pl.Int64),
         pl.col("open_interest").cast(pl.Int64),
         pl.col("strike").cast(pl.Float64),
         pl.col("spot").cast(pl.Float64),
@@ -200,5 +272,6 @@ def _atomic_write_parquet(dest: Path, df: pl.DataFrame) -> None:
 
 __all__ = [
     "OptionParquetWriter",
+    "OptionSeriesCoordinate",
     "OptionWriterError",
 ]

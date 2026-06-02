@@ -13,6 +13,7 @@ from decimal import Decimal
 
 from brutex.data.models import OptionBar
 from brutex.data.option_dedup import OptionDedupIndex
+from brutex.data.option_parquet_writer import OptionSeriesCoordinate
 from brutex.data.option_sink import NullOptionBarSink, OptionBarSink
 
 
@@ -35,9 +36,17 @@ def _bar(*, side: str = "CE", strike: str = "17500", minute: int = 0) -> OptionB
 class _FakeWriter:
     def __init__(self) -> None:
         self.calls: list[tuple[str, list[OptionBar]]] = []
+        self.coordinates: list[OptionSeriesCoordinate] = []
 
-    def write(self, *, partition_key: str, bars: Sequence[OptionBar]) -> int:
+    def write(
+        self,
+        *,
+        partition_key: str,
+        coordinate: OptionSeriesCoordinate,
+        bars: Sequence[OptionBar],
+    ) -> int:
         self.calls.append((partition_key, list(bars)))
+        self.coordinates.append(coordinate)
         return len(bars)
 
 
@@ -61,6 +70,8 @@ def _sink(writer: _FakeWriter, audit: _FakeAudit | None = None) -> OptionBarSink
 def _append(sink: OptionBarSink, bars: list[OptionBar]) -> int:
     return sink.append_option_bars(
         security_id="13",
+        exch_id="NSE",
+        underlying_symbol="NIFTY",
         exchange_segment="NSE_FNO",
         expiry_flag="WEEK",
         expiry_code=0,
@@ -84,6 +95,18 @@ def test_writes_survivors_and_audits() -> None:
     assert row["action"] == "OPTION_BARS_WRITTEN"
     assert row["subject"] == "NSE_FNO|13|WEEK|0|ATM|CALL"
     assert row["payload"] == {"written": 2, "deduped": 0}
+    # The series coordinate is threaded to the writer as real columns
+    # (DEC-EXPIRED-OPTIONS-TABLE-001): strike_offset = the REQUESTED selector.
+    (coord,) = writer.coordinates
+    assert coord == OptionSeriesCoordinate(
+        exch_id="NSE",
+        exchange_segment="NSE_FNO",
+        security_id=13,
+        underlying_symbol="NIFTY",
+        expiry_flag="WEEK",
+        expiry_code=0,
+        strike_offset="ATM",
+    )
 
 
 def test_idempotent_rerun_is_noop() -> None:
@@ -133,6 +156,8 @@ def _none_strike_bar(minute: int = 0) -> OptionBar:
 def _append_strike(sink: OptionBarSink, strike: str, bars: list[OptionBar]) -> int:
     return sink.append_option_bars(
         security_id="13",
+        exch_id="NSE",
+        underlying_symbol="NIFTY",
         exchange_segment="NSE_FNO",
         expiry_flag="WEEK",
         expiry_code=0,
@@ -163,6 +188,8 @@ class TestNullOptionBarSink:
         sink = NullOptionBarSink()
         n = sink.append_option_bars(
             security_id="13",
+            exch_id="NSE",
+            underlying_symbol="NIFTY",
             exchange_segment="NSE_FNO",
             expiry_flag="WEEK",
             expiry_code=1,
@@ -176,6 +203,8 @@ class TestNullOptionBarSink:
         assert (
             NullOptionBarSink().append_option_bars(
                 security_id="13",
+                exch_id="NSE",
+                underlying_symbol="NIFTY",
                 exchange_segment="NSE_FNO",
                 expiry_flag="MONTH",
                 expiry_code=1,

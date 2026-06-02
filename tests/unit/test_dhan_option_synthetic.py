@@ -45,6 +45,8 @@ def test_drives_the_rolling_option_spine_offline() -> None:
         SyntheticOptionClient(bars_per_window=4),
         NullOptionBarSink(),
         security_id="13",
+        exch_id="NSE",
+        underlying_symbol="NIFTY",
         exchange_segment="NSE_FNO",
         instrument="OPTIDX",
         expiry_flag="WEEK",

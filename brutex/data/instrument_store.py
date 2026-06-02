@@ -119,7 +119,15 @@ from brutex.models import (
 #: the ``(security_id, exch_id, segment, snapshot_date)`` PK with a cash
 #: equity sharing a numeric SECURITY_ID. The bump forces any v3 store
 #: (which may hold mis-segmented index rows) to DROP + rebuild from the CSV.
-SCHEMA_VERSION: Final[int] = 4
+#:
+#: v5 (DEC-EXPIRED-OPTIONS-TABLE-001, 2026-06-02): the empty/redundant
+#: ``expiries`` + ``contracts`` DuckDB tables were dropped — the dedicated
+#: expired-options Parquet table (``<lake>/options/<series>/``) is now the
+#: single source of truth for option series, with the rolling-option
+#: addressing promoted from the partition path into real columns. The bump
+#: forces any v4 store to DROP the two tables (``DROP TABLE IF EXISTS`` is
+#: kept in the migration list so existing DBs shed them).
+SCHEMA_VERSION: Final[int] = 5
 
 #: Default DuckDB file name inside the configured lake root.
 DEFAULT_DB_NAME: Final[str] = "instruments.duckdb"
@@ -188,41 +196,6 @@ CREATE TABLE IF NOT EXISTS instrument_runs (
 );
 """
 
-_DDL_EXPIRIES: Final[str] = """
-CREATE TABLE IF NOT EXISTS expiries (
-    exch_id           VARCHAR NOT NULL,
-    underlying_symbol VARCHAR NOT NULL,
-    sm_expiry_date    DATE    NOT NULL,
-    snapshot_date     DATE    NOT NULL,
-
-    pulled_year       INTEGER NOT NULL,
-    fetched_at        TIMESTAMP WITH TIME ZONE NOT NULL,
-    run_id            VARCHAR NOT NULL,
-
-    PRIMARY KEY (exch_id, underlying_symbol, sm_expiry_date, snapshot_date)
-);
-"""
-
-_DDL_CONTRACTS: Final[str] = """
-CREATE TABLE IF NOT EXISTS contracts (
-    exch_id           VARCHAR NOT NULL,
-    underlying_symbol VARCHAR NOT NULL,
-    sm_expiry_date    DATE    NOT NULL,
-    symbol_name       VARCHAR NOT NULL,   -- full Dhan contract symbol of the leg
-    snapshot_date     DATE    NOT NULL,
-
-    instrument        VARCHAR NOT NULL,   -- FUT | CE | PE
-    strike_price      DECIMAL(18, 4),     -- NULL for FUT
-    lot_size          INTEGER NOT NULL,
-    sm_freeze_qty     INTEGER,
-    tick_size         DECIMAL(18, 4) NOT NULL,
-    fetched_at        TIMESTAMP WITH TIME ZONE NOT NULL,
-    run_id            VARCHAR NOT NULL,
-
-    PRIMARY KEY (symbol_name, snapshot_date)
-);
-"""
-
 _DDL_COVERAGE_LEDGER: Final[str] = """
 CREATE TABLE IF NOT EXISTS coverage_ledger (
     exch_id           VARCHAR NOT NULL,
@@ -248,9 +221,14 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 """
 
 #: Tables dropped when an older-``schema_version`` store is opened (ADR-0003).
-#: The v3 rename is a non-additive shape change; these four tables are
-#: rebuildable from one CSV pull, so they are recreated at the current shape.
+#: The v3 rename is a non-additive shape change; these tables are rebuildable
+#: from one CSV pull, so they are recreated at the current shape.
 #: ``instrument_runs`` + ``schema_meta`` (pure bookkeeping) are NOT dropped.
+#:
+#: ``expiries`` + ``contracts`` are dropped UNCONDITIONALLY (v5 /
+#: DEC-EXPIRED-OPTIONS-TABLE-001): they are retired tables, never recreated —
+#: the ``DROP TABLE IF EXISTS`` here is what sheds them from any existing v4
+#: store, and ``open`` no longer issues their CREATE.
 _DDL_DROP_RENAMED: Final[tuple[str, ...]] = (
     "DROP TABLE IF EXISTS instruments;",
     "DROP TABLE IF EXISTS expiries;",
@@ -265,12 +243,6 @@ _DDL_INDEXES: Final[tuple[str, ...]] = (
     "CREATE INDEX IF NOT EXISTS idx_instr_type ON instruments (instrument, snapshot_date);",
     "CREATE INDEX IF NOT EXISTS idx_instr_expiry ON instruments (sm_expiry_date, snapshot_date);",
     "CREATE INDEX IF NOT EXISTS idx_instr_in_scope ON instruments (in_scope, snapshot_date);",
-    # Expiries fan-out: Phase C asks "every expiry for NIFTY"
-    "CREATE INDEX IF NOT EXISTS idx_exp_underlying ON expiries (underlying_symbol, snapshot_date);",
-    # Contracts fan-out: Phase D asks "every leg for (NIFTY, 2025-05-29)"
-    "CREATE INDEX IF NOT EXISTS idx_con_underlying_expiry "
-    "ON contracts (underlying_symbol, sm_expiry_date, snapshot_date);",
-    "CREATE INDEX IF NOT EXISTS idx_con_expiry ON contracts (sm_expiry_date, snapshot_date);",
     # Coverage ledger: the /coverage page asks "every incomplete cell"
     # (DEC-COVERAGE-LEDGER-001) — an indexed status scan, never a full table scan.
     "CREATE INDEX IF NOT EXISTS idx_cov_status ON coverage_ledger (status);",
@@ -357,51 +329,6 @@ class UpsertResult:
     rows_written: int
     rows_replaced: int
     snapshot_date: date
-    run_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class ExpiryRecord:
-    """One expiry row \u2014 output of Phase B per ``(exch_id, underlying)``.
-
-    Composite primary key in the table is
-    ``(exch_id, underlying_symbol, sm_expiry_date, snapshot_date)`` so
-    the same expiry pulled on different days is a new row (temporal
-    history); pulling twice on the same day upserts in place. Column names
-    are Dhan-faithful (ADR-0003); values are unchanged.
-    """
-
-    exch_id: str
-    underlying_symbol: str
-    sm_expiry_date: date
-    snapshot_date: date
-    pulled_year: int
-    fetched_at: datetime
-    run_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class ContractRecord:
-    """One contract leg \u2014 output of Phase C per ``(underlying, expiry)``.
-
-    Primary key is ``(symbol_name, snapshot_date)`` \u2014 ``symbol_name`` is
-    the full Dhan contract symbol (e.g. ``NSE-NIFTY-29May25-24000-CE``)
-    which is globally unique, and ``snapshot_date`` gives temporal history.
-    Column names are Dhan-faithful (ADR-0003); ``instrument`` keeps the
-    FUT/CE/PE value.
-    """
-
-    exch_id: str
-    underlying_symbol: str
-    sm_expiry_date: date
-    symbol_name: str
-    snapshot_date: date
-    instrument: InstrumentType
-    strike_price: Decimal | None
-    lot_size: int
-    sm_freeze_qty: int | None
-    tick_size: Decimal
-    fetched_at: datetime
     run_id: str
 
 
@@ -870,10 +797,12 @@ class InstrumentStore(metaclass=_StoreMeta):
         rename is a NON-additive column-shape change, so a store stamped at
         an OLDER ``schema_version`` cannot be migrated in place by additive
         DDL. The instrument master is fully rebuildable from one CSV pull,
-        so on an older-version store the renamed tables (``instruments`` /
-        ``expiries`` / ``contracts`` / ``coverage_ledger``) are DROPped and
-        recreated at the current shape; the pure-bookkeeping
-        ``instrument_runs`` / ``schema_meta`` tables are preserved. A fresh
+        so on an older-version store ``instruments`` / ``coverage_ledger``
+        are DROPped and recreated at the current shape; the pure-bookkeeping
+        ``instrument_runs`` / ``schema_meta`` tables are preserved. The
+        retired ``expiries`` / ``contracts`` tables (v5 /
+        DEC-EXPIRED-OPTIONS-TABLE-001) are DROPped but never recreated — the
+        dedicated expired-options Parquet table superseded them. A fresh
         store (no recorded version) and an already-current store both skip
         the drop.
         """
@@ -901,8 +830,6 @@ class InstrumentStore(metaclass=_StoreMeta):
                 for drop_sql in _DDL_DROP_RENAMED:
                     conn.execute(drop_sql)
             conn.execute(_DDL_INSTRUMENTS)
-            conn.execute(_DDL_EXPIRIES)
-            conn.execute(_DDL_CONTRACTS)
             conn.execute(_DDL_INSTRUMENT_RUNS)
             conn.execute(_DDL_COVERAGE_LEDGER)
             for index_sql in _DDL_INDEXES:
@@ -1143,107 +1070,14 @@ class InstrumentStore(metaclass=_StoreMeta):
             ],
         )
 
-    # ── Phase B / Phase C writers ──────────────────────────────────
-
-    def upsert_expiries(
-        self,
-        expiries: Sequence[ExpiryRecord],
-    ) -> int:
-        """Insert or replace *expiries* \u2014 transactional, idempotent.
-
-        Wrapped in a single transaction so partial failures roll
-        back. Re-upsert of the same composite PK replaces in place.
-        Returns the number of rows written.
-        """
-        self._ensure_open()
-        try:
-            self._conn.execute("BEGIN")
-            for exp in expiries:
-                self._conn.execute(
-                    "DELETE FROM expiries "
-                    "WHERE exch_id = ? AND underlying_symbol = ? "
-                    "AND sm_expiry_date = ? AND snapshot_date = ?",
-                    [
-                        exp.exch_id,
-                        exp.underlying_symbol,
-                        exp.sm_expiry_date,
-                        exp.snapshot_date,
-                    ],
-                )
-                self._conn.execute(
-                    "INSERT INTO expiries ("
-                    "exch_id, underlying_symbol, sm_expiry_date, snapshot_date, "
-                    "pulled_year, fetched_at, run_id"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    [
-                        exp.exch_id,
-                        exp.underlying_symbol,
-                        exp.sm_expiry_date,
-                        exp.snapshot_date,
-                        exp.pulled_year,
-                        exp.fetched_at,
-                        exp.run_id,
-                    ],
-                )
-            self._conn.execute("COMMIT")
-        except Exception:
-            self._conn.execute("ROLLBACK")
-            raise
-        return len(expiries)
-
-    def upsert_contracts(
-        self,
-        contracts: Sequence[ContractRecord],
-    ) -> int:
-        """Insert or replace *contracts* \u2014 transactional, idempotent.
-
-        Same PK-replace-in-transaction pattern as
-        :meth:`upsert_expiries`.
-        """
-        self._ensure_open()
-        try:
-            self._conn.execute("BEGIN")
-            for c in contracts:
-                self._conn.execute(
-                    "DELETE FROM contracts WHERE symbol_name = ? AND snapshot_date = ?",
-                    [c.symbol_name, c.snapshot_date],
-                )
-                self._conn.execute(
-                    "INSERT INTO contracts ("
-                    "exch_id, underlying_symbol, sm_expiry_date, symbol_name, "
-                    "snapshot_date, instrument, strike_price, lot_size, "
-                    "sm_freeze_qty, tick_size, fetched_at, run_id"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [
-                        c.exch_id,
-                        c.underlying_symbol,
-                        c.sm_expiry_date,
-                        c.symbol_name,
-                        c.snapshot_date,
-                        str(c.instrument),
-                        c.strike_price,
-                        c.lot_size,
-                        c.sm_freeze_qty,
-                        c.tick_size,
-                        c.fetched_at,
-                        c.run_id,
-                    ],
-                )
-            self._conn.execute("COMMIT")
-        except Exception:
-            self._conn.execute("ROLLBACK")
-            raise
-        return len(contracts)
-
     # ── Coverage ledger (DEC-COVERAGE-LEDGER-001) ──────────────────
 
     def upsert_coverage(self, record: CoverageRecord) -> None:
         """Insert or replace one ``coverage_ledger`` cell — O(1), idempotent.
 
         Keyed by ``(exchange, underlying_symbol, year)`` (the table PK), so a
-        re-pull of the same cell replaces it in place. Mirrors the
-        DELETE+INSERT style of :meth:`upsert_expiries` / :meth:`upsert_contracts`
-        so the latest attempt's counts + status + error always win
+        re-pull of the same cell replaces it in place. The DELETE+INSERT style
+        means the latest attempt's counts + status + error always win
         deterministically.
         """
         self._ensure_open()
@@ -1309,182 +1143,6 @@ class InstrumentStore(metaclass=_StoreMeta):
             "ORDER BY exch_id, underlying_symbol, year"
         ).fetchall()
         return [_row_to_coverage(row) for row in rows]
-
-    # ── Phase B / Phase C readers ──────────────────────────────────
-
-    def list_expiries(
-        self,
-        *,
-        underlying_symbol: str | None = None,
-        as_of: date | None = None,
-    ) -> list[ExpiryRecord]:
-        """Return every expiry row, optionally filtered.
-
-        ``as_of`` is interpreted per-``(exch_id, underlying, sm_expiry_date)``
-        triplet: for each unique triplet, the latest
-        ``snapshot_date <= as_of`` is returned. Used by Phase C to
-        enumerate "which expiries were known as of a given ingest
-        date".
-        """
-        self._ensure_open()
-        # Order of params matters: the subquery's ``?`` comes first
-        # in the SQL, so ``as_of`` must be pushed into params BEFORE
-        # the outer WHERE's ``underlying_symbol`` param.
-        sub_params: list[Any] = []
-        outer_where: list[str] = []
-        outer_params: list[Any] = []
-        as_of_clause = ""
-        if as_of is not None:
-            as_of_clause = " AND snapshot_date <= ?"
-            sub_params.append(as_of)
-        if underlying_symbol is not None:
-            outer_where.append("e.underlying_symbol = ?")
-            outer_params.append(underlying_symbol)
-        outer_where_sql = (" WHERE " + " AND ".join(outer_where)) if outer_where else ""
-
-        # Every user-supplied value flows through DuckDB parameter
-        # binding (the ``?`` placeholders). Only ``as_of_clause`` and
-        # ``outer_where_sql`` are concatenated, and those are built
-        # from a fixed set of literal column names above, not from
-        # user input \u2014 no SQL-injection vector here.
-        base_sql = (
-            "SELECT e.exch_id, e.underlying_symbol, e.sm_expiry_date, "
-            "e.snapshot_date, e.pulled_year, e.fetched_at, e.run_id "
-            "FROM expiries e "
-            "JOIN ("
-            "    SELECT exch_id, underlying_symbol, sm_expiry_date, "
-            "    MAX(snapshot_date) AS snap "
-            "    FROM expiries "
-        )
-        sub_sql = f"    WHERE 1 = 1{as_of_clause} "
-        join_sql = (
-            "    GROUP BY exch_id, underlying_symbol, sm_expiry_date"
-            ") latest "
-            "ON e.exch_id = latest.exch_id "
-            "AND e.underlying_symbol = latest.underlying_symbol "
-            "AND e.sm_expiry_date = latest.sm_expiry_date "
-            "AND e.snapshot_date = latest.snap"
-        )
-        order_sql = " ORDER BY e.underlying_symbol, e.sm_expiry_date"
-        sql = f"{base_sql}{sub_sql}{join_sql}{outer_where_sql}{order_sql}"  # nosec B608
-        params = sub_params + outer_params
-        rows = self._conn.execute(sql, params).fetchall()
-        return [
-            ExpiryRecord(
-                exch_id=row[0],
-                underlying_symbol=row[1],
-                sm_expiry_date=row[2],
-                snapshot_date=row[3],
-                pulled_year=int(row[4]),
-                fetched_at=row[5],
-                run_id=row[6],
-            )
-            for row in rows
-        ]
-
-    def list_contracts(
-        self,
-        *,
-        underlying_symbol: str | None = None,
-        sm_expiry_date: date | None = None,
-        as_of: date | None = None,
-    ) -> list[ContractRecord]:
-        """Return every contract leg, optionally filtered.
-
-        O(log n) via the ``(underlying_symbol, sm_expiry_date, snapshot_date)``
-        composite index when both filters are supplied \u2014 exactly the
-        access pattern Phase D needs when it builds candle requests.
-        """
-        self._ensure_open()
-        # Same param-ordering discipline as ``list_expiries`` \u2014 the
-        # subquery's ``?`` must come before the outer WHERE's ``?``.
-        sub_params: list[Any] = []
-        outer_where: list[str] = []
-        outer_params: list[Any] = []
-        as_of_clause = ""
-        if as_of is not None:
-            as_of_clause = " AND snapshot_date <= ?"
-            sub_params.append(as_of)
-        if underlying_symbol is not None:
-            outer_where.append("c.underlying_symbol = ?")
-            outer_params.append(underlying_symbol)
-        if sm_expiry_date is not None:
-            outer_where.append("c.sm_expiry_date = ?")
-            outer_params.append(sm_expiry_date)
-        outer_where_sql = (" WHERE " + " AND ".join(outer_where)) if outer_where else ""
-
-        # See ``list_expiries`` \u2014 same parameter-binding + literal
-        # concat story; this is not an injection vector.
-        base_sql = (
-            "SELECT c.exch_id, c.underlying_symbol, c.sm_expiry_date, "
-            "c.symbol_name, c.snapshot_date, c.instrument, "
-            "c.strike_price, c.lot_size, c.sm_freeze_qty, c.tick_size, "
-            "c.fetched_at, c.run_id "
-            "FROM contracts c "
-            "JOIN ("
-            "    SELECT symbol_name, MAX(snapshot_date) AS snap "
-            "    FROM contracts "
-        )
-        sub_sql = f"    WHERE 1 = 1{as_of_clause} "
-        join_sql = (
-            "    GROUP BY symbol_name"
-            ") latest "
-            "ON c.symbol_name = latest.symbol_name "
-            "AND c.snapshot_date = latest.snap"
-        )
-        order_sql = " ORDER BY c.symbol_name"
-        sql = f"{base_sql}{sub_sql}{join_sql}{outer_where_sql}{order_sql}"  # nosec B608
-        params = sub_params + outer_params
-        rows = self._conn.execute(sql, params).fetchall()
-        return [
-            ContractRecord(
-                exch_id=row[0],
-                underlying_symbol=row[1],
-                sm_expiry_date=row[2],
-                symbol_name=row[3],
-                snapshot_date=row[4],
-                instrument=InstrumentType(row[5]),
-                strike_price=(Decimal(str(row[6])) if row[6] is not None else None),
-                lot_size=int(row[7]),
-                sm_freeze_qty=int(row[8]) if row[8] is not None else None,
-                tick_size=Decimal(str(row[9])),
-                fetched_at=row[10],
-                run_id=row[11],
-            )
-            for row in rows
-        ]
-
-    def count_expiries(self, *, as_of: date | None = None) -> int:
-        """Return the total number of distinct expiries known as of *as_of*."""
-        self._ensure_open()
-        if as_of is None:
-            row = self._conn.execute(
-                "SELECT COUNT(*) FROM ("
-                "  SELECT DISTINCT exch_id, underlying_symbol, sm_expiry_date "
-                "  FROM expiries"
-                ")"
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT COUNT(*) FROM ("
-                "  SELECT DISTINCT exch_id, underlying_symbol, sm_expiry_date "
-                "  FROM expiries WHERE snapshot_date <= ?"
-                ")",
-                [as_of],
-            ).fetchone()
-        return int(row[0]) if row else 0
-
-    def count_contracts(self, *, as_of: date | None = None) -> int:
-        """Return the total number of distinct contracts known as of *as_of*."""
-        self._ensure_open()
-        if as_of is None:
-            row = self._conn.execute("SELECT COUNT(DISTINCT symbol_name) FROM contracts").fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT COUNT(DISTINCT symbol_name) FROM contracts WHERE snapshot_date <= ?",
-                [as_of],
-            ).fetchone()
-        return int(row[0]) if row else 0
 
     # ── Point reads ────────────────────────────────────────────────
 
@@ -1556,9 +1214,8 @@ class InstrumentStore(metaclass=_StoreMeta):
             extras_params.append(underlying_symbol)
         extras_sql = (" AND " + " AND ".join(extras)) if extras else ""
 
-        # Same story as ``list_expiries`` / ``list_contracts``
-        # \u2014 every value is parameter-bound; only literal clause
-        # strings from the static ``extras`` list are concatenated.
+        # Every value is parameter-bound; only literal clause strings from the
+        # static ``extras`` list are concatenated (no SQL-injection vector).
         base_sql = (
             "SELECT i.* FROM instruments i "
             "JOIN ("
@@ -2221,9 +1878,7 @@ def _row_to_instrument_run(row: Sequence[Any]) -> InstrumentRun:
 __all__ = [
     "DEFAULT_DB_NAME",
     "SCHEMA_VERSION",
-    "ContractRecord",
     "CoverageRecord",
-    "ExpiryRecord",
     "InstrumentRun",
     "InstrumentSnapshot",
     "InstrumentStore",

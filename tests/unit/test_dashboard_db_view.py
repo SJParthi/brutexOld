@@ -127,13 +127,12 @@ def test_table_summary_empty_store_all_zero(tmp_path: Path) -> None:
     store = _open_empty(tmp_path)
     summary = table_summary(store.connection)
     assert [row["table"] for row in summary] == list(KNOWN_TABLES)
-    # schema_meta has a single seeded schema_version row; the other four
-    # are empty. We assert the data tables are zero and the shape is right.
+    # schema_meta has a single seeded schema_version row; the others are
+    # empty. We assert the data tables are zero and the shape is right.
+    # expiries/contracts were dropped in DEC-EXPIRED-OPTIONS-TABLE-001.
     by_name = {row["table"]: row["row_count"] for row in summary}
     assert by_name["instruments"] == 0
     assert by_name["instrument_runs"] == 0
-    assert by_name["expiries"] == 0
-    assert by_name["contracts"] == 0
     assert by_name["schema_meta"] >= 1
     for row in summary:
         assert isinstance(row["row_count"], int)
@@ -150,9 +149,9 @@ def test_table_summary_reflects_inserts(tmp_path: Path) -> None:
 def test_table_summary_tolerates_missing_table(tmp_path: Path) -> None:
     """A dropped table is reported as count 0, not an exception."""
     store = _open_empty(tmp_path)
-    store.connection.execute("DROP TABLE contracts")
+    store.connection.execute("DROP TABLE instrument_runs")
     by_name = {row["table"]: row["row_count"] for row in table_summary(store.connection)}
-    assert by_name["contracts"] == 0
+    assert by_name["instrument_runs"] == 0
     # the other tables still report normally
     assert by_name["schema_meta"] >= 1
 
@@ -260,12 +259,12 @@ def test_sample_rows_injection_rejected_not_executed(tmp_path: Path) -> None:
     """An injection-y table name is rejected; the real table survives."""
     store = _open_empty(tmp_path)
     _seed(store)
-    payload = "instruments; DROP TABLE contracts"
+    payload = "instruments; DROP TABLE instrument_runs"
     with pytest.raises(ValueError, match="unknown table"):
         sample_rows(store.connection, payload, limit=10)
-    # contracts table must NOT have been dropped — the payload never ran
+    # instrument_runs table must NOT have been dropped — the payload never ran
     by_name = {row["table"]: row["row_count"] for row in table_summary(store.connection)}
-    assert "contracts" in by_name
+    assert "instrument_runs" in by_name
     # and instruments is still intact
     assert by_name["instruments"] == 2
 

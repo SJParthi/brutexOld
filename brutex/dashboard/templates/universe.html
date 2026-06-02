@@ -480,54 +480,47 @@ async function selectInstrument(i) {
     const r = await fetch('/api/v1/expiries?underlying=' + encodeURIComponent(i.symbol));
     const body = await r.json();
     const expiries = (body.expiries || []);
-    if (!expiries.length) { ex.innerHTML = '<div class="empty">no F&O expiries in the lake yet</div>'; return; }
+    if (!expiries.length) { ex.innerHTML = '<div class="empty">no expired-option series in the lake yet</div>'; return; }
     ex.innerHTML = "";
+    /* DEC-EXPIRED-OPTIONS-TABLE-001: an "expiry" is now a distinct
+       (flag, code) series in the expired-options lake, not a calendar date. */
     expiries.forEach((e, ix) => {
       const p = document.createElement("span");
       p.className = "pill" + (ix === 0 ? " near" : "");
       p.style.animationDelay = (ix * 0.05) + "s";
-      p.textContent = e.expiry_date;
-      p.onclick = () => selectExpiry(i.symbol, e.expiry_date, p);
+      p.textContent = e.expiry_flag + " " + e.expiry_code;
+      p.onclick = () => selectExpiry(i.symbol, e.expiry_code, p);
       ex.appendChild(p);
     });
   } catch (e) { ex.innerHTML = '<div class="empty">error loading expiries</div>'; }
 }
 
-function selectExpiry(symbol, expiry, el) {
-  selExp = expiry;
+function selectExpiry(symbol, expiryCode, el) {
+  selExp = expiryCode;
   document.querySelectorAll('#expiries .pill').forEach(x => x.classList.remove('sel'));
   el.classList.add('sel');
-  renderContracts(symbol, expiry);
+  renderContracts(symbol, expiryCode);
 }
 
-async function renderContracts(symbol, expiry) {
+async function renderContracts(symbol, expiryCode) {
   const c = document.getElementById("contracts");
   c.innerHTML = '<div class="empty">loading…</div>';
   try {
     const r = await fetch('/api/v1/contracts?underlying=' + encodeURIComponent(symbol)
-      + '&expiry=' + encodeURIComponent(expiry));
+      + '&expiry_code=' + encodeURIComponent(expiryCode));
     const body = await r.json();
     const contracts = body.contracts || [];
-    if (!contracts.length) { c.innerHTML = '<div class="empty">no contracts in the lake for this expiry</div>'; return; }
+    if (!contracts.length) { c.innerHTML = '<div class="empty">no option series in the lake for this expiry</div>'; return; }
     c.innerHTML = "";
-    // The future leg (if any) for this expiry → its own clickable pull row.
-    const fut = contracts.find(ct => ct.instrument_type === "FUT");
-    if (fut && fut.contract_symbol) {
-      const fr = document.createElement("div");
-      fr.className = "futrow";
-      fr.innerHTML = `<span class="ftag">FUT</span>`
-        + `<span class="fsym">${esc(fut.contract_symbol)}</span>`
-        + `<span class="cc" style="margin-left:auto;font-size:11px;color:var(--muted)">⤓ pull this future</span>`;
-      fr.onclick = () => runPull(fut.contract_symbol, `${fut.contract_symbol} (future)`);
-      c.appendChild(fr);
-    }
-    // Group options by strike → {ce, pe} contract symbols.
+    /* DEC-EXPIRED-OPTIONS-TABLE-001: the chain is the distinct
+       (strike, side) series present in the expired-options lake — grouped by
+       the RESOLVED strike, with the requested strike_offset as a hint. */
     const byStrike = {};
     contracts.forEach(ct => {
-      const s = ct.strike_price || "—";
-      byStrike[s] = byStrike[s] || {};
-      if (ct.instrument_type === "CE") byStrike[s].ce = ct.contract_symbol;
-      else if (ct.instrument_type === "PE") byStrike[s].pe = ct.contract_symbol;
+      const s = (ct.strike != null) ? ct.strike : "—";
+      byStrike[s] = byStrike[s] || {offset: ct.strike_offset};
+      if (ct.side === "CE") byStrike[s].ce = true;
+      else if (ct.side === "PE") byStrike[s].pe = true;
     });
     const strikes = Object.keys(byStrike).sort((a, b) => parseFloat(a) - parseFloat(b));
     const ladder = document.createElement("div");
@@ -537,7 +530,7 @@ async function renderContracts(symbol, expiry) {
       const row = byStrike[s];
       ladder.appendChild(optionCell("ce", row.ce, ix));
       const st = document.createElement("div");
-      st.className = "strike"; st.textContent = s;
+      st.className = "strike"; st.textContent = s + (row.offset ? " (" + row.offset + ")" : "");
       ladder.appendChild(st);
       ladder.appendChild(optionCell("pe", row.pe, ix));
     });
@@ -545,15 +538,14 @@ async function renderContracts(symbol, expiry) {
   } catch (e) { c.innerHTML = '<div class="empty">error loading contracts</div>'; }
 }
 
-/* Build one CE/PE option-chain cell; clickable (pulls THAT contract) when present. */
-function optionCell(side, contractSymbol, ix) {
+/* Build one CE/PE option-chain cell; lit when that side's series is in the lake. */
+function optionCell(side, present, ix) {
   const cell = document.createElement("div");
-  cell.className = "cell " + side + (contractSymbol ? " live" : "");
+  cell.className = "cell " + side + (present ? " live" : "");
   cell.style.animationDelay = (ix * 0.02) + "s";
-  cell.textContent = contractSymbol ? side.toUpperCase() : "—";
-  if (contractSymbol) {
-    cell.title = "⤓ pull " + contractSymbol;
-    cell.onclick = () => runPull(contractSymbol, `${contractSymbol} (${side.toUpperCase()})`);
+  cell.textContent = present ? side.toUpperCase() : "—";
+  if (present) {
+    cell.title = side.toUpperCase() + " series stored in the expired-options lake";
   }
   return cell;
 }

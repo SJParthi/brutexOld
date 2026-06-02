@@ -100,6 +100,8 @@ class OptionUnderlying:
     """One underlying to fan out over (its id, segment, instrument, width)."""
 
     security_id: str
+    exch_id: str  # ``NSE`` / ``BSE`` — promoted to the expired-options table
+    underlying_symbol: str  # engine symbol (e.g. ``NIFTY``) — table column
     exchange_segment: str
     instrument: str  # ``OPTIDX`` (index) / ``OPTSTK`` (stock)
     strike_offsets: int
@@ -227,6 +229,8 @@ def run_dhan_options_ingest(
                                 client,
                                 sink,
                                 security_id=underlying.security_id,
+                                exch_id=underlying.exch_id,
+                                underlying_symbol=underlying.underlying_symbol,
                                 exchange_segment=underlying.exchange_segment,
                                 instrument=underlying.instrument,
                                 expiry_flag=expiry_flag,

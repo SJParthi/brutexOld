@@ -121,6 +121,8 @@ def instrument_to_option_underlying(instrument: Instrument) -> OptionUnderlying:
         )
     return OptionUnderlying(
         security_id=numeric_id,
+        exch_id=instrument.exch_id.value,
+        underlying_symbol=instrument.symbol_name,
         exchange_segment=f"{instrument.exch_id.value}_FNO",
         instrument=instrument_name,
         strike_offsets=offsets,

@@ -112,6 +112,10 @@ class TestInstrumentToOptionUnderlying:
         assert u.instrument == "OPTIDX"
         assert u.exchange_segment == "NSE_FNO"
         assert u.strike_offsets == 10
+        # The addressing fields promoted to the expired-options table
+        # (DEC-EXPIRED-OPTIONS-TABLE-001) carry through from the instrument.
+        assert u.exch_id == "NSE"
+        assert u.underlying_symbol == inst.symbol_name
 
     def test_bse_index_maps_to_bse_fno(self) -> None:
         u = instrument_to_option_underlying(_index(symbol="51", exchange=Exchange.BSE))
