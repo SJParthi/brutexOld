@@ -1254,7 +1254,7 @@ def test_prev_trading_close_maps_each_day_to_prior_close() -> None:
 
 # ── _spot_derived_rows (every branch) ────────────────────────────────
 
-_ALL = list(CANDLE_COLUMNS)  # timestamp, open, high, low, close, volume, open_interest
+_ALL: list[str] = list(CANDLE_COLUMNS)  # timestamp, open, high, low, close, volume, open_interest
 _PREV = {date(2024, 3, 4): Decimal("100")}
 
 
