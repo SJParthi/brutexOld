@@ -100,3 +100,31 @@ def test_merge_step_depends_on_the_mergeability_gate() -> None:
     assert "mergeable-check.outputs.safe == 'true'" in guard, (
         "the squash-merge step is not gated on the mergeability check — G1 fix is bypassable"
     )
+
+
+def test_auto_merge_accepts_push_event_ci_completions() -> None:
+    """DEC-AUTOMERGE-RACE-FIX-001: a branch with an open PR often has two
+    concurrent CI runs (push + pull_request). The trigger guard must accept
+    a ``push``-event CI completion, else a green PR can sit un-merged (the
+    PR #304 failure)."""
+    jobs = _load_jobs(AUTO_MERGE_YML)
+    guard = str(jobs["auto-merge"]["if"])
+    assert "workflow_run.event == 'push'" in guard, (
+        "auto-merge no longer accepts push-event CI completions — concurrent "
+        "CI runs can leave a green PR stranded (regression of the race fix)"
+    )
+
+
+def test_ci_check_resolves_the_pr_current_head() -> None:
+    """DEC-AUTOMERGE-RACE-FIX-001: the ci-ok gate must re-resolve the PR's
+    CURRENT head (via ``gh pr view ... headRefOid``) instead of trusting the
+    triggering event's head_sha, so it checks the commit that will be
+    merged even with concurrent/stale CI runs."""
+    jobs = _load_jobs(AUTO_MERGE_YML)
+    steps = jobs["auto-merge"]["steps"]
+    ci_step = next(s for s in steps if isinstance(s, dict) and str(s.get("id", "")) == "ci-check")
+    run = str(ci_step.get("run", ""))
+    assert "gh pr view" in run and "headRefOid" in run, (
+        "ci-check no longer re-resolves the PR's current head — it can gate "
+        "on a stale/mismatched SHA (regression of the race fix)"
+    )
