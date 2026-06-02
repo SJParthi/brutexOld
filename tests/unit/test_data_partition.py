@@ -67,6 +67,22 @@ class TestBuildPartitionPath:
         )
         assert p.name == "03.parquet"
 
+    def test_accepts_index_segment(self, tmp_path: Path) -> None:
+        # DEC-UNDERLYING-LEG-ECONOMICS-001 / DEC-INDEX-SEGMENT-PK-FIX-001 (#406):
+        # index instruments carry segment='INDEX', so a NIFTY/BANKNIFTY spot
+        # candle pull routes 'INDEX' through the partition path — it must be
+        # accepted (it crashed every index spot pull before this).
+        p = build_partition_path(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            year=2024,
+            month=1,
+        )
+        assert "INDEX" in p.parts
+
     def test_uses_bar_dir_name_constant(self, tmp_path: Path) -> None:
         p = build_partition_path(
             lake_root=tmp_path,
