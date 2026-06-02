@@ -1,6 +1,6 @@
 """Money formatting — the single source of truth for rupee display.
 
-Track 1 stores every price as int64 **paisa** (CLAUDE.md §6: Groww emits
+Track 1 stores every price as int64 **paisa** (CLAUDE.md §6: Dhan emits
 prices as rupee floats; the adapter multiplies by 100 at the parse boundary to
 keep an exact integer). This module is the only place that converts paisa back
 to a human-facing rupee value, and it enforces the operator rule (2026-05-29,

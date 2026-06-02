@@ -8,7 +8,7 @@
 #
 # 1. Verifies Python 3.12 is available (CLAUDE.md §4 mandate).
 # 2. Creates a `.venv/` if missing.
-# 3. Installs `brutex[dev,data,groww]` editable from the working tree.
+# 3. Installs `brutex[dev,data,ui]` editable from the working tree.
 # 4. Installs the Rust toolchain via rustup if `cargo` is not on PATH.
 # 5. Builds + installs the `fno_math` Rust extension via maturin.
 # 6. Verifies `brutex doctor` exits 0 (audit chain + runtime + replay checks).
@@ -54,10 +54,10 @@ fi
 # DEC-CLONE-RUN-002: include the `ui` extra so the dashboard (fastapi +
 # uvicorn) runs immediately after a bootstrap — it was previously omitted,
 # so `python -m brutex dashboard` failed for missing fastapi/uvicorn.
-_step "Step 3/6 — install brutex[dev,data,ui,groww] editable"
+_step "Step 3/6 — install brutex[dev,data,ui] editable"
 pip install -q --upgrade pip
-if pip install -q -e ".[dev,data,ui,groww]" 2>&1 | tail -2; then
-  _ok "dev + data + ui + groww extras installed"
+if pip install -q -e ".[dev,data,ui]" 2>&1 | tail -2; then
+  _ok "dev + data + ui extras installed"
 else
   _err "pip install failed — see output above"
   exit 1
