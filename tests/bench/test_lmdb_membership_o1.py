@@ -16,6 +16,8 @@ from pathlib import Path
 
 from brutex.data.lmdb_membership import LmdbMembership
 
+from tests.bench._o1_tiers import ratio_ceiling
+
 _SMALL = 1_000
 _LARGE = 10_000
 
@@ -59,7 +61,7 @@ class TestContainsIsO1:
         t_small = _time(tmp_path / "rs.lmdb", _SMALL)
         t_large = _time(tmp_path / "rl.lmdb", _LARGE)
         ratio = t_large / max(t_small, 1.0)
-        assert ratio < 5.0, (
+        assert ratio < ratio_ceiling(5.0), (
             f"LmdbMembership.__contains__ ratio {ratio:.2f}× (10k vs 1k) exceeds "
             f"5× — membership may have regressed to a scan. "
             f"t_1k={t_small:.0f}ns, t_10k={t_large:.0f}ns."

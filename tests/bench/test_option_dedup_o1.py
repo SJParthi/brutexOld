@@ -20,6 +20,8 @@ import time
 
 from brutex.data.option_dedup import OptionDedupIndex, option_bar_key
 
+from tests.bench._o1_tiers import ratio_ceiling
+
 _SMALL = 1_000
 _LARGE = 100_000
 
@@ -63,7 +65,7 @@ class TestSeenIsO1:
         t_small = _time_seen(_SMALL)
         t_large = _time_seen(_LARGE)
         ratio = t_large / max(t_small, 1.0)
-        assert ratio < 5.0, (
+        assert ratio < ratio_ceiling(5.0), (
             f"OptionDedupIndex.seen latency ratio {ratio:.2f}× (100k vs 1k) "
             f"exceeds 5× — dedup may have regressed to a scan. "
             f"t_1k={t_small:.0f}ns, t_100k={t_large:.0f}ns."
