@@ -74,11 +74,28 @@ was doing the work. This is the *only* test that catches that failure mode.
 
 ---
 
-## What's left after this PR
+## The cascade that chains all nine (DEC-STAT-CASCADE-001)
 
-All nine **filter engines** now exist as standalone, tested, pure functions.
-The remaining Stage-4 work is the **cascade runner** that chains them
-(DSR → CPCV → SPA → PBO → RW → WFO → Lockbox → Monte-Carlo) over real
-per-(instrument, timeframe) leaderboards, and wiring their outputs into the
-result-row schema. That's a separate, separately-tracked step — stated plainly
-so nothing here is over-claimed.
+The nine engines are now tied into one end-to-end **gauntlet** by
+`brutex/metrics/cascade.py` (`run_stage4_cascade`): hard rejection gates →
+the nine filters in spec order **with short-circuit** (fail any → out, and we
+record *which* filter + the stat) → composite ranking of the survivors. A
+candidate must clear **all nine** to survive. It's pure + deterministic
+(one seed), so the same pool always yields the same ranked survivor set.
+
+| Order | Step | Level |
+|---|---|---|
+| 0 | Hard rejection gates (5 scalar gates) | per-candidate |
+| 2-3 | Deflated Sharpe → CPCV | per-candidate |
+| 4-6 | Reality Check / SPA → PBO → Romano-Wolf | **pool** (across survivors) |
+| 7-9 | Walk-Forward ×3 → Lockbox → Monte-Carlo | per-candidate |
+| — | Composite ranking → top survivors | per-candidate |
+
+## What's left
+
+The cascade *orchestration* is done. Still deferred (stated plainly, no
+over-claim): the **production adapter** that feeds it real candidates — it
+re-runs the Stage-2 trade-sim on the top leaderboard rows + reads the lake to
+build each candidate's series (it needs real market bars) — and wiring the
+filter outputs into the per-result `ResultMetrics` columns. Those are
+separate, separately-tracked steps.

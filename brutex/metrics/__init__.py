@@ -60,19 +60,31 @@ here as pure, deterministic functions:
   (:mod:`brutex.metrics.monte_carlo`, :func:`monte_carlo_permutation_test` —
   relocate the entries, re-run the injected exit logic, one-sided permutation
   p-value, spec filter #9) — ``DEC-STAT-LOCKBOX-MC-001``.
+* the **Stage-4 cascade orchestrator** (:mod:`brutex.metrics.cascade`,
+  :func:`run_stage4_cascade`) — chains the hard rejection gates (spec lines
+  589-600), the nine filters in spec order with short-circuit, and the
+  composite ranking (spec lines 602-615) over an injected per-candidate input;
+  returns the ranked survivor set + per-candidate verdicts — ``DEC-STAT-CASCADE-001``.
 
-**Still DEFERRED (honest envelope, Golden Rule #10):** the wiring of the
+**Still DEFERRED (honest envelope, Golden Rule #10):** wiring the
 ``cpcv_pass_rate`` / ``wfo_pass_rate`` / ``lockbox_sharpe`` / ``lockbox_mdd_pct``
-/ SPA / Romano-Wolf / Monte-Carlo results into the result-row schema (spec
-lines 586-587) + the end-to-end Stage-4 filter cascade that chains all nine
-filters. The composite ranking score (spec lines 602-615) and the hard
-rejection gates (spec lines 589-600) are likewise out of scope here. All nine
-Stage-4 *filter engines* now exist as standalone pure functions; only the
-cascade *wiring* remains.
+results into the per-result ``ResultMetrics`` columns (spec lines 586-587), and
+the production adapter that builds the cascade's ``CandidateInput``\\s by
+re-running the Stage-2 trade-sim + reading the lake (it needs real bars). The
+nine filter engines + the orchestrator that chains them now all exist as pure
+functions.
 """
 
 from __future__ import annotations
 
+from brutex.metrics.cascade import (
+    CandidateInput,
+    CandidateVerdict,
+    CascadeConfig,
+    CascadeReport,
+    FilterStage,
+    run_stage4_cascade,
+)
 from brutex.metrics.compute import (
     Moments,
     ResultMetrics,
@@ -123,9 +135,14 @@ __all__ = [
     "BootstrapConfig",
     "BootstrapMethod",
     "CPCVSplit",
+    "CandidateInput",
+    "CandidateVerdict",
+    "CascadeConfig",
+    "CascadeReport",
     "ClosedTrade",
     "DeflatedSharpeResult",
     "EquityCurve",
+    "FilterStage",
     "LockboxResult",
     "LockboxStatus",
     "Moments",
@@ -151,6 +168,7 @@ __all__ = [
     "probabilistic_sharpe_ratio",
     "reality_check",
     "romano_wolf",
+    "run_stage4_cascade",
     "sharpe_from_moments",
     "sharpe_of_returns",
     "walk_forward_splits",
