@@ -1014,6 +1014,7 @@ def build_app(
         years = _coverage_years()
 
         def _build() -> dict[str, Any]:
+            """Build the coverage payload off the event loop (threadpool worker)."""
             # Runs on a threadpool worker so the indexed coverage read + the
             # candidates scan never block the event loop, and the store lock the
             # synchronized methods take is acquired+released on this thread.
@@ -1062,6 +1063,7 @@ def build_app(
         lake = lake_root.parent
 
         def _recompute() -> list[dict[str, Any]]:
+            """Recompute the spot-dataset summary (cache-miss / dirty path only)."""
             # The O(files) full-lake aggregate — runs ONLY on a cache miss / a
             # dirty read past the 2 s TTL floor, on a threadpool worker, and
             # builds + uses store.connection here so the store RLock stays on one
@@ -1096,6 +1098,7 @@ def build_app(
         lake = lake_root.parent
 
         def _recompute() -> list[dict[str, Any]]:
+            """Recompute the option-dataset summary (cache-miss / dirty path only)."""
             # The O(files) full-lake aggregate — runs ONLY on a cache miss / a
             # dirty read past the 2 s TTL floor, on a threadpool worker, building
             # + using store.connection here so the store RLock stays on one
@@ -1156,6 +1159,7 @@ def build_app(
         lake_root = getattr(store, "path", None)
 
         def _build_rows(lake: Path) -> list[Any]:
+            """Build the pre-open report rows off the event loop (threadpool worker)."""
             # Offloaded: the dataset discovery (filesystem walk) + the per-symbol
             # DuckDB aggregate run on a threadpool worker, building store.connection
             # here so the store RLock stays on this thread (DEC-DASHBOARD-FASTREAD-001).
