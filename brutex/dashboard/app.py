@@ -477,6 +477,7 @@ def build_app(
     state: DashboardState,
     *,
     instrument_store: Any = None,
+    summary_cache: SummaryCache | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -496,6 +497,13 @@ def build_app(
         pulled. When ``None`` (the default), those endpoints return
         503 and the HTML section stays hidden \u2014 the pipeline
         progress cards still work.
+    summary_cache
+        Optional :class:`~brutex.dashboard.summary_cache.SummaryCache`
+        backing the O(1) coverage polls (DEC-DASHBOARD-FASTREAD-001).
+        Injected so a test can disable the 2 s TTL floor
+        (``SummaryCache(ttl_floor_s=0.0)``) and assert the write-path
+        invalidation deterministically; ``None`` (the default) builds a
+        fresh production cache.
 
     Returns
     -------
@@ -528,7 +536,7 @@ def build_app(
     # `store`, never a pre-built conn). The summary cache + incremental coverage
     # counters are owned by this app instance (no module-global mutable state —
     # CLAUDE.md §4) and injected into the routes / the background pull job below.
-    _summary_cache = SummaryCache()
+    _summary_cache = summary_cache if summary_cache is not None else SummaryCache()
 
     @app.get("/api/v1/state")
     async def api_state() -> JSONResponse:
@@ -856,6 +864,15 @@ def build_app(
             failed=report.total_failed,
             no_data=report.total_no_data,
         )
+        # Invalidate the coverage SummaryCache so the next /coverage poll reflects
+        # the just-written bars. This single-symbol pull runs SYNCHRONOUSLY here
+        # (not via the background _pull_job — the ONLY other writer that marks the
+        # cache dirty), so without this a one-off pull (e.g. pulling just SENSEX)
+        # leaves /coverage serving the stale cold-start snapshot: the "coverage
+        # shows 0 series / 0 bars after I pulled" bug
+        # (DEC-DASHBOARD-COVERAGE-INVALIDATE-001). mark_dirty is O(1); the cache's
+        # 2 s TTL floor still bounds how often the next read actually rescans.
+        _summary_cache.mark_dirty()
         return JSONResponse(report.to_dict())
 
     def _select_bulk_targets(kind: str) -> list[Instrument]:
