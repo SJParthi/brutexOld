@@ -12,7 +12,7 @@ tolerate a last-ULP quantile difference across CPython patch releases).
 
 Regenerate the constants only on a deliberate formula change and record it
 in the corresponding ``docs/MIGRATION.md`` entry. DEC-STAT-DSR-PBO-001
-(entry #428).
+(entry #430).
 """
 
 from __future__ import annotations
