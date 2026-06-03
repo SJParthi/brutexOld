@@ -185,6 +185,16 @@ _IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
 #: ``00:00:00`` suffix) in the candle viewer (DEC-DB-CANDLE-DERIVED-001).
 _DAILY_INTERVAL: Final[str] = "1day"
 
+#: The 1-minute base partition — the source of the previous-day close BASELINE
+#: for the derived %-change / gap columns. The engine is 1-minute-based, so the
+#: baseline is the prior trading day's **last 1-minute close** (the 15:29 IST
+#: bar), NOT the 1-day official close — this keeps ``change_pct`` / ``open_gap_pct``
+#: internally consistent with the 1-minute feed the engine actually sweeps
+#: (DEC-SPOT-PREVCLOSE-1MIN-001; operator 2026-06-03). The 1-day official close
+#: (= the NSE settlement / "previous close") is reserved for the separate NSE
+#: pre-open Excel report, never the engine store.
+_INTRADAY_BASE_INTERVAL: Final[str] = "1minute"
+
 #: 09:15:00 IST — the regular NSE/BSE session open. The overnight ``open_gap_pct``
 #: derived column (DEC-DB-CANDLE-DERIVED-001) is computed ONLY for the bar at
 #: this instant; mirrors ``brutex.data.spot_features._SESSION_OPEN`` (§11 COMMON).
@@ -193,7 +203,8 @@ _SESSION_OPEN_IST: Final[time] = time(9, 15)
 #: The two server-computed derived columns appended to every spot candle page
 #: (DEC-DB-CANDLE-DERIVED-001): previous-day % change + the 09:15 overnight gap.
 #: They are NOT real Parquet columns (never selectable in the column picker);
-#: the viewer computes them per bar from the symbol's 1d daily closes.
+#: the viewer computes them per bar from the symbol's prior-day last 1-minute
+#: close (DEC-SPOT-PREVCLOSE-1MIN-001).
 SPOT_DERIVED_COLUMNS: Final = ("change_pct", "open_gap_pct")
 
 
@@ -1021,11 +1032,14 @@ def query_candles(
     # DATE-ONLY for 1day); every other cell goes through the generic JSON
     # coercion (shared helper).
     rendered = _render_candle_rows(raw_rows, out_columns, interval)
-    # Read the symbol's 1d daily closes once → previous-trading-day close map
-    # (O(1) per-bar lookup, CLAUDE.md §5), then join the two derived %-change
-    # columns per bar (full precision; 2dp is display-only in db.html).
+    # Read the symbol's last 1-minute close per day once → previous-trading-day
+    # close map (O(1) per-bar lookup, CLAUDE.md §5), then join the two derived
+    # %-change columns per bar (full precision; 2dp is display-only in db.html).
+    # Baseline = prior day's last 1-MINUTE close (DEC-SPOT-PREVCLOSE-1MIN-001).
     prev_close = _prev_trading_close(
-        _daily_close_by_date(conn, lake_root, exchange=exchange, segment=segment, symbol=symbol)
+        _intraday_last_close_by_date(
+            conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+        )
     )
     derived = _spot_derived_rows(raw_rows, out_columns, prev_close)
     rows = [
@@ -1117,45 +1131,56 @@ def _bar_ist_time(ts: datetime) -> time:
     return (ts.astimezone(_IST) if ts.tzinfo is not None else ts).time()
 
 
-def _daily_close_by_date(
+def _intraday_last_close_by_date(
     conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
 ) -> dict[date, Decimal]:
-    """Read the symbol's 1d daily closes ONCE into a ``{ist_date: close}`` dict.
+    """Read the symbol's LAST 1-minute close per day into a ``{ist_date: close}`` dict.
 
-    Reads ``<lake>/bars/<exch>/<seg>/<symbol>/1day/**/*.parquet`` via a bound
+    The %-change / gap baseline is the prior trading day's **last 1-minute close**
+    (the 15:29 IST bar), NOT the 1-day official close — the engine is 1-minute-based,
+    so anchoring on the 1-minute feed keeps ``change_pct`` / ``open_gap_pct``
+    internally consistent with the bars actually swept (DEC-SPOT-PREVCLOSE-1MIN-001;
+    operator 2026-06-03).
+
+    Reads ``<lake>/bars/<exch>/<seg>/<symbol>/1minute/**/*.parquet`` via a bound
     DuckDB ``read_parquet`` glob (the coordinates are already validated by
-    :func:`_validate_candle_coords` in the caller — no free user text). Keyed by
-    the bar's IST date (:func:`_bar_ist_date`). Returns ``{}`` when the symbol
-    has no daily partition yet, so the derived columns degrade to blank rather
-    than raising (DEC-DB-CANDLE-DERIVED-001). One read per page → O(1) per-bar
-    lookup downstream (CLAUDE.md §5).
+    :func:`_validate_candle_coords` in the caller — no free user text) and
+    aggregates with ``arg_max(close, timestamp)`` grouped by the bar DATE — ONE
+    columnar pass returns ~one row per trading day, so the per-bar lookup
+    downstream is O(1) (CLAUDE.md §5). Session-filtered intraday bars (09:15–15:29
+    IST) never cross the IST/UTC date boundary, so ``CAST(timestamp AS DATE)`` IS
+    the IST trading date (matches :func:`_bar_ist_date` used on the viewed bars).
+    Returns ``{}`` when the symbol has no 1-minute partition yet, so the derived
+    columns degrade to blank rather than raising (DEC-DB-CANDLE-DERIVED-001).
     """
-    base = lake_root / "bars" / exchange / segment / symbol / _DAILY_INTERVAL
+    base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         return {}
     glob = base.as_posix() + "/**/*.parquet"
     # glob is built from validated coordinates (no free user text); the path is
-    # given to read_parquet as a bound parameter.
+    # given to read_parquet as a bound parameter. arg_max(close, timestamp) is
+    # the close of the day's LAST bar (the 15:29 IST close).
     cursor = conn.execute(
-        'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true)',
+        'SELECT CAST("timestamp" AS DATE) AS d, arg_max(close, "timestamp") AS last_close '
+        "FROM read_parquet(?, union_by_name=true) GROUP BY d",
         [glob],
     )
-    return {_bar_ist_date(ts): _to_decimal(close) for ts, close in cursor.fetchall()}
+    return {day: _to_decimal(last_close) for day, last_close in cursor.fetchall()}
 
 
-def _prev_trading_close(daily: dict[date, Decimal]) -> dict[date, Decimal]:
-    """Map each trading date to the PREVIOUS trading day's 1d close.
+def _prev_trading_close(last_close: dict[date, Decimal]) -> dict[date, Decimal]:
+    """Map each trading date to the PREVIOUS trading day's last 1-minute close.
 
-    Built once from the ``{date: close}`` daily dict by walking the dates in
+    Built once from the ``{date: last_1min_close}`` dict by walking the dates in
     sorted order, so a per-bar lookup is O(1) (DEC-DB-CANDLE-DERIVED-001). The
-    earliest daily date has no predecessor and is therefore absent from the
-    result (its bars get a blank %-change).
+    earliest date has no predecessor and is therefore absent from the result
+    (its bars get a blank %-change).
     """
     out: dict[date, Decimal] = {}
     prev: date | None = None
-    for day in sorted(daily):
+    for day in sorted(last_close):
         if prev is not None:
-            out[day] = daily[prev]
+            out[day] = last_close[prev]
         prev = day
     return out
 
@@ -1167,13 +1192,14 @@ def _spot_derived_rows(
 ) -> list[tuple[Any, Any]]:
     """Compute the per-bar ``(change_pct, open_gap_pct)`` derived pair.
 
-    For each bar (DEC-DB-CANDLE-DERIVED-001):
+    For each bar (DEC-DB-CANDLE-DERIVED-001), baselined on the prior trading
+    day's **last 1-minute close** (DEC-SPOT-PREVCLOSE-1MIN-001):
 
-    * ``change_pct = (close − prev_day_1d_close) / prev_day_1d_close × 100`` —
-      the previous trading day's 1d close (O(1) lookup in *prev_close_by_date*);
-    * ``open_gap_pct = (open − prev_day_1d_close) / prev_day_1d_close × 100`` —
-      the overnight gap, computed ONLY for the day's 09:15:00 IST market-open
-      bar; ``None`` (blank) on every other bar.
+    * ``change_pct = (close − prev_close) / prev_close × 100`` — the previous
+      trading day's last 1-minute close (O(1) lookup in *prev_close_by_date*);
+    * ``open_gap_pct = (open − prev_close) / prev_close × 100`` — the overnight
+      gap, computed ONLY for the day's 09:15:00 IST market-open bar; ``None``
+      (blank) on every other bar.
 
     Both reuse the COMMON :func:`brutex.data.spot_features.pct_change` primitive
     (CLAUDE.md §11) and stay full precision — statistical metrics, never
