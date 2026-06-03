@@ -149,9 +149,21 @@ _OPTION_SEGMENT_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 #: A candle symbol must match this allowlist before it is ever joined into
 #: a lake path / ``read_parquet`` glob — defence-in-depth against path
 #: traversal even though discovered symbols come from our own directory
-#: scan. Dhan symbols are alnum + ``-`` + ``_`` + ``.`` (e.g.
-#: ``NSE-NIFTY-30Jan25-28500-CE``); ``..`` is rejected separately.
-_SYMBOL_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
+#: scan. Dhan symbols are alnum + ``-`` + ``_`` + ``.`` + ``&`` (e.g.
+#: ``NSE-NIFTY-30Jan25-28500-CE``, ``M&M``); ``..`` is rejected separately.
+#:
+#: ``&`` is admitted because real NSE/BSE underlyings legitimately contain it —
+#: Mahindra & Mahindra (``M&M`` / ``M&MFIN``) and GE Vernova T&D (``GVT&D``) are
+#: F&O-eligible spot symbols the ingest writes verbatim (the partition layer's
+#: filesystem denylist in ``brutex.data.partition`` permits ``&``, so the lake
+#: holds a ``…/M&M/…`` directory). ``&`` is neither a path separator nor a
+#: DuckDB-glob metacharacter (``* ? [ ] { }``), so it cannot widen the bound
+#: ``read_parquet`` glob or traverse the tree — admitting it keeps this read
+#: allowlist consistent with what the write path stores (CLAUDE.md §11 COMMON)
+#: WITHOUT loosening the path-traversal / glob-injection guard. Before this fix
+#: the pre-open report 500'd on ``M&M`` (``illegal candle symbol 'M&M'``).
+#: DEC-PREOPEN-AMPERSAND-001.
+_SYMBOL_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.&\-]*$")
 
 #: Strict ISO calendar-date shape. ``date.fromisoformat`` (py3.11+) also
 #: accepts ``YYYYMMDD`` and ``YYYY-Www-D`` ordinal/week forms; the candle
