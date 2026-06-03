@@ -1550,6 +1550,42 @@ jobs:
       # rust/fno-math-py/ and brutex/math/. Track 1 backtest does not
       # need Greeks or a PyO3 wheel as of now.
 
+  rust-trading-core:
+    name: Rust (trading-core build + clippy + golden bit-identity test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/trading-core
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/trading-core -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      # DEC-SHARED-CORE-001 Phase 1: the golden bit-identity proof — the Rust
+      # vocab must reproduce every one of the 400 cases in
+      # tests/golden/fixtures/vocab_golden_vectors.json bit-for-bit (the same
+      # oracle the Python golden test reads). --release runs with overflow-checks.
+      - name: cargo test (golden bit-identity vs the Python oracle)
+        run: cargo test --release
+      # Verify the optional PyO3 binding (Phase-2 scaffold) still compiles. The
+      # ubuntu runner's python3 satisfies pyo3's abi3 build config (same as the
+      # fno-math job). The wheel itself is NOT built here (that is Phase 2).
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python
+
   # ─────────────────────────────────────────────────────────────────
   # BANNED PATTERNS — no print, no TODO in prod, no .env*
   # ─────────────────────────────────────────────────────────────────
@@ -2181,6 +2217,7 @@ jobs:
       - docs
       - licenses
       - rust
+      - rust-trading-core
       - banned
       - secrets
       # fno-math-drift moved to advisory-only on 2026-05-15.
@@ -2245,6 +2282,7 @@ jobs:
           echo "  docs:          ${{ needs.docs.result }}"
           echo "  licenses:      ${{ needs.licenses.result }}"
           echo "  rust:          ${{ needs.rust.result }}"
+          echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
           echo "  secrets:       ${{ needs.secrets.result }}"
           echo "  codeql:        ${{ needs.codeql.result }}"
@@ -2271,6 +2309,7 @@ jobs:
             "${{ needs.docs.result }}" \
             "${{ needs.licenses.result }}" \
             "${{ needs.rust.result }}" \
+            "${{ needs.rust-trading-core.result }}" \
             "${{ needs.banned.result }}" \
             "${{ needs.secrets.result }}" \
             "${{ needs.codeql.result }}" \
