@@ -30,30 +30,42 @@ moments keep full float precision and are NEVER rounded
 no losers, zero-variance returns, single trade) return ``None`` for the
 undefined ratio rather than ``inf`` / ``NaN`` (spec line 746).
 
-**Stage-4 cross-validation primitives (IMPLEMENTED here):** the CPCV and
-walk-forward *split generation + pass-rate* surfaces — :mod:`brutex.metrics.cpcv`
-(:func:`cpcv_splits`, :func:`cpcv_pass_rate`) and :mod:`brutex.metrics.wfo`
-(:func:`walk_forward_splits`, :func:`wfo_pass_rate`, :func:`wfo_pass_rates`).
-These are pure, deterministic functions over a returns series, with purging +
-embargo (CPCV) and rolling/anchored/expanding windows (WFO). Decision
-``DEC-STAT-CPCV-WFO-001`` (``docs/MIGRATION.md`` entry #428).
+**Stage-4 statistical-validity metrics (spec lines 581-587).** Implemented
+here as pure, deterministic functions:
 
-**STILL DEFERRED — Stage-4 cascade wiring + sibling metrics (NOT implemented):**
-``deflated_sharpe_ratio``, ``pbo_probability``, ``lockbox_sharpe``,
-``lockbox_mdd_pct`` (spec lines 581-587), the Reality-Check/SPA and
-Romano-Wolf gates, and the wiring of the ``cpcv_pass_rate`` / ``wfo_pass_rate``
-*columns* into the result-row schema. The spec marks the result-row
-statistical fields "Stage 4 only, NULL before then"; this PR ships the CV/WFO
-*engines* they will consume, not the full cascade. Honest-envelope deferral
-recorded in ``docs/MIGRATION.md`` entries #305 (DEC-METRICS-001) and #428
-(DEC-STAT-CPCV-WFO-001), per Golden Rule #10. The composite ranking score
-(spec lines 602-615) and the hard rejection gates (spec lines 589-600) remain
-out of scope here.
+* ``deflated_sharpe_ratio`` + ``probabilistic_sharpe_ratio`` +
+  ``expected_max_sharpe_ratio`` (Bailey & LdP 2014 / 2012) in
+  :mod:`brutex.metrics.deflated_sharpe`; ``pbo_probability`` (Bailey et al.
+  2017, CSCV) in :mod:`brutex.metrics.pbo` — ``DEC-STAT-DSR-PBO-001``
+  (``docs/MIGRATION.md`` entry #429). :func:`compute_metrics` leaves the
+  ``ResultMetrics`` DSR / PBO fields NULL; :func:`with_stage4_statistics`
+  fills them once the leaderboard's trial count / Sharpe dispersion / CSCV
+  matrix are known.
+* the CPCV + walk-forward *split generation + pass-rate* surfaces —
+  :mod:`brutex.metrics.cpcv` (:func:`cpcv_splits`, :func:`cpcv_pass_rate`)
+  and :mod:`brutex.metrics.wfo` (:func:`walk_forward_splits`,
+  :func:`wfo_pass_rate`, :func:`wfo_pass_rates`), pure functions over a
+  returns series with purging + embargo (CPCV) and
+  rolling/anchored/expanding windows (WFO) — ``DEC-STAT-CPCV-WFO-001``
+  (``docs/MIGRATION.md`` entry #428).
+
+**Still DEFERRED (honest envelope, Golden Rule #10):** ``lockbox_sharpe``,
+``lockbox_mdd_pct`` (spec lines 586-587), the Reality-Check / SPA +
+Romano-Wolf gates, and the wiring of the ``cpcv_pass_rate`` /
+``wfo_pass_rate`` *columns* into the result-row schema — the Stage-4 filter
+cascade remains out of scope. The composite ranking score (spec lines
+602-615) and the hard rejection gates (spec lines 589-600) are likewise
+Stage-4 concerns out of scope here.
 """
 
 from __future__ import annotations
 
-from brutex.metrics.compute import Moments, ResultMetrics, compute_metrics
+from brutex.metrics.compute import (
+    Moments,
+    ResultMetrics,
+    compute_metrics,
+    with_stage4_statistics,
+)
 from brutex.metrics.cpcv import (
     DEFAULT_N_GROUPS,
     DEFAULT_N_TEST_GROUPS,
@@ -62,6 +74,13 @@ from brutex.metrics.cpcv import (
     cpcv_splits,
     sharpe_of_returns,
 )
+from brutex.metrics.deflated_sharpe import (
+    DeflatedSharpeResult,
+    deflated_sharpe_ratio,
+    expected_max_sharpe_ratio,
+    probabilistic_sharpe_ratio,
+)
+from brutex.metrics.pbo import PBOResult, pbo_probability, sharpe_from_moments
 from brutex.metrics.types import ClosedTrade, EquityCurve
 from brutex.metrics.wfo import (
     WFOPassRates,
@@ -77,8 +96,10 @@ __all__ = [
     "DEFAULT_N_TEST_GROUPS",
     "CPCVSplit",
     "ClosedTrade",
+    "DeflatedSharpeResult",
     "EquityCurve",
     "Moments",
+    "PBOResult",
     "ResultMetrics",
     "WFOPassRates",
     "WFOScheme",
@@ -86,8 +107,14 @@ __all__ = [
     "compute_metrics",
     "cpcv_pass_rate",
     "cpcv_splits",
+    "deflated_sharpe_ratio",
+    "expected_max_sharpe_ratio",
+    "pbo_probability",
+    "probabilistic_sharpe_ratio",
+    "sharpe_from_moments",
     "sharpe_of_returns",
     "walk_forward_splits",
     "wfo_pass_rate",
     "wfo_pass_rates",
+    "with_stage4_statistics",
 ]
