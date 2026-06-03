@@ -1,10 +1,12 @@
 """Tests for `brutex.dashboard.option_pull_controller` — the options pull core.
 
 100% line+branch via the synthetic dry-run path + injected fake client/sink:
-the instrument→underlying mapping (IDX/EQ/blank/derivative), the report
-aggregation (completed series + quarantined failures grouped by underlying),
-the dry-run default path, the injected-factory (non-dry-run) branch, the
-empty-list no-op, and the ``to_dict`` projection.
+the instrument→underlying mapping (IDX/EQ/blank/derivative) incl. the per-kind
+expiry set (index WEEK+MONTH vs stock MONTH-only,
+DEC-DHAN-STOCK-MONTHLY-ONLY-001), the report aggregation (completed series +
+quarantined failures grouped by underlying), the dry-run default path, the
+injected-factory (non-dry-run) branch, the empty-list no-op, and the
+``to_dict`` projection.
 """
 
 from __future__ import annotations
@@ -112,6 +114,9 @@ class TestInstrumentToOptionUnderlying:
         assert u.instrument == "OPTIDX"
         assert u.exchange_segment == "NSE_FNO"
         assert u.strike_offsets == 10
+        # An index keeps the full WEEK+MONTH expiry set (only some indices
+        # carry weeklies; DEC-DHAN-STOCK-MONTHLY-ONLY-001).
+        assert u.expiry_flags == ("WEEK", "MONTH")
         # The addressing fields promoted to the expired-options table
         # (DEC-EXPIRED-OPTIONS-TABLE-001) carry through from the instrument.
         assert u.exch_id == "NSE"
@@ -126,6 +131,9 @@ class TestInstrumentToOptionUnderlying:
         assert u.instrument == "OPTSTK"
         assert u.exchange_segment == "NSE_FNO"
         assert u.strike_offsets == 3
+        # A single stock is MONTHLY-only — NSE single stocks carry no weekly
+        # series, so the WEEK leg is elided (DEC-DHAN-STOCK-MONTHLY-ONLY-001).
+        assert u.expiry_flags == ("MONTH",)
 
     def test_nonpositive_security_id_raises(self) -> None:
         with pytest.raises(ValueError, match="valid numeric SECURITY_ID"):
@@ -165,8 +173,15 @@ class TestPullOptions:
         )
         assert report.total_symbols == 2
         by_symbol = {s.symbol: s for s in report.symbols}
-        assert by_symbol["13"].series_completed == 21 * 2 * 3 * 2  # ATM±10
-        assert by_symbol["1333"].series_completed == 7 * 2 * 3 * 2  # ATM±3
+        # Index keeps WEEK+MONTH (2 flags); a STOCK is MONTHLY-only — NSE single
+        # stocks carry no weekly series (only some indices do), so the stock
+        # fans MONTH only (1 flag): its series count DROPS vs the old
+        # WEEK+MONTH fan-out — fewer wasted Dhan calls/quota
+        # (DEC-DHAN-STOCK-MONTHLY-ONLY-001).
+        assert by_symbol["13"].series_completed == 21 * 2 * 3 * 2  # ATM±10, WEEK+MONTH
+        assert by_symbol["1333"].series_completed == 7 * 1 * 3 * 2  # ATM±3, MONTH-only
+        # The per-kind elision strictly REDUCES the stock fan-out (was 7*2*3*2).
+        assert by_symbol["1333"].series_completed < 7 * 2 * 3 * 2
 
     def test_empty_list_is_clean_noop(self) -> None:
         report = pull_options([], lake_root=Path("/unused"), dry_run=True, now=_NOW)
