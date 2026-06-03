@@ -34,6 +34,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 
+import structlog
+
 from brutex.adapters.dhan.constants import DRV_OPTION_TYPES, EXPIRY_FLAGS
 from brutex.adapters.dhan.errors import DhanError
 from brutex.adapters.dhan.option_ingest import (
@@ -45,6 +47,14 @@ from brutex.adapters.dhan.option_ingest import (
     ingest_rolling_option_series,
 )
 from brutex.data.fetch_coverage import FetchCoverage
+from brutex.observability.correlation import current_pull_id
+
+#: Structured logger — emits the per-underlying options rollup at INFO
+#: (``ingest.underlying``) + the per-series terminal-failure cause at WARNING
+#: (``ingest.quarantine``), both carrying the pull's ``pull_id``
+#: (DEC-DHAN-INGEST-LOGGING-001). The per-window / per-series DEBUG detail is one
+#: layer down in ``ingest_rolling_option_series``.
+_LOG = structlog.get_logger("brutex.adapters.dhan.option_universe_ingest")
 
 #: ATM strike-window half-widths (DEC-DHAN-PULL-SCOPE-001) — the documented
 #: Dhan rolling-option bounds (``docs/dhan-ref/06``): indices ATM±10 (21
@@ -235,6 +245,7 @@ def run_dhan_options_ingest(
         Per-series :class:`OptionIngestReport` for successes + the quarantined
         terminal failures. **Never raises** on a Dhan error.
     """
+    pull_id = current_pull_id()
     series: dict[SeriesKey, OptionIngestReport] = {}
     failures: list[OptionSeriesFailure] = []
     for underlying in underlyings:
@@ -245,6 +256,9 @@ def run_dhan_options_ingest(
         # test pulls); ``None`` (the default) honours each underlying's own set.
         flags = underlying.expiry_flags if expiry_flags is None else expiry_flags
         underlying_bars = 0
+        underlying_windows = 0
+        underlying_completed = 0
+        underlying_quarantined = 0
         underlying_failed = False
         for expiry_flag in flags:
             for expiry_code in expiry_codes:
@@ -288,9 +302,39 @@ def run_dhan_options_ingest(
                                 )
                             )
                             underlying_failed = True
+                            underlying_quarantined += 1
+                            # Quarantine-cause nook: WHY this series was dropped,
+                            # with its full coordinate (the per-series analog of
+                            # the pull-level ``universe.pull_options.failures``).
+                            _LOG.warning(
+                                "ingest.quarantine",
+                                pull_id=pull_id,
+                                security_id=underlying.security_id,
+                                underlying_symbol=underlying.underlying_symbol,
+                                expiry_flag=expiry_flag,
+                                expiry_code=expiry_code,
+                                strike=strike,
+                                drv_option_type=drv_option_type,
+                                error=str(exc),
+                            )
                             continue
                         series[key] = report
                         underlying_bars += report.bars_appended
+                        underlying_windows += report.windows
+                        underlying_completed += 1
+        # Per-underlying rollup — INFO, one line per underlying (not per series),
+        # so a 16k-series fan-out's progress is visible without the DEBUG firehose.
+        _LOG.info(
+            "ingest.underlying",
+            pull_id=pull_id,
+            security_id=underlying.security_id,
+            underlying_symbol=underlying.underlying_symbol,
+            instrument=underlying.instrument,
+            series_completed=underlying_completed,
+            series_failed=underlying_quarantined,
+            bars_appended=underlying_bars,
+            windows=underlying_windows,
+        )
         # Fire the live-progress hook once the WHOLE underlying fan-out is done.
         if on_progress is not None:
             on_progress(underlying.security_id, underlying_bars, underlying_failed)

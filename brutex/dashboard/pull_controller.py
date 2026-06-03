@@ -54,6 +54,7 @@ from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.models import Instrument
+from brutex.observability.correlation import pull_id_scope
 
 _LOG = structlog.get_logger(__name__)
 
@@ -482,6 +483,7 @@ def pull_all_spot(
     adapter_factory: BulkAdapterFactory | None = None,
     on_progress: ProgressHook | None = None,
     coverage: FetchCoverage | None = None,
+    pull_id: str | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, previous day]`` range.
 
@@ -532,60 +534,68 @@ def pull_all_spot(
         adapter_factory = _build_dry_run_bulk_adapter if dry_run else _build_live_bulk_adapter
     adapter, sink = adapter_factory(lake_root, instruments)
 
-    # Skip windows already in the lake on a live re-pull (no wasted Dhan quota);
-    # DEC-FETCH-COVERAGE-WIRING-001.
-    coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
+    # Open the pull's correlation scope: ``pid`` is bound into the structlog
+    # contextvars for the whole pass, so every event — this start/done summary,
+    # the ingest spine's ``ingest.*`` events, AND the already-lit transport
+    # (``dhan.call``) + rate (``rate.*``) events — shares one ``pull_id``
+    # (DEC-DHAN-INGEST-LOGGING-001). Always unbinds on exit (no leak).
+    with pull_id_scope(pull_id) as pid:
+        # Skip windows already in the lake on a live re-pull (no wasted Dhan quota);
+        # DEC-FETCH-COVERAGE-WIRING-001.
+        coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
 
-    _LOG.info(
-        "universe.pull_all.start",
-        instruments=len(instruments),
-        start_date=start.date().isoformat(),
-        dry_run=dry_run,
-    )
-    pace, on_rate_limit, on_success = _live_rate_hooks(use_live_rate)
-    report = run_dhan_spot_ingest(
-        adapter,
-        sink,
-        instruments=instruments,
-        intervals=DHAN_FETCH_INTERVALS,
-        start=start.date(),
-        end=end.date(),
-        pace=pace,
-        on_rate_limit=on_rate_limit,
-        on_success=on_success,
-        on_progress=on_progress,
-        coverage=coverage,
-    )
-    end_pull_coverage(coverage, lake_root, dry_run=dry_run)
-    failure_keys = {(f.symbol, f.interval) for f in report.failures}
-    results: list[SymbolPullResult] = []
-    for instrument in instruments:
-        symbol = instrument.symbol_name
-        completed = failed = no_data = 0
-        for fetch_interval, _label in _FETCH_INTERVAL_LABELS:
-            key = (symbol, fetch_interval)
-            if key in failure_keys:
-                failed += 1
-            elif report.pairs[key].bars_appended > 0:
-                completed += 1
-            else:
-                no_data += 1
-        results.append(
-            SymbolPullResult(symbol=symbol, completed=completed, failed=failed, no_data=no_data)
+        _LOG.info(
+            "universe.pull_all.start",
+            pull_id=pid,
+            instruments=len(instruments),
+            start_date=start.date().isoformat(),
+            dry_run=dry_run,
         )
-    bulk = BulkSpotReport(
-        dry_run=dry_run,
-        start_date=start.date().isoformat(),
-        end_date=(end - timedelta(days=1)).date().isoformat(),
-        symbols=results,
-    )
-    _LOG.info(
-        "universe.pull_all.done",
-        instruments=bulk.total_symbols,
-        completed=bulk.total_completed,
-        failed=bulk.total_failed,
-        dry_run=dry_run,
-    )
+        pace, on_rate_limit, on_success = _live_rate_hooks(use_live_rate)
+        report = run_dhan_spot_ingest(
+            adapter,
+            sink,
+            instruments=instruments,
+            intervals=DHAN_FETCH_INTERVALS,
+            start=start.date(),
+            end=end.date(),
+            pace=pace,
+            on_rate_limit=on_rate_limit,
+            on_success=on_success,
+            on_progress=on_progress,
+            coverage=coverage,
+        )
+        end_pull_coverage(coverage, lake_root, dry_run=dry_run)
+        failure_keys = {(f.symbol, f.interval) for f in report.failures}
+        results: list[SymbolPullResult] = []
+        for instrument in instruments:
+            symbol = instrument.symbol_name
+            completed = failed = no_data = 0
+            for fetch_interval, _label in _FETCH_INTERVAL_LABELS:
+                key = (symbol, fetch_interval)
+                if key in failure_keys:
+                    failed += 1
+                elif report.pairs[key].bars_appended > 0:
+                    completed += 1
+                else:
+                    no_data += 1
+            results.append(
+                SymbolPullResult(symbol=symbol, completed=completed, failed=failed, no_data=no_data)
+            )
+        bulk = BulkSpotReport(
+            dry_run=dry_run,
+            start_date=start.date().isoformat(),
+            end_date=(end - timedelta(days=1)).date().isoformat(),
+            symbols=results,
+        )
+        _LOG.info(
+            "universe.pull_all.done",
+            pull_id=pid,
+            instruments=bulk.total_symbols,
+            completed=bulk.total_completed,
+            failed=bulk.total_failed,
+            dry_run=dry_run,
+        )
     return bulk
 
 
@@ -600,6 +610,7 @@ def pull_candles(
     adapter_factory: AdapterFactory | None = None,
     on_progress: ProgressHook | None = None,
     coverage: FetchCoverage | None = None,
+    pull_id: str | None = None,
 ) -> PullCandlesReport:
     """Ingest *instrument*'s spot candles over a date range (Dhan model).
 
@@ -686,67 +697,75 @@ def pull_candles(
         adapter_factory = _build_dry_run_adapter if dry_run else _build_live_pull_adapter
     adapter, sink = adapter_factory(lake_root, instrument)
 
-    # Skip windows already in the lake on a live re-pull (no wasted Dhan quota);
-    # DEC-FETCH-COVERAGE-WIRING-001.
-    coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
+    # Open the pull's correlation scope (DEC-DHAN-INGEST-LOGGING-001): ``pid`` is
+    # bound into the structlog contextvars for the whole pass, so this start/done
+    # summary, the ingest spine's ``ingest.*`` events, and the already-lit
+    # transport (``dhan.call``) + rate (``rate.*``) events all share one
+    # ``pull_id``. Always unbinds on exit (no leak).
+    with pull_id_scope(pull_id) as pid:
+        # Skip windows already in the lake on a live re-pull (no wasted Dhan quota);
+        # DEC-FETCH-COVERAGE-WIRING-001.
+        coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
 
-    _LOG.info(
-        "universe.pull.start",
-        symbol=symbol,
-        year=resolved_year,
-        start_date=start.date().isoformat(),
-        end_date=end_label,
-        dry_run=dry_run,
-        intervals=len(DHAN_FETCH_INTERVALS),
-    )
+        _LOG.info(
+            "universe.pull.start",
+            pull_id=pid,
+            symbol=symbol,
+            year=resolved_year,
+            start_date=start.date().isoformat(),
+            end_date=end_label,
+            dry_run=dry_run,
+            intervals=len(DHAN_FETCH_INTERVALS),
+        )
 
-    pace, on_rate_limit, on_success = _live_rate_hooks(use_live_rate)
-    report = run_dhan_spot_ingest(
-        adapter,
-        sink,
-        instruments=[instrument],
-        intervals=DHAN_FETCH_INTERVALS,
-        start=start.date(),
-        end=end.date(),
-        pace=pace,
-        on_rate_limit=on_rate_limit,
-        on_success=on_success,
-        on_progress=on_progress,
-        coverage=coverage,
-    )
-    end_pull_coverage(coverage, lake_root, dry_run=dry_run)
+        pace, on_rate_limit, on_success = _live_rate_hooks(use_live_rate)
+        report = run_dhan_spot_ingest(
+            adapter,
+            sink,
+            instruments=[instrument],
+            intervals=DHAN_FETCH_INTERVALS,
+            start=start.date(),
+            end=end.date(),
+            pace=pace,
+            on_rate_limit=on_rate_limit,
+            on_success=on_success,
+            on_progress=on_progress,
+            coverage=coverage,
+        )
+        end_pull_coverage(coverage, lake_root, dry_run=dry_run)
 
-    failure_keys = {(f.symbol, f.interval) for f in report.failures}
-    timeframes: list[TimeframeResult] = []
-    for fetch_interval, label in _FETCH_INTERVAL_LABELS:
-        key = (symbol, fetch_interval)
-        if key in failure_keys:
-            # Terminal Dhan error — quarantined, never in report.pairs.
-            timeframes.append(TimeframeResult(interval=label, completed=0, failed=1))
-        elif report.pairs[key].bars_appended > 0:
-            timeframes.append(TimeframeResult(interval=label, completed=1, failed=0))
-        else:
-            # Ran cleanly but the vendor returned no bars for the window.
-            timeframes.append(TimeframeResult(interval=label, completed=0, failed=0, no_data=1))
+        failure_keys = {(f.symbol, f.interval) for f in report.failures}
+        timeframes: list[TimeframeResult] = []
+        for fetch_interval, label in _FETCH_INTERVAL_LABELS:
+            key = (symbol, fetch_interval)
+            if key in failure_keys:
+                # Terminal Dhan error — quarantined, never in report.pairs.
+                timeframes.append(TimeframeResult(interval=label, completed=0, failed=1))
+            elif report.pairs[key].bars_appended > 0:
+                timeframes.append(TimeframeResult(interval=label, completed=1, failed=0))
+            else:
+                # Ran cleanly but the vendor returned no bars for the window.
+                timeframes.append(TimeframeResult(interval=label, completed=0, failed=0, no_data=1))
 
-    pull_report = PullCandlesReport(
-        symbol=symbol,
-        year=resolved_year,
-        start_date=start.date().isoformat(),
-        end_date=end_label,
-        dry_run=dry_run,
-        timeframes=timeframes,
-    )
-    _LOG.info(
-        "universe.pull.done",
-        symbol=symbol,
-        year=resolved_year,
-        start_date=start.date().isoformat(),
-        end_date=end_label,
-        dry_run=dry_run,
-        completed=pull_report.total_completed,
-        failed=pull_report.total_failed,
-    )
+        pull_report = PullCandlesReport(
+            symbol=symbol,
+            year=resolved_year,
+            start_date=start.date().isoformat(),
+            end_date=end_label,
+            dry_run=dry_run,
+            timeframes=timeframes,
+        )
+        _LOG.info(
+            "universe.pull.done",
+            pull_id=pid,
+            symbol=symbol,
+            year=resolved_year,
+            start_date=start.date().isoformat(),
+            end_date=end_label,
+            dry_run=dry_run,
+            completed=pull_report.total_completed,
+            failed=pull_report.total_failed,
+        )
     return pull_report
 
 

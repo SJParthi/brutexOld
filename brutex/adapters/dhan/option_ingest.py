@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Protocol
 
+import structlog
+
 from brutex.adapters.dhan.body import build_rolling_option_body
 from brutex.adapters.dhan.chunks import plan_option_windows
 from brutex.adapters.dhan.constants import ENDPOINT_ROLLING_OPTION, TRACK1_OPTIONS_INTERVAL
@@ -41,6 +43,14 @@ from brutex.adapters.dhan.option_parser import parse_rolling_option_sides
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.models import OptionBar
 from brutex.data.session import in_session
+from brutex.observability.correlation import current_pull_id
+
+#: Structured logger — lights the rolling-option ingest spine with per-window /
+#: parse / lake-write / series events under the ``ingest.*`` namespace, each
+#: carrying the pull's ``pull_id`` + the full series coordinate
+#: (DEC-DHAN-INGEST-LOGGING-001). All DEBUG so a 16k-series fan-out never floods
+#: INFO; the per-underlying rollup at INFO lives in ``option_universe_ingest``.
+_LOG = structlog.get_logger("brutex.adapters.dhan.option_ingest")
 
 #: Pacing hook invoked once before each window fetch (e.g. token-bucket acquire).
 Pacer = Callable[[], None]
@@ -199,6 +209,18 @@ def ingest_rolling_option_series(
     transient = 0
     skipped = 0
     windows = _window_dates(start, end)
+    # Read the pull's correlation id ONCE (the controller bound it via
+    # ``pull_id_scope``); stamp it + the full series coordinate on every
+    # ``ingest.*`` event so one pull greps end-to-end. Observability only — no
+    # behaviour change (DEC-DHAN-INGEST-LOGGING-001).
+    pull_id = current_pull_id()
+    series_fields: dict[str, object] = {
+        "security_id": security_id,
+        "expiry_flag": expiry_flag,
+        "expiry_code": expiry_code,
+        "strike": strike,
+        "drv_option_type": drv_option_type,
+    }
     for window_start, window_end in windows:
         key = _coverage_key(
             exchange_segment=exchange_segment,
@@ -213,6 +235,14 @@ def ingest_rolling_option_series(
         # Skip a window already pulled — no wasted Dhan hit (DEC-FETCH-COVERAGE-001).
         if coverage is not None and coverage.is_complete(key):
             skipped += 1
+            _LOG.debug(
+                "ingest.window",
+                pull_id=pull_id,
+                window_start=window_start.isoformat(),
+                window_end=window_end.isoformat(),
+                action="skipped",
+                **series_fields,
+            )
             continue
         if pace is not None:
             pace()
@@ -239,8 +269,18 @@ def ingest_rolling_option_series(
         data = payload.get("data")
         source = data if isinstance(data, Mapping) else payload
         # Options are intraday 1m → drop pre-open / post-close before the lake.
-        bars = [bar for bar in parse_rolling_option_sides(source) if in_session(bar.timestamp)]
-        bars_appended += sink.append_option_bars(
+        parsed = parse_rolling_option_sides(source)
+        bars = [bar for bar in parsed if in_session(bar.timestamp)]
+        # Parse nook: rows decoded from the per-side ce/pe payload vs how many
+        # survived the [09:15,15:30) IST session gate.
+        _LOG.debug(
+            "ingest.parse",
+            pull_id=pull_id,
+            raw_bars=len(parsed),
+            session_bars=len(bars),
+            **series_fields,
+        )
+        appended = sink.append_option_bars(
             security_id=security_id,
             exch_id=exch_id,
             underlying_symbol=underlying_symbol,
@@ -251,9 +291,31 @@ def ingest_rolling_option_series(
             drv_option_type=drv_option_type,
             bars=bars,
         )
+        bars_appended += appended
+        _LOG.debug(
+            "ingest.window",
+            pull_id=pull_id,
+            window_start=window_start.isoformat(),
+            window_end=window_end.isoformat(),
+            action="fetched",
+            **series_fields,
+        )
+        # Lake-write nook: option bars actually persisted for this window.
+        _LOG.debug("ingest.lake_write", pull_id=pull_id, bars_appended=appended, **series_fields)
         # Mark the window pulled only after a clean fetch + append.
         if coverage is not None:
             coverage.mark_complete(key)
+    # Per-series summary (one fanned-out series) — DEBUG; the per-underlying
+    # rollup at INFO is emitted by ``run_dhan_options_ingest`` one layer up.
+    _LOG.debug(
+        "ingest.series",
+        pull_id=pull_id,
+        windows=len(windows),
+        bars_appended=bars_appended,
+        transient_failures=transient,
+        skipped_windows=skipped,
+        **series_fields,
+    )
     return OptionIngestReport(
         windows=len(windows),
         bars_appended=bars_appended,

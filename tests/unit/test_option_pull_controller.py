@@ -11,7 +11,7 @@ injected-factory (non-dry-run) branch, the empty-list no-op, and the
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -28,6 +28,7 @@ from brutex.dashboard.option_pull_controller import (
 )
 from brutex.data.option_sink import NullOptionBarSink
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from structlog.testing import capture_logs
 
 _NOW = datetime(2021, 1, 6, tzinfo=UTC)  # tiny window so the synthetic fan-out is fast
 
@@ -334,3 +335,56 @@ class TestOptionsPullReport:
         assert report.total_symbols == 0
         assert report.total_bars == 0
         assert report.to_dict()["symbols"] == []
+
+
+def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
+    """All captured events with ``event == name`` (in emission order)."""
+    return [e for e in logs if e["event"] == name]
+
+
+class TestPullOptionsCorrelation:
+    """One ``pull_id`` ties the whole options fan-out together.
+
+    DEC-DHAN-INGEST-LOGGING-001: the controller's ``pull_id_scope`` binds the id,
+    so the start/done summary AND the real dry-run spine's ``ingest.*`` events all
+    carry it. Narrow axes keep the synthetic fan-out fast (21 strikes × 1 × 1 × 1).
+    """
+
+    def test_correlates_start_done_and_spine(self) -> None:
+        with capture_logs() as logs:
+            pull_options(
+                [_index()],
+                lake_root=Path("/unused"),
+                dry_run=True,
+                now=_NOW,
+                expiry_flags=("WEEK",),
+                expiry_codes=(1,),
+                option_types=("CALL",),
+                pull_id="optctl000001",
+            )
+        (start,) = _events(logs, "universe.pull_options.start")
+        (done,) = _events(logs, "universe.pull_options.done")
+        assert start["pull_id"] == "optctl000001"
+        assert done["pull_id"] == "optctl000001"
+        # The spine inherited the SAME id via the bound scope.
+        (underlying,) = _events(logs, "ingest.underlying")
+        assert underlying["pull_id"] == "optctl000001"
+        windows = _events(logs, "ingest.window")
+        assert windows and all(e["pull_id"] == "optctl000001" for e in windows)
+
+    def test_mints_a_pull_id_when_omitted(self) -> None:
+        with capture_logs() as logs:
+            pull_options(
+                [_index()],
+                lake_root=Path("/unused"),
+                dry_run=True,
+                now=_NOW,
+                expiry_flags=("WEEK",),
+                expiry_codes=(1,),
+                option_types=("CALL",),
+            )
+        (start,) = _events(logs, "universe.pull_options.start")
+        (done,) = _events(logs, "universe.pull_options.done")
+        pid = start["pull_id"]
+        assert isinstance(pid, str) and len(pid) == 12
+        assert done["pull_id"] == pid

@@ -68,6 +68,7 @@ from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.option_sink import NullOptionBarSink
 from brutex.models import Instrument, InstrumentType
+from brutex.observability.correlation import pull_id_scope
 
 _LOG = structlog.get_logger(__name__)
 
@@ -296,6 +297,7 @@ def pull_options(
     client_factory: OptionClientFactory | None = None,
     on_progress: ProgressHook | None = None,
     coverage: FetchCoverage | None = None,
+    pull_id: str | None = None,
 ) -> OptionsPullReport:
     """Fan-out-pull the option universe for *instruments* over ``[2021-01-01, today]``.
 
@@ -365,91 +367,100 @@ def pull_options(
         client_factory = _build_dry_run_options if dry_run else _build_live_options
     client, sink = client_factory(lake_root)
 
-    # Load the persisted skip-ledger for a live pull so windows already in the
-    # lake are not re-fetched (no wasted Dhan quota on a re-run);
-    # DEC-FETCH-COVERAGE-WIRING-001.
-    coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
+    # Open the pull's correlation scope (DEC-DHAN-INGEST-LOGGING-001): ``pid`` is
+    # bound into the structlog contextvars for the whole fan-out, so this
+    # start/done/failures summary, the ingest spine's ``ingest.*`` events, and the
+    # already-lit transport (``dhan.call``) + rate (``rate.*``) events all share
+    # one ``pull_id``. Always unbinds on exit (no leak).
+    with pull_id_scope(pull_id) as pid:
+        # Load the persisted skip-ledger for a live pull so windows already in the
+        # lake are not re-fetched (no wasted Dhan quota on a re-run);
+        # DEC-FETCH-COVERAGE-WIRING-001.
+        coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
 
-    _LOG.info(
-        "universe.pull_options.start",
-        underlyings=len(underlyings),
-        start_date=start.date().isoformat(),
-        dry_run=dry_run,
-    )
-    pace = _live_option_pace(use_live_rate)
-    report = run_dhan_options_ingest(
-        client,
-        sink,
-        underlyings=underlyings,
-        start=start.date(),
-        end=end.date(),
-        expiry_flags=expiry_flags,
-        expiry_codes=expiry_codes,
-        option_types=option_types,
-        required_data=ALL_REQUIRED_DATA,
-        pace=pace,
-        on_progress=on_progress,
-        coverage=coverage,
-    )
-    # Persist the windows just completed so the next pull skips them.
-    end_pull_coverage(coverage, lake_root, dry_run=dry_run)
-
-    # Aggregate the per-series reports + quarantined failures by underlying.
-    failed_by_symbol: dict[str, int] = {}
-    error_counts: dict[str, int] = {}
-    for failure in report.failures:
-        failed_by_symbol[failure.security_id] = failed_by_symbol.get(failure.security_id, 0) + 1
-        error_counts[failure.error] = error_counts.get(failure.error, 0) + 1
-    completed_by_symbol: dict[str, tuple[int, int, int]] = {}
-    for (security_id, *_rest), series_report in report.series.items():
-        prev_count, prev_bars, prev_windows = completed_by_symbol.get(security_id, (0, 0, 0))
-        completed_by_symbol[security_id] = (
-            prev_count + 1,
-            prev_bars + series_report.bars_appended,
-            prev_windows + series_report.windows,
+        _LOG.info(
+            "universe.pull_options.start",
+            pull_id=pid,
+            underlyings=len(underlyings),
+            start_date=start.date().isoformat(),
+            dry_run=dry_run,
         )
+        pace = _live_option_pace(use_live_rate)
+        report = run_dhan_options_ingest(
+            client,
+            sink,
+            underlyings=underlyings,
+            start=start.date(),
+            end=end.date(),
+            expiry_flags=expiry_flags,
+            expiry_codes=expiry_codes,
+            option_types=option_types,
+            required_data=ALL_REQUIRED_DATA,
+            pace=pace,
+            on_progress=on_progress,
+            coverage=coverage,
+        )
+        # Persist the windows just completed so the next pull skips them.
+        end_pull_coverage(coverage, lake_root, dry_run=dry_run)
 
-    results: list[OptionSymbolResult] = []
-    for underlying in underlyings:
-        sid = underlying.security_id
-        completed, bars, windows = completed_by_symbol.get(sid, (0, 0, 0))
-        results.append(
-            OptionSymbolResult(
-                symbol=sid,
-                instrument=underlying.instrument,
-                series_completed=completed,
-                series_failed=failed_by_symbol.get(sid, 0),
-                bars_appended=bars,
-                windows=windows,
+        # Aggregate the per-series reports + quarantined failures by underlying.
+        failed_by_symbol: dict[str, int] = {}
+        error_counts: dict[str, int] = {}
+        for failure in report.failures:
+            failed_by_symbol[failure.security_id] = failed_by_symbol.get(failure.security_id, 0) + 1
+            error_counts[failure.error] = error_counts.get(failure.error, 0) + 1
+        completed_by_symbol: dict[str, tuple[int, int, int]] = {}
+        for (security_id, *_rest), series_report in report.series.items():
+            prev_count, prev_bars, prev_windows = completed_by_symbol.get(security_id, (0, 0, 0))
+            completed_by_symbol[security_id] = (
+                prev_count + 1,
+                prev_bars + series_report.bars_appended,
+                prev_windows + series_report.windows,
             )
-        )
 
-    pull_report = OptionsPullReport(
-        dry_run=dry_run,
-        start_date=start.date().isoformat(),
-        end_date=(end - timedelta(days=1)).date().isoformat(),
-        symbols=results,
-    )
-    # Surface WHY series failed (the silent-failure logging gap the operator
-    # flagged): a bare ``series_failed=N`` count hides the cause. Log the
-    # distinct terminal-error messages with counts so the failure is
-    # diagnosable in one glance (DEC-OPTION-SECURITY-ID-FIX-001).
-    if error_counts:
-        top_errors = sorted(error_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
-        _LOG.warning(
-            "universe.pull_options.failures",
-            total_failed=pull_report.total_series_failed,
-            distinct_errors=len(error_counts),
-            top_errors=[{"error": err[:300], "count": cnt} for err, cnt in top_errors],
+        results: list[OptionSymbolResult] = []
+        for underlying in underlyings:
+            sid = underlying.security_id
+            completed, bars, windows = completed_by_symbol.get(sid, (0, 0, 0))
+            results.append(
+                OptionSymbolResult(
+                    symbol=sid,
+                    instrument=underlying.instrument,
+                    series_completed=completed,
+                    series_failed=failed_by_symbol.get(sid, 0),
+                    bars_appended=bars,
+                    windows=windows,
+                )
+            )
+
+        pull_report = OptionsPullReport(
+            dry_run=dry_run,
+            start_date=start.date().isoformat(),
+            end_date=(end - timedelta(days=1)).date().isoformat(),
+            symbols=results,
         )
-    _LOG.info(
-        "universe.pull_options.done",
-        underlyings=pull_report.total_symbols,
-        series_completed=pull_report.total_series_completed,
-        series_failed=pull_report.total_series_failed,
-        bars=pull_report.total_bars,
-        dry_run=dry_run,
-    )
+        # Surface WHY series failed (the silent-failure logging gap the operator
+        # flagged): a bare ``series_failed=N`` count hides the cause. Log the
+        # distinct terminal-error messages with counts so the failure is
+        # diagnosable in one glance (DEC-OPTION-SECURITY-ID-FIX-001).
+        if error_counts:
+            top_errors = sorted(error_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            _LOG.warning(
+                "universe.pull_options.failures",
+                pull_id=pid,
+                total_failed=pull_report.total_series_failed,
+                distinct_errors=len(error_counts),
+                top_errors=[{"error": err[:300], "count": cnt} for err, cnt in top_errors],
+            )
+        _LOG.info(
+            "universe.pull_options.done",
+            pull_id=pid,
+            underlyings=pull_report.total_symbols,
+            series_completed=pull_report.total_series_completed,
+            series_failed=pull_report.total_series_failed,
+            bars=pull_report.total_bars,
+            dry_run=dry_run,
+        )
     return pull_report
 
 
