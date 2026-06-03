@@ -37,7 +37,7 @@ here as pure, deterministic functions:
   ``expected_max_sharpe_ratio`` (Bailey & LdP 2014 / 2012) in
   :mod:`brutex.metrics.deflated_sharpe`; ``pbo_probability`` (Bailey et al.
   2017, CSCV) in :mod:`brutex.metrics.pbo` — ``DEC-STAT-DSR-PBO-001``
-  (``docs/MIGRATION.md`` entry #429). :func:`compute_metrics` leaves the
+  (``docs/MIGRATION.md`` entry #430). :func:`compute_metrics` leaves the
   ``ResultMetrics`` DSR / PBO fields NULL; :func:`with_stage4_statistics`
   fills them once the leaderboard's trial count / Sharpe dispersion / CSCV
   matrix are known.
