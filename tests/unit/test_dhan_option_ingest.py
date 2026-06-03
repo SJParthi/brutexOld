@@ -20,6 +20,8 @@ from brutex.adapters.dhan.option_ingest import (
     ingest_rolling_option_series,
 )
 from brutex.data.models import OptionBar
+from brutex.observability.correlation import pull_id_scope
+from structlog.testing import capture_logs
 
 # 1609732800 = 2021-01-04 04:00:00 UTC = 09:30 IST → in session [09:15,15:30).
 _TS_IN = 1609732800
@@ -224,3 +226,89 @@ def test_coverage_marks_then_skips_already_pulled_window() -> None:
     assert second.skipped_windows == 1
     assert second.bars_appended == 0
     assert second_client.calls == []  # never hit the vendor
+
+
+def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
+    """All captured events with ``event == name`` (in emission order)."""
+    return [e for e in logs if e["event"] == name]
+
+
+class TestOptionIngestLogging:
+    """The rolling-option spine must be VISIBLE — window / parse / lake-write / series.
+
+    DEC-DHAN-INGEST-LOGGING-001: each ``ingest.*`` event carries the pull's
+    ``pull_id`` + the full series coordinate, all DEBUG (a 16k-series fan-out must
+    not flood INFO). Observability only — the OptionIngestReport is unchanged.
+    """
+
+    def test_fetched_window_lights_all_nooks(self) -> None:
+        client = _FakeClient([{"data": {"ce": _side(), "pe": None}}])
+        sink = _FakeSink()
+        with capture_logs() as logs, pull_id_scope("optpull00001"):
+            _run(client, sink)
+        # ── ingest.window (fetched) ── carries the full series coordinate.
+        (window,) = _events(logs, "ingest.window")
+        assert window["log_level"] == "debug"
+        assert window["pull_id"] == "optpull00001"
+        assert window["security_id"] == "13"
+        assert window["expiry_flag"] == "WEEK"
+        assert window["expiry_code"] == 0
+        assert window["strike"] == "ATM"
+        assert window["drv_option_type"] == "CALL"
+        assert window["action"] == "fetched"
+        assert window["window_start"] == "2021-01-04"
+        # ── ingest.parse ── 2 decoded, 1 survives the session gate.
+        (parse,) = _events(logs, "ingest.parse")
+        assert parse["pull_id"] == "optpull00001"
+        assert parse["raw_bars"] == 2
+        assert parse["session_bars"] == 1
+        # ── ingest.lake_write ──
+        (write,) = _events(logs, "ingest.lake_write")
+        assert write["pull_id"] == "optpull00001"
+        assert write["bars_appended"] == 1
+        # ── ingest.series ──
+        (series,) = _events(logs, "ingest.series")
+        assert series["log_level"] == "debug"
+        assert series["pull_id"] == "optpull00001"
+        assert series["windows"] == 1
+        assert series["bars_appended"] == 1
+        assert series["skipped_windows"] == 0
+        # Every spine event carries the FULL series coordinate (so an operator can
+        # pinpoint the exact strike/expiry that produced N bars).
+        coords = {
+            "security_id": "13",
+            "expiry_flag": "WEEK",
+            "expiry_code": 0,
+            "strike": "ATM",
+            "drv_option_type": "CALL",
+        }
+        for ev in (window, parse, write, series):
+            assert {k: ev[k] for k in coords} == coords
+
+    def test_skipped_window_lights_only_the_skip_event(self) -> None:
+        from brutex.data.fetch_coverage import FetchCoverage
+
+        cov = FetchCoverage()
+        # First pull marks the single window complete.
+        _run_cov(_FakeClient([{"data": {"ce": _side(), "pe": None}}]), _FakeSink(), cov)
+        # Re-pull → the window is skipped before any vendor call.
+        with capture_logs() as logs, pull_id_scope("optpull00002"):
+            _run_cov(_FakeClient([]), _FakeSink(), cov)
+        (window,) = _events(logs, "ingest.window")
+        assert window["action"] == "skipped"
+        assert window["pull_id"] == "optpull00002"
+        assert window["strike"] == "ATM"
+        # Nothing fetched → no parse / lake-write events.
+        assert _events(logs, "ingest.parse") == []
+        assert _events(logs, "ingest.lake_write") == []
+        (series,) = _events(logs, "ingest.series")
+        assert series["pull_id"] == "optpull00002"
+        assert series["windows"] == 1
+        assert series["bars_appended"] == 0
+        assert series["skipped_windows"] == 1
+
+    def test_pull_id_is_empty_string_outside_a_scope(self) -> None:
+        client = _FakeClient([{"data": {"ce": _side(), "pe": None}}])
+        with capture_logs() as logs:
+            _run(client, _FakeSink())
+        assert _events(logs, "ingest.window")[0]["pull_id"] == ""
