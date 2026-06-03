@@ -1,0 +1,81 @@
+"""Golden byte-equality oracle for CPCV + WFO splits and pass-rates.
+
+Every value below is hand-derived in the comments and locked as a literal.
+Any change to the group partitioning, the purge/embargo arithmetic, the
+walk placement, the Sharpe convention, or the pass predicate that alters
+output breaks this test (Golden Rule #4 — reproducibility; §12 golden
+test type). Inputs are plain Python lists so the oracle is dependency-light.
+"""
+
+from __future__ import annotations
+
+from brutex.metrics.cpcv import cpcv_pass_rate, cpcv_splits
+from brutex.metrics.wfo import WFOScheme, walk_forward_splits, wfo_pass_rate, wfo_pass_rates
+
+# ─────────────────────────────────────────────────────────────────────
+# CPCV splits — n=8, S=4 (groups [0,1] [2,3] [4,5] [6,7]), k=2,
+# label_span=1, embargo=1. C(4,2)=6 splits. Each train set is the
+# complement minus [start-1, end+1+1] around every contiguous test block.
+# ─────────────────────────────────────────────────────────────────────
+_EXPECTED_CPCV: dict[tuple[int, ...], tuple[list[int], list[int]]] = {
+    # (test_groups): (test_indices, train_indices)
+    (0, 1): ([0, 1, 2, 3], [6, 7]),  # block[0,3] → excl[0,5]
+    (0, 2): ([0, 1, 4, 5], []),  # blocks[0,1]+[4,5] → excl[0,3]+[3,7]=[0,7]
+    (0, 3): ([0, 1, 6, 7], [4]),  # excl[0,3]+[5,7]
+    (1, 2): ([2, 3, 4, 5], [0]),  # block[2,5] → excl[1,7]
+    (1, 3): ([2, 3, 6, 7], [0]),  # excl[1,5]+[5,7]
+    (2, 3): ([4, 5, 6, 7], [0, 1, 2]),  # block[4,7] → excl[3,7]
+}
+
+
+def test_cpcv_splits_golden() -> None:
+    splits = cpcv_splits(8, n_groups=4, n_test_groups=2, label_span=1, embargo=1)
+    actual = {s.test_groups: (s.test.tolist(), s.train.tolist()) for s in splits}
+    assert actual == _EXPECTED_CPCV
+
+
+def test_cpcv_pass_rate_golden() -> None:
+    # n=4, S=4, k=2 → 4 singleton groups; each fold is two returns.
+    # returns [1, 2, -3, -4]; Sharpe sign == mean sign (population std > 0):
+    #   (0,1)[1,2] +  (0,2)[1,-3] -  (0,3)[1,-4] -
+    #   (1,2)[2,-3] - (1,3)[2,-4] - (2,3)[-3,-4] -  → 1 of 6 pass.
+    rate = cpcv_pass_rate([1.0, 2.0, -3.0, -4.0], n_groups=4, n_test_groups=2)
+    assert rate == 1.0 / 6.0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# WFO walks — n=10, rolling, train=3, test=2, step=2.
+# first test at index 3; test_start ∈ {3, 5, 7} (3+2 .. 8+2<=10).
+# ─────────────────────────────────────────────────────────────────────
+_EXPECTED_ROLLING_WALKS = [
+    (0, 3, 3, 5),
+    (2, 5, 5, 7),
+    (4, 7, 7, 9),
+]
+
+
+def test_wfo_rolling_walks_golden() -> None:
+    walks = walk_forward_splits(10, WFOScheme.ROLLING, train_size=3, test_size=2, step=2)
+    actual = [(w.train_start, w.train_stop, w.test_start, w.test_stop) for w in walks]
+    assert actual == _EXPECTED_ROLLING_WALKS
+
+
+def test_wfo_pass_rate_golden() -> None:
+    # returns indexed 0..9; rolling test windows are [3,5) [5,7) [7,9):
+    #   {1,2}  → Sharpe +  → pass
+    #   {0,0}  → zero variance → undefined → fail
+    #   {-1,-2}→ Sharpe -  → fail            → 1 of 3 pass.
+    returns = [0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, -1.0, -2.0, 0.0]
+    rate = wfo_pass_rate(returns, WFOScheme.ROLLING, train_size=3, test_size=2, step=2)
+    assert rate == 1.0 / 3.0
+
+
+def test_wfo_pass_rates_triple_golden() -> None:
+    # Same series. rolling/anchored share test windows (first test at 3) → 1/3.
+    # expanding starts at train_size//2 = 1 → windows [1,3) [3,5) [5,7) [7,9):
+    #   {0,0} fail, {1,2} pass, {0,0} fail, {-1,-2} fail → 1/4.
+    returns = [0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, -1.0, -2.0, 0.0]
+    rates = wfo_pass_rates(returns, train_size=3, test_size=2, step=2)
+    assert rates.rolling == 1.0 / 3.0
+    assert rates.anchored == 1.0 / 3.0
+    assert rates.expanding == 1.0 / 4.0

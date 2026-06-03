@@ -1,0 +1,244 @@
+"""Unit tests for :mod:`brutex.metrics.cpcv` (CPCV splits + pass-rate).
+
+Targets 100% line + branch coverage of the module (Golden Rule #12 /
+``docs/STANDARDS_100PCT.md``): split-count correctness, the purge +
+embargo row removal, every validation guard, the ``sharpe_of_returns``
+edge cases (single sample, zero variance), and the three ``cpcv_pass_rate``
+fold outcomes (pass / fail / undefined).
+"""
+
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import pytest
+from brutex.metrics.cpcv import (
+    DEFAULT_N_GROUPS,
+    DEFAULT_N_TEST_GROUPS,
+    CPCVSplit,
+    cpcv_pass_rate,
+    cpcv_splits,
+    sharpe_of_returns,
+)
+
+
+class TestSplitCount:
+    def test_default_is_c_16_8(self) -> None:
+        """Defaults reproduce the spec's S=16, C(16,8)=12,870 splits (line 387)."""
+        assert DEFAULT_N_GROUPS == 16
+        assert DEFAULT_N_TEST_GROUPS == 8
+        splits = cpcv_splits(64)
+        assert len(splits) == math.comb(16, 8) == 12_870
+
+    @pytest.mark.parametrize(
+        ("n_groups", "n_test_groups"),
+        [(2, 1), (4, 2), (5, 1), (6, 3), (8, 4)],
+    )
+    def test_count_equals_binomial(self, n_groups: int, n_test_groups: int) -> None:
+        n_samples = n_groups * 3
+        splits = cpcv_splits(n_samples, n_groups=n_groups, n_test_groups=n_test_groups)
+        assert len(splits) == math.comb(n_groups, n_test_groups)
+
+    def test_split_is_frozen_dataclass(self) -> None:
+        split = cpcv_splits(4, n_groups=2, n_test_groups=1)[0]
+        assert isinstance(split, CPCVSplit)
+        with pytest.raises(AttributeError):
+            split.test = np.array([0])  # type: ignore[misc]  # frozen
+
+
+class TestSplitStructure:
+    def test_complementary_without_purge(self) -> None:
+        """label_span=0, embargo=0 → train and test partition the index set."""
+        splits = cpcv_splits(12, n_groups=4, n_test_groups=2)
+        all_idx = set(range(12))
+        for s in splits:
+            test = set(s.test.tolist())
+            train = set(s.train.tolist())
+            assert test.isdisjoint(train)
+            assert test | train == all_idx
+
+    def test_test_groups_recorded_in_order(self) -> None:
+        splits = cpcv_splits(12, n_groups=4, n_test_groups=2)
+        # itertools.combinations order: first split is (0, 1).
+        assert splits[0].test_groups == (0, 1)
+        assert all(list(s.test_groups) == sorted(s.test_groups) for s in splits)
+
+    def test_uneven_group_partition(self) -> None:
+        """11 samples / 4 groups → sizes [3, 3, 3, 2] (array_split rule)."""
+        splits = cpcv_splits(11, n_groups=4, n_test_groups=1)
+        sizes = {s.test_groups[0]: s.test.size for s in splits}
+        assert sizes == {0: 3, 1: 3, 2: 3, 3: 2}
+
+    def test_even_group_partition(self) -> None:
+        splits = cpcv_splits(12, n_groups=4, n_test_groups=1)
+        assert {s.test.size for s in splits} == {3}
+
+    def test_arrays_are_read_only(self) -> None:
+        split = cpcv_splits(4, n_groups=2, n_test_groups=1)[0]
+        with pytest.raises(ValueError, match="read-only"):
+            split.test[0] = 999
+        with pytest.raises(ValueError, match="read-only"):
+            split.train[0] = 999
+
+    def test_determinism(self) -> None:
+        a = cpcv_splits(20, n_groups=5, n_test_groups=2, label_span=2, embargo=1)
+        b = cpcv_splits(20, n_groups=5, n_test_groups=2, label_span=2, embargo=1)
+        assert [s.test_groups for s in a] == [s.test_groups for s in b]
+        for sa, sb in zip(a, b, strict=True):
+            assert np.array_equal(sa.train, sb.train)
+            assert np.array_equal(sa.test, sb.test)
+
+
+class TestPurgeAndEmbargo:
+    def test_overlapping_label_is_purged(self) -> None:
+        """No-look-ahead: a train row whose label overlaps a test label is purged.
+
+        Groups of 3 over 12 samples; test = group 1 = indices [3,4,5].
+        With label_span=1, train index 2's label [2,3] overlaps test index
+        3's label [3,4] → index 2 MUST be purged from train.
+        """
+        # test_groups=(1,) is the 2nd single-group split.
+        split = cpcv_splits(12, n_groups=4, n_test_groups=1, label_span=1)[1]
+        assert split.test_groups == (1,)
+        assert split.test.tolist() == [3, 4, 5]
+        # index 2 (label [2,3]) overlaps test index 3 (label [3,4]) → purged.
+        assert 2 not in split.train.tolist()
+        # index 6 (label [6,7]) overlaps test index 5 (label [5,6]) → purged.
+        assert 6 not in split.train.tolist()
+        # index 1 (label [1,2]) does NOT overlap → survives.
+        assert 1 in split.train.tolist()
+
+    def test_embargo_removes_following_rows(self) -> None:
+        """Embargo drops the buffer immediately AFTER each test block."""
+        # test = group 1 = [3,4,5]; no label span, embargo=2.
+        split = cpcv_splits(12, n_groups=4, n_test_groups=1, embargo=2)[1]
+        assert split.test.tolist() == [3, 4, 5]
+        # rows 6,7 (within 2 bars after block end 5) are embargoed.
+        assert 6 not in split.train.tolist()
+        assert 7 not in split.train.tolist()
+        # row 8 is outside the embargo → survives.
+        assert 8 in split.train.tolist()
+        # embargo is forward-only: rows before the block are untouched.
+        assert {0, 1, 2}.issubset(set(split.train.tolist()))
+
+    def test_combined_purge_embargo_exact(self) -> None:
+        """Hand-derived exact train sets for n=12, S=4, k=2, span=1, embargo=1."""
+        splits = cpcv_splits(12, n_groups=4, n_test_groups=2, label_span=1, embargo=1)
+        by_groups = {s.test_groups: s.train.tolist() for s in splits}
+        # (0,1): block [0,5] → exclude [max(0,-1), min(11,7)] = [0,7] → train [8..11].
+        assert by_groups[(0, 1)] == [8, 9, 10, 11]
+        # (0,2): blocks [0,2]→excl[0,4] and [6,8]→excl[5,10] → train [11].
+        assert by_groups[(0, 2)] == [11]
+        # (2,3): block [6,11] → exclude [5, min(11,13)] = [5,11] → train [0..4].
+        assert by_groups[(2, 3)] == [0, 1, 2, 3, 4]
+
+    def test_heavy_purge_can_empty_train(self) -> None:
+        """A wide embargo can purge the entire remaining train set."""
+        split = cpcv_splits(6, n_groups=3, n_test_groups=1, embargo=10)[0]
+        assert split.test.tolist() == [0, 1]
+        assert split.train.size == 0
+
+
+class TestSharpeOfReturns:
+    def test_known_value(self) -> None:
+        # returns [1,2,3,4,5]: mean 3, population std sqrt(2).
+        result = sharpe_of_returns([1.0, 2.0, 3.0, 4.0, 5.0])
+        assert result is not None
+        assert result == pytest.approx(3.0 / math.sqrt(2.0))
+
+    def test_single_sample_is_none(self) -> None:
+        assert sharpe_of_returns([0.5]) is None
+
+    def test_zero_variance_is_none(self) -> None:
+        assert sharpe_of_returns([2.0, 2.0, 2.0]) is None
+
+    def test_negative_mean_is_negative(self) -> None:
+        result = sharpe_of_returns([-1.0, -2.0, -3.0])
+        assert result is not None
+        assert result < 0.0
+
+    def test_accepts_numpy_array(self) -> None:
+        arr = np.array([0.1, -0.2, 0.3], dtype=np.float64)
+        assert sharpe_of_returns(arr) == pytest.approx(sharpe_of_returns([0.1, -0.2, 0.3]))
+
+    @pytest.mark.parametrize(
+        ("bad", "match"),
+        [
+            ([], "non-empty"),
+            ([[1.0, 2.0], [3.0, 4.0]], "1-D"),
+            ([1.0, float("nan")], "finite"),
+            ([1.0, float("inf")], "finite"),
+        ],
+    )
+    def test_validation_errors(self, bad: object, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            sharpe_of_returns(bad)  # type: ignore[arg-type]
+
+
+class TestPassRate:
+    def test_in_unit_interval(self) -> None:
+        rng = np.random.default_rng(7)
+        rate = cpcv_pass_rate(rng.normal(0.0, 0.01, 96))
+        assert 0.0 <= rate <= 1.0
+
+    def test_all_positive_folds_pass(self) -> None:
+        # strictly increasing positive series → every fold mean > 0, var > 0.
+        returns = np.arange(1.0, 49.0)
+        assert cpcv_pass_rate(returns, n_groups=4, n_test_groups=2) == 1.0
+
+    def test_all_negative_folds_fail(self) -> None:
+        # strictly decreasing negative series → every fold Sharpe < 0 (defined).
+        returns = -np.arange(1.0, 49.0)
+        assert cpcv_pass_rate(returns, n_groups=4, n_test_groups=2) == 0.0
+
+    def test_undefined_folds_count_as_fail(self) -> None:
+        # n=2, S=2, k=1 → each fold has a single sample → Sharpe undefined.
+        assert cpcv_pass_rate([1.0, 2.0], n_groups=2, n_test_groups=1) == 0.0
+
+    def test_zero_variance_folds_fail(self) -> None:
+        # constant series → every fold has zero variance → undefined → fail.
+        assert cpcv_pass_rate([3.0] * 12, n_groups=4, n_test_groups=2) == 0.0
+
+    def test_partial_rate_between_zero_and_one(self) -> None:
+        # first half strongly up, second half strongly down → mixed folds.
+        returns = np.concatenate([np.arange(1.0, 25.0), -np.arange(1.0, 25.0)])
+        rate = cpcv_pass_rate(returns, n_groups=6, n_test_groups=3)
+        assert 0.0 < rate < 1.0
+
+    def test_min_sharpe_threshold_lowers_rate(self) -> None:
+        rng = np.random.default_rng(11)
+        returns = rng.normal(0.002, 0.01, 96)
+        lenient = cpcv_pass_rate(returns, min_sharpe=0.0)
+        strict = cpcv_pass_rate(returns, min_sharpe=5.0)
+        assert strict <= lenient
+
+    def test_determinism(self) -> None:
+        rng = np.random.default_rng(3)
+        returns = rng.normal(0.0, 0.01, 80)
+        assert cpcv_pass_rate(returns) == cpcv_pass_rate(returns)
+
+
+class TestParameterValidation:
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"n_groups": 1}, "n_groups must be >= 2"),
+            ({"n_groups": 99}, "cannot exceed n_samples"),
+            ({"n_groups": 4, "n_test_groups": 0}, "n_test_groups must be in"),
+            ({"n_groups": 4, "n_test_groups": 4}, "n_test_groups must be in"),
+            ({"n_groups": 4, "n_test_groups": 2, "label_span": -1}, "label_span must be >= 0"),
+            ({"n_groups": 4, "n_test_groups": 2, "embargo": -1}, "embargo must be >= 0"),
+        ],
+    )
+    def test_splits_reject_bad_params(self, kwargs: dict[str, int], match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            cpcv_splits(20, **kwargs)
+
+    def test_pass_rate_rejects_bad_returns(self) -> None:
+        with pytest.raises(ValueError, match="non-empty"):
+            cpcv_pass_rate([])
+
+    def test_pass_rate_rejects_bad_groups(self) -> None:
+        with pytest.raises(ValueError, match="cannot exceed n_samples"):
+            cpcv_pass_rate([1.0, 2.0, 3.0], n_groups=8)

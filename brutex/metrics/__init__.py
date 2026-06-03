@@ -30,27 +30,64 @@ moments keep full float precision and are NEVER rounded
 no losers, zero-variance returns, single trade) return ``None`` for the
 undefined ratio rather than ``inf`` / ``NaN`` (spec line 746).
 
-**DEFERRED — Stage-4 statistical-validity metrics (NOT implemented):**
-``deflated_sharpe_ratio``, ``pbo_probability``, ``cpcv_pass_rate``,
-``wfo_pass_rate``, ``lockbox_sharpe``, ``lockbox_mdd_pct`` (spec lines
-581-587). The spec itself marks these "Stage 4 only, NULL before then":
-they require the cross-validation / walk-forward / lockbox filter
-cascade and are out of scope for this per-result module. Honest-envelope
-deferral recorded in ``docs/MIGRATION.md`` entry #305 (DEC-METRICS-001),
-per Golden Rule #10. The composite ranking score (spec lines 602-615)
-and the hard rejection gates (spec lines 589-600) are also Stage-4
-concerns and are likewise out of scope here.
+**Stage-4 cross-validation primitives (IMPLEMENTED here):** the CPCV and
+walk-forward *split generation + pass-rate* surfaces — :mod:`brutex.metrics.cpcv`
+(:func:`cpcv_splits`, :func:`cpcv_pass_rate`) and :mod:`brutex.metrics.wfo`
+(:func:`walk_forward_splits`, :func:`wfo_pass_rate`, :func:`wfo_pass_rates`).
+These are pure, deterministic functions over a returns series, with purging +
+embargo (CPCV) and rolling/anchored/expanding windows (WFO). Decision
+``DEC-STAT-CPCV-WFO-001`` (``docs/MIGRATION.md`` entry #428).
+
+**STILL DEFERRED — Stage-4 cascade wiring + sibling metrics (NOT implemented):**
+``deflated_sharpe_ratio``, ``pbo_probability``, ``lockbox_sharpe``,
+``lockbox_mdd_pct`` (spec lines 581-587), the Reality-Check/SPA and
+Romano-Wolf gates, and the wiring of the ``cpcv_pass_rate`` / ``wfo_pass_rate``
+*columns* into the result-row schema. The spec marks the result-row
+statistical fields "Stage 4 only, NULL before then"; this PR ships the CV/WFO
+*engines* they will consume, not the full cascade. Honest-envelope deferral
+recorded in ``docs/MIGRATION.md`` entries #305 (DEC-METRICS-001) and #428
+(DEC-STAT-CPCV-WFO-001), per Golden Rule #10. The composite ranking score
+(spec lines 602-615) and the hard rejection gates (spec lines 589-600) remain
+out of scope here.
 """
 
 from __future__ import annotations
 
 from brutex.metrics.compute import Moments, ResultMetrics, compute_metrics
+from brutex.metrics.cpcv import (
+    DEFAULT_N_GROUPS,
+    DEFAULT_N_TEST_GROUPS,
+    CPCVSplit,
+    cpcv_pass_rate,
+    cpcv_splits,
+    sharpe_of_returns,
+)
 from brutex.metrics.types import ClosedTrade, EquityCurve
+from brutex.metrics.wfo import (
+    WFOPassRates,
+    WFOScheme,
+    WFOWalk,
+    walk_forward_splits,
+    wfo_pass_rate,
+    wfo_pass_rates,
+)
 
 __all__ = [
+    "DEFAULT_N_GROUPS",
+    "DEFAULT_N_TEST_GROUPS",
+    "CPCVSplit",
     "ClosedTrade",
     "EquityCurve",
     "Moments",
     "ResultMetrics",
+    "WFOPassRates",
+    "WFOScheme",
+    "WFOWalk",
     "compute_metrics",
+    "cpcv_pass_rate",
+    "cpcv_splits",
+    "sharpe_of_returns",
+    "walk_forward_splits",
+    "wfo_pass_rate",
+    "wfo_pass_rates",
 ]
