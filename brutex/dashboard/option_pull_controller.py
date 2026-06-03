@@ -63,6 +63,7 @@ from brutex.adapters.dhan.option_universe_ingest import (
 )
 from brutex.dashboard.pull_controller import DHAN_HISTORY_FLOOR, resolve_candle_range
 from brutex.data.fetch_coverage import FetchCoverage
+from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.option_sink import NullOptionBarSink
 from brutex.models import Instrument, InstrumentType
 
@@ -318,6 +319,13 @@ def pull_options(
         Override the ``(client, sink)`` builder; defaults to the synthetic
         builder when *dry_run* else the live builder. Tests inject a fake
         factory to exercise the non-dry-run branch without network.
+    coverage
+        Optional pre-seeded skip-ledger. On a **live** pull (``dry_run`` False),
+        ``None`` (the default) is replaced by the persisted ledger
+        (``<lake_root>/fetch_coverage.json``) so already-pulled option windows
+        are skipped and this run's completed windows are saved back — a re-pull
+        never re-burns the Dhan quota on data already in the lake
+        (DEC-FETCH-COVERAGE-WIRING-001). Dry-run ignores it (null sink).
 
     Returns
     -------
@@ -344,6 +352,11 @@ def pull_options(
         client_factory = _build_dry_run_options if dry_run else _build_live_options
     client, sink = client_factory(lake_root)
 
+    # Load the persisted skip-ledger for a live pull so windows already in the
+    # lake are not re-fetched (no wasted Dhan quota on a re-run);
+    # DEC-FETCH-COVERAGE-WIRING-001.
+    coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
+
     _LOG.info(
         "universe.pull_options.start",
         underlyings=len(underlyings),
@@ -365,6 +378,8 @@ def pull_options(
         on_progress=on_progress,
         coverage=coverage,
     )
+    # Persist the windows just completed so the next pull skips them.
+    end_pull_coverage(coverage, lake_root, dry_run=dry_run)
 
     # Aggregate the per-series reports + quarantined failures by underlying.
     failed_by_symbol: dict[str, int] = {}
