@@ -27,9 +27,17 @@ import time
 from collections import deque
 from collections.abc import Callable
 
+import structlog
+
 from brutex.adapters.dhan.constants import DATA_RATE_LIMIT_RPS
 from brutex.orchestrator.quota_tracker import DailyQuotaTracker
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
+
+#: Structured logger — surfaces the otherwise-invisible throttle: a 429
+#: (``rate.429``), a step DOWN under sustained pressure (``rate.stepdown``), and
+#: the recovery back up (``rate.stepup``) into the ``/logs`` stream so the
+#: operator SEES exactly when/why effective r/s dropped (DEC-DHAN-RATE-LOGGING-001).
+_LOG = structlog.get_logger("brutex.adapters.dhan.rate_control")
 
 #: Dhan's verified Data-API ceiling — the hard cap we never exceed (and start at).
 CEILING_RPS: float = float(DATA_RATE_LIMIT_RPS)
@@ -107,19 +115,24 @@ class DhanRateController:
         cutoff = now - STEP_DOWN_WINDOW
         while self._hits and self._hits[0] < cutoff:
             self._hits.popleft()
+        _LOG.warning("rate.429", current_rps=self._rps, recent_hits=len(self._hits))
         if len(self._hits) >= STEP_DOWN_HITS and self._rps > FLOOR_RPS:
+            old_rps = self._rps
             self._rps -= STEP_RPS
             self._bucket = self._make_bucket()
             self._hits.clear()
             self._last_step = now
+            _LOG.warning("rate.stepdown", from_rps=old_rps, to_rps=self._rps, floor_rps=FLOOR_RPS)
 
     def on_success(self) -> None:
         """Record a clean call; step **up** 1 r/s after a sustained clean window — O(1)."""
         now = self._clock()
         if self._rps < CEILING_RPS and not self._hits and now - self._last_step >= STEP_UP_WINDOW:
+            old_rps = self._rps
             self._rps += STEP_RPS
             self._bucket = self._make_bucket()
             self._last_step = now
+            _LOG.info("rate.stepup", from_rps=old_rps, to_rps=self._rps, ceiling_rps=CEILING_RPS)
 
     def snapshot(self) -> dict[str, object]:
         """A JSON-friendly state snapshot for the dashboard rate panel."""

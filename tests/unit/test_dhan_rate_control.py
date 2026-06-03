@@ -16,6 +16,7 @@ from brutex.adapters.dhan.rate_control import (
     STEP_UP_WINDOW,
     DhanRateController,
 )
+from structlog.testing import capture_logs
 
 
 class _Clock:
@@ -130,6 +131,44 @@ def test_on_success_blocked_before_clean_window() -> None:
     clock.advance(STEP_UP_WINDOW - 1)  # just under the clean window
     ctl.on_success()
     assert ctl.current_rps == 4.0  # too soon → no step up
+
+
+class TestThrottleLogging:
+    """The throttle must be VISIBLE — every 429, every step down, every recovery."""
+
+    def test_every_429_logs_rate_429(self) -> None:
+        clock = _Clock()
+        ctl = _controller(clock)
+        with capture_logs() as logs:
+            ctl.on_rate_limit()
+        hit = [e for e in logs if e["event"] == "rate.429"]
+        assert len(hit) == 1
+        assert hit[0]["current_rps"] == 5.0
+        assert hit[0]["recent_hits"] == 1
+
+    def test_step_down_logs_from_and_to_rps(self) -> None:
+        clock = _Clock()
+        ctl = _controller(clock)
+        with capture_logs() as logs:
+            _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # 5 → 4
+        down = [e for e in logs if e["event"] == "rate.stepdown"]
+        assert len(down) == 1
+        assert down[0]["from_rps"] == 5.0
+        assert down[0]["to_rps"] == 4.0
+        assert down[0]["floor_rps"] == FLOOR_RPS
+
+    def test_step_up_logs_recovery(self) -> None:
+        clock = _Clock()
+        ctl = _controller(clock)
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # 5 → 4 (silent here)
+        clock.advance(STEP_UP_WINDOW)
+        with capture_logs() as logs:
+            ctl.on_success()  # clean window → 4 → 5
+        up = [e for e in logs if e["event"] == "rate.stepup"]
+        assert len(up) == 1
+        assert up[0]["from_rps"] == 4.0
+        assert up[0]["to_rps"] == 5.0
+        assert up[0]["ceiling_rps"] == CEILING_RPS
 
 
 def test_pace_delegates_without_error() -> None:
