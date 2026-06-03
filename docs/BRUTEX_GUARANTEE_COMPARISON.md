@@ -98,6 +98,7 @@ truth, straight from the enforcement audit.
 | Test coverage | 🟡 **90% floor + 103 modules at 100%** | climbing to 100% one locked module at a time; 8 modules pending an upstream library fix |
 | Standards enforcement (overall) | 🟡 **15 of 21 rows fully enforced (71%)** | + 2 partial (10%) + 1 roadmap (5%) + 3 manual-reviewer (14%) — per `STANDARDS_100PCT.md` §1, re-verified 2026-06-02. *(Older docs that say "9 of 21 / ~22%" are pre-reconciliation drift.)* |
 | The brute-force **sweep engine** (Stage 1A→1B→2→3→4) | 📋 **next (Phase 3)** | the per-bar / per-mask / dedup **primitives exist and are O(1)-gated today**; the cascade itself is the upcoming build |
+| Overfitting protection — **purged cross-validation + walk-forward** | 🟢 **CV/WFO engine live** · 📋 cascade wiring | the Combinatorial Purged CV (S=16 → **12,870** purge+embargo splits, **no-look-ahead leakage property-tested**) and the rolling/anchored/expanding walk-forward **pass-rate engines** are live, **100%-covered**, and **O(1)-per-fold-gated** (a measured 1.03× flat ratio) — `brutex/metrics/cpcv.py` + `wfo.py` (DEC-STAT-CPCV-WFO-001); the DSR / PBO / Lockbox filters + result-row wiring that *consume* them are 📋 the upcoming Stage-4 build |
 | "33 billion trials in 2–4 days" SLA | 📋 **target, not yet proven** | tracked as an `xfail` until the engine + M4-Pro runner land — no "millions in minutes" claim without the hardware (Golden Rule #10) |
 | Live trading / order placement | 🚫 **out of scope** | Track 1 is **signal-only research**; execution realism is the later Options Track |
 

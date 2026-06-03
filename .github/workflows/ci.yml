@@ -1152,6 +1152,22 @@ jobs:
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
+          # DEC-STAT-CPCV-WFO-001 (#428): Stage-4 cross-validation primitives.
+          # brutex.metrics.cpcv (104 stmts, 34 branches, 42 tests) — CPCV
+          # splits + purge/embargo + pass-rate; numpy imported lazily so the
+          # single-module gate does not double-load the C extension (numpy 2.x).
+          if compgen -G "tests/unit/test_cpcv.py" > /dev/null; then
+            pytest --cov=brutex.metrics.cpcv --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_cpcv.py
+          else
+            echo "(brutex.metrics.cpcv test file not present yet — gate inactive)"
+          fi
+          # brutex.metrics.wfo (76 stmts, 22 branches, 32 tests) — walk-forward
+          # rolling/anchored/expanding pass-rates.
+          if compgen -G "tests/unit/test_wfo.py" > /dev/null; then
+            pytest --cov=brutex.metrics.wfo --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_wfo.py
+          else
+            echo "(brutex.metrics.wfo test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
