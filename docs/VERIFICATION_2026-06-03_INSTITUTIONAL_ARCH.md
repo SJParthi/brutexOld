@@ -30,12 +30,13 @@ important fact: **the repository tells the truth about this itself** — the
 projections are labelled "NEVER MEASURED". The gap is honesty-preserving,
 not deceptive.
 
-### 0.1 Two corrections to the audit inputs (why hostile cross-check matters)
+### 0.1 Corrections (why hostile cross-check matters — incl. to this audit's own first draft)
 
 | Input claim | Reality | Evidence |
 |---|---|---|
 | "Rayon multi-core `DEC-RUST-RAYON-...` recently merged (~#415)" | **FALSE.** No Rayon anywhere in `rust/`; not a dependency. MIGRATION entry #415 is the dashboard pull-beam fix. | `docs/MIGRATION.md:4920`; `rust/fno-math/Cargo.toml:27-59`; `rust/fno-math/src/python.rs:174,219,289` |
 | "MIGRATION tops out at #315; the Rust kernel decision IDs don't exist" (an early agent error) | **FALSE** — the file is ~4,930 lines; highest entry is **#415**; the kernel IDs are real. | `docs/MIGRATION.md:4913` (#411), `:4917` (#413) |
+| This audit's own first draft: "Stage 1A — only the `combo_mask` primitive exists" | **CORRECTED (post-§9 review)** — the 52-condition evaluator `evaluate_atoms` + the indicators EXIST and are unit-tested; only the matrix-builder *wiring* is missing, not the conditions. | `brutex/vocabulary/evaluator.py:137`; `brutex/vocabulary/bits.py:93`; `tests/unit/test_vocabulary.py` |
 
 ---
 
@@ -44,7 +45,7 @@ not deceptive.
 | Stage | Purpose | Input → Output (reduction) | Design cite | Built? |
 |---|---|---|---|---|
 | **Total** | Full combinatorial sweep space | **730 B** trials (1.095 T retired by DEC-MODE-002) | `docs/TRACK1_REQUIREMENTS_FINAL.md:26,117,169`; `docs/MIGRATION.md:692` | — |
-| **1A** Precompute | Cache 52 conditions/bar as a u64 bitmask matrix | OHLC → bitset (no reduction) | `docs/TRACK1_BACKTEST_SPEC.md:319-324` | 🟡 PARTIAL — only the `combo_mask` primitive exists; no `stage1a` module |
+| **1A** Precompute | Cache 52 conditions/bar as a u64 bitmask matrix | OHLC → bitset (no reduction) | `docs/TRACK1_BACKTEST_SPEC.md:319-324` | 🟡 PARTIAL — the **52-condition evaluator** (`brutex/vocabulary/evaluator.py:137` `evaluate_atoms`) + indicators (`brutex/indicators/*`) are **REAL + unit-tested** (`tests/unit/test_vocabulary.py`); the **matrix-builder seam** (feed→`IndicatorSnapshot`→packed `bar_bits`) is the missing wiring, not the conditions |
 | **1B** Coarse filter | Drop bottom 50% by coarse score | 730 B space → ~50% survivors | `docs/TRACK1_BACKTEST_SPEC.md:326-340` | 🔴 NONE — no `stage1b` module |
 | **2** Full backtest | Bar-by-bar SL/TP/15:20 walk on survivors | **~33 B** hot-path trials | `docs/TRACK1_BACKTEST_SPEC.md:29,342`; `docs/TRACK1_PERFORMANCE_BUDGET.md:18` | 🟡 kernel only — mask-count REAL, but no trade-sim, no driver |
 | **2.5** Bayesian early-stop | Posterior + SPRT prune of duds in-loop | ~33 B → **~13 B** effective (61% pruned) | `docs/TRACK1_OPTIMIZATIONS.md:26-151` (DEC #100; OPEN #124) | 🔴 NONE |
@@ -76,7 +77,7 @@ DEC-MODE-002 but is still listed as a live conflict in one stale doc
 | h | Trade-sim walker (mask-hit → P&L) | "lands alongside" | 🟡 STUB (unwired) | `ExecutionSimulator` is REAL (`brutex/execution/simulator.py:66-348`) but `engine/`+`sweep.py` never import it; `ComboSweep` records a "toy placeholder" `signal_count` (`brutex/strategies/sweep.py:32-36`); `ClosedTrade` has no producer (`brutex/metrics/types.py:13-19`) |
 | i | Stage 3 optimizer (CMA-ES) | designed | 🔴 NONE | docstring `brutex/engine/__init__.py:9`; no optuna/pycma/nevergrad dep |
 | j | Stage 4 stats — DSR/CPCV/SPA/WFO | 9-filter cascade | 🔴 NONE ×4 | `brutex/metrics/compute.py:13-19` "NOT implemented … NULL". SPA never even specced. (Sharpe/Sortino/Calmar etc. ARE real) |
-| — | **End-to-end sweep driver** | "runner — coming" | 🔴 STUB-ONLY | No `stage1a/1b/2/3/4/runner` module exists; `brutex/engine/__init__.py:13-23` admits "Foundation only." `ComboSweep` has zero non-test callers. A user cannot launch a sweep today |
+| — | **End-to-end sweep driver** | "runner — coming" | 🔴 STUB-ONLY | No Stage 1A→4 **funnel** sweep driver exists; `brutex/engine/__init__.py:13-23` admits "Foundation only." (A *single-strategy* `BacktestDriver` `brutex/execution/driver.py:48-142` + `StrategyRunner` `brutex/strategies/runner.py` exist, but they are `Decimal`/cost-based — not the funnel.) `ComboSweep` has zero non-test callers. A user cannot launch a multi-stage sweep today |
 | — | **Determinism (BLAKE3 9-field, GR#4)** | required | ✅ PASS | Genuine BLAKE3 `brutex/strategies/combo.py:180` → `rust/fno-math/src/python.rs:129`; all 9 fields validated; property+unit tested (`tests/unit/test_strategies_combo.py:127`, `tests/property/test_combo_hash_uniqueness.py`). Caveat: only wired caller passes 5/9 fields as literal `"N/A"` (`brutex/strategies/sweep.py:446-450`) |
 | — | **O(1) gates (GR#5, ≤1.1×)** | enforced in CI | 🟡 PARTIAL/MISLEADING | Bench tests are REAL and merge-gating (`.github/workflows/ci.yml:2060`), **but enforce 3–10×, not 1.1×** — the 1.1× tier only runs if `BRUTEX_M4PRO_STRICT=1`, which CI never sets (`tests/bench/_o1_tiers.py:36-43`; strict runner offline per `.github/workflows/bench-m4pro.yml:14-22`). "Result append" is skipped (`tests/bench/test_throughput_canary.py:28`). Kernel is explicitly O(N_masks·N_bars), NOT O(1)/mask (`rust/fno-math/src/python.rs:215-223`) |
 
@@ -143,7 +144,9 @@ Dhan data **ingest** pipeline (`brutex/orchestrator/pipeline.py:610`) ·
 u64 **mask primitives** + **resident buffer** (Rust) · **BLAKE3 9-field**
 reproducibility hash · **LMDB+Bloom** dedup · hash-chained **audit log** ·
 **30+ basic metrics** (Sharpe/Sortino/…) · **dashboard** · isolated
-`ExecutionSimulator`.
+`ExecutionSimulator` (`Decimal`/cost-based — Track-2 oriented) · the
+**52-condition vocabulary evaluator** + indicators (`brutex/vocabulary/evaluator.py`,
+unit-tested, **not yet wired** into a matrix builder).
 
 ### What is DESIGNED-ONLY (spec exists, no code)
 
@@ -211,7 +214,10 @@ the empirical-Bayes prior fit at `:39` names no method).
    `rust/fno-math/src/python.rs`).
 6. **Build `brutex/orchestrator/stage2_driver.py`** (does not exist).
 7. **Wire audit + reproducibility** (`STAGE_2_5_PRUNE/PROMOTE` + L3 replay
-   oracle; end-to-end repro hash is 🟡 PARTIAL per `docs/MIGRATION.md:271`).
+   oracle; the end-to-end reproducible sweep→Parquet path is unbuilt =
+   🟡 PARTIAL. NOTE: the prior anchor for this gap, `docs/MIGRATION.md:271`
+   / DEC-PROTOCOL-001, was **RETIRED** in DEC-P0-026 — the gap needs a live
+   re-anchor, not that retired decision).
 
 **Gate:** the phase doc requires "Phase 1 + Phase 2 complete"
 (`docs/phases/phase_2_5_bayesian_early_stop.md:17-22`); the master
