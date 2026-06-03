@@ -9,10 +9,11 @@ universe is the bulk case (CLAUDE.md §11 COMMON — one source, no copy-paste).
 
 For each underlying it maps the resolved :class:`~brutex.models.Instrument` to
 an :class:`~brutex.adapters.dhan.option_universe_ingest.OptionUnderlying`
-(index → ``OPTIDX`` / ATM±10, stock → ``OPTSTK`` / ATM±3;
-DEC-DHAN-PULL-SCOPE-001) and drives the proven
+(index → ``OPTIDX`` / ATM±10 / ``WEEK``+``MONTH``, stock → ``OPTSTK`` / ATM±3 /
+``MONTH``-only — Indian single-stock options are monthly-only;
+DEC-DHAN-PULL-SCOPE-001, DEC-DHAN-STOCK-MONTHLY-ONLY-001) and drives the proven
 :func:`~brutex.adapters.dhan.option_universe_ingest.run_dhan_options_ingest`
-fan-out (ATM window × ``WEEK``/``MONTH`` × the
+fan-out (ATM window × the underlying's per-kind expiry flags × the
 :data:`~brutex.adapters.dhan.option_universe_ingest.DEFAULT_EXPIRY_CODES` ×
 ``CALL``/``PUT``). Every series is **1-minute only** (DEC-DHAN-1M-ONLY-001),
 resolved relative to the underlying's spot, and each bar is stamped with its
@@ -56,6 +57,7 @@ from brutex.adapters.dhan.option_synthetic import SyntheticOptionClient
 from brutex.adapters.dhan.option_universe_ingest import (
     DEFAULT_EXPIRY_CODES,
     INDEX_STRIKE_OFFSETS,
+    STOCK_EXPIRY_FLAGS,
     STOCK_STRIKE_OFFSETS,
     OptionUnderlying,
     ProgressHook,
@@ -74,8 +76,12 @@ def instrument_to_option_underlying(instrument: Instrument) -> OptionUnderlying:
     """Map a spot :class:`Instrument` to its rolling-option fan-out underlying.
 
     O(1): pure field projection. An **index** (``IDX``) fans out as ``OPTIDX``
-    with the wide ATM±10 window; an **equity** (``EQ``) as ``OPTSTK`` with the
-    ATM±3 window (DEC-DHAN-PULL-SCOPE-001). The exchange-segment is the
+    with the wide ATM±10 window AND the full ``WEEK``+``MONTH`` expiry set; an
+    **equity** (``EQ``) as ``OPTSTK`` with the ATM±3 window and the
+    ``MONTH``-only expiry set — Indian single-stock options are monthly-only
+    (NSE single stocks have no weekly series; only some indices carry weeklies),
+    so fanning ``WEEK`` for a stock would only waste Dhan calls/quota
+    (DEC-DHAN-PULL-SCOPE-001; DEC-DHAN-STOCK-MONTHLY-ONLY-001). The exchange-segment is the
     underlying's exchange in the F&O segment (``NSE_FNO`` / ``BSE_FNO``), and
     the underlying's NUMERIC ``security_id`` (the Dhan ``SECURITY_ID``; the
     renamed numeric id field, ADR-0003) is the rolling option's resolution
@@ -112,9 +118,9 @@ def instrument_to_option_underlying(instrument: Instrument) -> OptionUnderlying:
         )
     numeric_id = str(instrument.security_id)
     if instrument.instrument is InstrumentType.IDX:
-        instrument_name, offsets = "OPTIDX", INDEX_STRIKE_OFFSETS
+        instrument_name, offsets, flags = "OPTIDX", INDEX_STRIKE_OFFSETS, EXPIRY_FLAGS
     elif instrument.instrument is InstrumentType.EQ:
-        instrument_name, offsets = "OPTSTK", STOCK_STRIKE_OFFSETS
+        instrument_name, offsets, flags = "OPTSTK", STOCK_STRIKE_OFFSETS, STOCK_EXPIRY_FLAGS
     else:
         raise ValueError(
             f"{instrument.symbol_name} is a {instrument.instrument.value} — only "
@@ -127,6 +133,7 @@ def instrument_to_option_underlying(instrument: Instrument) -> OptionUnderlying:
         exchange_segment=f"{instrument.exch_id.value}_FNO",
         instrument=instrument_name,
         strike_offsets=offsets,
+        expiry_flags=flags,
     )
 
 
@@ -283,7 +290,7 @@ def pull_options(
     lake_root: Path,
     dry_run: bool,
     now: datetime | None = None,
-    expiry_flags: Sequence[str] = EXPIRY_FLAGS,
+    expiry_flags: Sequence[str] | None = None,
     expiry_codes: Sequence[int] = DEFAULT_EXPIRY_CODES,
     option_types: Sequence[str] = DRV_OPTION_TYPES,
     client_factory: OptionClientFactory | None = None,
@@ -293,8 +300,9 @@ def pull_options(
     """Fan-out-pull the option universe for *instruments* over ``[2021-01-01, today]``.
 
     The core behind the options pull buttons: map each *instrument* to its
-    :class:`OptionUnderlying` (index → ``OPTIDX``/ATM±10, stock →
-    ``OPTSTK``/ATM±3), then drive ONE
+    :class:`OptionUnderlying` (index → ``OPTIDX``/ATM±10/``WEEK``+``MONTH``,
+    stock → ``OPTSTK``/ATM±3/``MONTH``-only — single stocks are monthly-only,
+    DEC-DHAN-STOCK-MONTHLY-ONLY-001), then drive ONE
     :func:`~brutex.adapters.dhan.option_universe_ingest.run_dhan_options_ingest`
     pass over the whole list so the live client is built ONCE and a bad series
     is quarantined without sinking the rest. A one-element list is the
@@ -312,9 +320,14 @@ def pull_options(
     now
         Injected "current" instant (defaults to :func:`datetime.now`) — its UTC
         date is the upper bound of the full ``[2021-01-01, today]`` window.
-    expiry_flags, expiry_codes, option_types
-        The fan-out axes — default to ``WEEK``/``MONTH``, the near/next/far
-        expiry codes (DEC-DHAN-EXPIRY-CODES-001), and ``CALL``/``PUT``.
+    expiry_flags
+        Optional **uniform override** for the expiry-flag axis. ``None`` (the
+        default) honours each underlying's own per-kind set — index
+        ``WEEK``+``MONTH``, stock ``MONTH``-only (DEC-DHAN-STOCK-MONTHLY-ONLY-001);
+        passing a sequence forces it on every underlying.
+    expiry_codes, option_types
+        The remaining fan-out axes — default to the near/next/far expiry codes
+        (DEC-DHAN-EXPIRY-CODES-001) and ``CALL``/``PUT``.
     client_factory
         Override the ``(client, sink)`` builder; defaults to the synthetic
         builder when *dry_run* else the live builder. Tests inject a fake

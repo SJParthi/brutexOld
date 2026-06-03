@@ -2,8 +2,10 @@
 
 100% line+branch via injected fakes (no network, no lake): the strike-window
 generator (incl. the 0 and negative-offset edges), the full fan-out cardinality
-(strikes × flags × codes × types), per-series terminal-error quarantine, the
-report aggregates, the empty-universe case, and custom fan-out axes.
+(strikes × flags × codes × types), the **per-kind expiry set** (index
+WEEK+MONTH vs stock MONTH-only, DEC-DHAN-STOCK-MONTHLY-ONLY-001) + the explicit
+uniform override, per-series terminal-error quarantine, the report aggregates,
+the empty-universe case, and custom fan-out axes.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from brutex.adapters.dhan.errors import DhanBadRequestError
 from brutex.adapters.dhan.option_universe_ingest import (
     DEFAULT_EXPIRY_CODES,
     INDEX_STRIKE_OFFSETS,
+    STOCK_EXPIRY_FLAGS,
     STOCK_STRIKE_OFFSETS,
     OptionsUniverseReport,
     OptionUnderlying,
@@ -95,6 +98,8 @@ class _Sink:
 
 
 def _index(security_id: str = "13", offsets: int = INDEX_STRIKE_OFFSETS) -> OptionUnderlying:
+    # No expiry_flags passed → the OptionUnderlying default EXPIRY_FLAGS
+    # (WEEK+MONTH) — the index set (DEC-DHAN-STOCK-MONTHLY-ONLY-001).
     return OptionUnderlying(
         security_id=security_id,
         exch_id="NSE",
@@ -102,6 +107,20 @@ def _index(security_id: str = "13", offsets: int = INDEX_STRIKE_OFFSETS) -> Opti
         exchange_segment="NSE_FNO",
         instrument="OPTIDX",
         strike_offsets=offsets,
+    )
+
+
+def _stock(security_id: str = "1333", offsets: int = STOCK_STRIKE_OFFSETS) -> OptionUnderlying:
+    # A single-stock underlying — MONTH-only expiry set (NSE single stocks have
+    # no weekly option series; DEC-DHAN-STOCK-MONTHLY-ONLY-001).
+    return OptionUnderlying(
+        security_id=security_id,
+        exch_id="NSE",
+        underlying_symbol="HDFCBANK",
+        exchange_segment="NSE_FNO",
+        instrument="OPTSTK",
+        strike_offsets=offsets,
+        expiry_flags=STOCK_EXPIRY_FLAGS,
     )
 
 
@@ -155,6 +174,50 @@ def test_full_fanout_cardinality_and_bars() -> None:
     assert report.bars_appended == expected  # one in-session bar per series
     assert report.windows == expected
     assert report.transient_failures == 0
+
+
+def test_per_kind_expiry_flags_stock_month_only_index_week_month() -> None:
+    """A stock fans MONTH-only; an index keeps WEEK+MONTH → the stock count HALVES.
+
+    The per-kind reduction the live-pull-log bug needed: a stock previously
+    fanned WEEK+MONTH, but Indian single stocks are monthly-only, so the WEEK
+    leg only ever returned empty + burned Dhan quota
+    (DEC-DHAN-STOCK-MONTHLY-ONLY-001).
+    """
+    report = run_dhan_options_ingest(
+        _OkClient(),
+        _Sink(),
+        underlyings=[_index(offsets=1), _stock(offsets=1)],  # identical 3-strike window
+        start=date(2021, 1, 4),
+        end=date(2021, 1, 5),
+    )
+    index_series = {k for k in report.series if k[0] == "13"}
+    stock_series = {k for k in report.series if k[0] == "1333"}
+    # Index: 3 strikes × 2 flags (WEEK+MONTH) × 3 codes × 2 types.
+    assert len(index_series) == 3 * 2 * len(DEFAULT_EXPIRY_CODES) * 2
+    # Stock: 3 strikes × 1 flag (MONTH) × 3 codes × 2 types — strictly fewer.
+    assert len(stock_series) == 3 * 1 * len(DEFAULT_EXPIRY_CODES) * 2
+    assert len(stock_series) < len(index_series)
+    # No WEEK leg is fanned for the stock (the elided, always-empty series).
+    assert {k[1] for k in stock_series} == {"MONTH"}
+    assert {k[1] for k in index_series} == {"WEEK", "MONTH"}
+
+
+def test_explicit_expiry_flags_override_beats_per_kind() -> None:
+    """An explicit ``expiry_flags`` argument overrides each underlying's per-kind set."""
+    report = run_dhan_options_ingest(
+        _OkClient(),
+        _Sink(),
+        underlyings=[_stock(offsets=0)],  # per-kind set = MONTH-only
+        start=date(2021, 1, 4),
+        end=date(2021, 1, 5),
+        expiry_flags=("WEEK", "MONTH"),  # force BOTH flags onto the stock
+        expiry_codes=(1,),
+        option_types=("CALL",),
+    )
+    # The uniform override wins: the stock fans both flags (1 × 2 × 1 × 1).
+    assert report.series_count == 2
+    assert {k[1] for k in report.series} == {"WEEK", "MONTH"}
 
 
 def test_terminal_error_quarantines_every_series() -> None:
