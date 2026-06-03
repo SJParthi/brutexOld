@@ -30,38 +30,47 @@ moments keep full float precision and are NEVER rounded
 no losers, zero-variance returns, single trade) return ``None`` for the
 undefined ratio rather than ``inf`` / ``NaN`` (spec line 746).
 
-**Stage-4 cross-validation primitives (IMPLEMENTED here):** the CPCV and
-walk-forward *split generation + pass-rate* surfaces — :mod:`brutex.metrics.cpcv`
-(:func:`cpcv_splits`, :func:`cpcv_pass_rate`) and :mod:`brutex.metrics.wfo`
-(:func:`walk_forward_splits`, :func:`wfo_pass_rate`, :func:`wfo_pass_rates`).
-These are pure, deterministic functions over a returns series, with purging +
-embargo (CPCV) and rolling/anchored/expanding windows (WFO). Decision
-``DEC-STAT-CPCV-WFO-001`` (``docs/MIGRATION.md`` entry #428).
+**Stage-4 statistical-validity metrics (spec lines 581-587).** Implemented
+here as pure, deterministic functions:
 
-**Stage-4 multiple-testing tests (IMPLEMENTED in** :mod:`brutex.metrics.spa`
-**):** White's Reality Check, Hansen's SPA, and the Romano-Wolf step-down
-(spec Stage-4 filters #4 + #6; DEC-STAT-SPA-001, ``docs/MIGRATION.md``
-entry #429) are pure bootstrap functions over a matrix of strategy excess
-returns and are re-exported here (:func:`reality_check`, :func:`hansen_spa`,
-:func:`romano_wolf`). They are independent of the per-result row schema above.
+* ``deflated_sharpe_ratio`` + ``probabilistic_sharpe_ratio`` +
+  ``expected_max_sharpe_ratio`` (Bailey & LdP 2014 / 2012) in
+  :mod:`brutex.metrics.deflated_sharpe`; ``pbo_probability`` (Bailey et al.
+  2017, CSCV) in :mod:`brutex.metrics.pbo` — ``DEC-STAT-DSR-PBO-001``
+  (``docs/MIGRATION.md`` entry #429). :func:`compute_metrics` leaves the
+  ``ResultMetrics`` DSR / PBO fields NULL; :func:`with_stage4_statistics`
+  fills them once the leaderboard's trial count / Sharpe dispersion / CSCV
+  matrix are known.
+* the CPCV + walk-forward *split generation + pass-rate* surfaces —
+  :mod:`brutex.metrics.cpcv` (:func:`cpcv_splits`, :func:`cpcv_pass_rate`)
+  and :mod:`brutex.metrics.wfo` (:func:`walk_forward_splits`,
+  :func:`wfo_pass_rate`, :func:`wfo_pass_rates`), pure functions over a
+  returns series with purging + embargo (CPCV) and
+  rolling/anchored/expanding windows (WFO) — ``DEC-STAT-CPCV-WFO-001``
+  (``docs/MIGRATION.md`` entry #428).
+* the **data-snooping multiple-testing** tests over a matrix of strategy
+  excess returns — :mod:`brutex.metrics.spa` (:func:`reality_check` —
+  White 2000; :func:`hansen_spa` — Hansen 2005; :func:`romano_wolf` —
+  Romano-Wolf 2005/2016), deterministic seeded block-bootstrap p-values +
+  FWER rejection set (spec Stage-4 filters #4 + #6) — ``DEC-STAT-SPA-001``
+  (``docs/MIGRATION.md`` entry #431).
 
-**STILL DEFERRED — Stage-4 cascade wiring + sibling metrics (NOT implemented):**
-``deflated_sharpe_ratio``, ``pbo_probability``, ``lockbox_sharpe``,
-``lockbox_mdd_pct`` (spec lines 581-587), and the wiring of the
-``cpcv_pass_rate`` / ``wfo_pass_rate`` *columns* (and the Reality-Check / SPA /
-Romano-Wolf gates) into the result-row schema + the end-to-end Stage-4
-cascade. The spec marks the result-row statistical fields "Stage 4 only, NULL
-before then"; these PRs ship the CV/WFO + data-snooping *engines* the cascade
-will consume, not the full cascade. Honest-envelope deferral recorded in
-``docs/MIGRATION.md`` entries #305 (DEC-METRICS-001), #428 (DEC-STAT-CPCV-WFO-001)
-and #429 (DEC-STAT-SPA-001), per Golden Rule #10. The composite ranking score
-(spec lines 602-615) and the hard rejection gates (spec lines 589-600) remain
-out of scope here.
+**Still DEFERRED (honest envelope, Golden Rule #10):** ``lockbox_sharpe``,
+``lockbox_mdd_pct`` (spec lines 586-587), and the wiring of the
+``cpcv_pass_rate`` / ``wfo_pass_rate`` / SPA / Romano-Wolf results into the
+result-row schema + the end-to-end Stage-4 filter cascade. The composite
+ranking score (spec lines 602-615) and the hard rejection gates (spec lines
+589-600) are likewise Stage-4 concerns out of scope here.
 """
 
 from __future__ import annotations
 
-from brutex.metrics.compute import Moments, ResultMetrics, compute_metrics
+from brutex.metrics.compute import (
+    Moments,
+    ResultMetrics,
+    compute_metrics,
+    with_stage4_statistics,
+)
 from brutex.metrics.cpcv import (
     DEFAULT_N_GROUPS,
     DEFAULT_N_TEST_GROUPS,
@@ -70,6 +79,13 @@ from brutex.metrics.cpcv import (
     cpcv_splits,
     sharpe_of_returns,
 )
+from brutex.metrics.deflated_sharpe import (
+    DeflatedSharpeResult,
+    deflated_sharpe_ratio,
+    expected_max_sharpe_ratio,
+    probabilistic_sharpe_ratio,
+)
+from brutex.metrics.pbo import PBOResult, pbo_probability, sharpe_from_moments
 from brutex.metrics.spa import (
     BootstrapConfig,
     BootstrapMethod,
@@ -98,8 +114,10 @@ __all__ = [
     "BootstrapMethod",
     "CPCVSplit",
     "ClosedTrade",
+    "DeflatedSharpeResult",
     "EquityCurve",
     "Moments",
+    "PBOResult",
     "RealityCheckResult",
     "ResultMetrics",
     "RomanoWolfResult",
@@ -110,12 +128,18 @@ __all__ = [
     "compute_metrics",
     "cpcv_pass_rate",
     "cpcv_splits",
+    "deflated_sharpe_ratio",
     "expected_block_length",
+    "expected_max_sharpe_ratio",
     "hansen_spa",
+    "pbo_probability",
+    "probabilistic_sharpe_ratio",
     "reality_check",
     "romano_wolf",
+    "sharpe_from_moments",
     "sharpe_of_returns",
     "walk_forward_splits",
     "wfo_pass_rate",
     "wfo_pass_rates",
+    "with_stage4_statistics",
 ]

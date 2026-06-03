@@ -10,13 +10,18 @@ the convention is documented on the field; the chosen conventions are
 recorded in ``docs/MIGRATION.md`` entry #305 (DEC-METRICS-001) under the
 honest-envelope clause.
 
-**Deferred (NOT implemented here):** the six Stage-4 statistical-validity
-metrics (``deflated_sharpe_ratio``, ``pbo_probability``,
-``cpcv_pass_rate``, ``wfo_pass_rate``, ``lockbox_sharpe``,
-``lockbox_mdd_pct`` — spec lines 581-587). The spec itself marks these
-"Stage 4 only, NULL before then"; they belong to the filter-cascade
-work and are tracked as a follow-up. See the module docstring of
-:mod:`brutex.metrics`.
+**Stage-4 statistical-validity metrics (spec lines 581-587).** Two of the
+six are now implemented (DEC-STAT-DSR-PBO-001): ``deflated_sharpe_ratio``
+(Bailey & LdP 2014) and ``pbo_probability`` (Bailey et al. 2017, CSCV).
+They are computed by :func:`with_stage4_statistics` from the pure functions
+in :mod:`brutex.metrics.deflated_sharpe` and :mod:`brutex.metrics.pbo`,
+because they need cross-trial inputs (the leaderboard's trial count, the
+Sharpe dispersion, and the CSCV performance matrix) that the per-result
+:func:`compute_metrics` pass does not have — so ``compute_metrics`` leaves
+them ``None`` (NULL, "Stage 4 only, NULL before then" per the spec) and the
+Stage-4 step fills them in. The remaining four (``cpcv_pass_rate``,
+``wfo_pass_rate``, ``lockbox_sharpe``, ``lockbox_mdd_pct`` — spec lines
+584-587) remain deferred to the filter-cascade work.
 
 **Precision rule (DEC-MONEY-2DP-001, money-only):** money fields stay
 int64 paisa; ratios / percentages / statistical moments keep full
@@ -36,12 +41,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
+from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS, deflated_sharpe_ratio
+from brutex.metrics.pbo import pbo_probability
 from brutex.metrics.types import ClosedTrade, EquityCurve
 
-__all__ = ["Moments", "ResultMetrics", "compute_metrics"]
+__all__ = ["Moments", "ResultMetrics", "compute_metrics", "with_stage4_statistics"]
 
 #: Number of trades below which moment-based ratios (Sharpe, Sortino,
 #: skewness, kurtosis) are mathematically undefined and returned as
@@ -158,8 +165,11 @@ class ResultMetrics:
 
     Money fields are int64 paisa; ratio / percentage / moment fields are
     full-precision floats (or ``None`` when mathematically undefined for
-    the given sample). The Stage-4 statistical-validity metrics (spec
-    lines 581-587) are intentionally absent — see the module docstring.
+    the given sample). The Stage-4 statistical-validity metrics
+    ``deflated_sharpe_ratio`` + ``pbo_probability`` (spec lines 582-583)
+    default to ``None`` and are filled by :func:`with_stage4_statistics`;
+    the other four Stage-4 fields (spec lines 584-587) remain deferred and
+    are absent — see the module docstring.
 
     Field groups mirror ``TRACK1_BACKTEST_SPEC.md`` §"Result Row Schema".
     """
@@ -212,6 +222,15 @@ class ResultMetrics:
     skewness: float | None
     kurtosis: float | None
     returns_std_dev: float | None
+
+    # ── Statistical validity (Stage 4 only — NULL before then; spec 581-583) ──
+    # Filled by with_stage4_statistics(); left None (NULL) by compute_metrics,
+    # whose per-result pass lacks the cross-trial inputs (trial count, Sharpe
+    # dispersion, CSCV matrix). The other four Stage-4 fields (cpcv_pass_rate,
+    # wfo_pass_rate, lockbox_sharpe, lockbox_mdd_pct — spec 584-587) remain
+    # deferred (DEC-STAT-DSR-PBO-001 scope = DSR + PBO only).
+    deflated_sharpe_ratio: float | None = None
+    pbo_probability: float | None = None
 
 
 def _percentile(sorted_values: Sequence[float], pct: float) -> float:
@@ -603,3 +622,78 @@ def compute_metrics(
         kurtosis=kurtosis,
         returns_std_dev=std_dev,
     )
+
+
+def with_stage4_statistics(
+    metrics: ResultMetrics,
+    *,
+    n_trials: int,
+    trial_sharpe_variance: float,
+    pbo_performance: Sequence[Sequence[float]] | None = None,
+    pbo_n_splits: int = 16,
+) -> ResultMetrics:
+    """Return a copy of ``metrics`` with the Stage-4 DSR + PBO fields filled.
+
+    Fills ``deflated_sharpe_ratio`` (spec line 582, Bailey & LdP 2014) and
+    ``pbo_probability`` (spec line 583, Bailey et al. 2017 CSCV) using the
+    pure functions in :mod:`brutex.metrics.deflated_sharpe` and
+    :mod:`brutex.metrics.pbo`. The other four Stage-4 fields
+    (``cpcv_pass_rate``, ``wfo_pass_rate``, ``lockbox_sharpe``,
+    ``lockbox_mdd_pct`` — spec lines 584-587) remain deferred.
+
+    A field stays ``None`` (NULL) when its inputs are undefined:
+
+    * ``deflated_sharpe_ratio`` is ``None`` unless the per-result Sharpe,
+      skewness and (excess) kurtosis are all defined and the row has at
+      least two trades — exactly the rows for which :func:`compute_metrics`
+      produced a usable Sharpe and shape moments.
+    * ``pbo_probability`` is ``None`` unless ``pbo_performance`` (the CSCV
+      ``(T, N)`` matrix for this row's leaderboard) is supplied.
+
+    Parameters
+    ----------
+    metrics
+        A per-result row from :func:`compute_metrics`. Its
+        ``sharpe_ratio`` / ``skewness`` / ``kurtosis`` / ``total_trades``
+        supply the DSR inputs. The stored kurtosis is *excess*, so
+        :data:`~brutex.metrics.deflated_sharpe.GAUSSIAN_KURTOSIS` is added
+        back to recover the non-excess kurtosis the PSR formula expects.
+    n_trials
+        ``N`` — the number of trials in this row's (instrument, TF)
+        leaderboard, the multiple-testing count the Sharpe is deflated
+        against (spec line 383, per-leaderboard N).
+    trial_sharpe_variance
+        ``V`` — the variance of the Sharpe ratios across those ``n_trials``.
+    pbo_performance
+        Optional CSCV ``(T, N)`` performance matrix for the leaderboard.
+        Left ``None`` ⇒ ``pbo_probability`` stays NULL.
+    pbo_n_splits
+        ``S`` for CSCV; defaults to ``16`` (spec line 387).
+
+    Returns
+    -------
+    ResultMetrics
+        A new row (``metrics`` is frozen) with the two Stage-4 fields set.
+        The remaining metrics are copied unchanged.
+    """
+    dsr: float | None = None
+    if (
+        metrics.sharpe_ratio is not None
+        and metrics.skewness is not None
+        and metrics.kurtosis is not None
+        and metrics.total_trades >= _MIN_SAMPLES_VARIANCE
+    ):
+        dsr = deflated_sharpe_ratio(
+            metrics.sharpe_ratio,
+            n_trials=n_trials,
+            trial_sharpe_variance=trial_sharpe_variance,
+            sample_length=metrics.total_trades,
+            skew=metrics.skewness,
+            kurtosis=metrics.kurtosis + GAUSSIAN_KURTOSIS,
+        ).deflated_sharpe_ratio
+
+    pbo: float | None = None
+    if pbo_performance is not None:
+        pbo = pbo_probability(pbo_performance, n_splits=pbo_n_splits).pbo
+
+    return replace(metrics, deflated_sharpe_ratio=dsr, pbo_probability=pbo)

@@ -1152,7 +1152,7 @@ jobs:
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
-          # DEC-STAT-SPA-001 (#429): brutex.metrics.spa — Hansen SPA, White
+          # DEC-STAT-SPA-001 (#431): brutex.metrics.spa — Hansen SPA, White
           # Reality Check, Romano-Wolf step-down (Stage-4 data-snooping filters
           # #4 + #6). 100% line+branch from the dedicated unit suite; the
           # property (test_spa_properties.py) + golden (test_spa_golden.py)
@@ -1177,7 +1177,7 @@ jobs:
           # rolling/anchored/expanding pass-rates.
           # NOTE: driven via the numpy-safe `--cov=brutex` + `coverage report
           # --include` form (NOT the dotted `--cov=brutex.metrics.cpcv`): once
-          # the spa re-export (DEC-STAT-SPA-001, #429) landed, brutex.metrics
+          # the spa re-export (DEC-STAT-SPA-001, #431) landed, brutex.metrics
           # eagerly imports numpy, so a dotted single-module --cov target imports
           # numpy at coverage startup and trips numpy 2.x's "cannot load module
           # more than once" C-extension guard under pytest-cov. Same form + grep
