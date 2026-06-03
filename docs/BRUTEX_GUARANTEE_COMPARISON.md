@@ -92,7 +92,7 @@ truth, straight from the enforcement audit.
 | Inspection belt (lint · 2 strict type-checkers · 5 security scanners · duplication · dead-code · build) | 🟢 **live** | runs on every change; merge blocked on any red |
 | O(1) uniqueness · dedup · mapping · space | 🟢 **live** | Bloom → LMDB → blake3, property-tested every push |
 | O(1) latency / time ratio gates | 🟢 **live (3–10×)** | the **tightest 1.1× tier is 🟡 wired** — it switches on once a dedicated quiet M4-Pro runner is registered (shared CI is too noisy to prove 10%) |
-| Tamper-proof audit log + bit-for-bit reproducibility | 🟢 **live** | break the hash chain → CI fails |
+| Tamper-proof audit log + bit-for-bit reproducibility | 🟢 **live** | break the hash chain → CI fails; the sweep→Parquet **results store** writes byte-identical files keyed by the `blake3` run-identity and **refuses to overwrite one identity with a different result** (a clash = upstream non-determinism, caught not hidden) — `brutex/engine/results_store.py` (DEC-RESULT-STORE-001), with golden + property byte-equality tests |
 | Restart-safe, quota-frugal incremental pulls | 🟢 **live** | a persisted fetch-coverage ledger skips windows already in the lake across restarts; only the new day is re-fetched (DEC-FETCH-COVERAGE-WIRING-001) |
 | Dashboard %-metrics consistency | 🟢 **live** | `change_pct` / `open_gap_pct` anchor on the prior day's **last 1-minute close** — internally consistent with the 1-minute feed the engine sweeps (DEC-SPOT-PREVCLOSE-1MIN-001); deliberately distinct from a broker's official daily % (honest, by design — that lives only in the separate pre-open report) |
 | Test coverage | 🟡 **90% floor + 103 modules at 100%** | climbing to 100% one locked module at a time; 8 modules pending an upstream library fix |

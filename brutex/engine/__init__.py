@@ -19,6 +19,9 @@ Currently exposes:
   52-condition :func:`brutex.vocabulary.evaluator.evaluate_atoms` across a
   ``(instrument, interval)`` bar feed to produce the per-bar ``bar_bits``
   matrix the supermask kernel consumes (DEC-ENGINE-DRIVER-001).
+- ``results_store`` — the deterministic sweep→Parquet results sink keyed by
+  the BLAKE3 run-identity: idempotent, byte-reproducible writes with an O(1)
+  read-back lookup + top-K leaderboard (DEC-RESULT-STORE-001).
 
 Coming in subsequent commits:
 - ``stage1b`` — coarse score filter
@@ -34,7 +37,7 @@ Re-exports the combo-mask primitives + the Stage-1A matrix builder. As
 subsequent modules land, their public symbols will be re-exported here.
 """
 
-from brutex.engine import combo_mask, stage1a
+from brutex.engine import combo_mask, results_store, stage1a
 from brutex.engine.combo_mask import (
     MAX_VOCAB_BITS,
     VOCAB_BITS,
@@ -44,6 +47,12 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_n,
     mask_to_bits,
     popcount,
+)
+from brutex.engine.results_store import (
+    FlushResult,
+    ResultRow,
+    ResultsStore,
+    ResultsStoreError,
 )
 from brutex.engine.stage1a import (
     ANCHOR_DEPENDENT_MASK,
@@ -55,6 +64,10 @@ __all__ = [
     "ANCHOR_DEPENDENT_MASK",
     "MAX_VOCAB_BITS",
     "VOCAB_BITS",
+    "FlushResult",
+    "ResultRow",
+    "ResultsStore",
+    "ResultsStoreError",
     "Stage1AMatrixBuilder",
     "bits_to_mask",
     "build_bar_bits",
@@ -64,5 +77,6 @@ __all__ = [
     "iter_masks_k_of_n",
     "mask_to_bits",
     "popcount",
+    "results_store",
     "stage1a",
 ]
