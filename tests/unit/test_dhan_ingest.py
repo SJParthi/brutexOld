@@ -21,6 +21,8 @@ from brutex.adapters.dhan.ingest import IngestReport, ingest_spot
 from brutex.data.models import CandleBar
 from brutex.data.sink import SinkAppendResult
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from brutex.observability.correlation import pull_id_scope
+from structlog.testing import capture_logs
 
 _CANDLES = {
     "open": [100.0],
@@ -320,3 +322,145 @@ class TestIngestSpotRateFeedback:
             on_success=lambda: ok.append(1),
         )
         assert ok == [1]  # one clean window → one recovery signal
+
+
+def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
+    """All captured events with ``event == name`` (in emission order)."""
+    return [e for e in logs if e["event"] == name]
+
+
+class TestIngestSpotLogging:
+    """The spot spine must be VISIBLE — every window / parse / lake-write / series.
+
+    DEC-DHAN-INGEST-LOGGING-001: each ``ingest.*`` event carries the pull's
+    ``pull_id`` (bound by the controller's ``pull_id_scope``) so an operator can
+    grep one pull end-to-end. Observability only — the IngestReport is unchanged.
+    """
+
+    def test_fetched_window_lights_window_parse_lakewrite_series(self) -> None:
+        sink = _Sink()
+        with capture_logs() as logs, pull_id_scope("spotpull0001"):
+            report = ingest_spot(
+                _adapter(),
+                sink,
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+            )
+        assert report == IngestReport(windows=1, bars_appended=1, transient_failures=0)
+        # ── ingest.window (fetched) ──
+        (window,) = _events(logs, "ingest.window")
+        assert window["log_level"] == "debug"
+        assert window["pull_id"] == "spotpull0001"
+        assert window["symbol"] == "NIFTY"
+        assert window["interval"] == "1day"
+        assert window["window_start"] == "2021-01-01"
+        assert window["window_end"] == "2021-08-01"
+        assert window["action"] == "fetched"
+        # ── ingest.parse ── DEBUG, carries the (symbol, interval) coordinate.
+        (parse,) = _events(logs, "ingest.parse")
+        assert parse["log_level"] == "debug"
+        assert parse["pull_id"] == "spotpull0001"
+        assert parse["symbol"] == "NIFTY"
+        assert parse["interval"] == "1day"
+        assert parse["raw_bars"] == 1
+        assert parse["session_bars"] == 1
+        # ── ingest.lake_write ── DEBUG, full coordinate.
+        (write,) = _events(logs, "ingest.lake_write")
+        assert write["log_level"] == "debug"
+        assert write["pull_id"] == "spotpull0001"
+        assert write["symbol"] == "NIFTY"
+        assert write["interval"] == "1day"
+        assert write["bars_appended"] == 1
+        # ── ingest.series ── DEBUG.
+        (series,) = _events(logs, "ingest.series")
+        assert series["log_level"] == "debug"
+        assert series["pull_id"] == "spotpull0001"
+        assert series["symbol"] == "NIFTY"
+        assert series["interval"] == "1day"
+        assert series["windows"] == 1
+        assert series["bars_appended"] == 1
+        assert series["transient_failures"] == 0
+        assert series["skipped_windows"] == 0
+
+    def test_parse_event_reports_session_drop(self) -> None:
+        # Two bars: one pre-open (dropped), one in-session (kept) — raw 2, session 1.
+        payload = {
+            "open": [100.0, 101.0],
+            "high": [110.0, 111.0],
+            "low": [90.0, 91.0],
+            "close": [105.0, 106.0],
+            "timestamp": [1609731000, 1609733100],  # 03:30 UTC (pre-open), 04:05 UTC (in)
+        }
+        with capture_logs() as logs, pull_id_scope("spotpull0002"):
+            ingest_spot(
+                _adapter(payload=payload),
+                _Sink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 3, 1),  # 1 window
+            )
+        (parse,) = _events(logs, "ingest.parse")
+        assert parse["pull_id"] == "spotpull0002"
+        assert parse["raw_bars"] == 2  # both vendor bars decoded
+        assert parse["session_bars"] == 1  # only the in-session bar survived
+        # The lake-write reflects the post-filter count.
+        (write,) = _events(logs, "ingest.lake_write")
+        assert write["pull_id"] == "spotpull0002"
+        assert write["bars_appended"] == 1
+
+    def test_skipped_window_lights_only_the_skip_event(self) -> None:
+        from brutex.data.fetch_coverage import FetchCoverage
+
+        cov = FetchCoverage()
+        # First pull marks the single window complete (not asserted here).
+        ingest_spot(
+            _adapter(),
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            coverage=cov,
+        )
+        # Re-pull → the window is skipped before any vendor call.
+        with capture_logs() as logs, pull_id_scope("spotpull0003"):
+            report = ingest_spot(
+                _adapter(),
+                _Sink(),
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+                coverage=cov,
+            )
+        assert report.skipped_windows == 1
+        (window,) = _events(logs, "ingest.window")
+        assert window["action"] == "skipped"
+        assert window["pull_id"] == "spotpull0003"
+        assert window["window_start"] == "2021-01-01"
+        # A skipped window fetches nothing → no parse / lake-write events.
+        assert _events(logs, "ingest.parse") == []
+        assert _events(logs, "ingest.lake_write") == []
+        # The series summary still fires, recording the skip.
+        (series,) = _events(logs, "ingest.series")
+        assert series["pull_id"] == "spotpull0003"
+        assert series["windows"] == 1
+        assert series["bars_appended"] == 0
+        assert series["transient_failures"] == 0
+        assert series["skipped_windows"] == 1
+
+    def test_pull_id_is_empty_string_outside_a_scope(self) -> None:
+        # Called with no enclosing scope → events carry a benign pull_id="".
+        with capture_logs() as logs:
+            ingest_spot(
+                _adapter(),
+                _Sink(),
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+            )
+        assert _events(logs, "ingest.window")[0]["pull_id"] == ""

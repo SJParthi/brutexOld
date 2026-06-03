@@ -38,7 +38,7 @@ import json
 import threading
 from collections import deque
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +64,11 @@ from brutex.dashboard.db_view import (
     table_summary,
 )
 from brutex.dashboard.option_pull_controller import pull_options
+from brutex.dashboard.preopen_report import (
+    build_preopen_rows,
+    render_xlsx,
+    resolve_report_datasets,
+)
 from brutex.dashboard.pull_controller import dhan_creds_present, pull_all_spot, pull_candles
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.universe_pull import select_pull_instruments
@@ -499,7 +504,7 @@ def build_app(
     """
     try:
         from fastapi import FastAPI, HTTPException, Query
-        from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+        from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
     except ImportError as exc:
         raise RuntimeError(
             "FastAPI is not installed. Install with `pip install "
@@ -1045,6 +1050,73 @@ def build_app(
     async def coverage_page() -> str:
         """GET /coverage — the completeness-ledger page (DEC-COVERAGE-LEDGER-001)."""
         return _render_coverage_html()
+
+    # ── Pre-open report (DEC-PREOPEN-REPORT-001) ────────────────────────
+
+    @app.get("/api/v1/reports/preopen/symbols")
+    async def api_preopen_symbols() -> JSONResponse:
+        """GET /api/v1/reports/preopen/symbols — spot symbols the report can cover.
+
+        Returns every ``(exchange, segment, symbol)`` in the lake that has BOTH a
+        ``1day`` (PREV. CLOSE source) and a ``1minute`` (IEP source) partition —
+        the picker for the pre-open report panel. READ-ONLY; empty when no lake.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse({"symbols": []})
+        triples = resolve_report_datasets(lake_root.parent)
+        return JSONResponse(
+            {"symbols": [{"exchange": e, "segment": s, "symbol": y} for e, s, y in triples]}
+        )
+
+    @app.get("/api/v1/reports/preopen.xlsx")
+    async def api_preopen_xlsx(
+        start: str = Query(..., alias="from"),
+        end: str = Query(..., alias="to"),
+        symbols: str | None = Query(None),
+    ) -> Response:
+        """GET /api/v1/reports/preopen.xlsx — the NSE-style pre-open ``.xlsx`` download.
+
+        Builds ``SYMBOL · PREV. CLOSE · IEP · CHNG · %CHNG`` for each requested
+        spot symbol over the inclusive ``[from, to]`` date range, lake-derived
+        (DEC-PREOPEN-REPORT-001) — the numbers match NSE to the paisa. *symbols*
+        is an optional comma-separated filter; omitted ⇒ every report-eligible
+        symbol in the lake. Returns a deterministic, dependency-free workbook as
+        an attachment. A 400 is raised for a malformed / inverted date range.
+        """
+        store = _require_store()
+        try:
+            start_d = date.fromisoformat(start)
+            end_d = date.fromisoformat(end)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"bad date: {exc}") from exc
+        if start_d > end_d:
+            raise HTTPException(status_code=400, detail="'from' must be on or before 'to'")
+        wanted = [s for s in (symbols or "").split(",") if s.strip()] or None
+        lake_root = getattr(store, "path", None)
+        rows = (
+            build_preopen_rows(
+                store.connection,
+                lake_root.parent,
+                datasets=resolve_report_datasets(lake_root.parent, wanted),
+                start=start_d,
+                end=end_d,
+            )
+            if isinstance(lake_root, Path)
+            else []
+        )
+        filename = f"preopen_{start_d.isoformat()}_{end_d.isoformat()}.xlsx"
+        return Response(
+            content=render_xlsx(rows),
+            media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/reports", response_class=HTMLResponse)
+    async def reports_page() -> str:
+        """GET /reports — the pre-open report download page (DEC-PREOPEN-REPORT-001)."""
+        return _render_reports_html()
 
     # ── Credentials store (DEC-CREDENTIALS-STORE-001) ───────────────
     # CredentialsIn is module-scope (see top of file) so FastAPI resolves
@@ -1660,6 +1732,29 @@ def _load_coverage_template() -> str:
 def _render_coverage_html() -> str:
     """Return the completeness-ledger page HTML (DEC-COVERAGE-LEDGER-001)."""
     return _load_coverage_template()
+
+
+_REPORTS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "reports.html"
+_REPORTS_TEMPLATE_CACHE: str | None = None
+
+
+def _load_reports_template() -> str:
+    """Load + cache the pre-open report page template (DEC-PREOPEN-REPORT-001).
+
+    Ships as ``brutex/dashboard/templates/reports.html``. The page lists the
+    report-eligible symbols (``/api/v1/reports/preopen/symbols``) and links the
+    From/To date range to the ``/api/v1/reports/preopen.xlsx`` download. Loaded
+    once, then served verbatim.
+    """
+    global _REPORTS_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _REPORTS_TEMPLATE_CACHE is None:
+        _REPORTS_TEMPLATE_CACHE = _REPORTS_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _REPORTS_TEMPLATE_CACHE
+
+
+def _render_reports_html() -> str:
+    """Return the pre-open report page HTML (DEC-PREOPEN-REPORT-001)."""
+    return _load_reports_template()
 
 
 def _coverage_years() -> list[int]:

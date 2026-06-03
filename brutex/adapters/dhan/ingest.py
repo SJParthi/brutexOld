@@ -22,6 +22,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time
 
+import structlog
+
 from brutex.adapters.dhan.chunks import plan_spot_intraday_windows
 from brutex.adapters.dhan.errors import DhanError, is_rate_limit, is_retryable
 from brutex.adapters.protocol import MarketAdapter
@@ -29,6 +31,14 @@ from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.session import filter_intraday_session, is_session_exempt
 from brutex.data.sink import BarSink
 from brutex.models import Instrument
+from brutex.observability.correlation import current_pull_id
+
+#: Structured logger — lights the spot ingest spine with per-window / parse /
+#: lake-write / series events under the ``ingest.*`` namespace, all carrying the
+#: pull's ``pull_id`` (DEC-DHAN-INGEST-LOGGING-001). Per-window detail is DEBUG so
+#: a long pull never floods INFO; the per-series summary stays DEBUG too (the
+#: per-instrument rollup at INFO lives one layer up in ``run_ingest``).
+_LOG = structlog.get_logger("brutex.adapters.dhan.ingest")
 
 #: Pacing hook invoked once before each window fetch (e.g. token-bucket acquire).
 Pacer = Callable[[], None]
@@ -116,6 +126,12 @@ def ingest_spot(
     transient = 0
     skipped = 0
     windows = _windows(interval, start, end)
+    # Read the pull's correlation id ONCE (the controller bound it via
+    # ``pull_id_scope``); stamp it + the (symbol, interval) coordinate on every
+    # ``ingest.*`` event so an operator can grep one pull end-to-end. Observability
+    # only — no behaviour change (DEC-DHAN-INGEST-LOGGING-001).
+    pull_id = current_pull_id()
+    series_fields = {"symbol": instrument.symbol_name, "interval": interval}
     for window_start, window_end in windows:
         key = WindowKey(
             market=_MARKET,
@@ -129,11 +145,19 @@ def ingest_spot(
         # anyway, so skipping is a pure quota/latency win, never a data risk.
         if coverage is not None and coverage.is_complete(key):
             skipped += 1
+            _LOG.debug(
+                "ingest.window",
+                pull_id=pull_id,
+                window_start=window_start.isoformat(),
+                window_end=window_end.isoformat(),
+                action="skipped",
+                **series_fields,
+            )
             continue
         if pace is not None:
             pace()
         try:
-            bars = adapter.fetch_ohlcv(
+            raw_bars = adapter.fetch_ohlcv(
                 symbol=instrument.symbol_name,
                 exchange=instrument.exch_id,
                 interval=interval,
@@ -154,7 +178,18 @@ def ingest_spot(
         # GIFT Nifty trades ~21h on NSE IX, so it is EXEMPT — its full-day
         # series is kept verbatim (DEC-DHAN-GIFTNIFTY-SESSION-001).
         if interval != _DAILY and not is_session_exempt(instrument.symbol_name):
-            bars = filter_intraday_session(bars)
+            bars = filter_intraday_session(raw_bars)
+        else:
+            bars = raw_bars
+        # Parse nook: how many bars the vendor returned vs how many survived the
+        # session gate (the silent drop an operator otherwise cannot see).
+        _LOG.debug(
+            "ingest.parse",
+            pull_id=pull_id,
+            raw_bars=len(raw_bars),
+            session_bars=len(bars),
+            **series_fields,
+        )
         result = sink.append(
             exchange=instrument.exch_id.value,
             segment=instrument.segment.value,
@@ -163,12 +198,39 @@ def ingest_spot(
             bars=bars,
         )
         bars_appended += result.bars_appended
+        _LOG.debug(
+            "ingest.window",
+            pull_id=pull_id,
+            window_start=window_start.isoformat(),
+            window_end=window_end.isoformat(),
+            action="fetched",
+            **series_fields,
+        )
+        # Lake-write nook: bars actually persisted (the idempotent sink may append
+        # fewer than handed it on a re-write) — the row count that reached Parquet.
+        _LOG.debug(
+            "ingest.lake_write",
+            pull_id=pull_id,
+            bars_appended=result.bars_appended,
+            **series_fields,
+        )
         # The window pulled cleanly — record it so a re-pull skips it.
         if coverage is not None:
             coverage.mark_complete(key)
         # Signal a clean window so the controller can recover the rate.
         if on_success is not None:
             on_success()
+    # Per-series summary (one (symbol, interval) pair) — DEBUG; the per-instrument
+    # rollup at INFO is emitted by ``run_dhan_spot_ingest`` one layer up.
+    _LOG.debug(
+        "ingest.series",
+        pull_id=pull_id,
+        windows=len(windows),
+        bars_appended=bars_appended,
+        transient_failures=transient,
+        skipped_windows=skipped,
+        **series_fields,
+    )
     return IngestReport(
         windows=len(windows),
         bars_appended=bars_appended,

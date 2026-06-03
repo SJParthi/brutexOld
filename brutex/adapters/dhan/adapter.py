@@ -10,10 +10,12 @@ INDIA VIX (reference) + F&O-stock spot. ``has_derivatives=False`` → the
 orchestrator skips the derivative phases; expired-option OHLC comes from
 the separate ``/charts/rollingoption`` path, not this adapter.
 
-Pacing / chunking / retry stay in the orchestrator (the chunk planner is
-`brutex.adapters.dhan.chunks`; retry semantics are `errors.is_retryable`):
-``fetch_ohlcv`` performs **one** within-window request and returns parsed
-bars. The universe (an immutable tuple of :class:`Instrument`) is indexed
+Pacing / chunking / *logical* retry+re-queue stay in the orchestrator (the
+chunk planner is `brutex.adapters.dhan.chunks`; retry semantics are
+`errors.is_retryable`); the client owns a bounded in-place transport-stall
+fast-retry (DEC-DHAN-CALL-TIMEOUT-RETRY-001). ``fetch_ohlcv`` performs **one
+logical** within-window request (which may fast-retry a transient stall) and
+returns parsed bars. The universe (an immutable tuple of :class:`Instrument`) is indexed
 by ``symbol_name`` — the bare engine symbol (``"NIFTY"``) — for O(1) lookup;
 the raw id the candle API needs lives in ``security_id`` (ADR-0003 dropped
 the old exchange-prefixed ``vendor_symbol``).

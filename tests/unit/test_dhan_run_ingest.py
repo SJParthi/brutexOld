@@ -7,6 +7,7 @@ aggregate report properties, pace threading, and the empty-universe case.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 
@@ -20,6 +21,8 @@ from brutex.adapters.dhan.run_ingest import (
     run_dhan_spot_ingest,
 )
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from brutex.observability.correlation import pull_id_scope
+from structlog.testing import capture_logs
 
 _START = date(2021, 1, 1)
 _END = date(2021, 2, 1)
@@ -302,3 +305,89 @@ def test_on_progress_fires_per_pair_success_and_failure(monkeypatch: pytest.Monk
         on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
     )
     assert events == [("13 1minute", 7, False), ("BAD 1minute", 0, True)]
+
+
+def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
+    """All captured events with ``event == name`` (in emission order)."""
+    return [e for e in logs if e["event"] == name]
+
+
+class TestRunIngestLogging:
+    """The spot fan-out must roll up per-instrument (INFO) + name quarantine causes.
+
+    DEC-DHAN-INGEST-LOGGING-001: ``ingest.underlying`` (INFO, one per instrument)
+    + ``ingest.quarantine`` (WARNING, one per terminal failure), both carrying the
+    pull's ``pull_id``. Observability only — the aggregate report is unchanged.
+    """
+
+    def test_underlying_rollup_per_instrument(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+            return IngestReport(windows=2, bars_appended=10, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        with capture_logs() as logs, pull_id_scope("runpull00001"):
+            run_dhan_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("13"), _index("25")],
+                intervals=["1minute", "1day"],
+                start=_START,
+                end=_END,
+            )
+        rollups = _events(logs, "ingest.underlying")
+        assert len(rollups) == 2  # one per instrument
+        first = rollups[0]
+        assert first["log_level"] == "info"
+        assert first["pull_id"] == "runpull00001"
+        assert first["symbol"] == "13"
+        assert first["series_completed"] == 2  # both intervals succeeded
+        assert first["series_failed"] == 0
+        assert first["bars_appended"] == 20  # 2 intervals × 10
+        assert first["windows"] == 4  # 2 intervals × 2 windows
+        assert _events(logs, "ingest.quarantine") == []
+
+    def test_quarantine_event_names_the_cause(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+            if instrument.symbol_name == "BAD":
+                raise DhanNotFoundError("HTTP 404 unknown security")
+            return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        with capture_logs() as logs, pull_id_scope("runpull00002"):
+            run_dhan_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("13"), _index("BAD", token=99)],
+                intervals=["1minute"],
+                start=_START,
+                end=_END,
+            )
+        (quarantine,) = _events(logs, "ingest.quarantine")
+        assert quarantine["log_level"] == "warning"
+        assert quarantine["pull_id"] == "runpull00002"
+        assert quarantine["symbol"] == "BAD"
+        assert quarantine["interval"] == "1minute"
+        assert quarantine["error"] == "HTTP 404 unknown security"
+        # The failed instrument's rollup records the quarantine.
+        bad_rollup = [e for e in _events(logs, "ingest.underlying") if e["symbol"] == "BAD"]
+        assert bad_rollup[0]["series_failed"] == 1
+        assert bad_rollup[0]["series_completed"] == 0
+
+    def test_events_carry_empty_pull_id_outside_a_scope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Called with no enclosing scope → the rollup carries a benign pull_id="".
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+            return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        with capture_logs() as logs:
+            run_dhan_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("13")],
+                intervals=["1minute"],
+                start=_START,
+                end=_END,
+            )
+        assert _events(logs, "ingest.underlying")[0]["pull_id"] == ""
