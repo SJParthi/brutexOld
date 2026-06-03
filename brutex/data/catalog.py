@@ -12,6 +12,7 @@ data-lake extras installed.
 from __future__ import annotations
 
 import hashlib
+import threading
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
@@ -56,12 +57,27 @@ class Catalog:
             cat.upsert(entry)
             row = cat.get(exchange="NSE", segment="FNO", symbol="NSE-NIFTY",
                           interval="1minute", year=2024, month=1)
+
+    Thread-safety (DEC-DHAN-PARALLEL-INGEST-001). The DuckDB connection is NOT
+    safe for concurrent use, so when a catalog is threaded into the parallel
+    spot fan-out (the live spot path passes ``catalog=None`` today, but tests
+    wire one) a :class:`threading.Lock` serialises ``upsert`` and the reads
+    (``get`` / ``list_partitions`` / ``data_snapshot_hash`` / ``count``). Each
+    critical section is one bounded DuckDB statement (the ``upsert`` is a single
+    DELETE+INSERT transaction); the lock is re-used internally via the
+    ``*_locked`` helpers so a read composed of another read (e.g.
+    ``data_snapshot_hash`` over ``list_partitions``) does not self-deadlock.
+    Future-proofing: it makes the catalog correct under the fan-out the moment a
+    caller wires one.
     """
 
     def __init__(self, *, conn: object, path: Path) -> None:
         self._conn = conn
         self._path = path
         self._closed = False
+        #: Serialises DuckDB access under the parallel fan-out
+        #: (DEC-DHAN-PARALLEL-INGEST-001). The connection is not concurrency-safe.
+        self._lock = threading.Lock()
 
     @classmethod
     def open(cls, path: Path) -> Self:
@@ -103,48 +119,51 @@ class Catalog:
         """
         if self._closed:
             raise CatalogError("Catalog is closed")
-        try:
-            self._conn.execute("BEGIN")  # type: ignore[attr-defined]
-            self._conn.execute(  # type: ignore[attr-defined]
-                """
-                DELETE FROM partitions
-                WHERE exchange = ? AND segment = ? AND symbol = ?
-                  AND interval = ? AND year = ? AND month = ?
-                """,
-                [
-                    entry.exchange,
-                    entry.segment,
-                    entry.symbol,
-                    entry.interval,
-                    entry.year,
-                    entry.month,
-                ],
-            )
-            self._conn.execute(  # type: ignore[attr-defined]
-                """
-                INSERT INTO partitions
-                (exchange, segment, symbol, interval, year, month,
-                 raw_hash, row_count, first_ts, last_ts, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    entry.exchange,
-                    entry.segment,
-                    entry.symbol,
-                    entry.interval,
-                    entry.year,
-                    entry.month,
-                    entry.raw_hash,
-                    entry.row_count,
-                    entry.first_ts,
-                    entry.last_ts,
-                    entry.fetched_at,
-                ],
-            )
-            self._conn.execute("COMMIT")  # type: ignore[attr-defined]
-        except Exception:
-            self._conn.execute("ROLLBACK")  # type: ignore[attr-defined]
-            raise
+        # Serialise the DELETE+INSERT transaction — the DuckDB connection is not
+        # concurrency-safe (DEC-DHAN-PARALLEL-INGEST-001).
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN")  # type: ignore[attr-defined]
+                self._conn.execute(  # type: ignore[attr-defined]
+                    """
+                    DELETE FROM partitions
+                    WHERE exchange = ? AND segment = ? AND symbol = ?
+                      AND interval = ? AND year = ? AND month = ?
+                    """,
+                    [
+                        entry.exchange,
+                        entry.segment,
+                        entry.symbol,
+                        entry.interval,
+                        entry.year,
+                        entry.month,
+                    ],
+                )
+                self._conn.execute(  # type: ignore[attr-defined]
+                    """
+                    INSERT INTO partitions
+                    (exchange, segment, symbol, interval, year, month,
+                     raw_hash, row_count, first_ts, last_ts, fetched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        entry.exchange,
+                        entry.segment,
+                        entry.symbol,
+                        entry.interval,
+                        entry.year,
+                        entry.month,
+                        entry.raw_hash,
+                        entry.row_count,
+                        entry.first_ts,
+                        entry.last_ts,
+                        entry.fetched_at,
+                    ],
+                )
+                self._conn.execute("COMMIT")  # type: ignore[attr-defined]
+            except Exception:
+                self._conn.execute("ROLLBACK")  # type: ignore[attr-defined]
+                raise
 
     def get(
         self,
@@ -159,16 +178,17 @@ class Catalog:
         """Return the catalog row for the given partition, or None if absent."""
         if self._closed:
             raise CatalogError("Catalog is closed")
-        row = self._conn.execute(  # type: ignore[attr-defined]
-            """
-            SELECT exchange, segment, symbol, interval, year, month,
-                   raw_hash, row_count, first_ts, last_ts, fetched_at
-            FROM partitions
-            WHERE exchange = ? AND segment = ? AND symbol = ?
-              AND interval = ? AND year = ? AND month = ?
-            """,
-            [exchange, segment, symbol, interval, year, month],
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(  # type: ignore[attr-defined]
+                """
+                SELECT exchange, segment, symbol, interval, year, month,
+                       raw_hash, row_count, first_ts, last_ts, fetched_at
+                FROM partitions
+                WHERE exchange = ? AND segment = ? AND symbol = ?
+                  AND interval = ? AND year = ? AND month = ?
+                """,
+                [exchange, segment, symbol, interval, year, month],
+            ).fetchone()
         if row is None:
             return None
         return CatalogEntry(
@@ -238,7 +258,8 @@ class Catalog:
             "FROM partitions"
         )
         sql = f"{base_sql} WHERE {where} ORDER BY year ASC, month ASC"  # nosec B608
-        rows = self._conn.execute(sql, params).fetchall()  # type: ignore[attr-defined]
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()  # type: ignore[attr-defined]
         return [
             CatalogEntry(
                 exchange=row[0],
@@ -430,9 +451,10 @@ class Catalog:
         """Return the number of partition rows recorded in the catalog."""
         if self._closed:
             raise CatalogError("Catalog is closed")
-        result = self._conn.execute(  # type: ignore[attr-defined]
-            "SELECT COUNT(*) FROM partitions"
-        ).fetchone()
+        with self._lock:
+            result = self._conn.execute(  # type: ignore[attr-defined]
+                "SELECT COUNT(*) FROM partitions"
+            ).fetchone()
         return int(result[0]) if result else 0
 
     def close(self) -> None:

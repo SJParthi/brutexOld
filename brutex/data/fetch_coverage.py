@@ -21,6 +21,7 @@ on the next day's pull, while every **settled past** window is skipped.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
@@ -44,29 +45,45 @@ class WindowKey:
 
 @dataclass(slots=True)
 class FetchCoverage:
-    """An O(1) set of completed fetch windows (the skip-if-already-pulled ledger)."""
+    """An O(1) set of completed fetch windows (the skip-if-already-pulled ledger).
+
+    Thread-safety (DEC-DHAN-PARALLEL-INGEST-001). One ledger is threaded into
+    every parallel ``(instrument, interval)`` worker (spot) / underlying worker
+    (options) so the workers share one skip-set. A :class:`threading.Lock`
+    guards every read/write (``is_complete`` / ``mark_complete`` /
+    ``completed_count`` / ``to_records``) so a concurrent ``mark_complete`` can
+    never tear the set during another worker's probe or serialisation. This is
+    defensive — a duplicate fetch is already idempotent at the sink (Rule #7) —
+    but cheap (O(1) hold time, no I/O under the lock) and it keeps the
+    skip/serialise reads consistent under the fan-out.
+    """
 
     _complete: set[WindowKey] = field(default_factory=set)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def is_complete(self, key: WindowKey) -> bool:
-        """Return ``True`` iff *key*'s window was already pulled — **O(1)**."""
-        return key in self._complete
+        """Return ``True`` iff *key*'s window was already pulled — **O(1)**, atomic."""
+        with self._lock:
+            return key in self._complete
 
     def mark_complete(self, key: WindowKey) -> None:
-        """Record *key*'s window as pulled — **O(1)**, idempotent."""
-        self._complete.add(key)
+        """Record *key*'s window as pulled — **O(1)**, idempotent, atomic."""
+        with self._lock:
+            self._complete.add(key)
 
     @property
     def completed_count(self) -> int:
-        """Number of windows recorded complete."""
-        return len(self._complete)
+        """Number of windows recorded complete (thread-safe)."""
+        with self._lock:
+            return len(self._complete)
 
     def to_records(self) -> list[tuple[str, str, str, str, str]]:
-        """Serialise to a deterministic, sorted list of string tuples (for persistence)."""
-        return sorted(
-            (k.market, k.security_id, k.interval, k.start.isoformat(), k.end.isoformat())
-            for k in self._complete
-        )
+        """Serialise to a deterministic, sorted list of string tuples (atomic snapshot)."""
+        with self._lock:
+            return sorted(
+                (k.market, k.security_id, k.interval, k.start.isoformat(), k.end.isoformat())
+                for k in self._complete
+            )
 
     @classmethod
     def from_records(cls, records: Iterable[tuple[str, str, str, str, str]]) -> FetchCoverage:
