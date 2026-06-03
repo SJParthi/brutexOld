@@ -72,7 +72,6 @@ from typing import TYPE_CHECKING
 import structlog
 
 from brutex.calendars.nse import FORCED_EXIT_IST, IST
-from brutex.metrics.types import ClosedTrade
 from brutex.models import BruteXError
 from brutex.money import paisa_to_rupees, rupees_to_paisa
 from brutex.strategies.types import Side
@@ -82,6 +81,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from datetime import date
 
     from brutex.data.models import CandleBar
+    from brutex.metrics.types import ClosedTrade
 
 _LOG = structlog.get_logger("brutex.engine.trade_sim")
 
@@ -212,6 +212,14 @@ def _walk_to_exit(
     Returns ``None`` (drop-incomplete) if the position reaches the end of the
     session with no SL/TP breach and no forced-15:20 bar to fill against.
     """
+    # Lazy import (DO NOT hoist to module top): `brutex.metrics.__init__`
+    # eagerly imports numpy, and `brutex.engine.__init__` re-exports this module
+    # — a top-level import would pull numpy into every `import brutex.engine`,
+    # tripping the dotted `--cov=brutex.engine.combo_mask` CI gate on numpy 2.x's
+    # "cannot load module more than once per process" (mirrors the metrics
+    # modules' numpy-safe coverage handling).
+    from brutex.metrics.types import ClosedTrade
+
     entry = position.entry_price
     mfe = Decimal(0)
     mae = Decimal(0)
