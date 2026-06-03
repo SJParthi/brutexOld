@@ -9,9 +9,23 @@ transport (:func:`urllib_transport`) is a thin ``urllib`` shim and is the
 only ``# pragma: no cover`` surface, exactly like the Groww adapter's
 SSRF-guarded fetch.
 
-Rate limiting + retries are NOT the client's concern (CLAUDE.md §11
-COMMON) — the orchestrator paces calls via the adaptive token bucket and
-consults :func:`brutex.adapters.dhan.errors.is_retryable`.
+Rate limiting + *logical* retry/re-queue stay the orchestrator's concern
+(CLAUDE.md §11 COMMON) — it paces calls via the adaptive token bucket and
+re-queues windows that fail. The client owns ONE narrow, bounded
+*latency-hygiene* concern (DEC-DHAN-CALL-TIMEOUT-RETRY-001): a stalled /
+transient transport (or 5xx) call is fast-retried in place
+(:attr:`DhanClient.max_attempts`, exponential backoff seeded at the 5 r/s
+interval) so a single 30s-style stall can no longer freeze a SEQUENTIAL pull.
+A rate-limit (HTTP 429) is NEVER fast-retried here (the token bucket owns 429
+backoff). The configured 5 r/s cap + ``rate_control`` are byte-unchanged and the
+backoff is spaced at the rate interval, so a single sequential stream stays
+within the per-second budget; the retries are NOT token-bucket-coordinated,
+though, so under a *sustained fast-failing* burst the instantaneous physical
+rate can briefly overlap the next paced window (bounded by ``max_attempts``,
+non-sustained — honest envelope in MIGRATION.md #427). Not delegated to
+:func:`brutex.orchestrator.retry.retry_call` (which RETRIES 429 and does not
+meter/log each physical attempt); the predicate reuses the COMMON
+:func:`brutex.adapters.dhan.errors.is_retryable`.
 """
 
 from __future__ import annotations
@@ -23,6 +37,7 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from math import inf
 from time import perf_counter
+from time import sleep as _time_sleep
 from typing import Final, Protocol
 from urllib.parse import urlparse
 
@@ -38,6 +53,8 @@ from brutex.adapters.dhan.errors import (
     DhanTimeoutError,
     DhanTransportError,
     from_http_status,
+    is_rate_limit,
+    is_retryable,
 )
 
 #: Structured logger — emits ``dhan.call`` (per-call DEBUG) + ``dhan.throughput``
@@ -47,8 +64,35 @@ _LOG = structlog.get_logger("brutex.adapters.dhan.client")
 #: Hosts the client is allowed to POST to (SSRF guard).
 _ALLOWED_HOSTS: frozenset[str] = frozenset({"api.dhan.co"})
 
-#: Default whole-request timeout (seconds).
-_DEFAULT_TIMEOUT: float = 30.0
+#: Default whole-request timeout (seconds). Lowered 30 → 10 in
+#: DEC-DHAN-CALL-TIMEOUT-RETRY-001: a single 30s-ceiling stall froze the whole
+#: SEQUENTIAL pull for 30s (observed ``latency_ms_max: 30080``, effective RPS
+#: collapsing 5.1 → 3.75). Real Dhan intraday/option chunk responses land in
+#: well under a few seconds, so 10s keeps generous P99.9 headroom while failing
+#: a true stall ~3× faster — where the bounded fast-retry below recovers it.
+#: Overridable per client via the :attr:`DhanClient.timeout` field.
+_DEFAULT_TIMEOUT: float = 10.0
+
+#: Default bounded fast-retry budget: total POST attempts for one logical call
+#: (1 initial + up to 2 in-place retries) on a transient transport/server stall.
+#: Bounded → O(1); see :func:`_should_fast_retry` for what is (and is NOT, e.g.
+#: a 429) retried, and DEC-DHAN-CALL-TIMEOUT-RETRY-001 for the rationale.
+_DEFAULT_MAX_ATTEMPTS: Final[int] = 3
+
+#: Base backoff (seconds) for the fast-retry. Seeded at the **5 r/s
+#: inter-request interval** (1 / 5 = 0.2 s, CLAUDE.md §2 Rule 6) so a single
+#: SEQUENTIAL stream's in-place retries are spaced no tighter than the rate
+#: budget would space them — keeping a self-healing window within the per-second
+#: cap without coupling the client to the token bucket. The *k*-th retry waits
+#: ``base × 2**(k-1)`` (0.2 s, 0.4 s …), clamped to :data:`_MAX_BACKOFF_S`. Still
+#: latency hygiene (≤ ~0.6 s added on a fully-failing window) vs the 10 s timeout.
+_DEFAULT_RETRY_BACKOFF_S: Final[float] = 0.2
+
+#: Hard ceiling (seconds) on a single fast-retry backoff — defends against an
+#: operator-set large ``max_attempts`` driving ``base × 2**(k-1)`` toward ``inf``
+#: (and ``sleep(inf)`` hanging the pull). Mirrors the clamp in
+#: :func:`brutex.orchestrator.retry.backoff_delay`.
+_MAX_BACKOFF_S: Final[float] = 5.0
 
 #: Bounded ring of recent per-call latencies kept for the p95 (O(1) memory).
 _LATENCY_WINDOW: Final[int] = 256
@@ -132,6 +176,22 @@ def _guard_url(url: str) -> None:
         raise DhanError(f"refusing non-allowlisted Dhan URL: {url!r}")
 
 
+def _should_fast_retry(exc: DhanError) -> bool:
+    """True if *exc* is a transient stall worth a bounded in-place fast-retry.
+
+    Reuses the COMMON :func:`is_retryable` predicate (CLAUDE.md §11) — so the
+    fast-retry set is timeout + transport + 5xx-server — but DELIBERATELY
+    EXCLUDES rate-limit (HTTP 429) via :func:`is_rate_limit`: a 429 means "slow
+    down", and the orchestrator's adaptive token bucket owns that backoff
+    (CLAUDE.md §2 Rule 6). Fast-retrying a 429 here would directly fight the
+    limiter; excluding it (plus a backoff seeded at the 5 r/s interval) keeps a
+    single sequential stream within the per-second budget — latency hygiene, not
+    a steady-state throughput change (DEC-DHAN-CALL-TIMEOUT-RETRY-001; honest
+    envelope re: fast-failing bursts in MIGRATION.md #427).
+    """
+    return is_retryable(exc) and not is_rate_limit(exc)
+
+
 @dataclass(frozen=True, slots=True)
 class DhanClient:
     """A configured Dhan Data-API caller (credentials + injected transport)."""
@@ -141,12 +201,24 @@ class DhanClient:
     transport: Transport
     base_url: str = DHAN_BASE_URL
     timeout: float = _DEFAULT_TIMEOUT
+    #: Bounded fast-retry budget — total attempts (1 initial + retries) for a
+    #: transient transport/server stall. Latency hygiene, NEVER a 429 retry.
+    max_attempts: int = _DEFAULT_MAX_ATTEMPTS
+    #: Base exponential-backoff seconds between fast-retries.
+    retry_backoff_s: float = _DEFAULT_RETRY_BACKOFF_S
     #: Monotonic clock for per-call latency (injected for deterministic tests).
     clock: Callable[[], float] = perf_counter
+    #: Sleep hook for the inter-retry backoff (injected → no real wait in tests).
+    sleep: Callable[[float], None] = _time_sleep
     #: Rolling latency / effective-RPS meter (a fresh one per client).
     meter: CallMeter = field(default_factory=CallMeter)
     #: Emit a ``dhan.throughput`` INFO summary every Nth call.
     log_every: int = _DEFAULT_LOG_EVERY
+
+    def __post_init__(self) -> None:
+        """Reject a non-positive fast-retry budget (fail fast on misconfig)."""
+        if self.max_attempts < 1:
+            raise ValueError(f"max_attempts must be >= 1; got {self.max_attempts!r}")
 
     def _headers(self) -> dict[str, str]:
         """Build the auth + content headers for every request."""
@@ -160,13 +232,57 @@ class DhanClient:
     def post_json(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
         """POST *body* as JSON to ``base_url + endpoint``; return the parsed object.
 
+        A transient transport/server **stall** (timeout, connection drop, or a
+        5xx) is fast-retried in place up to :attr:`max_attempts` times with an
+        exponential backoff seeded at the 5 r/s interval (:attr:`retry_backoff_s`,
+        clamped to :data:`_MAX_BACKOFF_S`), so a single slow call can no longer
+        freeze a SEQUENTIAL pull (DEC-DHAN-CALL-TIMEOUT-RETRY-001). A **rate-limit
+        (429)** is NOT fast-retried here — the orchestrator's token bucket owns
+        that backoff, and the configured 5 r/s cap + ``rate_control`` are
+        unchanged (CLAUDE.md §2 Rule 6; the retries are spaced at the rate
+        interval so a single stream stays within the per-second budget — honest
+        envelope re: fast-failing bursts in MIGRATION.md #427). Terminal errors
+        (400/404/auth) never retry. Each physical attempt is metered by
+        :attr:`meter`; a retry emits a ``dhan.retry`` INFO line so it is visible
+        on /logs. Bounded attempts + O(1) backoff math keep the hot path O(1).
+
         Raises
         ------
         DhanError
-            Non-allowlisted URL, malformed/non-object JSON, or an
-            unexpected HTTP status (mapped via :func:`from_http_status`).
+            Non-allowlisted URL, malformed/non-object JSON, or an unexpected
+            HTTP status (mapped via :func:`from_http_status`) — after the
+            fast-retry budget is exhausted for transient faults.
         DhanTimeoutError / DhanTransportError
-            On a transport timeout / connection failure.
+            On a transport timeout / connection failure that outlived the
+            fast-retry budget.
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return self._post_once(endpoint, body)
+            except DhanError as exc:
+                if not _should_fast_retry(exc):
+                    raise  # terminal (400/404/auth) or 429 (token bucket owns it)
+                if attempt >= self.max_attempts:
+                    raise  # bounded budget exhausted — orchestrator re-queues
+                backoff_s = min(self.retry_backoff_s * (2.0 ** (attempt - 1)), _MAX_BACKOFF_S)
+                _LOG.info(
+                    "dhan.retry",
+                    endpoint=endpoint,
+                    attempt=attempt,
+                    max_attempts=self.max_attempts,
+                    error=type(exc).__name__,
+                    backoff_ms=round(backoff_s * 1000.0, 1),
+                )
+                self.sleep(backoff_s)
+
+    def _post_once(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
+        """One physical POST attempt (guard → transport → status/JSON map).
+
+        The single round-trip the :meth:`post_json` fast-retry loop wraps; every
+        exit (success, timeout, transport error) is metered by :meth:`_observe`,
+        so a slow/failing attempt's latency is never invisible.
         """
         url = self.base_url + endpoint
         _guard_url(url)
