@@ -390,7 +390,7 @@ jobs:
           # writers/readers, fno_eligible_underlyings UNION arms, list_*
           # filtered scans, raw-hash-mismatch integrity + assert_clean).
           if compgen -G "tests/integration/test_instrument_store_edges.py" > /dev/null; then
-            pytest --cov=brutex.data.instrument_store --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_instrument_store.py tests/integration/test_instrument_store_edges.py
+            pytest --cov=brutex.data.instrument_store --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_instrument_store.py tests/integration/test_instrument_store_edges.py tests/integration/test_instrument_store_read_write_split.py
           else
             echo "(brutex.data.instrument_store edge test file not present yet — gate inactive)"
           fi
