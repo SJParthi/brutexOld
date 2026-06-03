@@ -1152,6 +1152,16 @@ jobs:
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
+          # DEC-STAT-SPA-001 (#424): brutex.metrics.spa — Hansen SPA, White
+          # Reality Check, Romano-Wolf step-down (Stage-4 data-snooping filters
+          # #4 + #6). 100% line+branch from the dedicated unit suite; the
+          # property (test_spa_properties.py) + golden (test_spa_golden.py)
+          # suites add distributional + byte-exact determinism checks.
+          if compgen -G "tests/unit/test_spa.py" > /dev/null; then
+            pytest --cov=brutex.metrics.spa --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_spa.py
+          else
+            echo "(brutex.metrics.spa test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML

@@ -40,17 +40,45 @@ deferral recorded in ``docs/MIGRATION.md`` entry #305 (DEC-METRICS-001),
 per Golden Rule #10. The composite ranking score (spec lines 602-615)
 and the hard rejection gates (spec lines 589-600) are also Stage-4
 concerns and are likewise out of scope here.
+
+**Stage-4 multiple-testing tests (IMPLEMENTED in** :mod:`brutex.metrics.spa`
+**):** White's Reality Check, Hansen's SPA, and the Romano-Wolf step-down
+(spec Stage-4 filters #4 + #6; DEC-STAT-SPA-001, ``docs/MIGRATION.md``
+entry #424) are pure bootstrap functions over a matrix of strategy excess
+returns and are re-exported here (:func:`reality_check`, :func:`hansen_spa`,
+:func:`romano_wolf`). They are independent of the per-result row schema
+above.
 """
 
 from __future__ import annotations
 
 from brutex.metrics.compute import Moments, ResultMetrics, compute_metrics
+from brutex.metrics.spa import (
+    BootstrapConfig,
+    BootstrapMethod,
+    RealityCheckResult,
+    RomanoWolfResult,
+    SPAResult,
+    expected_block_length,
+    hansen_spa,
+    reality_check,
+    romano_wolf,
+)
 from brutex.metrics.types import ClosedTrade, EquityCurve
 
 __all__ = [
+    "BootstrapConfig",
+    "BootstrapMethod",
     "ClosedTrade",
     "EquityCurve",
     "Moments",
+    "RealityCheckResult",
     "ResultMetrics",
+    "RomanoWolfResult",
+    "SPAResult",
     "compute_metrics",
+    "expected_block_length",
+    "hansen_spa",
+    "reality_check",
+    "romano_wolf",
 ]
