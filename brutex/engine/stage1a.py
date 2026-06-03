@@ -358,14 +358,15 @@ class Stage1AMatrixBuilder:
         low_paisa = _price_to_paisa(bar.low)
         close_paisa = _price_to_paisa(bar.close)
 
-        if bar_day != self._current_day:
-            self._roll_to_new_day(bar_day, open_paisa, high_paisa, low_paisa, close_paisa)
-        else:
-            # mypy: inside an existing day _today_ohlc is always set.
-            assert self._today_ohlc is not None  # noqa: S101 - state invariant
-            self._today_ohlc.absorb(
-                high_paisa=high_paisa, low_paisa=low_paisa, close_paisa=close_paisa
+        if self._today_ohlc is None or bar_day != self._current_day:
+            today_ohlc = self._roll_to_new_day(
+                bar_day, open_paisa, high_paisa, low_paisa, close_paisa
             )
+        else:
+            # Same IST day: the `or` above guarantees _today_ohlc is set here,
+            # so mypy narrows it to _DayOHLC (no assert needed).
+            today_ohlc = self._today_ohlc
+            today_ohlc.absorb(high_paisa=high_paisa, low_paisa=low_paisa, close_paisa=close_paisa)
 
         # Both EMAs are close-driven (vocabulary Group 1: "EMA 20 close, EMA
         # 200 close"). The float close is taken directly from the Decimal bar;
@@ -382,7 +383,6 @@ class Stage1AMatrixBuilder:
         pivots = self._anchors.pivots if self._anchors is not None else _PLACEHOLDER_PIVOTS
         fib = self._anchors.fib if self._anchors is not None else _PLACEHOLDER_FIB
 
-        assert self._today_ohlc is not None  # noqa: S101 - set by roll/absorb above
         snapshot = IndicatorSnapshot(
             timestamp_ist=ts_ist,
             open_paisa=open_paisa,
@@ -395,7 +395,7 @@ class Stage1AMatrixBuilder:
             fib=fib,
             day_high_paisa=day_high_paisa,
             day_low_paisa=day_low_paisa,
-            open_of_day_paisa=self._today_ohlc.open_paisa,
+            open_of_day_paisa=today_ohlc.open_paisa,
         )
 
         mask = evaluate_atoms(snapshot, self._proximity, self._prior_history)
@@ -414,7 +414,7 @@ class Stage1AMatrixBuilder:
         high_paisa: int,
         low_paisa: int,
         close_paisa: int,
-    ) -> None:
+    ) -> _DayOHLC:
         """Rotate state at an IST day boundary and recompute the day's anchors.
 
         The day that just ended (if any) becomes the prior day; its OHLC drives
@@ -427,19 +427,27 @@ class Stage1AMatrixBuilder:
             The new IST trading day.
         open_paisa, high_paisa, low_paisa, close_paisa
             The first bar of the new day, in int64 paisa.
+
+        Returns
+        -------
+        _DayOHLC
+            The freshly seeded OHLC accumulator for the new day (a definite,
+            non-``None`` value the caller uses without re-narrowing).
         """
         # The day we were accumulating is now complete → it is the prior day.
         if self._today_ohlc is not None:
             self._prev_day_ohlc = self._today_ohlc
 
         self._current_day = bar_day
-        self._today_ohlc = _DayOHLC(
+        new_ohlc = _DayOHLC(
             open_paisa=open_paisa,
             high_paisa=high_paisa,
             low_paisa=low_paisa,
             close_paisa=close_paisa,
         )
+        self._today_ohlc = new_ohlc
         self._anchors = self._compute_anchors(bar_day, self._prev_day_ohlc)
+        return new_ohlc
 
     @staticmethod
     def _compute_anchors(today: date, prev_ohlc: _DayOHLC | None) -> _DayAnchors | None:

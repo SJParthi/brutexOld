@@ -17,6 +17,7 @@ conversions this module owns.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -254,7 +255,7 @@ def test_stream_is_lazy() -> None:
     day = datetime(2024, 1, 2)
     pulled = 0
 
-    def gen() -> object:
+    def gen() -> Iterator[CandleBar]:
         nonlocal pulled
         for i in range(3):
             pulled += 1

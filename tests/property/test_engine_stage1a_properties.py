@@ -24,6 +24,14 @@ from brutex.engine.stage1a import Stage1AMatrixBuilder, _price_to_paisa, build_b
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+# pyright: reportCallIssue=false
+# Rationale (DEC-PYRIGHT-UNMASK-001): the Hypothesis `@st.composite` strategies
+# below are invoked with no args (e.g. `_bar_sequences()`) because the decorator
+# injects `draw` at runtime; pyright does not model the `@composite` signature
+# rewrite and emits a spurious "missing draw". Scoped to this file only —
+# `reportCallIssue` stays a hard error everywhere else (same convention as
+# tests/property/test_combo_hash_uniqueness.py).
+
 # 09:15:00 IST == 03:45 UTC (session-open anchor).
 _OPEN_UTC = datetime(2024, 1, 2, 3, 45, tzinfo=UTC)
 
