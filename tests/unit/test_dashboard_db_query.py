@@ -23,8 +23,8 @@ from brutex.dashboard.db_view import (
     SPOT_DERIVED_COLUMNS,
     _bar_ist_date,
     _bar_ist_time,
-    _daily_close_by_date,
     _format_candle_timestamp,
+    _intraday_last_close_by_date,
     _ist_date,
     _prev_trading_close,
     _quote_ident,
@@ -1315,48 +1315,67 @@ def test_bar_ist_time_tz_aware_and_naive() -> None:
     assert _bar_ist_time(datetime(2024, 3, 4, 9, 15, 0)) == time(9, 15)  # naive as-is
 
 
-# ── _daily_close_by_date ─────────────────────────────────────────────
+# ── _intraday_last_close_by_date ─────────────────────────────────────
 
 
-def test_daily_close_by_date_missing_partition_is_empty(
+def test_intraday_last_close_missing_partition_is_empty(
     store: InstrumentStore, tmp_path: Path
 ) -> None:
-    out = _daily_close_by_date(
+    out = _intraday_last_close_by_date(
         store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="NSE-NIFTY"
     )
     assert out == {}
 
 
-def test_daily_close_by_date_reads_closes_keyed_by_ist_date(
+def test_intraday_last_close_picks_each_days_final_1min_bar(
     store: InstrumentStore, tmp_path: Path
 ) -> None:
+    # Two minute bars per day → arg_max(close, timestamp) must pick the LATER
+    # bar's close (the 15:29 IST "previous close" the engine baselines on).
     ParquetWriter(lake_root=tmp_path).write(
         exchange="NSE",
         segment="CASH",
         symbol="NSE-NIFTY",
-        interval="1day",
+        interval="1minute",
         bars=[
+            # 2024-03-01: 09:15 close 99, 15:29 close 100 → last = 100.
             _ocbar(
                 datetime(2024, 3, 1, 3, 45, tzinfo=UTC),
-                open_="100",
+                open_="98",
                 high="101",
-                low="99",
-                close="100",
+                low="97",
+                close="99",
             ),
             _ocbar(
+                datetime(2024, 3, 1, 9, 59, tzinfo=UTC),
+                open_="99",
+                high="101",
+                low="98",
+                close="100",
+            ),
+            # 2024-03-04: 09:15 close 111, 15:29 close 110 → last = 110 (drifts DOWN
+            # into the close, exactly the COALINDIA case: last 1-min ≠ daily VWAP).
+            _ocbar(
                 datetime(2024, 3, 4, 3, 45, tzinfo=UTC),
-                open_="110",
-                high="111",
+                open_="112",
+                high="113",
+                low="109",
+                close="111",
+            ),
+            _ocbar(
+                datetime(2024, 3, 4, 9, 59, tzinfo=UTC),
+                open_="111",
+                high="112",
                 low="109",
                 close="110",
             ),
         ],
     )
-    out = _daily_close_by_date(
+    out = _intraday_last_close_by_date(
         store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="NSE-NIFTY"
     )
     assert set(out) == {date(2024, 3, 1), date(2024, 3, 4)}
-    assert out[date(2024, 3, 1)] == Decimal("100.0")
+    assert out[date(2024, 3, 1)] == Decimal("100.0")  # the 15:29 close, not the 09:15 99
     assert out[date(2024, 3, 4)] == Decimal("110.0")
 
 
@@ -1450,36 +1469,30 @@ def test_spot_derived_zero_prev_close_is_blank() -> None:
 
 
 def test_query_candles_derived_columns_end_to_end(store: InstrumentStore, tmp_path: Path) -> None:
-    # Daily closes: 2024-03-01 → 100, 2024-03-04 → 110 (prev of 03-04 is 100).
-    ParquetWriter(lake_root=tmp_path).write(
-        exchange="NSE",
-        segment="CASH",
-        symbol="NSE-NIFTY",
-        interval="1day",
-        bars=[
-            _ocbar(
-                datetime(2024, 3, 1, 3, 45, tzinfo=UTC),
-                open_="100",
-                high="101",
-                low="99",
-                close="100",
-            ),
-            _ocbar(
-                datetime(2024, 3, 4, 3, 45, tzinfo=UTC),
-                open_="110",
-                high="111",
-                low="109",
-                close="110",
-            ),
-        ],
-    )
-    # Minute bars on 2024-03-04: the 09:15 IST open bar + a later bar.
+    # Baseline = prior day's LAST 1-minute close (DEC-SPOT-PREVCLOSE-1MIN-001):
+    # 2024-03-01's final 1-min close is 100, so it anchors 2024-03-04's bars.
     ParquetWriter(lake_root=tmp_path).write(
         exchange="NSE",
         segment="CASH",
         symbol="NSE-NIFTY",
         interval="1minute",
         bars=[
+            # 2024-03-01: last 1-min close = 100 (the 09:59Z = 15:29 IST bar).
+            _ocbar(
+                datetime(2024, 3, 1, 3, 45, tzinfo=UTC),
+                open_="95",
+                high="101",
+                low="94",
+                close="98",
+            ),
+            _ocbar(
+                datetime(2024, 3, 1, 9, 59, tzinfo=UTC),
+                open_="98",
+                high="101",
+                low="97",
+                close="100",
+            ),
+            # 2024-03-04: the 09:15 IST open bar + a later bar (anchored on 100).
             _ocbar(
                 datetime(2024, 3, 4, 3, 45, tzinfo=UTC),
                 open_="105",
@@ -1516,6 +1529,9 @@ def test_query_candles_derived_columns_end_to_end(store: InstrumentStore, tmp_pa
     assert float(open_row[gap_i]) == pytest.approx(5.0)  # (105-100)/100*100
     assert float(later_row[chg_i]) == pytest.approx(21.0)  # (121-100)/100*100
     assert later_row[gap_i] is None  # gap only on the 09:15 bar
+    # 2024-03-01 is the FIRST day in the 1-min lake → no prior close → blank.
+    assert by_ts["2024-03-01 09:15:00"][chg_i] is None
+    assert by_ts["2024-03-01 09:15:00"][gap_i] is None
 
 
 def test_query_candles_daily_interval_is_date_only_with_change(
@@ -1543,6 +1559,31 @@ def test_query_candles_daily_interval_is_date_only_with_change(
             ),
         ],
     )
+    # The %-change baseline now comes from the 1-MINUTE lake (the prior day's
+    # last 1-min close), even for a 1day VIEW (DEC-SPOT-PREVCLOSE-1MIN-001):
+    # 2024-03-01's final 1-min close is 100 → anchors the 2024-03-04 daily bar.
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        bars=[
+            _ocbar(
+                datetime(2024, 3, 1, 9, 59, tzinfo=UTC),
+                open_="99",
+                high="101",
+                low="98",
+                close="100",
+            ),
+            _ocbar(
+                datetime(2024, 3, 4, 9, 59, tzinfo=UTC),
+                open_="109",
+                high="112",
+                low="108",
+                close="110",
+            ),
+        ],
+    )
     out = query_candles(
         store.connection,
         tmp_path,
@@ -1558,19 +1599,23 @@ def test_query_candles_daily_interval_is_date_only_with_change(
     # DATE-ONLY render for the 1day interval (no 00:00:00 / HH:MM:SS noise).
     assert set(rows) == {"2024-03-01", "2024-03-04"}
     assert rows["2024-03-01"][chg_i] is None  # first day → no previous close
-    assert float(rows["2024-03-04"][chg_i]) == pytest.approx(10.0)
+    assert float(rows["2024-03-04"][chg_i]) == pytest.approx(10.0)  # (110-100)/100*100
 
 
-def test_query_candles_no_daily_data_blank_derived(store: InstrumentStore, tmp_path: Path) -> None:
-    # Minute bars but NO 1day partition → derived columns present but all blank.
-    _write_candles(tmp_path, symbol="NSE-NIFTY", interval="1minute")
+def test_query_candles_no_intraday_data_blank_derived(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # 1day bars but NO 1minute partition → no prev-close source (the baseline is
+    # the prior day's last 1-min close, DEC-SPOT-PREVCLOSE-1MIN-001) → derived
+    # columns present but all blank.
+    _write_candles(tmp_path, symbol="NSE-NIFTY", interval="1day")
     out = query_candles(
         store.connection,
         tmp_path,
         exchange="NSE",
         segment="CASH",
         symbol="NSE-NIFTY",
-        interval="1minute",
+        interval="1day",
         limit=50,
     )
     chg_i = out["columns"].index("change_pct")

@@ -181,7 +181,9 @@ const OPS = [["eq","="],["ne","≠"],["lt","<"],["le","≤"],["gt",">"],["ge","�
 /* Server-computed derived %-columns appended to every spot candle page
    (DEC-DB-CANDLE-DERIVED-001): previous-day % change + the 09:15 overnight gap.
    They are NOT real Parquet columns (never in the column picker / CANDLE_COLS);
-   the backend joins them per bar from the symbol's 1d daily closes. Values
+   the backend joins them per bar from the prior trading day's LAST 1-minute
+   close (the engine is 1-minute-based, so the baseline is the 1-min feed it
+   sweeps, not the 1d official close — DEC-SPOT-PREVCLOSE-1MIN-001). Values
    arrive FULL PRECISION (statistical metrics, never money-rounded — CLAUDE.md
    §4); we render 2 decimals at DISPLAY only via fmtCell. */
 const PCT_COLS = new Set(["change_pct", "open_gap_pct"]);
