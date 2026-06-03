@@ -8,14 +8,25 @@
 > 2. Defaults
 >
 > The previous DEC-PROTOCOL-001 layer (tickvault adaptation doc +
-> auto-loaded protocol bundle) was RETIRED in DEC-P0-026 (PR #48) —
-> BruteX is a self-contained Track 1 backtest engine with no
-> co-development relationship to any other repo.
+> auto-loaded protocol bundle) remains RETIRED (DEC-P0-026, PR #48).
+> The ONLY co-development surface re-established since is the shared
+> `rust/trading-core/` crate — the single source of truth for the
+> evaluate-time indicators (pivots + Fibonacci) + the 52-condition
+> vocabulary, consumed bit-identically by BOTH BruteX (via the PyO3
+> `trading_core` wheel) and TickVault (native Rust) per
+> DEC-SHARED-CORE-001 (MIGRATION.md #441). The frozen 400-case golden
+> answer-key is the contract both sides satisfy; no other
+> adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-01 (DEC-DASHBOARD-OMIT-AUDIT-001 — vendor docs
-reconciled Groww → Dhan after the 5-agent workspace verification found
-§1/§6 stale). DEC-P0-026 (PR #48) retired the tickvault co-development
-layer. Vendor history: broker → Groww migration (2026-05-15), Groww →
+_Last updated: 2026-06-03 (DEC-SHARED-CORE-001 Phase 2b, MIGRATION.md
+#441 — BruteX's 52-condition vocab now delegates to the shared
+`rust/trading-core/` crate; §1/§5 reconciled). Earlier: 2026-06-01
+(DEC-DASHBOARD-OMIT-AUDIT-001 — vendor docs reconciled Groww → Dhan
+after the 5-agent workspace verification found §1/§6 stale). DEC-P0-026
+(PR #48) retired the tickvault co-development layer; DEC-SHARED-CORE-001
+then re-established a single shared `trading-core` crate (indicators +
+52-vocab) consumed by BruteX + TickVault. Vendor history: broker → Groww
+migration (2026-05-15), Groww →
 Dhan pivot proposed then reverted — **DEC-GROWW-DHAN-REVERT-001
 (2026-05-31, ADR-0002) is authoritative: the live vendor is Dhan.**
 Track 1 spec locked after 4-agent hostile-review pass._
@@ -280,9 +291,13 @@ bruteX/
 │   ├── config/
 │   ├── notifications/
 │   └── observability/
-├── rust/                           ← Rust hot kernel scaffold (Phase 2/3 only)
-│   └── fno-math/                   ← compat types + NSE calendar; Greeks/
-│                                     indicators removed in DEC-P0-025
+├── rust/                           ← Rust hot kernels (shared core + compat)
+│   ├── fno-math/                   ← compat types + NSE calendar; Greeks/
+│   │                                 indicators removed in DEC-P0-025
+│   └── trading-core/               ← SHARED 52-vocab + evaluate-time
+│                                     indicators (pivots/fib); bit-identical
+│                                     core for BruteX (PyO3 wheel) + TickVault
+│                                     (native) — DEC-SHARED-CORE-001 #441
 ├── tests/
 │   ├── unit/
 │   ├── integration/

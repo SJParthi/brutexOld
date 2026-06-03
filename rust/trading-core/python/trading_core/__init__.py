@@ -12,17 +12,23 @@ that Phase 2 wires in.
 from __future__ import annotations
 
 from ._trading_core import (  # type: ignore[import-not-found]
+    FIB_LEVELS_LEN,
+    PIVOT_LEVELS_LEN,
     TOTAL_CONDITIONS,
     __version__,
     evaluate_from_raw,
+    evaluate_with_levels,
     total_conditions,
     version,
 )
 
 __all__ = [
+    "FIB_LEVELS_LEN",
+    "PIVOT_LEVELS_LEN",
     "TOTAL_CONDITIONS",
     "__version__",
     "evaluate_from_raw",
+    "evaluate_with_levels",
     "total_conditions",
     "version",
 ]

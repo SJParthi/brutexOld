@@ -584,33 +584,40 @@ class TestPriorBarHistory:
         assert h.flags == [True, False, True]
 
     def test_all_bullish_requires_full_window(self) -> None:
+        # The all-bullish/alternating logic now lives in the Rust core
+        # (DEC-SHARED-CORE-001 #441); assert the BIT through evaluate_atoms.
         h = PriorBarHistory(prior_n=3)
         h.update(True)
         h.update(True)
-        # Only 2 bars in 3-bar window → not full
-        assert not h.all_bullish()
+        s = _make_snapshot()
+        # Only 2 bars in a 3-bar window → not full → bit stays clear.
+        assert not _bit(evaluate_atoms(s, _default_proximity(), h), B.BIT_PRIOR_N_BULLISH)
         h.update(True)
-        assert h.all_bullish()
+        assert _bit(evaluate_atoms(s, _default_proximity(), h), B.BIT_PRIOR_N_BULLISH)
 
     def test_alternating_for_n_eq_1(self) -> None:
+        # Single-bar history trivially "alternates" (empty pairwise check).
         h = PriorBarHistory(prior_n=1)
         h.update(True)
-        # Single-bar history trivially "alternates" (loop has 0 iterations)
-        assert h.alternating()
+        s = _make_snapshot()
+        assert _bit(evaluate_atoms(s, _default_proximity(), h), B.BIT_PRIOR_ALTERNATING)
 
     def test_alternating_pattern(self) -> None:
         h = PriorBarHistory(prior_n=4)
         for f in [True, False, True, False]:
             h.update(f)
-        assert h.alternating()
-        assert not h.all_bullish()
-        assert not h.all_bearish()
+        s = _make_snapshot()
+        m = evaluate_atoms(s, _default_proximity(), h)
+        assert _bit(m, B.BIT_PRIOR_ALTERNATING)
+        assert not _bit(m, B.BIT_PRIOR_N_BULLISH)
+        assert not _bit(m, B.BIT_PRIOR_N_BEARISH)
 
     def test_not_alternating_two_same_in_a_row(self) -> None:
         h = PriorBarHistory(prior_n=4)
         for f in [True, False, True, True]:  # last two same
             h.update(f)
-        assert not h.alternating()
+        s = _make_snapshot()
+        assert not _bit(evaluate_atoms(s, _default_proximity(), h), B.BIT_PRIOR_ALTERNATING)
 
 
 # ────── Strict-100% coverage backfill (DEC-INDICATOR-COVERAGE-001 follow-up) ──────
@@ -644,17 +651,21 @@ class TestBitsInvariants:
 
 
 class TestEvaluatorEdgeCases:
-    """Coverage for evaluator branches the per-bit tests don't hit.
+    """Edge-case coverage routed through the Rust core via the shim.
 
-    - `_is_near` guard for `close_paisa <= 0` (evaluator.py:129).
-    - Pivot R2 / S3 proximity hits (evaluator.py:191, 197).
-    - `total_range == 0` skip in Group 5 (evaluator.py: 262→280).
-    - `day_range == 0` skip in Group 7 (evaluator.py: 293→302).
-    - `pdc <= 0` skip in Group 9 (evaluator.py: 315→323).
+    The branch logic now lives in `rust/trading-core/src/evaluator.rs`; the
+    shim (`evaluate_atoms`) marshals to it, so the same hand-built snapshots
+    still produce the documented masks (DEC-SHARED-CORE-001 #441):
+
+    - `is_near` guard for `close <= 0` → no near_* bit ever fires.
+    - Pivot R3 / S3 proximity hits.
+    - `total_range == 0` skip in Group 5 (candle shape).
+    - `day_range == 0` skip in Group 7 (position-in-day).
+    - `pdc <= 0` skip in Group 9 (the gap-day path Option B preserves).
     """
 
     def test_close_zero_returns_no_near_bits(self) -> None:
-        # close=0 trips `_is_near` guard → all near_* bits stay 0.
+        # close=0 trips the Rust `is_near` close<=0 guard → all near_* bits stay 0.
         s = _make_snapshot(close_paisa=0)
         m = evaluate_atoms(s, _default_proximity(), _empty_history())
         for bit in (
@@ -687,8 +698,8 @@ class TestEvaluatorEdgeCases:
 
     def test_zero_range_bar_skips_candle_shape_branches(self) -> None:
         # open == high == low == close → total_range = 0 → skip Group 5
-        # body / wick checks (branch 262→280). Doji also requires
-        # total_range > 0, so it must NOT fire either.
+        # body / wick checks. Doji also requires total_range > 0, so it must
+        # NOT fire either.
         s = _make_snapshot(
             open_paisa=24_000_00,
             high_paisa=24_000_00,
@@ -709,8 +720,8 @@ class TestEvaluatorEdgeCases:
 
     def test_zero_day_range_skips_position_in_day(self) -> None:
         # day_high == day_low → day_range = 0 → skip Group 7 upper/lower
-        # third bits (branch 293→302). The at-high / at-low bits still
-        # fire because close == day_high == day_low.
+        # third bits. The at-high / at-low bits still fire because
+        # close == day_high == day_low.
         s = _make_snapshot(
             close_paisa=24_000_00,
             day_high_paisa=24_000_00,
@@ -723,10 +734,11 @@ class TestEvaluatorEdgeCases:
         assert not _bit(m, B.BIT_CLOSE_IN_LOWER_THIRD)
 
     def test_zero_pdc_skips_gap_bits(self) -> None:
-        # pdc=0 → Group 9 gap-up / gap-down branch (308→316) is skipped.
-        # `compute_pivot_levels` rejects pdc=0 (data-corruption guard), so
-        # build the PivotLevels manually with pdc_paisa=0 to exercise the
-        # downstream evaluator branch.
+        # pdc=0 → the Rust evaluator's `pdc > 0` guard skips the Group 9
+        # gap-up / gap-down branch. `compute_pivot_levels` rejects pdc=0
+        # (data-corruption guard), so build the PivotLevels manually with
+        # pdc_paisa=0; the shim passes the levels through verbatim (Option B),
+        # which is exactly why the gap-day path survives the Rust delegation.
         from datetime import date
 
         from brutex.indicators.pivots import PivotLevels
