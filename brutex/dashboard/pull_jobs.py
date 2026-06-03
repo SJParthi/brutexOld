@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from typing import Protocol
 
 from brutex.dashboard.pull_progress import ProgressSnapshot, PullProgress
+from brutex.dashboard.summary_cache import CoverageCounters
 
 #: The positional progress hook the ingest drivers emit (``label, bars, failed``)
 #: — identical to ``brutex.adapters.dhan.run_ingest.ProgressHook`` but redeclared
@@ -40,6 +42,20 @@ PullWork = Callable[[ProgressHook], object]
 #: The injected thread spawner — runs *fn* off the caller's thread. The default
 #: spawns a daemon thread; tests inject a synchronous runner for determinism.
 Spawner = Callable[[Callable[[], None]], None]
+
+
+class _Invalidatable(Protocol):
+    """Minimal structural type for the summary cache's write-invalidation hook.
+
+    Only :meth:`mark_dirty` is needed here, so the job depends on the BEHAVIOUR
+    (a cache to invalidate) not the concrete
+    :class:`~brutex.dashboard.summary_cache.SummaryCache` — a test double with a
+    ``mark_dirty`` method satisfies it (CLAUDE.md §4 dependency injection).
+    """
+
+    def mark_dirty(self) -> None:
+        """Invalidate the cache so the next eligible read recomputes."""
+        ...
 
 
 def _daemon_spawn(fn: Callable[[], None]) -> None:  # pragma: no cover — real-thread default
@@ -57,6 +73,20 @@ class BackgroundPullJob:
     spawn
         Thread spawner (defaults to a daemon thread). Inject a synchronous
         runner in tests for determinism.
+    counters
+        Optional :class:`~brutex.dashboard.summary_cache.CoverageCounters` to
+        hook into the single write-progress funnel (DEC-DASHBOARD-FASTREAD-001):
+        each window's POST-DEDUP newly-written bar count is added to its label's
+        running tally for the O(1) coverage headline. A fresh one is created when
+        omitted, exposed via :attr:`counters`. Because the funnel passes
+        ``bars == 0`` for a duplicate re-pull, the tally is idempotent for free
+        (CLAUDE.md §2 Rule 7); the audit hash-chain (Rule 8) is untouched.
+    summary_cache
+        Optional :class:`~brutex.dashboard.summary_cache.SummaryCache` to
+        invalidate (``mark_dirty``) on every write tick, so the next eligible
+        coverage poll recomputes its lake summary instead of serving stale data.
+        ``None`` (the default) disables that hook (the cache then falls back to
+        its own TTL refresh). Injected, never a global (CLAUDE.md §4).
     """
 
     def __init__(
@@ -64,9 +94,13 @@ class BackgroundPullJob:
         *,
         progress: PullProgress | None = None,
         spawn: Spawner = _daemon_spawn,
+        counters: CoverageCounters | None = None,
+        summary_cache: _Invalidatable | None = None,
     ) -> None:
         self._progress = progress if progress is not None else PullProgress()
         self._spawn = spawn
+        self._counters = counters if counters is not None else CoverageCounters()
+        self._summary_cache = summary_cache
         self._lock = threading.Lock()
         self._running = False
 
@@ -97,14 +131,32 @@ class BackgroundPullJob:
                 self._running = False
 
     def _on_progress(self, label: str, bars: int, failed: bool) -> None:
-        """Adapt the drivers' positional hook onto the tracker's kw advance."""
+        """Adapt the drivers' positional hook onto the tracker's kw advance.
+
+        Also feeds the SINGLE write funnel into the incremental coverage
+        counters (DEC-DASHBOARD-FASTREAD-001): *bars* is the POST-DEDUP
+        newly-written count, so :meth:`CoverageCounters.add` advances the
+        headline in O(1) and a duplicate re-pull (``bars == 0``) is a no-op
+        (idempotent — Rule 7). When a summary cache is wired, mark it dirty so
+        the next eligible poll refreshes its lake summary; the cache's TTL floor
+        collapses a 200-symbol fan-out of these ticks into at most one rescan per
+        window (so the funnel can't trigger a scan storm).
+        """
         self._progress.advance(current=label, bars=bars, failed=failed)
+        self._counters.add(label, bars)
+        if self._summary_cache is not None:
+            self._summary_cache.mark_dirty()
 
     @property
     def running(self) -> bool:
         """``True`` while a pull is in flight — O(1)."""
         with self._lock:
             return self._running
+
+    @property
+    def counters(self) -> CoverageCounters:
+        """The incremental coverage counters fed by the write funnel — O(1)."""
+        return self._counters
 
     def snapshot(self) -> ProgressSnapshot:
         """Return the current O(1) progress snapshot for the polling route."""
