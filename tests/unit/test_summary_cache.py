@@ -1,0 +1,343 @@
+"""Tests for `brutex.dashboard.summary_cache` (DEC-DASHBOARD-FASTREAD-001).
+
+100% line + branch via a fake recompute + fake clock — deterministic, no real
+threads, no lake:
+
+* :class:`SummaryCache` — cold miss recomputes once; a clean hit serves the
+  cache with ZERO recomputes; a dirty read past the 2 s TTL floor recomputes
+  exactly once; a dirty read WITHIN the floor is throttled (stale served, no
+  scan); ``ttl_floor_s <= 0`` disables the floor (every dirty read recomputes);
+  ``generation`` reflects ``mark_dirty``; a concurrent in-flight refresh of the
+  same kind serves the current entry (no double-scan); the ``recompute``-raises
+  path still clears the in-flight guard. A barrier-synced concurrency test proves
+  ``mark_dirty`` / ``get_or_refresh`` are thread-safe under contention.
+* :class:`CoverageCounters` — ``add`` accumulates per label + total; ``bars == 0``
+  AND ``bars < 0`` are no-ops (idempotent re-pull); ``snapshot`` is a consistent
+  immutable copy; ``to_dict`` is JSON-friendly; a barrier-synced storm proves the
+  tally is torn-state-free.
+"""
+
+# The default-clock test imports the private `_monotonic` helper.
+# pyright: reportPrivateUsage=none
+from __future__ import annotations
+
+import threading
+
+from brutex.dashboard.summary_cache import (
+    DEFAULT_TTL_FLOOR_S,
+    OPTIONS,
+    SPOT,
+    CoverageCounters,
+    CoverageCountersSnapshot,
+    SummaryCache,
+    _monotonic,
+)
+
+
+class _FakeClock:
+    """A manually-advanced monotonic clock for deterministic TTL tests."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self._t = start
+
+    def __call__(self) -> float:
+        return self._t
+
+    def advance(self, by: float) -> None:
+        self._t += by
+
+
+class _CountingRecompute:
+    """A recompute closure that counts its calls and returns a stamped payload."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> list[dict[str, object]]:
+        self.calls += 1
+        return [{"call": self.calls}]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# SummaryCache — hit / miss / dirty / TTL floor
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_default_monotonic_clock_returns_float() -> None:
+    # The default (non-injected) clock is the real monotonic wall clock.
+    t = _monotonic()
+    assert isinstance(t, float)
+
+
+def test_default_constructed_cache_uses_real_clock() -> None:
+    # No injected clock → the default _monotonic is wired and a read works.
+    cache = SummaryCache()
+    rc = _CountingRecompute()
+    assert cache.get_or_refresh(SPOT, recompute=rc) == [{"call": 1}]
+    assert cache.get_or_refresh(SPOT, recompute=rc) == [{"call": 1}]  # clean hit
+    assert rc.calls == 1
+
+
+def test_cold_miss_recomputes_once() -> None:
+    cache = SummaryCache(clock=_FakeClock())
+    rc = _CountingRecompute()
+    payload = cache.get_or_refresh(SPOT, recompute=rc)
+    assert payload == [{"call": 1}]
+    assert rc.calls == 1
+
+
+def test_clean_hit_serves_cache_without_recompute() -> None:
+    cache = SummaryCache(clock=_FakeClock())
+    rc = _CountingRecompute()
+    first = cache.get_or_refresh(SPOT, recompute=rc)
+    # Second read with NO intervening mark_dirty → clean hit, no recompute.
+    second = cache.get_or_refresh(SPOT, recompute=rc)
+    assert first == second == [{"call": 1}]
+    assert rc.calls == 1  # served from cache the second time
+
+
+def test_dirty_past_ttl_floor_recomputes_once() -> None:
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock, ttl_floor_s=2.0)
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc)  # call 1
+    cache.mark_dirty()
+    clock.advance(2.0)  # exactly at the floor (>= → eligible)
+    payload = cache.get_or_refresh(SPOT, recompute=rc)
+    assert payload == [{"call": 2}]
+    assert rc.calls == 2
+
+
+def test_dirty_within_ttl_floor_is_throttled() -> None:
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock, ttl_floor_s=2.0)
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc)  # call 1
+    cache.mark_dirty()
+    clock.advance(1.9)  # still inside the 2 s floor
+    payload = cache.get_or_refresh(SPOT, recompute=rc)
+    # Stale entry served; the write storm does NOT trigger a rescan.
+    assert payload == [{"call": 1}]
+    assert rc.calls == 1
+
+
+def test_many_mark_dirty_inside_floor_triggers_at_most_one_rescan() -> None:
+    """A 200-symbol fan-out (hundreds of mark_dirty) → ONE rescan per window."""
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock, ttl_floor_s=2.0)
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc)  # call 1 (cold)
+    for _ in range(200):
+        cache.mark_dirty()
+        cache.get_or_refresh(SPOT, recompute=rc)  # all throttled within the floor
+    assert rc.calls == 1  # the floor collapsed 200 dirty reads into zero rescans
+    clock.advance(2.0)
+    cache.get_or_refresh(SPOT, recompute=rc)  # now past the floor → exactly one
+    assert rc.calls == 2
+
+
+def test_zero_ttl_floor_recomputes_on_every_dirty_read() -> None:
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock, ttl_floor_s=0.0)
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc)  # call 1
+    cache.mark_dirty()
+    cache.get_or_refresh(SPOT, recompute=rc)  # call 2 (no floor, same instant)
+    cache.mark_dirty()
+    cache.get_or_refresh(SPOT, recompute=rc)  # call 3
+    assert rc.calls == 3
+
+
+def test_distinct_kinds_are_namespaced() -> None:
+    cache = SummaryCache(clock=_FakeClock())
+    spot_rc = _CountingRecompute()
+    opt_rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=spot_rc)
+    cache.get_or_refresh(OPTIONS, recompute=opt_rc)
+    # Each kind computed once; a second spot read hits cache, opt untouched.
+    cache.get_or_refresh(SPOT, recompute=spot_rc)
+    assert spot_rc.calls == 1
+    assert opt_rc.calls == 1
+
+
+def test_generation_reflects_mark_dirty() -> None:
+    cache = SummaryCache(clock=_FakeClock())
+    assert cache.generation == 0
+    cache.mark_dirty()
+    cache.mark_dirty()
+    assert cache.generation == 2
+
+
+def test_default_ttl_floor_constant() -> None:
+    # The default floor is the documented 2 s (no surprise zero).
+    cache = SummaryCache(clock=_FakeClock())
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc)
+    cache.mark_dirty()
+    # 0 < DEFAULT_TTL_FLOOR_S elapsed → throttled.
+    cache.get_or_refresh(SPOT, recompute=rc)
+    assert rc.calls == 1
+    assert DEFAULT_TTL_FLOOR_S == 2.0
+
+
+def test_in_flight_refresh_serves_current_entry_no_double_scan() -> None:
+    """A concurrent dirty read of the SAME kind serves the stale entry, no rescan.
+
+    Drives the ``kind in self._refreshing`` branch deterministically: the
+    recompute, while running, re-enters ``get_or_refresh`` for the same kind. The
+    re-entrant call must see the in-flight guard and return the current cached
+    entry WITHOUT a second recompute (single-flight per kind).
+    """
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock, ttl_floor_s=2.0)
+    seed = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=seed)  # seed the cache (call 1)
+    cache.mark_dirty()
+    clock.advance(2.0)  # make the next read eligible
+
+    reentrant_result: list[list[dict[str, object]]] = []
+    outer_calls = {"n": 0}
+
+    def reentrant_recompute() -> list[dict[str, object]]:
+        outer_calls["n"] += 1
+        # While THIS refresh is in flight, a second reader asks for the same kind.
+        reentrant_result.append(cache.get_or_refresh(SPOT, recompute=seed))
+        return [{"call": "fresh"}]
+
+    final = cache.get_or_refresh(SPOT, recompute=reentrant_recompute)
+    assert outer_calls["n"] == 1  # the outer refresh ran exactly once
+    assert seed.calls == 1  # the re-entrant reader did NOT trigger a new scan
+    assert reentrant_result == [[{"call": 1}]]  # it got the stale seeded entry
+    assert final == [{"call": "fresh"}]
+
+
+def test_recompute_exception_clears_in_flight_guard() -> None:
+    """If ``recompute`` raises, the in-flight guard is cleared so retries work."""
+    clock = _FakeClock()
+    cache = SummaryCache(clock=clock, ttl_floor_s=0.0)
+
+    class _Boom(RuntimeError):
+        pass
+
+    def boom() -> list[dict[str, object]]:
+        raise _Boom
+
+    try:
+        cache.get_or_refresh(SPOT, recompute=boom)
+    except _Boom:
+        pass
+    else:  # pragma: no cover — the recompute must propagate
+        raise AssertionError("expected the recompute exception to propagate")
+
+    # The guard was cleared in `finally`, so a subsequent good read recomputes.
+    rc = _CountingRecompute()
+    payload = cache.get_or_refresh(SPOT, recompute=rc)
+    assert payload == [{"call": 1}]
+    assert rc.calls == 1
+
+
+def test_concurrent_mark_dirty_and_get_are_thread_safe() -> None:
+    """Barrier-synced storm: concurrent mark_dirty + get never corrupt state."""
+    cache = SummaryCache(clock=_FakeClock(), ttl_floor_s=0.0)
+    rc = _CountingRecompute()
+    cache.get_or_refresh(SPOT, recompute=rc)  # seed
+    n_threads = 16
+    barrier = threading.Barrier(n_threads)
+    errors: list[Exception] = []
+
+    def worker(i: int) -> None:
+        barrier.wait()
+        try:
+            for _ in range(50):
+                if i % 2 == 0:
+                    cache.mark_dirty()
+                else:
+                    cache.get_or_refresh(SPOT, recompute=rc)
+        except Exception as exc:  # pragma: no cover — any race is a failure
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    # Generation advanced by exactly the 8 dirtying threads × 50 bumps.
+    assert cache.generation == 8 * 50
+
+
+# ────────────────────────────────────────────────────────────────────────
+# CoverageCounters — incremental, idempotent O(1) tally
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_counter_accumulates_per_label_and_total() -> None:
+    counters = CoverageCounters()
+    counters.add("NIFTY 1minute", 100)
+    counters.add("NIFTY 1minute", 50)
+    counters.add("BANKNIFTY 1minute", 7)
+    snap = counters.snapshot()
+    assert snap.by_label == {"NIFTY 1minute": 150, "BANKNIFTY 1minute": 7}
+    assert snap.total_bars == 157
+    assert snap.updates == 3
+
+
+def test_counter_zero_bars_is_a_noop_idempotent_repull() -> None:
+    counters = CoverageCounters()
+    counters.add("NIFTY 1minute", 100)
+    before = counters.snapshot()
+    # A duplicate re-pull writes zero new bars post-dedup → no change at all.
+    counters.add("NIFTY 1minute", 0)
+    after = counters.snapshot()
+    assert after.by_label == before.by_label == {"NIFTY 1minute": 100}
+    assert after.total_bars == before.total_bars == 100
+    assert after.updates == before.updates == 1  # the no-op did NOT advance updates
+
+
+def test_counter_negative_bars_is_a_noop() -> None:
+    counters = CoverageCounters()
+    counters.add("X", -5)
+    snap = counters.snapshot()
+    assert snap.by_label == {}
+    assert snap.total_bars == 0
+    assert snap.updates == 0
+
+
+def test_counter_snapshot_is_an_isolated_copy() -> None:
+    counters = CoverageCounters()
+    counters.add("X", 1)
+    snap = counters.snapshot()
+    # Mutating the snapshot's dict must not leak back into the live counter.
+    snap.by_label["X"] = 999
+    assert counters.snapshot().by_label == {"X": 1}
+
+
+def test_counters_snapshot_to_dict_is_json_friendly() -> None:
+    snap = CoverageCountersSnapshot(by_label={"A": 3}, total_bars=3, updates=1)
+    assert snap.to_dict() == {"by_label": {"A": 3}, "total_bars": 3, "updates": 1}
+    # to_dict copies the inner dict too (no shared mutable reference).
+    snap.to_dict()["by_label"]["A"] = 99
+    assert snap.by_label == {"A": 3}
+
+
+def test_concurrent_counter_adds_are_thread_safe() -> None:
+    """Barrier-synced storm of adds → the total is exact (no lost updates)."""
+    counters = CoverageCounters()
+    n_threads = 16
+    per_thread = 100
+    barrier = threading.Barrier(n_threads)
+
+    def worker() -> None:
+        barrier.wait()
+        for _ in range(per_thread):
+            counters.add("shared", 1)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    snap = counters.snapshot()
+    assert snap.total_bars == n_threads * per_thread
+    assert snap.by_label == {"shared": n_threads * per_thread}
+    assert snap.updates == n_threads * per_thread

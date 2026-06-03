@@ -1137,8 +1137,17 @@ jobs:
           else
             echo "(brutex.dashboard.pull_progress test file not present yet — gate inactive)"
           fi
+          # DEC-DASHBOARD-FASTREAD-001 (#437): pull_jobs now feeds the
+          # incremental coverage counters + invalidates the summary cache on the
+          # single write funnel. The unit suite achieves 100% alone; the
+          # responsive-under-write + e2e dashboard suites are co-run so the
+          # write-funnel hooks stay exercised end-to-end (and the module stays
+          # 100% if a future change shifts a branch into the integration path).
           if compgen -G "tests/unit/test_pull_jobs.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_jobs.py
+            pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 \
+              tests/unit/test_pull_jobs.py \
+              tests/integration/test_dashboard_responsive_under_write.py \
+              tests/integration/test_dashboard_e2e.py
           else
             echo "(brutex.dashboard.pull_jobs test file not present yet — gate inactive)"
           fi
@@ -1151,6 +1160,15 @@ jobs:
             pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
+          fi
+          # DEC-DASHBOARD-FASTREAD-001 (#437): the dashboard fast-read SPEED
+          # CORE — the in-memory summary cache (write-invalidation + 2 s TTL
+          # floor) + the incremental, idempotent coverage counters that back the
+          # O(1) coverage headline. 100% line+branch on summary_cache.py.
+          if compgen -G "tests/unit/test_summary_cache.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.summary_cache --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_summary_cache.py
+          else
+            echo "(brutex.dashboard.summary_cache test file not present yet — gate inactive)"
           fi
           # DEC-STAT-SPA-001 (#431): brutex.metrics.spa — Hansen SPA, White
           # Reality Check, Romano-Wolf step-down (Stage-4 data-snooping filters
