@@ -1,0 +1,62 @@
+# trading-core — the shared indicator + 52-condition vocabulary kernel (Rust).
+#
+# Phase 1 of DEC-SHARED-CORE-001 (docs/MIGRATION.md #441). A bit-for-bit Rust
+# port of BruteX's Python 52-condition vocabulary (`brutex/vocabulary/evaluator.py`)
+# plus its two evaluate-time indicators (`compute_pivot_levels`, `compute_fib_levels`),
+# proven identical against the language-neutral golden answer-key at
+# `tests/golden/fixtures/vocab_golden_vectors.json`.
+#
+# Pure-Rust-first (rlib, dependency-free core) so `cargo test` links no libpython;
+# the PyO3 surface is behind the OPTIONAL `python` feature (turned on by maturin
+# for the Phase-2 BruteX binding). TickVault will link this crate natively.
+
+[package]
+name = "trading-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.1"
+description = "Shared indicator + 52-condition vocabulary kernel (BruteX backtest + TickVault live)"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published. publish = false lets cargo-deny exclude it from
+# the SPDX license check (mirrors fno-math).
+publish = false
+
+[lib]
+name = "trading_core"
+path = "src/lib.rs"
+# cdylib so a future `import trading_core` finds the maturin-built extension;
+# rlib so `cargo test` + TickVault (native Rust) link the pure-Rust core.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The pure-Rust core (indicators + evaluator) needs NO Python. The PyO3 module
+# is opt-in: `cargo test` (default features) builds + links zero Python symbols,
+# so the bit-identity golden test runs without a Python toolchain. maturin turns
+# `python` on for the wheel build (see pyproject.toml).
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+# Optional — only compiled when the `python` feature is enabled (Phase 2 binding).
+# abi3-py312 pins the stable-ABI floor to BruteX's Python 3.12 baseline.
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py312"], optional = true }
+
+[dev-dependencies]
+# The golden integration test reads the JSON oracle. Test-only — not in the
+# shipped crate's dependency tree (so TickVault's native link stays dependency-free).
+serde = { version = "1.0.227", features = ["derive"] }
+serde_json = "1.0.146"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = true  # Finance code — a paisa overflow must never be silent.
+
+[profile.bench]
+inherits = "release"
+debug = true

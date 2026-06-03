@@ -1,0 +1,38 @@
+# Maturin build config for trading-core (Phase 2 of DEC-SHARED-CORE-001).
+#
+# Phase 1 (this PR) does NOT build the wheel in CI — the crate is verified as a
+# pure-Rust library (`cargo test`, the golden bit-identity proof) plus a
+# `cargo check --features python` that the PyO3 module compiles. Phase 2 wires
+# `pip install ./rust/trading-core` and points BruteX's vocabulary at it.
+#
+# https://www.maturin.rs/
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "trading-core"
+version = "0.1.0"
+description = "Shared indicator + 52-condition vocabulary kernel (BruteX backtest + TickVault live)."
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.12"
+authors = [{ name = "SJParthi" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: Other/Proprietary License",
+]
+
+[tool.maturin]
+# Mixed Python + Rust layout: the cdylib ships as the private submodule
+# `trading_core._trading_core`; `python/trading_core/__init__.py` re-exports it.
+# `features = ["python"]` turns on the optional pyo3 dependency (with its
+# extension-module + abi3-py312 features) so the wheel includes the bindings.
+python-source = "python"
+module-name = "trading_core._trading_core"
+features = ["python"]
+strip = true
