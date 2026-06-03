@@ -16,6 +16,25 @@ quarantined (recorded as a failure) and the run continues — one bad strike /
 expiry-code never kills the universe pull. Per-window transient errors are
 already retried/skipped inside ``ingest_rolling_option_series``.
 
+Parallel fan-out (DEC-DHAN-PARALLEL-INGEST-001). The OUTER loop — one job per
+**underlying** — runs through an injected
+:class:`~brutex.orchestrator.universe_phases.RunParallel` (production: a bounded
+:class:`~brutex.orchestrator.parallel.PoolRunParallel`) so many underlyings'
+windows are in flight at once and the pull **targets/saturates UP TO ~5 r/s**
+when Dhan is healthy (vs the old ~1 r/s sequential stream). Each worker runs its
+underlying's existing 4-deep series fan (``flags × codes × strikes × types``)
+**sequentially inside**, so the per-series spine is UNCHANGED; the shared rate
+bucket (the injected ``pace``) is the governor that keeps the aggregate
+``≤ 5 r/s`` (Rule #6). The shared option **sink** serialises its
+dedup→write→audit tail under a single lock so the hash-chained ``AuditWriter``
+advances as one writer (Rule #8; the per-series network fetch runs OUTSIDE that
+lock, so parallelism is preserved). **Honest envelope (Golden Rule #10):** this
+targets up to ~5 r/s — it CANNOT guarantee a constant 5 r/s (429 step-down +
+latency spikes). ``run_parallel`` is injectable so tests drive a synchronous
+fake. The per-underlying ``ingest.underlying`` rollup + ``on_progress`` fire on
+the CONTROLLER thread in a DETERMINISTIC post-pass (sorted by ``security_id``)
+so the log + progress order is reproducible (Rule #4).
+
 The strike window matches the documented Dhan rolling-option bounds
 (``docs/dhan-ref/06``): **ATM±10** for the brute-force indices (near-expiry),
 **ATM±3** for stocks. The **expiry set is per-kind too**: indices fan
@@ -31,7 +50,7 @@ DEC-DHAN-STOCK-MONTHLY-ONLY-001). The options lake is
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
 import structlog
@@ -47,7 +66,9 @@ from brutex.adapters.dhan.option_ingest import (
     ingest_rolling_option_series,
 )
 from brutex.data.fetch_coverage import FetchCoverage
-from brutex.observability.correlation import current_pull_id
+from brutex.observability.correlation import current_pull_id, pull_id_scope
+from brutex.orchestrator.parallel import PoolRunParallel
+from brutex.orchestrator.universe_phases import RunParallel
 
 #: Structured logger — emits the per-underlying options rollup at INFO
 #: (``ingest.underlying``) + the per-series terminal-failure cause at WARNING
@@ -151,6 +172,25 @@ class OptionSeriesFailure:
     error: str
 
 
+@dataclass(slots=True)
+class _UnderlyingResult:
+    """One parallel worker's outcome for a single underlying's whole fan-out.
+
+    Carries the per-series reports + quarantined failures it produced PLUS the
+    pre-aggregated rollup counts, so the controller thread can merge into the
+    universe report, emit the deterministic ``ingest.underlying`` rollup, and
+    fire ``on_progress`` without re-deriving anything (DEC-DHAN-PARALLEL-INGEST-001).
+    """
+
+    series: dict[SeriesKey, OptionIngestReport] = field(default_factory=dict)
+    failures: list[OptionSeriesFailure] = field(default_factory=list)
+    bars: int = 0
+    windows: int = 0
+    completed: int = 0
+    quarantined: int = 0
+    any_failed: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class OptionsUniverseReport:
     """Aggregate outcome of a :func:`run_dhan_options_ingest` pass."""
@@ -203,19 +243,30 @@ def run_dhan_options_ingest(
     pace: Pacer | None = None,
     on_progress: ProgressHook | None = None,
     coverage: FetchCoverage | None = None,
+    run_parallel: RunParallel | None = None,
 ) -> OptionsUniverseReport:
     """Fan out the rolling-option pull over the whole options universe.
 
-    For each *underlying* iterate ``strike_window(offsets) ×
-    (its per-kind expiry flags) × expiry_codes × option_types`` and drive
+    The OUTER loop — one job per *underlying* — is mapped through *run_parallel*
+    so many underlyings' windows are in flight at once (targets/saturates UP TO
+    ~5 r/s when Dhan is healthy). Each worker runs ITS underlying's 4-deep series
+    fan ``strike_window(offsets) × (its per-kind expiry flags) × expiry_codes ×
+    option_types`` **sequentially inside**, driving
     :func:`~brutex.adapters.dhan.option_ingest.ingest_rolling_option_series`
     per series (1-minute, session-filtered, spot-stamped). A **terminal** Dhan
     error on one series is quarantined into ``failures`` and the run continues.
+    The shared rate bucket (the *pace* hook) bounds the aggregate to ``≤ 5 r/s``
+    (Rule #6); the shared sink serialises its dedup→write→audit tail so the
+    hash-chained audit advances as one writer (Rule #8). **Honest envelope
+    (Golden Rule #10):** this targets ~5 r/s — it cannot guarantee a constant
+    5 r/s (429 step-down + latency spikes).
 
     Parameters
     ----------
     client, sink
         The Dhan JSON poster and the injected :class:`OptionBar` write sink.
+        Both are shared across workers; the concrete sink's dedup→write→audit is
+        now single-writer-locked (DEC-DHAN-PARALLEL-INGEST-001).
     underlyings
         The underlyings to fan out (each carries its own ``strike_offsets`` —
         ``INDEX_STRIKE_OFFSETS`` / ``STOCK_STRIKE_OFFSETS``).
@@ -233,95 +284,148 @@ def run_dhan_options_ingest(
     required_data
         Fields to request (defaults to every documented field).
     pace
-        Optional per-window pacing hook, threaded into each series.
+        Optional per-window pacing hook, threaded into each series. Under the
+        fan-out this is the SHARED rate bucket every worker acquires from — the
+        single governor that bounds the aggregate to ``≤ 5 r/s`` (Rule #6).
     on_progress
         Optional live-progress hook fired once per **underlying** after its
         whole fan-out completes: ``(security_id, bars_appended, any_failed)``.
-        Lets the dashboard stream real-time progress (DEC-PULL-PROGRESS-TRACKER-001).
+        Fired on the CONTROLLER thread in a DETERMINISTIC post-pass (sorted by
+        ``security_id``) so the hook need not be thread-safe and the order is
+        reproducible (DEC-PULL-PROGRESS-TRACKER-001, Rule #4).
+    run_parallel
+        The concurrency primitive mapping the per-underlying fetcher over the
+        worklist (a :class:`~brutex.orchestrator.universe_phases.RunParallel`).
+        ``None`` (the default) builds a bounded
+        :class:`~brutex.orchestrator.parallel.PoolRunParallel`; callers size the
+        pool via :func:`~brutex.orchestrator.parallel.workers_to_saturate` and
+        inject it. Tests inject a synchronous fake (mirrors
+        :func:`brutex.orchestrator.universe_phases.run_two_phase`).
 
     Returns
     -------
     OptionsUniverseReport
         Per-series :class:`OptionIngestReport` for successes + the quarantined
-        terminal failures. **Never raises** on a Dhan error.
+        terminal failures. **Never raises** on a Dhan error. A non-Dhan
+        exception (a genuine bug) is NOT swallowed — it surfaces unchanged.
     """
     pull_id = current_pull_id()
-    series: dict[SeriesKey, OptionIngestReport] = {}
-    failures: list[OptionSeriesFailure] = []
-    for underlying in underlyings:
+    runner: RunParallel = run_parallel if run_parallel is not None else PoolRunParallel()
+    underlyings = list(underlyings)
+
+    def _run_underlying(underlying: OptionUnderlying) -> _UnderlyingResult:
+        """Pull ONE underlying's whole 4-deep series fan — runs in a worker thread.
+
+        Re-binds *pull_id* into this thread's structlog context-vars (a worker
+        does NOT inherit the controller's contextvar), so every ``ingest.*``
+        event the inner series spine emits keeps the pull's correlation id
+        (DEC-DHAN-INGEST-LOGGING-001). The series fan is SEQUENTIAL inside a
+        worker (the parallelism is across underlyings); a terminal
+        :class:`DhanError` on one series is quarantined here and the fan
+        continues, exactly as before — only the outer loop changed.
+        """
+        result = _UnderlyingResult()
         strikes = strike_window(underlying.strike_offsets)
         # Per-kind expiry set: each underlying carries its own (index
         # WEEK+MONTH, stock MONTH-only; DEC-DHAN-STOCK-MONTHLY-ONLY-001). An
         # explicit ``expiry_flags`` argument is a uniform override (custom /
         # test pulls); ``None`` (the default) honours each underlying's own set.
         flags = underlying.expiry_flags if expiry_flags is None else expiry_flags
-        underlying_bars = 0
-        underlying_windows = 0
-        underlying_completed = 0
-        underlying_quarantined = 0
-        underlying_failed = False
-        for expiry_flag in flags:
-            for expiry_code in expiry_codes:
-                for strike in strikes:
-                    for drv_option_type in option_types:
-                        key: SeriesKey = (
-                            underlying.security_id,
-                            expiry_flag,
-                            expiry_code,
-                            strike,
-                            drv_option_type,
-                        )
-                        try:
-                            report = ingest_rolling_option_series(
-                                client,
-                                sink,
-                                security_id=underlying.security_id,
-                                exch_id=underlying.exch_id,
-                                underlying_symbol=underlying.underlying_symbol,
-                                exchange_segment=underlying.exchange_segment,
-                                instrument=underlying.instrument,
-                                expiry_flag=expiry_flag,
-                                expiry_code=expiry_code,
-                                strike=strike,
-                                drv_option_type=drv_option_type,
-                                start=start,
-                                end=end,
-                                required_data=required_data,
-                                pace=pace,
-                                coverage=coverage,
+        with pull_id_scope(pull_id):
+            for expiry_flag in flags:
+                for expiry_code in expiry_codes:
+                    for strike in strikes:
+                        for drv_option_type in option_types:
+                            key: SeriesKey = (
+                                underlying.security_id,
+                                expiry_flag,
+                                expiry_code,
+                                strike,
+                                drv_option_type,
                             )
-                        except DhanError as exc:
-                            failures.append(
-                                OptionSeriesFailure(
+                            try:
+                                report = ingest_rolling_option_series(
+                                    client,
+                                    sink,
                                     security_id=underlying.security_id,
+                                    exch_id=underlying.exch_id,
+                                    underlying_symbol=underlying.underlying_symbol,
+                                    exchange_segment=underlying.exchange_segment,
+                                    instrument=underlying.instrument,
+                                    expiry_flag=expiry_flag,
+                                    expiry_code=expiry_code,
+                                    strike=strike,
+                                    drv_option_type=drv_option_type,
+                                    start=start,
+                                    end=end,
+                                    required_data=required_data,
+                                    pace=pace,
+                                    coverage=coverage,
+                                )
+                            except DhanError as exc:
+                                result.failures.append(
+                                    OptionSeriesFailure(
+                                        security_id=underlying.security_id,
+                                        expiry_flag=expiry_flag,
+                                        expiry_code=expiry_code,
+                                        strike=strike,
+                                        drv_option_type=drv_option_type,
+                                        error=str(exc),
+                                    )
+                                )
+                                result.any_failed = True
+                                result.quarantined += 1
+                                # Quarantine-cause nook: WHY this series was
+                                # dropped, with its full coordinate (the
+                                # per-series analog of the pull-level
+                                # ``universe.pull_options.failures``).
+                                _LOG.warning(
+                                    "ingest.quarantine",
+                                    pull_id=pull_id,
+                                    security_id=underlying.security_id,
+                                    underlying_symbol=underlying.underlying_symbol,
                                     expiry_flag=expiry_flag,
                                     expiry_code=expiry_code,
                                     strike=strike,
                                     drv_option_type=drv_option_type,
                                     error=str(exc),
                                 )
-                            )
-                            underlying_failed = True
-                            underlying_quarantined += 1
-                            # Quarantine-cause nook: WHY this series was dropped,
-                            # with its full coordinate (the per-series analog of
-                            # the pull-level ``universe.pull_options.failures``).
-                            _LOG.warning(
-                                "ingest.quarantine",
-                                pull_id=pull_id,
-                                security_id=underlying.security_id,
-                                underlying_symbol=underlying.underlying_symbol,
-                                expiry_flag=expiry_flag,
-                                expiry_code=expiry_code,
-                                strike=strike,
-                                drv_option_type=drv_option_type,
-                                error=str(exc),
-                            )
-                            continue
-                        series[key] = report
-                        underlying_bars += report.bars_appended
-                        underlying_windows += report.windows
-                        underlying_completed += 1
+                                continue
+                            result.series[key] = report
+                            result.bars += report.bars_appended
+                            result.windows += report.windows
+                            result.completed += 1
+        return result
+
+    # Drain the fan-out, pairing each result with its underlying. on_progress +
+    # the deterministic rollup fire on THIS (controller) thread, so neither the
+    # hook nor the merge needs to be thread-safe; a captured non-DhanError
+    # surfaces. A list (not a dict) so two underlyings sharing a security_id —
+    # not expected, but possible for a hand-built pull — both keep their rollup.
+    collected: list[tuple[OptionUnderlying, _UnderlyingResult]] = []
+    for outcome in runner(_run_underlying, underlyings):
+        underlying = outcome.item
+        if not outcome.ok:
+            exc = outcome.exc
+            if exc is None:  # pragma: no cover — a failed outcome always carries exc
+                continue
+            # Only DhanError is quarantined (per-series, inside the worker); a
+            # non-DhanError escaping the worker is a genuine bug → surface it.
+            raise exc
+        result = outcome.result
+        if result is None:  # pragma: no cover — ok=True always carries a result
+            continue
+        collected.append((underlying, result))
+
+    series: dict[SeriesKey, OptionIngestReport] = {}
+    failures: list[OptionSeriesFailure] = []
+    # Deterministic post-pass: merge + emit the per-underlying rollup + fire
+    # on_progress in security_id order (stable sort → input order breaks ties),
+    # so the log + progress stream is reproducible regardless of worker
+    # completion order (Rule #4).
+    for underlying, result in sorted(collected, key=lambda pair: pair[0].security_id):
+        series.update(result.series)
+        failures.extend(result.failures)
         # Per-underlying rollup — INFO, one line per underlying (not per series),
         # so a 16k-series fan-out's progress is visible without the DEBUG firehose.
         _LOG.info(
@@ -330,14 +434,14 @@ def run_dhan_options_ingest(
             security_id=underlying.security_id,
             underlying_symbol=underlying.underlying_symbol,
             instrument=underlying.instrument,
-            series_completed=underlying_completed,
-            series_failed=underlying_quarantined,
-            bars_appended=underlying_bars,
-            windows=underlying_windows,
+            series_completed=result.completed,
+            series_failed=result.quarantined,
+            bars_appended=result.bars,
+            windows=result.windows,
         )
         # Fire the live-progress hook once the WHOLE underlying fan-out is done.
         if on_progress is not None:
-            on_progress(underlying.security_id, underlying_bars, underlying_failed)
+            on_progress(underlying.security_id, result.bars, result.any_failed)
     return OptionsUniverseReport(series=series, failures=tuple(failures))
 
 

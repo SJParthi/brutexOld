@@ -375,7 +375,7 @@ jobs:
           # upsert ROLLBACK, list_partitions None-bound partials, get_bars +
           # open() missing-dependency ImportError, open_catalog, naive-tz).
           if compgen -G "tests/integration/test_catalog.py" > /dev/null; then
-            pytest --cov=brutex.data.catalog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_data_lake_real.py tests/integration/test_catalog.py
+            pytest --cov=brutex.data.catalog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_data_lake_real.py tests/integration/test_catalog.py tests/unit/test_dhan_parallel_locks.py
           else
             echo "(brutex.data.catalog edge test file not present yet — gate inactive)"
           fi
@@ -992,7 +992,7 @@ jobs:
             echo "(brutex.adapters.dhan.synthetic_adapter test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_dhan_rate_control.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.rate_control --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_rate_control.py
+            pytest --cov=brutex.adapters.dhan.rate_control --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_rate_control.py tests/unit/test_dhan_parallel_locks.py tests/integration/test_dhan_spot_parallel.py tests/unit/test_dashboard_pull_pool_sizing.py
           else
             echo "(brutex.adapters.dhan.rate_control test file not present yet — gate inactive)"
           fi
@@ -1002,7 +1002,7 @@ jobs:
             echo "(brutex.adapters.dhan.option_synthetic test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_fetch_coverage.py" > /dev/null; then
-            pytest --cov=brutex.data.fetch_coverage --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fetch_coverage.py
+            pytest --cov=brutex.data.fetch_coverage --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fetch_coverage.py tests/unit/test_dhan_parallel_locks.py tests/integration/test_dhan_spot_parallel.py
           else
             echo "(brutex.data.fetch_coverage test file not present yet — gate inactive)"
           fi
@@ -1022,12 +1022,12 @@ jobs:
             echo "(brutex.adapters.dhan.option_ingest test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_dhan_option_universe_ingest.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.option_universe_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_option_universe_ingest.py
+            pytest --cov=brutex.adapters.dhan.option_universe_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_option_universe_ingest.py tests/unit/test_dhan_options_parallel_wiring.py tests/integration/test_dhan_options_audit_chain.py
           else
             echo "(brutex.adapters.dhan.option_universe_ingest test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_dhan_run_ingest.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.run_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_run_ingest.py
+            pytest --cov=brutex.adapters.dhan.run_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_run_ingest.py tests/unit/test_dhan_spot_parallel_wiring.py tests/integration/test_dhan_spot_parallel.py
           else
             echo "(brutex.adapters.dhan.run_ingest test file not present yet — gate inactive)"
           fi
@@ -1037,7 +1037,7 @@ jobs:
             echo "(brutex.adapters.dhan.universe_ingest test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_option_dedup.py" > /dev/null; then
-            pytest --cov=brutex.data.option_dedup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_dedup.py
+            pytest --cov=brutex.data.option_dedup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_dedup.py tests/unit/test_dhan_parallel_locks.py tests/integration/test_dhan_options_audit_chain.py
           else
             echo "(brutex.data.option_dedup test file not present yet — gate inactive)"
           fi
@@ -1047,7 +1047,7 @@ jobs:
             echo "(brutex.data.lmdb_membership test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_option_sink.py" > /dev/null; then
-            pytest --cov=brutex.data.option_sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_sink.py
+            pytest --cov=brutex.data.option_sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_sink.py tests/integration/test_dhan_options_audit_chain.py
           else
             echo "(brutex.data.option_sink test file not present yet — gate inactive)"
           fi
@@ -1057,7 +1057,7 @@ jobs:
             echo "(brutex.data.option_parquet_writer test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_option_pull_controller.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.option_pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_pull_controller.py
+            pytest --cov=brutex.dashboard.option_pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py
           else
             echo "(brutex.dashboard.option_pull_controller test file not present yet — gate inactive)"
           fi
@@ -1077,7 +1077,7 @@ jobs:
             echo "(brutex.adapters.dhan.errors test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_dhan_client.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.client --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_client.py
+            pytest --cov=brutex.adapters.dhan.client --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_client.py tests/unit/test_dhan_parallel_locks.py
           else
             echo "(brutex.adapters.dhan.client test file not present yet — gate inactive)"
           fi

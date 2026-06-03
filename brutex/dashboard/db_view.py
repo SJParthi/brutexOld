@@ -40,12 +40,22 @@ from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo
 
+import duckdb
+import structlog
+
 from brutex.data.partition import (
     VALID_EXCHANGES,
     VALID_INTERVALS,
     VALID_SEGMENTS,
 )
 from brutex.data.spot_features import pct_change
+
+#: Structured logger — surfaces the otherwise-silent coverage-read degradation
+#: (a single corrupt / version-incompatible Parquet file is SKIPPED, logged as
+#: ``coverage.parquet_skip``, instead of 500-ing the whole endpoint) into the
+#: same structlog stream the operator reads on ``/logs``
+#: (DEC-COVERAGE-PARQUET-RESILIENT-001).
+_LOG = structlog.get_logger("brutex.dashboard.db_view")
 
 #: The ONLY tables the viewer may touch — the real DuckDB tables created by
 #: :meth:`brutex.data.instrument_store.InstrumentStore.open`. A
@@ -139,9 +149,21 @@ _OPTION_SEGMENT_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 #: A candle symbol must match this allowlist before it is ever joined into
 #: a lake path / ``read_parquet`` glob — defence-in-depth against path
 #: traversal even though discovered symbols come from our own directory
-#: scan. Dhan symbols are alnum + ``-`` + ``_`` + ``.`` (e.g.
-#: ``NSE-NIFTY-30Jan25-28500-CE``); ``..`` is rejected separately.
-_SYMBOL_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
+#: scan. Dhan symbols are alnum + ``-`` + ``_`` + ``.`` + ``&`` (e.g.
+#: ``NSE-NIFTY-30Jan25-28500-CE``, ``M&M``); ``..`` is rejected separately.
+#:
+#: ``&`` is admitted because real NSE/BSE underlyings legitimately contain it —
+#: Mahindra & Mahindra (``M&M`` / ``M&MFIN``) and GE Vernova T&D (``GVT&D``) are
+#: F&O-eligible spot symbols the ingest writes verbatim (the partition layer's
+#: filesystem denylist in ``brutex.data.partition`` permits ``&``, so the lake
+#: holds a ``…/M&M/…`` directory). ``&`` is neither a path separator nor a
+#: DuckDB-glob metacharacter (``* ? [ ] { }``), so it cannot widen the bound
+#: ``read_parquet`` glob or traverse the tree — admitting it keeps this read
+#: allowlist consistent with what the write path stores (CLAUDE.md §11 COMMON)
+#: WITHOUT loosening the path-traversal / glob-injection guard. Before this fix
+#: the pre-open report 500'd on ``M&M`` (``illegal candle symbol 'M&M'``).
+#: DEC-PREOPEN-AMPERSAND-001.
+_SYMBOL_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.&\-]*$")
 
 #: Strict ISO calendar-date shape. ``date.fromisoformat`` (py3.11+) also
 #: accepts ``YYYYMMDD`` and ``YYYY-Www-D`` ordinal/week forms; the candle
@@ -660,6 +682,53 @@ def list_candle_datasets(lake_root: Path) -> list[dict[str, str]]:
     return found
 
 
+def _aggregate_parquet_resilient(
+    conn: Any, directory: Path, sql: str, *, source: str
+) -> list[tuple[Any, ...]]:
+    """Run *sql* — one ``read_parquet(?, union_by_name=true)`` aggregate over the
+    ``directory`` glob — and return its rows, **resilient to an unreadable file**.
+
+    Fast path (steady state): bind ``<directory>/**/*.parquet`` to the single
+    ``?`` and ``fetchall()`` — byte-identical to a direct query, one scan.
+
+    Degraded path: a single corrupt / version-incompatible Parquet file in the
+    lake (seen in the wild as DuckDB ``don't know what type: \\r``) makes the
+    whole-glob scan raise :class:`duckdb.Error`, which would 500 a coverage
+    endpoint that documents *"never a 500"*. So on that error we probe each
+    matched file, **skip** the unreadable one(s) — each logged as
+    ``coverage.parquet_skip`` with its path + DuckDB reason so the operator can
+    quarantine it — and re-run *sql* over the readable subset (bound as a LIST).
+    When NO file is readable we log ``coverage.parquet_unreadable`` and return
+    ``[]`` (an empty summary, never an exception). Honest envelope (Golden Rule
+    #10): a skipped file is OMITTED from coverage, never silently counted.
+
+    The per-file probing is paid ONLY when a read actually fails; the happy path
+    stays a single query (Golden Rule #5 O(1) steady-state).
+    """
+    glob = directory.as_posix() + "/**/*.parquet"
+    try:
+        return list(conn.execute(sql, [glob]).fetchall())
+    except duckdb.Error as whole_glob_error:
+        readable: list[str] = []
+        for path in sorted(directory.rglob("*.parquet")):
+            candidate = path.as_posix()
+            try:
+                conn.execute("SELECT 1 FROM read_parquet(?) LIMIT 1", [candidate]).fetchone()
+            except duckdb.Error as skip_reason:
+                _LOG.warning(
+                    "coverage.parquet_skip",
+                    source=source,
+                    path=candidate,
+                    error=str(skip_reason),
+                )
+            else:
+                readable.append(candidate)
+        if not readable:
+            _LOG.error("coverage.parquet_unreadable", source=source, error=str(whole_glob_error))
+            return []
+        return list(conn.execute(sql, [readable]).fetchall())
+
+
 def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
     """Summarise every spot candle dataset in the lake for the coverage page.
 
@@ -700,17 +769,20 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
         segment = dataset["segment"]
         symbol = dataset["symbol"]
         interval = dataset["interval"]
-        glob = (
-            lake_root / "bars" / exchange / segment / symbol / interval
-        ).as_posix() + "/**/*.parquet"
         # The glob is built from list_candle_datasets coordinates (each already
         # validated against the partition allowlists during discovery), never
         # free user text; the path is given to read_parquet as a bound parameter.
-        agg = conn.execute(
+        # Resilient read: a single unreadable Parquet file degrades this dataset
+        # to its readable subset (or 0 bars), never a 500 (DEC-COVERAGE-PARQUET-
+        # RESILIENT-001).
+        agg_rows = _aggregate_parquet_resilient(
+            conn,
+            lake_root / "bars" / exchange / segment / symbol / interval,
             'SELECT COUNT(*), MIN("timestamp"), MAX("timestamp") '
             "FROM read_parquet(?, union_by_name=true)",
-            [glob],
-        ).fetchone()
+            source=f"spot:{exchange}/{segment}/{symbol}/{interval}",
+        )
+        agg = agg_rows[0] if agg_rows else None
         rows.append(
             {
                 "exchange": exchange,
@@ -762,11 +834,14 @@ def summarize_option_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]
     options = lake_root / OPTIONS_DIR_NAME
     if not options.is_dir() or not any(options.rglob("*.parquet")):
         return []
-    glob = options.as_posix() + "/**/*.parquet"
     # read_parquet path is parameter-bound; the column list is the fixed
     # addressing set (no free user text). Inner query = one row per series;
     # the outer rolls up per underlying, so COUNT(*) is the series count.
-    rows = conn.execute(
+    # Resilient read: one corrupt Parquet file is SKIPPED (logged), never a 500
+    # (DEC-COVERAGE-PARQUET-RESILIENT-001).
+    rows = _aggregate_parquet_resilient(
+        conn,
+        options,
         "SELECT exch_id, underlying_symbol, COUNT(*) AS series, "  # nosec B608 - static SQL, parameter-bound path
         "SUM(bars) AS bars, MIN(first_ts) AS first_ts, MAX(last_ts) AS last_ts FROM ("
         "  SELECT exch_id, underlying_symbol, expiry_flag, expiry_code, strike_offset, "
@@ -775,8 +850,8 @@ def summarize_option_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]
         "  FROM read_parquet(?, union_by_name=true) "
         "  GROUP BY exch_id, underlying_symbol, expiry_flag, expiry_code, strike_offset, side, strike"
         ") GROUP BY exch_id, underlying_symbol ORDER BY exch_id, underlying_symbol",
-        [glob],
-    ).fetchall()
+        source="options",
+    )
     return [
         {
             "underlying": row[1],

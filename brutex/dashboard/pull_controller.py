@@ -42,7 +42,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
@@ -55,6 +55,15 @@ from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_cover
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.models import Instrument
 from brutex.observability.correlation import pull_id_scope
+from brutex.orchestrator.parallel import (
+    DEFAULT_LATENCY_BUDGET_S,
+    PoolRunParallel,
+    workers_to_saturate,
+)
+from brutex.orchestrator.universe_phases import RunParallel
+
+if TYPE_CHECKING:
+    from brutex.adapters.dhan.rate_control import DhanRateController
 
 _LOG = structlog.get_logger(__name__)
 
@@ -450,28 +459,58 @@ _NO_RATE_HOOKS: tuple[None, None, None] = (None, None, None)
 _RateHooks = tuple[Callable[[], None] | None, Callable[[], None] | None, Callable[[], None] | None]
 
 
-def _build_live_rate_hooks() -> _RateHooks:  # pragma: no cover — live Dhan rate controller
-    """Construct the adaptive [3..5] r/s controller and return its feedback hooks.
+def _spot_run_parallel(controller: DhanRateController | None) -> RunParallel | None:
+    """Size the spot fan-out pool to the controller's rate budget (Little's law).
 
-    The real live pull paces at 5 r/s and steps 5→4→3 under sustained 429s,
-    recovering toward 5 — `pace` throttles each window, `on_rate_limit` /
-    `on_success` feed the ladder (DEC-DHAN-ADAPTIVE-RPS-001).
+    DEC-DHAN-PARALLEL-INGEST-001. A live pull threads its shared
+    :class:`~brutex.adapters.dhan.rate_control.DhanRateController` through here:
+    the pool is widened to ``workers_to_saturate(controller.current_rps or 5.0,
+    DEFAULT_LATENCY_BUDGET_S)`` so enough windows are in flight to keep the rate
+    BUCKET (not network latency) the bottleneck — targeting/saturating UP TO
+    ~5 r/s (Rule #6 still caps the aggregate; honest envelope: never a guaranteed
+    constant 5 r/s). ``None`` controller (dry-run / injected-factory pull) →
+    ``None`` here, so ``run_dhan_spot_ingest`` uses its default pool. This is the
+    pure, covered sizing seam; the live controller construction is the
+    ``# pragma: no cover`` part.
+    """
+    if controller is None:
+        return None
+    workers = workers_to_saturate(controller.current_rps or 5.0, DEFAULT_LATENCY_BUDGET_S)
+    return PoolRunParallel(max_workers=workers)
+
+
+def _build_live_controller() -> DhanRateController:  # pragma: no cover — live Dhan controller
+    """Construct the shared adaptive [3..5] r/s controller for a live pull.
+
+    One controller per pull is threaded into BOTH the per-window pacing hooks
+    (``pace`` / ``on_rate_limit`` / ``on_success``) AND the pool sizing
+    (:func:`_spot_run_parallel`), so the fan-out width tracks the controller's
+    current rate (DEC-DHAN-ADAPTIVE-RPS-001 + DEC-DHAN-PARALLEL-INGEST-001).
     """
     from brutex.adapters.dhan.rate_control import DhanRateController
 
-    controller = DhanRateController()
-    return controller.pace, controller.on_rate_limit, controller.on_success
+    return DhanRateController()
 
 
-def _live_rate_hooks(use_live_rate: bool) -> _RateHooks:
-    """Return the live rate-controller hooks for a real live pull, else a None-triple.
+def _live_rate_runtime(use_live_rate: bool) -> tuple[_RateHooks, RunParallel | None]:
+    """Return ``((pace, on_rate_limit, on_success), run_parallel)`` for the pull.
 
-    Only the **default live** pull (no injected factory + not dry-run) gets the
-    adaptive controller; dry-run and injected-factory pulls need no throttle.
+    A **default live** pull (no injected factory + not dry-run) builds ONE shared
+    controller and derives both the feedback hooks AND a rate-sized fan-out pool
+    from it. Dry-run / injected-factory pulls need no throttle → the None-triple
+    + ``None`` pool (the ingest spine then uses its default pool). The sizing
+    itself (:func:`_spot_run_parallel`) is covered; only the live controller
+    construction is ``# pragma: no cover``.
     """
     if not use_live_rate:
-        return _NO_RATE_HOOKS
-    return _build_live_rate_hooks()  # pragma: no cover — live only
+        return _NO_RATE_HOOKS, None
+    controller = _build_live_controller()  # pragma: no cover — live only
+    hooks = (  # pragma: no cover — live only
+        controller.pace,
+        controller.on_rate_limit,
+        controller.on_success,
+    )
+    return hooks, _spot_run_parallel(controller)  # pragma: no cover — live only
 
 
 def pull_all_spot(
@@ -551,7 +590,7 @@ def pull_all_spot(
             start_date=start.date().isoformat(),
             dry_run=dry_run,
         )
-        pace, on_rate_limit, on_success = _live_rate_hooks(use_live_rate)
+        (pace, on_rate_limit, on_success), run_parallel = _live_rate_runtime(use_live_rate)
         report = run_dhan_spot_ingest(
             adapter,
             sink,
@@ -564,6 +603,7 @@ def pull_all_spot(
             on_success=on_success,
             on_progress=on_progress,
             coverage=coverage,
+            run_parallel=run_parallel,
         )
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
         failure_keys = {(f.symbol, f.interval) for f in report.failures}
@@ -718,7 +758,7 @@ def pull_candles(
             intervals=len(DHAN_FETCH_INTERVALS),
         )
 
-        pace, on_rate_limit, on_success = _live_rate_hooks(use_live_rate)
+        (pace, on_rate_limit, on_success), run_parallel = _live_rate_runtime(use_live_rate)
         report = run_dhan_spot_ingest(
             adapter,
             sink,
@@ -731,6 +771,7 @@ def pull_candles(
             on_success=on_success,
             on_progress=on_progress,
             coverage=coverage,
+            run_parallel=run_parallel,
         )
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
 

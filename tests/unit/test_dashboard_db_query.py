@@ -30,6 +30,7 @@ from brutex.dashboard.db_view import (
     _quote_ident,
     _spot_derived_rows,
     _to_decimal,
+    _validate_candle_coords,
     list_candle_datasets,
     list_columns,
     list_option_datasets,
@@ -43,7 +44,9 @@ from brutex.dashboard.db_view import (
 from brutex.data.instrument_store import Instrument, InstrumentStore
 from brutex.data.option_parquet_writer import OptionParquetWriter, OptionSeriesCoordinate
 from brutex.data.parquet_writer import ParquetWriter
+from brutex.data.partition import build_partition_path
 from brutex.models import Exchange, InstrumentType, Segment
+from structlog.testing import capture_logs
 
 from brutex.data.models import CandleBar, OptionBar  # isort: skip  (kept near other data imports)
 
@@ -172,6 +175,22 @@ def _write_options(
             _obar(datetime(2024, 3, 2, 4, 0, tzinfo=UTC), "PE", "96.1"),
         ],
     )
+
+
+#: A structurally-broken Parquet blob (no trailing ``PAR1`` magic → DuckDB
+#: raises ``duckdb.Error`` on read). The embedded ``\r`` mirrors the operator's
+#: real symptom (``don't know what type: \r``); the missing magic is what
+#: deterministically triggers the resilient-read degradation across DuckDB
+#: versions (DEC-COVERAGE-PARQUET-RESILIENT-001).
+_CORRUPT_PARQUET = b"not-a-parquet \r corrupt"
+
+
+def _drop_corrupt_parquet(directory: Path, name: str = "corrupt.parquet") -> Path:
+    """Drop an unreadable ``*.parquet`` into *directory* (matches the coverage glob)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    bad = directory / name
+    bad.write_bytes(_CORRUPT_PARQUET)
+    return bad
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -648,6 +667,56 @@ def test_query_candles_invalid_coords_raise(
         )
 
 
+# ── DEC-PREOPEN-AMPERSAND-001 — ``&`` symbols (M&M / M&MFIN / GVT&D) ──────────
+
+#: Real NSE/BSE F&O-eligible underlyings whose ticker carries ``&``. The ingest
+#: writes them verbatim (the partition denylist permits ``&``); before the fix
+#: the read path 500'd on them (``illegal candle symbol 'M&M'``).
+_AMPERSAND_SYMBOLS = ["M&M", "M&MFIN", "GVT&D"]
+
+
+def test_query_candles_accepts_ampersand_symbol(store: InstrumentStore, tmp_path: Path) -> None:
+    # M&M (Mahindra & Mahindra) is a real F&O underlying — the read path must
+    # SERVE its candles, not raise ``illegal candle symbol`` (the 500 bug).
+    _write_candles(tmp_path, symbol="M&M", interval="1minute")
+    out = query_candles(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="M&M",
+        interval="1minute",
+        limit=50,
+    )
+    assert len(out["rows"]) == 2  # both written bars round-trip through the ``&`` path
+
+
+@pytest.mark.parametrize("symbol", _AMPERSAND_SYMBOLS)
+def test_ampersand_symbol_write_read_validators_agree(symbol: str) -> None:
+    # CLAUDE.md §11 COMMON: the partition WRITE validator and the dashboard READ
+    # validator must accept exactly the same real symbols — neither may drift
+    # and reject what the other stored (the root cause of the M&M 500).
+    build_partition_path(  # write side: must not raise
+        lake_root=Path("/lake"),
+        exchange="NSE",
+        segment="CASH",
+        symbol=symbol,
+        interval="1day",
+        year=2026,
+        month=1,
+    )
+    _validate_candle_coords("NSE", "CASH", symbol, "1day")  # read side: must not raise
+
+
+@pytest.mark.parametrize("bad", ["FOO[BAR]", "FOO{1}", "A B", "x*", "y?z"])
+def test_validate_candle_coords_still_rejects_glob_and_space(bad: str) -> None:
+    # Admitting ``&`` must NOT loosen the glob-injection / whitespace guard:
+    # ``* ? [ ] { }`` and spaces stay illegal so a symbol can never widen the
+    # bound ``read_parquet`` glob.
+    with pytest.raises(ValueError, match="illegal candle symbol"):
+        _validate_candle_coords("NSE", "CASH", bad, "1day")
+
+
 @pytest.mark.parametrize("field", ["start", "end"])
 def test_query_candles_malformed_date_raises(
     store: InstrumentStore, tmp_path: Path, field: str
@@ -886,6 +955,42 @@ def test_summarize_option_datasets_aggregates_per_underlying(
         assert r["bars"] == 4  # 2 sides × 2 trading days
         assert r["first_date"] == "2024-03-01"
         assert r["last_date"] == "2024-03-02"
+
+
+def test_summarize_option_datasets_skips_one_corrupt_file(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Two readable underlyings + ONE unreadable *.parquet in the same options
+    # tree. The whole-glob scan raises duckdb.Error; the resilient read skips the
+    # bad file (logged) and still reports BOTH underlyings — never a 500.
+    _write_options(tmp_path, underlying_symbol="NIFTY")
+    _write_options(
+        tmp_path, partition_key="NSE_FNO|99|MONTH|1|ATM+1|PUT", underlying_symbol="BANKNIFTY"
+    )
+    bad = _drop_corrupt_parquet(tmp_path / "options")
+    with capture_logs() as logs:
+        rows = summarize_option_datasets(store.connection, tmp_path)
+    assert [r["underlying"] for r in rows] == ["BANKNIFTY", "NIFTY"]
+    assert all(r["series"] == 2 and r["bars"] == 4 for r in rows)
+    skips = [e for e in logs if e["event"] == "coverage.parquet_skip"]
+    assert len(skips) == 1
+    assert skips[0]["source"] == "options"
+    assert skips[0]["path"].endswith(bad.name)
+
+
+def test_summarize_option_datasets_all_unreadable_returns_empty(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # The options dir holds ONLY an unreadable *.parquet → the rglob guard passes,
+    # the whole-glob scan fails, and NO file is readable → [] (never a 500) plus
+    # an error log naming the source so the operator can quarantine the lake.
+    _drop_corrupt_parquet(tmp_path / "options")
+    with capture_logs() as logs:
+        rows = summarize_option_datasets(store.connection, tmp_path)
+    assert rows == []
+    unreadable = [e for e in logs if e["event"] == "coverage.parquet_unreadable"]
+    assert len(unreadable) == 1
+    assert unreadable[0]["source"] == "options"
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1267,6 +1372,60 @@ def test_summarize_spot_datasets_multiple_sets(store: InstrumentStore, tmp_path:
     symbols = [r["symbol"] for r in rows]
     assert symbols == ["NSE-BANKNIFTY", "NSE-NIFTY"]  # list_candle_datasets is sorted
     assert all(r["bars"] == 2 for r in rows)
+
+
+def test_summarize_spot_datasets_skips_one_corrupt_file(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # An unreadable *.parquet sibling inside the dataset dir makes the whole-glob
+    # scan fail; the resilient read skips it and still reports the real 2 bars.
+    _write_candles(tmp_path)
+    dataset_dir = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
+    _drop_corrupt_parquet(dataset_dir)
+    with capture_logs() as logs:
+        rows = summarize_spot_datasets(store.connection, tmp_path)
+    assert rows == [
+        {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+            "bars": 2,
+            "first_date": "2024-03-01",
+            "last_date": "2024-03-02",
+        }
+    ]
+    skips = [e for e in logs if e["event"] == "coverage.parquet_skip"]
+    assert len(skips) == 1
+    assert skips[0]["source"] == "spot:NSE/CASH/NSE-NIFTY/1minute"
+
+
+def test_summarize_spot_datasets_all_unreadable_reports_zero(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Every parquet in the dataset is unreadable → the dataset is still discovered
+    # (path-based) but aggregates to 0 bars / no dates via the empty-subset branch,
+    # never a 500.
+    _write_candles(tmp_path)
+    dataset_dir = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
+    for parquet in dataset_dir.rglob("*.parquet"):
+        parquet.write_bytes(_CORRUPT_PARQUET)
+    with capture_logs() as logs:
+        rows = summarize_spot_datasets(store.connection, tmp_path)
+    assert rows == [
+        {
+            "exchange": "NSE",
+            "segment": "CASH",
+            "symbol": "NSE-NIFTY",
+            "interval": "1minute",
+            "bars": 0,
+            "first_date": None,
+            "last_date": None,
+        }
+    ]
+    unreadable = [e for e in logs if e["event"] == "coverage.parquet_unreadable"]
+    assert len(unreadable) == 1
+    assert unreadable[0]["source"] == "spot:NSE/CASH/NSE-NIFTY/1minute"
 
 
 # ────────────────────────────────────────────────────────────────────────

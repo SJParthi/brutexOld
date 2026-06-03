@@ -28,6 +28,7 @@ row (CLAUDE.md §2 Rule 7). O(1) per bar (one dedup probe + one append).
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -80,6 +81,22 @@ class OptionBarSink:
     audit
         Optional hash-chained audit sink; when given, one row is appended per
         non-empty write (the material action).
+
+    Thread-safety (DEC-DHAN-PARALLEL-INGEST-001). The options ingest is
+    parallelised per underlying, so several workers may reach
+    :meth:`append_option_bars` on this ONE shared sink concurrently. The
+    dedup → partition-write → audit-append sequence is wrapped in a single
+    :class:`threading.Lock` so it is one atomic critical section. This is
+    REQUIRED because the hash-chained :class:`~brutex.orchestrator.audit.AuditWriter`
+    is explicitly **not thread-safe** (it mutates ``seq`` / ``prev_hash`` on
+    every append): the lock makes the audit chain advance as a strict SINGLE
+    WRITER (Golden Rule #8) — interleaved appends would corrupt the chain and
+    fail ``verify_chain``. The lock spans only fast local work (the O(1) dedup
+    probe + a Parquet/disk write + one audit line); the per-series **network
+    fetch** happens in ``ingest_rolling_option_series`` BEFORE this call, so the
+    cross-worker parallelism (the rate-limited Dhan I/O) is fully preserved — the
+    lock only serialises the lake/audit write tail, which a single-writer audit
+    chain requires anyway.
     """
 
     def __init__(
@@ -92,6 +109,10 @@ class OptionBarSink:
         self._index = index
         self._writer = writer
         self._audit = audit
+        #: Serialises the dedup→write→audit tail so the non-thread-safe
+        #: ``AuditWriter`` advances as a strict single writer
+        #: (DEC-DHAN-PARALLEL-INGEST-001, Golden Rule #8).
+        self._lock = threading.Lock()
 
     def append_option_bars(
         self,
@@ -118,15 +139,11 @@ class OptionBarSink:
         # The dedup identity is the FULL series coordinate (so two distinct
         # series can never alias — even if a side omits the resolved strike,
         # leaving bar.strike None) PLUS the per-bar (resolved strike, side,
-        # epoch). The partition key IS that series identity.
+        # epoch). The partition key IS that series identity. Building it is pure,
+        # so it stays OUTSIDE the lock to keep the held section minimal.
         partition_key = _KEY_SEP.join(
             [exchange_segment, security_id, expiry_flag, str(expiry_code), strike, drv_option_type]
         )
-        survivors = unique_option_bars(
-            bars, self._index, underlying=security_id, expiry=partition_key
-        )
-        if not survivors:
-            return 0
         coordinate = OptionSeriesCoordinate(
             exch_id=exch_id,
             exchange_segment=exchange_segment,
@@ -136,16 +153,27 @@ class OptionBarSink:
             expiry_code=expiry_code,
             strike_offset=strike,
         )
-        written = self._writer.write(
-            partition_key=partition_key, coordinate=coordinate, bars=survivors
-        )
-        if self._audit is not None:
-            self._audit.append(
-                action=_AUDIT_ACTION,
-                subject=partition_key,
-                payload={"written": written, "deduped": len(bars) - written},
+        # SINGLE-WRITER critical section (DEC-DHAN-PARALLEL-INGEST-001): the
+        # dedup probe + the partition write + the hash-chained audit append must
+        # be atomic so the non-thread-safe ``AuditWriter`` advances as exactly
+        # one writer (Golden Rule #8). No network I/O happens here — the Dhan
+        # fetch ran before this call — so cross-worker parallelism is preserved.
+        with self._lock:
+            survivors = unique_option_bars(
+                bars, self._index, underlying=security_id, expiry=partition_key
             )
-        return written
+            if not survivors:
+                return 0
+            written = self._writer.write(
+                partition_key=partition_key, coordinate=coordinate, bars=survivors
+            )
+            if self._audit is not None:
+                self._audit.append(
+                    action=_AUDIT_ACTION,
+                    subject=partition_key,
+                    payload={"written": written, "deduped": len(bars) - written},
+                )
+            return written
 
 
 class NullOptionBarSink:
