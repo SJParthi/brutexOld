@@ -130,8 +130,15 @@
     background:var(--surface); display:none; position:relative; overflow:hidden; }
   #pullpanel.on { display:block; animation: fadeInUp .4s ease both; }
   #pullpanel .title { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+  /* The sweeping beam is the LIVE "running" indicator. Show it ONLY while a
+     pull is actually in flight (panel has `.running`); the panel itself stays
+     `.on` after the job settles so the ✓/✕ result + chunk grid remain visible,
+     but the infinite beam MUST stop — otherwise it animates forever and reads
+     as "still running" long after the pull finished. */
   #pullpanel .beam { position:absolute; top:0; left:0; height:3px; width:40%;
-    background:linear-gradient(90deg,transparent,var(--yellow),transparent); animation: beam 1.1s linear infinite; }
+    background:linear-gradient(90deg,transparent,var(--yellow),transparent);
+    animation: beam 1.1s linear infinite; display:none; }
+  #pullpanel.running .beam { display:block; }
   .tfgrid { display:grid; grid-template-columns:repeat(6,1fr); gap:8px; }
   .tf { padding:10px 6px; border-radius:9px; text-align:center; font-size:12px;
     background:var(--surface-2); border:1px solid var(--border-strong); color:var(--muted); transition:.3s; }
@@ -559,7 +566,7 @@ async function runPull(symbol, label) {
   if (!symbol) return;
   const btn = document.getElementById("pullbtn");
   const panel = document.getElementById("pullpanel");
-  panel.classList.add("on");
+  panel.classList.add("on", "running");   // beam animates only while in flight
   btn.disabled = true;
   /* The from/to date picker scopes EVERY pull path (spot / future / CE-PE).
      Blank ends default server-side to 2021-01-01 / previous trading day and are clamped
@@ -624,6 +631,7 @@ async function runPull(symbol, label) {
       `<span style="color:var(--red)">✕</span> pull failed: ${esc(e.message)}`;
   } finally {
     btn.disabled = false;
+    panel.classList.remove("running");   // stop the beam; panel stays on to show the result
   }
 }
 
@@ -677,7 +685,7 @@ let pollTimer = null;
 
 async function startAndPoll(path, label) {
   const panel = document.getElementById('pullpanel');
-  panel.classList.add('on');
+  panel.classList.add('on', 'running');   // beam animates only while in flight
   setBulkDisabled(true);
   document.getElementById('optbtn').disabled = true;
   document.getElementById('pulltitle').textContent = `Starting ${label}…`;
@@ -741,6 +749,7 @@ function finishLive() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   setBulkDisabled(false);
   document.getElementById('optbtn').disabled = !selPullSymbol;
+  document.getElementById('pullpanel').classList.remove('running');  // stop the beam
 }
 
 /* Render the live stat row (units done/total · failed · bars) from a snapshot. */
