@@ -7,7 +7,7 @@ logit math, or the overfit-count tally produces different numbers and fails
 this test loudly.
 
 Regenerate only on a deliberate change and record it in the corresponding
-``docs/MIGRATION.md`` entry. DEC-STAT-DSR-PBO-001 (entry #428).
+``docs/MIGRATION.md`` entry. DEC-STAT-DSR-PBO-001 (entry #430).
 """
 
 from __future__ import annotations
