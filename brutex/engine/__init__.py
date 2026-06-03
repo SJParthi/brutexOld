@@ -10,14 +10,17 @@ Implements the 5-stage funnel from `docs/TRACK1_BACKTEST_SPEC.md`:
   Stage 4  — DSR / CPCV / Romano-Wolf / walk-forward
   Stage 4.7 — Lockbox (6mo + adaptive ≥500 trades per DEC-LOCK-001)
 
-## Build status (2026-05-17)
+## Build status (2026-06-03)
 
-Foundation only. Currently exposes:
+Currently exposes:
 - ``combo_mask`` — u64 bitmask iteration + evaluation primitives
-  (foundation for Stage 1A bar evaluation)
+  (Stage-2 supermask kernel facade)
+- ``stage1a`` — the Stage-1A bitset-matrix builder: drives the existing
+  52-condition :func:`brutex.vocabulary.evaluator.evaluate_atoms` across a
+  ``(instrument, interval)`` bar feed to produce the per-bar ``bar_bits``
+  matrix the supermask kernel consumes (DEC-ENGINE-DRIVER-001).
 
 Coming in subsequent commits:
-- ``stage1a`` — precompute + bar_bits packing
 - ``stage1b`` — coarse score filter
 - ``stage2``  — full sweep orchestrator
 - ``runner``  — end-to-end driver
@@ -27,11 +30,11 @@ coverage per Golden Rule #12 per-module strict gate.
 
 ## Public API (forward-compat re-exports)
 
-Currently exposes the combo-mask primitives. As subsequent modules
-land, their public symbols will be re-exported here.
+Re-exports the combo-mask primitives + the Stage-1A matrix builder. As
+subsequent modules land, their public symbols will be re-exported here.
 """
 
-from brutex.engine import combo_mask
+from brutex.engine import combo_mask, stage1a
 from brutex.engine.combo_mask import (
     MAX_VOCAB_BITS,
     VOCAB_BITS,
@@ -42,15 +45,24 @@ from brutex.engine.combo_mask import (
     mask_to_bits,
     popcount,
 )
+from brutex.engine.stage1a import (
+    ANCHOR_DEPENDENT_MASK,
+    Stage1AMatrixBuilder,
+    build_bar_bits,
+)
 
 __all__ = [
+    "ANCHOR_DEPENDENT_MASK",
     "MAX_VOCAB_BITS",
     "VOCAB_BITS",
+    "Stage1AMatrixBuilder",
     "bits_to_mask",
+    "build_bar_bits",
     "combo_mask",
     "count_combos",
     "evaluate_mask",
     "iter_masks_k_of_n",
     "mask_to_bits",
     "popcount",
+    "stage1a",
 ]
