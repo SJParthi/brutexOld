@@ -166,10 +166,13 @@ let mode = "table";  /* "table" | "candles" */
 
 /* Per-table structured-query state (DEC-DB-QUERY-001). cols=null → all. */
 const qstate = {};  /* { table: {allCols:[], cols:Set|null, filters:[{c,op,v}], orderBy:"", desc:false} } */
-/* Candle-viewer state. `datasets` holds BOTH spot (kind="spot") and expired-
-   option (kind="option") datasets; the selected one's `kind` drives which API
-   + column set is used (DEC-DB-QUERY-001 / options-in-db-viewer). */
-const cstate = { datasets: [], key: null, start: "", end: "", cols: null, desc: false, offset: 0 };
+/* Candle-viewer state. `kind` ("spot"|"option") is the active Candle-lake
+   row: the spot bars (`bars/`) and the dedicated expired-options table
+   (`options/`) are now SEPARATE, self-contained sidebar rows, so `datasets`
+   holds ONLY the active row's datasets (never both at once). The selected
+   dataset's `kind` still drives which API + column set is used
+   (DEC-EXPIRED-OPTIONS-TABLE-001 / options-in-db-viewer). */
+const cstate = { datasets: [], key: null, kind: null, start: "", end: "", cols: null, desc: false, offset: 0 };
 
 /* Friendly labels for the allowlisted query operators (mirrors
    db_view.ALLOWED_OPERATORS — the backend is the source of truth + re-validates). */
@@ -235,22 +238,30 @@ async function loadTables() {
         + '<span class="badge' + zero + '" data-count="' + (t.row_count || 0) + '">0</span>'
         + '</div>';
     }).join("");
-    /* The candle/OHLCV lake (spot bars/ + expired-option options/) lives in
-       Parquet, not a DuckDB table — surface it as its own browsable dataset
-       (DEC-DB-QUERY-001 / options-in-db-viewer). The picker inside lists both
-       spot and option datasets, labelled. */
-    const candleRow = '<div class="tbl" data-candles="1">'
+    /* The candle/OHLCV lake lives in Parquet, not a DuckDB table — surface
+       each lake as its OWN dedicated, clickable row
+       (DEC-EXPIRED-OPTIONS-TABLE-001 / options-in-db-viewer): the spot bars
+       (`bars/`) and the expired-options table (`options/`) are separate
+       first-class entries, so the expired-options table is a row of its own
+       (not hidden inside a shared picker). Each row's `data-candles` value is
+       the lake `kind` it browses. */
+    const candleRow = '<div class="tbl" data-candles="spot">'
       + '<span class="nm">📈 candles</span>'
-      + '<span class="badge" style="color:var(--purple);background:rgba(157,123,255,.13)">spot + options</span>'
+      + '<span class="badge" style="color:var(--purple);background:rgba(157,123,255,.13)">spot</span>'
+      + '</div>';
+    const optionRow = '<div class="tbl" data-candles="option">'
+      + '<span class="nm">🅾 expired options</span>'
+      + '<span class="badge" style="color:var(--pink);background:rgba(255,107,157,.13)">options</span>'
       + '</div>';
     tablesEl.innerHTML = '<h3>Tables</h3>' + tableRows
-      + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow;
+      + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow + optionRow;
     tablesEl.querySelectorAll(".badge[data-count]").forEach(b => countUp(b, b.getAttribute("data-count")));
     tablesEl.querySelectorAll(".tbl[data-table]").forEach(el => {
       el.addEventListener("click", () => selectTable(el.getAttribute("data-table")));
     });
-    const cEl = tablesEl.querySelector(".tbl[data-candles]");
-    if (cEl) cEl.addEventListener("click", () => selectCandles());
+    tablesEl.querySelectorAll(".tbl[data-candles]").forEach(el => {
+      el.addEventListener("click", () => selectCandles(el.getAttribute("data-candles")));
+    });
     if (mode === "candles") markCandles();
     else if (selected && counts[selected] !== undefined) markSelected(selected);
   } catch (e) {
@@ -265,8 +276,12 @@ function markSelected(name) {
 }
 
 function markCandles() {
+  /* Highlight only the active lake's row (spot vs expired-options). Guard on a
+     non-null kind so a data-table row (getAttribute → null) can never match a
+     null kind (null === null) and mass-highlight every table — correct by
+     construction, not by the caller's invariant. */
   tablesEl.querySelectorAll(".tbl").forEach(el => {
-    el.classList.toggle("sel", el.hasAttribute("data-candles"));
+    el.classList.toggle("sel", cstate.kind !== null && el.getAttribute("data-candles") === cstate.kind);
   });
 }
 
@@ -417,22 +432,30 @@ function curDataset() { return cstate.datasets.find(d => dsKey(d) === cstate.key
 /* Columns available for the currently-selected dataset (option vs spot). */
 function curCols() { const d = curDataset(); return d && d.kind === "option" ? OPTION_COLS : CANDLE_COLS; }
 
-async function selectCandles() {
+async function selectCandles(kind) {
   mode = "candles";
   selected = null;
+  /* Switching between the spot lake and the expired-options lake resets the
+     per-lake view (selected dataset / projection / page) so the two dedicated
+     rows never leak each other's columns or pager position. */
+  if (kind !== cstate.kind) { cstate.kind = kind; cstate.key = null; cstate.cols = null; }
+  cstate.offset = 0;
   markCandles();
-  dataEl.innerHTML = '<div class="empty">loading candle datasets…</div>';
+  const isOpt = cstate.kind === "option";
+  dataEl.innerHTML = '<div class="empty">loading ' + (isOpt ? "expired-option" : "candle") + ' datasets…</div>';
   try {
     const r = await fetch("/api/v1/db/candles/datasets");
     const body = await r.json();
-    /* Merge spot + option datasets into one list, each tagged with its kind. */
-    const spots = (body.datasets || []).map(d => ({ kind: "spot", ...d }));
-    const opts = (body.options || []).map(d => ({ kind: "option", ...d }));
-    cstate.datasets = spots.concat(opts);
-    cstate.offset = 0;
+    /* This row browses ONE lake — keep only the active kind's datasets,
+       each tagged so curCols()/buildCandleUrl() pick the right schema. */
+    cstate.datasets = isOpt
+      ? (body.options || []).map(d => ({ kind: "option", ...d }))
+      : (body.datasets || []).map(d => ({ kind: "spot", ...d }));
     if (!curDataset() && cstate.datasets.length) cstate.key = dsKey(cstate.datasets[0]);
     if (cstate.datasets.length) runCandleQuery();
-    else renderCandleView(null, "No candle data yet — pull an instrument's timeframes on /universe first.");
+    else renderCandleView(null, isOpt
+      ? "No expired-option data yet — pull an instrument's options on /universe first."
+      : "No spot candle data yet — pull an instrument's timeframes on /universe first.");
   } catch (e) {
     dataEl.innerHTML = '<div class="empty">offline</div>';
   }
@@ -539,7 +562,7 @@ limitSel.addEventListener("change", () => {
 });
 refreshBtn.addEventListener("click", () => {
   loadTables();
-  if (mode === "candles") selectCandles();
+  if (mode === "candles") selectCandles(cstate.kind);
   else if (selected) selectTable(selected);
 });
 
