@@ -61,6 +61,29 @@ def paisa_to_rupees(paisa: int) -> Decimal:
     return round_money(Decimal(paisa) / _PAISA_PER_RUPEE)
 
 
+def rupees_to_paisa(rupees: Decimal) -> int:
+    """Convert a rupee :class:`~decimal.Decimal` to int64 paisa (the inverse of
+    :func:`paisa_to_rupees`).
+
+    The amount is first snapped to the 2-decimal tick grid via
+    :func:`round_money` (``ROUND_HALF_UP``) so vendor float-noise like
+    ``14020.7999`` becomes ``1402080`` paisa, never ``1402079`` — the canonical
+    rupees→paisa seam (CLAUDE.md §11 COMMON; ``brutex.money`` previously only
+    converted the other direction, so each caller rolled its own).
+
+    Parameters
+    ----------
+    rupees
+        A rupee amount (price, P&L, or excursion) as a :class:`~decimal.Decimal`.
+
+    Returns
+    -------
+    int
+        The amount in paisa (exact: a 2-decimal rupee value × 100 is integral).
+    """
+    return int(round_money(rupees) * _PAISA_PER_RUPEE)
+
+
 def format_inr(paisa: int) -> str:
     """Format int64 paisa as a ``₹`` string with grouping and two decimals.
 
@@ -77,4 +100,4 @@ def format_inr(paisa: int) -> str:
     return f"₹{paisa_to_rupees(paisa):,.2f}"
 
 
-__all__ = ["format_inr", "paisa_to_rupees", "round_money"]
+__all__ = ["format_inr", "paisa_to_rupees", "round_money", "rupees_to_paisa"]

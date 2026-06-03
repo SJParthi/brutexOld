@@ -22,6 +22,10 @@ Currently exposes:
 - ``results_store`` — the deterministic sweep→Parquet results sink keyed by
   the BLAKE3 run-identity: idempotent, byte-reproducible writes with an O(1)
   read-back lookup + top-K leaderboard (DEC-RESULT-STORE-001).
+- ``trade_sim`` — the Stage-2 Mode-A spot trade-sim walker: bar-by-bar SL/TP +
+  forced-15:20 exit (signal-only, int64-paisa P&L, no look-ahead) that emits
+  :class:`brutex.metrics.types.ClosedTrade` — the producer that feeds the
+  results store (DEC-TRADE-SIM-MODEA-001).
 
 Coming in subsequent commits:
 - ``stage1b`` — coarse score filter
@@ -37,7 +41,7 @@ Re-exports the combo-mask primitives + the Stage-1A matrix builder. As
 subsequent modules land, their public symbols will be re-exported here.
 """
 
-from brutex.engine import combo_mask, results_store, stage1a
+from brutex.engine import combo_mask, results_store, stage1a, trade_sim
 from brutex.engine.combo_mask import (
     MAX_VOCAB_BITS,
     VOCAB_BITS,
@@ -59,6 +63,10 @@ from brutex.engine.stage1a import (
     Stage1AMatrixBuilder,
     build_bar_bits,
 )
+from brutex.engine.trade_sim import (
+    TradeSimError,
+    simulate_session_mode_a,
+)
 
 __all__ = [
     "ANCHOR_DEPENDENT_MASK",
@@ -69,6 +77,7 @@ __all__ = [
     "ResultsStore",
     "ResultsStoreError",
     "Stage1AMatrixBuilder",
+    "TradeSimError",
     "bits_to_mask",
     "build_bar_bits",
     "combo_mask",
@@ -78,5 +87,7 @@ __all__ = [
     "mask_to_bits",
     "popcount",
     "results_store",
+    "simulate_session_mode_a",
     "stage1a",
+    "trade_sim",
 ]
