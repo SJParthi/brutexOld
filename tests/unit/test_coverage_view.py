@@ -14,8 +14,10 @@ from brutex.dashboard.coverage_view import (
     STATUS_MISSING,
     build_coverage_payload,
     build_coverage_rows,
+    build_option_coverage_payload,
     build_spot_coverage_payload,
     coverage_headline,
+    option_coverage_headline,
     spot_coverage_headline,
 )
 from brutex.data.coverage_ledger import (
@@ -262,3 +264,52 @@ class TestBuildSpotCoveragePayload:
         payload = build_spot_coverage_payload(iter([_spot("NSE-NIFTY", bars=3)]))
         assert payload["headline"]["total_bars"] == 3
         assert payload["rows"][0]["symbol"] == "NSE-NIFTY"
+
+
+def _option(underlying: str, *, series: int, bars: int) -> dict[str, object]:
+    """One per-underlying expired-options coverage row (summarize_option_datasets shape)."""
+    return {
+        "underlying": underlying,
+        "exchange": "NSE",
+        "series": series,
+        "bars": bars,
+        "first_date": "2024-03-01",
+        "last_date": "2024-03-02",
+    }
+
+
+class TestOptionCoverageHeadline:
+    def test_empty_is_zero(self) -> None:
+        # No underlyings → vacuously zero, never raises.
+        assert option_coverage_headline([]) == {
+            "underlyings": 0,
+            "series": 0,
+            "total_bars": 0,
+        }
+
+    def test_sums_series_and_bars_across_underlyings(self) -> None:
+        head = option_coverage_headline(
+            [_option("NIFTY", series=2, bars=4), _option("BANKNIFTY", series=3, bars=9)]
+        )
+        assert head == {"underlyings": 2, "series": 5, "total_bars": 13}
+
+
+class TestBuildOptionCoveragePayload:
+    def test_payload_has_headline_and_rows(self) -> None:
+        payload = build_option_coverage_payload([_option("NIFTY", series=2, bars=4)])
+        assert set(payload) == {"headline", "rows"}
+        assert payload["headline"] == {"underlyings": 1, "series": 2, "total_bars": 4}
+        assert payload["rows"][0]["underlying"] == "NIFTY"
+
+    def test_payload_empty(self) -> None:
+        payload = build_option_coverage_payload([])
+        assert payload == {
+            "headline": {"underlyings": 0, "series": 0, "total_bars": 0},
+            "rows": [],
+        }
+
+    def test_payload_accepts_iterator_once(self) -> None:
+        # An iterator (single-use) must still produce both headline + rows.
+        payload = build_option_coverage_payload(iter([_option("NIFTY", series=1, bars=3)]))
+        assert payload["headline"]["total_bars"] == 3
+        assert payload["rows"][0]["underlying"] == "NIFTY"

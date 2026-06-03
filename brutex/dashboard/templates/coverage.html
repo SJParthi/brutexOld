@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BruteX — Coverage Ledger</title>
+<title>BruteX — Coverage</title>
 <style>
   :root {
     --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
@@ -86,7 +86,7 @@
 <body>
   <header>
     <div class="logo">BruteX</div>
-    <div class="sub">Coverage — completeness ledger (expiries + contracts from 2021)</div>
+    <div class="sub">Coverage — expired options + spot · present-in-lake = pulled</div>
     <nav class="topnav" style="margin-left:18px; display:flex; gap:14px; font-size:13px;">
       <a href="/credentials" style="color:var(--blue); text-decoration:none;">Credentials</a>
       <span style="color:var(--muted);">·</span>
@@ -100,18 +100,15 @@
   </header>
 
   <div class="band">
-    <div class="kpi"><span class="v" id="headline">— / —</span><span class="l">complete</span></div>
-    <div class="kpi"><span class="v" id="pct">—%</span><span class="l">coverage</span></div>
-    <div class="kpi"><span class="v" id="attempted">— / —</span><span class="l">pulled so far</span></div>
-    <div class="kpi"><span class="v bad" id="failed">—</span><span class="l">failed (real errors)</span></div>
-    <div class="kpi"><span class="v warn" id="pending">—</span><span class="l">no F&amp;O (no data)</span></div>
-    <div class="kpi"><span class="v" id="missing">—</span><span class="l">not pulled yet</span></div>
+    <div class="kpi"><span class="v ok" id="ul">—</span><span class="l">underlyings pulled</span></div>
+    <div class="kpi"><span class="v" id="ser">—</span><span class="l">expired-option series</span></div>
+    <div class="kpi"><span class="v" id="barz">—</span><span class="l">option bars</span></div>
     <span id="status"></span>
   </div>
 
   <div class="sectitle">
-    <h2>Options ledger</h2>
-    <span class="meta">expiries + contracts per underlying / year (from 2021)</span>
+    <h2>Expired options</h2>
+    <span class="meta">per underlying · present-in-lake = pulled (date-range completeness not asserted)</span>
   </div>
   <div class="panelwrap">
     <div id="panel"><div class="empty">loading…</div></div>
@@ -126,21 +123,18 @@
   </div>
 
 <script>
-/* ── BruteX coverage ledger viewer (DEC-COVERAGE-LEDGER-001) ──
-   Polls /api/v1/coverage every 4s for the headline + per-cell rows, and
-   POSTs /api/v1/coverage/repull from the "Re-pull gaps" button. Every
-   interpolated string is escaped before innerHTML (error messages can
-   carry attacker-influenced content — same XSS lesson as the logs page). */
+/* ── BruteX coverage viewer (DEC-OPTIONS-COVERAGE-LAKE-001) ──
+   Both sections read straight from the lake: the EXPIRED OPTIONS section
+   polls /api/v1/coverage/options (per-underlying series + bars, present-in-lake
+   = pulled — replaces the dead legacy expiries/contracts ledger the new
+   single-table pull never wrote), and SPOT polls /api/v1/coverage/spot. Every
+   interpolated string is escaped before innerHTML (XSS — same lesson as logs). */
 const panel = document.getElementById("panel");
 const spotPanel = document.getElementById("spotpanel");
 const spotMeta = document.getElementById("spotmeta");
-const headlineEl = document.getElementById("headline");
-const pctEl = document.getElementById("pct");
-const attemptedEl = document.getElementById("attempted");
-const failedEl = document.getElementById("failed");
-const pendingEl = document.getElementById("pending");
-const missingEl = document.getElementById("missing");
-const statusEl = document.getElementById("status");
+const ulEl = document.getElementById("ul");
+const serEl = document.getElementById("ser");
+const barzEl = document.getElementById("barz");
 const liveTxt = document.getElementById("livetxt");
 
 function esc(s) {
@@ -152,37 +146,30 @@ function esc(s) {
     .replace(/'/g, "&#39;");
 }
 
-const MARK = { complete: "✓", expiries_only: "◐", failed: "⚠", pending: "○", missing: "—" };
+function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
 
-function shortTs(ts) {
-  if (!ts) return "";
-  const t = String(ts);
-  const i = t.indexOf("T");
-  return i >= 0 ? t.slice(0, i) + " " + t.slice(i + 1, i + 9) : t;
-}
-
+/* One row per underlying that has expired-option bars in the lake. A series
+   PRESENT in the lake counts as pulled; the date span is shown but NOT asserted
+   complete (mirrors the Spot section). */
 function renderRows(rows) {
   if (!rows.length) {
-    panel.innerHTML = '<div class="empty">no coverage cells yet — load the instrument master, add credentials, then Re-pull gaps</div>';
+    panel.innerHTML = '<div class="empty">no expired-option data in the lake yet — add credentials, then pull an instrument\'s options chain on /universe</div>';
     return;
   }
-  const body = rows.map(r => {
-    const st = String(r.status || "missing");
-    return "<tr>"
-      + '<td><span class="sym">' + esc(r.underlying) + "</span></td>"
-      + "<td>" + esc(r.exchange) + "</td>"
-      + "<td>" + esc(r.year) + "</td>"
-      + '<td><span class="st ' + esc(st) + '">' + (MARK[st] || "") + " " + esc(st === "pending" ? "no F&O" : st) + "</span></td>"
-      + "<td>" + esc(r.expiries_pulled) + "</td>"
-      + "<td>" + esc(r.contracts_pulled) + "</td>"
-      + "<td>" + esc(shortTs(r.last_fetched_at)) + "</td>"
-      + '<td class="err">' + esc(r.error || "") + "</td>"
-      + "</tr>";
-  }).join("");
+  const body = rows.map(r =>
+    "<tr>"
+    + '<td><span class="sym">' + esc(r.underlying) + "</span></td>"
+    + "<td>" + esc(r.exchange) + "</td>"
+    + '<td class="num">' + esc(num(r.series)) + "</td>"
+    + '<td class="num">' + esc(num(r.bars)) + "</td>"
+    + "<td>" + esc(r.first_date || "") + "</td>"
+    + "<td>" + esc(r.last_date || "") + "</td>"
+    + "</tr>"
+  ).join("");
   panel.innerHTML =
     "<table><thead><tr>"
-    + "<th>Underlying</th><th>Exchange</th><th>Year</th><th>Status</th>"
-    + "<th>Expiries</th><th>Contracts</th><th>Last fetched</th><th>Error</th>"
+    + "<th>Underlying</th><th>Exchange</th><th>Series</th><th>Bars</th>"
+    + "<th>First date</th><th>Last date</th>"
     + "</tr></thead><tbody>" + body + "</tbody></table>";
 }
 
@@ -230,36 +217,26 @@ async function pollSpot() {
 
 async function poll() {
   try {
-    const r = await fetch("/api/v1/coverage");
+    const r = await fetch("/api/v1/coverage/options");
     if (!r.ok) { liveTxt.textContent = "error " + r.status; return; }
     const body = await r.json();
     const h = body.headline || {};
-    headlineEl.textContent = (h.complete ?? "—") + " / " + (h.total ?? "—");
-    pctEl.textContent = (h.percent ?? "—") + "%";
-    pctEl.className = "v " + (h.is_complete ? "ok" : (h.percent >= 50 ? "warn" : "bad"));
-    // "pulled so far" = attempted / total: the honest in-progress signal. A
-    // high "not pulled yet" early in a run is NORMAL (the pull walks the grid),
-    // not an error — only "failed" is a real error (DEC-PULL-ERROR-VISIBILITY-001).
-    attemptedEl.textContent = (h.attempted ?? "—") + " / " + (h.total ?? "—");
-    failedEl.textContent = h.failed ?? "—";
-    failedEl.className = "v " + ((h.failed ?? 0) > 0 ? "bad" : "ok");
-    pendingEl.textContent = h.pending ?? "—";
-    missingEl.textContent = (h.not_pulled ?? h.missing) ?? "—";
-    const attempted = h.attempted ?? 0;
-    const total = h.total ?? 0;
+    ulEl.textContent = h.underlyings ?? "—";
+    serEl.textContent = num(h.series);
+    barzEl.textContent = num(h.total_bars);
     renderRows(body.rows || []);
     // The badge says "pulling" ONLY when a pull job is ACTUALLY running — never
-    // merely because coverage is incomplete (which would read "pulling" forever
-    // after a finished or all-failed pull — the operator's perpetual-loading
-    // symptom). DEC-OPTION-SECURITY-ID-FIX-001.
+    // merely because the lake is still filling (which would read "pulling"
+    // forever after a finished run — the operator's perpetual-loading symptom).
+    // DEC-OPTION-SECURITY-ID-FIX-001.
     let running = false;
     try {
       const pr = await fetch('/api/v1/universe/pull-progress');
       if (pr.ok) running = ((await pr.json()).state || "") === "running";
     } catch (e) { running = false; }
     liveTxt.textContent = running
-      ? "pulling · " + attempted + " / " + total + " cells"
-      : "live · " + (body.rows || []).length + " cells";
+      ? "pulling · " + num(h.series) + " series · " + num(h.total_bars) + " bars"
+      : "live · " + (body.rows || []).length + " underlyings";
   } catch (e) {
     liveTxt.textContent = "offline";
   }

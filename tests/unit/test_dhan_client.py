@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 import pytest
-from brutex.adapters.dhan.client import DhanClient, _guard_url
+from brutex.adapters.dhan.client import CallMeter, DhanClient, _guard_url
 from brutex.adapters.dhan.constants import HEADER_ACCESS_TOKEN, HEADER_CLIENT_ID
 from brutex.adapters.dhan.errors import (
     DhanError,
@@ -18,6 +18,7 @@ from brutex.adapters.dhan.errors import (
     DhanTimeoutError,
     DhanTransportError,
 )
+from structlog.testing import capture_logs
 
 
 class _RecordingTransport:
@@ -110,3 +111,96 @@ class TestPostJson:
 
         with pytest.raises(DhanTransportError, match="transport error"):
             _client(_boom).post_json("charts/intraday", {})
+
+
+class _StepClock:
+    """Deterministic monotonic clock advancing a fixed step each call.
+
+    ``post_json`` reads the clock twice per call (start + completion), so a
+    ``step`` of 0.1 s yields a MEASURED per-call latency of exactly 100 ms.
+    """
+
+    def __init__(self, step: float = 0.1) -> None:
+        self._t = 0.0
+        self._step = step
+
+    def __call__(self) -> float:
+        self._t += self._step
+        return self._t
+
+
+class TestCallMeter:
+    def test_empty_snapshot_is_all_zero(self) -> None:
+        # No calls yet → vacuously zero, never divides by zero.
+        assert CallMeter().snapshot() == {
+            "calls": 0,
+            "effective_rps": 0.0,
+            "latency_ms_avg": 0.0,
+            "latency_ms_min": 0.0,
+            "latency_ms_max": 0.0,
+            "latency_ms_p95": 0.0,
+        }
+
+    def test_records_latency_and_effective_rps(self) -> None:
+        m = CallMeter()
+        m.record(latency_s=0.10, at=1.0)  # first call sets _first_at
+        m.record(latency_s=0.30, at=1.5)  # 1 interval over 0.5 s → 2 r/s
+        snap = m.snapshot()
+        assert snap == {
+            "calls": 2,
+            "effective_rps": 2.0,
+            "latency_ms_avg": 200.0,
+            "latency_ms_min": 100.0,
+            "latency_ms_max": 300.0,
+            "latency_ms_p95": 300.0,
+        }
+
+    def test_single_record_zero_span_reports_zero_rps(self) -> None:
+        # One call → first == last → span 0 → the guarded `span > 0` False arm.
+        m = CallMeter()
+        m.record(latency_s=0.2, at=5.0)
+        snap = m.snapshot()
+        assert snap["calls"] == 1
+        assert snap["effective_rps"] == 0.0
+        assert snap["latency_ms_avg"] == 200.0
+
+
+class TestPostJsonInstrumentation:
+    def _metered(self, transport: object, *, log_every: int) -> DhanClient:
+        return DhanClient(
+            access_token="jwt-abc",
+            client_id="100000001",
+            transport=transport,  # type: ignore[arg-type]
+            base_url="https://api.dhan.co/v2/",
+            clock=_StepClock(0.1),
+            log_every=log_every,
+        )
+
+    def test_each_call_records_measured_latency(self) -> None:
+        t = _RecordingTransport(200, b"{}")
+        client = self._metered(t, log_every=25)
+        client.post_json("charts/intraday", {"securityId": "13"})
+        assert client.meter.count == 1  # default log_every → no summary (1 % 25 ≠ 0)
+        assert client.meter.snapshot()["latency_ms_avg"] == 100.0
+
+    def test_throughput_summary_emitted_every_log_every(self) -> None:
+        t = _RecordingTransport(200, b"{}")
+        client = self._metered(t, log_every=2)
+        with capture_logs() as logs:
+            client.post_json("charts/intraday", {"securityId": "13"})  # call 1 → 1 % 2 ≠ 0
+            client.post_json("charts/intraday", {"securityId": "13"})  # call 2 → 2 % 2 == 0
+        per_call = [e for e in logs if e["event"] == "dhan.call"]
+        throughput = [e for e in logs if e["event"] == "dhan.throughput"]
+        assert len(per_call) == 2  # every call logs a DEBUG line
+        assert len(throughput) == 1  # summary fires once, on the 2nd call
+        assert throughput[0]["calls"] == 2
+        assert throughput[0]["latency_ms_avg"] == 100.0
+
+    def test_latency_recorded_even_when_transport_times_out(self) -> None:
+        def _boom(*_a: object, **_k: object) -> tuple[int, bytes]:
+            raise TimeoutError("slow")
+
+        client = self._metered(_boom, log_every=25)
+        with pytest.raises(DhanTimeoutError):
+            client.post_json("charts/intraday", {})
+        assert client.meter.count == 1  # a failed call's latency is NOT invisible

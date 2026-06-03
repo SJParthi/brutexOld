@@ -230,11 +230,62 @@ def build_spot_coverage_payload(rows: Iterable[dict[str, Any]]) -> dict[str, Any
     }
 
 
+def option_coverage_headline(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Return the expired-options coverage KPI headline — underlying/series/bar totals.
+
+    Pure derivation off the per-underlying stats from
+    :func:`brutex.dashboard.db_view.summarize_option_datasets`
+    (DEC-OPTIONS-COVERAGE-LAKE-001) — the options-side analog of
+    :func:`spot_coverage_headline`.
+
+    **Honest envelope (Golden Rule #10):** a series PRESENT in the lake counts
+    as *pulled*. This headline reports HOW MANY underlyings + distinct series
+    exist and their total bar count; it does NOT assert any date range is
+    complete (partial-range detection is a follow-up, mirroring spot).
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"underlyings": <int>, "series": <int>, "total_bars": <int>}``.
+    """
+    return {
+        "underlyings": len(rows),
+        "series": sum(int(row["series"]) for row in rows),
+        "total_bars": sum(int(row["bars"]) for row in rows),
+    }
+
+
+def build_option_coverage_payload(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Return the full ``/api/v1/coverage/options`` payload — headline + rows.
+
+    Composer mirroring :func:`build_spot_coverage_payload` for the EXPIRED
+    OPTIONS section of the ``/coverage`` page (DEC-OPTIONS-COVERAGE-LAKE-001).
+    *rows* are the per-underlying stats from
+    :func:`brutex.dashboard.db_view.summarize_option_datasets`
+    (``underlying`` · ``exchange`` · ``series`` · ``bars`` · ``first_date`` ·
+    ``last_date``). Pure projection: materialise once, derive the headline, pass
+    the rows through unchanged — so the FastAPI route stays a thin wrapper and
+    this surface is 100% unit-testable offline.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"headline": {"underlyings", "series", "total_bars"}, "rows": [...]}``.
+    """
+    materialised = list(rows)
+    return {
+        "headline": option_coverage_headline(materialised),
+        "rows": materialised,
+    }
+
+
 __all__ = [
     "STATUS_MISSING",
     "build_coverage_payload",
     "build_coverage_rows",
+    "build_option_coverage_payload",
     "build_spot_coverage_payload",
     "coverage_headline",
+    "option_coverage_headline",
     "spot_coverage_headline",
 ]
