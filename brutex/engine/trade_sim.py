@@ -84,11 +84,20 @@ from brutex.calendars.nse import IST, is_forced_exit_bar
 # Stage-2 walker reuses it rather than redefining the rounding rule (the task's
 # explicit reuse instruction); the sibling-private import is deliberate.
 from brutex.engine.stage1a import _price_to_paisa  # pyright: ignore[reportPrivateUsage]
-from brutex.metrics.types import ClosedTrade
 from brutex.strategies.types import Side
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.data.models import CandleBar
+
+    # ``ClosedTrade`` is imported lazily at its single construction site (``_close``)
+    # rather than at module top: importing ``brutex.metrics.types`` runs the
+    # ``brutex.metrics`` package ``__init__``, which eagerly imports numpy (via
+    # ``metrics.spa``). Keeping that out of ``brutex.engine``'s import chain stops
+    # the per-module strict-coverage gates (combo_mask / stage1a) from loading
+    # numpy at collection — numpy 2.x raises "cannot load module more than once
+    # per process" under the single-module ``--cov`` subprocess (DEC-TRADESIM-001;
+    # mirrors the numpy-lazy convention in metrics/cpcv + engine/combo_mask).
+    from brutex.metrics.types import ClosedTrade
 
 _LOG = structlog.get_logger(__name__)
 
@@ -528,6 +537,12 @@ class TradeSimWalker:
         reason: _ExitReason,
     ) -> ClosedTrade:
         """Build the :class:`ClosedTrade`, flatten the walker, and emit a log line."""
+        # Lazy import (see the TYPE_CHECKING note above): keeps numpy out of the
+        # ``brutex.engine`` collection-time import chain so the per-module
+        # coverage gates don't trip numpy's "load once" guard. Cached after the
+        # first trade closes, so this stays O(1) on the per-trade path.
+        from brutex.metrics.types import ClosedTrade
+
         if self._direction is Side.BUY:
             pnl = exit_price_paisa - pos.entry_price_paisa
         else:  # Side.SELL
