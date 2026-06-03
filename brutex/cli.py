@@ -521,6 +521,15 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     log_path = configure_logging(json_renderer=False, enable_file=True)
     _log = structlog.get_logger("brutex.dashboard")
 
+    # Quiet uvicorn's "GET ... 200" access firehose — the 1 s /pull-progress +
+    # 4 s coverage polls drowned the structured business events. The new
+    # per-request `dashboard.request` middleware event (latency + request_id, at
+    # DEBUG for those high-frequency polls) is now the single per-request source
+    # of truth (DEC-DASHBOARD-REQUEST-LOGGING-001).
+    from brutex.dashboard.request_logging import silence_uvicorn_access_log
+
+    silence_uvicorn_access_log()
+
     # Mirror RAW stdout (any third-party / vendor print) into the rotating
     # JSON log too, so EVERY line the operator sees in
     # the terminal is also captured in .brutex-logs/brutex.log for copy/paste

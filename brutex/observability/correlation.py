@@ -46,13 +46,24 @@ PULL_ID_KEY: str = "pull_id"
 _PULL_ID_WIDTH: int = 12
 
 
+def _mint_id(width: int) -> str:
+    """Mint a fresh, collision-free hex correlation id of *width* chars.
+
+    Derived from :func:`uuid.uuid4` so it is collision-free across processes and
+    machines without any shared state — O(1), no I/O. Shared by both the pull
+    and request id minters so the generation logic lives in exactly one place
+    (CLAUDE.md §11 COMMON).
+    """
+    return uuid.uuid4().hex[:width]
+
+
 def new_pull_id() -> str:
     """Return a fresh, unique pull correlation id (12 hex chars).
 
     Derived from :func:`uuid.uuid4` so it is collision-free across processes
     and machines without any shared state — O(1), no I/O.
     """
-    return uuid.uuid4().hex[:_PULL_ID_WIDTH]
+    return _mint_id(_PULL_ID_WIDTH)
 
 
 def current_pull_id() -> str:
@@ -97,9 +108,61 @@ def pull_id_scope(pull_id: str | None = None) -> Generator[str, None, None]:
         yield resolved
 
 
+#: The contextvar / event key every dashboard HTTP request is correlated by
+#: (DEC-DASHBOARD-REQUEST-LOGGING-001). Distinct from :data:`PULL_ID_KEY`: a
+#: request id tags one ``/api/...`` call, a pull id tags one ingest pull — both
+#: ride the same ``merge_contextvars`` processor, so a request that triggers a
+#: pull can carry both keys at once.
+REQUEST_ID_KEY: str = "request_id"
+
+#: Hex width for a request id — the same 48-bit budget as the pull id.
+_REQUEST_ID_WIDTH: int = 12
+
+
+def new_request_id() -> str:
+    """Return a fresh, unique dashboard-request correlation id (12 hex chars) — O(1)."""
+    return _mint_id(_REQUEST_ID_WIDTH)
+
+
+def current_request_id() -> str:
+    """Return the ``request_id`` bound to the current context, or ``""`` if none — O(1)."""
+    return str(structlog.contextvars.get_contextvars().get(REQUEST_ID_KEY, ""))
+
+
+@contextlib.contextmanager
+def request_id_scope(request_id: str | None = None) -> Generator[str, None, None]:
+    """Bind a ``request_id`` for one dashboard request; yield it; unbind on exit.
+
+    Mirrors :func:`pull_id_scope` for the dashboard's per-request logging
+    middleware (DEC-DASHBOARD-REQUEST-LOGGING-001). An inbound ``X-Request-ID``
+    header is passed as *request_id* (so a client can correlate one call across
+    services / its own logs); ``None`` (the default) mints a fresh id via
+    :func:`new_request_id`.
+
+    Yields
+    ------
+    str
+        The resolved ``request_id`` actually bound — so the middleware can echo
+        it back in the ``X-Request-ID`` response header.
+
+    Notes
+    -----
+    Delegates to :func:`structlog.contextvars.bound_contextvars`, which binds on
+    entry and RESTORES the prior value on exit, so the id never leaks to the next
+    request handled on the same worker thread. Observability-only.
+    """
+    resolved = request_id if request_id is not None else new_request_id()
+    with structlog.contextvars.bound_contextvars(**{REQUEST_ID_KEY: resolved}):
+        yield resolved
+
+
 __all__ = [
     "PULL_ID_KEY",
+    "REQUEST_ID_KEY",
     "current_pull_id",
+    "current_request_id",
     "new_pull_id",
+    "new_request_id",
     "pull_id_scope",
+    "request_id_scope",
 ]

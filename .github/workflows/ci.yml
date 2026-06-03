@@ -1107,7 +1107,11 @@ jobs:
             echo "(brutex.adapters.dhan.adapter test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_dhan_ingest.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_ingest.py
+            # DEC-DHAN-PARALLEL-WINDOWS-001: the per-window fan-out lives in
+            # ingest_spot, so the parallel-window integration suite is part of
+            # this module's 100% gate (same wiring fix DEC-DHAN-PARALLEL-INGEST-001
+            # made for run_ingest's parallel suite).
+            pytest --cov=brutex.adapters.dhan.ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_ingest.py tests/integration/test_dhan_spot_window_parallel.py
           else
             echo "(brutex.adapters.dhan.ingest test file not present yet — gate inactive)"
           fi
@@ -1137,8 +1141,17 @@ jobs:
           else
             echo "(brutex.dashboard.pull_progress test file not present yet — gate inactive)"
           fi
+          # DEC-DASHBOARD-FASTREAD-001 (#437): pull_jobs now feeds the
+          # incremental coverage counters + invalidates the summary cache on the
+          # single write funnel. The unit suite achieves 100% alone; the
+          # responsive-under-write + e2e dashboard suites are co-run so the
+          # write-funnel hooks stay exercised end-to-end (and the module stays
+          # 100% if a future change shifts a branch into the integration path).
           if compgen -G "tests/unit/test_pull_jobs.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_jobs.py
+            pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 \
+              tests/unit/test_pull_jobs.py \
+              tests/integration/test_dashboard_responsive_under_write.py \
+              tests/integration/test_dashboard_e2e.py
           else
             echo "(brutex.dashboard.pull_jobs test file not present yet — gate inactive)"
           fi
@@ -1151,6 +1164,31 @@ jobs:
             pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
+          fi
+          # DEC-DASHBOARD-FASTREAD-001 (#437): the dashboard fast-read SPEED
+          # CORE — the in-memory summary cache (write-invalidation + 2 s TTL
+          # floor) + the incremental, idempotent coverage counters that back the
+          # O(1) coverage headline. 100% line+branch on summary_cache.py.
+          if compgen -G "tests/unit/test_summary_cache.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.summary_cache --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_summary_cache.py
+          else
+            echo "(brutex.dashboard.summary_cache test file not present yet — gate inactive)"
+          fi
+          # DEC-DASHBOARD-REQUEST-LOGGING-001 (#440): per-request structured
+          # logging — the high-frequency-poll level policy + the uvicorn
+          # access-firehose silencer. 100% line+branch on request_logging.py.
+          if compgen -G "tests/unit/test_request_logging.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.request_logging --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_request_logging.py
+          else
+            echo "(brutex.dashboard.request_logging test file not present yet — gate inactive)"
+          fi
+          # DEC-DHAN-INGEST-LOGGING-001 (#426) + DEC-DASHBOARD-REQUEST-LOGGING-001
+          # (#440): the COMMON correlation primitive — pull_id (ingest) + request_id
+          # (dashboard). 100% line+branch on correlation.py.
+          if compgen -G "tests/unit/test_observability_correlation.py" > /dev/null; then
+            pytest --cov=brutex.observability.correlation --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_correlation.py
+          else
+            echo "(brutex.observability.correlation test file not present yet — gate inactive)"
           fi
           # DEC-STAT-SPA-001 (#431): brutex.metrics.spa — Hansen SPA, White
           # Reality Check, Romano-Wolf step-down (Stage-4 data-snooping filters

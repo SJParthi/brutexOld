@@ -15,9 +15,13 @@ import structlog
 import structlog.contextvars as cv
 from brutex.observability.correlation import (
     PULL_ID_KEY,
+    REQUEST_ID_KEY,
     current_pull_id,
+    current_request_id,
     new_pull_id,
+    new_request_id,
     pull_id_scope,
+    request_id_scope,
 )
 from structlog.testing import capture_logs
 
@@ -86,3 +90,50 @@ def test_scoped_id_is_assertable_via_capture_logs() -> None:
     with capture_logs() as logs, pull_id_scope("feedface0000"):
         structlog.get_logger("t").info("ingest.window", pull_id=current_pull_id())
     assert logs[0]["pull_id"] == "feedface0000"
+
+
+# ── request_id (DEC-DASHBOARD-REQUEST-LOGGING-001) — mirrors pull_id ──────────
+
+
+def test_request_id_key_is_request_id() -> None:
+    assert REQUEST_ID_KEY == "request_id"
+
+
+def test_new_request_id_is_twelve_hex_chars() -> None:
+    rid = new_request_id()
+    assert len(rid) == 12
+    assert all(c in "0123456789abcdef" for c in rid)
+
+
+def test_new_request_id_is_unique() -> None:
+    assert len({new_request_id() for _ in range(1000)}) == 1000
+
+
+def test_current_request_id_is_empty_when_unbound() -> None:
+    assert current_request_id() == ""
+
+
+def test_request_scope_with_explicit_id_binds_and_yields_it() -> None:
+    with request_id_scope("cafe00000001") as rid:
+        assert rid == "cafe00000001"
+        assert current_request_id() == "cafe00000001"
+
+
+def test_request_scope_with_none_generates_a_fresh_id() -> None:
+    with request_id_scope() as rid:
+        # Generated branch: a real 12-hex id is minted + bound.
+        assert len(rid) == 12
+        assert current_request_id() == rid
+
+
+def test_request_scope_unbinds_on_exit() -> None:
+    with request_id_scope("0000cafe0000"):
+        assert current_request_id() == "0000cafe0000"
+    assert current_request_id() == ""
+
+
+def test_request_and_pull_ids_coexist() -> None:
+    """A request that triggers a pull carries BOTH correlation keys at once."""
+    with request_id_scope("req000000001"), pull_id_scope("pull00000001"):
+        assert current_request_id() == "req000000001"
+        assert current_pull_id() == "pull00000001"

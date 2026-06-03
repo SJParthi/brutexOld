@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
@@ -71,9 +72,12 @@ from brutex.dashboard.preopen_report import (
 )
 from brutex.dashboard.pull_controller import dhan_creds_present, pull_all_spot, pull_candles
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
+from brutex.dashboard.request_logging import emit_request_log
+from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.models import Exchange, Instrument, InstrumentType
+from brutex.observability.correlation import request_id_scope
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
     PipelineEventKind,
@@ -476,6 +480,7 @@ def build_app(
     state: DashboardState,
     *,
     instrument_store: Any = None,
+    summary_cache: SummaryCache | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -495,6 +500,13 @@ def build_app(
         pulled. When ``None`` (the default), those endpoints return
         503 and the HTML section stays hidden \u2014 the pipeline
         progress cards still work.
+    summary_cache
+        Optional :class:`~brutex.dashboard.summary_cache.SummaryCache`
+        backing the O(1) coverage polls (DEC-DASHBOARD-FASTREAD-001).
+        Injected so a test can disable the 2 s TTL floor
+        (``SummaryCache(ttl_floor_s=0.0)``) and assert the write-path
+        invalidation deterministically; ``None`` (the default) builds a
+        fresh production cache.
 
     Returns
     -------
@@ -504,6 +516,7 @@ def build_app(
     """
     try:
         from fastapi import FastAPI, HTTPException, Query
+        from fastapi.concurrency import run_in_threadpool
         from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
     except ImportError as exc:
         raise RuntimeError(
@@ -515,6 +528,54 @@ def build_app(
     from brutex.observability.metrics import get_registry, render_prometheus
 
     app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
+
+    @app.middleware("http")
+    async def _log_request(request: Any, call_next: Any) -> Any:  # pragma: no cover — FastAPI glue
+        """Per-request structured log + request-id correlation (DEC-DASHBOARD-REQUEST-LOGGING-001).
+
+        Binds a ``request_id`` (an inbound ``X-Request-ID`` header, else a fresh
+        one) for the request's whole context so any downstream event inherits it,
+        times the handler, and emits ONE ``dashboard.request`` event via
+        :func:`brutex.dashboard.request_logging.emit_request_log` (high-frequency
+        polls at DEBUG, everything else at INFO — so the firehose stops drowning
+        the business events). The resolved id is echoed in the ``X-Request-ID``
+        response header. The emit runs in a ``finally`` so a handler that RAISES
+        is still logged (status 500) before the error propagates; the header is
+        set only when a response exists. The per-request pure logic + level policy
+        live in the 100%-tested ``request_logging`` module — this is the thin glue.
+        """
+        inbound = request.headers.get("x-request-id")
+        with request_id_scope(inbound) as rid:
+            start = time.perf_counter()
+            status_code = 500
+            response = None
+            try:
+                response = await call_next(request)
+                status_code = response.status_code
+                return response
+            finally:
+                emit_request_log(
+                    method=request.method,
+                    path=request.url.path,
+                    status_code=status_code,
+                    latency_ms=(time.perf_counter() - start) * 1000.0,
+                    request_id=rid,
+                    client=request.client.host if request.client else None,
+                )
+                if response is not None:
+                    response.headers["X-Request-ID"] = rid
+
+    # ── Fast-read SPEED CORE (DEC-DASHBOARD-FASTREAD-001) ───────────────────
+    # Every blocking lake/DuckDB read below is offloaded off the event loop via
+    # `run_in_threadpool(fn, ...)` so a single full-lake scan (or a read queued
+    # behind the active writer's store lock) can never freeze the whole async
+    # server. CRITICAL: `store.connection` returns a fresh `_LockedReadConn`
+    # whose RLock MUST be acquired+released on the SAME thread, so the offloaded
+    # callable builds + uses `store.connection` INSIDE the worker thread (we pass
+    # `store`, never a pre-built conn). The summary cache + incremental coverage
+    # counters are owned by this app instance (no module-global mutable state —
+    # CLAUDE.md §4) and injected into the routes / the background pull job below.
+    _summary_cache = summary_cache if summary_cache is not None else SummaryCache()
 
     @app.get("/api/v1/state")
     async def api_state() -> JSONResponse:
@@ -563,7 +624,8 @@ def build_app(
           * per-underlying instrument count (for the chart strip)
         """
         store = _require_store()
-        return JSONResponse(_collect_store_stats(store))
+        stats = await run_in_threadpool(_collect_store_stats, store)
+        return JSONResponse(stats)
 
     @app.get("/api/v1/instruments")
     async def api_instruments_list(
@@ -590,13 +652,15 @@ def build_app(
             keep responses snappy even on large universes.
         """
         store = _require_store()
-        rows = _query_instruments(
-            store,
-            underlying=underlying,
-            instrument_type=instrument_type,
-            segment=segment,
-            limit=limit,
-            offset=offset,
+        rows = await run_in_threadpool(
+            lambda: _query_instruments(
+                store,
+                underlying=underlying,
+                instrument_type=instrument_type,
+                segment=segment,
+                limit=limit,
+                offset=offset,
+            )
         )
         return JSONResponse({"instruments": rows, "limit": limit, "offset": offset})
 
@@ -617,8 +681,9 @@ def build_app(
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return JSONResponse({"expiries": []})
-        series = list_option_series(
-            store.connection, lake_root.parent, underlying_symbol=underlying
+        lake = lake_root.parent
+        series = await run_in_threadpool(
+            lambda: list_option_series(store.connection, lake, underlying_symbol=underlying)
         )
         seen: set[tuple[str, str, int | None]] = set()
         expiries: list[dict[str, Any]] = []
@@ -665,8 +730,9 @@ def build_app(
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return JSONResponse({"contracts": [], "limit": limit})
-        series = list_option_series(
-            store.connection, lake_root.parent, underlying_symbol=underlying
+        lake = lake_root.parent
+        series = await run_in_threadpool(
+            lambda: list_option_series(store.connection, lake, underlying_symbol=underlying)
         )
         rows = [
             {
@@ -837,6 +903,15 @@ def build_app(
             failed=report.total_failed,
             no_data=report.total_no_data,
         )
+        # Invalidate the coverage SummaryCache so the next /coverage poll reflects
+        # the just-written bars. This single-symbol pull runs SYNCHRONOUSLY here
+        # (not via the background _pull_job — the ONLY other writer that marks the
+        # cache dirty), so without this a one-off pull (e.g. pulling just SENSEX)
+        # leaves /coverage serving the stale cold-start snapshot: the "coverage
+        # shows 0 series / 0 bars after I pulled" bug
+        # (DEC-DASHBOARD-COVERAGE-INVALIDATE-001). mark_dirty is O(1); the cache's
+        # 2 s TTL floor still bounds how often the next read actually rescans.
+        _summary_cache.mark_dirty()
         return JSONResponse(report.to_dict())
 
     def _select_bulk_targets(kind: str) -> list[Instrument]:
@@ -857,8 +932,12 @@ def build_app(
     # The single-flight background pull job that powers the LIVE feed
     # (DEC-PULL-PROGRESS-LIVE-001): one universe pull at a time across the whole
     # server; the page polls /pull-progress for the per-unit tick. Owned by this
-    # app instance (no module-global mutable state — CLAUDE.md §4).
-    _pull_job = BackgroundPullJob()
+    # app instance (no module-global mutable state — CLAUDE.md §4). It is wired
+    # with the app's SummaryCache so each window write invalidates the coverage
+    # summary (the next eligible poll refreshes), and owns the incremental
+    # CoverageCounters that back the O(1) coverage headline
+    # (DEC-DASHBOARD-FASTREAD-001).
+    _pull_job = BackgroundPullJob(summary_cache=_summary_cache)
 
     @app.post("/api/v1/universe/pull-all")
     async def api_universe_pull_all(kind: str = Query(...)) -> JSONResponse:
@@ -959,6 +1038,20 @@ def build_app(
         """
         return JSONResponse(_pull_job.snapshot().to_dict())
 
+    @app.get("/api/v1/coverage/counters")
+    async def api_coverage_counters() -> JSONResponse:
+        """GET /api/v1/coverage/counters — the O(1) incremental coverage headline.
+
+        Returns the background pull job's running, per-dataset-label bar tally
+        (:meth:`brutex.dashboard.summary_cache.CoverageCounters.snapshot`) — a
+        truly O(1) read (one dict copy, never a lake scan) fed by the SINGLE
+        write-progress funnel (DEC-DASHBOARD-FASTREAD-001). ``bars`` is the
+        POST-DEDUP newly-written count, so a duplicate re-pull leaves the
+        headline unchanged (idempotent — CLAUDE.md §2 Rule 7). Not awaited on a
+        threadpool: the snapshot is a pure in-memory O(1) copy, no blocking I/O.
+        """
+        return JSONResponse(_pull_job.counters.snapshot().to_dict())
+
     # ── Completeness ledger / Coverage (DEC-COVERAGE-LEDGER-001) ────
 
     @app.get("/api/v1/coverage")
@@ -974,25 +1067,34 @@ def build_app(
         lives in the (coverage-tested) ``coverage_view`` module.
         """
         store = _require_store()
-        # Scope guard (DEC-DHAN-COVERAGE-RESCOPE-001): keep every index (incl.
-        # BSE SENSEX) but only NSE equities — BSE single-stock F&O is out of
-        # scope (DEC-DHAN-UNIVERSE-TICKVAULT-PARITY-001). This drops stale
-        # BSE-equity rows a pre-rescope lake may still carry so the coverage
-        # grid matches the live universe even before a fresh re-load.
-        candidates = [
-            inst
-            for inst in store.list_index_equity_instruments()
-            if inst.instrument is InstrumentType.IDX or inst.exch_id is Exchange.NSE
-        ]
-        # derive_lake_underlyings yields (underlying, exchange) (the order the
-        # universe ingest fan-out wants); the coverage reconciler / view want
-        # (exchange, underlying) — swap so the expected grid keys line up with
-        # the persisted ledger's (exchange, underlying_symbol, year) PK.
-        expected = [
-            (exchange, underlying) for underlying, exchange in derive_lake_underlyings(candidates)
-        ]
         years = _coverage_years()
-        return JSONResponse(build_coverage_payload(store.list_coverage(), expected, years))
+
+        def _build() -> dict[str, Any]:
+            """Build the coverage payload off the event loop (threadpool worker)."""
+            # Runs on a threadpool worker so the indexed coverage read + the
+            # candidates scan never block the event loop, and the store lock the
+            # synchronized methods take is acquired+released on this thread.
+            # Scope guard (DEC-DHAN-COVERAGE-RESCOPE-001): keep every index (incl.
+            # BSE SENSEX) but only NSE equities — BSE single-stock F&O is out of
+            # scope (DEC-DHAN-UNIVERSE-TICKVAULT-PARITY-001). This drops stale
+            # BSE-equity rows a pre-rescope lake may still carry so the coverage
+            # grid matches the live universe even before a fresh re-load.
+            candidates = [
+                inst
+                for inst in store.list_index_equity_instruments()
+                if inst.instrument is InstrumentType.IDX or inst.exch_id is Exchange.NSE
+            ]
+            # derive_lake_underlyings yields (underlying, exchange) (the order the
+            # universe ingest fan-out wants); the coverage reconciler / view want
+            # (exchange, underlying) — swap so the expected grid keys line up with
+            # the persisted ledger's (exchange, underlying_symbol, year) PK.
+            expected = [
+                (exchange, underlying)
+                for underlying, exchange in derive_lake_underlyings(candidates)
+            ]
+            return build_coverage_payload(store.list_coverage(), expected, years)
+
+        return JSONResponse(await run_in_threadpool(_build))
 
     @app.get("/api/v1/coverage/spot")
     async def api_coverage_spot() -> JSONResponse:
@@ -1014,9 +1116,18 @@ def build_app(
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return JSONResponse(build_spot_coverage_payload([]))
-        return JSONResponse(
-            build_spot_coverage_payload(summarize_spot_datasets(store.connection, lake_root.parent))
-        )
+        lake = lake_root.parent
+
+        def _recompute() -> list[dict[str, Any]]:
+            """Recompute the spot-dataset summary (cache-miss / dirty path only)."""
+            # The O(files) full-lake aggregate — runs ONLY on a cache miss / a
+            # dirty read past the 2 s TTL floor, on a threadpool worker, and
+            # builds + uses store.connection here so the store RLock stays on one
+            # thread (DEC-DASHBOARD-FASTREAD-001).
+            return summarize_spot_datasets(store.connection, lake)
+
+        rows = await run_in_threadpool(_summary_cache.get_or_refresh, SPOT, recompute=_recompute)
+        return JSONResponse(build_spot_coverage_payload(rows))
 
     @app.get("/api/v1/coverage/options")
     async def api_coverage_options() -> JSONResponse:
@@ -1040,11 +1151,18 @@ def build_app(
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return JSONResponse(build_option_coverage_payload([]))
-        return JSONResponse(
-            build_option_coverage_payload(
-                summarize_option_datasets(store.connection, lake_root.parent)
-            )
-        )
+        lake = lake_root.parent
+
+        def _recompute() -> list[dict[str, Any]]:
+            """Recompute the option-dataset summary (cache-miss / dirty path only)."""
+            # The O(files) full-lake aggregate — runs ONLY on a cache miss / a
+            # dirty read past the 2 s TTL floor, on a threadpool worker, building
+            # + using store.connection here so the store RLock stays on one
+            # thread (DEC-DASHBOARD-FASTREAD-001).
+            return summarize_option_datasets(store.connection, lake)
+
+        rows = await run_in_threadpool(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
+        return JSONResponse(build_option_coverage_payload(rows))
 
     @app.get("/coverage", response_class=HTMLResponse)
     async def coverage_page() -> str:
@@ -1095,14 +1213,22 @@ def build_app(
             raise HTTPException(status_code=400, detail="'from' must be on or before 'to'")
         wanted = [s for s in (symbols or "").split(",") if s.strip()] or None
         lake_root = getattr(store, "path", None)
-        rows = (
-            build_preopen_rows(
+
+        def _build_rows(lake: Path) -> list[Any]:
+            """Build the pre-open report rows off the event loop (threadpool worker)."""
+            # Offloaded: the dataset discovery (filesystem walk) + the per-symbol
+            # DuckDB aggregate run on a threadpool worker, building store.connection
+            # here so the store RLock stays on this thread (DEC-DASHBOARD-FASTREAD-001).
+            return build_preopen_rows(
                 store.connection,
-                lake_root.parent,
-                datasets=resolve_report_datasets(lake_root.parent, wanted),
+                lake,
+                datasets=resolve_report_datasets(lake, wanted),
                 start=start_d,
                 end=end_d,
             )
+
+        rows = (
+            await run_in_threadpool(_build_rows, lake_root.parent)
             if isinstance(lake_root, Path)
             else []
         )
@@ -1195,7 +1321,8 @@ def build_app(
         Tolerates a missing table (count 0) so a fresh/empty store works.
         """
         store = _require_store()
-        return JSONResponse({"tables": table_summary(store.connection)})
+        tables = await run_in_threadpool(lambda: table_summary(store.connection))
+        return JSONResponse({"tables": tables})
 
     @app.get("/api/v1/db/table/{name}")
     async def api_db_table(
@@ -1215,7 +1342,9 @@ def build_app(
         """
         store = _require_store()
         try:
-            payload = sample_rows(store.connection, name, limit=limit, offset=offset)
+            payload = await run_in_threadpool(
+                lambda: sample_rows(store.connection, name, limit=limit, offset=offset)
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)
@@ -1252,9 +1381,10 @@ def build_app(
         """
         store = _require_store()
         try:
-            return JSONResponse({"table": name, "columns": list_columns(store.connection, name)})
+            columns = await run_in_threadpool(lambda: list_columns(store.connection, name))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"table": name, "columns": columns})
 
     @app.get("/api/v1/db/query/{name}")
     async def api_db_query(
@@ -1282,16 +1412,23 @@ def build_app(
         allowlist-validated + every value parameter-bound there.
         """
         store = _require_store()
+        # _parse_filters can itself raise HTTPException(400) on a malformed
+        # filter token — keep that on the event loop (no I/O) so only the
+        # blocking query_table aggregate is offloaded.
+        parsed_filters = _parse_filters(f or [])
+        columns = tuple(column) if column else None
         try:
-            payload = query_table(
-                store.connection,
-                name,
-                columns=tuple(column) if column else None,
-                filters=_parse_filters(f or []),
-                order_by=order_by,
-                descending=desc,
-                limit=limit,
-                offset=offset,
+            payload = await run_in_threadpool(
+                lambda: query_table(
+                    store.connection,
+                    name,
+                    columns=columns,
+                    filters=parsed_filters,
+                    order_by=order_by,
+                    descending=desc,
+                    limit=limit,
+                    offset=offset,
+                )
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1347,20 +1484,24 @@ def build_app(
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             raise HTTPException(status_code=400, detail="no lake root wired for candle reads")
+        lake = lake_root.parent
+        columns = tuple(column) if column else None
         try:
-            payload = query_candles(
-                store.connection,
-                lake_root.parent,
-                exchange=exchange,
-                segment=segment,
-                symbol=symbol,
-                interval=interval,
-                start=start,
-                end=end,
-                columns=tuple(column) if column else None,
-                descending=desc,
-                limit=limit,
-                offset=offset,
+            payload = await run_in_threadpool(
+                lambda: query_candles(
+                    store.connection,
+                    lake,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    interval=interval,
+                    start=start,
+                    end=end,
+                    columns=columns,
+                    descending=desc,
+                    limit=limit,
+                    offset=offset,
+                )
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1391,17 +1532,21 @@ def build_app(
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             raise HTTPException(status_code=400, detail="no lake root wired for option reads")
+        lake = lake_root.parent
+        columns = tuple(column) if column else None
         try:
-            payload = query_option_candles(
-                store.connection,
-                lake_root.parent,
-                series=series,
-                start=start,
-                end=end,
-                columns=tuple(column) if column else None,
-                descending=desc,
-                limit=limit,
-                offset=offset,
+            payload = await run_in_threadpool(
+                lambda: query_option_candles(
+                    store.connection,
+                    lake,
+                    series=series,
+                    start=start,
+                    end=end,
+                    columns=columns,
+                    descending=desc,
+                    limit=limit,
+                    offset=offset,
+                )
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
