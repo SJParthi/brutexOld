@@ -13,8 +13,27 @@ swaps to. The adapter, sink and pacing hook are all injected, so it is 100%
 unit-testable without a network or a real lake; pacing keeps the **5 r/s /
 100k-day** Dhan limit honoured (CLAUDE.md §2 Rule 6).
 
+Parallel fan-out (DEC-DHAN-PARALLEL-INGEST-001). The OUTER loop — one job per
+``(instrument, interval)`` pair — runs through an injected
+:class:`~brutex.orchestrator.universe_phases.RunParallel` (production: a bounded
+:class:`~brutex.orchestrator.parallel.PoolRunParallel`) so many windows are
+in flight at once and the pull **targets/saturates UP TO ~5 r/s** when Dhan is
+healthy (vs the old ~1 r/s sequential stream). Each pair writes a DISTINCT lake
+partition (``symbol``×``interval``), so the spot writes are path-isolated and
+need no extra lock; the shared rate bucket (the injected ``pace``) is the
+governor that keeps the aggregate ``≤ 5 r/s`` (Rule #6). **Honest envelope
+(Golden Rule #10):** this targets up to ~5 r/s — it CANNOT guarantee a constant
+5 r/s (a 429 step-down + per-call latency spikes lower the achieved rate); the
+``run_parallel`` seam is the *mechanism* that lets the rate bucket, not a
+single-threaded loop, be the bottleneck. The per-window ``ingest_spot`` spine is
+UNCHANGED. ``run_parallel`` is injectable so tests drive a synchronous fake
+(mirrors :func:`brutex.orchestrator.universe_phases.run_two_phase`).
+
 Idempotent: ``ingest_spot``'s sink append is rerun-safe, so re-running a pull
-over the same range is a no-op on already-stored bars (CLAUDE.md §2 Rule 7).
+over the same range is a no-op on already-stored bars (CLAUDE.md §2 Rule 7). The
+per-instrument ``ingest.underlying`` rollup is emitted in a DETERMINISTIC
+post-pass (grouped + sorted by ``symbol_name``) so the log order is reproducible
+regardless of worker completion order (CLAUDE.md §2 Rule 4).
 """
 
 from __future__ import annotations
@@ -31,7 +50,9 @@ from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.sink import BarSink
 from brutex.models import Instrument
-from brutex.observability.correlation import current_pull_id
+from brutex.observability.correlation import current_pull_id, pull_id_scope
+from brutex.orchestrator.parallel import PoolRunParallel
+from brutex.orchestrator.universe_phases import RunParallel
 
 #: Structured logger — emits the per-underlying spot rollup at INFO
 #: (``ingest.underlying``) + the terminal-failure cause at WARNING
@@ -45,6 +66,11 @@ _LOG = structlog.get_logger("brutex.adapters.dhan.run_ingest")
 #: real-time progress (e.g. into a ``PullProgress`` tracker) without coupling
 #: this layer to the dashboard. ``bars_appended`` is 0 for a quarantined pair.
 ProgressHook = Callable[[str, int, bool], None]
+
+#: One unit of OUTER-loop work for the parallel fan-out: a spot
+#: ``(instrument, interval)`` pair. Each maps to a distinct lake partition, so
+#: the per-pair writes are path-isolated (DEC-DHAN-PARALLEL-INGEST-001).
+SpotJob = tuple[Instrument, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,13 +128,27 @@ def run_dhan_spot_ingest(
     on_rate_limit: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
     on_progress: ProgressHook | None = None,
+    run_parallel: RunParallel | None = None,
 ) -> DhanIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
+
+    The OUTER loop — one job per ``(instrument, interval)`` pair — is mapped
+    through *run_parallel* so many windows are in flight at once and the pull
+    targets/saturates UP TO ~5 r/s when Dhan is healthy (Little's law:
+    ``in_flight ≈ rate × latency``), governed by the shared rate bucket the
+    *pace* hook drives (the aggregate stays ``≤ 5 r/s``, Rule #6). Each pair
+    writes a DISTINCT lake partition, so the per-pair writes are path-isolated;
+    the per-window :func:`ingest_spot` spine is unchanged. **Honest envelope
+    (Golden Rule #10):** this targets ~5 r/s — it cannot guarantee a constant
+    5 r/s (a 429 step-down + latency spikes lower the achieved rate).
 
     Parameters
     ----------
     adapter, sink
-        The Dhan adapter (data source) and the lake write sink.
+        The Dhan adapter (data source) and the lake write sink. Both are shared
+        across workers; the spot sink writes path-isolated partitions and is
+        already concurrency-safe (the live ``ParquetBarSink`` writes one file per
+        ``symbol``×``interval``×month).
     instruments
         Spot instruments to pull (``symbol_name`` = engine symbol; raw id in ``security_id``).
     intervals
@@ -117,12 +157,17 @@ def run_dhan_spot_ingest(
         Half-open date range, shared by every pair.
     pace
         Optional per-window pacing hook (rate-limit acquire), threaded into
-        each :func:`ingest_spot` call.
+        each :func:`ingest_spot` call. Under the fan-out this is the SHARED rate
+        bucket every worker acquires from — the single governor that bounds the
+        aggregate physical rate to ``≤ 5 r/s`` (Rule #6;
+        :class:`~brutex.adapters.dhan.rate_control.DhanRateController` is now
+        thread-safe, DEC-DHAN-PARALLEL-INGEST-001).
     coverage
         Optional :class:`~brutex.data.fetch_coverage.FetchCoverage` ledger
         threaded into every pair — a window already pulled is skipped before
         the vendor call, so a re-pull never re-burns the Dhan budget on data
-        already in the lake (DEC-FETCH-COVERAGE-001).
+        already in the lake (DEC-FETCH-COVERAGE-001). Now thread-safe under the
+        shared fan-out.
     on_rate_limit, on_success
         Optional rate-controller feedback hooks threaded into every pair — a
         rate-limit 429 steps the rate down, a clean window recovers it
@@ -130,67 +175,131 @@ def run_dhan_spot_ingest(
     on_progress
         Optional live-progress hook fired once per ``(symbol, interval)`` pair
         after it is processed: ``(label, bars_appended, failed)``. A
-        quarantined pair fires with ``bars=0, failed=True``. Lets the dashboard
+        quarantined pair fires with ``bars=0, failed=True``. Fired on the
+        CONTROLLER thread as each pair's result is collected (so the hook need
+        not be thread-safe), in worker-completion order. Lets the dashboard
         stream real-time progress (DEC-PULL-PROGRESS-TRACKER-001).
+    run_parallel
+        The concurrency primitive mapping the per-pair fetcher over the worklist
+        (a :class:`~brutex.orchestrator.universe_phases.RunParallel`). ``None``
+        (the default) builds a bounded
+        :class:`~brutex.orchestrator.parallel.PoolRunParallel`; callers size the
+        pool to the rate budget via
+        :func:`~brutex.orchestrator.parallel.workers_to_saturate` and inject it.
+        Tests inject a synchronous fake to drive the fan-out with zero threads
+        (mirrors :func:`brutex.orchestrator.universe_phases.run_two_phase`).
 
     Returns
     -------
     DhanIngestReport
         Per-pair :class:`IngestReport` for successes + the quarantined
         terminal failures. **Never raises** on a Dhan error — a terminal
-        failure on one pair is recorded and the run continues.
+        failure on one pair is recorded and the run continues. A non-Dhan
+        exception (a genuine bug) is NOT swallowed — it surfaces unchanged.
     """
     pull_id = current_pull_id()
+    runner: RunParallel = run_parallel if run_parallel is not None else PoolRunParallel()
+
+    # Deterministic worklist: one job per (instrument, interval) pair, in the
+    # caller's instrument order × interval order. The OUTER fan-out unit.
+    instruments = list(instruments)
+    jobs: list[SpotJob] = [
+        (instrument, interval) for instrument in instruments for interval in intervals
+    ]
+
+    def _run_pair(job: SpotJob) -> IngestReport:
+        """Pull one ``(instrument, interval)`` pair — runs inside a worker thread.
+
+        Re-binds *pull_id* into THIS thread's structlog context-vars: a worker
+        thread does NOT inherit the controller thread's contextvar, so without
+        this the ``ingest.*`` events emitted inside ``ingest_spot`` would lose
+        their ``pull_id`` (regressing DEC-DHAN-INGEST-LOGGING-001). A raised
+        :class:`DhanError` is captured by *run_parallel* into the job's
+        :class:`ItemResult` and quarantined below; any other exception is
+        captured too and re-raised on the controller thread (a real bug must
+        surface, never be swallowed).
+        """
+        instrument, interval = job
+        with pull_id_scope(pull_id):
+            return ingest_spot(
+                adapter,
+                sink,
+                instrument=instrument,
+                interval=interval,
+                start=start,
+                end=end,
+                pace=pace,
+                coverage=coverage,
+                on_rate_limit=on_rate_limit,
+                on_success=on_success,
+            )
+
     pairs: dict[tuple[str, str], IngestReport] = {}
     failures: list[PairFailure] = []
-    for instrument in instruments:
-        # Per-instrument accumulators for the INFO rollup below (the engine
-        # symbol is the spot "underlying"; its intervals are its series).
-        completed = quarantined = inst_bars = inst_windows = 0
-        for interval in intervals:
-            label = f"{instrument.symbol_name} {interval}"
-            try:
-                report = ingest_spot(
-                    adapter,
-                    sink,
-                    instrument=instrument,
-                    interval=interval,
-                    start=start,
-                    end=end,
-                    pace=pace,
-                    coverage=coverage,
-                    on_rate_limit=on_rate_limit,
-                    on_success=on_success,
-                )
-            except DhanError as exc:
-                failures.append(
-                    PairFailure(symbol=instrument.symbol_name, interval=interval, error=str(exc))
-                )
-                quarantined += 1
-                # Quarantine-cause nook: WHY this pair was dropped (the bare
-                # failed=N count otherwise hides the terminal Dhan error).
-                _LOG.warning(
-                    "ingest.quarantine",
-                    pull_id=pull_id,
-                    symbol=instrument.symbol_name,
-                    interval=interval,
-                    error=str(exc),
-                )
-                if on_progress is not None:
-                    on_progress(label, 0, True)
+    # Drain the fan-out on the controller thread. on_progress + the quarantine
+    # WARNING fire here (single-threaded), so neither the progress hook nor the
+    # logger needs to be thread-safe. A captured non-DhanError surfaces.
+    for outcome in runner(_run_pair, jobs):
+        instrument, interval = outcome.item
+        label = f"{instrument.symbol_name} {interval}"
+        if outcome.ok:
+            report = outcome.result
+            if report is None:  # pragma: no cover — ok=True always carries a result
                 continue
             pairs[instrument.symbol_name, interval] = report
+            if on_progress is not None:
+                on_progress(label, report.bars_appended, False)
+            continue
+        # A failed ItemResult always carries the captured worker exception.
+        exc = outcome.exc
+        if exc is None:  # pragma: no cover — a failed outcome always carries exc
+            continue
+        if not isinstance(exc, DhanError):
+            # A genuine bug (e.g. ValueError) escaped a worker — preserve "never
+            # swallow a real error": re-raise so the orchestrator never hides a
+            # defect (only DhanError is quarantined; every other error surfaces).
+            raise exc
+        # Terminal Dhan error → quarantine this pair, the run continues.
+        failures.append(
+            PairFailure(symbol=instrument.symbol_name, interval=interval, error=str(exc))
+        )
+        # Quarantine-cause nook: WHY this pair was dropped (the bare failed=N
+        # count otherwise hides the terminal Dhan error).
+        _LOG.warning(
+            "ingest.quarantine",
+            pull_id=pull_id,
+            symbol=instrument.symbol_name,
+            interval=interval,
+            error=str(exc),
+        )
+        if on_progress is not None:
+            on_progress(label, 0, True)
+
+    # Per-underlying rollup — INFO, one line per instrument (not per window) — in
+    # a DETERMINISTIC post-pass grouped + sorted by symbol_name, so the log order
+    # is reproducible regardless of worker completion order (Rule #4). The first
+    # occurrence of each symbol in the worklist fixes its rollup order's tie-break
+    # to the caller's instrument order via the stable sort key.
+    failed_by_pair = {(f.symbol, f.interval) for f in failures}
+    for instrument in sorted(instruments, key=lambda i: i.symbol_name):
+        symbol = instrument.symbol_name
+        completed = quarantined = inst_bars = inst_windows = 0
+        for interval in intervals:
+            # Every dispatched pair lands in exactly one of failed_by_pair / pairs
+            # (a DhanError quarantines it, otherwise ingest_spot returned a
+            # report — including a 0-bar "no data" report). A surviving report is
+            # looked up directly; a missing key would be a genuine partition bug.
+            if (symbol, interval) in failed_by_pair:
+                quarantined += 1
+                continue
+            report = pairs[symbol, interval]
             completed += 1
             inst_bars += report.bars_appended
             inst_windows += report.windows
-            if on_progress is not None:
-                on_progress(label, report.bars_appended, False)
-        # Per-underlying rollup — INFO, one line per instrument (not per window),
-        # so a bulk pull's progress is visible without the DEBUG firehose.
         _LOG.info(
             "ingest.underlying",
             pull_id=pull_id,
-            symbol=instrument.symbol_name,
+            symbol=symbol,
             series_completed=completed,
             series_failed=quarantined,
             bars_appended=inst_bars,
@@ -203,5 +312,6 @@ __all__ = [
     "DhanIngestReport",
     "PairFailure",
     "ProgressHook",
+    "SpotJob",
     "run_dhan_spot_ingest",
 ]

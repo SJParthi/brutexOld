@@ -31,6 +31,7 @@ meter/log each physical attempt); the predicate reuses the COMMON
 from __future__ import annotations
 
 import json
+import threading
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -112,6 +113,14 @@ class CallMeter:
     inference. O(1) per :meth:`record` (running count / sum / min / max + a
     bounded ring for the p95); :meth:`snapshot` is O(window) and called only
     periodically.
+
+    Thread-safety (DEC-DHAN-PARALLEL-INGEST-001). One :class:`DhanClient` (hence
+    one ``CallMeter``) is shared by every parallel worker, so multiple calls
+    COMPLETE concurrently. A :class:`threading.Lock` makes each :meth:`record`
+    and :meth:`snapshot` atomic so the running aggregates never tear under a
+    racing increment. The lock is held ONLY for the in-memory bookkeeping at
+    call COMPLETION — never across the POST itself (the transport runs before
+    ``record`` is reached), so it adds no network serialisation.
     """
 
     count: int = 0
@@ -121,42 +130,45 @@ class CallMeter:
     _first_at: float = 0.0
     _last_at: float = 0.0
     _recent: deque[float] = field(default_factory=lambda: deque(maxlen=_LATENCY_WINDOW))
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def record(self, *, latency_s: float, at: float) -> None:
-        """Record one completed call's *latency_s* (seconds) at wall-time *at* — O(1)."""
-        if self.count == 0:
-            self._first_at = at
-        self.count += 1
-        self._sum_s += latency_s
-        self._min_s = min(self._min_s, latency_s)
-        self._max_s = max(self._max_s, latency_s)
-        self._last_at = at
-        self._recent.append(latency_s)
+        """Record one completed call's *latency_s* (seconds) at wall-time *at* — O(1), atomic."""
+        with self._lock:
+            if self.count == 0:
+                self._first_at = at
+            self.count += 1
+            self._sum_s += latency_s
+            self._min_s = min(self._min_s, latency_s)
+            self._max_s = max(self._max_s, latency_s)
+            self._last_at = at
+            self._recent.append(latency_s)
 
     def snapshot(self) -> dict[str, float | int]:
-        """Return a JSON-friendly MEASURED summary (latency in ms, rate in r/s)."""
-        if self.count == 0:
+        """Return a JSON-friendly MEASURED summary (latency in ms, rate in r/s) — atomic."""
+        with self._lock:
+            if self.count == 0:
+                return {
+                    "calls": 0,
+                    "effective_rps": 0.0,
+                    "latency_ms_avg": 0.0,
+                    "latency_ms_min": 0.0,
+                    "latency_ms_max": 0.0,
+                    "latency_ms_p95": 0.0,
+                }
+            span = self._last_at - self._first_at
+            recent = sorted(self._recent)
+            p95 = recent[min(len(recent) - 1, int(len(recent) * 0.95))]
+            # Inter-arrival rate = (N-1) intervals ÷ wall span — never OVERSTATES a
+            # steady stream (so a 5 r/s-paced run reads ≈5, never a false >5).
             return {
-                "calls": 0,
-                "effective_rps": 0.0,
-                "latency_ms_avg": 0.0,
-                "latency_ms_min": 0.0,
-                "latency_ms_max": 0.0,
-                "latency_ms_p95": 0.0,
+                "calls": self.count,
+                "effective_rps": round((self.count - 1) / span, 2) if span > 0 else 0.0,
+                "latency_ms_avg": round(self._sum_s / self.count * 1000.0, 1),
+                "latency_ms_min": round(self._min_s * 1000.0, 1),
+                "latency_ms_max": round(self._max_s * 1000.0, 1),
+                "latency_ms_p95": round(p95 * 1000.0, 1),
             }
-        span = self._last_at - self._first_at
-        recent = sorted(self._recent)
-        p95 = recent[min(len(recent) - 1, int(len(recent) * 0.95))]
-        # Inter-arrival rate = (N-1) intervals ÷ wall span — never OVERSTATES a
-        # steady stream (so a 5 r/s-paced run reads ≈5, never a false >5).
-        return {
-            "calls": self.count,
-            "effective_rps": round((self.count - 1) / span, 2) if span > 0 else 0.0,
-            "latency_ms_avg": round(self._sum_s / self.count * 1000.0, 1),
-            "latency_ms_min": round(self._min_s * 1000.0, 1),
-            "latency_ms_max": round(self._max_s * 1000.0, 1),
-            "latency_ms_p95": round(p95 * 1000.0, 1),
-        }
 
 
 class Transport(Protocol):

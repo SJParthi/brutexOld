@@ -35,6 +35,7 @@ the concrete sink). "O(1) space" is **per-insert amortized**, not total.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterable
 from typing import Protocol
 
@@ -129,6 +130,16 @@ class OptionDedupIndex:
     exact
         The exact-confirm backing — defaults to an in-memory ``set``; inject
         an LMDB-backed set for the persistent tier.
+
+    Thread-safety (DEC-DHAN-PARALLEL-INGEST-001). One index is shared by the
+    parallel option-ingest fan-out (each worker dedups its underlying's bars
+    against the same Bloom + exact backing), so the **check-then-act** in
+    :meth:`add_if_new` MUST be atomic — otherwise two workers could both observe
+    a key as unseen and both write it, defeating the idempotence guard (Rule
+    #7). A :class:`threading.Lock` makes ``seen`` / ``add`` / ``add_if_new`` each
+    one atomic O(1) critical section, so a given content key is admitted exactly
+    once across all workers. No I/O is done under the lock (the in-memory Bloom +
+    ``set`` tiers; an injected LMDB exact backing has its own internal locking).
     """
 
     def __init__(
@@ -143,29 +154,48 @@ class OptionDedupIndex:
             bloom if bloom is not None else BloomFilter(capacity=capacity, fpr_target=fpr_target)
         )
         self._exact: ExactMembership = exact if exact is not None else set()
+        #: Serialises the check-then-act so a key is admitted exactly once under
+        #: concurrent workers (DEC-DHAN-PARALLEL-INGEST-001). O(1) hold time.
+        self._lock = threading.Lock()
+
+    def _seen_locked(self, key: bytes) -> bool:
+        """Membership probe — caller MUST hold ``self._lock`` (the shared logic)."""
+        if not self._bloom.might_contain(key):
+            return False
+        return key in self._exact
+
+    def _add_locked(self, key: bytes) -> None:
+        """Record *key* in both tiers — caller MUST hold ``self._lock``."""
+        self._bloom.add(key)
+        self._exact.add(key)
 
     def seen(self, key: bytes) -> bool:
-        """True iff *key* was already added — O(1).
+        """True iff *key* was already added — O(1), atomic.
 
         Bloom-negative short-circuits to ``False`` (definitely new) without
         touching the exact tier; a Bloom-positive is confirmed against the
         exact backing so a false-positive never causes a false dedup.
         """
-        if not self._bloom.might_contain(key):
-            return False
-        return key in self._exact
+        with self._lock:
+            return self._seen_locked(key)
 
     def add(self, key: bytes) -> None:
-        """Record *key* in both tiers — O(1)."""
-        self._bloom.add(key)
-        self._exact.add(key)
+        """Record *key* in both tiers — O(1), atomic."""
+        with self._lock:
+            self._add_locked(key)
 
     def add_if_new(self, key: bytes) -> bool:
-        """Add *key* iff unseen; return ``True`` if newly added, else ``False``. O(1)."""
-        if self.seen(key):
-            return False
-        self.add(key)
-        return True
+        """Add *key* iff unseen; return ``True`` if newly added, else ``False``. O(1), atomic.
+
+        The membership probe and the insert are ONE critical section so two
+        concurrent workers can never both see *key* as new and both add it
+        (DEC-DHAN-PARALLEL-INGEST-001) — the key is admitted exactly once.
+        """
+        with self._lock:
+            if self._seen_locked(key):
+                return False
+            self._add_locked(key)
+            return True
 
 
 def unique_option_bars(

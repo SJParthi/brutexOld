@@ -513,7 +513,14 @@ class TestPullAllSpot:
         assert d["total_symbols"] == 3 and len(d["symbols"]) == 3
 
     def test_on_progress_forwarded_per_pair(self, tmp_path: Path) -> None:
-        """pull_all_spot threads on_progress → fires per (symbol, interval) pair."""
+        """pull_all_spot threads on_progress → fires once per (symbol, interval) pair.
+
+        Under the parallel fan-out (DEC-DHAN-PARALLEL-INGEST-001) on_progress
+        fires in worker-COMPLETION order, which is non-deterministic, so the set
+        of pairs is asserted (not a fixed order) — every pair fires exactly once
+        and all are clean. (The deterministic, order-stable surface is the
+        ``ingest.underlying`` rollup, covered separately.)
+        """
         events: list[tuple[str, int, bool]] = []
         pull_all_spot(
             [_index("13"), _index("25")],
@@ -523,12 +530,13 @@ class TestPullAllSpot:
             on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
         )
         # 2 symbols × 2 fetched intervals (1m + 1d) = 4 progress events, all clean.
-        assert [e[0] for e in events] == [
+        assert {e[0] for e in events} == {
             "13 1minute",
             "13 1day",
             "25 1minute",
             "25 1day",
-        ]
+        }
+        assert len(events) == 4
         assert all(failed is False for _, _, failed in events)
 
 

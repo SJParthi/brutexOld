@@ -47,7 +47,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -69,6 +69,15 @@ from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_cover
 from brutex.data.option_sink import NullOptionBarSink
 from brutex.models import Instrument, InstrumentType
 from brutex.observability.correlation import pull_id_scope
+from brutex.orchestrator.parallel import (
+    DEFAULT_LATENCY_BUDGET_S,
+    PoolRunParallel,
+    workers_to_saturate,
+)
+from brutex.orchestrator.universe_phases import RunParallel
+
+if TYPE_CHECKING:
+    from brutex.adapters.dhan.rate_control import DhanRateController
 
 _LOG = structlog.get_logger(__name__)
 
@@ -263,26 +272,52 @@ def _build_live_options(  # pragma: no cover — live Dhan token + transport + n
     return client, sink
 
 
-def _live_option_pace(use_live_rate: bool) -> Callable[[], None] | None:
-    """Return the adaptive controller's pacing hook for a live pull, else ``None``.
+def _options_run_parallel(controller: DhanRateController | None) -> RunParallel | None:
+    """Size the options fan-out pool to the controller's rate budget (Little's law).
 
-    Only the **default live** pull (no injected factory + not dry-run) is paced;
-    dry-run and injected-factory pulls need no throttle. The controller paces at
-    the 5 r/s ceiling (DEC-DHAN-ADAPTIVE-RPS-001); the rolling-option spine does
-    not yet thread the 429-feedback hooks, so live options hold at the safe
-    ceiling — the adaptive 5→4→3 step-down for the options spine is a tracked
-    follow-up (honest envelope, Golden Rule #10).
+    DEC-DHAN-PARALLEL-INGEST-001. A live pull threads its shared
+    :class:`~brutex.adapters.dhan.rate_control.DhanRateController` here: the pool
+    is widened to ``workers_to_saturate(controller.current_rps or 5.0,
+    DEFAULT_LATENCY_BUDGET_S)`` so enough underlyings' windows are in flight to
+    keep the rate BUCKET (not network latency) the bottleneck — targeting UP TO
+    ~5 r/s (Rule #6 caps the aggregate; honest envelope: never a guaranteed
+    constant 5 r/s). ``None`` controller (dry-run / injected factory) → ``None``,
+    so ``run_dhan_options_ingest`` uses its default pool. Pure + covered; the
+    live controller construction is the ``# pragma: no cover`` part.
+    """
+    if controller is None:
+        return None
+    workers = workers_to_saturate(controller.current_rps or 5.0, DEFAULT_LATENCY_BUDGET_S)
+    return PoolRunParallel(max_workers=workers)
+
+
+def _live_option_runtime(
+    use_live_rate: bool,
+) -> tuple[Callable[[], None] | None, RunParallel | None]:
+    """Return ``(pace, run_parallel)`` for the options pull.
+
+    A **default live** pull (no injected factory + not dry-run) builds ONE shared
+    controller and derives both its ``pace`` hook AND a rate-sized fan-out pool
+    from it (DEC-DHAN-PARALLEL-INGEST-001). Dry-run / injected-factory pulls need
+    no throttle → ``(None, None)`` (the ingest spine uses its default pool). The
+    controller paces at the 5 r/s ceiling (DEC-DHAN-ADAPTIVE-RPS-001); the
+    rolling-option spine still does not thread the 429-feedback hooks, so live
+    options hold at the safe ceiling — the adaptive 5→4→3 step-down for the
+    options spine remains a tracked follow-up (honest envelope, Golden Rule #10).
+    The sizing (:func:`_options_run_parallel`) is covered; only the live
+    controller construction is ``# pragma: no cover``.
     """
     if not use_live_rate:
-        return None
-    return _build_live_option_pace()  # pragma: no cover — live only
+        return None, None
+    controller = _build_live_option_controller()  # pragma: no cover — live only
+    return controller.pace, _options_run_parallel(controller)  # pragma: no cover — live only
 
 
-def _build_live_option_pace() -> Callable[[], None]:  # pragma: no cover — live rate controller
-    """Construct the adaptive [3..5] r/s controller and return its ``pace`` hook."""
+def _build_live_option_controller() -> DhanRateController:  # pragma: no cover — live controller
+    """Construct the shared adaptive [3..5] r/s controller for a live options pull."""
     from brutex.adapters.dhan.rate_control import DhanRateController
 
-    return DhanRateController().pace
+    return DhanRateController()
 
 
 def pull_options(
@@ -385,7 +420,7 @@ def pull_options(
             start_date=start.date().isoformat(),
             dry_run=dry_run,
         )
-        pace = _live_option_pace(use_live_rate)
+        pace, run_parallel = _live_option_runtime(use_live_rate)
         report = run_dhan_options_ingest(
             client,
             sink,
@@ -399,6 +434,7 @@ def pull_options(
             pace=pace,
             on_progress=on_progress,
             coverage=coverage,
+            run_parallel=run_parallel,
         )
         # Persist the windows just completed so the next pull skips them.
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
