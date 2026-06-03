@@ -174,7 +174,7 @@ class TestPullOptions:
         assert report.total_bars == 0
         assert report.total_series_completed == 0
 
-    def test_injected_factory_non_dry_run_branch(self) -> None:
+    def test_injected_factory_non_dry_run_branch(self, tmp_path: Path) -> None:
         """A fake (live-shaped) factory exercises the not-dry-run branch with no network."""
         client = SyntheticOptionClient(bars_per_window=2)
         sink = NullOptionBarSink()
@@ -187,16 +187,19 @@ class TestPullOptions:
 
         report = pull_options(
             [_index()],
-            lake_root=Path("/lake"),
+            lake_root=tmp_path,
             dry_run=False,  # not dry-run, but injected factory ⇒ no live rate/network
             now=_NOW,
             client_factory=factory,
         )
-        assert captured == [Path("/lake")]
+        assert captured == [tmp_path]
         assert report.dry_run is False
         assert report.total_series_completed == 21 * 2 * 3 * 2
+        # A live pull persists the skip-ledger so a re-pull skips the windows
+        # already in the lake (DEC-FETCH-COVERAGE-WIRING-001).
+        assert (tmp_path / "fetch_coverage.json").is_file()
 
-    def test_terminal_failure_is_quarantined_per_underlying(self) -> None:
+    def test_terminal_failure_is_quarantined_per_underlying(self, tmp_path: Path) -> None:
         """A fake client that always errors terminally → every series quarantined."""
 
         class _AlwaysTerminal:
@@ -209,7 +212,7 @@ class TestPullOptions:
 
         report = pull_options(
             [_stock(symbol="1333")],
-            lake_root=Path("/lake"),
+            lake_root=tmp_path,
             dry_run=False,
             now=_NOW,
             client_factory=factory,
