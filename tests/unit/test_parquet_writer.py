@@ -3,7 +3,13 @@
 DEC-SPOT-PRICE-2DP-001 — the spot lake stores OHLC snapped to the 2-decimal
 rupee tick grid (``ROUND_HALF_UP``, never truncation), mirroring the option
 writer, so ``/db`` shows clean values and re-pulls stay bit-idempotent.
+
+Whitebox: deliberately exercises private helpers (``_tick_round`` rounding +
+``_partition_lock`` interning, DEC-DHAN-PARALLEL-WINDOWS-001), so per the
+DEC-P0-017 convention the file silences ``reportPrivateUsage`` at the top.
 """
+
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -100,3 +106,72 @@ class TestWriterRoundTrip:
         )
         assert second.row_count == 1
         assert first.raw_hash == second.raw_hash  # byte-identical → idempotent
+
+
+class TestPartitionLock:
+    """Per-partition write serialisation (DEC-DHAN-PARALLEL-WINDOWS-001).
+
+    The merge-on-write is a read-modify-write, so when the per-window spot fetch
+    is parallelised two windows of ONE series can target the SAME month
+    partition (adjacent 90-day windows straddle a month boundary) and a naive
+    concurrent ``os.replace`` would drop the loser's bars. A per-PATH lock
+    serialises only same-file writers; different partitions never contend.
+    """
+
+    def test_same_path_returns_same_lock(self, tmp_path: Path) -> None:
+        from brutex.data.parquet_writer import _partition_lock
+
+        dest = tmp_path / "NSE" / "CASH" / "NIFTY" / "1minute" / "2021-01.parquet"
+        # The lock is interned by path: two calls for the same file → the SAME
+        # lock object (so two ParquetWriter instances serialise on one file).
+        assert _partition_lock(dest) is _partition_lock(dest)
+
+    def test_different_paths_get_distinct_locks(self, tmp_path: Path) -> None:
+        from brutex.data.parquet_writer import _partition_lock
+
+        a = tmp_path / "a" / "2021-01.parquet"
+        b = tmp_path / "b" / "2021-02.parquet"
+        # Distinct partitions get distinct locks → writers to different files
+        # never block each other (the fan-out keeps its parallelism).
+        assert _partition_lock(a) is not _partition_lock(b)
+
+    def test_concurrent_same_partition_writes_lose_no_bars(self, tmp_path: Path) -> None:
+        """Two threads merge-writing the same month from a barrier keep ALL bars.
+
+        Without the per-partition lock this is a lost-update race (both read the
+        empty/partial file, each unions only its own bar, the later rename
+        wins). With the lock the merges serialise and the partition holds the
+        UNION of every thread's bars regardless of completion order (Rule #7).
+        """
+        import threading
+
+        pl = pytest.importorskip("polars")
+        writer = ParquetWriter(lake_root=tmp_path)
+        n_threads = 16
+        barrier = threading.Barrier(n_threads)
+
+        def _write(minute: int) -> None:
+            # Each thread writes a DISTINCT timestamp into the SAME (year, month)
+            # partition — the union must end up with all n_threads rows.
+            barrier.wait()  # maximise the race window
+            writer.write(
+                exchange="NSE",
+                segment="CASH",
+                symbol="NIFTY",
+                interval="1minute",
+                bars=[_bar(minute, open_="100", high="100", low="100", close="100")],
+            )
+
+        threads = [threading.Thread(target=_write, args=(m,)) for m in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        files = list(tmp_path.rglob("*.parquet"))
+        assert len(files) == 1  # all wrote one month partition
+        df = pl.read_parquet(files[0])
+        # No lost update: every distinct-timestamp bar survived the merge.
+        assert df.height == n_threads
+        minutes = sorted(ts.minute for ts in df["timestamp"].to_list())
+        assert minutes == list(range(n_threads))
