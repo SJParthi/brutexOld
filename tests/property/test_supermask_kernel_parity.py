@@ -34,7 +34,7 @@ from brutex.engine.combo_mask import (
     count_supermasks_reference,
     evaluate_mask,
 )
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 _U64 = st.integers(min_value=0, max_value=(1 << 64) - 1)
@@ -70,6 +70,57 @@ def test_kernel_is_deterministic(bars: list[int], masks: list[int]) -> None:
     first = fno_math.count_supermasks_u64s(bars, masks)
     second = fno_math.count_supermasks_u64s(bars, masks)
     assert list(first) == list(second)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Rayon multi-core parity (DEC-RUST-RAYON-SUPERMASK-001, MIGRATION.md #417)
+# ─────────────────────────────────────────────────────────────────
+
+
+# deadline=None: each example builds a fresh scoped rayon ThreadPool per `n`
+# (spawns OS threads) — incidental cost that, under coverage instrumentation,
+# can exceed hypothesis's 200 ms default deadline. These tests verify
+# correctness/determinism, NOT latency, so the deadline is disabled to keep the
+# gate deterministic (no timing flake — the O(1)/throughput SLAs live in bench).
+@settings(deadline=None)
+@given(bars=_BARS, masks=_MASKS)
+def test_parallel_equals_serial_all_thread_counts(bars: list[int], masks: list[int]) -> None:
+    """The scoped-pool rayon kernel == numpy reference for n in {1, 2, 4}.
+
+    `count_supermasks_u64s_nthreads` runs the masks-outer scan on a SCOPED
+    rayon pool of exactly `n` workers via an order-preserving
+    `par_iter().map().collect()`. Because the collect is order-preserving and
+    every element is a pure integer count (no reduction-order ambiguity), the
+    output is bit-identical to the serial numpy reference oracle for ANY worker
+    count — the determinism guarantee (Golden Rule #4). One off-by-thread would
+    silently invalidate the blake3 run-identity hash.
+    """
+    reference = count_supermasks_reference(bars, masks)
+    for n in (1, 2, 4):
+        out = list(fno_math.count_supermasks_u64s_nthreads(bars, masks, n))
+        assert out == reference, f"n_threads={n} diverged from serial reference"
+
+
+@settings(deadline=None)  # builds 2 scoped pools per n — correctness test, not latency
+@given(bars=_BARS, masks=_MASKS)
+def test_parallel_is_deterministic_repeated_runs(bars: list[int], masks: list[int]) -> None:
+    """Repeated parallel runs (and the default-pool kernel) all agree.
+
+    Re-running the scoped-pool kernel — and the production default-global-pool
+    `count_supermasks_u64s` — on the same input must yield byte-identical output
+    every time (no thread-scheduling nondeterminism leaks into the result).
+    """
+    reference = count_supermasks_reference(bars, masks)
+    for n in (1, 2, 4):
+        first = list(fno_math.count_supermasks_u64s_nthreads(bars, masks, n))
+        second = list(fno_math.count_supermasks_u64s_nthreads(bars, masks, n))
+        assert first == second == reference
+    # The production default-pool path must also match, repeatedly.
+    assert (
+        list(fno_math.count_supermasks_u64s(bars, masks))
+        == list(fno_math.count_supermasks_u64s(bars, masks))
+        == reference
+    )
 
 
 @given(bars=_BARS)

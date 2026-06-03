@@ -15,6 +15,11 @@ description = "Minimal Rust scaffold for BruteX Phase 2/3 hot kernels (Track 1 b
 license = "Proprietary"
 repository = "https://github.com/SJParthi/bruteX"
 readme = "README.md"
+# Proprietary, never published to crates.io. `publish = false` lets
+# cargo-deny's `[licenses] private.ignore = true` exclude this crate from the
+# SPDX license check (its "Proprietary" string is not a valid SPDX expression)
+# while still license-checking every real dependency (DEC-RUST-RAYON-SUPERMASK-001).
+publish = false
 
 [lib]
 name = "fno_math"
@@ -57,6 +62,16 @@ tracing = "0.1.44"
 
 # Archival types (used by compat::types for rkyv serialization)
 rkyv = { version = "0.8.13", features = ["alloc"] }
+
+# DEC-RUST-RAYON-SUPERMASK-001 (MIGRATION.md #414): Rayon multi-core
+# parallelization of the Stage-2 supermask scan. The masks-outer loop is
+# embarrassingly parallel (each mask an independent integer count over the
+# shared, read-only bars), so `par_iter().map().collect()` (order-preserving,
+# IndexedParallelIterator) is bit-exact vs serial (Golden Rule #4) while
+# scaling toward the memory-bandwidth wall. Production uses rayon's DEFAULT
+# global pool; licenses for the new transitive crates (rayon-core, crossbeam-*,
+# either) are pinned in deny.toml.
+rayon = "1.10"
 
 [dev-dependencies]
 proptest = "1.6.0"

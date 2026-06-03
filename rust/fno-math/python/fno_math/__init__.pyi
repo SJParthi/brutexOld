@@ -59,6 +59,21 @@ def count_supermasks_u64s(bar_bits: list[int], masks: list[int]) -> list[int]:
     """
     ...
 
+def count_supermasks_u64s_nthreads(
+    bar_bits: list[int], masks: list[int], n_threads: int
+) -> list[int]:
+    """BENCH-ONLY: batched SUPERSET count on a SCOPED rayon pool of `n_threads`.
+
+    DEC-RUST-RAYON-SUPERMASK-001 (MIGRATION.md #414). Production uses rayon's
+    DEFAULT global pool via `count_supermasks_u64s`; this shim exists only so
+    the scaling bench + thread-count-independence parity tests can pin a worker
+    count without touching the global pool. The result is bit-identical to
+    `count_supermasks_u64s` for any `n_threads >= 1` (order-preserving collect).
+    `n_threads == 0` lets rayon choose its default count. Raises `ValueError` if
+    the scoped pool fails to build.
+    """
+    ...
+
 def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
     ...
