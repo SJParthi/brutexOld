@@ -1,0 +1,119 @@
+# BruteX — the honest comparison, in one page
+
+> **For anyone — not just engineers.** If you can read a phone plan
+> comparison, you can read this. It maps *every promise* to the **automatic
+> machine that proves it on every single code change** (a CI gate). If that
+> machine ever goes red, the change is **blocked from shipping**.
+>
+> **Honesty rule (no illusion — CLAUDE.md Golden Rule #10):** we never print
+> "100% / fully / guaranteed" for something only partly built. Every row is
+> marked truthfully:
+>
+> | Badge | Meaning |
+> |---|---|
+> | 🟢 **live** | runs automatically on every change today; blocks the merge if it fails |
+> | 🟡 **partial** | real and running, still being tightened (the gap is stated) |
+> | 📋 **planned** | designed, not wired yet |
+> | 🚫 **out of scope** | deliberately not built (BruteX is signal-only backtest research) |
+>
+> _Companions: [`WHY_BRUTEX.md`](WHY_BRUTEX.md) (plain-English scorecard) ·
+> [`BRUTEX_VS_THE_FIELD.md`](BRUTEX_VS_THE_FIELD.md) (vs other engines) ·
+> [`STANDARDS_100PCT.md`](STANDARDS_100PCT.md) (the full enforced-vs-target audit) ·
+> [`MERGE_READINESS_GUARANTEE.md`](MERGE_READINESS_GUARANTEE.md) (the merge gate)._
+
+---
+
+## The one-line promise
+
+**BruteX is a self-checking factory for trading-strategy research.** Every
+change is inspected by a battery of automated gates *before* it is allowed in,
+and **nothing ships unless every gate is green** — so the data stays
+trustworthy and the engine stays constant-time-fast at any size.
+
+---
+
+## 1 · Your exact ask → what BruteX actually does
+
+Each "extreme speed / O(1)" promise below is tied to a **real, named, automatic
+check**. This is the "no illusion" table.
+
+| What you asked for | In plain English | BruteX today | The machine that proves it (on every change) |
+|---|---|---|---|
+| **O(1) uniqueness** | "Spotting whether we've already seen this — instant, even among billions" | 🟢 live | a `blake3` fingerprint of every run/combo + property tests asserting no collisions — `brutex/strategies/combo.py`, `tests/property/test_dedup_hash_properties.py` |
+| **O(1) de-duplication, zero data loss** | "Never double-write, never drop a real bar" | 🟢 live | 4-tier dedup: Bloom filter → LMDB exact-confirm → audit-replay → property invariants; a Bloom false-positive can **never** cause a false drop — `brutex/orchestrator/bloom.py` + `store.py`, `tests/property/test_bloom_invariants.py` |
+| **O(1) mapping / lookup** | "Finding a symbol, a bar, or an indicator is instant" | 🟢 live | numeric primary-key catalog (`SECURITY_ID`) + dict/memory-map lookups, **speed-gated by a ratio benchmark** — `tests/bench/test_throughput_canary.py`, `test_store_o1.py` |
+| **O(1) latency / time per hot path** | "Same speed on row 1 and row 1-billion" | 🟢 live (ratio-gated) | `p99(big) / p99(small)` ratio gates on bar lookup, the u64 strategy-mask AND, dedup, and the rate limiter — `tests/bench/test_store_o1.py`, `test_throughput_canary.py` *(honest note ▼: tightest 1.1× tier is 🟡)* |
+| **O(1) space per operation** | "RAM per step stays flat as data grows" | 🟢 live | state lives in a memory-mapped LMDB tier off the Python heap — total storage is O(n), **per-operation RAM is O(1)** — `brutex/orchestrator/store.py` |
+| **All worst cases / errors / exceptions / bugs** | "It's tested every way that matters, and bugs can't sneak back" | 🟢 live (core) · 🟡 (full invariant catalog) | property/fuzz tests + golden fixtures + a **red-team harness that plants bugs and asserts the gates catch them** + a runtime look-ahead guard + per-symbol quarantine (one bad symbol can't kill the run). The full 24-invariant catalog is 5 live + 19 planned — `tests/property/`, `tests/golden/`, `brutex/feed/` |
+| **Comprehensively, fully, extremely automated** | "Humans don't babysit it" | 🟢 live | the full CI battery runs on **every push**; one master `CI OK` gate; **auto-merge only on all-green** + nightly soak + weekly mutation — `.github/workflows/ci.yml`, `auto-merge.yml` |
+| **Real-time checks, guarantee + assurance** | "You find out the instant something breaks" | 🟢 live | every change triggers the gates immediately; a tamper-proof **hash-chained audit log** (break the chain → CI fails); reproducibility fingerprint on every run — `brutex/orchestrator/`, CLAUDE.md §2 Rule 4 |
+| **All kinds of tests / full coverage** | "Tested every which way, and the code is actually exercised" | 🟢 7 test types · 🟡 coverage | 7 test families live (▼ §3); coverage is a **90% hard floor + 103 modules frozen at 100% line+branch** climbing the rest — `STANDARDS_100PCT.md` §1 |
+
+---
+
+## 2 · BruteX vs the usual ways to backtest
+
+| What you feel | 🟥 DIY (pandas + a loop) | 🟧 A heavyweight framework | 🟩 **BruteX** |
+|---|---|---|---|
+| **Re-running a data pull** | re-downloads / risks duplicates | manual cache keys | **O(1) uniqueness + dedup** — never double-writes, never drops a real bar |
+| **Speed as data grows** | slows down (O(n)) | varies, hand-tuned | **O(1) per bar / per signal / per dedup** — constant-time, CI-gated |
+| **Memory as data grows** | loads everything into RAM | tuned by hand | **O(1) RAM per operation** — memory-mapped tier |
+| **One bad symbol mid-run** | kills the whole run | depends | **quarantined** — the rest keep flowing |
+| **Look-ahead "cheating"** | easy to add silently | manual care | **blocked at runtime** — at bar N the engine can read only bars 0..N |
+| **"Is it correct?"** | you hope so | some tests | a full automated suite + **hash-chained audit log** + reproducibility fingerprint |
+| **Shipping a change** | push and pray | CI if you wrote it | **all gates must be green**, then it auto-merges — never on trust |
+| **Daily operation** | babysit it | babysit it | **designed for zero-click**: auto-merge + nightly soak + red-team harness |
+
+---
+
+## 3 · Every kind of test (most projects ship 1–2)
+
+| Test type | What it catches | In BruteX |
+|---|---|---|
+| **Unit** | logic bugs | 🟢 live, runs every push |
+| **Integration** | wiring / contract bugs | 🟢 live, runs every push |
+| **Property (fuzz)** | edge cases you didn't think of | 🟢 live (`-x`, stops on first falsification) |
+| **Golden-master** | byte-level output drift | 🟢 live (exact-equality fixtures) |
+| **Benchmark** | O(1) speed regressions | 🟢 live (ratio gates) |
+| **Stress / soak** | 24-hour sustained leaks | 🟢 live (nightly) |
+| **Mutation** | "do the tests actually catch bugs?" | 🟢 live (85% threshold on the critical state module; weekly full run) |
+| **Smoke + Red-team** | fast pre-push + gate-integrity (planted bugs) | 🟢 live |
+
+---
+
+## 4 · The honest scoreboard (Golden Rule #10 — live vs not)
+
+A comparison that only lists wins is marketing, not engineering. Here is the
+truth, straight from the enforcement audit.
+
+| Capability | Status | Honest note |
+|---|---|---|
+| Inspection belt (lint · 2 strict type-checkers · 5 security scanners · duplication · dead-code · build) | 🟢 **live** | runs on every change; merge blocked on any red |
+| O(1) uniqueness · dedup · mapping · space | 🟢 **live** | Bloom → LMDB → blake3, property-tested every push |
+| O(1) latency / time ratio gates | 🟢 **live (3–10×)** | the **tightest 1.1× tier is 🟡 wired** — it switches on once a dedicated quiet M4-Pro runner is registered (shared CI is too noisy to prove 10%) |
+| Tamper-proof audit log + bit-for-bit reproducibility | 🟢 **live** | break the hash chain → CI fails |
+| Test coverage | 🟡 **90% floor + 103 modules at 100%** | climbing to 100% one locked module at a time; 8 modules pending an upstream library fix |
+| Standards enforcement (overall) | 🟡 **15 of 21 rows fully enforced (71%)** | + 2 partial (10%) + 1 roadmap (5%) + 3 manual-reviewer (14%) — per `STANDARDS_100PCT.md` §1, re-verified 2026-06-02. *(Older docs that say "9 of 21 / ~22%" are pre-reconciliation drift.)* |
+| The brute-force **sweep engine** (Stage 1A→1B→2→3→4) | 📋 **next (Phase 3)** | the per-bar / per-mask / dedup **primitives exist and are O(1)-gated today**; the cascade itself is the upcoming build |
+| "33 billion trials in 2–4 days" SLA | 📋 **target, not yet proven** | tracked as an `xfail` until the engine + M4-Pro runner land — no "millions in minutes" claim without the hardware (Golden Rule #10) |
+| Live trading / order placement | 🚫 **out of scope** | Track 1 is **signal-only research**; execution realism is the later Options Track |
+
+---
+
+## The bottom line
+
+- ✅ **Genuinely locked today:** the inspection belt; O(1) uniqueness / dedup /
+  mapping / space; O(1) latency ratio gates; the tamper-proof audit trail;
+  bit-for-bit reproducibility; auto-merge-only-on-green; and a *growing* set of
+  modules frozen at 100% test coverage.
+- 🟡 **Still tightening:** total coverage (90% floor → 100%); the strictest 10%
+  speed proof; richer live dashboards.
+- 📋 **Designed, not built:** the full sweep cascade (Phase 3) and the
+  billions-in-days SLA — published as a *target*, never as a finished claim.
+
+> **Priority law (never traded away):**
+> **Correctness > Reliability > Recoverability > Observability > Performance > Scalability.**
+
+*The BruteX bet: every promise on this page is wired to a gate that turns red
+if we break it. That is the feature — boring, bulletproof, and merge-blocked
+when it isn't.*
