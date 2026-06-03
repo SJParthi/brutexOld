@@ -81,3 +81,7 @@ credentials.json
 # Rust (future P3)
 target/
 Cargo.lock
+# ...but the fno-math extension crate IS an application artifact: track its
+# lockfile for reproducibility (Golden Rule #4) + the security-audit
+# Cargo.lock trigger (DEC-RUST-RAYON-SUPERMASK-001, first new-crate PR).
+!rust/fno-math/Cargo.lock

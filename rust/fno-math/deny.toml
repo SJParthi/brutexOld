@@ -1,0 +1,50 @@
+# cargo-deny configuration for fno-math (DEC-RUST-RAYON-SUPERMASK-001).
+#
+# `.github/workflows/security-audit.yml` runs
+# `cargo deny check advisories bans sources licenses` (working-directory
+# rust/fno-math) on every push-to-main that touches Cargo.lock /
+# Cargo.toml. Before this file there was NO deny.toml, so cargo-deny ran
+# on its built-in defaults — which would START FAILING the moment the
+# rayon multi-core kernel (DEC-RUST-RAYON-SUPERMASK-001, MIGRATION.md
+# #414) pulled in rayon-core + crossbeam-deque/epoch/utils + either,
+# because the default license set + the default "deny multiple versions"
+# ban would red main post-merge.
+#
+# This config pins an explicit permissive allow-list covering the WHOLE
+# current + new dependency tree (pyo3, blake3, serde, chrono, rkyv,
+# rayon, crossbeam, either, ...), allows multiple versions (transitive
+# duplicates are common + benign in this tree), and locks the source
+# registry to crates.io. It is intentionally conservative: only
+# OSI-approved permissive licenses are allowed; copyleft beyond MPL-2.0
+# is NOT in the list.
+
+[advisories]
+version = 2
+
+[licenses]
+version = 2
+# fno-math itself is `license = "Proprietary"` (not a valid SPDX expression);
+# it is a private, unpublished crate, so exclude it from the SPDX license check.
+private = { ignore = true }
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

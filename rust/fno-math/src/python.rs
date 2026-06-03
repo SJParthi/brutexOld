@@ -24,6 +24,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use rayon::prelude::*;
 
 /// Add two unsigned 64-bit integers. Sanity-check the PyO3 wheel
 /// build round-trips correctly.
@@ -176,6 +177,47 @@ fn count_one(bars: &[u64], mask: u64) -> u64 {
         .sum()
 }
 
+/// Below this many `mask · bar` ops, run the batch scan SERIALLY.
+///
+/// DEC-RUST-RAYON-SUPERMASK-001 (MIGRATION.md #417). The masks-outer scan
+/// is embarrassingly parallel, but for tiny batches the rayon fork/join +
+/// work-stealing overhead would dominate AND would perturb the O(1) per-op
+/// latency canary at small N (Golden Rule #5). The serial fast-path below
+/// `2^20` (= 1 048 576) `mask·bar` ops keeps the small-N hot path identical
+/// to the pre-rayon kernel; only genuinely large Stage-2 batches cross into
+/// the parallel arm. `1 << 20` is one resident-bar window (~94 K) against
+/// ~11 masks, or a few hundred masks against a small bar slice — well below
+/// any real Stage-2 batch, so production always takes the parallel arm.
+const PARALLEL_WORK_THRESHOLD: u64 = 1 << 20;
+
+/// Dispatch the batched SUPERSET count to the serial or parallel arm.
+///
+/// DEC-RUST-RAYON-SUPERMASK-001 (MIGRATION.md #417). Both arms call ONLY the
+/// shared [`count_one`] kernel (single source of truth), so they are
+/// byte-identical by construction. The parallel arm uses
+/// `par_iter().map().collect()` — an `IndexedParallelIterator`, which is
+/// **order-preserving**: `out[j]` always aligns with `masks[j]` regardless of
+/// thread scheduling, and the per-element values are pure integer counts (no
+/// reduction-order ambiguity). The result is therefore **bit-identical to the
+/// serial scan on every device** (Golden Rule #4 determinism), so it feeds the
+/// blake3 run-identity hash unchanged. `par_bridge` is deliberately NOT used —
+/// it is not order-preserving.
+///
+/// `saturating_mul` keeps the work estimate panic-free: with the release
+/// profile's `overflow-checks = true` + `panic = "abort"`, an unchecked
+/// `masks.len() * bars.len()` that overflowed `u64` would SIGABRT the host
+/// process. Saturation simply caps at `u64::MAX` (which is `>= THRESHOLD`, so
+/// such an enormous workload correctly takes the parallel arm).
+#[inline]
+fn count_supermasks_dispatch(bars: &[u64], masks: &[u64]) -> Vec<u64> {
+    let work = (masks.len() as u64).saturating_mul(bars.len() as u64);
+    if work < PARALLEL_WORK_THRESHOLD {
+        masks.iter().map(|&m| count_one(bars, m)).collect()
+    } else {
+        masks.par_iter().map(|&m| count_one(bars, m)).collect()
+    }
+}
+
 /// Batched per-mask SUPERSET count — the Stage-2 brute-force accelerator.
 ///
 /// For each `mask` in `masks`, return how many bars in `bar_bits` satisfy
@@ -212,14 +254,87 @@ fn count_one(bars: &[u64], mask: u64) -> u64 {
 ///
 /// Empty inputs are valid: empty `masks` → empty `Vec`; empty `bar_bits`
 /// → a zero per mask.
+///
+/// ## Multi-core (DEC-RUST-RAYON-SUPERMASK-001, MIGRATION.md #417)
+///
+/// Routes through [`count_supermasks_dispatch`]: batches below
+/// [`PARALLEL_WORK_THRESHOLD`] `mask·bar` ops run serially (small-N O(1)
+/// canary protection); larger batches fan out across rayon's default global
+/// thread pool via an order-preserving `par_iter().map().collect()` — so the
+/// output is bit-identical to the serial scan (Golden Rule #4). rayon spawns
+/// its own worker threads regardless of the GIL, so the multi-core speedup
+/// does NOT depend on releasing it.
+///
+/// NOTE: this function deliberately does NOT wrap the scan in `Python::detach`
+/// (`allow_threads`). `detach` would be a pure host-cooperation nicety (let
+/// other Python threads run during the GIL-free integer scan), but it pulls
+/// `PyEval_SaveThread`/`PyEval_RestoreThread` + the panic-unwind print path
+/// into the crate, which do NOT link under the `extension-module` `cargo test`
+/// build (CI's Rust job links no libpython) — the spec made `detach` "ONLY IF
+/// it compiles cleanly", and it does not. Parallelism + bit-exactness are
+/// unchanged; only the GIL-release nicety is forgone, matching
+/// `ResidentBars::count_supermasks`.
 #[pyfunction]
 pub fn count_supermasks_u64s(bar_bits: Vec<u64>, masks: Vec<u64>) -> Vec<u64> {
     // bars inner — `bar_bits` streams linearly, `mask` is register-resident.
-    // Delegates to the shared `count_one` kernel (single source of truth).
-    masks
-        .iter()
-        .map(|&mask| count_one(&bar_bits, mask))
-        .collect()
+    // Delegates to the shared `count_one` kernel (single source of truth) via
+    // the serial/parallel dispatch.
+    count_supermasks_dispatch(&bar_bits, &masks)
+}
+
+/// BENCH-ONLY: batched SUPERSET count on a SCOPED rayon pool of `n_threads`.
+///
+/// DEC-RUST-RAYON-SUPERMASK-001 (MIGRATION.md #417). Production uses rayon's
+/// DEFAULT global pool (this crate never calls `build_global` — a double-call
+/// would panic → SIGABRT under `panic = "abort"` — and never sets
+/// `RAYON_NUM_THREADS`). This shim exists ONLY so the scaling bench +
+/// thread-count-independence parity tests can pin a specific worker count
+/// without touching the global pool: it builds a SCOPED
+/// `rayon::ThreadPoolBuilder` and runs the same order-preserving
+/// `par_iter().map().collect()` inside `pool.install`.
+///
+/// Determinism: the result is bit-identical to [`count_supermasks_u64s`] for
+/// any `n_threads >= 1` (order-preserving collect + pure integer counts), which
+/// the parity tests assert across `n in {1, 2, 4}`.
+///
+/// `n_threads == 0` lets rayon choose its default worker count (documented
+/// rayon behaviour for a 0 in `num_threads`); any value `>= 1` pins exactly
+/// that many. Pool-build failure is surfaced as a `ValueError` via `map_err`
+/// (never `unwrap`/`expect` — clippy denies them and `panic = "abort"` would
+/// SIGABRT the host).
+#[pyfunction]
+pub fn count_supermasks_u64s_nthreads(
+    bar_bits: Vec<u64>,
+    masks: Vec<u64>,
+    n_threads: usize,
+) -> PyResult<Vec<u64>> {
+    // The pure-Rust core lives in `count_supermasks_scoped` so the
+    // `#[cfg(test)]` suite can exercise it WITHOUT referencing any Python
+    // C-API symbol — under the `extension-module` `cargo test` build (CI's
+    // Rust job links no libpython) a test that pulled `PyValueError`/PyErr
+    // machinery would fail to link (the prior detach/PyErr link breakage).
+    count_supermasks_scoped(&bar_bits, &masks, n_threads).map_err(PyValueError::new_err)
+}
+
+/// Pure-Rust core of [`count_supermasks_u64s_nthreads`] — a SCOPED-pool scan
+/// returning a plain `Result<_, String>` (NO `PyErr`), so Rust unit tests can
+/// call it without dragging Python C-API symbols into the no-libpython
+/// `cargo test` link. The `#[pyfunction]` wrapper maps the `String` error to a
+/// `ValueError`.
+fn count_supermasks_scoped(
+    bars: &[u64],
+    masks: &[u64],
+    n_threads: usize,
+) -> Result<Vec<u64>, String> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(n_threads)
+        .build()
+        .map_err(|e| {
+            format!(
+                "count_supermasks_scoped: failed to build rayon pool (n_threads={n_threads}): {e}"
+            )
+        })?;
+    Ok(pool.install(|| masks.par_iter().map(|&m| count_one(bars, m)).collect()))
 }
 
 /// Resident bar buffer — holds the per-bar condition bitset `Vec<u64>`
@@ -285,11 +400,22 @@ impl ResidentBars {
     /// `masks` → empty `Vec`; empty resident bars → `0` per mask;
     /// `mask == 0` → all bars. Bars come from `&self.bars` — NOT
     /// re-marshalled — so only `masks` crosses the FFI boundary.
+    ///
+    /// Multi-core via [`count_supermasks_dispatch`]
+    /// (DEC-RUST-RAYON-SUPERMASK-001, MIGRATION.md #417): below
+    /// [`PARALLEL_WORK_THRESHOLD`] runs serially; larger batches fan out across
+    /// rayon's default global pool with an order-preserving collect, so output
+    /// is bit-identical to the serial scan.
+    ///
+    /// Like the free [`count_supermasks_u64s`], this does NOT wrap the scan in
+    /// `Python::detach`/`allow_threads`: that would only be a host-cooperation
+    /// nicety, and it drags `PyEval_SaveThread`/`RestoreThread` + the panic
+    /// print path into the crate, which do not link under the `extension-module`
+    /// `cargo test` build (CI's Rust job links no libpython). rayon spawns its
+    /// own worker threads regardless of the GIL, so parallelism + bit-exactness
+    /// are identical on the direct path; only the GIL-release nicety is forgone.
     fn count_supermasks(&self, masks: Vec<u64>) -> Vec<u64> {
-        masks
-            .iter()
-            .map(|&mask| count_one(&self.bars, mask))
-            .collect()
+        count_supermasks_dispatch(&self.bars, &masks)
     }
 
     /// Single-mask SUPERSET count over the resident bars.
@@ -335,7 +461,10 @@ pub fn popcount_bytes(data: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResidentBars, count_one, count_supermask_u64s, count_supermasks_u64s};
+    use super::{
+        PARALLEL_WORK_THRESHOLD, ResidentBars, count_one, count_supermask_u64s,
+        count_supermasks_dispatch, count_supermasks_scoped,
+    };
 
     // ── count_supermask_u64s (single mask) ──
 
@@ -379,12 +508,19 @@ mod tests {
         assert_eq!(count_supermask_u64s(bars, top), 2);
     }
 
-    // ── count_supermasks_u64s (batched) ──
+    // ── count_supermasks_dispatch (batched; serial/parallel arms) ──
+    //
+    // The free `count_supermasks_u64s` pyfunction and `ResidentBars::
+    // count_supermasks` both delegate directly to `count_supermasks_dispatch`
+    // (no `py`/`allow_threads` wrapper — see their docs), so the pure-Rust unit
+    // tests exercise `count_supermasks_dispatch` directly (byte-identical work,
+    // no GIL needed). The serial/parallel arm selection is covered explicitly
+    // by the threshold tests below.
 
     #[test]
     fn batch_empty_masks_is_empty() {
         assert_eq!(
-            count_supermasks_u64s(vec![1, 2, 3], vec![]),
+            count_supermasks_dispatch(&[1, 2, 3], &[]),
             Vec::<u64>::new()
         );
     }
@@ -392,7 +528,7 @@ mod tests {
     #[test]
     fn batch_empty_bars_is_zero_per_mask() {
         assert_eq!(
-            count_supermasks_u64s(vec![], vec![0b1, 0b11, 0]),
+            count_supermasks_dispatch(&[], &[0b1, 0b11, 0]),
             vec![0, 0, 0]
         );
     }
@@ -400,7 +536,7 @@ mod tests {
     #[test]
     fn batch_mask_zero_matches_all() {
         let bars = vec![0b0001, 0b1010, 0b1111];
-        assert_eq!(count_supermasks_u64s(bars, vec![0]), vec![3]);
+        assert_eq!(count_supermasks_dispatch(&bars, &[0]), vec![3]);
     }
 
     #[test]
@@ -410,7 +546,7 @@ mod tests {
         // mask 0b1000 → bars {0b1000,0b1011}        = 2
         // mask 0b1111 → none                        = 0
         // mask 0      → all                         = 5
-        let out = count_supermasks_u64s(bars, vec![0b0011, 0b1000, 0b1111, 0]);
+        let out = count_supermasks_dispatch(&bars, &[0b0011, 0b1000, 0b1111, 0]);
         assert_eq!(out, vec![3, 2, 0, 5]);
     }
 
@@ -419,11 +555,11 @@ mod tests {
         // out[j] must align with masks[j]; reordering masks reorders output.
         let bars = vec![0b0001, 0b0010, 0b0011];
         assert_eq!(
-            count_supermasks_u64s(bars.clone(), vec![0b0001, 0b0010]),
+            count_supermasks_dispatch(&bars, &[0b0001, 0b0010]),
             vec![2, 2]
         );
         assert_eq!(
-            count_supermasks_u64s(bars, vec![0b0010, 0b0001]),
+            count_supermasks_dispatch(&bars, &[0b0010, 0b0001]),
             vec![2, 2]
         );
     }
@@ -433,12 +569,173 @@ mod tests {
         // The batched kernel must agree with the single-mask kernel element-wise.
         let bars = vec![0u64, 1, 0b1011, 0b1111, 1u64 << 40, 0xDEAD_BEEF];
         let masks = vec![0u64, 1, 0b1010, 1u64 << 40, 0xFFFF_FFFF_FFFF_FFFF];
-        let batched = count_supermasks_u64s(bars.clone(), masks.clone());
+        let batched = count_supermasks_dispatch(&bars, &masks);
         let one_by_one: Vec<u64> = masks
             .iter()
             .map(|&m| count_supermask_u64s(bars.clone(), m))
             .collect();
         assert_eq!(batched, one_by_one);
+    }
+
+    // ── dispatch serial vs parallel arm + threshold boundary ──
+
+    /// Serial reference: the exact pre-rayon masks-outer loop.
+    fn serial_reference(bars: &[u64], masks: &[u64]) -> Vec<u64> {
+        masks.iter().map(|&m| count_one(bars, m)).collect()
+    }
+
+    #[test]
+    fn dispatch_serial_arm_below_threshold() {
+        // Small work (< THRESHOLD) → serial arm; correct vs reference.
+        let bars = vec![0b0011, 0b0111, 0b1000, 0b1011, 0b0000];
+        let masks = vec![0b0011u64, 0b1000, 0b1111, 0];
+        assert!((masks.len() as u64) * (bars.len() as u64) < PARALLEL_WORK_THRESHOLD);
+        assert_eq!(
+            count_supermasks_dispatch(&bars, &masks),
+            serial_reference(&bars, &masks)
+        );
+    }
+
+    #[test]
+    fn dispatch_parallel_arm_above_threshold() {
+        // bars.len()=1024 * masks.len()=1100 = 1_126_400 > 1<<20 (=1_048_576)
+        // → parallel arm; bit-exact vs serial reference. Kept cheap.
+        let bars: Vec<u64> = (0..1024u64).map(|i| i | 0b11).collect();
+        let masks: Vec<u64> = (0..1100u64).map(|i| (i & 0b1) | (1 << (i % 50))).collect();
+        let work = (masks.len() as u64) * (bars.len() as u64);
+        assert!(
+            work >= PARALLEL_WORK_THRESHOLD,
+            "work={work} must cross threshold"
+        );
+        assert_eq!(
+            count_supermasks_dispatch(&bars, &masks),
+            serial_reference(&bars, &masks)
+        );
+    }
+
+    #[test]
+    fn dispatch_threshold_boundary_identical_to_serial() {
+        // At work == THRESHOLD-1 (serial arm) and work == THRESHOLD (parallel
+        // arm) the dispatch output must equal the plain serial count_one loop.
+        // THRESHOLD = 1<<20 = 1_048_576 = 1024 * 1024.
+        let bars: Vec<u64> = (0..1024u64).map(|i| i | 0b101).collect();
+
+        // work == THRESHOLD (1024 masks) → parallel arm.
+        let masks_at: Vec<u64> = (0..1024u64).map(|i| (1 << (i % 40)) | (i & 0b11)).collect();
+        let work_at = (masks_at.len() as u64) * (bars.len() as u64);
+        assert_eq!(work_at, PARALLEL_WORK_THRESHOLD);
+        assert_eq!(
+            count_supermasks_dispatch(&bars, &masks_at),
+            serial_reference(&bars, &masks_at)
+        );
+
+        // work == THRESHOLD - 1024 (1023 masks) → serial arm, just below.
+        let masks_below = &masks_at[..1023];
+        let work_below = (masks_below.len() as u64) * (bars.len() as u64);
+        assert!(work_below < PARALLEL_WORK_THRESHOLD);
+        assert_eq!(
+            count_supermasks_dispatch(&bars, masks_below),
+            serial_reference(&bars, masks_below)
+        );
+    }
+
+    #[test]
+    fn dispatch_parallel_equals_serial_parity() {
+        // Direct parallel==serial parity on a parallel-arm input with varied bits.
+        let bars: Vec<u64> = (0..2048u64)
+            .map(|i| (i.wrapping_mul(0x9E37_79B9)) & 0xFFFF_FFFF_FFFF)
+            .collect();
+        let masks: Vec<u64> = (0..600u64)
+            .map(|i| (1u64 << (i % 48)) | (i & 0b111))
+            .collect();
+        assert!((masks.len() as u64) * (bars.len() as u64) >= PARALLEL_WORK_THRESHOLD);
+        assert_eq!(
+            count_supermasks_dispatch(&bars, &masks),
+            serial_reference(&bars, &masks)
+        );
+    }
+
+    #[test]
+    fn dispatch_empty_masks() {
+        assert_eq!(
+            count_supermasks_dispatch(&[1, 2, 3], &[]),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn dispatch_empty_bars() {
+        assert_eq!(
+            count_supermasks_dispatch(&[], &[0b1, 0b11, 0]),
+            vec![0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn dispatch_single_mask() {
+        let bars = vec![0b0011, 0b0001, 0b1011];
+        assert_eq!(count_supermasks_dispatch(&bars, &[0b0011]), vec![2]);
+    }
+
+    #[test]
+    fn dispatch_mask_zero_matches_all() {
+        let bars = vec![0u64, 1, 0xDEAD_BEEF, 0xFFFF_FFFF_FFFF_FFFF];
+        assert_eq!(
+            count_supermasks_dispatch(&bars, &[0]),
+            vec![bars.len() as u64]
+        );
+    }
+
+    // ── count_supermasks_scoped (pure core of the bench-only nthreads shim) ──
+    // Tests call the PURE helper (Result<_, String>, no PyErr) so the test
+    // binary references zero Python C-API symbols under the no-libpython
+    // `cargo test` link; the `#[pyfunction]` wrapper only adds `map_err`.
+
+    #[test]
+    fn nthreads_returns_ok_and_matches_reference() {
+        let bars = vec![0b0011, 0b0111, 0b1000, 0b1011, 0b0000];
+        let masks = vec![0b0011u64, 0b1000, 0b1111, 0];
+        let out = count_supermasks_scoped(&bars, &masks, 2)
+            .expect("pool build with n_threads=2 must succeed");
+        assert_eq!(out, serial_reference(&bars, &masks));
+    }
+
+    #[test]
+    fn nthreads_independence_across_thread_counts() {
+        // Same input, n in {1,2,4} → all equal to each other AND to the serial
+        // reference (which is what count_supermasks_dispatch / the free
+        // count_supermasks_u64s produce on the serial arm).
+        let bars: Vec<u64> = (0..300u64).map(|i| (i | 0b101) & 0xFFFF).collect();
+        let masks: Vec<u64> = (0..200u64)
+            .map(|i| (1u64 << (i % 16)) | (i & 0b11))
+            .collect();
+        let reference = serial_reference(&bars, &masks);
+        let dispatch_eq = count_supermasks_dispatch(&bars, &masks);
+        assert_eq!(dispatch_eq, reference);
+        for n in [1usize, 2, 4] {
+            let out = count_supermasks_scoped(&bars, &masks, n).expect("pool build must succeed");
+            assert_eq!(
+                out, reference,
+                "n_threads={n} diverged from serial reference"
+            );
+        }
+    }
+
+    #[test]
+    fn nthreads_empty_and_edge_cases() {
+        // empty masks → []; empty bars → 0 per mask; mask=0 → all.
+        assert_eq!(
+            count_supermasks_scoped(&[1, 2, 3], &[], 4).expect("ok"),
+            Vec::<u64>::new()
+        );
+        assert_eq!(
+            count_supermasks_scoped(&[], &[0b1, 0b11, 0], 4).expect("ok"),
+            vec![0, 0, 0]
+        );
+        assert_eq!(
+            count_supermasks_scoped(&[0b1, 0b1010, 0b1111], &[0], 2).expect("ok"),
+            vec![3]
+        );
     }
 
     // ── count_one (shared kernel — single source of truth) ──
@@ -540,13 +837,15 @@ mod tests {
 
     #[test]
     fn resident_parity_with_free_function() {
-        // resident.count_supermasks(m) elementwise == count_supermasks_u64s(bars, m).
+        // resident.count_supermasks(m) elementwise == the shared dispatch (the
+        // exact work the free `count_supermasks_u64s` pyfunction performs — both
+        // delegate directly to `count_supermasks_dispatch`).
         let bars = vec![0u64, 1, 0b1011, 0b1111, 1u64 << 40, 1u64 << 63, 0xDEAD_BEEF];
         let masks = vec![0u64, 1, 0b1010, 1u64 << 40, 0xFFFF_FFFF_FFFF_FFFF];
         let rb = ResidentBars::new(bars.clone());
         assert_eq!(
             rb.count_supermasks(masks.clone()),
-            count_supermasks_u64s(bars, masks)
+            count_supermasks_dispatch(&bars, &masks)
         );
     }
 }
