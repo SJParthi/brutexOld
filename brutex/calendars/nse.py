@@ -28,6 +28,18 @@ FIRST_USABLE_BAR_IST = time(9, 16)
 TICK_SIZE_PAISA = 5
 SESSION_DURATION_MINUTES = 375  # 09:15-15:30 = 6h15m = 375 minutes
 
+#: Seconds-per-unit helpers for timeframe-aware time-of-day arithmetic
+#: (:func:`is_forced_exit_bar`). Kept as named constants so the conversion
+#: reads as a sentence rather than magic ``3600`` / ``60`` literals.
+_SECONDS_PER_HOUR: Final[int] = 3600
+_SECONDS_PER_MINUTE: Final[int] = 60
+
+#: 15:20 IST as seconds-since-midnight — the forced-exit boundary, precomputed
+#: once (loop-invariant) so :func:`is_forced_exit_bar` stays a few int ops.
+_FORCED_EXIT_SECONDS: Final[int] = (
+    FORCED_EXIT_IST.hour * _SECONDS_PER_HOUR + FORCED_EXIT_IST.minute * _SECONDS_PER_MINUTE
+)
+
 
 class SessionType(Enum):
     """Trading session classification: REGULAR / MUHURAT / HALF_DAY / HOLIDAY."""
@@ -289,13 +301,44 @@ def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
 
 
 def is_forced_exit_bar(t: time, tf_minutes: int) -> bool:
-    """A bar timestamp at or past 15:20 IST means forced exit.
+    """Return True if a bar opening at IST time ``t`` reaches the 15:20 forced exit.
 
-    Per `docs/TRACK1_BACKTEST_SPEC.md` rule §8: forced 15:20 IST exit
-    overrides everything. Used by the backtest engine to flatten
-    positions at the end-of-day exit window.
+    Per `docs/TRACK1_BACKTEST_SPEC.md` rule §8 the forced 15:20 IST exit
+    overrides everything. A bar covers the half-open window
+    ``[t, t + tf_minutes)``; it is a forced-exit bar when that window **reaches
+    or passes** 15:20 IST — i.e. its close ``t + tf_minutes`` is strictly after
+    15:20.
+
+    For 1-minute bars this is identical to the old tf-blind ``t >= 15:20``
+    test, but for coarser timeframes it additionally catches the bar whose
+    *span* straddles 15:20 (e.g. a 15-minute bar opening at 15:15 IST runs to
+    15:30 and must force-exit) — which the previous implementation silently
+    missed because it ignored ``tf_minutes`` (DEC-TRADESIM-001; open question
+    Q4 from `docs/VERIFICATION_2026-06-03_ENGINE_SCOPING.md` §5).
+
+    Parameters
+    ----------
+    t
+        The bar's OPEN time of day, in IST.
+    tf_minutes
+        The bar's timeframe in whole minutes (``>= 1``): 1 for the 1-minute
+        base, 5/15/25/60/... for the resampled intraday timeframes.
+
+    Returns
+    -------
+    bool
+        True iff the bar's ``[open, open + tf)`` window reaches 15:20 IST.
+
+    Raises
+    ------
+    ValueError
+        If ``tf_minutes < 1``.
     """
-    return t >= FORCED_EXIT_IST
+    if tf_minutes < 1:
+        raise ValueError(f"is_forced_exit_bar.tf_minutes must be >= 1, got {tf_minutes}")
+    open_seconds = t.hour * _SECONDS_PER_HOUR + t.minute * _SECONDS_PER_MINUTE + t.second
+    close_seconds = open_seconds + tf_minutes * _SECONDS_PER_MINUTE
+    return close_seconds > _FORCED_EXIT_SECONDS
 
 
 def is_pre_open(t: time) -> bool:
