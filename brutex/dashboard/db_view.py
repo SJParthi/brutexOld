@@ -714,6 +714,71 @@ def summarize_spot_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def summarize_option_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]]:
+    """Summarise the expired-options lake per underlying for the coverage page.
+
+    The options-side analog of :func:`summarize_spot_datasets`
+    (DEC-OPTIONS-COVERAGE-LAKE-001): reads ONE aggregate per
+    ``(exch_id, underlying_symbol)`` straight from the expired-options Parquet
+    lake (``<lake>/options/**/*.parquet``) via DuckDB ``read_parquet`` — the
+    number of distinct series, total bars, and first/last bar date. The inner
+    GROUP BY collapses each ``(expiry_flag, expiry_code, strike_offset, side,
+    strike)`` series; the outer GROUP BY rolls those up per underlying, so
+    ``series`` is a plain ``COUNT(*)`` of the inner rows. Read-only by
+    construction — a single aggregate query, no bar rows materialised. A missing
+    / empty ``options`` directory yields ``[]`` (mirrors :func:`list_option_series`).
+
+    **Honest envelope (Golden Rule #10):** a series PRESENT in the lake counts
+    as *pulled*; ``series`` / ``bars`` / ``first_date`` / ``last_date`` describe
+    WHAT is stored, NOT whether the full ``2021 → today`` range is complete —
+    partial-range detection is an explicit follow-up, mirroring the spot side.
+
+    Parameters
+    ----------
+    conn
+        A DuckDB connection.
+    lake_root
+        Top-level lake directory (the parent of ``options/``).
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One row per underlying, sorted by ``(exchange, underlying)``::
+
+            {"underlying", "exchange", "series": <int>, "bars": <int>,
+             "first_date": <YYYY-MM-DD|None>, "last_date": <YYYY-MM-DD|None>}
+    """
+    options = lake_root / OPTIONS_DIR_NAME
+    if not options.is_dir() or not any(options.rglob("*.parquet")):
+        return []
+    glob = options.as_posix() + "/**/*.parquet"
+    # read_parquet path is parameter-bound; the column list is the fixed
+    # addressing set (no free user text). Inner query = one row per series;
+    # the outer rolls up per underlying, so COUNT(*) is the series count.
+    rows = conn.execute(
+        "SELECT exch_id, underlying_symbol, COUNT(*) AS series, "  # nosec B608 - static SQL, parameter-bound path
+        "SUM(bars) AS bars, MIN(first_ts) AS first_ts, MAX(last_ts) AS last_ts FROM ("
+        "  SELECT exch_id, underlying_symbol, expiry_flag, expiry_code, strike_offset, "
+        '         side, strike, COUNT(*) AS bars, MIN("timestamp") AS first_ts, '
+        '         MAX("timestamp") AS last_ts '
+        "  FROM read_parquet(?, union_by_name=true) "
+        "  GROUP BY exch_id, underlying_symbol, expiry_flag, expiry_code, strike_offset, side, strike"
+        ") GROUP BY exch_id, underlying_symbol ORDER BY exch_id, underlying_symbol",
+        [glob],
+    ).fetchall()
+    return [
+        {
+            "underlying": row[1],
+            "exchange": row[0],
+            "series": int(row[2]),
+            "bars": int(row[3]),
+            "first_date": _ist_date(row[4]),
+            "last_date": _ist_date(row[5]),
+        }
+        for row in rows
+    ]
+
+
 def _validate_option_segment(series: str) -> None:
     """Validate a discovered option-series directory name, else raise ValueError.
 
@@ -1280,6 +1345,7 @@ __all__ = [
     "query_option_candles",
     "query_table",
     "sample_rows",
+    "summarize_option_datasets",
     "summarize_spot_datasets",
     "table_summary",
 ]

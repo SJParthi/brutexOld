@@ -37,6 +37,7 @@ from brutex.dashboard.db_view import (
     query_candles,
     query_option_candles,
     query_table,
+    summarize_option_datasets,
     summarize_spot_datasets,
 )
 from brutex.data.instrument_store import Instrument, InstrumentStore
@@ -844,6 +845,47 @@ def test_list_option_series_filters_by_underlying(store: InstrumentStore, tmp_pa
     banknifty = list_option_series(store.connection, tmp_path, underlying_symbol="BANKNIFTY")
     assert {r["underlying_symbol"] for r in banknifty} == {"BANKNIFTY"}
     assert {r["strike_offset"] for r in banknifty} == {"ATM+1"}
+
+
+# ────────────────────────────────────────────────────────────────────────
+# summarize_option_datasets — per-underlying expired-options lake coverage
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_summarize_option_datasets_no_options_dir_returns_empty(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # No <lake>/options directory at all → [] (the is_dir() guard).
+    assert summarize_option_datasets(store.connection, tmp_path) == []
+
+
+def test_summarize_option_datasets_empty_options_dir_returns_empty(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # The options dir EXISTS but holds no .parquet → [] (the rglob guard's
+    # second operand — covers the branch the no-dir case can't reach).
+    (tmp_path / "options").mkdir()
+    assert summarize_option_datasets(store.connection, tmp_path) == []
+
+
+def test_summarize_option_datasets_aggregates_per_underlying(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    _write_options(tmp_path, underlying_symbol="NIFTY")  # CE+PE across 2 days
+    _write_options(
+        tmp_path,
+        partition_key="NSE_FNO|99|MONTH|1|ATM+1|PUT",
+        underlying_symbol="BANKNIFTY",
+    )
+    rows = summarize_option_datasets(store.connection, tmp_path)
+    # Sorted by (exchange, underlying): BANKNIFTY before NIFTY (both NSE).
+    assert [r["underlying"] for r in rows] == ["BANKNIFTY", "NIFTY"]
+    for r in rows:
+        assert r["exchange"] == "NSE"
+        assert r["series"] == 2  # one CE + one PE series
+        assert r["bars"] == 4  # 2 sides × 2 trading days
+        assert r["first_date"] == "2024-03-01"
+        assert r["last_date"] == "2024-03-02"
 
 
 # ────────────────────────────────────────────────────────────────────────
