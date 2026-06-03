@@ -1585,6 +1585,21 @@ jobs:
       # fno-math job). The wheel itself is NOT built here (that is Phase 2).
       - name: cargo check --features python (PyO3 binding compiles)
         run: cargo check --features python
+      # DEC-SHARED-CORE-001 Phase 2a: prove the Python-callable PyO3 binding
+      # (trading_core.evaluate_from_raw) is bit-identical to the Python vocab —
+      # build the abi3 wheel with maturin, install it, and run the 400-case
+      # parity check against the same golden oracle. Isolated here (not the main
+      # Python test job) so a wheel-build issue can't destabilise that pipeline.
+      - name: Set up Python (binding parity check)
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Build wheel + verify the Python binding is bit-identical (Phase 2a)
+        run: |
+          pip install maturin
+          maturin build --release --out dist
+          pip install dist/*.whl
+          python ../../scripts/check_vocab_rust_parity.py
 
   # ─────────────────────────────────────────────────────────────────
   # BANNED PATTERNS — no print, no TODO in prod, no .env*
