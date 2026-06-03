@@ -55,7 +55,6 @@ class _Invalidatable(Protocol):
 
     def mark_dirty(self) -> None:
         """Invalidate the cache so the next eligible read recomputes."""
-        ...
 
 
 def _daemon_spawn(fn: Callable[[], None]) -> None:  # pragma: no cover — real-thread default
