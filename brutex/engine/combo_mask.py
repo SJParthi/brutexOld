@@ -49,12 +49,18 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from itertools import combinations
+from typing import TYPE_CHECKING, cast
 
 import fno_math
+
+if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
 
 __all__ = [
     "MAX_VOCAB_BITS",
     "VOCAB_BITS",
+    "ResidentBarBuffer",
     "bits_to_mask",
     "count_combos",
     "count_supermasks",
@@ -313,6 +319,104 @@ def count_supermasks(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]
     []
     """
     return list(fno_math.count_supermasks_u64s(list(bar_bits), list(masks)))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Resident bar buffer — the Stage-2 batch accelerator
+# ─────────────────────────────────────────────────────────────────
+
+
+class ResidentBarBuffer:
+    """Hold a pre-sliced bar-bits window resident for repeated batch counts.
+
+    In a Stage-2 sweep the SAME ``bar_bits`` window is evaluated against many
+    successive mask batches. The free :func:`count_supermasks` re-marshals the
+    whole ``bar_bits`` (~94k u64) across the Python→Rust boundary on EVERY
+    call (``combo_mask.py:315``). This buffer moves ``bar_bits`` across the
+    boundary ONCE — into a resident Rust ``Vec<u64>`` (``fno_math.ResidentBars``)
+    — and reuses it; thereafter only ``masks`` crosses per call.
+
+    When the Rust kernel is unavailable (plain ``pip install`` without the
+    maturin-built wheel) the buffer transparently falls back to a resident
+    numpy ``uint64`` array reproducing :func:`count_supermasks_reference`
+    bit-for-bit. Exactly ONE backing store is held (Rust ``Vec`` XOR numpy
+    array, never both).
+
+    This is a Stage-2 AGGREGATE-COUNT primitive over a PRE-SLICED window — it
+    returns per-mask hit counts over a fixed bar set, NOT a per-bar feed, so it
+    has no look-ahead semantics (it cannot see "future" bars; the window is
+    chosen by the caller before construction).
+
+    Complexity (honest envelope — this is NOT an "O(1) Stage-2" primitive):
+
+    * Construction is ``O(N_bars)`` — the one-time copy into the resident
+      buffer, paid ONCE here.
+    * Each :meth:`count_supermasks` call is ``O(N_masks · N_bars)`` compute +
+      ``O(N_masks)`` marshalling. The ``O(N_bars)`` marshalling that the free
+      :func:`count_supermasks` repeats every call is paid ONCE at construction
+      — that elimination, repeated across many batches, is the entire win (it
+      grows with the number of batches and with ``N_bars``). The inner kernel
+      is byte-identical to the shipped free functions.
+
+    Examples
+    --------
+    Construct once over a bar window, then count many mask batches against it;
+    each ``count_supermasks`` call returns one hit count per mask, positionally
+    aligned with the masks. ``mask == 0`` matches every bar; an empty mask list
+    returns an empty list; an empty bar window returns ``0`` per mask. The
+    results are bit-identical to :func:`count_supermasks_reference`.
+    """
+
+    def __init__(self, bar_bits: Sequence[int]) -> None:
+        """Build the resident buffer, paying the one-time ``O(N_bars)`` copy.
+
+        Parameters
+        ----------
+        bar_bits : Sequence[int]
+            Per-bar packed u64 condition bitsets for the pre-sliced window.
+        """
+        try:
+            import fno_math
+
+            self._rust: fno_math.ResidentBars | None = fno_math.ResidentBars(list(bar_bits))
+            self._bars: npt.NDArray[np.uint64] | None = None
+        except (ImportError, AttributeError):
+            import numpy as np
+
+            self._rust = None
+            self._bars = np.asarray(bar_bits, dtype=np.uint64)
+
+    @property
+    def n_bars(self) -> int:
+        """Number of bars in the resident window."""
+        if self._rust is not None:
+            return self._rust.n_bars
+        bars = cast("npt.NDArray[np.uint64]", self._bars)
+        return int(bars.shape[0])
+
+    def count_supermasks(self, masks: Sequence[int]) -> list[int]:
+        """Per-mask SUPERSET count over the resident bars.
+
+        For each ``mask`` return how many resident bars satisfy
+        ``(bar & mask) == mask``. ``out[j]`` aligns with ``masks[j]``. Empty
+        ``masks`` → ``[]``; empty bar window → ``0`` per mask; ``mask == 0``
+        matches every bar. Only ``masks`` crosses the FFI boundary.
+        """
+        if self._rust is not None:
+            return list(self._rust.count_supermasks(list(masks)))
+        # numpy fallback — reproduces count_supermasks_reference bit-for-bit.
+        if len(masks) == 0:
+            return []
+        import numpy as np
+
+        bars = cast("npt.NDArray[np.uint64]", self._bars)
+        if bars.shape[0] == 0:
+            return [0] * len(masks)
+        return [int(((bars & np.uint64(m)) == np.uint64(m)).sum()) for m in masks]
+
+    def count_supermask(self, mask: int) -> int:
+        """Single-mask SUPERSET count over the resident bars."""
+        return self.count_supermasks([mask])[0]
 
 
 # ─────────────────────────────────────────────────────────────────

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import fno_math
 from brutex.engine.combo_mask import (
+    ResidentBarBuffer,
     count_supermasks,
     count_supermasks_reference,
     evaluate_mask,
@@ -90,3 +91,37 @@ def test_single_mask_matches_batched(bars: list[int], mask: int) -> None:
     single = fno_math.count_supermask_u64s(bars, mask)
     batched = fno_math.count_supermasks_u64s(bars, [mask])
     assert [single] == list(batched)
+
+
+# ─────────────────────────────────────────────────────────────────
+# ResidentBarBuffer parity (DEC-RUST-RESIDENT-BARS-001)
+# ─────────────────────────────────────────────────────────────────
+
+
+@given(bars=_BARS, masks=_MASKS)
+def test_resident_matches_reference(bars: list[int], masks: list[int]) -> None:
+    """ResidentBarBuffer == numpy reference == per-bar evaluate_mask truth."""
+    truth = [sum(evaluate_mask(b, m) for b in bars) for m in masks]
+    assert ResidentBarBuffer(bars).count_supermasks(masks) == count_supermasks_reference(
+        bars, masks
+    )
+    assert count_supermasks_reference(bars, masks) == truth
+
+
+@given(bars=_BARS, masks=_MASKS)
+def test_resident_is_deterministic(bars: list[int], masks: list[int]) -> None:
+    """Build once, call twice on the same buffer → identical output."""
+    buf = ResidentBarBuffer(bars)
+    first = buf.count_supermasks(masks)
+    second = buf.count_supermasks(masks)
+    assert first == second
+
+
+@given(bars=_BARS, masks=_MASKS)
+def test_resident_reuse_equals_fresh(bars: list[int], masks: list[int]) -> None:
+    """A reused buffer agrees with a freshly-built one (no hidden state)."""
+    reused = ResidentBarBuffer(bars)
+    _ = reused.count_supermasks(masks)  # warm / mutate-if-any
+    again = reused.count_supermasks(masks)
+    fresh = ResidentBarBuffer(bars).count_supermasks(masks)
+    assert again == fresh == count_supermasks(bars, masks)

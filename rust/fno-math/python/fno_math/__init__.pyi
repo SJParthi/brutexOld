@@ -4,7 +4,8 @@ Every public symbol re-exported by `__init__.py` is declared here so
 that `from fno_math import X` resolves under pyright-strict + mypy-strict
 without `# pyright: ignore` shims.
 
-The signatures mirror PyO3 0.23's runtime extract behavior:
+The signatures mirror PyO3 0.28.3's runtime extract behavior (the version
+pinned in `rust/fno-math/Cargo.lock:520-521`):
 - Rust `u64` ⇆ Python `int`
 - Rust `Vec<u64>` ⇆ Python `list[int]`
 - Rust `&[u8]` / `PyBytes` ⇆ Python `bytes`
@@ -61,3 +62,17 @@ def count_supermasks_u64s(bar_bits: list[int], masks: list[int]) -> list[int]:
 def popcount_bytes(data: bytes) -> int:
     """Return the total set-bit count across a byte buffer."""
     ...
+
+class ResidentBars:
+    """Resident bar buffer — holds `bar_bits` Rust-side across batch calls.
+
+    The `O(N_bars)` Python→Rust copy is paid ONCE in `__init__`; subsequent
+    `count_supermasks` calls marshal only `masks`. Frozen + immutable: only
+    `n_bars` is exposed (a `bars` getter would copy `O(N)` per access).
+    """
+
+    def __init__(self, bar_bits: list[int]) -> None: ...
+    @property
+    def n_bars(self) -> int: ...
+    def count_supermasks(self, masks: list[int]) -> list[int]: ...
+    def count_supermask(self, mask: int) -> int: ...

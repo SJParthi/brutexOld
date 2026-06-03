@@ -154,8 +154,24 @@ pub fn blake3_hash(py: Python<'_>, data: &[u8]) -> Py<PyBytes> {
 /// `evaluate_mask(bar, 0) is True`.
 #[pyfunction]
 pub fn count_supermask_u64s(bar_bits: Vec<u64>, mask: u64) -> u64 {
-    bar_bits
-        .iter()
+    count_one(&bar_bits, mask)
+}
+
+/// SINGLE SOURCE OF TRUTH for the SUPERSET-count inner loop.
+///
+/// Counts how many bars in `bars` are a superset of `mask`
+/// (`(bar & mask) == mask`). Branchless — `bool as u64` is `0`/`1`,
+/// summed with no branch so the loop is a straight linear scan the
+/// compiler auto-vectorises at `-C opt-level=3`. Reused by BOTH the free
+/// `#[pyfunction]` kernels (`count_supermask_u64s` /
+/// `count_supermasks_u64s`) AND the resident [`ResidentBars`] methods, so
+/// the resident path can NEVER diverge from the shipped kernel
+/// (DEC-RUST-RESIDENT-BARS-001 P0-3).
+///
+/// `mask == 0` requires nothing, so every bar matches and the result is
+/// `bars.len()` (`(bar & 0) == 0` always). Empty `bars` → `0`.
+fn count_one(bars: &[u64], mask: u64) -> u64 {
+    bars.iter()
         .map(|&bar| u64::from((bar & mask) == mask))
         .sum()
 }
@@ -198,18 +214,88 @@ pub fn count_supermask_u64s(bar_bits: Vec<u64>, mask: u64) -> u64 {
 /// → a zero per mask.
 #[pyfunction]
 pub fn count_supermasks_u64s(bar_bits: Vec<u64>, masks: Vec<u64>) -> Vec<u64> {
+    // bars inner — `bar_bits` streams linearly, `mask` is register-resident.
+    // Delegates to the shared `count_one` kernel (single source of truth).
     masks
         .iter()
-        .map(|&mask| {
-            // bars inner — `bar_bits` streams linearly, `mask` is register-
-            // resident. Branchless: `bool as u64` is 0/1, summed with no
-            // branch in the hot loop.
-            bar_bits
-                .iter()
-                .map(|&bar| u64::from((bar & mask) == mask))
-                .sum()
-        })
+        .map(|&mask| count_one(&bar_bits, mask))
         .collect()
+}
+
+/// Resident bar buffer — holds the per-bar condition bitset `Vec<u64>`
+/// Rust-side so the Stage-2 batch path pays the `O(N_bars)` Python→Rust
+/// copy ONCE (at construction) instead of on every batch call.
+///
+/// DEC-RUST-RESIDENT-BARS-001 (#413; builds on DEC-RUST-SUPERMASK-KERNEL-001
+/// #411 / ADR-0004 §5.2). The Stage-2 sweep evaluates the SAME `bar_bits`
+/// against many successive mask batches. The free
+/// [`count_supermasks_u64s`] re-marshals the whole `bar_bits` (~94 K u64)
+/// across the FFI boundary on every call; this class moves it across once
+/// and keeps it resident, so only `masks` crosses per call.
+///
+/// ## Complexity (honest envelope — NOT O(1))
+///
+/// * Construction: `O(N_bars)` — the one-time PyO3 extract copy, paid here.
+/// * [`Self::count_supermasks`]: `O(N_masks · N_bars)` compute +
+///   `O(N_masks)` marshalling. The `N_bars` marshalling is paid once at
+///   construction, NOT per call — that is the entire win, which grows with
+///   the number of batches and `N_bars`. The inner kernel ([`count_one`])
+///   is byte-identical to the shipped free functions.
+///
+/// ## Frozen + Sync (P3-1 scope lock)
+///
+/// `#[pyclass(frozen)]` — no interior mutability, no append / `__getitem__`
+/// / `bars` getter (a `bars` getter would copy `O(N)` per access, defeating
+/// the purpose). Only [`Self::n_bars`] is exposed. The buffer is immutable
+/// once built; this is a pre-sliced Stage-2 AGGREGATE-COUNT window, never a
+/// per-bar feed (no look-ahead semantics).
+///
+/// ## P0-1 panic safety
+///
+/// `panic = "abort"` is set in the release profile, so a panic inside a
+/// `#[pymethod]` would SIGABRT the host pytest process. NO `unwrap` /
+/// `expect` / indexing / `as`-cast appears in any method body; the fallible
+/// Python→Rust conversion is done entirely by the `Vec<u64>` signature
+/// extract (exactly as [`count_supermasks_u64s`] does), which raises a
+/// clean `TypeError` / `OverflowError` on the Python side instead.
+#[pyclass(frozen, module = "fno_math")]
+pub struct ResidentBars {
+    bars: Vec<u64>,
+}
+
+#[pymethods]
+impl ResidentBars {
+    /// Build a resident buffer from `bar_bits`. The ONE-TIME `O(N_bars)`
+    /// Python→Rust copy is paid here via the `Vec<u64>` extract.
+    #[new]
+    fn new(bar_bits: Vec<u64>) -> Self {
+        Self { bars: bar_bits }
+    }
+
+    /// Number of resident bars (the only exposed view of the buffer).
+    #[getter]
+    fn n_bars(&self) -> usize {
+        self.bars.len()
+    }
+
+    /// Batched per-mask SUPERSET count over the resident bars.
+    ///
+    /// For each `mask` in `masks`, return how many resident bars satisfy
+    /// `(bar & mask) == mask`. `out[j]` aligns with `masks[j]`. Empty
+    /// `masks` → empty `Vec`; empty resident bars → `0` per mask;
+    /// `mask == 0` → all bars. Bars come from `&self.bars` — NOT
+    /// re-marshalled — so only `masks` crosses the FFI boundary.
+    fn count_supermasks(&self, masks: Vec<u64>) -> Vec<u64> {
+        masks
+            .iter()
+            .map(|&mask| count_one(&self.bars, mask))
+            .collect()
+    }
+
+    /// Single-mask SUPERSET count over the resident bars.
+    fn count_supermask(&self, mask: u64) -> u64 {
+        count_one(&self.bars, mask)
+    }
 }
 
 /// Return the total number of set bits across a raw byte slice.
@@ -249,7 +335,7 @@ pub fn popcount_bytes(data: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_supermask_u64s, count_supermasks_u64s};
+    use super::{ResidentBars, count_one, count_supermask_u64s, count_supermasks_u64s};
 
     // ── count_supermask_u64s (single mask) ──
 
@@ -353,5 +439,114 @@ mod tests {
             .map(|&m| count_supermask_u64s(bars.clone(), m))
             .collect();
         assert_eq!(batched, one_by_one);
+    }
+
+    // ── count_one (shared kernel — single source of truth) ──
+
+    #[test]
+    fn count_one_empty_bars_is_zero() {
+        assert_eq!(count_one(&[], 0b1011), 0);
+    }
+
+    #[test]
+    fn count_one_mask_zero_matches_all() {
+        let bars = [0u64, 1, 0xFFFF_FFFF_FFFF_FFFF, 0xDEAD_BEEF];
+        assert_eq!(count_one(&bars, 0), bars.len() as u64);
+    }
+
+    #[test]
+    fn count_one_partial_match() {
+        let bars = [0b0011, 0b0001, 0b0010, 0b1011, 0b0100];
+        assert_eq!(count_one(&bars, 0b0011), 2);
+    }
+
+    #[test]
+    fn count_one_used_by_free_functions() {
+        // The free functions and the shared kernel must agree by construction.
+        let bars = vec![0u64, 1, 0b1011, 0b1111, 1u64 << 63, 0xDEAD_BEEF];
+        for &m in &[0u64, 1, 0b1010, 1u64 << 63, 0xFFFF_FFFF_FFFF_FFFF] {
+            assert_eq!(count_supermask_u64s(bars.clone(), m), count_one(&bars, m));
+        }
+    }
+
+    // ── ResidentBars ──
+
+    #[test]
+    fn resident_empty_bars_is_zero_per_mask() {
+        let rb = ResidentBars::new(vec![]);
+        assert_eq!(rb.count_supermasks(vec![0b1, 0b11, 0]), vec![0, 0, 0]);
+        assert_eq!(rb.count_supermask(0b11), 0);
+    }
+
+    #[test]
+    fn resident_empty_masks_is_empty() {
+        let rb = ResidentBars::new(vec![1, 2, 3]);
+        assert_eq!(rb.count_supermasks(vec![]), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn resident_mask_zero_matches_all() {
+        let rb = ResidentBars::new(vec![0b0001, 0b1010, 0b1111]);
+        assert_eq!(rb.count_supermasks(vec![0]), vec![3]);
+        assert_eq!(rb.count_supermask(0), 3);
+    }
+
+    #[test]
+    fn resident_multi_mask_mixed() {
+        let rb = ResidentBars::new(vec![0b0011, 0b0111, 0b1000, 0b1011, 0b0000]);
+        let out = rb.count_supermasks(vec![0b0011, 0b1000, 0b1111, 0]);
+        assert_eq!(out, vec![3, 2, 0, 5]);
+    }
+
+    #[test]
+    fn resident_positional_alignment() {
+        let rb = ResidentBars::new(vec![0b0001, 0b0010, 0b0011]);
+        assert_eq!(rb.count_supermasks(vec![0b0001, 0b0010]), vec![2, 2]);
+        assert_eq!(rb.count_supermasks(vec![0b0010, 0b0001]), vec![2, 2]);
+    }
+
+    #[test]
+    fn resident_high_bit_mask() {
+        let top = 1u64 << 63;
+        let rb = ResidentBars::new(vec![top, top | 1, 0, 1]);
+        assert_eq!(rb.count_supermask(top), 2);
+        assert_eq!(rb.count_supermasks(vec![top]), vec![2]);
+    }
+
+    #[test]
+    fn resident_full_width_mask() {
+        let full = 0xFFFF_FFFF_FFFF_FFFFu64;
+        let rb = ResidentBars::new(vec![full, full, 0, 1]);
+        assert_eq!(rb.count_supermask(full), 2);
+    }
+
+    #[test]
+    fn resident_n_bars_getter() {
+        assert_eq!(ResidentBars::new(vec![]).n_bars(), 0);
+        assert_eq!(ResidentBars::new(vec![1, 2, 3, 4]).n_bars(), 4);
+    }
+
+    #[test]
+    fn resident_reuse_is_stable() {
+        // Calling count_supermasks twice on ONE instance yields identical
+        // results — the resident buffer is immutable + reusable.
+        let rb = ResidentBars::new(vec![0b0011, 0b0111, 0b1111, 0b1011]);
+        let masks = vec![0b0011, 0b0100, 0u64];
+        let first = rb.count_supermasks(masks.clone());
+        let second = rb.count_supermasks(masks);
+        assert_eq!(first, second);
+        assert_eq!(first, vec![4, 2, 4]);
+    }
+
+    #[test]
+    fn resident_parity_with_free_function() {
+        // resident.count_supermasks(m) elementwise == count_supermasks_u64s(bars, m).
+        let bars = vec![0u64, 1, 0b1011, 0b1111, 1u64 << 40, 1u64 << 63, 0xDEAD_BEEF];
+        let masks = vec![0u64, 1, 0b1010, 1u64 << 40, 0xFFFF_FFFF_FFFF_FFFF];
+        let rb = ResidentBars::new(bars.clone());
+        assert_eq!(
+            rb.count_supermasks(masks.clone()),
+            count_supermasks_u64s(bars, masks)
+        );
     }
 }

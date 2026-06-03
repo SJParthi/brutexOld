@@ -14,6 +14,8 @@ Tests are organized as:
 
 from __future__ import annotations
 
+import sys
+import types
 from math import comb
 
 import pytest
@@ -21,6 +23,7 @@ from brutex.engine import combo_mask
 from brutex.engine.combo_mask import (
     MAX_VOCAB_BITS,
     VOCAB_BITS,
+    ResidentBarBuffer,
     bits_to_mask,
     count_combos,
     count_supermasks,
@@ -411,3 +414,186 @@ def test_count_supermasks_matches_reference_via_evaluate_mask() -> None:
     truth = [sum(evaluate_mask(b, m) for b in bars) for m in masks]
     assert count_supermasks(bars, masks) == truth
     assert count_supermasks_reference(bars, masks) == truth
+
+
+# ─────────────────────────────────────────────────────────────────
+# ResidentBarBuffer — Rust-backed + numpy fallback (DEC-RUST-RESIDENT-BARS-001)
+# ─────────────────────────────────────────────────────────────────
+#
+# The buffer has two backends — the Rust ``fno_math.ResidentBars`` (always
+# present in CI) and a numpy fallback (forced via ``sys.modules``). Both
+# branches of construction AND both branches of every method must be covered,
+# and both must agree bit-for-bit with ``count_supermasks_reference``. The
+# fallback-forcing idiom mirrors ``tests/unit/test_orchestrator_bloom.py``
+# (``monkeypatch.setitem(sys.modules, "fno_math", None)``).
+
+
+def _force_numpy_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``import fno_math`` raise ImportError → numpy fallback branch."""
+    monkeypatch.setitem(sys.modules, "fno_math", None)
+
+
+def _force_attribute_error_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install a fake ``fno_math`` lacking ``ResidentBars`` → AttributeError arm."""
+    fake = types.ModuleType("fno_math")
+    monkeypatch.setitem(sys.modules, "fno_math", fake)
+
+
+# ── Rust-backed path (CI always has the kernel) ──
+
+
+def test_resident_rust_empty_bars_zero_per_mask() -> None:
+    buf = ResidentBarBuffer([])
+    assert buf.n_bars == 0
+    assert buf.count_supermasks([0b1, 0b11, 0]) == [0, 0, 0]
+
+
+def test_resident_rust_empty_masks_empty() -> None:
+    buf = ResidentBarBuffer([0b1, 0b10])
+    assert buf.count_supermasks([]) == []
+
+
+def test_resident_rust_mask_zero_matches_all() -> None:
+    buf = ResidentBarBuffer([0b0001, 0b1010, 0b1111])
+    assert buf.count_supermasks([0]) == [3]
+
+
+def test_resident_rust_single_mask_via_count_supermask() -> None:
+    buf = ResidentBarBuffer([0b0011, 0b0001, 0b0010, 0b1011, 0b0100])
+    assert buf.count_supermask(0b0011) == 2
+
+
+def test_resident_rust_n_bars_getter() -> None:
+    assert ResidentBarBuffer([1, 2, 3, 4]).n_bars == 4
+
+
+def test_resident_rust_high_bit_and_full_width() -> None:
+    top = 1 << 63
+    full = 0xFFFF_FFFF_FFFF_FFFF
+    buf = ResidentBarBuffer([top, top | 1, full, 0, 1])
+    assert buf.count_supermask(top) == 3  # top, top|1, full
+    assert buf.count_supermask(full) == 1  # only full
+
+
+def test_resident_rust_matches_reference() -> None:
+    bars = [0, 1, 0b1011, 0b1111, 1 << 40, 1 << 63, 0xDEAD_BEEF]
+    masks = [0, 1, 0b1010, 1 << 40, 0xFFFF_FFFF_FFFF_FFFF]
+    buf = ResidentBarBuffer(bars)
+    assert buf.count_supermasks(masks) == count_supermasks_reference(bars, masks)
+
+
+def test_resident_rust_reuse_across_many_calls_stable() -> None:
+    """REUSE: one instance, many batches — results stable & == reference."""
+    bars = [0b0011, 0b0111, 0b1111, 0b1011, 0b0000, 1 << 63]
+    buf = ResidentBarBuffer(bars)
+    batches = [[0b0011], [0b0100, 0], [1 << 63, 0b1111], []]
+    for _ in range(3):
+        for batch in batches:
+            assert buf.count_supermasks(batch) == count_supermasks_reference(bars, batch)
+
+
+def test_resident_rust_construction_from_empty_sequence() -> None:
+    buf = ResidentBarBuffer([])
+    assert buf.n_bars == 0
+    assert buf.count_supermask(0b11) == 0
+
+
+# ── numpy fallback path (forced absent) ──
+
+
+def test_resident_fallback_empty_bars_zero_per_mask(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force_numpy_fallback(monkeypatch)
+    buf = ResidentBarBuffer([])
+    assert buf.n_bars == 0
+    assert buf.count_supermasks([0b1, 0b11, 0]) == [0, 0, 0]
+
+
+def test_resident_fallback_empty_masks_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force_numpy_fallback(monkeypatch)
+    buf = ResidentBarBuffer([0b1, 0b10])
+    assert buf.count_supermasks([]) == []
+
+
+def test_resident_fallback_mask_zero_matches_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force_numpy_fallback(monkeypatch)
+    buf = ResidentBarBuffer([0b0001, 0b1010, 0b1111])
+    assert buf.count_supermasks([0]) == [3]
+
+
+def test_resident_fallback_single_mask_via_count_supermask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _force_numpy_fallback(monkeypatch)
+    buf = ResidentBarBuffer([0b0011, 0b0001, 0b0010, 0b1011, 0b0100])
+    assert buf.count_supermask(0b0011) == 2
+
+
+def test_resident_fallback_n_bars_getter(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force_numpy_fallback(monkeypatch)
+    assert ResidentBarBuffer([1, 2, 3, 4]).n_bars == 4
+
+
+def test_resident_fallback_high_bit_and_full_width(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force_numpy_fallback(monkeypatch)
+    top = 1 << 63
+    full = 0xFFFF_FFFF_FFFF_FFFF
+    buf = ResidentBarBuffer([top, top | 1, full, 0, 1])
+    assert buf.count_supermask(top) == 3
+    assert buf.count_supermask(full) == 1
+
+
+def test_resident_fallback_matches_reference(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force_numpy_fallback(monkeypatch)
+    bars = [0, 1, 0b1011, 0b1111, 1 << 40, 1 << 63, 0xDEAD_BEEF]
+    masks = [0, 1, 0b1010, 1 << 40, 0xFFFF_FFFF_FFFF_FFFF]
+    buf = ResidentBarBuffer(bars)
+    assert buf.count_supermasks(masks) == count_supermasks_reference(bars, masks)
+
+
+def test_resident_fallback_reuse_across_many_calls_stable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _force_numpy_fallback(monkeypatch)
+    bars = [0b0011, 0b0111, 0b1111, 0b1011, 0b0000, 1 << 63]
+    buf = ResidentBarBuffer(bars)
+    batches = [[0b0011], [0b0100, 0], [1 << 63, 0b1111], []]
+    for _ in range(3):
+        for batch in batches:
+            assert buf.count_supermasks(batch) == count_supermasks_reference(bars, batch)
+
+
+def test_resident_fallback_construction_from_empty_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _force_numpy_fallback(monkeypatch)
+    buf = ResidentBarBuffer([])
+    assert buf.n_bars == 0
+    assert buf.count_supermask(0b11) == 0
+
+
+def test_resident_fallback_equals_rust_backed() -> None:
+    """The numpy fallback and the Rust backend produce identical results."""
+    bars = [0, 1, 0b1011, 0b1111, 1 << 40, 1 << 63, 0xDEAD_BEEF, 0]
+    masks = [0, 1, 0b1010, 1 << 40, 0xFFFF_FFFF_FFFF_FFFF, 0b11]
+    rust_buf = ResidentBarBuffer(bars)
+    rust_out = rust_buf.count_supermasks(masks)
+    import unittest.mock
+
+    with unittest.mock.patch.dict(sys.modules, {"fno_math": None}):
+        fallback_out = ResidentBarBuffer(bars).count_supermasks(masks)
+    assert rust_out == fallback_out == count_supermasks_reference(bars, masks)
+
+
+# ── AttributeError arm (older wheel lacking ResidentBars) ──
+
+
+def test_resident_attribute_error_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fake fno_math WITHOUT ResidentBars hits the AttributeError arm."""
+    _force_attribute_error_fallback(monkeypatch)
+    bars = [0b0011, 0b0111, 0b1000, 0b1011, 0b0000]
+    masks = [0b0011, 0b1000, 0b1111, 0]
+    buf = ResidentBarBuffer(bars)
+    # Constructed via the numpy fallback (the import succeeded but the class
+    # attribute is missing → AttributeError caught).
+    assert buf.n_bars == 5
+    assert buf.count_supermasks(masks) == count_supermasks_reference(bars, masks)

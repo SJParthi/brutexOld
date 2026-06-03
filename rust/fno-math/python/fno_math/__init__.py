@@ -14,6 +14,7 @@ docs/MIGRATION.md #190).
 from __future__ import annotations
 
 from ._fno_math import (
+    ResidentBars,
     __version__,
     add_u64,
     bitand_count_u64s,
@@ -25,6 +26,7 @@ from ._fno_math import (
 )
 
 __all__ = [
+    "ResidentBars",
     "__version__",
     "add_u64",
     "bitand_count_u64s",
