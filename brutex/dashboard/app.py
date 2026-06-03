@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
@@ -71,10 +72,12 @@ from brutex.dashboard.preopen_report import (
 )
 from brutex.dashboard.pull_controller import dhan_creds_present, pull_all_spot, pull_candles
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
+from brutex.dashboard.request_logging import emit_request_log
 from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.models import Exchange, Instrument, InstrumentType
+from brutex.observability.correlation import request_id_scope
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
     PipelineEventKind,
@@ -525,6 +528,42 @@ def build_app(
     from brutex.observability.metrics import get_registry, render_prometheus
 
     app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
+
+    @app.middleware("http")
+    async def _log_request(request: Any, call_next: Any) -> Any:  # pragma: no cover — FastAPI glue
+        """Per-request structured log + request-id correlation (DEC-DASHBOARD-REQUEST-LOGGING-001).
+
+        Binds a ``request_id`` (an inbound ``X-Request-ID`` header, else a fresh
+        one) for the request's whole context so any downstream event inherits it,
+        times the handler, and emits ONE ``dashboard.request`` event via
+        :func:`brutex.dashboard.request_logging.emit_request_log` (high-frequency
+        polls at DEBUG, everything else at INFO — so the firehose stops drowning
+        the business events). The resolved id is echoed in the ``X-Request-ID``
+        response header. The emit runs in a ``finally`` so a handler that RAISES
+        is still logged (status 500) before the error propagates; the header is
+        set only when a response exists. The per-request pure logic + level policy
+        live in the 100%-tested ``request_logging`` module — this is the thin glue.
+        """
+        inbound = request.headers.get("x-request-id")
+        with request_id_scope(inbound) as rid:
+            start = time.perf_counter()
+            status_code = 500
+            response = None
+            try:
+                response = await call_next(request)
+                status_code = response.status_code
+                return response
+            finally:
+                emit_request_log(
+                    method=request.method,
+                    path=request.url.path,
+                    status_code=status_code,
+                    latency_ms=(time.perf_counter() - start) * 1000.0,
+                    request_id=rid,
+                    client=request.client.host if request.client else None,
+                )
+                if response is not None:
+                    response.headers["X-Request-ID"] = rid
 
     # ── Fast-read SPEED CORE (DEC-DASHBOARD-FASTREAD-001) ───────────────────
     # Every blocking lake/DuckDB read below is offloaded off the event loop via
