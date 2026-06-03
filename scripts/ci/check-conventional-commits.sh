@@ -44,6 +44,12 @@ REGEX='^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\([a-z0-9
 FAILED=0
 COUNT=0
 
+# `--no-merges`: merge commits are exempt from Conventional Commits (the
+# commitlint default `defaultIgnores` does the same). This is also required
+# by this repo's workflow: force-push is denied (settings deny-list), so the
+# only way to resolve a base-branch conflict on a feature branch is a merge
+# commit ("Merge branch 'origin/main' …"), which can never match <type>: <desc>.
+# Every NON-merge commit is still strictly validated below.
 while IFS= read -r line; do
     COUNT=$((COUNT + 1))
     # line is: "<sha> <subject>"
@@ -54,7 +60,7 @@ while IFS= read -r line; do
         echo "❌ ${sha}: ${subject}" >&2
         FAILED=1
     fi
-done < <(git log --format='%h %s' "${FROM}..${TO}" 2>/dev/null || true)
+done < <(git log --no-merges --format='%h %s' "${FROM}..${TO}" 2>/dev/null || true)
 
 if [[ $COUNT -eq 0 ]]; then
     echo "⏸  No commits in range ${FROM}..${TO}"

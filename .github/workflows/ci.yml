@@ -1152,19 +1152,49 @@ jobs:
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
-          # DEC-STAT-CPCV-WFO-001 (#428): Stage-4 cross-validation primitives.
-          # brutex.metrics.cpcv (104 stmts, 34 branches, 42 tests) — CPCV
-          # splits + purge/embargo + pass-rate; numpy imported lazily so the
-          # single-module gate does not double-load the C extension (numpy 2.x).
+          # DEC-STAT-SPA-001 (#431): brutex.metrics.spa — Hansen SPA, White
+          # Reality Check, Romano-Wolf step-down (Stage-4 data-snooping filters
+          # #4 + #6). 100% line+branch from the dedicated unit suite; the
+          # property (test_spa_properties.py) + golden (test_spa_golden.py)
+          # suites add distributional + byte-exact determinism checks.
+          # NOTE: `--cov=brutex.metrics.spa` (a dotted module that imports numpy)
+          # trips numpy 2.x's "cannot load module more than once" C-extension
+          # guard under pytest-cov's late start. So drive coverage with the
+          # numpy-safe `brutex` package source and assert 100% line+branch on
+          # JUST spa.py via `coverage report --include` (the grep guard fails
+          # the gate if spa.py was somehow not measured — no silent false-pass).
+          if compgen -G "tests/unit/test_spa.py" > /dev/null; then
+            pytest tests/unit/test_spa.py --cov=brutex --cov-branch --cov-fail-under=0 -q
+            coverage report --include="*/brutex/metrics/spa.py" | grep -q "brutex/metrics/spa.py" \
+              || { echo "ERROR: brutex/metrics/spa.py was not measured — gate failed"; exit 1; }
+            coverage report --include="*/brutex/metrics/spa.py" --show-missing --fail-under=100
+          else
+            echo "(brutex.metrics.spa test file not present yet — gate inactive)"
+          fi
+          # DEC-STAT-CPCV-WFO-001 (#428): Stage-4 cross-validation primitives —
+          # brutex.metrics.cpcv (104 stmts / 34 branches) CPCV splits +
+          # purge/embargo + pass-rate; brutex.metrics.wfo (76 / 22) walk-forward
+          # rolling/anchored/expanding pass-rates.
+          # NOTE: driven via the numpy-safe `--cov=brutex` + `coverage report
+          # --include` form (NOT the dotted `--cov=brutex.metrics.cpcv`): once
+          # the spa re-export (DEC-STAT-SPA-001, #431) landed, brutex.metrics
+          # eagerly imports numpy, so a dotted single-module --cov target imports
+          # numpy at coverage startup and trips numpy 2.x's "cannot load module
+          # more than once" C-extension guard under pytest-cov. Same form + grep
+          # guard (no silent false-pass) as the spa gate above.
           if compgen -G "tests/unit/test_cpcv.py" > /dev/null; then
-            pytest --cov=brutex.metrics.cpcv --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_cpcv.py
+            pytest tests/unit/test_cpcv.py --cov=brutex --cov-branch --cov-fail-under=0 -q
+            coverage report --include="*/brutex/metrics/cpcv.py" | grep -q "brutex/metrics/cpcv.py" \
+              || { echo "ERROR: brutex/metrics/cpcv.py was not measured — gate failed"; exit 1; }
+            coverage report --include="*/brutex/metrics/cpcv.py" --show-missing --fail-under=100
           else
             echo "(brutex.metrics.cpcv test file not present yet — gate inactive)"
           fi
-          # brutex.metrics.wfo (76 stmts, 22 branches, 32 tests) — walk-forward
-          # rolling/anchored/expanding pass-rates.
           if compgen -G "tests/unit/test_wfo.py" > /dev/null; then
-            pytest --cov=brutex.metrics.wfo --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_wfo.py
+            pytest tests/unit/test_wfo.py --cov=brutex --cov-branch --cov-fail-under=0 -q
+            coverage report --include="*/brutex/metrics/wfo.py" | grep -q "brutex/metrics/wfo.py" \
+              || { echo "ERROR: brutex/metrics/wfo.py was not measured — gate failed"; exit 1; }
+            coverage report --include="*/brutex/metrics/wfo.py" --show-missing --fail-under=100
           else
             echo "(brutex.metrics.wfo test file not present yet — gate inactive)"
           fi

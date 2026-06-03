@@ -48,14 +48,19 @@ here as pure, deterministic functions:
   returns series with purging + embargo (CPCV) and
   rolling/anchored/expanding windows (WFO) — ``DEC-STAT-CPCV-WFO-001``
   (``docs/MIGRATION.md`` entry #428).
+* the **data-snooping multiple-testing** tests over a matrix of strategy
+  excess returns — :mod:`brutex.metrics.spa` (:func:`reality_check` —
+  White 2000; :func:`hansen_spa` — Hansen 2005; :func:`romano_wolf` —
+  Romano-Wolf 2005/2016), deterministic seeded block-bootstrap p-values +
+  FWER rejection set (spec Stage-4 filters #4 + #6) — ``DEC-STAT-SPA-001``
+  (``docs/MIGRATION.md`` entry #431).
 
 **Still DEFERRED (honest envelope, Golden Rule #10):** ``lockbox_sharpe``,
-``lockbox_mdd_pct`` (spec lines 586-587), the Reality-Check / SPA +
-Romano-Wolf gates, and the wiring of the ``cpcv_pass_rate`` /
-``wfo_pass_rate`` *columns* into the result-row schema — the Stage-4 filter
-cascade remains out of scope. The composite ranking score (spec lines
-602-615) and the hard rejection gates (spec lines 589-600) are likewise
-Stage-4 concerns out of scope here.
+``lockbox_mdd_pct`` (spec lines 586-587), and the wiring of the
+``cpcv_pass_rate`` / ``wfo_pass_rate`` / SPA / Romano-Wolf results into the
+result-row schema + the end-to-end Stage-4 filter cascade. The composite
+ranking score (spec lines 602-615) and the hard rejection gates (spec lines
+589-600) are likewise Stage-4 concerns out of scope here.
 """
 
 from __future__ import annotations
@@ -81,6 +86,17 @@ from brutex.metrics.deflated_sharpe import (
     probabilistic_sharpe_ratio,
 )
 from brutex.metrics.pbo import PBOResult, pbo_probability, sharpe_from_moments
+from brutex.metrics.spa import (
+    BootstrapConfig,
+    BootstrapMethod,
+    RealityCheckResult,
+    RomanoWolfResult,
+    SPAResult,
+    expected_block_length,
+    hansen_spa,
+    reality_check,
+    romano_wolf,
+)
 from brutex.metrics.types import ClosedTrade, EquityCurve
 from brutex.metrics.wfo import (
     WFOPassRates,
@@ -94,13 +110,18 @@ from brutex.metrics.wfo import (
 __all__ = [
     "DEFAULT_N_GROUPS",
     "DEFAULT_N_TEST_GROUPS",
+    "BootstrapConfig",
+    "BootstrapMethod",
     "CPCVSplit",
     "ClosedTrade",
     "DeflatedSharpeResult",
     "EquityCurve",
     "Moments",
     "PBOResult",
+    "RealityCheckResult",
     "ResultMetrics",
+    "RomanoWolfResult",
+    "SPAResult",
     "WFOPassRates",
     "WFOScheme",
     "WFOWalk",
@@ -108,9 +129,13 @@ __all__ = [
     "cpcv_pass_rate",
     "cpcv_splits",
     "deflated_sharpe_ratio",
+    "expected_block_length",
     "expected_max_sharpe_ratio",
+    "hansen_spa",
     "pbo_probability",
     "probabilistic_sharpe_ratio",
+    "reality_check",
+    "romano_wolf",
     "sharpe_from_moments",
     "sharpe_of_returns",
     "walk_forward_splits",
