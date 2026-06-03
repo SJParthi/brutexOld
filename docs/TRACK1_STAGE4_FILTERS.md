@@ -1,6 +1,6 @@
 # The Stage-4 gauntlet — all 9 "is this strategy real?" filters at a glance
 
-> **Decision:** DEC-STAT-LOCKBOX-MC-001 (`docs/MIGRATION.md` #432) — the entry
+> **Decision:** DEC-STAT-LOCKBOX-MC-001 (`docs/MIGRATION.md` #433) — the entry
 > that completes the engine set. **Spec:** `TRACK1_BACKTEST_SPEC.md` §"Stage 4".
 >
 > Plain-English companion to the code. Every claim is backed by a module +
@@ -16,7 +16,7 @@
 
 Stage 4 is the **final gauntlet**: nine independent statistical filters. A
 candidate must survive **all** of them. Each catches a *different* way a
-backtest can lie. As of #432, **all nine engines are built** (this PR added
+backtest can lie. As of #433, **all nine engines are built** (this PR added
 the last two — Lockbox + Monte-Carlo).
 
 ---
@@ -32,8 +32,8 @@ the last two — Lockbox + Monte-Carlo).
 | 5 | **PBO** | "it's overfit — the in-sample best is below-median out-of-sample" | `PBO` probability low | ✅ #430 |
 | 6 | **Romano-Wolf** | "which specific strategies are real?" — multiple-testing, not Bonferroni | in the FWER rejection set | ✅ #431 |
 | 7 | **Walk-Forward ×3** | "it's curve-fit to one regime / needs a specific lookback" | positive Sharpe in ≥12/16 walks, all 3 variants | ✅ #428 |
-| 8 | **Lockbox** | "it falls apart on data NO prior stage ever saw" | ≥500 held-out trades, Sharpe within 30% + MDD within 50% of training | ✅ **#432 (this PR)** |
-| 9 | **Monte-Carlo** | "the EXIT logic does all the work — random entries would look just as good" | real Sharpe beats ≥99% of entry-shuffles (p `< 0.01`) | ✅ **#432 (this PR)** |
+| 8 | **Lockbox** | "it falls apart on data NO prior stage ever saw" | ≥500 held-out trades, Sharpe within 30% + MDD within 50% of training | ✅ **#433 (this PR)** |
+| 9 | **Monte-Carlo** | "the EXIT logic does all the work — random entries would look just as good" | real Sharpe beats ≥99% of entry-shuffles (p `< 0.01`) | ✅ **#433 (this PR)** |
 
 ⭐ A strategy that survives all nine has been stress-tested against
 data-snooping, overfitting, regime-dependence, held-out collapse, and
@@ -64,7 +64,7 @@ was doing the work. This is the *only* test that catches that failure mode.
 | Same input + same seed → identical result, bit-for-bit | ✅ Guaranteed | Lockbox is pure (no RNG); Monte-Carlo uses one mandatory seed; golden + property tests |
 | No `NaN` / `inf` ever leaks out | ✅ Guaranteed | every degenerate input raises a *clear error*; Lockbox returns `None` (not NaN) for an undefined Sharpe |
 | No invented thresholds | ✅ Guaranteed | 6-month / 500-trade / 30% / 50% are the spec's institutional defaults; the MC p-value is the cited Phipson-Smyth (2010) estimator |
-| 100% line + branch test coverage | ✅ Guaranteed | per-module CI gate `--cov-fail-under=100` (lockbox 93/30, monte_carlo 42/18) |
+| 100% line + branch test coverage | ✅ Guaranteed | per-module CI gate `--cov-fail-under=100` (lockbox 96/32, monte_carlo 42/18) |
 | Runs in O(1) time | 🚫 **No — and we say so** | Lockbox is `O(trades)`, Monte-Carlo is `O(1,000 re-runs)`; offline Stage-4 batch work, **not** a per-bar hot path |
 
 > **O(1) honesty (Golden Rule #10):** the engine's *hot paths* (bar lookup,

@@ -1200,7 +1200,7 @@ jobs:
           fi
           # DEC-STAT-LOCKBOX-MC-001: Stage-4 filters #8 (Lockbox held-out
           # validation) + #9 (Monte-Carlo entry-permutation). brutex.metrics.lockbox
-          # (93 stmts / 30 branches) + brutex.metrics.monte_carlo (42 / 18). Same
+          # (96 stmts / 32 branches) + brutex.metrics.monte_carlo (42 / 18). Same
           # numpy-safe `--cov=brutex` + `coverage report --include` form as the
           # sibling metrics gates (brutex.metrics eagerly imports numpy via the spa
           # re-export, so a dotted `--cov=brutex.metrics.X` double-loads numpy 2.x).
