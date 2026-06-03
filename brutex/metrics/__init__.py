@@ -30,29 +30,46 @@ moments keep full float precision and are NEVER rounded
 no losers, zero-variance returns, single trade) return ``None`` for the
 undefined ratio rather than ``inf`` / ``NaN`` (spec line 746).
 
-**DEFERRED — Stage-4 statistical-validity metrics (NOT implemented):**
-``deflated_sharpe_ratio``, ``pbo_probability``, ``cpcv_pass_rate``,
-``wfo_pass_rate``, ``lockbox_sharpe``, ``lockbox_mdd_pct`` (spec lines
-581-587). The spec itself marks these "Stage 4 only, NULL before then":
-they require the cross-validation / walk-forward / lockbox filter
-cascade and are out of scope for this per-result module. Honest-envelope
-deferral recorded in ``docs/MIGRATION.md`` entry #305 (DEC-METRICS-001),
-per Golden Rule #10. The composite ranking score (spec lines 602-615)
-and the hard rejection gates (spec lines 589-600) are also Stage-4
-concerns and are likewise out of scope here.
+**Stage-4 cross-validation primitives (IMPLEMENTED here):** the CPCV and
+walk-forward *split generation + pass-rate* surfaces — :mod:`brutex.metrics.cpcv`
+(:func:`cpcv_splits`, :func:`cpcv_pass_rate`) and :mod:`brutex.metrics.wfo`
+(:func:`walk_forward_splits`, :func:`wfo_pass_rate`, :func:`wfo_pass_rates`).
+These are pure, deterministic functions over a returns series, with purging +
+embargo (CPCV) and rolling/anchored/expanding windows (WFO). Decision
+``DEC-STAT-CPCV-WFO-001`` (``docs/MIGRATION.md`` entry #428).
 
 **Stage-4 multiple-testing tests (IMPLEMENTED in** :mod:`brutex.metrics.spa`
 **):** White's Reality Check, Hansen's SPA, and the Romano-Wolf step-down
 (spec Stage-4 filters #4 + #6; DEC-STAT-SPA-001, ``docs/MIGRATION.md``
-entry #428) are pure bootstrap functions over a matrix of strategy excess
+entry #429) are pure bootstrap functions over a matrix of strategy excess
 returns and are re-exported here (:func:`reality_check`, :func:`hansen_spa`,
-:func:`romano_wolf`). They are independent of the per-result row schema
-above.
+:func:`romano_wolf`). They are independent of the per-result row schema above.
+
+**STILL DEFERRED — Stage-4 cascade wiring + sibling metrics (NOT implemented):**
+``deflated_sharpe_ratio``, ``pbo_probability``, ``lockbox_sharpe``,
+``lockbox_mdd_pct`` (spec lines 581-587), and the wiring of the
+``cpcv_pass_rate`` / ``wfo_pass_rate`` *columns* (and the Reality-Check / SPA /
+Romano-Wolf gates) into the result-row schema + the end-to-end Stage-4
+cascade. The spec marks the result-row statistical fields "Stage 4 only, NULL
+before then"; these PRs ship the CV/WFO + data-snooping *engines* the cascade
+will consume, not the full cascade. Honest-envelope deferral recorded in
+``docs/MIGRATION.md`` entries #305 (DEC-METRICS-001), #428 (DEC-STAT-CPCV-WFO-001)
+and #429 (DEC-STAT-SPA-001), per Golden Rule #10. The composite ranking score
+(spec lines 602-615) and the hard rejection gates (spec lines 589-600) remain
+out of scope here.
 """
 
 from __future__ import annotations
 
 from brutex.metrics.compute import Moments, ResultMetrics, compute_metrics
+from brutex.metrics.cpcv import (
+    DEFAULT_N_GROUPS,
+    DEFAULT_N_TEST_GROUPS,
+    CPCVSplit,
+    cpcv_pass_rate,
+    cpcv_splits,
+    sharpe_of_returns,
+)
 from brutex.metrics.spa import (
     BootstrapConfig,
     BootstrapMethod,
@@ -65,10 +82,21 @@ from brutex.metrics.spa import (
     romano_wolf,
 )
 from brutex.metrics.types import ClosedTrade, EquityCurve
+from brutex.metrics.wfo import (
+    WFOPassRates,
+    WFOScheme,
+    WFOWalk,
+    walk_forward_splits,
+    wfo_pass_rate,
+    wfo_pass_rates,
+)
 
 __all__ = [
+    "DEFAULT_N_GROUPS",
+    "DEFAULT_N_TEST_GROUPS",
     "BootstrapConfig",
     "BootstrapMethod",
+    "CPCVSplit",
     "ClosedTrade",
     "EquityCurve",
     "Moments",
@@ -76,9 +104,18 @@ __all__ = [
     "ResultMetrics",
     "RomanoWolfResult",
     "SPAResult",
+    "WFOPassRates",
+    "WFOScheme",
+    "WFOWalk",
     "compute_metrics",
+    "cpcv_pass_rate",
+    "cpcv_splits",
     "expected_block_length",
     "hansen_spa",
     "reality_check",
     "romano_wolf",
+    "sharpe_of_returns",
+    "walk_forward_splits",
+    "wfo_pass_rate",
+    "wfo_pass_rates",
 ]

@@ -1,7 +1,7 @@
 # Did my strategy *really* win — or did I just get lucky? — a plain-English guide
 
 > **Module:** `brutex/metrics/spa.py` · **Decision:** DEC-STAT-SPA-001
-> (`docs/MIGRATION.md` #428) · **Spec:** Stage-4 filters #4 + #6.
+> (`docs/MIGRATION.md` #429) · **Spec:** Stage-4 filters #4 + #6.
 >
 > This page is the "explain it to a human in 60 seconds" companion to the
 > code. Every claim here is backed by the implementation + the cited
