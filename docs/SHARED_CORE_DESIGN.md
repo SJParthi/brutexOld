@@ -1,9 +1,12 @@
 # Shared Indicator + Vocabulary Core — Design Proposal (BruteX ↔ TickVault)
 
-> **Status:** 🟡 **PROPOSAL — awaiting operator path decision.** No code yet.
-> Once a path is locked this becomes **ADR-0003** + decision **DEC-SHARED-CORE-001**
-> in `docs/MIGRATION.md`, with a paired decision + `CLAUDE.md` amendment in the
-> **TickVault** repo.
+> **Status:** 🟢 **ACCEPTED — Option 1 (shared Rust crate), phased rollout**
+> (operator decision 2026-06-03: *"build the common rust 52 vocab which can be
+> used by both tickvault and brutex"*). Ledgered as **DEC-SHARED-CORE-001**
+> (`docs/MIGRATION.md` #437). **Phase 0 (the golden answer-key) has shipped** in
+> this PR; the `CLAUDE.md` self-containment reversal + a paired TickVault-repo
+> decision land at **Phase 2** (when BruteX actually depends on the crate). A
+> future ADR-0003 will formalise the cross-repo governance once the crate exists.
 >
 > **Author:** Claude Code session (2026-06-03). **Reviewed by:** (pending §9
 > 4-agent hostile pass — see §8).
@@ -289,6 +292,11 @@ on the chosen path before implementation.
 - **Five operator decisions** (§7) unblock the rest — Q1 (replace vs augment the
   TickVault strategy engine) and Q2 (crate location) are the two that gate code.
 
-> **Nothing is implemented.** This doc is the requested design pass. On your
-> path pick + the §7 answers, the first mergeable step is **Phase 0 (golden
-> conformance vectors)** — pure, 100%-testable, BruteX-only, zero behaviour change.
+> **Decision made (Option 1) + Phase 0 shipped.** This doc was the design pass;
+> the operator accepted Option 1, and **Phase 0 (the golden conformance vectors)**
+> — pure, BruteX-only, zero behaviour change — is delivered in this same PR
+> (`scripts/gen_vocab_golden_vectors.py` + `tests/golden/test_vocab_golden.py` +
+> the 400-case fixture). **Next:** Phase 1 (build the Rust crate, gated to
+> reproduce the answer-key bit-for-bit). The §7 questions (Q1 replace-vs-augment
+> TickVault's engine, Q2 crate location, Q5 TickVault access) still gate Phases
+> 2–3 and are the operator's to answer.
