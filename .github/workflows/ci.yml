@@ -1198,6 +1198,28 @@ jobs:
           else
             echo "(brutex.metrics.wfo test file not present yet — gate inactive)"
           fi
+          # DEC-STAT-LOCKBOX-MC-001: Stage-4 filters #8 (Lockbox held-out
+          # validation) + #9 (Monte-Carlo entry-permutation). brutex.metrics.lockbox
+          # (96 stmts / 32 branches) + brutex.metrics.monte_carlo (42 / 18). Same
+          # numpy-safe `--cov=brutex` + `coverage report --include` form as the
+          # sibling metrics gates (brutex.metrics eagerly imports numpy via the spa
+          # re-export, so a dotted `--cov=brutex.metrics.X` double-loads numpy 2.x).
+          if compgen -G "tests/unit/test_lockbox.py" > /dev/null; then
+            pytest tests/unit/test_lockbox.py --cov=brutex --cov-branch --cov-fail-under=0 -q
+            coverage report --include="*/brutex/metrics/lockbox.py" | grep -q "brutex/metrics/lockbox.py" \
+              || { echo "ERROR: brutex/metrics/lockbox.py was not measured — gate failed"; exit 1; }
+            coverage report --include="*/brutex/metrics/lockbox.py" --show-missing --fail-under=100
+          else
+            echo "(brutex.metrics.lockbox test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_monte_carlo.py" > /dev/null; then
+            pytest tests/unit/test_monte_carlo.py --cov=brutex --cov-branch --cov-fail-under=0 -q
+            coverage report --include="*/brutex/metrics/monte_carlo.py" | grep -q "brutex/metrics/monte_carlo.py" \
+              || { echo "ERROR: brutex/metrics/monte_carlo.py was not measured — gate failed"; exit 1; }
+            coverage report --include="*/brutex/metrics/monte_carlo.py" --show-missing --fail-under=100
+          else
+            echo "(brutex.metrics.monte_carlo test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML

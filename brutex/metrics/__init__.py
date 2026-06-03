@@ -54,13 +54,21 @@ here as pure, deterministic functions:
   Romano-Wolf 2005/2016), deterministic seeded block-bootstrap p-values +
   FWER rejection set (spec Stage-4 filters #4 + #6) — ``DEC-STAT-SPA-001``
   (``docs/MIGRATION.md`` entry #431).
+* the **held-out Lockbox** final-validation gate (:mod:`brutex.metrics.lockbox`,
+  :func:`lockbox_evaluation` — adaptive ``>=`` 500-trade window + Sharpe/MDD
+  gates, spec filter #8) and the **Monte-Carlo entry-permutation** guard
+  (:mod:`brutex.metrics.monte_carlo`, :func:`monte_carlo_permutation_test` —
+  relocate the entries, re-run the injected exit logic, one-sided permutation
+  p-value, spec filter #9) — ``DEC-STAT-LOCKBOX-MC-001``.
 
-**Still DEFERRED (honest envelope, Golden Rule #10):** ``lockbox_sharpe``,
-``lockbox_mdd_pct`` (spec lines 586-587), and the wiring of the
-``cpcv_pass_rate`` / ``wfo_pass_rate`` / SPA / Romano-Wolf results into the
-result-row schema + the end-to-end Stage-4 filter cascade. The composite
-ranking score (spec lines 602-615) and the hard rejection gates (spec lines
-589-600) are likewise Stage-4 concerns out of scope here.
+**Still DEFERRED (honest envelope, Golden Rule #10):** the wiring of the
+``cpcv_pass_rate`` / ``wfo_pass_rate`` / ``lockbox_sharpe`` / ``lockbox_mdd_pct``
+/ SPA / Romano-Wolf / Monte-Carlo results into the result-row schema (spec
+lines 586-587) + the end-to-end Stage-4 filter cascade that chains all nine
+filters. The composite ranking score (spec lines 602-615) and the hard
+rejection gates (spec lines 589-600) are likewise out of scope here. All nine
+Stage-4 *filter engines* now exist as standalone pure functions; only the
+cascade *wiring* remains.
 """
 
 from __future__ import annotations
@@ -85,6 +93,8 @@ from brutex.metrics.deflated_sharpe import (
     expected_max_sharpe_ratio,
     probabilistic_sharpe_ratio,
 )
+from brutex.metrics.lockbox import LockboxResult, LockboxStatus, lockbox_evaluation
+from brutex.metrics.monte_carlo import MonteCarloResult, monte_carlo_permutation_test
 from brutex.metrics.pbo import PBOResult, pbo_probability, sharpe_from_moments
 from brutex.metrics.spa import (
     BootstrapConfig,
@@ -116,7 +126,10 @@ __all__ = [
     "ClosedTrade",
     "DeflatedSharpeResult",
     "EquityCurve",
+    "LockboxResult",
+    "LockboxStatus",
     "Moments",
+    "MonteCarloResult",
     "PBOResult",
     "RealityCheckResult",
     "ResultMetrics",
@@ -132,6 +145,8 @@ __all__ = [
     "expected_block_length",
     "expected_max_sharpe_ratio",
     "hansen_spa",
+    "lockbox_evaluation",
+    "monte_carlo_permutation_test",
     "pbo_probability",
     "probabilistic_sharpe_ratio",
     "reality_check",
