@@ -192,7 +192,8 @@ class TestResultRowValidation:
 class TestAppendAndLookup:
     def test_append_new_returns_true(self) -> None:
         store = ResultsStore(path=Path("unused.parquet"))
-        assert store.append(_row(run_id=_rid(1))) is True
+        added = store.append(_row(run_id=_rid(1)))
+        assert added is True
         assert len(store) == 1
         assert _rid(1) in store
         assert _rid(2) not in store
@@ -200,7 +201,8 @@ class TestAppendAndLookup:
     def test_append_identical_duplicate_is_noop(self) -> None:
         store = ResultsStore(path=Path("unused.parquet"))
         store.append(_row(run_id=_rid(1)))
-        assert store.append(_row(run_id=_rid(1))) is False  # idempotent dup-key dedup
+        readded = store.append(_row(run_id=_rid(1)))
+        assert readded is False  # idempotent dup-key dedup
         assert len(store) == 1
 
     def test_append_conflicting_run_id_raises(self) -> None:
@@ -411,10 +413,13 @@ class TestFlushLoad:
         path = tmp_path / "results.parquet"
         store = ResultsStore(path=path)
         store.append(_row(run_id=_rid(1)))
-        assert store.flush().row_count == 1
+        first = store.flush()
+        assert first.row_count == 1
         store.append(_row(run_id=_rid(2)))
-        assert store.flush().row_count == 2
-        assert len(ResultsStore.load(path)) == 2
+        second = store.flush()
+        assert second.row_count == 2
+        reloaded = ResultsStore.load(path)
+        assert len(reloaded) == 2
 
 
 # ──────────────────────────────────────────────────────────────────────────

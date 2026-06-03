@@ -31,6 +31,7 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from brutex.engine.results_store import ResultRow, ResultsStore
 
 
@@ -92,6 +93,7 @@ def test_golden_leaderboard_order() -> None:
 
 def test_golden_byte_for_byte_reproducibility(tmp_path: Path) -> None:
     """Two independent stores with the fixture rows flush to identical bytes."""
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     store_a = ResultsStore(path=tmp_path / "a.parquet")
     store_a.extend(_FIXTURE)
     store_b = ResultsStore(path=tmp_path / "b.parquet")
@@ -105,6 +107,7 @@ def test_golden_byte_for_byte_reproducibility(tmp_path: Path) -> None:
 
 def test_golden_round_trip_values(tmp_path: Path) -> None:
     """Round-trip recovers every locked field value, bit-exact."""
+    pytest.importorskip("polars")
     path = tmp_path / "results.parquet"
     store = ResultsStore(path=path)
     store.extend(_FIXTURE)

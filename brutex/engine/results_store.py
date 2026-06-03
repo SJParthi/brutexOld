@@ -118,15 +118,6 @@ _METRIC_FIELDS: Final[tuple[str, ...]] = (
 #: Float64 price columns — Decimal rupees snapped to the 2dp tick grid at write.
 _PRICE_FIELDS: Final[tuple[str, ...]] = ("avg_entry_price", "avg_exit_price")
 
-#: Deterministic Parquet column order (identity → money → counts → metrics → prices).
-_COLUMN_ORDER: Final[tuple[str, ...]] = (
-    *_STRING_FIELDS,
-    *_MONEY_PAISA_FIELDS,
-    *_COUNT_FIELDS,
-    *_METRIC_FIELDS,
-    *_PRICE_FIELDS,
-)
-
 #: Numeric columns a leaderboard may rank by (metrics + money + counts).
 _RANKABLE_FIELDS: Final[frozenset[str]] = frozenset(
     _METRIC_FIELDS + _MONEY_PAISA_FIELDS + _COUNT_FIELDS
@@ -478,8 +469,9 @@ class ResultsStore:
             columns[name] = [float(getattr(row, name)) for row in ordered]
 
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
-        # dtype is inferred; matched to columns by name, column order follows
-        # `columns` (== _COLUMN_ORDER) for a reproducible byte stream.
+        # dtype is inferred; matched to columns by name. Column order follows the
+        # fixed insertion order above (identity → money → counts → metrics →
+        # prices) for a reproducible byte stream.
         df = pl.DataFrame(
             columns,
             schema={

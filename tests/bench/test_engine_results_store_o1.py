@@ -67,12 +67,14 @@ class TestGetIsO1:
     def test_get_at_small_scale(self, benchmark) -> None:  # type: ignore[no-untyped-def]
         store = _filled(_SMALL)
         probe = _rid(_SMALL // 2)
-        assert benchmark(lambda: store.get(probe)) is not None
+        result = benchmark(lambda: store.get(probe))
+        assert result is not None
 
     def test_get_at_large_scale(self, benchmark) -> None:  # type: ignore[no-untyped-def]
         store = _filled(_LARGE)
         probe = _rid(_LARGE // 2)
-        assert benchmark(lambda: store.get(probe)) is not None
+        result = benchmark(lambda: store.get(probe))
+        assert result is not None
 
     def test_get_ratio_is_o1(self) -> None:
         """`get` latency at 10k / 1k rows must stay O(1) (< ceiling)."""
@@ -102,12 +104,14 @@ class TestAppendIsO1:
     def test_append_dup_noop_at_small_scale(self, benchmark) -> None:  # type: ignore[no-untyped-def]
         store = _filled(_SMALL)
         existing = _row(_SMALL // 2)
-        assert benchmark(lambda: store.append(existing)) is False
+        result = benchmark(lambda: store.append(existing))
+        assert result is False
 
     def test_append_dup_noop_at_large_scale(self, benchmark) -> None:  # type: ignore[no-untyped-def]
         store = _filled(_LARGE)
         existing = _row(_LARGE // 2)
-        assert benchmark(lambda: store.append(existing)) is False
+        result = benchmark(lambda: store.append(existing))
+        assert result is False
 
     def test_append_ratio_is_o1(self) -> None:
         """Inserting fresh rows costs the same at 10k base as at 1k base (O(1))."""

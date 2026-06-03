@@ -83,6 +83,7 @@ def _row_set(draw: st.DrawFn) -> list[ResultRow]:
 @settings(max_examples=60, deadline=None)
 @given(_row_set())
 def test_determinism_independent_of_append_order(rows: list[ResultRow]) -> None:
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     with tempfile.TemporaryDirectory() as tmp:
         path_a = Path(tmp) / "a.parquet"
         path_b = Path(tmp) / "b.parquet"
@@ -99,6 +100,7 @@ def test_determinism_independent_of_append_order(rows: list[ResultRow]) -> None:
 @settings(max_examples=60, deadline=None)
 @given(_row_set())
 def test_reflush_is_byte_identical(rows: list[ResultRow]) -> None:
+    pytest.importorskip("polars")
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "r.parquet"
         store = ResultsStore(path=path)
@@ -112,6 +114,7 @@ def test_reflush_is_byte_identical(rows: list[ResultRow]) -> None:
 @settings(max_examples=60, deadline=None)
 @given(_row_set())
 def test_round_trip_preserves_every_row(rows: list[ResultRow]) -> None:
+    pytest.importorskip("polars")
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "r.parquet"
         store = ResultsStore(path=path)
@@ -158,6 +161,7 @@ def test_price_is_always_two_decimals(price: Decimal) -> None:
 @settings(max_examples=200, deadline=None)
 @given(metric=st.floats(allow_nan=False, allow_infinity=False))
 def test_full_precision_metric_round_trips_exactly(metric: float) -> None:
+    pytest.importorskip("polars")
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "r.parquet"
         store = ResultsStore(path=path)
@@ -241,7 +245,9 @@ def test_same_run_id_different_result_always_conflicts(seed: int, pnl_a: int, pn
     assume(pnl_a != pnl_b)
     run_id = f"{seed:064x}"
     store = ResultsStore(path=Path("unused.parquet"))
-    assert store.append(_minimal_row(run_id, pnl_a)) is True
-    assert store.append(_minimal_row(run_id, pnl_a)) is False  # identical = no-op
+    first_add = store.append(_minimal_row(run_id, pnl_a))
+    assert first_add is True
+    dup_add = store.append(_minimal_row(run_id, pnl_a))
+    assert dup_add is False  # identical = no-op
     with pytest.raises(ResultsStoreError, match="conflict"):
         store.append(_minimal_row(run_id, pnl_b))
