@@ -57,10 +57,10 @@ Scope of this sub-PR (honest envelope — CLAUDE.md §10)
   reads bar ``M+1``'s OPEN as a mechanic (not to decide). The instrumented
   ``evaluate(N)`` accessor (Property P-06) is the future runtime enforcer.
 
-Two minor seams left as tracked follow-ups (honesty): ``stage1a._price_to_paisa``
-predates :func:`brutex.money.rupees_to_paisa` (this PR's new canonical seam) and
-should be DRYed to delegate to it; and circuit-breaker pre-emption of 15:20
-(DEC-RISK-009, Track-2 risk) is out of this Track-1 spot scope.
+One seam left as a tracked follow-up (honesty): circuit-breaker pre-emption of
+the 15:20 forced exit (DEC-RISK-009, a Track-2 risk concern) is out of this
+Track-1 spot scope. (This PR also added :func:`brutex.money.rupees_to_paisa` as
+the canonical rupees→paisa seam and DRYed ``stage1a._price_to_paisa`` onto it.)
 """
 
 from __future__ import annotations

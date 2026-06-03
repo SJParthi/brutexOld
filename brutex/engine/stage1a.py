@@ -15,10 +15,10 @@ What this module owns is the **adapter layer** between the lake's bar
 representation and the evaluator's snapshot contract:
 
 * **Decimal-rupees → int64 paisa** at the lake boundary via
-  ``int(round_money(price) * 100)`` (``ROUND_HALF_UP``, 2-dp tick grid —
-  ``DEC-MONEY-2DP-001`` / ``DEC-SPOT-PRICE-2DP-001``). ``brutex.money`` has no
-  rupees→paisa converter, so :func:`_price_to_paisa` is the canonical seam
-  (one source of truth, CLAUDE.md §11 COMMON).
+  :func:`_price_to_paisa`, a thin wrapper over the canonical seam
+  :func:`brutex.money.rupees_to_paisa` (``ROUND_HALF_UP``, 2-dp tick grid —
+  ``DEC-MONEY-2DP-001`` / ``DEC-SPOT-PRICE-2DP-001``; one source of truth,
+  CLAUDE.md §11 COMMON).
 * **UTC → IST** for ``timestamp_ist`` via the shared
   :data:`brutex.calendars.nse.IST` zone (never a hard-coded offset).
 * **EMA(20) / EMA(200)** causal running state (:class:`brutex.indicators.ema.EMAState`),
@@ -77,7 +77,7 @@ from brutex.indicators.day_extremes import DayExtremesState
 from brutex.indicators.ema import EMAState
 from brutex.indicators.fib_levels import FibLevels, compute_fib_levels
 from brutex.indicators.pivots import PivotLevels, compute_pivot_levels
-from brutex.money import round_money
+from brutex.money import rupees_to_paisa
 from brutex.vocabulary import bits as B  # noqa: N812 — B = bit-position namespace
 from brutex.vocabulary.evaluator import (
     IndicatorSnapshot,
@@ -88,10 +88,6 @@ from brutex.vocabulary.evaluator import (
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.data.models import CandleBar
-
-#: Paisa per rupee — the lake stores Decimal rupees; the evaluator wants int64
-#: paisa (``DEC-PAISA-DOC-RECONCILE-001``).
-_PAISA_PER_RUPEE: Final[int] = 100
 
 #: EMA periods Track 1 evaluates (``docs/TRACK1_VOCABULARY.md`` Group 1).
 _EMA_FAST_PERIOD: Final[int] = 20
@@ -172,11 +168,11 @@ _PLACEHOLDER_FIB: Final[FibLevels] = compute_fib_levels(_PLACEHOLDER_DAY, 0, 0)
 def _price_to_paisa(price: Decimal) -> int:
     """Convert a Decimal-rupee price to int64 paisa at the lake boundary.
 
-    The canonical rupees→paisa seam (``brutex.money`` only converts the other
-    direction). The price is first snapped to the 2-decimal tick grid via
-    :func:`brutex.money.round_money` (``ROUND_HALF_UP``, never truncation —
-    ``DEC-SPOT-PRICE-2DP-001``); the ``× 100`` is exact in :class:`~decimal.Decimal`,
-    so the final ``int`` is loss-free.
+    Delegates to the canonical seam :func:`brutex.money.rupees_to_paisa`
+    (``ROUND_HALF_UP`` snap to the 2-decimal tick grid, never truncation —
+    ``DEC-SPOT-PRICE-2DP-001``; the ``× 100`` is exact, so the result is
+    loss-free). Kept as a named adapter so the call sites below read as
+    price→paisa at the lake boundary.
 
     Parameters
     ----------
@@ -189,7 +185,7 @@ def _price_to_paisa(price: Decimal) -> int:
     int
         The price in int64 paisa.
     """
-    return int(round_money(price) * _PAISA_PER_RUPEE)
+    return rupees_to_paisa(price)
 
 
 def _ema_to_paisa(value: float | None) -> int | None:
