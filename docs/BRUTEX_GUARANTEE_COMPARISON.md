@@ -40,7 +40,7 @@ check**. This is the "no illusion" table.
 | What you asked for | In plain English | BruteX today | The machine that proves it (on every change) |
 |---|---|---|---|
 | **O(1) uniqueness** | "Spotting whether we've already seen this — instant, even among billions" | 🟢 live | a `blake3` fingerprint of every run/combo + property tests asserting no collisions — `brutex/strategies/combo.py`, `tests/property/test_dedup_hash_properties.py` |
-| **O(1) de-duplication, zero data loss** | "Never double-write, never drop a real bar" | 🟢 live | 4-tier dedup: Bloom filter → LMDB exact-confirm → audit-replay → property invariants; a Bloom false-positive can **never** cause a false drop — `brutex/orchestrator/bloom.py` + `store.py`, `tests/property/test_bloom_invariants.py` |
+| **O(1) de-duplication, zero data loss** | "Never double-write, never drop a real bar" | 🟢 live | 4-tier dedup: Bloom filter → LMDB exact-confirm → audit-replay → property invariants; a Bloom false-positive can **never** cause a false drop — `brutex/orchestrator/bloom.py` + `store.py`, `tests/property/test_bloom_invariants.py`. Plus a **persisted O(1) fetch-coverage ledger** so a re-pull *skips* windows already in the lake (never re-burns the data-vendor quota) — `brutex/data/fetch_coverage_store.py` (DEC-FETCH-COVERAGE-WIRING-001) |
 | **O(1) mapping / lookup** | "Finding a symbol, a bar, or an indicator is instant" | 🟢 live | numeric primary-key catalog (`SECURITY_ID`) + dict/memory-map lookups, **speed-gated by a ratio benchmark** — `tests/bench/test_throughput_canary.py`, `test_store_o1.py` |
 | **O(1) latency / time per hot path** | "Same speed on row 1 and row 1-billion" | 🟢 live (ratio-gated) | `p99(big) / p99(small)` ratio gates on bar lookup, the u64 strategy-mask AND, dedup, and the rate limiter — `tests/bench/test_store_o1.py`, `test_throughput_canary.py` *(honest note ▼: tightest 1.1× tier is 🟡)* |
 | **O(1) space per operation** | "RAM per step stays flat as data grows" | 🟢 live | state lives in a memory-mapped LMDB tier off the Python heap — total storage is O(n), **per-operation RAM is O(1)** — `brutex/orchestrator/store.py` |
@@ -56,6 +56,7 @@ check**. This is the "no illusion" table.
 | What you feel | 🟥 DIY (pandas + a loop) | 🟧 A heavyweight framework | 🟩 **BruteX** |
 |---|---|---|---|
 | **Re-running a data pull** | re-downloads / risks duplicates | manual cache keys | **O(1) uniqueness + dedup** — never double-writes, never drops a real bar |
+| **Pulling again tomorrow** | re-downloads the whole history | hand-rolled incremental logic | **only the new day is fetched** — a persisted skip-ledger marks every settled window done; today is pulled on the next day (daily-incremental, quota-frugal) |
 | **Speed as data grows** | slows down (O(n)) | varies, hand-tuned | **O(1) per bar / per signal / per dedup** — constant-time, CI-gated |
 | **Memory as data grows** | loads everything into RAM | tuned by hand | **O(1) RAM per operation** — memory-mapped tier |
 | **One bad symbol mid-run** | kills the whole run | depends | **quarantined** — the rest keep flowing |
@@ -92,6 +93,8 @@ truth, straight from the enforcement audit.
 | O(1) uniqueness · dedup · mapping · space | 🟢 **live** | Bloom → LMDB → blake3, property-tested every push |
 | O(1) latency / time ratio gates | 🟢 **live (3–10×)** | the **tightest 1.1× tier is 🟡 wired** — it switches on once a dedicated quiet M4-Pro runner is registered (shared CI is too noisy to prove 10%) |
 | Tamper-proof audit log + bit-for-bit reproducibility | 🟢 **live** | break the hash chain → CI fails |
+| Restart-safe, quota-frugal incremental pulls | 🟢 **live** | a persisted fetch-coverage ledger skips windows already in the lake across restarts; only the new day is re-fetched (DEC-FETCH-COVERAGE-WIRING-001) |
+| Dashboard %-metrics consistency | 🟢 **live** | `change_pct` / `open_gap_pct` anchor on the prior day's **last 1-minute close** — internally consistent with the 1-minute feed the engine sweeps (DEC-SPOT-PREVCLOSE-1MIN-001); deliberately distinct from a broker's official daily % (honest, by design — that lives only in the separate pre-open report) |
 | Test coverage | 🟡 **90% floor + 103 modules at 100%** | climbing to 100% one locked module at a time; 8 modules pending an upstream library fix |
 | Standards enforcement (overall) | 🟡 **15 of 21 rows fully enforced (71%)** | + 2 partial (10%) + 1 roadmap (5%) + 3 manual-reviewer (14%) — per `STANDARDS_100PCT.md` §1, re-verified 2026-06-02. *(Older docs that say "9 of 21 / ~22%" are pre-reconciliation drift.)* |
 | The brute-force **sweep engine** (Stage 1A→1B→2→3→4) | 📋 **next (Phase 3)** | the per-bar / per-mask / dedup **primitives exist and are O(1)-gated today**; the cascade itself is the upcoming build |
