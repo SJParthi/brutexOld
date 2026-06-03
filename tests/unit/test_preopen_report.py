@@ -18,6 +18,7 @@ from pathlib import Path
 
 import duckdb
 from brutex.dashboard.preopen_report import (
+    _COL_WIDTHS,
     REPORT_COLUMNS,
     PreOpenRow,
     _col_letter,
@@ -280,3 +281,119 @@ def test_render_escapes_inline_strings() -> None:
     )
     sheet = _open_sheet(render_xlsx([row]))
     assert "A&amp;B&lt;C" in sheet  # XML-escaped, never raw
+
+
+# ── DEC-PREOPEN-XLSX-STYLE-001 — bold header/symbol, date-range title, widths ─
+
+
+def _open_part(blob: bytes, name: str) -> str:
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        return zf.read(name).decode("utf-8")
+
+
+def test_col_widths_aligned_to_columns() -> None:
+    # Exactly one precise width per report column — no cramped default, no stray.
+    assert len(_COL_WIDTHS) == len(REPORT_COLUMNS)
+
+
+def test_render_wires_a_bold_styles_part() -> None:
+    blob = render_xlsx([], title="Pre-Open Market: 2024-01-01 to 2024-12-31")
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        assert "xl/styles.xml" in zf.namelist()
+    styles = _open_part(blob, "xl/styles.xml")
+    assert "<b/>" in styles  # a bold font is defined
+    assert '<alignment horizontal="center"/>' in styles  # the centred title style
+
+
+def test_render_title_row_is_merged_and_carries_the_range() -> None:
+    sheet = _open_part(
+        render_xlsx([], title="Pre-Open Market: 2024-01-01 to 2024-12-31"),
+        "xl/worksheets/sheet1.xml",
+    )
+    assert "Pre-Open Market: 2024-01-01 to 2024-12-31" in sheet
+    assert '<mergeCell ref="A1:F1"/>' in sheet  # merged across all 6 columns
+    assert 's="2"' in sheet  # the bold-centred title style
+    assert "<cols>" in sheet  # precise per-column widths
+    assert 'ySplit="2"' in sheet  # title + header both frozen
+    assert "autoFilter" in sheet
+
+
+def test_render_header_and_symbol_are_bold_but_numbers_are_not() -> None:
+    row = PreOpenRow(
+        day=date(2024, 3, 4),
+        symbol="COALINDIA",
+        prev_close=Decimal("458.15"),
+        iep=Decimal("429.00"),
+        chng=Decimal("-29.15"),
+        pct_chng=Decimal("-6.36"),
+    )
+    sheet = _open_part(render_xlsx([row]), "xl/worksheets/sheet1.xml")
+    # Header is row 2, every header cell bold (style 1).
+    assert '<c r="B2" s="1" t="inlineStr"><is><t>SYMBOL</t></is></c>' in sheet
+    # Data is row 3: the SYMBOL cell is bold; the money cells carry no style.
+    assert '<c r="B3" s="1" t="inlineStr"><is><t>COALINDIA</t></is></c>' in sheet
+    assert '<c r="C3"><v>458.15</v></c>' in sheet  # PREV. CLOSE — plain numeric
+
+
+def test_render_default_title_is_date_range() -> None:
+    rows = [
+        PreOpenRow(
+            day=date(2024, 3, 4),
+            symbol="AAA",
+            prev_close=Decimal("1"),
+            iep=Decimal("1"),
+            chng=Decimal("0"),
+            pct_chng=Decimal("0"),
+        ),
+        PreOpenRow(
+            day=date(2024, 3, 6),
+            symbol="ZZZ",
+            prev_close=Decimal("1"),
+            iep=Decimal("1"),
+            chng=Decimal("0"),
+            pct_chng=Decimal("0"),
+        ),
+    ]
+    sheet = _open_part(render_xlsx(rows), "xl/worksheets/sheet1.xml")
+    assert "Pre-Open Market: 2024-03-04 to 2024-03-06" in sheet
+
+
+def test_render_empty_default_title_is_bare_label() -> None:
+    sheet = _open_part(render_xlsx([]), "xl/worksheets/sheet1.xml")
+    assert "Pre-Open Market" in sheet
+    assert " to " not in sheet  # no date range when there are no rows
+
+
+def test_build_and_render_ampersand_symbol(tmp_path: Path) -> None:
+    # M&M (Mahindra & Mahindra) — a real ``&`` symbol that used to 500 the
+    # report (``illegal candle symbol 'M&M'``). Full path: write → resolve →
+    # build → render, no raise; SYMBOL escaped in the bold cell.
+    _write(
+        tmp_path,
+        "M&M",
+        "1day",
+        [
+            _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="2900", close="2950.50"),
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="2960", close="2975"),
+        ],
+    )
+    _write(
+        tmp_path,
+        "M&M",
+        "1minute",
+        [_bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="2960.00", close="2965")],
+    )
+    assert resolve_report_datasets(tmp_path, ["M&M"]) == [("NSE", "CASH", "M&M")]
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "M&M")],
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+    )
+    assert len(rows) == 1
+    assert rows[0].symbol == "M&M"
+    assert rows[0].prev_close == Decimal("2950.50")
+    assert rows[0].iep == Decimal("2960.00")
+    sheet = _open_part(render_xlsx(rows), "xl/worksheets/sheet1.xml")
+    assert "M&amp;M" in sheet  # XML-escaped in the bold SYMBOL cell

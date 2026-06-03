@@ -30,6 +30,7 @@ from brutex.dashboard.db_view import (
     _quote_ident,
     _spot_derived_rows,
     _to_decimal,
+    _validate_candle_coords,
     list_candle_datasets,
     list_columns,
     list_option_datasets,
@@ -43,6 +44,7 @@ from brutex.dashboard.db_view import (
 from brutex.data.instrument_store import Instrument, InstrumentStore
 from brutex.data.option_parquet_writer import OptionParquetWriter, OptionSeriesCoordinate
 from brutex.data.parquet_writer import ParquetWriter
+from brutex.data.partition import build_partition_path
 from brutex.models import Exchange, InstrumentType, Segment
 
 from brutex.data.models import CandleBar, OptionBar  # isort: skip  (kept near other data imports)
@@ -646,6 +648,56 @@ def test_query_candles_invalid_coords_raise(
             interval=interval,
             limit=50,
         )
+
+
+# ── DEC-PREOPEN-AMPERSAND-001 — ``&`` symbols (M&M / M&MFIN / GVT&D) ──────────
+
+#: Real NSE/BSE F&O-eligible underlyings whose ticker carries ``&``. The ingest
+#: writes them verbatim (the partition denylist permits ``&``); before the fix
+#: the read path 500'd on them (``illegal candle symbol 'M&M'``).
+_AMPERSAND_SYMBOLS = ["M&M", "M&MFIN", "GVT&D"]
+
+
+def test_query_candles_accepts_ampersand_symbol(store: InstrumentStore, tmp_path: Path) -> None:
+    # M&M (Mahindra & Mahindra) is a real F&O underlying — the read path must
+    # SERVE its candles, not raise ``illegal candle symbol`` (the 500 bug).
+    _write_candles(tmp_path, symbol="M&M", interval="1minute")
+    out = query_candles(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="M&M",
+        interval="1minute",
+        limit=50,
+    )
+    assert len(out["rows"]) == 2  # both written bars round-trip through the ``&`` path
+
+
+@pytest.mark.parametrize("symbol", _AMPERSAND_SYMBOLS)
+def test_ampersand_symbol_write_read_validators_agree(symbol: str) -> None:
+    # CLAUDE.md §11 COMMON: the partition WRITE validator and the dashboard READ
+    # validator must accept exactly the same real symbols — neither may drift
+    # and reject what the other stored (the root cause of the M&M 500).
+    build_partition_path(  # write side: must not raise
+        lake_root=Path("/lake"),
+        exchange="NSE",
+        segment="CASH",
+        symbol=symbol,
+        interval="1day",
+        year=2026,
+        month=1,
+    )
+    _validate_candle_coords("NSE", "CASH", symbol, "1day")  # read side: must not raise
+
+
+@pytest.mark.parametrize("bad", ["FOO[BAR]", "FOO{1}", "A B", "x*", "y?z"])
+def test_validate_candle_coords_still_rejects_glob_and_space(bad: str) -> None:
+    # Admitting ``&`` must NOT loosen the glob-injection / whitespace guard:
+    # ``* ? [ ] { }`` and spaces stay illegal so a symbol can never widen the
+    # bound ``read_parquet`` glob.
+    with pytest.raises(ValueError, match="illegal candle symbol"):
+        _validate_candle_coords("NSE", "CASH", bad, "1day")
 
 
 @pytest.mark.parametrize("field", ["start", "end"])

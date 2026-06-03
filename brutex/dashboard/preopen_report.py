@@ -64,6 +64,19 @@ _ZIP_EPOCH: Final[tuple[int, int, int, int, int, int]] = (1980, 1, 1, 0, 0, 0)
 #: Two-decimal display quantum (the report is a human-facing NSE-style sheet).
 _2DP: Final[Decimal] = Decimal("0.01")
 
+#: Cell-style indices into the ``xl/styles.xml`` ``<cellXfs>`` table
+#: (see :data:`_STYLES`). 0 is the implicit default, so it is omitted from
+#: the cell markup.
+_STYLE_NORMAL: Final[int] = 0  # default font, General alignment
+_STYLE_BOLD: Final[int] = 1  # bold font — the header row + the SYMBOL column
+_STYLE_TITLE: Final[int] = 2  # bold + centred — the merged date-range title row
+
+#: Per-column display widths (Excel "character" units), aligned 1:1 to
+#: :data:`REPORT_COLUMNS`, so the sheet opens with precise, readable columns
+#: instead of the cramped OOXML default width (operator: "make the spaces
+#: precise"). DEC-PREOPEN-XLSX-STYLE-001.
+_COL_WIDTHS: Final[tuple[float, ...]] = (12.0, 16.0, 13.0, 12.0, 11.0, 11.0)
+
 
 @dataclass(frozen=True, slots=True)
 class PreOpenRow:
@@ -210,14 +223,21 @@ def build_preopen_rows(
     return rows
 
 
-def _cell_xml(col: int, row: int, value: str | float) -> str:
-    """Render one ``<c>`` cell — numeric for int/float, inline-string otherwise."""
+def _cell_xml(col: int, row: int, value: str | float, style: int = _STYLE_NORMAL) -> str:
+    """Render one ``<c>`` cell — numeric for int/float, inline-string otherwise.
+
+    *style* is a 0-based index into the ``xl/styles.xml`` ``<cellXfs>`` table
+    (:data:`_STYLE_NORMAL` / :data:`_STYLE_BOLD` / :data:`_STYLE_TITLE`). The
+    default (0) is omitted from the markup since ``s="0"`` is the implicit
+    per-cell style.
+    """
     ref = f"{_col_letter(col)}{row}"
+    s_attr = f' s="{style}"' if style else ""
     if isinstance(value, bool):  # pragma: no cover — defensive; never a bool cell
         value = str(value)
     if isinstance(value, (int, float)):
-        return f'<c r="{ref}"><v>{value!r}</v></c>'
-    return f'<c r="{ref}" t="inlineStr"><is><t>{_xml_escape(value)}</t></is></c>'
+        return f'<c r="{ref}"{s_attr}><v>{value!r}</v></c>'
+    return f'<c r="{ref}"{s_attr} t="inlineStr"><is><t>{_xml_escape(value)}</t></is></c>'
 
 
 def _xml_escape(text: str) -> str:
@@ -240,25 +260,58 @@ def _col_letter(idx: int) -> str:
     return letters
 
 
-def _sheet_xml(header: tuple[str, ...], data: Sequence[tuple[str | float, ...]]) -> str:
-    """Build ``sheet1.xml`` with a frozen header row + auto-filter (no styles)."""
-    last_col = _col_letter(len(header) - 1)
-    last_row = len(data) + 1
+def _cols_xml(ncols: int) -> str:
+    """Build the ``<cols>`` block giving each column a precise display width."""
+    cols = "".join(
+        f'<col min="{i + 1}" max="{i + 1}" width="{_COL_WIDTHS[i]:g}" customWidth="1"/>'
+        for i in range(ncols)
+    )
+    return f"<cols>{cols}</cols>"
+
+
+def _sheet_xml(
+    header: tuple[str, ...], data: Sequence[tuple[str | float, ...]], *, title: str
+) -> str:
+    """Build ``sheet1.xml`` — the NSE-pre-open look, dependency-free.
+
+    Row 1 is a merged, **bold, centred TITLE** carrying the report's date range
+    (matching the NSE sheet's titled look — and the one place a *range* report
+    states its dates beyond the per-row ``DATE`` column); row 2 is the **bold,
+    frozen header**; data starts at row 3 with a **bold SYMBOL column**. Precise
+    per-column widths + an auto-filter on the header + a frozen title/header keep
+    the sheet readable the instant it opens. Element order follows the OOXML
+    ``CT_Worksheet`` sequence (``sheetViews`` → ``cols`` → ``sheetData`` →
+    ``autoFilter`` → ``mergeCells``) so Excel / Numbers open it without a repair
+    prompt.
+    """
+    ncols = len(header)
+    last_col = _col_letter(ncols - 1)
+    last_row = len(data) + 2  # row 1 title + row 2 header + N data rows
+    symbol_col = header.index("SYMBOL")
     out = [
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
         '<sheetViews><sheetView workbookViewId="0">',
-        '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>',
+        '<pane ySplit="2" topLeftCell="A3" activePane="bottomLeft" state="frozen"/>',
         "</sheetView></sheetViews>",
+        _cols_xml(ncols),
         "<sheetData>",
-        '<row r="1">' + "".join(_cell_xml(c, 1, h) for c, h in enumerate(header)) + "</row>",
+        # Row 1 — the merged, bold, centred date-range title.
+        f'<row r="1">{_cell_xml(0, 1, title, _STYLE_TITLE)}</row>',
+        # Row 2 — the bold header.
+        '<row r="2">'
+        + "".join(_cell_xml(c, 2, h, _STYLE_BOLD) for c, h in enumerate(header))
+        + "</row>",
     ]
-    for r, record in enumerate(data, start=2):
-        out.append(
-            f'<row r="{r}">' + "".join(_cell_xml(c, r, v) for c, v in enumerate(record)) + "</row>"
+    for r, record in enumerate(data, start=3):
+        cells = "".join(
+            _cell_xml(c, r, v, _STYLE_BOLD if c == symbol_col else _STYLE_NORMAL)
+            for c, v in enumerate(record)
         )
+        out.append(f'<row r="{r}">{cells}</row>')
     out.append("</sheetData>")
-    out.append(f'<autoFilter ref="A1:{last_col}{last_row}"/>')
+    out.append(f'<autoFilter ref="A2:{last_col}{last_row}"/>')
+    out.append(f'<mergeCells count="1"><mergeCell ref="A1:{last_col}1"/></mergeCells>')
     out.append("</worksheet>")
     return "".join(out)
 
@@ -270,6 +323,7 @@ _CONTENT_TYPES: Final[str] = (
     '<Default Extension="xml" ContentType="application/xml"/>'
     '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
     '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
     "</Types>"
 )
 _ROOT_RELS: Final[str] = (
@@ -288,26 +342,74 @@ _WORKBOOK_RELS: Final[str] = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
     '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
     "</Relationships>"
 )
 
+#: The workbook stylesheet: a default font (xf 0), a **bold** font (xf 1, the
+#: header + SYMBOL column) and a **bold + horizontally-centred** font (xf 2, the
+#: merged title row). The two mandatory default fills (``none`` + ``gray125``)
+#: and the empty border keep strict OOXML consumers (Excel) happy.
+#: DEC-PREOPEN-XLSX-STYLE-001.
+_STYLES: Final[str] = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+    '<fonts count="2">'
+    '<font><sz val="11"/><name val="Calibri"/></font>'
+    '<font><b/><sz val="11"/><name val="Calibri"/></font>'
+    "</fonts>"
+    '<fills count="2">'
+    '<fill><patternFill patternType="none"/></fill>'
+    '<fill><patternFill patternType="gray125"/></fill>'
+    "</fills>"
+    '<borders count="1"><border/></borders>'
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+    '<cellXfs count="3">'
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1">'
+    '<alignment horizontal="center"/></xf>'
+    "</cellXfs>"
+    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+    "</styleSheet>"
+)
 
-def render_xlsx(rows: list[PreOpenRow]) -> bytes:
+
+def _default_title(rows: list[PreOpenRow]) -> str:
+    """Derive the sheet title from *rows* when the caller passes none.
+
+    Rows are sorted by ``(day, symbol)``, so the first/last row bound the date
+    range. An empty report falls back to the bare ``"Pre-Open Market"`` label.
+    """
+    if not rows:
+        return "Pre-Open Market"
+    return f"Pre-Open Market: {rows[0].day.isoformat()} to {rows[-1].day.isoformat()}"
+
+
+def render_xlsx(rows: list[PreOpenRow], *, title: str | None = None) -> bytes:
     """Render *rows* to a deterministic, dependency-free ``.xlsx`` byte string.
 
-    A minimal valid OOXML workbook (one ``Pre-Open`` sheet, frozen header row,
-    auto-filter) written with the stdlib :mod:`zipfile` + a FIXED member
-    timestamp, so the same rows always produce byte-identical output
+    A minimal valid OOXML workbook (one ``Pre-Open`` sheet: a bold, centred
+    date-range title row, a bold + frozen header, a bold SYMBOL column and
+    precise per-column widths) written with the stdlib :mod:`zipfile` + a FIXED
+    member timestamp, so the same rows always produce byte-identical output
     (reproducible, CLAUDE.md §2 Rule 7). An empty *rows* yields a valid
-    header-only workbook.
+    title + header-only workbook.
+
+    *title* sets the row-1 banner (the report's date range — how a multi-day
+    *range* report states its dates, complementing the per-row ``DATE``
+    column); when omitted it is derived from the rows' date span via
+    :func:`_default_title`.
     """
     data = [r.display_cells() for r in rows]
+    sheet_title = title if title is not None else _default_title(rows)
     parts = {
         "[Content_Types].xml": _CONTENT_TYPES,
         "_rels/.rels": _ROOT_RELS,
         "xl/workbook.xml": _WORKBOOK,
         "xl/_rels/workbook.xml.rels": _WORKBOOK_RELS,
-        "xl/worksheets/sheet1.xml": _sheet_xml(REPORT_COLUMNS, data),
+        "xl/styles.xml": _STYLES,
+        "xl/worksheets/sheet1.xml": _sheet_xml(REPORT_COLUMNS, data, title=sheet_title),
     }
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:

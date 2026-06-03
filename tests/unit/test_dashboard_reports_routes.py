@@ -107,6 +107,50 @@ def test_xlsx_symbol_filter(tmp_path: Path) -> None:
     assert "COALINDIA" not in sheet
 
 
+def _write_ampersand_symbol(tmp_path: Path) -> None:
+    """Seed the lake with M&M (a real ``&`` underlying) — both report intervals."""
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="M&M",
+        interval="1day",
+        bars=[
+            _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="2900", close="2950.50"),
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="2960", close="2975"),
+        ],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="M&M",
+        interval="1minute",
+        bars=[_bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="2960.00", close="2965")],
+    )
+
+
+def test_xlsx_all_symbols_with_ampersand_no_500(tmp_path: Path) -> None:
+    # Reproduces the reported crash: an "all symbols" download (no ``?symbols=``)
+    # over a lake holding M&M used to 500 with ``ValueError: illegal candle
+    # symbol 'M&M'``. It must now stream a valid workbook with M&M included.
+    _write_ampersand_symbol(tmp_path)
+    resp = _client(tmp_path).get("/api/v1/reports/preopen.xlsx?from=2024-01-01&to=2024-12-31")
+    assert resp.status_code == 200  # was 500 before DEC-PREOPEN-AMPERSAND-001
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        sheet = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+    assert "M&amp;M" in sheet  # the once-crashing symbol now renders (XML-escaped)
+    assert "COALINDIA" in sheet  # and the rest of the report is intact
+
+
+def test_xlsx_title_carries_requested_range(tmp_path: Path) -> None:
+    # The row-1 banner states the requested date range (how a multi-day range
+    # report conveys its dates beyond the per-row DATE column).
+    resp = _client(tmp_path).get("/api/v1/reports/preopen.xlsx?from=2024-01-01&to=2024-12-31")
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        sheet = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+    assert "Pre-Open Market: 2024-01-01 to 2024-12-31" in sheet
+
+
 def test_xlsx_bad_date_is_400(tmp_path: Path) -> None:
     resp = _client(tmp_path).get("/api/v1/reports/preopen.xlsx?from=not-a-date&to=2024-12-31")
     assert resp.status_code == 400

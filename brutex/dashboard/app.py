@@ -1107,8 +1107,9 @@ def build_app(
             else []
         )
         filename = f"preopen_{start_d.isoformat()}_{end_d.isoformat()}.xlsx"
+        title = f"Pre-Open Market: {start_d.isoformat()} to {end_d.isoformat()}"
         return Response(
-            content=render_xlsx(rows),
+            content=render_xlsx(rows, title=title),
             media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
