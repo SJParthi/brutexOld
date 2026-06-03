@@ -50,6 +50,8 @@ from brutex.adapters.dhan.auth import dhan_creds_present
 from brutex.adapters.dhan.run_ingest import ProgressHook, run_dhan_spot_ingest
 from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
 from brutex.adapters.protocol import MarketAdapter
+from brutex.data.fetch_coverage import FetchCoverage
+from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.models import Instrument
 
@@ -479,6 +481,7 @@ def pull_all_spot(
     now: datetime | None = None,
     adapter_factory: BulkAdapterFactory | None = None,
     on_progress: ProgressHook | None = None,
+    coverage: FetchCoverage | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, previous day]`` range.
 
@@ -504,6 +507,13 @@ def pull_all_spot(
     adapter_factory
         Override the bulk ``(adapter, sink)`` builder; defaults to the
         synthetic builder when *dry_run* else the live builder.
+    coverage
+        Optional pre-seeded skip-ledger. On a **live** pull (``dry_run`` False),
+        ``None`` (the default) is replaced by the persisted ledger
+        (``<lake_root>/fetch_coverage.json``) so already-pulled windows are
+        skipped and the windows completed by this run are saved back — a re-pull
+        never re-burns the Dhan quota on data already in the lake
+        (DEC-FETCH-COVERAGE-WIRING-001). Dry-run ignores it (null sink).
 
     Returns
     -------
@@ -521,6 +531,10 @@ def pull_all_spot(
     if adapter_factory is None:
         adapter_factory = _build_dry_run_bulk_adapter if dry_run else _build_live_bulk_adapter
     adapter, sink = adapter_factory(lake_root, instruments)
+
+    # Skip windows already in the lake on a live re-pull (no wasted Dhan quota);
+    # DEC-FETCH-COVERAGE-WIRING-001.
+    coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
 
     _LOG.info(
         "universe.pull_all.start",
@@ -540,7 +554,9 @@ def pull_all_spot(
         on_rate_limit=on_rate_limit,
         on_success=on_success,
         on_progress=on_progress,
+        coverage=coverage,
     )
+    end_pull_coverage(coverage, lake_root, dry_run=dry_run)
     failure_keys = {(f.symbol, f.interval) for f in report.failures}
     results: list[SymbolPullResult] = []
     for instrument in instruments:
@@ -583,6 +599,7 @@ def pull_candles(
     dry_run: bool,
     adapter_factory: AdapterFactory | None = None,
     on_progress: ProgressHook | None = None,
+    coverage: FetchCoverage | None = None,
 ) -> PullCandlesReport:
     """Ingest *instrument*'s spot candles over a date range (Dhan model).
 
@@ -629,6 +646,13 @@ def pull_candles(
         synthetic builder when *dry_run* is ``True`` and to the live Dhan
         builder otherwise. Tests inject a fake factory to exercise the
         non-dry-run branch and the per-interval outcomes without network.
+    coverage
+        Optional pre-seeded skip-ledger. On a **live** pull (``dry_run`` False),
+        ``None`` (the default) is replaced by the persisted ledger
+        (``<lake_root>/fetch_coverage.json``) so already-pulled windows are
+        skipped and this run's completed windows are saved back — a re-pull never
+        re-burns the Dhan quota on data already in the lake
+        (DEC-FETCH-COVERAGE-WIRING-001). Dry-run ignores it (null sink).
 
     Returns
     -------
@@ -662,6 +686,10 @@ def pull_candles(
         adapter_factory = _build_dry_run_adapter if dry_run else _build_live_pull_adapter
     adapter, sink = adapter_factory(lake_root, instrument)
 
+    # Skip windows already in the lake on a live re-pull (no wasted Dhan quota);
+    # DEC-FETCH-COVERAGE-WIRING-001.
+    coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
+
     _LOG.info(
         "universe.pull.start",
         symbol=symbol,
@@ -684,7 +712,9 @@ def pull_candles(
         on_rate_limit=on_rate_limit,
         on_success=on_success,
         on_progress=on_progress,
+        coverage=coverage,
     )
+    end_pull_coverage(coverage, lake_root, dry_run=dry_run)
 
     failure_keys = {(f.symbol, f.interval) for f in report.failures}
     timeframes: list[TimeframeResult] = []
