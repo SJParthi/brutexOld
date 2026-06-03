@@ -1,0 +1,84 @@
+# The Stage-4 gauntlet — all 9 "is this strategy real?" filters at a glance
+
+> **Decision:** DEC-STAT-LOCKBOX-MC-001 (`docs/MIGRATION.md` #432) — the entry
+> that completes the engine set. **Spec:** `TRACK1_BACKTEST_SPEC.md` §"Stage 4".
+>
+> Plain-English companion to the code. Every claim is backed by a module +
+> a cited paper (CLAUDE.md Golden Rule #1 — no hallucination).
+
+---
+
+## The one-sentence problem
+
+> *"My brute-force found a strategy that looks amazing. Before I trust real
+> money to it, prove to me — nine different ways — that it isn't luck,
+> overfitting, or the exit logic doing all the work."*
+
+Stage 4 is the **final gauntlet**: nine independent statistical filters. A
+candidate must survive **all** of them. Each catches a *different* way a
+backtest can lie. As of #432, **all nine engines are built** (this PR added
+the last two — Lockbox + Monte-Carlo).
+
+---
+
+## The 9 filters — what each one catches (the table)
+
+| # | Filter | The lie it catches (plain English) | Pass rule | Built |
+|---|---|---|---|---|
+| 1 | Top-K composite | "keep only the genuinely best candidates" — a ranking pre-filter | keep top-K per group | ✅ (staging) |
+| 2 | **Deflated Sharpe** | "a high Sharpe is unremarkable once you tried thousands of strategies" | `DSR` clears the deflated bar | ✅ #430 |
+| 3 | **CPCV** | "it only worked on one lucky train/test split" | positive Sharpe on enough of the `C(16,8)` folds | ✅ #428 |
+| 4 | **Reality Check / SPA** | "the *best-of-N* beating the benchmark is just best-of-N luck" | SPA p-value `< 0.05` | ✅ #431 |
+| 5 | **PBO** | "it's overfit — the in-sample best is below-median out-of-sample" | `PBO` probability low | ✅ #430 |
+| 6 | **Romano-Wolf** | "which specific strategies are real?" — multiple-testing, not Bonferroni | in the FWER rejection set | ✅ #431 |
+| 7 | **Walk-Forward ×3** | "it's curve-fit to one regime / needs a specific lookback" | positive Sharpe in ≥12/16 walks, all 3 variants | ✅ #428 |
+| 8 | **Lockbox** | "it falls apart on data NO prior stage ever saw" | ≥500 held-out trades, Sharpe within 30% + MDD within 50% of training | ✅ **#432 (this PR)** |
+| 9 | **Monte-Carlo** | "the EXIT logic does all the work — random entries would look just as good" | real Sharpe beats ≥99% of entry-shuffles (p `< 0.01`) | ✅ **#432 (this PR)** |
+
+⭐ A strategy that survives all nine has been stress-tested against
+data-snooping, overfitting, regime-dependence, held-out collapse, and
+"is the signal even informative?" — the five ways backtests most often lie.
+
+---
+
+## The two new ones (this PR), in 20 seconds each
+
+**#8 Lockbox** — set aside the most recent trades that **no earlier stage was
+allowed to peek at**. Re-score the survivor there exactly once. If it needs
+more than the default 6 months to gather 500 trades, the window quietly
+extends backward (never into the training data). If it can't reach 500 trades
+at all → rejected for *insufficient evidence*. If its Sharpe drops > 30% or
+its drawdown grows > 50% vs training → rejected.
+
+**#9 Monte-Carlo** — keep the exit logic, but throw the **entry signals at
+random** 1,000 times. If the real strategy can't beat 99% of those random-entry
+versions, the entry signal wasn't actually telling you anything — the exit grid
+was doing the work. This is the *only* test that catches that failure mode.
+
+---
+
+## Guarantees — honest, no illusion
+
+| Promise | Status | How |
+|---|---|---|
+| Same input + same seed → identical result, bit-for-bit | ✅ Guaranteed | Lockbox is pure (no RNG); Monte-Carlo uses one mandatory seed; golden + property tests |
+| No `NaN` / `inf` ever leaks out | ✅ Guaranteed | every degenerate input raises a *clear error*; Lockbox returns `None` (not NaN) for an undefined Sharpe |
+| No invented thresholds | ✅ Guaranteed | 6-month / 500-trade / 30% / 50% are the spec's institutional defaults; the MC p-value is the cited Phipson-Smyth (2010) estimator |
+| 100% line + branch test coverage | ✅ Guaranteed | per-module CI gate `--cov-fail-under=100` (lockbox 93/30, monte_carlo 42/18) |
+| Runs in O(1) time | 🚫 **No — and we say so** | Lockbox is `O(trades)`, Monte-Carlo is `O(1,000 re-runs)`; offline Stage-4 batch work, **not** a per-bar hot path |
+
+> **O(1) honesty (Golden Rule #10):** the engine's *hot paths* (bar lookup,
+> dedup, mask eval — billions of times) are O(1). A held-out re-score and a
+> 1,000-shuffle permutation test are fundamentally not O(1) and are never
+> claimed to be — claiming otherwise would be a hallucination.
+
+---
+
+## What's left after this PR
+
+All nine **filter engines** now exist as standalone, tested, pure functions.
+The remaining Stage-4 work is the **cascade runner** that chains them
+(DSR → CPCV → SPA → PBO → RW → WFO → Lockbox → Monte-Carlo) over real
+per-(instrument, timeframe) leaderboards, and wiring their outputs into the
+result-row schema. That's a separate, separately-tracked step — stated plainly
+so nothing here is over-claimed.
