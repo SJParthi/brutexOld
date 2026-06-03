@@ -9,6 +9,7 @@ a real token + the ``urllib`` transport, both absent in CI
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -30,6 +31,7 @@ from brutex.dashboard.pull_controller import (
 from brutex.data.models import CandleBar
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from structlog.testing import capture_logs
 
 
 def _index(symbol: str = "13") -> Instrument:
@@ -528,3 +530,71 @@ class TestPullAllSpot:
             "25 1day",
         ]
         assert all(failed is False for _, _, failed in events)
+
+
+def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
+    """All captured events with ``event == name`` (in emission order)."""
+    return [e for e in logs if e["event"] == name]
+
+
+_LOG_NOW = datetime(2021, 1, 6, tzinfo=UTC)  # tiny window so the synthetic run is fast
+
+
+class TestPullControllerCorrelation:
+    """One ``pull_id`` ties a whole pull together (DEC-DHAN-INGEST-LOGGING-001).
+
+    The controller opens a ``pull_id_scope``, so the start/done summary AND the
+    ingest spine's ``ingest.*`` events (emitted by the real dry-run spine) all
+    carry the same id — the operator's one grep key for a pull.
+    """
+
+    def test_pull_candles_correlates_start_done_and_spine(self) -> None:
+        with capture_logs() as logs:
+            pull_candles(
+                _index("13"),
+                lake_root=Path("/unused"),
+                from_date="2021-01-01",
+                to_date="2021-01-05",
+                dry_run=True,
+                pull_id="ctlpull00001",
+            )
+        (start,) = _events(logs, "universe.pull.start")
+        (done,) = _events(logs, "universe.pull.done")
+        assert start["pull_id"] == "ctlpull00001"
+        assert done["pull_id"] == "ctlpull00001"
+        # The spine inherited the SAME id (no plumbing — via the bound scope).
+        underlying = _events(logs, "ingest.underlying")
+        assert underlying and all(e["pull_id"] == "ctlpull00001" for e in underlying)
+        windows = _events(logs, "ingest.window")
+        assert windows and all(e["pull_id"] == "ctlpull00001" for e in windows)
+
+    def test_pull_candles_mints_a_pull_id_when_omitted(self) -> None:
+        with capture_logs() as logs:
+            pull_candles(
+                _index("13"),
+                lake_root=Path("/unused"),
+                from_date="2021-01-01",
+                to_date="2021-01-05",
+                dry_run=True,
+            )
+        (start,) = _events(logs, "universe.pull.start")
+        (done,) = _events(logs, "universe.pull.done")
+        pid = start["pull_id"]
+        assert isinstance(pid, str) and len(pid) == 12  # a freshly minted id
+        assert done["pull_id"] == pid  # start + done share it
+
+    def test_pull_all_spot_correlates_under_one_pull_id(self) -> None:
+        with capture_logs() as logs:
+            pull_all_spot(
+                [_index("13")],
+                lake_root=Path("/unused"),
+                dry_run=True,
+                now=_LOG_NOW,
+                pull_id="ctlpull00003",
+            )
+        (start,) = _events(logs, "universe.pull_all.start")
+        (done,) = _events(logs, "universe.pull_all.done")
+        assert start["pull_id"] == "ctlpull00003"
+        assert done["pull_id"] == "ctlpull00003"
+        underlying = _events(logs, "ingest.underlying")
+        assert underlying and all(e["pull_id"] == "ctlpull00003" for e in underlying)

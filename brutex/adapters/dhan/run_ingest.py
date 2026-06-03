@@ -23,12 +23,22 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
 
+import structlog
+
 from brutex.adapters.dhan.errors import DhanError
 from brutex.adapters.dhan.ingest import IngestReport, Pacer, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.sink import BarSink
 from brutex.models import Instrument
+from brutex.observability.correlation import current_pull_id
+
+#: Structured logger — emits the per-underlying spot rollup at INFO
+#: (``ingest.underlying``) + the terminal-failure cause at WARNING
+#: (``ingest.quarantine``), both carrying the pull's ``pull_id``
+#: (DEC-DHAN-INGEST-LOGGING-001). The per-window / per-series DEBUG detail is one
+#: layer down in ``ingest_spot``.
+_LOG = structlog.get_logger("brutex.adapters.dhan.run_ingest")
 
 #: Live-progress hook fired once per ``(symbol, interval)`` pair after it is
 #: processed: ``(label, bars_appended, failed)``. Lets a caller stream
@@ -130,9 +140,13 @@ def run_dhan_spot_ingest(
         terminal failures. **Never raises** on a Dhan error — a terminal
         failure on one pair is recorded and the run continues.
     """
+    pull_id = current_pull_id()
     pairs: dict[tuple[str, str], IngestReport] = {}
     failures: list[PairFailure] = []
     for instrument in instruments:
+        # Per-instrument accumulators for the INFO rollup below (the engine
+        # symbol is the spot "underlying"; its intervals are its series).
+        completed = quarantined = inst_bars = inst_windows = 0
         for interval in intervals:
             label = f"{instrument.symbol_name} {interval}"
             try:
@@ -152,12 +166,36 @@ def run_dhan_spot_ingest(
                 failures.append(
                     PairFailure(symbol=instrument.symbol_name, interval=interval, error=str(exc))
                 )
+                quarantined += 1
+                # Quarantine-cause nook: WHY this pair was dropped (the bare
+                # failed=N count otherwise hides the terminal Dhan error).
+                _LOG.warning(
+                    "ingest.quarantine",
+                    pull_id=pull_id,
+                    symbol=instrument.symbol_name,
+                    interval=interval,
+                    error=str(exc),
+                )
                 if on_progress is not None:
                     on_progress(label, 0, True)
                 continue
             pairs[instrument.symbol_name, interval] = report
+            completed += 1
+            inst_bars += report.bars_appended
+            inst_windows += report.windows
             if on_progress is not None:
                 on_progress(label, report.bars_appended, False)
+        # Per-underlying rollup — INFO, one line per instrument (not per window),
+        # so a bulk pull's progress is visible without the DEBUG firehose.
+        _LOG.info(
+            "ingest.underlying",
+            pull_id=pull_id,
+            symbol=instrument.symbol_name,
+            series_completed=completed,
+            series_failed=quarantined,
+            bars_appended=inst_bars,
+            windows=inst_windows,
+        )
     return DhanIngestReport(pairs=pairs, failures=tuple(failures))
 
 

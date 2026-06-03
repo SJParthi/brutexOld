@@ -2,7 +2,7 @@
 
 The orchestration the cli/dashboard call to fill the **options** lake
 (DEC-DHAN-PULL-SCOPE-001, MIGRATION #348): for each underlying, fan out over
-the ATM strike window × ``WEEK``/``MONTH`` expiry flags × the expiry codes ×
+the ATM strike window × its **per-kind** expiry flags × the expiry codes ×
 ``CALL``/``PUT``, driving the proven
 :func:`~brutex.adapters.dhan.option_ingest.ingest_rolling_option_series`
 per series (CLAUDE.md §11 COMMON — no copy-paste of the window/parse/sink
@@ -18,8 +18,14 @@ already retried/skipped inside ``ingest_rolling_option_series``.
 
 The strike window matches the documented Dhan rolling-option bounds
 (``docs/dhan-ref/06``): **ATM±10** for the brute-force indices (near-expiry),
-**ATM±3** for stocks. The options lake is **LAKE-only / REFERENCE_ONLY** — the
-brute-force engine still sweeps only the 3 indices (CLAUDE.md §3; DEC-P0-063).
+**ATM±3** for stocks. The **expiry set is per-kind too**: indices fan
+``WEEK``+``MONTH`` but Indian single-stock options are **monthly-only** (NSE
+single stocks carry no weekly series — only some indices carry weeklies), so a
+stock fans ``MONTH`` ONLY. Fanning ``WEEK`` for a stock can only ever return
+empty + waste Dhan calls/quota (CLAUDE.md §2 Rule 6;
+DEC-DHAN-STOCK-MONTHLY-ONLY-001). The options lake is
+**LAKE-only / REFERENCE_ONLY** — the brute-force engine still sweeps only the
+3 indices (CLAUDE.md §3; DEC-P0-063).
 """
 
 from __future__ import annotations
@@ -27,6 +33,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
+
+import structlog
 
 from brutex.adapters.dhan.constants import DRV_OPTION_TYPES, EXPIRY_FLAGS
 from brutex.adapters.dhan.errors import DhanError
@@ -39,12 +47,31 @@ from brutex.adapters.dhan.option_ingest import (
     ingest_rolling_option_series,
 )
 from brutex.data.fetch_coverage import FetchCoverage
+from brutex.observability.correlation import current_pull_id
+
+#: Structured logger — emits the per-underlying options rollup at INFO
+#: (``ingest.underlying``) + the per-series terminal-failure cause at WARNING
+#: (``ingest.quarantine``), both carrying the pull's ``pull_id``
+#: (DEC-DHAN-INGEST-LOGGING-001). The per-window / per-series DEBUG detail is one
+#: layer down in ``ingest_rolling_option_series``.
+_LOG = structlog.get_logger("brutex.adapters.dhan.option_universe_ingest")
 
 #: ATM strike-window half-widths (DEC-DHAN-PULL-SCOPE-001) — the documented
 #: Dhan rolling-option bounds (``docs/dhan-ref/06``): indices ATM±10 (21
 #: strikes), stocks ATM±3 (7 strikes).
 INDEX_STRIKE_OFFSETS: int = 10
 STOCK_STRIKE_OFFSETS: int = 3
+
+#: Per-kind ``expiryFlag`` fan-out set for a SINGLE STOCK
+#: (DEC-DHAN-STOCK-MONTHLY-ONLY-001). Indian single-stock options are
+#: **monthly-only** — NSE single stocks have no weekly option series; only some
+#: INDICES carry weeklies. So a stock fans ``MONTH`` ONLY, while an index keeps
+#: the full :data:`~brutex.adapters.dhan.constants.EXPIRY_FLAGS`
+#: (``WEEK``+``MONTH``). Fanning ``WEEK`` for a stock can only ever return empty
+#: → wasted Dhan calls + quota (CLAUDE.md §2 Rule 6); this set elides them — it
+#: only ever REDUCES the fan-out, never adds. (Microstructure fact paired with
+#: the decision ID per Golden Rule #1 — no hallucination.)
+STOCK_EXPIRY_FLAGS: tuple[str, ...] = ("MONTH",)
 
 #: The expiry depths the rolling-option endpoint serves — Near, Next, Far
 #: (DEC-DHAN-EXPIRY-CODES-001). `/charts/rollingoption` documents
@@ -97,7 +124,7 @@ def strike_window(offsets: int) -> list[str]:
 
 @dataclass(frozen=True, slots=True)
 class OptionUnderlying:
-    """One underlying to fan out over (its id, segment, instrument, width)."""
+    """One underlying to fan out over (its id, segment, instrument, width, expiry set)."""
 
     security_id: str
     exch_id: str  # ``NSE`` / ``BSE`` — promoted to the expired-options table
@@ -105,6 +132,11 @@ class OptionUnderlying:
     exchange_segment: str
     instrument: str  # ``OPTIDX`` (index) / ``OPTSTK`` (stock)
     strike_offsets: int
+    #: Per-kind expiry-flag fan-out set (DEC-DHAN-STOCK-MONTHLY-ONLY-001):
+    #: ``EXPIRY_FLAGS`` (``WEEK``+``MONTH``) for an index, ``STOCK_EXPIRY_FLAGS``
+    #: (``MONTH`` only) for a single stock. Defaults to the index set so a
+    #: hand-built underlying never silently drops a flag.
+    expiry_flags: tuple[str, ...] = EXPIRY_FLAGS
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +196,7 @@ def run_dhan_options_ingest(
     underlyings: Sequence[OptionUnderlying],
     start: date,
     end: date,
-    expiry_flags: Sequence[str] = EXPIRY_FLAGS,
+    expiry_flags: Sequence[str] | None = None,
     expiry_codes: Sequence[int] = DEFAULT_EXPIRY_CODES,
     option_types: Sequence[str] = DRV_OPTION_TYPES,
     required_data: Sequence[str] = ALL_REQUIRED_DATA,
@@ -174,8 +206,8 @@ def run_dhan_options_ingest(
 ) -> OptionsUniverseReport:
     """Fan out the rolling-option pull over the whole options universe.
 
-    For each *underlying* iterate ``strike_window(offsets) × expiry_flags ×
-    expiry_codes × option_types`` and drive
+    For each *underlying* iterate ``strike_window(offsets) ×
+    (its per-kind expiry flags) × expiry_codes × option_types`` and drive
     :func:`~brutex.adapters.dhan.option_ingest.ingest_rolling_option_series`
     per series (1-minute, session-filtered, spot-stamped). A **terminal** Dhan
     error on one series is quarantined into ``failures`` and the run continues.
@@ -189,9 +221,15 @@ def run_dhan_options_ingest(
         ``INDEX_STRIKE_OFFSETS`` / ``STOCK_STRIKE_OFFSETS``).
     start, end
         Half-open date range, shared by every series.
-    expiry_flags, expiry_codes, option_types
-        The fan-out axes — default to ``WEEK``/``MONTH``, the 4 expiry codes
-        (DEC-P0-063), and ``CALL``/``PUT``.
+    expiry_flags
+        Optional **uniform override** for the expiry-flag axis. ``None`` (the
+        default) honours each underlying's own per-kind
+        :attr:`OptionUnderlying.expiry_flags` (index ``WEEK``+``MONTH``, stock
+        ``MONTH``-only; DEC-DHAN-STOCK-MONTHLY-ONLY-001). Passing a sequence
+        forces that exact set on **every** underlying (custom / test pulls).
+    expiry_codes, option_types
+        The remaining fan-out axes — default to the near/next/far expiry codes
+        (DEC-DHAN-EXPIRY-CODES-001) and ``CALL``/``PUT``.
     required_data
         Fields to request (defaults to every documented field).
     pace
@@ -207,13 +245,22 @@ def run_dhan_options_ingest(
         Per-series :class:`OptionIngestReport` for successes + the quarantined
         terminal failures. **Never raises** on a Dhan error.
     """
+    pull_id = current_pull_id()
     series: dict[SeriesKey, OptionIngestReport] = {}
     failures: list[OptionSeriesFailure] = []
     for underlying in underlyings:
         strikes = strike_window(underlying.strike_offsets)
+        # Per-kind expiry set: each underlying carries its own (index
+        # WEEK+MONTH, stock MONTH-only; DEC-DHAN-STOCK-MONTHLY-ONLY-001). An
+        # explicit ``expiry_flags`` argument is a uniform override (custom /
+        # test pulls); ``None`` (the default) honours each underlying's own set.
+        flags = underlying.expiry_flags if expiry_flags is None else expiry_flags
         underlying_bars = 0
+        underlying_windows = 0
+        underlying_completed = 0
+        underlying_quarantined = 0
         underlying_failed = False
-        for expiry_flag in expiry_flags:
+        for expiry_flag in flags:
             for expiry_code in expiry_codes:
                 for strike in strikes:
                     for drv_option_type in option_types:
@@ -255,9 +302,39 @@ def run_dhan_options_ingest(
                                 )
                             )
                             underlying_failed = True
+                            underlying_quarantined += 1
+                            # Quarantine-cause nook: WHY this series was dropped,
+                            # with its full coordinate (the per-series analog of
+                            # the pull-level ``universe.pull_options.failures``).
+                            _LOG.warning(
+                                "ingest.quarantine",
+                                pull_id=pull_id,
+                                security_id=underlying.security_id,
+                                underlying_symbol=underlying.underlying_symbol,
+                                expiry_flag=expiry_flag,
+                                expiry_code=expiry_code,
+                                strike=strike,
+                                drv_option_type=drv_option_type,
+                                error=str(exc),
+                            )
                             continue
                         series[key] = report
                         underlying_bars += report.bars_appended
+                        underlying_windows += report.windows
+                        underlying_completed += 1
+        # Per-underlying rollup — INFO, one line per underlying (not per series),
+        # so a 16k-series fan-out's progress is visible without the DEBUG firehose.
+        _LOG.info(
+            "ingest.underlying",
+            pull_id=pull_id,
+            security_id=underlying.security_id,
+            underlying_symbol=underlying.underlying_symbol,
+            instrument=underlying.instrument,
+            series_completed=underlying_completed,
+            series_failed=underlying_quarantined,
+            bars_appended=underlying_bars,
+            windows=underlying_windows,
+        )
         # Fire the live-progress hook once the WHOLE underlying fan-out is done.
         if on_progress is not None:
             on_progress(underlying.security_id, underlying_bars, underlying_failed)
@@ -267,6 +344,7 @@ def run_dhan_options_ingest(
 __all__ = [
     "DEFAULT_EXPIRY_CODES",
     "INDEX_STRIKE_OFFSETS",
+    "STOCK_EXPIRY_FLAGS",
     "STOCK_STRIKE_OFFSETS",
     "OptionSeriesFailure",
     "OptionUnderlying",

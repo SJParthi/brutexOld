@@ -9,10 +9,11 @@ universe is the bulk case (CLAUDE.md §11 COMMON — one source, no copy-paste).
 
 For each underlying it maps the resolved :class:`~brutex.models.Instrument` to
 an :class:`~brutex.adapters.dhan.option_universe_ingest.OptionUnderlying`
-(index → ``OPTIDX`` / ATM±10, stock → ``OPTSTK`` / ATM±3;
-DEC-DHAN-PULL-SCOPE-001) and drives the proven
+(index → ``OPTIDX`` / ATM±10 / ``WEEK``+``MONTH``, stock → ``OPTSTK`` / ATM±3 /
+``MONTH``-only — Indian single-stock options are monthly-only;
+DEC-DHAN-PULL-SCOPE-001, DEC-DHAN-STOCK-MONTHLY-ONLY-001) and drives the proven
 :func:`~brutex.adapters.dhan.option_universe_ingest.run_dhan_options_ingest`
-fan-out (ATM window × ``WEEK``/``MONTH`` × the
+fan-out (ATM window × the underlying's per-kind expiry flags × the
 :data:`~brutex.adapters.dhan.option_universe_ingest.DEFAULT_EXPIRY_CODES` ×
 ``CALL``/``PUT``). Every series is **1-minute only** (DEC-DHAN-1M-ONLY-001),
 resolved relative to the underlying's spot, and each bar is stamped with its
@@ -56,6 +57,7 @@ from brutex.adapters.dhan.option_synthetic import SyntheticOptionClient
 from brutex.adapters.dhan.option_universe_ingest import (
     DEFAULT_EXPIRY_CODES,
     INDEX_STRIKE_OFFSETS,
+    STOCK_EXPIRY_FLAGS,
     STOCK_STRIKE_OFFSETS,
     OptionUnderlying,
     ProgressHook,
@@ -66,6 +68,7 @@ from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.option_sink import NullOptionBarSink
 from brutex.models import Instrument, InstrumentType
+from brutex.observability.correlation import pull_id_scope
 
 _LOG = structlog.get_logger(__name__)
 
@@ -74,8 +77,12 @@ def instrument_to_option_underlying(instrument: Instrument) -> OptionUnderlying:
     """Map a spot :class:`Instrument` to its rolling-option fan-out underlying.
 
     O(1): pure field projection. An **index** (``IDX``) fans out as ``OPTIDX``
-    with the wide ATM±10 window; an **equity** (``EQ``) as ``OPTSTK`` with the
-    ATM±3 window (DEC-DHAN-PULL-SCOPE-001). The exchange-segment is the
+    with the wide ATM±10 window AND the full ``WEEK``+``MONTH`` expiry set; an
+    **equity** (``EQ``) as ``OPTSTK`` with the ATM±3 window and the
+    ``MONTH``-only expiry set — Indian single-stock options are monthly-only
+    (NSE single stocks have no weekly series; only some indices carry weeklies),
+    so fanning ``WEEK`` for a stock would only waste Dhan calls/quota
+    (DEC-DHAN-PULL-SCOPE-001; DEC-DHAN-STOCK-MONTHLY-ONLY-001). The exchange-segment is the
     underlying's exchange in the F&O segment (``NSE_FNO`` / ``BSE_FNO``), and
     the underlying's NUMERIC ``security_id`` (the Dhan ``SECURITY_ID``; the
     renamed numeric id field, ADR-0003) is the rolling option's resolution
@@ -112,9 +119,9 @@ def instrument_to_option_underlying(instrument: Instrument) -> OptionUnderlying:
         )
     numeric_id = str(instrument.security_id)
     if instrument.instrument is InstrumentType.IDX:
-        instrument_name, offsets = "OPTIDX", INDEX_STRIKE_OFFSETS
+        instrument_name, offsets, flags = "OPTIDX", INDEX_STRIKE_OFFSETS, EXPIRY_FLAGS
     elif instrument.instrument is InstrumentType.EQ:
-        instrument_name, offsets = "OPTSTK", STOCK_STRIKE_OFFSETS
+        instrument_name, offsets, flags = "OPTSTK", STOCK_STRIKE_OFFSETS, STOCK_EXPIRY_FLAGS
     else:
         raise ValueError(
             f"{instrument.symbol_name} is a {instrument.instrument.value} — only "
@@ -127,6 +134,7 @@ def instrument_to_option_underlying(instrument: Instrument) -> OptionUnderlying:
         exchange_segment=f"{instrument.exch_id.value}_FNO",
         instrument=instrument_name,
         strike_offsets=offsets,
+        expiry_flags=flags,
     )
 
 
@@ -283,18 +291,20 @@ def pull_options(
     lake_root: Path,
     dry_run: bool,
     now: datetime | None = None,
-    expiry_flags: Sequence[str] = EXPIRY_FLAGS,
+    expiry_flags: Sequence[str] | None = None,
     expiry_codes: Sequence[int] = DEFAULT_EXPIRY_CODES,
     option_types: Sequence[str] = DRV_OPTION_TYPES,
     client_factory: OptionClientFactory | None = None,
     on_progress: ProgressHook | None = None,
     coverage: FetchCoverage | None = None,
+    pull_id: str | None = None,
 ) -> OptionsPullReport:
     """Fan-out-pull the option universe for *instruments* over ``[2021-01-01, today]``.
 
     The core behind the options pull buttons: map each *instrument* to its
-    :class:`OptionUnderlying` (index → ``OPTIDX``/ATM±10, stock →
-    ``OPTSTK``/ATM±3), then drive ONE
+    :class:`OptionUnderlying` (index → ``OPTIDX``/ATM±10/``WEEK``+``MONTH``,
+    stock → ``OPTSTK``/ATM±3/``MONTH``-only — single stocks are monthly-only,
+    DEC-DHAN-STOCK-MONTHLY-ONLY-001), then drive ONE
     :func:`~brutex.adapters.dhan.option_universe_ingest.run_dhan_options_ingest`
     pass over the whole list so the live client is built ONCE and a bad series
     is quarantined without sinking the rest. A one-element list is the
@@ -312,9 +322,14 @@ def pull_options(
     now
         Injected "current" instant (defaults to :func:`datetime.now`) — its UTC
         date is the upper bound of the full ``[2021-01-01, today]`` window.
-    expiry_flags, expiry_codes, option_types
-        The fan-out axes — default to ``WEEK``/``MONTH``, the near/next/far
-        expiry codes (DEC-DHAN-EXPIRY-CODES-001), and ``CALL``/``PUT``.
+    expiry_flags
+        Optional **uniform override** for the expiry-flag axis. ``None`` (the
+        default) honours each underlying's own per-kind set — index
+        ``WEEK``+``MONTH``, stock ``MONTH``-only (DEC-DHAN-STOCK-MONTHLY-ONLY-001);
+        passing a sequence forces it on every underlying.
+    expiry_codes, option_types
+        The remaining fan-out axes — default to the near/next/far expiry codes
+        (DEC-DHAN-EXPIRY-CODES-001) and ``CALL``/``PUT``.
     client_factory
         Override the ``(client, sink)`` builder; defaults to the synthetic
         builder when *dry_run* else the live builder. Tests inject a fake
@@ -352,91 +367,100 @@ def pull_options(
         client_factory = _build_dry_run_options if dry_run else _build_live_options
     client, sink = client_factory(lake_root)
 
-    # Load the persisted skip-ledger for a live pull so windows already in the
-    # lake are not re-fetched (no wasted Dhan quota on a re-run);
-    # DEC-FETCH-COVERAGE-WIRING-001.
-    coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
+    # Open the pull's correlation scope (DEC-DHAN-INGEST-LOGGING-001): ``pid`` is
+    # bound into the structlog contextvars for the whole fan-out, so this
+    # start/done/failures summary, the ingest spine's ``ingest.*`` events, and the
+    # already-lit transport (``dhan.call``) + rate (``rate.*``) events all share
+    # one ``pull_id``. Always unbinds on exit (no leak).
+    with pull_id_scope(pull_id) as pid:
+        # Load the persisted skip-ledger for a live pull so windows already in the
+        # lake are not re-fetched (no wasted Dhan quota on a re-run);
+        # DEC-FETCH-COVERAGE-WIRING-001.
+        coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
 
-    _LOG.info(
-        "universe.pull_options.start",
-        underlyings=len(underlyings),
-        start_date=start.date().isoformat(),
-        dry_run=dry_run,
-    )
-    pace = _live_option_pace(use_live_rate)
-    report = run_dhan_options_ingest(
-        client,
-        sink,
-        underlyings=underlyings,
-        start=start.date(),
-        end=end.date(),
-        expiry_flags=expiry_flags,
-        expiry_codes=expiry_codes,
-        option_types=option_types,
-        required_data=ALL_REQUIRED_DATA,
-        pace=pace,
-        on_progress=on_progress,
-        coverage=coverage,
-    )
-    # Persist the windows just completed so the next pull skips them.
-    end_pull_coverage(coverage, lake_root, dry_run=dry_run)
-
-    # Aggregate the per-series reports + quarantined failures by underlying.
-    failed_by_symbol: dict[str, int] = {}
-    error_counts: dict[str, int] = {}
-    for failure in report.failures:
-        failed_by_symbol[failure.security_id] = failed_by_symbol.get(failure.security_id, 0) + 1
-        error_counts[failure.error] = error_counts.get(failure.error, 0) + 1
-    completed_by_symbol: dict[str, tuple[int, int, int]] = {}
-    for (security_id, *_rest), series_report in report.series.items():
-        prev_count, prev_bars, prev_windows = completed_by_symbol.get(security_id, (0, 0, 0))
-        completed_by_symbol[security_id] = (
-            prev_count + 1,
-            prev_bars + series_report.bars_appended,
-            prev_windows + series_report.windows,
+        _LOG.info(
+            "universe.pull_options.start",
+            pull_id=pid,
+            underlyings=len(underlyings),
+            start_date=start.date().isoformat(),
+            dry_run=dry_run,
         )
+        pace = _live_option_pace(use_live_rate)
+        report = run_dhan_options_ingest(
+            client,
+            sink,
+            underlyings=underlyings,
+            start=start.date(),
+            end=end.date(),
+            expiry_flags=expiry_flags,
+            expiry_codes=expiry_codes,
+            option_types=option_types,
+            required_data=ALL_REQUIRED_DATA,
+            pace=pace,
+            on_progress=on_progress,
+            coverage=coverage,
+        )
+        # Persist the windows just completed so the next pull skips them.
+        end_pull_coverage(coverage, lake_root, dry_run=dry_run)
 
-    results: list[OptionSymbolResult] = []
-    for underlying in underlyings:
-        sid = underlying.security_id
-        completed, bars, windows = completed_by_symbol.get(sid, (0, 0, 0))
-        results.append(
-            OptionSymbolResult(
-                symbol=sid,
-                instrument=underlying.instrument,
-                series_completed=completed,
-                series_failed=failed_by_symbol.get(sid, 0),
-                bars_appended=bars,
-                windows=windows,
+        # Aggregate the per-series reports + quarantined failures by underlying.
+        failed_by_symbol: dict[str, int] = {}
+        error_counts: dict[str, int] = {}
+        for failure in report.failures:
+            failed_by_symbol[failure.security_id] = failed_by_symbol.get(failure.security_id, 0) + 1
+            error_counts[failure.error] = error_counts.get(failure.error, 0) + 1
+        completed_by_symbol: dict[str, tuple[int, int, int]] = {}
+        for (security_id, *_rest), series_report in report.series.items():
+            prev_count, prev_bars, prev_windows = completed_by_symbol.get(security_id, (0, 0, 0))
+            completed_by_symbol[security_id] = (
+                prev_count + 1,
+                prev_bars + series_report.bars_appended,
+                prev_windows + series_report.windows,
             )
-        )
 
-    pull_report = OptionsPullReport(
-        dry_run=dry_run,
-        start_date=start.date().isoformat(),
-        end_date=(end - timedelta(days=1)).date().isoformat(),
-        symbols=results,
-    )
-    # Surface WHY series failed (the silent-failure logging gap the operator
-    # flagged): a bare ``series_failed=N`` count hides the cause. Log the
-    # distinct terminal-error messages with counts so the failure is
-    # diagnosable in one glance (DEC-OPTION-SECURITY-ID-FIX-001).
-    if error_counts:
-        top_errors = sorted(error_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
-        _LOG.warning(
-            "universe.pull_options.failures",
-            total_failed=pull_report.total_series_failed,
-            distinct_errors=len(error_counts),
-            top_errors=[{"error": err[:300], "count": cnt} for err, cnt in top_errors],
+        results: list[OptionSymbolResult] = []
+        for underlying in underlyings:
+            sid = underlying.security_id
+            completed, bars, windows = completed_by_symbol.get(sid, (0, 0, 0))
+            results.append(
+                OptionSymbolResult(
+                    symbol=sid,
+                    instrument=underlying.instrument,
+                    series_completed=completed,
+                    series_failed=failed_by_symbol.get(sid, 0),
+                    bars_appended=bars,
+                    windows=windows,
+                )
+            )
+
+        pull_report = OptionsPullReport(
+            dry_run=dry_run,
+            start_date=start.date().isoformat(),
+            end_date=(end - timedelta(days=1)).date().isoformat(),
+            symbols=results,
         )
-    _LOG.info(
-        "universe.pull_options.done",
-        underlyings=pull_report.total_symbols,
-        series_completed=pull_report.total_series_completed,
-        series_failed=pull_report.total_series_failed,
-        bars=pull_report.total_bars,
-        dry_run=dry_run,
-    )
+        # Surface WHY series failed (the silent-failure logging gap the operator
+        # flagged): a bare ``series_failed=N`` count hides the cause. Log the
+        # distinct terminal-error messages with counts so the failure is
+        # diagnosable in one glance (DEC-OPTION-SECURITY-ID-FIX-001).
+        if error_counts:
+            top_errors = sorted(error_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            _LOG.warning(
+                "universe.pull_options.failures",
+                pull_id=pid,
+                total_failed=pull_report.total_series_failed,
+                distinct_errors=len(error_counts),
+                top_errors=[{"error": err[:300], "count": cnt} for err, cnt in top_errors],
+            )
+        _LOG.info(
+            "universe.pull_options.done",
+            pull_id=pid,
+            underlyings=pull_report.total_symbols,
+            series_completed=pull_report.total_series_completed,
+            series_failed=pull_report.total_series_failed,
+            bars=pull_report.total_bars,
+            dry_run=dry_run,
+        )
     return pull_report
 
 

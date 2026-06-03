@@ -1152,7 +1152,7 @@ jobs:
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
-          # DEC-STAT-SPA-001 (#424): brutex.metrics.spa — Hansen SPA, White
+          # DEC-STAT-SPA-001 (#428): brutex.metrics.spa — Hansen SPA, White
           # Reality Check, Romano-Wolf step-down (Stage-4 data-snooping filters
           # #4 + #6). 100% line+branch from the dedicated unit suite; the
           # property (test_spa_properties.py) + golden (test_spa_golden.py)

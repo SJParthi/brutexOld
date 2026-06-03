@@ -4,7 +4,7 @@ Implements the three bootstrap-based tests named in
 ``docs/TRACK1_BACKTEST_SPEC.md`` §"Stage 4 — Statistical filters" filter
 #4 (Reality Check / SPA, spec lines 389-404) and filter #6 (Romano-Wolf
 step-down, spec line 406), locked by **DEC-EXTREME-001** and ledgered in
-``docs/MIGRATION.md`` entry #424 (**DEC-STAT-SPA-001**):
+``docs/MIGRATION.md`` entry #428 (**DEC-STAT-SPA-001**):
 
 * :func:`reality_check` — **White's Reality Check** for the null that the
   best strategy in a pool does not beat the benchmark.

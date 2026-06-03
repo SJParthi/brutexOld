@@ -1,20 +1,34 @@
 """Tests for `brutex.adapters.dhan.client` — POST logic via a fake transport.
 
 100% line+branch of the non-I/O surface: header build, SSRF guard, status
-mapping, JSON parsing, timeout/transport error translation. The real
-`urllib_transport` is `# pragma: no cover` (network shim).
+mapping, JSON parsing, timeout/transport error translation, and the bounded
+latency-hygiene fast-retry (DEC-DHAN-CALL-TIMEOUT-RETRY-001 — timeout/transport/
+5xx retried, 429 + terminal errors not). The real `urllib_transport` is
+`# pragma: no cover` (network shim).
+
+Whitebox: imports the module-private `_guard_url` / `_should_fast_retry`.
 """
 
+# pyright: reportPrivateUsage=none
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 import pytest
-from brutex.adapters.dhan.client import CallMeter, DhanClient, _guard_url
+from brutex.adapters.dhan.client import (
+    _DEFAULT_RETRY_BACKOFF_S,
+    _MAX_BACKOFF_S,
+    CallMeter,
+    DhanClient,
+    _guard_url,
+    _should_fast_retry,
+)
 from brutex.adapters.dhan.constants import HEADER_ACCESS_TOKEN, HEADER_CLIENT_ID
 from brutex.adapters.dhan.errors import (
+    DhanBadRequestError,
     DhanError,
     DhanRateLimitError,
+    DhanServerError,
     DhanTimeoutError,
     DhanTransportError,
 )
@@ -36,12 +50,21 @@ class _RecordingTransport:
         return self.status, self.body
 
 
+def _noop_sleep(_seconds: float) -> None:
+    """A backoff sleep that never actually waits (deterministic, fast tests)."""
+
+
 def _client(transport: object) -> DhanClient:
+    # ``max_attempts=1`` pins the legacy single-call semantics these tests assert
+    # (exactly one transport call); the fast-retry loop is covered by
+    # ``TestFastRetry`` below.
     return DhanClient(
         access_token="jwt-abc",
         client_id="100000001",
         transport=transport,  # type: ignore[arg-type]
         base_url="https://api.dhan.co/v2/",
+        max_attempts=1,
+        sleep=_noop_sleep,
     )
 
 
@@ -167,6 +190,7 @@ class TestCallMeter:
 
 class TestPostJsonInstrumentation:
     def _metered(self, transport: object, *, log_every: int) -> DhanClient:
+        # Single-attempt (see ``_client``): one transport call ⇒ one meter record.
         return DhanClient(
             access_token="jwt-abc",
             client_id="100000001",
@@ -174,6 +198,8 @@ class TestPostJsonInstrumentation:
             base_url="https://api.dhan.co/v2/",
             clock=_StepClock(0.1),
             log_every=log_every,
+            max_attempts=1,
+            sleep=_noop_sleep,
         )
 
     def test_each_call_records_measured_latency(self) -> None:
@@ -204,3 +230,163 @@ class TestPostJsonInstrumentation:
         with pytest.raises(DhanTimeoutError):
             client.post_json("charts/intraday", {})
         assert client.meter.count == 1  # a failed call's latency is NOT invisible
+
+
+#: One scripted transport outcome: an exception to RAISE, or a (status, body) to RETURN.
+_Outcome = BaseException | tuple[int, bytes]
+
+
+class _ScriptedTransport:
+    """Fake transport replaying a script of outcomes, counting every call.
+
+    Each outcome is either a ``BaseException`` to raise (a transport-level
+    failure) or a ``(status, body)`` tuple to return. When the script is
+    exhausted the LAST outcome repeats, so a one-item exception script models an
+    'always fails' transport and a one-item tuple models 'always succeeds'.
+    """
+
+    def __init__(self, outcomes: Sequence[_Outcome]) -> None:
+        self._outcomes: list[_Outcome] = list(outcomes)
+        self.calls = 0
+
+    def __call__(
+        self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+    ) -> tuple[int, bytes]:
+        outcome = self._outcomes[min(self.calls, len(self._outcomes) - 1)]
+        self.calls += 1
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+class _RecordingSleep:
+    """A backoff sleep that records each requested wait instead of sleeping."""
+
+    def __init__(self) -> None:
+        self.waits: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.waits.append(seconds)
+
+
+def _retry_client(
+    transport: object,
+    *,
+    max_attempts: int = 3,
+    retry_backoff_s: float = _DEFAULT_RETRY_BACKOFF_S,
+    sleep: Callable[[float], None] = _noop_sleep,
+) -> DhanClient:
+    return DhanClient(
+        access_token="jwt-abc",
+        client_id="100000001",
+        transport=transport,  # type: ignore[arg-type]
+        base_url="https://api.dhan.co/v2/",
+        clock=_StepClock(0.1),
+        max_attempts=max_attempts,
+        retry_backoff_s=retry_backoff_s,
+        sleep=sleep,
+    )
+
+
+class TestFastRetry:
+    """Bounded latency-hygiene fast-retry (DEC-DHAN-CALL-TIMEOUT-RETRY-001)."""
+
+    def test_timeout_then_success_retries_in_place(self) -> None:
+        # Times out twice, then 200 → returns on the 3rd physical attempt.
+        t = _ScriptedTransport([TimeoutError("slow"), TimeoutError("slow"), (200, b'{"ok": 1}')])
+        client = _retry_client(t, max_attempts=3)
+        assert client.post_json("charts/intraday", {}) == {"ok": 1}
+        assert t.calls == 3
+        assert client.meter.count == 3  # every physical attempt is metered
+
+    def test_transport_error_then_success_retries(self) -> None:
+        t = _ScriptedTransport([OSError("conn reset"), (200, b"{}")])
+        client = _retry_client(t, max_attempts=3)
+        assert client.post_json("x", {}) == {}
+        assert t.calls == 2
+
+    def test_server_5xx_is_fast_retried(self) -> None:
+        # 500 is retryable-and-not-429 → fast-retried in place, then succeeds.
+        t = _ScriptedTransport([(500, b"boom"), (200, b"{}")])
+        client = _retry_client(t, max_attempts=3)
+        assert client.post_json("x", {}) == {}
+        assert t.calls == 2
+
+    def test_retry_budget_exhausted_raises_last_error(self) -> None:
+        t = _ScriptedTransport([TimeoutError("slow")])  # always times out
+        client = _retry_client(t, max_attempts=3)
+        with pytest.raises(DhanTimeoutError):
+            client.post_json("x", {})
+        assert t.calls == 3  # bounded: exactly max_attempts physical calls
+
+    def test_rate_limit_is_never_fast_retried(self) -> None:
+        # 429 must NOT be retried in-client — the token bucket owns the 5 r/s cap.
+        t = _ScriptedTransport([(429, b"slow down")])
+        client = _retry_client(t, max_attempts=3)
+        with pytest.raises(DhanRateLimitError):
+            client.post_json("x", {})
+        assert t.calls == 1  # exactly one attempt — no fast-retry storm on a 429
+
+    def test_terminal_error_is_never_retried(self) -> None:
+        t = _ScriptedTransport([(400, b"bad")])
+        client = _retry_client(t, max_attempts=3)
+        with pytest.raises(DhanBadRequestError):
+            client.post_json("x", {})
+        assert t.calls == 1
+
+    def test_backoff_is_exponential_and_logged(self) -> None:
+        sleeper = _RecordingSleep()
+        t = _ScriptedTransport([TimeoutError("slow"), TimeoutError("slow"), (200, b"{}")])
+        client = _retry_client(t, max_attempts=3, retry_backoff_s=0.05, sleep=sleeper)
+        with capture_logs() as logs:
+            client.post_json("charts/intraday", {})
+        # 2 retries → 2 backoffs, doubling: 0.05 s then 0.10 s.
+        assert sleeper.waits == pytest.approx([0.05, 0.10])
+        retries = [e for e in logs if e["event"] == "dhan.retry"]
+        assert [e["attempt"] for e in retries] == [1, 2]
+        assert [e["backoff_ms"] for e in retries] == [50.0, 100.0]
+        assert retries[0]["error"] == "DhanTimeoutError"
+        assert retries[0]["endpoint"] == "charts/intraday"
+        assert retries[0]["max_attempts"] == 3
+
+    def test_no_retry_log_on_first_try_success(self) -> None:
+        t = _ScriptedTransport([(200, b"{}")])
+        client = _retry_client(t, max_attempts=3)
+        with capture_logs() as logs:
+            client.post_json("x", {})
+        assert [e for e in logs if e["event"] == "dhan.retry"] == []
+        assert t.calls == 1
+
+    def test_max_attempts_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="max_attempts must be >= 1"):
+            _retry_client(_ScriptedTransport([(200, b"{}")]), max_attempts=0)
+
+    def test_should_fast_retry_predicate(self) -> None:
+        # Whitebox check of the COMMON predicate's intent (reuse is_retryable,
+        # exclude 429).
+        assert _should_fast_retry(DhanTimeoutError("t")) is True
+        assert _should_fast_retry(DhanTransportError("t")) is True
+        assert _should_fast_retry(DhanServerError("t")) is True
+        assert _should_fast_retry(DhanRateLimitError("t")) is False  # 429 excluded
+        assert _should_fast_retry(DhanBadRequestError("t")) is False  # terminal
+        assert _should_fast_retry(DhanError("t")) is False
+
+    def test_default_backoff_is_the_rate_interval(self) -> None:
+        # The default base backoff is the 5 r/s inter-request interval (0.2 s) so
+        # a single sequential stream's retries stay within the per-second budget
+        # (CLAUDE.md §2 Rule 6) — the rate-cap-honesty invariant.
+        assert pytest.approx(0.2) == _DEFAULT_RETRY_BACKOFF_S
+        sleeper = _RecordingSleep()
+        t = _ScriptedTransport([TimeoutError("slow"), (200, b"{}")])
+        client = _retry_client(t, max_attempts=2, sleep=sleeper)  # inherits default
+        client.post_json("x", {})
+        assert sleeper.waits == pytest.approx([0.2])
+
+    def test_backoff_is_capped(self) -> None:
+        # A large base can't produce an unbounded (sleep(inf)) wait — it is
+        # clamped to _MAX_BACKOFF_S, defending the sequential pull from a hang.
+        sleeper = _RecordingSleep()
+        t = _ScriptedTransport([TimeoutError("slow"), (200, b"{}")])
+        client = _retry_client(t, max_attempts=2, retry_backoff_s=10.0, sleep=sleeper)
+        client.post_json("x", {})
+        assert sleeper.waits == pytest.approx([_MAX_BACKOFF_S])  # min(10.0, 5.0)

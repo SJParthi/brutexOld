@@ -44,7 +44,7 @@ concerns and are likewise out of scope here.
 **Stage-4 multiple-testing tests (IMPLEMENTED in** :mod:`brutex.metrics.spa`
 **):** White's Reality Check, Hansen's SPA, and the Romano-Wolf step-down
 (spec Stage-4 filters #4 + #6; DEC-STAT-SPA-001, ``docs/MIGRATION.md``
-entry #424) are pure bootstrap functions over a matrix of strategy excess
+entry #428) are pure bootstrap functions over a matrix of strategy excess
 returns and are re-exported here (:func:`reality_check`, :func:`hansen_spa`,
 :func:`romano_wolf`). They are independent of the per-result row schema
 above.

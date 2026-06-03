@@ -1,15 +1,17 @@
 """Tests for `brutex.dashboard.option_pull_controller` — the options pull core.
 
 100% line+branch via the synthetic dry-run path + injected fake client/sink:
-the instrument→underlying mapping (IDX/EQ/blank/derivative), the report
-aggregation (completed series + quarantined failures grouped by underlying),
-the dry-run default path, the injected-factory (non-dry-run) branch, the
-empty-list no-op, and the ``to_dict`` projection.
+the instrument→underlying mapping (IDX/EQ/blank/derivative) incl. the per-kind
+expiry set (index WEEK+MONTH vs stock MONTH-only,
+DEC-DHAN-STOCK-MONTHLY-ONLY-001), the report aggregation (completed series +
+quarantined failures grouped by underlying), the dry-run default path, the
+injected-factory (non-dry-run) branch, the empty-list no-op, and the
+``to_dict`` projection.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +28,7 @@ from brutex.dashboard.option_pull_controller import (
 )
 from brutex.data.option_sink import NullOptionBarSink
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from structlog.testing import capture_logs
 
 _NOW = datetime(2021, 1, 6, tzinfo=UTC)  # tiny window so the synthetic fan-out is fast
 
@@ -112,6 +115,9 @@ class TestInstrumentToOptionUnderlying:
         assert u.instrument == "OPTIDX"
         assert u.exchange_segment == "NSE_FNO"
         assert u.strike_offsets == 10
+        # An index keeps the full WEEK+MONTH expiry set (only some indices
+        # carry weeklies; DEC-DHAN-STOCK-MONTHLY-ONLY-001).
+        assert u.expiry_flags == ("WEEK", "MONTH")
         # The addressing fields promoted to the expired-options table
         # (DEC-EXPIRED-OPTIONS-TABLE-001) carry through from the instrument.
         assert u.exch_id == "NSE"
@@ -126,6 +132,9 @@ class TestInstrumentToOptionUnderlying:
         assert u.instrument == "OPTSTK"
         assert u.exchange_segment == "NSE_FNO"
         assert u.strike_offsets == 3
+        # A single stock is MONTHLY-only — NSE single stocks carry no weekly
+        # series, so the WEEK leg is elided (DEC-DHAN-STOCK-MONTHLY-ONLY-001).
+        assert u.expiry_flags == ("MONTH",)
 
     def test_nonpositive_security_id_raises(self) -> None:
         with pytest.raises(ValueError, match="valid numeric SECURITY_ID"):
@@ -165,8 +174,15 @@ class TestPullOptions:
         )
         assert report.total_symbols == 2
         by_symbol = {s.symbol: s for s in report.symbols}
-        assert by_symbol["13"].series_completed == 21 * 2 * 3 * 2  # ATM±10
-        assert by_symbol["1333"].series_completed == 7 * 2 * 3 * 2  # ATM±3
+        # Index keeps WEEK+MONTH (2 flags); a STOCK is MONTHLY-only — NSE single
+        # stocks carry no weekly series (only some indices do), so the stock
+        # fans MONTH only (1 flag): its series count DROPS vs the old
+        # WEEK+MONTH fan-out — fewer wasted Dhan calls/quota
+        # (DEC-DHAN-STOCK-MONTHLY-ONLY-001).
+        assert by_symbol["13"].series_completed == 21 * 2 * 3 * 2  # ATM±10, WEEK+MONTH
+        assert by_symbol["1333"].series_completed == 7 * 1 * 3 * 2  # ATM±3, MONTH-only
+        # The per-kind elision strictly REDUCES the stock fan-out (was 7*2*3*2).
+        assert by_symbol["1333"].series_completed < 7 * 2 * 3 * 2
 
     def test_empty_list_is_clean_noop(self) -> None:
         report = pull_options([], lake_root=Path("/unused"), dry_run=True, now=_NOW)
@@ -319,3 +335,56 @@ class TestOptionsPullReport:
         assert report.total_symbols == 0
         assert report.total_bars == 0
         assert report.to_dict()["symbols"] == []
+
+
+def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
+    """All captured events with ``event == name`` (in emission order)."""
+    return [e for e in logs if e["event"] == name]
+
+
+class TestPullOptionsCorrelation:
+    """One ``pull_id`` ties the whole options fan-out together.
+
+    DEC-DHAN-INGEST-LOGGING-001: the controller's ``pull_id_scope`` binds the id,
+    so the start/done summary AND the real dry-run spine's ``ingest.*`` events all
+    carry it. Narrow axes keep the synthetic fan-out fast (21 strikes × 1 × 1 × 1).
+    """
+
+    def test_correlates_start_done_and_spine(self) -> None:
+        with capture_logs() as logs:
+            pull_options(
+                [_index()],
+                lake_root=Path("/unused"),
+                dry_run=True,
+                now=_NOW,
+                expiry_flags=("WEEK",),
+                expiry_codes=(1,),
+                option_types=("CALL",),
+                pull_id="optctl000001",
+            )
+        (start,) = _events(logs, "universe.pull_options.start")
+        (done,) = _events(logs, "universe.pull_options.done")
+        assert start["pull_id"] == "optctl000001"
+        assert done["pull_id"] == "optctl000001"
+        # The spine inherited the SAME id via the bound scope.
+        (underlying,) = _events(logs, "ingest.underlying")
+        assert underlying["pull_id"] == "optctl000001"
+        windows = _events(logs, "ingest.window")
+        assert windows and all(e["pull_id"] == "optctl000001" for e in windows)
+
+    def test_mints_a_pull_id_when_omitted(self) -> None:
+        with capture_logs() as logs:
+            pull_options(
+                [_index()],
+                lake_root=Path("/unused"),
+                dry_run=True,
+                now=_NOW,
+                expiry_flags=("WEEK",),
+                expiry_codes=(1,),
+                option_types=("CALL",),
+            )
+        (start,) = _events(logs, "universe.pull_options.start")
+        (done,) = _events(logs, "universe.pull_options.done")
+        pid = start["pull_id"]
+        assert isinstance(pid, str) and len(pid) == 12
+        assert done["pull_id"] == pid
