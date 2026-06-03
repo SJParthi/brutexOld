@@ -1,0 +1,329 @@
+"""Fast dashboard read core — O(1) summary cache + incremental coverage counters.
+
+The SPEED CORE behind DEC-DASHBOARD-FASTREAD-001. The coverage page polls
+``/api/v1/coverage/spot`` + ``/api/v1/coverage/options`` every 4 seconds; each
+naively re-globs the WHOLE Parquet lake and re-aggregates every file
+(``summarize_spot_datasets`` / ``summarize_option_datasets`` in
+:mod:`brutex.dashboard.db_view`). During a 200-symbol pull that read serialised
+behind the active writer's store lock AND blocked the event loop. This module
+removes the *re-scan on every poll*:
+
+* :class:`SummaryCache` — caches the last spot/option summary payloads behind a
+  :class:`threading.Lock`, keyed by a monotonic ``generation`` counter. A poll
+  returns the cached payload (an O(1) dict handoff) unless the cache is **dirty**
+  (a write bumped the generation) AND a **2 s TTL floor** has elapsed since the
+  last recompute — so a 200-symbol write fan-out that calls
+  :meth:`mark_dirty` hundreds of times can trigger at most one rescan every 2 s,
+  never hundreds of back-to-back full-lake scans.
+* :class:`CoverageCounters` — a per-dataset-label int64 running bar tally bumped
+  from the single write-progress funnel (``BackgroundPullJob._on_progress``).
+  :meth:`snapshot` is genuinely O(1) in the lake size (one dict copy). Because
+  the funnel passes the POST-DEDUP newly-written bar count, a duplicate re-pull
+  passes ``bars == 0`` → no change → idempotent for free (CLAUDE.md §2 Rule 7).
+
+No module-global state (CLAUDE.md §4): both classes are instantiated in
+:func:`brutex.dashboard.app.build_app` and injected into the routes / the
+background pull job.
+
+Honest envelope (CLAUDE.md §2 Rule 10 — stated, not hidden)
+-----------------------------------------------------------
+* A cached summary **read** (the per-poll hot path) is **O(1)** — a dict handoff
+  under one lock, independent of how many Parquet files the lake holds.
+* The amortised **refresh** is still **O(files)** — it calls the real
+  ``read_parquet`` aggregate over the lake. The TTL floor bounds how OFTEN that
+  O(files) cost is paid (≤ once / 2 s while writes are landing), it does NOT make
+  the refresh itself O(1). This is deliberately NOT claimed away.
+* The running **coverage counter** add + :meth:`CoverageCounters.snapshot` are
+  **O(1)** (one int add / one dict copy).
+* An arbitrary user ``/db`` SQL query is inherently **O(rows scanned)** — this
+  module does not touch it; it is made non-blocking + paginated elsewhere, NOT
+  O(1).
+
+Never claim "everything is O(1)": the headline counter + cached summary read are
+O(1); the underlying lake aggregate is not.
+"""
+
+from __future__ import annotations
+
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Final
+
+#: The two summary kinds the cache stores — the spot candle lake summary and the
+#: expired-option lake summary. A :meth:`SummaryCache.get_or_refresh` call names
+#: exactly one of these.
+SPOT: Final[str] = "spot"
+OPTIONS: Final[str] = "options"
+
+#: The minimum number of seconds between two real recomputes of the SAME kind
+#: while the cache is dirty. A 200-symbol write fan-out bumps the generation
+#: hundreds of times; this floor collapses that storm into at most one full-lake
+#: rescan per window, so the poll never amplifies a pull into hundreds of scans.
+DEFAULT_TTL_FLOOR_S: Final[float] = 2.0
+
+#: A summary payload is whatever the injected ``recompute`` returns — the list of
+#: per-dataset dicts ``summarize_spot_datasets`` / ``summarize_option_datasets``
+#: produce. Treated opaquely here (the cache never inspects it).
+SummaryPayload = list[dict[str, Any]]
+
+#: The zero-arg recompute callable the route injects — it builds + uses the
+#: store's locked connection INSIDE the worker thread and returns the summary.
+Recompute = Callable[[], SummaryPayload]
+
+
+def _monotonic() -> float:
+    """Default clock — the monotonic wall clock (injected for testability)."""
+    import time
+
+    return time.monotonic()
+
+
+@dataclass(frozen=True, slots=True)
+class _Entry:
+    """One cached summary payload plus the generation + clock it was computed at.
+
+    Attributes
+    ----------
+    payload
+        The cached summary (the ``recompute`` result).
+    generation
+        The :class:`SummaryCache` generation counter value at compute time. The
+        entry is *clean* iff this equals the cache's current generation.
+    computed_at
+        The injected clock value when the payload was computed — the TTL floor
+        is measured against this.
+    """
+
+    payload: SummaryPayload
+    generation: int
+    computed_at: float
+
+
+class SummaryCache:
+    """Thread-safe summary cache with write-invalidation + a TTL floor.
+
+    A read calls :meth:`get_or_refresh` with the kind and a zero-arg
+    ``recompute`` closure. The cached payload is returned unless the cache is
+    dirty (its ``generation`` advanced past the entry's) AND at least
+    ``ttl_floor_s`` seconds have elapsed since that kind was last recomputed —
+    only then is ``recompute`` invoked and the fresh payload stored.
+
+    Parameters
+    ----------
+    clock
+        Zero-arg time source (defaults to :func:`time.monotonic`). Injected so
+        tests are deterministic.
+    ttl_floor_s
+        Minimum seconds between two real recomputes of the same kind while
+        dirty (defaults to :data:`DEFAULT_TTL_FLOOR_S`). A non-positive value
+        means "recompute on every dirty read" (no floor).
+
+    Notes
+    -----
+    All state mutation + read is serialised by a single :class:`threading.Lock`.
+    The ``recompute`` callable is invoked **outside** the lock so a slow
+    full-lake aggregate never blocks a concurrent :meth:`mark_dirty` from the
+    write thread or a :meth:`generation` read — the lock only guards the O(1)
+    bookkeeping (the cache is a fast index over a slow source, mirroring
+    :class:`brutex.dashboard.pull_progress.PullProgress`).
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = _monotonic,
+        ttl_floor_s: float = DEFAULT_TTL_FLOOR_S,
+    ) -> None:
+        self._clock = clock
+        self._ttl_floor_s = ttl_floor_s
+        self._lock = threading.Lock()
+        self._generation = 0
+        self._entries: dict[str, _Entry] = {}
+        #: Per-kind in-flight recompute guard so two concurrent dirty reads of
+        #: the same kind don't both pay the O(files) scan (the second waits for
+        #: the first's result via the post-recompute re-check).
+        self._refreshing: set[str] = set()
+
+    def mark_dirty(self) -> None:
+        """Bump the generation so the next eligible read recomputes — O(1).
+
+        Called from the write path (the background pull's per-label progress
+        funnel). Cheap by design: a single guarded integer increment, so a
+        200-symbol fan-out calling this hundreds of times is free — the TTL
+        floor (not this method) bounds the rescan rate.
+        """
+        with self._lock:
+            self._generation += 1
+
+    @property
+    def generation(self) -> int:
+        """The current monotonic generation counter — O(1)."""
+        with self._lock:
+            return self._generation
+
+    def get_or_refresh(self, kind: str, *, recompute: Recompute) -> SummaryPayload:
+        """Return the cached *kind* payload, recomputing only if dirty past the TTL.
+
+        Decision (all under the lock, O(1)):
+
+        * **Hit** — a clean entry exists (its generation == the current
+          generation): return it, no recompute.
+        * **Stale-but-throttled** — the entry is dirty but recomputed less than
+          ``ttl_floor_s`` ago: return the stale entry anyway (the floor wins, so
+          a write storm can't trigger a scan storm).
+        * **Miss / eligible** — no entry yet, OR dirty and past the floor:
+          invoke ``recompute`` (OUTSIDE the lock) and store the result stamped
+          with the generation observed *before* the recompute.
+
+        Parameters
+        ----------
+        kind
+            One of :data:`SPOT` / :data:`OPTIONS` (any stable string key works;
+            entries are namespaced by it).
+        recompute
+            Zero-arg closure that produces the fresh payload. MUST build + use
+            the store's locked connection inside itself (it runs on the caller's
+            thread — typically a threadpool worker — so the store lock is
+            acquired+released there).
+
+        Returns
+        -------
+        SummaryPayload
+            The cached or freshly-computed summary for *kind*.
+        """
+        with self._lock:
+            decision = self._plan(kind)
+        if decision is None:
+            # Hit or stale-but-throttled: a payload is available without a scan.
+            return self._entries[kind].payload
+        gen_at_start = decision
+        try:
+            payload = recompute()
+        finally:
+            with self._lock:
+                self._refreshing.discard(kind)
+        with self._lock:
+            self._entries[kind] = _Entry(
+                payload=payload,
+                generation=gen_at_start,
+                computed_at=self._clock(),
+            )
+        return payload
+
+    def _plan(self, kind: str) -> int | None:
+        """Decide whether *kind* needs a recompute — caller holds the lock.
+
+        Returns the generation to stamp a fresh entry with when a recompute is
+        needed (and marks the kind in-flight), or ``None`` when the cached entry
+        should be served as-is (hit, throttled, or already being refreshed by a
+        concurrent reader).
+        """
+        entry = self._entries.get(kind)
+        if entry is not None and entry.generation == self._generation:
+            # Clean hit — fast path, no scan.
+            return None
+        if kind in self._refreshing:
+            # Another reader is already paying the scan; serve the current entry
+            # (present whenever a refresh is in flight) instead of double-scanning.
+            return None
+        if (
+            entry is not None
+            and self._ttl_floor_s > 0.0
+            and (self._clock() - entry.computed_at) < self._ttl_floor_s
+        ):
+            # Dirty but within the TTL floor — throttle: serve the stale entry.
+            return None
+        self._refreshing.add(kind)
+        return self._generation
+
+
+class CoverageCounters:
+    """Thread-safe per-label running bar tally — a truly O(1) coverage headline.
+
+    Hooked into the single write-progress funnel
+    (``BackgroundPullJob._on_progress(label, bars, failed)``): every successful
+    window write calls :meth:`add` with the POST-DEDUP newly-written ``bars``,
+    so the per-label tally and the grand total advance in O(1) without ever
+    scanning the lake. :meth:`snapshot` is O(1) in the lake size (one dict copy).
+
+    Idempotence for free (CLAUDE.md §2 Rule 7): a duplicate re-pull writes zero
+    new bars, so the funnel passes ``bars == 0`` and :meth:`add` is a no-op — the
+    counter is unchanged, mirroring the dedup'd lake. The audit hash-chain
+    (Rule 8) is untouched: this only reads the count the funnel already emits.
+
+    All state is guarded by a single :class:`threading.Lock` so the write thread
+    and a reader request can never observe a torn tally.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._by_label: dict[str, int] = {}
+        self._total: int = 0
+        self._updated_count: int = 0
+
+    def add(self, label: str, bars: int) -> None:
+        """Add *bars* newly-written rows to *label*'s running tally — O(1).
+
+        A ``bars <= 0`` call (a duplicate re-pull's post-dedup zero, or a failed
+        window) is a **no-op** — neither the per-label tally, the grand total,
+        nor the update counter move, so a re-pull leaves the headline identical
+        (idempotent, CLAUDE.md §2 Rule 7). ``label`` is the dataset label the
+        ingest funnel already emits (e.g. ``"NIFTY 1minute"``); it is namespaced
+        as-is.
+        """
+        if bars <= 0:
+            return
+        with self._lock:
+            self._by_label[label] = self._by_label.get(label, 0) + bars
+            self._total += bars
+            self._updated_count += 1
+
+    def snapshot(self) -> CoverageCountersSnapshot:
+        """Return an immutable, consistent O(1) view of the running tallies."""
+        with self._lock:
+            return CoverageCountersSnapshot(
+                by_label=dict(self._by_label),
+                total_bars=self._total,
+                updates=self._updated_count,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageCountersSnapshot:
+    """An immutable point-in-time view of the incremental coverage counters.
+
+    Attributes
+    ----------
+    by_label
+        Per-dataset-label cumulative newly-written bar count.
+    total_bars
+        The grand total across every label — the headline number.
+    updates
+        How many non-zero :meth:`CoverageCounters.add` calls have landed (a
+        duplicate-suppressing diagnostic; a re-pull does NOT advance it).
+    """
+
+    by_label: dict[str, int]
+    total_bars: int
+    updates: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly dict for the headline counter route."""
+        return {
+            "by_label": dict(self.by_label),
+            "total_bars": self.total_bars,
+            "updates": self.updates,
+        }
+
+
+__all__ = [
+    "DEFAULT_TTL_FLOOR_S",
+    "OPTIONS",
+    "SPOT",
+    "CoverageCounters",
+    "CoverageCountersSnapshot",
+    "Recompute",
+    "SummaryCache",
+    "SummaryPayload",
+]

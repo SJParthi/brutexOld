@@ -204,3 +204,149 @@ class TestPrometheusFormat:
                 "stateset",
                 "unknown",
             }
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Offloaded read routes (DEC-DASHBOARD-FASTREAD-001)
+# ────────────────────────────────────────────────────────────────────────
+#
+# These verify that wrapping each blocking db_view/store read in
+# `run_in_threadpool(...)` did not change the JSON contract — the offloaded
+# routes must still return correct payloads against a real wired store. A real
+# `InstrumentStore` needs duckdb, so the section is guarded + fixtured.
+
+
+class TestOffloadedReadRoutes:
+    """The threadpool-offloaded read routes still return correct JSON."""
+
+    @pytest.fixture
+    def wired_client(self, tmp_path: object) -> Generator[TestClient]:
+        from datetime import date
+        from decimal import Decimal
+        from pathlib import Path
+
+        pytest.importorskip("duckdb")
+        from brutex.data.instrument_store import InstrumentStore
+        from brutex.models import Exchange, Instrument, InstrumentType, Segment
+
+        assert isinstance(tmp_path, Path)
+        store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+        store.upsert_many(
+            [
+                Instrument(
+                    exch_id=Exchange.NSE,
+                    security_id=13,
+                    symbol_name="NIFTY",
+                    display_name="NIFTY",
+                    instrument=InstrumentType.IDX,
+                    segment=Segment.CASH,
+                    series=None,
+                    isin=None,
+                    underlying_symbol=None,
+                    underlying_security_id=None,
+                    lot_size=1,
+                    tick_size=Decimal("0.05"),
+                    sm_freeze_qty=None,
+                    sm_expiry_date=None,
+                    strike_price=None,
+                    asm_gsm_flag=False,
+                )
+            ],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r1",
+            csv_source_sha256="0" * 64,
+        )
+        app = build_app(DashboardState(), instrument_store=store)
+        with TestClient(app) as c:
+            yield c
+        store.close()
+
+    def test_db_tables_offloaded(self, wired_client: TestClient) -> None:
+        r = wired_client.get("/api/v1/db/tables")
+        assert r.status_code == 200
+        names = {t["table"] for t in r.json()["tables"]}
+        assert "instruments" in names
+
+    def test_db_table_page_offloaded(self, wired_client: TestClient) -> None:
+        r = wired_client.get("/api/v1/db/table/instruments?limit=10")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["table"] == "instruments"
+        assert body["total"] == 1
+
+    def test_db_table_bad_name_still_maps_to_400(self, wired_client: TestClient) -> None:
+        # The try/except ValueError → HTTPException(400) survives the offload.
+        r = wired_client.get("/api/v1/db/table/not_a_real_table")
+        assert r.status_code == 400
+
+    def test_db_columns_offloaded(self, wired_client: TestClient) -> None:
+        r = wired_client.get("/api/v1/db/columns/instruments")
+        assert r.status_code == 200
+        assert "security_id" in r.json()["columns"]
+
+    def test_db_query_offloaded(self, wired_client: TestClient) -> None:
+        r = wired_client.get("/api/v1/db/query/instruments?limit=5")
+        assert r.status_code == 200
+        assert r.json()["total"] == 1
+
+    def test_db_query_bad_filter_maps_to_400(self, wired_client: TestClient) -> None:
+        # _parse_filters rejects a 2-token filter BEFORE the offload (400).
+        r = wired_client.get("/api/v1/db/query/instruments?f=bad_token")
+        assert r.status_code == 400
+
+    def test_instruments_stats_offloaded(self, wired_client: TestClient) -> None:
+        r = wired_client.get("/api/v1/instruments/stats")
+        assert r.status_code == 200
+        assert r.json()["totals"]["instruments"] == 1
+
+    def test_instruments_list_offloaded(self, wired_client: TestClient) -> None:
+        r = wired_client.get("/api/v1/instruments?limit=10")
+        assert r.status_code == 200
+        symbols = {i["symbol_name"] for i in r.json()["instruments"]}
+        assert "NIFTY" in symbols
+
+    def test_coverage_offloaded(self, wired_client: TestClient) -> None:
+        r = wired_client.get("/api/v1/coverage")
+        assert r.status_code == 200
+        assert "headline" in r.json()
+
+    def test_coverage_spot_offloaded_and_cached(self, wired_client: TestClient) -> None:
+        # Two polls — both 200; the second is served from the SummaryCache.
+        first = wired_client.get("/api/v1/coverage/spot")
+        second = wired_client.get("/api/v1/coverage/spot")
+        assert first.status_code == second.status_code == 200
+        assert "headline" in first.json()
+
+    def test_coverage_options_offloaded(self, wired_client: TestClient) -> None:
+        r = wired_client.get("/api/v1/coverage/options")
+        assert r.status_code == 200
+        assert "headline" in r.json()
+
+    def test_expiries_offloaded_empty_lake(self, wired_client: TestClient) -> None:
+        # No options in the lake → empty list (the offloaded list_option_series).
+        r = wired_client.get("/api/v1/expiries")
+        assert r.status_code == 200
+        assert r.json()["expiries"] == []
+
+    def test_contracts_offloaded_empty_lake(self, wired_client: TestClient) -> None:
+        r = wired_client.get("/api/v1/contracts")
+        assert r.status_code == 200
+        assert r.json()["contracts"] == []
+
+    def test_coverage_counters_route(self, wired_client: TestClient) -> None:
+        # The O(1) incremental headline route — empty before any pull.
+        r = wired_client.get("/api/v1/coverage/counters")
+        assert r.status_code == 200
+        body = r.json()
+        assert body == {"by_label": {}, "total_bars": 0, "updates": 0}
+
+    def test_preopen_xlsx_offloaded(self, wired_client: TestClient) -> None:
+        # The offloaded build_preopen_rows path still produces a workbook.
+        r = wired_client.get("/api/v1/reports/preopen.xlsx?from=2024-01-02&to=2024-01-02")
+        assert r.status_code == 200
+        assert "spreadsheetml" in r.headers["content-type"]
+
+    def test_preopen_xlsx_bad_date_still_400(self, wired_client: TestClient) -> None:
+        # Date validation runs on the event loop, before the offload.
+        r = wired_client.get("/api/v1/reports/preopen.xlsx?from=2024-99-99&to=2024-01-02")
+        assert r.status_code == 400

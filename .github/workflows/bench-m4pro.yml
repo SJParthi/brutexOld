@@ -35,6 +35,7 @@ on:
     paths:
       - "tests/bench/test_throughput_absolute.py"
       - "tests/bench/test_throughput_canary.py"
+      - "tests/bench/test_summary_cache_o1.py"
       - ".github/workflows/bench-m4pro.yml"
       - "brutex/vocabulary/**"
       - "rust/fno-math/**"
@@ -124,6 +125,7 @@ jobs:
           # this quiet self-hosted runner; shared CI keeps the robust 3-10x tier.
           pytest tests/bench/test_store_o1.py tests/bench/test_option_dedup_o1.py \
             tests/bench/test_lmdb_membership_o1.py tests/bench/test_rate_limiter_o1.py \
+            tests/bench/test_summary_cache_o1.py \
             tests/bench/test_throughput_canary.py -q --tb=short -p no:cacheprovider
 
       - name: Print summary
