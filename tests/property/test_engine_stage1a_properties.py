@@ -124,7 +124,7 @@ def test_fresh_builder_matches_functional_wrapper(bars: list[CandleBar]) -> None
 
 @given(bars=_bar_sequences(), data=st.data())
 @settings(suppress_health_check=[HealthCheck.too_slow])
-def test_no_lookahead_future_mutation(bars: list[CandleBar], data: st.DrawFn) -> None:
+def test_no_lookahead_future_mutation(bars: list[CandleBar], data: st.DataObject) -> None:
     if len(bars) < 2:
         return
     k = data.draw(st.integers(min_value=0, max_value=len(bars) - 2))
