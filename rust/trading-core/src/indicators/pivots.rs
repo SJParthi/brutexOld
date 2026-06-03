@@ -31,8 +31,11 @@ pub struct PivotLevels {
 /// (invalid-input handling is out of Phase-1 scope).
 #[must_use]
 pub fn compute_pivot_levels(pdh_paisa: i64, pdl_paisa: i64, pdc_paisa: i64) -> PivotLevels {
-    debug_assert!(pdh_paisa >= pdl_paisa, "PDH must be >= PDL");
-    debug_assert!(
+    // `assert!` (always-on, incl. release) so corrupt prev-day OHLC fails LOUD —
+    // matching Python's `ValueError` (`pivots.py:124-132`). A `debug_assert!`
+    // would be compiled out in release and silently produce a wrong result.
+    assert!(pdh_paisa >= pdl_paisa, "PDH must be >= PDL");
+    assert!(
         pdl_paisa <= pdc_paisa && pdc_paisa <= pdh_paisa,
         "PDC must be in [PDL, PDH]"
     );

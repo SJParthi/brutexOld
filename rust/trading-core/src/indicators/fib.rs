@@ -44,7 +44,9 @@ pub struct FibLevels {
 /// `*_200` uses `± range` directly (`1.000 * range == range` exactly in IEEE).
 #[must_use]
 pub fn compute_fib_levels(pdh_paisa: i64, pdl_paisa: i64) -> FibLevels {
-    debug_assert!(pdh_paisa >= pdl_paisa, "PDH must be >= PDL");
+    // `assert!` (always-on) so corrupt prev-day OHLC fails LOUD in release too,
+    // matching Python's `ValueError` (`fib_levels.py:254-257`).
+    assert!(pdh_paisa >= pdl_paisa, "PDH must be >= PDL");
 
     let range_paisa = pdh_paisa - pdl_paisa;
     let r = range_paisa as f64;

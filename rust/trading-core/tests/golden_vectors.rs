@@ -68,7 +68,16 @@ fn parse_tod_seconds(ts: &str) -> u32 {
     let mut parts = hms.split(':');
     let h: u32 = parts.next().expect("hour").parse().expect("hour int");
     let m: u32 = parts.next().expect("minute").parse().expect("minute int");
-    let s: u32 = parts.next().map_or(0, |x| x.parse().expect("second int"));
+    // Floor any fractional second (e.g. "00.5") — Group-8 cutoffs are whole-second,
+    // so the sub-second part never changes a bucket (matches the evaluator's
+    // `tod_seconds` flooring). Robust even though the fixtures are whole-minute.
+    let s: u32 = parts.next().map_or(0, |x| {
+        x.split('.')
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .expect("second int")
+    });
     h * 3600 + m * 60 + s
 }
 
