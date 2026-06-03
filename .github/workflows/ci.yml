@@ -1107,7 +1107,11 @@ jobs:
             echo "(brutex.adapters.dhan.adapter test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_dhan_ingest.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_ingest.py
+            # DEC-DHAN-PARALLEL-WINDOWS-001: the per-window fan-out lives in
+            # ingest_spot, so the parallel-window integration suite is part of
+            # this module's 100% gate (same wiring fix DEC-DHAN-PARALLEL-INGEST-001
+            # made for run_ingest's parallel suite).
+            pytest --cov=brutex.adapters.dhan.ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_ingest.py tests/integration/test_dhan_spot_window_parallel.py
           else
             echo "(brutex.adapters.dhan.ingest test file not present yet — gate inactive)"
           fi

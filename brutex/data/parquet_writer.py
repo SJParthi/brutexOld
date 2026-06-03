@@ -30,6 +30,24 @@ no-op, and only a SAME timestamp with DIFFERENT OHLCV raises
 :class:`WriterError` (a genuine vendor-data conflict, never silently
 overwritten). Incremental month-filling and full re-pulls are therefore
 idempotent — the completed partition is byte-stable across runs.
+
+## Per-partition write serialisation (DEC-DHAN-PARALLEL-WINDOWS-001)
+
+Merge-on-write is a read-modify-write (read the stored month → union the
+incoming bars → atomic rename), so two threads writing the **same**
+``(symbol, interval, year, month)`` partition at once would race a
+lost-update: both read the old file, each unions only its own bars, and the
+later ``os.replace`` wins — silently dropping the other's bars. This bites
+the moment the per-window spot fetch is parallelised, because adjacent
+90-day windows straddle a month boundary, so two windows of ONE series share
+a month partition (e.g. windows ``[Apr 1, Jun 30)`` and ``[Jun 30, Sep 28)``
+both touch June). A :class:`threading.Lock` **per destination path** (interned
+in :data:`_PARTITION_LOCKS` under a meta-lock) serialises only the writers
+that target the SAME file; writers to DIFFERENT partitions never contend, so
+the fan-out keeps its parallelism. The merge itself is already order-
+independent (it unions by timestamp), so serialising the two writers yields
+the same bytes regardless of which window lands first — completion order
+never affects the stored data (CLAUDE.md §2 Rule 7).
 """
 
 from __future__ import annotations
@@ -38,6 +56,7 @@ import contextlib
 import hashlib
 import os
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -62,6 +81,38 @@ ROW_GROUP_SIZE: Final[int] = 100_000
 
 #: zstd compression level — deterministic across zstd >= 1.5.
 ZSTD_LEVEL: Final[int] = 3
+
+#: Process-wide registry of per-partition write locks (DEC-DHAN-PARALLEL-WINDOWS-001).
+#: Keyed by the resolved destination ``Path`` so two threads writing the SAME
+#: ``(symbol, interval, year, month)`` file serialise their read-modify-write
+#: merge, while writers to DIFFERENT partitions never contend. Interned lazily so
+#: the map only ever holds locks for partitions actually written. It is keyed by
+#: PATH (not writer instance) on purpose: the production fan-out may build one
+#: :class:`ParquetWriter` per worker (the docstring blesses that), so the lock
+#: MUST be shared across instances that resolve to the same on-disk file.
+_PARTITION_LOCKS: dict[Path, threading.Lock] = {}
+
+#: Guards :data:`_PARTITION_LOCKS` itself — held only for the O(1)
+#: get-or-create of a path's lock, never across a write.
+_PARTITION_LOCKS_GUARD: threading.Lock = threading.Lock()
+
+
+def _partition_lock(dest: Path) -> threading.Lock:
+    """Return the shared write lock for partition *dest* (interned, O(1)).
+
+    The first caller for a given path creates the lock under
+    :data:`_PARTITION_LOCKS_GUARD`; every later caller (any thread, any
+    :class:`ParquetWriter` instance) gets the SAME lock object, so concurrent
+    merge-writes to one partition file are serialised. The guard is held only
+    for the dict get-or-create — never across the write itself — so distinct
+    partitions are looked up without contention.
+    """
+    with _PARTITION_LOCKS_GUARD:
+        lock = _PARTITION_LOCKS.get(dest)
+        if lock is None:
+            lock = threading.Lock()
+            _PARTITION_LOCKS[dest] = lock
+        return lock
 
 
 def _tick_round(bar: CandleBar) -> CandleBar:
@@ -211,19 +262,31 @@ class ParquetWriter:
         # a SAME timestamp with DIFFERENT OHLCV is a true conflict (real vendor
         # drift) → raise. This makes incremental month-filling + re-pulls
         # idempotent (DEC-LAKE-MERGE-WRITE-001).
-        if dest.exists():
-            return self._merge_write(dest, sorted_bars)
+        #
+        # The existence-check + merge/create below is a read-modify-write, so it
+        # runs under this partition's shared lock (DEC-DHAN-PARALLEL-WINDOWS-001):
+        # when the per-window spot fetch is parallelised, two adjacent 90-day
+        # windows of ONE series share a month partition (they straddle a month
+        # boundary), and without serialisation the later os.replace would drop
+        # the other window's bars (lost update). The lock is PER PATH, so writers
+        # to different partitions never contend — the fan-out keeps its
+        # parallelism; only same-file writers queue. The merge unions by
+        # timestamp, so the stored bytes are identical regardless of which window
+        # acquires the lock first (order-independent, Rule #7).
+        with _partition_lock(dest):
+            if dest.exists():
+                return self._merge_write(dest, sorted_bars)
 
-        content_bytes = self._render_bytes(sorted_bars)
-        self._atomic_write(dest, content_bytes)
-        return WriteResult(
-            path=dest,
-            row_count=len(sorted_bars),
-            raw_hash=hashlib.sha256(content_bytes).hexdigest(),
-            first_ts=first_ts,
-            last_ts=last_ts,
-            bytes_written=len(content_bytes),
-        )
+            content_bytes = self._render_bytes(sorted_bars)
+            self._atomic_write(dest, content_bytes)
+            return WriteResult(
+                path=dest,
+                row_count=len(sorted_bars),
+                raw_hash=hashlib.sha256(content_bytes).hexdigest(),
+                first_ts=first_ts,
+                last_ts=last_ts,
+                bytes_written=len(content_bytes),
+            )
 
     def _merge_write(self, dest: Path, new_bars: list[CandleBar]) -> WriteResult:
         """Union *new_bars* into the existing partition at *dest*, idempotently.
