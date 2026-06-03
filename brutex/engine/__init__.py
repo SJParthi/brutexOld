@@ -22,6 +22,11 @@ Currently exposes:
 - ``results_store`` — the deterministic sweep→Parquet results sink keyed by
   the BLAKE3 run-identity: idempotent, byte-reproducible writes with an O(1)
   read-back lookup + top-K leaderboard (DEC-RESULT-STORE-001).
+- ``trade_sim`` — the Stage-2 spot trade-simulation walker: consumes a
+  ``bool``-per-bar entry-signal stream + a ``CandleBar`` feed and emits
+  int64-paisa :class:`~brutex.metrics.types.ClosedTrade` round-trips
+  (signal-only — no slippage / brokerage / costs) for
+  :func:`brutex.metrics.compute.compute_metrics` (DEC-TRADESIM-001).
 
 Coming in subsequent commits:
 - ``stage1b`` — coarse score filter
@@ -37,7 +42,7 @@ Re-exports the combo-mask primitives + the Stage-1A matrix builder. As
 subsequent modules land, their public symbols will be re-exported here.
 """
 
-from brutex.engine import combo_mask, results_store, stage1a
+from brutex.engine import combo_mask, results_store, stage1a, trade_sim
 from brutex.engine.combo_mask import (
     MAX_VOCAB_BITS,
     VOCAB_BITS,
@@ -59,16 +64,29 @@ from brutex.engine.stage1a import (
     Stage1AMatrixBuilder,
     build_bar_bits,
 )
+from brutex.engine.trade_sim import (
+    DEFAULT_FILL_POLICY,
+    FillPolicy,
+    LevelFill,
+    SameBarTie,
+    TradeSimWalker,
+    simulate_trades,
+)
 
 __all__ = [
     "ANCHOR_DEPENDENT_MASK",
+    "DEFAULT_FILL_POLICY",
     "MAX_VOCAB_BITS",
     "VOCAB_BITS",
+    "FillPolicy",
     "FlushResult",
+    "LevelFill",
     "ResultRow",
     "ResultsStore",
     "ResultsStoreError",
+    "SameBarTie",
     "Stage1AMatrixBuilder",
+    "TradeSimWalker",
     "bits_to_mask",
     "build_bar_bits",
     "combo_mask",
@@ -78,5 +96,7 @@ __all__ = [
     "mask_to_bits",
     "popcount",
     "results_store",
+    "simulate_trades",
     "stage1a",
+    "trade_sim",
 ]

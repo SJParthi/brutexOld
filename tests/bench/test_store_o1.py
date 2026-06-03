@@ -236,11 +236,21 @@ class TestPutManyBatchIsLinear:
     def test_put_many_per_item_cost_stable(self, tmp_path: Path) -> None:
         """Per-item write cost at batch=1000 should be within the CI ceiling
         (5×) of batch=100. Verifies no quadratic behaviour inside put_many.
+
+        Each batch size is timed as the **best (minimum) of N fresh writes** —
+        the noise-robust per-item estimator (the same best-of-N convention the
+        other O(1) benches use, e.g. ``tests/bench/test_engine_stage1a_o1.py``).
+        A single LMDB write sample is too jittery on the shared GHA runners to
+        gate at 5× without flaking (DEC-P0-020: a lone mmap-resize / fsync stall
+        on the larger batch blew the ratio to ~13×); the per-batch minimum is
+        least perturbed by upward-only OS jitter and is never inflated.
         """
         import time
 
-        def _measure(batch_size: int) -> float:
-            path = tmp_path / f"put_{batch_size}.lmdb"
+        repeats = 5
+
+        def _measure(batch_size: int, rep: int) -> float:
+            path = tmp_path / f"put_{batch_size}_{rep}.lmdb"
             with WorkItemStore.open(path) as store:
                 items = [_make_item(i) for i in range(batch_size)]
                 t0 = time.perf_counter_ns()
@@ -248,8 +258,8 @@ class TestPutManyBatchIsLinear:
                 t1 = time.perf_counter_ns()
                 return (t1 - t0) / batch_size
 
-        per_item_100 = _measure(100)
-        per_item_1000 = _measure(1_000)
+        per_item_100 = min(_measure(100, rep) for rep in range(repeats))
+        per_item_1000 = min(_measure(1_000, rep) for rep in range(repeats))
         ratio = per_item_1000 / max(per_item_100, 1.0)
         assert ratio < ratio_ceiling(5.0), (
             f"put_many per-item cost ratio {ratio:.2f}× exceeds the 5× CI ceiling — "

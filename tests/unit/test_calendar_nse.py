@@ -166,6 +166,50 @@ class TestForcedExit:
         assert not is_forced_exit_bar(time(14, 0), tf_minutes=1)
 
 
+class TestForcedExitTimeframeAware:
+    """Regression for the ``is_forced_exit_bar`` tf-blindness bug (DEC-TRADESIM-001).
+
+    A bar covers ``[open, open + tf_minutes)``; it must force-exit when that
+    window reaches 15:20 IST. The old ``t >= 15:20`` test ignored ``tf_minutes``
+    and silently missed a coarse-TF bar whose *span* straddles 15:20.
+    """
+
+    def test_15m_bar_straddling_1520_is_forced(self) -> None:
+        # 15:15 + 15m = 15:30 > 15:20 → forced. The old tf-blind check returned
+        # False here (15:15 < 15:20) — this is the bug the fix closes.
+        assert is_forced_exit_bar(time(15, 15), tf_minutes=15)
+
+    def test_same_open_time_differs_by_timeframe(self) -> None:
+        # 15:10 is NOT forced at 5m (ends 15:15) but IS forced at 15m (ends 15:25).
+        assert not is_forced_exit_bar(time(15, 10), tf_minutes=5)
+        assert is_forced_exit_bar(time(15, 10), tf_minutes=15)
+
+    def test_5m_bar_ending_exactly_at_1520_is_not_forced(self) -> None:
+        # 15:15 + 5m = 15:20 (the window's exclusive end) → NOT yet forced.
+        assert not is_forced_exit_bar(time(15, 15), tf_minutes=5)
+
+    def test_5m_bar_ending_after_1520_is_forced(self) -> None:
+        # 15:16 + 5m = 15:21 > 15:20 → forced.
+        assert is_forced_exit_bar(time(15, 16), tf_minutes=5)
+
+    def test_1m_behaviour_matches_legacy_boundary(self) -> None:
+        # For 1-minute bars the fix is identical to the old `t >= 15:20` test.
+        assert is_forced_exit_bar(time(15, 20), tf_minutes=1)
+        assert not is_forced_exit_bar(time(15, 19), tf_minutes=1)
+
+    def test_seconds_in_open_time_are_honoured(self) -> None:
+        # 15:19:30 + 1m = 15:20:30 > 15:20:00 → forced (sub-minute open times).
+        assert is_forced_exit_bar(time(15, 19, 30), tf_minutes=1)
+
+    def test_daily_bar_is_forced(self) -> None:
+        # A 1-day bar (1440m) trivially spans 15:20.
+        assert is_forced_exit_bar(time(9, 15), tf_minutes=1440)
+
+    def test_invalid_timeframe_raises(self) -> None:
+        with pytest.raises(ValueError, match="tf_minutes must be >= 1"):
+            is_forced_exit_bar(time(15, 20), tf_minutes=0)
+
+
 class TestPreOpen:
     def test_0900_is_pre_open(self) -> None:
         assert is_pre_open(time(9, 0))
