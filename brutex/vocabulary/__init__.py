@@ -33,12 +33,16 @@ Each `evaluate_atoms()` call performs:
 - = O(1) per bar regardless of total bar count
 
 Operator decree 2026-05-16: COMMON · DYNAMIC · SCALABLE · AUTOMATED.
-This module satisfies all 5:
-- COMMON: identical class used by backtest + live
-- DYNAMIC: new condition = add new bit constant + branch in evaluator
-- SCALABLE: O(1) per bar
+This module satisfies all 5 (DEC-SHARED-CORE-001 #441 — the 52-condition
+logic now lives ONCE, in the Rust `trading-core` crate, which BruteX
+reaches via the `trading_core` PyO3 wheel and TickVault links natively):
+- COMMON: the *same compiled core* serves backtest + live (not just an
+  identical class — literally one Rust implementation, bit-identical)
+- DYNAMIC: new condition = add a bit constant + a branch in the shared
+  Rust evaluator (`rust/trading-core/src/evaluator.rs`); both apps inherit it
+- SCALABLE: O(1) per bar (one cache-resident Rust call)
 - AUTOMATED: pure-function evaluator, no I/O
-- COMPREHENSIVE: every bit has a unit test
+- COMPREHENSIVE: every bit has a unit test (routed through the shim)
 """
 
 from brutex.vocabulary.bits import (
