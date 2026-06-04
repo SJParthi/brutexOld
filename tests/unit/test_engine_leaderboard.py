@@ -114,6 +114,16 @@ class TestRenderLeaderboard:
         text = render_leaderboard(combos, top_n=1)
         assert "#1" in text
         assert "#2" not in text
+        # top_n keeps the FIRST rows, not the tail: the kept row carries combo #1's
+        # condition and combo #2's is absent (kills a `[:top_n]`→`[top_n:]` mutant).
+        assert "close_above_ema20" in text
+        assert "bar_bullish" not in text
+
+    def test_top_n_zero_renders_placeholder(self) -> None:
+        # top_n=0 → no rows → the empty placeholder (explicit, not just transitively
+        # branch-covered) so a mutant dropping the slice is caught.
+        combos = explain_combos([_ranked(1 << BIT_CLOSE_ABOVE_EMA20)])
+        assert render_leaderboard(combos, top_n=0) == "(no combos cleared the gates)"
 
     def test_empty_leaderboard_placeholder(self) -> None:
         assert render_leaderboard([]) == "(no combos cleared the gates)"
