@@ -51,7 +51,10 @@ from brutex.adapters.dhan.auth import dhan_creds_present
 from brutex.adapters.dhan.run_ingest import ProgressHook, run_dhan_spot_ingest
 from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
 from brutex.adapters.protocol import MarketAdapter
-from brutex.dashboard.coverage_reconcile import reconcile_coverage_with_lake
+from brutex.dashboard.coverage_reconcile import (
+    reconcile_coverage_with_lake,
+    reconcile_empty_terminal,
+)
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.sink import BarSink, NullBarSink
@@ -675,6 +678,12 @@ def pull_all_spot(
         # Per-window status (DEC-WINDOW-STATUS-001): a browsable SUCCESS/EMPTY/
         # FAILED record, loaded for the run + persisted at pull end.
         status_log = begin_pull_status(lake_root, dry_run=dry_run)
+        # EMPTY-terminal (DEC-EMPTY-TERMINAL-001): a window seen genuinely EMPTY on
+        # `threshold` separate pulls (e.g. SENSEX 1-minute before 2021-08-04) is
+        # marked complete → skipped, so it stops re-fetching every run. Pure
+        # (coverage + the cross-run status log), O(recorded windows) at pull start.
+        if not dry_run and coverage is not None and status_log is not None:
+            reconcile_empty_terminal(coverage, status_log)
 
         _LOG.info(
             "universe.pull_all.start",
@@ -860,6 +869,12 @@ def pull_candles(
             )
         # Per-window status (DEC-WINDOW-STATUS-001): browsable SUCCESS/EMPTY/FAILED.
         status_log = begin_pull_status(lake_root, dry_run=dry_run)
+        # EMPTY-terminal (DEC-EMPTY-TERMINAL-001): a window seen genuinely EMPTY on
+        # `threshold` separate pulls (e.g. SENSEX 1-minute before 2021-08-04) is
+        # marked complete → skipped, so it stops re-fetching every run. Pure
+        # (coverage + the cross-run status log), O(recorded windows) at pull start.
+        if not dry_run and coverage is not None and status_log is not None:
+            reconcile_empty_terminal(coverage, status_log)
 
         _LOG.info(
             "universe.pull.start",

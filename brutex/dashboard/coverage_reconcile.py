@@ -37,9 +37,23 @@ from typing import Any
 
 from brutex.adapters.dhan.ingest import _MARKET, _windows  # the canonical tiler (COMMON)
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
+from brutex.data.window_status import EMPTY, WindowStatusLog
 from brutex.models import Instrument
 
-__all__ = ["load_lake_spans", "reconcile_coverage_with_lake", "reconcile_windows"]
+__all__ = [
+    "EMPTY_TERMINAL_THRESHOLD",
+    "load_lake_spans",
+    "reconcile_coverage_with_lake",
+    "reconcile_empty_terminal",
+    "reconcile_windows",
+]
+
+#: A window that returned a CLEAN, zero-bar response on this many SEPARATE pulls is
+#: treated as genuinely EMPTY (the instrument did not trade at that granularity in
+#: that range — e.g. SENSEX 1-minute before 2021-08-04) and marked complete so it
+#: stops costing a re-fetch every run (DEC-EMPTY-TERMINAL-001). Three attempts give
+#: a transient empty (a load-induced ``{}`` that later fills) a few chances first.
+EMPTY_TERMINAL_THRESHOLD: int = 3
 
 
 def _span_key(exchange: str, segment: str, symbol: str, interval: str) -> tuple[str, str, str, str]:
@@ -126,6 +140,61 @@ def reconcile_windows(
                         )
                     )
                     marked += 1
+    return marked
+
+
+def reconcile_empty_terminal(
+    coverage: FetchCoverage,
+    status_log: WindowStatusLog,
+    *,
+    threshold: int = EMPTY_TERMINAL_THRESHOLD,
+) -> int:
+    """Mark every window seen genuinely EMPTY ≥ *threshold* times as complete — **pure**.
+
+    DEC-EMPTY-TERMINAL-001. The per-window status log (DEC-WINDOW-STATUS-001)
+    accumulates ``attempts`` across re-pulls. A window whose status is ``EMPTY`` (a
+    CLEAN 0-bar response — NOT an error) on ``threshold`` separate pulls is
+    genuinely empty (e.g. SENSEX 1-minute before 2021-08-04, where the index has no
+    1-minute history), not a transient miss; marking it complete in *coverage*
+    makes the ingest skip it, so it stops re-fetching a few wasted windows every
+    run (the `🟡` follow-up the windows table unblocked in #463/#465).
+
+    Only a clean ``EMPTY`` is ever terminal: a ``FAILED`` window (429 / timeout /
+    5xx — ``last_error`` set) is NEVER marked, so a rate-limited window that
+    happened to read 0 bars is never mistaken for genuinely-empty (it keeps
+    retrying via DEC-DHAN-429-RETRY-001). The :class:`WindowKey` is rebuilt to
+    match the ingest skip probe byte-for-byte (``market`` / ``security_id`` /
+    interval / dates), so a marked key is the exact key the ingest tests.
+
+    Parameters
+    ----------
+    coverage
+        The skip-ledger to populate (mutated in place via :meth:`mark_complete`).
+    status_log
+        The cross-run per-window status record.
+    threshold
+        How many EMPTY attempts make a window terminal (default
+        :data:`EMPTY_TERMINAL_THRESHOLD`).
+
+    Returns
+    -------
+    int
+        The number of windows newly marked EMPTY-terminal.
+    """
+    marked = 0
+    for record in status_log.records():
+        if record.status != EMPTY or record.attempts < threshold:
+            continue
+        coverage.mark_complete(
+            WindowKey(
+                market=record.market,
+                security_id=record.security_id,
+                interval=record.interval,
+                start=date.fromisoformat(record.window_start),
+                end=date.fromisoformat(record.window_end),
+            )
+        )
+        marked += 1
     return marked
 
 
