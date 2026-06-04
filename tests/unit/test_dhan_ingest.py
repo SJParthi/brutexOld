@@ -277,6 +277,66 @@ class TestIngestSpotCoverage:
         assert second.bars_appended == 0
         assert sink2.appends == []  # nothing re-fetched / re-written
 
+    def test_empty_vendor_response_not_marked_complete(self) -> None:
+        """A 0-bar (empty) vendor response is NOT marked complete (DEC-LAKE-RECONCILE-001).
+
+        An empty 200 (a load-induced ``{}`` under a 429 storm, or a genuinely-empty
+        range) must NOT stamp the window "done" — otherwise it is skipped forever
+        (the NIFTY / ADANIENT / COALINDIA 1-day "no_data" bug). It stays un-marked
+        so the next pull re-fetches it.
+        """
+        from brutex.data.fetch_coverage import FetchCoverage
+
+        empty = {"open": [], "high": [], "low": [], "close": [], "timestamp": []}
+        cov = FetchCoverage()
+        report = ingest_spot(
+            _adapter(payload=empty),
+            _Sink(),
+            instrument=_INST,
+            interval="1day",  # 1 window
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            coverage=cov,
+        )
+        assert report.bars_appended == 0
+        assert cov.completed_count == 0  # NOT marked → re-pulled next run
+
+    def test_repull_with_all_bars_already_stored_stays_marked(self) -> None:
+        """A re-pull whose vendor bars are all already in the lake (0 appended) STAYS marked.
+
+        ``raw_bars`` (not ``bars_appended``) is the mark signal: the vendor
+        returned data, so the window is complete even though keep-first dedups the
+        write to 0 — it must NOT be re-pulled forever.
+        """
+        from brutex.data.fetch_coverage import FetchCoverage
+
+        # A sink that reports 0 bars_appended (simulates keep-first: all already stored).
+        class _ZeroAppendSink:
+            def append(
+                self,
+                *,
+                exchange: str,
+                segment: str,
+                symbol: str,
+                interval: str,
+                bars: Sequence[CandleBar],
+            ) -> SinkAppendResult:
+                del exchange, segment, symbol, interval, bars
+                return SinkAppendResult(bars_appended=0, partitions_written=1, write_results=())
+
+        cov = FetchCoverage()
+        report = ingest_spot(
+            _adapter(),  # returns 1 raw bar
+            _ZeroAppendSink(),  # type: ignore[arg-type]
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            coverage=cov,
+        )
+        assert report.bars_appended == 0  # nothing newly written (all already stored)
+        assert cov.completed_count == 1  # but the window IS marked (vendor had data)
+
 
 class _SeqTransport:
     """Transport returning a fixed STATUS SEQUENCE (clamped to the last on overflow).

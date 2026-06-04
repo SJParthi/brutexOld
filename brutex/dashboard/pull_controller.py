@@ -50,6 +50,7 @@ from brutex.adapters.dhan.auth import dhan_creds_present
 from brutex.adapters.dhan.run_ingest import ProgressHook, run_dhan_spot_ingest
 from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
 from brutex.adapters.protocol import MarketAdapter
+from brutex.dashboard.coverage_reconcile import reconcile_coverage_with_lake
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.sink import BarSink, NullBarSink
@@ -616,6 +617,19 @@ def pull_all_spot(
         # Skip windows already in the lake on a live re-pull (no wasted Dhan quota);
         # DEC-FETCH-COVERAGE-WIRING-001.
         coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
+        # Reconcile the ledger against the lake (the source of truth): windows
+        # whose bars are already stored are marked complete → skipped (no re-fetch
+        # / conflict flood), while windows the lake does not cover stay un-marked →
+        # re-pulled (DEC-LAKE-RECONCILE-001). One-time O(datasets) at pull start.
+        if not dry_run and coverage is not None:
+            reconcile_coverage_with_lake(
+                coverage,
+                lake_root,
+                instruments=instruments,
+                intervals=DHAN_FETCH_INTERVALS,
+                start=start.date(),
+                end=end.date(),
+            )
 
         _LOG.info(
             "universe.pull_all.start",
@@ -784,6 +798,18 @@ def pull_candles(
         # Skip windows already in the lake on a live re-pull (no wasted Dhan quota);
         # DEC-FETCH-COVERAGE-WIRING-001.
         coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
+        # Reconcile the ledger against the lake (the source of truth): already-stored
+        # windows are marked complete → skipped (no re-fetch / conflict flood);
+        # windows the lake does not cover re-pull (DEC-LAKE-RECONCILE-001).
+        if not dry_run and coverage is not None:
+            reconcile_coverage_with_lake(
+                coverage,
+                lake_root,
+                instruments=[instrument],
+                intervals=DHAN_FETCH_INTERVALS,
+                start=start.date(),
+                end=end.date(),
+            )
 
         _LOG.info(
             "universe.pull.start",
