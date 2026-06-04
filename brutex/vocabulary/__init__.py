@@ -52,6 +52,12 @@ from brutex.vocabulary.bits import (
     TOTAL_CONDITIONS,
 )
 from brutex.vocabulary.conflicts import CONFLICT_PAIRS, has_conflict
+from brutex.vocabulary.describe import (
+    GROUP_RANGES,
+    MaskGroup,
+    describe_mask,
+    matched_condition_names,
+)
 from brutex.vocabulary.evaluator import (
     IndicatorSnapshot,
     PriorBarHistory,
@@ -63,11 +69,15 @@ __all__ = [
     "ALL_CONDITION_NAMES",
     "BIT_TO_NAME",
     "CONFLICT_PAIRS",
+    "GROUP_RANGES",
     "NAME_TO_BIT",
     "TOTAL_CONDITIONS",
     "IndicatorSnapshot",
+    "MaskGroup",
     "PriorBarHistory",
     "ProximityParams",
+    "describe_mask",
     "evaluate_atoms",
     "has_conflict",
+    "matched_condition_names",
 ]
