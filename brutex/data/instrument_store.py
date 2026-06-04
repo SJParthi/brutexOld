@@ -754,35 +754,57 @@ class InstrumentStore(metaclass=_StoreMeta):
     :class:`~brutex.data.catalog.Catalog`. Open once per process,
     share the handle across phases, close on shutdown.
 
-    Thread-safe (DEC-STORE-THREADSAFE-001): every public method is serialized
-    behind a per-store re-entrant lock via :class:`_StoreMeta`, so the
-    dashboard request threads and the background universe-pull thread can share
-    the single DuckDB connection without corrupting each other's result cursor.
+    Thread-safe (DEC-STORE-THREADSAFE-001): every public WRITE / metadata method
+    is serialized behind a per-store re-entrant write lock via :class:`_StoreMeta`.
+    Read/write split (DEC-STORE-READ-WRITE-SPLIT-001): the dashboard's raw
+    ``store.connection`` reads run on a dedicated child READ cursor under a
+    SEPARATE read lock, so an uncached ``/db`` scan never WAITS behind the
+    background universe-pull writer — DuckDB MVCC hands the reader a consistent
+    committed snapshot even mid-write. The writer stays single-flight at the job
+    level; this only frees concurrent READERS from waiting on it.
     """
 
     def __init__(self, *, conn: Any, path: Path) -> None:
-        # Re-entrant so a locked method may call another locked method on the
-        # same thread without self-deadlock.
+        # The WRITE lock — re-entrant so a locked method may call another locked
+        # method on the same thread without self-deadlock. Guards self._conn (the
+        # writer connection) + every synchronized public method.
         self._lock = threading.RLock()
         self._conn = conn
+        # Read/write split (DEC-STORE-READ-WRITE-SPLIT-001): a dedicated child
+        # READ cursor (a separate DuckDB connection sharing the same catalog) +
+        # its own lock, so a dashboard `store.connection` read runs on a DIFFERENT
+        # connection under a DIFFERENT lock and NEVER waits behind the writer's
+        # RLock. DuckDB MVCC gives the reader a consistent committed snapshot even
+        # while a write transaction is open on self._conn (empirically verified on
+        # 1.5.3); a second `read_only=True` connection cannot be opened while this
+        # process holds the file read-write, so the child cursor is the mechanism.
+        self._read_conn = conn.cursor()
+        # RLock (not a plain Lock) to satisfy _LockedReadConn's contract + as a
+        # safe superset: reads never re-enter (the view balances acquire/release
+        # via its _held flag), so re-entrancy is unused but harmless.
+        self._read_lock = threading.RLock()
         self._path = path
         self._closed = False
 
     @property
     def connection(self) -> Any:
-        """Lock-serialized read-only view of the underlying DuckDB connection.
+        """Read-only view of the lake on a dedicated child READ cursor.
 
-        Exposed for whitebox consumers (the ``/db`` viewer) that need raw
-        read access. Returns a :class:`_LockedReadConn` that holds the store
-        lock across ``execute → fetch`` (DEC-STORE-THREADSAFE-001), so a
-        ``/db`` read can never race the background pull's writes. Per
+        Exposed for whitebox consumers (the ``/db`` viewer) that need raw read
+        access. Returns a :class:`_LockedReadConn` over the child read cursor
+        (``self._read_conn``) guarded by the SEPARATE ``self._read_lock``
+        (DEC-STORE-READ-WRITE-SPLIT-001) — NOT the writer's RLock. So a ``/db``
+        read holds the read lock across its own ``execute → fetch`` (still
+        serialized against other concurrent reads, which share the one cursor)
+        but NEVER waits behind the background pull's writer connection; DuckDB
+        MVCC hands it a consistent committed snapshot even mid-write. Per
         DEC-P0-017 (PR #39) it avoids per-call-site private-access ignores.
 
         Treat as read-only — any state mutation MUST go through the
         InstrumentStore's typed methods (upsert_many, verify_integrity,
         etc.) to preserve audit + idempotence guarantees.
         """
-        return _LockedReadConn(self._conn, self._lock)
+        return _LockedReadConn(self._read_conn, self._read_lock)
 
     @classmethod
     def open(cls, path: Path) -> Self:
@@ -1675,6 +1697,9 @@ class InstrumentStore(metaclass=_StoreMeta):
         if self._closed:
             return
         try:
+            # Close the child READ cursor first, then the parent writer
+            # connection (DEC-STORE-READ-WRITE-SPLIT-001).
+            self._read_conn.close()
             self._conn.close()
         finally:
             self._closed = True
