@@ -29,6 +29,7 @@ from typing import Final
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import (
     count_combos,
+    count_supermasks,
     iter_masks_k_of_bits,
     mask_to_entry_signals,
 )
@@ -36,7 +37,7 @@ from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.trade_sim import simulate_trades
 from brutex.metrics.compute import ResultMetrics, compute_metrics
 from brutex.metrics.types import ClosedTrade, EquityCurve
-from brutex.ranking import RankedCombo, rank_combos
+from brutex.ranking import MIN_TRADES, RankedCombo, rank_combos
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
 
@@ -242,6 +243,7 @@ def sweep_masks(
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
     proximity: ProximityParams | None = None,
     prior_n: int = 3,
+    min_hits: int = 0,
 ) -> list[tuple[int, ResultMetrics]]:
     """Backtest MANY masks over the same bars → ``(mask, metrics)`` pairs.
 
@@ -259,11 +261,21 @@ def sweep_masks(
         :func:`brutex.engine.combo_mask.iter_masks_k_of_n`).
     direction, tf_minutes, stop_loss_paisa, take_profit_paisa, start_equity_paisa, proximity, prior_n
         As :func:`evaluate_combo`.
+    min_hits
+        **Stage-1B coarse pre-filter** (DEC-STAGE1B-WIRE-001). When ``> 0``, a mask
+        is dropped BEFORE the expensive trade sim if it fires (is a superset) on
+        fewer than ``min_hits`` bars — counted cheaply via the batched Rust kernel
+        :func:`~brutex.engine.combo_mask.count_supermasks`. Because the trade
+        simulator opens at most one trade per entry signal (no pyramiding), a mask
+        with fewer hits than the ``MIN_TRADES`` gate can never be rankable, so
+        pruning it does not change any *ranked* leaderboard — it only skips dead
+        work. ``0`` (default) disables the pre-filter (every mask is simulated).
 
     Returns
     -------
     list[tuple[int, ResultMetrics]]
-        One ``(mask, metrics)`` pair per input mask, in input order.
+        One ``(mask, metrics)`` pair per **surviving** mask, in input order (every
+        input mask when ``min_hits == 0``).
 
     Raises
     ------
@@ -273,6 +285,12 @@ def sweep_masks(
     if not bars:
         raise ValueError("sweep_masks: bars must be non-empty")
     bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=prior_n)
+    swept = masks
+    if min_hits > 0:
+        # Count each mask's superset hits once (one batched Rust call), then keep
+        # only masks that could possibly reach the trade-count gate.
+        hits = count_supermasks(bar_bits, masks)
+        swept = [mask for mask, hit in zip(masks, hits, strict=True) if hit >= min_hits]
     return [
         (
             mask,
@@ -287,7 +305,7 @@ def sweep_masks(
                 start_equity_paisa=start_equity_paisa,
             ),
         )
-        for mask in masks
+        for mask in swept
     ]
 
 
@@ -302,13 +320,17 @@ def rank_sweep(
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
     proximity: ProximityParams | None = None,
     prior_n: int = 3,
+    min_hits: int = 0,
 ) -> list[RankedCombo]:
     """Sweep a set of masks and return the **ranked leaderboard** — the top combos.
 
-    :func:`sweep_masks` backtests every mask, then
-    :func:`brutex.ranking.rank_combos` applies the hard rejection gates +
-    composite z-score and sorts. The head of the returned list is the
-    top-performing combo for this ``(instrument, TF, direction, params)``.
+    :func:`sweep_masks` backtests every mask (skipping any pruned by the optional
+    ``min_hits`` Stage-1B pre-filter), then :func:`brutex.ranking.rank_combos`
+    applies the hard rejection gates + composite z-score and sorts. The head of the
+    returned list is the top-performing combo for this
+    ``(instrument, TF, direction, params)``. ``min_hits`` (default ``0`` = off) only
+    skips masks that could never clear the trade-count gate, so it never changes the
+    ranked result — see :func:`sweep_masks`.
     """
     return rank_combos(
         sweep_masks(
@@ -321,6 +343,7 @@ def rank_sweep(
             start_equity_paisa=start_equity_paisa,
             proximity=proximity,
             prior_n=prior_n,
+            min_hits=min_hits,
         )
     )
 
@@ -338,6 +361,7 @@ def rank_sweep_over_bits(
     proximity: ProximityParams | None = None,
     prior_n: int = 3,
     max_combos: int = DEFAULT_MAX_COMBOS,
+    min_hits: int = MIN_TRADES,
 ) -> list[RankedCombo]:
     """Sweep + rank over the **K-of-the-chosen-condition-bits** mask space → top combos.
 
@@ -371,6 +395,12 @@ def rank_sweep_over_bits(
     max_combos
         Refuse (raise) rather than enumerate more than this many masks
         (default :data:`DEFAULT_MAX_COMBOS`).
+    min_hits
+        Stage-1B coarse pre-filter threshold (DEC-STAGE1B-WIRE-001). Defaults to
+        :data:`brutex.ranking.MIN_TRADES` — a mask firing on fewer bars than the
+        trade-count gate can never be rankable, so it is pruned before the trade sim
+        (identical leaderboard, less work). Pass ``0`` to disable (simulate every
+        enumerated mask). See :func:`sweep_masks`.
 
     Returns
     -------
@@ -406,6 +436,7 @@ def rank_sweep_over_bits(
         start_equity_paisa=start_equity_paisa,
         proximity=proximity,
         prior_n=prior_n,
+        min_hits=min_hits,
     )
 
 

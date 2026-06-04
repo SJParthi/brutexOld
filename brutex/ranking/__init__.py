@@ -43,7 +43,14 @@ from dataclasses import dataclass
 from brutex.metrics.compute import ResultMetrics
 
 # ── Hard rejection gate thresholds (the spec, above) ──
-_MIN_TRADES = 30
+#: Minimum closed trades for a result to be rankable (below this is statistical
+#: noise). PUBLIC because it is the single source of truth for the Stage-1B coarse
+#: pre-filter too (DEC-STAGE1B-WIRE-001): a mask that fires on fewer than this many
+#: bars can never reach this many trades (the trade simulator opens ≤ one trade per
+#: entry signal — no pyramiding), so it is provably un-rankable and can be pruned
+#: before the expensive trade sim. Keeping the gate + the pre-filter on ONE constant
+#: means they can never drift (CLAUDE.md §11 COMMON).
+MIN_TRADES = 30
 _MIN_PROFIT_FACTOR = 1.2
 _MAX_DRAWDOWN_PCT = 30.0
 _MIN_WIN_RATE = 0.25
@@ -105,7 +112,7 @@ def passes_gates(m: ResultMetrics) -> bool:
     metric (mathematically undefined for the sample) is treated as failing —
     a combo with no real edge cannot be ranked above one with a measured edge.
     """
-    if m.total_trades < _MIN_TRADES:
+    if m.total_trades < MIN_TRADES:
         return False
     if m.profit_factor is None or m.profit_factor < _MIN_PROFIT_FACTOR:
         return False
@@ -206,6 +213,7 @@ def rank_combos(candidates: Sequence[tuple[int, ResultMetrics]]) -> list[RankedC
 
 
 __all__ = [
+    "MIN_TRADES",
     "RankedCombo",
     "passes_gates",
     "rank_combos",
