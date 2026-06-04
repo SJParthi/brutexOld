@@ -284,6 +284,7 @@
     <button class="pullbtn" id="pullbtn" disabled>⤓ Pull spot — 1-minute</button>
     <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
     <button class="loadbtn" id="clrselbtn" title="Untick all selected">✗ clear</button>
+    <button class="loadbtn" id="tickconstbtn" title="Best-effort: tick this index's F&amp;O-eligible constituent stocks (fetched from NSE on your machine — verify; membership rebalances)" disabled>⊕ tick its constituents</button>
     <button class="pullbtn" id="pullmulti" disabled title="Tick several rows below, then pull all their spot in one go" style="background:linear-gradient(135deg,#5B8DEF,#9D7BFF);">⤓ Pull 0 selected</button>
   </div>
   <div class="loadmsg" id="loadmsg" style="margin:-4px 24px 8px;"></div>
@@ -492,6 +493,9 @@ async function selectInstrument(i) {
     `Ready to pull <b>${esc(i.symbol)}</b> spot / options — or click a future / option contract below`;
   document.getElementById("pullbtn").disabled = false;
   document.getElementById("optbtn").disabled = false;
+  /* "⊕ tick its constituents" is meaningful only for an INDEX
+     (DEC-UNIVERSE-NSE-CONSTITUENTS-001) — a stock has no constituents. */
+  document.getElementById("tickconstbtn").disabled = (i.kind !== "index");
   const ex = document.getElementById("expiries");
   ex.innerHTML = '<div class="empty">loading…</div>';
   document.getElementById("contracts").innerHTML = '<div class="empty">pick an expiry →</div>';
@@ -682,6 +686,64 @@ document.getElementById("clrselbtn").onclick = () => {
   updateMultiBtn();
   renderInstruments();
 };
+
+/* ── "⊕ tick its constituents" (DEC-UNIVERSE-NSE-CONSTITUENTS-001) ──
+   When an INDEX is selected, GET its NSE constituent stocks (best-effort —
+   fetched on the operator's machine; NSE bot-blocks + this build env
+   network-blocks nseindia.com), intersected with our F&O-eligible stocks.
+   source:"nse"  → switch to the Stocks tab + tick the returned members in
+                   the existing selMulti multi-select (ready for ⤓ Pull N).
+   source:"unknown-index" / "unavailable" → show the honest note pointing at
+                   the "Pull ALL F&O stocks" superset (button ③). NEVER 500. */
+document.getElementById("tickconstbtn").onclick = async () => {
+  if (!selInst) return;
+  const btn = document.getElementById("tickconstbtn");
+  const msg = document.getElementById("loadmsg");
+  btn.disabled = true;
+  const indexSymbol = selInst;
+  if (msg) { msg.classList.remove("err"); msg.textContent = `Fetching ${indexSymbol} constituents from NSE…`; }
+  let body;
+  try {
+    const r = await fetch('/api/v1/universe/index-constituents?symbol=' + encodeURIComponent(indexSymbol));
+    body = await r.json();
+  } catch (e) {
+    if (msg) { msg.classList.add("err"); msg.textContent = "couldn't reach the constituents endpoint: " + esc(e.message); }
+    btn.disabled = false;
+    return;
+  }
+  const members = body && body.members ? body.members : [];
+  const source = body && body.source ? body.source : "unavailable";
+  const note = (body && body.note) || "";
+  if (source !== "nse" || !members.length) {
+    /* unknown-index / unavailable / nse-but-none-eligible → honest note. */
+    if (msg) {
+      msg.classList.toggle("err", source !== "nse");
+      msg.textContent = note
+        || "No constituents to tick — use button ③ 'Pull ALL F&O stocks' (the superset).";
+    }
+    btn.disabled = false;
+    return;
+  }
+  /* Switch to the Stocks tab so the ticked rows are visible, reload its
+     instruments, THEN tick the members in selMulti (renderInstruments reads
+     selMulti.has(symbol) so the checkboxes reflect the ticks). */
+  filter = "stock";
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.k === "stock"));
+  await loadInstruments();
+  let ticked = 0;
+  members.forEach(sym => {
+    const inst = UNIV.find(i => i.symbol === sym);
+    if (inst) { selMulti.set(inst.symbol, inst); ticked++; }
+  });
+  updateMultiBtn();
+  renderInstruments();
+  if (msg) {
+    msg.classList.remove("err");
+    msg.textContent = `Ticked ${ticked} F&O-eligible constituent(s) of ${indexSymbol} — best-effort from NSE (verify; membership rebalances). Now hit ⤓ Pull N selected.`;
+  }
+  btn.disabled = false;
+};
+
 document.getElementById("pullmulti").onclick = async () => {
   const items = [...selMulti.values()];
   if (!items.length) return;

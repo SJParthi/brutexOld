@@ -1,0 +1,159 @@
+"""Unit tests for :mod:`brutex.dashboard.nse_constituents`.
+
+DEC-UNIVERSE-NSE-CONSTITUENTS-001 (MIGRATION.md #445). 100% line+branch
+on the module EXCEPT the ``# pragma: no cover`` live urllib opener
+(``_default_opener``) — NSE bot-blocks those endpoints and this build
+environment network-blocks ``nseindia.com``, so the live fetch is
+UNVERIFIABLE in CI. Every other path is exercised here with a PURE CSV
+fixture + an injected fake opener (no network).
+"""
+
+from __future__ import annotations
+
+import pytest
+from brutex.dashboard import nse_constituents as nc
+from brutex.dashboard.nse_constituents import (
+    INDEX_CSV_FILENAMES,
+    NSE_CONSTITUENTS_BASE_URL,
+    constituent_url,
+    fetch_constituent_symbols,
+    members_in_universe,
+    parse_symbols,
+)
+
+# A realistic NSE constituent CSV (cols: Company Name, Industry, Symbol,
+# Series, ISIN Code) including `&`-bearing symbols (M&M, GVT&D), a
+# duplicate row (RELIANCE twice), a blank-symbol row, and trailing blank
+# lines — every edge parse_symbols must survive.
+_FIXTURE_CSV = (
+    "Company Name,Industry,Symbol,Series,ISIN Code\n"
+    "Reliance Industries Ltd.,Refineries,RELIANCE,EQ,INE002A01018\n"
+    "Mahindra & Mahindra Ltd.,Automobile,M&M,EQ,INE101A01026\n"
+    "GE Vernova T&D India Ltd.,Heavy Electrical Equipment,GVT&D,EQ,INE200A01026\n"
+    "HDFC Bank Ltd.,Banks,HDFCBANK,EQ,INE040A01034\n"
+    "Reliance Industries Ltd.,Refineries,RELIANCE,EQ,INE002A01018\n"
+    ",,, ,\n"
+    "\n"
+    "\n"
+)
+
+
+class TestParseSymbols:
+    def test_parses_symbol_column_dedup_order_preserved(self) -> None:
+        assert parse_symbols(_FIXTURE_CSV) == [
+            "RELIANCE",
+            "M&M",
+            "GVT&D",
+            "HDFCBANK",
+        ]
+
+    def test_empty_text_returns_empty(self) -> None:
+        assert parse_symbols("") == []
+
+    def test_header_only_returns_empty(self) -> None:
+        assert parse_symbols("Company Name,Industry,Symbol,Series,ISIN Code\n") == []
+
+    def test_no_symbol_column_returns_empty(self) -> None:
+        assert parse_symbols("Company Name,Industry,Series\nFoo,Bar,EQ\n") == []
+
+    def test_header_whitespace_tolerated(self) -> None:
+        # A " Symbol " header (leading/trailing space) still resolves.
+        csv_text = "Company Name, Symbol ,Series\nReliance, RELIANCE ,EQ\n"
+        assert parse_symbols(csv_text) == ["RELIANCE"]
+
+    def test_lowercase_symbols_upcased(self) -> None:
+        csv_text = "Company Name,Symbol,Series\nReliance,reliance,EQ\n"
+        assert parse_symbols(csv_text) == ["RELIANCE"]
+
+    def test_row_with_missing_symbol_field_skipped(self) -> None:
+        # A short row (no Symbol value) → DictReader yields None for the key.
+        csv_text = "Company Name,Symbol,Series\nReliance\nHDFC,HDFCBANK,EQ\n"
+        assert parse_symbols(csv_text) == ["HDFCBANK"]
+
+
+class TestConstituentUrl:
+    def test_known_index_builds_full_url(self) -> None:
+        assert constituent_url("NIFTY") == (f"{NSE_CONSTITUENTS_BASE_URL}/ind_nifty50list.csv")
+
+    def test_case_insensitive_and_trimmed(self) -> None:
+        assert constituent_url("  banknifty  ") == (
+            f"{NSE_CONSTITUENTS_BASE_URL}/ind_niftybanklist.csv"
+        )
+
+    def test_alias_resolves(self) -> None:
+        assert constituent_url("NIFTY NEXT 50") == constituent_url("NIFTYNXT50")
+
+    def test_unknown_index_returns_none(self) -> None:
+        assert constituent_url("NIFTY IT") is None
+
+    @pytest.mark.parametrize("symbol", sorted(INDEX_CSV_FILENAMES))
+    def test_every_mapped_index_resolves(self, symbol: str) -> None:
+        assert constituent_url(symbol) is not None
+
+
+class TestFetchConstituentSymbols:
+    def test_success_with_injected_opener(self) -> None:
+        captured: dict[str, str] = {}
+
+        def fake_opener(url: str) -> str:
+            captured["url"] = url
+            return _FIXTURE_CSV
+
+        out = fetch_constituent_symbols("NIFTY", opener=fake_opener)
+        assert out == ["RELIANCE", "M&M", "GVT&D", "HDFCBANK"]
+        assert captured["url"].endswith("/ind_nifty50list.csv")
+
+    def test_unknown_index_returns_empty_without_calling_opener(self) -> None:
+        def boom(url: str) -> str:  # pragma: no cover - must NOT be called
+            raise AssertionError("opener should not be called for unknown index")
+
+        assert fetch_constituent_symbols("NIFTY IT", opener=boom) == []
+
+    def test_opener_error_propagates(self) -> None:
+        def failing(url: str) -> str:
+            raise OSError("network blocked")
+
+        with pytest.raises(OSError, match="network blocked"):
+            fetch_constituent_symbols("NIFTY", opener=failing)
+
+
+class TestMembersInUniverse:
+    def _opener(self, _url: str) -> str:
+        return _FIXTURE_CSV
+
+    def test_intersection_case_insensitive_order_preserved(self) -> None:
+        # We hold reliance (lower), HDFCBANK, M&M (held casing differs) + a
+        # non-member (INFY). Result keeps INDEX order + HELD casing.
+        held = ["reliance", "HDFCBANK", "m&m", "INFY"]
+        out = members_in_universe("NIFTY", held, opener=self._opener)
+        assert out == ["reliance", "m&m", "HDFCBANK"]
+
+    def test_non_members_dropped(self) -> None:
+        # GVT&D is in the index but NOT held → dropped.
+        held = ["RELIANCE"]
+        out = members_in_universe("NIFTY", held, opener=self._opener)
+        assert out == ["RELIANCE"]
+
+    def test_unknown_index_returns_empty(self) -> None:
+        out = members_in_universe("NIFTY IT", ["RELIANCE"], opener=self._opener)
+        assert out == []
+
+    def test_blank_held_symbols_ignored(self) -> None:
+        # Blank / whitespace-only held symbols are skipped (no key collision).
+        held = ["", "   ", "RELIANCE"]
+        out = members_in_universe("NIFTY", held, opener=self._opener)
+        assert out == ["RELIANCE"]
+
+    def test_duplicate_held_first_casing_wins(self) -> None:
+        held = ["Reliance", "RELIANCE"]
+        out = members_in_universe("NIFTY", held, opener=self._opener)
+        assert out == ["Reliance"]
+
+    def test_no_eligible_constituents_returns_empty(self) -> None:
+        out = members_in_universe("NIFTY", ["NOTINDEX"], opener=self._opener)
+        assert out == []
+
+
+def test_module_exports_are_public() -> None:
+    for name in nc.__all__:
+        assert hasattr(nc, name)

@@ -858,6 +858,88 @@ def build_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"instruments": rows, "kind": kind})
 
+    @app.get("/api/v1/universe/index-constituents")
+    async def api_universe_index_constituents(
+        symbol: str = Query(...),
+    ) -> JSONResponse:
+        """GET /api/v1/universe/index-constituents?symbol=… — best-effort.
+
+        Resolve an INDEX *symbol* to its NSE constituent stocks
+        (DEC-UNIVERSE-NSE-CONSTITUENTS-001, MIGRATION.md #445), intersect
+        them with the F&O-eligible single stocks we actually hold, and
+        return only the pullable members — so the ``/universe`` page can
+        auto-tick them in the multi-select.
+
+        Honesty (CLAUDE.md §1 / §10): this is **NOT Dhan data**. Index
+        membership is fetched best-effort from NSE's per-index constituent
+        CSVs (see :mod:`brutex.dashboard.nse_constituents`). NSE
+        bot-blocks those endpoints and this build environment
+        network-blocks ``nseindia.com``, so the live fetch is UNVERIFIABLE
+        in CI and runs only on the operator's machine. It degrades
+        gracefully and **never 500s**:
+
+        * ``source="nse"`` — a known index, fetched + intersected OK
+          (``members`` may be empty if none of its constituents are
+          F&O-eligible);
+        * ``source="unknown-index"`` — no NSE CSV mapping for *symbol*;
+        * ``source="unavailable"`` — the live fetch failed
+          (network/block/timeout); the note points at the
+          "Pull ALL F&O stocks" superset fallback.
+
+        The fetch itself (the injected default urllib opener) is the only
+        ``# pragma: no cover`` surface; the success-mapping (fake opener),
+        unknown-index, and unavailable branches are all unit-tested.
+        """
+        from brutex.dashboard.nse_constituents import (
+            constituent_url,
+            members_in_universe,
+        )
+
+        store = _require_store()
+        eligible = store.fno_eligible_underlyings()
+        candidates = store.list_index_equity_instruments()
+        # The bare engine symbols of the F&O-eligible single stocks we hold
+        # (the exact rows the multi-select renders) — reuse the COMMON
+        # classifier (CLAUDE.md §11) rather than re-deriving the split.
+        stock_rows = list_underlyings(candidates, kind="stock", fno_eligible=eligible)
+        fno_symbols = [row["symbol"] for row in stock_rows]
+
+        if constituent_url(symbol) is None:
+            return JSONResponse(
+                {
+                    "members": [],
+                    "source": "unknown-index",
+                    "note": (
+                        f"No NSE constituent list known for {symbol!r} — "
+                        "use 'Pull ALL F&O stocks' (the superset)."
+                    ),
+                }
+            )
+        try:
+            members = members_in_universe(symbol, fno_symbols)
+        except OSError:
+            # Any network / block / timeout from the live opener — degrade
+            # gracefully, NEVER 500 (DEC-UNIVERSE-NSE-CONSTITUENTS-001).
+            return JSONResponse(
+                {
+                    "members": [],
+                    "source": "unavailable",
+                    "note": (
+                        "NSE constituents unavailable — use 'Pull ALL F&O stocks' (the superset)"
+                    ),
+                }
+            )
+        return JSONResponse(
+            {
+                "members": members,
+                "source": "nse",
+                "note": (
+                    f"{len(members)} F&O-eligible constituent(s) of {symbol} "
+                    "ticked — best-effort from NSE (verify; membership rebalances)."
+                ),
+            }
+        )
+
     @app.post("/api/v1/universe/load-instruments")
     async def api_universe_load_instruments() -> JSONResponse:
         """POST /api/v1/universe/load-instruments — keylessly populate the list.
