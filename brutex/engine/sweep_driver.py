@@ -173,7 +173,7 @@ def evaluate_combo(
         raise ValueError("evaluate_combo: bars must be non-empty")
 
     bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=prior_n)
-    return _metrics_for_mask(
+    return metrics_for_mask(
         bars,
         bar_bits,
         required_mask,
@@ -185,7 +185,7 @@ def evaluate_combo(
     )
 
 
-def _metrics_for_mask(
+def metrics_for_mask(
     bars: Sequence[CandleBar],
     bar_bits: Sequence[int],
     required_mask: int,
@@ -196,11 +196,13 @@ def _metrics_for_mask(
     take_profit_paisa: int | None,
     start_equity_paisa: int,
 ) -> ResultMetrics:
-    """Project one mask onto pre-built ``bar_bits`` → its metrics (shared core).
+    """Project one mask onto pre-built ``bar_bits`` → its metrics (the shared core).
 
-    The per-mask body shared by :func:`evaluate_combo` (one mask) and
-    :func:`sweep_masks` (many masks over ONE ``bar_bits`` build) — so the sweep
-    builds the Stage-1A matrix once and reuses it across every mask.
+    The per-mask body shared by :func:`evaluate_combo` (one mask),
+    :func:`sweep_masks` (many masks over ONE ``bar_bits`` build), and
+    :func:`brutex.engine.validation.validate_out_of_sample` (one build, sliced into
+    train/test) — so callers build the Stage-1A matrix once and reuse it. Public so
+    those callers need not duplicate the chain (CLAUDE.md §11 COMMON).
     """
     entry_signals = mask_to_entry_signals(bar_bits, required_mask)
     trades = simulate_trades(
@@ -262,7 +264,7 @@ def sweep_masks(
     return [
         (
             mask,
-            _metrics_for_mask(
+            metrics_for_mask(
                 bars,
                 bar_bits,
                 mask,
@@ -315,6 +317,7 @@ __all__ = [
     "DEFAULT_START_EQUITY_PAISA",
     "build_equity_curve",
     "evaluate_combo",
+    "metrics_for_mask",
     "rank_sweep",
     "sweep_masks",
 ]
