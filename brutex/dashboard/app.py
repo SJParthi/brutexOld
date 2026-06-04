@@ -71,7 +71,12 @@ from brutex.dashboard.preopen_report import (
     render_xlsx,
     resolve_report_datasets,
 )
-from brutex.dashboard.pull_controller import dhan_creds_present, pull_all_spot, pull_candles
+from brutex.dashboard.pull_controller import (
+    SessionRateController,
+    dhan_creds_present,
+    pull_all_spot,
+    pull_candles,
+)
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.request_logging import emit_request_log
 from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
@@ -634,6 +639,10 @@ def build_app(
     # counters are owned by this app instance (no module-global mutable state —
     # CLAUDE.md §4) and injected into the routes / the background pull job below.
     _summary_cache = summary_cache if summary_cache is not None else SummaryCache()
+    # ONE rate controller per dashboard session, shared across every pull
+    # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
+    # pull restarting at the 5 r/s ceiling and re-storming Dhan.
+    _session_rate = SessionRateController()
 
     @app.get("/api/v1/state")
     async def api_state() -> JSONResponse:
@@ -1051,6 +1060,7 @@ def build_app(
                 to_date=to_date,
                 dry_run=dry_run,
                 rate_observer=make_rate_observer(state),
+                session_rate=_session_rate,
             )
         except Exception as exc:  # surface the REAL reason, never swallow it
             # A blank "no data returned" 400 was hiding the actual failure
@@ -1141,6 +1151,7 @@ def build_app(
                 dry_run=dry_run,
                 on_progress=on_progress,
                 rate_observer=make_rate_observer(state),
+                session_rate=_session_rate,
             )
 
         # total = symbols × the 2 fetched intervals (1m + 1d) — the unit the hook fires on.

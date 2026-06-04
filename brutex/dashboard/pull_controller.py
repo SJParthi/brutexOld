@@ -38,6 +38,7 @@ expansion.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -482,16 +483,49 @@ def _spot_run_parallel(controller: DhanRateController | None) -> RunParallel | N
 
 
 def _build_live_controller() -> DhanRateController:  # pragma: no cover — live Dhan controller
-    """Construct the shared adaptive [3..5] r/s controller for a live pull.
+    """Construct the shared adaptive [3..5] r/s controller (the session factory).
 
-    One controller per pull is threaded into BOTH the per-window pacing hooks
-    (``pace`` / ``on_rate_limit`` / ``on_success``) AND the pool sizing
+    The controller is threaded into BOTH the per-window pacing hooks (``pace`` /
+    ``on_rate_limit`` / ``on_success``) AND the pool sizing
     (:func:`_spot_run_parallel`), so the fan-out width tracks the controller's
-    current rate (DEC-DHAN-ADAPTIVE-RPS-001 + DEC-DHAN-PARALLEL-INGEST-001).
+    current rate (DEC-DHAN-ADAPTIVE-RPS-001 + DEC-DHAN-PARALLEL-INGEST-001). Built
+    ONCE per dashboard session and reused across pulls via
+    :class:`SessionRateController` (DEC-DHAN-PERSIST-RATE-001) so the learned rate
+    carries over instead of every pull restarting at the 5 r/s ceiling.
     """
     from brutex.adapters.dhan.rate_control import DhanRateController
 
     return DhanRateController()
+
+
+class SessionRateController:
+    """Persist ONE :class:`DhanRateController` across pulls in a dashboard session.
+
+    DEC-DHAN-PERSIST-RATE-001. Each ``POST /universe/pull`` used to build a FRESH
+    controller at the 5 r/s ceiling (:func:`_build_live_controller`), so every
+    symbol-pull re-opened at 5 r/s and re-hit Dhan's wall — the 429 storm the
+    operator saw at the start of *every* pull, re-learnt per symbol. This holder
+    builds the controller ONCE (lazily, thread-safe) and hands the SAME instance
+    to every pull, so the rate the system LEARNED (e.g. stepped down to 3 r/s)
+    CARRIES OVER: symbol 2, 3, 4… start at the learned rate, not 5. The controller
+    is itself thread-safe (DEC-DHAN-PARALLEL-INGEST-001), so sharing it across
+    sequential AND concurrent pulls correctly keeps the AGGREGATE issue rate
+    ≤ 5 r/s (Rule #6) — concurrent pulls now share one global budget instead of
+    each running its own 5 r/s.
+    """
+
+    def __init__(self, factory: Callable[[], DhanRateController] | None = None) -> None:
+        """Build a holder. *factory* (a test seam) defaults to :func:`_build_live_controller`."""
+        self._factory = factory if factory is not None else _build_live_controller
+        self._controller: DhanRateController | None = None
+        self._lock = threading.Lock()
+
+    def get(self) -> DhanRateController:
+        """Return the session's controller, building it ONCE on first use (thread-safe)."""
+        with self._lock:
+            if self._controller is None:
+                self._controller = self._factory()
+            return self._controller
 
 
 #: The dashboard rate-panel observer (DEC-DASHBOARD-RATE-PANEL-001): given a
@@ -525,21 +559,27 @@ def _observe_rate(
 
 def _live_rate_runtime(
     use_live_rate: bool,
+    session_rate: SessionRateController | None = None,
 ) -> tuple[_RateHooks, RunParallel | None, DhanRateController | None]:
     """Return ``((pace, on_rate_limit, on_success), run_parallel, controller)`` for the pull.
 
-    A **default live** pull (no injected factory + not dry-run) builds ONE shared
+    A **default live** pull (no injected factory + not dry-run) resolves ONE shared
     controller and derives both the feedback hooks AND a rate-sized fan-out pool
     from it; the controller is also returned so the caller can push its live
-    ``snapshot()`` to the dashboard rate panel (:func:`_observe_rate`). Dry-run /
+    ``snapshot()`` to the dashboard rate panel (:func:`_observe_rate`). When a
+    *session_rate* holder is wired the controller is the SESSION's persisted one
+    (:class:`SessionRateController` — DEC-DHAN-PERSIST-RATE-001) so its learned
+    rate carries across pulls; otherwise a fresh controller is built. Dry-run /
     injected-factory pulls need no throttle → the None-triple + ``None`` pool +
     ``None`` controller (the ingest spine then uses its default pool). The sizing
     itself (:func:`_spot_run_parallel`) is covered; only the live controller
-    construction is ``# pragma: no cover``.
+    resolution is ``# pragma: no cover``.
     """
     if not use_live_rate:
         return _NO_RATE_HOOKS, None, None
-    controller = _build_live_controller()  # pragma: no cover — live only
+    controller = (  # pragma: no cover — live only
+        session_rate.get() if session_rate is not None else _build_live_controller()
+    )
     hooks = (  # pragma: no cover — live only
         controller.pace,
         controller.on_rate_limit,
@@ -559,6 +599,7 @@ def pull_all_spot(
     coverage: FetchCoverage | None = None,
     pull_id: str | None = None,
     rate_observer: RateObserver | None = None,
+    session_rate: SessionRateController | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, previous day]`` range.
 
@@ -643,7 +684,7 @@ def pull_all_spot(
             dry_run=dry_run,
         )
         (pace, on_rate_limit, on_success), run_parallel, _rate_controller = _live_rate_runtime(
-            use_live_rate
+            use_live_rate, session_rate
         )
         report = run_dhan_spot_ingest(
             adapter,
@@ -709,6 +750,7 @@ def pull_candles(
     coverage: FetchCoverage | None = None,
     pull_id: str | None = None,
     rate_observer: RateObserver | None = None,
+    session_rate: SessionRateController | None = None,
 ) -> PullCandlesReport:
     """Ingest *instrument*'s spot candles over a date range (Dhan model).
 
@@ -831,7 +873,7 @@ def pull_candles(
         )
 
         (pace, on_rate_limit, on_success), run_parallel, _rate_controller = _live_rate_runtime(
-            use_live_rate
+            use_live_rate, session_rate
         )
         report = run_dhan_spot_ingest(
             adapter,
@@ -894,6 +936,7 @@ __all__ = [
     "BulkAdapterFactory",
     "BulkSpotReport",
     "PullCandlesReport",
+    "SessionRateController",
     "SymbolPullResult",
     "TimeframeResult",
     "dhan_creds_present",

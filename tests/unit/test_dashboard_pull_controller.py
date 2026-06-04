@@ -22,6 +22,7 @@ from brutex.dashboard.pull_controller import (
     DHAN_HISTORY_FLOOR,
     BulkSpotReport,
     PullCandlesReport,
+    SessionRateController,
     TimeframeResult,
     dhan_creds_present,
     pull_all_spot,
@@ -606,3 +607,35 @@ class TestPullControllerCorrelation:
         assert done["pull_id"] == "ctlpull00003"
         underlying = _events(logs, "ingest.underlying")
         assert underlying and all(e["pull_id"] == "ctlpull00003" for e in underlying)
+
+
+class TestSessionRateController:
+    """The session-scoped rate-controller holder (DEC-DHAN-PERSIST-RATE-001).
+
+    Persists ONE controller across pulls so the learned rate carries over instead
+    of every pull restarting at the 5 r/s ceiling.
+    """
+
+    def test_get_returns_same_instance_and_builds_once(self) -> None:
+        from brutex.adapters.dhan.rate_control import DhanRateController
+
+        built: list[DhanRateController] = []
+
+        def _factory() -> DhanRateController:
+            ctl = DhanRateController()
+            built.append(ctl)
+            return ctl
+
+        holder = SessionRateController(factory=_factory)
+        first = holder.get()
+        second = holder.get()
+        assert second is first  # SAME controller across pulls — the learned rate persists
+        assert len(built) == 1  # built ONCE, not per pull
+
+    def test_default_factory_builds_a_real_controller(self) -> None:
+        from brutex.adapters.dhan.rate_control import DhanRateController
+
+        holder = SessionRateController()  # default factory = _build_live_controller
+        ctl = holder.get()
+        assert isinstance(ctl, DhanRateController)
+        assert holder.get() is ctl  # cached on subsequent calls
