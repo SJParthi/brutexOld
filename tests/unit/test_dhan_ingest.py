@@ -338,6 +338,62 @@ class TestIngestSpotCoverage:
         assert cov.completed_count == 1  # but the window IS marked (vendor had data)
 
 
+class TestIngestSpotStatusLog:
+    """The browsable per-window status record (DEC-WINDOW-STATUS-001)."""
+
+    def test_records_success_when_vendor_returns_bars(self) -> None:
+        from brutex.data.window_status import SUCCESS, WindowStatusLog
+
+        log = WindowStatusLog()
+        ingest_spot(
+            _adapter(),  # 1 bar
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            status_log=log,
+        )
+        assert log.count == 1
+        rec = log.records()[0]
+        assert rec.status == SUCCESS
+        assert rec.attempts == 1
+        assert rec.last_error is None
+
+    def test_records_empty_on_zero_bar_response(self) -> None:
+        from brutex.data.window_status import EMPTY, WindowStatusLog
+
+        empty = {"open": [], "high": [], "low": [], "close": [], "timestamp": []}
+        log = WindowStatusLog()
+        ingest_spot(
+            _adapter(payload=empty),
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            status_log=log,
+        )
+        assert log.records()[0].status == EMPTY
+
+    def test_records_failed_on_429(self) -> None:
+        from brutex.data.window_status import FAILED, WindowStatusLog
+
+        log = WindowStatusLog()
+        ingest_spot(
+            _adapter(status=429),  # DhanRateLimitError — retryable; window=None (not re-run)
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            status_log=log,
+        )
+        rec = log.records()[0]
+        assert rec.status == FAILED
+        assert rec.last_error == "DhanRateLimitError"
+
+
 class _SeqTransport:
     """Transport returning a fixed STATUS SEQUENCE (clamped to the last on overflow).
 

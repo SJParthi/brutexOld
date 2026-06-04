@@ -54,6 +54,7 @@ from brutex.dashboard.coverage_reconcile import reconcile_coverage_with_lake
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.sink import BarSink, NullBarSink
+from brutex.data.window_status_store import begin_pull_status, end_pull_status
 from brutex.models import Instrument
 from brutex.observability.correlation import pull_id_scope
 from brutex.orchestrator.parallel import (
@@ -630,6 +631,9 @@ def pull_all_spot(
                 start=start.date(),
                 end=end.date(),
             )
+        # Per-window status (DEC-WINDOW-STATUS-001): a browsable SUCCESS/EMPTY/
+        # FAILED record, loaded for the run + persisted at pull end.
+        status_log = begin_pull_status(lake_root, dry_run=dry_run)
 
         _LOG.info(
             "universe.pull_all.start",
@@ -653,9 +657,11 @@ def pull_all_spot(
             on_success=on_success,
             on_progress=on_progress,
             coverage=coverage,
+            status_log=status_log,
             run_parallel=run_parallel,
         )
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
+        end_pull_status(status_log, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
         failure_keys = {(f.symbol, f.interval) for f in report.failures}
         results: list[SymbolPullResult] = []
@@ -810,6 +816,8 @@ def pull_candles(
                 start=start.date(),
                 end=end.date(),
             )
+        # Per-window status (DEC-WINDOW-STATUS-001): browsable SUCCESS/EMPTY/FAILED.
+        status_log = begin_pull_status(lake_root, dry_run=dry_run)
 
         _LOG.info(
             "universe.pull.start",
@@ -837,9 +845,11 @@ def pull_candles(
             on_success=on_success,
             on_progress=on_progress,
             coverage=coverage,
+            status_log=status_log,
             run_parallel=run_parallel,
         )
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
+        end_pull_status(status_log, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
 
         failure_keys = {(f.symbol, f.interval) for f in report.failures}

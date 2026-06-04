@@ -1061,6 +1061,19 @@ jobs:
           else
             echo "(brutex.data.fetch_coverage test file not present yet — gate inactive)"
           fi
+          # DEC-WINDOW-STATUS-001: the per-window SUCCESS/EMPTY/FAILED status model
+          # + its durable JSON sidecar. Two pure, import-light data modules — each
+          # held at 100% line+branch by its own unit suite.
+          if compgen -G "tests/unit/test_window_status.py" > /dev/null; then
+            pytest --cov=brutex.data.window_status --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_window_status.py
+          else
+            echo "(brutex.data.window_status test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_window_status_store.py" > /dev/null; then
+            pytest --cov=brutex.data.window_status_store --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_window_status_store.py
+          else
+            echo "(brutex.data.window_status_store test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_parser.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_parser.py
           else

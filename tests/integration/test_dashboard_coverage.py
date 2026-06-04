@@ -191,6 +191,65 @@ class TestSpotCoverageApi:
         assert body == {"headline": {"datasets": 0, "total_bars": 0}, "rows": []}
 
 
+class TestWindowStatusApi:
+    """The per-window SUCCESS / EMPTY / FAILED status table (DEC-WINDOW-STATUS-001).
+
+    Covers ``/api/v1/coverage/windows``: the empty-sidecar default, a recorded
+    window read back through the durable sidecar, the unwired-store 503, and the
+    no-lake-root empty-payload (never a 500).
+    """
+
+    def test_windows_empty_when_no_sidecar(self, store: InstrumentStore) -> None:
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        resp = client.get("/api/v1/coverage/windows")
+        assert resp.status_code == 200
+        assert resp.json() == {"count": 0, "windows": []}
+
+    def test_windows_reports_recorded_status(self, store: InstrumentStore, tmp_path: Path) -> None:
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_status import WindowStatusLog
+        from brutex.data.window_status_store import save_window_status
+
+        log = WindowStatusLog()
+        log.record(
+            WindowKey(
+                market="dhan",
+                security_id="NIFTY",
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 1),
+            ),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=datetime(2026, 6, 4, 9, 15, tzinfo=UTC),
+        )
+        # store.path is tmp_path/instruments.duckdb → lake root is tmp_path.
+        save_window_status(log, tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/coverage/windows").json()
+        assert body["count"] == 1
+        (row,) = body["windows"]
+        assert row["market"] == "dhan"
+        assert row["symbol"] == "NIFTY"
+        assert row["interval"] == "1day"
+        assert row["status"] == "SUCCESS"
+        assert row["bars"] == 5
+        assert row["attempts"] == 1
+        assert row["last_error"] is None
+
+    def test_windows_503_when_store_unwired(self) -> None:
+        client = TestClient(build_app(DashboardState(), instrument_store=None))
+        assert client.get("/api/v1/coverage/windows").status_code == 503
+
+    def test_windows_empty_payload_when_no_lake_root(self) -> None:
+        from types import SimpleNamespace
+
+        fake = SimpleNamespace(path=None)
+        client = TestClient(build_app(DashboardState(), instrument_store=fake))
+        assert client.get("/api/v1/coverage/windows").json() == {"count": 0, "windows": []}
+
+
 class TestCoverageHelpers:
     def test_coverage_years_starts_2021(self) -> None:
         # Floor is 2021-01-01 (DEC-DHAN-PULL-SCOPE-001); the old 2020 floor was a
