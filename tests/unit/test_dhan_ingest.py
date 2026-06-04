@@ -197,6 +197,7 @@ class TestIngestSpot:
             interval="1minute",
             start=date(2021, 1, 1),
             end=date(2021, 8, 1),
+            max_retry_passes=0,  # first-pass accounting only (retry covered below)
         )
         assert report.windows == 3
         assert report.bars_appended == 0
@@ -381,13 +382,14 @@ class TestIngestSpotStatusLog:
 
         log = WindowStatusLog()
         ingest_spot(
-            _adapter(status=429),  # DhanRateLimitError — retryable; window=None (not re-run)
+            _adapter(status=429),  # DhanRateLimitError — retryable
             _Sink(),
             instrument=_INST,
             interval="1day",
             start=date(2021, 1, 1),
             end=date(2021, 8, 1),
             status_log=log,
+            max_retry_passes=0,  # single attempt — assert the FAILED record, not the retry
         )
         rec = log.records()[0]
         assert rec.status == FAILED
@@ -440,8 +442,9 @@ class TestIngestSpotInRunRetry:
     A network drop (transport/timeout/5xx that outlived the client's in-call
     fast-retry) is re-run WITHIN the same pull, bounded by ``max_retry_passes``,
     with a per-window WARNING. A window still failing after the budget stays
-    UNMARKED (deferred to the next pull — the no-skip guarantee). A 429 is NOT
-    re-run in-run (the rate controller owns it).
+    UNMARKED (deferred to the next pull — the no-skip guarantee). A 429 is ALSO
+    re-run in-run after the backoff/step-down cooldown (DEC-DHAN-429-RETRY-001) —
+    deferring it never clears it because the next pull just re-bursts.
     """
 
     def test_network_drop_window_retried_then_succeeds(self) -> None:
@@ -500,9 +503,12 @@ class TestIngestSpotInRunRetry:
         assert report.retried_windows == 0
         assert _events(logs, "ingest.retry_pass") == []
 
-    def test_429_is_not_retried_in_run(self) -> None:
-        # A 429 is transient but the rate controller owns it: window=None, so it
-        # is NOT re-run in-run — on_rate_limit fires ONCE, no retry pass.
+    def test_429_is_retried_in_run(self) -> None:
+        # DEC-DHAN-429-RETRY-001: a 429 IS now re-run in-run. Deferring it to the
+        # next pull never clears it (the next pull re-opens at the full r/s and
+        # re-bursts), so the window is retried after the backoff/step-down cooldown.
+        # Always-429 → retried up to the budget, on_rate_limit fires per attempt,
+        # still failing (UNMARKED) after the budget.
         hits: list[int] = []
         with capture_logs() as logs:
             report = ingest_spot(
@@ -514,12 +520,31 @@ class TestIngestSpotInRunRetry:
                 end=date(2021, 8, 1),
                 on_rate_limit=lambda: hits.append(1),
                 max_retry_passes=2,
-                retry_backoff=lambda _i: None,
+                retry_backoff=lambda _i: None,  # no real sleep
             )
-        assert report.transient_failures == 1
-        assert report.retried_windows == 0  # 429 not re-run in-run
-        assert hits == [1]  # fired once, not once-per-pass
-        assert _events(logs, "ingest.retry_pass") == []
+        assert report.transient_failures == 1  # still failing after the budget
+        assert report.retried_windows == 1  # the 429 window WAS re-run (was 0 pre-fix)
+        assert hits == [1, 1, 1]  # one attempt + two retries → fired per attempt
+        assert len(_events(logs, "ingest.retry_pass")) == 2  # two retry passes ran
+
+    def test_429_recovers_on_retry(self) -> None:
+        # The fix's VALUE: a 429 caught in the opening burst self-heals WITHIN the
+        # run once the backoff + step-down let it through — so the operator's cheap
+        # 1-day window stops failing every pull. First attempt 429 → retry → clean.
+        adapter, _t = _flaky_adapter([429, 200])
+        report = ingest_spot(
+            adapter,
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            retry_backoff=lambda _i: None,
+        )
+        assert report.bars_appended == 1
+        assert report.transient_failures == 0
+        assert report.still_failed_windows == 0
+        assert report.retried_windows == 1
 
     def test_retry_pass_and_window_transient_logged(self) -> None:
         adapter, _t = _flaky_adapter([500, 500, 500, 200])
@@ -595,6 +620,7 @@ class TestIngestSpotRateFeedback:
             end=date(2021, 8, 1),
             on_rate_limit=lambda: hits.append(1),
             on_success=lambda: ok.append(1),
+            max_retry_passes=0,  # one attempt — assert the callback fires, not the retry
         )
         assert report.transient_failures == 1
         assert hits == [1]  # the 429 stepped the controller

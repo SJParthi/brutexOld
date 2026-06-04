@@ -499,25 +499,30 @@ def _ingest_one_window(
             rate_limited = is_rate_limit(exc)
             if on_rate_limit is not None and rate_limited:
                 on_rate_limit()
-            # In-run auto-retry (DEC-DHAN-WINDOW-RETRY-001) targets a NETWORK drop
-            # (transport / timeout / 5xx that outlived the client's in-call
-            # fast-retry) — the operator's seconds-long connectivity blips — and
-            # DELIBERATELY EXCLUDES a 429 (``window=None`` ⇒ not re-run in-run),
-            # mirroring ``client._should_fast_retry``: the rate controller's
-            # step-down (above) + the token bucket own 429 backoff, so retrying a
-            # 429 here would fight the limiter. EITHER way the window is counted
-            # transient and NEVER marked complete (no-skip) — a 429 window is
-            # simply deferred to the next pull, by when the stepped-down rate lets
-            # it through. The per-window WARNING surfaces the exact window + error
+            # In-run auto-retry (DEC-DHAN-WINDOW-RETRY-001, AMENDED by
+            # DEC-DHAN-429-RETRY-001): re-run the window WITHIN the pull — a NETWORK
+            # drop (transport / timeout / 5xx that outlived the client's in-call
+            # fast-retry) AND a 429 alike. The 429 is now retried because DEFERRING
+            # it to the next pull does NOT clear it: every pull re-opens at the full
+            # r/s and re-bursts, so a window caught in the opening storm — notably
+            # the single cheap 1-day call — 429s again and again, stuck at no_data
+            # FOREVER (the operator's recurring 1-day failure). The retry runs AFTER
+            # the seconds-scale backoff (``_default_retry_backoff``: 1 s → 2 s), by
+            # when the opening burst is over and the controller has STEPPED DOWN
+            # (DEC-DHAN-ADAPTIVE-RPS-001, fed by the ``on_rate_limit`` above), and is
+            # paced by the token bucket — so the retry WAITS the limiter out instead
+            # of fighting it. A window still failing after the retry budget stays
+            # transient + NEVER marked complete (the no-skip guarantee — deferred to
+            # the next pull). The per-window WARNING surfaces the exact window + error
             # the bare ``transient_failures=N`` count hid.
-            retry_window = None if rate_limited else window
+            retry_window = window
             _LOG.warning(
                 "ingest.window.transient",
                 pull_id=pull_id,
                 window_start=window_start.isoformat(),
                 window_end=window_end.isoformat(),
                 error_type=type(exc).__name__,
-                in_run_retry=not rate_limited,
+                in_run_retry=True,
                 **series_fields,
             )
             # Record the FAILED outcome in the browsable status table (DEC-WINDOW-
