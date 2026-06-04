@@ -1282,6 +1282,18 @@ jobs:
           else
             echo "(brutex.metrics.cascade test file not present yet — gate inactive)"
           fi
+          # DEC-UNIVERSE-NSE-CONSTITUENTS-001 (#445): best-effort NSE index →
+          # constituent-stock helper powering the /universe "⊕ tick its
+          # constituents" action. 100% line+branch on nse_constituents.py — the
+          # parser, index→URL mapping, fetch-with-injected-opener, and
+          # universe-intersect are all unit-tested; ONLY the live urllib opener
+          # (_default_opener) is `# pragma: no cover` (NSE bot-blocks + this
+          # build env network-blocks nseindia.com, so it is UNVERIFIABLE in CI).
+          if compgen -G "tests/unit/test_nse_constituents.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.nse_constituents --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_nse_constituents.py
+          else
+            echo "(brutex.dashboard.nse_constituents test file not present yet — gate inactive)"
+          fi
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
