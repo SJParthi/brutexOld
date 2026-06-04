@@ -326,6 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the interactive typed-'WIPE' confirmation (for non-interactive / CI use).",
     )
 
+    from brutex.engine.sweep_report import SORT_KEYS
     from brutex.feed.resampler import INTERVAL_SECONDS
 
     sweep = sub.add_parser(
@@ -375,6 +376,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Take-profit in paisa (default none)",
     )
     sweep.add_argument("--top", type=int, default=20, help="Print the top-N combos (default 20)")
+    sweep.add_argument(
+        "--sort-by",
+        default="composite",
+        choices=list(SORT_KEYS),
+        dest="sort_by",
+        help=(
+            "Leaderboard order: composite (default, anti-overfit) or raw pnl / win / "
+            "pf to put the max-profit / max-win-rate / best-PF combo on top"
+        ),
+    )
     sweep.add_argument(
         "--min-hits",
         type=int,
@@ -1143,6 +1154,7 @@ def cmd_sweep(
     take_profit_paisa: int | None,
     top: int,
     min_hits: int | None,
+    sort_by: str,
 ) -> int:
     """Brute-force sweep over lake bars → print the ranked top-combo table.
 
@@ -1203,6 +1215,7 @@ def cmd_sweep(
             take_profit_paisa=take_profit_paisa,
             top_n=top,
             min_hits=MIN_TRADES if min_hits is None else min_hits,
+            sort_by=sort_by,
         )
     )
     return EXIT_OK
@@ -1292,6 +1305,7 @@ def main(argv: list[str] | None = None) -> int:
             take_profit_paisa=args.take_profit_paisa,
             top=args.top,
             min_hits=args.min_hits,
+            sort_by=args.sort_by,
         )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits
