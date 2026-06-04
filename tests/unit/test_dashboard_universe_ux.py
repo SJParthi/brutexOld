@@ -10,8 +10,10 @@ mirroring ``test_dashboard_universe_template.py``):
 * every row has a **multi-select checkbox** that toggles ``selMulti`` WITHOUT
   triggering the row's single-select (``stopPropagation``);
 * a **"⤓ Pull N selected"** button + **select-all-shown** / **clear** controls;
-* the 19 intraday timeframes are **auto-derived** from the 1-minute base, made
-  explicit (the operator asked "where do I click to generate timeframes?").
+* the page states the pull **stores 1m + 1d only** and the 19 intraday
+  timeframes are **derived on demand, not written to the drive** (pre-
+  materialising is a future external-drive step) — the operator asked "where do
+  I click to generate timeframes?" and wants no local-drive bloat.
 """
 
 from __future__ import annotations
@@ -50,9 +52,14 @@ def test_multi_select_wiring_present() -> None:
     assert "await runPull(" in html, "the multi-pull must reuse runPull sequentially"
 
 
-def test_timeframe_derivation_is_explained() -> None:
-    """The page makes clear the intraday timeframes auto-derive (no manual step)."""
+def test_timeframe_storage_is_explained_honestly() -> None:
+    """The page states only 1m+1d are stored; intraday TFs are derived, not written to disk."""
     html = _render_universe_html()
-    assert "auto-derive from the 1-minute base" in html, (
-        "the page must state the 19 intraday timeframes auto-derive (no 'generate' step)"
+    assert "fetches + stores 1-minute + 1-day only" in html, (
+        "the page must state the pull stores ONLY 1m + 1d (no 19-timeframe local-drive bloat)"
     )
+    assert "derived on demand, NOT written to your drive" in html, (
+        "the page must state the intraday timeframes are derived on demand, not materialised; "
+        "pre-materialising is a future external-drive (BRUTEX_LAKE_ROOT) step"
+    )
+    assert "BRUTEX_LAKE_ROOT" in html, "the external-drive config knob must be named"

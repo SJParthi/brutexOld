@@ -229,7 +229,7 @@
     <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
     <div class="hsub">Spot pulls <b>1-minute + 1-day</b> from <b>2021-01-01 → previous trading day</b>; options fan
       <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1-minute.
-      Re-click any time — already-pulled windows are skipped (no wasted Dhan hit). <b>All 21 timeframes</b> (1m + 19 intraday + 1d) <b>auto-derive from the 1-minute base</b> — there is no separate "generate timeframes" step.</div>
+      Re-click any time — already-pulled windows are skipped (no wasted Dhan hit). The pull <b>fetches + stores 1-minute + 1-day only</b> — the 19 intraday timeframes are <b>derived on demand, NOT written to your drive</b> (pre-materialising them to disk is a future step, enabled when you point <code>BRUTEX_LAKE_ROOT</code> at an external drive).</div>
     <div class="bulkgrid">
       <button class="bulkbtn idx" id="bulkIdxSpot" data-surface="spot" data-kind="index">
         <span class="shine"></span><span class="bnum">①</span>
