@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from brutex.money import format_inr
 from brutex.ranking import RankedCombo
 from brutex.vocabulary.describe import MaskGroup, describe_mask
 
@@ -55,9 +56,12 @@ def explain_combos(ranked: Sequence[RankedCombo]) -> list[ExplainedCombo]:
 def render_leaderboard(explained: Sequence[ExplainedCombo], *, top_n: int | None = None) -> str:
     """Render the (top-N) explained leaderboard as human-readable text.
 
-    Each row shows the rank, composite score, risk-efficiency (MFE/MAE), trade
-    count, the mask, and the matched conditions grouped by family — so the winning
-    combo reads as a rule, not a number.
+    Each row shows the rank, composite score, **net P&L** (₹, via
+    :func:`brutex.money.format_inr`), **win-rate**, **profit-factor**,
+    risk-efficiency (MFE/MAE), trade count, the mask, and the matched conditions
+    grouped by family — so the winning combo reads as a rule with its headline
+    numbers (the operator's "massive profit + max win-rate" question, answered
+    in-line), not an opaque score.
 
     Parameters
     ----------
@@ -78,13 +82,20 @@ def render_leaderboard(explained: Sequence[ExplainedCombo], *, top_n: int | None
     lines: list[str] = []
     for rank, ec in enumerate(rows, start=1):
         rc = ec.ranked
+        m = rc.metrics
         conditions = " · ".join(f"{g.group}: {', '.join(g.conditions)}" for g in ec.groups)
         if not conditions:
             conditions = "(no conditions — enters every bar)"
+        # profit_factor is Optional (undefined when there were no losing trades);
+        # gate-passing combos have a real value, but render defensively.
+        pf = f"{m.profit_factor:.2f}" if m.profit_factor is not None else "n/a"
         lines.append(
             f"#{rank}  score={rc.composite_score:+.3f}  "
+            f"pnl={format_inr(m.net_pnl_paisa)}  "
+            f"win={m.win_rate * 100:.1f}%  "
+            f"pf={pf}  "
             f"risk_eff={rc.risk_efficiency:.2f}  "
-            f"trades={rc.metrics.total_trades}  "
+            f"trades={m.total_trades}  "
             f"mask=0x{rc.mask:014x}\n    {conditions}"
         )
     return "\n".join(lines)

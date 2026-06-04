@@ -104,6 +104,34 @@ class TestRenderLeaderboard:
         assert "close_above_ema20" in text
         assert "bar_bullish" in text
 
+    def test_row_shows_pnl_winrate_profit_factor(self) -> None:
+        # The operator's headline question — profit + win-rate — answered in-line.
+        text = render_leaderboard(
+            explain_combos(
+                [
+                    _ranked(
+                        1 << BIT_CLOSE_ABOVE_EMA20,
+                        net_pnl_paisa=1_234_567,  # ₹12,345.67
+                        win_rate=0.625,  # 62.5%
+                        profit_factor=2.34,
+                    )
+                ]
+            )
+        )
+        assert "pnl=₹12,345.67" in text
+        assert "win=62.5%" in text
+        assert "pf=2.34" in text
+
+    def test_row_renders_negative_pnl_and_na_profit_factor(self) -> None:
+        # net P&L can be negative; profit_factor is None when there were no losses.
+        text = render_leaderboard(
+            explain_combos(
+                [_ranked(1 << BIT_BAR_BULLISH, net_pnl_paisa=-500_000, profit_factor=None)]
+            )
+        )
+        assert "pnl=₹-5,000.00" in text
+        assert "pf=n/a" in text
+
     def test_top_n_limits_rows(self) -> None:
         combos = explain_combos(
             [
