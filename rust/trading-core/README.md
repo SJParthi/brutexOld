@@ -46,7 +46,17 @@ The pure-Rust core links **no** Python (the PyO3 surface is behind the optional
 
 ## Status (honest envelope)
 
-Phase 1 delivers the verified-identical Rust crate + its golden test. **Deferred:**
-BruteX adoption via PyO3 (Phase 2), TickVault adoption (Phase 3), the EMA port,
-and the `CLAUDE.md` self-containment reversal (Phase 2). Today BruteX still runs
-the Python vocabulary; this crate is proven equal and ready to switch in.
+- ✅ **DONE (Phase 1 / 2a / 2b, merged):** the verified-identical Rust crate + its
+  golden test; the PyO3 wheel; **BruteX's vocabulary delegates to this crate at
+  runtime** (`brutex/vocabulary/evaluator.py` is a thin shim over
+  `evaluate_with_levels`), CI-gated across every job that imports
+  `brutex.vocabulary`; the `CLAUDE.md` self-containment reversal landed.
+- ✅ **DONE (Phase 2c):** `compute_pivot_levels` / `compute_fib_levels` are exposed
+  to Python and a parity test pins Python==Rust bit-for-bit on every build — the
+  pivot/fib math can no longer drift between the two copies.
+- 🚫 **NOT done:** **EMA / day-extremes / prev-day-OHLC are NOT in this crate** —
+  they stay in Python and feed the evaluator as precomputed inputs (EMA is a
+  stateful recurrence). **TickVault adoption (Phase 3) is 0%** — no TickVault code
+  references this crate yet (it needs the TickVault repo). The **strategy / brute-
+  force sweep / SL-TP / fills** are BruteX-only and NOT shared. So "common" today =
+  the 52-condition evaluator + pivots + Fib, nothing more.

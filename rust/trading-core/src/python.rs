@@ -210,6 +210,58 @@ fn evaluate_with_levels(
     Ok(evaluate_atoms(&snapshot, &proximity, &prior))
 }
 
+/// Compute the 9 standard pivot levels from the previous day's H/L/C — the
+/// single-source indicator math BruteX's `compute_pivot_levels` wrapper packs
+/// into its `PivotLevels` dataclass (so the arithmetic lives ONCE, in Rust).
+///
+/// Returns a 9-element list in BruteX `PivotLevels` field order:
+/// `[r4, r3, r2, r1, p, s1, s2, s3, s4]` (int64 paisa). The caller supplies
+/// `pdh/pdl/pdc` and already holds them. Assumes valid prev-day OHLC
+/// (`pdh >= pdl`, `pdc in [pdl, pdh]`) — BruteX's wrapper validates first
+/// (raising `ValueError`) exactly as before; this is a thin compute pass-through.
+#[pyfunction]
+#[pyo3(name = "compute_pivot_levels", signature = (pdh_paisa, pdl_paisa, pdc_paisa))]
+fn py_compute_pivot_levels(pdh_paisa: i64, pdl_paisa: i64, pdc_paisa: i64) -> Vec<i64> {
+    let p = compute_pivot_levels(pdh_paisa, pdl_paisa, pdc_paisa);
+    vec![
+        p.r4_paisa, p.r3_paisa, p.r2_paisa, p.r1_paisa, p.p_paisa, p.s1_paisa, p.s2_paisa,
+        p.s3_paisa, p.s4_paisa,
+    ]
+}
+
+/// Compute the static daily Fibonacci levels from the previous day's H/L — the
+/// single-source indicator math BruteX's `compute_fib_levels` wrapper packs into
+/// its `FibLevels` dataclass.
+///
+/// Returns a 15-element list of the COMPUTED levels (int64 paisa), in order:
+/// `[retrace_23, retrace_38, retrace_50, retrace_62, retrace_78,
+///   ext_up_127, ext_up_162, ext_up_200, ext_up_262, ext_up_424,
+///   ext_down_127, ext_down_162, ext_down_200, ext_down_262, ext_down_424]`.
+/// `retrace@pdh = pdh`, `retrace@pdl = pdl`, and `range = pdh - pdl` are derived
+/// by the caller. Assumes `pdh >= pdl` (BruteX's wrapper validates first).
+#[pyfunction]
+#[pyo3(name = "compute_fib_levels", signature = (pdh_paisa, pdl_paisa))]
+fn py_compute_fib_levels(pdh_paisa: i64, pdl_paisa: i64) -> Vec<i64> {
+    let f = compute_fib_levels(pdh_paisa, pdl_paisa);
+    vec![
+        f.retrace_23_paisa,
+        f.retrace_38_paisa,
+        f.retrace_50_paisa,
+        f.retrace_62_paisa,
+        f.retrace_78_paisa,
+        f.ext_up_127_paisa,
+        f.ext_up_162_paisa,
+        f.ext_up_200_paisa,
+        f.ext_up_262_paisa,
+        f.ext_up_424_paisa,
+        f.ext_down_127_paisa,
+        f.ext_down_162_paisa,
+        f.ext_down_200_paisa,
+        f.ext_down_262_paisa,
+        f.ext_down_424_paisa,
+    ]
+}
+
 /// The Python extension module `trading_core._trading_core`.
 #[pymodule]
 fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -221,5 +273,7 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(total_conditions, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_from_raw, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_with_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compute_pivot_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compute_fib_levels, m)?)?;
     Ok(())
 }
