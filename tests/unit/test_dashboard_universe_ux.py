@@ -15,6 +15,8 @@ mirroring ``test_dashboard_universe_template.py``):
   materialising is a future external-drive step) — the operator asked "where do
   I click to generate timeframes?" and wants no local-drive bloat.
 """
+# pyright: reportPrivateUsage=none
+# (whitebox: these guards render the dashboard's own ``_render_universe_html``.)
 
 from __future__ import annotations
 
@@ -63,3 +65,30 @@ def test_timeframe_storage_is_explained_honestly() -> None:
         "pre-materialising is a future external-drive (BRUTEX_LAKE_ROOT) step"
     )
     assert "BRUTEX_LAKE_ROOT" in html, "the external-drive config knob must be named"
+
+
+def test_derive_timeframes_control_present() -> None:
+    """The MANUAL '⚙ Derive timeframes' button + the TF multi-select are rendered (DEC-TF-MATERIALIZE-001)."""
+    html = _render_universe_html()
+    for needle in ('id="derivebtn"', 'id="tfsel"', 'id="derivetfs"', "⚙ Derive timeframes"):
+        assert needle in html, f"missing derive-timeframes control: {needle}"
+    # The storable TF labels are the select options (default ticks 5m/15m/60m).
+    for tf in ("2m", "3m", "5m", "10m", "15m", "30m", "60m", "240m"):
+        assert f'value="{tf}"' in html, f"missing TF option: {tf}"
+
+
+def test_derive_timeframes_wiring_present() -> None:
+    """The button POSTs the derive route and renders the per-TF written counts."""
+    html = _render_universe_html()
+    assert 'getElementById("derivebtn").onclick' in html, "the derive button is not wired"
+    assert "/api/v1/universe/derive-timeframes?symbol=" in html, "the derive route is not POSTed"
+    assert "total_bars" in html, "the response total_bars must be surfaced"
+    # Revealed + enabled only once an instrument is selected (manual, per-symbol):
+    # selectInstrument reveals the control and clears the button's disabled flag.
+    assert 'getElementById("derivebtn")' in html
+    assert "derivebtn.disabled = false" in html, (
+        "the derive button must enable on instrument select"
+    )
+    assert 'getElementById("derivetfs").style.display = ""' in html, (
+        "the TF multi-select must be revealed on instrument select"
+    )

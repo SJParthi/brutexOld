@@ -229,7 +229,7 @@
     <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
     <div class="hsub">Spot pulls <b>1-minute + 1-day</b> from <b>2021-01-01 → previous trading day</b>; options fan
       <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1-minute.
-      Re-click any time — already-pulled windows are skipped (no wasted Dhan hit). The pull <b>fetches + stores 1-minute + 1-day only</b> — the 19 intraday timeframes are <b>derived on demand, NOT written to your drive</b> (pre-materialising them to disk is a future step, enabled when you point <code>BRUTEX_LAKE_ROOT</code> at an external drive).</div>
+      Re-click any time — already-pulled windows are skipped (no wasted Dhan hit). The pull <b>fetches + stores 1-minute + 1-day only</b> — the 19 intraday timeframes are <b>derived on demand, NOT written to your drive</b> by default. To pre-materialise the storable ones to disk for O(1) sweep reads, select an instrument and use <b>⚙ Derive timeframes</b> (a MANUAL step; the lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>).</div>
     <div class="bulkgrid">
       <button class="bulkbtn idx" id="bulkIdxSpot" data-surface="spot" data-kind="index">
         <span class="shine"></span><span class="bnum">①</span>
@@ -282,6 +282,19 @@
     <button class="loadbtn" id="loadbtn" title="Download the public Dhan instrument master — no keys needed">⟳ Load instruments</button>
     <button class="optbtn" id="optbtn" title="Pull this underlying's full option grid (ATM window · CE+PE · weekly+monthly · near/next/far, 1-minute)" disabled>⛓ Pull options chain</button>
     <button class="pullbtn" id="pullbtn" disabled>⤓ Pull spot — 1-minute</button>
+    <label id="derivetfs" title="Derived intraday timeframes to materialise from the stored 1-minute bars (each written as its own O(1)-readable partition)." style="display:none; color:var(--muted); font-size:12px;">TFs
+      <select id="tfsel" multiple size="3" style="vertical-align:middle; background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:2px 4px; min-width:120px;">
+        <option value="2m">2m</option>
+        <option value="3m">3m</option>
+        <option value="5m" selected>5m</option>
+        <option value="10m">10m</option>
+        <option value="15m" selected>15m</option>
+        <option value="30m">30m</option>
+        <option value="60m" selected>60m</option>
+        <option value="240m">240m</option>
+      </select>
+    </label>
+    <button class="loadbtn" id="derivebtn" title="MANUAL: resample the selected instrument's stored 1-minute bars into the ticked derived timeframes, each written as its own stored partition so the sweep reads them in O(1)." disabled style="display:none;">⚙ Derive timeframes</button>
     <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
     <button class="loadbtn" id="clrselbtn" title="Untick all selected">✗ clear</button>
     <button class="loadbtn" id="tickconstbtn" title="Best-effort: tick this index's F&amp;O-eligible constituent stocks (fetched from NSE on your machine — verify; membership rebalances)" disabled>⊕ tick its constituents</button>
@@ -496,6 +509,11 @@ async function selectInstrument(i) {
   /* "⊕ tick its constituents" is meaningful only for an INDEX
      (DEC-UNIVERSE-NSE-CONSTITUENTS-001) — a stock has no constituents. */
   document.getElementById("tickconstbtn").disabled = (i.kind !== "index");
+  /* Reveal + enable the MANUAL derive-timeframes control for the selection. */
+  document.getElementById("derivetfs").style.display = "";
+  const derivebtn = document.getElementById("derivebtn");
+  derivebtn.style.display = "";
+  derivebtn.disabled = false;
   const ex = document.getElementById("expiries");
   ex.innerHTML = '<div class="empty">loading…</div>';
   document.getElementById("contracts").innerHTML = '<div class="empty">pick an expiry →</div>';
@@ -657,6 +675,55 @@ async function runPull(symbol, label) {
 document.getElementById("pullbtn").onclick = () => {
   if (!selPullSymbol) return;
   runPull(selPullSymbol, `${selInst} spot`);
+};
+
+/* ── MANUAL "⚙ Derive timeframes" (DEC-TF-MATERIALIZE-001) ──
+   Resamples the selected instrument's STORED 1-minute bars into the ticked
+   derived timeframes, each written as its OWN stored partition so the sweep
+   reads a 5m/15m/60m bar in O(1) instead of re-resampling 1m. Manual only. */
+document.getElementById("derivebtn").onclick = async () => {
+  if (!selPullSymbol) return;
+  const sel = document.getElementById("tfsel");
+  const tfs = Array.from(sel.selectedOptions).map(o => o.value);
+  if (!tfs.length) return;
+  const btn = document.getElementById("derivebtn");
+  const panel = document.getElementById("pullpanel");
+  const grid = document.getElementById("tfgrid");
+  panel.classList.add("on", "running");
+  btn.disabled = true;
+  document.getElementById("pulltitle").textContent =
+    `Deriving ${selInst} timeframes · ${tfs.join(", ")}`;
+  grid.innerHTML = "";
+  document.getElementById("counter").textContent = "0";
+  const qs = '/api/v1/universe/derive-timeframes?symbol=' + encodeURIComponent(selPullSymbol)
+    + '&tfs=' + encodeURIComponent(tfs.join(","));
+  try {
+    const r = await fetch(qs, {method: 'POST'});
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.detail || ('HTTP ' + r.status));
+    const written = body.written || {};
+    grid.innerHTML = "";
+    /* One tile per requested TF: green when bars were written, muted when skipped. */
+    tfs.forEach(tf => {
+      const wrote = Object.prototype.hasOwnProperty.call(written, tf);
+      const d = document.createElement("div");
+      d.className = "tf " + (wrote ? "done" : "");
+      d.textContent = wrote ? `${esc(tf)} · ${(written[tf]).toLocaleString('en-IN')}` : `${esc(tf)} · skipped`;
+      grid.appendChild(d);
+    });
+    document.getElementById("counter").textContent =
+      (body.total_bars || 0).toLocaleString('en-IN');
+    const skipped = body.skipped || [];
+    const tail = skipped.length ? ` · skipped ${esc(skipped.join(", "))}` : "";
+    document.getElementById("pulltitle").innerHTML =
+      `<span class="spark">✓</span> ${esc(selInst)} — materialised ${Object.keys(written).length} timeframe(s)${tail}`;
+  } catch (e) {
+    document.getElementById("pulltitle").innerHTML =
+      `<span style="color:var(--red)">✕</span> derive failed: ${esc(e.message)}`;
+  } finally {
+    btn.disabled = false;
+    panel.classList.remove("running");
+  }
 };
 
 /* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001): tick several rows → "⤓ Pull N
