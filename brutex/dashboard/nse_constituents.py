@@ -167,7 +167,11 @@ def _default_opener(url: str) -> str:  # pragma: no cover - live network only
             "Accept-Language": "en-US,en;q=0.9",
         },
     )
-    with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+    # The S310 (ruff) + B310 (bandit) suppressions on the next line are honest:
+    # the URL is a fixed https NSE host built by ``constituent_url`` (never
+    # file:/ or a custom scheme); the whole opener is live-network-only glue
+    # (``# pragma: no cover``).
+    with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310  # nosec B310
         body: bytes = response.read()
     return body.decode("utf-8")
 
