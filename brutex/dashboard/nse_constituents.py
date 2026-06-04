@@ -79,6 +79,17 @@ INDEX_CSV_FILENAMES: Final[dict[str, str]] = {
     "NIFTY MIDCAP SELECT": "ind_niftymidcapselect.csv",
     "NIFTYNXT50": "ind_niftynext50list.csv",
     "NIFTY NEXT 50": "ind_niftynext50list.csv",
+    # Broad-market baskets (DEC-CONSTITUENTS-CACHE-001): NIFTY 100/200/500 are
+    # NOT tradable index rows in the instrument store — they exist here ONLY as
+    # constituent-basket selectors (pick the F&O-eligible stocks inside a wider
+    # basket). Same NSE naming convention + host as the rows above; verify
+    # against NSE (membership rebalances semi-annually, CLAUDE.md §7).
+    "NIFTY 100": "ind_nifty100list.csv",
+    "NIFTY100": "ind_nifty100list.csv",
+    "NIFTY 200": "ind_nifty200list.csv",
+    "NIFTY200": "ind_nifty200list.csv",
+    "NIFTY 500": "ind_nifty500list.csv",
+    "NIFTY500": "ind_nifty500list.csv",
 }
 
 
@@ -211,6 +222,50 @@ def fetch_constituent_symbols(
     return parse_symbols(fetch(url))
 
 
+def intersect_with_universe(
+    constituents: Iterable[str],
+    fno_symbols: Iterable[str],
+) -> list[str]:
+    """Keep only the *constituents* that are F&O-eligible stocks we hold.
+
+    PURE — no I/O. The single source of truth for the constituent →
+    universe intersection (CLAUDE.md §11 COMMON), shared by
+    :func:`members_in_universe` (live fetch) and the cache-backed
+    resolution path (:mod:`brutex.dashboard.constituents_cache`). Matches
+    **case-insensitively** and returns the members in the **original
+    casing** of *fno_symbols* (so the dashboard ticks the exact rows it
+    renders), order-preserved by the *constituents* order. Non-members are
+    dropped silently — the universe is the source of truth for what is
+    pullable.
+
+    Parameters
+    ----------
+    constituents
+        The index's member symbols (any case), e.g. from a live NSE fetch
+        or the on-disk cache.
+    fno_symbols
+        The F&O-eligible single-stock symbols we hold (any case).
+
+    Returns
+    -------
+    list[str]
+        The intersecting members in *fno_symbols*' casing, order-preserved
+        by *constituents*. ``[]`` when none intersect.
+    """
+    # Map upper-cased symbol → canonical (as-held) casing, first-seen wins.
+    canonical: dict[str, str] = {}
+    for sym in fno_symbols:
+        key = sym.strip().upper()
+        if key and key not in canonical:
+            canonical[key] = sym
+    members: list[str] = []
+    for constituent in constituents:
+        held = canonical.get(constituent.strip().upper())
+        if held is not None:
+            members.append(held)
+    return members
+
+
 def members_in_universe(
     index_symbol: str,
     fno_symbols: Iterable[str],
@@ -242,18 +297,9 @@ def members_in_universe(
         order-preserved by the index constituent order. ``[]`` for an
         unknown index or when none of the constituents are F&O-eligible.
     """
-    # Map upper-cased symbol → canonical (as-held) casing, first-seen wins.
-    canonical: dict[str, str] = {}
-    for sym in fno_symbols:
-        key = sym.strip().upper()
-        if key and key not in canonical:
-            canonical[key] = sym
-    members: list[str] = []
-    for constituent in fetch_constituent_symbols(index_symbol, opener=opener):
-        held = canonical.get(constituent.upper())
-        if held is not None:
-            members.append(held)
-    return members
+    return intersect_with_universe(
+        fetch_constituent_symbols(index_symbol, opener=opener), fno_symbols
+    )
 
 
 __all__ = [
@@ -261,6 +307,7 @@ __all__ = [
     "NSE_CONSTITUENTS_BASE_URL",
     "constituent_url",
     "fetch_constituent_symbols",
+    "intersect_with_universe",
     "members_in_universe",
     "parse_symbols",
 ]

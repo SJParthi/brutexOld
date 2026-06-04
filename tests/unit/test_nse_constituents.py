@@ -17,6 +17,7 @@ from brutex.dashboard.nse_constituents import (
     NSE_CONSTITUENTS_BASE_URL,
     constituent_url,
     fetch_constituent_symbols,
+    intersect_with_universe,
     members_in_universe,
     parse_symbols,
 )
@@ -90,6 +91,20 @@ class TestConstituentUrl:
     def test_every_mapped_index_resolves(self, symbol: str) -> None:
         assert constituent_url(symbol) is not None
 
+    @pytest.mark.parametrize(
+        ("symbol", "filename"),
+        [
+            ("NIFTY 100", "ind_nifty100list.csv"),
+            ("NIFTY100", "ind_nifty100list.csv"),
+            ("NIFTY 200", "ind_nifty200list.csv"),
+            ("NIFTY 500", "ind_nifty500list.csv"),
+        ],
+    )
+    def test_broad_market_baskets_resolve(self, symbol: str, filename: str) -> None:
+        """NIFTY 100/200/500 broad-market baskets map to their NSE CSVs
+        (DEC-CONSTITUENTS-CACHE-001)."""
+        assert constituent_url(symbol) == f"{NSE_CONSTITUENTS_BASE_URL}/{filename}"
+
 
 class TestFetchConstituentSymbols:
     def test_success_with_injected_opener(self) -> None:
@@ -152,6 +167,27 @@ class TestMembersInUniverse:
     def test_no_eligible_constituents_returns_empty(self) -> None:
         out = members_in_universe("NIFTY", ["NOTINDEX"], opener=self._opener)
         assert out == []
+
+
+class TestIntersectWithUniverse:
+    """The pure intersection helper shared by the live + cache paths (COMMON)."""
+
+    def test_keeps_held_casing_and_constituent_order(self) -> None:
+        # Constituents arrive upper-cased (from a fetch or the cache); the held
+        # symbols carry the casing the dashboard renders. Output = held casing,
+        # ordered by the constituent order, non-members dropped.
+        constituents = ["HDFCBANK", "RELIANCE", "ZZZNOTHELD"]
+        held = ["reliance", "HDFCBANK", "m&m"]
+        assert intersect_with_universe(constituents, held) == ["HDFCBANK", "reliance"]
+
+    def test_blank_held_skipped_and_first_casing_wins(self) -> None:
+        assert intersect_with_universe(["RELIANCE"], ["", "  ", "Reliance", "RELIANCE"]) == [
+            "Reliance"
+        ]
+
+    def test_empty_inputs_return_empty(self) -> None:
+        assert intersect_with_universe([], ["RELIANCE"]) == []
+        assert intersect_with_universe(["RELIANCE"], []) == []
 
 
 def test_module_exports_are_public() -> None:

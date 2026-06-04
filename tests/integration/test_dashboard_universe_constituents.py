@@ -155,3 +155,64 @@ def test_unknown_index_returns_unknown_source(client: TestClient) -> None:
     assert body["source"] == "unknown-index"
     assert body["members"] == []
     assert "superset" in body["note"]
+
+
+def test_second_call_serves_from_cache_even_when_live_fetch_breaks(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEC-CONSTITUENTS-CACHE-001: first success caches; a later call serves the
+    cache even when the live NSE fetch is broken (the "guarantee after first
+    success" the operator asked for — "Auto-fetch + cache")."""
+    # 1st call: live fetch succeeds → source "nse", cache written, as_of stamped.
+    monkeypatch.setattr(nc, "_default_opener", lambda _url: _FIXTURE_CSV)
+    first = client.get("/api/v1/universe/index-constituents", params={"symbol": "NIFTY"}).json()
+    assert first["source"] == "nse"
+    assert first["members"] == ["RELIANCE", "HDFCBANK", "M&M"]
+    assert first["as_of"] is not None
+
+    # 2nd call: live fetch now BREAKS, but the cache serves it (source "cache").
+    def _boom(_url: str) -> str:
+        raise OSError("Host not in allowlist")
+
+    monkeypatch.setattr(nc, "_default_opener", _boom)
+    second = client.get("/api/v1/universe/index-constituents", params={"symbol": "NIFTY"}).json()
+    assert second["source"] == "cache"
+    assert second["members"] == ["RELIANCE", "HDFCBANK", "M&M"]
+    assert second["as_of"] is not None
+    assert "from cache" in second["note"]
+
+
+def test_refresh_true_forces_a_refetch_over_a_cache_hit(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``refresh=true`` re-fetches even when a cache exists (post-rebalance path)."""
+    calls: list[str] = []
+
+    def _counting(_url: str) -> str:
+        calls.append(_url)
+        return _FIXTURE_CSV
+
+    monkeypatch.setattr(nc, "_default_opener", _counting)
+    # Seed the cache.
+    client.get("/api/v1/universe/index-constituents", params={"symbol": "NIFTY"})
+    assert len(calls) == 1
+    # refresh=true must hit the opener again (not serve the just-written cache).
+    r = client.get(
+        "/api/v1/universe/index-constituents",
+        params={"symbol": "NIFTY", "refresh": "true"},
+    )
+    assert r.json()["source"] == "nse"
+    assert len(calls) == 2
+
+
+def test_broad_market_basket_nifty500_resolves(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NIFTY 500 is not a tradable index row but resolves as a constituent
+    basket (DEC-CONSTITUENTS-CACHE-001) — its held F&O members are returned."""
+    monkeypatch.setattr(nc, "_default_opener", lambda _url: _FIXTURE_CSV)
+    r = client.get("/api/v1/universe/index-constituents", params={"symbol": "NIFTY 500"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "nse"
+    assert body["members"] == ["RELIANCE", "HDFCBANK", "M&M"]
