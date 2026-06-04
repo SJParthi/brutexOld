@@ -16,6 +16,7 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.engine.sweep_report import (
     SORT_KEYS,
+    filter_oos_held,
     oos_section,
     render_oos_verdict,
     sort_ranked,
@@ -359,3 +360,51 @@ class TestSweepReportOos:
             top_n=None,
         )
         assert "Out-of-sample" in report
+
+
+class TestFilterOosHeld:
+    """DEC-SWEEP-OOS-ONLY-001: keep only combos whose edge held on unseen data."""
+
+    def _params(self) -> dict[str, Any]:
+        return {
+            "direction": Side.BUY,
+            "tf_minutes": 1,
+            "stop_loss_paisa": None,
+            "take_profit_paisa": None,
+            "start_equity_paisa": 10_000_000,
+            "proximity": None,
+            "prior_n": 3,
+        }
+
+    def test_keeps_held_drops_failed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Deterministically: mask 1 holds, mask 2 fails out-of-sample.
+        def fake_validate(_bars: object, mask: int, **_kw: object) -> OOSValidation:
+            return _oos(held=(mask == 1), gates=(mask == 1), sharpe=True, dd=True)
+
+        monkeypatch.setattr("brutex.engine.sweep_report.validate_out_of_sample", fake_validate)
+        kept = filter_oos_held(_multiday_bars(), [_rc(mask=1), _rc(mask=2)], **self._params())
+        assert [rc.mask for rc in kept] == [1]
+
+    def test_empty_ranked_is_empty(self) -> None:
+        assert filter_oos_held(_multiday_bars(), [], **self._params()) == []
+
+    def test_short_window_propagates_value_error(self) -> None:
+        # One IST day → validate_out_of_sample can't split → ValueError propagates.
+        with pytest.raises(ValueError, match="distinct trading days"):
+            filter_oos_held(_bars(), [_rc(mask=0)], **self._params())
+
+
+class TestSweepReportOosOnly:
+    def test_oos_only_header_note(self) -> None:
+        # Synthetic board has no gate survivors → filter over [] → "0/0 held".
+        report = sweep_report(
+            _multiday_bars(),
+            instrument="NIFTY",
+            tf_label="1m",
+            tf_minutes=1,
+            direction=Side.BUY,
+            condition_bits=[0, 1, 2],
+            k=2,
+            oos_only=True,
+        )
+        assert "oos-only=0/0 held" in report

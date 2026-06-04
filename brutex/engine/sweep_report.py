@@ -145,6 +145,45 @@ def oos_section(
     return head + "\n" + "\n".join(lines)
 
 
+def filter_oos_held(
+    bars: Sequence[CandleBar],
+    ranked: Sequence[RankedCombo],
+    *,
+    direction: Side,
+    tf_minutes: int,
+    stop_loss_paisa: int | None,
+    take_profit_paisa: int | None,
+    start_equity_paisa: int,
+    proximity: ProximityParams | None,
+    prior_n: int,
+    train_frac: float = 0.7,
+) -> list[RankedCombo]:
+    """Keep only combos whose edge HELD out-of-sample — the no-illusion filter.
+
+    Re-runs each combo through :func:`~brutex.engine.validation.validate_out_of_sample`
+    and drops every one whose ``held_up`` is ``False`` (an in-sample winner that fell
+    apart on the unseen test days). Order-preserving. Needs ``>= 2`` distinct IST
+    trading days — a shorter window cannot be split, so the underlying
+    ``ValueError`` propagates (the caller surfaces it as a clear user error).
+    """
+    return [
+        rc
+        for rc in ranked
+        if validate_out_of_sample(
+            bars,
+            rc.mask,
+            direction=direction,
+            tf_minutes=tf_minutes,
+            stop_loss_paisa=stop_loss_paisa,
+            take_profit_paisa=take_profit_paisa,
+            start_equity_paisa=start_equity_paisa,
+            train_frac=train_frac,
+            proximity=proximity,
+            prior_n=prior_n,
+        ).held_up
+    ]
+
+
 def sweep_report(
     bars: Sequence[CandleBar],
     *,
@@ -164,6 +203,7 @@ def sweep_report(
     max_combos: int = DEFAULT_MAX_COMBOS,
     sort_by: str = "composite",
     validate_oos: bool = False,
+    oos_only: bool = False,
 ) -> str:
     """Run the funnel over *bars* and render the ranked top-combo table as text.
 
@@ -198,6 +238,11 @@ def sweep_report(
         follows — the no-illusion "is this edge real or overfit?" check. Default
         ``False`` (off; it re-simulates each shown combo, and needs ``>= 2`` IST
         trading days).
+    oos_only
+        When ``True``, FILTER the board to combos whose edge held out-of-sample
+        (:func:`filter_oos_held`) before rendering — so only the genuinely-robust
+        combos are shown. The header reports ``oos-only=<held>/<gate survivors>``.
+        Needs ``>= 2`` IST trading days (else a clear ``ValueError``).
 
     Returns
     -------
@@ -231,13 +276,28 @@ def sweep_report(
         min_hits=min_hits,
     )
     ranked = sort_ranked(ranked, sort_by)
+    n_gate = len(ranked)
+    oos_only_note = ""
+    if oos_only:
+        ranked = filter_oos_held(
+            bars,
+            ranked,
+            direction=direction,
+            tf_minutes=tf_minutes,
+            stop_loss_paisa=stop_loss_paisa,
+            take_profit_paisa=take_profit_paisa,
+            start_equity_paisa=start_equity_paisa,
+            proximity=proximity,
+            prior_n=prior_n,
+        )
+        oos_only_note = f"  oos-only={len(ranked)}/{n_gate} held"
     table = render_leaderboard(explain_combos(ranked), top_n=top_n)
     header = (
         f"BruteX sweep — {instrument} {tf_label} {direction.value}\n"
         f"  conditions={n_conditions}  K={k}  combos={n_combos}  min_hits={min_hits}\n"
         f"  bars={len(bars)}  window={bars[0].timestamp.isoformat()}"
         f" → {bars[-1].timestamp.isoformat()}\n"
-        f"  gate survivors={len(ranked)}  sort={sort_by}"
+        f"  gate survivors={n_gate}  sort={sort_by}{oos_only_note}"
     )
     report = f"{header}\n\n{table}"
     if validate_oos:
@@ -259,6 +319,7 @@ def sweep_report(
 
 __all__ = [
     "SORT_KEYS",
+    "filter_oos_held",
     "oos_section",
     "render_oos_verdict",
     "sort_ranked",

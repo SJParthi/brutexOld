@@ -386,6 +386,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sweep.add_argument(
+        "--oos-only",
+        action="store_true",
+        dest="oos_only",
+        help=(
+            "Show ONLY combos whose edge HELD out-of-sample — filter out the overfit "
+            "ones, so the board is the genuinely-robust combos (needs >= 2 trading days)"
+        ),
+    )
+    sweep.add_argument(
         "--sort-by",
         default="composite",
         choices=list(SORT_KEYS),
@@ -1165,6 +1174,7 @@ def cmd_sweep(
     min_hits: int | None,
     sort_by: str,
     validate_oos: bool,
+    oos_only: bool,
 ) -> int:
     """Brute-force sweep over lake bars → print the ranked top-combo table.
 
@@ -1212,8 +1222,8 @@ def cmd_sweep(
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
-    print(
-        sweep_report(
+    try:
+        report = sweep_report(
             bars,
             instrument=symbol,
             tf_label=interval,
@@ -1227,8 +1237,14 @@ def cmd_sweep(
             min_hits=MIN_TRADES if min_hits is None else min_hits,
             sort_by=sort_by,
             validate_oos=validate_oos,
+            oos_only=oos_only,
         )
-    )
+    except ValueError as exc:
+        # Honest user errors (over-cap sweep, bad k, --oos-only on a < 2-day window)
+        # → a clear message + non-zero exit, never a traceback.
+        print(f"[brutex] sweep error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    print(report)
     return EXIT_OK
 
 
@@ -1318,6 +1334,7 @@ def main(argv: list[str] | None = None) -> int:
             min_hits=args.min_hits,
             sort_by=args.sort_by,
             validate_oos=args.validate_oos,
+            oos_only=args.oos_only,
         )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits

@@ -91,6 +91,7 @@ def test_sweep_loads_lake_and_prints_report(
         min_hits=None,
         sort_by="composite",
         validate_oos=False,
+        oos_only=False,
     )
     assert rc == 0
     out = capsys.readouterr().out
@@ -158,6 +159,48 @@ def test_sweep_no_bars_is_user_error(tmp_path: Path, capsys: pytest.CaptureFixtu
         min_hits=None,
         sort_by="composite",
         validate_oos=False,
+        oos_only=False,
     )
     assert rc == 1
     assert "no bars for NIFTY" in capsys.readouterr().err
+
+
+def _sweep(tmp_path: Path, **over: object) -> int:
+    """Persist the lake + run cmd_sweep with sensible defaults, overridable per test."""
+    lake_root, catalog_path = _persist(tmp_path)
+    kwargs: dict[str, object] = {
+        "lake_root": lake_root,
+        "catalog_path": catalog_path,
+        "exchange": _EXCHANGE,
+        "segment": _SEGMENT,
+        "symbol": _SYMBOL,
+        "interval": _INTERVAL,
+        "start": "2024-01-02",
+        "end": "2024-01-03",
+        "direction": "BUY",
+        "k": 2,
+        "conditions": "0,1,2",
+        "stop_loss_paisa": None,
+        "take_profit_paisa": None,
+        "top": 10,
+        "min_hits": None,
+        "sort_by": "composite",
+        "validate_oos": False,
+        "oos_only": False,
+    }
+    kwargs.update(over)
+    return cmd_sweep(**kwargs)  # type: ignore[arg-type]
+
+
+def test_sweep_oos_only_filters(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # Single-day lake → no gate survivors → the filter runs over an empty board.
+    rc = _sweep(tmp_path, oos_only=True)
+    assert rc == 0
+    assert "oos-only=0/0 held" in capsys.readouterr().out
+
+
+def test_sweep_invalid_k_is_user_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # k > number of conditions → sweep_report raises → clear message + non-zero exit.
+    rc = _sweep(tmp_path, conditions="0,1", k=9)
+    assert rc == 1
+    assert "sweep error" in capsys.readouterr().err
