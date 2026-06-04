@@ -56,8 +56,16 @@ STEP_DOWN_WINDOW: float = 60.0
 #: "Recovered" = this many seconds of zero hits since the last step → step up 1 r/s.
 STEP_UP_WINDOW: float = 300.0
 
-#: Token-bucket burst allowance (short cadence absorption).
-BURST: int = 5
+#: Token-bucket burst allowance. EASE-IN (DEC-DHAN-EASE-IN-001): **1**, not 5, so
+#: a pull does NOT fire a multi-request spike at t=0. With burst 5 the bucket
+#: started FULL, so the parallel window fan-out dumped 5 requests instantly →
+#: an instantaneous rate far above Dhan's strict 5 r/s → the opening 429 storm
+#: the operator saw on every pull (3× ``rate.429`` → ``rate.stepdown`` within the
+#: first second). With burst 1 each worker paces from the first call at the
+#: current r/s. Steady-state throughput is UNCHANGED (still ``current_rps`` — one
+#: token per ``1/rps`` s); only the opening + post-step spike is removed. A 429
+#: that still slips through self-heals in-run (DEC-DHAN-429-RETRY-001, #466).
+BURST: int = 1
 
 
 class DhanRateController:
