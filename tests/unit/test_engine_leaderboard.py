@@ -1,0 +1,123 @@
+"""Unit tests for the self-explaining leaderboard (DEC-LEADERBOARD-EXPLAIN-001).
+
+Covers ``explain_combos`` (pairing each ranked combo with its decoded conditions)
+and ``render_leaderboard`` (rows / top-N / empty / no-condition mask) for the strict
+100% ``brutex.engine`` package gate.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from brutex.engine.leaderboard import (
+    ExplainedCombo,
+    explain_combos,
+    render_leaderboard,
+)
+from brutex.metrics.compute import ResultMetrics
+from brutex.ranking import RankedCombo
+from brutex.vocabulary.bits import (
+    BIT_BAR_BULLISH,
+    BIT_CLOSE_ABOVE_EMA20,
+    BIT_NEAR_FIB_618,
+)
+
+
+def _m(**overrides: Any) -> ResultMetrics:
+    """A ResultMetrics with sensible defaults; override per test."""
+    base: dict[str, Any] = {
+        "net_pnl_paisa": 0,
+        "total_return_pct": 0.0,
+        "cagr_pct": 0.0,
+        "gross_profit_paisa": 0,
+        "gross_loss_paisa": 0,
+        "sharpe_ratio": 1.0,
+        "sortino_ratio": 1.0,
+        "calmar_ratio": 1.0,
+        "mar_ratio": 0.0,
+        "information_ratio": 0.0,
+        "omega_ratio": 0.0,
+        "max_drawdown_pct": 5.0,
+        "max_drawdown_paisa": 0,
+        "max_drawdown_duration_bars": 0,
+        "recovery_factor": 1.0,
+        "ulcer_index": 0.0,
+        "largest_losing_trade_paisa": 0,
+        "max_consecutive_losses": 2,
+        "max_consecutive_wins": 0,
+        "total_trades": 50,
+        "winning_trades": 30,
+        "losing_trades": 20,
+        "win_rate": 0.6,
+        "profit_factor": 1.5,
+        "avg_winning_trade_paisa": 0,
+        "avg_losing_trade_paisa": 0,
+        "win_loss_ratio": 1.5,
+        "expectancy_paisa": 0,
+        "avg_mfe_paisa": 0,
+        "avg_mae_paisa": 0,
+        "avg_holding_time_bars": 0.0,
+        "max_holding_time_bars": 0,
+        "time_in_market_pct": 0.0,
+        "tail_ratio": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "returns_std_dev": 0.0,
+    }
+    base.update(overrides)
+    return ResultMetrics(**base)
+
+
+def _ranked(mask: int, *, score: float = 1.0, **m_over: Any) -> RankedCombo:
+    """A RankedCombo with a given mask + composite score."""
+    return RankedCombo(mask=mask, metrics=_m(**m_over), composite_score=score)
+
+
+class TestExplainCombos:
+    def test_pairs_each_combo_with_its_conditions(self) -> None:
+        mask = (1 << BIT_CLOSE_ABOVE_EMA20) | (1 << BIT_NEAR_FIB_618)
+        explained = explain_combos([_ranked(mask)])
+        assert len(explained) == 1
+        ec = explained[0]
+        assert isinstance(ec, ExplainedCombo)
+        assert ec.ranked.mask == mask
+        groups = {g.group: g.conditions for g in ec.groups}
+        assert groups["EMA Position"] == ("close_above_ema20",)
+        assert groups["Fibonacci"] == ("near_fib_618",)
+
+    def test_empty_input_yields_empty(self) -> None:
+        assert explain_combos([]) == []
+
+
+class TestRenderLeaderboard:
+    def test_renders_rows_with_score_and_conditions(self) -> None:
+        mask = (1 << BIT_CLOSE_ABOVE_EMA20) | (1 << BIT_BAR_BULLISH)
+        text = render_leaderboard(
+            explain_combos(
+                [_ranked(mask, score=1.234, total_trades=42, avg_mfe_paisa=900, avg_mae_paisa=300)]
+            )
+        )
+        assert "#1" in text
+        assert "score=+1.234" in text
+        assert "risk_eff=3.00" in text
+        assert "trades=42" in text
+        assert "close_above_ema20" in text
+        assert "bar_bullish" in text
+
+    def test_top_n_limits_rows(self) -> None:
+        combos = explain_combos(
+            [
+                _ranked(1 << BIT_CLOSE_ABOVE_EMA20, score=2.0),
+                _ranked(1 << BIT_BAR_BULLISH, score=1.0),
+            ]
+        )
+        text = render_leaderboard(combos, top_n=1)
+        assert "#1" in text
+        assert "#2" not in text
+
+    def test_empty_leaderboard_placeholder(self) -> None:
+        assert render_leaderboard([]) == "(no combos cleared the gates)"
+
+    def test_no_condition_mask_renders_placeholder(self) -> None:
+        text = render_leaderboard(explain_combos([_ranked(0)]))
+        assert "(no conditions — enters every bar)" in text
