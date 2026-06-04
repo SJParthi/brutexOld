@@ -32,6 +32,7 @@ from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.trade_sim import simulate_trades
 from brutex.metrics.compute import ResultMetrics, compute_metrics
 from brutex.metrics.types import ClosedTrade, EquityCurve
+from brutex.ranking import RankedCombo, rank_combos
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
 
@@ -172,6 +173,35 @@ def evaluate_combo(
         raise ValueError("evaluate_combo: bars must be non-empty")
 
     bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=prior_n)
+    return _metrics_for_mask(
+        bars,
+        bar_bits,
+        required_mask,
+        direction=direction,
+        tf_minutes=tf_minutes,
+        stop_loss_paisa=stop_loss_paisa,
+        take_profit_paisa=take_profit_paisa,
+        start_equity_paisa=start_equity_paisa,
+    )
+
+
+def _metrics_for_mask(
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    required_mask: int,
+    *,
+    direction: Side,
+    tf_minutes: int,
+    stop_loss_paisa: int | None,
+    take_profit_paisa: int | None,
+    start_equity_paisa: int,
+) -> ResultMetrics:
+    """Project one mask onto pre-built ``bar_bits`` → its metrics (shared core).
+
+    The per-mask body shared by :func:`evaluate_combo` (one mask) and
+    :func:`sweep_masks` (many masks over ONE ``bar_bits`` build) — so the sweep
+    builds the Stage-1A matrix once and reuses it across every mask.
+    """
     entry_signals = mask_to_entry_signals(bar_bits, required_mask)
     trades = simulate_trades(
         bars,
@@ -187,8 +217,104 @@ def evaluate_combo(
     return compute_metrics(trades, equity, total_bars=len(bars))
 
 
+def sweep_masks(
+    bars: Sequence[CandleBar],
+    masks: Sequence[int],
+    *,
+    direction: Side,
+    tf_minutes: int,
+    stop_loss_paisa: int | None = None,
+    take_profit_paisa: int | None = None,
+    start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
+    proximity: ProximityParams | None = None,
+    prior_n: int = 3,
+) -> list[tuple[int, ResultMetrics]]:
+    """Backtest MANY masks over the same bars → ``(mask, metrics)`` pairs.
+
+    Builds the Stage-1A ``bar_bits`` matrix **once** (the per-bar truth-vectors
+    are identical for every mask — only the AND-mask differs), then projects each
+    mask through the shared per-mask core. O(1) per (mask, bar): one AND + one
+    CMP, then the trade walk + metrics.
+
+    Parameters
+    ----------
+    bars
+        Chronologically ordered bars for one ``(instrument, interval)`` (non-empty).
+    masks
+        The u64 strategy masks to evaluate (e.g. from
+        :func:`brutex.engine.combo_mask.iter_masks_k_of_n`).
+    direction, tf_minutes, stop_loss_paisa, take_profit_paisa, start_equity_paisa, proximity, prior_n
+        As :func:`evaluate_combo`.
+
+    Returns
+    -------
+    list[tuple[int, ResultMetrics]]
+        One ``(mask, metrics)`` pair per input mask, in input order.
+
+    Raises
+    ------
+    ValueError
+        If ``bars`` is empty.
+    """
+    if not bars:
+        raise ValueError("sweep_masks: bars must be non-empty")
+    bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=prior_n)
+    return [
+        (
+            mask,
+            _metrics_for_mask(
+                bars,
+                bar_bits,
+                mask,
+                direction=direction,
+                tf_minutes=tf_minutes,
+                stop_loss_paisa=stop_loss_paisa,
+                take_profit_paisa=take_profit_paisa,
+                start_equity_paisa=start_equity_paisa,
+            ),
+        )
+        for mask in masks
+    ]
+
+
+def rank_sweep(
+    bars: Sequence[CandleBar],
+    masks: Sequence[int],
+    *,
+    direction: Side,
+    tf_minutes: int,
+    stop_loss_paisa: int | None = None,
+    take_profit_paisa: int | None = None,
+    start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
+    proximity: ProximityParams | None = None,
+    prior_n: int = 3,
+) -> list[RankedCombo]:
+    """Sweep a set of masks and return the **ranked leaderboard** — the top combos.
+
+    :func:`sweep_masks` backtests every mask, then
+    :func:`brutex.ranking.rank_combos` applies the hard rejection gates +
+    composite z-score and sorts. The head of the returned list is the
+    top-performing combo for this ``(instrument, TF, direction, params)``.
+    """
+    return rank_combos(
+        sweep_masks(
+            bars,
+            masks,
+            direction=direction,
+            tf_minutes=tf_minutes,
+            stop_loss_paisa=stop_loss_paisa,
+            take_profit_paisa=take_profit_paisa,
+            start_equity_paisa=start_equity_paisa,
+            proximity=proximity,
+            prior_n=prior_n,
+        )
+    )
+
+
 __all__ = [
     "DEFAULT_START_EQUITY_PAISA",
     "build_equity_curve",
     "evaluate_combo",
+    "rank_sweep",
+    "sweep_masks",
 ]

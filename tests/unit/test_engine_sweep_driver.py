@@ -12,12 +12,17 @@ from decimal import Decimal
 
 import pytest
 from brutex.data.models import CandleBar
+from brutex.engine.combo_mask import iter_masks_k_of_n
 from brutex.engine.sweep_driver import (
     DEFAULT_START_EQUITY_PAISA,
     build_equity_curve,
     evaluate_combo,
+    rank_sweep,
+    sweep_masks,
 )
+from brutex.metrics.compute import ResultMetrics
 from brutex.metrics.types import ClosedTrade
+from brutex.ranking import RankedCombo
 from brutex.strategies.types import Side
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -173,3 +178,40 @@ class TestEvaluateCombo:
             start_equity_paisa=5_000_000,
         )
         assert metrics.total_trades >= 1
+
+
+# ────── sweep_masks + rank_sweep (the leaderboard machine) ──────
+
+
+class TestSweepMasks:
+    def test_empty_bars_raises(self) -> None:
+        with pytest.raises(ValueError, match="bars must be non-empty"):
+            sweep_masks([], [0], direction=Side.BUY, tf_minutes=1)
+
+    def test_one_pair_per_mask(self) -> None:
+        bars = _session_bars()
+        masks = list(iter_masks_k_of_n(1, n=52))[:5]
+        pairs = sweep_masks(bars, masks, direction=Side.BUY, tf_minutes=1)
+        assert [mask for mask, _ in pairs] == masks
+        assert all(isinstance(m, ResultMetrics) for _, m in pairs)
+
+    def test_shares_bar_bits_matches_evaluate_combo(self) -> None:
+        # sweep_masks builds bar_bits ONCE + reuses it, but must produce the SAME
+        # metrics as evaluate_combo per mask (no behavioural drift from the refactor).
+        bars = _session_bars()
+        mask = 0
+        pairs = sweep_masks(bars, [mask], direction=Side.BUY, tf_minutes=1)
+        _, swept = pairs[0]
+        direct = evaluate_combo(bars, mask, direction=Side.BUY, tf_minutes=1)
+        assert swept == direct
+
+
+class TestRankSweep:
+    def test_returns_ranked_leaderboard(self) -> None:
+        bars = _session_bars()
+        masks = list(iter_masks_k_of_n(1, n=52))[:6]
+        ranked = rank_sweep(bars, masks, direction=Side.BUY, tf_minutes=1)
+        # A list of RankedCombo — possibly empty when no combo clears the hard
+        # gates on this tiny synthetic session (the gate discipline, not an error).
+        assert isinstance(ranked, list)
+        assert all(isinstance(rc, RankedCombo) for rc in ranked)
