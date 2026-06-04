@@ -68,6 +68,7 @@ __all__ = [
     "evaluate_mask",
     "iter_masks_k_of_n",
     "mask_to_bits",
+    "mask_to_entry_signals",
     "popcount",
 ]
 
@@ -229,6 +230,39 @@ def evaluate_mask(bar_bits: int, required_mask: int) -> bool:
     True
     """
     return (bar_bits & required_mask) == required_mask
+
+
+def mask_to_entry_signals(bar_bits: Sequence[int], required_mask: int) -> list[bool]:
+    """Project a strategy mask onto a bar-bits series → one entry signal per bar.
+
+    THE seam between Stage-1A (which produces the per-bar ``bar_bits``
+    truth-vectors) and :func:`brutex.engine.trade_sim.simulate_trades` (which
+    consumes one ``bool`` per bar): a bar fires iff it satisfies the mask's
+    AND-semantics (every required bit set). Equivalent to
+    ``[evaluate_mask(b, required_mask) for b in bar_bits]`` — one AND + one CMP
+    per bar (O(1) each; O(n) over the series). Same length as ``bar_bits``.
+
+    Parameters
+    ----------
+    bar_bits : Sequence[int]
+        Per-bar u64 truth-vectors (e.g. from
+        :func:`brutex.engine.stage1a.build_bar_bits`).
+    required_mask : int
+        The u64 strategy mask. An empty mask (``0``) fires on every bar.
+
+    Returns
+    -------
+    list[bool]
+        One entry signal per bar, in input order (1:1 with ``bar_bits``).
+
+    Examples
+    --------
+    >>> mask_to_entry_signals([0b111, 0b101, 0b010], 0b101)
+    [True, True, False]
+    >>> mask_to_entry_signals([1, 2, 3], 0)  # empty mask matches every bar
+    [True, True, True]
+    """
+    return [(b & required_mask) == required_mask for b in bar_bits]
 
 
 # ─────────────────────────────────────────────────────────────────
