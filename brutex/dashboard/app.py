@@ -38,6 +38,7 @@ import json
 import threading
 import time
 from collections import deque
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -170,11 +171,19 @@ class TelegramStatsPanel:
 
 @dataclass(slots=True)
 class RateLimitPanel:
-    """Rate-limiter snapshot (current RPS, available tokens, recent 429s)."""
+    """Rate-limiter snapshot (current + effective RPS, tokens, recent 429s, latency).
+
+    ``current_rps`` is the controller's *target* pace (the adaptive [3..5] ladder);
+    ``effective_rps`` is the *measured* inter-arrival rate from the transport meter
+    (calls ÷ wall-span, never overstating) — together they answer the operator's
+    "is 5 r/s actually working?" at a glance (DEC-DASHBOARD-RATE-PANEL-001).
+    """
 
     current_rps: float = 0.0
     available_tokens: float = 0.0
     recent_429_count: int = 0
+    effective_rps: float = 0.0
+    latency_ms_p95: float = 0.0
 
 
 @dataclass(slots=True)
@@ -380,6 +389,22 @@ class DashboardState:
             self.rate_limit.available_tokens = available_tokens
             self.rate_limit.recent_429_count = recent_429_count
 
+    def update_throughput(
+        self,
+        *,
+        effective_rps: float,
+        latency_ms_p95: float,
+    ) -> None:
+        """Update the MEASURED throughput half of the rate panel from a ``CallMeter`` snapshot.
+
+        ``effective_rps`` is the transport's inter-arrival rate (calls ÷ wall-span)
+        and ``latency_ms_p95`` its 95th-percentile round-trip — both straight from
+        :meth:`brutex.adapters.dhan.client.CallMeter.snapshot` (DEC-DASHBOARD-RATE-PANEL-001).
+        """
+        with self._lock:
+            self.rate_limit.effective_rps = effective_rps
+            self.rate_limit.latency_ms_p95 = latency_ms_p95
+
     # ── Sweep funnel passthrough (DEC-DASHBOARD-LIVE-1) ────────────
 
     def update_sweep_funnel(self, snapshot: SweepFunnelSnapshot) -> None:
@@ -474,6 +499,34 @@ def snapshot_to_json(state: DashboardState) -> str:
 # ────────────────────────────────────────────────────────────────────────
 # FastAPI app factory (lazy import)
 # ────────────────────────────────────────────────────────────────────────
+
+
+def make_rate_observer(
+    state: DashboardState,
+) -> Callable[[Mapping[str, Any], Mapping[str, Any]], None]:
+    """Build a callback that pushes a controller + meter snapshot to *state*'s rate panel.
+
+    Threaded (live-only) into the pull controllers' rate feedback so a live pull's
+    adaptive rate (:meth:`~brutex.adapters.dhan.rate_control.DhanRateController.snapshot`
+    → ``current_rps`` + ``recent_hits``) and measured throughput
+    (:meth:`~brutex.adapters.dhan.client.CallMeter.snapshot` → ``effective_rps`` +
+    ``latency_ms_p95``) flow to the dashboard rate panel (DEC-DASHBOARD-RATE-PANEL-001).
+    Pure + testable: drive it with two snapshot mappings and assert the panel updated.
+    """
+
+    def _observe(rate: Mapping[str, Any], meter: Mapping[str, Any]) -> None:
+        """Map one (rate-controller, call-meter) snapshot pair onto the rate panel."""
+        state.update_rate_limit(
+            current_rps=float(rate.get("current_rps", 0.0)),
+            available_tokens=float(rate.get("available_tokens", 0.0)),
+            recent_429_count=int(rate.get("recent_hits", 0)),
+        )
+        state.update_throughput(
+            effective_rps=float(meter.get("effective_rps", 0.0)),
+            latency_ms_p95=float(meter.get("latency_ms_p95", 0.0)),
+        )
+
+    return _observe
 
 
 def build_app(
@@ -581,6 +634,18 @@ def build_app(
     async def api_state() -> JSONResponse:
         """GET /api/v1/state — JSON snapshot of the current dashboard state."""
         return JSONResponse(state.to_dict())
+
+    @app.get("/api/v1/rate")
+    async def api_rate() -> JSONResponse:
+        """GET /api/v1/rate — O(1) in-memory rate panel (target + effective r/s, 429s, latency).
+
+        A dedicated, lock-light poll for the live rate panel: returns the
+        :class:`RateLimitPanel` snapshot (``current_rps`` target vs ``effective_rps``
+        measured, ``recent_429_count``, ``latency_ms_p95``), populated during a live
+        pull by :func:`make_rate_observer` (DEC-DASHBOARD-RATE-PANEL-001). A pure
+        in-memory dict copy — never touches the lake or the store lock.
+        """
+        return JSONResponse(asdict(state.rate_limit))
 
     @app.get("/api/v1/events")
     async def api_events() -> JSONResponse:
@@ -874,6 +939,7 @@ def build_app(
                 from_date=from_date,
                 to_date=to_date,
                 dry_run=dry_run,
+                rate_observer=make_rate_observer(state),
             )
         except Exception as exc:  # surface the REAL reason, never swallow it
             # A blank "no data returned" 400 was hiding the actual failure
@@ -959,7 +1025,11 @@ def build_app(
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: bulk-pull every selected spot symbol, streaming progress."""
             return pull_all_spot(
-                instruments, lake_root=lake_root, dry_run=dry_run, on_progress=on_progress
+                instruments,
+                lake_root=lake_root,
+                dry_run=dry_run,
+                on_progress=on_progress,
+                rate_observer=make_rate_observer(state),
             )
 
         # total = symbols × the 2 fetched intervals (1m + 1d) — the unit the hook fires on.
@@ -2164,9 +2234,11 @@ _INDEX_HTML_TEMPLATE = """\
   <div class="card">
     <h3>Rate Limit</h3>
     <div class="stats">
-      current: <span id="rl-rps">-</span> rps ·
+      target: <span id="rl-rps">-</span> rps ·
+      effective: <span id="rl-eff">-</span> rps ·
       tokens: <span id="rl-tokens">-</span> ·
-      429s (60s): <span id="rl-429">-</span>
+      429s (60s): <span id="rl-429">-</span> ·
+      p95: <span id="rl-lat">-</span> ms
     </div>
   </div>
   <div class="card">
@@ -2222,8 +2294,10 @@ function renderState(s) {
 
   const rl = s.rate_limit || {};
   document.getElementById('rl-rps').textContent = (rl.current_rps || 0).toFixed(1);
+  document.getElementById('rl-eff').textContent = (rl.effective_rps || 0).toFixed(2);
   document.getElementById('rl-tokens').textContent = (rl.available_tokens || 0).toFixed(1);
   document.getElementById('rl-429').textContent = rl.recent_429_count || 0;
+  document.getElementById('rl-lat').textContent = (rl.latency_ms_p95 || 0).toFixed(0);
 
   const tg = s.telegram || {};
   document.getElementById('tg-sent').textContent = tg.sent || 0;

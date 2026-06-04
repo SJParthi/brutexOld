@@ -38,7 +38,7 @@ expansion.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -492,25 +492,58 @@ def _build_live_controller() -> DhanRateController:  # pragma: no cover — live
     return DhanRateController()
 
 
-def _live_rate_runtime(use_live_rate: bool) -> tuple[_RateHooks, RunParallel | None]:
-    """Return ``((pace, on_rate_limit, on_success), run_parallel)`` for the pull.
+#: The dashboard rate-panel observer (DEC-DASHBOARD-RATE-PANEL-001): given a
+#: ``DhanRateController.snapshot()`` (current_rps + recent_hits) and a
+#: ``CallMeter.snapshot()`` (effective_rps + latency), push both to the panel.
+RateObserver = Callable[[Mapping[str, Any], Mapping[str, Any]], None]
+
+
+def _observe_rate(
+    rate_observer: RateObserver | None,
+    controller: DhanRateController | None,
+    adapter: MarketAdapter,
+) -> None:
+    """Push a live pull's adaptive rate + measured throughput to the dashboard panel.
+
+    A no-op for a dry-run / injected-factory pull (no *controller*) or when no
+    observer is wired (the default). On a live pull it sends the controller's
+    ``snapshot()`` (current_rps + recent 429s) and the transport ``CallMeter``'s
+    ``snapshot()`` (effective_rps + latency p95) to *rate_observer*
+    (``make_rate_observer`` — DEC-DASHBOARD-RATE-PANEL-001), so the operator SEES
+    the live rate on the dashboard, not just in ``/logs``.
+    """
+    if rate_observer is None or controller is None:
+        return
+    meter = getattr(getattr(adapter, "client", None), "meter", None)  # pragma: no cover — live
+    rate_observer(  # pragma: no cover — live
+        controller.snapshot(),
+        meter.snapshot() if meter is not None else {},
+    )
+
+
+def _live_rate_runtime(
+    use_live_rate: bool,
+) -> tuple[_RateHooks, RunParallel | None, DhanRateController | None]:
+    """Return ``((pace, on_rate_limit, on_success), run_parallel, controller)`` for the pull.
 
     A **default live** pull (no injected factory + not dry-run) builds ONE shared
     controller and derives both the feedback hooks AND a rate-sized fan-out pool
-    from it. Dry-run / injected-factory pulls need no throttle → the None-triple
-    + ``None`` pool (the ingest spine then uses its default pool). The sizing
+    from it; the controller is also returned so the caller can push its live
+    ``snapshot()`` to the dashboard rate panel (:func:`_observe_rate`). Dry-run /
+    injected-factory pulls need no throttle → the None-triple + ``None`` pool +
+    ``None`` controller (the ingest spine then uses its default pool). The sizing
     itself (:func:`_spot_run_parallel`) is covered; only the live controller
     construction is ``# pragma: no cover``.
     """
     if not use_live_rate:
-        return _NO_RATE_HOOKS, None
+        return _NO_RATE_HOOKS, None, None
     controller = _build_live_controller()  # pragma: no cover — live only
     hooks = (  # pragma: no cover — live only
         controller.pace,
         controller.on_rate_limit,
         controller.on_success,
     )
-    return hooks, _spot_run_parallel(controller)  # pragma: no cover — live only
+    return hooks, _spot_run_parallel(controller), controller  # pragma: no cover — live only
 
 
 def pull_all_spot(
@@ -523,6 +556,7 @@ def pull_all_spot(
     on_progress: ProgressHook | None = None,
     coverage: FetchCoverage | None = None,
     pull_id: str | None = None,
+    rate_observer: RateObserver | None = None,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, previous day]`` range.
 
@@ -590,7 +624,9 @@ def pull_all_spot(
             start_date=start.date().isoformat(),
             dry_run=dry_run,
         )
-        (pace, on_rate_limit, on_success), run_parallel = _live_rate_runtime(use_live_rate)
+        (pace, on_rate_limit, on_success), run_parallel, _rate_controller = _live_rate_runtime(
+            use_live_rate
+        )
         report = run_dhan_spot_ingest(
             adapter,
             sink,
@@ -606,6 +642,7 @@ def pull_all_spot(
             run_parallel=run_parallel,
         )
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
+        _observe_rate(rate_observer, _rate_controller, adapter)
         failure_keys = {(f.symbol, f.interval) for f in report.failures}
         results: list[SymbolPullResult] = []
         for instrument in instruments:
@@ -651,6 +688,7 @@ def pull_candles(
     on_progress: ProgressHook | None = None,
     coverage: FetchCoverage | None = None,
     pull_id: str | None = None,
+    rate_observer: RateObserver | None = None,
 ) -> PullCandlesReport:
     """Ingest *instrument*'s spot candles over a date range (Dhan model).
 
@@ -758,7 +796,9 @@ def pull_candles(
             intervals=len(DHAN_FETCH_INTERVALS),
         )
 
-        (pace, on_rate_limit, on_success), run_parallel = _live_rate_runtime(use_live_rate)
+        (pace, on_rate_limit, on_success), run_parallel, _rate_controller = _live_rate_runtime(
+            use_live_rate
+        )
         report = run_dhan_spot_ingest(
             adapter,
             sink,
@@ -774,6 +814,7 @@ def pull_candles(
             run_parallel=run_parallel,
         )
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
+        _observe_rate(rate_observer, _rate_controller, adapter)
 
         failure_keys = {(f.symbol, f.interval) for f in report.failures}
         timeframes: list[TimeframeResult] = []
