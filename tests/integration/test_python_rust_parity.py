@@ -211,7 +211,13 @@ class TestProductionPathParity:
 
 
 class TestIndicatorComputeParity:
-    """The pivot/Fib math lives in both languages — prove it cannot drift."""
+    """Pin the wrapper's pack order against the Rust tuple.
+
+    Post-Phase-2d the Python ``compute_*`` wrappers DELEGATE to these same Rust
+    bindings (the math is single-source), so this no longer guards math
+    divergence (the Rust-side golden test + the 400 frozen vectors do that) — it
+    catches a pack-order / field-transposition bug in the wrappers.
+    """
 
     def test_rust_pivot_compute_matches_python(self) -> None:
         """``trading_core.compute_pivot_levels`` == the Python wrapper, bit-for-bit."""
