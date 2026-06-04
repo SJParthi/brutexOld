@@ -1019,7 +1019,17 @@ def build_app(
                 detail=f"unknown security_id {symbol!r} — not in the instrument store",
             )
         try:
-            report = pull_candles(
+            # Run the (blocking, often 20-30 s) single-symbol pull OFF the event
+            # loop. This route is ``async`` but called the blocking ``pull_candles``
+            # directly, so for the WHOLE pull every other request — /db, /coverage,
+            # /summary — sat queued behind the frozen event loop (the logs showed
+            # `GET /api/v1/db/tables latency_ms≈32796` during a 32 s NIFTY pull).
+            # Offloading to the threadpool (mirroring every other route here) frees
+            # the loop so the rest of the dashboard stays responsive DURING a pull
+            # (DEC-DASHBOARD-PULL-ASYNC-001). The vendor-bound pull duration itself
+            # is unchanged (Dhan rate-limit), but it no longer blocks the UI.
+            report = await run_in_threadpool(
+                pull_candles,
                 instrument,
                 lake_root=_resolve_pull_lake_root(instrument_store, dry_run=dry_run),
                 year=year,
