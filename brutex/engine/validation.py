@@ -27,10 +27,13 @@ Honest envelope (Golden Rule #10)
   test — it does not itself do the selection. The OOS *validity* comes from the
   caller selecting the combo on the train period only; the full train/test
   orchestration is the cascade's job — this is the holdout primitive it builds on.
-* ``held_up`` is the basic OOS gate: the combo still clears the 5 hard rejection
-  gates on the test period. The fuller lockbox tolerance (test Sharpe within 30%
-  of train, drawdown within 50% — :mod:`brutex.metrics.lockbox`) + CPCV / DSR are
-  the next refinements.
+* ``held_up`` ANDs three checks: the test clears the 5 hard rejection gates, AND
+  its Sharpe stays within 30% of a POSITIVE train Sharpe, AND its max-drawdown
+  stays within 50% of train — the DEC-LOCK-001 tolerances, applied at the OOS
+  ``ResultMetrics`` level (train + test from the identical ``compute_metrics``
+  convention, directly comparable). The trade-returns-level lockbox MODULE (with
+  its 500-trade floor + return-unit drawdown) + CPCV pass-rate + DSR are the next
+  refinements.
 * A position still open at the train-period boundary is force-closed at that
   period's end (each segment is a self-contained walk) — standard for a split.
 """
@@ -54,6 +57,17 @@ from brutex.vocabulary import ProximityParams
 #: whole day for each side).
 _MIN_SPLIT_DAYS: Final[int] = 2
 
+#: OOS degradation tolerances — these MIRROR the DEC-LOCK-001 spec values used by
+#: :mod:`brutex.metrics.lockbox` (test Sharpe within 30% of train; test max-drawdown
+#: within 50% of train). ``lockbox`` is the trade-returns-level gate (with a 500-trade
+#: floor + return-unit drawdown); this applies the SAME spec criteria at the OOS
+#: ``ResultMetrics`` level, where train + test Sharpe / max-drawdown both come from
+#: the identical :func:`brutex.metrics.compute.compute_metrics` convention and are
+#: therefore directly comparable (no unit mismatch). Kept local (not imported) to
+#: avoid coupling to a private lockbox constant; the spec source is cited here.
+_SHARPE_DEGRADATION_TOLERANCE: Final[float] = 0.30
+_MDD_DEGRADATION_TOLERANCE: Final[float] = 0.50
+
 
 @dataclass(frozen=True, slots=True)
 class OOSValidation:
@@ -66,15 +80,27 @@ class OOSValidation:
         days) periods.
     train_days, test_days
         Distinct IST trading-day counts in each period.
+    gates_held
+        ``True`` iff the test period still clears the 5 hard rejection gates.
+    sharpe_held
+        ``True`` iff the test Sharpe is within the DEC-LOCK-001 tolerance (30%) of
+        a POSITIVE train Sharpe (``False`` if train had no positive Sharpe to hold).
+    drawdown_held
+        ``True`` iff the test max-drawdown is within the DEC-LOCK-001 tolerance
+        (50%) of the train max-drawdown.
     held_up
-        ``True`` iff the combo still clears the hard rejection gates on the test
-        period — the basic "not a fluke" out-of-sample check.
+        ``True`` iff ALL THREE hold — the full out-of-sample verdict. The three
+        component booleans are exposed (like ``LockboxResult``) so a failure is
+        attributable: did it lose the gates, degrade on Sharpe, or blow drawdown?
     """
 
     train_metrics: ResultMetrics
     test_metrics: ResultMetrics
     train_days: int
     test_days: int
+    gates_held: bool
+    sharpe_held: bool
+    drawdown_held: bool
     held_up: bool
 
 
@@ -107,6 +133,31 @@ def _day_split(bars: Sequence[CandleBar], train_frac: float) -> tuple[int, int, 
     return day_starts[train_days], train_days, n_days - train_days
 
 
+def _sharpe_held(train: ResultMetrics, test: ResultMetrics) -> bool:
+    """Test Sharpe within the DEC-LOCK-001 tolerance of a POSITIVE train Sharpe.
+
+    A combo with no positive in-sample Sharpe (``None`` or ``<= 0``) has no edge to
+    hold up out-of-sample → ``False``. Otherwise the test Sharpe must be defined and
+    ``>= train_sharpe * (1 - tolerance)``.
+    """
+    train_sharpe = train.sharpe_ratio
+    if train_sharpe is None or train_sharpe <= 0.0:
+        return False
+    test_sharpe = test.sharpe_ratio
+    return test_sharpe is not None and test_sharpe >= train_sharpe * (
+        1.0 - _SHARPE_DEGRADATION_TOLERANCE
+    )
+
+
+def _drawdown_held(train: ResultMetrics, test: ResultMetrics) -> bool:
+    """Test max-drawdown no worse than the DEC-LOCK-001 tolerance above train's.
+
+    Both ``max_drawdown_pct`` values are non-negative percentages from the same
+    :func:`brutex.metrics.compute.compute_metrics` convention (directly comparable).
+    """
+    return test.max_drawdown_pct <= train.max_drawdown_pct * (1.0 + _MDD_DEGRADATION_TOLERANCE)
+
+
 def validate_out_of_sample(
     bars: Sequence[CandleBar],
     required_mask: int,
@@ -125,7 +176,9 @@ def validate_out_of_sample(
     Builds ``bar_bits`` ONCE over the full stream (correct prior-day anchors
     everywhere), splits at an IST day boundary, and runs the SAME mask through the
     shared per-mask metrics core on each half. ``held_up`` is ``True`` iff the test
-    period still clears the hard rejection gates.
+    period clears the hard rejection gates AND its Sharpe / max-drawdown stay within
+    the DEC-LOCK-001 tolerances of train (the three component booleans are exposed
+    so a failure is attributable).
 
     Parameters
     ----------
@@ -177,12 +230,18 @@ def validate_out_of_sample(
         take_profit_paisa=take_profit_paisa,
         start_equity_paisa=start_equity_paisa,
     )
+    gates_held = passes_gates(test_metrics)
+    sharpe_held = _sharpe_held(train_metrics, test_metrics)
+    drawdown_held = _drawdown_held(train_metrics, test_metrics)
     return OOSValidation(
         train_metrics=train_metrics,
         test_metrics=test_metrics,
         train_days=train_days,
         test_days=test_days,
-        held_up=passes_gates(test_metrics),
+        gates_held=gates_held,
+        sharpe_held=sharpe_held,
+        drawdown_held=drawdown_held,
+        held_up=gates_held and sharpe_held and drawdown_held,
     )
 
 
