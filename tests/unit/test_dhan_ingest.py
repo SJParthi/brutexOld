@@ -278,6 +278,192 @@ class TestIngestSpotCoverage:
         assert sink2.appends == []  # nothing re-fetched / re-written
 
 
+class _SeqTransport:
+    """Transport returning a fixed STATUS SEQUENCE (clamped to the last on overflow).
+
+    Lets a test make a window's fetch FAIL on early calls then SUCCEED later, so
+    the ingest in-run auto-retry (DEC-DHAN-WINDOW-RETRY-001) is exercised. The
+    client itself fast-retries a 5xx up to 3× per fetch (NOT a 429), so e.g.
+    ``[500, 500, 500, 200]`` exhausts pass-0's client attempts then succeeds on
+    the retry pass's first call.
+    """
+
+    def __init__(self, statuses: Sequence[int], payload: object = _CANDLES) -> None:
+        self.statuses = list(statuses)
+        self.payload = payload
+        self.calls = 0
+
+    def __call__(
+        self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+    ) -> tuple[int, bytes]:
+        status = self.statuses[min(self.calls, len(self.statuses) - 1)]
+        self.calls += 1
+        return status, json.dumps(self.payload).encode()
+
+
+def _flaky_adapter(statuses: Sequence[int]) -> tuple[DhanMarketAdapter, _SeqTransport]:
+    """A real adapter over a :class:`_SeqTransport` with the client's sleep stubbed.
+
+    The injected ``sleep`` makes the client's in-call fast-retry instant so the
+    test never waits on the 0.2s/0.4s backoff.
+    """
+    transport = _SeqTransport(statuses)
+    client = DhanClient(
+        access_token="t",
+        client_id="c",
+        transport=transport,  # type: ignore[arg-type]
+        base_url="https://api.dhan.co/v2/",
+        sleep=lambda _s: None,
+    )
+    return DhanMarketAdapter(client=client, instruments=(_INST,)), transport
+
+
+class TestIngestSpotInRunRetry:
+    """In-run transient-window auto-retry (DEC-DHAN-WINDOW-RETRY-001).
+
+    A network drop (transport/timeout/5xx that outlived the client's in-call
+    fast-retry) is re-run WITHIN the same pull, bounded by ``max_retry_passes``,
+    with a per-window WARNING. A window still failing after the budget stays
+    UNMARKED (deferred to the next pull — the no-skip guarantee). A 429 is NOT
+    re-run in-run (the rate controller owns it).
+    """
+
+    def test_network_drop_window_retried_then_succeeds(self) -> None:
+        # Pass 0: 3×500 exhaust the client → transient; retry pass: 200 → clean.
+        adapter, _t = _flaky_adapter([500, 500, 500, 200])
+        report = ingest_spot(
+            adapter,
+            _Sink(),
+            instrument=_INST,
+            interval="1day",  # 1 window
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            retry_backoff=lambda _i: None,  # no real sleep
+        )
+        assert report.bars_appended == 1
+        assert report.transient_failures == 0
+        assert report.still_failed_windows == 0
+        assert report.retried_windows == 1
+
+    def test_network_drop_persists_after_budget_left_unmarked(self) -> None:
+        from brutex.data.fetch_coverage import FetchCoverage
+
+        cov = FetchCoverage()
+        adapter, _t = _flaky_adapter([500])  # always 5xx
+        report = ingest_spot(
+            adapter,
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            coverage=cov,
+            max_retry_passes=1,
+            retry_backoff=lambda _i: None,
+        )
+        assert report.transient_failures == 1
+        assert report.still_failed_windows == 1
+        assert report.retried_windows == 1
+        # NEVER marked complete → re-pulled next run (the no-skip guarantee).
+        assert cov.completed_count == 0
+
+    def test_max_retry_passes_zero_disables_retry(self) -> None:
+        adapter, _t = _flaky_adapter([500])
+        with capture_logs() as logs:
+            report = ingest_spot(
+                adapter,
+                _Sink(),
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+                max_retry_passes=0,
+                retry_backoff=lambda _i: None,
+            )
+        assert report.transient_failures == 1
+        assert report.retried_windows == 0
+        assert _events(logs, "ingest.retry_pass") == []
+
+    def test_429_is_not_retried_in_run(self) -> None:
+        # A 429 is transient but the rate controller owns it: window=None, so it
+        # is NOT re-run in-run — on_rate_limit fires ONCE, no retry pass.
+        hits: list[int] = []
+        with capture_logs() as logs:
+            report = ingest_spot(
+                _adapter(status=429),
+                _Sink(),
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+                on_rate_limit=lambda: hits.append(1),
+                max_retry_passes=2,
+                retry_backoff=lambda _i: None,
+            )
+        assert report.transient_failures == 1
+        assert report.retried_windows == 0  # 429 not re-run in-run
+        assert hits == [1]  # fired once, not once-per-pass
+        assert _events(logs, "ingest.retry_pass") == []
+
+    def test_retry_pass_and_window_transient_logged(self) -> None:
+        adapter, _t = _flaky_adapter([500, 500, 500, 200])
+        with capture_logs() as logs, pull_id_scope("retrypull01"):
+            ingest_spot(
+                adapter,
+                _Sink(),
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+                retry_backoff=lambda _i: None,
+            )
+        # The per-window WARNING surfaces the failed window + that it's in-run-retriable.
+        (warn,) = _events(logs, "ingest.window.transient")
+        assert warn["log_level"] == "warning"
+        assert warn["pull_id"] == "retrypull01"
+        assert warn["window_start"] == "2021-01-01"
+        assert warn["error_type"] == "DhanServerError"
+        assert warn["in_run_retry"] is True
+        # The retry-pass INFO fires once (one retry pass recovered the window).
+        (rp,) = _events(logs, "ingest.retry_pass")
+        assert rp["log_level"] == "info"
+        assert rp["retry_pass"] == 1
+        assert rp["windows"] == 1
+        # The series summary carries the new counters.
+        (series,) = _events(logs, "ingest.series")
+        assert series["retried_windows"] == 1
+        assert series["still_failed_windows"] == 0
+
+    def test_backoff_invoked_once_per_retry_pass_with_pass_index(self) -> None:
+        # 2 retry passes (both fail) → backoff called with pass indices 0 then 1.
+        calls: list[int] = []
+        adapter, _t = _flaky_adapter([500])
+        ingest_spot(
+            adapter,
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            max_retry_passes=2,
+            retry_backoff=calls.append,
+        )
+        assert calls == [0, 1]
+
+    def test_default_backoff_is_bounded_exponential(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # _default_retry_backoff: base 1.0 × 2**k, clamped to 8.0 — no real sleep.
+        from brutex.adapters.dhan.ingest import (  # type: ignore[reportPrivateUsage]
+            _default_retry_backoff,
+        )
+
+        slept: list[float] = []
+        monkeypatch.setattr("brutex.adapters.dhan.ingest._time_sleep", slept.append)
+        _default_retry_backoff(0)
+        _default_retry_backoff(1)
+        _default_retry_backoff(99)  # clamps to the ceiling
+        assert slept == [1.0, 2.0, 8.0]
+
+
 class TestIngestSpotRateFeedback:
     """The rate-controller feedback hooks (DEC-DHAN-ADAPTIVE-RPS-001)."""
 
