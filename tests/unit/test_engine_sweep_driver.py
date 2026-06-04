@@ -12,12 +12,14 @@ from decimal import Decimal
 
 import pytest
 from brutex.data.models import CandleBar
-from brutex.engine.combo_mask import iter_masks_k_of_n
+from brutex.engine.combo_mask import iter_masks_k_of_bits, iter_masks_k_of_n
 from brutex.engine.sweep_driver import (
+    DEFAULT_MAX_COMBOS,
     DEFAULT_START_EQUITY_PAISA,
     build_equity_curve,
     evaluate_combo,
     rank_sweep,
+    rank_sweep_over_bits,
     sweep_masks,
 )
 from brutex.metrics.compute import ResultMetrics
@@ -215,3 +217,56 @@ class TestRankSweep:
         # gates on this tiny synthetic session (the gate discipline, not an error).
         assert isinstance(ranked, list)
         assert all(isinstance(rc, RankedCombo) for rc in ranked)
+
+
+class TestRankSweepOverBits:
+    """Sweep + rank over a K-of-CHOSEN-condition-bits space (DEC-SWEEP-SUBSET-001).
+
+    The operator-facing "find the top combo over MY chosen conditions" entry, with
+    the honest combo-count cap that refuses an oversized sweep before any compute.
+    """
+
+    def test_empty_bars_raises(self) -> None:
+        with pytest.raises(ValueError, match="bars must be non-empty"):
+            rank_sweep_over_bits([], [0, 1], 2, direction=Side.BUY, tf_minutes=1)
+
+    def test_equivalent_to_explicit_rank_sweep(self) -> None:
+        # rank_sweep_over_bits is exactly rank_sweep over the K-of-bits mask space —
+        # no hidden behaviour (deterministic, so the leaderboards are identical).
+        bars = _session_bars()
+        bits = [0, 1, 2]
+        explicit = rank_sweep(
+            bars, list(iter_masks_k_of_bits(bits, 2)), direction=Side.BUY, tf_minutes=1
+        )
+        viabits = rank_sweep_over_bits(bars, bits, 2, direction=Side.BUY, tf_minutes=1)
+        assert viabits == explicit
+        assert isinstance(viabits, list)
+        assert all(isinstance(rc, RankedCombo) for rc in viabits)
+
+    def test_over_cap_raises_before_compute(self) -> None:
+        # C(3, 2) = 3 masks > max_combos=2 → refuse (honest guardrail), no sweep run.
+        bars = _session_bars()
+        with pytest.raises(ValueError, match=r"exceeds max_combos=2"):
+            rank_sweep_over_bits(bars, [0, 1, 2], 2, direction=Side.BUY, tf_minutes=1, max_combos=2)
+
+    def test_k_too_large_raises(self) -> None:
+        # count_combos rejects k > n_unique before any enumeration.
+        bars = _session_bars()
+        with pytest.raises(ValueError, match="invalid k"):
+            rank_sweep_over_bits(bars, [0, 1], 3, direction=Side.BUY, tf_minutes=1)
+
+    def test_out_of_range_bit_raises_after_cap_passes(self) -> None:
+        # C(2, 1) = 2 clears the default cap, so the range check in the generator
+        # is what rejects bit 64.
+        bars = _session_bars()
+        with pytest.raises(ValueError, match="out of range"):
+            rank_sweep_over_bits(bars, [0, 64], 1, direction=Side.BUY, tf_minutes=1)
+
+    def test_default_cap_admits_full_vocab_k_of_4(self) -> None:
+        # The documented envelope: the default cap admits C(52,4)=270,725? No — it is
+        # 100,000, so K=4 over the full 52 is REFUSED unless the cap is raised. This
+        # pins the honest default (no silent multi-100k-combo sweep).
+        assert DEFAULT_MAX_COMBOS == 100_000
+        bars = _session_bars()
+        with pytest.raises(ValueError, match="exceeds max_combos=100000"):
+            rank_sweep_over_bits(bars, list(range(52)), 4, direction=Side.BUY, tf_minutes=1)
