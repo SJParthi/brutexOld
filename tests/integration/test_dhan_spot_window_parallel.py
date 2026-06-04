@@ -308,15 +308,17 @@ class TestSingleSeriesWindowThroughput:
         )
         assert adapter.calls == _EXPECTED_WINDOWS
         assert pool.result is not None
-        # The burst-corrected steady-state rate is the token bucket's hard
-        # guarantee and NEVER exceeds 5 r/s (Rule #6). Honest envelope (Golden
-        # Rule #10): on a SHORT single-symbol series (22 windows) the 5-token
-        # burst is admitted at t=0, so the RAW admission count over the span can
-        # momentarily read > 5 r/s — the bucket never sustains > 5 (this is why
-        # the achieved-rate≈5 assertion only holds for a long stream, not a
-        # 22-window pull). The steady-state bound is the correct invariant here.
+        # EASE-IN (DEC-DHAN-EASE-IN-001): the opening token burst is now 1, so the
+        # fan-out no longer admits a multi-request spike at t=0. Both the
+        # burst-corrected steady-state rate AND the RAW achieved rate over the span
+        # now hold at/under 5 r/s (Rule #6) — even on a SHORT single-symbol series
+        # (22 windows). Before the ease-in the full 5-token burst was admitted at
+        # t=0, so the raw achieved rate on a short series read > 5 r/s (the bucket
+        # never SUSTAINED > 5, but the opening spike inflated the short-series
+        # average); removing that spike is precisely the fix, so the short series
+        # now also stays at/under the ceiling — strengthening this guard.
         assert pool.result.steady_state_rps <= _RATE + 1e-9
-        assert pool.result.achieved_rps > _RATE  # burst inflates a short series
+        assert pool.result.achieved_rps <= _RATE + 1e-9  # burst no longer inflates
 
 
 class TestRealRateControllerAcrossWindows:
