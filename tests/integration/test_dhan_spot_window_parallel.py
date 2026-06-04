@@ -36,7 +36,7 @@ import heapq
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -82,13 +82,30 @@ def _index(symbol: str = "SENSEX", *, token: int = 1) -> Instrument:
     )
 
 
-class _CountingAdapter:
-    """Fake spot adapter: returns zero bars per window, counting fetch calls.
+#: One in-session 1-minute bar so a FETCHED window is marked complete — the ingest
+#: marks a window only when the vendor returned bars (DEC-LAKE-RECONCILE-001; an
+#: empty 0-bar response is left un-marked → re-pulled). The :class:`NullBarSink`
+#: discards it, so call CADENCE is unchanged; only the coverage MARK (and thus the
+#: idempotent-re-pull skip) depends on ``raw_bars > 0``.
+_ONE_BAR = CandleBar(
+    timestamp=datetime(2021, 1, 4, 4, 5, tzinfo=UTC),  # 04:05 UTC = 09:35 IST, in session
+    open=Decimal("100.00"),
+    high=Decimal("110.00"),
+    low=Decimal("90.00"),
+    close=Decimal("105.00"),
+    volume=1,
+    open_interest=None,
+)
 
-    Zero bars is fine — these tests measure call CADENCE, not bar counts; the
-    timing is modelled by :class:`_SimPool`, never by this adapter (it never
-    sleeps). The call counter is lock-guarded so a real thread-pool run counts
-    correctly too.
+
+class _CountingAdapter:
+    """Fake spot adapter: returns ONE in-session bar per window, counting fetch calls.
+
+    The single bar exists only so a fetched window is marked complete
+    (DEC-LAKE-RECONCILE-001 marks a window only on ``raw_bars > 0``); the
+    :class:`NullBarSink` discards it, so it never affects bar counts. The timing
+    is modelled by :class:`_SimPool`, never by this adapter (it never sleeps). The
+    call counter is lock-guarded so a real thread-pool run counts correctly too.
     """
 
     def __init__(self) -> None:
@@ -107,7 +124,7 @@ class _CountingAdapter:
         with self._lock:
             self.calls += 1
         del symbol, exchange, interval, start, end
-        return []
+        return [_ONE_BAR]
 
 
 @dataclass

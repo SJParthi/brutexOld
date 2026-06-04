@@ -265,6 +265,15 @@ jobs:
           else
             echo "(brutex.dashboard.constituents_cache test files not present yet — gate inactive)"
           fi
+          # DEC-LAKE-RECONCILE-001 (MIGRATION.md #463): the lake-reconcile module
+          # ships at 100% line+branch (its sole DuckDB-connect surface is
+          # # pragma: no cover; the pure reconcile + the composition are tested,
+          # incl. a real-Parquet-lake end-to-end).
+          if compgen -G "tests/unit/test_coverage_reconcile.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.coverage_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_coverage_reconcile.py
+          else
+            echo "(brutex.dashboard.coverage_reconcile test files not present yet — gate inactive)"
+          fi
           # DEC-COV-001 (2026-05-24, MIGRATION.md entry #210): ratchet
           # `brutex.doctor` into the strict per-module 100% gate. The
           # module was designed in DEC-DOCTOR-001 (PR #100) with 18 unit

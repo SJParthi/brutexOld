@@ -573,8 +573,15 @@ def _ingest_one_window(
                 vendor_close=str(c.vendor.close),
                 **series_fields,
             )
-    # The window pulled cleanly — record it so a re-pull skips it.
-    if coverage is not None:
+    # Record the window as pulled so a re-pull skips it — BUT ONLY when the
+    # vendor actually returned bars (DEC-LAKE-RECONCILE-001). A 0-bar response
+    # (an empty 200 under a 429 storm, or a genuinely-empty range) is NOT marked
+    # complete, so it is re-pulled next run instead of being silently stuck (the
+    # NIFTY / ADANIENT / COALINDIA 1-day "no_data" bug). ``raw_bars`` (NOT
+    # ``result.bars_appended``) is the signal: a re-pull whose bars are all
+    # already in the lake dedups to ``bars_appended == 0`` via keep-first yet the
+    # window IS complete, so it must stay marked.
+    if coverage is not None and len(raw_bars) > 0:
         coverage.mark_complete(key)
     # Signal a clean window so the controller can recover the rate.
     if on_success is not None:
