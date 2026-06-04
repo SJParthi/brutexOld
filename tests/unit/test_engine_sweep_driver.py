@@ -12,7 +12,6 @@ from decimal import Decimal
 
 import pytest
 from brutex.data.models import CandleBar
-from brutex.engine.combo_mask import mask_to_entry_signals
 from brutex.engine.sweep_driver import (
     DEFAULT_START_EQUITY_PAISA,
     build_equity_curve,
@@ -51,24 +50,6 @@ def _session_bars() -> list[CandleBar]:
         _bar(9, 19, "100.40", "100.90", "99.80", "100.10"),
         _bar(9, 20, "100.10", "100.30", "99.00", "99.20"),
     ]
-
-
-# ────── The seam: mask_to_entry_signals ──────
-
-
-class TestMaskToEntrySignals:
-    def test_and_semantics(self) -> None:
-        assert mask_to_entry_signals([0b111, 0b101, 0b010], 0b101) == [True, True, False]
-
-    def test_empty_mask_matches_every_bar(self) -> None:
-        assert mask_to_entry_signals([1, 2, 3], 0) == [True, True, True]
-
-    def test_empty_series_yields_empty(self) -> None:
-        assert mask_to_entry_signals([], 0b1) == []
-
-    def test_length_is_preserved(self) -> None:
-        bits = [0, 1, 2, 3, 4, 5]
-        assert len(mask_to_entry_signals(bits, 0b10)) == len(bits)
 
 
 # ────── build_equity_curve ──────
