@@ -13,12 +13,12 @@ suite did not directly cover before the Phase-2b post-merge hostile review:
    against ``evaluate_from_raw``, and exercise the ``pdc == 0`` gap-day path the
    second entry point was specifically built for (absent from the 400 fixtures).
 
-2. **The indicator math can no longer drift.** BruteX's
-   ``brutex.indicators.compute_pivot_levels`` / ``compute_fib_levels`` and the
-   Rust ``trading_core.compute_pivot_levels`` / ``compute_fib_levels`` are two
-   copies of the same banker's-rounding float arithmetic. This test proves them
-   bit-identical over a deterministic grid, so a change to one that is not
-   mirrored in the other fails CI.
+2. **The pivot/Fib wrapper faithfully delegates.** As of Phase 2d
+   ``brutex.indicators.compute_pivot_levels`` / ``compute_fib_levels`` delegate
+   their arithmetic to ``trading_core.compute_pivot_levels`` /
+   ``compute_fib_levels`` — the Python copy of the math was REMOVED, so the math
+   is single-source (Rust). This test pins the wrapper's pack order against the
+   Rust tuple over a deterministic grid, so a packing/order regression fails CI.
 
 This file supersedes the retired ``fno-math`` parity skeleton
 (``DEC-PHASE1-INTEGRATION-SKELETONS-001``); the Greeks-stub operations it

@@ -65,6 +65,8 @@ from datetime import date
 from enum import Enum
 from typing import Final
 
+import trading_core
+
 # Standard Fibonacci ratios.
 FIB_RATIOS_RETRACEMENT: Final[dict[str, float]] = {
     "0": 0.0,
@@ -215,22 +217,19 @@ class FibLevels:
         return self.get_by_bullish_label(key)
 
 
-def _round_half_even(x: float) -> int:
-    """Round-half-to-even (banker's rounding) for deterministic i64 conversion.
-
-    Matches IEEE 754 default rounding mode and the FPCR pin per
-    CLAUDE.md §4 / spec §Non-Negotiable Correctness #11. Critical for
-    bit-identical replay across rebuilds.
-    """
-    return round(x)
-
-
 def compute_fib_levels(
     trading_day: date,
     pdh_paisa: int,
     pdl_paisa: int,
 ) -> FibLevels:
     """Compute all 17 static daily Fibonacci anchor levels.
+
+    The arithmetic is delegated to the shared Rust ``trading_core`` crate
+    (``DEC-SHARED-CORE-001``, ``docs/MIGRATION.md`` #441) — the **single source
+    of truth** for the Fib math. This wrapper keeps the data-corruption
+    validation and packs the result into the :class:`FibLevels` dataclass
+    (``retrace@pdh = pdh``, ``retrace@pdl = pdl``, ``range = pdh - pdl`` are
+    derived here; the 15 computed levels come from Rust).
 
     Args:
         trading_day: The trading day these levels apply to (today).
@@ -258,41 +257,38 @@ def compute_fib_levels(
 
     range_paisa = pdh_paisa - pdl_paisa
 
-    # Retracements (same physical levels regardless of direction label)
-    retrace_pdh = pdh_paisa
-    retrace_23 = _round_half_even(pdh_paisa - 0.236 * range_paisa)
-    retrace_38 = _round_half_even(pdh_paisa - 0.382 * range_paisa)
-    retrace_50 = _round_half_even((pdh_paisa + pdl_paisa) / 2.0)
-    retrace_62 = _round_half_even(pdh_paisa - 0.618 * range_paisa)
-    retrace_78 = _round_half_even(pdh_paisa - 0.786 * range_paisa)
-    retrace_pdl = pdl_paisa
-
-    # Bullish extensions ABOVE PDH
-    ext_up_127 = _round_half_even(pdh_paisa + 0.272 * range_paisa)
-    ext_up_162 = _round_half_even(pdh_paisa + 0.618 * range_paisa)
-    ext_up_200 = _round_half_even(pdh_paisa + 1.000 * range_paisa)
-    ext_up_262 = _round_half_even(pdh_paisa + 1.618 * range_paisa)
-    ext_up_424 = _round_half_even(pdh_paisa + 3.236 * range_paisa)
-
-    # Bearish extensions BELOW PDL
-    ext_down_127 = _round_half_even(pdl_paisa - 0.272 * range_paisa)
-    ext_down_162 = _round_half_even(pdl_paisa - 0.618 * range_paisa)
-    ext_down_200 = _round_half_even(pdl_paisa - 1.000 * range_paisa)
-    ext_down_262 = _round_half_even(pdl_paisa - 1.618 * range_paisa)
-    ext_down_424 = _round_half_even(pdl_paisa - 3.236 * range_paisa)
+    # Shared Rust core returns the 15 computed levels in order:
+    # [retrace_23,38,50,62,78, ext_up_127,162,200,262,424, ext_down_127,162,200,262,424].
+    (
+        retrace_23,
+        retrace_38,
+        retrace_50,
+        retrace_62,
+        retrace_78,
+        ext_up_127,
+        ext_up_162,
+        ext_up_200,
+        ext_up_262,
+        ext_up_424,
+        ext_down_127,
+        ext_down_162,
+        ext_down_200,
+        ext_down_262,
+        ext_down_424,
+    ) = trading_core.compute_fib_levels(pdh_paisa, pdl_paisa)
 
     return FibLevels(
         trading_day=trading_day,
         pdh_paisa=pdh_paisa,
         pdl_paisa=pdl_paisa,
         range_paisa=range_paisa,
-        retrace_level_at_pdh_paisa=retrace_pdh,
+        retrace_level_at_pdh_paisa=pdh_paisa,
         retrace_23_paisa=retrace_23,
         retrace_38_paisa=retrace_38,
         retrace_50_paisa=retrace_50,
         retrace_62_paisa=retrace_62,
         retrace_78_paisa=retrace_78,
-        retrace_level_at_pdl_paisa=retrace_pdl,
+        retrace_level_at_pdl_paisa=pdl_paisa,
         ext_up_127_paisa=ext_up_127,
         ext_up_162_paisa=ext_up_162,
         ext_up_200_paisa=ext_up_200,
