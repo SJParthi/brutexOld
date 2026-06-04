@@ -1421,6 +1421,7 @@ def build_app(
         lake = lake_root.parent
 
         def _load() -> dict[str, Any]:
+            """Load the durable status sidecar + project it to the JSON payload (threadpool)."""
             log = load_window_status(lake)
             return {
                 "count": log.count,
