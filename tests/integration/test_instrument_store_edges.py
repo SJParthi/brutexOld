@@ -505,6 +505,15 @@ class _RollbackConn:
     def unregister(self, name: str) -> None:
         self.calls.append("UNREGISTER")
 
+    def cursor(self) -> _RollbackConn:
+        """A child READ cursor (DEC-STORE-READ-WRITE-SPLIT-001) — this fake reuses itself.
+
+        ``InstrumentStore.__init__`` derives a read cursor for the read/write
+        split; this rollback double never serves a ``store.connection`` read, so
+        returning self (unused) suffices and keeps ``calls`` to the write path.
+        """
+        return self
+
 
 class TestUpsertManyEdges:
     def test_custom_in_scope_of_callable_is_used(self, tmp_path: Path) -> None:
