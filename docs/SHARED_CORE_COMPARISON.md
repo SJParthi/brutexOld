@@ -114,7 +114,7 @@ bars into a *ranked combo list*.
 | **Single-combo evaluator** (`evaluate_combo`) | ✅ BUILT (DEC-SWEEP-DRIVER-001, #445) |
 | **`ranking/` (5 hard gates + 7-term composite z-score)** | ✅ BUILT (DEC-RANKING-001 + DEC-RANKING-RISK-EFFICIENCY-001) |
 | **Mask-space sweep → ranked leaderboard** (`sweep_masks` / `rank_sweep` / `rank_sweep_over_bits`) | ✅ BUILT (DEC-SWEEP-SUBSET-001) |
-| Stage-1B coarse pre-filter wiring (via the built `count_supermasks`) | 🔴 **NOT WIRED** |
+| Stage-1B coarse pre-filter wiring (via the built `count_supermasks`) | ✅ WIRED (DEC-STAGE1B-WIRE-001 — `sweep_masks(min_hits=…)`, default-on in `rank_sweep_over_bits`) |
 | `ResultsStore` persistence wired to the leaderboard | 🔴 **NOT WIRED** |
 | Statistical robustness — lockbox Sharpe (CPCV / DSR train-test) | 🔴 **Stage-3, deferred** |
 | `brutex sweep` CLI command (lake bars → ranked table) | 🔴 **does not exist** |

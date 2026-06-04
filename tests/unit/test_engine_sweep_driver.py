@@ -12,7 +12,12 @@ from decimal import Decimal
 
 import pytest
 from brutex.data.models import CandleBar
-from brutex.engine.combo_mask import iter_masks_k_of_bits, iter_masks_k_of_n
+from brutex.engine.combo_mask import (
+    count_supermasks,
+    iter_masks_k_of_bits,
+    iter_masks_k_of_n,
+)
+from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import (
     DEFAULT_MAX_COMBOS,
     DEFAULT_START_EQUITY_PAISA,
@@ -24,7 +29,7 @@ from brutex.engine.sweep_driver import (
 )
 from brutex.metrics.compute import ResultMetrics
 from brutex.metrics.types import ClosedTrade
-from brutex.ranking import RankedCombo
+from brutex.ranking import MIN_TRADES, RankedCombo
 from brutex.strategies.types import Side
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -270,3 +275,65 @@ class TestRankSweepOverBits:
         bars = _session_bars()
         with pytest.raises(ValueError, match="exceeds max_combos=100000"):
             rank_sweep_over_bits(bars, list(range(52)), 4, direction=Side.BUY, tf_minutes=1)
+
+
+class TestStage1BPreFilter:
+    """Stage-1B coarse pre-filter (DEC-STAGE1B-WIRE-001).
+
+    `count_supermasks` cheaply counts how many bars each mask fires on; a mask
+    firing on fewer bars than the MIN_TRADES gate can never be rankable (the sim
+    opens ≤ one trade per signal — no pyramiding), so pruning it before the trade
+    sim never changes a ranked leaderboard. These tests prove that.
+    """
+
+    def test_min_hits_prunes_zero_hit_mask(self) -> None:
+        bars = _session_bars()
+        # mask 0 fires on every bar (5 hits); the all-52 mask fires on no bar.
+        pairs = sweep_masks(
+            bars, [0, _IMPOSSIBLE_MASK], direction=Side.BUY, tf_minutes=1, min_hits=1
+        )
+        assert [m for m, _ in pairs] == [0]
+
+    def test_min_hits_zero_keeps_every_mask(self) -> None:
+        bars = _session_bars()
+        pairs = sweep_masks(
+            bars, [0, _IMPOSSIBLE_MASK], direction=Side.BUY, tf_minutes=1, min_hits=0
+        )
+        assert [m for m, _ in pairs] == [0, _IMPOSSIBLE_MASK]
+
+    def test_surviving_metrics_identical_to_unfiltered(self) -> None:
+        bars = _session_bars()
+        # Prepend mask 0 (always 5 hits → always survives) so a survivor exists.
+        masks = [0, *list(iter_masks_k_of_n(1, n=52))[:7]]
+        full = dict(sweep_masks(bars, masks, direction=Side.BUY, tf_minutes=1, min_hits=0))
+        filtered = sweep_masks(bars, masks, direction=Side.BUY, tf_minutes=1, min_hits=1)
+        hits = count_supermasks(build_bar_bits(bars), masks)
+        expected = [m for m, h in zip(masks, hits, strict=True) if h >= 1]
+        assert [m for m, _ in filtered] == expected
+        # The pre-filter only DROPS masks — it never alters a surviving mask's metrics.
+        for mask, metrics in filtered:
+            assert metrics == full[mask]
+
+    def test_rank_sweep_threads_min_hits(self) -> None:
+        bars = _session_bars()
+        # The impossible mask is pruned; empty leaderboard either way (5 synthetic
+        # bars never clear the 30-trade gate) — proving the prune changes no ranking.
+        ranked = rank_sweep(
+            bars, [0, _IMPOSSIBLE_MASK], direction=Side.BUY, tf_minutes=1, min_hits=1
+        )
+        assert ranked == []
+
+    def test_rank_sweep_over_bits_prefilter_preserves_leaderboard(self) -> None:
+        # The default min_hits=MIN_TRADES prunes every sub-30-hit mask; the leaderboard
+        # is identical to simulating them all (they would all be gated out anyway).
+        bars = _session_bars()
+        bits = [0, 1, 2]
+        with_filter = rank_sweep_over_bits(bars, bits, 2, direction=Side.BUY, tf_minutes=1)
+        no_filter = rank_sweep_over_bits(
+            bars, bits, 2, direction=Side.BUY, tf_minutes=1, min_hits=0
+        )
+        assert with_filter == no_filter
+
+    def test_min_trades_is_the_shared_gate_constant(self) -> None:
+        # Single source of truth: the pre-filter default == the ranking trade gate.
+        assert MIN_TRADES == 30
