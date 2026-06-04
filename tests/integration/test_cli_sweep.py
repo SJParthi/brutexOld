@@ -1,0 +1,153 @@
+"""End-to-end proof for ``brutex sweep`` (DEC-SWEEP-CLI-001).
+
+The CLI shell is coverage-omitted (it is the lake-touching layer), so this
+INTEGRATION test is the honest validation that the command actually loads real
+bars from a Parquet lake, runs the assembled funnel, and prints the ranked report
+— not just that the pure core works. It persists a tiny lake with
+``ParquetWriter`` / ``ParquetBarSink`` (the same writers ingest uses), then runs
+the command and inspects stdout.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+from brutex.cli import cmd_sweep, main
+from brutex.data.catalog import Catalog
+from brutex.data.models import CandleBar
+from brutex.data.parquet_writer import ParquetWriter
+from brutex.data.sink import ParquetBarSink
+
+pytest.importorskip("polars")
+pytest.importorskip("duckdb")
+pytest.importorskip("pyarrow")
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+_EXCHANGE = "NSE"
+_SEGMENT = "INDEX"
+_SYMBOL = "NIFTY"
+_INTERVAL = "1minute"
+
+
+def _bars() -> list[CandleBar]:
+    """A short in-session NIFTY minute window (stored UTC), valid OHLC."""
+    out: list[CandleBar] = []
+    for i in range(6):
+        ts = datetime(2024, 1, 2, 9, 16 + i, tzinfo=_IST).astimezone(UTC)
+        close = Decimal("100.00") + Decimal(i) / 10
+        out.append(
+            CandleBar(
+                timestamp=ts,
+                open=Decimal("100.00"),
+                high=Decimal("102.00"),
+                low=Decimal("99.00"),
+                close=close,
+                volume=1000,
+                open_interest=None,
+            )
+        )
+    return out
+
+
+def _persist(tmp_path: Path) -> tuple[Path, Path]:
+    """Write the NIFTY bars to a temp lake; return (lake_root, catalog_path)."""
+    lake_root = tmp_path / "lake"
+    catalog_path = tmp_path / "catalog.duckdb"
+    writer = ParquetWriter(lake_root=lake_root)
+    with Catalog.open(catalog_path) as cat:
+        sink = ParquetBarSink(writer=writer, catalog=cat)
+        sink.append(
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            interval=_INTERVAL,
+            bars=_bars(),
+        )
+    return lake_root, catalog_path
+
+
+def test_sweep_loads_lake_and_prints_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lake_root, catalog_path = _persist(tmp_path)
+    rc = cmd_sweep(
+        lake_root=lake_root,
+        catalog_path=catalog_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        interval=_INTERVAL,
+        start="2024-01-02",
+        end="2024-01-03",
+        direction="BUY",
+        k=2,
+        conditions="0,1,2",
+        stop_loss_paisa=None,
+        take_profit_paisa=None,
+        top=10,
+        min_hits=None,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The report actually rendered from lake-loaded bars (6 of them).
+    assert "BruteX sweep — NIFTY 1minute BUY" in out
+    assert "bars=6" in out
+    assert "combos=3" in out  # C(3, 2)
+
+
+def test_sweep_argv_path_prints_report(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # Exercise the full argparse + dispatch via main(argv).
+    lake_root, catalog_path = _persist(tmp_path)
+    rc = main(
+        [
+            "sweep",
+            _SYMBOL,
+            "--start",
+            "2024-01-02",
+            "--end",
+            "2024-01-03",
+            "--exchange",
+            _EXCHANGE,
+            "--segment",
+            _SEGMENT,
+            "--interval",
+            _INTERVAL,
+            "--k",
+            "1",
+            "--conditions",
+            "5,6",
+            "--lake-root",
+            str(lake_root),
+            "--catalog",
+            str(catalog_path),
+        ]
+    )
+    assert rc == 0
+    assert "BruteX sweep — NIFTY 1minute BUY" in capsys.readouterr().out
+
+
+def test_sweep_no_bars_is_user_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    lake_root, catalog_path = _persist(tmp_path)
+    # A window with no data → honest message + non-zero exit, never a crash.
+    rc = cmd_sweep(
+        lake_root=lake_root,
+        catalog_path=catalog_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        interval=_INTERVAL,
+        start="2030-01-01",
+        end="2030-01-02",
+        direction="BUY",
+        k=2,
+        conditions=None,
+        stop_loss_paisa=None,
+        take_profit_paisa=None,
+        top=20,
+        min_hits=None,
+    )
+    assert rc == 1
+    assert "no bars for NIFTY" in capsys.readouterr().err

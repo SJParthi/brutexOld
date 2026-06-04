@@ -326,6 +326,76 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the interactive typed-'WIPE' confirmation (for non-interactive / CI use).",
     )
 
+    from brutex.feed.resampler import INTERVAL_SECONDS
+
+    sweep = sub.add_parser(
+        "sweep",
+        help="Brute-force sweep over lake bars → print the ranked top-combo table",
+    )
+    sweep.add_argument("symbol", help="Index symbol to sweep, e.g. NIFTY / BANKNIFTY / SENSEX")
+    sweep.add_argument("--start", required=True, help="Window start (YYYY-MM-DD or full ISO)")
+    sweep.add_argument("--end", required=True, help="Window end (YYYY-MM-DD or full ISO)")
+    sweep.add_argument(
+        "--exchange",
+        default="NSE",
+        help="LAKE exchange partition (default NSE; use BSE for SENSEX) — must match ingest",
+    )
+    sweep.add_argument(
+        "--segment",
+        default="INDEX",
+        help="LAKE segment partition (CASH/FNO/INDEX; default INDEX for the spot indexes)",
+    )
+    sweep.add_argument(
+        "--interval",
+        default="1minute",
+        choices=sorted(INTERVAL_SECONDS),
+        help="LAKE interval label (default 1minute)",
+    )
+    sweep.add_argument(
+        "--direction", default="BUY", choices=["BUY", "SELL"], help="Trade direction (default BUY)"
+    )
+    sweep.add_argument("--k", type=int, default=2, help="Conditions required per combo (default 2)")
+    sweep.add_argument(
+        "--conditions",
+        default=None,
+        help="Comma-separated condition bit indices 0..51 to sweep (default: all 52)",
+    )
+    sweep.add_argument(
+        "--sl",
+        type=int,
+        default=None,
+        dest="stop_loss_paisa",
+        help="Stop-loss in paisa (default none)",
+    )
+    sweep.add_argument(
+        "--tp",
+        type=int,
+        default=None,
+        dest="take_profit_paisa",
+        help="Take-profit in paisa (default none)",
+    )
+    sweep.add_argument("--top", type=int, default=20, help="Print the top-N combos (default 20)")
+    sweep.add_argument(
+        "--min-hits",
+        type=int,
+        default=None,
+        dest="min_hits",
+        help="Stage-1B prune threshold (default = the MIN_TRADES gate); 0 disables",
+    )
+    sweep.add_argument(
+        "--catalog",
+        type=Path,
+        default=None,
+        dest="catalog_path",
+        help="Catalog DuckDB path (default <lake-root>/catalog.duckdb)",
+    )
+    sweep.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+
     return parser
 
 
@@ -1056,6 +1126,88 @@ def cmd_wipe(*, execute: bool, assume_yes: bool) -> int:  # pragma: no cover —
     return EXIT_INTERNAL_ERROR if report.failed else EXIT_OK
 
 
+def cmd_sweep(
+    *,
+    lake_root: Path | None,
+    catalog_path: Path | None,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    interval: str,
+    start: str,
+    end: str,
+    direction: str,
+    k: int,
+    conditions: str | None,
+    stop_loss_paisa: int | None,
+    take_profit_paisa: int | None,
+    top: int,
+    min_hits: int | None,
+) -> int:
+    """Brute-force sweep over lake bars → print the ranked top-combo table.
+
+    Loads the bars for one ``(symbol, interval)`` window from the Parquet lake via
+    the SAME ``Catalog`` / ``ReplayFeed`` path the engine uses, runs the assembled
+    funnel (sweep → Stage-1B prune → hard gates → composite rank), and prints the
+    self-describing leaderboard (``brutex.engine.sweep_report``). Signal-only —
+    nothing is persisted (DEC-SWEEP-CLI-001). ``--exchange`` / ``--segment`` /
+    ``--interval`` are the LAKE partition labels and must match what was ingested
+    (segment ``INDEX`` for the spot indexes — the lake partition label, NOT the Dhan
+    API's ``IDX_I`` request segment).
+    """
+    from brutex.data.catalog import Catalog
+    from brutex.engine.sweep_report import sweep_report
+    from brutex.feed.replay import ReplayFeed
+    from brutex.feed.resampler import INTERVAL_SECONDS
+    from brutex.ranking import MIN_TRADES
+    from brutex.strategies.types import Side
+
+    resolved_lake = _resolve_lake_root(lake_root)
+    catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
+    tf_minutes = INTERVAL_SECONDS[interval] // 60
+    side = Side.BUY if direction.upper() == "BUY" else Side.SELL
+    condition_bits = (
+        [int(tok) for tok in conditions.split(",") if tok.strip()]
+        if conditions
+        else list(range(52))
+    )
+    with Catalog.open(catalog) as cat:
+        feed = ReplayFeed(
+            catalog=cat,
+            lake_root=resolved_lake,
+            exchange=exchange,
+            segment=segment,
+            symbols=[symbol],
+            interval=interval,
+            start=_parse_dt(start),
+            end=_parse_dt(end),
+        )
+        bars = [event.bar for event in feed]
+    if not bars:
+        print(
+            f"[brutex] no bars for {symbol} {interval} {start}→{end} "
+            f"under {exchange}/{segment} (lake={resolved_lake})",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    print(
+        sweep_report(
+            bars,
+            instrument=symbol,
+            tf_label=interval,
+            tf_minutes=tf_minutes,
+            direction=side,
+            condition_bits=condition_bits,
+            k=k,
+            stop_loss_paisa=stop_loss_paisa,
+            take_profit_paisa=take_profit_paisa,
+            top_n=top,
+            min_hits=MIN_TRADES if min_hits is None else min_hits,
+        )
+    )
+    return EXIT_OK
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Main dispatcher
 # ────────────────────────────────────────────────────────────────────────
@@ -1123,6 +1275,24 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "wipe":
         return cmd_wipe(execute=args.execute, assume_yes=args.yes)
+    if args.command == "sweep":
+        return cmd_sweep(
+            lake_root=args.lake_root,
+            catalog_path=args.catalog_path,
+            exchange=args.exchange,
+            segment=args.segment,
+            symbol=args.symbol,
+            interval=args.interval,
+            start=args.start,
+            end=args.end,
+            direction=args.direction,
+            k=args.k,
+            conditions=args.conditions,
+            stop_loss_paisa=args.stop_loss_paisa,
+            take_profit_paisa=args.take_profit_paisa,
+            top=args.top,
+            min_hits=args.min_hits,
+        )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits
 

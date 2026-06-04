@@ -117,7 +117,7 @@ bars into a *ranked combo list*.
 | Stage-1B coarse pre-filter wiring (via the built `count_supermasks`) | ✅ WIRED (DEC-STAGE1B-WIRE-001 — `sweep_masks(min_hits=…)`, default-on in `rank_sweep_over_bits`) |
 | `ResultsStore` persistence wired to the leaderboard | 🔴 **NOT WIRED** |
 | Statistical robustness — lockbox Sharpe (CPCV / DSR train-test) | 🔴 **Stage-3, deferred** |
-| `brutex sweep` CLI command (lake bars → ranked table) | 🔴 **does not exist** |
+| `brutex sweep` CLI command (lake bars → ranked table) | ✅ SHIPPED (DEC-SWEEP-CLI-001 — print-only; persistence deferred) |
 
 **The seam is closed (was the single missing piece):** `mask_to_entry_signals`
 converts a mask → a per-bar `entry_signals: bool[]` (DEC-SWEEP-DRIVER-001), so
@@ -131,12 +131,16 @@ top-combo today (proven on synthetic sessions; the gate discipline yields an emp
 board when no combo clears 30 trades / PF≥1.2 / DD≤30%, which is correct, not an
 error).
 
-**The next build:** the `brutex sweep` CLI — load real lake bars (`get_bars`) for an
-`(instrument, TF, range)`, pick the condition subset + K, call `rank_sweep_over_bits`,
-persist the top-K to `ResultsStore`, and render the table. Run on SENSEX 1m = **the
-first genuine ranked top-combo table on real data.** Statistical robustness
-(Stage-1B coarse pre-filter, then the lockbox DSR/CPCV split) layers on afterward
-without changing the `rank_sweep_over_bits` contract.
+**The CLI is shipped (DEC-SWEEP-CLI-001):** `brutex sweep NIFTY --start … --end …`
+loads real lake bars via the same `Catalog` / `ReplayFeed` path the engine uses,
+runs `rank_sweep_over_bits`, and prints the self-describing ranked condition table
+(`brutex.engine.sweep_report`) — proven end-to-end against a temp Parquet lake (the
+integration test caught a real read/write-label bug: the lake partition segment is
+`INDEX`, not the Dhan API's `IDX_I`). It is **print-only**: persisting the
+leaderboard is deferred because `ResultRow` requires entry/exit PRICES the
+signal-only spot sweep does not produce (a schema decision, not a guess). **The next
+builds:** the persistence schema, then the Stage-3 lockbox DSR/CPCV split — both
+layer on without changing the `rank_sweep_over_bits` contract.
 
 ---
 
@@ -145,10 +149,11 @@ without changing the `rank_sweep_over_bits` contract.
 > **The market-reading brain — the 52 conditions + pivots + Fibonacci — is now ONE
 > compiled Rust core, proven bit-identical to the chart and to a frozen answer-key,
 > CI-locked so it can never drift.** The brute-force *sweep* that ranks the
-> top-performing combo is **assembled** — `rank_sweep_over_bits` sweeps a chosen
-> K-of-conditions space and returns the ranked leaderboard today; the remaining
-> build is the `brutex sweep` CLI that runs it over real lake bars + persists the
-> table. EMA / day-extremes stay in Python on purpose (cheap,
+> top-performing combo **runs today**: `brutex sweep NIFTY --start … --end …` loads
+> real lake bars and prints the ranked condition table (DEC-SWEEP-CLI-001, proven
+> end-to-end on a temp lake). It is print-only — persisting the leaderboard + the
+> Stage-3 DSR/CPCV lockbox are the remaining builds. EMA / day-extremes stay in
+> Python on purpose (cheap,
 > stateful — Rust FFI per bar would be slower, not faster). TickVault adoption is
 > not started. We state what is green, what is partial, and what is out of scope —
 > never an illusion.
