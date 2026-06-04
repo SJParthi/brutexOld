@@ -326,6 +326,7 @@ let selInst = null;            // selected instrument's display symbol (trading_
 let selPullSymbol = null;      // selected instrument's vendor symbol (Dhan SECURITY_ID)
 let selExp = null;             // selected expiry ISO date
 let selMulti = new Map();      // multi-select: symbol → instrument, for "⤓ Pull N selected"
+let listAnimated = false;      // entrance animation plays ONCE per fresh load, never on re-render
 
 /* Escape broker-sourced free text (instrument name/symbol/contract_symbol)
    before it is interpolated into innerHTML — these are instrument-master
@@ -461,6 +462,7 @@ async function loadInstruments() {
     const body = await r.json();
     UNIV = body.instruments || [];
   } catch (e) { UNIV = []; }
+  listAnimated = false;   // a fresh instrument set animates in ONCE
   renderInstruments();
 }
 
@@ -486,7 +488,14 @@ function renderInstruments() {
   list.forEach((i, ix) => {
     const d = document.createElement("div");
     d.className = "inst" + (selInst === i.symbol ? " sel" : "");
-    d.style.animationDelay = (ix * 0.03) + "s";
+    d.dataset.symbol = i.symbol;
+    /* O(1) UI: animate the entrance ONCE per fresh load, never on re-render.
+       Re-rendering 243 rows on every click/filter restarted a 7-second fadeInUp
+       cascade (delay = ix*0.03s) whose un-started rows sit at opacity:0 — that
+       ate clicks ("click multiple times") and looked like "loading again and
+       again". Cap the stagger so even a full load finishes in < 0.4s. */
+    if (listAnimated) { d.style.animation = "none"; }
+    else { d.style.animationDelay = Math.min(ix, 12) * 0.03 + "s"; }
     const checked = selMulti.has(i.symbol) ? " checked" : "";
     d.innerHTML = `<input type="checkbox" class="msel"${checked} aria-label="multi-select ${esc(i.symbol)}">`
       + `<span class="chip ${esc(i.kind)}">${esc(i.kind)}</span>`
@@ -497,11 +506,19 @@ function renderInstruments() {
     d.onclick = () => selectInstrument(i);
     el.appendChild(d);
   });
+  listAnimated = true;   // subsequent re-renders (filter/select) skip the cascade
 }
 
 async function selectInstrument(i) {
   selInst = i.symbol; selPullSymbol = i.pull_symbol; selExp = null;
-  renderInstruments();
+  /* O(1) selection: swap the .sel class on just the affected rows — NOT a 243-row
+     rebuild (which restarted the entrance animation and ate the next click). The
+     list DOM is untouched, so clicks stay instant. */
+  const ilist = document.getElementById("instruments");
+  ilist.querySelectorAll(".inst.sel").forEach(n => n.classList.remove("sel"));
+  ilist.querySelectorAll(".inst").forEach(n => {
+    if (n.dataset.symbol === i.symbol) n.classList.add("sel");
+  });
   document.getElementById("pulllead").innerHTML =
     `Ready to pull <b>${esc(i.symbol)}</b> spot / options — or click a future / option contract below`;
   document.getElementById("pullbtn").disabled = false;
@@ -746,12 +763,13 @@ document.getElementById("selallbtn").onclick = () => {
   UNIV.filter(i => i.symbol.toUpperCase().includes(q) || (i.name || "").toUpperCase().includes(q))
     .forEach(i => selMulti.set(i.symbol, i));
   updateMultiBtn();
-  renderInstruments();
+  /* tick the visible checkboxes in place — no 243-row rebuild (O(visible), no animation). */
+  document.querySelectorAll("#instruments .inst .msel").forEach(cb => { cb.checked = true; });
 };
 document.getElementById("clrselbtn").onclick = () => {
   selMulti.clear();
   updateMultiBtn();
-  renderInstruments();
+  document.querySelectorAll("#instruments .inst .msel").forEach(cb => { cb.checked = false; });
 };
 
 /* ── "⊕ tick its constituents" (DEC-UNIVERSE-NSE-CONSTITUENTS-001) ──
