@@ -1,7 +1,8 @@
 """Unit tests for the composite ranking + hard rejection gates (DEC-RANKING-001).
 
-Every gate branch, every z-score edge (empty / zero-variance / clamp), and the
-full rank_combos path are exercised for the strict 100% line+branch gate.
+Every gate branch, every z-score edge (empty / zero-variance / clamp), the full
+rank_combos path, and the risk-efficiency term (DEC-RANKING-RISK-EFFICIENCY-001)
+are exercised for the strict 100% line+branch gate.
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from brutex.metrics.compute import ResultMetrics
-from brutex.ranking import passes_gates, rank_combos
+from brutex.ranking import RankedCombo, passes_gates, rank_combos
 
 
 def _m(**overrides: Any) -> ResultMetrics:
@@ -151,3 +152,34 @@ class TestRankCombos:
         ]
         ranked = rank_combos(cand)
         assert len(ranked) == 2
+
+
+# ────── risk-efficiency term (DEC-RANKING-RISK-EFFICIENCY-001) ──────
+
+
+class TestRiskEfficiency:
+    """The "tight SL + massive profit" ranking term: avg MFE / avg MAE."""
+
+    def _re(self, **overrides: Any) -> float:
+        # Exercise _risk_efficiency through the public RankedCombo property.
+        return RankedCombo(mask=0, metrics=_m(**overrides), composite_score=0.0).risk_efficiency
+
+    def test_ratio_is_mfe_over_mae(self) -> None:
+        # avg MFE 900 / avg MAE 300 = 3.0 (ran 3x as far for us as against us).
+        assert self._re(avg_mfe_paisa=900, avg_mae_paisa=300) == 3.0
+
+    def test_zero_mae_floors_to_one_paisa_finite(self) -> None:
+        # A never-adverse combo (avg MAE 0) → MFE / 1 paisa: large but FINITE,
+        # so the z-score never sees inf and the leaderboard stays well-defined.
+        assert self._re(avg_mfe_paisa=500, avg_mae_paisa=0) == 500.0
+
+    def test_drives_order_all_else_equal(self) -> None:
+        # Identical combos except excursion: the tighter-stop / bigger-run one
+        # wins purely on the risk-efficiency term (every other term ties to 0).
+        cand = [
+            (1, _m(avg_mfe_paisa=1_000, avg_mae_paisa=100)),  # ratio 10
+            (2, _m(avg_mfe_paisa=100, avg_mae_paisa=100)),  # ratio 1
+        ]
+        ranked = rank_combos(cand)
+        assert [rc.mask for rc in ranked] == [1, 2]
+        assert ranked[0].composite_score > ranked[1].composite_score

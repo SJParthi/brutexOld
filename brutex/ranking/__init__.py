@@ -11,17 +11,24 @@ Hard rejection gates (applied BEFORE composite scoring):
 Composite ranking score (after gates pass):
     0.25 × Sharpe + 0.20 × Sortino + 0.15 × Calmar
   + 0.15 × (Profit_Factor - 1.0) + 0.10 × Recovery_Factor
-  + 0.10 × (Win_Rate × Win_Loss_Ratio) + 0.05 × Lockbox_Sharpe
+  + 0.10 × (Win_Rate × Win_Loss_Ratio) + 0.15 × Risk_Efficiency
+  + 0.05 × Lockbox_Sharpe   [Stage-3, deferred]
 
-Each term z-score normalized per (instrument, TF) leaderboard, clamped [-3, +3].
+where Risk_Efficiency = avg_MFE / avg_MAE — the "tight stop, big run" signal
+(DEC-RANKING-RISK-EFFICIENCY-001): a high value means each trade tended to travel
+far in our favour (large Maximum Favorable Excursion) for little adverse heat
+(small Maximum Adverse Excursion), i.e. an extreme-tight effective stop *with* a
+large profit — the operator's stated #1 objective. Each term is z-score
+normalized per (instrument, TF) leaderboard, clamped [-3, +3].
 
 ## Honest envelope (Golden Rule #10) — the lockbox is Stage-3, deferred here
 
 The 6th gate (overfit) and the 7th composite term both need a **lockbox Sharpe**
 — a train/test (CPCV / walk-forward) split — which does **not exist yet** (Stage 3).
-So this module implements the **5 single-result gates** + the **6 available
-composite terms**; the lockbox gate is skipped and the lockbox term contributes
-nothing (its 0.05 weight is simply absent) until the Stage-3 split lands. The
+So this module implements the **5 single-result gates** + the **7 available
+composite terms** (incl. the risk-efficiency term); the lockbox gate is skipped
+and the lockbox term contributes nothing (its 0.05 weight is simply absent) until
+the Stage-3 split lands. The
 score's absolute scale is irrelevant — it is used only for the *relative* ordering
 of a leaderboard (z-scores are relative), so dropping the lockbox term changes
 ranking power, never correctness. This is recorded in ``docs/MIGRATION.md``
@@ -43,13 +50,19 @@ _MIN_WIN_RATE = 0.25
 _MIN_WIN_LOSS_RATIO = 2.0
 _MAX_CONSECUTIVE_LOSSES = 10
 
-# ── Composite weights (the 6 available terms; the 0.05 lockbox term is Stage-3) ──
+# ── Composite weights (the 7 available terms; the 0.05 lockbox term is Stage-3) ──
 _W_SHARPE = 0.25
 _W_SORTINO = 0.20
 _W_CALMAR = 0.15
 _W_PROFIT_FACTOR = 0.15
 _W_RECOVERY = 0.10
 _W_WIN_WLR = 0.10
+#: Risk-efficiency (avg MFE / avg MAE) — the "extreme tight SL + massive profit"
+#: priority (DEC-RANKING-RISK-EFFICIENCY-001). Co-equal with Calmar/PF (just under
+#: Sharpe's 0.25): a strong first-class voice for the operator's #1 objective, but
+#: BLENDED, not dominant — a single lucky huge-MFE trade cannot dictate the
+#: leaderboard (the anti-overfit / no-illusion choice, Golden Rule #10).
+_W_RISK_EFFICIENCY = 0.15
 
 #: Z-score clamp (spec: per-leaderboard z-score clamped to [-3, +3]).
 _Z_CLAMP = 3.0
@@ -73,6 +86,16 @@ class RankedCombo:
     mask: int
     metrics: ResultMetrics
     composite_score: float
+
+    @property
+    def risk_efficiency(self) -> float:
+        """Raw favorable-to-adverse excursion ratio (avg MFE / avg MAE).
+
+        Exposed for leaderboard transparency: the un-z-scored "tight stop, big
+        run" score behind this combo's risk-efficiency contribution to
+        :attr:`composite_score`. See :func:`_risk_efficiency`.
+        """
+        return _risk_efficiency(self.metrics)
 
 
 def passes_gates(m: ResultMetrics) -> bool:
@@ -99,6 +122,21 @@ def passes_gates(m: ResultMetrics) -> bool:
 def _f(value: float | None) -> float:
     """A ``None`` composite term contributes 0 (survivors have real metrics)."""
     return value if value is not None else 0.0
+
+
+def _risk_efficiency(m: ResultMetrics) -> float:
+    """Favorable-to-adverse excursion ratio — the "tight SL + massive profit" signal.
+
+    ``avg_mfe_paisa / avg_mae_paisa``: how far the average trade ran in our favour
+    (Maximum Favorable Excursion) per unit of adverse heat it endured (Maximum
+    Adverse Excursion). A high value is exactly the operator's objective — the move
+    paid big (large MFE) while the effective stop never needed to be wide (small
+    MAE). ``avg_mae_paisa`` is floored at 1 paisa so a never-adverse combo yields a
+    large but FINITE ratio (the z-score needs finite inputs), never a division by
+    zero. Both inputs are non-negative int64 paisa already aggregated on
+    :class:`~brutex.metrics.compute.ResultMetrics`.
+    """
+    return m.avg_mfe_paisa / max(m.avg_mae_paisa, 1)
 
 
 def _zscores(values: Sequence[float]) -> list[float]:
@@ -145,6 +183,7 @@ def rank_combos(candidates: Sequence[tuple[int, ResultMetrics]]) -> list[RankedC
     z_pf = _zscores([_f(m.profit_factor) - 1.0 for _, m in survivors])
     z_recovery = _zscores([_f(m.recovery_factor) for _, m in survivors])
     z_win_wlr = _zscores([m.win_rate * _f(m.win_loss_ratio) for _, m in survivors])
+    z_risk_eff = _zscores([_risk_efficiency(m) for _, m in survivors])
 
     ranked = [
         RankedCombo(
@@ -157,6 +196,7 @@ def rank_combos(candidates: Sequence[tuple[int, ResultMetrics]]) -> list[RankedC
                 + _W_PROFIT_FACTOR * z_pf[i]
                 + _W_RECOVERY * z_recovery[i]
                 + _W_WIN_WLR * z_win_wlr[i]
+                + _W_RISK_EFFICIENCY * z_risk_eff[i]
             ),
         )
         for i, (mask, m) in enumerate(survivors)
