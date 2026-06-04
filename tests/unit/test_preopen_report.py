@@ -220,6 +220,39 @@ def test_build_skips_zero_prev_close(tmp_path: Path) -> None:
     assert rows == []  # prev close 0 → divide-by-zero guard skips the row
 
 
+def test_build_includes_current_day_without_its_own_1day_bar(tmp_path: Path) -> None:
+    # The CURRENT day has a 09:15 IEP (1minute) but NO 1day bar of its OWN yet
+    # (Dhan finalises the daily bar after close). It must STILL appear, anchored to
+    # the prior trading day's official 1day close (DEC-PREOPEN-CURRENTDAY-001) — the
+    # old same-date lookup dropped it even though yesterday's close existed.
+    _write(
+        tmp_path,
+        "CUR",
+        "1day",
+        [_bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="100", close="120")],
+    )
+    _write(
+        tmp_path,
+        "CUR",
+        "1minute",
+        # 2024-03-04 has an IEP but NO 1day bar of its own (the "today" case).
+        [_bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="125", close="126")],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "CUR")],
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+    )
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.day == date(2024, 3, 4)
+    assert r.prev_close == Decimal("120")  # the PRIOR 1day close (as-of), not 03-04's own
+    assert r.iep == Decimal("125")
+    assert r.chng == Decimal("5")
+
+
 # ── render_xlsx + helpers ──────────────────────────────────────────────────
 
 

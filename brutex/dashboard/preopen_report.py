@@ -24,11 +24,12 @@ lake reads are one columnar pass each (O(N) once), mirroring the ``/db`` viewer.
 
 # pyright: reportPrivateUsage=false
 # ^ This module deliberately reuses db_view's shared lake helpers (_to_decimal,
-#   _bar_ist_date, _prev_trading_close, _validate_candle_coords, the interval
-#   constants) — CLAUDE.md §11 COMMON (one source of truth, no copy-paste).
+#   _bar_ist_date, _validate_candle_coords, the interval constants) — CLAUDE.md
+#   §11 COMMON (one source of truth, no copy-paste).
 
 from __future__ import annotations
 
+import bisect
 import io
 import zipfile
 from collections.abc import Sequence
@@ -42,7 +43,6 @@ from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
     _INTRADAY_BASE_INTERVAL,
     _bar_ist_date,
-    _prev_trading_close,
     _to_decimal,
     _validate_candle_coords,
     list_candle_datasets,
@@ -177,6 +177,30 @@ def resolve_report_datasets(
     return sorted(resolved, key=lambda k: k[2])
 
 
+def _prev_close_asof(
+    daily: dict[date, Decimal], daily_dates: list[date], day: date
+) -> Decimal | None:
+    """The NSE "previous close" for *day*: the latest 1-day close STRICTLY before it.
+
+    Unlike a same-date lookup, this anchors a day that has a 09:15 IEP but **no
+    1-day bar of its own yet** — the CURRENT day during/after the session, whose
+    daily bar Dhan only finalises after close (DEC-PREOPEN-CURRENTDAY-001) — to the
+    prior trading day's official close. For a day that DOES have its own 1-day bar
+    the result is identical to that day's predecessor close, so every historical
+    row is unchanged. ``None`` when no earlier 1-day bar exists (the first day).
+    O(log N) via :func:`bisect.bisect_left` over the pre-sorted *daily_dates*.
+
+    On an INTERNAL 1-day gap (a missing prior daily bar) this returns the most
+    recent AVAILABLE earlier close — a best-effort anchor rather than dropping the
+    row; the 1-day series is kept complete by DEC-DHAN-429-RETRY-001 (#466) +
+    the windows table (#465).
+    """
+    idx = bisect.bisect_left(daily_dates, day)
+    if idx == 0:
+        return None
+    return daily[daily_dates[idx - 1]]
+
+
 def build_preopen_rows(
     conn: Any,
     lake_root: Path,
@@ -188,23 +212,27 @@ def build_preopen_rows(
     """Build the pre-open rows for *datasets* over ``[start, end]`` (inclusive).
 
     Each dataset is an ``(exchange, segment, symbol)`` spot triple. For each
-    symbol the prior trading day's 1-day close anchors every day's 09:15 IEP; a
-    day is emitted only when BOTH its IEP and a previous close exist and the day
-    falls in range. Rows are sorted by ``(day, symbol)`` for a single, scannable
-    sheet. O(1) per emitted row (two dict lookups).
+    symbol every day's 09:15 IEP is anchored to the **latest 1-day close strictly
+    before that day** (:func:`_prev_close_asof`), so the CURRENT day — which has an
+    IEP but whose own daily bar is not finalised yet — is emitted using the prior
+    trading day's official close (DEC-PREOPEN-CURRENTDAY-001), and every historical
+    row is unchanged. A day is emitted only when its IEP exists, a (non-zero)
+    previous close exists, and the day falls in range. Rows are sorted by
+    ``(day, symbol)`` for a single, scannable sheet. O(log N) per emitted row.
     """
     rows: list[PreOpenRow] = []
     for exchange, segment, symbol in datasets:
-        prev_close = _prev_trading_close(
-            _daily_close_by_date(conn, lake_root, exchange=exchange, segment=segment, symbol=symbol)
+        daily = _daily_close_by_date(
+            conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
         )
+        daily_dates = sorted(daily)
         opens = _session_open_by_date(
             conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
         )
         for day in sorted(opens):
             if day < start or day > end:
                 continue
-            anchor = prev_close.get(day)
+            anchor = _prev_close_asof(daily, daily_dates, day)
             if anchor is None or anchor == 0:
                 continue
             iep = opens[day]
