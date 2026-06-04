@@ -256,6 +256,15 @@ jobs:
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
           fi
+          # DEC-CONSTITUENTS-CACHE-001 (MIGRATION.md #457): the new
+          # constituent disk-cache module ships at 100% line+branch from
+          # the start (its live-network surface lives in nse_constituents,
+          # already # pragma: no cover; this module is fully fake-injected).
+          if compgen -G "tests/unit/test_constituents_cache.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.constituents_cache --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_constituents_cache.py
+          else
+            echo "(brutex.dashboard.constituents_cache test files not present yet — gate inactive)"
+          fi
           # DEC-COV-001 (2026-05-24, MIGRATION.md entry #210): ratchet
           # `brutex.doctor` into the strict per-module 100% gate. The
           # module was designed in DEC-DOCTOR-001 (PR #100) with 18 unit
