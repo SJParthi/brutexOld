@@ -50,6 +50,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from time import sleep as _time_sleep
 
 import structlog
 
@@ -80,6 +81,36 @@ _DAILY: str = "1day"
 #: The data-source namespace stamped on every coverage :class:`WindowKey`.
 _MARKET: str = "dhan"
 
+#: In-run transient-window auto-retry budget (DEC-DHAN-WINDOW-RETRY-001). After the
+#: first fan-out pass, windows that returned a RETRYABLE error (a transient network
+#: drop / timeout / 5xx that outlived the client's in-call fast-retry) are re-run as
+#: their own pass, up to this many extra passes. The operator in a flaky-network
+#: region (seconds-long drops mid-pull) gets a self-heal WITHIN the run instead of
+#: waiting for the next pull. Windows still failing after the budget stay UNMARKED
+#: (deferred to the next pull — the no-skip guarantee: a window is recorded complete
+#: ONLY on a clean fetch+write, never on retry exhaustion).
+_DEFAULT_MAX_RETRY_PASSES: int = 2
+
+#: Base backoff (seconds) before a retry pass — SECONDS-scale (vs the client's
+#: 0.2 s in-call hygiene) so a multi-second network outage has time to recover
+#: between passes. Pass *k* waits ``base × 2**k`` clamped to :data:`_MAX_RETRY_BACKOFF_S`.
+_DEFAULT_RETRY_BACKOFF_S: float = 1.0
+
+#: Hard ceiling (seconds) on a single retry-pass backoff (defends an operator-set
+#: large pass budget from driving the backoff toward an unbounded sleep).
+_MAX_RETRY_BACKOFF_S: float = 8.0
+
+
+def _default_retry_backoff(pass_index: int) -> None:
+    """Sleep the bounded exponential backoff before retry pass ``pass_index`` (0-based).
+
+    Injected as the default ``retry_backoff`` hook so production waits a real,
+    network-recovery-scale gap between passes while tests pass a no-op recorder
+    (no real sleep) — the same inject-the-sleep pattern as
+    :class:`~brutex.adapters.dhan.client.DhanClient`.
+    """
+    _time_sleep(min(_DEFAULT_RETRY_BACKOFF_S * (2.0**pass_index), _MAX_RETRY_BACKOFF_S))
+
 
 @dataclass(frozen=True, slots=True)
 class IngestReport:
@@ -96,6 +127,23 @@ class IngestReport:
     the incoming bar.  The stored bar is kept (keep-first — never overwritten,
     Golden Rule #7); this count is the total number of such discrepancies across
     all windows in the series.  Zero on a clean pull or a coverage-skipped pull.
+    """
+
+    retried_windows: int = 0
+    """Distinct windows re-attempted by the in-run auto-retry (DEC-DHAN-WINDOW-RETRY-001).
+
+    A window that returned a retryable error on a pass and was re-run on a later
+    pass is counted once here, whether or not the retry ultimately succeeded.
+    Zero when no window failed transiently (or ``max_retry_passes=0``).
+    """
+
+    still_failed_windows: int = 0
+    """Windows still failing transiently AFTER the retry budget was exhausted.
+
+    These are deferred to the next pull (NEVER marked complete — the no-skip
+    guarantee). Equals :attr:`transient_failures` (the same final-pass count,
+    surfaced under an explicit name for the dashboard's "incomplete windows"
+    view). Zero on a fully clean / fully recovered pull.
     """
 
 
@@ -117,6 +165,13 @@ class _WindowOutcome:
     transient: int = 0
     skipped: int = 0
     conflicts: int = 0
+    #: The window's ``(start, end)`` — set ONLY on a transient outcome so the
+    #: in-run auto-retry (DEC-DHAN-WINDOW-RETRY-001) knows which window to re-run.
+    #: ``None`` on a clean / skipped outcome (nothing to retry).
+    window: tuple[date, date] | None = None
+    #: The retryable error's class name (e.g. ``"DhanTransportError"``) for the
+    #: per-window WARNING + the deferred-window audit. ``None`` unless transient.
+    error_type: str | None = None
 
 
 def _windows(interval: str, start: date, end: date) -> list[tuple[date, date]]:
@@ -142,6 +197,8 @@ def ingest_spot(
     on_rate_limit: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
     run_parallel: RunParallel | None = None,
+    max_retry_passes: int = _DEFAULT_MAX_RETRY_PASSES,
+    retry_backoff: Callable[[int], None] | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink*.
 
@@ -200,12 +257,26 @@ def ingest_spot(
         the rate budget (:func:`~brutex.orchestrator.parallel.workers_to_saturate`).
         Tests inject a synchronous fake to drive the fan-out with zero threads
         (mirrors :func:`~brutex.adapters.dhan.run_ingest.run_dhan_spot_ingest`).
+    max_retry_passes
+        In-run auto-retry budget (DEC-DHAN-WINDOW-RETRY-001). After the first
+        fan-out pass, windows that returned a RETRYABLE error are re-run as their
+        own pass, up to this many EXTRA passes (default
+        :data:`_DEFAULT_MAX_RETRY_PASSES`). ``0`` reproduces the old single-pass
+        behaviour. A window still failing after the budget stays UNMARKED
+        (deferred to the next pull — the no-skip guarantee).
+    retry_backoff
+        Injected ``(pass_index) -> None`` sleep hook called before each retry
+        pass (``None`` → :func:`_default_retry_backoff`, a bounded exponential
+        seconds-scale wait so a multi-second network drop recovers between
+        passes). Tests pass a no-op recorder so no real sleep occurs.
 
     Returns
     -------
     IngestReport
-        Window count, total bars appended, transient-failure count, and the
-        count of windows skipped as already-complete.
+        Window count, total bars appended, the (final-pass) transient-failure
+        count, the count of windows skipped as already-complete, plus
+        ``retried_windows`` (distinct windows re-attempted) and
+        ``still_failed_windows`` (windows deferred to the next pull).
 
     Raises
     ------
@@ -254,28 +325,71 @@ def ingest_spot(
                 series_fields=series_fields,
             )
 
-    bars_appended = 0
-    transient = 0
-    skipped = 0
-    conflicts = 0
-    # Drain the window fan-out on the caller thread, summing the per-window
-    # outcomes. A captured terminal DhanError is re-raised here so the outer
-    # quarantine behaves exactly as it did with the sequential spine; any other
-    # captured exception (a real bug) is re-raised too — never swallowed.
-    for outcome in runner(_fetch_window, windows):
-        if outcome.ok:
-            result = outcome.result
-            if result is None:  # pragma: no cover — ok=True always carries a result
+    backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
+
+    def _drain_pass(
+        pending: list[tuple[date, date]],
+    ) -> tuple[int, int, int, int, list[tuple[date, date]]]:
+        """Run ONE fan-out pass over *pending*; sum outcomes + collect failed windows.
+
+        Drains the window fan-out on the caller thread. A captured terminal
+        DhanError is re-raised here so the outer quarantine behaves exactly as it
+        did with the sequential spine; any other captured exception (a real bug)
+        is re-raised too — never swallowed. Returns
+        ``(bars_appended, transient, skipped, conflicts, transient_windows)``.
+        """
+        b = t = s = c = 0
+        failed: list[tuple[date, date]] = []
+        for outcome in runner(_fetch_window, pending):
+            if outcome.ok:
+                result = outcome.result
+                if result is None:  # pragma: no cover — ok=True always carries a result
+                    continue
+                b += result.bars_appended
+                t += result.transient
+                s += result.skipped
+                c += result.conflicts
+                if result.transient and result.window is not None:
+                    failed.append(result.window)
                 continue
-            bars_appended += result.bars_appended
-            transient += result.transient
-            skipped += result.skipped
-            conflicts += result.conflicts
-            continue
-        exc = outcome.exc
-        if exc is None:  # pragma: no cover — a failed outcome always carries exc
-            continue
-        raise exc
+            exc = outcome.exc
+            if exc is None:  # pragma: no cover — a failed outcome always carries exc
+                continue
+            raise exc
+        return b, t, s, c, failed
+
+    # First pass over ALL windows, then bounded in-run auto-retry of ONLY the
+    # windows that failed transiently (DEC-DHAN-WINDOW-RETRY-001) — so a multi-
+    # second network drop self-heals WITHIN the run instead of waiting for the
+    # next pull. Counts that accumulate across passes (bars/skips/conflicts) are
+    # summed; ``transient`` always holds the LATEST pass's still-failing count, so
+    # ``transient_failures == still_failed_windows`` = the windows deferred to the
+    # next pull (NEVER marked complete — the no-skip guarantee). Worklists are
+    # sorted before each pass so the report is deterministic regardless of
+    # worker-completion order (Rule #4).
+    bars_appended = skipped = conflicts = transient = 0
+    ever_retried: set[tuple[date, date]] = set()
+    pending = windows
+    pass_idx = 0
+    while True:
+        pass_bars, transient, pass_skipped, pass_conflicts, failed = _drain_pass(pending)
+        bars_appended += pass_bars
+        skipped += pass_skipped
+        conflicts += pass_conflicts
+        failed_sorted = sorted(set(failed))
+        if not failed_sorted or pass_idx >= max_retry_passes:
+            break
+        ever_retried.update(failed_sorted)
+        pass_idx += 1
+        _LOG.info(
+            "ingest.retry_pass",
+            pull_id=pull_id,
+            retry_pass=pass_idx,
+            windows=len(failed_sorted),
+            **series_fields,
+        )
+        backoff(pass_idx - 1)
+        pending = failed_sorted
     # Per-series summary (one (symbol, interval) pair) — DEBUG; the per-instrument
     # rollup at INFO is emitted by ``run_dhan_spot_ingest`` one layer up.
     _LOG.debug(
@@ -286,6 +400,8 @@ def ingest_spot(
         transient_failures=transient,
         skipped_windows=skipped,
         conflicts=conflicts,
+        retried_windows=len(ever_retried),
+        still_failed_windows=transient,
         **series_fields,
     )
     return IngestReport(
@@ -294,6 +410,8 @@ def ingest_spot(
         transient_failures=transient,
         skipped_windows=skipped,
         conflicts=conflicts,
+        retried_windows=len(ever_retried),
+        still_failed_windows=transient,
     )
 
 
@@ -374,9 +492,31 @@ def _ingest_one_window(
         if is_retryable(exc):
             # A rate-limit 429 feeds the controller so it steps the rate
             # down under sustained pressure (DEC-DHAN-ADAPTIVE-RPS-001).
-            if on_rate_limit is not None and is_rate_limit(exc):
+            rate_limited = is_rate_limit(exc)
+            if on_rate_limit is not None and rate_limited:
                 on_rate_limit()
-            return _WindowOutcome(transient=1)
+            # In-run auto-retry (DEC-DHAN-WINDOW-RETRY-001) targets a NETWORK drop
+            # (transport / timeout / 5xx that outlived the client's in-call
+            # fast-retry) — the operator's seconds-long connectivity blips — and
+            # DELIBERATELY EXCLUDES a 429 (``window=None`` ⇒ not re-run in-run),
+            # mirroring ``client._should_fast_retry``: the rate controller's
+            # step-down (above) + the token bucket own 429 backoff, so retrying a
+            # 429 here would fight the limiter. EITHER way the window is counted
+            # transient and NEVER marked complete (no-skip) — a 429 window is
+            # simply deferred to the next pull, by when the stepped-down rate lets
+            # it through. The per-window WARNING surfaces the exact window + error
+            # the bare ``transient_failures=N`` count hid.
+            retry_window = None if rate_limited else window
+            _LOG.warning(
+                "ingest.window.transient",
+                pull_id=pull_id,
+                window_start=window_start.isoformat(),
+                window_end=window_end.isoformat(),
+                error_type=type(exc).__name__,
+                in_run_retry=not rate_limited,
+                **series_fields,
+            )
+            return _WindowOutcome(transient=1, window=retry_window, error_type=type(exc).__name__)
         raise
     # Drop pre-open / post-close bars before they enter the lake — intraday
     # only (a daily bar has no intraday time). DEC-SESSION-FILTER-001.

@@ -110,6 +110,16 @@ class DhanIngestReport:
         return sum(r.skipped_windows for r in self.pairs.values())
 
     @property
+    def retried_windows(self) -> int:
+        """Total windows re-attempted by the in-run auto-retry (DEC-DHAN-WINDOW-RETRY-001)."""
+        return sum(r.retried_windows for r in self.pairs.values())
+
+    @property
+    def still_failed_windows(self) -> int:
+        """Total windows still failing after the retry budget — deferred to the next pull."""
+        return sum(r.still_failed_windows for r in self.pairs.values())
+
+    @property
     def failed_pairs(self) -> int:
         """Number of ``(symbol, interval)`` pairs quarantined on a terminal error."""
         return len(self.failures)
@@ -284,6 +294,7 @@ def run_dhan_spot_ingest(
     for instrument in sorted(instruments, key=lambda i: i.symbol_name):
         symbol = instrument.symbol_name
         completed = quarantined = inst_bars = inst_windows = 0
+        inst_retried = inst_still_failed = 0
         for interval in intervals:
             # Every dispatched pair lands in exactly one of failed_by_pair / pairs
             # (a DhanError quarantines it, otherwise ingest_spot returned a
@@ -296,6 +307,8 @@ def run_dhan_spot_ingest(
             completed += 1
             inst_bars += report.bars_appended
             inst_windows += report.windows
+            inst_retried += report.retried_windows
+            inst_still_failed += report.still_failed_windows
         _LOG.info(
             "ingest.underlying",
             pull_id=pull_id,
@@ -304,6 +317,8 @@ def run_dhan_spot_ingest(
             series_failed=quarantined,
             bars_appended=inst_bars,
             windows=inst_windows,
+            retried_windows=inst_retried,
+            still_failed_windows=inst_still_failed,
         )
     return DhanIngestReport(pairs=pairs, failures=tuple(failures))
 

@@ -203,6 +203,9 @@ def test_empty_universe_yields_empty_report() -> None:
     assert report.windows == 0
     assert report.bars_appended == 0
     assert report.transient_failures == 0
+    assert report.skipped_windows == 0
+    assert report.retried_windows == 0
+    assert report.still_failed_windows == 0
     assert report.failed_pairs == 0
 
 
