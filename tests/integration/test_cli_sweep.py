@@ -89,6 +89,7 @@ def test_sweep_loads_lake_and_prints_report(
         take_profit_paisa=None,
         top=10,
         min_hits=None,
+        sort_by="composite",
     )
     assert rc == 0
     out = capsys.readouterr().out
@@ -119,6 +120,8 @@ def test_sweep_argv_path_prints_report(tmp_path: Path, capsys: pytest.CaptureFix
             "1",
             "--conditions",
             "5,6",
+            "--sort-by",
+            "pnl",
             "--lake-root",
             str(lake_root),
             "--catalog",
@@ -126,7 +129,9 @@ def test_sweep_argv_path_prints_report(tmp_path: Path, capsys: pytest.CaptureFix
         ]
     )
     assert rc == 0
-    assert "BruteX sweep — NIFTY 1minute BUY" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "BruteX sweep — NIFTY 1minute BUY" in out
+    assert "sort=pnl" in out  # the --sort-by flag reaches the report
 
 
 def test_sweep_no_bars_is_user_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -148,6 +153,7 @@ def test_sweep_no_bars_is_user_error(tmp_path: Path, capsys: pytest.CaptureFixtu
         take_profit_paisa=None,
         top=20,
         min_hits=None,
+        sort_by="composite",
     )
     assert rc == 1
     assert "no bars for NIFTY" in capsys.readouterr().err
