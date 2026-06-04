@@ -206,17 +206,43 @@ jobs:
           HEAD_SHA=$(gh pr view "${PR_NUMBER}" --repo "${REPO}" \
             --json headRefOid --jq .headRefOid)
           echo "PR #${PR_NUMBER} current head: ${HEAD_SHA}"
-          # The ci-ok job produces a check run of the same name.
-          # It must exist AND be in conclusion=success on the current head.
-          conclusion=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" \
-            --jq '.check_runs[] | select(.name == "CI OK (aggregate gate)") | .conclusion' \
-            | head -1)
-          echo "ci-ok conclusion: ${conclusion:-<missing>}"
-          if [[ "${conclusion}" != "success" ]]; then
-            echo "::notice::ci-ok is not green (${conclusion:-missing}) on ${HEAD_SHA}; skipping merge"
+          # DEC-AUTOMERGE-ALLGREEN-001 (operator decree 2026-06-04: "without
+          # green it should NEVER be merged"). A PR head can carry MORE THAN ONE
+          # "CI OK (aggregate gate)" run — a push-event run AND a pull_request
+          # run. On a push the PR-only gates (bug-fix-regression, zplus, dec-id,
+          # hallucination, conv-commits) are SKIPPED, so that run reports
+          # CI OK=success even when the pull_request run is FAILURE. The OLD
+          # logic picked an arbitrary single conclusion and merged on the green
+          # push run — exactly how #366 merged with a RED bug-fix-regression gate.
+          #
+          # FIX (no green = no merge): read EVERY check run on the head, then
+          #   (1) refuse if ANY check is failing (failure / cancelled / timed_out
+          #       / action_required / stale) — excluding this workflow's OWN check;
+          #   (2) require "CI OK (aggregate gate)" to EXIST and EVERY instance of
+          #       it to be success (so a green push run can't mask a red PR run).
+          runs=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --paginate \
+            --jq '.check_runs[] | [(.conclusion // "pending"), .name] | @tsv')
+          printf 'check runs on %s:\n%s\n' "${HEAD_SHA}" "${runs}"
+          failing=$(printf '%s\n' "${runs}" | awk -F'\t' \
+            '$1 ~ /^(failure|cancelled|timed_out|action_required|stale)$/ && $2 != "Auto-merge on green CI" {print $2" = "$1}')
+          if [[ -n "${failing}" ]]; then
+            echo "::notice::refusing merge — these checks are NOT green on ${HEAD_SHA}:"
+            printf '%s\n' "${failing}"
             echo "green=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          ciok=$(printf '%s\n' "${runs}" | awk -F'\t' '$2 == "CI OK (aggregate gate)" {print $1}')
+          if [[ -z "${ciok}" ]]; then
+            echo "::notice::no CI OK (aggregate gate) check on ${HEAD_SHA} yet; skipping"
+            echo "green=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if printf '%s\n' "${ciok}" | grep -qvx success; then
+            echo "::notice::a CI OK run is not success on ${HEAD_SHA}; skipping merge"
+            echo "green=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "all checks green + CI OK success on ${HEAD_SHA}"
           echo "green=true" >> "$GITHUB_OUTPUT"
 
       - name: Verify PR is mergeable (no conflict / not behind base)
