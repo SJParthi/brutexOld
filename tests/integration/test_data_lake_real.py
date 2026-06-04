@@ -184,28 +184,51 @@ class TestRealParquetRoundTrip:
         assert r1.raw_hash == r2.raw_hash
         assert r1.path == r2.path
 
-    def test_same_timestamp_different_value_raises(self, tmp_path: Path) -> None:
-        """A SAME-timestamp bar with DIFFERENT OHLCV is a true conflict (raises).
+    def test_same_timestamp_different_value_keep_first(self, tmp_path: Path) -> None:
+        """A SAME-timestamp bar with DIFFERENT OHLCV keeps the STORED bar and logs the conflict.
 
-        DEC-LAKE-MERGE-WRITE-001: merge-on-write only rejects a genuine value
-        conflict at an already-stored timestamp, not a partial re-write.
+        DEC-LAKE-CONFLICT-KEEPFIRST-001: the second write does NOT raise.  The
+        stored (first-written) bar is preserved bit-for-bit; the incoming bar's
+        values are discarded.  The returned :class:`WriteResult` carries exactly
+        one :class:`BarConflict` whose ``stored`` / ``vendor`` fields match the
+        two bars.  The Parquet file on disk is UNCHANGED (no rewrite, so the
+        hash is identical to the first write's hash).
         """
+        from brutex.data.parquet_writer import BarConflict
+
         writer = ParquetWriter(lake_root=tmp_path)
-        writer.write(
+        first = writer.write(
             exchange="NSE",
             segment="FNO",
             symbol="NSE-NIFTY",
             interval="1minute",
             bars=[_bar(25, open_price=22000.0)],
         )
-        with pytest.raises(WriterError, match="CONFLICTING bar"):
-            writer.write(
-                exchange="NSE",
-                segment="FNO",
-                symbol="NSE-NIFTY",
-                interval="1minute",
-                bars=[_bar(25, open_price=99999.0)],  # same ts, different price
-            )
+        # Second write — same timestamp, different open price.
+        second = writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(25, open_price=99999.0)],
+        )
+        # No raise — the pull finishes.
+        assert second.path == first.path
+        # The stored file is unchanged: row count stays 1, hash is identical.
+        assert second.row_count == 1
+        assert second.raw_hash == first.raw_hash
+        # Exactly one conflict reported.
+        assert len(second.conflicts) == 1
+        (conflict,) = second.conflicts
+        assert isinstance(conflict, BarConflict)
+        # stored = the FIRST bar (22000.0 open, rounded to Decimal).
+        assert conflict.stored.open == _bar(25, open_price=22000.0).open
+        # vendor = the rejected second bar (99999.0 open).
+        assert conflict.vendor.open == _bar(25, open_price=99999.0).open
+        # The Parquet file on disk holds the ORIGINAL value, not the vendor re-statement.
+        df = pl.read_parquet(second.path)
+        assert df.shape == (1, 7)
+        assert df.row(0, named=True)["open"] == pytest.approx(22000.0)
 
     def test_merge_disjoint_days_accumulates_the_month(self, tmp_path: Path) -> None:
         """Two writes of DIFFERENT days in one month union into the partition.

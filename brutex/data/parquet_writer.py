@@ -26,10 +26,12 @@ partition is written by several chunks, each carrying only part of the
 month. Rather than reject a partial re-write as a conflict, :meth:`write`
 UNIONS the incoming bars into the existing partition keyed by timestamp
 (O(1) dedup per bar): a new timestamp is appended, an identical one is a
-no-op, and only a SAME timestamp with DIFFERENT OHLCV raises
-:class:`WriterError` (a genuine vendor-data conflict, never silently
-overwritten). Incremental month-filling and full re-pulls are therefore
-idempotent — the completed partition is byte-stable across runs.
+no-op, and a SAME timestamp with DIFFERENT OHLCV is recorded as a
+:class:`BarConflict` (keep-first — the STORED bar wins, never overwritten)
+and returned in :attr:`WriteResult.conflicts` so the caller can log and
+continue (DEC-LAKE-CONFLICT-KEEPFIRST-001). Incremental month-filling and
+full re-pulls are therefore idempotent — the completed partition is
+byte-stable across runs.
 
 ## Per-partition write serialisation (DEC-DHAN-PARALLEL-WINDOWS-001)
 
@@ -139,6 +141,34 @@ def _tick_round(bar: CandleBar) -> CandleBar:
 
 
 @dataclass(frozen=True, slots=True)
+class BarConflict:
+    """A single vendor re-statement detected during merge-on-write.
+
+    When Dhan returns a DIFFERENT OHLCV/OI for a timestamp ALREADY stored
+    in the lake the writer records the discrepancy here rather than raising
+    (DEC-LAKE-CONFLICT-KEEPFIRST-001). The STORED bar always wins
+    (keep-first — never overwritten, preserving reproducibility per
+    CLAUDE.md Golden Rule #7). The caller logs the conflict and continues
+    the pull, then reports exactly what the vendor changed.
+
+    Parameters
+    ----------
+    timestamp
+        The UTC timestamp of the conflicting bar.
+    stored
+        The bar currently in the lake (the authoritative value —
+        keep-first means this is never replaced).
+    vendor
+        The bar the vendor just returned (the re-statement that
+        was silently discarded after logging).
+    """
+
+    timestamp: datetime
+    stored: CandleBar
+    vendor: CandleBar
+
+
+@dataclass(frozen=True, slots=True)
 class WriteResult:
     """Outcome of a successful :meth:`ParquetWriter.write` call.
 
@@ -154,6 +184,11 @@ class WriteResult:
         Timestamp bounds of the bars written.
     bytes_written
         Size of the final Parquet file in bytes.
+    conflicts
+        Vendor re-statements detected during this write: timestamps whose
+        stored bar differed from the incoming bar (DEC-LAKE-CONFLICT-KEEPFIRST-001).
+        The stored bar was kept (keep-first, never overwritten). Empty tuple
+        for a first write or a clean re-pull with no value changes.
     """
 
     path: Path
@@ -162,6 +197,7 @@ class WriteResult:
     first_ts: datetime
     last_ts: datetime
     bytes_written: int
+    conflicts: tuple[BarConflict, ...] = ()
 
 
 class ParquetWriter:
@@ -294,31 +330,29 @@ class ParquetWriter:
         Reads the stored bars, merges the incoming ones keyed by timestamp
         (O(1) per bar), and rewrites the full month only if at least one new
         timestamp was added. A timestamp already present with identical OHLCV
-        is a silent no-op; a same-timestamp/different-value bar raises
-        :class:`WriterError` (a real data conflict — never silently overwritten).
+        is a silent no-op; a same-timestamp/different-value bar records a
+        :class:`BarConflict` — the STORED bar is kept (keep-first, never
+        overwritten, DEC-LAKE-CONFLICT-KEEPFIRST-001 / CLAUDE.md Golden Rule
+        #7), the conflict is collected and returned to the caller for logging,
+        and the merge continues so the pull always finishes.
         """
         merged = self._read_existing_bars(dest)
         added = 0
+        conflicts: list[BarConflict] = []
         for bar in new_bars:
             prev = merged.get(bar.timestamp)
             if prev is None:
                 merged[bar.timestamp] = bar
                 added += 1
             elif not self._bar_values_equal(prev, bar):
-                raise WriterError(
-                    f"partition {dest} has a CONFLICTING bar at "
-                    f"{bar.timestamp.isoformat()}: existing O/H/L/C/V/OI="
-                    f"{prev.open}/{prev.high}/{prev.low}/{prev.close}/"
-                    f"{prev.volume}/{prev.open_interest}, new="
-                    f"{bar.open}/{bar.high}/{bar.low}/{bar.close}/"
-                    f"{bar.volume}/{bar.open_interest}; the vendor returned "
-                    f"different values for an already-stored timestamp — "
-                    f"resolve the conflict and retry"
-                )
+                # Keep the STORED bar (keep-first — prev stays in `merged`).
+                # Record the discrepancy; do NOT increment `added`.
+                conflicts.append(BarConflict(timestamp=bar.timestamp, stored=prev, vendor=bar))
 
         merged_sorted = sorted(merged.values(), key=lambda b: b.timestamp)
         if added == 0:
-            # Every incoming bar is already stored identically → no rewrite.
+            # Every incoming bar is already stored identically or is a conflict
+            # (kept-first) → no rewrite needed; the stored file is unchanged.
             return WriteResult(
                 path=dest,
                 row_count=len(merged_sorted),
@@ -326,6 +360,7 @@ class ParquetWriter:
                 first_ts=merged_sorted[0].timestamp,
                 last_ts=merged_sorted[-1].timestamp,
                 bytes_written=dest.stat().st_size,
+                conflicts=tuple(conflicts),
             )
 
         content_bytes = self._render_bytes(merged_sorted)
@@ -337,6 +372,7 @@ class ParquetWriter:
             first_ts=merged_sorted[0].timestamp,
             last_ts=merged_sorted[-1].timestamp,
             bytes_written=len(content_bytes),
+            conflicts=tuple(conflicts),
         )
 
     def make_catalog_entry(
