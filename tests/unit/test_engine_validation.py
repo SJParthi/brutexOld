@@ -10,12 +10,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from brutex.data.models import CandleBar
 from brutex.engine.validation import (
     OOSValidation,
     _day_split,
+    _drawdown_held,
+    _sharpe_held,
     validate_out_of_sample,
 )
 from brutex.metrics.compute import ResultMetrics
@@ -45,6 +48,51 @@ def _bar(day: int, minute: int, base: int) -> CandleBar:
 def _multiday(n_days: int, bars_per_day: int = 4) -> list[CandleBar]:
     """``n_days`` distinct IST days, each with ``bars_per_day`` bars (slight drift)."""
     return [_bar(d, m, 100 + d) for d in range(n_days) for m in range(bars_per_day)]
+
+
+def _m(**overrides: Any) -> ResultMetrics:
+    """A ResultMetrics with neutral defaults; override the fields under test."""
+    base: dict[str, Any] = {
+        "net_pnl_paisa": 0,
+        "total_return_pct": 0.0,
+        "cagr_pct": 0.0,
+        "gross_profit_paisa": 0,
+        "gross_loss_paisa": 0,
+        "sharpe_ratio": 1.0,
+        "sortino_ratio": 1.0,
+        "calmar_ratio": 1.0,
+        "mar_ratio": 0.0,
+        "information_ratio": 0.0,
+        "omega_ratio": 0.0,
+        "max_drawdown_pct": 10.0,
+        "max_drawdown_paisa": 0,
+        "max_drawdown_duration_bars": 0,
+        "recovery_factor": 1.0,
+        "ulcer_index": 0.0,
+        "largest_losing_trade_paisa": 0,
+        "max_consecutive_losses": 2,
+        "max_consecutive_wins": 0,
+        "total_trades": 50,
+        "winning_trades": 30,
+        "losing_trades": 20,
+        "win_rate": 0.6,
+        "profit_factor": 1.5,
+        "avg_winning_trade_paisa": 0,
+        "avg_losing_trade_paisa": 0,
+        "win_loss_ratio": 1.5,
+        "expectancy_paisa": 0,
+        "avg_mfe_paisa": 0,
+        "avg_mae_paisa": 0,
+        "avg_holding_time_bars": 0.0,
+        "max_holding_time_bars": 0,
+        "time_in_market_pct": 0.0,
+        "tail_ratio": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "returns_std_dev": 0.0,
+    }
+    base.update(overrides)
+    return ResultMetrics(**base)
 
 
 class TestDaySplit:
@@ -88,14 +136,16 @@ class TestValidateOOS:
         assert isinstance(result.train_metrics, ResultMetrics)
         assert isinstance(result.test_metrics, ResultMetrics)
         assert result.train_days + result.test_days == 4
-        # held_up is EXACTLY the test-period hard-gate verdict (the wiring contract).
-        assert result.held_up == passes_gates(result.test_metrics)
+        # gates_held is the test-period hard-gate verdict; held_up ANDs all three.
+        assert result.gates_held == passes_gates(result.test_metrics)
+        assert result.held_up == (result.gates_held and result.sharpe_held and result.drawdown_held)
 
     def test_no_trade_combo_does_not_hold_up(self) -> None:
         bars = _multiday(4, bars_per_day=5)
         result = validate_out_of_sample(bars, _IMPOSSIBLE_MASK, direction=Side.BUY, tf_minutes=1)
         # The self-contradictory mask never fires → 0 test trades → fails the gates.
         assert result.test_metrics.total_trades == 0
+        assert result.gates_held is False
         assert result.held_up is False
 
     def test_deterministic(self) -> None:
@@ -104,3 +154,33 @@ class TestValidateOOS:
         a = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1, train_frac=0.6)
         b = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1, train_frac=0.6)
         assert a == b
+
+
+class TestSharpeHeld:
+    def test_none_train_sharpe_fails(self) -> None:
+        # No in-sample Sharpe to hold up → cannot validate.
+        assert _sharpe_held(_m(sharpe_ratio=None), _m(sharpe_ratio=2.0)) is False
+
+    def test_nonpositive_train_sharpe_fails(self) -> None:
+        assert _sharpe_held(_m(sharpe_ratio=0.0), _m(sharpe_ratio=2.0)) is False
+
+    def test_none_test_sharpe_fails(self) -> None:
+        assert _sharpe_held(_m(sharpe_ratio=1.0), _m(sharpe_ratio=None)) is False
+
+    def test_within_tolerance_holds(self) -> None:
+        # train 1.0 → floor 0.70; test 0.75 >= 0.70 → holds.
+        assert _sharpe_held(_m(sharpe_ratio=1.0), _m(sharpe_ratio=0.75)) is True
+
+    def test_below_tolerance_fails(self) -> None:
+        # test 0.69 < 0.70 floor → degraded too far.
+        assert _sharpe_held(_m(sharpe_ratio=1.0), _m(sharpe_ratio=0.69)) is False
+
+
+class TestDrawdownHeld:
+    def test_within_tolerance_holds(self) -> None:
+        # train 10% → ceiling 15%; test 14% <= 15% → holds.
+        assert _drawdown_held(_m(max_drawdown_pct=10.0), _m(max_drawdown_pct=14.0)) is True
+
+    def test_worse_than_tolerance_fails(self) -> None:
+        # test 16% > 15% ceiling → blew the drawdown budget.
+        assert _drawdown_held(_m(max_drawdown_pct=10.0), _m(max_drawdown_pct=16.0)) is False
