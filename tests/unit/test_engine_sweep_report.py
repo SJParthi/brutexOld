@@ -14,7 +14,14 @@ from typing import Any
 
 import pytest
 from brutex.data.models import CandleBar
-from brutex.engine.sweep_report import SORT_KEYS, sort_ranked, sweep_report
+from brutex.engine.sweep_report import (
+    SORT_KEYS,
+    oos_section,
+    render_oos_verdict,
+    sort_ranked,
+    sweep_report,
+)
+from brutex.engine.validation import OOSValidation
 from brutex.metrics.compute import ResultMetrics
 from brutex.ranking import RankedCombo
 from brutex.strategies.types import Side
@@ -228,3 +235,127 @@ class TestSweepReportSort:
                 k=2,
                 sort_by="bogus",
             )
+
+
+def _multiday_bars() -> list[CandleBar]:
+    """16 in-session bars spanning TWO IST days (so the OOS split is valid)."""
+    out: list[CandleBar] = []
+    for day in (2, 3):  # 2024-01-02, 2024-01-03
+        for i in range(8):
+            ts = datetime(2024, 1, day, 9, 16 + i, tzinfo=_IST).astimezone(UTC)
+            out.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal("100.00"),
+                    high=Decimal("102.00"),
+                    low=Decimal("99.00"),
+                    close=Decimal("100.50"),
+                    volume=1000,
+                    open_interest=None,
+                )
+            )
+    return out
+
+
+def _oos(*, held: bool, gates: bool, sharpe: bool, dd: bool) -> OOSValidation:
+    m = _rc().metrics
+    return OOSValidation(
+        train_metrics=m,
+        test_metrics=m,
+        train_days=3,
+        test_days=2,
+        gates_held=gates,
+        sharpe_held=sharpe,
+        drawdown_held=dd,
+        held_up=held,
+    )
+
+
+class TestRenderOosVerdict:
+    """DEC-SWEEP-OOS-001: the no-illusion 'did the edge survive unseen data?' line."""
+
+    def test_held(self) -> None:
+        text = render_oos_verdict(_oos(held=True, gates=True, sharpe=True, dd=True))
+        assert "HELD ✓" in text
+        assert "gates=✓ sharpe=✓ dd=✓" in text
+        assert "train 3d → test 2d" in text
+        assert "test trades=50" in text
+
+    def test_failed_with_attributable_components(self) -> None:
+        text = render_oos_verdict(_oos(held=False, gates=False, sharpe=True, dd=False))
+        assert "FAILED ✗" in text
+        assert "gates=✗ sharpe=✓ dd=✗" in text
+
+
+class TestOosSection:
+    def test_empty_ranked(self) -> None:
+        assert "no gate-passing combos" in oos_section(
+            _multiday_bars(),
+            [],
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=None,
+            take_profit_paisa=None,
+            start_equity_paisa=10_000_000,
+            proximity=None,
+            prior_n=3,
+        )
+
+    def test_single_day_window_is_na(self) -> None:
+        # _bars() is one IST day → cannot split → honest n/a (same for all combos).
+        out = oos_section(
+            _bars(),
+            [_rc(mask=0)],
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=None,
+            take_profit_paisa=None,
+            start_equity_paisa=10_000_000,
+            proximity=None,
+            prior_n=3,
+        )
+        assert "n/a" in out
+
+    def test_multiday_renders_verdict_per_combo(self) -> None:
+        out = oos_section(
+            _multiday_bars(),
+            [_rc(mask=0)],
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=None,
+            take_profit_paisa=None,
+            start_equity_paisa=10_000_000,
+            proximity=None,
+            prior_n=3,
+        )
+        assert "Out-of-sample (train 70% → unseen 30%):" in out
+        assert "#1" in out
+
+
+class TestSweepReportOos:
+    def test_validate_oos_appends_section(self) -> None:
+        report = sweep_report(
+            _bars(),
+            instrument="NIFTY",
+            tf_label="1m",
+            tf_minutes=1,
+            direction=Side.BUY,
+            condition_bits=[0, 1, 2],
+            k=2,
+            validate_oos=True,
+        )
+        assert "Out-of-sample" in report
+
+    def test_validate_oos_top_n_none(self) -> None:
+        report = sweep_report(
+            _bars(),
+            instrument="NIFTY",
+            tf_label="1m",
+            tf_minutes=1,
+            direction=Side.BUY,
+            condition_bits=[0, 1, 2],
+            k=2,
+            validate_oos=True,
+            top_n=None,
+        )
+        assert "Out-of-sample" in report

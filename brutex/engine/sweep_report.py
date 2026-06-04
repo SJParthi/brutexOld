@@ -32,6 +32,7 @@ from brutex.engine.sweep_driver import (
     DEFAULT_START_EQUITY_PAISA,
     rank_sweep_over_bits,
 )
+from brutex.engine.validation import OOSValidation, validate_out_of_sample
 from brutex.ranking import MIN_TRADES, RankedCombo
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
@@ -75,6 +76,75 @@ def sort_ranked(ranked: Sequence[RankedCombo], by: str) -> list[RankedCombo]:
     raise ValueError(f"sort_ranked: unknown sort key {by!r}; expected one of {SORT_KEYS}")
 
 
+def _tick(held: bool) -> str:
+    """``✓`` when a holdout component held, ``✗`` when it broke."""
+    return "✓" if held else "✗"
+
+
+def render_oos_verdict(oos: OOSValidation) -> str:
+    """One-line out-of-sample verdict — did the combo's edge survive unseen data?
+
+    Shows the overall ``HELD`` / ``FAILED`` verdict plus the three attributable
+    components (gates / Sharpe / drawdown) so a failure is explainable: did the edge
+    lose the hard gates on the test period, degrade on Sharpe, or blow drawdown?
+    Includes the train/test day split + the test-period trade count for context.
+    """
+    verdict = "HELD ✓" if oos.held_up else "FAILED ✗"
+    return (
+        f"{verdict}  gates={_tick(oos.gates_held)} "
+        f"sharpe={_tick(oos.sharpe_held)} dd={_tick(oos.drawdown_held)}  "
+        f"(train {oos.train_days}d → test {oos.test_days}d, "
+        f"test trades={oos.test_metrics.total_trades})"
+    )
+
+
+def oos_section(
+    bars: Sequence[CandleBar],
+    ranked: Sequence[RankedCombo],
+    *,
+    direction: Side,
+    tf_minutes: int,
+    stop_loss_paisa: int | None,
+    take_profit_paisa: int | None,
+    start_equity_paisa: int,
+    proximity: ProximityParams | None,
+    prior_n: int,
+    train_frac: float = 0.7,
+) -> str:
+    """Render the out-of-sample (train → unseen) verdict for each ranked combo.
+
+    Re-runs every combo on a train period vs the unseen test period that follows
+    (:func:`~brutex.engine.validation.validate_out_of_sample`), so the operator sees
+    whether a top combo's edge is REAL or just in-sample overfitting — the
+    no-illusion check (CLAUDE.md §1). Needs ``>= 2`` distinct IST trading days; a
+    shorter window renders an honest ``n/a`` (identical for every combo, so it is
+    reported once). An empty board renders a clear "nothing to validate" line.
+    """
+    if not ranked:
+        return "Out-of-sample: (no gate-passing combos to validate)"
+    lines: list[str] = []
+    for rank, rc in enumerate(ranked, start=1):
+        try:
+            oos = validate_out_of_sample(
+                bars,
+                rc.mask,
+                direction=direction,
+                tf_minutes=tf_minutes,
+                stop_loss_paisa=stop_loss_paisa,
+                take_profit_paisa=take_profit_paisa,
+                start_equity_paisa=start_equity_paisa,
+                train_frac=train_frac,
+                proximity=proximity,
+                prior_n=prior_n,
+            )
+        except ValueError as exc:
+            # Too short to split (< 2 trading days) — the same for every combo.
+            return f"Out-of-sample: n/a — {exc}"
+        lines.append(f"  #{rank}  {render_oos_verdict(oos)}")
+    head = f"Out-of-sample (train {train_frac:.0%} → unseen {1.0 - train_frac:.0%}):"
+    return head + "\n" + "\n".join(lines)
+
+
 def sweep_report(
     bars: Sequence[CandleBar],
     *,
@@ -93,6 +163,7 @@ def sweep_report(
     prior_n: int = 3,
     max_combos: int = DEFAULT_MAX_COMBOS,
     sort_by: str = "composite",
+    validate_oos: bool = False,
 ) -> str:
     """Run the funnel over *bars* and render the ranked top-combo table as text.
 
@@ -121,6 +192,12 @@ def sweep_report(
         the anti-overfit ranking; ``"pnl"`` / ``"win"`` / ``"pf"`` order by the raw
         headline metric so the max-profit / max-win-rate combo is on top). See
         :func:`sort_ranked`.
+    validate_oos
+        When ``True``, append an out-of-sample section (:func:`oos_section`) that
+        re-runs each shown combo on a train period vs the unseen test period that
+        follows — the no-illusion "is this edge real or overfit?" check. Default
+        ``False`` (off; it re-simulates each shown combo, and needs ``>= 2`` IST
+        trading days).
 
     Returns
     -------
@@ -162,7 +239,28 @@ def sweep_report(
         f" → {bars[-1].timestamp.isoformat()}\n"
         f"  gate survivors={len(ranked)}  sort={sort_by}"
     )
-    return f"{header}\n\n{table}"
+    report = f"{header}\n\n{table}"
+    if validate_oos:
+        oos_ranked = ranked if top_n is None else ranked[:top_n]
+        section = oos_section(
+            bars,
+            oos_ranked,
+            direction=direction,
+            tf_minutes=tf_minutes,
+            stop_loss_paisa=stop_loss_paisa,
+            take_profit_paisa=take_profit_paisa,
+            start_equity_paisa=start_equity_paisa,
+            proximity=proximity,
+            prior_n=prior_n,
+        )
+        report = f"{report}\n\n{section}"
+    return report
 
 
-__all__ = ["SORT_KEYS", "sort_ranked", "sweep_report"]
+__all__ = [
+    "SORT_KEYS",
+    "oos_section",
+    "render_oos_verdict",
+    "sort_ranked",
+    "sweep_report",
+]

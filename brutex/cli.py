@@ -377,6 +377,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sweep.add_argument("--top", type=int, default=20, help="Print the top-N combos (default 20)")
     sweep.add_argument(
+        "--oos",
+        action="store_true",
+        dest="validate_oos",
+        help=(
+            "Append an out-of-sample check: re-run each shown combo on train vs unseen "
+            "test days — did the edge HOLD or was it overfit? (needs >= 2 trading days)"
+        ),
+    )
+    sweep.add_argument(
         "--sort-by",
         default="composite",
         choices=list(SORT_KEYS),
@@ -1155,6 +1164,7 @@ def cmd_sweep(
     top: int,
     min_hits: int | None,
     sort_by: str,
+    validate_oos: bool,
 ) -> int:
     """Brute-force sweep over lake bars → print the ranked top-combo table.
 
@@ -1216,6 +1226,7 @@ def cmd_sweep(
             top_n=top,
             min_hits=MIN_TRADES if min_hits is None else min_hits,
             sort_by=sort_by,
+            validate_oos=validate_oos,
         )
     )
     return EXIT_OK
@@ -1306,6 +1317,7 @@ def main(argv: list[str] | None = None) -> int:
             top=args.top,
             min_hits=args.min_hits,
             sort_by=args.sort_by,
+            validate_oos=args.validate_oos,
         )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits
