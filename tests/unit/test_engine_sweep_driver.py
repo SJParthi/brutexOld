@@ -247,9 +247,7 @@ class TestRankSweepOverBits:
         # C(3, 2) = 3 masks > max_combos=2 → refuse (honest guardrail), no sweep run.
         bars = _session_bars()
         with pytest.raises(ValueError, match=r"exceeds max_combos=2"):
-            rank_sweep_over_bits(
-                bars, [0, 1, 2], 2, direction=Side.BUY, tf_minutes=1, max_combos=2
-            )
+            rank_sweep_over_bits(bars, [0, 1, 2], 2, direction=Side.BUY, tf_minutes=1, max_combos=2)
 
     def test_k_too_large_raises(self) -> None:
         # count_combos rejects k > n_unique before any enumeration.
