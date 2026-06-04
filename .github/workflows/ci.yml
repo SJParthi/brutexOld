@@ -1233,6 +1233,15 @@ jobs:
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
+          # DEC-PREOPEN-REPORT-001 + DEC-PREOPEN-CURRENTDAY-001: the NSE-style
+          # Pre-Open .xlsx export (PREV. CLOSE / IEP / CHNG / %CHNG) — incl. the
+          # as-of previous-close anchor that includes the CURRENT day (whose own
+          # 1-day bar is not finalised yet). 100% line+branch.
+          if compgen -G "tests/unit/test_preopen_report.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.preopen_report --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_preopen_report.py
+          else
+            echo "(brutex.dashboard.preopen_report test file not present yet — gate inactive)"
+          fi
           # DEC-DASHBOARD-FASTREAD-001 (#437): the dashboard fast-read SPEED
           # CORE — the in-memory summary cache (write-invalidation + 2 s TTL
           # floor) + the incremental, idempotent coverage counters that back the
