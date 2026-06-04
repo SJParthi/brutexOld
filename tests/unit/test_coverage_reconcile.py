@@ -9,14 +9,20 @@ DuckDB / lake I/O is touched here.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from brutex.adapters.dhan.ingest import _windows  # the tiler the reconcile must match
-from brutex.dashboard.coverage_reconcile import reconcile_coverage_with_lake, reconcile_windows
+from brutex.dashboard.coverage_reconcile import (
+    EMPTY_TERMINAL_THRESHOLD,
+    reconcile_coverage_with_lake,
+    reconcile_empty_terminal,
+    reconcile_windows,
+)
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
+from brutex.data.window_status import WindowStatusLog
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 
 _NIFTY = Instrument(
@@ -223,3 +229,71 @@ def test_reconcile_over_a_real_parquet_lake_skips_stored_windows() -> None:
     assert cov.is_complete(
         WindowKey(market="dhan", security_id="NIFTY", interval="1day", start=_START, end=_END)
     )
+
+
+_NOW = datetime(2026, 6, 4, tzinfo=UTC)
+
+
+def _sensex_key(*, interval: str = "1minute") -> WindowKey:
+    """A SENSEX 1-minute window (the genuinely-empty pre-2021-08-04 case)."""
+    return WindowKey(
+        market="dhan",
+        security_id="SENSEX",
+        interval=interval,
+        start=date(2021, 1, 1),
+        end=date(2021, 4, 1),
+    )
+
+
+def _log_recorded(
+    key: WindowKey, *, times: int, raw_bars: int, error_type: str | None
+) -> WindowStatusLog:
+    """A status log with *key* recorded *times* times (attempts accumulate to *times*)."""
+    log = WindowStatusLog()
+    for _ in range(times):
+        log.record(key, raw_bars=raw_bars, error_type=error_type, bars_appended=raw_bars, now=_NOW)
+    return log
+
+
+class TestReconcileEmptyTerminal:
+    """DEC-EMPTY-TERMINAL-001: a window seen genuinely EMPTY ≥ threshold times → complete."""
+
+    def test_empty_window_at_threshold_is_marked(self) -> None:
+        cov = FetchCoverage()
+        key = _sensex_key()
+        log = _log_recorded(key, times=EMPTY_TERMINAL_THRESHOLD, raw_bars=0, error_type=None)
+        assert reconcile_empty_terminal(cov, log) == 1
+        assert cov.is_complete(key)  # genuinely-empty → skipped from now on
+
+    def test_empty_window_below_threshold_is_not_marked(self) -> None:
+        cov = FetchCoverage()
+        key = _sensex_key()
+        log = _log_recorded(key, times=EMPTY_TERMINAL_THRESHOLD - 1, raw_bars=0, error_type=None)
+        assert reconcile_empty_terminal(cov, log) == 0
+        assert not cov.is_complete(key)  # still gets a few more chances
+
+    def test_failed_window_is_never_terminal(self) -> None:
+        # A 429/timeout (FAILED, error_type set) reading 0 bars is NEVER marked,
+        # even past the threshold — it keeps retrying (DEC-DHAN-429-RETRY-001).
+        cov = FetchCoverage()
+        key = _sensex_key()
+        log = _log_recorded(
+            key, times=EMPTY_TERMINAL_THRESHOLD + 2, raw_bars=0, error_type="DhanRateLimitError"
+        )
+        assert reconcile_empty_terminal(cov, log) == 0
+        assert not cov.is_complete(key)
+
+    def test_success_window_is_not_terminal(self) -> None:
+        # A SUCCESS window (bars returned) is not EMPTY → not the terminal path.
+        cov = FetchCoverage()
+        key = _sensex_key()
+        log = _log_recorded(key, times=EMPTY_TERMINAL_THRESHOLD + 1, raw_bars=5, error_type=None)
+        assert reconcile_empty_terminal(cov, log) == 0
+        assert not cov.is_complete(key)
+
+    def test_custom_threshold(self) -> None:
+        cov = FetchCoverage()
+        key = _sensex_key()
+        log = _log_recorded(key, times=2, raw_bars=0, error_type=None)
+        assert reconcile_empty_terminal(cov, log, threshold=2) == 1
+        assert cov.is_complete(key)
