@@ -31,6 +31,7 @@ from brutex.engine.combo_mask import (
     evaluate_mask,
     iter_masks_k_of_n,
     mask_to_bits,
+    mask_to_entry_signals,
     popcount,
 )
 
@@ -597,3 +598,20 @@ def test_resident_attribute_error_falls_back(monkeypatch: pytest.MonkeyPatch) ->
     # attribute is missing → AttributeError caught).
     assert buf.n_bars == 5
     assert buf.count_supermasks(masks) == count_supermasks_reference(bars, masks)
+
+
+class TestMaskToEntrySignals:
+    """``mask_to_entry_signals`` — the Stage-1A → trade-sim seam (DEC-SWEEP-DRIVER-001)."""
+
+    def test_and_semantics(self) -> None:
+        assert mask_to_entry_signals([0b111, 0b101, 0b010], 0b101) == [True, True, False]
+
+    def test_empty_mask_matches_every_bar(self) -> None:
+        assert mask_to_entry_signals([1, 2, 3], 0) == [True, True, True]
+
+    def test_empty_series_yields_empty(self) -> None:
+        assert mask_to_entry_signals([], 0b1) == []
+
+    def test_equals_per_bar_evaluate_mask(self) -> None:
+        bits = [0, 1, 2, 3, 4, 5]
+        assert mask_to_entry_signals(bits, 0b10) == [evaluate_mask(b, 0b10) for b in bits]
