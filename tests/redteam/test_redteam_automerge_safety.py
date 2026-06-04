@@ -128,3 +128,34 @@ def test_ci_check_resolves_the_pr_current_head() -> None:
         "ci-check no longer re-resolves the PR's current head — it can gate "
         "on a stale/mismatched SHA (regression of the race fix)"
     )
+
+
+def test_ci_check_requires_all_green_not_head_1() -> None:
+    """DEC-AUTOMERGE-ALLGREEN-001 (operator decree 2026-06-04: "without green it
+    should NEVER be merged").
+
+    A PR head can carry TWO ``CI OK (aggregate gate)`` runs — a ``push`` run
+    that SKIPS the PR-only gates and a ``pull_request`` run that runs them. The
+    OLD ``... | head -1`` picked an arbitrary conclusion and merged on the green
+    push run while the pull_request run was RED — exactly how #366 merged past a
+    red bug-fix-regression gate. The ci-check must therefore (a) no longer use
+    ``head -1``, (b) refuse on ANY failing check conclusion, and (c) require
+    EVERY ``CI OK`` instance on the head to be success.
+    """
+    jobs = _load_jobs(AUTO_MERGE_YML)
+    steps = jobs["auto-merge"]["steps"]
+    ci_step = next(s for s in steps if isinstance(s, dict) and str(s.get("id", "")) == "ci-check")
+    run = str(ci_step.get("run", ""))
+    assert "head -1" not in run, (
+        "ci-check still uses `head -1` on the CI OK conclusions — a green push "
+        "run can mask a red pull_request run (regression of the #366 merge hole)"
+    )
+    # (a) refuse on ANY failing check conclusion (no green = no merge).
+    assert "failure" in run and "timed_out" in run, (
+        "ci-check no longer blocks on failing check conclusions (no green = no merge)"
+    )
+    # (b) require EVERY CI OK (aggregate gate) instance to be success.
+    assert "CI OK (aggregate gate)" in run and "grep -qvx success" in run, (
+        "ci-check no longer requires EVERY CI OK run to be success — a single "
+        "green run could mask a red one"
+    )
