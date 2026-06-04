@@ -866,39 +866,40 @@ def build_app(
     @app.get("/api/v1/universe/index-constituents")
     async def api_universe_index_constituents(
         symbol: str = Query(...),
+        refresh: bool = Query(False),
     ) -> JSONResponse:
-        """GET /api/v1/universe/index-constituents?symbol=… — best-effort.
+        """GET /api/v1/universe/index-constituents?symbol=…&refresh=… — cache-backed.
 
-        Resolve an INDEX *symbol* to its NSE constituent stocks
-        (DEC-UNIVERSE-NSE-CONSTITUENTS-001, MIGRATION.md #445), intersect
-        them with the F&O-eligible single stocks we actually hold, and
-        return only the pullable members — so the ``/universe`` page can
-        auto-tick them in the multi-select.
+        Resolve an INDEX (or broad-market basket — NIFTY 100/200/500)
+        *symbol* to its NSE constituent stocks, intersect them with the
+        F&O-eligible single stocks we actually hold, and return only the
+        pullable members — so the ``/universe`` page can auto-tick them in
+        the multi-select (DEC-CONSTITUENTS-CACHE-001, builds on
+        DEC-UNIVERSE-NSE-CONSTITUENTS-001 / MIGRATION.md #445).
+
+        Cache-backed (the "Auto-fetch + cache" the operator chose): the
+        first successful NSE fetch is written to
+        ``<lake>/index_constituents/<INDEX>.json`` and every later call —
+        even when the live fetch is blocked / timed out — serves the cached
+        list (:mod:`brutex.dashboard.constituents_cache`). ``refresh=true``
+        forces a fresh fetch (use after a semi-annual rebalance), falling
+        back to the stale cache if the refresh fails.
 
         Honesty (CLAUDE.md §1 / §10): this is **NOT Dhan data**. Index
-        membership is fetched best-effort from NSE's per-index constituent
-        CSVs (see :mod:`brutex.dashboard.nse_constituents`). NSE
+        membership comes from NSE's per-index constituent CSVs. NSE
         bot-blocks those endpoints and this build environment
         network-blocks ``nseindia.com``, so the live fetch is UNVERIFIABLE
         in CI and runs only on the operator's machine. It degrades
-        gracefully and **never 500s**:
-
-        * ``source="nse"`` — a known index, fetched + intersected OK
-          (``members`` may be empty if none of its constituents are
-          F&O-eligible);
-        * ``source="unknown-index"`` — no NSE CSV mapping for *symbol*;
-        * ``source="unavailable"`` — the live fetch failed
-          (network/block/timeout); the note points at the
-          "Pull ALL F&O stocks" superset fallback.
-
-        The fetch itself (the injected default urllib opener) is the only
-        ``# pragma: no cover`` surface; the success-mapping (fake opener),
-        unknown-index, and unavailable branches are all unit-tested.
+        gracefully and **never 500s**. ``source`` is one of ``"nse"``
+        (fresh + cached), ``"cache"`` (served from a prior fetch, with
+        ``as_of``), ``"unknown-index"`` (no NSE mapping), or
+        ``"unavailable"`` (live fetch failed AND no cache yet). The blocking
+        resolve (disk cache + best-effort live fetch) is offloaded via
+        ``run_in_threadpool`` so it never freezes the event loop
+        (DEC-DASHBOARD-PULL-ASYNC-001).
         """
-        from brutex.dashboard.nse_constituents import (
-            constituent_url,
-            members_in_universe,
-        )
+        from brutex.dashboard.constituents_cache import resolve_constituents
+        from brutex.dashboard.nse_constituents import intersect_with_universe
 
         store = _require_store()
         eligible = store.fno_eligible_underlyings()
@@ -909,39 +910,52 @@ def build_app(
         stock_rows = list_underlyings(candidates, kind="stock", fno_eligible=eligible)
         fno_symbols = [row["symbol"] for row in stock_rows]
 
-        if constituent_url(symbol) is None:
-            return JSONResponse(
-                {
-                    "members": [],
-                    "source": "unknown-index",
-                    "note": (
-                        f"No NSE constituent list known for {symbol!r} — "
-                        "use 'Pull ALL F&O stocks' (the superset)."
-                    ),
-                }
-            )
-        try:
-            members = members_in_universe(symbol, fno_symbols)
-        except OSError:
-            # Any network / block / timeout from the live opener — degrade
-            # gracefully, NEVER 500 (DEC-UNIVERSE-NSE-CONSTITUENTS-001).
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            # No lake wired → no cache root → degrade honestly (never 500).
             return JSONResponse(
                 {
                     "members": [],
                     "source": "unavailable",
+                    "as_of": None,
                     "note": (
-                        "NSE constituents unavailable — use 'Pull ALL F&O stocks' (the superset)"
+                        "No lake wired — constituents cache unavailable; "
+                        "use 'Pull ALL F&O stocks' (the superset)."
                     ),
                 }
             )
+        # The cache lives beside the lake at <lake>/index_constituents/.
+        result = await run_in_threadpool(
+            resolve_constituents,
+            symbol,
+            cache_root=lake_root.parent,
+            force_refresh=refresh,
+        )
+        members = intersect_with_universe(result.symbols, fno_symbols)
+        notes = {
+            "nse": (
+                f"{len(members)} F&O-eligible constituent(s) of {symbol} ticked — "
+                "fresh from NSE + cached (verify; membership rebalances)."
+            ),
+            "cache": (
+                f"{len(members)} F&O-eligible constituent(s) of {symbol} ticked — "
+                f"from cache (fetched {result.as_of}; pass refresh=true after a rebalance)."
+            ),
+            "unknown-index": (
+                f"No NSE constituent list known for {symbol!r} — "
+                "use 'Pull ALL F&O stocks' (the superset)."
+            ),
+            "unavailable": (
+                "NSE constituents unavailable + no cache yet — "
+                "use 'Pull ALL F&O stocks' (the superset)."
+            ),
+        }
         return JSONResponse(
             {
                 "members": members,
-                "source": "nse",
-                "note": (
-                    f"{len(members)} F&O-eligible constituent(s) of {symbol} "
-                    "ticked — best-effort from NSE (verify; membership rebalances)."
-                ),
+                "source": result.source,
+                "as_of": result.as_of,
+                "note": notes[result.source],
             }
         )
 
