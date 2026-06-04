@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import urllib.request
 from collections.abc import Callable, Iterable
@@ -92,6 +93,45 @@ INDEX_CSV_FILENAMES: Final[dict[str, str]] = {
     "NIFTY500": "ind_nifty500list.csv",
 }
 
+#: Operator override env var (DEC-CONSTITUENTS-OVERRIDE-001): a JSON object
+#: ``{index_symbol: csv_filename_or_full_url}`` MERGED over :data:`INDEX_CSV_FILENAMES`
+#: so ANY index — the ~20 NSE sectorals, plus BSE SENSEX / BANKEX — becomes pickable
+#: WITHOUT a code change. This build environment cannot reach NSE (it 403-bot-blocks
+#: every request, verified), and per CLAUDE.md §1 (no hallucination) we will NOT
+#: hardcode constituent-CSV filenames we cannot verify; the override lets the
+#: operator — who CAN reach NSE/BSE — supply the filenames THEY have verified.
+#: Value rules: a bare filename (e.g. ``"ind_niftyitlist.csv"``) resolves under the
+#: NSE base URL (the built-in convention); a FULL ``http(s)://`` URL is used as-is
+#: (so a BSE index points at the BSE host / any mirror). Operator entries WIN over
+#: a built-in of the same key (so a renamed CSV can be corrected in place). Malformed
+#: / absent → ignored (degrade to the built-ins, never crash). CLAUDE.md §11 DYNAMIC.
+INDEX_CSV_FILENAMES_OVERRIDE_ENV: Final[str] = "BRUTEX_INDEX_CSV_FILENAMES"
+
+
+def _override_filenames() -> dict[str, str]:
+    """Parse the operator's JSON index→filename/URL override from the env — **pure**, never raises.
+
+    Reads :data:`INDEX_CSV_FILENAMES_OVERRIDE_ENV`. Returns ``{}`` when absent,
+    empty, not valid JSON, or not a JSON object; within a valid object, only
+    ``str → non-blank str`` pairs are kept (keys upper-cased + trimmed, values
+    trimmed). A lost / malformed override costs only the extra indices, never a
+    crash (reliability) — exactly like the lake-sidecar degrade-to-empty rule.
+    """
+    raw = os.environ.get(INDEX_CSV_FILENAMES_OVERRIDE_ENV)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in parsed.items():
+        if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip():
+            out[key.strip().upper()] = value.strip()
+    return out
+
 
 def parse_symbols(csv_text: str) -> list[str]:
     """Parse the ``Symbol`` column from an NSE constituent CSV.
@@ -140,21 +180,30 @@ def parse_symbols(csv_text: str) -> list[str]:
 
 
 def constituent_url(index_symbol: str) -> str | None:
-    """Map an engine index symbol to its NSE constituent-CSV URL.
+    """Map an engine index symbol to its constituent-CSV URL.
 
-    PURE — no I/O. Case-insensitive lookup against
-    :data:`INDEX_CSV_FILENAMES`.
+    Case-insensitive lookup against the operator override
+    (:func:`_override_filenames`, DEC-CONSTITUENTS-OVERRIDE-001) MERGED over the
+    built-in :data:`INDEX_CSV_FILENAMES`, override winning. Each lookup is O(1)
+    (two dict ``get``s). The resolved value is either a bare filename (joined to
+    the NSE base URL — the built-in convention) or a full ``http(s)://`` URL used
+    as-is (so an operator can point an index — e.g. BSE SENSEX — at any host).
 
     Returns
     -------
     str | None
-        The full CSV URL, or ``None`` for an index we have no mapping
-        for ("unknown-index").
+        The full CSV URL, or ``None`` for an index with no built-in OR override
+        mapping ("unknown-index").
     """
-    filename = INDEX_CSV_FILENAMES.get(index_symbol.strip().upper())
-    if filename is None:
+    key = index_symbol.strip().upper()
+    value = _override_filenames().get(key) or INDEX_CSV_FILENAMES.get(key)
+    if value is None:
         return None
-    return f"{NSE_CONSTITUENTS_BASE_URL}/{filename}"
+    # A full URL (operator points an index at BSE / a mirror) is used verbatim; a
+    # bare filename resolves under the NSE base (the built-in convention).
+    if value.startswith(("http://", "https://")):
+        return value
+    return f"{NSE_CONSTITUENTS_BASE_URL}/{value}"
 
 
 def _default_opener(url: str) -> str:  # pragma: no cover - live network only
@@ -304,6 +353,7 @@ def members_in_universe(
 
 __all__ = [
     "INDEX_CSV_FILENAMES",
+    "INDEX_CSV_FILENAMES_OVERRIDE_ENV",
     "NSE_CONSTITUENTS_BASE_URL",
     "constituent_url",
     "fetch_constituent_symbols",

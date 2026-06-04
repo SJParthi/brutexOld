@@ -10,6 +10,8 @@ fixture + an injected fake opener (no network).
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from brutex.dashboard import nse_constituents as nc
 from brutex.dashboard.nse_constituents import (
@@ -193,3 +195,60 @@ class TestIntersectWithUniverse:
 def test_module_exports_are_public() -> None:
     for name in nc.__all__:
         assert hasattr(nc, name)
+
+
+class TestConstituentUrlOverride:
+    """DEC-CONSTITUENTS-OVERRIDE-001: the env override makes ANY index pickable.
+
+    The operator supplies VERIFIED NSE filenames / BSE full-URLs (this build env
+    403-bot-blocks NSE, so we never hardcode unverified names — Golden Rule #1).
+    """
+
+    _ENV = nc.INDEX_CSV_FILENAMES_OVERRIDE_ENV
+
+    def test_override_adds_a_new_index(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # "NIFTY IT" has no built-in mapping (returns None) — the override adds it.
+        assert constituent_url("NIFTY IT") is None
+        monkeypatch.setenv(self._ENV, json.dumps({"NIFTY IT": "ind_niftyitlist.csv"}))
+        assert constituent_url("NIFTY IT") == f"{NSE_CONSTITUENTS_BASE_URL}/ind_niftyitlist.csv"
+
+    def test_override_full_url_used_verbatim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A BSE index points at a full URL on another host → used as-is, not joined.
+        url = "https://bse.example/indices/sensex.csv"
+        monkeypatch.setenv(self._ENV, json.dumps({"SENSEX": url}))
+        assert constituent_url("SENSEX") == url
+
+    def test_override_wins_over_builtin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A renamed CSV can be corrected in place — the override beats the built-in.
+        monkeypatch.setenv(self._ENV, json.dumps({"NIFTY": "ind_nifty50_renamed.csv"}))
+        assert constituent_url("NIFTY") == f"{NSE_CONSTITUENTS_BASE_URL}/ind_nifty50_renamed.csv"
+
+    def test_override_key_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(self._ENV, json.dumps({"nifty it": "ind_niftyitlist.csv"}))
+        assert constituent_url("NIFTY IT") == f"{NSE_CONSTITUENTS_BASE_URL}/ind_niftyitlist.csv"
+
+    def test_no_override_builtin_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(self._ENV, raising=False)
+        assert constituent_url("NIFTY") == f"{NSE_CONSTITUENTS_BASE_URL}/ind_nifty50list.csv"
+        assert constituent_url("NIFTY IT") is None
+
+    def test_malformed_json_degrades_to_builtins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(self._ENV, "not json {{{")
+        assert nc._override_filenames() == {}
+        assert constituent_url("NIFTY") == f"{NSE_CONSTITUENTS_BASE_URL}/ind_nifty50list.csv"
+        assert constituent_url("NIFTY IT") is None
+
+    def test_non_object_json_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(self._ENV, json.dumps([1, 2, 3]))  # valid JSON, not a dict
+        assert nc._override_filenames() == {}
+
+    def test_blank_and_non_string_entries_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(
+            self._ENV,
+            json.dumps({"GOOD": "f.csv", "BAD": "", "   ": "x.csv", "NUM": 123, "K": None}),
+        )
+        assert nc._override_filenames() == {"GOOD": "f.csv"}
+
+    def test_empty_env_value_is_no_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(self._ENV, "")
+        assert nc._override_filenames() == {}
