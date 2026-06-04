@@ -58,6 +58,10 @@ def test_make_rate_observer_tolerates_missing_keys() -> None:
 
 def test_observe_rate_skips_without_observer_or_controller() -> None:
     """The live push helper is a no-op for a default (no observer) / dry-run (no controller) pull."""
+    from typing import cast
+
+    from brutex.adapters.dhan.rate_control import DhanRateController
+    from brutex.adapters.protocol import MarketAdapter
     from brutex.dashboard.pull_controller import _observe_rate
 
     calls: list[object] = []
@@ -65,10 +69,12 @@ def test_observe_rate_skips_without_observer_or_controller() -> None:
     def _obs(rate: object, meter: object) -> None:
         calls.append((rate, meter))
 
-    _observe_rate(None, object(), object())  # observer None → skip  # type: ignore[arg-type]
-    _observe_rate(
-        _obs, None, object()
-    )  # controller None (dry-run) → skip  # type: ignore[arg-type]
+    # The guard returns BEFORE touching the adapter/controller, so these dummy
+    # casts are never dereferenced — they only satisfy the static types.
+    adapter = cast(MarketAdapter, object())
+    controller = cast(DhanRateController, object())
+    _observe_rate(None, controller, adapter)  # observer None → skip
+    _observe_rate(_obs, None, adapter)  # controller None (dry-run) → skip
     assert calls == []
 
 
