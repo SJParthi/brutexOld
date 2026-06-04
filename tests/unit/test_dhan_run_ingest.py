@@ -62,6 +62,7 @@ def test_fan_out_all_pairs_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
         end,
         pace=None,
         coverage=None,
+        status_log=None,
         on_rate_limit=None,
         on_success=None,
     ):
@@ -102,6 +103,7 @@ def test_terminal_error_quarantines_pair_and_continues(monkeypatch: pytest.Monke
         end,
         pace=None,
         coverage=None,
+        status_log=None,
         on_rate_limit=None,
         on_success=None,
     ):
@@ -140,6 +142,7 @@ def test_pace_threaded_through(monkeypatch: pytest.MonkeyPatch) -> None:
         end,
         pace=None,
         coverage=None,
+        status_log=None,
         on_rate_limit=None,
         on_success=None,
     ):
@@ -173,6 +176,7 @@ def test_non_dhan_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
         end,
         pace=None,
         coverage=None,
+        status_log=None,
         on_rate_limit=None,
         on_success=None,
     ):
@@ -227,6 +231,7 @@ def test_coverage_threaded_and_skipped_windows_aggregated(
         end,
         pace=None,
         coverage=None,
+        status_log=None,
         on_rate_limit=None,
         on_success=None,
     ):
@@ -265,6 +270,7 @@ def test_rate_feedback_hooks_threaded(monkeypatch: pytest.MonkeyPatch) -> None:
         end,
         pace=None,
         coverage=None,
+        status_log=None,
         on_rate_limit=None,
         on_success=None,
     ):
@@ -394,3 +400,35 @@ class TestRunIngestLogging:
                 end=_END,
             )
         assert _events(logs, "ingest.underlying")[0]["pull_id"] == ""
+
+
+def test_status_log_threaded_through_to_ingest_spot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller's ``status_log`` reaches ``ingest_spot`` unchanged (DEC-WINDOW-STATUS-001).
+
+    Guards the wiring: ``run_dhan_spot_ingest`` must pass the SAME log object it
+    is handed into every per-pair ``ingest_spot`` call, so the per-window SUCCESS
+    / EMPTY / FAILED records all land in the one durable log.
+    """
+    from brutex.data.window_status import WindowStatusLog
+
+    seen: list[object] = []
+
+    def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **kw):  # type: ignore[no-untyped-def]
+        seen.append(kw.get("status_log"))
+        return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    log = WindowStatusLog()
+    run_dhan_spot_ingest(
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        instruments=[_index("13"), _index("25")],
+        intervals=["1minute", "1day"],
+        start=_START,
+        end=_END,
+        status_log=log,
+    )
+    # Every pair (2 instruments × 2 intervals) saw the exact same log object.
+    assert seen == [log, log, log, log]

@@ -49,6 +49,7 @@ from brutex.adapters.dhan.ingest import IngestReport, Pacer, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.sink import BarSink
+from brutex.data.window_status import WindowStatusLog
 from brutex.models import Instrument
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import PoolRunParallel
@@ -135,6 +136,7 @@ def run_dhan_spot_ingest(
     end: date,
     pace: Pacer | None = None,
     coverage: FetchCoverage | None = None,
+    status_log: WindowStatusLog | None = None,
     on_rate_limit: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
     on_progress: ProgressHook | None = None,
@@ -240,6 +242,7 @@ def run_dhan_spot_ingest(
                 end=end,
                 pace=pace,
                 coverage=coverage,
+                status_log=status_log,
                 on_rate_limit=on_rate_limit,
                 on_success=on_success,
             )

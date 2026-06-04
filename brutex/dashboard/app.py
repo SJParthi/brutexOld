@@ -1400,6 +1400,50 @@ def build_app(
         rows = await run_in_threadpool(_summary_cache.get_or_refresh, SPOT, recompute=_recompute)
         return JSONResponse(build_spot_coverage_payload(rows))
 
+    @app.get("/api/v1/coverage/windows")
+    async def api_coverage_windows() -> JSONResponse:
+        """GET /api/v1/coverage/windows — per-window SUCCESS / EMPTY / FAILED status.
+
+        The browsable per-window status record (DEC-WINDOW-STATUS-001): one row
+        per fetch window with its status, attempt count, bars, and last error — so
+        the operator SEES exactly which windows are stored (SUCCESS), genuinely
+        empty (EMPTY), or failed and needing a re-pull (FAILED). READ-ONLY: loads
+        the durable status sidecar (``<lake>/window_status.json``) the ingest
+        writes; never runs a pull. Empty when no lake root is wired or no pull has
+        recorded a window yet (never a 500).
+        """
+        from brutex.data.window_status_store import load_window_status
+
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse({"count": 0, "windows": []})
+        lake = lake_root.parent
+
+        def _load() -> dict[str, Any]:
+            """Load the durable status sidecar + project it to the JSON payload (threadpool)."""
+            log = load_window_status(lake)
+            return {
+                "count": log.count,
+                "windows": [
+                    {
+                        "market": r.market,
+                        "symbol": r.security_id,
+                        "interval": r.interval,
+                        "window_start": r.window_start,
+                        "window_end": r.window_end,
+                        "status": r.status,
+                        "bars": r.bars,
+                        "attempts": r.attempts,
+                        "last_error": r.last_error,
+                        "last_attempt_at": r.last_attempt_at,
+                    }
+                    for r in log.records()
+                ],
+            }
+
+        return JSONResponse(await run_in_threadpool(_load))
+
     @app.get("/api/v1/coverage/options")
     async def api_coverage_options() -> JSONResponse:
         """GET /api/v1/coverage/options — per-underlying expired-options lake coverage.

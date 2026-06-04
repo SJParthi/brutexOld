@@ -49,7 +49,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 from time import sleep as _time_sleep
 
 import structlog
@@ -60,6 +60,7 @@ from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.session import filter_intraday_session, is_session_exempt
 from brutex.data.sink import BarSink
+from brutex.data.window_status import WindowStatusLog
 from brutex.models import Instrument
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import PoolRunParallel, workers_to_saturate
@@ -194,6 +195,7 @@ def ingest_spot(
     end: date,
     pace: Pacer | None = None,
     coverage: FetchCoverage | None = None,
+    status_log: WindowStatusLog | None = None,
     on_rate_limit: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
     run_parallel: RunParallel | None = None,
@@ -319,6 +321,7 @@ def ingest_spot(
                 window=window,
                 pace=pace,
                 coverage=coverage,
+                status_log=status_log,
                 on_rate_limit=on_rate_limit,
                 on_success=on_success,
                 pull_id=pull_id,
@@ -443,6 +446,7 @@ def _ingest_one_window(
     window: tuple[date, date],
     pace: Pacer | None,
     coverage: FetchCoverage | None,
+    status_log: WindowStatusLog | None,
     on_rate_limit: Callable[[], None] | None,
     on_success: Callable[[], None] | None,
     pull_id: str,
@@ -516,6 +520,16 @@ def _ingest_one_window(
                 in_run_retry=not rate_limited,
                 **series_fields,
             )
+            # Record the FAILED outcome in the browsable status table (DEC-WINDOW-
+            # STATUS-001) so the operator SEES which windows errored + how often.
+            if status_log is not None:
+                status_log.record(
+                    key,
+                    raw_bars=0,
+                    error_type=type(exc).__name__,
+                    bars_appended=0,
+                    now=datetime.now(UTC),
+                )
             return _WindowOutcome(transient=1, window=retry_window, error_type=type(exc).__name__)
         raise
     # Drop pre-open / post-close bars before they enter the lake — intraday
@@ -581,6 +595,18 @@ def _ingest_one_window(
     # ``result.bars_appended``) is the signal: a re-pull whose bars are all
     # already in the lake dedups to ``bars_appended == 0`` via keep-first yet the
     # window IS complete, so it must stay marked.
+    # Record the window's outcome in the browsable status table (DEC-WINDOW-
+    # STATUS-001): SUCCESS when the vendor returned bars, EMPTY on a clean 0-bar
+    # response. The mark below (skip-ledger) and this record share the same
+    # ``raw_bars > 0`` SUCCESS condition, so the two never disagree.
+    if status_log is not None:
+        status_log.record(
+            key,
+            raw_bars=len(raw_bars),
+            error_type=None,
+            bars_appended=result.bars_appended,
+            now=datetime.now(UTC),
+        )
     if coverage is not None and len(raw_bars) > 0:
         coverage.mark_complete(key)
     # Signal a clean window so the controller can recover the rate.
