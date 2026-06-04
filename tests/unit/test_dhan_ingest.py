@@ -19,6 +19,7 @@ from brutex.adapters.dhan.client import DhanClient
 from brutex.adapters.dhan.errors import DhanBadRequestError
 from brutex.adapters.dhan.ingest import IngestReport, ingest_spot
 from brutex.data.models import CandleBar
+from brutex.data.parquet_writer import BarConflict, WriteResult
 from brutex.data.sink import SinkAppendResult
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.observability.correlation import pull_id_scope
@@ -464,3 +465,199 @@ class TestIngestSpotLogging:
                 end=date(2021, 8, 1),
             )
         assert _events(logs, "ingest.window")[0]["pull_id"] == ""
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Conflict counting + logging (DEC-LAKE-CONFLICT-KEEPFIRST-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _make_conflict(
+    *,
+    ts_epoch: int = 1609733100,
+    stored_close: str = "105.00",
+    vendor_close: str = "104.50",
+) -> BarConflict:
+    """Build a minimal :class:`BarConflict` for injection into a fake sink result."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    ts = datetime.fromtimestamp(ts_epoch, tz=UTC)
+    stored = CandleBar(
+        timestamp=ts,
+        open=Decimal("100.00"),
+        high=Decimal("110.00"),
+        low=Decimal("90.00"),
+        close=Decimal(stored_close),
+        volume=1,
+        open_interest=None,
+    )
+    vendor = CandleBar(
+        timestamp=ts,
+        open=Decimal("100.00"),
+        high=Decimal("110.00"),
+        low=Decimal("90.00"),
+        close=Decimal(vendor_close),
+        volume=1,
+        open_interest=None,
+    )
+    return BarConflict(timestamp=ts, stored=stored, vendor=vendor)
+
+
+class _ConflictSink:
+    """A :class:`BarSink` that injects pre-built conflicts into its :class:`SinkAppendResult`.
+
+    Mirrors the keep-first scenario: the sink returns write_results that carry
+    ``BarConflict`` objects so the ingest spine's conflict-logging path is
+    exercised without a real Parquet writer.
+    """
+
+    def __init__(self, conflicts: tuple[BarConflict, ...], bars_appended: int = 0) -> None:
+        from pathlib import Path
+
+        self._conflicts = conflicts
+        self._bars_appended = bars_appended
+        self._fake_path = Path("/dev/null")
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+    ) -> SinkAppendResult:
+        del exchange, segment, symbol, interval, bars
+        from datetime import UTC, datetime
+
+        ts = datetime(2021, 1, 4, 4, 15, tzinfo=UTC)
+        wr = WriteResult(
+            path=self._fake_path,
+            row_count=1,
+            raw_hash="a" * 64,
+            first_ts=ts,
+            last_ts=ts,
+            bytes_written=0,
+            conflicts=self._conflicts,
+        )
+        return SinkAppendResult(
+            bars_appended=self._bars_appended,
+            partitions_written=1,
+            write_results=(wr,),
+        )
+
+
+class TestPaceRps:
+    """_pace_rps uses the controller's live rate when available."""
+
+    def test_returns_controller_rps_when_valid(self) -> None:
+        """When pace.__self__ has a positive current_rps, _pace_rps returns it."""
+        from brutex.adapters.dhan.ingest import _pace_rps  # type: ignore[reportPrivateUsage]
+
+        class _FakeController:
+            current_rps: float = 3.5
+
+        controller = _FakeController()
+
+        def _pace() -> None:
+            pass
+
+        _pace.__self__ = controller  # type: ignore[attr-defined]
+        assert _pace_rps(_pace) == 3.5  # type: ignore[arg-type]
+
+    def test_falls_back_to_5_when_no_controller(self) -> None:
+        """When pace has no __self__ (a plain callable), falls back to 5.0."""
+        from brutex.adapters.dhan.ingest import _pace_rps  # type: ignore[reportPrivateUsage]
+
+        def _pace() -> None:
+            pass
+
+        assert _pace_rps(_pace) == 5.0
+
+    def test_falls_back_to_5_when_pace_is_none(self) -> None:
+        from brutex.adapters.dhan.ingest import _pace_rps  # type: ignore[reportPrivateUsage]
+
+        assert _pace_rps(None) == 5.0
+
+
+class TestIngestSpotConflicts:
+    """Conflict counting + logging path (DEC-LAKE-CONFLICT-KEEPFIRST-001).
+
+    When the sink returns BarConflict objects in write_results, ingest_spot MUST:
+    - NOT raise
+    - Emit one ``ingest.conflict`` WARNING per conflict
+    - Aggregate the total count into IngestReport.conflicts
+    - Carry the count through ingest.series
+    """
+
+    def test_conflict_emits_warning_log_and_counts_in_report(self) -> None:
+        conflict = _make_conflict(stored_close="105.00", vendor_close="104.50")
+        sink = _ConflictSink(conflicts=(conflict,), bars_appended=0)
+        with capture_logs() as logs, pull_id_scope("conflict001"):
+            report = ingest_spot(
+                _adapter(),
+                sink,
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+            )
+        # Does NOT raise — the pull finishes.
+        assert report.conflicts == 1
+        # One ingest.conflict WARNING emitted.
+        conflict_logs = _events(logs, "ingest.conflict")
+        assert len(conflict_logs) == 1
+        (cl,) = conflict_logs
+        assert cl["log_level"] == "warning"
+        assert cl["pull_id"] == "conflict001"
+        assert cl["stored_close"] == "105.00"
+        assert cl["vendor_close"] == "104.50"
+        assert cl["symbol"] == "NIFTY"
+        assert cl["interval"] == "1day"
+
+    def test_conflict_count_appears_in_series_log(self) -> None:
+        conflict = _make_conflict()
+        sink = _ConflictSink(conflicts=(conflict,), bars_appended=0)
+        with capture_logs() as logs, pull_id_scope("conflict002"):
+            ingest_spot(
+                _adapter(),
+                sink,
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+            )
+        (series,) = _events(logs, "ingest.series")
+        assert series["conflicts"] == 1
+
+    def test_no_conflict_emits_no_warning(self) -> None:
+        """A clean window (no conflicts) must emit zero ingest.conflict events."""
+        sink = _Sink()
+        with capture_logs() as logs:
+            report = ingest_spot(
+                _adapter(),
+                sink,
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+            )
+        assert report.conflicts == 0
+        assert _events(logs, "ingest.conflict") == []
+
+    def test_multiple_conflicts_aggregated_across_windows(self) -> None:
+        """Two conflicts per window across three windows → 6 total conflicts."""
+        c1 = _make_conflict(ts_epoch=1609733100, stored_close="105.00", vendor_close="104.00")
+        c2 = _make_conflict(ts_epoch=1609733160, stored_close="106.00", vendor_close="105.50")
+        sink = _ConflictSink(conflicts=(c1, c2), bars_appended=0)
+        report = ingest_spot(
+            _adapter(),
+            sink,
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),  # 3 windows
+        )
+        # 3 windows × 2 conflicts each = 6 total.
+        assert report.conflicts == 6

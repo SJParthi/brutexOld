@@ -89,6 +89,14 @@ class IngestReport:
     bars_appended: int
     transient_failures: int
     skipped_windows: int = 0
+    conflicts: int = 0
+    """Vendor re-statements detected during this run (DEC-LAKE-CONFLICT-KEEPFIRST-001).
+
+    A conflict is a timestamp already in the lake whose stored bar differed from
+    the incoming bar.  The stored bar is kept (keep-first — never overwritten,
+    Golden Rule #7); this count is the total number of such discrepancies across
+    all windows in the series.  Zero on a clean pull or a coverage-skipped pull.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,14 +106,17 @@ class _WindowOutcome:
     Exactly one of the count fields is non-zero per window: a SKIPPED window
     (already in coverage) sets ``skipped=1``; a TRANSIENT failure sets
     ``transient=1``; a clean fetch sets ``bars_appended`` to the rows persisted
-    (possibly 0 when the session filter drops every bar). The controller thread
-    sums these across windows — addition is commutative, so worker-completion
-    order never changes the :class:`IngestReport` (Rule #4 / Rule #7).
+    (possibly 0 when the session filter drops every bar). ``conflicts`` tallies
+    vendor re-statements logged but kept-first in this window.  The controller
+    thread sums these across windows — addition is commutative, so
+    worker-completion order never changes the :class:`IngestReport`
+    (Rule #4 / Rule #7).
     """
 
     bars_appended: int = 0
     transient: int = 0
     skipped: int = 0
+    conflicts: int = 0
 
 
 def _windows(interval: str, start: date, end: date) -> list[tuple[date, date]]:
@@ -246,6 +257,7 @@ def ingest_spot(
     bars_appended = 0
     transient = 0
     skipped = 0
+    conflicts = 0
     # Drain the window fan-out on the caller thread, summing the per-window
     # outcomes. A captured terminal DhanError is re-raised here so the outer
     # quarantine behaves exactly as it did with the sequential spine; any other
@@ -258,6 +270,7 @@ def ingest_spot(
             bars_appended += result.bars_appended
             transient += result.transient
             skipped += result.skipped
+            conflicts += result.conflicts
             continue
         exc = outcome.exc
         if exc is None:  # pragma: no cover — a failed outcome always carries exc
@@ -272,6 +285,7 @@ def ingest_spot(
         bars_appended=bars_appended,
         transient_failures=transient,
         skipped_windows=skipped,
+        conflicts=conflicts,
         **series_fields,
     )
     return IngestReport(
@@ -279,6 +293,7 @@ def ingest_spot(
         bars_appended=bars_appended,
         transient_failures=transient,
         skipped_windows=skipped,
+        conflicts=conflicts,
     )
 
 
@@ -403,13 +418,28 @@ def _ingest_one_window(
         bars_appended=result.bars_appended,
         **series_fields,
     )
+    # Conflict nook: log each vendor re-statement at WARNING so the operator can
+    # see EXACTLY what Dhan changed.  The stored bar is kept (keep-first —
+    # never overwritten, DEC-LAKE-CONFLICT-KEEPFIRST-001 / Golden Rule #7).
+    window_conflicts = 0
+    for wr in result.write_results:
+        for c in wr.conflicts:
+            window_conflicts += 1
+            _LOG.warning(
+                "ingest.conflict",
+                pull_id=pull_id,
+                timestamp=c.timestamp.isoformat(),
+                stored_close=str(c.stored.close),
+                vendor_close=str(c.vendor.close),
+                **series_fields,
+            )
     # The window pulled cleanly — record it so a re-pull skips it.
     if coverage is not None:
         coverage.mark_complete(key)
     # Signal a clean window so the controller can recover the rate.
     if on_success is not None:
         on_success()
-    return _WindowOutcome(bars_appended=result.bars_appended)
+    return _WindowOutcome(bars_appended=result.bars_appended, conflicts=window_conflicts)
 
 
 __all__ = [

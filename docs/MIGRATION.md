@@ -4988,6 +4988,36 @@ superseded.
 
 ---
 
+## DEC-LAKE-CONFLICT-KEEPFIRST-001 (2026-06-04)
+
+449. **DEC-LAKE-CONFLICT-KEEPFIRST-001 — KEEP-FIRST conflict policy: when Dhan re-states a historical bar (same timestamp, different OHLCV/OI) the lake keeps the stored bar, records the discrepancy, and continues the pull — replacing the prior abort-on-conflict behaviour that killed the whole pull (real failure: NIFTY 2021-09-16 close 17513.80→17512.45 aborted the whole NIFTY ingest)** (2026-06-04, operator decision).
+
+**The problem (verbatim from the failure log):** `WriterError: partition … CONFLICTING bar at 2021-09-16T03:45:00Z — stored close 17513.80, vendor close 17512.45` killed the entire NIFTY pull on a tiny re-statement. Dhan occasionally back-adjusts a bar (micro-correction, corporate action, or transport noise); the previous policy treated ANY such re-statement as a fatal error.
+
+**The operator choice:** KEEP-FIRST + LOG + CONTINUE. The STORED bar wins unconditionally — once a bar is in the lake it is never overwritten (Golden Rule #7: reproducibility). The discrepancy is recorded as a `BarConflict` and surfaced as a WARNING so the operator sees exactly what the vendor changed. The pull finishes; the report counts every conflict across all windows.
+
+**What shipped:**
+
+- `brutex/data/parquet_writer.py` — `BarConflict(timestamp, stored, vendor)` frozen dataclass (DEC-LAKE-CONFLICT-KEEPFIRST-001 / Golden Rule #7 cited in NumPy docstring); `WriteResult.conflicts: tuple[BarConflict, ...] = ()` (defaulted so existing constructions are valid); `_merge_write` no longer raises on a value conflict — it appends a `BarConflict` to a local list, keeps `prev` in `merged` (stored bar wins), does NOT increment `added`, and propagates `conflicts` on BOTH the `added==0` early-return path (no rewrite needed) and the `added>0` rewrite path. The fresh-write path (no existing file) returns `conflicts=()`.
+
+- `brutex/adapters/dhan/ingest.py` — `_WindowOutcome.conflicts: int = 0`; `IngestReport.conflicts: int = 0`; `_ingest_one_window` iterates `result.write_results` and for each `wr.conflicts` emits one `ingest.conflict` WARNING per discrepancy (`pull_id`, `timestamp`, `stored_close`, `vendor_close`, `symbol`, `interval`) and counts them; `ingest_spot` sums `result.conflicts` across windows into the series total and includes it in the `ingest.series` DEBUG line.
+
+- `tests/integration/test_data_lake_real.py` — `test_same_timestamp_different_value_raises` (which asserted the OLD abort behaviour) replaced by `test_same_timestamp_different_value_keep_first` asserting: no raise; `WriteResult.conflicts` has 1 entry; stored bar intact; on-disk Parquet is unchanged.
+
+- `tests/unit/test_parquet_writer.py` — new `TestBarConflict` class (4 cases: pure conflict/added==0/no-rewrite, conflict-alongside-new-bar/added>0/rewrite-keeps-stored, identical-rewrite/empty-conflicts, fresh-write/empty-conflicts) + `TestWriterErrors` (empty-bars, multi-partition, atomic-write exception cleanup, polars-import error). Reaches 100% line+branch on `brutex.data.parquet_writer`.
+
+- `tests/unit/test_dhan_ingest.py` — `_ConflictSink` fake + `TestIngestSpotConflicts` (4 cases: single conflict emits WARNING log with correct fields, conflict count in `ingest.series`, clean window emits no WARNING, multiple conflicts aggregated across windows). Reaches 100% line+branch on `brutex.adapters.dhan.ingest`.
+
+**Honest envelope (Golden Rule #10):**
+- ✅ Keep-first is proven by the integration test (real Parquet round-trip + on-disk value asserted) and the unit tests (all paths at 100% line+branch).
+- ✅ `ingest.conflict` WARNING is structlog-verified; the count surfaces in `IngestReport.conflicts` + `ingest.series`.
+- 🟡 A gap-verifier that asserts COMPLETENESS (every stored bar has a hash-chain entry proving it was never overwritten) is a SEPARATE follow-up, not this PR — the keep-first invariant here is tested at the merge-write level, not end-to-end audit-chain level.
+- 🚫 Does NOT change retry logic, skip logic, or rate-limiting — conflict detection is purely additive.
+
+**Builds on:** DEC-LAKE-MERGE-WRITE-001 (the merge-on-write that this extends) · DEC-DHAN-PARALLEL-WINDOWS-001 (the per-partition lock under which `_merge_write` runs) · CLAUDE.md §2 Golden Rule #7 (idempotence) · §12 (100% coverage gate).
+
+---
+
 ## Acknowledgement
 
 The 2026-05-15 pivot was driven by a 4-agent hostile-review pass.
