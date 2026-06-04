@@ -126,6 +126,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Install fno_math Rust extension
         run: pip install ./rust/fno-math
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # BruteX's 52-condition vocab delegates to the shared Rust core
+        # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
+        # + maturin/abi3 build as fno-math above (identical edition 2024 /
+        # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
+        run: pip install ./rust/trading-core
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -173,6 +179,12 @@ jobs:
         # build the cdylib + install it into the env so the unit tests
         # can `import fno_math`.
         run: pip install ./rust/fno-math
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # BruteX's 52-condition vocab delegates to the shared Rust core
+        # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
+        # + maturin/abi3 build as fno-math above (identical edition 2024 /
+        # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
+        run: pip install ./rust/trading-core
       - name: pytest with coverage gate
         run: |
           # Coverage floor is 90% for P1. The [tool.coverage.run].omit list
@@ -1303,6 +1315,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Install fno_math Rust extension
         run: pip install ./rust/fno-math
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # BruteX's 52-condition vocab delegates to the shared Rust core
+        # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
+        # + maturin/abi3 build as fno-math above (identical edition 2024 /
+        # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
+        run: pip install ./rust/trading-core
       - name: pytest property tests
         run: |
           if [ -d tests/property ]; then
@@ -1346,6 +1364,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Install fno_math Rust extension
         run: pip install ./rust/fno-math
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # BruteX's 52-condition vocab delegates to the shared Rust core
+        # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
+        # + maturin/abi3 build as fno-math above (identical edition 2024 /
+        # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
+        run: pip install ./rust/trading-core
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -1393,6 +1417,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Install fno_math Rust extension
         run: pip install ./rust/fno-math
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # BruteX's 52-condition vocab delegates to the shared Rust core
+        # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
+        # + maturin/abi3 build as fno-math above (identical edition 2024 /
+        # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
+        run: pip install ./rust/trading-core
       - name: pytest golden tests
         run: |
           if [ -d tests/golden ]; then
@@ -1549,6 +1579,57 @@ jobs:
       # Math-stub verifier removed in DEC-P0-025 (PR #47) along with
       # rust/fno-math-py/ and brutex/math/. Track 1 backtest does not
       # need Greeks or a PyO3 wheel as of now.
+
+  rust-trading-core:
+    name: Rust (trading-core build + clippy + golden bit-identity test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/trading-core
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/trading-core -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      # DEC-SHARED-CORE-001 Phase 1: the golden bit-identity proof — the Rust
+      # vocab must reproduce every one of the 400 cases in
+      # tests/golden/fixtures/vocab_golden_vectors.json bit-for-bit (the same
+      # oracle the Python golden test reads). --release runs with overflow-checks.
+      - name: cargo test (golden bit-identity vs the Python oracle)
+        run: cargo test --release
+      # Verify the optional PyO3 binding (Phase-2 scaffold) still compiles. The
+      # ubuntu runner's python3 satisfies pyo3's abi3 build config (same as the
+      # fno-math job). The wheel itself is NOT built here (that is Phase 2).
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python
+      # DEC-SHARED-CORE-001 Phase 2a: prove the Python-callable PyO3 binding
+      # (trading_core.evaluate_from_raw) is bit-identical to the Python vocab —
+      # build the abi3 wheel with maturin, install it, and run the 400-case
+      # parity check against the same golden oracle. Isolated here (not the main
+      # Python test job) so a wheel-build issue can't destabilise that pipeline.
+      - name: Set up Python (binding parity check)
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Build wheel + verify the Python binding is bit-identical (Phase 2a)
+        run: |
+          pip install maturin
+          maturin build --release --out dist
+          pip install dist/*.whl
+          python ../../scripts/check_vocab_rust_parity.py
 
   # ─────────────────────────────────────────────────────────────────
   # BANNED PATTERNS — no print, no TODO in prod, no .env*
@@ -1844,6 +1925,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Install fno_math Rust extension
         run: pip install ./rust/fno-math
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # BruteX's 52-condition vocab delegates to the shared Rust core
+        # (trading_core.evaluate_with_levels). Same dtolnay/rust-toolchain@stable
+        # + maturin/abi3 build as fno-math above (identical edition 2024 /
+        # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
+        run: pip install ./rust/trading-core
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
@@ -2181,6 +2268,7 @@ jobs:
       - docs
       - licenses
       - rust
+      - rust-trading-core
       - banned
       - secrets
       # fno-math-drift moved to advisory-only on 2026-05-15.
@@ -2245,6 +2333,7 @@ jobs:
           echo "  docs:          ${{ needs.docs.result }}"
           echo "  licenses:      ${{ needs.licenses.result }}"
           echo "  rust:          ${{ needs.rust.result }}"
+          echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
           echo "  secrets:       ${{ needs.secrets.result }}"
           echo "  codeql:        ${{ needs.codeql.result }}"
@@ -2271,6 +2360,7 @@ jobs:
             "${{ needs.docs.result }}" \
             "${{ needs.licenses.result }}" \
             "${{ needs.rust.result }}" \
+            "${{ needs.rust-trading-core.result }}" \
             "${{ needs.banned.result }}" \
             "${{ needs.secrets.result }}" \
             "${{ needs.codeql.result }}" \

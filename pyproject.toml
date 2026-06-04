@@ -231,6 +231,7 @@ module = [
     "fastapi", "fastapi.*",
     "uvicorn", "uvicorn.*",
     "fno_math_py", "fno_math_py.*",
+    "trading_core", "trading_core.*",  # DEC-SHARED-CORE-001 #441: PyO3 shared 52-vocab core — no Python stubs published (mirrors fno_math_py / fastbloom_rs)
     "structlog", "structlog.*",  # DEC-P0-038: structlog runtime dep — type stubs not yet packaged
     "fastbloom_rs", "fastbloom_rs.*",  # DEC-P0-047: PyO3-backed Rust Bloom — no Python stubs published
     # DEC-P0-055 (PR-N+2): `fno_math` removed — wheel now ships bundled
