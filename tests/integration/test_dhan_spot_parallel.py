@@ -27,7 +27,7 @@ import heapq
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -67,12 +67,29 @@ def _index(symbol: str, *, token: int = 1) -> Instrument:
     )
 
 
-class _CountingAdapter:
-    """Fake spot adapter: returns one bar per window, counting fetch calls.
+#: One in-session 1-minute bar so a FETCHED window is marked complete — the ingest
+#: marks a window only when the vendor returned bars (DEC-LAKE-RECONCILE-001; an
+#: empty 0-bar response is left un-marked → re-pulled). The :class:`NullBarSink`
+#: discards it, so call cadence is unchanged; only the coverage MARK (and thus the
+#: idempotent-re-pull skip) depends on ``raw_bars > 0``.
+_ONE_BAR = CandleBar(
+    timestamp=datetime(2021, 1, 4, 4, 5, tzinfo=UTC),  # 04:05 UTC = 09:35 IST, in session
+    open=Decimal("100.00"),
+    high=Decimal("110.00"),
+    low=Decimal("90.00"),
+    close=Decimal("105.00"),
+    volume=1,
+    open_interest=None,
+)
 
-    The bar list is real :class:`CandleBar` rows so the whole ``ingest_spot``
-    session-filter → sink-append spine runs; the timing is modelled by the
-    simulator, not by this adapter (it never sleeps).
+
+class _CountingAdapter:
+    """Fake spot adapter: returns ONE in-session bar per window, counting fetch calls.
+
+    The single :class:`CandleBar` exists so a fetched window is marked complete
+    (DEC-LAKE-RECONCILE-001 marks only on ``raw_bars > 0``); the
+    :class:`NullBarSink` discards it, so it never affects bar counts. The timing
+    is modelled by the simulator, not by this adapter (it never sleeps).
     """
 
     def __init__(self) -> None:
@@ -91,7 +108,7 @@ class _CountingAdapter:
         with self._lock:
             self.calls += 1
         del symbol, exchange, interval, start, end
-        return []  # zero bars is fine — we measure call cadence, not bar counts
+        return [_ONE_BAR]
 
 
 @dataclass
