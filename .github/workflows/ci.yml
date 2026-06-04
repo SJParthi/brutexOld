@@ -669,6 +669,12 @@ jobs:
           else
             echo "(brutex.vocabulary.bits test file not present yet — gate inactive)"
           fi
+          # 19b2 · brutex.vocabulary.describe — combo explainer (DEC-COMBO-EXPLAIN-001)
+          if compgen -G "tests/unit/test_vocabulary_describe.py" > /dev/null; then
+            pytest --cov=brutex.vocabulary.describe --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_vocabulary_describe.py
+          else
+            echo "(brutex.vocabulary.describe test file not present yet — gate inactive)"
+          fi
           # 19c · brutex.doctor (85 stmts, 20 branches, 32 tests)
           if compgen -G "tests/unit/test_doctor.py" > /dev/null; then
             pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py
