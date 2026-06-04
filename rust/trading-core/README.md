@@ -51,9 +51,13 @@ The pure-Rust core links **no** Python (the PyO3 surface is behind the optional
   runtime** (`brutex/vocabulary/evaluator.py` is a thin shim over
   `evaluate_with_levels`), CI-gated across every job that imports
   `brutex.vocabulary`; the `CLAUDE.md` self-containment reversal landed.
-- ✅ **DONE (Phase 2c):** `compute_pivot_levels` / `compute_fib_levels` are exposed
-  to Python and a parity test pins Python==Rust bit-for-bit on every build — the
-  pivot/fib math can no longer drift between the two copies.
+- ✅ **DONE (Phase 2c):** `compute_pivot_levels` / `compute_fib_levels` exposed to
+  Python + a parity test pinning them bit-for-bit on every build.
+- ✅ **DONE (Phase 2d):** BruteX's `brutex/indicators/compute_pivot_levels` /
+  `compute_fib_levels` now **delegate** to this crate — the Python copy of the
+  pivot/Fib arithmetic was REMOVED, so the math is **single-source (Rust)**, not
+  "two copies kept identical". The wrappers keep only the input validation + the
+  dataclass packing (verified bit-exact against the TradingView oracle tests).
 - 🚫 **NOT done:** **EMA / day-extremes / prev-day-OHLC are NOT in this crate** —
   they stay in Python and feed the evaluator as precomputed inputs (EMA is a
   stateful recurrence). **TickVault adoption (Phase 3) is 0%** — no TickVault code

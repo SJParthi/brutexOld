@@ -111,6 +111,16 @@ jobs:
           cd rust/fno-math
           maturin develop --release
 
+      - name: Build trading_core (shared 52-vocab + pivot/Fib kernel)
+        run: |
+          . .venv/bin/activate
+          # DEC-SHARED-CORE-001 Phase 2b/2d: brutex.vocabulary + brutex.indicators
+          # delegate to the trading_core wheel; the throughput canary imports them
+          # transitively, so this self-hosted job must build it too (maturin is
+          # already installed by the fno_math step above).
+          cd rust/trading-core
+          maturin develop --release
+
       - name: Run absolute-throughput gate
         run: |
           . .venv/bin/activate

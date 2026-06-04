@@ -43,6 +43,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
+import trading_core
+
 
 @dataclass(frozen=True)
 class PivotLevels:
@@ -88,15 +90,6 @@ class PivotLevels:
         return mapping[key]
 
 
-def _round_half_even(x: float) -> int:
-    """Round-half-to-even (banker's rounding) for deterministic i64 conversion.
-
-    Matches IEEE 754 default rounding mode and the FPCR pin per
-    CLAUDE.md §4 / spec §Non-Negotiable Correctness #11.
-    """
-    return round(x)
-
-
 def compute_pivot_levels(
     trading_day: date,
     pdh_paisa: int,
@@ -104,6 +97,13 @@ def compute_pivot_levels(
     pdc_paisa: int,
 ) -> PivotLevels:
     """Compute Floor Trader pivot points for a trading day.
+
+    The arithmetic is delegated to the shared Rust ``trading_core`` crate
+    (``DEC-SHARED-CORE-001``, ``docs/MIGRATION.md`` #441) — the **single source
+    of truth** for the pivot math, so BruteX and TickVault compute identical
+    levels by construction. This wrapper keeps the data-corruption validation
+    (which the Rust core assumes the caller performs) and packs the result into
+    the :class:`PivotLevels` dataclass.
 
     Args:
         trading_day: The trading day these levels apply to (today).
@@ -131,25 +131,10 @@ def compute_pivot_levels(
             f"data corruption on {trading_day}"
         )
 
-    # Compute pivot from the standard Floor Trader formula: average of
-    # previous day's high, low, and close (rounded to whole paisa).
-    p = _round_half_even((pdh_paisa + pdl_paisa + pdc_paisa) / 3.0)
-
-    range_paisa = pdh_paisa - pdl_paisa  # H - L
-    # NOTE: we use the integer P for downstream formulas to match how
-    # TradingView and AmiBroker display rounded pivot values. This keeps
-    # the engine's pivot values aligned with what the operator sees on chart.
-    p_minus_pdl = p - pdl_paisa
-    pdh_minus_p = pdh_paisa - p
-
-    r1 = 2 * p - pdl_paisa
-    s1 = 2 * p - pdh_paisa
-    r2 = p + range_paisa
-    s2 = p - range_paisa
-    r3 = pdh_paisa + 2 * p_minus_pdl
-    s3 = pdl_paisa - 2 * pdh_minus_p
-    r4 = pdh_paisa + 3 * p_minus_pdl
-    s4 = pdl_paisa - 3 * pdh_minus_p
+    # Shared Rust core returns [r4, r3, r2, r1, p, s1, s2, s3, s4] (int64 paisa).
+    r4, r3, r2, r1, p, s1, s2, s3, s4 = trading_core.compute_pivot_levels(
+        pdh_paisa, pdl_paisa, pdc_paisa
+    )
 
     return PivotLevels(
         trading_day=trading_day,
