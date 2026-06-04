@@ -66,6 +66,7 @@ __all__ = [
     "count_supermasks",
     "count_supermasks_reference",
     "evaluate_mask",
+    "iter_masks_k_of_bits",
     "iter_masks_k_of_n",
     "mask_to_bits",
     "mask_to_entry_signals",
@@ -554,6 +555,61 @@ def iter_masks_k_of_n(k: int, n: int = VOCAB_BITS) -> Iterator[int]:
         )
         raise ValueError(msg)
     for positions in combinations(range(n), k):
+        mask = 0
+        for p in positions:
+            mask |= 1 << p
+        yield mask
+
+
+def iter_masks_k_of_bits(bits: Sequence[int], k: int) -> Iterator[int]:
+    """Yield every u64 mask with exactly ``k`` of the GIVEN condition bits set.
+
+    Generalises :func:`iter_masks_k_of_n` — which enumerates over the first ``n``
+    *contiguous* bits ``0..n-1`` — to an **arbitrary subset** of condition bits, so
+    a sweep can brute-force over a chosen handful of the 52 conditions (e.g. only
+    the pivot + Fibonacci bits), ``k`` at a time, instead of a contiguous prefix.
+    Positions are de-duplicated and sorted ascending, so the iteration order is
+    deterministic (lexicographic on the sorted positions) and the total count is
+    ``count_combos(k, len(set(bits)))``.
+
+    Parameters
+    ----------
+    bits : Sequence[int]
+        The condition bit positions to choose from, each in
+        ``[0, MAX_VOCAB_BITS)``. Duplicates are ignored (set semantics).
+    k : int
+        Number of bits to set in each yielded mask. ``0 <= k <= len(set(bits))``.
+
+    Yields
+    ------
+    int
+        u64 masks with exactly ``k`` of the chosen bits set, lexicographic order.
+
+    Raises
+    ------
+    ValueError
+        If any position is out of range ``[0, MAX_VOCAB_BITS)``, or ``k`` is
+        outside ``[0, len(set(bits))]``.
+
+    Examples
+    --------
+    >>> list(iter_masks_k_of_bits([0, 3, 5], 2))
+    [9, 33, 40]
+    >>> list(iter_masks_k_of_bits([5, 5, 5], 1))  # duplicates ignored
+    [32]
+    >>> list(iter_masks_k_of_bits([7, 2], 0))
+    [0]
+    """
+    unique = sorted(set(bits))
+    for pos in unique:
+        if pos < 0 or pos >= MAX_VOCAB_BITS:
+            msg = f"iter_masks_k_of_bits: position {pos} out of range [0, {MAX_VOCAB_BITS})"
+            raise ValueError(msg)
+    n = len(unique)
+    if k < 0 or k > n:
+        msg = f"iter_masks_k_of_bits: invalid k={k} for {n} unique bits (require 0 <= k <= n)"
+        raise ValueError(msg)
+    for positions in combinations(unique, k):
         mask = 0
         for p in positions:
             mask |= 1 << p

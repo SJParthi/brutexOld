@@ -29,6 +29,7 @@ from brutex.engine.combo_mask import (
     count_supermasks,
     count_supermasks_reference,
     evaluate_mask,
+    iter_masks_k_of_bits,
     iter_masks_k_of_n,
     mask_to_bits,
     mask_to_entry_signals,
@@ -615,3 +616,61 @@ class TestMaskToEntrySignals:
     def test_equals_per_bar_evaluate_mask(self) -> None:
         bits = [0, 1, 2, 3, 4, 5]
         assert mask_to_entry_signals(bits, 0b10) == [evaluate_mask(b, 0b10) for b in bits]
+
+
+class TestIterMasksKOfBits:
+    """K-of-an-ARBITRARY-condition-subset generator (DEC-SWEEP-SUBSET-001).
+
+    Generalises ``iter_masks_k_of_n`` (first n contiguous bits) to a chosen subset
+    of the 52 condition bits, so a sweep can brute-force over e.g. only the pivot +
+    Fibonacci bits, k at a time.
+    """
+
+    def test_two_of_three_chosen_bits(self) -> None:
+        # bits {0,3,5}, k=2 → {0,3}=9, {0,5}=33, {3,5}=40 (lexicographic).
+        assert list(iter_masks_k_of_bits([0, 3, 5], 2)) == [9, 33, 40]
+
+    def test_duplicates_ignored(self) -> None:
+        assert list(iter_masks_k_of_bits([5, 5, 5], 1)) == [32]
+
+    def test_unsorted_input_sorted_deterministically(self) -> None:
+        # Order of the input bits does not change the (sorted) enumeration order.
+        assert list(iter_masks_k_of_bits([5, 0, 3], 2)) == [9, 33, 40]
+
+    def test_k_zero_yields_empty_mask(self) -> None:
+        assert list(iter_masks_k_of_bits([7, 2], 0)) == [0]
+
+    def test_k_equals_n_yields_full_mask(self) -> None:
+        # All chosen bits set at once → a single mask.
+        assert list(iter_masks_k_of_bits([1, 4, 9], 3)) == [bits_to_mask(1, 4, 9)]
+
+    def test_count_matches_count_combos(self) -> None:
+        bits = [2, 7, 11, 20, 41]
+        for k in range(len(bits) + 1):
+            assert len(list(iter_masks_k_of_bits(bits, k))) == count_combos(k, len(bits))
+
+    def test_every_mask_has_exactly_k_chosen_bits(self) -> None:
+        bits = [3, 8, 50, 63]
+        for mask in iter_masks_k_of_bits(bits, 2):
+            chosen = [b for b in mask_to_bits(mask) if b in bits]
+            assert len(chosen) == 2
+            assert popcount(mask) == 2
+
+    def test_negative_position_raises(self) -> None:
+        with pytest.raises(ValueError, match="out of range"):
+            list(iter_masks_k_of_bits([-1, 3], 1))
+
+    def test_position_at_or_above_max_raises(self) -> None:
+        with pytest.raises(ValueError, match="out of range"):
+            list(iter_masks_k_of_bits([0, MAX_VOCAB_BITS], 1))
+
+    def test_k_too_large_raises(self) -> None:
+        with pytest.raises(ValueError, match="invalid k"):
+            list(iter_masks_k_of_bits([0, 1, 2], 4))
+
+    def test_k_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match="invalid k"):
+            list(iter_masks_k_of_bits([0, 1, 2], -1))
+
+    def test_empty_bits_k_zero_yields_empty_mask(self) -> None:
+        assert list(iter_masks_k_of_bits([], 0)) == [0]

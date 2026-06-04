@@ -110,21 +110,33 @@ bars into a *ranked combo list*.
 | Trade simulation (SL/TP, 15:20 forced exit) | ✅ BUILT |
 | Metrics (win-rate, profit-factor, Sharpe, drawdown) | ✅ BUILT |
 | Results store (Parquet sink + top-K query) | ✅ BUILT |
-| **The Stage 1B/2/3/4 funnel — the connective tissue** | 🔴 **NOT BUILT** |
-| **`ranking/` (gates + composite score)** | 🔴 **spec text only, zero code** |
-| `brutex sweep` CLI command | 🔴 **does not exist** |
+| **The mask → trade-result seam** (`mask_to_entry_signals`) | ✅ BUILT (DEC-SWEEP-DRIVER-001, #445) |
+| **Single-combo evaluator** (`evaluate_combo`) | ✅ BUILT (DEC-SWEEP-DRIVER-001, #445) |
+| **`ranking/` (5 hard gates + 7-term composite z-score)** | ✅ BUILT (DEC-RANKING-001 + DEC-RANKING-RISK-EFFICIENCY-001) |
+| **Mask-space sweep → ranked leaderboard** (`sweep_masks` / `rank_sweep` / `rank_sweep_over_bits`) | ✅ BUILT (DEC-SWEEP-SUBSET-001) |
+| Stage-1B coarse pre-filter wiring (via the built `count_supermasks`) | 🔴 **NOT WIRED** |
+| `ResultsStore` persistence wired to the leaderboard | 🔴 **NOT WIRED** |
+| Statistical robustness — lockbox Sharpe (CPCV / DSR train-test) | 🔴 **Stage-3, deferred** |
+| `brutex sweep` CLI command (lake bars → ranked table) | 🔴 **does not exist** |
 
-**The single missing seam:** converting a mask → a per-bar `entry_signals: bool[]`.
-Today there is `count_supermasks` (aggregate counts, for coarse pruning) and
-`evaluate_mask` (one bar) — but **nothing builds the full signal stream the trade
-simulator needs**, so Stage-1A's masks and the simulator literally cannot be joined.
+**The seam is closed (was the single missing piece):** `mask_to_entry_signals`
+converts a mask → a per-bar `entry_signals: bool[]` (DEC-SWEEP-DRIVER-001), so
+Stage-1A's masks now join the trade simulator. On top of it: `evaluate_combo` (one
+combo → full metrics), `sweep_masks` (many masks over one `bar_bits` build),
+`rank_combos` (the 5 gates + 7-term composite z-score), and `rank_sweep` /
+`rank_sweep_over_bits` (sweep an arbitrary K-of-chosen-condition-bits space → the
+ranked leaderboard, with an honest combo-count cap). **The funnel core is
+assembled** — given bars + a chosen condition subset, it returns the ranked
+top-combo today (proven on synthetic sessions; the gate discipline yields an empty
+board when no combo clears 30 trades / PF≥1.2 / DD≤30%, which is correct, not an
+error).
 
-**The next build (in flight):** `brutex/engine/sweep_driver.py` — a
-`one combo → one ranked ResultRow` walker: `bar_bits` → **new `mask_to_entry_signals`**
-→ `simulate_trades` → `compute_metrics` → implement the written **ranking** formula
-→ `ResultsStore` top-K. Run on SENSEX 1m = **the first genuine ranked top-combo
-table.** Statistical robustness (Stage-1B coarse pre-filter, then DSR/CPCV) layers on
-afterward without changing this contract.
+**The next build:** the `brutex sweep` CLI — load real lake bars (`get_bars`) for an
+`(instrument, TF, range)`, pick the condition subset + K, call `rank_sweep_over_bits`,
+persist the top-K to `ResultsStore`, and render the table. Run on SENSEX 1m = **the
+first genuine ranked top-combo table on real data.** Statistical robustness
+(Stage-1B coarse pre-filter, then the lockbox DSR/CPCV split) layers on afterward
+without changing the `rank_sweep_over_bits` contract.
 
 ---
 
@@ -133,8 +145,10 @@ afterward without changing this contract.
 > **The market-reading brain — the 52 conditions + pivots + Fibonacci — is now ONE
 > compiled Rust core, proven bit-identical to the chart and to a frozen answer-key,
 > CI-locked so it can never drift.** The brute-force *sweep* that ranks the
-> top-performing combo is the next build (every component exists; the driver that
-> joins them is in flight). EMA / day-extremes stay in Python on purpose (cheap,
+> top-performing combo is **assembled** — `rank_sweep_over_bits` sweeps a chosen
+> K-of-conditions space and returns the ranked leaderboard today; the remaining
+> build is the `brutex sweep` CLI that runs it over real lake bars + persists the
+> table. EMA / day-extremes stay in Python on purpose (cheap,
 > stateful — Rust FFI per bar would be slower, not faster). TickVault adoption is
 > not started. We state what is green, what is partial, and what is out of scope —
 > never an illusion.
