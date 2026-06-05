@@ -166,3 +166,15 @@ def test_reports_page_renders(tmp_path: Path) -> None:
     assert resp.status_code == 200
     assert "Pre-Open" in resp.text
     assert "Download .xlsx" in resp.text
+
+
+def test_reports_page_has_index_constituent_dropdown(tmp_path: Path) -> None:
+    # The index quick-select (DEC-REPORTS-INDEX-DROPDOWN-001): a dropdown that
+    # adds an index's constituent stocks in one go, wired to the (existing,
+    # cache-backed) /universe constituents endpoint — instead of clicking each
+    # stock. Guards the control + its endpoint wiring against silent regression.
+    html = _client(tmp_path).get("/reports").text
+    assert 'id="idxpick"' in html, "the index quick-select dropdown is missing"
+    assert "/api/v1/universe/index-constituents?symbol=" in html, (
+        "the dropdown must call the constituents endpoint to add an index's stocks"
+    )
