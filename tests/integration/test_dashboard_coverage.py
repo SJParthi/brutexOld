@@ -126,6 +126,12 @@ class TestCoverageApi:
         assert resp.status_code == 200
         assert "Coverage" in resp.text
         assert 'href="/coverage"' in resp.text
+        # The per-window status table is wired into the page (DEC-WINDOW-STATUS-001
+        # surfaced via DEC-COVERAGE-WINDOWS-UI-001): the section + its poll of
+        # /api/v1/coverage/windows must be present so the operator SEES which fetch
+        # windows are SUCCESS / EMPTY / FAILED without hitting the raw API.
+        assert "Fetch windows" in resp.text
+        assert "/api/v1/coverage/windows" in resp.text
 
 
 def _bar(ts: datetime, close: str) -> CandleBar:

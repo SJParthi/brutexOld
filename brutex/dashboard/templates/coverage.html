@@ -124,6 +124,14 @@
     <div id="spotpanel"><div class="empty">loading…</div></div>
   </div>
 
+  <div class="sectitle">
+    <h2>Fetch windows</h2>
+    <span class="meta" id="winmeta">— windows · per-window SUCCESS / EMPTY / FAILED (DEC-WINDOW-STATUS-001)</span>
+  </div>
+  <div class="panelwrap">
+    <div id="winpanel"><div class="empty">loading…</div></div>
+  </div>
+
 <script>
 /* ── BruteX coverage viewer (DEC-OPTIONS-COVERAGE-LAKE-001) ──
    Both sections read straight from the lake: the EXPIRED OPTIONS section
@@ -134,6 +142,8 @@
 const panel = document.getElementById("panel");
 const spotPanel = document.getElementById("spotpanel");
 const spotMeta = document.getElementById("spotmeta");
+const winPanel = document.getElementById("winpanel");
+const winMeta = document.getElementById("winmeta");
 const ulEl = document.getElementById("ul");
 const serEl = document.getElementById("ser");
 const barzEl = document.getElementById("barz");
@@ -244,10 +254,62 @@ async function poll() {
   }
 }
 
+/* ── FETCH WINDOWS (DEC-WINDOW-STATUS-001) ──
+   Read-only: one row per fetch window the ingest recorded in the durable
+   <lake>/window_status.json sidecar — so the operator SEES exactly which
+   windows are stored (SUCCESS), genuinely empty (EMPTY), or failed and needing
+   a re-pull (FAILED), with the attempt count + last error. Same escape-before-
+   innerHTML discipline as the sections above. */
+function winStatus(s) {
+  const v = String(s == null ? "" : s).toUpperCase();
+  const color = v === "SUCCESS" ? "#34d399" : v === "FAILED" ? "#f87171" : "#9aa4b2";
+  return '<span style="color:' + color + ';font-weight:700;">' + esc(v || "—") + "</span>";
+}
+
+function renderWindows(rows) {
+  if (!rows.length) {
+    winPanel.innerHTML = '<div class="empty">no fetch windows recorded yet — pull a symbol on /universe; each fetch window then logs SUCCESS / EMPTY / FAILED here (DEC-WINDOW-STATUS-001)</div>';
+    return;
+  }
+  const body = rows.map(r =>
+    "<tr>"
+    + '<td><span class="sym">' + esc(r.symbol) + "</span></td>"
+    + "<td>" + esc(r.market) + "</td>"
+    + "<td>" + esc(r.interval) + "</td>"
+    + "<td>" + esc(r.window_start || "") + "</td>"
+    + "<td>" + esc(r.window_end || "") + "</td>"
+    + "<td>" + winStatus(r.status) + "</td>"
+    + '<td class="num">' + esc(num(r.bars)) + "</td>"
+    + '<td class="num">' + esc(num(r.attempts)) + "</td>"
+    + "<td>" + esc(r.last_error || "") + "</td>"
+    + "</tr>"
+  ).join("");
+  winPanel.innerHTML =
+    "<table><thead><tr>"
+    + "<th>Symbol</th><th>Market</th><th>Interval</th><th>Window start</th><th>Window end</th>"
+    + "<th>Status</th><th>Bars</th><th>Attempts</th><th>Last error</th>"
+    + "</tr></thead><tbody>" + body + "</tbody></table>";
+}
+
+async function pollWindows() {
+  try {
+    const r = await fetch("/api/v1/coverage/windows");
+    if (!r.ok) { winMeta.textContent = "error " + r.status; return; }
+    const body = await r.json();
+    winMeta.textContent = (body.count ?? "—")
+      + " windows · per-window SUCCESS / EMPTY / FAILED (DEC-WINDOW-STATUS-001)";
+    renderWindows(body.windows || []);
+  } catch (e) {
+    winMeta.textContent = "offline";
+  }
+}
+
 poll();
 pollSpot();
+pollWindows();
 setInterval(poll, 4000);
 setInterval(pollSpot, 4000);
+setInterval(pollWindows, 4000);
 </script>
 </body>
 </html>
