@@ -391,6 +391,19 @@ class UniverseReport:
     persisted: int  # universe size = index + F&O-stock SPOT
     legs_dropped: int  # in-scope rows not in the universe (derivative legs + non-F&O equity)
     filtered: int  # out-of-scope rows skipped (MCX, etc.)
+    #: Census of the parse, written to the ``instrument_runs`` audit row
+    #: (DEC-INSTRUMENT-RUN-AUDIT-001). Counted over IN-SCOPE rows only, so
+    #: ``nse_count + bse_count == in_scope_count`` and the type histogram
+    #: reconciles against ``in_scope_count`` (the residual is in-scope EQUITY).
+    total_raw_rows: int  # every CSV row seen (in-scope + out-of-scope)
+    integrity_failures: int  # always 0 — the parser FAILS CLOSED (a bad row raises)
+    in_scope_count: int  # NSE/BSE rows (== ``parsed``)
+    out_of_scope_count: int  # non-NSE/BSE rows skipped (== ``filtered``)
+    index_count: int  # in-scope rows of INDEX type (raw histogram, NOT the admitted ~32)
+    futures_count: int  # in-scope rows of a FUT* type
+    options_count: int  # in-scope rows of an OPT* type
+    nse_count: int  # in-scope NSE rows
+    bse_count: int  # in-scope BSE rows
 
 
 #: F&O leg ``INSTRUMENT`` codes whose lot/freeze define the TRADABLE contract
@@ -475,6 +488,13 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
     by_key: dict[tuple[Exchange, str], Instrument] = {}
     parsed = 0
     filtered = 0
+    # Census counters for the ``instrument_runs`` audit row (counted IN-SCOPE only,
+    # in the single existing pass — DEC-INSTRUMENT-RUN-AUDIT-001).
+    index_count = 0
+    futures_count = 0
+    options_count = 0
+    nse_count = 0
+    bse_count = 0
     for row in rows:
         exch = row.get("EXCH_ID", "").strip().upper()
         if exch not in (Exchange.NSE, Exchange.BSE):
@@ -482,6 +502,19 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
             continue
         parsed += 1
         itype = row.get("INSTRUMENT", "").strip().upper()
+        # In-scope census: exchange split (NSE/BSE are the only in-scope exchanges,
+        # so the else IS BSE) + instrument-type histogram. Pure counting; does not
+        # change selection. EQUITY rows are the residual (not in any of the 3 sets).
+        if exch == Exchange.NSE:
+            nse_count += 1
+        else:
+            bse_count += 1
+        if itype in _INDEX_TYPES:
+            index_count += 1
+        elif itype in _FUTURE_TYPES:
+            futures_count += 1
+        elif itype in _OPTION_TYPES:
+            options_count += 1
         # Indices: ONLY the curated headline allow-list — the 31 NSE Index-tab
         # symbols + BSE SENSEX — NOT all ~194 INDEX rows (DEC-DHAN-INDEX-ALLOWLIST-001).
         # Stocks: an F&O-eligible **NSE** equity SPOT (BSE single stocks are out of
@@ -543,6 +576,15 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
         persisted=persisted,
         legs_dropped=parsed - persisted,
         filtered=filtered,
+        total_raw_rows=len(rows),
+        integrity_failures=0,
+        in_scope_count=parsed,
+        out_of_scope_count=filtered,
+        index_count=index_count,
+        futures_count=futures_count,
+        options_count=options_count,
+        nse_count=nse_count,
+        bse_count=bse_count,
     )
 
 

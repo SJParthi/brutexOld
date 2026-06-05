@@ -227,6 +227,15 @@ class TestUniverse:
                 STRIKE_PRICE="2500",
                 SM_EXPIRY_DATE="2025-01-30",
             ),
+            # In-scope NSE FUTSTK leg — census-only (futures_count); empty LOT_SIZE
+            # so it's skipped by leg-economics exactly like the OPTSTK above, and
+            # dropped from the lean universe (DEC-INSTRUMENT-RUN-AUDIT-001).
+            _row(
+                INSTRUMENT="FUTSTK",
+                SYMBOL_NAME="RELIANCE-FUT",
+                UNDERLYING_SYMBOL="RELIANCE",
+                SECURITY_ID="3002",
+            ),
             _row(
                 EXCH_ID="MCX", INSTRUMENT="FUTCOM", SYMBOL_NAME="GOLD", SECURITY_ID="7777"
             ),  # skipped
@@ -244,17 +253,30 @@ class TestUniverse:
 
     def test_select_universe_report_accounting(self) -> None:
         report = select_universe_report(self._rows())
-        # In-scope NSE/BSE rows: NIFTY, SENSEX, RELIANCE, TINYCO, RELIANCE-OPT.
-        assert report.parsed == 5
+        # In-scope NSE/BSE rows: NIFTY, SENSEX, RELIANCE, TINYCO, RELIANCE-OPT, RELIANCE-FUT.
+        assert report.parsed == 6
         # Persisted universe: NIFTY, SENSEX, RELIANCE.
         assert report.persisted == 3
         assert sorted(i.symbol_name for i in report.universe) == ["NIFTY", "RELIANCE", "SENSEX"]
-        # Dropped in-scope: TINYCO (non-F&O equity) + RELIANCE-OPT (option leg).
-        assert report.legs_dropped == 2
+        # Dropped in-scope: TINYCO (non-F&O equity) + RELIANCE-OPT + RELIANCE-FUT legs.
+        assert report.legs_dropped == 3
         # Out-of-scope: the MCX GOLD future.
         assert report.filtered == 1
         # Accounting invariant: every in-scope row is either persisted or dropped.
         assert report.parsed == report.persisted + report.legs_dropped
+        # Census for the instrument_runs audit row (DEC-INSTRUMENT-RUN-AUDIT-001),
+        # counted over IN-SCOPE rows only.
+        assert report.total_raw_rows == 7  # 6 in-scope + 1 MCX
+        assert report.integrity_failures == 0  # parser fails closed (no recoverable failures)
+        assert report.in_scope_count == 6
+        assert report.out_of_scope_count == 1
+        assert report.index_count == 2  # NIFTY + SENSEX
+        assert report.futures_count == 1  # RELIANCE-FUT
+        assert report.options_count == 1  # RELIANCE-OPT
+        assert report.nse_count == 5  # NIFTY, RELIANCE, TINYCO, RELIANCE-OPT, RELIANCE-FUT
+        assert report.bse_count == 1  # SENSEX
+        # In-scope exchange split reconciles exactly.
+        assert report.nse_count + report.bse_count == report.in_scope_count
 
 
 class TestClassifyOffInstrumentColumn:
