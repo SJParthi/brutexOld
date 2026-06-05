@@ -257,6 +257,9 @@ class _InterleaveProbeStore:
     def prune_to_latest_snapshot(self) -> int:
         return 0
 
+    def record_run(self, _run: Any) -> None:
+        """No-op: this probe tests lock serialisation, not run recording."""
+
     def fno_eligible_underlyings(self) -> frozenset[tuple[Any, str]]:
         return frozenset()
 
