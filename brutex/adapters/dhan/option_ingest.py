@@ -54,10 +54,11 @@ _LOG = structlog.get_logger("brutex.adapters.dhan.option_ingest")
 
 #: Pacing / rate-feedback hook — a no-arg callback (e.g. token-bucket acquire, or
 #: a rate-controller step). ``pace`` runs once before each window fetch; the
-#: ``on_rate_limit`` / ``on_timeout`` / ``on_success`` feedback hooks mirror the
-#: SPOT path's identical names + bound-method wiring (CLAUDE.md §11 COMMON,
-#: ``ingest.ingest_spot``) so the ONE shared rate governor adapts the options
-#: spine too (DEC-DHAN-TIMEOUT-BACKOFF-001): ``on_rate_limit`` on a swallowed 429,
+#: ``on_rate_limit`` / ``on_success`` feedback hooks REUSE the SPOT path's hook
+#: names + bound-method wiring (CLAUDE.md §11 COMMON, ``ingest.ingest_spot``),
+#: and ``on_timeout`` EXTENDS that pattern — the spot path has no timeout hook
+#: (yet) — so the ONE shared rate governor adapts the options spine too
+#: (DEC-DHAN-TIMEOUT-BACKOFF-001): ``on_rate_limit`` on a swallowed 429,
 #: ``on_timeout`` on a swallowed timeout / transport / 5xx (a slow, struggling
 #: Dhan), ``on_success`` once per cleanly-fetched window. All default ``None`` so
 #: the dry-run / synthetic path stays feedback-free.
@@ -276,13 +277,18 @@ def ingest_rolling_option_series(
             if is_retryable(exc):
                 transient += 1
                 # Feed the swallowed transient to the rate governor so it adapts
-                # the options spine (mirrors the spot path's routing,
-                # ``ingest.ingest_spot``): a 429 → the 429 ladder; a timeout /
-                # transport / 5xx → the GENTLE timeout ladder, so a SUSTAINED
-                # storm (the operator's long-pull `DhanTimeoutError` cascade)
-                # eases the rate instead of grinding at 5 r/s into a struggling
-                # Dhan (DEC-DHAN-TIMEOUT-BACKOFF-001). A one-off blip is ignored
-                # by the controller's threshold → steady throughput unchanged.
+                # the options spine. The 429/success routing FOLLOWS the spot
+                # path's pattern (``ingest.ingest_spot``); the timeout branch is
+                # NEW here (the spot path has no timeout hook yet): a 429 → the
+                # 429 ladder; a timeout / transport / 5xx → the GENTLE timeout
+                # ladder, so a SUSTAINED storm (the operator's long-pull
+                # `DhanTimeoutError` cascade) eases the rate instead of grinding
+                # at 5 r/s into a struggling Dhan (DEC-DHAN-TIMEOUT-BACKOFF-001).
+                # A one-off blip is ignored by the controller's threshold →
+                # steady throughput unchanged. NB (divergence from the spot
+                # path): here a failed window is DEFERRED (``continue``) to the
+                # next pull, NOT retried in-run as the spot path does
+                # (DEC-DHAN-429-RETRY-001) — pre-existing options behaviour.
                 if is_rate_limit(exc):
                     if on_rate_limit is not None:
                         on_rate_limit()
@@ -290,7 +296,10 @@ def ingest_rolling_option_series(
                     on_timeout()
                 continue
             raise
-        # A clean window is the recover-up signal for the rate governor.
+        # A clean window is the recover-up signal for the rate governor. NB: a
+        # COVERAGE-skipped window (the ``continue`` above) does NOT fire this —
+        # only an actually-fetched clean window — so a resume-heavy pull emits
+        # fewer recover-up signals (benign: the 300s step-up window dominates).
         if on_success is not None:
             on_success()
         data = payload.get("data")

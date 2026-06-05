@@ -301,10 +301,11 @@ class _LiveOptionRuntime(NamedTuple):
 
     All five derive from ONE shared
     :class:`~brutex.adapters.dhan.rate_control.DhanRateController`. The
-    ``on_rate_limit`` / ``on_timeout`` / ``on_success`` hooks mirror the spot
-    path's bound-method wiring (CLAUDE.md §11 COMMON) so the governor adapts the
-    options spine too (DEC-DHAN-TIMEOUT-BACKOFF-001). A dry-run / injected-factory
-    pull uses the all-``None`` default → no throttle, default pool.
+    ``on_rate_limit`` / ``on_success`` hooks reuse the spot path's bound-method
+    wiring style (CLAUDE.md §11 COMMON); ``on_timeout`` extends it (the spot path
+    has no timeout hook yet) so the governor adapts the options spine too
+    (DEC-DHAN-TIMEOUT-BACKOFF-001). A dry-run / injected-factory pull uses the
+    all-``None`` default → no throttle, default pool.
     """
 
     pace: Pacer | None = None
