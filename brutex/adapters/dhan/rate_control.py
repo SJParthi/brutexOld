@@ -97,7 +97,11 @@ BURST: int = 1
 
 
 class DhanRateController:
-    """Adaptive [3..5] r/s controller: start 5, step down on heavy 429s, recover up.
+    """Adaptive [1..5] r/s controller: start 5, step down on heavy 429s, recover up.
+
+    Steady-state envelope is [3..5] (the 429 ladder floors at :data:`FLOOR_RPS`);
+    a SUSTAINED timeout storm eases further to :data:`TIMEOUT_FLOOR_RPS` (1), so
+    the full range is [1..5] (DEC-DHAN-OPTION-TIMEOUT-STORM-001).
 
     Thread-safety (DEC-DHAN-PARALLEL-INGEST-001). The controller is the shared
     GOVERNOR for the parallelised ingest fan-out: one instance is threaded
@@ -164,7 +168,7 @@ class DhanRateController:
 
     @property
     def current_rps(self) -> float:
-        """The current steady-state rate (in ``[FLOOR_RPS, CEILING_RPS]``) — thread-safe."""
+        """The current rate (in ``[TIMEOUT_FLOOR_RPS, CEILING_RPS]``) — thread-safe."""
         with self._lock:
             return self._rps
 
