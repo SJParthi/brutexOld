@@ -4,9 +4,12 @@ The Dhan Data API ceiling is **5 req/s** (verified, ``docs/dhan-ref/01``). This
 controller (DEC-DHAN-ADAPTIVE-RPS-001) runs the pull at the **max 5 r/s** when
 Dhan is healthy and only **steps down 1 r/s** (5 → 4 → 3) under *sustained*
 rate-limiting, recovering 1 r/s at a time (3 → 4 → 5) once the pressure clears.
-It never exceeds **5** (the hard ceiling) and never drops below **3** (the floor
-— clamped, not a halt), maximising throughput while staying inside Dhan's limit
-(CLAUDE.md §2 Rule 6).
+It never exceeds **5** (the hard ceiling). The 429 ladder never drops below **3**
+(:data:`FLOOR_RPS` — clamped, not a halt); a SUSTAINED *timeout* storm on a heavy
+/ flaky endpoint eases FURTHER, to :data:`TIMEOUT_FLOOR_RPS` (1), so a struggling
+vendor can recover (DEC-DHAN-OPTION-TIMEOUT-STORM-001) — then recovers up to the
+ceiling. Maximises throughput while staying inside Dhan's limit (CLAUDE.md §2
+Rule 6).
 
 It owns only the small Dhan-specific step ladder; the **O(1) blocking pace** +
 the daily-quota gate are reused from
@@ -45,6 +48,19 @@ CEILING_RPS: float = float(DATA_RATE_LIMIT_RPS)
 
 #: The floor we clamp to under sustained pressure (never below — and never a halt).
 FLOOR_RPS: float = 3.0
+
+#: The DEEPER floor the **timeout** ladder alone may reach under a SUSTAINED
+#: server-stress storm (DEC-DHAN-OPTION-TIMEOUT-STORM-001, operator 2026-06-05).
+#: The 429 ladder still clamps at :data:`FLOOR_RPS` (3) — a quota breach is no
+#: reason to crawl — but a relentless TIMEOUT cascade is different: the operator's
+#: 50-stock options ``charts/rollingoption`` pull floored at 3 r/s yet kept
+#: ``latency_ms_max`` pinned at the 10s client timeout with ``recent_timeouts``
+#: saturated for 13+ min, because the timeout ladder had nowhere lower to ease.
+#: A struggling endpoint needs MORE room: the timeout ladder now steps
+#: 5→4→3→2→1; :meth:`on_success` recovers it back up to the ceiling once the storm
+#: clears, exactly as before. ``rollingoption`` is heavier + flakier than the spot
+#: ``intraday`` endpoint, so this deeper floor is the server-stress relief valve.
+TIMEOUT_FLOOR_RPS: float = 1.0
 
 #: One ladder rung.
 STEP_RPS: float = 1.0
@@ -199,15 +215,19 @@ class DhanRateController:
     def on_timeout(self) -> None:
         """Record a server-stress stall; step **down** 1 r/s on a sustained storm — O(1).
 
-        The gentle adaptive timeout ladder (DEC-DHAN-TIMEOUT-BACKOFF-001): a
-        long pull that starts TIMING OUT (a slow, struggling Dhan — not a quota
-        breach) eases 5→4→3 r/s once :data:`STEP_DOWN_TIMEOUT_HITS` stalls land
-        inside :data:`STEP_DOWN_WINDOW` seconds, then recovers via
-        :meth:`on_success` once the storm clears. A one-off timeout is ignored
-        (it self-heals via the client's bounded fast-retry) so steady-state
-        throughput is UNCHANGED — only a cascade eases the rate. Mirrors
-        :meth:`on_rate_limit`'s ladder + floor but reads the SEPARATE, more
-        tolerant ``_timeouts`` buffer so a 429 and a timeout never cross-count.
+        The gentle adaptive timeout ladder (DEC-DHAN-TIMEOUT-BACKOFF-001 +
+        DEC-DHAN-OPTION-TIMEOUT-STORM-001): a long pull that starts TIMING OUT (a
+        slow, struggling Dhan — not a quota breach) eases 5→4→3→2→1 r/s once
+        :data:`STEP_DOWN_TIMEOUT_HITS` stalls land inside :data:`STEP_DOWN_WINDOW`
+        seconds, then recovers via :meth:`on_success` once the storm clears. A
+        one-off timeout is ignored (it self-heals via the client's bounded
+        fast-retry) so steady-state throughput is UNCHANGED — only a cascade eases
+        the rate. Mirrors :meth:`on_rate_limit`'s ladder but reads the SEPARATE,
+        more tolerant ``_timeouts`` buffer (so a 429 and a timeout never
+        cross-count) AND eases to the DEEPER :data:`TIMEOUT_FLOOR_RPS` (1) rather
+        than the 429 :data:`FLOOR_RPS` (3): a relentless server-stress storm on a
+        heavy / flaky endpoint (e.g. ``charts/rollingoption``) needs more room to
+        let the vendor recover than a mere quota breach does.
 
         Thread-safe: the record → window-evict → maybe-step-down is one atomic
         O(1) critical section, so concurrent workers reporting a stall can never
@@ -221,7 +241,7 @@ class DhanRateController:
             while self._timeouts and self._timeouts[0] < cutoff:
                 self._timeouts.popleft()
             _LOG.warning("rate.timeout", current_rps=self._rps, recent_timeouts=len(self._timeouts))
-            if len(self._timeouts) >= STEP_DOWN_TIMEOUT_HITS and self._rps > FLOOR_RPS:
+            if len(self._timeouts) >= STEP_DOWN_TIMEOUT_HITS and self._rps > TIMEOUT_FLOOR_RPS:
                 old_rps = self._rps
                 self._rps -= STEP_RPS
                 self._bucket = self._make_bucket()
@@ -231,7 +251,7 @@ class DhanRateController:
                     "rate.stepdown",
                     from_rps=old_rps,
                     to_rps=self._rps,
-                    floor_rps=FLOOR_RPS,
+                    floor_rps=TIMEOUT_FLOOR_RPS,
                     cause="timeout",
                 )
 
@@ -282,5 +302,6 @@ __all__ = [
     "STEP_DOWN_WINDOW",
     "STEP_RPS",
     "STEP_UP_WINDOW",
+    "TIMEOUT_FLOOR_RPS",
     "DhanRateController",
 ]

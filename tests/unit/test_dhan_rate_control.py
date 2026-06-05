@@ -15,6 +15,7 @@ from brutex.adapters.dhan.rate_control import (
     STEP_DOWN_TIMEOUT_HITS,
     STEP_DOWN_WINDOW,
     STEP_UP_WINDOW,
+    TIMEOUT_FLOOR_RPS,
     DhanRateController,
 )
 from structlog.testing import capture_logs
@@ -146,10 +147,11 @@ def _hammer_timeouts(
 class TestTimeoutLadder:
     """The gentle adaptive TIMEOUT step-down (DEC-DHAN-TIMEOUT-BACKOFF-001).
 
-    A sustained timeout storm eases 5→4→3 r/s (separate, more tolerant threshold
-    than the 429 ladder), clamps at the floor, ignores a one-off / non-sustained
-    blip, evicts its window, and lets :meth:`on_success` recover only once the
-    storm has cleared.
+    A sustained timeout storm eases 5→4→3→2→1 r/s (separate, more tolerant
+    threshold than the 429 ladder) — down to the DEEPER timeout floor
+    (DEC-DHAN-OPTION-TIMEOUT-STORM-001), below the 429 floor — ignores a one-off /
+    non-sustained blip, evicts its window, and lets :meth:`on_success` recover
+    only once the storm has cleared.
     """
 
     def test_step_down_5_to_4_to_3_on_sustained_timeouts(self) -> None:
@@ -160,13 +162,35 @@ class TestTimeoutLadder:
         _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS)  # → 4→3
         assert ctl.current_rps == 3.0
 
-    def test_clamps_at_floor_never_below_3(self) -> None:
+    def test_eases_below_429_floor_to_timeout_floor(self) -> None:
+        # A relentless server-stress storm eases PAST the 429 floor (3) down to the
+        # deeper TIMEOUT_FLOOR_RPS (1), so a struggling endpoint can recover
+        # (DEC-DHAN-OPTION-TIMEOUT-STORM-001).
         clock = _Clock()
         ctl = _controller(clock)
-        _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS * 4)  # overshoot
-        assert ctl.current_rps == FLOOR_RPS
+        for expected in (4.0, 3.0, 2.0, 1.0):
+            _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS)
+            assert ctl.current_rps == expected
+        assert TIMEOUT_FLOOR_RPS < FLOOR_RPS  # the timeout floor is genuinely deeper
+
+    def test_clamps_at_timeout_floor_never_below(self) -> None:
+        clock = _Clock()
+        ctl = _controller(clock)
+        _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS * 4)  # overshoot → 1.0
+        assert ctl.current_rps == TIMEOUT_FLOOR_RPS  # 1.0 — clamped, not 0 or a halt
         _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS)  # already floor → no halt
-        assert ctl.current_rps == FLOOR_RPS
+        assert ctl.current_rps == TIMEOUT_FLOOR_RPS
+
+    def test_429_after_timeout_floor_does_not_step_below(self) -> None:
+        # Worst case: a timeout storm already eased to 1.0, then a 429 storm lands.
+        # The 429 ladder's floor is the HIGHER 3.0, so it must not step further —
+        # no zero/negative rate, no halt (the two ladders share one _rps cleanly).
+        clock = _Clock()
+        ctl = _controller(clock)
+        _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS * 4)  # → 1.0
+        assert ctl.current_rps == TIMEOUT_FLOOR_RPS
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS * 2)  # a 429 storm at the deep floor
+        assert ctl.current_rps == TIMEOUT_FLOOR_RPS  # unchanged — 429 floor (3) is higher
 
     def test_non_sustained_blip_does_not_step(self) -> None:
         clock = _Clock()
