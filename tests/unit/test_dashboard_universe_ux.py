@@ -117,29 +117,37 @@ def test_timeframe_storage_is_explained_honestly() -> None:
     assert "BRUTEX_LAKE_ROOT" in html, "the external-drive config knob must be named"
 
 
-def test_derive_timeframes_control_is_removed_from_the_pull_bar() -> None:
-    """The MANUAL derive-timeframes dropdown is GONE from the pull bar (DEC-UNIVERSE-TFS-DROPDOWN-REMOVE-001).
+def test_intrusive_tf_dropdown_stays_removed_but_clean_button_replaces_it() -> None:
+    """The intrusive auto-appearing TF *dropdown* stays GONE; a single clean
+    "⚙ Pre-build timeframes" button replaces it (DEC-UNIVERSE-TF-MATERIALIZE-BUTTON-001
+    amends DEC-UNIVERSE-TFS-DROPDOWN-REMOVE-001).
 
-    The operator hit a confusing, intrusive ``TFs`` multi-select + "⚙ Derive
-    timeframes" button that appeared in the pull bar the moment an instrument
-    was selected ("why suddenly this small tfs ... just remove that"). The
-    control is removed; the timeframe-materialise *backend* (the
-    ``/api/v1/universe/derive-timeframes`` route + ``timeframe_materialize``
-    service, DEC-TF-MATERIALIZE-001) is intentionally KEPT and still
-    independently tested — only the intrusive UI affordance is gone. This guard
-    pins the removal so the dropdown cannot silently creep back into the pull bar.
+    History: the operator first hit a confusing, intrusive ``TFs`` multi-select +
+    "⚙ Derive timeframes" button that auto-appeared in the pull bar the moment an
+    instrument was selected ("why suddenly this small tfs ... just remove that")
+    → it was removed, keeping the materialise *backend*
+    (``/api/v1/universe/derive-timeframes`` + ``timeframe_materialize``,
+    DEC-TF-MATERIALIZE-001). The operator then explicitly asked for a
+    pre-build-timeframes affordance back — so this adds ONE always-present,
+    non-intrusive ``matbtn`` button (NOT the auto-appearing ``tfsel``/``derivetfs``
+    dropdown). This guard pins BOTH halves: the dropdown cannot creep back, and
+    the clean button is wired to the route.
     """
     html = _render_universe_html()
+    # The intrusive dropdown + its auto-appearing widgets stay removed.
     for gone in ('id="derivebtn"', 'id="tfsel"', 'id="derivetfs"', "⚙ Derive timeframes"):
         assert gone not in html, (
-            f"the derive-timeframes pull-bar control {gone!r} must stay removed "
+            f"the intrusive derive-timeframes dropdown control {gone!r} must stay removed "
             "(DEC-UNIVERSE-TFS-DROPDOWN-REMOVE-001)"
         )
-    # The reveal/wiring that fired on instrument select must also be gone, so the
-    # page never references a now-nonexistent element (a null .onclick would throw).
     assert 'getElementById("derivebtn")' not in html, (
-        "selectInstrument must not reference the removed derive button (would throw at load)"
+        "no code may reference the removed dropdown button (would throw at load)"
     )
-    assert "derive-timeframes?symbol=" not in html, (
-        "the derive route must no longer be POSTed from the page"
+    # The clean replacement button IS present + wired to the (kept) backend route.
+    assert 'id="matbtn"' in html, "the single '⚙ Pre-build timeframes' button must be present"
+    assert "⚙ Pre-build timeframes" in html, "the clean materialise button label is missing"
+    assert "function matSelection" in html, "the one-or-many materialise selection helper is missing"
+    assert "matInFlight" in html, "the materialise double-click re-entrancy guard is missing"
+    assert "derive-timeframes?symbol=" in html, (
+        "the clean button must POST the (kept) materialise route"
     )

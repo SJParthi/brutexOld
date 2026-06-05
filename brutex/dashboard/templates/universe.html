@@ -235,7 +235,7 @@
     <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
     <div class="hsub">Spot pulls <b>1-minute + 1-day</b> from <b>2021-01-01 → previous trading day</b>; options fan
       <b>ATM±10</b> (indices) / <b>ATM±3</b> (stocks) · CE+PE · weekly+monthly · near/next/far, 1-minute.
-      Re-click any time — already-pulled windows are skipped (no wasted Dhan hit). The pull <b>fetches + stores 1-minute + 1-day only</b> — the 19 intraday timeframes are <b>derived on demand, NOT written to your drive</b>. (The lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>.)</div>
+      Re-click any time — already-pulled windows are skipped (no wasted Dhan hit). The pull <b>fetches + stores 1-minute + 1-day only</b> — the 19 intraday timeframes are <b>derived on demand, NOT written to your drive</b> by default. (The lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>.) Optionally hit <b>⚙ Pre-build timeframes</b> to materialise them to the drive once, so the sweep reads each in O(1).</div>
     <div class="bulkgrid">
       <button class="bulkbtn idx" id="bulkIdxSpot" data-surface="spot" data-kind="index">
         <span class="shine"></span><span class="bnum">①</span>
@@ -288,6 +288,7 @@
     <button class="loadbtn" id="loadbtn" title="Download the public Dhan instrument master — no keys needed">⟳ Load instruments</button>
     <button class="optbtn" id="optbtn" title="Pull this underlying's full option grid (ATM window · CE+PE · weekly+monthly · near/next/far, 1-minute)" disabled>⛓ Pull options chain</button>
     <button class="pullbtn" id="pullbtn" title="Pull 1-minute + 1-day spot for the selected instrument(s) — tick rows for many, or click one. Blank dates = full history (2021 → prev day)." disabled>⤓ Pull spot</button>
+    <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. Optional speed lever — writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
     <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
     <button class="loadbtn" id="clrselbtn" title="Untick all selected">✗ clear</button>
     <button class="loadbtn" id="tickconstbtn" title="Best-effort: tick this index's F&amp;O-eligible constituent stocks (fetched from NSE on your machine — verify; membership rebalances)" disabled>⊕ tick its constituents</button>
@@ -731,6 +732,11 @@ function updateMultiBtn() {
   const o = document.getElementById("optbtn");
   o.textContent = n > 0 ? `⛓ Pull options chain · ${n} selected` : "⛓ Pull options chain";
   o.disabled = n === 0 && !selPullSymbol;
+  // The "⚙ Pre-build timeframes" materialise button is selection-driven too
+  // (DEC-UNIVERSE-TF-MATERIALIZE-BUTTON-001): one OR many, same enable rule.
+  const m = document.getElementById("matbtn");
+  m.textContent = n > 0 ? `⚙ Pre-build timeframes · ${n} selected` : "⚙ Pre-build timeframes";
+  m.disabled = n === 0 && !selPullSymbol;
 }
 document.getElementById("selallbtn").onclick = () => {
   const q = (search.value || "").toUpperCase();
@@ -834,6 +840,72 @@ document.getElementById("optbtn").onclick = () => {
   } else {
     startAndPoll('/api/v1/universe/pull-options?symbol=' + encodeURIComponent(items[0].pull_symbol),
       `${items[0].symbol} options chain`);
+  }
+};
+
+/* ── "⚙ Pre-build timeframes" (DEC-UNIVERSE-TF-MATERIALIZE-BUTTON-001) ──
+   The single, explicit successor to the intrusive auto-appearing TF dropdown
+   that was removed (DEC-UNIVERSE-TFS-DROPDOWN-REMOVE-001): ONE clean button that
+   materialises ALL 19 derived intraday timeframes to the lake for the selected
+   instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1)
+   instead of resampling the 1-minute base. Selection-driven (mirrors
+   spotSelection): ticked rows → each in turn; else the single highlight. The
+   POST omits ?tfs= so the backend writes every materialisable timeframe. A
+   re-entrancy guard stops a double-click from launching two loops. ── */
+let matInFlight = false;
+function matSelection() {
+  if (selMulti.size > 0) return [...selMulti.values()];
+  if (selPullSymbol) return [{ symbol: selInst, pull_symbol: selPullSymbol }];
+  return [];
+}
+async function runMaterialize(symbol, label) {
+  if (!symbol) return;
+  const panel = document.getElementById("pullpanel");
+  panel.classList.add("on", "running");
+  document.getElementById("pulltitle").textContent = `Pre-building timeframes · ${label}`;
+  document.getElementById("tfgrid").innerHTML = "";
+  try {
+    const r = await fetch('/api/v1/universe/derive-timeframes?symbol=' + encodeURIComponent(symbol),
+      { method: 'POST' });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.detail || ('HTTP ' + r.status));
+    const written = body.written || {};
+    const grid = document.getElementById("tfgrid");
+    grid.innerHTML = "";
+    Object.keys(written).forEach(tf => {
+      const d = document.createElement("div");
+      d.className = "tf done";
+      d.textContent = esc(tf);
+      grid.appendChild(d);
+    });
+    const tfs = Object.keys(written).length;
+    document.getElementById("pulltitle").innerHTML =
+      `<span class="spark">✓</span> ${esc(label)} — materialised ${tfs} timeframes · `
+      + `${(body.total_bars || 0).toLocaleString('en-IN')} bars written`;
+  } catch (e) {
+    document.getElementById("pulltitle").innerHTML =
+      `<span style="color:var(--red)">✕</span> pre-build failed: ${esc(e.message)}`;
+  } finally {
+    panel.classList.remove("running");
+  }
+}
+document.getElementById("matbtn").onclick = async () => {
+  if (matInFlight) return;
+  const items = matSelection();
+  if (!items.length) return;
+  matInFlight = true;
+  document.getElementById("matbtn").disabled = true;
+  try {
+    for (let k = 0; k < items.length; k++) {
+      const it = items[k];
+      const label = items.length > 1
+        ? `${it.symbol} (${k + 1}/${items.length})`
+        : `${it.symbol}`;
+      await runMaterialize(it.pull_symbol, label);
+    }
+  } finally {
+    matInFlight = false;
+    updateMultiBtn();
   }
 };
 
