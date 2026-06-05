@@ -220,9 +220,7 @@ class DhanRateController:
             cutoff = now - STEP_DOWN_WINDOW
             while self._timeouts and self._timeouts[0] < cutoff:
                 self._timeouts.popleft()
-            _LOG.warning(
-                "rate.timeout", current_rps=self._rps, recent_timeouts=len(self._timeouts)
-            )
+            _LOG.warning("rate.timeout", current_rps=self._rps, recent_timeouts=len(self._timeouts))
             if len(self._timeouts) >= STEP_DOWN_TIMEOUT_HITS and self._rps > FLOOR_RPS:
                 old_rps = self._rps
                 self._rps -= STEP_RPS
