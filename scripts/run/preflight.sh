@@ -65,9 +65,9 @@ fi
 # ── cargo (Rust) ──────────────────────────────────────────────────
 if command -v cargo >/dev/null 2>&1 || [ -x "${HOME}/.cargo/bin/cargo" ]; then
   CARGO_BIN="$(command -v cargo 2>/dev/null || echo "${HOME}/.cargo/bin/cargo")"
-  echo "  ✅ cargo  : $("$CARGO_BIN" --version 2>&1)  (builds fno_math kernel)"
+  echo "  ✅ cargo  : $("$CARGO_BIN" --version 2>&1)  (builds fno_math + trading_core kernels)"
 else
-  echo "  ❌ cargo (Rust toolchain) NOT found — needed once to build fno_math."
+  echo "  ❌ cargo (Rust toolchain) NOT found — needed once to build fno_math + trading_core."
   echo "       fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
   echo "            (then restart the shell, or: source \$HOME/.cargo/env)"
   missing=1

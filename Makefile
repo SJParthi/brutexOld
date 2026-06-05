@@ -7,7 +7,7 @@ help:
 	@echo "BruteX development targets:"
 	@echo "  setup      — turnkey full env: venv + all libs + Rust kernel (scripts/setup/bootstrap.sh)"
 	@echo "  install    — install package + dev dependencies via pip (into the active env)"
-	@echo "  run        — turnkey one-click: venv + [data,ui] libs + fno_math kernel + launch (opens browser, http://127.0.0.1:9080)"
+	@echo "  run        — turnkey one-click: venv + [data,ui] libs + fno_math + trading_core kernels + launch (opens browser, http://127.0.0.1:9080)"
 	@echo "  fmt        — run ruff format"
 	@echo "  lint       — run ruff check"
 	@echo "  type       — run mypy --strict + pyright"
@@ -53,7 +53,9 @@ setup:
 # vendor SDK; auth is a manual access-token + client-id over plain REST,
 # DEC-DHAN-FINALIZE-001), builds the fno_math
 # Rust kernel when it is not importable (brutex.strategies.combo imports it at
-# module top, combo.py:64), then launches the one-click `brutex run` (resolves
+# module top, combo.py:64) AND the trading_core kernel (the shared 52-vocab
+# core — brutex.indicators.fib_levels imports it at module top, fib_levels.py:68,
+# DEC-SHARED-CORE-001), then launches the one-click `brutex run` (resolves
 # the lake root, opens the browser, boots the server). Idempotent: re-running
 # skips work already done. Open http://127.0.0.1:9080.
 # Verify the three host tools `run` depends on (python3.12 / make / cargo)
@@ -70,6 +72,11 @@ run: preflight
 		echo "==> fno_math kernel not importable — building it (one-time; needs cargo)"; \
 		$(VPIP) install maturin; \
 		cd rust/fno-math && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
+	}
+	@$(VPY) -c "import trading_core" 2>/dev/null || { \
+		echo "==> trading_core kernel not importable — building it (one-time; needs cargo)"; \
+		$(VPIP) install maturin; \
+		cd rust/trading-core && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
 	}
 	$(VPY) -m brutex run
 
