@@ -25,9 +25,11 @@ from brutex.dashboard.pull_controller import (
     SessionRateController,
     TimeframeResult,
     dhan_creds_present,
+    parse_symbol_list,
     pull_all_spot,
     pull_candles,
     resolve_candle_range,
+    resolve_pull_symbols,
 )
 from brutex.data.models import CandleBar
 from brutex.data.sink import BarSink, NullBarSink
@@ -639,3 +641,45 @@ class TestSessionRateController:
         ctl = holder.get()
         assert isinstance(ctl, DhanRateController)
         assert holder.get() is ctl  # cached on subsequent calls
+
+
+# ── parse_symbol_list + resolve_pull_symbols — the multi-select OPTIONS pull ──
+# (DEC-UNIVERSE-OPTIONS-MULTIPULL-001) — the ?symbols= backend resolution
+
+
+class TestParseSymbolList:
+    """``parse_symbol_list`` — split ?symbols= into a clean, ordered, de-duped list."""
+
+    def test_splits_trims_and_preserves_order(self) -> None:
+        assert parse_symbol_list("NIFTY, BANKNIFTY ,SENSEX") == ["NIFTY", "BANKNIFTY", "SENSEX"]
+
+    def test_drops_blanks_and_dedups_first_wins(self) -> None:
+        # empty segments + a repeat are removed; first occurrence keeps its place.
+        assert parse_symbol_list("NIFTY,,BANKNIFTY, ,NIFTY") == ["NIFTY", "BANKNIFTY"]
+
+    def test_empty_string_is_empty_list(self) -> None:
+        assert parse_symbol_list("") == []
+        assert parse_symbol_list("  , ,") == []
+
+
+class TestResolvePullSymbols:
+    """``resolve_pull_symbols`` — resolve the ?symbols= list to instruments, fail closed."""
+
+    def test_resolves_each_in_input_order(self) -> None:
+        store = {"NIFTY": _index("NIFTY"), "BANKNIFTY": _index("BANKNIFTY")}
+        out = resolve_pull_symbols("BANKNIFTY,NIFTY", store.get)
+        assert [i.symbol_name for i in out] == ["BANKNIFTY", "NIFTY"]
+
+    def test_empty_selection_raises(self) -> None:
+        with pytest.raises(ValueError, match="symbols= was empty"):
+            resolve_pull_symbols("  , ,", {}.get)
+
+    def test_any_unknown_id_fails_closed_naming_offenders(self) -> None:
+        store = {"NIFTY": _index("NIFTY")}
+        with pytest.raises(ValueError, match="unknown security_id.*NOPE.*ZZZ"):
+            resolve_pull_symbols("NIFTY,NOPE,ZZZ", store.get)
+
+    def test_single_known_id_resolves(self) -> None:
+        store = {"NIFTY": _index("NIFTY")}
+        (only,) = resolve_pull_symbols("NIFTY", store.get)
+        assert only.symbol_name == "NIFTY"

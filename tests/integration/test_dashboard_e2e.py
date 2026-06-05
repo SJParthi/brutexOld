@@ -350,3 +350,28 @@ class TestOffloadedReadRoutes:
         # Date validation runs on the event loop, before the offload.
         r = wired_client.get("/api/v1/reports/preopen.xlsx?from=2024-99-99&to=2024-01-02")
         assert r.status_code == 400
+
+    # ── multi-select OPTIONS pull route (DEC-UNIVERSE-OPTIONS-MULTIPULL-001) ──
+    # The ?symbols= validation runs on the event loop and fails CLOSED *before*
+    # any background pull job is started, so these assert the 400 paths without
+    # launching the (heavy, full-range) synthetic fan-out.
+
+    def test_pull_options_empty_symbols_is_400(self, wired_client: TestClient) -> None:
+        r = wired_client.post("/api/v1/universe/pull-options?symbols=%20,%20")
+        assert r.status_code == 400
+        assert "empty" in r.json()["detail"]
+
+    def test_pull_options_unknown_symbol_in_list_fails_closed(
+        self, wired_client: TestClient
+    ) -> None:
+        # NIFTY is in the wired store; NOPE is not → the whole request 400s
+        # (never a silent partial pull) and names the offender.
+        r = wired_client.post("/api/v1/universe/pull-options?symbols=NIFTY,NOPE")
+        assert r.status_code == 400
+        assert "NOPE" in r.json()["detail"]
+
+    def test_pull_options_requires_a_selection_form(self, wired_client: TestClient) -> None:
+        # None of symbols / symbol / kind → 400 naming all three accepted forms.
+        r = wired_client.post("/api/v1/universe/pull-options")
+        assert r.status_code == 400
+        assert "?symbols=" in r.json()["detail"]

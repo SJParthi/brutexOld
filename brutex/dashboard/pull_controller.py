@@ -221,6 +221,87 @@ def _parse_iso_date(value: str, field_name: str) -> date:
         raise ValueError(f"{field_name} must be ISO YYYY-MM-DD, got {value!r}") from exc
 
 
+def parse_symbol_list(symbols: str) -> list[str]:
+    """Split a comma-separated ``?symbols=`` value into a clean, ordered id list.
+
+    Blank entries are dropped and duplicates are removed (first occurrence wins),
+    while INPUT ORDER is preserved — so the multi-select pull fans the ticked
+    underlyings in the exact order the operator sees them, deterministically
+    (DEC-UNIVERSE-OPTIONS-MULTIPULL-001). O(n) over the (tiny) selection.
+
+    Parameters
+    ----------
+    symbols
+        The raw comma-joined query value (e.g. ``"NIFTY, BANKNIFTY ,NIFTY"``).
+
+    Returns
+    -------
+    list[str]
+        De-duplicated, order-preserving, whitespace-trimmed ids
+        (``["NIFTY", "BANKNIFTY"]`` for the example).
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in symbols.split(","):
+        sid = raw.strip()
+        if sid and sid not in seen:
+            seen.add(sid)
+            out.append(sid)
+    return out
+
+
+def resolve_pull_symbols(
+    symbols: str, lookup: Callable[[str], Instrument | None]
+) -> list[Instrument]:
+    """Resolve a comma ``?symbols=`` list to instruments via *lookup* (a store ``get``).
+
+    The backend half of the unified multi-select OPTIONS pull
+    (DEC-UNIVERSE-OPTIONS-MULTIPULL-001): the page sends the ticked underlyings
+    as ``?symbols=a,b,c``; this resolves each to its
+    :class:`~brutex.models.Instrument` so ONE
+    :func:`~brutex.dashboard.option_pull_controller.pull_options` pass fans them
+    all (the core already accepts a list). Blanks are dropped + duplicates
+    removed (:func:`parse_symbol_list`), order preserved.
+
+    Fails CLOSED (Golden Rule #1, no silent scope drift): an EMPTY selection or
+    ANY unknown id raises :class:`ValueError` naming every offender, which the
+    route maps to a 400 — so a typo never silently pulls a partial set.
+
+    Parameters
+    ----------
+    symbols
+        The raw comma-joined ``?symbols=`` value.
+    lookup
+        ``store.get``-style resolver: an id → :class:`Instrument` or ``None``.
+
+    Returns
+    -------
+    list[Instrument]
+        One resolved instrument per (de-duplicated) id, in input order.
+
+    Raises
+    ------
+    ValueError
+        If the list is empty after cleaning, or any id does not resolve.
+    """
+    ids = parse_symbol_list(symbols)
+    if not ids:
+        raise ValueError("symbols= was empty — tick at least one instrument")
+    resolved: list[Instrument] = []
+    unknown: list[str] = []
+    for sid in ids:
+        instrument = lookup(sid)
+        if instrument is None:
+            unknown.append(sid)
+        else:
+            resolved.append(instrument)
+    if unknown:
+        raise ValueError(
+            f"unknown security_id(s) not in the instrument store: {', '.join(unknown)}"
+        )
+    return resolved
+
+
 #: A factory that builds the ``(adapter, sink)`` pair the Dhan ingest spine
 #: needs, given the lake root + the instrument being pulled. The default
 #: builds the offline synthetic pair; the live path injects
@@ -955,7 +1036,9 @@ __all__ = [
     "SymbolPullResult",
     "TimeframeResult",
     "dhan_creds_present",
+    "parse_symbol_list",
     "pull_all_spot",
     "pull_candles",
     "resolve_candle_range",
+    "resolve_pull_symbols",
 ]
