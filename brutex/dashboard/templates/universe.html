@@ -287,11 +287,10 @@
     <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — blank pulls up to the previous trading day (pick today to include it).">to <input type="date" id="toDate" min="2021-01-01" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
     <button class="loadbtn" id="loadbtn" title="Download the public Dhan instrument master — no keys needed">⟳ Load instruments</button>
     <button class="optbtn" id="optbtn" title="Pull this underlying's full option grid (ATM window · CE+PE · weekly+monthly · near/next/far, 1-minute)" disabled>⛓ Pull options chain</button>
-    <button class="pullbtn" id="pullbtn" disabled>⤓ Pull spot — 1-minute</button>
+    <button class="pullbtn" id="pullbtn" title="Pull 1-minute + 1-day spot for the selected instrument(s) — tick rows for many, or click one. Blank dates = full history (2021 → prev day)." disabled>⤓ Pull spot</button>
     <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
     <button class="loadbtn" id="clrselbtn" title="Untick all selected">✗ clear</button>
     <button class="loadbtn" id="tickconstbtn" title="Best-effort: tick this index's F&amp;O-eligible constituent stocks (fetched from NSE on your machine — verify; membership rebalances)" disabled>⊕ tick its constituents</button>
-    <button class="pullbtn" id="pullmulti" disabled title="Tick several rows below, then pull all their spot in one go" style="background:linear-gradient(135deg,#5B8DEF,#9D7BFF);">⤓ Pull 0 selected</button>
   </div>
   <div class="loadmsg" id="loadmsg" style="margin:-4px 24px 8px;"></div>
 
@@ -318,7 +317,7 @@ let UNIV = [];                 // [{symbol,pull_symbol,name,kind,exchange}]
 let selInst = null;            // selected instrument's display symbol (trading_symbol)
 let selPullSymbol = null;      // selected instrument's vendor symbol (Dhan SECURITY_ID)
 let selExp = null;             // selected expiry ISO date
-let selMulti = new Map();      // multi-select: symbol → instrument, for "⤓ Pull N selected"
+let selMulti = new Map();      // multi-select: symbol → instrument, for the unified "⤓ Pull spot"
 let listAnimated = false;      // entrance animation plays ONCE per fresh load, never on re-render
 
 /* Escape broker-sourced free text (instrument name/symbol/contract_symbol)
@@ -518,7 +517,7 @@ async function selectInstrument(i) {
   });
   document.getElementById("pulllead").innerHTML =
     `Ready to pull <b>${esc(i.symbol)}</b> spot / options — or click a future / option contract below`;
-  document.getElementById("pullbtn").disabled = false;
+  updateMultiBtn();  // enable + label the unified "⤓ Pull spot" for this single highlight
   document.getElementById("optbtn").disabled = false;
   /* "⊕ tick its constituents" is meaningful only for an INDEX
      (DEC-UNIVERSE-NSE-CONSTITUENTS-001) — a stock has no constituents. */
@@ -681,9 +680,35 @@ async function runPull(symbol, label) {
 /* The spot pull button pulls the selected instrument's spot using its
    vendor symbol (pull_symbol — the Dhan SECURITY_ID) so the backend
    resolves the instrument — NOT the bare display symbol. */
-document.getElementById("pullbtn").onclick = () => {
-  if (!selPullSymbol) return;
-  runPull(selPullSymbol, `${selInst} spot`);
+/* ── Unified "⤓ Pull spot" (DEC-UNIVERSE-PULL-UNIFY-001): ONE button for one OR
+   many. If rows are ticked it pulls each in turn (sequential — the one shared
+   5 r/s budget is respected + each shows in the live panel); otherwise it pulls
+   the single highlighted instrument. The from/to date rule lives in runPull
+   (blank = full history 2021 → prev day). A re-entrancy guard stops a
+   double-click from launching two loops. ── */
+let spotPullInFlight = false;
+function spotSelection() {
+  if (selMulti.size > 0) return [...selMulti.values()];
+  if (selPullSymbol) return [{ symbol: selInst, pull_symbol: selPullSymbol }];
+  return [];
+}
+document.getElementById("pullbtn").onclick = async () => {
+  if (spotPullInFlight) return;
+  const items = spotSelection();
+  if (!items.length) return;
+  spotPullInFlight = true;
+  try {
+    for (let k = 0; k < items.length; k++) {
+      const it = items[k];
+      const label = items.length > 1
+        ? `${it.symbol} spot (${k + 1}/${items.length})`
+        : `${it.symbol} spot`;
+      await runPull(it.pull_symbol, label);
+    }
+  } finally {
+    spotPullInFlight = false;
+    updateMultiBtn();
+  }
 };
 
 /* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001): tick several rows → "⤓ Pull N
@@ -696,10 +721,12 @@ function toggleMulti(i, on) {
   updateMultiBtn();
 }
 function updateMultiBtn() {
-  const b = document.getElementById("pullmulti");
+  // Drives the unified "⤓ Pull spot" button: label reflects the selection
+  // count; enabled when ANY rows are ticked OR a single row is highlighted.
+  const b = document.getElementById("pullbtn");
   const n = selMulti.size;
-  b.textContent = `⤓ Pull ${n} selected`;
-  b.disabled = n === 0;
+  b.textContent = n > 0 ? `⤓ Pull spot · ${n} selected` : "⤓ Pull spot";
+  b.disabled = n === 0 && !selPullSymbol;
 }
 document.getElementById("selallbtn").onclick = () => {
   const q = (search.value || "").toUpperCase();
@@ -775,21 +802,9 @@ document.getElementById("tickconstbtn").onclick = async () => {
     /* Prefer the backend note (it already says "fresh from NSE" vs "from
        cache (fetched …)" correctly per source); fall back to a local line. */
     msg.textContent = note
-      || `Ticked ${ticked} F&O-eligible constituent(s) of ${indexSymbol} — verify; membership rebalances. Now hit ⤓ Pull N selected.`;
+      || `Ticked ${ticked} F&O-eligible constituent(s) of ${indexSymbol} — verify; membership rebalances. Now hit ⤓ Pull spot.`;
   }
   btn.disabled = false;
-};
-
-document.getElementById("pullmulti").onclick = async () => {
-  const items = [...selMulti.values()];
-  if (!items.length) return;
-  document.getElementById("pullmulti").disabled = true;
-  document.getElementById("pullbtn").disabled = true;
-  for (let k = 0; k < items.length; k++) {
-    const it = items[k];
-    await runPull(it.pull_symbol, `${it.symbol} spot (${k + 1}/${items.length})`);
-  }
-  updateMultiBtn();
 };
 
 /* ── Per-symbol OPTIONS pull (buttons ⑥ ⑧ — POST /pull-options?symbol=) ──
