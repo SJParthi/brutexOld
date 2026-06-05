@@ -10,9 +10,16 @@ import csv
 import hashlib
 import io
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 
-from brutex.adapters.dhan.instrument_refresh import RefreshResult, refresh_instruments
+import pytest
+from brutex import __version__
+from brutex.adapters.dhan.instrument_refresh import (
+    RefreshResult,
+    _code_commit_sha,
+    refresh_instruments,
+)
+from brutex.data.instrument_store import SCHEMA_VERSION, InstrumentRun
 from brutex.models import Instrument
 
 _HEADER = [
@@ -86,6 +93,7 @@ class _Store:
         self.upserts: list[dict[str, object]] = []
         self.prune_calls = 0
         self._pruned = pruned
+        self.runs: list[InstrumentRun] = []
 
     def upsert_many(
         self,
@@ -110,6 +118,9 @@ class _Store:
     def prune_to_latest_snapshot(self) -> int:
         self.prune_calls += 1
         return self._pruned
+
+    def record_run(self, run: InstrumentRun) -> None:
+        self.runs.append(run)
 
 
 def test_refresh_persists_universe_full_snapshot() -> None:
@@ -161,3 +172,50 @@ def test_refresh_uses_custom_url() -> None:
         url="https://images.dhan.co/x.csv",
     )
     assert seen == ["https://images.dhan.co/x.csv"]
+
+
+def test_refresh_records_instrument_run() -> None:
+    """The load is recorded in instrument_runs with the parse census (DEC-INSTRUMENT-RUN-AUDIT-001)."""
+    store = _Store()
+    text = _csv(_rows())
+    refresh_instruments(store, lambda _url: text, snapshot_date=date(2026, 5, 31), run_id="run-1")
+    assert len(store.runs) == 1
+    run = store.runs[0]
+    assert run.run_id == "run-1"
+    assert run.snapshot_date == date(2026, 5, 31)
+    assert run.csv_source_sha256 == hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert run.total_raw_rows == 3
+    assert run.integrity_failures == 0
+    assert run.in_scope_count == 3
+    assert run.out_of_scope_count == 0
+    assert run.index_count == 1  # NIFTY
+    assert run.futures_count == 0  # no future leg in this fixture
+    assert run.options_count == 1  # RELIANCE-OPT
+    assert run.nse_count == 3
+    assert run.bse_count == 0
+    assert run.schema_version == SCHEMA_VERSION
+    assert run.fetched_at.tzinfo is not None  # default clock is UTC-aware
+
+
+def test_refresh_run_uses_injected_clock() -> None:
+    """A fixed clock makes ``fetched_at`` deterministic (Rule #4)."""
+    store = _Store()
+    fixed = datetime(2026, 5, 31, 9, 15, tzinfo=UTC)
+    refresh_instruments(
+        store,
+        lambda _url: _csv(_rows()),
+        snapshot_date=date(2026, 5, 31),
+        run_id="run-1",
+        clock=lambda: fixed,
+    )
+    assert store.runs[0].fetched_at == fixed
+
+
+def test_code_commit_sha_env_then_version_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``BRUTEX_COMMIT_SHA`` wins; empty/absent falls back to ``__version__``."""
+    monkeypatch.setenv("BRUTEX_COMMIT_SHA", "deadbeefcafe")
+    assert _code_commit_sha() == "deadbeefcafe"
+    monkeypatch.delenv("BRUTEX_COMMIT_SHA", raising=False)
+    assert _code_commit_sha() == __version__
+    monkeypatch.setenv("BRUTEX_COMMIT_SHA", "")  # empty → falsy → fallback
+    assert _code_commit_sha() == __version__
