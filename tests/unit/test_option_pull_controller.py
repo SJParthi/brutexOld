@@ -23,6 +23,8 @@ from brutex.adapters.dhan.option_synthetic import SyntheticOptionClient
 from brutex.dashboard.option_pull_controller import (
     OptionsPullReport,
     OptionSymbolResult,
+    _LiveOptionRuntime,
+    _live_option_runtime,
     instrument_to_option_underlying,
     pull_options,
 )
@@ -388,3 +390,23 @@ class TestPullOptionsCorrelation:
         pid = start["pull_id"]
         assert isinstance(pid, str) and len(pid) == 12
         assert done["pull_id"] == pid
+
+
+class TestLiveOptionRuntime:
+    """``_live_option_runtime`` (DEC-DHAN-TIMEOUT-BACKOFF-001 wiring).
+
+    A dry-run / injected-factory pull needs no throttle → the all-``None``
+    runtime, so the options spine uses its default pool and stays feedback-free.
+    The LIVE branch (controller construction + bound-method wiring) is
+    ``# pragma: no cover`` (real token + network), exercised by the dry-run path
+    here and the spot path's own rate-feedback tests.
+    """
+
+    def test_dry_run_is_the_all_none_runtime(self) -> None:
+        runtime = _live_option_runtime(use_live_rate=False)
+        assert runtime == _LiveOptionRuntime()
+        assert runtime.pace is None
+        assert runtime.on_rate_limit is None
+        assert runtime.on_timeout is None
+        assert runtime.on_success is None
+        assert runtime.run_parallel is None

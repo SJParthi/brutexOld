@@ -47,12 +47,17 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import structlog
 
 from brutex.adapters.dhan.constants import DRV_OPTION_TYPES, EXPIRY_FLAGS
-from brutex.adapters.dhan.option_ingest import ALL_REQUIRED_DATA, JsonPoster, OptionBarSink
+from brutex.adapters.dhan.option_ingest import (
+    ALL_REQUIRED_DATA,
+    JsonPoster,
+    OptionBarSink,
+    Pacer,
+)
 from brutex.adapters.dhan.option_synthetic import SyntheticOptionClient
 from brutex.adapters.dhan.option_universe_ingest import (
     DEFAULT_EXPIRY_CODES,
@@ -291,26 +296,49 @@ def _options_run_parallel(controller: DhanRateController | None) -> RunParallel 
     return PoolRunParallel(max_workers=workers)
 
 
-def _live_option_runtime(
-    use_live_rate: bool,
-) -> tuple[Callable[[], None] | None, RunParallel | None]:
-    """Return ``(pace, run_parallel)`` for the options pull.
+class _LiveOptionRuntime(NamedTuple):
+    """The live-pull rate runtime: pacing + rate-feedback hooks + the sized pool.
+
+    All five derive from ONE shared
+    :class:`~brutex.adapters.dhan.rate_control.DhanRateController`. The
+    ``on_rate_limit`` / ``on_timeout`` / ``on_success`` hooks mirror the spot
+    path's bound-method wiring (CLAUDE.md §11 COMMON) so the governor adapts the
+    options spine too (DEC-DHAN-TIMEOUT-BACKOFF-001). A dry-run / injected-factory
+    pull uses the all-``None`` default → no throttle, default pool.
+    """
+
+    pace: Pacer | None = None
+    on_rate_limit: Pacer | None = None
+    on_timeout: Pacer | None = None
+    on_success: Pacer | None = None
+    run_parallel: RunParallel | None = None
+
+
+def _live_option_runtime(use_live_rate: bool) -> _LiveOptionRuntime:
+    """Build the :class:`_LiveOptionRuntime` for the options pull.
 
     A **default live** pull (no injected factory + not dry-run) builds ONE shared
-    controller and derives both its ``pace`` hook AND a rate-sized fan-out pool
-    from it (DEC-DHAN-PARALLEL-INGEST-001). Dry-run / injected-factory pulls need
-    no throttle → ``(None, None)`` (the ingest spine uses its default pool). The
-    controller paces at the 5 r/s ceiling (DEC-DHAN-ADAPTIVE-RPS-001); the
-    rolling-option spine still does not thread the 429-feedback hooks, so live
-    options hold at the safe ceiling — the adaptive 5→4→3 step-down for the
-    options spine remains a tracked follow-up (honest envelope, Golden Rule #10).
-    The sizing (:func:`_options_run_parallel`) is covered; only the live
-    controller construction is ``# pragma: no cover``.
+    controller and derives its ``pace`` hook, the three rate-feedback hooks (its
+    own ``on_rate_limit`` / ``on_timeout`` / ``on_success`` bound methods), AND a
+    rate-sized fan-out pool from it (DEC-DHAN-PARALLEL-INGEST-001 +
+    DEC-DHAN-TIMEOUT-BACKOFF-001). Dry-run / injected-factory pulls need no
+    throttle → the all-``None`` default (the ingest spine uses its default pool).
+    The controller starts at the 5 r/s ceiling (DEC-DHAN-ADAPTIVE-RPS-001) and
+    now ADAPTS the options spine: sustained 429s OR sustained timeouts step it
+    5→4→3, recovering on a clean window. The pool sizing
+    (:func:`_options_run_parallel`) is covered; only the live controller
+    construction is ``# pragma: no cover``.
     """
     if not use_live_rate:
-        return None, None
+        return _LiveOptionRuntime()
     controller = _build_live_option_controller()  # pragma: no cover — live only
-    return controller.pace, _options_run_parallel(controller)  # pragma: no cover — live only
+    return _LiveOptionRuntime(  # pragma: no cover — live only
+        pace=controller.pace,
+        on_rate_limit=controller.on_rate_limit,
+        on_timeout=controller.on_timeout,
+        on_success=controller.on_success,
+        run_parallel=_options_run_parallel(controller),
+    )
 
 
 def _build_live_option_controller() -> DhanRateController:  # pragma: no cover — live controller
@@ -420,7 +448,7 @@ def pull_options(
             start_date=start.date().isoformat(),
             dry_run=dry_run,
         )
-        pace, run_parallel = _live_option_runtime(use_live_rate)
+        runtime = _live_option_runtime(use_live_rate)
         report = run_dhan_options_ingest(
             client,
             sink,
@@ -431,10 +459,13 @@ def pull_options(
             expiry_codes=expiry_codes,
             option_types=option_types,
             required_data=ALL_REQUIRED_DATA,
-            pace=pace,
+            pace=runtime.pace,
+            on_rate_limit=runtime.on_rate_limit,
+            on_timeout=runtime.on_timeout,
+            on_success=runtime.on_success,
             on_progress=on_progress,
             coverage=coverage,
-            run_parallel=run_parallel,
+            run_parallel=runtime.run_parallel,
         )
         # Persist the windows just completed so the next pull skips them.
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)

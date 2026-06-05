@@ -13,7 +13,11 @@ from decimal import Decimal
 
 import pytest
 from brutex.adapters.dhan.constants import ENDPOINT_ROLLING_OPTION
-from brutex.adapters.dhan.errors import DhanBadRequestError, DhanServerError
+from brutex.adapters.dhan.errors import (
+    DhanBadRequestError,
+    DhanRateLimitError,
+    DhanServerError,
+)
 from brutex.adapters.dhan.option_ingest import (
     ALL_REQUIRED_DATA,
     OptionIngestReport,
@@ -99,6 +103,9 @@ def _run(
     start: date = date(2021, 1, 4),
     end: date = date(2021, 1, 20),
     pace: object = None,
+    on_rate_limit: object = None,
+    on_timeout: object = None,
+    on_success: object = None,
 ) -> OptionIngestReport:
     return ingest_rolling_option_series(
         client,
@@ -115,6 +122,9 @@ def _run(
         start=start,
         end=end,
         pace=pace,  # type: ignore[arg-type]
+        on_rate_limit=on_rate_limit,  # type: ignore[arg-type]
+        on_timeout=on_timeout,  # type: ignore[arg-type]
+        on_success=on_success,  # type: ignore[arg-type]
     )
 
 
@@ -183,6 +193,60 @@ def test_terminal_error_propagates() -> None:
     sink = _FakeSink()
     with pytest.raises(DhanBadRequestError):
         _run(client, sink)
+
+
+def test_on_success_fires_per_clean_window() -> None:
+    # The rate-feedback recover-up hook (DEC-DHAN-TIMEOUT-BACKOFF-001) fires once
+    # per successfully-fetched window, and NOT on a window that errors.
+    client = _FakeClient([{"data": {"ce": _side(), "pe": None}}])
+    sink = _FakeSink()
+    oks: list[int] = []
+    report = _run(client, sink, on_success=lambda: oks.append(1))
+    assert report.windows == 1
+    assert oks == [1]
+
+
+def test_timeout_routes_to_on_timeout_not_on_rate_limit() -> None:
+    # A retryable NON-429 stall (a 5xx / timeout — a struggling Dhan) is routed to
+    # the GENTLE timeout ladder via on_timeout, NOT the 429 hook; on_success must
+    # not fire for the errored window (DEC-DHAN-TIMEOUT-BACKOFF-001).
+    client = _FakeClient([DhanServerError("HTTP 503")])
+    sink = _FakeSink()
+    rl: list[int] = []
+    to: list[int] = []
+    oks: list[int] = []
+    report = _run(
+        client,
+        sink,
+        on_rate_limit=lambda: rl.append(1),
+        on_timeout=lambda: to.append(1),
+        on_success=lambda: oks.append(1),
+    )
+    assert report.transient_failures == 1
+    assert to == [1]
+    assert rl == []
+    assert oks == []
+
+
+def test_rate_limit_routes_to_on_rate_limit_not_on_timeout() -> None:
+    # A swallowed 429 drives the 429 ladder (on_rate_limit), never the timeout one.
+    client = _FakeClient([DhanRateLimitError("HTTP 429")])
+    sink = _FakeSink()
+    rl: list[int] = []
+    to: list[int] = []
+    report = _run(client, sink, on_rate_limit=lambda: rl.append(1), on_timeout=lambda: to.append(1))
+    assert report.transient_failures == 1
+    assert rl == [1]
+    assert to == []
+
+
+def test_swallowed_429_without_a_hook_is_a_clean_skip() -> None:
+    # A 429 with NO on_rate_limit hook wired (e.g. a feedback-free pull) still
+    # just skips the window — the hook guard's None branch.
+    client = _FakeClient([DhanRateLimitError("HTTP 429")])
+    sink = _FakeSink()
+    report = _run(client, sink)  # no feedback hooks
+    assert report == OptionIngestReport(windows=1, bars_appended=0, transient_failures=1)
 
 
 def _run_cov(client: _FakeClient, sink: _FakeSink, coverage: object) -> OptionIngestReport:
