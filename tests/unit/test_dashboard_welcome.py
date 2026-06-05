@@ -61,8 +61,10 @@ def test_welcome_has_animated_stat_targets() -> None:
 
 
 def test_welcome_honest_envelope_no_hype() -> None:
-    # Golden Rule #10: the headline SLA names its hardware; no "millions in minutes".
+    # Golden Rule #10: the headline SLA names its hardware, and the page DISAVOWS
+    # the classic hype phrase rather than claiming it (it appears only inside its
+    # own "No ... claims" disavowal).
     html = _render_welcome_html()
     assert "M4 Pro" in html
-    assert "signal-only" in html.lower() or "signal-only" in html
-    assert "millions in minutes" not in html.lower()
+    assert "signal-only" in html.lower()
+    assert 'No "millions in minutes"' in html
