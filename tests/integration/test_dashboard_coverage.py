@@ -132,6 +132,12 @@ class TestCoverageApi:
         # windows are SUCCESS / EMPTY / FAILED without hitting the raw API.
         assert "Fetch windows" in resp.text
         assert "/api/v1/coverage/windows" in resp.text
+        # Regression guard for the 3-section overlap (DEC-COVERAGE-WINDOWS-LAYOUT-001):
+        # ALL three panels — not just the first #panel — must carry the bounded
+        # internal-scroll rule, else #spotpanel/#winpanel grow to content height and
+        # overlap the next section. Without the fix the served CSS has "#panel {"
+        # alone and this assertion fails.
+        assert "#panel, #spotpanel, #winpanel" in resp.text
 
 
 def _bar(ts: datetime, close: str) -> CandleBar:
