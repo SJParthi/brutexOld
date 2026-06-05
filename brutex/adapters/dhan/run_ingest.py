@@ -138,6 +138,7 @@ def run_dhan_spot_ingest(
     coverage: FetchCoverage | None = None,
     status_log: WindowStatusLog | None = None,
     on_rate_limit: Callable[[], None] | None = None,
+    on_timeout: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
     on_progress: ProgressHook | None = None,
     run_parallel: RunParallel | None = None,
@@ -244,6 +245,7 @@ def run_dhan_spot_ingest(
                 coverage=coverage,
                 status_log=status_log,
                 on_rate_limit=on_rate_limit,
+                on_timeout=on_timeout,
                 on_success=on_success,
             )
 
