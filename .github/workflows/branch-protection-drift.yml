@@ -150,64 +150,57 @@ jobs:
         if: failure() && steps.drift.conclusion == 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SERVER_URL: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
         run: |
+          # Build the body in a file via printf (NOT a column-0 heredoc — a
+          # heredoc body at column 0 inside a `run: |` block scalar is
+          # spec-invalid YAML and startup-fails the whole run, which is why
+          # this detector showed permanently red; DEC-DRIFT-YAML-FIX-001).
+          summary="$(cat drift-summary.txt)"
+          ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           # Don't open dupes — check if an open drift-alert already exists.
           existing=$(gh issue list \
-            --repo "${{ github.repository }}" \
+            --repo "$REPO" \
             --label "branch-protection-drift" \
             --state open \
-            --json number,title \
+            --json number \
             --limit 1 | jq -r '.[0].number // empty')
           if [[ -n "$existing" ]]; then
+            {
+              printf '**Drift re-detected on %s**\n\n' "$ts"
+              printf '```\n%s\n```\n\n' "$summary"
+              printf 'Per DEC-P0-005 P1 follow-up: see `docs/runbooks/github-branch-protection-setup.md`.\n'
+            } > drift-body.md
             echo "Existing drift-alert issue #$existing already open; adding comment."
-            gh issue comment "$existing" --repo "${{ github.repository }}" \
-              --body "$(cat <<EOF
-**Drift re-detected on $(date -u +%Y-%m-%dT%H:%M:%SZ)**
-
-\`\`\`
-$(cat drift-summary.txt)
-\`\`\`
-
-Per DEC-P0-005 P1 follow-up: see \`docs/runbooks/github-branch-protection-setup.md\`.
-EOF
-)"
+            gh issue comment "$existing" --repo "$REPO" --body-file drift-body.md
           else
+            {
+              printf '## Drift detected\n\n'
+              printf 'The branch protection rule on `main` no longer matches the expected\n'
+              printf 'snapshot in `docs/runbooks/github-branch-protection-setup.md`.\n\n'
+              printf '### Details\n\n'
+              printf '```\n%s\n```\n\n' "$summary"
+              printf '### Why this matters\n\n'
+              printf 'Per DEC-P0-005 + the Z+ L4 PREVENT layer: server-side branch protection\n'
+              printf 'is the ONLY mechanical lock preventing merges with red CI. If this rule\n'
+              printf 'drifts (e.g., admin bypass re-enabled, required checks removed), Claude\n'
+              printf 'or any contributor could silently merge red CI again — the exact\n'
+              printf 'violation PR #25 caused.\n\n'
+              printf '### Action required\n\n'
+              printf '1. Read `docs/runbooks/github-branch-protection-setup.md`\n'
+              printf '2. Re-apply the missing settings via GitHub Settings → Branches\n'
+              printf '3. Document the drift cause in a follow-up DEC entry in MIGRATION.md\n'
+              printf '4. Close this issue once verified\n\n'
+              printf '### Audit trail\n\n'
+              printf -- '- Detected by: `.github/workflows/branch-protection-drift.yml`\n'
+              printf -- '- Run: %s/%s/actions/runs/%s\n' "$SERVER_URL" "$REPO" "$RUN_ID"
+              printf -- '- Timestamp: %s\n' "$ts"
+            } > drift-body.md
             gh issue create \
-              --repo "${{ github.repository }}" \
+              --repo "$REPO" \
               --title "🚨 Branch protection drift detected on main ($(date -u +%Y-%m-%d))" \
               --label "branch-protection-drift" \
-              --body "$(cat <<EOF
-## Drift detected
-
-The branch protection rule on \`main\` no longer matches the expected
-snapshot in \`docs/runbooks/github-branch-protection-setup.md\`.
-
-### Details
-
-\`\`\`
-$(cat drift-summary.txt)
-\`\`\`
-
-### Why this matters
-
-Per DEC-P0-005 + the Z+ L4 PREVENT layer: server-side branch protection
-is the ONLY mechanical lock preventing merges with red CI. If this rule
-drifts (e.g., admin bypass re-enabled, required checks removed), Claude
-or any contributor could silently merge red CI again — the exact
-violation PR #25 caused.
-
-### Action required
-
-1. Read \`docs/runbooks/github-branch-protection-setup.md\`
-2. Re-apply the missing settings via GitHub Settings → Branches
-3. Document the drift cause in a follow-up DEC entry in MIGRATION.md
-4. Close this issue once verified
-
-### Audit trail
-
-- Detected by: \`.github/workflows/branch-protection-drift.yml\`
-- Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-- Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-EOF
-)"
+              --body-file drift-body.md
           fi
