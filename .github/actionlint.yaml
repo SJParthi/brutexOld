@@ -1,0 +1,9 @@
+# actionlint configuration (DEC-ACTIONLINT-GATE-001).
+#
+# Declare custom self-hosted runner labels so actionlint does not flag
+# them as unknown. `m4pro` is the operator's Apple M4 Pro bench runner
+# (CLAUDE.md §8 hardware envelope; used by bench-m4pro.yml). `macos` and
+# `self-hosted` are built-in labels and need no declaration.
+self-hosted-runner:
+  labels:
+    - m4pro

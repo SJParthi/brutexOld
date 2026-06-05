@@ -98,6 +98,38 @@ jobs:
         run: ruff format --check brutex tests
 
   # ─────────────────────────────────────────────────────────────────
+  # ACTIONLINT — lint every workflow YAML (DEC-ACTIONLINT-GATE-001).
+  # Catches the class of bug fixed in DEC-DRIFT-YAML-FIX-001: a column-0
+  # heredoc / bad ${{ }} expression / invalid glob / unknown action ref
+  # that startup-fails a workflow SILENTLY (the drift detector rotted red
+  # for that exact reason). Core checks only — shellcheck/pyflakes are a
+  # tracked follow-up (DEC-ACTIONLINT-SHELLCHECK-001) so the gate is green
+  # on the current tree and starts protecting immediately rather than
+  # flooding on pre-existing shell warnings across this 2500-line file.
+  # ─────────────────────────────────────────────────────────────────
+  actionlint:
+    name: Lint workflows (actionlint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned actionlint
+        env:
+          AL_VERSION: "1.7.7"
+          AL_SHA256: "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
+        run: |
+          url="https://github.com/rhysd/actionlint/releases/download/v${AL_VERSION}/actionlint_${AL_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL "$url" -o actionlint.tgz
+          echo "${AL_SHA256}  actionlint.tgz" | sha256sum -c -
+          tar -xzf actionlint.tgz actionlint
+      - name: Run actionlint (core checks)
+        # -shellcheck= / -pyflakes= disable the embedded linters for now to
+        # avoid a pre-existing-warning flood; enabling shellcheck-on-workflows
+        # is DEC-ACTIONLINT-SHELLCHECK-001 (tracked follow-up). Core syntax /
+        # expression / glob / action-ref validation runs and IS the gate.
+        run: ./actionlint -color -shellcheck= -pyflakes=
+
+  # ─────────────────────────────────────────────────────────────────
   # TYPE — mypy --strict + pyright
   # ─────────────────────────────────────────────────────────────────
   type:
@@ -2231,6 +2263,37 @@ jobs:
           bash scripts/ci/zplus-pr-guard.sh "$tmp"
 
   # ─────────────────────────────────────────────────────────────────
+  # DEFINITION OF READY — the plan-first gate (DEC-DEFINITION-OF-READY-001).
+  # Refuses any PR whose body does not enumerate, in writing, every
+  # scenario + failure mode + the real-run proof + the rollback +
+  # what's out of scope. The mechanical complement to the Definition of
+  # DONE (the ci-ok merge gates). See docs/DEFINITION_OF_READY.md.
+  # ─────────────────────────────────────────────────────────────────
+  definition-of-ready:
+    name: Definition of Ready (plan-first gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+      - name: Detect PR author
+        id: pr-meta
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          echo "author=$PR_AUTHOR" >> "$GITHUB_OUTPUT"
+      - name: Run Definition-of-Ready guard
+        env:
+          PR_AUTHOR: ${{ steps.pr-meta.outputs.author }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp)
+          printf '%s\n' "$PR_BODY" > "$tmp"
+          bash scripts/ci/definition-of-ready-guard.sh "$tmp"
+
+  # ─────────────────────────────────────────────────────────────────
   # DEC-ID VALIDATOR — partial automation of STANDARDS row 18
   # Catches cited DEC-IDs that have no matching MIGRATION.md entry.
   # ─────────────────────────────────────────────────────────────────
@@ -2404,6 +2467,10 @@ jobs:
     runs-on: ubuntu-24.04
     needs:
       - lint
+      # DEC-ACTIONLINT-GATE-001: workflow-YAML lint. Hard gate so a
+      # column-0 heredoc / bad expression can never silently startup-fail
+      # a workflow again (the DEC-DRIFT-YAML-FIX-001 bug class).
+      - actionlint
       - type
       - test
       - property
@@ -2447,6 +2514,11 @@ jobs:
       # events (no PR body), enforced on pull_request events. Renovate
       # bots with security label are exempted by the guard itself.
       - zplus-pr-guard
+      # DEC-DEFINITION-OF-READY-001: plan-first gate — the PR body must
+      # enumerate scenarios + failure modes + real-run proof + rollback +
+      # out-of-scope before any implementation is accepted. Skipped on
+      # push events (no PR body); bot-exempt + operator-override.
+      - definition-of-ready
       # DEC-COV-001 step 5 follow-up (entry #214): DEC-ID validator
       # — partial automation of STANDARDS row 18. Skipped on push
       # events (no PR body), enforced on pull_request events.
@@ -2475,6 +2547,7 @@ jobs:
           set -e
           echo "Gate results:"
           echo "  lint:          ${{ needs.lint.result }}"
+          echo "  actionlint:    ${{ needs.actionlint.result }}"
           echo "  type:          ${{ needs.type.result }}"
           echo "  test:          ${{ needs.test.result }}"
           echo "  property:      ${{ needs.property.result }}"
@@ -2497,12 +2570,14 @@ jobs:
           echo "  mutation-py:   ${{ needs.mutation-py.result }}"
           echo "  proof-bundle:  ${{ needs.proof-bundle.result }}"
           echo "  zplus-pr-guard:${{ needs.zplus-pr-guard.result }}"
+          echo "  definition-of-ready:${{ needs.definition-of-ready.result }}"
           echo "  dec-id-validator:${{ needs.dec-id-validator.result }}"
           echo "  bugfix-regression-scan:${{ needs.bugfix-regression-scan.result }}"
           echo "  no-hallucination-scan:${{ needs.no-hallucination-scan.result }}"
           echo "  conv-commits:  ${{ needs.conv-commits.result }}"
           for result in \
             "${{ needs.lint.result }}" \
+            "${{ needs.actionlint.result }}" \
             "${{ needs.type.result }}" \
             "${{ needs.test.result }}" \
             "${{ needs.property.result }}" \
@@ -2525,6 +2600,7 @@ jobs:
             "${{ needs.mutation-py.result }}" \
             "${{ needs.proof-bundle.result }}" \
             "${{ needs.zplus-pr-guard.result }}" \
+            "${{ needs.definition-of-ready.result }}" \
             "${{ needs.dec-id-validator.result }}" \
             "${{ needs.bugfix-regression-scan.result }}" \
             "${{ needs.no-hallucination-scan.result }}" \
