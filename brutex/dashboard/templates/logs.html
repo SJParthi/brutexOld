@@ -72,6 +72,20 @@
   .row.error, .row.critical, .row.exception { background:rgba(255,92,92,.07); }
   .lvl.none { color:var(--muted); }
   .empty { color:var(--muted); font-size:13px; padding:24px 16px; text-align:center; }
+  /* ── Accessibility + motion polish (DEC-DASHBOARD-A11Y-POLISH-002, extends #497) ── */
+  /* Keyboard focus rings (TAB-only — never on mouse click) + reduce-motion honoured,
+     the same safe a11y polish shipped to /universe + /coverage in #497; additive,
+     zero static-layout change. */
+  a:focus-visible, button:focus-visible, input:focus-visible,
+  select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
+    outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+      transition-duration: .001ms !important; scroll-behavior: auto !important;
+    }
+  }
 </style>
 </head>
 <body>
