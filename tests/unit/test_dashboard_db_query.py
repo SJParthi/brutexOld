@@ -23,6 +23,8 @@ from brutex.dashboard.db_view import (
     SPOT_DERIVED_COLUMNS,
     _bar_ist_date,
     _bar_ist_time,
+    _daily_close_by_date,
+    _daily_open_by_date,
     _format_candle_timestamp,
     _intraday_last_close_by_date,
     _ist_date,
@@ -1556,6 +1558,55 @@ def test_prev_trading_close_maps_each_day_to_prior_close() -> None:
         date(2024, 3, 4): Decimal("100"),
         date(2024, 3, 5): Decimal("110"),
     }
+
+
+# ── _daily_close_by_date / _daily_open_by_date (the 1-day readers) ────
+
+
+def test_daily_readers_empty_partition(store: InstrumentStore, tmp_path: Path) -> None:
+    # No 1day partition → both readers return an empty map (the blank-degrade path).
+    assert (
+        _daily_close_by_date(store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="X")
+        == {}
+    )
+    assert (
+        _daily_open_by_date(store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="X")
+        == {}
+    )
+
+
+def test_daily_readers_keyed_by_ist_date(store: InstrumentStore, tmp_path: Path) -> None:
+    # The 1day close + open per IST trading date (DEC-DB-CANDLE-PERINTERVAL-001).
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="SBILIFE",
+        interval="1day",
+        bars=[
+            _ocbar(
+                datetime(2021, 1, 1, 3, 45, tzinfo=UTC),
+                open_="903",
+                high="907",
+                low="894",
+                close="895.4",
+            ),
+            _ocbar(
+                datetime(2021, 1, 4, 3, 45, tzinfo=UTC),
+                open_="900",
+                high="917",
+                low="894.5",
+                close="911.4",
+            ),
+        ],
+    )
+    closes = _daily_close_by_date(
+        store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="SBILIFE"
+    )
+    opens = _daily_open_by_date(
+        store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="SBILIFE"
+    )
+    assert closes == {date(2021, 1, 1): Decimal("895.4"), date(2021, 1, 4): Decimal("911.4")}
+    assert opens == {date(2021, 1, 1): Decimal("903"), date(2021, 1, 4): Decimal("900")}
 
 
 # ── _spot_derived_rows (every branch) ────────────────────────────────
