@@ -392,8 +392,10 @@ def pull_options(
         ``WEEK``+``MONTH``, stock ``MONTH``-only (DEC-DHAN-STOCK-MONTHLY-ONLY-001);
         passing a sequence forces it on every underlying.
     expiry_codes, option_types
-        The remaining fan-out axes — default to the near/next/far expiry codes
-        (DEC-DHAN-EXPIRY-CODES-001) and ``CALL``/``PUT``.
+        The remaining fan-out axes. ``expiry_codes`` defaults to ``None`` →
+        **per-flag** depth (WEEK codes 1..8, MONTH 1..3;
+        DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001); an explicit sequence forces that exact
+        set on every flag. ``option_types`` defaults to ``CALL``/``PUT``.
     client_factory
         Override the ``(client, sink)`` builder; defaults to the synthetic
         builder when *dry_run* else the live builder. Tests inject a fake
