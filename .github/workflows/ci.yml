@@ -98,6 +98,38 @@ jobs:
         run: ruff format --check brutex tests
 
   # ─────────────────────────────────────────────────────────────────
+  # ACTIONLINT — lint every workflow YAML (DEC-ACTIONLINT-GATE-001).
+  # Catches the class of bug fixed in DEC-DRIFT-YAML-FIX-001: a column-0
+  # heredoc / bad ${{ }} expression / invalid glob / unknown action ref
+  # that startup-fails a workflow SILENTLY (the drift detector rotted red
+  # for that exact reason). Core checks only — shellcheck/pyflakes are a
+  # tracked follow-up (DEC-ACTIONLINT-SHELLCHECK-001) so the gate is green
+  # on the current tree and starts protecting immediately rather than
+  # flooding on pre-existing shell warnings across this 2500-line file.
+  # ─────────────────────────────────────────────────────────────────
+  actionlint:
+    name: Lint workflows (actionlint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned actionlint
+        env:
+          AL_VERSION: "1.7.7"
+          AL_SHA256: "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
+        run: |
+          url="https://github.com/rhysd/actionlint/releases/download/v${AL_VERSION}/actionlint_${AL_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL "$url" -o actionlint.tgz
+          echo "${AL_SHA256}  actionlint.tgz" | sha256sum -c -
+          tar -xzf actionlint.tgz actionlint
+      - name: Run actionlint (core checks)
+        # -shellcheck= / -pyflakes= disable the embedded linters for now to
+        # avoid a pre-existing-warning flood; enabling shellcheck-on-workflows
+        # is DEC-ACTIONLINT-SHELLCHECK-001 (tracked follow-up). Core syntax /
+        # expression / glob / action-ref validation runs and IS the gate.
+        run: ./actionlint -color -shellcheck= -pyflakes=
+
+  # ─────────────────────────────────────────────────────────────────
   # TYPE — mypy --strict + pyright
   # ─────────────────────────────────────────────────────────────────
   type:
@@ -2404,6 +2436,10 @@ jobs:
     runs-on: ubuntu-24.04
     needs:
       - lint
+      # DEC-ACTIONLINT-GATE-001: workflow-YAML lint. Hard gate so a
+      # column-0 heredoc / bad expression can never silently startup-fail
+      # a workflow again (the DEC-DRIFT-YAML-FIX-001 bug class).
+      - actionlint
       - type
       - test
       - property
@@ -2475,6 +2511,7 @@ jobs:
           set -e
           echo "Gate results:"
           echo "  lint:          ${{ needs.lint.result }}"
+          echo "  actionlint:    ${{ needs.actionlint.result }}"
           echo "  type:          ${{ needs.type.result }}"
           echo "  test:          ${{ needs.test.result }}"
           echo "  property:      ${{ needs.property.result }}"
@@ -2503,6 +2540,7 @@ jobs:
           echo "  conv-commits:  ${{ needs.conv-commits.result }}"
           for result in \
             "${{ needs.lint.result }}" \
+            "${{ needs.actionlint.result }}" \
             "${{ needs.type.result }}" \
             "${{ needs.test.result }}" \
             "${{ needs.property.result }}" \
