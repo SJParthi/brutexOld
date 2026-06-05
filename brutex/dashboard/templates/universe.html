@@ -517,8 +517,7 @@ async function selectInstrument(i) {
   });
   document.getElementById("pulllead").innerHTML =
     `Ready to pull <b>${esc(i.symbol)}</b> spot / options — or click a future / option contract below`;
-  updateMultiBtn();  // enable + label the unified "⤓ Pull spot" for this single highlight
-  document.getElementById("optbtn").disabled = false;
+  updateMultiBtn();  // enable + label BOTH unified pull buttons for this single highlight
   /* "⊕ tick its constituents" is meaningful only for an INDEX
      (DEC-UNIVERSE-NSE-CONSTITUENTS-001) — a stock has no constituents. */
   document.getElementById("tickconstbtn").disabled = (i.kind !== "index");
@@ -721,12 +720,17 @@ function toggleMulti(i, on) {
   updateMultiBtn();
 }
 function updateMultiBtn() {
-  // Drives the unified "⤓ Pull spot" button: label reflects the selection
-  // count; enabled when ANY rows are ticked OR a single row is highlighted.
-  const b = document.getElementById("pullbtn");
+  // Drives BOTH unified pull buttons: the label reflects the selection count;
+  // each is enabled when ANY rows are ticked OR a single row is highlighted.
   const n = selMulti.size;
+  const b = document.getElementById("pullbtn");
   b.textContent = n > 0 ? `⤓ Pull spot · ${n} selected` : "⤓ Pull spot";
   b.disabled = n === 0 && !selPullSymbol;
+  // The unified "⛓ Pull options chain" mirrors it (DEC-UNIVERSE-OPTIONS-MULTIPULL-001):
+  // one button for one OR many — ticked rows fan all their option grids in one pass.
+  const o = document.getElementById("optbtn");
+  o.textContent = n > 0 ? `⛓ Pull options chain · ${n} selected` : "⛓ Pull options chain";
+  o.disabled = n === 0 && !selPullSymbol;
 }
 document.getElementById("selallbtn").onclick = () => {
   const q = (search.value || "").toUpperCase();
@@ -807,13 +811,30 @@ document.getElementById("tickconstbtn").onclick = async () => {
   btn.disabled = false;
 };
 
-/* ── Per-symbol OPTIONS pull (buttons ⑥ ⑧ — POST /pull-options?symbol=) ──
-   Fans the selected underlying's whole option grid (ATM window · CE+PE ·
-   weekly+monthly · near/next/far, 1-minute) via the live progress panel. */
+/* ── Unified OPTIONS pull (DEC-UNIVERSE-OPTIONS-MULTIPULL-001): ONE button for
+   one OR many, mirroring the unified "⤓ Pull spot". If rows are ticked it sends
+   the whole selection as ?symbols=a,b,c so the backend fans EVERY underlying's
+   option grid (ATM window · CE+PE · weekly+monthly · near/next/far, 1-minute) in
+   ONE background job (the live panel ticks per underlying); otherwise it pulls
+   the single highlighted underlying via ?symbol=. The selection helper mirrors
+   spotSelection(); startAndPoll is itself single-flight (the server returns
+   {started:false} if a pull is already running). ── */
+function optionSelection() {
+  if (selMulti.size > 0) return [...selMulti.values()];
+  if (selPullSymbol) return [{ symbol: selInst, pull_symbol: selPullSymbol }];
+  return [];
+}
 document.getElementById("optbtn").onclick = () => {
-  if (!selPullSymbol) return;
-  startAndPoll('/api/v1/universe/pull-options?symbol=' + encodeURIComponent(selPullSymbol),
-    `${selInst} options chain`);
+  const items = optionSelection();
+  if (!items.length) return;
+  if (items.length > 1) {
+    const ids = items.map(it => it.pull_symbol).join(",");
+    startAndPoll('/api/v1/universe/pull-options?symbols=' + encodeURIComponent(ids),
+      `${items.length} underlyings options chain`);
+  } else {
+    startAndPoll('/api/v1/universe/pull-options?symbol=' + encodeURIComponent(items[0].pull_symbol),
+      `${items[0].symbol} options chain`);
+  }
 };
 
 /* ── Bulk pull (buttons ① ② ③ ④) — one click fans the whole kind ──
@@ -912,7 +933,10 @@ async function pollProgress(label) {
 function finishLive() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   setBulkDisabled(false);
-  document.getElementById('optbtn').disabled = !selPullSymbol;
+  // Restore BOTH unified pull buttons to their selection-driven label/enabled
+  // state (ticked rows OR a single highlight) — not just the single case, so a
+  // multi-select options pull leaves the button correctly enabled afterwards.
+  updateMultiBtn();
   document.getElementById('pullpanel').classList.remove('running');  // stop the beam
 }
 

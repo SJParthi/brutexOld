@@ -76,6 +76,7 @@ from brutex.dashboard.pull_controller import (
     dhan_creds_present,
     pull_all_spot,
     pull_candles,
+    resolve_pull_symbols,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.request_logging import emit_request_log
@@ -1175,19 +1176,28 @@ def build_app(
     async def api_universe_pull_options(
         kind: str | None = Query(default=None),
         symbol: str | None = Query(default=None),
+        symbols: str | None = Query(default=None),
     ) -> JSONResponse:
-        """POST /api/v1/universe/pull-options — start a bulk OR per-symbol OPTIONS pull.
+        """POST /api/v1/universe/pull-options — start a multi / per-symbol / bulk OPTIONS pull.
 
-        Backs the options buttons (② ④ bulk-by-kind, ⑥ ⑧ per-symbol). Launches
+        Backs the unified "⛓ Pull options chain" button (single OR ticked many)
+        + the bulk-by-kind buttons. Launches
         :func:`brutex.dashboard.option_pull_controller.pull_options` on the
-        **background job** (returns at once; poll ``/pull-progress``). When
-        ``symbol`` is given it fans that one underlying (IDX→OPTIDX±10 /
-        EQ→OPTSTK±3); else it bulk-fans every admitted underlying of ``kind``.
-        Exactly one of ``symbol`` / ``kind`` is required. Single-flight + forced
-        ``dry_run`` when Dhan creds are absent, exactly like the spot bulk pull.
+        **background job** (returns at once; poll ``/pull-progress``). Precedence:
+        ``symbols`` (the ticked SELECTION — a comma list, fans every one in ONE
+        pass; DEC-UNIVERSE-OPTIONS-MULTIPULL-001) > ``symbol`` (one underlying) >
+        ``kind`` (every admitted underlying of index/stock). Exactly one form is
+        required (else 400); an empty / unknown ``symbols`` id fails CLOSED (400,
+        naming the offenders — never a silent partial pull). Single-flight +
+        forced ``dry_run`` when Dhan creds are absent, exactly like the bulk pull.
         """
         dry_run = not dhan_creds_present()
-        if symbol is not None:
+        if symbols is not None:
+            try:
+                instruments = resolve_pull_symbols(symbols, _require_store().get)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        elif symbol is not None:
             store = _require_store()
             instrument = store.get(symbol)
             if instrument is None:
@@ -1200,13 +1210,18 @@ def build_app(
             instruments = _select_bulk_targets(kind)
         else:
             raise HTTPException(
-                status_code=400, detail="pull-options requires either ?symbol=... or ?kind=..."
+                status_code=400,
+                detail="pull-options requires ?symbols=..., ?symbol=... or ?kind=...",
             )
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        # A human-friendly label for the live panel: the count for a multi-select,
+        # else the single symbol / kind.
+        label = f"{len(instruments)} underlyings" if symbols is not None else (kind or symbol)
         _LOG.info(
             "universe.pull_options.requested",
             kind=kind,
             symbol=symbol,
+            symbols=symbols,
             count=len(instruments),
             dry_run=dry_run,
         )
@@ -1218,12 +1233,13 @@ def build_app(
             )
 
         # total = one progress tick per underlying (the options hook fires per underlying).
-        started = _pull_job.start(_work, total=len(instruments), detail=f"{kind or symbol} options")
+        started = _pull_job.start(_work, total=len(instruments), detail=f"{label} options")
         return JSONResponse(
             {
                 "started": started,
                 "kind": kind,
                 "symbol": symbol,
+                "symbols": symbols,
                 "total": len(instruments),
                 "dry_run": dry_run,
             }
