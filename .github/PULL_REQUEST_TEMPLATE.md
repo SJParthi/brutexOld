@@ -7,6 +7,28 @@
 > do not claim "100% / fully / guaranteed" for any partial/roadmap/out-of-scope
 > row; disclose it in the Honest envelope.
 
+## Definition of Ready (plan-first gate — DEC-DEFINITION-OF-READY-001)
+
+<!-- All five sections are REQUIRED. A blank section fails the
+`definition-of-ready` CI gate. See docs/DEFINITION_OF_READY.md. -->
+
+### Scenarios covered
+<!-- happy + edge + empty/zero + failure + concurrent — list them -->
+
+### Failure modes
+<!-- each way it can fail, and what the system does on each -->
+
+### Real-run proof
+<!-- the EXACT command that shows it working against reality (not "tests pass") -->
+
+### Rollback plan
+<!-- how to undo this safely -->
+
+### Out of scope
+<!-- what this PR explicitly does NOT do (Golden Rule #3) -->
+
+---
+
 ## Summary
 
 <!-- 1-3 bullets: what changed + why -->
