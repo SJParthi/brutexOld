@@ -205,6 +205,15 @@ def test_refresh_true_forces_a_refetch_over_a_cache_hit(
     assert len(calls) == 2
 
 
+def test_favicon_returns_204_not_404(client: TestClient) -> None:
+    """DEC-DASHBOARD-FAVICON-001: the browser auto-requests ``/favicon.ico`` on
+    every page; the route answers **204 No Content** so the operator's run log
+    no longer fills with ``404``s for it."""
+    r = client.get("/favicon.ico")
+    assert r.status_code == 204
+    assert r.content == b""
+
+
 def test_broad_market_basket_nifty500_resolves(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

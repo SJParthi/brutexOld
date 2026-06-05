@@ -68,6 +68,12 @@
   .col { background:var(--surface); border:1px solid var(--border); border-radius:14px;
     padding:14px; min-height:440px; animation: fadeInUp .5s ease both; }
   .col h3 { margin:0 0 12px; font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--muted); }
+  /* Search-first: the 240-row instrument list scrolls WITHIN its own panel so
+     the whole page never grows tall — type in the search box to filter to a
+     handful of rows in a few keystrokes (DEC-DASHBOARD-INSTRUMENT-SCROLL-001).
+     A contained scroll keeps the pull controls + the EXPIRIES/CONTRACTS panels
+     always in view, instead of scrolling the entire page past them. */
+  #instruments { max-height: 56vh; overflow-y: auto; overscroll-behavior: contain; }
 
   .inst { display:flex; align-items:center; gap:10px; padding:11px 12px; border-radius:10px;
     cursor:pointer; border:1px solid transparent; transition:.16s; animation: fadeInUp .4s ease both; }
@@ -352,6 +358,10 @@ function buildTabs(summary) {
   search.placeholder = "Search symbol…";
   search.oninput = renderInstruments;
   tabsEl.appendChild(search);
+  /* Search-first UX: focus the box on load so the operator types a symbol
+     immediately instead of scrolling 240 rows. Guard on document.body so a
+     re-render never steals focus mid-typing (DEC-DASHBOARD-INSTRUMENT-SCROLL-001). */
+  if (document.activeElement === document.body) { try { search.focus(); } catch (e) { /* no focus */ } }
   countUp();
 }
 
@@ -732,10 +742,15 @@ document.getElementById("tickconstbtn").onclick = async () => {
   const members = body && body.members ? body.members : [];
   const source = body && body.source ? body.source : "unavailable";
   const note = (body && body.note) || "";
-  if (source !== "nse" || !members.length) {
-    /* unknown-index / unavailable / nse-but-none-eligible → honest note. */
+  /* BOTH "nse" (fresh fetch) and "cache" (served from a prior fetch) carry
+     valid members and MUST tick — on an NSE-blocked machine the cache IS the
+     normal path. Only "unknown-index" / "unavailable" / empty are the honest
+     no-tick note, and only those are errors (red). A cache hit is SUCCESS,
+     not an error (DEC-DASHBOARD-CONSTITUENTS-CACHE-TICK-001). */
+  const haveMembers = members.length > 0 && (source === "nse" || source === "cache");
+  if (!haveMembers) {
     if (msg) {
-      msg.classList.toggle("err", source !== "nse");
+      msg.classList.toggle("err", source === "unavailable" || source === "unknown-index");
       msg.textContent = note
         || "No constituents to tick — use button ③ 'Pull ALL F&O stocks' (the superset).";
     }
@@ -757,7 +772,10 @@ document.getElementById("tickconstbtn").onclick = async () => {
   renderInstruments();
   if (msg) {
     msg.classList.remove("err");
-    msg.textContent = `Ticked ${ticked} F&O-eligible constituent(s) of ${indexSymbol} — best-effort from NSE (verify; membership rebalances). Now hit ⤓ Pull N selected.`;
+    /* Prefer the backend note (it already says "fresh from NSE" vs "from
+       cache (fetched …)" correctly per source); fall back to a local line. */
+    msg.textContent = note
+      || `Ticked ${ticked} F&O-eligible constituent(s) of ${indexSymbol} — verify; membership rebalances. Now hit ⤓ Pull N selected.`;
   }
   btn.disabled = false;
 };

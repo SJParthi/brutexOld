@@ -649,6 +649,17 @@ def build_app(
         """GET /api/v1/state — JSON snapshot of the current dashboard state."""
         return JSONResponse(state.to_dict())
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        """GET /favicon.ico — 204 No Content (DEC-DASHBOARD-FAVICON-001).
+
+        Browsers auto-request ``/favicon.ico`` on every page load; with no
+        route each one logged a noisy ``404`` (visible in the operator's
+        ``make run`` log). 204 is the canonical "no icon" answer — quieter
+        than a 404 and it suppresses the browser's retry.
+        """
+        return Response(status_code=204)
+
     @app.get("/api/v1/rate")
     async def api_rate() -> JSONResponse:
         """GET /api/v1/rate — O(1) in-memory rate panel (target + effective r/s, 429s, latency).
