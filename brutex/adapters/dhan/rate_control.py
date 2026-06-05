@@ -53,6 +53,18 @@ STEP_RPS: float = 1.0
 STEP_DOWN_HITS: int = 3
 STEP_DOWN_WINDOW: float = 60.0
 
+#: "Heavy" TIMEOUTS = this many server-stress stalls (timeout / transport / 5xx —
+#: a SLOW, struggling Dhan, NOT a quota breach) inside :data:`STEP_DOWN_WINDOW`
+#: seconds → step DOWN 1 r/s (DEC-DHAN-TIMEOUT-BACKOFF-001, gentle adaptive
+#: step-down chosen by the operator 2026-06-05). Deliberately MORE tolerant than
+#: the 429 :data:`STEP_DOWN_HITS` (3): a timeout is softer evidence than an
+#: explicit 429, and a one-off stall already self-heals via the client's bounded
+#: fast-retry — so a single timeout must NOT cost throughput. Only a *sustained*
+#: storm (the `latency_ms_max → 10s` + `DhanTimeoutError` cascade the operator's
+#: long-pull logs caught) eases the rate; it then recovers 3→4→5 via
+#: :meth:`on_success` once the storm clears, exactly like the 429 ladder.
+STEP_DOWN_TIMEOUT_HITS: int = 5
+
 #: "Recovered" = this many seconds of zero hits since the last step → step up 1 r/s.
 STEP_UP_WINDOW: float = 300.0
 
@@ -111,6 +123,11 @@ class DhanRateController:
         self._quota = quota_tracker
         self._rps: float = CEILING_RPS
         self._hits: deque[float] = deque()
+        #: Server-stress stalls (timeout / transport / 5xx) inside the rolling
+        #: STEP_DOWN_WINDOW — the gentle adaptive timeout ladder's evidence
+        #: buffer (DEC-DHAN-TIMEOUT-BACKOFF-001), kept separate from the 429
+        #: ``_hits`` so the two signals never cross-trigger each other's ladder.
+        self._timeouts: deque[float] = deque()
         self._last_step: float = clock()
         self._bucket: AdaptiveTokenBucket = self._make_bucket()
         #: Guards the step-ladder state under concurrent worker access
@@ -179,17 +196,63 @@ class DhanRateController:
                     "rate.stepdown", from_rps=old_rps, to_rps=self._rps, floor_rps=FLOOR_RPS
                 )
 
+    def on_timeout(self) -> None:
+        """Record a server-stress stall; step **down** 1 r/s on a sustained storm — O(1).
+
+        The gentle adaptive timeout ladder (DEC-DHAN-TIMEOUT-BACKOFF-001): a
+        long pull that starts TIMING OUT (a slow, struggling Dhan — not a quota
+        breach) eases 5→4→3 r/s once :data:`STEP_DOWN_TIMEOUT_HITS` stalls land
+        inside :data:`STEP_DOWN_WINDOW` seconds, then recovers via
+        :meth:`on_success` once the storm clears. A one-off timeout is ignored
+        (it self-heals via the client's bounded fast-retry) so steady-state
+        throughput is UNCHANGED — only a cascade eases the rate. Mirrors
+        :meth:`on_rate_limit`'s ladder + floor but reads the SEPARATE, more
+        tolerant ``_timeouts`` buffer so a 429 and a timeout never cross-count.
+
+        Thread-safe: the record → window-evict → maybe-step-down is one atomic
+        O(1) critical section, so concurrent workers reporting a stall can never
+        double-step. The ``_make_bucket`` swap builds an in-memory bucket only
+        (no I/O / sleep under the lock).
+        """
+        with self._lock:
+            now = self._clock()
+            self._timeouts.append(now)
+            cutoff = now - STEP_DOWN_WINDOW
+            while self._timeouts and self._timeouts[0] < cutoff:
+                self._timeouts.popleft()
+            _LOG.warning("rate.timeout", current_rps=self._rps, recent_timeouts=len(self._timeouts))
+            if len(self._timeouts) >= STEP_DOWN_TIMEOUT_HITS and self._rps > FLOOR_RPS:
+                old_rps = self._rps
+                self._rps -= STEP_RPS
+                self._bucket = self._make_bucket()
+                self._timeouts.clear()
+                self._last_step = now
+                _LOG.warning(
+                    "rate.stepdown",
+                    from_rps=old_rps,
+                    to_rps=self._rps,
+                    floor_rps=FLOOR_RPS,
+                    cause="timeout",
+                )
+
     def on_success(self) -> None:
         """Record a clean call; step **up** 1 r/s after a sustained clean window — O(1).
 
         Thread-safe: the recover-up check + the ``_make_bucket`` swap are one
-        atomic O(1) critical section (no I/O / sleep under the lock).
+        atomic O(1) critical section (no I/O / sleep under the lock). Stale
+        timeouts (older than :data:`STEP_DOWN_WINDOW`) are evicted here too, so a
+        timeout storm that never reached the step-down threshold cannot block
+        recovery forever once it has aged out (DEC-DHAN-TIMEOUT-BACKOFF-001).
         """
         with self._lock:
             now = self._clock()
+            cutoff = now - STEP_DOWN_WINDOW
+            while self._timeouts and self._timeouts[0] < cutoff:
+                self._timeouts.popleft()
             if (
                 self._rps < CEILING_RPS
                 and not self._hits
+                and not self._timeouts
                 and now - self._last_step >= STEP_UP_WINDOW
             ):
                 old_rps = self._rps
@@ -203,7 +266,11 @@ class DhanRateController:
     def snapshot(self) -> dict[str, object]:
         """A JSON-friendly state snapshot for the dashboard rate panel (thread-safe, O(1))."""
         with self._lock:
-            return {"current_rps": self._rps, "recent_hits": len(self._hits)}
+            return {
+                "current_rps": self._rps,
+                "recent_hits": len(self._hits),
+                "recent_timeouts": len(self._timeouts),
+            }
 
 
 __all__ = [
@@ -211,6 +278,7 @@ __all__ = [
     "CEILING_RPS",
     "FLOOR_RPS",
     "STEP_DOWN_HITS",
+    "STEP_DOWN_TIMEOUT_HITS",
     "STEP_DOWN_WINDOW",
     "STEP_RPS",
     "STEP_UP_WINDOW",

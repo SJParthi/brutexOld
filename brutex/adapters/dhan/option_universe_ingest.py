@@ -247,6 +247,9 @@ def run_dhan_options_ingest(
     option_types: Sequence[str] = DRV_OPTION_TYPES,
     required_data: Sequence[str] = ALL_REQUIRED_DATA,
     pace: Pacer | None = None,
+    on_rate_limit: Pacer | None = None,
+    on_timeout: Pacer | None = None,
+    on_success: Pacer | None = None,
     on_progress: ProgressHook | None = None,
     coverage: FetchCoverage | None = None,
     run_parallel: RunParallel | None = None,
@@ -383,6 +386,9 @@ def run_dhan_options_ingest(
                 end=end,
                 required_data=required_data,
                 pace=pace,
+                on_rate_limit=on_rate_limit,
+                on_timeout=on_timeout,
+                on_success=on_success,
                 coverage=coverage,
             )
 

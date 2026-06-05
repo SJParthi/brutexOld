@@ -38,7 +38,7 @@ import structlog
 from brutex.adapters.dhan.body import build_rolling_option_body
 from brutex.adapters.dhan.chunks import plan_option_windows
 from brutex.adapters.dhan.constants import ENDPOINT_ROLLING_OPTION, TRACK1_OPTIONS_INTERVAL
-from brutex.adapters.dhan.errors import DhanError, is_retryable
+from brutex.adapters.dhan.errors import DhanError, is_rate_limit, is_retryable
 from brutex.adapters.dhan.option_parser import parse_rolling_option_sides
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.models import OptionBar
@@ -52,7 +52,16 @@ from brutex.observability.correlation import current_pull_id
 #: INFO; the per-underlying rollup at INFO lives in ``option_universe_ingest``.
 _LOG = structlog.get_logger("brutex.adapters.dhan.option_ingest")
 
-#: Pacing hook invoked once before each window fetch (e.g. token-bucket acquire).
+#: Pacing / rate-feedback hook — a no-arg callback (e.g. token-bucket acquire, or
+#: a rate-controller step). ``pace`` runs once before each window fetch; the
+#: ``on_rate_limit`` / ``on_success`` feedback hooks REUSE the SPOT path's hook
+#: names + bound-method wiring (CLAUDE.md §11 COMMON, ``ingest.ingest_spot``),
+#: and ``on_timeout`` EXTENDS that pattern — the spot path has no timeout hook
+#: (yet) — so the ONE shared rate governor adapts the options spine too
+#: (DEC-DHAN-TIMEOUT-BACKOFF-001): ``on_rate_limit`` on a swallowed 429,
+#: ``on_timeout`` on a swallowed timeout / transport / 5xx (a slow, struggling
+#: Dhan), ``on_success`` once per cleanly-fetched window. All default ``None`` so
+#: the dry-run / synthetic path stays feedback-free.
 Pacer = Callable[[], None]
 
 #: Default ``requiredData`` — every documented field, so the lake keeps the
@@ -163,6 +172,9 @@ def ingest_rolling_option_series(
     end: date,
     required_data: Sequence[str] = ALL_REQUIRED_DATA,
     pace: Pacer | None = None,
+    on_rate_limit: Pacer | None = None,
+    on_timeout: Pacer | None = None,
+    on_success: Pacer | None = None,
     coverage: FetchCoverage | None = None,
 ) -> OptionIngestReport:
     """Pull one expired-option series' 1-minute OHLC over ``[start, end)``.
@@ -264,8 +276,32 @@ def ingest_rolling_option_series(
         except DhanError as exc:
             if is_retryable(exc):
                 transient += 1
+                # Feed the swallowed transient to the rate governor so it adapts
+                # the options spine. The 429/success routing FOLLOWS the spot
+                # path's pattern (``ingest.ingest_spot``); the timeout branch is
+                # NEW here (the spot path has no timeout hook yet): a 429 → the
+                # 429 ladder; a timeout / transport / 5xx → the GENTLE timeout
+                # ladder, so a SUSTAINED storm (the operator's long-pull
+                # `DhanTimeoutError` cascade) eases the rate instead of grinding
+                # at 5 r/s into a struggling Dhan (DEC-DHAN-TIMEOUT-BACKOFF-001).
+                # A one-off blip is ignored by the controller's threshold →
+                # steady throughput unchanged. NB (divergence from the spot
+                # path): here a failed window is DEFERRED (``continue``) to the
+                # next pull, NOT retried in-run as the spot path does
+                # (DEC-DHAN-429-RETRY-001) — pre-existing options behaviour.
+                if is_rate_limit(exc):
+                    if on_rate_limit is not None:
+                        on_rate_limit()
+                elif on_timeout is not None:
+                    on_timeout()
                 continue
             raise
+        # A clean window is the recover-up signal for the rate governor. NB: a
+        # COVERAGE-skipped window (the ``continue`` above) does NOT fire this —
+        # only an actually-fetched clean window — so a resume-heavy pull emits
+        # fewer recover-up signals (benign: the 300s step-up window dominates).
+        if on_success is not None:
+            on_success()
         data = payload.get("data")
         source = data if isinstance(data, Mapping) else payload
         # Options are intraday 1m → drop pre-open / post-close before the lake.

@@ -12,6 +12,7 @@ from brutex.adapters.dhan.rate_control import (
     CEILING_RPS,
     FLOOR_RPS,
     STEP_DOWN_HITS,
+    STEP_DOWN_TIMEOUT_HITS,
     STEP_DOWN_WINDOW,
     STEP_UP_WINDOW,
     DhanRateController,
@@ -46,7 +47,7 @@ def _hammer(ctl: DhanRateController, clock: _Clock, *, hits: int, spread: float 
 def test_starts_at_ceiling() -> None:
     ctl = _controller(_Clock())
     assert ctl.current_rps == CEILING_RPS  # 5.0
-    assert ctl.snapshot() == {"current_rps": 5.0, "recent_hits": 0}
+    assert ctl.snapshot() == {"current_rps": 5.0, "recent_hits": 0, "recent_timeouts": 0}
 
 
 def test_step_down_5_to_4_to_3_on_sustained_429s() -> None:
@@ -133,6 +134,74 @@ def test_on_success_blocked_before_clean_window() -> None:
     assert ctl.current_rps == 4.0  # too soon → no step up
 
 
+def _hammer_timeouts(
+    ctl: DhanRateController, clock: _Clock, *, hits: int, spread: float = 1.0
+) -> None:
+    """Feed *hits* server-stress stalls, advancing the clock *spread* s between each."""
+    for _ in range(hits):
+        ctl.on_timeout()
+        clock.advance(spread)
+
+
+class TestTimeoutLadder:
+    """The gentle adaptive TIMEOUT step-down (DEC-DHAN-TIMEOUT-BACKOFF-001).
+
+    A sustained timeout storm eases 5→4→3 r/s (separate, more tolerant threshold
+    than the 429 ladder), clamps at the floor, ignores a one-off / non-sustained
+    blip, evicts its window, and lets :meth:`on_success` recover only once the
+    storm has cleared.
+    """
+
+    def test_step_down_5_to_4_to_3_on_sustained_timeouts(self) -> None:
+        clock = _Clock()
+        ctl = _controller(clock)
+        _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS)  # 5 within 60s → 5→4
+        assert ctl.current_rps == 4.0
+        _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS)  # → 4→3
+        assert ctl.current_rps == 3.0
+
+    def test_clamps_at_floor_never_below_3(self) -> None:
+        clock = _Clock()
+        ctl = _controller(clock)
+        _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS * 4)  # overshoot
+        assert ctl.current_rps == FLOOR_RPS
+        _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS)  # already floor → no halt
+        assert ctl.current_rps == FLOOR_RPS
+
+    def test_non_sustained_blip_does_not_step(self) -> None:
+        clock = _Clock()
+        ctl = _controller(clock)
+        ctl.on_timeout()
+        ctl.on_timeout()  # only 2 (< STEP_DOWN_TIMEOUT_HITS) → no step (no speed loss)
+        assert ctl.current_rps == CEILING_RPS
+        assert ctl.snapshot()["recent_timeouts"] == 2
+
+    def test_window_eviction_old_stalls_dont_count(self) -> None:
+        clock = _Clock()
+        ctl = _controller(clock)
+        ctl.on_timeout()
+        ctl.on_timeout()  # 2 stalls at t0
+        clock.advance(STEP_DOWN_WINDOW + 2.0)  # both age strictly out of the window
+        for _ in range(STEP_DOWN_TIMEOUT_HITS - 1):  # 4 fresh, same instant
+            ctl.on_timeout()
+        # the 2 stale were evicted → only 4 in-window (< 5) → no step
+        assert ctl.current_rps == CEILING_RPS
+        assert ctl.snapshot()["recent_timeouts"] == STEP_DOWN_TIMEOUT_HITS - 1
+
+    def test_recent_timeout_blocks_then_clears_recovery(self) -> None:
+        clock = _Clock()
+        ctl = _controller(clock)
+        _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS)  # → 4.0 (deque cleared)
+        assert ctl.current_rps == 4.0
+        clock.advance(STEP_UP_WINDOW + 1.0)  # the clean window has elapsed
+        ctl.on_timeout()  # but a FRESH stall lands right before recovery
+        ctl.on_success()  # blocked: a recent timeout is still in-window
+        assert ctl.current_rps == 4.0
+        clock.advance(STEP_DOWN_WINDOW + 1.0)  # the stall ages out
+        ctl.on_success()  # now genuinely clean → recover 4→5
+        assert ctl.current_rps == CEILING_RPS
+
+
 class TestThrottleLogging:
     """The throttle must be VISIBLE — every 429, every step down, every recovery."""
 
@@ -169,6 +238,27 @@ class TestThrottleLogging:
         assert up[0]["from_rps"] == 4.0
         assert up[0]["to_rps"] == 5.0
         assert up[0]["ceiling_rps"] == CEILING_RPS
+
+    def test_every_timeout_logs_rate_timeout(self) -> None:
+        clock = _Clock()
+        ctl = _controller(clock)
+        with capture_logs() as logs:
+            ctl.on_timeout()
+        hit = [e for e in logs if e["event"] == "rate.timeout"]
+        assert len(hit) == 1
+        assert hit[0]["current_rps"] == 5.0
+        assert hit[0]["recent_timeouts"] == 1
+
+    def test_timeout_step_down_logs_cause_timeout(self) -> None:
+        clock = _Clock()
+        ctl = _controller(clock)
+        with capture_logs() as logs:
+            _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS)  # 5 → 4
+        down = [e for e in logs if e["event"] == "rate.stepdown"]
+        assert len(down) == 1
+        assert down[0]["from_rps"] == 5.0
+        assert down[0]["to_rps"] == 4.0
+        assert down[0]["cause"] == "timeout"
 
 
 def test_pace_delegates_without_error() -> None:
