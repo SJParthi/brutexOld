@@ -146,7 +146,9 @@ def test_intrusive_tf_dropdown_stays_removed_but_clean_button_replaces_it() -> N
     # The clean replacement button IS present + wired to the (kept) backend route.
     assert 'id="matbtn"' in html, "the single '⚙ Pre-build timeframes' button must be present"
     assert "⚙ Pre-build timeframes" in html, "the clean materialise button label is missing"
-    assert "function matSelection" in html, "the one-or-many materialise selection helper is missing"
+    assert "function matSelection" in html, (
+        "the one-or-many materialise selection helper is missing"
+    )
     assert "matInFlight" in html, "the materialise double-click re-entrancy guard is missing"
     assert "derive-timeframes?symbol=" in html, (
         "the clean button must POST the (kept) materialise route"
