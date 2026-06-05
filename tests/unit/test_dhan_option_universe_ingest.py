@@ -20,14 +20,20 @@ from brutex.adapters.dhan.option_universe_ingest import (
     INDEX_STRIKE_OFFSETS,
     STOCK_EXPIRY_FLAGS,
     STOCK_STRIKE_OFFSETS,
+    WEEKLY_EXPIRY_CODES,
     OptionsUniverseReport,
     OptionUnderlying,
+    expiry_codes_for_flag,
     run_dhan_options_ingest,
     strike_window,
 )
 from brutex.data.models import OptionBar
 from brutex.observability.correlation import pull_id_scope
 from structlog.testing import capture_logs
+
+#: Index fan-out depth per (strike, type): WEEK fans 1..8 + MONTH fans 1..3
+#: (DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001). An index carries both flags.
+_INDEX_CODES_PER_AXIS = len(WEEKLY_EXPIRY_CODES) + len(DEFAULT_EXPIRY_CODES)
 
 # 1609732800 = 2021-01-04 04:00:00 UTC = 09:30 IST → in session [09:15, 15:30).
 _TS_IN = 1609732800
@@ -168,8 +174,9 @@ def test_full_fanout_cardinality_and_bars() -> None:
         start=date(2021, 1, 4),
         end=date(2021, 1, 5),
     )
-    # 3 strikes × 2 flags × 3 codes (1,2,3) × 2 types = 36 series.
-    expected = 3 * 2 * len(DEFAULT_EXPIRY_CODES) * 2
+    # 3 strikes × (WEEK 1..8 + MONTH 1..3 = 11 codes) × 2 types = 66 series
+    # (DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001).
+    expected = 3 * _INDEX_CODES_PER_AXIS * 2
     assert report.series_count == expected
     assert report.failed_series == 0
     assert client.calls == expected  # one window per series for a 1-day range
@@ -195,14 +202,37 @@ def test_per_kind_expiry_flags_stock_month_only_index_week_month() -> None:
     )
     index_series = {k for k in report.series if k[0] == "13"}
     stock_series = {k for k in report.series if k[0] == "1333"}
-    # Index: 3 strikes × 2 flags (WEEK+MONTH) × 3 codes × 2 types.
-    assert len(index_series) == 3 * 2 * len(DEFAULT_EXPIRY_CODES) * 2
-    # Stock: 3 strikes × 1 flag (MONTH) × 3 codes × 2 types — strictly fewer.
+    # Index: 3 strikes × (WEEK 1..8 + MONTH 1..3) codes × 2 types.
+    assert len(index_series) == 3 * _INDEX_CODES_PER_AXIS * 2
+    # Stock: 3 strikes × 1 flag (MONTH 1..3) × 2 types — strictly fewer.
     assert len(stock_series) == 3 * 1 * len(DEFAULT_EXPIRY_CODES) * 2
     assert len(stock_series) < len(index_series)
     # No WEEK leg is fanned for the stock (the elided, always-empty series).
     assert {k[1] for k in stock_series} == {"MONTH"}
     assert {k[1] for k in index_series} == {"WEEK", "MONTH"}
+
+
+def test_expiry_codes_for_flag_is_per_flag_depth() -> None:
+    # WEEK fans the deep 1..8 ladder; MONTH (and any other flag) stays 1..3
+    # (DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001 — MONTH has no 4th depth, code 4 → 400).
+    assert expiry_codes_for_flag("WEEK") == (1, 2, 3, 4, 5, 6, 7, 8)
+    assert expiry_codes_for_flag("MONTH") == (1, 2, 3)
+
+
+def test_default_fanout_uses_per_flag_codes_never_mixed() -> None:
+    # With no explicit expiry_codes, an index fans WEEK codes 1..8 and MONTH
+    # codes 1..3 — the per-flag depth, never the same set on both flags.
+    report = run_dhan_options_ingest(
+        _OkClient(),
+        _Sink(),
+        underlyings=[_index(offsets=0)],  # ATM only → 1 strike
+        start=date(2021, 1, 4),
+        end=date(2021, 1, 5),
+    )
+    week_codes = {k[2] for k in report.series if k[1] == "WEEK"}
+    month_codes = {k[2] for k in report.series if k[1] == "MONTH"}
+    assert week_codes == {1, 2, 3, 4, 5, 6, 7, 8}
+    assert month_codes == {1, 2, 3}
 
 
 def test_explicit_expiry_flags_override_beats_per_kind() -> None:
@@ -230,7 +260,7 @@ def test_terminal_error_quarantines_every_series() -> None:
         start=date(2021, 1, 4),
         end=date(2021, 1, 5),
     )
-    expected = 3 * 2 * len(DEFAULT_EXPIRY_CODES) * 2
+    expected = 3 * _INDEX_CODES_PER_AXIS * 2
     assert report.series_count == 0
     assert report.failed_series == expected
     assert report.bars_appended == 0
