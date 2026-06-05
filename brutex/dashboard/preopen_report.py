@@ -585,9 +585,14 @@ def _filled_sheet_xml(rows: list[PreOpenRow], *, title: str) -> str:
         + "</row>",
     ]
     for r, record in enumerate(rows, start=3):
+        # Widen the fixed heterogeneous display tuple to ``tuple[str | float, ...]``
+        # so iterating it yields ``str | float`` (the type ``_cell_xml`` wants) —
+        # iterating the FIXED tuple directly makes mypy join the element types to
+        # ``object`` (matches how the single-sheet ``_sheet_xml`` types its data).
+        row_cells: tuple[str | float, ...] = record.display_cells()
         cells = "".join(
             _cell_xml(c, r, v, _row_fill_styles(record.pct_chng, symbol_col, c))
-            for c, v in enumerate(record.display_cells())
+            for c, v in enumerate(row_cells)
         )
         out.append(f'<row r="{r}">{cells}</row>')
     out.append("</sheetData>")
