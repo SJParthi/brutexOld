@@ -1,14 +1,16 @@
 """Unit tests for the parallel options-ingest wiring (DEC-DHAN-PARALLEL-INGEST-001).
 
-Deterministic, synchronous-fake tests for the OUTER per-underlying fan-out in
-:func:`brutex.adapters.dhan.option_universe_ingest.run_dhan_options_ingest`:
+Deterministic, synchronous-fake tests for the per-SERIES fan-out in
+:func:`brutex.adapters.dhan.option_universe_ingest.run_dhan_options_ingest`
+(DEC-DHAN-OPTION-SERIES-FANOUT-001):
 
-* the injected ``run_parallel`` seam dispatches each underlying exactly once;
-* each worker runs its underlying's 4-deep series fan SEQUENTIALLY inside;
-* ``pull_id`` is re-bound inside each worker so the inner ``ingest.*`` events
-  keep the pull's correlation id across the pool boundary;
-* the per-underlying ``ingest.underlying`` rollup + ``on_progress`` fire in a
-  DETERMINISTIC ``security_id``-sorted post-pass (Rule #4);
+* the injected ``run_parallel`` seam dispatches one job PER SERIES (so a single
+  underlying's whole fan saturates the pool, not just one worker);
+* ``pull_id`` is re-bound inside each series worker so the inner ``ingest.*``
+  events keep the pull's correlation id across the pool boundary;
+* the per-underlying ``ingest.underlying`` rollup + ``on_progress`` still fire
+  ONCE per underlying in a DETERMINISTIC ``security_id``-sorted post-pass (Rule
+  #4), regardless of which series finished first;
 * a non-DhanError escaping a worker surfaces (a real bug is never swallowed),
   while a terminal DhanError on one series stays quarantined.
 
@@ -122,12 +124,15 @@ def _sync_run_parallel[ItemT, ResultT](
 
 
 class TestRunParallelSeam:
-    def test_each_underlying_dispatched_once(self) -> None:
+    def test_runner_dispatches_one_job_per_series(self) -> None:
+        # DEC-DHAN-OPTION-SERIES-FANOUT-001: the runner now sees one job PER SERIES
+        # (not per underlying). Each job is (idx, underlying, flag, code, strike,
+        # type) — so a single underlying's whole fan saturates the pool.
         dispatched: list[str] = []
 
         def _runner(fn, items):
             for item in items:
-                dispatched.append(item.security_id)
+                dispatched.append(item[1].security_id)
             return _sync_run_parallel(fn, items)
 
         client, sink = _OkClient(), _Sink()
@@ -139,10 +144,33 @@ class TestRunParallelSeam:
             end=_END,
             run_parallel=_runner,
         )
-        assert dispatched == ["13", "25"]
-        # 2 underlyings × (1 flag × 3 codes × 1 strike × 2 types) = 12 series.
+        # 2 underlyings × (1 flag × 3 codes × 1 strike × 2 types) = 12 SERIES jobs,
+        # in underlying input order.
+        assert len(dispatched) == 12
+        assert dispatched == ["13"] * 6 + ["25"] * 6
         assert report.series_count == 12
         assert report.failed_series == 0
+
+    def test_single_underlying_fans_all_its_series(self) -> None:
+        # The fix's load-bearing proof: ONE underlying produces MANY runner jobs
+        # (was exactly 1 → sequential → ~2 r/s), so the pool can saturate ≤5 r/s.
+        seen: list[object] = []
+
+        def _runner(fn, items):
+            seen.extend(items)
+            return _sync_run_parallel(fn, items)
+
+        client, sink = _OkClient(), _Sink()
+        report = run_dhan_options_ingest(
+            client,
+            sink,  # type: ignore[arg-type]
+            underlyings=[_underlying("13")],
+            start=_START,
+            end=_END,
+            run_parallel=_runner,
+        )
+        assert len(seen) == 6  # 6 series jobs for ONE underlying — NOT 1
+        assert report.series_count == 6
 
     def test_default_runner_when_omitted(self) -> None:
         # No run_parallel → the real bounded PoolRunParallel runs it (threads).
