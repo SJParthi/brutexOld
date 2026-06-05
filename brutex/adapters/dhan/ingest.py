@@ -197,6 +197,7 @@ def ingest_spot(
     coverage: FetchCoverage | None = None,
     status_log: WindowStatusLog | None = None,
     on_rate_limit: Callable[[], None] | None = None,
+    on_timeout: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
     run_parallel: RunParallel | None = None,
     max_retry_passes: int = _DEFAULT_MAX_RETRY_PASSES,
@@ -323,6 +324,7 @@ def ingest_spot(
                 coverage=coverage,
                 status_log=status_log,
                 on_rate_limit=on_rate_limit,
+                on_timeout=on_timeout,
                 on_success=on_success,
                 pull_id=pull_id,
                 series_fields=series_fields,
@@ -448,6 +450,7 @@ def _ingest_one_window(
     coverage: FetchCoverage | None,
     status_log: WindowStatusLog | None,
     on_rate_limit: Callable[[], None] | None,
+    on_timeout: Callable[[], None] | None,
     on_success: Callable[[], None] | None,
     pull_id: str,
     series_fields: dict[str, str],
@@ -494,11 +497,20 @@ def _ingest_one_window(
         )
     except DhanError as exc:
         if is_retryable(exc):
-            # A rate-limit 429 feeds the controller so it steps the rate
-            # down under sustained pressure (DEC-DHAN-ADAPTIVE-RPS-001).
+            # Feed the swallowed transient to the controller so it adapts: a
+            # rate-limit 429 steps the rate down under sustained pressure
+            # (DEC-DHAN-ADAPTIVE-RPS-001), and a timeout / transport / 5xx — a
+            # slow, struggling Dhan, not a quota breach — drives the GENTLE
+            # timeout ladder (DEC-DHAN-SPOT-TIMEOUT-BACKOFF-001, the spot-spine
+            # parallel of the options fix DEC-DHAN-TIMEOUT-BACKOFF-001 #494). A
+            # one-off blip is ignored by the controller's threshold, so steady
+            # throughput is unchanged.
             rate_limited = is_rate_limit(exc)
-            if on_rate_limit is not None and rate_limited:
-                on_rate_limit()
+            if rate_limited:
+                if on_rate_limit is not None:
+                    on_rate_limit()
+            elif on_timeout is not None:
+                on_timeout()
             # In-run auto-retry (DEC-DHAN-WINDOW-RETRY-001, AMENDED by
             # DEC-DHAN-429-RETRY-001): re-run the window WITHIN the pull — a NETWORK
             # drop (transport / timeout / 5xx that outlived the client's in-call

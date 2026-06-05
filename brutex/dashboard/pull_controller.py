@@ -541,9 +541,16 @@ def _build_live_bulk_adapter(  # pragma: no cover — thin bulk wrapper
 
 
 #: The "no rate controller" feedback triple (dry-run / injected-factory pulls).
-_NO_RATE_HOOKS: tuple[None, None, None] = (None, None, None)
+_NO_RATE_HOOKS: tuple[None, None, None, None] = (None, None, None, None)
 
-_RateHooks = tuple[Callable[[], None] | None, Callable[[], None] | None, Callable[[], None] | None]
+#: ``(pace, on_rate_limit, on_timeout, on_success)`` — the controller hooks the
+#: spot ingest spine threads (on_timeout added per DEC-DHAN-SPOT-TIMEOUT-BACKOFF-001).
+_RateHooks = tuple[
+    Callable[[], None] | None,
+    Callable[[], None] | None,
+    Callable[[], None] | None,
+    Callable[[], None] | None,
+]
 
 
 def _spot_run_parallel(controller: DhanRateController | None) -> RunParallel | None:
@@ -645,7 +652,7 @@ def _live_rate_runtime(
     use_live_rate: bool,
     session_rate: SessionRateController | None = None,
 ) -> tuple[_RateHooks, RunParallel | None, DhanRateController | None]:
-    """Return ``((pace, on_rate_limit, on_success), run_parallel, controller)`` for the pull.
+    """Return ``((pace, on_rate_limit, on_timeout, on_success), run_parallel, controller)``.
 
     A **default live** pull (no injected factory + not dry-run) resolves ONE shared
     controller and derives both the feedback hooks AND a rate-sized fan-out pool
@@ -654,7 +661,7 @@ def _live_rate_runtime(
     *session_rate* holder is wired the controller is the SESSION's persisted one
     (:class:`SessionRateController` — DEC-DHAN-PERSIST-RATE-001) so its learned
     rate carries across pulls; otherwise a fresh controller is built. Dry-run /
-    injected-factory pulls need no throttle → the None-triple + ``None`` pool +
+    injected-factory pulls need no throttle → the None-quad + ``None`` pool +
     ``None`` controller (the ingest spine then uses its default pool). The sizing
     itself (:func:`_spot_run_parallel`) is covered; only the live controller
     resolution is ``# pragma: no cover``.
@@ -667,6 +674,7 @@ def _live_rate_runtime(
     hooks = (  # pragma: no cover — live only
         controller.pace,
         controller.on_rate_limit,
+        controller.on_timeout,
         controller.on_success,
     )
     return hooks, _spot_run_parallel(controller), controller  # pragma: no cover — live only
@@ -773,8 +781,8 @@ def pull_all_spot(
             start_date=start.date().isoformat(),
             dry_run=dry_run,
         )
-        (pace, on_rate_limit, on_success), run_parallel, _rate_controller = _live_rate_runtime(
-            use_live_rate, session_rate
+        (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
+            _live_rate_runtime(use_live_rate, session_rate)
         )
         report = run_dhan_spot_ingest(
             adapter,
@@ -785,6 +793,7 @@ def pull_all_spot(
             end=end.date(),
             pace=pace,
             on_rate_limit=on_rate_limit,
+            on_timeout=on_timeout,
             on_success=on_success,
             on_progress=on_progress,
             coverage=coverage,
@@ -968,8 +977,8 @@ def pull_candles(
             intervals=len(DHAN_FETCH_INTERVALS),
         )
 
-        (pace, on_rate_limit, on_success), run_parallel, _rate_controller = _live_rate_runtime(
-            use_live_rate, session_rate
+        (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
+            _live_rate_runtime(use_live_rate, session_rate)
         )
         report = run_dhan_spot_ingest(
             adapter,
@@ -980,6 +989,7 @@ def pull_candles(
             end=end.date(),
             pace=pace,
             on_rate_limit=on_rate_limit,
+            on_timeout=on_timeout,
             on_success=on_success,
             on_progress=on_progress,
             coverage=coverage,

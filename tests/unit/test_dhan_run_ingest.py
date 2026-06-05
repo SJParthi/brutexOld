@@ -64,6 +64,7 @@ def test_fan_out_all_pairs_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
         coverage=None,
         status_log=None,
         on_rate_limit=None,
+        on_timeout=None,
         on_success=None,
     ):
         calls.append((instrument.symbol_name, interval))
@@ -105,6 +106,7 @@ def test_terminal_error_quarantines_pair_and_continues(monkeypatch: pytest.Monke
         coverage=None,
         status_log=None,
         on_rate_limit=None,
+        on_timeout=None,
         on_success=None,
     ):
         if instrument.symbol_name == "BAD":
@@ -144,6 +146,7 @@ def test_pace_threaded_through(monkeypatch: pytest.MonkeyPatch) -> None:
         coverage=None,
         status_log=None,
         on_rate_limit=None,
+        on_timeout=None,
         on_success=None,
     ):
         seen.append(pace)
@@ -178,6 +181,7 @@ def test_non_dhan_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
         coverage=None,
         status_log=None,
         on_rate_limit=None,
+        on_timeout=None,
         on_success=None,
     ):
         raise ValueError("a real bug, not a vendor error")
@@ -233,6 +237,7 @@ def test_coverage_threaded_and_skipped_windows_aggregated(
         coverage=None,
         status_log=None,
         on_rate_limit=None,
+        on_timeout=None,
         on_success=None,
     ):
         seen_coverage.append(coverage)
@@ -257,8 +262,8 @@ def test_coverage_threaded_and_skipped_windows_aggregated(
 
 
 def test_rate_feedback_hooks_threaded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """run_dhan_spot_ingest threads on_rate_limit + on_success into every pair."""
-    seen: list[tuple[object, object]] = []
+    """run_dhan_spot_ingest threads on_rate_limit + on_timeout + on_success into every pair."""
+    seen: list[tuple[object, object, object]] = []
 
     def _fake_ingest(
         adapter,
@@ -272,13 +277,15 @@ def test_rate_feedback_hooks_threaded(monkeypatch: pytest.MonkeyPatch) -> None:
         coverage=None,
         status_log=None,
         on_rate_limit=None,
+        on_timeout=None,
         on_success=None,
     ):
-        seen.append((on_rate_limit, on_success))
+        seen.append((on_rate_limit, on_timeout, on_success))
         return IngestReport(windows=1, bars_appended=1, transient_failures=0)
 
     monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
     rl = object()
+    to = object()
     ok = object()
     run_dhan_spot_ingest(
         object(),  # type: ignore[arg-type]
@@ -288,10 +295,11 @@ def test_rate_feedback_hooks_threaded(monkeypatch: pytest.MonkeyPatch) -> None:
         start=_START,
         end=_END,
         on_rate_limit=rl,  # type: ignore[arg-type]
+        on_timeout=to,  # type: ignore[arg-type]
         on_success=ok,  # type: ignore[arg-type]
     )
-    # Both pairs got the same hooks.
-    assert seen == [(rl, ok), (rl, ok)]
+    # Both pairs got the same hooks (now including on_timeout — DEC-DHAN-SPOT-TIMEOUT-BACKOFF-001).
+    assert seen == [(rl, to, ok), (rl, to, ok)]
 
 
 def test_on_progress_fires_per_pair_success_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:

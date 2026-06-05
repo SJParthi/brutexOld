@@ -608,8 +608,9 @@ class TestIngestSpotInRunRetry:
 class TestIngestSpotRateFeedback:
     """The rate-controller feedback hooks (DEC-DHAN-ADAPTIVE-RPS-001)."""
 
-    def test_on_rate_limit_fires_on_429(self) -> None:
+    def test_on_rate_limit_fires_on_429_not_on_timeout(self) -> None:
         hits: list[int] = []
+        timeouts: list[int] = []
         ok: list[int] = []
         report = ingest_spot(
             _adapter(status=429),  # DhanRateLimitError — retryable + is_rate_limit
@@ -619,15 +620,21 @@ class TestIngestSpotRateFeedback:
             start=date(2021, 1, 1),
             end=date(2021, 8, 1),
             on_rate_limit=lambda: hits.append(1),
+            on_timeout=lambda: timeouts.append(1),
             on_success=lambda: ok.append(1),
             max_retry_passes=0,  # one attempt — assert the callback fires, not the retry
         )
         assert report.transient_failures == 1
-        assert hits == [1]  # the 429 stepped the controller
+        assert hits == [1]  # the 429 stepped the 429 ladder
+        assert timeouts == []  # NOT the timeout ladder
         assert ok == []  # no clean window
 
-    def test_on_rate_limit_not_fired_on_non_ratelimit_retryable(self) -> None:
+    def test_on_timeout_fires_on_non_ratelimit_retryable(self) -> None:
+        # A 5xx / timeout (retryable but NOT a 429 — a slow, struggling Dhan)
+        # now drives the GENTLE timeout ladder, NOT the 429 one
+        # (DEC-DHAN-SPOT-TIMEOUT-BACKOFF-001, the spot parallel of #494).
         hits: list[int] = []
+        timeouts: list[int] = []
         ingest_spot(
             _adapter(status=500),  # DhanServerError — retryable but NOT rate-limit
             _Sink(),
@@ -636,8 +643,11 @@ class TestIngestSpotRateFeedback:
             start=date(2021, 1, 1),
             end=date(2021, 8, 1),
             on_rate_limit=lambda: hits.append(1),
+            on_timeout=lambda: timeouts.append(1),
+            max_retry_passes=0,  # one attempt — assert the callback fires, not the retry
         )
-        assert hits == []  # a 5xx is transient but not a rate-limit signal
+        assert hits == []  # a 5xx is NOT a rate-limit signal
+        assert timeouts == [1]  # but it IS a server-stress signal → timeout ladder
 
     def test_on_success_fires_on_clean_window(self) -> None:
         ok: list[int] = []
