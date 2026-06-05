@@ -30,6 +30,7 @@ _EXPECTED_PATHS = frozenset(
     {
         "/api/v1/reports/preopen/symbols",
         "/api/v1/reports/preopen.xlsx",
+        "/api/v1/reports/preopen.zip",
         "/reports",
     }
 )
@@ -165,7 +166,7 @@ def test_reports_page_renders(tmp_path: Path) -> None:
     resp = _client(tmp_path).get("/reports")
     assert resp.status_code == 200
     assert "Pre-Open" in resp.text
-    assert "Download .xlsx" in resp.text
+    assert "Download .zip" in resp.text  # Part B: the per-year-zip download
 
 
 def test_reports_page_has_index_constituent_dropdown(tmp_path: Path) -> None:
@@ -178,3 +179,75 @@ def test_reports_page_has_index_constituent_dropdown(tmp_path: Path) -> None:
     assert "/api/v1/universe/index-constituents?symbol=" in html, (
         "the dropdown must call the constituents endpoint to add an index's stocks"
     )
+
+
+def test_reports_page_has_category_toggle_and_minpct(tmp_path: Path) -> None:
+    # The two-category restructure (DEC-REPORTS-EXCEL-CATEGORIES-001): a mode
+    # toggle (All symbols / Top mover), a "Minimum % change" number input, and a
+    # Download wired to the new per-year-zip endpoint with mode + min_pct params.
+    html = _client(tmp_path).get("/reports").text
+    assert 'name="mode"' in html, "the All-symbols / Top-mover toggle is missing"
+    assert 'value="all"' in html and 'value="topmover"' in html, "both modes must be selectable"
+    assert 'id="minpct"' in html and 'type="number"' in html, "the minimum-% input is missing"
+    assert "/api/v1/reports/preopen.zip?" in html, "Download must hit the new .zip endpoint"
+    assert "min_pct" in html and "mode" in html, "the mode + min_pct params must be wired"
+
+
+def _open_zip_member(blob: bytes, member: str) -> str:
+    """Read one ``.xlsx`` member out of the report ``.zip`` → its sheet1 XML."""
+    with zipfile.ZipFile(io.BytesIO(blob)) as outer:
+        inner = outer.read(member)
+    with zipfile.ZipFile(io.BytesIO(inner)) as wb:
+        return wb.read("xl/worksheets/sheet1.xml").decode("utf-8")
+
+
+def test_zip_all_mode_download(tmp_path: Path) -> None:
+    resp = _client(tmp_path).get(
+        "/api/v1/reports/preopen.zip?from=2024-01-01&to=2024-12-31&mode=all"
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+    assert "preopen_report.zip" in resp.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        names = zf.namelist()
+    assert names == ["preopen_all_2024.xlsx"]  # one .xlsx for the single year
+    assert "COALINDIA" in _open_zip_member(resp.content, "preopen_all_2024.xlsx")
+
+
+def test_zip_topmover_mode_download(tmp_path: Path) -> None:
+    resp = _client(tmp_path).get(
+        "/api/v1/reports/preopen.zip?from=2024-01-01&to=2024-12-31&mode=topmover&min_pct=1"
+    )
+    assert resp.status_code == 200
+    assert _open_zip_member(resp.content, "preopen_topmover_2024.xlsx").count("COALINDIA") == 1
+
+
+def test_zip_default_mode_is_all(tmp_path: Path) -> None:
+    resp = _client(tmp_path).get("/api/v1/reports/preopen.zip?from=2024-01-01&to=2024-12-31")
+    assert resp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        assert zf.namelist() == ["preopen_all_2024.xlsx"]
+
+
+def test_zip_bad_mode_is_400(tmp_path: Path) -> None:
+    resp = _client(tmp_path).get(
+        "/api/v1/reports/preopen.zip?from=2024-01-01&to=2024-12-31&mode=bogus"
+    )
+    assert resp.status_code == 400
+
+
+def test_zip_negative_min_pct_is_400(tmp_path: Path) -> None:
+    resp = _client(tmp_path).get(
+        "/api/v1/reports/preopen.zip?from=2024-01-01&to=2024-12-31&mode=topmover&min_pct=-1"
+    )
+    assert resp.status_code == 400
+
+
+def test_zip_bad_date_is_400(tmp_path: Path) -> None:
+    resp = _client(tmp_path).get("/api/v1/reports/preopen.zip?from=nope&to=2024-12-31")
+    assert resp.status_code == 400
+
+
+def test_zip_inverted_range_is_400(tmp_path: Path) -> None:
+    resp = _client(tmp_path).get("/api/v1/reports/preopen.zip?from=2024-12-31&to=2024-01-01")
+    assert resp.status_code == 400

@@ -36,8 +36,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
+from itertools import groupby
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
@@ -70,6 +71,10 @@ _2DP: Final[Decimal] = Decimal("0.01")
 _STYLE_NORMAL: Final[int] = 0  # default font, General alignment
 _STYLE_BOLD: Final[int] = 1  # bold font — the header row + the SYMBOL column
 _STYLE_TITLE: Final[int] = 2  # bold + centred — the merged date-range title row
+_STYLE_GREEN: Final[int] = 3  # solid green fill — a gainer (%CHNG > 0) plain cell
+_STYLE_RED: Final[int] = 4  # solid red fill — a loser (%CHNG < 0) plain cell
+_STYLE_GREEN_BOLD: Final[int] = 5  # green fill + bold — a gainer row's SYMBOL cell
+_STYLE_RED_BOLD: Final[int] = 6  # red fill + bold — a loser row's SYMBOL cell
 
 #: Per-column display widths (Excel "character" units), aligned 1:1 to
 #: :data:`REPORT_COLUMNS`, so the sheet opens with precise, readable columns
@@ -251,6 +256,93 @@ def build_preopen_rows(
     return rows
 
 
+#: The two report categories the operator toggles between on ``/reports``.
+ReportMode = Literal["all", "topmover"]
+
+
+def select_all_symbols(rows: list[PreOpenRow]) -> list[PreOpenRow]:
+    """Select EVERY row, sorted by day then %CHNG **descending** within each day.
+
+    The "All symbols" category (DEC-REPORTS-EXCEL-CATEGORIES-001): one row per
+    ``(symbol, day)`` is kept verbatim — the minimum-%-change threshold is
+    IGNORED in this mode. Within a trading day the rows run gainers → losers
+    (``%CHNG`` high → low); ties break by SYMBOL alphabetical so the order is
+    deterministic and reproducible.
+
+    Parameters
+    ----------
+    rows
+        The full set of :class:`PreOpenRow` rows (any order).
+
+    Returns
+    -------
+    list[PreOpenRow]
+        A new list sorted by ``(day, -pct_chng, symbol)``. The input is not
+        mutated.
+    """
+    return sorted(rows, key=lambda r: (r.day, -r.pct_chng, r.symbol))
+
+
+def select_top_movers(rows: list[PreOpenRow], *, min_pct: Decimal) -> list[PreOpenRow]:
+    """Select the single biggest absolute mover per day (≥ *min_pct*), day-sorted.
+
+    The "Top mover" category (DEC-REPORTS-EXCEL-CATEGORIES-001): for each trading
+    day, among the rows whose ``abs(pct_chng) >= min_pct`` pick the ONE with the
+    largest ``abs(pct_chng)`` — a gainer OR a loser (e.g. ``+5`` vs ``-6`` → the
+    ``-6``). A day with no qualifying row is skipped entirely. Ties on
+    ``abs(pct_chng)`` break by SYMBOL alphabetical so the choice is deterministic.
+    The result is sorted by day.
+
+    Parameters
+    ----------
+    rows
+        The full set of :class:`PreOpenRow` rows (any order).
+    min_pct
+        The inclusive minimum absolute %CHNG a row must clear to qualify. ``0``
+        (or any non-positive value) admits every row, so every day still yields
+        its top mover.
+
+    Returns
+    -------
+    list[PreOpenRow]
+        One row per qualifying day, sorted by ``day``. The input is not mutated.
+    """
+    qualifiers = [r for r in rows if abs(r.pct_chng) >= min_pct]
+    by_day = sorted(qualifiers, key=lambda r: r.day)
+    picked: list[PreOpenRow] = []
+    for _day, day_rows in groupby(by_day, key=lambda r: r.day):
+        winner = min(day_rows, key=lambda r: (-abs(r.pct_chng), r.symbol))
+        picked.append(winner)
+    return picked
+
+
+def select_rows(rows: list[PreOpenRow], *, mode: ReportMode, min_pct: Decimal) -> list[PreOpenRow]:
+    """Dispatch to the row-selection function for *mode*.
+
+    A thin façade over :func:`select_all_symbols` (``mode="all"``) and
+    :func:`select_top_movers` (``mode="topmover"``) so callers pass a single
+    *mode* string. *min_pct* is forwarded only in the top-mover branch (the
+    "All symbols" category ignores the threshold by spec).
+
+    Parameters
+    ----------
+    rows
+        The full set of :class:`PreOpenRow` rows.
+    mode
+        ``"all"`` for every row, ``"topmover"`` for the per-day biggest mover.
+    min_pct
+        The inclusive minimum absolute %CHNG (top-mover mode only).
+
+    Returns
+    -------
+    list[PreOpenRow]
+        The selected, deterministically-ordered rows.
+    """
+    if mode == "all":
+        return select_all_symbols(rows)
+    return select_top_movers(rows, min_pct=min_pct)
+
+
 def _cell_xml(col: int, row: int, value: str | float, style: int = _STYLE_NORMAL) -> str:
     """Render one ``<c>`` cell — numeric for int/float, inline-string otherwise.
 
@@ -386,21 +478,304 @@ _STYLES: Final[str] = (
     '<font><sz val="11"/><name val="Calibri"/></font>'
     '<font><b/><sz val="11"/><name val="Calibri"/></font>'
     "</fonts>"
-    '<fills count="2">'
+    '<fills count="4">'
     '<fill><patternFill patternType="none"/></fill>'
     '<fill><patternFill patternType="gray125"/></fill>'
+    # fillId 2 — a light GREEN solid fill (gainer rows, %CHNG > 0).
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFC6EFCE"/>'
+    '<bgColor indexed="64"/></patternFill></fill>'
+    # fillId 3 — a light RED solid fill (loser rows, %CHNG < 0).
+    '<fill><patternFill patternType="solid"><fgColor rgb="FFFFC7CE"/>'
+    '<bgColor indexed="64"/></patternFill></fill>'
     "</fills>"
     '<borders count="1"><border/></borders>'
     '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-    '<cellXfs count="3">'
+    '<cellXfs count="7">'
     '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
     '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
     '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1">'
     '<alignment horizontal="center"/></xf>'
+    # xf 3 — green fill, default font (a gainer's money/date cells).
+    '<xf numFmtId="0" fontId="0" fillId="2" borderId="0" xfId="0" applyFill="1"/>'
+    # xf 4 — red fill, default font (a loser's money/date cells).
+    '<xf numFmtId="0" fontId="0" fillId="3" borderId="0" xfId="0" applyFill="1"/>'
+    # xf 5 — green fill + bold (a gainer row's SYMBOL cell).
+    '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
+    # xf 6 — red fill + bold (a loser row's SYMBOL cell).
+    '<xf numFmtId="0" fontId="1" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
     "</cellXfs>"
     '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
     "</styleSheet>"
 )
+
+
+def _row_fill_styles(pct_chng: Decimal, symbol_col: int, col: int) -> int:
+    """Pick a cell style for column *col* of a row with the given ``%CHNG``.
+
+    Maps the row's ``%CHNG`` sign to the green/red fill family and keeps the
+    SYMBOL column bold (DEC-REPORTS-EXCEL-CATEGORIES-001 — every gainer row is
+    green, every loser row red, an exact-zero row stays neutral):
+
+    * ``pct_chng > 0`` → :data:`_STYLE_GREEN_BOLD` for the SYMBOL column,
+      :data:`_STYLE_GREEN` for every other column;
+    * ``pct_chng < 0`` → :data:`_STYLE_RED_BOLD` / :data:`_STYLE_RED`;
+    * ``pct_chng == 0`` → :data:`_STYLE_BOLD` for SYMBOL, :data:`_STYLE_NORMAL`
+      otherwise (the unfilled neutral look, identical to the single-sheet export).
+
+    Parameters
+    ----------
+    pct_chng
+        The row's full-precision ``%CHNG`` (its sign drives the fill).
+    symbol_col
+        The 0-based index of the bold SYMBOL column.
+    col
+        The 0-based index of the column being styled.
+
+    Returns
+    -------
+    int
+        The 0-based ``cellXfs`` index for the cell (see :data:`_STYLES`).
+    """
+    is_symbol = col == symbol_col
+    if pct_chng > 0:
+        return _STYLE_GREEN_BOLD if is_symbol else _STYLE_GREEN
+    if pct_chng < 0:
+        return _STYLE_RED_BOLD if is_symbol else _STYLE_RED
+    return _STYLE_BOLD if is_symbol else _STYLE_NORMAL
+
+
+def _filled_sheet_xml(rows: list[PreOpenRow], *, title: str) -> str:
+    """Build one worksheet's XML with per-row green/red fills by ``%CHNG`` sign.
+
+    The multi-sheet sibling of :func:`_sheet_xml` (DEC-REPORTS-EXCEL-CATEGORIES-001):
+    same NSE look — a merged bold-centred TITLE (row 1), a bold frozen header
+    (row 2), a bold SYMBOL column — but every data row is shaded by its
+    ``%CHNG`` sign (green gainer / red loser / neutral zero) via
+    :func:`_row_fill_styles`. Element order follows the OOXML ``CT_Worksheet``
+    sequence so Excel / Numbers open it without a repair prompt.
+
+    Parameters
+    ----------
+    rows
+        The :class:`PreOpenRow` rows for this sheet, already in display order.
+    title
+        The row-1 banner text (e.g. the month label).
+
+    Returns
+    -------
+    str
+        The complete ``<worksheet>`` XML document.
+    """
+    header = REPORT_COLUMNS
+    ncols = len(header)
+    last_col = _col_letter(ncols - 1)
+    last_row = len(rows) + 2  # row 1 title + row 2 header + N data rows
+    symbol_col = header.index("SYMBOL")
+    out = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+        '<sheetViews><sheetView workbookViewId="0">',
+        '<pane ySplit="2" topLeftCell="A3" activePane="bottomLeft" state="frozen"/>',
+        "</sheetView></sheetViews>",
+        _cols_xml(ncols),
+        "<sheetData>",
+        f'<row r="1">{_cell_xml(0, 1, title, _STYLE_TITLE)}</row>',
+        '<row r="2">'
+        + "".join(_cell_xml(c, 2, h, _STYLE_BOLD) for c, h in enumerate(header))
+        + "</row>",
+    ]
+    for r, record in enumerate(rows, start=3):
+        cells = "".join(
+            _cell_xml(c, r, v, _row_fill_styles(record.pct_chng, symbol_col, c))
+            for c, v in enumerate(record.display_cells())
+        )
+        out.append(f'<row r="{r}">{cells}</row>')
+    out.append("</sheetData>")
+    out.append(f'<autoFilter ref="A2:{last_col}{last_row}"/>')
+    out.append(f'<mergeCells count="1"><mergeCell ref="A1:{last_col}1"/></mergeCells>')
+    out.append("</worksheet>")
+    return "".join(out)
+
+
+def _month_label(day: date) -> str:
+    """The ``YYYY-MM`` sheet label for *day* (e.g. ``date(2024, 3, 4)`` → ``2024-03``)."""
+    return f"{day.year:04d}-{day.month:02d}"
+
+
+def _group_by_month(rows: list[PreOpenRow]) -> list[tuple[str, list[PreOpenRow]]]:
+    """Group *already day-sorted* rows into ``(YYYY-MM, rows)`` pairs, month-ordered.
+
+    Only months that actually have rows produce a pair, so empty months yield no
+    sheet (DEC-REPORTS-EXCEL-CATEGORIES-001). The within-month order of *rows* is
+    preserved verbatim (the caller's selection order — gainers→losers for "all",
+    day-ascending for "top mover").
+
+    Parameters
+    ----------
+    rows
+        Rows pre-sorted so each month's rows are contiguous and ascending (the
+        output of :func:`select_all_symbols` / :func:`select_top_movers`).
+
+    Returns
+    -------
+    list[tuple[str, list[PreOpenRow]]]
+        One ``(label, rows)`` pair per non-empty month, in month order.
+    """
+    return [
+        (label, list(group)) for label, group in groupby(rows, key=lambda r: _month_label(r.day))
+    ]
+
+
+def _dynamic_content_types(nsheets: int) -> str:
+    """Build ``[Content_Types].xml`` declaring *nsheets* worksheet overrides."""
+    overrides = "".join(
+        f'<Override PartName="/xl/worksheets/sheet{i}.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        for i in range(1, nsheets + 1)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        f"{overrides}"
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        "</Types>"
+    )
+
+
+def _dynamic_workbook(sheet_names: list[str]) -> str:
+    """Build ``xl/workbook.xml`` listing one ``<sheet>`` per label in *sheet_names*."""
+    sheets = "".join(
+        f'<sheet name="{_xml_escape(name)}" sheetId="{i}" r:id="rId{i}"/>'
+        for i, name in enumerate(sheet_names, start=1)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f"<sheets>{sheets}</sheets></workbook>"
+    )
+
+
+def _dynamic_workbook_rels(nsheets: int) -> str:
+    """Build ``xl/_rels/workbook.xml.rels`` wiring *nsheets* sheets + the styles part."""
+    sheet_rels = "".join(
+        f'<Relationship Id="rId{i}" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        f'Target="worksheets/sheet{i}.xml"/>'
+        for i in range(1, nsheets + 1)
+    )
+    styles_id = nsheets + 1
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f"{sheet_rels}"
+        f'<Relationship Id="rId{styles_id}" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+        'Target="styles.xml"/>'
+        "</Relationships>"
+    )
+
+
+def render_month_workbook(months: list[tuple[str, list[PreOpenRow]]]) -> bytes:
+    """Render one ``.xlsx`` with **one worksheet per month** in *months*.
+
+    The per-year workbook of the two-category report
+    (DEC-REPORTS-EXCEL-CATEGORIES-001): each ``(label, rows)`` pair becomes a
+    worksheet named after *label* (e.g. ``2024-01``), carrying the
+    ``DATE · SYMBOL · PREV. CLOSE · IEP · CHNG · %CHNG`` columns with per-row
+    green/red fills by ``%CHNG`` sign (:func:`_filled_sheet_xml`). The bytes are
+    deterministic (fixed :data:`_ZIP_EPOCH` member timestamps) so the same input
+    always produces a byte-identical workbook (CLAUDE.md §2 Rule 7).
+
+    An empty *months* yields a valid single header-only worksheet named
+    ``Pre-Open`` (a workbook must have at least one sheet), so a year with no
+    rows still opens cleanly rather than producing a corrupt file.
+
+    Parameters
+    ----------
+    months
+        ``(sheet_label, rows)`` pairs, one per non-empty month, in sheet order.
+
+    Returns
+    -------
+    bytes
+        The deterministic ``.xlsx`` byte string.
+    """
+    pairs = months or [("Pre-Open", [])]
+    names = [label for label, _ in pairs]
+    parts = {
+        "[Content_Types].xml": _dynamic_content_types(len(pairs)),
+        "_rels/.rels": _ROOT_RELS,
+        "xl/workbook.xml": _dynamic_workbook(names),
+        "xl/_rels/workbook.xml.rels": _dynamic_workbook_rels(len(pairs)),
+        "xl/styles.xml": _STYLES,
+    }
+    for i, (label, rows) in enumerate(pairs, start=1):
+        parts[f"xl/worksheets/sheet{i}.xml"] = _filled_sheet_xml(rows, title=label)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in parts.items():
+            info = zipfile.ZipInfo(name, date_time=_ZIP_EPOCH)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zf.writestr(info, content)
+    return buffer.getvalue()
+
+
+def render_report_zip(rows: list[PreOpenRow], *, mode: ReportMode, min_pct: Decimal) -> bytes:
+    """Render the two-category report to a ``.zip`` of one ``.xlsx`` per year.
+
+    The top-level builder of DEC-REPORTS-EXCEL-CATEGORIES-001:
+
+    1. select rows for *mode* (:func:`select_rows` — "all" keeps every row
+       gainers→losers per day, "topmover" keeps the single biggest absolute
+       mover per day clearing *min_pct*);
+    2. group the selected rows by **year**;
+    3. for each year build a workbook whose worksheets are that year's
+       **months** (:func:`render_month_workbook`), with per-row green/red fills;
+    4. write every yearly workbook into one deterministic ``.zip``
+       (stdlib :mod:`zipfile`, fixed :data:`_ZIP_EPOCH`), the member name
+       carrying the mode + year (e.g. ``preopen_all_2024.xlsx`` /
+       ``preopen_topmover_2024.xlsx``).
+
+    An empty selection yields a valid ``.zip`` holding a single header-only
+    workbook (``preopen_<mode>_empty.xlsx``) so the download never fails.
+
+    Parameters
+    ----------
+    rows
+        The full set of :class:`PreOpenRow` rows (any order).
+    mode
+        ``"all"`` (every row) or ``"topmover"`` (per-day biggest mover).
+    min_pct
+        The inclusive minimum absolute ``%CHNG`` for the top-mover mode
+        (ignored when *mode* is ``"all"``).
+
+    Returns
+    -------
+    bytes
+        The deterministic ``.zip`` byte string.
+    """
+    selected = select_rows(rows, mode=mode, min_pct=min_pct)
+    by_year: dict[int, list[PreOpenRow]] = {}
+    for row in selected:
+        by_year.setdefault(row.day.year, []).append(row)
+    members: dict[str, bytes] = {}
+    if not by_year:
+        members[f"preopen_{mode}_empty.xlsx"] = render_month_workbook([])
+    else:
+        for year in sorted(by_year):
+            workbook = render_month_workbook(_group_by_month(by_year[year]))
+            members[f"preopen_{mode}_{year:04d}.xlsx"] = workbook
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in members.items():
+            info = zipfile.ZipInfo(name, date_time=_ZIP_EPOCH)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zf.writestr(info, content)
+    return buffer.getvalue()
 
 
 def _default_title(rows: list[PreOpenRow]) -> str:
@@ -451,7 +826,13 @@ def render_xlsx(rows: list[PreOpenRow], *, title: str | None = None) -> bytes:
 __all__ = [
     "REPORT_COLUMNS",
     "PreOpenRow",
+    "ReportMode",
     "build_preopen_rows",
+    "render_month_workbook",
+    "render_report_zip",
     "render_xlsx",
     "resolve_report_datasets",
+    "select_all_symbols",
+    "select_rows",
+    "select_top_movers",
 ]

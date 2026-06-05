@@ -41,8 +41,9 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import structlog
 from pydantic import BaseModel
@@ -68,6 +69,7 @@ from brutex.dashboard.db_view import (
 from brutex.dashboard.option_pull_controller import pull_options
 from brutex.dashboard.preopen_report import (
     build_preopen_rows,
+    render_report_zip,
     render_xlsx,
     resolve_report_datasets,
 )
@@ -1591,6 +1593,69 @@ def build_app(
             content=render_xlsx(rows, title=title),
             media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/v1/reports/preopen.zip")
+    async def api_preopen_zip(
+        start: str = Query(..., alias="from"),
+        end: str = Query(..., alias="to"),
+        symbols: str | None = Query(None),
+        mode: str = Query("all"),
+        min_pct: float = Query(0.0),
+    ) -> Response:
+        """GET /api/v1/reports/preopen.zip — the two-category pre-open report ``.zip``.
+
+        The Part-B export (DEC-REPORTS-EXCEL-CATEGORIES-001): builds the
+        ``DATE · SYMBOL · PREV. CLOSE · IEP · CHNG · %CHNG`` rows for the
+        requested spot symbols over ``[from, to]`` (lake-derived), then packs a
+        ``.zip`` holding **one ``.xlsx`` per year**, each with **one worksheet
+        per month** and per-row green/red fills by ``%CHNG`` sign.
+
+        * ``mode=all`` (default) — every selected symbol, every day, sorted
+          gainers→losers within each day; *min_pct* is ignored.
+        * ``mode=topmover`` — per day, the single biggest absolute mover whose
+          ``|%CHNG| ≥ min_pct``; days with no qualifier are skipped.
+
+        *symbols* is an optional comma-separated filter (omitted ⇒ every
+        report-eligible symbol). A 400 is raised for a malformed / inverted date
+        range, an unknown *mode*, or a negative *min_pct*.
+        """
+        store = _require_store()
+        try:
+            start_d = date.fromisoformat(start)
+            end_d = date.fromisoformat(end)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"bad date: {exc}") from exc
+        if start_d > end_d:
+            raise HTTPException(status_code=400, detail="'from' must be on or before 'to'")
+        if mode not in ("all", "topmover"):
+            raise HTTPException(status_code=400, detail="mode must be 'all' or 'topmover'")
+        if min_pct < 0:
+            raise HTTPException(status_code=400, detail="min_pct must be >= 0")
+        wanted = [s for s in (symbols or "").split(",") if s.strip()] or None
+        lake_root = getattr(store, "path", None)
+
+        def _build_rows(lake: Path) -> list[Any]:
+            """Build the pre-open report rows off the event loop (threadpool worker)."""
+            return build_preopen_rows(
+                store.connection,
+                lake,
+                datasets=resolve_report_datasets(lake, wanted),
+                start=start_d,
+                end=end_d,
+            )
+
+        rows = (
+            await run_in_threadpool(_build_rows, lake_root.parent)
+            if isinstance(lake_root, Path)
+            else []
+        )
+        report_mode = cast(Literal["all", "topmover"], mode)
+        blob = render_report_zip(rows, mode=report_mode, min_pct=Decimal(str(min_pct)))
+        return Response(
+            content=blob,
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="preopen_report.zip"'},
         )
 
     @app.get("/reports", response_class=HTMLResponse)
