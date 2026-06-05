@@ -30,9 +30,9 @@ lake reads are one columnar pass each (O(N) once), mirroring the ``/db`` viewer.
 """
 
 # pyright: reportPrivateUsage=false
-# ^ This module deliberately reuses db_view's shared lake helpers (_to_decimal,
-#   _bar_ist_date, _validate_candle_coords, the interval constants) — CLAUDE.md
-#   §11 COMMON (one source of truth, no copy-paste).
+# ^ This module deliberately reuses db_view's shared lake helpers (_DAILY_INTERVAL,
+#   _daily_close_by_date, _daily_open_by_date) — CLAUDE.md §11 COMMON (one source
+#   of truth, no copy-paste).
 
 from __future__ import annotations
 

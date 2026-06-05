@@ -1,7 +1,7 @@
 """Tests for `brutex.dashboard.preopen_report` — the NSE-style pre-open .xlsx export.
 
-100% line+branch: the lake readers (1-day close + 09:15 IEP), the dataset
-resolver (both-intervals gate + symbol filter), the row builder (prev-close
+100% line+branch: the lake readers (1-day close + 1-day open IEP), the dataset
+resolver (1day-only gate + symbol filter), the row builder (prev-close
 anchoring, range + first-day + zero-prev skips), and the dependency-free OOXML
 writer (valid zip, deterministic bytes, numeric vs inline-string cells, the
 column-letter helper). Verified against the operator's COALINDIA pre-open CSV
