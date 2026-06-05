@@ -43,7 +43,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any
 
 import structlog
 from pydantic import BaseModel
@@ -68,6 +68,7 @@ from brutex.dashboard.db_view import (
 )
 from brutex.dashboard.option_pull_controller import pull_options
 from brutex.dashboard.preopen_report import (
+    ReportMode,
     build_preopen_rows,
     render_report_zip,
     render_xlsx,
@@ -1628,7 +1629,14 @@ def build_app(
             raise HTTPException(status_code=400, detail=f"bad date: {exc}") from exc
         if start_d > end_d:
             raise HTTPException(status_code=400, detail="'from' must be on or before 'to'")
-        if mode not in ("all", "topmover"):
+        # Assign the validated mode as a literal so BOTH mypy and pyright narrow
+        # it to ReportMode without a cast (pyright's reportUnnecessaryCast errors
+        # on a cast it has already narrowed; mypy needs the literal assignment).
+        if mode == "all":
+            report_mode: ReportMode = "all"
+        elif mode == "topmover":
+            report_mode = "topmover"
+        else:
             raise HTTPException(status_code=400, detail="mode must be 'all' or 'topmover'")
         if min_pct < 0:
             raise HTTPException(status_code=400, detail="min_pct must be >= 0")
@@ -1650,7 +1658,6 @@ def build_app(
             if isinstance(lake_root, Path)
             else []
         )
-        report_mode = cast(Literal["all", "topmover"], mode)
         blob = render_report_zip(rows, mode=report_mode, min_pct=Decimal(str(min_pct)))
         return Response(
             content=blob,
