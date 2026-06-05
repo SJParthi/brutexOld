@@ -251,3 +251,20 @@ def test_zip_bad_date_is_400(tmp_path: Path) -> None:
 def test_zip_inverted_range_is_400(tmp_path: Path) -> None:
     resp = _client(tmp_path).get("/api/v1/reports/preopen.zip?from=2024-12-31&to=2024-01-01")
     assert resp.status_code == 400
+
+
+def test_zip_no_lake_root_is_valid_empty_workbook() -> None:
+    # A store whose `path` is not a filesystem Path → the route's non-Path
+    # fallback builds NO rows and returns a valid (empty) `.zip`, never a 500
+    # (DEC-REPORTS-EXCEL-CATEGORIES-001). Mirrors the coverage routes' own
+    # no-lake-root guard so the route degrades honestly when unwired.
+    from types import SimpleNamespace
+
+    store = SimpleNamespace(path=None)
+    client = TestClient(build_app(DashboardState(), instrument_store=store))
+    resp = client.get("/api/v1/reports/preopen.zip?from=2024-01-01&to=2024-12-31&mode=all")
+    assert resp.status_code == 200
+    assert "application/zip" in resp.headers["content-type"]
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        # The empty-selection fallback: a single header-only workbook member.
+        assert zf.namelist()
