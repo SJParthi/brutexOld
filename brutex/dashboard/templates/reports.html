@@ -54,6 +54,10 @@
     border-radius:10px; padding:11px 18px; font-size:13px; cursor:pointer; transition:.16s;
   }
   button:hover { border-color:var(--blue); }
+  select#idxpick {
+    background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);
+    border-radius:10px; padding:11px 14px; font-size:13px; cursor:pointer; transition:.16s; }
+  select#idxpick:hover { border-color:var(--blue); }
   button.go { border-color:var(--green); color:var(--green-bright); font-weight:700;
     background:linear-gradient(180deg, rgba(38,217,176,.10), transparent); }
   button:disabled { opacity:.45; cursor:not-allowed; }
@@ -112,6 +116,14 @@
       <div class="toolbar">
         <button id="all">Select all</button>
         <button id="none">Clear</button>
+        <select id="idxpick" title="Add an index's F&amp;O-eligible constituent stocks to the selection in one go — instead of clicking each stock (fetched from NSE on your machine; membership rebalances)">
+          <option value="">➕ add an index's stocks…</option>
+          <option value="NIFTY">NIFTY 50</option>
+          <option value="BANKNIFTY">BANK NIFTY</option>
+          <option value="NIFTY 100">NIFTY 100</option>
+          <option value="NIFTY 200">NIFTY 200</option>
+          <option value="NIFTY 500">NIFTY 500</option>
+        </select>
         <span class="count" id="count">0 selected</span>
       </div>
       <div class="syms" id="syms"><span class="empty">loading symbols…</span></div>
@@ -169,6 +181,32 @@ document.getElementById("all").onclick = () => {
 };
 document.getElementById("none").onclick = () => {
   selected = new Set(); renderChips(); refreshCount();
+};
+/* ── Index quick-select (DEC-REPORTS-INDEX-DROPDOWN-001) ──
+   Pick an index → add its F&O-eligible constituent stocks (held in the lake)
+   to the selection in ONE go, instead of clicking each stock. Reuses the
+   /universe constituents endpoint; intersects its members with the
+   report-eligible symbols, then ticks the matches. Cache-backed + degrades
+   gracefully (never throws) — the endpoint never 500s. */
+document.getElementById("idxpick").onchange = async (e) => {
+  const idx = e.target.value;
+  e.target.value = "";   // reset so the same index can be re-picked later
+  if (!idx) return;
+  msgEl.textContent = `Fetching ${idx} constituents…`;
+  try {
+    const r = await fetch("/api/v1/universe/index-constituents?symbol=" + encodeURIComponent(idx));
+    const j = await r.json();
+    const have = new Set(allSymbols.map(s => s.symbol));
+    let added = 0;
+    for (const m of (j.members || [])) {
+      if (have.has(m) && !selected.has(m)) { selected.add(m); added++; }
+    }
+    renderChips(); refreshCount();
+    msgEl.textContent = j.note
+      || `Added ${added} of ${idx}'s constituent stock(s) held in the lake — verify; membership rebalances.`;
+  } catch (err) {
+    msgEl.textContent = "could not fetch constituents (see /logs)";
+  }
 };
 document.getElementById("download").onclick = () => {
   const from = document.getElementById("from").value;
