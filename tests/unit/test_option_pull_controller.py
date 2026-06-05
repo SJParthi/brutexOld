@@ -159,8 +159,9 @@ class TestPullOptions:
         # 01-05); the in-progress current session is excluded by default (FIX 5).
         assert report.end_date == "2021-01-05"
         assert report.total_symbols == 1
-        # 21 strikes × 2 flags × 3 codes × 2 types = 252 series, all complete.
-        assert report.symbols[0].series_completed == 21 * 2 * 3 * 2
+        # 21 strikes × (WEEK 1..8 + MONTH 1..3 = 11 codes) × 2 types = 462 series,
+        # all complete (DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001).
+        assert report.symbols[0].series_completed == 21 * 11 * 2
         assert report.symbols[0].series_failed == 0
         assert report.symbols[0].instrument == "OPTIDX"
         # Every series appends synthetic in-session bars → strictly positive.
@@ -181,7 +182,8 @@ class TestPullOptions:
         # fans MONTH only (1 flag): its series count DROPS vs the old
         # WEEK+MONTH fan-out — fewer wasted Dhan calls/quota
         # (DEC-DHAN-STOCK-MONTHLY-ONLY-001).
-        assert by_symbol["13"].series_completed == 21 * 2 * 3 * 2  # ATM±10, WEEK+MONTH
+        # ATM±10, WEEK 1..8 + MONTH 1..3 (DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001).
+        assert by_symbol["13"].series_completed == 21 * 11 * 2
         assert by_symbol["1333"].series_completed == 7 * 1 * 3 * 2  # ATM±3, MONTH-only
         # The per-kind elision strictly REDUCES the stock fan-out (was 7*2*3*2).
         assert by_symbol["1333"].series_completed < 7 * 2 * 3 * 2
@@ -212,7 +214,7 @@ class TestPullOptions:
         )
         assert captured == [tmp_path]
         assert report.dry_run is False
-        assert report.total_series_completed == 21 * 2 * 3 * 2
+        assert report.total_series_completed == 21 * 11 * 2  # WEEK 1..8 + MONTH 1..3
         # A live pull persists the skip-ledger so a re-pull skips the windows
         # already in the lake (DEC-FETCH-COVERAGE-WIRING-001).
         assert (tmp_path / "fetch_coverage.json").is_file()

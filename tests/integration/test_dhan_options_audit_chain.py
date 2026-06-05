@@ -128,6 +128,10 @@ def test_option_sink_audit_chain_intact_under_parallel(tmp_path: Path) -> None:
                 _StrikeClient(),
                 sink,
                 underlyings=underlyings,
+                # Pin the depth — this test is about audit-chain integrity
+                # under parallelism, not expiry depth (DEC-DHAN-WEEKLY-
+                # EXPIRY-DEPTH-001 fans WEEK 1..8 by default).
+                expiry_codes=(1, 2, 3),
                 start=date.fromisoformat(_START),
                 end=date.fromisoformat(_END),
                 run_parallel=pool,
@@ -167,6 +171,10 @@ def test_audit_chain_intact_with_duplicate_repull(tmp_path: Path) -> None:
                 _StrikeClient(),
                 sink,
                 underlyings=underlyings,
+                # Pin the depth — this test is about audit-chain integrity
+                # under parallelism, not expiry depth (DEC-DHAN-WEEKLY-
+                # EXPIRY-DEPTH-001 fans WEEK 1..8 by default).
+                expiry_codes=(1, 2, 3),
                 start=date.fromisoformat(_START),
                 end=date.fromisoformat(_END),
                 run_parallel=pool,
@@ -182,6 +190,10 @@ def test_audit_chain_intact_with_duplicate_repull(tmp_path: Path) -> None:
                 _StrikeClient(),
                 sink,
                 underlyings=underlyings,
+                # Pin the depth — this test is about audit-chain integrity
+                # under parallelism, not expiry depth (DEC-DHAN-WEEKLY-
+                # EXPIRY-DEPTH-001 fans WEEK 1..8 by default).
+                expiry_codes=(1, 2, 3),
                 start=date.fromisoformat(_START),
                 end=date.fromisoformat(_END),
                 run_parallel=pool,

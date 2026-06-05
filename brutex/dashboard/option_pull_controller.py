@@ -13,8 +13,9 @@ an :class:`~brutex.adapters.dhan.option_universe_ingest.OptionUnderlying`
 ``MONTH``-only — Indian single-stock options are monthly-only;
 DEC-DHAN-PULL-SCOPE-001, DEC-DHAN-STOCK-MONTHLY-ONLY-001) and drives the proven
 :func:`~brutex.adapters.dhan.option_universe_ingest.run_dhan_options_ingest`
-fan-out (ATM window × the underlying's per-kind expiry flags × the
-:data:`~brutex.adapters.dhan.option_universe_ingest.DEFAULT_EXPIRY_CODES` ×
+fan-out (ATM window × the underlying's per-kind expiry flags × the per-flag
+expiry-code depth — WEEK codes 1..8, MONTH 1..3,
+DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001 — ×
 ``CALL``/``PUT``). Every series is **1-minute only** (DEC-DHAN-1M-ONLY-001),
 resolved relative to the underlying's spot, and each bar is stamped with its
 resolved ``strike`` + ``spot`` — so every option bar is mapped to its
@@ -60,7 +61,6 @@ from brutex.adapters.dhan.option_ingest import (
 )
 from brutex.adapters.dhan.option_synthetic import SyntheticOptionClient
 from brutex.adapters.dhan.option_universe_ingest import (
-    DEFAULT_EXPIRY_CODES,
     INDEX_STRIKE_OFFSETS,
     STOCK_EXPIRY_FLAGS,
     STOCK_STRIKE_OFFSETS,
@@ -356,7 +356,7 @@ def pull_options(
     dry_run: bool,
     now: datetime | None = None,
     expiry_flags: Sequence[str] | None = None,
-    expiry_codes: Sequence[int] = DEFAULT_EXPIRY_CODES,
+    expiry_codes: Sequence[int] | None = None,
     option_types: Sequence[str] = DRV_OPTION_TYPES,
     client_factory: OptionClientFactory | None = None,
     on_progress: ProgressHook | None = None,

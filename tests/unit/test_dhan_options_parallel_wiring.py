@@ -103,7 +103,10 @@ def _underlying(security_id: str, *, offsets: int = 0) -> OptionUnderlying:
         exchange_segment="NSE_FNO",
         instrument="OPTIDX",
         strike_offsets=offsets,
-        expiry_flags=("WEEK",),  # 1 flag × default 3 codes × 1 strike × 2 types = 6 series
+        # MONTH (1 flag × 3 codes 1..3 × 1 strike × 2 types = 6 series). This
+        # mechanics test is depth-agnostic; MONTH keeps the stable 3-code depth
+        # (WEEK now fans 1..8, DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001).
+        expiry_flags=("MONTH",),
     )
 
 

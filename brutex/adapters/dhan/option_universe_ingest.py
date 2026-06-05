@@ -94,15 +94,38 @@ STOCK_STRIKE_OFFSETS: int = 3
 #: the decision ID per Golden Rule #1 — no hallucination.)
 STOCK_EXPIRY_FLAGS: tuple[str, ...] = ("MONTH",)
 
-#: The expiry depths the rolling-option endpoint serves — Near, Next, Far
+#: The fallback / **MONTH** expiry depths — Near, Next, Far
 #: (DEC-DHAN-EXPIRY-CODES-001). `/charts/rollingoption` documents
 #: ``expiryCode`` **Allowed values: 1, 2, 3** (1-indexed for this endpoint;
 #: the general Annexure indexes the same three depths 0/1/2). Verified from the
 #: operator's 2026-06-01 Dhan docs + live 200-OK probes — this supersedes the
 #: earlier unverified "4 expiryCodes" assumption (a Groww carryover). A code the
 #: vendor rejects is still **safe**: the per-series quarantine records it and the
-#: run continues (never fatal).
+#: run continues (never fatal). MONTH stays at 1/2/3 — the operator's live probe
+#: showed MONTH ``expiryCode 4`` returns ``400 DH-905`` (no 4th monthly depth).
 DEFAULT_EXPIRY_CODES: tuple[int, ...] = (1, 2, 3)
+
+#: The **WEEK** expiry depths — codes 1..8 (DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001,
+#: operator decision 2026-06-05). Indian index weeklies historically listed many
+#: simultaneous weekly expiries (the operator's live probe pulled real
+#: ``expiryCode 8`` data for 2021-06; recent windows return empty past the few
+#: live weeks). So a 2021→ pull fans codes 1..8 to capture the full historical
+#: weekly ladder; any code with no contract for a window simply returns an empty
+#: response → 0 bars written, no audit row (the sink's existing no-op), so the
+#: extra far codes never store junk — they only ever ADD real history where it
+#: exists (Golden Rule #1). The cap is 8 — the operator-observed historical max.
+WEEKLY_EXPIRY_CODES: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
+
+
+def expiry_codes_for_flag(expiry_flag: str) -> tuple[int, ...]:
+    """Return the expiry-code fan-out for *expiry_flag* (per-flag, never mixed).
+
+    ``WEEK`` → :data:`WEEKLY_EXPIRY_CODES` (1..8, the deep historical weekly
+    ladder); every other flag (``MONTH``) → :data:`DEFAULT_EXPIRY_CODES` (1..3,
+    Near/Next/Far — MONTH has no 4th depth). DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001.
+    """
+    return WEEKLY_EXPIRY_CODES if expiry_flag == "WEEK" else DEFAULT_EXPIRY_CODES
+
 
 #: The report key for one fanned-out series.
 SeriesKey = tuple[str, str, int, str, str]
@@ -243,7 +266,7 @@ def run_dhan_options_ingest(
     start: date,
     end: date,
     expiry_flags: Sequence[str] | None = None,
-    expiry_codes: Sequence[int] = DEFAULT_EXPIRY_CODES,
+    expiry_codes: Sequence[int] | None = None,
     option_types: Sequence[str] = DRV_OPTION_TYPES,
     required_data: Sequence[str] = ALL_REQUIRED_DATA,
     pace: Pacer | None = None,
@@ -291,8 +314,13 @@ def run_dhan_options_ingest(
         ``MONTH``-only; DEC-DHAN-STOCK-MONTHLY-ONLY-001). Passing a sequence
         forces that exact set on **every** underlying (custom / test pulls).
     expiry_codes, option_types
-        The remaining fan-out axes — default to the near/next/far expiry codes
-        (DEC-DHAN-EXPIRY-CODES-001) and ``CALL``/``PUT``.
+        The remaining fan-out axes. ``expiry_codes`` defaults to ``None`` →
+        **per-flag** depth (WEEK fans codes 1..8, MONTH 1..3;
+        DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001) so a 2021→ pull captures the deep
+        historical weekly ladder without sending MONTH a rejected 4th code.
+        Passing an explicit sequence forces that exact set on EVERY flag (a
+        uniform override for custom / test pulls). ``option_types`` defaults to
+        ``CALL``/``PUT``.
     required_data
         Fields to request (defaults to every documented field).
     pace
@@ -350,7 +378,13 @@ def run_dhan_options_ingest(
         # honours each underlying's own set.
         flags = underlying.expiry_flags if expiry_flags is None else expiry_flags
         for expiry_flag in flags:
-            for expiry_code in expiry_codes:
+            # Per-flag expiry-code depth (DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001): WEEK
+            # fans 1..8 (the deep historical weekly ladder), MONTH 1..3. An
+            # explicit ``expiry_codes`` argument forces that exact set on EVERY
+            # flag (uniform override for custom / test pulls); ``None`` (the
+            # default) honours the per-flag depth and never mixes the two.
+            codes = expiry_codes_for_flag(expiry_flag) if expiry_codes is None else expiry_codes
+            for expiry_code in codes:
                 for strike in strikes:
                     for drv_option_type in option_types:
                         jobs.append(
@@ -486,11 +520,13 @@ __all__ = [
     "INDEX_STRIKE_OFFSETS",
     "STOCK_EXPIRY_FLAGS",
     "STOCK_STRIKE_OFFSETS",
+    "WEEKLY_EXPIRY_CODES",
     "OptionSeriesFailure",
     "OptionUnderlying",
     "OptionsUniverseReport",
     "ProgressHook",
     "SeriesKey",
+    "expiry_codes_for_flag",
     "run_dhan_options_ingest",
     "strike_window",
 ]
