@@ -1,19 +1,26 @@
 """Pre-open report — the NSE-style ``SYMBOL · PREV. CLOSE · IEP · CHNG · %CHNG`` export.
 
-A **standalone, lake-derived** report (DEC-PREOPEN-REPORT-001): for each requested
-spot symbol and each trading day in a ``[from, to]`` range it reconstructs the
-NSE pre-open columns straight from the Dhan lake — and the numbers match NSE to
-the paisa (verified against the operator's pre-open CSV: COALINDIA 2026-05-27
-IEP 429.00, PREV. CLOSE 458.15, %CHNG −6.36):
+A **standalone, lake-derived** report (DEC-PREOPEN-REPORT-001, fully 1-day-sourced
+per DEC-PREOPEN-REPORT-1DAY-001): for each requested spot symbol and each trading
+day in a ``[from, to]`` range it reconstructs the NSE pre-open columns straight
+from the Dhan **1-day** lake — and the numbers match NSE to the paisa (verified
+against the operator's pre-open CSV: COALINDIA 2026-05-27 IEP 429.00, PREV. CLOSE
+458.15, %CHNG −6.36):
 
 * **PREV. CLOSE** — the prior trading day's **1-day official close** (= the NSE
-  settlement / "previous close"). This is the ONE place BruteX uses the 1-day
-  official close; the brute-force engine itself uses the prior day's last
-  1-minute close (DEC-SPOT-PREVCLOSE-1MIN-001) — they are deliberately distinct.
-* **IEP** — the day's 09:15 IST opening price (the pre-open auction's indicative
-  equilibrium price *becomes* the session open), read as the day's FIRST 1-minute
-  bar open (``arg_min(open, timestamp)`` — session-filtered bars start at 09:15).
+  settlement / "previous close").
+* **IEP** — the day's **1-day official open**. On NSE the pre-open auction's
+  indicative equilibrium price *becomes* the day's official open, so the 1-day
+  bar's ``open`` IS the IEP — on the SAME 1-day basis as PREV. CLOSE.
 * **CHNG** = ``IEP − PREV. CLOSE``; **%CHNG** = ``CHNG / PREV. CLOSE × 100``.
+
+Both columns come from the **1-day** partition ALONE — the report NEVER reads the
+1-minute series (DEC-PREOPEN-REPORT-1DAY-001). Mixing a 1-minute open with a
+1-day close is what made adjustment-mismatched symbols (e.g. TMPV — raw intraday
+~186.6 vs demerger-adjusted daily ~112.9) report absurd gaps; staying on one
+basis keeps every symbol precise and matches NSE, which itself compares against
+1-day data. The brute-force engine is unaffected — it uses the prior day's last
+1-minute close (DEC-SPOT-PREVCLOSE-1MIN-001); the report and engine are distinct.
 
 The Excel is written by a tiny, dependency-free **stdlib OOXML writer**
 (:func:`render_xlsx`) so there is no new third-party dependency to vet through the
@@ -42,10 +49,8 @@ from typing import Any, Final, Literal
 
 from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
-    _INTRADAY_BASE_INTERVAL,
-    _bar_ist_date,
-    _to_decimal,
-    _validate_candle_coords,
+    _daily_close_by_date,
+    _daily_open_by_date,
     list_candle_datasets,
 )
 
@@ -111,61 +116,17 @@ def _round2(value: Decimal) -> Decimal:
     return value.quantize(_2DP, rounding=ROUND_HALF_UP)
 
 
-def _daily_close_by_date(
-    conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
-) -> dict[date, Decimal]:
-    """Read the symbol's 1-day OFFICIAL close per day → ``{ist_date: close}``.
-
-    The NSE "previous close" anchor for the pre-open report (NOT the engine's
-    1-minute baseline). Reads ``<lake>/bars/<exch>/<seg>/<symbol>/1day/**`` via a
-    bound ``read_parquet`` glob; keyed by the bar's IST date. ``{}`` when the
-    1-day partition is absent.
-    """
-    _validate_candle_coords(exchange, segment, symbol, _DAILY_INTERVAL)
-    base = lake_root / "bars" / exchange / segment / symbol / _DAILY_INTERVAL
-    if not (base.is_dir() and any(base.rglob("*.parquet"))):
-        return {}
-    glob = base.as_posix() + "/**/*.parquet"
-    cursor = conn.execute(
-        'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true)',
-        [glob],
-    )
-    return {_bar_ist_date(ts): _to_decimal(close) for ts, close in cursor.fetchall()}
-
-
-def _session_open_by_date(
-    conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
-) -> dict[date, Decimal]:
-    """Read each day's 09:15 IST opening price (= the IEP) → ``{ist_date: open}``.
-
-    The day's FIRST 1-minute bar open: session-filtered intraday bars start at
-    09:15 IST, so ``arg_min(open, timestamp)`` per bar-date IS the opening price
-    (= the pre-open auction's indicative equilibrium price). Reads
-    ``<lake>/bars/<exch>/<seg>/<symbol>/1minute/**``; ``{}`` when absent.
-    """
-    _validate_candle_coords(exchange, segment, symbol, _INTRADAY_BASE_INTERVAL)
-    base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
-    if not (base.is_dir() and any(base.rglob("*.parquet"))):
-        return {}
-    glob = base.as_posix() + "/**/*.parquet"
-    cursor = conn.execute(
-        'SELECT CAST("timestamp" AS DATE) AS d, arg_min(open, "timestamp") AS iep '
-        "FROM read_parquet(?, union_by_name=true) GROUP BY d",
-        [glob],
-    )
-    return {day: _to_decimal(iep) for day, iep in cursor.fetchall()}
-
-
 def resolve_report_datasets(
     lake_root: Path, symbols: list[str] | None = None
 ) -> list[tuple[str, str, str]]:
     """Resolve the ``(exchange, segment, symbol)`` triples the report can build.
 
-    A dataset qualifies only when it has BOTH a ``1day`` partition (the PREV.
-    CLOSE source) AND a ``1minute`` partition (the IEP source) in the lake. When
-    *symbols* is given, the result is filtered to that set (case-sensitive on the
-    lake symbol). Sorted by symbol for a stable picker / report order. An empty
-    or missing lake yields ``[]`` (the report degrades to a header-only sheet).
+    A dataset qualifies when it has a ``1day`` partition in the lake — the report
+    is fully 1-day-sourced (both PREV. CLOSE and IEP, DEC-PREOPEN-REPORT-1DAY-001),
+    so the 1-minute partition is irrelevant. When *symbols* is given, the result
+    is filtered to that set (case-sensitive on the lake symbol). Sorted by symbol
+    for a stable picker / report order. An empty or missing lake yields ``[]``
+    (the report degrades to a header-only sheet).
     """
     wanted = set(symbols) if symbols else None
     intervals_by_key: dict[tuple[str, str, str], set[str]] = {}
@@ -175,9 +136,7 @@ def resolve_report_datasets(
     resolved = [
         key
         for key, intervals in intervals_by_key.items()
-        if _DAILY_INTERVAL in intervals
-        and _INTRADAY_BASE_INTERVAL in intervals
-        and (wanted is None or key[2] in wanted)
+        if _DAILY_INTERVAL in intervals and (wanted is None or key[2] in wanted)
     ]
     return sorted(resolved, key=lambda k: k[2])
 
@@ -187,12 +146,10 @@ def _prev_close_asof(
 ) -> Decimal | None:
     """The NSE "previous close" for *day*: the latest 1-day close STRICTLY before it.
 
-    Unlike a same-date lookup, this anchors a day that has a 09:15 IEP but **no
-    1-day bar of its own yet** — the CURRENT day during/after the session, whose
-    daily bar Dhan only finalises after close (DEC-PREOPEN-CURRENTDAY-001) — to the
-    prior trading day's official close. For a day that DOES have its own 1-day bar
-    the result is identical to that day's predecessor close, so every historical
-    row is unchanged. ``None`` when no earlier 1-day bar exists (the first day).
+    A strictly-before lookup (not same-date) so it is robust to an INTERNAL 1-day
+    gap: it returns the most recent AVAILABLE earlier close rather than dropping
+    the row. For a contiguous series this is simply the prior trading day's
+    official close. ``None`` when no earlier 1-day bar exists (the first day).
     O(log N) via :func:`bisect.bisect_left` over the pre-sorted *daily_dates*.
 
     On an INTERNAL 1-day gap (a missing prior daily bar) this returns the most
@@ -216,14 +173,15 @@ def build_preopen_rows(
 ) -> list[PreOpenRow]:
     """Build the pre-open rows for *datasets* over ``[start, end]`` (inclusive).
 
-    Each dataset is an ``(exchange, segment, symbol)`` spot triple. For each
-    symbol every day's 09:15 IEP is anchored to the **latest 1-day close strictly
-    before that day** (:func:`_prev_close_asof`), so the CURRENT day — which has an
-    IEP but whose own daily bar is not finalised yet — is emitted using the prior
-    trading day's official close (DEC-PREOPEN-CURRENTDAY-001), and every historical
-    row is unchanged. A day is emitted only when its IEP exists, a (non-zero)
-    previous close exists, and the day falls in range. Rows are sorted by
-    ``(day, symbol)`` for a single, scannable sheet. O(log N) per emitted row.
+    Each dataset is an ``(exchange, segment, symbol)`` spot triple. Fully
+    1-day-sourced (DEC-PREOPEN-REPORT-1DAY-001): for each symbol every day with a
+    1-day bar uses that bar's **open** as the IEP, anchored to the **latest 1-day
+    close strictly before that day** (:func:`_prev_close_asof`) as PREV. CLOSE —
+    both on the SAME 1-day basis so adjustment-mismatched symbols (e.g. TMPV)
+    stay precise and the numbers match NSE. A day is emitted only when its 1-day
+    open exists, a (non-zero) previous 1-day close exists, and the day falls in
+    range. Rows are sorted by ``(day, symbol)`` for a single, scannable sheet.
+    O(log N) per emitted row.
     """
     rows: list[PreOpenRow] = []
     for exchange, segment, symbol in datasets:
@@ -231,7 +189,7 @@ def build_preopen_rows(
             conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
         )
         daily_dates = sorted(daily)
-        opens = _session_open_by_date(
+        opens = _daily_open_by_date(
             conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
         )
         for day in sorted(opens):

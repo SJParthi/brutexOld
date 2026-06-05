@@ -1624,7 +1624,62 @@ def test_spot_derived_zero_prev_close_is_blank() -> None:
     assert _spot_derived_rows([_row(ts)], _ALL, prev) == [(None, None)]
 
 
+def test_spot_derived_1day_gap_on_every_bar() -> None:
+    # On the 1-day basis (DEC-DB-CANDLE-PERINTERVAL-001) the open-vs-prior-close
+    # gap is computed on EVERY bar — not gated to the 09:15 IST instant (a 1-day
+    # bar is stamped at midnight/other times, which is why it used to read null).
+    ts = datetime(2024, 3, 4, 0, 0, tzinfo=UTC)  # IST 05:30 — NOT the 09:15 anchor
+    [(change, gap)] = _spot_derived_rows([_row(ts)], _ALL, _PREV, interval="1day")
+    assert float(change) == pytest.approx(10.0)  # (110-100)/100*100
+    assert float(gap) == pytest.approx(5.0)  # (105-100)/100*100 — gap on a non-09:15 bar
+
+
 # ── query_candles end-to-end with the derived columns ────────────────
+
+
+def test_query_candles_1day_uses_1day_baseline_and_fills_gap(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # SBILIFE 2021-01-04 (Dhan/NSE: +1.79%): the 1-day view must baseline on the
+    # prior 1-DAY close (895.4), NOT the prior 1-minute close — and fill the
+    # open_gap_pct that used to read null (DEC-DB-CANDLE-PERINTERVAL-001).
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="SBILIFE",
+        interval="1day",
+        bars=[
+            _ocbar(
+                datetime(2021, 1, 1, 3, 45, tzinfo=UTC),
+                open_="903",
+                high="907",
+                low="894",
+                close="895.4",
+            ),
+            _ocbar(
+                datetime(2021, 1, 4, 3, 45, tzinfo=UTC),
+                open_="900",
+                high="917",
+                low="894.5",
+                close="911.4",
+            ),
+        ],
+    )
+    out = query_candles(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="SBILIFE",
+        interval="1day",
+        limit=50,
+    )
+    cols = out["columns"]
+    ci = cols.index("change_pct")
+    gi = cols.index("open_gap_pct")
+    row = next(r for r in out["rows"] if str(r[0]) == "2021-01-04")
+    assert round(float(row[ci]), 2) == 1.79  # (911.4-895.4)/895.4*100 — matches NSE
+    assert round(float(row[gi]), 2) == 0.51  # (900-895.4)/895.4*100 — the 1day gap
 
 
 def test_query_candles_derived_columns_end_to_end(store: InstrumentStore, tmp_path: Path) -> None:
