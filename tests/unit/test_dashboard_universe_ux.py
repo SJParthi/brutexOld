@@ -38,6 +38,21 @@ def test_pull_bar_is_sticky() -> None:
     )
 
 
+def test_accessibility_focus_ring_and_reduced_motion_present() -> None:
+    """The page carries keyboard focus rings + honours reduce-motion
+    (DEC-DASHBOARD-A11Y-POLISH-001).
+
+    Both are safe, additive polish: ``:focus-visible`` shows the ring ONLY for
+    keyboard users (mouse clicks never trigger it → no visual/layout change for
+    mouse), and ``prefers-reduced-motion`` only applies when the OS opts in. This
+    pins them so the accessibility polish cannot silently regress.
+    """
+    html = _render_universe_html()
+    assert ":focus-visible" in html, "keyboard focus rings (:focus-visible) are missing"
+    assert "prefers-reduced-motion" in html, "the reduce-motion media query is missing"
+    assert "outline: 2px solid var(--blue)" in html, "the focus-ring outline rule is missing"
+
+
 def test_multi_select_controls_present() -> None:
     """The checkbox + the unified pull + select-all/clear controls are rendered."""
     html = _render_universe_html()

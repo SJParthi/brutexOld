@@ -275,3 +275,10 @@ class TestCoverageHelpers:
         html = _render_coverage_html()
         assert "/coverage" in html
         assert "Underlying" in html
+
+    def test_coverage_has_accessibility_polish(self) -> None:
+        # Keyboard focus rings + reduce-motion honoured, same safe a11y polish as
+        # /universe (DEC-DASHBOARD-A11Y-POLISH-001) — additive, no layout change.
+        html = _render_coverage_html()
+        assert ":focus-visible" in html
+        assert "prefers-reduced-motion" in html

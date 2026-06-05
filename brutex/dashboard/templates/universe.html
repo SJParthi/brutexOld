@@ -197,6 +197,26 @@
   .bstat .bk { font-size:10px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); }
   .bstat.ok .bv { color:var(--green-bright); }
   .bstat.bad .bv { color:var(--red); }
+  /* ── Accessibility + motion polish (DEC-DASHBOARD-A11Y-POLISH-001) ── */
+  /* Keyboard focus ring: a clear, consistent outline on TAB focus for every
+     interactive control. ``:focus-visible`` shows it only for keyboard users —
+     mouse clicks never trigger it — so this polishes keyboard navigation with
+     ZERO change to the mouse visual / layout. */
+  a:focus-visible, button:focus-visible, input:focus-visible,
+  [tabindex]:focus-visible, .tab:focus-visible, .inst:focus-visible,
+  .pill:focus-visible, .futrow:focus-visible {
+    outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px;
+  }
+  /* Honour the OS "reduce motion" setting: the page is animation-heavy
+     (fade-ins, the pull beam, hover lifts). Users who opt out get a calm,
+     instant UI — a standard accessibility + comfort win that never alters the
+     static layout. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+      transition-duration: .001ms !important; scroll-behavior: auto !important;
+    }
+  }
 </style>
 </head>
 <body>
