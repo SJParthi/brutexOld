@@ -23,6 +23,8 @@ from brutex.dashboard.db_view import (
     SPOT_DERIVED_COLUMNS,
     _bar_ist_date,
     _bar_ist_time,
+    _daily_close_by_date,
+    _daily_open_by_date,
     _format_candle_timestamp,
     _intraday_last_close_by_date,
     _ist_date,
@@ -1558,6 +1560,55 @@ def test_prev_trading_close_maps_each_day_to_prior_close() -> None:
     }
 
 
+# ── _daily_close_by_date / _daily_open_by_date (the 1-day readers) ────
+
+
+def test_daily_readers_empty_partition(store: InstrumentStore, tmp_path: Path) -> None:
+    # No 1day partition → both readers return an empty map (the blank-degrade path).
+    assert (
+        _daily_close_by_date(store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="X")
+        == {}
+    )
+    assert (
+        _daily_open_by_date(store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="X")
+        == {}
+    )
+
+
+def test_daily_readers_keyed_by_ist_date(store: InstrumentStore, tmp_path: Path) -> None:
+    # The 1day close + open per IST trading date (DEC-DB-CANDLE-PERINTERVAL-001).
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="SBILIFE",
+        interval="1day",
+        bars=[
+            _ocbar(
+                datetime(2021, 1, 1, 3, 45, tzinfo=UTC),
+                open_="903",
+                high="907",
+                low="894",
+                close="895.4",
+            ),
+            _ocbar(
+                datetime(2021, 1, 4, 3, 45, tzinfo=UTC),
+                open_="900",
+                high="917",
+                low="894.5",
+                close="911.4",
+            ),
+        ],
+    )
+    closes = _daily_close_by_date(
+        store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="SBILIFE"
+    )
+    opens = _daily_open_by_date(
+        store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="SBILIFE"
+    )
+    assert closes == {date(2021, 1, 1): Decimal("895.4"), date(2021, 1, 4): Decimal("911.4")}
+    assert opens == {date(2021, 1, 1): Decimal("903"), date(2021, 1, 4): Decimal("900")}
+
+
 # ── _spot_derived_rows (every branch) ────────────────────────────────
 
 _ALL: list[str] = list(CANDLE_COLUMNS)  # timestamp, open, high, low, close, volume, open_interest
@@ -1624,7 +1675,62 @@ def test_spot_derived_zero_prev_close_is_blank() -> None:
     assert _spot_derived_rows([_row(ts)], _ALL, prev) == [(None, None)]
 
 
+def test_spot_derived_1day_gap_on_every_bar() -> None:
+    # On the 1-day basis (DEC-DB-CANDLE-PERINTERVAL-001) the open-vs-prior-close
+    # gap is computed on EVERY bar — not gated to the 09:15 IST instant (a 1-day
+    # bar is stamped at midnight/other times, which is why it used to read null).
+    ts = datetime(2024, 3, 4, 0, 0, tzinfo=UTC)  # IST 05:30 — NOT the 09:15 anchor
+    [(change, gap)] = _spot_derived_rows([_row(ts)], _ALL, _PREV, interval="1day")
+    assert float(change) == pytest.approx(10.0)  # (110-100)/100*100
+    assert float(gap) == pytest.approx(5.0)  # (105-100)/100*100 — gap on a non-09:15 bar
+
+
 # ── query_candles end-to-end with the derived columns ────────────────
+
+
+def test_query_candles_1day_uses_1day_baseline_and_fills_gap(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # SBILIFE 2021-01-04 (Dhan/NSE: +1.79%): the 1-day view must baseline on the
+    # prior 1-DAY close (895.4), NOT the prior 1-minute close — and fill the
+    # open_gap_pct that used to read null (DEC-DB-CANDLE-PERINTERVAL-001).
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="SBILIFE",
+        interval="1day",
+        bars=[
+            _ocbar(
+                datetime(2021, 1, 1, 3, 45, tzinfo=UTC),
+                open_="903",
+                high="907",
+                low="894",
+                close="895.4",
+            ),
+            _ocbar(
+                datetime(2021, 1, 4, 3, 45, tzinfo=UTC),
+                open_="900",
+                high="917",
+                low="894.5",
+                close="911.4",
+            ),
+        ],
+    )
+    out = query_candles(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="SBILIFE",
+        interval="1day",
+        limit=50,
+    )
+    cols = out["columns"]
+    ci = cols.index("change_pct")
+    gi = cols.index("open_gap_pct")
+    row = next(r for r in out["rows"] if str(r[0]) == "2021-01-04")
+    assert round(float(row[ci]), 2) == 1.79  # (911.4-895.4)/895.4*100 — matches NSE
+    assert round(float(row[gi]), 2) == 0.51  # (900-895.4)/895.4*100 — the 1day gap
 
 
 def test_query_candles_derived_columns_end_to_end(store: InstrumentStore, tmp_path: Path) -> None:
@@ -1718,31 +1824,9 @@ def test_query_candles_daily_interval_is_date_only_with_change(
             ),
         ],
     )
-    # The %-change baseline now comes from the 1-MINUTE lake (the prior day's
-    # last 1-min close), even for a 1day VIEW (DEC-SPOT-PREVCLOSE-1MIN-001):
-    # 2024-03-01's final 1-min close is 100 → anchors the 2024-03-04 daily bar.
-    ParquetWriter(lake_root=tmp_path).write(
-        exchange="NSE",
-        segment="CASH",
-        symbol="NSE-NIFTY",
-        interval="1minute",
-        bars=[
-            _ocbar(
-                datetime(2024, 3, 1, 9, 59, tzinfo=UTC),
-                open_="99",
-                high="101",
-                low="98",
-                close="100",
-            ),
-            _ocbar(
-                datetime(2024, 3, 4, 9, 59, tzinfo=UTC),
-                open_="109",
-                high="112",
-                low="108",
-                close="110",
-            ),
-        ],
-    )
+    # The 1day VIEW baselines on the prior 1-DAY close, NOT the 1-minute lake
+    # (DEC-DB-CANDLE-PERINTERVAL-001): 2024-03-01's 1-day close is 100 → anchors
+    # the 2024-03-04 daily bar. No 1minute partition is needed.
     out = query_candles(
         store.connection,
         tmp_path,
@@ -1761,12 +1845,12 @@ def test_query_candles_daily_interval_is_date_only_with_change(
     assert float(rows["2024-03-04"][chg_i]) == pytest.approx(10.0)  # (110-100)/100*100
 
 
-def test_query_candles_no_intraday_data_blank_derived(
+def test_query_candles_1day_self_baselines_without_intraday(
     store: InstrumentStore, tmp_path: Path
 ) -> None:
-    # 1day bars but NO 1minute partition → no prev-close source (the baseline is
-    # the prior day's last 1-min close, DEC-SPOT-PREVCLOSE-1MIN-001) → derived
-    # columns present but all blank.
+    # A 1day view derives from the 1-DAY close ALONE (DEC-DB-CANDLE-PERINTERVAL-001)
+    # — it no longer needs a 1minute partition. _write_candles writes 1day bars
+    # 2024-03-01 (close 100.4) + 2024-03-02 (open 100, close 100.8).
     _write_candles(tmp_path, symbol="NSE-NIFTY", interval="1day")
     out = query_candles(
         store.connection,
@@ -1777,6 +1861,13 @@ def test_query_candles_no_intraday_data_blank_derived(
         interval="1day",
         limit=50,
     )
+    ts_i = out["columns"].index("timestamp")
     chg_i = out["columns"].index("change_pct")
     gap_i = out["columns"].index("open_gap_pct")
-    assert all(r[chg_i] is None and r[gap_i] is None for r in out["rows"])
+    rows = {r[ts_i]: r for r in out["rows"]}
+    # 2024-03-01 is the first day → no prior 1-day close → blank.
+    assert rows["2024-03-01"][chg_i] is None
+    assert rows["2024-03-01"][gap_i] is None
+    # 2024-03-02 baselines on 03-01's 1-day close (100.4), same basis:
+    assert round(float(rows["2024-03-02"][chg_i]), 2) == 0.40  # (100.8-100.4)/100.4*100
+    assert round(float(rows["2024-03-02"][gap_i]), 2) == -0.40  # (100-100.4)/100.4*100

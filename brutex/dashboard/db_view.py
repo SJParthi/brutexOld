@@ -1107,16 +1107,25 @@ def query_candles(
     # DATE-ONLY for 1day); every other cell goes through the generic JSON
     # coercion (shared helper).
     rendered = _render_candle_rows(raw_rows, out_columns, interval)
-    # Read the symbol's last 1-minute close per day once → previous-trading-day
-    # close map (O(1) per-bar lookup, CLAUDE.md §5), then join the two derived
-    # %-change columns per bar (full precision; 2dp is display-only in db.html).
-    # Baseline = prior day's last 1-MINUTE close (DEC-SPOT-PREVCLOSE-1MIN-001).
-    prev_close = _prev_trading_close(
-        _intraday_last_close_by_date(
-            conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+    # Derive the %-change columns WITHIN the shown interval's OWN basis — never
+    # mix two price scales (DEC-DB-CANDLE-PERINTERVAL-001): a 1-day view compares
+    # against the prior **1-day** close (so a demerger/split-adjusted daily series
+    # stays self-consistent), a 1-minute view against the prior day's last
+    # **1-minute** close (DEC-SPOT-PREVCLOSE-1MIN-001). Mixing them is what made
+    # adjustment-mismatched symbols (e.g. TMPV — adjusted daily ~112.9 vs raw
+    # intraday ~186.6) read garbage. The engine store is unaffected — this is the
+    # read-only viewer. O(1) per-bar lookup once the map is built (CLAUDE.md §5).
+    if interval == _DAILY_INTERVAL:
+        prev_close = _prev_trading_close(
+            _daily_close_by_date(conn, lake_root, exchange=exchange, segment=segment, symbol=symbol)
         )
-    )
-    derived = _spot_derived_rows(raw_rows, out_columns, prev_close)
+    else:
+        prev_close = _prev_trading_close(
+            _intraday_last_close_by_date(
+                conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+            )
+        )
+    derived = _spot_derived_rows(raw_rows, out_columns, prev_close, interval=interval)
     rows = [
         [*rendered_row, change, gap]
         for rendered_row, (change, gap) in zip(rendered, derived, strict=True)
@@ -1260,32 +1269,88 @@ def _prev_trading_close(last_close: dict[date, Decimal]) -> dict[date, Decimal]:
     return out
 
 
+def _daily_close_by_date(
+    conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
+) -> dict[date, Decimal]:
+    """Read the symbol's 1-DAY official close per IST date → ``{ist_date: close}``.
+
+    The same-basis baseline for the ``/db`` **1-day** view (and the NSE pre-open
+    report's "previous close") — the prior 1-day close, NOT the 1-minute close
+    (DEC-DB-CANDLE-PERINTERVAL-001), so a demerger/split-adjusted daily series
+    stays self-consistent. Reads ``<lake>/bars/<exch>/<seg>/<symbol>/1day/**``
+    via a bound ``read_parquet`` glob; keyed by the bar's IST date (a 1-day bar
+    may be stamped at IST midnight or a session instant, so :func:`_bar_ist_date`
+    — never a UTC ``CAST`` — is the trading day). ``{}`` when the 1-day partition
+    is absent.
+    """
+    _validate_candle_coords(exchange, segment, symbol, _DAILY_INTERVAL)
+    base = lake_root / "bars" / exchange / segment / symbol / _DAILY_INTERVAL
+    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        return {}
+    glob = base.as_posix() + "/**/*.parquet"
+    cursor = conn.execute(
+        'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true)',
+        [glob],
+    )
+    return {_bar_ist_date(ts): _to_decimal(close) for ts, close in cursor.fetchall()}
+
+
+def _daily_open_by_date(
+    conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
+) -> dict[date, Decimal]:
+    """Read the symbol's 1-DAY official open per IST date → ``{ist_date: open}``.
+
+    The day's official opening price — on NSE the pre-open auction's indicative
+    equilibrium price (IEP) *becomes* the day's 1-day open — used as the IEP for
+    the pre-open report (DEC-PREOPEN-REPORT-1DAY-001), on the SAME 1-day basis as
+    the report's previous close so the two never mix price scales. Reads the
+    1-day partition keyed by :func:`_bar_ist_date`; ``{}`` when absent.
+    """
+    _validate_candle_coords(exchange, segment, symbol, _DAILY_INTERVAL)
+    base = lake_root / "bars" / exchange / segment / symbol / _DAILY_INTERVAL
+    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        return {}
+    glob = base.as_posix() + "/**/*.parquet"
+    cursor = conn.execute(
+        'SELECT "timestamp", open FROM read_parquet(?, union_by_name=true)',
+        [glob],
+    )
+    return {_bar_ist_date(ts): _to_decimal(open_) for ts, open_ in cursor.fetchall()}
+
+
 def _spot_derived_rows(
     raw_rows: list[tuple[Any, ...]],
     out_columns: list[str],
     prev_close_by_date: dict[date, Decimal],
+    *,
+    interval: str = _INTRADAY_BASE_INTERVAL,
 ) -> list[tuple[Any, Any]]:
     """Compute the per-bar ``(change_pct, open_gap_pct)`` derived pair.
 
-    For each bar (DEC-DB-CANDLE-DERIVED-001), baselined on the prior trading
-    day's **last 1-minute close** (DEC-SPOT-PREVCLOSE-1MIN-001):
+    For each bar (DEC-DB-CANDLE-DERIVED-001), baselined on *prev_close_by_date* —
+    the prior trading day's close **on the shown interval's own basis**
+    (DEC-DB-CANDLE-PERINTERVAL-001): the prior 1-day close for a ``"1day"`` view,
+    the prior day's last 1-minute close for an intraday view
+    (DEC-SPOT-PREVCLOSE-1MIN-001). The two are never mixed, so an
+    adjustment-mismatched symbol (e.g. TMPV) stays precise:
 
-    * ``change_pct = (close − prev_close) / prev_close × 100`` — the previous
-      trading day's last 1-minute close (O(1) lookup in *prev_close_by_date*);
-    * ``open_gap_pct = (open − prev_close) / prev_close × 100`` — the overnight
-      gap, computed ONLY for the day's 09:15:00 IST market-open bar; ``None``
-      (blank) on every other bar.
+    * ``change_pct = (close − prev_close) / prev_close × 100``;
+    * ``open_gap_pct = (open − prev_close) / prev_close × 100`` — for a ``"1day"``
+      view computed on EVERY bar (the open-vs-prior-close gap); for an intraday
+      view computed ONLY for the day's 09:15:00 IST market-open bar (the overnight
+      gap), ``None`` on every other intraday bar.
 
     Both reuse the COMMON :func:`brutex.data.spot_features.pct_change` primitive
     (CLAUDE.md §11) and stay full precision — statistical metrics, never
     money-rounded (CLAUDE.md §4); the 2dp is a *display*-only concern in
     ``db.html``. A bar whose IST date is absent from *prev_close_by_date* (the
-    first trading day, or a symbol with no 1d lake) gets ``(None, None)``; a zero
-    previous close yields ``None`` (no divide-by-zero, via ``pct_change``).
+    first trading day, or a symbol with no baseline lake) gets ``(None, None)``;
+    a zero previous close yields ``None`` (no divide-by-zero, via ``pct_change``).
     """
     ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
     open_idx = out_columns.index("open") if "open" in out_columns else -1
     close_idx = out_columns.index("close") if "close" in out_columns else -1
+    is_daily = interval == _DAILY_INTERVAL
     derived: list[tuple[Any, Any]] = []
     for row in raw_rows:
         change: Decimal | None = None
@@ -1296,7 +1361,9 @@ def _spot_derived_rows(
             if prev is not None:
                 if close_idx >= 0:
                     change = pct_change(_to_decimal(row[close_idx]), prev)
-                if open_idx >= 0 and _bar_ist_time(ts) == _SESSION_OPEN_IST:
+                # 1-day: the open-vs-prior-close gap on every bar; intraday: only
+                # the 09:15 IST session-open bar (DEC-DB-CANDLE-PERINTERVAL-001).
+                if open_idx >= 0 and (is_daily or _bar_ist_time(ts) == _SESSION_OPEN_IST):
                     gap = pct_change(_to_decimal(row[open_idx]), prev)
         derived.append((_json_safe(change), _json_safe(gap)))
     return derived

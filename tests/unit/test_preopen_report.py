@@ -1,7 +1,7 @@
 """Tests for `brutex.dashboard.preopen_report` — the NSE-style pre-open .xlsx export.
 
-100% line+branch: the lake readers (1-day close + 09:15 IEP), the dataset
-resolver (both-intervals gate + symbol filter), the row builder (prev-close
+100% line+branch: the lake readers (1-day close + 1-day open IEP), the dataset
+resolver (1day-only gate + symbol filter), the row builder (prev-close
 anchoring, range + first-day + zero-prev skips), and the dependency-free OOXML
 writer (valid zip, deterministic bytes, numeric vs inline-string cells, the
 column-letter helper). Verified against the operator's COALINDIA pre-open CSV
@@ -27,10 +27,10 @@ from brutex.dashboard.preopen_report import (
     PreOpenRow,
     _col_letter,
     _daily_close_by_date,
+    _daily_open_by_date,
     _group_by_month,
     _month_label,
     _row_fill_styles,
-    _session_open_by_date,
     build_preopen_rows,
     render_month_workbook,
     render_report_zip,
@@ -99,9 +99,9 @@ def test_daily_close_missing_partition_is_empty(tmp_path: Path) -> None:
     )
 
 
-def test_session_open_missing_partition_is_empty(tmp_path: Path) -> None:
+def test_daily_open_missing_partition_is_empty(tmp_path: Path) -> None:
     assert (
-        _session_open_by_date(_conn(), tmp_path, exchange="NSE", segment="CASH", symbol="COALINDIA")
+        _daily_open_by_date(_conn(), tmp_path, exchange="NSE", segment="CASH", symbol="COALINDIA")
         == {}
     )
 
@@ -115,19 +115,20 @@ def test_daily_close_keyed_by_ist_date(tmp_path: Path) -> None:
     assert out[date(2024, 3, 4)] == Decimal("431.55")
 
 
-def test_session_open_picks_first_bar_of_day(tmp_path: Path) -> None:
+def test_daily_open_keyed_by_ist_date(tmp_path: Path) -> None:
+    # The report's IEP source is the 1-DAY open (DEC-PREOPEN-REPORT-1DAY-001).
     _coalindia(tmp_path)
-    out = _session_open_by_date(
-        _conn(), tmp_path, exchange="NSE", segment="CASH", symbol="COALINDIA"
-    )
-    assert out == {date(2024, 3, 4): Decimal("429.00")}  # the 09:15 open, not the 09:16 bar
+    out = _daily_open_by_date(_conn(), tmp_path, exchange="NSE", segment="CASH", symbol="COALINDIA")
+    assert out[date(2024, 3, 1)] == Decimal("455")
+    assert out[date(2024, 3, 4)] == Decimal("429")
 
 
 # ── resolve_report_datasets ────────────────────────────────────────────────
 
 
-def test_resolve_requires_both_intervals(tmp_path: Path) -> None:
-    # COALINDIA has both 1day + 1minute → eligible; ONLYDAY has only 1day → excluded.
+def test_resolve_requires_1day_partition(tmp_path: Path) -> None:
+    # The report is fully 1-day-sourced (DEC-PREOPEN-REPORT-1DAY-001): a 1day
+    # partition qualifies (COALINDIA, ONLYDAY); a 1minute-only symbol is excluded.
     _coalindia(tmp_path)
     _write(
         tmp_path,
@@ -135,7 +136,16 @@ def test_resolve_requires_both_intervals(tmp_path: Path) -> None:
         "1day",
         [_bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="1", close="2")],
     )
-    assert resolve_report_datasets(tmp_path) == [("NSE", "CASH", "COALINDIA")]
+    _write(
+        tmp_path,
+        "ONLYMIN",
+        "1minute",
+        [_bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="1", close="2")],
+    )
+    assert resolve_report_datasets(tmp_path) == [
+        ("NSE", "CASH", "COALINDIA"),
+        ("NSE", "CASH", "ONLYDAY"),
+    ]
 
 
 def test_resolve_filters_to_requested_symbols(tmp_path: Path) -> None:
@@ -232,11 +242,50 @@ def test_build_skips_zero_prev_close(tmp_path: Path) -> None:
     assert rows == []  # prev close 0 → divide-by-zero guard skips the row
 
 
-def test_build_includes_current_day_without_its_own_1day_bar(tmp_path: Path) -> None:
-    # The CURRENT day has a 09:15 IEP (1minute) but NO 1day bar of its OWN yet
-    # (Dhan finalises the daily bar after close). It must STILL appear, anchored to
-    # the prior trading day's official 1day close (DEC-PREOPEN-CURRENTDAY-001) — the
-    # old same-date lookup dropped it even though yesterday's close existed.
+def test_build_iep_is_1day_open_not_1minute_open(tmp_path: Path) -> None:
+    # TMPV-style cross-basis trap: the 1-DAY series (demerger-adjusted, ~112) and
+    # the 1-MINUTE series (raw intraday, ~191) live on DIFFERENT price scales. The
+    # report must take BOTH PREV. CLOSE and IEP from the 1-DAY partition
+    # (DEC-PREOPEN-REPORT-1DAY-001) — never the 1-minute open — else %CHNG explodes
+    # to +69.88% instead of the true +2.84%.
+    _write(
+        tmp_path,
+        "TMPV",
+        "1day",
+        [
+            _bar(datetime(2021, 1, 1, 3, 45, tzinfo=UTC), open_="111.96", close="112.9"),
+            # IEP = the 1-day OPEN (116.11); close just needs >= open for a valid
+            # bar (the helper sets high=close, low=open) and is irrelevant here.
+            _bar(datetime(2021, 1, 4, 3, 45, tzinfo=UTC), open_="116.11", close="117"),
+        ],
+    )
+    _write(
+        tmp_path,
+        "TMPV",
+        "1minute",
+        # Raw intraday ~191.8 open — MUST be ignored by the (1-day-only) report.
+        [_bar(datetime(2021, 1, 4, 3, 45, tzinfo=UTC), open_="191.8", close="191.9")],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "TMPV")],
+        start=date(2021, 1, 1),
+        end=date(2021, 12, 31),
+    )
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.day == date(2021, 1, 4)
+    assert r.prev_close == Decimal("112.9")  # prior 1-DAY close
+    assert r.iep == Decimal("116.11")  # the 1-DAY open, NOT the 1-minute 191.8
+    # %CHNG = (116.11 - 112.9) / 112.9 * 100 = 2.843… → +2.84 at 2dp (not +69.88).
+    assert r.display_cells()[-1] == 2.84
+
+
+def test_build_skips_day_without_its_own_1day_bar(tmp_path: Path) -> None:
+    # Fully 1-day-sourced (DEC-PREOPEN-REPORT-1DAY-001): a day with only a 1-minute
+    # bar (no 1-day open of its own) is NOT emitted — the intraday "today before
+    # close" preview is intentionally dropped to keep one consistent basis.
     _write(
         tmp_path,
         "CUR",
@@ -247,7 +296,6 @@ def test_build_includes_current_day_without_its_own_1day_bar(tmp_path: Path) -> 
         tmp_path,
         "CUR",
         "1minute",
-        # 2024-03-04 has an IEP but NO 1day bar of its own (the "today" case).
         [_bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="125", close="126")],
     )
     rows = build_preopen_rows(
@@ -257,12 +305,9 @@ def test_build_includes_current_day_without_its_own_1day_bar(tmp_path: Path) -> 
         start=date(2024, 1, 1),
         end=date(2024, 12, 31),
     )
-    assert len(rows) == 1
-    r = rows[0]
-    assert r.day == date(2024, 3, 4)
-    assert r.prev_close == Decimal("120")  # the PRIOR 1day close (as-of), not 03-04's own
-    assert r.iep == Decimal("125")
-    assert r.chng == Decimal("5")
+    # 2024-03-01 is the first 1day bar (no prior close) → skipped; 2024-03-04 has
+    # no 1day bar of its own → not emitted. Net: no rows.
+    assert rows == []
 
 
 # ── render_xlsx + helpers ──────────────────────────────────────────────────
