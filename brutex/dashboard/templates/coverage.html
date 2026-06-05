@@ -57,7 +57,12 @@
   #status { margin-left:auto; font-size:12px; color:var(--muted); }
 
   .panelwrap { flex:1; padding:14px 24px 24px; animation: fadeInUp .5s ease both; min-height:0; display:flex; }
-  #panel {
+  /* Every section's panel is a bounded, internally-scrolling box — NOT just the
+     first. Before, only #panel had flex:1+overflow, so #spotpanel + #winpanel
+     grew to their content height and OVERLAPPED the next section (the 3-section
+     overlap bug; DEC-COVERAGE-WINDOWS-LAYOUT-001). All three now share the
+     viewport and scroll internally. */
+  #panel, #spotpanel, #winpanel {
     flex:1; overflow:auto; background:var(--surface); border:1px solid var(--border);
     border-radius:14px;
   }
