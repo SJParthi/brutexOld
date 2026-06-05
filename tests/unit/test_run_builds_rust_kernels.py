@@ -24,6 +24,7 @@ PyO3 crate and import it, and this guard covers it automatically.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -57,19 +58,45 @@ def _discover_maturin_kernels() -> dict[str, str]:
 
 
 def _module_top_imports(import_name: str) -> bool:
-    """True if any ``brutex/`` module imports *import_name* at module top.
+    """True if any ``brutex/`` module imports *import_name*.
 
-    Matches a bare ``import <name>`` at the start of a (possibly indented) line
-    — the convention BruteX uses for its build-prerequisite kernels
-    (``combo.py`` ``import fno_math``; ``fib_levels.py`` ``import trading_core``).
+    Matches both ``import <name>`` and ``from <name> import …`` at the start of
+    a (possibly indented) line — covering the convention BruteX uses for its
+    build-prerequisite kernels (``combo.py`` ``import fno_math``;
+    ``fib_levels.py`` ``import trading_core``) AND any future ``from``-style
+    site (agent-3 hostile-review hardening, DEC-RUN-TRADING-CORE-BUILD-001).
     """
-    needle_a = f"\nimport {import_name}\n"
-    needle_b = f"\n    import {import_name}\n"
+    pattern = re.compile(
+        rf"^[ \t]*(?:import {re.escape(import_name)}\b"
+        rf"|from {re.escape(import_name)}(?:\.\w+)* import )",
+        re.MULTILINE,
+    )
     for path in BRUTEX_PKG.rglob("*.py"):
-        text = "\n" + path.read_text(encoding="utf-8")
-        if needle_a in text or needle_b in text:
+        if pattern.search(path.read_text(encoding="utf-8")):
             return True
     return False
+
+
+def _make_target_body(makefile: str, target: str) -> str:
+    """Return the recipe body of Makefile *target* (lines until the next target).
+
+    Lets the build-step assertions check the step is wired INSIDE the `run`
+    target's recipe, not merely present somewhere in the file (agent-3
+    hostile-review hardening — closes the decoupled-substring gap).
+    """
+    lines = makefile.splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines) if re.match(rf"^{re.escape(target)}\b.*:", ln)),
+        None,
+    )
+    assert start is not None, f"Makefile has no `{target}:` target"
+    body: list[str] = []
+    for ln in lines[start + 1 :]:
+        # A new target (non-indented `name:`) ends the current recipe.
+        if ln and not ln[0].isspace() and re.match(r"^[A-Za-z0-9_.-]+\s*:", ln):
+            break
+        body.append(ln)
+    return "\n".join(body)
 
 
 KERNELS = _discover_maturin_kernels()
@@ -93,13 +120,13 @@ def test_kernel_is_imported_by_brutex(import_name: str) -> None:
 @pytest.mark.parametrize(("import_name", "crate_dir"), sorted(KERNELS.items()))
 def test_make_run_builds_kernel(import_name: str, crate_dir: str) -> None:
     """``make run`` must build each kernel (cd rust/<crate> + maturin develop)."""
-    makefile = MAKEFILE.read_text(encoding="utf-8")
-    assert f"import {import_name}" in makefile, (
+    run_body = _make_target_body(MAKEFILE.read_text(encoding="utf-8"), "run")
+    assert f"import {import_name}" in run_body, (
         f"Makefile `run` target never probes `import {import_name}` — a clean "
         f"clone will crash with ModuleNotFoundError: No module named "
         f"'{import_name}' (the DEC-RUN-TRADING-CORE-BUILD-001 bug)."
     )
-    assert f"rust/{crate_dir}" in makefile and "maturin" in makefile, (
+    assert f"rust/{crate_dir}" in run_body and "maturin" in run_body, (
         f"Makefile `run` target never builds rust/{crate_dir} via maturin."
     )
 
