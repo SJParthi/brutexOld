@@ -19,14 +19,26 @@ from pathlib import Path
 import duckdb
 from brutex.dashboard.preopen_report import (
     _COL_WIDTHS,
+    _STYLE_GREEN,
+    _STYLE_GREEN_BOLD,
+    _STYLE_RED,
+    _STYLE_RED_BOLD,
     REPORT_COLUMNS,
     PreOpenRow,
     _col_letter,
     _daily_close_by_date,
+    _group_by_month,
+    _month_label,
+    _row_fill_styles,
     _session_open_by_date,
     build_preopen_rows,
+    render_month_workbook,
+    render_report_zip,
     render_xlsx,
     resolve_report_datasets,
+    select_all_symbols,
+    select_rows,
+    select_top_movers,
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
@@ -430,3 +442,233 @@ def test_build_and_render_ampersand_symbol(tmp_path: Path) -> None:
     assert rows[0].iep == Decimal("2960.00")
     sheet = _open_part(render_xlsx(rows), "xl/worksheets/sheet1.xml")
     assert "M&amp;M" in sheet  # XML-escaped in the bold SYMBOL cell
+
+
+# ── DEC-REPORTS-EXCEL-CATEGORIES-001 — two categories + per-year/per-month zip ─
+
+
+def _mk(day: date, symbol: str, pct: str) -> PreOpenRow:
+    """A minimal :class:`PreOpenRow` carrying just the fields the selectors use."""
+    pct_d = Decimal(pct)
+    return PreOpenRow(
+        day=day,
+        symbol=symbol,
+        prev_close=Decimal("100"),
+        iep=Decimal("100") + pct_d,
+        chng=pct_d,
+        pct_chng=pct_d,
+    )
+
+
+# ── select_all_symbols ──────────────────────────────────────────────────────
+
+
+def test_select_all_keeps_every_row_gainers_then_losers_per_day() -> None:
+    rows = [
+        _mk(date(2024, 3, 4), "BBB", "-6"),
+        _mk(date(2024, 3, 4), "AAA", "5"),
+        _mk(date(2024, 3, 5), "CCC", "2"),
+    ]
+    out = select_all_symbols(rows)
+    # Day-ordered; within 2024-03-04 the +5 gainer precedes the -6 loser.
+    assert [(r.day, r.symbol) for r in out] == [
+        (date(2024, 3, 4), "AAA"),
+        (date(2024, 3, 4), "BBB"),
+        (date(2024, 3, 5), "CCC"),
+    ]
+
+
+def test_select_all_breaks_pct_ties_by_symbol() -> None:
+    rows = [_mk(date(2024, 3, 4), "ZED", "5"), _mk(date(2024, 3, 4), "ACE", "5")]
+    out = select_all_symbols(rows)
+    assert [r.symbol for r in out] == ["ACE", "ZED"]  # equal %CHNG → alphabetical
+
+
+def test_select_all_does_not_mutate_input() -> None:
+    rows = [_mk(date(2024, 3, 5), "B", "1"), _mk(date(2024, 3, 4), "A", "2")]
+    select_all_symbols(rows)
+    assert [r.symbol for r in rows] == ["B", "A"]  # original order untouched
+
+
+# ── select_top_movers ───────────────────────────────────────────────────────
+
+
+def test_top_mover_picks_largest_absolute_gainer_or_loser() -> None:
+    # +5 vs -6 on the same day → the -6 (the bigger absolute mover).
+    rows = [_mk(date(2024, 3, 4), "AAA", "5"), _mk(date(2024, 3, 4), "BBB", "-6")]
+    out = select_top_movers(rows, min_pct=Decimal("0"))
+    assert len(out) == 1
+    assert out[0].symbol == "BBB"
+    assert out[0].pct_chng == Decimal("-6")
+
+
+def test_top_mover_filters_by_min_pct_and_skips_empty_days() -> None:
+    rows = [
+        _mk(date(2024, 3, 4), "AAA", "1.5"),  # below 2 → does not qualify
+        _mk(date(2024, 3, 5), "BBB", "3"),  # qualifies
+    ]
+    out = select_top_movers(rows, min_pct=Decimal("2"))
+    # 2024-03-04 has no qualifier → skipped; only 2024-03-05 survives.
+    assert [(r.day, r.symbol) for r in out] == [(date(2024, 3, 5), "BBB")]
+
+
+def test_top_mover_min_pct_is_inclusive() -> None:
+    rows = [_mk(date(2024, 3, 4), "AAA", "2")]  # exactly at the threshold
+    out = select_top_movers(rows, min_pct=Decimal("2"))
+    assert [r.symbol for r in out] == ["AAA"]  # |%CHNG| >= min is inclusive
+
+
+def test_top_mover_ties_break_by_symbol() -> None:
+    # Same |%CHNG| (one +5, one -5) → deterministic alphabetical pick.
+    rows = [_mk(date(2024, 3, 4), "ZED", "5"), _mk(date(2024, 3, 4), "ACE", "-5")]
+    out = select_top_movers(rows, min_pct=Decimal("0"))
+    assert [r.symbol for r in out] == ["ACE"]
+
+
+def test_top_mover_zero_min_yields_one_per_day() -> None:
+    rows = [
+        _mk(date(2024, 3, 4), "AAA", "0.1"),
+        _mk(date(2024, 3, 5), "BBB", "0.2"),
+    ]
+    out = select_top_movers(rows, min_pct=Decimal("0"))
+    assert [r.day for r in out] == [date(2024, 3, 4), date(2024, 3, 5)]
+
+
+def test_select_rows_dispatches_on_mode() -> None:
+    rows = [_mk(date(2024, 3, 4), "AAA", "5"), _mk(date(2024, 3, 4), "BBB", "-6")]
+    assert len(select_rows(rows, mode="all", min_pct=Decimal("0"))) == 2
+    top = select_rows(rows, mode="topmover", min_pct=Decimal("0"))
+    assert [r.symbol for r in top] == ["BBB"]
+
+
+# ── fill-style mapping ───────────────────────────────────────────────────────
+
+
+def test_row_fill_styles_green_red_neutral() -> None:
+    sym = REPORT_COLUMNS.index("SYMBOL")
+    other = 0  # the DATE column
+    # Gainer → green family (bold on SYMBOL, plain green elsewhere).
+    assert _row_fill_styles(Decimal("5"), sym, sym) == _STYLE_GREEN_BOLD
+    assert _row_fill_styles(Decimal("5"), sym, other) == _STYLE_GREEN
+    # Loser → red family.
+    assert _row_fill_styles(Decimal("-5"), sym, sym) == _STYLE_RED_BOLD
+    assert _row_fill_styles(Decimal("-5"), sym, other) == _STYLE_RED
+    # Exact zero → neutral (no fill): bold SYMBOL (1), plain otherwise (0).
+    assert _row_fill_styles(Decimal("0"), sym, sym) == 1
+    assert _row_fill_styles(Decimal("0"), sym, other) == 0
+
+
+# ── month grouping ───────────────────────────────────────────────────────────
+
+
+def test_month_label_and_grouping() -> None:
+    assert _month_label(date(2024, 3, 4)) == "2024-03"
+    rows = select_all_symbols(
+        [
+            _mk(date(2024, 1, 5), "A", "1"),
+            _mk(date(2024, 1, 9), "B", "2"),
+            _mk(date(2024, 3, 4), "C", "3"),
+        ]
+    )
+    grouped = _group_by_month(rows)
+    assert [label for label, _ in grouped] == ["2024-01", "2024-03"]
+    assert [len(g) for _, g in grouped] == [2, 1]  # Feb has no rows → no sheet
+
+
+# ── render_month_workbook ────────────────────────────────────────────────────
+
+
+def _names(blob: bytes) -> set[str]:
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        return set(zf.namelist())
+
+
+def test_month_workbook_one_sheet_per_month_with_fills() -> None:
+    jan = [_mk(date(2024, 1, 5), "GAIN", "5"), _mk(date(2024, 1, 9), "LOSE", "-3")]
+    feb = [_mk(date(2024, 2, 2), "FLAT", "0")]
+    blob = render_month_workbook([("2024-01", jan), ("2024-02", feb)])
+    names = _names(blob)
+    assert "xl/worksheets/sheet1.xml" in names
+    assert "xl/worksheets/sheet2.xml" in names
+    wb = _open_part(blob, "xl/workbook.xml")
+    assert '<sheet name="2024-01"' in wb
+    assert '<sheet name="2024-02"' in wb
+    s1 = _open_part(blob, "xl/worksheets/sheet1.xml")
+    # The gainer's DATE cell carries the green xf (3); the loser's the red xf (4).
+    assert f'<c r="A3" s="{_STYLE_GREEN}"' in s1
+    assert f'<c r="A4" s="{_STYLE_RED}"' in s1
+    # The neutral February row carries no fill (default style, no s= on DATE).
+    s2 = _open_part(blob, "xl/worksheets/sheet2.xml")
+    assert '<c r="A3" t="inlineStr">' in s2  # neutral DATE cell, unstyled
+
+
+def test_month_workbook_empty_is_header_only_single_sheet() -> None:
+    blob = render_month_workbook([])
+    names = _names(blob)
+    assert "xl/worksheets/sheet1.xml" in names
+    assert "xl/worksheets/sheet2.xml" not in names
+    wb = _open_part(blob, "xl/workbook.xml")
+    assert '<sheet name="Pre-Open"' in wb
+    sheet = _open_part(blob, "xl/worksheets/sheet1.xml")
+    for col in REPORT_COLUMNS:
+        assert col in sheet
+
+
+def test_month_workbook_is_deterministic() -> None:
+    months = [("2024-01", [_mk(date(2024, 1, 5), "A", "5")])]
+    assert render_month_workbook(months) == render_month_workbook(months)
+
+
+# ── render_report_zip ────────────────────────────────────────────────────────
+
+
+def _xlsx_members(blob: bytes) -> list[str]:
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        return sorted(zf.namelist())
+
+
+def _read_member(blob: bytes, member: str) -> bytes:
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        return zf.read(member)
+
+
+def test_zip_all_mode_one_xlsx_per_year() -> None:
+    rows = [
+        _mk(date(2024, 3, 4), "A", "5"),
+        _mk(date(2025, 1, 6), "B", "-2"),
+    ]
+    blob = render_report_zip(rows, mode="all", min_pct=Decimal("0"))
+    assert _xlsx_members(blob) == ["preopen_all_2024.xlsx", "preopen_all_2025.xlsx"]
+    # The 2024 workbook holds the March sheet.
+    inner = _read_member(blob, "preopen_all_2024.xlsx")
+    assert '<sheet name="2024-03"' in _open_part(inner, "xl/workbook.xml")
+
+
+def test_zip_topmover_mode_filename_and_filter() -> None:
+    rows = [
+        _mk(date(2024, 3, 4), "AAA", "5"),
+        _mk(date(2024, 3, 4), "BBB", "-6"),  # bigger absolute → the day's pick
+        _mk(date(2024, 3, 5), "CCC", "1"),  # below min 2 → day skipped
+    ]
+    blob = render_report_zip(rows, mode="topmover", min_pct=Decimal("2"))
+    assert _xlsx_members(blob) == ["preopen_topmover_2024.xlsx"]
+    inner = _read_member(blob, "preopen_topmover_2024.xlsx")
+    sheet = _open_part(inner, "xl/worksheets/sheet1.xml")
+    assert "BBB" in sheet  # the -6 mover won 2024-03-04
+    assert "CCC" not in sheet  # 2024-03-05 had no qualifier → no row
+
+
+def test_zip_empty_selection_is_valid_single_workbook() -> None:
+    blob = render_report_zip([], mode="all", min_pct=Decimal("0"))
+    assert _xlsx_members(blob) == ["preopen_all_empty.xlsx"]
+    inner = _read_member(blob, "preopen_all_empty.xlsx")
+    sheet = _open_part(inner, "xl/worksheets/sheet1.xml")
+    for col in REPORT_COLUMNS:
+        assert col in sheet  # header-only, opens cleanly
+
+
+def test_zip_is_deterministic() -> None:
+    rows = [_mk(date(2024, 3, 4), "A", "5")]
+    a = render_report_zip(rows, mode="all", min_pct=Decimal("0"))
+    b = render_report_zip(rows, mode="all", min_pct=Decimal("0"))
+    assert a == b  # fixed _ZIP_EPOCH → byte-identical
