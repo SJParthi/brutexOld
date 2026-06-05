@@ -81,6 +81,7 @@ explicit is better than implicit):**
 - [ ] **jscpd (code duplication)** — added in DEC-P0-001
 - [ ] **Python mutation (mutmut on critical modules)** — added in DEC-P0-001
 - [ ] **Proof bundle (aggregate CI artifacts)** — final artifact step
+- [ ] **make run smoke (cold-start boot)** — added in DEC-RUN-SMOKE-GATE-001; the ONLY gate that boots the app from a clean clone (`.[data,ui]` + kernels, no `[dev]`), so "100% green but `make run` is broken" can never recur
 
 **Do NOT add (these run on nightly cron only — would block ALL PR merges if listed):**
 - ~~Red-team harness — verify gates actually block~~ — defined in `.github/workflows/redteam-nightly.yml`, runs on `schedule: cron "0 2 * * *"` + `paths` filter on `tests/redteam/**`. Per Agent 4 of the DEC-P0-004 hostile-review pass: if you add this as a required check, GitHub will block every PR forever because the job doesn't run on most PRs. Wire it to all PRs first (separate PR), then add here.
