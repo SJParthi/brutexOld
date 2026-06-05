@@ -254,7 +254,9 @@ def test_build_iep_is_1day_open_not_1minute_open(tmp_path: Path) -> None:
         "1day",
         [
             _bar(datetime(2021, 1, 1, 3, 45, tzinfo=UTC), open_="111.96", close="112.9"),
-            _bar(datetime(2021, 1, 4, 3, 45, tzinfo=UTC), open_="116.11", close="115.81"),
+            # IEP = the 1-day OPEN (116.11); close just needs >= open for a valid
+            # bar (the helper sets high=close, low=open) and is irrelevant here.
+            _bar(datetime(2021, 1, 4, 3, 45, tzinfo=UTC), open_="116.11", close="117"),
         ],
     )
     _write(
