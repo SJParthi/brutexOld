@@ -3,7 +3,7 @@
 DEC-UNIVERSE-NSE-CONSTITUENTS-001 (MIGRATION.md #445). Powers the
 ``/universe`` page "⊕ tick its constituents" action: when an INDEX is
 selected, fetch its member stocks and auto-tick the ones that exist in
-our F&O-eligible universe, ready for "⤓ Pull N selected".
+our F&O-eligible universe, ready for the unified "⤓ Pull spot".
 
 ## Honesty (CLAUDE.md §1 no-hallucination, §10 honest limits)
 

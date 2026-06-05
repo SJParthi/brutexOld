@@ -9,7 +9,10 @@ mirroring ``test_dashboard_universe_template.py``):
 * the pull bar is **sticky** (never scrolls out of view);
 * every row has a **multi-select checkbox** that toggles ``selMulti`` WITHOUT
   triggering the row's single-select (``stopPropagation``);
-* a **"⤓ Pull N selected"** button + **select-all-shown** / **clear** controls;
+* ONE unified **"⤓ Pull spot"** button (DEC-UNIVERSE-PULL-UNIFY-001 — the old
+  separate ``pullmulti`` "⤓ Pull N selected" button is gone; the single
+  ``pullbtn`` now drives one OR many) + **select-all-shown** / **clear**
+  controls;
 * the page states the pull **stores 1m + 1d only** and the 19 intraday
   timeframes are **derived on demand, not written to the drive** (pre-
   materialising is a future external-drive step) — the operator asked "where do
@@ -36,10 +39,38 @@ def test_pull_bar_is_sticky() -> None:
 
 
 def test_multi_select_controls_present() -> None:
-    """The checkbox + the Pull-N-selected + select-all/clear controls are rendered."""
+    """The checkbox + the unified pull + select-all/clear controls are rendered."""
     html = _render_universe_html()
-    for needle in ('id="pullmulti"', 'id="selallbtn"', 'id="clrselbtn"', 'class="msel"'):
+    for needle in ('id="pullbtn"', 'id="selallbtn"', 'id="clrselbtn"', 'class="msel"'):
         assert needle in html, f"missing multi-select control: {needle}"
+
+
+def test_pull_button_is_unified_single_or_many() -> None:
+    """ONE "⤓ Pull spot" button drives single OR multi (DEC-UNIVERSE-PULL-UNIFY-001).
+
+    The operator asked "why we have two pull spot" — the separate ``pullmulti``
+    "⤓ Pull N selected" button is removed and the single ``pullbtn`` now pulls
+    the highlighted instrument when nothing is ticked, or every ticked row in
+    turn when rows are selected. This guards: (a) the old button is GONE, so a
+    null ``getElementById("pullmulti").onclick`` can never throw at page load;
+    (b) the unified label + selection helper + re-entrancy guard are wired.
+    """
+    html = _render_universe_html()
+    # (a) the second "Pull spot" button must be gone — single source of truth.
+    assert 'id="pullmulti"' not in html, (
+        "the separate multi-pull button must be removed (one unified Pull spot)"
+    )
+    assert 'getElementById("pullmulti")' not in html, (
+        "no code may reference the removed pullmulti element (would throw at load)"
+    )
+    assert "Pull N selected" not in html and "Pull 0 selected" not in html, (
+        "the old 'Pull N/0 selected' button text must be gone"
+    )
+    # (b) the unified wiring: the selection helper, the in-flight guard, and the
+    # single button's label all reference the one pullbtn.
+    assert "function spotSelection" in html, "the one-or-many selection helper is missing"
+    assert "spotPullInFlight" in html, "the double-click re-entrancy guard is missing"
+    assert "⤓ Pull spot" in html, "the unified button label is missing"
 
 
 def test_multi_select_wiring_present() -> None:
@@ -50,7 +81,7 @@ def test_multi_select_wiring_present() -> None:
     assert "function updateMultiBtn" in html
     # the per-row checkbox must NOT trigger the row's single-select (independent)
     assert "stopPropagation" in html, "the checkbox must stopPropagation off the row click"
-    # 'Pull N selected' pulls each in turn via the existing (tested) runPull
+    # the unified pull pulls each in turn via the existing (tested) runPull
     assert "await runPull(" in html, "the multi-pull must reuse runPull sequentially"
 
 
