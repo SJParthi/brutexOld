@@ -11,8 +11,10 @@
 # 3. Installs `brutex[dev,data,ui]` editable from the working tree.
 # 4. Installs the Rust toolchain via rustup if `cargo` is not on PATH.
 # 5. Builds + installs the `fno_math` Rust extension via maturin.
-# 6. Verifies `brutex doctor` exits 0 (audit chain + runtime + replay checks).
-# 7. Prints a one-screen summary of env-var + CLI command surface.
+# 6. Builds + installs the `trading_core` Rust extension via maturin
+#    (shared 52-vocab core — brutex.indicators imports it; DEC-SHARED-CORE-001).
+# 7. Verifies `brutex doctor` exits 0 (audit chain + runtime + replay checks).
+# 8. Prints a one-screen summary of env-var + CLI command surface.
 #
 # Decision: DEC-INFRA-OPS-001 (MIGRATION entry #244).
 
@@ -28,7 +30,7 @@ _warn() { printf "  \033[1;33m!\033[0m %s\n" "$1"; }
 _err()  { printf "  \033[1;31m✗\033[0m %s\n" "$1" >&2; }
 
 # ────────── 1. Python 3.12 ──────────
-_step "Step 1/6 — verify Python 3.12 is available"
+_step "Step 1/7 — verify Python 3.12 is available"
 if ! command -v python3.12 >/dev/null 2>&1; then
   _err "python3.12 is REQUIRED per CLAUDE.md §4. Install via:"
   _err "    macOS:  brew install python@3.12"
@@ -38,7 +40,7 @@ fi
 _ok "python3.12 found: $(python3.12 --version)"
 
 # ────────── 2. Virtualenv ──────────
-_step "Step 2/6 — virtual environment"
+_step "Step 2/7 — virtual environment"
 if [[ -d .venv ]]; then
   _ok ".venv/ already exists; reusing"
 else
@@ -54,7 +56,7 @@ fi
 # DEC-CLONE-RUN-002: include the `ui` extra so the dashboard (fastapi +
 # uvicorn) runs immediately after a bootstrap — it was previously omitted,
 # so `python -m brutex dashboard` failed for missing fastapi/uvicorn.
-_step "Step 3/6 — install brutex[dev,data,ui] editable"
+_step "Step 3/7 — install brutex[dev,data,ui] editable"
 pip install -q --upgrade pip
 if pip install -q -e ".[dev,data,ui]" 2>&1 | tail -2; then
   _ok "dev + data + ui extras installed"
@@ -64,7 +66,7 @@ else
 fi
 
 # ────────── 4. Rust toolchain ──────────
-_step "Step 4/6 — Rust toolchain"
+_step "Step 4/7 — Rust toolchain"
 if command -v cargo >/dev/null 2>&1; then
   _ok "cargo found: $(cargo --version)"
 else
@@ -76,7 +78,7 @@ else
 fi
 
 # ────────── 5. fno_math wheel ──────────
-_step "Step 5/6 — build + install fno_math Rust extension"
+_step "Step 5/7 — build + install fno_math Rust extension"
 if python -c "import fno_math" 2>/dev/null; then
   _ok "fno_math already importable"
 else
@@ -90,8 +92,26 @@ else
   fi
 fi
 
-# ────────── 6. brutex doctor smoke ──────────
-_step "Step 6/6 — verify brutex doctor exits 0"
+# ────────── 6. trading_core wheel ──────────
+# Shared 52-condition vocab + evaluate-time indicators core (DEC-SHARED-CORE-001).
+# brutex.indicators.fib_levels imports it at module top (fib_levels.py:68), so the
+# engine + dashboard fail to import without it — build it the same way as fno_math.
+_step "Step 6/7 — build + install trading_core Rust extension"
+if python -c "import trading_core" 2>/dev/null; then
+  _ok "trading_core already importable"
+else
+  pip install -q maturin
+  ( cd rust/trading-core && maturin develop --release 2>&1 | tail -3 )
+  if python -c "import trading_core" 2>/dev/null; then
+    _ok "trading_core built + installed via maturin"
+  else
+    _err "maturin develop failed; see output above"
+    exit 1
+  fi
+fi
+
+# ────────── 7. brutex doctor smoke ──────────
+_step "Step 7/7 — verify brutex doctor exits 0"
 mkdir -p "${HOME}/.brutex/audit"
 if brutex doctor >/dev/null 2>&1; then
   _ok "brutex doctor: PASS"
