@@ -64,6 +64,7 @@ def test_fan_out_all_pairs_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
         coverage=None,
         status_log=None,
         on_rate_limit=None,
+        on_timeout=None,
         on_success=None,
     ):
         calls.append((instrument.symbol_name, interval))
@@ -105,6 +106,7 @@ def test_terminal_error_quarantines_pair_and_continues(monkeypatch: pytest.Monke
         coverage=None,
         status_log=None,
         on_rate_limit=None,
+        on_timeout=None,
         on_success=None,
     ):
         if instrument.symbol_name == "BAD":
@@ -144,6 +146,7 @@ def test_pace_threaded_through(monkeypatch: pytest.MonkeyPatch) -> None:
         coverage=None,
         status_log=None,
         on_rate_limit=None,
+        on_timeout=None,
         on_success=None,
     ):
         seen.append(pace)
@@ -178,6 +181,7 @@ def test_non_dhan_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
         coverage=None,
         status_log=None,
         on_rate_limit=None,
+        on_timeout=None,
         on_success=None,
     ):
         raise ValueError("a real bug, not a vendor error")
@@ -233,6 +237,7 @@ def test_coverage_threaded_and_skipped_windows_aggregated(
         coverage=None,
         status_log=None,
         on_rate_limit=None,
+        on_timeout=None,
         on_success=None,
     ):
         seen_coverage.append(coverage)

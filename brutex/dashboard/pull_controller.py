@@ -652,7 +652,7 @@ def _live_rate_runtime(
     use_live_rate: bool,
     session_rate: SessionRateController | None = None,
 ) -> tuple[_RateHooks, RunParallel | None, DhanRateController | None]:
-    """Return ``((pace, on_rate_limit, on_success), run_parallel, controller)`` for the pull.
+    """Return ``((pace, on_rate_limit, on_timeout, on_success), run_parallel, controller)``.
 
     A **default live** pull (no injected factory + not dry-run) resolves ONE shared
     controller and derives both the feedback hooks AND a rate-sized fan-out pool
@@ -661,7 +661,7 @@ def _live_rate_runtime(
     *session_rate* holder is wired the controller is the SESSION's persisted one
     (:class:`SessionRateController` — DEC-DHAN-PERSIST-RATE-001) so its learned
     rate carries across pulls; otherwise a fresh controller is built. Dry-run /
-    injected-factory pulls need no throttle → the None-triple + ``None`` pool +
+    injected-factory pulls need no throttle → the None-quad + ``None`` pool +
     ``None`` controller (the ingest spine then uses its default pool). The sizing
     itself (:func:`_spot_run_parallel`) is covered; only the live controller
     resolution is ``# pragma: no cover``.
