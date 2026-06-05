@@ -1997,6 +1997,11 @@ def build_app(
         """GET /universe — the F&O Universe Explorer page (DEC-UNIVERSE-DASHBOARD-001)."""
         return _render_universe_html()
 
+    @app.get("/welcome", response_class=HTMLResponse)
+    async def welcome_page() -> str:
+        """GET /welcome — the premium animated landing page (DEC-DASHBOARD-WELCOME-001)."""
+        return _render_welcome_html()
+
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
         """GET / — inline HTML dashboard with embedded JS WebSocket client."""
@@ -2357,6 +2362,31 @@ def _load_universe_template() -> str:
 def _render_universe_html() -> str:
     """Return the F&O Universe Explorer page HTML (DEC-UNIVERSE-DASHBOARD-001)."""
     return _load_universe_template()
+
+
+_WELCOME_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "welcome.html"
+_WELCOME_TEMPLATE_CACHE: str | None = None
+
+
+def _load_welcome_template() -> str:
+    """Load + cache the premium animated landing page (DEC-DASHBOARD-WELCOME-001).
+
+    Ships as a package-relative resource at
+    ``brutex/dashboard/templates/welcome.html`` — a self-contained, dependency-free
+    marketing landing (no external fonts/CDN, CSP + offline safe) built on the
+    shared design tokens and fully accessible (keyboard ``:focus-visible`` rings +
+    ``prefers-reduced-motion`` honouring). Additive: it never touches the locked
+    v29 operator dashboard at ``/``. Loaded once, then served verbatim.
+    """
+    global _WELCOME_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _WELCOME_TEMPLATE_CACHE is None:
+        _WELCOME_TEMPLATE_CACHE = _WELCOME_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _WELCOME_TEMPLATE_CACHE
+
+
+def _render_welcome_html() -> str:
+    """Return the premium animated landing page HTML (DEC-DASHBOARD-WELCOME-001)."""
+    return _load_welcome_template()
 
 
 _COVERAGE_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "coverage.html"

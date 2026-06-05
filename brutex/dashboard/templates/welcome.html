@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<!--
+  BruteX — premium animated landing page (DEC-DASHBOARD-WELCOME-001).
+  Additive, self-contained (no external fonts/CDN — CSP + offline safe),
+  fully accessible: keyboard :focus-visible rings + prefers-reduced-motion.
+  Every headline number is repo-true (CLAUDE.md §1/§3/§8) — no hype.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BruteX — Extreme Brute-Force Backtesting</title>
+<style>
+  :root {
+    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
+    --border: #232938; --border-strong: #2E3648;
+    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
+    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
+    --red: #FF5C5C; --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
+    --grad: linear-gradient(100deg, var(--green-bright), var(--blue) 45%, var(--purple) 80%, var(--pink));
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    color: var(--text); min-height: 100vh; overflow-x: hidden; line-height: 1.5;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  :focus-visible {
+    outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 10px;
+  }
+
+  /* ── animated aurora backdrop ─────────────────────────────────────── */
+  .aurora { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; }
+  .aurora .orb {
+    position: absolute; width: 60vw; height: 60vw; border-radius: 50%;
+    filter: blur(90px); opacity: 0.30; mix-blend-mode: screen;
+    animation: float 22s ease-in-out infinite;
+  }
+  .aurora .o1 { background: var(--green); top: -18vw; left: -10vw; }
+  .aurora .o2 { background: var(--blue); top: 20vh; right: -16vw; animation-delay: -7s; }
+  .aurora .o3 { background: var(--purple); bottom: -22vw; left: 24vw; animation-delay: -13s; }
+  @keyframes float {
+    0%,100% { transform: translate(0,0) scale(1); }
+    33%     { transform: translate(4vw,-3vh) scale(1.08); }
+    66%     { transform: translate(-3vw,4vh) scale(0.95); }
+  }
+  .grid-veil {
+    position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.35;
+    background-image:
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 30%, transparent 75%);
+    -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 30%, transparent 75%);
+  }
+
+  main { position: relative; z-index: 1; }
+
+  /* ── top bar ──────────────────────────────────────────────────────── */
+  .bar {
+    position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 16px;
+    padding: 14px 28px; backdrop-filter: blur(12px);
+    background: rgba(10,13,17,0.72); border-bottom: 1px solid var(--border);
+  }
+  .brand { font-weight: 900; font-size: 20px; letter-spacing: 0.5px;
+    background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent;
+    background-size: 220% auto; animation: shimmer 6s linear infinite; }
+  @keyframes shimmer { to { background-position: 220% center; } }
+  .bar nav { margin-left: auto; display: flex; gap: 18px; font-size: 13.5px; flex-wrap: wrap; }
+  .bar nav a { color: var(--muted); transition: color .2s; }
+  .bar nav a:hover { color: var(--text-bright); }
+  .live { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+  .live .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green);
+    box-shadow: 0 0 12px var(--green); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  /* ── hero ─────────────────────────────────────────────────────────── */
+  .hero { text-align: center; padding: 88px 24px 64px; max-width: 980px; margin: 0 auto; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px; padding: 7px 16px; border-radius: 999px;
+    border: 1px solid var(--border-strong); background: var(--surface); color: var(--muted);
+    font-size: 12.5px; font-weight: 600; margin-bottom: 26px;
+  }
+  .pill b { color: var(--green-bright); font-weight: 800; }
+  .hero h1 {
+    font-size: clamp(38px, 7vw, 78px); line-height: 1.04; margin: 0 0 20px; font-weight: 900;
+    letter-spacing: -1.5px; color: var(--text-bright);
+  }
+  .hero h1 .accent {
+    background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent;
+    background-size: 220% auto; animation: shimmer 7s linear infinite;
+  }
+  .hero p.lede { font-size: clamp(16px, 2.3vw, 21px); color: var(--muted); max-width: 720px;
+    margin: 0 auto 36px; }
+  .cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 9px; padding: 14px 26px; border-radius: 12px;
+    font-size: 15px; font-weight: 800; cursor: pointer; border: 1px solid var(--border-strong);
+    background: var(--surface); color: var(--text-bright); transition: transform .18s, box-shadow .18s, border-color .18s;
+  }
+  .btn:hover { transform: translateY(-2px); border-color: var(--blue); box-shadow: 0 10px 30px rgba(91,141,239,0.25); }
+  .btn.primary { border: none; background: var(--grad); background-size: 200% auto; color: #06121A; }
+  .btn.primary:hover { box-shadow: 0 12px 36px rgba(38,217,176,0.35); background-position: right center; }
+
+  /* ── stat counters ────────────────────────────────────────────────── */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+    max-width: 1040px; margin: 12px auto 0; padding: 0 24px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 24px 18px; text-align: center; position: relative; overflow: hidden; }
+  .stat::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; background: var(--grad); }
+  .stat .num { font-size: clamp(30px, 4.5vw, 46px); font-weight: 900; color: var(--text-bright);
+    font-variant-numeric: tabular-nums; }
+  .stat .num .u { font-size: 0.5em; color: var(--green-bright); font-weight: 800; margin-left: 3px; }
+  .stat .lbl { font-size: 12.5px; color: var(--muted); margin-top: 6px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.6px; }
+
+  /* ── sections ─────────────────────────────────────────────────────── */
+  section.block { max-width: 1120px; margin: 0 auto; padding: 80px 24px 12px; }
+  .eyebrow { color: var(--green-bright); font-weight: 800; font-size: 12.5px; letter-spacing: 1.4px;
+    text-transform: uppercase; text-align: center; }
+  .h2 { font-size: clamp(26px, 4vw, 40px); font-weight: 900; color: var(--text-bright);
+    text-align: center; margin: 10px 0 8px; letter-spacing: -0.5px; }
+  .sub { color: var(--muted); text-align: center; max-width: 640px; margin: 0 auto 42px; font-size: 16px; }
+
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 18px;
+    padding: 26px 24px; transition: transform .2s, border-color .2s, box-shadow .2s; }
+  .card:hover { transform: translateY(-5px); border-color: var(--border-strong);
+    box-shadow: 0 18px 44px rgba(0,0,0,0.45); }
+  .card .ic { width: 46px; height: 46px; border-radius: 12px; display: grid; place-items: center;
+    font-size: 23px; margin-bottom: 16px; background: var(--surface-2); border: 1px solid var(--border-strong); }
+  .card h3 { font-size: 17px; font-weight: 800; color: var(--text-bright); margin: 0 0 8px; }
+  .card p { font-size: 14px; color: var(--muted); margin: 0; }
+
+  /* ── pipeline ─────────────────────────────────────────────────────── */
+  .pipe { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; counter-reset: step; }
+  .step { background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    padding: 22px 16px; position: relative; }
+  .step .k { font-size: 12px; font-weight: 800; color: var(--green-bright); letter-spacing: 0.5px; }
+  .step h4 { margin: 8px 0 4px; font-size: 15px; color: var(--text-bright); }
+  .step p { margin: 0; font-size: 13px; color: var(--muted); }
+
+  /* ── final CTA + footer ───────────────────────────────────────────── */
+  .final { text-align: center; max-width: 760px; margin: 30px auto 0; padding: 64px 24px;
+    border-radius: 22px; border: 1px solid var(--border-strong);
+    background: radial-gradient(120% 140% at 50% 0%, rgba(38,217,176,0.10), transparent 60%), var(--surface); }
+  footer { max-width: 1120px; margin: 64px auto 0; padding: 28px 24px 48px; border-top: 1px solid var(--border);
+    display: flex; gap: 16px 22px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 13px; }
+  footer nav { display: flex; gap: 16px; flex-wrap: wrap; margin-left: auto; }
+  footer nav a { color: var(--muted); } footer nav a:hover { color: var(--text-bright); }
+  .honest { color: var(--muted); font-size: 12px; max-width: 1120px; margin: 0 auto; padding: 0 24px 40px;
+    text-align: center; opacity: 0.8; }
+
+  /* ── scroll reveal ────────────────────────────────────────────────── */
+  .reveal { opacity: 0; transform: translateY(22px); transition: opacity .7s ease, transform .7s ease; }
+  .reveal.in { opacity: 1; transform: none; }
+
+  @media (max-width: 860px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .cards { grid-template-columns: 1fr; }
+    .pipe { grid-template-columns: 1fr 1fr; }
+  }
+
+  /* ── accessibility: honour reduced motion (kills all animation) ────── */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+      transition-duration: .001ms !important; scroll-behavior: auto !important;
+    }
+    .reveal { opacity: 1 !important; transform: none !important; }
+    .aurora { display: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="aurora" aria-hidden="true"><div class="orb o1"></div><div class="orb o2"></div><div class="orb o3"></div></div>
+  <div class="grid-veil" aria-hidden="true"></div>
+
+  <main>
+    <div class="bar">
+      <span class="brand">BruteX</span>
+      <nav aria-label="Primary">
+        <a href="/">Dashboard</a>
+        <a href="/universe">Universe</a>
+        <a href="/coverage">Coverage</a>
+        <a href="/reports">Reports</a>
+        <a href="/db">Database</a>
+        <a href="/logs">Logs</a>
+      </nav>
+      <span class="live" title="Engine status"><span class="dot"></span>signal-only research</span>
+    </div>
+
+    <!-- HERO -->
+    <header class="hero">
+      <span class="pill">⚡ <b>Extreme</b> drill-down backtesting · Indian spot indexes</span>
+      <h1>Brute-force <span class="accent">every</span> strategy.<br />Miss <span class="accent">nothing</span>.</h1>
+      <p class="lede">BruteX sweeps the entire signal space across NIFTY 50, BANKNIFTY &amp; SENSEX — minute by minute, 2021 to today — with O(1) deduplication, a hash-chained audit trail, and bit-for-bit reproducible results.</p>
+      <div class="cta">
+        <a class="btn primary" href="/">▶ Launch Dashboard</a>
+        <a class="btn" href="/universe">🌐 Explore Universe</a>
+        <a class="btn" href="/reports">📑 Pre-Open Reports</a>
+      </div>
+    </header>
+
+    <!-- STAT COUNTERS -->
+    <div class="stats" aria-label="Key numbers">
+      <div class="stat reveal"><div class="num" data-target="33" data-suffix="B"><span class="z">0</span></div><div class="lbl">Trials / sweep (target)</div></div>
+      <div class="stat reveal"><div class="num" data-target="241"><span class="z">0</span></div><div class="lbl">Universe underlyings</div></div>
+      <div class="stat reveal"><div class="num" data-target="21"><span class="z">0</span></div><div class="lbl">Timeframes</div></div>
+      <div class="stat reveal"><div class="num" data-target="5" data-suffix="yr"><span class="z">0</span></div><div class="lbl">History depth</div></div>
+    </div>
+
+    <!-- FEATURES -->
+    <section class="block">
+      <div class="eyebrow reveal">Built for scale</div>
+      <h2 class="h2 reveal">Everything, measured. Nothing, faked.</h2>
+      <p class="sub reveal">A single source of truth from the Dhan 1-minute lake to the strategy sweep — O(1) on every hot path, fully automated, honest to the paisa.</p>
+      <div class="cards">
+        <div class="card reveal"><div class="ic">🧮</div><h3>52-condition vocabulary</h3><p>A u64 strategy-mask engine evaluates pivots + Fibonacci conditions bit-identically, shared with TickVault via one Rust core.</p></div>
+        <div class="card reveal"><div class="ic">⚡</div><h3>O(1) everything</h3><p>Bar lookup, indicator value, combo dedup (Bloom + LMDB), mask AND, and result append — all O(1), CI-gated at p99 ≤ 1.1×.</p></div>
+        <div class="card reveal"><div class="ic">🪙</div><h3>1-minute lake</h3><p>One canonical 1-minute base; 19 intraday timeframes + daily resampled deterministically. Prices snapped to the 2-decimal tick grid.</p></div>
+        <div class="card reveal"><div class="ic">📑</div><h3>NSE pre-open reports</h3><p>PREV. CLOSE · IEP · CHNG · %CHNG straight from the 1-day lake — matching NSE to the paisa, exported as deterministic Excel.</p></div>
+        <div class="card reveal"><div class="ic">🔗</div><h3>Hash-chained audit</h3><p>Every ingest chunk, combo run, error and kill appends one line to a tamper-evident JSONL chain. Break the chain → CI fails.</p></div>
+        <div class="card reveal"><div class="ic">♻️</div><h3>Reproducible by design</h3><p>Every run is identified by a blake3 hash of its inputs + code commit. Same inputs → same outputs, bit-for-bit. Idempotent re-runs.</p></div>
+      </div>
+    </section>
+
+    <!-- PIPELINE -->
+    <section class="block">
+      <div class="eyebrow reveal">How a sweep flows</div>
+      <h2 class="h2 reveal">Five stages, one funnel</h2>
+      <p class="sub reveal">A staged pipeline narrows billions of trials to the survivors — each stage stricter than the last.</p>
+      <div class="pipe">
+        <div class="step reveal"><div class="k">STAGE 1A</div><h4>Generate</h4><p>Enumerate the strategy-mask space.</p></div>
+        <div class="step reveal"><div class="k">STAGE 1B</div><h4>Screen</h4><p>Cheap O(1) viability filters.</p></div>
+        <div class="step reveal"><div class="k">STAGE 2</div><h4>Backtest</h4><p>Full signal-only replay, no look-ahead.</p></div>
+        <div class="step reveal"><div class="k">STAGE 3</div><h4>Validate</h4><p>DSR · CPCV · deflated significance.</p></div>
+        <div class="step reveal"><div class="k">STAGE 4</div><h4>Rank</h4><p>The survivors worth your attention.</p></div>
+      </div>
+    </section>
+
+    <!-- FINAL CTA -->
+    <section class="block">
+      <div class="final reveal">
+        <div class="eyebrow">Zero clicks per day</div>
+        <h2 class="h2">Set it running. Walk away.</h2>
+        <p class="sub">Release-please auto-merge, a watchdog, auto-resume and Telegram alerts mean the operator monitors nothing. Open the live dashboard and watch the funnel fill.</p>
+        <div class="cta"><a class="btn primary" href="/">▶ Open the live dashboard</a><a class="btn" href="/coverage">📊 Check data coverage</a></div>
+      </div>
+    </section>
+
+    <p class="honest">Honest envelope: the ~33-billion-trial sweep targets <b>2–4 days</b> wall time on the reference Apple M4 Pro (14-core, 48 GB) envelope — larger EPYC / Threadripper machines bring it to 12–24 h. No "millions in minutes" claims. India VIX is reference-only; the brute-force engine sweeps the 3 spot indexes. Signal-only research — no order placement.</p>
+
+    <footer>
+      <span class="brand" style="font-size:16px;">BruteX</span>
+      <span>· Extreme brute-force backtesting for Indian spot indexes</span>
+      <nav aria-label="Footer">
+        <a href="/">Dashboard</a><a href="/universe">Universe</a><a href="/coverage">Coverage</a>
+        <a href="/reports">Reports</a><a href="/db">Database</a><a href="/logs">Logs</a><a href="/credentials">Credentials</a>
+      </nav>
+    </footer>
+  </main>
+
+  <script>
+    "use strict";
+    (function () {
+      var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      // Scroll-reveal — elements fade/slide in as they enter the viewport.
+      var revealers = Array.prototype.slice.call(document.querySelectorAll(".reveal"));
+      if (reduce || !("IntersectionObserver" in window)) {
+        revealers.forEach(function (el) { el.classList.add("in"); });
+      } else {
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (e) {
+            if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+          });
+        }, { threshold: 0.15 });
+        revealers.forEach(function (el) { io.observe(el); });
+      }
+
+      // Animated count-up for the stat numbers (honest targets from data-target).
+      function format(n, suffix) {
+        return String(n) + (suffix ? '<span class="u">' + suffix + "</span>" : "");
+      }
+      function countUp(el) {
+        var target = parseInt(el.getAttribute("data-target"), 10) || 0;
+        var suffix = el.getAttribute("data-suffix") || "";
+        if (reduce) { el.innerHTML = format(target, suffix); return; }
+        var dur = 1400, t0 = null;
+        function tick(ts) {
+          if (t0 === null) t0 = ts;
+          var p = Math.min((ts - t0) / dur, 1);
+          var eased = 1 - Math.pow(1 - p, 3); // easeOutCubic
+          el.innerHTML = format(Math.round(target * eased), suffix);
+          if (p < 1) requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+      }
+      var nums = Array.prototype.slice.call(document.querySelectorAll(".num[data-target]"));
+      if (reduce || !("IntersectionObserver" in window)) {
+        nums.forEach(countUp);
+      } else {
+        var io2 = new IntersectionObserver(function (entries) {
+          entries.forEach(function (e) {
+            if (e.isIntersecting) { countUp(e.target); io2.unobserve(e.target); }
+          });
+        }, { threshold: 0.4 });
+        nums.forEach(function (el) { io2.observe(el); });
+      }
+    })();
+  </script>
+</body>
+</html>

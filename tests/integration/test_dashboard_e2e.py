@@ -261,6 +261,15 @@ class TestOffloadedReadRoutes:
             yield c
         store.close()
 
+    def test_welcome_landing_page_serves_html(self, wired_client: TestClient) -> None:
+        # The premium animated landing route returns the self-contained HTML page
+        # (DEC-DASHBOARD-WELCOME-001) — additive, never touches the v29 "/" dashboard.
+        r = wired_client.get("/welcome")
+        assert r.status_code == 200
+        assert "text/html" in r.headers["content-type"]
+        assert "<title>BruteX" in r.text
+        assert 'href="/universe"' in r.text
+
     def test_db_tables_offloaded(self, wired_client: TestClient) -> None:
         r = wired_client.get("/api/v1/db/tables")
         assert r.status_code == 200
