@@ -1709,6 +1709,74 @@ jobs:
           python ../../scripts/check_vocab_rust_parity.py
 
   # ─────────────────────────────────────────────────────────────────
+  # MAKE RUN SMOKE — cold-start `make run` path, the gate that catches
+  # "100% green but the app won't start" bugs (DEC-RUN-SMOKE-GATE-001).
+  #
+  # WHY THIS EXISTS: every OTHER job installs `.[dev,data,ui]` AND
+  # `pip install ./rust/{fno-math,trading-core}`, so they hand-install
+  # everything `make run` builds itself. That masked two real cold-start
+  # crashes that shipped behind "100% green": `trading_core` not built
+  # (DEC-RUN-TRADING-CORE-BUILD-001 / #479) and `numpy` declared dev-only
+  # (DEC-RUN-NUMPY-CORE-001 / #480). This job reproduces the OPERATOR's
+  # exact `make run` environment — `.[data,ui]` ONLY (no [dev]) + the
+  # kernels — and boots the app, so a broken cold start can NEVER again
+  # pass as green. It is wired into ci-ok as a HARD gate.
+  # ─────────────────────────────────────────────────────────────────
+  run-smoke:
+    name: make run smoke (cold-start boot)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install Rust toolchain (for the kernels)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      # CRITICAL: install ONLY what `make run` installs — `.[data,ui]`,
+      # NOT [dev]. Installing [dev] here would re-mask numpy-class bugs
+      # (numpy used to live in [dev]); the whole point is to prove the
+      # operator's runtime dependency set is self-sufficient.
+      - name: Install brutex[data,ui] — the make run set (NO dev)
+        run: pip install -e ".[data,ui]"
+      - name: Build both Rust kernels (the make run way)
+        run: |
+          pip install ./rust/fno-math
+          pip install ./rust/trading-core
+      - name: Import smoke — the chain that crashed before (#479, #480)
+        run: |
+          python -c "import trading_core, fno_math; print('kernels OK')"
+          python -c "import brutex.indicators.fib_levels; print('fib_levels OK')"
+          python -c "import brutex.engine; print('engine OK')"
+      - name: CLI smoke — build_parser must not crash (cli.py:329)
+        run: python -m brutex --help
+      - name: Boot smoke — `brutex run` must serve HTTP 200
+        run: |
+          set -euo pipefail
+          python -m brutex run --no-browser > run.log 2>&1 &
+          server_pid=$!
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9080/ -o index.html; then ok=1; break; fi
+            # fail fast if the server process already died
+            if ! kill -0 "$server_pid" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          kill "$server_pid" 2>/dev/null || true
+          echo "----- run.log -----"; tail -30 run.log || true
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::brutex run did not serve HTTP 200 — cold-start boot failed."
+            exit 1
+          fi
+          bytes=$(wc -c < index.html)
+          echo "✅ brutex run served the dashboard ($bytes bytes, HTTP 200)"
+          test "$bytes" -gt 1000
+
+  # ─────────────────────────────────────────────────────────────────
   # BANNED PATTERNS — no print, no TODO in prod, no .env*
   # ─────────────────────────────────────────────────────────────────
   banned:
@@ -2346,6 +2414,12 @@ jobs:
       - licenses
       - rust
       - rust-trading-core
+      # DEC-RUN-SMOKE-GATE-001: the cold-start `make run` boot gate — the
+      # ONLY job that walks the operator's real run path (.[data,ui] + the
+      # kernels, no [dev]) and boots the app. Hard gate so "100% green but
+      # the app won't start" (the #479 trading_core + #480 numpy crashes)
+      # can never recur silently.
+      - run-smoke
       - banned
       - secrets
       # fno-math-drift moved to advisory-only on 2026-05-15.
@@ -2411,6 +2485,7 @@ jobs:
           echo "  licenses:      ${{ needs.licenses.result }}"
           echo "  rust:          ${{ needs.rust.result }}"
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
+          echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
           echo "  secrets:       ${{ needs.secrets.result }}"
           echo "  codeql:        ${{ needs.codeql.result }}"
@@ -2438,6 +2513,7 @@ jobs:
             "${{ needs.licenses.result }}" \
             "${{ needs.rust.result }}" \
             "${{ needs.rust-trading-core.result }}" \
+            "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
             "${{ needs.secrets.result }}" \
             "${{ needs.codeql.result }}" \

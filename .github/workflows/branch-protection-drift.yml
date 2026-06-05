@@ -79,6 +79,7 @@ jobs:
               "Docstring coverage (interrogate)",
               "License compliance",
               "Rust (fno-math build + clippy + test)",
+              "make run smoke (cold-start boot)",
               "Banned pattern scan",
               "Secret scan (gitleaks)",
               "CodeQL (Python SAST)",
