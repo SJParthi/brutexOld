@@ -47,12 +47,19 @@ from itertools import groupby
 from pathlib import Path
 from typing import Any, Final, Literal
 
+import duckdb
+import structlog
+
 from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
     _daily_close_by_date,
     _daily_open_by_date,
     list_candle_datasets,
 )
+
+#: Module logger — surfaces a per-symbol skip (DEC-PREOPEN-SPACE-SYMBOL-001) so a
+#: degraded export is visible in ``/logs``, never silent.
+_LOG = structlog.get_logger("brutex.dashboard.preopen_report")
 
 #: The exact column order of the report (mirrors the NSE pre-open file + a DATE).
 REPORT_COLUMNS: Final[tuple[str, ...]] = (
@@ -185,13 +192,30 @@ def build_preopen_rows(
     """
     rows: list[PreOpenRow] = []
     for exchange, segment, symbol in datasets:
-        daily = _daily_close_by_date(
-            conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
-        )
+        # Resilience (DEC-PREOPEN-SPACE-SYMBOL-001): one un-queryable symbol must
+        # NEVER 500 the whole multi-symbol export — mirroring the "never a 500"
+        # contract the coverage path already honours (db_view._aggregate_parquet_
+        # resilient). A ``ValueError`` (e.g. the candle-symbol validator) or a
+        # ``duckdb.Error`` (an unreadable / malformed Parquet for one symbol) is
+        # logged + skipped; every other symbol still exports.
+        try:
+            daily = _daily_close_by_date(
+                conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+            )
+            opens = _daily_open_by_date(
+                conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+            )
+        except (ValueError, duckdb.Error) as exc:
+            _LOG.warning(
+                "preopen.symbol.skipped",
+                symbol=symbol,
+                exchange=exchange,
+                segment=segment,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            continue
         daily_dates = sorted(daily)
-        opens = _daily_open_by_date(
-            conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
-        )
         for day in sorted(opens):
             if day < start or day > end:
                 continue

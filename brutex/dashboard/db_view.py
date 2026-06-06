@@ -163,7 +163,20 @@ _OPTION_SEGMENT_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 #: WITHOUT loosening the path-traversal / glob-injection guard. Before this fix
 #: the pre-open report 500'd on ``M&M`` (``illegal candle symbol 'M&M'``).
 #: DEC-PREOPEN-AMPERSAND-001.
-_SYMBOL_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.&\-]*$")
+#:
+#: A literal **space** is admitted for the same reason (DEC-PREOPEN-SPACE-SYMBOL-001):
+#: real INDEX underlyings the lake stores verbatim contain spaces — ``INDIA VIX``,
+#: ``NIFTY 50``, ``NIFTY TOTAL MKT``, ``NIFTY MIDCAP 150`` — and a space is neither a
+#: path separator nor a DuckDB-glob metacharacter (``* ? [ ] { }``). The symbol is
+#: joined via ``pathlib`` into ``<lake>/bars/<exch>/<seg>/<symbol>/<interval>`` and
+#: handed to ``read_parquet(?)`` as a **bound parameter** (never string-interpolated),
+#: so the space is an inert literal path component — it cannot widen the glob, inject
+#: SQL, or traverse (``..`` still rejected). Before this fix the pre-open ``.zip``
+#: 500'd on ``INDIA VIX`` (``illegal candle symbol 'INDIA VIX'``), and one bad symbol
+#: sank the whole multi-symbol export; admitting the space keeps the read allowlist
+#: consistent with what the write path stores (CLAUDE.md §11 COMMON) so no stored
+#: data is dropped.
+_SYMBOL_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.&\- ]*$")
 
 #: Strict ISO calendar-date shape. ``date.fromisoformat`` (py3.11+) also
 #: accepts ``YYYYMMDD`` and ``YYYY-Www-D`` ordinal/week forms; the candle

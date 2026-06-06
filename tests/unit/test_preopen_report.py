@@ -489,6 +489,64 @@ def test_build_and_render_ampersand_symbol(tmp_path: Path) -> None:
     assert "M&amp;M" in sheet  # XML-escaped in the bold SYMBOL cell
 
 
+def test_build_and_render_space_symbol(tmp_path: Path) -> None:
+    # DEC-PREOPEN-SPACE-SYMBOL-001: a space-containing INDEX symbol (e.g.
+    # 'INDIA VIX', 'NIFTY 50', 'NIFTY TOTAL MKT') used to 500 the whole .zip
+    # export (``illegal candle symbol 'INDIA VIX'``). The candle-symbol validator
+    # now admits a literal space (same safety class as '&'), so the symbol is
+    # queryable end-to-end and no stored data is dropped.
+    _write(
+        tmp_path,
+        "INDIA VIX",
+        "1day",
+        [
+            _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="14.20", close="14.85"),
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="15.10", close="15.40"),
+        ],
+    )
+    assert resolve_report_datasets(tmp_path, ["INDIA VIX"]) == [("NSE", "CASH", "INDIA VIX")]
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "INDIA VIX")],
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+    )
+    assert len(rows) == 1
+    assert rows[0].symbol == "INDIA VIX"
+    assert rows[0].prev_close == Decimal("14.85")
+    assert rows[0].iep == Decimal("15.10")
+    # Renders without raising; the space survives into the SYMBOL cell.
+    sheet = _open_part(render_xlsx(rows), "xl/worksheets/sheet1.xml")
+    assert "INDIA VIX" in sheet
+
+
+def test_build_preopen_rows_resilient_to_one_bad_symbol(tmp_path: Path) -> None:
+    # DEC-PREOPEN-SPACE-SYMBOL-001 resilience belt: one un-queryable symbol must
+    # NEVER 500 the whole export. A datasets entry whose symbol carries a
+    # glob-metachar (still rejected by the validator) is logged + skipped; the
+    # good symbol still builds. (Defence-in-depth: even if a non-validatable
+    # coordinate slips through dataset discovery, the build degrades, not crashes.)
+    _write(
+        tmp_path,
+        "COALINDIA",
+        "1day",
+        [
+            _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="400", close="410"),
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="412", close="415"),
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        # 'BAD*SYM' has a glob metachar → _validate_candle_coords raises → skipped.
+        datasets=[("NSE", "CASH", "BAD*SYM"), ("NSE", "CASH", "COALINDIA")],
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+    )
+    assert [r.symbol for r in rows] == ["COALINDIA"]  # bad symbol skipped, good one kept
+
+
 # ── DEC-REPORTS-EXCEL-CATEGORIES-001 — two categories + per-year/per-month zip ─
 
 
