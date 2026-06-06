@@ -1188,21 +1188,71 @@ def build_app(
     _pull_job = BackgroundPullJob(summary_cache=_summary_cache)
 
     @app.post("/api/v1/universe/pull-all")
-    async def api_universe_pull_all(kind: str = Query(...)) -> JSONResponse:
-        """POST /api/v1/universe/pull-all?kind=index|stock — start a bulk SPOT pull.
+    async def api_universe_pull_all(
+        kind: str | None = Query(default=None),
+        symbol: str | None = Query(default=None),
+        symbols: str | None = Query(default=None),
+        year: int | None = Query(default=None),
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull-all — start a bulk / multi / per-symbol SPOT pull.
 
-        The one-click "⤓ Pull ALL indices / stocks spot" buttons (① / ③). Launches
-        :func:`brutex.dashboard.pull_controller.pull_all_spot` (full
-        ``[2021-01-01, previous day]`` 1m + 1d; the current session is
-        excluded by default) on the **background job** so the request
-        returns at once and the page polls ``/pull-progress`` for the live tick.
-        Single-flight: a second start while one runs returns ``{"started": false}``.
-        ``dry_run`` is forced ``True`` when Dhan creds are absent (offline preview).
+        Backs BOTH the one-click "⤓ Pull ALL indices / stocks spot" buttons
+        (``?kind=index|stock``, full ``[2021-01-01, previous day]`` 1m + 1d) AND the
+        unified multi-select "⤓ Pull spot" (``?symbols=a,b,c`` — the ticked
+        SELECTION fanned in ONE saturating pass over the from/to picker range,
+        DEC-DHAN-SPOT-MULTI-SATURATE-001). Precedence: ``symbols`` (ticked many) >
+        ``symbol`` (one) > ``kind`` (every admitted underlying of index/stock).
+
+        All forms route to :func:`brutex.dashboard.pull_controller.pull_all_spot`
+        on the **background job** (returns at once; poll ``/pull-progress``): its
+        cross-symbol ``(symbol, interval, window)`` fan-out keeps the ONE shared
+        :class:`SessionRateController` SATURATED at the 5 r/s ceiling, replacing the
+        old serial per-symbol ``/universe/pull`` loop that only kept ~3 r/s in
+        flight. ``from_date`` / ``to_date`` / ``year`` carry the date picker; when
+        ALL are blank the full Track-1 history applies (the Pull-ALL default, so
+        the ``?kind=`` callers are byte-for-byte unchanged). Single-flight; an empty
+        / unknown ``?symbols=`` id fails CLOSED (400, naming offenders — never a
+        silent partial). ``dry_run`` is forced when Dhan creds are absent.
         """
         dry_run = not dhan_creds_present()
-        instruments = _select_bulk_targets(kind)
+        if symbols is not None:
+            try:
+                instruments = resolve_pull_symbols(symbols, _require_store().get)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            detail = f"{len(instruments)} symbols spot"
+        elif symbol is not None:
+            store = _require_store()
+            instrument = store.get(symbol)
+            if instrument is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown security_id {symbol!r} — not in the instrument store",
+                )
+            instruments = [instrument]
+            detail = f"{symbol} spot"
+        elif kind is not None:
+            instruments = _select_bulk_targets(kind)
+            detail = f"{kind} spot"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="pull-all requires ?symbols=..., ?symbol=... or ?kind=...",
+            )
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
-        _LOG.info("universe.pull_all.requested", kind=kind, count=len(instruments), dry_run=dry_run)
+        _LOG.info(
+            "universe.pull_all.requested",
+            kind=kind,
+            symbol=symbol,
+            symbols=symbols,
+            count=len(instruments),
+            from_date=from_date,
+            to_date=to_date,
+            year=year,
+            dry_run=dry_run,
+        )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: bulk-pull every selected spot symbol, streaming progress."""
@@ -1210,15 +1260,25 @@ def build_app(
                 instruments,
                 lake_root=lake_root,
                 dry_run=dry_run,
+                from_date=from_date,
+                to_date=to_date,
+                year=year,
                 on_progress=on_progress,
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
             )
 
         # total = symbols × the 2 fetched intervals (1m + 1d) — the unit the hook fires on.
-        started = _pull_job.start(_work, total=len(instruments) * 2, detail=f"{kind} spot")
+        started = _pull_job.start(_work, total=len(instruments) * 2, detail=detail)
         return JSONResponse(
-            {"started": started, "kind": kind, "total": len(instruments) * 2, "dry_run": dry_run}
+            {
+                "started": started,
+                "kind": kind,
+                "symbol": symbol,
+                "symbols": symbols,
+                "total": len(instruments) * 2,
+                "dry_run": dry_run,
+            }
         )
 
     @app.post("/api/v1/universe/pull-options")

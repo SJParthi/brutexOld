@@ -473,6 +473,46 @@ class TestPullAllSpot:
         assert report.total_completed == 0
         assert report.to_dict()["symbols"] == []
 
+    def test_explicit_range_is_honoured(self, tmp_path: Path) -> None:
+        # DEC-DHAN-SPOT-MULTI-SATURATE-001: the bulk flatten now accepts the
+        # multi-select date picker's from/to range (instead of always full
+        # history), so routing the multi-select "Pull spot" through this
+        # saturating path never silently widens the window. The report's
+        # [start, end] must reflect the explicit range, not the 2021 floor.
+        report = pull_all_spot(
+            [_index("13"), _index("25")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            from_date="2026-02-01",
+            to_date="2026-02-15",
+        )
+        assert report.start_date == "2026-02-01"
+        assert report.end_date == "2026-02-15"  # inclusive end label
+        assert report.total_symbols == 2
+
+    def test_explicit_year_is_honoured(self, tmp_path: Path) -> None:
+        report = pull_all_spot(
+            [_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW, year=2024
+        )
+        assert report.start_date == "2024-01-01"
+        assert report.end_date == "2024-12-31"
+
+    def test_no_range_defaults_to_full_history(self, tmp_path: Path) -> None:
+        # Regression guard for the range-param addition: the ?kind= "Pull ALL"
+        # callers pass no range → the full Track-1 history default is UNCHANGED.
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            from_date=None,
+            to_date=None,
+            year=None,
+        )
+        assert report.start_date == "2021-01-01"
+        assert report.end_date == "2026-05-29"  # previous day (now=05-30)
+
     def test_no_data_and_failure_branches(self, tmp_path: Path) -> None:
         # An adapter returning no rows → no_data for both intervals of the symbol.
         report = pull_all_spot(
