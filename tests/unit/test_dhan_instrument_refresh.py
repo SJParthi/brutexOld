@@ -345,6 +345,8 @@ def test_refresh_does_not_tag_fno_eligible_constituent_reference_only() -> None:
         reference_security_ids=frozenset({2885}),  # RELIANCE's id
     )
     up = store.upserts[0]
-    assert "RELIANCE" in [i.symbol_name for i in up["instruments"]]
+    persisted = up["instruments"]
+    assert isinstance(persisted, list)
+    assert "RELIANCE" in [i.symbol_name for i in persisted]
     # F&O-eligible → excluded from reference_only despite being in the reference set.
     assert up["reference_only_ids"] == frozenset()
