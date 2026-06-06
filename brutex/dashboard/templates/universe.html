@@ -228,8 +228,6 @@
       <span style="color:var(--muted);">·</span>
       <a href="/db" style="color:var(--blue); text-decoration:none;">Database</a>
       <span style="color:var(--muted);">·</span>
-      <a href="/logs" style="color:var(--blue); text-decoration:none;">Logs</a>
-      <span style="color:var(--muted);">·</span>
       <a href="/coverage" style="color:var(--blue); text-decoration:none;">Coverage</a>
       <span style="color:var(--border-strong);">·</span>
       <a href="/reports" style="color:var(--blue); text-decoration:none;">Reports</a>
@@ -295,7 +293,6 @@
       Paths — lake: <code>~/.brutex/lake</code> · DB: <code>~/.brutex/lake/instruments.duckdb</code> ·
       logs: <code>~/.brutex/logs/brutex.log</code> &nbsp;|&nbsp;
       Other views: <a href="/" style="color:var(--blue)">Report</a> ·
-      <a href="/logs" style="color:var(--blue)">Logs</a> ·
       <a href="/db" style="color:var(--blue)">Database</a> ·
       <a href="/credentials" style="color:var(--blue)">Credentials</a>
     </div>
@@ -674,7 +671,7 @@ async function runPull(symbol, label) {
       // 100%-failed pull (e.g. a wrong segment for an index) is never mistaken
       // for an empty range. The per-chunk reason is in /logs (ingest.chunk.failed).
       document.getElementById("pulltitle").innerHTML =
-        `<span style="color:var(--red)">✕</span> ${esc(label)} — ${failed.toLocaleString('en-IN')} chunk(s) failed across ${tfs.length} timeframes · see <a href="/logs" style="color:var(--blue)">/logs</a> (ingest.chunk.failed) for the reason`;
+        `<span style="color:var(--red)">✕</span> ${esc(label)} — ${failed.toLocaleString('en-IN')} chunk(s) failed across ${tfs.length} timeframes · see the brutex.log file (ingest.chunk.failed) for the reason`;
     } else if (completed === 0) {
       // No chunk persisted AND none failed → the vendor genuinely returned no
       // data (or every chunk was already settled). Don't show a green ✓.
