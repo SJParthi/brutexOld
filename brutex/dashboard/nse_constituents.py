@@ -105,6 +105,18 @@ INDEX_CSV_FILENAMES: Final[dict[str, str]] = {
     "NIFTY TOTAL MARKET": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
     "NIFTYTOTALMARKET": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
     "NIFTY_TOTAL_MARKET": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
+    # ABBREVIATED ("MKT") aliases — DEC-NIFTY-TOTAL-MARKET-MKT-ALIAS-001: the Dhan
+    # detailed-master spells this index "NIFTY TOTAL MKT" (the value
+    # ``ntm.NTM_SYMBOL`` holds + the display symbol the /universe page sends to
+    # ``/api/v1/universe/index-constituents``), NOT the niftyindices "MARKET"
+    # spelling. Without these the "⊕ tick its constituents" button resolved to
+    # "unknown-index" for the very index BruteX admits with ~750 constituents
+    # (operator make-run 2026-06-06: ``ntm_admitted constituents=750`` yet the UI
+    # showed "No NSE constituent list known"). All spellings map to the same
+    # operator-verified CSV (``ntm.NTM_NAME_PATTERN`` already matches MKT|MARKET).
+    "NIFTY TOTAL MKT": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
+    "NIFTYTOTALMKT": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
+    "NIFTY_TOTAL_MKT": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
 }
 
 #: Operator override env var (DEC-CONSTITUENTS-OVERRIDE-001): a JSON object

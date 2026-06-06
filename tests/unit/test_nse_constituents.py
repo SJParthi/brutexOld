@@ -145,10 +145,40 @@ class TestConstituentUrl:
         # It is a full URL on its own host — NOT prefixed with the NSE base.
         assert not expected.startswith(NSE_CONSTITUENTS_BASE_URL)
 
+    def test_nifty_total_market_mkt_abbreviation_resolves(self) -> None:
+        # DEC-NIFTY-TOTAL-MARKET-MKT-ALIAS-001: the Dhan detailed-master spells
+        # this index "NIFTY TOTAL MKT" (== ntm.NTM_SYMBOL, the display symbol the
+        # /universe page sends to /api/v1/universe/index-constituents), NOT the
+        # niftyindices "MARKET" spelling. The abbreviated aliases must resolve to
+        # the SAME CSV so the ⊕ tick-its-constituents button works for the index
+        # BruteX actually admits — regression for the operator's 2026-06-06
+        # make-run ("ntm_admitted constituents=750" but UI said "No NSE
+        # constituent list known for 'NIFTY TOTAL MKT'").
+        expected = "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv"
+        assert constituent_url("NIFTY TOTAL MKT") == expected
+        assert constituent_url("  nifty total mkt ") == expected
+        assert constituent_url("NIFTYTOTALMKT") == expected
+        assert constituent_url("NIFTY_TOTAL_MKT") == expected
+        # Both the abbreviated and spelled-out spellings hit the same URL.
+        assert constituent_url("NIFTY TOTAL MKT") == constituent_url("NIFTY TOTAL MARKET")
+
     def test_nifty_total_market_is_registered(self) -> None:
         # The basket selector must be present in the built-in map so the
-        # dashboard offers it without an operator override.
+        # dashboard offers it without an operator override — under BOTH the
+        # niftyindices "MARKET" spelling and the Dhan "MKT" display spelling
+        # (DEC-NIFTY-TOTAL-MARKET-MKT-ALIAS-001).
         assert "NIFTY TOTAL MARKET" in INDEX_CSV_FILENAMES
+        assert "NIFTY TOTAL MKT" in INDEX_CSV_FILENAMES
+
+    def test_ntm_display_symbol_resolves(self) -> None:
+        # Cross-module sync guard (CLAUDE.md §11 COMMON): the exact display symbol
+        # BruteX admits NTM under (ntm.NTM_SYMBOL — sent verbatim by the /universe
+        # page) MUST have a constituent mapping, else the button silently regresses
+        # to "unknown-index" again. Imported here so a future rename of either
+        # side trips this test (DEC-NIFTY-TOTAL-MARKET-MKT-ALIAS-001).
+        from brutex.adapters.dhan.ntm import NTM_SYMBOL
+
+        assert constituent_url(NTM_SYMBOL) is not None
 
     @pytest.mark.parametrize("symbol", sorted(INDEX_CSV_FILENAMES))
     def test_every_mapped_index_resolves(self, symbol: str) -> None:
