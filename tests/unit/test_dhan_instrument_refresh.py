@@ -102,14 +102,25 @@ class _Store:
         snapshot_date: date,
         run_id: str,
         csv_source_sha256: str,
+        reference_only_of: object = None,
         replace_snapshot: bool,
     ) -> object:
+        insts = list(instruments)
+        # Capture which rows the caller's reference_only_of would tag (Stage 2b
+        # PR-4c) so tests can assert the tag without a real DuckDB.
+        ref_ids = (
+            frozenset(i.security_id for i in insts if reference_only_of(i))  # type: ignore[operator]
+            if callable(reference_only_of)
+            else frozenset()
+        )
         self.upserts.append(
             {
-                "instruments": list(instruments),
+                "instruments": insts,
                 "snapshot_date": snapshot_date,
                 "run_id": run_id,
                 "csv_source_sha256": csv_source_sha256,
+                "reference_only_of": reference_only_of,
+                "reference_only_ids": ref_ids,
                 "replace_snapshot": replace_snapshot,
             }
         )
@@ -219,3 +230,54 @@ def test_code_commit_sha_env_then_version_fallback(monkeypatch: pytest.MonkeyPat
     assert _code_commit_sha() == __version__
     monkeypatch.setenv("BRUTEX_COMMIT_SHA", "")  # empty → falsy → fallback
     assert _code_commit_sha() == __version__
+
+
+def _rows_with_reference() -> list[dict[str, str]]:
+    rows = _rows()
+    rows.append(
+        _row(
+            EXCH_ID="NSE",
+            SECURITY_ID="9999",
+            INSTRUMENT="EQUITY",
+            SYMBOL_NAME="TINY CO LTD",
+            DISPLAY_NAME="Tiny Co",
+            LOT_SIZE="1",
+            TICK_SIZE="0.05",
+        )  # non-F&O (no UNDERLYING_SYMBOL)
+    )
+    return rows
+
+
+def test_refresh_admits_and_tags_reference_constituents() -> None:
+    # DEC-NIFTY-TOTAL-MARKET-PERSIST-001: a non-F&O equity is admitted by its id
+    # AND tagged reference_only=TRUE at upsert.
+    store = _Store()
+    text = _csv(_rows_with_reference())
+    refresh_instruments(
+        store,
+        lambda _url: text,
+        snapshot_date=date(2026, 6, 6),
+        run_id="run-ref",
+        reference_security_ids=frozenset({9999}),
+    )
+    up = store.upserts[0]
+    persisted = up["instruments"]
+    assert isinstance(persisted, list)
+    assert "TINY CO LTD" in [i.symbol_name for i in persisted]
+    # The constituent is tagged reference_only (VIX absent from these rows).
+    assert up["reference_only_ids"] == frozenset({9999})
+
+
+def test_refresh_default_does_not_admit_or_tag_reference() -> None:
+    store = _Store()
+    text = _csv(_rows_with_reference())
+    refresh_instruments(
+        store, lambda _url: text, snapshot_date=date(2026, 6, 6), run_id="run-noref"
+    )
+    up = store.upserts[0]
+    persisted = up["instruments"]
+    assert isinstance(persisted, list)
+    assert "TINY CO LTD" not in [i.symbol_name for i in persisted]
+    # No reference set → reference_only_of is None (store uses its VIX default).
+    assert up["reference_only_of"] is None
+    assert up["reference_only_ids"] == frozenset()
