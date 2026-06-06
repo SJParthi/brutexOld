@@ -686,6 +686,9 @@ def pull_all_spot(
     lake_root: Path,
     dry_run: bool,
     now: datetime | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    year: int | None = None,
     adapter_factory: BulkAdapterFactory | None = None,
     on_progress: ProgressHook | None = None,
     coverage: FetchCoverage | None = None,
@@ -731,10 +734,19 @@ def pull_all_spot(
         Per-symbol completed / failed / no-data counts + the aggregate totals.
     """
     instruments = list(instruments)
+    # Range resolution (DEC-DHAN-SPOT-MULTI-SATURATE-001): when NO range is given
+    # (the one-click "Pull ALL" caller) default to the full Track-1 history
+    # ``[2021-01-01, previous day]`` — the prior behaviour, unchanged. When the
+    # caller DOES pass an explicit ``from_date`` / ``to_date`` / ``year`` (the
+    # multi-select "Pull spot" bulk route, which carries the operator's date
+    # picker), honour it verbatim via :func:`resolve_candle_range` so routing the
+    # multi-select through this saturating flatten never silently widens the range.
+    if from_date is None and to_date is None and year is None:
+        from_date = DHAN_HISTORY_FLOOR.isoformat()
     start, end = resolve_candle_range(
-        from_date=DHAN_HISTORY_FLOOR.isoformat(),
-        to_date=None,
-        year=None,
+        from_date=from_date,
+        to_date=to_date,
+        year=year,
         now=now if now is not None else datetime.now(UTC),
     )
     use_live_rate = adapter_factory is None and not dry_run

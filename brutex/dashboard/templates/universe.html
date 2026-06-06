@@ -745,15 +745,28 @@ document.getElementById("pullbtn").onclick = async () => {
   if (spotPullInFlight) return;
   const items = spotSelection();
   if (!items.length) return;
+  /* The from/to date picker scopes every spot pull (blank = full 2021 → prev-day
+     history; clamped + defaulted server-side). */
+  const fromDate = document.getElementById("fromDate").value;
+  const toDate = document.getElementById("toDate").value;
+  let dq = "";
+  if (fromDate) dq += "&from_date=" + encodeURIComponent(fromDate);
+  if (toDate) dq += "&to_date=" + encodeURIComponent(toDate);
+  if (items.length > 1) {
+    /* DEC-DHAN-SPOT-MULTI-SATURATE-001: fan ALL ticked symbols in ONE server-side
+       bulk pass via /universe/pull-all?symbols= — the cross-symbol window flatten
+       keeps the shared 5 r/s controller SATURATED, replacing the old serial
+       per-symbol `await runPull` loop that only kept ~3 r/s in flight. Mirrors the
+       options-multi startAndPoll path; startAndPoll is itself single-flight. */
+    const ids = items.map(it => it.pull_symbol).join(",");
+    startAndPoll("/api/v1/universe/pull-all?symbols=" + encodeURIComponent(ids) + dq,
+      `${items.length} symbols spot`);
+    return;
+  }
+  /* Single highlight: keep the synchronous, live-animated single-symbol pull. */
   spotPullInFlight = true;
   try {
-    for (let k = 0; k < items.length; k++) {
-      const it = items[k];
-      const label = items.length > 1
-        ? `${it.symbol} spot (${k + 1}/${items.length})`
-        : `${it.symbol} spot`;
-      await runPull(it.pull_symbol, label);
-    }
+    await runPull(items[0].pull_symbol, `${items[0].symbol} spot`);
   } finally {
     spotPullInFlight = false;
     updateMultiBtn();
