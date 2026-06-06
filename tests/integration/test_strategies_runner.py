@@ -263,6 +263,23 @@ class TestRunnerHappyPath:
             assert signal.side == Side.BUY
             assert signal.symbol == "NSE-A"
 
+    def test_state_property_exposes_strategy_state(self, tmp_path: Path) -> None:
+        """The ``state`` property surfaces the (post-reset) :class:`StrategyState`."""
+        lake_root, catalog_path = _seed_single_symbol(tmp_path, n_bars=3)
+        with Catalog.open(catalog_path) as cat:
+            feed = ReplayFeed(
+                catalog=cat,
+                lake_root=lake_root,
+                exchange="NSE",
+                segment="FNO",
+                symbols=["NSE-A"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 1, 31, tzinfo=UTC),
+            )
+            runner = StrategyRunner(strategy=_AlwaysBuyStrategy(), feed=feed)
+            assert isinstance(runner.state, StrategyState)
+
     def test_quiet_strategy_emits_nothing(self, tmp_path: Path) -> None:
         lake_root, catalog_path = _seed_single_symbol(tmp_path, n_bars=5)
         with Catalog.open(catalog_path) as cat:

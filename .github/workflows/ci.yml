@@ -1151,6 +1151,27 @@ jobs:
           else
             echo "(brutex.data.option_sink test file not present yet — gate inactive)"
           fi
+          # DEC-COVERAGE-INCREMENTAL-001: four modules taken to 100% line+branch.
+          if compgen -G "tests/unit/test_data_sink.py" > /dev/null; then
+            pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py
+          else
+            echo "(brutex.data.sink test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/integration/test_strategies_runner.py" > /dev/null; then
+            pytest --cov=brutex.strategies.runner --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_strategies_runner.py
+          else
+            echo "(brutex.strategies.runner test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_orchestrator_audit.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit.py
+          else
+            echo "(brutex.orchestrator.audit test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_adaptive_rate_limiter.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.adaptive_rate_limiter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_adaptive_rate_limiter.py
+          else
+            echo "(brutex.orchestrator.adaptive_rate_limiter test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_option_parquet_writer.py" > /dev/null; then
             pytest --cov=brutex.data.option_parquet_writer --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_parquet_writer.py
           else

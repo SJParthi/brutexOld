@@ -503,3 +503,43 @@ class TestDefaultClock:
         limiter.record_rate_limit_hit()
         limiter.record_clean_call()
         limiter.tick()
+
+
+class TestEmitTransitionNoOp:
+    """``_emit_transition`` suppresses a genuine no-op (same state AND same rps)."""
+
+    def test_noop_transition_does_not_fire_callback(self) -> None:
+        fired: list[StateTransition] = []
+        limiter = AdaptiveRateLimiter(
+            config=_config(),
+            clock=_FakeClock(),
+            on_transition=fired.append,
+        )
+        # from_state == current state AND from_rps == to_rps → suppressed no-op.
+        limiter._emit_transition(  # pyright: ignore[reportPrivateUsage]
+            from_state=limiter.state,
+            from_rps=limiter.current_rps,
+            to_rps=limiter.current_rps,
+            timestamp=1000.0,
+            reason="noop",
+        )
+        assert fired == []
+
+    def test_same_state_rps_change_does_fire(self) -> None:
+        # A same-state rps DROP is a real transition and must fire (the branch
+        # the no-op guard must NOT swallow).
+        fired: list[StateTransition] = []
+        limiter = AdaptiveRateLimiter(
+            config=_config(),
+            clock=_FakeClock(),
+            on_transition=fired.append,
+        )
+        limiter._emit_transition(  # pyright: ignore[reportPrivateUsage]
+            from_state=limiter.state,
+            from_rps=limiter.current_rps,
+            to_rps=limiter.current_rps - 1.0,
+            timestamp=1000.0,
+            reason="rps-drop",
+        )
+        assert len(fired) == 1
+        assert fired[0].reason == "rps-drop"
