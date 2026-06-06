@@ -412,3 +412,13 @@ class TestLiveOptionRuntime:
         assert runtime.on_timeout is None
         assert runtime.on_success is None
         assert runtime.run_parallel is None
+
+    def test_dry_run_ignores_session_rate(self) -> None:
+        # DEC-DHAN-OPTION-PERSIST-RATE-001: the new session_rate is accepted and
+        # threaded, but a dry-run pull stays feedback-free (the shared controller
+        # is only resolved on the live branch). So passing a session holder must
+        # NOT change the all-None dry-run runtime.
+        from brutex.dashboard.pull_controller import SessionRateController
+
+        runtime = _live_option_runtime(use_live_rate=False, session_rate=SessionRateController())
+        assert runtime == _LiveOptionRuntime()
