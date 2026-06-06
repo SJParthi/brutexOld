@@ -240,3 +240,18 @@ and anything that activates only on a deployed service.
 both Rust kernels (maturin) → install `[dev,data,ui]` → run every gate that a
 generic Linux container can run, capture the real output, and report it without
 embellishment.*
+
+---
+
+## 8. Reproduce this baseline (one block)
+
+```bash
+make setup                 # 3.12 venv + [dev,data,ui] + both Rust kernels (maturin)
+. .venv/bin/activate
+ruff check brutex && ruff format --check brutex
+mypy --strict brutex && pyright brutex
+bandit -r brutex
+pytest -m "not stress and not network and not slow" --cov=brutex --cov-branch
+pytest tests/bench
+( cd rust/trading-core && cargo test ) && ( cd rust/fno-math && cargo test )
+```
