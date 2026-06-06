@@ -778,8 +778,13 @@ def pull_all_spot(
         # whose bars are already stored are marked complete → skipped (no re-fetch
         # / conflict flood), while windows the lake does not cover stay un-marked →
         # re-pulled (DEC-LAKE-RECONCILE-001). One-time O(datasets) at pull start.
+        # Capture how many windows the lake-reconcile marked complete so the skip
+        # is VISIBLE (DEC-LAKE-RECONCILE-VISIBILITY-001): without this the operator
+        # could not tell an already-stored re-pull was being skipped vs re-fetched
+        # — it stamps ``reconciled_windows`` on ``universe.pull_all.start`` below.
+        reconciled_windows = 0
         if not dry_run and coverage is not None:
-            reconcile_coverage_with_lake(
+            reconciled_windows = reconcile_coverage_with_lake(
                 coverage,
                 lake_root,
                 instruments=instruments,
@@ -803,6 +808,7 @@ def pull_all_spot(
             instruments=len(instruments),
             start_date=start.date().isoformat(),
             dry_run=dry_run,
+            reconciled_windows=reconciled_windows,
         )
         (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
             _live_rate_runtime(use_live_rate, session_rate)
