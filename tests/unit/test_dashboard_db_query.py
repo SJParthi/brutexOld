@@ -27,6 +27,7 @@ from brutex.dashboard.db_view import (
     _daily_open_by_date,
     _format_candle_timestamp,
     _intraday_last_close_by_date,
+    _intraday_open_by_date,
     _ist_date,
     _prev_trading_close,
     _quote_ident,
@@ -1549,6 +1550,67 @@ def test_intraday_last_close_picks_each_days_final_1min_bar(
     assert set(out) == {date(2024, 3, 1), date(2024, 3, 4)}
     assert out[date(2024, 3, 1)] == Decimal("100.0")  # the 15:29 close, not the 09:15 99
     assert out[date(2024, 3, 4)] == Decimal("110.0")
+
+
+# ── _intraday_open_by_date (DEC-PREOPEN-MINUTE-BASIS-001) ────────────
+
+
+def test_intraday_open_missing_partition_is_empty(store: InstrumentStore, tmp_path: Path) -> None:
+    out = _intraday_open_by_date(
+        store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="NSE-NIFTY"
+    )
+    assert out == {}
+
+
+def test_intraday_open_picks_each_days_first_1min_bar(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Two minute bars per day → arg_min(open, timestamp) must pick the EARLIER
+    # bar's open (the 09:15 IST session-open OPEN = the minute-basis IEP).
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        bars=[
+            # 2024-03-01: 09:15 open 98 (the IEP), 15:29 open 104.
+            _ocbar(
+                datetime(2024, 3, 1, 3, 45, tzinfo=UTC),
+                open_="98",
+                high="101",
+                low="98",
+                close="100",
+            ),
+            _ocbar(
+                datetime(2024, 3, 1, 9, 59, tzinfo=UTC),
+                open_="104",
+                high="106",
+                low="103",
+                close="105",
+            ),
+            # 2024-03-04: 09:15 open 112 (the IEP), 15:29 open 111.
+            _ocbar(
+                datetime(2024, 3, 4, 3, 45, tzinfo=UTC),
+                open_="112",
+                high="115",
+                low="110",
+                close="114",
+            ),
+            _ocbar(
+                datetime(2024, 3, 4, 9, 59, tzinfo=UTC),
+                open_="111",
+                high="113",
+                low="109",
+                close="110",
+            ),
+        ],
+    )
+    out = _intraday_open_by_date(
+        store.connection, tmp_path, exchange="NSE", segment="CASH", symbol="NSE-NIFTY"
+    )
+    assert set(out) == {date(2024, 3, 1), date(2024, 3, 4)}
+    assert out[date(2024, 3, 1)] == Decimal("98.0")  # the 09:15 open, not the 15:29 104
+    assert out[date(2024, 3, 4)] == Decimal("112.0")
 
 
 # ── _prev_trading_close ──────────────────────────────────────────────
