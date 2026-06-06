@@ -17,10 +17,12 @@ from brutex.dashboard import nse_constituents as nc
 from brutex.dashboard.nse_constituents import (
     INDEX_CSV_FILENAMES,
     NSE_CONSTITUENTS_BASE_URL,
+    ConstituentRow,
     constituent_url,
     fetch_constituent_symbols,
     intersect_with_universe,
     members_in_universe,
+    parse_constituents,
     parse_symbols,
 )
 
@@ -72,6 +74,46 @@ class TestParseSymbols:
         # A short row (no Symbol value) → DictReader yields None for the key.
         csv_text = "Company Name,Symbol,Series\nReliance\nHDFC,HDFCBANK,EQ\n"
         assert parse_symbols(csv_text) == ["HDFCBANK"]
+
+
+class TestParseConstituents:
+    """DEC-NIFTY-TOTAL-MARKET-MAP-001 — symbol + ISIN parsing."""
+
+    def test_parses_symbol_and_isin(self) -> None:
+        rows = parse_constituents(_FIXTURE_CSV)
+        assert rows[0] == ConstituentRow(symbol="RELIANCE", isin="INE002A01018")
+        assert rows[1] == ConstituentRow(symbol="M&M", isin="INE101A01026")
+        assert [r.symbol for r in rows] == ["RELIANCE", "M&M", "GVT&D", "HDFCBANK"]
+
+    def test_dedup_by_symbol_first_seen_wins(self) -> None:
+        # RELIANCE appears twice in the fixture; first row's ISIN is kept.
+        rows = parse_constituents(_FIXTURE_CSV)
+        reliance = [r for r in rows if r.symbol == "RELIANCE"]
+        assert len(reliance) == 1
+
+    def test_isin_header_variant_plain_isin(self) -> None:
+        csv_text = "Symbol,ISIN\nRELIANCE,INE002A01018\n"
+        assert parse_constituents(csv_text) == [ConstituentRow("RELIANCE", "INE002A01018")]
+
+    def test_missing_isin_column_yields_none(self) -> None:
+        csv_text = "Company Name,Symbol,Series\nReliance,RELIANCE,EQ\n"
+        assert parse_constituents(csv_text) == [ConstituentRow("RELIANCE", None)]
+
+    def test_blank_isin_value_yields_none(self) -> None:
+        csv_text = "Symbol,ISIN Code\nRELIANCE, \n"
+        assert parse_constituents(csv_text) == [ConstituentRow("RELIANCE", None)]
+
+    def test_isin_upcased_and_trimmed(self) -> None:
+        csv_text = "Symbol,ISIN Code\nRELIANCE, ine002a01018 \n"
+        assert parse_constituents(csv_text) == [ConstituentRow("RELIANCE", "INE002A01018")]
+
+    def test_empty_and_no_symbol_column(self) -> None:
+        assert parse_constituents("") == []
+        assert parse_constituents("Company Name,Industry\nFoo,Bar\n") == []
+
+    def test_parse_symbols_delegates_identically(self) -> None:
+        # parse_symbols is now a thin wrapper — must match the symbols exactly.
+        assert parse_symbols(_FIXTURE_CSV) == [r.symbol for r in parse_constituents(_FIXTURE_CSV)]
 
 
 class TestConstituentUrl:
