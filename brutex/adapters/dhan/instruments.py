@@ -518,6 +518,11 @@ class UniverseReport:
     options_count: int  # in-scope rows of an OPT* type
     nse_count: int  # in-scope NSE rows
     bse_count: int  # in-scope BSE rows
+    #: The NSE F&O-eligible underlying TICKERS (FUTSTK/OPTSTK underlyings). Lets a
+    #: caller tell a genuinely-F&O equity from a reference-only constituent that
+    #: merely shares the lake (DEC-OPTIONS-PULL-GUARD-001) — an admitted equity's
+    #: ``symbol_name`` IS its ticker (DEC-DHAN-FNO-JOIN-KEY-001). Defaults empty.
+    fno_eligible_symbols: frozenset[str] = frozenset()
 
 
 #: F&O leg ``INSTRUMENT`` codes whose lot/freeze define the TRADABLE contract
@@ -738,6 +743,7 @@ def select_universe_report(
         options_count=options_count,
         nse_count=nse_count,
         bse_count=bse_count,
+        fno_eligible_symbols=eligible,
     )
 
 

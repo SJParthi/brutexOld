@@ -133,8 +133,15 @@ def refresh_instruments(
     )
 
     def _is_reference(instrument: Instrument) -> bool:
-        # Tag the admitted constituents (by id) AND India VIX (the default rule).
-        return instrument.security_id in reference_security_ids or is_reference_only(instrument)
+        # Tag the admitted constituents (by id) AND India VIX (the default rule)
+        # — BUT a genuinely F&O-eligible stock is NEVER reference_only even when it
+        # is also an NTM constituent (DEC-OPTIONS-PULL-GUARD-001): it is a
+        # first-class F&O underlying that keeps its option chain. Without this, the
+        # ~211 F&O NTM constituents (e.g. RELIANCE) would be wrongly tagged
+        # reference_only and lose option-pull. The index branch (NTM / VIX) is
+        # unaffected — an index symbol is never in the stock F&O-eligible set.
+        is_ref = instrument.security_id in reference_security_ids or is_reference_only(instrument)
+        return is_ref and instrument.symbol_name not in report.fno_eligible_symbols
 
     store.upsert_many(
         report.universe,

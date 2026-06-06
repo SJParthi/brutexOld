@@ -32,6 +32,7 @@ from brutex.universe import (
     is_in_fetch_scope,
     is_in_scope,
     is_index_underlying,
+    is_option_pullable,
     is_reference_only,
     is_universe_underlying,
 )
@@ -762,3 +763,34 @@ class TestDeriveLakeUnderlyings:
 
     def test_empty(self) -> None:
         assert derive_lake_underlyings([]) == []
+
+
+class TestIsOptionPullable:
+    """The option-chain pull guard (DEC-OPTIONS-PULL-GUARD-001)."""
+
+    def test_fno_eligible_stock_is_pullable(self) -> None:
+        rel = _make_equity(Exchange.NSE, "RELIANCE")
+        assert is_option_pullable(rel, reference_only_ids=frozenset()) is True
+
+    def test_reference_only_index_is_not_pullable(self) -> None:
+        # NIFTY Total Market: reference-only + not F&O → blocked.
+        ntm = _make_idx(Exchange.NSE, "NIFTY TOTAL MKT")
+        assert is_option_pullable(ntm, reference_only_ids=frozenset({ntm.security_id})) is False
+
+    def test_reference_only_non_fno_stock_is_not_pullable(self) -> None:
+        acme = _make_equity(Exchange.NSE, "ACME")
+        assert is_option_pullable(acme, reference_only_ids=frozenset({acme.security_id})) is False
+
+    def test_pullable_is_purely_not_reference_only(self) -> None:
+        # The F&O-vs-reference decision is made at TAGGING time
+        # (instrument_refresh._is_reference excludes F&O-eligible stocks), so an id
+        # IN the reference set is not pullable here — a genuinely-F&O stock is never
+        # in that set (it's tagged reference_only=FALSE), so it stays pullable.
+        rel = _make_equity(Exchange.NSE, "RELIANCE")
+        assert is_option_pullable(rel, reference_only_ids=frozenset({rel.security_id})) is False
+        assert is_option_pullable(rel, reference_only_ids=frozenset()) is True
+
+    def test_non_reference_index_stays_pullable(self) -> None:
+        # A curated index (not reference-only) keeps its prior pullable behaviour.
+        nifty = _make_idx(Exchange.NSE, "NIFTY")
+        assert is_option_pullable(nifty, reference_only_ids=frozenset()) is True

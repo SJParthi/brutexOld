@@ -267,6 +267,36 @@ def is_reference_only(instrument: Instrument) -> bool:
     )
 
 
+def is_option_pullable(instrument: Instrument, *, reference_only_ids: frozenset[int]) -> bool:
+    """Return True iff *instrument* has a pullable option chain (DEC-OPTIONS-PULL-GUARD-001).
+
+    The operator rule: an option chain may be pulled ONLY for genuinely
+    F&O-bearing underlyings. It is BLOCKED for a **REFERENCE_ONLY** instrument —
+    NIFTY Total Market (a reference index with no options of its own), its non-F&O
+    constituents, and India VIX — so that accidentally selecting NTM or one of its
+    reference-only stocks can never start an options pull.
+
+    This relies on the lake's ``reference_only`` tag being CORRECT: an F&O-eligible
+    stock is NOT tagged reference_only even when it is also an NTM constituent
+    (``instrument_refresh._is_reference`` excludes the F&O-eligible set,
+    DEC-OPTIONS-PULL-GUARD-001), so such a stock keeps its options. Every persisted
+    non-reference equity is therefore F&O-eligible (the lean store only admits EQ
+    rows that are F&O-eligible OR reference), so ``not reference_only`` is exactly
+    "has an option chain" for stocks; a non-reference index keeps its pre-existing
+    pullable behaviour.
+
+    Parameters
+    ----------
+    instrument
+        The candidate underlying.
+    reference_only_ids
+        The ``SECURITY_ID`` set tagged ``reference_only=TRUE`` in the lake
+        (``store.reference_only_security_ids``) — NTM + its non-F&O constituents
+        + India VIX.
+    """
+    return instrument.security_id not in reference_only_ids
+
+
 def build_fno_eligible_underlyings(
     instruments: Iterable[Instrument],
 ) -> frozenset[tuple[Exchange, str]]:
@@ -513,5 +543,7 @@ __all__ = [
     "is_in_fetch_scope",
     "is_in_scope",
     "is_index_underlying",
+    "is_option_pullable",
+    "is_reference_only",
     "is_universe_underlying",
 ]
