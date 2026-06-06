@@ -47,6 +47,7 @@ import json
 import os
 import urllib.request
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Final
 
 #: Base URL for NSE per-index constituent CSVs. Overridable via the
@@ -146,15 +147,32 @@ def _override_filenames() -> dict[str, str]:
     return out
 
 
-def parse_symbols(csv_text: str) -> list[str]:
-    """Parse the ``Symbol`` column from an NSE constituent CSV.
+@dataclass(frozen=True)
+class ConstituentRow:
+    """One NSE-index constituent: its ticker ``symbol`` + (optional) ``isin``.
+
+    DEC-NIFTY-TOTAL-MARKET-MAP-001. The ISIN is the globally-unique join key
+    used to map a constituent to its Dhan ``SECURITY_ID`` (the ticker alone is
+    ambiguous — for non-F&O Dhan equities the engine ``symbol_name`` is the long
+    company name, NOT the ticker, per DEC-DHAN-FNO-JOIN-KEY-001). ``isin`` is
+    ``None`` only when the source CSV omits/blanks the ISIN column.
+    """
+
+    symbol: str
+    isin: str | None
+
+
+def parse_constituents(csv_text: str) -> list[ConstituentRow]:
+    """Parse the ``Symbol`` + ``ISIN Code`` columns from an NSE constituent CSV.
 
     PURE — no I/O. The NSE constituent CSV columns are
     ``Company Name, Industry, Symbol, Series, ISIN Code``; this reads the
-    ``Symbol`` column, strips whitespace, drops blanks (incl. trailing
-    blank lines), and de-duplicates **preserving first-seen order**.
-    Symbols carrying an ampersand (e.g. ``M&M``, ``GVT&D``) survive
-    intact because the CSV reader handles quoting/commas correctly.
+    ``Symbol`` and ``ISIN Code`` columns, strips whitespace, drops blank-symbol
+    rows, and de-duplicates **by symbol, preserving first-seen order**. Header
+    whitespace/case drift is tolerated (``" Symbol "``, ``"ISIN"`` vs
+    ``"ISIN Code"``). Symbols carrying an ampersand (``M&M``, ``GVT&D``) survive
+    intact (the CSV reader handles quoting). A missing/blank ISIN yields
+    ``isin=None`` (the row is still returned — ticker-fallback may still map it).
 
     Parameters
     ----------
@@ -163,23 +181,27 @@ def parse_symbols(csv_text: str) -> list[str]:
 
     Returns
     -------
-    list[str]
-        Constituent symbols, upper-cased, de-duplicated, order-preserved.
-        ``[]`` if the text is empty or has no ``Symbol`` column.
+    list[ConstituentRow]
+        Constituents (symbol upper-cased + ISIN upper-cased or ``None``),
+        de-duplicated by symbol, order-preserved. ``[]`` if the text is empty
+        or has no ``Symbol`` column.
     """
     reader = csv.DictReader(io.StringIO(csv_text))
     if reader.fieldnames is None:
         return []
-    # Tolerate header whitespace/case drift (e.g. " Symbol ").
+    # Tolerate header whitespace/case drift (e.g. " Symbol ", "ISIN" / "ISIN Code").
     symbol_key: str | None = None
+    isin_key: str | None = None
     for name in reader.fieldnames:
-        if name is not None and name.strip().lower() == "symbol":
+        low = name.strip().lower()
+        if low == "symbol":
             symbol_key = name
-            break
+        elif low in ("isin code", "isin"):
+            isin_key = name
     if symbol_key is None:
         return []
     seen: set[str] = set()
-    symbols: list[str] = []
+    rows: list[ConstituentRow] = []
     for row in reader:
         raw = row.get(symbol_key)
         if raw is None:
@@ -188,8 +210,24 @@ def parse_symbols(csv_text: str) -> list[str]:
         if not sym or sym in seen:
             continue
         seen.add(sym)
-        symbols.append(sym)
-    return symbols
+        isin_val: str | None = None
+        if isin_key is not None:
+            raw_isin = row.get(isin_key)
+            if raw_isin is not None and raw_isin.strip():
+                isin_val = raw_isin.strip().upper()
+        rows.append(ConstituentRow(symbol=sym, isin=isin_val))
+    return rows
+
+
+def parse_symbols(csv_text: str) -> list[str]:
+    """Parse just the ``Symbol`` column from an NSE constituent CSV.
+
+    Thin wrapper over :func:`parse_constituents` (the single source of truth for
+    constituent-CSV parsing — CLAUDE.md §11 COMMON). Returns the symbols only,
+    upper-cased, de-duplicated, order-preserved; ``[]`` for empty / no-``Symbol``
+    input.
+    """
+    return [row.symbol for row in parse_constituents(csv_text)]
 
 
 def constituent_url(index_symbol: str) -> str | None:
@@ -368,9 +406,11 @@ __all__ = [
     "INDEX_CSV_FILENAMES",
     "INDEX_CSV_FILENAMES_OVERRIDE_ENV",
     "NSE_CONSTITUENTS_BASE_URL",
+    "ConstituentRow",
     "constituent_url",
     "fetch_constituent_symbols",
     "intersect_with_universe",
     "members_in_universe",
+    "parse_constituents",
     "parse_symbols",
 ]
