@@ -32,7 +32,7 @@ What this does NOT catch (delegated to full CI):
 
 ## Decision
 
-DEC-PHASE1-SMOKE-001 (MIGRATION entry #251).
+DEC-PHASE1-SMOKE-AND-SKELETONS-001 (MIGRATION entry #251).
 """
 
 from __future__ import annotations
