@@ -95,6 +95,14 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     """An empty (header-only) CSV loads zero instruments → all counts 0."""
     store = _store(tmp_path)
     result = load_instrument_master(store, http_get=lambda _url: _csv([]))
+    # NTM enrichment skips an empty master (no INDEX row) with no network call.
+    assert result.pop("ntm") == {
+        "admitted": False,
+        "error": (
+            "no NSE INDEX row matched /TOTAL\\s*M(?:AR)?K(?:E)?T/i among 0 NSE INDEX "
+            "rows — loosen the pattern or confirm the index is present in the master"
+        ),
+    }
     assert result == {
         "parsed": 0,
         "persisted": 0,
@@ -105,3 +113,75 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
         "stock_count": 0,
         "total": 0,
     }
+
+
+def test_ntm_admitted_with_constituents(tmp_path: Path) -> None:
+    """NTM is auto-admitted on the keyless load (DEC-NIFTY-TOTAL-MARKET-LOAD-001).
+
+    The master carries an NTM ``INDEX`` row (id 46) + two NSE equities whose ISINs
+    appear in the injected constituent CSV. After the load: NTM is a recognised
+    index (index_count 3) and its constituents are admitted as REFERENCE_ONLY
+    stocks — exactly what the operator expects to SEE in /universe + /db.
+    """
+    store = _store(tmp_path)
+    rows = [
+        *_ROWS,
+        "NSE,46,INDEX,NIFTY TOTAL MKT,Nifty Total Market,0,0,,,,,,,,,",
+        "NSE,5001,EQUITY,SMALLCO ONE LTD,SmallCo One,1,0.05,,,,,,EQ,INE111A01011,,",
+        "NSE,5002,EQUITY,SMALLCO TWO LTD,SmallCo Two,1,0.05,,,,,,EQ,INE222A01012,,",
+    ]
+    constituent_csv = (
+        "Company Name,Industry,Symbol,Series,ISIN Code\n"
+        "SmallCo One Ltd.,X,SMALLCO1,EQ,INE111A01011\n"
+        "SmallCo Two Ltd.,Y,SMALLCO2,EQ,INE222A01012\n"
+        # RELIANCE is already F&O-eligible (in _ROWS); include it so the basket
+        # overlaps the existing universe too.
+        "Reliance Industries Ltd.,Energy,RELIANCE,EQ,INE002A01018\n"
+    )
+    result = load_instrument_master(
+        store,
+        http_get=lambda _url: _csv(rows),
+        constituent_opener=lambda _url: constituent_csv,
+    )
+
+    assert result["ntm"]["admitted"] is True
+    assert result["ntm"]["index_security_id"] == 46
+    assert result["ntm"]["index_symbol"] == "NIFTY TOTAL MKT"
+    assert result["ntm"]["constituents"] == 3  # all three ISINs resolved
+    # NTM shows up as a third index (NIFTY + BANKNIFTY + NIFTY TOTAL MKT) …
+    assert result["index_count"] == 3
+    # … and the two non-F&O constituents joined RELIANCE under stocks.
+    assert result["stock_count"] == 3
+
+
+def test_ntm_index_only_when_constituent_fetch_fails(tmp_path: Path) -> None:
+    """A constituent-fetch failure degrades to INDEX-ONLY — NTM still appears,
+    the core load is unbroken, and the reason is surfaced."""
+    store = _store(tmp_path)
+    rows = [*_ROWS, "NSE,46,INDEX,NIFTY TOTAL MKT,Nifty Total Market,0,0,,,,,,,,,"]
+
+    def _boom(_url: str) -> str:
+        raise OSError("nseindia 403 Forbidden")
+
+    result = load_instrument_master(
+        store, http_get=lambda _url: _csv(rows), constituent_opener=_boom
+    )
+    assert result["ntm"]["admitted"] is True
+    assert result["ntm"]["constituents"] == 0
+    assert "constituent resolution failed" in result["ntm"]["constituent_note"]
+    # NTM the index is still admitted (NIFTY + BANKNIFTY + NTM = 3).
+    assert result["index_count"] == 3
+
+
+def test_ntm_index_only_when_constituent_csv_empty(tmp_path: Path) -> None:
+    """An empty constituent body (opener returns "") → INDEX-ONLY admission with
+    the 'no constituent CSV mapping' note; NTM the index still appears."""
+    store = _store(tmp_path)
+    rows = [*_ROWS, "NSE,46,INDEX,NIFTY TOTAL MKT,Nifty Total Market,0,0,,,,,,,,,"]
+    result = load_instrument_master(
+        store, http_get=lambda _url: _csv(rows), constituent_opener=lambda _url: ""
+    )
+    assert result["ntm"]["admitted"] is True
+    assert result["ntm"]["constituents"] == 0
+    assert result["ntm"]["constituent_note"] == "no constituent CSV mapping for NIFTY TOTAL MARKET"
+    assert result["index_count"] == 3

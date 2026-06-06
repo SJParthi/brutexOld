@@ -322,6 +322,27 @@ def fetch_constituent_symbols(
     return parse_symbols(fetch(url))
 
 
+def fetch_constituent_csv(
+    index_symbol: str,
+    *,
+    opener: Callable[[str], str] | None = None,
+) -> str | None:
+    """Resolve *index_symbol* → URL → fetched RAW CSV text (Symbol + ISIN Code).
+
+    The text sibling of :func:`fetch_constituent_symbols`: returns the full CSV
+    body so callers that need the **ISIN** column (e.g. NTM constituent →
+    ``SECURITY_ID`` resolution against the Dhan master, DEC-NIFTY-TOTAL-MARKET-MAP-001)
+    can parse it themselves, not just the symbol list. Returns ``None`` for an
+    unknown index (no URL mapping). Fetch errors from *opener* PROPAGATE (the
+    caller decides whether to degrade). Tests inject a fake *opener* offline.
+    """
+    url = constituent_url(index_symbol)
+    if url is None:
+        return None
+    fetch = opener if opener is not None else _default_opener
+    return fetch(url)
+
+
 def intersect_with_universe(
     constituents: Iterable[str],
     fno_symbols: Iterable[str],
@@ -408,6 +429,7 @@ __all__ = [
     "NSE_CONSTITUENTS_BASE_URL",
     "ConstituentRow",
     "constituent_url",
+    "fetch_constituent_csv",
     "fetch_constituent_symbols",
     "intersect_with_universe",
     "members_in_universe",

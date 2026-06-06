@@ -19,6 +19,7 @@ from brutex.dashboard.nse_constituents import (
     NSE_CONSTITUENTS_BASE_URL,
     ConstituentRow,
     constituent_url,
+    fetch_constituent_csv,
     fetch_constituent_symbols,
     intersect_with_universe,
     members_in_universe,
@@ -192,6 +193,18 @@ class TestFetchConstituentSymbols:
 
         with pytest.raises(OSError, match="network blocked"):
             fetch_constituent_symbols("NIFTY", opener=failing)
+
+    def test_fetch_csv_returns_raw_text(self) -> None:
+        # The text sibling returns the full CSV body (Symbol + ISIN), used by the
+        # NTM constituent → SECURITY_ID resolution (DEC-NIFTY-TOTAL-MARKET-LOAD-001).
+        out = fetch_constituent_csv("NIFTY", opener=lambda _url: _FIXTURE_CSV)
+        assert out == _FIXTURE_CSV
+
+    def test_fetch_csv_unknown_index_returns_none(self) -> None:
+        def boom(url: str) -> str:  # pragma: no cover - must NOT be called
+            raise AssertionError("opener should not be called for unknown index")
+
+        assert fetch_constituent_csv("NIFTY IT", opener=boom) is None
 
 
 class TestMembersInUniverse:
