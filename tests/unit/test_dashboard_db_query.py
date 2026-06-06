@@ -710,13 +710,24 @@ def test_ampersand_symbol_write_read_validators_agree(symbol: str) -> None:
     _validate_candle_coords("NSE", "CASH", symbol, "1day")  # read side: must not raise
 
 
-@pytest.mark.parametrize("bad", ["FOO[BAR]", "FOO{1}", "A B", "x*", "y?z"])
-def test_validate_candle_coords_still_rejects_glob_and_space(bad: str) -> None:
-    # Admitting ``&`` must NOT loosen the glob-injection / whitespace guard:
-    # ``* ? [ ] { }`` and spaces stay illegal so a symbol can never widen the
-    # bound ``read_parquet`` glob.
+@pytest.mark.parametrize("bad", ["FOO[BAR]", "FOO{1}", "x*", "y?z"])
+def test_validate_candle_coords_still_rejects_glob_metachars(bad: str) -> None:
+    # Admitting ``&`` (DEC-PREOPEN-AMPERSAND-001) and a literal space
+    # (DEC-PREOPEN-SPACE-SYMBOL-001) must NOT loosen the glob-injection guard:
+    # the DuckDB-glob metacharacters ``* ? [ ] { }`` stay illegal so a symbol can
+    # never widen the bound ``read_parquet`` glob (``..`` traversal is rejected
+    # separately — see test_query_candles_invalid_coords_raise).
     with pytest.raises(ValueError, match="illegal candle symbol"):
         _validate_candle_coords("NSE", "CASH", bad, "1day")
+
+
+@pytest.mark.parametrize("ok", ["INDIA VIX", "NIFTY 50", "NIFTY TOTAL MKT"])
+def test_validate_candle_coords_accepts_space_symbol(ok: str) -> None:
+    # DEC-PREOPEN-SPACE-SYMBOL-001: real stored INDEX underlyings carry a space.
+    # A space is a bound-parameter literal path component (not a glob metachar,
+    # not a separator), so the read allowlist admits it — the pre-open report no
+    # longer 500s on 'INDIA VIX' / 'NIFTY 50' / 'NIFTY TOTAL MKT'.
+    _validate_candle_coords("NSE", "CASH", ok, "1day")  # must NOT raise
 
 
 @pytest.mark.parametrize("field", ["start", "end"])
