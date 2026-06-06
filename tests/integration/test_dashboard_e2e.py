@@ -119,6 +119,12 @@ class TestHttpRoutes:
         r = client.get("/does-not-exist")
         assert r.status_code == 404
 
+    def test_logs_webpage_removed_is_404(self, client: TestClient) -> None:
+        # The /logs webpage was removed (DEC-DASHBOARD-LOGS-REMOVE-001); the
+        # /api/v1/logs data endpoint is intentionally kept.
+        assert client.get("/logs").status_code == 404
+        assert client.get("/api/v1/logs").status_code == 200
+
 
 # ────────────────────────────────────────────────────────────────────────
 # WebSocket streaming

@@ -5,8 +5,9 @@ The keyboard focus ring (``:focus-visible`` — keyboard-only, never on a mouse
 click) + the ``prefers-reduced-motion`` honouring are additive, opt-in polish
 that cannot change the static mouse layout. #497 shipped them to ``/universe`` +
 ``/coverage``; this pins them on the remaining interactive pages (``/db``,
-``/reports``, ``/credentials``, ``/logs``) so the accessibility cannot silently
-regress. Rendered against the pages' own ``_render_*_html`` helpers, mirroring
+``/reports``, ``/credentials``) so the accessibility cannot silently
+regress. (The ``/logs`` webpage was removed — DEC-DASHBOARD-LOGS-REMOVE-001.)
+Rendered against the pages' own ``_render_*_html`` helpers, mirroring
 ``test_dashboard_universe_ux.py``.
 """
 # pyright: reportPrivateUsage=none
@@ -20,7 +21,6 @@ pytest.importorskip("fastapi", reason="dashboard render helpers need the [ui] ex
 from brutex.dashboard.app import (
     _render_credentials_html,
     _render_db_html,
-    _render_logs_html,
     _render_reports_html,
 )
 
@@ -29,7 +29,6 @@ _RENDERERS = {
     "/db": _render_db_html,
     "/reports": _render_reports_html,
     "/credentials": _render_credentials_html,
-    "/logs": _render_logs_html,
 }
 
 

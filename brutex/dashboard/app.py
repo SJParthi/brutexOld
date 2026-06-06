@@ -1987,11 +1987,6 @@ def build_app(
         """
         return HTMLResponse(_render_db_html(), headers={"Cache-Control": "no-store"})
 
-    @app.get("/logs", response_class=HTMLResponse)
-    async def logs_page() -> str:
-        """GET /logs — live log viewer page (DEC-LOGS-VIEWER-001)."""
-        return _render_logs_html()
-
     @app.get("/universe", response_class=HTMLResponse)
     async def universe_page() -> str:
         """GET /universe — the F&O Universe Explorer page (DEC-UNIVERSE-DASHBOARD-001)."""
@@ -2467,30 +2462,6 @@ def _load_credentials_template() -> str:
 def _render_credentials_html() -> str:
     """Return the Credentials page HTML (DEC-CREDENTIALS-STORE-001)."""
     return _load_credentials_template()
-
-
-_LOGS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "logs.html"
-_LOGS_TEMPLATE_CACHE: str | None = None
-
-
-def _load_logs_template() -> str:
-    """Load + cache the live log-viewer page template.
-
-    Ships as a package-relative resource at
-    ``brutex/dashboard/templates/logs.html`` (DEC-LOGS-VIEWER-001). The
-    template polls ``/api/v1/logs`` every 2 seconds, escapes every
-    interpolated log string before insertion (XSS), colour-codes the level,
-    and auto-scrolls to the newest line. Loaded once, then served verbatim.
-    """
-    global _LOGS_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
-    if _LOGS_TEMPLATE_CACHE is None:
-        _LOGS_TEMPLATE_CACHE = _LOGS_TEMPLATE_PATH.read_text(encoding="utf-8")
-    return _LOGS_TEMPLATE_CACHE
-
-
-def _render_logs_html() -> str:
-    """Return the live log-viewer page HTML (DEC-LOGS-VIEWER-001)."""
-    return _load_logs_template()
 
 
 _DB_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "db.html"
