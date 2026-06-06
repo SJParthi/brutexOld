@@ -6,18 +6,20 @@ locked by DEC-ENGINE-ISOLATION-INVARIANT-001) — alongside its ~755 constituent
 (also REFERENCE_ONLY, resolved by ISIN against the Dhan master).
 
 The two facts BruteX cannot derive — NTM's Dhan ``SECURITY_ID`` + symbol — are
-**VERIFIED from Dhan's own web chart** and cross-checked against the LIVE master
-at runtime, so nothing here is a hallucinated guess (Golden Rule #1):
+**VERIFIED from Dhan's own data** and cross-checked against the LIVE master at
+runtime, so nothing here is a hallucinated guess (Golden Rule #1). The Dhan web
+chart ``web.dhan.co/Charts?exch=IDX&seg=I&secid=46`` ("NIFTY TOTAL MKT · 1 · IDX",
+operator screenshot 2026-06-06) shows the CHART's ``secid=46``; the operator's
+live ``make run`` then resolved the **detailed-master** ``SECURITY_ID = 443`` for
+that same "NIFTY TOTAL MKT" INDEX row (``universe.load.ntm_admitted
+index_security_id=443``, verified 2026-06-06) — and **443 is the id the candle
+API needs**, so it is the cross-check value (DEC-NIFTY-TOTAL-MARKET-ID-RECONCILE-001).
 
-    web.dhan.co/Charts?exch=IDX&seg=I&secid=46  →  "NIFTY TOTAL MKT · 1 · IDX"
-    (operator screenshot, verified 2026-06-06)
-
-→ ``SECURITY_ID = 46``, symbol ``"NIFTY TOTAL MKT"``, segment ``IDX_I`` (the same
-cross-exchange index segment NIFTY/BANKNIFTY use). :func:`resolve_ntm_index`
-locates the matching ``INDEX`` row in the live master by pattern and FAILS LOUD
-if its ``SECURITY_ID`` disagrees with the operator-verified Dhan id — the
-real-time assurance that the master and Dhan's web app still agree before any
-pull trusts the id (DEC-NIFTY-TOTAL-MARKET-DISCOVER-001).
+→ ``SECURITY_ID = 443``, symbol ``"NIFTY TOTAL MKT"``. :func:`resolve_ntm_index`
+locates the matching ``INDEX`` row in the live master by pattern and FAILS LOUD if
+its ``SECURITY_ID`` disagrees with this verified id — the real-time assurance that
+the master still matches what the operator confirmed before any pull trusts the id
+(DEC-NIFTY-TOTAL-MARKET-DISCOVER-001).
 """
 
 from __future__ import annotations
@@ -36,11 +38,15 @@ from brutex.dashboard.nse_constituents import parse_constituents
 from brutex.models import Exchange
 from brutex.universe_constituents import resolve_reference_security_ids
 
-#: NTM's Dhan ``SECURITY_ID`` — VERIFIED 2026-06-06 from the Dhan web chart
-#: ``web.dhan.co/Charts?exch=IDX&seg=I&secid=46`` ("NIFTY TOTAL MKT · 1 · IDX").
-NTM_SECURITY_ID: Final[int] = 46
+#: NTM's Dhan detailed-master ``SECURITY_ID`` — the id the candle API needs.
+#: VERIFIED 2026-06-06 from the operator's live ``make run``
+#: (``universe.load.ntm_admitted index_security_id=443``). NOTE: the Dhan web
+#: CHART URL shows ``secid=46`` (its chart-segment param) — a DIFFERENT value from
+#: the detailed-master ``SECURITY_ID`` (443); 443 is the candle-API id, so it is
+#: the verified cross-check (DEC-NIFTY-TOTAL-MARKET-ID-RECONCILE-001).
+NTM_SECURITY_ID: Final[int] = 443
 
-#: NTM's Dhan display symbol — VERIFIED from the same chart title.
+#: NTM's Dhan display symbol — VERIFIED from the chart title + the live load.
 NTM_SYMBOL: Final[str] = "NIFTY TOTAL MKT"
 
 #: Case-insensitive regex matched against ``INDEX`` rows' ``SYMBOL_NAME`` in the
@@ -94,10 +100,10 @@ def resolve_ntm_index(
     if expected_security_id is not None and found.security_id != expected_security_id:
         raise IndexDiscoveryError(
             f"NTM index discovered as {found.symbol_name!r} id={found.security_id}, "
-            f"but the operator-verified Dhan id is {expected_security_id} "
-            f"(web.dhan.co/Charts?exch=IDX&seg=I&secid={expected_security_id}, "
-            f"2026-06-06) — the live master disagrees with Dhan web; investigate "
-            f"before trusting the pull"
+            f"but the operator-verified Dhan detailed-master SECURITY_ID is "
+            f"{expected_security_id} (verified 2026-06-06 via the live make-run "
+            f"ntm_admitted log) — the live master disagrees with the confirmed id; "
+            f"investigate before trusting the pull"
         )
     return found
 
