@@ -492,6 +492,27 @@ class TestIsUniverseUnderlying:
         eligible = frozenset({(Exchange.NSE, "RELIANCE")})
         assert is_universe_underlying(_make_equity(Exchange.NSE, "SOMEPENNY"), eligible) is False
 
+    def test_reference_security_id_admits_non_fno_equity(self) -> None:
+        # DEC-NIFTY-TOTAL-MARKET-ADMIT-001: a non-F&O NSE equity is admitted
+        # when its SECURITY_ID is in reference_security_ids (matched by id).
+        eligible = frozenset({(Exchange.NSE, "RELIANCE")})
+        penny = _make_equity(Exchange.NSE, "SOMEPENNY")
+        assert is_universe_underlying(penny, eligible) is False
+        assert is_universe_underlying(penny, eligible, frozenset({penny.security_id})) is True
+
+    def test_reference_set_does_not_admit_bse_equity(self) -> None:
+        # Reference admission is NSE-only, same as the F&O equity clause.
+        bse = _make_equity(Exchange.BSE, "SOMEPENNY")
+        assert is_universe_underlying(bse, self._NO_EQUITIES, frozenset({bse.security_id})) is False
+
+    def test_reference_set_does_not_admit_derivative(self) -> None:
+        # A derivative leg is rejected even if its id is in the reference set.
+        deriv = _make_derivative(Exchange.NSE, InstrumentType.FUT, "RELIANCE")
+        assert (
+            is_universe_underlying(deriv, self._NO_EQUITIES, frozenset({deriv.security_id}))
+            is False
+        )
+
     def test_bse_equity_rejected(self) -> None:
         eligible = frozenset({(Exchange.BSE, "RELIANCE")})
         assert is_universe_underlying(_make_equity(Exchange.BSE, "RELIANCE"), eligible) is False
