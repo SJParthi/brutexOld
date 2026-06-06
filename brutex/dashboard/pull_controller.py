@@ -717,6 +717,17 @@ def pull_all_spot(
         Injected "current" instant (defaults to :func:`datetime.now`) — its
         UTC date drives the upper bound (the previous day) of the full
         ``[2021-01-01, previous day]`` window; the current session is excluded.
+    from_date, to_date, year
+        Optional range selectors (DEC-DHAN-SPOT-MULTI-SATURATE-001) threaded to
+        :func:`resolve_candle_range` so the multi-select "Pull spot" bulk route
+        can pull the operator's date-picker window through this saturating
+        cross-symbol flatten. When **all three are ``None``** (the one-click
+        ``?kind=`` "Pull ALL" callers) the full Track-1 history
+        ``[2021-01-01, previous day]`` applies — byte-for-byte the prior
+        behaviour. An explicit ``from_date`` / ``to_date`` (inclusive ISO
+        ``YYYY-MM-DD``, clamped to ``[2021-01-01, today]``) takes precedence over
+        ``year`` (a full calendar year); a malformed date or ``from`` after
+        ``to`` raises :class:`ValueError` (the route maps it to a 400).
     adapter_factory
         Override the bulk ``(adapter, sink)`` builder; defaults to the
         synthetic builder when *dry_run* else the live builder.
