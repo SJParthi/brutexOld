@@ -65,8 +65,10 @@ def test_click_to_copy_cells_wired() -> None:
     html = _render_db_html()
     # Delegated on #data (survives re-render) and skips null cells.
     assert 'dataEl.addEventListener("click"' in html, "the copy-cell listener is missing"
-    assert "ev.target.closest(\"td\")" in html, "the listener does not target a cell"
-    assert 'td.classList.contains("nullcell")' in html, "null cells must be skipped (nothing to copy)"
+    assert 'ev.target.closest("td")' in html, "the listener does not target a cell"
+    assert 'td.classList.contains("nullcell")' in html, (
+        "null cells must be skipped (nothing to copy)"
+    )
     # Feature-detected clipboard write — never throws on insecure/old contexts.
     assert "navigator.clipboard && navigator.clipboard.writeText" in html, (
         "clipboard access must be feature-detected"
