@@ -474,24 +474,18 @@ def summarize_conflicts(conflicts: Sequence[BarConflict]) -> dict[str, object]:
     """
     differing: set[str] = set()
     max_close_delta = Decimal(0)
-    first_ts: datetime | None = None
-    last_ts: datetime | None = None
     for c in conflicts:
         for field_name in _CONFLICT_FIELDS:
             if getattr(c.stored, field_name) != getattr(c.vendor, field_name):
                 differing.add(field_name)
-        delta = abs(c.vendor.close - c.stored.close)
-        max_close_delta = max(max_close_delta, delta)
-        if first_ts is None or c.timestamp < first_ts:
-            first_ts = c.timestamp
-        if last_ts is None or c.timestamp > last_ts:
-            last_ts = c.timestamp
+        max_close_delta = max(max_close_delta, abs(c.vendor.close - c.stored.close))
+    timestamps = [c.timestamp for c in conflicts]
     return {
         "conflicts": len(conflicts),
         "differing_fields": ",".join(sorted(differing)),
         "max_close_delta": str(max_close_delta),
-        "first_ts": first_ts.isoformat() if first_ts is not None else None,
-        "last_ts": last_ts.isoformat() if last_ts is not None else None,
+        "first_ts": min(timestamps).isoformat() if timestamps else None,
+        "last_ts": max(timestamps).isoformat() if timestamps else None,
     }
 
 
