@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from brutex.adapters.dhan.adapter import DhanMarketAdapter
 from brutex.adapters.dhan.client import DhanClient
 from brutex.adapters.dhan.errors import DhanBadRequestError
-from brutex.adapters.dhan.ingest import IngestReport, ingest_spot
+from brutex.adapters.dhan.ingest import IngestReport, ingest_spot, summarize_conflicts
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
 from brutex.data.sink import SinkAppendResult
@@ -919,17 +919,46 @@ class TestPaceRps:
         assert _pace_rps(None) == 5.0
 
 
+class TestSummarizeConflicts:
+    """Direct unit cover for the pure ``summarize_conflicts`` helper
+    (DEC-LAKE-CONFLICT-LOG-AGG-001)."""
+
+    def test_empty_is_zero_and_none(self) -> None:
+        """No conflicts → zero count, empty fields, zero delta, null timestamps."""
+        assert summarize_conflicts([]) == {
+            "conflicts": 0,
+            "differing_fields": "",
+            "max_close_delta": "0",
+            "first_ts": None,
+            "last_ts": None,
+        }
+
+    def test_first_and_last_ts_are_order_independent(self) -> None:
+        """``first_ts`` / ``last_ts`` are the min / max regardless of input order."""
+        early = datetime.fromtimestamp(1609733100, tz=UTC)
+        late = datetime.fromtimestamp(1609740000, tz=UTC)
+        # Feed LATE first, EARLY second — min/max must still bracket correctly.
+        c_late = _make_conflict(ts_epoch=int(late.timestamp()))
+        c_early = _make_conflict(ts_epoch=int(early.timestamp()))
+        summary = summarize_conflicts([c_late, c_early])
+        assert summary["conflicts"] == 2
+        assert summary["first_ts"] == early.isoformat()
+        assert summary["last_ts"] == late.isoformat()
+
+
 class TestIngestSpotConflicts:
-    """Conflict counting + logging path (DEC-LAKE-CONFLICT-KEEPFIRST-001).
+    """Conflict counting + logging path (DEC-LAKE-CONFLICT-KEEPFIRST-001 +
+    DEC-LAKE-CONFLICT-LOG-AGG-001).
 
     When the sink returns BarConflict objects in write_results, ingest_spot MUST:
-    - NOT raise
-    - Emit one ``ingest.conflict`` WARNING per conflict
-    - Aggregate the total count into IngestReport.conflicts
-    - Carry the count through ingest.series
+    - NOT raise (keep-first; the stored bar wins, the pull finishes)
+    - Emit ONE aggregated ``ingest.conflict.summary`` WARNING per window (count +
+      which OHLCV+OI fields actually differ + max close delta) — NOT one WARNING
+      per bar (the prior flood); per-bar detail drops to ``ingest.conflict`` DEBUG
+    - Aggregate the total count into IngestReport.conflicts + ingest.series
     """
 
-    def test_conflict_emits_warning_log_and_counts_in_report(self) -> None:
+    def test_conflict_emits_summary_warning_and_counts_in_report(self) -> None:
         conflict = _make_conflict(stored_close="105.00", vendor_close="104.50")
         sink = _ConflictSink(conflicts=(conflict,), bars_appended=0)
         with capture_logs() as logs, pull_id_scope("conflict001"):
@@ -943,16 +972,62 @@ class TestIngestSpotConflicts:
             )
         # Does NOT raise — the pull finishes.
         assert report.conflicts == 1
-        # One ingest.conflict WARNING emitted.
-        conflict_logs = _events(logs, "ingest.conflict")
-        assert len(conflict_logs) == 1
-        (cl,) = conflict_logs
-        assert cl["log_level"] == "warning"
-        assert cl["pull_id"] == "conflict001"
+        # Per-bar detail is now DEBUG (no WARNING flood), still carrying the closes.
+        (cl,) = _events(logs, "ingest.conflict")
+        assert cl["log_level"] == "debug"
         assert cl["stored_close"] == "105.00"
         assert cl["vendor_close"] == "104.50"
-        assert cl["symbol"] == "NIFTY"
-        assert cl["interval"] == "1day"
+        # ONE aggregated WARNING summary per window — the operator-facing line.
+        (summary,) = _events(logs, "ingest.conflict.summary")
+        assert summary["log_level"] == "warning"
+        assert summary["pull_id"] == "conflict001"
+        assert summary["conflicts"] == 1
+        assert summary["differing_fields"] == "close"
+        assert summary["max_close_delta"] == "0.50"
+        assert summary["symbol"] == "NIFTY"
+        assert summary["interval"] == "1day"
+
+    def test_summary_reports_the_actual_differing_field_not_just_close(self) -> None:
+        """A vendor re-statement of OPEN (close EQUAL) must still be flagged — and
+        the summary must name ``open``, not mislead with an equal-close line
+        (the DEC-LAKE-CONFLICT-LOG-AGG-001 root cause: equal closes logged as a
+        'conflict' because the per-bar log only printed close)."""
+        ts = datetime.fromtimestamp(1609733100, tz=UTC)
+        stored = CandleBar(
+            timestamp=ts,
+            open=Decimal("100.00"),
+            high=Decimal("110.00"),
+            low=Decimal("90.00"),
+            close=Decimal("105.00"),
+            volume=1,
+            open_interest=None,
+        )
+        vendor = CandleBar(
+            timestamp=ts,
+            open=Decimal("100.75"),  # ONLY open differs; close is identical
+            high=Decimal("110.00"),
+            low=Decimal("90.00"),
+            close=Decimal("105.00"),
+            volume=1,
+            open_interest=None,
+        )
+        sink = _ConflictSink(
+            conflicts=(BarConflict(timestamp=ts, stored=stored, vendor=vendor),),
+            bars_appended=0,
+        )
+        with capture_logs() as logs, pull_id_scope("conflict003"):
+            report = ingest_spot(
+                _adapter(),
+                sink,
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+            )
+        assert report.conflicts == 1
+        (summary,) = _events(logs, "ingest.conflict.summary")
+        assert summary["differing_fields"] == "open"
+        assert summary["max_close_delta"] == "0"  # close did NOT move
 
     def test_conflict_count_appears_in_series_log(self) -> None:
         conflict = _make_conflict()
@@ -970,7 +1045,7 @@ class TestIngestSpotConflicts:
         assert series["conflicts"] == 1
 
     def test_no_conflict_emits_no_warning(self) -> None:
-        """A clean window (no conflicts) must emit zero ingest.conflict events."""
+        """A clean window (no conflicts) emits neither the per-bar event nor a summary."""
         sink = _Sink()
         with capture_logs() as logs:
             report = ingest_spot(
@@ -983,19 +1058,27 @@ class TestIngestSpotConflicts:
             )
         assert report.conflicts == 0
         assert _events(logs, "ingest.conflict") == []
+        assert _events(logs, "ingest.conflict.summary") == []
 
     def test_multiple_conflicts_aggregated_across_windows(self) -> None:
-        """Two conflicts per window across three windows → 6 total conflicts."""
+        """Two conflicts per window across three windows → 6 total + ONE summary/window."""
         c1 = _make_conflict(ts_epoch=1609733100, stored_close="105.00", vendor_close="104.00")
         c2 = _make_conflict(ts_epoch=1609733160, stored_close="106.00", vendor_close="105.50")
         sink = _ConflictSink(conflicts=(c1, c2), bars_appended=0)
-        report = ingest_spot(
-            _adapter(),
-            sink,
-            instrument=_INST,
-            interval="1minute",
-            start=date(2021, 1, 1),
-            end=date(2021, 8, 1),  # 3 windows
-        )
+        with capture_logs() as logs:
+            report = ingest_spot(
+                _adapter(),
+                sink,
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),  # 3 windows
+            )
         # 3 windows × 2 conflicts each = 6 total.
         assert report.conflicts == 6
+        # ONE aggregated summary per window (3), each counting its 2 conflicts —
+        # NOT 6 per-bar WARNINGs (the flood this fix removes).
+        summaries = _events(logs, "ingest.conflict.summary")
+        assert len(summaries) == 3
+        assert all(s["conflicts"] == 2 for s in summaries)
+        assert all(s["differing_fields"] == "close" for s in summaries)
