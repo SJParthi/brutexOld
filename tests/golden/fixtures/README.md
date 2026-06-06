@@ -15,16 +15,36 @@ in the calling test so any unintended drift is caught at test time.
 | 3 | SENSEX — circuit-close edge case | forced-exit (P-09) + simulator robustness | Phase 2 |
 | 4 | INDIA VIX — 1 week | reference-only data; no signal bits | Phase 2 |
 | 5 | Cross-instrument resample (1m → 5m) | resample associativity (P-08) | Phase 2 |
-| 7 | 52-condition truth table | per-condition determinism (G9) | Phase 2 |
+| 7 | 52-condition truth table | per-condition determinism (G9) | ✅ **landed** (see below) |
 | 8 | 12-fill paisa accounting | gross/net/Σ PnL (P-03, P-04) | Phase 2 |
 | 9 | combo-hash distinct inputs | hash uniqueness (P-01, P-02) | Phase 2 |
 
+## Landed corpora
+
+### #7 — 52-condition truth table (G9 per-condition determinism)
+
+`../condition_truth_table.csv` (DEC-PHASE2-TRUTH-TABLE-001, MIGRATION entry
+#538). A flat, human-auditable `(snippet_id, condition_name, bit_position,
+expected_bool, description)` table — the readable projection of the frozen
+`vocab_golden_vectors.json` `input → u64` oracle. Every `expected_bool` is
+**decoded from the already-proven `expected_u64`** (Golden Rule #1 — no
+hand-authored values); the bit↔name mapping comes from the single source of
+truth, `brutex/vocabulary/bits.py`.
+
+* Generator: `scripts/gen_condition_truth_table.py` (deterministic; greedy
+  both-ways set-cover of the 52 bits, padded to ≥ 200 rows — currently 1,144).
+* Golden gate: `../test_condition_truth_table.py` — structure + registry
+  agreement + oracle-decode match + G9 both-ways coverage + byte-for-byte
+  no-drift (SHA-256 manifest pinned in the test).
+* Regenerate: `python scripts/gen_condition_truth_table.py` then update the
+  `_EXPECTED_SHA256` manifest in the test.
+
 ## Status
 
-📋 ROADMAP — fixtures land alongside the Phase 2 ingest pipeline.
-Until then this README is a placeholder so the directory exists in git
-and the verification pyramid spec has a real path to point at.
+📋 ROADMAP (remaining corpora #1–5, #8, #9) — these land alongside the Phase 2
+ingest pipeline. Corpus #7 (truth table) is ✅ landed.
 
 ## Decision
 
-DEC-PHASE1-GOLDEN-FIXTURES-DIR-001 (MIGRATION entry #251).
+DEC-PHASE1-GOLDEN-FIXTURES-DIR-001 (MIGRATION entry #251);
+DEC-PHASE2-TRUTH-TABLE-001 (MIGRATION entry #538).
