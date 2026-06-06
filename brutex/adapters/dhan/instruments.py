@@ -41,6 +41,7 @@ demand. This module is pure (no I/O); the CSV download lives in the loader.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
@@ -149,13 +150,26 @@ _ADMITTED_NSE_INDEX_SYMBOLS: Final[frozenset[str]] = frozenset(
 _ADMITTED_BSE_INDEX_SYMBOLS: Final[frozenset[str]] = frozenset({"SENSEX"})
 
 
-def _is_admitted_index(exchange: str, symbol_name: str | None) -> bool:
+def _is_admitted_index(
+    exchange: str,
+    symbol_name: str | None,
+    extra_index_symbols: frozenset[str] = frozenset(),
+) -> bool:
     """Return ``True`` if this ``INDEX`` row is on the curated allow-list.
 
     Indices are NOT exchange-gated like stocks — but only the headline set is
     kept: the 31 NSE Index-tab symbols + BSE SENSEX (DEC-DHAN-INDEX-ALLOWLIST-001/-002).
+
+    ``extra_index_symbols`` (DEC-NIFTY-TOTAL-MARKET-DISCOVER-001): an OPTIONAL set
+    of upper-cased ``SYMBOL_NAME`` tokens to additionally admit as indices —
+    populated at RUNTIME with the exact symbol :func:`discover_index` found in
+    the live master (e.g. NIFTY Total Market). Empty by default → byte-identical
+    to the curated allow-list; never a hardcoded guess. Matched on ANY exchange
+    (the discovered token is already exchange-specific + INDEX-gated upstream).
     """
     symbol = (symbol_name or "").strip().upper()
+    if symbol in extra_index_symbols:
+        return True
     if exchange == Exchange.NSE:
         return symbol in _ADMITTED_NSE_INDEX_SYMBOLS
     if exchange == Exchange.BSE:
@@ -165,6 +179,106 @@ def _is_admitted_index(exchange: str, symbol_name: str | None) -> bool:
 
 class DhanInstrumentError(BruteXError):
     """A scrip-master row/header violates the documented shape."""
+
+
+class IndexDiscoveryError(DhanInstrumentError):
+    """:func:`discover_index` could not resolve the live master to exactly one
+    ``INDEX`` row (zero matches, an ambiguous multi-match, or a matched row that
+    carries no ``SECURITY_ID``). Fail-loud by design — NEVER guess the id
+    (DEC-NIFTY-TOTAL-MARKET-DISCOVER-001, Golden Rule #1 no-hallucination)."""
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredIndex:
+    """One ``INDEX`` row located in the LIVE master by pattern (no hardcoded guess).
+
+    The whole point: the exact Dhan ``SYMBOL_NAME`` + numeric ``SECURITY_ID`` for
+    an index BruteX does not pre-list (e.g. NIFTY Total Market) is read from the
+    operator's real ``api-scrip-master-detailed.csv`` at runtime, not asserted by
+    BruteX. ``symbol_name`` then feeds ``extra_index_symbols`` to admit the row;
+    ``security_id`` is the candle-API key + the id to tag ``reference_only=TRUE``.
+    """
+
+    symbol_name: str
+    security_id: int
+    exchange: Exchange
+
+
+def discover_index(
+    rows: Iterable[Mapping[str, str]],
+    *,
+    pattern: str,
+    exchange: Exchange = Exchange.NSE,
+) -> DiscoveredIndex:
+    """Find the SINGLE ``INDEX`` row whose ``SYMBOL_NAME`` matches *pattern*.
+
+    Reads the LIVE detailed master (the same rows :func:`select_universe` parses)
+    and returns the real ``(symbol_name, security_id)`` for the one matching index
+    — so the operator never has to hand-transcribe the token and BruteX never
+    hardcodes a guess (DEC-NIFTY-TOTAL-MARKET-DISCOVER-001).
+
+    Parameters
+    ----------
+    rows
+        Parsed detailed-CSV rows (mappings of column → cell).
+    pattern
+        A regular expression matched case-insensitively (``re.search``) against
+        each ``INDEX`` row's ``SYMBOL_NAME`` (e.g. ``r"TOTAL\\s*MARKET"`` for NIFTY
+        Total Market). The match is on the *vendor* symbol, so an abbreviated
+        master name still resolves when the pattern is loose enough.
+    exchange
+        The exchange whose ``INDEX`` rows are scanned (default NSE).
+
+    Returns
+    -------
+    DiscoveredIndex
+        The single matching row.
+
+    Raises
+    ------
+    IndexDiscoveryError
+        If ZERO ``INDEX`` rows match (message names the scan size so the operator
+        can loosen the pattern), if MORE THAN ONE matches (message lists every
+        candidate ``symbol_name(id=...)`` so the operator can tighten it), or if
+        the matched row has no ``SECURITY_ID``. Fail-loud — never a guessed id.
+    """
+    regex = re.compile(pattern, re.IGNORECASE)
+    matches: list[DiscoveredIndex] = []
+    index_rows_seen = 0
+    for row in rows:
+        if row.get("INSTRUMENT", "").strip().upper() not in _INDEX_TYPES:
+            continue
+        if row.get("EXCH_ID", "").strip().upper() != exchange:
+            continue
+        index_rows_seen += 1
+        name = (row.get("SYMBOL_NAME") or "").strip()
+        if not name or regex.search(name) is None:
+            continue
+        security_id = _opt_int(row.get("SECURITY_ID"))
+        if security_id is None:
+            raise IndexDiscoveryError(
+                f"{exchange} INDEX row {name!r} matched /{pattern}/i but carries no "
+                f"SECURITY_ID — the master row is unusable; inspect the CSV"
+            )
+        matches.append(
+            DiscoveredIndex(symbol_name=name, security_id=security_id, exchange=Exchange(exchange))
+        )
+    if not matches:
+        raise IndexDiscoveryError(
+            f"no {exchange} INDEX row matched /{pattern}/i among {index_rows_seen} "
+            f"{exchange} INDEX rows — loosen the pattern or confirm the index is "
+            f"present in the master"
+        )
+    if len(matches) > 1:
+        listing = ", ".join(
+            f"{m.symbol_name!r}(id={m.security_id})"
+            for m in sorted(matches, key=lambda m: m.symbol_name)
+        )
+        raise IndexDiscoveryError(
+            f"/{pattern}/i is ambiguous — matched {len(matches)} {exchange} INDEX "
+            f"rows: {listing}; tighten the pattern to select exactly one"
+        )
+    return matches[0]
 
 
 def validate_header(fieldnames: Sequence[str] | None) -> None:
@@ -463,6 +577,7 @@ def select_universe_report(
     rows: Sequence[Mapping[str, str]],
     *,
     reference_security_ids: frozenset[int] = frozenset(),
+    extra_index_symbols: frozenset[str] = frozenset(),
 ) -> UniverseReport:
     """Select the brute-force universe and report the parse accounting.
 
@@ -498,7 +613,17 @@ def select_universe_report(
     so the rows are tagged ``reference_only=TRUE``. The brute-force ENGINE is
     UNAFFECTED — these never become ``IDX`` and are blocked from the swept set
     by ``is_in_brute_force_scope`` (DEC-ENGINE-ISOLATION-INVARIANT-001).
+
+    ``extra_index_symbols`` (DEC-NIFTY-TOTAL-MARKET-DISCOVER-001): an OPTIONAL set
+    of ``SYMBOL_NAME`` tokens to admit as INDEX rows beyond the curated allow-list
+    — populated at runtime with the symbol :func:`discover_index` found in the
+    live master (e.g. NIFTY Total Market). Upper-cased here, then matched by
+    :func:`_is_admitted_index`. Empty default → byte-identical. Such an index is
+    REFERENCE_ONLY (tagged via ``reference_security_ids`` carrying its own id); the
+    brute-force ENGINE is UNAFFECTED — it is an ``IDX`` outside the hardcoded
+    3-index brute set, so ``is_in_brute_force_scope`` never sweeps it.
     """
+    extra_idx = frozenset(sym.strip().upper() for sym in extra_index_symbols if sym.strip())
     eligible = fno_underlying_symbols(rows)
     canonical_ids = fno_underlying_security_ids(rows)
     by_key: dict[tuple[Exchange, str], Instrument] = {}
@@ -536,7 +661,9 @@ def select_universe_report(
         # Stocks: an F&O-eligible **NSE** equity SPOT (BSE single stocks are out of
         # scope), excluding TEST scrips — tickvault's NSE_EQ-only stock universe
         # (DEC-DHAN-UNIVERSE-TICKVAULT-PARITY-001).
-        is_index = itype in _INDEX_TYPES and _is_admitted_index(exch, row.get("SYMBOL_NAME"))
+        is_index = itype in _INDEX_TYPES and _is_admitted_index(
+            exch, row.get("SYMBOL_NAME"), extra_idx
+        )
         is_fno_stock = (
             itype in _EQUITY_TYPES
             and exch == Exchange.NSE
@@ -618,21 +745,53 @@ def select_universe(
     rows: Sequence[Mapping[str, str]],
     *,
     reference_security_ids: frozenset[int] = frozenset(),
+    extra_index_symbols: frozenset[str] = frozenset(),
 ) -> list[Instrument]:
     """Select the universe (index + F&O-stock SPOT + optional REFERENCE_ONLY constituents).
 
     See :func:`select_universe_report`; ``reference_security_ids`` (default
-    empty) admits extra NSE equities by ``SECURITY_ID`` as REFERENCE_ONLY.
+    empty) admits extra NSE equities by ``SECURITY_ID`` as REFERENCE_ONLY, and
+    ``extra_index_symbols`` (default empty) admits extra INDEX rows by
+    ``SYMBOL_NAME`` (the runtime-discovered NIFTY Total Market token).
     """
-    return select_universe_report(rows, reference_security_ids=reference_security_ids).universe
+    return select_universe_report(
+        rows,
+        reference_security_ids=reference_security_ids,
+        extra_index_symbols=extra_index_symbols,
+    ).universe
+
+
+def parse_nse_equities(rows: Iterable[Mapping[str, str]]) -> list[Instrument]:
+    """Parse ONLY the NSE ``EQUITY`` rows of the master into :class:`Instrument`s.
+
+    The subset :func:`brutex.universe_constituents.resolve_constituents` needs to
+    match an index's constituents — including the **non-F&O long-name equities**
+    the lean brute-force universe drops (their ``SYMBOL_NAME`` is the company name,
+    matched by ISIN; DEC-DHAN-FNO-JOIN-KEY-001). Restricting to NSE EQUITY rows
+    avoids parsing the ~89k derivative legs and never trips
+    :func:`_instrument_type` on a non-equity row. Pure; O(n) over the master
+    (DEC-NIFTY-TOTAL-MARKET-DISCOVER-001).
+    """
+    out: list[Instrument] = []
+    for row in rows:
+        if (
+            row.get("INSTRUMENT", "").strip().upper() in _EQUITY_TYPES
+            and row.get("EXCH_ID", "").strip().upper() == Exchange.NSE
+        ):
+            out.append(parse_instrument_row(row))
+    return out
 
 
 __all__ = [
     "DhanInstrumentError",
+    "DiscoveredIndex",
+    "IndexDiscoveryError",
     "UniverseReport",
+    "discover_index",
     "fno_underlying_security_ids",
     "fno_underlying_symbols",
     "parse_instrument_row",
+    "parse_nse_equities",
     "select_universe",
     "select_universe_report",
     "validate_header",
