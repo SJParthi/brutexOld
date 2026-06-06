@@ -35,60 +35,36 @@
     background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
     -webkit-background-clip:text; background-clip:text; color:transparent; }
   .sub { color:var(--muted); font-size:12px; }
+  .topnav { margin-left:18px; display:flex; gap:14px; font-size:13px; align-items:center; }
+  .topnav a { color:var(--blue); text-decoration:none; }
+  .topnav .sep { color:var(--border-strong); }
   .live { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
   .live .dot { width:9px; height:9px; border-radius:50%; background:var(--green);
     box-shadow:0 0 12px var(--green); animation: pulse 1.6s ease-in-out infinite; }
 
-  .band { display:flex; align-items:center; gap:16px; padding:14px 24px; flex-wrap:wrap;
+  .band { display:flex; align-items:center; gap:28px; padding:18px 24px; flex-wrap:wrap;
     border-bottom:1px solid var(--border); animation: fadeInDown .6s .05s ease both; }
   .kpi { display:flex; flex-direction:column; gap:2px; }
-  .kpi .v { font-size:22px; font-weight:800; color:var(--text-bright); }
+  .kpi .v { font-size:24px; font-weight:800; color:var(--text-bright); font-variant-numeric:tabular-nums; }
   .kpi .l { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
   .kpi .v.ok { color:var(--green); }
-  .kpi .v.warn { color:var(--yellow); }
-  .kpi .v.bad { color:var(--red); }
-  button {
-    background:var(--surface); color:var(--text); border:1px solid var(--border-strong);
-    border-radius:9px; padding:9px 14px; font-size:13px; cursor:pointer; transition:.16s;
-  }
-  button:hover { border-color:var(--blue); }
-  button.go { border-color:var(--green); color:var(--green); }
-  button:disabled { opacity:.5; cursor:not-allowed; }
-  #status { margin-left:auto; font-size:12px; color:var(--muted); }
 
-  .panelwrap { flex:1; padding:14px 24px 24px; animation: fadeInUp .5s ease both; min-height:0; display:flex; }
-  /* Every section's panel is a bounded, internally-scrolling box — NOT just the
-     first. Before, only #panel had flex:1+overflow, so #spotpanel + #winpanel
-     grew to their content height and OVERLAPPED the next section (the 3-section
-     overlap bug; DEC-COVERAGE-WINDOWS-LAYOUT-001). All three now share the
-     viewport and scroll internally. */
-  #panel, #spotpanel, #winpanel {
-    flex:1; overflow:auto; background:var(--surface); border:1px solid var(--border);
-    border-radius:14px;
-  }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  thead th { position:sticky; top:0; background:var(--surface-2); color:var(--muted);
-    font-weight:700; text-align:left; padding:10px 14px; z-index:1; font-size:11px;
-    text-transform:uppercase; letter-spacing:.5px; }
-  tbody td { padding:9px 14px; border-top:1px solid var(--border); }
-  tbody tr:hover { background:var(--surface-2); }
-  .sym { font-weight:700; color:var(--text-bright); }
-  .st { font-weight:700; }
-  .st.complete { color:var(--green); }
-  .st.expiries_only { color:var(--blue); }
-  .st.failed { color:var(--red); }
-  .st.pending { color:var(--yellow); }
-  .st.missing { color:var(--muted); }
-  .err { color:var(--red); font-family:"SF Mono",Menlo,Consolas,monospace; font-size:11.5px; }
-  .empty { color:var(--muted); font-size:13px; padding:28px 16px; text-align:center; }
-  .sectitle { display:flex; align-items:baseline; gap:10px; margin:18px 24px 6px; }
-  .sectitle h2 { font-size:14px; font-weight:800; color:var(--text-bright); margin:0;
-    text-transform:uppercase; letter-spacing:.6px; }
-  .sectitle .meta { font-size:12px; color:var(--muted); }
-  .num { font-variant-numeric:tabular-nums; }
+  .cards { flex:1; display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+    gap:18px; padding:26px 24px; animation: fadeInUp .5s ease both; align-content:start; }
+  .card { display:flex; flex-direction:column; gap:10px; text-decoration:none;
+    background:linear-gradient(160deg,var(--surface),var(--surface-2));
+    border:1px solid var(--border-strong); border-radius:16px; padding:22px;
+    transition:transform .18s ease, border-color .18s ease, box-shadow .18s ease; }
+  .card:hover { transform:translateY(-4px); border-color:var(--blue);
+    box-shadow:0 12px 34px rgba(91,141,239,0.18); }
+  .card .ic { font-size:30px; }
+  .card h2 { margin:0; font-size:18px; font-weight:800; color:var(--text-bright); }
+  .card p { margin:0; font-size:13px; color:var(--muted); line-height:1.5; }
+  .card .stat { margin-top:6px; font-size:13px; color:var(--green); font-weight:700;
+    font-variant-numeric:tabular-nums; }
+  .card .arr { margin-top:auto; font-size:13px; color:var(--blue); font-weight:700; }
+
   /* ── Accessibility + motion polish (DEC-DASHBOARD-A11Y-POLISH-001) ── */
-  /* Keyboard focus ring (TAB-only, never on mouse click) + reduce-motion
-     honoured — same safe a11y polish as /universe; zero static-layout change. */
   a:focus-visible, button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
     outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px;
   }
@@ -103,15 +79,15 @@
 <body>
   <header>
     <div class="logo">BruteX</div>
-    <div class="sub">Coverage — expired options + spot · present-in-lake = pulled</div>
-    <nav class="topnav" style="margin-left:18px; display:flex; gap:14px; font-size:13px;">
-      <a href="/credentials" style="color:var(--blue); text-decoration:none;">Credentials</a>
-      <span style="color:var(--muted);">·</span>
-      <a href="/db" style="color:var(--blue); text-decoration:none;">Database</a>
-      <span style="color:var(--muted);">·</span>
-      <a href="/coverage" style="color:var(--blue); text-decoration:none;">Coverage</a>
-      <span style="color:var(--border-strong);">·</span>
-      <a href="/reports" style="color:var(--blue); text-decoration:none;">Reports</a>
+    <div class="sub">Coverage — pick a lake surface · present-in-lake = pulled</div>
+    <nav class="topnav">
+      <a href="/credentials">Credentials</a>
+      <span class="sep">·</span>
+      <a href="/db">Database</a>
+      <span class="sep">·</span>
+      <a href="/coverage">Coverage</a>
+      <span class="sep">·</span>
+      <a href="/reports">Reports</a>
     </nav>
     <div class="live" id="live"><span class="dot"></span><span id="livetxt">polling</span></div>
   </header>
@@ -119,212 +95,89 @@
   <div class="band">
     <div class="kpi"><span class="v ok" id="ul">—</span><span class="l">underlyings pulled</span></div>
     <div class="kpi"><span class="v" id="ser">—</span><span class="l">expired-option series</span></div>
-    <div class="kpi"><span class="v" id="barz">—</span><span class="l">option bars</span></div>
-    <span id="status"></span>
+    <div class="kpi"><span class="v" id="spotds">—</span><span class="l">spot datasets</span></div>
+    <div class="kpi"><span class="v" id="winc">—</span><span class="l">fetch windows</span></div>
   </div>
 
-  <div class="sectitle">
-    <h2>Expired options</h2>
-    <span class="meta">per underlying · present-in-lake = pulled (date-range completeness not asserted)</span>
-  </div>
-  <div class="panelwrap">
-    <div id="panel"><div class="empty">loading…</div></div>
-  </div>
-
-  <div class="sectitle">
-    <h2>Spot coverage</h2>
-    <span class="meta" id="spotmeta">— datasets · — bars · present-in-lake = pulled (date-range completeness not asserted)</span>
-  </div>
-  <div class="panelwrap">
-    <div id="spotpanel"><div class="empty">loading…</div></div>
-  </div>
-
-  <div class="sectitle">
-    <h2>Fetch windows</h2>
-    <span class="meta" id="winmeta">— windows · per-window SUCCESS / EMPTY / FAILED (DEC-WINDOW-STATUS-001)</span>
-  </div>
-  <div class="panelwrap">
-    <div id="winpanel"><div class="empty">loading…</div></div>
+  <!-- The combined ledger was split into three focused pages
+       (DEC-DASHBOARD-COVERAGE-SPLIT-001): this hub links to each and shows the
+       at-a-glance headline counts pulled from the same three coverage APIs. -->
+  <div class="cards">
+    <a class="card" href="/coverage/options">
+      <div class="ic">⛓️</div>
+      <h2>Expired options</h2>
+      <p>Per-underlying expired-option series + bars in the lake, with first/last date span.</p>
+      <span class="stat" id="c_opt">—</span>
+      <span class="arr">Open expired options →</span>
+    </a>
+    <a class="card" href="/coverage/spot">
+      <div class="ic">📈</div>
+      <h2>Spot coverage</h2>
+      <p>One aggregate row per spot dataset — exchange · segment · symbol · interval — with bars + date span.</p>
+      <span class="stat" id="c_spot">—</span>
+      <span class="arr">Open spot coverage →</span>
+    </a>
+    <a class="card" href="/coverage/windows">
+      <div class="ic">🪟</div>
+      <h2>Fetch windows</h2>
+      <p>Per-window SUCCESS / EMPTY / FAILED status with attempts + last error, so failed windows are visible for re-pull.</p>
+      <span class="stat" id="c_win">—</span>
+      <span class="arr">Open fetch windows →</span>
+    </a>
   </div>
 
 <script>
-/* ── BruteX coverage viewer (DEC-OPTIONS-COVERAGE-LAKE-001) ──
-   Both sections read straight from the lake: the EXPIRED OPTIONS section
-   polls /api/v1/coverage/options (per-underlying series + bars, present-in-lake
-   = pulled — replaces the dead legacy expiries/contracts ledger the new
-   single-table pull never wrote), and SPOT polls /api/v1/coverage/spot. Every
-   interpolated string is escaped before innerHTML (XSS — same lesson as logs). */
-const panel = document.getElementById("panel");
-const spotPanel = document.getElementById("spotpanel");
-const spotMeta = document.getElementById("spotmeta");
-const winPanel = document.getElementById("winpanel");
-const winMeta = document.getElementById("winmeta");
+/* ── BruteX coverage hub ──
+   The hub is read-only: it polls the same three coverage APIs the focused
+   sub-pages use (/api/v1/coverage/options, /spot, /windows) only for the
+   headline counts shown on each card + the KPI band. All detail tables live
+   on the dedicated pages (DEC-DASHBOARD-COVERAGE-SPLIT-001). */
 const ulEl = document.getElementById("ul");
 const serEl = document.getElementById("ser");
-const barzEl = document.getElementById("barz");
+const spotdsEl = document.getElementById("spotds");
+const wincEl = document.getElementById("winc");
+const cOpt = document.getElementById("c_opt");
+const cSpot = document.getElementById("c_spot");
+const cWin = document.getElementById("c_win");
 const liveTxt = document.getElementById("livetxt");
-
-function esc(s) {
-  return String(s == null ? "" : s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
 
 function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
 
-/* One row per underlying that has expired-option bars in the lake. A series
-   PRESENT in the lake counts as pulled; the date span is shown but NOT asserted
-   complete (mirrors the Spot section). */
-function renderRows(rows) {
-  if (!rows.length) {
-    panel.innerHTML = '<div class="empty">no expired-option data in the lake yet — add credentials, then pull an instrument\'s options chain on /universe</div>';
-    return;
-  }
-  const body = rows.map(r =>
-    "<tr>"
-    + '<td><span class="sym">' + esc(r.underlying) + "</span></td>"
-    + "<td>" + esc(r.exchange) + "</td>"
-    + '<td class="num">' + esc(num(r.series)) + "</td>"
-    + '<td class="num">' + esc(num(r.bars)) + "</td>"
-    + "<td>" + esc(r.first_date || "") + "</td>"
-    + "<td>" + esc(r.last_date || "") + "</td>"
-    + "</tr>"
-  ).join("");
-  panel.innerHTML =
-    "<table><thead><tr>"
-    + "<th>Underlying</th><th>Exchange</th><th>Series</th><th>Bars</th>"
-    + "<th>First date</th><th>Last date</th>"
-    + "</tr></thead><tbody>" + body + "</tbody></table>";
-}
-
-/* ── SPOT coverage (DEC-COVERAGE-SPOT-001) ──
-   Read-only: one aggregate row per spot dataset (exchange · segment · symbol ·
-   interval) with its bar count + first/last date, read from the candle lake.
-   A dataset present in the lake counts as "pulled"; the date range is shown
-   but NOT asserted complete (partial-range detection is a follow-up). */
-function renderSpot(rows) {
-  if (!rows.length) {
-    spotPanel.innerHTML = '<div class="empty">no spot datasets in the lake yet — pull a spot symbol (e.g. NIFTY 1minute) from the Database page</div>';
-    return;
-  }
-  const body = rows.map(r =>
-    "<tr>"
-    + '<td><span class="sym">' + esc(r.symbol) + "</span></td>"
-    + "<td>" + esc(r.exchange) + "</td>"
-    + "<td>" + esc(r.segment) + "</td>"
-    + "<td>" + esc(r.interval) + "</td>"
-    + '<td class="num">' + esc(r.bars) + "</td>"
-    + "<td>" + esc(r.first_date || "") + "</td>"
-    + "<td>" + esc(r.last_date || "") + "</td>"
-    + "</tr>"
-  ).join("");
-  spotPanel.innerHTML =
-    "<table><thead><tr>"
-    + "<th>Symbol</th><th>Exchange</th><th>Segment</th><th>Interval</th>"
-    + "<th>Bars</th><th>First date</th><th>Last date</th>"
-    + "</tr></thead><tbody>" + body + "</tbody></table>";
-}
-
-async function pollSpot() {
-  try {
-    const r = await fetch("/api/v1/coverage/spot");
-    if (!r.ok) { spotMeta.textContent = "error " + r.status; return; }
-    const body = await r.json();
-    const h = body.headline || {};
-    spotMeta.textContent = (h.datasets ?? "—") + " datasets · " + (h.total_bars ?? "—")
-      + " bars · present-in-lake = pulled (date-range completeness not asserted)";
-    renderSpot(body.rows || []);
-  } catch (e) {
-    spotMeta.textContent = "offline";
-  }
-}
-
 async function poll() {
+  let ok = 0;
   try {
     const r = await fetch("/api/v1/coverage/options");
-    if (!r.ok) { liveTxt.textContent = "error " + r.status; return; }
-    const body = await r.json();
-    const h = body.headline || {};
-    ulEl.textContent = h.underlyings ?? "—";
-    serEl.textContent = num(h.series);
-    barzEl.textContent = num(h.total_bars);
-    renderRows(body.rows || []);
-    // The badge says "pulling" ONLY when a pull job is ACTUALLY running — never
-    // merely because the lake is still filling (which would read "pulling"
-    // forever after a finished run — the operator's perpetual-loading symptom).
-    // DEC-OPTION-SECURITY-ID-FIX-001.
-    let running = false;
-    try {
-      const pr = await fetch('/api/v1/universe/pull-progress');
-      if (pr.ok) running = ((await pr.json()).state || "") === "running";
-    } catch (e) { running = false; }
-    liveTxt.textContent = running
-      ? "pulling · " + num(h.series) + " series · " + num(h.total_bars) + " bars"
-      : "live · " + (body.rows || []).length + " underlyings";
-  } catch (e) {
-    liveTxt.textContent = "offline";
-  }
-}
-
-/* ── FETCH WINDOWS (DEC-WINDOW-STATUS-001) ──
-   Read-only: one row per fetch window the ingest recorded in the durable
-   <lake>/window_status.json sidecar — so the operator SEES exactly which
-   windows are stored (SUCCESS), genuinely empty (EMPTY), or failed and needing
-   a re-pull (FAILED), with the attempt count + last error. Same escape-before-
-   innerHTML discipline as the sections above. */
-function winStatus(s) {
-  const v = String(s == null ? "" : s).toUpperCase();
-  const color = v === "SUCCESS" ? "#34d399" : v === "FAILED" ? "#f87171" : "#9aa4b2";
-  return '<span style="color:' + color + ';font-weight:700;">' + esc(v || "—") + "</span>";
-}
-
-function renderWindows(rows) {
-  if (!rows.length) {
-    winPanel.innerHTML = '<div class="empty">no fetch windows recorded yet — pull a symbol on /universe; each fetch window then logs SUCCESS / EMPTY / FAILED here (DEC-WINDOW-STATUS-001)</div>';
-    return;
-  }
-  const body = rows.map(r =>
-    "<tr>"
-    + '<td><span class="sym">' + esc(r.symbol) + "</span></td>"
-    + "<td>" + esc(r.market) + "</td>"
-    + "<td>" + esc(r.interval) + "</td>"
-    + "<td>" + esc(r.window_start || "") + "</td>"
-    + "<td>" + esc(r.window_end || "") + "</td>"
-    + "<td>" + winStatus(r.status) + "</td>"
-    + '<td class="num">' + esc(num(r.bars)) + "</td>"
-    + '<td class="num">' + esc(num(r.attempts)) + "</td>"
-    + "<td>" + esc(r.last_error || "") + "</td>"
-    + "</tr>"
-  ).join("");
-  winPanel.innerHTML =
-    "<table><thead><tr>"
-    + "<th>Symbol</th><th>Market</th><th>Interval</th><th>Window start</th><th>Window end</th>"
-    + "<th>Status</th><th>Bars</th><th>Attempts</th><th>Last error</th>"
-    + "</tr></thead><tbody>" + body + "</tbody></table>";
-}
-
-async function pollWindows() {
+    if (r.ok) {
+      const h = (await r.json()).headline || {};
+      ulEl.textContent = h.underlyings ?? "—";
+      serEl.textContent = num(h.series);
+      cOpt.textContent = num(h.underlyings) + " underlyings · " + num(h.total_bars) + " bars";
+      ok++;
+    }
+  } catch (e) { cOpt.textContent = "offline"; }
+  try {
+    const r = await fetch("/api/v1/coverage/spot");
+    if (r.ok) {
+      const h = (await r.json()).headline || {};
+      spotdsEl.textContent = num(h.datasets);
+      cSpot.textContent = num(h.datasets) + " datasets · " + num(h.total_bars) + " bars";
+      ok++;
+    }
+  } catch (e) { cSpot.textContent = "offline"; }
   try {
     const r = await fetch("/api/v1/coverage/windows");
-    if (!r.ok) { winMeta.textContent = "error " + r.status; return; }
-    const body = await r.json();
-    winMeta.textContent = (body.count ?? "—")
-      + " windows · per-window SUCCESS / EMPTY / FAILED (DEC-WINDOW-STATUS-001)";
-    renderWindows(body.windows || []);
-  } catch (e) {
-    winMeta.textContent = "offline";
-  }
+    if (r.ok) {
+      const b = await r.json();
+      wincEl.textContent = num(b.count);
+      cWin.textContent = num(b.count) + " windows recorded";
+      ok++;
+    }
+  } catch (e) { cWin.textContent = "offline"; }
+  liveTxt.textContent = ok === 3 ? "live · 3 surfaces" : "partial · " + ok + "/3";
 }
 
 poll();
-pollSpot();
-pollWindows();
 setInterval(poll, 4000);
-setInterval(pollSpot, 4000);
-setInterval(pollWindows, 4000);
 </script>
 </body>
 </html>

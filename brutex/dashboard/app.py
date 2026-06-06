@@ -1522,8 +1522,30 @@ def build_app(
 
     @app.get("/coverage", response_class=HTMLResponse)
     async def coverage_page() -> str:
-        """GET /coverage — the completeness-ledger page (DEC-COVERAGE-LEDGER-001)."""
+        """GET /coverage — the coverage hub (DEC-DASHBOARD-COVERAGE-SPLIT-001).
+
+        The former combined three-section ledger was split into three focused
+        pages; this hub links to each + shows the at-a-glance headline counts.
+        """
         return _render_coverage_html()
+
+    @app.get("/coverage/options", response_class=HTMLResponse)
+    async def coverage_options_page() -> str:
+        """GET /coverage/options — the focused expired-options coverage page
+        (DEC-DASHBOARD-COVERAGE-SPLIT-001 / DEC-OPTIONS-COVERAGE-LAKE-001)."""
+        return _render_expired_options_html()
+
+    @app.get("/coverage/spot", response_class=HTMLResponse)
+    async def coverage_spot_page() -> str:
+        """GET /coverage/spot — the focused spot-coverage page
+        (DEC-DASHBOARD-COVERAGE-SPLIT-001 / DEC-COVERAGE-SPOT-001)."""
+        return _render_spot_coverage_html()
+
+    @app.get("/coverage/windows", response_class=HTMLResponse)
+    async def coverage_windows_page() -> str:
+        """GET /coverage/windows — the focused fetch-windows page
+        (DEC-DASHBOARD-COVERAGE-SPLIT-001 / DEC-WINDOW-STATUS-001)."""
+        return _render_fetch_windows_html()
 
     # ── Pre-open report (DEC-PREOPEN-REPORT-001) ────────────────────────
 
@@ -2404,8 +2426,77 @@ def _load_coverage_template() -> str:
 
 
 def _render_coverage_html() -> str:
-    """Return the completeness-ledger page HTML (DEC-COVERAGE-LEDGER-001)."""
+    """Return the coverage hub HTML (DEC-DASHBOARD-COVERAGE-SPLIT-001)."""
     return _load_coverage_template()
+
+
+_EXPIRED_OPTIONS_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent / "templates" / "expired_options.html"
+)
+_EXPIRED_OPTIONS_TEMPLATE_CACHE: str | None = None
+
+
+def _load_expired_options_template() -> str:
+    """Load + cache the focused expired-options coverage page template.
+
+    Ships as ``brutex/dashboard/templates/expired_options.html``. The page polls
+    ``/api/v1/coverage/options`` (DEC-DASHBOARD-COVERAGE-SPLIT-001). Loaded once,
+    then served verbatim.
+    """
+    global _EXPIRED_OPTIONS_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _EXPIRED_OPTIONS_TEMPLATE_CACHE is None:
+        _EXPIRED_OPTIONS_TEMPLATE_CACHE = _EXPIRED_OPTIONS_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _EXPIRED_OPTIONS_TEMPLATE_CACHE
+
+
+def _render_expired_options_html() -> str:
+    """Return the focused expired-options coverage page HTML
+    (DEC-DASHBOARD-COVERAGE-SPLIT-001)."""
+    return _load_expired_options_template()
+
+
+_SPOT_COVERAGE_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "spot_coverage.html"
+_SPOT_COVERAGE_TEMPLATE_CACHE: str | None = None
+
+
+def _load_spot_coverage_template() -> str:
+    """Load + cache the focused spot-coverage page template.
+
+    Ships as ``brutex/dashboard/templates/spot_coverage.html``. The page polls
+    ``/api/v1/coverage/spot`` (DEC-DASHBOARD-COVERAGE-SPLIT-001). Loaded once,
+    then served verbatim.
+    """
+    global _SPOT_COVERAGE_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _SPOT_COVERAGE_TEMPLATE_CACHE is None:
+        _SPOT_COVERAGE_TEMPLATE_CACHE = _SPOT_COVERAGE_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _SPOT_COVERAGE_TEMPLATE_CACHE
+
+
+def _render_spot_coverage_html() -> str:
+    """Return the focused spot-coverage page HTML (DEC-DASHBOARD-COVERAGE-SPLIT-001)."""
+    return _load_spot_coverage_template()
+
+
+_FETCH_WINDOWS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "fetch_windows.html"
+_FETCH_WINDOWS_TEMPLATE_CACHE: str | None = None
+
+
+def _load_fetch_windows_template() -> str:
+    """Load + cache the focused fetch-windows page template.
+
+    Ships as ``brutex/dashboard/templates/fetch_windows.html``. The page polls
+    ``/api/v1/coverage/windows`` (DEC-DASHBOARD-COVERAGE-SPLIT-001). Loaded once,
+    then served verbatim.
+    """
+    global _FETCH_WINDOWS_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _FETCH_WINDOWS_TEMPLATE_CACHE is None:
+        _FETCH_WINDOWS_TEMPLATE_CACHE = _FETCH_WINDOWS_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return _FETCH_WINDOWS_TEMPLATE_CACHE
+
+
+def _render_fetch_windows_html() -> str:
+    """Return the focused fetch-windows page HTML (DEC-DASHBOARD-COVERAGE-SPLIT-001)."""
+    return _load_fetch_windows_template()
 
 
 _REPORTS_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "reports.html"

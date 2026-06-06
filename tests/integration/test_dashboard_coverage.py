@@ -25,6 +25,9 @@ from brutex.dashboard.app import (
     DashboardState,
     _coverage_years,
     _render_coverage_html,
+    _render_expired_options_html,
+    _render_fetch_windows_html,
+    _render_spot_coverage_html,
     build_app,
 )
 from brutex.data.coverage_ledger import CoverageRecord, classify_cell
@@ -120,24 +123,44 @@ class TestCoverageApi:
         resp = client.get("/api/v1/coverage")
         assert resp.status_code == 503
 
-    def test_coverage_page_renders_html(self, store: InstrumentStore) -> None:
+    def test_coverage_page_renders_hub(self, store: InstrumentStore) -> None:
+        # The /coverage page is now a HUB (DEC-DASHBOARD-COVERAGE-SPLIT-001): it
+        # links to the three focused sub-pages + shows headline counts. The detail
+        # tables moved to /coverage/options, /coverage/spot, /coverage/windows.
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         resp = client.get("/coverage")
         assert resp.status_code == 200
         assert "Coverage" in resp.text
         assert 'href="/coverage"' in resp.text
-        # The per-window status table is wired into the page (DEC-WINDOW-STATUS-001
-        # surfaced via DEC-COVERAGE-WINDOWS-UI-001): the section + its poll of
-        # /api/v1/coverage/windows must be present so the operator SEES which fetch
-        # windows are SUCCESS / EMPTY / FAILED without hitting the raw API.
-        assert "Fetch windows" in resp.text
-        assert "/api/v1/coverage/windows" in resp.text
-        # Regression guard for the 3-section overlap (DEC-COVERAGE-WINDOWS-LAYOUT-001):
-        # ALL three panels — not just the first #panel — must carry the bounded
-        # internal-scroll rule, else #spotpanel/#winpanel grow to content height and
-        # overlap the next section. Without the fix the served CSS has "#panel {"
-        # alone and this assertion fails.
-        assert "#panel, #spotpanel, #winpanel" in resp.text
+        # The hub links to each focused sub-page.
+        assert 'href="/coverage/options"' in resp.text
+        assert 'href="/coverage/spot"' in resp.text
+        assert 'href="/coverage/windows"' in resp.text
+
+    def test_coverage_subpages_render_html(self, store: InstrumentStore) -> None:
+        # Each focused sub-page (DEC-DASHBOARD-COVERAGE-SPLIT-001) renders 200 + a
+        # cross-link sub-nav + polls its own coverage API.
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+
+        opt = client.get("/coverage/options")
+        assert opt.status_code == 200
+        assert "Expired options" in opt.text
+        assert "/api/v1/coverage/options" in opt.text
+        assert 'href="/coverage/spot"' in opt.text
+
+        spot = client.get("/coverage/spot")
+        assert spot.status_code == 200
+        assert "Spot coverage" in spot.text
+        assert "/api/v1/coverage/spot" in spot.text
+        assert 'href="/coverage/windows"' in spot.text
+
+        win = client.get("/coverage/windows")
+        assert win.status_code == 200
+        # The per-window status page (DEC-WINDOW-STATUS-001): the operator SEES
+        # which fetch windows are SUCCESS / EMPTY / FAILED without the raw API.
+        assert "Fetch windows" in win.text
+        assert "/api/v1/coverage/windows" in win.text
+        assert 'href="/coverage/options"' in win.text
 
 
 def _bar(ts: datetime, close: str) -> CandleBar:
@@ -271,14 +294,34 @@ class TestCoverageHelpers:
         assert years[-1] == datetime.now(UTC).year
         assert years == list(range(2021, datetime.now(UTC).year + 1))
 
-    def test_render_coverage_html_has_nav_and_table(self) -> None:
+    def test_render_coverage_hub_links_subpages(self) -> None:
+        # The hub (DEC-DASHBOARD-COVERAGE-SPLIT-001) links to each focused page.
         html = _render_coverage_html()
         assert "/coverage" in html
-        assert "Underlying" in html
+        for href in (
+            'href="/coverage/options"',
+            'href="/coverage/spot"',
+            'href="/coverage/windows"',
+        ):
+            assert href in html, f"hub missing sub-page link {href}"
 
-    def test_coverage_has_accessibility_polish(self) -> None:
+    def test_subpages_render_their_detail_table(self) -> None:
+        # The detail tables live on the focused pages now, not the hub.
+        assert "Underlying" in _render_expired_options_html()
+        assert "Segment" in _render_spot_coverage_html()
+        assert "Last error" in _render_fetch_windows_html()
+
+    def test_coverage_pages_have_accessibility_polish(self) -> None:
         # Keyboard focus rings + reduce-motion honoured, same safe a11y polish as
         # /universe (DEC-DASHBOARD-A11Y-POLISH-001) — additive, no layout change.
-        html = _render_coverage_html()
-        assert ":focus-visible" in html
-        assert "prefers-reduced-motion" in html
+        # Pinned across the hub + all three focused sub-pages.
+        for render in (
+            _render_coverage_html,
+            _render_expired_options_html,
+            _render_spot_coverage_html,
+            _render_fetch_windows_html,
+        ):
+            html = render()
+            assert ":focus-visible" in html
+            assert "prefers-reduced-motion" in html
+            assert "outline: 2px solid var(--blue)" in html
