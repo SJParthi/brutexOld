@@ -74,6 +74,16 @@
       transition-duration: .001ms !important; scroll-behavior: auto !important;
     }
   }
+  /* ── DASH-UX D5: mobile responsiveness (DEC-DASHBOARD-MOBILE-UX-001) ── */
+  /* Stack the coverage cards to one column + let the header/KPI band wrap so the
+     page fits a phone. Additive — desktop layout (≥681px) is byte-identical. */
+  @media (max-width: 680px) {
+    header { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
+    .live { margin-left: 0; }
+    .band { gap: 14px; padding: 14px; }
+    .kpi .v { font-size: 20px; }
+    .cards { grid-template-columns: 1fr; padding: 16px 14px; gap: 14px; }
+  }
 </style>
 </head>
 <body>

@@ -161,6 +161,19 @@
       transition-duration: .001ms !important; scroll-behavior: auto !important;
     }
   }
+  /* ── DASH-UX D5: mobile responsiveness (DEC-DASHBOARD-MOBILE-UX-001) ── */
+  /* On phones the fixed 280px sidebar grid + dense controls overflow; stack to
+     one column, let the table list cap its height, and tighten padding. Additive
+     — desktop layout (≥681px) is byte-identical. */
+  @media (max-width: 680px) {
+    header { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
+    header .dbpath { margin-left: 0; }
+    .band { padding: 10px 14px; }
+    .wrap { grid-template-columns: 1fr; padding: 12px 14px 18px; }
+    #tables { max-height: 38vh; }
+    .qrow { flex-direction: column; align-items: stretch; }
+    th, td { padding: 6px 8px; }
+  }
 </style>
 </head>
 <body>
