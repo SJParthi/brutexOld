@@ -109,6 +109,27 @@ class TestLoadUniverse:
         symbols = sorted(i.symbol_name for i in universe)
         assert symbols == ["NIFTY", "RELIANCE", "SENSEX"]
 
+    def test_reference_security_ids_admits_constituent(self) -> None:
+        # DEC-NIFTY-TOTAL-MARKET-WIRE-001: the loader threads the reference id
+        # set into selection → the non-F&O TINY CO LTD (9999) is admitted.
+        text = _csv(_universe_rows())
+        universe = load_universe(lambda _url: text, reference_security_ids=frozenset({9999}))
+        assert sorted(i.symbol_name for i in universe) == [
+            "NIFTY",
+            "RELIANCE",
+            "SENSEX",
+            "TINY CO LTD",
+        ]
+
+    def test_reference_default_empty_is_byte_identical(self) -> None:
+        text = _csv(_universe_rows())
+        default = sorted(i.security_id for i in load_universe(lambda _url: text))
+        explicit = sorted(
+            i.security_id
+            for i in load_universe(lambda _url: text, reference_security_ids=frozenset())
+        )
+        assert default == explicit
+
     def test_report_carries_parse_accounting(self) -> None:
         text = _csv(_universe_rows())
         report = load_universe_report(lambda _url: text)

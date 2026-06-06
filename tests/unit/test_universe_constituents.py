@@ -10,9 +10,14 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
 from brutex.dashboard.nse_constituents import ConstituentRow, parse_constituents
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
-from brutex.universe_constituents import resolve_constituents
+from brutex.universe_constituents import (
+    ConstituentCoverageError,
+    resolve_constituents,
+    resolve_reference_security_ids,
+)
 
 
 def _inst(
@@ -188,3 +193,30 @@ class TestParseConstituentsIntegration:
         assert report.security_ids == (2885, 11536)
         assert [c.symbol for c in report.unmatched] == ["M&M"]
         assert report.summary() == "matched 2/3 (2 by ISIN, 0 by ticker); unmatched 1: [M&M]"
+
+
+class TestResolveReferenceSecurityIds:
+    """DEC-NIFTY-TOTAL-MARKET-WIRE-001 — fail-loud id-set resolution."""
+
+    def test_full_coverage_returns_id_set(self) -> None:
+        instruments = [
+            _inst(2885, "RELIANCE INDUSTRIES LTD", "INE002A01018"),
+            _inst(11536, "TCS", "INE467B01029"),
+        ]
+        cons = [ConstituentRow("RELIANCE", "INE002A01018"), ConstituentRow("TCS", "INE467B01029")]
+        assert resolve_reference_security_ids(cons, instruments) == frozenset({2885, 11536})
+
+    def test_unmatched_raises_by_default(self) -> None:
+        instruments = [_inst(2885, "RELIANCE INDUSTRIES LTD", "INE002A01018")]
+        cons = [ConstituentRow("RELIANCE", "INE002A01018"), ConstituentRow("GHOST", "INE000Z01010")]
+        with pytest.raises(ConstituentCoverageError, match="unmatched 1: \\[GHOST\\]"):
+            resolve_reference_security_ids(cons, instruments)
+
+    def test_unmatched_allowed_when_coverage_not_required(self) -> None:
+        instruments = [_inst(2885, "RELIANCE INDUSTRIES LTD", "INE002A01018")]
+        cons = [ConstituentRow("RELIANCE", "INE002A01018"), ConstituentRow("GHOST", "INE000Z01010")]
+        ids = resolve_reference_security_ids(cons, instruments, require_full_coverage=False)
+        assert ids == frozenset({2885})
+
+    def test_empty_constituents_is_empty_set(self) -> None:
+        assert resolve_reference_security_ids([], [_inst(1, "X LTD", "INE0X")]) == frozenset()
