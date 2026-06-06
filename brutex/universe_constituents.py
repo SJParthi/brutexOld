@@ -189,8 +189,62 @@ def resolve_constituents(
     return MatchReport(matched=tuple(matched), unmatched=tuple(unmatched))
 
 
+class ConstituentCoverageError(Exception):
+    """Raised when a constituent basket does not resolve to 100% coverage.
+
+    DEC-NIFTY-TOTAL-MARKET-WIRE-001 (Stage 2b PR-4b): the hostile review's P1
+    fail-loud rule — an unmatched constituent is silently absent from the lake,
+    so "all 750" quietly becomes "750 − N". Rather than let the count drop in
+    silence, :func:`resolve_reference_security_ids` raises this with the
+    :meth:`MatchReport.summary` so the operator SEES the gap and acts.
+    """
+
+
+def resolve_reference_security_ids(
+    constituents: Iterable[ConstituentRow],
+    instruments: Iterable[Instrument],
+    *,
+    require_full_coverage: bool = True,
+) -> frozenset[int]:
+    """Resolve constituents → the set of NSE cash-equity ``SECURITY_ID``s to admit.
+
+    DEC-NIFTY-TOTAL-MARKET-WIRE-001. The fail-loud wrapper over
+    :func:`resolve_constituents` that the loader/refresh feed into
+    ``select_universe``'s / ``upsert_many``'s ``reference_*`` parameters.
+
+    Parameters
+    ----------
+    constituents
+        The index members (e.g. from :func:`parse_constituents`).
+    instruments
+        The Dhan instrument master (only NSE cash equities participate).
+    require_full_coverage
+        When ``True`` (default), raise :class:`ConstituentCoverageError` if ANY
+        constituent is unmatched — the hostile review's fail-loud rule, so a
+        silent coverage drop is impossible. When ``False``, return only the
+        matched ids (the caller has explicitly accepted partial coverage).
+
+    Returns
+    -------
+    frozenset[int]
+        The matched NSE cash-equity ``SECURITY_ID``s, ready to pass as
+        ``reference_security_ids``.
+
+    Raises
+    ------
+    ConstituentCoverageError
+        If ``require_full_coverage`` and one or more constituents are unmatched.
+    """
+    report = resolve_constituents(constituents, instruments)
+    if require_full_coverage and report.unmatched:
+        raise ConstituentCoverageError(report.summary())
+    return frozenset(report.security_ids)
+
+
 __all__ = [
+    "ConstituentCoverageError",
     "ConstituentMatch",
     "MatchReport",
     "resolve_constituents",
+    "resolve_reference_security_ids",
 ]

@@ -38,13 +38,22 @@ _DOWNLOAD_TIMEOUT: float = 60.0
 
 
 def load_universe_report(
-    http_get: HttpGet, *, url: str = INSTRUMENT_MASTER_DETAILED_URL
+    http_get: HttpGet,
+    *,
+    url: str = INSTRUMENT_MASTER_DETAILED_URL,
+    reference_security_ids: frozenset[int] = frozenset(),
 ) -> UniverseReport:
     """Download + parse the detailed scrip master into a :class:`UniverseReport`.
 
     Returns the selected universe (all NSE indices + BSE SENSEX + every
     F&O-eligible single-stock SPOT) plus parse accounting (parsed / persisted
     / legs_dropped / filtered).
+
+    ``reference_security_ids`` (DEC-NIFTY-TOTAL-MARKET-WIRE-001, Stage 2b PR-4b):
+    optional NSE-equity ``SECURITY_ID``s to ALSO admit as REFERENCE_ONLY (the
+    resolved NIFTY-Total-Market constituents), threaded to
+    :func:`~brutex.adapters.dhan.instruments.select_universe_report`. Defaults
+    empty → the selection is byte-identical to the F&O-only universe.
 
     Raises
     ------
@@ -58,14 +67,23 @@ def load_universe_report(
     # validate_header raised if fieldnames was None/incomplete → safe to narrow.
     fieldnames = cast(Sequence[str], reader.fieldnames)
     rows = [{name: (row.get(name) or "") for name in fieldnames} for row in reader]
-    return select_universe_report(rows)
+    return select_universe_report(rows, reference_security_ids=reference_security_ids)
 
 
 def load_universe(
-    http_get: HttpGet, *, url: str = INSTRUMENT_MASTER_DETAILED_URL
+    http_get: HttpGet,
+    *,
+    url: str = INSTRUMENT_MASTER_DETAILED_URL,
+    reference_security_ids: frozenset[int] = frozenset(),
 ) -> list[Instrument]:
-    """Download + parse the detailed scrip master into the brute-force universe list."""
-    return load_universe_report(http_get, url=url).universe
+    """Download + parse the detailed scrip master into the universe list.
+
+    See :func:`load_universe_report`; ``reference_security_ids`` (default empty)
+    admits extra NSE equities by ``SECURITY_ID`` as REFERENCE_ONLY.
+    """
+    return load_universe_report(
+        http_get, url=url, reference_security_ids=reference_security_ids
+    ).universe
 
 
 def urllib_http_get(url: str) -> str:  # pragma: no cover — SSRF-guarded network shim
