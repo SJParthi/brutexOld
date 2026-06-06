@@ -89,6 +89,20 @@ class TestConstituentUrl:
     def test_unknown_index_returns_none(self) -> None:
         assert constituent_url("NIFTY IT") is None
 
+    def test_nifty_total_market_aliases_resolve(self) -> None:
+        # DEC-NIFTY-TOTAL-MARKET-001: the ~750-name basket selector. All three
+        # spellings (display, bare, underscore) map to the same best-effort
+        # NSE filename; case-insensitive + trimmed like every other entry.
+        expected = f"{NSE_CONSTITUENTS_BASE_URL}/ind_niftytotalmarket_list.csv"
+        assert constituent_url("NIFTY TOTAL MARKET") == expected
+        assert constituent_url("  niftytotalmarket ") == expected
+        assert constituent_url("NIFTY_TOTAL_MARKET") == expected
+
+    def test_nifty_total_market_is_registered(self) -> None:
+        # The basket selector must be present in the built-in map so the
+        # dashboard offers it without an operator override.
+        assert "NIFTY TOTAL MARKET" in INDEX_CSV_FILENAMES
+
     @pytest.mark.parametrize("symbol", sorted(INDEX_CSV_FILENAMES))
     def test_every_mapped_index_resolves(self, symbol: str) -> None:
         assert constituent_url(symbol) is not None

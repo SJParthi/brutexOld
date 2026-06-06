@@ -91,6 +91,16 @@ INDEX_CSV_FILENAMES: Final[dict[str, str]] = {
     "NIFTY200": "ind_nifty200list.csv",
     "NIFTY 500": "ind_nifty500list.csv",
     "NIFTY500": "ind_nifty500list.csv",
+    # NIFTY Total Market (~750 names: large+mid+small+micro cap) —
+    # DEC-NIFTY-TOTAL-MARKET-001 (MIGRATION.md). A constituent-basket
+    # selector ONLY (like NIFTY 100/200/500 above); NOT a tradable index
+    # row whose own OHLC we fetch. BEST-EFFORT filename — **verify against
+    # NSE; NSE may rename/retire it.** The operator override env
+    # (BRUTEX_INDEX_CSV_FILENAMES) is the authoritative correction path
+    # for a name we cannot reach NSE to confirm from this build env.
+    "NIFTY TOTAL MARKET": "ind_niftytotalmarket_list.csv",
+    "NIFTYTOTALMARKET": "ind_niftytotalmarket_list.csv",
+    "NIFTY_TOTAL_MARKET": "ind_niftytotalmarket_list.csv",
 }
 
 #: Operator override env var (DEC-CONSTITUENTS-OVERRIDE-001): a JSON object
