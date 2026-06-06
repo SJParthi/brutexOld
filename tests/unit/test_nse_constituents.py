@@ -90,13 +90,17 @@ class TestConstituentUrl:
         assert constituent_url("NIFTY IT") is None
 
     def test_nifty_total_market_aliases_resolve(self) -> None:
-        # DEC-NIFTY-TOTAL-MARKET-001: the ~750-name basket selector. All three
-        # spellings (display, bare, underscore) map to the same best-effort
-        # NSE filename; case-insensitive + trimmed like every other entry.
-        expected = f"{NSE_CONSTITUENTS_BASE_URL}/ind_niftytotalmarket_list.csv"
+        # DEC-NIFTY-TOTAL-MARKET-URL-001: the ~750-name basket selector resolves
+        # to the OPERATOR-VERIFIED full URL on the NSE-Indices host (a DIFFERENT
+        # host from NSE_CONSTITUENTS_BASE_URL), used verbatim — NOT joined to the
+        # base. All three spellings (display, bare, underscore) resolve the same,
+        # case-insensitive + trimmed.
+        expected = "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv"
         assert constituent_url("NIFTY TOTAL MARKET") == expected
         assert constituent_url("  niftytotalmarket ") == expected
         assert constituent_url("NIFTY_TOTAL_MARKET") == expected
+        # It is a full URL on its own host — NOT prefixed with the NSE base.
+        assert not expected.startswith(NSE_CONSTITUENTS_BASE_URL)
 
     def test_nifty_total_market_is_registered(self) -> None:
         # The basket selector must be present in the built-in map so the
