@@ -392,6 +392,7 @@ def derive_lake_underlyings(
 def is_universe_underlying(
     instrument: Instrument,
     fno_eligible_underlyings: frozenset[tuple[Exchange, str]],
+    reference_security_ids: frozenset[int] = frozenset(),
 ) -> bool:
     """Return True if *instrument* is a UNIVERSE underlying worth persisting.
 
@@ -411,9 +412,13 @@ def is_universe_underlying(
 
     * **IDX** — admitted by the same index rule as :func:`is_in_fetch_scope`:
       every NSE index; from BSE only SENSEX.
-    * **EQ** — admitted iff it is an F&O-eligible NSE underlying, i.e.
-      ``(exchange, trading_symbol)`` is in *fno_eligible_underlyings*
-      (identical to the equity clause of :func:`is_in_fetch_scope`).
+    * **EQ** — admitted iff it is an F&O-eligible NSE underlying
+      (``(exchange, trading_symbol)`` in *fno_eligible_underlyings*) **OR** an
+      admitted REFERENCE_ONLY constituent (``security_id`` in
+      *reference_security_ids* — matched by id because a non-F&O equity's
+      ``symbol_name`` is the long company name, DEC-NIFTY-TOTAL-MARKET-ADMIT-001).
+      *reference_security_ids* defaults empty → identical to the prior
+      F&O-only equity clause.
 
     Every derivative leg (FUT / CE / PE) returns ``False`` here — that is
     the whole point of the lean ingest — even though it is in the broad
@@ -440,10 +445,14 @@ def is_universe_underlying(
             instrument.exch_id == Exchange.NSE or instrument.symbol_name == _BSE_FETCH_INDEX_SYMBOL
         )
     if instrument_type == InstrumentType.EQ:
-        # Same EQ rule as is_in_fetch_scope: an F&O-eligible NSE underlying.
-        return (
-            instrument.exch_id == Exchange.NSE
-            and (instrument.exch_id, instrument.symbol_name) in fno_eligible_underlyings
+        # An NSE equity is a universe underlying if it is EITHER F&O-eligible
+        # (by ticker) OR an admitted REFERENCE_ONLY constituent (by SECURITY_ID
+        # — its SYMBOL_NAME is the long company name, not the ticker, so the
+        # ticker key cannot match; DEC-NIFTY-TOTAL-MARKET-ADMIT-001). The
+        # reference set defaults empty → byte-identical to the F&O-only rule.
+        return instrument.exch_id == Exchange.NSE and (
+            (instrument.exch_id, instrument.symbol_name) in fno_eligible_underlyings
+            or instrument.security_id in reference_security_ids
         )
     # Every derivative leg (FUT / CE / PE) — parsed for eligibility, never stored.
     return False

@@ -260,6 +260,38 @@ class TestUniverse:
         assert sorted(i.symbol_name for i in report.universe) == ["NIFTY", "RELIANCE", "SENSEX"]
         # Dropped in-scope: TINYCO (non-F&O equity) + RELIANCE-OPT + RELIANCE-FUT legs.
         assert report.legs_dropped == 3
+
+    # ── REFERENCE_ONLY admission (DEC-NIFTY-TOTAL-MARKET-ADMIT-001) ──
+
+    def test_reference_security_id_admits_non_fno_equity(self) -> None:
+        # TINY CO LTD (SECURITY_ID 9999) is non-F&O → normally dropped; admit it
+        # by its resolved SECURITY_ID as a REFERENCE_ONLY constituent.
+        universe = select_universe(self._rows(), reference_security_ids=frozenset({9999}))
+        symbols = sorted(i.symbol_name for i in universe)
+        assert symbols == ["NIFTY", "RELIANCE", "SENSEX", "TINY CO LTD"]
+        # It is admitted by id; its symbol_name stays the long company name.
+        tiny = next(i for i in universe if i.security_id == 9999)
+        assert tiny.instrument is InstrumentType.EQ
+        assert tiny.symbol_name == "TINY CO LTD"
+
+    def test_reference_empty_is_byte_identical(self) -> None:
+        rows = self._rows()
+        default = sorted(i.security_id for i in select_universe(rows))
+        explicit = sorted(
+            i.security_id for i in select_universe(rows, reference_security_ids=frozenset())
+        )
+        assert default == explicit  # empty set never changes the selection
+
+    def test_reference_id_does_not_admit_a_non_equity_row(self) -> None:
+        # 3001 is the OPTSTK leg, not an EQUITY — a reference id must NOT admit it.
+        universe = select_universe(self._rows(), reference_security_ids=frozenset({3001}))
+        assert sorted(i.symbol_name for i in universe) == ["NIFTY", "RELIANCE", "SENSEX"]
+
+    def test_reference_admission_report_counts(self) -> None:
+        report = select_universe_report(self._rows(), reference_security_ids=frozenset({9999}))
+        # TINYCO now persists → 4 universe rows, one fewer dropped leg.
+        assert report.persisted == 4
+        assert report.legs_dropped == 2
         # Out-of-scope: the MCX GOLD future.
         assert report.filtered == 1
         # Accounting invariant: every in-scope row is either persisted or dropped.

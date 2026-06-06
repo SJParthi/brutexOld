@@ -459,7 +459,11 @@ def build_leg_economics(
     return {key: (lot, freeze) for key, (_expiry, lot, freeze) in best.items()}
 
 
-def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
+def select_universe_report(
+    rows: Sequence[Mapping[str, str]],
+    *,
+    reference_security_ids: frozenset[int] = frozenset(),
+) -> UniverseReport:
     """Select the brute-force universe and report the parse accounting.
 
     Two-pass: collect the F&O-eligible underlying tickers, then keep (a) the
@@ -482,6 +486,18 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
     ``UNDERLYING_SECURITY_ID`` points to; absent that link we keep the first
     seen. This guarantees a unique key with no count regression
     (DEC-DHAN-UNIVERSE-DEDUP-001).
+
+    ``reference_security_ids`` (DEC-NIFTY-TOTAL-MARKET-ADMIT-001, Stage 2b
+    PR-3): an OPTIONAL set of NSE-equity ``SECURITY_ID``s to ALSO admit as
+    REFERENCE_ONLY spot — the non-F&O NIFTY-Total-Market constituents resolved
+    by :func:`brutex.universe_constituents.resolve_constituents`. Matched by
+    ``SECURITY_ID`` (NOT ticker — a non-F&O equity's ``SYMBOL_NAME`` is the long
+    company name, DEC-DHAN-FNO-JOIN-KEY-001). Defaults to ``frozenset()`` → the
+    selection is byte-identical to the F&O-only universe; the caller (Stage 2b
+    PR-4 wiring) supplies the set AND a matching ``reference_only_of`` at upsert
+    so the rows are tagged ``reference_only=TRUE``. The brute-force ENGINE is
+    UNAFFECTED — these never become ``IDX`` and are blocked from the swept set
+    by ``is_in_brute_force_scope`` (DEC-ENGINE-ISOLATION-INVARIANT-001).
     """
     eligible = fno_underlying_symbols(rows)
     canonical_ids = fno_underlying_security_ids(rows)
@@ -527,7 +543,17 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
             and _opt_str(row.get("UNDERLYING_SYMBOL")) in eligible
             and not _is_test_scrip(row.get("SYMBOL_NAME"), row.get("UNDERLYING_SYMBOL"))
         )
-        if is_index or is_fno_stock:
+        # REFERENCE_ONLY constituent (DEC-NIFTY-TOTAL-MARKET-ADMIT-001): an NSE
+        # equity admitted by its resolved SECURITY_ID (NOT ticker — its
+        # SYMBOL_NAME is the long company name). Empty set → never matches, so
+        # the default selection is byte-identical to the F&O-only universe.
+        is_reference_stock = (
+            itype in _EQUITY_TYPES
+            and exch == Exchange.NSE
+            and _opt_int(row.get("SECURITY_ID")) in reference_security_ids
+            and not _is_test_scrip(row.get("SYMBOL_NAME"), row.get("UNDERLYING_SYMBOL"))
+        )
+        if is_index or is_fno_stock or is_reference_stock:
             inst = parse_instrument_row(row)
             key = (inst.exch_id, inst.symbol_name)
             existing = by_key.get(key)
@@ -588,9 +614,17 @@ def select_universe_report(rows: Sequence[Mapping[str, str]]) -> UniverseReport:
     )
 
 
-def select_universe(rows: Sequence[Mapping[str, str]]) -> list[Instrument]:
-    """Select the brute-force universe (index + F&O-stock SPOT); see :func:`select_universe_report`."""
-    return select_universe_report(rows).universe
+def select_universe(
+    rows: Sequence[Mapping[str, str]],
+    *,
+    reference_security_ids: frozenset[int] = frozenset(),
+) -> list[Instrument]:
+    """Select the universe (index + F&O-stock SPOT + optional REFERENCE_ONLY constituents).
+
+    See :func:`select_universe_report`; ``reference_security_ids`` (default
+    empty) admits extra NSE equities by ``SECURITY_ID`` as REFERENCE_ONLY.
+    """
+    return select_universe_report(rows, reference_security_ids=reference_security_ids).universe
 
 
 __all__ = [
