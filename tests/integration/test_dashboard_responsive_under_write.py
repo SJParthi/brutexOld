@@ -53,12 +53,21 @@ from fastapi.testclient import TestClient
 #: The writer holds the store lock this long. The read assertions use a budget a
 #: large factor below it, so a passing read PROVES it did not wait for the writer
 #: (a regression to the old blocking path would wait ~the full hold and fail).
-_WRITER_HOLD_S: float = 1.0
+#: Widening the hold is FREE on the passing path — ``_HeldLock.__exit__`` releases
+#: the lock the instant the (fast) read returns, so the full hold elapses ONLY on
+#: the regression path (a blocked read waits out the whole window). A wider hold
+#: therefore buys a larger pass/fail separation at zero healthy-run cost
+#: (DEC-DASHBOARD-FASTREAD-FLAKE-001).
+_WRITER_HOLD_S: float = 2.0
 
-#: A generous per-read ceiling — still ~5x below the writer's hold, so it is a
-#: real proof of non-blocking yet immune to CI scheduling jitter (the old
-#: blocking path would block for ~``_WRITER_HOLD_S``, i.e. ~5x over this).
-_READ_BUDGET_S: float = 0.2
+#: A generous per-read ceiling — ``_WRITER_HOLD_S / 4`` (0.5 s). The discriminating
+#: signal is "far below the writer's hold": a cache/in-memory read completes in
+#: single-digit ms (~100x under this budget), while the old blocking path waits
+#: ~``_WRITER_HOLD_S`` (4x OVER this budget → a clear, unambiguous fail). The prior
+#: 0.2 s ceiling flaked on loaded CI runners (a 4.8 ms scheduling spike over 0.2 s
+#: spuriously failed + blocked a merge); 0.5 s keeps strong regression separation
+#: with ~25x jitter headroom on the healthy path (DEC-DASHBOARD-FASTREAD-FLAKE-001).
+_READ_BUDGET_S: float = 0.5
 
 
 def _idx(symbol: str) -> Instrument:
