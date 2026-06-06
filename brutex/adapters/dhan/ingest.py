@@ -47,12 +47,17 @@ drive a synchronous fake with zero threads (mirrors
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
+from decimal import Decimal
 from time import sleep as _time_sleep
+from typing import TYPE_CHECKING
 
 import structlog
+
+if TYPE_CHECKING:
+    from brutex.data.parquet_writer import BarConflict
 
 from brutex.adapters.dhan.chunks import plan_spot_intraday_windows
 from brutex.adapters.dhan.errors import DhanError, is_rate_limit, is_retryable
@@ -439,6 +444,57 @@ def _pace_rps(pace: Pacer | None) -> float:
     return 5.0
 
 
+#: OHLCV+OI fields compared bar-for-bar to detect a keep-first conflict — the
+#: SAME tuple :meth:`ParquetWriter._bar_values_equal` compares, kept here so the
+#: summary reports WHICH field a vendor re-statement touched (CLAUDE.md §11 COMMON).
+_CONFLICT_FIELDS: tuple[str, ...] = ("open", "high", "low", "close", "volume", "open_interest")
+
+
+def summarize_conflicts(conflicts: Sequence[BarConflict]) -> dict[str, object]:
+    """Aggregate a window's keep-first conflicts into ONE log payload.
+
+    DEC-LAKE-CONFLICT-LOG-AGG-001. The prior per-bar ``ingest.conflict`` WARNING
+    flooded the log (hundreds of lines on a re-pull) AND printed only ``close`` —
+    so a bar whose ``open``/``high``/``low`` was re-stated by the vendor looked
+    like a *false* conflict (equal closes). This collapses a window's conflicts to
+    one summary: the count, the sorted set of OHLCV+OI fields that ACTUALLY differ,
+    the max absolute close delta, and the first/last conflicting timestamps.
+
+    Parameters
+    ----------
+    conflicts
+        The window's :class:`~brutex.data.parquet_writer.BarConflict` records
+        (stored kept, vendor discarded — keep-first, Golden Rule #7).
+
+    Returns
+    -------
+    dict
+        ``conflicts`` (count), ``differing_fields`` (comma-joined, sorted),
+        ``max_close_delta`` (str Decimal), ``first_ts`` / ``last_ts`` (ISO or None).
+    """
+    differing: set[str] = set()
+    max_close_delta = Decimal(0)
+    first_ts: datetime | None = None
+    last_ts: datetime | None = None
+    for c in conflicts:
+        for field_name in _CONFLICT_FIELDS:
+            if getattr(c.stored, field_name) != getattr(c.vendor, field_name):
+                differing.add(field_name)
+        delta = abs(c.vendor.close - c.stored.close)
+        max_close_delta = max(max_close_delta, delta)
+        if first_ts is None or c.timestamp < first_ts:
+            first_ts = c.timestamp
+        if last_ts is None or c.timestamp > last_ts:
+            last_ts = c.timestamp
+    return {
+        "conflicts": len(conflicts),
+        "differing_fields": ",".join(sorted(differing)),
+        "max_close_delta": str(max_close_delta),
+        "first_ts": first_ts.isoformat() if first_ts is not None else None,
+        "last_ts": last_ts.isoformat() if last_ts is not None else None,
+    }
+
+
 def _ingest_one_window(
     adapter: MarketAdapter,
     sink: BarSink,
@@ -589,14 +645,18 @@ def _ingest_one_window(
         bars_appended=result.bars_appended,
         **series_fields,
     )
-    # Conflict nook: log each vendor re-statement at WARNING so the operator can
-    # see EXACTLY what Dhan changed.  The stored bar is kept (keep-first —
-    # never overwritten, DEC-LAKE-CONFLICT-KEEPFIRST-001 / Golden Rule #7).
-    window_conflicts = 0
-    for wr in result.write_results:
-        for c in wr.conflicts:
-            window_conflicts += 1
-            _LOG.warning(
+    # Conflict nook (DEC-LAKE-CONFLICT-LOG-AGG-001): the stored bar is kept
+    # (keep-first — never overwritten, DEC-LAKE-CONFLICT-KEEPFIRST-001 / Golden
+    # Rule #7). Emit ONE aggregated WARNING per window (count + WHICH fields the
+    # vendor re-stated + max close delta) instead of one WARNING per bar — a
+    # vendor re-statement of a whole window used to flood the log with hundreds
+    # of lines that showed only ``close`` (so an open/high/low revision looked
+    # like a false equal-close conflict). Per-bar detail stays available at DEBUG.
+    all_conflicts = [c for wr in result.write_results for c in wr.conflicts]
+    window_conflicts = len(all_conflicts)
+    if all_conflicts:
+        for c in all_conflicts:
+            _LOG.debug(
                 "ingest.conflict",
                 pull_id=pull_id,
                 timestamp=c.timestamp.isoformat(),
@@ -604,6 +664,12 @@ def _ingest_one_window(
                 vendor_close=str(c.vendor.close),
                 **series_fields,
             )
+        _LOG.warning(
+            "ingest.conflict.summary",
+            pull_id=pull_id,
+            **summarize_conflicts(all_conflicts),
+            **series_fields,
+        )
     # Record the window as pulled so a re-pull skips it — BUT ONLY when the
     # vendor actually returned bars (DEC-LAKE-RECONCILE-001). A 0-bar response
     # (an empty 200 under a 429 storm, or a genuinely-empty range) is NOT marked
