@@ -2226,12 +2226,18 @@ jobs:
           # indented 10 spaces causing Python IndentationError on every run.
           # Write the parser to a tmp file and exec it directly — no
           # indentation sensitivity, no heredoc-tab/space gotchas.
+          # Generic, REUSABLE parser (Golden Rule #11 COMMON): reads the XML path
+          # + module label + floor from env so a second module (money.py, below)
+          # invokes the SAME script — no duplicated parser block (jscpd-clean).
           cat > /tmp/check_mutation_score.py <<'PY'
-          import sys, xml.etree.ElementTree as ET
+          import os, sys, xml.etree.ElementTree as ET
+          mod = os.environ.get("MUT_MODULE", "state.py")
+          xml = os.environ.get("MUT_XML", "mutmut-results.xml")
+          floor = float(os.environ.get("MUT_FLOOR", "0.98"))
           try:
-              tree = ET.parse('mutmut-results.xml')
+              tree = ET.parse(xml)
           except ET.ParseError as exc:
-              print(f"ERROR: mutmut-results.xml is not valid XML: {exc}")
+              print(f"ERROR: {xml} is not valid XML: {exc}")
               sys.exit(1)
           root = tree.getroot()
           # mutmut 2.x junitxml root is <testsuites> wrapping one <testsuite>.
@@ -2247,19 +2253,50 @@ jobs:
               sys.exit(1)
           killed = tests - failures - errors
           if tests == 0:
-              print("ERROR: mutmut produced 0 mutants on state.py — likely a config issue")
+              print(f"ERROR: mutmut produced 0 mutants on {mod} — likely a config issue")
               sys.exit(1)
           score = killed / tests
-          print(f"mutation score: killed={killed} / total={tests} = {score:.2%}")
-          if score < 0.98:
-              print(f"FAILED: mutation score {score:.2%} below 98% gate (operator decree 2026-05-17, DEC-P0-009)")
+          print(f"{mod} mutation score: killed={killed} / total={tests} = {score:.2%}")
+          if score < floor:
+              print(f"FAILED: {mod} mutation score {score:.2%} below {floor:.0%} gate (DEC-P0-009)")
               sys.exit(1)
-          print(f"PASSED: mutation score {score:.2%} >= 98%")
+          print(f"PASSED: {mod} mutation score {score:.2%} >= {floor:.0%}")
           PY
           # Strip the 10-space CI-yml indent that bash heredoc preserves
           # (it would still cause IndentationError when python parses).
           sed -i 's/^          //' /tmp/check_mutation_score.py
-          python3 /tmp/check_mutation_score.py
+          MUT_MODULE="state.py" MUT_XML="mutmut-results.xml" python3 /tmp/check_mutation_score.py
+
+      - name: mutmut on money.py (2dp money display) (blocking — DEC-MUTATION-MONEY-001)
+        run: |
+          # money.py is the single source of truth for paisa→rupee display
+          # (DEC-MONEY-2DP-001) — tiny + safety-critical. Verified locally at a
+          # clean 100% kill (the only un-killable mutant, the quantum string →
+          # invalid Decimal, is excluded via `# pragma: no mutate`). Same bounded
+          # timeout + the SHARED parser above at a strict floor.
+          set +e
+          timeout 240 mutmut run \
+            --paths-to-mutate brutex/money.py \
+            --tests-dir tests/unit \
+            --runner "pytest -x tests/unit/test_money.py"
+          run_rc=$?
+          set -e
+          if [ $run_rc -eq 124 ]; then
+            echo "ERROR: mutmut timed out after 4 minutes on money.py"
+            exit 124
+          fi
+          echo "::group::mutmut results — money.py"
+          mutmut results || true
+          echo "::endgroup::"
+          set +e
+          mutmut junitxml > mutmut-money-results.xml 2>mutmut-money.err
+          xml_rc=$?
+          set -e
+          if [ $xml_rc -ne 0 ]; then
+            echo "ERROR: mutmut junitxml failed for money.py (exit $xml_rc)"; cat mutmut-money.err; exit 1
+          fi
+          MUT_MODULE="money.py" MUT_XML="mutmut-money-results.xml" MUT_FLOOR="0.99" \
+            python3 /tmp/check_mutation_score.py
 
       - name: Upload mutmut results XML for analysis
         if: always()
