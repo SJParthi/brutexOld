@@ -30,6 +30,11 @@
   header {
     display:flex; align-items:center; gap:14px; padding:16px 24px;
     border-bottom:1px solid var(--border); animation: fadeInDown .5s ease both;
+    /* DASH-UX D2: sticky, frosted header so the nav + db-path never scroll away
+       and content slides under it (DEC-DASHBOARD-DB-UX-001). */
+    position:sticky; top:0; z-index:6;
+    background:rgba(10,13,17,.82);
+    -webkit-backdrop-filter:blur(11px); backdrop-filter:blur(11px);
   }
   .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
     background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
@@ -79,8 +84,36 @@
     white-space:nowrap; }
   thead th { position:sticky; top:0; background:var(--surface-2); color:var(--muted);
     font-weight:700; z-index:1; }
+  /* DASH-UX D2: zebra striping + a brighter hover make dense rows readable
+     (DEC-DASHBOARD-DB-UX-001). Hover wins over zebra (declared after). */
+  tbody tr:nth-child(even) { background:rgba(255,255,255,.018); }
   tbody tr:hover { background:var(--surface-2); }
-  td.nullcell { color:var(--muted); font-style:italic; }
+  td { cursor:copy; }
+  td.nullcell { color:var(--muted); font-style:italic; cursor:default; }
+  /* Click-to-copy cell flash — a brief green pulse on the copied cell. */
+  @keyframes cellCopied { 0% { background:var(--green-dim); } 100% { background:transparent; } }
+  td.copied { animation: cellCopied .6s ease both; color:var(--green-bright); }
+
+  /* Column-type chip in each header cell: ⏱ time · # numeric · A text. */
+  th .tchip { display:inline-block; min-width:15px; text-align:center; margin-right:7px;
+    font-size:10px; font-weight:800; border-radius:5px; padding:1px 4px;
+    font-family:"SF Mono",Menlo,Consolas,monospace; vertical-align:middle; }
+  th .tchip.t-num { color:var(--green); background:rgba(38,217,176,.14); }
+  th .tchip.t-time { color:var(--blue); background:rgba(91,141,239,.16); }
+  th .tchip.t-txt { color:var(--purple); background:rgba(157,123,255,.15); }
+
+  /* Empty-state art — a floating glyph instead of a bare sentence. */
+  .empty .art { font-size:46px; line-height:1; margin-bottom:12px;
+    animation: floatArt 3.4s ease-in-out infinite; }
+  @keyframes floatArt { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-9px); } }
+
+  /* Click-to-copy toast (bottom-centre, fades out). */
+  #copytoast { position:fixed; left:50%; bottom:30px; transform:translateX(-50%) translateY(14px);
+    background:var(--surface-3); border:1px solid var(--green-dim); color:var(--green-bright);
+    padding:9px 18px; border-radius:10px; font-size:13px; font-weight:700; opacity:0;
+    pointer-events:none; transition:opacity .2s, transform .2s; z-index:20;
+    box-shadow:0 8px 30px rgba(0,0,0,.4); }
+  #copytoast.show { opacity:1; transform:translateX(-50%) translateY(0); }
   .empty { color:var(--muted); font-size:13px; padding:28px 16px; text-align:center; }
   .empty b { color:var(--text); }
   .pager { display:flex; align-items:center; gap:14px; padding:10px 16px;
@@ -159,8 +192,10 @@
 
   <div class="wrap">
     <div id="tables"><h3>Tables</h3><div class="empty">loading…</div></div>
-    <div id="data"><div class="empty">Select a table on the left to browse its columns &amp; sample rows.</div></div>
+    <div id="data"><div class="empty emptyart"><div class="art">🗄️</div><div>Select a table on the left to browse its <b>columns &amp; sample rows</b>.</div></div></div>
   </div>
+
+  <div id="copytoast">✓ copied to clipboard</div>
 
 <script>
 /* ── BruteX database viewer (DEC-DB-VIEWER-001) ──
@@ -211,6 +246,38 @@ function fmtCell(col, cell) {
     return Number.isFinite(n) ? n.toFixed(2) : cell;
   }
   return cell;
+}
+
+/* DASH-UX D2 (DEC-DASHBOARD-DB-UX-001): column-type inference for the header
+   chips. Purely presentational — the backend re-validates every column; this
+   only picks a glyph (⏱ time · # numeric · A text) from the column NAME, so a
+   wrong guess is cosmetic and never gates a query. */
+const NUM_COLS = new Set([
+  "open", "high", "low", "close", "volume", "open_interest", "oi",
+  "strike", "spot", "iv", "lot_size", "tick_size", "sm_freeze_qty",
+  "security_id", "row_count", "underlying_security_id",
+]);
+function colType(col) {
+  const c = String(col).toLowerCase();
+  if (c === "timestamp" || c.includes("date") || c.includes("time") ||
+      c === "expiry" || c.endsWith("_at")) {
+    return { cls: "t-time", glyph: "⏱", title: "timestamp" };
+  }
+  if (NUM_COLS.has(c) || PCT_COLS.has(col) ||
+      c.endsWith("_id") || c.endsWith("_qty") || c.endsWith("_size") || c.endsWith("_count")) {
+    return { cls: "t-num", glyph: "#", title: "numeric" };
+  }
+  return { cls: "t-txt", glyph: "A", title: "text" };
+}
+
+/* Click-to-copy toast: flash a bottom-centre "✓ copied" for ~1.1s. */
+let copyToastTimer = null;
+function showCopyToast() {
+  const t = document.getElementById("copytoast");
+  if (!t) return;
+  t.classList.add("show");
+  if (copyToastTimer) clearTimeout(copyToastTimer);
+  copyToastTimer = setTimeout(() => t.classList.remove("show"), 1100);
 }
 
 /* Escape free text before interpolation into innerHTML (XSS sink). */
@@ -315,7 +382,10 @@ function gridAndPager(cols, rows, total, off, lim) {
   if (!rows.length) {
     html += '<div class="empty">no rows on this page</div>';
   } else {
-    const thead = '<thead><tr>' + cols.map(c => '<th>' + esc(c) + '</th>').join("") + '</tr></thead>';
+    const thead = '<thead><tr>' + cols.map(c => {
+      const t = colType(c);
+      return '<th><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
+    }).join("") + '</tr></thead>';
     const tbody = '<tbody>' + rows.map(row =>
       '<tr>' + row.map((cell, i) =>
         cell == null ? '<td class="nullcell">null</td>' : '<td>' + esc(fmtCell(cols[i], cell)) + '</td>'
@@ -580,6 +650,23 @@ refreshBtn.addEventListener("click", () => {
   loadTables();
   if (mode === "candles") selectCandles(cstate.kind);
   else if (selected) selectTable(selected);
+});
+
+/* DASH-UX D2: click any data cell to copy its value (DEC-DASHBOARD-DB-UX-001).
+   Delegated on #data so it survives every grid re-render; null cells are
+   skipped. navigator.clipboard is feature-detected (absent on insecure/old
+   contexts) — the green flash + toast still confirm the interaction. */
+dataEl.addEventListener("click", (ev) => {
+  const td = ev.target.closest("td");
+  if (!td || td.classList.contains("nullcell")) return;
+  const text = td.textContent;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).catch(() => {});
+  }
+  td.classList.remove("copied");
+  void td.offsetWidth;  /* restart the flash animation on a repeat click */
+  td.classList.add("copied");
+  showCopyToast();
 });
 
 loadTables();
