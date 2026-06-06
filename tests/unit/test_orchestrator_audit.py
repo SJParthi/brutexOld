@@ -441,3 +441,46 @@ class TestReadEntries:
             f.write("\n")
         entries = read_entries(audit_path)
         assert len(entries) == 1
+
+
+class TestWriterEdges:
+    """The raw-constructor context-manager path + the write-failure branch."""
+
+    def test_enter_opens_fp_for_raw_constructed_writer(self, audit_path: Path) -> None:
+        # A writer built via the raw constructor (NOT .open()) has no fp until
+        # __enter__ opens one in append mode (audit.py __enter__ branch).
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = AuditWriter(path=audit_path)
+        with writer as log:
+            log.append(action="A", subject="s", ts_utc=1.0)
+        assert verify_chain(audit_path) == 1
+
+    def test_append_wraps_write_oserror(self, audit_path: Path) -> None:
+        # An OSError from the underlying file (e.g. disk full) is wrapped as
+        # AuditWriteError naming the seq + path (audit.py append OSError branch).
+        class _BadFP:
+            closed = False
+
+            def write(self, _s: str) -> int:
+                raise OSError("disk full")
+
+            def flush(self) -> None:  # pragma: no cover — never reached
+                pass
+
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = AuditWriter.open(audit_path)
+        real_fp = writer._fp  # pyright: ignore[reportPrivateUsage]
+        try:
+            writer._fp = _BadFP()  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+            with pytest.raises(AuditWriteError, match="Failed to write audit entry seq=0"):
+                writer.append(action="A", subject="s", ts_utc=1.0)
+        finally:
+            if real_fp is not None:
+                real_fp.close()  # close the real fd we swapped out (no leak)
+
+    def test_close_is_idempotent_when_already_closed(self, audit_path: Path) -> None:
+        # A second close() (or close() on a never-opened writer) is a no-op —
+        # the `self._fp is not None` guard's False branch (audit.py close()).
+        writer = AuditWriter.open(audit_path)
+        writer.close()
+        writer.close()  # _fp is None now → guard skips → clean no-op

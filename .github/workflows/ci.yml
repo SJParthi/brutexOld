@@ -1151,6 +1151,26 @@ jobs:
           else
             echo "(brutex.data.option_sink test file not present yet — gate inactive)"
           fi
+          # DEC-COVERAGE-INCREMENTAL-001: modules taken to 100% line+branch.
+          # NOTE: only NON-orchestrator modules get a per-module pytest-cov gate.
+          # A `--cov=brutex.orchestrator.*` target makes pytest-cov PRE-IMPORT the
+          # module (→ orchestrator/__init__ → bloom → fastbloom_rs), and that PyO3
+          # wheel may init only ONCE per interpreter — the test's own import then
+          # double-inits and collection errors. (This is why no existing
+          # orchestrator per-module gate is active.) audit.py +
+          # adaptive_rate_limiter.py reach 100% in the whole-package `--cov=brutex`
+          # run above (their tests are added in this PR); they are NOT given an
+          # isolated per-module gate for that reason.
+          if compgen -G "tests/unit/test_data_sink.py" > /dev/null; then
+            pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py
+          else
+            echo "(brutex.data.sink test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/integration/test_strategies_runner.py" > /dev/null; then
+            pytest --cov=brutex.strategies.runner --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_strategies_runner.py
+          else
+            echo "(brutex.strategies.runner test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_option_parquet_writer.py" > /dev/null; then
             pytest --cov=brutex.data.option_parquet_writer --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_parquet_writer.py
           else

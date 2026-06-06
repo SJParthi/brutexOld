@@ -224,3 +224,22 @@ class TestParquetBarSinkGrouping:
         )
         assert result.partitions_written == 1
         assert len(writer.calls) == 1
+
+
+class TestParquetBarSinkProperties:
+    """The ``writer`` / ``catalog`` accessors return the wired collaborators."""
+
+    def test_writer_property_returns_wired_writer(self, tmp_path: Path) -> None:
+        writer = FakeWriter(lake_root=tmp_path)
+        sink = ParquetBarSink(writer=writer, catalog=None)  # type: ignore[arg-type]
+        assert sink.writer is writer
+
+    def test_catalog_property_returns_wired_catalog(self, tmp_path: Path) -> None:
+        writer = FakeWriter(lake_root=tmp_path)
+        catalog = FakeCatalog()
+        sink = ParquetBarSink(writer=writer, catalog=catalog)  # type: ignore[arg-type]
+        assert sink.catalog is catalog
+
+    def test_catalog_property_is_none_when_unwired(self, tmp_path: Path) -> None:
+        sink = ParquetBarSink(writer=FakeWriter(lake_root=tmp_path), catalog=None)  # type: ignore[arg-type]
+        assert sink.catalog is None
