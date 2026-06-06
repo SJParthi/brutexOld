@@ -82,6 +82,20 @@
   .chip { font-size:10px; font-weight:700; padding:2px 8px; border-radius:20px; }
   .chip.index { color:var(--purple); background:rgba(157,123,255,.13); }
   .chip.stock { color:var(--blue);   background:rgba(91,141,239,.13); }
+  /* REFERENCE_ONLY marker (DEC-DASHBOARD-UNIVERSE-UX-001) — NIFTY Total Market +
+     its non-F&O constituents + India VIX: fetched + stored, but NOT brute-forced
+     and no option chain (the option button greys for these). Amber so it reads
+     "informational, not tradable". */
+  .chip.ref { color:var(--yellow); background:rgba(255,183,77,.14); }
+  .inst.refonly { opacity:.82; }   /* subtle dim so F&O rows pop */
+  /* Inline legend explaining the row chips. */
+  .legend { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+    margin-left:14px; font-size:11px; color:var(--muted); }
+  .legend .key { display:inline-flex; align-items:center; gap:5px; }
+  /* Skeleton-shimmer placeholder rows while the instrument list loads. */
+  .skel-row { height:42px; border-radius:10px; margin-bottom:7px;
+    background:linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 37%, var(--surface) 63%);
+    background-size:200% 100%; animation: shimmer 1.4s linear infinite; }
   .inst .sym { font-weight:700; }
   .inst .nm { font-size:11px; color:var(--muted); }
   .inst .cc { margin-left:auto; font-size:11px; color:var(--muted); }
@@ -376,6 +390,14 @@ function buildTabs(summary) {
   search.placeholder = "Search symbol…";
   search.oninput = renderInstruments;
   tabsEl.appendChild(search);
+  // Inline legend so the row chips are self-explanatory (DEC-DASHBOARD-UNIVERSE-UX-001).
+  const legend = document.createElement("div");
+  legend.className = "legend";
+  legend.innerHTML =
+    '<span class="key"><span class="chip index">INDEX</span></span>'
+    + '<span class="key"><span class="chip stock">STOCK</span></span>'
+    + '<span class="key"><span class="chip ref">REF</span> reference-only · no options</span>';
+  tabsEl.appendChild(legend);
   /* Search-first UX: focus the box on load so the operator types a symbol
      immediately instead of scrolling 240 rows. Guard on document.body so a
      re-render never steals focus mid-typing (DEC-DASHBOARD-INSTRUMENT-SCROLL-001). */
@@ -471,7 +493,9 @@ async function loadSummary() {
 
 async function loadInstruments() {
   const el = document.getElementById("instruments");
-  el.innerHTML = '<div class="empty">loading…</div>';
+  // Skeleton-shimmer placeholder instead of a bare "loading…" — reads as a fast,
+  // alive load (DEC-DASHBOARD-UNIVERSE-UX-001).
+  el.innerHTML = Array.from({length: 8}, () => '<div class="skel-row"></div>').join("");
   try {
     const r = await fetch('/api/v1/universe/instruments?kind=' + encodeURIComponent(filter));
     const body = await r.json();
@@ -502,7 +526,10 @@ function renderInstruments() {
   el.innerHTML = "";
   list.forEach((i, ix) => {
     const d = document.createElement("div");
-    d.className = "inst" + (selInst === i.symbol ? " sel" : "");
+    // reference-only rows (no option chain — DEC-OPTIONS-PULL-GUARD-001) get a
+    // subtle dim + a REF chip so the F&O universe stands out at a glance.
+    const refOnly = i.option_pullable === false;
+    d.className = "inst" + (selInst === i.symbol ? " sel" : "") + (refOnly ? " refonly" : "");
     d.dataset.symbol = i.symbol;
     /* O(1) UI: animate the entrance ONCE per fresh load, never on re-render.
        Re-rendering 243 rows on every click/filter restarted a 7-second fadeInUp
@@ -514,6 +541,9 @@ function renderInstruments() {
     const checked = selMulti.has(i.symbol) ? " checked" : "";
     d.innerHTML = `<input type="checkbox" class="msel"${checked} aria-label="multi-select ${esc(i.symbol)}">`
       + `<span class="chip ${esc(i.kind)}">${esc(i.kind)}</span>`
+      + (refOnly
+          ? '<span class="chip ref" title="Reference-only — fetched + stored for context, but NOT brute-forced and no option chain (NIFTY Total Market + its non-F&amp;O constituents, India VIX)">REF</span>'
+          : "")
       + `<div><div class="sym">${esc(i.symbol)}</div><div class="nm">${esc(i.name)}</div></div>`
       + `<span class="cc">${esc(i.exchange)}</span>`;
     const cb = d.querySelector(".msel");
