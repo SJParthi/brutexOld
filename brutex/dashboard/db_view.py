@@ -1331,6 +1331,38 @@ def _daily_open_by_date(
     return {_bar_ist_date(ts): _to_decimal(open_) for ts, open_ in cursor.fetchall()}
 
 
+def _intraday_open_by_date(
+    conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
+) -> dict[date, Decimal]:
+    """Read the symbol's 09:15 IST session-open 1-minute OPEN per day → ``{ist_date: open}``.
+
+    The **minute-basis IEP** for the pre-open report (DEC-PREOPEN-MINUTE-BASIS-001):
+    the day's FIRST 1-minute bar IS the 09:15:00 IST session open (the intraday
+    partition is session-filtered 09:15–15:29 IST), so ``arg_min(open, timestamp)``
+    grouped by the bar DATE is the 09:15 open — the true pre-open opening price the
+    report header names, on the SAME 1-minute basis as the minute prev-close (the
+    prior day's last 1-minute close, :func:`_intraday_last_close_by_date` +
+    :func:`_prev_trading_close`). Mirrors :func:`_intraday_last_close_by_date`: a
+    bound ``read_parquet`` glob over validated coordinates, ONE columnar pass
+    (~one row per trading day → O(1) per-day lookup, CLAUDE.md §5); session bars
+    never cross the IST/UTC date boundary so ``CAST(timestamp AS DATE)`` IS the IST
+    trading date. ``{}`` when the symbol has no 1-minute partition.
+    """
+    _validate_candle_coords(exchange, segment, symbol, _INTRADAY_BASE_INTERVAL)
+    base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
+    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        return {}
+    glob = base.as_posix() + "/**/*.parquet"
+    # glob built from validated coordinates (no free user text); path is a bound
+    # parameter. arg_min(open, timestamp) = the open of the day's FIRST (09:15) bar.
+    cursor = conn.execute(
+        'SELECT CAST("timestamp" AS DATE) AS d, arg_min(open, "timestamp") AS first_open '
+        "FROM read_parquet(?, union_by_name=true) GROUP BY d",
+        [glob],
+    )
+    return {day: _to_decimal(first_open) for day, first_open in cursor.fetchall()}
+
+
 def _spot_derived_rows(
     raw_rows: list[tuple[Any, ...]],
     out_columns: list[str],

@@ -243,6 +243,43 @@ def test_zip_negative_min_pct_is_400(tmp_path: Path) -> None:
     assert resp.status_code == 400
 
 
+def test_zip_minute_basis_download(tmp_path: Path) -> None:
+    # DEC-PREOPEN-MINUTE-BASIS-001: ?basis=minute builds the report from the
+    # 1-minute lake (09:15 open + prior last-min close) and still returns a valid
+    # .zip — never a 500.
+    resp = _client(tmp_path).get(
+        "/api/v1/reports/preopen.zip?from=2024-01-01&to=2024-12-31&basis=minute"
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+
+
+def test_zip_bad_basis_is_400(tmp_path: Path) -> None:
+    resp = _client(tmp_path).get(
+        "/api/v1/reports/preopen.zip?from=2024-01-01&to=2024-12-31&basis=bogus"
+    )
+    assert resp.status_code == 400
+
+
+def test_symbols_minute_basis(tmp_path: Path) -> None:
+    # The picker honours ?basis= and echoes it; COALINDIA has a 1minute partition
+    # so it qualifies for the minute basis (DEC-PREOPEN-MINUTE-BASIS-001).
+    resp = _client(tmp_path).get("/api/v1/reports/preopen/symbols?basis=minute")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["basis"] == "minute"
+    assert any(s["symbol"] == "COALINDIA" for s in body["symbols"])
+
+
+def test_reports_page_has_basis_toggle(tmp_path: Path) -> None:
+    # The /reports page exposes the 1-day | minute basis toggle that threads
+    # ?basis= into the .zip download (DEC-PREOPEN-MINUTE-BASIS-001).
+    html = _client(tmp_path).get("/reports").text
+    assert 'name="basis"' in html
+    assert 'value="minute"' in html
+    assert "currentBasis()" in html  # threaded into the download params
+
+
 def test_zip_bad_date_is_400(tmp_path: Path) -> None:
     resp = _client(tmp_path).get("/api/v1/reports/preopen.zip?from=nope&to=2024-12-31")
     assert resp.status_code == 400

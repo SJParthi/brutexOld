@@ -187,6 +187,16 @@
             </label>
           </div>
         </label>
+        <label>Basis
+          <div class="modes" id="bases">
+            <label class="mode on" id="basis-day">
+              <input type="radio" name="basis" value="day" checked /> 📅 1-day
+            </label>
+            <label class="mode" id="basis-min">
+              <input type="radio" name="basis" value="minute" /> ⏱ minute
+            </label>
+          </div>
+        </label>
         <label>Minimum % change
           <input type="number" id="minpct" step="0.01" min="0" placeholder="0" disabled />
         </label>
@@ -324,6 +334,24 @@ for (const r of document.querySelectorAll('input[name="mode"]')) {
   r.onchange = syncModeUI;
 }
 syncModeUI();
+/* ── Basis toggle (DEC-PREOPEN-MINUTE-BASIS-001) ──
+   📅 1-day (PREV. CLOSE + IEP from the 1-day bar — the default) vs ⏱ minute
+   (IEP = the 09:15 1-minute open; PREV. CLOSE = the prior day's last 1-minute
+   close). Each basis stays on one price scale; the back end builds whichever is
+   chosen and never mixes them. */
+function currentBasis() {
+  const checked = document.querySelector('input[name="basis"]:checked');
+  return checked ? checked.value : "day";
+}
+function syncBasisUI() {
+  const basis = currentBasis();
+  document.getElementById("basis-day").classList.toggle("on", basis === "day");
+  document.getElementById("basis-min").classList.toggle("on", basis === "minute");
+}
+for (const r of document.querySelectorAll('input[name="basis"]')) {
+  r.onchange = syncBasisUI;
+}
+syncBasisUI();
 document.getElementById("download").onclick = () => {
   const from = document.getElementById("from").value;
   const to = document.getElementById("to").value;
@@ -336,7 +364,7 @@ document.getElementById("download").onclick = () => {
   if (mode === "topmover" && Number(minPct) < 0) {
     msgEl.textContent = "Minimum % change cannot be negative."; return;
   }
-  const params = new URLSearchParams({ from, to, mode, min_pct: minPct });
+  const params = new URLSearchParams({ from, to, mode, min_pct: minPct, basis: currentBasis() });
   if (selected.size !== allSymbols.length) params.set("symbols", [...selected].join(","));
   window.location = "/api/v1/reports/preopen.zip?" + params.toString();
 };
