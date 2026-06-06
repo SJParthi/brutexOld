@@ -236,6 +236,37 @@ def is_in_brute_force_scope(instrument: Instrument) -> bool:
     )
 
 
+#: ``(exchange, symbol)`` pairs for the reference-only indexes (today: India
+#: VIX). Fetched + stamped on trades, but NEVER brute-forced.
+REFERENCE_ONLY_INDEX_UNDERLYINGS: Final[frozenset[tuple[Exchange, str]]] = frozenset(
+    (u.exchange, u.underlying_symbol) for u in REFERENCE_ONLY_INDICES
+)
+
+
+def is_reference_only(instrument: Instrument) -> bool:
+    """Return True if *instrument* is admitted to the lake as REFERENCE_ONLY.
+
+    DEC-NIFTY-TOTAL-MARKET-REFTAG-001 (Stage 2b PR-2): the explicit
+    REFERENCE_ONLY tier — fetched + stored for context, but NEVER part of the
+    brute-force engine or the 52-condition vocabulary. Today this is exactly
+    India VIX (the only ``UnderlyingSpec`` with ``reference_only=True``); the
+    later Stage-2b sub-PRs widen it to the admitted non-F&O NIFTY-Total-Market
+    constituents. This is the single, unified encoding of "reference-only" — it
+    persists onto the ``instruments.reference_only`` column so VIX and the
+    future constituent equities share ONE mechanism (the Stage-2b hostile
+    review's P0 recommendation), instead of VIX's ``UnderlyingSpec`` flag
+    living apart from a separate stock tag.
+
+    Invariant: ``is_reference_only`` and :func:`is_in_brute_force_scope` are
+    mutually exclusive — a reference-only row is never swept (locked by the
+    engine-isolation property test, DEC-ENGINE-ISOLATION-INVARIANT-001).
+    """
+    return (
+        instrument.instrument == InstrumentType.IDX
+        and (instrument.exch_id, instrument.symbol_name) in REFERENCE_ONLY_INDEX_UNDERLYINGS
+    )
+
+
 def build_fno_eligible_underlyings(
     instruments: Iterable[Instrument],
 ) -> frozenset[tuple[Exchange, str]]:

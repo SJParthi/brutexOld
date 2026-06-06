@@ -127,7 +127,16 @@ from brutex.models import (
 #: addressing promoted from the partition path into real columns. The bump
 #: forces any v4 store to DROP the two tables (``DROP TABLE IF EXISTS`` is
 #: kept in the migration list so existing DBs shed them).
-SCHEMA_VERSION: Final[int] = 5
+#:
+#: v6 (DEC-NIFTY-TOTAL-MARKET-REFTAG-001, 2026-06-06): added the
+#: ``reference_only BOOLEAN`` column to ``instruments`` — the explicit
+#: REFERENCE_ONLY scope tier (Stage 2b's P0 fix from the hostile review: stop
+#: overloading ``in_scope`` to imply the engine tier). Today it is True only
+#: for India VIX (unifying its ``UnderlyingSpec.reference_only`` flag onto the
+#: row); Stage-2b's later sub-PRs set it for the admitted non-F&O constituents.
+#: ``instruments`` is already in the drop+recreate list (rebuildable from the
+#: CSV), so any v5 store rebuilds at the new shape on open.
+SCHEMA_VERSION: Final[int] = 6
 
 #: Default DuckDB file name inside the configured lake root.
 DEFAULT_DB_NAME: Final[str] = "instruments.duckdb"
@@ -167,6 +176,11 @@ CREATE TABLE IF NOT EXISTS instruments (
     fetched_at             TIMESTAMP WITH TIME ZONE NOT NULL,
     run_id                 VARCHAR NOT NULL,
     csv_source_sha256      VARCHAR NOT NULL,
+    -- REFERENCE_ONLY scope tier (v6, DEC-NIFTY-TOTAL-MARKET-REFTAG-001): True
+    -- for rows fetched-for-context but never brute-forced (India VIX today;
+    -- the non-F&O NIFTY-Total-Market constituents in later Stage-2b sub-PRs).
+    -- DEFAULT FALSE so the column is back-fill-safe on the drop+recreate.
+    reference_only         BOOLEAN NOT NULL DEFAULT FALSE,
 
     -- Dhan identity is (securityId, exchangeSegment) — a security_id is
     -- unique only WITHIN an (exch_id, segment); the same id recurs across
@@ -276,6 +290,7 @@ _INSTR_COLUMNS: Final[tuple[str, ...]] = (
     "fetched_at",
     "run_id",
     "csv_source_sha256",
+    "reference_only",
 )
 
 
@@ -893,6 +908,7 @@ class InstrumentStore(metaclass=_StoreMeta):
         run_id: str,
         csv_source_sha256: str,
         in_scope_of: Any = None,
+        reference_only_of: Any = None,
         replace_snapshot: bool = False,
     ) -> UpsertResult:
         """Insert or replace rows for *snapshot_date*.
@@ -932,12 +948,22 @@ class InstrumentStore(metaclass=_StoreMeta):
             Optional :class:`~typing.Callable` used to populate the
             ``in_scope`` column. If ``None``, the function imported
             from :mod:`brutex.universe` is used.
+        reference_only_of
+            Optional :class:`~typing.Callable` used to populate the
+            ``reference_only`` column (v6, DEC-NIFTY-TOTAL-MARKET-REFTAG-001).
+            If ``None``, :func:`brutex.universe.is_reference_only` is used
+            (True for India VIX today; widened to the non-F&O constituents in
+            later Stage-2b sub-PRs).
         """
         self._ensure_open()
         if in_scope_of is None:
             from brutex.universe import is_in_scope
 
             in_scope_of = is_in_scope
+        if reference_only_of is None:
+            from brutex.universe import is_reference_only
+
+            reference_only_of = is_reference_only
 
         fetched_at = datetime.now(UTC)
 
@@ -976,6 +1002,7 @@ class InstrumentStore(metaclass=_StoreMeta):
                 csv_source_sha256=csv_source_sha256,
                 fetched_at=fetched_at,
                 in_scope=bool(in_scope_of(instr)),
+                reference_only=bool(reference_only_of(instr)),
             )
             for instr in instruments
         ]
@@ -1269,6 +1296,40 @@ class InstrumentStore(metaclass=_StoreMeta):
             as_of=as_of,
             instrument_type=InstrumentType.IDX,
         )
+
+    def reference_only_security_ids(self, *, as_of: date | None = None) -> frozenset[int]:
+        """Return the ``SECURITY_ID``s flagged ``reference_only`` (v6 column).
+
+        DEC-NIFTY-TOTAL-MARKET-REFTAG-001: the explicit REFERENCE_ONLY tier —
+        India VIX today; widened to the non-F&O NIFTY-Total-Market constituents
+        in later Stage-2b sub-PRs. Latest-snapshot semantics per
+        ``(security_id, exch_id, segment)`` (mirrors :meth:`list_in_scope`).
+        """
+        self._ensure_open()
+        as_of_clause = " AND snapshot_date <= ?" if as_of is not None else ""
+        # Assembled from pre-built string parts (mirrors list_in_scope): only
+        # the literal clause strings concatenate; ``as_of`` is parameter-bound,
+        # so this is not a SQL-injection vector.
+        base_sql = (
+            "SELECT i.security_id FROM instruments i "
+            "JOIN ("
+            "    SELECT security_id, exch_id, segment, MAX(snapshot_date) AS snap "
+            "    FROM instruments "
+        )
+        sub_sql = f"    WHERE reference_only = TRUE{as_of_clause} "
+        join_sql = (
+            "    GROUP BY security_id, exch_id, segment"
+            ") latest "
+            "ON i.security_id = latest.security_id "
+            "AND i.exch_id = latest.exch_id "
+            "AND i.segment = latest.segment "
+            "AND i.snapshot_date = latest.snap "
+            "WHERE i.reference_only = TRUE"
+        )
+        sql = f"{base_sql}{sub_sql}{join_sql}"  # nosec B608
+        params: list[Any] = [as_of] if as_of is not None else []
+        rows = self._conn.execute(sql, params).fetchall()
+        return frozenset(int(r[0]) for r in rows)
 
     def fno_eligible_underlyings(
         self, *, as_of: date | None = None
@@ -1770,6 +1831,7 @@ def _instrument_to_params(
     csv_source_sha256: str,
     fetched_at: datetime,
     in_scope: bool,
+    reference_only: bool,
 ) -> list[Any]:
     """Project *instrument* into the column tuple the INSERT expects.
 
@@ -1801,6 +1863,7 @@ def _instrument_to_params(
         fetched_at,
         run_id,
         csv_source_sha256,
+        reference_only,
     ]
 
 
@@ -1835,6 +1898,7 @@ def _row_to_instrument(row: Sequence[Any]) -> Instrument:
         _fetched_at,
         _run_id,
         _csv_sha,
+        _reference_only,
     ) = row
     return Instrument(
         exch_id=Exchange(exch_id),
