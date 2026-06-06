@@ -547,6 +547,85 @@ def test_build_preopen_rows_resilient_to_one_bad_symbol(tmp_path: Path) -> None:
     assert [r.symbol for r in rows] == ["COALINDIA"]  # bad symbol skipped, good one kept
 
 
+def test_build_minute_basis(tmp_path: Path) -> None:
+    # DEC-PREOPEN-MINUTE-BASIS-001: the minute basis takes IEP from the 09:15:00
+    # 1-minute session-open OPEN and PREV. CLOSE from the PRIOR trading day's LAST
+    # 1-minute close — both on the 1-minute scale (never the 1-day bar).
+    # 03:45 UTC == 09:15 IST (session open); a later same-day bar is the last close.
+    _write(
+        tmp_path,
+        "COALINDIA",
+        "1minute",
+        [
+            _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="100", close="101"),  # d1 09:15
+            _bar(datetime(2024, 3, 1, 3, 50, tzinfo=UTC), open_="104", close="105"),  # d1 last
+            _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="106", close="107"),  # d2 09:15
+            _bar(datetime(2024, 3, 4, 3, 50, tzinfo=UTC), open_="108", close="110"),  # d2 last
+        ],
+    )
+    # Minute basis qualifies on the 1minute partition (no 1day needed).
+    assert resolve_report_datasets(tmp_path, ["COALINDIA"], basis="minute") == [
+        ("NSE", "CASH", "COALINDIA")
+    ]
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "COALINDIA")],
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        basis="minute",
+    )
+    # Only 2024-03-04 emits (2024-03-01 has no prior trading day).
+    assert len(rows) == 1
+    assert rows[0].day == date(2024, 3, 4)
+    assert rows[0].prev_close == Decimal("105")  # d1's LAST 1-minute close
+    assert rows[0].iep == Decimal("106")  # d2's 09:15 1-minute OPEN
+    assert rows[0].chng == Decimal("1")
+
+
+def test_resolve_report_datasets_basis_gate(tmp_path: Path) -> None:
+    # DEC-PREOPEN-MINUTE-BASIS-001: a 1day-only symbol qualifies for basis="day"
+    # but NOT basis="minute", and a 1minute-only symbol qualifies for
+    # basis="minute" but NOT basis="day" (each basis reads its own partition).
+    _write(
+        tmp_path,
+        "DAYONLY",
+        "1day",
+        [_bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="10", close="11")],
+    )
+    _write(
+        tmp_path,
+        "MINONLY",
+        "1minute",
+        [_bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="20", close="21")],
+    )
+    day_syms = {s for _, _, s in resolve_report_datasets(tmp_path, basis="day")}
+    min_syms = {s for _, _, s in resolve_report_datasets(tmp_path, basis="minute")}
+    assert "DAYONLY" in day_syms and "DAYONLY" not in min_syms
+    assert "MINONLY" in min_syms and "MINONLY" not in day_syms
+
+
+def test_build_minute_basis_no_minute_partition_is_empty(tmp_path: Path) -> None:
+    # Minute-basis build on a symbol with only a 1day partition: the 09:15-open
+    # helper returns {} for the absent 1minute partition → no rows, no crash
+    # (covers the empty-partition branch of _intraday_open_by_date).
+    _write(
+        tmp_path,
+        "DAYONLY",
+        "1day",
+        [_bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="10", close="11")],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "DAYONLY")],
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        basis="minute",
+    )
+    assert rows == []
+
+
 # ── DEC-REPORTS-EXCEL-CATEGORIES-001 — two categories + per-year/per-month zip ─
 
 

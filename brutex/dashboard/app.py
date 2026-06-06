@@ -68,6 +68,7 @@ from brutex.dashboard.db_view import (
 )
 from brutex.dashboard.option_pull_controller import pull_options
 from brutex.dashboard.preopen_report import (
+    ReportBasis,
     ReportMode,
     build_preopen_rows,
     render_report_zip,
@@ -1660,21 +1661,41 @@ def build_app(
 
     # ── Pre-open report (DEC-PREOPEN-REPORT-001) ────────────────────────
 
+    def _report_basis_literal(basis: str) -> ReportBasis:
+        """Validate the ``?basis=`` query → the ``ReportBasis`` literal (400 on bad value).
+
+        DEC-PREOPEN-MINUTE-BASIS-001: ``day`` (default — 1-day open + prior 1-day
+        close) or ``minute`` (09:15 1-minute open + prior day's last 1-minute
+        close). Mirrors the ``mode`` literal-narrowing pattern so mypy + pyright
+        both narrow without a cast. ONE source of truth for the three endpoints.
+        """
+        if basis == "day":
+            return "day"
+        if basis == "minute":
+            return "minute"
+        raise HTTPException(status_code=400, detail="basis must be 'day' or 'minute'")
+
     @app.get("/api/v1/reports/preopen/symbols")
-    async def api_preopen_symbols() -> JSONResponse:
+    async def api_preopen_symbols(basis: str = Query("day")) -> JSONResponse:
         """GET /api/v1/reports/preopen/symbols — spot symbols the report can cover.
 
-        Returns every ``(exchange, segment, symbol)`` in the lake that has BOTH a
-        ``1day`` (PREV. CLOSE source) and a ``1minute`` (IEP source) partition —
-        the picker for the pre-open report panel. READ-ONLY; empty when no lake.
+        Returns every ``(exchange, segment, symbol)`` in the lake that has the
+        partition the chosen ``basis`` reads (DEC-PREOPEN-MINUTE-BASIS-001): the
+        ``1day`` partition for ``basis=day`` (default), else the ``1minute``
+        partition for ``basis=minute``. The picker for the pre-open report panel.
+        READ-ONLY; empty when no lake.
         """
+        report_basis = _report_basis_literal(basis)
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return JSONResponse({"symbols": []})
-        triples = resolve_report_datasets(lake_root.parent)
+        triples = resolve_report_datasets(lake_root.parent, basis=report_basis)
         return JSONResponse(
-            {"symbols": [{"exchange": e, "segment": s, "symbol": y} for e, s, y in triples]}
+            {
+                "symbols": [{"exchange": e, "segment": s, "symbol": y} for e, s, y in triples],
+                "basis": report_basis,
+            }
         )
 
     @app.get("/api/v1/reports/preopen.xlsx")
@@ -1682,6 +1703,7 @@ def build_app(
         start: str = Query(..., alias="from"),
         end: str = Query(..., alias="to"),
         symbols: str | None = Query(None),
+        basis: str = Query("day"),
     ) -> Response:
         """GET /api/v1/reports/preopen.xlsx — the NSE-style pre-open ``.xlsx`` download.
 
@@ -1689,9 +1711,13 @@ def build_app(
         spot symbol over the inclusive ``[from, to]`` date range, lake-derived
         (DEC-PREOPEN-REPORT-001) — the numbers match NSE to the paisa. *symbols*
         is an optional comma-separated filter; omitted ⇒ every report-eligible
-        symbol in the lake. Returns a deterministic, dependency-free workbook as
-        an attachment. A 400 is raised for a malformed / inverted date range.
+        symbol in the lake. ``basis`` (DEC-PREOPEN-MINUTE-BASIS-001) selects the
+        price scale: ``day`` (default — 1-day open + prior 1-day close) or
+        ``minute`` (09:15 1-minute open + prior day's last 1-minute close).
+        Returns a deterministic, dependency-free workbook as an attachment. A 400
+        is raised for a malformed / inverted date range or an unknown ``basis``.
         """
+        report_basis = _report_basis_literal(basis)
         store = _require_store()
         try:
             start_d = date.fromisoformat(start)
@@ -1711,9 +1737,10 @@ def build_app(
             return build_preopen_rows(
                 store.connection,
                 lake,
-                datasets=resolve_report_datasets(lake, wanted),
+                datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
                 start=start_d,
                 end=end_d,
+                basis=report_basis,
             )
 
         rows = (
@@ -1736,6 +1763,7 @@ def build_app(
         symbols: str | None = Query(None),
         mode: str = Query("all"),
         min_pct: float = Query(0.0),
+        basis: str = Query("day"),
     ) -> Response:
         """GET /api/v1/reports/preopen.zip — the two-category pre-open report ``.zip``.
 
@@ -1773,6 +1801,7 @@ def build_app(
             raise HTTPException(status_code=400, detail="mode must be 'all' or 'topmover'")
         if min_pct < 0:
             raise HTTPException(status_code=400, detail="min_pct must be >= 0")
+        report_basis = _report_basis_literal(basis)
         wanted = [s for s in (symbols or "").split(",") if s.strip()] or None
         lake_root = getattr(store, "path", None)
 
@@ -1781,9 +1810,10 @@ def build_app(
             return build_preopen_rows(
                 store.connection,
                 lake,
-                datasets=resolve_report_datasets(lake, wanted),
+                datasets=resolve_report_datasets(lake, wanted, basis=report_basis),
                 start=start_d,
                 end=end_d,
+                basis=report_basis,
             )
 
         rows = (

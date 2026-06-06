@@ -52,8 +52,12 @@ import structlog
 
 from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
+    _INTRADAY_BASE_INTERVAL,
     _daily_close_by_date,
     _daily_open_by_date,
+    _intraday_last_close_by_date,
+    _intraday_open_by_date,
+    _prev_trading_close,
     list_candle_datasets,
 )
 
@@ -123,18 +127,36 @@ def _round2(value: Decimal) -> Decimal:
     return value.quantize(_2DP, rounding=ROUND_HALF_UP)
 
 
+#: The basis a pre-open report is computed on (DEC-PREOPEN-MINUTE-BASIS-001):
+#: ``"day"`` (default — PREV. CLOSE + IEP from the **1-day** bar, the original
+#: DEC-PREOPEN-REPORT-1DAY-001 behaviour) or ``"minute"`` (IEP = the **09:15:00
+#: 1-minute** session-open OPEN; PREV. CLOSE = the **prior trading day's last
+#: 1-minute close**, matching the engine's prev-close convention
+#: DEC-SPOT-PREVCLOSE-1MIN-001). Each basis stays on ONE price scale (never mixed)
+#: so an adjustment-mismatched symbol stays precise.
+ReportBasis = Literal["day", "minute"]
+
+#: The lake partition interval each basis reads from.
+_BASIS_INTERVAL: Final[dict[str, str]] = {
+    "day": _DAILY_INTERVAL,
+    "minute": _INTRADAY_BASE_INTERVAL,
+}
+
+
 def resolve_report_datasets(
-    lake_root: Path, symbols: list[str] | None = None
+    lake_root: Path, symbols: list[str] | None = None, *, basis: ReportBasis = "day"
 ) -> list[tuple[str, str, str]]:
     """Resolve the ``(exchange, segment, symbol)`` triples the report can build.
 
-    A dataset qualifies when it has a ``1day`` partition in the lake — the report
-    is fully 1-day-sourced (both PREV. CLOSE and IEP, DEC-PREOPEN-REPORT-1DAY-001),
-    so the 1-minute partition is irrelevant. When *symbols* is given, the result
-    is filtered to that set (case-sensitive on the lake symbol). Sorted by symbol
+    A dataset qualifies when it has the partition the chosen *basis* reads
+    (DEC-PREOPEN-MINUTE-BASIS-001): the ``1day`` partition for ``basis="day"``
+    (the original DEC-PREOPEN-REPORT-1DAY-001 behaviour), else the ``1minute``
+    partition for ``basis="minute"``. When *symbols* is given, the result is
+    filtered to that set (case-sensitive on the lake symbol). Sorted by symbol
     for a stable picker / report order. An empty or missing lake yields ``[]``
     (the report degrades to a header-only sheet).
     """
+    required = _BASIS_INTERVAL[basis]
     wanted = set(symbols) if symbols else None
     intervals_by_key: dict[tuple[str, str, str], set[str]] = {}
     for ds in list_candle_datasets(lake_root):
@@ -143,7 +165,7 @@ def resolve_report_datasets(
     resolved = [
         key
         for key, intervals in intervals_by_key.items()
-        if _DAILY_INTERVAL in intervals and (wanted is None or key[2] in wanted)
+        if required in intervals and (wanted is None or key[2] in wanted)
     ]
     return sorted(resolved, key=lambda k: k[2])
 
@@ -177,49 +199,74 @@ def build_preopen_rows(
     datasets: list[tuple[str, str, str]],
     start: date,
     end: date,
+    basis: ReportBasis = "day",
 ) -> list[PreOpenRow]:
     """Build the pre-open rows for *datasets* over ``[start, end]`` (inclusive).
 
-    Each dataset is an ``(exchange, segment, symbol)`` spot triple. Fully
-    1-day-sourced (DEC-PREOPEN-REPORT-1DAY-001): for each symbol every day with a
-    1-day bar uses that bar's **open** as the IEP, anchored to the **latest 1-day
-    close strictly before that day** (:func:`_prev_close_asof`) as PREV. CLOSE —
-    both on the SAME 1-day basis so adjustment-mismatched symbols (e.g. TMPV)
-    stay precise and the numbers match NSE. A day is emitted only when its 1-day
-    open exists, a (non-zero) previous 1-day close exists, and the day falls in
-    range. Rows are sorted by ``(day, symbol)`` for a single, scannable sheet.
-    O(log N) per emitted row.
+    Each dataset is an ``(exchange, segment, symbol)`` spot triple. The price
+    *basis* (DEC-PREOPEN-MINUTE-BASIS-001) selects ONE consistent scale:
+
+    * ``"day"`` (default, DEC-PREOPEN-REPORT-1DAY-001) — IEP = the day's **1-day
+      open**; PREV. CLOSE = the **latest 1-day close strictly before** that day
+      (:func:`_prev_close_asof`, robust to an internal 1-day gap).
+    * ``"minute"`` (DEC-PREOPEN-MINUTE-BASIS-001) — IEP = the **09:15:00 1-minute
+      session-open OPEN** (:func:`_intraday_open_by_date`); PREV. CLOSE = the
+      **prior trading day's last 1-minute close** (:func:`_prev_trading_close`
+      over :func:`_intraday_last_close_by_date`), matching the engine's own
+      prev-close (DEC-SPOT-PREVCLOSE-1MIN-001).
+
+    Both columns ALWAYS come from the same basis (never mixed), so an
+    adjustment-mismatched symbol (e.g. TMPV) stays precise. A day is emitted only
+    when its open exists, a non-zero prior close exists, and the day is in range.
+    Per-symbol reads are wrapped so one un-queryable symbol can NEVER 500 the
+    export (DEC-PREOPEN-SPACE-SYMBOL-001). Rows sorted by ``(day, symbol)``.
     """
     rows: list[PreOpenRow] = []
     for exchange, segment, symbol in datasets:
         # Resilience (DEC-PREOPEN-SPACE-SYMBOL-001): one un-queryable symbol must
-        # NEVER 500 the whole multi-symbol export — mirroring the "never a 500"
-        # contract the coverage path already honours (db_view._aggregate_parquet_
-        # resilient). A ``ValueError`` (e.g. the candle-symbol validator) or a
-        # ``duckdb.Error`` (an unreadable / malformed Parquet for one symbol) is
-        # logged + skipped; every other symbol still exports.
+        # NEVER 500 the whole multi-symbol export — a ``ValueError`` (the candle-
+        # symbol validator) or a ``duckdb.Error`` (an unreadable / malformed
+        # Parquet for one symbol) is logged + skipped; every other symbol exports.
         try:
-            daily = _daily_close_by_date(
-                conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
-            )
-            opens = _daily_open_by_date(
-                conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
-            )
+            if basis == "minute":
+                opens = _intraday_open_by_date(
+                    conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+                )
+                prev_by_day = _prev_trading_close(
+                    _intraday_last_close_by_date(
+                        conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+                    )
+                )
+                daily: dict[date, Decimal] = {}
+                daily_dates: list[date] = []
+            else:
+                opens = _daily_open_by_date(
+                    conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+                )
+                daily = _daily_close_by_date(
+                    conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+                )
+                daily_dates = sorted(daily)
+                prev_by_day = {}
         except (ValueError, duckdb.Error) as exc:
             _LOG.warning(
                 "preopen.symbol.skipped",
                 symbol=symbol,
                 exchange=exchange,
                 segment=segment,
+                basis=basis,
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
             continue
-        daily_dates = sorted(daily)
         for day in sorted(opens):
             if day < start or day > end:
                 continue
-            anchor = _prev_close_asof(daily, daily_dates, day)
+            anchor = (
+                prev_by_day.get(day)
+                if basis == "minute"
+                else _prev_close_asof(daily, daily_dates, day)
+            )
             if anchor is None or anchor == 0:
                 continue
             iep = opens[day]
