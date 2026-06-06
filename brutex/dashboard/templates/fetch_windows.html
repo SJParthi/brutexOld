@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BruteX — Fetch windows</title>
+<style>
+  :root {
+    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
+    --border: #1E222D; --border-strong: #2B313F;
+    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
+    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
+    --red: #FF5C5C;
+    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    color: var(--text); min-height: 100vh; display: flex; flex-direction: column;
+    background:
+      radial-gradient(ellipse at top, rgba(255,183,77,0.06), transparent 50%),
+      radial-gradient(ellipse at bottom right, rgba(38,217,176,0.04), transparent 60%),
+      var(--bg);
+  }
+  @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1);} 50% { opacity: .5; transform: scale(.9);} }
+
+  header {
+    display:flex; align-items:center; gap:14px; padding:16px 24px;
+    border-bottom:1px solid var(--border); animation: fadeInDown .5s ease both;
+  }
+  .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
+    background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .sub { color:var(--muted); font-size:12px; }
+  .topnav { margin-left:18px; display:flex; gap:14px; font-size:13px; align-items:center; }
+  .topnav a { color:var(--blue); text-decoration:none; }
+  .topnav .sep { color:var(--border-strong); }
+  .live { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
+  .live .dot { width:9px; height:9px; border-radius:50%; background:var(--green);
+    box-shadow:0 0 12px var(--green); animation: pulse 1.6s ease-in-out infinite; }
+
+  .subnav { display:flex; gap:10px; padding:12px 24px; border-bottom:1px solid var(--border);
+    animation: fadeInDown .6s .04s ease both; flex-wrap:wrap; }
+  .subnav a { font-size:13px; text-decoration:none; color:var(--muted); padding:6px 12px;
+    border:1px solid var(--border-strong); border-radius:999px; transition:.16s; }
+  .subnav a:hover { border-color:var(--blue); color:var(--text); }
+  .subnav a.active { color:var(--text-bright); border-color:var(--yellow);
+    background:rgba(255,183,77,0.12); }
+  .subnav a.hub { margin-left:auto; color:var(--blue); border-color:var(--blue); }
+
+  .band { display:flex; align-items:center; gap:28px; padding:16px 24px; flex-wrap:wrap;
+    border-bottom:1px solid var(--border); animation: fadeInDown .6s .06s ease both; }
+  .kpi { display:flex; flex-direction:column; gap:2px; }
+  .kpi .v { font-size:24px; font-weight:800; color:var(--text-bright); font-variant-numeric:tabular-nums; }
+  .kpi .l { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .kpi .v.ok { color:var(--green); }
+  .kpi .v.bad { color:var(--red); }
+  #status { margin-left:auto; font-size:12px; color:var(--muted); }
+
+  .panelwrap { flex:1; padding:14px 24px 24px; animation: fadeInUp .5s ease both; min-height:0; display:flex; }
+  #panel { flex:1; overflow:auto; background:var(--surface); border:1px solid var(--border); border-radius:14px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  thead th { position:sticky; top:0; background:var(--surface-2); color:var(--muted);
+    font-weight:700; text-align:left; padding:10px 14px; z-index:1; font-size:11px;
+    text-transform:uppercase; letter-spacing:.5px; }
+  tbody td { padding:9px 14px; border-top:1px solid var(--border); }
+  tbody tr:hover { background:var(--surface-2); }
+  .sym { font-weight:700; color:var(--text-bright); }
+  .err { color:var(--red); font-family:"SF Mono",Menlo,Consolas,monospace; font-size:11.5px; }
+  .empty { color:var(--muted); font-size:13px; padding:28px 16px; text-align:center; }
+  .num { font-variant-numeric:tabular-nums; }
+
+  /* ── Accessibility + motion polish (DEC-DASHBOARD-A11Y-POLISH-001) ── */
+  a:focus-visible, button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
+    outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 8px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+      transition-duration: .001ms !important; scroll-behavior: auto !important;
+    }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div class="logo">BruteX</div>
+    <div class="sub">Fetch windows — per-window SUCCESS / EMPTY / FAILED (DEC-WINDOW-STATUS-001)</div>
+    <nav class="topnav">
+      <a href="/credentials">Credentials</a>
+      <span class="sep">·</span>
+      <a href="/db">Database</a>
+      <span class="sep">·</span>
+      <a href="/coverage">Coverage</a>
+      <span class="sep">·</span>
+      <a href="/reports">Reports</a>
+    </nav>
+    <div class="live" id="live"><span class="dot"></span><span id="livetxt">polling</span></div>
+  </header>
+
+  <nav class="subnav">
+    <a href="/coverage/options">⛓️ Expired options</a>
+    <a href="/coverage/spot">📈 Spot coverage</a>
+    <a href="/coverage/windows" class="active">🪟 Fetch windows</a>
+    <a href="/coverage" class="hub">← Coverage hub</a>
+  </nav>
+
+  <div class="band">
+    <div class="kpi"><span class="v ok" id="winc">—</span><span class="l">windows recorded</span></div>
+    <div class="kpi"><span class="v bad" id="failc">—</span><span class="l">failed windows</span></div>
+    <span id="status"></span>
+  </div>
+
+  <div class="panelwrap">
+    <div id="panel"><div class="empty">loading…</div></div>
+  </div>
+
+<script>
+/* ── BruteX fetch windows (DEC-WINDOW-STATUS-001) ──
+   Read-only: one row per fetch window the ingest recorded in the durable
+   <lake>/window_status.json sidecar — so the operator SEES exactly which windows
+   are stored (SUCCESS), genuinely empty (EMPTY), or failed and needing a re-pull
+   (FAILED), with the attempt count + last error. Polls /api/v1/coverage/windows.
+   Escape-before-innerHTML discipline (XSS). */
+const panel = document.getElementById("panel");
+const wincEl = document.getElementById("winc");
+const failcEl = document.getElementById("failc");
+const liveTxt = document.getElementById("livetxt");
+const statusEl = document.getElementById("status");
+
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
+
+function winStatus(s) {
+  const v = String(s == null ? "" : s).toUpperCase();
+  const color = v === "SUCCESS" ? "#34d399" : v === "FAILED" ? "#f87171" : "#9aa4b2";
+  return '<span style="color:' + color + ';font-weight:700;">' + esc(v || "—") + "</span>";
+}
+
+function renderWindows(rows) {
+  if (!rows.length) {
+    panel.innerHTML = '<div class="empty">no fetch windows recorded yet — pull a symbol on /universe; each fetch window then logs SUCCESS / EMPTY / FAILED here (DEC-WINDOW-STATUS-001)</div>';
+    return;
+  }
+  const body = rows.map(r =>
+    "<tr>"
+    + '<td><span class="sym">' + esc(r.symbol) + "</span></td>"
+    + "<td>" + esc(r.market) + "</td>"
+    + "<td>" + esc(r.interval) + "</td>"
+    + "<td>" + esc(r.window_start || "") + "</td>"
+    + "<td>" + esc(r.window_end || "") + "</td>"
+    + "<td>" + winStatus(r.status) + "</td>"
+    + '<td class="num">' + esc(num(r.bars)) + "</td>"
+    + '<td class="num">' + esc(num(r.attempts)) + "</td>"
+    + "<td>" + esc(r.last_error || "") + "</td>"
+    + "</tr>"
+  ).join("");
+  panel.innerHTML =
+    "<table><thead><tr>"
+    + "<th>Symbol</th><th>Market</th><th>Interval</th><th>Window start</th><th>Window end</th>"
+    + "<th>Status</th><th>Bars</th><th>Attempts</th><th>Last error</th>"
+    + "</tr></thead><tbody>" + body + "</tbody></table>";
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/v1/coverage/windows");
+    if (!r.ok) { liveTxt.textContent = "error " + r.status; return; }
+    const body = await r.json();
+    const rows = body.windows || [];
+    const failed = rows.filter(w => String(w.status || "").toUpperCase() === "FAILED").length;
+    wincEl.textContent = body.count ?? "—";
+    failcEl.textContent = num(failed);
+    statusEl.textContent = (body.count ?? "—")
+      + " windows · per-window SUCCESS / EMPTY / FAILED (DEC-WINDOW-STATUS-001)";
+    renderWindows(rows);
+    liveTxt.textContent = "live · " + rows.length + " windows";
+  } catch (e) {
+    liveTxt.textContent = "offline";
+  }
+}
+
+poll();
+setInterval(poll, 4000);
+</script>
+</body>
+</html>
