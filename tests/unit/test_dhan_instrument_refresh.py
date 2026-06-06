@@ -281,3 +281,50 @@ def test_refresh_default_does_not_admit_or_tag_reference() -> None:
     # No reference set → reference_only_of is None (store uses its VIX default).
     assert up["reference_only_of"] is None
     assert up["reference_only_ids"] == frozenset()
+
+
+def _rows_with_ntm_index() -> list[dict[str, str]]:
+    rows = _rows()
+    rows.append(
+        _row(
+            EXCH_ID="NSE",
+            SECURITY_ID="46",  # verified Dhan id (web.dhan.co/...secid=46)
+            INSTRUMENT="INDEX",
+            SYMBOL_NAME="NIFTY TOTAL MKT",
+            DISPLAY_NAME="Nifty Total Market",
+        )
+    )
+    return rows
+
+
+def test_refresh_admits_and_tags_ntm_index_reference_only() -> None:
+    # DEC-NIFTY-TOTAL-MARKET-DISCOVER-001: the NTM index is admitted via
+    # extra_index_symbols AND tagged reference_only=TRUE (its id is in the
+    # reference set). The brute-force engine is unaffected — it stays an IDX
+    # outside the hardcoded 3-index brute set.
+    store = _Store()
+    text = _csv(_rows_with_ntm_index())
+    refresh_instruments(
+        store,
+        lambda _url: text,
+        snapshot_date=date(2026, 6, 6),
+        run_id="run-ntm",
+        reference_security_ids=frozenset({46}),
+        extra_index_symbols=frozenset({"NIFTY TOTAL MKT"}),
+    )
+    up = store.upserts[0]
+    persisted = up["instruments"]
+    assert isinstance(persisted, list)
+    assert "NIFTY TOTAL MKT" in [i.symbol_name for i in persisted]
+    assert up["reference_only_ids"] == frozenset({46})
+
+
+def test_refresh_default_does_not_admit_ntm_index() -> None:
+    store = _Store()
+    text = _csv(_rows_with_ntm_index())
+    refresh_instruments(
+        store, lambda _url: text, snapshot_date=date(2026, 6, 6), run_id="run-nontm"
+    )
+    persisted = store.upserts[0]["instruments"]
+    assert isinstance(persisted, list)
+    assert "NIFTY TOTAL MKT" not in [i.symbol_name for i in persisted]

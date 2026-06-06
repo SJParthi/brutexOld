@@ -42,6 +42,7 @@ def load_universe_report(
     *,
     url: str = INSTRUMENT_MASTER_DETAILED_URL,
     reference_security_ids: frozenset[int] = frozenset(),
+    extra_index_symbols: frozenset[str] = frozenset(),
 ) -> UniverseReport:
     """Download + parse the detailed scrip master into a :class:`UniverseReport`.
 
@@ -55,6 +56,11 @@ def load_universe_report(
     :func:`~brutex.adapters.dhan.instruments.select_universe_report`. Defaults
     empty → the selection is byte-identical to the F&O-only universe.
 
+    ``extra_index_symbols`` (DEC-NIFTY-TOTAL-MARKET-DISCOVER-001): optional
+    ``SYMBOL_NAME`` tokens to ALSO admit as INDEX rows (the runtime-discovered
+    NIFTY Total Market token), threaded to ``select_universe_report``. Default
+    empty → byte-identical.
+
     Raises
     ------
     DhanInstrumentError
@@ -67,7 +73,11 @@ def load_universe_report(
     # validate_header raised if fieldnames was None/incomplete → safe to narrow.
     fieldnames = cast(Sequence[str], reader.fieldnames)
     rows = [{name: (row.get(name) or "") for name in fieldnames} for row in reader]
-    return select_universe_report(rows, reference_security_ids=reference_security_ids)
+    return select_universe_report(
+        rows,
+        reference_security_ids=reference_security_ids,
+        extra_index_symbols=extra_index_symbols,
+    )
 
 
 def load_universe(
@@ -75,14 +85,20 @@ def load_universe(
     *,
     url: str = INSTRUMENT_MASTER_DETAILED_URL,
     reference_security_ids: frozenset[int] = frozenset(),
+    extra_index_symbols: frozenset[str] = frozenset(),
 ) -> list[Instrument]:
     """Download + parse the detailed scrip master into the universe list.
 
     See :func:`load_universe_report`; ``reference_security_ids`` (default empty)
-    admits extra NSE equities by ``SECURITY_ID`` as REFERENCE_ONLY.
+    admits extra NSE equities by ``SECURITY_ID`` as REFERENCE_ONLY, and
+    ``extra_index_symbols`` (default empty) admits extra INDEX rows by
+    ``SYMBOL_NAME`` (the discovered NIFTY Total Market token).
     """
     return load_universe_report(
-        http_get, url=url, reference_security_ids=reference_security_ids
+        http_get,
+        url=url,
+        reference_security_ids=reference_security_ids,
+        extra_index_symbols=extra_index_symbols,
     ).universe
 
 

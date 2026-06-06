@@ -14,10 +14,14 @@ from decimal import Decimal
 import pytest
 from brutex.adapters.dhan.instruments import (
     DhanInstrumentError,
+    DiscoveredIndex,
+    IndexDiscoveryError,
     build_leg_economics,
+    discover_index,
     fno_underlying_security_ids,
     fno_underlying_symbols,
     parse_instrument_row,
+    parse_nse_equities,
     select_universe,
     select_universe_report,
     validate_header,
@@ -848,3 +852,112 @@ class TestBuildLegEconomics:
         ]
         # Only leg → used despite no expiry; freeze 0 → None.
         assert build_leg_economics(rows)[(Exchange.NSE, "NIFTY")] == (65, None)
+
+
+class TestDiscoverIndex:
+    """Runtime index discovery (DEC-NIFTY-TOTAL-MARKET-DISCOVER-001).
+
+    Reads the LIVE master and returns the real (symbol_name, security_id) for the
+    one matching INDEX row — fail-loud on zero / ambiguous / no-id, so BruteX
+    never hardcodes a guessed id (Golden Rule #1).
+    """
+
+    def test_finds_single_match(self) -> None:
+        rows = [
+            _row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY TOTAL MKT", SECURITY_ID="46"),
+            _row(INSTRUMENT="EQUITY", SYMBOL_NAME="RELIANCE", SECURITY_ID="2"),
+        ]
+        found = discover_index(rows, pattern=r"TOTAL\s*M(?:AR)?K(?:E)?T")
+        assert found == DiscoveredIndex(
+            symbol_name="NIFTY TOTAL MKT", security_id=46, exchange=Exchange.NSE
+        )
+
+    def test_matches_market_spelling_too(self) -> None:
+        rows = [_row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY TOTAL MARKET", SECURITY_ID="46")]
+        assert discover_index(rows, pattern=r"TOTAL\s*M(?:AR)?K(?:E)?T").security_id == 46
+
+    def test_zero_match_raises_with_scan_size(self) -> None:
+        rows = [_row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY 50", SECURITY_ID="13")]
+        with pytest.raises(IndexDiscoveryError, match=r"no NSE INDEX row matched.*among 1"):
+            discover_index(rows, pattern=r"TOTAL\s*MKT")
+
+    def test_ambiguous_match_lists_candidates(self) -> None:
+        rows = [
+            _row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY TOTAL MKT", SECURITY_ID="46"),
+            _row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY TOTAL MARKET 2", SECURITY_ID="47"),
+        ]
+        with pytest.raises(IndexDiscoveryError, match=r"ambiguous.*matched 2"):
+            discover_index(rows, pattern=r"TOTAL\s*M")
+
+    def test_matched_row_without_security_id_raises(self) -> None:
+        rows = [_row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY TOTAL MKT", SECURITY_ID="")]
+        with pytest.raises(IndexDiscoveryError, match=r"no\s+SECURITY_ID|carries no"):
+            discover_index(rows, pattern=r"TOTAL\s*MKT")
+
+    def test_non_index_rows_ignored(self) -> None:
+        # An EQUITY (or any non-INDEX) row that matches the name pattern is NOT a
+        # candidate — only INSTRUMENT==INDEX rows are scanned.
+        rows = [
+            _row(INSTRUMENT="EQUITY", SYMBOL_NAME="NIFTY TOTAL MKT LTD", SECURITY_ID="9"),
+        ]
+        with pytest.raises(IndexDiscoveryError, match=r"among 0"):
+            discover_index(rows, pattern=r"TOTAL\s*MKT")
+
+    def test_other_exchange_rows_ignored(self) -> None:
+        # exchange filter: a BSE INDEX matching the pattern is skipped when the
+        # default NSE scan is requested.
+        rows = [
+            _row(EXCH_ID="BSE", INSTRUMENT="INDEX", SYMBOL_NAME="TOTAL MKT", SECURITY_ID="5"),
+        ]
+        with pytest.raises(IndexDiscoveryError, match=r"no NSE INDEX row matched.*among 0"):
+            discover_index(rows, pattern=r"TOTAL\s*MKT", exchange=Exchange.NSE)
+        # ...but found when the BSE exchange is scanned.
+        assert discover_index(rows, pattern=r"TOTAL\s*MKT", exchange=Exchange.BSE).security_id == 5
+
+
+class TestExtraIndexSymbols:
+    """``extra_index_symbols`` admits runtime-discovered indices (NTM) as
+    REFERENCE_ONLY IDX rows without leaking into the brute-force engine."""
+
+    def test_default_empty_does_not_admit_ntm(self) -> None:
+        rows = [_row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY TOTAL MKT", SECURITY_ID="46")]
+        # Not on the curated allow-list → dropped by default (byte-identical).
+        assert select_universe(rows) == []
+
+    def test_extra_symbol_admits_the_index(self) -> None:
+        rows = [_row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY TOTAL MKT", SECURITY_ID="46")]
+        uni = select_universe(rows, extra_index_symbols=frozenset({"NIFTY TOTAL MKT"}))
+        assert len(uni) == 1
+        assert uni[0].security_id == 46
+        assert uni[0].instrument is InstrumentType.IDX
+
+    def test_extra_symbol_lowercase_is_normalised(self) -> None:
+        rows = [_row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY TOTAL MKT", SECURITY_ID="46")]
+        # Tokens are upper-cased before matching, so a lower-case token still admits.
+        uni = select_universe(rows, extra_index_symbols=frozenset({"nifty total mkt"}))
+        assert [i.security_id for i in uni] == [46]
+
+    def test_blank_token_ignored(self) -> None:
+        rows = [_row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY 50", SECURITY_ID="13")]
+        # A whitespace-only token is filtered out → no spurious admission.
+        assert select_universe(rows, extra_index_symbols=frozenset({"   "})) == []
+
+
+class TestParseNseEquities:
+    """``parse_nse_equities`` returns ONLY the NSE EQUITY rows (the subset the
+    constituent resolver matches against), skipping indices + derivative legs."""
+
+    def test_keeps_only_nse_equities(self) -> None:
+        rows = [
+            _row(INSTRUMENT="EQUITY", SYMBOL_NAME="RELIANCE", SECURITY_ID="2", ISIN="INE002A01018"),
+            _row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY 50", SECURITY_ID="13"),
+            _row(INSTRUMENT="OPTSTK", SYMBOL_NAME="RELIANCE-OPT", SECURITY_ID="3"),
+            _row(EXCH_ID="BSE", INSTRUMENT="EQUITY", SYMBOL_NAME="TCS", SECURITY_ID="4"),
+        ]
+        out = parse_nse_equities(rows)
+        assert [i.security_id for i in out] == [2]
+        assert out[0].isin == "INE002A01018"
+
+    def test_empty_when_no_equities(self) -> None:
+        rows = [_row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY 50", SECURITY_ID="13")]
+        assert parse_nse_equities(rows) == []

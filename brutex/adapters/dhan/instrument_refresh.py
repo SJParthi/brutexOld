@@ -92,6 +92,7 @@ def refresh_instruments(
     run_id: str,
     url: str = INSTRUMENT_MASTER_DETAILED_URL,
     reference_security_ids: frozenset[int] = frozenset(),
+    extra_index_symbols: frozenset[str] = frozenset(),
     clock: Callable[[], datetime] = _utcnow,
 ) -> RefreshResult:
     """Download the scrip master, select the universe, and persist it.
@@ -113,11 +114,22 @@ def refresh_instruments(
     default :func:`brutex.universe.is_reference_only` already tags). Defaults
     empty → byte-identical to the F&O-only refresh. The brute-force ENGINE is
     unaffected (DEC-ENGINE-ISOLATION-INVARIANT-001).
+
+    ``extra_index_symbols`` (DEC-NIFTY-TOTAL-MARKET-DISCOVER-001): ``SYMBOL_NAME``
+    tokens to ALSO admit as INDEX rows (the runtime-discovered NIFTY Total Market
+    token from :func:`brutex.adapters.dhan.ntm.prepare_ntm_reference_plan`). The
+    NTM index's own ``SECURITY_ID`` is included in ``reference_security_ids`` so
+    the index row is tagged ``reference_only=TRUE`` too. Default empty →
+    byte-identical. NTM is an ``IDX`` outside the hardcoded brute-force 3, so the
+    engine never sweeps it (DEC-ENGINE-ISOLATION-INVARIANT-001).
     """
     text = http_get(url)
     csv_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
     report = load_universe_report(
-        lambda _url: text, url=url, reference_security_ids=reference_security_ids
+        lambda _url: text,
+        url=url,
+        reference_security_ids=reference_security_ids,
+        extra_index_symbols=extra_index_symbols,
     )
 
     def _is_reference(instrument: Instrument) -> bool:
