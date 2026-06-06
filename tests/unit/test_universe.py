@@ -18,6 +18,7 @@ from brutex.universe import (
     BRUTE_FORCE_INDEX_UNDERLYINGS,
     BRUTE_FORCE_INDICES,
     INDEX_UNDERLYINGS,
+    REFERENCE_ONLY_INDEX_UNDERLYINGS,
     REFERENCE_ONLY_INDICES,
     V1_INDICES,
     V1_UNDERLYINGS,
@@ -31,6 +32,7 @@ from brutex.universe import (
     is_in_fetch_scope,
     is_in_scope,
     is_index_underlying,
+    is_reference_only,
     is_universe_underlying,
 )
 
@@ -250,6 +252,36 @@ def _make_equity(exchange: Exchange, symbol: str) -> Instrument:
         strike_price=None,
         asm_gsm_flag=False,
     )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# is_reference_only (DEC-NIFTY-TOTAL-MARKET-REFTAG-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestIsReferenceOnly:
+    def test_vix_is_reference_only(self) -> None:
+        # India VIX (the only reference_only=True UnderlyingSpec today).
+        exch, sym = next(iter(REFERENCE_ONLY_INDEX_UNDERLYINGS))
+        vix = _make_idx(exch, sym)
+        assert is_reference_only(vix) is True
+        # Mutual exclusion with the engine tier (the locked invariant).
+        assert is_in_brute_force_scope(vix) is False
+
+    def test_brute_force_index_is_not_reference_only(self) -> None:
+        exch, sym = next(iter(BRUTE_FORCE_INDEX_UNDERLYINGS))
+        idx = _make_idx(exch, sym)
+        assert is_reference_only(idx) is False
+        assert is_in_brute_force_scope(idx) is True
+
+    def test_equity_is_never_reference_only(self) -> None:
+        # reference_only is an IDX-only tier today (it keys off the index set);
+        # an equity named like VIX must not be mislabelled.
+        exch, sym = next(iter(REFERENCE_ONLY_INDEX_UNDERLYINGS))
+        assert is_reference_only(_make_equity(exch, sym)) is False
+
+    def test_unknown_index_is_not_reference_only(self) -> None:
+        assert is_reference_only(_make_idx(Exchange.NSE, "NIFTY IT")) is False
 
 
 # ────────────────────────────────────────────────────────────────────────

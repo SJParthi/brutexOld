@@ -958,15 +958,15 @@ class TestCoverageLedger:
             error_message=error,
         )
 
-    def test_schema_version_is_five(self, tmp_path: Path) -> None:
-        # v5: the empty/redundant expiries + contracts tables were dropped;
-        # the dedicated expired-options Parquet table superseded them
-        # (DEC-EXPIRED-OPTIONS-TABLE-001). v4 was the index segment='INDEX'
-        # PK fix (DEC-INDEX-SEGMENT-PK-FIX-001); v3 the Dhan-native rename
-        # (ADR-0003 / DEC-DHAN-NATIVE-SCHEMA-001).
+    def test_schema_version_is_six(self, tmp_path: Path) -> None:
+        # v6: added the reference_only column — the explicit REFERENCE_ONLY
+        # scope tier (DEC-NIFTY-TOTAL-MARKET-REFTAG-001). v5 dropped the
+        # empty expiries/contracts tables (DEC-EXPIRED-OPTIONS-TABLE-001); v4
+        # the index segment='INDEX' PK fix (DEC-INDEX-SEGMENT-PK-FIX-001); v3
+        # the Dhan-native rename (ADR-0003 / DEC-DHAN-NATIVE-SCHEMA-001).
         with InstrumentStore.open(tmp_path / "db") as s:
-            assert s.schema_version == 5
-            assert SCHEMA_VERSION == 5
+            assert s.schema_version == 6
+            assert SCHEMA_VERSION == 6
 
     def test_upsert_and_get_roundtrip(self, tmp_path: Path) -> None:
         with InstrumentStore.open(tmp_path / "db") as s:
@@ -1060,3 +1060,61 @@ class TestCoverageLedger:
             got = s.get_coverage("NSE", "NIFTY", 2024)
         assert got is not None
         assert got.status == "complete"
+
+
+# ------------------------------------------------------------------
+# reference_only column (v6, DEC-NIFTY-TOTAL-MARKET-REFTAG-001)
+# ------------------------------------------------------------------
+
+
+class TestReferenceOnlyColumn:
+    def test_default_classifier_flags_only_vix(self, tmp_path: Path) -> None:
+        # The default reference_only_of (universe.is_reference_only) tags India
+        # VIX True; the brute index + the equity stay False.
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY"), _idx("INDIAVIX"), _eq("RELIANCE")],
+                snapshot_date=date(2026, 6, 6),
+                run_id="r1",
+                csv_source_sha256=_csv_hash("ref"),
+            )
+            assert s.reference_only_security_ids() == frozenset({_idx("INDIAVIX").security_id})
+
+    def test_empty_when_no_reference_rows(self, tmp_path: Path) -> None:
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY"), _eq("RELIANCE")],
+                snapshot_date=date(2026, 6, 6),
+                run_id="r1",
+                csv_source_sha256=_csv_hash("ref"),
+            )
+            assert s.reference_only_security_ids() == frozenset()
+
+    def test_custom_classifier_is_honoured(self, tmp_path: Path) -> None:
+        # A caller-supplied reference_only_of overrides the default.
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY"), _eq("RELIANCE")],
+                snapshot_date=date(2026, 6, 6),
+                run_id="r1",
+                csv_source_sha256=_csv_hash("ref"),
+                reference_only_of=lambda _instr: True,
+            )
+            assert s.reference_only_security_ids() == frozenset(
+                {_idx("NIFTY").security_id, _eq("RELIANCE").security_id}
+            )
+
+    def test_as_of_respects_latest_snapshot(self, tmp_path: Path) -> None:
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("INDIAVIX")],
+                snapshot_date=date(2026, 6, 1),
+                run_id="r1",
+                csv_source_sha256=_csv_hash("d1"),
+            )
+            # as_of before the snapshot → nothing visible yet.
+            assert s.reference_only_security_ids(as_of=date(2026, 5, 1)) == frozenset()
+            # as_of on/after → visible.
+            assert s.reference_only_security_ids(as_of=date(2026, 6, 1)) == frozenset(
+                {_idx("INDIAVIX").security_id}
+            )
