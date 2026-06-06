@@ -27,6 +27,11 @@
   header {
     display:flex; align-items:center; gap:14px; padding:16px 24px;
     border-bottom:1px solid var(--border); animation:fadeInDown .5s ease both;
+    /* DASH-UX D3: sticky, frosted header (matches /db D2) so the nav stays put
+       while the symbol grid scrolls (DEC-DASHBOARD-REPORTS-UX-001). */
+    position:sticky; top:0; z-index:6;
+    background:rgba(10,13,17,.82);
+    -webkit-backdrop-filter:blur(11px); backdrop-filter:blur(11px);
   }
   .logo { font-weight:800; font-size:18px; letter-spacing:.5px;
     background:linear-gradient(90deg,var(--purple),var(--blue),var(--green));
@@ -91,6 +96,23 @@
   .note b { color:var(--text); }
   #msg { font-size:13px; color:var(--yellow); margin-top:12px; min-height:18px; }
   .empty { color:var(--muted); font-size:13px; padding:14px 0; }
+
+  /* ── DASH-UX D3 (DEC-DASHBOARD-REPORTS-UX-001): additive presentational polish ── */
+  /* Chip hover lift (mouse only; keyboard focus uses the a11y ring below). */
+  .chip:hover { border-color:var(--blue); transform:translateY(-1px); }
+  /* Animated count-up "pop" when the selected count changes. */
+  @keyframes countPop { 0% { transform:scale(1); } 40% { transform:scale(1.18); color:var(--green-bright); } 100% { transform:scale(1); } }
+  .count.pop { animation:countPop .32s ease; display:inline-block; }
+  /* Skeleton-shimmer chips while the symbol list loads (reuses the D1 pattern). */
+  @keyframes shimmer { 0% { background-position:-340px 0; } 100% { background-position:340px 0; } }
+  .skel-chip { display:inline-block; height:30px; width:104px; border-radius:999px;
+    margin:0 8px 8px 0; border:1px solid var(--border);
+    background:linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 50%, var(--surface-2) 75%);
+    background-size:680px 100%; animation:shimmer 1.25s linear infinite; }
+  /* Empty-state art — a floating glyph instead of a bare sentence (matches /db). */
+  .empty .art { display:block; font-size:42px; line-height:1; margin-bottom:10px;
+    animation:floatArt 3.4s ease-in-out infinite; }
+  @keyframes floatArt { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-9px); } }
   /* ── Accessibility + motion polish (DEC-DASHBOARD-A11Y-POLISH-002, extends #497) ── */
   /* Keyboard focus rings (TAB-only — never on mouse click) + reduce-motion honoured,
      the same safe a11y polish shipped to /universe + /coverage in #497; additive,
@@ -173,7 +195,7 @@
         </select>
         <span class="count" id="count">0 selected</span>
       </div>
-      <div class="syms" id="syms"><span class="empty">loading symbols…</span></div>
+      <div class="syms" id="syms"></div>
 
       <div id="msg"></div>
       <p class="note">
@@ -191,12 +213,27 @@ const msgEl = document.getElementById("msg");
 let selected = new Set();
 let allSymbols = [];
 
+/* DASH-UX D3 (DEC-DASHBOARD-REPORTS-UX-001): the count gets a brief "pop" each
+   time it changes so selecting/clearing feels alive. The animation class is
+   removed on the next frame so it can re-trigger on the following change. */
 function refreshCount() {
   countEl.textContent = selected.size + " selected";
+  countEl.classList.remove("pop");
+  void countEl.offsetWidth;
+  countEl.classList.add("pop");
 }
+
+/* Skeleton-shimmer placeholder chips shown while the symbol list loads
+   (matches the /universe D1 skeleton). Replaced by real chips or the
+   empty-state art once the fetch resolves. */
+function showSkeleton() {
+  symsEl.innerHTML = Array.from({ length: 14 }, () => '<span class="skel-chip"></span>').join("");
+}
+
 function renderChips() {
   if (allSymbols.length === 0) {
-    symsEl.innerHTML = '<span class="empty">no report-eligible symbols in the lake yet — pull a stock\'s spot (1m + 1d) first</span>';
+    symsEl.innerHTML = '<div class="empty"><span class="art">📭</span>'
+      + 'no report-eligible symbols in the lake yet — pull a stock\'s spot (1m + 1d) first</div>';
     return;
   }
   symsEl.innerHTML = "";
@@ -213,6 +250,7 @@ function renderChips() {
   }
 }
 async function loadSymbols() {
+  showSkeleton();
   try {
     const r = await fetch("/api/v1/reports/preopen/symbols");
     const j = await r.json();
@@ -220,7 +258,7 @@ async function loadSymbols() {
     selected = new Set(allSymbols.map(s => s.symbol)); // default: all
     renderChips(); refreshCount();
   } catch (e) {
-    symsEl.innerHTML = '<span class="empty">could not load symbols</span>';
+    symsEl.innerHTML = '<div class="empty"><span class="art">📭</span>could not load symbols</div>';
   }
 }
 document.getElementById("all").onclick = () => {
@@ -252,7 +290,7 @@ document.getElementById("idxpick").onchange = async (e) => {
     msgEl.textContent = j.note
       || `Added ${added} of ${idx}'s constituent stock(s) held in the lake — verify; membership rebalances.`;
   } catch (err) {
-    msgEl.textContent = "could not fetch constituents (see /logs)";
+    msgEl.textContent = "could not fetch constituents — try again, or check the server logs";
   }
 };
 /* ── Category toggle (DEC-REPORTS-EXCEL-CATEGORIES-001) ──
