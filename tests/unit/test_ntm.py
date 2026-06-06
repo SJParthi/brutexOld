@@ -164,6 +164,7 @@ def test_end_to_end_against_real_constituent_csv() -> None:
 
     rows: list[Mapping[str, str]] = [_index_row()]
     for offset, con in enumerate(constituents):
+        assert con.isin is not None  # the real NTM list has 100% ISIN coverage
         rows.append(
             _equity_row(isin=con.isin, security_id=str(2000 + offset), name=f"{con.symbol} LTD")
         )
