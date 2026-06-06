@@ -127,6 +127,18 @@
       transition-duration: .001ms !important; scroll-behavior: auto !important;
     }
   }
+  /* ── DASH-UX D5: mobile responsiveness (DEC-DASHBOARD-MOBILE-UX-001) ── */
+  /* Stack the date/category/min-% row to full-width fields + tighten padding so
+     the export form fits a phone. Additive — desktop layout (≥681px) is identical. */
+  @media (max-width: 680px) {
+    header { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
+    nav { margin-left: 0; }
+    .wrap { padding: 14px; }
+    .card { padding: 16px 14px; }
+    .row { gap: 10px; }
+    .row > label, .row input[type=date], .row input[type=number] { width: 100%; min-width: 0; }
+    .syms { max-height: 220px; }
+  }
 </style>
 </head>
 <body>
