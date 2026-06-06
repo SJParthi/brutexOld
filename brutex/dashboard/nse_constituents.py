@@ -92,15 +92,18 @@ INDEX_CSV_FILENAMES: Final[dict[str, str]] = {
     "NIFTY 500": "ind_nifty500list.csv",
     "NIFTY500": "ind_nifty500list.csv",
     # NIFTY Total Market (~750 names: large+mid+small+micro cap) —
-    # DEC-NIFTY-TOTAL-MARKET-001 (MIGRATION.md). A constituent-basket
-    # selector ONLY (like NIFTY 100/200/500 above); NOT a tradable index
-    # row whose own OHLC we fetch. BEST-EFFORT filename — **verify against
-    # NSE; NSE may rename/retire it.** The operator override env
-    # (BRUTEX_INDEX_CSV_FILENAMES) is the authoritative correction path
-    # for a name we cannot reach NSE to confirm from this build env.
-    "NIFTY TOTAL MARKET": "ind_niftytotalmarket_list.csv",
-    "NIFTYTOTALMARKET": "ind_niftytotalmarket_list.csv",
-    "NIFTY_TOTAL_MARKET": "ind_niftytotalmarket_list.csv",
+    # DEC-NIFTY-TOTAL-MARKET-001 + DEC-NIFTY-TOTAL-MARKET-URL-001 (MIGRATION.md).
+    # A constituent-basket selector ONLY (like NIFTY 100/200/500 above); NOT a
+    # tradable index row whose own OHLC we fetch. OPERATOR-VERIFIED full URL
+    # (2026-06-06): this index's CSV lives on the NSE-Indices host
+    # ``www.niftyindices.com/IndexConstituent/`` — a DIFFERENT host from the
+    # ``nsearchives.nseindia.com`` base the bare-filename entries above use, so
+    # it is stored as a FULL URL (used verbatim by ``constituent_url``, never
+    # joined to the NSE base). Override env (BRUTEX_INDEX_CSV_FILENAMES) still
+    # wins if NSE ever moves it.
+    "NIFTY TOTAL MARKET": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
+    "NIFTYTOTALMARKET": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
+    "NIFTY_TOTAL_MARKET": "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv",
 }
 
 #: Operator override env var (DEC-CONSTITUENTS-OVERRIDE-001): a JSON object
