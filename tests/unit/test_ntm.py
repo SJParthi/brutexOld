@@ -1,7 +1,7 @@
 """Tests for ``brutex.adapters.dhan.ntm`` (DEC-NIFTY-TOTAL-MARKET-DISCOVER-001).
 
 NTM is admitted as a REFERENCE_ONLY index — its Dhan ``SECURITY_ID`` + symbol are
-VERIFIED from Dhan's own web chart (web.dhan.co/Charts?exch=IDX&seg=I&secid=46,
+VERIFIED from the operator's live make-run (detailed-master SECURITY_ID=443,
 2026-06-06) and cross-checked against the live master at runtime. These cover:
 the verified constants, ``resolve_ntm_index`` (success + id-mismatch fail-loud),
 and ``prepare_ntm_reference_plan`` end-to-end — including against the REAL 755-row
@@ -33,7 +33,7 @@ _FIXTURE = (
 )
 
 
-def _index_row(*, symbol: str = NTM_SYMBOL, security_id: str = "46") -> dict[str, str]:
+def _index_row(*, symbol: str = NTM_SYMBOL, security_id: str = "443") -> dict[str, str]:
     """A minimal NTM ``INDEX`` master row."""
     return {
         "EXCH_ID": "NSE",
@@ -72,21 +72,21 @@ def _equity_row(*, isin: str, security_id: str, name: str) -> dict[str, str]:
 def test_verified_constants_match_dhan_web() -> None:
     # Pinned to the operator-verified Dhan web chart (2026-06-06). If Dhan ever
     # re-issues the id this test is the canary that forces a re-verification.
-    assert NTM_SECURITY_ID == 46
+    assert NTM_SECURITY_ID == 443
     assert NTM_SYMBOL == "NIFTY TOTAL MKT"
 
 
 class TestResolveNtmIndex:
     def test_finds_and_verifies_id(self) -> None:
         found = resolve_ntm_index([_index_row()])
-        assert found.security_id == 46
+        assert found.security_id == 443
         assert found.symbol_name == NTM_SYMBOL
         assert found.exchange is Exchange.NSE
 
     def test_id_mismatch_fails_loud(self) -> None:
         # The live master names an NTM index but with a DIFFERENT id than the
-        # operator-verified Dhan web id → fail loud (don't trust the pull).
-        with pytest.raises(IndexDiscoveryError, match=r"disagrees with Dhan web"):
+        # operator-verified Dhan detailed-master id → fail loud (don't trust the pull).
+        with pytest.raises(IndexDiscoveryError, match=r"disagrees with the confirmed id"):
             resolve_ntm_index([_index_row(security_id="999")])
 
     def test_skip_cross_check_when_expected_none(self) -> None:
@@ -102,7 +102,7 @@ class TestResolveNtmIndex:
         # The master could spell it "NIFTY TOTAL MARKET"; the default pattern still
         # matches, and the id cross-check still holds.
         found = resolve_ntm_index([_index_row(symbol="NIFTY TOTAL MARKET")])
-        assert found.security_id == 46
+        assert found.security_id == 443
 
 
 class TestPrepareNtmReferencePlan:
@@ -123,10 +123,10 @@ class TestPrepareNtmReferencePlan:
     def test_assembles_plan(self) -> None:
         plan = prepare_ntm_reference_plan(self._master(), self._csv())
         assert isinstance(plan, NtmReferencePlan)
-        assert plan.index.security_id == 46
+        assert plan.index.security_id == 443
         assert plan.extra_index_symbols == frozenset({"NIFTY TOTAL MKT"})
         # reference set = the index's own id ∪ the matched constituent ids …
-        assert plan.reference_security_ids == frozenset({46, 1001, 1002})
+        assert plan.reference_security_ids == frozenset({443, 1001, 1002})
         # … and the count excludes the index id.
         assert plan.constituent_count == 2
 
@@ -141,12 +141,12 @@ class TestPrepareNtmReferencePlan:
         csv = self._csv() + "Ghost Ltd.,X,GHOST,EQ,INE000ABSENT0\n"
         plan = prepare_ntm_reference_plan(self._master(), csv, require_full_coverage=False)
         # The two matched constituents (+ index id) survive; the ghost is dropped.
-        assert plan.reference_security_ids == frozenset({46, 1001, 1002})
+        assert plan.reference_security_ids == frozenset({443, 1001, 1002})
         assert plan.constituent_count == 2
 
     def test_index_id_mismatch_propagates(self) -> None:
         master = [_index_row(security_id="999"), *self._master()[1:]]
-        with pytest.raises(IndexDiscoveryError, match=r"disagrees with Dhan web"):
+        with pytest.raises(IndexDiscoveryError, match=r"disagrees with the confirmed id"):
             prepare_ntm_reference_plan(master, self._csv())
 
 
@@ -173,4 +173,4 @@ def test_end_to_end_against_real_constituent_csv() -> None:
     assert plan.constituent_count == 755
     # index id + 755 distinct constituent ids
     assert len(plan.reference_security_ids) == 756
-    assert 46 in plan.reference_security_ids
+    assert 443 in plan.reference_security_ids

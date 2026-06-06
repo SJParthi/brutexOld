@@ -609,10 +609,10 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # Persist logs to a rotating file (in addition to the console) so a
     # `make run` session has a viewable log trail — DEC-LOGS-VIEWER-001.
     # json_renderer=False keeps the console human-readable; the file sink is
-    # ALWAYS JSON (the /logs viewer parses it). Combined with log_config=None on
-    # uvicorn.run below, this finally routes uvicorn's HTTP/startup logs AND our
-    # own milestones through the rotating file — the previously-empty /logs page
-    # fix (DEC-RUN-LOG-CAPTURE-001).
+    # ALWAYS JSON (the GET /api/v1/logs data endpoint parses it). Combined with
+    # log_config=None on uvicorn.run below, this routes uvicorn's HTTP/startup
+    # logs AND our own milestones through the rotating file
+    # (DEC-RUN-LOG-CAPTURE-001).
     import structlog
 
     from brutex.observability.logging import configure_logging
@@ -749,11 +749,13 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         )
     app = build_app(state, instrument_store=store)
     print(f"[brutex] dashboard → http://{host}:{port}  (Ctrl-C to stop)")
-    print(f"[brutex] logs → {log_path}  ·  live viewer: http://{host}:{port}/logs")
+    # The /logs WEBPAGE was removed (DEC-DASHBOARD-LOGS-REMOVE-001); point at the
+    # rotating file + the kept JSON data endpoint, not the dead page.
+    print(f"[brutex] logs → {log_path}  ·  tail via GET http://{host}:{port}/api/v1/logs")
     _log.info("dashboard.ready", host=host, port=port, log_file=str(log_path))
     # log_config=None lets uvicorn's access/error loggers PROPAGATE into our
     # root handlers (console + rotating JSON file) instead of uvicorn's own
-    # isolated stderr handlers — so the file (and the /logs page) finally
+    # isolated stderr handlers — so the file (and the /api/v1/logs endpoint)
     # capture the full HTTP + startup trail (DEC-RUN-LOG-CAPTURE-001).
     uvicorn.run(app, host=host, port=port, log_config=None)
     return EXIT_OK
