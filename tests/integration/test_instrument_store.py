@@ -824,6 +824,36 @@ class TestPlaceholderEconomicsAndPrune:
             # The newest snapshot per symbol is the enriched one → not stale.
             assert s.has_placeholder_stock_economics() is False
 
+    def test_placeholder_ignores_reference_only_equity(self, tmp_path: Path) -> None:
+        """A REFERENCE_ONLY equity's cash lot_size=1 is correct, not a stale
+        placeholder — it must NOT trigger the auto-heal (DEC-NIFTY-TOTAL-MARKET-ADMIT-001)."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY"), _eq("TINYCO")],  # _eq builds lot_size=1
+                snapshot_date=date(2026, 6, 6),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+                reference_only_of=lambda i: i.symbol_name == "TINYCO",
+            )
+            # TINYCO is reference_only=True with cash lot=1 → excluded from the probe.
+            assert s.has_placeholder_stock_economics() is False
+
+    def test_placeholder_still_true_for_fno_equity_alongside_reference(
+        self, tmp_path: Path
+    ) -> None:
+        """An un-enriched F&O equity still triggers the heal even when a
+        reference equity (also lot=1) coexists — only the reference one is excluded."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_eq("RELIANCE"), _eq("TINYCO")],  # both lot_size=1
+                snapshot_date=date(2026, 6, 6),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+                reference_only_of=lambda i: i.symbol_name == "TINYCO",
+            )
+            # RELIANCE (F&O, reference_only=False, lot=1) is still stale.
+            assert s.has_placeholder_stock_economics() is True
+
     def test_prune_collapses_to_latest_snapshot(self, tmp_path: Path) -> None:
         """Two daily snapshots → prune keeps only the newest (236→472 fix)."""
         with InstrumentStore.open(tmp_path / "db") as s:

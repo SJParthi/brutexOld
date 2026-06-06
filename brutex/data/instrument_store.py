@@ -1444,20 +1444,26 @@ class InstrumentStore(metaclass=_StoreMeta):
         return bool(row[0]) if row else False
 
     def has_placeholder_stock_economics(self) -> bool:
-        """Return ``True`` if any latest-snapshot NSE equity still has placeholder economics.
+        """Return ``True`` if any latest-snapshot **F&O** NSE equity still has placeholder economics.
 
         The pre-economics-backfill fingerprint (DEC-STALE-ECONOMICS-HEAL-001):
-        every persisted NSE ``EQ`` row is an F&O-eligible underlying by
-        construction (lean ingest only stores F&O-eligible equities;
-        :func:`brutex.universe.is_universe_underlying`), so after the
-        leg-derived back-fill (DEC-UNDERLYING-ECONOMICS-001) it MUST carry a
-        real F&O ``lot_size`` (always > 1 — e.g. RELIANCE 500, the smallest
-        real lots are still in the hundreds). A lake loaded BEFORE that
-        back-fill landed instead carries the master's placeholder
-        ``lot_size = 1``. This probe — an indexed ``EXISTS`` over the latest
-        snapshot per symbol (matching ``list_index_equity_instruments`` /
-        ``load_snapshot`` semantics) — is therefore ``True`` iff the lake holds
-        stale, un-enriched stock economics and should be re-loaded.
+        every persisted **F&O-eligible** NSE ``EQ`` row carries, after the
+        leg-derived back-fill (DEC-UNDERLYING-ECONOMICS-001), a real F&O
+        ``lot_size`` (always > 1 — e.g. RELIANCE 500, the smallest real lots are
+        still in the hundreds). A lake loaded BEFORE that back-fill landed
+        instead carries the master's placeholder ``lot_size = 1``. This probe —
+        an indexed ``EXISTS`` over the latest snapshot per symbol (matching
+        ``list_index_equity_instruments`` / ``load_snapshot`` semantics) — is
+        therefore ``True`` iff the lake holds stale, un-enriched F&O stock
+        economics and should be re-loaded.
+
+        **REFERENCE_ONLY equities are EXCLUDED** (DEC-NIFTY-TOTAL-MARKET-ADMIT-001,
+        Stage 2b): a non-F&O constituent admitted as ``reference_only=TRUE`` has
+        NO derivative leg, so its cash ``lot_size = 1`` is CORRECT, not a stale
+        placeholder. Without this exclusion the auto-heal would see those rows,
+        believe the lake is un-enriched, and re-load the master forever (the
+        Stage-2b hostile-review P1). The ``reference_only = FALSE`` clause scopes
+        the probe back to the F&O equities it was designed for.
 
         It is the auto-heal trigger that closes the gap the operator hit:
         ``should_reload_instrument_master`` previously reloaded only on an
@@ -1469,20 +1475,25 @@ class InstrumentStore(metaclass=_StoreMeta):
         Returns
         -------
         bool
-            ``True`` iff at least one latest-snapshot NSE ``EQ`` row has
-            ``lot_size <= 1``; ``False`` on a fully-enriched (or stock-less) lake.
+            ``True`` iff at least one latest-snapshot NSE **F&O** ``EQ`` row
+            (``reference_only = FALSE``) has ``lot_size <= 1``; ``False`` on a
+            fully-enriched (or stock-less) lake. REFERENCE_ONLY equities never
+            count.
         """
         self._ensure_open()
         # A master load (replace_snapshot=True) writes EVERY universe symbol for
         # ONE snapshot_date, and prune_to_latest_snapshot() collapses to it — so
         # the newest snapshot is the whole live universe and ``snapshot_date =
         # MAX(snapshot_date)`` is exactly the latest-per-symbol view here, while
-        # hitting the PK index instead of a GROUP BY full scan.
+        # hitting the PK index instead of a GROUP BY full scan. The
+        # ``reference_only = FALSE`` clause excludes non-F&O constituents whose
+        # cash lot_size=1 is correct (DEC-NIFTY-TOTAL-MARKET-ADMIT-001).
         sql = (
             "SELECT EXISTS ("
             "  SELECT 1 FROM instruments "
             "  WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM instruments) "
-            "  AND instrument = 'EQ' AND exch_id = 'NSE' AND lot_size <= 1"
+            "  AND instrument = 'EQ' AND exch_id = 'NSE' AND lot_size <= 1 "
+            "  AND reference_only = FALSE"
             ")"
         )
         row = self._conn.execute(sql).fetchone()
