@@ -23,7 +23,12 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Final
 
 #: Quantum for money rounding — two decimal places, always (DEC-MONEY-2DP-001).
-_MONEY_QUANTUM: Final[Decimal] = Decimal("0.01")
+#: ``# pragma: no mutate`` — mutmut's string mutation yields ``Decimal("XX0.01XX")``
+#: which raises ``InvalidOperation`` at import, so it cannot represent any real
+#: behavioural change (it just breaks the module load); the 2-decimal behaviour it
+#: governs is fully pinned by ``test_money.py`` (``1.005→1.01`` / ``1.004→1.00``).
+#: Excluding it lets ``money.py`` reach a clean 100% mutation kill (DEC-MUTATION-MONEY-001).
+_MONEY_QUANTUM: Final[Decimal] = Decimal("0.01")  # pragma: no mutate
 
 #: Paisa per rupee.
 _PAISA_PER_RUPEE: Final[Decimal] = Decimal(100)
