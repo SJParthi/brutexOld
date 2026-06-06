@@ -238,7 +238,23 @@ class TestListUnderlyings:
             "name": "NIFTY 50",
             "kind": KIND_INDEX,
             "exchange": "NSE",
+            # NIFTY is not reference-only → option chain applies (DEC-OPTIONS-PULL-GUARD-001).
+            "option_pullable": True,
         }
+
+    def test_option_pullable_flag(self) -> None:
+        # DEC-OPTIONS-PULL-GUARD-001: a reference-only index (id ∈ reference set,
+        # not F&O) is NOT option-pullable; an F&O-eligible equity IS.
+        ntm = _index("NIFTY TOTAL MKT")  # security_id=1
+        rel = _equity("RELIANCE")  # security_id=2
+        rows = list_underlyings(
+            [ntm, rel],
+            fno_eligible=frozenset({(Exchange.NSE, "RELIANCE")}),
+            reference_only_ids=frozenset({ntm.security_id}),
+        )
+        flags = {r["symbol"]: r["option_pullable"] for r in rows}
+        assert flags["NIFTY TOTAL MKT"] is False
+        assert flags["RELIANCE"] is True
 
     def test_pull_symbol_is_bare_engine_symbol(self) -> None:
         # ADR-0003: the Dhan-native schema dropped the exchange-prefixed

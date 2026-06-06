@@ -98,7 +98,7 @@ from brutex.orchestrator.pipeline import (
     PipelineEventKind,
 )
 from brutex.orchestrator.state import IngestPhase
-from brutex.universe import derive_lake_underlyings
+from brutex.universe import derive_lake_underlyings, is_option_pullable
 
 #: Module logger — every material dashboard action (especially a pull that
 #: fails) lands in the same ``.brutex-logs/brutex.log`` JSONL the operator
@@ -881,8 +881,14 @@ def build_app(
         store = _require_store()
         eligible = store.fno_eligible_underlyings()
         candidates = store.list_index_equity_instruments()
+        reference_only_ids = store.reference_only_security_ids()
         try:
-            rows = list_underlyings(candidates, kind=kind, fno_eligible=eligible)
+            rows = list_underlyings(
+                candidates,
+                kind=kind,
+                fno_eligible=eligible,
+                reference_only_ids=reference_only_ids,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({"instruments": rows, "kind": kind})
@@ -1131,6 +1137,46 @@ def build_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    def _is_option_pullable(instrument: Instrument) -> bool:
+        """Whether *instrument* has a pullable option chain (DEC-OPTIONS-PULL-GUARD-001).
+
+        Reads the lake's F&O-eligible set + the ``reference_only`` id set and
+        delegates to the single source of truth
+        :func:`brutex.universe.is_option_pullable` — so NTM + its reference-only /
+        non-F&O constituents + India VIX can never start an options pull, while
+        F&O-eligible stocks (even NTM constituents) keep their options.
+        """
+        store = _require_store()
+        return is_option_pullable(
+            instrument, reference_only_ids=store.reference_only_security_ids()
+        )
+
+    def _reject_non_option_pullable(instruments: list[Instrument]) -> None:
+        """Fail CLOSED (400) if any EXPLICITLY-requested underlying has no options.
+
+        For ``?symbol=`` / ``?symbols=`` (a deliberate selection) a non-pullable
+        target — NTM, a reference-only non-F&O constituent, or India VIX — is a
+        user error, so we reject the whole request naming the offenders rather
+        than silently pulling nothing for them (DEC-OPTIONS-PULL-GUARD-001).
+        """
+        store = _require_store()
+        reference_only_ids = store.reference_only_security_ids()
+        blocked = [
+            inst.symbol_name
+            for inst in instruments
+            if not is_option_pullable(inst, reference_only_ids=reference_only_ids)
+        ]
+        if blocked:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "option chain is not available for reference-only / non-F&O "
+                    f"underlyings: {', '.join(sorted(blocked))} — these (e.g. NIFTY "
+                    "Total Market + its non-F&O constituents, India VIX) carry no "
+                    "options; select an F&O-eligible underlying instead"
+                ),
+            )
+
     # The single-flight background pull job that powers the LIVE feed
     # (DEC-PULL-PROGRESS-LIVE-001): one universe pull at a time across the whole
     # server; the page polls /pull-progress for the per-unit tick. Owned by this
@@ -1200,6 +1246,7 @@ def build_app(
                 instruments = resolve_pull_symbols(symbols, _require_store().get)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            _reject_non_option_pullable(instruments)
         elif symbol is not None:
             store = _require_store()
             instrument = store.get(symbol)
@@ -1209,8 +1256,12 @@ def build_app(
                     detail=f"unknown security_id {symbol!r} — not in the instrument store",
                 )
             instruments = [instrument]
+            _reject_non_option_pullable(instruments)
         elif kind is not None:
-            instruments = _select_bulk_targets(kind)
+            # Bulk-by-kind: silently SKIP non-option-pullable underlyings (NTM +
+            # its reference-only / non-F&O constituents + VIX) rather than fail —
+            # a bulk pull is a "pull everything that has options" action.
+            instruments = [i for i in _select_bulk_targets(kind) if _is_option_pullable(i)]
         else:
             raise HTTPException(
                 status_code=400,

@@ -334,6 +334,7 @@ let filter = "index";          // active tab kind
 let UNIV = [];                 // [{symbol,pull_symbol,name,kind,exchange}]
 let selInst = null;            // selected instrument's display symbol (trading_symbol)
 let selPullSymbol = null;      // selected instrument's vendor symbol (Dhan SECURITY_ID)
+let selOptionPullable = true;  // whether the single-clicked instrument has an option chain (DEC-OPTIONS-PULL-GUARD-001)
 let selExp = null;             // selected expiry ISO date
 let selMulti = new Map();      // multi-select: symbol → instrument, for the unified "⤓ Pull spot"
 let listAnimated = false;      // entrance animation plays ONCE per fresh load, never on re-render
@@ -525,6 +526,7 @@ function renderInstruments() {
 
 async function selectInstrument(i) {
   selInst = i.symbol; selPullSymbol = i.pull_symbol; selExp = null;
+  selOptionPullable = (i.option_pullable !== false);  // NTM + reference-only/non-F&O → no option chain
   /* O(1) selection: swap the .sel class on just the affected rows — NOT a 243-row
      rebuild (which restarted the entrance animation and ate the next click). The
      list DOM is untouched, so clicks stay instant. */
@@ -746,9 +748,22 @@ function updateMultiBtn() {
   b.disabled = n === 0 && !selPullSymbol;
   // The unified "⛓ Pull options chain" mirrors it (DEC-UNIVERSE-OPTIONS-MULTIPULL-001):
   // one button for one OR many — ticked rows fan all their option grids in one pass.
+  // GUARD (DEC-OPTIONS-PULL-GUARD-001): the option chain only applies to F&O-bearing
+  // underlyings, so the button is DISABLED whenever the selection includes a
+  // reference-only / non-F&O target (NIFTY Total Market + its non-F&O constituents,
+  // India VIX) — the server also fail-closes, this just greys it pre-emptively.
   const o = document.getElementById("optbtn");
   o.textContent = n > 0 ? `⛓ Pull options chain · ${n} selected` : "⛓ Pull options chain";
-  o.disabled = n === 0 && !selPullSymbol;
+  let optEnabled;
+  if (n > 0) {
+    optEnabled = [...selMulti.values()].every(x => x.option_pullable !== false);
+  } else {
+    optEnabled = !!selPullSymbol && selOptionPullable;
+  }
+  o.disabled = !optEnabled;
+  o.title = (!o.disabled)
+    ? "Pull this underlying's full option grid (ATM window · CE+PE · weekly+monthly · near/next/far, 1-minute)"
+    : "Option chain unavailable for reference-only / non-F&O underlyings (e.g. NIFTY Total Market + its non-F&O constituents, India VIX) — select an F&O-eligible underlying";
   // The "⚙ Pre-build timeframes" materialise button is selection-driven too
   // (DEC-UNIVERSE-TF-MATERIALIZE-BUTTON-001): one OR many, same enable rule.
   const m = document.getElementById("matbtn");

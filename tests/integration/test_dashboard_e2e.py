@@ -390,3 +390,64 @@ class TestOffloadedReadRoutes:
         r = wired_client.post("/api/v1/universe/pull-options")
         assert r.status_code == 400
         assert "?symbols=" in r.json()["detail"]
+
+    def test_pull_options_blocked_for_reference_only_non_fno(self, tmp_path: object) -> None:
+        # DEC-OPTIONS-PULL-GUARD-001: selecting a reference-only / non-F&O underlying
+        # (an NTM constituent stock, or NTM itself) and hitting "Pull options chain"
+        # FAILS CLOSED — its option chain is never started; a non-reference index
+        # (NIFTY) is unaffected.
+        from datetime import date
+        from decimal import Decimal
+        from pathlib import Path
+
+        pytest.importorskip("duckdb")
+        from brutex.data.instrument_store import InstrumentStore
+        from brutex.models import Exchange, Instrument, InstrumentType, Segment
+
+        assert isinstance(tmp_path, Path)
+        store = InstrumentStore.open(tmp_path / "guard.duckdb")
+
+        def _row(sec: int, sym: str, typ: InstrumentType, seg: Segment) -> Instrument:
+            return Instrument(
+                exch_id=Exchange.NSE,
+                security_id=sec,
+                symbol_name=sym,
+                display_name=sym,
+                instrument=typ,
+                segment=seg,
+                series=None,
+                isin=None,
+                underlying_symbol=None,
+                underlying_security_id=None,
+                lot_size=1,
+                tick_size=Decimal("0.05"),
+                sm_freeze_qty=None,
+                sm_expiry_date=None,
+                strike_price=None,
+                asm_gsm_flag=False,
+            )
+
+        nifty = _row(13, "NIFTY", InstrumentType.IDX, Segment.CASH)
+        acme = _row(5001, "ACME LTD", InstrumentType.EQ, Segment.CASH)  # reference-only constituent
+        store.upsert_many(
+            [nifty, acme],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r1",
+            csv_source_sha256="0" * 64,
+            reference_only_of=lambda i: i.security_id == 5001,  # ACME tagged reference_only
+        )
+        with TestClient(build_app(DashboardState(), instrument_store=store)) as client:
+            # The reference-only non-F&O stock is rejected, naming it.
+            blocked = client.post("/api/v1/universe/pull-options", params={"symbol": "ACME LTD"})
+            assert blocked.status_code == 400
+            assert "reference-only" in blocked.json()["detail"]
+            assert "ACME LTD" in blocked.json()["detail"]
+            # NIFTY (not reference-only) passes the guard.
+            ok = client.post("/api/v1/universe/pull-options", params={"symbol": "NIFTY"})
+            assert ok.status_code == 200
+            # The /universe rows expose the flag so the UI can grey the button.
+            rows = client.get("/api/v1/universe/instruments").json()["instruments"]
+            flags = {r["symbol"]: r["option_pullable"] for r in rows}
+            assert flags["ACME LTD"] is False
+            assert flags["NIFTY"] is True
+        store.close()

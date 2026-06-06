@@ -328,3 +328,23 @@ def test_refresh_default_does_not_admit_ntm_index() -> None:
     persisted = store.upserts[0]["instruments"]
     assert isinstance(persisted, list)
     assert "NIFTY TOTAL MKT" not in [i.symbol_name for i in persisted]
+
+
+def test_refresh_does_not_tag_fno_eligible_constituent_reference_only() -> None:
+    # DEC-OPTIONS-PULL-GUARD-001: RELIANCE is F&O-eligible (it has an OPTSTK leg in
+    # _rows) AND we pass it in reference_security_ids (as if it were an NTM
+    # constituent). It must NOT be tagged reference_only — a first-class F&O stock
+    # keeps its option chain. So reference_only_ids comes back EMPTY here.
+    store = _Store()
+    text = _csv(_rows())  # RELIANCE (2885) + its OPTSTK leg → F&O-eligible
+    refresh_instruments(
+        store,
+        lambda _url: text,
+        snapshot_date=date(2026, 6, 6),
+        run_id="run-fno-ref",
+        reference_security_ids=frozenset({2885}),  # RELIANCE's id
+    )
+    up = store.upserts[0]
+    assert "RELIANCE" in [i.symbol_name for i in up["instruments"]]
+    # F&O-eligible → excluded from reference_only despite being in the reference set.
+    assert up["reference_only_ids"] == frozenset()

@@ -54,7 +54,11 @@ from collections.abc import Iterable
 from typing import Any, Final
 
 from brutex.models import Exchange, Instrument, InstrumentType
-from brutex.universe import build_fno_eligible_underlyings, is_universe_underlying
+from brutex.universe import (
+    build_fno_eligible_underlyings,
+    is_option_pullable,
+    is_universe_underlying,
+)
 
 #: Classification of an ``IDX`` instrument.
 KIND_INDEX: Final[str] = "index"
@@ -171,6 +175,7 @@ def list_underlyings(
     *,
     kind: str | None = None,
     fno_eligible: frozenset[tuple[Exchange, str]] | None = None,
+    reference_only_ids: frozenset[int] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Return the explorer's instrument rows, optionally filtered by *kind*.
 
@@ -229,6 +234,12 @@ def list_underlyings(
                 "name": instrument.display_name or instrument.symbol_name,
                 "kind": classified,
                 "exchange": str(instrument.exch_id),
+                # Whether the "⛓ Pull options chain" action applies to this row
+                # (DEC-OPTIONS-PULL-GUARD-001) — False for NTM + its reference-only
+                # non-F&O constituents + India VIX, so the UI greys the button.
+                "option_pullable": is_option_pullable(
+                    instrument, reference_only_ids=reference_only_ids
+                ),
             }
         )
     rows.sort(key=lambda row: (EXPLORER_KINDS.index(row["kind"]), row["symbol"]))
