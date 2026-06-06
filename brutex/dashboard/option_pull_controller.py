@@ -68,7 +68,11 @@ from brutex.adapters.dhan.option_universe_ingest import (
     ProgressHook,
     run_dhan_options_ingest,
 )
-from brutex.dashboard.pull_controller import DHAN_HISTORY_FLOOR, resolve_candle_range
+from brutex.dashboard.pull_controller import (
+    DHAN_HISTORY_FLOOR,
+    SessionRateController,
+    resolve_candle_range,
+)
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.option_sink import NullOptionBarSink
@@ -315,24 +319,32 @@ class _LiveOptionRuntime(NamedTuple):
     run_parallel: RunParallel | None = None
 
 
-def _live_option_runtime(use_live_rate: bool) -> _LiveOptionRuntime:
+def _live_option_runtime(
+    use_live_rate: bool, session_rate: SessionRateController | None = None
+) -> _LiveOptionRuntime:
     """Build the :class:`_LiveOptionRuntime` for the options pull.
 
-    A **default live** pull (no injected factory + not dry-run) builds ONE shared
+    A **default live** pull (no injected factory + not dry-run) resolves ONE shared
     controller and derives its ``pace`` hook, the three rate-feedback hooks (its
     own ``on_rate_limit`` / ``on_timeout`` / ``on_success`` bound methods), AND a
     rate-sized fan-out pool from it (DEC-DHAN-PARALLEL-INGEST-001 +
-    DEC-DHAN-TIMEOUT-BACKOFF-001). Dry-run / injected-factory pulls need no
+    DEC-DHAN-TIMEOUT-BACKOFF-001). When *session_rate* is given (the dashboard's
+    persistent holder) the controller is the SAME one the spot pulls share — so
+    the learned rate carries across spot AND options pulls and an options pull
+    stops re-storming Dhan at the 5 r/s ceiling every time (DEC-DHAN-OPTION-PERSIST-RATE-001,
+    extending the spot DEC-DHAN-PERSIST-RATE-001); the single-flight background
+    job means spot + options never run concurrently, so one shared ≤ 5 r/s budget
+    is correct (Rule #6). ``None`` (a CLI / injected-factory pull) builds a fresh
+    controller, the prior behaviour. Dry-run / injected-factory pulls need no
     throttle → the all-``None`` default (the ingest spine uses its default pool).
-    The controller starts at the 5 r/s ceiling (DEC-DHAN-ADAPTIVE-RPS-001) and
-    now ADAPTS the options spine: sustained 429s OR sustained timeouts step it
-    5→4→3, recovering on a clean window. The pool sizing
-    (:func:`_options_run_parallel`) is covered; only the live controller
-    construction is ``# pragma: no cover``.
+    The pool sizing (:func:`_options_run_parallel`) is covered; only the live
+    controller resolution is ``# pragma: no cover``.
     """
     if not use_live_rate:
         return _LiveOptionRuntime()
-    controller = _build_live_option_controller()  # pragma: no cover — live only
+    controller = (  # pragma: no cover — live only
+        session_rate.get() if session_rate is not None else _build_live_option_controller()
+    )
     return _LiveOptionRuntime(  # pragma: no cover — live only
         pace=controller.pace,
         on_rate_limit=controller.on_rate_limit,
@@ -362,6 +374,7 @@ def pull_options(
     on_progress: ProgressHook | None = None,
     coverage: FetchCoverage | None = None,
     pull_id: str | None = None,
+    session_rate: SessionRateController | None = None,
 ) -> OptionsPullReport:
     """Fan-out-pull the option universe for *instruments* over ``[2021-01-01, today]``.
 
@@ -451,7 +464,7 @@ def pull_options(
             start_date=start.date().isoformat(),
             dry_run=dry_run,
         )
-        runtime = _live_option_runtime(use_live_rate)
+        runtime = _live_option_runtime(use_live_rate, session_rate)
         report = run_dhan_options_ingest(
             client,
             sink,

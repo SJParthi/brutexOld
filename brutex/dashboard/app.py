@@ -1344,7 +1344,11 @@ def build_app(
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: fan the options pull over the targets, streaming progress."""
             return pull_options(
-                instruments, lake_root=lake_root, dry_run=dry_run, on_progress=on_progress
+                instruments,
+                lake_root=lake_root,
+                dry_run=dry_run,
+                on_progress=on_progress,
+                session_rate=_session_rate,
             )
 
         # total = one progress tick per underlying (the options hook fires per underlying).
