@@ -27,6 +27,7 @@ from brutex.adapters.dhan.constants import INSTRUMENT_MASTER_DETAILED_URL
 from brutex.adapters.dhan.instrument_loader import HttpGet, load_universe_report
 from brutex.data.instrument_store import SCHEMA_VERSION, InstrumentRun
 from brutex.models import Instrument
+from brutex.universe import is_reference_only
 
 
 class InstrumentSink(Protocol):
@@ -39,6 +40,7 @@ class InstrumentSink(Protocol):
         snapshot_date: date,
         run_id: str,
         csv_source_sha256: str,
+        reference_only_of: object = None,
         replace_snapshot: bool,
     ) -> object:
         """Upsert *instruments* for this snapshot; return the store's result."""
@@ -89,6 +91,7 @@ def refresh_instruments(
     snapshot_date: date,
     run_id: str,
     url: str = INSTRUMENT_MASTER_DETAILED_URL,
+    reference_security_ids: frozenset[int] = frozenset(),
     clock: Callable[[], datetime] = _utcnow,
 ) -> RefreshResult:
     """Download the scrip master, select the universe, and persist it.
@@ -100,15 +103,33 @@ def refresh_instruments(
     ``load_universe_report`` BEFORE the record, so ``instrument_runs`` captures
     SUCCESSFUL loads only — the parser fails closed (no failed-attempt rows).
     ``clock`` is injectable so ``fetched_at`` is deterministic in tests.
+
+    ``reference_security_ids`` (DEC-NIFTY-TOTAL-MARKET-PERSIST-001, Stage 2b
+    PR-4c): NSE-equity ``SECURITY_ID``s (the resolved NIFTY-Total-Market
+    constituents, typically from
+    :func:`brutex.universe_constituents.resolve_reference_security_ids`) to ALSO
+    admit + persist as REFERENCE_ONLY. They are admitted in the selection AND
+    tagged ``reference_only=TRUE`` at upsert (alongside India VIX, which the
+    default :func:`brutex.universe.is_reference_only` already tags). Defaults
+    empty → byte-identical to the F&O-only refresh. The brute-force ENGINE is
+    unaffected (DEC-ENGINE-ISOLATION-INVARIANT-001).
     """
     text = http_get(url)
     csv_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    report = load_universe_report(lambda _url: text, url=url)
+    report = load_universe_report(
+        lambda _url: text, url=url, reference_security_ids=reference_security_ids
+    )
+
+    def _is_reference(instrument: Instrument) -> bool:
+        # Tag the admitted constituents (by id) AND India VIX (the default rule).
+        return instrument.security_id in reference_security_ids or is_reference_only(instrument)
+
     store.upsert_many(
         report.universe,
         snapshot_date=snapshot_date,
         run_id=run_id,
         csv_source_sha256=csv_sha256,
+        reference_only_of=_is_reference if reference_security_ids else None,
         replace_snapshot=True,
     )
     pruned = store.prune_to_latest_snapshot()
