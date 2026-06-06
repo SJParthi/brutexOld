@@ -96,3 +96,15 @@ repos:
         language: system
         pass_filenames: false
         stages: [commit-msg]
+
+      # ── Pre-push gate (DEC-PRE-PUSH-HOOK-001) ──────────────────────
+      # The fastest meaningful CI subset, run on `git push`: ruff
+      # check/format + the tests/smoke invariants. Catches the noisy-
+      # flake class in seconds, before the ~10 min CI. Fail-closed.
+      - id: pre-push-gate
+        name: pre-push fast gate (ruff + smoke)
+        entry: bash scripts/hooks/pre-push.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+        always_run: true

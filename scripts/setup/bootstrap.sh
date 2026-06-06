@@ -110,6 +110,22 @@ else
   fi
 fi
 
+# ────────── 6b. git hooks (pre-commit + commit-msg + pre-push) ──────────
+# DEC-PRE-PUSH-HOOK-001: install ALL hook stages so the local gates
+# (.pre-commit-config.yaml) actually fire — including the new pre-push
+# fast gate (ruff + smoke). Best-effort: a missing pre-commit binary
+# warns but never aborts bootstrap (CI is the hard gate regardless).
+_step "Step 6b/7 — install git hooks (pre-commit + commit-msg + pre-push)"
+if command -v pre-commit >/dev/null 2>&1 || pip install -q pre-commit; then
+  if pre-commit install --hook-type pre-commit --hook-type commit-msg --hook-type pre-push >/dev/null 2>&1; then
+    _ok "git hooks installed (pre-commit + commit-msg + pre-push)"
+  else
+    _warn "pre-commit install failed — local hooks not active (CI still enforces all gates)"
+  fi
+else
+  _warn "pre-commit unavailable — local hooks not active (CI still enforces all gates)"
+fi
+
 # ────────── 7. brutex doctor smoke ──────────
 _step "Step 7/7 — verify brutex doctor exits 0"
 mkdir -p "${HOME}/.brutex/audit"

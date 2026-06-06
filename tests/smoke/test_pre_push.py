@@ -32,7 +32,7 @@ What this does NOT catch (delegated to full CI):
 
 ## Decision
 
-DEC-PHASE1-SMOKE-001 (MIGRATION entry #251).
+DEC-PHASE1-SMOKE-AND-SKELETONS-001 (MIGRATION entry #251).
 """
 
 from __future__ import annotations
@@ -159,6 +159,34 @@ class TestConventionalCommit:
 # ────────────────────────────────────────────────────────────────────
 # Required CLAUDE.md / MIGRATION.md docs
 # ────────────────────────────────────────────────────────────────────
+
+
+class TestPrePushHookWired:
+    """DEC-PRE-PUSH-HOOK-001 — the pre-push fast gate must be *wired*, not
+    just present as a pytest module. These assert the three wiring points so
+    a regression that silently un-installs the hook is caught.
+    """
+
+    def test_pre_push_script_exists_and_is_valid_bash(self) -> None:
+        script = REPO_ROOT / "scripts" / "hooks" / "pre-push.sh"
+        assert script.is_file(), "scripts/hooks/pre-push.sh is missing"
+        # `bash -n` parses without executing — catches syntax errors.
+        result = _run(["bash", "-n", str(script)])
+        assert result.returncode == 0, f"pre-push.sh has a bash syntax error: {result.stderr}"
+
+    def test_precommit_config_declares_pre_push_stage(self) -> None:
+        cfg = (REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+        # The pre-push hook must reference the script AND declare the stage.
+        assert "scripts/hooks/pre-push.sh" in cfg, (
+            "pre-commit config does not call the pre-push script"
+        )
+        assert "stages: [pre-push]" in cfg, "pre-commit config declares no pre-push stage"
+
+    def test_bootstrap_installs_pre_push_hook(self) -> None:
+        boot = (REPO_ROOT / "scripts" / "setup" / "bootstrap.sh").read_text(encoding="utf-8")
+        assert "--hook-type pre-push" in boot, (
+            "bootstrap.sh does not install the pre-push hook stage"
+        )
 
 
 class TestRequiredDocs:
