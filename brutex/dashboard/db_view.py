@@ -1348,6 +1348,7 @@ def _intraday_open_by_date(
     never cross the IST/UTC date boundary so ``CAST(timestamp AS DATE)`` IS the IST
     trading date. ``{}`` when the symbol has no 1-minute partition.
     """
+    _validate_candle_coords(exchange, segment, symbol, _INTRADAY_BASE_INTERVAL)
     base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         return {}
