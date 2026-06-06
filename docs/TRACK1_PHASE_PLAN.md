@@ -2,6 +2,18 @@
 
 > **Status:** Locked 2026-05-15. Companion to `TRACK1_BACKTEST_SPEC.md §19`.
 
+> **⚠️ VENDOR RECONCILIATION (DEC-DHAN-DOC-RECONCILE-001, 2026-06-06):** this
+> plan was written 2026-05-15 and revised during the short-lived Dhan→Groww
+> pivot, so its forward-looking phases say "Groww". **The live vendor is Dhan
+> Data API v2** — the Groww pivot was REVERTED per DEC-GROWW-DHAN-REVERT-001
+> (`docs/adr/0002-groww-to-dhan-revert.md`, 2026-05-31; CLAUDE.md §1/§6). Read
+> every forward-looking "Groww" below as **Dhan** (adapter already shipped at
+> `brutex/adapters/dhan/`). HISTORICAL rows that record what was done at the
+> time (Phase 0 deliverables, the 2026-05-15 review findings) are left intact as
+> an accurate record. This installment reconciles Phase 0b + Phase 2 + the Risk
+> Register on this file; the prior installment (ledger #378) covered the
+> operator-facing docs (README / bootstrap / ENV_VARS / runday).
+
 This document specifies the 5-phase build plan from this week (Phase 0
 documentation) through to the first production sweep.
 
@@ -35,6 +47,17 @@ documentation) through to the first production sweep.
 ---
 
 ## Phase 0b — Empirical Probe (HARD GATE before Phase 1 adapter code)
+
+> **🛑 SUPERSEDED — MOOT post-revert (DEC-DHAN-DOC-RECONCILE-001, 2026-06-06).**
+> This entire Phase 0b was a **Groww-vendor** empirical-probe HARD GATE. It was
+> created during the Dhan→Groww pivot (DEC-VENDOR-PIVOT-001) and is **no longer
+> in force**: the Groww pivot was REVERTED to **Dhan Data API v2** per
+> DEC-GROWW-DHAN-REVERT-001 (`docs/adr/0002-groww-to-dhan-revert.md`), so the
+> Groww subscription, the `BRUTEX_GROWW_*` env vars, and the four
+> `docs/groww/probe/` transcripts below are **NOT prerequisites for anything**.
+> The live data path is the shipped `brutex/adapters/dhan/` adapter (REST, no
+> SDK; CLAUDE.md §6). The text is retained verbatim below only as a historical
+> record of the abandoned Groww gate — do NOT action it.
 
 > **Added 2026-05-26** post-merge of `DEC-VENDOR-PIVOT-001`
 > (`MIGRATION.md` entry #246). Inserted between the original Phase 0
@@ -124,26 +147,31 @@ green with all stubs. The verification surface is mapped.
 
 > **AMENDED 2026-05-22 per DEC-P0-063 (MIGRATION.md entry #200):** the "Spot-Index Ingest" scope below describes the **core 4-instrument surface** (NIFTY 50 / BANKNIFTY / SENSEX / INDIA VIX). DEC-P0-063 expanded the LAKE to additionally cover **200 NSE F&O eligible single stocks (spot + options across all 4 Groww `expiryCodes`)**. The 200 stocks join INDIAVIX in REFERENCE_ONLY (BRUTE-FORCE ENGINE excluded — engine stays at the 3 brute-force indexes). Phase 2's Week 4-7 deliverables use the same Groww adapter primitives for both surfaces (per COMMON · DYNAMIC · SCALABLE rules in CLAUDE.md §11); no Phase 2 work needs to be re-scoped — the deliverable table below is the 4-instrument core, and the 200-stock universe joins on the same code path. See CLAUDE.md §3 + `TRACK1_BACKTEST_SPEC.md §"Scope Lock"` (per DEC-SPEC-CONSISTENCY-002, entry #264) + `TRACK1_DATA_INGEST_DESIGN.md §1` (per DEC-SPEC-CONSISTENCY-003, entry #265) + `TRACK1_RUNTIME_ARCHITECTURE.md §2` (per DEC-SPEC-CONSISTENCY-004, entry #266) for the full locked wording.
 
-**Goal:** Stand up the Groww data path, the 52-condition vocabulary,
+**Goal:** Stand up the Dhan data path, the 52-condition vocabulary,
 and the indicator precompute pipeline.
 
 ### Week 4
 
+> **Reconciled to Dhan (DEC-DHAN-DOC-RECONCILE-001):** the adapter package below
+> has **already shipped** as `brutex/adapters/dhan/` (REST, no SDK; CLAUDE.md §6).
+> The original "Groww" module names are corrected to their real Dhan equivalents.
+
 | Deliverable | Notes |
 |---|---|
-| `brutex/adapters/groww/__init__.py` | New package |
-| `brutex/adapters/groww/client.py` | HTTP client with token, rate limit |
-| `brutex/adapters/groww/instruments.py` | Master CSV fetcher + securityId resolver |
-| `brutex/adapters/groww/intraday.py` | `POST /v2/charts/intraday` wrapper |
-| `brutex/adapters/groww/historical.py` | `POST /v2/charts/historical` wrapper |
+| `brutex/adapters/dhan/__init__.py` | ✅ shipped — package |
+| `brutex/adapters/dhan/adapter.py` + `auth.py` | ✅ shipped — HTTP client + token auth |
+| `brutex/adapters/dhan/rate_control.py` | ✅ shipped — adaptive [3..5] r/s token bucket (CLAUDE.md §6) |
+| `brutex/adapters/dhan/instruments.py` | ✅ shipped — master CSV fetcher + `SECURITY_ID` resolver |
+| `brutex/adapters/dhan/adapter.py` — `POST /v2/charts/intraday` (1m) | ✅ shipped wrapper |
+| `brutex/adapters/dhan/adapter.py` — `POST /v2/charts/historical` (1d) | ✅ shipped wrapper |
 | Property tests P-18 (rate limiter) green | |
-| First live call to Groww verifies rate limit and `securityId` map | |
+| First live call to Dhan verifies rate limit and `SECURITY_ID` map | |
 
 ### Week 5
 
 | Deliverable | Notes |
 |---|---|
-| `brutex/data/parser.py` updated for Groww response format | Generic candle parser |
+| `brutex/adapters/dhan/parser.py` — Dhan columnar candle response (✅ shipped) | Parses parallel arrays `{open[],high[],low[],close[],volume[],timestamp[],open_interest[]}` (CLAUDE.md §6) |
 | 1m → 14 TFs resampler verified deterministic (P-08) | |
 | Indicators 1-9 implemented in Rust (`rust/fno-math/src/indicators/`) | Extends existing crate |
 | Indicator cache key (`sha256(data_version ‖ indicator_version)`) | |
@@ -166,7 +194,7 @@ and the indicator precompute pipeline.
 | Phase 2 hostile review (4-agent pass) | Catches anything missed |
 | Phase 2 sign-off | User reviews vocabulary + adapter |
 
-**Exit criteria:** Groww ingest of 5 years × 4 instruments (NIFTY 50, BANKNIFTY, SENSEX, INDIA VIX) × 21 TFs
+**Exit criteria:** Dhan ingest of 5 years × 4 instruments (NIFTY 50, BANKNIFTY, SENSEX, INDIA VIX) × 21 TFs
 working. 9 indicators precomputed. 52 atomic conditions evaluable. The
 pattern generator emits the pruned set.
 
@@ -271,7 +299,7 @@ runbook with exact prompts.
 
 | Risk | Mitigation |
 |---|---|
-| Groww API rate-limit lower than expected | Cap at 10 r/s; verify on first call; escalate adapter only with user approval |
+| Dhan Data API rate-limit lower than expected | Documented 5 r/s + 100,000/day; adapter runs an adaptive **[3..5] r/s** token bucket that steps down on 429 (`brutex/adapters/dhan/rate_control.py`; CLAUDE.md §6). Never raised without explicit user approval (Golden Rule #6) |
 | Throughput below 80K trials/sec sustained | Phase 3 micro-benchmark gates this; if fails, escalate to larger hardware before Phase 4 |
 | DSR effective-N still rejects everything | Phase 4 dry-run on Phase 3 outputs; if rejects everything, revisit cluster-pruning aggressiveness |
 | Indian market microstructure surprise | Phase 2 hostile review re-checks; calendar tests P-22, P-23 guard the canary |
