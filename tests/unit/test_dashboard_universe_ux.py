@@ -168,3 +168,21 @@ def test_intrusive_tf_dropdown_stays_removed_but_clean_button_replaces_it() -> N
     assert "derive-timeframes?symbol=" in html, (
         "the clean button must POST the (kept) materialise route"
     )
+
+
+def test_universe_visual_upgrade_present() -> None:
+    """The /universe visual upgrade (DEC-DASHBOARD-UNIVERSE-UX-001): the REF chip +
+    its CSS, the inline chip legend, the skeleton-load shimmer, and the
+    reference-only row dim — all keyed off the option_pullable flag."""
+    html = _render_universe_html()
+    # REF chip styling + the reference-only row dim.
+    assert ".chip.ref" in html, "the REF chip style is missing"
+    assert ".inst.refonly" in html, "the reference-only row dim is missing"
+    # The chip is rendered for non-option-pullable rows (the NTM / reference set).
+    assert "i.option_pullable === false" in html, "rows do not branch on option_pullable"
+    assert ">REF<" in html, "the REF chip label is missing"
+    # The inline legend explaining INDEX / STOCK / REF.
+    assert 'legend.className = "legend"' in html, "the chip legend is missing"
+    assert "reference-only · no options" in html, "the legend's REF explanation is missing"
+    # Skeleton-shimmer load placeholder (reuses the existing shimmer keyframe).
+    assert "skel-row" in html, "the skeleton-load shimmer rows are missing"
