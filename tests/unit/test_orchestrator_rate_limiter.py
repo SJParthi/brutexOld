@@ -545,3 +545,58 @@ class TestStartEmpty:
             sleep=clock.sleep,
         )
         assert b.acquire() == 1.0 / 5.0
+
+
+class TestSetRate:
+    """``set_rate`` in-place rate change (DEC-DHAN-RATE-SINGLE-BUCKET-001): the
+    Dhan controller mutates its ONE shared bucket instead of swapping in a fresh
+    one, so a 5→4→3 step can never create a second concurrent token stream (the
+    ``rate.breach rps_1s=11`` opening transient)."""
+
+    def _bucket(self, clock: FakeClock) -> AdaptiveTokenBucket:
+        return AdaptiveTokenBucket(
+            initial_rps=5.0,
+            downshift_rps=2.5,
+            burst=1,
+            start_empty=True,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+
+    def test_changes_current_rps(self, clock: FakeClock) -> None:
+        b = self._bucket(clock)
+        b.set_rate(4.0)
+        assert b.current_rps() == 4.0
+
+    def test_rejects_non_positive(self, clock: FakeClock) -> None:
+        b = self._bucket(clock)
+        with pytest.raises(RateLimiterError, match="must be > 0"):
+            b.set_rate(0.0)
+
+    def test_drains_tokens_to_empty(self, clock: FakeClock) -> None:
+        # A FULL bucket (start_empty=False, burst=2) holds 2 tokens; set_rate must
+        # drain it to 0 so a stepdown can't release a stale higher-rate token.
+        b = AdaptiveTokenBucket(
+            initial_rps=5.0, downshift_rps=2.5, burst=2, clock=clock.now, sleep=clock.sleep
+        )
+        assert b.available_tokens() == 2.0
+        b.set_rate(4.0)
+        assert b.available_tokens() == 0.0  # drained — no free token at the new rate
+
+    def test_first_call_after_downshift_waits_full_new_interval(self, clock: FakeClock) -> None:
+        # The drained bucket + 0 elapsed since the change → the next acquire waits a
+        # full 1/new_rps, exactly mirroring the prior start_empty rebuild.
+        b = self._bucket(clock)
+        b.set_rate(4.0)
+        assert b.acquire() == 1.0 / 4.0
+
+    def test_internal_upshift_stays_dormant(self, clock: FakeClock) -> None:
+        # set_rate moves initial_rps WITH the rate, so the bucket's own
+        # _maybe_upshift_locked (which never sees a controller 429) cannot bump the
+        # rate back up on the next acquire — the controller stays the sole authority.
+        b = self._bucket(clock)
+        b.set_rate(2.0)
+        b.acquire()
+        clock.advance(1000.0)  # well past upshift_recovery
+        b.acquire()
+        assert b.current_rps() == 2.0  # did NOT auto-recover to the old initial 5.0

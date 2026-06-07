@@ -195,10 +195,12 @@ class AdaptiveTokenBucket:
     #: Ease-in: start the bucket EMPTY (0 tokens) instead of full (``burst``).
     #: With the default ``False`` the bucket grants its ``burst`` allowance
     #: immediately (legacy behaviour). The Dhan controller passes ``True`` so
-    #: that NEITHER the opening NOR a mid-pull rate-change rebuild can release a
-    #: free burst token — the first call after each (re)build waits one full
-    #: ``1/rate`` interval, keeping the PHYSICAL issue rate strictly ≤ the
-    #: current rate at all times (DEC-DHAN-RATE-HARD-CAP-001 / Golden Rule #6).
+    #: that the opening call cannot release a free burst token — it waits one full
+    #: ``1/rate`` interval. A mid-pull rate change goes through :meth:`set_rate`
+    #: (NOT a rebuild), which likewise drains the bucket to empty, so a stepdown
+    #: can't release a stale higher-rate token either — keeping the PHYSICAL issue
+    #: rate strictly ≤ the current rate at all times (DEC-DHAN-RATE-HARD-CAP-001 +
+    #: DEC-DHAN-RATE-SINGLE-BUCKET-001 / Golden Rule #6).
     start_empty: bool = False
 
     # ── Runtime state (not dataclass fields — computed in __post_init__) ──
@@ -364,6 +366,42 @@ class AdaptiveTokenBucket:
         """Dashboard stat — current effective rate."""
         with self._lock:
             return self._current_rps
+
+    def set_rate(self, new_rps: float) -> None:
+        """Atomically change the steady-state rate on this LIVE bucket — O(1).
+
+        The Dhan controller's step ladder (5→4→3 down / 3→4→5 up) calls this so a
+        rate change mutates the ONE shared bucket IN PLACE instead of swapping in
+        a freshly-built one. Swapping created a transient where in-flight
+        :meth:`acquire` callers paced on the OLD bucket while new callers paced on
+        the NEW one — two independent token streams whose COMBINED physical issue
+        rate briefly exceeded the cap (the operator's ``rate.breach rps_1s=11``
+        opening 5→4→3 cascade). With a single persistent object every caller
+        shares one ≤ ``new_rps`` token stream at all times
+        (DEC-DHAN-RATE-SINGLE-BUCKET-001 / CLAUDE.md §2 Rule 6).
+
+        Drains the bucket to EMPTY on the change — exactly mirroring the prior
+        ``start_empty=True`` rebuild — so the first call after a DOWNSHIFT waits a
+        full ``1/new_rps`` interval and cannot release a stale higher-rate token.
+        ``initial_rps`` (and the unused ``downshift_rps``) move WITH the rate so
+        the bucket's own dormant 429/upshift logic stays self-consistent: a
+        controller never feeds the bucket 429s — it owns its own ladder — so with
+        ``_current_rps == initial_rps`` the internal :meth:`_maybe_upshift_locked`
+        stays a no-op and never fights the controller's chosen rate.
+
+        Raises
+        ------
+        RateLimiterError
+            If *new_rps* is not strictly positive.
+        """
+        if new_rps <= 0:
+            raise RateLimiterError(f"new_rps must be > 0, got {new_rps}")
+        with self._lock:
+            self.initial_rps = new_rps
+            self.downshift_rps = new_rps / 2.0
+            self._current_rps = new_rps
+            self._tokens = 0.0
+            self._last_refill = self.clock()
 
     def available_tokens(self) -> float:
         """Dashboard stat — how many tokens are currently in the bucket."""
