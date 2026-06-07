@@ -91,3 +91,64 @@ class ResidentBars:
     def n_bars(self) -> int: ...
     def count_supermasks(self, masks: list[int]) -> list[int]: ...
     def count_supermask(self, mask: int) -> int: ...
+
+class ResidentSweepSim:
+    """Resident Stage-2 trade-sim buffer — OHLC paisa + forced flags + bar_bits.
+
+    DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563). The per-bar SL/TP/forced-exit
+    state machine (the Python `TradeSimWalker`) ported to Rust + fused with the
+    per-mask entry projection. The `O(N_bars)` Python→Rust copy of the 5 columns +
+    flags + bar_bits is paid ONCE in `__init__`; subsequent `simulate_masks` /
+    `count_trades` calls marshal only `masks`. Frozen + immutable (only `n_bars`
+    is exposed). All money is int64 paisa; the price→paisa conversion + forced-exit
+    detection are done in Python (the single source of truth) so the trades are
+    bit-identical to `brutex.engine.trade_sim.simulate_trades`.
+
+    Unequal column lengths raise `ValueError`.
+    """
+
+    def __init__(
+        self,
+        open: list[int],
+        high: list[int],
+        low: list[int],
+        close: list[int],
+        is_forced: list[bool],
+        bar_bits: list[int],
+    ) -> None: ...
+    @property
+    def n_bars(self) -> int: ...
+    def simulate_masks(
+        self,
+        masks: list[int],
+        is_buy: bool,
+        sl_paisa: int | None,
+        tp_paisa: int | None,
+        sl_next_open: bool = ...,
+        tp_next_open: bool = ...,
+        tp_first: bool = ...,
+    ) -> list[list[tuple[int, int, int, int, int, int]]]:
+        """Simulate a batch of masks → per-mask round-trip trade tuples.
+
+        `out[j]` is the trades for `masks[j]`, each a tuple
+        `(pnl_paisa, mfe_paisa, mae_paisa, holding_bars, entry_idx, exit_idx)`.
+        Empty `masks` → `[]`.
+        """
+        ...
+
+    def count_trades(
+        self,
+        masks: list[int],
+        is_buy: bool,
+        sl_paisa: int | None,
+        tp_paisa: int | None,
+        sl_next_open: bool = ...,
+        tp_next_open: bool = ...,
+        tp_first: bool = ...,
+    ) -> list[int]:
+        """Per-mask round-trip trade COUNT only (the throughput-bench fast path).
+
+        Same state machine as `simulate_masks` without the per-trade allocation.
+        `out[j]` aligns with `masks[j]`.
+        """
+        ...
