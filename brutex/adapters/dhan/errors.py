@@ -80,6 +80,40 @@ def is_rate_limit(exc: DhanError) -> bool:
     return isinstance(exc, DhanRateLimitError)
 
 
+#: Dhan's "no data / incorrect parameters" 400 marker (errorCode ``DH-905``).
+#: Returned for a genuinely-empty range (e.g. an index whose DAILY history
+#: starts after the requested ``fromDate``) AND for a true param bug — Dhan does
+#: not distinguish, so the caller treats it as a re-tryable KNOWN GAP, never a
+#: silent skip (DEC-DHAN-NO-DATA-KNOWN-GAP-001 / Golden Rule #1).
+_NO_DATA_MARKERS: tuple[str, ...] = ("DH-905", "no data present")
+
+
+def is_no_data_error(exc: DhanError) -> bool:
+    """True if *exc* is a Dhan HTTP-400 signalling NO DATA (``DH-905``).
+
+    Distinguishes a "no data for this symbol/interval/range" 400 from a generic
+    malformed-request 400 so the ingest spine can record it as a visible
+    ``KNOWN_GAP`` (isolated, NOT marked complete → re-tried next pull) rather than
+    a scary terminal quarantine — a transient/param case then self-heals while a
+    genuine gap is surfaced, never silently masked (Golden Rule #1).
+
+    Parameters
+    ----------
+    exc
+        Any :class:`DhanError`.
+
+    Returns
+    -------
+    bool
+        ``True`` iff *exc* is a :class:`DhanBadRequestError` whose message carries
+        a Dhan no-data marker (``DH-905`` / "no data present").
+    """
+    if not isinstance(exc, DhanBadRequestError):
+        return False
+    text = str(exc)
+    return any(marker in text for marker in _NO_DATA_MARKERS)
+
+
 def is_retryable(exc: DhanError) -> bool:
     """True if *exc* is transient and the orchestrator should retry it.
 
@@ -103,6 +137,7 @@ __all__ = [
     "DhanTimeoutError",
     "DhanTransportError",
     "from_http_status",
+    "is_no_data_error",
     "is_rate_limit",
     "is_retryable",
 ]

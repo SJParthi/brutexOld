@@ -13,7 +13,7 @@ from decimal import Decimal
 
 import pytest
 from brutex.adapters.dhan import run_ingest as mod
-from brutex.adapters.dhan.errors import DhanNotFoundError
+from brutex.adapters.dhan.errors import DhanBadRequestError, DhanNotFoundError
 from brutex.adapters.dhan.ingest import IngestReport
 from brutex.adapters.dhan.run_ingest import (
     DhanIngestReport,
@@ -389,6 +389,38 @@ class TestRunIngestLogging:
         bad_rollup = [e for e in _events(logs, "ingest.underlying") if e["symbol"] == "BAD"]
         assert bad_rollup[0]["series_failed"] == 1
         assert bad_rollup[0]["series_completed"] == 0
+
+    def test_no_data_logs_known_gap_not_quarantine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A Dhan DH-905 "no data" 400 (e.g. NIFTY NEXT 50 daily) is a KNOWN_GAP, not
+        # a scary quarantine: it logs ``ingest.known_gap`` (INFO), NOT
+        # ``ingest.quarantine`` (DEC-DHAN-NO-DATA-KNOWN-GAP-001). The pair is still
+        # isolated + re-tried next pull — data is never silently masked.
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
+            if instrument.symbol_name == "GAP":
+                raise DhanBadRequestError("HTTP 400 bad request: DH-905 no data present")
+            return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        with capture_logs() as logs, pull_id_scope("runpull00003"):
+            run_dhan_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("13"), _index("GAP", token=98)],
+                intervals=["1day"],
+                start=_START,
+                end=_END,
+            )
+        assert _events(logs, "ingest.quarantine") == []  # NOT an alarming quarantine
+        (gap,) = _events(logs, "ingest.known_gap")
+        assert gap["log_level"] == "info"
+        assert gap["pull_id"] == "runpull00003"
+        assert gap["symbol"] == "GAP"
+        assert gap["interval"] == "1day"
+        assert "DH-905" in str(gap["reason"])
+        # Still isolated + re-tried: the rollup records the failure (not dropped).
+        gap_rollup = [e for e in _events(logs, "ingest.underlying") if e["symbol"] == "GAP"]
+        assert gap_rollup[0]["series_failed"] == 1
+        assert gap_rollup[0]["series_completed"] == 0
 
     def test_events_carry_empty_pull_id_outside_a_scope(
         self, monkeypatch: pytest.MonkeyPatch
