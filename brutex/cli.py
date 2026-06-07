@@ -596,6 +596,44 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Leaderboard sort key (default {DEFAULT_SORT_BY})",
     )
 
+    # ── cascade (DEC-CASCADE-WIRE-001) — manual Stage-4 cascade re-run ──
+    cascade = sub.add_parser(
+        "cascade",
+        help=(
+            "Re-run the Stage-4 nine-filter cascade on a finished sweep's top-K "
+            "winners (the MANUAL path; sweep-all also runs it automatically)"
+        ),
+    )
+    cascade.add_argument(
+        "run_id",
+        nargs="?",
+        default=None,
+        help=(
+            "Optional sweep run-id (grid identity) to validate against the "
+            "manifest the sweep wrote; omit to cascade whatever is under --results-root"
+        ),
+    )
+    cascade.add_argument(
+        "--results-root",
+        type=Path,
+        default=None,
+        dest="results_root",
+        help="Directory of the sweep's per-tuple results (default <lake-root>/sweeps)",
+    )
+    cascade.add_argument(
+        "--catalog",
+        type=Path,
+        default=None,
+        dest="catalog_path",
+        help="Catalog DuckDB path (default <lake-root>/catalog.duckdb)",
+    )
+    cascade.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+
     return parser
 
 
@@ -1797,6 +1835,69 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     )
     print(f"[brutex] results: {out_root}  ·  audit: {audit_path}  ·  supervisor: {sup_audit_path}")
     print(f"[brutex] live progress: {progress_path}  ·  checkpoint: {checkpoint_path}")
+
+    # ── AUTOMATIC Stage-4 cascade on the top-K winners (DEC-CASCADE-WIRE-001) ──
+    # Re-build the cascade inputs from each tuple's persisted finalists + the
+    # in-memory bars (the SAME slices the sweep ran on), run the nine-filter
+    # cascade per (instrument, tf) pool, and write the manifest + report under
+    # <out_root>/cascade/. `brutex cascade <run-id>` (+ the dashboard button)
+    # replay that manifest to the byte-identical report. The --overfit-gate
+    # behaviour is UNCHANGED (it ran per-leaderboard inside the sweep above).
+    from brutex.engine.cascade_wire import (
+        BarsContext,
+        cascade_config_for_sweep,
+        run_and_write_from_specs,
+        spec_from_store_rows,
+    )
+    from brutex.engine.results_store import ResultsStore
+    from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+    from brutex.engine.sweep_run import _direction_label
+
+    cascade_specs = []
+    for sweep_tuple in iter_sweep_tuples(grid):
+        store_path = tuple_store_path(out_root, sweep_tuple, grid)
+        if not store_path.exists():
+            continue
+        proximity_bps = (
+            None
+            if sweep_tuple.proximity is None
+            else (
+                sweep_tuple.proximity.pivot_proximity_bps,
+                sweep_tuple.proximity.pdh_pdl_proximity_bps,
+                sweep_tuple.proximity.fib_proximity_bps,
+            )
+        )
+        spec = spec_from_store_rows(
+            instrument=sweep_tuple.instrument,
+            tf_label=sweep_tuple.tf.label,
+            tf_minutes=sweep_tuple.tf.minutes,
+            direction_label=_direction_label(sweep_tuple.direction),
+            sl_paisa=sweep_tuple.sl_paisa,
+            tp_paisa=sweep_tuple.tp_paisa,
+            prior_n=grid.prior_n,
+            proximity_bps=proximity_bps,
+            start_equity_paisa=grid.start_equity_paisa,
+            rows=ResultsStore.load(store_path).rows(),
+            top_k=top,
+        )
+        if spec is not None:
+            cascade_specs.append(spec)
+
+    if cascade_specs:
+        sweep_id = grid_identity(grid)
+        cascade_report = run_and_write_from_specs(
+            out_root,
+            sweep_id=sweep_id,
+            specs=cascade_specs,
+            bars_for=_bars_for,
+            bars_context=BarsContext(exchange=exchange, segment=segment, start=start, end=end),
+            cascade_config=cascade_config_for_sweep(sweep_id),
+        )
+        print(
+            f"[brutex] cascade — pools={len(cascade_report.groups)} "
+            f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
+            f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
+        )
     return EXIT_OK
 
 
@@ -1820,6 +1921,57 @@ def cmd_results_show(*, results_root: Path, top: int, sort_by: str) -> int:
         print(f"[brutex] results error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
     print(report)
+    return EXIT_OK
+
+
+def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested engine
+    *,
+    lake_root: Path | None,
+    results_root: Path | None,
+    catalog_path: Path | None,
+    run_id: str | None,
+) -> int:
+    """Re-run the Stage-4 nine-filter cascade on a finished sweep's winners (MANUAL path).
+
+    The hand-trigger counterpart of the AUTOMATIC cascade ``brutex sweep-all``
+    runs after the grid (DEC-CASCADE-WIRE-001): it reloads the cascade manifest
+    the sweep wrote under ``--results-root`` (default ``<lake>/sweeps``), re-reads
+    the SAME bars from the lake, and re-runs the cascade through the identical
+    pure core — so the regenerated ``cascade-report.json`` is byte-identical to the
+    one the sweep produced. A missing/invalid manifest, or a ``run_id`` that does
+    not match the manifest's, surfaces as a clear user error, never a traceback.
+    """
+    from brutex.engine.cascade_wire import (
+        CascadeWireError,
+        load_bars_for_manifest,
+        load_manifest,
+        report_path,
+        run_and_write_from_manifest,
+    )
+
+    resolved_lake = _resolve_lake_root(lake_root)
+    root = results_root if results_root is not None else resolved_lake / "sweeps"
+    catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
+    try:
+        manifest = load_manifest(root)
+    except CascadeWireError as exc:
+        print(f"[brutex] cascade error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if run_id is not None and run_id != manifest.sweep_id:
+        print(
+            f"[brutex] cascade error: run-id {run_id!r} does not match the manifest's "
+            f"sweep-id {manifest.sweep_id!r} under {root}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+
+    bars_for = load_bars_for_manifest(manifest, lake_root=resolved_lake, catalog_path=catalog)
+    report = run_and_write_from_manifest(root, bars_for=bars_for)
+    print(
+        f"[brutex] cascade done — sweep={manifest.sweep_id[:16]} pools={len(report.groups)} "
+        f"candidates={report.n_input} survivors={report.n_survived}"
+    )
+    print(f"[brutex] report: {report_path(root)}")
     return EXIT_OK
 
 
@@ -1945,6 +2097,14 @@ def main(argv: list[str] | None = None) -> int:
             results_root=args.results_root,
             top=args.top,
             sort_by=args.sort_by,
+        )
+    # Manual Stage-4 cascade re-run (DEC-CASCADE-WIRE-001).
+    if args.command == "cascade":
+        return cmd_cascade(
+            lake_root=args.lake_root,
+            results_root=args.results_root,
+            catalog_path=args.catalog_path,
+            run_id=args.run_id,
         )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits

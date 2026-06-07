@@ -226,6 +226,21 @@
         Leaving everything selected exports them all.
       </p>
     </div>
+
+    <div class="card" style="margin-top:18px;">
+      <h1>🪜 Stage-4 cascade (9 filters)</h1>
+      <p class="lede">
+        Re-run the nine-filter statistical cascade (DSR · CPCV · SPA · PBO ·
+        Romano-Wolf · WFO · Lockbox · Monte-Carlo) on the most recent sweep's
+        top-K winners. <code>sweep-all</code> already runs this automatically;
+        this button re-runs it on demand and regenerates the byte-identical
+        <code>cascade-report.json</code>.
+      </p>
+      <div class="row" style="margin-top:14px;">
+        <button class="go" id="run-cascade">🪜 Run cascade</button>
+      </div>
+      <div id="cascade-msg"></div>
+    </div>
   </div>
 
 <script>
@@ -369,6 +384,31 @@ document.getElementById("download").onclick = () => {
   window.location = "/api/v1/reports/preopen.zip?" + params.toString();
 };
 loadSymbols();
+
+/* Stage-4 cascade trigger (DEC-CASCADE-WIRE-001): POST the manual re-run and
+   show the pool / candidate / survivor tally (or a clear "run a sweep first"
+   message). The cascade itself is the engine's job — this just kicks it. */
+const cascadeBtn = document.getElementById("run-cascade");
+const cascadeMsg = document.getElementById("cascade-msg");
+cascadeBtn.onclick = async () => {
+  cascadeBtn.disabled = true;
+  cascadeMsg.textContent = "Running the nine-filter cascade…";
+  try {
+    const r = await fetch("/api/v1/cascade/run", { method: "POST" });
+    const j = await r.json();
+    if (j.ok) {
+      cascadeMsg.textContent =
+        "Cascade done — sweep " + j.sweep_id.slice(0, 16) + " · pools=" + j.pools +
+        " · candidates=" + j.candidates + " · survivors=" + j.survivors;
+    } else {
+      cascadeMsg.textContent = "Cascade error: " + (j.error || ("HTTP " + r.status));
+    }
+  } catch (e) {
+    cascadeMsg.textContent = "Cascade request failed: " + e;
+  } finally {
+    cascadeBtn.disabled = false;
+  }
+};
 </script>
 </body>
 </html>
