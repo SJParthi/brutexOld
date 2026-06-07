@@ -20,6 +20,7 @@ checkout.
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import types
 
@@ -59,17 +60,19 @@ def _install_structlog_stub() -> None:
     observability, not part of the locked output, so a stub does not weaken the
     assertion.
     """
-    try:
-        import structlog  # noqa: F401  — probe: real dep present → no stub needed
-    except ImportError:
-        stub = types.ModuleType("structlog")
+    if "structlog" in sys.modules:
+        return  # already importable — the real dep, or a stub from a prior call
+    if importlib.util.find_spec("structlog") is not None:
+        return  # real dep installed (just not imported yet) — never shadow it
+    # structlog is genuinely absent (a bare-checkout golden runner) → no-op stub.
+    stub = types.ModuleType("structlog")
 
-        class _Logger:
-            def info(self, *args: object, **kwargs: object) -> None:
-                return None
+    class _Logger:
+        def info(self, *args: object, **kwargs: object) -> None:
+            return None
 
-        stub.get_logger = lambda *args, **kwargs: _Logger()  # type: ignore[attr-defined]
-        sys.modules["structlog"] = stub
+    stub.get_logger = lambda *args, **kwargs: _Logger()  # type: ignore[attr-defined]
+    sys.modules["structlog"] = stub
 
 
 def test_golden_pure_forward_replay_trail() -> None:
@@ -92,9 +95,11 @@ def test_golden_forward_with_lookback_trail() -> None:
         if index > 0:
             barrier.access(index - 1)  # bounded look-back — still ≤ N
     assert barrier.touched_indices == _GOLDEN_B_TOUCHED
-    assert barrier.max_touched == _GOLDEN_B_MAX
+    max_touched = barrier.max_touched
+    assert max_touched is not None
+    assert max_touched == _GOLDEN_B_MAX
     assert barrier.current_index == _GOLDEN_B_CURSOR
-    assert barrier.max_touched <= barrier.current_index
+    assert max_touched <= barrier.current_index
 
 
 def test_golden_verify_report_is_locked() -> None:

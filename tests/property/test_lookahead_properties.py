@@ -63,8 +63,10 @@ def test_p06_forward_replay_touches_only_past_or_present(n: int) -> None:
         barrier.access(index)
     touched = barrier.touched_indices
     assert touched == tuple(range(n))
-    assert barrier.max_touched == n - 1
-    assert barrier.max_touched <= barrier.current_index
+    max_touched = barrier.max_touched
+    assert max_touched is not None
+    assert max_touched == n - 1
+    assert max_touched <= barrier.current_index
 
 
 @given(
