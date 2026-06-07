@@ -23,7 +23,11 @@ from brutex.adapters.dhan.client import (
     _guard_url,
     _should_fast_retry,
 )
-from brutex.adapters.dhan.constants import HEADER_ACCESS_TOKEN, HEADER_CLIENT_ID
+from brutex.adapters.dhan.constants import (
+    DATA_RATE_LIMIT_RPS,
+    HEADER_ACCESS_TOKEN,
+    HEADER_CLIENT_ID,
+)
 from brutex.adapters.dhan.errors import (
     DhanBadRequestError,
     DhanError,
@@ -191,6 +195,16 @@ class TestCallMeter:
         assert snap["effective_rps"] == 0.0
         assert snap["latency_ms_avg"] == 200.0
 
+    def test_record_issue_tracks_peak_and_evicts_stale(self) -> None:
+        # The trailing-1s issue gauge (DEC-DHAN-RATE-REALTIME-GUARANTEE-001): five
+        # issues at 0.2s spacing peak at 5; jumping >1s ahead ages them out (the
+        # eviction `popleft` loop) so the trailing count resets to 1.
+        m = CallMeter()
+        for t in (0.0, 0.2, 0.4, 0.6, 0.8):
+            m.record_issue(t)
+        assert m.snapshot()["rps_1s_max"] == 5
+        assert m.record_issue(2.0) == 1  # exercises the stale-eviction popleft
+
 
 class TestPostJsonInstrumentation:
     def _metered(self, transport: object, *, log_every: int) -> DhanClient:
@@ -234,6 +248,26 @@ class TestPostJsonInstrumentation:
         with pytest.raises(DhanTimeoutError):
             client.post_json("charts/intraday", {})
         assert client.meter.count == 1  # a failed call's latency is NOT invisible
+
+    def test_rate_breach_warning_when_issue_rate_exceeds_cap(self) -> None:
+        # Real-time ASSURANCE (DEC-DHAN-RATE-REALTIME-GUARANTEE-001): a fine clock
+        # keeps 6 successful POSTs inside one second → the trailing-1s issue rate
+        # crosses the 5 r/s cap, so `_post_once` emits the `rate.breach` WARNING.
+        t = _RecordingTransport(200, b"{}")
+        client = DhanClient(
+            access_token="jwt-abc",
+            client_id="100000001",
+            transport=t,  # type: ignore[arg-type]
+            clock=_StepClock(0.01),  # 6 issues land well within 1.0s
+            max_attempts=1,
+            sleep=_noop_sleep,
+        )
+        with capture_logs() as logs:
+            for _ in range(DATA_RATE_LIMIT_RPS + 1):  # 6 POSTs
+                client.post_json("charts/intraday", {})
+        breaches = [e for e in logs if e["event"] == "rate.breach"]
+        assert breaches and breaches[-1]["rps_1s"] > DATA_RATE_LIMIT_RPS
+        assert client.meter.snapshot()["rps_1s_max"] > DATA_RATE_LIMIT_RPS
 
 
 #: One scripted transport outcome: an exception to RAISE, or a (status, body) to RETURN.
