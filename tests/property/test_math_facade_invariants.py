@@ -1,6 +1,6 @@
 """Property invariants for the ``brutex.math`` Rust-kernel facade.
 
-DEC-STRUCTURE-CLEANUP-001 (``docs/MIGRATION.md`` #568). Drives the facade's
+DEC-STRUCTURE-CLEANUP-001 (``docs/MIGRATION.md`` #569). Drives the facade's
 ``_reexport`` / ``_public_names`` against randomly generated fake kernels so the
 re-export contract holds for any kernel surface — independent of the compiled
 wheels (which cannot build on the local Python 3.11 sandbox).
