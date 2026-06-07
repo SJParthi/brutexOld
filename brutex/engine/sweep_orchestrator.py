@@ -73,12 +73,13 @@ import structlog
 from brutex.engine.combo_mask import count_combos
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS, DEFAULT_START_EQUITY_PAISA
+from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_run import (
     SweepRunConfig,
     SweepRunSummary,
     run_persisted_sweep,
 )
-from brutex.ranking import MIN_TRADES
+from brutex.ranking import MIN_TRADES, OverfitGateConfig
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
 
@@ -191,6 +192,12 @@ class SweepGridConfig:
     min_hits
         Stage-1B coarse pre-filter threshold (defaults to
         :data:`brutex.ranking.MIN_TRADES`); ``0`` disables it.
+    overfit
+        Opt-in :class:`~brutex.ranking.overfit.OverfitGateConfig`, forwarded to
+        every tuple's :class:`~brutex.engine.sweep_run.SweepRunConfig` so the
+        Stage-3 multiple-testing overfit gate (DEC-RANKING-OVERFIT-001) runs per
+        leaderboard. ``None`` (the default) keeps the legacy ranking. Each tuple's
+        own backtested-combo count is its authoritative trial count ``N``.
 
     Raises
     ------
@@ -220,6 +227,7 @@ class SweepGridConfig:
     max_tuples: int = DEFAULT_MAX_TUPLES
     top_k: int | None = None
     min_hits: int = MIN_TRADES
+    overfit: OverfitGateConfig | None = None
 
     def __post_init__(self) -> None:
         # Order-preserving de-dup of every axis (set semantics, deterministic
@@ -334,8 +342,9 @@ class SweepTuple:
 
         Threads the grid's shared context (mode + the three reproducibility
         hashes), shared knobs (``condition_bits``, ``prior_n``,
-        ``start_equity_paisa``) and the honest guards (``max_combos``, ``top_k``,
-        ``min_hits``) together with this tuple's swept axes.
+        ``start_equity_paisa``), the honest guards (``max_combos``, ``top_k``,
+        ``min_hits``) and the opt-in ``overfit`` gate config together with this
+        tuple's swept axes.
 
         Parameters
         ----------
@@ -367,6 +376,7 @@ class SweepTuple:
             max_combos=grid.max_combos,
             top_k=grid.top_k,
             min_hits=grid.min_hits,
+            overfit=grid.overfit,
         )
 
 
@@ -635,6 +645,7 @@ def run_sweep_grid(
     audit: AuditWriter,
     skip_empty: bool = True,
     on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
+    reuse_bar_bits: bool = True,
 ) -> SweepGridSummary:
     """Run the full grid sweep: enumerate the outer product + persist every tuple.
 
@@ -676,6 +687,16 @@ def run_sweep_grid(
         Optional hook fired with ``(tuple, summary)`` after each tuple that ran
         (never for a skipped tuple) — the streaming seam for live progress /
         dashboards without retaining O(T) state.
+    reuse_bar_bits
+        When ``True`` (default), the grid threads a bounded
+        :class:`~brutex.engine.sweep_kernel.ResidentKernelCache` through its tuples
+        (DEC-SWEEP-RESIDENT-KERNEL-001): the Stage-1A ``bar_bits`` build + the
+        bar-window Python→Rust marshal are paid ONCE per distinct ``(instrument,
+        tf, proximity, prior_n)`` rather than once per ``(direction, K, sl, tp)``
+        tuple — a byte-identical result (Golden Rule #4), only faster. Set
+        ``False`` to rebuild per tuple (the legacy path). Honest envelope (Golden
+        Rule #10): the cache holds at most ``|proximities|`` bar windows resident →
+        bounded ``O(|proximities| · N_bars)`` memory, never O(1) total.
 
     Returns
     -------
@@ -717,6 +738,12 @@ def run_sweep_grid(
     ranked = 0
     persisted = 0
 
+    # Bounded resident-kernel cache (DEC-SWEEP-RESIDENT-KERNEL-001): one bar window
+    # per distinct (instrument, tf, proximity, prior_n). Sized to the proximity
+    # fan-out so a fixed (instrument, tf) reuses every kernel across its
+    # direction/K/sl/tp tuples. `None` when reuse is disabled (legacy rebuild path).
+    kernel_cache = ResidentKernelCache(capacity=len(grid.proximities)) if reuse_bar_bits else None
+
     for tuple_ in iter_sweep_tuples(grid):
         bars = bars_for(tuple_.instrument, tuple_.tf.label)
         if not bars:
@@ -727,12 +754,24 @@ def run_sweep_grid(
                 )
             tuples_skipped_no_bars += 1
             continue
+        kernel = (
+            kernel_cache.get(
+                bars,
+                instrument=tuple_.instrument,
+                tf_label=tuple_.tf.label,
+                proximity=tuple_.proximity,
+                prior_n=grid.prior_n,
+            )
+            if kernel_cache is not None
+            else None
+        )
         summary = run_persisted_sweep(
             bars,
             tuple_.to_run_config(grid),
             store=store_for(tuple_),
             dedup=dedup,
             audit=audit,
+            kernel=kernel,
         )
         tuples_run += 1
         enumerated += summary.enumerated

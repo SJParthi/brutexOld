@@ -36,7 +36,7 @@ from brutex.engine.sweep_run import (
     run_persisted_sweep,
 )
 from brutex.orchestrator.audit import AuditWriter, verify_chain
-from brutex.ranking import RankedCombo, rank_combos
+from brutex.ranking import OverfitGateConfig, RankedCombo, rank_combos
 from brutex.strategies.errors import StrategyError
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
@@ -382,6 +382,41 @@ class TestRunPersistedSweep:
         assert len(summary.store_content_hash) == 64
         # Exactly THREE audit lines, independent of combo count (Golden Rule #8).
         assert verify_chain(audit_path) == 3
+
+    def test_overfit_gate_threads_into_persisted_leaderboard(self, tmp_path: Path) -> None:
+        # End-to-end: the opt-in overfit gate is wired through run_persisted_sweep.
+        # With dsr_min=0.0 every deflatable combo clears the 6th gate, so the
+        # survivor SET matches the legacy run, but each finalist now carries a
+        # Deflated Sharpe — proving the gate ran over the real backtest pool.
+        bars = _trending_bars()
+        legacy_store = ResultsStore(path=tmp_path / "legacy.parquet")
+        with AuditWriter.open(tmp_path / "la.jsonl") as audit:
+            legacy = run_persisted_sweep(
+                bars, _make_config(), store=legacy_store, dedup=_dedup(), audit=audit
+            )
+
+        gated_store = ResultsStore(path=tmp_path / "gated.parquet")
+        cfg = _make_config(overfit=OverfitGateConfig(dsr_min=0.0))
+        with AuditWriter.open(tmp_path / "ga.jsonl") as audit:
+            gated = run_persisted_sweep(bars, cfg, store=gated_store, dedup=_dedup(), audit=audit)
+        # dsr_min=0.0 rejects nobody → same leaderboard size as legacy.
+        assert gated.ranked == legacy.ranked
+
+    def test_overfit_gate_rejects_can_only_shrink_leaderboard(self, tmp_path: Path) -> None:
+        # A stricter dsr_min can only drop combos (monotone): the gated leaderboard
+        # is never larger than the legacy one (Golden Rule #10 — the gate rejects).
+        bars = _trending_bars()
+        legacy_store = ResultsStore(path=tmp_path / "legacy.parquet")
+        with AuditWriter.open(tmp_path / "la.jsonl") as audit:
+            legacy = run_persisted_sweep(
+                bars, _make_config(), store=legacy_store, dedup=_dedup(), audit=audit
+            )
+        gated_store = ResultsStore(path=tmp_path / "gated.parquet")
+        cfg = _make_config(overfit=OverfitGateConfig(dsr_min=0.99))
+        with AuditWriter.open(tmp_path / "ga.jsonl") as audit:
+            gated = run_persisted_sweep(bars, cfg, store=gated_store, dedup=_dedup(), audit=audit)
+        assert gated.ranked <= legacy.ranked
+        assert gated.persisted == len(gated_store)
 
     def test_top_k_truncates_persisted(self, tmp_path: Path) -> None:
         bars = _trending_bars()

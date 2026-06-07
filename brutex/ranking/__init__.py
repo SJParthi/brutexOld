@@ -6,13 +6,13 @@ Hard rejection gates (applied BEFORE composite scoring):
 - max_drawdown_pct > 30% → REJECT (uninvestable)
 - win_rate < 25% AND win_loss_ratio < 2.0 → REJECT
 - max_consecutive_losses > 10 → REJECT (account-blower)
-- lockbox_sharpe / training_sharpe < 0.5 → REJECT (overfit)
+- Deflated_Sharpe < dsr_min → REJECT (multiple-testing overfit)  [6th gate, opt-in]
 
 Composite ranking score (after gates pass):
     0.25 × Sharpe + 0.20 × Sortino + 0.15 × Calmar
   + 0.15 × (Profit_Factor - 1.0) + 0.10 × Recovery_Factor
   + 0.10 × (Win_Rate × Win_Loss_Ratio) + 0.15 × Risk_Efficiency
-  + 0.05 × Lockbox_Sharpe   [Stage-3, deferred]
+  + 0.05 × Deflated_Sharpe   [8th term, opt-in via OverfitGateConfig]
 
 where Risk_Efficiency = avg_MFE / avg_MAE — the "tight stop, big run" signal
 (DEC-RANKING-RISK-EFFICIENCY-001): a high value means each trade tended to travel
@@ -21,26 +21,52 @@ far in our favour (large Maximum Favorable Excursion) for little adverse heat
 large profit — the operator's stated #1 objective. Each term is z-score
 normalized per (instrument, TF) leaderboard, clamped [-3, +3].
 
-## Honest envelope (Golden Rule #10) — the lockbox is Stage-3, deferred here
+## The 6th gate + 8th term: the Stage-3 overfit control (DEC-RANKING-OVERFIT-001)
 
-The 6th gate (overfit) and the 7th composite term both need a **lockbox Sharpe**
-— a train/test (CPCV / walk-forward) split — which does **not exist yet** (Stage 3).
-So this module implements the **5 single-result gates** + the **7 available
-composite terms** (incl. the risk-efficiency term); the lockbox gate is skipped
-and the lockbox term contributes nothing (its 0.05 weight is simply absent) until
-the Stage-3 split lands. The
-score's absolute scale is irrelevant — it is used only for the *relative* ordering
-of a leaderboard (z-scores are relative), so dropping the lockbox term changes
-ranking power, never correctness. This is recorded in ``docs/MIGRATION.md``
-(DEC-RANKING-001).
+The originally-reserved Stage-3 "lockbox" gate needed a train/test split that does
+not exist yet. In its place, the **Deflated Sharpe Ratio** (Bailey & López de
+Prado 2014) realises the overfit gate from scalars alone: it deflates each combo's
+Sharpe against the *expected maximum* Sharpe of the ``N = len(candidates)`` trials
+that were tried for this leaderboard (the per-(instrument, TF) trial count the spec
+pins at ``TRACK1_BACKTEST_SPEC.md:383-385``). A combo whose Sharpe is no better
+than that selection-bias bar is rejected as data-snooped; survivors are down-ranked
+by their Deflated Sharpe. The gate + term are **opt-in** via
+:class:`~brutex.ranking.overfit.OverfitGateConfig` (the engine lives in
+:mod:`brutex.ranking.overfit`, single source of truth — COMMON); passing
+``overfit=None`` (the default) keeps the legacy five-gate / seven-term ranking
+**byte-identical**.
+
+## Honest envelope (Golden Rule #10) — only DSR is scalar-computable; N is inline-only
+
+DSR is the **only** member of the Stage-4 cascade (DSR / CPCV / SPA / PBO /
+Romano-Wolf / WFO / Lockbox / Monte-Carlo, :mod:`brutex.metrics.cascade`)
+computable from a leaderboard's scalars; every other filter needs each candidate's
+per-period **return series**, absent from the persisted scalar result rows —
+synthesising them would fabricate significance and is FORBIDDEN. The authoritative
+trial count ``N`` is known only **inline** here (after persistence only ``top_k``
+finalists survive and ``N`` is lost), so the gate runs at ranking time and W2-a's
+persisted output is, by construction, the overfit-gated leaderboard; no
+statistically-valid post-store re-gate exists. When the pool cannot be deflated
+(< 2 finite Sharpes or zero cross-trial variance) the gate **abstains** rather than
+fabricate a verdict (see :mod:`brutex.ranking.overfit`). The composite score's
+absolute scale is irrelevant — it orders one leaderboard *relatively* (z-scores are
+relative), so the enabled-path weight sum of 1.05 changes ranking power, never
+correctness. Recorded in ``docs/MIGRATION.md`` (DEC-RANKING-001 / DEC-RANKING-OVERFIT-001).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import cast
 
 from brutex.metrics.compute import ResultMetrics
+from brutex.ranking.overfit import (
+    OverfitGateConfig,
+    deflated_sharpe_for,
+    passes_overfit_gate,
+    pool_sharpe_dispersion,
+)
 
 # ── Hard rejection gate thresholds (the spec, above) ──
 #: Minimum closed trades for a result to be rankable (below this is statistical
@@ -93,6 +119,11 @@ class RankedCombo:
     mask: int
     metrics: ResultMetrics
     composite_score: float
+    #: The combo's Deflated Sharpe probability (Bailey & LdP 2014) when the opt-in
+    #: 6th overfit gate ran for this leaderboard, else ``None`` (legacy ranking, or
+    #: a pool that could not be deflated). Exposed for leaderboard transparency —
+    #: the selection-bias-corrected confidence behind this combo's overfit survival.
+    deflated_sharpe: float | None = None
 
     @property
     def risk_efficiency(self) -> float:
@@ -162,7 +193,60 @@ def _zscores(values: Sequence[float]) -> list[float]:
     return [max(-_Z_CLAMP, min(_Z_CLAMP, (v - mean) / std)) for v in values]
 
 
-def rank_combos(candidates: Sequence[tuple[int, ResultMetrics]]) -> list[RankedCombo]:
+def _overfit_gate(
+    candidates: Sequence[tuple[int, ResultMetrics]],
+    survivors: list[tuple[int, ResultMetrics]],
+    overfit: OverfitGateConfig,
+) -> tuple[list[tuple[int, ResultMetrics]], list[float] | None]:
+    """Apply the 6th (overfit) gate to *survivors*; return ``(kept, kept_dsrs)``.
+
+    Deflates every survivor's Sharpe against the **whole** ``candidates`` pool — the
+    trial count ``N = len(candidates)`` and the cross-trial Sharpe variance ``V`` are
+    taken over every combo that was tried for this leaderboard (the authoritative
+    multiple-testing population, ``TRACK1_BACKTEST_SPEC.md:383-385``), NOT just the
+    gate-survivors. A survivor is kept iff its Deflated Sharpe clears ``dsr_min``.
+
+    When the pool cannot be deflated (< 2 finite Sharpes or zero cross-trial
+    variance) the gate **abstains**: *survivors* pass through unchanged and the
+    second element is ``None`` (no DSR term), so the leaderboard falls back to its
+    seven single-result terms rather than a fabricated deflation (Golden Rule #10).
+
+    Returns
+    -------
+    tuple[list[tuple[int, ResultMetrics]], list[float] | None]
+        The kept ``(mask, metrics)`` survivors and their per-survivor Deflated
+        Sharpe values (aligned to ``kept``), or ``None`` DSR list when the pool
+        was not deflatable (abstain).
+    """
+    dispersion = pool_sharpe_dispersion([m.sharpe_ratio for _, m in candidates])
+    if not dispersion.deflatable:
+        return survivors, None
+    n_trials = len(candidates)
+    kept: list[tuple[int, ResultMetrics]] = []
+    kept_dsrs: list[float] = []
+    for mask, m in survivors:
+        dsr = deflated_sharpe_for(
+            m.sharpe_ratio,
+            m.total_trades,
+            m.skewness,
+            m.kurtosis,
+            n_trials=n_trials,
+            trial_sharpe_variance=dispersion.variance,
+            cfg=overfit,
+        )
+        if passes_overfit_gate(dsr, overfit):
+            kept.append((mask, m))
+            # passes_overfit_gate guarantees dsr is a float (never None) here; the
+            # cast keeps the typed DSR leaderboard precise without re-checking.
+            kept_dsrs.append(cast("float", dsr))
+    return kept, kept_dsrs
+
+
+def rank_combos(
+    candidates: Sequence[tuple[int, ResultMetrics]],
+    *,
+    overfit: OverfitGateConfig | None = None,
+) -> list[RankedCombo]:
     """Rank a leaderboard: gate, z-normalise the composite terms, score, sort.
 
     The composite terms are z-normalised **across the surviving population** (the
@@ -172,15 +256,29 @@ def rank_combos(candidates: Sequence[tuple[int, ResultMetrics]]) -> list[RankedC
     Parameters
     ----------
     candidates
-        ``(mask, metrics)`` pairs for one (instrument, TF) leaderboard.
+        ``(mask, metrics)`` pairs for one (instrument, TF) leaderboard. ``len`` is
+        the authoritative multiple-testing trial count ``N`` for the opt-in overfit
+        gate (``TRACK1_BACKTEST_SPEC.md:383-385``).
+    overfit
+        Opt-in :class:`~brutex.ranking.overfit.OverfitGateConfig` activating the
+        **6th (overfit) gate + the 8th (Deflated-Sharpe) ranking term**
+        (DEC-RANKING-OVERFIT-001). ``None`` (the default) keeps the legacy
+        five-gate / seven-term ranking byte-identical.
 
     Returns
     -------
     list[RankedCombo]
         The gate-passing combos sorted by composite score (descending). Empty if
-        no candidate survives the gates.
+        no candidate survives the gates. When ``overfit`` is supplied and the pool
+        was deflatable, each :class:`RankedCombo` carries its ``deflated_sharpe``
+        and the composite includes the weighted Deflated-Sharpe z-term.
     """
     survivors = [(mask, m) for mask, m in candidates if passes_gates(m)]
+
+    dsr_by_survivor: list[float] | None = None
+    if overfit is not None and survivors:
+        survivors, dsr_by_survivor = _overfit_gate(candidates, survivors, overfit)
+
     if not survivors:
         return []
 
@@ -191,6 +289,14 @@ def rank_combos(candidates: Sequence[tuple[int, ResultMetrics]]) -> list[RankedC
     z_recovery = _zscores([_f(m.recovery_factor) for _, m in survivors])
     z_win_wlr = _zscores([m.win_rate * _f(m.win_loss_ratio) for _, m in survivors])
     z_risk_eff = _zscores([_risk_efficiency(m) for _, m in survivors])
+
+    # 8th term (opt-in): the Deflated-Sharpe z-term — ``overfit`` is non-None
+    # exactly when ``dsr_by_survivor`` is a list (the gate ran and was deflatable).
+    if dsr_by_survivor is not None:
+        z_dsr = _zscores(dsr_by_survivor)
+        dsr_contrib = [cast("OverfitGateConfig", overfit).weight * z for z in z_dsr]
+    else:
+        dsr_contrib = [0.0] * len(survivors)
 
     ranked = [
         RankedCombo(
@@ -204,7 +310,9 @@ def rank_combos(candidates: Sequence[tuple[int, ResultMetrics]]) -> list[RankedC
                 + _W_RECOVERY * z_recovery[i]
                 + _W_WIN_WLR * z_win_wlr[i]
                 + _W_RISK_EFFICIENCY * z_risk_eff[i]
+                + dsr_contrib[i]
             ),
+            deflated_sharpe=None if dsr_by_survivor is None else dsr_by_survivor[i],
         )
         for i, (mask, m) in enumerate(survivors)
     ]
@@ -214,6 +322,7 @@ def rank_combos(candidates: Sequence[tuple[int, ResultMetrics]]) -> list[RankedC
 
 __all__ = [
     "MIN_TRADES",
+    "OverfitGateConfig",
     "RankedCombo",
     "passes_gates",
     "rank_combos",

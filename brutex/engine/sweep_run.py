@@ -66,7 +66,7 @@ from brutex.engine.sweep_driver import (
 from brutex.engine.trade_sim import simulate_trades
 from brutex.metrics.compute import ResultMetrics
 from brutex.money import round_money
-from brutex.ranking import MIN_TRADES, RankedCombo, rank_combos
+from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
 from brutex.strategies.combo import combo_hash
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams, has_conflict
@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     # *receives* an already-built OptionDedupIndex; the runner only *receives*
     # an already-open AuditWriter — neither is constructed here.
     from brutex.data.option_dedup import OptionDedupIndex
+    from brutex.engine.sweep_kernel import ResidentSweepKernel
     from brutex.orchestrator.audit import AuditWriter
 
 _LOG = structlog.get_logger("brutex.engine.sweep_run")
@@ -297,6 +298,15 @@ class SweepRunConfig:
         Stage-1B coarse pre-filter threshold (defaults to
         :data:`brutex.ranking.MIN_TRADES`); a mask firing on fewer bars can never
         be rankable, so it is pruned before the trade sim. ``0`` disables it.
+    overfit
+        Opt-in :class:`~brutex.ranking.overfit.OverfitGateConfig` activating the
+        Stage-3 multiple-testing **overfit gate** (6th gate + Deflated-Sharpe
+        ranking term, DEC-RANKING-OVERFIT-001) inside :func:`brutex.ranking.rank_combos`.
+        ``None`` (the default) keeps the legacy five-gate / seven-term ranking. The
+        leaderboard's trial count ``N`` is this tuple's backtested-combo count —
+        the authoritative per-(instrument, TF) ``N`` — so the persisted store is, by
+        construction, the overfit-gated output (see the ``overfit`` module's honest
+        envelope: no statistically-valid post-store re-gate exists).
 
     Raises
     ------
@@ -323,6 +333,7 @@ class SweepRunConfig:
     max_combos: int = DEFAULT_MAX_COMBOS
     top_k: int | None = None
     min_hits: int = MIN_TRADES
+    overfit: OverfitGateConfig | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf", "mode"):
@@ -372,8 +383,9 @@ class SweepRunSummary:
         is marked seen so a re-run skips them) — includes those the Stage-1B
         pre-filter dropped.
     ranked
-        Surviving combos that cleared the hard rejection gates (the leaderboard
-        size before ``top_k`` truncation).
+        Surviving combos that cleared the hard rejection gates — and, when
+        ``cfg.overfit`` is set, the Stage-3 multiple-testing overfit gate too (the
+        leaderboard size before ``top_k`` truncation).
     persisted
         Ranked finalists appended to the store (``ranked`` truncated to
         ``cfg.top_k``).
@@ -540,6 +552,7 @@ def run_persisted_sweep(
     store: ResultsStore,
     dedup: ComboDedup,
     audit: AuditWriter,
+    kernel: ResidentSweepKernel | None = None,
 ) -> SweepRunSummary:
     """Run a reproducible, deduped, audited K-of-bits sweep over ONE (instrument, TF).
 
@@ -581,6 +594,17 @@ def run_persisted_sweep(
         The :class:`ComboDedup` carrying the run's cross-run dedup state.
     audit
         An open :class:`~brutex.orchestrator.audit.AuditWriter`.
+    kernel
+        Optional pre-built :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel`
+        for this tuple's ``(instrument, tf, proximity, prior_n)`` bar window
+        (DEC-SWEEP-RESIDENT-KERNEL-001). When supplied, the Stage-1A ``bar_bits``
+        build is skipped (its pre-built matrix is reused) and the Stage-1B count is
+        served from the resident Rust buffer (no bar re-marshal) — the
+        :func:`~brutex.engine.sweep_orchestrator.run_sweep_grid` reuse path. The
+        result is **byte-identical** to the ``kernel=None`` path (both delegate to
+        the same SUPERSET kernel; Golden Rule #4); only redundant rebuild/re-marshal
+        work is removed. ``None`` (default) builds + counts inline as before. The
+        kernel MUST be built from the SAME ``bars`` (a length mismatch raises).
 
     Returns
     -------
@@ -590,8 +614,9 @@ def run_persisted_sweep(
     Raises
     ------
     ValueError
-        If ``bars`` is empty, ``cfg.direction`` is ``HOLD``, or the enumerated
-        combo count exceeds ``cfg.max_combos``.
+        If ``bars`` is empty, ``cfg.direction`` is ``HOLD``, the enumerated combo
+        count exceeds ``cfg.max_combos``, or ``kernel`` was built from a different
+        number of bars than ``bars``.
     """
     if not bars:
         raise ValueError("run_persisted_sweep: bars must be non-empty")
@@ -625,7 +650,15 @@ def run_persisted_sweep(
         },
     )
 
-    bar_bits = build_bar_bits(bars, proximity=cfg.proximity, prior_n=cfg.prior_n)
+    if kernel is None:
+        bar_bits = build_bar_bits(bars, proximity=cfg.proximity, prior_n=cfg.prior_n)
+    else:
+        if kernel.n_bars != len(bars):
+            raise ValueError(
+                f"run_persisted_sweep: kernel has {kernel.n_bars} bars but {len(bars)} "
+                f"bars were supplied — the kernel must be built from this tuple's bars"
+            )
+        bar_bits = kernel.bar_bits
 
     enumerated = 0
     conflict_pruned = 0
@@ -656,7 +689,14 @@ def run_persisted_sweep(
     # trade-count gate (still "evaluated": we decided their fate + mark them seen).
     kept = survivors
     if cfg.min_hits > 0 and survivors:
-        hits = count_supermasks(bar_bits, [mask for mask, _ in survivors])
+        survivor_masks = [mask for mask, _ in survivors]
+        # Resident buffer (kernel) avoids re-marshalling the bar window; both arms
+        # are bit-identical (same SUPERSET kernel) so the kept set never differs.
+        hits = (
+            kernel.count_hits(survivor_masks)
+            if kernel is not None
+            else count_supermasks(bar_bits, survivor_masks)
+        )
         kept = [
             (mask, run_id)
             for (mask, run_id), hit in zip(survivors, hits, strict=True)
@@ -681,7 +721,7 @@ def run_persisted_sweep(
         )
         for mask, _ in kept
     ]
-    ranked = rank_combos(pairs)
+    ranked = rank_combos(pairs, overfit=cfg.overfit)
     finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
 
     persisted = 0
