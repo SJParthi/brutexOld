@@ -723,9 +723,10 @@ def read_progress(path: Path) -> dict[str, Any]:
         The parsed snapshot dict, or a copy of the idle snapshot.
     """
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        parsed: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return dict(_IDLE_PROGRESS)
+    return parsed
 
 
 def idle_progress() -> dict[str, Any]:
