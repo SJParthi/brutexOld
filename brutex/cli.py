@@ -1950,6 +1950,7 @@ class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-veri
         entry_ts: datetime,
         exit_ts: datetime,
     ) -> Any:
+        """Return the leg's entry/exit ``OptionBarPair`` from the lake, or ``None``."""
         del expiry_date  # the rolling lake is keyed by resolved strike + ts, not expiry
         from brutex.options.executor import OptionBarPair
 
@@ -1985,6 +1986,7 @@ class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-veri
 
     @staticmethod
     def _row_at(df: Any, ts_utc: datetime, side: str) -> Any:  # pragma: no cover — lake I/O
+        """Build the ``OptionBar`` whose timestamp matches *ts_utc*, or ``None``."""
         from decimal import Decimal
 
         import polars as pl
