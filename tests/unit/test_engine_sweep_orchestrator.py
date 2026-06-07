@@ -46,6 +46,7 @@ from brutex.engine.sweep_orchestrator import (
 )
 from brutex.engine.sweep_run import ComboDedup, SweepRunConfig
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
+from brutex.ranking import OverfitGateConfig
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
 
@@ -267,6 +268,14 @@ class TestToRunConfig:
         assert cfg.min_hits == 7
         assert cfg.mode == "A"
         assert cfg.code_commit_sha == "deadbeef"
+        assert cfg.overfit is None  # default: legacy ranking
+
+    def test_forwards_overfit_gate_config(self) -> None:
+        # The opt-in overfit gate config is threaded onto every tuple's run config.
+        overfit = OverfitGateConfig(dsr_min=0.9)
+        grid = _grid(overfit=overfit)
+        cfg = _tuple().to_run_config(grid)
+        assert cfg.overfit is overfit
 
 
 # ────── count / iter ──────
