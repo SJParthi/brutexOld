@@ -26,25 +26,46 @@ def test_rate_panel_defaults_include_effective_and_latency() -> None:
     assert panel.latency_ms_p95 == 0.0
 
 
+def test_rate_panel_defaults_include_instantaneous_rps_gauge() -> None:
+    """DEC-DASHBOARD-RPS1S-PANEL-001: the per-second issue gauge defaults to 0."""
+    panel = RateLimitPanel()
+    assert panel.rps_1s == 0
+    assert panel.rps_1s_max == 0
+
+
 def test_update_throughput_sets_measured_fields() -> None:
     state = DashboardState()
     state.update_throughput(effective_rps=4.07, latency_ms_p95=174.4)
     assert state.rate_limit.effective_rps == 4.07
     assert state.rate_limit.latency_ms_p95 == 174.4
+    # The rps gauge defaults to 0 when the caller omits it (back-compat).
+    assert state.rate_limit.rps_1s == 0
+    assert state.rate_limit.rps_1s_max == 0
+
+
+def test_update_throughput_sets_instantaneous_rps_gauge() -> None:
+    """DEC-DASHBOARD-RPS1S-PANEL-001: the trailing-1s count + run peak land on the panel."""
+    state = DashboardState()
+    state.update_throughput(effective_rps=4.9, latency_ms_p95=150.0, rps_1s=5, rps_1s_max=5)
+    assert state.rate_limit.rps_1s == 5
+    assert state.rate_limit.rps_1s_max == 5
 
 
 def test_make_rate_observer_maps_both_snapshots_onto_the_panel() -> None:
     state = DashboardState()
     observe = make_rate_observer(state)
-    # controller snapshot {current_rps, recent_hits} + meter snapshot {effective_rps, latency}
+    # controller snapshot {current_rps, recent_hits} + meter snapshot
+    # {effective_rps, latency, rps_1s, rps_1s_max}
     observe(
         {"current_rps": 3.0, "recent_hits": 7},
-        {"effective_rps": 6.08, "latency_ms_p95": 198.3},
+        {"effective_rps": 6.08, "latency_ms_p95": 198.3, "rps_1s": 4, "rps_1s_max": 5},
     )
     assert state.rate_limit.current_rps == 3.0
     assert state.rate_limit.recent_429_count == 7
     assert state.rate_limit.effective_rps == 6.08
     assert state.rate_limit.latency_ms_p95 == 198.3
+    assert state.rate_limit.rps_1s == 4
+    assert state.rate_limit.rps_1s_max == 5
 
 
 def test_make_rate_observer_tolerates_missing_keys() -> None:
@@ -54,6 +75,8 @@ def test_make_rate_observer_tolerates_missing_keys() -> None:
     assert state.rate_limit.recent_429_count == 0
     assert state.rate_limit.effective_rps == 0.0
     assert state.rate_limit.latency_ms_p95 == 0.0
+    assert state.rate_limit.rps_1s == 0
+    assert state.rate_limit.rps_1s_max == 0
 
 
 def test_observe_rate_skips_without_observer_or_controller() -> None:
@@ -81,12 +104,15 @@ def test_observe_rate_skips_without_observer_or_controller() -> None:
 def test_state_to_dict_exposes_the_new_rate_fields() -> None:
     state = DashboardState()
     state.update_rate_limit(current_rps=5.0, available_tokens=2.0, recent_429_count=1)
-    state.update_throughput(effective_rps=4.9, latency_ms_p95=150.0)
+    state.update_throughput(effective_rps=4.9, latency_ms_p95=150.0, rps_1s=4, rps_1s_max=5)
     rl = state.to_dict()["rate_limit"]
     assert rl["current_rps"] == 5.0
     assert rl["effective_rps"] == 4.9
     assert rl["latency_ms_p95"] == 150.0
     assert rl["recent_429_count"] == 1
+    # DEC-DASHBOARD-RPS1S-PANEL-001: the instantaneous gauge is serialised too.
+    assert rl["rps_1s"] == 4
+    assert rl["rps_1s_max"] == 5
 
 
 class TestRateRoute:
@@ -98,7 +124,7 @@ class TestRateRoute:
 
         state = DashboardState()
         state.update_rate_limit(current_rps=5.0, available_tokens=3.0, recent_429_count=2)
-        state.update_throughput(effective_rps=4.8, latency_ms_p95=160.0)
+        state.update_throughput(effective_rps=4.8, latency_ms_p95=160.0, rps_1s=5, rps_1s_max=5)
         with TestClient(build_app(state)) as c:
             yield c
 
@@ -110,3 +136,6 @@ class TestRateRoute:
         assert body["effective_rps"] == 4.8
         assert body["latency_ms_p95"] == 160.0
         assert body["recent_429_count"] == 2
+        # DEC-DASHBOARD-RPS1S-PANEL-001: the instantaneous gauge rides the same route.
+        assert body["rps_1s"] == 5
+        assert body["rps_1s_max"] == 5

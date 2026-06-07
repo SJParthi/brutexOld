@@ -625,7 +625,9 @@ class SessionRateController:
 
 #: The dashboard rate-panel observer (DEC-DASHBOARD-RATE-PANEL-001): given a
 #: ``DhanRateController.snapshot()`` (current_rps + recent_hits) and a
-#: ``CallMeter.snapshot()`` (effective_rps + latency), push both to the panel.
+#: ``CallMeter.snapshot()`` (effective_rps + latency + the instantaneous
+#: ``rps_1s`` / ``rps_1s_max`` gauge — DEC-DASHBOARD-RPS1S-PANEL-001), push both
+#: to the panel.
 RateObserver = Callable[[Mapping[str, Any], Mapping[str, Any]], None]
 
 
@@ -639,9 +641,11 @@ def _observe_rate(
     A no-op for a dry-run / injected-factory pull (no *controller*) or when no
     observer is wired (the default). On a live pull it sends the controller's
     ``snapshot()`` (current_rps + recent 429s) and the transport ``CallMeter``'s
-    ``snapshot()`` (effective_rps + latency p95) to *rate_observer*
-    (``make_rate_observer`` — DEC-DASHBOARD-RATE-PANEL-001), so the operator SEES
-    the live rate on the dashboard, not just in ``/logs``.
+    ``snapshot()`` (effective_rps + latency p95 + the instantaneous
+    ``rps_1s`` / ``rps_1s_max`` gauge) to *rate_observer* (``make_rate_observer`` —
+    DEC-DASHBOARD-RATE-PANEL-001 + DEC-DASHBOARD-RPS1S-PANEL-001), so the operator
+    SEES the live per-second issue rate + its peak on the dashboard, not just in
+    ``/logs``.
     """
     if rate_observer is None or controller is None:
         return
