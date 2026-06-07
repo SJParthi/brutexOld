@@ -1213,6 +1213,14 @@ jobs:
           else
             echo "(brutex.adapters.dhan.errors test file not present yet — gate inactive)"
           fi
+          # DEC-CATALOG-RECONCILE-WIRE-001: the lake→catalog reconciler ships at
+          # 100% line+branch from the start (read-side fix that makes an
+          # already-pulled lake sweep-able with no re-pull).
+          if compgen -G "tests/unit/test_catalog_reconcile.py" > /dev/null; then
+            pytest --cov=brutex.data.catalog_reconcile --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_catalog_reconcile.py
+          else
+            echo "(brutex.data.catalog_reconcile test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_client.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.client --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_client.py tests/unit/test_dhan_parallel_locks.py
           else
