@@ -1181,6 +1181,15 @@ jobs:
           else
             echo "(brutex.adapters.dhan.run_ingest test file not present yet — gate inactive)"
           fi
+          # Ratchet `brutex.adapters.dhan.auto_retry` (post-run leftover-window
+          # auto-retry round loop — DEC-INGEST-AUTO-RETRY-001) into the strict
+          # per-module 100% gate. The module is wheel-free, so its unit suite
+          # covers every line + branch via a fake run_pass + injected backoff.
+          if compgen -G "tests/unit/test_dhan_auto_retry.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.auto_retry --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_auto_retry.py
+          else
+            echo "(brutex.adapters.dhan.auto_retry test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_universe_ingest.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.universe_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_universe_ingest.py
           else

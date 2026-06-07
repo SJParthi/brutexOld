@@ -476,6 +476,23 @@ class TestPullAllSpot:
         assert report.total_completed == 0
         assert report.to_dict()["symbols"] == []
 
+    def test_auto_retry_on_clean_dry_run_is_noop(self, tmp_path: Path) -> None:
+        # The "Retry failed windows" button path (auto_retry=True): a clean
+        # synthetic pull leaves no transient residual, so the wrapper runs no
+        # extra rounds and the per-symbol rollup is identical to the single-pass
+        # default — same engine, no behaviour change on a clean pull
+        # (DEC-INGEST-AUTO-RETRY-001).
+        report = pull_all_spot(
+            [_index("13"), _index("25")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            auto_retry=True,
+        )
+        assert report.total_symbols == 2
+        assert report.total_completed == 4
+        assert report.total_failed == 0
+
     def test_explicit_range_is_honoured(self, tmp_path: Path) -> None:
         # DEC-DHAN-SPOT-MULTI-SATURATE-001: the bulk flatten now accepts the
         # multi-select date picker's from/to range (instead of always full
