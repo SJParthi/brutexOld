@@ -588,6 +588,19 @@ jobs:
           else
             echo "(brutex.notifications.telegram test file not present yet — gate inactive)"
           fi
+          # DEC-TELEGRAM-WIRE-001 (2026-06-07, MIGRATION entry #565): the
+          # sweep-supervisor → Telegram alert seam (watchdog-hung /
+          # rate.breach / auth.renew_failed / sweep complete + the manual
+          # `brutex notify test` digest) ships at 100% line+branch. It is
+          # wheel-free at import (telegram channel only); the default lazy
+          # singleton resolver is # pragma: no cover (delegates to the
+          # already-100% brutex.notifications.wiring), and the CLI/pull
+          # wiring sites live in the coverage-omitted cli.py / live pull path.
+          if compgen -G "tests/unit/test_notifications_sweep_alerts.py" > /dev/null; then
+            pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py
+          else
+            echo "(brutex.notifications.sweep_alerts test file not present yet — gate inactive)"
+          fi
           # DEC-TELEGRAM-WIRING-001 (2026-05-25, MIGRATION entry #238):
           # ratchet brutex.notifications.wiring (the Telegram⇄pipeline
           # seam) into the strict per-module 100% gate. 34 unit tests
@@ -919,6 +932,15 @@ jobs:
             pytest --cov=brutex.options.strike_rules --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strike_rules.py
           else
             echo "(brutex.options.strike_rules test file not present yet — gate inactive)"
+          fi
+          # 21e · brutex.options.executor (193 stmts, 50 branches, 38 tests).
+          #       DEC-OPTIONS-EXECUTOR-001 — the spot-signal → priced-option
+          #       materializer. The unit file alone reaches 100% line+branch;
+          #       golden + property + integration suites are additional oracles.
+          if compgen -G "tests/unit/test_options_executor.py" > /dev/null; then
+            pytest --cov=brutex.options.executor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_options_executor.py
+          else
+            echo "(brutex.options.executor test file not present yet — gate inactive)"
           fi
           # DEC-COV-BACKFILL-003 (entry #259, 2026-05-27): 1-module
           # backfill — close the biggest non-orchestrator gap via 6

@@ -620,6 +620,14 @@ def _maybe_renew_adapter_token(
 
     token = maybe_renew_token(adapter.client, pace=pace, log=_LOG)  # pragma: no cover — live
     if token is None:  # pragma: no cover — live
+        # AUTOMATIC auth.renew_failed alert (DEC-TELEGRAM-WIRE-001): RenewToken
+        # refused, so the pull runs on a token that will expire — push a
+        # best-effort ERROR to Telegram (no-op when disabled; never blocks).
+        from brutex.notifications.sweep_alerts import SweepAlerter
+
+        SweepAlerter().auth_renew_failed(
+            reason="RenewToken refused (token may be expired or TOTP-minted)"
+        )
         return adapter
     return replace(  # pragma: no cover — live
         adapter, client=replace(adapter.client, access_token=token.access_token)
