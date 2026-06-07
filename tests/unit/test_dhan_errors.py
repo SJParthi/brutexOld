@@ -19,6 +19,7 @@ from brutex.adapters.dhan.errors import (
     from_http_status,
     is_auth_failure,
     is_no_data_error,
+    is_no_data_message,
     is_rate_limit,
     is_retryable,
 )
@@ -117,6 +118,32 @@ class TestIsNoDataError:
     )
     def test_false_for_non_bad_request(self, exc: DhanError) -> None:
         assert is_no_data_error(exc) is False
+
+
+class TestIsNoDataMessage:
+    """``is_no_data_message`` — the STRING twin used by the auto-retry classifier."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "HTTP 400 bad request: DH-905 no data",
+            "no data present for this range",
+            '{"errorCode":"DH-905"}',
+        ],
+    )
+    def test_true_for_markers(self, text: str) -> None:
+        assert is_no_data_message(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "HTTP 429 rate limited: slow down",
+            "HTTP 400 bad request: malformed body",
+            "",
+        ],
+    )
+    def test_false_for_non_no_data(self, text: str) -> None:
+        assert is_no_data_message(text) is False
 
 
 class TestIsAuthFailure:

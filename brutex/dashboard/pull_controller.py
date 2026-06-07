@@ -48,7 +48,11 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from brutex.adapters.dhan.auth import dhan_creds_present
-from brutex.adapters.dhan.run_ingest import ProgressHook, run_dhan_spot_ingest
+from brutex.adapters.dhan.run_ingest import (
+    ProgressHook,
+    run_dhan_spot_ingest,
+    run_dhan_spot_ingest_with_retry,
+)
 from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
 from brutex.adapters.protocol import MarketAdapter
 from brutex.dashboard.coverage_reconcile import (
@@ -846,6 +850,7 @@ def pull_all_spot(
     pull_id: str | None = None,
     rate_observer: RateObserver | None = None,
     session_rate: SessionRateController | None = None,
+    auto_retry: bool = False,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, previous day]`` range.
 
@@ -889,6 +894,14 @@ def pull_all_spot(
         skipped and the windows completed by this run are saved back — a re-pull
         never re-burns the Dhan quota on data already in the lake
         (DEC-FETCH-COVERAGE-WIRING-001). Dry-run ignores it (null sink).
+    auto_retry
+        When ``True`` (the dashboard "Retry failed windows" button / the manual
+        recovery path), leftover failed windows are auto-re-pulled in bounded
+        rounds after the pull — only the still-failed windows, via the shared
+        coverage ledger (rate-safe + idempotent; DEC-INGEST-AUTO-RETRY-001).
+        ``False`` (default — the one-click Pull-ALL) runs a single pass, the prior
+        behaviour. Either way the per-symbol rollup is computed from the ORIGINAL
+        pass's report.
 
     Returns
     -------
@@ -982,7 +995,14 @@ def pull_all_spot(
                 on_progress(label, bars, failed)
             status_flush()
 
-        report = run_dhan_spot_ingest(
+        # The "Retry failed windows" button passes ``auto_retry=True`` so leftover
+        # failed windows are auto-re-pulled in bounded rounds AFTER the pull (only
+        # the still-failed windows, via the shared coverage ledger — rate-safe,
+        # idempotent; DEC-INGEST-AUTO-RETRY-001). The default one-click Pull-ALL
+        # keeps ``auto_retry=False`` (a single pass) — byte-for-byte the prior
+        # behaviour. BOTH paths share the same ingest spine (CLAUDE.md §11 COMMON);
+        # ``report`` is always the ORIGINAL pass's report for the per-symbol rollup.
+        report = run_dhan_spot_ingest_with_retry(
             adapter,
             sink,
             instruments=instruments,
@@ -997,7 +1017,8 @@ def pull_all_spot(
             coverage=coverage,
             status_log=status_log,
             run_parallel=run_parallel,
-        )
+            auto_retry=auto_retry,
+        ).report
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
         end_pull_status(status_log, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
