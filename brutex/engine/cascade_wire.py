@@ -1,0 +1,1073 @@
+"""Stage-4 cascade **wiring** — re-build the cascade inputs from a persisted sweep
+and run the nine-filter cascade on its top-K winners (DEC-CASCADE-WIRE-001).
+
+The pure orchestrator in :mod:`brutex.metrics.cascade` (``run_stage4_cascade``)
+consumes hand-built :class:`~brutex.metrics.cascade.CandidateInput`\\s; its
+docstring explicitly deferred *"the production series-regeneration adapter
+(trade-sim + lake)"* as out of scope. **This module is that adapter** — the seam
+that turns a finished sweep's persisted winners back into ``CandidateInput``\\s by
+re-running the Stage-2 trade-sim on the same bars, then runs the cascade.
+
+It is consumed two ways (both go through the SAME pure core
+:func:`run_cascade_over_specs`, so the AUTOMATIC and the MANUAL paths produce a
+**byte-identical** report — the golden contract of this PR):
+
+* **AUTOMATIC** — the sweep launcher (``brutex sweep-all``) calls
+  :func:`run_and_write_from_specs` after the grid completes, building the
+  :class:`CascadeManifest` from the grid + the persisted per-tuple stores and
+  writing both ``cascade/manifest.json`` and ``cascade/cascade-report.json``.
+* **MANUAL** — ``brutex cascade <run-id>`` (and the dashboard "Run cascade"
+  button) call :func:`run_and_write_from_manifest`, which reloads the manifest
+  this sweep wrote, re-reads the same bars from the lake, and re-runs the cascade
+  → the same report bytes.
+
+Why a manifest (Golden Rule #1, #4)
+-----------------------------------
+A persisted :class:`~brutex.engine.results_store.ResultRow` carries the winning
+``mask_bits`` + the ``instrument``/``tf``/``direction`` context, but NOT the
+tuple's ``sl``/``tp``/``prior_n``/``proximity``/``start_equity`` — those are
+folded into the BLAKE3 ``run_id`` but never stored as columns. Re-simulating the
+exact trades needs them, so the AUTOMATIC path (which still holds the
+:class:`~brutex.engine.sweep_orchestrator.SweepGridConfig`) records a manifest of
+:class:`CascadeTupleSpec`\\s; the MANUAL path replays it. The manifest is the
+single source of truth both paths consume — no parameter is ever re-derived or
+guessed.
+
+Per-``(instrument, tf)`` pooling (honest envelope, Golden Rule #10)
+-------------------------------------------------------------------
+The cascade's pool filters (Reality-Check / PBO / Romano-Wolf) require every
+pooled candidate to share ONE returns length — they stack the survivors into a
+common ``(n_obs, n)`` matrix. Per-bar return series are only equal-length within
+one ``(instrument, tf)`` slice (same bars), so the cascade is run **once per
+slice** (the spec's per-leaderboard pool, ``TRACK1_BACKTEST_SPEC.md`` §"Stage 4")
+and the per-slice reports are aggregated into one :class:`CascadeWireReport`.
+Pooling across instruments/timeframes (different bar counts) would crash the
+pool matrix and is deliberately NOT done.
+
+Reconstruction conventions (documented, not hidden)
+---------------------------------------------------
+For each winning mask the trades are re-simulated (next-bar-open fills + SL/TP +
+15:20 forced exit, the golden-locked :func:`~brutex.engine.trade_sim.simulate_trades`)
+and the :class:`~brutex.metrics.cascade.CandidateInput` is filled as:
+
+* scalar metrics (Sharpe / Sortino / Calmar / profit-factor / win-rate /
+  win-loss / recovery / max-DD% / consecutive-losses / skew / kurtosis) — from
+  :func:`brutex.metrics.compute.compute_metrics` (the per-**trade** moments),
+  a ``None`` (mathematically-undefined) value mapped to ``0.0`` (the same
+  documented choice as :func:`brutex.engine.sweep_run.ranked_combo_to_result_row`);
+* ``returns`` — the **per-bar** change in the realised-equity curve as a
+  fraction of the notional base (the equal-length pool axis for CPCV / WFO / DSR
+  and the SPA/RW/PBO matrix);
+* ``lockbox_returns`` / ``lockbox_days`` — the same per-bar series plus each
+  bar's IST trading-day ordinal (so the held-out window slices by day);
+  ``training_sharpe`` / ``training_max_drawdown`` are the in-sample per-bar
+  Sharpe + drawdown (return units) — self-consistent with ``lockbox_returns``;
+* ``mc_evaluate`` — the injected exit logic for filter #9: relocate the entry
+  signals to the given bar positions, re-run the SAME trade-sim, return the
+  per-trade Sharpe (comparable to the observed per-trade ``sharpe_ratio``);
+  an undefined Sharpe returns ``nan`` (treated as "did not beat").
+
+This is offline Stage-4 batch work, ``O(K)`` re-simulations over the top-K
+winners — never an ``O(1)`` per-bar hot path; no O(1)-total claim is made.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Final, cast
+
+import structlog
+
+from brutex.models import BruteXError
+
+if TYPE_CHECKING:  # pragma: no cover - import only for static typing
+    from collections.abc import Callable, Sequence
+    from pathlib import Path
+
+    import numpy as np
+    import numpy.typing as npt
+
+    from brutex.data.models import CandleBar
+    from brutex.engine.results_store import ResultRow
+    from brutex.metrics.cascade import CandidateInput, CascadeConfig, CascadeReport
+
+_LOG = structlog.get_logger("brutex.engine.cascade_wire")
+
+#: Directory (under a sweep results-root) holding the cascade manifest + report.
+CASCADE_DIRNAME: Final[str] = "cascade"
+#: The manifest the AUTOMATIC path writes + the MANUAL path replays.
+MANIFEST_FILENAME: Final[str] = "manifest.json"
+#: The serialised cascade report (auto path == manual path, byte-for-byte).
+REPORT_FILENAME: Final[str] = "cascade-report.json"
+#: Manifest schema version (bump on any incompatible field change).
+MANIFEST_VERSION: Final[int] = 1
+#: Report schema version.
+REPORT_VERSION: Final[int] = 1
+
+#: 64-char lowercase-hex BLAKE3 run-identity length (mirrors COMBO_HASH_HEX_LEN).
+_RUN_ID_LEN: Final[int] = 64
+#: Largest valid strategy mask — the 52 atomic condition bits (0..51) all set.
+_MASK_BITS_MAX: Final[int] = (1 << 52) - 1
+#: Modulus keeping the sweep-id-derived seed a non-negative 31-bit int.
+_SEED_MODULUS: Final[int] = 2**31
+#: The three proximity tolerances ``(pivot, pdh_pdl, fib)`` carried per tuple.
+_PROXIMITY_LEN: Final[int] = 3
+
+
+class CascadeWireError(BruteXError):
+    """Raised for any cascade-wiring failure (bad manifest / spec / missing file)."""
+
+
+# ── Manifest data model ──────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class CascadeTupleSpec:
+    """One grid tuple's cascade inputs — its params + the winning ``(run_id, mask)``\\s.
+
+    Carries everything :func:`build_candidate_input` needs to re-simulate the
+    tuple's winners (the params are NOT recoverable from a stored
+    :class:`~brutex.engine.results_store.ResultRow`).
+
+    Parameters
+    ----------
+    instrument, tf_label, direction_label
+        Context labels; non-empty. ``direction_label`` is ``"bull"`` / ``"bear"``.
+    tf_minutes
+        Bar timeframe in whole minutes (``>= 1``).
+    sl_paisa, tp_paisa
+        Stop-loss / take-profit distances in paisa (``> 0``), or ``None``.
+    prior_n
+        Prior-bar pattern look-back (``>= 1``).
+    proximity_bps
+        ``(pivot, pdh_pdl, fib)`` proximity tolerances in bps, or ``None`` for the
+        Stage-1A default.
+    start_equity_paisa
+        Notional capital base (paisa, ``> 0``).
+    winners
+        The tuple's finalists as ``(run_id, mask)`` pairs; each ``run_id`` is
+        64-char lowercase hex, each ``mask`` in ``[0, _MASK_BITS_MAX]``.
+
+    Raises
+    ------
+    CascadeWireError
+        On an empty label, a non-positive knob, a malformed run_id, or an
+        out-of-range mask.
+    """
+
+    instrument: str
+    tf_label: str
+    tf_minutes: int
+    direction_label: str
+    sl_paisa: int | None
+    tp_paisa: int | None
+    prior_n: int
+    proximity_bps: tuple[int, int, int] | None
+    start_equity_paisa: int
+    winners: tuple[tuple[str, int], ...]
+
+    def __post_init__(self) -> None:
+        for name in ("instrument", "tf_label", "direction_label"):
+            if not getattr(self, name):
+                raise CascadeWireError(f"CascadeTupleSpec.{name} must be non-empty")
+        if self.direction_label not in ("bull", "bear"):
+            raise CascadeWireError(
+                f"CascadeTupleSpec.direction_label must be 'bull' or 'bear', "
+                f"got {self.direction_label!r}"
+            )
+        if self.tf_minutes < 1:
+            raise CascadeWireError(
+                f"CascadeTupleSpec.tf_minutes must be >= 1, got {self.tf_minutes}"
+            )
+        for name in ("sl_paisa", "tp_paisa"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise CascadeWireError(f"CascadeTupleSpec.{name} must be > 0 or None, got {value}")
+        if self.prior_n < 1:
+            raise CascadeWireError(f"CascadeTupleSpec.prior_n must be >= 1, got {self.prior_n}")
+        if self.start_equity_paisa <= 0:
+            raise CascadeWireError(
+                f"CascadeTupleSpec.start_equity_paisa must be > 0, got {self.start_equity_paisa}"
+            )
+        if self.proximity_bps is not None and len(self.proximity_bps) != _PROXIMITY_LEN:
+            raise CascadeWireError(
+                f"CascadeTupleSpec.proximity_bps must be a 3-tuple or None, got {self.proximity_bps!r}"
+            )
+        for run_id, mask in self.winners:
+            if len(run_id) != _RUN_ID_LEN or run_id != run_id.lower():
+                raise CascadeWireError(
+                    f"CascadeTupleSpec winner run_id must be {_RUN_ID_LEN}-char lowercase hex, "
+                    f"got {run_id!r}"
+                )
+            if not 0 <= mask <= _MASK_BITS_MAX:
+                raise CascadeWireError(
+                    f"CascadeTupleSpec winner mask {mask} out of range [0, {_MASK_BITS_MAX}]"
+                )
+
+
+@dataclass(frozen=True, slots=True)
+class BarsContext:
+    """The lake window a sweep ran over — so the MANUAL path reloads the same bars.
+
+    Parameters
+    ----------
+    exchange, segment, start, end
+        The lake partition labels + ISO window the sweep loaded; each non-empty.
+
+    Raises
+    ------
+    CascadeWireError
+        If any field is empty.
+    """
+
+    exchange: str
+    segment: str
+    start: str
+    end: str
+
+    def __post_init__(self) -> None:
+        for name in ("exchange", "segment", "start", "end"):
+            if not getattr(self, name):
+                raise CascadeWireError(f"BarsContext.{name} must be non-empty")
+
+
+@dataclass(frozen=True, slots=True)
+class CascadeManifest:
+    """The full replayable cascade input set written by the AUTOMATIC path.
+
+    Parameters
+    ----------
+    version
+        Manifest schema version (:data:`MANIFEST_VERSION`).
+    sweep_id
+        The grid identity (``grid_identity(grid)``) this cascade ran for.
+    cascade_config
+        The :class:`~brutex.metrics.cascade.CascadeConfig` (thresholds + seed) —
+        stored so the MANUAL replay uses identical thresholds.
+    bars_context
+        The :class:`BarsContext` for the MANUAL bar reload.
+    specs
+        Every tuple's :class:`CascadeTupleSpec`.
+    """
+
+    version: int
+    sweep_id: str
+    cascade_config: CascadeConfig
+    bars_context: BarsContext
+    specs: tuple[CascadeTupleSpec, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CascadeWireReport:
+    """The aggregate cascade result — one :class:`CascadeReport` per pooled slice.
+
+    Parameters
+    ----------
+    sweep_id
+        The grid identity this report is for.
+    groups
+        ``(instrument, tf_label, report)`` triples, one per ``(instrument, tf)``
+        pool, in sorted order.
+    """
+
+    sweep_id: str
+    groups: tuple[tuple[str, str, CascadeReport], ...]
+
+    @property
+    def n_input(self) -> int:
+        """Total candidates fed across every pool."""
+        return sum(report.n_input for _, _, report in self.groups)
+
+    @property
+    def n_survived(self) -> int:
+        """Total cascade survivors across every pool."""
+        return sum(report.n_survived for _, _, report in self.groups)
+
+    @property
+    def survivor_ids(self) -> tuple[str, ...]:
+        """Every surviving candidate id, in pool order then composite-rank order."""
+        return tuple(sid for _, _, report in self.groups for sid in report.survivor_ids)
+
+
+# ── Cascade config (deterministic seed from the sweep id) ─────────────────────
+
+
+def cascade_config_for_sweep(
+    sweep_id: str, *, overrides: dict[str, object] | None = None
+) -> CascadeConfig:
+    """Build a deterministic :class:`~brutex.metrics.cascade.CascadeConfig` for a sweep.
+
+    The mandatory cascade ``seed`` (Golden Rule #4) is derived from the sweep
+    identity (its leading hex) so it is reproducible AND distinct per sweep; any
+    *overrides* (e.g. relaxed thresholds for a manual probe) are applied on top.
+    The resulting config is stored in the manifest so the MANUAL replay is exact.
+
+    Parameters
+    ----------
+    sweep_id
+        The grid identity (``>= 1`` hex char).
+    overrides
+        Optional field overrides forwarded to :class:`CascadeConfig`.
+
+    Returns
+    -------
+    CascadeConfig
+        The reproducible cascade config.
+
+    Raises
+    ------
+    CascadeWireError
+        If *sweep_id* is empty or not hex.
+    """
+    from brutex.metrics.cascade import CascadeConfig
+
+    if not sweep_id:
+        raise CascadeWireError("cascade_config_for_sweep: sweep_id must be non-empty")
+    try:
+        seed = int(sweep_id[:16], 16) % _SEED_MODULUS
+    except ValueError as exc:
+        raise CascadeWireError(f"cascade_config_for_sweep: sweep_id is not hex: {exc}") from exc
+    kwargs: dict[str, object] = {"seed": seed}
+    if overrides is not None:
+        kwargs.update(overrides)
+    return CascadeConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def cascade_config_to_dict(config: CascadeConfig) -> dict[str, object]:
+    """Return *config*'s fields as a JSON-serialisable dict (manifest storage)."""
+    from dataclasses import asdict
+
+    return asdict(config)
+
+
+def cascade_config_from_dict(data: dict[str, object]) -> CascadeConfig:
+    """Rebuild a :class:`CascadeConfig` from :func:`cascade_config_to_dict` output."""
+    from brutex.metrics.cascade import CascadeConfig
+
+    try:
+        return CascadeConfig(**data)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise CascadeWireError(f"invalid cascade_config in manifest: {exc}") from exc
+
+
+# ── CandidateInput reconstruction ─────────────────────────────────────────────
+
+
+def _finite(value: float | None) -> float:
+    """Map a ``float | None`` metric to a finite float (``None`` / non-finite → ``0.0``).
+
+    The cascade's :class:`CandidateInput` rejects any non-finite scalar; a metric
+    that is mathematically undefined for the sample (``None``) or an out-of-domain
+    ``inf``/``nan`` maps to ``0.0`` — the same documented choice as
+    :func:`brutex.engine.sweep_run.ranked_combo_to_result_row`. Real finite values
+    pass through unchanged.
+    """
+    if value is None or not math.isfinite(value):
+        return 0.0
+    return value
+
+
+def _per_bar_returns(equity_paisa: Sequence[int], start_equity_paisa: int) -> tuple[float, ...]:
+    """Per-bar realised return = the per-bar equity change ÷ the notional base.
+
+    The first bar's return is measured against ``start_equity_paisa`` (the curve's
+    implicit pre-window equity); every subsequent bar against the prior bar. The
+    series is the equal-length pool axis the cascade's matrix filters require.
+    """
+    out: list[float] = []
+    prev = start_equity_paisa
+    for value in equity_paisa:
+        out.append((value - prev) / start_equity_paisa)
+        prev = value
+    return tuple(out)
+
+
+def _max_drawdown_return_units(returns: Sequence[float]) -> float:
+    """Largest peak-to-trough decline of the cumulative-return path (``>= 0``).
+
+    Matches :func:`brutex.metrics.lockbox._max_drawdown`'s convention so the
+    in-sample ``training_max_drawdown`` reference is in the SAME units the lockbox
+    re-measures, keeping the drawdown gate apples-to-apples. ``0.0`` for an empty
+    or monotonically non-decreasing path.
+    """
+    peak = float("-inf")
+    cum = 0.0
+    max_dd = 0.0
+    for r in returns:
+        cum += r
+        peak = max(peak, cum)
+        max_dd = max(max_dd, peak - cum)
+    return max_dd
+
+
+def _make_mc_evaluate(
+    *,
+    bars: Sequence[CandleBar],
+    side: object,
+    tf_minutes: int,
+    sl_paisa: int | None,
+    tp_paisa: int | None,
+    start_equity_paisa: int,
+) -> Callable[[npt.NDArray[np.intp]], float]:
+    """Build the Monte-Carlo exit-logic callable (filter #9) for one candidate.
+
+    Returns a closure that, given a sorted array of entry-bar positions, relocates
+    the entry signals there, re-runs the SAME trade-sim (identical exit logic), and
+    returns the per-trade Sharpe — comparable to the candidate's observed per-trade
+    Sharpe. An undefined Sharpe (``< 2`` trades / zero variance) returns ``nan``,
+    which the permutation test treats as "did not beat" the observed statistic.
+    """
+    from brutex.engine.trade_sim import simulate_trades
+    from brutex.metrics.cpcv import sharpe_of_returns
+
+    n_bars = len(bars)
+
+    def evaluate(positions: npt.NDArray[np.intp]) -> float:
+        signals = [False] * n_bars
+        for position in positions:
+            signals[int(position)] = True
+        trades = simulate_trades(
+            bars,
+            signals,
+            direction=side,  # type: ignore[arg-type]
+            tf_minutes=tf_minutes,
+            stop_loss_paisa=sl_paisa,
+            take_profit_paisa=tp_paisa,
+        )
+        rets = [t.pnl_paisa / start_equity_paisa for t in trades]
+        sharpe = sharpe_of_returns(rets)
+        return float("nan") if sharpe is None else float(sharpe)
+
+    return evaluate
+
+
+def build_candidate_input(
+    *,
+    run_id: str,
+    mask: int,
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    direction_label: str,
+    tf_minutes: int,
+    sl_paisa: int | None,
+    tp_paisa: int | None,
+    start_equity_paisa: int,
+) -> CandidateInput:
+    """Re-simulate one winning *mask* over *bars* into a cascade :class:`CandidateInput`.
+
+    Projects the mask onto the pre-built ``bar_bits``, simulates the trades with
+    the tuple's exact knobs (so the result reproduces the persisted finalist), and
+    fills every field the nine filters need (see the module docstring for the
+    per-field conventions).
+
+    Parameters
+    ----------
+    run_id
+        The finalist's 64-char BLAKE3 run-identity (the candidate id).
+    mask
+        The winning u64 strategy mask.
+    bars, bar_bits
+        The slice's bars + the pre-built Stage-1A matrix (built once per slice).
+    direction_label
+        ``"bull"`` / ``"bear"``.
+    tf_minutes, sl_paisa, tp_paisa, start_equity_paisa
+        The tuple's trade-sim knobs (must match what produced the finalist).
+
+    Returns
+    -------
+    CandidateInput
+        The reconstructed cascade input.
+    """
+    from brutex.calendars.nse import IST
+    from brutex.engine.combo_mask import mask_to_entry_signals
+    from brutex.engine.sweep_driver import build_equity_curve
+    from brutex.engine.trade_sim import simulate_trades
+    from brutex.metrics.cascade import CandidateInput
+    from brutex.metrics.compute import compute_metrics
+    from brutex.metrics.cpcv import sharpe_of_returns
+    from brutex.strategies.types import Side
+
+    side = Side.BUY if direction_label == "bull" else Side.SELL
+    entry_signals = mask_to_entry_signals(bar_bits, mask)
+    trades = simulate_trades(
+        bars,
+        entry_signals,
+        direction=side,
+        tf_minutes=tf_minutes,
+        stop_loss_paisa=sl_paisa,
+        take_profit_paisa=tp_paisa,
+    )
+    equity = build_equity_curve(
+        bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
+    )
+    metrics = compute_metrics(trades, equity, total_bars=len(bars))
+
+    per_bar = _per_bar_returns(equity.equity_paisa, start_equity_paisa)
+    day_ordinals = tuple(bar.timestamp.astimezone(IST).date().toordinal() for bar in bars)
+    n_entries = sum(1 for signal in entry_signals if signal)
+
+    return CandidateInput(
+        candidate_id=run_id,
+        sharpe_ratio=_finite(metrics.sharpe_ratio),
+        sortino_ratio=_finite(metrics.sortino_ratio),
+        calmar_ratio=_finite(metrics.calmar_ratio),
+        profit_factor=_finite(metrics.profit_factor),
+        win_rate=metrics.win_rate,
+        win_loss_ratio=_finite(metrics.win_loss_ratio),
+        recovery_factor=_finite(metrics.recovery_factor),
+        max_drawdown_pct=metrics.max_drawdown_pct,
+        max_consecutive_losses=metrics.max_consecutive_losses,
+        total_trades=metrics.total_trades,
+        training_sharpe=_finite(sharpe_of_returns(per_bar)),
+        training_max_drawdown=_max_drawdown_return_units(per_bar),
+        skew=_finite(metrics.skewness),
+        kurtosis=_finite(metrics.kurtosis),
+        returns=per_bar,
+        lockbox_returns=per_bar,
+        lockbox_days=day_ordinals,
+        mc_n_bars=len(bars),
+        mc_n_entries=n_entries,
+        mc_evaluate=_make_mc_evaluate(
+            bars=bars,
+            side=side,
+            tf_minutes=tf_minutes,
+            sl_paisa=sl_paisa,
+            tp_paisa=tp_paisa,
+            start_equity_paisa=start_equity_paisa,
+        ),
+    )
+
+
+def candidates_for_spec(spec: CascadeTupleSpec, bars: Sequence[CandleBar]) -> list[CandidateInput]:
+    """Re-build every winner of *spec* into a :class:`CandidateInput` over *bars*.
+
+    Builds the Stage-1A ``bar_bits`` once (the tuple's proximity + prior_n), then
+    projects each winning mask through :func:`build_candidate_input`.
+    """
+    from brutex.engine.stage1a import build_bar_bits
+    from brutex.vocabulary import ProximityParams
+
+    proximity = (
+        None
+        if spec.proximity_bps is None
+        else ProximityParams(
+            pivot_proximity_bps=spec.proximity_bps[0],
+            pdh_pdl_proximity_bps=spec.proximity_bps[1],
+            fib_proximity_bps=spec.proximity_bps[2],
+        )
+    )
+    bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=spec.prior_n)
+    return [
+        build_candidate_input(
+            run_id=run_id,
+            mask=mask,
+            bars=bars,
+            bar_bits=bar_bits,
+            direction_label=spec.direction_label,
+            tf_minutes=spec.tf_minutes,
+            sl_paisa=spec.sl_paisa,
+            tp_paisa=spec.tp_paisa,
+            start_equity_paisa=spec.start_equity_paisa,
+        )
+        for run_id, mask in spec.winners
+    ]
+
+
+# ── The shared pure core (auto path == manual path) ───────────────────────────
+
+
+def run_cascade_over_specs(
+    specs: Sequence[CascadeTupleSpec],
+    *,
+    bars_for: Callable[[str, str], Sequence[CandleBar]],
+    config: CascadeConfig,
+    sweep_id: str,
+) -> CascadeWireReport:
+    """Run the Stage-4 cascade per ``(instrument, tf)`` pool → one aggregate report.
+
+    The single function both the AUTOMATIC and the MANUAL paths call, so a
+    byte-identical *specs* + *config* + *bars_for* produces a byte-identical
+    report. Specs are grouped by ``(instrument, tf_label)`` (the equal-length
+    returns pool); for each group with bars + candidates the cascade runs once.
+
+    Parameters
+    ----------
+    specs
+        Every tuple's :class:`CascadeTupleSpec`.
+    bars_for
+        ``(instrument, tf_label) -> bars`` loader (empty ⇒ that slice is skipped).
+    config
+        The :class:`CascadeConfig` (shared across pools — same seed + thresholds).
+    sweep_id
+        The grid identity stamped on the report.
+
+    Returns
+    -------
+    CascadeWireReport
+        One :class:`CascadeReport` per pooled slice, sorted by ``(instrument, tf)``.
+    """
+    from brutex.metrics.cascade import run_stage4_cascade
+
+    grouped: dict[tuple[str, str], list[CascadeTupleSpec]] = {}
+    for spec in specs:
+        grouped.setdefault((spec.instrument, spec.tf_label), []).append(spec)
+
+    groups: list[tuple[str, str, CascadeReport]] = []
+    for instrument, tf_label in sorted(grouped):
+        bars = bars_for(instrument, tf_label)
+        if not bars:
+            continue
+        candidates: list[CandidateInput] = []
+        for spec in grouped[(instrument, tf_label)]:
+            candidates.extend(candidates_for_spec(spec, bars))
+        if not candidates:
+            continue
+        report = run_stage4_cascade(candidates, config)
+        groups.append((instrument, tf_label, report))
+
+    _LOG.info(
+        "cascade_wire.complete",
+        sweep_id=sweep_id,
+        pools=len(groups),
+        n_input=sum(report.n_input for _, _, report in groups),
+        n_survived=sum(report.n_survived for _, _, report in groups),
+    )
+    return CascadeWireReport(sweep_id=sweep_id, groups=tuple(groups))
+
+
+# ── Report serialisation (deterministic) ──────────────────────────────────────
+
+
+def _report_to_dict(report: CascadeReport) -> dict[str, object]:
+    """Serialise one :class:`CascadeReport` into a JSON-native dict."""
+    return {
+        "n_input": report.n_input,
+        "n_survived": report.n_survived,
+        "survivor_ids": list(report.survivor_ids),
+        "stage_survivors": dict(report.stage_survivors),
+        "verdicts": [
+            {
+                "candidate_id": verdict.candidate_id,
+                "passed": verdict.passed,
+                "rejected_at": None if verdict.rejected_at is None else verdict.rejected_at.value,
+                "detail": verdict.detail,
+                "composite_score": verdict.composite_score,
+            }
+            for verdict in report.verdicts
+        ],
+    }
+
+
+def wire_report_to_dict(report: CascadeWireReport) -> dict[str, object]:
+    """Serialise a :class:`CascadeWireReport` into a JSON-native dict."""
+    return {
+        "version": REPORT_VERSION,
+        "sweep_id": report.sweep_id,
+        "n_input": report.n_input,
+        "n_survived": report.n_survived,
+        "groups": [
+            {"instrument": instrument, "tf": tf_label, "report": _report_to_dict(group_report)}
+            for instrument, tf_label, group_report in report.groups
+        ],
+    }
+
+
+def serialize_wire_report(report: CascadeWireReport) -> bytes:
+    """Return the deterministic JSON bytes of *report* (the byte-identity surface).
+
+    Keys are sorted and floats use Python's round-trippable ``repr``, so the same
+    report always serialises to the same bytes — the contract the golden test
+    (auto path == manual path) asserts. ``allow_nan=False`` fails loudly rather
+    than emitting non-standard ``NaN``/``Infinity`` (the composite z-scores are
+    clamped finite, so this never triggers in practice).
+    """
+    return json.dumps(
+        wire_report_to_dict(report), sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+# ── Manifest serialisation ────────────────────────────────────────────────────
+
+
+def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
+    """Serialise one :class:`CascadeTupleSpec` into a JSON-native dict."""
+    return {
+        "instrument": spec.instrument,
+        "tf_label": spec.tf_label,
+        "tf_minutes": spec.tf_minutes,
+        "direction_label": spec.direction_label,
+        "sl_paisa": spec.sl_paisa,
+        "tp_paisa": spec.tp_paisa,
+        "prior_n": spec.prior_n,
+        "proximity_bps": None if spec.proximity_bps is None else list(spec.proximity_bps),
+        "start_equity_paisa": spec.start_equity_paisa,
+        "winners": [[run_id, mask] for run_id, mask in spec.winners],
+    }
+
+
+def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
+    """Rebuild a :class:`CascadeTupleSpec` from :func:`_spec_to_dict` output."""
+    # The manifest is JSON (typed ``dict[str, object]``); cast to ``Any`` so the
+    # scalar coercions below read cleanly. Every malformed value is caught by the
+    # ``(KeyError, TypeError, ValueError)`` guard and re-raised as a CascadeWireError.
+    raw = cast(dict[str, Any], data)
+    try:
+        proximity = raw["proximity_bps"]
+        proximity_bps = (
+            None if proximity is None else (int(proximity[0]), int(proximity[1]), int(proximity[2]))
+        )
+        winners = tuple((str(run_id), int(mask)) for run_id, mask in raw["winners"])
+        return CascadeTupleSpec(
+            instrument=str(raw["instrument"]),
+            tf_label=str(raw["tf_label"]),
+            tf_minutes=int(raw["tf_minutes"]),
+            direction_label=str(raw["direction_label"]),
+            sl_paisa=None if raw["sl_paisa"] is None else int(raw["sl_paisa"]),
+            tp_paisa=None if raw["tp_paisa"] is None else int(raw["tp_paisa"]),
+            prior_n=int(raw["prior_n"]),
+            proximity_bps=proximity_bps,
+            start_equity_paisa=int(raw["start_equity_paisa"]),
+            winners=winners,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CascadeWireError(f"invalid cascade tuple spec in manifest: {exc}") from exc
+
+
+def manifest_to_json(manifest: CascadeManifest) -> bytes:
+    """Return the deterministic JSON bytes of *manifest* (sorted keys)."""
+    payload = {
+        "version": manifest.version,
+        "sweep_id": manifest.sweep_id,
+        "cascade_config": cascade_config_to_dict(manifest.cascade_config),
+        "bars_context": {
+            "exchange": manifest.bars_context.exchange,
+            "segment": manifest.bars_context.segment,
+            "start": manifest.bars_context.start,
+            "end": manifest.bars_context.end,
+        },
+        "specs": [_spec_to_dict(spec) for spec in manifest.specs],
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+        "utf-8"
+    )
+
+
+def manifest_from_json(data: bytes) -> CascadeManifest:
+    """Parse + validate a manifest written by :func:`manifest_to_json`.
+
+    Raises
+    ------
+    CascadeWireError
+        On malformed JSON, an unsupported version, or any bad field.
+    """
+    try:
+        payload = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise CascadeWireError(f"cascade manifest is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise CascadeWireError("cascade manifest must be a JSON object")
+    version = payload.get("version")
+    if version != MANIFEST_VERSION:
+        raise CascadeWireError(
+            f"unsupported cascade manifest version {version!r} (expected {MANIFEST_VERSION})"
+        )
+    try:
+        bars_raw = payload["bars_context"]
+        bars_context = BarsContext(
+            exchange=str(bars_raw["exchange"]),
+            segment=str(bars_raw["segment"]),
+            start=str(bars_raw["start"]),
+            end=str(bars_raw["end"]),
+        )
+        specs = tuple(_spec_from_dict(spec) for spec in payload["specs"])
+        return CascadeManifest(
+            version=MANIFEST_VERSION,
+            sweep_id=str(payload["sweep_id"]),
+            cascade_config=cascade_config_from_dict(payload["cascade_config"]),
+            bars_context=bars_context,
+            specs=specs,
+        )
+    except (KeyError, TypeError) as exc:
+        raise CascadeWireError(f"cascade manifest missing/invalid field: {exc}") from exc
+
+
+# ── Spec building from a persisted per-tuple store ─────────────────────────────
+
+
+def spec_from_store_rows(
+    *,
+    instrument: str,
+    tf_label: str,
+    tf_minutes: int,
+    direction_label: str,
+    sl_paisa: int | None,
+    tp_paisa: int | None,
+    prior_n: int,
+    proximity_bps: tuple[int, int, int] | None,
+    start_equity_paisa: int,
+    rows: Sequence[ResultRow],
+    top_k: int | None = None,
+) -> CascadeTupleSpec | None:
+    """Build a :class:`CascadeTupleSpec` from one tuple's persisted finalists.
+
+    Selects the top-``top_k`` *rows* by Sharpe (ties broken by ``run_id`` ascending
+    — deterministic, matching :meth:`ResultsStore.top_k`) as the tuple's cascade
+    winners. Returns ``None`` when *rows* is empty (nothing to cascade).
+
+    Parameters
+    ----------
+    instrument, tf_label, tf_minutes, direction_label, sl_paisa, tp_paisa, prior_n, proximity_bps, start_equity_paisa
+        The tuple's identity + trade-sim knobs (carried onto the spec).
+    rows
+        The tuple's persisted :class:`~brutex.engine.results_store.ResultRow`\\s.
+    top_k
+        Keep only the top-``top_k`` by Sharpe, or ``None`` for all.
+
+    Returns
+    -------
+    CascadeTupleSpec | None
+        The spec, or ``None`` if *rows* is empty.
+    """
+    if not rows:
+        return None
+    ordered = sorted(rows, key=lambda row: row.run_id)
+    ordered.sort(key=lambda row: row.sharpe_ratio, reverse=True)
+    selected = ordered if top_k is None else ordered[:top_k]
+    winners = tuple((row.run_id, row.mask_bits) for row in selected)
+    return CascadeTupleSpec(
+        instrument=instrument,
+        tf_label=tf_label,
+        tf_minutes=tf_minutes,
+        direction_label=direction_label,
+        sl_paisa=sl_paisa,
+        tp_paisa=tp_paisa,
+        prior_n=prior_n,
+        proximity_bps=proximity_bps,
+        start_equity_paisa=start_equity_paisa,
+        winners=winners,
+    )
+
+
+# ── Output paths + IO ─────────────────────────────────────────────────────────
+
+
+def manifest_path(results_root: Path) -> Path:
+    """Return the manifest path under *results_root* (``<root>/cascade/manifest.json``)."""
+    return results_root / CASCADE_DIRNAME / MANIFEST_FILENAME
+
+
+def report_path(results_root: Path) -> Path:
+    """Return the report path under *results_root* (``<root>/cascade/cascade-report.json``)."""
+    return results_root / CASCADE_DIRNAME / REPORT_FILENAME
+
+
+def write_manifest(results_root: Path, manifest: CascadeManifest) -> Path:
+    """Write *manifest* JSON under *results_root* and return its path."""
+    path = manifest_path(results_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(manifest_to_json(manifest))
+    return path
+
+
+def write_report(results_root: Path, report: CascadeWireReport) -> Path:
+    """Write the serialised *report* JSON under *results_root* and return its path."""
+    path = report_path(results_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(serialize_wire_report(report))
+    return path
+
+
+def load_manifest(results_root: Path) -> CascadeManifest:
+    """Read + parse the manifest under *results_root*.
+
+    Raises
+    ------
+    CascadeWireError
+        If no manifest exists under *results_root* (run a sweep first), or it is
+        malformed.
+    """
+    path = manifest_path(results_root)
+    if not path.exists():
+        raise CascadeWireError(
+            f"no cascade manifest at {path} — run `brutex sweep-all` first "
+            f"(the sweep writes the manifest its winners are cascaded from)"
+        )
+    return manifest_from_json(path.read_bytes())
+
+
+# ── End-to-end (auto path + manual path) ──────────────────────────────────────
+
+
+def run_and_write_from_specs(
+    results_root: Path,
+    *,
+    sweep_id: str,
+    specs: Sequence[CascadeTupleSpec],
+    bars_for: Callable[[str, str], Sequence[CandleBar]],
+    bars_context: BarsContext,
+    cascade_config: CascadeConfig,
+) -> CascadeWireReport:
+    """AUTOMATIC path: run the cascade + write the manifest AND the report.
+
+    Builds the :class:`CascadeManifest` from *specs* (so the MANUAL path can
+    replay it bit-for-bit), runs :func:`run_cascade_over_specs`, then writes both
+    ``cascade/manifest.json`` and ``cascade/cascade-report.json`` under
+    *results_root*.
+
+    Returns
+    -------
+    CascadeWireReport
+        The aggregate cascade report (also written to disk).
+    """
+    manifest = CascadeManifest(
+        version=MANIFEST_VERSION,
+        sweep_id=sweep_id,
+        cascade_config=cascade_config,
+        bars_context=bars_context,
+        specs=tuple(specs),
+    )
+    report = run_cascade_over_specs(
+        specs, bars_for=bars_for, config=cascade_config, sweep_id=sweep_id
+    )
+    write_manifest(results_root, manifest)
+    write_report(results_root, report)
+    return report
+
+
+def run_and_write_from_manifest(
+    results_root: Path,
+    *,
+    bars_for: Callable[[str, str], Sequence[CandleBar]],
+) -> CascadeWireReport:
+    """MANUAL path: replay the manifest this sweep wrote → the SAME report bytes.
+
+    Reloads the manifest under *results_root*, re-runs :func:`run_cascade_over_specs`
+    with the stored config + specs over freshly-loaded bars, and re-writes
+    ``cascade/cascade-report.json``. Given an unchanged lake, the rewritten report
+    is byte-identical to the one the AUTOMATIC path wrote (the golden contract).
+
+    Returns
+    -------
+    CascadeWireReport
+        The aggregate cascade report (also written to disk).
+
+    Raises
+    ------
+    CascadeWireError
+        If no manifest exists under *results_root* or it is malformed.
+    """
+    manifest = load_manifest(results_root)
+    report = run_cascade_over_specs(
+        manifest.specs,
+        bars_for=bars_for,
+        config=manifest.cascade_config,
+        sweep_id=manifest.sweep_id,
+    )
+    write_report(results_root, report)
+    return report
+
+
+def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFeed
+    manifest: CascadeManifest,
+    *,
+    lake_root: Path,
+    catalog_path: Path | None = None,
+) -> Callable[[str, str], list[CandleBar]]:
+    """Build a ``bars_for`` over the lake for the MANUAL replay (live-lake adapter).
+
+    Reloads each ``(instrument, tf_label)`` slice the manifest references from the
+    Parquet lake via the SAME ``Catalog`` / ``ReplayFeed`` path the sweep used
+    (reconciling the catalog from on-disk Parquet first, mirroring
+    ``brutex sweep-all``), keyed by the manifest's :class:`BarsContext` window.
+    Marked ``no cover``: it opens DuckDB + reads the real lake (the pure cascade
+    core + the manifest round-trip are fully tested with injected bars).
+
+    Parameters
+    ----------
+    manifest
+        The replayed manifest (its ``bars_context`` + ``specs`` drive the loads).
+    lake_root
+        The lake root directory.
+    catalog_path
+        The catalog DuckDB path (default ``<lake_root>/catalog.duckdb``).
+
+    Returns
+    -------
+    Callable[[str, str], list[CandleBar]]
+        A ``(instrument, tf_label) -> bars`` closure over the loaded slices.
+    """
+    from datetime import UTC, datetime
+
+    from brutex.data.catalog import Catalog
+    from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+    from brutex.feed.replay import ReplayFeed
+
+    def _parse(value: str) -> datetime:
+        parsed = datetime.fromisoformat(value)
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+    ctx = manifest.bars_context
+    catalog = catalog_path if catalog_path is not None else lake_root / "catalog.duckdb"
+    coords = {(spec.instrument, spec.tf_label) for spec in manifest.specs}
+    slices: dict[tuple[str, str], list[CandleBar]] = {}
+    with Catalog.open(catalog) as cat:
+        for instrument, tf_label in coords:
+            reconcile_catalog_from_lake(
+                lake_root=lake_root,
+                catalog=cat,
+                exchange=ctx.exchange,
+                segment=ctx.segment,
+                symbol=instrument,
+                interval=tf_label,
+            )
+            feed = ReplayFeed(
+                catalog=cat,
+                lake_root=lake_root,
+                exchange=ctx.exchange,
+                segment=ctx.segment,
+                symbols=[instrument],
+                interval=tf_label,
+                start=_parse(ctx.start),
+                end=_parse(ctx.end),
+            )
+            slices[(instrument, tf_label)] = [event.bar for event in feed]
+
+    def bars_for(instrument: str, tf_label: str) -> list[CandleBar]:
+        return slices.get((instrument, tf_label), [])
+
+    return bars_for
+
+
+__all__ = [
+    "CASCADE_DIRNAME",
+    "MANIFEST_FILENAME",
+    "MANIFEST_VERSION",
+    "REPORT_FILENAME",
+    "REPORT_VERSION",
+    "BarsContext",
+    "CascadeManifest",
+    "CascadeTupleSpec",
+    "CascadeWireError",
+    "CascadeWireReport",
+    "build_candidate_input",
+    "candidates_for_spec",
+    "cascade_config_for_sweep",
+    "cascade_config_from_dict",
+    "cascade_config_to_dict",
+    "load_bars_for_manifest",
+    "load_manifest",
+    "manifest_from_json",
+    "manifest_path",
+    "manifest_to_json",
+    "report_path",
+    "run_and_write_from_manifest",
+    "run_and_write_from_specs",
+    "run_cascade_over_specs",
+    "serialize_wire_report",
+    "spec_from_store_rows",
+    "wire_report_to_dict",
+    "write_manifest",
+    "write_report",
+]

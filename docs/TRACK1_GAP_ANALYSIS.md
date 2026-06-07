@@ -52,7 +52,7 @@
 | 1 | **Auto-wire the Stage-4 cascade into the main sweep** — the 9 overfitting filters EXIST but `run_stage4_cascade()` is called manually; wire it so every sweep's top-K winners are auto-filtered. Highest value-per-effort | Engine | 🔴 Critical (quick win) | `metrics/cascade.py` done; not invoked by `sweep_orchestrator` |
 | 2 | **Options Track executor** — the strike selector + grid + expiry + lot-size are **already built** (`options/strike_rules.py`, 10 rules); what's missing is the **executor/materializer** (winning spot signal → priced options PnL), Greeks/risk-free, options TF resampler, and the real `data/option_sink.py` (currently a Protocol stub) | Data | 🔴 Critical | `options/strike_rules.py:190` done; `options/__init__.py` (Greeks TBD); `data/option_sink.py:57` stub |
 | 3 | **Stage-2.5 adaptive optimizer (BIPOP-CMA-ES / Bayesian)** — learns from trial failures to *guide* the next parameter proposal instead of static grid enumeration; makes billions-scale search smart | Engine | 🔴 High | no CMA-ES/Bayesian kernel exists; grid axes accepted in `sweep_orchestrator.py` but no adaptive proposer |
-| 4 | ~~**Telegram alerts wired to sweep events** — infra built, not connected to watchdog-hung / rate-breach / renew-fail~~ ✅ **CLOSED** by DEC-TELEGRAM-WIRE-001 (#566): `notifications/sweep_alerts.py` wires watchdog-hung / rate.breach / auth.renew_failed / sweep-complete + a manual `brutex notify test` | Observability | ✅ Done | `notifications/sweep_alerts.py`; `cmd_sweep_all` + `cmd_fetch` + `pull_controller` |
+| 4 | ~~**Telegram alerts wired to sweep events** — infra built, not connected to watchdog-hung / rate-breach / renew-fail~~ ✅ **CLOSED** by DEC-TELEGRAM-WIRE-001 (#567): `notifications/sweep_alerts.py` wires watchdog-hung / rate.breach / auth.renew_failed / sweep-complete + a manual `brutex notify test` | Observability | ✅ Done | `notifications/sweep_alerts.py`; `cmd_sweep_all` + `cmd_fetch` + `pull_controller` |
 | 5 | **Runtime look-ahead enforcement in the sweep** — `ReplayFeed.ensure_no_lookahead()` exists + P-06 partly live, but the sweep relies on *structural* causality, no mandated runtime barrier | Engine | 🟡 Medium | `feed/replay.py:184-208` method exists; no call site in main sweep |
 | 6 | **14 of 24 property invariants + absolute ≥50 M/s throughput gate** | Hardening | 🟡 Medium | `tests/property/test_invariants_catalog.py` (10 live / 14 ROADMAP); M4-Pro runner stub `bench-m4pro.yml` |
 | 7 | **8 orchestrator modules to strict-100% per-module gate; dashboard per-module gate** | Hardening | 🟡 Medium | PyO3 ABI3 single-init blocks per-module gate (covered 100% via global `--cov`) |
@@ -117,7 +117,7 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | **#2 Options executor** | Strike selector is built; add the **executor** that turns winning spot signals into **real ATM±N options trades** with costs/slippage/IV — execution realism | 🔴 high |
 | **#3 Stage-2.5 smart optimizer** | The search **learns** where good strategies live (Bayesian/CMA-ES) instead of blind grid — same answers, far less compute | 🔴 high |
 | **Sweep scheduler (manual + automatic)** | Keep `sweep-all` (manual) **+** an opt-in scheduled/daemon runner (automatic) | 🟡 medium |
-| **Telegram (manual + automatic)** | ✅ **DONE** (DEC-TELEGRAM-WIRE-001 #566): `brutex notify test` (manual) **+** auto-alerts on watchdog-hung/rate.breach/auth.renew_failed/sweep-complete | ✅ done |
+| **Telegram (manual + automatic)** | ✅ **DONE** (DEC-TELEGRAM-WIRE-001 #567): `brutex notify test` (manual) **+** auto-alerts on watchdog-hung/rate.breach/auth.renew_failed/sweep-complete | ✅ done |
 | **Scheduled reports + standalone TF/cascade CLIs** | Manual triggers kept; add the automatic twins (§6 duality) | 🟡 medium |
 | **Runtime look-ahead barrier in sweep** | A hard runtime guard (not just structural) that the engine can never peek at future bars | 🟡 medium |
 | **Stub cleanup + `brutex/math/` facade** | Implement or delete `backtest/`/`sprint/`/`visualization/`; build the §5 Rust facade; reconcile CLAUDE.md | 🟡 medium |
@@ -142,12 +142,12 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | **Stage-4 cascade (9 filters)** | ❌ only `--overfit-gate` (1 filter) | ❌ not auto on winners | 🔴 **add BOTH** (a `brutex cascade` CLI + auto-on-sweep) |
 | **Report export (pre-open)** | ✅ on-demand route | ❌ no scheduled/auto-send | 🟡 **add automatic option** |
 | Timeframe pre-build | ✅ button / (no standalone CLI) | ❌ intentional (DEC-TF-MATERIALIZE-001) | 🟡 add a standalone CLI trigger |
-| Telegram digest | ✅ `brutex notify test` | ✅ auto on watchdog/rate/auth/complete | ✅ **both** (DEC-TELEGRAM-WIRE-001 #566) |
+| Telegram digest | ✅ `brutex notify test` | ✅ auto on watchdog/rate/auth/complete | ✅ **both** (DEC-TELEGRAM-WIRE-001 #567) |
 
 **Duality work items (each ships manual + automatic together):**
 1. 🔴 **Cascade**: `brutex cascade <run-id>` (manual) **+** auto-run on every sweep's top-K (automatic). *This is roadmap item #1.*
 2. 🔴 **Sweep scheduler**: keep `brutex sweep-all` (manual) **+** add an opt-in scheduled/daemon runner (automatic).
-3. ✅ **Telegram** (DONE — DEC-TELEGRAM-WIRE-001 #566): `brutex notify test` (manual) **+** wired watchdog-hung/rate.breach/auth.renew_failed/sweep-complete events (automatic).
+3. ✅ **Telegram** (DONE — DEC-TELEGRAM-WIRE-001 #567): `brutex notify test` (manual) **+** wired watchdog-hung/rate.breach/auth.renew_failed/sweep-complete events (automatic).
 4. 🟡 **Reports**: keep the on-demand route (manual) **+** an opt-in scheduled daily export (automatic).
 5. 🟡 **Expiries/contracts pull + TF pre-build**: keep the buttons (manual) **+** an opt-in auto-cascade / standalone CLI.
 

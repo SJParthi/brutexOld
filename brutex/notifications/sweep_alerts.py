@@ -38,7 +38,7 @@ never the ``fastbloom_rs`` / ``lmdb`` PyO3 chain pulled by
 lazily inside the default resolver so the strict per-module coverage gate stays
 clean (the same precedent as :mod:`brutex.observability.standard_monitor`).
 
-## Decision: DEC-TELEGRAM-WIRE-001 (MIGRATION.md entry #566).
+## Decision: DEC-TELEGRAM-WIRE-001 (MIGRATION.md entry #567).
 """
 
 from __future__ import annotations
