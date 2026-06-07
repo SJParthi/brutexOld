@@ -24,6 +24,11 @@ dependencies = [
     "structlog>=24.1,<26.0",  # was <25.0; PyPI latest 25.5.0 (DEC-P0-012)
     "lmdb>=1.5,<3.0",
     "fastbloom-rs>=0.5,<1.0",  # DEC-P0-047: PyO3-backed Rust Bloom for the L1 4-tier dedup
+    # DEC-SWEEP-REALTIME-GUARANTEE-001 (MIGRATION.md #548): wheel-free BLAKE3 for
+    # the sweep assurance layer (engine/sweep_audit hash-chain + engine/sweep_cache
+    # combo digest). Prebuilt manylinux wheels — no local Rust build, unlike the
+    # fno_math kernel — so these modules run + test without the compiled wheel.
+    "blake3>=0.4,<2.0",
     # CORE runtime dep (DEC-RUN-NUMPY-CORE-001): brutex.metrics.{cascade,spa,
     # monte_carlo,lockbox} import numpy UNCONDITIONALLY at module top, and that
     # chain is on the `brutex` CLI/engine import path (cli -> engine.sweep_report
