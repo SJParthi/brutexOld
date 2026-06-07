@@ -57,7 +57,7 @@ jobs:
         run: cargo +${{ env.NIGHTLY }} careful test --test-threads=1
       - name: Open issue on failure
         if: failure() && github.event_name == 'schedule'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const title = `cargo-careful: failure on ${context.sha.substring(0, 7)}`;
@@ -106,7 +106,7 @@ jobs:
             -- --test-threads=1
       - name: Open issue on failure
         if: failure() && github.event_name == 'schedule'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const title = `ASan: failure on ${context.sha.substring(0, 7)}`;
@@ -155,7 +155,7 @@ jobs:
             -- --test-threads=1
       - name: Open issue on failure
         if: failure() && github.event_name == 'schedule'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const title = `TSan: failure on ${context.sha.substring(0, 7)}`;
