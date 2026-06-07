@@ -59,8 +59,9 @@ import structlog
 if TYPE_CHECKING:
     from brutex.data.parquet_writer import BarConflict
 
+from brutex.adapters.dhan.auth_guard import AuthGuard
 from brutex.adapters.dhan.chunks import plan_spot_intraday_windows
-from brutex.adapters.dhan.errors import DhanError, is_rate_limit, is_retryable
+from brutex.adapters.dhan.errors import DhanError, is_auth_failure, is_rate_limit, is_retryable
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.session import filter_intraday_session, is_session_exempt
@@ -207,6 +208,7 @@ def ingest_spot(
     run_parallel: RunParallel | None = None,
     max_retry_passes: int = _DEFAULT_MAX_RETRY_PASSES,
     retry_backoff: Callable[[int], None] | None = None,
+    auth_guard: AuthGuard | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink*.
 
@@ -277,6 +279,16 @@ def ingest_spot(
         pass (``None`` → :func:`_default_retry_backoff`, a bounded exponential
         seconds-scale wait so a multi-second network drop recovers between
         passes). Tests pass a no-op recorder so no real sleep occurs.
+    auth_guard
+        Optional shared "token is dead" latch (DEC-DHAN-AUTH-FAILFAST-RENEW-001).
+        When given, a window worker checks it BEFORE the vendor call and
+        short-circuits (returns a no-op skipped outcome, ZERO doomed calls) once
+        the token is known dead, and TRIPS it on the first auth failure
+        (:func:`~brutex.adapters.dhan.errors.is_auth_failure` — a 401/403 OR a
+        ``DH-906`` "Invalid Token" 400). The auth error is then re-raised (auth is
+        non-retryable) so the outer
+        :func:`~brutex.adapters.dhan.run_ingest.run_dhan_spot_ingest` quarantine
+        sees it. ``None`` (default) keeps the prior per-symbol terminal behaviour.
 
     Returns
     -------
@@ -333,6 +345,7 @@ def ingest_spot(
                 on_success=on_success,
                 pull_id=pull_id,
                 series_fields=series_fields,
+                auth_guard=auth_guard,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
@@ -504,6 +517,7 @@ def _ingest_one_window(
     on_success: Callable[[], None] | None,
     pull_id: str,
     series_fields: dict[str, str],
+    auth_guard: AuthGuard | None = None,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
@@ -513,6 +527,14 @@ def _ingest_one_window(
     *coverage* ledger, the *on_rate_limit* / *on_success* controller hooks, and
     the sink) are thread-safe, so N windows of one series run it concurrently
     without a data race (DEC-DHAN-PARALLEL-WINDOWS-001).
+
+    When *auth_guard* is supplied (DEC-DHAN-AUTH-FAILFAST-RENEW-001) and is
+    already tripped, the window short-circuits to a no-op ``skipped`` outcome
+    BEFORE pacing or any vendor call — so once the token is known dead the rest
+    of the pull drains instantly with ZERO doomed 401 calls. On the FIRST auth
+    failure (:func:`~brutex.adapters.dhan.errors.is_auth_failure` — a 401/403 OR
+    a ``DH-906`` "Invalid Token" 400) it trips the guard, then re-raises (auth is
+    non-retryable, so it must surface to the outer quarantine).
     """
     window_start, window_end = window
     key = WindowKey(
@@ -534,6 +556,15 @@ def _ingest_one_window(
             action="skipped",
             **series_fields,
         )
+        return _WindowOutcome(skipped=1)
+    # Token already known dead (a prior window tripped the guard)? Drain this
+    # window WITHOUT a vendor call (DEC-DHAN-AUTH-FAILFAST-RENEW-001) — once the
+    # 24h token expires mid-pull EVERY remaining window would otherwise fire its
+    # own doomed 401, so the guard short-circuits new windows to a no-op skip
+    # the instant the token is known dead. (In-flight threads finish their
+    # current call; the check here drains the rest fast — it does NOT hard-cancel
+    # the pool, the honest envelope per Golden Rule #10.)
+    if auth_guard is not None and auth_guard.tripped():
         return _WindowOutcome(skipped=1)
     if pace is not None:
         pace()
@@ -598,6 +629,15 @@ def _ingest_one_window(
                     now=datetime.now(UTC),
                 )
             return _WindowOutcome(transient=1, window=retry_window, error_type=type(exc).__name__)
+        # A TERMINAL (non-retryable) error. If it is the token dying — a 401/403
+        # OR a ``DH-906`` "Invalid Token" 400 (is_auth_failure) — trip the shared
+        # latch so every NOT-YET-DISPATCHED window short-circuits above instead of
+        # firing its own doomed 401 (DEC-DHAN-AUTH-FAILFAST-RENEW-001). Auth is
+        # non-retryable, so we still RE-RAISE: the error must surface to the outer
+        # run_dhan_spot_ingest quarantine (which records the pair + emits the ONE
+        # loud auth-aborted alert), never swallowed.
+        if auth_guard is not None and is_auth_failure(exc):
+            auth_guard.trip(str(exc))
         raise
     # Drop pre-open / post-close bars before they enter the lake — intraday
     # only (a daily bar has no intraday time). DEC-SESSION-FILTER-001.
