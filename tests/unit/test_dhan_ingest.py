@@ -9,20 +9,22 @@ controllable fake transport + a recording fake sink.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from brutex.adapters.dhan.adapter import DhanMarketAdapter
+from brutex.adapters.dhan.auth_guard import AuthGuard
 from brutex.adapters.dhan.client import DhanClient
-from brutex.adapters.dhan.errors import DhanBadRequestError
+from brutex.adapters.dhan.errors import DhanAuthError, DhanBadRequestError
 from brutex.adapters.dhan.ingest import IngestReport, ingest_spot, summarize_conflicts
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
 from brutex.data.sink import SinkAppendResult
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.observability.correlation import pull_id_scope
+from brutex.orchestrator.universe_phases import ItemResult
 from structlog.testing import capture_logs
 
 _CANDLES = {
@@ -1082,3 +1084,132 @@ class TestIngestSpotConflicts:
         assert len(summaries) == 3
         assert all(s["conflicts"] == 2 for s in summaries)
         assert all(s["differing_fields"] == "close" for s in summaries)
+
+
+def _sync_run_parallel[ItemT, ResultT](
+    fn: Callable[[ItemT], ResultT],
+    items: Sequence[ItemT],
+) -> list[ItemResult[ItemT, ResultT]]:
+    """A synchronous ``RunParallel`` fake: run *fn* inline IN ORDER, capture excs.
+
+    Deterministic order lets the auth-guard short-circuit tests assert that
+    windows AFTER the first auth failure fire ZERO further vendor calls.
+    """
+    out: list[ItemResult[ItemT, ResultT]] = []
+    for item in items:
+        try:
+            value = fn(item)
+        except Exception as exc:  # mirror PoolRunParallel's capture
+            out.append(ItemResult(item=item, ok=False, result=None, exc=exc))
+        else:
+            out.append(ItemResult(item=item, ok=True, result=value, exc=None))
+    return out
+
+
+class _CountingAuthAdapter:
+    """Fake adapter whose first ``fetch_ohlcv`` raises an auth error, then counts calls.
+
+    ``error`` is raised on EVERY call; ``calls`` records how many fetches were
+    actually attempted, so a test can prove the guard short-circuits the rest.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls = 0
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: object, interval: str, start: date, end: date
+    ) -> Sequence[CandleBar]:
+        del symbol, exchange, interval, start, end
+        self.calls += 1
+        raise self.error
+
+
+class TestAuthGuardFailFast:
+    """The per-window guard short-circuits + trips on a dead token (DEC-DHAN-AUTH-FAILFAST-RENEW-001)."""
+
+    def test_first_auth_failure_trips_guard_and_drains_rest_with_zero_calls(self) -> None:
+        # 3 intraday windows, processed in order by the synchronous runner. Window 1
+        # raises a 401 → trips the guard + re-raises (auth is non-retryable). Windows
+        # 2 + 3 then see the tripped guard and short-circuit BEFORE any vendor call:
+        # exactly ONE fetch is attempted, not three.
+        adapter = _CountingAuthAdapter(DhanAuthError("HTTP 401 auth failure: DH-901 token expired"))
+        guard = AuthGuard()
+        with pytest.raises(DhanAuthError, match="DH-901"):
+            ingest_spot(
+                adapter,  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),  # 3 windows
+                run_parallel=_sync_run_parallel,
+                max_retry_passes=0,
+                auth_guard=guard,
+            )
+        assert guard.tripped() is True
+        assert "DH-901" in str(guard.cause())
+        # Only the FIRST window hit the vendor; the other two short-circuited.
+        assert adapter.calls == 1
+
+    def test_dh906_400_trips_guard(self) -> None:
+        # A DH-906 "Invalid Token" 400 masquerading as a bad request is treated as
+        # a dead token: it trips the guard + re-raises (it is non-retryable here).
+        adapter = _CountingAuthAdapter(
+            DhanBadRequestError("HTTP 400 bad request: DH-906 Invalid Token")
+        )
+        guard = AuthGuard()
+        with pytest.raises(DhanBadRequestError, match="DH-906"):
+            ingest_spot(
+                adapter,  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+                run_parallel=_sync_run_parallel,
+                max_retry_passes=0,
+                auth_guard=guard,
+            )
+        assert guard.tripped() is True
+        assert adapter.calls == 1
+
+    def test_pre_tripped_guard_skips_all_windows_zero_calls(self) -> None:
+        # If the guard is ALREADY tripped (another series killed the token first),
+        # every window of this series short-circuits to a skip with ZERO calls.
+        adapter = _CountingAuthAdapter(DhanAuthError("should never be raised"))
+        guard = AuthGuard()
+        guard.trip("token died earlier")
+        report = ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),  # 3 windows
+            run_parallel=_sync_run_parallel,
+            max_retry_passes=0,
+            auth_guard=guard,
+        )
+        assert adapter.calls == 0
+        assert report.skipped_windows == 3
+        assert report.bars_appended == 0
+
+    def test_no_guard_keeps_prior_terminal_behaviour(self) -> None:
+        # Without a guard (default None), an auth error stays a per-series terminal
+        # raise on EVERY window — no short-circuit (the prior behaviour is intact).
+        adapter = _CountingAuthAdapter(DhanAuthError("HTTP 401 auth failure"))
+        with pytest.raises(DhanAuthError):
+            ingest_spot(
+                adapter,  # type: ignore[arg-type]
+                _Sink(),
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+                run_parallel=_sync_run_parallel,
+                max_retry_passes=0,
+            )
+        # First window raised; the runner stops the pass at the re-raise, so the
+        # later windows were not reached — but crucially no guard was consulted.
+        assert adapter.calls >= 1

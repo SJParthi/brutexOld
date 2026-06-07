@@ -23,11 +23,22 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+import structlog
 
 from brutex.adapters.dhan.client import DhanClient
 from brutex.adapters.dhan.constants import ENDPOINT_RENEW_TOKEN
-from brutex.adapters.dhan.errors import DhanAuthError
+from brutex.adapters.dhan.errors import DhanAuthError, DhanError
+
+if TYPE_CHECKING:
+    from structlog.stdlib import BoundLogger
+
+#: Module logger for the best-effort proactive-renew path (DEC-DHAN-AUTH-FAILFAST-
+#: RENEW-001). Emits ``auth.renewed`` INFO on a successful +24h refresh and ONE
+#: ``auth.renew_failed`` WARNING when RenewToken refuses (an expired / TOTP-minted
+#: token) — never raising, so renewal can NEVER block or abort the pull.
+_LOG = structlog.get_logger("brutex.adapters.dhan.auth")
 
 #: Env var carrying the JWT access token (the value, not stored here).
 ENV_ACCESS_TOKEN: Final[str] = "BRUTEX_DHAN_ACCESS_TOKEN"  # noqa: S105  # env var name, not a secret
@@ -112,6 +123,58 @@ def renew_token(client: DhanClient, *, pace: Callable[[], None] | None = None) -
     return TokenInfo(access_token=token, expiry_time=expiry)
 
 
+def maybe_renew_token(
+    client: DhanClient,
+    *,
+    pace: Callable[[], None] | None = None,
+    log: BoundLogger | None = None,
+) -> TokenInfo | None:
+    """Best-effort proactive ``RenewToken`` at pull start — NEVER raises.
+
+    ``RenewToken`` only refreshes an *active* token (an already-expired token
+    errors — it CANNOT revive a dead one), so the wiring calls this PROACTIVELY at
+    the start of a long live pull to push the 24h expiry ``+24h`` BEFORE the pull
+    crosses the wall (DEC-DHAN-AUTH-FAILFAST-RENEW-001). It is strictly
+    best-effort: a renewal failure is logged once and swallowed so it can never
+    block or abort the pull — the pull simply proceeds on the existing token (and
+    if that token then dies mid-pull, Piece 1's fail-fast guard handles it).
+
+    Parameters
+    ----------
+    client
+        The configured :class:`DhanClient` performing the network refresh.
+    pace
+        Optional rate-bucket acquire hook gating the physical POST, forwarded to
+        :func:`renew_token` (the shared token bucket, so this physical Dhan POST
+        is ``≤ current r/s ≤ 5`` — CLAUDE.md §2 Rule 6). ``None`` falls back to
+        the client's own ``pace`` hook.
+    log
+        Optional structlog logger for the ``auth.renewed`` / ``auth.renew_failed``
+        events (defaults to this module's logger).
+
+    Returns
+    -------
+    TokenInfo | None
+        The freshly renewed :class:`TokenInfo` (a ``+24h`` access token) on
+        success; ``None`` when ``RenewToken`` refused (logged once, swallowed).
+    """
+    logger = log if log is not None else _LOG
+    try:
+        token = renew_token(client, pace=pace)
+    except DhanError as exc:
+        # RenewToken refused — the token may already be expired or TOTP-minted
+        # (RenewToken only refreshes an ACTIVE web-generated token). Best-effort:
+        # log ONE warning and proceed on the existing token; NEVER raise.
+        logger.warning(
+            "auth.renew_failed",
+            reason=str(exc),
+            note="RenewToken refused (token may be expired or TOTP-minted); proceeding on existing token",
+        )
+        return None
+    logger.info("auth.renewed", expiry_time=token.expiry_time)
+    return token
+
+
 def with_token(creds: DhanCredentials, token: TokenInfo) -> DhanCredentials:
     """Return new credentials with the renewed access token applied."""
     return replace(creds, access_token=token.access_token)
@@ -137,6 +200,7 @@ __all__ = [
     "DhanCredentials",
     "TokenInfo",
     "dhan_creds_present",
+    "maybe_renew_token",
     "renew_token",
     "resolve_dhan_credentials",
     "with_token",
