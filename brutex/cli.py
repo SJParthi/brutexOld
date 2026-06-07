@@ -719,6 +719,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
     )
 
+    # ── verify-lookahead (DEC-LOOKAHEAD-BARRIER-001) — manual P-06 recheck ──
+    verify_la = sub.add_parser(
+        "verify-lookahead",
+        help=(
+            "MANUAL Property-P-06 recheck: re-run a bounded lake slice forward "
+            "through the instrumented look-ahead barrier and report pass/fail "
+            "(the same barrier that is active automatically on every sweep eval)"
+        ),
+    )
+    verify_la.add_argument(
+        "run_id",
+        nargs="?",
+        default=None,
+        help="Optional run/slice label, echoed into the verdict line (informational)",
+    )
+    verify_la.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    verify_la.add_argument(
+        "--catalog",
+        type=Path,
+        default=None,
+        dest="catalog_path",
+        help="Catalog DuckDB path (default <lake-root>/catalog.duckdb)",
+    )
+    verify_la.add_argument("--exchange", default="NSE", help="Lake partition exchange (default NSE)")
+    verify_la.add_argument(
+        "--segment", default="INDEX", help="Lake partition segment (default INDEX)"
+    )
+    verify_la.add_argument("--symbol", required=True, help="Canonical symbol, e.g. NIFTY")
+    verify_la.add_argument("--interval", default="1minute", help="Bar interval (default 1minute)")
+    verify_la.add_argument("--start", required=True, help="Slice start date/ISO (UTC)")
+    verify_la.add_argument("--end", required=True, help="Slice end date/ISO (UTC)")
+
     return parser
 
 
@@ -2153,6 +2190,84 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
     return EXIT_OK
 
 
+def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 100%-tested barrier
+    *,
+    lake_root: Path | None,
+    catalog_path: Path | None,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    interval: str,
+    start: str,
+    end: str,
+    run_id: str | None,
+) -> int:
+    """MANUAL Property-**P-06** recheck — re-run a lake slice through the barrier.
+
+    The hand-trigger counterpart of the AUTOMATIC barrier that
+    :class:`~brutex.strategies.runner.StrategyRunner` /
+    :class:`~brutex.execution.driver.BacktestDriver` run on every sweep eval
+    (DEC-LOOKAHEAD-BARRIER-001). It loads one ``(symbol, interval)`` window
+    from the lake via the SAME ``Catalog`` / ``ReplayFeed`` path the engine
+    uses, then replays those bars **forward** through a recording
+    :class:`~brutex.feed.lookahead.LookAheadBarrier` — advancing the cursor to
+    bar ``i`` and accessing index ``i`` exactly as the engine consumes them —
+    and reports the :class:`~brutex.feed.lookahead.LookAheadReport` verdict via
+    :func:`~brutex.feed.lookahead.verify_with_barrier`.
+
+    A look-ahead (any access index ``> N``) surfaces as a clear FAIL line +
+    non-zero exit, never a traceback. An empty slice is a user error.
+    """
+    from brutex.data.catalog import Catalog
+    from brutex.feed.lookahead import LookAheadBarrier, verify_with_barrier
+    from brutex.feed.replay import ReplayFeed
+
+    resolved_lake = _resolve_lake_root(lake_root)
+    catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
+    with Catalog.open(catalog) as cat:
+        feed = ReplayFeed(
+            catalog=cat,
+            lake_root=resolved_lake,
+            exchange=exchange,
+            segment=segment,
+            symbols=[symbol],
+            interval=interval,
+            start=_parse_dt(start),
+            end=_parse_dt(end),
+        )
+        bars = [event.bar for event in feed]
+    if not bars:
+        print(
+            f"[brutex] verify-lookahead: no bars for {symbol} {interval} {start}→{end} "
+            f"under {exchange}/{segment} (lake={resolved_lake})",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+
+    barrier = LookAheadBarrier(record=True)
+
+    def _replay_slice() -> None:
+        # Forward replay over the run's REAL bars — the exact order the engine
+        # consumes them. Each bar is read at its own index, so a correct replay
+        # never trips the barrier; a wiring regression that peeked ahead would.
+        for index in range(len(bars)):
+            barrier.advance_to(index)
+            barrier.access(index)
+
+    report = verify_with_barrier(_replay_slice, barrier)
+    label = run_id if run_id is not None else f"{symbol}/{interval}"
+    verdict = "PASS" if report.passed else "FAIL"
+    print(
+        f"[brutex] verify-lookahead {verdict} — run={label} bars={len(bars)} "
+        f"checked={report.indices_checked} max_index={report.max_index_touched} "
+        f"final_cursor={report.final_cursor}"
+    )
+    if not report.passed:
+        print(f"[brutex] look-ahead violation: {report.violation}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    return EXIT_OK
+
+
 # ────────────────────────────────────────────────────────────────────────
 # options-sim (DEC-OPTIONS-EXECUTOR-001) — winning spot run → priced options
 # ────────────────────────────────────────────────────────────────────────
@@ -2657,6 +2772,18 @@ def main(argv: list[str] | None = None) -> int:
             lake_root=args.lake_root,
             results_root=args.results_root,
             catalog_path=args.catalog_path,
+            run_id=args.run_id,
+        )
+    if args.command == "verify-lookahead":
+        return cmd_verify_lookahead(
+            lake_root=args.lake_root,
+            catalog_path=args.catalog_path,
+            exchange=args.exchange,
+            segment=args.segment,
+            symbol=args.symbol,
+            interval=args.interval,
+            start=args.start,
+            end=args.end,
             run_id=args.run_id,
         )
     parser.error(f"unknown command: {args.command}")

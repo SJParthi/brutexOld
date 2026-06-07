@@ -31,6 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from brutex.feed.lookahead import LookAheadBarrier
 from brutex.strategies.errors import StrategyContractError
 from brutex.strategies.types import Signal, StrategyState
 
@@ -82,6 +83,14 @@ class StrategyRunner:
         Optional pre-built :class:`StrategyState`. When omitted, the
         runner creates a fresh one. Either way,
         :meth:`StrategyState.reset` is called before iteration starts.
+    barrier
+        Optional injected :class:`~brutex.feed.lookahead.LookAheadBarrier`
+        — the runtime look-ahead enforcer (Property **P-06**). When
+        omitted, the runner builds a default ``record=False`` barrier so
+        the guard is **active on every run by default** (the AUTOMATIC
+        half of the manual⇄automatic duality) at O(1) memory. Inject a
+        ``record=True`` barrier (e.g. via the ``brutex verify-lookahead``
+        manual recheck) to capture the touched-index trail.
     """
 
     def __init__(
@@ -90,10 +99,12 @@ class StrategyRunner:
         strategy: Strategy,
         feed: ReplayFeed,
         state: StrategyState | None = None,
+        barrier: LookAheadBarrier | None = None,
     ) -> None:
         self._strategy = strategy
         self._feed = feed
         self._state = state if state is not None else StrategyState()
+        self._barrier = barrier if barrier is not None else LookAheadBarrier(record=False)
 
         meta = strategy.META
         self._allowed_symbols = frozenset(meta.symbols)
@@ -110,6 +121,11 @@ class StrategyRunner:
         """Return the (post-reset, possibly mid-run) :class:`StrategyState`."""
         return self._state
 
+    @property
+    def barrier(self) -> LookAheadBarrier:
+        """Return the runtime look-ahead barrier (Property **P-06**)."""
+        return self._barrier
+
     def run(self) -> StrategyRunResult:
         """Drive the feed through the strategy and return a summary.
 
@@ -120,20 +136,30 @@ class StrategyRunner:
         construct a fresh :class:`StrategyRunner` instead.
         """
         self._state.reset()
+        self._barrier.reset()
         meta = self._strategy.META
         lookback = meta.lookback_bars
 
         signals: list[Signal] = []
         bars_skipped_lookback = 0
 
-        for event in self._feed:
+        for step, event in enumerate(self._feed):
+            # Advance the runtime look-ahead barrier (Property P-06) to the
+            # bar the feed just yielded, BEFORE any symbol filtering — the
+            # cursor tracks every consumed feed position.
+            self._barrier.advance_to(step)
             if event.symbol not in self._allowed_symbols:
                 continue
+
+            # Route the bar through the barrier: it asserts the index the
+            # strategy is about to see is ≤ the current cursor (never the
+            # future) and returns the same bar unchanged.
+            bar = self._barrier.guard(step, event.bar)
 
             # Update state BEFORE invoking the strategy — FR-STR-003
             # pins that strategies only see state that already
             # reflects the current bar.
-            self._state.last_prices[event.symbol] = event.bar.close
+            self._state.last_prices[event.symbol] = bar.close
             self._state.bar_count += 1
 
             if self._state.bar_count <= lookback:

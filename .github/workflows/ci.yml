@@ -439,6 +439,19 @@ jobs:
           else
             echo "(brutex.execution.driver edge test file not present yet — gate inactive)"
           fi
+          # DEC-LOOKAHEAD-BARRIER-001 (2026-06-07): brutex.feed.lookahead —
+          # Property P-06's LIVE runtime enforcer (the instrumented bar
+          # accessor). 100% line+branch is reachable wheel-free: the
+          # LookAheadBarrier is pure, and verify_with_barrier lazy-imports the
+          # core structlog runtime dep for its single material-action log line.
+          # The unit suite pins every guard branch + the manual-recheck core,
+          # the property suite is the live P-06 invariant, the golden locks the
+          # byte-exact touched-index trail.
+          if compgen -G "tests/unit/test_lookahead_barrier.py" > /dev/null; then
+            pytest --cov=brutex.feed.lookahead --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_lookahead_barrier.py tests/property/test_lookahead_properties.py tests/golden/test_lookahead_golden.py
+          else
+            echo "(brutex.feed.lookahead test file not present yet — gate inactive)"
+          fi
           # DEC-STRUCTURE-CLEANUP-001 (2026-06-07): brutex.math — the thin
           # facade re-exporting the Rust hot kernels (fno_math + trading_core).
           # 100% line+branch is reachable wheel-free: the unit + property
