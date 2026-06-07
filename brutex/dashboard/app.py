@@ -81,6 +81,8 @@ from brutex.dashboard.pull_controller import (
     pull_all_spot,
     pull_candles,
     resolve_pull_symbols,
+    set_live_token_holder,
+    start_token_keepalive,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.request_logging import emit_request_log
@@ -665,9 +667,41 @@ def build_app(
             "state model do not need FastAPI."
         ) from exc
 
+    from collections.abc import AsyncGenerator
+    from contextlib import asynccontextmanager
+
+    from brutex.adapters.dhan.token_keepalive import TokenKeepalive
     from brutex.observability.metrics import get_registry, render_prometheus
 
-    app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
+    # Continuous 12h token keepalive (DEC-DHAN-TOKEN-KEEPALIVE-001): one holder +
+    # one background thread for the app's lifetime keep the 24h Dhan web token
+    # alive so a live pull never 401s on expiry mid-run. Started on app startup +
+    # stopped on shutdown via the modern FastAPI LIFESPAN handler (NOT the
+    # deprecated ``@app.on_event`` hooks, which raise a DeprecationWarning the
+    # dashboard test suite treats as an error). Holds the started TokenKeepalive
+    # (or None when no live creds / dry-run) so shutdown can stop it; references
+    # ``_session_rate`` (assigned below, before startup fires) by late-bound closure.
+    _token_keepalive: list[TokenKeepalive | None] = [None]
+
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
+        """Start the 12h token keepalive on startup; stop it + clear the holder on shutdown.
+
+        Best-effort (DEC-DHAN-TOKEN-KEEPALIVE-001): :func:`start_token_keepalive`
+        returns ``None`` (a no-op) when no live creds resolve, so a dry-run
+        dashboard is unaffected. Uses the modern lifespan context manager rather
+        than the deprecated ``@app.on_event`` hooks.
+        """
+        _token_keepalive[0] = start_token_keepalive(session_rate=_session_rate)
+        try:
+            yield
+        finally:
+            keepalive = _token_keepalive[0]
+            if keepalive is not None:
+                keepalive.stop()
+            set_live_token_holder(None)
+
+    app = FastAPI(title="BruteX Dashboard", version="0.1.0a0", lifespan=_lifespan)
 
     @app.middleware("http")
     async def _log_request(request: Any, call_next: Any) -> Any:  # pragma: no cover — FastAPI glue

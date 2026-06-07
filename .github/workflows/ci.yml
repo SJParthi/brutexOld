@@ -1219,6 +1219,16 @@ jobs:
           else
             echo "(brutex.adapters.dhan.auth_guard test file not present yet — gate inactive)"
           fi
+          if compgen -G "tests/unit/test_dhan_token_holder.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.token_holder --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_token_holder.py
+          else
+            echo "(brutex.adapters.dhan.token_holder test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_token_keepalive.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.token_keepalive --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_token_keepalive.py
+          else
+            echo "(brutex.adapters.dhan.token_keepalive test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_instruments.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.instruments --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_instruments.py
           else

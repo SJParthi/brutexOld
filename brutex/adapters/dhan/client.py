@@ -279,6 +279,13 @@ class DhanClient:
     #: the client rate-agnostic (same injection pattern as ``transport`` / ``clock``
     #: / ``sleep``); the live ingest wires ``controller.pace`` in.
     pace: Callable[[], None] = field(default=_no_pace)
+    #: Optional live-token provider (DEC-DHAN-TOKEN-KEEPALIVE-001). When set,
+    #: :meth:`_headers` reads the ``access-token`` value from ``token_provider()``
+    #: on EVERY request instead of the static :attr:`access_token`, so a background
+    #: keepalive renew (which INVALIDATES the old token) propagates instantly to
+    #: this client and every in-flight worker sharing it. ``None`` (the default)
+    #: keeps the static-token behaviour, so every existing caller is byte-unchanged.
+    token_provider: Callable[[], str] | None = field(default=None)
 
     def __post_init__(self) -> None:
         """Reject a non-positive fast-retry budget (fail fast on misconfig)."""
@@ -286,9 +293,17 @@ class DhanClient:
             raise ValueError(f"max_attempts must be >= 1; got {self.max_attempts!r}")
 
     def _headers(self) -> dict[str, str]:
-        """Build the auth + content headers for every request."""
+        """Build the auth + content headers for every request.
+
+        The ``access-token`` value is read from :attr:`token_provider` when one is
+        injected (the live keepalive's holder — DEC-DHAN-TOKEN-KEEPALIVE-001), so a
+        mid-life renew that invalidated the old token is picked up on the very next
+        request; otherwise the static :attr:`access_token` is used (unchanged for
+        every existing caller).
+        """
+        token = self.token_provider() if self.token_provider is not None else self.access_token
         return {
-            HEADER_ACCESS_TOKEN: self.access_token,
+            HEADER_ACCESS_TOKEN: token,
             HEADER_CLIENT_ID: self.client_id,
             "Content-Type": "application/json",
             "Accept": "application/json",

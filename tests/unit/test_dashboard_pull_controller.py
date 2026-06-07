@@ -689,6 +689,31 @@ class TestSessionRateController:
         assert holder.get() is ctl  # cached on subsequent calls
 
 
+class TestLiveTokenHolderSeam:
+    """The process-wide live-token holder seam (DEC-DHAN-TOKEN-KEEPALIVE-001).
+
+    ``set_live_token_holder`` installs the holder the live builders wire into every
+    ``DhanClient`` via ``token_provider`` so a mid-life renew propagates instantly.
+    The live builder itself is ``# pragma: no cover`` (network), but the install /
+    clear seam IS testable.
+    """
+
+    def test_install_and_clear_round_trips(self) -> None:
+        import brutex.dashboard.pull_controller as pc
+        from brutex.adapters.dhan.token_holder import TokenHolder
+
+        previous = pc._LIVE_TOKEN_HOLDER
+        try:
+            assert pc._LIVE_TOKEN_HOLDER is None
+            holder = TokenHolder("seed-jwt")
+            pc.set_live_token_holder(holder)
+            assert pc._LIVE_TOKEN_HOLDER is holder
+            pc.set_live_token_holder(None)
+            assert pc._LIVE_TOKEN_HOLDER is None
+        finally:
+            pc.set_live_token_holder(previous)
+
+
 # ── parse_symbol_list + resolve_pull_symbols — the multi-select OPTIONS pull ──
 # (DEC-UNIVERSE-OPTIONS-MULTIPULL-001) — the ?symbols= backend resolution
 
