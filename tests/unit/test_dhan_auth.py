@@ -115,6 +115,53 @@ class TestRenewToken:
             renew_token(_client(200, b'{"accessToken": 1, "expiryTime": 2}'))
 
 
+class TestRenewTokenPacing:
+    """The defence-in-depth pace hook (DEC-DHAN-RATE-RESIDUAL-HARDEN-001).
+
+    Every physical Dhan POST from the renew path must be bucket-gated even when
+    wired into a live pull later: the explicit ``pace`` hook gates the INITIAL
+    POST and is called BEFORE the network request; with no explicit hook, the
+    client's own ``pace`` field is used (no-op by default → current callers
+    unchanged).
+    """
+
+    def test_explicit_pace_called_before_post(self) -> None:
+        # An explicit pace hook gates the initial POST and fires BEFORE it.
+        order: list[str] = []
+
+        class _RecordingTransport:
+            def __call__(
+                self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+            ) -> tuple[int, bytes]:
+                order.append("post")
+                return 200, b'{"accessToken": "newjwt", "expiryTime": "t"}'
+
+        client = DhanClient(
+            access_token="old",
+            client_id="cid",
+            transport=_RecordingTransport(),  # type: ignore[arg-type]
+            base_url="https://api.dhan.co/v2/",
+        )
+        info = renew_token(client, pace=lambda: order.append("pace"))
+        assert info == TokenInfo(access_token="newjwt", expiry_time="t")
+        assert order == ["pace", "post"]  # paced BEFORE the physical POST
+
+    def test_default_falls_back_to_client_pace(self) -> None:
+        # No explicit hook → the client's own pace field gates the initial POST.
+        calls: list[str] = []
+        body = b'{"accessToken": "newjwt", "expiryTime": "t"}'
+        client = DhanClient(
+            access_token="old",
+            client_id="cid",
+            transport=_Transport(200, body),  # type: ignore[arg-type]
+            base_url="https://api.dhan.co/v2/",
+            pace=lambda: calls.append("client_pace"),
+        )
+        info = renew_token(client)
+        assert info == TokenInfo(access_token="newjwt", expiry_time="t")
+        assert calls == ["client_pace"]  # client.pace fired exactly once
+
+
 class TestWithToken:
     def test_applies_new_token_keeps_client_id(self) -> None:
         creds = DhanCredentials(access_token="old", client_id="cid")

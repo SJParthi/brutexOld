@@ -193,6 +193,15 @@ class RateLimitPanel:
     ``effective_rps`` is the *measured* inter-arrival rate from the transport meter
     (calls ÷ wall-span, never overstating) — together they answer the operator's
     "is 5 r/s actually working?" at a glance (DEC-DASHBOARD-RATE-PANEL-001).
+
+    ``rps_1s`` / ``rps_1s_max`` are the **instantaneous** per-second issue gauge
+    straight from :meth:`brutex.adapters.dhan.client.CallMeter.snapshot` — the
+    trailing-1s physical-POST count and its run peak. Unlike the cumulative
+    ``effective_rps`` average (which can read high in the opening seconds without
+    any true breach), ``rps_1s_max`` is the real-time PROOF the 5 r/s cap held:
+    ``rps_1s_max <= 5`` ⇒ no per-second breach ever (DEC-DHAN-RATE-REALTIME-GUARANTEE-001).
+    A value > 5 should be impossible (every physical POST is burst-1 bucket-gated);
+    the panel flags it loudly if it ever happens (DEC-DASHBOARD-RPS1S-PANEL-001).
     """
 
     current_rps: float = 0.0
@@ -200,6 +209,8 @@ class RateLimitPanel:
     recent_429_count: int = 0
     effective_rps: float = 0.0
     latency_ms_p95: float = 0.0
+    rps_1s: int = 0
+    rps_1s_max: int = 0
 
 
 @dataclass(slots=True)
@@ -410,16 +421,23 @@ class DashboardState:
         *,
         effective_rps: float,
         latency_ms_p95: float,
+        rps_1s: int = 0,
+        rps_1s_max: int = 0,
     ) -> None:
         """Update the MEASURED throughput half of the rate panel from a ``CallMeter`` snapshot.
 
         ``effective_rps`` is the transport's inter-arrival rate (calls ÷ wall-span)
-        and ``latency_ms_p95`` its 95th-percentile round-trip — both straight from
-        :meth:`brutex.adapters.dhan.client.CallMeter.snapshot` (DEC-DASHBOARD-RATE-PANEL-001).
+        and ``latency_ms_p95`` its 95th-percentile round-trip; ``rps_1s`` /
+        ``rps_1s_max`` are the instantaneous trailing-1s issue gauge + its run peak —
+        all straight from :meth:`brutex.adapters.dhan.client.CallMeter.snapshot`
+        (DEC-DASHBOARD-RATE-PANEL-001 + DEC-DASHBOARD-RPS1S-PANEL-001). ``rps_1s_max``
+        is the real-time proof the 5 r/s cap held (``<= 5`` ⇒ no breach, ever).
         """
         with self._lock:
             self.rate_limit.effective_rps = effective_rps
             self.rate_limit.latency_ms_p95 = latency_ms_p95
+            self.rate_limit.rps_1s = rps_1s
+            self.rate_limit.rps_1s_max = rps_1s_max
 
     # ── Sweep funnel passthrough (DEC-DASHBOARD-LIVE-1) ────────────
 
@@ -526,8 +544,10 @@ def make_rate_observer(
     adaptive rate (:meth:`~brutex.adapters.dhan.rate_control.DhanRateController.snapshot`
     → ``current_rps`` + ``recent_hits``) and measured throughput
     (:meth:`~brutex.adapters.dhan.client.CallMeter.snapshot` → ``effective_rps`` +
-    ``latency_ms_p95``) flow to the dashboard rate panel (DEC-DASHBOARD-RATE-PANEL-001).
-    Pure + testable: drive it with two snapshot mappings and assert the panel updated.
+    ``latency_ms_p95`` + the instantaneous ``rps_1s`` / ``rps_1s_max`` gauge) flow to
+    the dashboard rate panel (DEC-DASHBOARD-RATE-PANEL-001 +
+    DEC-DASHBOARD-RPS1S-PANEL-001). Pure + testable: drive it with two snapshot
+    mappings and assert the panel updated.
     """
 
     def _observe(rate: Mapping[str, Any], meter: Mapping[str, Any]) -> None:
@@ -540,6 +560,8 @@ def make_rate_observer(
         state.update_throughput(
             effective_rps=float(meter.get("effective_rps", 0.0)),
             latency_ms_p95=float(meter.get("latency_ms_p95", 0.0)),
+            rps_1s=int(meter.get("rps_1s", 0)),
+            rps_1s_max=int(meter.get("rps_1s_max", 0)),
         )
 
     return _observe
@@ -672,9 +694,11 @@ def build_app(
 
         A dedicated, lock-light poll for the live rate panel: returns the
         :class:`RateLimitPanel` snapshot (``current_rps`` target vs ``effective_rps``
-        measured, ``recent_429_count``, ``latency_ms_p95``), populated during a live
-        pull by :func:`make_rate_observer` (DEC-DASHBOARD-RATE-PANEL-001). A pure
-        in-memory dict copy — never touches the lake or the store lock.
+        measured, the instantaneous ``rps_1s`` / ``rps_1s_max`` gauge,
+        ``recent_429_count``, ``latency_ms_p95``), populated during a live pull by
+        :func:`make_rate_observer` (DEC-DASHBOARD-RATE-PANEL-001 +
+        DEC-DASHBOARD-RPS1S-PANEL-001). A pure in-memory dict copy — never touches
+        the lake or the store lock.
         """
         return JSONResponse(asdict(state.rate_limit))
 
@@ -2897,6 +2921,11 @@ _INDEX_HTML_TEMPLATE = """\
   .status-dot.complete { background: #10b981; }
   @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
   .muted { color: #64748b; }
+  /* rps_1s breach flag (DEC-DASHBOARD-RPS1S-PANEL-001): the trailing-1s issue
+     gauge crossing the 5 r/s cap should be impossible — make it impossible to
+     miss when it is not. */
+  .rps-breach { color: #ef4444; font-weight: 700; }
+  .rps-breach::after { content: " ⚠ >5 r/s BREACH"; }
 </style>
 </head>
 <body>
@@ -2913,6 +2942,8 @@ _INDEX_HTML_TEMPLATE = """\
     <div class="stats">
       target: <span id="rl-rps">-</span> rps ·
       effective: <span id="rl-eff">-</span> rps ·
+      live: <span id="rl-rps1s">-</span> rps ·
+      peak: <span id="rl-rps1s-max">-</span> rps ·
       tokens: <span id="rl-tokens">-</span> ·
       429s (60s): <span id="rl-429">-</span> ·
       p95: <span id="rl-lat">-</span> ms
@@ -2975,6 +3006,18 @@ function renderState(s) {
   document.getElementById('rl-tokens').textContent = (rl.available_tokens || 0).toFixed(1);
   document.getElementById('rl-429').textContent = rl.recent_429_count || 0;
   document.getElementById('rl-lat').textContent = (rl.latency_ms_p95 || 0).toFixed(0);
+  // Instantaneous per-second issue gauge (DEC-DASHBOARD-RPS1S-PANEL-001): the
+  // trailing-1s POST count + its run peak. rps_1s_max > 5 should be impossible
+  // (every physical POST is burst-1 bucket-gated) — flag it loudly if it ever is.
+  const RPS_CAP = 5;
+  const rps1s = rl.rps_1s || 0;
+  const rps1sMax = rl.rps_1s_max || 0;
+  const rps1sEl = document.getElementById('rl-rps1s');
+  const rps1sMaxEl = document.getElementById('rl-rps1s-max');
+  rps1sEl.textContent = rps1s;
+  rps1sMaxEl.textContent = rps1sMax;
+  rps1sEl.classList.toggle('rps-breach', rps1s > RPS_CAP);
+  rps1sMaxEl.classList.toggle('rps-breach', rps1sMax > RPS_CAP);
 
   const tg = s.telegram || {};
   document.getElementById('tg-sent').textContent = tg.sent || 0;
