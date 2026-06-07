@@ -26,7 +26,7 @@ mirroring ``tests/unit/test_engine_sweep_orchestrator.py``.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
@@ -128,7 +128,7 @@ def _dedup() -> ComboDedup:
 @contextmanager
 def _open_guards(
     tmp_path: Path, grid: SweepGridConfig, *, worker_name: str = DEFAULT_WORKER_NAME
-) -> Iterator[SweepGuards]:
+) -> Generator[SweepGuards, None, None]:
     """Open the five real G&A objects, bundle them, and clean up on exit."""
     audit = SweepAuditWriter.open(tmp_path / "sup.jsonl")
     cache = SweepCache.open(tmp_path / "cache", bloom_capacity=10_000)
