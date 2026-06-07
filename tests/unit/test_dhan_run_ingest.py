@@ -687,7 +687,7 @@ class TestRunDhanSpotIngestWithRetry:
     def test_clean_pull_does_not_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls = self._patch_passes(monkeypatch, [_report(still_failed=0)])
         result = run_dhan_spot_ingest_with_retry(
-            object(),
+            object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             instruments=[_index("13")],
             intervals=["1minute"],
@@ -702,7 +702,7 @@ class TestRunDhanSpotIngestWithRetry:
     def test_auto_retry_off_keeps_single_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls = self._patch_passes(monkeypatch, [_report(still_failed=7)])
         result = run_dhan_spot_ingest_with_retry(
-            object(),
+            object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             instruments=[_index("13")],
             intervals=["1minute"],
@@ -721,7 +721,7 @@ class TestRunDhanSpotIngestWithRetry:
             [_report(still_failed=84), _report(still_failed=10), _report(still_failed=0)],
         )
         result = run_dhan_spot_ingest_with_retry(
-            object(),
+            object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             instruments=[_index("13")],
             intervals=["1minute"],
@@ -741,7 +741,7 @@ class TestRunDhanSpotIngestWithRetry:
         # A pull whose only leftover is a known-gap (still_failed=0) is NOT retried.
         calls = self._patch_passes(monkeypatch, [_report(still_failed=0, known_gap=True)])
         result = run_dhan_spot_ingest_with_retry(
-            object(),
+            object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             instruments=[_index("13")],
             intervals=["1minute"],
