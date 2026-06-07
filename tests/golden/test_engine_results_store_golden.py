@@ -46,6 +46,7 @@ def _row(seed: int, sharpe: float, entry: str, exit_: str) -> ResultRow:
         tf="5m",
         direction="bull",
         mode="A",
+        mask_bits=seed,
         net_pnl_paisa=1_000 * seed,
         gross_profit_paisa=2_000 * seed,
         gross_loss_paisa=500,
@@ -82,6 +83,14 @@ def test_golden_price_snap() -> None:
         Decimal("0.00"),
         Decimal("100.00"),
     )
+
+
+def test_golden_condition_names_decode() -> None:
+    # mask_bits = seed → the locked vocabulary decode (single source of truth).
+    # seed 1 = bit0; seed 2 = bit1; seed 3 = bits0+1.
+    assert _ROW_1.condition_names == "close_above_ema20"
+    assert _ROW_2.condition_names == "close_below_ema20"
+    assert _ROW_3.condition_names == "close_above_ema20 AND close_below_ema20"
 
 
 def test_golden_leaderboard_order() -> None:

@@ -68,7 +68,7 @@ import math
 import os
 import tempfile
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from decimal import Decimal
 from pathlib import Path
 from typing import Final
@@ -78,6 +78,7 @@ import structlog
 from brutex.models import BruteXError
 from brutex.money import round_money
 from brutex.strategies.sweep import COMBO_HASH_HEX_LEN
+from brutex.vocabulary.describe import matched_condition_names
 
 _LOG = structlog.get_logger("brutex.engine.results_store")
 
@@ -91,10 +92,31 @@ ROW_GROUP_SIZE: Final[int] = 100_000
 _INT64_MIN: Final[int] = -(2**63)
 _INT64_MAX: Final[int] = 2**63 - 1
 
+#: Largest valid strategy mask — the 52 atomic condition bits (0..51) all set.
+#: Bits 52..63 are RESERVED (``brutex.vocabulary.bits``); a mask is rejected if it
+#: sets any of them, so ``mask_bits`` always fits Parquet ``Int64`` (2**52-1 ≪ 2**63)
+#: and ``condition_names`` decodes to a defined name for every set bit.
+MASK_BITS_MAX: Final[int] = (1 << 52) - 1
+
+#: Separator joining the matched-condition NAMES in the readable ``condition_names``
+#: column — reads as the combo's rule ("close_above_ema20 AND near_fib_618").
+CONDITION_NAME_SEP: Final[str] = " AND "
+
 # ── Column families (declared ONCE — CLAUDE.md §11 COMMON; reused by the
 #    writer, the reader, the validators and the leaderboard whitelist) ──────────
-#: Identity / context string columns. ``run_id`` is the BLAKE3 run-identity key.
-_STRING_FIELDS: Final[tuple[str, ...]] = ("run_id", "instrument", "tf", "direction", "mode")
+#: Identity / context string columns. ``run_id`` is the BLAKE3 run-identity key;
+#: ``condition_names`` is the human-readable decode of ``mask_bits`` (the winning
+#: combo, by name — DEC-SWEEP-WINNERS-BY-NAME-001).
+_STRING_FIELDS: Final[tuple[str, ...]] = (
+    "run_id",
+    "instrument",
+    "tf",
+    "direction",
+    "mode",
+    "condition_names",
+)
+#: int64 strategy-mask column — the u64 combo mask (set bits = required conditions).
+_MASK_FIELDS: Final[tuple[str, ...]] = ("mask_bits",)
 #: int64 paisa money columns. ``*_pnl`` / ``expectancy`` may be signed; the
 #: gross/drawdown magnitudes are validated ``>= 0`` (see :class:`ResultRow`).
 _MONEY_PAISA_FIELDS: Final[tuple[str, ...]] = (
@@ -115,6 +137,10 @@ _METRIC_FIELDS: Final[tuple[str, ...]] = (
     "win_rate",
     "max_drawdown_pct",
 )
+#: Float64 **nullable** full-precision metric columns (NEVER rounded). ``None`` is a
+#: first-class value (the metric was mathematically undefined for the sample — e.g.
+#: a pool that could not be deflated) and round-trips as a Parquet null.
+_NULLABLE_METRIC_FIELDS: Final[tuple[str, ...]] = ("deflated_sharpe",)
 #: Float64 price columns — Decimal rupees snapped to the 2dp tick grid at write.
 _PRICE_FIELDS: Final[tuple[str, ...]] = ("avg_entry_price", "avg_exit_price")
 
@@ -155,6 +181,20 @@ class ResultRow:
         ``"A"``). Validated non-empty only — the universe / TF / mode
         vocabularies live in their own modules (CLAUDE.md §11 COMMON); the
         producer supplies valid enum values.
+    mask_bits
+        The u64 strategy mask — set bits are the required-true atomic conditions
+        (``brutex.vocabulary.bits``). Validated ``0 <= mask_bits <= MASK_BITS_MAX``
+        (only the 52 defined condition bits; reserved bits 52..63 rejected), so it
+        always fits Parquet ``Int64``. This is the machine-readable winning combo;
+        ``condition_names`` is its human-readable decode (DEC-SWEEP-WINNERS-BY-NAME-001).
+    condition_names
+        DERIVED (``init=False``) — the matched condition NAMES of ``mask_bits``, in
+        ascending bit order, joined by :data:`CONDITION_NAME_SEP` (empty string for
+        the no-condition mask ``0``). Sourced from the single-source-of-truth
+        :func:`brutex.vocabulary.describe.matched_condition_names` (imported, never
+        copy-pasted), so it can NEVER drift from ``mask_bits``. Stored as a column
+        purely for at-rest legibility — the operator reads which conditions won, by
+        name, without re-running the decoder.
     net_pnl_paisa, gross_profit_paisa, gross_loss_paisa, max_drawdown_paisa, expectancy_paisa
         Money in signed int64 **paisa**. ``gross_profit_paisa``,
         ``gross_loss_paisa`` and ``max_drawdown_paisa`` are absolute magnitudes
@@ -166,6 +206,12 @@ class ResultRow:
     sharpe_ratio, sortino_ratio, calmar_ratio, profit_factor, win_rate, max_drawdown_pct
         Full-precision Float64 metrics. Must be finite (``NaN`` / ``±inf``
         rejected). NEVER rounded.
+    deflated_sharpe
+        The Deflated-Sharpe ratio (multiple-testing-adjusted Sharpe,
+        DEC-RANKING-OVERFIT-001) carried for leaderboard transparency, or ``None``
+        when the pool could not be deflated / the overfit gate was inactive. When
+        present it must be finite (``NaN`` / ``±inf`` rejected); NEVER rounded.
+        Round-trips as a Parquet null when ``None``.
     avg_entry_price, avg_exit_price
         Price-family representatives as :class:`~decimal.Decimal` rupees. Must be
         finite and ``>= 0``; normalised to two decimals via
@@ -184,6 +230,7 @@ class ResultRow:
     tf: str
     direction: str
     mode: str
+    mask_bits: int
     net_pnl_paisa: int
     gross_profit_paisa: int
     gross_loss_paisa: int
@@ -200,12 +247,29 @@ class ResultRow:
     max_drawdown_pct: float
     avg_entry_price: Decimal
     avg_exit_price: Decimal
+    deflated_sharpe: float | None = None
+    #: Derived from ``mask_bits`` in ``__post_init__`` — never an init arg.
+    condition_names: str = field(init=False, default="")
 
     def __post_init__(self) -> None:
         _validate_run_id(self.run_id)
         for name in ("instrument", "tf", "direction", "mode"):
             if not getattr(self, name):
                 raise ResultsStoreError(f"ResultRow.{name} must be non-empty")
+
+        if not 0 <= self.mask_bits <= MASK_BITS_MAX:
+            raise ResultsStoreError(
+                f"ResultRow.mask_bits={self.mask_bits} is out of range "
+                f"[0, {MASK_BITS_MAX}] (the 52 atomic condition bits; reserved bits "
+                f"52..63 are not allowed)"
+            )
+        # Derive the readable decode from the SINGLE source of truth (the vocabulary
+        # name table) so condition_names can never drift from mask_bits.
+        object.__setattr__(
+            self,
+            "condition_names",
+            CONDITION_NAME_SEP.join(matched_condition_names(self.mask_bits)),
+        )
 
         for name in (*_MONEY_PAISA_FIELDS, *_COUNT_FIELDS):
             value = getattr(self, name)
@@ -239,6 +303,17 @@ class ResultRow:
             # for every other finite double — this is NOT rounding, only the
             # sign of zero is normalised (Golden Rule #4 byte-determinism).
             object.__setattr__(self, name, value + 0.0)
+
+        for name in _NULLABLE_METRIC_FIELDS:
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if not math.isfinite(value):
+                raise ResultsStoreError(
+                    f"ResultRow.{name} must be a finite float or None (no NaN/inf — "
+                    f"determinism + ranking integrity), got {value!r}"
+                )
+            object.__setattr__(self, name, value + 0.0)  # -0.0 → +0.0 (byte-determinism)
 
         for name in _PRICE_FIELDS:
             price = getattr(self, name)
@@ -462,7 +537,15 @@ class ResultsStore:
 
         ordered = [self._rows[run_id] for run_id in sorted(self._rows)]
         columns: dict[str, list[object]] = {}
-        for name in (*_STRING_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS, *_METRIC_FIELDS):
+        for name in (
+            *_STRING_FIELDS,
+            *_MASK_FIELDS,
+            *_MONEY_PAISA_FIELDS,
+            *_COUNT_FIELDS,
+            *_METRIC_FIELDS,
+            *_NULLABLE_METRIC_FIELDS,
+        ):
+            # Nullable metrics keep ``None`` (→ Parquet null); others are concrete.
             columns[name] = [getattr(row, name) for row in ordered]
         for name in _PRICE_FIELDS:
             # Already 2dp-snapped at construction; Decimal → float for Float64 storage.
@@ -470,14 +553,16 @@ class ResultsStore:
 
         # Schema built inline (like brutex/data/parquet_writer.py) so the polars
         # dtype is inferred; matched to columns by name. Column order follows the
-        # fixed insertion order above (identity → money → counts → metrics →
-        # prices) for a reproducible byte stream.
+        # fixed insertion order above (identity → mask → money → counts → metrics
+        # → deflated → prices) for a reproducible byte stream.
         df = pl.DataFrame(
             columns,
             schema={
                 **dict.fromkeys(_STRING_FIELDS, pl.Utf8),
-                **dict.fromkeys((*_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64),
-                **dict.fromkeys((*_METRIC_FIELDS, *_PRICE_FIELDS), pl.Float64),
+                **dict.fromkeys((*_MASK_FIELDS, *_MONEY_PAISA_FIELDS, *_COUNT_FIELDS), pl.Int64),
+                **dict.fromkeys(
+                    (*_METRIC_FIELDS, *_NULLABLE_METRIC_FIELDS, *_PRICE_FIELDS), pl.Float64
+                ),
             },
         )
         bio = io.BytesIO()
@@ -539,13 +624,19 @@ def _row_from_record(record: dict[str, object]) -> ResultRow:
 
     Prices come back as Float64; ``Decimal(str(float))`` then the construction
     snap reproduces the exact 2dp value, keeping the round-trip bit-stable.
+    ``condition_names`` is NOT read back — it is re-derived from ``mask_bits`` at
+    construction (single source of truth), so the stored string can never desync.
+    ``deflated_sharpe`` is nullable: a Parquet null reads back as ``None``.
     """
+    deflated = record["deflated_sharpe"]
     return ResultRow(
         run_id=str(record["run_id"]),
         instrument=str(record["instrument"]),
         tf=str(record["tf"]),
         direction=str(record["direction"]),
         mode=str(record["mode"]),
+        mask_bits=int(record["mask_bits"]),  # type: ignore[call-overload]
+        deflated_sharpe=None if deflated is None else float(deflated),  # type: ignore[arg-type]
         net_pnl_paisa=int(record["net_pnl_paisa"]),  # type: ignore[call-overload]
         gross_profit_paisa=int(record["gross_profit_paisa"]),  # type: ignore[call-overload]
         gross_loss_paisa=int(record["gross_loss_paisa"]),  # type: ignore[call-overload]
@@ -587,6 +678,8 @@ def _atomic_write(dest: Path, content: bytes) -> None:
 
 
 __all__ = [
+    "CONDITION_NAME_SEP",
+    "MASK_BITS_MAX",
     "FlushResult",
     "ResultRow",
     "ResultsStore",
