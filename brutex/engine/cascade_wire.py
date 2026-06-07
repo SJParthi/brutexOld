@@ -171,6 +171,7 @@ class CascadeSurvivorSpec:
     start_equity_paisa: int
 
     def __post_init__(self) -> None:
+        """Validate the survivor spec fields (non-empty run_id, non-negative mask)."""
         if not self.run_id:
             raise ValueError("CascadeSurvivorSpec.run_id must be non-empty")
         if self.mask_bits < 0:
@@ -315,6 +316,7 @@ def build_candidate_input(
     n_bars = len(bars)
 
     def _evaluate(positions: npt.NDArray[np.intp]) -> float:
+        """Compute the held-out objective for one CPCV fold's test positions."""
         relocated = [False] * n_bars
         for pos in positions:
             relocated[int(pos)] = True
@@ -606,6 +608,7 @@ def manual_cascade_report(
     }
 
     def _knobs_for(row: ResultRow) -> dict[str, Any]:
+        """Return the per-row reconstruction knobs with the row's tf resolved to minutes."""
         return {**knobs, "tf_minutes": _tf_minutes(row.tf)}
 
     return cascade_report_for_store(
