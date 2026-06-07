@@ -25,12 +25,15 @@ from pathlib import Path
 
 import pytest
 from brutex.engine.results_store import (
+    CONDITION_NAME_SEP,
+    MASK_BITS_MAX,
     FlushResult,
     ResultRow,
     ResultsStore,
     ResultsStoreError,
 )
 from brutex.strategies.combo import combo_hash
+from brutex.vocabulary.describe import matched_condition_names
 
 
 def _rid(seed: int) -> str:
@@ -46,6 +49,7 @@ def _row(**overrides: object) -> ResultRow:
         "tf": "5m",
         "direction": "bull",
         "mode": "A",
+        "mask_bits": 0b101,
         "net_pnl_paisa": 1_000,
         "gross_profit_paisa": 1_500,
         "gross_loss_paisa": 500,
@@ -182,6 +186,55 @@ class TestResultRowValidation:
         # The `+ 0.0` canonicalisation must not perturb any non-zero finite value.
         row = _row(sharpe_ratio=1.234567890123456)
         assert row.sharpe_ratio == 1.234567890123456
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ResultRow — readable-mask surface (DEC-SWEEP-WINNERS-BY-NAME-001)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestReadableMask:
+    def test_condition_names_decode_matches_vocabulary(self) -> None:
+        # bits {0, 23, 30} = close_above_ema20, near_fib_618, bar_bullish.
+        mask = (1 << 0) | (1 << 23) | (1 << 30)
+        row = _row(mask_bits=mask)
+        expected = CONDITION_NAME_SEP.join(matched_condition_names(mask))
+        assert row.condition_names == expected
+        assert row.condition_names == "close_above_ema20 AND near_fib_618 AND bar_bullish"
+
+    def test_no_condition_mask_yields_empty_names(self) -> None:
+        row = _row(mask_bits=0)
+        assert row.condition_names == ""
+
+    def test_condition_names_is_not_an_init_argument(self) -> None:
+        # condition_names is DERIVED — passing it must be rejected as an unknown kwarg.
+        with pytest.raises(TypeError, match="condition_names"):
+            _row(condition_names="forged")
+
+    @pytest.mark.parametrize("mask", [0, 1, MASK_BITS_MAX])
+    def test_mask_bits_boundary_values_accepted(self, mask: int) -> None:
+        assert _row(mask_bits=mask).mask_bits == mask
+
+    @pytest.mark.parametrize("bad", [-1, MASK_BITS_MAX + 1, 1 << 63])
+    def test_mask_bits_out_of_range_rejected(self, bad: int) -> None:
+        with pytest.raises(ResultsStoreError, match="mask_bits"):
+            _row(mask_bits=bad)
+
+    def test_deflated_sharpe_defaults_to_none(self) -> None:
+        assert _row().deflated_sharpe is None
+
+    def test_deflated_sharpe_finite_value_kept(self) -> None:
+        assert _row(deflated_sharpe=0.97).deflated_sharpe == 0.97
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_deflated_sharpe_non_finite_rejected(self, bad: float) -> None:
+        with pytest.raises(ResultsStoreError, match="deflated_sharpe must be a finite"):
+            _row(deflated_sharpe=bad)
+
+    def test_deflated_sharpe_negative_zero_canonicalised(self) -> None:
+        row = _row(deflated_sharpe=-0.0)
+        assert row.deflated_sharpe == 0.0
+        assert str(row.deflated_sharpe) == "0.0"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -351,6 +404,25 @@ class TestFlushLoad:
         assert len(reloaded) == 2
         assert reloaded.get(_rid(1)) == store.get(_rid(1))
         assert reloaded.get(_rid(2)) == store.get(_rid(2))
+
+    def test_readable_mask_round_trips(self, tmp_path: Path) -> None:
+        # mask_bits + (derived) condition_names + nullable deflated_sharpe survive a
+        # flush→load, covering BOTH the None and the float deflated branches.
+        path = tmp_path / "results.parquet"
+        mask = (1 << 2) | (1 << 30)
+        store = ResultsStore(path=path)
+        store.append(_row(run_id=_rid(1), mask_bits=mask, deflated_sharpe=None))
+        store.append(_row(run_id=_rid(2), mask_bits=mask, deflated_sharpe=0.97))
+        store.flush()
+        reloaded = ResultsStore.load(path)
+        got_null = reloaded.get(_rid(1))
+        got_val = reloaded.get(_rid(2))
+        assert got_null is not None
+        assert got_val is not None
+        assert got_null.mask_bits == mask
+        assert got_null.condition_names == "close_above_ema200 AND bar_bullish"
+        assert got_null.deflated_sharpe is None
+        assert got_val.deflated_sharpe == 0.97
 
     def test_price_round_trips_exactly(self, tmp_path: Path) -> None:
         path = tmp_path / "results.parquet"

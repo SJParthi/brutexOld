@@ -303,6 +303,53 @@ class TestRankedComboToResultRow:
         )
         assert row.direction == "bear"
 
+    def test_stamps_readable_mask_and_deflated_sharpe(self) -> None:
+        # DEC-SWEEP-WINNERS-BY-NAME-001: mask_bits = rc.mask; condition_names is the
+        # vocabulary decode of that mask; deflated_sharpe is carried through.
+        from dataclasses import replace
+
+        from brutex.vocabulary.describe import matched_condition_names
+
+        bars = _trending_bars()
+        rc_real, bar_bits = _ranked_combo(bars)
+        rc = replace(rc_real, deflated_sharpe=0.92)
+        row = ranked_combo_to_result_row(
+            rc,
+            run_id=mask_run_id(mask=rc.mask, params=_PARAMS, **_CTX),
+            instrument="NIFTY",
+            tf="1m",
+            direction="bull",
+            mode="A",
+            bars=bars,
+            bar_bits=bar_bits,
+            tf_minutes=1,
+            sl_paisa=80,
+            tp_paisa=50,
+        )
+        assert row.mask_bits == rc.mask
+        assert row.condition_names == " AND ".join(matched_condition_names(rc.mask))
+        assert row.deflated_sharpe == 0.92
+
+    def test_none_deflated_sharpe_passes_through(self) -> None:
+        # The legacy (no overfit gate) path leaves rc.deflated_sharpe None → stored None.
+        bars = _trending_bars()
+        rc, bar_bits = _ranked_combo(bars)
+        assert rc.deflated_sharpe is None
+        row = ranked_combo_to_result_row(
+            rc,
+            run_id=mask_run_id(mask=rc.mask, params=_PARAMS, **_CTX),
+            instrument="NIFTY",
+            tf="1m",
+            direction="bull",
+            mode="A",
+            bars=bars,
+            bar_bits=bar_bits,
+            tf_minutes=1,
+            sl_paisa=80,
+            tp_paisa=50,
+        )
+        assert row.deflated_sharpe is None
+
     def test_none_metrics_map_to_zero(self) -> None:
         # Hand-build a RankedCombo whose optional ratios are None to exercise the
         # None → 0.0 mapping deterministically (independent of the trade sim).

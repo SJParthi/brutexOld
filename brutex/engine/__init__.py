@@ -42,7 +42,7 @@ Re-exports the combo-mask primitives + the Stage-1A matrix builder. As
 subsequent modules land, their public symbols will be re-exported here.
 """
 
-from brutex.engine import combo_mask, results_store, stage1a, trade_sim
+from brutex.engine import combo_mask, results_report, results_store, stage1a, trade_sim
 from brutex.engine.combo_mask import (
     MAX_VOCAB_BITS,
     VOCAB_BITS,
@@ -54,6 +54,7 @@ from brutex.engine.combo_mask import (
     mask_to_bits,
     popcount,
 )
+from brutex.engine.results_report import results_show_report
 from brutex.engine.results_store import (
     FlushResult,
     ResultRow,
@@ -97,6 +98,8 @@ __all__ = [
     "iter_masks_k_of_n",
     "mask_to_bits",
     "popcount",
+    "results_report",
+    "results_show_report",
     "results_store",
     "simulate_trades",
     "stage1a",
