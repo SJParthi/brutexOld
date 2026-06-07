@@ -58,7 +58,11 @@ from brutex.dashboard.coverage_reconcile import (
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.sink import BarSink, NullBarSink
-from brutex.data.window_status_store import begin_pull_status, end_pull_status
+from brutex.data.window_status_store import (
+    begin_pull_status,
+    end_pull_status,
+    make_live_status_flush,
+)
 from brutex.models import Instrument
 from brutex.observability.correlation import pull_id_scope
 from brutex.orchestrator.parallel import (
@@ -813,6 +817,16 @@ def pull_all_spot(
         (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
             _live_rate_runtime(use_live_rate, session_rate)
         )
+        # Live status (DEC-WINDOW-STATUS-LIVE-001): flush the per-window status
+        # sidecar MID-pull (throttled) after each completed pair, so
+        # /coverage/windows ticks up live instead of staying 0 until pull end.
+        status_flush = make_live_status_flush(status_log, lake_root)
+
+        def _progress_then_flush(label: str, bars: int, failed: bool) -> None:
+            if on_progress is not None:
+                on_progress(label, bars, failed)
+            status_flush()
+
         report = run_dhan_spot_ingest(
             adapter,
             sink,
@@ -824,7 +838,7 @@ def pull_all_spot(
             on_rate_limit=on_rate_limit,
             on_timeout=on_timeout,
             on_success=on_success,
-            on_progress=on_progress,
+            on_progress=_progress_then_flush,
             coverage=coverage,
             status_log=status_log,
             run_parallel=run_parallel,
@@ -1009,6 +1023,15 @@ def pull_candles(
         (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
             _live_rate_runtime(use_live_rate, session_rate)
         )
+        # Live status (DEC-WINDOW-STATUS-LIVE-001): flush mid-pull (throttled) per
+        # completed interval so /coverage/windows ticks up live, not only at end.
+        status_flush = make_live_status_flush(status_log, lake_root)
+
+        def _progress_then_flush(label: str, bars: int, failed: bool) -> None:
+            if on_progress is not None:
+                on_progress(label, bars, failed)
+            status_flush()
+
         report = run_dhan_spot_ingest(
             adapter,
             sink,
@@ -1020,7 +1043,7 @@ def pull_candles(
             on_rate_limit=on_rate_limit,
             on_timeout=on_timeout,
             on_success=on_success,
-            on_progress=on_progress,
+            on_progress=_progress_then_flush,
             coverage=coverage,
             status_log=status_log,
             run_parallel=run_parallel,

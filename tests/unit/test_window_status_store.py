@@ -16,6 +16,7 @@ from brutex.data.window_status_store import (
     begin_pull_status,
     end_pull_status,
     load_window_status,
+    make_live_status_flush,
     save_window_status,
     status_path,
 )
@@ -43,6 +44,33 @@ def _log_with_one() -> WindowStatusLog:
 
 def test_status_path(tmp_path: Path) -> None:
     assert status_path(tmp_path) == tmp_path / "window_status.json"
+
+
+def test_live_flush_writes_first_then_throttles_then_writes(tmp_path: Path) -> None:
+    # DEC-WINDOW-STATUS-LIVE-001: first call writes; a second within the throttle
+    # window is skipped; a call past the window writes again.
+    clock = {"t": 100.0}
+    flush = make_live_status_flush(
+        _log_with_one(), tmp_path, min_interval_s=2.0, clock=lambda: clock["t"]
+    )
+    flush()  # first → writes
+    path = status_path(tmp_path)
+    assert path.is_file()
+
+    path.unlink()  # remove so we can detect whether the next call rewrites
+    clock["t"] = 101.0  # within the 2s window → throttled, no write
+    flush()
+    assert not path.is_file()
+
+    clock["t"] = 103.0  # past the window → writes again
+    flush()
+    assert path.is_file()
+
+
+def test_live_flush_none_log_is_noop(tmp_path: Path) -> None:
+    # A dry-run (None log) records nothing → the flush must never touch disk.
+    make_live_status_flush(None, tmp_path)()
+    assert not status_path(tmp_path).is_file()
 
 
 def test_load_missing_returns_empty(tmp_path: Path) -> None:
