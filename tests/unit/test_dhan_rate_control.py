@@ -286,18 +286,9 @@ class TestThrottleLogging:
 
 
 def test_pace_delegates_without_error() -> None:
-    clock = _Clock()
-    slept: list[float] = []
-    ctl = DhanRateController(clock=clock, sleep=slept.append)
-    ctl.pace()  # a token is available (burst) → no blocking sleep
-    assert slept == []
-
-
-def test_eases_in_no_opening_burst() -> None:
-    # EASE-IN (DEC-DHAN-EASE-IN-001): burst is 1, so a pull does NOT fire a spike
-    # at t=0. The FIRST call gets the single token free; the SECOND back-to-back
-    # call must WAIT for a refill (paced at the current r/s) instead of firing
-    # free from a multi-token burst — exactly what stops the opening 429 storm.
+    # HARD-CAP (DEC-DHAN-RATE-HARD-CAP-001): the session bucket starts EMPTY, so the
+    # very first paced call waits one 1/5 s interval — no free opening token that
+    # would push the physical rate over the 5 r/s ceiling.
     clock = _Clock()
     slept: list[float] = []
 
@@ -306,6 +297,43 @@ def test_eases_in_no_opening_burst() -> None:
         clock.advance(seconds)  # sleeping advances time → the bucket refills
 
     ctl = DhanRateController(clock=clock, sleep=_sleep)
-    ctl.pace()  # 1st: the single burst token → no wait
-    ctl.pace()  # 2nd: bucket drained → paced one token at the 5 r/s ceiling
-    assert slept == [1.0 / CEILING_RPS]  # waited exactly 1/5 s — not a free burst
+    ctl.pace()
+    assert slept == [1.0 / CEILING_RPS]  # first call paced, not a free burst
+
+
+def test_eases_in_no_opening_burst() -> None:
+    # HARD-CAP (DEC-DHAN-RATE-HARD-CAP-001) hardens EASE-IN (DEC-DHAN-EASE-IN-001):
+    # the bucket now starts EMPTY, so NEITHER the opening call NOR the next one fires
+    # free — both are paced at 1/5 s, so the PHYSICAL rate never exceeds 5 r/s even
+    # in the opening burst that previously triggered the 429 storm.
+    clock = _Clock()
+    slept: list[float] = []
+
+    def _sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.advance(seconds)  # sleeping advances time → the bucket refills
+
+    ctl = DhanRateController(clock=clock, sleep=_sleep)
+    ctl.pace()  # 1st: empty bucket → paced
+    ctl.pace()  # 2nd: still paced at the ceiling
+    assert slept == [1.0 / CEILING_RPS, 1.0 / CEILING_RPS]
+
+
+def test_stepdown_rebuild_starts_empty_no_free_burst() -> None:
+    # HARD-CAP (DEC-DHAN-RATE-HARD-CAP-001): a 5→4 stepdown REBUILDS the bucket; it
+    # must ALSO start EMPTY so the stepdown can't release a free burst token at the
+    # lower rate. The first paced call after the step waits a full 1/4 s (0 elapsed
+    # since the rebuild) — the physical rate stays strictly ≤ the new rate.
+    clock = _Clock()
+    slept: list[float] = []
+
+    def _sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.advance(seconds)
+
+    ctl = DhanRateController(clock=clock, sleep=_sleep)
+    for _ in range(STEP_DOWN_HITS):  # 3 hits at the same instant → 5→4 (rebuild)
+        ctl.on_rate_limit()
+    assert ctl.current_rps == 4.0
+    ctl.pace()  # rebuilt bucket is empty + 0 elapsed → waits a full 1/4 s
+    assert slept == [1.0 / 4.0]

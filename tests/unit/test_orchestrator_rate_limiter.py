@@ -516,3 +516,32 @@ class TestQuotaTrackerIntegration:
             assert bucket._last_success_at == success_at_before
         finally:
             tracker.close()
+
+
+class TestStartEmpty:
+    """``start_empty`` ease-in (DEC-DHAN-RATE-HARD-CAP-001): the bucket holds 0
+    tokens at t=0 instead of ``burst``, so the FIRST acquire waits one full
+    ``1/rate`` interval — no opening burst over the rate."""
+
+    def test_default_starts_full_first_call_immediate(self, clock: FakeClock) -> None:
+        """Legacy default (start_empty=False): a full bucket → first token is free."""
+        b = AdaptiveTokenBucket(
+            initial_rps=5.0,
+            downshift_rps=2.5,
+            burst=1,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+        assert b.acquire() == 0.0
+
+    def test_start_empty_first_call_waits_one_interval(self, clock: FakeClock) -> None:
+        """start_empty=True: a 0-token bucket → the first call is paced at 1/rate."""
+        b = AdaptiveTokenBucket(
+            initial_rps=5.0,
+            downshift_rps=2.5,
+            burst=1,
+            start_empty=True,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+        assert b.acquire() == 1.0 / 5.0

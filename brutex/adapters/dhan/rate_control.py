@@ -161,6 +161,12 @@ class DhanRateController:
             initial_rps=self._rps,
             downshift_rps=self._rps / 2.0,  # unused (we never feed the bucket hits); just < initial
             burst=BURST,
+            # HARD-CAP (DEC-DHAN-RATE-HARD-CAP-001): every (re)build starts EMPTY,
+            # so neither the opening nor a 5→4→3 stepdown can release a free burst
+            # token — the next call waits a full ``1/rate`` interval. The PHYSICAL
+            # issue rate therefore stays strictly ≤ the current rate (≤ 5 r/s at
+            # the ceiling), removing the over-issue the operator's `make run` showed.
+            start_empty=True,
             clock=self._clock,
             sleep=self._sleep,
             quota_tracker=self._quota,
