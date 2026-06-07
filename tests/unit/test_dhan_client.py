@@ -48,9 +48,23 @@ class _RecordingTransport:
         self.calls: list[dict[str, object]] = []
 
     def __call__(
-        self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+        self,
+        url: str,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+        method: str = "POST",
     ) -> tuple[int, bytes]:
-        self.calls.append({"url": url, "body": body, "headers": dict(headers), "timeout": timeout})
+        self.calls.append(
+            {
+                "url": url,
+                "body": body,
+                "headers": dict(headers),
+                "timeout": timeout,
+                "method": method,
+            }
+        )
         return self.status, self.body
 
 
@@ -174,6 +188,61 @@ class TestPostJson:
         assert headers[HEADER_ACCESS_TOKEN] == "jwt-abc"
 
 
+class TestGetJson:
+    """The headers-only GET surface — ``RenewToken`` (DEC-DHAN-RENEWTOKEN-GET-001).
+
+    ``get_json`` is a GET (the fake records ``method == "GET"``), sends an EMPTY
+    body, carries the same ``access-token`` + ``dhanClientId`` headers as a POST,
+    and runs the SAME metered + paced + bounded fast-retry loop.
+    """
+
+    def test_issues_get_with_empty_body_and_headers(self) -> None:
+        t = _RecordingTransport(200, b'{"accessToken": "new", "expiryTime": "t"}')
+        result = _client(t).get_json("RenewToken")
+        assert result == {"accessToken": "new", "expiryTime": "t"}
+        sent = t.calls[0]
+        assert sent["method"] == "GET"  # GET, not POST
+        assert sent["body"] == b""  # headers-only, NO request body
+        assert sent["url"] == "https://api.dhan.co/v2/RenewToken"
+        headers = sent["headers"]
+        assert isinstance(headers, dict)
+        assert headers[HEADER_ACCESS_TOKEN] == "jwt-abc"
+        assert headers[HEADER_CLIENT_ID] == "100000001"
+
+    def test_post_json_still_sends_post(self) -> None:
+        # The POST path is byte-unchanged — it still records method == "POST".
+        t = _RecordingTransport(200, b"{}")
+        _client(t).post_json("charts/intraday", {"securityId": "13"})
+        assert t.calls[0]["method"] == "POST"
+        assert t.calls[0]["body"] == b'{"securityId": "13"}'
+
+    def test_get_json_meters_issue_and_warns_on_breach(self) -> None:
+        # The 5 r/s issue gauge + ``rate.breach`` WARNING apply to GET identically
+        # (DEC-DHAN-RATE-REALTIME-GUARANTEE-001): 6 GETs inside one second breach.
+        t = _RecordingTransport(200, b'{"accessToken": "n", "expiryTime": "t"}')
+        client = DhanClient(
+            access_token="jwt-abc",
+            client_id="100000001",
+            transport=t,  # type: ignore[arg-type]
+            clock=_StepClock(0.01),  # 6 issues land well within 1.0s
+            max_attempts=1,
+            sleep=_noop_sleep,
+        )
+        with capture_logs() as logs:
+            for _ in range(DATA_RATE_LIMIT_RPS + 1):  # 6 GETs
+                client.get_json("RenewToken")
+        breaches = [e for e in logs if e["event"] == "rate.breach"]
+        assert breaches and breaches[-1]["rps_1s"] > DATA_RATE_LIMIT_RPS
+        assert client.meter.snapshot()["rps_1s_max"] > DATA_RATE_LIMIT_RPS
+
+    def test_get_timeout_translated(self) -> None:
+        def _boom(*_a: object, **_k: object) -> tuple[int, bytes]:
+            raise TimeoutError("slow")
+
+        with pytest.raises(DhanTimeoutError, match="timeout GETing"):
+            _client(_boom).get_json("RenewToken")
+
+
 class _StepClock:
     """Deterministic monotonic clock advancing a fixed step each call.
 
@@ -286,7 +355,7 @@ class TestPostJsonInstrumentation:
     def test_rate_breach_warning_when_issue_rate_exceeds_cap(self) -> None:
         # Real-time ASSURANCE (DEC-DHAN-RATE-REALTIME-GUARANTEE-001): a fine clock
         # keeps 6 successful POSTs inside one second → the trailing-1s issue rate
-        # crosses the 5 r/s cap, so `_post_once` emits the `rate.breach` WARNING.
+        # crosses the 5 r/s cap, so `_send_once` emits the `rate.breach` WARNING.
         t = _RecordingTransport(200, b"{}")
         client = DhanClient(
             access_token="jwt-abc",
@@ -322,7 +391,13 @@ class _ScriptedTransport:
         self.calls = 0
 
     def __call__(
-        self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+        self,
+        url: str,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+        method: str = "POST",
     ) -> tuple[int, bytes]:
         outcome = self._outcomes[min(self.calls, len(self._outcomes) - 1)]
         self.calls += 1
@@ -462,3 +537,27 @@ class TestFastRetry:
         client = _retry_client(t, max_attempts=2, retry_backoff_s=10.0, sleep=sleeper)
         client.post_json("x", {})
         assert sleeper.waits == pytest.approx([_MAX_BACKOFF_S])  # min(10.0, 5.0)
+
+    def test_get_json_is_fast_retried_and_paced_like_post(self) -> None:
+        # A GET stall is fast-retried (bounded) and PACED between retries exactly
+        # like a POST — pacing + backoff + bounded budget all apply to the GET path
+        # (DEC-DHAN-RENEWTOKEN-GET-001 / DEC-DHAN-RATE-REALTIME-GUARANTEE-001).
+        paces: list[str] = []
+        sleeper = _RecordingSleep()
+        body = b'{"accessToken": "n", "expiryTime": "t"}'
+        t = _ScriptedTransport([TimeoutError("slow"), TimeoutError("slow"), (200, body)])
+        client = DhanClient(
+            access_token="jwt-abc",
+            client_id="100000001",
+            transport=t,  # type: ignore[arg-type]
+            base_url="https://api.dhan.co/v2/",
+            clock=_StepClock(0.1),
+            max_attempts=3,
+            retry_backoff_s=0.05,
+            sleep=sleeper,
+            pace=lambda: paces.append("pace"),
+        )
+        assert client.get_json("RenewToken") == {"accessToken": "n", "expiryTime": "t"}
+        assert t.calls == 3  # 1 initial + 2 in-place retries (bounded)
+        assert sleeper.waits == pytest.approx([0.05, 0.10])  # exponential backoff
+        assert paces == ["pace", "pace"]  # paced before EACH retry, just like POST

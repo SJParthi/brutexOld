@@ -42,7 +42,13 @@ class _Transport:
         self.payload = payload
 
     def __call__(
-        self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+        self,
+        url: str,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+        method: str = "POST",
     ) -> tuple[int, bytes]:
         return self.status, json.dumps(self.payload).encode()
 
@@ -414,7 +420,13 @@ class _SeqTransport:
         self.calls = 0
 
     def __call__(
-        self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+        self,
+        url: str,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+        method: str = "POST",
     ) -> tuple[int, bytes]:
         status = self.statuses[min(self.calls, len(self.statuses) - 1)]
         self.calls += 1

@@ -35,7 +35,13 @@ class _Transport:
         self.calls: list[dict[str, object]] = []
 
     def __call__(
-        self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+        self,
+        url: str,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+        method: str = "POST",
     ) -> tuple[int, bytes]:
         self.calls.append({"url": url, "body": json.loads(body)})
         return 200, json.dumps(self.payload).encode()

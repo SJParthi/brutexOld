@@ -149,7 +149,12 @@ def test_with_paced_client_injects_pace_into_live_dhan_client() -> None:
     from brutex.adapters.dhan.client import DhanClient
 
     def _transport(
-        url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+        url: str,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+        method: str = "POST",
     ) -> tuple[int, bytes]:
         return 200, b"{}"
 

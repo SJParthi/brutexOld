@@ -85,7 +85,15 @@ def resolve_dhan_credentials(env: Mapping[str, str] | None = None) -> DhanCreden
 
 
 def renew_token(client: DhanClient, *, pace: Callable[[], None] | None = None) -> TokenInfo:
-    """Refresh the active (web-generated) token via ``/v2/RenewToken`` (+24h).
+    """Refresh the active (web-generated) token via ``GET /v2/RenewToken`` (+24h).
+
+    ``RenewToken`` is an **HTTP GET** — headers-only (``access-token`` +
+    ``dhanClientId``), NO request body — exactly as the official DhanHQ SDK
+    calls it (``dhan-oss/DhanHQ-py`` ``src/dhanhq/auth.py``:
+    ``requests.get(url, headers=headers)``). Sending it as a POST with a JSON
+    body makes real Dhan reject it with ``HTTP 400 DH-905`` "Missing required
+    fields, bad values for parameters" (DEC-DHAN-RENEWTOKEN-GET-001), which is
+    why this goes through :meth:`DhanClient.get_json`, not ``post_json``.
 
     Parameters
     ----------
@@ -115,7 +123,7 @@ def renew_token(client: DhanClient, *, pace: Callable[[], None] | None = None) -
     # client's own no-op default) BEFORE the call — the client's fast-retry path
     # gates each subsequent attempt itself (DEC-DHAN-RATE-RESIDUAL-HARDEN-001).
     (pace or client.pace)()
-    payload = client.post_json(ENDPOINT_RENEW_TOKEN, {})
+    payload = client.get_json(ENDPOINT_RENEW_TOKEN)
     token = payload.get("accessToken")
     expiry = payload.get("expiryTime")
     if not isinstance(token, str) or not isinstance(expiry, str):

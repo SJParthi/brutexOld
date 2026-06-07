@@ -349,7 +349,7 @@ bruteX/
 | Rate limit — Data APIs | **5 r/s, 100,000/day** (single Data bucket) | `dhan/constants.py:86-89`; `dhan-ref/01...:22-26` |
 | Adapter effective cap | **Adaptive [3..5] r/s** (token bucket, step-down on 429) | `dhan/rate_control.py:1-153` + this file §2 rule 6 |
 | Data-API bucket isolation | **UNVERIFIED** — no explicit sharing rule in docs; treat 5 r/s as binding | `dhan-ref/01...:49-57` |
-| Auth — default approach | **Manual web-generated token + `RenewToken`** (operator 2026-05-31); header `access-token` (JWT, 24h) + `dhanClientId` | `dhan/auth.py`; `dhan/constants.py:53,56`; `dhan-ref/02...:19-35,67-72` |
+| Auth — default approach | **Manual web-generated token + `RenewToken`** (operator 2026-05-31); header `access-token` (JWT, 24h) + `dhanClientId`. `RenewToken` is an **HTTP GET — headers-only, NO body** (DEC-DHAN-RENEWTOKEN-GET-001; source: official SDK `dhan-oss/DhanHQ-py` `src/dhanhq/auth.py` `requests.get(url, headers=headers)`) — a POST+body is rejected `HTTP 400 DH-905` | `dhan/auth.py`; `dhan/constants.py:53,56`; `dhan-ref/02...:19-35,67-72` |
 | Auth — TOTP alternative | `POST https://auth.dhan.co/app/generateAccessToken?dhanClientId=&pin=&totp=` (unattended runs, meets §11) | `dhan/constants.py:27`; `dhan-ref/02...:44-82` |
 | Instrument master URL — compact | `https://images.dhan.co/api-data/api-scrip-master.csv` | `dhan/constants.py:44`; `dhan-ref/09...:10` |
 | Instrument master URL — detailed | `https://images.dhan.co/api-data/api-scrip-master-detailed.csv` (**required for F&O**) | `dhan/constants.py:47-48`; `dhan-ref/09...:11` |
