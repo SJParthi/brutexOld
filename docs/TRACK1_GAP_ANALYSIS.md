@@ -20,28 +20,33 @@
 | **Overfitting guards** | **~95%** | DSR · CPCV · SPA · PBO · Romano-Wolf · WFO · Lockbox · Monte-Carlo all implemented |
 | **Tests / hardening** | **~71% CI-enforced** | 15/21 STANDARDS rows enforced, all 7 test types CI-gated, 121 modules at strict 100% line+branch |
 | **Automation / observability** | **~85%** | auto-resume + watchdog + BLAKE3 audit + dashboard + Release-Please + auto-merge live |
-| **Auth (zero-touch)** | **~70%** | RenewToken-GET + 12h keepalive done; **TOTP auto-mint missing** = the real zero-clicks gap |
+| **Auth** | **✅ COMPLETE for the chosen path** | manual web-token + RenewToken-GET (#472) + 12h keepalive (#468). **TOTP auto-mint is explicitly OUT OF SCOPE** per operator decision 2026-06-07 — not a gap |
 | **Data — spot** | **~90%** | 1m+1d ingest, incremental/idempotent re-pull, resampler, 2dp lake all done |
 | **Data — options** | **~25%** | endpoint + parse skeleton only; **no strike-selector, materialization, or executor** |
 
-**Bottom line (no illusion):** the **signal-research engine is essentially done and honest** — it can discover, validate against 9 statistical overfitting filters, and rank winners. The three real frontiers are: **(1)** a smart optimizer so the search learns instead of blindly enumerating, **(2)** true zero-touch auth (TOTP), and **(3)** the Options Track for execution realism.
+**Bottom line (no illusion):** the **signal-research engine is essentially done and honest** — it can discover, validate against 9 statistical overfitting filters, and rank winners. With **TOTP de-scoped by the operator**, the two real frontiers are: **(1)** auto-wiring the 9-filter cascade so winners are filtered automatically, and **(2)** the Options Track for execution realism — plus a smarter optimizer for scale.
+
+> **Auth note (operator decision 2026-06-07):** TOTP `generateAccessToken` is **NOT pursued**. The accepted auth path is the manual web-generated token + RenewToken-GET keepalive (CLAUDE.md §6 default, operator 2026-05-31). This means auth is "automated while the token is active; one manual paste on full expiry" — which is the **intended, accepted** operating model, not a gap. TOTP is therefore removed from the ranked list below.
 
 ---
 
 ## 2. TOP MISSING FUNCTIONALITIES (ranked, with evidence)
 
-| # | Missing capability | Domain | Severity | Evidence (file:line) |
-|---|--------------------|--------|----------|----------------------|
-| 1 | **Stage-2.5 adaptive optimizer (BIPOP-CMA-ES / Bayesian)** — learns from trial failures to *guide* the next parameter proposal instead of static grid enumeration | Engine | 🔴 Critical | no CMA-ES/Bayesian kernel exists; grid axes accepted in `sweep_orchestrator.py` but no adaptive proposer |
-| 2 | **TOTP `generateAccessToken` auto-mint** — the only path that survives token expiry / app restart with zero clicks (§11) | Auth | 🔴 Critical | URL constant `dhan/constants.py:27` exists but is **never called**; `auth.py:6-15` states the gap |
-| 3 | **Options Track** — ATM±N strike selector → materialization → execution-realism PnL (translate winning signals to options) | Data | 🔴 Critical | `option_ingest.py` is data-only skeleton; no selector/executor; no options TF resampler |
-| 4 | **Auto-wire the Stage-4 cascade into the main sweep** — all 9 filters exist but `run_stage4_cascade()` is called manually, not on top-K finalists automatically | Engine | 🟡 High (low effort) | `metrics/cascade.py` done; not invoked by `sweep_orchestrator` |
-| 5 | **Telegram alerts wired to sweep events** — infra built, not connected to watchdog-hung / rate-breach / renew-fail | Observability | 🟡 High | `notifications/telegram.py` exists; `sweep_supervisor.py` notes "future" |
-| 6 | **Runtime look-ahead enforcement in the sweep** — `ReplayFeed.ensure_no_lookahead()` exists + P-06 partly live, but the sweep path relies on *structural* causality, no mandated runtime barrier | Engine | 🟡 Medium | `feed/replay.py:184-208` method exists; no call site in main sweep |
-| 7 | **14 of 24 property invariants + absolute ≥50 M/s throughput gate** | Hardening | 🟡 Medium | `tests/property/test_invariants_catalog.py` (10 live / 14 ROADMAP); M4-Pro runner stub `bench-m4pro.yml` |
-| 8 | **8 orchestrator modules to strict-100% per-module gate; dashboard per-module gate** | Hardening | 🟡 Medium | PyO3 ABI3 single-init blocks per-module gate (covered 100% via global `--cov`) |
-| 9 | **Keepalive prod start-wiring + watchdog sub-tuple detection + 120m/180m/240m TF persistence** | Mixed | 🟢 Low | keepalive `start()` call site UNVERIFIED; watchdog inter-tuple only; 8/19 TFs persisted |
-| 10 | **Post-persistence DSR re-gating · synthetic-data corruption tests · info-leak static analyzer** | Engine/Hardening | 🟢 Low | documented design limits, not bugs |
+> **TOTP de-scoped (operator 2026-06-07)** — removed from this ranked list. The list below is **only what is actually needed**.
+
+| # | Needed capability | Domain | Severity | Evidence (file:line) |
+|---|-------------------|--------|----------|----------------------|
+| 1 | **Auto-wire the Stage-4 cascade into the main sweep** — the 9 overfitting filters EXIST but `run_stage4_cascade()` is called manually; wire it so every sweep's top-K winners are auto-filtered. Highest value-per-effort | Engine | 🔴 Critical (quick win) | `metrics/cascade.py` done; not invoked by `sweep_orchestrator` |
+| 2 | **Options Track** — ATM±N strike selector → materialization → execution-realism PnL (translate winning spot signals into options) | Data | 🔴 Critical | `option_ingest.py` is data-only skeleton; no selector/executor; no options TF resampler |
+| 3 | **Stage-2.5 adaptive optimizer (BIPOP-CMA-ES / Bayesian)** — learns from trial failures to *guide* the next parameter proposal instead of static grid enumeration; makes billions-scale search smart | Engine | 🔴 High | no CMA-ES/Bayesian kernel exists; grid axes accepted in `sweep_orchestrator.py` but no adaptive proposer |
+| 4 | **Telegram alerts wired to sweep events** — infra built, not connected to watchdog-hung / rate-breach / renew-fail (true zero-monitoring) | Observability | 🟡 High | `notifications/telegram.py` exists; `sweep_supervisor.py` notes "future" |
+| 5 | **Runtime look-ahead enforcement in the sweep** — `ReplayFeed.ensure_no_lookahead()` exists + P-06 partly live, but the sweep relies on *structural* causality, no mandated runtime barrier | Engine | 🟡 Medium | `feed/replay.py:184-208` method exists; no call site in main sweep |
+| 6 | **14 of 24 property invariants + absolute ≥50 M/s throughput gate** | Hardening | 🟡 Medium | `tests/property/test_invariants_catalog.py` (10 live / 14 ROADMAP); M4-Pro runner stub `bench-m4pro.yml` |
+| 7 | **8 orchestrator modules to strict-100% per-module gate; dashboard per-module gate** | Hardening | 🟡 Medium | PyO3 ABI3 single-init blocks per-module gate (covered 100% via global `--cov`) |
+| 8 | **Keepalive prod start-wiring + watchdog sub-tuple detection + 120m/180m/240m TF persistence** | Mixed | 🟢 Low | keepalive `start()` call site UNVERIFIED; watchdog inter-tuple only; 8/19 TFs persisted |
+| 9 | **Post-persistence DSR re-gating · synthetic-data corruption tests · info-leak static analyzer** | Engine/Hardening | 🟢 Low | documented design limits, not bugs |
+
+> **Explicitly OUT OF SCOPE (not needed):** TOTP `generateAccessToken` auto-mint (operator 2026-06-07) — the manual-token + RenewToken-keepalive path is the accepted auth model.
 
 ---
 
@@ -93,10 +98,9 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 
 | Next PR | Plain English — what it unlocks | Severity |
 |---------|--------------------------------|----------|
-| **Auto-wire the cascade** | The 9 overfitting filters run **automatically** on every sweep's winners (today it's a manual call) — small refactor, huge value | 🟡 quick win |
-| **TOTP zero-touch auth** | Token mints itself from PIN+TOTP — runs for **days/weeks unattended**, survives restarts (true "zero clicks/day") | 🔴 high |
-| **Stage-2.5 smart optimizer** | The search **learns** where good strategies live (Bayesian/CMA-ES) instead of blind grid — same answers, far less compute | 🔴 high |
-| **Options Track** | Translates winning spot signals into **real ATM±N options trades** with costs/slippage/IV — execution realism | 🔴 high |
+| **#1 Auto-wire the cascade** | The 9 overfitting filters run **automatically** on every sweep's winners (today it's a manual call) — small refactor, huge value | 🔴 quick win |
+| **#2 Options Track** | Translates winning spot signals into **real ATM±N options trades** with costs/slippage/IV — execution realism | 🔴 high |
+| **#3 Stage-2.5 smart optimizer** | The search **learns** where good strategies live (Bayesian/CMA-ES) instead of blind grid — same answers, far less compute | 🔴 high |
 | **Telegram alerts wired** | You get a phone ping on a stall, rate-breach, or auth failure — true zero-monitoring | 🟡 medium |
 | **Runtime look-ahead barrier in sweep** | A hard runtime guard (not just structural) that the engine can never peek at future bars | 🟡 medium |
 | **Remaining 14 property invariants + ≥50 M/s absolute gate** | Closes the verification-pyramid + the absolute-throughput canary | 🟡 medium |
