@@ -1,0 +1,1008 @@
+//! Resident Stage-2 trade-simulation kernel — the hot trade-walk in Rust.
+//!
+//! DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #561). The Rust port of the Python
+//! `brutex.engine.trade_sim.TradeSimWalker` state machine, fused with the per-mask
+//! entry-signal projection, over a **resident** bar window. It is the next hop
+//! after [`crate::python::ResidentBars`] (which holds the per-bar u64 condition
+//! bitset for the Stage-2 SUPERSET count): this kernel additionally holds the OHLC
+//! (int64 paisa) + the precomputed 15:20-forced-exit flags, so a whole grid of
+//! strategy masks is simulated WITHOUT re-marshalling the bar window per combo.
+//!
+//! ## Why a Rust port
+//!
+//! `TradeSimWalker.push` is O(1) per bar, but the per-combo sweep runs it ~33
+//! billion times; the interpreter overhead per bar dominates the measured ~43-91
+//! combos/s end-to-end (DEC-SWEEP-RESIDENT-KERNEL-001 honest envelope). Moving the
+//! per-bar state machine into a branch-predictable Rust loop over resident
+//! `Vec<i64>` price columns removes that interpreter tax. The bars cross the FFI
+//! boundary ONCE (at construction); thereafter only the (small) mask list crosses
+//! per `simulate_masks` call.
+//!
+//! ## Bit-exactness (Golden Rule #4)
+//!
+//! The price→paisa conversion (`_price_to_paisa`, `ROUND_HALF_UP`) and the
+//! timeframe-aware 15:20-IST forced-exit detection (`is_forced_exit_bar`) stay in
+//! Python — the single source of truth (CLAUDE.md §11 COMMON) — and their
+//! pre-computed results (`open/high/low/close` paisa + `is_forced` flags) are
+//! handed to this kernel. The kernel therefore depends on NEITHER the Decimal
+//! rounding rule NOR the IST timezone math (the two functions a port would most
+//! easily get wrong); it reproduces only the Python state machine's branch order,
+//! which it does EXACTLY. For the same `(bars, mask, direction, sl, tp, policy)`
+//! it emits byte-identical trades to `simulate_trades(...)`; a golden cross-check
+//! asserts this field-by-field over hypothesis-generated inputs.
+//!
+//! ## Exit precedence (the traps, from the hostile port review)
+//!
+//! Per managed bar the order is **pending-next-open → forced-15:20 → SL/TP →
+//! Mode-B signal → still-open**. A pending next-open exit fills BEFORE forced is
+//! even checked (so "forced overrides everything" is true only relative to
+//! SL/TP/signal, NOT to an already-pending exit). The three exit kinds fold
+//! excursion differently: a normal bar folds the full `(high, low)`; a
+//! pending/forced exit folds only `(open, open)`; the end-of-data close folds
+//! nothing. `finish()` silently closes a still-pending exit at the last bar's
+//! CLOSE (not the would-be next open). All reproduced verbatim below.
+//!
+//! ## Complexity (honest envelope — NOT O(1) total)
+//!
+//! * Construction is `O(N_bars)` — the one-time copy of the 5 price columns +
+//!   flags + bar_bits, paid ONCE.
+//! * [`ResidentSweepSim::simulate_masks`] is `O(N_masks · N_bars)` compute (each
+//!   mask walks the whole window once) + `O(Σ trades)` output. The per-bar work is
+//!   O(1); the per-combo work is O(N_bars); the whole sweep is inherently
+//!   O(N_masks · N_bars) — claiming O(1) total is a physical impossibility and is
+//!   FORBIDDEN (Golden Rule #10).
+
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use rayon::prelude::*;
+
+/// How a stop-loss / take-profit trigger is priced once a bar touches it.
+/// Mirrors `brutex.engine.trade_sim.LevelFill`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LevelFill {
+    /// Fill exactly at the trigger (SL / TP) price — the conservative default.
+    AtLevel,
+    /// Fill at the NEXT bar's OPEN. Falls back to the last bar's CLOSE at end of
+    /// data (no next bar) via `finish`.
+    NextOpen,
+}
+
+/// Which leg fills first when ONE bar's range spans BOTH the stop and target.
+/// Mirrors `brutex.engine.trade_sim.SameBarTie`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SameBarTie {
+    /// Pessimistic — assume the stop filled first (worst case). The default.
+    SlFirst,
+    /// Optimistic — assume the target filled first.
+    TpFirst,
+}
+
+/// The configurable spot-fill conventions (mirrors `FillPolicy`).
+#[derive(Clone, Copy, Debug)]
+struct FillPolicy {
+    stop_loss: LevelFill,
+    take_profit: LevelFill,
+    same_bar: SameBarTie,
+}
+
+/// One emitted round-trip trade. Field order matches the Python `ClosedTrade`
+/// numeric payload; `entry_idx` / `exit_idx` are bar indices the Python wrapper
+/// maps to `entry_ts` / `exit_ts` via the bar timestamps. `direction` is a
+/// per-batch constant (not stored per trade).
+///
+/// `(pnl_paisa, mfe_paisa, mae_paisa, holding_bars, entry_idx, exit_idx)`.
+pub type TradeRecord = (i64, i64, i64, u64, u64, u64);
+
+/// Mutable per-trade state while a position is open (int64 paisa). Mirrors the
+/// Python `_OpenPosition`; `last_bar` is replaced by `last_idx` since the kernel
+/// holds the resident price columns and reads `close[last_idx]` directly.
+#[derive(Clone, Copy)]
+struct OpenPosition {
+    entry_idx: usize,
+    entry_price_paisa: i64,
+    sl_level_paisa: Option<i64>,
+    tp_level_paisa: Option<i64>,
+    mfe_paisa: i64,
+    mae_paisa: i64,
+    last_idx: usize,
+}
+
+/// Below this many `mask · bar` ops, run the batch SERIALLY. Mirrors the supermask
+/// kernel's `PARALLEL_WORK_THRESHOLD` (DEC-RUST-RAYON-SUPERMASK-001) so the
+/// small-N hot path stays serial (O(1) canary protection) and only genuinely
+/// large Stage-2 batches cross into the rayon-parallel arm.
+const PARALLEL_WORK_THRESHOLD: u64 = 1 << 20;
+
+/// Pure-Rust faithful port of `TradeSimWalker` — a forward-only per-bar state
+/// machine. No look-ahead: at bar `i` it reads only `open/high/low/close[i]` and
+/// `is_forced[i]` (plus the entry signal derived from the resident `bar_bits[i]`).
+struct Walker {
+    is_buy: bool,
+    sl_paisa: Option<i64>,
+    tp_paisa: Option<i64>,
+    policy: FillPolicy,
+    position: Option<OpenPosition>,
+    pending_entry: bool,
+    /// True iff a next-open exit (SL/TP NEXT_OPEN, or Mode-B signal) is scheduled.
+    /// The Python walker stores the reason too, but the emitted trade carries no
+    /// reason, so a bool is sufficient + bit-identical.
+    pending_exit: bool,
+}
+
+impl Walker {
+    fn new(is_buy: bool, sl_paisa: Option<i64>, tp_paisa: Option<i64>, policy: FillPolicy) -> Self {
+        Self {
+            is_buy,
+            sl_paisa,
+            tp_paisa,
+            policy,
+            position: None,
+            pending_entry: false,
+            pending_exit: false,
+        }
+    }
+
+    /// (sl_level, tp_level) in paisa for the configured direction — mirrors
+    /// `_levels`. BUY: stop below / target above; SELL: stop above / target below.
+    fn levels(&self, entry_price: i64) -> (Option<i64>, Option<i64>) {
+        if self.is_buy {
+            (
+                self.sl_paisa.map(|d| entry_price - d),
+                self.tp_paisa.map(|d| entry_price + d),
+            )
+        } else {
+            (
+                self.sl_paisa.map(|d| entry_price + d),
+                self.tp_paisa.map(|d| entry_price - d),
+            )
+        }
+    }
+
+    /// Open a position at `open[idx]` (the next-bar-open entry fill). Mirrors
+    /// `_open_position`. No excursion update at open — the entry bar's high/low is
+    /// folded by the same-bar `manage_position` call (step 3).
+    fn open_position(&mut self, open_paisa: i64, idx: usize) {
+        let (sl_level, tp_level) = self.levels(open_paisa);
+        self.position = Some(OpenPosition {
+            entry_idx: idx,
+            entry_price_paisa: open_paisa,
+            sl_level_paisa: sl_level,
+            tp_level_paisa: tp_level,
+            mfe_paisa: 0,
+            mae_paisa: 0,
+            last_idx: idx,
+        });
+    }
+
+    /// Fold a `(high, low)` pair into the running MFE/MAE — mirrors
+    /// `_update_excursion`. Both stay `>= 0` (max-accumulated from the 0 floor).
+    fn update_excursion(pos: &mut OpenPosition, is_buy: bool, high_paisa: i64, low_paisa: i64) {
+        let (favourable, adverse) = if is_buy {
+            (
+                high_paisa - pos.entry_price_paisa,
+                pos.entry_price_paisa - low_paisa,
+            )
+        } else {
+            (
+                pos.entry_price_paisa - low_paisa,
+                high_paisa - pos.entry_price_paisa,
+            )
+        };
+        if favourable > pos.mfe_paisa {
+            pos.mfe_paisa = favourable;
+        }
+        if adverse > pos.mae_paisa {
+            pos.mae_paisa = adverse;
+        }
+    }
+
+    /// Decide which of SL/TP a bar's `[low, high]` touched (same-bar tie applied)
+    /// — mirrors `_resolve_level_hit`. Returns `(is_stop, level_paisa)` or `None`.
+    /// Operators are inclusive (touching the level exactly is a hit).
+    fn resolve_level_hit(
+        &self,
+        pos: &OpenPosition,
+        high_paisa: i64,
+        low_paisa: i64,
+    ) -> Option<(bool, i64)> {
+        let buy = self.is_buy;
+        let stop: Option<(bool, i64)> = pos.sl_level_paisa.and_then(|sl| {
+            let hit = if buy {
+                low_paisa <= sl
+            } else {
+                high_paisa >= sl
+            };
+            if hit { Some((true, sl)) } else { None }
+        });
+        let target: Option<(bool, i64)> = pos.tp_level_paisa.and_then(|tp| {
+            let hit = if buy {
+                high_paisa >= tp
+            } else {
+                low_paisa <= tp
+            };
+            if hit { Some((false, tp)) } else { None }
+        });
+        match (stop, target) {
+            (Some(s), Some(t)) => Some(if self.policy.same_bar == SameBarTie::SlFirst {
+                s
+            } else {
+                t
+            }),
+            (Some(s), None) => Some(s),
+            (None, t) => t,
+        }
+    }
+
+    /// Build the trade record + flatten the walker — mirrors `_close`.
+    fn close(&mut self, pos: OpenPosition, exit_price_paisa: i64, exit_idx: usize) -> TradeRecord {
+        let pnl = if self.is_buy {
+            exit_price_paisa - pos.entry_price_paisa
+        } else {
+            pos.entry_price_paisa - exit_price_paisa
+        };
+        self.position = None;
+        let holding = (exit_idx - pos.entry_idx + 1) as u64;
+        (
+            pnl,
+            pos.mfe_paisa,
+            pos.mae_paisa,
+            holding,
+            pos.entry_idx as u64,
+            exit_idx as u64,
+        )
+    }
+
+    /// Process one in-position bar — mirrors `_manage_position`. `pos` is taken by
+    /// value (the caller `take()`s it from `self.position`); still-open branches
+    /// write it back, closing branches consume it. Precedence is EXACTLY the
+    /// Python order.
+    fn manage_position(
+        &mut self,
+        mut pos: OpenPosition,
+        open_paisa: i64,
+        high_paisa: i64,
+        low_paisa: i64,
+        idx: usize,
+        forced: bool,
+        exit_signal: bool,
+    ) -> Option<TradeRecord> {
+        pos.last_idx = idx;
+
+        // (1) A next-open exit scheduled on a prior bar fills at THIS bar's open —
+        // BEFORE forced is checked (pending beats forced).
+        if self.pending_exit {
+            self.pending_exit = false;
+            Self::update_excursion(&mut pos, self.is_buy, open_paisa, open_paisa);
+            return Some(self.close(pos, open_paisa, idx));
+        }
+
+        // (2) Forced 15:20 IST exit overrides SL/TP/signal — fill at the open.
+        if forced {
+            Self::update_excursion(&mut pos, self.is_buy, open_paisa, open_paisa);
+            return Some(self.close(pos, open_paisa, idx));
+        }
+
+        // (3) Full-range in-position bar: fold its high/low into MFE/MAE.
+        Self::update_excursion(&mut pos, self.is_buy, high_paisa, low_paisa);
+
+        // (4) Stop-loss / take-profit (per-leg fill policy).
+        if let Some((is_stop, level_paisa)) = self.resolve_level_hit(&pos, high_paisa, low_paisa) {
+            let fill = if is_stop {
+                self.policy.stop_loss
+            } else {
+                self.policy.take_profit
+            };
+            if fill == LevelFill::AtLevel {
+                return Some(self.close(pos, level_paisa, idx));
+            }
+            // NEXT_OPEN — fill on the next bar's open.
+            self.position = Some(pos);
+            self.pending_exit = true;
+            return None;
+        }
+
+        // (5) Mode-B signal exit — fill on the next bar's open.
+        if exit_signal {
+            self.position = Some(pos);
+            self.pending_exit = true;
+            return None;
+        }
+
+        // (6) Still open — persist the mutated excursion + last_idx.
+        self.position = Some(pos);
+        None
+    }
+
+    /// Advance one bar — mirrors `push`. Returns a trade iff a position closed.
+    fn push(
+        &mut self,
+        open_paisa: i64,
+        high_paisa: i64,
+        low_paisa: i64,
+        idx: usize,
+        forced_raw: bool,
+        entry_signal: bool,
+        exit_signal: bool,
+    ) -> Option<TradeRecord> {
+        // forced is only consulted when opening a pending entry or managing an
+        // open position (Python skips it on a flat, no-pending bar).
+        let need_forced = self.position.is_some() || self.pending_entry;
+        let forced = need_forced && forced_raw;
+
+        // (A) Open a pending entry at THIS bar's open (cannot open at/after 15:20;
+        // the pending flag is cleared UNCONDITIONALLY — an entry landing on a
+        // forced bar is dropped).
+        if self.position.is_none() && self.pending_entry {
+            self.pending_entry = false;
+            if !forced {
+                self.open_position(open_paisa, idx);
+            }
+        }
+
+        // (B) Manage an open position on this bar (including one just opened in A).
+        let mut closed: Option<TradeRecord> = None;
+        if let Some(pos) = self.position.take() {
+            closed = self.manage_position(
+                pos,
+                open_paisa,
+                high_paisa,
+                low_paisa,
+                idx,
+                forced,
+                exit_signal,
+            );
+        }
+
+        // (C) While flat (and NOT on a bar a trade just closed — the exit bar
+        // consumes the entry signal), arm the next entry.
+        if self.position.is_none() && closed.is_none() && entry_signal {
+            self.pending_entry = true;
+        }
+
+        closed
+    }
+
+    /// Close any still-open position at the last managed bar's CLOSE — mirrors
+    /// `finish`. A still-pending next-open exit is IGNORED here (closed at CLOSE,
+    /// not the would-be open); no excursion fold.
+    fn finish(&mut self, close_at: impl Fn(usize) -> i64) -> Option<TradeRecord> {
+        let pos = self.position.take()?;
+        let exit_price = close_at(pos.last_idx);
+        Some(self.close(pos, exit_price, pos.last_idx))
+    }
+}
+
+/// Build the policy from the three boolean flags shared by the batch methods.
+fn policy_from_flags(sl_next_open: bool, tp_next_open: bool, tp_first: bool) -> FillPolicy {
+    FillPolicy {
+        stop_loss: if sl_next_open {
+            LevelFill::NextOpen
+        } else {
+            LevelFill::AtLevel
+        },
+        take_profit: if tp_next_open {
+            LevelFill::NextOpen
+        } else {
+            LevelFill::AtLevel
+        },
+        same_bar: if tp_first {
+            SameBarTie::TpFirst
+        } else {
+            SameBarTie::SlFirst
+        },
+    }
+}
+
+/// Resident bar window for the Stage-2 trade-sim sweep — OHLC paisa + forced flags
+/// + the per-bar condition bitset, held Rust-side so a whole mask grid is
+/// simulated without re-marshalling the window per combo.
+///
+/// See the module docs for the bit-exactness + honest-envelope contracts.
+#[pyclass(frozen, module = "fno_math")]
+pub struct ResidentSweepSim {
+    open: Vec<i64>,
+    high: Vec<i64>,
+    low: Vec<i64>,
+    close: Vec<i64>,
+    is_forced: Vec<bool>,
+    bar_bits: Vec<u64>,
+}
+
+impl ResidentSweepSim {
+    /// Pure constructor returning a plain `Result<_, String>` (NO `PyErr`), so the
+    /// `#[cfg(test)]` suite exercises the length validation WITHOUT pulling Python
+    /// C-API symbols into the no-libpython `cargo test` link (mirrors
+    /// `python::count_supermasks_scoped`). The `#[new]` wrapper maps the error.
+    fn build(
+        open: Vec<i64>,
+        high: Vec<i64>,
+        low: Vec<i64>,
+        close: Vec<i64>,
+        is_forced: Vec<bool>,
+        bar_bits: Vec<u64>,
+    ) -> Result<Self, String> {
+        let n = open.len();
+        if high.len() != n
+            || low.len() != n
+            || close.len() != n
+            || is_forced.len() != n
+            || bar_bits.len() != n
+        {
+            return Err(format!(
+                "ResidentSweepSim: column length mismatch — open={}, high={}, low={}, close={}, \
+                 is_forced={}, bar_bits={} (all must be equal)",
+                n,
+                high.len(),
+                low.len(),
+                close.len(),
+                is_forced.len(),
+                bar_bits.len(),
+            ));
+        }
+        Ok(Self {
+            open,
+            high,
+            low,
+            close,
+            is_forced,
+            bar_bits,
+        })
+    }
+
+    /// Simulate ONE mask over the resident window — the pure-Rust core both the
+    /// PyO3 methods and the `#[cfg(test)]` suite call. Entry signal for bar `i` is
+    /// `(bar_bits[i] & mask) == mask`; there is no Mode-B exit-signal stream on the
+    /// sweep path (it matches `metrics_for_mask`, which passes none).
+    fn simulate_one(
+        &self,
+        mask: u64,
+        is_buy: bool,
+        sl: Option<i64>,
+        tp: Option<i64>,
+        policy: FillPolicy,
+    ) -> Vec<TradeRecord> {
+        let n = self.open.len();
+        let mut walker = Walker::new(is_buy, sl, tp, policy);
+        let mut trades: Vec<TradeRecord> = Vec::new();
+        for i in 0..n {
+            let entry_signal = (self.bar_bits[i] & mask) == mask;
+            if let Some(t) = walker.push(
+                self.open[i],
+                self.high[i],
+                self.low[i],
+                i,
+                self.is_forced[i],
+                entry_signal,
+                false,
+            ) {
+                trades.push(t);
+            }
+        }
+        if let Some(t) = walker.finish(|idx| self.close[idx]) {
+            trades.push(t);
+        }
+        trades
+    }
+}
+
+#[pymethods]
+impl ResidentSweepSim {
+    /// Build the resident buffer. The ONE-TIME `O(N_bars)` Python→Rust copy of the
+    /// 5 price columns + flags + bar_bits is paid here via the `Vec` extracts.
+    /// Unequal column lengths raise a clean `ValueError` (never a panic that would
+    /// SIGABRT under `panic=abort`).
+    #[new]
+    fn new(
+        open: Vec<i64>,
+        high: Vec<i64>,
+        low: Vec<i64>,
+        close: Vec<i64>,
+        is_forced: Vec<bool>,
+        bar_bits: Vec<u64>,
+    ) -> PyResult<Self> {
+        Self::build(open, high, low, close, is_forced, bar_bits).map_err(PyValueError::new_err)
+    }
+
+    /// Number of resident bars (the only exposed view of the buffer).
+    #[getter]
+    fn n_bars(&self) -> usize {
+        self.open.len()
+    }
+
+    /// Simulate a BATCH of masks over the resident window → per-mask trade lists.
+    ///
+    /// `out[j]` is the list of round-trip trades for `masks[j]`, each a tuple
+    /// `(pnl_paisa, mfe_paisa, mae_paisa, holding_bars, entry_idx, exit_idx)`.
+    /// `is_buy` selects long (`true`) / short (`false`); `sl_paisa` / `tp_paisa`
+    /// are the stop / target distances in paisa (`None` disables that leg). The
+    /// three policy flags mirror `FillPolicy`: `sl_next_open` / `tp_next_open` fill
+    /// the SL / TP leg at the next bar's open, and `tp_first` breaks a same-bar
+    /// SL+TP tie in favour of the target (default `false` = pessimistic SL-first).
+    ///
+    /// Multi-core (DEC-RUST-RAYON-SUPERMASK-001 convention): masks are independent
+    /// (each walks the shared read-only window), so above the work threshold the
+    /// batch fans out across rayon's default global pool with an order-preserving
+    /// `par_iter().map().collect()` — `out[j]` always aligns with `masks[j]` and
+    /// each per-mask trade list is bit-identical to the serial walk (pure integer
+    /// arithmetic; Golden Rule #4). Below the threshold it runs serially.
+    #[pyo3(signature = (masks, is_buy, sl_paisa, tp_paisa, sl_next_open=false, tp_next_open=false, tp_first=false))]
+    fn simulate_masks(
+        &self,
+        masks: Vec<u64>,
+        is_buy: bool,
+        sl_paisa: Option<i64>,
+        tp_paisa: Option<i64>,
+        sl_next_open: bool,
+        tp_next_open: bool,
+        tp_first: bool,
+    ) -> Vec<Vec<TradeRecord>> {
+        let policy = policy_from_flags(sl_next_open, tp_next_open, tp_first);
+        let work = (masks.len() as u64).saturating_mul(self.open.len() as u64);
+        if work < PARALLEL_WORK_THRESHOLD {
+            masks
+                .iter()
+                .map(|&m| self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy))
+                .collect()
+        } else {
+            masks
+                .par_iter()
+                .map(|&m| self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy))
+                .collect()
+        }
+    }
+
+    /// Per-mask trade COUNT only — the throughput-bench fast path.
+    ///
+    /// Identical state machine to [`Self::simulate_masks`] but returns only the
+    /// number of round-trip trades per mask (no per-trade allocation), so a
+    /// throughput bench measures the pure mask-eval + trade-walk hot loop without
+    /// the `O(Σ trades)` output marshalling. `out[j]` aligns with `masks[j]`.
+    #[pyo3(signature = (masks, is_buy, sl_paisa, tp_paisa, sl_next_open=false, tp_next_open=false, tp_first=false))]
+    fn count_trades(
+        &self,
+        masks: Vec<u64>,
+        is_buy: bool,
+        sl_paisa: Option<i64>,
+        tp_paisa: Option<i64>,
+        sl_next_open: bool,
+        tp_next_open: bool,
+        tp_first: bool,
+    ) -> Vec<u64> {
+        let policy = policy_from_flags(sl_next_open, tp_next_open, tp_first);
+        let work = (masks.len() as u64).saturating_mul(self.open.len() as u64);
+        let run = |m: u64| {
+            self.simulate_one(m, is_buy, sl_paisa, tp_paisa, policy)
+                .len() as u64
+        };
+        if work < PARALLEL_WORK_THRESHOLD {
+            masks.iter().map(|&m| run(m)).collect()
+        } else {
+            masks.par_iter().map(|&m| run(m)).collect()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy_default() -> FillPolicy {
+        FillPolicy {
+            stop_loss: LevelFill::AtLevel,
+            take_profit: LevelFill::AtLevel,
+            same_bar: SameBarTie::SlFirst,
+        }
+    }
+
+    /// Build a sim with explicit per-column data and no forced bars (test helper).
+    fn sim(
+        open: Vec<i64>,
+        high: Vec<i64>,
+        low: Vec<i64>,
+        close: Vec<i64>,
+        bar_bits: Vec<u64>,
+    ) -> ResidentSweepSim {
+        let n = open.len();
+        ResidentSweepSim::build(open, high, low, close, vec![false; n], bar_bits)
+            .expect("equal-length test data")
+    }
+
+    // ── construction validation (via the pure `build`, no PyErr in tests) ──
+
+    #[test]
+    fn build_rejects_length_mismatch() {
+        assert!(
+            ResidentSweepSim::build(
+                vec![1, 2],
+                vec![1],
+                vec![1, 2],
+                vec![1, 2],
+                vec![false, false],
+                vec![0, 0]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn build_accepts_equal_lengths_and_reports_n_bars() {
+        let r = ResidentSweepSim::build(
+            vec![1, 2],
+            vec![3, 4],
+            vec![0, 1],
+            vec![2, 3],
+            vec![false, false],
+            vec![0, 0],
+        )
+        .expect("equal lengths must build");
+        assert_eq!(r.n_bars(), 2);
+    }
+
+    #[test]
+    fn build_empty_is_ok() {
+        let r = ResidentSweepSim::build(vec![], vec![], vec![], vec![], vec![], vec![])
+            .expect("empty ok");
+        assert_eq!(r.n_bars(), 0);
+    }
+
+    // ── empty / degenerate windows ──
+
+    #[test]
+    fn empty_window_yields_no_trades() {
+        let s = sim(vec![], vec![], vec![], vec![], vec![]);
+        assert_eq!(
+            s.simulate_one(0, true, None, None, policy_default()),
+            Vec::<TradeRecord>::new()
+        );
+    }
+
+    #[test]
+    fn single_bar_never_opens_a_trade() {
+        // Entry arms on bar 0 but there is no NEXT bar to fill the open against,
+        // and finish() ignores pending_entry → zero trades. Mirrors Python.
+        let s = sim(vec![100], vec![110], vec![90], vec![105], vec![0xFF]);
+        assert_eq!(
+            s.simulate_one(0, true, None, None, policy_default()),
+            Vec::<TradeRecord>::new()
+        );
+    }
+
+    #[test]
+    fn zero_firing_mask_yields_no_trades() {
+        let s = sim(
+            vec![100, 101, 102],
+            vec![100, 101, 102],
+            vec![100, 101, 102],
+            vec![100, 101, 102],
+            vec![1, 1, 1],
+        );
+        assert_eq!(
+            s.simulate_one(1u64 << 63, true, None, None, policy_default()),
+            Vec::<TradeRecord>::new()
+        );
+    }
+
+    // ── basic long round-trip: end-of-data close ──
+
+    #[test]
+    fn long_entry_then_end_of_data_close() {
+        let s = sim(
+            vec![50, 100, 120],
+            vec![60, 110, 130],
+            vec![40, 95, 118],
+            vec![55, 105, 130],
+            vec![0, 0, 0],
+        );
+        let out = s.simulate_one(0, true, None, None, policy_default());
+        assert_eq!(out.len(), 1);
+        let (pnl, mfe, mae, holding, entry_idx, exit_idx) = out[0];
+        assert_eq!(pnl, 30); // close[2]=130 - open[1]=100
+        assert_eq!(holding, 2);
+        assert_eq!(entry_idx, 1);
+        assert_eq!(exit_idx, 2);
+        // entry=100. bar1 (110,95): fav=10, adv=5. bar2 (130,118): fav=30, adv=-18.
+        assert_eq!(mfe, 30);
+        assert_eq!(mae, 5);
+    }
+
+    // ── stop-loss / take-profit at level (long) ──
+
+    #[test]
+    fn long_stop_loss_at_level() {
+        let s = sim(
+            vec![50, 100, 95],
+            vec![60, 105, 99],
+            vec![40, 98, 85],
+            vec![55, 100, 95],
+            vec![0, 0, 0],
+        );
+        let out = s.simulate_one(0, true, Some(10), None, policy_default());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, -10); // fill at sl_level 90, pnl 90-100
+        assert_eq!(out[0].5, 2);
+    }
+
+    #[test]
+    fn long_take_profit_at_level() {
+        let s = sim(
+            vec![50, 100, 115],
+            vec![60, 105, 125],
+            vec![40, 98, 113],
+            vec![55, 100, 118],
+            vec![0, 0, 0],
+        );
+        let out = s.simulate_one(0, true, None, Some(20), policy_default());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 20); // fill at tp_level 120
+    }
+
+    // ── same-bar SL+TP tie ──
+
+    #[test]
+    fn same_bar_sl_and_tp_tie_policies() {
+        let s = sim(
+            vec![50, 100, 100],
+            vec![60, 105, 115],
+            vec![40, 98, 85],
+            vec![55, 100, 100],
+            vec![0, 0, 0],
+        );
+        assert_eq!(
+            s.simulate_one(0, true, Some(10), Some(10), policy_default())[0].0,
+            -10
+        );
+        let tp_first = FillPolicy {
+            same_bar: SameBarTie::TpFirst,
+            ..policy_default()
+        };
+        assert_eq!(
+            s.simulate_one(0, true, Some(10), Some(10), tp_first)[0].0,
+            10
+        );
+    }
+
+    // ── short round-trips ──
+
+    #[test]
+    fn short_take_profit_at_level() {
+        let s = sim(
+            vec![50, 100, 85],
+            vec![60, 105, 90],
+            vec![40, 98, 75],
+            vec![55, 100, 82],
+            vec![0, 0, 0],
+        );
+        let out = s.simulate_one(0, false, None, Some(20), policy_default());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 20); // short: entry 100 - tp_level 80
+    }
+
+    #[test]
+    fn short_stop_loss_at_level() {
+        let s = sim(
+            vec![50, 100, 108],
+            vec![60, 105, 115],
+            vec![40, 98, 106],
+            vec![55, 100, 112],
+            vec![0, 0, 0],
+        );
+        let out = s.simulate_one(0, false, Some(10), None, policy_default());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, -10); // short: entry 100 - sl_level 110
+    }
+
+    // ── forced 15:20 exit ──
+
+    #[test]
+    fn forced_exit_overrides_and_fills_at_open() {
+        // Entry open[1]=100; sl=50→50, tp=20→120 do NOT trigger on bar1
+        // (high110<120, low95>50). bar2 is_forced AND tp would trigger
+        // (high130>=120) — but forced overrides → fill at open[2]=125 (≠ the
+        // tp_level 120), proving the forced override. pnl = 125-100 = 25.
+        let s = ResidentSweepSim::build(
+            vec![50, 100, 125],
+            vec![60, 110, 130],
+            vec![40, 95, 123],
+            vec![55, 105, 128],
+            vec![false, false, true],
+            vec![0, 0, 0],
+        )
+        .unwrap();
+        let out = s.simulate_one(0, true, Some(50), Some(20), policy_default());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 25); // forced fill at open[2]=125, NOT the tp_level 120
+        assert_eq!(out[0].5, 2);
+    }
+
+    #[test]
+    fn forced_bar_suppresses_pending_entry() {
+        // mask=1 fires ONLY on bar0 → arms an entry for bar1. bar1 is_forced →
+        // the pending entry is dropped, and bar1 does not fire (bit0 clear) so it
+        // does not re-arm. No trade. (With mask=0 every bar fires, so bar1 would
+        // re-arm and bar2 would open — a different, also-correct path.)
+        let s = ResidentSweepSim::build(
+            vec![50, 100, 120],
+            vec![60, 110, 130],
+            vec![40, 95, 118],
+            vec![55, 105, 125],
+            vec![false, true, false],
+            vec![1, 0, 0],
+        )
+        .unwrap();
+        assert_eq!(
+            s.simulate_one(1, true, None, None, policy_default()),
+            Vec::<TradeRecord>::new()
+        );
+    }
+
+    // ── next-open fills ──
+
+    #[test]
+    fn stop_loss_next_open_fill() {
+        let s = sim(
+            vec![50, 100, 95, 80],
+            vec![60, 105, 99, 82],
+            vec![40, 98, 85, 78],
+            vec![55, 100, 90, 81],
+            vec![0, 0, 0, 0],
+        );
+        let policy = FillPolicy {
+            stop_loss: LevelFill::NextOpen,
+            ..policy_default()
+        };
+        let out = s.simulate_one(0, true, Some(10), None, policy);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, -20); // fill at open[3]=80
+        assert_eq!(out[0].5, 3);
+    }
+
+    #[test]
+    fn next_open_pending_exit_takes_precedence_over_forced() {
+        let s = ResidentSweepSim::build(
+            vec![50, 100, 95, 80],
+            vec![60, 105, 99, 82],
+            vec![40, 98, 85, 78],
+            vec![55, 100, 90, 81],
+            vec![false, false, false, true],
+            vec![0, 0, 0, 0],
+        )
+        .unwrap();
+        let policy = FillPolicy {
+            stop_loss: LevelFill::NextOpen,
+            ..policy_default()
+        };
+        let out = s.simulate_one(0, true, Some(10), None, policy);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, -20); // pending SL fill at open[3]=80, NOT a forced exit
+        assert_eq!(out[0].5, 3);
+    }
+
+    #[test]
+    fn next_open_pending_exit_at_end_of_data_closes_at_last_close() {
+        let s = sim(
+            vec![50, 100, 95],
+            vec![60, 105, 99],
+            vec![40, 98, 85],
+            vec![55, 100, 90],
+            vec![0, 0, 0],
+        );
+        let policy = FillPolicy {
+            stop_loss: LevelFill::NextOpen,
+            ..policy_default()
+        };
+        let out = s.simulate_one(0, true, Some(10), None, policy);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, -10); // finish closes at close[2]=90, NOT the discarded next-open
+        assert_eq!(out[0].5, 2);
+    }
+
+    // ── multiple non-overlapping trades from one mask ──
+
+    #[test]
+    fn multiple_trades_non_overlapping() {
+        let bar_bits = vec![1u64, 0, 0, 1, 0, 0];
+        let s = sim(
+            vec![100, 100, 100, 100, 100, 100],
+            vec![100, 110, 100, 100, 110, 100],
+            vec![100, 100, 100, 100, 100, 100],
+            vec![100, 100, 100, 100, 100, 100],
+            bar_bits,
+        );
+        let out = s.simulate_one(1, true, None, Some(5), policy_default());
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, 5);
+        assert_eq!(out[1].0, 5);
+    }
+
+    // ── batch parity ──
+
+    #[test]
+    fn batch_aligns_with_per_mask() {
+        let s = sim(
+            vec![100, 100, 100, 100],
+            vec![100, 110, 100, 108],
+            vec![100, 92, 100, 100],
+            vec![100, 100, 100, 100],
+            vec![1, 0, 1, 0],
+        );
+        let masks = vec![0u64, 1u64, 1u64 << 63];
+        let batch = s.simulate_masks(masks.clone(), true, Some(8), Some(5), false, false, false);
+        for (j, &m) in masks.iter().enumerate() {
+            assert_eq!(
+                batch[j],
+                s.simulate_one(m, true, Some(8), Some(5), policy_default())
+            );
+        }
+    }
+
+    #[test]
+    fn count_trades_matches_simulate_masks_lengths() {
+        let s = sim(
+            vec![100, 100, 100, 100],
+            vec![100, 110, 100, 108],
+            vec![100, 92, 100, 100],
+            vec![100, 100, 100, 100],
+            vec![1, 0, 1, 0],
+        );
+        let masks = vec![0u64, 1u64, 1u64 << 63];
+        let counts = s.count_trades(masks.clone(), true, Some(8), Some(5), false, false, false);
+        let full = s.simulate_masks(masks, true, Some(8), Some(5), false, false, false);
+        let expected: Vec<u64> = full.iter().map(|t| t.len() as u64).collect();
+        assert_eq!(counts, expected);
+    }
+
+    #[test]
+    fn empty_masks_batch_is_empty() {
+        let s = sim(vec![100], vec![100], vec![100], vec![100], vec![0]);
+        assert_eq!(
+            s.simulate_masks(vec![], true, None, None, false, false, false),
+            Vec::<Vec<TradeRecord>>::new()
+        );
+        assert_eq!(
+            s.count_trades(vec![], true, None, None, false, false, false),
+            Vec::<u64>::new()
+        );
+    }
+
+    // ── parallel arm parity (crosses PARALLEL_WORK_THRESHOLD) ──
+
+    #[test]
+    fn parallel_arm_matches_serial() {
+        let n = 1024usize;
+        let open: Vec<i64> = (0..n as i64).map(|i| 1000 + (i % 7)).collect();
+        let high: Vec<i64> = open.iter().map(|&o| o + 5).collect();
+        let low: Vec<i64> = open.iter().map(|&o| o - 5).collect();
+        let close: Vec<i64> = open.clone();
+        let bar_bits: Vec<u64> = (0..n as u64)
+            .map(|i| (i & 0b111) | (1 << (i % 50)))
+            .collect();
+        let s = sim(open, high, low, close, bar_bits);
+        let masks: Vec<u64> = (0..1100u64).map(|i| (i & 0b1) | (1 << (i % 50))).collect();
+        assert!((masks.len() as u64) * (n as u64) >= PARALLEL_WORK_THRESHOLD);
+        let batch = s.simulate_masks(masks.clone(), true, Some(3), Some(4), false, false, false);
+        let serial: Vec<Vec<TradeRecord>> = masks
+            .iter()
+            .map(|&m| s.simulate_one(m, true, Some(3), Some(4), policy_default()))
+            .collect();
+        assert_eq!(batch, serial);
+    }
+
+    // ── excursion accumulation over still-open bars ──
+
+    #[test]
+    fn excursion_accumulates_over_open_bars() {
+        let s = sim(
+            vec![50, 100, 100, 100],
+            vec![60, 130, 105, 102],
+            vec![40, 95, 70, 99],
+            vec![55, 100, 100, 101],
+            vec![0, 0, 0, 0],
+        );
+        let out = s.simulate_one(0, true, None, None, policy_default());
+        assert_eq!(out.len(), 1);
+        let (_pnl, mfe, mae, _h, _e, _x) = out[0];
+        // bar1 (130,95): fav=30,adv=5. bar2 (105,70): fav=5,adv=30. bar3 (102,99): fav=2,adv=1.
+        assert_eq!(mfe, 30);
+        assert_eq!(mae, 30);
+    }
+}

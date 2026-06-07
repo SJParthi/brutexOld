@@ -61,6 +61,11 @@ pub mod math;
 /// performance-critical Rust functions get registered here.
 pub mod python;
 
+/// DEC-SWEEP-RUST-TRADESIM-001 (#560): resident Stage-2 trade-simulation kernel
+/// — the per-bar SL/TP/forced-exit state machine (Python `TradeSimWalker`) ported
+/// to Rust + fused with the per-mask entry projection over a resident bar window.
+pub mod trade_sim;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -88,6 +93,7 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::count_supermasks_u64s, m)?)?;
     m.add_function(wrap_pyfunction!(python::count_supermasks_u64s_nthreads, m)?)?;
     m.add_class::<python::ResidentBars>()?;
+    m.add_class::<trade_sim::ResidentSweepSim>()?;
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
     Ok(())
 }
