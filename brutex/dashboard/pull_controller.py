@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -544,6 +544,44 @@ def _build_live_bulk_adapter(  # pragma: no cover — thin bulk wrapper
     return _build_live_spot_adapter(lake_root, instruments)
 
 
+def _maybe_renew_adapter_token(
+    adapter: MarketAdapter,
+    pace: Callable[[], None] | None,
+) -> MarketAdapter:
+    """Best-effort proactive ``RenewToken`` at the start of a LIVE spot pull.
+
+    DEC-DHAN-AUTH-FAILFAST-RENEW-001, Piece 2. ``RenewToken`` only refreshes an
+    *active* token (it CANNOT revive a dead one), so this pushes the 24h expiry
+    ``+24h`` PROACTIVELY at pull start — before a long pull crosses the wall.
+    Best-effort + NEVER blocks: :func:`~brutex.adapters.dhan.auth.maybe_renew_token`
+    swallows a refusal (logs one ``auth.renew_failed`` WARNING) and returns
+    ``None``, in which case the pull proceeds on the existing token unchanged (and
+    if THAT token then dies mid-pull, Piece 1's fail-fast guard handles it).
+
+    A no-op (returns *adapter* unchanged) for any non-live path — exactly the
+    same guard style as :func:`_with_paced_client`: a dry-run / injected-factory
+    pull is not a :class:`~brutex.adapters.dhan.adapter.DhanMarketAdapter`, so it
+    is skipped. On a fresh token the adapter's client is rebuilt via
+    :func:`replace` (frozen dataclasses — no shared-state mutation) so the pull
+    uses the refreshed access token. The live-token construction itself is
+    ``# pragma: no cover`` (needs a real token + network, absent in CI); the
+    non-live no-op guard IS covered.
+    """
+    from brutex.adapters.dhan.adapter import DhanMarketAdapter
+
+    if not isinstance(adapter, DhanMarketAdapter):
+        return adapter
+    # Live DhanMarketAdapter — the only path that owns a real DhanClient + token.
+    from brutex.adapters.dhan.auth import maybe_renew_token  # pragma: no cover — live
+
+    token = maybe_renew_token(adapter.client, pace=pace, log=_LOG)  # pragma: no cover — live
+    if token is None:  # pragma: no cover — live
+        return adapter
+    return replace(  # pragma: no cover — live
+        adapter, client=replace(adapter.client, access_token=token.access_token)
+    )
+
+
 #: The "no rate controller" feedback triple (dry-run / injected-factory pulls).
 _NO_RATE_HOOKS: tuple[None, None, None, None] = (None, None, None, None)
 
@@ -821,6 +859,14 @@ def pull_all_spot(
         (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
             _live_rate_runtime(use_live_rate, session_rate)
         )
+        # Proactive RenewToken at the LIVE pull start (DEC-DHAN-AUTH-FAILFAST-
+        # RENEW-001, Piece 2): push the 24h token expiry +24h BEFORE this long
+        # bulk pull crosses the wall. Best-effort — a no-op for dry-run / injected-
+        # factory pulls (not a DhanMarketAdapter), and never blocks/aborts if
+        # RenewToken refuses (the existing token is kept, Piece 1's guard catches a
+        # mid-pull death). Paced through the shared bucket so the physical POST is
+        # ≤ 5 r/s.
+        adapter = _maybe_renew_adapter_token(adapter, pace)
         # Live status (DEC-WINDOW-STATUS-LIVE-001): flush the per-window status
         # sidecar MID-pull (throttled) after each completed pair, so
         # /coverage/windows ticks up live instead of staying 0 until pull end.
@@ -1027,6 +1073,11 @@ def pull_candles(
         (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
             _live_rate_runtime(use_live_rate, session_rate)
         )
+        # Proactive RenewToken at the LIVE pull start (DEC-DHAN-AUTH-FAILFAST-
+        # RENEW-001, Piece 2): push the 24h token expiry +24h before this pull
+        # crosses the wall. Best-effort no-op for dry-run / injected-factory pulls;
+        # never blocks/aborts (Piece 1's guard catches a mid-pull token death).
+        adapter = _maybe_renew_adapter_token(adapter, pace)
         # Live status (DEC-WINDOW-STATUS-LIVE-001): flush mid-pull (throttled) per
         # completed interval so /coverage/windows ticks up live, not only at end.
         status_flush = make_live_status_flush(status_log, lake_root)

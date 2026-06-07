@@ -114,6 +114,48 @@ def is_no_data_error(exc: DhanError) -> bool:
     return any(marker in text for marker in _NO_DATA_MARKERS)
 
 
+#: Dhan markers for a TOKEN-INVALID HTTP-400 (``DH-906`` / "Invalid Token") that
+#: masquerades as a generic bad request. The 24h web token sometimes expires into
+#: a 400 carrying ``DH-906`` rather than a clean 401 — so the "token is dead"
+#: predicate must treat it as an auth failure, not a per-symbol terminal bug
+#: (DEC-DHAN-AUTH-FAILFAST-RENEW-001 / Golden Rule #1).
+_TOKEN_INVALID_MARKERS: tuple[str, ...] = ("DH-906", "Invalid Token")
+
+
+def is_auth_failure(exc: DhanError) -> bool:
+    """True if *exc* means the Dhan access token is dead (expired/invalid).
+
+    The single source of truth for "the token died" detection
+    (DEC-DHAN-AUTH-FAILFAST-RENEW-001). On a real ``make run`` the operator's 24h
+    web token expired mid-pull: from that moment EVERY remaining symbol failed
+    with a 401 (:class:`DhanAuthError`) or a few token-invalid 400s
+    (:class:`DhanBadRequestError` carrying ``DH-906`` / "Invalid Token"). Both are
+    the SAME root cause — a dead token — so the ingest spine trips a one-way
+    fail-fast switch on either, draining the rest of the pull instantly instead
+    of firing ~800 doomed 401 calls one symbol at a time.
+
+    Parameters
+    ----------
+    exc
+        Any :class:`DhanError`.
+
+    Returns
+    -------
+    bool
+        ``True`` iff *exc* is a :class:`DhanAuthError` (401/403) OR a
+        :class:`DhanBadRequestError` whose message carries a token-invalid marker
+        (``DH-906`` / "Invalid Token"). ``False`` for a plain malformed-request
+        400, a 404, a 429, or any other error — those stay per-symbol terminal /
+        retryable as before (:func:`is_retryable` is unchanged).
+    """
+    if isinstance(exc, DhanAuthError):
+        return True
+    if isinstance(exc, DhanBadRequestError):
+        text = str(exc)
+        return any(marker in text for marker in _TOKEN_INVALID_MARKERS)
+    return False
+
+
 def is_retryable(exc: DhanError) -> bool:
     """True if *exc* is transient and the orchestrator should retry it.
 
@@ -137,6 +179,7 @@ __all__ = [
     "DhanTimeoutError",
     "DhanTransportError",
     "from_http_status",
+    "is_auth_failure",
     "is_no_data_error",
     "is_rate_limit",
     "is_retryable",

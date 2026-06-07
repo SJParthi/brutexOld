@@ -7,6 +7,9 @@ a real token + the ``urllib`` transport, both absent in CI
 (DEC-VENDOR-PIVOT-001).
 """
 
+# Whitebox test of the module-private `_maybe_renew_adapter_token` (sanctioned per pyproject.toml).
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -726,3 +729,20 @@ class TestResolvePullSymbols:
         store = {"NIFTY": _index("NIFTY")}
         (only,) = resolve_pull_symbols("NIFTY", store.get)
         assert only.symbol_name == "NIFTY"
+
+
+class TestMaybeRenewAdapterToken:
+    """The proactive-renew wiring helper (DEC-DHAN-AUTH-FAILFAST-RENEW-001, Piece 2).
+
+    The covered seam is the NON-live no-op guard (same style as
+    ``_with_paced_client``): a non-DhanMarketAdapter (dry-run / injected-factory
+    pull) is returned UNCHANGED, never touching the network. The live token
+    construction itself is ``# pragma: no cover`` (needs a real token + network).
+    """
+
+    def test_non_dhan_adapter_returned_unchanged(self) -> None:
+        from brutex.dashboard.pull_controller import _maybe_renew_adapter_token
+
+        adapter = SyntheticDhanAdapter()
+        # Not a DhanMarketAdapter → no-op (no renew attempted, returned as-is).
+        assert _maybe_renew_adapter_token(adapter, pace=None) is adapter

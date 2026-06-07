@@ -1214,6 +1214,11 @@ jobs:
           else
             echo "(brutex.adapters.dhan.auth test file not present yet — gate inactive)"
           fi
+          if compgen -G "tests/unit/test_dhan_auth_guard.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.auth_guard --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_auth_guard.py
+          else
+            echo "(brutex.adapters.dhan.auth_guard test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_instruments.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.instruments --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_instruments.py
           else
