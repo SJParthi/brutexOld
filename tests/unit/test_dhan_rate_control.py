@@ -5,6 +5,7 @@
 (no halt), ignores a non-sustained burst, evicts the window, recovers 3→4→5 on
 a sustained clean window, never exceeds 5, and `pace()` delegates to the bucket.
 """
+# pyright: reportPrivateUsage=none
 
 from __future__ import annotations
 
@@ -319,11 +320,12 @@ def test_eases_in_no_opening_burst() -> None:
     assert slept == [1.0 / CEILING_RPS, 1.0 / CEILING_RPS]
 
 
-def test_stepdown_rebuild_starts_empty_no_free_burst() -> None:
-    # HARD-CAP (DEC-DHAN-RATE-HARD-CAP-001): a 5→4 stepdown REBUILDS the bucket; it
-    # must ALSO start EMPTY so the stepdown can't release a free burst token at the
-    # lower rate. The first paced call after the step waits a full 1/4 s (0 elapsed
-    # since the rebuild) — the physical rate stays strictly ≤ the new rate.
+def test_stepdown_drains_to_empty_no_free_burst() -> None:
+    # HARD-CAP (DEC-DHAN-RATE-HARD-CAP-001): a 5→4 stepdown changes the bucket's
+    # rate IN PLACE (DEC-DHAN-RATE-SINGLE-BUCKET-001) and drains it to empty, so the
+    # stepdown can't release a free burst token at the lower rate. The first paced
+    # call after the step waits a full 1/4 s (0 elapsed since the change) — the
+    # physical rate stays strictly ≤ the new rate.
     clock = _Clock()
     slept: list[float] = []
 
@@ -332,8 +334,38 @@ def test_stepdown_rebuild_starts_empty_no_free_burst() -> None:
         clock.advance(seconds)
 
     ctl = DhanRateController(clock=clock, sleep=_sleep)
-    for _ in range(STEP_DOWN_HITS):  # 3 hits at the same instant → 5→4 (rebuild)
+    for _ in range(STEP_DOWN_HITS):  # 3 hits at the same instant → 5→4 (in place)
         ctl.on_rate_limit()
     assert ctl.current_rps == 4.0
-    ctl.pace()  # rebuilt bucket is empty + 0 elapsed → waits a full 1/4 s
+    ctl.pace()  # drained bucket + 0 elapsed → waits a full 1/4 s
     assert slept == [1.0 / 4.0]
+
+
+def test_steps_preserve_single_bucket_identity() -> None:
+    # DEC-DHAN-RATE-SINGLE-BUCKET-001 — the ROOT-CAUSE regression for the operator's
+    # ``rate.breach rps_1s=11`` opening transient. A per-step bucket REBUILD let
+    # in-flight ``pace`` workers (on the OLD bucket) and new workers (on the NEW
+    # bucket) run two independent token streams that stacked POSTs over the cap.
+    # The fix mutates ONE persistent bucket in place, so its object identity is
+    # STABLE across every 429 stepdown, timeout stepdown AND recovery stepup —
+    # there is therefore only ever a single ≤ current_rps token stream.
+    clock = _Clock()
+    ctl = _controller(clock)
+    original = ctl._bucket
+
+    _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # 5→4 (429 ladder)
+    assert ctl.current_rps == 4.0
+    assert ctl._bucket is original
+
+    _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS)  # 4→3 (timeout ladder)
+    assert ctl.current_rps == 3.0
+    assert ctl._bucket is original
+
+    clock.advance(STEP_UP_WINDOW)
+    ctl.on_success()  # 3→4 recovery stepup
+    assert ctl.current_rps == 4.0
+    assert ctl._bucket is original
+
+    # The single shared bucket now paces at the recovered rate (proof the same
+    # object carries the new rate, not a stale clone).
+    assert ctl._bucket.current_rps() == 4.0
