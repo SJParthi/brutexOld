@@ -545,6 +545,10 @@ class TestPullAllSpot:
         assert report.total_no_data == 2
         assert report.total_completed == 0
         assert report.symbols[0].symbol == "13"
+        # Nothing completed + only no-data → the known-gap verdict (no operator action).
+        assert report.verdict.kind == "known_gap_only"
+        assert report.verdict.needs_operator is False
+        assert report.to_dict()["verdict"]["kind"] == "known_gap_only"
         # A failing adapter → both intervals quarantined.
         failed = pull_all_spot(
             [_index("13")],
@@ -555,6 +559,12 @@ class TestPullAllSpot:
         )
         assert failed.total_failed == 2
         assert failed.dry_run is False
+        # Quarantined pairs (token alive) → transient-residual: re-pull/auto-retry
+        # finishes. needs_operator True drives the loud action-required WARNING.
+        assert failed.verdict.kind == "transient_residual"
+        assert failed.verdict.needs_operator is True
+        assert failed.verdict.pending_windows == 2
+        assert failed.to_dict()["verdict"]["needs_operator"] is True
 
     def test_factory_receives_the_full_instrument_list(self, tmp_path: Path) -> None:
         seen: dict[str, int] = {}
