@@ -23,7 +23,7 @@ in the calling test so any unintended drift is caught at test time.
 
 ### #1–5, #9 — Phase 2 engine/resample/combo corpora (DEC-PHASE2-CORPORA-001)
 
-MIGRATION entry #547. Six byte-frozen goldens that each drive a REAL existing
+MIGRATION entry #548. Six byte-frozen goldens that each drive a REAL existing
 component over a small hand-derived (or translation-invariant / deterministic)
 fixture, with the expected values either hand-derived bar-for-bar or pinned as a
 SHA-256 / digest manifest (Golden Rule #1 — no hand-authored numbers without a
@@ -99,4 +99,4 @@ spot is signal-only → NO brokerage (CLAUDE.md §7), so net == gross.
 DEC-PHASE1-SMOKE-AND-SKELETONS-001 (MIGRATION entry #251);
 DEC-PHASE2-TRUTH-TABLE-001 (MIGRATION entry #538);
 DEC-ENGINE-PAISA-ACCOUNTING-GOLDEN-001 (MIGRATION entry #544);
-DEC-PHASE2-CORPORA-001 (MIGRATION entry #547).
+DEC-PHASE2-CORPORA-001 (MIGRATION entry #548).

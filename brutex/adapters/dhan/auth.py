@@ -21,7 +21,7 @@ so every branch is unit-testable without a network.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -73,13 +73,37 @@ def resolve_dhan_credentials(env: Mapping[str, str] | None = None) -> DhanCreden
     return DhanCredentials(access_token=creds.access_token, client_id=creds.client_id)
 
 
-def renew_token(client: DhanClient) -> TokenInfo:
+def renew_token(client: DhanClient, *, pace: Callable[[], None] | None = None) -> TokenInfo:
     """Refresh the active (web-generated) token via ``/v2/RenewToken`` (+24h).
 
-    Raises :class:`DhanAuthError` if the response lacks a string
-    ``accessToken`` / ``expiryTime`` (e.g. an expired or TOTP-minted token
-    that ``RenewToken`` refuses).
+    Parameters
+    ----------
+    client
+        The configured :class:`DhanClient` performing the network refresh.
+    pace
+        Optional rate-bucket acquire hook gating the **initial** physical POST
+        (defence-in-depth, DEC-DHAN-RATE-RESIDUAL-HARDEN-001). ``DhanClient``
+        already gates each fast-retry through its own :attr:`~DhanClient.pace`
+        field (DEC-DHAN-RATE-REALTIME-GUARANTEE-001, MIGRATION.md #545), but the
+        FIRST attempt is paced by the caller — for the ingest spine that is the
+        token bucket, but ``renew_token`` has no such pacing today (a LATENT
+        residual: no production caller wires it into a live pull). Passing a
+        ``pace`` here makes EVERY physical Dhan POST from this path
+        bucket-bounded (≤ current r/s ≤ 5, CLAUDE.md §2 Rule 6) the moment it
+        IS wired live. ``None`` (the default) falls back to the client's own
+        ``pace`` hook — itself a no-op unless a controller is injected — so
+        current callers are byte-unchanged.
+
+    Raises
+    ------
+    DhanAuthError
+        If the response lacks a string ``accessToken`` / ``expiryTime`` (e.g. an
+        expired or TOTP-minted token that ``RenewToken`` refuses).
     """
+    # Gate the INITIAL physical POST through the shared rate bucket (or the
+    # client's own no-op default) BEFORE the call — the client's fast-retry path
+    # gates each subsequent attempt itself (DEC-DHAN-RATE-RESIDUAL-HARDEN-001).
+    (pace or client.pace)()
     payload = client.post_json(ENDPOINT_RENEW_TOKEN, {})
     token = payload.get("accessToken")
     expiry = payload.get("expiryTime")
