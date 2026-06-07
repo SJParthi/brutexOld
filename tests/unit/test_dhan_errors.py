@@ -17,6 +17,7 @@ from brutex.adapters.dhan.errors import (
     DhanTimeoutError,
     DhanTransportError,
     from_http_status,
+    is_no_data_error,
     is_rate_limit,
     is_retryable,
 )
@@ -83,3 +84,35 @@ class TestIsRetryable:
     )
     def test_terminal(self, exc: DhanError) -> None:
         assert is_retryable(exc) is False
+
+
+class TestIsNoDataError:
+    """``is_no_data_error`` flags Dhan's DH-905 "no data" 400 (DEC-DHAN-NO-DATA-KNOWN-GAP-001)."""
+
+    def test_true_for_dh905_marker(self) -> None:
+        exc = from_http_status(
+            400,
+            '{"errorType":"Input_Exception","errorCode":"DH-905","errorMessage":"... no data present"}',
+        )
+        assert is_no_data_error(exc) is True
+
+    def test_true_for_no_data_present_phrase(self) -> None:
+        assert (
+            is_no_data_error(DhanBadRequestError("HTTP 400 bad request: no data present")) is True
+        )
+
+    def test_false_for_generic_bad_request(self) -> None:
+        assert (
+            is_no_data_error(DhanBadRequestError("HTTP 400 bad request: malformed body")) is False
+        )
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            DhanRateLimitError("DH-905"),  # right marker, WRONG type → not a 400 no-data
+            DhanServerError("no data present"),
+            DhanError("DH-905"),
+        ],
+    )
+    def test_false_for_non_bad_request(self, exc: DhanError) -> None:
+        assert is_no_data_error(exc) is False

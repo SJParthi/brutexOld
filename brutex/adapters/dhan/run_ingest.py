@@ -44,7 +44,7 @@ from datetime import date
 
 import structlog
 
-from brutex.adapters.dhan.errors import DhanError
+from brutex.adapters.dhan.errors import DhanError, is_no_data_error
 from brutex.adapters.dhan.ingest import IngestReport, Pacer, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import FetchCoverage
@@ -274,19 +274,37 @@ def run_dhan_spot_ingest(
             # swallow a real error": re-raise so the orchestrator never hides a
             # defect (only DhanError is quarantined; every other error surfaces).
             raise exc
-        # Terminal Dhan error → quarantine this pair, the run continues.
+        # Terminal Dhan error → isolate this pair, the run continues. The pair is
+        # NOT marked complete, so it is re-tried on the next pull (never masked).
         failures.append(
             PairFailure(symbol=instrument.symbol_name, interval=interval, error=str(exc))
         )
-        # Quarantine-cause nook: WHY this pair was dropped (the bare failed=N
-        # count otherwise hides the terminal Dhan error).
-        _LOG.warning(
-            "ingest.quarantine",
-            pull_id=pull_id,
-            symbol=instrument.symbol_name,
-            interval=interval,
-            error=str(exc),
-        )
+        # KNOWN-GAP vs quarantine (DEC-DHAN-NO-DATA-KNOWN-GAP-001): a Dhan
+        # ``DH-905`` "no data" 400 (e.g. NIFTY NEXT 50 daily, whose history starts
+        # after 2021-01-01) is an EXPECTED data boundary, not a defect — log it as
+        # an INFO ``ingest.known_gap`` so the operator's log is not flooded with
+        # alarming quarantine WARNINGs for benign empty ranges. A genuine terminal
+        # error (real 400 / 404 / auth) still logs the WARNING. EITHER way the pair
+        # is isolated + re-tried next pull — data is never silently dropped.
+        if is_no_data_error(exc):
+            _LOG.info(
+                "ingest.known_gap",
+                pull_id=pull_id,
+                symbol=instrument.symbol_name,
+                interval=interval,
+                reason=str(exc),
+                note="Dhan reports no data for this range (DH-905); re-tried next pull, not masked",
+            )
+        else:
+            # Quarantine-cause nook: WHY this pair was dropped (the bare failed=N
+            # count otherwise hides the terminal Dhan error).
+            _LOG.warning(
+                "ingest.quarantine",
+                pull_id=pull_id,
+                symbol=instrument.symbol_name,
+                interval=interval,
+                error=str(exc),
+            )
         if on_progress is not None:
             on_progress(label, 0, True)
 
