@@ -1,0 +1,278 @@
+"""Unit + property tests for the resumable sweep checkpoint (`brutex.engine.sweep_checkpoint`).
+
+100% line + branch coverage of the crash-safe resume marker
+(DEC-SWEEP-REALTIME-GUARANTEE-001, CLAUDE.md §2 Rule 7):
+
+* :class:`SweepCheckpoint` every ``__post_init__`` validation branch + derived
+  ``next_index`` / ``is_complete`` / ``completed_count`` + ``to_dict`` /
+  ``from_dict`` (missing field, bad version, malformed field, valid);
+* :class:`SweepCheckpointStore` constructor guards, ``load`` (no file, OSError,
+  malformed JSON, sweep-id mismatch, matching resume), ``record`` (negative,
+  out-of-range, stale no-op, advance), ``save`` (success, OSError wrap);
+* the atomic-write OSError cleanup path;
+* a hypothesis property that a monotone record sequence persists the running
+  maximum and survives a reopen, and a real crash-resume round-trip.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+from brutex.engine import sweep_checkpoint as ckpt
+from brutex.engine.sweep_checkpoint import (
+    CHECKPOINT_VERSION,
+    SweepCheckpoint,
+    SweepCheckpointError,
+    SweepCheckpointStore,
+)
+from hypothesis import given
+from hypothesis import strategies as st
+
+
+def _store(tmp_path: Path, **over: Any) -> SweepCheckpointStore:
+    base: dict[str, Any] = {
+        "path": tmp_path / "ckpt.json",
+        "sweep_id": "sweep-1",
+        "total_combos": 10,
+        "clock": lambda: 1234.0,
+    }
+    base.update(over)
+    return SweepCheckpointStore(**base)
+
+
+# ── SweepCheckpoint dataclass ───────────────────────────────────────────────
+
+
+def test_checkpoint_valid_and_derived() -> None:
+    cp = SweepCheckpoint(sweep_id="s", total_combos=10, last_completed_index=3, updated_at=1.0)
+    assert cp.next_index == 4
+    assert cp.completed_count == 4
+    assert not cp.is_complete
+
+
+def test_checkpoint_is_complete() -> None:
+    cp = SweepCheckpoint(sweep_id="s", total_combos=5, last_completed_index=4, updated_at=1.0)
+    assert cp.is_complete
+    assert cp.next_index == 5
+
+
+def test_checkpoint_fresh_index_minus_one() -> None:
+    cp = SweepCheckpoint(sweep_id="s", total_combos=5, last_completed_index=-1, updated_at=1.0)
+    assert cp.next_index == 0
+    assert cp.completed_count == 0
+    assert not cp.is_complete
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"sweep_id": "", "total_combos": 5, "last_completed_index": 0}, "sweep_id"),
+        ({"sweep_id": "s", "total_combos": -1, "last_completed_index": -1}, "total_combos"),
+        ({"sweep_id": "s", "total_combos": 5, "last_completed_index": -2}, "last_completed_index"),
+        ({"sweep_id": "s", "total_combos": 5, "last_completed_index": 5}, "must be"),
+    ],
+)
+def test_checkpoint_validation_raises(kwargs: dict[str, Any], match: str) -> None:
+    with pytest.raises(SweepCheckpointError, match=match):
+        SweepCheckpoint(updated_at=1.0, **kwargs)
+
+
+def test_to_from_dict_round_trip() -> None:
+    cp = SweepCheckpoint(sweep_id="s", total_combos=10, last_completed_index=3, updated_at=2.5)
+    d = cp.to_dict()
+    assert d["version"] == CHECKPOINT_VERSION
+    assert SweepCheckpoint.from_dict(d) == cp
+
+
+def test_from_dict_missing_field_raises() -> None:
+    with pytest.raises(SweepCheckpointError, match="missing required fields"):
+        SweepCheckpoint.from_dict({"version": CHECKPOINT_VERSION})
+
+
+def test_from_dict_unknown_version_raises() -> None:
+    d = {
+        "version": 999,
+        "sweep_id": "s",
+        "total_combos": 10,
+        "last_completed_index": 0,
+        "updated_at": 1.0,
+    }
+    with pytest.raises(SweepCheckpointError, match="Unknown checkpoint schema version"):
+        SweepCheckpoint.from_dict(d)
+
+
+def test_from_dict_malformed_field_raises() -> None:
+    d = {
+        "version": CHECKPOINT_VERSION,
+        "sweep_id": "s",
+        "total_combos": "not-an-int",
+        "last_completed_index": 0,
+        "updated_at": 1.0,
+    }
+    with pytest.raises(SweepCheckpointError, match="Malformed checkpoint field"):
+        SweepCheckpoint.from_dict(d)
+
+
+# ── SweepCheckpointStore construction ───────────────────────────────────────
+
+
+def test_store_rejects_empty_sweep_id(tmp_path: Path) -> None:
+    with pytest.raises(SweepCheckpointError, match="sweep_id"):
+        _store(tmp_path, sweep_id="")
+
+
+def test_store_rejects_negative_total(tmp_path: Path) -> None:
+    with pytest.raises(SweepCheckpointError, match="total_combos"):
+        _store(tmp_path, total_combos=-1)
+
+
+def test_store_initial_state(tmp_path: Path) -> None:
+    s = _store(tmp_path)
+    assert s.path == tmp_path / "ckpt.json"
+    assert s.last_completed_index == -1
+    assert s.next_index == 0
+
+
+# ── load ────────────────────────────────────────────────────────────────────
+
+
+def test_load_no_file_returns_none(tmp_path: Path) -> None:
+    assert _store(tmp_path).load() is None
+
+
+def test_load_read_oserror_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _store(tmp_path)
+    s.record(0)  # create the file
+
+    def _boom(*_a: Any, **_k: Any) -> str:
+        raise OSError("eio")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    with pytest.raises(SweepCheckpointError, match="Failed to read checkpoint"):
+        s.load()
+
+
+def test_load_malformed_json_raises(tmp_path: Path) -> None:
+    p = tmp_path / "ckpt.json"
+    p.write_text("{not json", encoding="utf-8")
+    with pytest.raises(SweepCheckpointError, match="Malformed checkpoint JSON"):
+        _store(tmp_path).load()
+
+
+def test_load_different_sweep_id_ignored(tmp_path: Path) -> None:
+    _store(tmp_path, sweep_id="other").record(4)
+    # A store for a different sweep must not adopt the foreign checkpoint.
+    s = _store(tmp_path, sweep_id="sweep-1")
+    assert s.load() is None
+    assert s.last_completed_index == -1
+
+
+def test_load_matching_resumes(tmp_path: Path) -> None:
+    _store(tmp_path).record(6)
+    s2 = _store(tmp_path)
+    cp = s2.load()
+    assert cp is not None
+    assert cp.last_completed_index == 6
+    assert s2.next_index == 7
+
+
+# ── record ──────────────────────────────────────────────────────────────────
+
+
+def test_record_negative_raises(tmp_path: Path) -> None:
+    with pytest.raises(SweepCheckpointError, match="must be >= 0"):
+        _store(tmp_path).record(-1)
+
+
+def test_record_out_of_range_raises(tmp_path: Path) -> None:
+    with pytest.raises(SweepCheckpointError, match="< total_combos"):
+        _store(tmp_path, total_combos=3).record(3)
+
+
+def test_record_advances_and_is_monotonic(tmp_path: Path) -> None:
+    s = _store(tmp_path)
+    assert s.record(0) is True
+    assert s.record(2) is True
+    assert s.record(1) is False  # stale — ignored, no rewind
+    assert s.record(2) is False  # duplicate — no-op
+    assert s.last_completed_index == 2
+
+
+# ── save ────────────────────────────────────────────────────────────────────
+
+
+def test_save_oserror_wrapped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _store(tmp_path)
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ckpt, "_atomic_write", _boom)
+    with pytest.raises(SweepCheckpointError, match="Failed to write checkpoint"):
+        s.record(0)
+
+
+def test_save_explicit_checkpoint(tmp_path: Path) -> None:
+    s = _store(tmp_path)
+    cp = SweepCheckpoint(
+        sweep_id="sweep-1", total_combos=10, last_completed_index=5, updated_at=9.0
+    )
+    s.save(cp)
+    assert SweepCheckpoint.from_dict(__import__("json").loads(s.path.read_text())) == cp
+
+
+# ── atomic-write cleanup ────────────────────────────────────────────────────
+
+
+def test_atomic_write_cleanup_on_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "x.json"
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(ckpt.os, "replace", _boom)
+    with pytest.raises(OSError, match="replace failed"):
+        ckpt._atomic_write(dest, b"data")
+    # No temp files left behind in the directory.
+    assert list(tmp_path.glob(".brutex-ckpt-*")) == []
+    assert not dest.exists()
+
+
+# ── property + real resume round-trip ───────────────────────────────────────
+
+
+@given(indices=st.lists(st.integers(min_value=0, max_value=49), max_size=40))
+def test_property_record_tracks_running_max(tmp_path_factory: Any, indices: list[int]) -> None:
+    d = tmp_path_factory.mktemp("ck")
+    s = SweepCheckpointStore(path=d / "c.json", sweep_id="p", total_combos=50, clock=lambda: 0.0)
+    running = -1
+    for i in indices:
+        advanced = s.record(i)
+        if i > running:
+            assert advanced is True
+            running = i
+        else:
+            assert advanced is False
+    assert s.last_completed_index == running
+    if running >= 0:
+        reopened = SweepCheckpointStore(path=d / "c.json", sweep_id="p", total_combos=50)
+        loaded = reopened.load()
+        assert loaded is not None
+        assert loaded.last_completed_index == running
+
+
+def test_crash_resume_skips_completed(tmp_path: Path) -> None:
+    # Simulate a sweep that completes combos 0..4 then is killed.
+    s = SweepCheckpointStore(path=tmp_path / "c.json", sweep_id="run", total_combos=10)
+    for i in range(5):
+        s.record(i)
+    # A fresh process reopens and resumes from where it left off.
+    resumed = SweepCheckpointStore(path=tmp_path / "c.json", sweep_id="run", total_combos=10)
+    cp = resumed.load()
+    assert cp is not None
+    assert resumed.next_index == 5
+    assert not cp.is_complete

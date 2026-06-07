@@ -94,6 +94,7 @@ from brutex.data.timeframe_materialize import (
 )
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.observability.correlation import request_id_scope
+from brutex.observability.throttle import make_throttled
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
     PipelineEventKind,
@@ -1372,6 +1373,12 @@ def build_app(
                 lake_root=lake_root,
                 dry_run=dry_run,
                 on_progress=on_progress,
+                # Live status (DEC-OPTIONS-LIVE-STATUS-001): a THROTTLED per-series
+                # summary-cache invalidation so /coverage/options ticks live during
+                # a single-underlying pull (whose per-underlying on_progress fires
+                # only at the very end). The 2 s throttle matches the cache TTL
+                # floor; the per-underlying on_progress already marks dirty too.
+                on_series_tick=make_throttled(_summary_cache.mark_dirty),
                 session_rate=_session_rate,
             )
 

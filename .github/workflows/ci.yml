@@ -1106,6 +1106,14 @@ jobs:
           else
             echo "(brutex.data.window_status_store test file not present yet — gate inactive)"
           fi
+          # DEC-OPTIONS-LIVE-STATUS-001: the generic throttled-callback helper
+          # (the options analog of make_live_status_flush). Pure + import-light —
+          # held at 100% line+branch by its own unit suite (fake clock).
+          if compgen -G "tests/unit/test_observability_throttle.py" > /dev/null; then
+            pytest --cov=brutex.observability.throttle --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_throttle.py
+          else
+            echo "(brutex.observability.throttle test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_parser.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_parser.py
           else
@@ -1539,8 +1547,13 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-      - name: Install deps
-        run: pip install -e ".[dev]"
+      - name: Install deps (includes [data] for the resample golden corpora)
+        # DEC-PHASE2-CORPORA-001 (#548): corpora #4 (INDIA VIX) + #5
+        # (cross-instrument resample) drive brutex.data.tf_resampler, which
+        # needs polars (the [data] extra). Without it those two golden modules
+        # fail at import (ModuleNotFoundError: polars), mirroring the [data]
+        # install the unit-test job already uses.
+        run: pip install -e ".[dev,data]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
         uses: dtolnay/rust-toolchain@stable

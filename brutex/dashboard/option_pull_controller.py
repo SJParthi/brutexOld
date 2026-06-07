@@ -372,6 +372,7 @@ def pull_options(
     option_types: Sequence[str] = DRV_OPTION_TYPES,
     client_factory: OptionClientFactory | None = None,
     on_progress: ProgressHook | None = None,
+    on_series_tick: Callable[[], None] | None = None,
     coverage: FetchCoverage | None = None,
     pull_id: str | None = None,
     session_rate: SessionRateController | None = None,
@@ -413,6 +414,13 @@ def pull_options(
         Override the ``(client, sink)`` builder; defaults to the synthetic
         builder when *dry_run* else the live builder. Tests inject a fake
         factory to exercise the non-dry-run branch without network.
+    on_series_tick
+        Optional **observability-only** zero-arg hook threaded to the ingest
+        spine, fired once per SERIES as it completes (DEC-OPTIONS-LIVE-STATUS-001).
+        The dashboard passes a THROTTLED summary-cache ``mark_dirty`` so a
+        single-underlying options pull's lake-backed ``/coverage/options`` surface
+        ticks live mid-fan-out, not only at the per-underlying ``on_progress`` at
+        the very end. Never changes what is fetched/parsed/sunk or the rate.
     coverage
         Optional pre-seeded skip-ledger. On a **live** pull (``dry_run`` False),
         ``None`` (the default) is replaced by the persisted ledger
@@ -480,6 +488,7 @@ def pull_options(
             on_timeout=runtime.on_timeout,
             on_success=runtime.on_success,
             on_progress=on_progress,
+            on_series_tick=on_series_tick,
             coverage=coverage,
             run_parallel=runtime.run_parallel,
         )

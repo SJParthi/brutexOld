@@ -1,0 +1,340 @@
+"""Crash-safe resumable sweep checkpoint (DEC-SWEEP-REALTIME-GUARANTEE-001).
+
+The durable "where did the sweep get to?" marker so a killed sweep resumes
+where it left off instead of recomputing from combo 0 (CLAUDE.md §2 Rule 7 —
+idempotence; same inputs → same outputs, and a re-run never repeats finished
+work). The checkpoint records the index of the **last fully-completed combo**;
+:attr:`SweepCheckpoint.next_index` is where the resumed sweep starts.
+
+## Crash safety — atomic tmp + ``os.replace``
+
+:meth:`SweepCheckpointStore.save` writes to a sibling ``*.tmp`` file, ``flush``
++ ``fsync``s it, then ``os.replace``s it over the real path. ``os.replace`` is
+atomic on POSIX + Windows, so a crash mid-write leaves EITHER the previous
+checkpoint OR the new one fully on disk — never a half-written / truncated JSON
+file that would fail to parse on resume (mirrors
+:func:`brutex.engine.results_store._atomic_write` +
+``brutex.data.parquet_writer``).
+
+## Idempotence + monotonicity
+
+:meth:`SweepCheckpointStore.record` only advances the stored index — a stale or
+out-of-order ``record`` of an earlier index is ignored (returns ``False``), so
+a re-delivered progress callback can never rewind the checkpoint. Re-recording
+the same index is a no-op (also ``False``). This keeps the checkpoint a
+monotonic high-water mark.
+
+## Honest envelope (Golden Rule #10)
+
+Every operation is O(1) — a single small-JSON read or atomic write, no scan of
+the work already done. The checkpoint stores only an integer index + a little
+metadata; it does **not** store the per-combo results (those are the
+:class:`~brutex.engine.results_store.ResultsStore`'s job). Resume correctness
+therefore assumes the sweep enumerates combos in the **same deterministic
+order** every run (which the K-of-N mask enumeration in
+:mod:`brutex.engine.combo_mask` guarantees) — the checkpoint is an index into
+that fixed order, not a content address.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from time import time
+from typing import Any, Final
+
+from brutex.models import BruteXError
+
+#: Schema version stamped on every checkpoint so a future format change is
+#: detectable on load rather than silently mis-parsed.
+CHECKPOINT_VERSION: Final[int] = 1
+
+
+class SweepCheckpointError(BruteXError):
+    """Raised on a malformed checkpoint payload or a checkpoint I/O failure."""
+
+
+@dataclass(frozen=True, slots=True)
+class SweepCheckpoint:
+    """An immutable snapshot of a sweep's resume position.
+
+    Parameters
+    ----------
+    sweep_id
+        Stable identifier of the sweep this checkpoint belongs to (e.g. a
+        run-config digest). Non-empty.
+    total_combos
+        Total combos the sweep will enumerate (``>= 0``). The completion
+        denominator.
+    last_completed_index
+        Zero-based index of the **last fully-completed** combo, or ``-1`` when
+        no combo has completed yet (a fresh sweep). Must satisfy
+        ``-1 <= last_completed_index < total_combos``.
+    updated_at
+        Wall-clock seconds (epoch) of the last write.
+
+    Raises
+    ------
+    SweepCheckpointError
+        On an empty ``sweep_id``, a negative ``total_combos``, or a
+        ``last_completed_index`` outside ``[-1, total_combos)``.
+    """
+
+    sweep_id: str
+    total_combos: int
+    last_completed_index: int
+    updated_at: float
+
+    def __post_init__(self) -> None:
+        if not self.sweep_id:
+            raise SweepCheckpointError("SweepCheckpoint.sweep_id must be non-empty")
+        if self.total_combos < 0:
+            raise SweepCheckpointError(
+                f"SweepCheckpoint.total_combos must be >= 0, got {self.total_combos}"
+            )
+        if self.last_completed_index < -1:
+            raise SweepCheckpointError(
+                f"SweepCheckpoint.last_completed_index must be >= -1, "
+                f"got {self.last_completed_index}"
+            )
+        if self.last_completed_index >= self.total_combos:
+            raise SweepCheckpointError(
+                f"SweepCheckpoint.last_completed_index ({self.last_completed_index}) must be "
+                f"< total_combos ({self.total_combos})"
+            )
+
+    @property
+    def next_index(self) -> int:
+        """The index the resumed sweep should start from (``last + 1``)."""
+        return self.last_completed_index + 1
+
+    @property
+    def is_complete(self) -> bool:
+        """``True`` iff every enumerated combo has completed."""
+        return self.next_index >= self.total_combos
+
+    @property
+    def completed_count(self) -> int:
+        """How many combos have completed so far (``last_completed_index + 1``)."""
+        return self.last_completed_index + 1
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON-serialisable on-disk representation."""
+        return {
+            "version": CHECKPOINT_VERSION,
+            "sweep_id": self.sweep_id,
+            "total_combos": self.total_combos,
+            "last_completed_index": self.last_completed_index,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SweepCheckpoint:
+        """Rebuild a :class:`SweepCheckpoint` from its on-disk dict.
+
+        Raises
+        ------
+        SweepCheckpointError
+            If a required field is missing, has the wrong type, or the
+            schema version is unknown.
+        """
+        required = {"version", "sweep_id", "total_combos", "last_completed_index", "updated_at"}
+        missing = required - set(data.keys())
+        if missing:
+            raise SweepCheckpointError(
+                f"Checkpoint dict missing required fields: {sorted(missing)}"
+            )
+        version = data["version"]
+        if version != CHECKPOINT_VERSION:
+            raise SweepCheckpointError(
+                f"Unknown checkpoint schema version {version!r} "
+                f"(this build understands version {CHECKPOINT_VERSION})"
+            )
+        try:
+            return cls(
+                sweep_id=str(data["sweep_id"]),
+                total_combos=int(data["total_combos"]),
+                last_completed_index=int(data["last_completed_index"]),
+                updated_at=float(data["updated_at"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise SweepCheckpointError(f"Malformed checkpoint field: {exc}") from exc
+
+
+class SweepCheckpointStore:
+    """Atomic, monotonic, resumable checkpoint backed by a single JSON file.
+
+    Parameters
+    ----------
+    path
+        Destination JSON file (parents created on first :meth:`save`).
+    sweep_id
+        Identifier stamped on every checkpoint this store writes.
+    total_combos
+        Total combos the sweep enumerates (``>= 0``).
+    clock
+        Zero-arg epoch-seconds source for the ``updated_at`` stamp (defaults
+        to :func:`time.time`); injected for deterministic tests.
+
+    Raises
+    ------
+    SweepCheckpointError
+        If ``sweep_id`` is empty or ``total_combos`` is negative.
+    """
+
+    def __init__(
+        self,
+        *,
+        path: Path,
+        sweep_id: str,
+        total_combos: int,
+        clock: Any = time,
+    ) -> None:
+        if not sweep_id:
+            raise SweepCheckpointError("SweepCheckpointStore.sweep_id must be non-empty")
+        if total_combos < 0:
+            raise SweepCheckpointError(
+                f"SweepCheckpointStore.total_combos must be >= 0, got {total_combos}"
+            )
+        self._path = path
+        self._sweep_id = sweep_id
+        self._total_combos = total_combos
+        self._clock = clock
+        # In-memory high-water mark; -1 == nothing completed yet.
+        self._last_index = -1
+
+    @property
+    def path(self) -> Path:
+        """The configured checkpoint file path."""
+        return self._path
+
+    @property
+    def last_completed_index(self) -> int:
+        """The current in-memory high-water index (``-1`` if none)."""
+        return self._last_index
+
+    @property
+    def next_index(self) -> int:
+        """The index a resume should start from (``last_completed_index + 1``)."""
+        return self._last_index + 1
+
+    def load(self) -> SweepCheckpoint | None:
+        """Read + adopt the on-disk checkpoint, returning it (or ``None``).
+
+        Returns ``None`` when no checkpoint file exists (a first run). When one
+        exists for a **different** ``sweep_id`` it is ignored (returns ``None``)
+        — a stale checkpoint from another sweep must never resume this one. On a
+        matching checkpoint, the in-memory high-water mark is adopted so
+        subsequent :meth:`record` calls continue monotonically.
+
+        Raises
+        ------
+        SweepCheckpointError
+            If the file exists but is unreadable or malformed.
+        """
+        if not self._path.exists():
+            return None
+        try:
+            raw = self._path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise SweepCheckpointError(f"Failed to read checkpoint {self._path}: {exc}") from exc
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SweepCheckpointError(f"Malformed checkpoint JSON at {self._path}: {exc}") from exc
+        checkpoint = SweepCheckpoint.from_dict(data)
+        if checkpoint.sweep_id != self._sweep_id:
+            # A checkpoint from a different sweep — never resume from it.
+            return None
+        self._last_index = checkpoint.last_completed_index
+        return checkpoint
+
+    def record(self, completed_index: int) -> bool:
+        """Advance + persist the high-water mark to *completed_index*.
+
+        Returns ``True`` if the checkpoint advanced (the index was strictly
+        greater than the stored high-water mark and was written to disk), or
+        ``False`` if the call was a no-op — a stale / re-delivered index ``<=``
+        the current mark is ignored so the checkpoint can never rewind
+        (idempotent monotonic high-water mark, CLAUDE.md §2 Rule 7).
+
+        Raises
+        ------
+        SweepCheckpointError
+            If ``completed_index`` is outside ``[0, total_combos)``, or the
+            atomic write fails.
+        """
+        if completed_index < 0:
+            raise SweepCheckpointError(
+                f"record: completed_index must be >= 0, got {completed_index}"
+            )
+        if completed_index >= self._total_combos:
+            raise SweepCheckpointError(
+                f"record: completed_index ({completed_index}) must be "
+                f"< total_combos ({self._total_combos})"
+            )
+        if completed_index <= self._last_index:
+            return False
+        self._last_index = completed_index
+        self.save(self._build_checkpoint())
+        return True
+
+    def save(self, checkpoint: SweepCheckpoint) -> None:
+        """Atomically write *checkpoint* to :attr:`path`.
+
+        Tempfile in the destination directory → ``flush`` → ``fsync`` →
+        ``os.replace``, so a crash mid-write never corrupts the resume point.
+
+        Raises
+        ------
+        SweepCheckpointError
+            If the write fails.
+        """
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        content = json.dumps(checkpoint.to_dict(), sort_keys=True).encode("utf-8")
+        try:
+            _atomic_write(self._path, content)
+        except OSError as exc:
+            raise SweepCheckpointError(f"Failed to write checkpoint {self._path}: {exc}") from exc
+
+    def _build_checkpoint(self) -> SweepCheckpoint:
+        """Materialise a :class:`SweepCheckpoint` from the current store state."""
+        return SweepCheckpoint(
+            sweep_id=self._sweep_id,
+            total_combos=self._total_combos,
+            last_completed_index=self._last_index,
+            updated_at=float(self._clock()),
+        )
+
+
+def _atomic_write(dest: Path, content: bytes) -> None:
+    """Atomically write *content* to *dest* via tempfile + fsync + ``os.replace``.
+
+    Mirrors :func:`brutex.engine.results_store._atomic_write`: a kill mid-write
+    leaves either the old file or the new one — never a partial.
+    """
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(dest.parent), prefix=".brutex-ckpt-", suffix=".json.tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, dest)
+    except OSError:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_path)
+        raise
+
+
+__all__ = [
+    "CHECKPOINT_VERSION",
+    "SweepCheckpoint",
+    "SweepCheckpointError",
+    "SweepCheckpointStore",
+]
