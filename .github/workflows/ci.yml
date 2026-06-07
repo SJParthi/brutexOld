@@ -1510,7 +1510,7 @@ jobs:
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-xml
           path: coverage.xml
@@ -1613,7 +1613,7 @@ jobs:
           fi
       - name: Upload benchmark results
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: bench-results
           path: bench-results.json
@@ -2100,7 +2100,7 @@ jobs:
           output: 'trivy-results.sarif'
       - name: Upload SARIF
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: trivy-results
           path: trivy-results.sarif
@@ -2130,7 +2130,7 @@ jobs:
           cyclonedx-py environment --output-file sbom-python.json
       - name: Upload SBOM
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: sbom-python.json
@@ -2400,7 +2400,7 @@ jobs:
 
       - name: Upload mutmut results XML for analysis
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: mutmut-results-xml
           path: mutmut-results.xml
@@ -2643,7 +2643,7 @@ jobs:
           find proof -type f -print
       - name: Upload proof bundle
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: proof-bundle
           path: proof/
