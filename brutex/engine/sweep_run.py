@@ -66,7 +66,7 @@ from brutex.engine.sweep_driver import (
 from brutex.engine.trade_sim import simulate_trades
 from brutex.metrics.compute import ResultMetrics
 from brutex.money import round_money
-from brutex.ranking import MIN_TRADES, RankedCombo, rank_combos
+from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
 from brutex.strategies.combo import combo_hash
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams, has_conflict
@@ -297,6 +297,15 @@ class SweepRunConfig:
         Stage-1B coarse pre-filter threshold (defaults to
         :data:`brutex.ranking.MIN_TRADES`); a mask firing on fewer bars can never
         be rankable, so it is pruned before the trade sim. ``0`` disables it.
+    overfit
+        Opt-in :class:`~brutex.ranking.overfit.OverfitGateConfig` activating the
+        Stage-3 multiple-testing **overfit gate** (6th gate + Deflated-Sharpe
+        ranking term, DEC-RANKING-OVERFIT-001) inside :func:`brutex.ranking.rank_combos`.
+        ``None`` (the default) keeps the legacy five-gate / seven-term ranking. The
+        leaderboard's trial count ``N`` is this tuple's backtested-combo count —
+        the authoritative per-(instrument, TF) ``N`` — so the persisted store is, by
+        construction, the overfit-gated output (see the ``overfit`` module's honest
+        envelope: no statistically-valid post-store re-gate exists).
 
     Raises
     ------
@@ -323,6 +332,7 @@ class SweepRunConfig:
     max_combos: int = DEFAULT_MAX_COMBOS
     top_k: int | None = None
     min_hits: int = MIN_TRADES
+    overfit: OverfitGateConfig | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf", "mode"):
@@ -372,8 +382,9 @@ class SweepRunSummary:
         is marked seen so a re-run skips them) — includes those the Stage-1B
         pre-filter dropped.
     ranked
-        Surviving combos that cleared the hard rejection gates (the leaderboard
-        size before ``top_k`` truncation).
+        Surviving combos that cleared the hard rejection gates — and, when
+        ``cfg.overfit`` is set, the Stage-3 multiple-testing overfit gate too (the
+        leaderboard size before ``top_k`` truncation).
     persisted
         Ranked finalists appended to the store (``ranked`` truncated to
         ``cfg.top_k``).
@@ -681,7 +692,7 @@ def run_persisted_sweep(
         )
         for mask, _ in kept
     ]
-    ranked = rank_combos(pairs)
+    ranked = rank_combos(pairs, overfit=cfg.overfit)
     finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
 
     persisted = 0

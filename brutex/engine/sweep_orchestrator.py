@@ -78,7 +78,7 @@ from brutex.engine.sweep_run import (
     SweepRunSummary,
     run_persisted_sweep,
 )
-from brutex.ranking import MIN_TRADES
+from brutex.ranking import MIN_TRADES, OverfitGateConfig
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
 
@@ -191,6 +191,12 @@ class SweepGridConfig:
     min_hits
         Stage-1B coarse pre-filter threshold (defaults to
         :data:`brutex.ranking.MIN_TRADES`); ``0`` disables it.
+    overfit
+        Opt-in :class:`~brutex.ranking.overfit.OverfitGateConfig`, forwarded to
+        every tuple's :class:`~brutex.engine.sweep_run.SweepRunConfig` so the
+        Stage-3 multiple-testing overfit gate (DEC-RANKING-OVERFIT-001) runs per
+        leaderboard. ``None`` (the default) keeps the legacy ranking. Each tuple's
+        own backtested-combo count is its authoritative trial count ``N``.
 
     Raises
     ------
@@ -220,6 +226,7 @@ class SweepGridConfig:
     max_tuples: int = DEFAULT_MAX_TUPLES
     top_k: int | None = None
     min_hits: int = MIN_TRADES
+    overfit: OverfitGateConfig | None = None
 
     def __post_init__(self) -> None:
         # Order-preserving de-dup of every axis (set semantics, deterministic
@@ -334,8 +341,9 @@ class SweepTuple:
 
         Threads the grid's shared context (mode + the three reproducibility
         hashes), shared knobs (``condition_bits``, ``prior_n``,
-        ``start_equity_paisa``) and the honest guards (``max_combos``, ``top_k``,
-        ``min_hits``) together with this tuple's swept axes.
+        ``start_equity_paisa``), the honest guards (``max_combos``, ``top_k``,
+        ``min_hits``) and the opt-in ``overfit`` gate config together with this
+        tuple's swept axes.
 
         Parameters
         ----------
@@ -367,6 +375,7 @@ class SweepTuple:
             max_combos=grid.max_combos,
             top_k=grid.top_k,
             min_hits=grid.min_hits,
+            overfit=grid.overfit,
         )
 
 
