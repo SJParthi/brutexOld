@@ -34,8 +34,8 @@
 | **Data — spot** | **~90%** | 1m+1d ingest, incremental/idempotent re-pull, resampler, 2dp lake all done |
 | **Data — options** | **~40%** | strike selector + grid + expiry + lot-size **built** (`options/strike_rules.py`); **missing** Greeks/risk-free + executor/materializer + options TF resampler + `data/option_sink.py` (Protocol stub) |
 | **Error / worst-case robustness** | **~95%** | all 10 failure modes have handlers + tests (1 partial: disk-full ENOSPC untested); **zero bare `except:`**; secrets mode-0600; real-time guards fire during a run |
-| **User surfaces (dashboard/CLI)** | **~95%** | 10 dashboard pages + 20+ routes + 13 CLI commands all complete; only PNG charts (`visualization/`) is a stub |
-| **Structure / scaffolds** | **drift** | 3 empty docstring-only packages (`backtest/`, `sprint/`, `visualization/`); `brutex/math/` facade absent (CLAUDE.md §5); `rust/fno-math/src/math/` dormant |
+| **User surfaces (dashboard/CLI)** | **~95%** | 10 dashboard pages + 20+ routes + 13 CLI commands all complete; PNG charts (the deleted `visualization/` stub, #569) are not implemented — a separate future decision |
+| **Structure / scaffolds** | **mostly reconciled** | ✅ 3 docstring-only packages (`backtest/`, `sprint/`, `visualization/`) DELETED + `brutex/math/` facade CREATED + CLAUDE.md §5 reconciled (DEC-STRUCTURE-CLEANUP-001, #569); remaining: `rust/fno-math/src/math/` dormant scaffold |
 
 **Bottom line (no illusion):** the **signal-research engine is essentially done and honest** — it can discover, validate against 9 statistical overfitting filters, and rank winners; error-handling and user surfaces are ~95% complete. With **TOTP de-scoped**, the real frontiers are: **(1)** auto-wiring the 9-filter cascade (manual + automatic), **(2)** the manual⇄automatic *duality* for the flows that are currently manual-only (§6), **(3)** the Options executor, and **(4)** a smarter optimizer for scale.
 
@@ -57,7 +57,7 @@
 | 6 | **14 of 24 property invariants + absolute ≥50 M/s throughput gate** | Hardening | 🟡 Medium | `tests/property/test_invariants_catalog.py` (10 live / 14 ROADMAP); M4-Pro runner stub `bench-m4pro.yml` |
 | 7 | **8 orchestrator modules to strict-100% per-module gate; dashboard per-module gate** | Hardening | 🟡 Medium | PyO3 ABI3 single-init blocks per-module gate (covered 100% via global `--cov`) |
 | 8 | **Keepalive prod start-wiring + watchdog sub-tuple detection + 120m/180m/240m TF persistence** | Mixed | 🟢 Low | keepalive `start()` call site UNVERIFIED; watchdog inter-tuple only; 8/19 TFs persisted |
-| 9 | **Clean up 3 docstring-only stub packages + the missing `brutex/math/` facade** — `backtest/`, `sprint/`, `visualization/` are empty shells; `brutex/math/` (CLAUDE.md §5 Rust facade) does not exist; `rust/fno-math/src/math/` is a dormant scaffold. Either implement or remove + reconcile CLAUDE.md §5 | Structure | 🟡 Medium | `backtest/__init__.py`, `sprint/__init__.py`, `visualization/__init__.py` (docstring-only); no `brutex.math`; `rust/fno-math/src/math/mod.rs:1-13` |
+| 9 | **Clean up 3 docstring-only stub packages + the missing `brutex/math/` facade** — ✅ **MOSTLY RESOLVED (DEC-STRUCTURE-CLEANUP-001, #569, PR #479):** `backtest/`, `sprint/`, `visualization/` DELETED (zero importers); `brutex/math/` facade CREATED (programmatic re-export of `fno_math` + `trading_core`, 100% line+branch); CLAUDE.md §5 reconciled. **Remaining:** the dormant `rust/fno-math/src/math/` Rust scaffold is untouched (separate follow-up) | Structure | 🟢 Low (was 🟡) | done: no `backtest`/`sprint`/`visualization`; `brutex/math/__init__.py` live. remaining: `rust/fno-math/src/math/mod.rs:1-13` |
 | 10 | **Disk-full (ENOSPC) write-failure unit test + JSON-fuzz the parser** — handlers EXIST (cleanup + re-raise), only the tests are missing | Hardening | 🟢 Low | `sweep_checkpoint.py:314-332` handler; no ENOSPC unit test |
 | 11 | **Post-persistence DSR re-gating · synthetic-data corruption tests · info-leak static analyzer** | Engine/Hardening | 🟢 Low | documented design limits, not bugs |
 
@@ -120,7 +120,7 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | **Telegram (manual + automatic)** | ✅ **DONE** (DEC-TELEGRAM-WIRE-001 #567): `brutex notify test` (manual) **+** auto-alerts on watchdog-hung/rate.breach/auth.renew_failed/sweep-complete | ✅ done |
 | **Scheduled reports + standalone TF/cascade CLIs** | Manual triggers kept; add the automatic twins (§6 duality) | 🟡 medium |
 | **Runtime look-ahead barrier in sweep** | A hard runtime guard (not just structural) that the engine can never peek at future bars | 🟡 medium |
-| **Stub cleanup + `brutex/math/` facade** | Implement or delete `backtest/`/`sprint/`/`visualization/`; build the §5 Rust facade; reconcile CLAUDE.md | 🟡 medium |
+| **Stub cleanup + `brutex/math/` facade** | ✅ DONE (#569): deleted `backtest/`/`sprint/`/`visualization/`, created the §5 `brutex/math/` facade, reconciled CLAUDE.md; only `rust/fno-math/src/math/` remains | ✅ resolved |
 | **Remaining 14 property invariants + ≥50 M/s absolute gate** | Closes the verification-pyramid + the absolute-throughput canary | 🟡 medium |
 
 ---
@@ -159,15 +159,15 @@ These were **not** in the wave-1 audit and are now tracked (Golden Rule #1 — h
 
 | Surface | What it is | Status | Evidence |
 |---------|-----------|--------|----------|
-| `brutex/backtest/` | docstring promises a Polars vectorized sim | **STUB / orphaned** (real sim is `engine/trade_sim.py` + `rust_trade_sim.py`) | `backtest/__init__.py` (16 LOC) |
-| `brutex/sprint/` | "Day 1 end-to-end runner" glue | **STUB** (never built) | `sprint/__init__.py` (18 LOC) |
-| `brutex/visualization/` | PNG charts for the Telegram digest | **STUB** (the chart half of the digest) | `visualization/__init__.py` (12 LOC) |
-| `brutex/math/` | CLAUDE.md §5 mandated Rust facade | **ABSENT** — facade is scattered across `engine/`, `vocabulary/`, `indicators/` | no `brutex.math` import |
-| `rust/fno-math/src/math/` | rolling / distributions / solvers | **dormant scaffold** | `mod.rs:1-13` ("scaffold only", modules commented out) |
+| `brutex/backtest/` | docstring promises a Polars vectorized sim | ✅ **DELETED** (#569 — orphan; real sim is `engine/trade_sim.py` + `rust_trade_sim.py`) | removed in DEC-STRUCTURE-CLEANUP-001 |
+| `brutex/sprint/` | "Day 1 end-to-end runner" glue | ✅ **DELETED** (#569 — never built, zero importers) | removed in DEC-STRUCTURE-CLEANUP-001 |
+| `brutex/visualization/` | PNG charts for the Telegram digest | ✅ **DELETED** (#569 — stub; PNG charting is a separate future decision) | removed in DEC-STRUCTURE-CLEANUP-001 |
+| `brutex/math/` | CLAUDE.md §5 mandated Rust facade | ✅ **CREATED** (#569 — programmatic re-export of `fno_math` + `trading_core`, 100% line+branch) | `brutex/math/__init__.py` |
+| `rust/fno-math/src/math/` | rolling / distributions / solvers | **dormant scaffold** (untouched — separate follow-up) | `mod.rs:1-13` ("scaffold only", modules commented out) |
 | `options/strike_rules.py` | the strike selector | ✅ **BUILT** (corrects the wave-1 "no strike-selector" claim) | `strike_rules.py:190` (offset + delta-target) |
 | `engine/deflate.py` + `engine/robustness.py` | DSR pool-deflation + CPCV pass-rate | ✅ built but **un-enumerated** in wave 1 | (reviewer should confirm delegate vs duplicate) |
 
-**Recommendation:** treat the 3 stub packages + `brutex/math/` as a **single cleanup PR** — either implement (`visualization` + `math` facade) or delete (`backtest`, `sprint`) and reconcile CLAUDE.md §5, so the tree matches the spec with no dead scaffolding.
+**Recommendation:** ✅ **DONE (DEC-STRUCTURE-CLEANUP-001, #569, PR #479)** — the 3 stub packages were deleted, the `brutex/math/` §5 facade was created, and CLAUDE.md §5 was reconciled in a single cleanup PR. The only remaining dead scaffolding is the `rust/fno-math/src/math/` Rust module (a separate follow-up).
 
 ---
 
