@@ -34,8 +34,8 @@
 | **Data — spot** | **~90%** | 1m+1d ingest, incremental/idempotent re-pull, resampler, 2dp lake all done |
 | **Data — options** | **~40%** | strike selector + grid + expiry + lot-size **built** (`options/strike_rules.py`); **missing** Greeks/risk-free + executor/materializer + options TF resampler + `data/option_sink.py` (Protocol stub) |
 | **Error / worst-case robustness** | **~95%** | all 10 failure modes have handlers + tests (1 partial: disk-full ENOSPC untested); **zero bare `except:`**; secrets mode-0600; real-time guards fire during a run |
-| **User surfaces (dashboard/CLI)** | **~95%** | 10 dashboard pages + 20+ routes + 13 CLI commands all complete; only PNG charts (`visualization/`) is a stub |
-| **Structure / scaffolds** | **drift** | 3 empty docstring-only packages (`backtest/`, `sprint/`, `visualization/`); `brutex/math/` facade absent (CLAUDE.md §5); `rust/fno-math/src/math/` dormant |
+| **User surfaces (dashboard/CLI)** | **~95%** | 10 dashboard pages + 20+ routes + 13 CLI commands all complete; PNG charts (the deleted `visualization/` stub, #569) are not implemented — a separate future decision |
+| **Structure / scaffolds** | **mostly reconciled** | ✅ 3 docstring-only packages (`backtest/`, `sprint/`, `visualization/`) DELETED + `brutex/math/` facade CREATED + CLAUDE.md §5 reconciled (DEC-STRUCTURE-CLEANUP-001, #569); remaining: `rust/fno-math/src/math/` dormant scaffold |
 
 **Bottom line (no illusion):** the **signal-research engine is essentially done and honest** — it can discover, validate against 9 statistical overfitting filters, and rank winners; error-handling and user surfaces are ~95% complete. With **TOTP de-scoped**, the real frontiers are: **(1)** auto-wiring the 9-filter cascade (manual + automatic), **(2)** the manual⇄automatic *duality* for the flows that are currently manual-only (§6), **(3)** the Options executor, and **(4)** a smarter optimizer for scale.
 
@@ -52,12 +52,12 @@
 | 1 | **Auto-wire the Stage-4 cascade into the main sweep** — the 9 overfitting filters EXIST but `run_stage4_cascade()` is called manually; wire it so every sweep's top-K winners are auto-filtered. Highest value-per-effort | Engine | 🔴 Critical (quick win) | `metrics/cascade.py` done; not invoked by `sweep_orchestrator` |
 | 2 | **Options Track executor** — the strike selector + grid + expiry + lot-size are **already built** (`options/strike_rules.py`, 10 rules); what's missing is the **executor/materializer** (winning spot signal → priced options PnL), Greeks/risk-free, options TF resampler, and the real `data/option_sink.py` (currently a Protocol stub) | Data | 🔴 Critical | `options/strike_rules.py:190` done; `options/__init__.py` (Greeks TBD); `data/option_sink.py:57` stub |
 | 3 | **Stage-2.5 adaptive optimizer (BIPOP-CMA-ES / Bayesian)** — learns from trial failures to *guide* the next parameter proposal instead of static grid enumeration; makes billions-scale search smart | Engine | 🔴 High | no CMA-ES/Bayesian kernel exists; grid axes accepted in `sweep_orchestrator.py` but no adaptive proposer |
-| 4 | **Telegram alerts wired to sweep events** — infra built, not connected to watchdog-hung / rate-breach / renew-fail (true zero-monitoring) | Observability | 🟡 High | `notifications/telegram.py` exists; `sweep_supervisor.py` notes "future" |
+| 4 | ~~**Telegram alerts wired to sweep events** — infra built, not connected to watchdog-hung / rate-breach / renew-fail~~ ✅ **CLOSED** by DEC-TELEGRAM-WIRE-001 (#567): `notifications/sweep_alerts.py` wires watchdog-hung / rate.breach / auth.renew_failed / sweep-complete + a manual `brutex notify test` | Observability | ✅ Done | `notifications/sweep_alerts.py`; `cmd_sweep_all` + `cmd_fetch` + `pull_controller` |
 | 5 | **Runtime look-ahead enforcement in the sweep** — `ReplayFeed.ensure_no_lookahead()` exists + P-06 partly live, but the sweep relies on *structural* causality, no mandated runtime barrier | Engine | 🟡 Medium | `feed/replay.py:184-208` method exists; no call site in main sweep |
 | 6 | **14 of 24 property invariants + absolute ≥50 M/s throughput gate** | Hardening | 🟡 Medium | `tests/property/test_invariants_catalog.py` (10 live / 14 ROADMAP); M4-Pro runner stub `bench-m4pro.yml` |
 | 7 | **8 orchestrator modules to strict-100% per-module gate; dashboard per-module gate** | Hardening | 🟡 Medium | PyO3 ABI3 single-init blocks per-module gate (covered 100% via global `--cov`) |
 | 8 | **Keepalive prod start-wiring + watchdog sub-tuple detection + 120m/180m/240m TF persistence** | Mixed | 🟢 Low | keepalive `start()` call site UNVERIFIED; watchdog inter-tuple only; 8/19 TFs persisted |
-| 9 | **Clean up 3 docstring-only stub packages + the missing `brutex/math/` facade** — `backtest/`, `sprint/`, `visualization/` are empty shells; `brutex/math/` (CLAUDE.md §5 Rust facade) does not exist; `rust/fno-math/src/math/` is a dormant scaffold. Either implement or remove + reconcile CLAUDE.md §5 | Structure | 🟡 Medium | `backtest/__init__.py`, `sprint/__init__.py`, `visualization/__init__.py` (docstring-only); no `brutex.math`; `rust/fno-math/src/math/mod.rs:1-13` |
+| 9 | **Clean up 3 docstring-only stub packages + the missing `brutex/math/` facade** — ✅ **MOSTLY RESOLVED (DEC-STRUCTURE-CLEANUP-001, #569, PR #479):** `backtest/`, `sprint/`, `visualization/` DELETED (zero importers); `brutex/math/` facade CREATED (programmatic re-export of `fno_math` + `trading_core`, 100% line+branch); CLAUDE.md §5 reconciled. **Remaining:** the dormant `rust/fno-math/src/math/` Rust scaffold is untouched (separate follow-up) | Structure | 🟢 Low (was 🟡) | done: no `backtest`/`sprint`/`visualization`; `brutex/math/__init__.py` live. remaining: `rust/fno-math/src/math/mod.rs:1-13` |
 | 10 | **Disk-full (ENOSPC) write-failure unit test + JSON-fuzz the parser** — handlers EXIST (cleanup + re-raise), only the tests are missing | Hardening | 🟢 Low | `sweep_checkpoint.py:314-332` handler; no ENOSPC unit test |
 | 11 | **Post-persistence DSR re-gating · synthetic-data corruption tests · info-leak static analyzer** | Engine/Hardening | 🟢 Low | documented design limits, not bugs |
 
@@ -117,10 +117,10 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | **#2 Options executor** | Strike selector is built; add the **executor** that turns winning spot signals into **real ATM±N options trades** with costs/slippage/IV — execution realism | 🔴 high |
 | **#3 Stage-2.5 smart optimizer** | The search **learns** where good strategies live (Bayesian/CMA-ES) instead of blind grid — same answers, far less compute | 🔴 high |
 | **Sweep scheduler (manual + automatic)** | Keep `sweep-all` (manual) **+** an opt-in scheduled/daemon runner (automatic) | 🟡 medium |
-| **Telegram (manual + automatic)** | `brutex notify test` (manual) **+** auto-alerts on stall/rate-breach/renew-fail | 🟡 medium |
+| **Telegram (manual + automatic)** | ✅ **DONE** (DEC-TELEGRAM-WIRE-001 #567): `brutex notify test` (manual) **+** auto-alerts on watchdog-hung/rate.breach/auth.renew_failed/sweep-complete | ✅ done |
 | **Scheduled reports + standalone TF/cascade CLIs** | Manual triggers kept; add the automatic twins (§6 duality) | 🟡 medium |
 | **Runtime look-ahead barrier in sweep** | A hard runtime guard (not just structural) that the engine can never peek at future bars | 🟡 medium |
-| **Stub cleanup + `brutex/math/` facade** | Implement or delete `backtest/`/`sprint/`/`visualization/`; build the §5 Rust facade; reconcile CLAUDE.md | 🟡 medium |
+| **Stub cleanup + `brutex/math/` facade** | ✅ DONE (#569): deleted `backtest/`/`sprint/`/`visualization/`, created the §5 `brutex/math/` facade, reconciled CLAUDE.md; only `rust/fno-math/src/math/` remains | ✅ resolved |
 | **Remaining 14 property invariants + ≥50 M/s absolute gate** | Closes the verification-pyramid + the absolute-throughput canary | 🟡 medium |
 
 ---
@@ -142,12 +142,12 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | **Stage-4 cascade (9 filters)** | ❌ only `--overfit-gate` (1 filter) | ❌ not auto on winners | 🔴 **add BOTH** (a `brutex cascade` CLI + auto-on-sweep) |
 | **Report export (pre-open)** | ✅ on-demand route | ❌ no scheduled/auto-send | 🟡 **add automatic option** |
 | Timeframe pre-build | ✅ button / (no standalone CLI) | ❌ intentional (DEC-TF-MATERIALIZE-001) | 🟡 add a standalone CLI trigger |
-| Telegram digest | ❌ no "send test digest" | ❌ not wired to sweep | 🔴 **add BOTH** (manual test-send + auto on events) |
+| Telegram digest | ✅ `brutex notify test` | ✅ auto on watchdog/rate/auth/complete | ✅ **both** (DEC-TELEGRAM-WIRE-001 #567) |
 
 **Duality work items (each ships manual + automatic together):**
 1. 🔴 **Cascade**: `brutex cascade <run-id>` (manual) **+** auto-run on every sweep's top-K (automatic). *This is roadmap item #1.*
 2. 🔴 **Sweep scheduler**: keep `brutex sweep-all` (manual) **+** add an opt-in scheduled/daemon runner (automatic).
-3. 🔴 **Telegram**: `brutex notify test` (manual) **+** wire watchdog/rate/renew events (automatic).
+3. ✅ **Telegram** (DONE — DEC-TELEGRAM-WIRE-001 #567): `brutex notify test` (manual) **+** wired watchdog-hung/rate.breach/auth.renew_failed/sweep-complete events (automatic).
 4. 🟡 **Reports**: keep the on-demand route (manual) **+** an opt-in scheduled daily export (automatic).
 5. 🟡 **Expiries/contracts pull + TF pre-build**: keep the buttons (manual) **+** an opt-in auto-cascade / standalone CLI.
 
@@ -159,15 +159,15 @@ These were **not** in the wave-1 audit and are now tracked (Golden Rule #1 — h
 
 | Surface | What it is | Status | Evidence |
 |---------|-----------|--------|----------|
-| `brutex/backtest/` | docstring promises a Polars vectorized sim | **STUB / orphaned** (real sim is `engine/trade_sim.py` + `rust_trade_sim.py`) | `backtest/__init__.py` (16 LOC) |
-| `brutex/sprint/` | "Day 1 end-to-end runner" glue | **STUB** (never built) | `sprint/__init__.py` (18 LOC) |
-| `brutex/visualization/` | PNG charts for the Telegram digest | **STUB** (the chart half of the digest) | `visualization/__init__.py` (12 LOC) |
-| `brutex/math/` | CLAUDE.md §5 mandated Rust facade | **ABSENT** — facade is scattered across `engine/`, `vocabulary/`, `indicators/` | no `brutex.math` import |
-| `rust/fno-math/src/math/` | rolling / distributions / solvers | **dormant scaffold** | `mod.rs:1-13` ("scaffold only", modules commented out) |
+| `brutex/backtest/` | docstring promises a Polars vectorized sim | ✅ **DELETED** (#569 — orphan; real sim is `engine/trade_sim.py` + `rust_trade_sim.py`) | removed in DEC-STRUCTURE-CLEANUP-001 |
+| `brutex/sprint/` | "Day 1 end-to-end runner" glue | ✅ **DELETED** (#569 — never built, zero importers) | removed in DEC-STRUCTURE-CLEANUP-001 |
+| `brutex/visualization/` | PNG charts for the Telegram digest | ✅ **DELETED** (#569 — stub; PNG charting is a separate future decision) | removed in DEC-STRUCTURE-CLEANUP-001 |
+| `brutex/math/` | CLAUDE.md §5 mandated Rust facade | ✅ **CREATED** (#569 — programmatic re-export of `fno_math` + `trading_core`, 100% line+branch) | `brutex/math/__init__.py` |
+| `rust/fno-math/src/math/` | rolling / distributions / solvers | **dormant scaffold** (untouched — separate follow-up) | `mod.rs:1-13` ("scaffold only", modules commented out) |
 | `options/strike_rules.py` | the strike selector | ✅ **BUILT** (corrects the wave-1 "no strike-selector" claim) | `strike_rules.py:190` (offset + delta-target) |
 | `engine/deflate.py` + `engine/robustness.py` | DSR pool-deflation + CPCV pass-rate | ✅ built but **un-enumerated** in wave 1 | (reviewer should confirm delegate vs duplicate) |
 
-**Recommendation:** treat the 3 stub packages + `brutex/math/` as a **single cleanup PR** — either implement (`visualization` + `math` facade) or delete (`backtest`, `sprint`) and reconcile CLAUDE.md §5, so the tree matches the spec with no dead scaffolding.
+**Recommendation:** ✅ **DONE (DEC-STRUCTURE-CLEANUP-001, #569, PR #479)** — the 3 stub packages were deleted, the `brutex/math/` §5 facade was created, and CLAUDE.md §5 was reconciled in a single cleanup PR. The only remaining dead scaffolding is the `rust/fno-math/src/math/` Rust module (a separate follow-up).
 
 ---
 

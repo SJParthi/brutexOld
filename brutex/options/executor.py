@@ -1,0 +1,823 @@
+"""Options executor / materializer — winning spot signal → priced option leg.
+
+The Track-2 **execution-realism** bridge (``docs/track2/TRACK2_EXECUTION_SIMULATOR.md``
++ ``TRACK2_OPTIONS_SPEC.md`` §6b, DEC-OPTIONS-EXECUTOR-001): a winning Track-1
+**spot** signal carries only a direction + an entry/exit time + the underlying
+spot at entry. This module *materializes* that abstract signal into a concrete,
+**priced** option trade:
+
+1. **Select** the strike via the locked 10-rule pre-trade selector
+   (:mod:`brutex.options.strike_rules` — ATM±N offsets, plus the Greeks-gated
+   delta-target rules) on the per-underlying strike grid
+   (:mod:`brutex.options.strike_grid`).  BULL → buy CE (``long_call``); BEAR →
+   buy PE (``long_put``) — option type follows the spot direction strictly, no
+   straddles / spreads (DEC-EXEC-009).
+2. **Load** the leg's entry + 15:20-forced-exit option bars from the lake
+   through an injected :class:`OptionBarSource` seam (so the core is pure +
+   100% unit-testable with a fake; the real lake reader is the CLI's job).
+3. **Price** the round-trip via the already-locked Track-2 cost calculator
+   (:func:`brutex.costs.calculator.compute_trade_cost`): 1-tick slippage per
+   side (``TRACK2_OPTIONS_SPEC.md`` §9), STT / exchange / SEBI / IPFT / stamp /
+   GST (``COSTS_VERIFIED.md``), gross + **net** P&L in int64 paisa. No pricing
+   math is re-implemented here — this module is pure composition (CLAUDE.md §11
+   COMMON).
+
+The implied volatility ``iv`` the rolling endpoint stamps per bar is carried
+through onto each :class:`MaterializedTrade` (``iv_at_entry``) so downstream
+analysis keeps it; Greeks (delta/gamma/theta/vega) are NOT computed here — the
+BSM pipeline is a separate Phase-4 deliverable (``TRACK2_OPTIONS_SPEC.md`` §7),
+so the **delta-target** rules (8/9/10) require the caller to supply a delta
+chain and are NOT run by default (only the 7 offset ATM±N rules are — honest
+per Golden Rule #1: we never pretend Greeks exist before they are built).
+
+## BUY-only (DEC-EXEC-008)
+
+Track 2 only ever BUYS options (``long_call`` / ``long_put``) — never writes /
+shorts. Max loss = premium paid; no SPAN/ELM margin modelling.
+
+## Determinism + O(1) (Golden Rules #4 / #5)
+
+:func:`materialize_trade` is a pure function: same signal + rule + bar pair →
+the same priced trade, bit-for-bit. Its per-trade cost is **O(1)** — a fixed
+ALU strike computation, one bar-source probe, and one O(1) cost compute. The
+aggregators (:func:`run_rule_over_signals`, :func:`execute_options_sim`) are
+**O(N) over the signal count** (and O(rules × signals) for the full sweep) —
+that is inherent work over the input, NEVER an O(1)-total claim (forbidden as
+hallucination).
+
+## Audit (Golden Rule #8)
+
+:func:`execute_options_sim` appends one audit row per rule result through an
+optional injected :class:`AuditAppend` sink (the material action is "an options
+sim was run for rule R producing N priced trades"), so the hash-chained audit
+trail covers it without coupling the pure core to a concrete writer.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
+from enum import Enum
+from typing import TYPE_CHECKING, Final, Protocol
+
+from brutex.calendars.nse import IST
+from brutex.data.models import OptionBar
+from brutex.money import rupees_to_paisa
+from brutex.options.expiry_calendar import next_monthly_expiry, next_weekly_expiry
+from brutex.options.lot_size_history import OptionsUnderlying
+from brutex.options.strike_grid import get_strike_step, round_to_atm
+from brutex.options.strike_rules import (
+    OFFSET_RULES,
+    StrikeRule,
+    StrikeRuleKind,
+    TradeDirection,
+    resolve_delta_target_strike,
+    resolve_offset_strike,
+)
+
+if TYPE_CHECKING:  # pragma: no cover — annotation-only imports
+    # Imported lazily for runtime (inside ``materialize_trade``) to break the
+    # ``costs.calculator → options.lot_size_history → options.__init__ →
+    # options.executor → costs.calculator`` import cycle; here only for typing
+    # (every annotation is a string under ``from __future__ import annotations``).
+    from brutex.costs.types import (
+        Broker,
+        GstSplit,
+        Instrument,
+        OptionType,
+        TradeCostBreakdown,
+    )
+
+__all__ = [
+    "TICK_FLOOR_MULTIPLE",
+    "AuditAppend",
+    "DeltaChain",
+    "DeltaChainProvider",
+    "ExpiryKind",
+    "MaterializedTrade",
+    "OptionBarPair",
+    "OptionBarSource",
+    "OptionLeg",
+    "OptionsRuleResult",
+    "RejectReason",
+    "RejectedTrade",
+    "SpotSignal",
+    "SpotTrade",
+    "execute_options_sim",
+    "materialize_trade",
+    "resolve_current_expiry",
+    "run_rule_over_signals",
+    "select_option_leg",
+    "signals_from_spot_trades",
+]
+
+#: Audit action stamped per rule result by :func:`execute_options_sim`.
+_AUDIT_ACTION: Final[str] = "OPTIONS_SIM_RULE"
+
+#: Entry-quality floor (``TRACK2_OPTIONS_SPEC.md`` §7.8 / §8): a strike whose
+#: entry premium is at or below ``TICK_FLOOR_MULTIPLE × TICK_PAISA`` (₹0.25) is
+#: tick-floor-saturated — its quoted price is dominated by the ₹0.05 tick, IV is
+#: unstable, and it is EXCLUDED from the entry universe.
+TICK_FLOOR_MULTIPLE: Final[int] = 5
+
+#: ``OptionsUnderlying`` → the cost calculator's ``Instrument`` literal. The enum
+#: values already equal the literals; the explicit map keeps the type checker
+#: happy (a plain ``.value`` would widen to ``str``).
+_INSTRUMENT_LITERAL: Final[dict[OptionsUnderlying, Instrument]] = {
+    OptionsUnderlying.NIFTY: "NIFTY",
+    OptionsUnderlying.BANKNIFTY: "BANKNIFTY",
+    OptionsUnderlying.SENSEX: "SENSEX",
+}
+
+#: A delta chain: ``[(strike, signed_delta), ...]`` for one option side at signal
+#: time (CE delta positive, PE negative). Consumed only by the delta-target rules.
+DeltaChain = Sequence[tuple[int, float]]
+
+
+class ExpiryKind(Enum):
+    """Which expiry cycle a trade uses (``TRACK2_OPTIONS_SPEC.md`` §6)."""
+
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+
+
+class RejectReason(Enum):
+    """Why a candidate option trade was not priced."""
+
+    #: The leg's option bars are absent from the lake at entry/exit — the
+    #: "band-drift hole" failure mode (the pinned strike left the fetched ATM±N
+    #: window, or the contract is simply not in the lake / illiquid).
+    NO_DATA = "no_data"
+    #: The entry (or exit) premium is at/below the tradeable tick floor
+    #: (:data:`TICK_FLOOR_MULTIPLE` × tick) — excluded per §7.8.
+    TICK_FLOOR = "tick_floor"
+
+
+@dataclass(frozen=True, slots=True)
+class SpotSignal:
+    """One winning Track-1 spot signal, ready to materialize into an option leg.
+
+    Attributes
+    ----------
+    instrument
+        The brute-force underlying (NIFTY / BANKNIFTY / SENSEX).
+    direction
+        :data:`~brutex.options.strike_rules.TradeDirection.BULL` (→ buy CE) or
+        ``BEAR`` (→ buy PE).
+    entry_ts, exit_ts
+        Entry + forced-exit timestamps, **timezone-aware IST** (the cost
+        calculator selects the STT regime + lot-size era from
+        ``entry_ts.date()``). ``exit_ts >= entry_ts``.
+    spot_at_entry
+        The underlying spot price (rupees, ``> 0``) at the entry bar — used to
+        locate ATM on the strike grid.
+    expiry_date
+        The option expiry the trade uses (resolved by the caller via
+        :func:`resolve_current_expiry`). Must be ``>= entry_ts.date()``.
+    """
+
+    instrument: OptionsUnderlying
+    direction: TradeDirection
+    entry_ts: datetime
+    exit_ts: datetime
+    spot_at_entry: Decimal
+    expiry_date: date
+
+    def __post_init__(self) -> None:
+        if self.entry_ts.tzinfo is None:
+            raise ValueError(f"SpotSignal.entry_ts must be timezone-aware, got {self.entry_ts!r}")
+        if self.exit_ts.tzinfo is None:
+            raise ValueError(f"SpotSignal.exit_ts must be timezone-aware, got {self.exit_ts!r}")
+        if self.exit_ts < self.entry_ts:
+            raise ValueError(
+                f"SpotSignal.exit_ts ({self.exit_ts}) must be >= entry_ts ({self.entry_ts})"
+            )
+        if self.spot_at_entry <= 0:
+            raise ValueError(f"SpotSignal.spot_at_entry must be > 0, got {self.spot_at_entry}")
+        if self.expiry_date < self.entry_ts.date():
+            raise ValueError(
+                f"SpotSignal.expiry_date ({self.expiry_date}) must be >= entry date "
+                f"({self.entry_ts.date()})"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class OptionLeg:
+    """The concrete option contract a strike rule selected for a signal.
+
+    Attributes
+    ----------
+    rule_name
+        The :class:`~brutex.options.strike_rules.StrikeRule` name that picked it.
+    option_type
+        ``"CE"`` (BULL) or ``"PE"`` (BEAR).
+    side
+        ``"long_call"`` / ``"long_put"`` — always BUY (DEC-EXEC-008).
+    atm_strike
+        The ATM strike on the grid at signal time.
+    strike
+        The resolved absolute strike (rupees, ``> 0``).
+    strike_offset
+        Signed grid offset of ``strike`` from ATM in whole steps.
+    """
+
+    rule_name: str
+    option_type: OptionType
+    side: str
+    atm_strike: int
+    strike: int
+    strike_offset: int
+
+    def __post_init__(self) -> None:
+        if self.strike <= 0:
+            raise ValueError(f"OptionLeg.strike must be > 0, got {self.strike}")
+
+
+@dataclass(frozen=True, slots=True)
+class OptionBarPair:
+    """The entry + forced-exit option bars for one leg (same side)."""
+
+    entry_bar: OptionBar
+    exit_bar: OptionBar
+
+    def __post_init__(self) -> None:
+        if self.entry_bar.side != self.exit_bar.side:
+            raise ValueError(
+                f"OptionBarPair sides must match, got entry={self.entry_bar.side!r} "
+                f"exit={self.exit_bar.side!r}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class MaterializedTrade:
+    """A fully priced option trade — the success outcome of materialization.
+
+    Attributes
+    ----------
+    leg
+        The selected :class:`OptionLeg`.
+    expiry_date
+        The option expiry used.
+    entry_open_paisa, exit_open_paisa
+        The entry / exit bar OPEN premiums in int64 paisa (pre-slippage; the
+        cost calculator applies the 1-tick slippage internally).
+    iv_at_entry
+        The implied volatility stamped on the entry bar, or ``None`` if the
+        side omitted it.
+    breakdown
+        The full :class:`~brutex.costs.types.TradeCostBreakdown` (gross / net /
+        per-charge, all paisa).
+    """
+
+    leg: OptionLeg
+    expiry_date: date
+    entry_open_paisa: int
+    exit_open_paisa: int
+    iv_at_entry: Decimal | None
+    breakdown: TradeCostBreakdown
+
+    @property
+    def net_pnl_paisa(self) -> int:
+        """Post-cost P&L in paisa (the deliverable number)."""
+        return self.breakdown.net_pnl_paisa
+
+    @property
+    def gross_pnl_paisa(self) -> int:
+        """Pre-cost P&L in paisa (slippage already baked into the fills)."""
+        return self.breakdown.gross_pnl_paisa
+
+    @property
+    def total_charges_paisa(self) -> int:
+        """Sum of every charge in paisa."""
+        return self.breakdown.total_charges_paisa
+
+
+@dataclass(frozen=True, slots=True)
+class RejectedTrade:
+    """A candidate that was selected but could not be priced.
+
+    Attributes
+    ----------
+    leg
+        The selected :class:`OptionLeg`.
+    reason
+        Why it was rejected (:class:`RejectReason`).
+    """
+
+    leg: OptionLeg
+    reason: RejectReason
+
+
+class OptionBarSource(Protocol):
+    """Read-side seam: load a leg's entry + forced-exit option bars from the lake.
+
+    Returns ``None`` when the leg's bars are not available (band-drift hole /
+    not ingested / illiquid) — the trade is then rejected, never faked.
+    """
+
+    def load_pair(
+        self,
+        *,
+        instrument: OptionsUnderlying,
+        expiry_date: date,
+        strike: int,
+        option_type: OptionType,
+        entry_ts: datetime,
+        exit_ts: datetime,
+    ) -> OptionBarPair | None:
+        """Return the entry/exit :class:`OptionBarPair`, or ``None`` if absent."""
+        ...
+
+
+class AuditAppend(Protocol):
+    """The ``append`` slice of the hash-chained audit writer the sim uses."""
+
+    def append(self, *, action: str, subject: str, payload: dict[str, object]) -> object:
+        """Append one audit entry; return the writer's result."""
+        ...
+
+
+class SpotTrade(Protocol):
+    """A round-trip spot trade — structurally a ``ClosedTrade`` (entry/exit ts)."""
+
+    @property
+    def entry_ts(self) -> datetime:
+        """Entry timestamp (timezone-aware)."""
+        ...
+
+    @property
+    def exit_ts(self) -> datetime:
+        """Exit timestamp (timezone-aware)."""
+        ...
+
+
+#: A callable returning the delta chain for a signal (delta-target rules only).
+DeltaChainProvider = Callable[[SpotSignal], DeltaChain]
+
+
+def select_option_leg(
+    signal: SpotSignal,
+    rule: StrikeRule,
+    *,
+    delta_chain: DeltaChain | None = None,
+) -> OptionLeg:
+    """Resolve the concrete :class:`OptionLeg` a strike *rule* picks for *signal*.
+
+    Parameters
+    ----------
+    signal
+        The spot signal (its direction fixes CE vs PE; its spot fixes ATM).
+    rule
+        One of the 10 locked :data:`~brutex.options.strike_rules.ALL_STRIKE_RULES`.
+    delta_chain
+        Required for a ``DELTA_TARGET`` rule — the ``(strike, delta)`` chain for
+        the trade's option side at signal time. Ignored for ``OFFSET`` rules.
+
+    Returns
+    -------
+    OptionLeg
+        The selected leg (option type, side, resolved strike + offset).
+
+    Raises
+    ------
+    ValueError
+        If a ``DELTA_TARGET`` rule is given without a *delta_chain*.
+    """
+    if signal.direction == TradeDirection.BULL:
+        option_type: OptionType = "CE"
+        side = "long_call"
+    else:
+        option_type = "PE"
+        side = "long_put"
+
+    step = get_strike_step(signal.instrument)
+    atm = round_to_atm(float(signal.spot_at_entry), signal.instrument)
+
+    if rule.kind == StrikeRuleKind.OFFSET:
+        strike = resolve_offset_strike(rule, signal.direction, atm, step)
+    else:  # DELTA_TARGET
+        if delta_chain is None:
+            raise ValueError(
+                f"strike rule {rule.name!r} is delta-target and needs a delta_chain "
+                f"(the Greeks pipeline is Phase 4 — TRACK2_OPTIONS_SPEC §7)"
+            )
+        strike = resolve_delta_target_strike(rule, signal.direction, list(delta_chain))
+
+    return OptionLeg(
+        rule_name=rule.name,
+        option_type=option_type,
+        side=side,
+        atm_strike=atm,
+        strike=strike,
+        strike_offset=(strike - atm) // step,
+    )
+
+
+def materialize_trade(
+    signal: SpotSignal,
+    rule: StrikeRule,
+    *,
+    source: OptionBarSource,
+    broker: Broker = "groww",
+    gst_split: GstSplit = "intra_state",
+    n_lots: int = 1,
+    delta_chain: DeltaChain | None = None,
+) -> MaterializedTrade | RejectedTrade:
+    """Materialize + price one option trade for *signal* under *rule*.
+
+    Pure given a deterministic *source*: same inputs → same priced trade.
+    O(1) per call (strike ALU + one bar-source probe + one O(1) cost compute).
+
+    Parameters
+    ----------
+    signal
+        The winning spot signal to translate.
+    rule
+        The strike-selection rule to apply.
+    source
+        The :class:`OptionBarSource` that loads the leg's bars.
+    broker, gst_split, n_lots
+        Cost-model parameters (defaults match the Track-2 spec: Groww,
+        intra-state GST, 1 lot).
+    delta_chain
+        Required only for delta-target rules.
+
+    Returns
+    -------
+    MaterializedTrade | RejectedTrade
+        The priced trade, or a rejection (no data / tick floor).
+    """
+    # Lazy import (breaks the options↔costs cycle — see the TYPE_CHECKING block):
+    # by pricing time the costs package is always fully initialised.
+    from brutex.costs.calculator import compute_trade_cost
+    from brutex.costs.constants import TICK_PAISA
+    from brutex.costs.types import TradeInput
+
+    leg = select_option_leg(signal, rule, delta_chain=delta_chain)
+    pair = source.load_pair(
+        instrument=signal.instrument,
+        expiry_date=signal.expiry_date,
+        strike=leg.strike,
+        option_type=leg.option_type,
+        entry_ts=signal.entry_ts,
+        exit_ts=signal.exit_ts,
+    )
+    if pair is None:
+        return RejectedTrade(leg=leg, reason=RejectReason.NO_DATA)
+
+    entry_open_paisa = rupees_to_paisa(pair.entry_bar.open)
+    exit_open_paisa = rupees_to_paisa(pair.exit_bar.open)
+    # §7.8 entry-quality floor + a defensive sub-tick guard on the exit so a
+    # malformed bar can never reach the cost calculator's ``>= 1 tick`` assert.
+    if entry_open_paisa <= TICK_FLOOR_MULTIPLE * TICK_PAISA or exit_open_paisa < TICK_PAISA:
+        return RejectedTrade(leg=leg, reason=RejectReason.TICK_FLOOR)
+
+    trade_input = TradeInput(
+        entry_dt_ist=signal.entry_ts,
+        exit_dt_ist=signal.exit_ts,
+        instrument=_INSTRUMENT_LITERAL[signal.instrument],
+        option_type=leg.option_type,
+        strike=leg.strike * 100,
+        expiry_date=signal.expiry_date,
+        entry_bar_open_paisa=entry_open_paisa,
+        exit_bar_open_paisa=exit_open_paisa,
+        side=leg.side,  # type: ignore[arg-type]  # always long_call/long_put (DEC-EXEC-008)
+        n_lots=n_lots,
+        broker=broker,
+        gst_split=gst_split,
+        trade_outcome="NORMAL_CLOSE",
+    )
+    breakdown = compute_trade_cost(trade_input)
+    return MaterializedTrade(
+        leg=leg,
+        expiry_date=signal.expiry_date,
+        entry_open_paisa=entry_open_paisa,
+        exit_open_paisa=exit_open_paisa,
+        iv_at_entry=pair.entry_bar.iv,
+        breakdown=breakdown,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class OptionsRuleResult:
+    """Aggregated priced outcome of one strike rule over many signals.
+
+    Attributes
+    ----------
+    rule_name
+        The strike rule this row aggregates.
+    n_signals
+        Total signals processed (``= n_accepted + n_rejected``).
+    n_accepted
+        Signals priced into a :class:`MaterializedTrade`.
+    n_rejected_no_data, n_rejected_tick_floor
+        Rejections by reason (sum ``= n_rejected``).
+    gross_pnl_paisa, total_charges_paisa, net_pnl_paisa
+        Sums over the accepted trades (int64 paisa).
+    n_winners, n_losers
+        Accepted trades with net P&L ``> 0`` (winners) vs ``<= 0`` (non-winners
+        — a loss or the vanishingly-rare exact-zero scratch, which the non-zero
+        cost stack makes unreachable in practice). ``n_winners + n_losers ==
+        n_accepted``.
+
+    Raises
+    ------
+    ValueError
+        On a negative count or a count inconsistency.
+    """
+
+    rule_name: str
+    n_signals: int
+    n_accepted: int
+    n_rejected_no_data: int
+    n_rejected_tick_floor: int
+    gross_pnl_paisa: int
+    total_charges_paisa: int
+    net_pnl_paisa: int
+    n_winners: int
+    n_losers: int
+
+    def __post_init__(self) -> None:
+        for name in (
+            "n_signals",
+            "n_accepted",
+            "n_rejected_no_data",
+            "n_rejected_tick_floor",
+            "n_winners",
+            "n_losers",
+        ):
+            if getattr(self, name) < 0:
+                raise ValueError(
+                    f"OptionsRuleResult.{name} must be >= 0, got {getattr(self, name)}"
+                )
+        if self.n_accepted + self.n_rejected != self.n_signals:
+            raise ValueError(
+                f"OptionsRuleResult: n_accepted ({self.n_accepted}) + n_rejected "
+                f"({self.n_rejected}) must equal n_signals ({self.n_signals})"
+            )
+        if self.n_winners + self.n_losers > self.n_accepted:
+            raise ValueError(
+                f"OptionsRuleResult: n_winners ({self.n_winners}) + n_losers "
+                f"({self.n_losers}) cannot exceed n_accepted ({self.n_accepted})"
+            )
+
+    @property
+    def n_rejected(self) -> int:
+        """Total rejected signals (no-data + tick-floor)."""
+        return self.n_rejected_no_data + self.n_rejected_tick_floor
+
+    @property
+    def win_rate(self) -> float:
+        """Fraction of accepted trades that were winners (``0.0`` if none accepted)."""
+        if self.n_accepted == 0:
+            return 0.0
+        return self.n_winners / self.n_accepted
+
+
+def run_rule_over_signals(
+    signals: Iterable[SpotSignal],
+    rule: StrikeRule,
+    *,
+    source: OptionBarSource,
+    broker: Broker = "groww",
+    gst_split: GstSplit = "intra_state",
+    n_lots: int = 1,
+    delta_chain_provider: DeltaChainProvider | None = None,
+) -> OptionsRuleResult:
+    """Price every *signal* under *rule* and aggregate into an :class:`OptionsRuleResult`.
+
+    Parameters
+    ----------
+    signals
+        The winning spot signals to replay.
+    rule
+        The strike rule to apply to each.
+    source
+        The option-bar source.
+    broker, gst_split, n_lots
+        Cost-model parameters.
+    delta_chain_provider
+        Required for a delta-target rule — yields the per-signal delta chain.
+
+    Returns
+    -------
+    OptionsRuleResult
+        The aggregated row.
+
+    Raises
+    ------
+    ValueError
+        If *rule* is delta-target but no *delta_chain_provider* was supplied.
+    """
+    if rule.kind == StrikeRuleKind.DELTA_TARGET and delta_chain_provider is None:
+        raise ValueError(
+            f"strike rule {rule.name!r} is delta-target; supply a delta_chain_provider "
+            f"(the Greeks pipeline is Phase 4 — TRACK2_OPTIONS_SPEC §7)"
+        )
+
+    n_signals = 0
+    n_accepted = 0
+    n_no_data = 0
+    n_tick_floor = 0
+    gross = 0
+    charges = 0
+    net = 0
+    winners = 0
+    losers = 0
+
+    for signal in signals:
+        n_signals += 1
+        chain = delta_chain_provider(signal) if delta_chain_provider is not None else None
+        outcome = materialize_trade(
+            signal,
+            rule,
+            source=source,
+            broker=broker,
+            gst_split=gst_split,
+            n_lots=n_lots,
+            delta_chain=chain,
+        )
+        if isinstance(outcome, RejectedTrade):
+            if outcome.reason == RejectReason.NO_DATA:
+                n_no_data += 1
+            else:
+                n_tick_floor += 1
+            continue
+        n_accepted += 1
+        gross += outcome.gross_pnl_paisa
+        charges += outcome.total_charges_paisa
+        net += outcome.net_pnl_paisa
+        # Winner = strictly positive post-cost P&L; everything else (a loss, or
+        # the vanishingly-rare exact-zero scratch — unreachable in practice
+        # because every trade pays a non-zero brokerage+GST+slippage stack) is a
+        # non-winner. Two buckets keep win_rate well-defined and the branch live.
+        if outcome.net_pnl_paisa > 0:
+            winners += 1
+        else:
+            losers += 1
+
+    return OptionsRuleResult(
+        rule_name=rule.name,
+        n_signals=n_signals,
+        n_accepted=n_accepted,
+        n_rejected_no_data=n_no_data,
+        n_rejected_tick_floor=n_tick_floor,
+        gross_pnl_paisa=gross,
+        total_charges_paisa=charges,
+        net_pnl_paisa=net,
+        n_winners=winners,
+        n_losers=losers,
+    )
+
+
+def execute_options_sim(
+    signals: Sequence[SpotSignal],
+    *,
+    source: OptionBarSource,
+    rules: Sequence[StrikeRule] = OFFSET_RULES,
+    broker: Broker = "groww",
+    gst_split: GstSplit = "intra_state",
+    n_lots: int = 1,
+    delta_chain_provider: DeltaChainProvider | None = None,
+    audit: AuditAppend | None = None,
+) -> tuple[OptionsRuleResult, ...]:
+    """Run the options sim across every *rule* and return one result per rule.
+
+    The default *rules* are the 7 offset ATM±N rules (delta-target rules need
+    the Greeks pipeline + a *delta_chain_provider*, so they are opt-in). When an
+    *audit* sink is given, one hash-chained row is appended per rule result
+    (Golden Rule #8).
+
+    Parameters
+    ----------
+    signals
+        The winning spot signals (one run's replayed trades).
+    source
+        The option-bar source.
+    rules
+        Which strike rules to sweep. Defaults to :data:`OFFSET_RULES`.
+    broker, gst_split, n_lots
+        Cost-model parameters.
+    delta_chain_provider
+        Required only if *rules* includes a delta-target rule.
+    audit
+        Optional audit sink; one row per rule result when supplied.
+
+    Returns
+    -------
+    tuple[OptionsRuleResult, ...]
+        One result per rule, in *rules* order.
+    """
+    results: list[OptionsRuleResult] = []
+    for rule in rules:
+        result = run_rule_over_signals(
+            signals,
+            rule,
+            source=source,
+            broker=broker,
+            gst_split=gst_split,
+            n_lots=n_lots,
+            delta_chain_provider=delta_chain_provider,
+        )
+        results.append(result)
+        if audit is not None:
+            audit.append(
+                action=_AUDIT_ACTION,
+                subject=result.rule_name,
+                payload={
+                    "n_signals": result.n_signals,
+                    "n_accepted": result.n_accepted,
+                    "n_rejected": result.n_rejected,
+                    "net_pnl_paisa": result.net_pnl_paisa,
+                    "n_winners": result.n_winners,
+                },
+            )
+    return tuple(results)
+
+
+def resolve_current_expiry(
+    instrument: OptionsUnderlying,
+    on_date: date,
+    kind: ExpiryKind,
+) -> date:
+    """Resolve the expiry a trade entering on *on_date* would use.
+
+    Wraps the per-date historical expiry calendar
+    (:mod:`brutex.options.expiry_calendar`). For ``WEEKLY`` on an underlying
+    with no live weekly cycle on *on_date* (e.g. BANKNIFTY after 2024-11-13),
+    falls back to the monthly expiry (``TRACK2_OPTIONS_SPEC.md`` §6). Holiday
+    shifts are NOT applied here (the calendar's stated limitation).
+
+    Parameters
+    ----------
+    instrument
+        The underlying.
+    on_date
+        The trade's entry date (IST).
+    kind
+        :data:`ExpiryKind.WEEKLY` or :data:`ExpiryKind.MONTHLY`.
+
+    Returns
+    -------
+    date
+        The resolved expiry date (``>= on_date``).
+    """
+    if kind == ExpiryKind.WEEKLY:
+        weekly = next_weekly_expiry(instrument, on_date)
+        if weekly is not None:
+            return weekly
+        return next_monthly_expiry(instrument, on_date)
+    return next_monthly_expiry(instrument, on_date)
+
+
+def signals_from_spot_trades(
+    spot_trades: Iterable[SpotTrade],
+    *,
+    instrument: OptionsUnderlying,
+    direction: TradeDirection,
+    spot_open_at: Callable[[datetime], Decimal],
+    expiry_kind: ExpiryKind,
+) -> list[SpotSignal]:
+    """Turn replayed spot round-trips into :class:`SpotSignal` inputs.
+
+    The seam between the Track-1 trade-sim output (``ClosedTrade`` objects, which
+    carry only entry/exit timestamps + direction) and this module. Pure: the
+    underlying spot at entry is looked up through the injected *spot_open_at*
+    callable and the expiry through :func:`resolve_current_expiry`, so it is
+    100% testable without a lake.
+
+    Parameters
+    ----------
+    spot_trades
+        The replayed round-trips (anything with ``entry_ts`` / ``exit_ts``).
+    instrument
+        The underlying every trade is for.
+    direction
+        The run's trade direction (one direction per winning combo).
+    spot_open_at
+        ``entry_ts -> spot price (rupees)`` — the underlying value at entry.
+    expiry_kind
+        Which expiry cycle to trade.
+
+    Returns
+    -------
+    list[SpotSignal]
+        One signal per spot trade, in input order.
+    """
+    signals: list[SpotSignal] = []
+    for trade in spot_trades:
+        entry_ist = trade.entry_ts.astimezone(IST)
+        exit_ist = trade.exit_ts.astimezone(IST)
+        signals.append(
+            SpotSignal(
+                instrument=instrument,
+                direction=direction,
+                entry_ts=entry_ist,
+                exit_ts=exit_ist,
+                spot_at_entry=spot_open_at(trade.entry_ts),
+                expiry_date=resolve_current_expiry(instrument, entry_ist.date(), expiry_kind),
+            )
+        )
+    return signals

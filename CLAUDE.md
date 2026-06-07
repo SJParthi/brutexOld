@@ -281,16 +281,26 @@ bruteX/
 │   └── runbooks/
 ├── brutex/                         ← Python package
 │   ├── adapters/dhan/              ← Dhan Data API v2 adapter (REST)
+│   ├── calendars/                  ← NSE/BSE trading calendar
+│   ├── config/
+│   ├── costs/                      ← brokerage/tax cost models
+│   ├── dashboard/                  ← FastAPI UI
 │   ├── data/                       ← Parquet + DuckDB lake (generic)
+│   ├── engine/                     ← brute-force combo/mask sweep engine
 │   ├── execution/                  ← signal-only simulator (Track 1)
 │   ├── feed/                       ← replay + resampler
-│   ├── math/                       ← facade to Rust hot kernel
-│   ├── orchestrator/               ← FSM + audit + rate limiter
-│   ├── strategies/                 ← 52-vocabulary engine (Phase 3)
-│   ├── dashboard/                  ← FastAPI UI
-│   ├── config/
+│   ├── indicators/                 ← evaluate-time indicators (pivots/fib/EMA)
+│   ├── math/                       ← thin facade to Rust hot kernel
+│   │                                 (fno_math + trading_core re-export;
+│   │                                 DEC-STRUCTURE-CLEANUP-001)
+│   ├── metrics/                    ← Sharpe/DSR/SPA/CPCV statistics
 │   ├── notifications/
-│   └── observability/
+│   ├── observability/
+│   ├── options/                    ← expiry/strike/lot-size rules (lake)
+│   ├── orchestrator/               ← FSM + audit + rate limiter
+│   ├── ranking/                    ← composite ranking + rejection gates
+│   ├── strategies/                 ← 52-vocabulary engine (Phase 3)
+│   └── vocabulary/                 ← 52-condition evaluator (→ trading_core)
 ├── rust/                           ← Rust hot kernels (shared core + compat)
 │   ├── fno-math/                   ← compat types + NSE calendar; Greeks/
 │   │                                 indicators removed in DEC-P0-025
