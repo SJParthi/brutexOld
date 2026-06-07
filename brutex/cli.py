@@ -1352,10 +1352,10 @@ def _resolve_code_commit_sha() -> str:  # pragma: no cover — git/subprocess + 
     if git is unavailable (e.g. a wheel install with no repo), falls back to the
     pinned ``brutex.__version__`` — still a real, traceable code identity.
     """
-    import subprocess
+    import subprocess  # nosec B404 — git SHA read only; fixed constant argv below
 
     try:
-        out = subprocess.run(
+        out = subprocess.run(  # nosec B603 B607 — fixed constant argv, no shell, git on PATH
             ["git", "rev-parse", "HEAD"],  # noqa: S607 — fixed constant argv, no shell/user input
             capture_output=True,
             text=True,
