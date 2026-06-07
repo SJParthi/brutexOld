@@ -260,7 +260,9 @@ def test_property_record_tracks_running_max(tmp_path_factory: Any, indices: list
     assert s.last_completed_index == running
     if running >= 0:
         reopened = SweepCheckpointStore(path=d / "c.json", sweep_id="p", total_combos=50)
-        assert reopened.load().last_completed_index == running
+        loaded = reopened.load()
+        assert loaded is not None
+        assert loaded.last_completed_index == running
 
 
 def test_crash_resume_skips_completed(tmp_path: Path) -> None:

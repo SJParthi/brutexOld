@@ -151,9 +151,9 @@ def test_record_digest_new_then_idempotent(tmp_path: Path) -> None:
     )
 )
 def test_property_recorded_combos_always_seen(
-    tmp_path_factory: object, combos: list[object]
+    tmp_path_factory: pytest.TempPathFactory, combos: list[tuple[int, str, str, str]]
 ) -> None:
-    d = tmp_path_factory.mktemp("kc")  # type: ignore[attr-defined]
+    d = tmp_path_factory.mktemp("kc")
     with SweepCache.open(d / "c", bloom_capacity=100_000) as cache:
         for mask, instrument, tf, direction in combos:
             cache.record(mask, instrument, tf, direction)

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -232,7 +233,7 @@ def _write_lines(p: Path, entries: list[SweepAuditEntry]) -> None:
 def test_verify_seq_out_of_order(tmp_path: Path) -> None:
     p = tmp_path / "a.jsonl"
     e = _entry(seq=5)
-    _write_lines(p, [SweepAuditEntry(**{**_entry_kwargs(e), "entry_hash": e.compute_hash()})])
+    _write_lines(p, [replace(e, entry_hash=e.compute_hash())])
     with pytest.raises(SweepAuditChainCorruption) as ei:
         verify_chain(p)
     assert ei.value.reason == "seq number out of order"
@@ -241,7 +242,7 @@ def test_verify_seq_out_of_order(tmp_path: Path) -> None:
 def test_verify_prev_hash_break(tmp_path: Path) -> None:
     p = tmp_path / "a.jsonl"
     bad = _entry(prev_hash="f" * 64)
-    bad = SweepAuditEntry(**{**_entry_kwargs(bad), "entry_hash": bad.compute_hash()})
+    bad = replace(bad, entry_hash=bad.compute_hash())
     _write_lines(p, [bad])
     with pytest.raises(SweepAuditChainCorruption) as ei:
         verify_chain(p)
@@ -256,18 +257,6 @@ def test_verify_entry_hash_tamper(tmp_path: Path) -> None:
         verify_chain(p)
     assert "content tampered" in ei.value.reason
     assert ei.value.seq == 0
-
-
-def _entry_kwargs(e: SweepAuditEntry) -> dict[str, Any]:
-    return {
-        "seq": e.seq,
-        "prev_hash": e.prev_hash,
-        "ts_utc": e.ts_utc,
-        "actor": e.actor,
-        "action": e.action,
-        "subject": e.subject,
-        "payload": e.payload,
-    }
 
 
 # ── property: honest chains verify; tamper is caught ────────────────────────
@@ -299,10 +288,7 @@ def test_property_single_payload_tamper_breaks_chain(tmp_path: Path) -> None:
         w.append(action="B", subject="s1", payload={"v": 2}, ts_utc=2.0)
     entries = read_entries(p)
     # Flip a payload value on entry 0 but keep its (now stale) stored hash.
-    tampered = SweepAuditEntry(
-        **{**_entry_kwargs(entries[0]), "payload": {"v": 999}},
-        entry_hash=entries[0].entry_hash,
-    )
+    tampered = replace(entries[0], payload={"v": 999}, entry_hash=entries[0].entry_hash)
     _write_lines(p, [tampered, entries[1]])
     with pytest.raises(SweepAuditChainCorruption):
         verify_chain(p)
