@@ -448,6 +448,24 @@ class TestRunSupervisedGrid:
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert actions[-1] == "SUPERVISOR_ABORT"
 
+    def test_reuse_bar_bits_disabled(self, tmp_path: Path) -> None:
+        """reuse_bar_bits=False takes the legacy no-kernel-cache branch."""
+        grid = _grid()
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path, grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+                reuse_bar_bits=False,
+            )
+        assert summary.tuples_skipped_no_bars == 1
+
     def test_watchdog_daemon_thread_starts_and_stops(self, tmp_path: Path) -> None:
         """watchdog_poll_seconds spawns + joins the detector daemon (no-bars grid)."""
         grid = _grid()

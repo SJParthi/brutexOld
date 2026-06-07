@@ -518,6 +518,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
     )
+    sweep_all.add_argument(
+        "--overfit-gate",
+        action="store_true",
+        dest="overfit_gate",
+        help=(
+            "Enable the Stage-3 multiple-testing overfit gate (Deflated Sharpe) "
+            "per leaderboard (DEC-RANKING-OVERFIT-001); off by default"
+        ),
+    )
+    sweep_all.add_argument(
+        "--dsr-min",
+        type=float,
+        default=0.95,
+        dest="dsr_min",
+        help="Min Deflated-Sharpe probability to survive the overfit gate (default 0.95)",
+    )
 
     return parser
 
@@ -1449,6 +1465,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     max_tuples: int | None,
     max_combos: int | None,
     data_snapshot_hash: str | None,
+    overfit_gate: bool = False,
+    dsr_min: float = 0.95,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -1486,6 +1504,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.feed.replay import ReplayFeed
     from brutex.feed.resampler import INTERVAL_SECONDS
     from brutex.orchestrator.audit import AuditWriter
+    from brutex.ranking import OverfitGateConfig
     from brutex.strategies.types import Side
 
     resolved_lake = _resolve_lake_root(lake_root)
@@ -1567,6 +1586,8 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         grid_kwargs["max_tuples"] = max_tuples
     if max_combos is not None:
         grid_kwargs["max_combos"] = max_combos
+    if overfit_gate:
+        grid_kwargs["overfit"] = OverfitGateConfig(dsr_min=dsr_min)
 
     try:
         grid = SweepGridConfig(**grid_kwargs)
@@ -1753,6 +1774,8 @@ def main(argv: list[str] | None = None) -> int:
             max_tuples=args.max_tuples,
             max_combos=args.max_combos,
             data_snapshot_hash=args.data_snapshot_hash,
+            overfit_gate=args.overfit_gate,
+            dsr_min=args.dsr_min,
         )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits

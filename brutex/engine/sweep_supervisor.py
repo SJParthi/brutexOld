@@ -87,6 +87,7 @@ import structlog
 
 from brutex.engine.sweep_cache import SweepCache, combo_digest
 from brutex.engine.sweep_checkpoint import SweepCheckpointStore
+from brutex.engine.sweep_kernel import ResidentKernelCache
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
@@ -405,6 +406,7 @@ def run_supervised_grid(
     on_tuple: Callable[[SweepTuple, SweepRunSummary], None] | None = None,
     on_progress: Callable[[SweepProgressSnapshot], None] | None = None,
     watchdog_poll_seconds: float | None = None,
+    reuse_bar_bits: bool = True,
 ) -> SupervisedGridSummary:
     """Run the grid with the full live guarantee-&-assurance layer wired in.
 
@@ -476,6 +478,12 @@ def run_supervised_grid(
         When set, a daemon thread polls :meth:`SweepWatchdog.check_once` on this
         cadence (active inter-tuple hang detection); when ``None`` (default), the
         heartbeat is recorded but no active detection runs.
+    reuse_bar_bits
+        When ``True`` (default), reuse one Stage-1A bar window per distinct
+        ``(instrument, tf, proximity, prior_n)`` across its tuples via a bounded
+        :class:`~brutex.engine.sweep_kernel.ResidentKernelCache`
+        (DEC-SWEEP-RESIDENT-KERNEL-001) — byte-identical results, only the
+        redundant rebuild is skipped; ``False`` rebuilds per tuple.
 
     Returns
     -------
@@ -523,6 +531,11 @@ def run_supervised_grid(
     evaluated = 0
     ranked = 0
     persisted = 0
+
+    # Bounded resident-kernel cache (DEC-SWEEP-RESIDENT-KERNEL-001): reuse one
+    # Stage-1A bar window per distinct (instrument, tf, proximity, prior_n) across
+    # its direction/K/sl/tp tuples; None disables reuse (legacy per-tuple rebuild).
+    kernel_cache = ResidentKernelCache(capacity=len(grid.proximities)) if reuse_bar_bits else None
 
     stop_event = threading.Event()
     wd_thread: threading.Thread | None = None
@@ -581,6 +594,7 @@ def run_supervised_grid(
                 dedup=dedup,
                 audit=ingest_audit,
                 skip_empty=skip_empty,
+                kernel_cache=kernel_cache,
             )
             if summary is None:
                 tuples_skipped_no_bars += 1
