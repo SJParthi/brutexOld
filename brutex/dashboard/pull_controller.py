@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from brutex.adapters.dhan.auth import dhan_creds_present
+from brutex.adapters.dhan.pull_verdict import PullVerdict, classify_pull
 from brutex.adapters.dhan.run_ingest import (
     ProgressHook,
     run_dhan_spot_ingest,
@@ -529,6 +530,13 @@ class BulkSpotReport:
     start_date: str
     end_date: str
     symbols: list[SymbolPullResult] = field(default_factory=list)
+    auth_aborted: bool = False
+    """True if the Dhan token died mid-pull (DEC-DHAN-AUTH-FAILFAST-RENEW-001) —
+    drives the loud ``auth_expired`` verdict (DEC-PULL-VERDICT-001)."""
+    auth_cause: str | None = None
+    """The first dead-token cause string, carried onto the ``auth_expired`` verdict."""
+    still_failed_windows: int = 0
+    """Windows still failing after the in-run retry budget — deferred to the next pull."""
 
     @property
     def total_symbols(self) -> int:
@@ -550,6 +558,24 @@ class BulkSpotReport:
         """Total pairs the vendor returned empty."""
         return sum(s.no_data for s in self.symbols)
 
+    @property
+    def verdict(self) -> PullVerdict:
+        """The prioritised, actionable verdict for this pull (DEC-PULL-VERDICT-001).
+
+        Turns the raw tallies into one operator instruction so a token-stuck or
+        retry-residual pull never sits silent — ``auth_expired`` (regenerate the
+        token), ``transient_residual`` (re-pull / auto-retry finishes),
+        ``known_gap_only`` (reference symbols with no intraday), or ``clean``.
+        """
+        return classify_pull(
+            auth_aborted=self.auth_aborted,
+            still_failed_windows=self.still_failed_windows,
+            failed_pairs=self.total_failed,
+            no_data=self.total_no_data,
+            completed=self.total_completed,
+            auth_cause=self.auth_cause,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dict for the ``/api/v1/universe/pull-all`` route."""
         return {
@@ -560,6 +586,7 @@ class BulkSpotReport:
             "total_completed": self.total_completed,
             "total_failed": self.total_failed,
             "total_no_data": self.total_no_data,
+            "verdict": self.verdict.to_dict(),
             "symbols": [
                 {
                     "symbol": s.symbol,
@@ -1043,7 +1070,11 @@ def pull_all_spot(
             start_date=start.date().isoformat(),
             end_date=(end - timedelta(days=1)).date().isoformat(),
             symbols=results,
+            auth_aborted=report.auth_aborted,
+            auth_cause=report.auth_cause,
+            still_failed_windows=report.still_failed_windows,
         )
+        verdict = bulk.verdict
         _LOG.info(
             "universe.pull_all.done",
             pull_id=pid,
@@ -1051,7 +1082,23 @@ def pull_all_spot(
             completed=bulk.total_completed,
             failed=bulk.total_failed,
             dry_run=dry_run,
+            verdict=verdict.kind,
+            pending_windows=verdict.pending_windows,
         )
+        # Loud, actionable surface (DEC-PULL-VERDICT-001): when the operator must
+        # act (a dead token, or windows still pending), emit ONE WARNING carrying
+        # the headline + the exact next step + the pending count, so a stuck pull
+        # is never silent in /logs (mirrors the loud ingest.auth_aborted alert).
+        if verdict.needs_operator:
+            _LOG.warning(
+                "universe.pull_all.action_required",
+                pull_id=pid,
+                verdict=verdict.kind,
+                headline=verdict.headline,
+                action=verdict.action,
+                pending_windows=verdict.pending_windows,
+                auth_cause=verdict.auth_cause,
+            )
     return bulk
 
 

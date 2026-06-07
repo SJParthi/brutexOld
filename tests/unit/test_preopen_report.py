@@ -29,6 +29,7 @@ from brutex.dashboard.preopen_report import (
     _daily_close_by_date,
     _daily_open_by_date,
     _group_by_month,
+    _minute_prev_close_contiguous,
     _month_label,
     _row_fill_styles,
     build_preopen_rows,
@@ -624,6 +625,112 @@ def test_build_minute_basis_no_minute_partition_is_empty(tmp_path: Path) -> None
         basis="minute",
     )
     assert rows == []
+
+
+# ── DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001 — no fake mover across a data hole ────
+
+
+def test_minute_prev_close_contiguous_branches() -> None:
+    # The pure guard: PREV. CLOSE is the IMMEDIATELY-preceding 1-day session's
+    # last 1-minute close, valid ONLY when that session has minute data.
+    d1, d2, d3 = date(2026, 6, 3), date(2026, 6, 4), date(2026, 6, 5)
+    trading_dates = [d1, d2, d3]
+    minute_last = {d1: Decimal("630")}
+    # valid — the prior session (d1) has minute data → its last close.
+    assert _minute_prev_close_contiguous(minute_last, trading_dates, d2) == Decimal("630")
+    # missing — the prior session (d2) has NO minute data → None (skip, no fake anchor).
+    assert _minute_prev_close_contiguous(minute_last, trading_dates, d3) is None
+    # first session — no prior 1-day date (idx == 0) → None.
+    assert _minute_prev_close_contiguous(minute_last, trading_dates, d1) is None
+    # zero prior close → None (never a /0 %CHNG).
+    assert _minute_prev_close_contiguous({d2: Decimal("0")}, [d2, d3], d3) is None
+
+
+def test_build_minute_basis_skips_row_when_prior_window_missing(tmp_path: Path) -> None:
+    # The JUBLINGREA bug (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001): the prior trading
+    # day's 1-minute window is MISSING from the lake (it failed/was never fetched),
+    # but a STALE far-earlier minute close exists. The 1-day series is the calendar
+    # and proves the prior session (06-03) IS a trading day — so the report must
+    # SKIP 06-04 rather than anchor PREV. CLOSE on the stale 685 (a fake −7.88%).
+    # ParquetWriter writes ONE (year, month) partition per call — split by month.
+    _write(
+        tmp_path,
+        "JUBLINGREA",
+        "1day",
+        [_bar(datetime(2026, 4, 1, 3, 45, tzinfo=UTC), open_="680", close="685")],
+    )
+    _write(
+        tmp_path,
+        "JUBLINGREA",
+        "1day",
+        [
+            _bar(datetime(2026, 6, 3, 3, 45, tzinfo=UTC), open_="629", close="630"),
+            _bar(datetime(2026, 6, 4, 3, 45, tzinfo=UTC), open_="631", close="632"),
+        ],
+    )
+    # a stale 01-Apr minute close (685) — the value the OLD code anchored on
+    _write(
+        tmp_path,
+        "JUBLINGREA",
+        "1minute",
+        [_bar(datetime(2026, 4, 1, 3, 45, tzinfo=UTC), open_="684", close="685")],
+    )
+    # 03-Jun (the real prior session) is ABSENT — the missing window. 04-Jun has
+    # its 09:15 open but no valid prior-session anchor.
+    _write(
+        tmp_path,
+        "JUBLINGREA",
+        "1minute",
+        [_bar(datetime(2026, 6, 4, 3, 45, tzinfo=UTC), open_="631", close="631.5")],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "JUBLINGREA")],
+        start=date(2026, 1, 1),
+        end=date(2026, 12, 31),
+        basis="minute",
+    )
+    # 01-Apr → skipped (first session); 04-Jun → skipped (prior 03-Jun minute hole).
+    # NO fake −7.88% row anchored on the stale 685.
+    assert rows == []
+
+
+def test_build_minute_basis_contiguous_uses_prior_session(tmp_path: Path) -> None:
+    # The healthy case: the prior trading session (06-03) HAS minute data, so the
+    # 04-Jun row is emitted with PREV. CLOSE = 03-Jun's last 1-minute close (630).
+    _write(
+        tmp_path,
+        "JUBLINGREA",
+        "1day",
+        [
+            _bar(datetime(2026, 6, 3, 3, 45, tzinfo=UTC), open_="629", close="630"),
+            _bar(datetime(2026, 6, 4, 3, 45, tzinfo=UTC), open_="631", close="632"),
+        ],
+    )
+    _write(
+        tmp_path,
+        "JUBLINGREA",
+        "1minute",
+        [
+            _bar(datetime(2026, 6, 3, 3, 45, tzinfo=UTC), open_="629", close="629.5"),
+            _bar(datetime(2026, 6, 3, 9, 44, tzinfo=UTC), open_="629.5", close="630"),  # 15:29 last
+            _bar(datetime(2026, 6, 4, 3, 45, tzinfo=UTC), open_="631.05", close="631.5"),  # 09:15
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "JUBLINGREA")],
+        start=date(2026, 1, 1),
+        end=date(2026, 12, 31),
+        basis="minute",
+    )
+    assert len(rows) == 1
+    assert rows[0].day == date(2026, 6, 4)
+    assert rows[0].prev_close == Decimal("630")  # 03-Jun's LAST 1-minute close
+    assert rows[0].iep == Decimal("631.05")  # 04-Jun's 09:15 open
+    assert rows[0].chng == Decimal("1.05")
 
 
 # ── DEC-REPORTS-EXCEL-CATEGORIES-001 — two categories + per-year/per-month zip ─
