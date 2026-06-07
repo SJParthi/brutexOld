@@ -53,6 +53,25 @@ file is `docs/MIGRATION.md` (append) → `git merge origin/main`, keep both.
 
 ---
 
+## STANDING GUARANTEE & ASSURANCE BLOCK (every prompt embeds this verbatim)
+
+> **Operator decree (2026-06-07):** every Wave-2 prompt below ends with this
+> exact block so each is self-contained when copy-pasted into its own session.
+> It is HONEST by construction (Golden Rule #10): O(1) is claimed **per
+> operation** with bounded memory — never the physically-impossible O(1) total.
+
+```
+GUARANTEE & ASSURANCE (MANDATORY — obey verbatim; no illusion, no hallucination):
+- DEEP RESEARCH FIRST: run the 4-agent hostile review (Plan + Explore + 2x general-purpose) and any sub-agents to CONFIRM THE ENTIRE WORKSPACE WORKS AS EXPECTED both before and after your change (ruff + ruff-format + mypy --strict + pyright 0/0, full pytest green, no import breakage). Every factual claim must trace to a file:line or a real command's output — never assert, always verify.
+- O(1) EVERYWHERE (HONEST, Golden Rule #10): every hot-path operation — uniqueness, deduplication, mapping/lookup, append/write, u64 mask-eval — must be O(1) TIME PER OPERATION with bounded/streaming (O(1) amortized) MEMORY PER OPERATION, proven by a CI O(1)-ratio bench p99(N=1M)/p99(N=1K) <= 1.1. NEVER claim O(1) TOTAL time/space for a whole sweep: N combos is inherently O(N) work + O(N) stored results, so O(1)-total is a hallucination and is FORBIDDEN. State the honest envelope explicitly.
+- WORST-CASE HARDENING: cover EVERY worst case / scenario / error / exception / bug / root-cause — empty, zero, oversized, malformed, crash-mid-op, concurrent, rerun/idempotent — each with an explicit test, plus real-time checks (alarms / gauges / audit hash-chain) on every material action, with guarantee + assurance.
+- 100% TESTING: 100% line + 100% branch on every new/touched brutex module (add the strict gate to ci.yml); all 7 test types (unit, integration, property/hypothesis, golden byte-equality, bench/O(1), stress, mutation >= 85%).
+- FULLY AUTOMATED: zero manual steps after bootstrap; the feature is self-driving with real-time guarantee + assurance.
+- MERGE & PROCEED: DRAFT PR -> all 4 PR-body guards green (zplus + definition-of-ready + validate_no_hallucination + validate_dec_ids) -> mark ready -> MONITOR CI until green -> on ANY conflict/failure, resolve + re-push + re-merge -> MERGE on green (NEVER over a red/pending gate). ALWAYS monitor PR status and ensure it merges; once merged, GO AHEAD with the next step of the plan — always. Add a MIGRATION.md DEC-ID entry using the NEXT FREE number (check the file tail first to avoid an append collision).
+```
+
+---
+
 ## W2-a — Full sweep orchestrator + result persistence
 
 ```
@@ -64,6 +83,14 @@ BRANCH: claude/sweep-orchestrator-full (branch from origin/main).
 PREREQUISITE: the Phase-3 engine slice (Wave-1 session S4) MUST be merged first.
 
 DELIVER + DISCIPLINE: ruff format+check, mypy --strict, pyright (brutex+tests 0/0); 100% line+branch on every new brutex/* module (add the strict gate test files in .github/workflows/ci.yml); add a MIGRATION.md DEC-ID entry; the PR body MUST pass scripts/ci/zplus-pr-guard.sh + definition-of-ready-guard.sh + validate_no_hallucination.py + validate_dec_ids.py (run locally first). DRAFT PR → mark ready → MONITOR CI to green → fix any failure → MERGE on green. CI (3.12) is the oracle for the wheel/PEP-695 chain; unit-test pure pieces locally. Resolve trivial docs/MIGRATION.md append conflicts via `git merge origin/main`.
+
+GUARANTEE & ASSURANCE (MANDATORY — obey verbatim; no illusion, no hallucination):
+- DEEP RESEARCH FIRST: run the 4-agent hostile review (Plan + Explore + 2x general-purpose) and any sub-agents to CONFIRM THE ENTIRE WORKSPACE WORKS AS EXPECTED both before and after your change (ruff + ruff-format + mypy --strict + pyright 0/0, full pytest green, no import breakage). Every factual claim must trace to a file:line or a real command's output — never assert, always verify.
+- O(1) EVERYWHERE (HONEST, Golden Rule #10): every hot-path operation — uniqueness, deduplication, mapping/lookup, append/write, u64 mask-eval — must be O(1) TIME PER OPERATION with bounded/streaming (O(1) amortized) MEMORY PER OPERATION, proven by a CI O(1)-ratio bench p99(N=1M)/p99(N=1K) <= 1.1. NEVER claim O(1) TOTAL time/space for a whole sweep: N combos is inherently O(N) work + O(N) stored results, so O(1)-total is a hallucination and is FORBIDDEN. State the honest envelope explicitly.
+- WORST-CASE HARDENING: cover EVERY worst case / scenario / error / exception / bug / root-cause — empty, zero, oversized, malformed, crash-mid-op, concurrent, rerun/idempotent — each with an explicit test, plus real-time checks (alarms / gauges / audit hash-chain) on every material action, with guarantee + assurance.
+- 100% TESTING: 100% line + 100% branch on every new/touched brutex module (add the strict gate to ci.yml); all 7 test types (unit, integration, property/hypothesis, golden byte-equality, bench/O(1), stress, mutation >= 85%).
+- FULLY AUTOMATED: zero manual steps after bootstrap; the feature is self-driving with real-time guarantee + assurance.
+- MERGE & PROCEED: DRAFT PR -> all 4 PR-body guards green (zplus + definition-of-ready + validate_no_hallucination + validate_dec_ids) -> mark ready -> MONITOR CI until green -> on ANY conflict/failure, resolve + re-push + re-merge -> MERGE on green (NEVER over a red/pending gate). ALWAYS monitor PR status and ensure it merges; once merged, GO AHEAD with the next step of the plan — always. Add a MIGRATION.md DEC-ID entry using the NEXT FREE number (check the file tail first to avoid an append collision).
 ```
 
 ## W2-b — Wire the Wave-1 G&A modules into the sweep loop
@@ -77,6 +104,14 @@ BRANCH: claude/sweep-wire-ga (branch from origin/main).
 PREREQUISITE: Wave-1 S4 + S7 AND W2-a all merged first.
 
 DELIVER + DISCIPLINE: same as W2-a — ruff/mypy/pyright 0/0, 100% coverage on touched modules, MIGRATION.md DEC-ID, PR body passes the 4 scripts/ci guards, DRAFT→ready→monitor→merge on green, resolve trivial MIGRATION.md conflicts via `git merge origin/main`.
+
+GUARANTEE & ASSURANCE (MANDATORY — obey verbatim; no illusion, no hallucination):
+- DEEP RESEARCH FIRST: run the 4-agent hostile review (Plan + Explore + 2x general-purpose) and any sub-agents to CONFIRM THE ENTIRE WORKSPACE WORKS AS EXPECTED both before and after your change (ruff + ruff-format + mypy --strict + pyright 0/0, full pytest green, no import breakage). Every factual claim must trace to a file:line or a real command's output — never assert, always verify.
+- O(1) EVERYWHERE (HONEST, Golden Rule #10): every hot-path operation — uniqueness, deduplication, mapping/lookup, append/write, u64 mask-eval — must be O(1) TIME PER OPERATION with bounded/streaming (O(1) amortized) MEMORY PER OPERATION, proven by a CI O(1)-ratio bench p99(N=1M)/p99(N=1K) <= 1.1. NEVER claim O(1) TOTAL time/space for a whole sweep: N combos is inherently O(N) work + O(N) stored results, so O(1)-total is a hallucination and is FORBIDDEN. State the honest envelope explicitly.
+- WORST-CASE HARDENING: cover EVERY worst case / scenario / error / exception / bug / root-cause — empty, zero, oversized, malformed, crash-mid-op, concurrent, rerun/idempotent — each with an explicit test, plus real-time checks (alarms / gauges / audit hash-chain) on every material action, with guarantee + assurance.
+- 100% TESTING: 100% line + 100% branch on every new/touched brutex module (add the strict gate to ci.yml); all 7 test types (unit, integration, property/hypothesis, golden byte-equality, bench/O(1), stress, mutation >= 85%).
+- FULLY AUTOMATED: zero manual steps after bootstrap; the feature is self-driving with real-time guarantee + assurance.
+- MERGE & PROCEED: DRAFT PR -> all 4 PR-body guards green (zplus + definition-of-ready + validate_no_hallucination + validate_dec_ids) -> mark ready -> MONITOR CI until green -> on ANY conflict/failure, resolve + re-push + re-merge -> MERGE on green (NEVER over a red/pending gate). ALWAYS monitor PR status and ensure it merges; once merged, GO AHEAD with the next step of the plan — always. Add a MIGRATION.md DEC-ID entry using the NEXT FREE number (check the file tail first to avoid an append collision).
 ```
 
 ## W2-c — Throughput SLA on the real sweep path
@@ -90,6 +125,14 @@ BRANCH: claude/sweep-throughput-sla (branch from origin/main).
 PREREQUISITE: W2-a merged.
 
 DELIVER + DISCIPLINE: ruff/mypy/pyright 0/0; keep all bench ratio gates green; 100% coverage on touched modules; MIGRATION.md DEC-ID; PR body passes the 4 scripts/ci guards; DRAFT→ready→monitor→merge on green; trivial MIGRATION.md conflicts via `git merge origin/main`. Be brutally honest about measured vs target throughput (no illusion).
+
+GUARANTEE & ASSURANCE (MANDATORY — obey verbatim; no illusion, no hallucination):
+- DEEP RESEARCH FIRST: run the 4-agent hostile review (Plan + Explore + 2x general-purpose) and any sub-agents to CONFIRM THE ENTIRE WORKSPACE WORKS AS EXPECTED both before and after your change (ruff + ruff-format + mypy --strict + pyright 0/0, full pytest green, no import breakage). Every factual claim must trace to a file:line or a real command's output — never assert, always verify.
+- O(1) EVERYWHERE (HONEST, Golden Rule #10): every hot-path operation — uniqueness, deduplication, mapping/lookup, append/write, u64 mask-eval — must be O(1) TIME PER OPERATION with bounded/streaming (O(1) amortized) MEMORY PER OPERATION, proven by a CI O(1)-ratio bench p99(N=1M)/p99(N=1K) <= 1.1. NEVER claim O(1) TOTAL time/space for a whole sweep: N combos is inherently O(N) work + O(N) stored results, so O(1)-total is a hallucination and is FORBIDDEN. State the honest envelope explicitly.
+- WORST-CASE HARDENING: cover EVERY worst case / scenario / error / exception / bug / root-cause — empty, zero, oversized, malformed, crash-mid-op, concurrent, rerun/idempotent — each with an explicit test, plus real-time checks (alarms / gauges / audit hash-chain) on every material action, with guarantee + assurance.
+- 100% TESTING: 100% line + 100% branch on every new/touched brutex module (add the strict gate to ci.yml); all 7 test types (unit, integration, property/hypothesis, golden byte-equality, bench/O(1), stress, mutation >= 85%).
+- FULLY AUTOMATED: zero manual steps after bootstrap; the feature is self-driving with real-time guarantee + assurance.
+- MERGE & PROCEED: DRAFT PR -> all 4 PR-body guards green (zplus + definition-of-ready + validate_no_hallucination + validate_dec_ids) -> mark ready -> MONITOR CI until green -> on ANY conflict/failure, resolve + re-push + re-merge -> MERGE on green (NEVER over a red/pending gate). ALWAYS monitor PR status and ensure it merges; once merged, GO AHEAD with the next step of the plan — always. Add a MIGRATION.md DEC-ID entry using the NEXT FREE number (check the file tail first to avoid an append collision).
 ```
 
 ## W2-d — Wire the overfitting gates into ranking (Stage 3)
@@ -103,6 +146,14 @@ BRANCH: claude/overfit-gates-ranking (branch from origin/main).
 PREREQUISITE: W2-a merged (needs persisted sweep results to validate).
 
 DELIVER + DISCIPLINE: ruff/mypy/pyright 0/0; 100% coverage on touched brutex/* modules; MIGRATION.md DEC-ID; PR body passes the 4 scripts/ci guards; DRAFT→ready→monitor→merge on green; trivial MIGRATION.md conflicts via `git merge origin/main`. Honest envelope: state which statistical assumptions each test makes; do not over-claim significance.
+
+GUARANTEE & ASSURANCE (MANDATORY — obey verbatim; no illusion, no hallucination):
+- DEEP RESEARCH FIRST: run the 4-agent hostile review (Plan + Explore + 2x general-purpose) and any sub-agents to CONFIRM THE ENTIRE WORKSPACE WORKS AS EXPECTED both before and after your change (ruff + ruff-format + mypy --strict + pyright 0/0, full pytest green, no import breakage). Every factual claim must trace to a file:line or a real command's output — never assert, always verify.
+- O(1) EVERYWHERE (HONEST, Golden Rule #10): every hot-path operation — uniqueness, deduplication, mapping/lookup, append/write, u64 mask-eval — must be O(1) TIME PER OPERATION with bounded/streaming (O(1) amortized) MEMORY PER OPERATION, proven by a CI O(1)-ratio bench p99(N=1M)/p99(N=1K) <= 1.1. NEVER claim O(1) TOTAL time/space for a whole sweep: N combos is inherently O(N) work + O(N) stored results, so O(1)-total is a hallucination and is FORBIDDEN. State the honest envelope explicitly.
+- WORST-CASE HARDENING: cover EVERY worst case / scenario / error / exception / bug / root-cause — empty, zero, oversized, malformed, crash-mid-op, concurrent, rerun/idempotent — each with an explicit test, plus real-time checks (alarms / gauges / audit hash-chain) on every material action, with guarantee + assurance.
+- 100% TESTING: 100% line + 100% branch on every new/touched brutex module (add the strict gate to ci.yml); all 7 test types (unit, integration, property/hypothesis, golden byte-equality, bench/O(1), stress, mutation >= 85%).
+- FULLY AUTOMATED: zero manual steps after bootstrap; the feature is self-driving with real-time guarantee + assurance.
+- MERGE & PROCEED: DRAFT PR -> all 4 PR-body guards green (zplus + definition-of-ready + validate_no_hallucination + validate_dec_ids) -> mark ready -> MONITOR CI until green -> on ANY conflict/failure, resolve + re-push + re-merge -> MERGE on green (NEVER over a red/pending gate). ALWAYS monitor PR status and ensure it merges; once merged, GO AHEAD with the next step of the plan — always. Add a MIGRATION.md DEC-ID entry using the NEXT FREE number (check the file tail first to avoid an append collision).
 ```
 
 ---
