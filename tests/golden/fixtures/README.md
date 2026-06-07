@@ -16,7 +16,7 @@ in the calling test so any unintended drift is caught at test time.
 | 4 | INDIA VIX — 1 week | reference-only data; no signal bits | Phase 2 |
 | 5 | Cross-instrument resample (1m → 5m) | resample associativity (P-08) | Phase 2 |
 | 7 | 52-condition truth table | per-condition determinism (G9) | ✅ **landed** (see below) |
-| 8 | 12-fill paisa accounting | gross/net/Σ PnL (P-03, P-04) | Phase 2 |
+| 8 | 12-fill paisa accounting | gross/net/Σ PnL (P-03, P-04) | ✅ **landed** (see below) |
 | 9 | combo-hash distinct inputs | hash uniqueness (P-01, P-02) | Phase 2 |
 
 ## Landed corpora
@@ -39,12 +39,24 @@ truth, `brutex/vocabulary/bits.py`.
 * Regenerate: `python scripts/gen_condition_truth_table.py` then update the
   `_EXPECTED_SHA256` manifest in the test.
 
+### #8 — 12-fill paisa accounting (P-03 per-trade · P-04 Σ PnL)
+
+`../test_engine_paisa_accounting_golden.py` (DEC-ENGINE-PAISA-ACCOUNTING-GOLDEN-001,
+MIGRATION entry #544). Locks the int64-paisa accounting across many back-to-back
+round-trips: one `ClosedTrade` per fill with the exact per-trade paisa P&L
+(P-03), and the aggregate **Σ PnL as the EXACT integer sum** with no float drift
+(P-04). Correct-by-construction: **12 identical copies** of the already-golden
+Fixture-A trade 1 from `test_engine_trade_sim_golden.py` (long, take-profit +50p
+→ pnl 50 / mfe 60 / mae 10 / holding 2) ⇒ **Σ = 12 × 50 = 600 paisa**. Track-1
+spot is signal-only → NO brokerage (CLAUDE.md §7), so net == gross.
+
 ## Status
 
-📋 ROADMAP (remaining corpora #1–5, #8, #9) — these land alongside the Phase 2
-ingest pipeline. Corpus #7 (truth table) is ✅ landed.
+📋 ROADMAP (remaining corpora #1–5, #9) — these land alongside the Phase 2
+ingest pipeline. Corpora #7 (truth table) + #8 (paisa accounting) are ✅ landed.
 
 ## Decision
 
 DEC-PHASE1-GOLDEN-FIXTURES-DIR-001 (MIGRATION entry #251);
-DEC-PHASE2-TRUTH-TABLE-001 (MIGRATION entry #538).
+DEC-PHASE2-TRUTH-TABLE-001 (MIGRATION entry #538);
+DEC-ENGINE-PAISA-ACCOUNTING-GOLDEN-001 (MIGRATION entry #544).
