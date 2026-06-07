@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 
 import pytest
 from brutex.notifications.sweep_alerts import SweepAlerter, escape_markdown_v2
@@ -39,6 +38,18 @@ class RecordingTransport:
         """Record the send and report success."""
         self.sends.append((config, event))
         return True
+
+
+@dataclass(frozen=True)
+class FakeSummary:
+    """Typed :class:`SweepSummaryLike` stand-in for the complete-alert test."""
+
+    sweep_id: str
+    tuples_run: int
+    tuples_total: int
+    evaluated: int
+    ranked: int
+    persisted: int
 
 
 @pytest.fixture
@@ -71,7 +82,7 @@ class TestSyncWire:
         )
         alerter.rate_breach(current_rps=3.0, recent_hits=5)
         alerter.auth_renew_failed(reason="token expired")
-        summary = SimpleNamespace(
+        summary = FakeSummary(
             sweep_id="deadbeefcafe0001",
             tuples_run=8,
             tuples_total=8,

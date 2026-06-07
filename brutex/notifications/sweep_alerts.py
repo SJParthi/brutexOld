@@ -38,7 +38,7 @@ never the ``fastbloom_rs`` / ``lmdb`` PyO3 chain pulled by
 lazily inside the default resolver so the strict per-module coverage gate stays
 clean (the same precedent as :mod:`brutex.observability.standard_monitor`).
 
-## Decision: DEC-TELEGRAM-WIRE-001 (MIGRATION.md entry #565).
+## Decision: DEC-TELEGRAM-WIRE-001 (MIGRATION.md entry #566).
 """
 
 from __future__ import annotations
@@ -50,15 +50,28 @@ from typing import Final, Protocol
 from brutex.notifications.telegram import (
     TelegramEvent,
     TelegramEventKind,
-    TelegramNotifier,
     TelegramSeverity,
 )
 
 logger = logging.getLogger(__name__)
 
+
+class NotifierLike(Protocol):
+    """Structural type for the notifier surface :class:`SweepAlerter` uses.
+
+    Matched by :class:`brutex.notifications.telegram.TelegramNotifier` (and by any
+    test fake exposing the same one-method surface), so the alerter never depends
+    on the concrete notifier class.
+    """
+
+    def publish(self, event: TelegramEvent) -> None:
+        """Enqueue *event* for best-effort, non-blocking delivery."""
+        ...
+
+
 #: A zero-arg callable returning the active notifier (or ``None`` when Telegram
 #: is disabled). The default is the lazy process singleton; tests inject a fake.
-NotifierResolver = Callable[[], TelegramNotifier | None]
+NotifierResolver = Callable[[], NotifierLike | None]
 
 #: Telegram MarkdownV2 reserved characters that MUST be backslash-escaped in any
 #: dynamic text, per the Bot API spec (``api.telegram.org/bots/api#markdownv2-style``).
@@ -90,9 +103,7 @@ def escape_markdown_v2(text: str) -> str:
     return "".join(out)
 
 
-def _resolve_singleton_notifier() -> (
-    TelegramNotifier | None
-):  # pragma: no cover — lazy wiring import
+def _resolve_singleton_notifier() -> NotifierLike | None:  # pragma: no cover — lazy wiring import
     """Default resolver: the process-wide singleton via the wiring layer.
 
     Excluded from this module's coverage gate because it is a pure two-line
@@ -112,13 +123,16 @@ class RateControllerLike(Protocol):
     """Structural type for the Dhan rate controller bits :class:`SweepAlerter` reads.
 
     Matched by :class:`brutex.adapters.dhan.rate_control.DhanRateController`. The
-    ``...`` method bodies are coverage-excluded (never executed — Protocols are
-    structural-only).
+    method bodies are never executed (Protocols are structural-only).
     """
 
-    def on_rate_limit(self) -> None: ...
+    def on_rate_limit(self) -> None:
+        """Record a 429 and maybe step the rate down (the controller's own hook)."""
+        ...
 
-    def snapshot(self) -> dict[str, object]: ...
+    def snapshot(self) -> dict[str, object]:
+        """Return the JSON-friendly state (``current_rps`` / ``recent_hits`` / …)."""
+        ...
 
 
 class WorkerEventLike(Protocol):
@@ -128,13 +142,19 @@ class WorkerEventLike(Protocol):
     """
 
     @property
-    def worker_name(self) -> str: ...
+    def worker_name(self) -> str:
+        """The hung worker's name."""
+        ...
 
     @property
-    def last_beat_seconds_ago(self) -> float: ...
+    def last_beat_seconds_ago(self) -> float:
+        """Seconds since the worker's last heartbeat."""
+        ...
 
     @property
-    def timeout_seconds(self) -> float: ...
+    def timeout_seconds(self) -> float:
+        """The configured hung threshold (seconds)."""
+        ...
 
 
 class SweepSummaryLike(Protocol):
@@ -144,22 +164,34 @@ class SweepSummaryLike(Protocol):
     """
 
     @property
-    def sweep_id(self) -> str: ...
+    def sweep_id(self) -> str:
+        """The grid-identity digest."""
+        ...
 
     @property
-    def tuples_run(self) -> int: ...
+    def tuples_run(self) -> int:
+        """Tuples evaluated this run."""
+        ...
 
     @property
-    def tuples_total(self) -> int: ...
+    def tuples_total(self) -> int:
+        """Full grid size."""
+        ...
 
     @property
-    def evaluated(self) -> int: ...
+    def evaluated(self) -> int:
+        """Masks evaluated across the run."""
+        ...
 
     @property
-    def ranked(self) -> int: ...
+    def ranked(self) -> int:
+        """Finalists ranked across the run."""
+        ...
 
     @property
-    def persisted(self) -> int: ...
+    def persisted(self) -> int:
+        """Finalists persisted across the run."""
+        ...
 
 
 class SweepAlerter:
@@ -180,7 +212,7 @@ class SweepAlerter:
     def __init__(
         self,
         *,
-        notifier: TelegramNotifier | None = None,
+        notifier: NotifierLike | None = None,
         resolver: NotifierResolver = _resolve_singleton_notifier,
     ) -> None:
         self._explicit = notifier
@@ -188,7 +220,7 @@ class SweepAlerter:
 
     # ── Resolution + publish (best-effort core) ─────────────────────
 
-    def _notifier(self) -> TelegramNotifier | None:
+    def _notifier(self) -> NotifierLike | None:
         """Return the active notifier, swallowing a resolver that raises."""
         if self._explicit is not None:
             return self._explicit

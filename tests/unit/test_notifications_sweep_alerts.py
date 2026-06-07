@@ -16,7 +16,7 @@ Test types present (CLAUDE.md §12 / Golden Rule #12):
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from dataclasses import dataclass
 
 from brutex.notifications.sweep_alerts import (
     SweepAlerter,
@@ -47,6 +47,27 @@ class FakeNotifier:
         if self.raise_on_publish:
             raise RuntimeError("simulated publish failure")
         self.published.append(event)
+
+
+@dataclass(frozen=True)
+class FakeSummary:
+    """Typed :class:`SweepSummaryLike` stand-in (matches the supervised-grid summary)."""
+
+    sweep_id: str
+    tuples_run: int
+    tuples_total: int
+    evaluated: int
+    ranked: int
+    persisted: int
+
+
+@dataclass(frozen=True)
+class FakeWorkerEvent:
+    """Typed :class:`WorkerEventLike` stand-in (matches the watchdog event)."""
+
+    worker_name: str
+    last_beat_seconds_ago: float
+    timeout_seconds: float
 
 
 class FakeController:
@@ -191,7 +212,7 @@ class TestAlerts:
 
     def test_sweep_complete(self) -> None:
         fake = FakeNotifier()
-        summary = SimpleNamespace(
+        summary = FakeSummary(
             sweep_id="abcdef0123456789",
             tuples_run=10,
             tuples_total=12,
@@ -216,7 +237,7 @@ class TestAlerts:
         )
         assert alerter.rate_breach(current_rps=3.0, recent_hits=1) is False
         assert alerter.auth_renew_failed(reason="x") is False
-        summary = SimpleNamespace(
+        summary = FakeSummary(
             sweep_id="s", tuples_run=1, tuples_total=1, evaluated=1, ranked=1, persisted=1
         )
         assert alerter.sweep_complete(summary) is False
@@ -231,11 +252,10 @@ class TestCallbackAdapters:
     def test_watchdog_hung_callback(self) -> None:
         fake = FakeNotifier()
         cb = SweepAlerter(notifier=fake).watchdog_hung_callback()
-        event = SimpleNamespace(
+        event = FakeWorkerEvent(
             worker_name="sweep-worker-0",
             last_beat_seconds_ago=999.0,
             timeout_seconds=300.0,
-            new_state=SimpleNamespace(value="hung"),
         )
         cb(event)
         assert len(fake.published) == 1
