@@ -55,10 +55,18 @@ non-TOTP alternative.**
 **3. `RenewToken` — refresh an active token (+24h), NO TOTP:**
 
 ```
-POST https://api.dhan.co/v2/RenewToken
+GET https://api.dhan.co/v2/RenewToken
   header: access-token: {JWT}
   header: dhanClientId: {id}
 ```
+
+> **`RenewToken` is an HTTP GET — headers-only, NO request body**
+> (DEC-DHAN-RENEWTOKEN-GET-001). Source: the official DhanHQ Python SDK
+> (`dhan-oss/DhanHQ-py`, `src/dhanhq/auth.py`) calls it as
+> `requests.get(url, headers=headers)` — a GET with the two headers and no
+> body. (An earlier revision of this doc wrongly said `POST`; sending it as a
+> POST with a JSON body makes Dhan reject it with `HTTP 400 DH-905` "Missing
+> required fields, bad values for parameters".)
 
 > "This only renews tokens which are **active**. If you try to renew an
 > **expired** token, it will return an error." Also: renews only tokens
