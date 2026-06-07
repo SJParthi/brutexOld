@@ -25,7 +25,9 @@ from brutex.adapters.dhan.ingest import IngestReport
 from brutex.adapters.dhan.run_ingest import (
     DhanIngestReport,
     PairFailure,
+    SpotIngestWithRetry,
     run_dhan_spot_ingest,
+    run_dhan_spot_ingest_with_retry,
 )
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.observability.correlation import pull_id_scope
@@ -637,3 +639,134 @@ class TestAuthFailFast:
         assert _events(logs, "ingest.auth_aborted") == []
         # The non-auth terminal still logs its per-pair quarantine WARNING.
         assert len(_events(logs, "ingest.quarantine")) == 1
+
+
+def _report(
+    *,
+    still_failed: int = 0,
+    known_gap: bool = False,
+    auth_aborted: bool = False,
+) -> DhanIngestReport:
+    """Build a DhanIngestReport with a chosen transient residual / known-gap / auth state.
+
+    ``still_failed`` is surfaced via a single pair's ``IngestReport.still_failed_windows``
+    (the report's property sums over pairs); a known-gap adds a ``DH-905`` PairFailure;
+    ``auth_aborted`` sets the report flag (a dead token).
+    """
+    pairs = {
+        ("X", "1minute"): IngestReport(
+            windows=1,
+            bars_appended=0,
+            transient_failures=still_failed,
+            still_failed_windows=still_failed,
+        )
+    }
+    failures: tuple[PairFailure, ...] = ()
+    if known_gap:
+        failures = (PairFailure(symbol="X", interval="1day", error="DH-905 no data present"),)
+    return DhanIngestReport(pairs=pairs, failures=failures, auth_aborted=auth_aborted)
+
+
+class TestRunDhanSpotIngestWithRetry:
+    """`run_dhan_spot_ingest_with_retry` — post-run auto-retry wrapper (DEC-INGEST-AUTO-RETRY-001)."""
+
+    def _patch_passes(
+        self, monkeypatch: pytest.MonkeyPatch, reports: list[DhanIngestReport]
+    ) -> list[int]:
+        """Patch ``mod.run_dhan_spot_ingest`` to return *reports* in order; return call log."""
+        calls: list[int] = []
+
+        def _fake(*_args: object, **_kw: object) -> DhanIngestReport:
+            idx = len(calls)
+            calls.append(idx)
+            return reports[idx]
+
+        monkeypatch.setattr(mod, "run_dhan_spot_ingest", _fake)
+        return calls
+
+    def test_clean_pull_does_not_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._patch_passes(monkeypatch, [_report(still_failed=0)])
+        result = run_dhan_spot_ingest_with_retry(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("13")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            retry_backoff=lambda _i: None,
+        )
+        assert calls == [0]  # only the original pass ran
+        assert result.retry is None
+        assert result.still_failed_windows == 0
+
+    def test_auto_retry_off_keeps_single_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._patch_passes(monkeypatch, [_report(still_failed=7)])
+        result = run_dhan_spot_ingest_with_retry(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("13")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            auto_retry=False,
+            retry_backoff=lambda _i: None,
+        )
+        assert calls == [0]  # the residual is NOT retried when auto_retry is off
+        assert result.retry is None
+        assert result.still_failed_windows == 7  # falls back to the original report
+
+    def test_residual_triggers_bounded_rounds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._patch_passes(
+            monkeypatch,
+            [_report(still_failed=84), _report(still_failed=10), _report(still_failed=0)],
+        )
+        result = run_dhan_spot_ingest_with_retry(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("13")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            max_retry_rounds=5,
+            retry_backoff=lambda _i: None,
+        )
+        assert calls == [0, 1, 2]  # original + 2 retry rounds (cleared)
+        assert result.retry is not None
+        assert result.retry.initial_still_failed == 10  # the FIRST retry round's residual
+        assert result.retry.final_still_failed == 0
+        assert result.retry.clean is True
+        assert result.still_failed_windows == 0
+
+    def test_known_gap_residual_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A pull whose only leftover is a known-gap (still_failed=0) is NOT retried.
+        calls = self._patch_passes(monkeypatch, [_report(still_failed=0, known_gap=True)])
+        result = run_dhan_spot_ingest_with_retry(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("13")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            retry_backoff=lambda _i: None,
+        )
+        assert calls == [0]
+        assert result.retry is None
+
+    def test_still_failed_windows_property_prefers_retry(self) -> None:
+        # Direct unit of the SpotIngestWithRetry.still_failed_windows property:
+        # when a retry ran, the final residual wins over the original.
+        from brutex.adapters.dhan.auto_retry import RetryOutcome
+
+        original = _report(still_failed=84)
+        retry = RetryOutcome(
+            initial_still_failed=84,
+            final_still_failed=3,
+            rounds_run=3,
+            rounds=(),
+            clean=False,
+            auth_aborted=False,
+        )
+        wrapped = SpotIngestWithRetry(report=original, retry=retry)
+        assert wrapped.still_failed_windows == 3
+        # ...and with no retry it falls back to the original.
+        assert SpotIngestWithRetry(report=original, retry=None).still_failed_windows == 84

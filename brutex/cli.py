@@ -275,6 +275,23 @@ def build_parser() -> argparse.ArgumentParser:
             "list without auth (DEC-INSTRUMENT-LOAD-001)"
         ),
     )
+    fetch.add_argument(
+        "--no-auto-retry",
+        action="store_true",
+        help=(
+            "Disable the post-pull auto-retry of leftover failed windows "
+            "(DEC-INGEST-AUTO-RETRY-001) — keep the prior single-pass behaviour"
+        ),
+    )
+    fetch.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help=(
+            "MANUAL trigger: re-pull ONLY the currently-failed windows on demand "
+            "(the coverage ledger skips everything already in the lake) — same "
+            "engine as the automatic retry (DEC-INGEST-AUTO-RETRY-001)"
+        ),
+    )
 
     # ── doctor (DEC-DOCTOR-001) ───────────────────────────────────
     doctor = sub.add_parser(
@@ -1365,6 +1382,8 @@ def cmd_fetch(
     rows_per_chunk: int,
     universe: bool = False,
     instruments: bool = False,
+    auto_retry: bool = True,
+    retry_failed: bool = False,
 ) -> int:
     """Fetch candles for the 3 brute-force indices into the lake (§13.9 step 3).
 
@@ -1380,6 +1399,17 @@ def cmd_fetch(
     "pull everything" command. ``--instruments`` loads ONLY the keyless public
     instrument master (no Dhan keys), prints the index/stock counts, and exits —
     it populates the ``/universe`` list without auth (DEC-INSTRUMENT-LOAD-001).
+
+    Leftover failed windows are AUTO-RETRIED after the pull by default
+    (DEC-INGEST-AUTO-RETRY-001): when the pull leaves a transient residual (a
+    429-storm leftover), bounded extra rounds re-fetch ONLY the still-failed
+    windows via the shared coverage ledger (incremental + idempotent + rate-safe).
+    ``--no-auto-retry`` disables that (the prior single-pass behaviour);
+    ``--retry-failed`` is the MANUAL trigger that re-pulls ONLY the currently
+    failed windows on demand (the coverage ledger skips everything already in the
+    lake). Both ways call the SAME
+    :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows` engine
+    (CLAUDE.md §11 COMMON).
     """
     resolved_instruments = _resolve_lake_root(lake_root)
     if instruments:
@@ -1396,10 +1426,11 @@ def cmd_fetch(
 
     import contextlib
 
-    from brutex.adapters.dhan.run_ingest import run_dhan_spot_ingest
+    from brutex.adapters.dhan.run_ingest import run_dhan_spot_ingest_with_retry
     from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
     from brutex.dashboard.pull_controller import DHAN_HISTORY_FLOOR
     from brutex.data.catalog import Catalog
+    from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import NullBarSink, ParquetBarSink
     from brutex.universe import BRUTE_FORCE_INDICES
@@ -1489,7 +1520,20 @@ def cmd_fetch(
             on_rate_limit = _alerter.rate_breach_callback(_rate)
             print("[brutex] fetch (live Dhan)", file=sys.stderr)
 
-        report = run_dhan_spot_ingest(
+        # Persist the fetch-coverage ledger so a re-pull (and every auto-retry
+        # round, and the manual `--retry-failed` run) re-fetches ONLY the windows
+        # not already in the lake (DEC-FETCH-COVERAGE-001 / DEC-INGEST-AUTO-RETRY-001).
+        # `--inspect` writes nothing and `--dry-run` writes SYNTHETIC sample bars,
+        # so neither touches the real coverage ledger (the store's `dry_run` flag
+        # is its "do not persist coverage" switch).
+        _no_coverage = dry_run or inspect
+        coverage = begin_pull_coverage(resolved, dry_run=_no_coverage, coverage=None)
+        # `--retry-failed` (the manual trigger) ALWAYS retries on demand; otherwise
+        # the post-pull auto-retry is on unless `--no-auto-retry` was passed. Both
+        # routes drive the SAME run_dhan_spot_ingest_with_retry → retry_failed_windows
+        # engine (CLAUDE.md §11 COMMON) — no duplicated round loop.
+        do_retry = retry_failed or auto_retry
+        result = run_dhan_spot_ingest_with_retry(
             adapter,
             sink,
             instruments=fetch_instruments,
@@ -1497,15 +1541,29 @@ def cmd_fetch(
             start=start_dt.date(),
             end=end_dt.date(),
             pace=pace,
+            coverage=coverage,
             on_rate_limit=on_rate_limit,
             on_success=on_success,
+            auto_retry=do_retry,
         )
+        end_pull_coverage(coverage, resolved, dry_run=_no_coverage)
+    report = result.report
+    retry = result.retry
     print(
         f"[brutex] fetch done — windows={report.windows} bars_appended={report.bars_appended} "
         f"failed_pairs={report.failed_pairs} transient={report.transient_failures}"
     )
+    if retry is not None:
+        print(
+            f"[brutex] auto-retry — rounds={retry.rounds_run} "
+            f"recovered_windows={retry.recovered_windows} "
+            f"still_failed={retry.final_still_failed}"
+        )
     print(f"[brutex] lake: {resolved}")
-    return EXIT_OK if report.failed_pairs == 0 else EXIT_INTERNAL_ERROR
+    residual = result.still_failed_windows
+    if report.failed_pairs > 0 or residual > 0:
+        return EXIT_INTERNAL_ERROR
+    return EXIT_OK
 
 
 def cmd_wipe(*, execute: bool, assume_yes: bool) -> int:  # pragma: no cover — interactive + real FS
@@ -2562,6 +2620,8 @@ def main(argv: list[str] | None = None) -> int:
             rows_per_chunk=args.rows_per_chunk,
             universe=args.universe,
             instruments=args.instruments,
+            auto_retry=not args.no_auto_retry,
+            retry_failed=args.retry_failed,
         )
     if args.command == "doctor":
         return cmd_doctor(

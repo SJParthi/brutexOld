@@ -41,8 +41,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
+from typing import TYPE_CHECKING
 
 import structlog
+
+if TYPE_CHECKING:
+    from brutex.adapters.dhan.auto_retry import RetryOutcome
 
 from brutex.adapters.dhan.auth_guard import AuthGuard
 from brutex.adapters.dhan.errors import DhanError, is_auth_failure, is_no_data_error
@@ -73,6 +77,15 @@ ProgressHook = Callable[[str, int, bool], None]
 #: ``(instrument, interval)`` pair. Each maps to a distinct lake partition, so
 #: the per-pair writes are path-isolated (DEC-DHAN-PARALLEL-INGEST-001).
 SpotJob = tuple[Instrument, str]
+
+#: Default bounded post-run auto-retry-ROUND budget (DEC-INGEST-AUTO-RETRY-001) —
+#: the number of EXTRA full re-pulls of ONLY the leftover failed windows after the
+#: original pull, when it left a transient residual. Small + finite (Golden Rule
+#: #10 — never infinite). This is the ROUND layer that wraps the per-window
+#: in-run retry (``_DEFAULT_MAX_RETRY_PASSES`` in ``ingest``): the in-run passes
+#: self-heal a brief drop WITHIN a series; these rounds self-heal a residual a
+#: multi-minute 429 storm left after the WHOLE pull.
+_DEFAULT_MAX_RETRY_ROUNDS: int = 3
 
 
 def _with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdapter:
@@ -441,10 +454,148 @@ def run_dhan_spot_ingest(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SpotIngestWithRetry:
+    """A pull's original report + its post-run auto-retry outcome (DEC-INGEST-AUTO-RETRY-001).
+
+    What :func:`run_dhan_spot_ingest_with_retry` returns: the FIRST full-pull
+    :class:`DhanIngestReport` (the original pass, exactly what the no-retry path
+    produced) plus the :class:`~brutex.adapters.dhan.auto_retry.RetryOutcome` of
+    the leftover-window recovery rounds (``None`` when no retry ran — the pull
+    was already clean, or auto-retry was disabled).
+    """
+
+    report: DhanIngestReport
+    retry: RetryOutcome | None
+
+    @property
+    def still_failed_windows(self) -> int:
+        """Transient windows STILL failing after the auto-retry (or the original, if none ran).
+
+        The final residual the operator cares about: the retry's
+        ``final_still_failed`` when a retry ran, else the original pull's
+        ``still_failed_windows``. Zero ⇒ the lake is complete for this run.
+        """
+        if self.retry is not None:
+            return self.retry.final_still_failed
+        return self.report.still_failed_windows
+
+
+def run_dhan_spot_ingest_with_retry(
+    adapter: MarketAdapter,
+    sink: BarSink,
+    *,
+    instruments: Iterable[Instrument],
+    intervals: Sequence[str],
+    start: date,
+    end: date,
+    pace: Pacer | None = None,
+    coverage: FetchCoverage | None = None,
+    status_log: WindowStatusLog | None = None,
+    on_rate_limit: Callable[[], None] | None = None,
+    on_timeout: Callable[[], None] | None = None,
+    on_success: Callable[[], None] | None = None,
+    on_progress: ProgressHook | None = None,
+    run_parallel: RunParallel | None = None,
+    auto_retry: bool = True,
+    max_retry_rounds: int = _DEFAULT_MAX_RETRY_ROUNDS,
+    retry_backoff: Callable[[int], None] | None = None,
+) -> SpotIngestWithRetry:
+    """Run the spot pull, then auto-retry any leftover failed windows (DEC-INGEST-AUTO-RETRY-001).
+
+    The AUTOMATIC half of the manual⇄automatic retry duality: run one full
+    :func:`run_dhan_spot_ingest` pass, and — when it leaves TRANSIENT residual
+    windows (``still_failed_windows`` > 0, the 429-storm leftover) AND
+    *auto_retry* is on — re-run additional bounded rounds via
+    :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows`, each
+    re-fetching ONLY the still-failed windows through the SAME *coverage* ledger
+    (incremental + idempotent, DEC-FETCH-COVERAGE-001) and the SAME *pace* bucket
+    (rate-safe, ``≤ 5 r/s``). The MANUAL ``brutex fetch --retry-failed`` path and
+    the dashboard button call the SAME underlying
+    :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows` (CLAUDE.md §11
+    COMMON) — no duplicated round loop.
+
+    The retry rounds re-use the original call's keyword bindings VERBATIM (same
+    adapter / sink / instruments / intervals / range / coverage / pace / hooks),
+    so a round is byte-for-byte the same ingest the operator's manual re-run does
+    — except the coverage ledger now skips the windows the first pass completed,
+    so only the leftover failed windows hit Dhan again.
+
+    **Honest envelope (Golden Rule #10):** the retry is O(failed_windows), NOT
+    O(1)-total; the round count is bounded by *max_retry_rounds* (never infinite);
+    every round is rate-safe (the shared bucket caps it ``≤ 5 r/s``); a known-gap
+    (``DH-905`` no-data) quarantine is NEVER retried; and a mid-pull token death
+    halts the loop (RenewToken cannot revive a dead token).
+
+    Parameters
+    ----------
+    adapter, sink, instruments, intervals, start, end, pace, coverage, status_log,
+    on_rate_limit, on_timeout, on_success, on_progress, run_parallel
+        Threaded VERBATIM into every :func:`run_dhan_spot_ingest` pass (the
+        original + each retry round) — see that function's parameter docs. The
+        *coverage* ledger is what makes a round re-fetch ONLY the failed windows.
+    auto_retry
+        When ``True`` (default) the leftover failed windows are auto-retried after
+        the original pull; ``False`` (the ``--no-auto-retry`` / config opt-out)
+        reproduces the prior single-pass behaviour exactly (``retry`` is ``None``).
+    max_retry_rounds
+        Bounded retry-round budget (default :data:`_DEFAULT_MAX_RETRY_ROUNDS`),
+        passed through to :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows`.
+    retry_backoff
+        Injected ``(round_index) -> None`` inter-round sleep hook (``None`` → the
+        bounded exponential default). Tests pass a no-op recorder (no real sleep).
+
+    Returns
+    -------
+    SpotIngestWithRetry
+        The original :class:`DhanIngestReport` plus the
+        :class:`~brutex.adapters.dhan.auto_retry.RetryOutcome` (``None`` when no
+        retry ran — auto-retry off, or the original pull was already clean).
+    """
+    # Local import: the auto-retry engine type-imports DhanIngestReport from THIS
+    # module, so importing it at module top would be a cycle. The import is paid
+    # once per pull, never on the hot path (CLAUDE.md §11 COMMON — one engine).
+    from brutex.adapters.dhan.auto_retry import retry_failed_windows
+
+    def _one_pass() -> DhanIngestReport:
+        """Run ONE full spot-ingest pass with the original call's bindings."""
+        return run_dhan_spot_ingest(
+            adapter,
+            sink,
+            instruments=instruments,
+            intervals=intervals,
+            start=start,
+            end=end,
+            pace=pace,
+            coverage=coverage,
+            status_log=status_log,
+            on_rate_limit=on_rate_limit,
+            on_timeout=on_timeout,
+            on_success=on_success,
+            on_progress=on_progress,
+            run_parallel=run_parallel,
+        )
+
+    report = _one_pass()
+    # Only spend a retry round when auto-retry is ON and the original pull actually
+    # left a TRANSIENT residual (a clean pull / a pull whose only failures were
+    # known-gaps or terminal errors needs no re-pull — those are not retryable).
+    if not auto_retry or report.still_failed_windows == 0:
+        return SpotIngestWithRetry(report=report, retry=None)
+    retry = retry_failed_windows(
+        _one_pass,
+        max_rounds=max_retry_rounds,
+        backoff=retry_backoff,
+    )
+    return SpotIngestWithRetry(report=report, retry=retry)
+
+
 __all__ = [
     "DhanIngestReport",
     "PairFailure",
     "ProgressHook",
+    "SpotIngestWithRetry",
     "SpotJob",
     "run_dhan_spot_ingest",
+    "run_dhan_spot_ingest_with_retry",
 ]
