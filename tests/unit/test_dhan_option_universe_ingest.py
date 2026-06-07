@@ -351,6 +351,57 @@ def test_on_progress_fires_per_underlying_success() -> None:
     assert events == [("13", 1, False)]
 
 
+def test_on_series_tick_fires_once_per_drained_series() -> None:
+    """on_series_tick fires once per SERIES outcome — far finer than on_progress.
+
+    DEC-OPTIONS-LIVE-STATUS-001: a single underlying fans 3 strikes × 2 codes ×
+    2 types = 12 series, so the per-series observability tick fires 12 times while
+    the per-underlying on_progress would fire only ONCE (at the end). This is what
+    lets a single-underlying pull's lake-backed coverage surface tick live.
+    """
+    ticks: list[int] = []
+    progress: list[tuple[str, int, bool]] = []
+    report = run_dhan_options_ingest(
+        _OkClient(),
+        _Sink(),
+        underlyings=[_index("13", offsets=1)],  # 3 strikes
+        start=date(2021, 1, 4),
+        end=date(2021, 1, 5),
+        expiry_flags=("WEEK", "MONTH"),
+        expiry_codes=(1, 2),
+        option_types=("CALL", "PUT"),
+        on_progress=lambda label, bars, failed: progress.append((label, bars, failed)),
+        on_series_tick=lambda: ticks.append(1),
+    )
+    # 3 strikes × 2 flags... no: expiry_codes uniform (1,2) on both flags →
+    # 3 × 2 flags × 2 codes × 2 types = 24 series.
+    assert report.series_count == 24
+    assert len(ticks) == 24  # one tick per drained series outcome
+    assert len(progress) == 1  # on_progress fires once, per underlying
+
+
+def test_on_series_tick_fires_for_quarantined_series_too() -> None:
+    """A terminal-error series still drains an outcome → the tick still fires.
+
+    The tick means "a series finished" (success OR quarantine); invalidating the
+    lake-backed surface on a failed series is harmless (the recompute reads the
+    unchanged lake) and keeps the surface live regardless of outcome.
+    """
+    ticks: list[int] = []
+    run_dhan_options_ingest(
+        _FailClient(),
+        _Sink(),
+        underlyings=[_index("13", offsets=0)],  # 1 strike
+        start=date(2021, 1, 4),
+        end=date(2021, 1, 5),
+        expiry_flags=("WEEK",),
+        expiry_codes=(1,),
+        option_types=("CALL",),
+        on_series_tick=lambda: ticks.append(1),
+    )
+    assert ticks == [1]  # the single quarantined series still ticked
+
+
 def test_skipped_windows_aggregate_after_repull() -> None:
     """A re-pull with the same coverage ledger skips every window (aggregate)."""
     from brutex.data.fetch_coverage import FetchCoverage

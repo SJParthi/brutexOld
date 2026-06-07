@@ -1106,6 +1106,14 @@ jobs:
           else
             echo "(brutex.data.window_status_store test file not present yet — gate inactive)"
           fi
+          # DEC-OPTIONS-LIVE-STATUS-001: the generic throttled-callback helper
+          # (the options analog of make_live_status_flush). Pure + import-light —
+          # held at 100% line+branch by its own unit suite (fake clock).
+          if compgen -G "tests/unit/test_observability_throttle.py" > /dev/null; then
+            pytest --cov=brutex.observability.throttle --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_throttle.py
+          else
+            echo "(brutex.observability.throttle test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_parser.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_parser.py
           else

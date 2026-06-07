@@ -274,6 +274,32 @@ class TestPullOptions:
         assert [e[0] for e in events] == ["13", "1333"]
         assert all(bars > 0 and failed is False for _, bars, failed in events)
 
+    def test_on_series_tick_forwarded_to_driver(self) -> None:
+        """pull_options threads on_series_tick → fires once per SERIES (dry-run).
+
+        DEC-OPTIONS-LIVE-STATUS-001: the per-series observability tick reaches the
+        ingest spine and fires once per fanned series — far finer than the
+        per-underlying on_progress (which fires once here). The dashboard wires a
+        throttled summary-cache mark_dirty here so /coverage/options ticks live.
+        """
+        ticks: list[int] = []
+        progress: list[str] = []
+        pull_options(
+            [_index(symbol="13")],
+            lake_root=Path("/unused"),
+            dry_run=True,
+            now=_NOW,
+            expiry_flags=("WEEK",),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+            on_progress=lambda label, bars, failed: progress.append(label),
+            on_series_tick=lambda: ticks.append(1),
+        )
+        # ATM±10 = 21 strikes × 1 flag × 1 code × 1 type = 21 series → 21 ticks,
+        # but only 1 per-underlying on_progress.
+        assert len(ticks) == 21
+        assert progress == ["13"]
+
     def test_now_defaults_to_wall_clock(self) -> None:
         """Omitting *now* uses the real clock — the window still starts at the floor."""
         report = pull_options(
