@@ -192,6 +192,43 @@ def _prev_close_asof(
     return daily[daily_dates[idx - 1]]
 
 
+def _minute_prev_close_contiguous(
+    minute_last: dict[date, Decimal], trading_dates: list[date], day: date
+) -> Decimal | None:
+    """Minute-basis PREV. CLOSE that REFUSES to anchor across a data hole.
+
+    The "previous close" for *day* is the **immediately preceding trading
+    session's** last 1-minute close. The authoritative trading-session list is
+    the symbol's own **1-day** series (*trading_dates*, sorted) — one bar per
+    session, far more robust than the minute feed and able to tell a genuine
+    holiday gap (absent from BOTH series) apart from a *missing 1-minute window*
+    (present in the 1-day series, absent from the minute feed). The expected
+    prior session is the latest 1-day date strictly before *day*; the anchor is
+    valid ONLY when that exact session also has 1-minute data in *minute_last*.
+
+    When the prior session's minute window is MISSING from the lake this returns
+    ``None`` so the caller SKIPS the row rather than silently anchoring on a
+    stale far-earlier close — the fake-mover bug where a missing prior-day
+    window produced a wildly wrong %CHNG (e.g. a −7.88% on JUBLINGREA whose
+    prior 1-minute window had not been fetched), exactly the rows the Top-mover
+    category then surfaced (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001). Also ``None``
+    on the first known session (no prior 1-day date) or a zero prior close.
+    O(log N) via :func:`bisect.bisect_left` over the pre-sorted *trading_dates*.
+
+    Used ONLY when a 1-day series exists for the symbol; a pure-minute symbol
+    with no 1-day partition keeps the DEC-PREOPEN-MINUTE-BASIS-001 fallback (the
+    previous AVAILABLE minute session) since there is no calendar to verify
+    against — the honest limit is recorded in the decision ledger.
+    """
+    idx = bisect.bisect_left(trading_dates, day)
+    if idx == 0:
+        return None
+    close = minute_last.get(trading_dates[idx - 1])
+    if close is None or close == 0:
+        return None
+    return close
+
+
 def build_preopen_rows(
     conn: Any,
     lake_root: Path,
@@ -228,17 +265,29 @@ def build_preopen_rows(
         # symbol validator) or a ``duckdb.Error`` (an unreadable / malformed
         # Parquet for one symbol) is logged + skipped; every other symbol exports.
         try:
+            daily: dict[date, Decimal] = {}
+            daily_dates: list[date] = []
+            minute_last: dict[date, Decimal] = {}
+            prev_by_day: dict[date, Decimal] = {}
             if basis == "minute":
                 opens = _intraday_open_by_date(
                     conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
                 )
-                prev_by_day = _prev_trading_close(
-                    _intraday_last_close_by_date(
-                        conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
-                    )
+                minute_last = _intraday_last_close_by_date(
+                    conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
                 )
-                daily: dict[date, Decimal] = {}
-                daily_dates: list[date] = []
+                # The 1-day series is the trading-session CALENDAR used to detect a
+                # missing prior-day 1-minute window so PREV. CLOSE never anchors
+                # across a data hole (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001). When a
+                # symbol has NO 1-day partition there is no calendar to verify
+                # against, so we keep the DEC-PREOPEN-MINUTE-BASIS-001 fallback (the
+                # previous AVAILABLE minute session).
+                daily = _daily_close_by_date(
+                    conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
+                )
+                daily_dates = sorted(daily)
+                if not daily_dates:
+                    prev_by_day = _prev_trading_close(minute_last)
             else:
                 opens = _daily_open_by_date(
                     conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
@@ -247,7 +296,6 @@ def build_preopen_rows(
                     conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
                 )
                 daily_dates = sorted(daily)
-                prev_by_day = {}
         except (ValueError, duckdb.Error) as exc:
             _LOG.warning(
                 "preopen.symbol.skipped",
@@ -262,11 +310,12 @@ def build_preopen_rows(
         for day in sorted(opens):
             if day < start or day > end:
                 continue
-            anchor = (
-                prev_by_day.get(day)
-                if basis == "minute"
-                else _prev_close_asof(daily, daily_dates, day)
-            )
+            if basis != "minute":
+                anchor = _prev_close_asof(daily, daily_dates, day)
+            elif daily_dates:
+                anchor = _minute_prev_close_contiguous(minute_last, daily_dates, day)
+            else:
+                anchor = prev_by_day.get(day)
             if anchor is None or anchor == 0:
                 continue
             iep = opens[day]
