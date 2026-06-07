@@ -57,6 +57,6 @@ ingest pipeline. Corpora #7 (truth table) + #8 (paisa accounting) are ✅ landed
 
 ## Decision
 
-DEC-PHASE1-GOLDEN-FIXTURES-DIR-001 (MIGRATION entry #251);
+DEC-PHASE1-SMOKE-AND-SKELETONS-001 (MIGRATION entry #251);
 DEC-PHASE2-TRUTH-TABLE-001 (MIGRATION entry #538);
 DEC-ENGINE-PAISA-ACCOUNTING-GOLDEN-001 (MIGRATION entry #544).
