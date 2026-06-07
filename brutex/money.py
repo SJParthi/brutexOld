@@ -50,6 +50,29 @@ def round_money(rupees: Decimal) -> Decimal:
     return rupees.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
 
 
+def rupees_to_paisa(rupees: Decimal) -> int:
+    """Convert an exact rupee :class:`~decimal.Decimal` to int64 paisa.
+
+    The forward complement of :func:`paisa_to_rupees` and the single source of
+    truth for the lake-boundary rupees→paisa snap (CLAUDE.md §11 COMMON): the
+    rupee price is first snapped to the 2-decimal tick grid via
+    :func:`round_money` (``ROUND_HALF_UP``, never truncation —
+    ``DEC-SPOT-PRICE-2DP-001``), then the ``× 100`` is exact in
+    :class:`~decimal.Decimal`, so the resulting ``int`` is loss-free.
+
+    Parameters
+    ----------
+    rupees
+        A price / money amount in rupees at arbitrary precision.
+
+    Returns
+    -------
+    int
+        The amount in int64 paisa.
+    """
+    return int(round_money(rupees) * _PAISA_PER_RUPEE)
+
+
 def paisa_to_rupees(paisa: int) -> Decimal:
     """Convert int64 paisa to an exact two-place rupee :class:`~decimal.Decimal`.
 
@@ -82,4 +105,4 @@ def format_inr(paisa: int) -> str:
     return f"₹{paisa_to_rupees(paisa):,.2f}"
 
 
-__all__ = ["format_inr", "paisa_to_rupees", "round_money"]
+__all__ = ["format_inr", "paisa_to_rupees", "round_money", "rupees_to_paisa"]

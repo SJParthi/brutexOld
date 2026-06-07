@@ -920,6 +920,15 @@ jobs:
           else
             echo "(brutex.options.strike_rules test file not present yet — gate inactive)"
           fi
+          # 21e · brutex.options.executor (193 stmts, 50 branches, 38 tests).
+          #       DEC-OPTIONS-EXECUTOR-001 — the spot-signal → priced-option
+          #       materializer. The unit file alone reaches 100% line+branch;
+          #       golden + property + integration suites are additional oracles.
+          if compgen -G "tests/unit/test_options_executor.py" > /dev/null; then
+            pytest --cov=brutex.options.executor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_options_executor.py
+          else
+            echo "(brutex.options.executor test file not present yet — gate inactive)"
+          fi
           # DEC-COV-BACKFILL-003 (entry #259, 2026-05-27): 1-module
           # backfill — close the biggest non-orchestrator gap via 6
           # surgical tests in TestOSErrorPaths covering the OSError
