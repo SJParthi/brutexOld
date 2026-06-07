@@ -1,6 +1,6 @@
 """Property: the Rust trade-sim seam is byte-identical to the Python oracle.
 
-DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #561). Over hypothesis-generated bar
+DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #562). Over hypothesis-generated bar
 feeds (valid OHLC, varied start times so some windows cross the 15:20 forced
 exit), masks, SL/TP distances, directions and fill policies, the resident Rust
 kernel :class:`brutex.engine.rust_trade_sim.ResidentTradeSim` must emit exactly

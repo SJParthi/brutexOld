@@ -1,6 +1,6 @@
 """Throughput + O(1) bench for the resident Rust trade-sim kernel.
 
-DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #561). Measures the REAL combos/sec of
+DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #562). Measures the REAL combos/sec of
 the fused mask-eval + trade-walk hot loop (``fno_math.ResidentSweepSim``) — the
 work the per-combo sweep runs ~33 billion times — over a resident bar window
 (loaded ONCE, reused across all masks). Three gates, mirroring the established

@@ -1,6 +1,6 @@
 """Unit + parity tests for the resident Rust trade-sim seam.
 
-DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #561). Exercises
+DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #562). Exercises
 :class:`brutex.engine.rust_trade_sim.ResidentTradeSim` to 100% line + branch:
 construction validation, the ``n_bars`` view, the ``HOLD``/empty guards, both the
 Rust path (the default when the ``fno_math`` wheel is built — CI) AND the

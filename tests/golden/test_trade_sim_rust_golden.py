@@ -1,6 +1,6 @@
 """Golden cross-check: the Rust trade-sim kernel is byte-identical to the oracle.
 
-DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #561). Two guarantees:
+DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #562). Two guarantees:
 
 1. **Parity** — over a frozen curated scenario corpus (every exit kind: end-of-
    data, SL/TP at level, next-open, forced 15:20, same-bar tie, BUY + SELL) the

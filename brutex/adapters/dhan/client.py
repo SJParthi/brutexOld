@@ -1,13 +1,21 @@
-"""Dhan REST client — POST a JSON request body to a Data API endpoint.
+"""Dhan REST client — POST a JSON body (or GET headers-only) to a Data API endpoint.
 
 The client is the ONLY component that performs Dhan network I/O. The
-**transport is injected** (a ``(url, body, headers, timeout) → (status,
-bytes)`` callable), so every branch of the request/response logic — header
-construction, SSRF guard, HTTP-status → :mod:`errors` mapping, JSON
-parsing — is unit-testable with a fake transport (no network). The real
-transport (:func:`urllib_transport`) is a thin ``urllib`` shim and is the
-only ``# pragma: no cover`` surface, exactly like the Groww adapter's
+**transport is injected** (a ``(url, body, headers, timeout, method) →
+(status, bytes)`` callable), so every branch of the request/response logic
+— header construction, SSRF guard, HTTP-status → :mod:`errors` mapping,
+JSON parsing — is unit-testable with a fake transport (no network). The
+real transport (:func:`urllib_transport`) is a thin ``urllib`` shim and is
+the only ``# pragma: no cover`` surface, exactly like the Groww adapter's
 SSRF-guarded fetch.
+
+Most Dhan Data-API surfaces are POSTs (a JSON request body); ``RenewToken``
+is the one **GET** — headers-only, NO body, exactly as the official DhanHQ
+SDK calls it (``dhan-oss/DhanHQ-py`` ``src/dhanhq/auth.py``:
+``requests.get(url, headers=headers)``). :meth:`DhanClient.get_json` serves
+that path; :meth:`DhanClient.post_json` is byte-unchanged for the POST
+surfaces. Both share the same metered, paced, bounded fast-retry loop
+(DEC-DHAN-RENEWTOKEN-GET-001).
 
 Rate limiting + *logical* retry/re-queue stay the orchestrator's concern
 (CLAUDE.md §11 COMMON) — it paces calls via the adaptive token bucket and
@@ -219,12 +227,23 @@ class CallMeter:
 
 
 class Transport(Protocol):
-    """A POST transport: ``(url, body, headers, timeout) → (status, bytes)``."""
+    """An HTTP transport: ``(url, body, headers, timeout, method) → (status, bytes)``.
+
+    ``method`` defaults to ``"POST"`` so every existing POST caller / fake
+    transport keeps the original signature; the ``RenewToken`` GET path passes
+    ``method="GET"`` with an empty body (DEC-DHAN-RENEWTOKEN-GET-001).
+    """
 
     def __call__(
-        self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+        self,
+        url: str,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+        method: str = "POST",
     ) -> tuple[int, bytes]:
-        """Send a POST and return ``(http_status, response_body_bytes)``."""
+        """Send the request and return ``(http_status, response_body_bytes)``."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -336,11 +355,45 @@ class DhanClient:
             On a transport timeout / connection failure that outlived the
             fast-retry budget.
         """
+        return self._with_fast_retry("POST", endpoint, body)
+
+    def get_json(self, endpoint: str) -> dict[str, object]:
+        """GET ``base_url + endpoint`` headers-only (NO body); return the parsed object.
+
+        The headers-only GET surface — currently only ``RenewToken``, which the
+        official DhanHQ SDK calls as ``requests.get(url, headers=headers)``
+        (``dhan-oss/DhanHQ-py`` ``src/dhanhq/auth.py``), NOT a POST with a JSON
+        body (DEC-DHAN-RENEWTOKEN-GET-001). Shares the SAME metered + paced +
+        bounded fast-retry loop as :meth:`post_json` (an empty ``b""`` body is
+        sent), so pacing, the 5 r/s issue gauge / ``rate.breach`` alarm, and the
+        transient-stall fast-retry all apply identically to a GET (DEC-DHAN-RATE-
+        REALTIME-GUARANTEE-001 / DEC-DHAN-RATE-RESIDUAL-HARDEN-001).
+
+        Raises
+        ------
+        DhanError / DhanTimeoutError / DhanTransportError
+            Exactly as :meth:`post_json` — see its docstring.
+        """
+        return self._with_fast_retry("GET", endpoint, None)
+
+    def _with_fast_retry(
+        self, method: str, endpoint: str, body: Mapping[str, object] | None
+    ) -> dict[str, object]:
+        """Run :meth:`_send_once` under the bounded latency-hygiene fast-retry loop.
+
+        The single retry policy shared by :meth:`post_json` (POST + body) and
+        :meth:`get_json` (GET, no body): a transient transport/server stall is
+        fast-retried in place up to :attr:`max_attempts` times with an
+        exponential backoff (clamped to :data:`_MAX_BACKOFF_S`); a 429 / terminal
+        error is never retried; each retry emits ``dhan.retry`` and is paced
+        through the shared rate bucket. Bounded attempts + O(1) backoff keep the
+        hot path O(1) for both verbs (DEC-DHAN-RENEWTOKEN-GET-001).
+        """
         attempt = 0
         while True:
             attempt += 1
             try:
-                return self._post_once(endpoint, body)
+                return self._send_once(method, endpoint, body)
             except DhanError as exc:
                 if not _should_fast_retry(exc):
                     raise  # terminal (400/404/auth) or 429 (token bucket owns it)
@@ -356,24 +409,30 @@ class DhanClient:
                     backoff_ms=round(backoff_s * 1000.0, 1),
                 )
                 self.sleep(backoff_s)
-                # Gate the RETRY POST through the shared rate bucket — the initial
+                # Gate the RETRY through the shared rate bucket — the initial
                 # attempt was already paced by the ingest layer, so pacing here
-                # (and only here) makes EVERY physical POST bucket-bounded without
-                # double-pacing the first (DEC-DHAN-RATE-REALTIME-GUARANTEE-001).
+                # (and only here) makes EVERY physical request bucket-bounded
+                # without double-pacing the first (DEC-DHAN-RATE-REALTIME-GUARANTEE-001).
                 self.pace()
 
-    def _post_once(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
-        """One physical POST attempt (guard → transport → status/JSON map).
+    def _send_once(
+        self, method: str, endpoint: str, body: Mapping[str, object] | None
+    ) -> dict[str, object]:
+        """One physical request attempt (guard → transport → status/JSON map).
 
-        The single round-trip the :meth:`post_json` fast-retry loop wraps; every
-        exit (success, timeout, transport error) is metered by :meth:`_observe`,
-        so a slow/failing attempt's latency is never invisible.
+        The single round-trip the :meth:`_with_fast_retry` loop wraps, for either
+        verb: a POST serialises *body* to JSON; a GET sends an empty ``b""`` body
+        and ``method="GET"`` (headers-only, the ``RenewToken`` shape — DEC-DHAN-
+        RENEWTOKEN-GET-001). Every exit (success, timeout, transport error) is
+        metered by :meth:`_observe` and every physical issue is counted against
+        the 5 r/s cap, so a slow/failing attempt's latency + rate are never
+        invisible regardless of verb.
         """
         url = self.base_url + endpoint
         _guard_url(url)
-        data = json.dumps(body).encode("utf-8")
+        data = json.dumps(body).encode("utf-8") if body is not None else b""
         started = self.clock()
-        # Real-time assurance: count this POST at its ISSUE instant and shout if
+        # Real-time assurance: count this request at its ISSUE instant and shout if
         # the trailing-1s rate ever crosses the 5 r/s cap (CLAUDE.md §2 Rule 6).
         # With every path now bucket-gated (burst=1) this WARNING must never fire
         # — its presence on /logs is the breach alarm (DEC-DHAN-RATE-REALTIME-GUARANTEE-001).
@@ -384,14 +443,14 @@ class DhanClient:
             )
         try:
             status, raw = self.transport(
-                url, body=data, headers=self._headers(), timeout=self.timeout
+                url, body=data, headers=self._headers(), timeout=self.timeout, method=method
             )
         except TimeoutError as exc:
             self._observe(endpoint, None, started)
-            raise DhanTimeoutError(f"timeout POSTing {endpoint!r}") from exc
+            raise DhanTimeoutError(f"timeout {method}ing {endpoint!r}") from exc
         except OSError as exc:
             self._observe(endpoint, None, started)
-            raise DhanTransportError(f"transport error POSTing {endpoint!r}: {exc}") from exc
+            raise DhanTransportError(f"transport error {method}ing {endpoint!r}: {exc}") from exc
         self._observe(endpoint, int(status), started)
         if status != HTTPStatus.OK:
             raise from_http_status(status, raw.decode("utf-8", "replace"))
@@ -428,18 +487,25 @@ class DhanClient:
 
 
 def urllib_transport(  # pragma: no cover — thin urllib I/O shim, exercised via integration
-    url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+    url: str,
+    *,
+    body: bytes,
+    headers: Mapping[str, str],
+    timeout: float,
+    method: str = "POST",
 ) -> tuple[int, bytes]:
-    """Real :mod:`urllib` POST transport (production wiring for :class:`DhanClient`).
+    """Real :mod:`urllib` transport (production wiring for :class:`DhanClient`).
 
-    Returns ``(status, body)`` for 2xx **and** 4xx/5xx (``HTTPError`` carries
-    a status + body), so :meth:`DhanClient.post_json` maps non-2xx uniformly.
+    Sends *method* (POST by default; ``"GET"`` for the headers-only
+    ``RenewToken`` path — DEC-DHAN-RENEWTOKEN-GET-001). Returns ``(status,
+    body)`` for 2xx **and** 4xx/5xx (``HTTPError`` carries a status + body), so
+    :meth:`DhanClient._send_once` maps non-2xx uniformly.
     """
     import urllib.error
     import urllib.request
 
     request = urllib.request.Request(  # noqa: S310 — https + host allow-listed by _guard_url
-        url, data=body, headers=dict(headers), method="POST"
+        url, data=body, headers=dict(headers), method=method
     )
     try:
         with urllib.request.urlopen(  # nosec B310 — https + host allow-listed by _guard_url  # noqa: S310

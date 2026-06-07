@@ -50,15 +50,28 @@ def creds_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 class _Transport:
-    """Fake transport returning a canned (status, body)."""
+    """Fake transport returning a canned (status, body) and recording the verb/body.
+
+    ``RenewToken`` is a GET (DEC-DHAN-RENEWTOKEN-GET-001), so the fake records the
+    ``method`` + request ``body`` the client sent; the renew tests assert it is a
+    GET with an EMPTY body (no POST ``{}``).
+    """
 
     def __init__(self, status: int, body: bytes) -> None:
         self.status = status
         self.body = body
+        self.calls: list[dict[str, object]] = []
 
     def __call__(
-        self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+        self,
+        url: str,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+        method: str = "POST",
     ) -> tuple[int, bytes]:
+        self.calls.append({"url": url, "body": body, "method": method})
         return self.status, self.body
 
 
@@ -103,10 +116,23 @@ class TestResolveCredentials:
 
 
 class TestRenewToken:
-    def test_success(self) -> None:
+    def test_success_is_a_get_with_no_body(self) -> None:
+        # RenewToken is an HTTP GET, headers-only, NO body — exactly as the
+        # official DhanHQ SDK calls it (DEC-DHAN-RENEWTOKEN-GET-001). Sending it
+        # as a POST {} makes real Dhan reject it with HTTP 400 DH-905.
         body = b'{"accessToken": "newjwt", "expiryTime": "2026-01-01T00:00:00.000"}'
-        info = renew_token(_client(200, body))
+        transport = _Transport(200, body)
+        client = DhanClient(
+            access_token="old",
+            client_id="cid",
+            transport=transport,  # type: ignore[arg-type]
+            base_url="https://api.dhan.co/v2/",
+        )
+        info = renew_token(client)
         assert info == TokenInfo(access_token="newjwt", expiry_time="2026-01-01T00:00:00.000")
+        assert transport.calls[0]["method"] == "GET"  # GET, not POST
+        assert transport.calls[0]["body"] == b""  # headers-only, NO request body
+        assert transport.calls[0]["url"] == "https://api.dhan.co/v2/RenewToken"
 
     def test_missing_fields_raises(self) -> None:
         with pytest.raises(DhanAuthError, match="missing string accessToken"):
@@ -120,22 +146,28 @@ class TestRenewToken:
 class TestRenewTokenPacing:
     """The defence-in-depth pace hook (DEC-DHAN-RATE-RESIDUAL-HARDEN-001).
 
-    Every physical Dhan POST from the renew path must be bucket-gated even when
+    Every physical Dhan request from the renew path must be bucket-gated even when
     wired into a live pull later: the explicit ``pace`` hook gates the INITIAL
-    POST and is called BEFORE the network request; with no explicit hook, the
-    client's own ``pace`` field is used (no-op by default → current callers
-    unchanged).
+    request and is called BEFORE the network call (RenewToken is a GET —
+    DEC-DHAN-RENEWTOKEN-GET-001); with no explicit hook, the client's own ``pace``
+    field is used (no-op by default → current callers unchanged).
     """
 
-    def test_explicit_pace_called_before_post(self) -> None:
-        # An explicit pace hook gates the initial POST and fires BEFORE it.
+    def test_explicit_pace_called_before_get(self) -> None:
+        # An explicit pace hook gates the initial GET and fires BEFORE it.
         order: list[str] = []
 
         class _RecordingTransport:
             def __call__(
-                self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+                self,
+                url: str,
+                *,
+                body: bytes,
+                headers: Mapping[str, str],
+                timeout: float,
+                method: str = "POST",
             ) -> tuple[int, bytes]:
-                order.append("post")
+                order.append("get")
                 return 200, b'{"accessToken": "newjwt", "expiryTime": "t"}'
 
         client = DhanClient(
@@ -146,7 +178,7 @@ class TestRenewTokenPacing:
         )
         info = renew_token(client, pace=lambda: order.append("pace"))
         assert info == TokenInfo(access_token="newjwt", expiry_time="t")
-        assert order == ["pace", "post"]  # paced BEFORE the physical POST
+        assert order == ["pace", "get"]  # paced BEFORE the physical GET
 
     def test_default_falls_back_to_client_pace(self) -> None:
         # No explicit hook → the client's own pace field gates the initial POST.

@@ -1,6 +1,6 @@
 """Resident Rust trade-sim seam — the hot trade-walk reused across masks.
 
-DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #561). The Python side of the Rust
+DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #562). The Python side of the Rust
 Stage-2 trade-simulation kernel (``fno_math.ResidentSweepSim``). It is the
 trade-sim analogue of :class:`brutex.engine.combo_mask.ResidentBarBuffer`: the
 expensive per-(instrument, tf) inputs — the OHLC→paisa conversion

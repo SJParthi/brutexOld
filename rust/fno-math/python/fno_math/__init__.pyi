@@ -95,7 +95,7 @@ class ResidentBars:
 class ResidentSweepSim:
     """Resident Stage-2 trade-sim buffer — OHLC paisa + forced flags + bar_bits.
 
-    DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #561). The per-bar SL/TP/forced-exit
+    DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #562). The per-bar SL/TP/forced-exit
     state machine (the Python `TradeSimWalker`) ported to Rust + fused with the
     per-mask entry projection. The `O(N_bars)` Python→Rust copy of the 5 columns +
     flags + bar_bits is paid ONCE in `__init__`; subsequent `simulate_masks` /
