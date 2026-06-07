@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
+from time import monotonic
 
 import structlog
 
@@ -36,6 +38,11 @@ _LOG = structlog.get_logger("brutex.data.window_status_store")
 
 #: The status sidecar filename, written directly under the lake root.
 STATUS_FILENAME: str = "window_status.json"
+
+#: Minimum seconds between live mid-pull status flushes (DEC-WINDOW-STATUS-LIVE-001).
+#: Small enough that /coverage/windows feels live; large enough that a multi-
+#: thousand-window JSON is not rewritten on every completed pair.
+LIVE_FLUSH_MIN_INTERVAL_S: float = 2.0
 
 
 def status_path(lake_root: Path) -> Path:
@@ -102,6 +109,42 @@ def save_window_status(log: WindowStatusLog, lake_root: Path) -> None:
     os.replace(tmp, path)
 
 
+def make_live_status_flush(
+    log: WindowStatusLog | None,
+    lake_root: Path,
+    *,
+    min_interval_s: float = LIVE_FLUSH_MIN_INTERVAL_S,
+    clock: Callable[[], float] = monotonic,
+) -> Callable[[], None]:
+    """Return a THROTTLED mid-pull status-flush callback (DEC-WINDOW-STATUS-LIVE-001).
+
+    During a long pull every window's SUCCESS / EMPTY / FAILED record accumulates
+    in *log* in memory, but the sidecar is only written by :func:`end_pull_status`
+    at the very END — so ``/coverage/windows`` shows ``0 windows`` for the whole
+    run and only "jumps" to the final table once the pull finishes. This returns a
+    callable the ingest spine fires after each completed pair to persist *log*
+    MID-pull, so the page ticks up live.
+
+    Throttled to at most once per *min_interval_s* (default
+    :data:`LIVE_FLUSH_MIN_INTERVAL_S`): a several-thousand-window JSON must not be
+    rewritten on every one of ~1,500 pairs. A ``None`` *log* (a dry-run, which
+    records nothing) yields a no-op callable. *clock* / *min_interval_s* are
+    injectable for deterministic tests. O(N) only on the calls that actually write.
+    """
+    last_write: list[float | None] = [None]
+
+    def _flush() -> None:
+        if log is None:
+            return
+        now = clock()
+        if last_write[0] is not None and now - last_write[0] < min_interval_s:
+            return
+        last_write[0] = now
+        save_window_status(log, lake_root)
+
+    return _flush
+
+
 def begin_pull_status(lake_root: Path, *, dry_run: bool) -> WindowStatusLog | None:
     """Resolve the status log to thread into a pull (load the persisted one for a live run).
 
@@ -121,10 +164,12 @@ def end_pull_status(log: WindowStatusLog | None, lake_root: Path, *, dry_run: bo
 
 
 __all__ = [
+    "LIVE_FLUSH_MIN_INTERVAL_S",
     "STATUS_FILENAME",
     "begin_pull_status",
     "end_pull_status",
     "load_window_status",
+    "make_live_status_flush",
     "save_window_status",
     "status_path",
 ]
