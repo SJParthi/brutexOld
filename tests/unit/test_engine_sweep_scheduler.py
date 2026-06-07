@@ -306,7 +306,7 @@ def test_cycle_audit_payload_shape() -> None:
         "resume_from_index": 3,
         "resume_reason": resume.reason,
         "should_run": True,
-        "once": True,
+        "once": False,
     }
 
 
