@@ -45,12 +45,11 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
 from brutex.data.models import CandleBar
-from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.combo_mask import (
     count_combos,
     count_supermasks,
@@ -67,11 +66,22 @@ from brutex.engine.sweep_driver import (
 from brutex.engine.trade_sim import simulate_trades
 from brutex.metrics.compute import ResultMetrics
 from brutex.money import round_money
-from brutex.orchestrator.audit import AuditWriter
 from brutex.ranking import MIN_TRADES, RankedCombo, rank_combos
 from brutex.strategies.combo import combo_hash
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams, has_conflict
+
+if TYPE_CHECKING:
+    # Annotation-only imports — kept out of the runtime import graph so the
+    # `fastbloom_rs` PyO3 wheel (pulled in transitively by both modules below
+    # via brutex.orchestrator.bloom) never enters brutex.engine's import chain.
+    # That single-init-per-interpreter wheel breaks the strict per-module
+    # coverage gates for the other brutex.engine.* modules otherwise (the same
+    # constraint recorded in DEC-COV-BACKFILL-LIMIT-001). ``ComboDedup`` only
+    # *receives* an already-built OptionDedupIndex; the runner only *receives*
+    # an already-open AuditWriter — neither is constructed here.
+    from brutex.data.option_dedup import OptionDedupIndex
+    from brutex.orchestrator.audit import AuditWriter
 
 _LOG = structlog.get_logger("brutex.engine.sweep_run")
 
