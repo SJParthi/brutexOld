@@ -77,6 +77,141 @@ EXIT_INTERNAL_ERROR = 2
 # ────────────────────────────────────────────────────────────────────────
 
 
+def _add_sweep_grid_args(
+    parser: argparse.ArgumentParser,
+) -> None:  # pragma: no cover — declarative argparse wiring (cli-omitted)
+    """Add the shared grid-sweep arguments to *parser* (CLAUDE.md §11 COMMON).
+
+    The single declaration of the full ``(symbols × intervals × directions × K ×
+    SL × TP)`` grid + lake/output/overfit/options-sim knobs, reused by BOTH
+    ``sweep-all`` (manual) and ``sweep-daemon`` (automatic) so the two surfaces
+    can never drift apart — exactly one source of truth for the sweep CLI
+    contract (DEC-SWEEP-SCHEDULER-001).
+    """
+    parser.add_argument(
+        "--symbols",
+        default="NIFTY,BANKNIFTY",
+        help="Comma-separated index symbols (default NIFTY,BANKNIFTY — run SENSEX with --exchange BSE)",
+    )
+    parser.add_argument("--start", required=True, help="Window start (YYYY-MM-DD or full ISO)")
+    parser.add_argument("--end", required=True, help="Window end (YYYY-MM-DD or full ISO)")
+    parser.add_argument(
+        "--exchange", default="NSE", help="LAKE exchange partition (default NSE; BSE for SENSEX)"
+    )
+    parser.add_argument("--segment", default="INDEX", help="LAKE segment partition (default INDEX)")
+    parser.add_argument(
+        "--intervals",
+        default="1minute,5minute,15minute",
+        help="Comma-separated lake interval labels to sweep (default 1minute,5minute,15minute)",
+    )
+    parser.add_argument(
+        "--directions",
+        default="BUY,SELL",
+        help="Comma-separated directions BUY/SELL (default BUY,SELL)",
+    )
+    parser.add_argument(
+        "--k", default="1,2", help="Comma-separated conditions-per-combo values (default 1,2)"
+    )
+    parser.add_argument(
+        "--conditions",
+        default=None,
+        help="Comma-separated condition bit indices 0..51 to sweep (default: all 52)",
+    )
+    parser.add_argument(
+        "--sl",
+        default="none",
+        help="Comma-separated stop-loss paisa values; use 'none' to disable a leg (default none)",
+    )
+    parser.add_argument(
+        "--tp",
+        default="none",
+        help="Comma-separated take-profit paisa values; use 'none' to disable a leg (default none)",
+    )
+    parser.add_argument(
+        "--top", type=int, default=20, help="Persist the top-N ranked combos per tuple (default 20)"
+    )
+    parser.add_argument(
+        "--mode", default="A", help="Run mode label stamped on the run identity (default A)"
+    )
+    parser.add_argument(
+        "--max-tuples",
+        type=int,
+        default=None,
+        help="Refuse a grid larger than this many tuples (honest opt-in guard)",
+    )
+    parser.add_argument(
+        "--max-combos",
+        type=int,
+        default=None,
+        help="Refuse any tuple whose mask count exceeds this (honest opt-in guard)",
+    )
+    parser.add_argument(
+        "--data-snapshot-hash",
+        default=None,
+        dest="data_snapshot_hash",
+        help="Override the data-snapshot identity (default: content fingerprint of the loaded bars)",
+    )
+    parser.add_argument(
+        "--results-root",
+        type=Path,
+        default=None,
+        dest="results_root",
+        help="Directory for the per-tuple Parquet results (default <lake-root>/sweeps)",
+    )
+    parser.add_argument(
+        "--catalog",
+        type=Path,
+        default=None,
+        dest="catalog_path",
+        help="Catalog DuckDB path (default <lake-root>/catalog.duckdb)",
+    )
+    parser.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    parser.add_argument(
+        "--overfit-gate",
+        action="store_true",
+        dest="overfit_gate",
+        help=(
+            "Enable the Stage-3 multiple-testing overfit gate (Deflated Sharpe) "
+            "per leaderboard (DEC-RANKING-OVERFIT-001); off by default"
+        ),
+    )
+    parser.add_argument(
+        "--dsr-min",
+        type=float,
+        default=0.95,
+        dest="dsr_min",
+        help="Min Deflated-Sharpe probability to survive the overfit gate (default 0.95)",
+    )
+    parser.add_argument(
+        "--no-options-sim",
+        action="store_false",
+        dest="options_sim",
+        help=(
+            "Disable the automatic post-sweep options-sim (DEC-OPTIONS-EXECUTOR-001). "
+            "By default, when a rolling-option lake is present, winners are auto-priced as options."
+        ),
+    )
+    parser.add_argument(
+        "--options-expiry",
+        default="weekly",
+        choices=("weekly", "monthly"),
+        dest="options_expiry",
+        help="Expiry cycle for the auto options-sim (default weekly)",
+    )
+    parser.add_argument(
+        "--options-broker",
+        default="groww",
+        choices=("groww", "zerodha"),
+        dest="options_broker",
+        help="Brokerage rate card for the auto options-sim (default groww)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the full argparse tree."""
     parser = argparse.ArgumentParser(
@@ -495,129 +630,47 @@ def build_parser() -> argparse.ArgumentParser:
             "× SL × TP × proximity) → persist every ranked finalist to Parquet"
         ),
     )
-    sweep_all.add_argument(
-        "--symbols",
-        default="NIFTY,BANKNIFTY",
-        help="Comma-separated index symbols (default NIFTY,BANKNIFTY — run SENSEX with --exchange BSE)",
+    _add_sweep_grid_args(sweep_all)
+
+    # ── sweep-daemon (DEC-SWEEP-SCHEDULER-001) — scheduled/daemon sweep runner ──
+    # The AUTOMATIC twin of `sweep-all` (CLAUDE.md §11 manual⇄automatic duality):
+    # runs the EXACT same grid pipeline on a cadence (intended: nightly, after the
+    # incremental Dhan pull), crash-safe auto-resume via the SAME checkpoint, BLAKE3
+    # audit-logged per cycle. `--once` runs exactly one cycle on demand (manual).
+    sweep_daemon = sub.add_parser(
+        "sweep-daemon",
+        help=(
+            "Scheduled/daemon sweep runner (AUTOMATIC twin of sweep-all): run the full "
+            "grid on a cadence with crash-safe auto-resume; --once runs one cycle now"
+        ),
     )
-    sweep_all.add_argument("--start", required=True, help="Window start (YYYY-MM-DD or full ISO)")
-    sweep_all.add_argument("--end", required=True, help="Window end (YYYY-MM-DD or full ISO)")
-    sweep_all.add_argument(
-        "--exchange", default="NSE", help="LAKE exchange partition (default NSE; BSE for SENSEX)"
+    _add_sweep_grid_args(sweep_daemon)
+    sweep_daemon.add_argument(
+        "--schedule",
+        default="daily@02:30",
+        help=(
+            "Cadence: an interval like '24h'/'90m'/'@hourly', or a daily wall-clock "
+            "time like 'daily@02:30'/'02:30'/'@daily' (default daily@02:30, IST)"
+        ),
     )
-    sweep_all.add_argument(
-        "--segment", default="INDEX", help="LAKE segment partition (default INDEX)"
-    )
-    sweep_all.add_argument(
-        "--intervals",
-        default="1minute,5minute,15minute",
-        help="Comma-separated lake interval labels to sweep (default 1minute,5minute,15minute)",
-    )
-    sweep_all.add_argument(
-        "--directions",
-        default="BUY,SELL",
-        help="Comma-separated directions BUY/SELL (default BUY,SELL)",
-    )
-    sweep_all.add_argument(
-        "--k", default="1,2", help="Comma-separated conditions-per-combo values (default 1,2)"
-    )
-    sweep_all.add_argument(
-        "--conditions",
-        default=None,
-        help="Comma-separated condition bit indices 0..51 to sweep (default: all 52)",
-    )
-    sweep_all.add_argument(
-        "--sl",
-        default="none",
-        help="Comma-separated stop-loss paisa values; use 'none' to disable a leg (default none)",
-    )
-    sweep_all.add_argument(
-        "--tp",
-        default="none",
-        help="Comma-separated take-profit paisa values; use 'none' to disable a leg (default none)",
-    )
-    sweep_all.add_argument(
-        "--top", type=int, default=20, help="Persist the top-N ranked combos per tuple (default 20)"
-    )
-    sweep_all.add_argument(
-        "--mode", default="A", help="Run mode label stamped on the run identity (default A)"
-    )
-    sweep_all.add_argument(
-        "--max-tuples",
-        type=int,
-        default=None,
-        help="Refuse a grid larger than this many tuples (honest opt-in guard)",
-    )
-    sweep_all.add_argument(
-        "--max-combos",
-        type=int,
-        default=None,
-        help="Refuse any tuple whose mask count exceeds this (honest opt-in guard)",
-    )
-    sweep_all.add_argument(
-        "--data-snapshot-hash",
-        default=None,
-        dest="data_snapshot_hash",
-        help="Override the data-snapshot identity (default: content fingerprint of the loaded bars)",
-    )
-    sweep_all.add_argument(
-        "--results-root",
-        type=Path,
-        default=None,
-        dest="results_root",
-        help="Directory for the per-tuple Parquet results (default <lake-root>/sweeps)",
-    )
-    sweep_all.add_argument(
-        "--catalog",
-        type=Path,
-        default=None,
-        dest="catalog_path",
-        help="Catalog DuckDB path (default <lake-root>/catalog.duckdb)",
-    )
-    sweep_all.add_argument(
-        "--lake-root",
-        type=Path,
-        default=None,
-        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
-    )
-    sweep_all.add_argument(
-        "--overfit-gate",
+    sweep_daemon.add_argument(
+        "--once",
         action="store_true",
-        dest="overfit_gate",
-        help=(
-            "Enable the Stage-3 multiple-testing overfit gate (Deflated Sharpe) "
-            "per leaderboard (DEC-RANKING-OVERFIT-001); off by default"
-        ),
+        help="Run exactly ONE sweep cycle immediately, then exit (the manual on-demand trigger)",
     )
-    sweep_all.add_argument(
-        "--dsr-min",
-        type=float,
-        default=0.95,
-        dest="dsr_min",
-        help="Min Deflated-Sharpe probability to survive the overfit gate (default 0.95)",
+    sweep_daemon.add_argument(
+        "--max-cycles",
+        type=int,
+        default=None,
+        dest="max_cycles",
+        help="Stop the daemon after this many cycles (default: run forever until killed)",
     )
-    sweep_all.add_argument(
-        "--no-options-sim",
-        action="store_false",
-        dest="options_sim",
-        help=(
-            "Disable the automatic post-sweep options-sim (DEC-OPTIONS-EXECUTOR-001). "
-            "By default, when a rolling-option lake is present, winners are auto-priced as options."
-        ),
-    )
-    sweep_all.add_argument(
-        "--options-expiry",
-        default="weekly",
-        choices=("weekly", "monthly"),
-        dest="options_expiry",
-        help="Expiry cycle for the auto options-sim (default weekly)",
-    )
-    sweep_all.add_argument(
-        "--options-broker",
-        default="groww",
-        choices=("groww", "zerodha"),
-        dest="options_broker",
-        help="Brokerage rate card for the auto options-sim (default groww)",
+    sweep_daemon.add_argument(
+        "--tz-offset-minutes",
+        type=int,
+        default=None,
+        dest="tz_offset_minutes",
+        help="Timezone offset (minutes) for a daily --schedule (default: IST, +330)",
     )
 
     # ── results (DEC-SWEEP-WINNERS-BY-NAME-001) — read back a sweep results tree ──
@@ -2176,6 +2229,133 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     return EXIT_OK
 
 
+def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sleep + lake I/O); the scheduler CORE is 100%-tested in brutex.engine.sweep_scheduler
+    *,
+    schedule: str,
+    once: bool,
+    max_cycles: int | None,
+    tz_offset_minutes: int | None,
+    **sweep_kwargs: Any,
+) -> int:
+    """Run the full grid sweep unattended on a cadence — the AUTOMATIC twin of ``sweep-all``.
+
+    The §11 "ZERO clicks per day" scheduler (DEC-SWEEP-SCHEDULER-001). It owns ONLY
+    the *when* — the clock-injected decision kernel
+    :mod:`brutex.engine.sweep_scheduler` (parsed cadence + resume classification,
+    100% line+branch tested) — and reuses :func:`cmd_sweep_all` verbatim for the
+    *what* (the grid + the live G&A supervisor's crash-safe per-tuple auto-resume +
+    audit + options-sim + cascade). It re-implements NO sweep or resume logic
+    (CLAUDE.md §11 COMMON).
+
+    Per cycle, with the real wall clock: compute the next fire (or fire now under
+    ``--once`` / the on-demand manual path), sleep to it, BLAKE3-audit the cycle
+    plan (cadence + resume classification of the shared sweep checkpoint), run one
+    ``cmd_sweep_all`` pipeline, BLAKE3-audit the outcome, then loop. ``--once`` (or
+    ``--max-cycles``) bounds the loop; otherwise it runs until killed and
+    auto-resumes from the same checkpoint after a crash.
+
+    Honest envelope (Golden Rule #10): this bounds WHEN a sweep starts, not its
+    ``O(Σ work)`` — a scheduled sweep still costs the §8 wall-time envelope (~33B
+    trials in 2-4 days on an M4 Pro, 12-24 h on a 64-128 core box). No
+    "millions in minutes" claim is made anywhere.
+    """
+    import json
+    import time
+
+    from brutex.engine.sweep_audit import SweepAuditWriter
+    from brutex.engine.sweep_checkpoint import SweepCheckpoint, SweepCheckpointError
+    from brutex.engine.sweep_scheduler import (
+        IST_OFFSET_SECONDS,
+        CheckpointView,
+        Schedule,
+        SchedulerError,
+        cycle_audit_payload,
+        plan_cycle,
+    )
+
+    tz_offset_seconds = (
+        tz_offset_minutes * 60 if tz_offset_minutes is not None else IST_OFFSET_SECONDS
+    )
+    try:
+        parsed = Schedule.parse(schedule, tz_offset_seconds=tz_offset_seconds)
+    except SchedulerError as exc:
+        print(f"[brutex] sweep-daemon schedule error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    resolved_lake = _resolve_lake_root(sweep_kwargs.get("lake_root"))
+    results_root = sweep_kwargs.get("results_root")
+    out_root = results_root if results_root is not None else resolved_lake / "sweeps"
+    checkpoint_path = out_root / "checkpoint" / "sweep-all.json"
+    daemon_audit_path = out_root / "audit" / "sweep-daemon.jsonl"
+    daemon_audit_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _checkpoint_view() -> CheckpointView:
+        """Best-effort read of the shared sweep checkpoint for the audit decision.
+
+        The authoritative per-tuple resume is the supervisor's job inside
+        ``cmd_sweep_all``; this read only classifies the prior cycle's progress
+        for the daemon's BLAKE3 audit line. Any read/parse error degrades to "no
+        checkpoint" (FRESH) — it can never crash the daemon.
+        """
+        try:
+            data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint = SweepCheckpoint.from_dict(data)
+        except (OSError, json.JSONDecodeError, SweepCheckpointError):
+            return CheckpointView.from_loaded(None, expected_sweep_id="")
+        return CheckpointView.from_loaded(checkpoint, expected_sweep_id=checkpoint.sweep_id)
+
+    mode = "once" if once else f"schedule={parsed.spec}"
+    print(f"[brutex] sweep-daemon starting ({mode}) — audit: {daemon_audit_path}")
+
+    last_fire: float | None = None
+    cycle = 0
+    with SweepAuditWriter.open(daemon_audit_path, resume=daemon_audit_path.exists()) as audit:
+        while True:
+            plan = plan_cycle(
+                now=time.time(),
+                schedule=parsed,
+                checkpoint_view=_checkpoint_view(),
+                last_fire=last_fire,
+                run_immediately=once,
+            )
+            audit.append(
+                action="DAEMON_CYCLE_PLAN",
+                subject=f"sweep-daemon:cycle-{cycle}",
+                payload=cycle_audit_payload(
+                    cycle_index=cycle,
+                    fire_at=plan.fire_at,
+                    schedule=parsed,
+                    resume=plan.resume,
+                    once=once,
+                ),
+            )
+            if not once:
+                sleep_seconds = max(0.0, plan.fire_at - time.time())
+                print(
+                    f"[brutex] sweep-daemon cycle {cycle}: next fire in {sleep_seconds:.0f}s "
+                    f"({plan.resume.kind.value}) — {plan.resume.reason}"
+                )
+                time.sleep(sleep_seconds)
+            else:
+                print(
+                    f"[brutex] sweep-daemon --once: running one cycle now ({plan.resume.kind.value})"
+                )
+
+            exit_code = cmd_sweep_all(**sweep_kwargs)
+            audit.append(
+                action="DAEMON_CYCLE_DONE",
+                subject=f"sweep-daemon:cycle-{cycle}",
+                payload={"cycle_index": cycle, "exit_code": exit_code, "fire_at": plan.fire_at},
+            )
+            last_fire = plan.fire_at
+            cycle += 1
+            if once or (max_cycles is not None and cycle >= max_cycles):
+                break
+
+    print(f"[brutex] sweep-daemon stopped after {cycle} cycle(s)")
+    return EXIT_OK
+
+
 def cmd_results_show(*, results_root: Path, top: int, sort_by: str) -> int:
     """Read back a sweep results tree and print the ranked winners-by-name leaderboard.
 
@@ -2782,6 +2962,39 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "sweep-all":
         return cmd_sweep_all(
+            lake_root=args.lake_root,
+            catalog_path=args.catalog_path,
+            results_root=args.results_root,
+            exchange=args.exchange,
+            segment=args.segment,
+            symbols=args.symbols,
+            intervals=args.intervals,
+            start=args.start,
+            end=args.end,
+            directions=args.directions,
+            k=args.k,
+            conditions=args.conditions,
+            sl=args.sl,
+            tp=args.tp,
+            top=args.top,
+            mode=args.mode,
+            max_tuples=args.max_tuples,
+            max_combos=args.max_combos,
+            data_snapshot_hash=args.data_snapshot_hash,
+            overfit_gate=args.overfit_gate,
+            dsr_min=args.dsr_min,
+            options_sim=args.options_sim,
+            options_expiry=args.options_expiry,
+            options_broker=args.options_broker,
+        )
+    # Scheduled/daemon sweep runner (DEC-SWEEP-SCHEDULER-001) — reuses cmd_sweep_all
+    # for the grid; the scheduler core decides only WHEN each cycle fires.
+    if args.command == "sweep-daemon":
+        return cmd_sweep_daemon(
+            schedule=args.schedule,
+            once=args.once,
+            max_cycles=args.max_cycles,
+            tz_offset_minutes=args.tz_offset_minutes,
             lake_root=args.lake_root,
             catalog_path=args.catalog_path,
             results_root=args.results_root,
