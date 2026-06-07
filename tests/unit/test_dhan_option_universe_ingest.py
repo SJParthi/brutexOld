@@ -8,6 +8,9 @@ uniform override, per-series terminal-error quarantine, the report aggregates,
 the empty-universe case, and custom fan-out axes.
 """
 
+# Whitebox test of the module-private `_with_paced_client` (sanctioned per pyproject.toml).
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -146,7 +149,7 @@ def test_with_paced_client_injects_pace_into_live_dhan_client() -> None:
     from brutex.adapters.dhan.client import DhanClient
 
     def _transport(
-        _url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+        url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
     ) -> tuple[int, bytes]:
         return 200, b"{}"
 
@@ -160,7 +163,8 @@ def test_with_paced_client_injects_pace_into_live_dhan_client() -> None:
 
     assert _with_paced_client(client, None) is client  # pace None → unchanged
     sentinel = object()
-    assert _with_paced_client(sentinel, _pace) is sentinel  # non-Dhan poster → unchanged
+    # non-Dhan poster → returned unchanged
+    assert _with_paced_client(sentinel, _pace) is sentinel  # type: ignore[arg-type]
 
 
 def test_strike_window_zero_is_atm_only() -> None:

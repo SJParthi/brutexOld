@@ -5,6 +5,9 @@ instruments × intervals, terminal-error quarantine (run continues), the
 aggregate report properties, pace threading, and the empty-universe case.
 """
 
+# Whitebox test of the module-private `_with_paced_client` (sanctioned per pyproject.toml).
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -177,7 +180,7 @@ def test_with_paced_client_injects_pace_into_live_dhan_adapter() -> None:
     from brutex.adapters.dhan.client import DhanClient
 
     def _transport(
-        _url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+        url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
     ) -> tuple[int, bytes]:
         return 200, b"{}"
 
@@ -192,7 +195,8 @@ def test_with_paced_client_injects_pace_into_live_dhan_adapter() -> None:
 
     assert mod._with_paced_client(adapter, None) is adapter  # pace None → unchanged
     sentinel = object()
-    assert mod._with_paced_client(sentinel, _pace) is sentinel  # non-Dhan → unchanged
+    # non-Dhan adapter → returned unchanged
+    assert mod._with_paced_client(sentinel, _pace) is sentinel  # type: ignore[arg-type]
 
 
 def test_non_dhan_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
