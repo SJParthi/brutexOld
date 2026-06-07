@@ -565,6 +565,86 @@ def build_parser() -> argparse.ArgumentParser:
         dest="dsr_min",
         help="Min Deflated-Sharpe probability to survive the overfit gate (default 0.95)",
     )
+    # ── Stage-4 9-filter cascade auto-wire (DEC-CASCADE-WIRE-001) ──
+    cascade_group = sweep_all.add_mutually_exclusive_group()
+    cascade_group.add_argument(
+        "--cascade",
+        action="store_true",
+        default=None,
+        dest="cascade",
+        help=(
+            "Auto-run the Stage-4 9-filter cascade on each tuple's top-K survivors "
+            "and persist a cascade_verdicts.parquet sidecar (DEC-CASCADE-WIRE-001; "
+            "ON by default)"
+        ),
+    )
+    cascade_group.add_argument(
+        "--no-cascade",
+        action="store_false",
+        dest="cascade",
+        help="Disable the automatic Stage-4 cascade (keeps the legacy ranking-only output)",
+    )
+    sweep_all.add_argument(
+        "--cascade-top-k",
+        type=int,
+        default=None,
+        dest="cascade_top_k",
+        help="How many top-ranked finalists per tuple to feed the cascade (default 50)",
+    )
+    sweep_all.add_argument(
+        "--cascade-seed",
+        type=int,
+        default=0,
+        dest="cascade_seed",
+        help="Deterministic seed for the cascade's bootstraps + Monte-Carlo (default 0)",
+    )
+
+    # ── cascade (DEC-CASCADE-WIRE-001) — MANUAL re-run of the Stage-4 cascade ──
+    cascade_cmd = sub.add_parser(
+        "cascade",
+        help="Run the Stage-4 9-filter cascade on a persisted sweep's survivors (manual)",
+    )
+    cascade_cmd.add_argument(
+        "--results-root",
+        type=Path,
+        required=True,
+        dest="results_root",
+        help="Directory of per-tuple Parquet results (the sweep-all --results-root)",
+    )
+    cascade_cmd.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    cascade_cmd.add_argument(
+        "--catalog",
+        type=Path,
+        default=None,
+        dest="catalog_path",
+        help="Catalog DuckDB path (default <lake-root>/catalog.duckdb)",
+    )
+    cascade_cmd.add_argument(
+        "--exchange", default="NSE", help="LAKE exchange partition (default NSE; BSE for SENSEX)"
+    )
+    cascade_cmd.add_argument(
+        "--segment", default="INDEX", help="LAKE segment partition (default INDEX)"
+    )
+    cascade_cmd.add_argument("--start", required=True, help="Window start (YYYY-MM-DD or full ISO)")
+    cascade_cmd.add_argument("--end", required=True, help="Window end (YYYY-MM-DD or full ISO)")
+    cascade_cmd.add_argument(
+        "--top", type=int, default=50, help="Feed the top-N ranked finalists to the cascade (default 50)"
+    )
+    cascade_cmd.add_argument(
+        "--seed", type=int, default=0, help="Deterministic cascade seed (default 0)"
+    )
+    cascade_cmd.add_argument(
+        "--start-equity-paisa",
+        type=int,
+        default=None,
+        dest="start_equity_paisa",
+        help="Notional capital base in paisa (the per-trade return denominator; default engine default)",
+    )
 
     # ── results (DEC-SWEEP-WINNERS-BY-NAME-001) — read back a sweep results tree ──
     from brutex.engine.results_report import DEFAULT_SORT_BY, SORT_ALIASES
@@ -1584,6 +1664,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     data_snapshot_hash: str | None,
     overfit_gate: bool = False,
     dsr_min: float = 0.95,
+    cascade: bool | None = None,
+    cascade_top_k: int | None = None,
+    cascade_seed: int = 0,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -1598,6 +1681,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     """
     from brutex.data.catalog import Catalog
     from brutex.data.option_dedup import OptionDedupIndex
+    from brutex.engine.cascade_sidecar import CASCADE_SIDECAR_NAME
+    from brutex.engine.cascade_wire import run_cascade_on_store
+    from brutex.engine.results_store import ResultsStore
     from brutex.engine.sweep_audit import SweepAuditWriter
     from brutex.engine.sweep_cache import SweepCache
     from brutex.engine.sweep_checkpoint import SweepCheckpointStore
@@ -1608,6 +1694,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         bloom_capacity_hint,
         count_sweep_tuples,
         make_store_for,
+        tuple_store_path,
     )
     from brutex.engine.sweep_progress import SweepProgress, SweepProgressSnapshot
     from brutex.engine.sweep_run import ComboDedup, SweepRunSummary
@@ -1745,12 +1832,47 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     def _bars_for(symbol: str, interval: str) -> list[Any]:
         return slices.get((symbol, interval), [])
 
+    # Cascade is ON by default for the full pipeline (DEC-CASCADE-WIRE-001); a bare
+    # --no-cascade disables it. The single-DSR --overfit-gate stays orthogonal +
+    # non-breaking (it gates the per-leaderboard ranking; the cascade post-filters
+    # the persisted top-K with all nine statistical filters).
+    from brutex.engine.cascade_wire import DEFAULT_CASCADE_TOP_K
+    from brutex.metrics.cascade import CascadeConfig
+
+    cascade_enabled = True if cascade is None else cascade
+    cascade_k = DEFAULT_CASCADE_TOP_K if cascade_top_k is None else cascade_top_k
+    cascade_cfg = CascadeConfig(seed=cascade_seed)
+
     def _on_tuple(t: SweepTuple, summary: SweepRunSummary) -> None:
         print(
             f"[brutex]   {t.instrument} {t.tf.label} {t.direction.value} k={t.k} "
             f"sl={t.sl_paisa} tp={t.tp_paisa} → persisted={summary.persisted} "
             f"(evaluated={summary.evaluated})"
         )
+        if not cascade_enabled or summary.persisted == 0:
+            return
+        store_path = tuple_store_path(out_root, t, grid)
+        knobs = {
+            "tf_minutes": t.tf.minutes,
+            "sl_paisa": t.sl_paisa,
+            "tp_paisa": t.tp_paisa,
+            "proximity": t.proximity,
+            "prior_n": grid.prior_n,
+            "start_equity_paisa": grid.start_equity_paisa,
+        }
+        auto = run_cascade_on_store(
+            ResultsStore.load(store_path),
+            _bars_for(t.instrument, t.tf.label),
+            knobs,
+            cascade_cfg,
+            sidecar_path=store_path.with_name(f"{store_path.stem}_{CASCADE_SIDECAR_NAME}"),
+            top_k=cascade_k,
+        )
+        if auto.report is not None:
+            print(
+                f"[brutex]     cascade: {auto.report.n_survived}/{auto.report.n_input} "
+                f"survived → {auto.sidecar.path.name if auto.sidecar else '(no sidecar)'}"
+            )
 
     def _on_progress(snap: SweepProgressSnapshot) -> None:
         publish_progress(progress_path, snap)
@@ -1820,6 +1942,90 @@ def cmd_results_show(*, results_root: Path, top: int, sort_by: str) -> int:
         print(f"[brutex] results error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
     print(report)
+    return EXIT_OK
+
+
+def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested engine
+    *,
+    results_root: Path,
+    lake_root: Path | None,
+    catalog_path: Path | None,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+    top: int,
+    seed: int,
+    start_equity_paisa: int | None,
+) -> int:
+    """MANUAL Stage-4 cascade: re-run the 9 filters on a persisted sweep's survivors.
+
+    The manual twin of the automatic on-sweep cascade (DEC-CASCADE-WIRE-001): it
+    loads the merged finalists from *results_root* (the same tree
+    ``brutex results show`` reads — cascade sidecars are excluded), loads each row's
+    bars from the lake (the SAME Catalog/ReplayFeed path ``sweep-all`` uses), and
+    runs the IDENTICAL :func:`brutex.engine.cascade_wire.run_cascade_for_survivors`
+    the automatic path runs (CLAUDE.md §11 COMMON), printing the verdict table.
+
+    Honest limitation: the persisted row schema does not carry sl/tp/proximity/
+    prior_n, so the manual re-run uses the engine defaults (see
+    :func:`brutex.engine.cascade_wire.manual_cascade_report`); a sweep run with the
+    ``sweep-all`` defaults reproduces the automatic verdict.
+    """
+    from brutex.data.catalog import Catalog
+    from brutex.engine.cascade_sidecar import cascade_verdict_table
+    from brutex.engine.cascade_wire import manual_cascade_report
+    from brutex.engine.results_report import load_results_tree
+    from brutex.engine.results_store import ResultsStoreError
+    from brutex.engine.sweep_driver import DEFAULT_START_EQUITY_PAISA
+    from brutex.feed.replay import ReplayFeed
+    from brutex.metrics.cascade import CascadeConfig
+
+    resolved_lake = _resolve_lake_root(lake_root)
+    catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
+    equity = DEFAULT_START_EQUITY_PAISA if start_equity_paisa is None else start_equity_paisa
+
+    try:
+        store = load_results_tree(results_root)
+    except ResultsStoreError as exc:
+        print(f"[brutex] cascade error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    rows = store.rows()
+    if not rows:
+        print(f"[brutex] cascade: no persisted finalists under {results_root}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    bars_cache: dict[tuple[str, str], list[Any]] = {}
+
+    def _bars_by_tf(instrument: str, tf: str) -> list[Any]:
+        key = (instrument, tf)
+        if key not in bars_cache:
+            with Catalog.open(catalog) as cat:
+                feed = ReplayFeed(
+                    catalog=cat,
+                    lake_root=resolved_lake,
+                    exchange=exchange,
+                    segment=segment,
+                    symbols=[instrument],
+                    interval=tf,
+                    start=_parse_dt(start),
+                    end=_parse_dt(end),
+                )
+                bars_cache[key] = [event.bar for event in feed]
+        return bars_cache[key]
+
+    try:
+        report = manual_cascade_report(
+            rows,
+            _bars_by_tf,
+            CascadeConfig(seed=seed),
+            start_equity_paisa=equity,
+            top_k=top,
+        )
+    except ValueError as exc:
+        print(f"[brutex] cascade error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    print(cascade_verdict_table(report))
     return EXIT_OK
 
 
@@ -1938,6 +2144,22 @@ def main(argv: list[str] | None = None) -> int:
             data_snapshot_hash=args.data_snapshot_hash,
             overfit_gate=args.overfit_gate,
             dsr_min=args.dsr_min,
+            cascade=args.cascade,
+            cascade_top_k=args.cascade_top_k,
+            cascade_seed=args.cascade_seed,
+        )
+    if args.command == "cascade":
+        return cmd_cascade(
+            results_root=args.results_root,
+            lake_root=args.lake_root,
+            catalog_path=args.catalog_path,
+            exchange=args.exchange,
+            segment=args.segment,
+            start=args.start,
+            end=args.end,
+            top=args.top,
+            seed=args.seed,
+            start_equity_paisa=args.start_equity_paisa,
         )
     # Thin dispatch over cmd_results_show (DEC-SWEEP-WINNERS-BY-NAME-001).
     if args.command == "results" and args.results_command == "show":

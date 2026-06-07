@@ -77,7 +77,14 @@ def discover_result_files(root: Path) -> list[Path]:
     """
     if not root.is_dir():
         raise ResultsStoreError(f"results root not found or not a directory: {root}")
-    return sorted(root.glob("**/*.parquet"))
+    # Exclude the Stage-4 cascade-verdict sidecars (DEC-CASCADE-WIRE-001): they live
+    # beside the per-tuple result files (``*_cascade_verdicts.parquet``) but carry a
+    # different schema, so they must not be merged as result rows.
+    from brutex.engine.cascade_sidecar import CASCADE_SIDECAR_NAME
+
+    return sorted(
+        path for path in root.glob("**/*.parquet") if not path.name.endswith(CASCADE_SIDECAR_NAME)
+    )
 
 
 def load_results_tree(root: Path) -> ResultsStore:

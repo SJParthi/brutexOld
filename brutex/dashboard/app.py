@@ -799,6 +799,82 @@ def build_app(
         """
         return JSONResponse(state.sweep_progress_view())
 
+    @app.get("/api/v1/cascade")
+    async def api_cascade(  # pragma: no cover — thin shim over the 100%-tested engine
+        results_root: str,
+        start: str,
+        end: str,
+        exchange: str = "NSE",
+        segment: str = "INDEX",
+        top: int = 50,
+        seed: int = 0,
+    ) -> JSONResponse:
+        """GET /api/v1/cascade — MANUAL Stage-4 cascade over a persisted sweep (DEC-CASCADE-WIRE-001).
+
+        The dashboard twin of ``brutex cascade``: it loads the merged finalists
+        under *results_root* (the same tree the results page reads), loads their
+        bars from the lake, and runs the IDENTICAL
+        :func:`brutex.engine.cascade_wire.manual_cascade_report` the CLI runs
+        (CLAUDE.md §11 COMMON), returning the per-candidate verdicts as JSON. Engine
+        I/O lives behind the 100%-tested ``cascade_wire`` module; this handler is a
+        thin shim (``# pragma: no cover``).
+        """
+        from pathlib import Path
+
+        from brutex.data.catalog import Catalog
+        from brutex.engine.cascade_wire import manual_cascade_report
+        from brutex.engine.results_report import load_results_tree
+        from brutex.engine.sweep_driver import DEFAULT_START_EQUITY_PAISA
+        from brutex.feed.replay import ReplayFeed
+        from brutex.metrics.cascade import CascadeConfig
+
+        store = _require_store()
+        store_path = getattr(store, "path", None)
+        if not isinstance(store_path, Path):
+            return JSONResponse({"error": "no lake wired"}, status_code=503)
+        lake = store_path.parent
+        catalog = lake / "catalog.duckdb"
+        rows = load_results_tree(Path(results_root)).rows()
+
+        def _bars_by_tf(instrument: str, tf: str) -> list[Any]:
+            with Catalog.open(catalog) as cat:
+                feed = ReplayFeed(
+                    catalog=cat,
+                    lake_root=lake,
+                    exchange=exchange,
+                    segment=segment,
+                    symbols=[instrument],
+                    interval=tf,
+                    start=datetime.fromisoformat(start),
+                    end=datetime.fromisoformat(end),
+                )
+                return [event.bar for event in feed]
+
+        report = manual_cascade_report(
+            rows,
+            _bars_by_tf,
+            CascadeConfig(seed=seed),
+            start_equity_paisa=DEFAULT_START_EQUITY_PAISA,
+            top_k=top,
+        )
+        return JSONResponse(
+            {
+                "n_input": report.n_input,
+                "n_survived": report.n_survived,
+                "survivor_ids": list(report.survivor_ids),
+                "verdicts": [
+                    {
+                        "candidate_id": v.candidate_id,
+                        "passed": v.passed,
+                        "rejected_at": None if v.rejected_at is None else v.rejected_at.value,
+                        "detail": v.detail,
+                        "composite_score": v.composite_score,
+                    }
+                    for v in report.verdicts
+                ],
+            }
+        )
+
     @app.get("/api/v1/events")
     async def api_events() -> JSONResponse:
         """GET /api/v1/events — JSON dump of the recent-events ring buffer."""

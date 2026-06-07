@@ -37,7 +37,7 @@
 | **User surfaces (dashboard/CLI)** | **~95%** | 10 dashboard pages + 20+ routes + 13 CLI commands all complete; only PNG charts (`visualization/`) is a stub |
 | **Structure / scaffolds** | **drift** | 3 empty docstring-only packages (`backtest/`, `sprint/`, `visualization/`); `brutex/math/` facade absent (CLAUDE.md §5); `rust/fno-math/src/math/` dormant |
 
-**Bottom line (no illusion):** the **signal-research engine is essentially done and honest** — it can discover, validate against 9 statistical overfitting filters, and rank winners; error-handling and user surfaces are ~95% complete. With **TOTP de-scoped**, the real frontiers are: **(1)** auto-wiring the 9-filter cascade (manual + automatic), **(2)** the manual⇄automatic *duality* for the flows that are currently manual-only (§6), **(3)** the Options executor, and **(4)** a smarter optimizer for scale.
+**Bottom line (no illusion):** the **signal-research engine is essentially done and honest** — it can discover, validate against 9 statistical overfitting filters, and rank winners; error-handling and user surfaces are ~95% complete. With **TOTP de-scoped**, the real frontiers are: **(1)** ✅ auto-wiring the 9-filter cascade (manual + automatic) — **DONE (DEC-CASCADE-WIRE-001 #566)**, **(2)** the manual⇄automatic *duality* for the remaining manual-only flows (§6), **(3)** the Options executor, and **(4)** a smarter optimizer for scale.
 
 > **Auth note (operator decision 2026-06-07):** TOTP `generateAccessToken` is **NOT pursued**. The accepted auth path is the manual web-generated token + RenewToken-GET keepalive (CLAUDE.md §6 default, operator 2026-05-31). This means auth is "automated while the token is active; one manual paste on full expiry" — which is the **intended, accepted** operating model, not a gap. TOTP is therefore removed from the ranked list below.
 
@@ -49,7 +49,7 @@
 
 | # | Needed capability | Domain | Severity | Evidence (file:line) |
 |---|-------------------|--------|----------|----------------------|
-| 1 | **Auto-wire the Stage-4 cascade into the main sweep** — the 9 overfitting filters EXIST but `run_stage4_cascade()` is called manually; wire it so every sweep's top-K winners are auto-filtered. Highest value-per-effort | Engine | 🔴 Critical (quick win) | `metrics/cascade.py` done; not invoked by `sweep_orchestrator` |
+| 1 | ✅ **DONE (DEC-CASCADE-WIRE-001, #566)** — the Stage-4 9-filter cascade now runs BOTH ways: AUTOMATICALLY on every sweep's persisted top-K (`cmd_sweep_all` `--cascade`, ON by default → `*_cascade_verdicts.parquet` sidecar) AND MANUALLY via `brutex cascade <results-root>`. Both paths call the SAME `run_cascade_for_survivors` (`engine/cascade_wire.py`); a golden byte-equality test asserts auto==manual. | Engine | ✅ DONE | `engine/cascade_wire.py` + `engine/cascade_sidecar.py`; `metrics/cascade.py` now invoked auto + manual |
 | 2 | **Options Track executor** — the strike selector + grid + expiry + lot-size are **already built** (`options/strike_rules.py`, 10 rules); what's missing is the **executor/materializer** (winning spot signal → priced options PnL), Greeks/risk-free, options TF resampler, and the real `data/option_sink.py` (currently a Protocol stub) | Data | 🔴 Critical | `options/strike_rules.py:190` done; `options/__init__.py` (Greeks TBD); `data/option_sink.py:57` stub |
 | 3 | **Stage-2.5 adaptive optimizer (BIPOP-CMA-ES / Bayesian)** — learns from trial failures to *guide* the next parameter proposal instead of static grid enumeration; makes billions-scale search smart | Engine | 🔴 High | no CMA-ES/Bayesian kernel exists; grid axes accepted in `sweep_orchestrator.py` but no adaptive proposer |
 | 4 | **Telegram alerts wired to sweep events** — infra built, not connected to watchdog-hung / rate-breach / renew-fail (true zero-monitoring) | Observability | 🟡 High | `notifications/telegram.py` exists; `sweep_supervisor.py` notes "future" |
@@ -113,7 +113,7 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 
 | Next PR | Plain English — what it unlocks | Severity |
 |---------|--------------------------------|----------|
-| **#1 Cascade — manual + automatic** | The 9 overfitting filters run **automatically** on every sweep's winners **and** via a manual `brutex cascade <run-id>` trigger you can hit by hand — small refactor, huge value | 🔴 quick win |
+| ~~#1 Cascade — manual + automatic~~ ✅ **DONE (#566)** | The 9 overfitting filters now run **automatically** on every sweep's winners (`--cascade`, ON by default) **and** via the manual `brutex cascade <results-root>` trigger — both call the same engine, byte-equality golden-tested | ✅ shipped |
 | **#2 Options executor** | Strike selector is built; add the **executor** that turns winning spot signals into **real ATM±N options trades** with costs/slippage/IV — execution realism | 🔴 high |
 | **#3 Stage-2.5 smart optimizer** | The search **learns** where good strategies live (Bayesian/CMA-ES) instead of blind grid — same answers, far less compute | 🔴 high |
 | **Sweep scheduler (manual + automatic)** | Keep `sweep-all` (manual) **+** an opt-in scheduled/daemon runner (automatic) | 🟡 medium |
@@ -139,13 +139,13 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | Data pull — instrument master | ✅ button/CLI | ✅ auto on startup | ✅ **both** |
 | Data pull — expiries/contracts | ✅ 2 buttons | ❌ no auto-cascade | 🟡 **add automatic option** |
 | **Sweep run** | ✅ `brutex sweep` / `sweep-all` | ❌ **no scheduler/daemon** | 🔴 **add automatic option** |
-| **Stage-4 cascade (9 filters)** | ❌ only `--overfit-gate` (1 filter) | ❌ not auto on winners | 🔴 **add BOTH** (a `brutex cascade` CLI + auto-on-sweep) |
+| **Stage-4 cascade (9 filters)** | ✅ `brutex cascade <results-root>` | ✅ auto-on-sweep (`--cascade`, default ON) | ✅ **both (DEC-CASCADE-WIRE-001 #566)** — same engine, byte-equality golden-tested |
 | **Report export (pre-open)** | ✅ on-demand route | ❌ no scheduled/auto-send | 🟡 **add automatic option** |
 | Timeframe pre-build | ✅ button / (no standalone CLI) | ❌ intentional (DEC-TF-MATERIALIZE-001) | 🟡 add a standalone CLI trigger |
 | Telegram digest | ❌ no "send test digest" | ❌ not wired to sweep | 🔴 **add BOTH** (manual test-send + auto on events) |
 
 **Duality work items (each ships manual + automatic together):**
-1. 🔴 **Cascade**: `brutex cascade <run-id>` (manual) **+** auto-run on every sweep's top-K (automatic). *This is roadmap item #1.*
+1. ✅ **Cascade (DONE — DEC-CASCADE-WIRE-001 #566)**: `brutex cascade <results-root>` (manual) **+** auto-run on every sweep's top-K (`--cascade`, default ON) — both call the same `run_cascade_for_survivors`, byte-equality golden-tested.
 2. 🔴 **Sweep scheduler**: keep `brutex sweep-all` (manual) **+** add an opt-in scheduled/daemon runner (automatic).
 3. 🔴 **Telegram**: `brutex notify test` (manual) **+** wire watchdog/rate/renew events (automatic).
 4. 🟡 **Reports**: keep the on-demand route (manual) **+** an opt-in scheduled daily export (automatic).
