@@ -192,6 +192,14 @@ class AdaptiveTokenBucket:
     #: bucket runs in legacy "bucket-only" mode (production callers
     #: MUST always pass a tracker; ``None`` is for test fixtures only).
     quota_tracker: DailyQuotaTracker | None = None
+    #: Ease-in: start the bucket EMPTY (0 tokens) instead of full (``burst``).
+    #: With the default ``False`` the bucket grants its ``burst`` allowance
+    #: immediately (legacy behaviour). The Dhan controller passes ``True`` so
+    #: that NEITHER the opening NOR a mid-pull rate-change rebuild can release a
+    #: free burst token — the first call after each (re)build waits one full
+    #: ``1/rate`` interval, keeping the PHYSICAL issue rate strictly ≤ the
+    #: current rate at all times (DEC-DHAN-RATE-HARD-CAP-001 / Golden Rule #6).
+    start_empty: bool = False
 
     # ── Runtime state (not dataclass fields — computed in __post_init__) ──
     _current_rps: float = field(init=False)
@@ -225,7 +233,7 @@ class AdaptiveTokenBucket:
             raise RateLimiterError(f"burst must be ≥ 1, got {self.burst}")
 
         self._current_rps = self.initial_rps
-        self._tokens = float(self.burst)
+        self._tokens = 0.0 if self.start_empty else float(self.burst)
         self._last_refill = self.clock()
         self._recent_429s = deque()
         self._last_success_at = self.clock()
