@@ -42,6 +42,12 @@ in ``test_engine_trade_sim_properties.py`` (driving
 :func:`brutex.metrics.compute.compute_metrics`) and **P-13 / P-14** in
 ``test_indicator_properties.py`` (the EMA / pivot / Fib indicators).
 
+DEC-LOOKAHEAD-BARRIER-001 (``docs/MIGRATION.md``) then promoted **P-06** to a
+live hypothesis test in ``test_lookahead_properties.py``, driving the runtime
+look-ahead enforcer :class:`brutex.feed.lookahead.LookAheadBarrier` (the
+instrumented bar accessor): for any current bar index ``N``, every access index
+``> N`` raises and every access ``≤ N`` is allowed.
+
 Decision: DEC-PHASE1-INVARIANT-CATALOG-001 (MIGRATION entry #250).
 """
 
@@ -126,7 +132,7 @@ def test_p_21_tick_rounding() -> None:
 
 def test_p_06_no_lookahead_in_evaluate() -> None:
     """P-06: For any bar index N, ``evaluate(N)`` reads only indices ≤ N."""
-    pytest.skip("Phase 2 implementation pending (instrumented bar accessor)")
+    pytest.skip("implemented in tests/property/test_lookahead_properties.py")
 
 
 # ────────────────────────────────────────────────────────────────────

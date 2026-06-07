@@ -37,6 +37,7 @@ from brutex.execution.types import (
     Fill,
     Position,
 )
+from brutex.feed.lookahead import LookAheadBarrier
 from brutex.strategies.errors import StrategyContractError
 from brutex.strategies.types import Signal, StrategyState
 
@@ -65,6 +66,12 @@ class BacktestDriver:
     state
         Optional pre-built :class:`StrategyState`. Reset before the
         loop starts \u2014 FR-STR-003 deterministic replay still holds.
+    barrier
+        Optional injected :class:`~brutex.feed.lookahead.LookAheadBarrier`
+        \u2014 the runtime look-ahead enforcer (Property **P-06**). Defaults
+        to a ``record=False`` barrier so the guard is active on every
+        backtest by default at O(1) memory (the AUTOMATIC half of the
+        manual\u21c4automatic duality).
     """
 
     def __init__(
@@ -74,11 +81,13 @@ class BacktestDriver:
         feed: ReplayFeed,
         simulator: ExecutionSimulator,
         state: StrategyState | None = None,
+        barrier: LookAheadBarrier | None = None,
     ) -> None:
         self._strategy = strategy
         self._feed = feed
         self._simulator = simulator
         self._state = state if state is not None else StrategyState()
+        self._barrier = barrier if barrier is not None else LookAheadBarrier(record=False)
 
         meta = strategy.META
         self._allowed_symbols = frozenset(meta.symbols)
@@ -100,6 +109,11 @@ class BacktestDriver:
         """Return the :class:`StrategyState` held by this driver."""
         return self._state
 
+    @property
+    def barrier(self) -> LookAheadBarrier:
+        """Return the runtime look-ahead barrier (Property **P-06**)."""
+        return self._barrier
+
     def run(self) -> BacktestResult:
         """Drive the feed to completion and return a frozen :class:`BacktestResult`.
 
@@ -113,15 +127,23 @@ class BacktestDriver:
             emission, out-of-scope symbol, future timestamp).
         """
         self._state.reset()
+        self._barrier.reset()
         meta = self._strategy.META
         lookback = meta.lookback_bars
 
-        for event in self._feed:
+        for step, event in enumerate(self._feed):
+            # Advance the runtime look-ahead barrier (Property P-06) before
+            # the symbol filter so the cursor tracks every feed position.
+            self._barrier.advance_to(step)
             if event.symbol not in self._allowed_symbols:
                 continue
 
+            # Route the bar through the barrier \u2014 it asserts the read is at
+            # an index \u2264 the current cursor (never the future).
+            bar = self._barrier.guard(step, event.bar)
+
             # Update state first \u2014 same contract as StrategyRunner.
-            self._state.last_prices[event.symbol] = event.bar.close
+            self._state.last_prices[event.symbol] = bar.close
             self._state.bar_count += 1
 
             if self._state.bar_count > lookback:
@@ -135,7 +157,7 @@ class BacktestDriver:
             # state of the book.
             self._simulator.mark_to_market(
                 symbol=event.symbol,
-                price=event.bar.close,
+                price=bar.close,
                 timestamp=event.timestamp,
             )
 

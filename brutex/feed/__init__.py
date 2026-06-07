@@ -34,6 +34,11 @@ without the ``[data]`` extras installed.
 from __future__ import annotations
 
 from brutex.feed.errors import FeedError, LookAheadError, ResampleError
+from brutex.feed.lookahead import (
+    LookAheadBarrier,
+    LookAheadReport,
+    verify_with_barrier,
+)
 from brutex.feed.replay import FeedEvent, ReplayFeed
 from brutex.feed.resampler import (
     INTERVAL_SECONDS,
@@ -46,8 +51,11 @@ __all__ = [
     "RESAMPLEABLE_INTERVALS",
     "FeedError",
     "FeedEvent",
+    "LookAheadBarrier",
     "LookAheadError",
+    "LookAheadReport",
     "ReplayFeed",
     "ResampleError",
     "resample_bars",
+    "verify_with_barrier",
 ]

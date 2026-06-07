@@ -23,6 +23,7 @@ from brutex.execution.driver import BacktestDriver
 from brutex.execution.errors import ExecutionError
 from brutex.execution.simulator import ExecutionSimulator
 from brutex.execution.types import Fill
+from brutex.feed.lookahead import LookAheadBarrier
 from brutex.feed.replay import FeedEvent, ReplayFeed
 from brutex.strategies.errors import StrategyContractError
 from brutex.strategies.protocol import Strategy, StrategyMeta
@@ -184,3 +185,51 @@ def test_lookahead_signal_raises() -> None:
     feed = _FakeFeed("1minute", [FeedEvent(symbol=_SYMBOL, bar=_bar(100))])
     with pytest.raises(StrategyContractError):
         _driver(strat, feed, _FakeSimulator()).run()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Runtime look-ahead barrier wiring — DEC-LOOKAHEAD-BARRIER-001 (P-06)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_default_barrier_is_active_and_record_free() -> None:
+    """No barrier injected → the driver builds a default O(1)-memory guard."""
+    driver = _driver(_FakeStrategy(_meta()), _FakeFeed("1minute", []), _FakeSimulator())
+    assert isinstance(driver.barrier, LookAheadBarrier)
+    assert driver.barrier.records is False  # AUTOMATIC always-on, O(1) memory
+
+
+def test_injected_recording_barrier_records_consumed_bars() -> None:
+    """An injected record=True barrier captures the index of every consumed bar."""
+    barrier = LookAheadBarrier(record=True)
+    strat = _FakeStrategy(_meta())  # in-scope, emits nothing
+    events = [
+        FeedEvent(symbol=_SYMBOL, bar=_bar(100, ts=_TS)),
+        FeedEvent(symbol=_SYMBOL, bar=_bar(101, ts=datetime(2024, 1, 1, 9, 16, 0, tzinfo=UTC))),
+    ]
+    driver = BacktestDriver(
+        strategy=cast(Strategy, strat),
+        feed=cast(ReplayFeed, _FakeFeed("1minute", events)),
+        simulator=cast(ExecutionSimulator, _FakeSimulator()),
+        barrier=barrier,
+    )
+    driver.run()
+    assert driver.barrier is barrier
+    assert barrier.touched_indices == (0, 1)  # every consumed bar, index ≤ cursor
+    assert barrier.max_touched == barrier.current_index == 1
+
+
+def test_barrier_resets_between_runs() -> None:
+    """The barrier is reset at the top of run() so back-to-back runs don't leak."""
+    barrier = LookAheadBarrier(record=True)
+    strat = _FakeStrategy(_meta())
+    feed = _FakeFeed("1minute", [FeedEvent(symbol=_SYMBOL, bar=_bar(100))])
+    driver = BacktestDriver(
+        strategy=cast(Strategy, strat),
+        feed=cast(ReplayFeed, feed),
+        simulator=cast(ExecutionSimulator, _FakeSimulator()),
+        barrier=barrier,
+    )
+    driver.run()
+    driver.run()  # second run must NOT accumulate the first run's trail
+    assert barrier.touched_indices == (0,)

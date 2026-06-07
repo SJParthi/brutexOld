@@ -53,7 +53,7 @@
 | 2 | **Options Track executor** — the strike selector + grid + expiry + lot-size are **already built** (`options/strike_rules.py`, 10 rules); what's missing is the **executor/materializer** (winning spot signal → priced options PnL), Greeks/risk-free, options TF resampler, and the real `data/option_sink.py` (currently a Protocol stub) | Data | 🔴 Critical | `options/strike_rules.py:190` done; `options/__init__.py` (Greeks TBD); `data/option_sink.py:57` stub |
 | 3 | **Stage-2.5 adaptive optimizer (BIPOP-CMA-ES / Bayesian)** — learns from trial failures to *guide* the next parameter proposal instead of static grid enumeration; makes billions-scale search smart | Engine | 🔴 High | no CMA-ES/Bayesian kernel exists; grid axes accepted in `sweep_orchestrator.py` but no adaptive proposer |
 | 4 | ~~**Telegram alerts wired to sweep events** — infra built, not connected to watchdog-hung / rate-breach / renew-fail~~ ✅ **CLOSED** by DEC-TELEGRAM-WIRE-001 (#567): `notifications/sweep_alerts.py` wires watchdog-hung / rate.breach / auth.renew_failed / sweep-complete + a manual `brutex notify test` | Observability | ✅ Done | `notifications/sweep_alerts.py`; `cmd_sweep_all` + `cmd_fetch` + `pull_controller` |
-| 5 | **Runtime look-ahead enforcement in the sweep** — `ReplayFeed.ensure_no_lookahead()` exists + P-06 partly live, but the sweep relies on *structural* causality, no mandated runtime barrier | Engine | 🟡 Medium | `feed/replay.py:184-208` method exists; no call site in main sweep |
+| 5 | ~~**Runtime look-ahead enforcement in the sweep**~~ ✅ **CLOSED** by DEC-LOOKAHEAD-BARRIER-001: Property **P-06** is now a LIVE runtime enforcer (`feed/lookahead.py` `LookAheadBarrier`) wired into the strategy runner (`runner.py`) + execution driver (`driver.py`) alongside the existing `ReplayFeed.ensure_no_lookahead()` timestamp guard — active automatically on every sweep eval (`record=False`, O(1) memory) + a manual `brutex verify-lookahead` recheck. P-06 promoted from `pytest.skip` to a live hypothesis test | Engine | ✅ Done | `feed/lookahead.py`; `runner.py` + `driver.py` call sites; `feed/replay.py:184-208` (the sibling timestamp guard) |
 | 6 | **14 of 24 property invariants + absolute ≥50 M/s throughput gate** | Hardening | 🟡 Medium | `tests/property/test_invariants_catalog.py` (10 live / 14 ROADMAP); M4-Pro runner stub `bench-m4pro.yml` |
 | 7 | **8 orchestrator modules to strict-100% per-module gate; dashboard per-module gate** | Hardening | 🟡 Medium | PyO3 ABI3 single-init blocks per-module gate (covered 100% via global `--cov`) |
 | 8 | **Keepalive prod start-wiring + watchdog sub-tuple detection + 120m/180m/240m TF persistence** | Mixed | 🟢 Low | keepalive `start()` call site UNVERIFIED; watchdog inter-tuple only; 8/19 TFs persisted |
@@ -116,10 +116,10 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | **#1 Cascade — manual + automatic** | The 9 overfitting filters run **automatically** on every sweep's winners **and** via a manual `brutex cascade <run-id>` trigger you can hit by hand — small refactor, huge value | 🔴 quick win |
 | **#2 Options executor** | Strike selector is built; add the **executor** that turns winning spot signals into **real ATM±N options trades** with costs/slippage/IV — execution realism | 🔴 high |
 | **#3 Stage-2.5 smart optimizer** | The search **learns** where good strategies live (Bayesian/CMA-ES) instead of blind grid — same answers, far less compute | 🔴 high |
-| **Sweep scheduler (manual + automatic)** | ✅ **DONE** (DEC-SWEEP-SCHEDULER-001 #573): keep `sweep-all` (manual) **+** `brutex sweep-daemon --schedule …` opt-in scheduled/daemon runner (automatic), `--once` on-demand single cycle | ✅ done |
+| **Sweep scheduler (manual + automatic)** | ✅ **DONE** (DEC-SWEEP-SCHEDULER-001 #574): keep `sweep-all` (manual) **+** `brutex sweep-daemon --schedule …` opt-in scheduled/daemon runner (automatic), `--once` on-demand single cycle | ✅ done |
 | **Telegram (manual + automatic)** | ✅ **DONE** (DEC-TELEGRAM-WIRE-001 #567): `brutex notify test` (manual) **+** auto-alerts on watchdog-hung/rate.breach/auth.renew_failed/sweep-complete | ✅ done |
 | **Scheduled reports + standalone TF/cascade CLIs** | Manual triggers kept; add the automatic twins (§6 duality) | 🟡 medium |
-| **Runtime look-ahead barrier in sweep** | A hard runtime guard (not just structural) that the engine can never peek at future bars | 🟡 medium |
+| **Runtime look-ahead barrier in sweep** | ✅ **DONE** (DEC-LOOKAHEAD-BARRIER-001): a hard runtime guard (`LookAheadBarrier`, Property P-06) wired into the runner + driver so the engine can never read a future bar — automatic on every eval + a manual `brutex verify-lookahead` recheck | ✅ done |
 | **Stub cleanup + `brutex/math/` facade** | ✅ DONE (#569): deleted `backtest/`/`sprint/`/`visualization/`, created the §5 `brutex/math/` facade, reconciled CLAUDE.md; only `rust/fno-math/src/math/` remains | ✅ resolved |
 | **Remaining 14 property invariants + ≥50 M/s absolute gate** | Closes the verification-pyramid + the absolute-throughput canary | 🟡 medium |
 
@@ -139,7 +139,7 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | Data pull — instrument master | ✅ button/CLI | ✅ auto on startup | ✅ **both** |
 | **Data pull — retry failed windows** | ✅ `brutex fetch --retry-failed` / dashboard "Retry failed windows" button | ✅ auto-retry rounds after every pull (default-on, `--no-auto-retry` opt-out) | ✅ **DONE** (DEC-INGEST-AUTO-RETRY-001 #567 — one `retry_failed_windows` engine; bounded + rate-safe ≤5 r/s + known-gaps excluded + O(failed_windows) not O(1)-total) |
 | Data pull — expiries/contracts | ✅ 2 buttons | ❌ no auto-cascade | 🟡 **add automatic option** |
-| **Sweep run** | ✅ `brutex sweep` / `sweep-all` / `sweep-daemon --once` | ✅ `brutex sweep-daemon --schedule …` (cron/interval, crash-safe auto-resume) | ✅ **DONE** (DEC-SWEEP-SCHEDULER-001 #573 — pure clock-injected core, reuses the sweep+resume+audit pipeline; bounds WHEN not O(work)) |
+| **Sweep run** | ✅ `brutex sweep` / `sweep-all` / `sweep-daemon --once` | ✅ `brutex sweep-daemon --schedule …` (cron/interval, crash-safe auto-resume) | ✅ **DONE** (DEC-SWEEP-SCHEDULER-001 #574 — pure clock-injected core, reuses the sweep+resume+audit pipeline; bounds WHEN not O(work)) |
 | **Stage-4 cascade (9 filters)** | ❌ only `--overfit-gate` (1 filter) | ❌ not auto on winners | 🔴 **add BOTH** (a `brutex cascade` CLI + auto-on-sweep) |
 | **Report export (pre-open)** | ✅ on-demand route | ❌ no scheduled/auto-send | 🟡 **add automatic option** |
 | Timeframe pre-build | ✅ button / (no standalone CLI) | ❌ intentional (DEC-TF-MATERIALIZE-001) | 🟡 add a standalone CLI trigger |
@@ -147,7 +147,7 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 
 **Duality work items (each ships manual + automatic together):**
 1. 🔴 **Cascade**: `brutex cascade <run-id>` (manual) **+** auto-run on every sweep's top-K (automatic). *This is roadmap item #1.*
-2. ✅ **Sweep scheduler** (DONE — DEC-SWEEP-SCHEDULER-001 #573): keep `brutex sweep-all` (manual) **+** `brutex sweep-daemon --schedule …` opt-in scheduled/daemon runner (automatic), `--once` for an on-demand single cycle.
+2. ✅ **Sweep scheduler** (DONE — DEC-SWEEP-SCHEDULER-001 #574): keep `brutex sweep-all` (manual) **+** `brutex sweep-daemon --schedule …` opt-in scheduled/daemon runner (automatic), `--once` for an on-demand single cycle.
 3. ✅ **Telegram** (DONE — DEC-TELEGRAM-WIRE-001 #567): `brutex notify test` (manual) **+** wired watchdog-hung/rate.breach/auth.renew_failed/sweep-complete events (automatic).
 4. 🟡 **Reports**: keep the on-demand route (manual) **+** an opt-in scheduled daily export (automatic).
 5. 🟡 **Expiries/contracts pull + TF pre-build**: keep the buttons (manual) **+** an opt-in auto-cascade / standalone CLI.
