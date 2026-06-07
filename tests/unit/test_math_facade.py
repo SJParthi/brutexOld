@@ -1,6 +1,6 @@
 """Unit tests for ``brutex.math`` — the Rust hot-kernel facade.
 
-DEC-STRUCTURE-CLEANUP-001 (``docs/MIGRATION.md`` #566). The facade is a thin,
+DEC-STRUCTURE-CLEANUP-001 (``docs/MIGRATION.md`` #567). The facade is a thin,
 programmatic re-export of the two compiled PyO3 wheels (``fno_math`` +
 ``trading_core``). The compiled wheels cannot be built on the local
 Python 3.11 sandbox, so every test here drives the facade against **fake

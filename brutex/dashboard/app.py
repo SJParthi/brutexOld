@@ -1965,6 +1965,51 @@ def build_app(
         """GET /reports — the pre-open report download page (DEC-PREOPEN-REPORT-001)."""
         return _render_reports_html()
 
+    @app.post("/api/v1/cascade/run")
+    async def api_cascade_run() -> JSONResponse:  # pragma: no cover — live lake + DuckDB replay
+        """POST /api/v1/cascade/run — re-run the Stage-4 cascade on the latest sweep.
+
+        The dashboard "Run cascade" button (DEC-CASCADE-WIRE-001): reloads the
+        cascade manifest the most recent ``sweep-all`` wrote under
+        ``<lake>/sweeps`` and replays it through the SAME pure core the sweep used,
+        regenerating the byte-identical ``cascade-report.json``. Returns the pool /
+        candidate / survivor tally as JSON (or a 400 with a clear message when no
+        sweep has been cascaded yet). The cascade engine itself is 100%-tested in
+        :mod:`brutex.engine.cascade_wire`; this is the thin live-lake trigger.
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake configured for cascade")
+        lake = lake_root.parent
+        root = lake / "sweeps"
+
+        def _run() -> tuple[int, dict[str, object]]:
+            """Replay the cascade off the event loop (threadpool worker)."""
+            from brutex.engine.cascade_wire import (
+                CascadeWireError,
+                load_bars_for_manifest,
+                load_manifest,
+                run_and_write_from_manifest,
+            )
+
+            try:
+                manifest = load_manifest(root)
+            except CascadeWireError as exc:
+                return 400, {"ok": False, "error": str(exc)}
+            bars_for = load_bars_for_manifest(manifest, lake_root=lake)
+            report = run_and_write_from_manifest(root, bars_for=bars_for)
+            return 200, {
+                "ok": True,
+                "sweep_id": manifest.sweep_id,
+                "pools": len(report.groups),
+                "candidates": report.n_input,
+                "survivors": report.n_survived,
+            }
+
+        status_code, payload = await run_in_threadpool(_run)
+        return JSONResponse(payload, status_code=status_code)
+
     # ── Credentials store (DEC-CREDENTIALS-STORE-001) ───────────────
     # CredentialsIn is module-scope (see top of file) so FastAPI resolves
     # it as a request body, not a query param (DEC-CREDS-422-FIX-001).
