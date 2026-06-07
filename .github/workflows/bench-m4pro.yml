@@ -127,6 +127,16 @@ jobs:
           # -p no:cacheprovider keeps the runner's $HOME clean between runs.
           pytest tests/bench/test_throughput_absolute.py -q --tb=short -p no:cacheprovider
 
+      - name: Run 33B-trial SLA gate (resident-parallel mask-AND)
+        run: |
+          . .venv/bin/activate
+          # DEC-SWEEP-RESIDENT-KERNEL-001 (W2-c): the 33B-trial wall-time SLA gate
+          # is REAL on this M4 Pro runner (BRUTEX_M4PRO_ABS=1, set in the job env)
+          # — it projects from the resident + rayon-parallel batched mask-AND
+          # kernel and fails if it exceeds the 4-day M4 Pro SLA. On shared GHA the
+          # same test SKIPS (no env var); CI keeps the O(1) RATIO gate instead.
+          pytest tests/bench/test_full_sweep_extrapolation.py -q --tb=short -p no:cacheprovider
+
       - name: Run strict 1.1x O(1) ratio tier
         run: |
           . .venv/bin/activate
