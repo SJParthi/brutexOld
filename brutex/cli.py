@@ -747,7 +747,9 @@ def build_parser() -> argparse.ArgumentParser:
         dest="catalog_path",
         help="Catalog DuckDB path (default <lake-root>/catalog.duckdb)",
     )
-    verify_la.add_argument("--exchange", default="NSE", help="Lake partition exchange (default NSE)")
+    verify_la.add_argument(
+        "--exchange", default="NSE", help="Lake partition exchange (default NSE)"
+    )
     verify_la.add_argument(
         "--segment", default="INDEX", help="Lake partition segment (default INDEX)"
     )
