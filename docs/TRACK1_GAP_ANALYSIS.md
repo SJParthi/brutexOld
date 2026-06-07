@@ -116,7 +116,7 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | **#1 Cascade — manual + automatic** | The 9 overfitting filters run **automatically** on every sweep's winners **and** via a manual `brutex cascade <run-id>` trigger you can hit by hand — small refactor, huge value | 🔴 quick win |
 | **#2 Options executor** | Strike selector is built; add the **executor** that turns winning spot signals into **real ATM±N options trades** with costs/slippage/IV — execution realism | 🔴 high |
 | **#3 Stage-2.5 smart optimizer** | The search **learns** where good strategies live (Bayesian/CMA-ES) instead of blind grid — same answers, far less compute | 🔴 high |
-| **Sweep scheduler (manual + automatic)** | Keep `sweep-all` (manual) **+** an opt-in scheduled/daemon runner (automatic) | 🟡 medium |
+| **Sweep scheduler (manual + automatic)** | ✅ **DONE** (DEC-SWEEP-SCHEDULER-001 #572): keep `sweep-all` (manual) **+** `brutex sweep-daemon --schedule …` opt-in scheduled/daemon runner (automatic), `--once` on-demand single cycle | ✅ done |
 | **Telegram (manual + automatic)** | ✅ **DONE** (DEC-TELEGRAM-WIRE-001 #567): `brutex notify test` (manual) **+** auto-alerts on watchdog-hung/rate.breach/auth.renew_failed/sweep-complete | ✅ done |
 | **Scheduled reports + standalone TF/cascade CLIs** | Manual triggers kept; add the automatic twins (§6 duality) | 🟡 medium |
 | **Runtime look-ahead barrier in sweep** | A hard runtime guard (not just structural) that the engine can never peek at future bars | 🟡 medium |
@@ -139,7 +139,7 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | Data pull — instrument master | ✅ button/CLI | ✅ auto on startup | ✅ **both** |
 | **Data pull — retry failed windows** | ✅ `brutex fetch --retry-failed` / dashboard "Retry failed windows" button | ✅ auto-retry rounds after every pull (default-on, `--no-auto-retry` opt-out) | ✅ **DONE** (DEC-INGEST-AUTO-RETRY-001 #567 — one `retry_failed_windows` engine; bounded + rate-safe ≤5 r/s + known-gaps excluded + O(failed_windows) not O(1)-total) |
 | Data pull — expiries/contracts | ✅ 2 buttons | ❌ no auto-cascade | 🟡 **add automatic option** |
-| **Sweep run** | ✅ `brutex sweep` / `sweep-all` | ❌ **no scheduler/daemon** | 🔴 **add automatic option** |
+| **Sweep run** | ✅ `brutex sweep` / `sweep-all` / `sweep-daemon --once` | ✅ `brutex sweep-daemon --schedule …` (cron/interval, crash-safe auto-resume) | ✅ **DONE** (DEC-SWEEP-SCHEDULER-001 #572 — pure clock-injected core, reuses the sweep+resume+audit pipeline; bounds WHEN not O(work)) |
 | **Stage-4 cascade (9 filters)** | ❌ only `--overfit-gate` (1 filter) | ❌ not auto on winners | 🔴 **add BOTH** (a `brutex cascade` CLI + auto-on-sweep) |
 | **Report export (pre-open)** | ✅ on-demand route | ❌ no scheduled/auto-send | 🟡 **add automatic option** |
 | Timeframe pre-build | ✅ button / (no standalone CLI) | ❌ intentional (DEC-TF-MATERIALIZE-001) | 🟡 add a standalone CLI trigger |
@@ -147,7 +147,7 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 
 **Duality work items (each ships manual + automatic together):**
 1. 🔴 **Cascade**: `brutex cascade <run-id>` (manual) **+** auto-run on every sweep's top-K (automatic). *This is roadmap item #1.*
-2. 🔴 **Sweep scheduler**: keep `brutex sweep-all` (manual) **+** add an opt-in scheduled/daemon runner (automatic).
+2. ✅ **Sweep scheduler** (DONE — DEC-SWEEP-SCHEDULER-001 #572): keep `brutex sweep-all` (manual) **+** `brutex sweep-daemon --schedule …` opt-in scheduled/daemon runner (automatic), `--once` for an on-demand single cycle.
 3. ✅ **Telegram** (DONE — DEC-TELEGRAM-WIRE-001 #567): `brutex notify test` (manual) **+** wired watchdog-hung/rate.breach/auth.renew_failed/sweep-complete events (automatic).
 4. 🟡 **Reports**: keep the on-demand route (manual) **+** an opt-in scheduled daily export (automatic).
 5. 🟡 **Expiries/contracts pull + TF pre-build**: keep the buttons (manual) **+** an opt-in auto-cascade / standalone CLI.
