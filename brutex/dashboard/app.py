@@ -618,7 +618,7 @@ def build_app(
             "state model do not need FastAPI."
         ) from exc
 
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
     from contextlib import asynccontextmanager
 
     from brutex.adapters.dhan.token_keepalive import TokenKeepalive
@@ -635,7 +635,7 @@ def build_app(
     _token_keepalive: list[TokenKeepalive | None] = [None]
 
     @asynccontextmanager
-    async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # pragma: no cover
+    async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
         """Start the 12h token keepalive on startup; stop it + clear the holder on shutdown.
 
         Best-effort (DEC-DHAN-TOKEN-KEEPALIVE-001): :func:`start_token_keepalive`
