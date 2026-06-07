@@ -137,6 +137,7 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | Token renew | ✅ `brutex auth` | ✅ 12h keepalive | ✅ **both** (keepalive prod-start UNVERIFIED) |
 | Crash-resume (sweep) | ✅ re-run | ✅ checkpoint+dedup | ✅ **both** |
 | Data pull — instrument master | ✅ button/CLI | ✅ auto on startup | ✅ **both** |
+| **Data pull — retry failed windows** | ✅ `brutex fetch --retry-failed` / dashboard "Retry failed windows" button | ✅ auto-retry rounds after every pull (default-on, `--no-auto-retry` opt-out) | ✅ **DONE** (DEC-INGEST-AUTO-RETRY-001 #567 — one `retry_failed_windows` engine; bounded + rate-safe ≤5 r/s + known-gaps excluded + O(failed_windows) not O(1)-total) |
 | Data pull — expiries/contracts | ✅ 2 buttons | ❌ no auto-cascade | 🟡 **add automatic option** |
 | **Sweep run** | ✅ `brutex sweep` / `sweep-all` | ❌ **no scheduler/daemon** | 🔴 **add automatic option** |
 | **Stage-4 cascade (9 filters)** | ❌ only `--overfit-gate` (1 filter) | ❌ not auto on winners | 🔴 **add BOTH** (a `brutex cascade` CLI + auto-on-sweep) |

@@ -1404,6 +1404,88 @@ def build_app(
             }
         )
 
+    @app.post("/api/v1/universe/retry-failed")
+    async def api_universe_retry_failed(  # pragma: no cover — thin route over the 100%-tested core
+        kind: str | None = Query(default=None),
+        symbol: str | None = Query(default=None),
+        symbols: str | None = Query(default=None),
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
+        year: int | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/retry-failed — MANUAL re-pull of ONLY the leftover failed windows.
+
+        Backs the "Retry failed windows" button (DEC-INGEST-AUTO-RETRY-001 — the
+        MANUAL half of the manual⇄automatic retry duality). Routes to
+        :func:`brutex.dashboard.pull_controller.pull_all_spot` with
+        ``auto_retry=True`` so AFTER the (coverage-skipped) pass, bounded extra
+        rounds re-fetch ONLY the still-failed windows — the SAME
+        :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows` engine the
+        CLI ``brutex fetch --retry-failed`` calls (CLAUDE.md §11 COMMON), rate-safe
+        (``≤ 5 r/s``) + idempotent (a now-succeeded window is a no-op). With no
+        ``?symbols=`` / ``?symbol=`` / ``?kind=`` the full admitted spot universe
+        is targeted (index + stock). The persisted coverage ledger means windows
+        already in the lake are skipped, so this re-pulls only the gaps.
+        """
+        dry_run = not dhan_creds_present()
+        if symbols is not None:
+            try:
+                instruments = resolve_pull_symbols(symbols, _require_store().get)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            detail = f"retry {len(instruments)} symbols spot"
+        elif symbol is not None:
+            store = _require_store()
+            instrument = store.get(symbol)
+            if instrument is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown security_id {symbol!r} — not in the instrument store",
+                )
+            instruments = [instrument]
+            detail = f"retry {symbol} spot"
+        else:
+            # No explicit selection → the full admitted spot universe (index + stock).
+            instruments = _select_bulk_targets("index") + _select_bulk_targets("stock")
+            detail = f"retry {kind or 'all'} spot"
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        _LOG.info(
+            "universe.retry_failed.requested",
+            kind=kind,
+            symbol=symbol,
+            symbols=symbols,
+            count=len(instruments),
+            dry_run=dry_run,
+        )
+
+        def _work(on_progress: ProgressHook) -> object:
+            """Background body: re-pull every selected symbol with auto-retry on."""
+            return pull_all_spot(
+                instruments,
+                lake_root=lake_root,
+                dry_run=dry_run,
+                from_date=from_date,
+                to_date=to_date,
+                year=year,
+                on_progress=on_progress,
+                rate_observer=make_rate_observer(state),
+                session_rate=_session_rate,
+                auto_retry=True,
+            )
+
+        started = _pull_job.start(_work, total=len(instruments) * 2, detail=detail)
+        return JSONResponse(
+            {
+                "started": started,
+                "kind": kind,
+                "symbol": symbol,
+                "symbols": symbols,
+                "total": len(instruments) * 2,
+                "dry_run": dry_run,
+                "retry_failed": True,
+            }
+        )
+
     @app.post("/api/v1/universe/pull-options")
     async def api_universe_pull_options(
         kind: str | None = Query(default=None),
