@@ -38,6 +38,7 @@ def _row(seed: int) -> ResultRow:
         tf="5m",
         direction="bull",
         mode="A",
+        mask_bits=seed % (1 << 52),
         net_pnl_paisa=seed,
         gross_profit_paisa=seed,
         gross_loss_paisa=0,

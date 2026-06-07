@@ -47,6 +47,8 @@ def _result_row(draw: st.DrawFn, run_id: str) -> ResultRow:
         tf=draw(st.sampled_from(["1m", "5m", "15m", "1d"])),
         direction=draw(st.sampled_from(["bull", "bear"])),
         mode=draw(st.sampled_from(["A", "B"])),
+        mask_bits=draw(st.integers(min_value=0, max_value=(1 << 52) - 1)),
+        deflated_sharpe=draw(st.one_of(st.none(), _FINITE_FLOAT)),
         net_pnl_paisa=draw(st.integers(min_value=-(10**15), max_value=10**15)),
         gross_profit_paisa=draw(st.integers(min_value=0, max_value=10**15)),
         gross_loss_paisa=draw(st.integers(min_value=0, max_value=10**15)),
@@ -125,6 +127,19 @@ def test_round_trip_preserves_every_row(rows: list[ResultRow]) -> None:
 
 
 @settings(max_examples=200, deadline=None)
+@given(mask=st.integers(min_value=0, max_value=(1 << 52) - 1))
+def test_condition_names_always_match_mask_decode(mask: int) -> None:
+    # condition_names is ALWAYS the vocabulary decode of mask_bits — never drifts
+    # (DEC-SWEEP-WINNERS-BY-NAME-001, single source of truth).
+    from dataclasses import replace
+
+    from brutex.vocabulary.describe import matched_condition_names
+
+    row = replace(_minimal_row(f"{1:064x}", 0), mask_bits=mask)
+    assert row.condition_names == " AND ".join(matched_condition_names(mask))
+
+
+@settings(max_examples=200, deadline=None)
 @given(
     price=st.decimals(
         min_value=Decimal(0), max_value=Decimal(10**7), allow_nan=False, allow_infinity=False
@@ -137,6 +152,7 @@ def test_price_is_always_two_decimals(price: Decimal) -> None:
         tf="5m",
         direction="bull",
         mode="A",
+        mask_bits=0,
         net_pnl_paisa=0,
         gross_profit_paisa=0,
         gross_loss_paisa=0,
@@ -172,6 +188,7 @@ def test_full_precision_metric_round_trips_exactly(metric: float) -> None:
                 tf="5m",
                 direction="bull",
                 mode="A",
+                mask_bits=0,
                 net_pnl_paisa=0,
                 gross_profit_paisa=0,
                 gross_loss_paisa=0,
@@ -214,6 +231,7 @@ def _minimal_row(run_id: str, net_pnl_paisa: int) -> ResultRow:
         tf="5m",
         direction="bull",
         mode="A",
+        mask_bits=0,
         net_pnl_paisa=net_pnl_paisa,
         gross_profit_paisa=0,
         gross_loss_paisa=0,

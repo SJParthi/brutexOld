@@ -535,6 +535,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Min Deflated-Sharpe probability to survive the overfit gate (default 0.95)",
     )
 
+    # ── results (DEC-SWEEP-WINNERS-BY-NAME-001) — read back a sweep results tree ──
+    from brutex.engine.results_report import DEFAULT_SORT_BY, SORT_ALIASES
+
+    results = sub.add_parser(
+        "results",
+        help="Read back a persisted sweep results tree (winning combos BY NAME)",
+    )
+    results_sub = results.add_subparsers(dest="results_command", required=True)
+    results_show = results_sub.add_parser(
+        "show",
+        help="Render the ranked winners leaderboard (condition NAMES + metrics + gate)",
+    )
+    results_show.add_argument(
+        "--results-root",
+        type=Path,
+        required=True,
+        dest="results_root",
+        help="Directory of per-tuple Parquet results (the sweep-all --results-root)",
+    )
+    results_show.add_argument(
+        "--top", type=int, default=20, help="Show the top-N winners (default 20)"
+    )
+    results_show.add_argument(
+        "--sort-by",
+        default=DEFAULT_SORT_BY,
+        choices=sorted(SORT_ALIASES),
+        dest="sort_by",
+        help=f"Leaderboard sort key (default {DEFAULT_SORT_BY})",
+    )
+
     return parser
 
 
@@ -1665,6 +1695,29 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     return EXIT_OK
 
 
+def cmd_results_show(*, results_root: Path, top: int, sort_by: str) -> int:
+    """Read back a sweep results tree and print the ranked winners-by-name leaderboard.
+
+    Thin shell over :func:`brutex.engine.results_report.results_show_report` (the
+    100%-tested engine module): discovers every per-tuple Parquet under
+    *results_root*, merges them, and prints the leaderboard showing each finalist's
+    winning conditions BY NAME plus net P&L, trades, win-rate, Sharpe,
+    Deflated-Sharpe and the gate verdict (DEC-SWEEP-WINNERS-BY-NAME-001). A missing
+    root, empty ``top`` or unknown sort key surfaces as a clear user error, never a
+    traceback.
+    """
+    from brutex.engine.results_report import results_show_report
+    from brutex.engine.results_store import ResultsStoreError
+
+    try:
+        report = results_show_report(results_root, top=top, sort_by=sort_by)
+    except ResultsStoreError as exc:
+        print(f"[brutex] results error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    print(report)
+    return EXIT_OK
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Main dispatcher
 # ────────────────────────────────────────────────────────────────────────
@@ -1776,6 +1829,13 @@ def main(argv: list[str] | None = None) -> int:
             data_snapshot_hash=args.data_snapshot_hash,
             overfit_gate=args.overfit_gate,
             dsr_min=args.dsr_min,
+        )
+    # Thin dispatch over cmd_results_show (DEC-SWEEP-WINNERS-BY-NAME-001).
+    if args.command == "results" and args.results_command == "show":
+        return cmd_results_show(
+            results_root=args.results_root,
+            top=args.top,
+            sort_by=args.sort_by,
         )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits
