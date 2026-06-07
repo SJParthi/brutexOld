@@ -133,6 +133,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # ── catalog (DEC-CATALOG-RECONCILE-WIRE-001) — rebuild partitions from lake ──
+    catalog_cmd = sub.add_parser(
+        "catalog",
+        help="DuckDB catalog tools (partition registry over the Parquet lake)",
+    )
+    catalog_sub = catalog_cmd.add_subparsers(dest="catalog_command", required=True)
+    catalog_reconcile = catalog_sub.add_parser(
+        "reconcile",
+        help=(
+            "Rebuild the catalog 'partitions' table from the on-disk Parquet "
+            "lake so an already-pulled lake is sweep-able with no re-pull"
+        ),
+    )
+    catalog_reconcile.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+
     # ── auth (DEC-CREDENTIALS-STORE-001) — set/status/clear creds ──
     auth = sub.add_parser(
         "auth",
@@ -639,6 +659,28 @@ def cmd_audit_verify(audit_file: Path, audit_format: str = "auto") -> int:
     return EXIT_OK
 
 
+def cmd_catalog_reconcile(lake_root: Path | None) -> int:
+    """Rebuild the DuckDB catalog ``partitions`` table from the Parquet lake.
+
+    Repairs a lake whose partitions were written but never registered (every
+    production ingest sink historically passed ``catalog=None`` — DEC-CATALOG-
+    RECONCILE-WIRE-001), so ``brutex sweep-all`` can read the bars back with no
+    re-pull. ``sweep-all`` also runs this automatically for the swept
+    coordinates; this command reconciles the WHOLE lake on demand.
+    """
+    from brutex.data.catalog import Catalog
+    from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+
+    resolved = _resolve_lake_root(lake_root)
+    with Catalog.open(resolved / "catalog.duckdb") as cat:
+        result = reconcile_catalog_from_lake(lake_root=resolved, catalog=cat)
+    print(
+        f"[brutex] catalog reconcile — partitions={result.partitions_reconciled} "
+        f"bars={result.bars_total} skipped={result.skipped} (lake={resolved})"
+    )
+    return EXIT_OK
+
+
 def cmd_auth_set() -> int:  # pragma: no cover — interactive getpass prompts
     """Interactively prompt (no echo) for the Dhan creds and save them.
 
@@ -1080,7 +1122,7 @@ def _resolve_brute_force_instruments(  # pragma: no cover — opens DuckDB store
 
 
 def _build_live_dhan_spot(  # pragma: no cover — live Dhan token + transport + network
-    lake_root: Path, instruments: list[Any]
+    lake_root: Path, instruments: list[Any], catalog: Any = None
 ) -> tuple[Any, Any]:
     """Wire the real Dhan client + persisting Parquet sink → ``(adapter, sink)``.
 
@@ -1103,7 +1145,7 @@ def _build_live_dhan_spot(  # pragma: no cover — live Dhan token + transport +
         transport=urllib_transport,
     )
     adapter = DhanMarketAdapter(client=client, instruments=tuple(instruments))
-    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root), catalog=catalog)
     return adapter, sink
 
 
@@ -1172,9 +1214,12 @@ def cmd_fetch(
         print(f"[brutex] lake: {resolved_instruments}")
         return EXIT_OK
 
+    import contextlib
+
     from brutex.adapters.dhan.run_ingest import run_dhan_spot_ingest
     from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
     from brutex.dashboard.pull_controller import DHAN_HISTORY_FLOOR
+    from brutex.data.catalog import Catalog
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import NullBarSink, ParquetBarSink
     from brutex.universe import BRUTE_FORCE_INDICES
@@ -1226,36 +1271,48 @@ def cmd_fetch(
     pace: Any = None
     on_rate_limit: Any = None
     on_success: Any = None
-    if dry_run:
-        fetch_instruments = [_synthetic_index_instrument(spec) for spec in BRUTE_FORCE_INDICES]
-        adapter = SyntheticDhanAdapter(bars_per_window=rows_per_chunk)
-        sink = (
-            NullBarSink() if inspect else ParquetBarSink(writer=ParquetWriter(lake_root=resolved))
-        )
-        print("[brutex] fetch --dry-run → synthetic candles", file=sys.stderr)
-    else:
-        fetch_instruments = _resolve_brute_force_instruments(resolved)
-        adapter, sink = _build_live_dhan_spot(resolved, fetch_instruments)
-        if inspect:
-            sink = NullBarSink()
-        # Adaptive [3..5] r/s throttle for the live pull (DEC-DHAN-ADAPTIVE-RPS-001).
-        from brutex.adapters.dhan.rate_control import DhanRateController
-
-        _rate = DhanRateController()
-        pace, on_rate_limit, on_success = _rate.pace, _rate.on_rate_limit, _rate.on_success
-        print("[brutex] fetch (live Dhan)", file=sys.stderr)
-
-    report = run_dhan_spot_ingest(
-        adapter,
-        sink,
-        instruments=fetch_instruments,
-        intervals=intervals,
-        start=start_dt.date(),
-        end=end_dt.date(),
-        pace=pace,
-        on_rate_limit=on_rate_limit,
-        on_success=on_success,
+    # Persisting pulls register every written partition in the DuckDB catalog
+    # so `brutex sweep-all` can read the bars back (DEC-CATALOG-RECONCILE-WIRE-001
+    # — historically the sink was built with catalog=None, leaving the catalog
+    # empty and the sweep blind). --inspect persists nothing, so it needs no
+    # catalog. The catalog's own lock serialises the upserts under the parallel
+    # window fan-out (DEC-DHAN-PARALLEL-INGEST-001).
+    cat_ctx: Any = (
+        contextlib.nullcontext(None) if inspect else Catalog.open(resolved / "catalog.duckdb")
     )
+    with cat_ctx as cat:
+        if dry_run:
+            fetch_instruments = [_synthetic_index_instrument(spec) for spec in BRUTE_FORCE_INDICES]
+            adapter = SyntheticDhanAdapter(bars_per_window=rows_per_chunk)
+            sink = (
+                NullBarSink()
+                if inspect
+                else ParquetBarSink(writer=ParquetWriter(lake_root=resolved), catalog=cat)
+            )
+            print("[brutex] fetch --dry-run → synthetic candles", file=sys.stderr)
+        else:
+            fetch_instruments = _resolve_brute_force_instruments(resolved)
+            adapter, sink = _build_live_dhan_spot(resolved, fetch_instruments, catalog=cat)
+            if inspect:
+                sink = NullBarSink()
+            # Adaptive [3..5] r/s throttle for the live pull (DEC-DHAN-ADAPTIVE-RPS-001).
+            from brutex.adapters.dhan.rate_control import DhanRateController
+
+            _rate = DhanRateController()
+            pace, on_rate_limit, on_success = _rate.pace, _rate.on_rate_limit, _rate.on_success
+            print("[brutex] fetch (live Dhan)", file=sys.stderr)
+
+        report = run_dhan_spot_ingest(
+            adapter,
+            sink,
+            instruments=fetch_instruments,
+            intervals=intervals,
+            start=start_dt.date(),
+            end=end_dt.date(),
+            pace=pace,
+            on_rate_limit=on_rate_limit,
+            on_success=on_success,
+        )
     print(
         f"[brutex] fetch done — windows={report.windows} bars_appended={report.bars_appended} "
         f"failed_pairs={report.failed_pairs} transient={report.transient_failures}"
@@ -1597,6 +1654,24 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # content fingerprint and each tuple reuses the cached bars (no re-read).
     slices: dict[tuple[str, str], list[Any]] = {}
     with Catalog.open(catalog) as cat:
+        # Rebuild the catalog from the on-disk Parquet truth for the swept
+        # coordinates BEFORE reading, so a lake whose partitions were never
+        # registered (every production ingest sink historically passed
+        # catalog=None — DEC-CATALOG-RECONCILE-WIRE-001) is still sweep-able
+        # with no re-pull. O(P) one-time over the requested partitions, not in
+        # the per-combo hot loop (Golden Rule #10).
+        from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+
+        for symbol in symbol_list:
+            for interval in interval_list:
+                reconcile_catalog_from_lake(
+                    lake_root=resolved_lake,
+                    catalog=cat,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    interval=interval,
+                )
         for symbol in symbol_list:
             for interval in interval_list:
                 feed = ReplayFeed(
@@ -1766,6 +1841,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.audit_command != "verify":
             parser.error(f"unknown audit subcommand: {args.audit_command}")
         return cmd_audit_verify(audit_file=args.audit_file, audit_format=args.audit_format)
+    if args.command == "catalog":
+        if args.catalog_command != "reconcile":
+            parser.error(f"unknown catalog subcommand: {args.catalog_command}")
+        return cmd_catalog_reconcile(lake_root=args.lake_root)
     if args.command == "auth":  # pragma: no cover — interactive / thin print shims
         if args.auth_command == "set":
             return cmd_auth_set()
