@@ -62,7 +62,6 @@ from typing import Any
 from brutex import __version__
 from brutex.config.paths import resolve_lake_root
 from brutex.config.runtime import read_runtime_file
-from brutex.orchestrator.audit import AuditChainCorruption, verify_chain
 
 # ────────────────────────────────────────────────────────────────────────
 # Exit codes
@@ -120,6 +119,18 @@ def build_parser() -> argparse.ArgumentParser:
         "audit_file",
         type=Path,
         help="Path to a JSONL audit-log file",
+    )
+    audit_verify.add_argument(
+        "--format",
+        dest="audit_format",
+        choices=["orchestrator", "sweep", "auto"],
+        default="auto",
+        help=(
+            "Chain algorithm: 'orchestrator' (SHA-256 ingest chain), 'sweep' "
+            "(BLAKE3 supervisor chain), or 'auto' to detect from the file "
+            "(default). 'auto' verifies EITHER format and never misreports a "
+            "valid chain as corrupt."
+        ),
     )
 
     # ── auth (DEC-CREDENTIALS-STORE-001) — set/status/clear creds ──
@@ -565,17 +576,36 @@ def cmd_status(run_id: str | None) -> int:
     return EXIT_OK
 
 
-def cmd_audit_verify(audit_file: Path) -> int:
-    """Verify the hash chain of an audit-log file."""
+def cmd_audit_verify(audit_file: Path, audit_format: str = "auto") -> int:
+    """Verify the hash chain of an audit-log file (orchestrator / sweep / auto).
+
+    Auto-detects the chain format (SHA-256 ingest vs BLAKE3 supervisor) by
+    default and verifies EITHER — closing the operability gap where the
+    supervisor chain falsely reported as corrupt (DEC-AUDIT-VERIFY-UNIFY-001).
+    Exit codes are preserved: missing file / malformed line → user error;
+    a real hash-chain integrity break → internal error.
+    """
+    # Lazy import: the unified verifier pulls the Rust-backed engine package,
+    # so non-audit commands (e.g. `brutex version`) stay wheel-free.
+    from brutex.audit_verify import verify_audit_file
+    from brutex.engine.sweep_audit import SweepAuditChainCorruption, SweepAuditError
+    from brutex.orchestrator.audit import AuditChainCorruption, AuditError
+
     if not audit_file.exists():
         print(f"[brutex] audit file not found: {audit_file}", file=sys.stderr)
         return EXIT_USER_ERROR
     try:
-        count = verify_chain(audit_file)
-    except AuditChainCorruption as exc:
+        result = verify_audit_file(audit_file, audit_format)
+    # Corruption subclasses MUST be caught before their base error classes
+    # (AuditChainCorruption ⊂ AuditError; SweepAuditChainCorruption ⊂ SweepAuditError).
+    except (AuditChainCorruption, SweepAuditChainCorruption) as exc:
         print(f"[brutex] AUDIT CHAIN CORRUPT: {exc}", file=sys.stderr)
         return EXIT_INTERNAL_ERROR
-    print(f"[brutex] audit chain OK — {count} entries verified")
+    except (AuditError, SweepAuditError) as exc:
+        print(f"[brutex] audit file unreadable: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    label = result.format.value if result.format is not None else "empty"
+    print(f"[brutex] audit chain OK [{label}] — {result.entry_count} entries verified")
     return EXIT_OK
 
 
@@ -1682,7 +1712,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "audit":
         if args.audit_command != "verify":
             parser.error(f"unknown audit subcommand: {args.audit_command}")
-        return cmd_audit_verify(audit_file=args.audit_file)
+        return cmd_audit_verify(audit_file=args.audit_file, audit_format=args.audit_format)
     if args.command == "auth":  # pragma: no cover — interactive / thin print shims
         if args.auth_command == "set":
             return cmd_auth_set()

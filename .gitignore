@@ -81,6 +81,14 @@ credentials.json
 # In-repo log redirect target (make run LOG_DIR=./.brutex-logs → BRUTEX_LOG_DIR)
 .brutex-logs/
 
+# Local sweep-validation artifacts — synthetic lake + sweep outputs from
+# pipeline-mechanics runs. NEVER commit: these are throwaway artifacts and the
+# synthetic OHLC must not be mistaken for real market data (Golden Rule #1).
+.synth/
+.sweep-results/
+.sweep-results-clean/
+.sweep-scale/
+
 # Rust (future P3)
 target/
 Cargo.lock
