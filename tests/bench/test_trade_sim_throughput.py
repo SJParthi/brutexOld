@@ -24,13 +24,18 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
 fno_math = pytest.importorskip("fno_math", reason="resident trade-sim kernel needs the built wheel")
 
 from tests.bench._o1_tiers import ratio_ceiling  # noqa: E402
+
+if TYPE_CHECKING:  # pragma: no cover - typing only (annotations are lazy)
+    # `fno_math` above is a runtime variable (importorskip result); pyright forbids
+    # it in a type expression. Import the class name for annotations only.
+    from fno_math import ResidentSweepSim
 
 # Env-var gate — set to "1" on the M4 Pro self-hosted runner (bench-m4pro.yml).
 _ENV_M4PRO_ABS: Final[str] = "BRUTEX_M4PRO_ABS"
@@ -48,7 +53,7 @@ def _m4pro_abs_active() -> bool:
     return os.environ.get(_ENV_M4PRO_ABS, "").strip() == "1"
 
 
-def _make_sim(n_bars: int) -> fno_math.ResidentSweepSim:
+def _make_sim(n_bars: int) -> ResidentSweepSim:
     """Deterministic resident sim: a gently oscillating window, sparse bar_bits."""
     seed = 0x9E3779B97F4A7C15
     base = 1_000_000  # ₹10,000.00 in paisa
