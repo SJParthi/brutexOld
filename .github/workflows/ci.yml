@@ -439,6 +439,17 @@ jobs:
           else
             echo "(brutex.execution.driver edge test file not present yet — gate inactive)"
           fi
+          # DEC-STRUCTURE-CLEANUP-001 (2026-06-07): brutex.math — the thin
+          # facade re-exporting the Rust hot kernels (fno_math + trading_core).
+          # 100% line+branch is reachable wheel-free: the unit + property
+          # suites drive the programmatic re-export against fake kernel modules
+          # injected into sys.modules (the real-wheel surface is pinned by the
+          # golden test, which importorskips when the wheels are absent).
+          if compgen -G "tests/unit/test_math_facade.py" > /dev/null; then
+            pytest --cov=brutex.math --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_math_facade.py tests/property/test_math_facade_invariants.py
+          else
+            echo "(brutex.math facade test file not present yet — gate inactive)"
+          fi
           # DEC-COVERAGE-CATALOG-001 (2026-06-02): brutex.data.catalog
           # un-omitted at 100% line+branch. Reaching 100% needs BOTH the
           # real-lake happy-path suite (test_data_lake_real.py) AND the
