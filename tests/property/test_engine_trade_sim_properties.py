@@ -13,17 +13,36 @@ Invariants (hold for any chronologically-ordered bar feed + signal stream):
 * **ClosedTrade invariants** — every emitted trade already satisfies the
   ``ClosedTrade`` post-init contract (MFE/MAE ``>= 0``, ``holding_bars >= 1``,
   ``exit_ts >= entry_ts``); a run that produced any trade proves it.
+
+This file is also the live home of three verification-pyramid invariants
+(``docs/TRACK1_VERIFICATION_PYRAMID.md`` §3) — promoted from the
+``test_invariants_catalog.py`` ROADMAP stubs by
+DEC-PROPERTY-INVARIANTS-LIVE-001 (``docs/MIGRATION.md``):
+
+* **P-03** (``test_p03_per_trade_pnl_sums_to_balance_delta``) — Σ per-trade
+  paper P&L equals ``final_balance − initial_balance`` to the exact paisa, with
+  the metrics aggregator (:func:`brutex.metrics.compute.compute_metrics`)
+  agreeing on every random scenario.
+* **P-04** (``test_p04_gross_minus_costs_equals_net``) — Track-1 spot is
+  signal-only (costs ``= 0``), so ``gross − Σcosts == net`` collapses to
+  ``net_pnl == gross_profit − gross_loss`` exactly, never deducting a cost leg.
+* **P-09** (``test_p09_forced_exit_no_trade_survives_1520``) — no trade survives
+  the 15:20 IST forced exit: every emitted trade opens before, and closes on or
+  before, the first bar whose window reaches 15:20 IST.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import pairwise
 
+from brutex.calendars.nse import IST, is_forced_exit_bar
 from brutex.data.models import CandleBar
 from brutex.engine.trade_sim import FillPolicy, LevelFill, SameBarTie, simulate_trades
-from brutex.metrics.types import ClosedTrade
+from brutex.metrics.compute import compute_metrics
+from brutex.metrics.types import ClosedTrade, EquityCurve
 from brutex.strategies.types import Side
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
@@ -48,12 +67,26 @@ def _rupees(paisa: int) -> Decimal:
     return Decimal(paisa) / Decimal(100)
 
 
-def _bar_at(minute: int, open_p: int, close_p: int, up_wick: int, down_wick: int) -> CandleBar:
-    """A valid 1-minute bar whose high/low extend the open/close by the wicks."""
+def _bar_at(
+    minute: int,
+    open_p: int,
+    close_p: int,
+    up_wick: int,
+    down_wick: int,
+    *,
+    anchor: datetime = _OPEN_UTC,
+) -> CandleBar:
+    """A valid 1-minute bar whose high/low extend the open/close by the wicks.
+
+    ``anchor`` is the UTC timestamp of the ``minute == 0`` bar; it defaults to
+    the 09:15 IST session open (well clear of 15:20) used by the accounting /
+    look-ahead scenarios, and is overridden by :func:`_forced_scenarios` to
+    straddle the 15:20 IST forced-exit boundary.
+    """
     high_p = max(open_p, close_p) + up_wick
     low_p = min(open_p, close_p) - down_wick
     return CandleBar(
-        timestamp=_OPEN_UTC + timedelta(minutes=minute),
+        timestamp=anchor + timedelta(minutes=minute),
         open=_rupees(open_p),
         high=_rupees(high_p),
         low=_rupees(low_p),
@@ -207,3 +240,206 @@ def test_trades_never_overlap(
         assert trade.exit_ts >= trade.entry_ts
         assert trade.mfe_paisa >= 0
         assert trade.mae_paisa >= 0
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# P-03 / P-04 — int64-paisa accounting (verification pyramid §3, guarantee G4)
+#
+# The accounting invariants drive the SAME ``_scenarios`` feed (anchored at the
+# 09:15 IST session open, so the 15:20 forced-exit path is *not* exercised here —
+# it has its own P-09 test below) through :func:`simulate_trades` and then build
+# an independent int64-paisa ledger / equity curve, reconciling it against the
+# metrics aggregator. DEC-PROPERTY-INVARIANTS-LIVE-001.
+# ────────────────────────────────────────────────────────────────────────────
+
+#: Starting balance for the P-03/P-04 ledger, in int64 paisa (``> 0`` for a
+#: valid :class:`~brutex.metrics.types.EquityCurve`). The exact value is
+#: irrelevant — the invariants are about the *delta* — so any positive base
+#: exercises the reconciliation.
+_INITIAL_BALANCE_PAISA = st.integers(min_value=1, max_value=10_000_000)
+
+
+def _equity_curve(initial_paisa: int, pnls: Sequence[int]) -> tuple[EquityCurve, list[int]]:
+    """Build the per-trade equity curve by applying each trade's paisa P&L in order.
+
+    Returns the :class:`~brutex.metrics.types.EquityCurve` (for the metrics
+    aggregator) plus the raw ``list[int]`` of per-trade balance snapshots
+    (``len == len(pnls) + 1``; ``curve[0]`` is the opening balance) so the test
+    can assert the per-trade ledger granularity directly.
+    """
+    balance = initial_paisa
+    curve = [initial_paisa]
+    for pnl in pnls:
+        balance += pnl
+        curve.append(balance)
+    return (
+        EquityCurve(tuple(curve), start_equity_paisa=initial_paisa, span_years=1.0),
+        curve,
+    )
+
+
+@given(
+    scenario=_scenarios(),
+    direction=st.sampled_from([Side.BUY, Side.SELL]),
+    sl=st.none() | _LEG_PAISA,
+    tp=st.none() | _LEG_PAISA,
+    policy=_POLICIES,
+    initial=_INITIAL_BALANCE_PAISA,
+)
+@settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
+def test_p03_per_trade_pnl_sums_to_balance_delta(
+    scenario: tuple[list[CandleBar], list[bool], list[bool]],
+    direction: Side,
+    sl: int | None,
+    tp: int | None,
+    policy: FillPolicy,
+    initial: int,
+) -> None:
+    """P-03: Σ per-trade paper_pnl == final_balance − initial_balance (exact paise)."""
+    bars, entry, exit_ = scenario
+    trades = simulate_trades(
+        bars,
+        entry,
+        direction=direction,
+        tf_minutes=1,
+        stop_loss_paisa=sl,
+        take_profit_paisa=tp,
+        exit_signals=exit_,
+        policy=policy,
+    )
+    pnls = [t.pnl_paisa for t in trades]
+    equity, curve = _equity_curve(initial, pnls)
+    final = curve[-1]
+
+    # Per-trade granularity: each ledger step is exactly that trade's paisa P&L.
+    for prev, cur, trade in zip(curve[:-1], curve[1:], trades, strict=True):
+        assert cur - prev == trade.pnl_paisa
+
+    # Σ identity, in exact integer paise (no float drift ever creeps in).
+    delta = final - initial
+    assert sum(pnls) == delta
+    assert isinstance(delta, int)
+
+    # The metrics aggregator's net P&L agrees with the balance delta to the paisa.
+    metrics = compute_metrics(trades, equity, total_bars=max(1, len(bars)))
+    assert metrics.net_pnl_paisa == delta
+    assert isinstance(metrics.net_pnl_paisa, int)
+
+
+@given(
+    scenario=_scenarios(),
+    direction=st.sampled_from([Side.BUY, Side.SELL]),
+    sl=st.none() | _LEG_PAISA,
+    tp=st.none() | _LEG_PAISA,
+    policy=_POLICIES,
+    initial=_INITIAL_BALANCE_PAISA,
+)
+@settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
+def test_p04_gross_minus_costs_equals_net(
+    scenario: tuple[list[CandleBar], list[bool], list[bool]],
+    direction: Side,
+    sl: int | None,
+    tp: int | None,
+    policy: FillPolicy,
+    initial: int,
+) -> None:
+    """P-04: gross_pnl − Σ costs == net_pnl (Track 1: costs=0, so gross == net)."""
+    bars, entry, exit_ = scenario
+    trades = simulate_trades(
+        bars,
+        entry,
+        direction=direction,
+        tf_minutes=1,
+        stop_loss_paisa=sl,
+        take_profit_paisa=tp,
+        exit_signals=exit_,
+        policy=policy,
+    )
+    pnls = [t.pnl_paisa for t in trades]
+    equity, _curve = _equity_curve(initial, pnls)
+    metrics = compute_metrics(trades, equity, total_bars=max(1, len(bars)))
+
+    # Gross profit / loss are non-negative magnitudes (loss is stored absolute).
+    assert metrics.gross_profit_paisa >= 0
+    assert metrics.gross_loss_paisa >= 0
+    # costs == 0 for signal-only spot (CLAUDE.md §7), so the cost-free identity
+    # gross − Σcosts == net collapses to net == gross_profit − gross_loss, exact.
+    assert metrics.net_pnl_paisa == metrics.gross_profit_paisa - metrics.gross_loss_paisa
+    # ...and net is the RAW directional sum with no cost leg deducted anywhere.
+    assert metrics.net_pnl_paisa == sum(pnls)
+    assert isinstance(metrics.net_pnl_paisa, int)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# P-09 — forced 15:20 IST exit (verification pyramid §3, guarantee G4)
+# ────────────────────────────────────────────────────────────────────────────
+
+#: 15:10 IST == 09:40 UTC. Anchoring the feed here makes every drawn scenario
+#: (>= 11 one-minute bars) straddle the 15:20 IST forced-exit boundary, so the
+#: forced-exit path is always exercised (bar index 10 opens at 15:20 IST).
+_FORCED_OPEN_UTC = datetime(2024, 1, 2, 9, 40, tzinfo=UTC)
+
+
+@st.composite
+def _forced_scenarios(draw: st.DrawFn) -> tuple[list[CandleBar], list[bool], list[bool]]:
+    """Draw a feed that straddles the 15:20 IST forced exit (11..40 1-minute bars)."""
+    n = draw(st.integers(min_value=11, max_value=40))
+    bars: list[CandleBar] = []
+    for minute in range(n):
+        open_p = draw(_PRICE_PAISA)
+        close_p = draw(_PRICE_PAISA)
+        bars.append(
+            _bar_at(
+                minute,
+                open_p,
+                close_p,
+                draw(_WICK_PAISA),
+                draw(_WICK_PAISA),
+                anchor=_FORCED_OPEN_UTC,
+            )
+        )
+    entry = draw(st.lists(st.booleans(), min_size=n, max_size=n))
+    exit_ = draw(st.lists(st.booleans(), min_size=n, max_size=n))
+    return bars, entry, exit_
+
+
+@given(
+    scenario=_forced_scenarios(),
+    direction=st.sampled_from([Side.BUY, Side.SELL]),
+    sl=st.none() | _LEG_PAISA,
+    tp=st.none() | _LEG_PAISA,
+    policy=_POLICIES,
+)
+@settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
+def test_p09_forced_exit_no_trade_survives_1520(
+    scenario: tuple[list[CandleBar], list[bool], list[bool]],
+    direction: Side,
+    sl: int | None,
+    tp: int | None,
+    policy: FillPolicy,
+) -> None:
+    """P-09: no trade survives 15:20 IST — entries open before, exits land by, the boundary."""
+    bars, entry, exit_ = scenario
+    # The first bar whose [open, open + 1m) window reaches 15:20 IST. Guaranteed
+    # to exist (>= 11 bars from 15:10 IST), so ``next`` never raises.
+    forced_idx = next(
+        i
+        for i, bar in enumerate(bars)
+        if is_forced_exit_bar(bar.timestamp.astimezone(IST).time(), 1)
+    )
+    boundary_ts = bars[forced_idx].timestamp
+    trades = simulate_trades(
+        bars,
+        entry,
+        direction=direction,
+        tf_minutes=1,
+        stop_loss_paisa=sl,
+        take_profit_paisa=tp,
+        exit_signals=exit_,
+        policy=policy,
+    )
+    for trade in trades:
+        # No position opens on or after the forced bar...
+        assert trade.entry_ts < boundary_ts
+        # ...and none survives past it (force-closed at the boundary at the latest).
+        assert trade.exit_ts <= boundary_ts
