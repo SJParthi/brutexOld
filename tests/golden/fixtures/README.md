@@ -10,16 +10,56 @@ in the calling test so any unintended drift is caught at test time.
 
 | # | Corpus | Purpose | Phase |
 |---|---|---|---|
-| 1 | NIFTY 50 — 1 trading day (375 bars × 4 instruments) | reproducibility round-trip + tick-rounding (P-19, P-21) | Phase 2 |
-| 2 | BANKNIFTY — 1 week (5 days × 1-minute) | session window + holiday-calendar pruning (P-22, P-23) | Phase 2 |
-| 3 | SENSEX — circuit-close edge case | forced-exit (P-09) + simulator robustness | Phase 2 |
-| 4 | INDIA VIX — 1 week | reference-only data; no signal bits | Phase 2 |
-| 5 | Cross-instrument resample (1m → 5m) | resample associativity (P-08) | Phase 2 |
+| 1 | NIFTY 50 — 1 trading day (375 bars) | reproducibility round-trip + tick-rounding (P-19, P-21) | ✅ **landed** (see below) |
+| 2 | BANKNIFTY — 1 week | session window + holiday-calendar pruning (P-22, P-23) | ✅ **landed** (see below) |
+| 3 | SENSEX — circuit-close edge case | forced-exit (P-09) + simulator robustness | ✅ **landed** (see below) |
+| 4 | INDIA VIX — 1 week | reference-only data; no signal bits | ✅ **landed** (see below) |
+| 5 | Cross-instrument resample (1m → 5m) | resample associativity (P-08) | ✅ **landed** (see below) |
 | 7 | 52-condition truth table | per-condition determinism (G9) | ✅ **landed** (see below) |
 | 8 | 12-fill paisa accounting | gross/net/Σ PnL (P-03, P-04) | ✅ **landed** (see below) |
-| 9 | combo-hash distinct inputs | hash uniqueness (P-01, P-02) | Phase 2 |
+| 9 | combo-hash distinct inputs | hash uniqueness (P-01, P-02) | ✅ **landed** (see below) |
 
 ## Landed corpora
+
+### #1–5, #9 — Phase 2 engine/resample/combo corpora (DEC-PHASE2-CORPORA-001)
+
+MIGRATION entry #547. Six byte-frozen goldens that each drive a REAL existing
+component over a small hand-derived (or translation-invariant / deterministic)
+fixture, with the expected values either hand-derived bar-for-bar or pinned as a
+SHA-256 / digest manifest (Golden Rule #1 — no hand-authored numbers without a
+justification):
+
+* **#1 — `../test_engine_nifty_day_golden.py`** (NIFTY, 375-bar trading day):
+  drives `engine.stage1a.build_bar_bits`. Every bar is a flat doji on the first
+  IST day, so each `u64` mask is a closed form (`{40,41} ∪ time_bit ∪ {38 if
+  i≥3}`) asserted bar-for-bar + pinned by SHA-256; plus the **reproducibility
+  round-trip** (batch==batch==stream, P-19) and the **tick-rounding** 2-dp
+  ROUND_HALF_UP seam (P-21).
+* **#2 — `../test_engine_banknifty_week_golden.py`** (BANKNIFTY, holiday week):
+  `calendars.nse.trading_days_between` prunes 2024-08-12→18 to 4 trading days
+  (Independence Day + weekend removed, P-23), and `build_bar_bits` walks the
+  pruned session-window feed across the IST day-rollover (P-22) — masks
+  hand-derived + SHA-256 pinned.
+* **#3 — `../test_engine_sensex_forced_exit_golden.py`** (SENSEX): drives
+  `engine.trade_sim.simulate_trades` for the 15:20 **forced-exit override**
+  (P-09) and the **end-of-data** close-at-last-CLOSE robustness path — both the
+  proven Fixture-A windows translated to SENSEX scale (price-difference fields
+  invariant under translation).
+* **#4 — `../test_india_vix_reference_golden.py`** (INDIA VIX, reference-only):
+  `data.tf_resampler` aggregates the VIX week to hand-derived daily bars (the
+  reference data path), and `brutex.universe` proves VIX is `reference_only` and
+  **excluded** from the brute-force engine — the "no signal bits" guarantee.
+* **#5 — `../test_resample_cross_instrument_golden.py`**: drives
+  `data.tf_resampler.resample_1m_to_tf` 1m→5m at three instrument price scales
+  (hand-derived buckets) + the **associativity** 1m→15m == (1m→5m)→15m (P-08).
+* **#9 — `../test_combo_hash_distinct_golden.py`**: byte-freezes the 9-field
+  BLAKE3 `strategies.combo.combo_hash` over a base + nine single-field variants —
+  determinism (P-01), distinct-inputs→distinct-digests + per-field sensitivity
+  (P-02), and param-order invariance.
+
+All six run under CI (3.12 + the `fno_math` / `trading_core` wheels); they were
+authored against a local 3.12 venv with both wheels built (the CI-equivalent
+oracle).
 
 ### #7 — 52-condition truth table (G9 per-condition determinism)
 
@@ -52,11 +92,11 @@ spot is signal-only → NO brokerage (CLAUDE.md §7), so net == gross.
 
 ## Status
 
-📋 ROADMAP (remaining corpora #1–5, #9) — these land alongside the Phase 2
-ingest pipeline. Corpora #7 (truth table) + #8 (paisa accounting) are ✅ landed.
+✅ All Phase 2 corpora (#1–5, #7, #8, #9) are landed.
 
 ## Decision
 
 DEC-PHASE1-SMOKE-AND-SKELETONS-001 (MIGRATION entry #251);
 DEC-PHASE2-TRUTH-TABLE-001 (MIGRATION entry #538);
-DEC-ENGINE-PAISA-ACCOUNTING-GOLDEN-001 (MIGRATION entry #544).
+DEC-ENGINE-PAISA-ACCOUNTING-GOLDEN-001 (MIGRATION entry #544);
+DEC-PHASE2-CORPORA-001 (MIGRATION entry #547).
