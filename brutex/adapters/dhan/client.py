@@ -45,6 +45,7 @@ from urllib.parse import urlparse
 import structlog
 
 from brutex.adapters.dhan.constants import (
+    DATA_RATE_LIMIT_RPS,
     DHAN_BASE_URL,
     HEADER_ACCESS_TOKEN,
     HEADER_CLIENT_ID,
@@ -102,6 +103,18 @@ _LATENCY_WINDOW: Final[int] = 256
 #: 16k-call options fan-out never floods INFO, while the rate stays visible).
 _DEFAULT_LOG_EVERY: Final[int] = 25
 
+#: Width (seconds) of the rolling window for the INSTANTANEOUS issue-rate gauge
+#: (``rps_1s`` / ``rps_1s_max``). One second = the unit Dhan's 5 r/s cap is
+#: expressed in (CLAUDE.md §2 Rule 6), so a trailing-1s POST count is the
+#: DIRECT real-time measurement of "did we ever exceed 5 per second?" — unlike
+#: the cumulative ``effective_rps`` average, which can read high in the opening
+#: without any true per-second breach (DEC-DHAN-RATE-REALTIME-GUARANTEE-001).
+_RPS_WINDOW_S: Final[float] = 1.0
+
+
+def _no_pace() -> None:
+    """Default no-op pace hook — the client is rate-agnostic unless a bucket is wired."""
+
 
 @dataclass(slots=True)
 class CallMeter:
@@ -130,7 +143,32 @@ class CallMeter:
     _first_at: float = 0.0
     _last_at: float = 0.0
     _recent: deque[float] = field(default_factory=lambda: deque(maxlen=_LATENCY_WINDOW))
+    #: Monotonic timestamps of POST ISSUES within the trailing ``_RPS_WINDOW_S``
+    #: (evicted on each :meth:`record_issue`) — the instantaneous per-second gauge.
+    _issued: deque[float] = field(default_factory=deque)
+    #: Peak trailing-1s issue count seen this run — the real-time ASSURANCE that
+    #: per-second never crossed 5 (``rps_1s_max <= 5`` ⇒ no breach, ever).
+    _max_rps_1s: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def record_issue(self, at: float) -> int:
+        """Record one POST ISSUED at monotonic *at*; return the trailing-1s count — O(1), atomic.
+
+        Counts EVERY physical POST at the moment it is sent (initial + every
+        fast-retry), so the returned ``rps_1s`` is the TRUE instantaneous issue
+        rate against the 5 r/s cap (CLAUDE.md §2 Rule 6) — the caller logs a
+        ``rate.breach`` WARNING if it exceeds the cap. Evicting entries older than
+        ``_RPS_WINDOW_S`` keeps the deque bounded to ≈ the rate, so this stays
+        O(1) amortised (DEC-DHAN-RATE-REALTIME-GUARANTEE-001).
+        """
+        with self._lock:
+            self._issued.append(at)
+            cutoff = at - _RPS_WINDOW_S
+            while self._issued and self._issued[0] <= cutoff:
+                self._issued.popleft()
+            rps_1s = len(self._issued)
+            self._max_rps_1s = max(self._max_rps_1s, rps_1s)
+            return rps_1s
 
     def record(self, *, latency_s: float, at: float) -> None:
         """Record one completed call's *latency_s* (seconds) at wall-time *at* — O(1), atomic."""
@@ -148,9 +186,13 @@ class CallMeter:
         """Return a JSON-friendly MEASURED summary (latency in ms, rate in r/s) — atomic."""
         with self._lock:
             if self.count == 0:
+                # No COMPLETED round-trip yet — but POSTs may already be in flight,
+                # so still surface the issue-rate gauge (record_issue fires at send).
                 return {
                     "calls": 0,
                     "effective_rps": 0.0,
+                    "rps_1s": len(self._issued),
+                    "rps_1s_max": self._max_rps_1s,
                     "latency_ms_avg": 0.0,
                     "latency_ms_min": 0.0,
                     "latency_ms_max": 0.0,
@@ -164,6 +206,11 @@ class CallMeter:
             return {
                 "calls": self.count,
                 "effective_rps": round((self.count - 1) / span, 2) if span > 0 else 0.0,
+                # The INSTANTANEOUS gauge: ``rps_1s_max`` is the peak trailing-1s
+                # POST count this run — ``<= 5`` is the real-time PROOF the 5 r/s
+                # cap was never crossed (DEC-DHAN-RATE-REALTIME-GUARANTEE-001).
+                "rps_1s": len(self._issued),
+                "rps_1s_max": self._max_rps_1s,
                 "latency_ms_avg": round(self._sum_s / self.count * 1000.0, 1),
                 "latency_ms_min": round(self._min_s * 1000.0, 1),
                 "latency_ms_max": round(self._max_s * 1000.0, 1),
@@ -226,6 +273,12 @@ class DhanClient:
     meter: CallMeter = field(default_factory=CallMeter)
     #: Emit a ``dhan.throughput`` INFO summary every Nth call.
     log_every: int = _DEFAULT_LOG_EVERY
+    #: Rate-bucket acquire hook, called before EVERY physical POST including each
+    #: fast-retry, so a transient-stall retry can no longer bypass the shared 5
+    #: r/s token bucket (DEC-DHAN-RATE-REALTIME-GUARANTEE-001). Default no-op keeps
+    #: the client rate-agnostic (same injection pattern as ``transport`` / ``clock``
+    #: / ``sleep``); the live ingest wires ``controller.pace`` in.
+    pace: Callable[[], None] = field(default=_no_pace)
 
     def __post_init__(self) -> None:
         """Reject a non-positive fast-retry budget (fail fast on misconfig)."""
@@ -288,6 +341,11 @@ class DhanClient:
                     backoff_ms=round(backoff_s * 1000.0, 1),
                 )
                 self.sleep(backoff_s)
+                # Gate the RETRY POST through the shared rate bucket — the initial
+                # attempt was already paced by the ingest layer, so pacing here
+                # (and only here) makes EVERY physical POST bucket-bounded without
+                # double-pacing the first (DEC-DHAN-RATE-REALTIME-GUARANTEE-001).
+                self.pace()
 
     def _post_once(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
         """One physical POST attempt (guard → transport → status/JSON map).
@@ -300,6 +358,15 @@ class DhanClient:
         _guard_url(url)
         data = json.dumps(body).encode("utf-8")
         started = self.clock()
+        # Real-time assurance: count this POST at its ISSUE instant and shout if
+        # the trailing-1s rate ever crosses the 5 r/s cap (CLAUDE.md §2 Rule 6).
+        # With every path now bucket-gated (burst=1) this WARNING must never fire
+        # — its presence on /logs is the breach alarm (DEC-DHAN-RATE-REALTIME-GUARANTEE-001).
+        rps_1s = self.meter.record_issue(started)
+        if rps_1s > DATA_RATE_LIMIT_RPS:
+            _LOG.warning(
+                "rate.breach", rps_1s=rps_1s, cap_rps=DATA_RATE_LIMIT_RPS, endpoint=endpoint
+            )
         try:
             status, raw = self.transport(
                 url, body=data, headers=self._headers(), timeout=self.timeout

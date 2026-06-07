@@ -39,7 +39,7 @@ regardless of worker completion order (CLAUDE.md §2 Rule 4).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 
 import structlog
@@ -72,6 +72,31 @@ ProgressHook = Callable[[str, int, bool], None]
 #: ``(instrument, interval)`` pair. Each maps to a distinct lake partition, so
 #: the per-pair writes are path-isolated (DEC-DHAN-PARALLEL-INGEST-001).
 SpotJob = tuple[Instrument, str]
+
+
+def _with_paced_client(adapter: MarketAdapter, pace: Pacer | None) -> MarketAdapter:
+    """Return *adapter* with its Dhan client's ``pace`` hook wired to the shared bucket.
+
+    The rate ≤5 GUARANTEE (DEC-DHAN-RATE-REALTIME-GUARANTEE-001): the client's
+    bounded fast-retry (a timeout/transport/5xx stall) is the ONE physical-POST
+    path the per-window ``pace`` does not cover, so under a parallel timeout storm
+    those retries could push the aggregate issue rate over 5 r/s. Injecting *pace*
+    into the client (it acquires a token before each retry POST) closes that gap —
+    with ``burst=1`` every physical POST is then bucket-bounded ⇒ ≤ ``current_rps``.
+
+    A no-op (returns *adapter* unchanged) when there is nothing to wire: an
+    unthrottled run (*pace* is ``None``), or any adapter that is not the live
+    :class:`~brutex.adapters.dhan.adapter.DhanMarketAdapter` (e.g. the dry-run
+    :class:`SyntheticDhanAdapter`). The adapter + client are frozen dataclasses, so
+    this rebuilds via :func:`replace` rather than mutating (no shared-state
+    surprise across workers). The import is local to avoid any import cycle and is
+    paid once per pull, never on the hot path.
+    """
+    from brutex.adapters.dhan.adapter import DhanMarketAdapter
+
+    if pace is None or not isinstance(adapter, DhanMarketAdapter):
+        return adapter
+    return replace(adapter, client=replace(adapter.client, pace=pace))
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +236,12 @@ def run_dhan_spot_ingest(
         exception (a genuine bug) is NOT swallowed — it surfaces unchanged.
     """
     pull_id = current_pull_id()
+    # Rate ≤5 GUARANTEE (DEC-DHAN-RATE-REALTIME-GUARANTEE-001): wire the shared
+    # bucket's *pace* into the adapter's Dhan client so a client fast-retry (a
+    # timeout/5xx stall) re-acquires a token instead of bypassing the limiter —
+    # closing the only un-gated physical-POST path. No-op for adapters without a
+    # paceable client (dry-run / fakes) or when unthrottled (*pace* is None).
+    adapter = _with_paced_client(adapter, pace)
     runner: RunParallel = run_parallel if run_parallel is not None else PoolRunParallel()
 
     # Deterministic worklist: one job per (instrument, interval) pair, in the

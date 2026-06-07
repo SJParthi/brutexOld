@@ -8,6 +8,9 @@ uniform override, per-series terminal-error quarantine, the report aggregates,
 the empty-universe case, and custom fan-out axes.
 """
 
+# Whitebox test of the module-private `_with_paced_client` (sanctioned per pyproject.toml).
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -23,6 +26,7 @@ from brutex.adapters.dhan.option_universe_ingest import (
     WEEKLY_EXPIRY_CODES,
     OptionsUniverseReport,
     OptionUnderlying,
+    _with_paced_client,
     expiry_codes_for_flag,
     run_dhan_options_ingest,
     strike_window,
@@ -133,6 +137,34 @@ def _stock(security_id: str = "1333", offsets: int = STOCK_STRIKE_OFFSETS) -> Op
 
 
 # ── strike_window ────────────────────────────────────────────────────────
+
+
+def test_with_paced_client_injects_pace_into_live_dhan_client() -> None:
+    """`_with_paced_client` wires `pace` into a real options DhanClient.
+
+    Rate ≤5 GUARANTEE (DEC-DHAN-RATE-REALTIME-GUARANTEE-001) — options analog of
+    the spot helper: covers pace None (unchanged), non-Dhan poster (unchanged),
+    and the live DhanClient (rebuilt with the bucket `pace`).
+    """
+    from brutex.adapters.dhan.client import DhanClient
+
+    def _transport(
+        url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+    ) -> tuple[int, bytes]:
+        return 200, b"{}"
+
+    def _pace() -> None: ...
+
+    client = DhanClient(access_token="t", client_id="c", transport=_transport)
+
+    paced = _with_paced_client(client, _pace)
+    assert paced is not client
+    assert isinstance(paced, DhanClient) and paced.pace is _pace
+
+    assert _with_paced_client(client, None) is client  # pace None → unchanged
+    sentinel = object()
+    # non-Dhan poster → returned unchanged
+    assert _with_paced_client(sentinel, _pace) is sentinel  # type: ignore[arg-type]
 
 
 def test_strike_window_zero_is_atm_only() -> None:

@@ -50,11 +50,12 @@ DEC-DHAN-STOCK-MONTHLY-ONLY-001). The options lake is
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 
 import structlog
 
+from brutex.adapters.dhan.client import DhanClient
 from brutex.adapters.dhan.constants import DRV_OPTION_TYPES, EXPIRY_FLAGS
 from brutex.adapters.dhan.errors import DhanError
 from brutex.adapters.dhan.option_ingest import (
@@ -187,6 +188,22 @@ class OptionUnderlying:
 #: re-group deterministically) + the underlying + its 4 fan-out coordinates
 #: (DEC-DHAN-OPTION-SERIES-FANOUT-001).
 _SeriesJob = tuple[int, OptionUnderlying, str, int, str, str]
+
+
+def _with_paced_client(client: JsonPoster, pace: Pacer | None) -> JsonPoster:
+    """Return *client* with its ``pace`` wired to the shared bucket (DEC-DHAN-RATE-REALTIME-GUARANTEE-001).
+
+    The options analog of the spot ``run_ingest._with_paced_client``: the option
+    ``post_json`` fast-retry (a `rollingoption` 5xx/timeout) must re-acquire a
+    bucket token instead of bypassing the limiter, so EVERY physical option POST
+    (initial via the per-window pace + each retry via this hook) is bucket-bounded
+    ⇒ ≤ ``current_rps`` ≤ 5 (CLAUDE.md §2 Rule 6). A no-op when unthrottled
+    (*pace* ``None``) or for a non-:class:`DhanClient` poster (test fakes); the
+    frozen dataclass is rebuilt via :func:`replace`, never mutated.
+    """
+    if pace is None or not isinstance(client, DhanClient):
+        return client
+    return replace(client, pace=pace)
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +367,11 @@ def run_dhan_options_ingest(
         exception (a genuine bug) is NOT swallowed — it surfaces unchanged.
     """
     pull_id = current_pull_id()
+    # Rate ≤5 GUARANTEE (DEC-DHAN-RATE-REALTIME-GUARANTEE-001): wire the shared
+    # bucket's *pace* into the options client so a `rollingoption` fast-retry
+    # (5xx/timeout) re-acquires a token instead of bypassing the limiter — the
+    # options analog of the spot fix, closing the last un-gated physical-POST path.
+    client = _with_paced_client(client, pace)
     runner: RunParallel = run_parallel if run_parallel is not None else PoolRunParallel()
     underlyings = list(underlyings)
 

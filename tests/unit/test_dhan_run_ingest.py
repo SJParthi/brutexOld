@@ -5,6 +5,9 @@ instruments × intervals, terminal-error quarantine (run continues), the
 aggregate report properties, pace threading, and the empty-universe case.
 """
 
+# Whitebox test of the module-private `_with_paced_client` (sanctioned per pyproject.toml).
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -164,6 +167,36 @@ def test_pace_threaded_through(monkeypatch: pytest.MonkeyPatch) -> None:
         pace=sentinel,  # type: ignore[arg-type]
     )
     assert seen == [sentinel]
+
+
+def test_with_paced_client_injects_pace_into_live_dhan_adapter() -> None:
+    """`_with_paced_client` wires `pace` into a real DhanMarketAdapter's client.
+
+    Rate ≤5 GUARANTEE (DEC-DHAN-RATE-REALTIME-GUARANTEE-001): covers all three
+    branches — pace None (unchanged), non-Dhan adapter (unchanged), and the live
+    DhanMarketAdapter (client rebuilt with the bucket `pace`).
+    """
+    from brutex.adapters.dhan.adapter import DhanMarketAdapter
+    from brutex.adapters.dhan.client import DhanClient
+
+    def _transport(
+        url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+    ) -> tuple[int, bytes]:
+        return 200, b"{}"
+
+    def _pace() -> None: ...
+
+    client = DhanClient(access_token="t", client_id="c", transport=_transport)
+    adapter = DhanMarketAdapter(client=client, instruments=())
+
+    paced = mod._with_paced_client(adapter, _pace)
+    assert paced is not adapter
+    assert isinstance(paced, DhanMarketAdapter) and paced.client.pace is _pace
+
+    assert mod._with_paced_client(adapter, None) is adapter  # pace None → unchanged
+    sentinel = object()
+    # non-Dhan adapter → returned unchanged
+    assert mod._with_paced_client(sentinel, _pace) is sentinel  # type: ignore[arg-type]
 
 
 def test_non_dhan_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
