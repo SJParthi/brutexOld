@@ -312,6 +312,16 @@ class DashboardState:
     # See ``TRACK1_DASHBOARD_DESIGN.md §6.4`` for the incremental
     # swap-out contract.
     sweep_funnel: SweepFunnelSnapshot | None = None
+    # Live brute-force SWEEP progress (DEC-SWEEP-WIRE-GA-001) — percent / ETA /
+    # tuples-per-sec / survivors, served at ``/api/v1/sweep-progress``. Two
+    # feeds: ``sweep_progress`` is the in-process push (a same-process sweep calls
+    # :meth:`update_sweep_progress`), and ``sweep_progress_path`` is the
+    # cross-process file bridge a CLI-launched ``brutex sweep-all`` publishes to
+    # via :func:`brutex.engine.sweep_supervisor.publish_progress`. The route
+    # prefers the file (most-recent for a separate sweep process), then the
+    # in-process push, then an idle snapshot.
+    sweep_progress: dict[str, Any] | None = None
+    sweep_progress_path: Path | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     # ── Event subscription entry point ──────────────────────────────
@@ -451,6 +461,45 @@ class DashboardState:
         """
         with self._lock:
             self.sweep_funnel = snapshot
+
+    def update_sweep_progress(self, snapshot: Mapping[str, Any]) -> None:
+        """Replace the in-process live sweep-progress snapshot (DEC-SWEEP-WIRE-GA-001).
+
+        The in-process push seam: a sweep running in THIS process wires this as
+        its supervisor ``on_progress`` hook (passing
+        :meth:`SweepProgressSnapshot.to_dict
+        <brutex.engine.sweep_progress.SweepProgressSnapshot.to_dict>`). Stores a
+        shallow copy under the state lock. A separate sweep PROCESS instead
+        publishes to :attr:`sweep_progress_path` (see :meth:`sweep_progress_view`).
+        """
+        with self._lock:
+            self.sweep_progress = dict(snapshot)
+
+    def sweep_progress_view(self) -> dict[str, Any]:
+        """Return the current live sweep-progress snapshot for the dashboard route.
+
+        Resolution order (crash-tolerant — a dashboard poll NEVER raises):
+
+        1. :attr:`sweep_progress_path` if configured + readable — the
+           cross-process file bridge a CLI ``brutex sweep-all`` publishes to (the
+           freshest source for a separate sweep process);
+        2. else the in-process :attr:`sweep_progress` push, if set;
+        3. else an idle snapshot.
+
+        A missing / malformed progress file falls through to (2)/(3) — never an
+        error (delegated to :func:`brutex.engine.sweep_supervisor.read_progress`,
+        which returns the idle view on any read/parse failure).
+        """
+        from brutex.engine.sweep_supervisor import idle_progress, read_progress
+
+        with self._lock:
+            path = self.sweep_progress_path
+            in_process = self.sweep_progress
+        if path is not None and path.exists():
+            return read_progress(path)
+        if in_process is not None:
+            return dict(in_process)
+        return idle_progress()
 
     def update_telegram(self, *, stats: dict[str, int | float]) -> None:
         """Update the Telegram panel from a fresh notifier counter snapshot."""
@@ -701,6 +750,20 @@ def build_app(
         the lake or the store lock.
         """
         return JSONResponse(asdict(state.rate_limit))
+
+    @app.get("/api/v1/sweep-progress")
+    async def api_sweep_progress() -> JSONResponse:
+        """GET /api/v1/sweep-progress — O(1) live brute-force sweep progress (DEC-SWEEP-WIRE-GA-001).
+
+        The dashboard panel for the guarantee-&-assurance layer: percent / ETA /
+        tuples-per-sec / survivors / skipped, populated by the supervisor's
+        :class:`~brutex.engine.sweep_progress.SweepProgress` (wired into
+        :func:`~brutex.engine.sweep_supervisor.run_supervised_grid`). Serves the
+        freshest of the cross-process file bridge, the in-process push, or an idle
+        snapshot — a pure O(1) read that never touches the lake or the store lock
+        and never raises (see :meth:`DashboardState.sweep_progress_view`).
+        """
+        return JSONResponse(state.sweep_progress_view())
 
     @app.get("/api/v1/events")
     async def api_events() -> JSONResponse:

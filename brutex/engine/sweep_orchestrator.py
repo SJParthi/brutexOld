@@ -626,6 +626,79 @@ def make_store_for(root: Path, grid: SweepGridConfig) -> Callable[[SweepTuple], 
     return lambda tuple_: load_or_create_store(tuple_store_path(root, tuple_, grid))
 
 
+def run_one_tuple(
+    grid: SweepGridConfig,
+    tuple_: SweepTuple,
+    *,
+    bars_for: Callable[[str, str], Sequence[CandleBar]],
+    store_for: Callable[[SweepTuple], ResultsStore],
+    dedup: ComboDedup,
+    audit: AuditWriter,
+    skip_empty: bool = True,
+) -> SweepRunSummary | None:
+    """Execute ONE grid tuple — the single per-tuple body shared across drivers.
+
+    The COMMON seam (CLAUDE.md §11) between the plain :func:`run_sweep_grid` and
+    the guarantee-&-assurance :func:`brutex.engine.sweep_supervisor.run_supervised_grid`:
+    load the tuple's bars via *bars_for*; if it has bars, build its
+    :class:`~brutex.engine.sweep_run.SweepRunConfig`, obtain its load-or-create
+    store via *store_for* (called **only** on the run path, never eagerly — so a
+    skip never flushes an empty store over good results), and delegate to
+    :func:`~brutex.engine.sweep_run.run_persisted_sweep` (which owns the
+    dedup-mark / flush ordering — this seam never marks or flushes itself).
+
+    A tuple that *has bars* but ranks zero finalists returns a real
+    :class:`~brutex.engine.sweep_run.SweepRunSummary` with ``persisted == 0`` —
+    ``None`` is reserved **strictly** for the no-bars case so a caller can tell
+    "no data" from "data, nothing survived".
+
+    Parameters
+    ----------
+    grid
+        The validated grid config.
+    tuple_
+        The grid point to run.
+    bars_for
+        ``(instrument, tf_label) -> bars`` loader. An empty sequence means the
+        tuple has no data.
+    store_for
+        ``tuple -> ResultsStore`` factory (called only when the tuple has bars).
+    dedup
+        The shared :class:`~brutex.engine.sweep_run.ComboDedup`.
+    audit
+        An open, single-writer :class:`~brutex.orchestrator.audit.AuditWriter`.
+    skip_empty
+        When ``True`` (default), a tuple with no bars returns ``None``; when
+        ``False``, it raises :class:`ValueError`.
+
+    Returns
+    -------
+    SweepRunSummary | None
+        The per-tuple tally, or ``None`` when the tuple has no bars and
+        ``skip_empty`` is ``True``.
+
+    Raises
+    ------
+    ValueError
+        If ``skip_empty=False`` and the tuple has no bars.
+    """
+    bars = bars_for(tuple_.instrument, tuple_.tf.label)
+    if not bars:
+        if not skip_empty:
+            raise ValueError(
+                f"run_sweep_grid: no bars for {tuple_.instrument}/{tuple_.tf.label} "
+                f"(skip_empty=False)"
+            )
+        return None
+    return run_persisted_sweep(
+        bars,
+        tuple_.to_run_config(grid),
+        store=store_for(tuple_),
+        dedup=dedup,
+        audit=audit,
+    )
+
+
 def run_sweep_grid(
     grid: SweepGridConfig,
     *,
@@ -718,22 +791,18 @@ def run_sweep_grid(
     persisted = 0
 
     for tuple_ in iter_sweep_tuples(grid):
-        bars = bars_for(tuple_.instrument, tuple_.tf.label)
-        if not bars:
-            if not skip_empty:
-                raise ValueError(
-                    f"run_sweep_grid: no bars for {tuple_.instrument}/{tuple_.tf.label} "
-                    f"(skip_empty=False)"
-                )
-            tuples_skipped_no_bars += 1
-            continue
-        summary = run_persisted_sweep(
-            bars,
-            tuple_.to_run_config(grid),
-            store=store_for(tuple_),
+        summary = run_one_tuple(
+            grid,
+            tuple_,
+            bars_for=bars_for,
+            store_for=store_for,
             dedup=dedup,
             audit=audit,
+            skip_empty=skip_empty,
         )
+        if summary is None:
+            tuples_skipped_no_bars += 1
+            continue
         tuples_run += 1
         enumerated += summary.enumerated
         conflict_pruned += summary.conflict_pruned
@@ -782,6 +851,7 @@ __all__ = [
     "iter_sweep_tuples",
     "load_or_create_store",
     "make_store_for",
+    "run_one_tuple",
     "run_sweep_grid",
     "tuple_store_path",
 ]
