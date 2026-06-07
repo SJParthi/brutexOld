@@ -158,6 +158,8 @@ class TestCallMeter:
         assert CallMeter().snapshot() == {
             "calls": 0,
             "effective_rps": 0.0,
+            "rps_1s": 0,
+            "rps_1s_max": 0,
             "latency_ms_avg": 0.0,
             "latency_ms_min": 0.0,
             "latency_ms_max": 0.0,
@@ -172,6 +174,8 @@ class TestCallMeter:
         assert snap == {
             "calls": 2,
             "effective_rps": 2.0,
+            "rps_1s": 0,  # no record_issue() calls here → issue gauge stays 0
+            "rps_1s_max": 0,
             "latency_ms_avg": 200.0,
             "latency_ms_min": 100.0,
             "latency_ms_max": 300.0,
