@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from typing import Any
 
 import pytest
 
@@ -23,7 +24,7 @@ fno_math = pytest.importorskip("fno_math")
 trading_core = pytest.importorskip("trading_core")
 
 
-def _fresh_real_facade() -> object:
+def _fresh_real_facade() -> Any:
     """Import a fresh ``brutex.math`` bound to the real kernels in sys.modules."""
     sys.modules.pop("brutex.math", None)
     return importlib.import_module("brutex.math")
@@ -78,7 +79,7 @@ def test_real_facade_resolves_to_kernel_objects() -> None:
 def test_real_kernel_versions_reports_both() -> None:
     """``kernel_versions()`` reports a non-empty version per real kernel."""
     facade = _fresh_real_facade()
-    versions = facade.kernel_versions()  # type: ignore[attr-defined]
+    versions = facade.kernel_versions()
     assert set(versions) == {"fno_math", "trading_core"}
     assert all(isinstance(v, str) and v for v in versions.values())
 
