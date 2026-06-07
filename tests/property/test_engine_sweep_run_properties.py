@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 import structlog
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
@@ -150,6 +151,7 @@ def _config() -> SweepRunConfig:
 
 
 def test_rerun_same_dirs_dedups_everything(tmp_path: Path) -> None:
+    pytest.importorskip("polars")  # flush/load need the [data] extra; skips the .[dev]-only job
     bars = _bars()
     cfg = _config()
     store_path = tmp_path / "r.parquet"
@@ -176,6 +178,7 @@ def test_rerun_same_dirs_dedups_everything(tmp_path: Path) -> None:
 
 
 def test_rerun_fresh_dirs_identical_content_hash(tmp_path: Path) -> None:
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     bars = _bars()
     cfg = _config()
 

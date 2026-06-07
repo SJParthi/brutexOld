@@ -29,6 +29,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 import structlog
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
@@ -145,6 +146,7 @@ _GOLDEN_CONTENT_HASH = "9713beff6059f155db8897938049755ba284d66c91e446cab48ef215
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     summary = _run(tmp_path, "a")
     assert summary.enumerated == 5
     assert summary.conflict_pruned == 0
@@ -155,6 +157,7 @@ def test_golden_summary_is_stable(tmp_path: Path) -> None:
 
 
 def test_golden_store_is_deterministic_across_runs(tmp_path: Path) -> None:
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     a = _run(tmp_path, "a")
     b = _run(tmp_path, "b")
     assert a.store_content_hash == b.store_content_hash
@@ -162,5 +165,6 @@ def test_golden_store_is_deterministic_across_runs(tmp_path: Path) -> None:
 
 
 def test_golden_content_hash_literal(tmp_path: Path) -> None:
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     summary = _run(tmp_path, "a")
     assert summary.store_content_hash == _GOLDEN_CONTENT_HASH

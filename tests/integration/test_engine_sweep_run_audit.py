@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 import structlog
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
@@ -78,6 +79,7 @@ def _config(**overrides: object) -> SweepRunConfig:
 
 
 def test_end_to_end_store_and_audit(tmp_path: Path) -> None:
+    pytest.importorskip("polars")  # flush/load need the [data] extra; skips the .[dev]-only job
     bars = _bars()
     store_path = tmp_path / "results.parquet"
     audit_path = tmp_path / "audit.jsonl"
@@ -107,6 +109,7 @@ def test_end_to_end_store_and_audit(tmp_path: Path) -> None:
 
 
 def test_audit_line_count_independent_of_combo_count(tmp_path: Path) -> None:
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     # A k=2 sweep enumerates C(5,2)=10 masks vs C(5,1)=5 for k=1 — the audit line
     # count must stay 3 either way (the O(1)-in-combo-count audit invariant).
     bars = _bars()

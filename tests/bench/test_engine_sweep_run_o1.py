@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 import structlog
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
@@ -142,6 +143,7 @@ def _config(k: int) -> SweepRunConfig:
 
 class TestAuditCountIsComboIndependent:
     def test_three_lines_regardless_of_k(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
         # k=1 → 5 masks; k=2 → 10 masks; both emit EXACTLY 3 audit lines.
         bars = _bars()
         counts: list[int] = []
