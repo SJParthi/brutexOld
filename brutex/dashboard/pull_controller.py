@@ -75,6 +75,7 @@ from brutex.orchestrator.universe_phases import RunParallel
 if TYPE_CHECKING:
     from brutex.adapters.dhan.rate_control import DhanRateController
     from brutex.adapters.dhan.token_holder import TokenHolder
+    from brutex.adapters.dhan.token_keepalive import TokenKeepalive
 
 _LOG = structlog.get_logger(__name__)
 
@@ -702,7 +703,7 @@ class SessionRateController:
 
 def start_token_keepalive(  # pragma: no cover — live creds + RenewToken network, absent in CI
     session_rate: SessionRateController | None = None,
-) -> object | None:
+) -> TokenKeepalive | None:
     """Start the continuous 12h token keepalive for the app's lifetime (best-effort).
 
     DEC-DHAN-TOKEN-KEEPALIVE-001. When live creds resolve, this:
@@ -728,7 +729,7 @@ def start_token_keepalive(  # pragma: no cover — live creds + RenewToken netwo
 
     Returns
     -------
-    object | None
+    TokenKeepalive | None
         The started :class:`TokenKeepalive` (call ``.stop()`` at shutdown), or
         ``None`` when no live creds are present.
     """
