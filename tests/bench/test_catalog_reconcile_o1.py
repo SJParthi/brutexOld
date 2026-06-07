@@ -12,20 +12,20 @@ partition) would blow the ratio.
 Honest scope (Golden Rule #10): a full reconcile is inherently **O(P)** over P
 partitions — this gates the per-partition cost in P, NOT an O(1)-total claim,
 which is physically impossible for a P-partition scan.
+
+The reconciler needs the ``[data]`` extra (polars + duckdb); the CI bench job
+installs only ``[dev]``, so this module ``importorskip``s those FIRST and
+imports the data-layer symbols lazily inside the helpers — collection never
+fails when ``[data]`` is absent, it just skips (mirrors the other data-backed
+benches).
 """
 
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from brutex.data.catalog import Catalog
-from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
-from brutex.data.models import CandleBar
-from brutex.data.parquet_writer import ParquetWriter
 
 from tests.bench._o1_tiers import ratio_ceiling
 
@@ -38,6 +38,12 @@ _LARGE = 100
 
 def _build_lake(root: Path, n_partitions: int) -> None:
     """Write *n_partitions* one-bar partitions across distinct months/years."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from brutex.data.models import CandleBar
+    from brutex.data.parquet_writer import ParquetWriter
+
     writer = ParquetWriter(lake_root=root)
     for idx in range(n_partitions):
         year = 2010 + idx // 12
@@ -62,6 +68,9 @@ def _build_lake(root: Path, n_partitions: int) -> None:
 
 
 def _per_partition_ns(tmp: Path, n: int) -> float:
+    from brutex.data.catalog import Catalog
+    from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+
     lake = tmp / f"lake_{n}"
     lake.mkdir()
     _build_lake(lake, n)
