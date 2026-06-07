@@ -17,13 +17,11 @@ OHLC (Golden Rule #1 — real-shaped data, no fabrication).
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
-import structlog
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
@@ -57,10 +55,6 @@ _CTX: dict[str, str] = {
     "code_commit_sha": "deadbeef",
 }
 _PARAMS: dict[str, object] = {"sl_paisa": 80, "tp_paisa": 50, "prior_n": 3}
-
-
-def _quiet_logs() -> None:
-    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
 
 
 def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
@@ -346,7 +340,6 @@ class TestRankedComboToResultRow:
 
 class TestRunPersistedSweep:
     def test_empty_bars_raises(self, tmp_path: Path) -> None:
-        _quiet_logs()
         store = ResultsStore(path=tmp_path / "r.parquet")
         with (
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
@@ -355,7 +348,6 @@ class TestRunPersistedSweep:
             run_persisted_sweep([], _make_config(), store=store, dedup=_dedup(), audit=audit)
 
     def test_hold_direction_rejected(self, tmp_path: Path) -> None:
-        _quiet_logs()
         store = ResultsStore(path=tmp_path / "r.parquet")
         cfg = _make_config(direction=Side.HOLD)
         with (
@@ -365,7 +357,6 @@ class TestRunPersistedSweep:
             run_persisted_sweep(_trending_bars(), cfg, store=store, dedup=_dedup(), audit=audit)
 
     def test_over_cap_raises_before_compute(self, tmp_path: Path) -> None:
-        _quiet_logs()
         store = ResultsStore(path=tmp_path / "r.parquet")
         # C(5,2)=10 > max_combos=3 → refuse.
         cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, max_combos=3)
@@ -376,7 +367,6 @@ class TestRunPersistedSweep:
             run_persisted_sweep(_trending_bars(), cfg, store=store, dedup=_dedup(), audit=audit)
 
     def test_happy_path_persists_and_audits_three_lines(self, tmp_path: Path) -> None:
-        _quiet_logs()
         bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
         audit_path = tmp_path / "a.jsonl"
@@ -394,7 +384,6 @@ class TestRunPersistedSweep:
         assert verify_chain(audit_path) == 3
 
     def test_top_k_truncates_persisted(self, tmp_path: Path) -> None:
-        _quiet_logs()
         bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
         cfg = _make_config(top_k=1)
@@ -404,7 +393,6 @@ class TestRunPersistedSweep:
         assert summary.persisted == 1
 
     def test_skip_path_on_prepopulated_dedup(self, tmp_path: Path) -> None:
-        _quiet_logs()
         bars = _trending_bars()
         cfg = _make_config()
         dedup = _dedup()
@@ -439,7 +427,6 @@ class TestRunPersistedSweep:
         assert summary.persisted == 0
 
     def test_conflict_prune_path(self, tmp_path: Path) -> None:
-        _quiet_logs()
         bars = _trending_bars()
         # BIT_BAR_BULLISH + BIT_BAR_BEARISH is a conflict pair → the k=2 mask that
         # selects both is pruned; the other k=2 masks survive.
@@ -451,7 +438,6 @@ class TestRunPersistedSweep:
         assert summary.conflict_pruned == 1
 
     def test_empty_survivor_path_with_high_min_hits(self, tmp_path: Path) -> None:
-        _quiet_logs()
         bars = _trending_bars()
         # A min_hits larger than the bar count → every survivor is pre-filtered out;
         # nothing is ranked or persisted, but all are still counted as evaluated.
@@ -464,7 +450,6 @@ class TestRunPersistedSweep:
         assert summary.persisted == 0
 
     def test_min_hits_disabled_keeps_all_survivors(self, tmp_path: Path) -> None:
-        _quiet_logs()
         bars = _trending_bars()
         cfg = _make_config(min_hits=0)
         store = ResultsStore(path=tmp_path / "r.parquet")
@@ -474,7 +459,6 @@ class TestRunPersistedSweep:
 
     def test_sell_direction_runs(self, tmp_path: Path) -> None:
         # Exercise the Side.SELL → "bear" direction-label branch end-to-end.
-        _quiet_logs()
         bars = _trending_bars()
         cfg = _make_config(direction=Side.SELL)
         store = ResultsStore(path=tmp_path / "r.parquet")
@@ -488,7 +472,6 @@ class TestRunPersistedSweep:
         # A non-None ProximityParams exercises the proximity-bps params branch and
         # must change the run identity vs the default-proximity sweep (it is part
         # of the canonical params hashed into every mask's run_id).
-        _quiet_logs()
         bars = _trending_bars()
         cfg = _make_config(proximity=ProximityParams(pivot_proximity_bps=25))
         store = ResultsStore(path=tmp_path / "r.parquet")

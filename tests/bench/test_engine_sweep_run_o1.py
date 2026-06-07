@@ -17,14 +17,12 @@ Two hot-path / scaling invariants (CLAUDE.md §2 r5 / §12 / Golden Rule #8):
 
 from __future__ import annotations
 
-import logging
 import time
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
-import structlog
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
@@ -33,8 +31,6 @@ from brutex.orchestrator.audit import AuditWriter, verify_chain
 from brutex.strategies.types import Side
 
 from tests.bench._o1_tiers import ratio_ceiling
-
-structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 _SMALL = 1_000

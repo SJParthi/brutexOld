@@ -14,21 +14,17 @@ unit tests stub:
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
-import structlog
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.sweep_run import ComboDedup, SweepRunConfig, run_persisted_sweep
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
 from brutex.strategies.types import Side
-
-structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 

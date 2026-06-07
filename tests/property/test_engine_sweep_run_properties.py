@@ -14,13 +14,11 @@ Two invariant families (hypothesis + a hand-built fixed-bar oracle):
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
-import structlog
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
@@ -34,8 +32,6 @@ from brutex.orchestrator.audit import AuditWriter
 from brutex.strategies.types import Side
 from hypothesis import given, settings
 from hypothesis import strategies as st
-
-structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
