@@ -636,6 +636,99 @@ def make_store_for(root: Path, grid: SweepGridConfig) -> Callable[[SweepTuple], 
     return lambda tuple_: load_or_create_store(tuple_store_path(root, tuple_, grid))
 
 
+def run_one_tuple(
+    grid: SweepGridConfig,
+    tuple_: SweepTuple,
+    *,
+    bars_for: Callable[[str, str], Sequence[CandleBar]],
+    store_for: Callable[[SweepTuple], ResultsStore],
+    dedup: ComboDedup,
+    audit: AuditWriter,
+    skip_empty: bool = True,
+    kernel_cache: ResidentKernelCache | None = None,
+) -> SweepRunSummary | None:
+    """Execute ONE grid tuple — the single per-tuple body shared across drivers.
+
+    The COMMON seam (CLAUDE.md §11) between the plain :func:`run_sweep_grid` and
+    the guarantee-&-assurance :func:`brutex.engine.sweep_supervisor.run_supervised_grid`:
+    load the tuple's bars via *bars_for*; if it has bars, build its
+    :class:`~brutex.engine.sweep_run.SweepRunConfig`, obtain its load-or-create
+    store via *store_for* (called **only** on the run path, never eagerly — so a
+    skip never flushes an empty store over good results), and delegate to
+    :func:`~brutex.engine.sweep_run.run_persisted_sweep` (which owns the
+    dedup-mark / flush ordering — this seam never marks or flushes itself).
+
+    A tuple that *has bars* but ranks zero finalists returns a real
+    :class:`~brutex.engine.sweep_run.SweepRunSummary` with ``persisted == 0`` —
+    ``None`` is reserved **strictly** for the no-bars case so a caller can tell
+    "no data" from "data, nothing survived".
+
+    Parameters
+    ----------
+    grid
+        The validated grid config.
+    tuple_
+        The grid point to run.
+    bars_for
+        ``(instrument, tf_label) -> bars`` loader. An empty sequence means the
+        tuple has no data.
+    store_for
+        ``tuple -> ResultsStore`` factory (called only when the tuple has bars).
+    dedup
+        The shared :class:`~brutex.engine.sweep_run.ComboDedup`.
+    audit
+        An open, single-writer :class:`~brutex.orchestrator.audit.AuditWriter`.
+    skip_empty
+        When ``True`` (default), a tuple with no bars returns ``None``; when
+        ``False``, it raises :class:`ValueError`.
+    kernel_cache
+        Optional bounded :class:`~brutex.engine.sweep_kernel.ResidentKernelCache`
+        (DEC-SWEEP-RESIDENT-KERNEL-001). When provided, the Stage-1A bar kernel
+        for this tuple's ``(instrument, tf, proximity, prior_n)`` is fetched/reused
+        from it and handed to :func:`~brutex.engine.sweep_run.run_persisted_sweep`
+        (``kernel=``) — a byte-identical result, only the redundant rebuild is
+        skipped (Golden Rule #4). ``None`` rebuilds per tuple (legacy path).
+
+    Returns
+    -------
+    SweepRunSummary | None
+        The per-tuple tally, or ``None`` when the tuple has no bars and
+        ``skip_empty`` is ``True``.
+
+    Raises
+    ------
+    ValueError
+        If ``skip_empty=False`` and the tuple has no bars.
+    """
+    bars = bars_for(tuple_.instrument, tuple_.tf.label)
+    if not bars:
+        if not skip_empty:
+            raise ValueError(
+                f"run_sweep_grid: no bars for {tuple_.instrument}/{tuple_.tf.label} "
+                f"(skip_empty=False)"
+            )
+        return None
+    kernel = (
+        kernel_cache.get(
+            bars,
+            instrument=tuple_.instrument,
+            tf_label=tuple_.tf.label,
+            proximity=tuple_.proximity,
+            prior_n=grid.prior_n,
+        )
+        if kernel_cache is not None
+        else None
+    )
+    return run_persisted_sweep(
+        bars,
+        tuple_.to_run_config(grid),
+        store=store_for(tuple_),
+        dedup=dedup,
+        audit=audit,
+        kernel=kernel,
+    )
+
+
 def run_sweep_grid(
     grid: SweepGridConfig,
     *,
@@ -745,34 +838,19 @@ def run_sweep_grid(
     kernel_cache = ResidentKernelCache(capacity=len(grid.proximities)) if reuse_bar_bits else None
 
     for tuple_ in iter_sweep_tuples(grid):
-        bars = bars_for(tuple_.instrument, tuple_.tf.label)
-        if not bars:
-            if not skip_empty:
-                raise ValueError(
-                    f"run_sweep_grid: no bars for {tuple_.instrument}/{tuple_.tf.label} "
-                    f"(skip_empty=False)"
-                )
-            tuples_skipped_no_bars += 1
-            continue
-        kernel = (
-            kernel_cache.get(
-                bars,
-                instrument=tuple_.instrument,
-                tf_label=tuple_.tf.label,
-                proximity=tuple_.proximity,
-                prior_n=grid.prior_n,
-            )
-            if kernel_cache is not None
-            else None
-        )
-        summary = run_persisted_sweep(
-            bars,
-            tuple_.to_run_config(grid),
-            store=store_for(tuple_),
+        summary = run_one_tuple(
+            grid,
+            tuple_,
+            bars_for=bars_for,
+            store_for=store_for,
             dedup=dedup,
             audit=audit,
-            kernel=kernel,
+            skip_empty=skip_empty,
+            kernel_cache=kernel_cache,
         )
+        if summary is None:
+            tuples_skipped_no_bars += 1
+            continue
         tuples_run += 1
         enumerated += summary.enumerated
         conflict_pruned += summary.conflict_pruned
@@ -821,6 +899,7 @@ __all__ = [
     "iter_sweep_tuples",
     "load_or_create_store",
     "make_store_for",
+    "run_one_tuple",
     "run_sweep_grid",
     "tuple_store_path",
 ]
