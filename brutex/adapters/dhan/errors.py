@@ -88,6 +88,29 @@ def is_rate_limit(exc: DhanError) -> bool:
 _NO_DATA_MARKERS: tuple[str, ...] = ("DH-905", "no data present")
 
 
+def is_no_data_message(text: str) -> bool:
+    """True if *text* carries a Dhan no-data marker (``DH-905`` / "no data present").
+
+    The STRING-level twin of :func:`is_no_data_error` for callers that hold only a
+    quarantined failure's serialised ``str(exc)`` (e.g. the post-run auto-retry
+    classifying a :class:`~brutex.adapters.dhan.run_ingest.PairFailure.error`),
+    not the live exception. Sharing the same :data:`_NO_DATA_MARKERS` keeps "what
+    counts as no-data" in ONE place (CLAUDE.md §11 COMMON), so a known-gap is never
+    mis-retried by the round loop (DEC-INGEST-AUTO-RETRY-001 / Golden Rule #1).
+
+    Parameters
+    ----------
+    text
+        A failure message (typically ``str(exc)`` of a quarantined pair).
+
+    Returns
+    -------
+    bool
+        ``True`` iff *text* contains any Dhan no-data marker.
+    """
+    return any(marker in text for marker in _NO_DATA_MARKERS)
+
+
 def is_no_data_error(exc: DhanError) -> bool:
     """True if *exc* is a Dhan HTTP-400 signalling NO DATA (``DH-905``).
 
@@ -110,8 +133,7 @@ def is_no_data_error(exc: DhanError) -> bool:
     """
     if not isinstance(exc, DhanBadRequestError):
         return False
-    text = str(exc)
-    return any(marker in text for marker in _NO_DATA_MARKERS)
+    return is_no_data_message(str(exc))
 
 
 #: Dhan markers for a TOKEN-INVALID HTTP-400 (``DH-906`` / "Invalid Token") that
@@ -181,6 +203,7 @@ __all__ = [
     "from_http_status",
     "is_auth_failure",
     "is_no_data_error",
+    "is_no_data_message",
     "is_rate_limit",
     "is_retryable",
 ]
