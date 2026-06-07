@@ -139,6 +139,40 @@ class TestPostJson:
         with pytest.raises(DhanTransportError, match="transport error"):
             _client(_boom).post_json("charts/intraday", {})
 
+    def test_token_provider_overrides_static_header(self) -> None:
+        # DEC-DHAN-TOKEN-KEEPALIVE-001: when a token_provider is injected the
+        # access-token header reads from it (the LIVE holder), NOT the static field,
+        # so a mid-life renew propagates to the very next request.
+        live = {"token": "fresh-jwt"}
+        t = _RecordingTransport(200, b"{}")
+        client = DhanClient(
+            access_token="stale-jwt",
+            client_id="100000001",
+            transport=t,  # type: ignore[arg-type]
+            base_url="https://api.dhan.co/v2/",
+            max_attempts=1,
+            sleep=_noop_sleep,
+            token_provider=lambda: live["token"],
+        )
+        client.post_json("charts/intraday", {})
+        headers = t.calls[0]["headers"]
+        assert isinstance(headers, dict)
+        assert headers[HEADER_ACCESS_TOKEN] == "fresh-jwt"
+        # A renew swaps the holder's value; the NEXT call reads it live.
+        live["token"] = "fresher-jwt"
+        client.post_json("charts/intraday", {})
+        headers2 = t.calls[1]["headers"]
+        assert isinstance(headers2, dict)
+        assert headers2[HEADER_ACCESS_TOKEN] == "fresher-jwt"
+
+    def test_token_provider_none_uses_static_token(self) -> None:
+        # Default (no provider) → the static access_token, byte-unchanged.
+        t = _RecordingTransport(200, b"{}")
+        _client(t).post_json("charts/intraday", {})
+        headers = t.calls[0]["headers"]
+        assert isinstance(headers, dict)
+        assert headers[HEADER_ACCESS_TOKEN] == "jwt-abc"
+
 
 class _StepClock:
     """Deterministic monotonic clock advancing a fixed step each call.

@@ -81,6 +81,8 @@ from brutex.dashboard.pull_controller import (
     pull_all_spot,
     pull_candles,
     resolve_pull_symbols,
+    set_live_token_holder,
+    start_token_keepalive,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.request_logging import emit_request_log
@@ -671,6 +673,31 @@ def build_app(
     # (DEC-DHAN-PERSIST-RATE-001) so the learned rate carries over instead of each
     # pull restarting at the 5 r/s ceiling and re-storming Dhan.
     _session_rate = SessionRateController()
+    # Continuous 12h token keepalive (DEC-DHAN-TOKEN-KEEPALIVE-001): one holder +
+    # one background thread for the app's lifetime keep the 24h Dhan web token
+    # alive so a live pull never 401s on expiry mid-run. Holds the started
+    # TokenKeepalive (or None when no live creds / dry-run dashboard) so shutdown
+    # can stop it. Mirrors the _session_rate per-session holder pattern.
+    _token_keepalive: list[object | None] = [None]
+
+    @app.on_event("startup")
+    async def _start_token_keepalive() -> None:  # pragma: no cover — FastAPI lifecycle + live creds
+        """Start the background 12h token keepalive when live creds are present.
+
+        Best-effort: :func:`start_token_keepalive` returns ``None`` (and does
+        nothing) when no live creds resolve, so a dry-run dashboard is unaffected.
+        The started keepalive (if any) installs the shared token holder the live
+        pull builders read, and is stopped by ``_stop_token_keepalive`` on shutdown.
+        """
+        _token_keepalive[0] = start_token_keepalive(session_rate=_session_rate)
+
+    @app.on_event("shutdown")
+    async def _stop_token_keepalive() -> None:  # pragma: no cover — FastAPI lifecycle glue
+        """Stop the background token keepalive and clear the live-token holder."""
+        keepalive = _token_keepalive[0]
+        if keepalive is not None:
+            keepalive.stop()  # type: ignore[attr-defined]
+        set_live_token_holder(None)
 
     @app.get("/api/v1/state")
     async def api_state() -> JSONResponse:
