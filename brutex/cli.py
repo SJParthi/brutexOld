@@ -579,6 +579,29 @@ def build_parser() -> argparse.ArgumentParser:
         dest="dsr_min",
         help="Min Deflated-Sharpe probability to survive the overfit gate (default 0.95)",
     )
+    sweep_all.add_argument(
+        "--no-options-sim",
+        action="store_false",
+        dest="options_sim",
+        help=(
+            "Disable the automatic post-sweep options-sim (DEC-OPTIONS-EXECUTOR-001). "
+            "By default, when a rolling-option lake is present, winners are auto-priced as options."
+        ),
+    )
+    sweep_all.add_argument(
+        "--options-expiry",
+        default="weekly",
+        choices=("weekly", "monthly"),
+        dest="options_expiry",
+        help="Expiry cycle for the auto options-sim (default weekly)",
+    )
+    sweep_all.add_argument(
+        "--options-broker",
+        default="groww",
+        choices=("groww", "zerodha"),
+        dest="options_broker",
+        help="Brokerage rate card for the auto options-sim (default groww)",
+    )
 
     # ── results (DEC-SWEEP-WINNERS-BY-NAME-001) — read back a sweep results tree ──
     from brutex.engine.results_report import DEFAULT_SORT_BY, SORT_ALIASES
@@ -608,6 +631,54 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(SORT_ALIASES),
         dest="sort_by",
         help=f"Leaderboard sort key (default {DEFAULT_SORT_BY})",
+    )
+
+    # ── options-sim (DEC-OPTIONS-EXECUTOR-001) — price a winning spot run as options ──
+    options_sim = sub.add_parser(
+        "options-sim",
+        help="Materialize + price a winning spot run (run-id) into options PnL per strike rule",
+    )
+    options_sim.add_argument(
+        "run_id", help="The winning spot run-id (BLAKE3 hex from the results tree)"
+    )
+    options_sim.add_argument(
+        "--results-root",
+        type=Path,
+        required=True,
+        dest="results_root",
+        help="Directory of per-tuple Parquet sweep results (the sweep-all --results-root)",
+    )
+    options_sim.add_argument(
+        "--start", required=True, help="Replay window start (YYYY-MM-DD or ISO)"
+    )
+    options_sim.add_argument("--end", required=True, help="Replay window end (YYYY-MM-DD or ISO)")
+    options_sim.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    options_sim.add_argument(
+        "--catalog",
+        type=Path,
+        default=None,
+        dest="catalog_path",
+        help="Catalog DuckDB path (default <lake-root>/catalog.duckdb)",
+    )
+    options_sim.add_argument(
+        "--exchange", default="NSE", help="Spot exchange for the signal replay (default NSE)"
+    )
+    options_sim.add_argument(
+        "--segment", default="IDX_I", help="Spot segment for the signal replay (default IDX_I)"
+    )
+    options_sim.add_argument(
+        "--expiry",
+        default="weekly",
+        choices=("weekly", "monthly"),
+        help="Option expiry cycle to trade (default weekly; falls back to monthly when none)",
+    )
+    options_sim.add_argument(
+        "--broker", default="groww", choices=("groww", "zerodha"), help="Brokerage rate card"
     )
 
     # ── cascade (DEC-CASCADE-WIRE-001) — manual Stage-4 cascade re-run ──
@@ -1700,6 +1771,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     data_snapshot_hash: str | None,
     overfit_gate: bool = False,
     dsr_min: float = 0.95,
+    options_sim: bool = True,
+    options_expiry: str = "weekly",
+    options_broker: str = "groww",
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -1924,6 +1998,22 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     print(f"[brutex] results: {out_root}  ·  audit: {audit_path}  ·  supervisor: {sup_audit_path}")
     print(f"[brutex] live progress: {progress_path}  ·  checkpoint: {checkpoint_path}")
 
+    # Automatic options-sim on the winners (DEC-OPTIONS-EXECUTOR-001), zero-touch +
+    # non-fatal: skips cleanly when there is no rolling-option lake or a replay fails.
+    if options_sim:
+        _maybe_run_options_sim_on_winners(
+            out_root=out_root,
+            lake_root=resolved_lake,
+            catalog_path=catalog,
+            exchange=exchange,
+            segment=segment,
+            start=start,
+            end=end,
+            expiry=options_expiry,
+            broker=options_broker,
+            top=top,
+        )
+
     # ── AUTOMATIC Stage-4 cascade on the top-K winners (DEC-CASCADE-WIRE-001) ──
     # Re-build the cascade inputs from each tuple's persisted finalists + the
     # in-memory bars (the SAME slices the sweep ran on), run the nine-filter
@@ -2064,6 +2154,360 @@ def cmd_cascade(  # pragma: no cover — orchestration shim over the 100%-tested
 
 
 # ────────────────────────────────────────────────────────────────────────
+# options-sim (DEC-OPTIONS-EXECUTOR-001) — winning spot run → priced options
+# ────────────────────────────────────────────────────────────────────────
+#
+# These helpers compose the 100%-tested, golden-locked options EXECUTOR
+# (brutex.options.executor) with the spot lake (signal replay via the engine)
+# and the rolling-option lake (the OptionBarSource). They are real-lake +
+# fno_math I/O paths — unrunnable on the Py3.11/no-wheel/no-data sandbox — so
+# they are coverage-omitted (cli.py) + pragma'd and verified by the operator
+# against a real Dhan lake; the executor core they call is the tested piece.
+
+
+class _LakeOptionBarSource:  # pragma: no cover — real-lake I/O, operator-verified
+    """An ``OptionBarSource`` backed by the rolling-option Parquet lake.
+
+    Reads the self-describing expired-options table (DEC-EXPIRED-OPTIONS-TABLE-001,
+    ``brutex/data/option_parquet_writer.py``): one ``(year, month)`` partition per
+    series, every bar carrying ``underlying_symbol`` / ``side`` / resolved
+    ``strike`` / UTC ``timestamp`` + OHLC + ``iv`` columns. A leg is located by
+    ``(underlying_symbol, side, strike, timestamp)``; a missing entry/exit bar
+    (band-drift hole / not ingested) returns ``None`` so the trade is rejected,
+    never faked.
+    """
+
+    def __init__(self, *, lake_root: Path) -> None:
+        self._root = lake_root / "options"
+
+    def load_pair(
+        self,
+        *,
+        instrument: Any,
+        expiry_date: Any,
+        strike: int,
+        option_type: str,
+        entry_ts: datetime,
+        exit_ts: datetime,
+    ) -> Any:
+        """Return the leg's entry/exit ``OptionBarPair`` from the lake, or ``None``."""
+        del expiry_date  # the rolling lake is keyed by resolved strike + ts, not expiry
+        from brutex.options.executor import OptionBarPair
+
+        try:
+            import polars as pl
+        except ImportError:
+            return None
+        if not self._root.exists():
+            return None
+
+        entry_utc = entry_ts.astimezone(UTC)
+        exit_utc = exit_ts.astimezone(UTC)
+        months = {(entry_utc.year, entry_utc.month), (exit_utc.year, exit_utc.month)}
+        frames = [
+            pl.read_parquet(p)
+            for year, month in months
+            for p in self._root.glob(f"*/{year:04d}-{month:02d}.parquet")
+        ]
+        if not frames:
+            return None
+        df = pl.concat(frames) if len(frames) > 1 else frames[0]
+        df = df.filter(
+            (pl.col("underlying_symbol") == instrument.value)
+            & (pl.col("side") == option_type)
+            & (pl.col("strike") == float(strike))
+        )
+
+        entry_bar = self._row_at(df, entry_utc, option_type)
+        exit_bar = self._row_at(df, exit_utc, option_type)
+        if entry_bar is None or exit_bar is None:
+            return None
+        return OptionBarPair(entry_bar=entry_bar, exit_bar=exit_bar)
+
+    @staticmethod
+    def _row_at(df: Any, ts_utc: datetime, side: str) -> Any:  # pragma: no cover — lake I/O
+        """Build the ``OptionBar`` whose timestamp matches *ts_utc*, or ``None``."""
+        from decimal import Decimal
+
+        import polars as pl
+
+        from brutex.data.models import OptionBar
+
+        hit = df.filter(pl.col("timestamp") == ts_utc)
+        if hit.height == 0:
+            return None
+        r = hit.row(0, named=True)
+
+        def _dec(value: object) -> Decimal | None:
+            return None if value is None else Decimal(str(value))
+
+        return OptionBar(
+            timestamp=r["timestamp"].replace(tzinfo=UTC)
+            if r["timestamp"].tzinfo is None
+            else r["timestamp"],
+            open=Decimal(str(r["open"])),
+            high=Decimal(str(r["high"])),
+            low=Decimal(str(r["low"])),
+            close=Decimal(str(r["close"])),
+            volume=int(r["volume"]),
+            open_interest=None if r["open_interest"] is None else int(r["open_interest"]),
+            side=side,
+            strike=_dec(r["strike"]),
+            spot=_dec(r["spot"]),
+            iv=_dec(r["iv"]),
+        )
+
+
+def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, operator-verified
+    row: Any,
+    *,
+    lake_root: Path,
+    catalog_path: Path,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+    expiry_kind: Any,
+) -> list[Any]:
+    """Re-derive the winning combo's spot round-trips → ``SpotSignal`` inputs.
+
+    Replays ``row.mask_bits`` over the spot lake for ``(row.instrument, row.tf)``
+    via the SAME Stage-1A matrix → mask projection → trade-sim path the sweep
+    used, then lifts each closed trade into a :class:`SpotSignal` (the entry
+    bar's OPEN is the spot at entry; the expiry is resolved per the calendar).
+    """
+    from brutex.data.catalog import Catalog
+    from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+    from brutex.engine.combo_mask import mask_to_entry_signals
+    from brutex.engine.stage1a import build_bar_bits
+    from brutex.engine.trade_sim import simulate_trades
+    from brutex.feed.replay import ReplayFeed
+    from brutex.feed.resampler import INTERVAL_SECONDS
+    from brutex.options.executor import signals_from_spot_trades
+    from brutex.options.lot_size_history import OptionsUnderlying
+    from brutex.options.strike_rules import TradeDirection
+    from brutex.strategies.types import Side
+
+    interval = row.tf
+    if interval not in INTERVAL_SECONDS:
+        raise ValueError(f"unknown timeframe label {interval!r} on result row")
+    tf_minutes = INTERVAL_SECONDS[interval] // 60
+    is_bull = row.direction.lower() in ("bull", "buy", "long")
+    side = Side.BUY if is_bull else Side.SELL
+    direction = TradeDirection.BULL if is_bull else TradeDirection.BEAR
+    underlying = OptionsUnderlying(row.instrument)
+
+    with Catalog.open(catalog_path) as cat:
+        reconcile_catalog_from_lake(
+            lake_root=lake_root,
+            catalog=cat,
+            exchange=exchange,
+            segment=segment,
+            symbol=row.instrument,
+            interval=interval,
+        )
+        feed = ReplayFeed(
+            catalog=cat,
+            lake_root=lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbols=[row.instrument],
+            interval=interval,
+            start=_parse_dt(start),
+            end=_parse_dt(end),
+        )
+        bars = [event.bar for event in feed]
+
+    if not bars:
+        return []
+    bar_bits = build_bar_bits(bars)
+    entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
+    trades = simulate_trades(bars, entry_signals, direction=side, tf_minutes=tf_minutes)
+    open_by_ts = {bar.timestamp: bar.open for bar in bars}
+    return signals_from_spot_trades(
+        trades,
+        instrument=underlying,
+        direction=direction,
+        spot_open_at=lambda ts: open_by_ts[ts],
+        expiry_kind=expiry_kind,
+    )
+
+
+def _render_options_leaderboard(
+    row: Any, results: tuple[Any, ...]
+) -> str:  # pragma: no cover — formatting over real-run output
+    """Render the per-rule priced-options leaderboard for one winning spot run."""
+    from brutex.money import format_inr
+
+    lines = [
+        f"options-sim · {row.instrument} {row.tf} {row.direction} · run {row.run_id[:12]}…",
+        f"{'rule':<22} {'trades':>7} {'win%':>6} {'gross':>16} {'charges':>14} {'net':>16}",
+    ]
+    for res in sorted(results, key=lambda r: r.net_pnl_paisa, reverse=True):
+        lines.append(
+            f"{res.rule_name:<22} {res.n_accepted:>7} {res.win_rate * 100:>5.1f}% "
+            f"{format_inr(res.gross_pnl_paisa):>16} {format_inr(res.total_charges_paisa):>14} "
+            f"{format_inr(res.net_pnl_paisa):>16}"
+        )
+    return "\n".join(lines)
+
+
+def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + tested executor
+    row: Any,
+    *,
+    lake_root: Path,
+    catalog_path: Path,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+    expiry: str,
+    broker: str,
+    audit_path: Path,
+) -> tuple[Any, ...]:
+    """Replay a winning spot run into priced per-rule options results + audit."""
+    from brutex.options.executor import ExpiryKind, execute_options_sim
+    from brutex.orchestrator.audit import AuditWriter
+
+    expiry_kind = ExpiryKind.MONTHLY if expiry.lower() == "monthly" else ExpiryKind.WEEKLY
+    signals = _replay_spot_signals_for_row(
+        row,
+        lake_root=lake_root,
+        catalog_path=catalog_path,
+        exchange=exchange,
+        segment=segment,
+        start=start,
+        end=end,
+        expiry_kind=expiry_kind,
+    )
+    source = _LakeOptionBarSource(lake_root=lake_root)
+    with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
+        return execute_options_sim(
+            signals,
+            source=source,
+            broker=broker,  # type: ignore[arg-type]
+            audit=audit,
+        )
+
+
+def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + tested executor
+    *,
+    run_id: str,
+    results_root: Path,
+    lake_root: Path | None,
+    catalog_path: Path | None,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+    expiry: str,
+    broker: str,
+) -> int:
+    """Materialize + price the winning spot run *run_id* into options PnL (manual trigger).
+
+    Resolves *run_id* in the persisted sweep results tree, replays its spot
+    signals, selects an ATM±N leg per signal under each offset strike rule
+    (DEC-OPTIONS-EXECUTOR-001), prices the round-trip via the locked Track-2 cost
+    calculator, audits each rule result, and prints the per-rule leaderboard.
+    """
+    from brutex.engine.results_report import load_results_tree
+    from brutex.engine.results_store import ResultsStoreError
+
+    resolved_lake = _resolve_lake_root(lake_root)
+    catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
+    try:
+        store = load_results_tree(results_root)
+    except ResultsStoreError as exc:
+        print(f"[brutex] options-sim: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    row = store.get(run_id)
+    if row is None:
+        print(
+            f"[brutex] options-sim: run-id {run_id!r} not found under {results_root}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+
+    audit_path = results_root / "audit" / f"options-sim-{run_id[:12]}.jsonl"
+    results = _options_sim_for_row(
+        row,
+        lake_root=resolved_lake,
+        catalog_path=catalog,
+        exchange=exchange,
+        segment=segment,
+        start=start,
+        end=end,
+        expiry=expiry,
+        broker=broker,
+        audit_path=audit_path,
+    )
+    total_signals = results[0].n_signals if results else 0
+    if total_signals == 0:
+        print(
+            f"[brutex] options-sim: no spot signals replayed for {run_id[:12]}… "
+            f"(check --start/--end window + spot lake)",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    print(_render_options_leaderboard(row, results))
+    print(f"[brutex] options-sim audit: {audit_path}")
+    return EXIT_OK
+
+
+def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over real-lake I/O
+    *,
+    out_root: Path,
+    lake_root: Path,
+    catalog_path: Path,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+    expiry: str,
+    broker: str,
+    top: int,
+) -> None:
+    """Automatic post-sweep options-sim on the top winners (zero-touch).
+
+    Runs after a sweep persists its winners. Best-effort + non-fatal: when the
+    rolling-option lake is absent (spot-only setup) or a replay raises, it logs
+    and returns without failing the sweep.
+    """
+    if not (lake_root / "options").exists():
+        print("[brutex] options-sim: skipped (no rolling-option lake at <lake>/options)")
+        return
+    from brutex.engine.results_report import load_results_tree
+    from brutex.engine.results_store import ResultsStoreError
+
+    try:
+        store = load_results_tree(out_root)
+    except ResultsStoreError as exc:
+        print(f"[brutex] options-sim: skipped ({exc})")
+        return
+    winners = store.top_k(top, by="net_pnl_paisa")
+    print(f"[brutex] options-sim: pricing options for top {len(winners)} winner(s)…")
+    for row in winners:
+        audit_path = out_root / "audit" / f"options-sim-{row.run_id[:12]}.jsonl"
+        try:
+            results = _options_sim_for_row(
+                row,
+                lake_root=lake_root,
+                catalog_path=catalog_path,
+                exchange=exchange,
+                segment=segment,
+                start=start,
+                end=end,
+                expiry=expiry,
+                broker=broker,
+                audit_path=audit_path,
+            )
+        except (ValueError, KeyError, OSError) as exc:
+            print(f"[brutex] options-sim: {row.run_id[:12]}… skipped ({exc})")
+            continue
+        print(_render_options_leaderboard(row, results))
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Main dispatcher
 # ────────────────────────────────────────────────────────────────────────
 
@@ -2182,6 +2626,9 @@ def main(argv: list[str] | None = None) -> int:
             data_snapshot_hash=args.data_snapshot_hash,
             overfit_gate=args.overfit_gate,
             dsr_min=args.dsr_min,
+            options_sim=args.options_sim,
+            options_expiry=args.options_expiry,
+            options_broker=args.options_broker,
         )
     # Thin dispatch over cmd_results_show (DEC-SWEEP-WINNERS-BY-NAME-001).
     if args.command == "results" and args.results_command == "show":
@@ -2189,6 +2636,20 @@ def main(argv: list[str] | None = None) -> int:
             results_root=args.results_root,
             top=args.top,
             sort_by=args.sort_by,
+        )
+    # options-sim (DEC-OPTIONS-EXECUTOR-001) — price a winning spot run as options.
+    if args.command == "options-sim":
+        return cmd_options_sim(
+            run_id=args.run_id,
+            results_root=args.results_root,
+            lake_root=args.lake_root,
+            catalog_path=args.catalog_path,
+            exchange=args.exchange,
+            segment=args.segment,
+            start=args.start,
+            end=args.end,
+            expiry=args.expiry,
+            broker=args.broker,
         )
     # Manual Stage-4 cascade re-run (DEC-CASCADE-WIRE-001).
     if args.command == "cascade":

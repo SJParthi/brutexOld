@@ -9,7 +9,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from brutex.money import format_inr, paisa_to_rupees, round_money
+from brutex.money import format_inr, paisa_to_rupees, round_money, rupees_to_paisa
 
 
 class TestRoundMoney:
@@ -40,6 +40,27 @@ class TestPaisaToRupees:
     )
     def test_converts_exactly(self, paisa: int, expected: str) -> None:
         assert paisa_to_rupees(paisa) == Decimal(expected)
+
+
+class TestRupeesToPaisa:
+    @pytest.mark.parametrize(
+        ("rupees", "expected"),
+        [
+            ("0.01", 1),
+            ("0.05", 5),
+            ("1.00", 100),
+            ("1234.56", 123456),
+            ("-0.50", -50),
+            ("14020.7999", 1402080),  # vendor float-noise snaps half-up to ₹14020.80
+            ("1.005", 101),  # half rounds away from zero (same rule as round_money)
+        ],
+    )
+    def test_converts_exactly(self, rupees: str, expected: int) -> None:
+        assert rupees_to_paisa(Decimal(rupees)) == expected
+
+    def test_round_trips_with_paisa_to_rupees(self) -> None:
+        for paisa in (0, 5, 100, 123456, -50):
+            assert rupees_to_paisa(paisa_to_rupees(paisa)) == paisa
 
 
 class TestFormatInr:
