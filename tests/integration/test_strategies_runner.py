@@ -18,6 +18,7 @@ from brutex.data.catalog import Catalog
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink
+from brutex.feed.lookahead import LookAheadBarrier
 from brutex.feed.replay import FeedEvent, ReplayFeed
 from brutex.strategies.errors import StrategyContractError
 from brutex.strategies.protocol import StrategyMeta
@@ -470,3 +471,73 @@ class TestSymbolFiltering:
         assert result.bars_observed == 3  # only NSE-A bars
         assert len(result.signals) == 3
         assert all(s.symbol == "NSE-A" for s in result.signals)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Runtime look-ahead barrier — DEC-LOOKAHEAD-BARRIER-001 (Property P-06)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestLookAheadBarrier:
+    def test_default_barrier_is_active_and_record_free(self, tmp_path: Path) -> None:
+        """No barrier injected → the runner builds a default O(1)-memory guard."""
+        lake_root, catalog_path = _seed_single_symbol(tmp_path, n_bars=1)
+        with Catalog.open(catalog_path) as cat:
+            feed = ReplayFeed(
+                catalog=cat,
+                lake_root=lake_root,
+                exchange="NSE",
+                segment="FNO",
+                symbols=["NSE-A"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 1, 31, tzinfo=UTC),
+            )
+            runner = StrategyRunner(strategy=_AlwaysBuyStrategy(), feed=feed)
+            assert isinstance(runner.barrier, LookAheadBarrier)
+            assert runner.barrier.records is False
+
+    def test_injected_recording_barrier_only_touches_past_or_present(self, tmp_path: Path) -> None:
+        """A record=True barrier proves the run never reaches a future bar index."""
+        lake_root, catalog_path = _seed_single_symbol(tmp_path, n_bars=5)
+        barrier = LookAheadBarrier(record=True)
+        with Catalog.open(catalog_path) as cat:
+            feed = ReplayFeed(
+                catalog=cat,
+                lake_root=lake_root,
+                exchange="NSE",
+                segment="FNO",
+                symbols=["NSE-A"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 1, 31, tzinfo=UTC),
+            )
+            runner = StrategyRunner(strategy=_AlwaysBuyStrategy(), feed=feed, barrier=barrier)
+            result = runner.run()
+
+        assert runner.barrier is barrier
+        assert result.bars_observed == 5
+        # P-06: every touched index ≤ the current cursor, and the run is forward.
+        assert barrier.touched_indices == (0, 1, 2, 3, 4)
+        assert barrier.max_touched == barrier.current_index == 4
+
+    def test_barrier_resets_between_back_to_back_runs(self, tmp_path: Path) -> None:
+        """reset() at the top of run() keeps the trail from leaking across runs."""
+        lake_root, catalog_path = _seed_single_symbol(tmp_path, n_bars=3)
+        barrier = LookAheadBarrier(record=True)
+        with Catalog.open(catalog_path) as cat:
+            feed = ReplayFeed(
+                catalog=cat,
+                lake_root=lake_root,
+                exchange="NSE",
+                segment="FNO",
+                symbols=["NSE-A"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 1, 31, tzinfo=UTC),
+            )
+            runner = StrategyRunner(strategy=_AlwaysBuyStrategy(), feed=feed, barrier=barrier)
+            runner.run()
+            runner.run()  # second run must not accumulate the first run's trail
+
+        assert barrier.touched_indices == (0, 1, 2)
