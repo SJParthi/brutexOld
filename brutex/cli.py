@@ -788,6 +788,12 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         sys.stdout = _StdoutMirror(sys.stdout)
 
     state = DashboardState()
+    # Point the live sweep-progress panel at the file a CLI `brutex sweep-all`
+    # publishes to (DEC-SWEEP-WIRE-GA-001). Same path the supervisor's
+    # `_on_progress` hook writes — the cross-process bridge for /api/v1/sweep-progress.
+    state.sweep_progress_path = (
+        _resolve_lake_root(lake_root) / "sweeps" / "progress" / "sweep-progress.json"
+    )
     # Open a real InstrumentStore so the F&O Universe Explorer routes can call
     # store.load_snapshot(...). Passing the bare lake_root Path here was the
     # cause of the `'PosixPath' object has no attribute 'load_snapshot'` 500.
@@ -1475,15 +1481,26 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     """
     from brutex.data.catalog import Catalog
     from brutex.data.option_dedup import OptionDedupIndex
+    from brutex.engine.sweep_audit import SweepAuditWriter
+    from brutex.engine.sweep_cache import SweepCache
+    from brutex.engine.sweep_checkpoint import SweepCheckpointStore
     from brutex.engine.sweep_orchestrator import (
         SweepGridConfig,
         SweepTuple,
         Timeframe,
         bloom_capacity_hint,
+        count_sweep_tuples,
         make_store_for,
-        run_sweep_grid,
     )
+    from brutex.engine.sweep_progress import SweepProgress, SweepProgressSnapshot
     from brutex.engine.sweep_run import ComboDedup, SweepRunSummary
+    from brutex.engine.sweep_supervisor import (
+        SweepGuards,
+        grid_identity,
+        publish_progress,
+        run_supervised_grid,
+    )
+    from brutex.engine.sweep_watchdog import SweepWatchdog
     from brutex.feed.replay import ReplayFeed
     from brutex.feed.resampler import INTERVAL_SECONDS
     from brutex.orchestrator.audit import AuditWriter
@@ -1581,6 +1598,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     dedup = ComboDedup(OptionDedupIndex(capacity=bloom_capacity_hint(grid), fpr_target=1e-7))
     audit_path = out_root / "audit" / "sweep-all.jsonl"
     audit_path.parent.mkdir(parents=True, exist_ok=True)
+    # G&A layer (DEC-SWEEP-WIRE-GA-001): one BLAKE3 supervisor audit chain, a
+    # crash-safe resume checkpoint keyed on the grid identity, a Bloom→LMDB
+    # tuple-level dedup cache, and a live progress file the dashboard serves at
+    # /api/v1/sweep-progress. The dashboard reads this exact path.
+    sup_audit_path = out_root / "audit" / "sweep-all-supervisor.jsonl"
+    checkpoint_path = out_root / "checkpoint" / "sweep-all.json"
+    cache_path = out_root / "dedup-cache"
+    progress_path = out_root / "progress" / "sweep-progress.json"
 
     def _bars_for(symbol: str, interval: str) -> list[Any]:
         return slices.get((symbol, interval), [])
@@ -1592,26 +1617,51 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             f"(evaluated={summary.evaluated})"
         )
 
+    def _on_progress(snap: SweepProgressSnapshot) -> None:
+        publish_progress(progress_path, snap)
+
     print(
         f"[brutex] sweep-all: {grid.instruments} × {[tf.label for tf in grid.timeframes]} × "
         f"{[d.value for d in grid.directions]} × k={list(grid.k_values)} → "
         f"results: {out_root}"
     )
-    with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
-        result = run_sweep_grid(
+    watchdog = SweepWatchdog()
+    checkpoint = SweepCheckpointStore(
+        path=checkpoint_path,
+        sweep_id=grid_identity(grid),
+        total_combos=count_sweep_tuples(grid),
+    )
+    with (
+        AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
+        SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
+        SweepCache.open(cache_path) as cache,
+    ):
+        guards = SweepGuards(
+            audit=sup_audit,
+            progress=SweepProgress(),
+            checkpoint=checkpoint,
+            cache=cache,
+            watchdog=watchdog,
+        )
+        result = run_supervised_grid(
             grid,
             bars_for=_bars_for,
             store_for=make_store_for(out_root, grid),
             dedup=dedup,
-            audit=audit,
+            ingest_audit=ingest_audit,
+            guards=guards,
             on_tuple=_on_tuple,
+            on_progress=_on_progress,
+            watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
         )
     print(
         f"[brutex] sweep-all done — tuples={result.tuples_run}/{result.tuples_total} "
-        f"(skipped_no_bars={result.tuples_skipped_no_bars}) evaluated={result.evaluated} "
+        f"(no_bars={result.tuples_skipped_no_bars} cached={result.skipped_cache} "
+        f"resumed={result.skipped_resume}) evaluated={result.evaluated} "
         f"ranked={result.ranked} persisted={result.persisted}"
     )
-    print(f"[brutex] results: {out_root}  ·  audit: {audit_path}")
+    print(f"[brutex] results: {out_root}  ·  audit: {audit_path}  ·  supervisor: {sup_audit_path}")
+    print(f"[brutex] live progress: {progress_path}  ·  checkpoint: {checkpoint_path}")
     return EXIT_OK
 
 

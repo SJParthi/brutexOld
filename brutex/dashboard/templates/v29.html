@@ -2207,6 +2207,21 @@
   <span class="ok">DETERMINISM PASS · AUDIT REPLAY OK</span>
 </div>
 
+<!-- Live sweep-progress panel (DEC-SWEEP-WIRE-GA-001) — populated by the
+     supervisor's SweepProgress via /api/v1/sweep-progress every 2s. Hidden
+     until the first running/done snapshot arrives (data-sweep-panel is
+     un-hidden by the poller below). HONEST: the unit is the grid TUPLE, so the
+     rate is tuples/sec (per-mask progress lives inside run_persisted_sweep). -->
+<div class="sweep-progress show-operator-only" id="sweepProgressPanel" hidden>
+  <span>SWEEP <code data-sweep="state">idle</code></span>
+  <span><strong data-sweep="percent">0</strong>% done</span>
+  <span><code data-sweep="evaluated">0</code>/<code data-sweep="enumerated">0</code> tuples</span>
+  <span><code data-sweep="combos_per_sec">0</code> tuples/s</span>
+  <span>ETA <code data-sweep="eta_seconds">—</code></span>
+  <span><code data-sweep="survivors">0</code> survivors</span>
+  <span><code data-sweep="skipped">0</code> skipped</span>
+</div>
+
 <div class="brand-watermark show-share-only">
   <div class="handle">@brutex_sj</div>
   <div class="tag">Brute-force backtest · 28.4M strategies tested</div>
@@ -3930,6 +3945,49 @@
     if (window.location.protocol !== 'file:') {
       pollState();  // first call immediate so the page is fresh on load
       setInterval(pollState, 2000);
+    }
+  })();
+
+  // Live sweep-progress poller (DEC-SWEEP-WIRE-GA-001) — fetches the dedicated
+  // /api/v1/sweep-progress route every 2s and fills every [data-sweep="<field>"]
+  // element. Idle until the supervisor's first snapshot; the panel un-hides once
+  // a sweep is running or done. HONEST envelope: rate/percent are at the grid
+  // TUPLE grain (the supervised unit), not per-mask.
+  (function () {
+    function fmtEta(secs) {
+      if (secs === null || secs === undefined) return '—';
+      const s = Math.max(0, Math.round(secs));
+      if (s < 60) return s + 's';
+      if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+      return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+    }
+    function fmtRate(n) {
+      if (n === null || n === undefined) return '0';
+      if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+      return n.toFixed(n >= 10 ? 0 : 1);
+    }
+    async function pollSweepProgress() {
+      try {
+        const res = await fetch('/api/v1/sweep-progress');
+        if (!res.ok) return;  // server hiccup; next tick retries
+        const sp = await res.json();
+        if (!sp || sp.state === 'idle') return;  // nothing running yet
+        const panel = document.getElementById('sweepProgressPanel');
+        if (panel) panel.hidden = false;
+        document.querySelectorAll('[data-sweep]').forEach(function (el) {
+          const key = el.getAttribute('data-sweep');
+          let v = sp[key];
+          if (key === 'eta_seconds') v = fmtEta(v);
+          else if (key === 'combos_per_sec') v = fmtRate(v);
+          else if (key === 'percent') v = (v === null || v === undefined) ? '0' : v;
+          el.textContent = (v === null || v === undefined) ? '' : String(v);
+        });
+      } catch (e) { /* network blip; next tick retries */ }
+    }
+    if (window.location.protocol !== 'file:') {
+      pollSweepProgress();
+      setInterval(pollSweepProgress, 2000);
     }
   })();
 </script>
