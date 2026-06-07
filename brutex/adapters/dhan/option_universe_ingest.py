@@ -291,6 +291,7 @@ def run_dhan_options_ingest(
     on_timeout: Pacer | None = None,
     on_success: Pacer | None = None,
     on_progress: ProgressHook | None = None,
+    on_series_tick: Callable[[], None] | None = None,
     coverage: FetchCoverage | None = None,
     run_parallel: RunParallel | None = None,
 ) -> OptionsUniverseReport:
@@ -350,6 +351,17 @@ def run_dhan_options_ingest(
         Fired on the CONTROLLER thread in a DETERMINISTIC post-pass (sorted by
         ``security_id``) so the hook need not be thread-safe and the order is
         reproducible (DEC-PULL-PROGRESS-TRACKER-001, Rule #4).
+    on_series_tick
+        Optional **observability-only** zero-arg hook fired once per SERIES as
+        each outcome is drained on the controller thread — far finer than the
+        per-underlying ``on_progress`` (DEC-OPTIONS-LIVE-STATUS-001). A
+        single-underlying pull fires ``on_progress`` only at the very end, so its
+        lake-backed status surface would otherwise stay frozen for the whole
+        fan-out; this lets the caller refresh that surface mid-pull (e.g. a
+        THROTTLED summary-cache ``mark_dirty``, see
+        :func:`brutex.observability.throttle.make_throttled`). It NEVER changes
+        what is fetched, parsed, sunk, or the rate — it only signals "a series
+        finished". ``None`` (the default) is a no-op.
     run_parallel
         The concurrency primitive mapping the per-underlying fetcher over the
         worklist (a :class:`~brutex.orchestrator.universe_phases.RunParallel`).
@@ -455,6 +467,15 @@ def run_dhan_options_ingest(
     # thread, so neither needs to be thread-safe (Rule #4).
     buckets: list[_UnderlyingResult] = [_UnderlyingResult() for _ in underlyings]
     for outcome in runner(_run_series, jobs):
+        # Live status tick (DEC-OPTIONS-LIVE-STATUS-001): fire the throttled
+        # observability hook as each series outcome is drained on THIS controller
+        # thread — the series' lake write already happened in the worker before
+        # the outcome was yielded, so the lake reflects it. This is what makes a
+        # single-underlying pull's lake-backed coverage surface tick live
+        # mid-fan-out instead of only at the per-underlying ``on_progress`` at the
+        # very end. Pure observability — it does not touch fetch/parse/sink/rate.
+        if on_series_tick is not None:
+            on_series_tick()
         idx, underlying, expiry_flag, expiry_code, strike, drv_option_type = outcome.item
         result = buckets[idx]
         key: SeriesKey = (
