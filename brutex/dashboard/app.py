@@ -1985,6 +1985,7 @@ def build_app(
         root = lake / "sweeps"
 
         def _run() -> tuple[int, dict[str, object]]:
+            """Replay the cascade off the event loop (threadpool worker)."""
             from brutex.engine.cascade_wire import (
                 CascadeWireError,
                 load_bars_for_manifest,

@@ -76,7 +76,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import structlog
 
@@ -709,31 +709,26 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
 
 def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
     """Rebuild a :class:`CascadeTupleSpec` from :func:`_spec_to_dict` output."""
+    # The manifest is JSON (typed ``dict[str, object]``); cast to ``Any`` so the
+    # scalar coercions below read cleanly. Every malformed value is caught by the
+    # ``(KeyError, TypeError, ValueError)`` guard and re-raised as a CascadeWireError.
+    raw = cast("dict[str, Any]", data)
     try:
-        raw_proximity = data["proximity_bps"]
+        proximity = raw["proximity_bps"]
         proximity_bps = (
-            None
-            if raw_proximity is None
-            else (
-                int(raw_proximity[0]),  # type: ignore[index]
-                int(raw_proximity[1]),  # type: ignore[index]
-                int(raw_proximity[2]),  # type: ignore[index]
-            )
+            None if proximity is None else (int(proximity[0]), int(proximity[1]), int(proximity[2]))
         )
-        winners = tuple(
-            (str(run_id), int(mask))
-            for run_id, mask in data["winners"]  # type: ignore[union-attr]
-        )
+        winners = tuple((str(run_id), int(mask)) for run_id, mask in raw["winners"])
         return CascadeTupleSpec(
-            instrument=str(data["instrument"]),
-            tf_label=str(data["tf_label"]),
-            tf_minutes=int(data["tf_minutes"]),  # type: ignore[call-overload]
-            direction_label=str(data["direction_label"]),
-            sl_paisa=None if data["sl_paisa"] is None else int(data["sl_paisa"]),  # type: ignore[call-overload]
-            tp_paisa=None if data["tp_paisa"] is None else int(data["tp_paisa"]),  # type: ignore[call-overload]
-            prior_n=int(data["prior_n"]),  # type: ignore[call-overload]
+            instrument=str(raw["instrument"]),
+            tf_label=str(raw["tf_label"]),
+            tf_minutes=int(raw["tf_minutes"]),
+            direction_label=str(raw["direction_label"]),
+            sl_paisa=None if raw["sl_paisa"] is None else int(raw["sl_paisa"]),
+            tp_paisa=None if raw["tp_paisa"] is None else int(raw["tp_paisa"]),
+            prior_n=int(raw["prior_n"]),
             proximity_bps=proximity_bps,
-            start_equity_paisa=int(data["start_equity_paisa"]),  # type: ignore[call-overload]
+            start_equity_paisa=int(raw["start_equity_paisa"]),
             winners=winners,
         )
     except (KeyError, TypeError, ValueError) as exc:

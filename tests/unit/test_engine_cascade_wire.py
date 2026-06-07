@@ -198,8 +198,9 @@ class TestCascadeConfig:
         assert restored == cfg
 
     def test_config_from_bad_dict_raises(self) -> None:
+        # An unknown field is a structural error → TypeError → CascadeWireError.
         with pytest.raises(cw.CascadeWireError, match="invalid cascade_config"):
-            cw.cascade_config_from_dict({"seed": "not-an-int", "n_resamples": -5})
+            cw.cascade_config_from_dict({"seed": 1, "not_a_real_field": 7})
 
 
 # ── Pure numeric helpers ──────────────────────────────────────────────────────

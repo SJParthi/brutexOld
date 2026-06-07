@@ -18,8 +18,6 @@ from brutex.engine import cascade_wire as cw
 from hypothesis import given
 from hypothesis import strategies as st
 
-_HEX = "0123456789abcdef"
-
 
 @st.composite
 def _specs(draw: st.DrawFn) -> list[cw.CascadeTupleSpec]:
