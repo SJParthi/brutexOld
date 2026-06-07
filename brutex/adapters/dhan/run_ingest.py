@@ -44,7 +44,8 @@ from datetime import date
 
 import structlog
 
-from brutex.adapters.dhan.errors import DhanError, is_no_data_error
+from brutex.adapters.dhan.auth_guard import AuthGuard
+from brutex.adapters.dhan.errors import DhanError, is_auth_failure, is_no_data_error
 from brutex.adapters.dhan.ingest import IngestReport, Pacer, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import FetchCoverage
@@ -114,6 +115,26 @@ class DhanIngestReport:
 
     pairs: dict[tuple[str, str], IngestReport]
     failures: tuple[PairFailure, ...]
+    auth_aborted: bool = False
+    """True if the Dhan token died mid-pull (DEC-DHAN-AUTH-FAILFAST-RENEW-001).
+
+    Set when the shared :class:`~brutex.adapters.dhan.auth_guard.AuthGuard` tripped
+    — i.e. at least one pair failed with a dead-token error (a 401/403 OR a
+    ``DH-906`` "Invalid Token" 400). Once tripped, the remaining not-yet-dispatched
+    windows short-circuit to a no-op skip (ZERO further doomed calls); the affected
+    pairs are STILL recorded in :attr:`failures` (re-tried next pull, never masked).
+    ``False`` on a clean pull or one whose only failures were non-auth (per-pair
+    terminal / no-data) errors.
+    """
+
+    auth_cause: str | None = None
+    """The first dead-token cause that tripped the guard, or ``None`` if not tripped.
+
+    The originating ``str(exc)`` of the FIRST auth failure observed (DEC-DHAN-AUTH-
+    FAILFAST-RENEW-001) — carried on the single loud ``ingest.auth_aborted`` alert
+    so the operator sees exactly why the pull aborted. ``None`` when
+    :attr:`auth_aborted` is ``False``.
+    """
 
     @property
     def windows(self) -> int:
@@ -243,6 +264,15 @@ def run_dhan_spot_ingest(
     # paceable client (dry-run / fakes) or when unthrottled (*pace* is None).
     adapter = _with_paced_client(adapter, pace)
     runner: RunParallel = run_parallel if run_parallel is not None else PoolRunParallel()
+    # ONE shared "token is dead" latch per run (DEC-DHAN-AUTH-FAILFAST-RENEW-001),
+    # threaded into every ingest_spot pair. The first window to hit a dead-token
+    # error trips it; every NOT-YET-DISPATCHED window then short-circuits to a no-op
+    # skip (the doomed-call flood stops). The error still surfaces here so the pair
+    # is recorded + the ONE loud auth-aborted alert fires. Honest envelope (Golden
+    # Rule #10): the latch short-circuits NEW windows; it does NOT hard-cancel
+    # threads already mid-call in the pool — those finish, then drain at the next
+    # window-start check.
+    auth_guard = AuthGuard()
 
     # Deterministic worklist: one job per (instrument, interval) pair, in the
     # caller's instrument order × interval order. The OUTER fan-out unit.
@@ -278,10 +308,16 @@ def run_dhan_spot_ingest(
                 on_rate_limit=on_rate_limit,
                 on_timeout=on_timeout,
                 on_success=on_success,
+                auth_guard=auth_guard,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
     failures: list[PairFailure] = []
+    #: Whether the loud ``ingest.auth_aborted`` alert has fired — emitted EXACTLY
+    #: ONCE (the first dead-token failure), then subsequent auth failures are
+    #: recorded silently to avoid the 400-line per-symbol WARNING flood that the
+    #: live DH-901 storm produced (DEC-DHAN-AUTH-FAILFAST-RENEW-001).
+    auth_alerted = False
     # Drain the fan-out on the controller thread. on_progress + the quarantine
     # WARNING fire here (single-threaded), so neither the progress hook nor the
     # logger needs to be thread-safe. A captured non-DhanError surfaces.
@@ -317,7 +353,30 @@ def run_dhan_spot_ingest(
         # alarming quarantine WARNINGs for benign empty ranges. A genuine terminal
         # error (real 400 / 404 / auth) still logs the WARNING. EITHER way the pair
         # is isolated + re-tried next pull — data is never silently dropped.
-        if is_no_data_error(exc):
+        if is_auth_failure(exc):
+            # The token died (DEC-DHAN-AUTH-FAILFAST-RENEW-001). The pair is STILL
+            # recorded above (re-tried next pull, never masked), but we DON'T emit a
+            # per-symbol WARNING for each of the ~400 doomed symbols — that was the
+            # 400-line flood. Ensure the latch is tripped (a window worker normally
+            # trips it, but trip here too in case this exc reached us via another
+            # path), then emit the ONE loud ``ingest.auth_aborted`` alert the FIRST
+            # time only; later auth failures are recorded silently.
+            auth_guard.trip(str(exc))
+            if not auth_alerted:
+                auth_alerted = True
+                _LOG.warning(
+                    "ingest.auth_aborted",
+                    pull_id=pull_id,
+                    symbol=instrument.symbol_name,
+                    interval=interval,
+                    cause=auth_guard.cause(),
+                    note=(
+                        "Dhan access token expired/invalid mid-pull — pull aborted; "
+                        "regenerate the 24h token at web.dhan.co (or it will auto-renew "
+                        "while active next run)"
+                    ),
+                )
+        elif is_no_data_error(exc):
             _LOG.info(
                 "ingest.known_gap",
                 pull_id=pull_id,
@@ -374,7 +433,12 @@ def run_dhan_spot_ingest(
             retried_windows=inst_retried,
             still_failed_windows=inst_still_failed,
         )
-    return DhanIngestReport(pairs=pairs, failures=tuple(failures))
+    return DhanIngestReport(
+        pairs=pairs,
+        failures=tuple(failures),
+        auth_aborted=auth_guard.tripped(),
+        auth_cause=auth_guard.cause(),
+    )
 
 
 __all__ = [

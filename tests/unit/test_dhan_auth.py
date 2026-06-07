@@ -12,12 +12,14 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+import structlog
 from brutex.adapters.dhan.auth import (
     ENV_ACCESS_TOKEN,
     ENV_CLIENT_ID,
     DhanCredentials,
     TokenInfo,
     dhan_creds_present,
+    maybe_renew_token,
     renew_token,
     resolve_dhan_credentials,
     with_token,
@@ -160,6 +162,54 @@ class TestRenewTokenPacing:
         info = renew_token(client)
         assert info == TokenInfo(access_token="newjwt", expiry_time="t")
         assert calls == ["client_pace"]  # client.pace fired exactly once
+
+
+class TestMaybeRenewToken:
+    """Best-effort proactive renew (DEC-DHAN-AUTH-FAILFAST-RENEW-001, Piece 2).
+
+    Success returns the fresh TokenInfo + logs ``auth.renewed``; a RenewToken
+    refusal (any DhanError, incl. DhanAuthError) returns ``None`` + logs ONE
+    ``auth.renew_failed`` WARNING and NEVER raises.
+    """
+
+    def test_success_returns_token_and_logs_renewed(self) -> None:
+        body = b'{"accessToken": "freshjwt", "expiryTime": "2026-06-08T09:00:00.000"}'
+        with structlog.testing.capture_logs() as logs:
+            info = maybe_renew_token(_client(200, body))
+        assert info == TokenInfo(access_token="freshjwt", expiry_time="2026-06-08T09:00:00.000")
+        events = [e for e in logs if e["event"] == "auth.renewed"]
+        assert len(events) == 1
+        assert events[0]["expiry_time"] == "2026-06-08T09:00:00.000"
+
+    def test_dhan_error_returns_none_and_logs_once_never_raises(self) -> None:
+        # Malformed RenewToken response → DhanAuthError inside renew_token. The
+        # best-effort wrapper swallows it: returns None, logs ONE renew_failed.
+        with structlog.testing.capture_logs() as logs:
+            result = maybe_renew_token(_client(200, b'{"accessToken": "x"}'))
+        assert result is None
+        warned = [e for e in logs if e["event"] == "auth.renew_failed"]
+        assert len(warned) == 1
+        assert warned[0]["log_level"] == "warning"
+
+    def test_auth_error_status_returns_none(self) -> None:
+        # A 401 from RenewToken (an already-expired token Dhan refuses) → None.
+        result = maybe_renew_token(_client(401, b"unauthorized"))
+        assert result is None
+
+    def test_forwards_pace_hook(self) -> None:
+        # The pace hook is forwarded to renew_token (gates the physical POST).
+        calls: list[str] = []
+        body = b'{"accessToken": "freshjwt", "expiryTime": "t"}'
+        info = maybe_renew_token(_client(200, body), pace=lambda: calls.append("pace"))
+        assert info is not None
+        assert calls == ["pace"]
+
+    def test_custom_logger_receives_event(self) -> None:
+        # An explicit *log* is honoured (covers the `log is not None` branch).
+        body = b'{"accessToken": "freshjwt", "expiryTime": "t"}'
+        custom = structlog.get_logger("test.custom")
+        info = maybe_renew_token(_client(200, body), log=custom)
+        assert info == TokenInfo(access_token="freshjwt", expiry_time="t")
 
 
 class TestWithToken:

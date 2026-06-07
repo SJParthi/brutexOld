@@ -16,7 +16,11 @@ from decimal import Decimal
 
 import pytest
 from brutex.adapters.dhan import run_ingest as mod
-from brutex.adapters.dhan.errors import DhanBadRequestError, DhanNotFoundError
+from brutex.adapters.dhan.errors import (
+    DhanAuthError,
+    DhanBadRequestError,
+    DhanNotFoundError,
+)
 from brutex.adapters.dhan.ingest import IngestReport
 from brutex.adapters.dhan.run_ingest import (
     DhanIngestReport,
@@ -69,6 +73,7 @@ def test_fan_out_all_pairs_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
         on_rate_limit=None,
         on_timeout=None,
         on_success=None,
+        auth_guard=None,
     ):
         calls.append((instrument.symbol_name, interval))
         return IngestReport(windows=2, bars_appended=10, transient_failures=1)
@@ -111,6 +116,7 @@ def test_terminal_error_quarantines_pair_and_continues(monkeypatch: pytest.Monke
         on_rate_limit=None,
         on_timeout=None,
         on_success=None,
+        auth_guard=None,
     ):
         if instrument.symbol_name == "BAD":
             raise DhanNotFoundError("HTTP 404 unknown security")
@@ -151,6 +157,7 @@ def test_pace_threaded_through(monkeypatch: pytest.MonkeyPatch) -> None:
         on_rate_limit=None,
         on_timeout=None,
         on_success=None,
+        auth_guard=None,
     ):
         seen.append(pace)
         return IngestReport(windows=0, bars_appended=0, transient_failures=0)
@@ -216,6 +223,7 @@ def test_non_dhan_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
         on_rate_limit=None,
         on_timeout=None,
         on_success=None,
+        auth_guard=None,
     ):
         raise ValueError("a real bug, not a vendor error")
 
@@ -272,6 +280,7 @@ def test_coverage_threaded_and_skipped_windows_aggregated(
         on_rate_limit=None,
         on_timeout=None,
         on_success=None,
+        auth_guard=None,
     ):
         seen_coverage.append(coverage)
         return IngestReport(windows=3, bars_appended=0, transient_failures=0, skipped_windows=3)
@@ -312,6 +321,7 @@ def test_rate_feedback_hooks_threaded(monkeypatch: pytest.MonkeyPatch) -> None:
         on_rate_limit=None,
         on_timeout=None,
         on_success=None,
+        auth_guard=None,
     ):
         seen.append((on_rate_limit, on_timeout, on_success))
         return IngestReport(windows=1, bars_appended=1, transient_failures=0)
@@ -505,3 +515,120 @@ def test_status_log_threaded_through_to_ingest_spot(
     )
     # Every pair (2 instruments × 2 intervals) saw the exact same log object.
     assert seen == [log, log, log, log]
+
+
+class TestAuthFailFast:
+    """The dead-token fail-fast flood control (DEC-DHAN-AUTH-FAILFAST-RENEW-001).
+
+    A 401 (or DH-906 400) from one pair must: trip the shared guard, set
+    ``auth_aborted`` + ``auth_cause`` on the report, emit EXACTLY ONE loud
+    ``ingest.auth_aborted`` WARNING (not the per-symbol flood), and STILL record
+    every failed pair (re-tried next pull, never masked). Non-auth terminal errors
+    keep quarantining per-pair as before (no regression).
+    """
+
+    def test_auth_guard_threaded_into_every_pair(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The ONE per-run AuthGuard reaches every ingest_spot pair.
+        seen: list[object] = []
+
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **kw):  # type: ignore[no-untyped-def]
+            seen.append(kw.get("auth_guard"))
+            return IngestReport(windows=1, bars_appended=1, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        run_dhan_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("13"), _index("25")],
+            intervals=["1minute", "1day"],
+            start=_START,
+            end=_END,
+        )
+        # 4 pairs, all the same (non-None) guard instance.
+        assert len(seen) == 4
+        assert all(g is seen[0] for g in seen)
+        assert seen[0] is not None
+
+    def test_auth_failure_sets_report_fields_and_alerts_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Every pair's ingest_spot raises an auth error (simulating the token dying
+        # mid-pull: a window worker normally trips the guard + re-raises). The outer
+        # loop must record every pair, set auth_aborted/auth_cause, and emit exactly
+        # ONE ingest.auth_aborted alert — never a per-symbol flood.
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **kw):  # type: ignore[no-untyped-def]
+            raise DhanAuthError(
+                f"HTTP 401 auth failure: DH-901 token expired ({instrument.symbol_name})"
+            )
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        with capture_logs() as logs, pull_id_scope("authpull0001"):
+            report = run_dhan_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("13"), _index("25"), _index("99", token=99)],
+                intervals=["1minute"],
+                start=_START,
+                end=_END,
+            )
+        # All three pairs recorded (re-tried next pull, never masked).
+        assert report.failed_pairs == 3
+        assert report.auth_aborted is True
+        assert report.auth_cause is not None
+        assert "DH-901" in report.auth_cause
+        # EXACTLY ONE loud alert (not one per symbol) — the flood is killed.
+        alerts = _events(logs, "ingest.auth_aborted")
+        assert len(alerts) == 1
+        assert alerts[0]["log_level"] == "warning"
+        assert alerts[0]["pull_id"] == "authpull0001"
+        assert "web.dhan.co" in str(alerts[0]["note"])
+        # No per-symbol quarantine WARNINGs for the auth failures.
+        assert _events(logs, "ingest.quarantine") == []
+
+    def test_dh906_400_is_treated_as_auth_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A DH-906 "Invalid Token" 400 masquerading as a bad request is still a
+        # dead token → auth_aborted, not a per-pair quarantine.
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **kw):  # type: ignore[no-untyped-def]
+            raise DhanBadRequestError("HTTP 400 bad request: DH-906 Invalid Token")
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        with capture_logs() as logs:
+            report = run_dhan_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("13")],
+                intervals=["1minute"],
+                start=_START,
+                end=_END,
+            )
+        assert report.auth_aborted is True
+        assert "DH-906" in str(report.auth_cause)
+        assert len(_events(logs, "ingest.auth_aborted")) == 1
+        assert _events(logs, "ingest.quarantine") == []
+
+    def test_non_auth_terminal_still_quarantines_no_regression(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A plain 404 (not a dead token) keeps the per-pair quarantine + leaves
+        # auth_aborted False — the existing behaviour is unchanged.
+        def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **kw):  # type: ignore[no-untyped-def]
+            if instrument.symbol_name == "BAD":
+                raise DhanNotFoundError("HTTP 404 not found: unknown security")
+            return IngestReport(windows=1, bars_appended=5, transient_failures=0)
+
+        monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+        with capture_logs() as logs:
+            report = run_dhan_spot_ingest(
+                object(),  # type: ignore[arg-type]
+                object(),  # type: ignore[arg-type]
+                instruments=[_index("13"), _index("BAD", token=99)],
+                intervals=["1minute"],
+                start=_START,
+                end=_END,
+            )
+        assert report.auth_aborted is False
+        assert report.auth_cause is None
+        assert report.failed_pairs == 1
+        assert _events(logs, "ingest.auth_aborted") == []
+        # The non-auth terminal still logs its per-pair quarantine WARNING.
+        assert len(_events(logs, "ingest.quarantine")) == 1
