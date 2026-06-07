@@ -25,14 +25,22 @@ match reality: an invariant pointing to a non-existent test function
 in a sibling file is a Golden Rule #1 hallucination and CI will catch
 the lie via the catalog's own implementation-reference cross-check.
 
-## Implementation status (verified 2026-05-26)
+## Implementation status (verified 2026-06-07)
 
 * ✅ IMPLEMENTED — invariant is covered by tests in another file in
   this directory. The catalog test ``skip``s with a pointer.
 * 📋 ROADMAP — invariant awaits Phase 2 / Phase 3 implementation when
-  the underlying subject (PnL accounting, options-cost calculator,
-  Rust parity harness, etc.) lands. The catalog test ``skip``s with
-  the phase tag.
+  the underlying subject (options-cost calculator, Rust parity
+  harness, deterministic Parquet writer, etc.) lands. The catalog test
+  ``skip``s with the phase tag.
+
+DEC-PROPERTY-INVARIANTS-LIVE-001 (``docs/MIGRATION.md``) promoted five
+ROADMAP stubs to live hypothesis tests against the real sandbox-safe
+components (no :mod:`brutex.orchestrator` import): **P-03 / P-04 / P-09**
+in ``test_engine_trade_sim_properties.py`` (driving
+:func:`brutex.engine.trade_sim.simulate_trades` +
+:func:`brutex.metrics.compute.compute_metrics`) and **P-13 / P-14** in
+``test_indicator_properties.py`` (the EMA / pivot / Fib indicators).
 
 Decision: DEC-PHASE1-INVARIANT-CATALOG-001 (MIGRATION entry #250).
 """
@@ -78,12 +86,12 @@ def test_p_24_mask_and_independent_of_worker_order() -> None:
 
 def test_p_03_per_trade_pnl_sums_to_balance_delta() -> None:
     """P-03: ``Σ per-trade paper_pnl == final_balance − initial_balance`` (exact paise)."""
-    pytest.skip("Phase 2 implementation pending (PnL accounting harness)")
+    pytest.skip("implemented in tests/property/test_engine_trade_sim_properties.py")
 
 
 def test_p_04_gross_minus_costs_equals_net() -> None:
     """P-04: ``gross_pnl − Σ costs == net_pnl`` (Track 1: costs=0, so gross == net)."""
-    pytest.skip("Phase 2 implementation pending (PnL accounting harness)")
+    pytest.skip("implemented in tests/property/test_engine_trade_sim_properties.py")
 
 
 def test_p_08_resample_associative() -> None:
@@ -93,17 +101,17 @@ def test_p_08_resample_associative() -> None:
 
 def test_p_09_forced_exit_no_trade_past_1520() -> None:
     """P-09: Forced-exit invariant — no trade survives 15:20 IST."""
-    pytest.skip("Phase 2 implementation pending (signal-only simulator)")
+    pytest.skip("implemented in tests/property/test_engine_trade_sim_properties.py")
 
 
 def test_p_13_ema_is_contraction() -> None:
     """P-13: ``EMA(α, x)`` is a contraction in the ``ℓ∞`` norm."""
-    pytest.skip("Phase 2 implementation pending (EMA property harness)")
+    pytest.skip("implemented in tests/property/test_indicator_properties.py")
 
 
 def test_p_14_pivot_fib_pure_functions() -> None:
     """P-14: Pivot/Fib levels are pure functions of ``(PDH, PDL, PDC)`` — no intraday state leak."""
-    pytest.skip("Phase 2 implementation pending (Pivot/Fib property harness)")
+    pytest.skip("implemented in tests/property/test_indicator_properties.py")
 
 
 def test_p_21_tick_rounding() -> None:
