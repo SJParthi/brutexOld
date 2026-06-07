@@ -189,4 +189,4 @@ These were **not** in the wave-1 audit and are now tracked (Golden Rule #1 — h
 
 ---
 
-_Authority: this doc is a living gap ledger under DEC-GAP-ANALYSIS-001 (MIGRATION.md #564). It supplements — does not supersede — `TRACK1_BACKTEST_SPEC.md`, `STANDARDS_100PCT.md`, and `MERGE_READINESS_GUARANTEE.md`. Every row is a tracked follow-up; PRs that close a gap MUST update its row._
+_Authority: this doc is a living gap ledger under DEC-GAP-ANALYSIS-001 (MIGRATION.md #565). It supplements — does not supersede — `TRACK1_BACKTEST_SPEC.md`, `STANDARDS_100PCT.md`, and `MERGE_READINESS_GUARANTEE.md`. Every row is a tracked follow-up; PRs that close a gap MUST update its row._
