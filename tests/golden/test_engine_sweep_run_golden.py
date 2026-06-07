@@ -138,7 +138,10 @@ def test_golden_run_id_is_byte_stable() -> None:
 #: The hand-pinned store content hash for the fixed fixture (polars/zstd-build
 #: sensitive — see the module docstring; the determinism + summary assertions
 #: are the version-robust contract).
-_GOLDEN_CONTENT_HASH = "9713beff6059f155db8897938049755ba284d66c91e446cab48ef21581de74c9"
+# Re-locked for DEC-SWEEP-WINNERS-BY-NAME-001: the readable-mask surface added the
+# mask_bits + condition_names + (nullable) deflated_sharpe columns to the persisted
+# Parquet schema, so the deterministic content hash moved by design.
+_GOLDEN_CONTENT_HASH = "d3070e20afc27fcc060df3862b1b5053cea838e48748e46933fe1c8b26486d74"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:

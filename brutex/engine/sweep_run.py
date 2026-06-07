@@ -447,8 +447,13 @@ def ranked_combo_to_result_row(
     """Project a :class:`~brutex.ranking.RankedCombo` into a storable :class:`ResultRow`.
 
     The seam between the ranked leaderboard (rich metrics, no storage discipline)
-    and the deterministic store (fixed 20-column schema, money/metric/price
-    families). The mapping is mechanical except two deliberate choices:
+    and the deterministic store (money/metric/price families + the readable-mask
+    surface). The winning combo is stamped two ways (DEC-SWEEP-WINNERS-BY-NAME-001):
+    ``mask_bits=rc.mask`` (the machine-readable u64) and — derived from it inside
+    :class:`ResultRow` via the single-source-of-truth vocabulary name table — the
+    human-readable ``condition_names``; ``rc.deflated_sharpe`` is carried through for
+    leaderboard transparency (``None`` when the pool was not deflatable). The rest of
+    the mapping is mechanical except two deliberate choices:
 
     * **``None`` metrics → ``0.0``.** ``ResultMetrics`` carries ``sortino_ratio``
       / ``calmar_ratio`` / ``profit_factor`` as ``float | None`` (mathematically
@@ -515,6 +520,8 @@ def ranked_combo_to_result_row(
         tf=tf,
         direction=direction,
         mode=mode,
+        mask_bits=rc.mask,
+        deflated_sharpe=rc.deflated_sharpe,
         net_pnl_paisa=m.net_pnl_paisa,
         gross_profit_paisa=m.gross_profit_paisa,
         gross_loss_paisa=abs(m.gross_loss_paisa),

@@ -1,6 +1,6 @@
 //! Resident Stage-2 trade-simulation kernel — the hot trade-walk in Rust.
 //!
-//! DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #562). The Rust port of the Python
+//! DEC-SWEEP-RUST-TRADESIM-001 (MIGRATION.md #563). The Rust port of the Python
 //! `brutex.engine.trade_sim.TradeSimWalker` state machine, fused with the per-mask
 //! entry-signal projection, over a **resident** bar window. It is the next hop
 //! after [`crate::python::ResidentBars`] (which holds the per-bar u64 condition

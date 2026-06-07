@@ -235,7 +235,7 @@ gate is **no longer `xfail`**. It follows the absolute-throughput convention of
 
 This gate proves only the **bandwidth-bound mask-AND kernel** meets the SLA — the
 full sweep additionally walks a per-surviving-mask trade-sim + a per-mask metrics
-pass. As of **DEC-SWEEP-RUST-TRADESIM-001 (#562)** the trade-sim itself is now a
+pass. As of **DEC-SWEEP-RUST-TRADESIM-001 (#563)** the trade-sim itself is now a
 **resident Rust kernel** (`fno_math.ResidentSweepSim`, OHLC paisa + forced flags
 + bar_bits loaded ONCE per (instrument, tf) and reused across all masks; bench
 `tests/bench/test_trade_sim_throughput.py` measures its real combos/s + an O(1)
