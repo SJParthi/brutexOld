@@ -17,6 +17,7 @@ and runs the nine-filter cascade per ``(instrument, tf)`` pool. Covers:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -84,7 +85,7 @@ def _spec(**overrides: object) -> cw.CascadeTupleSpec:
     return cw.CascadeTupleSpec(**base)  # type: ignore[arg-type]
 
 
-def _bars_for(bars: list[CandleBar]) -> object:
+def _bars_for(bars: list[CandleBar]) -> Callable[[str, str], list[CandleBar]]:
     """Return a ``bars_for`` that serves *bars* for NIFTY/1minute, else empty."""
 
     def loader(instrument: str, tf_label: str) -> list[CandleBar]:

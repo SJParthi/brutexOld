@@ -712,7 +712,7 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
     # The manifest is JSON (typed ``dict[str, object]``); cast to ``Any`` so the
     # scalar coercions below read cleanly. Every malformed value is caught by the
     # ``(KeyError, TypeError, ValueError)`` guard and re-raised as a CascadeWireError.
-    raw = cast("dict[str, Any]", data)
+    raw = cast(dict[str, Any], data)
     try:
         proximity = raw["proximity_bps"]
         proximity_bps = (
