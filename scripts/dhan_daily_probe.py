@@ -52,6 +52,12 @@ def _probe_one(client: DhanClient, *, label: str, endpoint: str, body: dict[str,
     """Fire one endpoint and print a one-line OUTCOME (OK / NO_DATA / ERROR)."""
     sys.stdout.write(f"\n── {label}  (POST /v2/{endpoint}) ──\n")
     sys.stdout.write(f"   request: {body}\n")
+    # Gate the INITIAL physical POST through the client's rate-bucket hook
+    # (no-op unless a controller is wired into ``DhanClient.pace``), so EVERY
+    # physical Dhan POST stays bucket-bounded ≤5 r/s even if this diagnostic is
+    # ever threaded into a live pull — the fast-retry path self-gates inside
+    # ``post_json`` (DEC-DHAN-RATE-RESIDUAL-HARDEN-001, CLAUDE.md §2 Rule 6).
+    client.pace()
     try:
         payload = client.post_json(endpoint, body)
     except DhanError as exc:
