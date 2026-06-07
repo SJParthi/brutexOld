@@ -23,7 +23,7 @@ with no edit here (and ``pyproject.toml`` already silences the static-analysis
 noise this dynamic-``__all__`` rebind produces: ruff ``A005``/``PLE0604``,
 pyright ``reportConstantRedefinition``/``reportUnsupportedDunderAll``).
 
-Decision: ``DEC-STRUCTURE-CLEANUP-001`` (``docs/MIGRATION.md`` #567).
+Decision: ``DEC-STRUCTURE-CLEANUP-001`` (``docs/MIGRATION.md`` #568).
 """
 
 from __future__ import annotations

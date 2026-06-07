@@ -339,6 +339,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # ── notify (DEC-TELEGRAM-WIRE-001) — MANUAL Telegram channel trigger ──
+    notify = sub.add_parser(
+        "notify",
+        help="Telegram alert tools (manual trigger for the channel the sweep auto-alerts use)",
+    )
+    notify_sub = notify.add_subparsers(dest="notify_command", required=True)
+    notify_sub.add_parser(
+        "test",
+        help=(
+            "Send a one-shot Telegram test digest to prove the channel is wired "
+            "+ reachable (needs BRUTEX_TELEGRAM_ENABLED=true + token + chat id)"
+        ),
+    )
+
     wipe = sub.add_parser(
         "wipe",
         help=(
@@ -843,6 +857,63 @@ def cmd_monitor(poll_interval: float, ticks: int) -> int:
     return 0
 
 
+def cmd_notify_test() -> int:  # pragma: no cover — live network + singleton + cli-omitted
+    """Send a one-shot Telegram test digest (the MANUAL channel trigger).
+
+    The hand-run counterpart to the sweep supervisor's AUTOMATIC alerts
+    (watchdog-hung / rate.breach / auth.renew_failed / sweep complete —
+    DEC-TELEGRAM-WIRE-001): it lets the operator confirm the Telegram channel is
+    wired + reachable on demand. Reads the channel config from env; if Telegram
+    is disabled or misconfigured, prints a clear hint and exits non-zero (never a
+    traceback). On success it starts the singleton notifier, publishes one
+    :class:`~brutex.notifications.telegram.TelegramEventKind.TEST` digest, drains
+    the async queue, prints the send stats, and stops the notifier. The pure
+    digest-build + best-effort publish logic lives in the 100%-tested
+    :class:`brutex.notifications.sweep_alerts.SweepAlerter`.
+    """
+    from brutex.notifications.sweep_alerts import SweepAlerter
+    from brutex.notifications.telegram import TelegramConfig, TelegramConfigError
+    from brutex.notifications.wiring import get_or_start_notifier
+
+    try:
+        config = TelegramConfig.from_env()
+    except TelegramConfigError as exc:
+        print(f"[brutex] Telegram misconfigured: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if not config.enabled:
+        print(
+            "[brutex] Telegram disabled — set BRUTEX_TELEGRAM_ENABLED=true plus "
+            "BRUTEX_TELEGRAM_BOT_TOKEN + BRUTEX_TELEGRAM_CHAT_ID (see "
+            "docs/runbooks/telegram-setup.md), then re-run `brutex notify test`.",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+
+    notifier = get_or_start_notifier(config=config)
+    if notifier is None:
+        print("[brutex] Telegram could not start — see logs.", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+
+    alerter = SweepAlerter(notifier=notifier)
+    alerter.test_digest()
+    notifier.drain(timeout=5.0)
+    stats = notifier.stats()
+    notifier.stop()
+    print(
+        f"[brutex] notify test → sent={stats['sent']} "
+        f"dropped_on_failure={stats['dropped_on_failure']} "
+        f"dropped_on_dedupe={stats['dropped_on_dedupe']}"
+    )
+    if stats["sent"] > 0:
+        print("[brutex] ✅ test digest delivered to Telegram.")
+        return EXIT_OK
+    print(
+        "[brutex] ❌ test digest was NOT delivered (check token / chat id / network).",
+        file=sys.stderr,
+    )
+    return EXIT_INTERNAL_ERROR
+
+
 def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     """Start the dashboard FastAPI server."""
     try:
@@ -1335,9 +1406,16 @@ def cmd_fetch(
                 sink = NullBarSink()
             # Adaptive [3..5] r/s throttle for the live pull (DEC-DHAN-ADAPTIVE-RPS-001).
             from brutex.adapters.dhan.rate_control import DhanRateController
+            from brutex.notifications.sweep_alerts import SweepAlerter
 
             _rate = DhanRateController()
-            pace, on_rate_limit, on_success = _rate.pace, _rate.on_rate_limit, _rate.on_success
+            # AUTOMATIC rate.breach alert (DEC-TELEGRAM-WIRE-001): wrap the
+            # controller's own on_rate_limit so a sustained 429 storm also fires a
+            # best-effort Telegram push (coalesced by the notifier's 60 s dedupe).
+            # No-op when Telegram is disabled; never blocks the pull.
+            _alerter = SweepAlerter()
+            pace, on_success = _rate.pace, _rate.on_success
+            on_rate_limit = _alerter.rate_breach_callback(_rate)
             print("[brutex] fetch (live Dhan)", file=sys.stderr)
 
         report = run_dhan_spot_ingest(
@@ -1798,7 +1876,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         f"{[d.value for d in grid.directions]} × k={list(grid.k_values)} → "
         f"results: {out_root}"
     )
-    watchdog = SweepWatchdog()
+    # AUTOMATIC operator alerts (DEC-TELEGRAM-WIRE-001): a hung sweep worker fires
+    # a CRITICAL Telegram push, and the grid-complete tally lands when the sweep
+    # finishes. Best-effort + a silent no-op when Telegram is disabled (the
+    # default) — an alert can never block or slow the sweep (Golden Rule #10).
+    from brutex.notifications.sweep_alerts import SweepAlerter
+
+    alerter = SweepAlerter()
+    watchdog = SweepWatchdog(on_hung=alerter.watchdog_hung_callback())
     checkpoint = SweepCheckpointStore(
         path=checkpoint_path,
         sweep_id=grid_identity(grid),
@@ -1827,6 +1912,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             on_progress=_on_progress,
             watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
         )
+    # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
+    # disabled) now that the supervised grid returned cleanly (DEC-TELEGRAM-WIRE-001).
+    alerter.sweep_complete(result)
     print(
         f"[brutex] sweep-all done — tuples={result.tuples_run}/{result.tuples_total} "
         f"(no_bars={result.tuples_skipped_no_bars} cached={result.skipped_cache} "
@@ -2044,6 +2132,10 @@ def main(argv: list[str] | None = None) -> int:
             poll_interval=args.poll_interval,
             ticks=args.ticks,
         )
+    if args.command == "notify":  # pragma: no cover — live network + cli-omitted
+        if args.notify_command != "test":
+            parser.error(f"unknown notify subcommand: {args.notify_command}")
+        return cmd_notify_test()
     if args.command == "wipe":
         return cmd_wipe(execute=args.execute, assume_yes=args.yes)
     if args.command == "sweep":
