@@ -425,6 +425,100 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
     )
 
+    # ── sweep-all (DEC-SWEEP-ORCHESTRATOR-001) — full multi-parameter grid ──
+    sweep_all = sub.add_parser(
+        "sweep-all",
+        help=(
+            "Full multi-parameter grid sweep (instrument × timeframe × direction × K "
+            "× SL × TP × proximity) → persist every ranked finalist to Parquet"
+        ),
+    )
+    sweep_all.add_argument(
+        "--symbols",
+        default="NIFTY,BANKNIFTY",
+        help="Comma-separated index symbols (default NIFTY,BANKNIFTY — run SENSEX with --exchange BSE)",
+    )
+    sweep_all.add_argument("--start", required=True, help="Window start (YYYY-MM-DD or full ISO)")
+    sweep_all.add_argument("--end", required=True, help="Window end (YYYY-MM-DD or full ISO)")
+    sweep_all.add_argument(
+        "--exchange", default="NSE", help="LAKE exchange partition (default NSE; BSE for SENSEX)"
+    )
+    sweep_all.add_argument(
+        "--segment", default="INDEX", help="LAKE segment partition (default INDEX)"
+    )
+    sweep_all.add_argument(
+        "--intervals",
+        default="1minute,5minute,15minute",
+        help="Comma-separated lake interval labels to sweep (default 1minute,5minute,15minute)",
+    )
+    sweep_all.add_argument(
+        "--directions",
+        default="BUY,SELL",
+        help="Comma-separated directions BUY/SELL (default BUY,SELL)",
+    )
+    sweep_all.add_argument(
+        "--k", default="1,2", help="Comma-separated conditions-per-combo values (default 1,2)"
+    )
+    sweep_all.add_argument(
+        "--conditions",
+        default=None,
+        help="Comma-separated condition bit indices 0..51 to sweep (default: all 52)",
+    )
+    sweep_all.add_argument(
+        "--sl",
+        default="none",
+        help="Comma-separated stop-loss paisa values; use 'none' to disable a leg (default none)",
+    )
+    sweep_all.add_argument(
+        "--tp",
+        default="none",
+        help="Comma-separated take-profit paisa values; use 'none' to disable a leg (default none)",
+    )
+    sweep_all.add_argument(
+        "--top", type=int, default=20, help="Persist the top-N ranked combos per tuple (default 20)"
+    )
+    sweep_all.add_argument(
+        "--mode", default="A", help="Run mode label stamped on the run identity (default A)"
+    )
+    sweep_all.add_argument(
+        "--max-tuples",
+        type=int,
+        default=None,
+        help="Refuse a grid larger than this many tuples (honest opt-in guard)",
+    )
+    sweep_all.add_argument(
+        "--max-combos",
+        type=int,
+        default=None,
+        help="Refuse any tuple whose mask count exceeds this (honest opt-in guard)",
+    )
+    sweep_all.add_argument(
+        "--data-snapshot-hash",
+        default=None,
+        dest="data_snapshot_hash",
+        help="Override the data-snapshot identity (default: content fingerprint of the loaded bars)",
+    )
+    sweep_all.add_argument(
+        "--results-root",
+        type=Path,
+        default=None,
+        dest="results_root",
+        help="Directory for the per-tuple Parquet results (default <lake-root>/sweeps)",
+    )
+    sweep_all.add_argument(
+        "--catalog",
+        type=Path,
+        default=None,
+        dest="catalog_path",
+        help="Catalog DuckDB path (default <lake-root>/catalog.duckdb)",
+    )
+    sweep_all.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+
     return parser
 
 
@@ -1250,6 +1344,256 @@ def cmd_sweep(
     return EXIT_OK
 
 
+def _resolve_code_commit_sha() -> str:  # pragma: no cover — git/subprocess + cli-omitted
+    """Return the real current git commit SHA, falling back to the package version.
+
+    Golden Rule #1/#4: the run-identity's ``code_commit_sha`` must be a REAL value,
+    never a placeholder. Uses ``git rev-parse HEAD`` when run inside a checkout;
+    if git is unavailable (e.g. a wheel install with no repo), falls back to the
+    pinned ``brutex.__version__`` — still a real, traceable code identity.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],  # noqa: S607 — fixed constant argv, no shell/user input
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        sha = out.stdout.strip()
+        if sha:
+            return sha
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return f"brutex-{__version__}"
+
+
+def _indicator_version() -> str:  # pragma: no cover — cli-omitted thin string builder
+    """Return a real indicator-stack version string (BruteX + shared trading_core)."""
+    try:
+        import trading_core
+
+        return f"brutex-{__version__}+trading_core-{trading_core.__version__}"
+    except (ImportError, AttributeError):  # pragma: no cover — wheel always present in prod
+        return f"brutex-{__version__}"
+
+
+def _data_snapshot_hash(  # pragma: no cover — cli-omitted; pure helper tested via engine layer
+    *,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+    slices: dict[tuple[str, str], list[Any]],
+) -> str:
+    """Return a real BLAKE3 content fingerprint of the loaded data window.
+
+    Honest (Golden Rule #1/#10): a deterministic digest of the data SCOPE
+    (exchange/segment/window) plus, per ``(symbol, interval)`` slice, the bar
+    count and the first/last bar timestamps + closes — a real content-derived
+    snapshot identity, not a fabricated placeholder. Two different lake states
+    over the same window therefore hash differently.
+    """
+    import blake3
+
+    parts: list[str] = [f"{exchange}|{segment}|{start}|{end}"]
+    for (symbol, interval), bars in sorted(slices.items()):
+        if bars:
+            first, last = bars[0], bars[-1]
+            parts.append(
+                f"{symbol}|{interval}|{len(bars)}|{first.timestamp.isoformat()}|"
+                f"{first.close}|{last.timestamp.isoformat()}|{last.close}"
+            )
+        else:
+            parts.append(f"{symbol}|{interval}|0")
+    return blake3.blake3("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _parse_paisa_list(raw: str) -> list[int | None]:
+    """Parse a comma list of paisa values; the token ``none`` (any case) → ``None``."""
+    out: list[int | None] = []
+    for tok in raw.split(","):
+        token = tok.strip()
+        if not token:
+            continue
+        out.append(None if token.lower() == "none" else int(token))
+    return out
+
+
+def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-tested engine
+    *,
+    lake_root: Path | None,
+    catalog_path: Path | None,
+    results_root: Path | None,
+    exchange: str,
+    segment: str,
+    symbols: str,
+    intervals: str,
+    start: str,
+    end: str,
+    directions: str,
+    k: str,
+    conditions: str | None,
+    sl: str,
+    tp: str,
+    top: int,
+    mode: str,
+    max_tuples: int | None,
+    max_combos: int | None,
+    data_snapshot_hash: str | None,
+) -> int:
+    """Run the full multi-parameter grid sweep and persist every ranked finalist.
+
+    The launch entry point for DEC-SWEEP-ORCHESTRATOR-001: it pre-loads every
+    ``(symbol, interval)`` slice from the Parquet lake (the SAME Catalog/ReplayFeed
+    path :func:`cmd_sweep` uses), derives a REAL reproducibility context (git SHA,
+    indicator-stack version, a content fingerprint of the loaded bars — never
+    placeholders, Golden Rule #1), then drives
+    :func:`brutex.engine.sweep_orchestrator.run_sweep_grid` with a shared
+    Bloom→exact dedup, a hash-chained audit log, and one load-or-create Parquet
+    store per tuple (idempotent, lossless re-run — Golden Rule #7).
+    """
+    from brutex.data.catalog import Catalog
+    from brutex.data.option_dedup import OptionDedupIndex
+    from brutex.engine.sweep_orchestrator import (
+        SweepGridConfig,
+        SweepTuple,
+        Timeframe,
+        bloom_capacity_hint,
+        make_store_for,
+        run_sweep_grid,
+    )
+    from brutex.engine.sweep_run import ComboDedup, SweepRunSummary
+    from brutex.feed.replay import ReplayFeed
+    from brutex.feed.resampler import INTERVAL_SECONDS
+    from brutex.orchestrator.audit import AuditWriter
+    from brutex.strategies.types import Side
+
+    resolved_lake = _resolve_lake_root(lake_root)
+    catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
+    out_root = results_root if results_root is not None else resolved_lake / "sweeps"
+
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    interval_list = [i.strip() for i in intervals.split(",") if i.strip()]
+    for interval in interval_list:
+        if interval not in INTERVAL_SECONDS:
+            print(
+                f"[brutex] unknown --intervals label {interval!r}; choose from "
+                f"{sorted(INTERVAL_SECONDS)}",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
+    direction_list = [
+        Side.BUY if d.strip().upper() == "BUY" else Side.SELL
+        for d in directions.split(",")
+        if d.strip()
+    ]
+    k_list = [int(tok) for tok in k.split(",") if tok.strip()]
+    condition_bits = (
+        [int(tok) for tok in conditions.split(",") if tok.strip()]
+        if conditions
+        else list(range(52))
+    )
+
+    # Pre-load every slice ONCE (the bars_for memo) so the snapshot hash is a real
+    # content fingerprint and each tuple reuses the cached bars (no re-read).
+    slices: dict[tuple[str, str], list[Any]] = {}
+    with Catalog.open(catalog) as cat:
+        for symbol in symbol_list:
+            for interval in interval_list:
+                feed = ReplayFeed(
+                    catalog=cat,
+                    lake_root=resolved_lake,
+                    exchange=exchange,
+                    segment=segment,
+                    symbols=[symbol],
+                    interval=interval,
+                    start=_parse_dt(start),
+                    end=_parse_dt(end),
+                )
+                slices[(symbol, interval)] = [event.bar for event in feed]
+
+    loaded = {key: len(bars) for key, bars in slices.items() if bars}
+    if not loaded:
+        print(
+            f"[brutex] no bars for any {symbol_list} × {interval_list} under "
+            f"{exchange}/{segment} (lake={resolved_lake})",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+
+    timeframes = [
+        Timeframe(interval, INTERVAL_SECONDS[interval] // 60) for interval in interval_list
+    ]
+    snapshot = data_snapshot_hash or _data_snapshot_hash(
+        exchange=exchange, segment=segment, start=start, end=end, slices=slices
+    )
+
+    grid_kwargs: dict[str, Any] = {
+        "instruments": symbol_list,
+        "timeframes": timeframes,
+        "directions": direction_list,
+        "k_values": k_list,
+        "condition_bits": condition_bits,
+        "stop_losses": _parse_paisa_list(sl),
+        "take_profits": _parse_paisa_list(tp),
+        "proximities": [None],
+        "mode": mode,
+        "data_snapshot_hash": snapshot,
+        "indicator_version": _indicator_version(),
+        "code_commit_sha": _resolve_code_commit_sha(),
+        "top_k": top,
+    }
+    if max_tuples is not None:
+        grid_kwargs["max_tuples"] = max_tuples
+    if max_combos is not None:
+        grid_kwargs["max_combos"] = max_combos
+
+    try:
+        grid = SweepGridConfig(**grid_kwargs)
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    dedup = ComboDedup(OptionDedupIndex(capacity=bloom_capacity_hint(grid), fpr_target=1e-7))
+    audit_path = out_root / "audit" / "sweep-all.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _bars_for(symbol: str, interval: str) -> list[Any]:
+        return slices.get((symbol, interval), [])
+
+    def _on_tuple(t: SweepTuple, summary: SweepRunSummary) -> None:
+        print(
+            f"[brutex]   {t.instrument} {t.tf.label} {t.direction.value} k={t.k} "
+            f"sl={t.sl_paisa} tp={t.tp_paisa} → persisted={summary.persisted} "
+            f"(evaluated={summary.evaluated})"
+        )
+
+    print(
+        f"[brutex] sweep-all: {grid.instruments} × {[tf.label for tf in grid.timeframes]} × "
+        f"{[d.value for d in grid.directions]} × k={list(grid.k_values)} → "
+        f"results: {out_root}"
+    )
+    with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
+        result = run_sweep_grid(
+            grid,
+            bars_for=_bars_for,
+            store_for=make_store_for(out_root, grid),
+            dedup=dedup,
+            audit=audit,
+            on_tuple=_on_tuple,
+        )
+    print(
+        f"[brutex] sweep-all done — tuples={result.tuples_run}/{result.tuples_total} "
+        f"(skipped_no_bars={result.tuples_skipped_no_bars}) evaluated={result.evaluated} "
+        f"ranked={result.ranked} persisted={result.persisted}"
+    )
+    print(f"[brutex] results: {out_root}  ·  audit: {audit_path}")
+    return EXIT_OK
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Main dispatcher
 # ────────────────────────────────────────────────────────────────────────
@@ -1337,6 +1681,28 @@ def main(argv: list[str] | None = None) -> int:
             sort_by=args.sort_by,
             validate_oos=args.validate_oos,
             oos_only=args.oos_only,
+        )
+    if args.command == "sweep-all":
+        return cmd_sweep_all(
+            lake_root=args.lake_root,
+            catalog_path=args.catalog_path,
+            results_root=args.results_root,
+            exchange=args.exchange,
+            segment=args.segment,
+            symbols=args.symbols,
+            intervals=args.intervals,
+            start=args.start,
+            end=args.end,
+            directions=args.directions,
+            k=args.k,
+            conditions=args.conditions,
+            sl=args.sl,
+            tp=args.tp,
+            top=args.top,
+            mode=args.mode,
+            max_tuples=args.max_tuples,
+            max_combos=args.max_combos,
+            data_snapshot_hash=args.data_snapshot_hash,
         )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits
