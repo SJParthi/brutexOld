@@ -1,6 +1,6 @@
 """O(1) bench for the ``brutex.math`` facade — per-symbol lookup latency.
 
-DEC-STRUCTURE-CLEANUP-001 (``docs/MIGRATION.md`` #565).
+DEC-STRUCTURE-CLEANUP-001 (``docs/MIGRATION.md`` #566).
 
 Honest envelope (Golden Rule #10): building the facade (``_reexport``) is a
 **one-time O(total-symbols)** cost at import — NOT O(1)-total. What is O(1) is

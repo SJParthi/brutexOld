@@ -1,6 +1,6 @@
 """Golden surface contract for ``brutex.math`` against the REAL Rust wheels.
 
-DEC-STRUCTURE-CLEANUP-001 (``docs/MIGRATION.md`` #565). The unit/property tests
+DEC-STRUCTURE-CLEANUP-001 (``docs/MIGRATION.md`` #566). The unit/property tests
 drive the facade with fakes; this golden test pins the *actual* re-exported
 surface produced by the compiled ``fno_math`` + ``trading_core`` wheels and
 proves each facade symbol resolves to the SAME object the kernel exports (the
