@@ -42,7 +42,7 @@ Re-exports the combo-mask primitives + the Stage-1A matrix builder. As
 subsequent modules land, their public symbols will be re-exported here.
 """
 
-from brutex.engine import combo_mask, results_store, stage1a, sweep_run, trade_sim
+from brutex.engine import combo_mask, results_store, stage1a, trade_sim
 from brutex.engine.combo_mask import (
     MAX_VOCAB_BITS,
     VOCAB_BITS,
@@ -65,14 +65,6 @@ from brutex.engine.stage1a import (
     Stage1AMatrixBuilder,
     build_bar_bits,
 )
-from brutex.engine.sweep_run import (
-    ComboDedup,
-    SweepRunConfig,
-    SweepRunSummary,
-    mask_run_id,
-    ranked_combo_to_result_row,
-    run_persisted_sweep,
-)
 from brutex.engine.trade_sim import (
     DEFAULT_FILL_POLICY,
     FillPolicy,
@@ -87,7 +79,6 @@ __all__ = [
     "DEFAULT_FILL_POLICY",
     "MAX_VOCAB_BITS",
     "VOCAB_BITS",
-    "ComboDedup",
     "FillPolicy",
     "FlushResult",
     "LevelFill",
@@ -96,8 +87,6 @@ __all__ = [
     "ResultsStoreError",
     "SameBarTie",
     "Stage1AMatrixBuilder",
-    "SweepRunConfig",
-    "SweepRunSummary",
     "TradeSimWalker",
     "bits_to_mask",
     "build_bar_bits",
@@ -106,14 +95,10 @@ __all__ = [
     "evaluate_mask",
     "iter_masks_k_of_bits",
     "iter_masks_k_of_n",
-    "mask_run_id",
     "mask_to_bits",
     "popcount",
-    "ranked_combo_to_result_row",
     "results_store",
-    "run_persisted_sweep",
     "simulate_trades",
     "stage1a",
-    "sweep_run",
     "trade_sim",
 ]
