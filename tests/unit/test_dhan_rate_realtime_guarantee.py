@@ -34,7 +34,12 @@ class _Clock:
 
 
 def _ok_transport(
-    _url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+    _url: str,
+    *,
+    body: bytes,
+    headers: Mapping[str, str],
+    timeout: float,
+    method: str = "POST",
 ) -> tuple[int, bytes]:
     """A transport that always succeeds with an empty JSON object."""
     return 200, b"{}"
@@ -45,7 +50,12 @@ def _flaky_transport(n_timeouts: int):
     state = {"left": n_timeouts}
 
     def _transport(
-        _url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+        _url: str,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+        method: str = "POST",
     ) -> tuple[int, bytes]:
         if state["left"] > 0:
             state["left"] -= 1

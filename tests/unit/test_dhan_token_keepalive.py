@@ -38,7 +38,13 @@ class _FakeTransport:
         self.calls = 0
 
     def __call__(
-        self, url: str, *, body: bytes, headers: Mapping[str, str], timeout: float
+        self,
+        url: str,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+        method: str = "POST",
     ) -> tuple[int, bytes]:
         self.calls += 1
         idx = min(self.calls - 1, len(self._scripts) - 1)
