@@ -361,6 +361,18 @@ operator must HALT the sweep, modify the registry, restart the sweep
 > *slowdown*). The accepted pure intra-backtest design + the 5 unblock items live
 > in **`docs/adr/0006-stage2.5-sprt-design-block.md`**. Until those land, the
 > engine backtests every Stage-2 survivor to completion (no early-stop).
+>
+> ✅ **B1 RESOLVED (DEC-SPRT-SPEC-RECONCILE-001, 2026-06-08):** the
+> **intra-backtest** definition below (kill ONE backtest after **≥50 closed
+> trades** when `Pr(true_sharpe > p95) < 0.10`) is now the **LOCKED canonical
+> algorithm**. The `TRACK1_OPTIMIZATIONS.md §2` *inter-backtest* variant (prune a
+> param-tuple after ≥50,000 param-trials via a shared `DashMap`) is **SUPERSEDED**
+> — it was rejected by the review for the determinism risk (B3). The remaining
+> open blockers are **B2** (prove ranking-invariance / accept the probabilistic
+> envelope), **B4** (tie the kill percentile to the real `top_k`), and **B5**
+> (wire the Rust kernel into the production sweep + publish the honest worst-case
+> SLA). The pure deterministic decision **core** is built (opt-in, default-OFF,
+> NOT wired) per DEC-SPRT-EARLY-STOP-CORE-001 (`brutex/engine/early_stop.py`).
 
 - **Gaussian conjugate posterior** on 95th-percentile Sharpe per (instrument, TF)
 - **Wald SPRT** at α=0.05, β=0.10
