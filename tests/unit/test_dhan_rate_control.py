@@ -321,6 +321,23 @@ class TestThrottleLogging:
         assert down[0]["to_rps"] == 4.0
         assert down[0]["floor_rps"] == FLOOR_RPS
 
+    def test_storm_step_below_soft_floor_logs_deep_storm_floor(self) -> None:
+        # A sustained-storm step BELOW the soft floor (3→2) must log the EFFECTIVE
+        # floor for that rung — the deep RATE_LIMIT_STORM_FLOOR_RPS (1), not the
+        # soft FLOOR_RPS (3) — so the operator sees the controller is now easing
+        # into the storm regime (DEC-DHAN-RATE-STORM-FLOOR-001).
+        clock = _Clock()
+        ctl = _controller(clock)
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS * 2)  # 5→4→3 (now AT the soft floor)
+        assert ctl.current_rps == FLOOR_RPS
+        with capture_logs() as logs:
+            _hammer(ctl, clock, hits=STORM_HITS)  # sustained storm → 3→2
+        down = [e for e in logs if e["event"] == "rate.stepdown"]
+        assert len(down) == 1
+        assert down[0]["from_rps"] == 3.0
+        assert down[0]["to_rps"] == 2.0
+        assert down[0]["floor_rps"] == RATE_LIMIT_STORM_FLOOR_RPS  # deep floor, not 3
+
     def test_step_up_logs_recovery(self) -> None:
         clock = _Clock()
         ctl = _controller(clock)
