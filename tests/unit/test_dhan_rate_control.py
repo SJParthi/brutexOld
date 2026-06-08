@@ -1,9 +1,11 @@
 """Tests for `brutex.adapters.dhan.rate_control.DhanRateController`.
 
 100% line+branch with an injected fake clock (no real sleeping): starts at the
-5 r/s ceiling, steps down 5→4→3 on sustained 429s, clamps at the 3 r/s floor
-(no halt), ignores a non-sustained burst, evicts the window, recovers 3→4→5 on
-a sustained clean window, never exceeds 5, and `pace()` delegates to the bucket.
+5 r/s ceiling, steps down 5→4→3 on sustained 429s, rests at the SOFT 3 r/s floor
+on a brief burst but eases 3→2→1 under a SUSTAINED storm (DEC-DHAN-RATE-STORM-
+FLOOR-001), ignores a non-sustained burst, evicts the window, recovers up on a
+sustained clean window (incl. after a storm aged out — the on_success hits-evict
+fix), never exceeds 5, and `pace()` delegates to the bucket.
 """
 # pyright: reportPrivateUsage=none
 
