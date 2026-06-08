@@ -510,6 +510,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):  # pragma: no cover â
         self._brutex_policy = policy
 
     def connect(self) -> None:
+        """Open the TLS connection, then SPKI-verify the peer before any I/O."""
         super().connect()
         from brutex.adapters.dhan.pinning import verify_pin
 
@@ -536,7 +537,11 @@ def _pinned_opener() -> urllib.request.OpenerDirector:  # pragma: no cover â€” n
     ssl_context = ssl.create_default_context()
 
     class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+        """An :mod:`urllib` HTTPS handler that opens SPKI-pinned connections."""
+
         def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+            """Open *req* over a :class:`_PinnedHTTPSConnection` under the resolved policy."""
+
             def _factory(host: str, **kwargs: object) -> _PinnedHTTPSConnection:
                 return _PinnedHTTPSConnection(policy, host, **kwargs)
 
