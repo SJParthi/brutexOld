@@ -48,6 +48,18 @@ look-ahead enforcer :class:`brutex.feed.lookahead.LookAheadBarrier` (the
 instrumented bar accessor): for any current bar index ``N``, every access index
 ``> N`` raises and every access ``≤ N`` is allowed.
 
+DEC-PHASE2-INVARIANTS-PROMOTE-001 (``docs/MIGRATION.md``) promoted the
+remaining sandbox-safe ROADMAP stubs to live Hypothesis properties in
+``test_phase2_invariants_promoted.py``: **P-11 / P-24** (u64 mask AND algebra
++ worker-order/partition invariance), **P-19** (deterministic Parquet writer),
+**P-21** (2-decimal tick snap — the stale "5 paise" claim corrected),
+**P-22** (no NSE holiday is a trading day), **P-23** (IST session window), and
+the two spec-named-but-absent invariants **P-25** (no VIX leak in the
+vocabulary) and **P-26** (audit→dedup replay oracle). **P-08** points at the
+existing golden associativity test. **P-20** (audit→Parquet byte-equality)
+stays deferred — that reconstruction harness does not exist yet (honest
+envelope, Golden Rule #10).
+
 Decision: DEC-PHASE1-INVARIANT-CATALOG-001 (MIGRATION entry #250).
 """
 
@@ -77,12 +89,12 @@ def test_p_05_bloom_zero_false_negatives() -> None:
 
 def test_p_11_mask_and_commutativity() -> None:
     """P-11: Bitwise u64 mask AND on vocabulary is commutative & associative."""
-    pytest.skip("Phase 2 implementation pending (vocabulary u64 mask engine)")
+    pytest.skip("implemented in tests/property/test_phase2_invariants_promoted.py")
 
 
 def test_p_24_mask_and_independent_of_worker_order() -> None:
     """P-24: Bitmask AND result is independent of evaluation order across workers."""
-    pytest.skip("Phase 2 implementation pending (multi-worker mask harness)")
+    pytest.skip("implemented in tests/property/test_phase2_invariants_promoted.py")
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -102,7 +114,7 @@ def test_p_04_gross_minus_costs_equals_net() -> None:
 
 def test_p_08_resample_associative() -> None:
     """P-08: ``resample(resample(x,2),3) ≡ resample(x,6)`` when 09:15 anchor aligns."""
-    pytest.skip("Phase 2 implementation pending (resampler implementation)")
+    pytest.skip("implemented in tests/golden/test_resample_cross_instrument_golden.py")
 
 
 def test_p_09_forced_exit_no_trade_past_1520() -> None:
@@ -121,8 +133,10 @@ def test_p_14_pivot_fib_pure_functions() -> None:
 
 
 def test_p_21_tick_rounding() -> None:
-    """P-21: Every persisted price is a multiple of 5 paise (NSE tick size)."""
-    pytest.skip("Phase 2 implementation pending (parquet writer)")
+    """P-21: Every persisted price snaps to the 2-decimal (1-paisa) tick grid
+    via ``round_money`` (ROUND_HALF_UP) — DEC-SPOT-PRICE-2DP-001. (The earlier
+    "multiple of 5 paise" wording was stale vs the live writer.)"""
+    pytest.skip("implemented in tests/property/test_phase2_invariants_promoted.py")
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -181,18 +195,20 @@ def test_p_17_audit_single_byte_tamper_detected() -> None:
 
 
 def test_p_18_rate_limiter_holds_to_spec_rate() -> None:
-    """P-18: 1000 calls at 10 r/s complete in ≥ 1000/10 s (Groww-tuned)."""
-    pytest.skip("Phase 1.5 implementation pending (adapter HTTP layer)")
+    """P-18: the token-bucket rate limiter never exceeds the vendor cap
+    (Dhan Data API: 5 r/s — DEC-GROWW-DHAN-REVERT-001, CLAUDE.md §6;
+    the earlier "10 r/s Groww-tuned" wording was stale)."""
+    pytest.skip("Phase 1.5 implementation pending (adapter HTTP-layer property)")
 
 
 def test_p_22_no_bars_on_nse_holidays() -> None:
     """P-22: No bar timestamp on any NSE holiday 2021-2026."""
-    pytest.skip("Phase 2 implementation pending (holiday calendar)")
+    pytest.skip("implemented in tests/property/test_phase2_invariants_promoted.py")
 
 
 def test_p_23_session_window_respected() -> None:
     """P-23: Every persisted intraday bar has ``03:45 ≤ utc_minute_of_day ≤ 10:00`` UTC."""
-    pytest.skip("Phase 2 implementation pending (session-window enforcement)")
+    pytest.skip("implemented in tests/property/test_phase2_invariants_promoted.py")
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -202,9 +218,30 @@ def test_p_23_session_window_respected() -> None:
 
 def test_p_19_parquet_writer_deterministic() -> None:
     """P-19: ``bytes(write(df)) == bytes(write(df))`` across two processes."""
-    pytest.skip("Phase 2 implementation pending (deterministic Parquet writer)")
+    pytest.skip("implemented in tests/property/test_phase2_invariants_promoted.py")
 
 
 def test_p_20_replay_byte_equals_original() -> None:
     """P-20: ``replay(audit_log) → Parquet`` byte-equals the original Parquet."""
-    pytest.skip("Phase 2 implementation pending (audit → Parquet replay)")
+    # Honest envelope (Golden Rule #10): the end-to-end audit→Parquet
+    # reconstruction harness does not exist yet — only the dedup-subject
+    # set oracle (P-26) does. Stays deferred until the replay harness lands.
+    pytest.skip("Phase 2 implementation pending (audit → Parquet replay harness)")
+
+
+# ────────────────────────────────────────────────────────────────────
+# Group 9 — Vocabulary scope + replay oracle (P-25, P-26)
+# Promoted from spec-named-but-absent to live (DEC-PHASE2-INVARIANTS-PROMOTE-001).
+# ────────────────────────────────────────────────────────────────────
+
+
+def test_p_25_no_vix_leak_in_vocabulary() -> None:
+    """P-25: India-VIX (REFERENCE-ONLY, CLAUDE.md §2 Rule 3) never appears
+    in the 52-condition vocabulary, so it cannot leak into a pattern mask."""
+    pytest.skip("implemented in tests/property/test_phase2_invariants_promoted.py")
+
+
+def test_p_26_audit_replay_oracle_consistent() -> None:
+    """P-26: replaying the ``add``-action audit log against the live dedup
+    set diffs clean (idempotence/replay oracle — CLAUDE.md Rules #7/#8)."""
+    pytest.skip("implemented in tests/property/test_phase2_invariants_promoted.py")
