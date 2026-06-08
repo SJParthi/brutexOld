@@ -238,7 +238,9 @@ class TestWindowStatusApi:
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         resp = client.get("/api/v1/coverage/windows")
         assert resp.status_code == 200
-        assert resp.json() == {"count": 0, "windows": []}
+        # DEC-WINDOW-LEDGER-001 (PR-3): the payload now carries a `source` field
+        # (which backing answered) — falls back to the status log when no ledger.
+        assert resp.json() == {"source": "status_log", "count": 0, "windows": []}
 
     def test_windows_reports_recorded_status(self, store: InstrumentStore, tmp_path: Path) -> None:
         from brutex.data.fetch_coverage import WindowKey
@@ -282,7 +284,12 @@ class TestWindowStatusApi:
 
         fake = SimpleNamespace(path=None)
         client = TestClient(build_app(DashboardState(), instrument_store=fake))
-        assert client.get("/api/v1/coverage/windows").json() == {"count": 0, "windows": []}
+        # No lake root wired → `source="none"` (DEC-WINDOW-LEDGER-001, PR-3).
+        assert client.get("/api/v1/coverage/windows").json() == {
+            "source": "none",
+            "count": 0,
+            "windows": [],
+        }
 
 
 class TestCoverageHelpers:
