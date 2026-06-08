@@ -120,7 +120,7 @@ class TestRenewToken:
         # RenewToken is an HTTP GET, headers-only, NO body — exactly as the
         # official DhanHQ SDK calls it (DEC-DHAN-RENEWTOKEN-GET-001). Sending it
         # as a POST {} makes real Dhan reject it with HTTP 400 DH-905.
-        body = b'{"accessToken": "newjwt", "expiryTime": "2026-01-01T00:00:00.000"}'
+        body = b'{"token": "newjwt", "expiryTime": "2026-01-01T00:00:00.000"}'
         transport = _Transport(200, body)
         client = DhanClient(
             access_token="old",
@@ -134,13 +134,29 @@ class TestRenewToken:
         assert transport.calls[0]["body"] == b""  # headers-only, NO request body
         assert transport.calls[0]["url"] == "https://api.dhan.co/v2/RenewToken"
 
+    def test_real_rotation_response_shape_is_parsed(self) -> None:
+        # REGRESSION (DEC-DHAN-RENEWTOKEN-ROTATE-001): the operator's live curl
+        # proved RenewToken returns {"createTime","expiryTime","token"} — the new
+        # token is under "token", NOT "accessToken". The pre-fix parser read
+        # "accessToken", so EVERY successful rotation raised DhanAuthError; the
+        # caller then kept the just-invalidated old token → DH-906 on the next
+        # data call. This body is the exact real shape and MUST parse cleanly.
+        body = (
+            b'{"createTime": "2026-06-08T16:25:59.06",'
+            b' "expiryTime": "2026-06-09T16:25:59.059",'
+            b' "token": "rotatedjwt"}'
+        )
+        info = renew_token(_client(200, body))
+        assert info == TokenInfo(access_token="rotatedjwt", expiry_time="2026-06-09T16:25:59.059")
+
     def test_missing_fields_raises(self) -> None:
-        with pytest.raises(DhanAuthError, match="missing string accessToken"):
-            renew_token(_client(200, b'{"accessToken": "x"}'))
+        # No "token" key (the rotated credential) → refusal.
+        with pytest.raises(DhanAuthError, match="missing string token"):
+            renew_token(_client(200, b'{"expiryTime": "t"}'))
 
     def test_non_string_fields_raises(self) -> None:
-        with pytest.raises(DhanAuthError, match="missing string accessToken"):
-            renew_token(_client(200, b'{"accessToken": 1, "expiryTime": 2}'))
+        with pytest.raises(DhanAuthError, match="missing string token"):
+            renew_token(_client(200, b'{"token": 1, "expiryTime": 2}'))
 
 
 class TestRenewTokenPacing:
@@ -168,7 +184,7 @@ class TestRenewTokenPacing:
                 method: str = "POST",
             ) -> tuple[int, bytes]:
                 order.append("get")
-                return 200, b'{"accessToken": "newjwt", "expiryTime": "t"}'
+                return 200, b'{"token": "newjwt", "expiryTime": "t"}'
 
         client = DhanClient(
             access_token="old",
@@ -183,7 +199,7 @@ class TestRenewTokenPacing:
     def test_default_falls_back_to_client_pace(self) -> None:
         # No explicit hook → the client's own pace field gates the initial POST.
         calls: list[str] = []
-        body = b'{"accessToken": "newjwt", "expiryTime": "t"}'
+        body = b'{"token": "newjwt", "expiryTime": "t"}'
         client = DhanClient(
             access_token="old",
             client_id="cid",
@@ -205,7 +221,7 @@ class TestMaybeRenewToken:
     """
 
     def test_success_returns_token_and_logs_renewed(self) -> None:
-        body = b'{"accessToken": "freshjwt", "expiryTime": "2026-06-08T09:00:00.000"}'
+        body = b'{"token": "freshjwt", "expiryTime": "2026-06-08T09:00:00.000"}'
         with structlog.testing.capture_logs() as logs:
             info = maybe_renew_token(_client(200, body))
         assert info == TokenInfo(access_token="freshjwt", expiry_time="2026-06-08T09:00:00.000")
@@ -217,7 +233,7 @@ class TestMaybeRenewToken:
         # Malformed RenewToken response → DhanAuthError inside renew_token. The
         # best-effort wrapper swallows it: returns None, logs ONE renew_failed.
         with structlog.testing.capture_logs() as logs:
-            result = maybe_renew_token(_client(200, b'{"accessToken": "x"}'))
+            result = maybe_renew_token(_client(200, b'{"expiryTime": "t"}'))
         assert result is None
         warned = [e for e in logs if e["event"] == "auth.renew_failed"]
         assert len(warned) == 1
@@ -231,14 +247,14 @@ class TestMaybeRenewToken:
     def test_forwards_pace_hook(self) -> None:
         # The pace hook is forwarded to renew_token (gates the physical POST).
         calls: list[str] = []
-        body = b'{"accessToken": "freshjwt", "expiryTime": "t"}'
+        body = b'{"token": "freshjwt", "expiryTime": "t"}'
         info = maybe_renew_token(_client(200, body), pace=lambda: calls.append("pace"))
         assert info is not None
         assert calls == ["pace"]
 
     def test_custom_logger_receives_event(self) -> None:
         # An explicit *log* is honoured (covers the `log is not None` branch).
-        body = b'{"accessToken": "freshjwt", "expiryTime": "t"}'
+        body = b'{"token": "freshjwt", "expiryTime": "t"}'
         custom = structlog.get_logger("test.custom")
         info = maybe_renew_token(_client(200, body), log=custom)
         assert info == TokenInfo(access_token="freshjwt", expiry_time="t")
