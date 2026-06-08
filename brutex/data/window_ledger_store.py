@@ -142,7 +142,7 @@ def load_window_ledger(
     try:
         import pyarrow.parquet as pq
 
-        table = pq.read_table(path, columns=list(_COLUMNS))
+        table = pq.read_table(path, columns=list(_COLUMNS))  # type: ignore[no-untyped-call]
         columns = {name: table.column(name).to_pylist() for name in _COLUMNS}
         rows = zip(*(columns[name] for name in _COLUMNS), strict=True)
         return WindowLedger.from_rows(_rows_to_records(rows), threshold=threshold)
@@ -188,7 +188,7 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
     table = pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
     path = ledger_path(lake_root)
     tmp = path.with_name(f"{LEDGER_FILENAME}.tmp")
-    pq.write_table(table, tmp)
+    pq.write_table(table, tmp)  # type: ignore[no-untyped-call]
     os.replace(tmp, path)
 
 
