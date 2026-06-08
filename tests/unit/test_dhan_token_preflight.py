@@ -12,10 +12,20 @@ network), so it is not exercised here; its decision logic IS the covered pure
 from __future__ import annotations
 
 import pytest
+from brutex.adapters.dhan.errors import (
+    DhanAuthError,
+    DhanBadRequestError,
+    DhanError,
+    DhanRateLimitError,
+    DhanServerError,
+    DhanTimeoutError,
+    DhanTransportError,
+)
 from brutex.adapters.dhan.pull_verdict import PullVerdict
 from brutex.adapters.dhan.token_keepalive import RENEW_BEFORE_EXPIRY_S
 from brutex.adapters.dhan.token_preflight import (
     TokenPreflight,
+    classify_data_probe,
     classify_token,
     classify_token_lifetime,
     preflight_pull_verdict,
@@ -102,6 +112,62 @@ def test_classify_token_from_deadline_and_now() -> None:
     )
     # deadline already in the past ⇒ dead.
     assert classify_token(probe_auth_failed=False, expiry_deadline=100.0, now=200.0).state == "dead"
+
+
+def test_data_probe_success_is_valid() -> None:
+    """A data probe that fetched (no exception) ⇒ valid — the token pulls bars."""
+    pre = classify_data_probe(None, now=42.0)
+    assert pre.state == "valid"
+    assert pre.is_dead is False
+    assert pre.remaining_seconds is None  # the data probe learns no expiry
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        DhanAuthError("HTTP 401 auth failure: token expired"),
+        DhanAuthError("HTTP 403 auth failure: forbidden"),
+        DhanBadRequestError("HTTP 400 bad request: DH-906 Invalid Token"),
+        DhanBadRequestError("HTTP 400 bad request: Invalid Token"),
+    ],
+)
+def test_data_probe_auth_failure_is_dead(error: DhanError) -> None:
+    """A GENUINE auth failure (401/403 or a DH-906 / Invalid-Token 400) ⇒ DEAD.
+
+    These are exactly the cases :func:`is_auth_failure` flags — the single source
+    of truth the in-pull fail-fast guard also uses, so the gate can never be more
+    trigger-happy than the guard it fronts (DEC-TOKEN-PREFLIGHT-DATAPROBE-001).
+    """
+    pre = classify_data_probe(error, now=0.0)
+    assert pre.state == "dead"
+    assert pre.is_dead is True
+    assert pre.remaining_seconds is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        DhanRateLimitError("HTTP 429 rate limited: slow down"),
+        DhanServerError("HTTP 503 server error: try later"),
+        DhanTimeoutError("read timed out"),
+        DhanTransportError("connection reset"),
+        DhanBadRequestError("HTTP 400 bad request: malformed body"),
+        DhanBadRequestError("HTTP 400 bad request: DH-905 no data present"),
+        DhanError("unexpected HTTP 418: teapot"),
+    ],
+)
+def test_data_probe_non_auth_error_is_valid_so_pull_proceeds(error: DhanError) -> None:
+    """A transient / non-auth probe error ⇒ valid (PROCEED) — NOT a dead token.
+
+    The false-dead-loop fix: a 429 / 5xx / timeout / transport / plain-400 /
+    ``DH-905`` no-data outcome must never abort a working pull — the in-pull guard
+    still catches a real mid-pull death (DEC-TOKEN-PREFLIGHT-DATAPROBE-001).
+    """
+    pre = classify_data_probe(error, now=0.0)
+    assert pre.state == "valid"
+    assert pre.is_dead is False
+    # A non-dead data probe maps to NO refusal verdict — the pull starts.
+    assert preflight_pull_verdict(pre) is None
 
 
 def test_preflight_pull_verdict_dead_maps_to_auth_expired() -> None:

@@ -1052,13 +1052,19 @@ def pull_all_spot(
     # present): probe the token ONCE before any fetch so a dead token short-circuits
     # to the same refusal — the dashboard "Pull ALL" path's automatic guard. An
     # injected ``preflight`` (handled above) or a dry-run / injected-factory pull
-    # skips this. ``# pragma: no cover`` — needs a real token + RenewToken network.
-    if preflight is None and use_live_rate:  # pragma: no cover — live token + network
-        from brutex.adapters.dhan.token_preflight import probe_token_live
+    # skips this. The probe is a TINY ``charts/intraday`` data call that classifies
+    # dead ONLY on a genuine auth failure (is_auth_failure), so a transient 429 /
+    # 5xx / timeout — or a token RenewToken would falsely refuse — never aborts a
+    # working pull (DEC-TOKEN-PREFLIGHT-DATAPROBE-001, the false-dead-loop fix).
+    # ``# pragma: no cover`` — needs a real token + the data network.
+    if (
+        preflight is None and use_live_rate and instruments
+    ):  # pragma: no cover — live token + network
+        from brutex.adapters.dhan.token_preflight import probe_token_data_live
 
         _client = getattr(adapter, "client", None)
         if _client is not None:
-            live_pf = probe_token_live(_client)
+            live_pf = probe_token_data_live(adapter, instruments[0])  # type: ignore[arg-type]
             if live_pf.is_dead:
                 with pull_id_scope(pull_id) as pid:
                     return _preflight_refusal(
