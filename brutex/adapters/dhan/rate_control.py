@@ -186,7 +186,13 @@ class DhanRateController:
         #: Server-stress stalls (timeout / transport / 5xx) inside the rolling
         #: STEP_DOWN_WINDOW — the gentle adaptive timeout ladder's evidence
         #: buffer (DEC-DHAN-TIMEOUT-BACKOFF-001), kept separate from the 429
-        #: ``_hits`` so the two signals never cross-trigger each other's ladder.
+        #: ``_hits`` so the two signals never cross-COUNT (a timeout never advances
+        #: the 429 ladder, nor vice-versa). NOTE they still share ``_rps`` /
+        #: ``_last_step``, so a MIXED storm (429s + timeouts) compounds on the rate —
+        #: each ladder steps the shared rate independently, descending faster than
+        #: either alone (intended: more pressure → back off harder), and a step on
+        #: EITHER ladder restamps ``_last_step``, delaying recovery for both. Both
+        #: floor at 1 (DEC-DHAN-RATE-STORM-FLOOR-001), so they cannot fight below it.
         self._timeouts: deque[float] = deque()
         self._last_step: float = clock()
         self._bucket: AdaptiveTokenBucket = self._make_bucket()
@@ -278,11 +284,14 @@ class DhanRateController:
                 self._bucket.set_rate(self._rps)
                 self._hits.clear()
                 self._last_step = now
+                # Log the EFFECTIVE floor for THIS rung: a soft-floor step (still
+                # above 3) heads toward FLOOR_RPS (3); a sustained-storm step below
+                # the soft floor heads toward the deep RATE_LIMIT_STORM_FLOOR_RPS (1).
                 _LOG.warning(
                     "rate.stepdown",
                     from_rps=old_rps,
                     to_rps=self._rps,
-                    floor_rps=RATE_LIMIT_STORM_FLOOR_RPS,
+                    floor_rps=FLOOR_RPS if above_soft_floor else RATE_LIMIT_STORM_FLOOR_RPS,
                 )
 
     def on_timeout(self) -> None:
