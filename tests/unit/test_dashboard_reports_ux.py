@@ -92,3 +92,47 @@ def test_download_form_and_routes_unchanged() -> None:
         'id="download"',
     ):
         assert needle in html, f"a pre-existing /reports control regressed: {needle}"
+
+
+def test_reports_date_pickers_prefilled_with_canonical_default() -> None:
+    """DEC-DEFAULT-DATE-RANGE-001: the /reports From/To pickers are PRE-FILLED with
+    the SAME canonical [2021-01-01, previous day] default as the spot/options pickers."""
+    from brutex.dashboard.app import _render_reports_html
+    from brutex.dashboard.pull_controller import default_date_range
+
+    html = _render_reports_html()
+    from_iso, to_iso = default_date_range()
+    assert f'id="from" value="{from_iso}"' in html
+    assert f'id="to" value="{to_iso}"' in html
+    assert "__BRUTEX_DATE_" not in html
+
+
+def test_resolve_report_dates_defaults_blanks_to_canonical_range() -> None:
+    """A blank from/to falls back to the canonical [2021-01-01, previous day]."""
+    from datetime import date
+
+    from brutex.dashboard.app import _resolve_report_dates
+    from brutex.dashboard.pull_controller import default_date_range
+
+    d_from, d_to = default_date_range()
+    assert _resolve_report_dates(None, None) == (
+        date.fromisoformat(d_from),
+        date.fromisoformat(d_to),
+    )
+    # An explicit range overrides the default; a partial blank fills only the gap.
+    assert _resolve_report_dates("2024-01-01", "2024-03-31") == (
+        date(2024, 1, 1),
+        date(2024, 3, 31),
+    )
+    assert _resolve_report_dates("2024-01-01", None) == (date(2024, 1, 1), date.fromisoformat(d_to))
+
+
+def test_resolve_report_dates_rejects_bad_and_inverted() -> None:
+    """A malformed ISO date or an inverted range raises ValueError (route → 400)."""
+    import pytest
+    from brutex.dashboard.app import _resolve_report_dates
+
+    with pytest.raises(ValueError, match="bad date"):
+        _resolve_report_dates("not-a-date", "2024-01-01")
+    with pytest.raises(ValueError, match="on or before"):
+        _resolve_report_dates("2024-12-31", "2024-01-01")
