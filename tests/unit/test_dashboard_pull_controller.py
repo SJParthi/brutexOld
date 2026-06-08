@@ -27,6 +27,7 @@ from brutex.dashboard.pull_controller import (
     PullCandlesReport,
     SessionRateController,
     TimeframeResult,
+    default_date_range,
     dhan_creds_present,
     parse_symbol_list,
     pull_all_spot,
@@ -290,6 +291,12 @@ class TestResolveCandleRange:
         start, end = resolve_candle_range(from_date=None, to_date=None, year=None, now=_NOW)
         assert start == datetime(2021, 1, 1, tzinfo=UTC)  # the 2021 floor, not 2026
         assert end == datetime(2026, 5, 30, tzinfo=UTC)  # yesterday (05-29) + 1 day
+
+    def test_default_date_range_is_the_picker_prefill(self) -> None:
+        """DEC-DEFAULT-DATE-RANGE-001: the canonical picker default = [2021-01-01,
+        previous day] — the SAME window resolve_candle_range applies when blank, so
+        the pre-filled UI dates can never drift from what a blank pull fetches."""
+        assert default_date_range(now=_NOW) == ("2021-01-01", "2026-05-29")
 
     def test_no_dates_explicit_past_year_is_full_year(self) -> None:
         # Mode 2 — a PAST year, no dates → that full calendar year (the tail

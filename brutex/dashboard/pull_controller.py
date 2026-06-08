@@ -239,6 +239,38 @@ def _parse_iso_date(value: str, field_name: str) -> date:
         raise ValueError(f"{field_name} must be ISO YYYY-MM-DD, got {value!r}") from exc
 
 
+def default_date_range(now: datetime | None = None) -> tuple[str, str]:
+    """The canonical default ``(from_iso, to_iso)`` the date pickers pre-fill everywhere.
+
+    DEC-DEFAULT-DATE-RANGE-001. Reuses :func:`resolve_candle_range` with ALL bounds
+    blank, so the pre-filled UI dates are GUARANTEED byte-identical to what a blank
+    spot / options pull (or report) actually fetches — ONE source of truth for "the
+    default range is ``[2021-01-01, previous trading day]``" across the whole
+    dashboard. ``to`` is the INCLUSIVE previous day (``resolve_candle_range``'s
+    ``end`` is the exclusive half-open boundary, so subtract a day to display it).
+
+    Parameters
+    ----------
+    now
+        Injected "current" instant (defaults to :func:`datetime.now` UTC) so the
+        "previous day" is deterministic in tests and stays current across midnight
+        in production (the render path recomputes per request).
+
+    Returns
+    -------
+    tuple[str, str]
+        ``(from_iso, to_iso)`` ISO ``YYYY-MM-DD`` — e.g. ``("2021-01-01",
+        "2026-06-07")`` when "today" is 2026-06-08.
+    """
+    start, end = resolve_candle_range(
+        from_date=None,
+        to_date=None,
+        year=None,
+        now=now if now is not None else datetime.now(UTC),
+    )
+    return start.date().isoformat(), (end - timedelta(days=1)).date().isoformat()
+
+
 def parse_symbol_list(symbols: str) -> list[str]:
     """Split a comma-separated ``?symbols=`` value into a clean, ordered id list.
 

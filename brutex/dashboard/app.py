@@ -1983,8 +1983,8 @@ def build_app(
 
     @app.get("/api/v1/reports/preopen.xlsx")
     async def api_preopen_xlsx(
-        start: str = Query(..., alias="from"),
-        end: str = Query(..., alias="to"),
+        start: str | None = Query(None, alias="from"),
+        end: str | None = Query(None, alias="to"),
         symbols: str | None = Query(None),
         basis: str = Query("day"),
     ) -> Response:
@@ -2003,12 +2003,9 @@ def build_app(
         report_basis = _report_basis_literal(basis)
         store = _require_store()
         try:
-            start_d = date.fromisoformat(start)
-            end_d = date.fromisoformat(end)
+            start_d, end_d = _resolve_report_dates(start, end)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=f"bad date: {exc}") from exc
-        if start_d > end_d:
-            raise HTTPException(status_code=400, detail="'from' must be on or before 'to'")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         wanted = [s for s in (symbols or "").split(",") if s.strip()] or None
         lake_root = getattr(store, "path", None)
 
@@ -2041,8 +2038,8 @@ def build_app(
 
     @app.get("/api/v1/reports/preopen.zip")
     async def api_preopen_zip(
-        start: str = Query(..., alias="from"),
-        end: str = Query(..., alias="to"),
+        start: str | None = Query(None, alias="from"),
+        end: str | None = Query(None, alias="to"),
         symbols: str | None = Query(None),
         mode: str = Query("all"),
         min_pct: float = Query(0.0),
@@ -2067,12 +2064,9 @@ def build_app(
         """
         store = _require_store()
         try:
-            start_d = date.fromisoformat(start)
-            end_d = date.fromisoformat(end)
+            start_d, end_d = _resolve_report_dates(start, end)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=f"bad date: {exc}") from exc
-        if start_d > end_d:
-            raise HTTPException(status_code=400, detail="'from' must be on or before 'to'")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         # Assign the validated mode as a literal so BOTH mypy and pyright narrow
         # it to ReportMode without a cast (pyright's reportUnnecessaryCast errors
         # on a cast it has already narrowed; mypy needs the literal assignment).
@@ -2845,9 +2839,32 @@ def _load_universe_template() -> str:
     return _UNIVERSE_TEMPLATE_CACHE
 
 
+def _fill_default_dates(html: str) -> str:
+    """Substitute the canonical ``[2021-01-01, previous day]`` into the picker tokens.
+
+    DEC-DEFAULT-DATE-RANGE-001. The from/to date inputs carry ``value=``
+    placeholder tokens (``__BRUTEX_DATE_FROM__`` / ``__BRUTEX_DATE_TO__``); this
+    swaps them for the canonical default from
+    :func:`~brutex.dashboard.pull_controller.default_date_range` (which itself
+    reuses ``resolve_candle_range`` — one source of truth), so every page's pickers
+    are PRE-FILLED with exactly what a blank pull/report fetches. Computed PER
+    RENDER, so "previous day" stays current across midnight (the template cache
+    holds the raw token, never a frozen date). A token-free template is returned
+    unchanged.
+    """
+    from brutex.dashboard.pull_controller import default_date_range
+
+    from_iso, to_iso = default_date_range()
+    return html.replace("__BRUTEX_DATE_FROM__", from_iso).replace("__BRUTEX_DATE_TO__", to_iso)
+
+
 def _render_universe_html() -> str:
-    """Return the F&O Universe Explorer page HTML (DEC-UNIVERSE-DASHBOARD-001)."""
-    return _load_universe_template()
+    """Return the F&O Universe Explorer page HTML (DEC-UNIVERSE-DASHBOARD-001).
+
+    Pre-fills the spot/options from/to date pickers with the canonical
+    ``[2021-01-01, previous day]`` default (DEC-DEFAULT-DATE-RANGE-001).
+    """
+    return _fill_default_dates(_load_universe_template())
 
 
 _WELCOME_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "welcome.html"
@@ -2987,8 +3004,41 @@ def _load_reports_template() -> str:
 
 
 def _render_reports_html() -> str:
-    """Return the pre-open report page HTML (DEC-PREOPEN-REPORT-001)."""
-    return _load_reports_template()
+    """Return the pre-open report page HTML (DEC-PREOPEN-REPORT-001).
+
+    Pre-fills the From/To date pickers with the canonical ``[2021-01-01, previous
+    day]`` default (DEC-DEFAULT-DATE-RANGE-001) — the SAME range the spot/options
+    pickers and a blank report use.
+    """
+    return _fill_default_dates(_load_reports_template())
+
+
+def _resolve_report_dates(start: str | None, end: str | None) -> tuple[date, date]:
+    """Resolve a pre-open report's inclusive ``[from, to]`` — blanks DEFAULT to the canon range.
+
+    DEC-DEFAULT-DATE-RANGE-001. A blank ``from`` / ``to`` falls back to the SAME
+    canonical ``[2021-01-01, previous day]`` window the spot/options pickers + a
+    blank pull use (via :func:`~brutex.dashboard.pull_controller.default_date_range`),
+    so a report is consistent with everything else and a cleared field never 400s.
+    Pure + framework-free (raises :class:`ValueError`; the route maps it to a 400),
+    so it is unit-tested without a TestClient.
+
+    Raises
+    ------
+    ValueError
+        On a malformed ISO date or an inverted (``from > to``) range.
+    """
+    from brutex.dashboard.pull_controller import default_date_range
+
+    d_from, d_to = default_date_range()
+    try:
+        start_d = date.fromisoformat(start or d_from)
+        end_d = date.fromisoformat(end or d_to)
+    except ValueError as exc:
+        raise ValueError(f"bad date: {exc}") from exc
+    if start_d > end_d:
+        raise ValueError("'from' must be on or before 'to'")
+    return start_d, end_d
 
 
 def _coverage_years() -> list[int]:
