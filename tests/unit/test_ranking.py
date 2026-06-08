@@ -80,6 +80,13 @@ class TestPassesGates:
     def test_reject_too_few_trades(self) -> None:
         assert passes_gates(_m(total_trades=29)) is False
 
+    def test_accept_exactly_min_trades(self) -> None:
+        # Boundary: total_trades == MIN_TRADES (30) is the lowest rankable
+        # count and must PASS. Pins the threshold against an off-by-one
+        # (MIN_TRADES 30 → 31) mutant that would silently reject valid combos
+        # at exactly the gate (DEC-MUTATION-GATE-RANKING-001).
+        assert passes_gates(_m(total_trades=30)) is True
+
     def test_reject_profit_factor_none(self) -> None:
         assert passes_gates(_m(profit_factor=None)) is False
 
