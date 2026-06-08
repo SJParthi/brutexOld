@@ -157,6 +157,31 @@ class WorkerEventLike(Protocol):
         ...
 
 
+class SymbolFailureLike(Protocol):
+    """Structural type for the retry-storm symbol-failure event fields the alert reads.
+
+    Matched by :class:`brutex.orchestrator.watchdog.SymbolFailureEvent`. Kept
+    structural (not an import) so this module stays wheel-free — importing the
+    orchestrator package would pull the ``fastbloom_rs`` / ``lmdb`` PyO3 chain
+    that this module deliberately avoids (see the module docstring).
+    """
+
+    @property
+    def symbol(self) -> str:
+        """The symbol that reached 100% window-failure."""
+        ...
+
+    @property
+    def failed_windows(self) -> int:
+        """How many of the symbol's windows gave up (== total at 100%)."""
+        ...
+
+    @property
+    def total_windows(self) -> int:
+        """The symbol's full registered window count (the 100% denominator)."""
+        ...
+
+
 class SweepSummaryLike(Protocol):
     """Structural type for the supervised-grid summary fields the complete alert reads.
 
@@ -318,6 +343,31 @@ class SweepAlerter:
             dedupe_key="dhan-auth",
         )
 
+    def symbol_window_failure(
+        self,
+        *,
+        symbol: str,
+        failed_windows: int,
+        total_windows: int,
+    ) -> bool:
+        """Alert that a symbol hit 100% window-failure in a retry storm (CRITICAL).
+
+        Fired by the :class:`~brutex.orchestrator.watchdog.RetryStormWatchdog`
+        once per symbol (never per window). The ``dedupe_key`` is the symbol so
+        a re-run within one process never double-pushes (DEC-RATE-STORM-WATCHDOG-001).
+        """
+        message = escape_markdown_v2(
+            f"🛑 Retry storm: {symbol} hit 100% window-failure "
+            f"({failed_windows}/{total_windows} windows gave up). Bars for {symbol} "
+            "are NOT in the lake — re-pull after the 429 storm clears."
+        )
+        return self._publish(
+            kind=TelegramEventKind.SYMBOL_WINDOW_FAILURE,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=symbol,
+        )
+
     def sweep_complete(self, summary: SweepSummaryLike) -> bool:
         """Alert that the supervised grid finished (INFO), with the run funnel tally."""
         message = escape_markdown_v2(
@@ -352,6 +402,24 @@ class SweepAlerter:
 
         return _on_hung
 
+    def symbol_failure_callback(self) -> Callable[[SymbolFailureLike], None]:
+        """Return a :class:`~brutex.orchestrator.watchdog.RetryStormWatchdog` ``on_symbol_failure`` callback.
+
+        Plug into ``build_retry_storm_watchdog(on_symbol_failure=alerter.symbol_failure_callback())``
+        so a symbol reaching 100% window-failure fires the Telegram alert. Best-effort —
+        the closure can never raise into the watchdog's give-up verdict.
+        """
+
+        def _on_symbol_failure(event: SymbolFailureLike) -> None:
+            """Map a watchdog :class:`SymbolFailureEvent` to a CRITICAL Telegram alert."""
+            self.symbol_window_failure(
+                symbol=event.symbol,
+                failed_windows=event.failed_windows,
+                total_windows=event.total_windows,
+            )
+
+        return _on_symbol_failure
+
     def rate_breach_callback(self, controller: RateControllerLike) -> Callable[[], None]:
         """Return an ``on_rate_limit`` hook that steps the rate down THEN alerts.
 
@@ -383,6 +451,7 @@ __all__ = [
     "RateControllerLike",
     "SweepAlerter",
     "SweepSummaryLike",
+    "SymbolFailureLike",
     "WorkerEventLike",
     "escape_markdown_v2",
 ]
