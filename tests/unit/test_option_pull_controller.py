@@ -23,13 +23,17 @@ from brutex.adapters.dhan.option_synthetic import SyntheticOptionClient
 from brutex.dashboard.option_pull_controller import (
     OptionsPullReport,
     OptionSymbolResult,
+    _build_option_audit,
+    _close_sink,
     _live_option_runtime,
     _LiveOptionRuntime,
+    _option_audit_path,
     instrument_to_option_underlying,
     pull_options,
 )
 from brutex.data.option_sink import NullOptionBarSink
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from brutex.orchestrator.audit import read_entries, verify_chain
 from structlog.testing import capture_logs
 
 _NOW = datetime(2021, 1, 6, tzinfo=UTC)  # tiny window so the synthetic fan-out is fast
@@ -418,6 +422,101 @@ class TestPullOptionsCorrelation:
         pid = start["pull_id"]
         assert isinstance(pid, str) and len(pid) == 12
         assert done["pull_id"] == pid
+
+
+class _ClosingNullSink(NullOptionBarSink):
+    """A counts-but-discards sink that ALSO records ``close`` calls.
+
+    Stands in for the live concrete sink (which owns a closeable audit handle) so
+    the not-dry-run path can prove ``pull_options`` releases the sink at end of run
+    with no real Dhan token / network.
+    """
+
+    def __init__(self) -> None:
+        self.closes = 0
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+class TestOptionAuditWiring:
+    """Hash-chained option-ingest audit chain wiring (DEC-OPTION-AUDIT-WIRING-001).
+
+    Finding D-2: the live option sink was constructed WITHOUT ``audit=`` so the
+    ``OPTION_BARS_WRITTEN`` chain was never written. These cover the (now unit-
+    testable) audit construction + lifecycle the live builder delegates to; the
+    live builder itself stays ``# pragma: no cover`` (real token + network).
+    """
+
+    def test_audit_path_under_lake_audit_dir(self, tmp_path: Path) -> None:
+        assert _option_audit_path(tmp_path) == tmp_path / "audit" / "option_ingest.jsonl"
+
+    def test_build_option_audit_opens_a_verifiable_chain(self, tmp_path: Path) -> None:
+        audit = _build_option_audit(tmp_path)
+        try:
+            audit.append(
+                action="OPTION_BARS_WRITTEN",
+                subject="NSE_FNO|13|WEEK|0|ATM|CALL",
+                payload={"written": 2},
+            )
+        finally:
+            audit.close()
+        path = _option_audit_path(tmp_path)
+        assert path.is_file()
+        assert verify_chain(path) == 1  # genesis-linked, recomputes clean
+        (entry,) = read_entries(path)
+        assert entry.action == "OPTION_BARS_WRITTEN"
+
+    def test_build_option_audit_resumes_existing_chain(self, tmp_path: Path) -> None:
+        # resume=True: a re-pull APPENDS to the existing chain (idempotent re-pulls,
+        # Golden Rule #7) rather than failing on an existing file.
+        first = _build_option_audit(tmp_path)
+        try:
+            first.append(action="OPTION_BARS_WRITTEN", subject="s0", payload={})
+        finally:
+            first.close()
+        second = _build_option_audit(tmp_path)  # must NOT raise on the existing file
+        try:
+            second.append(action="OPTION_BARS_WRITTEN", subject="s1", payload={})
+        finally:
+            second.close()
+        path = _option_audit_path(tmp_path)
+        assert verify_chain(path) == 2  # both rows link into ONE chain
+        assert [e.seq for e in read_entries(path)] == [0, 1]
+
+
+class TestCloseSink:
+    """``_close_sink`` releases a closeable sink, no-ops otherwise."""
+
+    def test_closes_a_closeable_sink(self) -> None:
+        sink = _ClosingNullSink()
+        _close_sink(sink)
+        assert sink.closes == 1
+
+    def test_noop_for_non_closeable_sink(self) -> None:
+        # NullOptionBarSink has no close() → getattr returns None → no-op (no error).
+        _close_sink(NullOptionBarSink())
+
+    def test_pull_options_closes_the_sink_at_end_of_run(self, tmp_path: Path) -> None:
+        # The not-dry-run path with an injected closeable sink: pull_options must
+        # close it on the way out (the ExitStack callback) so the live audit handle
+        # is released — proven without a real token / network.
+        sink = _ClosingNullSink()
+
+        def factory(_lake_root: Path) -> tuple[JsonPoster, OptionBarSink]:
+            return SyntheticOptionClient(bars_per_window=1), sink
+
+        pull_options(
+            [_index()],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_NOW,
+            client_factory=factory,
+            expiry_flags=("WEEK",),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+        )
+        assert sink.closes == 1
 
 
 class TestLiveOptionRuntime:
