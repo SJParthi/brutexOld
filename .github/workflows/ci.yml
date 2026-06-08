@@ -1592,7 +1592,12 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev]"
+        # Needs the `[data]` extra (polars/duckdb) because this job also runs
+        # `pytest tests/stress -q`, and the sweep+ingest soak
+        # (test_sweep_ingest_soak.py, DEC-SWEEP-INGEST-SOAK-001) writes Parquet
+        # via the data-lake ParquetWriter. Mirrors the main test job + the
+        # nightly soak job, both of which install `[dev,data]`.
+        run: pip install -e ".[dev,data]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math
         # at module load time. Every Python job that imports any
@@ -2069,9 +2074,15 @@ jobs:
       - name: Install gitleaks
         run: |
           VERSION="8.21.2"
-          curl -sSL \
+          # Download to a file with retries (-f fails on HTTP error so the
+          # retry actually fires) BEFORE extracting — piping curl straight
+          # into tar made a transient CDN hiccup (an HTML error body) crash
+          # with "gzip: stdin: not in gzip format". --retry-all-errors retries
+          # the non-transient HTTP failures too.
+          curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
             "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
-            | tar xz -C /tmp
+            -o /tmp/gitleaks.tar.gz
+          tar xz -C /tmp -f /tmp/gitleaks.tar.gz
           sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
       - name: Run gitleaks
