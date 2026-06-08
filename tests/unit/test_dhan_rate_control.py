@@ -165,15 +165,57 @@ def test_never_exceeds_ceiling() -> None:
     assert ctl.current_rps == 5.0
 
 
-def test_on_success_blocked_by_recent_hit() -> None:
+def test_mild_trickle_does_not_block_recovery() -> None:
+    # DEC-DHAN-RATE-RECOVERY-TRICKLE-001 (the trickle-trap fix): a CHRONIC mild 429
+    # drip BELOW the step-down trigger must NOT pin the rate forever. A single fresh
+    # in-window hit — which previously blocked recovery indefinitely (`not
+    # self._hits`) — now recovers, because one hit is nowhere near step-down-level
+    # pressure (STEP_DOWN_HITS). This is the residual the #539 age-out fix left open
+    # (it only recovered when the window fully cleared to ZERO).
     clock = _Clock()
     ctl = _controller(clock)
-    _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # → 4.0 (buffer cleared on the step), last_step ≈ now
+    _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # → 4.0 (buffer cleared on the step)
     assert ctl.current_rps == 4.0
-    clock.advance(STEP_UP_WINDOW)  # the clean-window TIME is satisfied …
-    ctl.on_rate_limit()  # … but a FRESH in-window hit lands right before recovery
-    ctl.on_success()  # the hit is NOT aged out (>= cutoff) → not evicted → recovery blocked
-    assert ctl.current_rps == 4.0  # did NOT step up (a recent in-window hit blocks it)
+    clock.advance(STEP_UP_WINDOW)  # the clean-window TIME is satisfied
+    ctl.on_rate_limit()  # a single fresh in-window hit — a mild drip, NOT a storm
+    assert ctl.snapshot()["recent_hits"] == 1  # 1 < STEP_DOWN_HITS → not blocking
+    ctl.on_success()  # recovery proceeds DESPITE the lone in-window drip
+    assert ctl.current_rps == 5.0  # stepped up — the trickle-trap is closed
+
+
+def test_step_down_pressure_at_floor_blocks_recovery() -> None:
+    # The False arm of the hit gate (DEC-DHAN-RATE-RECOVERY-TRICKLE-001): at/below
+    # the floor — where on_rate_limit no longer clears _hits on every step (it needs
+    # STORM_HITS there) — a drip that REACHES the step-down trigger
+    # (>= STEP_DOWN_HITS in the rolling window) is genuine pressure and HOLDS the
+    # rate down. Recovery does NOT fire even though the STEP_UP_WINDOW timer is met.
+    clock = _Clock()
+    ctl = _controller(clock)
+    _hammer(ctl, clock, hits=STEP_DOWN_HITS * 2)  # → 3.0 (the soft floor), last_step = now
+    assert ctl.current_rps == FLOOR_RPS
+    clock.advance(STEP_UP_WINDOW)  # timer satisfied AND the setup hits age out of the window
+    for _ in range(STEP_DOWN_HITS):  # a FRESH step-down-level drip, in-window; at 3 r/s → no step
+        ctl.on_rate_limit()
+    assert ctl.snapshot()["recent_hits"] == STEP_DOWN_HITS  # genuine pressure sitting in-window
+    ctl.on_success()  # timer met, but len(_hits) >= STEP_DOWN_HITS → recovery HELD
+    assert ctl.current_rps == FLOOR_RPS  # did NOT step up — real pressure holds it down
+
+
+def test_timeout_pressure_at_floor_blocks_recovery() -> None:
+    # The False arm of the TIMEOUT gate (DEC-DHAN-RATE-RECOVERY-TRICKLE-001):
+    # symmetric to the 429 case — a sustained timeout drip at the timeout floor (1)
+    # that reaches STEP_DOWN_TIMEOUT_HITS in-window holds the rate down, even with
+    # zero 429s and the STEP_UP_WINDOW timer met.
+    clock = _Clock()
+    ctl = _controller(clock)
+    _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS * 4)  # ease to the timeout floor (1.0)
+    assert ctl.current_rps == TIMEOUT_FLOOR_RPS
+    clock.advance(STEP_UP_WINDOW)  # timer satisfied AND the setup timeouts age out
+    for _ in range(STEP_DOWN_TIMEOUT_HITS):  # fresh timeout drip, in-window; at 1 r/s → no step
+        ctl.on_timeout()
+    assert ctl.snapshot()["recent_timeouts"] == STEP_DOWN_TIMEOUT_HITS
+    ctl.on_success()  # timer met, but len(_timeouts) >= STEP_DOWN_TIMEOUT_HITS → recovery HELD
+    assert ctl.current_rps == TIMEOUT_FLOOR_RPS  # held at the timeout floor by the drip
 
 
 def test_on_success_blocked_before_clean_window() -> None:
@@ -201,7 +243,7 @@ def test_recovery_unblocked_after_storm_hits_age_out() -> None:
     clock.advance(
         STEP_UP_WINDOW
     )  # storm clears: the 5 hits age out (> STEP_DOWN_WINDOW) + clean window
-    ctl.on_success()  # evicts the aged hits → not self._hits → recovery 3→4
+    ctl.on_success()  # evicts the aged hits → len(_hits) < STEP_DOWN_HITS → recovery 3→4
     assert ctl.current_rps == 4.0
     assert ctl.snapshot()["recent_hits"] == 0  # the aged 429 hits were evicted by on_success
 
@@ -283,18 +325,41 @@ class TestTimeoutLadder:
         assert ctl.current_rps == CEILING_RPS
         assert ctl.snapshot()["recent_timeouts"] == STEP_DOWN_TIMEOUT_HITS - 1
 
-    def test_recent_timeout_blocks_then_clears_recovery(self) -> None:
+    def test_mild_timeout_drip_does_not_block_recovery(self) -> None:
+        # DEC-DHAN-RATE-RECOVERY-TRICKLE-001 (timeout side): a single fresh stall —
+        # a mild drip far below STEP_DOWN_TIMEOUT_HITS — must NOT pin the rate. It
+        # previously blocked recovery indefinitely (`not self._timeouts`); now
+        # recovery proceeds because one stall is nowhere near step-down pressure.
+        # (Genuine step-down-level timeout pressure is held by
+        # test_timeout_pressure_at_floor_blocks_recovery.)
         clock = _Clock()
         ctl = _controller(clock)
         _hammer_timeouts(ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS)  # → 4.0 (deque cleared)
         assert ctl.current_rps == 4.0
         clock.advance(STEP_UP_WINDOW + 1.0)  # the clean window has elapsed
-        ctl.on_timeout()  # but a FRESH stall lands right before recovery
-        ctl.on_success()  # blocked: a recent timeout is still in-window
-        assert ctl.current_rps == 4.0
-        clock.advance(STEP_DOWN_WINDOW + 1.0)  # the stall ages out
-        ctl.on_success()  # now genuinely clean → recover 4→5
+        ctl.on_timeout()  # a single fresh stall — a mild drip, not a storm
+        assert ctl.snapshot()["recent_timeouts"] == 1  # 1 < STEP_DOWN_TIMEOUT_HITS
+        ctl.on_success()  # recovery proceeds DESPITE the lone in-window stall
+        assert ctl.current_rps == CEILING_RPS  # stepped 4→5 — the trickle-trap is closed
+
+    def test_recovery_unblocked_after_timeout_drip_ages_out(self) -> None:
+        # Symmetric to the 429 age-out (test_recovery_unblocked_after_storm_hits_age_out):
+        # a sub-threshold timeout drip pins _timeouts at the rate; once the stalls
+        # age out of the rolling window, on_success EVICTS them and recovery proceeds
+        # (DEC-DHAN-RATE-RECOVERY-TRICKLE-001 + DEC-DHAN-RATE-STORM-FLOOR-001).
+        clock = _Clock()
+        ctl = _controller(clock)
+        _hammer_timeouts(
+            ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS
+        )  # → 4.0 (deque cleared on the step)
+        _hammer_timeouts(
+            ctl, clock, hits=STEP_DOWN_TIMEOUT_HITS - 1
+        )  # 4 sub-threshold stalls pin it
+        assert ctl.snapshot()["recent_timeouts"] == STEP_DOWN_TIMEOUT_HITS - 1
+        clock.advance(STEP_UP_WINDOW)  # the stalls age out (> STEP_DOWN_WINDOW) + clean window
+        ctl.on_success()  # evicts the aged timeouts → recovery 4→5
         assert ctl.current_rps == CEILING_RPS
+        assert ctl.snapshot()["recent_timeouts"] == 0  # the aged stalls were evicted
 
 
 class TestThrottleLogging:
