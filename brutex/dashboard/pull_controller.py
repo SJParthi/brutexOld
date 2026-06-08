@@ -847,16 +847,22 @@ def start_token_keepalive(  # pragma: no cover — live creds + RenewToken netwo
 
     def _persist_token(token: str) -> None:
         """Write-through the live token to the SINGLE durable store (the 0600 creds
-        file), preserving the current client id, best-effort — NEVER raises (a
-        persist failure must not crash a renewal mid-pull; the in-memory token is
-        already updated). DEC-DHAN-TOKEN-SINGLE-SOURCE-001: a keepalive renewal
-        ROTATES the token (the new one invalidates the old), so persisting it keeps
-        the file holding the LIVE token — a restart then re-loads the live token, not
-        the just-invalidated pre-rotation one.
+        file), best-effort — NEVER raises (a persist failure must not crash a renewal
+        mid-pull; the in-memory token is already updated). DEC-DHAN-TOKEN-SINGLE-
+        SOURCE-001: a keepalive renewal ROTATES the token (the new one invalidates
+        the old), so persisting it keeps the file holding the LIVE token — a restart
+        then re-loads the live token, not the just-invalidated pre-rotation one.
+
+        The client id is RE-READ from the store at persist time (not captured at
+        keepalive start): on the SAVE path the operator may have just changed it, and
+        a captured startup value would clobber the new one back to the old (a stale
+        full-overwrite). Re-resolving uses whatever the store currently holds, so the
+        persist only ever updates the token, never reverts the client id.
         """
         try:
+            client_id = resolve_dhan_credentials().client_id
             save_dhan_credentials(
-                DhanFileCredentials(access_token=token, client_id=creds.client_id)
+                DhanFileCredentials(access_token=token, client_id=client_id)
             )
         except Exception as exc:  # best-effort persist; must never crash a renewal mid-pull
             _LOG.warning("auth.token_persist_failed", reason=str(exc))
