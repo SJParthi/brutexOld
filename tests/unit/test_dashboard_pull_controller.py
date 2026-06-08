@@ -1058,10 +1058,11 @@ class TestPullPopulatesLedger:
         # The ledger now backs /coverage/windows (every window has a row).
         assert all(r.market == "dhan" and r.security_id == "13" for r in ledger.records())
 
-    def test_dh905_windows_are_tracked_as_planned(self, tmp_path: Path) -> None:
-        # A DH-905 known-gap is terminal (never recorded), so its windows REMAIN
-        # PLANNED in the ledger — proving even an UN-fetched window is captured in
-        # the DB (nothing silently missing), exactly the operator's requirement.
+    def test_dh905_windows_are_settled_skipped(self, tmp_path: Path) -> None:
+        # A DH-905 known-gap is the vendor's definitive no-data; the ingest now
+        # settles it as SKIPPED in the ledger (DEC-WINDOW-LEDGER-001 Stage a) — so
+        # every window is captured in the DB (nothing silently missing) AND its
+        # true settled state is recorded, not a perpetual "pending" row.
         from brutex.data.window_ledger_store import ledger_path, load_window_ledger
 
         pull_all_spot(
@@ -1074,7 +1075,7 @@ class TestPullPopulatesLedger:
         assert ledger_path(tmp_path).is_file()
         ledger = load_window_ledger(tmp_path)
         assert ledger.count > 0
-        assert {r.status for r in ledger.records()} == {"PLANNED"}  # tracked, not missing
+        assert {r.status for r in ledger.records()} == {"SKIPPED"}  # settled known-gap
 
     def test_dry_run_writes_no_ledger(self, tmp_path: Path) -> None:
         from brutex.data.window_ledger_store import ledger_path
