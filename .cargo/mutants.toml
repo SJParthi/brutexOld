@@ -26,9 +26,18 @@ timeout_multiplier = 3.0
 minimum_test_timeout = 30  # seconds
 
 # Walk the fno-math crate first; fastest feedback during ratchet PRs.
+# trading-core is the SHARED 52-vocab + indicators kernel
+# (DEC-SHARED-CORE-001 / DEC-TRADING-CORE-PROPTEST-MUTANTS-001). Its CI job runs
+# `cargo mutants` from `rust/trading-core` directly (see
+# .github/workflows/mutation.yml) scoped to the DECISION core `evaluator.rs`
+# (zero surviving mutants); bits.rs + the pivots/fib indicators are covered by
+# the 400-case golden answer-key + the property ordering/determinism tests, and
+# extending the mutation gate to their (largely unused) fields is a tracked
+# follow-up. The glob below keeps a future repo-root invocation aligned.
 examine_re = [
   "rust/fno-math/src/math/",
   "rust/fno-math/src/compat/",
+  "rust/trading-core/src/evaluator\\.rs",
 ]
 
 # Files cargo-mutants must NEVER mutate — generated Rust glue +
@@ -39,6 +48,10 @@ exclude_re = [
   "rust/fno-math/target/",               # build artefacts
   "rust/fno-math/tests/",                # tests can't mutate themselves
   "rust/fno-math/benches/",              # bench harnesses
+  "rust/trading-core/src/lib\\.rs",      # module surface + PyO3 re-exports
+  "rust/trading-core/src/python\\.rs",   # PyO3 glue (python feature only)
+  "rust/trading-core/target/",           # build artefacts
+  "rust/trading-core/tests/",            # tests can't mutate themselves
 ]
 
 # Skip mutations that are guaranteed-noisy (e.g., turning Debug derives

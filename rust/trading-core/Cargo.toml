@@ -48,6 +48,11 @@ pyo3 = { version = "0.28", features = ["extension-module", "abi3-py312"], option
 # shipped crate's dependency tree (so TickVault's native link stays dependency-free).
 serde = { version = "1.0.227", features = ["derive"] }
 serde_json = "1.0.146"
+# Property-based testing (DEC-TRADING-CORE-PROPTEST-MUTANTS-001). Test-only;
+# pinned to the same major as fno-math's proptest so the workspace toolchains
+# agree. Drives the invariant + independent-oracle properties in
+# tests/proptests.rs against arbitrary (bounded, finance-safe) inputs.
+proptest = "1.6.0"
 
 [profile.release]
 opt-level = 3
