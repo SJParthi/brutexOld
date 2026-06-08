@@ -55,6 +55,13 @@ from brutex.adapters.dhan.run_ingest import (
     run_dhan_spot_ingest_with_retry,
 )
 from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
+from brutex.adapters.dhan.until_clean import (
+    DEFAULT_MAX_ROUNDS as _DEFAULT_UNTIL_CLEAN_ROUNDS,
+)
+from brutex.adapters.dhan.until_clean import (
+    UntilCleanRound,
+    run_until_clean,
+)
 from brutex.adapters.protocol import MarketAdapter
 from brutex.dashboard.coverage_reconcile import (
     reconcile_coverage_with_lake,
@@ -79,8 +86,10 @@ from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
     from brutex.adapters.dhan.rate_control import DhanRateController
+    from brutex.adapters.dhan.run_ingest import SpotIngestWithRetry
     from brutex.adapters.dhan.token_holder import TokenHolder
     from brutex.adapters.dhan.token_keepalive import TokenKeepalive
+    from brutex.adapters.dhan.token_preflight import TokenPreflight
 
 _LOG = structlog.get_logger(__name__)
 
@@ -862,6 +871,45 @@ def _live_rate_runtime(
     return hooks, _spot_run_parallel(controller), controller  # pragma: no cover — live only
 
 
+def _preflight_refusal(
+    preflight: TokenPreflight,
+    *,
+    dry_run: bool,
+    start: datetime,
+    end: datetime,
+    instruments_len: int,
+    pid: str | None,
+) -> BulkSpotReport:
+    """Build + loudly log the ``auth_expired`` refusal for a DEAD pre-flight token.
+
+    DEC-TOKEN-PREFLIGHT-001. Shared by BOTH the injected-pre-flight gate (the
+    tested path) and the live auto-probe gate (``# pragma: no cover``): returns an
+    ``auth_aborted`` :class:`BulkSpotReport` whose ``.verdict`` is the loud
+    ``auth_expired`` (reusing ``classify_pull`` — no second vocabulary) and emits
+    ONE ``universe.pull_all.preflight_refused`` WARNING so a refused pull is never
+    silent. No fetch is performed — a dead token can never land a bar.
+    """
+    refusal = BulkSpotReport(
+        dry_run=dry_run,
+        start_date=start.date().isoformat(),
+        end_date=(end - timedelta(days=1)).date().isoformat(),
+        symbols=[],
+        auth_aborted=True,
+        auth_cause=preflight.reason,
+    )
+    verdict = refusal.verdict
+    _LOG.warning(
+        "universe.pull_all.preflight_refused",
+        pull_id=pid,
+        instruments=instruments_len,
+        verdict=verdict.kind,
+        headline=verdict.headline,
+        action=verdict.action,
+        reason=preflight.reason,
+    )
+    return refusal
+
+
 def pull_all_spot(
     instruments: Sequence[Instrument],
     *,
@@ -878,6 +926,9 @@ def pull_all_spot(
     rate_observer: RateObserver | None = None,
     session_rate: SessionRateController | None = None,
     auto_retry: bool = False,
+    preflight: TokenPreflight | None = None,
+    until_clean: bool = False,
+    until_clean_rounds: int = _DEFAULT_UNTIL_CLEAN_ROUNDS,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, previous day]`` range.
 
@@ -929,6 +980,32 @@ def pull_all_spot(
         ``False`` (default — the one-click Pull-ALL) runs a single pass, the prior
         behaviour. Either way the per-symbol rollup is computed from the ORIGINAL
         pass's report.
+    preflight
+        Optional pre-flight token classification (DEC-TOKEN-PREFLIGHT-001). When a
+        DEAD :class:`~brutex.adapters.dhan.token_preflight.TokenPreflight` is
+        injected, this REFUSES to start — it returns an ``auth_aborted``
+        :class:`BulkSpotReport` (whose ``.verdict`` is the loud ``auth_expired``)
+        WITHOUT firing a single doomed window, instead of burning a paced
+        ``≤ 5 r/s`` pull a dead token can never satisfy. ``None`` (the default)
+        skips the gate — the in-pull fail-fast guard still catches a mid-pull
+        death (DEC-DHAN-AUTH-FAILFAST-RENEW-001). The caller computes this via the
+        live :func:`~brutex.adapters.dhan.token_preflight.probe_token_live` probe
+        (``# pragma: no cover``); tests inject it directly.
+    until_clean
+        When ``True`` (``brutex fetch --until-clean`` / the dashboard "until clean"
+        option), keep running bounded auto-retry rounds — each one a full
+        pull-pass-with-auto-retry over the SHARED coverage ledger, reusing
+        :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows` (NO
+        duplicated round loop) — until the ledger is CLEAN, OR the token dies (stop
+        + ``auth_expired`` verdict), OR ``until_clean_rounds`` is spent
+        (DEC-TOKEN-PREFLIGHT-001). ``False`` (default — the one-click Pull-ALL)
+        runs the single ``auto_retry`` pass, the prior behaviour. The per-symbol
+        rollup is still computed from the FIRST pass's report; the aggregate
+        ``still_failed_windows`` / ``auth_aborted`` reflect the FINAL state.
+    until_clean_rounds
+        Bounded OUTER round budget for *until_clean* (default
+        :data:`~brutex.adapters.dhan.until_clean.DEFAULT_MAX_ROUNDS`). Never
+        infinite (Golden Rule #10).
 
     Returns
     -------
@@ -951,10 +1028,47 @@ def pull_all_spot(
         year=year,
         now=now if now is not None else datetime.now(UTC),
     )
+    # Pre-flight gate (DEC-TOKEN-PREFLIGHT-001): a DEAD token can NEVER satisfy a
+    # paced ≤ 5 r/s bulk pull — every window would fire a doomed 401/DH-906. REFUSE
+    # up front, returning the loud ``auth_expired`` verdict (reusing classify_pull
+    # via BulkSpotReport.verdict — no second vocabulary), instead of burning the
+    # pull into the wall. ``None`` preflight skips the gate (the in-pull fail-fast
+    # guard still catches a mid-pull death).
+    if preflight is not None and preflight.is_dead:
+        with pull_id_scope(pull_id) as pid:
+            return _preflight_refusal(
+                preflight,
+                dry_run=dry_run,
+                start=start,
+                end=end,
+                instruments_len=len(instruments),
+                pid=pid,
+            )
     use_live_rate = adapter_factory is None and not dry_run
     if adapter_factory is None:
         adapter_factory = _build_dry_run_bulk_adapter if dry_run else _build_live_bulk_adapter
     adapter, sink = adapter_factory(lake_root, instruments)
+    # Auto pre-flight on a DEFAULT live bulk pull (no injected factory + creds
+    # present): probe the token ONCE before any fetch so a dead token short-circuits
+    # to the same refusal — the dashboard "Pull ALL" path's automatic guard. An
+    # injected ``preflight`` (handled above) or a dry-run / injected-factory pull
+    # skips this. ``# pragma: no cover`` — needs a real token + RenewToken network.
+    if preflight is None and use_live_rate:  # pragma: no cover — live token + network
+        from brutex.adapters.dhan.token_preflight import probe_token_live
+
+        _client = getattr(adapter, "client", None)
+        if _client is not None:
+            live_pf = probe_token_live(_client)
+            if live_pf.is_dead:
+                with pull_id_scope(pull_id) as pid:
+                    return _preflight_refusal(
+                        live_pf,
+                        dry_run=dry_run,
+                        start=start,
+                        end=end,
+                        instruments_len=len(instruments),
+                        pid=pid,
+                    )
 
     # Open the pull's correlation scope: ``pid`` is bound into the structlog
     # contextvars for the whole pass, so every event — this start/done summary,
@@ -1029,23 +1143,59 @@ def pull_all_spot(
         # keeps ``auto_retry=False`` (a single pass) — byte-for-byte the prior
         # behaviour. BOTH paths share the same ingest spine (CLAUDE.md §11 COMMON);
         # ``report`` is always the ORIGINAL pass's report for the per-symbol rollup.
-        report = run_dhan_spot_ingest_with_retry(
-            adapter,
-            sink,
-            instruments=instruments,
-            intervals=DHAN_FETCH_INTERVALS,
-            start=start.date(),
-            end=end.date(),
-            pace=pace,
-            on_rate_limit=on_rate_limit,
-            on_timeout=on_timeout,
-            on_success=on_success,
-            on_progress=_progress_then_flush,
-            coverage=coverage,
-            status_log=status_log,
-            run_parallel=run_parallel,
-            auto_retry=auto_retry,
-        ).report
+        def _one_pass(do_retry: bool) -> SpotIngestWithRetry:
+            """Run ONE full pull-pass-with-auto-retry over the SHARED coverage ledger.
+
+            The single ingest call site (CLAUDE.md §11 COMMON) — the one-shot path,
+            every until-clean round, and the auto-retry inner loop all go through
+            here, so the args can never drift between them.
+            """
+            return run_dhan_spot_ingest_with_retry(
+                adapter,
+                sink,
+                instruments=instruments,
+                intervals=DHAN_FETCH_INTERVALS,
+                start=start.date(),
+                end=end.date(),
+                pace=pace,
+                on_rate_limit=on_rate_limit,
+                on_timeout=on_timeout,
+                on_success=on_success,
+                on_progress=_progress_then_flush,
+                coverage=coverage,
+                status_log=status_log,
+                run_parallel=run_parallel,
+                auto_retry=do_retry,
+            )
+
+        # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded rounds
+        # — each a full pass over the SHARED coverage ledger (so it re-fetches ONLY
+        # the still-failed windows; rate-safe + idempotent) — until clean / token
+        # dead / outer budget spent. Reuses ``run_until_clean`` over the SAME
+        # ``retry_failed_windows`` engine; the round COUNT is bounded (never an
+        # O(1)-total claim). The per-symbol rollup uses the FIRST pass's report;
+        # the aggregate residual / auth state reflect the FINAL round.
+        if until_clean:
+            passes: list[SpotIngestWithRetry] = []
+
+            def _round_runner() -> UntilCleanRound:
+                """One until-clean round = one full pull pass; record it for the rollup."""
+                res = _one_pass(True)
+                passes.append(res)
+                return UntilCleanRound(
+                    still_failed_windows=res.report.still_failed_windows,
+                    auth_aborted=res.report.auth_aborted,
+                    auth_cause=res.report.auth_cause,
+                )
+
+            until_outcome = run_until_clean(_round_runner, max_rounds=until_clean_rounds)
+            report = passes[0].report
+            final_still_failed = until_outcome.final_still_failed
+            final_auth_aborted = until_outcome.auth_aborted or report.auth_aborted
+        else:
+            report = _one_pass(auto_retry).report
+            final_still_failed = report.still_failed_windows
+            final_auth_aborted = report.auth_aborted
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
         end_pull_status(status_log, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
@@ -1070,9 +1220,9 @@ def pull_all_spot(
             start_date=start.date().isoformat(),
             end_date=(end - timedelta(days=1)).date().isoformat(),
             symbols=results,
-            auth_aborted=report.auth_aborted,
+            auth_aborted=final_auth_aborted,
             auth_cause=report.auth_cause,
-            still_failed_windows=report.still_failed_windows,
+            still_failed_windows=final_still_failed,
         )
         verdict = bulk.verdict
         _LOG.info(

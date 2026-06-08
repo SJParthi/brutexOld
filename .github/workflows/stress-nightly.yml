@@ -79,6 +79,17 @@ jobs:
       - name: Install fno_math Rust extension
         run: pip install ./rust/fno-math
 
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # The engine package (`brutex.engine.__init__` → `brutex.vocabulary`)
+        # imports the Rust-backed `trading_core` extension, so any stress test
+        # that touches the engine (e.g. tests/stress/test_sweep_scheduler_resume_stress.py,
+        # DEC-SWEEP-SCHEDULER-001 #487) errors at COLLECTION with
+        # `ModuleNotFoundError: No module named 'trading_core'` and aborts the
+        # whole stress run. Main CI's test job installs BOTH wheels (ci.yml:160-166);
+        # this nightly job installed only fno-math — the gap that made the stress
+        # suite red. Mirror the main CI pattern so the engine stress tests collect.
+        run: pip install ./rust/trading-core
+
       - name: Run stress suite
         env:
           STRESS_EVENTS: ${{ github.event.inputs.stress_events || '5000' }}

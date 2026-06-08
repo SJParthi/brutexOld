@@ -427,6 +427,25 @@ def build_parser() -> argparse.ArgumentParser:
             "engine as the automatic retry (DEC-INGEST-AUTO-RETRY-001)"
         ),
     )
+    fetch.add_argument(
+        "--until-clean",
+        action="store_true",
+        help=(
+            "MANUAL: keep running bounded auto-retry rounds until the coverage "
+            "ledger is CLEAN, OR the token dies (stop + auth_expired verdict), OR "
+            "the round budget is spent — reuses the same retry engine, rate-safe "
+            "(≤5 r/s), bounded (NOT infinite) (DEC-TOKEN-PREFLIGHT-001)"
+        ),
+    )
+    fetch.add_argument(
+        "--until-clean-rounds",
+        type=int,
+        default=None,
+        help=(
+            "Bounded OUTER round budget for --until-clean "
+            "(default: until_clean.DEFAULT_MAX_ROUNDS). Never infinite."
+        ),
+    )
 
     # ── doctor (DEC-DOCTOR-001) ───────────────────────────────────
     doctor = sub.add_parser(
@@ -1476,6 +1495,8 @@ def cmd_fetch(
     instruments: bool = False,
     auto_retry: bool = True,
     retry_failed: bool = False,
+    until_clean: bool = False,
+    until_clean_rounds: int | None = None,
 ) -> int:
     """Fetch candles for the 3 brute-force indices into the lake (§13.9 step 3).
 
@@ -1502,6 +1523,15 @@ def cmd_fetch(
     lake). Both ways call the SAME
     :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows` engine
     (CLAUDE.md §11 COMMON).
+
+    ``--until-clean`` (DEC-TOKEN-PREFLIGHT-001) keeps running bounded auto-retry
+    rounds — each a full pass over the SHARED coverage ledger — until the ledger is
+    CLEAN, OR the token dies (stop + the loud ``auth_expired`` verdict), OR the
+    ``--until-clean-rounds`` OUTER budget is spent. It REUSES
+    :func:`~brutex.adapters.dhan.until_clean.run_until_clean` over the SAME retry
+    engine (no duplicated round loop); honest envelope (Golden Rule #10): the round
+    count is bounded (NOT infinite), each round is one ``≤ 5 r/s`` pass, and the
+    work is ``O(failed_windows)`` per round — never an "O(1)-total" claim.
     """
     resolved_instruments = _resolve_lake_root(lake_root)
     if instruments:
@@ -1611,6 +1641,24 @@ def cmd_fetch(
             pace, on_success = _rate.pace, _rate.on_success
             on_rate_limit = _alerter.rate_breach_callback(_rate)
             print("[brutex] fetch (live Dhan)", file=sys.stderr)
+            # Pre-flight gate (DEC-TOKEN-PREFLIGHT-001): probe the token ONCE before
+            # burning a paced ≤5 r/s pull. A DEAD token can NEVER land a bar, so
+            # REFUSE up front with the loud auth_expired verdict instead of firing
+            # ~800 doomed 401s and grinding through the whole universe. Paced through
+            # the same bucket so the probe is itself ≤5 r/s. # pragma: no cover —
+            # live token + RenewToken network (the classification is 100%-covered in
+            # token_preflight's pure tests).
+            from brutex.adapters.dhan.token_preflight import (  # pragma: no cover — live
+                preflight_pull_verdict,
+                probe_token_live,
+            )
+
+            _refuse = preflight_pull_verdict(  # pragma: no cover — live
+                probe_token_live(adapter.client, pace=pace)
+            )
+            if _refuse is not None:  # pragma: no cover — live
+                print(f"[brutex] {_refuse.headline} {_refuse.action}", file=sys.stderr)
+                return EXIT_INTERNAL_ERROR
 
         # Persist the fetch-coverage ledger so a re-pull (and every auto-retry
         # round, and the manual `--retry-failed` run) re-fetches ONLY the windows
@@ -1625,19 +1673,55 @@ def cmd_fetch(
         # routes drive the SAME run_dhan_spot_ingest_with_retry → retry_failed_windows
         # engine (CLAUDE.md §11 COMMON) — no duplicated round loop.
         do_retry = retry_failed or auto_retry
-        result = run_dhan_spot_ingest_with_retry(
-            adapter,
-            sink,
-            instruments=fetch_instruments,
-            intervals=intervals,
-            start=start_dt.date(),
-            end=end_dt.date(),
-            pace=pace,
-            coverage=coverage,
-            on_rate_limit=on_rate_limit,
-            on_success=on_success,
-            auto_retry=do_retry,
-        )
+
+        def _one_fetch_pass(do_retry_flag: bool) -> Any:
+            """Run ONE full spot pass-with-auto-retry over the SHARED coverage ledger."""
+            return run_dhan_spot_ingest_with_retry(
+                adapter,
+                sink,
+                instruments=fetch_instruments,
+                intervals=intervals,
+                start=start_dt.date(),
+                end=end_dt.date(),
+                pace=pace,
+                coverage=coverage,
+                on_rate_limit=on_rate_limit,
+                on_success=on_success,
+                auto_retry=do_retry_flag,
+            )
+
+        until_outcome = None
+        if until_clean:
+            # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
+            # rounds — each a full pass over the SHARED coverage ledger (re-fetches
+            # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
+            # SAME retry engine via run_until_clean, until clean / token dead / outer
+            # budget spent. Bounded round count (never an O(1)-total claim).
+            from brutex.adapters.dhan.until_clean import (
+                DEFAULT_MAX_ROUNDS,
+                UntilCleanRound,
+                run_until_clean,
+            )
+
+            fetch_passes: list[Any] = []
+
+            def _round_runner() -> UntilCleanRound:
+                """One until-clean round = one full fetch pass; recorded for the summary."""
+                res = _one_fetch_pass(True)
+                fetch_passes.append(res)
+                return UntilCleanRound(
+                    still_failed_windows=res.report.still_failed_windows,
+                    auth_aborted=res.report.auth_aborted,
+                    auth_cause=res.report.auth_cause,
+                )
+
+            rounds_budget = (
+                until_clean_rounds if until_clean_rounds is not None else DEFAULT_MAX_ROUNDS
+            )
+            until_outcome = run_until_clean(_round_runner, max_rounds=rounds_budget)
+            result = fetch_passes[0]
+        else:
+            result = _one_fetch_pass(do_retry)
         end_pull_coverage(coverage, resolved, dry_run=_no_coverage)
     report = result.report
     retry = result.retry
@@ -1651,8 +1735,23 @@ def cmd_fetch(
             f"recovered_windows={retry.recovered_windows} "
             f"still_failed={retry.final_still_failed}"
         )
+    if until_outcome is not None:
+        verdict = until_outcome.pull_verdict()
+        print(
+            f"[brutex] until-clean — verdict={until_outcome.verdict} "
+            f"rounds={until_outcome.rounds_run} "
+            f"still_failed={until_outcome.final_still_failed}"
+        )
+        if verdict.needs_operator:
+            print(f"[brutex] {verdict.headline} {verdict.action}", file=sys.stderr)
     print(f"[brutex] lake: {resolved}")
-    residual = result.still_failed_windows
+    # With --until-clean the FINAL residual (post all rounds) is the truth, not the
+    # first pass's; otherwise the wrapper's still_failed_windows is correct.
+    residual = (
+        until_outcome.final_still_failed
+        if until_outcome is not None
+        else result.still_failed_windows
+    )
     if report.failed_pairs > 0 or residual > 0:
         return EXIT_INTERNAL_ERROR
     return EXIT_OK
@@ -2919,6 +3018,8 @@ def main(argv: list[str] | None = None) -> int:
             instruments=args.instruments,
             auto_retry=not args.no_auto_retry,
             retry_failed=args.retry_failed,
+            until_clean=args.until_clean,
+            until_clean_rounds=args.until_clean_rounds,
         )
     if args.command == "doctor":
         return cmd_doctor(
