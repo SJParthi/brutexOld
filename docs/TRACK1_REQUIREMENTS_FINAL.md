@@ -1,5 +1,15 @@
 # Track 1 — Requirements Final Review
 
+> ⚠️ **STALE SNAPSHOT (2026-05-18) — DO NOT CITE AS CURRENT STATE.**
+> This review predates the Dhan revert (DEC-GROWW-DHAN-REVERT-001) and the
+> engine work shipped in PRs #460–#497. It still says "Groww" and lists the
+> Rust hot kernel (G-01), Bloom filter (G-02) and Stage 1A/1B/2 (G-03) as
+> empty 🔴 gaps — **all three are now BUILT** (`rust/fno-math/src/python.rs`,
+> `brutex/orchestrator/bloom.py`, `brutex/engine/stage1a.py`). For the
+> current, evidence-backed status use **`docs/WORKSPACE_HEALTH_AND_ROADMAP.md`**
+> (DEC-WORKSPACE-HEALTH-REPORT-001) and **`docs/TRACK1_GAP_ANALYSIS.md`**
+> (DEC-GAP-ANALYSIS-001). This file is retained as a historical record only.
+
 **Date:** 2026-05-18
 **Trigger:** Operator directive — "I need to finalise it dude" — Renaissance-style hostile multi-perspective review before further Phase 3+ work.
 **Method:** 4 agents in parallel, each covering 3 dimensions (12 lenses total).
