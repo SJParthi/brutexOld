@@ -1984,6 +1984,12 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
       - name: Install fno_math Rust extension
         run: pip install ./rust/fno-math
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # The sweep-engine chaos test (DEC-CHAOS-SWEEP-PARQUET-001) runs a real
+        # supervised combo sweep, whose evaluator delegates to the shared Rust
+        # core (trading_core.evaluate_with_levels via brutex.vocabulary). Same
+        # dtolnay/rust-toolchain@stable + maturin/abi3 build as fno-math above.
+        run: pip install ./rust/trading-core
       - name: Run chaos suite
         env:
           # PR-gate default is fast; a manual soak overrides these much higher.
