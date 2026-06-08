@@ -45,6 +45,24 @@ def test_mark_is_idempotent() -> None:
     assert cov.completed_count == 1
 
 
+def test_unmark_drops_a_completed_window() -> None:
+    # DEC-FAILED-WINDOW-FORCE-REPULL-001: un-marking a complete window makes it
+    # incomplete again so the ingest re-pulls it.
+    cov = FetchCoverage()
+    key = _key()
+    cov.mark_complete(key)
+    assert cov.is_complete(key) is True
+    cov.unmark(key)
+    assert cov.is_complete(key) is False
+    assert cov.completed_count == 0
+
+
+def test_unmark_absent_window_is_a_noop() -> None:
+    cov = FetchCoverage()
+    cov.unmark(_key())  # never marked → discard is a safe no-op
+    assert cov.completed_count == 0
+
+
 def test_serialise_restore_round_trip() -> None:
     cov = FetchCoverage()
     cov.mark_complete(_key("13", "1minute"))

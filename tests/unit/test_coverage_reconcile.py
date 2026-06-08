@@ -19,6 +19,7 @@ from brutex.dashboard.coverage_reconcile import (
     EMPTY_TERMINAL_THRESHOLD,
     reconcile_coverage_with_lake,
     reconcile_empty_terminal,
+    reconcile_failed_windows_for_repull,
     reconcile_windows,
 )
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
@@ -297,3 +298,65 @@ class TestReconcileEmptyTerminal:
         log = _log_recorded(key, times=2, raw_bars=0, error_type=None)
         assert reconcile_empty_terminal(cov, log, threshold=2) == 1
         assert cov.is_complete(key)
+
+
+def _nifty_tile(index: int) -> WindowKey:
+    """The *index*-th NIFTY 1-minute fetch tile over the test range (ingest-exact key)."""
+    w_start, w_end = list(_windows("1minute", _START, _END))[index]
+    return WindowKey(
+        market="dhan",
+        security_id="NIFTY",
+        interval="1minute",
+        start=w_start,
+        end=w_end,
+    )
+
+
+class TestReconcileFailedWindowsForRepull:
+    """DEC-FAILED-WINDOW-FORCE-REPULL-001: a FAILED window is un-marked → re-pulled."""
+
+    def test_failed_window_is_unmarked_for_repull(self) -> None:
+        # The internal-gap case: span-enclosure wrongly marked the failed window
+        # complete; un-marking it forces the ingest to re-fetch (not skip) it.
+        key = _nifty_tile(1)
+        cov = FetchCoverage()
+        cov.mark_complete(key)  # the wrong span-enclosure mark
+        log = WindowStatusLog()
+        log.record(key, raw_bars=0, error_type="DhanRateLimitError", bars_appended=0, now=_NOW)
+        assert reconcile_failed_windows_for_repull(cov, log) == 1
+        assert not cov.is_complete(key)  # re-pulled next pass
+
+    def test_success_window_is_left_complete(self) -> None:
+        # A SUCCESS row is genuinely done — never un-marked (no needless re-fetch).
+        key = _nifty_tile(1)
+        cov = FetchCoverage()
+        cov.mark_complete(key)
+        log = WindowStatusLog()
+        log.record(key, raw_bars=10, error_type=None, bars_appended=10, now=_NOW)  # SUCCESS
+        assert reconcile_failed_windows_for_repull(cov, log) == 0
+        assert cov.is_complete(key)
+
+    def test_empty_window_is_left_complete(self) -> None:
+        # An EMPTY (clean 0-bar) row is not a retryable failure → not un-marked
+        # (the EMPTY-terminal reconcile owns it); never re-pulled by this path.
+        key = _nifty_tile(1)
+        cov = FetchCoverage()
+        cov.mark_complete(key)
+        log = WindowStatusLog()
+        log.record(key, raw_bars=0, error_type=None, bars_appended=0, now=_NOW)  # EMPTY
+        assert reconcile_failed_windows_for_repull(cov, log) == 0
+        assert cov.is_complete(key)
+
+    def test_failed_window_absent_from_ledger_is_a_noop(self) -> None:
+        # Un-marking a window that was never marked complete is a safe no-op.
+        key = _nifty_tile(1)
+        cov = FetchCoverage()  # ledger empty
+        log = WindowStatusLog()
+        log.record(key, raw_bars=0, error_type="DhanTimeoutError", bars_appended=0, now=_NOW)
+        assert reconcile_failed_windows_for_repull(cov, log) == 1
+        assert not cov.is_complete(key)
+
+    def test_no_recorded_window_no_unmark(self) -> None:
+        cov = FetchCoverage()
+        log = WindowStatusLog()  # nothing recorded
+        assert reconcile_failed_windows_for_repull(cov, log) == 0

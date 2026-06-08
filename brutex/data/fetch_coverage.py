@@ -71,6 +71,17 @@ class FetchCoverage:
         with self._lock:
             self._complete.add(key)
 
+    def unmark(self, key: WindowKey) -> None:
+        """Drop *key* from the completed set so it is RE-PULLED — **O(1)**, idempotent, atomic.
+
+        The inverse of :meth:`mark_complete` (DEC-FAILED-WINDOW-FORCE-REPULL-001):
+        a window wrongly marked complete by the coarse span-enclosure reconcile
+        (an internal-gap ``FAILED`` window) is un-marked so the ingest re-fetches
+        it instead of skipping it forever. ``set.discard`` — a no-op if absent.
+        """
+        with self._lock:
+            self._complete.discard(key)
+
     @property
     def completed_count(self) -> int:
         """Number of windows recorded complete (thread-safe)."""
