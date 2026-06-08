@@ -7,8 +7,11 @@
 #    suite against each mutant. Any mutant that **survives** a full
 #    test run means the tests don't actually cover that logic branch.
 #
-# 2. Rust side: `cargo-mutants` over rust/fno-math/ — same idea in the
-#    Rust crate. Mirrors tickvault's mutation.yml semantics.
+# 2. Rust side: `cargo-mutants` over rust/fno-math/ AND rust/trading-core/
+#    — same idea in the Rust crates. Mirrors tickvault's mutation.yml
+#    semantics. trading-core is the SHARED 52-vocab + pivots/fib core
+#    (bit-identical contract with TickVault), gated here per
+#    DEC-TRADING-CORE-FUZZ-PROPTEST-001.
 #
 # Threshold: **zero surviving mutants on critical modules**. Failing
 # this gate means tests pass but don't detect a behavior change — a
@@ -17,7 +20,8 @@
 # Runs on:
 #   - weekly schedule (Monday 04:00 UTC)
 #   - manual dispatch via workflow_dispatch
-#   - push to main (only when brutex/** or rust/fno-math/** touched)
+#   - push to main (only when brutex/**, rust/fno-math/** or
+#     rust/trading-core/** touched)
 
 name: Mutation testing
 
@@ -31,6 +35,7 @@ on:
     paths:
       - "brutex/**"
       - "rust/fno-math/**"
+      - "rust/trading-core/**"
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/mutation.yml"
@@ -170,5 +175,71 @@ jobs:
               repo: context.repo.repo,
               title,
               body: `cargo-mutants detected surviving mutants on commit ${context.sha}. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+              labels: ['bug', 'mutation', 'rust', 'critical'],
+            });
+
+  # ─────────────────────────────────────────────────────────────────
+  # Rust mutation — cargo-mutants over rust/trading-core/ (the SHARED
+  # 52-vocab + pivots/fib core; bit-identical contract with TickVault).
+  # DEC-TRADING-CORE-FUZZ-PROPTEST-001.
+  # ─────────────────────────────────────────────────────────────────
+  rust-mutation-trading-core:
+    name: Rust mutation (cargo-mutants, trading-core)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: rust/trading-core
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/trading-core -> target
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: Run cargo-mutants
+        run: |
+          # --exclude the PyO3 binding (python.rs is behind the optional
+          # `python` feature, not built by the default `cargo test`).
+          cargo mutants \
+            --test-tool cargo \
+            --no-shuffle \
+            --timeout 300 \
+            --exclude src/python.rs \
+            --output cargo-mutants.out \
+            -- \
+            --release
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cargo-mutants-report-trading-core
+          path: rust/trading-core/cargo-mutants.out
+          retention-days: 14
+      - name: Open GitHub issue on failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = `cargo-mutants: surviving mutants in trading-core on ${context.sha.substring(0, 7)}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'bug,mutation,rust',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: `cargo-mutants detected surviving mutants in trading-core on commit ${context.sha}. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
               labels: ['bug', 'mutation', 'rust', 'critical'],
             });

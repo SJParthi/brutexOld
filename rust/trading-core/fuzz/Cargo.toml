@@ -1,0 +1,45 @@
+# trading-core fuzz harness — cargo-fuzz / libFuzzer targets.
+#
+# Gap-sweep test-type #4 (DEC-TRADING-CORE-FUZZ-PROPTEST-001, MIGRATION.md):
+# the SHARED 52-vocab + pivots/fib core (bit-identical contract with TickVault)
+# previously had ZERO fuzz coverage. These targets assert the pure-Rust core
+# never panics / overflows / sets a reserved bit on any input inside its
+# documented honest envelope (lib.rs "Domain (honest envelope)").
+#
+# A separate package (the [workspace] table below detaches it from the parent)
+# so plain `cargo test` in trading-core never pulls libfuzzer-sys. Built with
+# nightly: `cargo +nightly fuzz run <target>`.
+
+[package]
+name = "trading-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# Structured input decoding (derive on RawSnapshot in fuzz_targets/common.rs).
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.trading-core]
+path = ".."
+
+# Detach from any parent workspace so this fuzz crate resolves independently.
+[workspace]
+
+[[bin]]
+name = "fuzz_mask_and"
+path = "fuzz_targets/fuzz_mask_and.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pivot_fib_resolve"
+path = "fuzz_targets/fuzz_pivot_fib_resolve.rs"
+test = false
+doc = false
+bench = false

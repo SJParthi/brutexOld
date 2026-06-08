@@ -2036,9 +2036,14 @@ jobs:
       - name: Install gitleaks
         run: |
           VERSION="8.21.2"
-          curl -sSL \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
-            | tar xz -C /tmp
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          # -f: fail (don't pipe an HTML error page into tar → cryptic "not in
+          # gzip format"); --retry/--retry-all-errors: ride out a transient
+          # CDN blip on the release download (DEC-TRADING-CORE-FUZZ-PROPTEST-001
+          # CI-infra fix). Download then extract (no pipe) so a bad body fails loud.
+          curl -fSL --retry 5 --retry-delay 3 --retry-all-errors \
+            -o /tmp/gitleaks.tar.gz "$url"
+          tar xzf /tmp/gitleaks.tar.gz -C /tmp
           sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
       - name: Run gitleaks
@@ -2250,7 +2255,12 @@ jobs:
         with:
           node-version: '22'
       - name: Install jscpd
-        run: npm install -g jscpd
+        # jscpd v8 is a Rust binary split into per-platform packages that
+        # `npm install -g jscpd` does NOT pull (npm optionalDependencies bug →
+        # "Platform package cpd-linux-x64-gnu not installed"). Pin to the last
+        # pure-JS line (v4) so there is no native binary to resolve — same flags,
+        # same duplication algorithm (DEC-TRADING-CORE-FUZZ-PROPTEST-001 CI-infra fix).
+        run: npm install -g "jscpd@^4.0.0"
       - name: Run jscpd (blocking — DEC-P0-001)
         run: |
           # DEC-P0-001 (2026-05-17) removed `|| true`; jscpd now blocks merge

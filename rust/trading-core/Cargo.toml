@@ -48,6 +48,9 @@ pyo3 = { version = "0.28", features = ["extension-module", "abi3-py312"], option
 # shipped crate's dependency tree (so TickVault's native link stays dependency-free).
 serde = { version = "1.0.227", features = ["derive"] }
 serde_json = "1.0.146"
+# Property test cross-checking evaluate_atoms against an independent reference
+# (DEC-TRADING-CORE-FUZZ-PROPTEST-001). Test-only, same isolation as serde above.
+proptest = "1.6.0"
 
 [profile.release]
 opt-level = 3
