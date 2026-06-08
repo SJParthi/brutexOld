@@ -43,7 +43,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
@@ -546,6 +546,62 @@ def set_live_token_holder(holder: TokenHolder | None) -> None:
     _LIVE_TOKEN_HOLDER = holder
 
 
+class _LiveKeepalive(Protocol):
+    """The one method :func:`refresh_live_token` needs from the live keepalive.
+
+    Kept minimal so a test can inject a lightweight fake without the live network
+    dependencies of the real
+    :class:`~brutex.adapters.dhan.token_keepalive.TokenKeepalive`.
+    """
+
+    def forget_expiry(self) -> None:
+        """Drop the learned expiry so the next tick re-learns the live token's exp."""
+        ...
+
+
+#: Process-wide live keepalive seam (DEC-DHAN-TOKEN-SINGLE-SOURCE-001), installed at
+#: startup alongside the holder so a mid-session credential save can tell the
+#: keepalive to RE-LEARN the new token's expiry. ``None`` when no keepalive runs.
+_LIVE_KEEPALIVE: _LiveKeepalive | None = None
+
+
+def set_live_keepalive(keepalive: _LiveKeepalive | None) -> None:
+    """Install (or clear) the process-wide live keepalive reference (startup/shutdown)."""
+    global _LIVE_KEEPALIVE  # noqa: PLW0603 — single live-path singleton, set once at app start
+    _LIVE_KEEPALIVE = keepalive
+
+
+def refresh_live_token(access_token: str) -> bool:
+    """Propagate a freshly-saved access token to the LIVE session — no restart.
+
+    DEC-DHAN-TOKEN-SINGLE-SOURCE-001. When the operator saves a new token via the
+    Credentials page mid-session, the file is updated but the in-memory holder every
+    live ``DhanClient`` reads through ``token_provider`` was NOT — so every pull kept
+    using the STALE startup token and 401/``DH-906``'d (``auth_expired``) even with a
+    valid fresh token. This updates the installed holder IN PLACE (write-through, so
+    the durable store stays in sync) and tells the keepalive to re-learn the new
+    token's expiry on its next tick. Returns ``True`` when a live holder was installed
+    (the change took effect), ``False`` otherwise (no live session — a no-op).
+
+    Parameters
+    ----------
+    access_token
+        The freshly-saved access token to make live immediately.
+    """
+    holder = _LIVE_TOKEN_HOLDER
+    if holder is None:
+        return False
+    holder.set(access_token)
+    keepalive = _LIVE_KEEPALIVE
+    if keepalive is not None:
+        keepalive.forget_expiry()
+    _LOG.info(
+        "auth.live_token_refreshed",
+        note="new token propagated to the live holder; keepalive will re-learn its expiry",
+    )
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class SymbolPullResult:
     """Per-symbol completed / failed / no-data interval counts for a bulk pull."""
@@ -783,11 +839,29 @@ def start_token_keepalive(  # pragma: no cover — live creds + RenewToken netwo
     from brutex.adapters.dhan.client import DhanClient, default_dhan_transport
     from brutex.adapters.dhan.token_holder import TokenHolder
     from brutex.adapters.dhan.token_keepalive import TokenKeepalive
+    from brutex.config.credentials import DhanFileCredentials, save_dhan_credentials
 
     if not dhan_creds_present():
         return None
     creds = resolve_dhan_credentials()
-    holder = TokenHolder(creds.access_token)
+
+    def _persist_token(token: str) -> None:
+        """Write-through the live token to the SINGLE durable store (the 0600 creds
+        file), preserving the current client id, best-effort — NEVER raises (a
+        persist failure must not crash a renewal mid-pull; the in-memory token is
+        already updated). DEC-DHAN-TOKEN-SINGLE-SOURCE-001: a keepalive renewal
+        ROTATES the token (the new one invalidates the old), so persisting it keeps
+        the file holding the LIVE token — a restart then re-loads the live token, not
+        the just-invalidated pre-rotation one.
+        """
+        try:
+            save_dhan_credentials(
+                DhanFileCredentials(access_token=token, client_id=creds.client_id)
+            )
+        except Exception as exc:  # best-effort persist; must never crash a renewal mid-pull
+            _LOG.warning("auth.token_persist_failed", reason=str(exc))
+
+    holder = TokenHolder(creds.access_token, on_set=_persist_token)
     set_live_token_holder(holder)
     pace: Callable[[], None] | None = None
     if session_rate is not None:
@@ -800,6 +874,7 @@ def start_token_keepalive(  # pragma: no cover — live creds + RenewToken netwo
     )
     keepalive = TokenKeepalive(client, holder, pace=pace, log=_LOG)
     keepalive.start()
+    set_live_keepalive(keepalive)
     _LOG.info("auth.keepalive.started", renew_before_hours=12)
     return keepalive
 
@@ -1503,8 +1578,10 @@ __all__ = [
     "parse_symbol_list",
     "pull_all_spot",
     "pull_candles",
+    "refresh_live_token",
     "resolve_candle_range",
     "resolve_pull_symbols",
+    "set_live_keepalive",
     "set_live_token_holder",
     "start_token_keepalive",
 ]
