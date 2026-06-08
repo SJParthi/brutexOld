@@ -35,6 +35,13 @@ dependencies = [
     # -> ranking -> metrics.cascade). Was [dev]-only, so a clean `make run`
     # (installs .[data,ui], not [dev]) crashed with ModuleNotFoundError: numpy.
     "numpy>=1.26,<3.0",
+    # DEC-DHAN-TLS-SPKI-PIN-001 (MIGRATION.md #579): SPKI certificate pinning on
+    # the Dhan TLS egress (brutex/adapters/dhan/pinning.py) extracts the peer
+    # SubjectPublicKeyInfo via cryptography's X.509 parser. On the core ingest
+    # path (cli/dashboard -> DhanClient.urllib_transport), so it is a core dep,
+    # not a [data]/[ui] extra. Floor pinned to 46.0.7 — the first release fixing
+    # PYSEC-2026-35 / PYSEC-2026-36 / CVE-2026-26007 (pip-audit clean).
+    "cryptography>=46.0.7,<47",
 ]
 
 [project.optional-dependencies]

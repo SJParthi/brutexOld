@@ -38,16 +38,21 @@ meter/log each physical attempt); the predicate reuses the COMMON
 
 from __future__ import annotations
 
+import http.client
 import json
+import ssl
 import threading
+import urllib.error
+import urllib.request
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from functools import cache
 from http import HTTPStatus
 from math import inf
 from time import perf_counter
 from time import sleep as _time_sleep
-from typing import Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol, cast
 from urllib.parse import urlparse
 
 import structlog
@@ -66,6 +71,9 @@ from brutex.adapters.dhan.errors import (
     is_rate_limit,
     is_retryable,
 )
+
+if TYPE_CHECKING:
+    from brutex.adapters.dhan.pinning import PinningPolicy
 
 #: Structured logger — emits ``dhan.call`` (per-call DEBUG) + ``dhan.throughput``
 #: (periodic INFO) into the same structlog stream the operator reads on /logs.
@@ -486,6 +494,67 @@ class DhanClient:
             _LOG.info("dhan.throughput", **self.meter.snapshot())
 
 
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):  # pragma: no cover — network shim
+    """An :class:`~http.client.HTTPSConnection` that SPKI-pins after the handshake.
+
+    On :meth:`connect`, after the default CA chain validation completes, the
+    live peer leaf certificate (DER) is pulled and handed to
+    :func:`brutex.adapters.dhan.pinning.verify_pin`. An enforcing policy that
+    sees a non-matching public key raises :class:`DhanPinMismatchError` here —
+    BEFORE any credentialed bytes are written — so a chain-valid MITM cert from
+    a mis-issued/compromised CA cannot intercept the token/data traffic.
+    """
+
+    def __init__(self, policy: PinningPolicy, host: str, **kwargs: object) -> None:
+        super().__init__(host, **kwargs)  # type: ignore[arg-type]
+        self._brutex_policy = policy
+
+    def connect(self) -> None:
+        """Open the TLS connection, then SPKI-verify the peer before any I/O."""
+        super().connect()
+        from brutex.adapters.dhan.pinning import verify_pin
+
+        sock = cast("ssl.SSLSocket", self.sock)
+        der = sock.getpeercert(binary_form=True)
+        verify_pin(der or b"", self._brutex_policy, host=self.host)
+
+
+@cache
+def _pinned_opener() -> urllib.request.OpenerDirector:  # pragma: no cover — network/TLS wiring shim
+    """Build the process-wide :mod:`urllib` opener whose HTTPS handler SPKI-pins egress.
+
+    Memoised with :func:`functools.cache`, so the pinning policy is resolved ONCE
+    from the environment
+    (:func:`brutex.adapters.dhan.pinning.load_pinning_policy`) and the mode
+    banner logged once (:func:`~brutex.adapters.dhan.pinning.log_policy`). The
+    handler installs :class:`_PinnedHTTPSConnection` so every HTTPS connection
+    verifies the peer SPKI under that policy.
+    """
+    from brutex.adapters.dhan.pinning import load_pinning_policy, log_policy
+
+    policy = load_pinning_policy()
+    log_policy(policy)
+    ssl_context = ssl.create_default_context()
+
+    class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+        """An :mod:`urllib` HTTPS handler that opens SPKI-pinned connections."""
+
+        def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+            """Open *req* over a :class:`_PinnedHTTPSConnection` under the resolved policy."""
+
+            def _factory(host: str, **kwargs: object) -> _PinnedHTTPSConnection:
+                return _PinnedHTTPSConnection(policy, host, **kwargs)
+
+            return self.do_open(
+                _factory,
+                req,
+                context=ssl_context,
+                check_hostname=ssl_context.check_hostname,
+            )
+
+    return urllib.request.build_opener(_PinnedHTTPSHandler(context=ssl_context))
+
+
 def urllib_transport(  # pragma: no cover — thin urllib I/O shim, exercised via integration
     url: str,
     *,
@@ -500,15 +569,19 @@ def urllib_transport(  # pragma: no cover — thin urllib I/O shim, exercised vi
     ``RenewToken`` path — DEC-DHAN-RENEWTOKEN-GET-001). Returns ``(status,
     body)`` for 2xx **and** 4xx/5xx (``HTTPError`` carries a status + body), so
     :meth:`DhanClient._send_once` maps non-2xx uniformly.
-    """
-    import urllib.error
-    import urllib.request
 
+    TLS egress to ``api.dhan.co`` is SPKI-pinned via :func:`_pinned_opener`
+    (DEC-DHAN-TLS-SPKI-PIN-001): a mis-issued/compromised CA presenting a
+    chain-valid cert for a non-pinned key is rejected with
+    :class:`~brutex.adapters.dhan.pinning.DhanPinMismatchError` before any
+    credentialed bytes are sent. Pinning is operator-config + opt-out-able; see
+    :mod:`brutex.adapters.dhan.pinning`.
+    """
     request = urllib.request.Request(  # noqa: S310 — https + host allow-listed by _guard_url
         url, data=body, headers=dict(headers), method=method
     )
     try:
-        with urllib.request.urlopen(  # nosec B310 — https + host allow-listed by _guard_url  # noqa: S310
+        with _pinned_opener().open(  # nosec B310 — https + host allow-listed by _guard_url
             request, timeout=timeout
         ) as resp:
             return int(resp.status), resp.read()
