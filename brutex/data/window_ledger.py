@@ -151,6 +151,37 @@ class WindowLedger:
                 last_attempt_at=None,
             )
 
+    def seed_lake_success(self, key: WindowKey, *, bars: int, now: datetime) -> bool:
+        """Seed *key* as ``SUCCESS`` ONLY if it is ABSENT — the lake cold-start — **O(1)**, atomic.
+
+        Cold-start bridge (DEC-WINDOW-LEDGER-001): on a fresh clone / lost ledger,
+        the lake's Parquet already holds bars but the ledger has no row, so a re-pull
+        would re-fetch everything (the old ``reconcile_coverage_with_lake`` rescue).
+        This seeds a ``SUCCESS`` row for a window the lake proves it already has —
+        but ONLY when the window is genuinely ABSENT. A window with ANY existing row
+        (``FAILED`` / ``PLANNED`` / ``EMPTY`` / ``SKIPPED`` / ``SUCCESS``) is left
+        untouched, so this can NEVER mask a FAILED window that needs a re-pull or
+        overwrite a settled state. Returns ``True`` iff a row was newly seeded.
+        """
+        wk = self._key(key)
+        with self._lock:
+            if wk in self._by_window:
+                return False
+            self._by_window[wk] = WindowLedgerRecord(
+                market=key.market,
+                security_id=key.security_id,
+                interval=key.interval,
+                window_start=key.start.isoformat(),
+                window_end=key.end.isoformat(),
+                status=SUCCESS,
+                bars=bars,
+                attempts=1,
+                last_error=None,
+                first_seen_at=now.isoformat(),
+                last_attempt_at=now.isoformat(),
+            )
+            return True
+
     def is_skippable(self, key: WindowKey) -> bool:
         """Return ``True`` iff *key* is SETTLED (``SUCCESS`` / ``SKIPPED``) — **O(1)**, atomic.
 

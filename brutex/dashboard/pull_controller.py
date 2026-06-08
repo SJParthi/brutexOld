@@ -75,6 +75,7 @@ from brutex.data.window_ledger_store import (
     end_pull_ledger,
     make_live_ledger_flush,
     plan_windows,
+    reconcile_ledger_with_lake,
 )
 from brutex.data.window_status_store import (
     begin_pull_status,
@@ -1250,6 +1251,20 @@ def pull_all_spot(
                 start=start.date(),
                 end=end.date(),
             )
+            # Cold-start seed (DEC-WINDOW-LEDGER-001, Stage b1): on a fresh clone
+            # the ledger is empty but the lake may already hold years of bars.
+            # Seed SUCCESS for every PLANNED window the lake already encloses (and
+            # only ABSENT rows — never overwriting a FAILED/PLANNED row) so the
+            # upcoming is_skippable flip will NOT re-pull the entire history.
+            if not dry_run:
+                reconcile_ledger_with_lake(
+                    ledger,
+                    lake_root,
+                    instruments=instruments,
+                    intervals=DHAN_FETCH_INTERVALS,
+                    start=start.date(),
+                    end=end.date(),
+                )
 
         _LOG.info(
             "universe.pull_all.start",
@@ -1579,6 +1594,18 @@ def pull_candles(
                 start=start.date(),
                 end=end.date(),
             )
+            # Cold-start seed (DEC-WINDOW-LEDGER-001, Stage b1): seed SUCCESS for
+            # this symbol's lake-enclosed ABSENT windows so the upcoming
+            # is_skippable flip won't re-pull bars the lake already holds.
+            if not dry_run:
+                reconcile_ledger_with_lake(
+                    ledger,
+                    lake_root,
+                    instruments=[instrument],
+                    intervals=DHAN_FETCH_INTERVALS,
+                    start=start.date(),
+                    end=end.date(),
+                )
 
         _LOG.info(
             "universe.pull.start",
