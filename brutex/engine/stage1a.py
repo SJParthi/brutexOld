@@ -66,11 +66,14 @@ calendar lives in exactly one place). A new IST date always starts a new day.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+import json
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final
+
+import fno_math
 
 from brutex.calendars.nse import IST
 from brutex.indicators.day_extremes import DayExtremesState
@@ -510,8 +513,321 @@ def build_bar_bits(
     return Stage1AMatrixBuilder(proximity=proximity, prior_n=prior_n).build(bars)
 
 
+# ────────────────────────────────────────────────────────────────────────
+# Walk-forward fold schedule (DEC-WALK-FORWARD-OOS-001)
+# ────────────────────────────────────────────────────────────────────────
+#
+# Today the engine has a SINGLE chronological out-of-sample split
+# (:func:`brutex.engine.validation.validate_out_of_sample` — one train block +
+# one OOS block). A lone split lets a seasonal overfit (an earnings cluster, an
+# index reconstitution week) hide inside the one test period (audit Gap #4). A
+# *rolling walk-forward* schedule scores a combo on MANY held-out folds, so a
+# combo that only worked in one season is exposed by the folds it fails.
+#
+# This section owns the **deterministic, NSE-calendar-anchored fold schedule**:
+# rolling windows of ``train_days`` trading days immediately before
+# ``test_days`` held-out trading days, shifted ``step_days`` trading days per
+# fold. "Anchored to the NSE calendar" means the windows are sized in **actual
+# IST trading days present in the stream** (:func:`trading_day_starts`), never in
+# wall-clock days — weekends/holidays are simply absent, so a fold's 5 test days
+# are 5 real sessions. The per-fold scoring + aggregation lives in
+# :mod:`brutex.engine.sweep_driver`; this is the schedule it consumes.
+#
+# Reproducibility (Golden Rule #4): the schedule carries a BLAKE3
+# :attr:`WalkForwardSchedule.schedule_hash` over its fold boundaries + window
+# parameters, which the sweep driver folds into the run-hash so a result is tied
+# to the exact fold layout it was scored on.
+
+#: Walk-forward window defaults: a 90-trading-day train window, a 5-trading-day
+#: (≈ one week) held-out test window, shifted one trading week (5 days) per fold.
+#: With ``step_days == test_days`` the test windows tile the covered range with
+#: no overlap and no gap (a clean partition); the property tests pin this.
+DEFAULT_WF_TRAIN_DAYS: Final[int] = 90
+DEFAULT_WF_TEST_DAYS: Final[int] = 5
+DEFAULT_WF_STEP_DAYS: Final[int] = 5
+
+#: Bumped if the canonical encoding fed to :func:`_walk_forward_schedule_hash`
+#: ever changes, so an old hash can never be silently reinterpreted under new
+#: encoding rules (mirrors the ``indicator_version`` discipline of the combo
+#: identity hash — DEC-WALK-FORWARD-OOS-001).
+_WF_SCHEDULE_HASH_VERSION: Final[int] = 1
+
+
+def trading_day_starts(bars: Sequence[CandleBar]) -> list[int]:
+    """Return the bar index at which each distinct IST trading day begins.
+
+    The canonical IST trading-day segmenter for the engine: one pass over the
+    bars recording the index of the first bar of every new IST calendar date —
+    the same day-rollover rule :class:`Stage1AMatrixBuilder` applies internally.
+    The result is strictly increasing; ``starts[k]`` is the first bar of trading
+    day ``k`` and ``starts[k + 1]`` (or ``len(bars)`` for the last day) is one
+    past its last bar. ``len(starts)`` is the number of distinct trading days.
+
+    O(N) one pass, O(days) memory. Bars must be in chronological order (the lake
+    / :class:`~brutex.feed.replay.ReplayFeed` contract).
+
+    Parameters
+    ----------
+    bars
+        Chronologically ordered bars for one ``(instrument, interval)``.
+
+    Returns
+    -------
+    list[int]
+        The first-bar index of each distinct IST trading day, in order.
+    """
+    starts: list[int] = []
+    prev_date: date | None = None
+    for i, bar in enumerate(bars):
+        ist_date = bar.timestamp.astimezone(IST).date()
+        if ist_date != prev_date:
+            starts.append(i)
+            prev_date = ist_date
+    return starts
+
+
+@dataclass(frozen=True, slots=True)
+class WalkForwardFold:
+    """One rolling walk-forward fold: a train window strictly before a test window.
+
+    Each bound comes in two coordinate systems, both half-open ``[start, end)``:
+
+    * **day** indices into :func:`trading_day_starts` (the NSE-calendar anchor);
+    * **bar** indices into the bar stream (the slice the scorer actually uses).
+
+    ``train_end_day == test_start_day`` and ``train_end_bar == test_start_bar``
+    (contiguous, no embargo): the training window ends exactly where the held-out
+    test window begins, so no test bar can ever inform the training side — the
+    no-look-ahead invariant the property tests assert (and the
+    :class:`~brutex.feed.lookahead.LookAheadBarrier` re-checks in the sweep
+    driver).
+
+    Attributes
+    ----------
+    fold_index
+        Zero-based position of this fold in the schedule (chronological).
+    train_start_day, train_end_day
+        The fold's training window in trading-day indices ``[start, end)``.
+    test_start_day, test_end_day
+        The fold's held-out test window in trading-day indices ``[start, end)``.
+    train_start_bar, train_end_bar
+        The training window mapped to bar indices ``[start, end)``.
+    test_start_bar, test_end_bar
+        The test window mapped to bar indices ``[start, end)``.
+    """
+
+    fold_index: int
+    train_start_day: int
+    train_end_day: int
+    test_start_day: int
+    test_end_day: int
+    train_start_bar: int
+    train_end_bar: int
+    test_start_bar: int
+    test_end_bar: int
+
+
+@dataclass(frozen=True, slots=True)
+class WalkForwardSchedule:
+    """A deterministic rolling walk-forward fold schedule + its identity hash.
+
+    Produced by :func:`build_walk_forward_schedule`; consumed by the per-fold
+    scorer in :mod:`brutex.engine.sweep_driver`. Holds the ordered folds plus the
+    window parameters and the stream shape they were derived from, and a BLAKE3
+    :attr:`schedule_hash` over the fold boundaries + parameters so a downstream
+    run-hash can pin the exact layout (Golden Rule #4 reproducibility).
+
+    Attributes
+    ----------
+    folds
+        The walk-forward folds in chronological order (at least one — the builder
+        raises rather than return an empty schedule).
+    train_days, test_days, step_days
+        The window parameters the schedule was built with (trading days).
+    n_trading_days
+        Distinct IST trading days in the source stream.
+    n_bars
+        Total bars in the source stream.
+    schedule_hash
+        64-char BLAKE3 hex digest of the canonical fold layout — see
+        :func:`_walk_forward_schedule_hash`.
+    """
+
+    folds: tuple[WalkForwardFold, ...]
+    train_days: int
+    test_days: int
+    step_days: int
+    n_trading_days: int
+    n_bars: int
+    schedule_hash: str
+
+    @property
+    def n_folds(self) -> int:
+        """Number of walk-forward folds in the schedule (``>= 1``)."""
+        return len(self.folds)
+
+
+def _day_to_bar(day_starts: Sequence[int], n_bars: int, day_index: int) -> int:
+    """Map a half-open trading-day index to its bar index.
+
+    For an in-range day this is its first-bar index; for the past-the-end day
+    index (``== len(day_starts)``, used as an exclusive upper bound) it is
+    ``n_bars`` (one past the last bar). :func:`build_walk_forward_schedule` only
+    ever passes day indices in ``[0, len(day_starts)]``, so no other case arises.
+    """
+    if day_index < len(day_starts):
+        return day_starts[day_index]
+    return n_bars
+
+
+def _walk_forward_schedule_hash(
+    folds: tuple[WalkForwardFold, ...],
+    train_days: int,
+    test_days: int,
+    step_days: int,
+    n_trading_days: int,
+    n_bars: int,
+) -> str:
+    """Return the 64-char BLAKE3 hex digest of a fold schedule's identity.
+
+    Hashes a canonical JSON encoding of the window parameters, the source
+    stream's shape (``n_trading_days`` + ``n_bars``), and every fold's **bar**
+    boundaries (the executed contract — the day boundaries are implied by them)
+    under a version tag. Including the stream shape closes the otherwise-possible
+    aliasing where two streams of different length yielding coincidentally
+    identical fold bar-bounds would share a hash. Assuming BLAKE3's
+    collision-resistance, two schedules then share a digest only when their
+    parameters, stream shape, and every fold's ``[train_start_bar, train_end_bar,
+    test_start_bar, test_end_bar]`` all match. Uses the same
+    ``fno_math.blake3_hash`` primitive and canonical-JSON rules as the combo
+    identity hash (:func:`brutex.strategies.combo.combo_hash`) — one hashing
+    source of truth (CLAUDE.md §11 COMMON).
+    """
+    payload = json.dumps(
+        {
+            "v": _WF_SCHEDULE_HASH_VERSION,
+            "train_days": train_days,
+            "test_days": test_days,
+            "step_days": step_days,
+            "n_trading_days": n_trading_days,
+            "n_bars": n_bars,
+            "folds": [
+                [f.train_start_bar, f.train_end_bar, f.test_start_bar, f.test_end_bar]
+                for f in folds
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return fno_math.blake3_hash(payload.encode("utf-8")).hex()
+
+
+def build_walk_forward_schedule(
+    bars: Sequence[CandleBar],
+    *,
+    train_days: int = DEFAULT_WF_TRAIN_DAYS,
+    test_days: int = DEFAULT_WF_TEST_DAYS,
+    step_days: int = DEFAULT_WF_STEP_DAYS,
+) -> WalkForwardSchedule:
+    """Build the deterministic rolling walk-forward schedule for a bar stream.
+
+    Segments the stream into IST trading days (:func:`trading_day_starts`), then
+    lays rolling folds of ``train_days`` training days immediately before
+    ``test_days`` held-out test days, shifting ``step_days`` trading days per
+    fold. The rolling-window arithmetic reuses the proven
+    :func:`brutex.metrics.wfo.walk_forward_splits` (``ROLLING`` scheme, no
+    embargo) — one source of truth for window stepping + the
+    ``train_stop <= test_start`` no-look-ahead guarantee (CLAUDE.md §11 COMMON) —
+    over the trading-day axis, and maps each day window to bar-index slices.
+
+    The splitter is imported lazily so importing this module does not pull in the
+    statistics stack (numpy via ``brutex.metrics``); the schedule build is a
+    once-per-sweep call, never a per-bar hot path.
+
+    Parameters
+    ----------
+    bars
+        Chronologically ordered bars for one ``(instrument, interval)``
+        (non-empty).
+    train_days
+        Trading days in each fold's training window (``>= 1``).
+    test_days
+        Trading days in each fold's held-out test window (``>= 1``).
+    step_days
+        Trading days to shift the windows between successive folds (``>= 1``).
+        ``step_days == test_days`` tiles the test windows with no overlap/gap.
+
+    Returns
+    -------
+    WalkForwardSchedule
+        The ordered folds + window parameters + the BLAKE3 schedule hash.
+
+    Raises
+    ------
+    ValueError
+        If ``bars`` is empty, any window parameter is ``< 1``, or the stream has
+        too few trading days to fit even one fold
+        (``n_trading_days < train_days + test_days``).
+    """
+    if not bars:
+        raise ValueError("build_walk_forward_schedule: bars must be non-empty")
+    # Lazy import keeps this module's load free of the numpy-backed statistics
+    # package; the rolling-window stepping itself is numpy-free.
+    from brutex.metrics.wfo import WFOScheme, walk_forward_splits
+
+    day_starts = trading_day_starts(bars)
+    n_days = len(day_starts)
+    n_bars = len(bars)
+    walks = walk_forward_splits(
+        n_days,
+        WFOScheme.ROLLING,
+        train_size=train_days,
+        test_size=test_days,
+        step=step_days,
+    )
+    if not walks:
+        raise ValueError(
+            f"build_walk_forward_schedule: {n_days} trading day(s) is too short for "
+            f"train_days={train_days} + test_days={test_days} "
+            f"(need >= {train_days + test_days}); widen the history or shrink the windows"
+        )
+    folds = tuple(
+        WalkForwardFold(
+            fold_index=i,
+            train_start_day=walk.train_start,
+            train_end_day=walk.train_stop,
+            test_start_day=walk.test_start,
+            test_end_day=walk.test_stop,
+            train_start_bar=_day_to_bar(day_starts, n_bars, walk.train_start),
+            train_end_bar=_day_to_bar(day_starts, n_bars, walk.train_stop),
+            test_start_bar=_day_to_bar(day_starts, n_bars, walk.test_start),
+            test_end_bar=_day_to_bar(day_starts, n_bars, walk.test_stop),
+        )
+        for i, walk in enumerate(walks)
+    )
+    return WalkForwardSchedule(
+        folds=folds,
+        train_days=train_days,
+        test_days=test_days,
+        step_days=step_days,
+        n_trading_days=n_days,
+        n_bars=n_bars,
+        schedule_hash=_walk_forward_schedule_hash(
+            folds, train_days, test_days, step_days, n_days, n_bars
+        ),
+    )
+
+
 __all__ = [
     "ANCHOR_DEPENDENT_MASK",
+    "DEFAULT_WF_STEP_DAYS",
+    "DEFAULT_WF_TEST_DAYS",
+    "DEFAULT_WF_TRAIN_DAYS",
     "Stage1AMatrixBuilder",
+    "WalkForwardFold",
+    "WalkForwardSchedule",
     "build_bar_bits",
+    "build_walk_forward_schedule",
+    "trading_day_starts",
 ]
