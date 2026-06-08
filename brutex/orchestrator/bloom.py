@@ -108,12 +108,42 @@ from __future__ import annotations
 import math
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
-from fastbloom_rs import BloomFilter as _RustBloomFilter
 
 from brutex.models import BruteXError
+
+if TYPE_CHECKING:
+    from fastbloom_rs import BloomFilter as _RustBloomFilter
+
+
+def _load_rust_bloom() -> type[_RustBloomFilter]:
+    """Import the ``fastbloom_rs`` Rust filter lazily, on first construction.
+
+    Mirrors the lazy ``fno_math`` import in :func:`_popcount_bytes`: merely
+    importing this module — e.g. when ``pytest-cov`` pre-imports
+    ``brutex.orchestrator.*`` for a *standalone* strict per-module coverage
+    gate — must NOT initialise the ``fastbloom_rs`` PyO3 extension. That wheel
+    is built ``abi3-py38`` (``cp37-abi3``), and PyO3 forbids initialising such
+    a module more than once per interpreter process; an import-time init
+    collides with the coverage machinery's own source-package import and aborts
+    the gate with *"PyO3 modules compiled for CPython 3.8 or older may only be
+    initialized once per interpreter process"*. Deferring the import to the one
+    site that actually needs the class (``BloomFilter.__post_init__``) keeps the
+    package import side-effect-free, so the per-module gate can be re-enabled
+    (DEC-ORCH-LAZY-BLOOM-001). The real-filter behaviour is unchanged: the very
+    first ``BloomFilter()`` triggers exactly one init, identical to the prior
+    eager top-level import.
+    """
+    from fastbloom_rs import BloomFilter as RustBloomFilter
+
+    # mypy treats fastbloom_rs as Any (ignore_missing_imports override) while
+    # pyright resolves the real class; the explicit local annotation narrows the
+    # Any for mypy (no `no-any-return`) without a `cast` that pyright would flag
+    # as unnecessary (reportUnnecessaryCast) — satisfying BOTH type checkers.
+    cls: type[_RustBloomFilter] = RustBloomFilter
+    return cls
 
 
 def _popcount_bytes(raw: bytes) -> int:
@@ -288,7 +318,7 @@ class BloomFilter:
         # 4. Initialise the Rust-backed filter. fastbloom-rs picks its
         #    own (m, k) internally from the same (n, p) inputs; we
         #    expose our computed values as properties for observability.
-        self._impl = _RustBloomFilter(self.capacity, self.fpr_target)
+        self._impl = _load_rust_bloom()(self.capacity, self.fpr_target)
         self._lock = threading.Lock()
 
         # 5. Emit init event. Hostile lens §9: every init must structlog

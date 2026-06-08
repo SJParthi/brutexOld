@@ -54,7 +54,10 @@ jobs:
   python-mutation:
     name: Python mutation (mutmut)
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # 120 (was 90): the added Deflated-Sharpe module + the two Rust wheel
+    # builds (fno_math, trading_core) need headroom over the orchestrator-only
+    # baseline (DEC-MUTATION-GATE-RANKING-001).
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
       - name: Set up Python
@@ -63,16 +66,46 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install deps
-        run: pip install -e ".[dev]" mutmut>=2.5
+        # Pin mutmut to the 2.x line: this workflow drives the mutmut 2.x CLI
+        # (`mutmut run --paths-to-mutate … --runner … --simple-output` +
+        # `mutmut results`), which mutmut 3.x rewrote incompatibly. The prior
+        # `pip install -e ".[dev]" mutmut>=2.5` was ALSO a shell-redirect bug
+        # (`>=2.5` redirected stdout to a file named `=2.5` and left mutmut
+        # unpinned → 3.x resolved, breaking the CLI). Quote + pin <3.0.
+        # The `[data,ui]` extras + the two Rust wheels (fno_math, trading_core)
+        # mirror ci.yml's test job: `pytest tests/unit` collects the WHOLE unit
+        # suite, much of which imports brutex.strategies (→ `import fno_math`)
+        # and brutex.vocabulary (→ trading_core), so without them collection
+        # fails before a single mutant is checked (DEC-MUTATION-GATE-RANKING-001).
+        run: pip install -e ".[dev,data,ui]" "mutmut>=2.5,<3.0"
+      - name: Install Rust toolchain (for the PyO3 wheels)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install fno_math Rust extension
+        run: pip install ./rust/fno-math
+      - name: Install trading_core Rust extension
+        run: pip install ./rust/trading-core
       - name: Run mutmut on critical modules
         run: |
           set -e
-          # Target the modules where silent regressions cause the
-          # biggest damage: the FSM, retry classifier, audit chain,
-          # rate limiter, store. Tests on these already hit 100% line
-          # coverage; mutmut verifies that the coverage is *meaningful*.
+          # Target the modules where silent regressions cause the biggest
+          # damage. Two groups:
+          #
+          # 1. Orchestration / data plumbing (the FSM, retry classifier, audit
+          #    chain, rate limiter, store, partition/parser) — broad
+          #    `tests/unit` runner.
+          # 2. Ranking / metrics MATH (DEC-MUTATION-GATE-RANKING-001): the
+          #    Deflated-Sharpe engine. A silent regression in the DSR corrupts
+          #    the Stage-3 overfit gate and therefore strategy selection, so it
+          #    is now a first-class mutation target alongside the orchestrator.
+          #    (compute.py [Sharpe] + ranking [composite] carry their own
+          #    hardening tests this PR landed; folding them into the
+          #    zero-survivor gate is the tracked next ratchet — they retain a
+          #    handful of provably-equivalent mutants, see MIGRATION #590.)
+          #
+          # Tests on these already hit 100% line coverage; mutmut verifies that
+          # the coverage is *meaningful* (the tests detect a behaviour change).
           mutmut run \
-            --paths-to-mutate brutex/orchestrator/state.py,brutex/orchestrator/retry.py,brutex/orchestrator/audit.py,brutex/orchestrator/rate_limiter.py,brutex/orchestrator/store.py,brutex/data/partition.py,brutex/data/parser.py \
+            --paths-to-mutate brutex/orchestrator/state.py,brutex/orchestrator/retry.py,brutex/orchestrator/audit.py,brutex/orchestrator/rate_limiter.py,brutex/orchestrator/store.py,brutex/data/partition.py,brutex/data/parser.py,brutex/metrics/deflated_sharpe.py \
             --runner "pytest tests/unit -x -q --no-header" \
             --simple-output
           # Fail if any mutants survived
