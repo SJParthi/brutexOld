@@ -76,6 +76,7 @@ from brutex.dashboard.pull_controller import (
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.option_sink import NullOptionBarSink
+from brutex.data.window_ledger_store import begin_pull_ledger, end_pull_ledger
 from brutex.models import Instrument, InstrumentType
 from brutex.observability.correlation import pull_id_scope
 from brutex.orchestrator.parallel import (
@@ -474,6 +475,11 @@ def pull_options(
         # lake are not re-fetched (no wasted Dhan quota on a re-run);
         # DEC-FETCH-COVERAGE-WIRING-001.
         coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
+        # Unified per-window ledger (DEC-WINDOW-LEDGER-001, PR-4b): load/migrate the
+        # durable ledger so each committed option cursor is recorded into the SAME
+        # browsable DB table as spot. (Option windows are keyed per-series, so they
+        # are recorded as they commit — not pre-PLANNED like spot.)
+        ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
 
         _LOG.info(
             "universe.pull_options.start",
@@ -500,10 +506,12 @@ def pull_options(
             on_progress=on_progress,
             on_series_tick=on_series_tick,
             coverage=coverage,
+            ledger=ledger,
             run_parallel=runtime.run_parallel,
         )
         # Persist the windows just completed so the next pull skips them.
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
+        end_pull_ledger(ledger, lake_root, dry_run=dry_run)
 
         # Aggregate the per-series reports + quarantined failures by underlying.
         failed_by_symbol: dict[str, int] = {}

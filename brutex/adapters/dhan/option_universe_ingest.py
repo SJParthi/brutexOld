@@ -67,6 +67,7 @@ from brutex.adapters.dhan.option_ingest import (
     ingest_rolling_option_series,
 )
 from brutex.data.fetch_coverage import FetchCoverage
+from brutex.data.window_ledger import WindowLedger
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.universe_phases import RunParallel
@@ -293,6 +294,7 @@ def run_dhan_options_ingest(
     on_progress: ProgressHook | None = None,
     on_series_tick: Callable[[], None] | None = None,
     coverage: FetchCoverage | None = None,
+    ledger: WindowLedger | None = None,
     run_parallel: RunParallel | None = None,
 ) -> OptionsUniverseReport:
     """Fan out the rolling-option pull over the whole options universe.
@@ -458,6 +460,7 @@ def run_dhan_options_ingest(
                 on_timeout=on_timeout,
                 on_success=on_success,
                 coverage=coverage,
+                ledger=ledger,
             )
 
     # Drain the SERIES fan-out, re-aggregating into a per-underlying bucket keyed

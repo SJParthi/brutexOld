@@ -395,6 +395,35 @@ class TestResumeCursorAndTransactionalCommit:
         assert report.complete is True
         assert cov.completed_count == 2  # both windows marked only after commit
 
+    def test_complete_series_records_every_window_in_the_ledger(self) -> None:
+        # DEC-WINDOW-LEDGER-001 (PR-4b): each committed option cursor is recorded
+        # into the unified ledger DB as SUCCESS (same table as spot).
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        ledger = WindowLedger()
+        client = _FakeClient([{"data": {"ce": _side(), "pe": None}} for _ in range(2)])
+        ingest_rolling_option_series(
+            client,
+            _FakeSink(),
+            security_id="13",
+            exch_id="NSE",
+            underlying_symbol="NIFTY",
+            exchange_segment="NSE_FNO",
+            instrument="OPTIDX",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            start=self._START,
+            end=self._END,
+            ledger=ledger,
+            max_retry_passes=2,
+            retry_backoff=lambda _i: None,
+        )
+        records = ledger.records()
+        assert len(records) == 2  # both committed cursors recorded
+        assert {r.status for r in records} == {SUCCESS}
+
     def test_backoff_invoked_with_zero_based_attempt_indices(self) -> None:
         # Two retries before success → backoff(0), backoff(1) (bounded exponential).
         seen: list[int] = []
