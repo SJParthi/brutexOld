@@ -86,10 +86,10 @@ from brutex.dashboard.pull_controller import (
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.request_logging import emit_request_log
-from brutex.dashboard.verdict_banner import banner_for
 from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
+from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.timeframe_materialize import (
     INTRADAY_TF_INTERVALS,
     MATERIALIZABLE_TFS,
@@ -1601,7 +1601,7 @@ def build_app(
         return JSONResponse(_pull_job.snapshot().to_dict())
 
     @app.get("/api/v1/universe/pull-verdict")
-    async def api_universe_pull_verdict() -> JSONResponse:  # pragma: no cover — thin route over the 100%-tested banner_for helper
+    async def api_universe_pull_verdict() -> JSONResponse:  # pragma: no cover — thin route
         """GET /api/v1/universe/pull-verdict — the last finished pull's banner verdict.
 
         The MANUAL surface of DEC-VERDICT-BANNER-001: maps the most-recent
