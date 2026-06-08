@@ -95,6 +95,47 @@ class _FailingAdapter(SyntheticDhanAdapter):
         raise DhanBadRequestError(f"boom for {interval}")
 
 
+class _NoDataDH905Adapter(SyntheticDhanAdapter):
+    """Every fetch raises Dhan's ``DH-905`` "no data present" 400.
+
+    The vendor's DEFINITIVE "no bars exist for this range" answer (not a defect).
+    It must be classified as ``no_data`` (settled / EMPTY), NOT ``failed`` — so it
+    can never pin the pull at ``transient_residual`` / a manual re-pull
+    (DEC-DHAN-NODATA-SETTLED-001).
+    """
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        """Always raise a ``DH-905`` no-data 400 — drives the known-gap branch."""
+        del symbol, exchange, interval, start, end
+        raise DhanBadRequestError(
+            'HTTP 400 bad request: {"errorCode":"DH-905",'
+            '"errorMessage":"System is unable to fetch data ... or no data present"}'
+        )
+
+
+class _DailyGapAdapter(SyntheticDhanAdapter):
+    """The EXACT operator case: ``1minute`` returns bars, ``1day`` is a ``DH-905`` gap.
+
+    Mirrors NIFTY NEXT 50 (daily history starts after 2021-01-01). The symbol must
+    finish ``completed=1`` (1m) + ``no_data=1`` (1d known gap) → verdict ``clean``,
+    NOT ``transient_residual`` (DEC-DHAN-NODATA-SETTLED-001).
+    """
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        """Return bars for ``1minute``; raise ``DH-905`` for the ``1day`` series."""
+        if interval == "1day":
+            raise DhanBadRequestError(
+                'HTTP 400 bad request: {"errorCode":"DH-905","errorMessage":"... no data present"}'
+            )
+        return super().fetch_ohlcv(
+            symbol=symbol, exchange=exchange, interval=interval, start=start, end=end
+        )
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Dataclass surface
 # ────────────────────────────────────────────────────────────────────────
@@ -572,6 +613,46 @@ class TestPullAllSpot:
         assert failed.verdict.needs_operator is True
         assert failed.verdict.pending_windows == 2
         assert failed.to_dict()["verdict"]["needs_operator"] is True
+
+    def test_dh905_no_data_is_settled_not_a_failure(self, tmp_path: Path) -> None:
+        # DEC-DHAN-NODATA-SETTLED-001: a Dhan DH-905 "no data present" is the
+        # vendor's DEFINITIVE answer (no bars for this range), NOT a transient
+        # failure. It must count as no_data (settled), never as a failed/pending
+        # window — so it can NEVER pin the pull at transient_residual / the manual
+        # "Re-pull to finish" button (the operator's NIFTY NEXT 50 daily trap).
+        all_gap = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=lambda _root, _insts: (_NoDataDH905Adapter(), NullBarSink()),
+        )
+        assert all_gap.total_failed == 0  # NOT counted as a failure
+        assert all_gap.total_no_data == 2  # both intervals settled as known-gap
+        # Nothing completed + only no-data → known_gap_only (no operator action),
+        # NOT transient_residual — zero manual re-pull is asked.
+        assert all_gap.verdict.kind == "known_gap_only"
+        assert all_gap.verdict.needs_operator is False
+        assert all_gap.verdict.pending_windows == 0
+
+    def test_daily_gap_with_intraday_data_is_clean(self, tmp_path: Path) -> None:
+        # The EXACT operator case (NIFTY NEXT 50): 1minute completes, the 1day
+        # series is a DH-905 known gap. The pull must be CLEAN (no pending window,
+        # no manual button), because the only "miss" is a settled no-data gap
+        # (DEC-DHAN-NODATA-SETTLED-001).
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=lambda _root, _insts: (_DailyGapAdapter(), NullBarSink()),
+        )
+        assert report.total_completed == 1  # the 1minute series landed bars
+        assert report.total_failed == 0  # the 1day DH-905 is NOT a failure
+        assert report.total_no_data == 1  # the 1day gap is settled no-data
+        assert report.verdict.kind == "clean"
+        assert report.verdict.needs_operator is False
+        assert report.verdict.pending_windows == 0
 
     def test_preflight_dead_refuses_pull(self, tmp_path: Path) -> None:
         """A DEAD pre-flight REFUSES the bulk pull — no ingest, loud auth_expired verdict."""
