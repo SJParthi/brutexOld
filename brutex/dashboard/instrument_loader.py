@@ -33,7 +33,7 @@ import io
 import threading
 from collections.abc import Callable
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -47,8 +47,16 @@ from brutex.adapters.dhan.ntm import (
     resolve_ntm_index,
 )
 from brutex.dashboard.nse_constituents import fetch_constituent_csv
+from brutex.dashboard.ntm_cache import (
+    default_cache_dir,
+    load_cached_constituent_csv,
+    save_constituent_csv,
+)
 from brutex.dashboard.universe_query import universe_summary
 from brutex.models import InstrumentFormatError
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _LOG = structlog.get_logger(__name__)
 
@@ -69,10 +77,43 @@ _NTM_INDEX_NAME = "NIFTY TOTAL MARKET"
 _LOAD_LOCK: threading.Lock = threading.Lock()
 
 
+def _resolve_constituent_csv(
+    opener: Callable[[str], str] | None,
+    *,
+    cache_dir: Path,
+) -> tuple[str, bool]:
+    """Live NTM constituent fetch with a last-good disk-cache fallback.
+
+    DEC-NTM-CONSTITUENT-CACHE-001. Returns ``(csv_text, from_cache)``:
+
+    * a successful NON-EMPTY live fetch → ``(live, False)`` and REFRESHES the cache
+      (so the next outage has a fresh fallback);
+    * a live failure (``niftyindices`` timeout / bot-block) OR an empty live result
+      → fall back to the cache → ``(cached, True)`` when a cache exists.
+
+    The live exception is swallowed ONLY when a cache can cover it; with NO cache
+    the exception PROPAGATES so the caller's single fail-soft handler notes it
+    (keeping one tested except site instead of a provably-dead nested one).
+    """
+    try:
+        live = fetch_constituent_csv(_NTM_INDEX_NAME, opener=opener) or ""
+    except (OSError, DhanInstrumentError, IndexDiscoveryError):
+        cached = load_cached_constituent_csv(cache_dir=cache_dir)
+        if cached:
+            return cached, True
+        raise  # no cache to cover it → let the caller's fail-soft handler note why
+    if live:
+        save_constituent_csv(live, cache_dir=cache_dir)
+        return live, False
+    cached = load_cached_constituent_csv(cache_dir=cache_dir)
+    return (cached, True) if cached else ("", False)
+
+
 def _ntm_admission(
     master_text: str,
     *,
     constituent_opener: Callable[[str], str] | None,
+    cache_dir: Path,
 ) -> tuple[frozenset[str], frozenset[int], dict[str, Any]]:
     """Best-effort NTM admission args from the already-fetched master (+ its CSV).
 
@@ -116,11 +157,16 @@ def _ntm_admission(
         constituents=0,
     )
 
-    # 2) NTM IS in the master — now fetch + resolve its constituents (network,
-    #    best-effort). A fetch/parse failure degrades to INDEX-ONLY admission (NTM
-    #    still appears as an index) with the reason noted — never breaks the load.
+    # 2) NTM IS in the master — fetch + resolve its constituents (network,
+    #    best-effort) WITH a last-good disk-cache fallback (DEC-NTM-CONSTITUENT-
+    #    CACHE-001). niftyindices.com bot-blocks / times out plain HTTP clients
+    #    (works in a browser, hangs in urllib), so a live failure would otherwise
+    #    crater the universe from ~750 to the ~211 base set. The cache holds the
+    #    last successful CSV — AND the operator can DROP the browser-downloaded
+    #    ``ind_niftytotalmarket_list.csv`` at the cache path to seed it — so a
+    #    timeout falls back to ~750. A successful live fetch refreshes the cache.
     try:
-        csv_text = fetch_constituent_csv(_NTM_INDEX_NAME, opener=constituent_opener)
+        csv_text, from_cache = _resolve_constituent_csv(constituent_opener, cache_dir=cache_dir)
         if csv_text:
             plan = prepare_ntm_reference_plan(
                 rows,
@@ -131,12 +177,22 @@ def _ntm_admission(
             )
             reference_security_ids |= set(plan.reference_security_ids)
             note["constituents"] = plan.constituent_count
+            if from_cache:
+                note["constituent_note"] = (
+                    "live NTM constituent source unavailable — used last-good cache "
+                    "(~/.brutex/cache/ntm_constituents.csv)"
+                )
         else:
             note["constituent_note"] = "no constituent CSV mapping for NIFTY TOTAL MARKET"
     except (OSError, DhanInstrumentError, IndexDiscoveryError) as exc:
-        # URLError/HTTPError/timeout (OSError) or a parse/discovery hiccup — keep
-        # the index, drop the constituents this load, surface why.
-        note["constituent_note"] = f"constituent resolution failed: {exc}"
+        # Live fetch failed with NO cache to fall back to (a cache would have been
+        # returned above), or the CSV was unparseable — keep the index, drop the
+        # constituents this load, surface why + how to seed the cache.
+        note["constituent_note"] = (
+            f"constituent resolution failed: {exc} "
+            "(no cache yet — drop ind_niftytotalmarket_list.csv at "
+            "~/.brutex/cache/ntm_constituents.csv to seed the fallback)"
+        )
 
     return extra_index_symbols, frozenset(reference_security_ids), note
 
@@ -147,6 +203,7 @@ def load_instrument_master(
     http_get: Callable[[str], str] | None = None,
     run_id_factory: Callable[[], str] | None = None,
     constituent_opener: Callable[[str], str] | None = None,
+    constituent_cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Keylessly download + parse the Dhan instrument master into *store*.
 
@@ -170,6 +227,15 @@ def load_instrument_master(
         tests). When ``None`` (production) the real best-effort niftyindices
         opener is used. NTM enrichment runs only AFTER NTM's index row is found
         in the master, so a master without NTM never touches the network here.
+    constituent_cache_dir
+        Directory for the last-good NTM constituent CSV cache (DEC-NTM-CONSTITUENT-
+        CACHE-001). ``None`` (production) uses
+        :func:`~brutex.dashboard.ntm_cache.default_cache_dir` (``~/.brutex/cache/``).
+        A successful live fetch refreshes the cache; a failed/empty fetch falls back
+        to it, so a transient niftyindices timeout no longer craters the universe
+        from ~750 to the ~211 base set. The operator can also seed the fallback by
+        dropping the browser-downloaded ``ind_niftytotalmarket_list.csv`` at
+        ``<cache_dir>/ntm_constituents.csv``. Tests inject a tmp dir for isolation.
 
     Returns
     -------
@@ -201,8 +267,11 @@ def load_instrument_master(
         # the refresh (no double download). NTM enrichment is fail-soft — it never
         # blocks the keyless core load (DEC-NIFTY-TOTAL-MARKET-LOAD-001).
         master_text = fetch(INSTRUMENT_MASTER_DETAILED_URL)
+        cache_dir = (
+            constituent_cache_dir if constituent_cache_dir is not None else default_cache_dir()
+        )
         extra_index_symbols, reference_security_ids, ntm_note = _ntm_admission(
-            master_text, constituent_opener=constituent_opener
+            master_text, constituent_opener=constituent_opener, cache_dir=cache_dir
         )
         if ntm_note.get("admitted"):
             _LOG.info("universe.load.ntm_admitted", **ntm_note)
