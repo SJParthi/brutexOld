@@ -108,12 +108,22 @@ from __future__ import annotations
 import math
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
-from fastbloom_rs import BloomFilter as _RustBloomFilter
 
 from brutex.models import BruteXError
+
+if TYPE_CHECKING:
+    # Imported under TYPE_CHECKING only so the runtime import of this module
+    # does NOT pull in the fastbloom_rs PyO3 extension. The real runtime import
+    # is deferred to BloomFilter.__post_init__ (DEC-LAZY-FASTBLOOM-IMPORT-001):
+    # constructing a filter is the only place the extension is actually needed,
+    # so importing a sibling orchestrator module (replay/audit/state/
+    # rate_limiter) for its strict per-module coverage gate no longer triggers
+    # fastbloom_rs's "abi3-py38 may only be initialized once per interpreter
+    # process" error during pytest-cov's pre-import.
+    from fastbloom_rs import BloomFilter as _RustBloomFilter
 
 
 def _popcount_bytes(raw: bytes) -> int:
@@ -288,6 +298,12 @@ class BloomFilter:
         # 4. Initialise the Rust-backed filter. fastbloom-rs picks its
         #    own (m, k) internally from the same (n, p) inputs; we
         #    expose our computed values as properties for observability.
+        #    Imported lazily here (not at module top) so importing the
+        #    orchestrator package for a sibling module's strict coverage
+        #    gate never triggers the fastbloom_rs PyO3 single-init limit
+        #    (DEC-LAZY-FASTBLOOM-IMPORT-001).
+        from fastbloom_rs import BloomFilter as _RustBloomFilter
+
         self._impl = _RustBloomFilter(self.capacity, self.fpr_target)
         self._lock = threading.Lock()
 

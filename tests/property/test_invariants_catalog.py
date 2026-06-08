@@ -48,6 +48,13 @@ look-ahead enforcer :class:`brutex.feed.lookahead.LookAheadBarrier` (the
 instrumented bar accessor): for any current bar index ``N``, every access index
 ``> N`` raises and every access ``≤ N`` is allowed.
 
+DEC-P20-REPLAY-HARNESS-001 (``docs/MIGRATION.md`` entry #580) then promoted
+**P-20** to a live integration test in
+``tests/integration/test_replay_audit_log.py``, driving the audit→Parquet
+replay harness :mod:`brutex.data.audit_replay`: a tiny ingest job writes
+deterministic Parquet + audits each write, and replaying the audit log alone
+rebuilds byte-identical partition files.
+
 Decision: DEC-PHASE1-INVARIANT-CATALOG-001 (MIGRATION entry #250).
 """
 
@@ -207,4 +214,4 @@ def test_p_19_parquet_writer_deterministic() -> None:
 
 def test_p_20_replay_byte_equals_original() -> None:
     """P-20: ``replay(audit_log) → Parquet`` byte-equals the original Parquet."""
-    pytest.skip("Phase 2 implementation pending (audit → Parquet replay)")
+    pytest.skip("implemented in tests/integration/test_replay_audit_log.py")

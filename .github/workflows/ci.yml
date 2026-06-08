@@ -698,24 +698,48 @@ jobs:
           else
             echo "(brutex.observability.standard_monitor test file not present yet — gate inactive)"
           fi
-          # DEC-L3-REPLAY-ORACLE-001 (2026-05-25, MIGRATION entry #241):
-          # ratchet brutex.orchestrator.replay (the L3 audit-log replay
-          # oracle) into the strict per-module 100% gate. 18 unit tests
-          # cover project_subjects, compute_replay_diff,
-          # replay_audit_to_diff round-trip, and assert_dedup_consistent
-          # silence/raise/truncate semantics. Closes 2026-05-25 audit
-          # row 14 (L3 replay was UNIMPLEMENTED).
+          # DEC-LAZY-FASTBLOOM-IMPORT-001 (2026-06-08, MIGRATION entry #579):
+          # the 4 bloom-free orchestrator modules (replay/audit/state/
+          # rate_limiter) are now RE-ENABLED in the strict per-module 100%
+          # gate. The previous blocker — pytest-cov's `--cov=brutex.orchestrator.X`
+          # PRE-IMPORTS the module, dragging in orchestrator/__init__ → pipeline
+          # → store → bloom → fastbloom_rs, whose abi3-py38 wheel may init only
+          # ONCE per interpreter, so the test's own import double-inited and
+          # collection errored — was resolved by making bloom.py import
+          # fastbloom_rs LAZILY (deferred from module top into
+          # BloomFilter.__post_init__). Importing a bloom-free sibling no longer
+          # touches the extension, so these four gates collect + pass at strict
+          # 100% line + branch. (bloom/store/pipeline/quota_tracker still
+          # construct filters and remain global-cov only — separate ratchet.)
           #
-          # NOTE 2026-05-25: same fastbloom_rs PyO3 ABI3 limit as the
-          # brutex.notifications.wiring strict gate above — see that
-          # comment for the full rationale. Module IS covered at 100%
-          # line + branch by the global --cov=brutex step.
-          # if compgen -G "tests/unit/test_orchestrator_replay.py" > /dev/null; then
-          #   pytest --cov=brutex.orchestrator.replay --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_replay.py
-          # else
-          #   echo "(brutex.orchestrator.replay test file not present yet — gate inactive)"
-          # fi
-          echo "(brutex.orchestrator.replay strict gate temporarily disabled — see notifications.wiring comment for fastbloom_rs PyO3 ABI3 detail)"
+          # DEC-L3-REPLAY-ORACLE-001 (2026-05-25, MIGRATION entry #241):
+          # brutex.orchestrator.replay (the L3 audit-log replay oracle).
+          if compgen -G "tests/unit/test_orchestrator_replay.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.replay --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_replay.py
+          else
+            echo "(brutex.orchestrator.replay test file not present yet — gate inactive)"
+          fi
+          # brutex.orchestrator.audit — hash-chained JSONL audit log (NFR-OBS-003).
+          if compgen -G "tests/unit/test_orchestrator_audit.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit.py
+          else
+            echo "(brutex.orchestrator.audit test file not present yet — gate inactive)"
+          fi
+          # brutex.orchestrator.state — work-item FSM (FR-ING-014). The final
+          # defensive 'unhandled outcome' raise is now exercised directly.
+          if compgen -G "tests/unit/test_orchestrator_state.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.state --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_state.py
+          else
+            echo "(brutex.orchestrator.state test file not present yet — gate inactive)"
+          fi
+          # brutex.orchestrator.rate_limiter — adaptive token bucket (FR-ING-017).
+          # Supplementary tests cover the upshift path, loop-cap safety net,
+          # downshift-rps validation, and the clock-anomaly upshift guards.
+          if compgen -G "tests/unit/test_orchestrator_rate_limiter.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.rate_limiter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_rate_limiter.py
+          else
+            echo "(brutex.orchestrator.rate_limiter test file not present yet — gate inactive)"
+          fi
           # DEC-COV-001 step 18: 3-module indicator backfill batch
           # (DEC-INDICATOR-COVERAGE-001, ratchets the last 3 Track 1
           # indicator modules below strict-100% up to the gate). Each
@@ -1242,19 +1266,28 @@ jobs:
             echo "(brutex.data.option_sink test file not present yet — gate inactive)"
           fi
           # DEC-COVERAGE-INCREMENTAL-001: modules taken to 100% line+branch.
-          # NOTE: only NON-orchestrator modules get a per-module pytest-cov gate.
-          # A `--cov=brutex.orchestrator.*` target makes pytest-cov PRE-IMPORT the
-          # module (→ orchestrator/__init__ → bloom → fastbloom_rs), and that PyO3
-          # wheel may init only ONCE per interpreter — the test's own import then
-          # double-inits and collection errors. (This is why no existing
-          # orchestrator per-module gate is active.) audit.py +
-          # adaptive_rate_limiter.py reach 100% in the whole-package `--cov=brutex`
-          # run above (their tests are added in this PR); they are NOT given an
-          # isolated per-module gate for that reason.
+          # NOTE (UPDATED DEC-LAZY-FASTBLOOM-IMPORT-001, MIGRATION entry #579):
+          # the bloom-free orchestrator modules (replay/audit/state/rate_limiter)
+          # NOW have active strict per-module gates above — bloom.py's
+          # fastbloom_rs import was made LAZY so a `--cov=brutex.orchestrator.X`
+          # pre-import of a bloom-free sibling no longer drags the abi3-py38
+          # wheel through its once-per-interpreter init. Modules that DO
+          # construct a Bloom filter (bloom/store/pipeline/quota_tracker) still
+          # hit the limit under an isolated gate and remain whole-package
+          # `--cov=brutex`-only — a separate ratchet.
           if compgen -G "tests/unit/test_data_sink.py" > /dev/null; then
             pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py
           else
             echo "(brutex.data.sink test file not present yet — gate inactive)"
+          fi
+          # DEC-P20-REPLAY-HARNESS-001 (2026-06-08, MIGRATION entry #580):
+          # brutex.data.audit_replay — the audit-log → Parquet replay harness
+          # (invariant P-20). Unit file pins the edge/failure branches; the
+          # integration file drives the byte-equal roundtrip + L3 consistency.
+          if compgen -G "tests/unit/test_audit_replay.py" > /dev/null; then
+            pytest --cov=brutex.data.audit_replay --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_audit_replay.py tests/integration/test_replay_audit_log.py
+          else
+            echo "(brutex.data.audit_replay test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/integration/test_strategies_runner.py" > /dev/null; then
             pytest --cov=brutex.strategies.runner --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/integration/test_strategies_runner.py
