@@ -137,6 +137,9 @@ class TelegramEventKind(StrEnum):
     RATE_LIMIT_DOWNSHIFT = "rate_limit.downshift"
     RATE_LIMIT_RECOVERED = "rate_limit.recovered"
     WORKER_HUNG = "worker.hung"
+    SYMBOL_WINDOW_FAILURE = (
+        "symbol.window_failure"  # 100% window-failure for a symbol (DEC-RATE-STORM-WATCHDOG-001)
+    )
     AUTH_RENEW_FAILED = "auth.renew_failed"  # Dhan RenewToken refused (DEC-TELEGRAM-WIRE-001)
     RUN_HEARTBEAT = "run.heartbeat"
     RUN_COMPLETE = "run.complete"
@@ -156,6 +159,10 @@ DEDUPE_WINDOW_SECONDS: Final[dict[str, float]] = {
     TelegramEventKind.RATE_LIMIT_DOWNSHIFT: 60.0,
     TelegramEventKind.RATE_LIMIT_RECOVERED: 60.0,
     TelegramEventKind.WORKER_HUNG: 0.0,
+    # The RetryStormWatchdog already guarantees one alert per symbol, so the
+    # notifier window is 0.0 (no extra coalescing) — the dedupe_key (symbol)
+    # is still set as defence-in-depth against a re-run within one process.
+    TelegramEventKind.SYMBOL_WINDOW_FAILURE: 0.0,
     TelegramEventKind.AUTH_RENEW_FAILED: 300.0,  # coalesce a renew-retry storm (5 min)
     TelegramEventKind.RUN_HEARTBEAT: 600.0,  # 10 min
     TelegramEventKind.RUN_COMPLETE: 0.0,
