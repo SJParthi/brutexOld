@@ -22,11 +22,21 @@ Design (CLAUDE.md §11 COMMON + Golden Rule #1/#10):
   classifies from an injected ``now`` + a parsed ``expiry_deadline`` (epoch
   seconds) or an explicit ``probe_auth_failed`` flag. Every branch is unit-tested
   at 100% line+branch.
-* The **live probe** (:func:`probe_token_live`) is the ONLY network seam — it
-  fires one ``RenewToken`` to learn the fresh ``expiryTime`` (and, as a bonus,
-  pushes the token ``+24h``); a refusal means the token is dead. It is
-  ``# pragma: no cover`` (needs a real token + the ``urllib`` transport, absent
-  in CI), exactly like the other live-only Dhan seams.
+* The **live probes** (:func:`probe_token_data_live` / :func:`probe_token_live`)
+  are the ONLY network seams. The DEFAULT gate uses :func:`probe_token_data_live`
+  — it fires ONE tiny ``charts/intraday`` call (the exact surface a pull needs)
+  and classifies the token **dead only on a genuine auth failure**
+  (:func:`~brutex.adapters.dhan.errors.is_auth_failure` — a 401/403 OR a 400
+  carrying ``DH-906`` / "Invalid Token"), so a transient 429 / 5xx / timeout /
+  plain-400 / no-data outcome NEVER false-deads a working token
+  (DEC-TOKEN-PREFLIGHT-DATAPROBE-001). The legacy :func:`probe_token_live` fires
+  one ``RenewToken`` to learn the fresh ``expiryTime`` (and push the token
+  ``+24h``) — but ``RenewToken`` is a POOR validity oracle (it only renews
+  *web-generated, active* tokens and refuses TOTP-/OAuth-minted ones that are
+  perfectly valid for data calls — ``docs/dhan-ref/02``), so it too now treats
+  ONLY an :func:`~brutex.adapters.dhan.errors.is_auth_failure` as dead. Both are
+  ``# pragma: no cover`` (need a real token + the ``urllib`` transport, absent in
+  CI), exactly like the other live-only Dhan seams.
 
 **Honest envelope (Golden Rule #10):** the pre-flight can only CLASSIFY + ADVISE
 — it cannot revive a dead token. A ``dead`` verdict means a human must regenerate
@@ -41,13 +51,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal
 
+from brutex.adapters.dhan.errors import DhanError, is_auth_failure
 from brutex.adapters.dhan.pull_verdict import PullVerdict, classify_pull
 from brutex.adapters.dhan.token_keepalive import RENEW_BEFORE_EXPIRY_S
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import date
 
+    from brutex.adapters.dhan.adapter import DhanMarketAdapter
     from brutex.adapters.dhan.client import DhanClient
+    from brutex.models import Instrument
+
+#: Track-1's fetched intraday interval label — the 1-minute base the data probe
+#: hits (matches ``DHAN_FETCH_INTERVALS``; the adapter resamples everything else).
+_PROBE_INTERVAL: Final[str] = "1minute"
+
+#: Lookback (days) for the data probe's tiny window. A short recent span is
+#: enough to learn "does this token fetch bars?"; an all-holiday span returns
+#: empty/no-data, which is correctly classified NOT-dead (it is not an auth fail).
+_PROBE_LOOKBACK_DAYS: Final[int] = 7
 
 #: The three mutually-exclusive token states, worst → best for branching clarity.
 TokenState = Literal["dead", "expiring_soon", "valid"]
@@ -161,6 +184,45 @@ def classify_token(
     return classify_token_lifetime(expiry_deadline - now, expiring_threshold_s=expiring_threshold_s)
 
 
+def classify_data_probe(
+    error: DhanError | None,
+    *,
+    now: float,
+    expiring_threshold_s: float = RENEW_BEFORE_EXPIRY_S,
+) -> TokenPreflight:
+    """Classify a DATA-endpoint probe outcome — DEAD only on a genuine auth failure.
+
+    The data probe (one tiny ``charts/intraday`` call) tests the exact thing a
+    pull needs: can this token fetch bars? The mapping (DEC-TOKEN-PREFLIGHT-
+    DATAPROBE-001) deliberately reuses the project's single source of truth for
+    "the token died", :func:`~brutex.adapters.dhan.errors.is_auth_failure`, so the
+    pre-flight GATE can never be more trigger-happy than the in-pull fail-fast
+    guard it fronts:
+
+    * ``error is None`` — the probe fetched (or got an empty / no-data window)
+      WITHOUT an auth failure: the token works → **valid**.
+    * ``is_auth_failure(error)`` (a 401/403, or a 400 carrying ``DH-906`` /
+      "Invalid Token") — conclusively **dead**: a human must regenerate the token.
+    * any OTHER :class:`~brutex.adapters.dhan.errors.DhanError` (429 / 5xx /
+      timeout / transport / plain-400 / ``DH-905`` no-data) — transient or
+      unrelated, NOT a dead token: report **valid** so the pull PROCEEDS (the
+      in-pull guard still catches a real mid-pull death). This is the fix for the
+      false-dead loop where a transient ``RenewToken`` hiccup — or a token
+      ``RenewToken`` structurally refuses — wrongly aborted every pull.
+
+    Pure + O(1) (one predicate + the :func:`classify_token` dispatch). ``now`` is
+    injected (epoch seconds) so tests are deterministic; ``remaining_seconds`` is
+    ``None`` (the data probe learns no expiry — it only proves the token is alive).
+    """
+    auth_failed = error is not None and is_auth_failure(error)
+    return classify_token(
+        probe_auth_failed=auth_failed,
+        expiry_deadline=None,
+        now=now,
+        expiring_threshold_s=expiring_threshold_s,
+    )
+
+
 def preflight_pull_verdict(
     preflight: TokenPreflight, *, auth_cause: str | None = None
 ) -> PullVerdict | None:
@@ -224,19 +286,20 @@ def probe_token_live(  # pragma: no cover — live Dhan token + RenewToken netwo
     import time
 
     from brutex.adapters.dhan.auth import renew_token
-    from brutex.adapters.dhan.errors import DhanError
     from brutex.adapters.dhan.token_keepalive import parse_expiry_deadline
 
     clock = now if now is not None else time.time
     try:
         info = renew_token(client, pace=pace)
-    except DhanError:
-        return classify_token(
-            probe_auth_failed=True,
-            expiry_deadline=None,
-            now=clock(),
-            expiring_threshold_s=expiring_threshold_s,
-        )
+    except DhanError as exc:
+        # NARROW: a RenewToken refusal is the token's death ONLY when it is a
+        # genuine auth failure (is_auth_failure — 401/403 or DH-906). A transient
+        # 429 / 5xx / timeout — or a 400 from a token RenewToken structurally
+        # refuses (TOTP-/OAuth-minted) — must NOT false-dead a token that can
+        # still fetch data (DEC-TOKEN-PREFLIGHT-DATAPROBE-001). On a non-auth
+        # error we report "valid" so the pull proceeds; the in-pull fail-fast
+        # guard still catches a real mid-pull death.
+        return classify_data_probe(exc, now=clock(), expiring_threshold_s=expiring_threshold_s)
     deadline = parse_expiry_deadline(info.expiry_time, now=clock)
     return classify_token(
         probe_auth_failed=False,
@@ -246,11 +309,63 @@ def probe_token_live(  # pragma: no cover — live Dhan token + RenewToken netwo
     )
 
 
+def probe_token_data_live(  # pragma: no cover — live Dhan token + data network, absent in CI
+    adapter: DhanMarketAdapter,
+    instrument: Instrument,
+    *,
+    today: date | None = None,
+    now: Callable[[], float] | None = None,
+    expiring_threshold_s: float = RENEW_BEFORE_EXPIRY_S,
+) -> TokenPreflight:
+    """Probe the LIVE token with ONE tiny ``charts/intraday`` call (the DEFAULT gate).
+
+    DEC-TOKEN-PREFLIGHT-DATAPROBE-001. Fires a single 1-minute fetch for
+    *instrument* over a short recent window (:data:`_PROBE_LOOKBACK_DAYS` days,
+    ending the *today* reference) through the live
+    :class:`~brutex.adapters.dhan.adapter.DhanMarketAdapter` — the EXACT surface a
+    bulk pull uses — and classifies via :func:`classify_data_probe`:
+
+    * the fetch returns (bars OR an empty / no-data window) → **valid**;
+    * a genuine auth failure (:func:`~brutex.adapters.dhan.errors.is_auth_failure`
+      — 401/403 or a ``DH-906`` 400) → **dead**;
+    * any other :class:`~brutex.adapters.dhan.errors.DhanError` (429 / 5xx /
+      timeout / transport / ``DH-905``) → **valid** (proceed — not a dead token).
+
+    This is the wrong-oracle fix: unlike ``RenewToken`` (which refuses TOTP-/OAuth-
+    minted tokens that ARE valid for data — ``docs/dhan-ref/02``), a data probe
+    asks the only question that matters: *can this token pull bars?* ``# pragma: no
+    cover`` — needs a real token + network; its decision logic is the 100%-covered
+    pure :func:`classify_data_probe`.
+    """
+    import time
+    from datetime import UTC, datetime, timedelta
+
+    clock = now if now is not None else time.time
+    ref = today if today is not None else datetime.now(UTC).date()
+    # ``end`` is the EXCLUSIVE half-open boundary the adapter tiles on (it maps an
+    # inclusive end day D to D+1 itself), so a [ref - lookback, ref) window is a
+    # plausible recent span without ever requesting the future.
+    probe_start = ref - timedelta(days=_PROBE_LOOKBACK_DAYS)
+    try:
+        adapter.fetch_ohlcv(
+            symbol=instrument.symbol_name,
+            exchange=instrument.exch_id,
+            interval=_PROBE_INTERVAL,
+            start=probe_start,
+            end=ref,
+        )
+    except DhanError as exc:
+        return classify_data_probe(exc, now=clock(), expiring_threshold_s=expiring_threshold_s)
+    return classify_data_probe(None, now=clock(), expiring_threshold_s=expiring_threshold_s)
+
+
 __all__ = [
     "TokenPreflight",
     "TokenState",
+    "classify_data_probe",
     "classify_token",
     "classify_token_lifetime",
     "preflight_pull_verdict",
+    "probe_token_data_live",
     "probe_token_live",
 ]

@@ -1650,11 +1650,15 @@ def cmd_fetch(
             # token_preflight's pure tests).
             from brutex.adapters.dhan.token_preflight import (  # pragma: no cover — live
                 preflight_pull_verdict,
-                probe_token_live,
+                probe_token_data_live,
             )
 
+            # DATA probe (DEC-TOKEN-PREFLIGHT-DATAPROBE-001): a tiny charts/intraday
+            # call over the first fetched instrument, dead ONLY on a real auth
+            # failure — so a transient hiccup (or a RenewToken-ineligible token that
+            # is valid for data) no longer false-aborts the pull.
             _refuse = preflight_pull_verdict(  # pragma: no cover — live
-                probe_token_live(adapter.client, pace=pace)
+                probe_token_data_live(adapter, fetch_instruments[0])
             )
             if _refuse is not None:  # pragma: no cover — live
                 print(f"[brutex] {_refuse.headline} {_refuse.action}", file=sys.stderr)
