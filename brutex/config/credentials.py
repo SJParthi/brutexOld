@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import tempfile
 from collections.abc import Mapping
@@ -93,6 +94,70 @@ def normalise_token(value: str) -> str:
     left untouched (the token is an opaque JWT).
     """
     return value.strip()
+
+
+#: A Dhan access token is a JWT (``CLAUDE.md`` §6: "header ``access-token``
+#: (JWT, 24h)") — exactly three base64url segments joined by ``.``
+#: (``header.payload.signature``). A clipboard paste that drops characters
+#: almost always loses or empties the trailing signature segment, collapsing
+#: the segment count, so a structural JWT check is a fast, offline catch for
+#: the dominant paste-truncation failure mode (DEC-CREDS-JWT-SHAPE-001).
+_JWT_SEGMENTS: Final[int] = 3
+
+#: A single JWT segment: non-empty base64url (the JWT-unpadded alphabet,
+#: ``A-Z a-z 0-9 - _``). An empty or otherwise-charactered segment means the
+#: paste was truncated or corrupted.
+_B64URL_SEGMENT: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def token_shape_problem(token: str) -> str | None:
+    """Return a reason *token* is not a well-formed JWT, or ``None`` when it is.
+
+    A Dhan access token is a JWT (``CLAUDE.md`` §6) — exactly three non-empty
+    base64url segments joined by ``.`` (``header.payload.signature``). A
+    clipboard paste that drops characters almost always loses or empties the
+    trailing signature segment, collapsing the segment count, so this
+    structural check catches the dominant truncation failure mode **offline,
+    before a doomed token is ever saved** (DEC-CREDS-JWT-SHAPE-001). It is the
+    web-form save guard's first line of defence against the ``DH-906 Invalid
+    Token`` failures an incomplete paste produces.
+
+    This is a STRUCTURAL check, and it is honest about its limits: it reliably
+    catches a token that lost a whole segment, or whose paste introduced a
+    non-base64url character, or has an empty segment. A token clipped *within*
+    its (3rd) segment but still leaving three segments can pass this check —
+    the live pre-flight data-probe (``token_preflight``) is the backstop for
+    that residual case.
+
+    Parameters
+    ----------
+    token
+        The pasted access token. Surrounding whitespace is stripped before the
+        check (mirrors :func:`normalise_token`), so a trailing newline is not
+        mistaken for malformation.
+
+    Returns
+    -------
+    str | None
+        A human-readable, **secret-free** reason (segment count / length only,
+        never the token value) when the token is malformed; ``None`` when the
+        token has a valid JWT shape.
+    """
+    stripped = token.strip()
+    segments = stripped.split(".")
+    if len(segments) != _JWT_SEGMENTS:
+        return (
+            f"access token is not a JWT: expected {_JWT_SEGMENTS} dot-separated "
+            f"segments, found {len(segments)} ({len(stripped)} chars) — the "
+            f"paste looks truncated. Clear the field and re-paste the FULL token."
+        )
+    if any(_B64URL_SEGMENT.match(seg) is None for seg in segments):
+        return (
+            "access token is not a JWT: a segment is empty or contains "
+            "non-base64url characters — the paste looks truncated or corrupt. "
+            "Clear the field and re-paste the FULL token."
+        )
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,4 +501,5 @@ __all__ = [
     "normalise_token",
     "resolve_dhan_file_credentials",
     "save_dhan_credentials",
+    "token_shape_problem",
 ]
