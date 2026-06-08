@@ -1255,16 +1255,17 @@ def pull_all_spot(
             # the ledger is empty but the lake may already hold years of bars.
             # Seed SUCCESS for every PLANNED window the lake already encloses (and
             # only ABSENT rows — never overwriting a FAILED/PLANNED row) so the
-            # upcoming is_skippable flip will NOT re-pull the entire history.
-            if not dry_run:
-                reconcile_ledger_with_lake(
-                    ledger,
-                    lake_root,
-                    instruments=instruments,
-                    intervals=DHAN_FETCH_INTERVALS,
-                    start=start.date(),
-                    end=end.date(),
-                )
+            # upcoming is_skippable flip will NOT re-pull the entire history. A
+            # non-None ledger already implies a live (non-dry-run) pull —
+            # ``begin_pull_ledger`` returns None for dry_run — so no extra guard.
+            reconcile_ledger_with_lake(
+                ledger,
+                lake_root,
+                instruments=instruments,
+                intervals=DHAN_FETCH_INTERVALS,
+                start=start.date(),
+                end=end.date(),
+            )
 
         _LOG.info(
             "universe.pull_all.start",
@@ -1596,16 +1597,17 @@ def pull_candles(
             )
             # Cold-start seed (DEC-WINDOW-LEDGER-001, Stage b1): seed SUCCESS for
             # this symbol's lake-enclosed ABSENT windows so the upcoming
-            # is_skippable flip won't re-pull bars the lake already holds.
-            if not dry_run:
-                reconcile_ledger_with_lake(
-                    ledger,
-                    lake_root,
-                    instruments=[instrument],
-                    intervals=DHAN_FETCH_INTERVALS,
-                    start=start.date(),
-                    end=end.date(),
-                )
+            # is_skippable flip won't re-pull bars the lake already holds. A
+            # non-None ledger already implies a live pull (begin_pull_ledger
+            # returns None for dry_run), so no extra dry-run guard is needed.
+            reconcile_ledger_with_lake(
+                ledger,
+                lake_root,
+                instruments=[instrument],
+                intervals=DHAN_FETCH_INTERVALS,
+                start=start.date(),
+                end=end.date(),
+            )
 
         _LOG.info(
             "universe.pull.start",
