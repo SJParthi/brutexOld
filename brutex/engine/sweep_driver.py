@@ -23,8 +23,12 @@ not a hidden assumption.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Final
+
+import fno_math
 
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import (
@@ -33,11 +37,21 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_bits,
     mask_to_entry_signals,
 )
-from brutex.engine.stage1a import build_bar_bits
+from brutex.engine.stage1a import (
+    DEFAULT_WF_STEP_DAYS,
+    DEFAULT_WF_TEST_DAYS,
+    DEFAULT_WF_TRAIN_DAYS,
+    WalkForwardFold,
+    WalkForwardSchedule,
+    build_bar_bits,
+    build_walk_forward_schedule,
+)
 from brutex.engine.trade_sim import simulate_trades
+from brutex.feed.errors import LookAheadError
+from brutex.feed.lookahead import LookAheadBarrier, LookAheadReport, verify_with_barrier
 from brutex.metrics.compute import ResultMetrics, compute_metrics
 from brutex.metrics.types import ClosedTrade, EquityCurve
-from brutex.ranking import MIN_TRADES, RankedCombo, rank_combos
+from brutex.ranking import MIN_TRADES, RankedCombo, passes_gates, rank_combos
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
 
@@ -440,13 +454,468 @@ def rank_sweep_over_bits(
     )
 
 
+# ────────────────────────────────────────────────────────────────────────
+# Walk-forward mode (DEC-WALK-FORWARD-OOS-001)
+# ────────────────────────────────────────────────────────────────────────
+#
+# A single chronological OOS split (``validation.validate_out_of_sample``) lets a
+# seasonal overfit hide in the one test block (audit Gap #4). Walk-forward mode
+# scores a combo on EVERY held-out fold of a rolling
+# :class:`~brutex.engine.stage1a.WalkForwardSchedule` (train 90d / test 5d /
+# shift 1w by default) and aggregates the per-fold verdicts, so a combo that only
+# worked in one season is exposed by the folds it fails.
+#
+# Two correctness pillars, both inherited from the proven OOS validator
+# (``brutex.engine.validation``):
+#
+# 1. **No anchor artifact.** ``bar_bits`` is built ONCE over the FULL stream, so
+#    every fold's first test day keeps its real prior-day pivots/Fib/PDH-PDL
+#    (its prior day is the last train day). Slicing the *trade simulation* at the
+#    IST day boundaries the schedule is anchored to — never rebuilding per fold —
+#    avoids clearing those first-day anchors.
+# 2. **No look-ahead.** Each fold's training window ends exactly where its
+#    held-out test window begins (``train_end_bar == test_start_bar``). Before any
+#    scoring, :func:`verify_walk_forward_no_lookahead` re-proves this through the
+#    named P-06 :class:`~brutex.feed.lookahead.LookAheadBarrier`; a leaky schedule
+#    raises rather than scoring silently.
+#
+# Reproducibility (Golden Rule #4): :func:`_walk_forward_run_hash` folds the
+# schedule's BLAKE3 hash into the run-hash, so a walk-forward result is tied to
+# the exact fold layout it was scored on.
+
+#: Walk-forward screening verdict threshold: a combo "holds up" out-of-sample
+#: when it clears the 5 hard rejection gates on at least this fraction of the
+#: held-out folds. A SCREENING heuristic (Golden Rule #10 — honest limits), not a
+#: spec-locked gate: the spec's positive-Sharpe WFO pass-rate gate lives in
+#: :mod:`brutex.metrics.wfo`; this is the engine-mode "robust across folds" signal
+#: callers can tighten. Pinned here so it has one source of truth.
+WALK_FORWARD_PASS_RATE_THRESHOLD: Final[float] = 0.6
+
+#: Exit-mode-agnostic mode label fed to the walk-forward run-hash (distinguishes a
+#: walk-forward run-identity from a single-shot ``evaluate_combo`` one).
+_WALK_FORWARD_MODE_LABEL: Final[str] = "walk_forward"
+
+
+@dataclass(frozen=True, slots=True)
+class FoldResult:
+    """One combo's metrics on a single walk-forward fold (train + held-out test).
+
+    Attributes
+    ----------
+    fold_index
+        The fold's zero-based position in the schedule.
+    train_metrics, test_metrics
+        The combo's metrics on the fold's training window and its held-out test
+        window, both from the identical :func:`metrics_for_mask` core (directly
+        comparable).
+    test_gates_held
+        ``True`` iff the test-window metrics clear the 5 hard rejection gates
+        (:func:`brutex.ranking.passes_gates`) — the per-fold "passed" signal the
+        aggregate pass-rate counts.
+    """
+
+    fold_index: int
+    train_metrics: ResultMetrics
+    test_metrics: ResultMetrics
+    test_gates_held: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WalkForwardResult:
+    """A combo's full walk-forward outcome: per-fold metrics + the aggregate verdict.
+
+    Attributes
+    ----------
+    schedule
+        The fold schedule the combo was scored on (carries the ``schedule_hash``).
+    fold_results
+        One :class:`FoldResult` per fold, in chronological order.
+    folds_passed
+        Number of folds whose held-out test cleared the hard gates.
+    pass_rate
+        ``folds_passed / n_folds`` — the fraction of held-out folds that held up
+        (in ``[0, 1]``; ``n_folds >= 1`` always).
+    mean_test_sharpe, min_test_sharpe
+        Mean and worst (minimum) of the defined per-fold test Sharpe ratios, or
+        ``None`` if no fold produced a defined Sharpe. Full precision — never
+        rounded (DEC-MONEY-2DP-001 is money-only).
+    run_hash
+        64-char BLAKE3 hex run-identity binding this combo + params to the fold
+        schedule (:func:`_walk_forward_run_hash`).
+    """
+
+    schedule: WalkForwardSchedule
+    fold_results: tuple[FoldResult, ...]
+    folds_passed: int
+    pass_rate: float
+    mean_test_sharpe: float | None
+    min_test_sharpe: float | None
+    run_hash: str
+
+    @property
+    def n_folds(self) -> int:
+        """Number of walk-forward folds scored (``>= 1``)."""
+        return len(self.fold_results)
+
+    @property
+    def held_up(self) -> bool:
+        """``True`` iff the held-out pass-rate clears the screening threshold.
+
+        See :data:`WALK_FORWARD_PASS_RATE_THRESHOLD` for the honest-envelope
+        caveat — this is a screening signal, not a spec-locked guarantee.
+        """
+        return self.pass_rate >= WALK_FORWARD_PASS_RATE_THRESHOLD
+
+
+def verify_walk_forward_no_lookahead(schedule: WalkForwardSchedule) -> LookAheadReport:
+    """Re-prove a fold schedule's no-look-ahead invariant via the P-06 barrier.
+
+    Drives the named **P-06** :class:`~brutex.feed.lookahead.LookAheadBarrier`
+    across the folds: for each fold the barrier's cursor is set to the last bar
+    the training side is permitted to use (``test_start_bar - 1``), then the
+    fold's latest training bar (``train_end_bar - 1``) is accessed. Because the
+    schedule builds contiguous windows (``train_end_bar == test_start_bar``) the
+    latest training bar equals the cursor and the access is allowed; a regression
+    that let a training window reach into (or past) its own test window would push
+    the accessed index above the cursor and raise
+    :class:`~brutex.feed.errors.LookAheadError`, which
+    :func:`~brutex.feed.lookahead.verify_with_barrier` folds into the returned
+    report (and logs as one structured audit event — Golden Rule #8).
+
+    The fold cursors are non-decreasing (folds are chronological, so
+    ``test_start_bar`` only grows), so the barrier's forward-only ``advance_to``
+    is never violated by a well-formed schedule.
+
+    Parameters
+    ----------
+    schedule
+        The :class:`~brutex.engine.stage1a.WalkForwardSchedule` to re-verify.
+
+    Returns
+    -------
+    LookAheadReport
+        ``passed=True`` with the barrier statistics when every fold's training
+        window lies strictly before its test window; ``passed=False`` carrying the
+        violation string otherwise.
+    """
+    barrier = LookAheadBarrier(record=True)
+
+    def _walk() -> None:
+        for fold in schedule.folds:
+            barrier.advance_to(fold.test_start_bar - 1)
+            barrier.access(fold.train_end_bar - 1)
+
+    return verify_with_barrier(_walk, barrier)
+
+
+def _walk_forward_run_hash(
+    schedule_hash: str,
+    *,
+    required_mask: int,
+    direction: Side,
+    tf_minutes: int,
+    stop_loss_paisa: int | None,
+    take_profit_paisa: int | None,
+    start_equity_paisa: int,
+    proximity: ProximityParams | None,
+    prior_n: int,
+) -> str:
+    """Return the 64-char BLAKE3 run-hash for a walk-forward combo evaluation.
+
+    Binds the combo (mask + direction + TF + exit/cost/proximity params) to the
+    **fold schedule** (via ``schedule_hash``) so a result is reproducible only
+    against the exact layout it was scored on (Golden Rule #4). Uses the same
+    ``fno_math.blake3_hash`` primitive + canonical-JSON rules + ``\\x1f`` field
+    join as :func:`brutex.strategies.combo.combo_hash` — one hashing source of
+    truth (CLAUDE.md §11 COMMON).
+    """
+    prox = proximity if proximity is not None else ProximityParams()
+    canonical = json.dumps(
+        {
+            "mask": required_mask,
+            "direction": direction.name,
+            "tf_minutes": tf_minutes,
+            "stop_loss_paisa": stop_loss_paisa,
+            "take_profit_paisa": take_profit_paisa,
+            "start_equity_paisa": start_equity_paisa,
+            "pivot_proximity_bps": prox.pivot_proximity_bps,
+            "pdh_pdl_proximity_bps": prox.pdh_pdl_proximity_bps,
+            "fib_proximity_bps": prox.fib_proximity_bps,
+            "prior_n": prior_n,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    payload = "\x1f".join([_WALK_FORWARD_MODE_LABEL, schedule_hash, canonical])
+    return fno_math.blake3_hash(payload.encode("utf-8")).hex()
+
+
+def _score_fold(
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    fold: WalkForwardFold,
+    required_mask: int,
+    *,
+    direction: Side,
+    tf_minutes: int,
+    stop_loss_paisa: int | None,
+    take_profit_paisa: int | None,
+    start_equity_paisa: int,
+) -> FoldResult:
+    """Score one mask on one fold's train + held-out test windows.
+
+    Slices the pre-built (full-stream) ``bar_bits`` + ``bars`` at the fold's bar
+    boundaries and runs the SAME mask through the shared :func:`metrics_for_mask`
+    core on each window — building once and slicing (never rebuilding per fold)
+    preserves the test window's first-day anchors (see the module note).
+    """
+    train_metrics = metrics_for_mask(
+        bars[fold.train_start_bar : fold.train_end_bar],
+        bar_bits[fold.train_start_bar : fold.train_end_bar],
+        required_mask,
+        direction=direction,
+        tf_minutes=tf_minutes,
+        stop_loss_paisa=stop_loss_paisa,
+        take_profit_paisa=take_profit_paisa,
+        start_equity_paisa=start_equity_paisa,
+    )
+    test_metrics = metrics_for_mask(
+        bars[fold.test_start_bar : fold.test_end_bar],
+        bar_bits[fold.test_start_bar : fold.test_end_bar],
+        required_mask,
+        direction=direction,
+        tf_minutes=tf_minutes,
+        stop_loss_paisa=stop_loss_paisa,
+        take_profit_paisa=take_profit_paisa,
+        start_equity_paisa=start_equity_paisa,
+    )
+    return FoldResult(
+        fold_index=fold.fold_index,
+        train_metrics=train_metrics,
+        test_metrics=test_metrics,
+        test_gates_held=passes_gates(test_metrics),
+    )
+
+
+def _aggregate_folds(
+    schedule: WalkForwardSchedule,
+    fold_results: list[FoldResult],
+    run_hash: str,
+) -> WalkForwardResult:
+    """Fold the per-fold results into the aggregate :class:`WalkForwardResult`.
+
+    Counts held-out gate passes for the pass-rate, and summarises the defined
+    per-fold test Sharpe ratios (mean + worst). ``schedule.n_folds >= 1`` always,
+    so the pass-rate denominator is never zero.
+    """
+    folds_passed = sum(1 for fr in fold_results if fr.test_gates_held)
+    test_sharpes = [
+        fr.test_metrics.sharpe_ratio
+        for fr in fold_results
+        if fr.test_metrics.sharpe_ratio is not None
+    ]
+    mean_test_sharpe = sum(test_sharpes) / len(test_sharpes) if test_sharpes else None
+    min_test_sharpe = min(test_sharpes) if test_sharpes else None
+    return WalkForwardResult(
+        schedule=schedule,
+        fold_results=tuple(fold_results),
+        folds_passed=folds_passed,
+        pass_rate=folds_passed / schedule.n_folds,
+        mean_test_sharpe=mean_test_sharpe,
+        min_test_sharpe=min_test_sharpe,
+        run_hash=run_hash,
+    )
+
+
+def evaluate_combo_walk_forward(
+    bars: Sequence[CandleBar],
+    required_mask: int,
+    *,
+    direction: Side,
+    tf_minutes: int,
+    stop_loss_paisa: int | None = None,
+    take_profit_paisa: int | None = None,
+    start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
+    proximity: ProximityParams | None = None,
+    prior_n: int = 3,
+    train_days: int = DEFAULT_WF_TRAIN_DAYS,
+    test_days: int = DEFAULT_WF_TEST_DAYS,
+    step_days: int = DEFAULT_WF_STEP_DAYS,
+) -> WalkForwardResult:
+    """Backtest ONE combo across a rolling walk-forward schedule → its WF outcome.
+
+    Builds the NSE-calendar-anchored fold schedule
+    (:func:`~brutex.engine.stage1a.build_walk_forward_schedule`), re-proves its
+    no-look-ahead invariant through the P-06 barrier
+    (:func:`verify_walk_forward_no_lookahead`), then scores the combo on every
+    fold's train + held-out test window from a SINGLE full-stream ``bar_bits``
+    build (correct first-day anchors everywhere), and aggregates the per-fold
+    verdicts. The result's ``run_hash`` binds the combo to the exact fold layout.
+
+    Parameters
+    ----------
+    bars
+        Chronologically ordered bars for one ``(instrument, interval)`` spanning
+        at least ``train_days + test_days`` distinct IST trading days (non-empty).
+    required_mask
+        The u64 strategy combo to walk-forward (``0`` enters on every bar).
+    direction, tf_minutes, stop_loss_paisa, take_profit_paisa, start_equity_paisa, proximity, prior_n
+        As :func:`evaluate_combo`.
+    train_days, test_days, step_days
+        Rolling-window sizes in trading days (see
+        :func:`~brutex.engine.stage1a.build_walk_forward_schedule`).
+
+    Returns
+    -------
+    WalkForwardResult
+        The per-fold metrics + the aggregate held-out pass-rate, Sharpe summary,
+        and reproducible run-hash.
+
+    Raises
+    ------
+    ValueError
+        If ``bars`` is empty or there are too few trading days for one fold.
+    LookAheadError
+        If the generated schedule fails the P-06 no-look-ahead re-check (a
+        regression guard — a well-formed schedule never trips it).
+    """
+    if not bars:
+        raise ValueError("evaluate_combo_walk_forward: bars must be non-empty")
+    schedule = build_walk_forward_schedule(
+        bars, train_days=train_days, test_days=test_days, step_days=step_days
+    )
+    report = verify_walk_forward_no_lookahead(schedule)
+    if not report.passed:
+        raise LookAheadError(f"walk-forward schedule failed P-06 re-check: {report.violation}")
+    bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=prior_n)
+    fold_results = [
+        _score_fold(
+            bars,
+            bar_bits,
+            fold,
+            required_mask,
+            direction=direction,
+            tf_minutes=tf_minutes,
+            stop_loss_paisa=stop_loss_paisa,
+            take_profit_paisa=take_profit_paisa,
+            start_equity_paisa=start_equity_paisa,
+        )
+        for fold in schedule.folds
+    ]
+    run_hash = _walk_forward_run_hash(
+        schedule.schedule_hash,
+        required_mask=required_mask,
+        direction=direction,
+        tf_minutes=tf_minutes,
+        stop_loss_paisa=stop_loss_paisa,
+        take_profit_paisa=take_profit_paisa,
+        start_equity_paisa=start_equity_paisa,
+        proximity=proximity,
+        prior_n=prior_n,
+    )
+    return _aggregate_folds(schedule, fold_results, run_hash)
+
+
+def walk_forward_sweep(
+    bars: Sequence[CandleBar],
+    masks: Sequence[int],
+    *,
+    direction: Side,
+    tf_minutes: int,
+    stop_loss_paisa: int | None = None,
+    take_profit_paisa: int | None = None,
+    start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
+    proximity: ProximityParams | None = None,
+    prior_n: int = 3,
+    train_days: int = DEFAULT_WF_TRAIN_DAYS,
+    test_days: int = DEFAULT_WF_TEST_DAYS,
+    step_days: int = DEFAULT_WF_STEP_DAYS,
+) -> list[tuple[int, WalkForwardResult]]:
+    """Walk-forward MANY masks over the same bars → ``(mask, WalkForwardResult)`` pairs.
+
+    Builds the fold schedule and the full-stream ``bar_bits`` matrix **once** (the
+    per-bar truth-vectors and the fold layout are identical for every mask — only
+    the AND-mask differs), re-proves the schedule's no-look-ahead invariant once,
+    then scores each mask across all folds. O(1) per (mask, fold, bar) beyond the
+    shared one-time build.
+
+    Parameters
+    ----------
+    bars
+        Chronologically ordered bars for one ``(instrument, interval)`` (non-empty).
+    masks
+        The u64 strategy masks to walk-forward.
+    direction, tf_minutes, stop_loss_paisa, take_profit_paisa, start_equity_paisa, proximity, prior_n
+        As :func:`evaluate_combo`.
+    train_days, test_days, step_days
+        Rolling-window sizes in trading days.
+
+    Returns
+    -------
+    list[tuple[int, WalkForwardResult]]
+        One ``(mask, WalkForwardResult)`` pair per input mask, in input order.
+
+    Raises
+    ------
+    ValueError
+        If ``bars`` is empty or there are too few trading days for one fold.
+    LookAheadError
+        If the generated schedule fails the P-06 no-look-ahead re-check.
+    """
+    if not bars:
+        raise ValueError("walk_forward_sweep: bars must be non-empty")
+    schedule = build_walk_forward_schedule(
+        bars, train_days=train_days, test_days=test_days, step_days=step_days
+    )
+    report = verify_walk_forward_no_lookahead(schedule)
+    if not report.passed:
+        raise LookAheadError(f"walk-forward schedule failed P-06 re-check: {report.violation}")
+    bar_bits = build_bar_bits(bars, proximity=proximity, prior_n=prior_n)
+    results: list[tuple[int, WalkForwardResult]] = []
+    for mask in masks:
+        fold_results = [
+            _score_fold(
+                bars,
+                bar_bits,
+                fold,
+                mask,
+                direction=direction,
+                tf_minutes=tf_minutes,
+                stop_loss_paisa=stop_loss_paisa,
+                take_profit_paisa=take_profit_paisa,
+                start_equity_paisa=start_equity_paisa,
+            )
+            for fold in schedule.folds
+        ]
+        run_hash = _walk_forward_run_hash(
+            schedule.schedule_hash,
+            required_mask=mask,
+            direction=direction,
+            tf_minutes=tf_minutes,
+            stop_loss_paisa=stop_loss_paisa,
+            take_profit_paisa=take_profit_paisa,
+            start_equity_paisa=start_equity_paisa,
+            proximity=proximity,
+            prior_n=prior_n,
+        )
+        results.append((mask, _aggregate_folds(schedule, fold_results, run_hash)))
+    return results
+
+
 __all__ = [
     "DEFAULT_MAX_COMBOS",
     "DEFAULT_START_EQUITY_PAISA",
+    "WALK_FORWARD_PASS_RATE_THRESHOLD",
+    "FoldResult",
+    "WalkForwardResult",
     "build_equity_curve",
     "evaluate_combo",
+    "evaluate_combo_walk_forward",
     "metrics_for_mask",
     "rank_sweep",
     "rank_sweep_over_bits",
     "sweep_masks",
+    "verify_walk_forward_no_lookahead",
+    "walk_forward_sweep",
 ]
