@@ -108,7 +108,7 @@ from __future__ import annotations
 import math
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
@@ -138,9 +138,12 @@ def _load_rust_bloom() -> type[_RustBloomFilter]:
     """
     from fastbloom_rs import BloomFilter as RustBloomFilter
 
-    # fastbloom_rs ships no type stubs (mypy override ignore_missing_imports),
-    # so the imported class is Any; cast keeps the typed signature honest.
-    return cast("type[_RustBloomFilter]", RustBloomFilter)
+    # mypy treats fastbloom_rs as Any (ignore_missing_imports override) while
+    # pyright resolves the real class; the explicit local annotation narrows the
+    # Any for mypy (no `no-any-return`) without a `cast` that pyright would flag
+    # as unnecessary (reportUnnecessaryCast) — satisfying BOTH type checkers.
+    cls: type[_RustBloomFilter] = RustBloomFilter
+    return cls
 
 
 def _popcount_bytes(raw: bytes) -> int:
