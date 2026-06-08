@@ -5,6 +5,10 @@ no lake): window tiling (single + multi), pacing, session filtering,
 `data`-wrapper vs flat-payload fallback, transient-skip, and terminal-raise.
 """
 
+# Whitebox use of the module-private `_default_retry_backoff` (the bounded-backoff
+# oracle) is sanctioned for tests, mirroring `test_dhan_ingest.py`.
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -106,7 +110,13 @@ def _run(
     on_rate_limit: object = None,
     on_timeout: object = None,
     on_success: object = None,
+    max_retry_passes: int = 0,
+    retry_backoff: object = lambda _i: None,
 ) -> OptionIngestReport:
+    # ``max_retry_passes`` defaults to 0 here so a single error response is a
+    # single attempt (the in-run resume-cursor retry, DEC-OPTION-429-RECOVERY-001,
+    # is exercised by its own dedicated tests with multi-response clients). The
+    # injected no-op ``retry_backoff`` guarantees NO real sleep in any test.
     return ingest_rolling_option_series(
         client,
         sink,
@@ -125,6 +135,8 @@ def _run(
         on_rate_limit=on_rate_limit,  # type: ignore[arg-type]
         on_timeout=on_timeout,  # type: ignore[arg-type]
         on_success=on_success,  # type: ignore[arg-type]
+        max_retry_passes=max_retry_passes,
+        retry_backoff=retry_backoff,  # type: ignore[arg-type]
     )
 
 
@@ -180,11 +192,23 @@ def test_data_not_a_mapping_falls_back_to_payload() -> None:
     assert report.bars_appended == 1  # parsed from the payload-level "ce"
 
 
-def test_transient_error_skips_window() -> None:
+def test_transient_error_aborts_without_committing() -> None:
+    # A transient cursor that outruns its (here 0) retry budget ABORTS the whole
+    # series, committing NOTHING — the partition stays EMPTY, never partial
+    # (DEC-OPTION-429-RECOVERY-001). The residual is reported as still-failing so
+    # the next pull re-fetches it (the no-skip guarantee).
     client = _FakeClient([DhanServerError("HTTP 503")])
     sink = _FakeSink()
     report = _run(client, sink)
-    assert report == OptionIngestReport(windows=1, bars_appended=0, transient_failures=1)
+    assert report == OptionIngestReport(
+        windows=1,
+        bars_appended=0,
+        transient_failures=1,
+        skipped_windows=0,
+        retried_windows=0,
+        still_failed_windows=1,
+    )
+    assert report.complete is False
     assert sink.batches == []
 
 
@@ -223,6 +247,7 @@ def test_timeout_routes_to_on_timeout_not_on_rate_limit() -> None:
         on_success=lambda: oks.append(1),
     )
     assert report.transient_failures == 1
+    assert report.complete is False
     assert to == [1]
     assert rl == []
     assert oks == []
@@ -236,17 +261,190 @@ def test_rate_limit_routes_to_on_rate_limit_not_on_timeout() -> None:
     to: list[int] = []
     report = _run(client, sink, on_rate_limit=lambda: rl.append(1), on_timeout=lambda: to.append(1))
     assert report.transient_failures == 1
+    assert report.complete is False
     assert rl == [1]
     assert to == []
 
 
-def test_swallowed_429_without_a_hook_is_a_clean_skip() -> None:
+def test_swallowed_429_without_a_hook_aborts_cleanly() -> None:
     # A 429 with NO on_rate_limit hook wired (e.g. a feedback-free pull) still
-    # just skips the window — the hook guard's None branch.
+    # aborts the series cleanly via the hook guard's None branch — nothing is
+    # committed (empty, never partial).
     client = _FakeClient([DhanRateLimitError("HTTP 429")])
     sink = _FakeSink()
     report = _run(client, sink)  # no feedback hooks
-    assert report == OptionIngestReport(windows=1, bars_appended=0, transient_failures=1)
+    assert report == OptionIngestReport(
+        windows=1,
+        bars_appended=0,
+        transient_failures=1,
+        skipped_windows=0,
+        retried_windows=0,
+        still_failed_windows=1,
+    )
+    assert sink.batches == []
+
+
+class TestResumeCursorAndTransactionalCommit:
+    """A 429 mid-pagination is RESUMED to completion, or the partition is left EMPTY.
+
+    DEC-OPTION-429-RECOVERY-001 (audit Gap #2): the option series ingest is
+    transactional — a transient (429 / 5xx / timeout) cursor is re-fetched in-run
+    up to ``max_retry_passes`` extra attempts, and the sink is written + coverage
+    marked ONLY after EVERY cursor is fetched cleanly. So the partition the lake
+    holds is always COMPLETE (all windows committed) or EMPTY (nothing committed),
+    never a page-holed partial.
+    """
+
+    # date(2021,1,4) → date(2021,3,5) tiles into exactly two 30-day cursors.
+    _START = date(2021, 1, 4)
+    _END = date(2021, 3, 5)
+
+    def test_429_at_first_cursor_heals_on_retry_completes(self) -> None:
+        # cursor 0: 429 then OK (resumed); cursor 1: OK. The whole series commits.
+        client = _FakeClient(
+            [
+                DhanRateLimitError("HTTP 429"),
+                {"data": {"ce": _side(), "pe": None}},
+                {"data": {"ce": _side(), "pe": None}},
+            ]
+        )
+        sink = _FakeSink()
+        report = _run(client, sink, start=self._START, end=self._END, max_retry_passes=2)
+        assert report.windows == 2
+        assert report.bars_appended == 2  # both cursors committed
+        assert report.retried_windows == 1
+        assert report.still_failed_windows == 0
+        assert report.complete is True
+        assert len(sink.batches) == 2  # both windows written
+
+    def test_permanent_429_at_second_cursor_leaves_partition_empty(self) -> None:
+        # cursor 0 succeeds, cursor 1 429s past its retry budget → the series aborts
+        # and commits NOTHING — NOT even the already-fetched cursor 0 (transactional).
+        client = _FakeClient(
+            [
+                {"data": {"ce": _side(), "pe": None}},  # cursor 0 fetched + staged
+                DhanRateLimitError("HTTP 429"),  # cursor 1 attempt 1
+                DhanRateLimitError("HTTP 429"),  # cursor 1 retry 1
+                DhanRateLimitError("HTTP 429"),  # cursor 1 retry 2 → budget spent
+            ]
+        )
+        sink = _FakeSink()
+        report = _run(client, sink, start=self._START, end=self._END, max_retry_passes=2)
+        assert report.bars_appended == 0
+        assert report.complete is False
+        assert report.still_failed_windows == 2  # BOTH windows deferred (none committed)
+        assert report.retried_windows == 1
+        assert sink.batches == []  # the staged cursor-0 bars were NEVER committed
+
+    def test_abort_does_not_mark_coverage(self) -> None:
+        # On abort, coverage stays untouched so a re-pull re-fetches every window
+        # (the no-skip guarantee — coverage advances all-or-nothing with the lake).
+        from brutex.data.fetch_coverage import FetchCoverage
+
+        cov = FetchCoverage()
+        client = _FakeClient(
+            [
+                {"data": {"ce": _side(), "pe": None}},
+                DhanRateLimitError("HTTP 429"),
+            ]
+        )
+        report = ingest_rolling_option_series(
+            client,
+            _FakeSink(),
+            security_id="13",
+            exch_id="NSE",
+            underlying_symbol="NIFTY",
+            exchange_segment="NSE_FNO",
+            instrument="OPTIDX",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            start=self._START,
+            end=self._END,
+            coverage=cov,
+            max_retry_passes=0,
+            retry_backoff=lambda _i: None,
+        )
+        assert report.complete is False
+        assert cov.completed_count == 0  # NOTHING marked complete
+
+    def test_complete_series_marks_every_window_in_one_commit(self) -> None:
+        from brutex.data.fetch_coverage import FetchCoverage
+
+        cov = FetchCoverage()
+        client = _FakeClient([{"data": {"ce": _side(), "pe": None}} for _ in range(2)])
+        report = ingest_rolling_option_series(
+            client,
+            _FakeSink(),
+            security_id="13",
+            exch_id="NSE",
+            underlying_symbol="NIFTY",
+            exchange_segment="NSE_FNO",
+            instrument="OPTIDX",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            start=self._START,
+            end=self._END,
+            coverage=cov,
+            max_retry_passes=2,
+            retry_backoff=lambda _i: None,
+        )
+        assert report.complete is True
+        assert cov.completed_count == 2  # both windows marked only after commit
+
+    def test_backoff_invoked_with_zero_based_attempt_indices(self) -> None:
+        # Two retries before success → backoff(0), backoff(1) (bounded exponential).
+        seen: list[int] = []
+        client = _FakeClient(
+            [
+                DhanRateLimitError("HTTP 429"),
+                DhanRateLimitError("HTTP 429"),
+                {"data": {"ce": _side(), "pe": None}},
+            ]
+        )
+        report = _run(
+            client,
+            _FakeSink(),
+            start=date(2021, 1, 4),
+            end=date(2021, 1, 20),  # single cursor
+            max_retry_passes=5,
+            retry_backoff=seen.append,
+        )
+        assert seen == [0, 1]
+        assert report.complete is True
+        assert report.retried_windows == 1
+
+    def test_default_backoff_is_bounded_exponential(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # _default_retry_backoff: base 1.0 × 2**k, clamped to the 8.0 s ceiling —
+        # no real sleep (the worst-case far-attempt index must NOT sleep unbounded).
+        from brutex.adapters.dhan.option_ingest import (  # type: ignore[reportPrivateUsage]
+            _default_retry_backoff,
+        )
+
+        slept: list[float] = []
+        monkeypatch.setattr("brutex.adapters.dhan.option_ingest._time_sleep", slept.append)
+        _default_retry_backoff(0)
+        _default_retry_backoff(1)
+        _default_retry_backoff(99)  # clamps to the ceiling
+        assert slept == [1.0, 2.0, 8.0]
+
+    def test_terminal_error_mid_series_commits_nothing(self) -> None:
+        # A TERMINAL (non-retryable) error on cursor 1 raises straight out — and
+        # because the commit is deferred, the already-fetched cursor 0 is NEVER
+        # written (the partition stays empty; the series is quarantined upstream).
+        client = _FakeClient(
+            [
+                {"data": {"ce": _side(), "pe": None}},
+                DhanBadRequestError("HTTP 400"),
+            ]
+        )
+        sink = _FakeSink()
+        with pytest.raises(DhanBadRequestError):
+            _run(client, sink, start=self._START, end=self._END, max_retry_passes=2)
+        assert sink.batches == []
 
 
 def _run_cov(client: _FakeClient, sink: _FakeSink, coverage: object) -> OptionIngestReport:
