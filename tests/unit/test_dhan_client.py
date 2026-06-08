@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 import pytest
 from brutex.adapters.dhan.client import (
     _DEFAULT_RETRY_BACKOFF_S,
+    _DEFAULT_TIMEOUT,
     _MAX_BACKOFF_S,
     CallMeter,
     DhanClient,
@@ -138,6 +139,18 @@ class TestPostJson:
     def test_non_object_json_raises(self) -> None:
         with pytest.raises(DhanError, match="expected a JSON object"):
             _client(_RecordingTransport(200, b"[1, 2, 3]")).post_json("x", {})
+
+    def test_default_timeout_is_generous_for_large_intraday_payloads(self) -> None:
+        # DEC-DHAN-INTRADAY-TIMEOUT-RAISE-001: a 90-day 1-minute chunk (~22k bars)
+        # can take >=10s from Dhan under sustained load, so the default
+        # whole-request timeout must leave room for a slow-but-valid response to
+        # complete (the old 10s killed them as false timeouts + re-requested).
+        assert _DEFAULT_TIMEOUT >= 25.0
+        # A client built without an explicit timeout inherits the default and
+        # passes it to the transport on every call.
+        transport = _RecordingTransport(200, b"{}")
+        _client(transport).post_json("charts/intraday", {})
+        assert transport.calls[0]["timeout"] == _DEFAULT_TIMEOUT
 
     def test_timeout_translated(self) -> None:
         def _boom(*_a: object, **_k: object) -> tuple[int, bytes]:

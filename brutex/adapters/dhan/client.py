@@ -74,14 +74,22 @@ _LOG = structlog.get_logger("brutex.adapters.dhan.client")
 #: Hosts the client is allowed to POST to (SSRF guard).
 _ALLOWED_HOSTS: frozenset[str] = frozenset({"api.dhan.co"})
 
-#: Default whole-request timeout (seconds). Lowered 30 → 10 in
-#: DEC-DHAN-CALL-TIMEOUT-RETRY-001: a single 30s-ceiling stall froze the whole
-#: SEQUENTIAL pull for 30s (observed ``latency_ms_max: 30080``, effective RPS
-#: collapsing 5.1 → 3.75). Real Dhan intraday/option chunk responses land in
-#: well under a few seconds, so 10s keeps generous P99.9 headroom while failing
-#: a true stall ~3× faster — where the bounded fast-retry below recovers it.
-#: Overridable per client via the :attr:`DhanClient.timeout` field.
-_DEFAULT_TIMEOUT: float = 10.0
+#: Default whole-request timeout (seconds). History:
+#: 30 → 10 (DEC-DHAN-CALL-TIMEOUT-RETRY-001: a single 30s-ceiling stall froze the
+#: SEQUENTIAL pull for 30s — ``latency_ms_max: 30080``, RPS collapsing 5.1→3.75).
+#: 10 → 25 (DEC-DHAN-INTRADAY-TIMEOUT-RAISE-001, operator live run 2026-06-08):
+#: the original "responses land well under a few seconds" assumption was WRONG
+#: for a 783-symbol full-history pull — Dhan's ``charts/intraday`` takes ≥10s to
+#: build a 90-day **1-minute** payload (~22k bars) under sustained load (observed
+#: ``latency_ms_p95 ≈ 10,072`` — pinned right at the old 10s ceiling), so a flood
+#: of would-have-SUCCEEDED calls were killed as ``DhanTimeoutError`` and
+#: re-requested, ADDING load. 25s lets a slow-but-valid intraday response finish
+#: on the first attempt. The 30→10 "one stall freezes everything" concern no
+#: longer applies: the window fetch is now PARALLEL (DEC-DHAN-PARALLEL-WINDOWS-001),
+#: so one slow call doesn't block the pull, and the bounded fast-retry below still
+#: recovers a TRUE stall (caught at 25s). Overridable per client via the
+#: :attr:`DhanClient.timeout` field.
+_DEFAULT_TIMEOUT: float = 25.0
 
 #: Default bounded fast-retry budget: total POST attempts for one logical call
 #: (1 initial + up to 2 in-place retries) on a transient transport/server stall.
