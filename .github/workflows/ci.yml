@@ -1203,6 +1203,24 @@ jobs:
           else
             echo "(brutex.adapters.dhan.auto_retry test file not present yet — gate inactive)"
           fi
+          # Ratchet `brutex.adapters.dhan.token_preflight` (the PURE token-state
+          # classifier valid/expiring-soon/dead + the DEAD→auth_expired verdict —
+          # DEC-TOKEN-PREFLIGHT-001) into the strict per-module 100% gate. Wheel-free
+          # pure core; the live RenewToken probe is `# pragma: no cover`.
+          if compgen -G "tests/unit/test_dhan_token_preflight.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.token_preflight --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_token_preflight.py tests/property/test_until_clean_properties.py tests/golden/test_token_preflight_golden.py
+          else
+            echo "(brutex.adapters.dhan.token_preflight test file not present yet — gate inactive)"
+          fi
+          # Ratchet `brutex.adapters.dhan.until_clean` (the PURE re-pull-until-clean
+          # loop-controller: continue/stop_clean/stop_dead/stop_budget + the bounded
+          # driver — DEC-TOKEN-PREFLIGHT-001) into the strict per-module 100% gate.
+          # Wheel-free; driven by a fake clock + fake round-runner (no real sleeps).
+          if compgen -G "tests/unit/test_dhan_until_clean.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.until_clean --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_until_clean.py tests/property/test_until_clean_properties.py tests/golden/test_token_preflight_golden.py
+          else
+            echo "(brutex.adapters.dhan.until_clean test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_universe_ingest.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.universe_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_universe_ingest.py
           else

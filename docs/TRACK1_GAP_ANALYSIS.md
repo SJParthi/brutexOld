@@ -135,6 +135,8 @@ The standing order is **ultra-fast O(1) uniqueness / dedup / mapping / latency**
 | Flow | Manual trigger | Automatic path | Verdict / gap |
 |------|----------------|----------------|---------------|
 | Token renew | ✅ `brutex auth` | ✅ 12h keepalive | ✅ **both** (keepalive prod-start UNVERIFIED) |
+| **Token pre-flight (before a bulk pull)** | ✅ via `brutex fetch --until-clean` / dashboard | ✅ `pull_all_spot(preflight=…)` REFUSES a DEAD token up front (loud `auth_expired`) | ✅ **DONE** (DEC-TOKEN-PREFLIGHT-001 — pure valid/expiring-soon/dead classifier; live probe `# pragma: no cover`; cannot revive a dead token) |
+| **Re-pull-until-clean** | ✅ `brutex fetch --until-clean` | ✅ default-off `pull_all_spot(until_clean=True)` / `?until_clean=true` button | ✅ **DONE** (DEC-TOKEN-PREFLIGHT-001 — bounded rounds until clean / token-dead / budget; reuses `retry_failed_windows` #483; O(failed_windows)/round, NOT O(1)-total) |
 | Crash-resume (sweep) | ✅ re-run | ✅ checkpoint+dedup | ✅ **both** |
 | Data pull — instrument master | ✅ button/CLI | ✅ auto on startup | ✅ **both** |
 | **Data pull — retry failed windows** | ✅ `brutex fetch --retry-failed` / dashboard "Retry failed windows" button | ✅ auto-retry rounds after every pull (default-on, `--no-auto-retry` opt-out) | ✅ **DONE** (DEC-INGEST-AUTO-RETRY-001 #567 — one `retry_failed_windows` engine; bounded + rate-safe ≤5 r/s + known-gaps excluded + O(failed_windows) not O(1)-total) |

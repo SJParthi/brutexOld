@@ -566,6 +566,69 @@ class TestPullAllSpot:
         assert failed.verdict.pending_windows == 2
         assert failed.to_dict()["verdict"]["needs_operator"] is True
 
+    def test_preflight_dead_refuses_pull(self, tmp_path: Path) -> None:
+        """A DEAD pre-flight REFUSES the bulk pull — no ingest, loud auth_expired verdict."""
+        from brutex.adapters.dhan.token_preflight import classify_token_lifetime
+
+        built: list[int] = []
+
+        def factory(_root: Path, _insts: object) -> tuple[SyntheticDhanAdapter, BarSink]:
+            built.append(1)  # must NEVER run for a dead token
+            return SyntheticDhanAdapter(), NullBarSink()
+
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13"), _index("25")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                adapter_factory=factory,
+                preflight=classify_token_lifetime(-60.0),  # dead
+            )
+
+        assert built == []  # the adapter was never built — no doomed pull burned
+        assert report.auth_aborted is True
+        assert report.symbols == []
+        assert report.verdict.kind == "auth_expired"
+        assert report.verdict.needs_operator is True
+        assert "DEAD" in (report.auth_cause or "")
+        assert _events(logs, "universe.pull_all.preflight_refused")
+
+    def test_preflight_alive_proceeds(self, tmp_path: Path) -> None:
+        """A healthy pre-flight does NOT block the pull — it completes normally."""
+        from brutex.adapters.dhan.token_preflight import classify_token_lifetime
+
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            preflight=classify_token_lifetime(20 * 3600.0),  # valid
+        )
+        assert report.auth_aborted is False
+        assert report.total_completed > 0
+        assert report.verdict.kind == "clean"
+
+    def test_until_clean_dry_run_reaches_clean(self, tmp_path: Path) -> None:
+        """``until_clean=True`` drives the bounded loop; a clean synthetic pull ends clean.
+
+        The synthetic adapter always succeeds, so the FIRST round leaves zero
+        transient residual → the until-clean loop stops on round 1 (no inter-round
+        backoff, no real sleep) and the aggregate residual is 0.
+        """
+        report = pull_all_spot(
+            [_index("13"), _index("25")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            until_clean=True,
+            until_clean_rounds=3,
+        )
+        assert report.auth_aborted is False
+        assert report.still_failed_windows == 0
+        assert report.total_completed > 0
+        assert report.verdict.kind == "clean"
+
     def test_factory_receives_the_full_instrument_list(self, tmp_path: Path) -> None:
         seen: dict[str, int] = {}
 

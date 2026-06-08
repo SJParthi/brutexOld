@@ -1424,6 +1424,7 @@ def build_app(
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
         year: int | None = Query(default=None),
+        until_clean: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/universe/retry-failed — MANUAL re-pull of ONLY the leftover failed windows.
 
@@ -1471,7 +1472,13 @@ def build_app(
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
-            """Background body: re-pull every selected symbol with auto-retry on."""
+            """Background body: re-pull every selected symbol with auto-retry on.
+
+            ``?until_clean=true`` (DEC-TOKEN-PREFLIGHT-001) escalates to the bounded
+            re-pull-until-clean loop (clean / token-dead / budget) — the dashboard
+            twin of ``brutex fetch --until-clean``; default-off keeps the prior
+            single auto-retry pass.
+            """
             report = pull_all_spot(
                 instruments,
                 lake_root=lake_root,
@@ -1483,6 +1490,7 @@ def build_app(
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
                 auto_retry=True,
+                until_clean=until_clean,
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
@@ -1497,6 +1505,7 @@ def build_app(
                 "total": len(instruments) * 2,
                 "dry_run": dry_run,
                 "retry_failed": True,
+                "until_clean": until_clean,
             }
         )
 
