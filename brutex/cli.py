@@ -1442,7 +1442,7 @@ def _build_live_dhan_spot(  # pragma: no cover — live Dhan token + transport +
     """
     from brutex.adapters.dhan.adapter import DhanMarketAdapter
     from brutex.adapters.dhan.auth import resolve_dhan_credentials
-    from brutex.adapters.dhan.client import DhanClient, urllib_transport
+    from brutex.adapters.dhan.client import DhanClient, default_dhan_transport
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
 
@@ -1450,7 +1450,7 @@ def _build_live_dhan_spot(  # pragma: no cover — live Dhan token + transport +
     client = DhanClient(
         access_token=creds.access_token,
         client_id=creds.client_id,
-        transport=urllib_transport,
+        transport=default_dhan_transport(),
     )
     adapter = DhanMarketAdapter(client=client, instruments=tuple(instruments))
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root), catalog=catalog)
