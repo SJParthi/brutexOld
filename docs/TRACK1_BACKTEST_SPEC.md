@@ -349,6 +349,19 @@ operator must HALT the sweep, modify the registry, restart the sweep
 - Result row written to streaming Parquet
 
 ### Stage 2.5 — Bayesian early-stop (~61% reduction)
+
+> ⚠️ **DESIGN-BLOCKED — do NOT implement as written (DEC-SPRT-DESIGN-BLOCK-001,
+> ADR-0006).** A 4-agent hostile review found this section (a) **contradicts**
+> `TRACK1_OPTIMIZATIONS.md §2` on what a "trial" is (≥50 *trades* here vs ≥50,000
+> *param-trials* there — Golden Rule #2 violated), and (b) describes a
+> **results-changing** optimization, not a correctness-neutral one: the
+> Sharpe-percentile kill is not aligned with the 8-term composite leaderboard and
+> pruning mutates the z-scores / Deflated-Sharpe `N` of surviving combos. The
+> "~61% reduction" SLA also has no honest no-prune worst case (which is a net
+> *slowdown*). The accepted pure intra-backtest design + the 5 unblock items live
+> in **`docs/adr/0006-stage2.5-sprt-design-block.md`**. Until those land, the
+> engine backtests every Stage-2 survivor to completion (no early-stop).
+
 - **Gaussian conjugate posterior** on 95th-percentile Sharpe per (instrument, TF)
 - **Wald SPRT** at α=0.05, β=0.10
 - Kill trial mid-flight if `Pr(true_sharpe > p95_threshold) < 0.10` after
