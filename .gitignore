@@ -96,6 +96,9 @@ Cargo.lock
 # lockfile for reproducibility (Golden Rule #4) + the security-audit
 # Cargo.lock trigger (DEC-RUST-RAYON-SUPERMASK-001, first new-crate PR).
 !rust/fno-math/Cargo.lock
+# cargo-mutants local run output (CI uploads it as an artifact; never committed).
+mutants.out/
+mutants.out.old/
 
 # Claude Code transient state — isolated background-agent worktrees (auto-cleaned)
 .claude/worktrees/

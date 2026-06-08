@@ -1,0 +1,22 @@
+# cargo-mutants config for trading-core (DEC-TRADING-CORE-FUZZ-PROPTEST-001).
+#
+# The full crate mutation run catches 375/377 mutants. The two excluded below are
+# provably EQUIVALENT mutants — they produce byte-identical behaviour to the
+# original, so NO test (or proptest, or fuzz target) can ever kill them. They are
+# excluded explicitly (not silenced wholesale) so the gate's "zero surviving
+# mutants" threshold stays meaningful for every other mutant.
+#
+# ⚠ The patterns pin line numbers; if src/evaluator.rs shifts these lines a
+#   resurfaced equivalent mutant will FAIL the gate (fail-loud) — re-verify the
+#   two are still equivalent and update the line numbers.
+#
+#   1. `1u64 << bits::BIT_CLOSE_ABOVE_EMA20` with BIT_CLOSE_ABOVE_EMA20 == 0:
+#      `1u64 << 0` == `1u64 >> 0` == 1, so `<<` → `>>` is a no-op for this bit
+#      (every OTHER `1u64 << BIT` has a non-zero shift and IS caught).
+#   2. `if total_range > 0 && body * 10 < total_range` (doji): the `total_range > 0`
+#      guard is redundant — `body * 10 < total_range` with `body >= 0` already
+#      implies `total_range > 0` — so `>` → `>=` cannot change the result.
+exclude_re = [
+    "src/evaluator\\.rs:101:\\d+: replace << with >> in evaluate_atoms",
+    "src/evaluator\\.rs:237:\\d+: replace > with >= in evaluate_atoms",
+]
