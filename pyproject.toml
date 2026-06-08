@@ -39,8 +39,9 @@ dependencies = [
     # the Dhan TLS egress (brutex/adapters/dhan/pinning.py) extracts the peer
     # SubjectPublicKeyInfo via cryptography's X.509 parser. On the core ingest
     # path (cli/dashboard -> DhanClient.urllib_transport), so it is a core dep,
-    # not a [data]/[ui] extra.
-    "cryptography>=41,<46",
+    # not a [data]/[ui] extra. Floor pinned to 46.0.7 — the first release fixing
+    # PYSEC-2026-35 / PYSEC-2026-36 / CVE-2026-26007 (pip-audit clean).
+    "cryptography>=46.0.7,<47",
 ]
 
 [project.optional-dependencies]
