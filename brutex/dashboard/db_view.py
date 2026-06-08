@@ -1541,6 +1541,65 @@ def _parse_iso_date(value: str, field_name: str) -> date:
         raise ValueError(f"{field_name} must be ISO YYYY-MM-DD, got {value!r}") from exc
 
 
+def _window_row(record: Any, *, first_seen_at: str | None) -> dict[str, Any]:
+    """Project one per-window record to the ``/coverage/windows`` JSON row (ONE shape).
+
+    Shared by both sources (the unified ledger + the legacy status log) so the two
+    can never drift — CLAUDE.md §11 COMMON. Both record types expose the same
+    field names; only the ledger carries ``first_seen_at`` (``None`` for the
+    legacy log).
+    """
+    return {
+        "market": record.market,
+        "symbol": record.security_id,
+        "interval": record.interval,
+        "window_start": record.window_start,
+        "window_end": record.window_end,
+        "status": record.status,
+        "bars": record.bars,
+        "attempts": record.attempts,
+        "last_error": record.last_error,
+        "first_seen_at": first_seen_at,
+        "last_attempt_at": record.last_attempt_at,
+    }
+
+
+def build_window_payload(lake_root: Path) -> dict[str, Any]:
+    """Project the per-window state for ``/coverage/windows`` — the unified ledger if present.
+
+    DEC-WINDOW-LEDGER-001 (PR-3). Reads the durable ledger Parquet
+    (``<lake>/window_ledger/ledger.parquet``) when it exists — surfacing EVERY
+    window with its full status (``PLANNED`` / ``SUCCESS`` / ``EMPTY`` / ``FAILED``
+    / ``SKIPPED``) + ``first_seen_at`` — and otherwise FALLS BACK to the legacy
+    ``window_status.json`` sidecar so the page keeps working before the
+    ingest-switch slice (PR-4) writes the ledger. READ-ONLY; never raises (both
+    loaders degrade to an empty record set). The ``source`` field tells the UI
+    which backing answered.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"source": "ledger"|"status_log", "count": int, "windows": [...]}``.
+    """
+    from brutex.data.window_ledger_store import ledger_path, load_window_ledger
+
+    if ledger_path(lake_root).is_file():
+        ledger = load_window_ledger(lake_root)
+        return {
+            "source": "ledger",
+            "count": ledger.count,
+            "windows": [_window_row(r, first_seen_at=r.first_seen_at) for r in ledger.records()],
+        }
+    from brutex.data.window_status_store import load_window_status
+
+    log = load_window_status(lake_root)
+    return {
+        "source": "status_log",
+        "count": log.count,
+        "windows": [_window_row(r, first_seen_at=None) for r in log.records()],
+    }
+
+
 __all__ = [
     "ALLOWED_OPERATORS",
     "CANDLE_COLUMNS",
@@ -1548,6 +1607,7 @@ __all__ = [
     "OPTIONS_DIR_NAME",
     "OPTION_CANDLE_COLUMNS",
     "SPOT_DERIVED_COLUMNS",
+    "build_window_payload",
     "clamp_limit",
     "clamp_offset",
     "list_candle_datasets",

@@ -17,7 +17,7 @@ Target: 100% line + branch coverage of ``brutex/dashboard/db_view.py``.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -25,12 +25,18 @@ import pytest
 from brutex.dashboard.db_view import (
     KNOWN_TABLES,
     _json_safe,
+    build_window_payload,
     clamp_limit,
     clamp_offset,
     sample_rows,
     table_summary,
 )
+from brutex.data.fetch_coverage import WindowKey
 from brutex.data.instrument_store import Instrument, InstrumentStore
+from brutex.data.window_ledger import WindowLedger
+from brutex.data.window_ledger_store import save_window_ledger
+from brutex.data.window_status import WindowStatusLog
+from brutex.data.window_status_store import save_window_status
 from brutex.models import Exchange, InstrumentType, Segment
 
 
@@ -286,3 +292,72 @@ def test_json_safe_non_finite_floats_are_stringified() -> None:
     assert _json_safe(float("nan")) == "nan"
     assert _json_safe(float("inf")) == "inf"
     assert _json_safe(float("-inf")) == "-inf"
+
+
+# ── build_window_payload — /coverage/windows projection (DEC-WINDOW-LEDGER-001) ──
+
+_WINDOW_NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
+
+
+def _window_key(security_id: str = "NIFTY", interval: str = "1minute") -> WindowKey:
+    return WindowKey(
+        market="dhan",
+        security_id=security_id,
+        interval=interval,
+        start=date(2021, 1, 1),
+        end=date(2021, 4, 1),
+    )
+
+
+def test_build_window_payload_reads_the_ledger_when_present(tmp_path: Path) -> None:
+    ledger = WindowLedger()
+    ledger.plan(_window_key("SENSEX"), now=_WINDOW_NOW)  # PLANNED
+    ledger.record(
+        _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+    )  # SUCCESS
+    save_window_ledger(ledger, tmp_path)
+
+    payload = build_window_payload(tmp_path)
+    assert payload["source"] == "ledger"
+    assert payload["count"] == 2
+    by_symbol = {w["symbol"]: w for w in payload["windows"]}
+    assert by_symbol["SENSEX"]["status"] == "PLANNED"
+    assert by_symbol["NIFTY"]["status"] == "SUCCESS"
+    assert by_symbol["NIFTY"]["first_seen_at"] == _WINDOW_NOW.isoformat()
+    # The legacy field names are preserved so the existing UI keeps working.
+    assert set(by_symbol["NIFTY"]) == {
+        "market",
+        "symbol",
+        "interval",
+        "window_start",
+        "window_end",
+        "status",
+        "bars",
+        "attempts",
+        "last_error",
+        "first_seen_at",
+        "last_attempt_at",
+    }
+
+
+def test_build_window_payload_falls_back_to_status_sidecar(tmp_path: Path) -> None:
+    log = WindowStatusLog()
+    log.record(
+        _window_key("NIFTY"),
+        raw_bars=0,
+        error_type="DhanRateLimitError",
+        bars_appended=0,
+        now=_WINDOW_NOW,
+    )
+    save_window_status(log, tmp_path)
+
+    payload = build_window_payload(tmp_path)
+    assert payload["source"] == "status_log"
+    assert payload["count"] == 1
+    window = payload["windows"][0]
+    assert window["status"] == "FAILED"
+    assert window["first_seen_at"] is None  # legacy log has no first_seen_at
+
+
+def test_build_window_payload_empty_when_neither_exists(tmp_path: Path) -> None:
+    assert build_window_payload(tmp_path) == {"source": "status_log", "count": 0, "windows": []}
