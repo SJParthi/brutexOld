@@ -171,8 +171,16 @@ Track 1 spec locked after 4-agent hostile-review pass._
     **Honest envelope (Golden Rule #10 + DEC-P0-040 / DEC-P0-042
     rebaselining):** The 18-requirement decree above is the **target**.
     The actual CI enforcement matrix in `docs/STANDARDS_100PCT.md` §1
-    is **9 of 21 sub-rows ✅ ENFORCED + 4 🟡 PARTIAL + 5 📋 ROADMAP +
-    3 👁️ MANUAL** (~22% fully enforced). Per Golden Rule #10 no PR
+    is **15 of 21 sub-rows 🟢 ENFORCED + 2 🟡 PARTIAL + 1 📋 ROADMAP +
+    3 👁️ MANUAL** (~71% fully enforced, per the summary count at
+    `docs/STANDARDS_100PCT.md:67-86`, post-DEC-STRESS-001 2026-05-24).
+    The earlier "9 of 21 / ~22%" wording here was a stale 2026-05-16
+    snapshot from before the DEC-STANDARDS-AUDIT-001 → DEC-STRESS-001
+    ratchet arc (audit + CROSSWALK + PYLINT-DROP + DOCTOR + STRESS
+    closed 6 rows); reconciled by DEC-DOC-STANDARDS-RECONCILE-001
+    (MIGRATION.md entry #591). `docs/STANDARDS_100PCT.md` §1 remains the
+    single source of truth — if the two ever disagree, that doc wins and
+    this line is the stale copy to fix. Per Golden Rule #10 no PR
     may claim "100% standards compliant" without first auditing against
     that matrix. The decree-vs-reality gap is a living ratchet, not a
     bypass — every gap row tracks a dedicated follow-up PR in

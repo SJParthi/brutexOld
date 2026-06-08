@@ -92,6 +92,16 @@ credentials.json
 # Rust (future P3)
 target/
 Cargo.lock
+
+# cargo-mutants scratch + reports — throwaway, never commit
+**/mutants.out/
+**/mutants.out.old/
+**/cargo-mutants.out/
+**/mutants-full.out/
+**/mutants-verify.out/
+# proptest persists failure seeds here; the only ones generated so far were
+# induced by cargo-mutants mutants (not real failures), so they are scratch.
+**/*.proptest-regressions
 # ...but the fno-math extension crate IS an application artifact: track its
 # lockfile for reproducibility (Golden Rule #4) + the security-audit
 # Cargo.lock trigger (DEC-RUST-RAYON-SUPERMASK-001, first new-crate PR).

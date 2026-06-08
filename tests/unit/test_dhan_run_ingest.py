@@ -770,3 +770,64 @@ class TestRunDhanSpotIngestWithRetry:
         assert wrapped.still_failed_windows == 3
         # ...and with no retry it falls back to the original.
         assert SpotIngestWithRetry(report=original, retry=None).still_failed_windows == 84
+
+
+def test_audit_chain_records_run_and_pairs(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """DEC-INGEST-AUDIT-CHAIN-001: when an AuditWriter is wired, the spot pull
+    appends a hash-chained RUN_START → per-pair → RUN_COMPLETE trail (Golden
+    Rule #8). A success pair emits INGEST_PAIR_DONE; a terminal Dhan failure
+    emits INGEST_PAIR_FAILED with its classification."""
+    from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
+
+    def _fake_ingest(
+        adapter,
+        sink,
+        *,
+        instrument,
+        interval,
+        start,
+        end,
+        pace=None,
+        coverage=None,
+        status_log=None,
+        on_rate_limit=None,
+        on_timeout=None,
+        on_success=None,
+        auth_guard=None,
+    ):
+        if instrument.symbol_name == "FAIL":
+            raise DhanBadRequestError("boom")
+        return IngestReport(windows=2, bars_appended=10, transient_failures=0)
+
+    monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
+    path = tmp_path / "ingest-audit.jsonl"
+    with pull_id_scope("pull-xyz"), AuditWriter.open(path) as audit:
+        report = run_dhan_spot_ingest(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("OK"), _index("FAIL")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            audit=audit,
+        )
+
+    assert report.failed_pairs == 1
+    # The hash chain is intact and carries exactly the 4 expected actions.
+    assert verify_chain(path) == 4
+    entries = read_entries(path)
+    actions = [e.action for e in entries]
+    assert actions[0] == "INGEST_RUN_START"
+    assert actions[-1] == "INGEST_RUN_COMPLETE"
+    assert "INGEST_PAIR_DONE" in actions
+    assert "INGEST_PAIR_FAILED" in actions
+    start_entry = entries[0]
+    assert start_entry.subject == "pull:pull-xyz"
+    assert start_entry.payload["jobs"] == 2
+    failed = next(e for e in entries if e.action == "INGEST_PAIR_FAILED")
+    assert failed.payload["auth_failure"] is False
+    assert failed.payload["known_gap"] is False
+    complete = entries[-1]
+    assert complete.payload["pairs_ok"] == 1
+    assert complete.payload["pairs_failed"] == 1
+    assert complete.payload["total_bars"] == 10

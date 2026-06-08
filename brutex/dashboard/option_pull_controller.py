@@ -267,6 +267,7 @@ def _build_live_options(  # pragma: no cover — live Dhan token + transport + n
     from brutex.data.option_dedup import OptionDedupIndex
     from brutex.data.option_parquet_writer import OptionParquetWriter
     from brutex.data.option_sink import OptionBarSink as ConcreteOptionBarSink
+    from brutex.orchestrator.audit import AuditWriter
 
     creds = resolve_dhan_credentials()
     client = DhanClient(
@@ -274,9 +275,18 @@ def _build_live_options(  # pragma: no cover — live Dhan token + transport + n
         client_id=creds.client_id,
         transport=urllib_transport,
     )
+    # Golden Rule #8 — wire the hash-chained option audit the sink already
+    # supports (one OPTION_BARS_WRITTEN row per written series), for parity with
+    # the spot pull's audit chain (DEC-INGEST-AUDIT-CHAIN-001). The AuditWriter
+    # is flush-per-entry, so every row persists without an explicit close; the
+    # sink's single write-lock keeps the chain single-writer (the append path is
+    # 100%-tested in test_option_sink.py). DEC-OPTION-AUDIT-WIRE-001.
+    audit_path = lake_root / "audit" / "option-ingest.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
     sink = ConcreteOptionBarSink(
         index=OptionDedupIndex(),
         writer=OptionParquetWriter(lake_root=lake_root),
+        audit=AuditWriter.open(audit_path, resume=audit_path.exists()),
     )
     return client, sink
 

@@ -1,0 +1,48 @@
+# cargo-fuzz harness for the shared trading-core kernel.
+#
+# DEC-FUZZ-HOTKERNEL-001 (docs/MIGRATION.md). Fuzzes the evaluate-time
+# indicators (pivot + Fibonacci resolve) and the 52-condition u64 evaluator —
+# the bit-identical core BruteX (PyO3) and TickVault (native) share. cargo-fuzz
+# needs NIGHTLY Rust + libFuzzer; this is a separate, non-published package
+# (NOT a workspace member), built with trading-core's DEFAULT features so it
+# links the dependency-free pure-Rust core (no libpython, unlike fno-math).
+[package]
+name = "trading-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.93.1"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.trading-core]
+path = ".."
+# default features only — the pure-Rust core, NO `python`/pyo3 feature, so the
+# fuzz binary links zero Python symbols.
+default-features = false
+
+# Overflow must panic (not wrap) so libFuzzer flags any out-of-domain magnitude
+# as a crash — matching the parent crate's release profile ("a paisa overflow
+# must never be silent"). The fuzzers stay inside the documented realistic
+# domain, where no overflow can occur.
+[profile.release]
+debug = 1
+overflow-checks = true
+
+[[bin]]
+name = "fuzz_pivot_fib"
+path = "fuzz_targets/fuzz_pivot_fib.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_evaluator"
+path = "fuzz_targets/fuzz_evaluator.rs"
+test = false
+doc = false
+bench = false

@@ -25,6 +25,16 @@
 
 ## 2. Stage 2.5 — Bayesian Adaptive Early-Stop
 
+> 🚫 **SUPERSEDED (DEC-SPRT-SPEC-RECONCILE-001, 2026-06-08).** The
+> **inter-backtest** design in this section (prune a param-tuple after ≥50,000
+> param-trials via a shared `Arc<DashMap>` polled by Rayon workers) was **rejected**
+> by the 4-agent hostile review (ADR-0006): the `DashMap`/worker-poll prune is
+> **thread-scheduling-dependent → non-deterministic → breaks the audit-replay
+> oracle** (blocker B3). The LOCKED canonical algorithm is the **intra-backtest**
+> definition in `TRACK1_BACKTEST_SPEC.md §"Stage 2.5"` (kill ONE backtest after
+> ≥50 closed trades). This §2 is retained for historical context only — do NOT
+> implement the DashMap architecture (§2.3) or the 50,000-param-trial floor (§2.2).
+
 Insert as a **modifier inside Stage 2** (not a new sequential stage). The
 5-stage funnel name preserved; engine gets one new in-loop component.
 
