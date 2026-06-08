@@ -1613,7 +1613,19 @@ def cmd_fetch(
     cat_ctx: Any = (
         contextlib.nullcontext(None) if inspect else Catalog.open(resolved / "catalog.duckdb")
     )
-    with cat_ctx as cat:
+    # Golden Rule #8 audit trail (DEC-INGEST-AUDIT-CHAIN-001): a real live pull
+    # writes a hash-chained JSONL trail under <lake>/audit/ (RUN_START → per-pair
+    # → RUN_COMPLETE). --inspect / --dry-run write no real data, so they get a
+    # null context (no audit). # pragma: no cover — live path (the audit-write
+    # core is 100%-tested in test_dhan_run_ingest.py).
+    audit_ctx: Any = contextlib.nullcontext(None)
+    if not (dry_run or inspect):  # pragma: no cover — live
+        from brutex.orchestrator.audit import AuditWriter
+
+        _ingest_audit_path = resolved / "audit" / "spot-ingest.jsonl"
+        _ingest_audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_ctx = AuditWriter.open(_ingest_audit_path, resume=_ingest_audit_path.exists())
+    with cat_ctx as cat, audit_ctx as ingest_audit:
         if dry_run:
             fetch_instruments = [_synthetic_index_instrument(spec) for spec in BRUTE_FORCE_INDICES]
             adapter = SyntheticDhanAdapter(bars_per_window=rows_per_chunk)
@@ -1688,6 +1700,7 @@ def cmd_fetch(
                 on_rate_limit=on_rate_limit,
                 on_success=on_success,
                 auto_retry=do_retry_flag,
+                audit=ingest_audit,
             )
 
         until_outcome = None
