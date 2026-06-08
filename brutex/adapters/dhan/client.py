@@ -52,6 +52,7 @@ from urllib.parse import urlparse
 
 import structlog
 
+from brutex.adapters.dhan.cert_pinning import PinPolicy
 from brutex.adapters.dhan.constants import (
     DATA_RATE_LIMIT_RPS,
     DHAN_BASE_URL,
@@ -508,6 +509,11 @@ def urllib_transport(  # pragma: no cover — thin urllib I/O shim, exercised vi
     ``RenewToken`` path — DEC-DHAN-RENEWTOKEN-GET-001). Returns ``(status,
     body)`` for 2xx **and** 4xx/5xx (``HTTPError`` carries a status + body), so
     :meth:`DhanClient._send_once` maps non-2xx uniformly.
+
+    NOTE: this shim validates the server certificate against the system CA store
+    ONLY. For defence-in-depth against a CA compromise / MITM use
+    :func:`make_pinning_transport` (DEC-DHAN-TLS-SPKI-PIN-001), which adds SPKI
+    public-key pinning on top of the same CA validation.
     """
     import urllib.error
     import urllib.request
@@ -524,9 +530,98 @@ def urllib_transport(  # pragma: no cover — thin urllib I/O shim, exercised vi
         return int(exc.code), exc.read()
 
 
+def make_pinning_transport(policy: PinPolicy) -> Transport:
+    """Return a :class:`Transport` that adds SPKI cert pinning to the HTTPS call.
+
+    Production wiring for :class:`DhanClient` when the operator has configured a
+    TLS pin set (DEC-DHAN-TLS-SPKI-PIN-001). The returned transport performs the
+    request over :mod:`http.client` (which, like :func:`urllib_transport`, returns
+    a status + body for 2xx **and** 4xx/5xx without raising), then — BEFORE
+    returning the body — extracts the peer certificate and runs
+    :meth:`PinPolicy.verify`. A pin MISMATCH raises
+    :class:`~brutex.adapters.dhan.cert_pinning.DhanCertPinError` (audited +
+    alerted, never a silent fall-back); a non-enforced policy (no pins / explicit
+    opt-out) verifies as a no-op, so this is the SAFE default to wire everywhere.
+
+    The certificate chain is ALWAYS validated against the system CA store
+    (``ssl.create_default_context``) — pinning is an ADDITIONAL check, never a
+    replacement for CA validation.
+
+    Parameters
+    ----------
+    policy
+        The operator's :class:`PinPolicy` (typically :meth:`PinPolicy.from_env`).
+
+    Returns
+    -------
+    Transport
+        A ``(url, body, headers, timeout, method) → (status, bytes)`` callable
+        enforcing *policy* on every call.
+    """
+
+    def _transport(  # pragma: no cover — network I/O shim, exercised via integration
+        url: str,
+        *,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+        method: str = "POST",
+    ) -> tuple[int, bytes]:
+        import http.client
+        import ssl
+
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        port = parsed.port or 443
+        path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+        context = ssl.create_default_context()
+        conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=context)
+        try:
+            conn.connect()
+            # SPKI pin check on the negotiated peer cert — BEFORE sending the
+            # token-bearing request, so a MITM never even receives the JWT.
+            sock = conn.sock
+            cert_der = sock.getpeercert(binary_form=True) if sock is not None else None
+            policy.verify(cert_der, host=host)
+            conn.request(method, path or "/", body=body, headers=dict(headers))
+            resp = conn.getresponse()
+            return int(resp.status), resp.read()
+        finally:
+            conn.close()
+
+    return _transport
+
+
+def default_dhan_transport(*, env: Mapping[str, str] | None = None) -> Transport:
+    """Return the COMMON production transport: SPKI pinning over system-CA HTTPS.
+
+    The single wiring point (CLAUDE.md §11 COMMON) every live :class:`DhanClient`
+    uses, so the pin policy is resolved from the environment in ONE place
+    (DEC-DHAN-TLS-SPKI-PIN-001). Equivalent to
+    ``make_pinning_transport(PinPolicy.from_env(env))``: with a pin set
+    configured it enforces SPKI pinning; with none it is the SAFE fallback
+    (system-CA validation only), byte-equivalent in behaviour to the prior
+    ``urllib_transport`` wiring.
+
+    Parameters
+    ----------
+    env
+        Environment mapping for :meth:`PinPolicy.from_env`. Defaults to
+        :data:`os.environ`.
+
+    Returns
+    -------
+    Transport
+        The pinning-capable production transport.
+    """
+    return make_pinning_transport(PinPolicy.from_env(env))
+
+
 __all__ = [
     "CallMeter",
     "DhanClient",
     "Transport",
+    "default_dhan_transport",
+    "make_pinning_transport",
     "urllib_transport",
 ]
