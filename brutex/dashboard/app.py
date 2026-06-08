@@ -2201,7 +2201,13 @@ def build_app(
         # even with a valid fresh token. ``refresh_live_token`` updates the holder in
         # place (write-through) + tells the keepalive to re-learn the new expiry; a
         # no-op (``False``) when no live session is running (dry-run / no creds).
-        refresh_live_token(body.access_token)
+        # Resolve the lake root best-effort so a `saved` token event is recorded
+        # into the durable token-events table (DEC-TOKEN-EVENTS-001) — with the
+        # JWT-derived expiry + the MASKED client id, never the secret. None when
+        # no store/lake is wired (the event is simply skipped).
+        store_path = getattr(instrument_store, "path", None)
+        events_lake = store_path.parent if isinstance(store_path, Path) else None
+        refresh_live_token(body.access_token, lake_root=events_lake, client_id=body.client_id)
         # Echo back the masked preview so the page can confirm the paste landed
         # (right value/length, not empty) — never a usable secret.
         return JSONResponse(credentials_preview())
@@ -2432,6 +2438,31 @@ def build_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)
+
+    @app.get("/api/v1/db/token-events")
+    async def api_db_token_events() -> JSONResponse:
+        """GET /api/v1/db/token-events — the durable token-lifecycle event log.
+
+        DEC-TOKEN-EVENTS-001. One row per token event (saved / renewed / expired /
+        refused) with its JWT-derived expiry + a MASKED client id — NEVER the token
+        secret (the schema has no token column). READ-ONLY: loads
+        ``<lake>/token_events/events.parquet``; never raises (empty when no lake /
+        no event yet, never a 500).
+        """
+        from brutex.adapters.dhan.token_events import load_token_events, to_payload
+
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse({"count": 0, "events": []})
+        lake = lake_root.parent
+
+        def _load() -> dict[str, Any]:
+            """Load the token-events Parquet + project it to the JSON payload (threadpool)."""
+            events = to_payload(load_token_events(lake))
+            return {"count": len(events), "events": events}
+
+        return JSONResponse(await run_in_threadpool(_load))
 
     @app.get("/api/v1/db/options")
     async def api_db_options(
