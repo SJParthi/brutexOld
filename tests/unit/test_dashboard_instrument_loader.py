@@ -142,6 +142,7 @@ def test_ntm_admitted_with_constituents(tmp_path: Path) -> None:
         store,
         http_get=lambda _url: _csv(rows),
         constituent_opener=lambda _url: constituent_csv,
+        constituent_cache_dir=tmp_path / "ntmcache",  # isolated (also seeds the cache)
     )
 
     assert result["ntm"]["admitted"] is True
@@ -164,7 +165,10 @@ def test_ntm_index_only_when_constituent_fetch_fails(tmp_path: Path) -> None:
         raise OSError("nseindia 403 Forbidden")
 
     result = load_instrument_master(
-        store, http_get=lambda _url: _csv(rows), constituent_opener=_boom
+        store,
+        http_get=lambda _url: _csv(rows),
+        constituent_opener=_boom,
+        constituent_cache_dir=tmp_path / "ntmcache",  # isolated + EMPTY → no fallback
     )
     assert result["ntm"]["admitted"] is True
     assert result["ntm"]["constituents"] == 0
@@ -179,9 +183,84 @@ def test_ntm_index_only_when_constituent_csv_empty(tmp_path: Path) -> None:
     store = _store(tmp_path)
     rows = [*_ROWS, "NSE,46,INDEX,NIFTY TOTAL MKT,Nifty Total Market,0,0,,,,,,,,,"]
     result = load_instrument_master(
-        store, http_get=lambda _url: _csv(rows), constituent_opener=lambda _url: ""
+        store,
+        http_get=lambda _url: _csv(rows),
+        constituent_opener=lambda _url: "",
+        constituent_cache_dir=tmp_path / "ntmcache",  # isolated + EMPTY → no fallback
     )
     assert result["ntm"]["admitted"] is True
     assert result["ntm"]["constituents"] == 0
     assert result["ntm"]["constituent_note"] == "no constituent CSV mapping for NIFTY TOTAL MARKET"
     assert result["index_count"] == 3
+
+
+def test_ntm_constituent_fetch_falls_back_to_cache(tmp_path: Path) -> None:
+    """DEC-NTM-CONSTITUENT-CACHE-001: a live fetch seeds the cache; a LATER failed
+    fetch falls back to it so the ~750 constituents survive a niftyindices timeout."""
+    cache = tmp_path / "ntmcache"
+    rows = [
+        *_ROWS,
+        "NSE,46,INDEX,NIFTY TOTAL MKT,Nifty Total Market,0,0,,,,,,,,,",
+        "NSE,5001,EQUITY,SMALLCO ONE LTD,SmallCo One,1,0.05,,,,,,EQ,INE111A01011,,",
+    ]
+    csv_text = (
+        "Company Name,Industry,Symbol,Series,ISIN Code\n"
+        "SmallCo One Ltd.,X,SMALLCO1,EQ,INE111A01011\n"
+    )
+    store = _store(tmp_path)
+
+    # 1) Live fetch SUCCEEDS → the constituent is admitted AND the cache is seeded.
+    r1 = load_instrument_master(
+        store,
+        http_get=lambda _url: _csv(rows),
+        constituent_opener=lambda _url: csv_text,
+        constituent_cache_dir=cache,
+    )
+    assert r1["ntm"]["constituents"] == 1
+    assert "constituent_note" not in r1["ntm"]  # clean live load, no fallback note
+
+    # 2) Live fetch now FAILS (niftyindices timeout) → falls back to the cache, so
+    #    the constituent is STILL admitted (universe does not crater to the base set).
+    def _boom(_url: str) -> str:
+        raise OSError("The read operation timed out")
+
+    r2 = load_instrument_master(
+        store,
+        http_get=lambda _url: _csv(rows),
+        constituent_opener=_boom,
+        constituent_cache_dir=cache,
+    )
+    assert r2["ntm"]["constituents"] == 1  # preserved by the cache fallback
+    assert "used last-good cache" in r2["ntm"]["constituent_note"]
+
+
+def test_ntm_uses_operator_dropped_cache_file(tmp_path: Path) -> None:
+    """The operator can pre-seed the cache by dropping the browser-downloaded CSV.
+
+    Mirrors the real workaround: niftyindices bot-blocks urllib but the operator's
+    browser CAN download ``ind_niftytotalmarket_list.csv``; saving it at the cache
+    path makes the failing live fetch fall back to it (DEC-NTM-CONSTITUENT-CACHE-001).
+    """
+    from brutex.dashboard.ntm_cache import save_constituent_csv
+
+    cache = tmp_path / "ntmcache"
+    save_constituent_csv(
+        "Company Name,Industry,Symbol,Series,ISIN Code\n"
+        "SmallCo One Ltd.,X,SMALLCO1,EQ,INE111A01011\n",
+        cache_dir=cache,
+    )
+    rows = [
+        *_ROWS,
+        "NSE,46,INDEX,NIFTY TOTAL MKT,Nifty Total Market,0,0,,,,,,,,,",
+        "NSE,5001,EQUITY,SMALLCO ONE LTD,SmallCo One,1,0.05,,,,,,EQ,INE111A01011,,",
+    ]
+    # Live opener returns EMPTY (e.g. blocked → empty body) → falls back to the
+    # operator-dropped cache (covers the live-empty + cache-present branch).
+    result = load_instrument_master(
+        _store(tmp_path),
+        http_get=lambda _url: _csv(rows),
+        constituent_opener=lambda _url: "",
+        constituent_cache_dir=cache,
+    )
+    assert result["ntm"]["constituents"] == 1  # operator-dropped CSV used as fallback
+    assert "used last-good cache" in result["ntm"]["constituent_note"]
