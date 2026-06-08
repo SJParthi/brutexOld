@@ -100,7 +100,7 @@ jobs:
           #    (compute.py [Sharpe] + ranking [composite] carry their own
           #    hardening tests this PR landed; folding them into the
           #    zero-survivor gate is the tracked next ratchet — they retain a
-          #    handful of provably-equivalent mutants, see MIGRATION #589.)
+          #    handful of provably-equivalent mutants, see MIGRATION #590.)
           #
           # Tests on these already hit 100% line coverage; mutmut verifies that
           # the coverage is *meaningful* (the tests detect a behaviour change).
