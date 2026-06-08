@@ -350,6 +350,18 @@ operator must HALT the sweep, modify the registry, restart the sweep
 
 ### Stage 2.5 — Bayesian early-stop (~61% reduction)
 
+> 🚫 **ABANDONED — do NOT implement (DEC-SPRT-INFEASIBLE-001, ADR-0006 Final
+> Verdict).** A feasibility review proved a *provably* leaderboard-preserving
+> SPRT early-stop is **infeasible**: the leaderboard score is relative/pool-coupled
+> (z-scored across survivors + DSR-deflated against `N`) and no mid-flight bound
+> exists for the non-Sharpe composite terms, so any kill is either unsafe
+> (probabilistic) or non-accelerating (exact = full backtest). The "~61% reduction"
+> SLA is **NOT safely achievable** and is retired. Use the **exact Stage-1B
+> prefilter** (`sweep_driver.py:264-272`) + the **bit-exact GPU path** instead
+> (both leaderboard-safe by construction). The inert decision core, A/B oracle,
+> and residual-B2 proof remain as guardrails — not wired, must not be. Full
+> rationale: `docs/adr/0006-stage2.5-sprt-design-block.md`.
+
 > ⚠️ **DESIGN-BLOCKED — do NOT implement as written (DEC-SPRT-DESIGN-BLOCK-001,
 > ADR-0006).** A 4-agent hostile review found this section (a) **contradicts**
 > `TRACK1_OPTIMIZATIONS.md §2` on what a "trial" is (≥50 *trades* here vs ≥50,000
