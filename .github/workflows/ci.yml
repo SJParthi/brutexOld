@@ -1356,6 +1356,16 @@ jobs:
           else
             echo "(brutex.dashboard.pull_progress test file not present yet — gate inactive)"
           fi
+          # DEC-VERDICT-BANNER-001 (MIGRATION.md #575): the pure pull-verdict
+          # banner helper (verdict kind → colour/css-class + retry-button bool)
+          # ships at 100% line+branch from the start; the HTML/JS + the thin
+          # /pull-verdict route are # pragma: no cover (display-only).
+          if compgen -G "tests/unit/test_verdict_banner.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.verdict_banner --cov-branch --cov-report=term-missing --cov-fail-under=100 \
+              tests/unit/test_verdict_banner.py tests/property/test_verdict_banner_properties.py tests/golden/test_verdict_banner_golden.py
+          else
+            echo "(brutex.dashboard.verdict_banner test file not present yet — gate inactive)"
+          fi
           # DEC-DASHBOARD-FASTREAD-001 (#437): pull_jobs now feeds the
           # incremental coverage counters + invalidates the summary cache on the
           # single write funnel. The unit suite achieves 100% alone; the

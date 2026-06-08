@@ -89,6 +89,7 @@ from brutex.dashboard.request_logging import emit_request_log
 from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
+from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.timeframe_materialize import (
     INTRADAY_TF_INTERVALS,
     MATERIALIZABLE_TFS,
@@ -1310,6 +1311,15 @@ def build_app(
     # (DEC-DASHBOARD-FASTREAD-001).
     _pull_job = BackgroundPullJob(summary_cache=_summary_cache)
 
+    # Last finished spot pull's verdict dict (DEC-VERDICT-BANNER-001). The
+    # background _work closure stamps the BulkSpotReport's `.verdict.to_dict()`
+    # here when a pull / retry completes; GET /pull-verdict maps it through the
+    # pure banner_for() helper so /universe can SHOW the coloured banner. A
+    # one-key holder (not a module-global — CLAUDE.md §4); the write is a single
+    # atomic reference assignment on the job thread, the read is on the request
+    # thread (CPython GIL → torn-state-free). `None` until the first pull lands.
+    _last_pull_verdict: dict[str, dict[str, Any] | None] = {"verdict": None}
+
     @app.post("/api/v1/universe/pull-all")
     async def api_universe_pull_all(
         kind: str | None = Query(default=None),
@@ -1379,7 +1389,7 @@ def build_app(
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: bulk-pull every selected spot symbol, streaming progress."""
-            return pull_all_spot(
+            report = pull_all_spot(
                 instruments,
                 lake_root=lake_root,
                 dry_run=dry_run,
@@ -1390,6 +1400,8 @@ def build_app(
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
             )
+            _last_pull_verdict["verdict"] = report.verdict.to_dict()
+            return report
 
         # total = symbols × the 2 fetched intervals (1m + 1d) — the unit the hook fires on.
         started = _pull_job.start(_work, total=len(instruments) * 2, detail=detail)
@@ -1458,9 +1470,9 @@ def build_app(
             dry_run=dry_run,
         )
 
-        def _work(on_progress: ProgressHook) -> object:
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: re-pull every selected symbol with auto-retry on."""
-            return pull_all_spot(
+            report = pull_all_spot(
                 instruments,
                 lake_root=lake_root,
                 dry_run=dry_run,
@@ -1472,6 +1484,8 @@ def build_app(
                 session_rate=_session_rate,
                 auto_retry=True,
             )
+            _last_pull_verdict["verdict"] = report.verdict.to_dict()
+            return report
 
         started = _pull_job.start(_work, total=len(instruments) * 2, detail=detail)
         return JSONResponse(
@@ -1585,6 +1599,26 @@ def build_app(
         runs to tick the counters window-by-window (DEC-PULL-PROGRESS-LIVE-001).
         """
         return JSONResponse(_pull_job.snapshot().to_dict())
+
+    @app.get("/api/v1/universe/pull-verdict")
+    async def api_universe_pull_verdict() -> JSONResponse:  # pragma: no cover — thin route
+        """GET /api/v1/universe/pull-verdict — the last finished pull's banner verdict.
+
+        The MANUAL surface of DEC-VERDICT-BANNER-001: maps the most-recent
+        completed pull / retry verdict (stamped by the background ``_work``) through
+        the pure :func:`brutex.dashboard.verdict_banner.banner_for` helper into the
+        display-ready banner (``kind`` / ``css_class`` / ``colour`` / ``headline`` /
+        ``action`` / ``pending_windows`` / ``show_retry_button``). ``/universe``
+        fetches this after a pull completes (AUTOMATIC) and on a manual refresh
+        (MANUAL) to render / update the coloured banner. ``{"present": false}`` until
+        the first pull lands. This route only DISPLAYS the already-computed verdict —
+        it never fetches data or retries (Golden Rule #10); the "Retry failed
+        windows" button targets the existing ``/retry-failed`` engine.
+        """
+        raw = _last_pull_verdict["verdict"]
+        if raw is None:
+            return JSONResponse({"present": False})
+        return JSONResponse({"present": True, **banner_for(raw).to_dict()})
 
     @app.post("/api/v1/universe/derive-timeframes")
     async def api_universe_derive_timeframes(

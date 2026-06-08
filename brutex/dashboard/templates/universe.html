@@ -211,6 +211,40 @@
   .bstat .bk { font-size:10px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); }
   .bstat.ok .bv { color:var(--green-bright); }
   .bstat.bad .bv { color:var(--red); }
+  /* ── Pull-verdict banner (DEC-VERDICT-BANNER-001) ──
+     A coloured, actionable banner shown on /universe AFTER a pull. The colour +
+     CSS modifier class + the "show retry button" decision come verbatim from the
+     server's pure brutex.dashboard.verdict_banner.banner_for() helper (one source
+     of truth — CLAUDE.md §11 COMMON); this only paints the four kinds. */
+  #verdictBanner { display:none; margin:0 24px 18px; padding:14px 18px; border-radius:14px;
+    border:1px solid var(--border); align-items:flex-start; gap:14px;
+    animation: fadeInUp .4s ease both; }
+  #verdictBanner.on { display:flex; }
+  #verdictBanner .vdot { width:12px; height:12px; border-radius:50%; margin-top:5px; flex:0 0 auto; }
+  #verdictBanner .vbody { flex:1 1 auto; min-width:0; }
+  #verdictBanner .vhead { font-weight:800; font-size:15px; }
+  #verdictBanner .vaction { color:var(--muted); font-size:13px; margin-top:4px; }
+  #verdictBanner .vmeta { color:var(--muted); font-size:11px; text-transform:uppercase;
+    letter-spacing:.6px; margin-top:6px; }
+  #verdictBanner .vbtns { display:flex; gap:8px; flex:0 0 auto; align-items:center; }
+  #verdictBanner .vbtn { cursor:pointer; border:1px solid var(--border); border-radius:10px;
+    background:transparent; color:var(--text-bright); font-weight:700; padding:8px 13px; font-size:13px;
+    transition:.15s; }
+  #verdictBanner .vbtn:hover { border-color:var(--green); box-shadow:0 0 16px rgba(38,217,176,.25); }
+  #verdictBanner .vbtn.retry { color:#1A1300; border:none;
+    background:linear-gradient(90deg,var(--yellow),#FFD089); }
+  #verdictBanner.verdict--red { border-color:var(--red); background:rgba(255,92,92,.10); }
+  #verdictBanner.verdict--red .vhead { color:var(--red); }
+  #verdictBanner.verdict--red .vdot { background:var(--red); }
+  #verdictBanner.verdict--amber { border-color:var(--yellow); background:rgba(255,183,77,.10); }
+  #verdictBanner.verdict--amber .vhead { color:var(--yellow); }
+  #verdictBanner.verdict--amber .vdot { background:var(--yellow); }
+  #verdictBanner.verdict--grey { border-color:var(--border); background:rgba(255,255,255,.04); }
+  #verdictBanner.verdict--grey .vhead { color:var(--muted); }
+  #verdictBanner.verdict--grey .vdot { background:var(--muted); }
+  #verdictBanner.verdict--green { border-color:var(--green); background:rgba(38,217,176,.10); }
+  #verdictBanner.verdict--green .vhead { color:var(--green-bright); }
+  #verdictBanner.verdict--green .vdot { background:var(--green); }
   /* ── Accessibility + motion polish (DEC-DASHBOARD-A11Y-POLISH-001) ── */
   /* Keyboard focus ring: a clear, consistent outline on TAB focus for every
      interactive control. ``:focus-visible`` shows it only for keyboard users —
@@ -325,6 +359,23 @@
     <button class="loadbtn" id="tickconstbtn" title="Best-effort: tick this index's F&amp;O-eligible constituent stocks (fetched from NSE on your machine — verify; membership rebalances)" disabled>⊕ tick its constituents</button>
   </div>
   <div class="loadmsg" id="loadmsg" style="margin:-4px 24px 8px;"></div>
+
+  <!-- Pull-verdict banner (DEC-VERDICT-BANNER-001): coloured, actionable verdict
+       shown after a pull. Colour + retry-button visibility come from the server's
+       pure banner_for() helper; this is display-only. -->
+  <div id="verdictBanner" role="status" aria-live="polite">
+    <div class="vdot"></div>
+    <div class="vbody">
+      <div class="vhead" id="verdictHead"></div>
+      <div class="vaction" id="verdictAction"></div>
+      <div class="vmeta" id="verdictMeta"></div>
+    </div>
+    <div class="vbtns">
+      <button class="vbtn retry" id="verdictRetry" style="display:none"
+              title="Re-pull only the still-failed windows (manual retry)">↻ Retry failed windows</button>
+      <button class="vbtn" id="verdictRefresh" title="Re-fetch the latest pull verdict">⟳ Refresh</button>
+    </div>
+  </div>
 
   <div id="pullpanel">
     <div class="beam"></div>
@@ -1085,7 +1136,41 @@ function finishLive() {
   // multi-select options pull leaves the button correctly enabled afterwards.
   updateMultiBtn();
   document.getElementById('pullpanel').classList.remove('running');  // stop the beam
+  refreshVerdict();  // a pull just ended — fetch + paint the verdict banner (DEC-VERDICT-BANNER-001)
 }
+
+/* ── Pull-verdict banner (DEC-VERDICT-BANNER-001) ──
+   AUTOMATIC: called from finishLive() the moment a pull ends.
+   MANUAL: the banner's ⟳ Refresh button calls it on demand.
+   The colour (css_class) + the retry-button visibility (show_retry_button) come
+   verbatim from the server's pure banner_for() helper — this only paints them. */
+async function refreshVerdict() {
+  const banner = document.getElementById('verdictBanner');
+  if (!banner) return;
+  try {
+    const r = await fetch('/api/v1/universe/pull-verdict');
+    if (!r.ok) return;
+    const v = await r.json();
+    if (!v || !v.present) { banner.style.display = 'none'; return; }
+    // Reset to the base class then apply the server-chosen colour modifier only.
+    banner.className = 'on ' + esc(v.css_class || '');
+    document.getElementById('verdictHead').textContent = v.headline || '';
+    document.getElementById('verdictAction').textContent = v.action || '';
+    document.getElementById('verdictMeta').textContent =
+      (v.pending_windows || 0).toLocaleString('en-IN') + ' pending window'
+      + ((v.pending_windows === 1) ? '' : 's');
+    document.getElementById('verdictRetry').style.display =
+      v.show_retry_button ? 'inline-block' : 'none';
+    banner.style.display = 'flex';
+  } catch (e) { /* offline — leave the banner as-is */ }
+}
+const verdictRefreshBtn = document.getElementById('verdictRefresh');
+if (verdictRefreshBtn) verdictRefreshBtn.addEventListener('click', refreshVerdict);
+const verdictRetryBtn = document.getElementById('verdictRetry');
+if (verdictRetryBtn) verdictRetryBtn.addEventListener('click', () =>
+  // Wire to the EXISTING manual retry engine (DEC-INGEST-AUTO-RETRY-001 / PR #483) —
+  // re-pull ONLY the still-failed windows over the full admitted spot universe.
+  startAndPoll('/api/v1/universe/retry-failed', 'retry failed windows'));
 
 /* Render the live stat row (units done/total · failed · bars) from a snapshot. */
 function renderLiveStats(s) {
@@ -1126,6 +1211,7 @@ if (credDismiss) credDismiss.addEventListener('click', () => {
   if (b) b.style.display = 'none';
 });
 checkCredentialsBanner();
+refreshVerdict();  // show any prior pull's verdict banner on load (DEC-VERDICT-BANNER-001)
 
 /* Initial page render uses the already-loaded GET endpoints only. The keyless
    load-instruments POST fires at most ONCE here (maybeAutoLoad) and only when
