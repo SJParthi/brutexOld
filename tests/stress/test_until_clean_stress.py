@@ -12,7 +12,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 
+import pytest
 from brutex.adapters.dhan.until_clean import UntilCleanRound, run_until_clean
+
+#: All stress tests carry the ``stress`` marker (registered in pyproject.toml) so the
+#: nightly ``pytest tests/stress -m stress`` soak selects them (DEC-STRESS-001).
+pytestmark = pytest.mark.stress
 
 _CYCLES = 20_000
 
