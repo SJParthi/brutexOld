@@ -52,7 +52,9 @@ class _FakeTransport:
 
 
 def _renew_body(token: str, expiry: str) -> bytes:
-    return json.dumps({"accessToken": token, "expiryTime": expiry}).encode("utf-8")
+    # Real Dhan RenewToken shape (DEC-DHAN-RENEWTOKEN-ROTATE-001): the rotated
+    # token is under "token" (NOT "accessToken"), alongside "expiryTime".
+    return json.dumps({"token": token, "expiryTime": expiry}).encode("utf-8")
 
 
 def _client(transport: _FakeTransport) -> DhanClient:

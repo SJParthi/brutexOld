@@ -116,18 +116,36 @@ def renew_token(client: DhanClient, *, pace: Callable[[], None] | None = None) -
     Raises
     ------
     DhanAuthError
-        If the response lacks a string ``accessToken`` / ``expiryTime`` (e.g. an
+        If the response lacks a string ``token`` / ``expiryTime`` (e.g. an
         expired or TOTP-minted token that ``RenewToken`` refuses).
+
+    Notes
+    -----
+    **Response shape (DEC-DHAN-RENEWTOKEN-ROTATE-001, operator curl 2026-06-08):**
+    a successful ``RenewToken`` returns ``{"createTime", "expiryTime", "token"}``
+    — the fresh access token is under the **``token``** key, NOT ``accessToken``.
+    Per the Dhan docs ("one active token at a time — generating a new token
+    invalidates the old one"), the call **rotates**: it mints the new token and
+    **invalidates the one presented in the header**. Parsing the wrong key made
+    this function raise ``DhanAuthError`` on every successful rotation, so the
+    caller discarded the new token and kept pulling on the just-invalidated old
+    one → ``HTTP 400 DH-906 "Invalid Token"`` on the very next data call. Reading
+    ``token`` captures the rotated credential so the pull proceeds on the LIVE
+    token (the operator's 3-curl test proved the rotation: data-200 → RenewToken
+    returns ``{...,"token":...}`` → same old token now data-DH-906).
     """
     # Gate the INITIAL physical POST through the shared rate bucket (or the
     # client's own no-op default) BEFORE the call — the client's fast-retry path
     # gates each subsequent attempt itself (DEC-DHAN-RATE-RESIDUAL-HARDEN-001).
     (pace or client.pace)()
     payload = client.get_json(ENDPOINT_RENEW_TOKEN)
-    token = payload.get("accessToken")
+    # The rotated access token is under "token" (DEC-DHAN-RENEWTOKEN-ROTATE-001);
+    # "accessToken" (the pre-fix key) is NEVER present, so the old code discarded
+    # every successful rotation and left the caller on a dead token.
+    token = payload.get("token")
     expiry = payload.get("expiryTime")
     if not isinstance(token, str) or not isinstance(expiry, str):
-        raise DhanAuthError("RenewToken response missing string accessToken/expiryTime")
+        raise DhanAuthError("RenewToken response missing string token/expiryTime")
     return TokenInfo(access_token=token, expiry_time=expiry)
 
 
