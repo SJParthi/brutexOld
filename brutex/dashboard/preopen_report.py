@@ -41,7 +41,7 @@ import io
 import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from itertools import groupby
 from pathlib import Path
@@ -50,6 +50,7 @@ from typing import Any, Final, Literal
 import duckdb
 import structlog
 
+from brutex.calendars.nse import is_trading_day
 from brutex.dashboard.db_view import (
     _DAILY_INTERVAL,
     _INTRADAY_BASE_INTERVAL,
@@ -170,26 +171,75 @@ def resolve_report_datasets(
     return sorted(resolved, key=lambda k: k[2])
 
 
-def _prev_close_asof(
+def _previous_trading_day(day: date) -> date:
+    """The NSE trading session immediately before *day* (per the shared calendar).
+
+    Walks back one calendar day at a time from ``day - 1`` until
+    :func:`brutex.calendars.nse.is_trading_day` is satisfied — so weekends and
+    listed NSE/BSE holidays are stepped over (they are NOT trading sessions) and
+    a special weekend session (e.g. a Budget-Day Saturday) IS honoured. The walk
+    always terminates: any weekday outside the holiday list is a trading day, so
+    the immediately-preceding session is at most a handful of days back (bounded
+    constant work, not unbounded).
+
+    Honest limit (Golden Rule #10): a Diwali **Muhurat** date is classified as a
+    holiday by :func:`is_trading_day`, so it is treated as a NON-session here.
+    A symbol whose 1-day lake happens to carry a Muhurat daily bar may therefore
+    have the day-after-Diwali row conservatively SKIPPED by
+    :func:`_daily_prev_close_contiguous` (the "correct-or-absent, never wrong"
+    rule) — recorded in the decision ledger, not a silent wrong number.
+    """
+    probe = day - timedelta(days=1)
+    while not is_trading_day(probe):
+        probe -= timedelta(days=1)
+    return probe
+
+
+def _daily_prev_close_contiguous(
     daily: dict[date, Decimal], daily_dates: list[date], day: date
 ) -> Decimal | None:
-    """The NSE "previous close" for *day*: the latest 1-day close STRICTLY before it.
+    """Daily-basis PREV. CLOSE that REFUSES to anchor across a MISSING daily bar.
 
-    A strictly-before lookup (not same-date) so it is robust to an INTERNAL 1-day
-    gap: it returns the most recent AVAILABLE earlier close rather than dropping
-    the row. For a contiguous series this is simply the prior trading day's
-    official close. ``None`` when no earlier 1-day bar exists (the first day).
-    O(log N) via :func:`bisect.bisect_left` over the pre-sorted *daily_dates*.
+    The NSE "previous close" for *day* is the **immediately-preceding trading
+    session's** 1-day official close. For the daily basis the 1-day series IS the
+    data, so it cannot be its own calendar (a missing bar would look like a
+    holiday); instead the authoritative prior session is derived from the shared
+    NSE trading calendar (:func:`_previous_trading_day`) and the anchor is valid
+    ONLY when the lake actually holds that EXACT session's daily bar.
 
-    On an INTERNAL 1-day gap (a missing prior daily bar) this returns the most
-    recent AVAILABLE earlier close — a best-effort anchor rather than dropping the
-    row; the 1-day series is kept complete by DEC-DHAN-429-RETRY-001 (#466) +
-    the windows table (#465).
+    This is the daily mirror of :func:`_minute_prev_close_contiguous`
+    (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-001, PR #484): the latent stale-jump bug in
+    the old ``_prev_close_asof`` returned the most-recent AVAILABLE earlier close,
+    which silently jumped across a MISSING daily bar onto a far-earlier session →
+    a wrong %CHNG. Here:
+
+    * ``idx == 0`` (no daily bar strictly before *day*) → ``None`` (first session).
+    * The expected prior session (from the calendar) has its daily bar present in
+      the lake — i.e. the latest available daily date strictly before *day* IS
+      that exact session → return its close (``None`` if that close is zero, so a
+      ``/0`` %CHNG can never form).
+    * The expected prior session's daily bar is MISSING (the latest available
+      earlier daily date is older than the calendar's prior session) → ``None`` so
+      the caller SKIPS the row rather than anchoring on a stale far-earlier close
+      (the operator's locked "correct-or-absent, never wrong" rule).
+
+    A genuine weekend/holiday gap is NOT a hole: the calendar steps over it, so a
+    contiguous series across a holiday still resolves to the real prior session.
+    O(log N) per row via :func:`bisect.bisect_left` over *daily_dates* (the
+    calendar walk is a bounded constant); a safety net, never a data fix — the
+    1-day series is filled by re-pulling (DEC-DHAN-429-RETRY-001 #466) + the
+    windows table (#465) + the auto-retry layer (DEC-INGEST-AUTO-RETRY-001).
     """
     idx = bisect.bisect_left(daily_dates, day)
     if idx == 0:
         return None
-    return daily[daily_dates[idx - 1]]
+    expected = _previous_trading_day(day)
+    if daily_dates[idx - 1] != expected:
+        return None
+    close = daily[expected]
+    if close == 0:
+        return None
+    return close
 
 
 def _minute_prev_close_contiguous(
@@ -244,8 +294,10 @@ def build_preopen_rows(
     *basis* (DEC-PREOPEN-MINUTE-BASIS-001) selects ONE consistent scale:
 
     * ``"day"`` (default, DEC-PREOPEN-REPORT-1DAY-001) — IEP = the day's **1-day
-      open**; PREV. CLOSE = the **latest 1-day close strictly before** that day
-      (:func:`_prev_close_asof`, robust to an internal 1-day gap).
+      open**; PREV. CLOSE = the prior **NSE-trading-session's** 1-day close
+      (:func:`_daily_prev_close_contiguous`, which REFUSES to anchor across a
+      MISSING daily bar — DEC-PREOPEN-PREVCLOSE-CONTIGUITY-DAILY-001 — and skips
+      the row instead of jumping onto a stale far-earlier close).
     * ``"minute"`` (DEC-PREOPEN-MINUTE-BASIS-001) — IEP = the **09:15:00 1-minute
       session-open OPEN** (:func:`_intraday_open_by_date`); PREV. CLOSE = the
       **prior trading day's last 1-minute close** (:func:`_prev_trading_close`
@@ -311,7 +363,7 @@ def build_preopen_rows(
             if day < start or day > end:
                 continue
             if basis != "minute":
-                anchor = _prev_close_asof(daily, daily_dates, day)
+                anchor = _daily_prev_close_contiguous(daily, daily_dates, day)
             elif daily_dates:
                 anchor = _minute_prev_close_contiguous(minute_last, daily_dates, day)
             else:
