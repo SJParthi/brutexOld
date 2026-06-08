@@ -37,7 +37,7 @@ from typing import Any
 
 from brutex.adapters.dhan.ingest import _MARKET, _windows  # the canonical tiler (COMMON)
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
-from brutex.data.window_status import EMPTY, WindowStatusLog
+from brutex.data.window_status import EMPTY, FAILED, WindowStatusLog
 from brutex.models import Instrument
 
 __all__ = [
@@ -45,6 +45,7 @@ __all__ = [
     "load_lake_spans",
     "reconcile_coverage_with_lake",
     "reconcile_empty_terminal",
+    "reconcile_failed_windows_for_repull",
     "reconcile_windows",
 ]
 
@@ -141,6 +142,53 @@ def reconcile_windows(
                     )
                     marked += 1
     return marked
+
+
+def reconcile_failed_windows_for_repull(
+    coverage: FetchCoverage,
+    status_log: WindowStatusLog,
+) -> int:
+    """Un-mark every ``FAILED`` window from the skip-ledger so the ingest RE-PULLS it — **pure**.
+
+    DEC-FAILED-WINDOW-FORCE-REPULL-001. A ``FAILED`` status row is ALWAYS a
+    *retryable* transient: the ingest records ``FAILED`` only on the retryable
+    branch (rate-limit / timeout / transport / 5xx; ``ingest.py``), while a
+    terminal ``DH-905`` no-data is re-raised and NEVER recorded ``FAILED``. So
+    every ``FAILED`` window is one that *should* keep being re-pulled until it
+    succeeds — exactly the operator's ``DhanRateLimitError`` windows stuck at
+    0 bars.
+
+    The bug they were stuck on: the coarse span-enclosure
+    :func:`reconcile_windows` marks a window complete from the dataset's *min/max*
+    span, which ENCLOSES an internal-gap failed window (stored bars exist both
+    *before* and *after* it), so the failed window is skipped on every re-pull and
+    never retried. This un-marks (``FetchCoverage.unmark``) every ``FAILED``
+    window — overriding that enclosure mark AND any stale persisted skip — so the
+    pass re-fetches it; the auto-retry / until-clean loop then drives it to
+    ``SUCCESS`` (or, if Dhan genuinely has no data, settles it as a ``DH-905``
+    known-gap). Run AFTER :func:`reconcile_windows` so the un-mark wins.
+    O(recorded windows) once at pull start.
+
+    Returns
+    -------
+    int
+        The number of ``FAILED`` windows un-marked for re-pull.
+    """
+    unmarked = 0
+    for record in status_log.records():
+        if record.status != FAILED:
+            continue
+        coverage.unmark(
+            WindowKey(
+                market=record.market,
+                security_id=record.security_id,
+                interval=record.interval,
+                start=date.fromisoformat(record.window_start),
+                end=date.fromisoformat(record.window_end),
+            )
+        )
+        unmarked += 1
+    return unmarked
 
 
 def reconcile_empty_terminal(

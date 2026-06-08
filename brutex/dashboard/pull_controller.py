@@ -65,6 +65,7 @@ from brutex.adapters.protocol import MarketAdapter
 from brutex.dashboard.coverage_reconcile import (
     reconcile_coverage_with_lake,
     reconcile_empty_terminal,
+    reconcile_failed_windows_for_repull,
 )
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
@@ -1191,6 +1192,16 @@ def pull_all_spot(
         # (coverage + the cross-run status log), O(recorded windows) at pull start.
         if not dry_run and coverage is not None and status_log is not None:
             reconcile_empty_terminal(coverage, status_log)
+        # Force-re-pull FAILED windows (DEC-FAILED-WINDOW-FORCE-REPULL-001): a
+        # FAILED row is ALWAYS a retryable transient (rate-limit / timeout — a
+        # terminal DH-905 no-data is never recorded FAILED), yet the coarse
+        # span-enclosure reconcile above marks an internal-gap failed window
+        # complete (stored bars exist before AND after it), stranding the
+        # operator's DhanRateLimitError windows at 0 bars forever. Un-mark every
+        # FAILED window so THIS pass re-fetches it; auto-retry drives it to
+        # success. Runs AFTER reconcile_coverage_with_lake so the un-mark wins.
+        if not dry_run and coverage is not None and status_log is not None:
+            reconcile_failed_windows_for_repull(coverage, status_log)
 
         _LOG.info(
             "universe.pull_all.start",
@@ -1499,6 +1510,12 @@ def pull_candles(
         # (coverage + the cross-run status log), O(recorded windows) at pull start.
         if not dry_run and coverage is not None and status_log is not None:
             reconcile_empty_terminal(coverage, status_log)
+        # Force-re-pull FAILED windows (DEC-FAILED-WINDOW-FORCE-REPULL-001):
+        # un-mark every FAILED (retryable) window the coarse span-enclosure
+        # reconcile wrongly marked complete, so the ingest re-fetches it until it
+        # succeeds instead of skipping a 0-bar internal gap forever.
+        if not dry_run and coverage is not None and status_log is not None:
+            reconcile_failed_windows_for_repull(coverage, status_log)
 
         _LOG.info(
             "universe.pull.start",
