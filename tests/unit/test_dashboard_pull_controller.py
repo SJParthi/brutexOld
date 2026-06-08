@@ -964,6 +964,40 @@ class TestRefreshLiveToken:
         set_live_keepalive(None)
         assert refresh_live_token("new-jwt") is False  # no live session → no-op
 
+    def test_records_saved_token_event_with_masked_client_and_expiry(self, tmp_path: Path) -> None:
+        # DEC-TOKEN-EVENTS-001: a save records a `saved` event with the JWT-derived
+        # expiry + a MASKED client id — never the token secret.
+        import base64
+        import json
+
+        from brutex.adapters.dhan.token_events import load_token_events
+        from brutex.dashboard.pull_controller import refresh_live_token, set_live_token_holder
+
+        payload = base64.urlsafe_b64encode(json.dumps({"exp": 9_999_999_999}).encode())
+        jwt = f"hdr.{payload.rstrip(b'=').decode()}.sig"
+        set_live_token_holder(None)
+        try:
+            refresh_live_token(jwt, lake_root=tmp_path, client_id="1100123456788842")
+        finally:
+            set_live_token_holder(None)
+        (event,) = load_token_events(tmp_path)
+        assert event.action == "saved"
+        assert event.client_id_masked == "1100********8842"  # masked, not the raw id
+        assert event.expiry_at is not None  # the JWT exp was decoded
+        assert jwt not in str(event)  # the token secret never reaches the event
+
+    def test_records_saved_token_event_without_jwt_exp(self, tmp_path: Path) -> None:
+        # A non-JWT token → no expiry decoded, but the save is still recorded.
+        from brutex.adapters.dhan.token_events import load_token_events
+        from brutex.dashboard.pull_controller import refresh_live_token, set_live_token_holder
+
+        set_live_token_holder(None)
+        refresh_live_token("not-a-jwt", lake_root=tmp_path)
+        (event,) = load_token_events(tmp_path)
+        assert event.action == "saved"
+        assert event.expiry_at is None
+        assert event.client_id_masked is None
+
     def test_updates_holder_and_pokes_keepalive(self) -> None:
         from brutex.adapters.dhan.token_holder import TokenHolder
         from brutex.dashboard.pull_controller import (

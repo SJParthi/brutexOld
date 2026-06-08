@@ -332,3 +332,35 @@ class TestCoverageHelpers:
             assert ":focus-visible" in html
             assert "prefers-reduced-motion" in html
             assert "outline: 2px solid var(--blue)" in html
+
+
+class TestTokenEventsApi:
+    """GET /api/v1/db/token-events — the durable token-lifecycle log (DEC-TOKEN-EVENTS-001)."""
+
+    def test_empty_when_no_events(self, store: InstrumentStore) -> None:
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        resp = client.get("/api/v1/db/token-events")
+        assert resp.status_code == 200
+        assert resp.json() == {"count": 0, "events": []}
+
+    def test_lists_recorded_events_with_masked_client(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        from brutex.adapters.dhan.token_events import record_token_event
+
+        # store.path is tmp_path/instruments.duckdb → lake root is tmp_path.
+        record_token_event(tmp_path, action="saved", client_id="1100123456788842")
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/db/token-events").json()
+        assert body["count"] == 1
+        event = body["events"][0]
+        assert event["action"] == "saved"
+        assert event["client_id_masked"] == "1100********8842"  # masked, never the raw id
+        assert "token" not in event  # the secret never appears in the payload
+
+    def test_empty_payload_when_no_lake_root(self) -> None:
+        from types import SimpleNamespace
+
+        fake = SimpleNamespace(path=None)
+        client = TestClient(build_app(DashboardState(), instrument_store=fake))
+        assert client.get("/api/v1/db/token-events").json() == {"count": 0, "events": []}

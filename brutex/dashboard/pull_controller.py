@@ -578,7 +578,12 @@ def set_live_keepalive(keepalive: _LiveKeepalive | None) -> None:
     _LIVE_KEEPALIVE = keepalive
 
 
-def refresh_live_token(access_token: str) -> bool:
+def refresh_live_token(
+    access_token: str,
+    *,
+    lake_root: Path | None = None,
+    client_id: str | None = None,
+) -> bool:
     """Propagate a freshly-saved access token to the LIVE session — no restart.
 
     DEC-DHAN-TOKEN-SINGLE-SOURCE-001. When the operator saves a new token via the
@@ -590,11 +595,33 @@ def refresh_live_token(access_token: str) -> bool:
     token's expiry on its next tick. Returns ``True`` when a live holder was installed
     (the change took effect), ``False`` otherwise (no live session — a no-op).
 
+    Token-events log (DEC-TOKEN-EVENTS-001): when *lake_root* is given, a ``saved``
+    event is recorded into the durable token-events table — with the token's
+    JWT-derived expiry + a MASKED *client_id*, NEVER the token secret. Best-effort
+    (``record_token_event`` never raises), so it can never block a token save.
+
     Parameters
     ----------
     access_token
         The freshly-saved access token to make live immediately.
+    lake_root
+        The lake root to record the ``saved`` token event under (``None`` → no event).
+    client_id
+        The dhanClientId to MASK into the event (the raw id is never stored).
     """
+    if lake_root is not None:
+        from brutex.adapters.dhan.token_events import ACTION_SAVED, record_token_event
+        from brutex.adapters.dhan.token_keepalive import decode_jwt_expiry
+
+        exp_epoch = decode_jwt_expiry(access_token)
+        expiry_at = datetime.fromtimestamp(exp_epoch, tz=UTC) if exp_epoch is not None else None
+        record_token_event(
+            lake_root,
+            action=ACTION_SAVED,
+            status="ok",
+            expiry_at=expiry_at,
+            client_id=client_id,
+        )
     holder = _LIVE_TOKEN_HOLDER
     if holder is None:
         return False
