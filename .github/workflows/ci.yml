@@ -1299,6 +1299,13 @@ jobs:
           else
             echo "(brutex.adapters.dhan.client test file not present yet — gate inactive)"
           fi
+          # Ratchet `brutex.adapters.dhan.pinning` (the PURE SPKI certificate-
+          # pinning security core — DEC-DHAN-TLS-SPKI-PIN-001) at 100% line+branch.
+          if compgen -G "tests/unit/test_dhan_pinning.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.pinning --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_pinning.py
+          else
+            echo "(brutex.adapters.dhan.pinning test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_auth.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.auth --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_auth.py
           else
