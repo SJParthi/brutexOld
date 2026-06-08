@@ -35,7 +35,11 @@ from itertools import pairwise
 import pytest
 from brutex.data.models import CandleBar
 from brutex.engine.stage1a import build_walk_forward_schedule, trading_day_starts
-from brutex.engine.sweep_driver import verify_walk_forward_no_lookahead
+from brutex.engine.sweep_driver import (
+    evaluate_combo_walk_forward,
+    verify_walk_forward_no_lookahead,
+)
+from brutex.strategies.types import Side
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -120,6 +124,14 @@ def test_schedule_invariants(n_days: int, bpd: int, train: int, test: int, step:
             assert covered.isdisjoint(window)
             covered |= window
 
+    # (5b) overlap regime: when step < test, consecutive test windows MUST overlap
+    # by exactly (test - step) trading days (not merely "did not crash").
+    if step < test and schedule.n_folds >= 2:
+        for prev, nxt in pairwise(schedule.folds):
+            overlap_days = prev.test_end_day - nxt.test_start_day
+            assert overlap_days == test - step
+            assert overlap_days > 0
+
     # (4) clean partition (no overlap, no gap) when step == test
     if step == test:
         for (_, prev_end), (next_start, _) in pairwise(test_day_ranges):
@@ -161,3 +173,78 @@ def test_hash_sensitive_to_window_change(n_days: int, bpd: int) -> None:
     # Different train window ⇒ different fold boundaries ⇒ different hash.
     if base.folds != other.folds:
         assert base.schedule_hash != other.schedule_hash
+
+
+def _perturb_tail(bars: list[CandleBar], from_index: int) -> list[CandleBar]:
+    """Return a copy of ``bars`` with every bar at index >= ``from_index`` shifted.
+
+    Bumps the price of the tail bars by a large constant (preserving OHLC ordering
+    + IST dates so the schedule is identical), to test that NO earlier fold's
+    metrics depend on those future bars.
+    """
+    bump = Decimal("17.00")
+    out: list[CandleBar] = []
+    for i, bar in enumerate(bars):
+        if i < from_index:
+            out.append(bar)
+            continue
+        out.append(
+            CandleBar(
+                timestamp=bar.timestamp,
+                open=bar.open + bump,
+                high=bar.high + bump,
+                low=bar.low + bump,
+                close=bar.close + bump,
+                volume=bar.volume,
+                open_interest=bar.open_interest,
+            )
+        )
+    return out
+
+
+@settings(max_examples=40, deadline=None)
+@given(
+    n_days=st.integers(min_value=10, max_value=24),
+    bpd=st.integers(min_value=2, max_value=4),
+    train=st.integers(min_value=2, max_value=6),
+    test=st.integers(min_value=2, max_value=4),
+)
+def test_no_lookahead_counterfactual(n_days: int, bpd: int, train: int, test: int) -> None:
+    """The REAL no-look-ahead proof: perturbing bars AFTER a fold's ``test_end_bar``
+    must leave that fold's train + test metrics byte-identical.
+
+    This is the substantive causality guarantee (module note pillar 1) — stronger
+    than the structural P-06 barrier re-check: a centred window, a "next-day-open"
+    anchor, or any forward peek in the bit-matrix would change an earlier fold's
+    metrics when the future is mutated, and this would catch it.
+    """
+    step = test  # clean partition keeps folds independent for the comparison
+    bars = _make_bars(n_days, bpd)
+    if n_days < train + test:
+        return
+    baseline = evaluate_combo_walk_forward(
+        bars,
+        0,
+        direction=Side.BUY,
+        tf_minutes=1,
+        train_days=train,
+        test_days=test,
+        step_days=step,
+    )
+    # Perturb everything strictly after the FIRST fold's test window.
+    cut = baseline.schedule.folds[0].test_end_bar
+    if cut >= len(bars):
+        return  # only one fold spanning the whole stream; nothing "after" to perturb
+    perturbed = evaluate_combo_walk_forward(
+        _perturb_tail(bars, cut),
+        0,
+        direction=Side.BUY,
+        tf_minutes=1,
+        train_days=train,
+        test_days=test,
+        step_days=step,
+    )
+    # The schedule (bar boundaries) is unchanged by a price-only perturbation.
+    assert perturbed.schedule.folds == baseline.schedule.folds
+    # Fold 0 lies entirely before the cut → its metrics must be identical.
+    assert perturbed.fold_results[0] == baseline.fold_results[0]

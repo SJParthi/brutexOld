@@ -685,17 +685,23 @@ def _walk_forward_schedule_hash(
     train_days: int,
     test_days: int,
     step_days: int,
+    n_trading_days: int,
+    n_bars: int,
 ) -> str:
     """Return the 64-char BLAKE3 hex digest of a fold schedule's identity.
 
-    Hashes a canonical JSON encoding of the window parameters and every fold's
-    **bar** boundaries (the executed contract — the day boundaries are implied by
-    them) under a version tag. Two schedules collide iff their parameters and
-    every fold's ``[train_start_bar, train_end_bar, test_start_bar,
-    test_end_bar]`` collide. Uses the same ``fno_math.blake3_hash`` primitive and
-    canonical-JSON rules as the combo identity hash
-    (:func:`brutex.strategies.combo.combo_hash`) — one hashing source of truth
-    (CLAUDE.md §11 COMMON).
+    Hashes a canonical JSON encoding of the window parameters, the source
+    stream's shape (``n_trading_days`` + ``n_bars``), and every fold's **bar**
+    boundaries (the executed contract — the day boundaries are implied by them)
+    under a version tag. Including the stream shape closes the otherwise-possible
+    aliasing where two streams of different length yielding coincidentally
+    identical fold bar-bounds would share a hash. Assuming BLAKE3's
+    collision-resistance, two schedules then share a digest only when their
+    parameters, stream shape, and every fold's ``[train_start_bar, train_end_bar,
+    test_start_bar, test_end_bar]`` all match. Uses the same
+    ``fno_math.blake3_hash`` primitive and canonical-JSON rules as the combo
+    identity hash (:func:`brutex.strategies.combo.combo_hash`) — one hashing
+    source of truth (CLAUDE.md §11 COMMON).
     """
     payload = json.dumps(
         {
@@ -703,6 +709,8 @@ def _walk_forward_schedule_hash(
             "train_days": train_days,
             "test_days": test_days,
             "step_days": step_days,
+            "n_trading_days": n_trading_days,
+            "n_bars": n_bars,
             "folds": [
                 [f.train_start_bar, f.train_end_bar, f.test_start_bar, f.test_end_bar]
                 for f in folds
@@ -805,7 +813,9 @@ def build_walk_forward_schedule(
         step_days=step_days,
         n_trading_days=n_days,
         n_bars=n_bars,
-        schedule_hash=_walk_forward_schedule_hash(folds, train_days, test_days, step_days),
+        schedule_hash=_walk_forward_schedule_hash(
+            folds, train_days, test_days, step_days, n_days, n_bars
+        ),
     )
 
 

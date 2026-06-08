@@ -33,7 +33,7 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 #: The locked schedule hash for the fixture below. Regenerating it requires an
 #: intentional change to the boundaries or the canonical hash encoding.
-_GOLDEN_SCHEDULE_HASH = "9da8110e0188497f450b967a6c94d595c59846dcdecf43a376b91430fe625057"
+_GOLDEN_SCHEDULE_HASH = "f7763dd3941443a0b85b51d535207c574028cd9301e55d35817ad3159e38a7ec"
 
 #: (train_start_bar, train_end_bar, test_start_bar, test_end_bar) per fold — the
 #: hand-derived oracle.

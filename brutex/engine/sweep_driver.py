@@ -231,8 +231,39 @@ def metrics_for_mask(
     train/test) — so callers build the Stage-1A matrix once and reuse it. Public so
     those callers need not duplicate the chain (CLAUDE.md §11 COMMON).
     """
+    trades = _simulate_window(
+        bars,
+        bar_bits,
+        required_mask,
+        direction=direction,
+        tf_minutes=tf_minutes,
+        stop_loss_paisa=stop_loss_paisa,
+        take_profit_paisa=take_profit_paisa,
+    )
+    return _metrics_from_trades(
+        bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
+    )
+
+
+def _simulate_window(
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    required_mask: int,
+    *,
+    direction: Side,
+    tf_minutes: int,
+    stop_loss_paisa: int | None,
+    take_profit_paisa: int | None,
+) -> list[ClosedTrade]:
+    """Project a mask onto ``bar_bits`` and simulate the trades (the shared seam).
+
+    The signal→trade half of :func:`metrics_for_mask`, factored out so the
+    walk-forward scorer can get a fold's realized trades (to run the P-06
+    confinement guard over them) without duplicating the chain or re-simulating
+    (CLAUDE.md §11 COMMON).
+    """
     entry_signals = mask_to_entry_signals(bar_bits, required_mask)
-    trades = simulate_trades(
+    return simulate_trades(
         bars,
         entry_signals,
         direction=direction,
@@ -240,6 +271,21 @@ def metrics_for_mask(
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
     )
+
+
+def _metrics_from_trades(
+    bars: Sequence[CandleBar],
+    trades: Sequence[ClosedTrade],
+    *,
+    start_equity_paisa: int,
+    tf_minutes: int,
+) -> ResultMetrics:
+    """Build the equity curve from already-simulated trades and compute metrics.
+
+    The trade→metrics half of :func:`metrics_for_mask`, factored out so the
+    walk-forward scorer reuses the identical equity + metrics convention after it
+    has run the P-06 confinement guard over the trades (CLAUDE.md §11 COMMON).
+    """
     equity = build_equity_curve(
         bars, trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
     )
@@ -468,16 +514,27 @@ def rank_sweep_over_bits(
 # Two correctness pillars, both inherited from the proven OOS validator
 # (``brutex.engine.validation``):
 #
-# 1. **No anchor artifact.** ``bar_bits`` is built ONCE over the FULL stream, so
-#    every fold's first test day keeps its real prior-day pivots/Fib/PDH-PDL
-#    (its prior day is the last train day). Slicing the *trade simulation* at the
-#    IST day boundaries the schedule is anchored to — never rebuilding per fold —
-#    avoids clearing those first-day anchors.
-# 2. **No look-ahead.** Each fold's training window ends exactly where its
-#    held-out test window begins (``train_end_bar == test_start_bar``). Before any
-#    scoring, :func:`verify_walk_forward_no_lookahead` re-proves this through the
-#    named P-06 :class:`~brutex.feed.lookahead.LookAheadBarrier`; a leaky schedule
-#    raises rather than scoring silently.
+# 1. **No anchor artifact (the substantive causality guarantee).** ``bar_bits``
+#    is built ONCE over the FULL stream, so every fold's first test day keeps its
+#    real prior-day pivots/Fib/PDH-PDL (its prior day is the last train day).
+#    Slicing the *trade simulation* at the IST day boundaries the schedule is
+#    anchored to — never rebuilding per fold — avoids clearing those first-day
+#    anchors. Each bar's truth-vector is causal by construction (Stage-1A reads
+#    only bars ``<= N``), so a later fold's test window can never inform an earlier
+#    one. This is the real no-look-ahead guarantee, and it is *proved* by the
+#    counterfactual property test (perturbing bars after a fold's ``test_end_bar``
+#    leaves that fold's metrics byte-identical).
+# 2. **P-06 belt-and-suspenders (a guard, NOT the proof).** Two cheap runtime
+#    re-checks via the named :class:`~brutex.feed.lookahead.LookAheadBarrier`,
+#    honestly framed (Golden Rule #10): (a) :func:`verify_walk_forward_no_lookahead`
+#    re-asserts the *schedule* keeps every training window before its test window
+#    (``train_end_bar <= test_start_bar``) — a structural regression guard, since a
+#    well-formed schedule satisfies it by construction; (b) :func:`_assert_trades_confined`
+#    drives the barrier over each fold's *realized test trades*, proving none
+#    references a bar outside its own fold window and that they are chronologically
+#    ordered — a genuine guard on the scoring OUTPUT (it bites if a future slicing
+#    regression let a trade escape its window). Neither replaces pillar 1; both
+#    fail-closed (raise :class:`~brutex.feed.errors.LookAheadError`).
 #
 # Reproducibility (Golden Rule #4): :func:`_walk_forward_run_hash` folds the
 # schedule's BLAKE3 hash into the run-hash, so a walk-forward result is tied to
@@ -538,7 +595,11 @@ class WalkForwardResult:
     mean_test_sharpe, min_test_sharpe
         Mean and worst (minimum) of the defined per-fold test Sharpe ratios, or
         ``None`` if no fold produced a defined Sharpe. Full precision — never
-        rounded (DEC-MONEY-2DP-001 is money-only).
+        rounded (DEC-MONEY-2DP-001 is money-only). The mean is an unbiased
+        summary only when ``step_days >= test_days`` (disjoint test windows); with
+        ``step_days < test_days`` the test windows overlap and the mean
+        double-counts the shared bars — a caller deliberately oversampling folds
+        should prefer ``min_test_sharpe`` / ``pass_rate`` (Golden Rule #10).
     run_hash
         64-char BLAKE3 hex run-identity binding this combo + params to the fold
         schedule (:func:`_walk_forward_run_hash`).
@@ -568,23 +629,30 @@ class WalkForwardResult:
 
 
 def verify_walk_forward_no_lookahead(schedule: WalkForwardSchedule) -> LookAheadReport:
-    """Re-prove a fold schedule's no-look-ahead invariant via the P-06 barrier.
+    """Re-assert a fold schedule's train-before-test invariant via the P-06 barrier.
 
-    Drives the named **P-06** :class:`~brutex.feed.lookahead.LookAheadBarrier`
-    across the folds: for each fold the barrier's cursor is set to the last bar
-    the training side is permitted to use (``test_start_bar - 1``), then the
-    fold's latest training bar (``train_end_bar - 1``) is accessed. Because the
-    schedule builds contiguous windows (``train_end_bar == test_start_bar``) the
-    latest training bar equals the cursor and the access is allowed; a regression
-    that let a training window reach into (or past) its own test window would push
-    the accessed index above the cursor and raise
-    :class:`~brutex.feed.errors.LookAheadError`, which
+    The **structural** belt-and-suspenders guard (pillar 2a — see the module
+    note). It drives the named **P-06**
+    :class:`~brutex.feed.lookahead.LookAheadBarrier` across the folds: for each
+    fold the barrier's cursor is set to the last bar the training side is
+    permitted to use (``test_start_bar - 1``), then the fold's latest training bar
+    (``train_end_bar - 1``) is accessed. A well-formed schedule builds contiguous
+    windows (``train_end_bar == test_start_bar``), so the access lands exactly on
+    the cursor and passes; a regression that let a training window reach into (or
+    past) its own test window pushes the accessed index above the cursor and
+    raises :class:`~brutex.feed.errors.LookAheadError`, which
     :func:`~brutex.feed.lookahead.verify_with_barrier` folds into the returned
-    report (and logs as one structured audit event — Golden Rule #8).
+    report (and logs one structured audit event — Golden Rule #8).
 
-    The fold cursors are non-decreasing (folds are chronological, so
-    ``test_start_bar`` only grows), so the barrier's forward-only ``advance_to``
-    is never violated by a well-formed schedule.
+    **Honest scope (Golden Rule #10):** because the builder guarantees
+    contiguity, this check is *structural* — it guards against a future regression
+    in :func:`~brutex.engine.stage1a.build_walk_forward_schedule`, not against an
+    indicator that peeks forward (that risk lives in the bit-matrix construction
+    and is covered by pillar 1 + the counterfactual property test). A malformed
+    hand-built schedule (a negative ``test_start_bar`` or folds whose cursors move
+    backwards) is reported as a violation — ``passed=False`` — rather than raising
+    an uncaught ``ValueError`` from the barrier, so the contract "the caller gets a
+    pass/fail verdict, not a traceback" always holds.
 
     Parameters
     ----------
@@ -595,17 +663,69 @@ def verify_walk_forward_no_lookahead(schedule: WalkForwardSchedule) -> LookAhead
     -------
     LookAheadReport
         ``passed=True`` with the barrier statistics when every fold's training
-        window lies strictly before its test window; ``passed=False`` carrying the
-        violation string otherwise.
+        window lies at or before its test window; ``passed=False`` carrying the
+        violation string otherwise (including a malformed schedule).
     """
     barrier = LookAheadBarrier(record=True)
 
     def _walk() -> None:
+        prev_cursor = -1
         for fold in schedule.folds:
-            barrier.advance_to(fold.test_start_bar - 1)
+            cursor = fold.test_start_bar - 1
+            # A well-formed schedule has cursor >= 0 (test_start_bar >= 1) and
+            # non-decreasing cursors (chronological folds). Map a malformed
+            # schedule to a LookAheadError so verify_with_barrier reports
+            # passed=False instead of leaking the barrier's ValueError.
+            if cursor < 0 or cursor < prev_cursor or fold.train_end_bar - 1 < 0:
+                raise LookAheadError(
+                    f"malformed walk-forward schedule at fold {fold.fold_index}: "
+                    f"test_start_bar={fold.test_start_bar}, train_end_bar={fold.train_end_bar}"
+                )
+            barrier.advance_to(cursor)
             barrier.access(fold.train_end_bar - 1)
+            prev_cursor = cursor
 
     return verify_with_barrier(_walk, barrier)
+
+
+def _assert_trades_confined(
+    window_bars: Sequence[CandleBar],
+    trades: Sequence[ClosedTrade],
+) -> None:
+    """Prove a fold's realized trades stay inside its window, via the P-06 barrier.
+
+    The **scoring-output** guard (pillar 2b — see the module note). Drives a P-06
+    :class:`~brutex.feed.lookahead.LookAheadBarrier` over the trades a fold's
+    held-out test window produced: each trade's exit bar advances the cursor
+    (forward-only — the single-position simulator emits chronological,
+    non-overlapping trades) and its entry bar is then ``access``-ed, so the
+    barrier proves every trade *entered no later than it exited* and *both bars lie
+    inside this fold's window* (an out-of-window timestamp has no index → a
+    violation). This bites if a future slicing regression let a trade reference a
+    bar outside its fold — the genuine no-look-ahead guard on the scoring output
+    (distinct from the structural schedule check). O(1) memory
+    (``record=False``); O(trades) time.
+
+    Raises
+    ------
+    LookAheadError
+        If any trade's entry/exit bar is outside ``window_bars`` or the trades are
+        not chronologically ordered by exit.
+    """
+    barrier = LookAheadBarrier(record=False)
+    ts_to_index = {bar.timestamp: i for i, bar in enumerate(window_bars)}
+    for trade in trades:
+        exit_index = ts_to_index.get(trade.exit_ts)
+        entry_index = ts_to_index.get(trade.entry_ts)
+        if exit_index is None or entry_index is None:
+            raise LookAheadError(
+                f"walk-forward fold: trade {trade.entry_ts!r}->{trade.exit_ts!r} "
+                f"escapes its test window"
+            )
+        if exit_index < barrier.current_index:
+            raise LookAheadError("walk-forward fold: trades not chronologically ordered by exit")
+        barrier.advance_to(exit_index)
+        barrier.access(entry_index)
 
 
 def _walk_forward_run_hash(
@@ -666,9 +786,16 @@ def _score_fold(
     """Score one mask on one fold's train + held-out test windows.
 
     Slices the pre-built (full-stream) ``bar_bits`` + ``bars`` at the fold's bar
-    boundaries and runs the SAME mask through the shared :func:`metrics_for_mask`
-    core on each window — building once and slicing (never rebuilding per fold)
-    preserves the test window's first-day anchors (see the module note).
+    boundaries and runs the SAME mask through the shared metrics core on each
+    window — building once and slicing (never rebuilding per fold) preserves the
+    test window's first-day anchors (see the module note). The held-out test
+    window's realized trades are routed through the P-06
+    :func:`_assert_trades_confined` guard before metrics, so a slicing regression
+    that let a trade escape the fold raises rather than scoring silently.
+
+    ``train_metrics`` is the in-sample side of the standard walk-forward
+    in-sample-vs-out-of-sample table (a first-class deliverable a caller inspects,
+    not discarded); the aggregate verdict uses the held-out ``test`` side.
     """
     train_metrics = metrics_for_mask(
         bars[fold.train_start_bar : fold.train_end_bar],
@@ -680,15 +807,19 @@ def _score_fold(
         take_profit_paisa=take_profit_paisa,
         start_equity_paisa=start_equity_paisa,
     )
-    test_metrics = metrics_for_mask(
-        bars[fold.test_start_bar : fold.test_end_bar],
+    test_bars = bars[fold.test_start_bar : fold.test_end_bar]
+    test_trades = _simulate_window(
+        test_bars,
         bar_bits[fold.test_start_bar : fold.test_end_bar],
         required_mask,
         direction=direction,
         tf_minutes=tf_minutes,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
-        start_equity_paisa=start_equity_paisa,
+    )
+    _assert_trades_confined(test_bars, test_trades)
+    test_metrics = _metrics_from_trades(
+        test_bars, test_trades, start_equity_paisa=start_equity_paisa, tf_minutes=tf_minutes
     )
     return FoldResult(
         fold_index=fold.fold_index,
