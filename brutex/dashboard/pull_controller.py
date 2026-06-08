@@ -861,9 +861,7 @@ def start_token_keepalive(  # pragma: no cover — live creds + RenewToken netwo
         """
         try:
             client_id = resolve_dhan_credentials().client_id
-            save_dhan_credentials(
-                DhanFileCredentials(access_token=token, client_id=client_id)
-            )
+            save_dhan_credentials(DhanFileCredentials(access_token=token, client_id=client_id))
         except Exception as exc:  # best-effort persist; must never crash a renewal mid-pull
             _LOG.warning("auth.token_persist_failed", reason=str(exc))
 
