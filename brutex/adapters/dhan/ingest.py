@@ -61,7 +61,13 @@ if TYPE_CHECKING:
 
 from brutex.adapters.dhan.auth_guard import AuthGuard
 from brutex.adapters.dhan.chunks import plan_spot_intraday_windows
-from brutex.adapters.dhan.errors import DhanError, is_auth_failure, is_rate_limit, is_retryable
+from brutex.adapters.dhan.errors import (
+    DhanError,
+    is_auth_failure,
+    is_no_data_error,
+    is_rate_limit,
+    is_retryable,
+)
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.session import filter_intraday_session, is_session_exempt
@@ -644,6 +650,16 @@ def _ingest_one_window(
                     now=_failed_at,
                 )
             return _WindowOutcome(transient=1, window=retry_window, error_type=type(exc).__name__)
+        # A Dhan DH-905 "no data present" is the vendor's DEFINITIVE answer that
+        # the range has no bars (a genuine gap, e.g. NIFTY NEXT 50 daily) — a
+        # TERMINAL non-retryable error, but NOT a failure. Settle it as SKIPPED in
+        # the unified ledger (DEC-WINDOW-LEDGER-001) so the ledger reflects the true
+        # settled state (and, once the ledger drives skip, it is not re-fetched
+        # forever). It is STILL re-raised below to the run_dhan_spot_ingest
+        # known-gap quarantine (the verdict counts it as no_data) — behaviour
+        # unchanged; this only enriches the ledger record.
+        if ledger is not None and is_no_data_error(exc):
+            ledger.settle_known_gap(key, now=datetime.now(UTC), reason=type(exc).__name__)
         # A TERMINAL (non-retryable) error. If it is the token dying — a 401/403
         # OR a ``DH-906`` "Invalid Token" 400 (is_auth_failure) — trip the shared
         # latch so every NOT-YET-DISPATCHED window short-circuits above instead of

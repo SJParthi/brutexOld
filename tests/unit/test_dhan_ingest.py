@@ -460,6 +460,48 @@ class TestIngestSpotLedger:
         assert rec.status == FAILED
         assert rec.last_error == "DhanRateLimitError"
 
+    def test_dh905_terminal_settles_skipped_in_ledger_and_reraises(self) -> None:
+        # DEC-WINDOW-LEDGER-001 (Stage a): a Dhan DH-905 "no data present" is a
+        # TERMINAL gap — settled as SKIPPED in the ledger, but STILL re-raised to
+        # the run_ingest known-gap quarantine (behaviour unchanged).
+        from brutex.data.window_ledger import SKIPPED, WindowLedger
+
+        dh905 = {
+            "errorType": "Input_Exception",
+            "errorCode": "DH-905",
+            "errorMessage": "System is unable to fetch data ... no data present",
+        }
+        ledger = WindowLedger()
+        with pytest.raises(DhanBadRequestError):
+            ingest_spot(
+                _adapter(status=400, payload=dh905),
+                _Sink(),
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+                ledger=ledger,
+            )
+        assert ledger.records()[0].status == SKIPPED  # the gap is settled, not pending
+
+    def test_non_dh905_terminal_does_not_settle(self) -> None:
+        # A genuine terminal 400 (not a no-data marker) is re-raised WITHOUT being
+        # settled — it is a real error, never a settled gap.
+        from brutex.data.window_ledger import WindowLedger
+
+        ledger = WindowLedger()
+        with pytest.raises(DhanBadRequestError):
+            ingest_spot(
+                _adapter(status=400),  # default body — no DH-905 marker
+                _Sink(),
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+                ledger=ledger,
+            )
+        assert ledger.count == 0  # never settled, never recorded
+
 
 class _SeqTransport:
     """Transport returning a fixed STATUS SEQUENCE (clamped to the last on overflow).
