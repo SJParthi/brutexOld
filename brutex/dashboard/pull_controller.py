@@ -556,7 +556,6 @@ class _LiveKeepalive(Protocol):
 
     def forget_expiry(self) -> None:
         """Drop the learned expiry so the next tick re-learns the live token's exp."""
-        ...
 
 
 #: Process-wide live keepalive seam (DEC-DHAN-TOKEN-SINGLE-SOURCE-001), installed at
