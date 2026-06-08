@@ -1414,7 +1414,20 @@ def build_app(
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
-            """Background body: bulk-pull every selected spot symbol, streaming progress."""
+            """Background body: bulk-pull every selected spot symbol, streaming progress.
+
+            Runs the AUTO-RESUME-UNTIL-CLEAN loop (DEC-AUTO-RESUME-DEFAULT-001):
+            ``auto_retry=True`` + ``until_clean=True`` so AFTER the saturating first
+            pass the leftover failed windows are re-pulled in bounded rounds (over
+            the SHARED coverage ledger — only the still-failed windows hit Dhan
+            again, rate-safe) until ONE terminal state is reached: ``stop_clean``
+            (every window fetched — the normal exit), ``stop_quota`` (the day's
+            100,000-call Dhan quota is spent — resume after the IST-midnight reset),
+            ``stop_dead`` (the token died — re-auth), or ``stop_no_progress`` /
+            budget backstop. So the one-click pull DRIVES ITSELF to a clean lake with
+            zero manual "Re-pull to finish" clicks (CLAUDE.md §11 AUTOMATED), bounded
+            + quota-safe (Golden Rule #10 — never an infinite or quota-burning loop).
+            """
             report = pull_all_spot(
                 instruments,
                 lake_root=lake_root,
@@ -1425,6 +1438,8 @@ def build_app(
                 on_progress=on_progress,
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
+                auto_retry=True,
+                until_clean=True,
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report

@@ -225,6 +225,7 @@ class RetryStormWatchdog:
                 self.register(symbol, window)
 
     def _require_registered(self, key: tuple[str, str]) -> None:
+        """Raise ``KeyError`` if *key* was not registered before being recorded."""
         if key not in self._registered:
             raise KeyError(
                 f"({key[0]!r}, {key[1]!r}) was not registered before being recorded; "
@@ -346,6 +347,7 @@ class RetryStormWatchdog:
             )
 
     def _fire_give_up(self, event: GiveUpEvent) -> None:
+        """Invoke the ``on_give_up`` callback, best-effort (never crashes the run)."""
         try:
             self.on_give_up(event)
         except (OSError, ValueError, RuntimeError):
@@ -356,6 +358,7 @@ class RetryStormWatchdog:
             )
 
     def _fire_symbol_failure(self, event: SymbolFailureEvent) -> None:
+        """Invoke the ``on_symbol_failure`` callback, best-effort (never crashes the run)."""
         try:
             self.on_symbol_failure(event)
         except (OSError, ValueError, RuntimeError):
