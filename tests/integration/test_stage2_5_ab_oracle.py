@@ -95,7 +95,7 @@ def _topk_masks(candidates: list[tuple[int, ResultMetrics]], k: int) -> list[int
 
 def _percentile(values: list[float], q: float) -> float:
     ordered = sorted(values)
-    idx = min(len(ordered) - 1, max(0, int(round(q * (len(ordered) - 1)))))
+    idx = min(len(ordered) - 1, max(0, round(q * (len(ordered) - 1))))
     return ordered[idx]
 
 
