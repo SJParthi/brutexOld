@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 import structlog
 
 from brutex.adapters.dhan.auth import dhan_creds_present
+from brutex.adapters.dhan.errors import is_no_data_message
 from brutex.adapters.dhan.pull_verdict import PullVerdict, classify_pull
 from brutex.adapters.dhan.run_ingest import (
     ProgressHook,
@@ -1300,7 +1301,20 @@ def pull_all_spot(
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
         end_pull_status(status_log, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
-        failure_keys = {(f.symbol, f.interval) for f in report.failures}
+        # A Dhan DH-905 "no data present" is the vendor's DEFINITIVE answer that
+        # the range has no bars (e.g. NIFTY NEXT 50 daily, whose history starts
+        # after 2021-01-01) — NOT a transient failure. Counting it as a failed
+        # pair pinned the pull at `transient_residual` ("⏳ Re-pull to finish")
+        # FOREVER, since a re-pull just hits DH-905 again — the manual-retry trap
+        # the operator saw (DEC-DHAN-NODATA-SETTLED-001). Split those known-gap
+        # pairs out of `failed` and count them as `no_data` (settled / EMPTY), so
+        # the verdict is `clean` and zero manual re-pull is asked. A GENUINE
+        # terminal error (real 400/404 — auth is handled separately) still counts
+        # as `failed` → `transient_residual`, exactly as before.
+        known_gap_keys = {
+            (f.symbol, f.interval) for f in report.failures if is_no_data_message(f.error)
+        }
+        failure_keys = {(f.symbol, f.interval) for f in report.failures} - known_gap_keys
         results: list[SymbolPullResult] = []
         for instrument in instruments:
             symbol = instrument.symbol_name
@@ -1309,6 +1323,8 @@ def pull_all_spot(
                 key = (symbol, fetch_interval)
                 if key in failure_keys:
                     failed += 1
+                elif key in known_gap_keys:
+                    no_data += 1
                 elif report.pairs[key].bars_appended > 0:
                     completed += 1
                 else:
