@@ -347,6 +347,10 @@ class DhanRateController:
         step-down branch, the only OTHER place ``_hits`` is cleared, can no longer
         fire — cannot block recovery forever once the hits age out
         (DEC-DHAN-RATE-STORM-FLOOR-001 + DEC-DHAN-TIMEOUT-BACKOFF-001).
+
+        Recovery is gated on the **step-down trigger**, NOT on a strictly-empty
+        window (DEC-DHAN-RATE-RECOVERY-TRICKLE-001) — see the inline note for the
+        trickle-trap this closes.
         """
         with self._lock:
             now = self._clock()
@@ -364,10 +368,29 @@ class DhanRateController:
                 self._hits.popleft()
             while self._timeouts and self._timeouts[0] < cutoff:
                 self._timeouts.popleft()
+            # Recover when NEITHER ladder currently shows step-down-level pressure.
+            # This was previously gated on a STRICTLY-empty window (`not self._hits
+            # and not self._timeouts`), which created the "trickle-trap"
+            # (DEC-DHAN-RATE-RECOVERY-TRICKLE-001): under a CHRONIC mild 429 (or
+            # timeout) drip — a few rejections per minute, far BELOW the step-down
+            # trigger — the rolling window never fully empties, so `not self._hits`
+            # was never True and the rate stayed pinned at the floor FOREVER, never
+            # probing back toward the ceiling. (#539's age-out fix only closed the
+            # case where a storm FULLY clears to zero; a persistent drip still pinned
+            # it — the residual of the operator's "never recovered above 3" log.)
+            # Gating on the step-down trigger instead lets a mild drip recover: probe
+            # up one rung, and if the higher rate genuinely storms the ladder steps
+            # straight back down (self-correcting AIMD) — while genuine
+            # step-down-level pressure still HOLDS the rate down. Note the threshold
+            # bites only at/below the floor: above it on_rate_limit/on_timeout clear
+            # their deque on every step, so at most STEP_DOWN_HITS-1 hits ever sit in
+            # the window there and recovery is purely STEP_UP_WINDOW-timer gated; at/
+            # below the floor (where no further step clears the deque) a real
+            # >= STEP_DOWN_HITS drip is what holds recovery. O(1): len() on a deque.
             if (
                 self._rps < CEILING_RPS
-                and not self._hits
-                and not self._timeouts
+                and len(self._hits) < STEP_DOWN_HITS
+                and len(self._timeouts) < STEP_DOWN_TIMEOUT_HITS
                 and now - self._last_step >= STEP_UP_WINDOW
             ):
                 old_rps = self._rps
