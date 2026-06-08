@@ -62,7 +62,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 from time import sleep as _time_sleep
 from typing import Protocol
 
@@ -76,6 +76,7 @@ from brutex.adapters.dhan.option_parser import parse_rolling_option_sides
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.models import OptionBar
 from brutex.data.session import in_session
+from brutex.data.window_ledger import WindowLedger
 from brutex.observability.correlation import current_pull_id
 
 #: Structured logger — lights the rolling-option ingest spine with per-window /
@@ -269,6 +270,7 @@ def ingest_rolling_option_series(
     on_timeout: Pacer | None = None,
     on_success: Pacer | None = None,
     coverage: FetchCoverage | None = None,
+    ledger: WindowLedger | None = None,
     max_retry_passes: int = _DEFAULT_MAX_RETRY_PASSES,
     retry_backoff: Callable[[int], None] | None = None,
 ) -> OptionIngestReport:
@@ -542,6 +544,19 @@ def ingest_rolling_option_series(
         # Mark the window pulled only now — after the whole series committed.
         if coverage is not None:
             coverage.mark_complete(key)
+        # Record the committed option window into the unified ledger DB
+        # (DEC-WINDOW-LEDGER-001, PR-4b) so option chains are tracked in the SAME
+        # browsable table as spot. A committed cursor returned bars → SUCCESS; an
+        # aborted series commits nothing here, so its cursors are never recorded
+        # (re-attempted next pull, mirroring the all-or-nothing coverage mark).
+        if ledger is not None:
+            ledger.record(
+                key,
+                raw_bars=len(bars),
+                error_type=None,
+                bars_appended=appended,
+                now=datetime.now(UTC),
+            )
     # Per-series summary (one fanned-out series) — DEBUG; the per-underlying
     # rollup at INFO is emitted by ``run_dhan_options_ingest`` one layer up.
     _LOG.debug(
