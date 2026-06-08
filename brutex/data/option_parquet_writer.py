@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -47,6 +48,40 @@ if TYPE_CHECKING:
 
 #: Subdirectory under the lake root holding the expired-options table.
 _OPTIONS_SUBDIR: str = "options"
+
+#: Process-wide registry of per-partition write locks (DEC-OPTION-PARTITION-LOCK-001;
+#: mirrors the spot :data:`brutex.data.parquet_writer._PARTITION_LOCKS`). Keyed by
+#: the resolved destination ``Path`` so two threads merging the SAME
+#: ``(series, year, month)`` file serialise their read-modify-write union, while
+#: writers to DIFFERENT partitions never contend. Interned lazily so the map only
+#: ever holds locks for partitions actually written. Keyed by PATH (not writer
+#: instance) on purpose: a parallel fan-out may build one
+#: :class:`OptionParquetWriter` per worker, so the lock MUST be shared across
+#: instances that resolve to the same on-disk file.
+_PARTITION_LOCKS: dict[Path, threading.Lock] = {}
+
+#: Guards :data:`_PARTITION_LOCKS` itself — held only for the O(1) get-or-create
+#: of a path's lock, never across a write.
+_PARTITION_LOCKS_GUARD: threading.Lock = threading.Lock()
+
+
+def _partition_lock(dest: Path) -> threading.Lock:
+    """Return the shared write lock for partition *dest* (interned, O(1)).
+
+    The first caller for a given path creates the lock under
+    :data:`_PARTITION_LOCKS_GUARD`; every later caller (any thread, any
+    :class:`OptionParquetWriter` instance) gets the SAME lock object, so
+    concurrent merge-writes to one partition file are serialised. The guard is
+    held only for the dict get-or-create — never across the write itself — so
+    distinct partitions are looked up without contention
+    (DEC-OPTION-PARTITION-LOCK-001).
+    """
+    with _PARTITION_LOCKS_GUARD:
+        lock = _PARTITION_LOCKS.get(dest)
+        if lock is None:
+            lock = threading.Lock()
+            _PARTITION_LOCKS[dest] = lock
+        return lock
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,32 +198,49 @@ class OptionParquetWriter:
     def _merge_partition(
         self, dest: Path, coordinate: OptionSeriesCoordinate, new_bars: list[OptionBar]
     ) -> int:
-        """Union *new_bars* into *dest* keyed by ``(side, timestamp)``; return new rows."""
-        new_df = _render_df(coordinate, new_bars)  # validates the polars import
+        """Union *new_bars* into *dest* keyed by ``(side, timestamp)``; return new rows.
+
+        The existence-check + read + union + atomic rename is a read-modify-write,
+        so two threads merging the SAME ``(series, year, month)`` partition at once
+        would race a lost update (both read the old file, each unions only its own
+        bars, the later ``os.replace`` wins — silently dropping the other's bars).
+        This bites once option writes run in parallel: today the shared
+        :class:`~brutex.data.option_sink.OptionBarSink` lock serialises every
+        write, but that ALSO kills option write parallelism and is the WRONG level
+        (it exists for the single-writer audit chain). A :class:`threading.Lock`
+        **per destination path** (DEC-OPTION-PARTITION-LOCK-001, mirroring the spot
+        :class:`~brutex.data.parquet_writer.ParquetWriter`) serialises only writers
+        targeting the SAME file; writers to DIFFERENT partitions never contend, so a
+        fan-out keeps its parallelism. The merge unions by ``(side, timestamp)`` so
+        the stored bytes are identical regardless of which writer wins the lock
+        (order-independent, CLAUDE.md §2 Rule 7).
+        """
+        new_df = _render_df(coordinate, new_bars)  # pure; validates the polars import
         import polars as pl
 
-        if dest.exists():
-            existing = pl.read_parquet(dest)
-            # int() coercion keeps the return concretely int even in the CI
-            # type-check env where polars is NOT installed (`[dev]`-only env, without the `[data]` extra)
-            # — there `.height` is Any (ignore_missing_imports) and an un-coerced
-            # return would trip mypy --strict's no-any-return.
-            before = int(existing.height)
-            combined = (
-                pl.concat([existing, new_df])
-                .unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
-                .sort(["side", "timestamp"])
-            )
-        else:
-            before = 0
-            combined = new_df.unique(
-                subset=["side", "timestamp"], keep="first", maintain_order=True
-            ).sort(["side", "timestamp"])
-        added = int(combined.height) - before
-        if added > 0:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write_parquet(dest, combined)
-        return added
+        with _partition_lock(dest):
+            if dest.exists():
+                existing = pl.read_parquet(dest)
+                # int() coercion keeps the return concretely int even in the CI
+                # type-check env where polars is NOT installed (`[dev]`-only env, without the `[data]` extra)
+                # — there `.height` is Any (ignore_missing_imports) and an un-coerced
+                # return would trip mypy --strict's no-any-return.
+                before = int(existing.height)
+                combined = (
+                    pl.concat([existing, new_df])
+                    .unique(subset=["side", "timestamp"], keep="first", maintain_order=True)
+                    .sort(["side", "timestamp"])
+                )
+            else:
+                before = 0
+                combined = new_df.unique(
+                    subset=["side", "timestamp"], keep="first", maintain_order=True
+                ).sort(["side", "timestamp"])
+            added = int(combined.height) - before
+            if added > 0:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_write_parquet(dest, combined)
+            return added
 
 
 def _money(value: Decimal) -> float:

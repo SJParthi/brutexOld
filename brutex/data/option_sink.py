@@ -175,6 +175,24 @@ class OptionBarSink:
                 )
             return written
 
+    def close(self) -> None:
+        """Release the injected audit sink's resources at end of pull, if any.
+
+        The concrete hash-chained :class:`~brutex.orchestrator.audit.AuditWriter`
+        holds an open file descriptor it flushes per append; closing it at the end
+        of a pull flushes + fsyncs and releases the handle so a long-lived
+        dashboard process does not leak one handle per pull
+        (DEC-OPTION-AUDIT-WIRING-001). Duck-typed (``getattr``) so this is a no-op
+        when no audit sink was injected (``self._audit is None``) or the injected
+        audit sink is not closeable (e.g. a test double exposing only ``append``):
+        the :class:`OptionAuditSink` protocol intentionally declares only
+        ``append``, so the sink never assumes a closeable. ``AuditWriter.close`` is
+        idempotent, so a double-close is safe.
+        """
+        close = getattr(self._audit, "close", None)
+        if close is not None:
+            close()
+
 
 class NullOptionBarSink:
     """An :class:`OptionBarSink` that counts but discards — the options dry-run sink.

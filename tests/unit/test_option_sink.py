@@ -59,6 +59,17 @@ class _FakeAudit:
         return object()
 
 
+class _FakeClosingAudit(_FakeAudit):
+    """An audit double that ALSO owns a closeable handle (like ``AuditWriter``)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closes = 0
+
+    def close(self) -> None:
+        self.closes += 1
+
+
 def _index() -> OptionDedupIndex:
     return OptionDedupIndex(capacity=1024, fpr_target=1e-3)
 
@@ -135,6 +146,33 @@ def test_audit_optional_none_branch() -> None:
     sink = _sink(writer, audit=None)  # no audit sink injected
     assert _append(sink, [_bar(minute=0)]) == 1
     assert len(writer.calls) == 1  # write still happens, no audit
+
+
+def test_close_releases_a_closeable_audit() -> None:
+    # DEC-OPTION-AUDIT-WIRING-001: close() flushes + releases the audit handle at
+    # end of pull (the live AuditWriter holds an open fd) — a closeable audit is
+    # closed exactly once per call, and a double-close is safe (idempotent here).
+    audit = _FakeClosingAudit()
+    sink = _sink(_FakeWriter(), audit)
+    sink.close()
+    assert audit.closes == 1
+    sink.close()
+    assert audit.closes == 2  # idempotent / safe to call again
+
+
+def test_close_is_noop_without_an_audit() -> None:
+    # audit is None → getattr(None, "close", None) is None → no-op (no error).
+    _sink(_FakeWriter(), audit=None).close()
+
+
+def test_close_is_noop_for_non_closeable_audit() -> None:
+    # A plain audit double exposing only ``append`` (no ``close``) → no-op: the
+    # OptionAuditSink protocol declares only ``append``, so the sink never assumes
+    # a closeable.
+    audit = _FakeAudit()
+    sink = _sink(_FakeWriter(), audit)
+    sink.close()  # must not raise even though _FakeAudit has no close()
+    assert audit.rows == []  # close touched nothing
 
 
 def _none_strike_bar(minute: int = 0) -> OptionBar:

@@ -44,6 +44,7 @@ BRUTE-FORCE ENGINE is unchanged — it still sweeps only the 3 indices.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -78,6 +79,7 @@ from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_cover
 from brutex.data.option_sink import NullOptionBarSink
 from brutex.models import Instrument, InstrumentType
 from brutex.observability.correlation import pull_id_scope
+from brutex.orchestrator.audit import AuditWriter
 from brutex.orchestrator.parallel import (
     DEFAULT_LATENCY_BUDGET_S,
     PoolRunParallel,
@@ -249,6 +251,50 @@ def _build_dry_run_options(_lake_root: Path) -> tuple[JsonPoster, OptionBarSink]
     return SyntheticOptionClient(), NullOptionBarSink()
 
 
+#: Hash-chained option-ingest audit log path under the lake root (Golden Rule #8).
+_OPTION_AUDIT_SUBDIR: str = "audit"
+_OPTION_AUDIT_FILE: str = "option_ingest.jsonl"
+
+
+def _option_audit_path(lake_root: Path) -> Path:
+    """Resolve the option-ingest audit log path: ``<lake_root>/audit/option_ingest.jsonl``.
+
+    Pure path projection (O(1)); the audit chain lives under ``<lake>/audit/`` so it
+    sits beside the lake it records (DEC-OPTION-AUDIT-WIRING-001).
+    """
+    return lake_root / _OPTION_AUDIT_SUBDIR / _OPTION_AUDIT_FILE
+
+
+def _build_option_audit(lake_root: Path) -> AuditWriter:
+    """Open the hash-chained option-ingest :class:`AuditWriter` under ``<lake>/audit/``.
+
+    The options analog of the spot ingest audit chain (Golden Rule #8): every
+    material option-bar write appends one ``OPTION_BARS_WRITTEN`` row to a
+    tamper-evident JSONL chain at :func:`_option_audit_path`. ``resume=True`` so a
+    re-pull APPENDS to the existing chain instead of failing on an existing file
+    (idempotent re-pulls, Golden Rule #7) and the chain stays end-to-end
+    verifiable across runs (``verify_chain``). ``AuditWriter`` flushes per append,
+    so a crash mid-pull leaves the chain consistent; the single-writer advance is
+    guaranteed by the sink's lock (DEC-DHAN-PARALLEL-INGEST-001).
+    """
+    return AuditWriter.open(_option_audit_path(lake_root), resume=True)
+
+
+def _close_sink(sink: OptionBarSink) -> None:
+    """Release *sink*'s resources at end of pull, if it owns any (the audit handle).
+
+    The concrete :class:`~brutex.data.option_sink.OptionBarSink` exposes ``close``
+    to flush + release its hash-chained audit writer; the dry-run
+    :class:`~brutex.data.option_sink.NullOptionBarSink` and injected test sinks do
+    not, so this is a no-op for them (duck-typed via ``getattr``). Called from a
+    ``finally`` so the audit handle is released even when the fan-out raises
+    (DEC-OPTION-AUDIT-WIRING-001).
+    """
+    close = getattr(sink, "close", None)
+    if close is not None:
+        close()
+
+
 def _build_live_options(  # pragma: no cover — live Dhan token + transport + network
     lake_root: Path,
 ) -> tuple[JsonPoster, OptionBarSink]:
@@ -259,8 +305,13 @@ def _build_live_options(  # pragma: no cover — live Dhan token + transport + n
     transport and a :class:`~brutex.data.option_sink.OptionBarSink` backed by an
     O(1) :class:`~brutex.data.option_dedup.OptionDedupIndex` +
     :class:`~brutex.data.option_parquet_writer.OptionParquetWriter` over
-    *lake_root*. ``# pragma: no cover`` — needs real credentials + network,
-    absent in CI; its orchestration is exercised through the dry-run path.
+    *lake_root* **and a hash-chained** :class:`AuditWriter` (Golden Rule #8) — the
+    ``audit=`` the previous wiring omitted, so the option audit chain
+    (``OPTION_BARS_WRITTEN`` rows) is now actually written
+    (DEC-OPTION-AUDIT-WIRING-001). ``# pragma: no cover`` — needs real credentials
+    + network, absent in CI; its orchestration is exercised through the dry-run
+    path, and the audit/sink construction it delegates to (:func:`_build_option_audit`,
+    :class:`~brutex.data.option_sink.OptionBarSink`) is unit-covered directly.
     """
     from brutex.adapters.dhan.auth import resolve_dhan_credentials
     from brutex.adapters.dhan.client import DhanClient, urllib_transport
@@ -277,6 +328,7 @@ def _build_live_options(  # pragma: no cover — live Dhan token + transport + n
     sink = ConcreteOptionBarSink(
         index=OptionDedupIndex(),
         writer=OptionParquetWriter(lake_root=lake_root),
+        audit=_build_option_audit(lake_root),
     )
     return client, sink
 
@@ -458,8 +510,12 @@ def pull_options(
     # bound into the structlog contextvars for the whole fan-out, so this
     # start/done/failures summary, the ingest spine's ``ingest.*`` events, and the
     # already-lit transport (``dhan.call``) + rate (``rate.*``) events all share
-    # one ``pull_id``. Always unbinds on exit (no leak).
-    with pull_id_scope(pull_id) as pid:
+    # one ``pull_id``. Always unbinds on exit (no leak). The ExitStack closes the
+    # sink (flush + release the live audit handle) on ANY exit — normal or
+    # exception — so a long-lived dashboard process leaks no handle per pull
+    # (DEC-OPTION-AUDIT-WIRING-001); it is a no-op for the dry-run / injected sinks.
+    with contextlib.ExitStack() as stack, pull_id_scope(pull_id) as pid:
+        stack.callback(_close_sink, sink)
         # Load the persisted skip-ledger for a live pull so windows already in the
         # lake are not re-fetched (no wasted Dhan quota on a re-run);
         # DEC-FETCH-COVERAGE-WIRING-001.
