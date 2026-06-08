@@ -2250,7 +2250,12 @@ jobs:
         with:
           node-version: '22'
       - name: Install jscpd
-        run: npm install -g jscpd
+        # DEC-JSCPD-PIN-001: pin to the last stable pure-JS line. The
+        # unpinned `jscpd` floated to the 4.x Rust rewrite, whose
+        # platform binary (`cpd-linux-x64-gnu`) fails to install on the
+        # runner ("Platform package … not installed", exit 1) so the
+        # scan never runs — a repo-wide CI break unrelated to any PR diff.
+        run: npm install -g jscpd@3.5.10
       - name: Run jscpd (blocking — DEC-P0-001)
         run: |
           # DEC-P0-001 (2026-05-17) removed `|| true`; jscpd now blocks merge
