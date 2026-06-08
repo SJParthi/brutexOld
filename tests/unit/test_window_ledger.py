@@ -1,0 +1,230 @@
+"""Unit tests for :mod:`brutex.data.window_ledger` (DEC-WINDOW-LEDGER-001).
+
+100% line+branch on the pure model: `plan` insert + idempotent no-op; the single
+`is_skippable` rule for every status; `record` classification incl. the
+EMPTY→SKIPPED promotion boundary; `settle_known_gap`; attempt accumulation;
+`first_seen_at` set-once; the `to_rows`/`from_rows` round-trip fixed point; and
+thread-safety under a concurrent fan-out.
+"""
+
+from __future__ import annotations
+
+import threading
+from datetime import UTC, date, datetime
+
+from brutex.data.fetch_coverage import WindowKey
+from brutex.data.window_ledger import (
+    EMPTY_TERMINAL_THRESHOLD,
+    PLANNED,
+    SKIPPED,
+    WindowLedger,
+)
+
+_NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
+_LATER = datetime(2026, 6, 9, 12, 0, tzinfo=UTC)
+
+
+def _key(security_id: str = "NIFTY", interval: str = "1minute") -> WindowKey:
+    return WindowKey(
+        market="dhan",
+        security_id=security_id,
+        interval=interval,
+        start=date(2021, 1, 1),
+        end=date(2021, 4, 1),
+    )
+
+
+class TestPlan:
+    """`plan` upserts PLANNED once and never resets a settled row."""
+
+    def test_plan_inserts_planned(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key(), now=_NOW)
+        record = ledger.records()[0]
+        assert record.status == PLANNED
+        assert record.attempts == 0
+        assert record.bars == 0
+        assert record.first_seen_at == _NOW.isoformat()
+        assert record.last_attempt_at is None
+        assert ledger.count == 1
+
+    def test_plan_is_idempotent_noop_on_existing(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key(), now=_NOW)
+        # A second plan (e.g. next pull) must NOT reset the row or its timestamp.
+        ledger.plan(_key(), now=_LATER)
+        record = ledger.records()[0]
+        assert record.first_seen_at == _NOW.isoformat()
+        assert ledger.count == 1
+
+    def test_plan_does_not_reset_a_success_row(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=10, error_type=None, bars_appended=10, now=_NOW)
+        ledger.plan(_key(), now=_LATER)  # re-pull plan
+        record = ledger.records()[0]
+        assert record.status == "SUCCESS"  # untouched
+        assert record.bars == 10
+
+
+class TestIsSkippable:
+    """The single skip rule — SUCCESS / SKIPPED skippable; everything else fetched."""
+
+    def test_missing_window_is_not_skippable(self) -> None:
+        assert WindowLedger().is_skippable(_key()) is False
+
+    def test_success_is_skippable(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        assert ledger.is_skippable(_key()) is True
+
+    def test_skipped_is_skippable(self) -> None:
+        ledger = WindowLedger()
+        ledger.settle_known_gap(_key(), now=_NOW)
+        assert ledger.is_skippable(_key()) is True
+
+    def test_planned_is_not_skippable(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key(), now=_NOW)
+        assert ledger.is_skippable(_key()) is False
+
+    def test_failed_is_not_skippable(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=0, error_type="DhanRateLimitError", bars_appended=0, now=_NOW
+        )
+        assert ledger.is_skippable(_key()) is False
+
+    def test_empty_below_threshold_is_not_skippable(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.is_skippable(_key()) is False
+
+
+class TestRecord:
+    """`record` classification + the EMPTY→SKIPPED promotion + attempt history."""
+
+    def test_success_records_bars(self) -> None:
+        ledger = WindowLedger()
+        status = ledger.record(_key(), raw_bars=7, error_type=None, bars_appended=7, now=_NOW)
+        assert status == "SUCCESS"
+        record = ledger.records()[0]
+        assert record.bars == 7
+        assert record.attempts == 1
+        assert record.last_error is None
+        assert record.last_attempt_at == _NOW.isoformat()
+
+    def test_failed_carries_error(self) -> None:
+        ledger = WindowLedger()
+        status = ledger.record(
+            _key(), raw_bars=0, error_type="DhanTimeoutError", bars_appended=0, now=_NOW
+        )
+        assert status == "FAILED"
+        assert ledger.records()[0].last_error == "DhanTimeoutError"
+
+    def test_empty_below_threshold_stays_empty(self) -> None:
+        ledger = WindowLedger()
+        status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert status == "EMPTY"
+
+    def test_empty_promotes_to_skipped_at_threshold(self) -> None:
+        ledger = WindowLedger()
+        status = ""
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert status == SKIPPED  # genuinely empty → settled
+        assert ledger.records()[0].attempts == EMPTY_TERMINAL_THRESHOLD
+
+    def test_attempts_accumulate_and_first_seen_preserved(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key(), now=_NOW)  # first_seen = _NOW
+        ledger.record(
+            _key(), raw_bars=0, error_type="DhanRateLimitError", bars_appended=0, now=_LATER
+        )
+        ledger.record(_key(), raw_bars=9, error_type=None, bars_appended=9, now=_LATER)
+        record = ledger.records()[0]
+        assert record.status == "SUCCESS"  # FAILED → re-pulled → SUCCESS
+        assert record.attempts == 2
+        assert record.first_seen_at == _NOW.isoformat()  # preserved from plan
+
+    def test_record_on_never_planned_window_stamps_first_seen(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=3, error_type=None, bars_appended=3, now=_NOW)
+        assert ledger.records()[0].first_seen_at == _NOW.isoformat()
+
+    def test_custom_threshold(self) -> None:
+        ledger = WindowLedger(_threshold=2)
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert status == SKIPPED
+
+
+class TestSettleKnownGap:
+    """A DH-905 known-gap is settled SKIPPED (never re-pulled forever)."""
+
+    def test_settle_without_prior(self) -> None:
+        ledger = WindowLedger()
+        status = ledger.settle_known_gap(_key(), now=_NOW, reason="DH-905")
+        assert status == SKIPPED
+        record = ledger.records()[0]
+        assert record.attempts == 1
+        assert record.last_error == "DH-905"
+        assert record.first_seen_at == _NOW.isoformat()
+        assert record.bars == 0
+
+    def test_settle_preserves_prior_first_seen_and_bars(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=4, error_type=None, bars_appended=4, now=_NOW)
+        ledger.settle_known_gap(_key(), now=_LATER)
+        record = ledger.records()[0]
+        assert record.status == SKIPPED
+        assert record.attempts == 2
+        assert record.bars == 4  # prior bars preserved
+        assert record.first_seen_at == _NOW.isoformat()
+        assert record.last_error is None  # no reason given
+
+
+def test_records_are_sorted() -> None:
+    ledger = WindowLedger()
+    ledger.plan(_key("SENSEX"), now=_NOW)
+    ledger.plan(_key("BANKNIFTY"), now=_NOW)
+    ledger.plan(_key("NIFTY"), now=_NOW)
+    symbols = [r.security_id for r in ledger.records()]
+    assert symbols == ["BANKNIFTY", "NIFTY", "SENSEX"]
+
+
+def test_to_rows_from_rows_round_trip_is_a_fixed_point() -> None:
+    ledger = WindowLedger()
+    ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+    ledger.plan(_key("SENSEX"), now=_NOW)  # last_attempt_at None branch
+    rows = ledger.to_rows()
+    restored = WindowLedger.from_rows(rows)
+    assert restored.to_rows() == rows
+    assert restored.count == 2
+    assert restored.is_skippable(_key("NIFTY")) is True
+    assert restored.is_skippable(_key("SENSEX")) is False
+
+
+def test_from_rows_honours_threshold() -> None:
+    ledger = WindowLedger.from_rows([], threshold=2)
+    ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+    status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+    assert status == SKIPPED  # the injected threshold of 2 took effect
+
+
+def test_concurrent_plan_and_record_never_tears_the_map() -> None:
+    # DEC-DHAN-PARALLEL-INGEST-001: one ledger, many workers stamping distinct
+    # windows concurrently — the lock keeps the map consistent.
+    ledger = WindowLedger()
+    keys = [_key(f"SYM{i}") for i in range(200)]
+
+    def worker(k: WindowKey) -> None:
+        ledger.plan(k, now=_NOW)
+        ledger.record(k, raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+
+    threads = [threading.Thread(target=worker, args=(k,)) for k in keys]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert ledger.count == 200
+    assert all(ledger.is_skippable(k) for k in keys)
