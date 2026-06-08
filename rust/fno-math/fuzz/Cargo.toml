@@ -1,0 +1,44 @@
+# cargo-fuzz harness for the fno-math Rust hot kernel.
+#
+# DEC-FUZZ-HOTKERNEL-001 (docs/MIGRATION.md). Phase-2 activation of the
+# README's planned fuzz targets #2 (`fuzz_mask_and`) and the SUPERSET-count
+# kernel (`fuzz_supermask`). cargo-fuzz needs NIGHTLY Rust + libFuzzer; this
+# crate is a separate, non-published package (NOT a workspace member) so it
+# never perturbs the stable `cargo test` / `cargo build` of the parent crate.
+[package]
+name = "fno-math-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.93.1"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.fno-math]
+path = ".."
+
+# Overflow must panic (not wrap) so libFuzzer flags it as a crash — the parent
+# crate sets the same in its release profile (Cargo.toml: "Finance code —
+# overflow must never be silent").
+[profile.release]
+debug = 1
+overflow-checks = true
+
+# Each target is a no-default-test binary (cargo-fuzz convention).
+[[bin]]
+name = "fuzz_mask_and"
+path = "fuzz_targets/fuzz_mask_and.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_supermask"
+path = "fuzz_targets/fuzz_supermask.rs"
+test = false
+doc = false
+bench = false
