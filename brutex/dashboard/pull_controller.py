@@ -70,6 +70,12 @@ from brutex.dashboard.coverage_reconcile import (
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.sink import BarSink, NullBarSink
+from brutex.data.window_ledger_store import (
+    begin_pull_ledger,
+    end_pull_ledger,
+    make_live_ledger_flush,
+    plan_windows,
+)
 from brutex.data.window_status_store import (
     begin_pull_status,
     end_pull_status,
@@ -1202,6 +1208,21 @@ def pull_all_spot(
         # success. Runs AFTER reconcile_coverage_with_lake so the un-mark wins.
         if not dry_run and coverage is not None and status_log is not None:
             reconcile_failed_windows_for_repull(coverage, status_log)
+        # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load (one-shot
+        # migrate) the durable Parquet ledger + PLAN every window the pull will
+        # touch as PLANNED, so EVERY spot window has a DB row BEFORE any fetch.
+        # The ingest then records each outcome into it alongside the status log
+        # (identical record signature). Persisted to <lake>/window_ledger/ — the
+        # single source of truth /coverage/windows surfaces.
+        ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
+        if ledger is not None:
+            plan_windows(
+                ledger,
+                instruments=instruments,
+                intervals=DHAN_FETCH_INTERVALS,
+                start=start.date(),
+                end=end.date(),
+            )
 
         _LOG.info(
             "universe.pull_all.start",
@@ -1228,11 +1249,13 @@ def pull_all_spot(
         # sidecar MID-pull (throttled) after each completed pair, so
         # /coverage/windows ticks up live instead of staying 0 until pull end.
         status_flush = make_live_status_flush(status_log, lake_root)
+        ledger_flush = make_live_ledger_flush(ledger, lake_root)
 
         def _progress_then_flush(label: str, bars: int, failed: bool) -> None:
             if on_progress is not None:
                 on_progress(label, bars, failed)
             status_flush()
+            ledger_flush()
 
         # The "Retry failed windows" button passes ``auto_retry=True`` so leftover
         # failed windows are auto-re-pulled in bounded rounds AFTER the pull (only
@@ -1262,6 +1285,7 @@ def pull_all_spot(
                 on_progress=_progress_then_flush,
                 coverage=coverage,
                 status_log=status_log,
+                ledger=ledger,
                 run_parallel=run_parallel,
                 auto_retry=do_retry,
             )
@@ -1311,6 +1335,7 @@ def pull_all_spot(
             final_quota_exhausted = False
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
         end_pull_status(status_log, lake_root, dry_run=dry_run)
+        end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
         # A Dhan DH-905 "no data present" is the vendor's DEFINITIVE answer that
         # the range has no bars (e.g. NIFTY NEXT 50 daily, whose history starts
@@ -1516,6 +1541,17 @@ def pull_candles(
         # succeeds instead of skipping a 0-bar internal gap forever.
         if not dry_run and coverage is not None and status_log is not None:
             reconcile_failed_windows_for_repull(coverage, status_log)
+        # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load/migrate + PLAN
+        # this symbol's windows, then record each outcome alongside the status log.
+        ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
+        if ledger is not None:
+            plan_windows(
+                ledger,
+                instruments=[instrument],
+                intervals=DHAN_FETCH_INTERVALS,
+                start=start.date(),
+                end=end.date(),
+            )
 
         _LOG.info(
             "universe.pull.start",
@@ -1539,11 +1575,13 @@ def pull_candles(
         # Live status (DEC-WINDOW-STATUS-LIVE-001): flush mid-pull (throttled) per
         # completed interval so /coverage/windows ticks up live, not only at end.
         status_flush = make_live_status_flush(status_log, lake_root)
+        ledger_flush = make_live_ledger_flush(ledger, lake_root)
 
         def _progress_then_flush(label: str, bars: int, failed: bool) -> None:
             if on_progress is not None:
                 on_progress(label, bars, failed)
             status_flush()
+            ledger_flush()
 
         report = run_dhan_spot_ingest(
             adapter,
@@ -1559,10 +1597,12 @@ def pull_candles(
             on_progress=_progress_then_flush,
             coverage=coverage,
             status_log=status_log,
+            ledger=ledger,
             run_parallel=run_parallel,
         )
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
         end_pull_status(status_log, lake_root, dry_run=dry_run)
+        end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
 
         failure_keys = {(f.symbol, f.interval) for f in report.failures}

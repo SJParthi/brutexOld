@@ -55,6 +55,7 @@ from brutex.adapters.dhan.ingest import IngestReport, Pacer, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.sink import BarSink
+from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_status import WindowStatusLog
 from brutex.models import Instrument
 from brutex.observability.correlation import current_pull_id, pull_id_scope
@@ -214,6 +215,7 @@ def run_dhan_spot_ingest(
     pace: Pacer | None = None,
     coverage: FetchCoverage | None = None,
     status_log: WindowStatusLog | None = None,
+    ledger: WindowLedger | None = None,
     on_rate_limit: Callable[[], None] | None = None,
     on_timeout: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
@@ -337,6 +339,7 @@ def run_dhan_spot_ingest(
                 pace=pace,
                 coverage=coverage,
                 status_log=status_log,
+                ledger=ledger,
                 on_rate_limit=on_rate_limit,
                 on_timeout=on_timeout,
                 on_success=on_success,
@@ -559,6 +562,7 @@ def run_dhan_spot_ingest_with_retry(
     pace: Pacer | None = None,
     coverage: FetchCoverage | None = None,
     status_log: WindowStatusLog | None = None,
+    ledger: WindowLedger | None = None,
     on_rate_limit: Callable[[], None] | None = None,
     on_timeout: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
@@ -637,6 +641,7 @@ def run_dhan_spot_ingest_with_retry(
             pace=pace,
             coverage=coverage,
             status_log=status_log,
+            ledger=ledger,
             on_rate_limit=on_rate_limit,
             on_timeout=on_timeout,
             on_success=on_success,

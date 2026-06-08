@@ -66,6 +66,7 @@ from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.session import filter_intraday_session, is_session_exempt
 from brutex.data.sink import BarSink
+from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_status import WindowStatusLog
 from brutex.models import Instrument
 from brutex.observability.correlation import current_pull_id, pull_id_scope
@@ -202,6 +203,7 @@ def ingest_spot(
     pace: Pacer | None = None,
     coverage: FetchCoverage | None = None,
     status_log: WindowStatusLog | None = None,
+    ledger: WindowLedger | None = None,
     on_rate_limit: Callable[[], None] | None = None,
     on_timeout: Callable[[], None] | None = None,
     on_success: Callable[[], None] | None = None,
@@ -340,6 +342,7 @@ def ingest_spot(
                 pace=pace,
                 coverage=coverage,
                 status_log=status_log,
+                ledger=ledger,
                 on_rate_limit=on_rate_limit,
                 on_timeout=on_timeout,
                 on_success=on_success,
@@ -512,6 +515,7 @@ def _ingest_one_window(
     pace: Pacer | None,
     coverage: FetchCoverage | None,
     status_log: WindowStatusLog | None,
+    ledger: WindowLedger | None,
     on_rate_limit: Callable[[], None] | None,
     on_timeout: Callable[[], None] | None,
     on_success: Callable[[], None] | None,
@@ -619,14 +623,25 @@ def _ingest_one_window(
                 **series_fields,
             )
             # Record the FAILED outcome in the browsable status table (DEC-WINDOW-
-            # STATUS-001) so the operator SEES which windows errored + how often.
+            # STATUS-001) + the unified ledger (DEC-WINDOW-LEDGER-001) so the
+            # operator SEES which windows errored + how often. Both share the
+            # identical record() signature, so they never drift.
+            _failed_at = datetime.now(UTC)
             if status_log is not None:
                 status_log.record(
                     key,
                     raw_bars=0,
                     error_type=type(exc).__name__,
                     bars_appended=0,
-                    now=datetime.now(UTC),
+                    now=_failed_at,
+                )
+            if ledger is not None:
+                ledger.record(
+                    key,
+                    raw_bars=0,
+                    error_type=type(exc).__name__,
+                    bars_appended=0,
+                    now=_failed_at,
                 )
             return _WindowOutcome(transient=1, window=retry_window, error_type=type(exc).__name__)
         # A TERMINAL (non-retryable) error. If it is the token dying — a 401/403
@@ -713,16 +728,26 @@ def _ingest_one_window(
     # already in the lake dedups to ``bars_appended == 0`` via keep-first yet the
     # window IS complete, so it must stay marked.
     # Record the window's outcome in the browsable status table (DEC-WINDOW-
-    # STATUS-001): SUCCESS when the vendor returned bars, EMPTY on a clean 0-bar
-    # response. The mark below (skip-ledger) and this record share the same
-    # ``raw_bars > 0`` SUCCESS condition, so the two never disagree.
+    # STATUS-001) + the unified ledger (DEC-WINDOW-LEDGER-001): SUCCESS when the
+    # vendor returned bars, EMPTY on a clean 0-bar response. The mark below
+    # (skip-ledger) and these records share the same ``raw_bars > 0`` SUCCESS
+    # condition, so they never disagree.
+    _done_at = datetime.now(UTC)
     if status_log is not None:
         status_log.record(
             key,
             raw_bars=len(raw_bars),
             error_type=None,
             bars_appended=result.bars_appended,
-            now=datetime.now(UTC),
+            now=_done_at,
+        )
+    if ledger is not None:
+        ledger.record(
+            key,
+            raw_bars=len(raw_bars),
+            error_type=None,
+            bars_appended=result.bars_appended,
+            now=_done_at,
         )
     if coverage is not None and len(raw_bars) > 0:
         coverage.mark_complete(key)
