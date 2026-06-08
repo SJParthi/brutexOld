@@ -28,6 +28,44 @@ class TestClassifyPull:
         assert v.auth_cause == "HTTP 400 DH-906 Invalid Token"
         assert "web.dhan.co" in v.action
 
+    def test_quota_exhausted_ranks_just_under_auth(self) -> None:
+        # The daily-quota brake (DEC-AUTO-RESUME-QUOTA-001): with residual but a
+        # LIVE token, a spent quota outranks transient_residual (no retry lands a
+        # bar today — only the IST-midnight reset can).
+        v = classify_pull(
+            auth_aborted=False,
+            still_failed_windows=12,
+            failed_pairs=0,
+            no_data=0,
+            completed=500,
+            quota_exhausted=True,
+        )
+        assert v.kind == "quota_exhausted"
+        assert v.needs_operator is True
+        assert v.pending_windows == 12
+        assert v.auth_cause is None  # quota is not an auth cause
+        assert "IST-midnight reset" in v.action
+
+    def test_auth_outranks_quota(self) -> None:
+        # A dead token is still the headline even if the quota is also spent.
+        v = classify_pull(
+            auth_aborted=True,
+            still_failed_windows=4,
+            failed_pairs=0,
+            no_data=0,
+            completed=0,
+            quota_exhausted=True,
+            auth_cause="DH-906",
+        )
+        assert v.kind == "auth_expired"
+
+    def test_quota_default_false_keeps_prior_behaviour(self) -> None:
+        # Omitting quota_exhausted reproduces the pre-feature classification.
+        v = classify_pull(
+            auth_aborted=False, still_failed_windows=4, failed_pairs=0, no_data=0, completed=100
+        )
+        assert v.kind == "transient_residual"
+
     def test_transient_residual_on_still_failed_windows(self) -> None:
         v = classify_pull(
             auth_aborted=False, still_failed_windows=4, failed_pairs=0, no_data=0, completed=100

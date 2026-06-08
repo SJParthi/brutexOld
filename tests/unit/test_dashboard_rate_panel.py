@@ -73,6 +73,39 @@ def test_make_rate_observer_tolerates_missing_keys() -> None:
     make_rate_observer(state)({}, {})  # empty snapshots → defaults, never a KeyError
     assert state.rate_limit.current_rps == 0.0
     assert state.rate_limit.recent_429_count == 0
+    # No quota in the snapshot → the -1 sentinel so the panel hides the gauge.
+    assert state.rate_limit.quota_limit == -1
+
+
+def test_rate_panel_quota_gauge_default_hidden() -> None:
+    """DEC-AUTO-RESUME-QUOTA-001: the quota gauge defaults to the hidden sentinel."""
+    panel = RateLimitPanel()
+    assert panel.quota_used == 0
+    assert panel.quota_remaining == 0
+    assert panel.quota_limit == -1  # -1 ⇒ no tracker wired ⇒ panel hides the gauge
+
+
+def test_make_rate_observer_maps_quota_gauge_onto_panel() -> None:
+    """The daily-quota gauge in the controller snapshot flows to the panel (and JSON)."""
+    state = DashboardState()
+    observe = make_rate_observer(state)
+    observe(
+        {
+            "current_rps": 5.0,
+            "recent_hits": 0,
+            "quota_used": 1234,
+            "quota_remaining": 98766,
+            "quota_limit": 100000,
+        },
+        {},
+    )
+    assert state.rate_limit.quota_used == 1234
+    assert state.rate_limit.quota_remaining == 98766
+    assert state.rate_limit.quota_limit == 100000
+    rl = state.to_dict()["rate_limit"]
+    assert rl["quota_used"] == 1234
+    assert rl["quota_remaining"] == 98766
+    assert rl["quota_limit"] == 100000
     assert state.rate_limit.effective_rps == 0.0
     assert state.rate_limit.latency_ms_p95 == 0.0
     assert state.rate_limit.rps_1s == 0

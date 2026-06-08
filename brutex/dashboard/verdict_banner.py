@@ -31,12 +31,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
-#: Verdict kind → (CSS modifier class, human colour name). The four kinds are the
+#: Verdict kind → (CSS modifier class, human colour name). The keys are the
 #: exact, mutually-exclusive
 #: :data:`~brutex.adapters.dhan.pull_verdict.PullVerdictKind` values; the colours
-#: are the operator-facing severity decree (red/amber/grey/green).
+#: are the operator-facing severity decree (red/amber/grey/green). ``quota_exhausted``
+#: shares the amber "paused — resume later" lane (the auto-resume paused itself on
+#: the daily quota; not broken, just waiting for the IST-midnight reset —
+#: DEC-AUTO-RESUME-QUOTA-001), distinct from the red ``auth_expired`` "broken token".
 _KIND_STYLE: Final[dict[str, tuple[str, str]]] = {
     "auth_expired": ("verdict--red", "red"),
+    "quota_exhausted": ("verdict--amber", "amber"),
     "transient_residual": ("verdict--amber", "amber"),
     "known_gap_only": ("verdict--grey", "grey"),
     "clean": ("verdict--green", "green"),
@@ -99,7 +103,7 @@ def banner_for(verdict: Mapping[str, Any]) -> VerdictBanner:
     Raises
     ------
     ValueError
-        If ``kind`` is not one of the four known
+        If ``kind`` is not one of the known
         :data:`~brutex.adapters.dhan.pull_verdict.PullVerdictKind` values — a
         fail-closed guard so an unknown kind is never rendered uncoloured.
     """

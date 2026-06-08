@@ -316,13 +316,39 @@ class DhanRateController:
                 )
 
     def snapshot(self) -> dict[str, object]:
-        """A JSON-friendly state snapshot for the dashboard rate panel (thread-safe, O(1))."""
+        """A JSON-friendly state snapshot for the dashboard rate panel (thread-safe, O(1)).
+
+        When a :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker` is wired
+        (the live path — DEC-AUTO-RESUME-QUOTA-001), the snapshot ALSO carries the
+        day's quota gauge (``quota_used`` / ``quota_remaining`` / ``quota_limit``) so
+        the dashboard SHOWS how much of the mandatory 100,000/day Dhan quota is
+        spent, not just the live r/s. The quota tracker is read OUTSIDE the
+        controller lock (``self._quota`` is set once at construction, never mutated)
+        to avoid nesting the controller lock over the tracker's own lock + LMDB read.
+        """
         with self._lock:
-            return {
+            snap: dict[str, object] = {
                 "current_rps": self._rps,
                 "recent_hits": len(self._hits),
                 "recent_timeouts": len(self._timeouts),
             }
+        if self._quota is not None:
+            snap["quota_used"] = self._quota.current_count()
+            snap["quota_remaining"] = self._quota.remaining()
+            snap["quota_limit"] = self._quota.daily_limit
+        return snap
+
+    def quota_exhausted(self) -> bool:
+        """True iff a quota tracker is wired AND the day's quota is fully spent.
+
+        The hook the re-pull-until-clean / auto-resume loop reads after each round
+        (DEC-AUTO-RESUME-QUOTA-001): when ``remaining() <= 0`` the loop stops with
+        ``stop_quota`` instead of re-firing batches that would only raise
+        :class:`~brutex.orchestrator.quota_tracker.DailyQuotaExceeded`. ``False`` when
+        no tracker is wired (the bucket-only test path). Read outside the controller
+        lock (the tracker has its own lock); O(1) bar one LMDB read.
+        """
+        return self._quota is not None and self._quota.remaining() <= 0
 
 
 __all__ = [
