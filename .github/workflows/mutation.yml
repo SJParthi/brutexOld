@@ -93,7 +93,7 @@ jobs:
           if-no-files-found: ignore
       - name: Open GitHub issue on failure
         if: failure() && github.event_name == 'schedule'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const title = `mutmut: surviving mutants on ${context.sha.substring(0, 7)}`;
@@ -154,7 +154,7 @@ jobs:
           retention-days: 14
       - name: Open GitHub issue on failure
         if: failure() && github.event_name == 'schedule'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const title = `cargo-mutants: surviving mutants in fno-math on ${context.sha.substring(0, 7)}`;
