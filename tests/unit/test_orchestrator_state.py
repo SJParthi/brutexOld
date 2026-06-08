@@ -822,19 +822,27 @@ class TestErrorMessagePinning:
         assert "dispatch" in str(exc_info.value).lower()
 
     def test_unhandled_outcome_error_mentions_outcome_value(self) -> None:
-        """Force the 'unhandled outcome' branch by creating a fake Outcome.
+        """Force the defensive 'unhandled outcome' branch with a fake Outcome.
 
-        We can't easily reach this in production code (all 9 Outcome values
-        are handled), but we verify the error format would carry the item_id
-        AND the outcome string if it ever fires.
+        All real ``Outcome`` members are handled above the final ``raise`` in
+        ``transition()``, so the exhaustiveness guard is unreachable in
+        production. We drive it directly by feeding ``transition`` a foreign
+        enum member that is ``==``/``in`` nothing in the real ``Outcome`` set:
+        every ``if outcome == Outcome.X`` falls through to the guard, which
+        must raise ``TransitionError`` carrying the item_id AND the outcome's
+        ``.value`` (rate_limiter-style defensive coverage, line 399).
         """
+        from enum import Enum
+        from typing import cast
+
+        class _ForeignOutcome(Enum):
+            FAKE_VALUE = "FAKE_VALUE"
+
         item = _in_flight_item()
-        # Use a value-spoofed mock: the message must contain item_id format
-        # (we verified terminal-state error already; this is structural pinning)
-        # Verify by direct construction:
-        msg = f"{item.item_id}: unhandled outcome FAKE_VALUE"
-        assert item.item_id in msg
-        assert "unhandled outcome" in msg
+        with pytest.raises(TransitionError) as exc_info:
+            transition(item, cast(Outcome, _ForeignOutcome.FAKE_VALUE))
+        assert item.item_id in str(exc_info.value)
+        assert "unhandled outcome FAKE_VALUE" in str(exc_info.value)
 
     def test_resolve_quarantine_terminal_error_mentions_state(self) -> None:
         """Resolve_quarantine on non-quarantined item must mention state."""

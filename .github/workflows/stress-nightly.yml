@@ -35,6 +35,14 @@ on:
         description: "Number of stress events per test (default 5000; soak: 10_000_000)"
         required: false
         default: "5000"
+      sweep_iters:
+        description: "Sweep-kernel soak iterations (nightly sub-24h: 10_000_000; full soak: scale up)"
+        required: false
+        default: "10000000"
+      ingest_bars:
+        description: "Ingest-lake soak bar count (nightly sub-24h: 500_000; full soak: scale up)"
+        required: false
+        default: "500000"
   push:
     paths:
       - "tests/stress/**"
@@ -102,6 +110,62 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: stress-logs
+          path: |
+            /tmp/pytest-*
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Sub-24h nightly SOAK for the two hottest production paths — the Stage-2
+  # sweep kernel (`count_supermasks`) + the audit→Parquet ingest lake (P-20).
+  # DEC-SWEEP-INGEST-SOAK-001 (MIGRATION entry #581): the `stress` job above
+  # is "light stress" (~30s, audit-chain + scheduler). This job runs a
+  # MEANINGFUL but BOUNDED soak (sized to finish in a few minutes — well
+  # under 24h) AUTOMATICALLY every night, instead of leaving the only real
+  # soak to a manual `workflow_dispatch`. Scale `sweep_iters` / `ingest_bars`
+  # up via dispatch for the full multi-hour push (honest envelope, Golden
+  # Rule #10 — the heavy run still isn't auto-cron, to spare GHA hours).
+  soak-sweep-ingest:
+    name: Soak — sweep kernel + ingest lake (sub-24h)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install deps
+        run: pip install -e ".[dev,data]"
+
+      - name: Install Rust toolchain (for fno_math + trading_core wheels)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install fno_math Rust extension
+        # The sweep kernel `count_supermasks` delegates to fno_math.
+        run: pip install ./rust/fno-math
+
+      - name: Install trading_core Rust extension (DEC-SHARED-CORE-001 #441)
+        # `brutex.engine.__init__` → `brutex.vocabulary` imports trading_core,
+        # so the sweep import errors at collection without it.
+        run: pip install ./rust/trading-core
+
+      - name: Run sweep + ingest soak (sub-24h budget)
+        env:
+          STRESS_SWEEP_ITERS: ${{ github.event.inputs.sweep_iters || '10000000' }}
+          STRESS_INGEST_BARS: ${{ github.event.inputs.ingest_bars || '500000' }}
+        run: |
+          echo "Soak: STRESS_SWEEP_ITERS=$STRESS_SWEEP_ITERS STRESS_INGEST_BARS=$STRESS_INGEST_BARS"
+          pytest tests/stress/test_sweep_ingest_soak.py -v -m stress --tb=short
+
+      - name: Upload soak artifacts (if any)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-sweep-ingest-logs
           path: |
             /tmp/pytest-*
           if-no-files-found: ignore

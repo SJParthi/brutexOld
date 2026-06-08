@@ -600,3 +600,165 @@ class TestSetRate:
         clock.advance(1000.0)  # well past upshift_recovery
         b.acquire()
         assert b.current_rps() == 2.0  # did NOT auto-recover to the old initial 5.0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Supplementary coverage (DEC-LAZY-FASTBLOOM-IMPORT-001): close the last
+# uncovered regions so brutex.orchestrator.rate_limiter qualifies for the
+# strict per-module 100% line+branch gate (re-enabled now that the bloom
+# lazy-import fix removed the fastbloom_rs PyO3 abi3 pre-import blocker).
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestDownshiftRpsValidation:
+    """The ``downshift_rps > 0`` guard (rate_limiter.py:226-227) — fires
+    BEFORE the ``downshift_rps < initial_rps`` check, so a zero/negative
+    downshift is rejected with its own message even when ``initial_rps`` is
+    valid."""
+
+    def test_zero_downshift_rps_rejected(self) -> None:
+        with pytest.raises(RateLimiterError, match="downshift_rps must be > 0"):
+            AdaptiveTokenBucket(initial_rps=3.0, downshift_rps=0.0)
+
+    def test_negative_downshift_rps_rejected(self) -> None:
+        with pytest.raises(RateLimiterError, match="downshift_rps must be > 0"):
+            AdaptiveTokenBucket(initial_rps=3.0, downshift_rps=-1.0)
+
+
+class TestAcquireLoopCap:
+    """The refill-loop safety net (rate_limiter.py:282-287): under a frozen
+    clock whose ``sleep`` never advances time, the bucket can never refill a
+    token, so the bounded loop must give up after ``_ACQUIRE_LOOP_CAP``
+    iterations and force a token rather than spin forever."""
+
+    def test_loop_cap_forces_token_when_sleep_does_not_advance(self) -> None:
+        frozen_t = 1000.0
+
+        def frozen_clock() -> float:
+            return frozen_t
+
+        def noop_sleep(_seconds: float) -> None:
+            # Deliberately does NOT advance the clock — models a pathological
+            # fake clock so the refill loop can never satisfy `tokens >= 1`.
+            return None
+
+        b = AdaptiveTokenBucket(
+            initial_rps=5.0,
+            downshift_rps=2.5,
+            burst=1,
+            start_empty=True,  # 0 tokens → acquire must wait + loop
+            clock=frozen_clock,
+            sleep=noop_sleep,
+        )
+        # acquire returns rather than hanging: the loop hits the 16-iteration
+        # cap, sets tokens to 1.0, breaks, then consumes the forced token.
+        waited = b.acquire()
+        assert waited >= 0.0
+        assert b.available_tokens() == 0.0  # the forced token was consumed
+
+
+class TestInternalUpshiftFires:
+    """Drive the dormant internal upshift path (rate_limiter.py:460-487): a
+    429-triggered downshift followed by a clean recovery window must let the
+    NEXT ``acquire`` auto-upshift back to ``initial_rps`` and queue an
+    ``upshift`` event in ``_pending_events``."""
+
+    def _bucket(self, clock: FakeClock) -> AdaptiveTokenBucket:
+        return AdaptiveTokenBucket(
+            initial_rps=15.0,
+            downshift_rps=10.0,
+            downshift_trigger=3,
+            downshift_window=60.0,
+            upshift_recovery=120.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+
+    def test_acquire_upshifts_after_clean_window(self, clock: FakeClock) -> None:
+        b = self._bucket(clock)
+        # 1. Three 429s inside the window → downshift to 10 r/s.
+        for _ in range(3):
+            b.record_rate_limit_hit()
+        assert b.current_rps() == 10.0
+        # 2. Advance past the downshift window so the recorded 429s evict
+        #    (exercises the popleft eviction inside _maybe_upshift_locked).
+        clock.advance(70.0)
+        b.record_success()  # a clean call in the window → last_success_at = now
+        # 3. Next acquire runs _maybe_upshift_locked → upshift back to 15 r/s.
+        b.acquire()
+        assert b.current_rps() == 15.0
+
+    def test_upshift_event_is_queued_and_drained(self, clock: FakeClock) -> None:
+        b = self._bucket(clock)
+        for _ in range(3):
+            b.record_rate_limit_hit()
+        clock.advance(70.0)
+        b.record_success()
+        b.acquire()  # upshift fires → appends an event to _pending_events
+        # pending_events() drains the queue (rate_limiter.py:428-431).
+        events = b.pending_events()
+        assert [e.kind for e in events] == ["upshift"]
+        assert events[0].to_rps == 15.0
+        assert b.pending_events() == []  # second drain is empty
+
+
+class TestUpshiftClockAnomalyGuards:
+    """The two defensive ``return None`` guards in ``_maybe_upshift_locked``
+    (rate_limiter.py:469-470 and 474-475) protect the upshift decision against
+    clock anomalies — a wall reference that runs BACKWARDS of the recorded
+    ``last_success_at`` (line 470) or a non-positive ``last_success_at``
+    (line 475). A settable fake clock reproduces exactly those anomalies and
+    proves the limiter declines to upshift rather than mis-firing."""
+
+    class _SettableClock:
+        """Fake clock whose value the test sets to ANY point — including
+        backwards — so the anomaly guards can be exercised deterministically."""
+
+        def __init__(self, start: float) -> None:
+            self.t = start
+
+        def now(self) -> float:
+            return self.t
+
+        @staticmethod
+        def noop_sleep(_seconds: float) -> None:
+            return None
+
+    def _downshifted_bucket(self, clock: _SettableClock) -> AdaptiveTokenBucket:
+        b = AdaptiveTokenBucket(
+            initial_rps=15.0,
+            downshift_rps=10.0,
+            downshift_trigger=3,
+            downshift_window=60.0,
+            upshift_recovery=120.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.noop_sleep,
+        )
+        for _ in range(3):  # three 429s at the current clock → downshift to 10
+            b.record_rate_limit_hit()
+        assert b.current_rps() == 10.0
+        return b
+
+    def test_now_behind_last_success_declines_upshift(self) -> None:
+        # last_success_at set far in the FUTURE relative to the next acquire's
+        # `now` → `now - last_success_at < 0` → guard at line 470 returns None.
+        clock = self._SettableClock(100.0)
+        b = self._downshifted_bucket(clock)
+        clock.t = 500.0
+        b.record_success()  # last_success_at = 500
+        clock.t = 200.0  # now=200: past the 60s 429 window (evicts) but < 500
+        b.acquire()
+        assert b.current_rps() == 10.0  # still downshifted — upshift declined
+
+    def test_nonpositive_last_success_declines_upshift(self) -> None:
+        # last_success_at == 0 → guard at line 475 returns None even though the
+        # 429 window is empty and `now - last_success_at >= 0`.
+        clock = self._SettableClock(100.0)
+        b = self._downshifted_bucket(clock)
+        clock.t = 0.0
+        b.record_success()  # last_success_at = 0
+        clock.t = 200.0  # now=200: 429s (recorded at t=100) evict from window
+        b.acquire()
+        assert b.current_rps() == 10.0  # still downshifted — upshift declined
