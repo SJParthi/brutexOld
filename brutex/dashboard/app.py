@@ -2458,6 +2458,7 @@ def build_app(
         lake = lake_root.parent
 
         def _load() -> dict[str, Any]:
+            """Load the token-events Parquet + project it to the JSON payload (threadpool)."""
             events = to_payload(load_token_events(lake))
             return {"count": len(events), "events": events}
 
