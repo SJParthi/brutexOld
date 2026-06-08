@@ -225,7 +225,7 @@ class RetryStormWatchdog:
                 self.register(symbol, window)
 
     def _require_registered(self, key: tuple[str, str]) -> None:
-        """Raise ``KeyError`` unless ``key`` was registered as a fan-out unit first."""
+        """Raise ``KeyError`` if *key* was not registered before being recorded."""
         if key not in self._registered:
             raise KeyError(
                 f"({key[0]!r}, {key[1]!r}) was not registered before being recorded; "
@@ -347,11 +347,7 @@ class RetryStormWatchdog:
             )
 
     def _fire_give_up(self, event: GiveUpEvent) -> None:
-        """Invoke the ``on_give_up`` callback, swallowing+logging any callback fault.
-
-        Callback faults must never crash the ingest (Golden Rule #10): a raising
-        sink is logged and the watchdog continues.
-        """
+        """Invoke the ``on_give_up`` callback, best-effort (never crashes the run)."""
         try:
             self.on_give_up(event)
         except (OSError, ValueError, RuntimeError):
@@ -362,11 +358,7 @@ class RetryStormWatchdog:
             )
 
     def _fire_symbol_failure(self, event: SymbolFailureEvent) -> None:
-        """Invoke the ``on_symbol_failure`` callback, swallowing+logging any fault.
-
-        As with :meth:`_fire_give_up`, a raising alert sink is logged and the
-        watchdog keeps running (the symbol is still marked failed).
-        """
+        """Invoke the ``on_symbol_failure`` callback, best-effort (never crashes the run)."""
         try:
             self.on_symbol_failure(event)
         except (OSError, ValueError, RuntimeError):

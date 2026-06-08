@@ -11,6 +11,7 @@ N ticks (so even the loop is covered). NO real threads, NO real sleeps.
 # pyright: reportPrivateUsage=none
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Mapping
 
@@ -21,9 +22,20 @@ from brutex.adapters.dhan.token_keepalive import (
     RENEW_BEFORE_EXPIRY_S,
     RETRY_WHEN_DEAD_S,
     TokenKeepalive,
+    decode_jwt_expiry,
     parse_expiry_deadline,
 )
 from structlog.testing import capture_logs
+
+
+def _jwt(claims: object) -> str:
+    """Build a 3-segment JWT-shaped string whose middle segment encodes *claims*.
+
+    base64url WITHOUT padding (how real JWTs are emitted) so the decoder's
+    padding-restore branch is exercised on the same path production hits.
+    """
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode("utf-8")).rstrip(b"=")
+    return f"hdr.{payload.decode('ascii')}.sig"
 
 
 class _FakeTransport:
@@ -95,6 +107,45 @@ class TestParseExpiryDeadline:
             deadline = parse_expiry_deadline("not-a-date", now=clock)
         assert deadline == 500.0 + 24 * 3600.0
         assert any(e["event"] == "auth.keepalive.expiry_unparsed" for e in logs)
+
+
+class TestDecodeJwtExpiry:
+    """Offline JWT-``exp`` learning (DEC-DHAN-RENEW-SINGLE-OWNER-001).
+
+    Lets the keepalive learn a token's expiry with NO RenewToken (no rotation);
+    every malformed shape degrades to ``None`` (the caller falls back to
+    learn-by-renew), never raising.
+    """
+
+    def test_reads_integer_exp(self) -> None:
+        assert decode_jwt_expiry(_jwt({"exp": 1_700_000_000})) == 1_700_000_000.0
+
+    def test_reads_float_exp(self) -> None:
+        assert decode_jwt_expiry(_jwt({"exp": 1_700_000_000.5})) == 1_700_000_000.5
+
+    def test_missing_exp_returns_none(self) -> None:
+        assert decode_jwt_expiry(_jwt({"sub": "client"})) is None
+
+    def test_bool_exp_rejected(self) -> None:
+        # ``True`` is an int subclass — must NOT be misread as epoch 1.
+        assert decode_jwt_expiry(_jwt({"exp": True})) is None
+
+    def test_string_exp_rejected(self) -> None:
+        assert decode_jwt_expiry(_jwt({"exp": "1700000000"})) is None
+
+    def test_non_object_payload_returns_none(self) -> None:
+        assert decode_jwt_expiry(_jwt([1, 2, 3])) is None
+
+    def test_not_three_segments_returns_none(self) -> None:
+        assert decode_jwt_expiry("only-one-segment") is None
+
+    def test_undecodable_base64_returns_none(self) -> None:
+        # A 1-char payload segment is structurally invalid base64 (binascii.Error).
+        assert decode_jwt_expiry("hdr.A.sig") is None
+
+    def test_non_json_payload_returns_none(self) -> None:
+        payload = base64.urlsafe_b64encode(b"not-json").rstrip(b"=").decode("ascii")
+        assert decode_jwt_expiry(f"hdr.{payload}.sig") is None
 
 
 class TestTick:
@@ -178,6 +229,35 @@ class TestTick:
         assert sleep_s == RETRY_WHEN_DEAD_S
         assert keepalive._expiry_deadline is None
         assert holder.get() == "seed-jwt"
+
+    def test_first_tick_learns_from_jwt_no_renew_when_above_threshold(self) -> None:
+        # The DEC-DHAN-RENEW-SINGLE-OWNER-001 fix: a healthy >12h JWT token is
+        # learned OFFLINE — ZERO RenewToken, the live token is NOT rotated.
+        clock = _FixedClock(1000.0)
+        transport = _FakeTransport([(200, _renew_body("must-not-fire", "x"))])
+        jwt = _jwt({"exp": 1000.0 + 20 * 3600.0})  # 20h out → above the 12h window
+        holder = TokenHolder(jwt)
+        keepalive = TokenKeepalive(_client(transport), holder, now=clock, sleep=lambda _s: None)
+        with capture_logs() as logs:
+            sleep_s = keepalive._tick()
+        assert transport.calls == 0  # NO RenewToken fired
+        assert holder.get() == jwt  # token untouched — no rotation
+        assert sleep_s == MAX_SLEEP_S  # remaining - 12h = 8h, clamped to 1h
+        assert keepalive._expiry_deadline == 1000.0 + 20 * 3600.0
+        assert any(e["event"] == "auth.keepalive.expiry_learned" for e in logs)
+        assert not any(e["event"] == "auth.renewed" for e in logs)
+
+    def test_first_tick_jwt_below_threshold_renews(self) -> None:
+        clock = _FixedClock(1000.0)
+        transport = _FakeTransport([(200, _renew_body("renewed-jwt", "2099-01-01T00:00:00.000"))])
+        jwt = _jwt({"exp": 1000.0 + 1 * 3600.0})  # only 1h out → inside 12h → renew
+        holder = TokenHolder(jwt)
+        keepalive = TokenKeepalive(_client(transport), holder, now=clock, sleep=lambda _s: None)
+        with capture_logs() as logs:
+            keepalive._tick()
+        assert transport.calls == 1
+        assert holder.get() == "renewed-jwt"
+        assert any(e["event"] == "auth.renewed" for e in logs)
 
 
 class TestRunLoop:

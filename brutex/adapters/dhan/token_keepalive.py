@@ -38,6 +38,9 @@ transport — NO real threads, NO real sleeps. The thread wrapper
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import threading
 import time
 from collections.abc import Callable
@@ -81,6 +84,10 @@ _FALLBACK_LIFETIME_S: Final[float] = 24 * 3600.0
 #: Dhan ``expiryTime`` formats (IST wall-clock, per docs/dhan-ref/02), tried in
 #: order: with milliseconds (``2026-01-01T00:00:00.000``) then without.
 _EXPIRY_FORMATS: Final[tuple[str, ...]] = ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S")
+
+#: A JWT is exactly three base64url segments: ``header.payload.signature``
+#: (RFC 7519). Anything else is not a token we can read an ``exp`` from offline.
+_JWT_SEGMENTS: Final[int] = 3
 
 
 def parse_expiry_deadline(
@@ -129,6 +136,63 @@ def parse_expiry_deadline(
         note="unparseable expiryTime; assuming now+24h so the keepalive cannot crash",
     )
     return now() + _FALLBACK_LIFETIME_S
+
+
+def decode_jwt_expiry(token: str) -> float | None:
+    """Read a JWT access-token's ``exp`` (epoch seconds) WITHOUT any network call.
+
+    The Dhan access-token is a JWT (CLAUDE.md §6 — ``access-token`` is a 24h JWT).
+    A JWT's middle segment is a base64url-encoded JSON claim set carrying the
+    standard ``exp`` expiry (RFC 7519, epoch seconds). Decoding it lets the
+    keepalive LEARN the token's expiry **offline** — so a freshly-pasted token with
+    ample life triggers **ZERO** ``RenewToken`` calls until it is genuinely inside
+    the 12h renew window (DEC-DHAN-RENEW-SINGLE-OWNER-001). This removes the
+    needless startup rotation: ``RenewToken`` **rotates** (mints a new token and
+    invalidates the presented one — DEC-DHAN-RENEWTOKEN-ROTATE-001), so renewing a
+    healthy >12h token only to LEARN its expiry was a self-inflicted token swap.
+
+    Best-effort + NEVER raises (Golden Rule #1/#10 — no guessing): returns ``None``
+    on ANY shape we cannot trust — not a 3-segment JWT, bad base64url, a payload
+    that is not JSON, a non-object claim set, or a missing / non-numeric ``exp``
+    (a ``bool`` is rejected even though it subclasses ``int``). On ``None`` the
+    caller falls back to the prior learn-by-renew path, so a vendor token that is
+    NOT a JWT-with-``exp`` degrades to exactly the old behaviour — never a crash,
+    never a false expiry.
+
+    Pure + O(1) (a fixed split + one bounded base64/JSON decode of the small claim
+    set); no clock, no I/O.
+
+    Parameters
+    ----------
+    token
+        The current access-token string (read from the live
+        :class:`~brutex.adapters.dhan.token_holder.TokenHolder`).
+
+    Returns
+    -------
+    float | None
+        The ``exp`` epoch-seconds deadline when decodable, else ``None``.
+    """
+    parts = token.split(".")
+    if len(parts) != _JWT_SEGMENTS:
+        return None
+    segment = parts[1]
+    # base64url payloads are emitted WITHOUT ``=`` padding; restore it so the
+    # standard-library decoder accepts the segment (``-len % 4`` ∈ {0,1,2,3}).
+    padded = segment + "=" * (-len(segment) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(padded))
+    except (binascii.Error, ValueError):
+        # binascii.Error (bad base64) and json.JSONDecodeError / UnicodeDecodeError
+        # are all ValueError subclasses — any malformed payload → not learnable.
+        return None
+    if not isinstance(claims, dict):
+        return None
+    exp = claims.get("exp")
+    # Reject bool explicitly (``True`` is an ``int`` subclass) and any non-number.
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        return None
+    return float(exp)
 
 
 class TokenKeepalive:
@@ -232,13 +296,19 @@ class TokenKeepalive:
         ``renew_token`` POST + ``holder.set`` + logging), so the whole policy is
         unit-tested with a fake clock + fake transport — no threads, no real sleeps.
 
-        Logic:
+        Logic (DEC-DHAN-RENEW-SINGLE-OWNER-001 — renew ONLY when genuinely <12h):
 
-        * If the expiry deadline is unknown (first tick), do an immediate renew to
-          LEARN the expiry + refresh the token.
-        * Else compute ``remaining = expiry_deadline - now()``; if it is below
-          :data:`RENEW_BEFORE_EXPIRY_S` (12h), renew now; otherwise sleep until the
-          token is ~12h from expiry (clamped to :data:`MAX_SLEEP_S`).
+        * If the expiry deadline is unknown (first tick), LEARN it OFFLINE from the
+          live token's own JWT ``exp`` (:func:`decode_jwt_expiry`) — **no network,
+          no rotation**. A token with >12h of life therefore triggers **zero**
+          ``RenewToken`` calls; only a token already inside the 12h window is
+          renewed. If the token is NOT a JWT-with-``exp`` (decode returns ``None``)
+          we fall back to ONE learn-by-renew (the prior behaviour) so a non-JWT
+          token still works.
+        * Once the deadline is known, compute ``remaining = expiry_deadline -
+          now()``; if it is below :data:`RENEW_BEFORE_EXPIRY_S` (12h), renew now;
+          otherwise sleep until the token is ~12h from expiry (clamped to
+          :data:`MAX_SLEEP_S`).
 
         Returns
         -------
@@ -246,7 +316,17 @@ class TokenKeepalive:
             Seconds to sleep before the next tick.
         """
         if self._expiry_deadline is None:
-            return self._renew_once()
+            learned = decode_jwt_expiry(self._holder.get())
+            if learned is None:
+                # Expiry not learnable offline (token is not a JWT carrying `exp`):
+                # fall back to learning it via ONE RenewToken (prior behaviour).
+                return self._renew_once()
+            self._log.info(
+                "auth.keepalive.expiry_learned",
+                remaining_hours=round((learned - self._now()) / 3600.0, 2),
+                note="learned token expiry from its JWT exp — no RenewToken fired",
+            )
+            self._expiry_deadline = learned
         remaining = self._expiry_deadline - self._now()
         if remaining < RENEW_BEFORE_EXPIRY_S:
             return self._renew_once()
@@ -286,5 +366,6 @@ __all__ = [
     "RENEW_BEFORE_EXPIRY_S",
     "RETRY_WHEN_DEAD_S",
     "TokenKeepalive",
+    "decode_jwt_expiry",
     "parse_expiry_deadline",
 ]
