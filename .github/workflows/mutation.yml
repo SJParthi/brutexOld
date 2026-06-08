@@ -31,6 +31,7 @@ on:
     paths:
       - "brutex/**"
       - "rust/fno-math/**"
+      - "rust/trading-core/**"
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/mutation.yml"
@@ -203,5 +204,90 @@ jobs:
               repo: context.repo.repo,
               title,
               body: `cargo-mutants detected surviving mutants on commit ${context.sha}. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+              labels: ['bug', 'mutation', 'rust', 'critical'],
+            });
+
+  # ─────────────────────────────────────────────────────────────────
+  # Rust mutation — cargo-mutants over rust/trading-core/
+  #
+  # The SHARED 52-vocab + indicators kernel (DEC-SHARED-CORE-001) — a
+  # silent regression here breaks BOTH BruteX (PyO3 wheel) and TickVault
+  # (native) at once, so it gets its own mutation gate
+  # (DEC-TRADING-CORE-PROPTEST-MUTANTS-001).
+  #
+  # Scope = `src/evaluator.rs`, the 52-condition DECISION core (the named
+  # "critical module" of §12) — driven to ZERO surviving mutants by the
+  # proptest + golden + boundary/degenerate suite. This mirrors fno-math's
+  # scoped `examine_re` (src/math + src/compat, not the whole crate);
+  # bits.rs + the pivots/fib indicators are covered by the 400-case golden
+  # answer-key + the property ordering/determinism tests, and extending the
+  # mutation gate to their (largely unused, e.g. r4/s4/ext_424) fields is a
+  # tracked follow-up (DEC-TRADING-CORE-PROPTEST-MUTANTS-001 honest envelope).
+  #
+  # NOTE: `--in-place` (NOT the default copy) is required because the
+  # golden integration test reads the repo-root oracle at
+  # `../../tests/golden/fixtures/vocab_golden_vectors.json`, which lives
+  # OUTSIDE the crate dir and so is absent from cargo-mutants' scratch
+  # copy. In-place mutates the fresh CI checkout in place (reverted after
+  # each mutant), so the fixture resolves. `--in-place` precludes `-j`,
+  # hence the generous 120-minute budget.
+  # ─────────────────────────────────────────────────────────────────
+  rust-mutation-trading-core:
+    name: Rust mutation (cargo-mutants, trading-core)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: rust/trading-core
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/trading-core -> target
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: Run cargo-mutants
+        run: |
+          cargo mutants \
+            --in-place \
+            --file src/evaluator.rs \
+            --test-tool cargo \
+            --no-shuffle \
+            --timeout 300 \
+            --output cargo-mutants.out \
+            -- \
+            --release
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cargo-mutants-report-trading-core
+          path: rust/trading-core/cargo-mutants.out
+          retention-days: 14
+      - name: Open GitHub issue on failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = `cargo-mutants: surviving mutants in trading-core on ${context.sha.substring(0, 7)}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'bug,mutation,rust',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: `cargo-mutants detected surviving mutants in trading-core on commit ${context.sha}. See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
               labels: ['bug', 'mutation', 'rust', 'critical'],
             });

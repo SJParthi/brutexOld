@@ -17,6 +17,17 @@ const MID_MORNING_END: u32 = 11 * 3600 + 30 * 60; // 11:30
 const MIDDAY_END: u32 = 13 * 3600; // 13:00
 const AFTERNOON_END: u32 = 15 * 3600; // 15:00
 
+/// The single-bit mask for condition `pos` (`1 << pos`). Routing every
+/// `mask |= …` through this one site is the DYNAMIC/COMMON discipline (one shift
+/// expression, not 52) and removes the `1u64 << 0` ⇔ `1u64 >> 0` equivalent
+/// mutant at bit 0: because this helper is called for every bit 0..=51, a
+/// `<<`→`>>` perturbation breaks bit 1+ and is killed
+/// (DEC-TRADING-CORE-PROPTEST-MUTANTS-001).
+#[inline]
+const fn bit(pos: u32) -> u64 {
+    1u64 << pos
+}
+
 /// All per-bar indicator values consumed by [`evaluate_atoms`]. Money is int64
 /// paisa; `ema*` are `None` during warm-up. `tod_seconds` is the bar's IST
 /// wall-clock time-of-day in seconds (Group 8 reads only the local HH:MM:SS,
@@ -98,26 +109,26 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
     // ── Group 1: EMA Position (bits 0-5) ──
     if let Some(ema20) = s.ema20_paisa {
         if close > ema20 {
-            mask |= 1u64 << bits::BIT_CLOSE_ABOVE_EMA20;
+            mask |= bit(bits::BIT_CLOSE_ABOVE_EMA20);
         }
         if close < ema20 {
-            mask |= 1u64 << bits::BIT_CLOSE_BELOW_EMA20;
+            mask |= bit(bits::BIT_CLOSE_BELOW_EMA20);
         }
     }
     if let Some(ema200) = s.ema200_paisa {
         if close > ema200 {
-            mask |= 1u64 << bits::BIT_CLOSE_ABOVE_EMA200;
+            mask |= bit(bits::BIT_CLOSE_ABOVE_EMA200);
         }
         if close < ema200 {
-            mask |= 1u64 << bits::BIT_CLOSE_BELOW_EMA200;
+            mask |= bit(bits::BIT_CLOSE_BELOW_EMA200);
         }
     }
     if let (Some(ema20), Some(ema200)) = (s.ema20_paisa, s.ema200_paisa) {
         if ema20 > ema200 {
-            mask |= 1u64 << bits::BIT_EMA20_ABOVE_EMA200;
+            mask |= bit(bits::BIT_EMA20_ABOVE_EMA200);
         }
         if ema20 < ema200 {
-            mask |= 1u64 << bits::BIT_EMA20_BELOW_EMA200;
+            mask |= bit(bits::BIT_EMA20_BELOW_EMA200);
         }
     }
 
@@ -125,73 +136,73 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
     let bps = p.pivot_proximity_bps;
     let pv = &s.pivots;
     if is_near(close, pv.p_paisa, bps) {
-        mask |= 1u64 << bits::BIT_NEAR_PIVOT_P;
+        mask |= bit(bits::BIT_NEAR_PIVOT_P);
     }
     if is_near(close, pv.r1_paisa, bps) {
-        mask |= 1u64 << bits::BIT_NEAR_PIVOT_R1;
+        mask |= bit(bits::BIT_NEAR_PIVOT_R1);
     }
     if is_near(close, pv.r2_paisa, bps) {
-        mask |= 1u64 << bits::BIT_NEAR_PIVOT_R2;
+        mask |= bit(bits::BIT_NEAR_PIVOT_R2);
     }
     if is_near(close, pv.r3_paisa, bps) {
-        mask |= 1u64 << bits::BIT_NEAR_PIVOT_R3;
+        mask |= bit(bits::BIT_NEAR_PIVOT_R3);
     }
     if is_near(close, pv.s1_paisa, bps) {
-        mask |= 1u64 << bits::BIT_NEAR_PIVOT_S1;
+        mask |= bit(bits::BIT_NEAR_PIVOT_S1);
     }
     if is_near(close, pv.s2_paisa, bps) {
-        mask |= 1u64 << bits::BIT_NEAR_PIVOT_S2;
+        mask |= bit(bits::BIT_NEAR_PIVOT_S2);
     }
     if is_near(close, pv.s3_paisa, bps) {
-        mask |= 1u64 << bits::BIT_NEAR_PIVOT_S3;
+        mask |= bit(bits::BIT_NEAR_PIVOT_S3);
     }
 
     // ── Group 3: PDH/PDL (bits 13-18) ──
     let pdh = pv.pdh_paisa;
     let pdl = pv.pdl_paisa;
     if close > pdh {
-        mask |= 1u64 << bits::BIT_CLOSE_ABOVE_PDH;
+        mask |= bit(bits::BIT_CLOSE_ABOVE_PDH);
     }
     if close < pdh {
-        mask |= 1u64 << bits::BIT_CLOSE_BELOW_PDH;
+        mask |= bit(bits::BIT_CLOSE_BELOW_PDH);
     }
     if close > pdl {
-        mask |= 1u64 << bits::BIT_CLOSE_ABOVE_PDL;
+        mask |= bit(bits::BIT_CLOSE_ABOVE_PDL);
     }
     if close < pdl {
-        mask |= 1u64 << bits::BIT_CLOSE_BELOW_PDL;
+        mask |= bit(bits::BIT_CLOSE_BELOW_PDL);
     }
     let bps_pp = p.pdh_pdl_proximity_bps;
     if is_near(close, pdh, bps_pp) {
-        mask |= 1u64 << bits::BIT_NEAR_PDH;
+        mask |= bit(bits::BIT_NEAR_PDH);
     }
     if is_near(close, pdl, bps_pp) {
-        mask |= 1u64 << bits::BIT_NEAR_PDL;
+        mask |= bit(bits::BIT_NEAR_PDL);
     }
 
     // ── Group 4: Fib Proximity (bits 19-29) ──
     let bps_fib = p.fib_proximity_bps;
     let fib = &s.fib;
     if is_near(close, fib.retrace_level_at_pdh_paisa, bps_fib) {
-        mask |= 1u64 << bits::BIT_NEAR_FIB_0;
+        mask |= bit(bits::BIT_NEAR_FIB_0);
     }
     if is_near(close, fib.retrace_23_paisa, bps_fib) {
-        mask |= 1u64 << bits::BIT_NEAR_FIB_236;
+        mask |= bit(bits::BIT_NEAR_FIB_236);
     }
     if is_near(close, fib.retrace_38_paisa, bps_fib) {
-        mask |= 1u64 << bits::BIT_NEAR_FIB_382;
+        mask |= bit(bits::BIT_NEAR_FIB_382);
     }
     if is_near(close, fib.retrace_50_paisa, bps_fib) {
-        mask |= 1u64 << bits::BIT_NEAR_FIB_50;
+        mask |= bit(bits::BIT_NEAR_FIB_50);
     }
     if is_near(close, fib.retrace_62_paisa, bps_fib) {
-        mask |= 1u64 << bits::BIT_NEAR_FIB_618;
+        mask |= bit(bits::BIT_NEAR_FIB_618);
     }
     if is_near(close, fib.retrace_78_paisa, bps_fib) {
-        mask |= 1u64 << bits::BIT_NEAR_FIB_786;
+        mask |= bit(bits::BIT_NEAR_FIB_786);
     }
     if is_near(close, fib.retrace_level_at_pdl_paisa, bps_fib) {
-        mask |= 1u64 << bits::BIT_NEAR_FIB_100;
+        mask |= bit(bits::BIT_NEAR_FIB_100);
     }
     // Extensions: the bit fires if EITHER the up or the down variant is near.
     for (ext_up, ext_down, bit_pos) in [
@@ -217,7 +228,7 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
         ),
     ] {
         if is_near(close, ext_up, bps_fib) || is_near(close, ext_down, bps_fib) {
-            mask |= 1u64 << bit_pos;
+            mask |= bit(bit_pos);
         }
     }
 
@@ -229,87 +240,103 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
     let body = (c - o).abs();
     let total_range = h - lo;
     if c > o {
-        mask |= 1u64 << bits::BIT_BAR_BULLISH;
+        mask |= bit(bits::BIT_BAR_BULLISH);
     }
     if c < o {
-        mask |= 1u64 << bits::BIT_BAR_BEARISH;
+        mask |= bit(bits::BIT_BAR_BEARISH);
     }
-    if total_range > 0 && body * 10 < total_range {
-        mask |= 1u64 << bits::BIT_BAR_DOJI;
+    // No `total_range > 0` guard needed: `body >= 0`, so a strict
+    // `body * 10 < total_range` already implies `total_range > 0` (when
+    // total_range <= 0 the comparison is false). Dropping the redundant guard
+    // keeps the mask bit-identical (golden 400 + the independent oracle prove
+    // it) AND removes a provably-equivalent `>`→`>=` mutant
+    // (DEC-TRADING-CORE-PROPTEST-MUTANTS-001).
+    if body * 10 < total_range {
+        mask |= bit(bits::BIT_BAR_DOJI);
     }
+    // The remaining shape bits DO need the guard: at `total_range <= 0` a
+    // degenerate bar (e.g. high == low with open != close) could otherwise
+    // spuriously fire `large_body` etc. — the guard is load-bearing and its
+    // mutant is killed by `degenerate_bars_fire_no_shape_or_gap_bits`.
     if total_range > 0 {
         if body * 10 > total_range * 7 {
-            mask |= 1u64 << bits::BIT_BAR_LARGE_BODY;
+            mask |= bit(bits::BIT_BAR_LARGE_BODY);
         }
         if body * 10 < total_range * 3 {
-            mask |= 1u64 << bits::BIT_BAR_SMALL_BODY;
+            mask |= bit(bits::BIT_BAR_SMALL_BODY);
         }
         let upper_wick = h - o.max(c);
         let lower_wick = o.min(c) - lo;
         if upper_wick * 2 > total_range {
-            mask |= 1u64 << bits::BIT_LONG_UPPER_WICK;
+            mask |= bit(bits::BIT_LONG_UPPER_WICK);
         }
         if lower_wick * 2 > total_range {
-            mask |= 1u64 << bits::BIT_LONG_LOWER_WICK;
+            mask |= bit(bits::BIT_LONG_LOWER_WICK);
         }
     }
 
     // ── Group 6: Prior Bar Pattern (bits 37-39) ──
     if prior.all_bullish() {
-        mask |= 1u64 << bits::BIT_PRIOR_N_BULLISH;
+        mask |= bit(bits::BIT_PRIOR_N_BULLISH);
     }
     if prior.all_bearish() {
-        mask |= 1u64 << bits::BIT_PRIOR_N_BEARISH;
+        mask |= bit(bits::BIT_PRIOR_N_BEARISH);
     }
     if prior.alternating() {
-        mask |= 1u64 << bits::BIT_PRIOR_ALTERNATING;
+        mask |= bit(bits::BIT_PRIOR_ALTERNATING);
     }
 
     // ── Group 7: Day Structure (bits 40-43) ──
     if c == s.day_high_paisa {
-        mask |= 1u64 << bits::BIT_CLOSE_AT_DAY_HIGH;
+        mask |= bit(bits::BIT_CLOSE_AT_DAY_HIGH);
     }
     if c == s.day_low_paisa {
-        mask |= 1u64 << bits::BIT_CLOSE_AT_DAY_LOW;
+        mask |= bit(bits::BIT_CLOSE_AT_DAY_LOW);
     }
+    // The `day_range > 0` guard is load-bearing: at day_high == day_low a close
+    // off that level would otherwise spuriously fire the third bits; its mutant
+    // is killed by `degenerate_bars_fire_no_shape_or_gap_bits`.
     let day_range = s.day_high_paisa - s.day_low_paisa;
     if day_range > 0 {
         if (c - s.day_low_paisa) * 3 > day_range * 2 {
-            mask |= 1u64 << bits::BIT_CLOSE_IN_UPPER_THIRD;
+            mask |= bit(bits::BIT_CLOSE_IN_UPPER_THIRD);
         }
         if (c - s.day_low_paisa) * 3 < day_range {
-            mask |= 1u64 << bits::BIT_CLOSE_IN_LOWER_THIRD;
+            mask |= bit(bits::BIT_CLOSE_IN_LOWER_THIRD);
         }
     }
 
     // ── Group 8: Time of Day (bits 44-47) ──
     let t = s.tod_seconds;
     if (EARLY_MORNING_START..EARLY_MORNING_END).contains(&t) {
-        mask |= 1u64 << bits::BIT_EARLY_MORNING;
+        mask |= bit(bits::BIT_EARLY_MORNING);
     } else if (EARLY_MORNING_END..MID_MORNING_END).contains(&t) {
-        mask |= 1u64 << bits::BIT_MID_MORNING;
+        mask |= bit(bits::BIT_MID_MORNING);
     } else if (MID_MORNING_END..MIDDAY_END).contains(&t) {
-        mask |= 1u64 << bits::BIT_MIDDAY;
+        mask |= bit(bits::BIT_MIDDAY);
     } else if (MIDDAY_END..AFTERNOON_END).contains(&t) {
-        mask |= 1u64 << bits::BIT_AFTERNOON;
+        mask |= bit(bits::BIT_AFTERNOON);
     }
 
     // ── Group 9: Day Type (bits 48-51) ──
+    // The `pdc > 0` guard is load-bearing: at pdc == 0 the 0.5%-gap threshold is
+    // 0 and any positive open would spuriously gap; its mutant is killed by
+    // `degenerate_bars_fire_no_shape_or_gap_bits`.
     let pdc = pv.pdc_paisa;
     if pdc > 0 {
         let gap_threshold = (pdc * 50).div_euclid(10_000); // 0.5% of pdc
         if s.open_of_day_paisa > pdc + gap_threshold {
-            mask |= 1u64 << bits::BIT_GAP_UP_DAY;
+            mask |= bit(bits::BIT_GAP_UP_DAY);
         }
         if s.open_of_day_paisa < pdc - gap_threshold {
-            mask |= 1u64 << bits::BIT_GAP_DOWN_DAY;
+            mask |= bit(bits::BIT_GAP_DOWN_DAY);
         }
     }
     if s.day_high_paisa < pdh && s.day_low_paisa > pdl {
-        mask |= 1u64 << bits::BIT_INSIDE_DAY;
+        mask |= bit(bits::BIT_INSIDE_DAY);
     }
     if s.day_high_paisa > pdh && s.day_low_paisa < pdl {
-        mask |= 1u64 << bits::BIT_OUTSIDE_DAY;
+        mask |= bit(bits::BIT_OUTSIDE_DAY);
     }
 
     mask
