@@ -2283,7 +2283,15 @@ jobs:
         with:
           node-version: '22'
       - name: Install jscpd
-        run: npm install -g jscpd
+        # Pin to the last Node-native jscpd (4.0.5). Unpinned `jscpd@latest`
+        # now resolves to a Rust-rewrite release that requires a platform
+        # binary (`cpd-linux-x64-gnu`) which `npm install -g jscpd` does NOT
+        # pull, so the step died with "Platform package cpd-linux-x64-gnu not
+        # installed" (exit 1) before scanning anything — an upstream tooling
+        # break, not a duplication finding. 4.0.5 runs self-contained and
+        # reproduces the prior behaviour (verified: brutex/ total 0.73% < 3%,
+        # exit 0). DEC-LAZY-FASTBLOOM-IMPORT-001 (MIGRATION entry #579).
+        run: npm install -g jscpd@4.0.5
       - name: Run jscpd (blocking — DEC-P0-001)
         run: |
           # DEC-P0-001 (2026-05-17) removed `|| true`; jscpd now blocks merge
