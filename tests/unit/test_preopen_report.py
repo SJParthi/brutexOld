@@ -28,9 +28,11 @@ from brutex.dashboard.preopen_report import (
     _col_letter,
     _daily_close_by_date,
     _daily_open_by_date,
+    _daily_prev_close_contiguous,
     _group_by_month,
     _minute_prev_close_contiguous,
     _month_label,
+    _previous_trading_day,
     _row_fill_styles,
     build_preopen_rows,
     render_month_workbook,
@@ -731,6 +733,104 @@ def test_build_minute_basis_contiguous_uses_prior_session(tmp_path: Path) -> Non
     assert rows[0].prev_close == Decimal("630")  # 03-Jun's LAST 1-minute close
     assert rows[0].iep == Decimal("631.05")  # 04-Jun's 09:15 open
     assert rows[0].chng == Decimal("1.05")
+
+
+# ── DEC-PREOPEN-PREVCLOSE-CONTIGUITY-DAILY-001 — daily basis: no jump over a hole ─
+
+
+def test_daily_prev_close_contiguous_branches() -> None:
+    # The pure guard: daily-basis PREV. CLOSE is the IMMEDIATELY-preceding NSE
+    # trading session's 1-day close, valid ONLY when that exact session's daily
+    # bar is present. The trading sessions below (Wed/Thu/Fri) are contiguous.
+    d1, d2, d3 = date(2026, 6, 3), date(2026, 6, 4), date(2026, 6, 5)
+    daily = {d1: Decimal("630"), d2: Decimal("632")}
+    # valid — the prior session (d1) has a daily bar → its close.
+    assert _daily_prev_close_contiguous(daily, [d1, d2], d2) == Decimal("630")
+    # first session — no earlier daily bar (idx == 0) → None.
+    assert _daily_prev_close_contiguous(daily, [d1, d2], d1) is None
+    # hole — the prior session (d2, Thu) bar is MISSING; the latest available
+    # earlier bar (d1) is older than the calendar's prior session → None (skip).
+    assert _daily_prev_close_contiguous({d1: Decimal("630")}, [d1], d3) is None
+    # zero prior close → None (never a /0 %CHNG).
+    assert _daily_prev_close_contiguous({d1: Decimal("0"), d2: Decimal("5")}, [d1, d2], d2) is None
+    # holiday gap is NOT a hole: 2024-01-26 (Fri, Republic Day) + the weekend sit
+    # between the prior session (Thu 01-25) and 01-29 (Mon) — the calendar steps
+    # over them so the contiguous series still resolves to the real prior close.
+    thu, mon = date(2024, 1, 25), date(2024, 1, 29)
+    assert _daily_prev_close_contiguous(
+        {thu: Decimal("500"), mon: Decimal("510")}, [thu, mon], mon
+    ) == Decimal("500")
+
+
+def test_previous_trading_day_steps_over_weekend_and_holiday() -> None:
+    # day-1 is a trading day → returned directly (loop body never runs).
+    assert _previous_trading_day(date(2026, 6, 4)) == date(2026, 6, 3)  # Thu → Wed
+    # day-1 is a weekend → walk back to Friday (loop body runs).
+    assert _previous_trading_day(date(2026, 6, 8)) == date(2026, 6, 5)  # Mon → Fri
+    # Republic Day (Fri 2024-01-26) + the weekend are stepped over → Thu 01-25.
+    assert _previous_trading_day(date(2024, 1, 29)) == date(2024, 1, 25)
+
+
+def test_build_day_basis_skips_row_when_prior_session_missing(tmp_path: Path) -> None:
+    # The daily mirror of the JUBLINGREA bug (DEC-PREOPEN-PREVCLOSE-CONTIGUITY-
+    # DAILY-001): the immediately-preceding trading session's 1-DAY bar (Wed
+    # 2026-06-03) is MISSING from the lake, but a STALE far-earlier daily bar
+    # (2026-04-01, close 685) exists. The calendar proves 06-03 IS a trading day,
+    # so the report must SKIP 06-04 rather than anchor PREV. CLOSE on the stale
+    # 685 (a fake mover). ParquetWriter writes ONE (year, month) partition per
+    # call — split April from June.
+    _write(
+        tmp_path,
+        "JUBLINGREA",
+        "1day",
+        [_bar(datetime(2026, 4, 1, 3, 45, tzinfo=UTC), open_="680", close="685")],
+    )
+    # 06-03 (the real prior session) is ABSENT; 06-04 has its own 1-day open but
+    # no valid prior-session anchor.
+    _write(
+        tmp_path,
+        "JUBLINGREA",
+        "1day",
+        [_bar(datetime(2026, 6, 4, 3, 45, tzinfo=UTC), open_="631", close="632")],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "JUBLINGREA")],
+        start=date(2026, 1, 1),
+        end=date(2026, 12, 31),
+    )
+    # 01-Apr → skipped (first session); 04-Jun → skipped (prior 03-Jun daily hole).
+    # NO fake mover anchored on the stale 685.
+    assert rows == []
+
+
+def test_build_day_basis_holiday_gap_is_not_skipped(tmp_path: Path) -> None:
+    # The healthy case across a real NSE holiday: Republic Day (Fri 2024-01-26) +
+    # the weekend separate Thu 01-25 from Mon 01-29. Both daily bars are present,
+    # so the calendar steps over the holiday gap and 01-29 IS emitted with
+    # PREV. CLOSE = 01-25's close (a holiday gap is NOT a data hole).
+    _write(
+        tmp_path,
+        "HCAL",
+        "1day",
+        [
+            _bar(datetime(2024, 1, 25, 3, 45, tzinfo=UTC), open_="490", close="500"),
+            _bar(datetime(2024, 1, 29, 3, 45, tzinfo=UTC), open_="505", close="510"),
+        ],
+    )
+    rows = build_preopen_rows(
+        _conn(),
+        tmp_path,
+        datasets=[("NSE", "CASH", "HCAL")],
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+    )
+    assert len(rows) == 1
+    assert rows[0].day == date(2024, 1, 29)
+    assert rows[0].prev_close == Decimal("500")  # Thu 01-25's close, across the holiday
+    assert rows[0].iep == Decimal("505")  # 01-29's 1-day open
+    assert rows[0].chng == Decimal("5")
 
 
 # ── DEC-REPORTS-EXCEL-CATEGORIES-001 — two categories + per-year/per-month zip ─
