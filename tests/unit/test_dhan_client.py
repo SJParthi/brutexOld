@@ -574,3 +574,29 @@ class TestFastRetry:
         assert t.calls == 3  # 1 initial + 2 in-place retries (bounded)
         assert sleeper.waits == pytest.approx([0.05, 0.10])  # exponential backoff
         assert paces == ["pace", "pace"]  # paced before EACH retry, just like POST
+
+
+class TestPinningTransportFactories:
+    """`make_pinning_transport` / `default_dhan_transport` build a Transport.
+
+    The returned closures perform real network I/O (`# pragma: no cover`); these
+    tests cover the FACTORY surface — that each returns a callable matching the
+    `Transport` signature wired to the given/resolved `PinPolicy`
+    (DEC-DHAN-TLS-SPKI-PIN-001). Pin verification itself is covered exhaustively
+    in `test_dhan_cert_pinning.py`.
+    """
+
+    def test_make_pinning_transport_returns_callable(self) -> None:
+        """The factory returns a callable for any policy (enforced or not)."""
+        from brutex.adapters.dhan.cert_pinning import PinPolicy
+        from brutex.adapters.dhan.client import make_pinning_transport
+
+        transport = make_pinning_transport(PinPolicy(pins=frozenset({"a-pin"})))
+        assert callable(transport)
+
+    def test_default_dhan_transport_resolves_policy_from_env(self) -> None:
+        """`default_dhan_transport` builds the COMMON pinning transport from env."""
+        from brutex.adapters.dhan.client import default_dhan_transport
+
+        assert callable(default_dhan_transport(env={}))
+        assert callable(default_dhan_transport(env={"BRUTEX_DHAN_TLS_PINS": "a-pin"}))
