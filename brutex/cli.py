@@ -53,8 +53,10 @@ phase plan (see ``brutex/adapters/dhan/``).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -444,6 +446,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Bounded OUTER round budget for --until-clean "
             "(default: until_clean.DEFAULT_MAX_ROUNDS). Never infinite."
+        ),
+    )
+    fetch.add_argument(
+        "--max-retry-minutes",
+        type=int,
+        default=None,
+        help=(
+            "Arm the retry-storm give-up guard (DEC-RATE-STORM-WATCHDOG-001): each "
+            "(symbol, window) fan-out unit gives up after N minutes of continuous "
+            "failure, and a symbol that reaches 100%% window-failure fires ONE "
+            "Telegram alert (never per window). Give-ups + the alert are stamped as "
+            "hash-chained audit rows under <lake>/audit/. Omit to disable (default)."
         ),
     )
 
@@ -1481,6 +1495,47 @@ def _run_instrument_master_load(  # pragma: no cover — opens DuckDB store + li
         store.close()
 
 
+def _arm_retry_storm_guard(
+    *,
+    max_retry_minutes: int | None,
+    lake_root: Path,
+    instruments: Sequence[Any],
+    intervals: Sequence[str],
+    stack: contextlib.ExitStack,
+) -> Callable[[str, int, bool], None] | None:
+    """Build + arm the retry-storm give-up guard for one pull (DEC-RATE-STORM-WATCHDOG-001).
+
+    Returns a ``run_ingest`` ``ProgressHook`` ``(label, bars, failed)`` that feeds
+    every window outcome into a :class:`~brutex.orchestrator.watchdog.RetryStormWatchdog`
+    (a terminal window-failure gives up + stamps a hash-chained ``RETRY_GIVE_UP``
+    audit row; a symbol reaching 100%% window-failure stamps ``SYMBOL_WINDOW_FAILURE``
+    + fires ONE best-effort Telegram alert, never per window), or ``None`` when
+    ``--max-retry-minutes`` is unset. The audit writer is opened under
+    ``<lake>/audit/`` and its close is registered on *stack*.
+    """
+    if max_retry_minutes is None:
+        return None
+    from brutex.notifications.sweep_alerts import SweepAlerter
+    from brutex.observability.correlation import new_pull_id
+    from brutex.orchestrator.audit import AuditWriter
+    from brutex.orchestrator.watchdog import build_retry_storm_watchdog
+
+    audit_path = lake_root / "audit" / f"retry-storm-{new_pull_id()}.jsonl"
+    audit = stack.enter_context(AuditWriter.open(audit_path))
+    watchdog = build_retry_storm_watchdog(
+        max_retry_minutes=max_retry_minutes,
+        audit=audit,
+        on_symbol_failure=SweepAlerter().symbol_failure_callback(),
+    )
+    watchdog.register_fanout([instrument.symbol_name for instrument in instruments], intervals)
+    print(
+        f"[brutex] retry-storm guard armed — give up after {max_retry_minutes} min of "
+        f"continuous failure; audit → {audit_path}",
+        file=sys.stderr,
+    )
+    return watchdog.progress_hook()
+
+
 def cmd_fetch(
     lake_root: Path | None,
     start: str | None,
@@ -1497,6 +1552,7 @@ def cmd_fetch(
     retry_failed: bool = False,
     until_clean: bool = False,
     until_clean_rounds: int | None = None,
+    max_retry_minutes: int | None = None,
 ) -> int:
     """Fetch candles for the 3 brute-force indices into the lake (§13.9 step 3).
 
@@ -1533,6 +1589,13 @@ def cmd_fetch(
     count is bounded (NOT infinite), each round is one ``≤ 5 r/s`` pass, and the
     work is ``O(failed_windows)`` per round — never an "O(1)-total" claim.
     """
+    if max_retry_minutes is not None and max_retry_minutes < 1:
+        print(
+            f"[brutex] --max-retry-minutes must be >= 1; got {max_retry_minutes}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+
     resolved_instruments = _resolve_lake_root(lake_root)
     if instruments:
         print("[brutex] fetch --instruments → keyless public instrument master (no keys)")
@@ -1545,8 +1608,6 @@ def cmd_fetch(
         )
         print(f"[brutex] lake: {resolved_instruments}")
         return EXIT_OK
-
-    import contextlib
 
     from brutex.adapters.dhan.run_ingest import run_dhan_spot_ingest_with_retry
     from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
@@ -1613,7 +1674,7 @@ def cmd_fetch(
     cat_ctx: Any = (
         contextlib.nullcontext(None) if inspect else Catalog.open(resolved / "catalog.duckdb")
     )
-    with cat_ctx as cat:
+    with cat_ctx as cat, contextlib.ExitStack() as storm_stack:
         if dry_run:
             fetch_instruments = [_synthetic_index_instrument(spec) for spec in BRUTE_FORCE_INDICES]
             adapter = SyntheticDhanAdapter(bars_per_window=rows_per_chunk)
@@ -1678,6 +1739,19 @@ def cmd_fetch(
         # engine (CLAUDE.md §11 COMMON) — no duplicated round loop.
         do_retry = retry_failed or auto_retry
 
+        # Retry-storm give-up guard (DEC-RATE-STORM-WATCHDOG-001): when
+        # `--max-retry-minutes` is set, feed every window outcome through the
+        # watchdog so a 429 storm's silent bar-loss becomes a loud, audited,
+        # once-per-symbol alert instead of a manual audit-chain diff (Gap #3).
+        # No-op (None) when the flag is unset.
+        storm_progress = _arm_retry_storm_guard(
+            max_retry_minutes=max_retry_minutes,
+            lake_root=resolved,
+            instruments=fetch_instruments,
+            intervals=intervals,
+            stack=storm_stack,
+        )
+
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED coverage ledger."""
             return run_dhan_spot_ingest_with_retry(
@@ -1691,6 +1765,7 @@ def cmd_fetch(
                 coverage=coverage,
                 on_rate_limit=on_rate_limit,
                 on_success=on_success,
+                on_progress=storm_progress,
                 auto_retry=do_retry_flag,
             )
 
@@ -3024,6 +3099,7 @@ def main(argv: list[str] | None = None) -> int:
             retry_failed=args.retry_failed,
             until_clean=args.until_clean,
             until_clean_rounds=args.until_clean_rounds,
+            max_retry_minutes=args.max_retry_minutes,
         )
     if args.command == "doctor":
         return cmd_doctor(

@@ -715,16 +715,43 @@ jobs:
           # silence/raise/truncate semantics. Closes 2026-05-25 audit
           # row 14 (L3 replay was UNIMPLEMENTED).
           #
-          # NOTE 2026-05-25: same fastbloom_rs PyO3 ABI3 limit as the
-          # brutex.notifications.wiring strict gate above — see that
-          # comment for the full rationale. Module IS covered at 100%
-          # line + branch by the global --cov=brutex step.
-          # if compgen -G "tests/unit/test_orchestrator_replay.py" > /dev/null; then
-          #   pytest --cov=brutex.orchestrator.replay --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_replay.py
-          # else
-          #   echo "(brutex.orchestrator.replay test file not present yet — gate inactive)"
-          # fi
-          echo "(brutex.orchestrator.replay strict gate temporarily disabled — see notifications.wiring comment for fastbloom_rs PyO3 ABI3 detail)"
+          # RE-ENABLED by DEC-ORCH-LAZY-BLOOM-001 (2026-06-08, MIGRATION
+          # entry #570): the fastbloom_rs PyO3 abi3-py38 "may only be
+          # initialized once per interpreter process" import error — which
+          # forced a standalone `--cov=brutex.orchestrator.*` gate to abort
+          # at collection — is RESOLVED. brutex/orchestrator/bloom.py now
+          # imports fastbloom_rs lazily (inside BloomFilter.__post_init__ via
+          # _load_rust_bloom(), mirroring the existing lazy fno_math import in
+          # _popcount_bytes), so merely importing the orchestrator package no
+          # longer initialises the extension and collides with coverage's own
+          # source-package import. Verified: this gate reaches 100% line+branch.
+          if compgen -G "tests/unit/test_orchestrator_replay.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.replay --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_replay.py
+          else
+            echo "(brutex.orchestrator.replay test file not present yet — gate inactive)"
+          fi
+          # DEC-ORCH-LAZY-BLOOM-001 (2026-06-08, MIGRATION entry #589): the
+          # lazy fastbloom_rs import also unblocks three more orchestrator
+          # modules that reach 100% line+branch standalone with their
+          # dedicated test files. (state / store / pipeline / rate_limiter /
+          # quota_tracker / bloom carry residual standalone-coverage gaps —
+          # lines exercised only by the aggregate --cov=brutex run — tracked
+          # as the next ratchet; their ABI3 import blocker is now gone too.)
+          if compgen -G "tests/unit/test_orchestrator_audit.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit.py
+          else
+            echo "(brutex.orchestrator.audit test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_orchestrator_retry.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.retry --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_retry.py
+          else
+            echo "(brutex.orchestrator.retry test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_adaptive_rate_limiter.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.adaptive_rate_limiter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_adaptive_rate_limiter.py
+          else
+            echo "(brutex.orchestrator.adaptive_rate_limiter test file not present yet — gate inactive)"
+          fi
           # DEC-COV-001 step 18: 3-module indicator backfill batch
           # (DEC-INDICATOR-COVERAGE-001, ratchets the last 3 Track 1
           # indicator modules below strict-100% up to the gate). Each
@@ -858,13 +885,13 @@ jobs:
           else
             echo "(brutex.strategies.library.buy_and_hold test file not present yet — gate inactive)"
           fi
-          # NOTE 2026-05-27: brutex.orchestrator.retry (26 stmts) excluded
-          # from this ratchet — same fastbloom_rs PyO3 ABI3 limitation as
-          # brutex.orchestrator.replay + brutex.notifications.wiring; the
-          # orchestrator package's __init__ transitively imports bloom →
-          # fastbloom_rs which can only be initialized once per interpreter
-          # process. Module IS covered at 100% line + branch by the global
-          # --cov=brutex step; standalone strict gate is a follow-up.
+          # NOTE 2026-06-08 (DEC-ORCH-LAZY-BLOOM-001, MIGRATION entry #589):
+          # brutex.orchestrator.retry is NO LONGER excluded — the lazy
+          # fastbloom_rs import (bloom.py::_load_rust_bloom) removed the
+          # ABI3 single-init blocker, and retry's strict 100% gate is now
+          # ACTIVE above (next to the re-enabled replay / audit /
+          # adaptive_rate_limiter gates). This note is retained as the
+          # historical record of why it was previously deferred.
           # DEC-COV-BACKFILL-001 (entry #257, 2026-05-27): 3-module
           # backfill ratchet — modules previously 95-99% pushed to 100%
           # via surgical test additions + 1 dead-code removal + 1 defensive
@@ -1690,6 +1717,10 @@ jobs:
         # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
         run: pip install ./rust/trading-core
       - name: pytest golden tests
+        # Discovers every tests/golden/*.py oracle by placement, including
+        # test_execution_driver_golden.py (DEC-EXEC-GOLDEN-PIN-001) — the frozen
+        # byte-equality answer-key for the execution driver's slippage +
+        # fill/no-fill + cash/freeze boundary geometry (audit Gap #5).
         run: |
           if [ -d tests/golden ]; then
             pytest tests/golden -x

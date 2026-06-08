@@ -70,6 +70,15 @@ class FakeWorkerEvent:
     timeout_seconds: float
 
 
+@dataclass(frozen=True)
+class FakeSymbolFailureEvent:
+    """Typed :class:`SymbolFailureLike` stand-in (matches the retry-storm event)."""
+
+    symbol: str
+    failed_windows: int
+    total_windows: int
+
+
 class FakeController:
     """Duck-typed :class:`RateControllerLike` — records the throttle call + snapshot."""
 
@@ -228,6 +237,21 @@ class TestAlerts:
         assert "10/12" in ev.message
         assert "abcdef012345" in ev.message  # sweep_id[:12]
 
+    def test_symbol_window_failure(self) -> None:
+        fake = FakeNotifier()
+        SweepAlerter(notifier=fake).symbol_window_failure(
+            symbol="BANK-NIFTY",
+            failed_windows=15,
+            total_windows=15,
+        )
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.SYMBOL_WINDOW_FAILURE
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "BANK-NIFTY"  # dedupe key is the RAW (unescaped) symbol
+        # The body is MarkdownV2-escaped (hyphen → `\-`), so assert the escaped forms.
+        assert escape_markdown_v2("100% window-failure") in ev.message
+        assert escape_markdown_v2("BANK-NIFTY") in ev.message
+
     def test_alert_disabled_returns_false(self) -> None:
         # Every alert routes through `_publish`, so a None notifier no-ops them all.
         alerter = SweepAlerter(resolver=lambda: None)
@@ -237,6 +261,7 @@ class TestAlerts:
         )
         assert alerter.rate_breach(current_rps=3.0, recent_hits=1) is False
         assert alerter.auth_renew_failed(reason="x") is False
+        assert alerter.symbol_window_failure(symbol="s", failed_windows=1, total_windows=1) is False
         summary = FakeSummary(
             sweep_id="s", tuples_run=1, tuples_total=1, evaluated=1, ranked=1, persisted=1
         )
@@ -260,6 +285,16 @@ class TestCallbackAdapters:
         cb(event)
         assert len(fake.published) == 1
         assert fake.published[0].kind == TelegramEventKind.WORKER_HUNG
+
+    def test_symbol_failure_callback(self) -> None:
+        fake = FakeNotifier()
+        cb = SweepAlerter(notifier=fake).symbol_failure_callback()
+        event = FakeSymbolFailureEvent(symbol="SENSEX", failed_windows=15, total_windows=15)
+        cb(event)
+        assert len(fake.published) == 1
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.SYMBOL_WINDOW_FAILURE
+        assert ev.dedupe_key == "SENSEX"
 
     def test_rate_breach_callback_throttles_then_alerts(self) -> None:
         fake = FakeNotifier()

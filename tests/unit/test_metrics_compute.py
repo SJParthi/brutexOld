@@ -17,6 +17,7 @@ below is intentional.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from datetime import UTC, datetime, timedelta
 
@@ -28,7 +29,17 @@ from brutex.metrics import (
     ResultMetrics,
     compute_metrics,
 )
-from brutex.metrics.compute import _accumulate_moments, _percentile
+from brutex.metrics.compute import (
+    _accumulate_moments,
+    _consecutive_runs,
+    _drawdown_stats,
+    _excess_kurtosis,
+    _percentile,
+    _skewness,
+    with_stage4_statistics,
+)
+from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS, deflated_sharpe_ratio
+from brutex.metrics.pbo import pbo_probability
 from brutex.strategies.types import Side
 
 _T0 = datetime(2025, 1, 1, 9, 15, tzinfo=UTC)
@@ -583,3 +594,373 @@ def test_moments_is_frozen_value() -> None:
     mom = Moments(n=1, mean=1.0, m2=0.0, m3=0.0, m4=0.0)
     with pytest.raises((AttributeError, TypeError)):
         mom.n = 2  # type: ignore[misc]
+
+
+# ════════════════════════════════════════════════════════════════════
+# Mutation-hardening (DEC-MUTATION-GATE-RANKING-001)
+#
+# These pin the EXACT arithmetic of the metrics that drive strategy
+# selection so the weekly mutation gate (mutation.yml) finds zero
+# surviving mutants. The pre-existing tests above assert structure and
+# approximate values; the assertions below pin operator choices
+# (``//`` vs ``/``, ``*`` vs ``/``, ``+`` vs ``-``), comparison
+# boundaries (``<`` vs ``<=``), exact constants (powers, thresholds),
+# the all-zero empty row, dataclass immutability/slots, and the exact
+# error text — each of which a silent regression would otherwise slip
+# past. A wrong Sharpe / skewness / drawdown / integer-division here
+# corrupts the leaderboard ranking, so the gate is a correctness gate.
+# ════════════════════════════════════════════════════════════════════
+
+
+# ── _percentile: exact linear interpolation ─────────────────────────
+
+
+def test_percentile_two_element_midpoint() -> None:
+    """Two-element p50 interpolates to the midpoint (kills the ``len == 1``
+    short-circuit mutant, which would return the first element instead)."""
+    assert _percentile([2.0, 8.0], 50.0) == 5.0
+
+
+def test_percentile_interpolates_between_neighbours() -> None:
+    """A non-integer rank interpolates exactly between the bracketing values.
+
+    rank = 0.5·3 = 1.5 → lower=1, upper=2, frac=0.5 →
+    10·(1−0.5) + 20·0.5 = 15.0. Pins every operator in the interpolation
+    expression and the ``lower == upper`` branch direction.
+    """
+    assert _percentile([0.0, 10.0, 20.0, 30.0], 50.0) == 15.0
+
+
+def test_percentile_integer_rank_hits_exact_element() -> None:
+    """An integer rank returns the exact element (the ``lower == upper`` path)."""
+    assert _percentile([0.0, 10.0, 20.0, 30.0, 40.0], 50.0) == 20.0
+
+
+# ── _drawdown_stats: comparison boundaries ──────────────────────────
+
+
+def test_drawdown_duration_counts_drop_of_exactly_one() -> None:
+    """A peak-to-value drop of exactly 1 paisa still counts as a drawdown bar.
+
+    Kills the ``drop > 0`` → ``drop > 1`` mutant: at a 1-paisa drop the
+    original increments the duration counter, the mutant resets it.
+    """
+    _dd_paisa, _dd_pct, dd_bars, _ulcer = _drawdown_stats(
+        EquityCurve(equity_paisa=(1000, 1000, 999), start_equity_paisa=1000, span_years=1.0)
+    )
+    assert dd_bars == 1
+
+
+def test_drawdown_pct_zero_peak_is_skipped_not_divided() -> None:
+    """A non-positive running peak yields 0% drawdown, never a 0/0 division.
+
+    Kills the ``peak > 0`` → ``peak >= 0`` mutant: at peak == 0 the original
+    skips the percentage (cannot express as a fraction of zero); the mutant
+    would evaluate ``drop / 0`` and raise.
+    """
+    _dd_paisa, dd_pct, _dd_bars, ulcer = _drawdown_stats(
+        EquityCurve(equity_paisa=(0, -100), start_equity_paisa=1000, span_years=1.0)
+    )
+    assert dd_pct == 0.0
+    assert ulcer == 0.0
+
+
+def test_drawdown_pct_peak_of_one_is_included() -> None:
+    """A running peak of exactly 1 IS a positive peak and yields a real %.
+
+    Kills the ``peak > 0`` → ``peak > 1`` mutant: equity [1, 0] drops the full
+    peak, so max_drawdown_pct must be 100%, not 0.
+    """
+    _dd_paisa, dd_pct, _dd_bars, _ulcer = _drawdown_stats(
+        EquityCurve(equity_paisa=(1, 0), start_equity_paisa=1000, span_years=1.0)
+    )
+    assert dd_pct == 100.0
+
+
+# ── _consecutive_runs: streak counters + resets ─────────────────────
+
+
+def test_consecutive_runs_all_wins() -> None:
+    """All wins ⇒ (0 losses, 3 wins). Pins the ``max_losses`` / ``cur_*``
+    initialisers to 0 (a 1-init would report a phantom loss streak)."""
+    assert _consecutive_runs([_trade(1), _trade(1), _trade(1)]) == (0, 3)
+
+
+def test_consecutive_runs_all_losses() -> None:
+    """All losses ⇒ (3 losses, 0 wins). Pins the ``max_wins`` initialiser."""
+    assert _consecutive_runs([_trade(-1), _trade(-1), _trade(-1)]) == (3, 0)
+
+
+def test_consecutive_runs_single_loss() -> None:
+    """A single loss ⇒ (1, 0). Pins the ``cur_losses`` initialiser to 0
+    (a 1-init would double-count the first loss to a streak of 2)."""
+    assert _consecutive_runs([_trade(-1)]) == (1, 0)
+
+
+def test_consecutive_runs_win_resets_loss_streak_and_vice_versa() -> None:
+    """A win between losses resets the loss streak (and vice versa).
+
+    [loss, loss, win, loss] ⇒ max 2 consecutive losses, 1 win. Kills the
+    streak-reset mutants (``cur_wins = 0`` / ``cur_losses = 0`` inside the
+    win/loss branches): without the reset the streak would not break.
+    """
+    assert _consecutive_runs([_trade(-1), _trade(-1), _trade(1), _trade(-1)]) == (2, 1)
+
+
+def test_consecutive_runs_scratch_breaks_both_streaks() -> None:
+    """A scratch (pnl == 0) trade resets BOTH streaks.
+
+    [loss, scratch, loss] ⇒ max 1 consecutive loss (the scratch breaks the
+    run). Kills the else-branch reset mutants (``cur_wins = 0`` /
+    ``cur_losses = 0`` for the scratch case).
+    """
+    assert _consecutive_runs([_trade(-1), _trade(0), _trade(-1)]) == (1, 0)
+
+
+# ── _skewness / _excess_kurtosis / Moments: exact moment math ───────
+
+# Series [0, 0, 0, 4]: mean=1, m2=12, m3=24, m4=84 →
+#   skewness        = (24/4) / (12/4)**1.5 = 6 / 3**1.5      = 1.1547005383792515
+#   excess kurtosis = (84/4) / (12/4)**2 − 3 = 21/9 − 3      = -0.6666666666666667
+_SKEW_SERIES = [0.0, 0.0, 0.0, 4.0]
+_SKEW_GOLDEN = 6.0 / 3.0**1.5
+_KURT_GOLDEN = 21.0 / 9.0 - 3.0
+
+
+def test_skewness_exact_golden() -> None:
+    """Population skewness pins ``m3/n / (m2/n)**1.5`` exactly (kills the
+    ``/``→``*`` and ``1.5``→``2.5`` mutants in the moment arithmetic)."""
+    skew = _skewness(_accumulate_moments(_SKEW_SERIES))
+    assert skew == pytest.approx(_SKEW_GOLDEN, rel=1e-12)
+
+
+def test_excess_kurtosis_exact_golden() -> None:
+    """Population excess kurtosis pins ``m4/n / (m2/n)**2 − 3`` exactly."""
+    kurt = _excess_kurtosis(_accumulate_moments(_SKEW_SERIES))
+    assert kurt == pytest.approx(_KURT_GOLDEN, rel=1e-12)
+
+
+def test_moments_variance_defined_at_n_equals_two() -> None:
+    """``n == 2`` is the lower bound for a defined variance / skewness.
+
+    Kills the ``_MIN_SAMPLES_VARIANCE`` (2→3) and the ``n < MIN`` → ``<=``
+    boundary mutants in ``Moments.variance`` / ``_skewness`` / ``_excess_kurtosis``.
+    """
+    mom = _accumulate_moments([1.0, 3.0])  # n=2, mean=2, m2=2
+    assert mom.n == 2
+    assert mom.variance == 1.0
+    assert mom.std_dev == 1.0
+    # n=2 with non-zero variance ⇒ skewness / kurtosis are defined (not None).
+    assert _skewness(mom) is not None
+    assert _excess_kurtosis(mom) is not None
+
+
+def test_moments_uses_slots() -> None:
+    """``Moments`` is ``slots=True`` — kills the ``slots`` flip."""
+    mom = Moments(n=1, mean=0.0, m2=0.0, m3=0.0, m4=0.0)
+    assert not hasattr(mom, "__dict__")
+    assert hasattr(Moments, "__slots__")
+
+
+# ── compute_metrics: exact integer division + counts ────────────────
+
+
+def _golden_trades() -> list[ClosedTrade]:
+    """Two wins then two losses with deliberately non-divisible aggregates.
+
+    Chosen so floor- vs true-division differ in the *value* (not just the
+    type): gross_profit=401 / winners=2, gross_loss=299 / losers=2,
+    net=102 / 4, sum_mfe=826 / 4, sum_mae=603 / 4 are all non-integer
+    under ``/`` but exact under ``//``.
+    """
+    return [
+        _trade(301, mfe=505, mae=101, holding=10, offset_min=0),
+        _trade(100, mfe=200, mae=50, holding=4, offset_min=20),
+        _trade(-200, mfe=80, mae=301, holding=6, offset_min=40),
+        _trade(-99, mfe=41, mae=151, holding=2, offset_min=60),
+    ]
+
+
+def test_compute_metrics_integer_division_is_floor() -> None:
+    """Per-trade money averages use floor division (int paisa), pinned by value.
+
+    Kills the ``//`` → ``/`` mutants on avg_win, avg_loss, expectancy,
+    avg_mfe and avg_mae: under true division these would be …5 / …75 floats,
+    not the floored integers asserted here.
+    """
+    m = compute_metrics(
+        _golden_trades(),
+        _curve([1_000_000, 1_000_301, 1_000_401, 1_000_201, 1_000_102]),
+        total_bars=200,
+    )
+    assert m.avg_winning_trade_paisa == 200  # 401 // 2
+    assert m.avg_losing_trade_paisa == 149  # 299 // 2
+    assert m.expectancy_paisa == 25  # 102 // 4
+    assert m.avg_mfe_paisa == 206  # 826 // 4
+    assert m.avg_mae_paisa == 150  # 603 // 4
+    # Counts / money the same scenario pins (kills counting/sum mutants).
+    assert m.net_pnl_paisa == 102
+    assert m.gross_profit_paisa == 401
+    assert m.gross_loss_paisa == 299
+    assert m.winning_trades == 2
+    assert m.losing_trades == 2
+    assert m.total_trades == 4
+    assert m.max_consecutive_wins == 2
+    assert m.max_consecutive_losses == 2
+    assert m.largest_losing_trade_paisa == -200
+    assert m.max_holding_time_bars == 10
+    assert m.win_rate == 0.5
+
+
+def test_compute_metrics_total_bars_one_is_accepted() -> None:
+    """``total_bars == 1`` is the valid lower bound and must NOT raise.
+
+    Kills the ``total_bars < 1`` → ``<= 1`` / ``< 2`` mutants.
+    """
+    m = compute_metrics([_trade(10)], _curve([1_000_000, 1_000_010]), total_bars=1)
+    assert m.time_in_market_pct == 100.0  # clamped
+
+
+def test_compute_metrics_total_bars_zero_message_is_exact() -> None:
+    """The ``total_bars`` guard message is pinned byte-exact."""
+    with pytest.raises(ValueError) as exc:
+        compute_metrics([_trade(10)], _curve([1_000_000]), total_bars=0)
+    assert str(exc.value) == "total_bars must be >= 1, got 0"
+
+
+def test_empty_metrics_row_is_all_zero() -> None:
+    """A zero-trade result is exactly zero in every count/money/ratio-able
+    field (kills the ``_empty_metrics`` ``0`` → ``1`` literal mutants)."""
+    m = compute_metrics([], _curve([1_000_000, 1_000_000]), total_bars=10)
+    assert m.total_return_pct == 0.0
+    assert m.cagr_pct == 0.0
+    assert m.gross_profit_paisa == 0
+    assert m.gross_loss_paisa == 0
+    assert m.largest_losing_trade_paisa == 0
+    assert m.max_consecutive_losses == 0
+    assert m.max_consecutive_wins == 0
+    assert m.winning_trades == 0
+    assert m.losing_trades == 0
+    assert m.avg_winning_trade_paisa == 0
+    assert m.avg_losing_trade_paisa == 0
+    assert m.expectancy_paisa == 0
+    assert m.avg_mfe_paisa == 0
+    assert m.avg_mae_paisa == 0
+    assert m.avg_holding_time_bars == 0.0
+    assert m.max_holding_time_bars == 0
+    assert m.net_pnl_paisa == 0
+    assert m.total_trades == 0
+
+
+# ── with_stage4_statistics: DSR + PBO gating and exact values ────────
+
+
+def _stage4_metrics(**over: object) -> ResultMetrics:
+    """A metrics row whose Stage-4 DSR inputs (Sharpe/skew/kurt/trades) are
+    all defined, so :func:`with_stage4_statistics` computes a real DSR."""
+    m = compute_metrics(_golden_trades(), _curve([1_000_000] * 5), total_bars=200)
+    defaults: dict[str, object] = {
+        "sharpe_ratio": 1.2,
+        "skewness": -0.3,
+        "kurtosis": 2.0,
+        "total_trades": 120,
+    }
+    defaults.update(over)
+    return dataclasses.replace(m, **defaults)
+
+
+def test_stage4_dsr_exact_value_and_kurtosis_offset() -> None:
+    """The filled DSR matches an independent ``deflated_sharpe_ratio`` call.
+
+    Pins (a) that the gate computes the DSR at all, and (b) the
+    ``kurtosis + GAUSSIAN_KURTOSIS`` excess→raw conversion (kills the
+    ``+`` → ``-`` mutant and the ``dsr = None`` body-replacement mutant).
+    """
+    metrics = _stage4_metrics()
+    result = with_stage4_statistics(metrics, n_trials=500, trial_sharpe_variance=0.4)
+    expected = deflated_sharpe_ratio(
+        1.2,
+        n_trials=500,
+        trial_sharpe_variance=0.4,
+        sample_length=120,
+        skew=-0.3,
+        kurtosis=2.0 + GAUSSIAN_KURTOSIS,
+    ).deflated_sharpe_ratio
+    assert result.deflated_sharpe_ratio == expected
+    assert result.deflated_sharpe_ratio is not None
+
+
+def test_stage4_dsr_none_when_sharpe_missing() -> None:
+    """DSR stays NULL (None, not ``""``) when the Sharpe is undefined.
+
+    Kills the ``dsr: float | None = ""`` default-literal mutant and the
+    ``sharpe_ratio is not None`` → ``is None`` gate-flip mutant.
+    """
+    metrics = _stage4_metrics(sharpe_ratio=None)
+    result = with_stage4_statistics(metrics, n_trials=500, trial_sharpe_variance=0.4)
+    assert result.deflated_sharpe_ratio is None
+
+
+def test_stage4_dsr_none_when_skewness_missing() -> None:
+    """DSR stays None when skewness is undefined (kills the skewness gate-flip
+    AND the ``and`` → ``or`` mutant, which would attempt a DSR with skew=None)."""
+    metrics = _stage4_metrics(skewness=None)
+    result = with_stage4_statistics(metrics, n_trials=500, trial_sharpe_variance=0.4)
+    assert result.deflated_sharpe_ratio is None
+
+
+def test_stage4_dsr_none_when_kurtosis_missing() -> None:
+    """DSR stays None when kurtosis is undefined (kills the kurtosis gate-flip)."""
+    metrics = _stage4_metrics(kurtosis=None)
+    result = with_stage4_statistics(metrics, n_trials=500, trial_sharpe_variance=0.4)
+    assert result.deflated_sharpe_ratio is None
+
+
+def test_stage4_dsr_computed_at_exactly_two_trades() -> None:
+    """``total_trades == _MIN_SAMPLES_VARIANCE`` (2) is enough for the DSR.
+
+    Kills the ``total_trades >= 2`` → ``> 2`` boundary mutant: at exactly two
+    trades the DSR is still defined and must be filled.
+    """
+    metrics = _stage4_metrics(total_trades=2)
+    result = with_stage4_statistics(metrics, n_trials=10, trial_sharpe_variance=0.2)
+    assert result.deflated_sharpe_ratio is not None
+
+
+def test_stage4_pbo_none_without_performance_matrix() -> None:
+    """PBO stays None (not ``""``) when no CSCV matrix is supplied.
+
+    Kills the ``pbo: float | None = ""`` default-literal mutant.
+    """
+    result = with_stage4_statistics(_stage4_metrics(), n_trials=50, trial_sharpe_variance=0.3)
+    assert result.pbo_probability is None
+
+
+def test_stage4_pbo_uses_default_sixteen_splits() -> None:
+    """A supplied CSCV matrix fills PBO using the default S=16 splits.
+
+    Kills the ``pbo_performance is not None`` → ``is None`` gate-flip, the
+    ``pbo = None`` body-replacement, and the ``pbo_n_splits = 16`` → ``17``
+    default mutant (the value must equal the explicit-16 reference).
+    """
+    # A 16×4 CSCV-style performance matrix (T rows × N strategies); the row
+    # count must be a multiple of the default S=16 splits.
+    base = [
+        [0.5, 0.1, -0.2, 0.3],
+        [0.4, 0.2, -0.1, 0.2],
+        [0.6, 0.0, -0.3, 0.4],
+        [0.3, 0.3, -0.2, 0.1],
+        [0.5, 0.1, -0.1, 0.3],
+        [0.4, 0.2, -0.2, 0.2],
+        [0.6, 0.0, -0.3, 0.5],
+        [0.2, 0.4, -0.1, 0.1],
+    ]
+    matrix = base + [[a + 0.01, b, c, d] for a, b, c, d in base]
+    result = with_stage4_statistics(
+        _stage4_metrics(),
+        n_trials=50,
+        trial_sharpe_variance=0.3,
+        pbo_performance=matrix,
+    )
+    assert result.pbo_probability is not None
+    assert result.pbo_probability == pbo_probability(matrix, n_splits=16).pbo

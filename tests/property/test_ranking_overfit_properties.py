@@ -31,7 +31,7 @@ from brutex.ranking.overfit import (
     passes_overfit_gate,
     pool_sharpe_dispersion,
 )
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 # Inputs that keep the PSR estimator-variance radicand strictly positive
@@ -109,8 +109,19 @@ def test_dispersion_sanity(sharpes: list[float | None]) -> None:
     assert disp.deflatable == (disp.n_finite >= 2 and disp.variance > 0.0)
 
 
+# Monotonicity holds on the NON-NEGATIVE observed-Sharpe domain only. With the
+# Gaussian moments this test fixes (skew=0, excess-kurtosis=0 ⇒ radicand
+# 1 + SR²/2), the PSR z-score derivative wrt observed Sharpe is
+# (1 + SR_0·SR/2) / radicand^1.5, which is strictly positive for SR >= 0 and the
+# non-negative benchmark SR_0, but can go NEGATIVE at large-negative Sharpe (the
+# estimator-variance radicand then grows faster than the numerator) — so the DSR
+# is genuinely NON-monotone in observed Sharpe in the loss-making tail. Restrict
+# to SR >= 0 (the regime that matters for ranking winning strategies); see
+# DEC-MUTATION-GATE-RANKING-001 (MIGRATION.md #586). ``derandomize`` pins the
+# run for CI determinism (STANDARDS_100PCT.md §1 row 9 closing path).
+@settings(derandomize=True)
 @given(
-    sr_lo=_sharpe,
+    sr_lo=st.floats(min_value=0.0, max_value=6.0, allow_nan=False, allow_infinity=False),
     delta=st.floats(min_value=0.0, max_value=5.0),
     n=st.integers(min_value=2, max_value=10_000),
     v=st.floats(min_value=0.01, max_value=4.0),

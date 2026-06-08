@@ -11,6 +11,7 @@ Formula sources cited in the module docstring (Bailey & LdP 2012/2014).
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from itertools import pairwise
 from statistics import NormalDist
@@ -185,3 +186,110 @@ def test_dsr_propagates_short_track_error() -> None:
             skew=0.0,
             kurtosis=GAUSSIAN_KURTOSIS,
         )
+
+
+# ── Mutation-hardening: boundaries, immutability, exact messages ─────
+#
+# These pin the contract precisely enough to kill the mutmut survivors the
+# approximate / substring-match assertions above leave alive (boundary
+# `<`→`<=` flips, frozen/slots dataclass flags, and `match=` regexes that
+# still pass against mutmut's ``"XX…XX"``-wrapped string mutants). Recorded
+# under DEC-MUTATION-GATE-RANKING-001 — a silent regression in DSR corrupts
+# the Stage-3 overfit gate and therefore strategy selection.
+
+
+def test_psr_accepts_minimum_sample_length_of_two() -> None:
+    """``sample_length == 2`` is the lower bound and must NOT raise.
+
+    Kills the ``sample_length < 2`` → ``<= 2`` boundary mutant: at exactly two
+    observations ``sqrt(n - 1) = 1`` is real and the PSR is defined.
+    """
+    psr = probabilistic_sharpe_ratio(1.0, 0.0, 2, 0.0, GAUSSIAN_KURTOSIS)
+    # radicand = 1.5, z = (1−0)·√1/√1.5 = √(1/1.5); compared to the closed form.
+    expected = NormalDist().cdf(math.sqrt(1.0 / 1.5))
+    assert psr == pytest.approx(expected, rel=1e-15)
+
+
+def test_psr_accepts_radicand_in_zero_to_one_open_interval() -> None:
+    """A radicand in ``(0, 1]`` must NOT raise — only ``radicand <= 0`` is invalid.
+
+    Kills the ``radicand <= 0.0`` → ``radicand <= 1.0`` mutant: with obs=1,
+    skew=0.6, kurt=3 the radicand is ``1 − 0.6 + 0.5 = 0.9`` (strictly positive
+    but ``< 1``), for which the PSR is perfectly well-defined.
+    """
+    radicand = 1.0 - 0.6 * 1.0 + (GAUSSIAN_KURTOSIS - 1.0) / 4.0 * 1.0 * 1.0
+    assert radicand == pytest.approx(0.9)
+    psr = probabilistic_sharpe_ratio(1.0, 0.0, 10, 0.6, GAUSSIAN_KURTOSIS)
+    expected = NormalDist().cdf(1.0 * math.sqrt(10 - 1) / math.sqrt(radicand))
+    assert psr == pytest.approx(expected, rel=1e-15)
+    assert 0.0 <= psr <= 1.0
+
+
+def test_psr_short_track_message_is_exact() -> None:
+    """The short-track ``ValueError`` text is pinned byte-exact.
+
+    A plain ``match=`` substring still matches mutmut's ``"XX…XX"``-wrapped
+    string mutant; an equality assertion on ``str(exc)`` does not, so this
+    kills the message-literal mutant.
+    """
+    with pytest.raises(ValueError) as exc:
+        probabilistic_sharpe_ratio(1.0, 0.0, 1, 0.0, GAUSSIAN_KURTOSIS)
+    assert str(exc.value) == "sample_length must be >= 2, got 1"
+
+
+def test_psr_radicand_message_is_exact() -> None:
+    """The non-positive-radicand ``ValueError`` text is pinned byte-exact."""
+    # obs=2, skew=1.5, kurt=3 → radicand = 1 − 3 + 2 = 0.0 (the boundary).
+    with pytest.raises(ValueError) as exc:
+        probabilistic_sharpe_ratio(2.0, 0.0, 10, 1.5, GAUSSIAN_KURTOSIS)
+    assert str(exc.value) == (
+        "Sharpe-estimator variance radicand "
+        "(1 - skew*SR + (kurtosis-1)/4*SR^2) must be > 0; "
+        "got 0.0 for observed_sharpe=2.0, skew=1.5, kurtosis=3.0"
+    )
+
+
+def test_expected_max_zero_trials_message_is_exact() -> None:
+    """The ``n_trials < 1`` ``ValueError`` text is pinned byte-exact."""
+    with pytest.raises(ValueError) as exc:
+        expected_max_sharpe_ratio(0, 1.0)
+    assert str(exc.value) == "n_trials must be >= 1, got 0"
+
+
+def test_expected_max_negative_variance_message_is_exact() -> None:
+    """The negative-variance ``ValueError`` text is pinned byte-exact."""
+    with pytest.raises(ValueError) as exc:
+        expected_max_sharpe_ratio(10, -0.1)
+    assert str(exc.value) == "trial_sharpe_variance must be >= 0, got -0.1"
+
+
+def test_deflated_sharpe_result_is_frozen() -> None:
+    """``DeflatedSharpeResult`` is immutable — kills the ``frozen=True`` flip."""
+    result = deflated_sharpe_ratio(
+        1.0,
+        n_trials=10,
+        trial_sharpe_variance=0.2,
+        sample_length=50,
+        skew=0.0,
+        kurtosis=GAUSSIAN_KURTOSIS,
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.observed_sharpe = 2.0  # type: ignore[misc]
+
+
+def test_deflated_sharpe_result_uses_slots() -> None:
+    """``DeflatedSharpeResult`` is ``slots=True`` — kills the ``slots`` flip.
+
+    A ``slots=True`` dataclass instance has no per-instance ``__dict__`` and
+    rejects attribute creation outside the declared slots.
+    """
+    result = deflated_sharpe_ratio(
+        1.0,
+        n_trials=10,
+        trial_sharpe_variance=0.2,
+        sample_length=50,
+        skew=0.0,
+        kurtosis=GAUSSIAN_KURTOSIS,
+    )
+    assert not hasattr(result, "__dict__")
+    assert hasattr(DeflatedSharpeResult, "__slots__")
