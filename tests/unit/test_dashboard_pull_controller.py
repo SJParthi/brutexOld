@@ -851,3 +851,71 @@ class TestResolvePullSymbols:
         store = {"NIFTY": _index("NIFTY")}
         (only,) = resolve_pull_symbols("NIFTY", store.get)
         assert only.symbol_name == "NIFTY"
+
+
+class _FakeKeepalive:
+    """A minimal keepalive double — records forget_expiry() calls."""
+
+    def __init__(self) -> None:
+        self.forgot = 0
+
+    def forget_expiry(self) -> None:
+        self.forgot += 1
+
+
+class TestRefreshLiveToken:
+    """refresh_live_token + set_live_keepalive (DEC-DHAN-TOKEN-SINGLE-SOURCE-001).
+
+    A mid-session credential save must propagate to the in-memory holder the live
+    clients read (no restart) and tell the keepalive to re-learn the new expiry.
+    These mutate the process-wide live-session singletons, so each resets them in a
+    ``finally`` to stay isolated.
+    """
+
+    def test_no_holder_installed_is_noop_false(self) -> None:
+        from brutex.dashboard.pull_controller import (
+            refresh_live_token,
+            set_live_keepalive,
+            set_live_token_holder,
+        )
+
+        set_live_token_holder(None)
+        set_live_keepalive(None)
+        assert refresh_live_token("new-jwt") is False  # no live session → no-op
+
+    def test_updates_holder_and_pokes_keepalive(self) -> None:
+        from brutex.adapters.dhan.token_holder import TokenHolder
+        from brutex.dashboard.pull_controller import (
+            refresh_live_token,
+            set_live_keepalive,
+            set_live_token_holder,
+        )
+
+        holder = TokenHolder("startup-jwt")
+        keepalive = _FakeKeepalive()
+        set_live_token_holder(holder)
+        set_live_keepalive(keepalive)
+        try:
+            assert refresh_live_token("new-jwt") is True
+            assert holder.get() == "new-jwt"  # the live token the pull reads is updated
+            assert keepalive.forgot == 1  # keepalive told to re-learn the new expiry
+        finally:
+            set_live_token_holder(None)
+            set_live_keepalive(None)
+
+    def test_holder_without_keepalive_still_updates(self) -> None:
+        from brutex.adapters.dhan.token_holder import TokenHolder
+        from brutex.dashboard.pull_controller import (
+            refresh_live_token,
+            set_live_keepalive,
+            set_live_token_holder,
+        )
+
+        holder = TokenHolder("startup-jwt")
+        set_live_token_holder(holder)
+        set_live_keepalive(None)  # no keepalive → the `keepalive is not None` False arm
+        try:
+            assert refresh_live_token("new-jwt") is True
+            assert holder.get() == "new-jwt"
+        finally:
+            set_live_token_holder(None)

@@ -332,6 +332,19 @@ class TokenKeepalive:
             return self._renew_once()
         return min(remaining - RENEW_BEFORE_EXPIRY_S, MAX_SLEEP_S)
 
+    def forget_expiry(self) -> None:
+        """Drop the learned expiry so the next tick RE-LEARNS it from the live token.
+
+        Called when the operator saves a NEW token mid-session (the holder is
+        updated out-of-band — DEC-DHAN-TOKEN-SINGLE-SOURCE-001): the previously
+        learned ``_expiry_deadline`` belongs to the OLD token, so reset it to
+        ``None`` and the next :meth:`_tick` re-learns the new token's JWT ``exp``
+        OFFLINE (or renews if it is already inside the 12h window) instead of keeping
+        a stale renewal schedule. A plain reference store — atomic in CPython; a
+        benign race with an in-flight tick at worst re-learns one tick later.
+        """
+        self._expiry_deadline = None
+
     def _run(self) -> None:
         """Daemon loop: sleep for one tick's verdict until stopped.
 

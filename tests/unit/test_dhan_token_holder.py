@@ -27,6 +27,18 @@ class TestTokenHolder:
         holder.set("v2")
         assert holder.get() == "v2"
 
+    def test_on_set_write_through_persists_each_set(self) -> None:
+        # DEC-DHAN-TOKEN-SINGLE-SOURCE-001: with an on_set hook the holder is a
+        # write-through cache — every set (renewal OR mid-session save) persists,
+        # but construction does NOT (only an explicit set propagates).
+        persisted: list[str] = []
+        holder = TokenHolder("seed", on_set=persisted.append)
+        assert persisted == []  # construction does not write through
+        holder.set("renewed-1")
+        holder.set("renewed-2")
+        assert holder.get() == "renewed-2"
+        assert persisted == ["renewed-1", "renewed-2"]  # both sets wrote through, in order
+
     def test_concurrent_get_set_never_tears(self) -> None:
         # The lock guarantees a reader always sees a whole token string. Hammer
         # get/set from many threads and assert every read is one of the written

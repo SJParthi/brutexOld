@@ -260,6 +260,20 @@ class TestTick:
         assert any(e["event"] == "auth.renewed" for e in logs)
 
 
+def test_forget_expiry_clears_learned_deadline() -> None:
+    # DEC-DHAN-TOKEN-SINGLE-SOURCE-001: a mid-session token save resets the learned
+    # deadline so the next tick re-learns the NEW token's exp (no stale schedule).
+    keepalive = TokenKeepalive(
+        _client(_FakeTransport([(200, _renew_body("x", "x"))])),
+        TokenHolder("seed-jwt"),
+        now=_FixedClock(1000.0),
+        sleep=lambda _s: None,
+    )
+    keepalive._expiry_deadline = 1000.0 + 20 * 3600.0  # an old-token deadline
+    keepalive.forget_expiry()
+    assert keepalive._expiry_deadline is None
+
+
 class TestRunLoop:
     def test_run_loops_ticks_then_stops_via_fake_sleep(self) -> None:
         # Drive _run with a fake clock + a stop event triggered after N ticks by the
