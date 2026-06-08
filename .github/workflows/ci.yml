@@ -730,7 +730,7 @@ jobs:
           else
             echo "(brutex.orchestrator.replay test file not present yet — gate inactive)"
           fi
-          # DEC-ORCH-LAZY-BLOOM-001 (2026-06-08, MIGRATION entry #585): the
+          # DEC-ORCH-LAZY-BLOOM-001 (2026-06-08, MIGRATION entry #587): the
           # lazy fastbloom_rs import also unblocks three more orchestrator
           # modules that reach 100% line+branch standalone with their
           # dedicated test files. (state / store / pipeline / rate_limiter /
@@ -885,7 +885,7 @@ jobs:
           else
             echo "(brutex.strategies.library.buy_and_hold test file not present yet — gate inactive)"
           fi
-          # NOTE 2026-06-08 (DEC-ORCH-LAZY-BLOOM-001, MIGRATION entry #585):
+          # NOTE 2026-06-08 (DEC-ORCH-LAZY-BLOOM-001, MIGRATION entry #587):
           # brutex.orchestrator.retry is NO LONGER excluded — the lazy
           # fastbloom_rs import (bloom.py::_load_rust_bloom) removed the
           # ABI3 single-init blocker, and retry's strict 100% gate is now

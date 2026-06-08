@@ -479,7 +479,7 @@ def _build_live_spot_adapter(  # pragma: no cover — live Dhan token + transpor
     """
     from brutex.adapters.dhan.adapter import DhanMarketAdapter
     from brutex.adapters.dhan.auth import resolve_dhan_credentials
-    from brutex.adapters.dhan.client import DhanClient, urllib_transport
+    from brutex.adapters.dhan.client import DhanClient, default_dhan_transport
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
 
@@ -494,7 +494,7 @@ def _build_live_spot_adapter(  # pragma: no cover — live Dhan token + transpor
     client = DhanClient(
         access_token=creds.access_token,
         client_id=creds.client_id,
-        transport=urllib_transport,
+        transport=default_dhan_transport(),
         token_provider=holder.get if holder is not None else None,
     )
     adapter = DhanMarketAdapter(client=client, instruments=tuple(instruments))
@@ -826,7 +826,7 @@ def start_token_keepalive(  # pragma: no cover — live creds + RenewToken netwo
         ``None`` when no live creds are present.
     """
     from brutex.adapters.dhan.auth import dhan_creds_present, resolve_dhan_credentials
-    from brutex.adapters.dhan.client import DhanClient, urllib_transport
+    from brutex.adapters.dhan.client import DhanClient, default_dhan_transport
     from brutex.adapters.dhan.token_holder import TokenHolder
     from brutex.adapters.dhan.token_keepalive import TokenKeepalive
 
@@ -841,7 +841,7 @@ def start_token_keepalive(  # pragma: no cover — live creds + RenewToken netwo
     client = DhanClient(
         access_token=creds.access_token,
         client_id=creds.client_id,
-        transport=urllib_transport,
+        transport=default_dhan_transport(),
         token_provider=holder.get,
     )
     keepalive = TokenKeepalive(client, holder, pace=pace, log=_LOG)
