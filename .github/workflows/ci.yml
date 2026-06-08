@@ -1690,6 +1690,10 @@ jobs:
         # rust-version 1.93.1 floor); every job importing brutex.vocabulary needs it.
         run: pip install ./rust/trading-core
       - name: pytest golden tests
+        # Discovers every tests/golden/*.py oracle by placement, including
+        # test_execution_driver_golden.py (DEC-EXEC-GOLDEN-PIN-001) — the frozen
+        # byte-equality answer-key for the execution driver's slippage +
+        # fill/no-fill + cash/freeze boundary geometry (audit Gap #5).
         run: |
           if [ -d tests/golden ]; then
             pytest tests/golden -x
