@@ -47,6 +47,7 @@ import structlog
 
 if TYPE_CHECKING:
     from brutex.adapters.dhan.auto_retry import RetryOutcome
+    from brutex.orchestrator.audit import AuditWriter
 
 from brutex.adapters.dhan.auth_guard import AuthGuard
 from brutex.adapters.dhan.errors import DhanError, is_auth_failure, is_no_data_error
@@ -185,6 +186,23 @@ class DhanIngestReport:
         return len(self.failures)
 
 
+def _maybe_audit(
+    audit: AuditWriter | None,
+    action: str,
+    subject: str,
+    payload: dict[str, object],
+) -> None:
+    """Append one hash-chained audit line when an ``audit`` writer is wired.
+
+    A no-op when ``audit is None`` (the default — tests + callers that don't
+    request an audit trail). Called ONLY from the single controller thread (the
+    fan-out drain loop), so the not-thread-safe :class:`AuditWriter` is never
+    touched concurrently (DEC-INGEST-AUDIT-CHAIN-001 / Golden Rule #8).
+    """
+    if audit is not None:
+        audit.append(action=action, subject=subject, payload=payload)
+
+
 def run_dhan_spot_ingest(
     adapter: MarketAdapter,
     sink: BarSink,
@@ -201,6 +219,7 @@ def run_dhan_spot_ingest(
     on_success: Callable[[], None] | None = None,
     on_progress: ProgressHook | None = None,
     run_parallel: RunParallel | None = None,
+    audit: AuditWriter | None = None,
 ) -> DhanIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -331,6 +350,23 @@ def run_dhan_spot_ingest(
     #: recorded silently to avoid the 400-line per-symbol WARNING flood that the
     #: live DH-901 storm produced (DEC-DHAN-AUTH-FAILFAST-RENEW-001).
     auth_alerted = False
+    # Golden Rule #8 audit trail (DEC-INGEST-AUDIT-CHAIN-001): one hash-chained
+    # JSONL line per material ingest action, written ONLY here on the controller
+    # thread (the AuditWriter is not thread-safe; the fan-out workers never touch
+    # it). RUN_START records the worklist shape so a replay can reconstruct the
+    # pull's scope.
+    _maybe_audit(
+        audit,
+        "INGEST_RUN_START",
+        f"pull:{pull_id}",
+        {
+            "instruments": len(instruments),
+            "intervals": list(intervals),
+            "jobs": len(jobs),
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        },
+    )
     # Drain the fan-out on the controller thread. on_progress + the quarantine
     # WARNING fire here (single-threaded), so neither the progress hook nor the
     # logger needs to be thread-safe. A captured non-DhanError surfaces.
@@ -342,6 +378,16 @@ def run_dhan_spot_ingest(
             if report is None:  # pragma: no cover — ok=True always carries a result
                 continue
             pairs[instrument.symbol_name, interval] = report
+            _maybe_audit(
+                audit,
+                "INGEST_PAIR_DONE",
+                f"{instrument.symbol_name}:{interval}",
+                {
+                    "bars_appended": report.bars_appended,
+                    "windows": report.windows,
+                    "still_failed_windows": report.still_failed_windows,
+                },
+            )
             if on_progress is not None:
                 on_progress(label, report.bars_appended, False)
             continue
@@ -358,6 +404,16 @@ def run_dhan_spot_ingest(
         # NOT marked complete, so it is re-tried on the next pull (never masked).
         failures.append(
             PairFailure(symbol=instrument.symbol_name, interval=interval, error=str(exc))
+        )
+        _maybe_audit(
+            audit,
+            "INGEST_PAIR_FAILED",
+            f"{instrument.symbol_name}:{interval}",
+            {
+                "error": str(exc),
+                "auth_failure": is_auth_failure(exc),
+                "known_gap": is_no_data_error(exc),
+            },
         )
         # KNOWN-GAP vs quarantine (DEC-DHAN-NO-DATA-KNOWN-GAP-001): a Dhan
         # ``DH-905`` "no data" 400 (e.g. NIFTY NEXT 50 daily, whose history starts
@@ -446,6 +502,17 @@ def run_dhan_spot_ingest(
             retried_windows=inst_retried,
             still_failed_windows=inst_still_failed,
         )
+    _maybe_audit(
+        audit,
+        "INGEST_RUN_COMPLETE",
+        f"pull:{pull_id}",
+        {
+            "pairs_ok": len(pairs),
+            "pairs_failed": len(failures),
+            "total_bars": sum(report.bars_appended for report in pairs.values()),
+            "auth_aborted": auth_guard.tripped(),
+        },
+    )
     return DhanIngestReport(
         pairs=pairs,
         failures=tuple(failures),
@@ -500,6 +567,7 @@ def run_dhan_spot_ingest_with_retry(
     auto_retry: bool = True,
     max_retry_rounds: int = _DEFAULT_MAX_RETRY_ROUNDS,
     retry_backoff: Callable[[int], None] | None = None,
+    audit: AuditWriter | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows (DEC-INGEST-AUTO-RETRY-001).
 
@@ -574,6 +642,7 @@ def run_dhan_spot_ingest_with_retry(
             on_success=on_success,
             on_progress=on_progress,
             run_parallel=run_parallel,
+            audit=audit,
         )
 
     report = _one_pass()

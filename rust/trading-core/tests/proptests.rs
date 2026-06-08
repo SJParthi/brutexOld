@@ -1,0 +1,1454 @@
+//! Property-based tests for the shared `trading-core` kernel.
+//!
+//! `DEC-TRADING-CORE-PROPTEST-MUTANTS-001` (`docs/MIGRATION.md`). The crate
+//! shipped with only 2 `#[test]`s + the golden answer-key; this adds the
+//! property layer the rest of the repo already mandates (CLAUDE.md §4 — 7 test
+//! types incl. property + mutation).
+//!
+//! The properties fall in three families, each chosen to be *robust* (never
+//! flaky) AND *mutation-killing* (every comparison / bit / threshold has a case
+//! that fails when that operator is perturbed):
+//!
+//! 1. **Universal invariants** — hold for ALL bounded inputs: determinism,
+//!    reserved bits 52-63 always clear, mutually-exclusive bit pairs, at most
+//!    one time-of-day bucket, the pivot/fib level ladders are monotonic.
+//! 2. **Independent oracle parity** — a deliberately separate re-implementation
+//!    of the 52 predicates (this file is in `tests/`, which `cargo-mutants`
+//!    never mutates, so a mutant in `src/` diverges from this oracle and dies).
+//!    Generators are boundary-aware so `<`↔`<=`/`==`↔`!=` mutants are reached.
+//! 3. **Golden parity under sampling** — re-evaluating an arbitrary golden case
+//!    reproduces its frozen `expected_u64` (leaderboard-safety: the mask that
+//!    ranks strategies is bit-stable).
+//!
+//! Money stays inside the documented finance-safe i64 paisa domain
+//! (`src/lib.rs` "honest envelope"): `[1, 10^12]` paisa, whose largest derived
+//! value (`pdh + 3.236*range ≈ 4·10^12`) is < 0.05 % of `i64::MAX`, so no
+//! property ever trips the release `overflow-checks` panic — exactly the
+//! "no panic/overflow on arbitrary (in-domain) inputs" guarantee.
+
+use proptest::prelude::*;
+use trading_core::{
+    FibLevels, IndicatorSnapshot, PivotLevels, PriorBarHistory, ProximityParams, bits,
+    compute_fib_levels, compute_pivot_levels, evaluate_atoms,
+};
+
+/// Upper bound for generated paisa magnitudes (₹10 billion). See module docs:
+/// chosen so every derived level stays far inside the i64 overflow guard.
+const MAX_PAISA: i64 = 1_000_000_000_000;
+
+/// Time-of-day cutoffs (seconds since IST midnight) — mirror of `evaluator.rs`,
+/// used by the oracle and to seed boundary-aligned timestamps.
+const EARLY_MORNING_START: u32 = 9 * 3600 + 16 * 60;
+const EARLY_MORNING_END: u32 = 10 * 3600;
+const MID_MORNING_END: u32 = 11 * 3600 + 30 * 60;
+const MIDDAY_END: u32 = 13 * 3600;
+const AFTERNOON_END: u32 = 15 * 3600;
+
+const FULL_MASK: u64 = (1u64 << bits::TOTAL_CONDITIONS) - 1;
+
+// ───────────────────────────── strategies ──────────────────────────────────
+
+/// A valid previous-day OHLC anchor: `pdl <= pdc <= pdh`, all in `[1, MAX]`.
+/// (The indicators `assert!` on violations; we only ever feed valid anchors —
+/// the corrupt-input panic path is covered by the dedicated unit tests below.)
+fn arb_prev_day() -> impl Strategy<Value = (i64, i64, i64)> {
+    (1i64..=MAX_PAISA, 0i64..=MAX_PAISA).prop_flat_map(|(pdl, range)| {
+        let pdh = pdl + range;
+        (Just(pdh), Just(pdl), pdl..=pdh)
+    })
+}
+
+/// Proximity tolerances spanning 0 bps (degenerate, only exact hits) … 2 %.
+fn arb_proximity() -> impl Strategy<Value = ProximityParams> {
+    (0i64..=200, 0i64..=200, 0i64..=200).prop_map(|(a, b, c)| ProximityParams {
+        pivot_proximity_bps: a,
+        pdh_pdl_proximity_bps: b,
+        fib_proximity_bps: c,
+    })
+}
+
+/// Prior-bar window: `prior_n` in 1..=6 with a flag vector whose length is
+/// sometimes equal (the active branch) and sometimes not (the early-return
+/// branch), so both Group-6 paths are exercised.
+fn arb_prior() -> impl Strategy<Value = PriorBarHistory> {
+    (1usize..=6, prop::collection::vec(any::<bool>(), 0..=6))
+        .prop_map(|(prior_n, flags)| PriorBarHistory { prior_n, flags })
+}
+
+/// Time-of-day: a mix of exact bucket cutoffs (boundary mutants on the
+/// half-open ranges) and uniform random seconds.
+fn arb_tod() -> impl Strategy<Value = u32> {
+    prop_oneof![
+        Just(0u32),
+        Just(EARLY_MORNING_START - 1),
+        Just(EARLY_MORNING_START),
+        Just(EARLY_MORNING_END - 1),
+        Just(EARLY_MORNING_END),
+        Just(MID_MORNING_END - 1),
+        Just(MID_MORNING_END),
+        Just(MIDDAY_END - 1),
+        Just(MIDDAY_END),
+        Just(AFTERNOON_END - 1),
+        Just(AFTERNOON_END),
+        Just(86_399u32),
+        0u32..=86_399,
+    ]
+}
+
+/// An EMA reading: `None` (warm-up) or a value at/just-around a reference price
+/// so the strict `>`/`<` comparisons see their equality boundary.
+fn arb_ema(reference: i64) -> impl Strategy<Value = Option<i64>> {
+    prop_oneof![
+        Just(None),
+        Just(Some(reference)),
+        Just(Some(reference - 1)),
+        Just(Some(reference + 1)),
+        (1i64..=2 * MAX_PAISA).prop_map(Some),
+    ]
+}
+
+/// A candle constructed from an exact `(range, body, lower_wick, direction)`
+/// budget so Group-5 ratio thresholds (`body*10` vs `range*{1,3,7}`,
+/// `wick*2` vs `range`) land exactly on their boundary, killing `<`↔`<=`
+/// mutants. Returns `(open, high, low, close)`.
+fn arb_candle(low_anchor: i64) -> impl Strategy<Value = (i64, i64, i64, i64)> {
+    (0i64..=MAX_PAISA, any::<bool>())
+        .prop_flat_map(|(range, bull)| {
+            // Body candidates hit each ratio boundary plus random.
+            let body_opts = prop_oneof![
+                Just(0i64),
+                Just(range / 10),
+                Just(range * 3 / 10),
+                Just(range * 7 / 10),
+                Just(range),
+                0i64..=range.max(0),
+            ];
+            (Just(range), Just(bull), body_opts)
+        })
+        .prop_flat_map(|(range, bull, body)| {
+            let body = body.clamp(0, range);
+            let slack = range - body;
+            // Lower-wick candidates hit the wick*2 == range boundary.
+            let lw_opts = prop_oneof![
+                Just(0i64),
+                Just(slack),
+                Just((range / 2).min(slack)),
+                0i64..=slack.max(0),
+            ];
+            (Just(range), Just(bull), Just(body), lw_opts)
+        })
+        .prop_map(move |(range, bull, body, lower_wick)| {
+            let lower_wick = lower_wick.clamp(0, range - body);
+            let low = low_anchor;
+            let high = low + range;
+            let (open, close) = if bull {
+                let open = low + lower_wick;
+                (open, open + body)
+            } else {
+                let close = low + lower_wick;
+                (close + body, close)
+            };
+            (open, high, low, close)
+        })
+}
+
+/// A full scenario: consistent pivots/fib derived from a valid prev-day anchor
+/// (exactly how the real engine feeds the evaluator), a boundary-aware candle,
+/// and day-structure / gap inputs that sometimes coincide with `close`, a
+/// level, or `pdc±gap` so Group-7/9 equality and threshold mutants are reached.
+fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, PriorBarHistory)> {
+    arb_prev_day()
+        .prop_flat_map(|(pdh, pdl, pdc)| {
+            let pivots = compute_pivot_levels(pdh, pdl, pdc);
+            let fib = compute_fib_levels(pdh, pdl);
+            // Anchor the candle near the prev-day band, sometimes exactly on a level
+            // so proximity / above-below boundaries are hit.
+            let level_choices = prop_oneof![
+                Just(pdh),
+                Just(pdl),
+                Just(pivots.p_paisa),
+                Just(pivots.r1_paisa.max(1)),
+                Just(pivots.s1_paisa.max(1)),
+                Just(fib.retrace_50_paisa),
+                Just(((pdh + pdl) / 2).max(1)),
+                1i64..=MAX_PAISA,
+            ];
+            (Just(pivots), Just(fib), Just(pdc), level_choices)
+        })
+        .prop_flat_map(|(pivots, fib, pdc, low_anchor)| {
+            let low_anchor = low_anchor.clamp(1, MAX_PAISA);
+            (Just(pivots), Just(fib), Just(pdc), arb_candle(low_anchor))
+        })
+        .prop_flat_map(|(pivots, fib, pdc, candle)| {
+            let (_o, _h, _l, close) = candle;
+            // Day structure: day_low <= day_high, sometimes ==close so the
+            // close_at_day_high/low equality bits fire. Yields (day_high, day_low).
+            let day_strat = prop_oneof![
+                Just((close, close)),                // day_high==day_low==close
+                (Just(close), 1i64..=2 * MAX_PAISA), // day_low==close
+                (1i64..=2 * MAX_PAISA, Just(close)), // day_high==close
+                (1i64..=2 * MAX_PAISA, 1i64..=2 * MAX_PAISA),
+            ]
+            .prop_map(|(a, b)| (a.max(b), a.min(b)));
+            // Open-of-day: sometimes exactly at the gap threshold edges.
+            let gap_thr = (pdc * 50).div_euclid(10_000);
+            let ood_strat = prop_oneof![
+                Just((pdc + gap_thr).max(1)),
+                Just((pdc + gap_thr + 1).max(1)),
+                Just((pdc - gap_thr).max(1)),
+                Just((pdc - gap_thr - 1).max(1)),
+                1i64..=2 * MAX_PAISA,
+            ];
+            // Nine elements (nested tuples keep us inside proptest's 12-tuple cap).
+            (
+                Just(pivots),
+                Just(fib),
+                Just(candle),
+                day_strat,
+                ood_strat,
+                (arb_ema(close), arb_ema(close)),
+                arb_tod(),
+                arb_proximity(),
+                arb_prior(),
+            )
+        })
+        .prop_map(
+            |(pivots, fib, candle, day, open_of_day, emas, tod_seconds, proximity, prior)| {
+                let (open, high, low, close) = candle;
+                let (day_high, day_low) = day;
+                let (ema20, ema200) = emas;
+                let snapshot = IndicatorSnapshot {
+                    tod_seconds,
+                    open_paisa: open,
+                    high_paisa: high,
+                    low_paisa: low,
+                    close_paisa: close,
+                    ema20_paisa: ema20,
+                    ema200_paisa: ema200,
+                    pivots,
+                    fib,
+                    day_high_paisa: day_high,
+                    day_low_paisa: day_low,
+                    open_of_day_paisa: open_of_day,
+                };
+                (snapshot, proximity, prior)
+            },
+        )
+}
+
+// ─────────────────────────── independent oracle ─────────────────────────────
+
+/// Proximity primitive — independent re-derivation of `is_near` (`evaluator.rs`).
+fn oracle_is_near(close: i64, level: i64, bps: i64) -> bool {
+    if close <= 0 {
+        return false;
+    }
+    let tolerance = (close * bps).div_euclid(10_000);
+    (close - level).abs() <= tolerance
+}
+
+/// A second, deliberately independent implementation of all 52 conditions, used
+/// only as a test oracle. `cargo-mutants` mutates `src/` but never `tests/`, so
+/// any mutant in `evaluate_atoms` diverges from this reference and is killed
+/// (provided the generators reach the mutated line — they are boundary-aware).
+fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u64 {
+    let mut m = 0u64;
+    let c = s.close_paisa;
+    let pv: &PivotLevels = &s.pivots;
+    let fib: &FibLevels = &s.fib;
+
+    // Group 1: EMA position.
+    if let Some(e) = s.ema20_paisa {
+        if c > e {
+            m |= 1 << bits::BIT_CLOSE_ABOVE_EMA20;
+        }
+        if c < e {
+            m |= 1 << bits::BIT_CLOSE_BELOW_EMA20;
+        }
+    }
+    if let Some(e) = s.ema200_paisa {
+        if c > e {
+            m |= 1 << bits::BIT_CLOSE_ABOVE_EMA200;
+        }
+        if c < e {
+            m |= 1 << bits::BIT_CLOSE_BELOW_EMA200;
+        }
+    }
+    if let (Some(e20), Some(e200)) = (s.ema20_paisa, s.ema200_paisa) {
+        if e20 > e200 {
+            m |= 1 << bits::BIT_EMA20_ABOVE_EMA200;
+        }
+        if e20 < e200 {
+            m |= 1 << bits::BIT_EMA20_BELOW_EMA200;
+        }
+    }
+
+    // Group 2: pivot proximity.
+    let bp = p.pivot_proximity_bps;
+    for (lvl, bit) in [
+        (pv.p_paisa, bits::BIT_NEAR_PIVOT_P),
+        (pv.r1_paisa, bits::BIT_NEAR_PIVOT_R1),
+        (pv.r2_paisa, bits::BIT_NEAR_PIVOT_R2),
+        (pv.r3_paisa, bits::BIT_NEAR_PIVOT_R3),
+        (pv.s1_paisa, bits::BIT_NEAR_PIVOT_S1),
+        (pv.s2_paisa, bits::BIT_NEAR_PIVOT_S2),
+        (pv.s3_paisa, bits::BIT_NEAR_PIVOT_S3),
+    ] {
+        if oracle_is_near(c, lvl, bp) {
+            m |= 1 << bit;
+        }
+    }
+
+    // Group 3: PDH/PDL.
+    if c > pv.pdh_paisa {
+        m |= 1 << bits::BIT_CLOSE_ABOVE_PDH;
+    }
+    if c < pv.pdh_paisa {
+        m |= 1 << bits::BIT_CLOSE_BELOW_PDH;
+    }
+    if c > pv.pdl_paisa {
+        m |= 1 << bits::BIT_CLOSE_ABOVE_PDL;
+    }
+    if c < pv.pdl_paisa {
+        m |= 1 << bits::BIT_CLOSE_BELOW_PDL;
+    }
+    if oracle_is_near(c, pv.pdh_paisa, p.pdh_pdl_proximity_bps) {
+        m |= 1 << bits::BIT_NEAR_PDH;
+    }
+    if oracle_is_near(c, pv.pdl_paisa, p.pdh_pdl_proximity_bps) {
+        m |= 1 << bits::BIT_NEAR_PDL;
+    }
+
+    // Group 4: fib proximity.
+    let bf = p.fib_proximity_bps;
+    for (lvl, bit) in [
+        (fib.retrace_level_at_pdh_paisa, bits::BIT_NEAR_FIB_0),
+        (fib.retrace_23_paisa, bits::BIT_NEAR_FIB_236),
+        (fib.retrace_38_paisa, bits::BIT_NEAR_FIB_382),
+        (fib.retrace_50_paisa, bits::BIT_NEAR_FIB_50),
+        (fib.retrace_62_paisa, bits::BIT_NEAR_FIB_618),
+        (fib.retrace_78_paisa, bits::BIT_NEAR_FIB_786),
+        (fib.retrace_level_at_pdl_paisa, bits::BIT_NEAR_FIB_100),
+    ] {
+        if oracle_is_near(c, lvl, bf) {
+            m |= 1 << bit;
+        }
+    }
+    for (up, down, bit) in [
+        (
+            fib.ext_up_127_paisa,
+            fib.ext_down_127_paisa,
+            bits::BIT_NEAR_FIB_1272,
+        ),
+        (
+            fib.ext_up_162_paisa,
+            fib.ext_down_162_paisa,
+            bits::BIT_NEAR_FIB_1618,
+        ),
+        (
+            fib.ext_up_200_paisa,
+            fib.ext_down_200_paisa,
+            bits::BIT_NEAR_FIB_200,
+        ),
+        (
+            fib.ext_up_262_paisa,
+            fib.ext_down_262_paisa,
+            bits::BIT_NEAR_FIB_2618,
+        ),
+    ] {
+        if oracle_is_near(c, up, bf) || oracle_is_near(c, down, bf) {
+            m |= 1 << bit;
+        }
+    }
+
+    // Group 5: candle shape.
+    let (o, h, lo) = (s.open_paisa, s.high_paisa, s.low_paisa);
+    let body = (c - o).abs();
+    let total_range = h - lo;
+    if c > o {
+        m |= 1 << bits::BIT_BAR_BULLISH;
+    }
+    if c < o {
+        m |= 1 << bits::BIT_BAR_BEARISH;
+    }
+    if total_range > 0 && body * 10 < total_range {
+        m |= 1 << bits::BIT_BAR_DOJI;
+    }
+    if total_range > 0 {
+        if body * 10 > total_range * 7 {
+            m |= 1 << bits::BIT_BAR_LARGE_BODY;
+        }
+        if body * 10 < total_range * 3 {
+            m |= 1 << bits::BIT_BAR_SMALL_BODY;
+        }
+        if (h - o.max(c)) * 2 > total_range {
+            m |= 1 << bits::BIT_LONG_UPPER_WICK;
+        }
+        if (o.min(c) - lo) * 2 > total_range {
+            m |= 1 << bits::BIT_LONG_LOWER_WICK;
+        }
+    }
+
+    // Group 6: prior bar pattern.
+    if prior.all_bullish() {
+        m |= 1 << bits::BIT_PRIOR_N_BULLISH;
+    }
+    if prior.all_bearish() {
+        m |= 1 << bits::BIT_PRIOR_N_BEARISH;
+    }
+    if prior.alternating() {
+        m |= 1 << bits::BIT_PRIOR_ALTERNATING;
+    }
+
+    // Group 7: day structure.
+    if c == s.day_high_paisa {
+        m |= 1 << bits::BIT_CLOSE_AT_DAY_HIGH;
+    }
+    if c == s.day_low_paisa {
+        m |= 1 << bits::BIT_CLOSE_AT_DAY_LOW;
+    }
+    let day_range = s.day_high_paisa - s.day_low_paisa;
+    if day_range > 0 {
+        if (c - s.day_low_paisa) * 3 > day_range * 2 {
+            m |= 1 << bits::BIT_CLOSE_IN_UPPER_THIRD;
+        }
+        if (c - s.day_low_paisa) * 3 < day_range {
+            m |= 1 << bits::BIT_CLOSE_IN_LOWER_THIRD;
+        }
+    }
+
+    // Group 8: time of day (mutually-exclusive half-open buckets).
+    let t = s.tod_seconds;
+    if (EARLY_MORNING_START..EARLY_MORNING_END).contains(&t) {
+        m |= 1 << bits::BIT_EARLY_MORNING;
+    } else if (EARLY_MORNING_END..MID_MORNING_END).contains(&t) {
+        m |= 1 << bits::BIT_MID_MORNING;
+    } else if (MID_MORNING_END..MIDDAY_END).contains(&t) {
+        m |= 1 << bits::BIT_MIDDAY;
+    } else if (MIDDAY_END..AFTERNOON_END).contains(&t) {
+        m |= 1 << bits::BIT_AFTERNOON;
+    }
+
+    // Group 9: day type.
+    let pdc = pv.pdc_paisa;
+    if pdc > 0 {
+        let gap = (pdc * 50).div_euclid(10_000);
+        if s.open_of_day_paisa > pdc + gap {
+            m |= 1 << bits::BIT_GAP_UP_DAY;
+        }
+        if s.open_of_day_paisa < pdc - gap {
+            m |= 1 << bits::BIT_GAP_DOWN_DAY;
+        }
+    }
+    if s.day_high_paisa < pv.pdh_paisa && s.day_low_paisa > pv.pdl_paisa {
+        m |= 1 << bits::BIT_INSIDE_DAY;
+    }
+    if s.day_high_paisa > pv.pdh_paisa && s.day_low_paisa < pv.pdl_paisa {
+        m |= 1 << bits::BIT_OUTSIDE_DAY;
+    }
+
+    m
+}
+
+// ───────────────────────────── properties ───────────────────────────────────
+
+proptest! {
+    // Run a generous case budget — the generators are cheap and boundary-heavy.
+    // `max_shrink_time` bounds shrinking so that when a property fails (e.g. when
+    // cargo-mutants perturbs the evaluator) the test binary EXITS FAST instead of
+    // shrinking the deep nested strategy for minutes — otherwise a detected
+    // mutant is mis-classified as a timeout. `failure_persistence: None` keeps
+    // the run from writing `*.proptest-regressions` scratch (the only seeds ever
+    // generated here were mutant-induced, not real failures).
+    #![proptest_config(ProptestConfig {
+        cases: 4096,
+        max_shrink_time: 3_000,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// The evaluator is a pure function: identical inputs → identical mask, and
+    /// it never panics for any in-domain scenario (this is also the
+    /// "no panic/overflow on arbitrary inputs" guarantee).
+    #[test]
+    fn evaluator_is_deterministic_and_total((s, p, prior) in arb_scenario()) {
+        let a = evaluate_atoms(&s, &p, &prior);
+        let b = evaluate_atoms(&s, &p, &prior);
+        prop_assert_eq!(a, b);
+    }
+
+    /// Bits 52-63 are reserved and must always be clear.
+    #[test]
+    fn reserved_bits_are_always_clear((s, p, prior) in arb_scenario()) {
+        let mask = evaluate_atoms(&s, &p, &prior);
+        prop_assert_eq!(mask & !FULL_MASK, 0u64);
+    }
+
+    /// The evaluator must equal the independent oracle on every scenario. This
+    /// is the workhorse mutation-killer: it pins the exact predicate of all 52
+    /// bits, and the boundary-aware generators reach each comparison's edge.
+    #[test]
+    fn evaluator_matches_independent_oracle((s, p, prior) in arb_scenario()) {
+        prop_assert_eq!(evaluate_atoms(&s, &p, &prior), oracle(&s, &p, &prior));
+    }
+
+    /// Logically-opposite bits can never be set together.
+    #[test]
+    fn opposite_bits_are_mutually_exclusive((s, p, prior) in arb_scenario()) {
+        let m = evaluate_atoms(&s, &p, &prior);
+        let pair = |a: u32, b: u32| (m >> a) & (m >> b) & 1;
+        prop_assert_eq!(pair(bits::BIT_CLOSE_ABOVE_EMA20, bits::BIT_CLOSE_BELOW_EMA20), 0);
+        prop_assert_eq!(pair(bits::BIT_CLOSE_ABOVE_EMA200, bits::BIT_CLOSE_BELOW_EMA200), 0);
+        prop_assert_eq!(pair(bits::BIT_EMA20_ABOVE_EMA200, bits::BIT_EMA20_BELOW_EMA200), 0);
+        prop_assert_eq!(pair(bits::BIT_CLOSE_ABOVE_PDH, bits::BIT_CLOSE_BELOW_PDH), 0);
+        prop_assert_eq!(pair(bits::BIT_CLOSE_ABOVE_PDL, bits::BIT_CLOSE_BELOW_PDL), 0);
+        prop_assert_eq!(pair(bits::BIT_BAR_BULLISH, bits::BIT_BAR_BEARISH), 0);
+        prop_assert_eq!(pair(bits::BIT_CLOSE_IN_UPPER_THIRD, bits::BIT_CLOSE_IN_LOWER_THIRD), 0);
+        prop_assert_eq!(pair(bits::BIT_GAP_UP_DAY, bits::BIT_GAP_DOWN_DAY), 0);
+        prop_assert_eq!(pair(bits::BIT_INSIDE_DAY, bits::BIT_OUTSIDE_DAY), 0);
+    }
+
+    /// At most one Group-8 time-of-day bucket fires (the `else if` chain).
+    #[test]
+    fn at_most_one_time_bucket((s, p, prior) in arb_scenario()) {
+        let m = evaluate_atoms(&s, &p, &prior);
+        let tod = (m >> bits::BIT_EARLY_MORNING) & 0b1111;
+        prop_assert!(tod.count_ones() <= 1, "tod buckets = {tod:#06b}");
+    }
+
+    /// `compute_pivot_levels` is deterministic and produces a monotonic ladder
+    /// `s4 <= s3 <= s2 <= s1 <= p <= r1 <= r2 <= r3 <= r4` for any valid anchor.
+    #[test]
+    fn pivot_ladder_is_monotonic_and_deterministic((pdh, pdl, pdc) in arb_prev_day()) {
+        let a = compute_pivot_levels(pdh, pdl, pdc);
+        let b = compute_pivot_levels(pdh, pdl, pdc);
+        prop_assert_eq!(a, b);
+        prop_assert!(a.s4_paisa <= a.s3_paisa);
+        prop_assert!(a.s3_paisa <= a.s2_paisa);
+        prop_assert!(a.s2_paisa <= a.s1_paisa);
+        prop_assert!(a.s1_paisa <= a.p_paisa);
+        prop_assert!(a.p_paisa <= a.r1_paisa);
+        prop_assert!(a.r1_paisa <= a.r2_paisa);
+        prop_assert!(a.r2_paisa <= a.r3_paisa);
+        prop_assert!(a.r3_paisa <= a.r4_paisa);
+        // The central pivot stays inside the prior-day range.
+        prop_assert!(a.p_paisa >= pdl && a.p_paisa <= pdh);
+        // Stored prev-day anchors are echoed verbatim.
+        prop_assert_eq!(a.pdh_paisa, pdh);
+        prop_assert_eq!(a.pdl_paisa, pdl);
+        prop_assert_eq!(a.pdc_paisa, pdc);
+    }
+
+    /// `compute_fib_levels` is deterministic and produces an ordered retracement
+    /// ladder bounded by the extensions, for any valid anchor.
+    #[test]
+    fn fib_ladder_is_ordered_and_deterministic((pdh, pdl, _pdc) in arb_prev_day()) {
+        let a = compute_fib_levels(pdh, pdl);
+        let b = compute_fib_levels(pdh, pdl);
+        prop_assert_eq!(a, b);
+        // Retracements: pdl <= 78% <= 62% <= 50% <= 38% <= 23% <= pdh.
+        prop_assert!(a.retrace_level_at_pdl_paisa <= a.retrace_78_paisa);
+        prop_assert!(a.retrace_78_paisa <= a.retrace_62_paisa);
+        prop_assert!(a.retrace_62_paisa <= a.retrace_50_paisa);
+        prop_assert!(a.retrace_50_paisa <= a.retrace_38_paisa);
+        prop_assert!(a.retrace_38_paisa <= a.retrace_23_paisa);
+        prop_assert!(a.retrace_23_paisa <= a.retrace_level_at_pdh_paisa);
+        // Stored anchors + range field.
+        prop_assert_eq!(a.pdh_paisa, pdh);
+        prop_assert_eq!(a.pdl_paisa, pdl);
+        prop_assert_eq!(a.range_paisa, pdh - pdl);
+        prop_assert_eq!(a.retrace_level_at_pdh_paisa, pdh);
+        prop_assert_eq!(a.retrace_level_at_pdl_paisa, pdl);
+        // Up extensions sit above pdh and ascend 127 ≤ 162 ≤ 200 ≤ 262 ≤ 424;
+        // down extensions sit below pdl and descend (incl. the unused 424 leg,
+        // which only the property tests observe).
+        prop_assert!(a.ext_up_127_paisa >= pdh);
+        prop_assert!(a.ext_up_127_paisa <= a.ext_up_162_paisa);
+        prop_assert!(a.ext_up_162_paisa <= a.ext_up_200_paisa);
+        prop_assert!(a.ext_up_200_paisa <= a.ext_up_262_paisa);
+        prop_assert!(a.ext_up_262_paisa <= a.ext_up_424_paisa);
+        prop_assert!(a.ext_down_127_paisa <= pdl);
+        prop_assert!(a.ext_down_162_paisa <= a.ext_down_127_paisa);
+        prop_assert!(a.ext_down_262_paisa <= a.ext_down_200_paisa);
+        prop_assert!(a.ext_down_200_paisa <= a.ext_down_162_paisa);
+        prop_assert!(a.ext_down_424_paisa <= a.ext_down_262_paisa);
+    }
+}
+
+// ──────────────────── deterministic per-bit reachability ─────────────────────
+
+/// Every one of the 52 bits is *individually* reachable: a hand-built scenario
+/// forces exactly that condition true and the bit fires. This is non-flaky
+/// (no RNG), proves reachability for all 52 (complementing the golden union
+/// test), and is a sharp mutation-killer — a deleted `mask |= 1 << BIT_X`
+/// statement, or a flipped comparison for that bit, makes its case fail.
+#[test]
+fn every_one_of_the_52_bits_is_individually_reachable() {
+    // Anchor chosen so ALL pivot + fib levels are strictly positive (so the
+    // `close <= 0` short-circuit in `is_near` never masks a proximity case).
+    let pivots = compute_pivot_levels(1_100_000, 1_000_000, 1_060_000);
+    let fib = compute_fib_levels(1_100_000, 1_000_000);
+    let base = IndicatorSnapshot {
+        tod_seconds: 0,
+        open_paisa: 1_050_000,
+        high_paisa: 1_050_000,
+        low_paisa: 1_050_000,
+        close_paisa: 1_050_000,
+        ema20_paisa: None,
+        ema200_paisa: None,
+        pivots,
+        fib,
+        day_high_paisa: 1_050_000,
+        day_low_paisa: 1_050_000,
+        open_of_day_paisa: 1_050_000,
+    };
+    let prox = ProximityParams {
+        pivot_proximity_bps: 10,
+        pdh_pdl_proximity_bps: 10,
+        fib_proximity_bps: 10,
+    };
+    let no_prior = PriorBarHistory {
+        prior_n: 3,
+        flags: vec![],
+    };
+
+    let mut seen: u64 = 0;
+    let mut check = |bit: u32, s: IndicatorSnapshot, pr: &PriorBarHistory| {
+        let m = evaluate_atoms(&s, &prox, pr);
+        assert!(
+            (m >> bit) & 1 == 1,
+            "bit {bit} should be set but mask = {m:#054b}"
+        );
+        seen |= 1 << bit;
+    };
+
+    // Group 1: EMA position.
+    check(
+        bits::BIT_CLOSE_ABOVE_EMA20,
+        IndicatorSnapshot {
+            close_paisa: 1_200_000,
+            ema20_paisa: Some(1_000_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_BELOW_EMA20,
+        IndicatorSnapshot {
+            close_paisa: 1_000_000,
+            ema20_paisa: Some(1_200_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_ABOVE_EMA200,
+        IndicatorSnapshot {
+            close_paisa: 1_200_000,
+            ema200_paisa: Some(1_000_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_BELOW_EMA200,
+        IndicatorSnapshot {
+            close_paisa: 1_000_000,
+            ema200_paisa: Some(1_200_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_EMA20_ABOVE_EMA200,
+        IndicatorSnapshot {
+            ema20_paisa: Some(1_200_000),
+            ema200_paisa: Some(1_000_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_EMA20_BELOW_EMA200,
+        IndicatorSnapshot {
+            ema20_paisa: Some(1_000_000),
+            ema200_paisa: Some(1_200_000),
+            ..base
+        },
+        &no_prior,
+    );
+
+    // Group 2: pivot proximity (close exactly on each level).
+    check(
+        bits::BIT_NEAR_PIVOT_P,
+        IndicatorSnapshot {
+            close_paisa: pivots.p_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_PIVOT_R1,
+        IndicatorSnapshot {
+            close_paisa: pivots.r1_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_PIVOT_R2,
+        IndicatorSnapshot {
+            close_paisa: pivots.r2_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_PIVOT_R3,
+        IndicatorSnapshot {
+            close_paisa: pivots.r3_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_PIVOT_S1,
+        IndicatorSnapshot {
+            close_paisa: pivots.s1_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_PIVOT_S2,
+        IndicatorSnapshot {
+            close_paisa: pivots.s2_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_PIVOT_S3,
+        IndicatorSnapshot {
+            close_paisa: pivots.s3_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+
+    // Group 3: PDH/PDL.
+    check(
+        bits::BIT_CLOSE_ABOVE_PDH,
+        IndicatorSnapshot {
+            close_paisa: 1_200_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_BELOW_PDH,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_ABOVE_PDL,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_BELOW_PDL,
+        IndicatorSnapshot {
+            close_paisa: 950_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_PDH,
+        IndicatorSnapshot {
+            close_paisa: 1_100_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_PDL,
+        IndicatorSnapshot {
+            close_paisa: 1_000_000,
+            ..base
+        },
+        &no_prior,
+    );
+
+    // Group 4: fib proximity.
+    check(
+        bits::BIT_NEAR_FIB_0,
+        IndicatorSnapshot {
+            close_paisa: fib.retrace_level_at_pdh_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_236,
+        IndicatorSnapshot {
+            close_paisa: fib.retrace_23_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_382,
+        IndicatorSnapshot {
+            close_paisa: fib.retrace_38_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_50,
+        IndicatorSnapshot {
+            close_paisa: fib.retrace_50_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_618,
+        IndicatorSnapshot {
+            close_paisa: fib.retrace_62_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_786,
+        IndicatorSnapshot {
+            close_paisa: fib.retrace_78_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_100,
+        IndicatorSnapshot {
+            close_paisa: fib.retrace_level_at_pdl_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_1272,
+        IndicatorSnapshot {
+            close_paisa: fib.ext_up_127_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_1618,
+        IndicatorSnapshot {
+            close_paisa: fib.ext_up_162_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_200,
+        IndicatorSnapshot {
+            close_paisa: fib.ext_up_200_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_2618,
+        IndicatorSnapshot {
+            close_paisa: fib.ext_up_262_paisa,
+            ..base
+        },
+        &no_prior,
+    );
+
+    // Group 5: candle shape.
+    check(
+        bits::BIT_BAR_BULLISH,
+        IndicatorSnapshot {
+            open_paisa: 1_000_000,
+            close_paisa: 1_100_000,
+            high_paisa: 1_100_000,
+            low_paisa: 1_000_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_BAR_BEARISH,
+        IndicatorSnapshot {
+            open_paisa: 1_100_000,
+            close_paisa: 1_000_000,
+            high_paisa: 1_100_000,
+            low_paisa: 1_000_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_BAR_DOJI,
+        IndicatorSnapshot {
+            open_paisa: 1_050_000,
+            close_paisa: 1_050_000,
+            high_paisa: 1_100_000,
+            low_paisa: 1_000_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_BAR_LARGE_BODY,
+        IndicatorSnapshot {
+            open_paisa: 1_000_000,
+            close_paisa: 1_080_000,
+            high_paisa: 1_080_000,
+            low_paisa: 1_000_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_BAR_SMALL_BODY,
+        IndicatorSnapshot {
+            open_paisa: 1_000_000,
+            close_paisa: 1_010_000,
+            high_paisa: 1_100_000,
+            low_paisa: 1_000_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_LONG_UPPER_WICK,
+        IndicatorSnapshot {
+            open_paisa: 1_000_000,
+            close_paisa: 1_000_000,
+            high_paisa: 1_100_000,
+            low_paisa: 1_000_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_LONG_LOWER_WICK,
+        IndicatorSnapshot {
+            open_paisa: 1_100_000,
+            close_paisa: 1_100_000,
+            high_paisa: 1_100_000,
+            low_paisa: 1_000_000,
+            ..base
+        },
+        &no_prior,
+    );
+
+    // Group 6: prior bar pattern.
+    check(
+        bits::BIT_PRIOR_N_BULLISH,
+        base,
+        &PriorBarHistory {
+            prior_n: 3,
+            flags: vec![true, true, true],
+        },
+    );
+    check(
+        bits::BIT_PRIOR_N_BEARISH,
+        base,
+        &PriorBarHistory {
+            prior_n: 3,
+            flags: vec![false, false, false],
+        },
+    );
+    check(
+        bits::BIT_PRIOR_ALTERNATING,
+        base,
+        &PriorBarHistory {
+            prior_n: 3,
+            flags: vec![true, false, true],
+        },
+    );
+
+    // Group 7: day structure.
+    check(
+        bits::BIT_CLOSE_AT_DAY_HIGH,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            day_high_paisa: 1_050_000,
+            day_low_paisa: 1_000_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_AT_DAY_LOW,
+        IndicatorSnapshot {
+            close_paisa: 1_000_000,
+            day_high_paisa: 1_100_000,
+            day_low_paisa: 1_000_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_IN_UPPER_THIRD,
+        IndicatorSnapshot {
+            close_paisa: 1_080_000,
+            day_high_paisa: 1_100_000,
+            day_low_paisa: 1_000_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_IN_LOWER_THIRD,
+        IndicatorSnapshot {
+            close_paisa: 1_020_000,
+            day_high_paisa: 1_100_000,
+            day_low_paisa: 1_000_000,
+            ..base
+        },
+        &no_prior,
+    );
+
+    // Group 8: time of day (each bucket's lower edge).
+    check(
+        bits::BIT_EARLY_MORNING,
+        IndicatorSnapshot {
+            tod_seconds: EARLY_MORNING_START,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_MID_MORNING,
+        IndicatorSnapshot {
+            tod_seconds: EARLY_MORNING_END,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_MIDDAY,
+        IndicatorSnapshot {
+            tod_seconds: MID_MORNING_END,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_AFTERNOON,
+        IndicatorSnapshot {
+            tod_seconds: MIDDAY_END,
+            ..base
+        },
+        &no_prior,
+    );
+
+    // Group 9: day type.
+    check(
+        bits::BIT_GAP_UP_DAY,
+        IndicatorSnapshot {
+            open_of_day_paisa: 1_070_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_GAP_DOWN_DAY,
+        IndicatorSnapshot {
+            open_of_day_paisa: 1_050_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_INSIDE_DAY,
+        IndicatorSnapshot {
+            day_high_paisa: 1_090_000,
+            day_low_paisa: 1_010_000,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_OUTSIDE_DAY,
+        IndicatorSnapshot {
+            day_high_paisa: 1_110_000,
+            day_low_paisa: 990_000,
+            ..base
+        },
+        &no_prior,
+    );
+
+    assert_eq!(seen, FULL_MASK, "not all 52 bits were exercised");
+}
+
+// ───────────────────── deterministic equality boundaries ────────────────────
+
+/// Every strict comparison in the evaluator is pinned at its EXACT equality
+/// edge: at the boundary the bit must be CLEAR (the conditions use `<`/`>`, not
+/// `<=`/`>=`). This is the non-flaky companion to the boundary-aware proptest
+/// generators — it deterministically kills `<`↔`<=` / `>`↔`>=` mutants (the
+/// ones that only diverge on an exact tie) in <1 ms, with no RNG and no shrink.
+#[test]
+fn equality_boundaries_keep_strict_bits_clear() {
+    let pivots = compute_pivot_levels(1_100_000, 1_000_000, 1_060_000);
+    let fib = compute_fib_levels(1_100_000, 1_000_000);
+    let base = IndicatorSnapshot {
+        tod_seconds: 0,
+        open_paisa: 1_050_000,
+        high_paisa: 1_050_000,
+        low_paisa: 1_050_000,
+        close_paisa: 1_050_000,
+        ema20_paisa: None,
+        ema200_paisa: None,
+        pivots,
+        fib,
+        day_high_paisa: 1_050_000,
+        day_low_paisa: 1_050_000,
+        open_of_day_paisa: 1_050_000,
+    };
+    let prox = ProximityParams {
+        pivot_proximity_bps: 0,
+        pdh_pdl_proximity_bps: 0,
+        fib_proximity_bps: 0,
+    };
+    let no_prior = PriorBarHistory {
+        prior_n: 3,
+        flags: vec![],
+    };
+    let clear = |bit: u32, s: IndicatorSnapshot| {
+        let m = evaluate_atoms(&s, &prox, &no_prior);
+        assert_eq!(
+            (m >> bit) & 1,
+            0,
+            "bit {bit} must be CLEAR at its equality boundary, mask = {m:#054b}"
+        );
+    };
+
+    // Group 3 — close exactly on PDH/PDL (the mutants that previously survived).
+    clear(
+        bits::BIT_CLOSE_ABOVE_PDH,
+        IndicatorSnapshot {
+            close_paisa: 1_100_000,
+            ..base
+        },
+    );
+    clear(
+        bits::BIT_CLOSE_BELOW_PDH,
+        IndicatorSnapshot {
+            close_paisa: 1_100_000,
+            ..base
+        },
+    );
+    clear(
+        bits::BIT_CLOSE_ABOVE_PDL,
+        IndicatorSnapshot {
+            close_paisa: 1_000_000,
+            ..base
+        },
+    );
+    clear(
+        bits::BIT_CLOSE_BELOW_PDL,
+        IndicatorSnapshot {
+            close_paisa: 1_000_000,
+            ..base
+        },
+    );
+
+    // Group 1 — close exactly on EMA, and ema20 exactly on ema200.
+    clear(
+        bits::BIT_CLOSE_ABOVE_EMA20,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            ema20_paisa: Some(1_050_000),
+            ..base
+        },
+    );
+    clear(
+        bits::BIT_CLOSE_BELOW_EMA20,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            ema20_paisa: Some(1_050_000),
+            ..base
+        },
+    );
+    clear(
+        bits::BIT_CLOSE_ABOVE_EMA200,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            ema200_paisa: Some(1_050_000),
+            ..base
+        },
+    );
+    clear(
+        bits::BIT_CLOSE_BELOW_EMA200,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            ema200_paisa: Some(1_050_000),
+            ..base
+        },
+    );
+    clear(
+        bits::BIT_EMA20_ABOVE_EMA200,
+        IndicatorSnapshot {
+            ema20_paisa: Some(1_050_000),
+            ema200_paisa: Some(1_050_000),
+            ..base
+        },
+    );
+    clear(
+        bits::BIT_EMA20_BELOW_EMA200,
+        IndicatorSnapshot {
+            ema20_paisa: Some(1_050_000),
+            ema200_paisa: Some(1_050_000),
+            ..base
+        },
+    );
+
+    // Group 5 — candle equality edges.
+    // close == open → neither bullish nor bearish.
+    let flat = IndicatorSnapshot {
+        open_paisa: 1_050_000,
+        close_paisa: 1_050_000,
+        high_paisa: 1_100_000,
+        low_paisa: 1_000_000,
+        ..base
+    };
+    clear(bits::BIT_BAR_BULLISH, flat);
+    clear(bits::BIT_BAR_BEARISH, flat);
+    // body*10 == range → doji uses `<`, so clear.
+    clear(
+        bits::BIT_BAR_DOJI,
+        IndicatorSnapshot {
+            open_paisa: 1_000_000,
+            close_paisa: 1_010_000,
+            high_paisa: 1_100_000,
+            low_paisa: 1_000_000,
+            ..base
+        },
+    );
+    // body*10 == range*7 → large-body uses `>`, so clear.
+    clear(
+        bits::BIT_BAR_LARGE_BODY,
+        IndicatorSnapshot {
+            open_paisa: 1_000_000,
+            close_paisa: 1_070_000,
+            high_paisa: 1_100_000,
+            low_paisa: 1_000_000,
+            ..base
+        },
+    );
+    // body*10 == range*3 → small-body uses `<`, so clear.
+    clear(
+        bits::BIT_BAR_SMALL_BODY,
+        IndicatorSnapshot {
+            open_paisa: 1_000_000,
+            close_paisa: 1_030_000,
+            high_paisa: 1_100_000,
+            low_paisa: 1_000_000,
+            ..base
+        },
+    );
+    // upper_wick*2 == range AND lower_wick*2 == range → both wick bits clear.
+    let balanced_wicks = IndicatorSnapshot {
+        open_paisa: 1_050_000,
+        close_paisa: 1_050_000,
+        high_paisa: 1_100_000,
+        low_paisa: 1_000_000,
+        ..base
+    };
+    clear(bits::BIT_LONG_UPPER_WICK, balanced_wicks);
+    clear(bits::BIT_LONG_LOWER_WICK, balanced_wicks);
+
+    // Group 7 — close ≠ day_high/day_low → the `==` bits clear; and the thirds
+    // sit exactly on their boundary (day_range = 30_000 for clean integers).
+    clear(
+        bits::BIT_CLOSE_AT_DAY_HIGH,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            day_high_paisa: 1_100_000,
+            day_low_paisa: 1_000_000,
+            ..base
+        },
+    );
+    clear(
+        bits::BIT_CLOSE_AT_DAY_LOW,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000,
+            day_high_paisa: 1_100_000,
+            day_low_paisa: 1_000_000,
+            ..base
+        },
+    );
+    // (c-day_low)*3 == day_range*2 → upper-third uses `>`, so clear.
+    clear(
+        bits::BIT_CLOSE_IN_UPPER_THIRD,
+        IndicatorSnapshot {
+            close_paisa: 1_020_000,
+            day_high_paisa: 1_030_000,
+            day_low_paisa: 1_000_000,
+            ..base
+        },
+    );
+    // (c-day_low)*3 == day_range → lower-third uses `<`, so clear.
+    clear(
+        bits::BIT_CLOSE_IN_LOWER_THIRD,
+        IndicatorSnapshot {
+            close_paisa: 1_010_000,
+            day_high_paisa: 1_030_000,
+            day_low_paisa: 1_000_000,
+            ..base
+        },
+    );
+
+    // Group 9 — gap thresholds exactly on the edge (gap = 0.5% of pdc = 5_300).
+    clear(
+        bits::BIT_GAP_UP_DAY,
+        IndicatorSnapshot {
+            open_of_day_paisa: 1_065_300,
+            ..base
+        },
+    );
+    clear(
+        bits::BIT_GAP_DOWN_DAY,
+        IndicatorSnapshot {
+            open_of_day_paisa: 1_054_700,
+            ..base
+        },
+    );
+    // inside/outside use strict `<`/`>` — at day_high == pdh (or day_low == pdl)
+    // neither fires.
+    clear(
+        bits::BIT_INSIDE_DAY,
+        IndicatorSnapshot {
+            day_high_paisa: 1_100_000,
+            day_low_paisa: 1_050_000,
+            ..base
+        },
+    );
+    clear(
+        bits::BIT_OUTSIDE_DAY,
+        IndicatorSnapshot {
+            day_high_paisa: 1_100_000,
+            day_low_paisa: 990_000,
+            ..base
+        },
+    );
+}
+
+// ──────────────── degenerate-input guards (zero-range / zero pdc) ────────────
+
+/// The Group-5/7/9 `total_range > 0` / `day_range > 0` / `pdc > 0` guards are
+/// LOAD-BEARING for degenerate inputs that no valid-candle generator can reach
+/// (zero range with a non-zero body, a flat day, a zero prev-close): with a
+/// guard relaxed to `>= 0` a flat bar would spuriously fire shape / third / gap
+/// bits. Feeding such snapshots and asserting the bits stay clear kills those
+/// guard mutants deterministically (DEC-TRADING-CORE-PROPTEST-MUTANTS-001).
+#[test]
+fn degenerate_bars_fire_no_shape_or_gap_bits() {
+    let pivots = compute_pivot_levels(1_100_000, 1_000_000, 1_060_000);
+    let fib = compute_fib_levels(1_100_000, 1_000_000);
+    let base = IndicatorSnapshot {
+        tod_seconds: 0,
+        open_paisa: 1_050_000,
+        high_paisa: 1_050_000,
+        low_paisa: 1_050_000,
+        close_paisa: 1_050_000,
+        ema20_paisa: None,
+        ema200_paisa: None,
+        pivots,
+        fib,
+        day_high_paisa: 1_050_000,
+        day_low_paisa: 1_050_000,
+        open_of_day_paisa: 1_050_000,
+    };
+    let prox = ProximityParams {
+        pivot_proximity_bps: 0,
+        pdh_pdl_proximity_bps: 0,
+        fib_proximity_bps: 0,
+    };
+    let no_prior = PriorBarHistory {
+        prior_n: 3,
+        flags: vec![],
+    };
+    let clear = |bit: u32, s: IndicatorSnapshot| {
+        let m = evaluate_atoms(&s, &prox, &no_prior);
+        assert_eq!(
+            (m >> bit) & 1,
+            0,
+            "bit {bit} must be CLEAR for a degenerate bar, mask = {m:#054b}"
+        );
+    };
+
+    // total_range == 0 (high == low) but body > 0 (open != close): the block
+    // guard must suppress EVERY candle-shape bit.
+    let flat_range_big_body = IndicatorSnapshot {
+        open_paisa: 1_050_000,
+        close_paisa: 1_000_000,
+        high_paisa: 1_000_000,
+        low_paisa: 1_000_000,
+        ..base
+    };
+    clear(bits::BIT_BAR_DOJI, flat_range_big_body);
+    clear(bits::BIT_BAR_LARGE_BODY, flat_range_big_body);
+    clear(bits::BIT_BAR_SMALL_BODY, flat_range_big_body);
+    clear(bits::BIT_LONG_UPPER_WICK, flat_range_big_body);
+    clear(bits::BIT_LONG_LOWER_WICK, flat_range_big_body);
+
+    // day_range == 0 (day_high == day_low) but close off that level: the day
+    // guard must suppress both third bits.
+    let flat_day = IndicatorSnapshot {
+        close_paisa: 1_060_000,
+        day_high_paisa: 1_050_000,
+        day_low_paisa: 1_050_000,
+        ..base
+    };
+    clear(bits::BIT_CLOSE_IN_UPPER_THIRD, flat_day);
+    clear(bits::BIT_CLOSE_IN_LOWER_THIRD, flat_day);
+
+    // pdc == 0: the 0.5%-gap threshold collapses to 0; a positive open must NOT
+    // gap (the `pdc > 0` guard skips the whole block).
+    let zero_pdc = IndicatorSnapshot {
+        pivots: compute_pivot_levels(100_000, 0, 0),
+        open_of_day_paisa: 50_000,
+        ..base
+    };
+    clear(bits::BIT_GAP_UP_DAY, zero_pdc);
+    clear(bits::BIT_GAP_DOWN_DAY, zero_pdc);
+}
+
+// ───────────────────── corrupt-input panic guards ───────────────────────────
+
+/// Corrupt prev-day OHLC (`pdh < pdl`) must panic LOUD in both indicators — the
+/// release-safe mirror of Python's `ValueError` (`src/lib.rs` honest envelope).
+#[test]
+#[should_panic(expected = "PDH must be >= PDL")]
+fn pivots_panic_on_pdh_below_pdl() {
+    let _ = compute_pivot_levels(1_000_000, 1_100_000, 1_050_000);
+}
+
+#[test]
+#[should_panic(expected = "PDC must be in [PDL, PDH]")]
+fn pivots_panic_on_pdc_out_of_range() {
+    let _ = compute_pivot_levels(1_100_000, 1_000_000, 1_200_000);
+}
+
+#[test]
+#[should_panic(expected = "PDH must be >= PDL")]
+fn fib_panics_on_pdh_below_pdl() {
+    let _ = compute_fib_levels(1_000_000, 1_100_000);
+}

@@ -80,7 +80,9 @@ from brutex.dashboard.pull_controller import (
     dhan_creds_present,
     pull_all_spot,
     pull_candles,
+    refresh_live_token,
     resolve_pull_symbols,
+    set_live_keepalive,
     set_live_token_holder,
     start_token_keepalive,
 )
@@ -726,6 +728,7 @@ def build_app(
             keepalive = _token_keepalive[0]
             if keepalive is not None:
                 keepalive.stop()
+            set_live_keepalive(None)
             set_live_token_holder(None)
 
     app = FastAPI(title="BruteX Dashboard", version="0.1.0a0", lifespan=_lifespan)
@@ -2213,6 +2216,14 @@ def build_app(
             )
         except CredentialsError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # Propagate the new token to the LIVE session WITHOUT a restart
+        # (DEC-DHAN-TOKEN-SINGLE-SOURCE-001): saving updated the file, but the
+        # in-memory holder every live DhanClient reads via ``token_provider`` still
+        # held the STALE startup token → every pull 401/DH-906'd (``auth_expired``)
+        # even with a valid fresh token. ``refresh_live_token`` updates the holder in
+        # place (write-through) + tells the keepalive to re-learn the new expiry; a
+        # no-op (``False``) when no live session is running (dry-run / no creds).
+        refresh_live_token(body.access_token)
         # Echo back the masked preview so the page can confirm the paste landed
         # (right value/length, not empty) — never a usable secret.
         return JSONResponse(credentials_preview())

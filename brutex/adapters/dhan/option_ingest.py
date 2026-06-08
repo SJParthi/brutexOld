@@ -21,9 +21,41 @@ Both the JSON poster (the ``post_json`` surface of
 **injected** :class:`~typing.Protocol` seams, so this is 100% unit-testable
 without a network or a real lake. Pacing is injected too (``pace`` — the
 orchestrator's token-bucket ``acquire`` hook), keeping the **5 req/s /
-100k-day** limit honoured without coupling the limiter in here. A
-**transient** (retryable) error on a window is counted and skipped (the
-orchestrator re-queues it); a **terminal** error propagates.
+100k-day** limit honoured without coupling the limiter in here.
+
+## Resume-cursor / transactional commit (DEC-OPTION-429-RECOVERY-001, audit Gap #2)
+
+The series' 30-day windows are the **cursors** of a multi-page option chain.
+The earlier spine **deferred** a transient (429 / 5xx / timeout) cursor to the
+next pull and kept fetching the rest — so a 429 mid-pagination left the
+partition with a HOLE (a missing page). Keep-first dedup deduplicates a
+duplicate timestamp on a re-pull, but it can NEVER fill a missing page, so the
+lake could sit PARTIAL until the operator manually re-ran (audit Gap #2). This
+spine closes that gap the way the spot path does (DEC-DHAN-429-RETRY-001 +
+``until_clean``), with one stronger invariant for the option partition:
+
+* **Resume the cursor** — a RETRYABLE error (429 / 5xx / timeout / transport)
+  on a cursor is re-fetched IN-RUN, after a bounded seconds-scale backoff, up to
+  ``max_retry_passes`` extra attempts. By then the opening 429 burst is over and
+  the rate governor has stepped down, so the retry waits the limiter out rather
+  than fighting it (mirrors the spot DEC-DHAN-429-RETRY-001 rationale).
+* **Complete OR empty, never partial** — bars are STAGED per window and the sink
+  is written + coverage marked only in a final commit pass AFTER every cursor has
+  been fetched cleanly. If a cursor still fails after its retry budget (or a
+  TERMINAL error raises mid-fetch), the whole series ABORTS having committed
+  NOTHING — the partition stays EMPTY and the un-committed windows are deferred
+  to the next pull (coverage untouched ⇒ a re-pull re-fetches them). So the
+  partition the lake holds for a series is always whole or absent, never a
+  page-holed partial.
+
+**Honest envelope (Golden Rule #10):** the staging buffer is
+O(session-bars in the series) SPACE, NOT O(1) — an all-or-nothing commit cannot
+be O(1) space without a sink-side rollback (out of this path's scope). The O(1)
+guarantees that DO hold are per-bar: the coverage probe, the dedup probe, and
+the coverage key build are each O(1). The retry COUNT is bounded by
+``max_retry_passes`` (never infinite) and every fetch (initial + retry) is paced
+by the SAME ``≤ 5 r/s`` bucket (Rule #6); a token death / terminal error is
+non-retryable and raises straight out.
 """
 
 from __future__ import annotations
@@ -31,6 +63,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from time import sleep as _time_sleep
 from typing import Protocol
 
 import structlog
@@ -53,7 +86,8 @@ from brutex.observability.correlation import current_pull_id
 _LOG = structlog.get_logger("brutex.adapters.dhan.option_ingest")
 
 #: Pacing / rate-feedback hook — a no-arg callback (e.g. token-bucket acquire, or
-#: a rate-controller step). ``pace`` runs once before each window fetch; the
+#: a rate-controller step). ``pace`` runs once before each window fetch (and once
+#: before each in-run RETRY of that window, so a resume stays bucket-bounded); the
 #: ``on_rate_limit`` / ``on_success`` feedback hooks REUSE the SPOT path's hook
 #: names + bound-method wiring (CLAUDE.md §11 COMMON, ``ingest.ingest_spot``),
 #: and ``on_timeout`` EXTENDS that pattern — the spot path has no timeout hook
@@ -77,6 +111,36 @@ ALL_REQUIRED_DATA: tuple[str, ...] = (
     "spot",
     "iv",
 )
+
+#: In-run transient-cursor auto-retry budget (DEC-OPTION-429-RECOVERY-001) — the
+#: options analog of the spot path's in-run window retry (DEC-DHAN-WINDOW-RETRY-001
+#: / DEC-DHAN-429-RETRY-001). A cursor (30-day window) that returns a RETRYABLE
+#: error (429 / 5xx / timeout / transport) is re-fetched in-run up to this many
+#: EXTRA attempts before the staged series is committed, so a 429 mid-pagination
+#: is RESUMED to completion rather than left page-holed. ``0`` disables the retry
+#: (single attempt then abort). Small + finite (Golden Rule #10 — never infinite).
+_DEFAULT_MAX_RETRY_PASSES: int = 2
+
+#: Base backoff (seconds) before an in-run cursor retry — SECONDS-scale (vs the
+#: client's sub-second in-call hygiene) so a multi-second 429 storm / network
+#: outage has time to clear between attempts. Retry *k* (1-based) waits
+#: ``base × 2**(k-1)`` clamped to :data:`_MAX_RETRY_BACKOFF_S`.
+_DEFAULT_RETRY_BACKOFF_S: float = 1.0
+
+#: Hard ceiling (seconds) on a single retry backoff (defends an operator-set large
+#: budget from driving the backoff toward an unbounded sleep).
+_MAX_RETRY_BACKOFF_S: float = 8.0
+
+
+def _default_retry_backoff(attempt_index: int) -> None:
+    """Sleep the bounded exponential backoff before in-run retry ``attempt_index`` (0-based).
+
+    Injected as the default ``retry_backoff`` hook so production waits a real,
+    recovery-scale gap between attempts while tests pass a no-op recorder (no real
+    sleep) — the same inject-the-sleep pattern as the spot path's
+    :func:`~brutex.adapters.dhan.ingest._default_retry_backoff`.
+    """
+    _time_sleep(min(_DEFAULT_RETRY_BACKOFF_S * (2.0**attempt_index), _MAX_RETRY_BACKOFF_S))
 
 
 class JsonPoster(Protocol):
@@ -119,6 +183,35 @@ class OptionIngestReport:
     bars_appended: int
     transient_failures: int
     skipped_windows: int = 0
+    retried_windows: int = 0
+    """Distinct cursors re-attempted by the in-run resume-cursor retry.
+
+    DEC-OPTION-429-RECOVERY-001. A window that returned a retryable error on an
+    attempt and was re-fetched is counted once here, whether or not the retry
+    ultimately succeeded. Zero when no cursor failed transiently (or
+    ``max_retry_passes=0``).
+    """
+
+    still_failed_windows: int = 0
+    """Cursors NOT committed because the series aborted (a cursor outran its retry budget).
+
+    On an aborted series the partition is committed all-or-nothing as EMPTY, so
+    EVERY non-skipped window is deferred to the next pull (never marked complete —
+    the no-skip guarantee); this equals that deferred count. Equals
+    :attr:`transient_failures` (the same residual, under an explicit name mirroring
+    the spot :class:`~brutex.adapters.dhan.ingest.IngestReport`). Zero on a fully
+    committed (complete) series.
+    """
+
+    @property
+    def complete(self) -> bool:
+        """True iff the series committed (no residual) — the partition is WHOLE.
+
+        The transactional invariant (DEC-OPTION-429-RECOVERY-001): a series either
+        commits every window (``complete``) or commits nothing (``still_failed_windows
+        > 0``). Never a page-holed partial.
+        """
+        return self.still_failed_windows == 0
 
 
 def _coverage_key(
@@ -176,8 +269,19 @@ def ingest_rolling_option_series(
     on_timeout: Pacer | None = None,
     on_success: Pacer | None = None,
     coverage: FetchCoverage | None = None,
+    max_retry_passes: int = _DEFAULT_MAX_RETRY_PASSES,
+    retry_backoff: Callable[[int], None] | None = None,
 ) -> OptionIngestReport:
-    """Pull one expired-option series' 1-minute OHLC over ``[start, end)``.
+    """Pull one expired-option series' 1-minute OHLC over ``[start, end)`` — transactionally.
+
+    The series' 30-day windows are the cursors of a multi-page option chain. They
+    are fetched into a STAGING buffer with a bounded in-run resume-cursor retry on
+    transient (429 / 5xx / timeout) errors, then written to *sink* + marked in
+    *coverage* in a single COMMIT pass only after EVERY cursor has been fetched
+    cleanly. If any cursor outruns its retry budget (or a terminal error raises),
+    the whole series aborts having committed NOTHING — so the partition the lake
+    holds is always complete or empty, never a page-holed partial
+    (DEC-OPTION-429-RECOVERY-001, audit Gap #2).
 
     Parameters
     ----------
@@ -204,22 +308,45 @@ def ingest_rolling_option_series(
     required_data
         Fields to request — defaults to :data:`ALL_REQUIRED_DATA`.
     pace
-        Optional per-window pacing hook (rate-limit acquire).
+        Optional per-window pacing hook (rate-limit acquire). Fired before the
+        initial fetch AND before each in-run retry of a cursor, so a resume stays
+        bucket-bounded (``≤ 5 r/s``, Rule #6).
+    on_rate_limit, on_timeout, on_success
+        Optional rate-governor feedback hooks (DEC-DHAN-TIMEOUT-BACKOFF-001).
+        ``on_rate_limit`` fires on each swallowed 429, ``on_timeout`` on each
+        swallowed timeout / transport / 5xx, ``on_success`` once per cleanly-fetched
+        cursor (NOT on a skip or a still-failing attempt).
+    coverage
+        Optional :class:`~brutex.data.fetch_coverage.FetchCoverage` skip-ledger.
+        A window already complete is skipped before the vendor call; a window is
+        marked complete only in the COMMIT pass, so coverage advances all-or-nothing
+        with the partition (DEC-FETCH-COVERAGE-001).
+    max_retry_passes
+        In-run resume-cursor retry budget (DEC-OPTION-429-RECOVERY-001). A cursor
+        that returns a retryable error is re-fetched up to this many EXTRA attempts
+        after a bounded backoff (default :data:`_DEFAULT_MAX_RETRY_PASSES`). ``0``
+        disables the retry (single attempt then abort). A cursor still failing after
+        the budget aborts the series (commit nothing — empty, never partial).
+    retry_backoff
+        Injected ``(attempt_index) -> None`` sleep hook called before each in-run
+        retry (``None`` → :func:`_default_retry_backoff`, a bounded exponential
+        seconds-scale wait). Tests pass a no-op recorder so no real sleep occurs.
 
     Returns
     -------
     OptionIngestReport
-        Window count, total bars appended (session-filtered), and
-        transient-failure count.
+        Window count, total bars committed (session-filtered), the residual
+        ``transient_failures`` / ``still_failed_windows`` (0 on a complete series;
+        the deferred count on an aborted one), windows skipped as already-complete,
+        and ``retried_windows`` (distinct cursors re-attempted). ``report.complete``
+        is ``True`` iff the partition committed whole.
 
     Raises
     ------
     DhanError
-        On a terminal (non-retryable) fetch error.
+        On a terminal (non-retryable) fetch error — propagated before any commit,
+        so the partition stays empty and the series is quarantined upstream.
     """
-    bars_appended = 0
-    transient = 0
-    skipped = 0
     windows = _window_dates(start, end)
     # Read the pull's correlation id ONCE (the controller bound it via
     # ``pull_id_scope``); stamp it + the full series coordinate on every
@@ -233,6 +360,116 @@ def ingest_rolling_option_series(
         "strike": strike,
         "drv_option_type": drv_option_type,
     }
+    backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
+    retried: set[tuple[date, date]] = set()
+
+    def _fetch_cursor(window_start: date, window_end: date) -> list[OptionBar] | None:
+        """Fetch ONE cursor with bounded in-run retry; return staged bars or ``None`` if exhausted.
+
+        Resume-cursor (DEC-OPTION-429-RECOVERY-001): a RETRYABLE error
+        (429 / 5xx / timeout / transport) is re-fetched in-run up to
+        *max_retry_passes* EXTRA attempts after the injected backoff. Returns the
+        parsed, session-filtered bars on a clean fetch (NOT yet written — the
+        caller's COMMIT pass does that), or ``None`` when the retry budget is spent
+        (the caller then ABORTS the whole series without committing). A TERMINAL
+        (non-retryable) :class:`DhanError` propagates unchanged.
+        """
+        body = build_rolling_option_body(
+            security_id=security_id,
+            exchange_segment=exchange_segment,
+            instrument=instrument,
+            expiry_flag=expiry_flag,
+            expiry_code=expiry_code,
+            strike=strike,
+            drv_option_type=drv_option_type,
+            required_data=required_data,
+            from_date=datetime.combine(window_start, time()),
+            to_date=datetime.combine(window_end, time()),
+            interval=TRACK1_OPTIONS_INTERVAL,
+        )
+        attempt = 0
+        while True:
+            if pace is not None:
+                pace()
+            try:
+                payload = client.post_json(ENDPOINT_ROLLING_OPTION, body)
+            except DhanError as exc:
+                if not is_retryable(exc):
+                    # TERMINAL — propagate before any commit (empty partition);
+                    # quarantined upstream by ``run_dhan_options_ingest``.
+                    raise
+                # Feed the swallowed transient to the rate governor: a 429 drives
+                # the 429 ladder, a timeout / transport / 5xx the GENTLE timeout
+                # ladder (DEC-DHAN-TIMEOUT-BACKOFF-001) — so a sustained storm eases
+                # the rate instead of grinding at 5 r/s into a struggling Dhan.
+                if is_rate_limit(exc):
+                    if on_rate_limit is not None:
+                        on_rate_limit()
+                elif on_timeout is not None:
+                    on_timeout()
+                if attempt >= max_retry_passes:
+                    # Budget spent on this cursor — signal ABORT (commit nothing).
+                    _LOG.warning(
+                        "ingest.window.transient",
+                        pull_id=pull_id,
+                        window_start=window_start.isoformat(),
+                        window_end=window_end.isoformat(),
+                        error_type=type(exc).__name__,
+                        in_run_retry=False,
+                        attempts=attempt + 1,
+                        **series_fields,
+                    )
+                    return None
+                # Resume the cursor after a bounded backoff: by now the opening 429
+                # burst is over + the governor has stepped down, so the retry waits
+                # the limiter out rather than fighting it (DEC-OPTION-429-RECOVERY-001).
+                retried.add((window_start, window_end))
+                attempt += 1
+                _LOG.warning(
+                    "ingest.window.transient",
+                    pull_id=pull_id,
+                    window_start=window_start.isoformat(),
+                    window_end=window_end.isoformat(),
+                    error_type=type(exc).__name__,
+                    in_run_retry=True,
+                    retry_attempt=attempt,
+                    **series_fields,
+                )
+                backoff(attempt - 1)
+                continue
+            # A clean cursor is the recover-up signal for the rate governor.
+            if on_success is not None:
+                on_success()
+            data = payload.get("data")
+            source = data if isinstance(data, Mapping) else payload
+            # Options are intraday 1m → drop pre-open / post-close before the lake.
+            parsed = parse_rolling_option_sides(source)
+            bars = [bar for bar in parsed if in_session(bar.timestamp)]
+            # Parse nook: rows decoded from the per-side ce/pe payload vs how many
+            # survived the [09:15,15:30) IST session gate.
+            _LOG.debug(
+                "ingest.parse",
+                pull_id=pull_id,
+                raw_bars=len(parsed),
+                session_bars=len(bars),
+                **series_fields,
+            )
+            _LOG.debug(
+                "ingest.window",
+                pull_id=pull_id,
+                window_start=window_start.isoformat(),
+                window_end=window_end.isoformat(),
+                action="fetched",
+                **series_fields,
+            )
+            return bars
+
+    # ── Phase 1 — STAGE every cursor (no sink write, no coverage mark yet) ──
+    # Fetch each window (with the in-run resume-cursor retry); buffer its bars.
+    # Nothing is committed until the WHOLE series is fetched cleanly, so an abort
+    # leaves the partition EMPTY rather than page-holed (audit Gap #2).
+    staged: list[tuple[WindowKey, list[OptionBar]]] = []
+    skipped = 0
     for window_start, window_end in windows:
         key = _coverage_key(
             exchange_segment=exchange_segment,
@@ -256,66 +493,38 @@ def ingest_rolling_option_series(
                 **series_fields,
             )
             continue
-        if pace is not None:
-            pace()
-        body = build_rolling_option_body(
-            security_id=security_id,
-            exchange_segment=exchange_segment,
-            instrument=instrument,
-            expiry_flag=expiry_flag,
-            expiry_code=expiry_code,
-            strike=strike,
-            drv_option_type=drv_option_type,
-            required_data=required_data,
-            from_date=datetime.combine(window_start, time()),
-            to_date=datetime.combine(window_end, time()),
-            interval=TRACK1_OPTIONS_INTERVAL,
-        )
-        try:
-            payload = client.post_json(ENDPOINT_ROLLING_OPTION, body)
-        except DhanError as exc:
-            if is_retryable(exc):
-                transient += 1
-                # Feed the swallowed transient to the rate governor so it adapts
-                # the options spine. The 429/success routing FOLLOWS the spot
-                # path's pattern (``ingest.ingest_spot``); the timeout branch is
-                # NEW here (the spot path has no timeout hook yet): a 429 → the
-                # 429 ladder; a timeout / transport / 5xx → the GENTLE timeout
-                # ladder, so a SUSTAINED storm (the operator's long-pull
-                # `DhanTimeoutError` cascade) eases the rate instead of grinding
-                # at 5 r/s into a struggling Dhan (DEC-DHAN-TIMEOUT-BACKOFF-001).
-                # A one-off blip is ignored by the controller's threshold →
-                # steady throughput unchanged. NB (divergence from the spot
-                # path): here a failed window is DEFERRED (``continue``) to the
-                # next pull, NOT retried in-run as the spot path does
-                # (DEC-DHAN-429-RETRY-001) — pre-existing options behaviour.
-                if is_rate_limit(exc):
-                    if on_rate_limit is not None:
-                        on_rate_limit()
-                elif on_timeout is not None:
-                    on_timeout()
-                continue
-            raise
-        # A clean window is the recover-up signal for the rate governor. NB: a
-        # COVERAGE-skipped window (the ``continue`` above) does NOT fire this —
-        # only an actually-fetched clean window — so a resume-heavy pull emits
-        # fewer recover-up signals (benign: the 300s step-up window dominates).
-        if on_success is not None:
-            on_success()
-        data = payload.get("data")
-        source = data if isinstance(data, Mapping) else payload
-        # Options are intraday 1m → drop pre-open / post-close before the lake.
-        parsed = parse_rolling_option_sides(source)
-        bars = [bar for bar in parsed if in_session(bar.timestamp)]
-        # Parse nook: rows decoded from the per-side ce/pe payload vs how many
-        # survived the [09:15,15:30) IST session gate.
-        _LOG.debug(
-            "ingest.parse",
-            pull_id=pull_id,
-            raw_bars=len(parsed),
-            session_bars=len(bars),
-            **series_fields,
-        )
+        bars = _fetch_cursor(window_start, window_end)
+        if bars is None:
+            # A cursor outran its retry budget → ABORT the whole series, committing
+            # NOTHING. Every non-skipped window is deferred to the next pull (the
+            # no-skip guarantee — coverage untouched ⇒ a re-pull re-fetches them).
+            still_failed = len(windows) - skipped
+            _LOG.warning(
+                "ingest.series.aborted",
+                pull_id=pull_id,
+                windows=len(windows),
+                skipped_windows=skipped,
+                still_failed_windows=still_failed,
+                committed=False,
+                note="cursor outran retry budget — partition NOT committed (empty, never partial)",
+                **series_fields,
+            )
+            return OptionIngestReport(
+                windows=len(windows),
+                bars_appended=0,
+                transient_failures=still_failed,
+                skipped_windows=skipped,
+                retried_windows=len(retried),
+                still_failed_windows=still_failed,
+            )
+        staged.append((key, bars))
+
+    # ── Phase 2 — COMMIT (every cursor fetched cleanly) ──
+    # The only place the sink + coverage are mutated, so the partition is committed
+    # all-or-nothing. Each window's append + coverage mark mirrors the prior
+    # per-window write, just deferred until the series is proven whole.
+    bars_appended = 0
+    for key, bars in staged:
         appended = sink.append_option_bars(
             security_id=security_id,
             exch_id=exch_id,
@@ -328,17 +537,9 @@ def ingest_rolling_option_series(
             bars=bars,
         )
         bars_appended += appended
-        _LOG.debug(
-            "ingest.window",
-            pull_id=pull_id,
-            window_start=window_start.isoformat(),
-            window_end=window_end.isoformat(),
-            action="fetched",
-            **series_fields,
-        )
         # Lake-write nook: option bars actually persisted for this window.
         _LOG.debug("ingest.lake_write", pull_id=pull_id, bars_appended=appended, **series_fields)
-        # Mark the window pulled only after a clean fetch + append.
+        # Mark the window pulled only now — after the whole series committed.
         if coverage is not None:
             coverage.mark_complete(key)
     # Per-series summary (one fanned-out series) — DEBUG; the per-underlying
@@ -348,15 +549,19 @@ def ingest_rolling_option_series(
         pull_id=pull_id,
         windows=len(windows),
         bars_appended=bars_appended,
-        transient_failures=transient,
+        transient_failures=0,
         skipped_windows=skipped,
+        retried_windows=len(retried),
+        still_failed_windows=0,
         **series_fields,
     )
     return OptionIngestReport(
         windows=len(windows),
         bars_appended=bars_appended,
-        transient_failures=transient,
+        transient_failures=0,
         skipped_windows=skipped,
+        retried_windows=len(retried),
+        still_failed_windows=0,
     )
 
 

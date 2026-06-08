@@ -91,8 +91,9 @@ still climbing to perfect is test coverage (next section).
   full end-to-end browser) for surfaces BruteX doesn't have yet (it's a
   backtest engine — **no live trading, no order placement**).
 
-We publish this scorecard *honestly* on purpose: per `STANDARDS_100PCT.md`,
-about **9 of 21** quality rows are *fully* enforced today, with the rest on a
+We publish this scorecard *honestly* on purpose: per `STANDARDS_100PCT.md`
+§1 (re-verified 2026-06-08), **15 of 21** quality rows are *fully* enforced
+today (71%), with 2 partial, 1 roadmap, and 3 manual-reviewer rows on a
 visible ratchet — every gap tracks a dedicated follow-up in
 `docs/MIGRATION.md`. The spine you'd actually bet on — **correctness,
 reproducibility, the audit trail, the merge gate, O(1) dedup** — is real and

@@ -48,6 +48,8 @@ from brutex.vocabulary.bits import (
     BIT_GAP_DOWN_DAY,
     BIT_GAP_UP_DAY,
     BIT_INSIDE_DAY,
+    BIT_LONG_LOWER_WICK,
+    BIT_LONG_UPPER_WICK,
     BIT_MID_MORNING,
     BIT_MIDDAY,
     BIT_OUTSIDE_DAY,
@@ -68,10 +70,25 @@ CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset(
         (BIT_CLOSE_ABOVE_PDH, BIT_CLOSE_BELOW_PDH),
         (BIT_CLOSE_ABOVE_PDL, BIT_CLOSE_BELOW_PDL),
         # Group 5: Candle shape mutual exclusions
+        # NOTE (DEC-STAGE1B-CONFLICT-FIX-001): (BULLISH, DOJI) and (BEARISH, DOJI)
+        # were REMOVED — they are NOT conflicts. The evaluator defines DOJI as a
+        # SMALL body (`body*10 < range`, evaluator.rs:239), not `open==close`, so a
+        # bar with a tiny POSITIVE body is both BULLISH and DOJI (and a tiny
+        # negative body is BEARISH+DOJI). Listing them as conflicts WRONGLY pruned
+        # those valid masks from the sweep — a leaderboard-corruption bug (verified:
+        # ~9% of random bars are bullish/bearish dojis).
         (BIT_BAR_BULLISH, BIT_BAR_BEARISH),
-        (BIT_BAR_BULLISH, BIT_BAR_DOJI),
-        (BIT_BAR_BEARISH, BIT_BAR_DOJI),
         (BIT_BAR_LARGE_BODY, BIT_BAR_SMALL_BODY),
+        # New UNCONDITIONAL candle conflicts (DEC-STAGE1B-CONFLICT-FIX-001),
+        # each provable from evaluator.rs:233-256 (body/range + wick/range bounds)
+        # and verified to never co-occur across 20k random bars:
+        #   DOJI (body/range < 0.1) ⊥ LARGE_BODY (body/range > 0.7)
+        (BIT_BAR_DOJI, BIT_BAR_LARGE_BODY),
+        #   upper_wick + body + lower_wick == range, so two halves can't both
+        #   exceed range/2, and a >0.7 body leaves <0.3 for either wick:
+        (BIT_LONG_UPPER_WICK, BIT_LONG_LOWER_WICK),
+        (BIT_BAR_LARGE_BODY, BIT_LONG_UPPER_WICK),
+        (BIT_BAR_LARGE_BODY, BIT_LONG_LOWER_WICK),
         # Group 6: Prior bar pattern mutual exclusions
         (BIT_PRIOR_N_BULLISH, BIT_PRIOR_N_BEARISH),
         (BIT_PRIOR_N_BULLISH, BIT_PRIOR_ALTERNATING),
