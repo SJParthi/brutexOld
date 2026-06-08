@@ -33,6 +33,10 @@ from brutex.feed.lookahead import LookAheadReport
 from brutex.metrics.compute import ResultMetrics
 from brutex.metrics.types import ClosedTrade
 from brutex.strategies.types import Side
+from brutex.vocabulary import ProximityParams
+
+#: A self-contradictory mask (all 52 bits) never fires → deterministic no-trade.
+_IMPOSSIBLE_MASK = (1 << 52) - 1
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -347,3 +351,98 @@ def test_aggregate_all_none_sharpe_yields_none_summary() -> None:
     assert result.min_test_sharpe is None
     assert result.pass_rate == 0.0
     assert result.held_up is False
+
+
+# ── end-to-end happy paths (the unit suite is the brutex.engine 100% gate, which
+#    runs ONLY tests/unit/test_engine_*.py — so the scoring bodies must be unit-covered) ──
+
+
+def test_evaluate_combo_walk_forward_end_to_end() -> None:
+    # 25 IST days × 2 bars; train=10/test=5/step=5 → 3 folds.
+    result = evaluate_combo_walk_forward(
+        _stream(25),
+        required_mask=0,
+        direction=Side.BUY,
+        tf_minutes=1,
+        train_days=10,
+        test_days=5,
+        step_days=5,
+    )
+    assert result.n_folds == 3
+    assert len(result.fold_results) == 3
+    assert 0.0 <= result.pass_rate <= 1.0
+    assert isinstance(result.held_up, bool)
+    assert len(result.run_hash) == 64
+    for i, fr in enumerate(result.fold_results):
+        assert fr.fold_index == i
+        assert fr.train_metrics.total_trades >= 0
+        assert fr.test_metrics.total_trades >= 0
+
+
+def test_evaluate_combo_walk_forward_with_explicit_proximity_and_sltp() -> None:
+    # An explicit (non-None) proximity exercises the run-hash proximity branch;
+    # SL/TP cycles trades inside the windows so the trade-confinement guard runs.
+    result = evaluate_combo_walk_forward(
+        _stream(25),
+        required_mask=0,
+        direction=Side.SELL,
+        tf_minutes=1,
+        stop_loss_paisa=20,
+        take_profit_paisa=20,
+        proximity=ProximityParams(),
+        train_days=10,
+        test_days=5,
+        step_days=5,
+    )
+    assert result.n_folds == 3
+    assert len(result.run_hash) == 64
+
+
+def test_walk_forward_sweep_end_to_end_matches_single() -> None:
+    bars = _stream(25)
+    masks = [0, _IMPOSSIBLE_MASK]
+    swept = walk_forward_sweep(
+        bars,
+        masks,
+        direction=Side.BUY,
+        tf_minutes=1,
+        train_days=10,
+        test_days=5,
+        step_days=5,
+    )
+    assert [m for m, _ in swept] == masks
+    for mask, swept_result in swept:
+        single = evaluate_combo_walk_forward(
+            bars,
+            required_mask=mask,
+            direction=Side.BUY,
+            tf_minutes=1,
+            train_days=10,
+            test_days=5,
+            step_days=5,
+        )
+        assert swept_result.run_hash == single.run_hash
+        assert swept_result.fold_results == single.fold_results
+
+
+def test_no_trade_mask_aggregates_to_zero() -> None:
+    result = evaluate_combo_walk_forward(
+        _stream(25),
+        required_mask=_IMPOSSIBLE_MASK,
+        direction=Side.BUY,
+        tf_minutes=1,
+        train_days=10,
+        test_days=5,
+        step_days=5,
+    )
+    assert result.folds_passed == 0
+    assert result.pass_rate == 0.0
+    assert result.held_up is False
+    assert result.mean_test_sharpe is None
+
+
+def test_evaluate_and_sweep_empty_bars_raise() -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        evaluate_combo_walk_forward([], required_mask=0, direction=Side.BUY, tf_minutes=1)
+    with pytest.raises(ValueError, match="non-empty"):
+        walk_forward_sweep([], [0], direction=Side.BUY, tf_minutes=1)
