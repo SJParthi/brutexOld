@@ -198,7 +198,7 @@ def test_p_18_rate_limiter_holds_to_spec_rate() -> None:
     """P-18: the token-bucket rate limiter never exceeds the vendor cap
     (Dhan Data API: 5 r/s — DEC-GROWW-DHAN-REVERT-001, CLAUDE.md §6;
     the earlier "10 r/s Groww-tuned" wording was stale)."""
-    pytest.skip("Phase 1.5 implementation pending (adapter HTTP-layer property)")
+    pytest.skip("implemented in tests/property/test_rate_limiter_properties.py")
 
 
 def test_p_22_no_bars_on_nse_holidays() -> None:
