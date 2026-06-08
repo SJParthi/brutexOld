@@ -1,9 +1,11 @@
 """Tests for `brutex.adapters.dhan.rate_control.DhanRateController`.
 
 100% line+branch with an injected fake clock (no real sleeping): starts at the
-5 r/s ceiling, steps down 5→4→3 on sustained 429s, clamps at the 3 r/s floor
-(no halt), ignores a non-sustained burst, evicts the window, recovers 3→4→5 on
-a sustained clean window, never exceeds 5, and `pace()` delegates to the bucket.
+5 r/s ceiling, steps down 5→4→3 on sustained 429s, rests at the SOFT 3 r/s floor
+on a brief burst but eases 3→2→1 under a SUSTAINED storm (DEC-DHAN-RATE-STORM-
+FLOOR-001), ignores a non-sustained burst, evicts the window, recovers up on a
+sustained clean window (incl. after a storm aged out — the on_success hits-evict
+fix), never exceeds 5, and `pace()` delegates to the bucket.
 """
 # pyright: reportPrivateUsage=none
 
@@ -16,10 +18,12 @@ from zoneinfo import ZoneInfo
 from brutex.adapters.dhan.rate_control import (
     CEILING_RPS,
     FLOOR_RPS,
+    RATE_LIMIT_STORM_FLOOR_RPS,
     STEP_DOWN_HITS,
     STEP_DOWN_TIMEOUT_HITS,
     STEP_DOWN_WINDOW,
     STEP_UP_WINDOW,
+    STORM_HITS,
     TIMEOUT_FLOOR_RPS,
     DhanRateController,
 )
@@ -80,14 +84,42 @@ def test_step_down_5_to_4_to_3_on_sustained_429s() -> None:
     assert ctl.current_rps == 3.0
 
 
-def test_clamps_at_floor_never_below_3_no_halt() -> None:
+def test_brief_429_burst_clamps_at_soft_floor_3() -> None:
+    # A BRIEF burst reaches the SOFT floor (3) quickly and rests there — a
+    # sub-STORM_HITS burst never crawls below 3 (a quota nudge is no reason to crawl).
     clock = _Clock()
     ctl = _controller(clock)
-    _hammer(ctl, clock, hits=STEP_DOWN_HITS * 4)  # way more than enough to overshoot
-    assert ctl.current_rps == FLOOR_RPS  # 3.0 — clamped, not 2 or a halt
-    # A further sustained burst at the floor stays at 3.0 (no exception).
-    _hammer(ctl, clock, hits=STEP_DOWN_HITS)
-    assert ctl.current_rps == 3.0
+    _hammer(ctl, clock, hits=STEP_DOWN_HITS * 4)  # 5→4→3, then a few more (< STORM_HITS)
+    assert ctl.current_rps == FLOOR_RPS  # 3.0 — the soft floor, not 2
+    _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # still a brief burst at the floor → stays 3
+    assert ctl.current_rps == FLOOR_RPS
+
+
+def test_sustained_429_storm_eases_below_soft_floor_to_storm_floor() -> None:
+    # A RELENTLESS 429 storm — every call rejected even at the soft floor (3) —
+    # eases BELOW it to RATE_LIMIT_STORM_FLOOR_RPS (1) on the higher STORM_HITS
+    # evidence threshold (DEC-DHAN-RATE-STORM-FLOOR-001), so the controller can
+    # finally back off instead of spinning pinned at 3 getting 100%-rejected.
+    clock = _Clock()
+    ctl = _controller(clock)
+    _hammer(ctl, clock, hits=STEP_DOWN_HITS * 2)  # 5→4→3 (the soft floor)
+    assert ctl.current_rps == FLOOR_RPS
+    _hammer(ctl, clock, hits=STORM_HITS)  # sustained at the floor → 3→2
+    assert ctl.current_rps == 2.0
+    _hammer(ctl, clock, hits=STORM_HITS)  # → 2→1
+    assert ctl.current_rps == RATE_LIMIT_STORM_FLOOR_RPS  # 1.0
+    assert RATE_LIMIT_STORM_FLOOR_RPS < FLOOR_RPS  # genuinely deeper than the soft floor
+
+
+def test_429_clamps_at_storm_floor_never_below_1() -> None:
+    clock = _Clock()
+    ctl = _controller(clock)
+    _hammer(ctl, clock, hits=STEP_DOWN_HITS * 2)  # → 3
+    _hammer(ctl, clock, hits=STORM_HITS)  # → 2
+    _hammer(ctl, clock, hits=STORM_HITS)  # → 1 (the storm floor)
+    assert ctl.current_rps == RATE_LIMIT_STORM_FLOOR_RPS
+    _hammer(ctl, clock, hits=STORM_HITS)  # at the storm floor: rps > floor is False → no step
+    assert ctl.current_rps == RATE_LIMIT_STORM_FLOOR_RPS  # 1.0 — clamped, no halt
 
 
 def test_non_sustained_burst_does_not_step() -> None:
@@ -136,12 +168,12 @@ def test_never_exceeds_ceiling() -> None:
 def test_on_success_blocked_by_recent_hit() -> None:
     clock = _Clock()
     ctl = _controller(clock)
-    _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # → 4.0 (and the buffer was cleared on the step)
+    _hammer(ctl, clock, hits=STEP_DOWN_HITS)  # → 4.0 (buffer cleared on the step), last_step ≈ now
     assert ctl.current_rps == 4.0
-    ctl.on_rate_limit()  # a fresh in-window hit → recovery is blocked
-    clock.advance(STEP_UP_WINDOW)
-    ctl.on_success()
-    assert ctl.current_rps == 4.0  # did NOT step up (recent hit present)
+    clock.advance(STEP_UP_WINDOW)  # the clean-window TIME is satisfied …
+    ctl.on_rate_limit()  # … but a FRESH in-window hit lands right before recovery
+    ctl.on_success()  # the hit is NOT aged out (>= cutoff) → not evicted → recovery blocked
+    assert ctl.current_rps == 4.0  # did NOT step up (a recent in-window hit blocks it)
 
 
 def test_on_success_blocked_before_clean_window() -> None:
@@ -153,6 +185,25 @@ def test_on_success_blocked_before_clean_window() -> None:
     clock.advance(STEP_UP_WINDOW - 1)  # just under the clean window
     ctl.on_success()
     assert ctl.current_rps == 4.0  # too soon → no step up
+
+
+def test_recovery_unblocked_after_storm_hits_age_out() -> None:
+    # The recovery-bug fix (DEC-DHAN-RATE-STORM-FLOOR-001): a 429 storm pins _hits
+    # at the floor; on_success must EVICT the aged hits so recovery proceeds —
+    # previously on_success evicted only _timeouts, so _hits stayed pinned and the
+    # rate was STUCK at the floor for the rest of the pull, never recovering to 5.
+    clock = _Clock()
+    ctl = _controller(clock)
+    _hammer(ctl, clock, hits=STEP_DOWN_HITS * 2)  # → 3.0 (soft floor; _hits cleared on the step)
+    # A sub-STORM_HITS burst at the floor pins _hits (no further step, never cleared).
+    _hammer(ctl, clock, hits=5)
+    assert ctl.snapshot()["recent_hits"] == 5  # pinned — would block recovery forever pre-fix
+    clock.advance(
+        STEP_UP_WINDOW
+    )  # storm clears: the 5 hits age out (> STEP_DOWN_WINDOW) + clean window
+    ctl.on_success()  # evicts the aged hits → not self._hits → recovery 3→4
+    assert ctl.current_rps == 4.0
+    assert ctl.snapshot()["recent_hits"] == 0  # the aged 429 hits were evicted by on_success
 
 
 def _hammer_timeouts(
@@ -269,6 +320,23 @@ class TestThrottleLogging:
         assert down[0]["from_rps"] == 5.0
         assert down[0]["to_rps"] == 4.0
         assert down[0]["floor_rps"] == FLOOR_RPS
+
+    def test_storm_step_below_soft_floor_logs_deep_storm_floor(self) -> None:
+        # A sustained-storm step BELOW the soft floor (3→2) must log the EFFECTIVE
+        # floor for that rung — the deep RATE_LIMIT_STORM_FLOOR_RPS (1), not the
+        # soft FLOOR_RPS (3) — so the operator sees the controller is now easing
+        # into the storm regime (DEC-DHAN-RATE-STORM-FLOOR-001).
+        clock = _Clock()
+        ctl = _controller(clock)
+        _hammer(ctl, clock, hits=STEP_DOWN_HITS * 2)  # 5→4→3 (now AT the soft floor)
+        assert ctl.current_rps == FLOOR_RPS
+        with capture_logs() as logs:
+            _hammer(ctl, clock, hits=STORM_HITS)  # sustained storm → 3→2
+        down = [e for e in logs if e["event"] == "rate.stepdown"]
+        assert len(down) == 1
+        assert down[0]["from_rps"] == 3.0
+        assert down[0]["to_rps"] == 2.0
+        assert down[0]["floor_rps"] == RATE_LIMIT_STORM_FLOOR_RPS  # deep floor, not 3
 
     def test_step_up_logs_recovery(self) -> None:
         clock = _Clock()

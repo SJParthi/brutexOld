@@ -30,7 +30,7 @@ from pathlib import Path
 from brutex.adapters.dhan.client import CallMeter
 from brutex.adapters.dhan.rate_control import (
     CEILING_RPS,
-    FLOOR_RPS,
+    RATE_LIMIT_STORM_FLOOR_RPS,
     DhanRateController,
 )
 from brutex.data.catalog import Catalog
@@ -97,20 +97,27 @@ class TestDhanRateControllerConcurrency:
             ctl.snapshot()
 
         _run_storm(op, threads=12, per_thread=200)
-        # The rate must always remain a valid rung in [FLOOR, CEILING] — a torn
-        # step (lost/duplicated decrement) would land it outside the envelope.
-        assert FLOOR_RPS <= ctl.current_rps <= CEILING_RPS
+        # The rate must always remain a valid rung in [STORM_FLOOR, CEILING] — a
+        # torn step (lost/duplicated decrement) would land it outside the envelope.
+        # The lower bound is the DEEP storm floor (1), not the soft FLOOR_RPS (3):
+        # the 4 on_rate_limit threads (800 hits on a frozen clock) are a SUSTAINED
+        # storm that eases past the soft floor to the storm floor
+        # (DEC-DHAN-RATE-STORM-FLOOR-001).
+        assert RATE_LIMIT_STORM_FLOOR_RPS <= ctl.current_rps <= CEILING_RPS
         snap = ctl.snapshot()
         current_rps = snap["current_rps"]
         recent_hits = snap["recent_hits"]
         assert isinstance(current_rps, float)
         assert isinstance(recent_hits, int)
-        assert FLOOR_RPS <= current_rps <= CEILING_RPS
+        assert RATE_LIMIT_STORM_FLOOR_RPS <= current_rps <= CEILING_RPS
         assert recent_hits >= 0
 
-    def test_concurrent_429s_step_down_to_floor_atomically(self) -> None:
-        # Many threads hammering 429s must drive the rate to the floor and stop
-        # there — never below (a double-step would undershoot the floor).
+    def test_concurrent_429s_step_down_to_storm_floor_atomically(self) -> None:
+        # Many threads hammering 429s is a SUSTAINED storm: it must drive the rate
+        # PAST the soft FLOOR_RPS (3) down to the deep RATE_LIMIT_STORM_FLOOR_RPS (1)
+        # and stop there — never below (a double-step would undershoot the floor).
+        # 800 hits on a frozen clock cross both the 3-hit soft-floor rungs (5→4→3)
+        # and the 30-hit STORM_HITS rungs (3→2→1) (DEC-DHAN-RATE-STORM-FLOOR-001).
         clock = _Clock()
         ctl = DhanRateController(clock=clock, sleep=lambda _s: None)
 
@@ -118,7 +125,7 @@ class TestDhanRateControllerConcurrency:
             ctl.on_rate_limit()
 
         _run_storm(op, threads=8, per_thread=100)
-        assert ctl.current_rps == FLOOR_RPS  # clamped, never below
+        assert ctl.current_rps == RATE_LIMIT_STORM_FLOOR_RPS  # clamped, never below
 
 
 class TestCallMeterConcurrency:

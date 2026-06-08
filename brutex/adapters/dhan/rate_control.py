@@ -4,11 +4,14 @@ The Dhan Data API ceiling is **5 req/s** (verified, ``docs/dhan-ref/01``). This
 controller (DEC-DHAN-ADAPTIVE-RPS-001) runs the pull at the **max 5 r/s** when
 Dhan is healthy and only **steps down 1 r/s** (5 → 4 → 3) under *sustained*
 rate-limiting, recovering 1 r/s at a time (3 → 4 → 5) once the pressure clears.
-It never exceeds **5** (the hard ceiling). The 429 ladder never drops below **3**
-(:data:`FLOOR_RPS` — clamped, not a halt); a SUSTAINED *timeout* storm on a heavy
-/ flaky endpoint eases FURTHER, to :data:`TIMEOUT_FLOOR_RPS` (1), so a struggling
-vendor can recover (DEC-DHAN-OPTION-TIMEOUT-STORM-001) — then recovers up to the
-ceiling. Maximises throughput while staying inside Dhan's limit (CLAUDE.md §2
+It never exceeds **5** (the hard ceiling). The 429 ladder reaches the SOFT
+:data:`FLOOR_RPS` (**3**) quickly on a brief burst (a quota nudge is no reason to
+crawl), and under a SUSTAINED 429 storm — every call rejected even at 3 r/s — eases
+FURTHER to :data:`RATE_LIMIT_STORM_FLOOR_RPS` (**1**) on the higher
+:data:`STORM_HITS` evidence threshold (DEC-DHAN-RATE-STORM-FLOOR-001), exactly as a
+SUSTAINED *timeout* storm on a heavy / flaky endpoint already eases to
+:data:`TIMEOUT_FLOOR_RPS` (1) (DEC-DHAN-OPTION-TIMEOUT-STORM-001) — then recovers up
+to the ceiling once the pressure clears. Maximises throughput while staying inside Dhan's limit (CLAUDE.md §2
 Rule 6).
 
 It owns only the small Dhan-specific step ladder; the **O(1) blocking pace** +
@@ -53,13 +56,17 @@ _LOG = structlog.get_logger("brutex.adapters.dhan.rate_control")
 #: Dhan's verified Data-API ceiling — the hard cap we never exceed (and start at).
 CEILING_RPS: float = float(DATA_RATE_LIMIT_RPS)
 
-#: The floor we clamp to under sustained pressure (never below — and never a halt).
+#: The SOFT floor the 429 ladder reaches quickly on a brief burst (a quota nudge is
+#: no reason to crawl). A SUSTAINED 429 storm eases BELOW it toward
+#: :data:`RATE_LIMIT_STORM_FLOOR_RPS` on the higher :data:`STORM_HITS` threshold
+#: (DEC-DHAN-RATE-STORM-FLOOR-001) — never a halt.
 FLOOR_RPS: float = 3.0
 
 #: The DEEPER floor the **timeout** ladder alone may reach under a SUSTAINED
 #: server-stress storm (DEC-DHAN-OPTION-TIMEOUT-STORM-001, operator 2026-06-05).
-#: The 429 ladder still clamps at :data:`FLOOR_RPS` (3) — a quota breach is no
-#: reason to crawl — but a relentless TIMEOUT cascade is different: the operator's
+#: A BRIEF 429 burst clamps at :data:`FLOOR_RPS` (3) — a quota nudge is no reason to
+#: crawl — but a SUSTAINED 429 storm (DEC-DHAN-RATE-STORM-FLOOR-001) AND a relentless
+#: TIMEOUT cascade both need to ease deeper: the operator's
 #: 50-stock options ``charts/rollingoption`` pull floored at 3 r/s yet kept
 #: ``latency_ms_max`` pinned at the 10s client timeout with ``recent_timeouts``
 #: saturated for 13+ min, because the timeout ladder had nowhere lower to ease.
@@ -75,6 +82,25 @@ STEP_RPS: float = 1.0
 #: "Heavy" = this many rate-limit hits inside :data:`STEP_DOWN_WINDOW` seconds.
 STEP_DOWN_HITS: int = 3
 STEP_DOWN_WINDOW: float = 60.0
+
+#: The DEEPER floor the **429** ladder may reach under a SUSTAINED rate-limit storm
+#: (DEC-DHAN-RATE-STORM-FLOOR-001). The 429 ladder reaches the soft :data:`FLOOR_RPS`
+#: (3) quickly on a brief burst — a mere quota nudge is no reason to crawl — but a
+#: RELENTLESS 429 cascade where EVERY call is rejected even AT 3 r/s proves 3 is
+#: still too fast (the operator's 90-min log: ``current_rps=3.0`` with ``recent_hits``
+#: pinned at ~179 for 3.5 min). Like the timeout ladder it then needs room to ease to
+#: :data:`TIMEOUT_FLOOR_RPS` (1) so the vendor can recover; :meth:`on_success` raises
+#: it back to the ceiling once the storm clears. Easing below the soft floor requires
+#: SUSTAINED evidence (:data:`STORM_HITS`), so a transient burst never crawls.
+RATE_LIMIT_STORM_FLOOR_RPS: float = TIMEOUT_FLOOR_RPS
+
+#: Sustained-storm evidence: this many 429 hits inside :data:`STEP_DOWN_WINDOW` while
+#: ALREADY at (or below) the soft :data:`FLOOR_RPS` → ease ONE rung toward
+#: :data:`RATE_LIMIT_STORM_FLOOR_RPS`. At 3 r/s this is ~10 s of 100%-rejection — an
+#: unmistakable storm — vs the 3-hit :data:`STEP_DOWN_HITS` that reaches the soft floor
+#: from above. Deliberately high so only a genuine cascade (not a brief quota nudge)
+#: drops below 3 (DEC-DHAN-RATE-STORM-FLOOR-001).
+STORM_HITS: int = 30
 
 #: "Heavy" TIMEOUTS = this many server-stress stalls (timeout / transport / 5xx —
 #: a SLOW, struggling Dhan, NOT a quota breach) inside :data:`STEP_DOWN_WINDOW`
@@ -106,9 +132,10 @@ BURST: int = 1
 class DhanRateController:
     """Adaptive [1..5] r/s controller: start 5, step down on heavy 429s, recover up.
 
-    Steady-state envelope is [3..5] (the 429 ladder floors at :data:`FLOOR_RPS`);
-    a SUSTAINED timeout storm eases further to :data:`TIMEOUT_FLOOR_RPS` (1), so
-    the full range is [1..5] (DEC-DHAN-OPTION-TIMEOUT-STORM-001).
+    Steady-state envelope is [3..5] (the 429 ladder reaches the soft
+    :data:`FLOOR_RPS` on a brief burst); a SUSTAINED 429 storm (:data:`STORM_HITS`)
+    OR a sustained timeout storm eases further to the deep floor (1), so the full
+    range is [1..5] (DEC-DHAN-RATE-STORM-FLOOR-001 + DEC-DHAN-OPTION-TIMEOUT-STORM-001).
 
     Thread-safety (DEC-DHAN-PARALLEL-INGEST-001). The controller is the shared
     GOVERNOR for the parallelised ingest fan-out: one instance is threaded
@@ -159,7 +186,13 @@ class DhanRateController:
         #: Server-stress stalls (timeout / transport / 5xx) inside the rolling
         #: STEP_DOWN_WINDOW — the gentle adaptive timeout ladder's evidence
         #: buffer (DEC-DHAN-TIMEOUT-BACKOFF-001), kept separate from the 429
-        #: ``_hits`` so the two signals never cross-trigger each other's ladder.
+        #: ``_hits`` so the two signals never cross-COUNT (a timeout never advances
+        #: the 429 ladder, nor vice-versa). NOTE they still share ``_rps`` /
+        #: ``_last_step``, so a MIXED storm (429s + timeouts) compounds on the rate —
+        #: each ladder steps the shared rate independently, descending faster than
+        #: either alone (intended: more pressure → back off harder), and a step on
+        #: EITHER ladder restamps ``_last_step``, delaying recovery for both. Both
+        #: floor at 1 (DEC-DHAN-RATE-STORM-FLOOR-001), so they cannot fight below it.
         self._timeouts: deque[float] = deque()
         self._last_step: float = clock()
         self._bucket: AdaptiveTokenBucket = self._make_bucket()
@@ -234,14 +267,31 @@ class DhanRateController:
             while self._hits and self._hits[0] < cutoff:
                 self._hits.popleft()
             _LOG.warning("rate.429", current_rps=self._rps, recent_hits=len(self._hits))
-            if len(self._hits) >= STEP_DOWN_HITS and self._rps > FLOOR_RPS:
+            # Two-tier 429 ladder (DEC-DHAN-RATE-STORM-FLOOR-001): reach the soft
+            # FLOOR_RPS (3) quickly on a brief burst (STEP_DOWN_HITS=3), but ease BELOW
+            # it toward the deep RATE_LIMIT_STORM_FLOOR_RPS (1) ONLY on SUSTAINED
+            # evidence (STORM_HITS). So a transient quota nudge rests at 3 (a quota
+            # breach is no reason to crawl), while a relentless cascade — every call
+            # rejected even at 3 r/s — can finally back off instead of spinning pinned
+            # at the floor getting 100%-rejected for minutes. The floor for the 429
+            # ladder is now the deep RATE_LIMIT_STORM_FLOOR_RPS, gated by the higher
+            # STORM_HITS threshold below 3 so it is reached only under a true storm.
+            above_soft_floor = self._rps > FLOOR_RPS
+            threshold = STEP_DOWN_HITS if above_soft_floor else STORM_HITS
+            if len(self._hits) >= threshold and self._rps > RATE_LIMIT_STORM_FLOOR_RPS:
                 old_rps = self._rps
                 self._rps -= STEP_RPS
                 self._bucket.set_rate(self._rps)
                 self._hits.clear()
                 self._last_step = now
+                # Log the EFFECTIVE floor for THIS rung: a soft-floor step (still
+                # above 3) heads toward FLOOR_RPS (3); a sustained-storm step below
+                # the soft floor heads toward the deep RATE_LIMIT_STORM_FLOOR_RPS (1).
                 _LOG.warning(
-                    "rate.stepdown", from_rps=old_rps, to_rps=self._rps, floor_rps=FLOOR_RPS
+                    "rate.stepdown",
+                    from_rps=old_rps,
+                    to_rps=self._rps,
+                    floor_rps=FLOOR_RPS if above_soft_floor else RATE_LIMIT_STORM_FLOOR_RPS,
                 )
 
     def on_timeout(self) -> None:
@@ -291,14 +341,27 @@ class DhanRateController:
         """Record a clean call; step **up** 1 r/s after a sustained clean window — O(1).
 
         Thread-safe: the recover-up check + the ``set_rate`` mutation are one
-        atomic O(1) critical section (no I/O / sleep under the lock). Stale
-        timeouts (older than :data:`STEP_DOWN_WINDOW`) are evicted here too, so a
-        timeout storm that never reached the step-down threshold cannot block
-        recovery forever once it has aged out (DEC-DHAN-TIMEOUT-BACKOFF-001).
+        atomic O(1) critical section (no I/O / sleep under the lock). Stale 429
+        hits AND timeouts (older than :data:`STEP_DOWN_WINDOW`) are evicted here, so
+        a storm that pinned the rate at the floor — where ``on_rate_limit``'s
+        step-down branch, the only OTHER place ``_hits`` is cleared, can no longer
+        fire — cannot block recovery forever once the hits age out
+        (DEC-DHAN-RATE-STORM-FLOOR-001 + DEC-DHAN-TIMEOUT-BACKOFF-001).
         """
         with self._lock:
             now = self._clock()
             cutoff = now - STEP_DOWN_WINDOW
+            # Evict aged-out 429 hits AND timeouts (DEC-DHAN-RATE-STORM-FLOOR-001).
+            # on_success previously evicted ONLY _timeouts. But on_rate_limit clears
+            # _hits exclusively inside its step-DOWN branch, which cannot fire once the
+            # rate is pinned at the floor (`rps > RATE_LIMIT_STORM_FLOOR_RPS` False) — so
+            # after a storm reached the floor, _hits stayed pinned at its rolling-window
+            # count and `not self._hits` was NEVER True, leaving the rate STUCK at the
+            # floor for the rest of the pull, never recovering to 5 (the operator's
+            # 90-min log: 3 r/s the whole run after one storm). Aging stale hits out here
+            # lets recovery proceed once the storm has truly cleared (no new 429s).
+            while self._hits and self._hits[0] < cutoff:
+                self._hits.popleft()
             while self._timeouts and self._timeouts[0] < cutoff:
                 self._timeouts.popleft()
             if (
@@ -355,11 +418,13 @@ __all__ = [
     "BURST",
     "CEILING_RPS",
     "FLOOR_RPS",
+    "RATE_LIMIT_STORM_FLOOR_RPS",
     "STEP_DOWN_HITS",
     "STEP_DOWN_TIMEOUT_HITS",
     "STEP_DOWN_WINDOW",
     "STEP_RPS",
     "STEP_UP_WINDOW",
+    "STORM_HITS",
     "TIMEOUT_FLOOR_RPS",
     "DhanRateController",
 ]
