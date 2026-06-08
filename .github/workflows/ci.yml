@@ -565,6 +565,15 @@ jobs:
           else
             echo "(brutex.config.ports test file not present yet — gate inactive)"
           fi
+          # DEC-CREDS-JWT-SHAPE-001: the secure Dhan credentials store —
+          # save/load/resolve/preview + the new token_shape_problem JWT-shape
+          # guard that rejects a truncated paste (the DH-906 root cause) at the
+          # web-form save boundary. 100% line+branch (138 stmts, 36 branches).
+          if compgen -G "tests/unit/test_credentials.py" > /dev/null; then
+            pytest --cov=brutex.config.credentials --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_credentials.py
+          else
+            echo "(brutex.config.credentials test file not present yet — gate inactive)"
+          fi
           # DEC-VENDOR-PIVOT-001: groww.types strict-100% gate deleted
           # with the Groww wipe. Groww types gate lands in Phase 1.
           # DEC-COV-001 step 16 (entry #228): 5-module quintuple-add of

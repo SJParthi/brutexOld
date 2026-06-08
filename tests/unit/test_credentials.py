@@ -29,6 +29,7 @@ from brutex.config.credentials import (
     normalise_token,
     resolve_dhan_file_credentials,
     save_dhan_credentials,
+    token_shape_problem,
 )
 
 # FAKE constants — never real secrets. The whole suite uses only these.
@@ -420,6 +421,58 @@ class TestNormalise:
 # ────────────────────────────────────────────────────────────────────────
 # credentials_preview — DEC-CREDS-PREVIEW-001 (masked, never a usable secret)
 # ────────────────────────────────────────────────────────────────────────
+
+
+class TestTokenShape:
+    """token_shape_problem — JWT-shape guard (DEC-CREDS-JWT-SHAPE-001).
+
+    A truncated paste (the DH-906 root cause) almost always loses or empties
+    the trailing signature segment; this structural check catches that offline,
+    before a doomed token is saved. The reason is always SECRET-FREE.
+    """
+
+    def test_valid_three_segment_jwt_passes(self) -> None:
+        # Three non-empty base64url segments → well-formed → no problem.
+        assert token_shape_problem("eyJhbGc.eyJzdWI.sIg-na_ture") is None
+
+    def test_surrounding_whitespace_is_stripped_before_check(self) -> None:
+        # A trailing newline must NOT be mistaken for malformation.
+        assert token_shape_problem("  eyJhbGc.eyJzdWI.sIgnature \n") is None
+
+    def test_two_segments_flagged_as_truncated(self) -> None:
+        # Lost the whole signature → only 2 segments → flagged.
+        reason = token_shape_problem("eyJhbGc.eyJzdWI")
+        assert reason is not None
+        assert "truncated" in reason
+        assert "found 2" in reason
+
+    def test_single_segment_no_dots_flagged(self) -> None:
+        reason = token_shape_problem("notajwtatall")
+        assert reason is not None
+        assert "found 1" in reason
+
+    def test_empty_trailing_segment_flagged(self) -> None:
+        # A trailing dot leaves an empty 3rd segment → base64url check fails.
+        reason = token_shape_problem("eyJhbGc.eyJzdWI.")
+        assert reason is not None
+        assert "base64url" in reason
+
+    def test_empty_leading_segment_flagged(self) -> None:
+        reason = token_shape_problem(".eyJzdWI.sIgnature")
+        assert reason is not None
+        assert "base64url" in reason
+
+    def test_non_base64url_character_flagged(self) -> None:
+        # '+' / '/' are standard base64 but NOT base64url → a JWT never has them.
+        reason = token_shape_problem("eyJhbGc.eyJ+dWI.sIgnature")
+        assert reason is not None
+        assert "base64url" in reason
+
+    def test_reason_never_contains_the_token(self) -> None:
+        secret = "supersecretpastethatgottruncated"
+        reason = token_shape_problem(secret)
+        assert reason is not None
+        assert secret not in reason
 
 
 class TestPreview:

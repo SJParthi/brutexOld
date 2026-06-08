@@ -2164,8 +2164,13 @@ def build_app(
         """POST /api/v1/credentials — save the Dhan credentials (mode 0600).
 
         Accepts the access token + client id in the request BODY (never query
-        params, which leak into access logs). The body is NOT logged. On a
-        validation error (blank field) the credentials store raises
+        params, which leak into access logs). The body is NOT logged. Before
+        saving, the access token is checked for a well-formed JWT shape
+        (:func:`brutex.config.credentials.token_shape_problem`,
+        DEC-CREDS-JWT-SHAPE-001): a truncated paste — the dominant cause of the
+        opaque ``DH-906 Invalid Token`` failures — is rejected here with a
+        clear "re-paste the FULL token" 400 instead of silently saving a doomed
+        token. On a validation error (blank field) the credentials store raises
         :class:`CredentialsError`, mapped here to HTTP 400 with a message
         that names the offending field but NEVER its value. Returns only
         the masked preview — never echoes a value back. Saving here ENABLES
@@ -2178,7 +2183,14 @@ def build_app(
             DhanFileCredentials,
             credentials_preview,
             save_dhan_credentials,
+            token_shape_problem,
         )
+
+        # Reject a truncated/corrupt paste up front (DEC-CREDS-JWT-SHAPE-001) so
+        # a doomed token never reaches the store — the reason is secret-free.
+        shape_problem = token_shape_problem(body.access_token)
+        if shape_problem is not None:
+            raise HTTPException(status_code=400, detail=shape_problem)
 
         try:
             save_dhan_credentials(
