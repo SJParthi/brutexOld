@@ -91,6 +91,12 @@ fuzz_target!(|data: &[u8]| {
         "the 50% retracement must lie within [PDL, PDH]"
     );
     // Up-extensions sit above PDH, down-extensions below PDL (range >= 0).
-    assert!(fb.ext_up_127_paisa >= pdh, "127% up-extension must be >= PDH");
-    assert!(fb.ext_down_127_paisa <= pdl, "127% down-extension must be <= PDL");
+    assert!(
+        fb.ext_up_127_paisa >= pdh,
+        "127% up-extension must be >= PDH"
+    );
+    assert!(
+        fb.ext_down_127_paisa <= pdl,
+        "127% down-extension must be <= PDL"
+    );
 });

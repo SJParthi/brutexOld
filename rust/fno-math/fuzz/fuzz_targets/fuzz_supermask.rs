@@ -52,7 +52,11 @@ fuzz_target!(|data: &[u8]| {
     // 3. Batch == single element-wise, order preserved.
     let masks = vec![mask, 0u64, !mask];
     let batch = count_supermasks_u64s(bars.clone(), masks.clone());
-    assert_eq!(batch.len(), masks.len(), "batch length must equal masks length");
+    assert_eq!(
+        batch.len(),
+        masks.len(),
+        "batch length must equal masks length"
+    );
     for (j, &mj) in masks.iter().enumerate() {
         assert_eq!(
             batch[j],
