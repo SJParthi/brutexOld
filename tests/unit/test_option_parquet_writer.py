@@ -195,6 +195,73 @@ class TestAtomicWriteCleanup:
         assert leftovers == []
 
 
+class TestPartitionLock:
+    """Per-partition write serialisation (DEC-OPTION-PARTITION-LOCK-001).
+
+    The merge-on-write is a read-modify-write, so when the rolling-option fetch is
+    parallelised (DEC-DHAN-PARALLEL-INGEST-001) two windows of ONE series can target
+    the SAME month partition (a 30-day option pull straddles a month boundary) and a
+    naive concurrent ``os.replace`` would drop the loser's bars. A per-PATH lock
+    serialises only same-file writers; different partitions never contend. This is
+    belt-and-braces below the coarse ``OptionBarSink`` audit lock — the writer is now
+    correct on its own.
+    """
+
+    def test_same_path_returns_same_lock(self, tmp_path: Path) -> None:
+        from brutex.data.option_parquet_writer import _partition_lock
+
+        dest = tmp_path / "options" / "NSE_FNO__13__WEEK__0__ATM__CALL" / "2021-01.parquet"
+        # Interned by path: two calls for the same file → the SAME lock object (so two
+        # OptionParquetWriter instances serialise on one file).
+        assert _partition_lock(dest) is _partition_lock(dest)
+
+    def test_different_paths_get_distinct_locks(self, tmp_path: Path) -> None:
+        from brutex.data.option_parquet_writer import _partition_lock
+
+        a = tmp_path / "options" / "a" / "2021-01.parquet"
+        b = tmp_path / "options" / "b" / "2021-02.parquet"
+        # Distinct partitions get distinct locks → writers to different files never
+        # block each other (the fan-out keeps its parallelism).
+        assert _partition_lock(a) is not _partition_lock(b)
+
+    def test_concurrent_same_partition_writes_lose_no_bars(self, tmp_path: Path) -> None:
+        """16 threads merge-writing the same month from a barrier keep ALL bars.
+
+        Without the per-partition lock this is a lost-update race (every thread reads
+        the empty/partial file, each unions only its own bar, the later rename wins).
+        With the lock the merges serialise and the partition holds the UNION of every
+        thread's bars regardless of completion order (Rule #7).
+        """
+        import threading
+
+        w = _writer(tmp_path)
+        n_threads = 16
+        barrier = threading.Barrier(n_threads)
+        errors: list[Exception] = []
+
+        def _write(minute: int) -> None:
+            # Each thread writes a DISTINCT (side, timestamp) into the SAME (year,
+            # month) partition — the union must end up with all n_threads rows.
+            barrier.wait()  # maximise the race window
+            try:
+                w.write(partition_key=_PK, coordinate=_COORD, bars=[_bar(minute=minute)])
+            except Exception as exc:  # surface any worker failure to the assert below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_write, args=(m,)) for m in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert errors == []
+        df = _read(tmp_path)
+        # No lost update: every distinct-minute bar survived the merge.
+        assert df.height == n_threads
+        minutes = sorted(ts.minute for ts in df["timestamp"].to_list())
+        assert minutes == list(range(n_threads))
+
+
 class TestPathSafety:
     def test_empty_partition_key_raises(self, tmp_path: Path) -> None:
         with pytest.raises(OptionWriterError, match="non-empty"):
