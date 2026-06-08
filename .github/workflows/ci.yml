@@ -2297,12 +2297,12 @@ jobs:
         with:
           node-version: '22'
       - name: Install jscpd
-        # PIN to the last pure-JS line (3.5.10). The unpinned `npm install -g
-        # jscpd` began resolving a 4.x release whose Rust-core CPD ships as
-        # platform-specific optional packages (`cpd-linux-x64-gnu`) that the npm
-        # publish omits, so jscpd exited 1 ("Platform package not installed")
-        # BEFORE scanning a line — a broken-installer false-fail, not real
-        # duplication. 3.5.10 has no native binary and keeps the same CLI flags.
+        # DEC-JSCPD-PIN-001: PIN to the last pure-JS line (3.5.10). The unpinned
+        # `npm install -g jscpd` began resolving a 4.x release whose Rust-core CPD
+        # ships as platform-specific optional packages (`cpd-linux-x64-gnu`) that
+        # the npm publish omits, so jscpd exited 1 ("Platform package not
+        # installed") BEFORE scanning a line — a broken-installer false-fail, not
+        # real duplication. 3.5.10 has no native binary and keeps the same CLI flags.
         run: npm install -g jscpd@3.5.10
       - name: Run jscpd (blocking — DEC-P0-001)
         run: |

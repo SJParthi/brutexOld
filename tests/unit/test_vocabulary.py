@@ -473,9 +473,10 @@ class TestConflicts:
         mask = (1 << B.BIT_CLOSE_ABOVE_EMA20) | (1 << B.BIT_CLOSE_ABOVE_PDH)
         assert not has_conflict(mask)
 
-    def test_all_24_conflict_pairs_documented(self) -> None:
-        # Verify CONFLICT_PAIRS has the expected 24 entries (per spec)
-        assert len(CONFLICT_PAIRS) == 24
+    def test_all_conflict_pairs_documented(self) -> None:
+        # 24 original − 2 buggy (bullish/bearish-doji, removed in
+        # DEC-STAGE1B-CONFLICT-FIX-001) + 4 verified candle conflicts = 26.
+        assert len(CONFLICT_PAIRS) == 26
 
 
 # ────── Look-ahead invariant ──────
