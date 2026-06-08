@@ -1000,3 +1000,50 @@ class TestRefreshLiveToken:
             assert holder.get() == "new-jwt"
         finally:
             set_live_token_holder(None)
+
+
+class TestPullPopulatesLedger:
+    """DEC-WINDOW-LEDGER-001 (PR-4): a live pull records EVERY window in the ledger DB."""
+
+    def test_live_pull_writes_success_rows(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import ledger_path, load_window_ledger
+
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=lambda _root, _insts: (SyntheticDhanAdapter(), NullBarSink()),
+        )
+        assert report.dry_run is False
+        assert ledger_path(tmp_path).is_file()  # durable Parquet written
+        ledger = load_window_ledger(tmp_path)
+        statuses = {r.status for r in ledger.records()}
+        assert ledger.count > 0
+        assert statuses == {"SUCCESS"}  # every planned window fetched + recorded
+        # The ledger now backs /coverage/windows (every window has a row).
+        assert all(r.market == "dhan" and r.security_id == "13" for r in ledger.records())
+
+    def test_dh905_windows_are_tracked_as_planned(self, tmp_path: Path) -> None:
+        # A DH-905 known-gap is terminal (never recorded), so its windows REMAIN
+        # PLANNED in the ledger — proving even an UN-fetched window is captured in
+        # the DB (nothing silently missing), exactly the operator's requirement.
+        from brutex.data.window_ledger_store import ledger_path, load_window_ledger
+
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=lambda _root, _insts: (_NoDataDH905Adapter(), NullBarSink()),
+        )
+        assert ledger_path(tmp_path).is_file()
+        ledger = load_window_ledger(tmp_path)
+        assert ledger.count > 0
+        assert {r.status for r in ledger.records()} == {"PLANNED"}  # tracked, not missing
+
+    def test_dry_run_writes_no_ledger(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import ledger_path
+
+        pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert not ledger_path(tmp_path).exists()  # dry-run never pollutes the ledger

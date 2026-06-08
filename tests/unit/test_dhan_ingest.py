@@ -404,6 +404,63 @@ class TestIngestSpotStatusLog:
         assert rec.last_error == "DhanRateLimitError"
 
 
+class TestIngestSpotLedger:
+    """The unified ledger record (DEC-WINDOW-LEDGER-001, PR-4a) — the same two
+    record sites as the status log, exercised here so ingest.py stays 100%."""
+
+    def test_ledger_records_success_when_vendor_returns_bars(self) -> None:
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        ledger = WindowLedger()
+        ingest_spot(
+            _adapter(),  # 1 bar
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            ledger=ledger,
+        )
+        rec = ledger.records()[0]
+        assert rec.status == SUCCESS
+        assert rec.attempts == 1
+        assert rec.last_error is None
+
+    def test_ledger_records_empty_on_zero_bar_response(self) -> None:
+        from brutex.data.window_ledger import EMPTY, WindowLedger
+
+        empty = {"open": [], "high": [], "low": [], "close": [], "timestamp": []}
+        ledger = WindowLedger()
+        ingest_spot(
+            _adapter(payload=empty),
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            ledger=ledger,
+        )
+        assert ledger.records()[0].status == EMPTY
+
+    def test_ledger_records_failed_on_429(self) -> None:
+        from brutex.data.window_ledger import FAILED, WindowLedger
+
+        ledger = WindowLedger()
+        ingest_spot(
+            _adapter(status=429),  # DhanRateLimitError — retryable
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            ledger=ledger,
+            max_retry_passes=0,  # single attempt — assert the FAILED record, not the retry
+        )
+        rec = ledger.records()[0]
+        assert rec.status == FAILED
+        assert rec.last_error == "DhanRateLimitError"
+
+
 class _SeqTransport:
     """Transport returning a fixed STATUS SEQUENCE (clamped to the last on overflow).
 
