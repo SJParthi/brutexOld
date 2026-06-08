@@ -52,7 +52,7 @@
 
 | # | Requirement | Verdict | Evidence | Risk |
 |---|---|---|---|---|
-| P-01 | **"100% standards / 18 requirements"** | 🟠 | Only **9 of 21 sub-rows ✅ ENFORCED**; 4 🟡 PARTIAL; 5 📋 ROADMAP; 3 👁️ MANUAL per STANDARDS_100PCT.md's own self-audit. CLAUDE.md §2 rule 12 presents all 18 as binding. **Real coverage: ~22%.** | Decree-vs-reality gap of ~60%. |
+| P-01 | **"100% standards / 18 requirements"** | 🟢 LARGELY CLOSED | Was "9 of 21 ✅ / ~22%" at the original audit; the DEC-STANDARDS-AUDIT-001 → DEC-CROSSWALK-001 → DEC-PYLINT-DROP-001 → DEC-DOCTOR-001 → DEC-STRESS-001 arc ratcheted it to **15 of 21 sub-rows 🟢 ENFORCED; 2 🟡 PARTIAL; 1 📋 ROADMAP; 3 👁️ MANUAL → ~71%** (per `STANDARDS_100PCT.md:67-86`, re-verified 2026-06-08; CLAUDE.md §2 rule 12 reconciled by DEC-DOC-STANDARDS-RECONCILE-001). CLAUDE.md §2 rule 12 still presents all 18 as the binding *target*; the honest-envelope block now cites the real 71%. | Decree-vs-reality gap narrowed from ~60% → ~14% (remaining: 2 partial coverage rows + 1 throughput-runner roadmap). |
 | P-02 | **"Mutation score ≥ 85%"** | 🟠 | Covers ONE module (`brutex/orchestrator/state.py` at 98%). 4 prior PRs used `OPERATOR_OVERRIDE` to bypass entirely (DEC-P0-005). | Headline gate covers ~1% of package. |
 | P-03 | **"2-4 day SLA at 80-150K trials/sec"** | 🟠 | PERFORMANCE_BUDGET §5: "OPTIMISTIC" tier. Realistic is "20-50K" (7-20 days), conservative "5-15K" (25-75 days). MIGRATION #98: probability 55-65%. **No measured M4 Pro throughput.** | Operator plans against 2-4 days; actual likely 7-20+. |
 | P-04 | **`BRUTEX_SAFETY_FACTOR=0.6` configurable** | 🟠 | CI env-var set; **zero code reads it**. `DEFAULT_INITIAL_RPS = 3.0` hardcoded in `rate_limiter.py:72`. "5 × 0.6" math is comment-only. | Misleading configurability. |
