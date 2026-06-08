@@ -214,6 +214,14 @@ class RateLimitPanel:
     latency_ms_p95: float = 0.0
     rps_1s: int = 0
     rps_1s_max: int = 0
+    #: The mandatory daily Dhan quota gauge (DEC-AUTO-RESUME-QUOTA-001): calls spent
+    #: today, calls remaining, and the 100,000/day ceiling — straight from the
+    #: shared persisted ``DailyQuotaTracker`` via the controller snapshot. ``-1``
+    #: ``quota_limit`` means "no tracker wired" (dry-run / no live pull) so the panel
+    #: hides the gauge rather than showing a false 0.
+    quota_used: int = 0
+    quota_remaining: int = 0
+    quota_limit: int = -1
 
 
 @dataclass(slots=True)
@@ -422,12 +430,24 @@ class DashboardState:
         current_rps: float,
         available_tokens: float,
         recent_429_count: int,
+        quota_used: int = 0,
+        quota_remaining: int = 0,
+        quota_limit: int = -1,
     ) -> None:
-        """Update the rate-limit panel from a fresh :class:`AdaptiveTokenBucket` snapshot."""
+        """Update the rate-limit panel from a fresh controller snapshot.
+
+        ``quota_used`` / ``quota_remaining`` / ``quota_limit`` are the daily Dhan
+        quota gauge (DEC-AUTO-RESUME-QUOTA-001), defaulting to the "no tracker
+        wired" sentinel (``quota_limit=-1``) so a caller that has no quota snapshot
+        leaves the gauge hidden rather than showing a false 0.
+        """
         with self._lock:
             self.rate_limit.current_rps = current_rps
             self.rate_limit.available_tokens = available_tokens
             self.rate_limit.recent_429_count = recent_429_count
+            self.rate_limit.quota_used = quota_used
+            self.rate_limit.quota_remaining = quota_remaining
+            self.rate_limit.quota_limit = quota_limit
 
     def update_throughput(
         self,
@@ -604,10 +624,16 @@ def make_rate_observer(
 
     def _observe(rate: Mapping[str, Any], meter: Mapping[str, Any]) -> None:
         """Map one (rate-controller, call-meter) snapshot pair onto the rate panel."""
+        # Quota gauge (DEC-AUTO-RESUME-QUOTA-001): the controller snapshot carries
+        # ``quota_*`` only when a DailyQuotaTracker is wired (the live path); absent
+        # → ``quota_limit=-1`` sentinel so the panel hides the gauge, not a false 0.
         state.update_rate_limit(
             current_rps=float(rate.get("current_rps", 0.0)),
             available_tokens=float(rate.get("available_tokens", 0.0)),
             recent_429_count=int(rate.get("recent_hits", 0)),
+            quota_used=int(rate.get("quota_used", 0)),
+            quota_remaining=int(rate.get("quota_remaining", 0)),
+            quota_limit=int(rate.get("quota_limit", -1)),
         )
         state.update_throughput(
             effective_rps=float(meter.get("effective_rps", 0.0)),

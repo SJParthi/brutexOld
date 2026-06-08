@@ -56,9 +56,7 @@ from brutex.adapters.dhan.run_ingest import (
 )
 from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
 from brutex.adapters.dhan.until_clean import (
-    DEFAULT_MAX_ROUNDS as _DEFAULT_UNTIL_CLEAN_ROUNDS,
-)
-from brutex.adapters.dhan.until_clean import (
+    AUTO_RESUME_MAX_ROUNDS,
     UntilCleanRound,
     run_until_clean,
 )
@@ -546,6 +544,9 @@ class BulkSpotReport:
     """The first dead-token cause string, carried onto the ``auth_expired`` verdict."""
     still_failed_windows: int = 0
     """Windows still failing after the in-run retry budget — deferred to the next pull."""
+    quota_exhausted: bool = False
+    """True if the auto-resume paused on the daily Dhan quota (DEC-AUTO-RESUME-QUOTA-001)
+    — drives the loud ``quota_exhausted`` verdict (resume after the IST-midnight reset)."""
 
     @property
     def total_symbols(self) -> int:
@@ -583,6 +584,7 @@ class BulkSpotReport:
             no_data=self.total_no_data,
             completed=self.total_completed,
             auth_cause=self.auth_cause,
+            quota_exhausted=self.quota_exhausted,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -713,10 +715,20 @@ def _build_live_controller() -> DhanRateController:  # pragma: no cover — live
     ONCE per dashboard session and reused across pulls via
     :class:`SessionRateController` (DEC-DHAN-PERSIST-RATE-001) so the learned rate
     carries over instead of every pull restarting at the 5 r/s ceiling.
+
+    The controller is now wired with the persisted IST-midnight
+    :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`
+    (DEC-AUTO-RESUME-QUOTA-001): previously the dashboard built a controller with
+    ``quota_tracker=None``, so dashboard pulls were NOT counted against the
+    mandatory 100,000/day Dhan quota at all. Wiring the SAME persisted tracker the
+    CLI/orchestrator use (``~/.brutex/quota/quota.lmdb``, global to the API key)
+    makes every paced dashboard call increment + check the quota, surfaces the
+    gauge on the rate panel, and gives the auto-resume loop its hard brake.
     """
     from brutex.adapters.dhan.rate_control import DhanRateController
+    from brutex.orchestrator.quota_tracker import DailyQuotaTracker
 
-    return DhanRateController()
+    return DhanRateController(quota_tracker=DailyQuotaTracker())
 
 
 class SessionRateController:
@@ -928,7 +940,7 @@ def pull_all_spot(
     auto_retry: bool = False,
     preflight: TokenPreflight | None = None,
     until_clean: bool = False,
-    until_clean_rounds: int = _DEFAULT_UNTIL_CLEAN_ROUNDS,
+    until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
 ) -> BulkSpotReport:
     """Bulk-pull EVERY instrument's spot over the full ``[2021-01-01, previous day]`` range.
 
@@ -1004,8 +1016,10 @@ def pull_all_spot(
         ``still_failed_windows`` / ``auth_aborted`` reflect the FINAL state.
     until_clean_rounds
         Bounded OUTER round budget for *until_clean* (default
-        :data:`~brutex.adapters.dhan.until_clean.DEFAULT_MAX_ROUNDS`). Never
-        infinite (Golden Rule #10).
+        :data:`~brutex.adapters.dhan.until_clean.AUTO_RESUME_MAX_ROUNDS` — the
+        auto-resume budget, DEC-AUTO-RESUME-QUOTA-001). Never infinite (Golden
+        Rule #10): the loop self-terminates on clean / token-dead / quota-spent /
+        no-progress well before this cap, which is only the final backstop.
 
     Returns
     -------
@@ -1194,14 +1208,29 @@ def pull_all_spot(
                     auth_cause=res.report.auth_cause,
                 )
 
-            until_outcome = run_until_clean(_round_runner, max_rounds=until_clean_rounds)
+            # Auto-resume (DEC-AUTO-RESUME-QUOTA-001): keep re-firing batches with
+            # NO clicks until the ledger is 100% clean, stopping only on a real
+            # limit — token dead (existing), the daily quota spent (the mandatory
+            # brake; ``_rate_controller.quota_exhausted`` reads the persisted
+            # tracker), or a no-progress round (``stop_when_stuck`` — what makes the
+            # large budget safe). Dry-run / injected-factory pulls have no controller
+            # → quota hook is ``None`` (never the limit), unchanged.
+            quota_hook = _rate_controller.quota_exhausted if _rate_controller is not None else None
+            until_outcome = run_until_clean(
+                _round_runner,
+                max_rounds=until_clean_rounds,
+                quota_exhausted=quota_hook,
+                stop_when_stuck=True,
+            )
             report = passes[0].report
             final_still_failed = until_outcome.final_still_failed
             final_auth_aborted = until_outcome.auth_aborted or report.auth_aborted
+            final_quota_exhausted = until_outcome.stopped_on_quota
         else:
             report = _one_pass(auto_retry).report
             final_still_failed = report.still_failed_windows
             final_auth_aborted = report.auth_aborted
+            final_quota_exhausted = False
         end_pull_coverage(coverage, lake_root, dry_run=dry_run)
         end_pull_status(status_log, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
@@ -1229,6 +1258,7 @@ def pull_all_spot(
             auth_aborted=final_auth_aborted,
             auth_cause=report.auth_cause,
             still_failed_windows=final_still_failed,
+            quota_exhausted=final_quota_exhausted,
         )
         verdict = bulk.verdict
         _LOG.info(

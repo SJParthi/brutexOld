@@ -22,6 +22,7 @@ def _verdict_dict(
     no_data: int = 0,
     completed: int = 0,
     auth_cause: str | None = None,
+    quota_exhausted: bool = False,
 ) -> dict[str, object]:
     """Build a real PullVerdict.to_dict() so the helper is tested against the live contract."""
     return classify_pull(
@@ -31,6 +32,7 @@ def _verdict_dict(
         no_data=no_data,
         completed=completed,
         auth_cause=auth_cause,
+        quota_exhausted=quota_exhausted,
     ).to_dict()
 
 
@@ -56,6 +58,17 @@ class TestBannerForEachKind:
         assert b.css_class == "verdict--amber"
         assert b.show_retry_button is True
         assert b.pending_windows == 4
+
+    def test_quota_exhausted_is_amber_with_retry(self) -> None:
+        # DEC-AUTO-RESUME-QUOTA-001: the auto-resume paused on the daily quota —
+        # amber "paused, resume later" lane (not red "broken"), needs_operator.
+        b = banner_for(_verdict_dict(still_failed_windows=12, completed=500, quota_exhausted=True))
+        assert b.kind == "quota_exhausted"
+        assert b.colour == "amber"
+        assert b.css_class == "verdict--amber"
+        assert b.show_retry_button is True  # needs_operator (resume after reset)
+        assert b.pending_windows == 12
+        assert "quota" in b.headline.lower()
 
     def test_known_gap_only_is_grey_no_retry(self) -> None:
         b = banner_for(_verdict_dict(no_data=5, completed=0))
@@ -151,13 +164,14 @@ class TestToDict:
 
 class TestProperties:
     @pytest.mark.parametrize(
-        "kind", ["auth_expired", "transient_residual", "known_gap_only", "clean"]
+        "kind",
+        ["auth_expired", "quota_exhausted", "transient_residual", "known_gap_only", "clean"],
     )
     def test_every_kind_maps_to_a_verdict_css_modifier(self, kind: PullVerdictKind) -> None:
-        # Property: each of the four contract kinds yields a `verdict--*` class +
-        # a non-empty colour, and `show_retry_button` mirrors `needs_operator`
-        # exactly (the COMMON pass-through, not a re-derivation).
-        needs_operator = kind in ("auth_expired", "transient_residual")
+        # Property: each contract kind yields a `verdict--*` class + a non-empty
+        # colour, and `show_retry_button` mirrors `needs_operator` exactly (the
+        # COMMON pass-through, not a re-derivation).
+        needs_operator = kind in ("auth_expired", "quota_exhausted", "transient_residual")
         b = banner_for(
             {
                 "kind": kind,

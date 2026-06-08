@@ -71,6 +71,8 @@ def test_until_clean_outcome_to_dict_golden() -> None:
         "clean": True,
         "auth_aborted": False,
         "stopped_on_budget": False,
+        "stopped_on_quota": False,
+        "stopped_no_progress": False,
         "final_still_failed": 0,
     }
     dead = UntilCleanOutcome(
@@ -80,3 +82,13 @@ def test_until_clean_outcome_to_dict_golden() -> None:
     )
     assert dead.pull_verdict().kind == "auth_expired"
     assert dead.pull_verdict().auth_cause == "DH-906 Invalid Token"
+    # The auto-resume quota brake (DEC-AUTO-RESUME-QUOTA-001): a stop_quota outcome
+    # surfaces the loud quota_exhausted verdict (resume after the IST-midnight reset).
+    quota = UntilCleanOutcome(
+        verdict="stop_quota",
+        rounds_run=4,
+        rounds=(UntilCleanRound(12, False),),
+    )
+    assert quota.stopped_on_quota is True
+    assert quota.pull_verdict().kind == "quota_exhausted"
+    assert quota.pull_verdict().needs_operator is True

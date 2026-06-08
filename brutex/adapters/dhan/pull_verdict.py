@@ -29,9 +29,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
-#: The four mutually-exclusive, priority-ordered outcomes of a finished pull.
+#: The mutually-exclusive, priority-ordered outcomes of a finished pull.
 PullVerdictKind = Literal[
     "auth_expired",
+    "quota_exhausted",
     "transient_residual",
     "known_gap_only",
     "clean",
@@ -42,6 +43,7 @@ PullVerdictKind = Literal[
 #: dynamic counts are carried as structured fields on :class:`PullVerdict`.
 _HEADLINE: Final[dict[str, str]] = {
     "auth_expired": "🔑 Dhan token expired mid-pull — the pull aborted.",
+    "quota_exhausted": "📊 Daily Dhan quota reached — auto-resume paused for today.",
     "transient_residual": "⏳ Some windows are still pending after retries.",
     "known_gap_only": "ℹ️ No new bars — these symbols have no intraday on Dhan.",
     "clean": "✅ Pull complete.",
@@ -50,6 +52,11 @@ _ACTION: Final[dict[str, str]] = {
     "auth_expired": (
         "Regenerate the 24-hour token at web.dhan.co, then re-pull. "
         "A retry can NEVER succeed on a dead token — only a fresh token can."
+    ),
+    "quota_exhausted": (
+        "The 100,000/day Dhan quota is spent — the auto-resume paused itself "
+        "(it will NOT keep burning a dead quota). Re-pull after the IST-midnight "
+        "reset; already-pulled windows are skipped, so only the gaps re-fetch."
     ),
     "transient_residual": (
         "Re-pull to finish — already-pulled windows are skipped and only the "
@@ -85,8 +92,13 @@ class PullVerdict:
 
     @property
     def needs_operator(self) -> bool:
-        """True iff a human must act before more data can land (the loud case)."""
-        return self.kind in ("auth_expired", "transient_residual")
+        """True iff a human must act before more data can land (the loud case).
+
+        ``quota_exhausted`` counts: the day's quota is spent, so the operator must
+        wait for the IST-midnight reset (or re-pull then) — the auto-resume cannot
+        finish today on its own.
+        """
+        return self.kind in ("auth_expired", "quota_exhausted", "transient_residual")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dict for the pull-all route / structured log."""
@@ -111,6 +123,7 @@ def classify_pull(
     no_data: int,
     completed: int,
     auth_cause: str | None = None,
+    quota_exhausted: bool = False,
 ) -> PullVerdict:
     """Classify a finished pull into ONE prioritised, actionable :class:`PullVerdict`.
 
@@ -119,13 +132,19 @@ def classify_pull(
     1. **auth_expired** — the token died mid-pull (``auth_aborted``). Most urgent:
        no retry can recover until the token is regenerated. ``pending_windows``
        counts the still-failed windows + quarantined pairs left behind.
-    2. **transient_residual** — windows are still failing (``still_failed_windows``)
+    2. **quota_exhausted** — the day's 100,000-call Dhan quota is spent
+       (``quota_exhausted``) with windows still pending: the auto-resume paused
+       itself rather than burn a dead quota; the operator re-pulls after the
+       IST-midnight reset (DEC-AUTO-RESUME-QUOTA-001). Ranked just under a dead
+       token because, like it, NO amount of immediate retrying can land a bar
+       today — only the reset can.
+    3. **transient_residual** — windows are still failing (``still_failed_windows``)
        or pairs were quarantined (``failed_pairs``) but the token is alive: a
        re-pull / the auto-retry layer will finish them.
-    3. **known_gap_only** — nothing completed and nothing failed, but the vendor
+    4. **known_gap_only** — nothing completed and nothing failed, but the vendor
        returned empty for some symbols (``no_data``): Dhan genuinely has no
        intraday for them (reference-only). Expected, not an error.
-    4. **clean** — everything that could complete did.
+    5. **clean** — everything that could complete did.
 
     Pure + deterministic (no I/O / clock). ``auth_cause`` is preserved ONLY on
     the ``auth_expired`` verdict.
@@ -133,6 +152,10 @@ def classify_pull(
     if auth_aborted:
         return _make(
             "auth_expired", still_failed_windows, failed_pairs, no_data, completed, auth_cause
+        )
+    if quota_exhausted:
+        return _make(
+            "quota_exhausted", still_failed_windows, failed_pairs, no_data, completed, None
         )
     if still_failed_windows > 0 or failed_pairs > 0:
         return _make(

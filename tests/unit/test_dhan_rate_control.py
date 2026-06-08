@@ -9,6 +9,10 @@ a sustained clean window, never exceeds 5, and `pace()` delegates to the bucket.
 
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
 from brutex.adapters.dhan.rate_control import (
     CEILING_RPS,
     FLOOR_RPS,
@@ -19,7 +23,22 @@ from brutex.adapters.dhan.rate_control import (
     TIMEOUT_FLOOR_RPS,
     DhanRateController,
 )
+from brutex.orchestrator.quota_tracker import DailyQuotaTracker
 from structlog.testing import capture_logs
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _quota(tmp_path: Path, *, limit: int, used: int) -> DailyQuotaTracker:
+    """Build a real quota tracker (fixed IST clock) pre-advanced to *used* calls."""
+    q = DailyQuotaTracker(
+        daily_limit=limit,
+        store_path=tmp_path / "q.lmdb",
+        clock=lambda: datetime(2026, 6, 8, 12, 0, tzinfo=_IST),
+    )
+    for _ in range(used):
+        q.acquire_or_raise()
+    return q
 
 
 class _Clock:
@@ -369,3 +388,41 @@ def test_steps_preserve_single_bucket_identity() -> None:
     # The single shared bucket now paces at the recovered rate (proof the same
     # object carries the new rate, not a stale clone).
     assert ctl._bucket.current_rps() == 4.0
+
+
+class TestQuotaWiring:
+    """The daily-quota gauge + brake (DEC-AUTO-RESUME-QUOTA-001)."""
+
+    def test_snapshot_includes_quota_when_tracker_wired(self, tmp_path: Path) -> None:
+        ctl = DhanRateController(
+            clock=_Clock(), sleep=lambda _s: None, quota_tracker=_quota(tmp_path, limit=10, used=4)
+        )
+        snap = ctl.snapshot()
+        assert snap["current_rps"] == 5.0  # base rate fields still present
+        assert snap["quota_used"] == 4
+        assert snap["quota_remaining"] == 6
+        assert snap["quota_limit"] == 10
+
+    def test_snapshot_omits_quota_without_tracker(self) -> None:
+        # The default (test) controller has no tracker → snapshot is byte-unchanged.
+        assert set(_controller(_Clock()).snapshot()) == {
+            "current_rps",
+            "recent_hits",
+            "recent_timeouts",
+        }
+
+    def test_quota_exhausted_true_at_limit(self, tmp_path: Path) -> None:
+        ctl = DhanRateController(
+            clock=_Clock(), sleep=lambda _s: None, quota_tracker=_quota(tmp_path, limit=2, used=2)
+        )
+        assert ctl.quota_exhausted() is True
+
+    def test_quota_exhausted_false_with_remaining(self, tmp_path: Path) -> None:
+        ctl = DhanRateController(
+            clock=_Clock(), sleep=lambda _s: None, quota_tracker=_quota(tmp_path, limit=5, used=1)
+        )
+        assert ctl.quota_exhausted() is False
+
+    def test_quota_exhausted_false_without_tracker(self) -> None:
+        # No tracker wired (the bucket-only mode) → never the limit.
+        assert _controller(_Clock()).quota_exhausted() is False

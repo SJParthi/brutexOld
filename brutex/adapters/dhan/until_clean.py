@@ -49,14 +49,31 @@ from brutex.adapters.dhan.pull_verdict import PullVerdict, classify_pull
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-#: The pure controller's four verdicts: keep going, or one of three terminal stops.
-LoopVerdict = Literal["continue", "stop_clean", "stop_dead", "stop_budget"]
+#: The pure controller's verdicts: keep going, or one of five terminal stops.
+LoopVerdict = Literal[
+    "continue",
+    "stop_clean",
+    "stop_dead",
+    "stop_quota",
+    "stop_no_progress",
+    "stop_budget",
+]
 
 #: Default bounded OUTER round budget. Small + finite (Golden Rule #10 — never an
 #: infinite loop): a handful of full re-pull rounds drains a multi-minute 429 storm
 #: once the burst is over. Each round itself runs the bounded inner
 #: ``retry_failed_windows`` loop, so the worst case is strictly bounded.
 DEFAULT_MAX_ROUNDS: int = 5
+
+#: Auto-resume OUTER round budget (DEC-AUTO-RESUME-QUOTA-001): the "keep re-firing
+#: batches until 100% clean, zero clicks" path. Larger than
+#: :data:`DEFAULT_MAX_ROUNDS` but STILL finite (Golden Rule #10 — never infinite),
+#: because three guards terminate the loop long before this cap in every real run:
+#: ``stop_clean`` (done), ``stop_dead`` (token died), ``stop_quota`` (daily quota
+#: spent), and ``stop_no_progress`` (a round that shrank the residual by zero — a
+#: stuck window can never be drained by more rounds). The cap is the final
+#: backstop against a pathological never-clean residual, NOT the normal exit.
+AUTO_RESUME_MAX_ROUNDS: int = 50
 
 #: Base inter-round backoff (seconds): round *k* (1-based, only rounds ≥ 2 wait)
 #: sleeps ``base × 2**(k-2)`` clamped to :data:`_MAX_ROUND_BACKOFF_S` — a
@@ -131,6 +148,26 @@ class UntilCleanOutcome:
         return self.verdict == "stop_budget"
 
     @property
+    def stopped_on_quota(self) -> bool:
+        """True iff the auto-resume paused on the daily quota (``stop_quota``).
+
+        DEC-AUTO-RESUME-QUOTA-001 — the day's 100,000-call Dhan quota is spent;
+        re-pull after the IST-midnight reset (the auto-resume will not burn a dead
+        quota).
+        """
+        return self.verdict == "stop_quota"
+
+    @property
+    def stopped_no_progress(self) -> bool:
+        """True iff the loop halted because a round shrank the residual by zero.
+
+        DEC-AUTO-RESUME-QUOTA-001 — a stuck window can never be drained by more
+        identical rounds, so the loop self-terminates instead of churning to the
+        budget cap (this is what makes the large auto-resume budget safe).
+        """
+        return self.verdict == "stop_no_progress"
+
+    @property
     def final_still_failed(self) -> int:
         """Transient residual after the LAST round ran (0 when none ran / clean)."""
         return self.rounds[-1].still_failed_windows if self.rounds else 0
@@ -145,8 +182,13 @@ class UntilCleanOutcome:
 
         Reuses :func:`~brutex.adapters.dhan.pull_verdict.classify_pull` (#485) —
         the SAME verdict vocabulary a finished pull emits (CLAUDE.md §11 COMMON):
-        ``auth_expired`` when the token died, ``transient_residual`` when the
-        budget was spent with residual left, ``clean`` when the ledger is clean.
+        ``auth_expired`` when the token died, ``quota_exhausted`` when the
+        auto-resume paused on the daily quota (DEC-AUTO-RESUME-QUOTA-001),
+        ``transient_residual`` when the budget / no-progress guard stopped with
+        residual left, ``clean`` when the ledger is clean. A ``stop_no_progress``
+        finish carries residual but a live token + quota, so it maps to
+        ``transient_residual`` (re-pull / the next round mops it up) — exactly like
+        ``stop_budget``.
         """
         return classify_pull(
             auth_aborted=self.auth_aborted,
@@ -155,6 +197,7 @@ class UntilCleanOutcome:
             no_data=0,
             completed=0,
             auth_cause=self.auth_cause,
+            quota_exhausted=self.stopped_on_quota,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -165,6 +208,8 @@ class UntilCleanOutcome:
             "clean": self.clean,
             "auth_aborted": self.auth_aborted,
             "stopped_on_budget": self.stopped_on_budget,
+            "stopped_on_quota": self.stopped_on_quota,
+            "stopped_no_progress": self.stopped_no_progress,
             "final_still_failed": self.final_still_failed,
         }
 
@@ -175,24 +220,46 @@ def decide_until_clean(
     auth_aborted: bool,
     rounds_used: int,
     max_rounds: int,
+    quota_exhausted: bool = False,
+    made_progress: bool = True,
 ) -> LoopVerdict:
-    """Decide what the until-clean loop does after a round — the pure 4-way controller.
+    """Decide what the until-clean loop does after a round — the pure 6-way controller.
 
     Priority (matching ``auto_retry`` + ``classify_pull``, worst first):
 
     1. **stop_dead** — ``auth_aborted``: the token died; retrying is futile
        (``RenewToken`` cannot revive a dead token) — halt for re-auth.
-    2. **stop_clean** — ``still_failed_windows == 0``: the coverage ledger is clean.
-    3. **stop_budget** — ``rounds_used >= max_rounds``: residual remains but the
-       bounded outer budget is spent.
-    4. **continue** — residual remains and budget is left: run another round.
+    2. **stop_clean** — ``still_failed_windows == 0``: the coverage ledger is clean
+       (success outranks every "can't continue" reason — if we're done, we're done).
+    3. **stop_quota** — ``quota_exhausted``: the day's 100,000-call Dhan quota is
+       spent (DEC-AUTO-RESUME-QUOTA-001). Like a dead token, NO amount of immediate
+       retrying can land a bar today — the auto-resume pauses itself rather than
+       burn a dead quota; the operator re-pulls after the IST-midnight reset. Ranked
+       above ``no_progress`` because it is the SPECIFIC reason no progress is
+       possible.
+    4. **stop_no_progress** — ``not made_progress``: the last round shrank the
+       residual by ZERO. A stuck window can never be drained by more identical
+       rounds, so spinning is futile — halt instead of churning to the budget cap.
+       This is what makes a LARGE ``max_rounds`` (the auto-resume budget) safe: the
+       loop self-terminates the instant it stops making headway.
+    5. **stop_budget** — ``rounds_used >= max_rounds``: residual remains, the loop is
+       still making progress, but the bounded outer budget is spent (the final
+       backstop).
+    6. **continue** — residual remains, progress is being made, budget is left.
 
-    Pure + O(1) (a constant number of comparisons). No I/O, no clock.
+    Pure + O(1) (a constant number of comparisons). No I/O, no clock. The two new
+    keyword args default to the pre-DEC-AUTO-RESUME-QUOTA-001 behaviour
+    (``quota_exhausted=False`` + ``made_progress=True``), so every existing caller is
+    byte-unchanged.
     """
     if auth_aborted:
         return "stop_dead"
     if still_failed_windows == 0:
         return "stop_clean"
+    if quota_exhausted:
+        return "stop_quota"
+    if not made_progress:
+        return "stop_no_progress"
     if rounds_used >= max_rounds:
         return "stop_budget"
     return "continue"
@@ -204,6 +271,8 @@ def run_until_clean(
     max_rounds: int = DEFAULT_MAX_ROUNDS,
     sleep: Callable[[int], None] | None = None,
     decide: Callable[..., LoopVerdict] = decide_until_clean,
+    quota_exhausted: Callable[[], bool] | None = None,
+    stop_when_stuck: bool = False,
 ) -> UntilCleanOutcome:
     """Run bounded re-pull rounds until CLEAN, the token dies, or the budget is spent.
 
@@ -242,6 +311,24 @@ def run_until_clean(
     decide
         The verdict function (default :func:`decide_until_clean`); injectable for
         tests.
+    quota_exhausted
+        Optional ``() -> bool`` hook checked AFTER each round (DEC-AUTO-RESUME-
+        QUOTA-001): ``True`` means the day's 100,000-call Dhan quota is spent, so the
+        loop stops with ``stop_quota`` rather than re-firing batches that would only
+        raise :class:`~brutex.orchestrator.quota_tracker.DailyQuotaExceeded`. ``None``
+        (the default) → quota is never the limit (the pre-feature behaviour, for the
+        bounded ``DEFAULT_MAX_ROUNDS`` path + tests). The hook reads the shared
+        persisted :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`, so
+        it reflects the SAME counter the rate bucket increments per call.
+    stop_when_stuck
+        When ``True`` (the auto-resume path, DEC-AUTO-RESUME-QUOTA-001), a round
+        that shrinks the residual by ZERO stops the loop with ``stop_no_progress``
+        — this is what makes the large :data:`AUTO_RESUME_MAX_ROUNDS` budget safe (a
+        stuck window self-terminates instead of churning to the cap). ``False`` (the
+        default — the bounded ``DEFAULT_MAX_ROUNDS`` path + every existing caller)
+        keeps ``made_progress=True`` always, so the loop runs to ``stop_clean`` /
+        ``stop_dead`` / ``stop_budget`` exactly as before (byte-unchanged: a
+        constant-residual run still ends on ``stop_budget``).
 
     Returns
     -------
@@ -256,6 +343,10 @@ def run_until_clean(
         return UntilCleanOutcome(verdict="stop_budget", rounds_run=0, rounds=())
     round_index = 0
     verdict: LoopVerdict = "continue"
+    #: The previous round's residual, so a round that shrank it by ZERO trips the
+    #: ``stop_no_progress`` guard (what makes the large auto-resume budget safe).
+    #: ``None`` before round 1 ⇒ round 1 always counts as progress (no baseline).
+    prev_failed: int | None = None
     while True:
         round_index += 1
         if round_index > 1:
@@ -264,18 +355,28 @@ def run_until_clean(
             wait(round_index)
         outcome = round_runner()
         rounds.append(outcome)
+        # No-progress is only consulted when the caller opts in (auto-resume); the
+        # default path keeps ``made_progress=True`` so its behaviour is byte-
+        # unchanged (a constant-residual run still ends on ``stop_budget``).
+        made_progress = (not stop_when_stuck) or (
+            prev_failed is None or outcome.still_failed_windows < prev_failed
+        )
         verdict = decide(
             still_failed_windows=outcome.still_failed_windows,
             auth_aborted=outcome.auth_aborted,
             rounds_used=round_index,
             max_rounds=max_rounds,
+            quota_exhausted=quota_exhausted() if quota_exhausted is not None else False,
+            made_progress=made_progress,
         )
+        prev_failed = outcome.still_failed_windows
         if verdict != "continue":
             break
     return UntilCleanOutcome(verdict=verdict, rounds_run=round_index, rounds=tuple(rounds))
 
 
 __all__ = [
+    "AUTO_RESUME_MAX_ROUNDS",
     "DEFAULT_MAX_ROUNDS",
     "LoopVerdict",
     "UntilCleanOutcome",

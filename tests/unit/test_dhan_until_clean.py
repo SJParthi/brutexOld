@@ -88,6 +88,103 @@ def test_decide_continue() -> None:
     )
 
 
+# ── decide_until_clean — the auto-resume guards (DEC-AUTO-RESUME-QUOTA-001) ──
+
+
+def test_decide_stop_quota() -> None:
+    """Quota exhausted with residual ⇒ stop_quota (the mandatory auto-resume brake)."""
+    assert (
+        decide_until_clean(
+            still_failed_windows=12,
+            auth_aborted=False,
+            rounds_used=2,
+            max_rounds=50,
+            quota_exhausted=True,
+        )
+        == "stop_quota"
+    )
+
+
+def test_decide_dead_outranks_quota() -> None:
+    """A dead token outranks an exhausted quota (worst-first: re-auth is the headline)."""
+    assert (
+        decide_until_clean(
+            still_failed_windows=5,
+            auth_aborted=True,
+            rounds_used=2,
+            max_rounds=50,
+            quota_exhausted=True,
+        )
+        == "stop_dead"
+    )
+
+
+def test_decide_clean_outranks_quota() -> None:
+    """A clean ledger wins over an exhausted quota — if we're done, we're done."""
+    assert (
+        decide_until_clean(
+            still_failed_windows=0,
+            auth_aborted=False,
+            rounds_used=2,
+            max_rounds=50,
+            quota_exhausted=True,
+        )
+        == "stop_clean"
+    )
+
+
+def test_decide_stop_no_progress() -> None:
+    """Residual unchanged (no progress) with budget + quota left ⇒ stop_no_progress."""
+    assert (
+        decide_until_clean(
+            still_failed_windows=10,
+            auth_aborted=False,
+            rounds_used=2,
+            max_rounds=50,
+            made_progress=False,
+        )
+        == "stop_no_progress"
+    )
+
+
+def test_decide_quota_outranks_no_progress() -> None:
+    """Quota is the SPECIFIC reason no progress is possible ⇒ stop_quota wins."""
+    assert (
+        decide_until_clean(
+            still_failed_windows=10,
+            auth_aborted=False,
+            rounds_used=2,
+            max_rounds=50,
+            quota_exhausted=True,
+            made_progress=False,
+        )
+        == "stop_quota"
+    )
+
+
+def test_decide_no_progress_outranks_budget() -> None:
+    """A stuck round stops on no-progress BEFORE churning to the budget cap."""
+    assert (
+        decide_until_clean(
+            still_failed_windows=10,
+            auth_aborted=False,
+            rounds_used=5,
+            max_rounds=5,
+            made_progress=False,
+        )
+        == "stop_no_progress"
+    )
+
+
+def test_decide_new_kwargs_default_to_prior_behaviour() -> None:
+    """Omitting the new kwargs reproduces the pre-feature 4-way controller exactly."""
+    # made_progress defaults True + quota_exhausted defaults False ⇒ continue.
+    assert (
+        decide_until_clean(still_failed_windows=3, auth_aborted=False, rounds_used=1, max_rounds=5)
+        == "continue"
+    )
+
+
 # ── run_until_clean — the bounded driver ────────────────────────────────────
 
 
@@ -140,6 +237,83 @@ def test_run_stop_budget_with_residual() -> None:
     assert out.clean is False
     assert out.final_still_failed == 40
     assert out.pull_verdict().kind == "transient_residual"
+
+
+# ── run_until_clean — auto-resume guards (DEC-AUTO-RESUME-QUOTA-001) ─────────
+
+
+def test_run_stop_quota_pauses_auto_resume() -> None:
+    """A quota that runs out after a round halts with stop_quota → quota_exhausted verdict."""
+    runner, calls = _scripted_runner(
+        [UntilCleanRound(50, False), UntilCleanRound(20, False), UntilCleanRound(0, False)]
+    )
+    sleep, _seen = _no_sleep()
+    # Quota becomes exhausted on the 2nd check (after round 2), before the clean round 3.
+    checks = iter([False, True])
+
+    out = run_until_clean(
+        runner,
+        max_rounds=50,
+        sleep=sleep,
+        quota_exhausted=lambda: next(checks),
+        stop_when_stuck=True,
+    )
+
+    assert calls == [0, 1]  # stopped after round 2 — never fired the doomed round 3
+    assert out.verdict == "stop_quota"
+    assert out.stopped_on_quota is True
+    assert out.final_still_failed == 20
+    assert out.pull_verdict().kind == "quota_exhausted"
+    assert out.pull_verdict().needs_operator is True
+
+
+def test_run_stop_no_progress_when_stuck() -> None:
+    """With stop_when_stuck, a round that shrinks the residual by zero halts the loop."""
+    runner, calls = _scripted_runner(
+        [UntilCleanRound(10, False), UntilCleanRound(10, False), UntilCleanRound(10, False)]
+    )
+    sleep, _seen = _no_sleep()
+
+    out = run_until_clean(runner, max_rounds=50, sleep=sleep, stop_when_stuck=True)
+
+    assert calls == [0, 1]  # round 1 (baseline) + round 2 (no shrink) → stop; not 50 rounds
+    assert out.verdict == "stop_no_progress"
+    assert out.stopped_no_progress is True
+    assert out.final_still_failed == 10
+    # A stuck-but-live residual still maps to transient_residual (re-pull mops it up).
+    assert out.pull_verdict().kind == "transient_residual"
+
+
+def test_run_no_progress_off_by_default() -> None:
+    """Without stop_when_stuck, a constant residual runs to the budget (byte-unchanged)."""
+    runner, calls = _scripted_runner([UntilCleanRound(10, False)] * 4)
+    sleep, _seen = _no_sleep()
+
+    out = run_until_clean(runner, max_rounds=4, sleep=sleep)
+
+    assert calls == [0, 1, 2, 3]  # the no-progress guard never fired (opt-in only)
+    assert out.verdict == "stop_budget"
+    assert out.rounds_run == 4
+
+
+def test_run_auto_resume_drains_over_many_rounds() -> None:
+    """Auto-resume keeps re-firing (zero clicks) while making progress, until clean."""
+    script = [UntilCleanRound(r, False) for r in (40, 30, 20, 10, 0)]
+    runner, calls = _scripted_runner(script)
+    sleep, _seen = _no_sleep()
+
+    out = run_until_clean(
+        runner,
+        max_rounds=50,
+        sleep=sleep,
+        quota_exhausted=lambda: False,  # quota never the limit
+        stop_when_stuck=True,
+    )
+
+    assert calls == [0, 1, 2, 3, 4]  # drained across 5 progress rounds, well under the cap
+    assert out.verdict == "stop_clean"
+    assert out.clean is True
+    assert out.final_still_failed == 0
 
 
 def test_run_stop_dead_halts_loop() -> None:
@@ -233,6 +407,8 @@ def test_outcome_to_dict_shape() -> None:
         "clean": False,
         "auth_aborted": False,
         "stopped_on_budget": True,
+        "stopped_on_quota": False,
+        "stopped_no_progress": False,
         "final_still_failed": 3,
     }
 
