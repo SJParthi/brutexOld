@@ -27,10 +27,18 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from brutex.data import CandleBar
-from brutex.data.parquet_writer import ParquetWriter
+import pytest
 
 from tests.bench._o1_tiers import ratio_ceiling
+
+# The CI ``bench`` job installs lean (no ``[data]`` extra), so ``polars`` —
+# which ``ParquetWriter`` needs at write time — may be absent. Skip the whole
+# module then, mirroring ``test_catalog_reconcile_o1.py``. The data-layer
+# symbols are imported only after this guard passes.
+pytest.importorskip("polars")
+
+from brutex.data import CandleBar
+from brutex.data.parquet_writer import ParquetWriter
 
 #: Existing-partition counts the fresh-write cost must be independent of.
 _SMALL = 50
