@@ -197,7 +197,9 @@ class TestSeedLakeSuccess:
     def test_never_overwrites_an_existing_row(self) -> None:
         ledger = WindowLedger()
         # A FAILED window must NEVER be seeded to SUCCESS (it needs a re-pull).
-        ledger.record(_key(), raw_bars=0, error_type="DhanRateLimitError", bars_appended=0, now=_NOW)
+        ledger.record(
+            _key(), raw_bars=0, error_type="DhanRateLimitError", bars_appended=0, now=_NOW
+        )
         assert ledger.seed_lake_success(_key(), bars=99, now=_LATER) is False
         record = ledger.records()[0]
         assert record.status == "FAILED"  # untouched
