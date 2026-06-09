@@ -316,6 +316,36 @@ def build_fno_eligible_underlyings(
     return frozenset(eligible)
 
 
+def build_options_eligible_underlyings(
+    instruments: Iterable[Instrument],
+) -> frozenset[tuple[Exchange, str]]:
+    """Return the ``(exchange, underlying_symbol)`` set that has tradeable OPTIONS.
+
+    DEC-OPTIONS-ELIGIBLE-GUARD-001. The OPTIONS-ONLY sibling of
+    :func:`build_fno_eligible_underlyings` (operator decree: "we will NEVER pull
+    futures — only options"): an underlying is options-eligible iff at least one
+    Dhan **option** leg (``CE`` / ``PE`` — i.e. an ``OPTIDX`` index option or an
+    ``OPTSTK`` stock option) names it as the underlying. A ``FUT`` leg does NOT
+    qualify it. This is the AUTHORITATIVE, data-driven set — derived from Dhan's
+    own instrument master in the SAME single pass the F&O-eligibility scan uses, so
+    it auto-tracks NSE adding/removing an F&O name, never a hardcoded guess
+    (Golden Rule #1). The dashboard guards the options-chain pull on this set: a
+    ``Pull options chain`` on an underlying NOT in it is rejected BEFORE any Dhan
+    call, so a mis-click can never waste the 100,000/day quota on options that do
+    not exist (e.g. NIFTY 100 / INDIA VIX / a non-F&O equity).
+
+    Cross-reference with the admitted ``INDEX`` vs ``EQ`` rows to split it into the
+    **F&O indices** (the ~handful: NIFTY / BANKNIFTY / FINNIFTY / MIDCPNIFTY /
+    NIFTY NEXT 50 …) and the **F&O stocks** (the NSE F&O equity list).
+    """
+    eligible: set[tuple[Exchange, str]] = set()
+    for inst in instruments:
+        underlying = inst.underlying_symbol
+        if inst.is_option and inst.exch_id == Exchange.NSE and underlying is not None:
+            eligible.add((inst.exch_id, underlying))
+    return frozenset(eligible)
+
+
 #: One underlying's contract economics derived from its derivative legs:
 #: ``(lot_size, tick_size, freeze_quantity)``.
 UnderlyingEconomics = tuple[int, Decimal, int | None]
@@ -536,6 +566,7 @@ __all__ = [
     "UnderlyingEconomics",
     "UnderlyingSpec",
     "build_fno_eligible_underlyings",
+    "build_options_eligible_underlyings",
     "build_underlying_economics",
     "classify_underlying_kind",
     "derive_lake_underlyings",
