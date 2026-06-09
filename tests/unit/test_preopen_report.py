@@ -1038,24 +1038,46 @@ def test_zip_all_mode_one_xlsx_per_year() -> None:
     assert '<sheet name="2024-03"' in _open_part(inner, "xl/workbook.xml")
 
 
-def test_zip_member_date_is_the_latest_data_day_not_1980() -> None:
-    # DEC-PREOPEN-XLSX-DATE-001: each yearly .xlsx member's date = its LATEST data
-    # day (deterministic, meaningful) — never the alarming 1 Jan 1980.
+def test_zip_member_date_is_the_ist_generation_time_not_1980() -> None:
+    # DEC-PREOPEN-XLSX-DATE-001 (amended): each .xlsx member's mtime = the IST
+    # GENERATION time (a freshly-downloaded file reads "Date Modified = now"),
+    # never the alarming 1 Jan 1980. `now` is injected for a deterministic assert.
+    from datetime import datetime
+
+    from brutex.data.session import IST
+
+    gen = datetime(2026, 6, 9, 17, 4, 30, tzinfo=IST)
     rows = [
         _mk(date(2024, 3, 4), "A", "5"),
-        _mk(date(2024, 11, 28), "B", "-2"),  # the latest 2024 day → the member date
         _mk(date(2025, 1, 6), "C", "3"),
     ]
-    blob = render_report_zip(rows, mode="all", min_pct=Decimal("0"))
-    assert _member_date(blob, "preopen_all_2024.xlsx") == (2024, 11, 28, 0, 0, 0)
-    assert _member_date(blob, "preopen_all_2025.xlsx") == (2025, 1, 6, 0, 0, 0)
-    # Same rows → byte-identical zip (the date is data-derived, not wall-clock).
-    assert render_report_zip(rows, mode="all", min_pct=Decimal("0")) == blob
+    blob = render_report_zip(rows, mode="all", min_pct=Decimal("0"), now=gen)
+    # EVERY member (any data year) carries the SAME generation timestamp.
+    assert _member_date(blob, "preopen_all_2024.xlsx") == (2026, 6, 9, 17, 4, 30)
+    assert _member_date(blob, "preopen_all_2025.xlsx") == (2026, 6, 9, 17, 4, 30)
 
 
-def test_zip_empty_member_date_is_the_data_floor() -> None:
-    blob = render_report_zip([], mode="all", min_pct=Decimal("0"))
-    assert _member_date(blob, "preopen_all_empty.xlsx") == (2021, 1, 1, 0, 0, 0)
+def test_zip_empty_member_also_gets_the_generation_time() -> None:
+    from datetime import datetime
+
+    from brutex.data.session import IST
+
+    gen = datetime(2026, 6, 9, 17, 4, 30, tzinfo=IST)
+    blob = render_report_zip([], mode="all", min_pct=Decimal("0"), now=gen)
+    assert _member_date(blob, "preopen_all_empty.xlsx") == (2026, 6, 9, 17, 4, 30)
+
+
+def test_zip_default_now_is_recent_not_1980() -> None:
+    # No injected `now` → defaults to datetime.now(IST); the member year is the
+    # current year, never 1980 (the bug this whole fix removes).
+    from datetime import datetime
+
+    from brutex.data.session import IST
+
+    blob = render_report_zip([_mk(date(2024, 3, 4), "A", "5")], mode="all", min_pct=Decimal("0"))
+    member_year = _member_date(blob, "preopen_all_2024.xlsx")[0]
+    assert member_year == datetime.now(IST).year
+    assert member_year >= 2026
 
 
 def test_zip_topmover_mode_filename_and_filter() -> None:
