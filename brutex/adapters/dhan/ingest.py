@@ -554,10 +554,16 @@ def _ingest_one_window(
         start=window_start,
         end=window_end,
     )
-    # Already pulled? Skip the vendor call entirely — no wasted Dhan hit
-    # (DEC-FETCH-COVERAGE-001). The idempotent sink would no-op the write
-    # anyway, so skipping is a pure quota/latency win, never a data risk.
-    if coverage is not None and coverage.is_complete(key):
+    # Already settled? Skip the vendor call entirely — no wasted Dhan hit. The
+    # unified WindowLedger is now the SOLE skip authority (DEC-WINDOW-LEDGER-001,
+    # Stage b3): a window is skipped ONLY when its ledger row is settled
+    # (SUCCESS / SKIPPED) — the precise per-window record, NOT the coarse
+    # span-enclosure FetchCoverage set that masked internal-gap FAILED windows
+    # (#598). A FAILED / PLANNED / EMPTY-below-threshold / MISSING window is
+    # fetched. The idempotent sink would no-op a redundant write anyway, so
+    # skipping is a pure quota/latency win, never a data risk. (FetchCoverage is
+    # still maintained alongside for one release — removed in the final stage.)
+    if ledger is not None and ledger.is_skippable(key):
         _LOG.debug(
             "ingest.window",
             pull_id=pull_id,

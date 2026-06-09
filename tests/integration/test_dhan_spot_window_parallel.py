@@ -389,7 +389,10 @@ class TestIdempotentRepullWindows:
     """A re-pull over the same series yields zero net-new window fetches (Rule #7)."""
 
     def test_second_window_pull_is_a_noop(self) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
         coverage = FetchCoverage()
+        ledger = WindowLedger()
 
         def _pull(adapter: _CountingAdapter) -> None:
             pool = _SimPool(max_workers=10, rate=_RATE, latency=0.5)
@@ -401,21 +404,22 @@ class TestIdempotentRepullWindows:
                 start=_START,
                 end=_END,
                 coverage=coverage,
+                ledger=ledger,
                 run_parallel=pool,
             )
 
         first = _CountingAdapter()
         _pull(first)
-        first_records = coverage.to_records()
+        first_rows = ledger.to_rows()
         assert first.calls == _EXPECTED_WINDOWS  # every window fetched once
-        assert coverage.completed_count == _EXPECTED_WINDOWS
-        # SECOND pull over the same range + shared coverage: every window is now
-        # marked complete, so NOT A SINGLE vendor fetch is issued — 0 net-new
+        assert ledger.count == _EXPECTED_WINDOWS
+        # SECOND pull over the same range + shared ledger: every window is now
+        # settled SUCCESS, so NOT A SINGLE vendor fetch is issued — 0 net-new
         # (quota-frugal, idempotent; the ledger short-circuits before the call).
         second = _CountingAdapter()
         _pull(second)
         assert second.calls == 0
-        assert coverage.to_records() == first_records  # byte-identical state
+        assert ledger.to_rows() == first_rows  # byte-identical state
 
 
 class TestConcurrentWindowWriteCorrectness:

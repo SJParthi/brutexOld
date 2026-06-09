@@ -1616,6 +1616,12 @@ def cmd_fetch(
     from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import NullBarSink, ParquetBarSink
+    from brutex.data.window_ledger_store import (
+        begin_pull_ledger,
+        end_pull_ledger,
+        plan_windows,
+        reconcile_ledger_with_lake,
+    )
     from brutex.universe import BRUTE_FORCE_INDICES
 
     resolved = _resolve_lake_root(lake_root)
@@ -1751,6 +1757,34 @@ def cmd_fetch(
         # is its "do not persist coverage" switch).
         _no_coverage = dry_run or inspect
         coverage = begin_pull_coverage(resolved, dry_run=_no_coverage, coverage=None)
+        # Unified per-window ledger (DEC-WINDOW-LEDGER-001, Stage b3 — R7): the CLI
+        # now threads the SAME ledger the dashboard does so it is the SOLE skip
+        # authority on the `brutex fetch` path too. Load (one-shot migrate) the
+        # durable ledger, PLAN every window the pull will touch, and seed SUCCESS
+        # for every window the lake already encloses (cold-start) so a re-pull
+        # re-fetches ONLY the windows not already settled — never the full history.
+        # `--dry-run` / `--inspect` pass `dry_run=True`, so the ledger is None (no
+        # skip, no disk touch), exactly mirroring the coverage gate above.
+        ledger = begin_pull_ledger(resolved, dry_run=_no_coverage)
+        if ledger is not None:  # pragma: no cover — live (non-dry, non-inspect) only
+            # plan_windows + reconcile_ledger_with_lake are themselves 100%-covered in
+            # test_window_ledger_store.py; only this live wiring is excluded, exactly
+            # as the live `_build_live_dhan_spot` adapter build above is.
+            plan_windows(
+                ledger,
+                instruments=fetch_instruments,
+                intervals=intervals,
+                start=start_dt.date(),
+                end=end_dt.date(),
+            )
+            reconcile_ledger_with_lake(
+                ledger,
+                resolved,
+                instruments=fetch_instruments,
+                intervals=intervals,
+                start=start_dt.date(),
+                end=end_dt.date(),
+            )
         # `--retry-failed` (the manual trigger) ALWAYS retries on demand; otherwise
         # the post-pull auto-retry is on unless `--no-auto-retry` was passed. Both
         # routes drive the SAME run_dhan_spot_ingest_with_retry → retry_failed_windows
@@ -1781,6 +1815,7 @@ def cmd_fetch(
                 end=end_dt.date(),
                 pace=pace,
                 coverage=coverage,
+                ledger=ledger,
                 on_rate_limit=on_rate_limit,
                 on_success=on_success,
                 on_progress=storm_progress,
@@ -1821,6 +1856,7 @@ def cmd_fetch(
         else:
             result = _one_fetch_pass(do_retry)
         end_pull_coverage(coverage, resolved, dry_run=_no_coverage)
+        end_pull_ledger(ledger, resolved, dry_run=_no_coverage)
     report = result.report
     retry = result.retry
     print(
