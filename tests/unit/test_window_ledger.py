@@ -158,6 +158,53 @@ class TestRecord:
         assert status == SKIPPED
 
 
+class TestEmptyStreakR1:
+    """R1 (DEC-WINDOW-LEDGER-001): promote on the CONSECUTIVE EMPTY streak, not total attempts."""
+
+    def test_failed_attempts_do_not_inflate_the_empty_promotion(self) -> None:
+        # Two 429 FAILs then ONE EMPTY: attempts == 3 but the streak is 1 — the
+        # window must NOT be masked (it was empty once, rate-limited twice).
+        ledger = WindowLedger()
+        ledger.record(
+            _key(), raw_bars=0, error_type="DhanRateLimitError", bars_appended=0, now=_NOW
+        )
+        ledger.record(
+            _key(), raw_bars=0, error_type="DhanRateLimitError", bars_appended=0, now=_NOW
+        )
+        status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert status == "EMPTY"  # NOT SKIPPED — the R1 fix
+        record = ledger.records()[0]
+        assert record.attempts == 3
+        assert record.empty_streak == 1
+        assert ledger.is_skippable(_key()) is False
+
+    def test_a_non_empty_outcome_resets_the_streak(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)  # EMPTY 1
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)  # EMPTY 2
+        # A transient FAIL between empties RESETS the streak to 0.
+        ledger.record(_key(), raw_bars=0, error_type="DhanTimeoutError", bars_appended=0, now=_NOW)
+        assert ledger.records()[0].empty_streak == 0
+        # So the next EMPTY is streak 1 again — three MORE consecutive empties needed.
+        status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert status == "EMPTY"
+        assert ledger.records()[0].empty_streak == 1
+
+    def test_three_consecutive_empties_still_promote(self) -> None:
+        ledger = WindowLedger()
+        status = ""
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            status = ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert status == SKIPPED
+        assert ledger.records()[0].empty_streak == EMPTY_TERMINAL_THRESHOLD
+
+    def test_success_resets_streak_to_zero(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)  # EMPTY 1
+        ledger.record(_key(), raw_bars=7, error_type=None, bars_appended=7, now=_NOW)  # SUCCESS
+        assert ledger.records()[0].empty_streak == 0
+
+
 class TestSettleKnownGap:
     """A DH-905 known-gap is settled SKIPPED (never re-pulled forever)."""
 

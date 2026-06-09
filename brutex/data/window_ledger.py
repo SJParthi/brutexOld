@@ -92,6 +92,12 @@ class WindowLedgerRecord:
     last_error: str | None
     first_seen_at: str  # ISO-8601 timestamp
     last_attempt_at: str | None  # ISO-8601 timestamp, None until first attempt
+    #: CONSECUTIVE genuine-``EMPTY`` outcomes (DEC-WINDOW-LEDGER-001 R1). Bumped only
+    #: when :meth:`WindowLedger.record` classifies the window ``EMPTY``; RESET to 0 by
+    #: any ``SUCCESS`` / ``FAILED`` outcome. The EMPTY→``SKIPPED`` promotion fires on
+    #: this streak, NOT on total ``attempts`` (which FAILED retries inflate), so a
+    #: window that 429-failed twice then returned one transient ``EMPTY`` is NOT masked.
+    empty_streak: int = 0
 
 
 @dataclass(slots=True)
@@ -149,6 +155,7 @@ class WindowLedger:
                 last_error=None,
                 first_seen_at=now.isoformat(),
                 last_attempt_at=None,
+                empty_streak=0,
             )
 
     def seed_lake_success(self, key: WindowKey, *, bars: int, now: datetime) -> bool:
@@ -179,6 +186,7 @@ class WindowLedger:
                 last_error=None,
                 first_seen_at=now.isoformat(),
                 last_attempt_at=now.isoformat(),
+                empty_streak=0,
             )
             return True
 
@@ -219,9 +227,18 @@ class WindowLedger:
         with self._lock:
             prior = self._by_window.get(wk)
             attempts = (prior.attempts if prior is not None else 0) + 1
+            # R1 (DEC-WINDOW-LEDGER-001): promote on the CONSECUTIVE genuine-EMPTY
+            # streak, NOT total ``attempts``. A SUCCESS / FAILED outcome RESETS the
+            # streak to 0, so a window that 429-failed twice then returned one
+            # transient EMPTY (attempts == 3 but streak == 1) is NOT masked — it
+            # keeps being fetched until it is genuinely EMPTY ``_threshold`` pulls
+            # running. The legacy DEC-EMPTY-TERMINAL-001 counted total attempts and
+            # would have wrongly settled it; this is the strictly-more-correct rule.
+            prior_streak = prior.empty_streak if prior is not None else 0
+            empty_streak = prior_streak + 1 if classified == EMPTY else 0
             status = classified
-            if classified == EMPTY and attempts >= self._threshold:
-                status = SKIPPED  # genuinely empty → settle, stop re-fetching
+            if classified == EMPTY and empty_streak >= self._threshold:
+                status = SKIPPED  # genuinely empty _threshold pulls running → settle
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
             self._by_window[wk] = WindowLedgerRecord(
                 market=key.market,
@@ -235,6 +252,7 @@ class WindowLedger:
                 last_error=error_type,
                 first_seen_at=first_seen,
                 last_attempt_at=now.isoformat(),
+                empty_streak=empty_streak,
             )
             return status
 
@@ -255,6 +273,7 @@ class WindowLedger:
             attempts = (prior.attempts if prior is not None else 0) + 1
             first_seen = prior.first_seen_at if prior is not None else now.isoformat()
             bars = prior.bars if prior is not None else 0
+            empty_streak = prior.empty_streak if prior is not None else 0
             self._by_window[wk] = WindowLedgerRecord(
                 market=key.market,
                 security_id=key.security_id,
@@ -267,6 +286,7 @@ class WindowLedger:
                 last_error=reason,
                 first_seen_at=first_seen,
                 last_attempt_at=now.isoformat(),
+                empty_streak=empty_streak,
             )
             return SKIPPED
 
@@ -292,7 +312,7 @@ class WindowLedger:
 
     def to_rows(
         self,
-    ) -> list[tuple[str, str, str, str, str, str, int, int, str | None, str, str | None]]:
+    ) -> list[tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int]]:
         """Serialise to a deterministic list of plain tuples (for the durable store)."""
         return [
             (
@@ -307,6 +327,7 @@ class WindowLedger:
                 r.last_error,
                 r.first_seen_at,
                 r.last_attempt_at,
+                r.empty_streak,
             )
             for r in self.records()
         ]
@@ -314,7 +335,9 @@ class WindowLedger:
     @classmethod
     def from_rows(
         cls,
-        rows: Iterable[tuple[str, str, str, str, str, str, int, int, str | None, str, str | None]],
+        rows: Iterable[
+            tuple[str, str, str, str, str, str, int, int, str | None, str, str | None, int]
+        ],
         *,
         threshold: int = EMPTY_TERMINAL_THRESHOLD,
     ) -> WindowLedger:
@@ -332,6 +355,7 @@ class WindowLedger:
             last_error,
             first_seen_at,
             last_attempt_at,
+            empty_streak,
         ) in rows:
             ledger._by_window[(market, security_id, interval, window_start, window_end)] = (
                 WindowLedgerRecord(
@@ -346,6 +370,7 @@ class WindowLedger:
                     last_error=last_error,
                     first_seen_at=first_seen_at,
                     last_attempt_at=last_attempt_at,
+                    empty_streak=empty_streak,
                 )
             )
         return ledger
