@@ -368,11 +368,11 @@ class TestIdempotenceUnderParallel:
     """A re-run over the same range yields zero net-new bars (Rule #7)."""
 
     def test_second_parallel_pull_is_a_noop(self) -> None:
-        from brutex.data.fetch_coverage import FetchCoverage
+        from brutex.data.window_ledger import WindowLedger
 
         instruments = _many_instruments(8)
         intervals = ["1minute", "1day"]
-        coverage = FetchCoverage()
+        ledger = WindowLedger()
 
         def _pull(adapter: _CountingAdapter) -> None:
             pool = _SimPool(max_workers=10, rate=_RATE, latency=0.5)
@@ -383,22 +383,23 @@ class TestIdempotenceUnderParallel:
                 intervals=intervals,
                 start=_START,
                 end=_END,
-                coverage=coverage,
+                ledger=ledger,
                 run_parallel=pool,
             )
 
         first = _CountingAdapter()
         _pull(first)
-        first_records = coverage.to_records()
+        first_rows = ledger.to_rows()
         assert first.calls > 0  # the first pull fetched every window
-        # SECOND pull over the same range + shared coverage: every window is now
-        # marked complete, so NOT A SINGLE vendor fetch is issued (quota-frugal,
-        # idempotent — the coverage ledger short-circuits before the call).
+        # SECOND pull over the same range + shared ledger: every window is now
+        # settled SUCCESS, so NOT A SINGLE vendor fetch is issued (quota-frugal,
+        # idempotent — the ledger is the SOLE skip authority, short-circuiting
+        # before the call, DEC-WINDOW-LEDGER-001 b3).
         second = _CountingAdapter()
         _pull(second)
         assert second.calls == 0
-        # Coverage is byte-identical (deterministic serialisation) — no new state.
-        assert coverage.to_records() == first_records
+        # The ledger is byte-identical (deterministic serialisation) — no new state.
+        assert ledger.to_rows() == first_rows
 
 
 class TestQuarantineUnderParallel:

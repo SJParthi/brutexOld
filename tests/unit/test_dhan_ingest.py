@@ -248,13 +248,21 @@ class TestIngestSpot:
 
 
 class TestIngestSpotCoverage:
-    """The fetch-coverage watermark — skip already-pulled windows (DEC-FETCH-COVERAGE-001)."""
+    """The skip authority — the unified WindowLedger skips already-settled windows.
 
-    def test_coverage_marks_then_skips_on_repull(self) -> None:
+    DEC-WINDOW-LEDGER-001 Stage b3 flipped the skip probe from
+    ``FetchCoverage.is_complete`` to ``WindowLedger.is_skippable``: the ledger is
+    now the SOLE skip authority. FetchCoverage is still MARKED (vestigial, removed
+    in the final stage) but no longer drives the skip.
+    """
+
+    def test_ledger_marks_then_skips_on_repull(self) -> None:
         from brutex.data.fetch_coverage import FetchCoverage
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
 
         cov = FetchCoverage()
-        # First pull (empty coverage) → fetches all 3 windows + marks them.
+        led = WindowLedger()
+        # First pull (empty ledger) → fetches all 3 windows + records them SUCCESS.
         first = ingest_spot(
             _adapter(),
             _Sink(),
@@ -263,14 +271,16 @@ class TestIngestSpotCoverage:
             start=date(2021, 1, 1),
             end=date(2021, 8, 1),  # ~212 days → 3 windows
             coverage=cov,
+            ledger=led,
         )
         assert first.windows == 3
         assert first.bars_appended == 3
         assert first.skipped_windows == 0
-        assert cov.completed_count == 3
+        assert {r.status for r in led.records()} == {SUCCESS}
+        assert cov.completed_count == 3  # coverage still MARKED (vestigial)
 
-        # Re-pull with the SAME coverage → every window is skipped before the
-        # vendor call: no fetch, no append, skipped_windows == 3.
+        # Re-pull with the SAME ledger → every window is skippable (SUCCESS) so it
+        # is skipped before the vendor call: no fetch, no append, skipped == 3.
         sink2 = _Sink()
         second = ingest_spot(
             _adapter(),
@@ -280,11 +290,40 @@ class TestIngestSpotCoverage:
             start=date(2021, 1, 1),
             end=date(2021, 8, 1),
             coverage=cov,
+            ledger=led,
         )
         assert second.windows == 3
         assert second.skipped_windows == 3
         assert second.bars_appended == 0
         assert sink2.appends == []  # nothing re-fetched / re-written
+
+    def test_coverage_alone_no_longer_skips(self) -> None:
+        # The flip guard: a re-pull with ONLY coverage (no ledger) does NOT skip —
+        # coverage is no longer the skip authority (DEC-WINDOW-LEDGER-001 b3).
+        from brutex.data.fetch_coverage import FetchCoverage
+
+        cov = FetchCoverage()
+        ingest_spot(
+            _adapter(),
+            _Sink(),
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            coverage=cov,
+        )
+        assert cov.completed_count == 3  # marked...
+        second = ingest_spot(
+            _adapter(),
+            _Sink(),
+            instrument=_INST,
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            coverage=cov,  # ...but coverage alone re-fetches (no ledger → no skip)
+        )
+        assert second.skipped_windows == 0
+        assert second.bars_appended == 3
 
     def test_empty_vendor_response_not_marked_complete(self) -> None:
         """A 0-bar (empty) vendor response is NOT marked complete (DEC-LAKE-RECONCILE-001).
@@ -864,10 +903,10 @@ class TestIngestSpotLogging:
         assert write["bars_appended"] == 1
 
     def test_skipped_window_lights_only_the_skip_event(self) -> None:
-        from brutex.data.fetch_coverage import FetchCoverage
+        from brutex.data.window_ledger import WindowLedger
 
-        cov = FetchCoverage()
-        # First pull marks the single window complete (not asserted here).
+        led = WindowLedger()
+        # First pull records the single window SUCCESS (not asserted here).
         ingest_spot(
             _adapter(),
             _Sink(),
@@ -875,9 +914,9 @@ class TestIngestSpotLogging:
             interval="1day",
             start=date(2021, 1, 1),
             end=date(2021, 8, 1),
-            coverage=cov,
+            ledger=led,
         )
-        # Re-pull → the window is skipped before any vendor call.
+        # Re-pull → the window is skippable (SUCCESS) → skipped before any vendor call.
         with capture_logs() as logs, pull_id_scope("spotpull0003"):
             report = ingest_spot(
                 _adapter(),
@@ -886,7 +925,7 @@ class TestIngestSpotLogging:
                 interval="1day",
                 start=date(2021, 1, 1),
                 end=date(2021, 8, 1),
-                coverage=cov,
+                ledger=led,
             )
         assert report.skipped_windows == 1
         (window,) = _events(logs, "ingest.window")
