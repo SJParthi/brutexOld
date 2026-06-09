@@ -31,10 +31,12 @@ from typing import Protocol
 from brutex.dashboard.pull_progress import ProgressSnapshot, PullProgress
 from brutex.dashboard.summary_cache import CoverageCounters
 
-#: The positional progress hook the ingest drivers emit (``label, bars, failed``)
-#: — identical to ``brutex.adapters.dhan.run_ingest.ProgressHook`` but redeclared
-#: here so this layer carries no import from the adapter package.
-ProgressHook = Callable[[str, int, bool], None]
+#: The positional progress hook the ingest drivers emit
+#: (``label, bars, failed, gap``) — identical to
+#: ``brutex.adapters.dhan.run_ingest.ProgressHook`` but redeclared here so this
+#: layer carries no import from the adapter package. ``gap`` flags a benign
+#: DH-905 no-data boundary (NOT a failure — DEC-DHAN-NO-DATA-GAP-COUNT-001).
+ProgressHook = Callable[[str, int, bool, bool], None]
 
 #: The injected pull work — given the progress hook, run the pull (return ignored).
 PullWork = Callable[[ProgressHook], object]
@@ -129,8 +131,11 @@ class BackgroundPullJob:
             with self._lock:
                 self._running = False
 
-    def _on_progress(self, label: str, bars: int, failed: bool) -> None:
+    def _on_progress(self, label: str, bars: int, failed: bool, gap: bool = False) -> None:
         """Adapt the drivers' positional hook onto the tracker's kw advance.
+
+        *gap* flags a benign DH-905 no-data boundary (NOT a failure — counted
+        separately so the live tally stays honest, DEC-DHAN-NO-DATA-GAP-COUNT-001).
 
         Also feeds the SINGLE write funnel into the incremental coverage
         counters (DEC-DASHBOARD-FASTREAD-001): *bars* is the POST-DEDUP
@@ -141,7 +146,7 @@ class BackgroundPullJob:
         collapses a 200-symbol fan-out of these ticks into at most one rescan per
         window (so the funnel can't trigger a scan storm).
         """
-        self._progress.advance(current=label, bars=bars, failed=failed)
+        self._progress.advance(current=label, bars=bars, failed=failed, gap=gap)
         self._counters.add(label, bars)
         if self._summary_cache is not None:
             self._summary_cache.mark_dirty()

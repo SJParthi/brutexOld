@@ -1502,10 +1502,10 @@ def _arm_retry_storm_guard(
     instruments: Sequence[Any],
     intervals: Sequence[str],
     stack: contextlib.ExitStack,
-) -> Callable[[str, int, bool], None] | None:
+) -> Callable[[str, int, bool, bool], None] | None:
     """Build + arm the retry-storm give-up guard for one pull (DEC-RATE-STORM-WATCHDOG-001).
 
-    Returns a ``run_ingest`` ``ProgressHook`` ``(label, bars, failed)`` that feeds
+    Returns a ``run_ingest`` ``ProgressHook`` ``(label, bars, failed, gap)`` that feeds
     every window outcome into a :class:`~brutex.orchestrator.watchdog.RetryStormWatchdog`
     (a terminal window-failure gives up + stamps a hash-chained ``RETRY_GIVE_UP``
     audit row; a symbol reaching 100%% window-failure stamps ``SYMBOL_WINDOW_FAILURE``

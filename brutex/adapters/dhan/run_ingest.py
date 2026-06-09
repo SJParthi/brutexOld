@@ -72,7 +72,10 @@ _LOG = structlog.get_logger("brutex.adapters.dhan.run_ingest")
 #: processed: ``(label, bars_appended, failed)``. Lets a caller stream
 #: real-time progress (e.g. into a ``PullProgress`` tracker) without coupling
 #: this layer to the dashboard. ``bars_appended`` is 0 for a quarantined pair.
-ProgressHook = Callable[[str, int, bool], None]
+#: The 4-tuple is ``(label, bars, failed, gap)`` — ``gap`` flags a benign Dhan
+#: ``DH-905`` no-data boundary that is NOT a failure (re-tried next pull, never
+#: masked), so the live "failed" tally stays honest (DEC-DHAN-NO-DATA-GAP-COUNT-001).
+ProgressHook = Callable[[str, int, bool, bool], None]
 
 #: One unit of OUTER-loop work for the parallel fan-out: a spot
 #: ``(instrument, interval)`` pair. Each maps to a distinct lake partition, so
@@ -383,7 +386,7 @@ def run_dhan_spot_ingest(
                 },
             )
             if on_progress is not None:
-                on_progress(label, report.bars_appended, False)
+                on_progress(label, report.bars_appended, False, False)
             continue
         # A failed ItemResult always carries the captured worker exception.
         exc = outcome.exc
@@ -459,7 +462,12 @@ def run_dhan_spot_ingest(
                 error=str(exc),
             )
         if on_progress is not None:
-            on_progress(label, 0, True)
+            # A DH-905 no-data boundary is a benign GAP, NOT a failure — count it
+            # separately so the live tally stops reading "1 failed" for an expected
+            # empty range (DEC-DHAN-NO-DATA-GAP-COUNT-001). Every other terminal
+            # DhanError (auth / real 4xx) is a true failure.
+            known_gap = is_no_data_error(exc)
+            on_progress(label, 0, not known_gap, known_gap)
 
     # Per-underlying rollup — INFO, one line per instrument (not per window) — in
     # a DETERMINISTIC post-pass grouped + sorted by symbol_name, so the log order

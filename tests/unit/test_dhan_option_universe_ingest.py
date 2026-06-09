@@ -340,7 +340,7 @@ def test_custom_axes_narrow_the_fanout() -> None:
 
 def test_on_progress_fires_per_underlying_success() -> None:
     """on_progress fires once per underlying with (id, bars, any_failed=False)."""
-    events: list[tuple[str, int, bool]] = []
+    events: list[tuple[str, int, bool, bool]] = []
     run_dhan_options_ingest(
         _OkClient(),
         _Sink(),
@@ -350,10 +350,10 @@ def test_on_progress_fires_per_underlying_success() -> None:
         expiry_flags=("WEEK",),
         expiry_codes=(1,),
         option_types=("CALL",),
-        on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
+        on_progress=lambda label, bars, failed, gap: events.append((label, bars, failed, gap)),
     )
     # 1 series × 1 in-session CE bar → 1 bar appended, nothing failed.
-    assert events == [("13", 1, False)]
+    assert events == [("13", 1, False, False)]
 
 
 def test_on_series_tick_fires_once_per_drained_series() -> None:
@@ -365,7 +365,7 @@ def test_on_series_tick_fires_once_per_drained_series() -> None:
     lets a single-underlying pull's lake-backed coverage surface tick live.
     """
     ticks: list[int] = []
-    progress: list[tuple[str, int, bool]] = []
+    progress: list[tuple[str, int, bool, bool]] = []
     report = run_dhan_options_ingest(
         _OkClient(),
         _Sink(),
@@ -375,7 +375,7 @@ def test_on_series_tick_fires_once_per_drained_series() -> None:
         expiry_flags=("WEEK", "MONTH"),
         expiry_codes=(1, 2),
         option_types=("CALL", "PUT"),
-        on_progress=lambda label, bars, failed: progress.append((label, bars, failed)),
+        on_progress=lambda label, bars, failed, gap: progress.append((label, bars, failed, gap)),
         on_series_tick=lambda: ticks.append(1),
     )
     # 3 strikes × 2 flags... no: expiry_codes uniform (1,2) on both flags →
@@ -432,7 +432,7 @@ def test_skipped_windows_aggregate_after_repull() -> None:
 
 def test_on_progress_flags_failed_underlying() -> None:
     """A wholly-failing underlying fires on_progress with (id, 0, True)."""
-    events: list[tuple[str, int, bool]] = []
+    events: list[tuple[str, int, bool, bool]] = []
     run_dhan_options_ingest(
         _FailClient(),
         _Sink(),
@@ -442,9 +442,9 @@ def test_on_progress_flags_failed_underlying() -> None:
         expiry_flags=("WEEK",),
         expiry_codes=(1,),
         option_types=("CALL",),
-        on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
+        on_progress=lambda label, bars, failed, gap: events.append((label, bars, failed, gap)),
     )
-    assert events == [("13", 0, True)]
+    assert events == [("13", 0, True, False)]
 
 
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:

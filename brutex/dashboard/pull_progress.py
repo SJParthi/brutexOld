@@ -49,6 +49,13 @@ class ProgressSnapshot:
     completed, failed
         Units finished cleanly / quarantined so far (``completed`` counts both
         clean and failed units — it is the units *processed*).
+    gaps
+        Units that returned NO data for a benign, expected reason — a Dhan
+        ``DH-905`` "no data" boundary (e.g. NIFTY NEXT 50's daily history that
+        starts after 2021-01-01). A gap is NOT a failure (it is re-tried next
+        pull, never masked) — counting it separately keeps the ``failed`` tally
+        honest so a benign boundary stops reading as "1 failed"
+        (DEC-DHAN-NO-DATA-GAP-COUNT-001).
     bars
         Running total of bars/rows appended so far.
     current
@@ -67,6 +74,7 @@ class ProgressSnapshot:
     current: str
     detail: str
     updated_at: float
+    gaps: int = 0
 
     @property
     def percent(self) -> float:
@@ -87,6 +95,7 @@ class ProgressSnapshot:
             "total": self.total,
             "completed": self.completed,
             "failed": self.failed,
+            "gaps": self.gaps,
             "bars": self.bars,
             "current": self.current,
             "detail": self.detail,
@@ -120,6 +129,7 @@ class PullProgress:
         self._total = 0
         self._completed = 0
         self._failed = 0
+        self._gaps = 0
         self._bars = 0
         self._current = ""
         self._detail = ""
@@ -137,23 +147,31 @@ class PullProgress:
             self._total = max(0, total)
             self._completed = 0
             self._failed = 0
+            self._gaps = 0
             self._bars = 0
             self._current = ""
             self._detail = detail
             self._updated_at = self._clock()
 
-    def advance(self, *, current: str = "", bars: int = 0, failed: bool = False) -> None:
+    def advance(
+        self, *, current: str = "", bars: int = 0, failed: bool = False, gap: bool = False
+    ) -> None:
         """Record one processed unit — O(1).
 
         Increments ``completed`` (clamped to ``total``), adds *bars* to the
-        running total, bumps ``failed`` when *failed* is true, and stamps
-        *current* as the most-recent label.
+        running total, bumps ``failed`` when *failed* is true, bumps ``gaps``
+        when *gap* is true (a benign DH-905 no-data boundary — NOT a failure,
+        DEC-DHAN-NO-DATA-GAP-COUNT-001), and stamps *current* as the most-recent
+        label. ``failed`` and ``gap`` are mutually exclusive at the call sites,
+        but both are honoured independently here.
         """
         with self._lock:
             self._completed = min(self._total, self._completed + 1)
             self._bars += max(0, bars)
             if failed:
                 self._failed += 1
+            if gap:
+                self._gaps += 1
             if current:
                 self._current = current
             self._updated_at = self._clock()
@@ -180,6 +198,7 @@ class PullProgress:
                 total=self._total,
                 completed=self._completed,
                 failed=self._failed,
+                gaps=self._gaps,
                 bars=self._bars,
                 current=self._current,
                 detail=self._detail,

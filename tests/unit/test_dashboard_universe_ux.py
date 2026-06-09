@@ -217,3 +217,13 @@ def test_universe_daily_quota_gauge_present() -> None:
     assert "/api/v1/rate" in html, "the gauge does not poll the rate endpoint"
     assert "s.quota_limit" in html, "the poller does not read quota_limit"
     assert "pct >= 95" in html, "the crit threshold branch is missing"
+
+
+def test_universe_no_data_gap_live_stat_present() -> None:
+    """The live pull stats split benign DH-905 no-data boundaries out of "failed"
+    into their own amber "no-data gaps" counter (DEC-DHAN-NO-DATA-GAP-COUNT-001),
+    so a known empty range stops reading as a failure."""
+    html = _render_universe_html()
+    assert "no-data gaps" in html, "the no-data gaps live stat is missing"
+    assert "s.gaps" in html, "the live stats do not read the gaps counter"
+    assert ".bstat.gap" in html, "the amber gap stat style is missing"

@@ -227,7 +227,7 @@ class TestPullIdPropagation:
 
 class TestDeterministicRollup:
     def test_rollup_and_progress_sorted_by_security_id(self) -> None:
-        progress: list[tuple[str, int, bool]] = []
+        progress: list[tuple[str, int, bool, bool]] = []
 
         def _reversed_runner(fn, items):
             # Complete in REVERSE order; the rollup + on_progress must still be
@@ -242,7 +242,9 @@ class TestDeterministicRollup:
                 underlyings=[_underlying("70"), _underlying("13"), _underlying("42")],
                 start=_START,
                 end=_END,
-                on_progress=lambda sid, bars, failed: progress.append((sid, bars, failed)),
+                on_progress=lambda sid, bars, failed, gap: progress.append(
+                    (sid, bars, failed, gap)
+                ),
                 run_parallel=_reversed_runner,
             )
         rollups = [e for e in logs if e["event"] == "ingest.underlying"]

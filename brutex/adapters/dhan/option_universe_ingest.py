@@ -132,10 +132,14 @@ def expiry_codes_for_flag(expiry_flag: str) -> tuple[int, ...]:
 SeriesKey = tuple[str, str, int, str, str]
 
 #: Live-progress hook fired once per **underlying** after its whole fan-out is
-#: done: ``(label, bars_appended, any_failed)``. Lets a caller stream real-time
-#: progress (e.g. into a ``PullProgress`` tracker) without coupling this layer
-#: to the dashboard (DEC-PULL-PROGRESS-TRACKER-001).
-ProgressHook = Callable[[str, int, bool], None]
+#: done: ``(label, bars_appended, any_failed, gap)``. Lets a caller stream
+#: real-time progress (e.g. into a ``PullProgress`` tracker) without coupling
+#: this layer to the dashboard (DEC-PULL-PROGRESS-TRACKER-001). ``gap`` mirrors
+#: the spot hook's benign-DH-905 flag (DEC-DHAN-NO-DATA-GAP-COUNT-001); the
+#: per-underlying options rollup does not yet split gap from failure, so it is
+#: emitted ``False`` here (a tracked follow-up — options gaps still count as
+#: failed exactly as before, no regression).
+ProgressHook = Callable[[str, int, bool, bool], None]
 
 
 def strike_window(offsets: int) -> list[str]:
@@ -553,8 +557,10 @@ def run_dhan_options_ingest(
             windows=result.windows,
         )
         # Fire the live-progress hook once the WHOLE underlying fan-out is done.
+        # gap=False: the options rollup does not yet split benign DH-905 from a
+        # real failure (DEC-DHAN-NO-DATA-GAP-COUNT-001 follow-up) — no regression.
         if on_progress is not None:
-            on_progress(underlying.security_id, result.bars, result.any_failed)
+            on_progress(underlying.security_id, result.bars, result.any_failed, False)
     return OptionsUniverseReport(series=series, failures=tuple(failures))
 
 

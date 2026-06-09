@@ -152,6 +152,7 @@ def test_to_dict_shape() -> None:
         "total": 2,
         "completed": 1,
         "failed": 0,
+        "gaps": 0,
         "bars": 10,
         "current": "NIFTY",
         "detail": "",
@@ -160,6 +161,24 @@ def test_to_dict_shape() -> None:
         "updated_at": d["updated_at"],
     }
     assert isinstance(d["updated_at"], float)
+
+
+def test_advance_counts_no_data_gaps_separately_from_failures() -> None:
+    # DEC-DHAN-NO-DATA-GAP-COUNT-001: a benign DH-905 gap bumps ``gaps``, NOT
+    # ``failed`` — the two counters are independent and a gap is still a processed
+    # unit (``completed`` advances). A reset via ``start`` clears ``gaps`` too.
+    p = PullProgress(clock=_FakeClock())
+    p.start(total=3)
+    p.advance(current="NIFTY", bars=100)  # clean
+    p.advance(current="NIFTY NEXT 50", gap=True)  # benign DH-905 boundary
+    p.advance(current="BADSYM", failed=True)  # real failure
+    snap = p.snapshot()
+    assert snap.completed == 3
+    assert snap.failed == 1
+    assert snap.gaps == 1
+    assert snap.to_dict()["gaps"] == 1
+    p.start(total=1)  # reset clears the gap counter
+    assert p.snapshot().gaps == 0
 
 
 def test_default_monotonic_clock() -> None:

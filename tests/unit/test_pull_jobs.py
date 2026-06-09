@@ -73,10 +73,21 @@ def test_worker_exception_becomes_error_state() -> None:
 
 def test_failed_unit_flag_is_forwarded() -> None:
     job = _job()
-    job.start(lambda on_progress: on_progress("BAD 1minute", 0, True), total=1)
+    job.start(lambda on_progress: on_progress("BAD 1minute", 0, True, False), total=1)
     snap = job.snapshot()
     assert snap.failed == 1
     assert snap.state == STATE_DONE  # a failed UNIT is not a failed JOB
+
+
+def test_no_data_gap_flag_is_forwarded_and_not_a_failure() -> None:
+    # DEC-DHAN-NO-DATA-GAP-COUNT-001: a benign DH-905 gap tick (gap=True) bumps
+    # ``gaps``, NOT ``failed`` — so a known empty boundary stops reading as a failure.
+    job = _job()
+    job.start(lambda on_progress: on_progress("NIFTY NEXT 50 1day", 0, False, True), total=1)
+    snap = job.snapshot()
+    assert snap.gaps == 1
+    assert snap.failed == 0
+    assert snap.state == STATE_DONE
 
 
 def test_single_flight_blocks_second_start() -> None:
