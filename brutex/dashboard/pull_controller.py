@@ -62,11 +62,6 @@ from brutex.adapters.dhan.until_clean import (
     run_until_clean,
 )
 from brutex.adapters.protocol import MarketAdapter
-from brutex.dashboard.coverage_reconcile import (
-    reconcile_coverage_with_lake,
-    reconcile_empty_terminal,
-    reconcile_failed_windows_for_repull,
-)
 from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.sink import BarSink, NullBarSink
@@ -1199,43 +1194,14 @@ def pull_all_spot(
         # Skip windows already in the lake on a live re-pull (no wasted Dhan quota);
         # DEC-FETCH-COVERAGE-WIRING-001.
         coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
-        # Reconcile the ledger against the lake (the source of truth): windows
-        # whose bars are already stored are marked complete → skipped (no re-fetch
-        # / conflict flood), while windows the lake does not cover stay un-marked →
-        # re-pulled (DEC-LAKE-RECONCILE-001). One-time O(datasets) at pull start.
-        # Capture how many windows the lake-reconcile marked complete so the skip
-        # is VISIBLE (DEC-LAKE-RECONCILE-VISIBILITY-001): without this the operator
-        # could not tell an already-stored re-pull was being skipped vs re-fetched
-        # — it stamps ``reconciled_windows`` on ``universe.pull_all.start`` below.
-        reconciled_windows = 0
-        if not dry_run and coverage is not None:
-            reconciled_windows = reconcile_coverage_with_lake(
-                coverage,
-                lake_root,
-                instruments=instruments,
-                intervals=DHAN_FETCH_INTERVALS,
-                start=start.date(),
-                end=end.date(),
-            )
-        # Per-window status (DEC-WINDOW-STATUS-001): a browsable SUCCESS/EMPTY/
-        # FAILED record, loaded for the run + persisted at pull end.
+        # The coverage reconcile band-aids (lake-reconcile / EMPTY-terminal /
+        # FAILED-repull) are RETIRED (DEC-WINDOW-LEDGER-001, Stage d): the unified
+        # ledger is the SOLE skip authority, so its own per-window record + the
+        # cold-start `reconcile_ledger_with_lake` below replace every coarse
+        # coverage-set patch. `coverage` is still marked (vestigial, removed in the
+        # final stage). Per-window status (DEC-WINDOW-STATUS-001) stays: a browsable
+        # SUCCESS/EMPTY/FAILED record, loaded for the run + persisted at pull end.
         status_log = begin_pull_status(lake_root, dry_run=dry_run)
-        # EMPTY-terminal (DEC-EMPTY-TERMINAL-001): a window seen genuinely EMPTY on
-        # `threshold` separate pulls (e.g. SENSEX 1-minute before 2021-08-04) is
-        # marked complete → skipped, so it stops re-fetching every run. Pure
-        # (coverage + the cross-run status log), O(recorded windows) at pull start.
-        if not dry_run and coverage is not None and status_log is not None:
-            reconcile_empty_terminal(coverage, status_log)
-        # Force-re-pull FAILED windows (DEC-FAILED-WINDOW-FORCE-REPULL-001): a
-        # FAILED row is ALWAYS a retryable transient (rate-limit / timeout — a
-        # terminal DH-905 no-data is never recorded FAILED), yet the coarse
-        # span-enclosure reconcile above marks an internal-gap failed window
-        # complete (stored bars exist before AND after it), stranding the
-        # operator's DhanRateLimitError windows at 0 bars forever. Un-mark every
-        # FAILED window so THIS pass re-fetches it; auto-retry drives it to
-        # success. Runs AFTER reconcile_coverage_with_lake so the un-mark wins.
-        if not dry_run and coverage is not None and status_log is not None:
-            reconcile_failed_windows_for_repull(coverage, status_log)
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load (one-shot
         # migrate) the durable Parquet ledger + PLAN every window the pull will
         # touch as PLANNED, so EVERY spot window has a DB row BEFORE any fetch.
@@ -1273,7 +1239,6 @@ def pull_all_spot(
             instruments=len(instruments),
             start_date=start.date().isoformat(),
             dry_run=dry_run,
-            reconciled_windows=reconciled_windows,
         )
         (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
             _live_rate_runtime(use_live_rate, session_rate)
@@ -1558,32 +1523,12 @@ def pull_candles(
         # Skip windows already in the lake on a live re-pull (no wasted Dhan quota);
         # DEC-FETCH-COVERAGE-WIRING-001.
         coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
-        # Reconcile the ledger against the lake (the source of truth): already-stored
-        # windows are marked complete → skipped (no re-fetch / conflict flood);
-        # windows the lake does not cover re-pull (DEC-LAKE-RECONCILE-001).
-        if not dry_run and coverage is not None:
-            reconcile_coverage_with_lake(
-                coverage,
-                lake_root,
-                instruments=[instrument],
-                intervals=DHAN_FETCH_INTERVALS,
-                start=start.date(),
-                end=end.date(),
-            )
+        # The coverage reconcile band-aids are RETIRED (DEC-WINDOW-LEDGER-001,
+        # Stage d) — the ledger's per-window record + the cold-start
+        # `reconcile_ledger_with_lake` below are the sole skip source. `coverage`
+        # is still marked (vestigial, removed in the final stage).
         # Per-window status (DEC-WINDOW-STATUS-001): browsable SUCCESS/EMPTY/FAILED.
         status_log = begin_pull_status(lake_root, dry_run=dry_run)
-        # EMPTY-terminal (DEC-EMPTY-TERMINAL-001): a window seen genuinely EMPTY on
-        # `threshold` separate pulls (e.g. SENSEX 1-minute before 2021-08-04) is
-        # marked complete → skipped, so it stops re-fetching every run. Pure
-        # (coverage + the cross-run status log), O(recorded windows) at pull start.
-        if not dry_run and coverage is not None and status_log is not None:
-            reconcile_empty_terminal(coverage, status_log)
-        # Force-re-pull FAILED windows (DEC-FAILED-WINDOW-FORCE-REPULL-001):
-        # un-mark every FAILED (retryable) window the coarse span-enclosure
-        # reconcile wrongly marked complete, so the ingest re-fetches it until it
-        # succeeds instead of skipping a 0-bar internal gap forever.
-        if not dry_run and coverage is not None and status_log is not None:
-            reconcile_failed_windows_for_repull(coverage, status_log)
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load/migrate + PLAN
         # this symbol's windows, then record each outcome alongside the status log.
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
