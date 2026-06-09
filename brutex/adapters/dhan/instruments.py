@@ -462,6 +462,59 @@ def fno_underlying_symbols(rows: Iterable[Mapping[str, str]]) -> frozenset[str]:
     return frozenset(eligible)
 
 
+#: OPTION leg ``INSTRUMENT`` codes — CE/PE only, single-stock (OPTSTK) + index
+#: (OPTIDX). **Futures are DELIBERATELY excluded** (DEC-OPTIONS-ELIGIBLE-GUARD-001):
+#: Track 1's option-chain pull NEVER touches futures, so a FUT-only underlying is
+#: NOT options-eligible and must not be option-pullable.
+_OPTION_LEG_TYPES: Final[frozenset[str]] = frozenset({"OPTSTK", "OPTIDX"})
+
+
+def options_underlying_symbols(rows: Iterable[Mapping[str, str]]) -> frozenset[str]:
+    """Collect the UPPER-CASED tickers that have listed **OPTIONS** (OPTSTK/OPTIDX).
+
+    OPTIONS-ONLY (FUTSTK/FUTIDX deliberately excluded — we never pull futures)
+    per DEC-OPTIONS-ELIGIBLE-GUARD-001. A ticker is options-eligible if it
+    appears as ``UNDERLYING_SYMBOL`` on any OPTSTK/OPTIDX row (NSE or BSE, so the
+    BSE SENSEX/BANKEX options are caught too — unlike the NSE-only stock F&O set).
+    Test scrips are excluded. The result is the symbol arm of the option-pull
+    guard: an admitted index whose ``symbol_name`` is NOT in this set has no
+    option chain and must be blocked from option-pull (quota safety).
+    """
+    eligible: set[str] = set()
+    for row in rows:
+        if row.get("INSTRUMENT", "").strip().upper() not in _OPTION_LEG_TYPES:
+            continue
+        if row.get("EXCH_ID", "").strip().upper() not in (Exchange.NSE, Exchange.BSE):
+            continue
+        underlying = _opt_str(row.get("UNDERLYING_SYMBOL"))
+        if underlying is not None and not _is_test_scrip(row.get("SYMBOL_NAME"), underlying):
+            eligible.add(underlying.upper())
+    return frozenset(eligible)
+
+
+def options_underlying_security_ids(rows: Iterable[Mapping[str, str]]) -> frozenset[int]:
+    """Collect the spot ``SECURITY_ID``s that listed **OPTIONS** legs point to.
+
+    The robust (string-free) arm of the option-pull guard: each OPTSTK/OPTIDX leg
+    carries ``UNDERLYING_SECURITY_ID`` — the id of the ONE real spot row it derives
+    from. Matching an admitted index by id avoids the ``"NIFTY"`` vs ``"Nifty 50"``
+    symbol-case fragility entirely (DEC-OPTIONS-ELIGIBLE-GUARD-001). FUT legs are
+    excluded (we never pull futures); test scrips are excluded.
+    """
+    ids: set[int] = set()
+    for row in rows:
+        if row.get("INSTRUMENT", "").strip().upper() not in _OPTION_LEG_TYPES:
+            continue
+        if row.get("EXCH_ID", "").strip().upper() not in (Exchange.NSE, Exchange.BSE):
+            continue
+        if _is_test_scrip(row.get("SYMBOL_NAME"), row.get("UNDERLYING_SYMBOL")):
+            continue
+        usid = _opt_int(row.get("UNDERLYING_SECURITY_ID"))
+        if usid is not None:
+            ids.add(usid)
+    return frozenset(ids)
+
+
 def _is_nse_stock_derivative(row: Mapping[str, str]) -> bool:
     """Return ``True`` for an NSE single-stock futures/option row (FUTSTK/OPTSTK).
 
@@ -523,6 +576,14 @@ class UniverseReport:
     #: merely shares the lake (DEC-OPTIONS-PULL-GUARD-001) — an admitted equity's
     #: ``symbol_name`` IS its ticker (DEC-DHAN-FNO-JOIN-KEY-001). Defaults empty.
     fno_eligible_symbols: frozenset[str] = frozenset()
+    #: The UPPER-CASED tickers that have listed **OPTIONS** (OPTSTK/OPTIDX legs;
+    #: futures excluded — we never pull futures). The symbol arm of the
+    #: option-pull guard (DEC-OPTIONS-ELIGIBLE-GUARD-001): an admitted index whose
+    #: ``symbol_name`` is absent here has no chain and is blocked from option-pull.
+    options_eligible_symbols: frozenset[str] = frozenset()
+    #: The spot ``SECURITY_ID``s that listed OPTIONS legs point to — the string-free
+    #: arm of the same guard (matches an index by id, dodging name-case fragility).
+    options_eligible_security_ids: frozenset[int] = frozenset()
 
 
 #: F&O leg ``INSTRUMENT`` codes whose lot/freeze define the TRADABLE contract
@@ -631,6 +692,8 @@ def select_universe_report(
     extra_idx = frozenset(sym.strip().upper() for sym in extra_index_symbols if sym.strip())
     eligible = fno_underlying_symbols(rows)
     canonical_ids = fno_underlying_security_ids(rows)
+    options_symbols = options_underlying_symbols(rows)
+    options_security_ids = options_underlying_security_ids(rows)
     by_key: dict[tuple[Exchange, str], Instrument] = {}
     parsed = 0
     filtered = 0
@@ -744,6 +807,8 @@ def select_universe_report(
         nse_count=nse_count,
         bse_count=bse_count,
         fno_eligible_symbols=eligible,
+        options_eligible_symbols=options_symbols,
+        options_eligible_security_ids=options_security_ids,
     )
 
 
@@ -796,6 +861,8 @@ __all__ = [
     "discover_index",
     "fno_underlying_security_ids",
     "fno_underlying_symbols",
+    "options_underlying_security_ids",
+    "options_underlying_symbols",
     "parse_instrument_row",
     "parse_nse_equities",
     "select_universe",
