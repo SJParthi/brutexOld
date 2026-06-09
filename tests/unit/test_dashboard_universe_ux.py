@@ -203,9 +203,10 @@ def test_universe_opt_badge_present() -> None:
 
 def test_universe_daily_quota_gauge_present() -> None:
     """The Dhan daily-quota gauge (DEC-DASHBOARD-QUOTA-GAUGE-001): the header gauge
-    markup, the 80%/95% colour-band CSS, and the poller that reads /api/v1/rate and
-    only shows the gauge once a positive limit is reported (so the operator can SEE
-    the 100,000/day budget on the page where pulls happen)."""
+    markup, the 80%/95% colour-band CSS, and the poller that reads /api/v1/quota
+    (the persisted IST-midnight tracker — DEC-DASHBOARD-QUOTA-PERSISTED-001) so the
+    gauge shows today's budget on page-load, before any pull. Hidden until a
+    positive limit is reported."""
     html = _render_universe_html()
     assert 'id="quotaGauge"' in html, "the quota gauge block is missing"
     for span in ("qgUsed", "qgLimit", "qgRem", "qgPct", "qgFill"):
@@ -213,8 +214,8 @@ def test_universe_daily_quota_gauge_present() -> None:
     assert "display:none" in html, "the gauge must start hidden until usage is reported"
     assert ".quota-gauge.warn" in html, "the ≥80% amber band is missing"
     assert ".quota-gauge.crit" in html, "the ≥95% red band is missing"
-    # The poller reads the existing rate endpoint's quota fields + the crit branch.
-    assert "/api/v1/rate" in html, "the gauge does not poll the rate endpoint"
+    # The poller reads the persisted-quota endpoint + the crit branch.
+    assert "/api/v1/quota" in html, "the gauge does not poll the persisted-quota endpoint"
     assert "s.quota_limit" in html, "the poller does not read quota_limit"
     assert "pct >= 95" in html, "the crit threshold branch is missing"
 
