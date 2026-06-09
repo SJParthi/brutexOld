@@ -364,3 +364,71 @@ class TestTokenEventsApi:
         fake = SimpleNamespace(path=None)
         client = TestClient(build_app(DashboardState(), instrument_store=fake))
         assert client.get("/api/v1/db/token-events").json() == {"count": 0, "events": []}
+
+
+_LEDGER_COLS = [
+    "market",
+    "security_id",
+    "interval",
+    "window_start",
+    "window_end",
+    "status",
+    "bars",
+    "attempts",
+    "last_error",
+    "first_seen_at",
+    "last_attempt_at",
+    "empty_streak",
+]
+
+
+class TestWindowLedgerApi:
+    """GET /api/v1/db/window-ledger — the unified per-window ledger as a /db table."""
+
+    def test_empty_when_no_ledger(self, store: InstrumentStore) -> None:
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        resp = client.get("/api/v1/db/window-ledger")
+        assert resp.status_code == 200
+        assert resp.json() == {"columns": _LEDGER_COLS, "rows": [], "total": 0}
+
+    def test_lists_recorded_windows_in_grid_shape(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        from datetime import UTC, date, datetime
+
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        ledger = WindowLedger()
+        key = WindowKey(
+            market="dhan",
+            security_id="NIFTY",
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 4, 1),
+        )
+        ledger.record(
+            key, raw_bars=5, error_type=None, bars_appended=5, now=datetime(2026, 6, 9, tzinfo=UTC)
+        )
+        # store.path is tmp_path/instruments.duckdb → lake root is tmp_path.
+        save_window_ledger(ledger, tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/db/window-ledger").json()
+        assert body["columns"] == _LEDGER_COLS
+        assert body["total"] == 1
+        row = body["rows"][0]
+        assert row[1] == "NIFTY"  # security_id
+        assert row[5] == "SUCCESS"  # status
+        assert row[6] == 5  # bars
+
+    def test_empty_payload_when_no_lake_root(self) -> None:
+        from types import SimpleNamespace
+
+        fake = SimpleNamespace(path=None)
+        client = TestClient(build_app(DashboardState(), instrument_store=fake))
+        assert client.get("/api/v1/db/window-ledger").json() == {
+            "columns": _LEDGER_COLS,
+            "rows": [],
+            "total": 0,
+        }

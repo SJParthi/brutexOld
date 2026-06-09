@@ -2464,6 +2464,46 @@ def build_app(
 
         return JSONResponse(await run_in_threadpool(_load))
 
+    @app.get("/api/v1/db/window-ledger")
+    async def api_db_window_ledger() -> JSONResponse:
+        """GET /api/v1/db/window-ledger — the unified per-window skip/retry ledger.
+
+        DEC-WINDOW-LEDGER-001. EVERY spot + options fetch window the engine has
+        ever planned, as a browsable table row (market / security_id / interval /
+        window dates / status / bars / attempts / last_error / streak). READ-ONLY:
+        loads ``<lake>/window_ledger/ledger.parquet``; never raises (empty
+        ``{columns, rows, total}`` when no lake / no pull yet, never a 500). Shape
+        matches the DuckDB-table grid so the /db viewer renders it identically.
+        """
+        from brutex.data.window_ledger_store import load_window_ledger
+
+        columns = [
+            "market",
+            "security_id",
+            "interval",
+            "window_start",
+            "window_end",
+            "status",
+            "bars",
+            "attempts",
+            "last_error",
+            "first_seen_at",
+            "last_attempt_at",
+            "empty_streak",
+        ]
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            return JSONResponse({"columns": columns, "rows": [], "total": 0})
+        lake = lake_root.parent
+
+        def _load() -> dict[str, Any]:
+            """Load the ledger Parquet + project its sorted rows to the grid shape."""
+            rows = [list(row) for row in load_window_ledger(lake).to_rows()]
+            return {"columns": columns, "rows": rows, "total": len(rows)}
+
+        return JSONResponse(await run_in_threadpool(_load))
+
     @app.get("/api/v1/db/options")
     async def api_db_options(
         series: str = Query(...),
