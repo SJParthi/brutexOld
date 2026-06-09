@@ -96,9 +96,9 @@ def test_arm_guard_builds_hook_audits_terminal_failure(tmp_path: Path) -> None:
         )
         assert hook is not None
         # A success outcome must not give up; a terminal failure must.
-        hook("NIFTY 1minute", 375, False)
-        hook("NIFTY 1minute", 0, True)
-        hook("NIFTY 1day", 0, True)  # 2/2 windows of NIFTY → 100% → symbol row
+        hook("NIFTY 1minute", 375, False, False)
+        hook("NIFTY 1minute", 0, True, False)
+        hook("NIFTY 1day", 0, True, False)  # 2/2 windows of NIFTY → 100% → symbol row
 
     # The audit file was opened under <lake>/audit/ and its chain verifies.
     audit_files = list((tmp_path / "audit").glob("retry-storm-*.jsonl"))
