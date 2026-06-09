@@ -424,6 +424,65 @@ class TestResumeCursorAndTransactionalCommit:
         assert len(records) == 2  # both committed cursors recorded
         assert {r.status for r in records} == {SUCCESS}
 
+    def test_dh905_terminal_settles_skipped_in_ledger_and_reraises(self) -> None:
+        # DEC-WINDOW-LEDGER-001 Stage c2: a Dhan DH-905 "no data present" for an
+        # option window is settled SKIPPED in the ledger (so it stops aborting the
+        # series forever) BUT still re-raised to the run_dhan_options_ingest
+        # quarantine — behaviour unchanged, only the ledger is enriched.
+        from brutex.data.window_ledger import SKIPPED, WindowLedger
+
+        ledger = WindowLedger()
+        client = _FakeClient([DhanBadRequestError("HTTP 400 DH-905 no data present")])
+        with pytest.raises(DhanBadRequestError):
+            ingest_rolling_option_series(
+                client,
+                _FakeSink(),
+                security_id="13",
+                exch_id="NSE",
+                underlying_symbol="NIFTY",
+                exchange_segment="NSE_FNO",
+                instrument="OPTIDX",
+                expiry_flag="WEEK",
+                expiry_code=1,
+                strike="ATM",
+                drv_option_type="CALL",
+                start=self._START,
+                end=self._END,
+                ledger=ledger,
+                max_retry_passes=0,
+                retry_backoff=lambda _i: None,
+            )
+        # The first window is settled SKIPPED (the known gap), not left pending.
+        assert ledger.records()[0].status == SKIPPED
+
+    def test_non_dh905_terminal_does_not_settle(self) -> None:
+        # A non-DH-905 terminal 400 (a genuine malformed request) is re-raised
+        # WITHOUT a ledger settle — only a real no-data gap is settled.
+        from brutex.data.window_ledger import WindowLedger
+
+        ledger = WindowLedger()
+        client = _FakeClient([DhanBadRequestError("HTTP 400 malformed body")])
+        with pytest.raises(DhanBadRequestError):
+            ingest_rolling_option_series(
+                client,
+                _FakeSink(),
+                security_id="13",
+                exch_id="NSE",
+                underlying_symbol="NIFTY",
+                exchange_segment="NSE_FNO",
+                instrument="OPTIDX",
+                expiry_flag="WEEK",
+                expiry_code=1,
+                strike="ATM",
+                drv_option_type="CALL",
+                start=self._START,
+                end=self._END,
+                ledger=ledger,
+                max_retry_passes=0,
+                retry_backoff=lambda _i: None,
+            )
+        assert ledger.count == 0  # nothing settled — a real error, not a gap
+
     def test_backoff_invoked_with_zero_based_attempt_indices(self) -> None:
         # Two retries before success → backoff(0), backoff(1) (bounded exponential).
         seen: list[int] = []
