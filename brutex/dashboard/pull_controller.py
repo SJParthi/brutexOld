@@ -62,8 +62,6 @@ from brutex.adapters.dhan.until_clean import (
     run_until_clean,
 )
 from brutex.adapters.protocol import MarketAdapter
-from brutex.data.fetch_coverage import FetchCoverage
-from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
@@ -1028,7 +1026,6 @@ def pull_all_spot(
     year: int | None = None,
     adapter_factory: BulkAdapterFactory | None = None,
     on_progress: ProgressHook | None = None,
-    coverage: FetchCoverage | None = None,
     pull_id: str | None = None,
     rate_observer: RateObserver | None = None,
     session_rate: SessionRateController | None = None,
@@ -1072,18 +1069,11 @@ def pull_all_spot(
     adapter_factory
         Override the bulk ``(adapter, sink)`` builder; defaults to the
         synthetic builder when *dry_run* else the live builder.
-    coverage
-        Optional pre-seeded skip-ledger. On a **live** pull (``dry_run`` False),
-        ``None`` (the default) is replaced by the persisted ledger
-        (``<lake_root>/fetch_coverage.json``) so already-pulled windows are
-        skipped and the windows completed by this run are saved back — a re-pull
-        never re-burns the Dhan quota on data already in the lake
-        (DEC-FETCH-COVERAGE-WIRING-001). Dry-run ignores it (null sink).
     auto_retry
         When ``True`` (the dashboard "Retry failed windows" button / the manual
         recovery path), leftover failed windows are auto-re-pulled in bounded
         rounds after the pull — only the still-failed windows, via the shared
-        coverage ledger (rate-safe + idempotent; DEC-INGEST-AUTO-RETRY-001).
+        window ledger (rate-safe + idempotent; DEC-INGEST-AUTO-RETRY-001).
         ``False`` (default — the one-click Pull-ALL) runs a single pass, the prior
         behaviour. Either way the per-symbol rollup is computed from the ORIGINAL
         pass's report.
@@ -1101,7 +1091,7 @@ def pull_all_spot(
     until_clean
         When ``True`` (``brutex fetch --until-clean`` / the dashboard "until clean"
         option), keep running bounded auto-retry rounds — each one a full
-        pull-pass-with-auto-retry over the SHARED coverage ledger, reusing
+        pull-pass-with-auto-retry over the SHARED window ledger, reusing
         :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows` (NO
         duplicated round loop) — until the ledger is CLEAN, OR the token dies (stop
         + ``auth_expired`` verdict), OR ``until_clean_rounds`` is spent
@@ -1191,15 +1181,12 @@ def pull_all_spot(
     # (``dhan.call``) + rate (``rate.*``) events — shares one ``pull_id``
     # (DEC-DHAN-INGEST-LOGGING-001). Always unbinds on exit (no leak).
     with pull_id_scope(pull_id) as pid:
-        # Skip windows already in the lake on a live re-pull (no wasted Dhan quota);
-        # DEC-FETCH-COVERAGE-WIRING-001.
-        coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
         # The coverage reconcile band-aids (lake-reconcile / EMPTY-terminal /
         # FAILED-repull) are RETIRED (DEC-WINDOW-LEDGER-001, Stage d): the unified
         # ledger is the SOLE skip authority, so its own per-window record + the
         # cold-start `reconcile_ledger_with_lake` below replace every coarse
-        # coverage-set patch. `coverage` is still marked (vestigial, removed in the
-        # final stage). Per-window status (DEC-WINDOW-STATUS-001) stays: a browsable
+        # coverage-set patch (the FetchCoverage set was deleted in Stage e).
+        # Per-window status (DEC-WINDOW-STATUS-001) stays: a browsable
         # SUCCESS/EMPTY/FAILED record, loaded for the run + persisted at pull end.
         status_log = begin_pull_status(lake_root, dry_run=dry_run)
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load (one-shot
@@ -1267,13 +1254,13 @@ def pull_all_spot(
 
         # The "Retry failed windows" button passes ``auto_retry=True`` so leftover
         # failed windows are auto-re-pulled in bounded rounds AFTER the pull (only
-        # the still-failed windows, via the shared coverage ledger — rate-safe,
+        # the still-failed windows, via the shared window ledger — rate-safe,
         # idempotent; DEC-INGEST-AUTO-RETRY-001). The default one-click Pull-ALL
         # keeps ``auto_retry=False`` (a single pass) — byte-for-byte the prior
         # behaviour. BOTH paths share the same ingest spine (CLAUDE.md §11 COMMON);
         # ``report`` is always the ORIGINAL pass's report for the per-symbol rollup.
         def _one_pass(do_retry: bool) -> SpotIngestWithRetry:
-            """Run ONE full pull-pass-with-auto-retry over the SHARED coverage ledger.
+            """Run ONE full pull-pass-with-auto-retry over the SHARED window ledger.
 
             The single ingest call site (CLAUDE.md §11 COMMON) — the one-shot path,
             every until-clean round, and the auto-retry inner loop all go through
@@ -1291,7 +1278,6 @@ def pull_all_spot(
                 on_timeout=on_timeout,
                 on_success=on_success,
                 on_progress=_progress_then_flush,
-                coverage=coverage,
                 status_log=status_log,
                 ledger=ledger,
                 run_parallel=run_parallel,
@@ -1299,7 +1285,7 @@ def pull_all_spot(
             )
 
         # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded rounds
-        # — each a full pass over the SHARED coverage ledger (so it re-fetches ONLY
+        # — each a full pass over the SHARED window ledger (so it re-fetches ONLY
         # the still-failed windows; rate-safe + idempotent) — until clean / token
         # dead / outer budget spent. Reuses ``run_until_clean`` over the SAME
         # ``retry_failed_windows`` engine; the round COUNT is bounded (never an
@@ -1341,7 +1327,6 @@ def pull_all_spot(
             final_still_failed = report.still_failed_windows
             final_auth_aborted = report.auth_aborted
             final_quota_exhausted = False
-        end_pull_coverage(coverage, lake_root, dry_run=dry_run)
         end_pull_status(status_log, lake_root, dry_run=dry_run)
         end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
@@ -1424,7 +1409,6 @@ def pull_candles(
     dry_run: bool,
     adapter_factory: AdapterFactory | None = None,
     on_progress: ProgressHook | None = None,
-    coverage: FetchCoverage | None = None,
     pull_id: str | None = None,
     rate_observer: RateObserver | None = None,
     session_rate: SessionRateController | None = None,
@@ -1474,13 +1458,6 @@ def pull_candles(
         synthetic builder when *dry_run* is ``True`` and to the live Dhan
         builder otherwise. Tests inject a fake factory to exercise the
         non-dry-run branch and the per-interval outcomes without network.
-    coverage
-        Optional pre-seeded skip-ledger. On a **live** pull (``dry_run`` False),
-        ``None`` (the default) is replaced by the persisted ledger
-        (``<lake_root>/fetch_coverage.json``) so already-pulled windows are
-        skipped and this run's completed windows are saved back — a re-pull never
-        re-burns the Dhan quota on data already in the lake
-        (DEC-FETCH-COVERAGE-WIRING-001). Dry-run ignores it (null sink).
 
     Returns
     -------
@@ -1520,13 +1497,10 @@ def pull_candles(
     # transport (``dhan.call``) + rate (``rate.*``) events all share one
     # ``pull_id``. Always unbinds on exit (no leak).
     with pull_id_scope(pull_id) as pid:
-        # Skip windows already in the lake on a live re-pull (no wasted Dhan quota);
-        # DEC-FETCH-COVERAGE-WIRING-001.
-        coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
         # The coverage reconcile band-aids are RETIRED (DEC-WINDOW-LEDGER-001,
         # Stage d) — the ledger's per-window record + the cold-start
-        # `reconcile_ledger_with_lake` below are the sole skip source. `coverage`
-        # is still marked (vestigial, removed in the final stage).
+        # `reconcile_ledger_with_lake` below are the sole skip source (the
+        # FetchCoverage set was deleted in Stage e).
         # Per-window status (DEC-WINDOW-STATUS-001): browsable SUCCESS/EMPTY/FAILED.
         status_log = begin_pull_status(lake_root, dry_run=dry_run)
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load/migrate + PLAN
@@ -1596,12 +1570,10 @@ def pull_candles(
             on_timeout=on_timeout,
             on_success=on_success,
             on_progress=_progress_then_flush,
-            coverage=coverage,
             status_log=status_log,
             ledger=ledger,
             run_parallel=run_parallel,
         )
-        end_pull_coverage(coverage, lake_root, dry_run=dry_run)
         end_pull_status(status_log, lake_root, dry_run=dry_run)
         end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)

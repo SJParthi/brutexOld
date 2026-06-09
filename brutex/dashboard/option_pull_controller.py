@@ -73,8 +73,6 @@ from brutex.dashboard.pull_controller import (
     SessionRateController,
     resolve_candle_range,
 )
-from brutex.data.fetch_coverage import FetchCoverage
-from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
 from brutex.data.option_sink import NullOptionBarSink
 from brutex.data.window_ledger_store import begin_pull_ledger, end_pull_ledger
 from brutex.models import Instrument, InstrumentType
@@ -384,7 +382,6 @@ def pull_options(
     client_factory: OptionClientFactory | None = None,
     on_progress: ProgressHook | None = None,
     on_series_tick: Callable[[], None] | None = None,
-    coverage: FetchCoverage | None = None,
     pull_id: str | None = None,
     session_rate: SessionRateController | None = None,
 ) -> OptionsPullReport:
@@ -432,13 +429,6 @@ def pull_options(
         single-underlying options pull's lake-backed ``/coverage/options`` surface
         ticks live mid-fan-out, not only at the per-underlying ``on_progress`` at
         the very end. Never changes what is fetched/parsed/sunk or the rate.
-    coverage
-        Optional pre-seeded skip-ledger. On a **live** pull (``dry_run`` False),
-        ``None`` (the default) is replaced by the persisted ledger
-        (``<lake_root>/fetch_coverage.json``) so already-pulled option windows
-        are skipped and this run's completed windows are saved back — a re-pull
-        never re-burns the Dhan quota on data already in the lake
-        (DEC-FETCH-COVERAGE-WIRING-001). Dry-run ignores it (null sink).
 
     Returns
     -------
@@ -471,10 +461,6 @@ def pull_options(
     # already-lit transport (``dhan.call``) + rate (``rate.*``) events all share
     # one ``pull_id``. Always unbinds on exit (no leak).
     with pull_id_scope(pull_id) as pid:
-        # Load the persisted skip-ledger for a live pull so windows already in the
-        # lake are not re-fetched (no wasted Dhan quota on a re-run);
-        # DEC-FETCH-COVERAGE-WIRING-001.
-        coverage = begin_pull_coverage(lake_root, dry_run=dry_run, coverage=coverage)
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001, PR-4b): load/migrate the
         # durable ledger so each committed option cursor is recorded into the SAME
         # browsable DB table as spot. (Option windows are keyed per-series, so they
@@ -505,12 +491,10 @@ def pull_options(
             on_success=runtime.on_success,
             on_progress=on_progress,
             on_series_tick=on_series_tick,
-            coverage=coverage,
             ledger=ledger,
             run_parallel=runtime.run_parallel,
         )
         # Persist the windows just completed so the next pull skips them.
-        end_pull_coverage(coverage, lake_root, dry_run=dry_run)
         end_pull_ledger(ledger, lake_root, dry_run=dry_run)
 
         # Aggregate the per-series reports + quarantined failures by underlying.

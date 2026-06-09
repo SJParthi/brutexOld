@@ -3,7 +3,7 @@
 DEC-WINDOW-LEDGER-001 (Stage d). This module once held the fetch-coverage
 reconcile *band-aids* (``reconcile_windows`` / ``reconcile_coverage_with_lake`` /
 ``reconcile_empty_terminal`` / ``reconcile_failed_windows_for_repull``) that
-patched the COARSE :class:`~brutex.data.fetch_coverage.FetchCoverage` span-set so
+patched the COARSE ``FetchCoverage`` span-set so
 its #598 internal-gap mask did less harm. Now that the precise per-window
 :class:`~brutex.data.window_ledger.WindowLedger` is the SOLE skip authority
 (Stages b3 / c), those band-aids are dead and have been removed — the ledger

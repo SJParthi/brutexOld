@@ -1,13 +1,13 @@
 """The unified per-window ledger — ONE source of truth for skip + retry + visibility.
 
-DEC-WINDOW-LEDGER-001. Today the spot/options pull keeps the per-window state in
-TWO stores that must agree but are wired so the WRONG one drives the skip:
+DEC-WINDOW-LEDGER-001. The pull once kept the per-window state in TWO stores that
+had to agree but were wired so the WRONG one drove the skip:
 
-* :class:`~brutex.data.fetch_coverage.FetchCoverage` — a flat *set* of completed
-  windows. This is what the ingest probes to skip a vendor call, but it is
-  populated COARSELY (the dataset min/max span enclosing a window), so an
-  internal-gap ``FAILED`` window is marked "complete" and skipped forever
-  (the #598 bug).
+* the legacy ``FetchCoverage`` — a flat *set* of completed
+  windows (RETIRED in Stage e). This was what the ingest probed to skip a vendor
+  call, but it was populated COARSELY (the dataset min/max span enclosing a
+  window), so an internal-gap ``FAILED`` window was marked "complete" and skipped
+  forever (the #598 bug).
 * :class:`~brutex.data.window_status.WindowStatusLog` — the PRECISE
   ``SUCCESS``/``EMPTY``/``FAILED`` record. Visibility only; it does not drive the
   skip.

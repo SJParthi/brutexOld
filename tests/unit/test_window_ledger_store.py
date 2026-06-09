@@ -2,9 +2,9 @@
 
 100% line+branch on the durable Parquet backing: the save→load row fixed point,
 the never-raise degradation (missing / corrupt / wrong-shape), the one-shot
-migration that folds the two legacy sidecars (status-log wins on conflict), the
-PLANNED upsert (`plan_windows`), the throttled live flush, and the
-begin/end dry-run rule.
+migration that folds the legacy status-log sidecar (the coverage sidecar fold was
+retired in Stage e), the PLANNED upsert (`plan_windows`), the throttled live
+flush, and the begin/end dry-run rule.
 """
 
 from __future__ import annotations
@@ -13,8 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from brutex.data.fetch_coverage import FetchCoverage, WindowKey
-from brutex.data.fetch_coverage_store import save_fetch_coverage
+from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import SKIPPED, SUCCESS, WindowLedger
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
@@ -113,28 +112,21 @@ def test_load_honours_threshold(tmp_path: Path) -> None:
 
 
 class TestMigration:
-    """The one-shot fold of the two legacy JSON sidecars (status-log wins)."""
+    """The one-shot fold of the legacy status-log sidecar (coverage fold retired)."""
 
-    def test_migrate_folds_both_sidecars(self, tmp_path: Path) -> None:
+    def test_migrate_folds_status_log_sidecar(self, tmp_path: Path) -> None:
         # Status log: a SUCCESS (NIFTY) + a terminal EMPTY (SENSEX, attempts>=3).
         log = WindowStatusLog()
         log.record(_key("NIFTY"), raw_bars=9, error_type=None, bars_appended=9, now=_NOW)
         for _ in range(3):
             log.record(_key("SENSEX"), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
         save_window_status(log, tmp_path)
-        # Coverage set: NIFTY (conflict — status wins) + a coverage-only BANKNIFTY.
-        cov = FetchCoverage()
-        cov.mark_complete(_key("NIFTY"))
-        cov.mark_complete(_key("BANKNIFTY"))
-        save_fetch_coverage(cov, tmp_path)
 
         ledger = load_or_migrate_window_ledger(tmp_path, now=_NOW)
         by_symbol = {r.security_id: r for r in ledger.records()}
         assert by_symbol["NIFTY"].status == SUCCESS
-        assert by_symbol["NIFTY"].bars == 9  # status-log row WON (richer)
+        assert by_symbol["NIFTY"].bars == 9  # status-log row folded
         assert by_symbol["SENSEX"].status == SKIPPED  # EMPTY-at-threshold → SKIPPED
-        assert by_symbol["BANKNIFTY"].status == SUCCESS  # coverage-only seed
-        assert by_symbol["BANKNIFTY"].bars == 0
 
     def test_migrate_empty_sidecars_is_empty_ledger(self, tmp_path: Path) -> None:
         assert load_or_migrate_window_ledger(tmp_path, now=_NOW).count == 0
@@ -143,17 +135,17 @@ class TestMigration:
         ledger = WindowLedger()
         ledger.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
         save_window_ledger(ledger, tmp_path)
-        # A stale coverage sidecar must be IGNORED once the Parquet exists.
-        cov = FetchCoverage()
-        cov.mark_complete(_key("BANKNIFTY"))
-        save_fetch_coverage(cov, tmp_path)
+        # A stale status-log sidecar must be IGNORED once the Parquet exists.
+        log = WindowStatusLog()
+        log.record(_key("BANKNIFTY"), raw_bars=7, error_type=None, bars_appended=7, now=_NOW)
+        save_window_status(log, tmp_path)
         restored = load_or_migrate_window_ledger(tmp_path, now=_NOW)
         assert {r.security_id for r in restored.records()} == {"NIFTY"}
 
     def test_migrate_defaults_now(self, tmp_path: Path) -> None:
-        cov = FetchCoverage()
-        cov.mark_complete(_key("NIFTY"))
-        save_fetch_coverage(cov, tmp_path)
+        log = WindowStatusLog()
+        log.record(_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        save_window_status(log, tmp_path)
         ledger = load_or_migrate_window_ledger(tmp_path)  # now=None → datetime.now
         assert ledger.records()[0].status == SUCCESS
 

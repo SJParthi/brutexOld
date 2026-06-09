@@ -69,7 +69,7 @@ from brutex.adapters.dhan.errors import (
     is_retryable,
 )
 from brutex.adapters.protocol import MarketAdapter
-from brutex.data.fetch_coverage import FetchCoverage, WindowKey
+from brutex.data.fetch_coverage import WindowKey
 from brutex.data.session import filter_intraday_session, is_session_exempt
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
@@ -207,7 +207,6 @@ def ingest_spot(
     start: date,
     end: date,
     pace: Pacer | None = None,
-    coverage: FetchCoverage | None = None,
     status_log: WindowStatusLog | None = None,
     ledger: WindowLedger | None = None,
     on_rate_limit: Callable[[], None] | None = None,
@@ -253,15 +252,6 @@ def ingest_spot(
         single governor that bounds the aggregate physical rate to ``≤ 5 r/s``
         (Rule #6; :class:`~brutex.adapters.dhan.rate_control.DhanRateController`
         is thread-safe).
-    coverage
-        Optional :class:`~brutex.data.fetch_coverage.FetchCoverage` ledger
-        (DEC-FETCH-COVERAGE-001). When given, a window already marked complete
-        is **skipped before the vendor call** (no wasted Dhan hit), and a window
-        is marked complete after a successful fetch + append. ``None`` (default)
-        keeps the always-fetch behaviour — the idempotent sink already makes a
-        re-pull safe; coverage makes it quota-frugal too. Thread-safe under the
-        window fan-out (its reads/writes are lock-guarded), so a concurrent
-        re-pull skips already-covered windows and adds 0 net-new fetches.
     on_rate_limit, on_success
         Optional rate-controller feedback hooks (DEC-DHAN-ADAPTIVE-RPS-001).
         ``on_rate_limit`` fires on a **rate-limit** 429 (``is_rate_limit``) so
@@ -346,7 +336,6 @@ def ingest_spot(
                 interval=interval,
                 window=window,
                 pace=pace,
-                coverage=coverage,
                 status_log=status_log,
                 ledger=ledger,
                 on_rate_limit=on_rate_limit,
@@ -519,7 +508,6 @@ def _ingest_one_window(
     interval: str,
     window: tuple[date, date],
     pace: Pacer | None,
-    coverage: FetchCoverage | None,
     status_log: WindowStatusLog | None,
     ledger: WindowLedger | None,
     on_rate_limit: Callable[[], None] | None,
@@ -534,7 +522,7 @@ def _ingest_one_window(
     The body of the former sequential loop, extracted verbatim so one window's
     work runs identically whether the fan-out is the real thread pool or a
     synchronous test fake. All side effects it touches (the *pace* bucket,
-    *coverage* ledger, the *on_rate_limit* / *on_success* controller hooks, and
+    the *on_rate_limit* / *on_success* controller hooks, and
     the sink) are thread-safe, so N windows of one series run it concurrently
     without a data race (DEC-DHAN-PARALLEL-WINDOWS-001).
 
@@ -561,8 +549,7 @@ def _ingest_one_window(
     # span-enclosure FetchCoverage set that masked internal-gap FAILED windows
     # (#598). A FAILED / PLANNED / EMPTY-below-threshold / MISSING window is
     # fetched. The idempotent sink would no-op a redundant write anyway, so
-    # skipping is a pure quota/latency win, never a data risk. (FetchCoverage is
-    # still maintained alongside for one release — removed in the final stage.)
+    # skipping is a pure quota/latency win, never a data risk.
     if ledger is not None and ledger.is_skippable(key):
         _LOG.debug(
             "ingest.window",
@@ -771,8 +758,6 @@ def _ingest_one_window(
             bars_appended=result.bars_appended,
             now=_done_at,
         )
-    if coverage is not None and len(raw_bars) > 0:
-        coverage.mark_complete(key)
     # Signal a clean window so the controller can recover the rate.
     if on_success is not None:
         on_success()

@@ -44,7 +44,6 @@ import pytest
 from brutex.adapters.dhan.errors import DhanNotFoundError
 from brutex.adapters.dhan.ingest import ingest_spot
 from brutex.adapters.dhan.rate_control import BURST, CEILING_RPS, DhanRateController
-from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.models import CandleBar
 from brutex.data.sink import NullBarSink
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
@@ -82,10 +81,10 @@ def _index(symbol: str = "SENSEX", *, token: int = 1) -> Instrument:
     )
 
 
-#: One in-session 1-minute bar so a FETCHED window is marked complete — the ingest
-#: marks a window only when the vendor returned bars (DEC-LAKE-RECONCILE-001; an
-#: empty 0-bar response is left un-marked → re-pulled). The :class:`NullBarSink`
-#: discards it, so call CADENCE is unchanged; only the coverage MARK (and thus the
+#: One in-session 1-minute bar so a FETCHED window is recorded SUCCESS — the ingest
+#: records a window SUCCESS only when the vendor returned bars (DEC-LAKE-RECONCILE-001;
+#: an empty 0-bar response is recorded EMPTY → re-pulled). The :class:`NullBarSink`
+#: discards it, so call CADENCE is unchanged; only the ledger record (and thus the
 #: idempotent-re-pull skip) depends on ``raw_bars > 0``.
 _ONE_BAR = CandleBar(
     timestamp=datetime(2021, 1, 4, 4, 5, tzinfo=UTC),  # 04:05 UTC = 09:35 IST, in session
@@ -391,7 +390,6 @@ class TestIdempotentRepullWindows:
     def test_second_window_pull_is_a_noop(self) -> None:
         from brutex.data.window_ledger import WindowLedger
 
-        coverage = FetchCoverage()
         ledger = WindowLedger()
 
         def _pull(adapter: _CountingAdapter) -> None:
@@ -403,7 +401,6 @@ class TestIdempotentRepullWindows:
                 interval="1minute",
                 start=_START,
                 end=_END,
-                coverage=coverage,
                 ledger=ledger,
                 run_parallel=pool,
             )
