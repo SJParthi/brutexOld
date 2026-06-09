@@ -33,6 +33,7 @@ from brutex.dashboard.db_view import (
 )
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.instrument_store import Instrument, InstrumentStore
+from brutex.data.session import IST
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import save_window_ledger
 from brutex.data.window_status import WindowStatusLog
@@ -323,7 +324,10 @@ def test_build_window_payload_reads_the_ledger_when_present(tmp_path: Path) -> N
     by_symbol = {w["symbol"]: w for w in payload["windows"]}
     assert by_symbol["SENSEX"]["status"] == "PLANNED"
     assert by_symbol["NIFTY"]["status"] == "SUCCESS"
-    assert by_symbol["NIFTY"]["first_seen_at"] == _WINDOW_NOW.isoformat()
+    # Displayed as clean IST (CLAUDE.md §6): _WINDOW_NOW = 12:00 UTC → 17:30 IST.
+    assert by_symbol["NIFTY"]["first_seen_at"] == _WINDOW_NOW.astimezone(IST).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
     # The legacy field names are preserved so the existing UI keeps working.
     assert set(by_symbol["NIFTY"]) == {
         "market",

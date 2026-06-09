@@ -12,6 +12,7 @@ Skipped when ``fastapi`` / ``duckdb`` are absent — matches the existing
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -357,6 +358,9 @@ class TestTokenEventsApi:
         assert event["action"] == "saved"
         assert event["client_id_masked"] == "1100********8842"  # masked, never the raw id
         assert "token" not in event  # the secret never appears in the payload
+        # event_at displayed as clean IST — no raw UTC `+00:00`, the YYYY-MM-DD HH:MM:SS shape.
+        assert "+00:00" not in event["event_at"]
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", event["event_at"])
 
     def test_empty_payload_when_no_lake_root(self) -> None:
         from types import SimpleNamespace
@@ -421,6 +425,9 @@ class TestWindowLedgerApi:
         assert row[1] == "NIFTY"  # security_id
         assert row[5] == "SUCCESS"  # status
         assert row[6] == 5  # bars
+        # first_seen_at (idx 9) shown as clean IST: 2026-06-09 00:00 UTC → 05:30 IST.
+        assert row[9] == "2026-06-09 05:30:00"
+        assert "+00:00" not in str(row[9])  # the raw UTC offset is gone
 
     def test_empty_payload_when_no_lake_root(self) -> None:
         from types import SimpleNamespace

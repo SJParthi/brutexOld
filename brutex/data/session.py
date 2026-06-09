@@ -29,6 +29,32 @@ from brutex.data.models import CandleBar
 #: India Standard Time (NSE/BSE wall clock).
 IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
 
+
+def format_ist_clock(value: str | datetime | None) -> str | None:
+    """Render a stored UTC timestamp as a clean IST wall-clock string — the COMMON display rule.
+
+    The lake stores every timestamp in UTC (reproducibility, CLAUDE.md §6); this is
+    the single display-boundary conversion to the Indian-market wall clock (§11
+    COMMON), so the window-ledger / token-events / coverage surfaces all read like
+    the candle viewer. A value like ``2026-06-09T08:35:53.763513+00:00`` (or the
+    same as a :class:`~datetime.datetime`) renders ``2026-06-09 14:05:53`` (IST),
+    dropping the ``+05:30`` offset. ``None`` passes through; an unparseable string
+    is returned unchanged (a display helper must NEVER raise + break a page). A
+    naive datetime / string (no offset) is assumed already-IST and just formatted.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return value  # not a timestamp (e.g. a free-text note) — leave it be
+    ist = dt.astimezone(IST) if dt.tzinfo is not None else dt
+    return ist.strftime("%Y-%m-%d %H:%M:%S")
+
+
 #: Regular session open — 09:15:00 IST (inclusive).
 SESSION_OPEN: Final[time] = time(9, 15)
 
@@ -68,6 +94,7 @@ __all__ = [
     "SESSION_EXEMPT_SYMBOLS",
     "SESSION_OPEN",
     "filter_intraday_session",
+    "format_ist_clock",
     "in_session",
     "is_session_exempt",
 ]
