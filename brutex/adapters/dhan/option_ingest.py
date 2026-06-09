@@ -71,7 +71,7 @@ import structlog
 from brutex.adapters.dhan.body import build_rolling_option_body
 from brutex.adapters.dhan.chunks import plan_option_windows
 from brutex.adapters.dhan.constants import ENDPOINT_ROLLING_OPTION, TRACK1_OPTIONS_INTERVAL
-from brutex.adapters.dhan.errors import DhanError, is_rate_limit, is_retryable
+from brutex.adapters.dhan.errors import DhanError, is_no_data_error, is_rate_limit, is_retryable
 from brutex.adapters.dhan.option_parser import parse_rolling_option_sides
 from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.models import OptionBar
@@ -500,7 +500,22 @@ def ingest_rolling_option_series(
                 **series_fields,
             )
             continue
-        bars = _fetch_cursor(window_start, window_end)
+        try:
+            bars = _fetch_cursor(window_start, window_end)
+        except DhanError as exc:
+            # A Dhan DH-905 "no data present" for THIS option window is the vendor's
+            # DEFINITIVE no-data answer (a genuine gap — e.g. an illiquid strike /
+            # far expiry with no trades in the range). Settle it SKIPPED in the
+            # unified ledger (DEC-WINDOW-LEDGER-001 Stage c2) so it stops ABORTING
+            # the whole series forever: the next pull skips this known-gap window
+            # and can commit the rest. It is STILL re-raised to the
+            # run_dhan_options_ingest quarantine — behaviour unchanged; this only
+            # enriches the ledger so the known gap is never re-fetched. A genuine
+            # retryable error never reaches here (it returns None from _fetch_cursor
+            # above); a non-DH-905 terminal error is re-raised WITHOUT a settle.
+            if ledger is not None and is_no_data_error(exc):
+                ledger.settle_known_gap(key, now=datetime.now(UTC), reason=type(exc).__name__)
+            raise
         if bars is None:
             # A cursor outran its retry budget → ABORT the whole series, committing
             # NOTHING. Every non-skipped window is deferred to the next pull (the
