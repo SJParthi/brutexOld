@@ -269,15 +269,25 @@ def constituent_url(index_symbol: str) -> str | None:
     return f"{NSE_CONSTITUENTS_BASE_URL}/{value}"
 
 
+#: Bounded retry budget for the live niftyindices fetch — a single 10 s attempt
+#: read-timed-out for the operator; 3 attempts × 30 s clears a slow first-byte.
+_FETCH_MAX_RETRIES: int = 3
+
+
 def _default_opener(url: str) -> str:  # pragma: no cover - live network only
     """Fetch *url* and return its text body (the real urllib opener).
 
     LIVE ONLY (``# pragma: no cover``): NSE bot-blocks these endpoints
     and this build environment network-blocks ``nseindia.com``, so this
     cannot be exercised in CI. A browser-like ``User-Agent`` + ``Accept``
-    + a short timeout give the best-effort fetch its best chance on the
-    operator's machine. Callers inject a fake ``opener`` in tests.
+    + a generous timeout + a few bounded retries give the best-effort
+    fetch its best chance on the operator's machine (niftyindices.com is
+    SLOW to first-byte for non-browser clients — a single 10 s attempt
+    read-timed-out for the operator; 30 s × 3 tries clears that). Callers
+    inject a fake ``opener`` in tests.
     """
+    import time
+
     request = urllib.request.Request(  # noqa: S310 - https NSE host, best-effort
         url,
         headers={
@@ -288,15 +298,26 @@ def _default_opener(url: str) -> str:  # pragma: no cover - live network only
             ),
             "Accept": "text/csv,application/csv,text/plain,*/*",
             "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.niftyindices.com/",
         },
     )
-    # The S310 (ruff) + B310 (bandit) suppressions on the next line are honest:
-    # the URL is a fixed https NSE host built by ``constituent_url`` (never
-    # file:/ or a custom scheme); the whole opener is live-network-only glue
-    # (``# pragma: no cover``).
-    with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310  # nosec B310
-        body: bytes = response.read()
-    return body.decode("utf-8")
+    # The S310 (ruff) + B310 (bandit) suppressions are honest: the URL is a fixed
+    # https NSE host built by ``constituent_url`` (never file:/ or a custom
+    # scheme); the whole opener is live-network-only glue (``# pragma: no cover``).
+    # Bounded retry (3 attempts, 30 s read timeout, short backoff) so a slow
+    # first-byte / transient throttle recovers instead of cratering the universe
+    # to the ~211 base set on a single 10 s timeout.
+    last_exc: Exception | None = None
+    for attempt in range(_FETCH_MAX_RETRIES):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310  # nosec B310
+                body: bytes = response.read()
+            return body.decode("utf-8")
+        except OSError as exc:  # timeout / transport — retry the bounded budget
+            last_exc = exc
+            if attempt < _FETCH_MAX_RETRIES - 1:
+                time.sleep(1.5 * (attempt + 1))
+    raise last_exc if last_exc is not None else OSError("constituent fetch failed")
 
 
 def fetch_constituent_symbols(
