@@ -44,6 +44,19 @@
     color:#1A1300; background:linear-gradient(90deg,var(--yellow),#FFD089);
     padding:4px 10px; border-radius:20px; box-shadow:0 0 18px rgba(255,183,77,.5);
     animation: pulse 2.4s ease-in-out infinite; display:none; }
+  /* Dhan daily API-quota gauge (DEC-DASHBOARD-QUOTA-GAUGE-001) — the 100,000/day
+     budget the operator could not previously SEE on the page where pulls happen.
+     Lights up once a pull reports usage; green < 80%, amber ≥ 80%, red ≥ 95% — so
+     "did I hit the daily limit?" is answerable at a glance. Resets at IST midnight. */
+  .quota-gauge { display:flex; align-items:center; gap:8px; font-size:11px;
+    color:var(--muted); margin-left:auto; }
+  .quota-gauge .qg-num { color:var(--text); font-variant-numeric:tabular-nums; }
+  .quota-gauge .qg-bar { width:96px; height:7px; border-radius:4px;
+    background:var(--surface-3); overflow:hidden; }
+  .quota-gauge .qg-bar div { height:100%; width:0; background:var(--green); transition:width .3s; }
+  .quota-gauge.warn .qg-bar div { background:var(--yellow); }
+  .quota-gauge.crit .qg-bar div { background:var(--red); }
+  .quota-gauge.crit .qg-num { color:var(--red); font-weight:700; }
   .badge.on { display:inline-block; }
 
   /* ── Zone 1: filter + KPI band ── */
@@ -287,6 +300,13 @@
       <a href="/reports" style="color:var(--blue); text-decoration:none;">Reports</a>
     </nav>
     <div class="badge" id="previewBadge">● PREVIEW · synthetic data</div>
+    <div class="quota-gauge" id="quotaGauge" style="display:none"
+         title="Dhan daily API quota — 100,000 calls/day, resets at IST midnight (DEC-DASHBOARD-QUOTA-GAUGE-001)">
+      <span>Dhan quota</span>
+      <span class="qg-num"><b id="qgUsed">-</b> / <span id="qgLimit">-</span></span>
+      <div class="qg-bar"><div id="qgFill"></div></div>
+      <span><span id="qgRem">-</span> left · <span id="qgPct">-</span>%</span>
+    </div>
   </header>
 
   <div id="credBanner" style="display:none; margin:8px 24px 4px; padding:12px 18px;
@@ -1224,10 +1244,38 @@ refreshVerdict();  // show any prior pull's verdict banner on load (DEC-VERDICT-
    load-instruments POST fires at most ONCE here (maybeAutoLoad) and only when
    the universe is empty — normal renders, tab switches and searches never POST
    (DEC-UNDERLYING-ECONOMICS-001). */
+// Dhan daily-quota gauge (DEC-DASHBOARD-QUOTA-GAUGE-001). Polls the existing
+// O(1) /api/v1/rate panel, which carries quota_used / quota_limit / quota_remaining
+// once a pull reports usage. quota_limit <= 0 ⇒ no usage reported yet ⇒ stay hidden
+// (never show a fake 0). Green < 80%, amber ≥ 80%, red ≥ 95%.
+async function pollQuota() {
+  const g = document.getElementById('quotaGauge');
+  try {
+    const r = await fetch('/api/v1/rate');
+    if (!r.ok) return;
+    const s = await r.json();
+    const limit = s.quota_limit || 0;
+    if (limit <= 0) { g.style.display = 'none'; return; }
+    const used = s.quota_used || 0;
+    const rem = (s.quota_remaining != null) ? s.quota_remaining : Math.max(0, limit - used);
+    const pct = Math.min(100, used / limit * 100);
+    document.getElementById('qgUsed').textContent = used.toLocaleString();
+    document.getElementById('qgLimit').textContent = limit.toLocaleString();
+    document.getElementById('qgRem').textContent = rem.toLocaleString();
+    document.getElementById('qgPct').textContent = pct.toFixed(1);
+    document.getElementById('qgFill').style.width = pct + '%';
+    g.classList.toggle('warn', pct >= 80 && pct < 95);
+    g.classList.toggle('crit', pct >= 95);
+    g.style.display = '';
+  } catch (e) { /* transient — keep the last shown value */ }
+}
+
 async function bootstrap() {
   const summary = await loadSummary();
   await loadInstruments();
   await maybeAutoLoad(summary || {index_count: 0, stock_count: 0});
+  pollQuota();
+  setInterval(pollQuota, 3000);
 }
 bootstrap();
 </script>
