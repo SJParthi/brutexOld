@@ -53,7 +53,6 @@ from brutex.adapters.dhan.auth_guard import AuthGuard
 from brutex.adapters.dhan.errors import DhanError, is_auth_failure, is_no_data_error
 from brutex.adapters.dhan.ingest import IngestReport, Pacer, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
-from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.sink import BarSink
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_status import WindowStatusLog
@@ -213,7 +212,6 @@ def run_dhan_spot_ingest(
     start: date,
     end: date,
     pace: Pacer | None = None,
-    coverage: FetchCoverage | None = None,
     status_log: WindowStatusLog | None = None,
     ledger: WindowLedger | None = None,
     on_rate_limit: Callable[[], None] | None = None,
@@ -255,12 +253,6 @@ def run_dhan_spot_ingest(
         aggregate physical rate to ``≤ 5 r/s`` (Rule #6;
         :class:`~brutex.adapters.dhan.rate_control.DhanRateController` is now
         thread-safe, DEC-DHAN-PARALLEL-INGEST-001).
-    coverage
-        Optional :class:`~brutex.data.fetch_coverage.FetchCoverage` ledger
-        threaded into every pair — a window already pulled is skipped before
-        the vendor call, so a re-pull never re-burns the Dhan budget on data
-        already in the lake (DEC-FETCH-COVERAGE-001). Now thread-safe under the
-        shared fan-out.
     on_rate_limit, on_success
         Optional rate-controller feedback hooks threaded into every pair — a
         rate-limit 429 steps the rate down, a clean window recovers it
@@ -337,7 +329,6 @@ def run_dhan_spot_ingest(
                 start=start,
                 end=end,
                 pace=pace,
-                coverage=coverage,
                 status_log=status_log,
                 ledger=ledger,
                 on_rate_limit=on_rate_limit,
@@ -560,7 +551,6 @@ def run_dhan_spot_ingest_with_retry(
     start: date,
     end: date,
     pace: Pacer | None = None,
-    coverage: FetchCoverage | None = None,
     status_log: WindowStatusLog | None = None,
     ledger: WindowLedger | None = None,
     on_rate_limit: Callable[[], None] | None = None,
@@ -580,17 +570,17 @@ def run_dhan_spot_ingest_with_retry(
     windows (``still_failed_windows`` > 0, the 429-storm leftover) AND
     *auto_retry* is on — re-run additional bounded rounds via
     :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows`, each
-    re-fetching ONLY the still-failed windows through the SAME *coverage* ledger
-    (incremental + idempotent, DEC-FETCH-COVERAGE-001) and the SAME *pace* bucket
-    (rate-safe, ``≤ 5 r/s``). The MANUAL ``brutex fetch --retry-failed`` path and
+    re-fetching ONLY the still-failed windows through the SAME *ledger* skip
+    authority (incremental + idempotent, DEC-WINDOW-LEDGER-001) and the SAME
+    *pace* bucket (rate-safe, ``≤ 5 r/s``). The MANUAL ``brutex fetch --retry-failed`` path and
     the dashboard button call the SAME underlying
     :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows` (CLAUDE.md §11
     COMMON) — no duplicated round loop.
 
     The retry rounds re-use the original call's keyword bindings VERBATIM (same
-    adapter / sink / instruments / intervals / range / coverage / pace / hooks),
+    adapter / sink / instruments / intervals / range / ledger / pace / hooks),
     so a round is byte-for-byte the same ingest the operator's manual re-run does
-    — except the coverage ledger now skips the windows the first pass completed,
+    — except the ledger now skips the windows the first pass completed,
     so only the leftover failed windows hit Dhan again.
 
     **Honest envelope (Golden Rule #10):** the retry is O(failed_windows), NOT
@@ -601,11 +591,11 @@ def run_dhan_spot_ingest_with_retry(
 
     Parameters
     ----------
-    adapter, sink, instruments, intervals, start, end, pace, coverage, status_log,
+    adapter, sink, instruments, intervals, start, end, pace, status_log, ledger,
     on_rate_limit, on_timeout, on_success, on_progress, run_parallel
         Threaded VERBATIM into every :func:`run_dhan_spot_ingest` pass (the
         original + each retry round) — see that function's parameter docs. The
-        *coverage* ledger is what makes a round re-fetch ONLY the failed windows.
+        *ledger* skip authority is what makes a round re-fetch ONLY the failed windows.
     auto_retry
         When ``True`` (default) the leftover failed windows are auto-retried after
         the original pull; ``False`` (the ``--no-auto-retry`` / config opt-out)
@@ -639,7 +629,6 @@ def run_dhan_spot_ingest_with_retry(
             start=start,
             end=end,
             pace=pace,
-            coverage=coverage,
             status_log=status_log,
             ledger=ledger,
             on_rate_limit=on_rate_limit,

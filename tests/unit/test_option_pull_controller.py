@@ -215,9 +215,9 @@ class TestPullOptions:
         assert captured == [tmp_path]
         assert report.dry_run is False
         assert report.total_series_completed == 21 * 11 * 2  # WEEK 1..8 + MONTH 1..3
-        # A live pull persists the skip-ledger so a re-pull skips the windows
-        # already in the lake (DEC-FETCH-COVERAGE-WIRING-001).
-        assert (tmp_path / "fetch_coverage.json").is_file()
+        # A live pull persists the unified window ledger so a re-pull skips the
+        # windows already in the lake (DEC-WINDOW-LEDGER-001).
+        assert (tmp_path / "window_ledger" / "ledger.parquet").is_file()
 
     def test_terminal_failure_is_quarantined_per_underlying(self, tmp_path: Path) -> None:
         """A fake client that always errors terminally → every series quarantined."""

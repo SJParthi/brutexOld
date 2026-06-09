@@ -73,7 +73,7 @@ from brutex.adapters.dhan.chunks import plan_option_windows
 from brutex.adapters.dhan.constants import ENDPOINT_ROLLING_OPTION, TRACK1_OPTIONS_INTERVAL
 from brutex.adapters.dhan.errors import DhanError, is_no_data_error, is_rate_limit, is_retryable
 from brutex.adapters.dhan.option_parser import parse_rolling_option_sides
-from brutex.data.fetch_coverage import FetchCoverage, WindowKey
+from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import OptionBar
 from brutex.data.session import in_session
 from brutex.data.window_ledger import WindowLedger
@@ -269,7 +269,6 @@ def ingest_rolling_option_series(
     on_rate_limit: Pacer | None = None,
     on_timeout: Pacer | None = None,
     on_success: Pacer | None = None,
-    coverage: FetchCoverage | None = None,
     ledger: WindowLedger | None = None,
     max_retry_passes: int = _DEFAULT_MAX_RETRY_PASSES,
     retry_backoff: Callable[[int], None] | None = None,
@@ -278,8 +277,8 @@ def ingest_rolling_option_series(
 
     The series' 30-day windows are the cursors of a multi-page option chain. They
     are fetched into a STAGING buffer with a bounded in-run resume-cursor retry on
-    transient (429 / 5xx / timeout) errors, then written to *sink* + marked in
-    *coverage* in a single COMMIT pass only after EVERY cursor has been fetched
+    transient (429 / 5xx / timeout) errors, then written to *sink* + recorded in
+    the *ledger* in a single COMMIT pass only after EVERY cursor has been fetched
     cleanly. If any cursor outruns its retry budget (or a terminal error raises),
     the whole series aborts having committed NOTHING — so the partition the lake
     holds is always complete or empty, never a page-holed partial
@@ -318,11 +317,6 @@ def ingest_rolling_option_series(
         ``on_rate_limit`` fires on each swallowed 429, ``on_timeout`` on each
         swallowed timeout / transport / 5xx, ``on_success`` once per cleanly-fetched
         cursor (NOT on a skip or a still-failing attempt).
-    coverage
-        Optional :class:`~brutex.data.fetch_coverage.FetchCoverage` skip-ledger.
-        A window already complete is skipped before the vendor call; a window is
-        marked complete only in the COMMIT pass, so coverage advances all-or-nothing
-        with the partition (DEC-FETCH-COVERAGE-001).
     max_retry_passes
         In-run resume-cursor retry budget (DEC-OPTION-429-RECOVERY-001). A cursor
         that returns a retryable error is re-fetched up to this many EXTRA attempts
@@ -487,8 +481,8 @@ def ingest_rolling_option_series(
         # WindowLedger is now the SOLE skip authority (DEC-WINDOW-LEDGER-001,
         # Stage c): a window is skipped ONLY when its ledger row is settled
         # (SUCCESS / SKIPPED), the precise per-window record — NOT the coarse
-        # span-enclosure FetchCoverage set (#598). FetchCoverage is still marked
-        # in the commit pass for one release (removed in the final stage).
+        # span-enclosure FetchCoverage set (#598, retired in DEC-WINDOW-LEDGER-001
+        # Stage e).
         if ledger is not None and ledger.is_skippable(key):
             skipped += 1
             _LOG.debug(
@@ -519,7 +513,7 @@ def ingest_rolling_option_series(
         if bars is None:
             # A cursor outran its retry budget → ABORT the whole series, committing
             # NOTHING. Every non-skipped window is deferred to the next pull (the
-            # no-skip guarantee — coverage untouched ⇒ a re-pull re-fetches them).
+            # no-skip guarantee — ledger untouched ⇒ a re-pull re-fetches them).
             still_failed = len(windows) - skipped
             _LOG.warning(
                 "ingest.series.aborted",
@@ -542,8 +536,8 @@ def ingest_rolling_option_series(
         staged.append((key, bars))
 
     # ── Phase 2 — COMMIT (every cursor fetched cleanly) ──
-    # The only place the sink + coverage are mutated, so the partition is committed
-    # all-or-nothing. Each window's append + coverage mark mirrors the prior
+    # The only place the sink + ledger are mutated, so the partition is committed
+    # all-or-nothing. Each window's append + ledger record mirrors the prior
     # per-window write, just deferred until the series is proven whole.
     bars_appended = 0
     for key, bars in staged:
@@ -561,14 +555,11 @@ def ingest_rolling_option_series(
         bars_appended += appended
         # Lake-write nook: option bars actually persisted for this window.
         _LOG.debug("ingest.lake_write", pull_id=pull_id, bars_appended=appended, **series_fields)
-        # Mark the window pulled only now — after the whole series committed.
-        if coverage is not None:
-            coverage.mark_complete(key)
         # Record the committed option window into the unified ledger DB
         # (DEC-WINDOW-LEDGER-001, PR-4b) so option chains are tracked in the SAME
         # browsable table as spot. A committed cursor returned bars → SUCCESS; an
         # aborted series commits nothing here, so its cursors are never recorded
-        # (re-attempted next pull, mirroring the all-or-nothing coverage mark).
+        # (re-attempted next pull, mirroring the all-or-nothing ledger record).
         if ledger is not None:
             ledger.record(
                 key,

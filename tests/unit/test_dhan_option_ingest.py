@@ -289,8 +289,8 @@ class TestResumeCursorAndTransactionalCommit:
 
     DEC-OPTION-429-RECOVERY-001 (audit Gap #2): the option series ingest is
     transactional — a transient (429 / 5xx / timeout) cursor is re-fetched in-run
-    up to ``max_retry_passes`` extra attempts, and the sink is written + coverage
-    marked ONLY after EVERY cursor is fetched cleanly. So the partition the lake
+    up to ``max_retry_passes`` extra attempts, and the sink is written + the ledger
+    recorded ONLY after EVERY cursor is fetched cleanly. So the partition the lake
     holds is always COMPLETE (all windows committed) or EMPTY (nothing committed),
     never a page-holed partial.
     """
@@ -336,21 +336,19 @@ class TestResumeCursorAndTransactionalCommit:
         assert report.retried_windows == 1
         assert sink.batches == []  # the staged cursor-0 bars were NEVER committed
 
-    def test_abort_does_not_mark_coverage(self) -> None:
-        # On abort, coverage stays untouched so a re-pull re-fetches every window
-        # (the no-skip guarantee — coverage advances all-or-nothing with the lake).
-        from brutex.data.fetch_coverage import FetchCoverage
-
-        cov = FetchCoverage()
+    def test_abort_does_not_commit(self) -> None:
+        # On abort, NOTHING is committed so a re-pull re-fetches every window
+        # (the no-skip guarantee — the partition advances all-or-nothing).
         client = _FakeClient(
             [
                 {"data": {"ce": _side(), "pe": None}},
                 DhanRateLimitError("HTTP 429"),
             ]
         )
+        sink = _FakeSink()
         report = ingest_rolling_option_series(
             client,
-            _FakeSink(),
+            sink,
             security_id="13",
             exch_id="NSE",
             underlying_symbol="NIFTY",
@@ -362,38 +360,11 @@ class TestResumeCursorAndTransactionalCommit:
             drv_option_type="CALL",
             start=self._START,
             end=self._END,
-            coverage=cov,
             max_retry_passes=0,
             retry_backoff=lambda _i: None,
         )
         assert report.complete is False
-        assert cov.completed_count == 0  # NOTHING marked complete
-
-    def test_complete_series_marks_every_window_in_one_commit(self) -> None:
-        from brutex.data.fetch_coverage import FetchCoverage
-
-        cov = FetchCoverage()
-        client = _FakeClient([{"data": {"ce": _side(), "pe": None}} for _ in range(2)])
-        report = ingest_rolling_option_series(
-            client,
-            _FakeSink(),
-            security_id="13",
-            exch_id="NSE",
-            underlying_symbol="NIFTY",
-            exchange_segment="NSE_FNO",
-            instrument="OPTIDX",
-            expiry_flag="WEEK",
-            expiry_code=1,
-            strike="ATM",
-            drv_option_type="CALL",
-            start=self._START,
-            end=self._END,
-            coverage=cov,
-            max_retry_passes=2,
-            retry_backoff=lambda _i: None,
-        )
-        assert report.complete is True
-        assert cov.completed_count == 2  # both windows marked only after commit
+        assert sink.batches == []  # NOTHING committed
 
     def test_complete_series_records_every_window_in_the_ledger(self) -> None:
         # DEC-WINDOW-LEDGER-001 (PR-4b): each committed option cursor is recorded
@@ -538,11 +509,10 @@ class TestResumeCursorAndTransactionalCommit:
 def _run_cov(
     client: _FakeClient,
     sink: _FakeSink,
-    coverage: object = None,
     *,
     ledger: object = None,
 ) -> OptionIngestReport:
-    """Drive a single-window option series threading the skip stores (DEC-WINDOW-LEDGER-001)."""
+    """Drive a single-window option series threading the ledger skip authority (DEC-WINDOW-LEDGER-001)."""
     return ingest_rolling_option_series(
         client,
         sink,
@@ -557,47 +527,38 @@ def _run_cov(
         drv_option_type="CALL",
         start=date(2021, 1, 4),
         end=date(2021, 1, 5),  # 1-day range → exactly one rolling window
-        coverage=coverage,  # type: ignore[arg-type]
         ledger=ledger,  # type: ignore[arg-type]
     )
 
 
 def test_ledger_marks_then_skips_already_pulled_window() -> None:
     """First pull records the window SUCCESS in the ledger; a re-pull skips it (no client call)."""
-    from brutex.data.fetch_coverage import FetchCoverage
     from brutex.data.window_ledger import SUCCESS, WindowLedger
 
-    cov = FetchCoverage()
     led = WindowLedger()
     sink = _FakeSink()
-    first = _run_cov(_FakeClient([{"data": {"ce": _side(), "pe": None}}]), sink, cov, ledger=led)
+    first = _run_cov(_FakeClient([{"data": {"ce": _side(), "pe": None}}]), sink, ledger=led)
     assert first.windows == 1
     assert first.bars_appended == 1  # one in-session bar survived the filter
     assert first.skipped_windows == 0
     assert {r.status for r in led.records()} == {SUCCESS}
-    assert cov.completed_count == 1  # coverage still MARKED (vestigial)
 
     # Re-pull with the SAME ledger → the window is settled SUCCESS → skipped.
     # The client has ZERO responses, so any vendor call would IndexError (proving
     # the skip happens BEFORE the network hit — no wasted Dhan budget).
     second_client = _FakeClient([])
-    second = _run_cov(second_client, sink, cov, ledger=led)
+    second = _run_cov(second_client, sink, ledger=led)
     assert second.windows == 1
     assert second.skipped_windows == 1
     assert second.bars_appended == 0
     assert second_client.calls == []  # never hit the vendor
 
 
-def test_coverage_alone_no_longer_skips_options() -> None:
-    """The flip guard: coverage alone (no ledger) no longer skips an option re-pull."""
-    from brutex.data.fetch_coverage import FetchCoverage
-
-    cov = FetchCoverage()
-    _run_cov(_FakeClient([{"data": {"ce": _side(), "pe": None}}]), _FakeSink(), cov)
-    assert cov.completed_count == 1  # marked...
-    # ...but a re-pull with ONLY coverage re-fetches (no ledger → no skip).
+def test_no_ledger_always_refetches_options() -> None:
+    """Without a ledger there is no skip authority — an option re-pull always re-fetches."""
+    _run_cov(_FakeClient([{"data": {"ce": _side(), "pe": None}}]), _FakeSink())
     second_client = _FakeClient([{"data": {"ce": _side(), "pe": None}}])
-    second = _run_cov(second_client, _FakeSink(), cov)
+    second = _run_cov(second_client, _FakeSink())
     assert second.skipped_windows == 0
     assert second.bars_appended == 1
     assert second_client.calls != []  # the vendor WAS hit

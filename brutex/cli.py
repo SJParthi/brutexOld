@@ -1613,7 +1613,6 @@ def cmd_fetch(
     from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
     from brutex.dashboard.pull_controller import DHAN_HISTORY_FLOOR
     from brutex.data.catalog import Catalog
-    from brutex.data.fetch_coverage_store import begin_pull_coverage, end_pull_coverage
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import NullBarSink, ParquetBarSink
     from brutex.data.window_ledger_store import (
@@ -1749,23 +1748,17 @@ def cmd_fetch(
                 print(f"[brutex] {_refuse.headline} {_refuse.action}", file=sys.stderr)
                 return EXIT_INTERNAL_ERROR
 
-        # Persist the fetch-coverage ledger so a re-pull (and every auto-retry
-        # round, and the manual `--retry-failed` run) re-fetches ONLY the windows
-        # not already in the lake (DEC-FETCH-COVERAGE-001 / DEC-INGEST-AUTO-RETRY-001).
-        # `--inspect` writes nothing and `--dry-run` writes SYNTHETIC sample bars,
-        # so neither touches the real coverage ledger (the store's `dry_run` flag
-        # is its "do not persist coverage" switch).
-        _no_coverage = dry_run or inspect
-        coverage = begin_pull_coverage(resolved, dry_run=_no_coverage, coverage=None)
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001, Stage b3 — R7): the CLI
-        # now threads the SAME ledger the dashboard does so it is the SOLE skip
+        # threads the SAME ledger the dashboard does so it is the SOLE skip
         # authority on the `brutex fetch` path too. Load (one-shot migrate) the
         # durable ledger, PLAN every window the pull will touch, and seed SUCCESS
         # for every window the lake already encloses (cold-start) so a re-pull
         # re-fetches ONLY the windows not already settled — never the full history.
-        # `--dry-run` / `--inspect` pass `dry_run=True`, so the ledger is None (no
-        # skip, no disk touch), exactly mirroring the coverage gate above.
-        ledger = begin_pull_ledger(resolved, dry_run=_no_coverage)
+        # `--inspect` writes nothing and `--dry-run` writes SYNTHETIC sample bars,
+        # so neither touches the real ledger: `_no_persist` passes `dry_run=True`,
+        # so the ledger is None (no skip, no disk touch).
+        _no_persist = dry_run or inspect
+        ledger = begin_pull_ledger(resolved, dry_run=_no_persist)
         if ledger is not None:  # pragma: no cover — live (non-dry, non-inspect) only
             # plan_windows + reconcile_ledger_with_lake are themselves 100%-covered in
             # test_window_ledger_store.py; only this live wiring is excluded, exactly
@@ -1805,7 +1798,7 @@ def cmd_fetch(
         )
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
-            """Run ONE full spot pass-with-auto-retry over the SHARED coverage ledger."""
+            """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
             return run_dhan_spot_ingest_with_retry(
                 adapter,
                 sink,
@@ -1814,7 +1807,6 @@ def cmd_fetch(
                 start=start_dt.date(),
                 end=end_dt.date(),
                 pace=pace,
-                coverage=coverage,
                 ledger=ledger,
                 on_rate_limit=on_rate_limit,
                 on_success=on_success,
@@ -1826,7 +1818,7 @@ def cmd_fetch(
         until_outcome = None
         if until_clean:
             # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
-            # rounds — each a full pass over the SHARED coverage ledger (re-fetches
+            # rounds — each a full pass over the SHARED window ledger (re-fetches
             # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
             # SAME retry engine via run_until_clean, until clean / token dead / outer
             # budget spent. Bounded round count (never an O(1)-total claim).
@@ -1855,8 +1847,7 @@ def cmd_fetch(
             result = fetch_passes[0]
         else:
             result = _one_fetch_pass(do_retry)
-        end_pull_coverage(coverage, resolved, dry_run=_no_coverage)
-        end_pull_ledger(ledger, resolved, dry_run=_no_coverage)
+        end_pull_ledger(ledger, resolved, dry_run=_no_persist)
     report = result.report
     retry = result.retry
     print(

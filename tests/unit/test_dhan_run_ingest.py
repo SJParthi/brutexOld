@@ -70,7 +70,6 @@ def test_fan_out_all_pairs_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
         start,
         end,
         pace=None,
-        coverage=None,
         status_log=None,
         ledger=None,
         on_rate_limit=None,
@@ -114,7 +113,6 @@ def test_terminal_error_quarantines_pair_and_continues(monkeypatch: pytest.Monke
         start,
         end,
         pace=None,
-        coverage=None,
         status_log=None,
         ledger=None,
         on_rate_limit=None,
@@ -156,7 +154,6 @@ def test_pace_threaded_through(monkeypatch: pytest.MonkeyPatch) -> None:
         start,
         end,
         pace=None,
-        coverage=None,
         status_log=None,
         ledger=None,
         on_rate_limit=None,
@@ -228,7 +225,6 @@ def test_non_dhan_exception_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
         start,
         end,
         pace=None,
-        coverage=None,
         status_log=None,
         ledger=None,
         on_rate_limit=None,
@@ -269,13 +265,13 @@ def test_empty_universe_yields_empty_report() -> None:
     assert report.failed_pairs == 0
 
 
-def test_coverage_threaded_and_skipped_windows_aggregated(
+def test_ledger_threaded_and_skipped_windows_aggregated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """run_dhan_spot_ingest threads the coverage ledger + sums skipped_windows."""
-    from brutex.data.fetch_coverage import FetchCoverage
+    """run_dhan_spot_ingest threads the unified ledger + sums skipped_windows."""
+    from brutex.data.window_ledger import WindowLedger
 
-    seen_coverage: list[object] = []
+    seen_ledger: list[object] = []
 
     def _fake_ingest(
         adapter,
@@ -286,7 +282,6 @@ def test_coverage_threaded_and_skipped_windows_aggregated(
         start,
         end,
         pace=None,
-        coverage=None,
         status_log=None,
         ledger=None,
         on_rate_limit=None,
@@ -294,11 +289,11 @@ def test_coverage_threaded_and_skipped_windows_aggregated(
         on_success=None,
         auth_guard=None,
     ):
-        seen_coverage.append(coverage)
+        seen_ledger.append(ledger)
         return IngestReport(windows=3, bars_appended=0, transient_failures=0, skipped_windows=3)
 
     monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
-    cov = FetchCoverage()
+    led = WindowLedger()
     report = run_dhan_spot_ingest(
         object(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
@@ -306,10 +301,10 @@ def test_coverage_threaded_and_skipped_windows_aggregated(
         intervals=["1minute", "1day"],
         start=_START,
         end=_END,
-        coverage=cov,
+        ledger=led,
     )
-    # The same coverage ledger was threaded into every pair.
-    assert seen_coverage == [cov, cov]
+    # The same ledger was threaded into every pair.
+    assert seen_ledger == [led, led]
     # 2 pairs × 3 skipped windows each.
     assert report.skipped_windows == 6
     assert report.bars_appended == 0
@@ -328,7 +323,6 @@ def test_rate_feedback_hooks_threaded(monkeypatch: pytest.MonkeyPatch) -> None:
         start,
         end,
         pace=None,
-        coverage=None,
         status_log=None,
         ledger=None,
         on_rate_limit=None,
@@ -794,7 +788,6 @@ def test_audit_chain_records_run_and_pairs(monkeypatch: pytest.MonkeyPatch, tmp_
         start,
         end,
         pace=None,
-        coverage=None,
         status_log=None,
         ledger=None,
         on_rate_limit=None,

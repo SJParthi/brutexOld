@@ -250,17 +250,14 @@ class TestIngestSpot:
 class TestIngestSpotCoverage:
     """The skip authority — the unified WindowLedger skips already-settled windows.
 
-    DEC-WINDOW-LEDGER-001 Stage b3 flipped the skip probe from
-    ``FetchCoverage.is_complete`` to ``WindowLedger.is_skippable``: the ledger is
-    now the SOLE skip authority. FetchCoverage is still MARKED (vestigial, removed
-    in the final stage) but no longer drives the skip.
+    DEC-WINDOW-LEDGER-001 Stage b3 flipped the skip probe from the legacy
+    ``FetchCoverage`` set to ``WindowLedger.is_skippable``: the ledger is the SOLE
+    skip authority. The coverage set itself was deleted in Stage e.
     """
 
     def test_ledger_marks_then_skips_on_repull(self) -> None:
-        from brutex.data.fetch_coverage import FetchCoverage
         from brutex.data.window_ledger import SUCCESS, WindowLedger
 
-        cov = FetchCoverage()
         led = WindowLedger()
         # First pull (empty ledger) → fetches all 3 windows + records them SUCCESS.
         first = ingest_spot(
@@ -270,14 +267,12 @@ class TestIngestSpotCoverage:
             interval="1minute",
             start=date(2021, 1, 1),
             end=date(2021, 8, 1),  # ~212 days → 3 windows
-            coverage=cov,
             ledger=led,
         )
         assert first.windows == 3
         assert first.bars_appended == 3
         assert first.skipped_windows == 0
         assert {r.status for r in led.records()} == {SUCCESS}
-        assert cov.completed_count == 3  # coverage still MARKED (vestigial)
 
         # Re-pull with the SAME ledger → every window is skippable (SUCCESS) so it
         # is skipped before the vendor call: no fetch, no append, skipped == 3.
@@ -289,7 +284,6 @@ class TestIngestSpotCoverage:
             interval="1minute",
             start=date(2021, 1, 1),
             end=date(2021, 8, 1),
-            coverage=cov,
             ledger=led,
         )
         assert second.windows == 3
@@ -297,12 +291,9 @@ class TestIngestSpotCoverage:
         assert second.bars_appended == 0
         assert sink2.appends == []  # nothing re-fetched / re-written
 
-    def test_coverage_alone_no_longer_skips(self) -> None:
-        # The flip guard: a re-pull with ONLY coverage (no ledger) does NOT skip —
-        # coverage is no longer the skip authority (DEC-WINDOW-LEDGER-001 b3).
-        from brutex.data.fetch_coverage import FetchCoverage
-
-        cov = FetchCoverage()
+    def test_no_ledger_always_refetches(self) -> None:
+        # Without a ledger there is no skip authority — a re-pull always re-fetches
+        # (the idempotent sink keeps a redundant write safe).
         ingest_spot(
             _adapter(),
             _Sink(),
@@ -310,9 +301,7 @@ class TestIngestSpotCoverage:
             interval="1minute",
             start=date(2021, 1, 1),
             end=date(2021, 8, 1),
-            coverage=cov,
         )
-        assert cov.completed_count == 3  # marked...
         second = ingest_spot(
             _adapter(),
             _Sink(),
@@ -320,70 +309,9 @@ class TestIngestSpotCoverage:
             interval="1minute",
             start=date(2021, 1, 1),
             end=date(2021, 8, 1),
-            coverage=cov,  # ...but coverage alone re-fetches (no ledger → no skip)
         )
         assert second.skipped_windows == 0
         assert second.bars_appended == 3
-
-    def test_empty_vendor_response_not_marked_complete(self) -> None:
-        """A 0-bar (empty) vendor response is NOT marked complete (DEC-LAKE-RECONCILE-001).
-
-        An empty 200 (a load-induced ``{}`` under a 429 storm, or a genuinely-empty
-        range) must NOT stamp the window "done" — otherwise it is skipped forever
-        (the NIFTY / ADANIENT / COALINDIA 1-day "no_data" bug). It stays un-marked
-        so the next pull re-fetches it.
-        """
-        from brutex.data.fetch_coverage import FetchCoverage
-
-        empty = {"open": [], "high": [], "low": [], "close": [], "timestamp": []}
-        cov = FetchCoverage()
-        report = ingest_spot(
-            _adapter(payload=empty),
-            _Sink(),
-            instrument=_INST,
-            interval="1day",  # 1 window
-            start=date(2021, 1, 1),
-            end=date(2021, 8, 1),
-            coverage=cov,
-        )
-        assert report.bars_appended == 0
-        assert cov.completed_count == 0  # NOT marked → re-pulled next run
-
-    def test_repull_with_all_bars_already_stored_stays_marked(self) -> None:
-        """A re-pull whose vendor bars are all already in the lake (0 appended) STAYS marked.
-
-        ``raw_bars`` (not ``bars_appended``) is the mark signal: the vendor
-        returned data, so the window is complete even though keep-first dedups the
-        write to 0 — it must NOT be re-pulled forever.
-        """
-        from brutex.data.fetch_coverage import FetchCoverage
-
-        # A sink that reports 0 bars_appended (simulates keep-first: all already stored).
-        class _ZeroAppendSink:
-            def append(
-                self,
-                *,
-                exchange: str,
-                segment: str,
-                symbol: str,
-                interval: str,
-                bars: Sequence[CandleBar],
-            ) -> SinkAppendResult:
-                del exchange, segment, symbol, interval, bars
-                return SinkAppendResult(bars_appended=0, partitions_written=1, write_results=())
-
-        cov = FetchCoverage()
-        report = ingest_spot(
-            _adapter(),  # returns 1 raw bar
-            _ZeroAppendSink(),  # type: ignore[arg-type]
-            instrument=_INST,
-            interval="1day",
-            start=date(2021, 1, 1),
-            end=date(2021, 8, 1),
-            coverage=cov,
-        )
-        assert report.bars_appended == 0  # nothing newly written (all already stored)
-        assert cov.completed_count == 1  # but the window IS marked (vendor had data)
 
 
 class TestIngestSpotStatusLog:
@@ -617,9 +545,6 @@ class TestIngestSpotInRunRetry:
         assert report.retried_windows == 1
 
     def test_network_drop_persists_after_budget_left_unmarked(self) -> None:
-        from brutex.data.fetch_coverage import FetchCoverage
-
-        cov = FetchCoverage()
         adapter, _t = _flaky_adapter([500])  # always 5xx
         report = ingest_spot(
             adapter,
@@ -628,15 +553,12 @@ class TestIngestSpotInRunRetry:
             interval="1day",
             start=date(2021, 1, 1),
             end=date(2021, 8, 1),
-            coverage=cov,
             max_retry_passes=1,
             retry_backoff=lambda _i: None,
         )
         assert report.transient_failures == 1
         assert report.still_failed_windows == 1
         assert report.retried_windows == 1
-        # NEVER marked complete → re-pulled next run (the no-skip guarantee).
-        assert cov.completed_count == 0
 
     def test_max_retry_passes_zero_disables_retry(self) -> None:
         adapter, _t = _flaky_adapter([500])

@@ -11,8 +11,6 @@ thread storm and assert the lock holds its invariant:
   running aggregates never tear).
 * ``OptionDedupIndex.add_if_new`` — a content key is admitted EXACTLY once even
   when N threads race the same key (the idempotence guard, Rule #7).
-* ``FetchCoverage.mark_complete`` — every distinct window is recorded once and
-  ``to_records`` never tears mid-write.
 * ``Catalog.upsert`` — concurrent upserts of distinct rows all land (DuckDB is
   not concurrency-safe without the lock).
 
@@ -34,7 +32,6 @@ from brutex.adapters.dhan.rate_control import (
     DhanRateController,
 )
 from brutex.data.catalog import Catalog
-from brutex.data.fetch_coverage import FetchCoverage, WindowKey
 from brutex.data.models import CatalogEntry
 from brutex.data.option_dedup import OptionDedupIndex, option_bar_key
 
@@ -184,35 +181,6 @@ class TestOptionDedupConcurrency:
         # Every thread tries every key; each key must be admitted exactly once.
         _run_storm(op, threads=10, per_thread=n_keys)
         assert added == [1] * n_keys
-
-
-class TestFetchCoverageConcurrency:
-    """Concurrent mark_complete records every distinct window once; reads atomic."""
-
-    def test_concurrent_marks_record_every_window(self) -> None:
-        cov = FetchCoverage()
-        n_windows = 300
-
-        def _key(i: int) -> WindowKey:
-            return WindowKey(
-                market="dhan",
-                security_id=str(i),
-                interval="1minute",
-                start=datetime(2021, 1, 1, tzinfo=UTC).date(),
-                end=datetime(2021, 4, 1, tzinfo=UTC).date(),
-            )
-
-        def op(_idx: int, op_i: int) -> None:
-            cov.mark_complete(_key(op_i % n_windows))
-            # Interleave a serialising read to exercise to_records under the lock.
-            cov.to_records()
-
-        _run_storm(op, threads=12, per_thread=n_windows)
-        assert cov.completed_count == n_windows
-        # to_records is a clean, sorted, deduplicated snapshot.
-        records = cov.to_records()
-        assert len(records) == n_windows
-        assert records == sorted(records)
 
 
 class TestCatalogConcurrency:

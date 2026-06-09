@@ -22,10 +22,10 @@ Design (priority law — Correctness > Reliability > … > Performance):
   (idempotent keep-first sink), never data.
 * **Reliability — crash-safe write.** :func:`save_window_ledger` writes a sibling
   ``*.tmp`` then :func:`os.replace` (atomic on POSIX within one filesystem).
-* **Migration (one-shot).** :func:`load_or_migrate_window_ledger` folds the two
-  legacy JSON sidecars (``window_status.json`` + ``fetch_coverage.json``) into the
-  ledger the first time, the richer status-log row WINNING on conflict, so no
-  history is lost when the unified ledger supersedes them.
+* **Migration (one-shot).** :func:`load_or_migrate_window_ledger` folds the
+  legacy ``window_status.json`` sidecar into the ledger the first time, so no
+  history is lost when the unified ledger supersedes it. (The ``fetch_coverage.json``
+  sidecar fold was retired with the coverage set in DEC-WINDOW-LEDGER-001 Stage e.)
 
 The O(1) per-window probe/record stays in :class:`WindowLedger`; only the
 one-shot load (run start) + save (run end) are O(N) over the recorded windows.
@@ -46,7 +46,6 @@ from brutex.data.window_ledger import (
     EMPTY,
     EMPTY_TERMINAL_THRESHOLD,
     SKIPPED,
-    SUCCESS,
     WindowLedger,
     WindowLedgerRecord,
 )
@@ -238,15 +237,15 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
     os.replace(tmp, path)
 
 
-def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int, now: datetime) -> WindowLedger:
-    """Fold ``window_status.json`` + ``fetch_coverage.json`` into a fresh ledger — one-shot.
+def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger:
+    """Fold the legacy ``window_status.json`` sidecar into a fresh ledger — one-shot.
 
-    The richer status-log row WINS on conflict (it carries bars / attempts /
-    last_error); a coverage-only key (the coarse "complete" set) seeds a minimal
-    ``SUCCESS`` row. An ``EMPTY`` status at/above *threshold* migrates straight to
-    ``SKIPPED`` (the EMPTY-terminal settle), mirroring :meth:`WindowLedger.record`.
+    The status-log row carries bars / attempts / last_error. An ``EMPTY`` status
+    at/above *threshold* migrates straight to ``SKIPPED`` (the EMPTY-terminal
+    settle), mirroring :meth:`WindowLedger.record`. (The ``fetch_coverage.json``
+    coverage-set fold was retired with the coverage set in DEC-WINDOW-LEDGER-001
+    Stage e — only the status-log sidecar is folded now.)
     """
-    from brutex.data.fetch_coverage_store import load_fetch_coverage
     from brutex.data.window_status_store import load_window_status
 
     by_window: dict[tuple[str, str, str, str, str], WindowLedgerRecord] = {}
@@ -274,27 +273,6 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int, now: datetime) 
                 # reconcile_empty_terminal gave (status-log attempts == EMPTY count).
                 empty_streak=_derive_empty_streak(status, r.attempts),
             )
-        )
-
-    coverage = load_fetch_coverage(lake_root)
-    stamp = now.isoformat()
-    for market, security_id, interval, start, end in coverage.to_records():
-        key = (market, security_id, interval, start, end)
-        if key in by_window:
-            continue  # status-log row already richer — it wins
-        by_window[key] = WindowLedgerRecord(
-            market=market,
-            security_id=security_id,
-            interval=interval,
-            window_start=start,
-            window_end=end,
-            status=SUCCESS,  # the coarse set's only signal is "complete"
-            bars=0,
-            attempts=1,
-            last_error=None,
-            first_seen_at=stamp,
-            last_attempt_at=stamp,
-            empty_streak=0,
         )
 
     return WindowLedger.from_rows(
@@ -325,17 +303,17 @@ def load_or_migrate_window_ledger(
     threshold: int = EMPTY_TERMINAL_THRESHOLD,
     now: datetime | None = None,
 ) -> WindowLedger:
-    """Load the ledger, or seed it once from the two legacy sidecars (no data loss).
+    """Load the ledger, or seed it once from the legacy status-log sidecar (no data loss).
 
     Steady state: the Parquet exists → :func:`load_window_ledger`. First run after
-    the unification: no Parquet → fold ``window_status.json`` +
-    ``fetch_coverage.json`` (:func:`_migrate_legacy_sidecars`). The legacy files
-    are LEFT on disk (a one-release rollback net); a later slice removes them.
+    the unification: no Parquet → fold ``window_status.json``
+    (:func:`_migrate_legacy_sidecars`). The legacy file is LEFT on disk (a
+    one-release rollback net); a later slice removes it. (The ``fetch_coverage.json``
+    fold was retired with the coverage set in DEC-WINDOW-LEDGER-001 Stage e.)
     """
     if ledger_path(lake_root).is_file():
         return load_window_ledger(lake_root, threshold=threshold)
-    stamp = now if now is not None else datetime.now(UTC)
-    return _migrate_legacy_sidecars(lake_root, threshold=threshold, now=stamp)
+    return _migrate_legacy_sidecars(lake_root, threshold=threshold)
 
 
 def plan_windows(

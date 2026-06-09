@@ -66,7 +66,6 @@ from brutex.adapters.dhan.option_ingest import (
     Pacer,
     ingest_rolling_option_series,
 )
-from brutex.data.fetch_coverage import FetchCoverage
 from brutex.data.window_ledger import WindowLedger
 from brutex.observability.correlation import current_pull_id, pull_id_scope
 from brutex.orchestrator.parallel import PoolRunParallel
@@ -293,7 +292,6 @@ def run_dhan_options_ingest(
     on_success: Pacer | None = None,
     on_progress: ProgressHook | None = None,
     on_series_tick: Callable[[], None] | None = None,
-    coverage: FetchCoverage | None = None,
     ledger: WindowLedger | None = None,
     run_parallel: RunParallel | None = None,
 ) -> OptionsUniverseReport:
@@ -459,7 +457,6 @@ def run_dhan_options_ingest(
                 on_rate_limit=on_rate_limit,
                 on_timeout=on_timeout,
                 on_success=on_success,
-                coverage=coverage,
                 ledger=ledger,
             )
 
