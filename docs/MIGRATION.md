@@ -5682,3 +5682,17 @@ end. Track 2 Phase 0 went through 2 rounds of the same pattern
 ## DEC-PREOPEN-XLSX-DATE-001 (2026-06-09)
 
 601. **DEC-PREOPEN-XLSX-DATE-001 — stamp each pre-open report `.xlsx` zip member with its DATA-date, not the fixed 1980 epoch** (operator report 2026-06-09: "why everywhere it is not using the precise current IST timestamp … the preopen .xlsx shows 1 Jan 1980"). **Why:** the pre-open report download is a `.zip` of one `.xlsx` per year (`render_report_zip`); every member carried a fixed `_ZIP_EPOCH` (`1980-01-01`) `date_time` — chosen for byte-reproducibility (CLAUDE.md §2 Rule 7) — so Finder showed every extracted `.xlsx` as "1 Jan 1980", looking broken. **The fix:** stamp each yearly member with the **latest data day it holds** (e.g. `2024-11-28`), and the empty-report member with the `2021-01-01` Track-1 data floor (`_EMPTY_REPORT_DATE`). The date is **derived from the data** (same rows → same date → byte-identical zip), NOT wall-clock `now()`, so the reproducible-bytes contract is fully preserved (asserted: a re-render equals the original blob). The `.xlsx` INTERNAL OOXML parts keep `_ZIP_EPOCH` (invisible to the operator; preserves the per-`.xlsx` byte digest) — only the OUTER zip member dates change. **Verified (HONEST — REAL local run):** `tests/unit/test_preopen_report.py` = **100.00% line + branch** on `preopen_report.py` (Python 3.12.3); new tests assert the yearly member date = its latest data day (never 1980), the empty member = the data floor, and byte-determinism (re-render == blob). `ruff check` + `ruff format --check` + `mypy --strict` clean; full `tests/unit tests/integration tests/property` suite green. **Honest envelope (Golden Rule #10):** ✅ the alarming "1 Jan 1980" is gone — each file shows its data-year date, still byte-reproducible. 🟡 the date is the *data* day, not the literal generation time (deliberate — generation time would break reproducibility). 🚫 no change to the engine, the ingest, the report data, or the `.xlsx` content. **Builds on:** CLAUDE.md §2 Rule 7 (reproducible bytes) · the IST-display fix (DEC-WINDOW-LEDGER-001 / DEC-TOKEN-EVENTS-001 surfaces, #561) this completes the "timestamps wrong everywhere" operator report alongside.
+
+### DEC-PREOPEN-XLSX-DATE-001 — AMENDED (2026-06-09)
+
+**Amendment:** the original entry stamped each ``.xlsx`` member with the LATEST
+data day (e.g. 2024-12-30) "deliberately, not generation time, to preserve
+byte-reproducibility". The operator found that confusing — a file downloaded NOW
+should read "Date Modified = now", consistent with the standing "everywhere the
+precise current IST timestamp" decree. **Reversed:** each ``.xlsx`` member mtime
+is now the **IST generation time** (``datetime.now(IST)``, injectable for tests).
+The workbook BODY stays byte-stable for the same data (the internal OOXML parts
+keep ``_ZIP_EPOCH``); only the outer member mtime is the clock — so the report
+content is still reproducible, just the file's "Date Modified" reads the download
+moment. ``_EMPTY_REPORT_DATE`` removed. Verified: ``preopen_report.py`` 100%
+line+branch; a live render stamps the member at ``now(IST)`` to the second.
