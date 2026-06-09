@@ -349,9 +349,9 @@ def test_progress_hook_routes_failed_and_success() -> None:
     wd.register("NIFTY", "1minute")
     hook = wd.progress_hook()
 
-    hook("NIFTY 1minute", 0, False)  # success → no give-up
+    hook("NIFTY 1minute", 0, False, False)  # success → no give-up
     assert wd.has_given_up("NIFTY", "1minute") is False
-    hook("NIFTY 1minute", 0, True)  # terminal failure → give up
+    hook("NIFTY 1minute", 0, True, False)  # terminal failure → give up
     assert wd.has_given_up("NIFTY", "1minute") is True
 
 
@@ -372,7 +372,7 @@ def test_progress_hook_ignores_unregistered_label() -> None:
     wd.register("NIFTY", "1minute")
     hook = wd.progress_hook()
     # Stray label — never registered. Must be ignored, never raise.
-    hook("BANKNIFTY 1day", 0, True)
+    hook("BANKNIFTY 1day", 0, True, False)
     assert wd.has_given_up("BANKNIFTY", "1day") is False
 
 
@@ -380,5 +380,5 @@ def test_progress_hook_label_without_separator() -> None:
     wd = RetryStormWatchdog(max_retry_seconds=600.0)
     wd.register("SOLO", "")  # a label with no separator resolves to window=""
     hook = wd.progress_hook()
-    hook("SOLO", 0, True)
+    hook("SOLO", 0, True, False)
     assert wd.has_given_up("SOLO", "") is True

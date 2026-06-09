@@ -57,7 +57,7 @@ import structlog
 
 from brutex.adapters.dhan.client import DhanClient
 from brutex.adapters.dhan.constants import DRV_OPTION_TYPES, EXPIRY_FLAGS
-from brutex.adapters.dhan.errors import DhanError
+from brutex.adapters.dhan.errors import DhanError, is_no_data_error
 from brutex.adapters.dhan.option_ingest import (
     ALL_REQUIRED_DATA,
     JsonPoster,
@@ -135,10 +135,9 @@ SeriesKey = tuple[str, str, int, str, str]
 #: done: ``(label, bars_appended, any_failed, gap)``. Lets a caller stream
 #: real-time progress (e.g. into a ``PullProgress`` tracker) without coupling
 #: this layer to the dashboard (DEC-PULL-PROGRESS-TRACKER-001). ``gap`` mirrors
-#: the spot hook's benign-DH-905 flag (DEC-DHAN-NO-DATA-GAP-COUNT-001); the
-#: per-underlying options rollup does not yet split gap from failure, so it is
-#: emitted ``False`` here (a tracked follow-up — options gaps still count as
-#: failed exactly as before, no regression).
+#: the spot hook's benign-DH-905 flag (DEC-DHAN-NO-DATA-GAP-COUNT-001): an
+#: underlying whose ONLY empty series were DH-905 no-data boundaries reads as a
+#: no-data gap, not a failure (a real failure on any series outranks it).
 ProgressHook = Callable[[str, int, bool, bool], None]
 
 
@@ -239,6 +238,9 @@ class _UnderlyingResult:
     completed: int = 0
     quarantined: int = 0
     any_failed: bool = False
+    #: True iff at least one series returned a benign Dhan ``DH-905`` no-data
+    #: boundary (NOT a real failure — DEC-DHAN-NO-DATA-GAP-COUNT-001 options arm).
+    any_gap: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,7 +353,8 @@ def run_dhan_options_ingest(
         single governor that bounds the aggregate to ``≤ 5 r/s`` (Rule #6).
     on_progress
         Optional live-progress hook fired once per **underlying** after its
-        whole fan-out completes: ``(security_id, bars_appended, any_failed)``.
+        whole fan-out completes: ``(security_id, bars_appended, any_failed, gap)``
+        where ``gap`` flags a benign DH-905-only underlying (DEC-DHAN-NO-DATA-GAP-COUNT-001).
         Fired on the CONTROLLER thread in a DETERMINISTIC post-pass (sorted by
         ``security_id``) so the hook need not be thread-safe and the order is
         reproducible (DEC-PULL-PROGRESS-TRACKER-001, Rule #4).
@@ -507,20 +510,41 @@ def run_dhan_options_ingest(
                     error=str(exc),
                 )
             )
-            result.any_failed = True
+            # The series is recorded (re-tried next pull, never masked) + counted in
+            # the quarantined rollup EITHER way. But a Dhan ``DH-905`` "no data" is a
+            # benign GAP, NOT a failure (DEC-DHAN-NO-DATA-GAP-COUNT-001, options arm):
+            # log it INFO ``ingest.known_gap`` + flag ``any_gap`` so the live counter
+            # reads it as a no-data gap, mirroring the spot path. Every other terminal
+            # error stays a WARNING ``ingest.quarantine`` failure.
             result.quarantined += 1
-            # Quarantine-cause nook: WHY this series was dropped, full coordinate.
-            _LOG.warning(
-                "ingest.quarantine",
-                pull_id=pull_id,
-                security_id=underlying.security_id,
-                underlying_symbol=underlying.underlying_symbol,
-                expiry_flag=expiry_flag,
-                expiry_code=expiry_code,
-                strike=strike,
-                drv_option_type=drv_option_type,
-                error=str(exc),
-            )
+            if is_no_data_error(exc):
+                result.any_gap = True
+                _LOG.info(
+                    "ingest.known_gap",
+                    pull_id=pull_id,
+                    security_id=underlying.security_id,
+                    underlying_symbol=underlying.underlying_symbol,
+                    expiry_flag=expiry_flag,
+                    expiry_code=expiry_code,
+                    strike=strike,
+                    drv_option_type=drv_option_type,
+                    reason=str(exc),
+                    note="Dhan reports no data for this series (DH-905); re-tried next pull, not masked",
+                )
+            else:
+                result.any_failed = True
+                # Quarantine-cause nook: WHY this series was dropped, full coordinate.
+                _LOG.warning(
+                    "ingest.quarantine",
+                    pull_id=pull_id,
+                    security_id=underlying.security_id,
+                    underlying_symbol=underlying.underlying_symbol,
+                    expiry_flag=expiry_flag,
+                    expiry_code=expiry_code,
+                    strike=strike,
+                    drv_option_type=drv_option_type,
+                    error=str(exc),
+                )
             continue
         report = outcome.result
         if report is None:  # pragma: no cover — ok=True always carries a result
@@ -557,10 +581,17 @@ def run_dhan_options_ingest(
             windows=result.windows,
         )
         # Fire the live-progress hook once the WHOLE underlying fan-out is done.
-        # gap=False: the options rollup does not yet split benign DH-905 from a
-        # real failure (DEC-DHAN-NO-DATA-GAP-COUNT-001 follow-up) — no regression.
+        # ``failed`` and ``gap`` are mutually exclusive on this one unit: a real
+        # failure outranks a benign DH-905 gap, so an underlying with ANY real
+        # failure reads as failed; one whose only empty series were DH-905 reads
+        # as a no-data gap (DEC-DHAN-NO-DATA-GAP-COUNT-001, options arm).
         if on_progress is not None:
-            on_progress(underlying.security_id, result.bars, result.any_failed, False)
+            on_progress(
+                underlying.security_id,
+                result.bars,
+                result.any_failed,
+                result.any_gap and not result.any_failed,
+            )
     return OptionsUniverseReport(series=series, failures=tuple(failures))
 
 

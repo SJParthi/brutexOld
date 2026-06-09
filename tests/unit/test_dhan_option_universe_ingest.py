@@ -84,6 +84,14 @@ class _FailClient:
         raise DhanBadRequestError("boom")
 
 
+class _NoDataClient:
+    """A JSON poster that always raises a Dhan DH-905 "no data" boundary."""
+
+    def post_json(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
+        del endpoint, body
+        raise DhanBadRequestError("HTTP 400 bad request: DH-905 no data present")
+
+
 class _Sink:
     """Counts appended bars per series (the OptionBarSink seam)."""
 
@@ -445,6 +453,27 @@ def test_on_progress_flags_failed_underlying() -> None:
         on_progress=lambda label, bars, failed, gap: events.append((label, bars, failed, gap)),
     )
     assert events == [("13", 0, True, False)]
+
+
+def test_on_progress_flags_no_data_gap_underlying() -> None:
+    """An underlying whose only empty series are DH-905 boundaries fires on_progress
+    with gap=True, failed=False — a benign no-data gap, NOT a failure
+    (DEC-DHAN-NO-DATA-GAP-COUNT-001, options arm)."""
+    events: list[tuple[str, int, bool, bool]] = []
+    report = run_dhan_options_ingest(
+        _NoDataClient(),
+        _Sink(),
+        underlyings=[_index("13", offsets=0)],
+        start=date(2021, 1, 4),
+        end=date(2021, 1, 5),
+        expiry_flags=("WEEK",),
+        expiry_codes=(1,),
+        option_types=("CALL",),
+        on_progress=lambda label, bars, failed, gap: events.append((label, bars, failed, gap)),
+    )
+    assert events == [("13", 0, False, True)]  # gap, not a failure
+    # The DH-905 series is still RECORDED (re-tried next pull, never masked).
+    assert len(report.failures) == 1
 
 
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:

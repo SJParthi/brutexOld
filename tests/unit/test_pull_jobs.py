@@ -42,8 +42,8 @@ def test_successful_job_advances_then_finishes() -> None:
     job = _job()
 
     def work(on_progress: ProgressHook) -> None:
-        on_progress("NIFTY 1minute", 100, False)
-        on_progress("NIFTY 1day", 5, False)
+        on_progress("NIFTY 1minute", 100, False, False)
+        on_progress("NIFTY 1day", 5, False, False)
 
     started = job.start(work, total=2, detail="kick")
     assert started is True
@@ -61,7 +61,7 @@ def test_worker_exception_becomes_error_state() -> None:
     job = _job()
 
     def work(on_progress: ProgressHook) -> None:
-        on_progress("13 1minute", 1, False)
+        on_progress("13 1minute", 1, False, False)
         raise RuntimeError("boom")
 
     assert job.start(work, total=1) is True
@@ -120,7 +120,7 @@ def test_running_true_during_work() -> None:
 def test_default_progress_when_none_injected() -> None:
     # No injected tracker → a fresh PullProgress is created internally.
     job = BackgroundPullJob(spawn=_sync_spawn)
-    job.start(lambda on_progress: on_progress("X", 1, False), total=1)
+    job.start(lambda on_progress: on_progress("X", 1, False, False), total=1)
     assert job.snapshot().state == STATE_DONE
 
 
@@ -137,7 +137,7 @@ def test_real_daemon_thread_end_to_end() -> None:
         done.set()
 
     job = BackgroundPullJob(progress=progress, spawn=spawn)
-    job.start(lambda on_progress: on_progress("13 1minute", 7, False), total=1)
+    job.start(lambda on_progress: on_progress("13 1minute", 7, False, False), total=1)
     assert done.is_set()
     assert job.snapshot().state == STATE_DONE
     assert job.snapshot().bars == 7
@@ -175,9 +175,9 @@ def test_write_funnel_feeds_coverage_counters() -> None:
     job = _job()
 
     def work(on_progress: ProgressHook) -> None:
-        on_progress("NIFTY 1minute", 100, False)
-        on_progress("NIFTY 1minute", 50, False)
-        on_progress("BANKNIFTY 1minute", 7, False)
+        on_progress("NIFTY 1minute", 100, False, False)
+        on_progress("NIFTY 1minute", 50, False, False)
+        on_progress("BANKNIFTY 1minute", 7, False, False)
 
     job.start(work, total=3)
     snap = job.counters.snapshot()
@@ -190,7 +190,7 @@ def test_injected_counters_are_used() -> None:
     job = BackgroundPullJob(
         progress=PullProgress(clock=_FakeClock()), spawn=_sync_spawn, counters=counters
     )
-    job.start(lambda on_progress: on_progress("X 1minute", 9, False), total=1)
+    job.start(lambda on_progress: on_progress("X 1minute", 9, False, False), total=1)
     assert job.counters is counters
     assert counters.snapshot().total_bars == 9
 
@@ -198,7 +198,7 @@ def test_injected_counters_are_used() -> None:
 def test_duplicate_repull_zero_bars_leaves_counter_unchanged() -> None:
     # bars == 0 (post-dedup duplicate) is a no-op → idempotent headline.
     job = _job()
-    job.start(lambda on_progress: on_progress("DUP 1minute", 0, False), total=1)
+    job.start(lambda on_progress: on_progress("DUP 1minute", 0, False, False), total=1)
     snap = job.counters.snapshot()
     assert snap.total_bars == 0
     assert snap.by_label == {}
@@ -211,8 +211,8 @@ def test_summary_cache_invalidated_once_per_window() -> None:
     )
 
     def work(on_progress: ProgressHook) -> None:
-        on_progress("A 1minute", 10, False)
-        on_progress("B 1minute", 0, True)  # a failed/zero window still ticks the funnel
+        on_progress("A 1minute", 10, False, False)
+        on_progress("B 1minute", 0, True, False)  # a failed/zero window still ticks the funnel
 
     job.start(work, total=2)
     # mark_dirty fires on EVERY progress tick (so the next poll refreshes),
@@ -224,5 +224,5 @@ def test_no_summary_cache_means_no_invalidation_branch() -> None:
     # Default job has summary_cache=None → the mark_dirty branch is skipped
     # (no AttributeError), proving the None guard.
     job = _job()
-    job.start(lambda on_progress: on_progress("X 1minute", 1, False), total=1)
+    job.start(lambda on_progress: on_progress("X 1minute", 1, False, False), total=1)
     assert job.snapshot().state == STATE_DONE
