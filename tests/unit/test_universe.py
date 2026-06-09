@@ -25,6 +25,7 @@ from brutex.universe import (
     UnderlyingEconomics,
     UnderlyingSpec,
     build_fno_eligible_underlyings,
+    build_options_eligible_underlyings,
     build_underlying_economics,
     classify_underlying_kind,
     derive_lake_underlyings,
@@ -422,6 +423,32 @@ class TestBuildFnoEligibleUnderlyings:
 
     def test_empty_iterable(self) -> None:
         assert build_fno_eligible_underlyings([]) == frozenset()
+
+
+class TestBuildOptionsEligibleUnderlyings:
+    """Derive the OPTIONS-only eligible set (CE/PE underlyings; FUT excluded)."""
+
+    def test_collects_option_underlyings_only(self) -> None:
+        # CE (index/stock call) + PE (put) qualify; FUT does NOT (options-only).
+        instruments = [
+            _make_derivative(Exchange.NSE, InstrumentType.CE, "NIFTY"),  # index option
+            _make_derivative(Exchange.NSE, InstrumentType.PE, "RELIANCE"),  # stock option
+            _make_derivative(Exchange.NSE, InstrumentType.FUT, "NIFTY100"),  # FUTURE → excluded
+        ]
+        eligible = build_options_eligible_underlyings(instruments)
+        assert eligible == frozenset({(Exchange.NSE, "NIFTY"), (Exchange.NSE, "RELIANCE")})
+        assert (Exchange.NSE, "NIFTY100") not in eligible  # a futures-only name is NOT eligible
+
+    def test_skips_non_options(self) -> None:
+        instruments = [
+            _make_idx(Exchange.NSE, "NIFTY 100"),  # a spot index (no options)
+            _make_equity(Exchange.NSE, "SOMESTOCK"),
+            _make_derivative(Exchange.NSE, InstrumentType.FUT, "X"),  # future only
+        ]
+        assert build_options_eligible_underlyings(instruments) == frozenset()
+
+    def test_empty_iterable(self) -> None:
+        assert build_options_eligible_underlyings([]) == frozenset()
 
 
 class TestIsInFetchScope:
