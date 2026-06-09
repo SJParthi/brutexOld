@@ -186,3 +186,16 @@ def test_universe_visual_upgrade_present() -> None:
     assert "reference-only · no options" in html, "the legend's REF explanation is missing"
     # Skeleton-shimmer load placeholder (reuses the existing shimmer keyframe).
     assert "skel-row" in html, "the skeleton-load shimmer rows are missing"
+
+
+def test_universe_opt_badge_present() -> None:
+    """The positive OPT badge (DEC-OPTIONS-ELIGIBLE-GUARD-001): an option-pullable
+    row gets a green OPT chip — the mutually-exclusive partner of the REF chip —
+    plus its CSS + legend key, so F&O vs spot-only reads at a glance."""
+    html = _render_universe_html()
+    assert ".chip.opt" in html, "the OPT chip style is missing"
+    # The OPT chip is the else-branch of the refOnly conditional (every row is
+    # one or the other), so it renders for every option-pullable row.
+    assert '<span class="chip opt"' in html, "the OPT chip is not rendered"
+    assert ">OPT<" in html, "the OPT chip label is missing"
+    assert "option-pullable · F&amp;O" in html, "the legend's OPT explanation is missing"

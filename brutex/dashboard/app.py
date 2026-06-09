@@ -1970,9 +1970,30 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"symbols": []})
         triples = resolve_report_datasets(lake_root.parent, basis=report_basis)
+        # Tag each report symbol with option-pullability so /reports can badge
+        # F&O vs spot-only at a glance (DEC-OPTIONS-ELIGIBLE-GUARD-001) — reusing
+        # the SAME store calls + single-source predicate the /universe explorer
+        # uses (no duplication). A symbol absent from the underlying universe
+        # (a spot-only dataset) defaults to NOT pullable.
+        pullable = {
+            (row["exchange"], row["symbol"]): row["option_pullable"]
+            for row in list_underlyings(
+                store.list_index_equity_instruments(),
+                fno_eligible=store.fno_eligible_underlyings(),
+                reference_only_ids=store.reference_only_security_ids(),
+            )
+        }
         return JSONResponse(
             {
-                "symbols": [{"exchange": e, "segment": s, "symbol": y} for e, s, y in triples],
+                "symbols": [
+                    {
+                        "exchange": e,
+                        "segment": s,
+                        "symbol": y,
+                        "option_pullable": pullable.get((e, y), False),
+                    }
+                    for e, s, y in triples
+                ],
                 "basis": report_basis,
             }
         )

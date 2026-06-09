@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import io
 import zipfile
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -21,9 +21,10 @@ pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("httpx", reason="TestClient needs httpx")
 
 from brutex.dashboard.app import DashboardState, build_app
-from brutex.data.instrument_store import InstrumentStore
+from brutex.data.instrument_store import Instrument, InstrumentStore
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
+from brutex.models import Exchange, InstrumentType, Segment
 from fastapi.testclient import TestClient
 
 _EXPECTED_PATHS = frozenset(
@@ -81,8 +82,89 @@ def test_report_routes_registered(tmp_path: Path) -> None:
 def test_symbols_lists_report_eligible(tmp_path: Path) -> None:
     resp = _client(tmp_path).get("/api/v1/reports/preopen/symbols")
     assert resp.status_code == 200
-    symbols = [s["symbol"] for s in resp.json()["symbols"]]
-    assert symbols == ["COALINDIA"]
+    rows = resp.json()["symbols"]
+    assert [s["symbol"] for s in rows] == ["COALINDIA"]
+    # Every symbol carries the option-pullability tag (DEC-OPTIONS-ELIGIBLE-GUARD-001).
+    # The store here holds no instruments, so COALINDIA defaults to spot-only.
+    assert rows[0]["option_pullable"] is False
+
+
+def _eq(symbol: str) -> Instrument:
+    """A minimal NSE cash-equity (EQ) instrument-master row."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=hash(symbol) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+def _ce(underlying: str) -> Instrument:
+    """A minimal NSE CE option leg naming *underlying* (makes it F&O-eligible)."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=500_000 + abs(hash(f"{underlying}CE")) % 400_000,
+        symbol_name=f"{underlying}CE",
+        display_name=f"{underlying} CE",
+        instrument=InstrumentType.CE,
+        segment=Segment.FNO,
+        series=None,
+        isin=None,
+        underlying_symbol=underlying,
+        underlying_security_id=hash(underlying) % 100_000,
+        lot_size=75,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=1800,
+        sm_expiry_date=date(2025, 1, 30),
+        strike_price=Decimal("20000"),
+        option_type="CE",
+        asm_gsm_flag=False,
+    )
+
+
+def test_symbols_tags_option_pullability(tmp_path: Path) -> None:
+    """Each report symbol carries an ``option_pullable`` flag so /reports can badge
+    F&O vs spot-only (DEC-OPTIONS-ELIGIBLE-GUARD-001): an F&O-eligible underlying →
+    True; a spot-only one → False. Reuses the single-source predicate the
+    /universe explorer uses."""
+    writer = ParquetWriter(lake_root=tmp_path)
+    for sym in ("COALINDIA", "SPOTONLY"):
+        writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol=sym,
+            interval="1day",
+            bars=[
+                _bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="455", close="458.15"),
+                _bar(datetime(2024, 3, 4, 3, 45, tzinfo=UTC), open_="429", close="431.55"),
+            ],
+        )
+    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+    # COALINDIA is F&O-eligible (it has a CE leg); SPOTONLY is not seeded at all.
+    store.upsert_many(
+        [_eq("COALINDIA"), _ce("COALINDIA")],
+        snapshot_date=date.today(),
+        run_id="seed",
+        csv_source_sha256="0" * 64,
+    )
+    client = TestClient(build_app(DashboardState(), instrument_store=store))
+    resp = client.get("/api/v1/reports/preopen/symbols")
+    assert resp.status_code == 200
+    by_sym = {s["symbol"]: s["option_pullable"] for s in resp.json()["symbols"]}
+    assert by_sym["COALINDIA"] is True  # F&O-eligible → has an option chain
+    assert by_sym["SPOTONLY"] is False  # absent from the universe → spot-only
 
 
 def test_xlsx_download_matches_nse(tmp_path: Path) -> None:
