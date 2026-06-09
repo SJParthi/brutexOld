@@ -172,3 +172,40 @@ class TestRateRoute:
         # DEC-DASHBOARD-RPS1S-PANEL-001: the instantaneous gauge rides the same route.
         assert body["rps_1s"] == 5
         assert body["rps_1s_max"] == 5
+
+
+class _FakeQuotaTracker:
+    """A read-only daily-quota source (duck-typed, no LMDB) for the route test."""
+
+    def __init__(self, used: int, limit: int) -> None:
+        self._used = used
+        self.daily_limit = limit
+
+    def current_count(self) -> int:
+        return self._used
+
+    def remaining(self) -> int:
+        return max(0, self.daily_limit - self._used)
+
+
+class TestQuotaRoute:
+    """``/api/v1/quota`` exposes today's PERSISTED usage so the /universe gauge
+    shows the budget on page-load (DEC-DASHBOARD-QUOTA-PERSISTED-001)."""
+
+    def test_quota_route_reads_injected_tracker(self) -> None:
+        pytest.importorskip("fastapi")
+        from brutex.dashboard.app import build_app
+        from fastapi.testclient import TestClient
+
+        app = build_app(
+            DashboardState(), quota_tracker=_FakeQuotaTracker(used=82_000, limit=100_000)
+        )
+        with TestClient(app) as c:
+            resp = c.get("/api/v1/quota")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == {
+            "quota_used": 82_000,
+            "quota_limit": 100_000,
+            "quota_remaining": 18_000,
+        }

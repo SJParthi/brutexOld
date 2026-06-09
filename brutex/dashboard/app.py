@@ -652,6 +652,7 @@ def build_app(
     *,
     instrument_store: Any = None,
     summary_cache: SummaryCache | None = None,
+    quota_tracker: Any = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -678,6 +679,17 @@ def build_app(
         (``SummaryCache(ttl_floor_s=0.0)``) and assert the write-path
         invalidation deterministically; ``None`` (the default) builds a
         fresh production cache.
+    quota_tracker
+        Optional read-only daily-quota source for the ``/api/v1/quota``
+        endpoint (DEC-DASHBOARD-QUOTA-PERSISTED-001). Any object exposing
+        ``current_count() -> int``, ``remaining() -> int`` and a
+        ``daily_limit`` int satisfies it (the live
+        :class:`~brutex.orchestrator.quota_tracker.DailyQuotaTracker`). When
+        ``None`` (the default) a real tracker is built lazily on first poll,
+        reading the IST-midnight LMDB counter the pulls write — so the
+        ``/universe`` gauge shows today's PERSISTED usage on page-load, before
+        any pull in this session reports onto the live rate panel. Injected so
+        tests drive a deterministic fake (no LMDB).
 
     Returns
     -------
@@ -814,6 +826,40 @@ def build_app(
         the lake or the store lock.
         """
         return JSONResponse(asdict(state.rate_limit))
+
+    #: Lazily-built read-only daily-quota source for ``/api/v1/quota``. Holds the
+    #: injected tracker, else builds ONE real ``DailyQuotaTracker`` on first poll
+    #: (so importing/constructing the app never touches the LMDB) — both point at
+    #: the same IST-midnight ``~/.brutex/quota`` file the pulls write, so a fresh
+    #: read reflects today's usage (DEC-DASHBOARD-QUOTA-PERSISTED-001).
+    _quota_holder: dict[str, Any] = {"tracker": quota_tracker}
+
+    def _resolve_quota_tracker() -> Any:
+        if _quota_holder["tracker"] is None:
+            from brutex.orchestrator.quota_tracker import DailyQuotaTracker
+
+            _quota_holder["tracker"] = DailyQuotaTracker()
+        return _quota_holder["tracker"]
+
+    @app.get("/api/v1/quota")
+    async def api_quota() -> JSONResponse:
+        """GET /api/v1/quota — today's PERSISTED Dhan daily-quota usage (read-only).
+
+        Reads the IST-midnight :class:`DailyQuotaTracker` directly (one O(1) LMDB
+        read) so the ``/universe`` gauge can show ``used / limit / remaining`` on
+        page-load — BEFORE any pull in this session pushes onto the live rate
+        panel (DEC-DASHBOARD-QUOTA-PERSISTED-001). The tracker is the SAME
+        file-backed counter the pulls increment, so this stays current mid-pull
+        too. Never touches the lake or the store lock.
+        """
+        tracker = _resolve_quota_tracker()
+        return JSONResponse(
+            {
+                "quota_used": tracker.current_count(),
+                "quota_limit": tracker.daily_limit,
+                "quota_remaining": tracker.remaining(),
+            }
+        )
 
     @app.get("/api/v1/sweep-progress")
     async def api_sweep_progress() -> JSONResponse:
