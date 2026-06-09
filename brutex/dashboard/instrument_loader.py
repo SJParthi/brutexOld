@@ -189,9 +189,10 @@ def _ntm_admission(
         # returned above), or the CSV was unparseable — keep the index, drop the
         # constituents this load, surface why + how to seed the cache.
         note["constituent_note"] = (
-            f"constituent resolution failed: {exc} "
-            "(no cache yet — drop ind_niftytotalmarket_list.csv at "
-            "~/.brutex/cache/ntm_constituents.csv to seed the fallback)"
+            "NIFTY TOTAL MKT is admitted as an index — but its ~750 constituents "
+            f"need niftyindices.com, currently unreachable ({exc}). One-time fix: "
+            "download ind_niftytotalmarket_list.csv in your browser and drop it at "
+            "~/.brutex/cache/ntm_constituents.csv — it is cached from then on."
         )
 
     return extra_index_symbols, frozenset(reference_security_ids), note

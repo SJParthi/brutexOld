@@ -172,7 +172,10 @@ def test_ntm_index_only_when_constituent_fetch_fails(tmp_path: Path) -> None:
     )
     assert result["ntm"]["admitted"] is True
     assert result["ntm"]["constituents"] == 0
-    assert "constituent resolution failed" in result["ntm"]["constituent_note"]
+    note = result["ntm"]["constituent_note"]
+    assert "admitted as an index" in note  # NTM-the-index is fine, only constituents missing
+    assert "nseindia 403 Forbidden" in note  # the underlying cause is surfaced
+    assert "ntm_constituents.csv" in note  # the one-time browser-download fix
     # NTM the index is still admitted (NIFTY + BANKNIFTY + NTM = 3).
     assert result["index_count"] == 3
 
