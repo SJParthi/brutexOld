@@ -11,7 +11,12 @@ from decimal import Decimal
 
 import pytest
 from brutex.data.models import CandleBar
-from brutex.data.session import filter_intraday_session, in_session, is_session_exempt
+from brutex.data.session import (
+    filter_intraday_session,
+    format_ist_clock,
+    in_session,
+    is_session_exempt,
+)
 
 
 def _bar(hh: int, mm: int) -> CandleBar:
@@ -77,3 +82,27 @@ class TestSessionExempt:
     )
     def test_is_session_exempt(self, symbol: str | None, expected: bool) -> None:
         assert is_session_exempt(symbol) is expected
+
+
+class TestFormatIstClock:
+    """`format_ist_clock` — the COMMON UTC→clean-IST display rule (DEC-WINDOW-LEDGER-001)."""
+
+    def test_utc_iso_string_converts_to_clean_ist(self) -> None:
+        # 08:35:53 UTC + 5:30 = 14:05:53 IST; the +05:30 offset is dropped.
+        assert format_ist_clock("2026-06-09T08:35:53.763513+00:00") == "2026-06-09 14:05:53"
+
+    def test_utc_datetime_converts_to_clean_ist(self) -> None:
+        assert (
+            format_ist_clock(datetime(2026, 6, 9, 8, 35, 53, tzinfo=UTC)) == "2026-06-09 14:05:53"
+        )
+
+    def test_none_passes_through(self) -> None:
+        assert format_ist_clock(None) is None
+
+    def test_naive_datetime_assumed_ist(self) -> None:
+        # No tzinfo → assumed already-IST, just formatted (no shift).
+        assert format_ist_clock(datetime(2026, 6, 9, 14, 5, 53)) == "2026-06-09 14:05:53"
+
+    def test_unparseable_string_returned_unchanged(self) -> None:
+        # A free-text note (e.g. last_error) is not a timestamp — left as-is.
+        assert format_ist_clock("DhanRateLimitError") == "DhanRateLimitError"

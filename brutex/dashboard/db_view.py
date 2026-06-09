@@ -48,6 +48,7 @@ from brutex.data.partition import (
     VALID_INTERVALS,
     VALID_SEGMENTS,
 )
+from brutex.data.session import format_ist_clock
 from brutex.data.spot_features import pct_change
 
 #: Structured logger — surfaces the otherwise-silent coverage-read degradation
@@ -1559,8 +1560,11 @@ def _window_row(record: Any, *, first_seen_at: str | None) -> dict[str, Any]:
         "bars": record.bars,
         "attempts": record.attempts,
         "last_error": record.last_error,
-        "first_seen_at": first_seen_at,
-        "last_attempt_at": record.last_attempt_at,
+        # Display the stored UTC stamps as clean IST (CLAUDE.md §6 store-UTC /
+        # display-IST; §11 COMMON via `format_ist_clock`) so /coverage/windows
+        # reads like the candle viewer, not raw `...+00:00`.
+        "first_seen_at": format_ist_clock(first_seen_at),
+        "last_attempt_at": format_ist_clock(record.last_attempt_at),
     }
 
 

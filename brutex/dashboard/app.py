@@ -2459,7 +2459,13 @@ def build_app(
 
         def _load() -> dict[str, Any]:
             """Load the token-events Parquet + project it to the JSON payload (threadpool)."""
+            from brutex.data.session import format_ist_clock
+
             events = to_payload(load_token_events(lake))
+            # Display the stored UTC stamps as clean IST (CLAUDE.md §6 / §11 COMMON).
+            for event in events:
+                event["event_at"] = format_ist_clock(event["event_at"])
+                event["expiry_at"] = format_ist_clock(event["expiry_at"])
             return {"count": len(events), "events": events}
 
         return JSONResponse(await run_in_threadpool(_load))
@@ -2499,7 +2505,17 @@ def build_app(
 
         def _load() -> dict[str, Any]:
             """Load the ledger Parquet + project its sorted rows to the grid shape."""
-            rows = [list(row) for row in load_window_ledger(lake).to_rows()]
+            from brutex.data.session import format_ist_clock
+
+            rows: list[list[Any]] = []
+            for row in load_window_ledger(lake).to_rows():
+                cells: list[Any] = list(row)
+                # first_seen_at (idx 9) + last_attempt_at (idx 10) are stored UTC;
+                # show clean IST (CLAUDE.md §6 / §11 COMMON). window_start/end stay
+                # date-only (they are window boundaries, not clock times).
+                cells[9] = format_ist_clock(cells[9])
+                cells[10] = format_ist_clock(cells[10])
+                rows.append(cells)
             return {"columns": columns, "rows": rows, "total": len(rows)}
 
         return JSONResponse(await run_in_threadpool(_load))
