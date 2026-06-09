@@ -87,6 +87,12 @@
   .chip.on { border-color:var(--green); color:var(--green-bright);
     background:linear-gradient(180deg, rgba(38,217,176,.12), transparent); }
   .chip .x { font-size:10px; color:var(--muted); }
+  /* OPT vs SPOT badge (DEC-OPTIONS-ELIGIBLE-GUARD-001) — tag whether a report
+     symbol also has a listed option chain (green OPT) or is spot-only (amber
+     SPOT), mirroring the /universe explorer's OPT/REF chips. */
+  .chip .b { font-size:9px; font-weight:700; padding:1px 6px; border-radius:999px; }
+  .chip .b.opt  { color:var(--green);  background:rgba(38,217,176,.14); }
+  .chip .b.spot { color:var(--yellow); background:rgba(255,183,77,.14); }
   .toolbar { display:flex; gap:10px; align-items:center; margin-top:6px; }
   .count { font-size:12px; color:var(--muted); margin-left:auto; }
   .cols { display:flex; gap:8px; flex-wrap:wrap; margin-top:6px; }
@@ -277,7 +283,11 @@ function renderChips() {
   for (const s of allSymbols) {
     const chip = document.createElement("span");
     chip.className = "chip" + (selected.has(s.symbol) ? " on" : "");
-    chip.innerHTML = '<span>' + s.symbol + '</span><span class="x">' + s.exchange + '</span>';
+    // OPT (has an option chain) vs SPOT (spot-only) badge — DEC-OPTIONS-ELIGIBLE-GUARD-001.
+    const badge = s.option_pullable
+      ? '<span class="b opt" title="Option-pullable — has a listed option chain">OPT</span>'
+      : '<span class="b spot" title="Spot-only — no option chain to pull">SPOT</span>';
+    chip.innerHTML = '<span>' + s.symbol + '</span>' + badge + '<span class="x">' + s.exchange + '</span>';
     chip.onclick = () => {
       if (selected.has(s.symbol)) selected.delete(s.symbol); else selected.add(s.symbol);
       chip.classList.toggle("on");

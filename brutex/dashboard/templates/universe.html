@@ -87,6 +87,12 @@
      and no option chain (the option button greys for these). Amber so it reads
      "informational, not tradable". */
   .chip.ref { color:var(--yellow); background:rgba(255,183,77,.14); }
+  /* OPTION-PULLABLE marker (DEC-OPTIONS-ELIGIBLE-GUARD-001) — the positive
+     counterpart of REF: this underlying has a listed option chain, so the
+     "⛓ Pull options chain" action is allowed. Green so it reads "tradable
+     F&O". The mutually-exclusive partner of .chip.ref (every row is one or
+     the other) — together they tag F&O vs spot-only at a glance. */
+  .chip.opt { color:var(--green); background:rgba(38,217,176,.13); }
   .inst.refonly { opacity:.82; }   /* subtle dim so F&O rows pop */
   /* Inline legend explaining the row chips. */
   .legend { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
@@ -447,6 +453,7 @@ function buildTabs(summary) {
   legend.innerHTML =
     '<span class="key"><span class="chip index">INDEX</span></span>'
     + '<span class="key"><span class="chip stock">STOCK</span></span>'
+    + '<span class="key"><span class="chip opt">OPT</span> option-pullable · F&amp;O</span>'
     + '<span class="key"><span class="chip ref">REF</span> reference-only · no options</span>';
   tabsEl.appendChild(legend);
   /* Search-first UX: focus the box on load so the operator types a symbol
@@ -594,7 +601,7 @@ function renderInstruments() {
       + `<span class="chip ${esc(i.kind)}">${esc(i.kind)}</span>`
       + (refOnly
           ? '<span class="chip ref" title="Reference-only — fetched + stored for context, but NOT brute-forced and no option chain (NIFTY Total Market + its non-F&amp;O constituents, India VIX)">REF</span>'
-          : "")
+          : '<span class="chip opt" title="Option-pullable — this underlying has a listed option chain, so &quot;Pull options chain&quot; is allowed (DEC-OPTIONS-ELIGIBLE-GUARD-001)">OPT</span>')
       + `<div><div class="sym">${esc(i.symbol)}</div><div class="nm">${esc(i.name)}</div></div>`
       + `<span class="cc">${esc(i.exchange)}</span>`;
     const cb = d.querySelector(".msel");

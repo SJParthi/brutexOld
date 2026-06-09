@@ -136,3 +136,16 @@ def test_resolve_report_dates_rejects_bad_and_inverted() -> None:
         _resolve_report_dates("not-a-date", "2024-01-01")
     with pytest.raises(ValueError, match="on or before"):
         _resolve_report_dates("2024-12-31", "2024-01-01")
+
+
+def test_reports_opt_spot_badge_present() -> None:
+    """The OPT vs SPOT symbol badge (DEC-OPTIONS-ELIGIBLE-GUARD-001): each report
+    chip is tagged green OPT (has an option chain) or amber SPOT (spot-only),
+    mirroring the /universe explorer's OPT/REF chips."""
+    html = _render_reports_html()
+    assert ".chip .b.opt" in html, "the OPT badge style is missing"
+    assert ".chip .b.spot" in html, "the SPOT badge style is missing"
+    # The render branches on the API's option_pullable flag.
+    assert "s.option_pullable" in html, "the chip does not branch on option_pullable"
+    assert ">OPT<" in html, "the OPT badge label is missing"
+    assert ">SPOT<" in html, "the SPOT badge label is missing"
