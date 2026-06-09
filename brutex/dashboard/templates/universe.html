@@ -230,6 +230,9 @@
   .bstat .bk { font-size:10px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); }
   .bstat.ok .bv { color:var(--green-bright); }
   .bstat.bad .bv { color:var(--red); }
+  /* no-data gap (benign DH-905 boundary) — amber, NOT red: it is not a failure
+     (DEC-DHAN-NO-DATA-GAP-COUNT-001). */
+  .bstat.gap .bv { color:var(--yellow); }
   /* ── Pull-verdict banner (DEC-VERDICT-BANNER-001) ──
      A coloured, actionable banner shown on /universe AFTER a pull. The colour +
      CSS modifier class + the "show retry button" decision come verbatim from the
@@ -1145,7 +1148,8 @@ async function pollProgress(label) {
         `<span class="spark">✓</span> ${esc(label)} complete — `
         + `${(s.completed||0).toLocaleString('en-IN')} units · `
         + `${(s.bars||0).toLocaleString('en-IN')} bars`
-        + (s.failed ? ` · <span style="color:var(--red)">${s.failed} failed</span>` : '');
+        + (s.failed ? ` · <span style="color:var(--red)">${s.failed} failed</span>` : '')
+        + (s.gaps ? ` · <span style="color:var(--yellow)">${s.gaps} no-data gap${s.gaps === 1 ? '' : 's'}</span>` : '');
     }
     finishLive();
   } catch (e) {
@@ -1199,7 +1203,10 @@ if (verdictRetryBtn) verdictRetryBtn.addEventListener('click', () =>
   // re-pull ONLY the still-failed windows over the full admitted spot universe.
   startAndPoll('/api/v1/universe/retry-failed', 'retry failed windows'));
 
-/* Render the live stat row (units done/total · failed · bars) from a snapshot. */
+/* Render the live stat row (units done/total · failed · no-data gaps · bars). A
+   no-data gap is a benign Dhan DH-905 boundary (e.g. NIFTY NEXT 50's pre-2021
+   daily range) — NOT a failure, so it gets its own neutral counter instead of
+   inflating "failed" (DEC-DHAN-NO-DATA-GAP-COUNT-001). */
 function renderLiveStats(s) {
   const grid = document.getElementById('tfgrid');
   grid.innerHTML = '<div class="bulkrow" id="bulkrow"></div>';
@@ -1208,6 +1215,7 @@ function renderLiveStats(s) {
     ['units done', s.completed, 'ok'],
     ['of total', s.total, ''],
     ['failed', s.failed, (s.failed ? 'bad' : '')],
+    ['no-data gaps', s.gaps || 0, (s.gaps ? 'gap' : '')],
     ['bars', s.bars, 'ok'],
   ].forEach(([k, v, cls]) => {
     const d = document.createElement('div');

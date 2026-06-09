@@ -389,18 +389,24 @@ class RetryStormWatchdog:
 
     def progress_hook(
         self, *, label_sep: str = DEFAULT_LABEL_SEP
-    ) -> Callable[[str, int, bool], None]:
-        """Return a ``run_ingest`` ``ProgressHook`` ``(label, bars, failed)`` callable.
+    ) -> Callable[[str, int, bool, bool], None]:
+        """Return a ``run_ingest`` ``ProgressHook`` ``(label, bars, failed, gap)`` callable.
 
         The hook splits ``label`` (``"{symbol} {window}"``) on the LAST
         *label_sep*, routes ``failed=True`` to
         :meth:`record_terminal_failure` and ``failed=False`` to
-        :meth:`record_success`. A label whose tuple was never registered (a
-        stray / malformed label) is ignored — the guard never crashes the
+        :meth:`record_success`. A ``gap=True`` tick (a benign Dhan ``DH-905``
+        no-data boundary — DEC-DHAN-NO-DATA-GAP-COUNT-001) is IGNORED: it is
+        neither a failure nor a clean success, so a recurring known gap (e.g.
+        NIFTY NEXT 50's pre-2021 daily range, empty on every pull) can never
+        trip the retry-storm give-up. A label whose tuple was never registered
+        (a stray / malformed label) is ignored — the guard never crashes the
         ingest fan-out (Golden Rule #10).
         """
 
-        def _hook(label: str, _bars: int, failed: bool) -> None:
+        def _hook(label: str, _bars: int, failed: bool, gap: bool = False) -> None:
+            if gap:
+                return
             symbol, window = self._split_label(label, label_sep)
             if (symbol, window) not in self._registered:
                 logger.warning(

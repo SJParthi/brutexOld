@@ -259,7 +259,7 @@ class TestPullOptions:
 
     def test_on_progress_forwarded_to_driver(self) -> None:
         """pull_options threads on_progress → fires once per underlying (dry-run)."""
-        events: list[tuple[str, int, bool]] = []
+        events: list[tuple[str, int, bool, bool]] = []
         pull_options(
             [_index(symbol="13"), _stock(symbol="1333")],
             lake_root=Path("/unused"),
@@ -268,11 +268,11 @@ class TestPullOptions:
             expiry_flags=("WEEK",),
             expiry_codes=(1,),
             option_types=("CALL",),
-            on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
+            on_progress=lambda label, bars, failed, gap: events.append((label, bars, failed, gap)),
         )
         # One event per underlying, in order, each with bars>0 and not failed.
         assert [e[0] for e in events] == ["13", "1333"]
-        assert all(bars > 0 and failed is False for _, bars, failed in events)
+        assert all(bars > 0 and failed is False for _, bars, failed, _gap in events)
 
     def test_on_series_tick_forwarded_to_driver(self) -> None:
         """pull_options threads on_series_tick → fires once per SERIES (dry-run).
@@ -292,7 +292,7 @@ class TestPullOptions:
             expiry_flags=("WEEK",),
             expiry_codes=(1,),
             option_types=("CALL",),
-            on_progress=lambda label, bars, failed: progress.append(label),
+            on_progress=lambda label, bars, failed, gap: progress.append(label),
             on_series_tick=lambda: ticks.append(1),
         )
         # ATM±10 = 21 strikes × 1 flag × 1 code × 1 type = 21 series → 21 ticks,

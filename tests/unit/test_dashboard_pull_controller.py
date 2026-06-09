@@ -745,13 +745,13 @@ class TestPullAllSpot:
         and all are clean. (The deterministic, order-stable surface is the
         ``ingest.underlying`` rollup, covered separately.)
         """
-        events: list[tuple[str, int, bool]] = []
+        events: list[tuple[str, int, bool, bool]] = []
         pull_all_spot(
             [_index("13"), _index("25")],
             lake_root=tmp_path,
             dry_run=True,
             now=_BULK_NOW,
-            on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
+            on_progress=lambda label, bars, failed, gap: events.append((label, bars, failed, gap)),
         )
         # 2 symbols × 2 fetched intervals (1m + 1d) = 4 progress events, all clean.
         assert {e[0] for e in events} == {
@@ -761,7 +761,7 @@ class TestPullAllSpot:
             "25 1day",
         }
         assert len(events) == 4
-        assert all(failed is False for _, _, failed in events)
+        assert all(failed is False for _, _, failed, _gap in events)
 
 
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:

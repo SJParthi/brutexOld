@@ -355,6 +355,18 @@ def test_progress_hook_routes_failed_and_success() -> None:
     assert wd.has_given_up("NIFTY", "1minute") is True
 
 
+def test_progress_hook_ignores_no_data_gap_ticks() -> None:
+    # DEC-DHAN-NO-DATA-GAP-COUNT-001: a benign DH-905 gap tick (gap=True) is
+    # neither a failure nor a success — it must NOT trip the give-up, so a
+    # recurring known gap (e.g. NIFTY NEXT 50's empty pre-2021 daily) can never
+    # raise a false retry-storm alert.
+    wd = RetryStormWatchdog(max_retry_seconds=600.0)
+    wd.register("NIFTY NEXT 50", "1day")
+    hook = wd.progress_hook()
+    hook("NIFTY NEXT 50 1day", 0, False, True)  # gap → ignored
+    assert wd.has_given_up("NIFTY NEXT 50", "1day") is False
+
+
 def test_progress_hook_ignores_unregistered_label() -> None:
     wd = RetryStormWatchdog(max_retry_seconds=600.0)
     wd.register("NIFTY", "1minute")

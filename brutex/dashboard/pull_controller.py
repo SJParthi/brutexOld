@@ -1246,9 +1246,9 @@ def pull_all_spot(
         status_flush = make_live_status_flush(status_log, lake_root)
         ledger_flush = make_live_ledger_flush(ledger, lake_root)
 
-        def _progress_then_flush(label: str, bars: int, failed: bool) -> None:
+        def _progress_then_flush(label: str, bars: int, failed: bool, gap: bool = False) -> None:
             if on_progress is not None:
-                on_progress(label, bars, failed)
+                on_progress(label, bars, failed, gap)
             status_flush()
             ledger_flush()
 
@@ -1552,9 +1552,9 @@ def pull_candles(
         status_flush = make_live_status_flush(status_log, lake_root)
         ledger_flush = make_live_ledger_flush(ledger, lake_root)
 
-        def _progress_then_flush(label: str, bars: int, failed: bool) -> None:
+        def _progress_then_flush(label: str, bars: int, failed: bool, gap: bool = False) -> None:
             if on_progress is not None:
-                on_progress(label, bars, failed)
+                on_progress(label, bars, failed, gap)
             status_flush()
             ledger_flush()
 

@@ -352,26 +352,40 @@ def test_rate_feedback_hooks_threaded(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [(rl, to, ok), (rl, to, ok)]
 
 
-def test_on_progress_fires_per_pair_success_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """on_progress fires once per pair: (label, bars, failed) — both branches."""
+def test_on_progress_fires_per_pair_success_failure_and_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_progress fires once per pair: (label, bars, failed, gap) — all branches.
+
+    A clean pair → (bars, False, False); a real terminal error → (0, True, False);
+    a benign DH-905 no-data boundary → (0, False, True) — NOT a failure
+    (DEC-DHAN-NO-DATA-GAP-COUNT-001).
+    """
 
     def _fake_ingest(adapter, sink, *, instrument, interval, start, end, **_kw):
         if instrument.symbol_name == "BAD":
             raise DhanNotFoundError("DH-902 gone")
+        if instrument.symbol_name == "GAP":
+            raise DhanBadRequestError("HTTP 400 bad request: DH-905 no data present")
         return IngestReport(windows=1, bars_appended=7, transient_failures=0)
 
     monkeypatch.setattr(mod, "ingest_spot", _fake_ingest)
-    events: list[tuple[str, int, bool]] = []
+    events: list[tuple[str, int, bool, bool]] = []
     run_dhan_spot_ingest(
         object(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
-        instruments=[_index("13"), _index("BAD")],
+        instruments=[_index("13"), _index("BAD"), _index("GAP")],
         intervals=["1minute"],
         start=_START,
         end=_END,
-        on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
+        on_progress=lambda label, bars, failed, gap: events.append((label, bars, failed, gap)),
     )
-    assert events == [("13 1minute", 7, False), ("BAD 1minute", 0, True)]
+    # The fan-out is parallel → the tick ORDER is not deterministic; assert the SET.
+    assert set(events) == {
+        ("13 1minute", 7, False, False),
+        ("BAD 1minute", 0, True, False),
+        ("GAP 1minute", 0, False, True),
+    }
 
 
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
