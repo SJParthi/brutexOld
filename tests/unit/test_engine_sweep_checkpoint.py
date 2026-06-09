@@ -27,7 +27,7 @@ from brutex.engine.sweep_checkpoint import (
     SweepCheckpointError,
     SweepCheckpointStore,
 )
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 
@@ -245,6 +245,13 @@ def test_atomic_write_cleanup_on_replace_failure(
 # ── property + real resume round-trip ───────────────────────────────────────
 
 
+# ``deadline=None``: each example writes the checkpoint JSON to disk up to 40
+# times, so the per-example wall-clock cost is dominated by real file I/O and
+# varies with machine load — the default 200 ms Hypothesis deadline made this
+# test intermittently flake with ``DeadlineExceeded`` (a timing artefact, NOT a
+# logic failure). Disabling the deadline removes the flake without weakening what
+# the property asserts.
+@settings(deadline=None)
 @given(indices=st.lists(st.integers(min_value=0, max_value=49), max_size=40))
 def test_property_record_tracks_running_max(tmp_path_factory: Any, indices: list[int]) -> None:
     d = tmp_path_factory.mktemp("ck")
