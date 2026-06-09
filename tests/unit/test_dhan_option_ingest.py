@@ -476,8 +476,14 @@ class TestResumeCursorAndTransactionalCommit:
         assert sink.batches == []
 
 
-def _run_cov(client: _FakeClient, sink: _FakeSink, coverage: object) -> OptionIngestReport:
-    """Drive a single-window series with a coverage ledger (DEC-FETCH-COVERAGE-001)."""
+def _run_cov(
+    client: _FakeClient,
+    sink: _FakeSink,
+    coverage: object = None,
+    *,
+    ledger: object = None,
+) -> OptionIngestReport:
+    """Drive a single-window option series threading the skip stores (DEC-WINDOW-LEDGER-001)."""
     return ingest_rolling_option_series(
         client,
         sink,
@@ -493,30 +499,49 @@ def _run_cov(client: _FakeClient, sink: _FakeSink, coverage: object) -> OptionIn
         start=date(2021, 1, 4),
         end=date(2021, 1, 5),  # 1-day range → exactly one rolling window
         coverage=coverage,  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
     )
 
 
-def test_coverage_marks_then_skips_already_pulled_window() -> None:
-    """First pull marks the window complete; a re-pull skips it with no client call."""
+def test_ledger_marks_then_skips_already_pulled_window() -> None:
+    """First pull records the window SUCCESS in the ledger; a re-pull skips it (no client call)."""
     from brutex.data.fetch_coverage import FetchCoverage
+    from brutex.data.window_ledger import SUCCESS, WindowLedger
 
     cov = FetchCoverage()
+    led = WindowLedger()
     sink = _FakeSink()
-    first = _run_cov(_FakeClient([{"data": {"ce": _side(), "pe": None}}]), sink, cov)
+    first = _run_cov(_FakeClient([{"data": {"ce": _side(), "pe": None}}]), sink, cov, ledger=led)
     assert first.windows == 1
     assert first.bars_appended == 1  # one in-session bar survived the filter
     assert first.skipped_windows == 0
-    assert cov.completed_count == 1
+    assert {r.status for r in led.records()} == {SUCCESS}
+    assert cov.completed_count == 1  # coverage still MARKED (vestigial)
 
-    # Re-pull with the SAME ledger → the window is already complete → skipped.
+    # Re-pull with the SAME ledger → the window is settled SUCCESS → skipped.
     # The client has ZERO responses, so any vendor call would IndexError (proving
     # the skip happens BEFORE the network hit — no wasted Dhan budget).
     second_client = _FakeClient([])
-    second = _run_cov(second_client, sink, cov)
+    second = _run_cov(second_client, sink, cov, ledger=led)
     assert second.windows == 1
     assert second.skipped_windows == 1
     assert second.bars_appended == 0
     assert second_client.calls == []  # never hit the vendor
+
+
+def test_coverage_alone_no_longer_skips_options() -> None:
+    """The flip guard: coverage alone (no ledger) no longer skips an option re-pull."""
+    from brutex.data.fetch_coverage import FetchCoverage
+
+    cov = FetchCoverage()
+    _run_cov(_FakeClient([{"data": {"ce": _side(), "pe": None}}]), _FakeSink(), cov)
+    assert cov.completed_count == 1  # marked...
+    # ...but a re-pull with ONLY coverage re-fetches (no ledger → no skip).
+    second_client = _FakeClient([{"data": {"ce": _side(), "pe": None}}])
+    second = _run_cov(second_client, _FakeSink(), cov)
+    assert second.skipped_windows == 0
+    assert second.bars_appended == 1
+    assert second_client.calls != []  # the vendor WAS hit
 
 
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
@@ -577,14 +602,14 @@ class TestOptionIngestLogging:
             assert {k: ev[k] for k in coords} == coords
 
     def test_skipped_window_lights_only_the_skip_event(self) -> None:
-        from brutex.data.fetch_coverage import FetchCoverage
+        from brutex.data.window_ledger import WindowLedger
 
-        cov = FetchCoverage()
-        # First pull marks the single window complete.
-        _run_cov(_FakeClient([{"data": {"ce": _side(), "pe": None}}]), _FakeSink(), cov)
-        # Re-pull → the window is skipped before any vendor call.
+        led = WindowLedger()
+        # First pull records the single window SUCCESS in the ledger.
+        _run_cov(_FakeClient([{"data": {"ce": _side(), "pe": None}}]), _FakeSink(), ledger=led)
+        # Re-pull → the window is settled SUCCESS → skipped before any vendor call.
         with capture_logs() as logs, pull_id_scope("optpull00002"):
-            _run_cov(_FakeClient([]), _FakeSink(), cov)
+            _run_cov(_FakeClient([]), _FakeSink(), ledger=led)
         (window,) = _events(logs, "ingest.window")
         assert window["action"] == "skipped"
         assert window["pull_id"] == "optpull00002"
