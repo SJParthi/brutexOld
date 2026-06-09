@@ -45,6 +45,7 @@ from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import (
     EMPTY,
     EMPTY_TERMINAL_THRESHOLD,
+    SKIPPED,
     SUCCESS,
     WindowLedger,
     WindowLedgerRecord,
@@ -62,9 +63,9 @@ LEDGER_FILENAME: str = "ledger.parquet"
 #: multi-thousand-row Parquet is not rewritten on every completed pair.
 LIVE_FLUSH_MIN_INTERVAL_S: float = 2.0
 
-#: The on-disk column order — fixed so the Parquet schema is stable + the row
-#: tuples round-trip :meth:`WindowLedger.to_rows` exactly.
-_COLUMNS: tuple[str, ...] = (
+#: The CORE columns every ledger Parquet MUST carry — their absence is a
+#: wrong-shape file that degrades to an empty ledger (a re-pull, never a crash).
+_CORE_COLUMNS: tuple[str, ...] = (
     "market",
     "security_id",
     "interval",
@@ -78,6 +79,13 @@ _COLUMNS: tuple[str, ...] = (
     "last_attempt_at",
 )
 
+#: The full on-disk column order — fixed so the Parquet schema is stable + the row
+#: tuples round-trip :meth:`WindowLedger.to_rows` exactly. ``empty_streak`` was
+#: appended LAST (DEC-WINDOW-LEDGER-001 R1), so a legacy file written before it
+#: existed loads cleanly: the core columns are read and ``empty_streak`` is derived
+#: per-row (see :func:`_rows_to_records`). Backward-compatible, never a re-pull.
+_COLUMNS: tuple[str, ...] = (*_CORE_COLUMNS, "empty_streak")
+
 
 def ledger_dir(lake_root: Path) -> Path:
     """Return the ledger directory for *lake_root* (``<lake_root>/window_ledger``)."""
@@ -89,11 +97,31 @@ def ledger_path(lake_root: Path) -> Path:
     return ledger_dir(lake_root) / LEDGER_FILENAME
 
 
-def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
-    """Coerce raw rows to the exact 11-field tuple :meth:`WindowLedger.from_rows` expects.
+def _derive_empty_streak(status: str, attempts: int) -> int:
+    """Best-effort ``empty_streak`` for a LEGACY row that predates the column (R1).
 
-    A wrong arity / non-coercible element raises here (``ValueError`` /
-    ``TypeError``) and is caught by the caller, degrading to an empty ledger.
+    A pre-R1 Parquet has no ``empty_streak``; reconstruct it from the row's terminal
+    state so the loaded ledger keeps behaving sensibly: a settled ``SKIPPED`` reads
+    as a full streak (it is already terminal, so this is inert), a still-``EMPTY``
+    row reads as ``attempts`` (a legacy EMPTY row is below the old threshold — else
+    it would have been promoted to ``SKIPPED`` — so it never spuriously promotes),
+    and every other status resets to 0. New pulls then use the exact streak counter.
+    """
+    if status == SKIPPED:
+        return EMPTY_TERMINAL_THRESHOLD
+    if status == EMPTY:
+        return attempts
+    return 0
+
+
+def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
+    """Coerce raw rows to the exact 12-field tuple :meth:`WindowLedger.from_rows` expects.
+
+    Each row is the core 11 fields plus ``empty_streak`` (DEC-WINDOW-LEDGER-001 R1);
+    a ``None`` ``empty_streak`` (a legacy file written before the column) is derived
+    from ``(status, attempts)`` via :func:`_derive_empty_streak`. A wrong arity /
+    non-coercible element raises here (``ValueError`` / ``TypeError``) and is caught
+    by the caller, degrading to an empty ledger.
     """
     coerced: list[tuple[Any, ...]] = []
     for (
@@ -108,7 +136,15 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
         last_error,
         first_seen_at,
         last_attempt_at,
+        empty_streak,
     ) in rows:
+        status_s = str(status)
+        attempts_i = int(attempts)
+        streak = (
+            _derive_empty_streak(status_s, attempts_i)
+            if empty_streak is None
+            else int(empty_streak)
+        )
         coerced.append(
             (
                 str(market),
@@ -116,12 +152,13 @@ def _rows_to_records(rows: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
                 str(interval),
                 str(window_start),
                 str(window_end),
-                str(status),
+                status_s,
                 int(bars),
-                int(attempts),
+                attempts_i,
                 (None if last_error is None else str(last_error)),
                 str(first_seen_at),
                 (None if last_attempt_at is None else str(last_attempt_at)),
+                streak,
             )
         )
     return coerced
@@ -142,9 +179,17 @@ def load_window_ledger(
     try:
         import pyarrow.parquet as pq
 
-        table = pq.read_table(path, columns=list(_COLUMNS))  # type: ignore[no-untyped-call]
-        columns = {name: table.column(name).to_pylist() for name in _COLUMNS}
-        rows = zip(*(columns[name] for name in _COLUMNS), strict=True)
+        table = pq.read_table(path)  # type: ignore[no-untyped-call]
+        present = set(table.schema.names)
+        # The core 11 columns are REQUIRED — a missing one raises KeyError below and
+        # degrades to empty (the wrong-shape guard). ``empty_streak`` is OPTIONAL: a
+        # legacy file lacks it, so fill ``None`` and let `_rows_to_records` derive it.
+        columns = {name: table.column(name).to_pylist() for name in _CORE_COLUMNS}
+        n = len(columns[_CORE_COLUMNS[0]])
+        streaks = (
+            table.column("empty_streak").to_pylist() if "empty_streak" in present else [None] * n
+        )
+        rows = zip(*(columns[name] for name in _CORE_COLUMNS), streaks, strict=True)
         return WindowLedger.from_rows(_rows_to_records(rows), threshold=threshold)
     except (OSError, ValueError, TypeError, KeyError, ImportError) as exc:
         _LOG.warning("window_ledger.load_failed", path=str(path), error=str(exc))
@@ -183,6 +228,7 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
             ("last_error", pa.string()),
             ("first_seen_at", pa.string()),
             ("last_attempt_at", pa.string()),
+            ("empty_streak", pa.int64()),
         ]
     )
     table = pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
@@ -209,7 +255,7 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int, now: datetime) 
     for r in status_log.records():
         status = r.status
         if status == EMPTY and r.attempts >= threshold:
-            status = "SKIPPED"
+            status = SKIPPED
         by_window[(r.market, r.security_id, r.interval, r.window_start, r.window_end)] = (
             WindowLedgerRecord(
                 market=r.market,
@@ -223,6 +269,10 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int, now: datetime) 
                 last_error=r.last_error,
                 first_seen_at=r.last_attempt_at,  # best available origin stamp
                 last_attempt_at=r.last_attempt_at,
+                # The legacy status log has no streak column; derive it (R1) so the
+                # migrated ledger keeps the EMPTY-terminal behaviour the old
+                # reconcile_empty_terminal gave (status-log attempts == EMPTY count).
+                empty_streak=_derive_empty_streak(status, r.attempts),
             )
         )
 
@@ -244,6 +294,7 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int, now: datetime) 
             last_error=None,
             first_seen_at=stamp,
             last_attempt_at=stamp,
+            empty_streak=0,
         )
 
     return WindowLedger.from_rows(
@@ -260,6 +311,7 @@ def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int, now: datetime) 
                 r.last_error,
                 r.first_seen_at,
                 r.last_attempt_at,
+                r.empty_streak,
             )
             for r in by_window.values()
         ),

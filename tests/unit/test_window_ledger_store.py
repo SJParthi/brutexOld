@@ -272,6 +272,58 @@ def test_load_failed_logs_warning(tmp_path: Path) -> None:
     assert load_window_ledger(tmp_path).count == 0  # int() raises → degrade
 
 
+def _write_legacy_ledger_parquet(tmp_path: Path, rows: dict) -> None:
+    """Write a PRE-R1 ledger Parquet (the core 11 columns, NO ``empty_streak``)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = ledger_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table(rows), path)
+
+
+class TestLegacyBackwardCompat:
+    """A pre-R1 Parquet (no ``empty_streak``) loads cleanly with a derived streak (never a re-pull)."""
+
+    def test_legacy_rows_derive_empty_streak(self, tmp_path: Path) -> None:
+        # One row per _derive_empty_streak branch: SUCCESS→0, EMPTY→attempts, SKIPPED→threshold.
+        _write_legacy_ledger_parquet(
+            tmp_path,
+            {
+                "market": ["dhan", "dhan", "dhan"],
+                "security_id": ["NIFTY", "SENSEX", "BANKNIFTY"],
+                "interval": ["1minute", "1minute", "1minute"],
+                "window_start": ["2021-01-01", "2021-01-01", "2021-01-01"],
+                "window_end": ["2021-04-01", "2021-04-01", "2021-04-01"],
+                "status": [SUCCESS, "EMPTY", SKIPPED],
+                "bars": [5, 0, 0],
+                "attempts": [1, 2, 3],
+                "last_error": [None, None, None],
+                "first_seen_at": ["2026-06-08T12:00:00+00:00"] * 3,
+                "last_attempt_at": ["2026-06-08T12:00:00+00:00"] * 3,
+            },
+        )
+        ledger = load_window_ledger(tmp_path)
+        by_symbol = {r.security_id: r for r in ledger.records()}
+        assert ledger.count == 3  # loaded, NOT degraded to empty
+        assert by_symbol["NIFTY"].empty_streak == 0  # SUCCESS → 0
+        assert by_symbol["SENSEX"].empty_streak == 2  # EMPTY → attempts (still below threshold)
+        assert by_symbol["BANKNIFTY"].empty_streak == 3  # SKIPPED → threshold
+        # A legacy EMPTY-below-threshold row is still fetched (not masked).
+        assert ledger.is_skippable(_key("SENSEX")) is False
+        assert ledger.is_skippable(_key("BANKNIFTY")) is True
+
+    def test_empty_streak_round_trips(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        # Build a streak of 2 (below threshold 3) so it persists as EMPTY, streak 2.
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        save_window_ledger(ledger, tmp_path)
+        restored = load_window_ledger(tmp_path)
+        assert restored.to_rows() == ledger.to_rows()
+        assert restored.records()[0].empty_streak == 2
+
+
 def _inst(symbol: str = "NIFTY", *, exchange: str = "NSE", segment: str = "CASH") -> object:
     """A minimal instrument shape `reconcile_ledger_windows` reads."""
     from types import SimpleNamespace
