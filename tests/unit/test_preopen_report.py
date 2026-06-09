@@ -1021,6 +1021,11 @@ def _read_member(blob: bytes, member: str) -> bytes:
         return zf.read(member)
 
 
+def _member_date(blob: bytes, member: str) -> tuple[int, int, int, int, int, int]:
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        return zf.getinfo(member).date_time
+
+
 def test_zip_all_mode_one_xlsx_per_year() -> None:
     rows = [
         _mk(date(2024, 3, 4), "A", "5"),
@@ -1031,6 +1036,26 @@ def test_zip_all_mode_one_xlsx_per_year() -> None:
     # The 2024 workbook holds the March sheet.
     inner = _read_member(blob, "preopen_all_2024.xlsx")
     assert '<sheet name="2024-03"' in _open_part(inner, "xl/workbook.xml")
+
+
+def test_zip_member_date_is_the_latest_data_day_not_1980() -> None:
+    # DEC-PREOPEN-XLSX-DATE-001: each yearly .xlsx member's date = its LATEST data
+    # day (deterministic, meaningful) — never the alarming 1 Jan 1980.
+    rows = [
+        _mk(date(2024, 3, 4), "A", "5"),
+        _mk(date(2024, 11, 28), "B", "-2"),  # the latest 2024 day → the member date
+        _mk(date(2025, 1, 6), "C", "3"),
+    ]
+    blob = render_report_zip(rows, mode="all", min_pct=Decimal("0"))
+    assert _member_date(blob, "preopen_all_2024.xlsx") == (2024, 11, 28, 0, 0, 0)
+    assert _member_date(blob, "preopen_all_2025.xlsx") == (2025, 1, 6, 0, 0, 0)
+    # Same rows → byte-identical zip (the date is data-derived, not wall-clock).
+    assert render_report_zip(rows, mode="all", min_pct=Decimal("0")) == blob
+
+
+def test_zip_empty_member_date_is_the_data_floor() -> None:
+    blob = render_report_zip([], mode="all", min_pct=Decimal("0"))
+    assert _member_date(blob, "preopen_all_empty.xlsx") == (2021, 1, 1, 0, 0, 0)
 
 
 def test_zip_topmover_mode_filename_and_filter() -> None:

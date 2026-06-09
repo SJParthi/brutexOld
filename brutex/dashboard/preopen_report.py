@@ -77,7 +77,13 @@ REPORT_COLUMNS: Final[tuple[str, ...]] = (
 )
 
 #: A fixed zip member timestamp so the workbook bytes are reproducible (no wall clock).
+#: Used for the .xlsx INTERNAL OOXML parts (invisible to the operator).
 _ZIP_EPOCH: Final[tuple[int, int, int, int, int, int]] = (1980, 1, 1, 0, 0, 0)
+
+#: Date stamped on the ``preopen_<mode>_empty.xlsx`` member when a report has NO
+#: rows (DEC-PREOPEN-XLSX-DATE-001) — the Track-1 data floor (2021-01-01), a
+#: fixed deterministic date that reads sensibly in Finder (never ``1 Jan 1980``).
+_EMPTY_REPORT_DATE: Final[tuple[int, int, int, int, int, int]] = (2021, 1, 1, 0, 0, 0)
 
 #: Two-decimal display quantum (the report is a human-facing NSE-style sheet).
 _2DP: Final[Decimal] = Decimal("0.01")
@@ -898,16 +904,29 @@ def render_report_zip(rows: list[PreOpenRow], *, mode: ReportMode, min_pct: Deci
     for row in selected:
         by_year.setdefault(row.day.year, []).append(row)
     members: dict[str, bytes] = {}
+    # Each yearly ``.xlsx`` MEMBER carries a date_time = the LATEST data day it
+    # holds (DEC-PREOPEN-XLSX-DATE-001) — so Finder shows a meaningful "Date
+    # Modified" (e.g. 2024-12-30) instead of the alarming ``1 Jan 1980`` the bare
+    # ``_ZIP_EPOCH`` produced. STILL deterministic: the date is derived from the
+    # data (same rows → same date → byte-identical zip), NOT wall-clock ``now()``,
+    # so the reproducible-bytes contract (CLAUDE.md §2 Rule 7) holds. The empty
+    # report uses a fixed data-floor date. (The .xlsx INTERNAL OOXML parts keep
+    # ``_ZIP_EPOCH`` — invisible to the operator, preserves the .xlsx byte digest.)
+    member_dates: dict[str, tuple[int, int, int, int, int, int]] = {}
     if not by_year:
-        members[f"preopen_{mode}_empty.xlsx"] = render_month_workbook([])
+        name = f"preopen_{mode}_empty.xlsx"
+        members[name] = render_month_workbook([])
+        member_dates[name] = _EMPTY_REPORT_DATE
     else:
         for year in sorted(by_year):
-            workbook = render_month_workbook(_group_by_month(by_year[year]))
-            members[f"preopen_{mode}_{year:04d}.xlsx"] = workbook
+            name = f"preopen_{mode}_{year:04d}.xlsx"
+            members[name] = render_month_workbook(_group_by_month(by_year[year]))
+            last_day = max(row.day for row in by_year[year])
+            member_dates[name] = (last_day.year, last_day.month, last_day.day, 0, 0, 0)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, content in members.items():
-            info = zipfile.ZipInfo(name, date_time=_ZIP_EPOCH)
+            info = zipfile.ZipInfo(name, date_time=member_dates[name])
             info.compress_type = zipfile.ZIP_DEFLATED
             zf.writestr(info, content)
     return buffer.getvalue()
