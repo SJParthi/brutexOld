@@ -483,8 +483,13 @@ def ingest_rolling_option_series(
             window_start=window_start,
             window_end=window_end,
         )
-        # Skip a window already pulled — no wasted Dhan hit (DEC-FETCH-COVERAGE-001).
-        if coverage is not None and coverage.is_complete(key):
+        # Skip a window already settled — no wasted Dhan hit. The unified
+        # WindowLedger is now the SOLE skip authority (DEC-WINDOW-LEDGER-001,
+        # Stage c): a window is skipped ONLY when its ledger row is settled
+        # (SUCCESS / SKIPPED), the precise per-window record — NOT the coarse
+        # span-enclosure FetchCoverage set (#598). FetchCoverage is still marked
+        # in the commit pass for one release (removed in the final stage).
+        if ledger is not None and ledger.is_skippable(key):
             skipped += 1
             _LOG.debug(
                 "ingest.window",

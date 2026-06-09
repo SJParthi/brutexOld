@@ -408,10 +408,10 @@ def test_on_series_tick_fires_for_quarantined_series_too() -> None:
 
 
 def test_skipped_windows_aggregate_after_repull() -> None:
-    """A re-pull with the same coverage ledger skips every window (aggregate)."""
-    from brutex.data.fetch_coverage import FetchCoverage
+    """A re-pull with the same unified ledger skips every window (aggregate)."""
+    from brutex.data.window_ledger import WindowLedger
 
-    cov = FetchCoverage()
+    led = WindowLedger()
     underlyings = [_index("13", offsets=0)]  # 1 strike → 1 series
     kwargs: dict[str, object] = {
         "underlyings": underlyings,
@@ -421,10 +421,11 @@ def test_skipped_windows_aggregate_after_repull() -> None:
         "expiry_codes": (1,),
         "option_types": ("CALL",),
     }
-    first = run_dhan_options_ingest(_OkClient(), _Sink(), coverage=cov, **kwargs)  # type: ignore[arg-type]
+    first = run_dhan_options_ingest(_OkClient(), _Sink(), ledger=led, **kwargs)  # type: ignore[arg-type]
     assert first.skipped_windows == 0
-    # Re-pull → the one window is already complete → skipped across the aggregate.
-    second = run_dhan_options_ingest(_OkClient(), _Sink(), coverage=cov, **kwargs)  # type: ignore[arg-type]
+    # Re-pull → the one window is settled SUCCESS in the ledger → skipped (the
+    # ledger is the SOLE skip authority for options too, DEC-WINDOW-LEDGER-001 c).
+    second = run_dhan_options_ingest(_OkClient(), _Sink(), ledger=led, **kwargs)  # type: ignore[arg-type]
     assert second.skipped_windows == 1
     assert second.bars_appended == 0
 
