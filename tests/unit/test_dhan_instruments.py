@@ -20,6 +20,8 @@ from brutex.adapters.dhan.instruments import (
     discover_index,
     fno_underlying_security_ids,
     fno_underlying_symbols,
+    options_underlying_security_ids,
+    options_underlying_symbols,
     parse_instrument_row,
     parse_nse_equities,
     select_universe,
@@ -533,6 +535,101 @@ class TestUniverseDedup:
         report = select_universe_report(rows)
         assert [i.security_id for i in report.universe] == [111]
         assert report.persisted == 1
+
+
+class TestOptionsEligible:
+    """OPTIONS-ONLY eligibility detectors (DEC-OPTIONS-ELIGIBLE-GUARD-001): the
+    symbol arm (``options_underlying_symbols``) + the string-free id arm
+    (``options_underlying_security_ids``) of the option-pull quota guard. Both
+    collect from OPTSTK/OPTIDX legs ONLY — futures are deliberately excluded
+    (Track 1 never pulls futures).
+    """
+
+    def test_symbols_collect_stock_and_index_options_uppercased(self) -> None:
+        rows = [
+            _row(INSTRUMENT="OPTSTK", SYMBOL_NAME="REL-OPT", UNDERLYING_SYMBOL="reliance"),
+            _row(INSTRUMENT="OPTIDX", SYMBOL_NAME="NIFTY-OPT", UNDERLYING_SYMBOL="NIFTY"),
+        ]
+        assert options_underlying_symbols(rows) == frozenset({"RELIANCE", "NIFTY"})
+
+    def test_symbols_exclude_futures(self) -> None:
+        # FUTSTK / FUTIDX legs are NOT options — we never pull futures.
+        rows = [
+            _row(INSTRUMENT="FUTSTK", SYMBOL_NAME="REL-FUT", UNDERLYING_SYMBOL="RELIANCE"),
+            _row(INSTRUMENT="FUTIDX", SYMBOL_NAME="NIFTY-FUT", UNDERLYING_SYMBOL="NIFTY"),
+        ]
+        assert options_underlying_symbols(rows) == frozenset()
+        assert options_underlying_security_ids(rows) == frozenset()
+
+    def test_symbols_skip_off_exchange_and_blank_and_test_scrips(self) -> None:
+        rows = [
+            # Off-exchange (MCX) option leg → skipped.
+            _row(
+                EXCH_ID="MCX",
+                INSTRUMENT="OPTSTK",
+                SYMBOL_NAME="GOLD-OPT",
+                UNDERLYING_SYMBOL="GOLD",
+            ),
+            # Blank underlying → contributes nothing.
+            _row(INSTRUMENT="OPTSTK", SYMBOL_NAME="X-OPT", UNDERLYING_SYMBOL=""),
+            # TEST scrip (Dhan "NSETEST" marker) → excluded.
+            _row(INSTRUMENT="OPTSTK", SYMBOL_NAME="NSETEST-OPT", UNDERLYING_SYMBOL="NSETEST"),
+        ]
+        assert options_underlying_symbols(rows) == frozenset()
+
+    def test_security_ids_collect_canonical_spot_ids(self) -> None:
+        rows = [
+            _row(
+                INSTRUMENT="OPTIDX",
+                SYMBOL_NAME="NIFTY-OPT",
+                UNDERLYING_SYMBOL="NIFTY",
+                UNDERLYING_SECURITY_ID="13",
+            ),
+            _row(
+                INSTRUMENT="OPTSTK",
+                SYMBOL_NAME="REL-OPT",
+                UNDERLYING_SYMBOL="RELIANCE",
+                UNDERLYING_SECURITY_ID="2885",
+            ),
+        ]
+        assert options_underlying_security_ids(rows) == frozenset({13, 2885})
+
+    def test_security_ids_skip_off_exchange_blank_and_test_scrips(self) -> None:
+        rows = [
+            # Off-exchange → skipped.
+            _row(
+                EXCH_ID="MCX",
+                INSTRUMENT="OPTSTK",
+                SYMBOL_NAME="GOLD-OPT",
+                UNDERLYING_SYMBOL="GOLD",
+                UNDERLYING_SECURITY_ID="999",
+            ),
+            # TEST scrip (Dhan "NSETEST" marker) → excluded.
+            _row(
+                INSTRUMENT="OPTSTK",
+                SYMBOL_NAME="NSETEST-OPT",
+                UNDERLYING_SYMBOL="NSETEST",
+                UNDERLYING_SECURITY_ID="888",
+            ),
+            # No UNDERLYING_SECURITY_ID → contributes nothing.
+            _row(INSTRUMENT="OPTIDX", SYMBOL_NAME="NIFTY-OPT", UNDERLYING_SYMBOL="NIFTY"),
+        ]
+        assert options_underlying_security_ids(rows) == frozenset()
+
+    def test_report_exposes_both_options_sets(self) -> None:
+        rows = [
+            _row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY", SECURITY_ID="13", LOT_SIZE="0"),
+            _row(
+                INSTRUMENT="OPTIDX",
+                SYMBOL_NAME="NIFTY-OPT",
+                SECURITY_ID="3002",
+                UNDERLYING_SYMBOL="NIFTY",
+                UNDERLYING_SECURITY_ID="13",
+            ),
+        ]
+        report = select_universe_report(rows)
+        assert report.options_eligible_symbols == frozenset({"NIFTY"})
+        assert report.options_eligible_security_ids == frozenset({13})
 
 
 class TestTickvaultParity:

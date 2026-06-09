@@ -85,6 +85,22 @@ def _rows() -> list[dict[str, str]]:
             STRIKE_PRICE="2600",
             SM_EXPIRY_DATE="2025-01-30",
         ),
+        # NIFTY has a listed INDEX option (OPTIDX) → option-pullable. Without this
+        # leg the option-pull guard (DEC-OPTIONS-ELIGIBLE-GUARD-001) would tag NIFTY
+        # spot-only — these fixtures mirror reality where NIFTY DOES have a chain.
+        _row(
+            EXCH_ID="NSE",
+            SECURITY_ID="3002",
+            INSTRUMENT="OPTIDX",
+            SYMBOL_NAME="NIFTY-OPT",
+            DISPLAY_NAME="Nifty CE",
+            LOT_SIZE="75",
+            TICK_SIZE="0.05",
+            OPTION_TYPE="CE",
+            UNDERLYING_SYMBOL="NIFTY",
+            STRIKE_PRICE="23000",
+            SM_EXPIRY_DATE="2025-01-30",
+        ),
     ]
 
 
@@ -157,9 +173,9 @@ def test_refresh_persists_universe_full_snapshot() -> None:
     ]  # option leg dropped
     assert store.prune_calls == 1
     assert result == RefreshResult(
-        parsed=3,  # NSE/BSE rows seen: NIFTY + RELIANCE + RELIANCE-OPT leg
+        parsed=4,  # NSE/BSE rows seen: NIFTY + RELIANCE + RELIANCE-OPT + NIFTY-OPT
         persisted=2,  # universe upserted: NIFTY + RELIANCE
-        legs_dropped=1,  # the option leg, not persisted in the lean universe
+        legs_dropped=2,  # both option legs, not persisted in the lean universe
         filtered=0,  # no out-of-scope (MCX) rows here
         snapshot_date=date(2026, 5, 31),
         csv_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -195,14 +211,14 @@ def test_refresh_records_instrument_run() -> None:
     assert run.run_id == "run-1"
     assert run.snapshot_date == date(2026, 5, 31)
     assert run.csv_source_sha256 == hashlib.sha256(text.encode("utf-8")).hexdigest()
-    assert run.total_raw_rows == 3
+    assert run.total_raw_rows == 4
     assert run.integrity_failures == 0
-    assert run.in_scope_count == 3
+    assert run.in_scope_count == 4
     assert run.out_of_scope_count == 0
     assert run.index_count == 1  # NIFTY
     assert run.futures_count == 0  # no future leg in this fixture
-    assert run.options_count == 1  # RELIANCE-OPT
-    assert run.nse_count == 3
+    assert run.options_count == 2  # RELIANCE-OPT + NIFTY-OPT
+    assert run.nse_count == 4
     assert run.bse_count == 0
     assert run.schema_version == SCHEMA_VERSION
     assert run.fetched_at.tzinfo is not None  # default clock is UTC-aware
@@ -278,8 +294,11 @@ def test_refresh_default_does_not_admit_or_tag_reference() -> None:
     persisted = up["instruments"]
     assert isinstance(persisted, list)
     assert "TINY CO LTD" not in [i.symbol_name for i in persisted]
-    # No reference set → reference_only_of is None (store uses its VIX default).
-    assert up["reference_only_of"] is None
+    # The tagger is ALWAYS supplied now (the option-pull guard must run on every
+    # refresh, DEC-OPTIONS-ELIGIBLE-GUARD-001) — it still applies the VIX default
+    # internally. No reference set + every admitted index here (NIFTY) has options
+    # → nothing tagged reference_only.
+    assert callable(up["reference_only_of"])
     assert up["reference_only_ids"] == frozenset()
 
 
@@ -350,3 +369,44 @@ def test_refresh_does_not_tag_fno_eligible_constituent_reference_only() -> None:
     assert "RELIANCE" in [i.symbol_name for i in persisted]
     # F&O-eligible → excluded from reference_only despite being in the reference set.
     assert up["reference_only_ids"] == frozenset()
+
+
+def _rows_with_spot_only_index() -> list[dict[str, str]]:
+    # An admitted index with NO option leg — e.g. NIFTY 100 in reality. It is
+    # spot-tradable but has no chain, so option-pull must be blocked.
+    rows = _rows()
+    rows.append(
+        _row(
+            EXCH_ID="NSE",
+            SECURITY_ID="55",
+            INSTRUMENT="INDEX",
+            SYMBOL_NAME="NIFTY 100",
+            DISPLAY_NAME="Nifty 100",
+        )
+    )
+    return rows
+
+
+def test_refresh_tags_spot_only_index_reference_only() -> None:
+    # DEC-OPTIONS-ELIGIBLE-GUARD-001: an admitted index with NO listed OPTIDX leg
+    # (NIFTY 100) is tagged reference_only so a mis-click can't waste Dhan quota on
+    # an empty option pull — while NIFTY (which HAS an OPTIDX leg) stays pullable.
+    store = _Store()
+    text = _csv(_rows_with_spot_only_index())
+    refresh_instruments(
+        store, lambda _url: text, snapshot_date=date(2026, 6, 9), run_id="run-spot-idx"
+    )
+    up = store.upserts[0]
+    persisted = up["instruments"]
+    assert isinstance(persisted, list)
+    names = [i.symbol_name for i in persisted]
+    assert "NIFTY 100" in names  # admitted (spot is fine)
+    assert "NIFTY" in names
+    by_name = {i.symbol_name: i for i in persisted}
+    # NIFTY 100 (no chain) is tagged reference_only; NIFTY (has chain) is not.
+    ref_of = up["reference_only_of"]
+    assert callable(ref_of)
+    assert ref_of(by_name["NIFTY 100"]) is True
+    assert ref_of(by_name["NIFTY"]) is False
+    assert by_name["NIFTY 100"].security_id in up["reference_only_ids"]
+    assert by_name["NIFTY"].security_id not in up["reference_only_ids"]

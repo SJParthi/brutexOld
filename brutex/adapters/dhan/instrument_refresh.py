@@ -22,12 +22,16 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Protocol
 
+import structlog
+
 from brutex import __version__
 from brutex.adapters.dhan.constants import INSTRUMENT_MASTER_DETAILED_URL
 from brutex.adapters.dhan.instrument_loader import HttpGet, load_universe_report
 from brutex.data.instrument_store import SCHEMA_VERSION, InstrumentRun
 from brutex.models import Instrument
 from brutex.universe import is_reference_only
+
+_LOG = structlog.get_logger("brutex.adapters.dhan.instrument_refresh")
 
 
 class InstrumentSink(Protocol):
@@ -132,6 +136,19 @@ def refresh_instruments(
         extra_index_symbols=extra_index_symbols,
     )
 
+    def _index_has_options(instrument: Instrument) -> bool:
+        # OPTIONS-ONLY eligibility (DEC-OPTIONS-ELIGIBLE-GUARD-001). An admitted
+        # index is option-pullable ONLY if it has a listed OPTSTK/OPTIDX leg —
+        # matched by EITHER its spot SECURITY_ID (string-free, robust) OR its
+        # UPPER-CASED symbol (catches a vendor id/name skew). Belt-and-suspenders so
+        # the brute-force 3 (NIFTY/BANKNIFTY/SENSEX) are never wrongly blocked: an
+        # option index must miss BOTH arms to be tagged reference_only. Futures are
+        # excluded upstream — a FUT-only index is correctly NOT eligible.
+        return (
+            instrument.security_id in report.options_eligible_security_ids
+            or instrument.symbol_name.upper() in report.options_eligible_symbols
+        )
+
     def _is_reference(instrument: Instrument) -> bool:
         # Tag the admitted constituents (by id) AND India VIX (the default rule)
         # — BUT a genuinely F&O-eligible stock is NEVER reference_only even when it
@@ -141,15 +158,45 @@ def refresh_instruments(
         # reference_only and lose option-pull. The index branch (NTM / VIX) is
         # unaffected — an index symbol is never in the stock F&O-eligible set.
         is_ref = instrument.security_id in reference_security_ids or is_reference_only(instrument)
+        # OPTION-PULL QUOTA GUARD (DEC-OPTIONS-ELIGIBLE-GUARD-001): an admitted
+        # index with NO listed option chain (e.g. NIFTY 100, NIFTY AUTO) is tagged
+        # reference_only so a mis-click can't waste Dhan quota on an empty option
+        # pull. Spot pull + the brute-force ENGINE are UNAFFECTED (reference_only
+        # gates ONLY option-pull, DEC-ENGINE-ISOLATION-INVARIANT-001).
+        if instrument.is_index and not _index_has_options(instrument):
+            is_ref = True
         return is_ref and instrument.symbol_name not in report.fno_eligible_symbols
 
+    # Always supply the tagger now (was gated on ``reference_security_ids``): the
+    # option-pull guard must run on every refresh, even an F&O-only one with no NTM
+    # constituents. ``_is_reference`` still calls ``is_reference_only`` for the VIX
+    # default, so the no-constituents path stays behaviourally identical apart from
+    # the new index-options guard (DEC-OPTIONS-ELIGIBLE-GUARD-001).
     store.upsert_many(
         report.universe,
         snapshot_date=snapshot_date,
         run_id=run_id,
         csv_source_sha256=csv_sha256,
-        reference_only_of=_is_reference if reference_security_ids else None,
+        reference_only_of=_is_reference,
         replace_snapshot=True,
+    )
+    # Verification log (operator eyeballs this on ``make run``): the derived
+    # OPTION-pullable index set vs the spot-only indices we just blocked. Lets the
+    # operator confirm the data-driven set against reality WITHOUT a master CSV in
+    # hand — no hallucination (Golden Rule #1), the set is whatever the vendor
+    # master listed as OPTIDX legs today.
+    _opt_idx = sorted(
+        i.symbol_name for i in report.universe if i.is_index and _index_has_options(i)
+    )
+    _spot_idx = sorted(
+        i.symbol_name for i in report.universe if i.is_index and not _index_has_options(i)
+    )
+    _LOG.info(
+        "instrument_refresh.options_index_guard",
+        option_pullable_indices=_opt_idx,
+        spot_only_indices_blocked=_spot_idx,
+        option_pullable_count=len(_opt_idx),
+        spot_only_count=len(_spot_idx),
     )
     pruned = store.prune_to_latest_snapshot()
     store.record_run(
