@@ -25,6 +25,8 @@ from brutex.data.window_ledger_store import (
     load_window_ledger,
     make_live_ledger_flush,
     plan_windows,
+    reconcile_ledger_windows,
+    reconcile_ledger_with_lake,
     save_window_ledger,
 )
 from brutex.data.window_status import WindowStatusLog
@@ -268,3 +270,147 @@ def test_load_failed_logs_warning(tmp_path: Path) -> None:
     }
     pq.write_table(pa.table(cols), path)
     assert load_window_ledger(tmp_path).count == 0  # int() raises → degrade
+
+
+def _inst(symbol: str = "NIFTY", *, exchange: str = "NSE", segment: str = "CASH") -> object:
+    """A minimal instrument shape `reconcile_ledger_windows` reads."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        symbol_name=symbol,
+        exch_id=SimpleNamespace(value=exchange),
+        segment=SimpleNamespace(value=segment),
+    )
+
+
+def _span(
+    symbol: str = "NIFTY",
+    interval: str = "1day",
+    *,
+    bars: int = 100,
+    first: str | None = "2021-01-01",
+    last: str | None = "2026-06-03",
+    exchange: str = "NSE",
+    segment: str = "CASH",
+) -> dict:
+    return {
+        "exchange": exchange,
+        "segment": segment,
+        "symbol": symbol,
+        "interval": interval,
+        "bars": bars,
+        "first_date": first,
+        "last_date": last,
+    }
+
+
+class TestReconcileLedgerWithLake:
+    """DEC-WINDOW-LEDGER-001 cold-start: seed SUCCESS for lake-enclosed absent windows."""
+
+    def test_seeds_an_enclosed_window(self) -> None:
+        ledger = WindowLedger()
+        seeded = reconcile_ledger_windows(
+            ledger,
+            [_span(interval="1day")],
+            instruments=[_inst()],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+        )
+        assert seeded == 1
+        rec = ledger.records()[0]
+        assert rec.status == "SUCCESS"
+        assert rec.bars == 100
+        assert ledger.is_skippable(
+            WindowKey(market="dhan", security_id="NIFTY", interval="1day", start=_START, end=_END)
+        )
+
+    def test_does_not_seed_unenclosed_window(self) -> None:
+        # Span ends well before the range end → the 1day window is NOT enclosed.
+        ledger = WindowLedger()
+        seeded = reconcile_ledger_windows(
+            ledger,
+            [_span(interval="1day", last="2021-02-01")],
+            instruments=[_inst()],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+        )
+        assert seeded == 0
+        assert ledger.count == 0
+
+    def test_skips_zero_bar_and_null_and_missing_spans(self) -> None:
+        ledger = WindowLedger()
+        # bars=0, null dates, and an interval with no span all seed nothing.
+        assert (
+            reconcile_ledger_windows(
+                ledger,
+                [_span(bars=0)],
+                instruments=[_inst()],
+                intervals=["1day"],
+                start=_START,
+                end=_END,
+                now=_NOW,
+            )
+            == 0
+        )
+        assert (
+            reconcile_ledger_windows(
+                ledger,
+                [_span(first=None, last=None)],
+                instruments=[_inst()],
+                intervals=["1day"],
+                start=_START,
+                end=_END,
+                now=_NOW,
+            )
+            == 0
+        )
+        assert (
+            reconcile_ledger_windows(
+                ledger,
+                [],
+                instruments=[_inst()],
+                intervals=["1day"],
+                start=_START,
+                end=_END,
+                now=_NOW,
+            )
+            == 0
+        )
+        assert ledger.count == 0
+
+    def test_never_overwrites_an_existing_failed_row(self) -> None:
+        ledger = WindowLedger()
+        key = WindowKey(market="dhan", security_id="NIFTY", interval="1day", start=_START, end=_END)
+        ledger.record(key, raw_bars=0, error_type="DhanRateLimitError", bars_appended=0, now=_NOW)
+        seeded = reconcile_ledger_windows(
+            ledger,
+            [_span(interval="1day")],
+            instruments=[_inst()],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+        )
+        assert seeded == 0  # the FAILED row is left for a re-pull, never masked
+        assert ledger.records()[0].status == "FAILED"
+
+    def test_with_lake_delegates_and_defaults_now(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "brutex.dashboard.coverage_reconcile.load_lake_spans",
+            lambda _root: [_span(interval="1day")],
+        )
+        ledger = WindowLedger()
+        seeded = reconcile_ledger_with_lake(
+            ledger,
+            tmp_path,
+            instruments=[_inst()],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+        )  # now=None → datetime.now
+        assert seeded == 1
+        assert ledger.records()[0].status == "SUCCESS"

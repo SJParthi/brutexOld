@@ -327,6 +327,106 @@ def plan_windows(
     return planned
 
 
+def reconcile_ledger_windows(
+    ledger: WindowLedger,
+    spans: Sequence[dict[str, Any]],
+    *,
+    instruments: Iterable[Any],
+    intervals: Sequence[str],
+    start: date,
+    end: date,
+    now: datetime | None = None,
+) -> int:
+    """Seed ``SUCCESS`` for every lake-enclosed window with no ledger row — **pure** (cold-start).
+
+    DEC-WINDOW-LEDGER-001. On a fresh clone / lost ledger the lake's Parquet holds
+    bars but the ledger is empty, so once the ledger drives the skip a re-pull would
+    re-fetch EVERYTHING (the rescue the old ``reconcile_coverage_with_lake`` gave the
+    coverage set). For each ``(instrument, interval)`` whose stored span ENCLOSES a
+    planned window (``first_date <= window_start AND window_end <= last_date``, span
+    has ≥ 1 bar — the conservative DEC-LAKE-RECONCILE-001 rule), seed that window
+    ``SUCCESS`` — but ONLY if ABSENT (:meth:`WindowLedger.seed_lake_success` NEVER
+    overwrites a ``FAILED`` / ``PLANNED`` / settled row, so it can't mask a re-pull).
+    *spans* is the :func:`~brutex.dashboard.coverage_reconcile.load_lake_spans`
+    shape. O(windows) once at pull start. Returns the number of windows seeded.
+    """
+    from brutex.adapters.dhan.ingest import _MARKET, _windows
+
+    stamp = now if now is not None else datetime.now(UTC)
+    span_by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {
+        (str(s["exchange"]), str(s["segment"]), str(s["symbol"]), str(s["interval"])): s
+        for s in spans
+    }
+    seeded = 0
+    for instrument in instruments:
+        for interval in intervals:
+            entry = span_by_key.get(
+                (
+                    instrument.exch_id.value,
+                    instrument.segment.value,
+                    instrument.symbol_name,
+                    interval,
+                )
+            )
+            if (
+                entry is None
+                or int(entry["bars"]) <= 0
+                or entry["first_date"] is None
+                or entry["last_date"] is None
+            ):
+                continue
+            first_date = date.fromisoformat(str(entry["first_date"]))
+            last_date = date.fromisoformat(str(entry["last_date"]))
+            for window_start, window_end in _windows(interval, start, end):
+                if not (first_date <= window_start and window_end <= last_date):
+                    continue
+                if ledger.seed_lake_success(
+                    WindowKey(
+                        market=_MARKET,
+                        security_id=instrument.symbol_name,
+                        interval=interval,
+                        start=window_start,
+                        end=window_end,
+                    ),
+                    bars=int(entry["bars"]),
+                    now=stamp,
+                ):
+                    seeded += 1
+    return seeded
+
+
+def reconcile_ledger_with_lake(
+    ledger: WindowLedger,
+    lake_root: Path,
+    *,
+    instruments: Iterable[Any],
+    intervals: Sequence[str],
+    start: date,
+    end: date,
+    now: datetime | None = None,
+) -> int:
+    """Load the lake spans + seed the ledger cold-start (the wired entry point).
+
+    Thin composition of :func:`~brutex.dashboard.coverage_reconcile.load_lake_spans`
+    (the DuckDB span read) + :func:`reconcile_ledger_windows` (pure). Called once at
+    pull start so a fresh-clone ledger inherits the lake's already-stored windows as
+    ``SUCCESS`` — no full re-pull / quota blowout once the ledger drives skip.
+    O(datasets) aggregate reads, never per-window.
+    """
+    from brutex.dashboard.coverage_reconcile import load_lake_spans
+
+    spans = load_lake_spans(lake_root)
+    return reconcile_ledger_windows(
+        ledger,
+        spans,
+        instruments=instruments,
+        intervals=intervals,
+        start=start,
+        end=end,
+        now=now,
+    )
+
+
 def make_live_ledger_flush(
     ledger: WindowLedger | None,
     lake_root: Path,
@@ -392,5 +492,7 @@ __all__ = [
     "load_window_ledger",
     "make_live_ledger_flush",
     "plan_windows",
+    "reconcile_ledger_windows",
+    "reconcile_ledger_with_lake",
     "save_window_ledger",
 ]

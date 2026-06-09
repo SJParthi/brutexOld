@@ -183,6 +183,35 @@ class TestSettleKnownGap:
         assert record.last_error is None  # no reason given
 
 
+class TestSeedLakeSuccess:
+    """The lake cold-start: seed SUCCESS only for an ABSENT window, never overwrite."""
+
+    def test_seeds_an_absent_window(self) -> None:
+        ledger = WindowLedger()
+        assert ledger.seed_lake_success(_key(), bars=42, now=_NOW) is True
+        record = ledger.records()[0]
+        assert record.status == "SUCCESS"
+        assert record.bars == 42
+        assert ledger.is_skippable(_key()) is True
+
+    def test_never_overwrites_an_existing_row(self) -> None:
+        ledger = WindowLedger()
+        # A FAILED window must NEVER be seeded to SUCCESS (it needs a re-pull).
+        ledger.record(
+            _key(), raw_bars=0, error_type="DhanRateLimitError", bars_appended=0, now=_NOW
+        )
+        assert ledger.seed_lake_success(_key(), bars=99, now=_LATER) is False
+        record = ledger.records()[0]
+        assert record.status == "FAILED"  # untouched
+        assert ledger.is_skippable(_key()) is False
+
+    def test_does_not_overwrite_a_planned_row(self) -> None:
+        ledger = WindowLedger()
+        ledger.plan(_key(), now=_NOW)
+        assert ledger.seed_lake_success(_key(), bars=5, now=_LATER) is False
+        assert ledger.records()[0].status == PLANNED
+
+
 def test_records_are_sorted() -> None:
     ledger = WindowLedger()
     ledger.plan(_key("SENSEX"), now=_NOW)
