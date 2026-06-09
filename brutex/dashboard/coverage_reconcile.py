@@ -1,249 +1,28 @@
-"""Reconcile the fetch-coverage skip-ledger against what's actually in the lake.
+"""Read the lake's per-dataset spans — the cold-start source for the window ledger.
 
-DEC-LAKE-RECONCILE-001. The skip-ledger (DEC-FETCH-COVERAGE-001,
-``<lake>/fetch_coverage.json``) records which fetch windows are already pulled so
-a re-pull skips them (no wasted Dhan hit). But it reads ONLY its own JSON
-sidecar — never the lake — so a fresh clone / lost / never-persisted ledger
-re-fetches **every** window even though the Parquet bars are already stored,
-producing the ``ingest.conflict`` flood the operator saw on NIFTY 1-minute.
+DEC-WINDOW-LEDGER-001 (Stage d). This module once held the fetch-coverage
+reconcile *band-aids* (``reconcile_windows`` / ``reconcile_coverage_with_lake`` /
+``reconcile_empty_terminal`` / ``reconcile_failed_windows_for_repull``) that
+patched the COARSE :class:`~brutex.data.fetch_coverage.FetchCoverage` span-set so
+its #598 internal-gap mask did less harm. Now that the precise per-window
+:class:`~brutex.data.window_ledger.WindowLedger` is the SOLE skip authority
+(Stages b3 / c), those band-aids are dead and have been removed — the ledger
+records the exact per-window state and never needs a coarse set patched every
+pull.
 
-This module makes the **lake the single source of truth** (CLAUDE.md §11 COMMON):
-at pull start, every window the lake already encloses is marked complete in the
-ledger, so a window whose bars are in the DB is **never re-fetched** — while a
-window the lake does NOT cover (a missing 1-day dataset, a recent gap) is left
-un-marked and re-pulled. Re-fetching an un-enclosed window is always safe (the
-sink is idempotent + keep-first, DEC-LAKE-CONFLICT-KEEPFIRST-001), so the
-reconcile is deliberately **conservative**: it marks a window complete ONLY when
-the stored span fully encloses it.
-
-## Honest envelope (Golden Rule #10)
-
-* Enclosure is computed from each dataset's stored **min/max date span**
-  (:func:`~brutex.dashboard.db_view.summarize_spot_datasets`), so an *internal*
-  gap inside an enclosed span is not detected here — that finer per-window
-  completeness is the windows-ledger follow-up. The conservative rule never
-  causes data loss (an un-enclosed window re-pulls; keep-first makes a re-fetch a
-  no-op), it only narrows the quota saving to the clearly-settled windows.
-* Pure :func:`reconcile_windows` (spans injected → 100% testable) +
-  :func:`reconcile_coverage_with_lake` (the one ``read_parquet`` I/O surface).
+The single survivor is :func:`load_lake_spans`: the read-only ``read_parquet``
+surface the ledger's cold-start seed
+(:func:`~brutex.data.window_ledger_store.reconcile_ledger_with_lake`) consumes to
+discover which windows the lake already holds. O(datasets) aggregate reads at
+pull start, never per-window.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-from datetime import date
 from pathlib import Path
 from typing import Any
 
-from brutex.adapters.dhan.ingest import _MARKET, _windows  # the canonical tiler (COMMON)
-from brutex.data.fetch_coverage import FetchCoverage, WindowKey
-from brutex.data.window_status import EMPTY, FAILED, WindowStatusLog
-from brutex.models import Instrument
-
-__all__ = [
-    "EMPTY_TERMINAL_THRESHOLD",
-    "load_lake_spans",
-    "reconcile_coverage_with_lake",
-    "reconcile_empty_terminal",
-    "reconcile_failed_windows_for_repull",
-    "reconcile_windows",
-]
-
-#: A window that returned a CLEAN, zero-bar response on this many SEPARATE pulls is
-#: treated as genuinely EMPTY (the instrument did not trade at that granularity in
-#: that range — e.g. SENSEX 1-minute before 2021-08-04) and marked complete so it
-#: stops costing a re-fetch every run (DEC-EMPTY-TERMINAL-001). Three attempts give
-#: a transient empty (a load-induced ``{}`` that later fills) a few chances first.
-EMPTY_TERMINAL_THRESHOLD: int = 3
-
-
-def _span_key(exchange: str, segment: str, symbol: str, interval: str) -> tuple[str, str, str, str]:
-    """The ``(exchange, segment, symbol, interval)`` coordinate keying a lake span."""
-    return (exchange, segment, symbol, interval)
-
-
-def reconcile_windows(
-    coverage: FetchCoverage,
-    spans: Sequence[dict[str, Any]],
-    *,
-    instruments: Iterable[Instrument],
-    intervals: Sequence[str],
-    start: date,
-    end: date,
-) -> int:
-    """Mark every planned window the lake already encloses as complete — **pure**.
-
-    For each ``(instrument, interval)`` being pulled over ``[start, end)``, look up
-    the lake's stored span (from *spans*) and mark a window complete iff the span
-    fully encloses it: ``first_date <= window_start AND window_end <= last_date``
-    and the dataset holds at least one bar. The window tiling is the SAME
-    :func:`~brutex.adapters.dhan.ingest._windows` the ingest uses (one source of
-    truth), so a marked window's key matches the key the ingest's skip probe will
-    test byte-for-byte (``security_id == instrument.symbol_name``,
-    ``market == "dhan"``).
-
-    Parameters
-    ----------
-    coverage
-        The ledger to populate (mutated in place via :meth:`FetchCoverage.mark_complete`).
-    spans
-        The lake's per-dataset spans — each a dict with ``exchange``, ``segment``,
-        ``symbol``, ``interval``, ``bars`` (int), ``first_date`` / ``last_date``
-        (``YYYY-MM-DD`` strings or ``None``), as returned by
-        :func:`~brutex.dashboard.db_view.summarize_spot_datasets`.
-    instruments, intervals
-        The instruments + canonical intervals being pulled.
-    start, end
-        The half-open pull date range.
-
-    Returns
-    -------
-    int
-        The number of windows newly marked complete from the lake.
-    """
-    span_by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-    for span in spans:
-        span_by_key[
-            _span_key(
-                str(span["exchange"]),
-                str(span["segment"]),
-                str(span["symbol"]),
-                str(span["interval"]),
-            )
-        ] = span
-    marked = 0
-    for instrument in instruments:
-        for interval in intervals:
-            entry = span_by_key.get(
-                _span_key(
-                    instrument.exch_id.value,
-                    instrument.segment.value,
-                    instrument.symbol_name,
-                    interval,
-                )
-            )
-            if entry is None:
-                continue
-            if int(entry["bars"]) <= 0 or entry["first_date"] is None or entry["last_date"] is None:
-                continue
-            first_date = date.fromisoformat(str(entry["first_date"]))
-            last_date = date.fromisoformat(str(entry["last_date"]))
-            for window_start, window_end in _windows(interval, start, end):
-                # Conservative: the stored span must ENCLOSE the whole window.
-                if first_date <= window_start and window_end <= last_date:
-                    coverage.mark_complete(
-                        WindowKey(
-                            market=_MARKET,
-                            security_id=instrument.symbol_name,
-                            interval=interval,
-                            start=window_start,
-                            end=window_end,
-                        )
-                    )
-                    marked += 1
-    return marked
-
-
-def reconcile_failed_windows_for_repull(
-    coverage: FetchCoverage,
-    status_log: WindowStatusLog,
-) -> int:
-    """Un-mark every ``FAILED`` window from the skip-ledger so the ingest RE-PULLS it — **pure**.
-
-    DEC-FAILED-WINDOW-FORCE-REPULL-001. A ``FAILED`` status row is ALWAYS a
-    *retryable* transient: the ingest records ``FAILED`` only on the retryable
-    branch (rate-limit / timeout / transport / 5xx; ``ingest.py``), while a
-    terminal ``DH-905`` no-data is re-raised and NEVER recorded ``FAILED``. So
-    every ``FAILED`` window is one that *should* keep being re-pulled until it
-    succeeds — exactly the operator's ``DhanRateLimitError`` windows stuck at
-    0 bars.
-
-    The bug they were stuck on: the coarse span-enclosure
-    :func:`reconcile_windows` marks a window complete from the dataset's *min/max*
-    span, which ENCLOSES an internal-gap failed window (stored bars exist both
-    *before* and *after* it), so the failed window is skipped on every re-pull and
-    never retried. This un-marks (``FetchCoverage.unmark``) every ``FAILED``
-    window — overriding that enclosure mark AND any stale persisted skip — so the
-    pass re-fetches it; the auto-retry / until-clean loop then drives it to
-    ``SUCCESS`` (or, if Dhan genuinely has no data, settles it as a ``DH-905``
-    known-gap). Run AFTER :func:`reconcile_windows` so the un-mark wins.
-    O(recorded windows) once at pull start.
-
-    Returns
-    -------
-    int
-        The number of ``FAILED`` windows un-marked for re-pull.
-    """
-    unmarked = 0
-    for record in status_log.records():
-        if record.status != FAILED:
-            continue
-        coverage.unmark(
-            WindowKey(
-                market=record.market,
-                security_id=record.security_id,
-                interval=record.interval,
-                start=date.fromisoformat(record.window_start),
-                end=date.fromisoformat(record.window_end),
-            )
-        )
-        unmarked += 1
-    return unmarked
-
-
-def reconcile_empty_terminal(
-    coverage: FetchCoverage,
-    status_log: WindowStatusLog,
-    *,
-    threshold: int = EMPTY_TERMINAL_THRESHOLD,
-) -> int:
-    """Mark every window seen genuinely EMPTY ≥ *threshold* times as complete — **pure**.
-
-    DEC-EMPTY-TERMINAL-001. The per-window status log (DEC-WINDOW-STATUS-001)
-    accumulates ``attempts`` across re-pulls. A window whose status is ``EMPTY`` (a
-    CLEAN 0-bar response — NOT an error) on ``threshold`` separate pulls is
-    genuinely empty (e.g. SENSEX 1-minute before 2021-08-04, where the index has no
-    1-minute history), not a transient miss; marking it complete in *coverage*
-    makes the ingest skip it, so it stops re-fetching a few wasted windows every
-    run (the `🟡` follow-up the windows table unblocked in #463/#465).
-
-    Only a clean ``EMPTY`` is ever terminal: a ``FAILED`` window (429 / timeout /
-    5xx — ``last_error`` set) is NEVER marked, so a rate-limited window that
-    happened to read 0 bars is never mistaken for genuinely-empty (it keeps
-    retrying via DEC-DHAN-429-RETRY-001). The :class:`WindowKey` is rebuilt to
-    match the ingest skip probe byte-for-byte (``market`` / ``security_id`` /
-    interval / dates), so a marked key is the exact key the ingest tests.
-
-    Parameters
-    ----------
-    coverage
-        The skip-ledger to populate (mutated in place via :meth:`mark_complete`).
-    status_log
-        The cross-run per-window status record.
-    threshold
-        How many EMPTY attempts make a window terminal (default
-        :data:`EMPTY_TERMINAL_THRESHOLD`).
-
-    Returns
-    -------
-    int
-        The number of windows newly marked EMPTY-terminal.
-    """
-    marked = 0
-    for record in status_log.records():
-        if record.status != EMPTY or record.attempts < threshold:
-            continue
-        coverage.mark_complete(
-            WindowKey(
-                market=record.market,
-                security_id=record.security_id,
-                interval=record.interval,
-                start=date.fromisoformat(record.window_start),
-                end=date.fromisoformat(record.window_end),
-            )
-        )
-        marked += 1
-    return marked
+__all__ = ["load_lake_spans"]
 
 
 def load_lake_spans(lake_root: Path) -> list[dict[str, Any]]:  # pragma: no cover - thin DuckDB I/O
@@ -266,29 +45,3 @@ def load_lake_spans(lake_root: Path) -> list[dict[str, Any]]:  # pragma: no cove
         return summarize_spot_datasets(conn, lake_root)
     finally:
         conn.close()
-
-
-def reconcile_coverage_with_lake(
-    coverage: FetchCoverage,
-    lake_root: Path,
-    *,
-    instruments: Iterable[Instrument],
-    intervals: Sequence[str],
-    start: date,
-    end: date,
-) -> int:
-    """Load the lake spans and reconcile *coverage* against them (the wired entry point).
-
-    Thin composition of :func:`load_lake_spans` (I/O) + :func:`reconcile_windows`
-    (pure). Called once at pull start, so its cost is O(datasets) aggregate reads,
-    never per-window — the steady-state per-window skip stays O(1).
-    """
-    spans = load_lake_spans(lake_root)
-    return reconcile_windows(
-        coverage,
-        spans,
-        instruments=instruments,
-        intervals=intervals,
-        start=start,
-        end=end,
-    )

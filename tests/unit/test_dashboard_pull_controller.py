@@ -828,9 +828,9 @@ class TestPullControllerCorrelation:
         (done,) = _events(logs, "universe.pull_all.done")
         assert start["pull_id"] == "ctlpull00003"
         assert done["pull_id"] == "ctlpull00003"
-        # The lake-reconcile skip count is stamped on the start event so the skip
-        # is VISIBLE (DEC-LAKE-RECONCILE-VISIBILITY-001). Dry-run does no reconcile → 0.
-        assert start["reconciled_windows"] == 0
+        # The coverage lake-reconcile (and its `reconciled_windows` stamp) was
+        # retired in DEC-WINDOW-LEDGER-001 Stage d — the ledger drives skip now.
+        assert "reconciled_windows" not in start
         underlying = _events(logs, "ingest.underlying")
         assert underlying and all(e["pull_id"] == "ctlpull00003" for e in underlying)
 
