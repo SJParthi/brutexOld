@@ -55,9 +55,10 @@ from datetime import date
 
 import structlog
 
+from brutex.adapters.dhan.auth_guard import AuthGuard
 from brutex.adapters.dhan.client import DhanClient
 from brutex.adapters.dhan.constants import DRV_OPTION_TYPES, EXPIRY_FLAGS
-from brutex.adapters.dhan.errors import DhanError, is_no_data_error
+from brutex.adapters.dhan.errors import DhanError, is_auth_failure, is_no_data_error
 from brutex.adapters.dhan.option_ingest import (
     ALL_REQUIRED_DATA,
     JsonPoster,
@@ -241,6 +242,15 @@ class _UnderlyingResult:
     #: True iff at least one series returned a benign Dhan ``DH-905`` no-data
     #: boundary (NOT a real failure — DEC-DHAN-NO-DATA-GAP-COUNT-001 options arm).
     any_gap: bool = False
+    #: Series whose transactional commit ABORTED (a cursor outran its in-run retry
+    #: budget — ``report.complete`` is False; committed NOTHING, deferred to the
+    #: next round/pull). Counted SEPARATELY from ``completed`` so the rollup never
+    #: reads an uncommitted series as done (DEC-OPTIONS-UNTIL-CLEAN-001, hostile
+    #: finding 6).
+    aborted: int = 0
+    #: Series short-circuited by the tripped dead-token latch (never dispatched a
+    #: vendor call). NOT completed, NOT residual — a re-auth + re-pull re-fans them.
+    skipped_auth: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,21 +259,40 @@ class OptionsUniverseReport:
 
     series: dict[SeriesKey, OptionIngestReport]
     failures: tuple[OptionSeriesFailure, ...]
+    #: True iff the Dhan token died mid-pull (the shared :class:`AuthGuard`
+    #: tripped) — re-auth needed; drives the loud ``auth_expired`` verdict
+    #: (DEC-OPTIONS-UNTIL-CLEAN-001, the options arm of
+    #: DEC-DHAN-AUTH-FAILFAST-RENEW-001).
+    auth_aborted: bool = False
+    #: The first dead-token cause string (``None`` unless :attr:`auth_aborted`).
+    auth_cause: str | None = None
+    #: Series short-circuited by the tripped latch (no vendor call fired).
+    series_skipped_auth: int = 0
 
     @property
     def windows(self) -> int:
-        """Total fetch windows across all successful series."""
+        """Total fetch windows across all non-quarantined series."""
         return sum(r.windows for r in self.series.values())
 
     @property
     def bars_appended(self) -> int:
-        """Total option bars appended across all successful series."""
+        """Total option bars appended across all non-quarantined series."""
         return sum(r.bars_appended for r in self.series.values())
 
     @property
     def transient_failures(self) -> int:
-        """Total per-window transient skips across all successful series."""
+        """Total per-window transient skips across all non-quarantined series."""
         return sum(r.transient_failures for r in self.series.values())
+
+    @property
+    def still_failed_windows(self) -> int:
+        """Transient windows still failing after the in-run retry budget.
+
+        The sum of every ABORTED series' deferred-window count — the retryable
+        residual that drives the until-clean rounds (DEC-OPTIONS-UNTIL-CLEAN-001).
+        ``0`` iff every dispatched series committed whole.
+        """
+        return sum(r.still_failed_windows for r in self.series.values())
 
     @property
     def skipped_windows(self) -> int:
@@ -272,13 +301,40 @@ class OptionsUniverseReport:
 
     @property
     def series_count(self) -> int:
-        """Number of series that completed (non-quarantined)."""
+        """Number of non-quarantined series (committed whole + aborted)."""
         return len(self.series)
+
+    @property
+    def aborted_series(self) -> int:
+        """Series whose all-or-nothing commit ABORTED (committed nothing this pass).
+
+        Disjoint from quarantines: an aborted series returned a report whose
+        ``complete`` is False (its windows are the :attr:`still_failed_windows`
+        residual). Never counted as completed (hostile finding 6).
+        """
+        return sum(1 for r in self.series.values() if not r.complete)
 
     @property
     def failed_series(self) -> int:
         """Number of series quarantined on a terminal error."""
         return len(self.failures)
+
+    @property
+    def no_data_series(self) -> int:
+        """Quarantined series whose terminal error was a benign Dhan DH-905 no-data.
+
+        Classified by the single source of truth
+        :func:`~brutex.adapters.dhan.errors.is_no_data_message`
+        (DEC-DHAN-NO-DATA-GAP-COUNT-001) — a data boundary, never a defect.
+        """
+        from brutex.adapters.dhan.errors import is_no_data_message
+
+        return sum(1 for f in self.failures if is_no_data_message(f.error))
+
+    @property
+    def real_failed_series(self) -> int:
+        """Quarantined series with a GENUINE terminal error (non-DH-905, incl. auth)."""
+        return self.failed_series - self.no_data_series
 
 
 def run_dhan_options_ingest(
@@ -393,6 +449,16 @@ def run_dhan_options_ingest(
     client = _with_paced_client(client, pace)
     runner: RunParallel = run_parallel if run_parallel is not None else PoolRunParallel()
     underlyings = list(underlyings)
+    # ONE shared "token is dead" latch per pass (DEC-OPTIONS-UNTIL-CLEAN-001 — the
+    # options arm of DEC-DHAN-AUTH-FAILFAST-RENEW-001). The first series to hit a
+    # dead-token error trips it AT THE SOURCE (inside ingest_rolling_option_series);
+    # every series not yet dispatched then short-circuits to a no-call skip, so a
+    # 16k-series fan-out stops flooding doomed paced calls within pool width of the
+    # first failure. Honest envelope (Golden Rule #10): workers already mid-call
+    # finish their current cursor — the latch stops NEW dispatches, it cannot
+    # hard-cancel in-flight threads; their staged clean cursors are discarded by the
+    # all-or-nothing abort and re-fetched after re-auth.
+    auth_guard = AuthGuard()
 
     # DEC-DHAN-OPTION-SERIES-FANOUT-001: map the parallel runner over individual
     # SERIES, not whole underlyings. Before, one job == one underlying and its
@@ -432,7 +498,7 @@ def run_dhan_options_ingest(
                             (idx, underlying, expiry_flag, expiry_code, strike, drv_option_type)
                         )
 
-    def _run_series(job: _SeriesJob) -> OptionIngestReport:
+    def _run_series(job: _SeriesJob) -> OptionIngestReport | None:
         """Pull ONE option series — runs in a worker thread under the fan-out.
 
         Re-binds *pull_id* into THIS thread's structlog context-vars (a worker does
@@ -441,9 +507,14 @@ def run_dhan_options_ingest(
         analog of the spot path's re-bind). A terminal :class:`DhanError`
         propagates and is captured by *run_parallel* into the outcome, then
         quarantined per series on the controller thread below; a non-Dhan exception
-        (a genuine bug) is re-raised unchanged.
+        (a genuine bug) is re-raised unchanged. Returns ``None`` — a no-call
+        AUTH-SKIP, never folded into completed/aborted/residual — when the shared
+        dead-token latch tripped before this series was dispatched
+        (DEC-OPTIONS-UNTIL-CLEAN-001, hostile finding 6).
         """
         _idx, underlying, expiry_flag, expiry_code, strike, drv_option_type = job
+        if auth_guard.tripped():
+            return None
         with pull_id_scope(pull_id):
             return ingest_rolling_option_series(
                 client,
@@ -465,6 +536,7 @@ def run_dhan_options_ingest(
                 on_timeout=on_timeout,
                 on_success=on_success,
                 ledger=ledger,
+                auth_guard=auth_guard,
             )
 
     # Drain the SERIES fan-out, re-aggregating into a per-underlying bucket keyed
@@ -473,6 +545,11 @@ def run_dhan_options_ingest(
     # the deterministic rollup/on_progress post-pass fire on THIS (controller)
     # thread, so neither needs to be thread-safe (Rule #4).
     buckets: list[_UnderlyingResult] = [_UnderlyingResult() for _ in underlyings]
+    #: Whether the loud ``ingest.auth_aborted`` alert has fired — EXACTLY ONCE (the
+    #: first dead-token quarantine); later auth failures are recorded silently to
+    #: avoid the per-series WARNING flood (mirrors the spot drain,
+    #: DEC-DHAN-AUTH-FAILFAST-RENEW-001).
+    auth_alerted = False
     for outcome in runner(_run_series, jobs):
         # Live status tick (DEC-OPTIONS-LIVE-STATUS-001): fire the throttled
         # observability hook as each series outcome is drained on THIS controller
@@ -515,7 +592,10 @@ def run_dhan_options_ingest(
             # benign GAP, NOT a failure (DEC-DHAN-NO-DATA-GAP-COUNT-001, options arm):
             # log it INFO ``ingest.known_gap`` + flag ``any_gap`` so the live counter
             # reads it as a no-data gap, mirroring the spot path. Every other terminal
-            # error stays a WARNING ``ingest.quarantine`` failure.
+            # error stays a WARNING ``ingest.quarantine`` failure — EXCEPT a dead
+            # token, which fires ONE loud ``ingest.auth_aborted`` alert instead of a
+            # per-series WARNING flood (DEC-OPTIONS-UNTIL-CLEAN-001 / the options arm
+            # of DEC-DHAN-AUTH-FAILFAST-RENEW-001).
             result.quarantined += 1
             if is_no_data_error(exc):
                 result.any_gap = True
@@ -531,6 +611,25 @@ def run_dhan_options_ingest(
                     reason=str(exc),
                     note="Dhan reports no data for this series (DH-905); re-tried next pull, not masked",
                 )
+            elif is_auth_failure(exc):
+                result.any_failed = True
+                # The worker normally trips the latch at the source; trip here too in
+                # case this exc reached the drain via another path (idempotent).
+                auth_guard.trip(str(exc))
+                if not auth_alerted:
+                    auth_alerted = True
+                    _LOG.warning(
+                        "ingest.auth_aborted",
+                        pull_id=pull_id,
+                        security_id=underlying.security_id,
+                        underlying_symbol=underlying.underlying_symbol,
+                        cause=auth_guard.cause(),
+                        note=(
+                            "Dhan access token expired/invalid mid-pull — options pull "
+                            "aborted; regenerate the 24h token at web.dhan.co (or it "
+                            "will auto-renew while active next run)"
+                        ),
+                    )
             else:
                 result.any_failed = True
                 # Quarantine-cause nook: WHY this series was dropped, full coordinate.
@@ -547,12 +646,21 @@ def run_dhan_options_ingest(
                 )
             continue
         report = outcome.result
-        if report is None:  # pragma: no cover — ok=True always carries a result
+        if report is None:
+            # AUTH-SKIP: the latch tripped before this series was dispatched — no
+            # vendor call fired. Distinct from completed/aborted/residual (hostile
+            # finding 6): a re-auth + the next round/pull re-fans it.
+            result.skipped_auth += 1
             continue
         result.series[key] = report
         result.bars += report.bars_appended
         result.windows += report.windows
-        result.completed += 1
+        # An ABORTED series (cursor outran its in-run retry budget) committed
+        # NOTHING — it is residual work, never a completion (hostile finding 6).
+        if report.complete:
+            result.completed += 1
+        else:
+            result.aborted += 1
 
     series: dict[SeriesKey, OptionIngestReport] = {}
     failures: list[OptionSeriesFailure] = []
@@ -577,6 +685,8 @@ def run_dhan_options_ingest(
             instrument=underlying.instrument,
             series_completed=result.completed,
             series_failed=result.quarantined,
+            series_aborted=result.aborted,
+            series_skipped_auth=result.skipped_auth,
             bars_appended=result.bars,
             windows=result.windows,
         )
@@ -592,7 +702,13 @@ def run_dhan_options_ingest(
                 result.any_failed,
                 result.any_gap and not result.any_failed,
             )
-    return OptionsUniverseReport(series=series, failures=tuple(failures))
+    return OptionsUniverseReport(
+        series=series,
+        failures=tuple(failures),
+        auth_aborted=auth_guard.tripped(),
+        auth_cause=auth_guard.cause(),
+        series_skipped_auth=sum(result.skipped_auth for result in buckets),
+    )
 
 
 __all__ = [

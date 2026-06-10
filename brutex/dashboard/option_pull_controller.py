@@ -64,9 +64,16 @@ from brutex.adapters.dhan.option_universe_ingest import (
     INDEX_STRIKE_OFFSETS,
     STOCK_EXPIRY_FLAGS,
     STOCK_STRIKE_OFFSETS,
+    OptionsUniverseReport,
     OptionUnderlying,
     ProgressHook,
     run_dhan_options_ingest,
+)
+from brutex.adapters.dhan.pull_verdict import PullVerdict, classify_pull
+from brutex.adapters.dhan.until_clean import (
+    AUTO_RESUME_MAX_ROUNDS,
+    UntilCleanRound,
+    run_until_clean,
 )
 from brutex.dashboard.pull_controller import (
     DHAN_HISTORY_FLOOR,
@@ -74,7 +81,11 @@ from brutex.dashboard.pull_controller import (
     resolve_candle_range,
 )
 from brutex.data.option_sink import NullOptionBarSink
-from brutex.data.window_ledger_store import begin_pull_ledger, end_pull_ledger
+from brutex.data.window_ledger_store import (
+    begin_pull_ledger,
+    end_pull_ledger,
+    make_live_ledger_flush,
+)
 from brutex.models import Instrument, InstrumentType
 from brutex.observability.correlation import pull_id_scope
 from brutex.orchestrator.parallel import (
@@ -82,6 +93,7 @@ from brutex.orchestrator.parallel import (
     PoolRunParallel,
     workers_to_saturate,
 )
+from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
@@ -186,6 +198,26 @@ class OptionsPullReport:
     start_date: str
     end_date: str
     symbols: list[OptionSymbolResult] = field(default_factory=list)
+    #: Transient windows still failing after the FINAL round (0 ⇒ ledger clean) —
+    #: the aborted-series residual deferred to the next pull
+    #: (DEC-OPTIONS-UNTIL-CLEAN-001).
+    still_failed_windows: int = 0
+    #: True iff the Dhan token died mid-pull (re-auth needed) + its first cause.
+    auth_aborted: bool = False
+    auth_cause: str | None = None
+    #: True iff the pull paused on the spent 100,000-call daily quota
+    #: (between-round brake OR a mid-round ``DailyQuotaExceeded``) — resume after
+    #: the IST-midnight reset.
+    quota_exhausted: bool = False
+    #: First-pass series accounting (hostile finding 6): aborted all-or-nothing
+    #: commits, latch-skipped series, benign DH-905 quarantines, genuine terminal
+    #: quarantines.
+    series_aborted: int = 0
+    series_skipped_auth: int = 0
+    no_data_series: int = 0
+    real_failed_series: int = 0
+    #: Until-clean rounds actually run (1 for a single-pass pull).
+    rounds_run: int = 1
 
     @property
     def total_symbols(self) -> int:
@@ -212,6 +244,27 @@ class OptionsPullReport:
         """Total fetch windows across all successful series."""
         return sum(s.windows for s in self.symbols)
 
+    @property
+    def verdict(self) -> PullVerdict:
+        """The pull's loud 4-way verdict (DEC-PULL-VERDICT-001, options arm).
+
+        Reuses the SAME :func:`~brutex.adapters.dhan.pull_verdict.classify_pull`
+        vocabulary the spot pull stamps (CLAUDE.md §11 COMMON): ``auth_expired``
+        outranks everything, then ``quota_exhausted``, then ``transient_residual``
+        (still-failing windows OR genuine terminal quarantines), then
+        ``known_gap_only`` / ``clean``. Built from the REPORT (never the loop
+        outcome, which zeroes the failure counts — hostile finding 5).
+        """
+        return classify_pull(
+            auth_aborted=self.auth_aborted,
+            still_failed_windows=self.still_failed_windows,
+            failed_pairs=self.real_failed_series,
+            no_data=self.no_data_series,
+            completed=self.total_series_completed,
+            auth_cause=self.auth_cause,
+            quota_exhausted=self.quota_exhausted,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dict for the ``/api/v1/universe/pull-options`` route."""
         return {
@@ -223,6 +276,15 @@ class OptionsPullReport:
             "total_series_failed": self.total_series_failed,
             "total_bars": self.total_bars,
             "total_windows": self.total_windows,
+            "still_failed_windows": self.still_failed_windows,
+            "auth_aborted": self.auth_aborted,
+            "auth_cause": self.auth_cause,
+            "quota_exhausted": self.quota_exhausted,
+            "series_aborted": self.series_aborted,
+            "series_skipped_auth": self.series_skipped_auth,
+            "no_data_series": self.no_data_series,
+            "real_failed_series": self.real_failed_series,
+            "rounds_run": self.rounds_run,
             "symbols": [
                 {
                     "symbol": s.symbol,
@@ -326,6 +388,11 @@ class _LiveOptionRuntime(NamedTuple):
     on_timeout: Pacer | None = None
     on_success: Pacer | None = None
     run_parallel: RunParallel | None = None
+    #: The shared controller's daily-quota probe (DEC-AUTO-RESUME-QUOTA-001) — the
+    #: between-round brake the until-clean loop reads so it never re-fires a batch
+    #: into a spent 100k-call day. ``None`` (dry-run / injected factory) ⇒ quota is
+    #: never the limit.
+    quota_exhausted: Callable[[], bool] | None = None
 
 
 def _live_option_runtime(
@@ -360,6 +427,7 @@ def _live_option_runtime(
         on_timeout=controller.on_timeout,
         on_success=controller.on_success,
         run_parallel=_options_run_parallel(controller),
+        quota_exhausted=controller.quota_exhausted,
     )
 
 
@@ -384,6 +452,9 @@ def pull_options(
     on_series_tick: Callable[[], None] | None = None,
     pull_id: str | None = None,
     session_rate: SessionRateController | None = None,
+    until_clean: bool = False,
+    until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
+    until_clean_sleep: Callable[[int], None] | None = None,
 ) -> OptionsPullReport:
     """Fan-out-pull the option universe for *instruments* over ``[2021-01-01, today]``.
 
@@ -429,12 +500,39 @@ def pull_options(
         single-underlying options pull's lake-backed ``/coverage/options`` surface
         ticks live mid-fan-out, not only at the per-underlying ``on_progress`` at
         the very end. Never changes what is fetched/parsed/sunk or the rate.
+    until_clean
+        ``True`` (DEC-OPTIONS-UNTIL-CLEAN-001) escalates to the bounded
+        re-pull-until-clean loop — the options arm of the spot auto-resume:
+        bounded rounds over the SHARED window ledger (settled windows skip in
+        O(1) — only the aborted-series residual hits Dhan again), reusing the
+        SAME :func:`~brutex.adapters.dhan.until_clean.run_until_clean` driver
+        (CLAUDE.md §11 COMMON; NO new loop logic), until ``stop_clean`` /
+        ``stop_dead`` (token died) / ``stop_quota`` (daily quota spent) /
+        ``stop_budget``. ``stop_when_stuck`` is OFF for options — an aborted
+        all-or-nothing series settles NOTHING, so its residual is constant
+        across failing rounds and the shrinkage signal would falsely stop the
+        canonical 429-storm recovery after ~2 rounds (hostile finding 1); the
+        quota brake + the bounded budget keep the loop safe instead. ``False``
+        (the default) keeps the prior single pass.
+    until_clean_rounds
+        Bounded OUTER round budget for *until_clean* (default
+        :data:`~brutex.adapters.dhan.until_clean.AUTO_RESUME_MAX_ROUNDS`).
+        Never infinite (Golden Rule #10). Worst case (a never-recovering
+        storm): ``rounds × residual × (1 + in-run retries)`` paced calls, every
+        one ``≤ 5 r/s`` bucket-bounded and quota-braked.
+    until_clean_sleep
+        Injected ``(round_index) -> None`` inter-round backoff (``None`` → the
+        driver's bounded exponential 5→60 s default). Tests pass a no-op so no
+        real sleep occurs.
 
     Returns
     -------
     OptionsPullReport
         Per-underlying series-completed / series-failed / bars / windows counts
-        + the aggregate totals.
+        + the aggregate totals, the FINAL-round residual/auth/quota state, and
+        the loud :attr:`OptionsPullReport.verdict`. Per-symbol rollups come from
+        the FIRST pass's report (mirroring the spot until-clean contract); the
+        aggregate residual reflects the FINAL round.
 
     Raises
     ------
@@ -473,29 +571,128 @@ def pull_options(
             underlyings=len(underlyings),
             start_date=start.date().isoformat(),
             dry_run=dry_run,
+            until_clean=until_clean,
         )
         runtime = _live_option_runtime(use_live_rate, session_rate)
-        report = run_dhan_options_ingest(
-            client,
-            sink,
-            underlyings=underlyings,
-            start=start.date(),
-            end=end.date(),
-            expiry_flags=expiry_flags,
-            expiry_codes=expiry_codes,
-            option_types=option_types,
-            required_data=ALL_REQUIRED_DATA,
-            pace=runtime.pace,
-            on_rate_limit=runtime.on_rate_limit,
-            on_timeout=runtime.on_timeout,
-            on_success=runtime.on_success,
-            on_progress=on_progress,
-            on_series_tick=on_series_tick,
-            ledger=ledger,
-            run_parallel=runtime.run_parallel,
-        )
-        # Persist the windows just completed so the next pull skips them.
-        end_pull_ledger(ledger, lake_root, dry_run=dry_run)
+        # Mid-pull durability (DEC-OPTIONS-UNTIL-CLEAN-001, hostile finding 2):
+        # flush the in-memory window ledger to its Parquet THROTTLED on every
+        # series tick, so a crash / kill / mid-round quota death loses ≤ the
+        # throttle interval of window records — never hours of settled windows.
+        # (Bars are already durable: the sink commits per series.) No-op for a
+        # dry-run (``ledger`` is None).
+        ledger_flush = make_live_ledger_flush(ledger, lake_root)
+
+        def _tick_then_flush() -> None:
+            if on_series_tick is not None:
+                on_series_tick()
+            ledger_flush()
+
+        passes: list[OptionsUniverseReport] = []
+
+        def _one_pass() -> OptionsUniverseReport:
+            """Run ONE full fan-out pass — the single ingest call site (§11 COMMON).
+
+            The one-shot path AND every until-clean round go through here, so the
+            args can never drift between them; each pass shares the SAME ledger
+            (settled windows skip in O(1) — only residual windows hit Dhan).
+            Honest envelope (Golden Rule #10): a round still REBUILDS the full
+            jobs list and probes every series' windows — O(series·windows) CPU
+            per round with ZERO vendor calls for settled windows; never an
+            O(residual) or O(1)-total claim.
+            """
+            rep = run_dhan_options_ingest(
+                client,
+                sink,
+                underlyings=underlyings,
+                start=start.date(),
+                end=end.date(),
+                expiry_flags=expiry_flags,
+                expiry_codes=expiry_codes,
+                option_types=option_types,
+                required_data=ALL_REQUIRED_DATA,
+                pace=runtime.pace,
+                on_rate_limit=runtime.on_rate_limit,
+                on_timeout=runtime.on_timeout,
+                on_success=runtime.on_success,
+                on_progress=on_progress,
+                on_series_tick=_tick_then_flush,
+                ledger=ledger,
+                run_parallel=runtime.run_parallel,
+            )
+            passes.append(rep)
+            return rep
+
+        final_quota = False
+        final_still_failed = 0
+        final_auth_aborted = False
+        final_auth_cause: str | None = None
+        rounds_run = 1
+        try:
+            try:
+                if until_clean:
+
+                    def _round_runner() -> UntilCleanRound:
+                        """One until-clean round = one full fan-out pass."""
+                        rep = _one_pass()
+                        return UntilCleanRound(
+                            still_failed_windows=rep.still_failed_windows,
+                            auth_aborted=rep.auth_aborted,
+                            auth_cause=rep.auth_cause,
+                        )
+
+                    # The options auto-resume (DEC-OPTIONS-UNTIL-CLEAN-001): the SAME
+                    # bounded driver + quota brake as spot. ``stop_when_stuck`` stays
+                    # OFF — an aborted all-or-nothing series settles NOTHING, so its
+                    # residual is CONSTANT across failing rounds and the shrinkage
+                    # heuristic would falsely kill the canonical 429-storm recovery
+                    # after ~2 rounds (hostile finding 1); the bounded budget + the
+                    # quota hook are the safety here.
+                    until_outcome = run_until_clean(
+                        _round_runner,
+                        max_rounds=until_clean_rounds,
+                        sleep=until_clean_sleep,
+                        quota_exhausted=runtime.quota_exhausted,
+                        stop_when_stuck=False,
+                    )
+                    rounds_run = until_outcome.rounds_run
+                    final_still_failed = until_outcome.final_still_failed
+                    final_auth_aborted = until_outcome.auth_aborted or (
+                        bool(passes) and passes[0].auth_aborted
+                    )
+                    final_auth_cause = until_outcome.auth_cause or (
+                        passes[0].auth_cause if passes else None
+                    )
+                    final_quota = until_outcome.stopped_on_quota
+                else:
+                    rep = _one_pass()
+                    final_still_failed = rep.still_failed_windows
+                    final_auth_aborted = rep.auth_aborted
+                    final_auth_cause = rep.auth_cause
+            except DailyQuotaExceeded as exc:
+                # The 100k daily quota died MID-round (the loop's between-round
+                # hook can only brake at round boundaries — hostile finding 2c).
+                # Everything already committed survives: bars per series via the
+                # sink, window records via the throttled flush + the finally
+                # below. Map to the loud quota verdict instead of a generic job
+                # error; the next pull (after IST midnight) resumes incrementally.
+                final_quota = True
+                rounds_run = max(len(passes), 1)
+                final_still_failed = passes[-1].still_failed_windows if passes else 0
+                final_auth_aborted = passes[-1].auth_aborted if passes else False
+                final_auth_cause = passes[-1].auth_cause if passes else None
+                _LOG.warning(
+                    "universe.pull_options.quota_exhausted",
+                    pull_id=pid,
+                    error=str(exc),
+                    rounds_completed=len(passes),
+                    note="daily Dhan quota spent mid-round — committed work kept; resume after IST midnight",
+                )
+        finally:
+            # ALWAYS persist the window ledger — a crash/abort must never discard
+            # the settled-window history (hostile finding 2a). Idempotent with the
+            # throttled mid-pull flushes.
+            end_pull_ledger(ledger, lake_root, dry_run=dry_run)
+        report = passes[0] if passes else OptionsUniverseReport(series={}, failures=())
 
         # Aggregate the per-series reports + quarantined failures by underlying.
         failed_by_symbol: dict[str, int] = {}
@@ -507,7 +704,9 @@ def pull_options(
         for (security_id, *_rest), series_report in report.series.items():
             prev_count, prev_bars, prev_windows = completed_by_symbol.get(security_id, (0, 0, 0))
             completed_by_symbol[security_id] = (
-                prev_count + 1,
+                # An ABORTED series committed nothing — never a completion
+                # (hostile finding 6); its windows stay in the residual count.
+                prev_count + (1 if series_report.complete else 0),
                 prev_bars + series_report.bars_appended,
                 prev_windows + series_report.windows,
             )
@@ -532,6 +731,15 @@ def pull_options(
             start_date=start.date().isoformat(),
             end_date=(end - timedelta(days=1)).date().isoformat(),
             symbols=results,
+            still_failed_windows=final_still_failed,
+            auth_aborted=final_auth_aborted,
+            auth_cause=final_auth_cause,
+            quota_exhausted=final_quota,
+            series_aborted=report.aborted_series,
+            series_skipped_auth=report.series_skipped_auth,
+            no_data_series=report.no_data_series,
+            real_failed_series=report.real_failed_series,
+            rounds_run=rounds_run,
         )
         # Surface WHY series failed (the silent-failure logging gap the operator
         # flagged): a bare ``series_failed=N`` count hides the cause. Log the
@@ -552,6 +760,11 @@ def pull_options(
             underlyings=pull_report.total_symbols,
             series_completed=pull_report.total_series_completed,
             series_failed=pull_report.total_series_failed,
+            series_aborted=pull_report.series_aborted,
+            series_skipped_auth=pull_report.series_skipped_auth,
+            still_failed_windows=pull_report.still_failed_windows,
+            rounds_run=pull_report.rounds_run,
+            verdict=pull_report.verdict.kind,
             bars=pull_report.total_bars,
             dry_run=dry_run,
         )
