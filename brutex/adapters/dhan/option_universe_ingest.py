@@ -14,7 +14,10 @@ to its underlying (operator decree 2026-06-01).
 Resilient like the spot fan-out: a **terminal** Dhan error on one series is
 quarantined (recorded as a failure) and the run continues — one bad strike /
 expiry-code never kills the universe pull. Per-window transient errors are
-already retried/skipped inside ``ingest_rolling_option_series``.
+already retried/skipped inside ``ingest_rolling_option_series``, and a DH-905
+"no data" window settles as a known gap WITHOUT quarantining the series
+(DEC-OPTION-DH905-CONTINUE-001) — a fully-dead series completes GAP-ONLY in one
+pass and is surfaced via ``gap_only_series`` + the ``ingest.known_gap`` INFO.
 
 Parallel fan-out (DEC-DHAN-PARALLEL-INGEST-001). The OUTER loop — one job per
 **underlying** — runs through an injected
@@ -239,9 +242,17 @@ class _UnderlyingResult:
     completed: int = 0
     quarantined: int = 0
     any_failed: bool = False
-    #: True iff at least one series returned a benign Dhan ``DH-905`` no-data
+    #: True iff at least one series carried a benign Dhan ``DH-905`` no-data
     #: boundary (NOT a real failure — DEC-DHAN-NO-DATA-GAP-COUNT-001 options arm).
+    #: Set when a report carries settled known-gap windows
+    #: (DEC-OPTION-DH905-CONTINUE-001) or — defensively — on a drain-side DH-905
+    #: quarantine.
     any_gap: bool = False
+    #: Series that completed GAP-ONLY: committed whole with ZERO bars and ≥1
+    #: settled DH-905 known-gap window (DEC-OPTION-DH905-CONTINUE-001) — Dhan
+    #: genuinely has no data for them. Counted inside ``completed`` (the series
+    #: IS settled); surfaced separately so the rollup + verdict stay honest.
+    gap_only: int = 0
     #: Series whose transactional commit ABORTED (a cursor outran its in-run retry
     #: budget — ``report.complete`` is False; committed NOTHING, deferred to the
     #: next round/pull). Counted SEPARATELY from ``completed`` so the rollup never
@@ -326,15 +337,51 @@ class OptionsUniverseReport:
         Classified by the single source of truth
         :func:`~brutex.adapters.dhan.errors.is_no_data_message`
         (DEC-DHAN-NO-DATA-GAP-COUNT-001) — a data boundary, never a defect.
+        DEFENSIVE-ONLY since DEC-OPTION-DH905-CONTINUE-001: the series spine
+        settles a DH-905 cursor as a known gap and continues (never re-raises),
+        so no production path quarantines a DH-905 series any more — this reads
+        0 there and is kept only as the drain-side classifier for any other
+        arrival path. AUTH OUTRANKS NO-DATA (hostile finding 1): a both-marker
+        token death is a REAL failure here, never a benign gap.
         """
-        from brutex.adapters.dhan.errors import is_no_data_message
+        from brutex.adapters.dhan.errors import is_auth_failure_message, is_no_data_message
 
-        return sum(1 for f in self.failures if is_no_data_message(f.error))
+        return sum(
+            1
+            for f in self.failures
+            if is_no_data_message(f.error) and not is_auth_failure_message(f.error)
+        )
 
     @property
     def real_failed_series(self) -> int:
         """Quarantined series with a GENUINE terminal error (non-DH-905, incl. auth)."""
         return self.failed_series - self.no_data_series
+
+    @property
+    def no_data_windows(self) -> int:
+        """Total DH-905 known-gap windows settled this pass across all series.
+
+        DEC-OPTION-DH905-CONTINUE-001: each is a 0-bar cursor the vendor
+        definitively answered "no data" for — settled ``SKIPPED`` in the ledger,
+        never a failure, never part of :attr:`still_failed_windows`.
+        """
+        return sum(r.no_data_windows for r in self.series.values())
+
+    @property
+    def gap_only_series(self) -> int:
+        """Series that completed GAP-ONLY — whole, zero bars, ≥1 known-gap window.
+
+        DEC-OPTION-DH905-CONTINUE-001: a fully-dead series (e.g. a far weekly
+        expiry code that never listed) now settles in ONE pass and lands here —
+        COMPLETE (its windows are settled vendor answers), but distinguished so
+        the pull verdict can read ``known_gap_only`` instead of a lying ``clean``
+        when a pull found NOTHING but gaps.
+        """
+        return sum(
+            1
+            for r in self.series.values()
+            if r.complete and r.bars_appended == 0 and r.no_data_windows > 0
+        )
 
 
 def iter_series_jobs(
@@ -668,30 +715,18 @@ def run_dhan_options_ingest(
                 )
             )
             # The series is recorded (re-tried next pull, never masked) + counted in
-            # the quarantined rollup EITHER way. But a Dhan ``DH-905`` "no data" is a
-            # benign GAP, NOT a failure (DEC-DHAN-NO-DATA-GAP-COUNT-001, options arm):
-            # log it INFO ``ingest.known_gap`` + flag ``any_gap`` so the live counter
-            # reads it as a no-data gap, mirroring the spot path. Every other terminal
-            # error stays a WARNING ``ingest.quarantine`` failure — EXCEPT a dead
-            # token, which fires ONE loud ``ingest.auth_aborted`` alert instead of a
-            # per-series WARNING flood (DEC-OPTIONS-UNTIL-CLEAN-001 / the options arm
-            # of DEC-DHAN-AUTH-FAILFAST-RENEW-001).
+            # the quarantined rollup EITHER way. AUTH OUTRANKS NO-DATA
+            # (DEC-OPTION-DH905-CONTINUE-001 hostile finding 1): a token-death 400
+            # can carry BOTH markers (DH-906 + DH-905), so the dead-token check
+            # runs FIRST — it fires ONE loud ``ingest.auth_aborted`` alert instead
+            # of a per-series WARNING flood (DEC-OPTIONS-UNTIL-CLEAN-001 / the
+            # options arm of DEC-DHAN-AUTH-FAILFAST-RENEW-001). A pure ``DH-905``
+            # "no data" is a benign GAP, NOT a failure
+            # (DEC-DHAN-NO-DATA-GAP-COUNT-001, options arm): INFO
+            # ``ingest.known_gap`` + ``any_gap``. Every other terminal error stays
+            # a WARNING ``ingest.quarantine`` failure.
             result.quarantined += 1
-            if is_no_data_error(exc):
-                result.any_gap = True
-                _LOG.info(
-                    "ingest.known_gap",
-                    pull_id=pull_id,
-                    security_id=underlying.security_id,
-                    underlying_symbol=underlying.underlying_symbol,
-                    expiry_flag=expiry_flag,
-                    expiry_code=expiry_code,
-                    strike=strike,
-                    drv_option_type=drv_option_type,
-                    reason=str(exc),
-                    note="Dhan reports no data for this series (DH-905); re-tried next pull, not masked",
-                )
-            elif is_auth_failure(exc):
+            if is_auth_failure(exc):
                 result.any_failed = True
                 # The worker normally trips the latch at the source; trip here too in
                 # case this exc reached the drain via another path (idempotent).
@@ -710,6 +745,25 @@ def run_dhan_options_ingest(
                             "will auto-renew while active next run)"
                         ),
                     )
+            elif is_no_data_error(exc):
+                # DEFENSIVE-ONLY since DEC-OPTION-DH905-CONTINUE-001: the series
+                # spine settles a DH-905 cursor and continues (never re-raises), so
+                # no production path reaches this branch — kept (and fake-runner
+                # tested) so a DH-905 arriving via any OTHER path still classifies
+                # as a benign gap, never a scary failure (hostile finding 8).
+                result.any_gap = True
+                _LOG.info(
+                    "ingest.known_gap",
+                    pull_id=pull_id,
+                    security_id=underlying.security_id,
+                    underlying_symbol=underlying.underlying_symbol,
+                    expiry_flag=expiry_flag,
+                    expiry_code=expiry_code,
+                    strike=strike,
+                    drv_option_type=drv_option_type,
+                    reason=str(exc),
+                    note="Dhan reports no data for this series (DH-905); re-tried next pull, not masked",
+                )
             else:
                 result.any_failed = True
                 # Quarantine-cause nook: WHY this series was dropped, full coordinate.
@@ -735,10 +789,36 @@ def run_dhan_options_ingest(
         result.series[key] = report
         result.bars += report.bars_appended
         result.windows += report.windows
+        # Settled DH-905 known-gap windows read as a benign no-data gap on the
+        # per-underlying progress hook, mirroring the old quarantine-path flag
+        # (DEC-OPTION-DH905-CONTINUE-001 / DEC-DHAN-NO-DATA-GAP-COUNT-001).
+        if report.no_data_windows > 0:
+            result.any_gap = True
         # An ABORTED series (cursor outran its in-run retry budget) committed
         # NOTHING — it is residual work, never a completion (hostile finding 6).
         if report.complete:
             result.completed += 1
+            if report.bars_appended == 0 and report.no_data_windows > 0:
+                # GAP-ONLY: the whole series is settled vendor no-data — COMPLETE
+                # (never re-fetched) but surfaced at INFO like the old per-series
+                # quarantine was, so a dead strike/expiry stays one glance away
+                # (DEC-OPTION-DH905-CONTINUE-001).
+                result.gap_only += 1
+                _LOG.info(
+                    "ingest.known_gap",
+                    pull_id=pull_id,
+                    security_id=underlying.security_id,
+                    underlying_symbol=underlying.underlying_symbol,
+                    expiry_flag=expiry_flag,
+                    expiry_code=expiry_code,
+                    strike=strike,
+                    drv_option_type=drv_option_type,
+                    no_data_windows=report.no_data_windows,
+                    note=(
+                        "Dhan reports no data for this series (DH-905); all windows "
+                        "settled SKIPPED — drained in one pass, never re-fetched"
+                    ),
+                )
         else:
             result.aborted += 1
 
@@ -767,6 +847,7 @@ def run_dhan_options_ingest(
             series_failed=result.quarantined,
             series_aborted=result.aborted,
             series_skipped_auth=result.skipped_auth,
+            series_gap_only=result.gap_only,
             bars_appended=result.bars,
             windows=result.windows,
         )
