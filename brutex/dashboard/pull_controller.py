@@ -1379,9 +1379,14 @@ def pull_all_spot(
             # mid-round quota death must never discard the settled-window history
             # (DEC-SPOT-QUOTA-MIDROUND-001; previously persisted only on a clean
             # return, shielded just by the throttled mid-pull flushes). Idempotent
-            # with those flushes.
-            end_pull_status(status_log, lake_root, dry_run=dry_run)
-            end_pull_ledger(ledger, lake_root, dry_run=dry_run)
+            # with those flushes. Nested so a status-persist failure (e.g. a
+            # disk-full OSError) can never skip the LEDGER persist — the ledger
+            # is the skip authority (DEC-WINDOW-LEDGER-001), the more critical
+            # of the two stores.
+            try:
+                end_pull_status(status_log, lake_root, dry_run=dry_run)
+            finally:
+                end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         # Per-symbol rollup = the FIRST pass's report (the until-clean contract).
         # A quota death before ANY pass completed leaves no per-pair information —
         # the empty fallback rolls every symbol up as zeros (the quota verdict

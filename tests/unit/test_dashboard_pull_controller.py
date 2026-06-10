@@ -13,7 +13,7 @@ a real token + the ``urllib`` transport, both absent in CI
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -1199,14 +1199,86 @@ class TestQuotaDeathMidRound:
 
     def test_quota_death_mid_round_until_clean_maps_verdict(self, tmp_path: Path) -> None:
         """until_clean: a round-1 mid-round death maps identically (no doomed rounds)."""
-        from brutex.data.window_ledger_store import ledger_path
+        from brutex.data.window_ledger_store import ledger_path, load_window_ledger
 
         report, logs = self._pull(tmp_path, until_clean=True)
         assert report.quota_exhausted is True
         assert report.verdict.kind == "quota_exhausted"
         assert report.auth_aborted is False
+        assert report.auth_cause is None
+        assert report.still_failed_windows == 0
+        # No round COMPLETED — the rollup claims nothing; the ledger keeps the truth.
+        assert report.total_completed == 0
+        assert report.total_failed == 0
         assert ledger_path(tmp_path).is_file()
+        assert {r.status for r in load_window_ledger(tmp_path).records()} == {
+            "SUCCESS",
+            "PLANNED",
+        }
         assert _events(logs, "universe.pull_all.quota_exhausted")
+
+    def test_quota_death_in_round_two_keeps_round_one_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A round-≥2 death reports the LAST COMPLETED round's state + rollup.
+
+        The ``passes[-1]`` arm (hostile-review finding): round 1 completes (1minute
+        SUCCESS, 1day quarantined terminally — a FAILED window is never skippable,
+        so round 2 re-attempts exactly it), then round 2's only worker call dies on
+        the quota. The real driver would need round-1 transient residual + real
+        inter-round backoff sleeps to reach round 2, so the loop driver is faked to
+        force the second round — the quota exception itself still originates INSIDE
+        a real worker pass and propagates through the real except/finally path.
+        """
+        from brutex.adapters.dhan.until_clean import UntilCleanOutcome, UntilCleanRound
+        from brutex.data.window_ledger_store import ledger_path
+
+        state = {"round": 1}
+
+        class _DiesInRoundTwo(SyntheticDhanAdapter):
+            def fetch_ohlcv(
+                self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+            ) -> list[CandleBar]:
+                if interval == "1day":
+                    if state["round"] >= 2:
+                        raise DailyQuotaExceeded("daily quota of 100000 calls spent")
+                    raise DhanBadRequestError("boom 1day")  # round 1: terminal quarantine
+                return super().fetch_ohlcv(
+                    symbol=symbol, exchange=exchange, interval=interval, start=start, end=end
+                )
+
+        def _force_second_round(
+            round_runner: Callable[[], UntilCleanRound], **_kwargs: object
+        ) -> UntilCleanOutcome:
+            round_runner()  # round 1 — a REAL full pass, recorded in ``passes``
+            state["round"] = 2
+            round_runner()  # round 2 — the 1day worker raises DailyQuotaExceeded
+            raise AssertionError("round 2 must die on the quota")
+
+        monkeypatch.setattr("brutex.dashboard.pull_controller.run_until_clean", _force_second_round)
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                from_date="2021-01-04",
+                to_date="2021-01-08",
+                adapter_factory=lambda _root, _insts: (_DiesInRoundTwo(), NullBarSink()),
+                until_clean=True,
+            )
+        assert report.quota_exhausted is True
+        assert report.verdict.kind == "quota_exhausted"  # quota outranks the failed pair
+        # passes[-1] = round 1's COMPLETED pass: zero transient residual, live token.
+        assert report.still_failed_windows == 0
+        assert report.auth_aborted is False
+        assert report.auth_cause is None
+        # The per-symbol rollup is round 1's full report — committed work shown.
+        assert report.total_completed == 1  # the 1minute pair landed in round 1
+        assert report.total_failed == 1  # the 1day terminal quarantine from round 1
+        assert ledger_path(tmp_path).is_file()
+        events = _events(logs, "universe.pull_all.quota_exhausted")
+        assert events and events[0]["rounds_completed"] == 1
 
     def test_until_clean_zero_round_budget_is_a_safe_noop(self, tmp_path: Path) -> None:
         """``until_clean_rounds=0`` returns the empty-report rollup, never IndexError.
