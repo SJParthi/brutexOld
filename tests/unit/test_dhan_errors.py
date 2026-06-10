@@ -18,6 +18,7 @@ from brutex.adapters.dhan.errors import (
     DhanTransportError,
     from_http_status,
     is_auth_failure,
+    is_auth_failure_message,
     is_no_data_error,
     is_no_data_message,
     is_rate_limit,
@@ -144,6 +145,38 @@ class TestIsNoDataMessage:
     )
     def test_false_for_non_no_data(self, text: str) -> None:
         assert is_no_data_message(text) is False
+
+
+class TestIsAuthFailureMessage:
+    """``is_auth_failure_message`` — the STRING twin of ``is_auth_failure``.
+
+    DEC-OPTION-DH905-CONTINUE-001 (hostile finding 1, AUTH OUTRANKS NO-DATA):
+    string-level consumers holding only a quarantined ``str(exc)`` need a way to
+    refuse classifying a both-marker token death as a benign known gap.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            '{"errorCode":"DH-906","errorMessage":"Invalid Token"}',
+            "HTTP 400 bad request: Invalid Token",
+            # The BLOCKER case: both marker families in one message — still auth.
+            "HTTP 400: DH-906 Invalid Token (no data present DH-905)",
+        ],
+    )
+    def test_true_for_token_markers(self, text: str) -> None:
+        assert is_auth_failure_message(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "HTTP 400 bad request: DH-905 no data present",
+            "HTTP 400 bad request: malformed body",
+            "",
+        ],
+    )
+    def test_false_for_non_auth(self, text: str) -> None:
+        assert is_auth_failure_message(text) is False
 
 
 class TestIsAuthFailure:
