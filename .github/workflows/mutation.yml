@@ -55,9 +55,11 @@ jobs:
   python-mutation:
     name: Python mutation (mutmut)
     runs-on: ubuntu-24.04
-    # 120 (was 90): the added Deflated-Sharpe module + the two Rust wheel
-    # builds (fno_math, trading_core) need headroom over the orchestrator-only
-    # baseline (DEC-MUTATION-GATE-RANKING-001).
+    # 120: with every pass on a focused per-module runner the whole job is
+    # measured at ~890 mutants × ~2 s ≈ 30 min locally (DEC-MUTATION-RUNTIME-001);
+    # 120 leaves >2× headroom for slower shared runners + the two Rust wheel
+    # builds (fno_math, trading_core). The OLD broad `pytest tests/unit`
+    # runner could never finish here (123/804 mutants at cancellation).
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
@@ -89,26 +91,28 @@ jobs:
         run: |
           set -e
           # Target the modules where silent regressions cause the biggest
-          # damage. Two groups, run as two sequential mutmut passes (shared
-          # cache) — the FAST proven-zero math pass FIRST, so its verdict is
-          # always reported even if the broad pass later hits the known
-          # pre-existing job-timeout (see the phase-2 comment below):
+          # damage. Every pass uses a FOCUSED per-module(-group) runner — the
+          # module's dedicated unit test file(s) — instead of the old broad
+          # `pytest tests/unit` runner: a focused runner is a strict SUBSET
+          # of the unit suite (focused-zero implies broad-zero) and each
+          # mutant dies in ~2 s instead of ~1 min, which is what lets the
+          # whole job FINISH inside its budget (the old broad runner was
+          # measured at 123/804 mutants in ~116 min before the 120-min
+          # timeout killed it — DEC-MUTATION-RUNTIME-001, after
+          # DEC-MUTATION-GATE-RANKING-002 / MIGRATION #615 disclosed it).
           #
-          # 1. Ranking / metrics MATH (DEC-MUTATION-GATE-RANKING-001 + its
-          #    executed follow-up ratchet DEC-MUTATION-GATE-RANKING-002): the
-          #    Deflated-Sharpe engine, the composite-ranking functions
-          #    (brutex/ranking/__init__.py: gates + z-scores + composite) and
-          #    the Stage-3 overfit gate (brutex/ranking/overfit.py). A silent
-          #    regression in any of these corrupts strategy selection, so all
-          #    three are first-class ZERO-SURVIVOR targets. Verified 0/228
-          #    survivors locally (MIGRATION #615). The runner is the focused
-          #    pair of dedicated test files — a strict SUBSET of tests/unit,
-          #    so focused-zero implies broad-zero, and each mutant dies in
-          #    seconds instead of ~1 min (the measured 2026-06-09 main run
-          #    processed 123/804 mutants in ~116 min with the broad runner).
-          #    Provably-equivalent mutants (annotation-only `X | None` flips,
-          #    `cast(...)` type strings, z-score translation invariance) carry
-          #    documented `# pragma: no mutate` markers in the modules.
+          # Every runner is wrapped `sh -c '… || exit 1'`: mutmut 2.x counts
+          # ONLY exit code 1 as "killed", so a mutant that crashes module
+          # IMPORT (pytest exits 2 at collection) would be misclassified as
+          # SURVIVED without the wrap (measured on audit.py's
+          # `"0" * 64 → "0" / 64` genesis-hash mutant).
+          #
+          # 1. Ranking / metrics MATH (DEC-MUTATION-GATE-RANKING-001/-002):
+          #    the Deflated-Sharpe engine, the composite-ranking functions
+          #    and the Stage-3 overfit gate — a silent mutant here corrupts
+          #    strategy selection. Verified 0/228 survivors locally
+          #    (MIGRATION #615). Provably-equivalent mutants carry documented
+          #    `# pragma: no mutate` markers in the modules.
           #    (compute.py [Sharpe] is the remaining ranking-math ratchet —
           #    it retains its own equivalent mutants, see MIGRATION #590.)
           #
@@ -116,7 +120,7 @@ jobs:
           # the coverage is *meaningful* (the tests detect a behaviour change).
           mutmut run \
             --paths-to-mutate brutex/metrics/deflated_sharpe.py,brutex/ranking/__init__.py,brutex/ranking/overfit.py \
-            --runner "pytest tests/unit/test_ranking.py tests/unit/test_deflated_sharpe.py -x -q --no-header" \
+            --runner "sh -c 'pytest tests/unit/test_ranking.py tests/unit/test_deflated_sharpe.py -x -q --no-header || exit 1'" \
             --simple-output
           mutmut results | tee mutmut-results-math.txt
           if grep -qE "^[0-9]+" mutmut-results-math.txt; then
@@ -127,44 +131,49 @@ jobs:
           echo "✅ No surviving mutants (ranking/DSR math pass)"
           # Reset the cache between passes: mutmut caches the BASELINE test
           # time in .mutmut-cache and reuses it ("Using cached time for
-          # baseline tests"), so the broad pass below would inherit the
-          # focused runner's ~2 s baseline and false-TIMEOUT every mutant of
-          # its ~90 s suite. The two passes mutate DISJOINT path sets, so no
-          # mutant results are lost — each pass has its own survivors check.
+          # baseline tests"), so a later pass would inherit an earlier
+          # pass's baseline and mis-time its mutants. The passes mutate
+          # DISJOINT path sets, so no mutant result is lost — each pass has
+          # its own survivors check.
           mv .mutmut-cache .mutmut-cache-math
           # 2. Orchestration / data plumbing (the FSM, retry classifier, audit
-          #    chain, rate limiter, store, partition/parser) — broad
-          #    `tests/unit` runner, semantics UNCHANGED from the original job.
-          #    KNOWN PRE-EXISTING LIMIT (discovered 2026-06-10, MIGRATION
-          #    #615 honest envelope): on shared runners this pass advances at
-          #    ~1 min/mutant (full-suite runner), so it exceeds the job
-          #    timeout before finishing (the 2026-06-09 main run was cancelled
-          #    at 123/804 with 26 early survivors). Restructuring it onto
-          #    per-module focused runners — after enumerating + killing those
-          #    survivors — is the tracked follow-up (proposed
-          #    DEC-MUTATION-RUNTIME-001); hiding the timeout by deleting the
-          #    pass would silently drop the orchestrator gate (Golden Rule #10).
-          mutmut run \
-            --paths-to-mutate brutex/orchestrator/state.py,brutex/orchestrator/retry.py,brutex/orchestrator/audit.py,brutex/orchestrator/rate_limiter.py,brutex/orchestrator/store.py,brutex/data/partition.py,brutex/data/parser.py \
-            --runner "pytest tests/unit -x -q --no-header" \
-            --simple-output
-          # Fail if any mutants survived (this pass only — the math pass was
-          # checked above before its cache was set aside)
-          mutmut results | tee mutmut-results.txt
-          if grep -qE "^[0-9]+" mutmut-results.txt; then
-            echo "❌ Surviving mutants detected"
-            mutmut show all 2>&1 | head -200
-            exit 1
-          fi
-          echo "✅ No surviving mutants"
+          #    chain, rate limiter, store, partition/parser) — one pass per
+          #    module against its dedicated unit test file, all driven to
+          #    ZERO survivors by DEC-MUTATION-RUNTIME-001 (the measured 223
+          #    survivors of the per-module enumeration were killed by
+          #    targeted tests; the handful of provably-equivalent mutants
+          #    carry documented in-module pragmas).
+          for pair in \
+            "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py" \
+            "brutex/orchestrator/retry.py:tests/unit/test_orchestrator_retry.py" \
+            "brutex/orchestrator/audit.py:tests/unit/test_orchestrator_audit.py" \
+            "brutex/orchestrator/rate_limiter.py:tests/unit/test_orchestrator_rate_limiter.py" \
+            "brutex/orchestrator/store.py:tests/unit/test_orchestrator_store.py" \
+            "brutex/data/partition.py:tests/unit/test_data_partition.py" \
+            "brutex/data/parser.py:tests/unit/test_data_parser.py"; do
+            mod="${pair%%:*}"
+            tf="${pair##*:}"
+            name="$(basename "$mod" .py)"
+            mutmut run \
+              --paths-to-mutate "$mod" \
+              --runner "sh -c 'pytest $tf -x -q --no-header || exit 1'" \
+              --simple-output
+            mutmut results | tee "mutmut-results-$name.txt"
+            if grep -qE "^[0-9]+" "mutmut-results-$name.txt"; then
+              echo "❌ Surviving mutants detected ($name)"
+              mutmut show all 2>&1 | head -200
+              exit 1
+            fi
+            echo "✅ No surviving mutants ($name)"
+            mv .mutmut-cache ".mutmut-cache-$name"
+          done
+          echo "✅ No surviving mutants (all passes)"
       - name: Upload mutmut cache
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: mutmut-cache
-          path: |
-            .mutmut-cache
-            .mutmut-cache-math
+          path: ".mutmut-cache*"
           retention-days: 7
           if-no-files-found: ignore
       - name: Open GitHub issue on failure
@@ -259,8 +268,12 @@ jobs:
   #
   # Scope = `src/evaluator.rs`, the 52-condition DECISION core (the named
   # "critical module" of §12) — driven to ZERO surviving mutants by the
-  # proptest + golden + boundary/degenerate suite. This mirrors fno-math's
-  # scoped `examine_re` (src/math + src/compat, not the whole crate);
+  # proptest + golden + boundary/degenerate suite. (An earlier revision of
+  # this comment claimed fno-math has a "scoped examine_re" — verified FALSE
+  # on 2026-06-10: no mutants.toml / examine_re exists anywhere in rust/,
+  # the fno-math job mutates the WHOLE crate with per-mutant release builds
+  # and was cancelled at its 2 h budget; right-scoping it is tracked in
+  # DEC-MUTATION-RUNTIME-001's honest envelope, MIGRATION ledger.)
   # bits.rs + the pivots/fib indicators are covered by the 400-case golden
   # answer-key + the property ordering/determinism tests, and extending the
   # mutation gate to their (largely unused, e.g. r4/s4/ext_424) fields is a

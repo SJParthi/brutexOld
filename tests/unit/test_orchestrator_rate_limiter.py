@@ -376,6 +376,36 @@ class TestAcquireMicroWaitLoop:
         b = self._bucket(clock, undershoot_sleep)
         assert b.acquire() == 1.0
 
+    def test_loop_counter_increments_by_exactly_one(self) -> None:
+        """The micro-wait counter advances by exactly +1 per iteration.
+
+        The sleep callable HARD-STOPS after cap+3 micro-waits, so this is
+        the one cap-path test that cannot hang even when the loop bound
+        itself is broken: under the ``iterations += 1`` → ``= 1`` / ``-= 1``
+        mutants the safety net is unreachable and the guard trips at call
+        cap+4 in microseconds (previously those two mutants could only die
+        by mutmut TIMEOUT — a red, slow verdict — because every cap test
+        relied on the cap for termination, DEC-MUTATION-RUNTIME-001). On
+        real code the cap fires first: exactly 1 + _ACQUIRE_LOOP_CAP sleeps.
+        MUST run before test_eps_drift_floor_pinned_at_1e_9 (the first
+        hang-capable test) so the `-x` mutation runner fails fast.
+        """
+        clock = FakeClock(start=0.0)
+        sleeps: list[float] = []
+
+        def bounded_undershoot_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            if len(sleeps) > 3 + _ACQUIRE_LOOP_CAP:
+                raise AssertionError(
+                    "micro-wait loop escaped _ACQUIRE_LOOP_CAP — the "
+                    "iteration counter is not incrementing by +1"
+                )
+            clock.advance(seconds - 1.5e-9)
+
+        b = self._bucket(clock, bounded_undershoot_sleep)
+        b.acquire()
+        assert len(sleeps) == 1 + _ACQUIRE_LOOP_CAP
+
     def test_eps_drift_floor_pinned_at_1e_9(self) -> None:
         """eps == 1e-9 byte-exact, via a deficit BETWEEN 1e-9 and 2e-9.
 
