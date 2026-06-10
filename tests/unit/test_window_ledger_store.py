@@ -10,7 +10,7 @@ flush, and the begin/end dry-run rule.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -31,6 +31,7 @@ from brutex.data.window_ledger_store import (
 )
 from brutex.data.window_status import WindowStatusLog
 from brutex.data.window_status_store import save_window_status
+from structlog.testing import capture_logs
 
 _NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
 _START = date(2021, 1, 1)
@@ -182,6 +183,135 @@ class TestPlanWindows:
             end=_END,
         )
         assert ledger.count >= 1
+
+
+class TestPruneOnPlan:
+    """DEC-WINDOW-TRAILING-GC-001 — plan_windows prunes superseded trailing rows.
+
+    The daily ``end`` advance re-keys the clipped trailing window (1minute) and
+    the single whole-range window (1day); yesterday's rows are orphans the tiler
+    can never re-emit. Planning today's tiling must remove them — and ONLY them.
+    """
+
+    def test_trailing_orphans_of_both_intervals_are_pruned(self) -> None:
+        ledger = WindowLedger()
+        instruments = [_FakeInstrument("NIFTY")]
+        intervals = ["1minute", "1day"]
+        # Yesterday's pull: end one day short — its trailing keys orphan today.
+        yesterday_end = _END - timedelta(days=1)
+        plan_windows(
+            ledger,
+            instruments=instruments,
+            intervals=intervals,
+            start=_START,
+            end=yesterday_end,
+            now=_NOW,
+        )
+        # Today's pull: end advanced — yesterday's trailing 1minute partial AND
+        # the whole-range 1day window are superseded; the full tiles are not.
+        planned_today = plan_windows(
+            ledger,
+            instruments=instruments,
+            intervals=intervals,
+            start=_START,
+            end=_END,
+            now=_NOW,
+        )
+        assert ledger.count == planned_today  # zero orphans survive
+        ends = {(r.interval, r.window_end) for r in ledger.records()}
+        assert ("1day", yesterday_end.isoformat()) not in ends
+        assert ("1day", _END.isoformat()) in ends
+        assert ("1minute", yesterday_end.isoformat()) not in ends
+
+    def test_settled_equal_end_rows_survive_a_same_day_replan(self) -> None:
+        # Run `make pull` twice the same day: the second plan must keep the
+        # first pull's settled rows (equal-end keys) so the skip still fires.
+        ledger = WindowLedger()
+        plan_windows(
+            ledger,
+            instruments=[_FakeInstrument("NIFTY")],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+        )
+        key = WindowKey(market="dhan", security_id="NIFTY", interval="1day", start=_START, end=_END)
+        ledger.record(key, raw_bars=9, error_type=None, bars_appended=9, now=_NOW)
+        plan_windows(
+            ledger,
+            instruments=[_FakeInstrument("NIFTY")],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+        )
+        assert ledger.is_skippable(key) is True
+
+    def test_prune_event_logged_only_when_rows_pruned(self) -> None:
+        ledger = WindowLedger()
+        with capture_logs() as clean_logs:
+            plan_windows(
+                ledger,
+                instruments=[_FakeInstrument("NIFTY")],
+                intervals=["1day"],
+                start=_START,
+                end=_END,
+                now=_NOW,
+            )
+        assert not [e for e in clean_logs if e["event"] == "window_ledger.pruned_superseded"]
+        with capture_logs() as logs:
+            plan_windows(
+                ledger,
+                instruments=[_FakeInstrument("NIFTY")],
+                intervals=["1day"],
+                start=_START,
+                end=_END + timedelta(days=1),
+                now=_NOW,
+            )
+        events = [e for e in logs if e["event"] == "window_ledger.pruned_superseded"]
+        assert len(events) == 1
+        assert events[0]["pruned"] == 1
+
+    def test_reconcile_never_reseeds_a_pruned_key(self) -> None:
+        # DEC-WINDOW-TRAILING-GC-001 hostile F5: the ONLY deletion→insert
+        # coupling. reconcile seeds ABSENT windows — but only over the CURRENT
+        # plan's tiling, whose keys the prune always keeps (equal-end rule).
+        # Pin that after plan→prune→reconcile, no pruned (shorter-end) key has
+        # been re-seeded and every current-plan key survived the prune.
+        from brutex.adapters.dhan.ingest import _windows
+
+        ledger = WindowLedger()
+        instrument = _inst(symbol="NIFTY")
+        yesterday_end = _END - timedelta(days=1)
+        plan_windows(
+            ledger,
+            instruments=[instrument],
+            intervals=["1day"],
+            start=_START,
+            end=yesterday_end,
+            now=_NOW,
+        )
+        plan_windows(
+            ledger,
+            instruments=[instrument],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+        )
+        reconcile_ledger_windows(
+            ledger,
+            [_span(interval="1day", last="2026-06-03")],  # encloses both tilings
+            instruments=[instrument],
+            intervals=["1day"],
+            start=_START,
+            end=_END,
+            now=_NOW,
+        )
+        ends = {r.window_end for r in ledger.records()}
+        assert yesterday_end.isoformat() not in ends  # pruned key NOT re-seeded
+        current = {we.isoformat() for _ws, we in _windows("1day", _START, _END)}
+        assert current <= ends  # every current-plan key present
 
 
 class TestLiveFlush:
