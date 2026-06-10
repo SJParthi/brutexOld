@@ -88,6 +88,59 @@ _LMDB_KEY: Final[bytes] = b"quota"
 #: the file on demand but never above this ceiling.
 _DEFAULT_MAP_SIZE_BYTES: Final[int] = 1 * 1024 * 1024
 
+#: Process-wide LMDB environment registry: resolved path → (env, refcount).
+#:
+#: LMDB forbids opening the same environment twice within one process
+#: (``lmdb.Error: ... is already open in this process``), so EVERY
+#: :class:`DailyQuotaTracker` on the same ``store_path`` must share ONE
+#: cached env (DEC-QUOTA-ENV-SINGLE-OPEN-001). Discovered in a live
+#: operator run: the dashboard's ``/api/v1/quota`` lazy tracker
+#: (DEC-DASHBOARD-QUOTA-PERSISTED-001) collided with the pull
+#: controller's tracker (DEC-AUTO-RESUME-QUOTA-001) inside one uvicorn
+#: process — every 3 s gauge poll raised and 500'd; in the reverse
+#: construction order the FIRST PULL would have crashed instead.
+#:
+#: This is deliberate module-level state: the uniqueness constraint is a
+#: property of the PROCESS (LMDB's), so the share point must live at
+#: process scope — the narrow, documented exception to the "no global
+#: mutable state" rule (CLAUDE.md §4), exactly like LMDB's own internal
+#: per-process registry it mirrors. Ref-counted so :meth:`close` only
+#: closes the env when the LAST tracker on that path releases it. The
+#: first opener's ``map_size_bytes`` wins for the process lifetime
+#: (identical default everywhere; tests use distinct tmp paths).
+_ENV_REGISTRY: dict[str, tuple[lmdb.Environment, int]] = {}
+_ENV_REGISTRY_LOCK: Final[threading.Lock] = threading.Lock()
+
+
+def _open_shared_env(key: str, store_path: Path, map_size_bytes: int) -> lmdb.Environment:
+    """Return the process-shared LMDB env for *key*, opening it on first use."""
+    with _ENV_REGISTRY_LOCK:
+        entry = _ENV_REGISTRY.get(key)
+        if entry is not None:
+            env, refs = entry
+            _ENV_REGISTRY[key] = (env, refs + 1)
+            return env
+        env = lmdb.open(
+            str(store_path),
+            map_size=map_size_bytes,
+            subdir=True,
+            create=True,
+            lock=True,
+        )
+        _ENV_REGISTRY[key] = (env, 1)
+        return env
+
+
+def _release_shared_env(key: str) -> None:
+    """Drop one reference to *key*'s shared env; close it on the last release."""
+    with _ENV_REGISTRY_LOCK:
+        env, refs = _ENV_REGISTRY[key]
+        if refs <= 1:
+            del _ENV_REGISTRY[key]
+            env.close()
+        else:
+            _ENV_REGISTRY[key] = (env, refs - 1)
+
 
 def _default_quota_path() -> Path:
     """Return the per-user quota LMDB env path.
@@ -218,6 +271,8 @@ class DailyQuotaTracker:
     map_size_bytes: int = _DEFAULT_MAP_SIZE_BYTES
 
     _env: lmdb.Environment = field(init=False)
+    _env_key: str = field(init=False)
+    _closed: bool = field(init=False)
     _lock: threading.Lock = field(init=False)
     _fired_today: set[str] = field(init=False)
     _thresholds: tuple[tuple[int, str], ...] = field(init=False)
@@ -229,13 +284,13 @@ class DailyQuotaTracker:
             raise ValueError(f"map_size_bytes must be positive, got {self.map_size_bytes}")
 
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
-        self._env = lmdb.open(
-            str(self.store_path),
-            map_size=self.map_size_bytes,
-            subdir=True,
-            create=True,
-            lock=True,
-        )
+        # One env per path per PROCESS (DEC-QUOTA-ENV-SINGLE-OPEN-001):
+        # a second tracker on the same path (e.g. the /api/v1/quota gauge
+        # next to the pull controller's) shares the cached env instead of
+        # crashing on LMDB's already-open-in-this-process rule.
+        self._env_key = str(self.store_path.resolve())
+        self._env = _open_shared_env(self._env_key, self.store_path, self.map_size_bytes)
+        self._closed = False
         self._lock = threading.Lock()
         self._fired_today = set()
         # Compute absolute threshold counts from percentages x daily_limit.
@@ -261,10 +316,16 @@ class DailyQuotaTracker:
                         self._fired_today.add(label)
 
     def close(self) -> None:
-        """Close the LMDB env. Safe to call multiple times."""
-        env = getattr(self, "_env", None)
-        if env is not None:
-            env.close()
+        """Release this tracker's reference to the shared LMDB env.
+
+        Safe to call multiple times. The underlying env is closed only
+        when the LAST tracker on this ``store_path`` releases it
+        (DEC-QUOTA-ENV-SINGLE-OPEN-001) — so the dashboard gauge closing
+        its tracker can never yank the env out from under a live pull.
+        """
+        if getattr(self, "_env", None) is not None and not self._closed:
+            self._closed = True
+            _release_shared_env(self._env_key)
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -286,28 +347,40 @@ class DailyQuotaTracker:
         """
         with self._lock:
             observed_date = self.clock().date()
-            persisted = self._read_state()
+            # Read + decide + write inside ONE LMDB write txn: since
+            # DEC-QUOTA-ENV-SINGLE-OPEN-001 allows several tracker
+            # instances on the same env in one process, the increment
+            # must be linearizable ACROSS instances, not just under this
+            # instance's Python lock. LMDB write txns are exclusive per
+            # env, so the get-check-put below cannot interleave with
+            # another instance's — no lost update possible. A raise
+            # inside the block aborts the txn before any write.
+            with self._env.begin(write=True) as txn:
+                raw = txn.get(_LMDB_KEY)
+                persisted = None if raw is None else self._decode_state(bytes(raw))
 
-            if persisted is None:
-                current_date = observed_date
-                current_count = 0
-            else:
-                current_date, current_count = persisted
-                if current_date > observed_date:
-                    raise ClockSkewError(persisted=current_date, observed=observed_date)
-                if current_date < observed_date:
-                    # Day rollover — reset counter + fired-today set.
+                if persisted is None:
                     current_date = observed_date
                     current_count = 0
-                    self._fired_today.clear()
+                else:
+                    current_date, current_count = persisted
+                    if current_date > observed_date:
+                        raise ClockSkewError(persisted=current_date, observed=observed_date)
+                    if current_date < observed_date:
+                        # Day rollover — reset counter + fired-today set.
+                        current_date = observed_date
+                        current_count = 0
+                        self._fired_today.clear()
 
-            if current_count >= self.daily_limit:
-                raise DailyQuotaExceeded(
-                    f"daily_limit={self.daily_limit} already reached on {current_date.isoformat()}"
-                )
+                if current_count >= self.daily_limit:
+                    raise DailyQuotaExceeded(
+                        f"daily_limit={self.daily_limit} already reached on "
+                        f"{current_date.isoformat()}"
+                    )
 
-            new_count = current_count + 1
-            self._write_state(current_date, new_count)
+                new_count = current_count + 1
+                # Single put under the same txn — atomic, no torn write.
+                txn.put(_LMDB_KEY, self._encode_state(current_date, new_count))
 
             return new_count
 
@@ -380,15 +453,6 @@ class DailyQuotaTracker:
         if raw is None:
             return None
         return self._decode_state(bytes(raw))
-
-    def _write_state(self, current_date: date, count: int) -> None:
-        """Persist the (date, count) tuple under a single LMDB key.
-
-        Atomic — single write txn — no torn-write possible (Agent 3 §B).
-        """
-        payload = self._encode_state(current_date, count)
-        with self._env.begin(write=True) as txn:
-            txn.put(_LMDB_KEY, payload)
 
     @staticmethod
     def _encode_state(current_date: date, count: int) -> bytes:
