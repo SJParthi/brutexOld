@@ -100,11 +100,15 @@ repos:
         language: system
         pass_filenames: false
 
+      # Validates the message BEING COMMITTED (pre-commit passes the msg file
+      # at the commit-msg stage). Was `HEAD~1 HEAD`, which validated the
+      # PREVIOUS commit instead — so one non-conforming squash title on main
+      # (PR #588's dual-type title) blocked every later local commit
+      # (DEC-WINDOW-OPTION-DECODE-001 hardening).
       - id: conventional-commit
         name: conventional commit format
-        entry: bash scripts/ci/check-conventional-commits.sh HEAD~1 HEAD
+        entry: bash scripts/ci/check-conventional-commits.sh --msg-file
         language: system
-        pass_filenames: false
         stages: [commit-msg]
 
       # ── Pre-push gate (DEC-PRE-PUSH-HOOK-001) ──────────────────────

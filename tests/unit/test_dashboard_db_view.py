@@ -365,3 +365,96 @@ def test_build_window_payload_falls_back_to_status_sidecar(tmp_path: Path) -> No
 
 def test_build_window_payload_empty_when_neither_exists(tmp_path: Path) -> None:
     assert build_window_payload(tmp_path) == {"source": "status_log", "count": 0, "windows": []}
+
+
+# ── option-window decode (DEC-WINDOW-OPTION-DECODE-001) ──────────────────
+
+
+def _option_window_key(
+    security_id: str = "25|NSE_FNO", interval: str = "OPT|WEEK|1|ATM+3|CALL"
+) -> WindowKey:
+    """An option-series ledger key exactly as option_ingest._coverage_key folds it."""
+    return WindowKey(
+        market="dhan-option",
+        security_id=security_id,
+        interval=interval,
+        start=date(2021, 1, 1),
+        end=date(2021, 1, 31),
+    )
+
+
+class TestOptionWindowDecode:
+    """Option windows display the operator's PRECISE coordinates, never vendor ids.
+
+    The live /coverage/windows complaint (2026-06-10): option rows rendered as
+    ``25|NSE_FNO`` / ``OPT|WEEK|1|ATM+3|CALL`` — undecipherable and sorted below
+    20k+ spot rows. The projection now decodes them via the id→symbol map.
+    """
+
+    def test_option_window_decodes_symbol_and_series(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _option_window_key(), raw_bars=375, error_type=None, bars_appended=375, now=_WINDOW_NOW
+        )
+        save_window_ledger(ledger, tmp_path)
+
+        payload = build_window_payload(tmp_path, symbol_for_id={"25": "BANKNIFTY"})
+        (window,) = payload["windows"]
+        assert window["symbol"] == "BANKNIFTY · NSE_FNO"
+        assert window["interval"] == "WEEK#1 ATM+3 CALL · 1m"
+        assert window["market"] == "dhan-option"  # the filter key stays raw
+
+    def test_unknown_id_keeps_numeric_id_not_a_crash(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _option_window_key(security_id="9999|BSE_FNO"),
+            raw_bars=1,
+            error_type=None,
+            bars_appended=1,
+            now=_WINDOW_NOW,
+        )
+        save_window_ledger(ledger, tmp_path)
+
+        payload = build_window_payload(tmp_path, symbol_for_id={"25": "BANKNIFTY"})
+        (window,) = payload["windows"]
+        assert window["symbol"] == "9999 · BSE_FNO"  # still precise, still distinguishable
+
+    def test_no_map_still_decodes_series_coordinates(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _option_window_key(), raw_bars=1, error_type=None, bars_appended=1, now=_WINDOW_NOW
+        )
+        save_window_ledger(ledger, tmp_path)
+
+        (window,) = build_window_payload(tmp_path)["windows"]
+        assert window["symbol"] == "25 · NSE_FNO"
+        assert window["interval"] == "WEEK#1 ATM+3 CALL · 1m"
+
+    def test_malformed_option_key_falls_back_to_raw(self, tmp_path: Path) -> None:
+        # A dhan-option row whose coordinates don't parse (no segment separator /
+        # wrong arity) is shown RAW — fallback, never an exception, never hidden.
+        ledger = WindowLedger()
+        ledger.record(
+            _option_window_key(security_id="25", interval="OPT|WEEK|1"),
+            raw_bars=1,
+            error_type=None,
+            bars_appended=1,
+            now=_WINDOW_NOW,
+        )
+        save_window_ledger(ledger, tmp_path)
+
+        (window,) = build_window_payload(tmp_path, symbol_for_id={"25": "BANKNIFTY"})["windows"]
+        assert window["symbol"] == "25"
+        assert window["interval"] == "OPT|WEEK|1"
+
+    def test_spot_rows_are_byte_unchanged_by_the_map(self, tmp_path: Path) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+        )
+        save_window_ledger(ledger, tmp_path)
+
+        with_map = build_window_payload(tmp_path, symbol_for_id={"25": "BANKNIFTY"})
+        without_map = build_window_payload(tmp_path)
+        assert with_map == without_map
+        assert with_map["windows"][0]["symbol"] == "NIFTY"
