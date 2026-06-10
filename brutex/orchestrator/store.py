@@ -560,7 +560,10 @@ class WorkItemStore:
         """
         if self._closed:
             return
-        self._env.sync(force=force)
+        # lmdb-py's C binding rejects keyword arguments on sync() —
+        # `sync(force=...)` raised TypeError on every call (latent until
+        # DEC-ORCH-STRICT-GATES-001 added the first flush() test).
+        self._env.sync(force)
 
     def delete_phase(self, phase: IngestPhase) -> int:
         """Clear every item from *phase*. Returns the number of

@@ -468,6 +468,51 @@ def fno_underlying_symbols(rows: Iterable[Mapping[str, str]]) -> frozenset[str]:
 #: NOT options-eligible and must not be option-pullable.
 _OPTION_LEG_TYPES: Final[frozenset[str]] = frozenset({"OPTSTK", "OPTIDX"})
 
+#: Vendor name-skew aliases between an OPTIDX leg's ``UNDERLYING_SYMBOL`` and the
+#: spot INDEX row's ``SYMBOL_NAME`` (DEC-OPTIONS-ELIGIBLE-PRECISE-001). Verified
+#: against the operator-supplied detailed master (2026-06-10): the spot row is
+#: ``SYMBOL_NAME='NIFTY NEXT 50'`` (NSE, id 38) while its option legs say
+#: ``UNDERLYING_SYMBOL='NIFTYNXT50'`` (underlying id 26013) — no string transform
+#: bridges NXT↔NEXT, so the alias is explicit and sourced. Every other admitted
+#: option index matches by exact symbol (NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY/
+#: SENSEX/BANKEX).
+_OPTIDX_UNDERLYING_ALIASES: Final[dict[str, str]] = {"NIFTYNXT50": "NIFTY NEXT 50"}
+
+
+def index_options_underlying_symbols(rows: Iterable[Mapping[str, str]]) -> frozenset[str]:
+    """Collect the UPPER-CASED **index** tickers with listed OPTIDX legs.
+
+    The PRECISE index arm of the option-pull guard
+    (DEC-OPTIONS-ELIGIBLE-PRECISE-001): OPTIDX rows ONLY (an OPTSTK ticker can
+    never make an index option-pullable), NSE + BSE (so SENSEX/BANKEX count),
+    vendor name-skews bridged via :data:`_OPTIDX_UNDERLYING_ALIASES` (both the
+    raw and the aliased spelling are returned, so either side of the skew
+    matches). Futures and test scrips are excluded.
+
+    The previous id arm (``UNDERLYING_SECURITY_ID`` membership) was VERIFIED
+    WRONG against the real master (2026-06-10): option legs point at the
+    derivatives id space (NIFTY → 26000), never the spot INDEX row's id
+    (NIFTY → 13), and the pooled ids collide across namespaces — NSE equity ids
+    (ABB=13, ADANIENT=25) and BSE underlying ids (SENSEX=1 ≙ NSE 'NIFTY MIDCAP
+    150', BANKEX=12 ≙ NSE 'NIFTY ALPHA 50') — so id membership blessed and
+    blocked the WRONG indices. Index eligibility is therefore symbol-only.
+    """
+    eligible: set[str] = set()
+    for row in rows:
+        if row.get("INSTRUMENT", "").strip().upper() != "OPTIDX":
+            continue
+        if row.get("EXCH_ID", "").strip().upper() not in (Exchange.NSE, Exchange.BSE):
+            continue
+        underlying = _opt_str(row.get("UNDERLYING_SYMBOL"))
+        if underlying is None or _is_test_scrip(row.get("SYMBOL_NAME"), underlying):
+            continue
+        upper = underlying.upper()
+        eligible.add(upper)
+        alias = _OPTIDX_UNDERLYING_ALIASES.get(upper)
+        if alias is not None:
+            eligible.add(alias)
+    return frozenset(eligible)
+
 
 def options_underlying_symbols(rows: Iterable[Mapping[str, str]]) -> frozenset[str]:
     """Collect the UPPER-CASED tickers that have listed **OPTIONS** (OPTSTK/OPTIDX).
@@ -581,9 +626,18 @@ class UniverseReport:
     #: option-pull guard (DEC-OPTIONS-ELIGIBLE-GUARD-001): an admitted index whose
     #: ``symbol_name`` is absent here has no chain and is blocked from option-pull.
     options_eligible_symbols: frozenset[str] = frozenset()
-    #: The spot ``SECURITY_ID``s that listed OPTIONS legs point to — the string-free
-    #: arm of the same guard (matches an index by id, dodging name-case fragility).
+    #: The ``UNDERLYING_SECURITY_ID``s that listed OPTIONS legs point to. HONEST
+    #: LIMIT (DEC-OPTIONS-ELIGIBLE-PRECISE-001, measured 2026-06-10): these ids
+    #: live in the DERIVATIVES id space and collide across exchanges/instrument
+    #: families — they can NOT be matched against a spot INDEX row's id (NIFTY
+    #: spot=13 vs its options' underlying=26000; BSE SENSEX legs carry id 1 which
+    #: is NSE 'NIFTY MIDCAP 150'). Kept as an informational report surface only;
+    #: NO eligibility decision may consume it.
     options_eligible_security_ids: frozenset[int] = frozenset()
+    #: The UPPER-CASED **index** tickers with listed OPTIDX legs, alias-normalized
+    #: (``NIFTYNXT50`` ↔ ``NIFTY NEXT 50``) — THE authoritative index arm of the
+    #: option-pull guard (DEC-OPTIONS-ELIGIBLE-PRECISE-001).
+    index_options_symbols: frozenset[str] = frozenset()
 
 
 #: F&O leg ``INSTRUMENT`` codes whose lot/freeze define the TRADABLE contract
@@ -694,6 +748,7 @@ def select_universe_report(
     canonical_ids = fno_underlying_security_ids(rows)
     options_symbols = options_underlying_symbols(rows)
     options_security_ids = options_underlying_security_ids(rows)
+    index_options = index_options_underlying_symbols(rows)
     by_key: dict[tuple[Exchange, str], Instrument] = {}
     parsed = 0
     filtered = 0
@@ -809,6 +864,7 @@ def select_universe_report(
         fno_eligible_symbols=eligible,
         options_eligible_symbols=options_symbols,
         options_eligible_security_ids=options_security_ids,
+        index_options_symbols=index_options,
     )
 
 
