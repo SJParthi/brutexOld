@@ -1499,6 +1499,44 @@ class InstrumentStore(metaclass=_StoreMeta):
         row = self._conn.execute(sql).fetchone()
         return bool(row[0]) if row else False
 
+    def has_stale_option_eligibility(self) -> bool:
+        """Return ``True`` if the latest snapshot carries pre-precise OPT/REF flags.
+
+        The pre-DEC-OPTIONS-ELIGIBLE-PRECISE-001 fingerprint
+        (DEC-ELIGIBILITY-AUTOHEAL-001): the retired id-collision tagger left
+        stores where a brute-force index (NIFTY / BANKNIFTY / SENSEX — all of
+        which ALWAYS carry OPTIDX legs in the real master) sits wrongly
+        ``reference_only = TRUE``, and/or INDIA VIX (which has NO option chain
+        and is REFERENCE ONLY by decree, CLAUDE.md §2 Rule 3) sits wrongly
+        option-pullable. Either direction means the flags were written by an
+        old build: the boot auto-heal then re-loads the keyless master so the
+        precise tagger re-tags every row — the operator never has to remember
+        the "Load instruments" click after an upgrade.
+
+        Idempotent by the same argument as the sibling probes: a precise-tagger
+        refresh clears both arms, so the reload fires at most once. (If the
+        vendor master ever genuinely lost the NIFTY option chain, the reload
+        would re-fire each boot — one keyless CSV fetch per boot, logged, and a
+        far smaller problem than the broken vendor data itself.) One indexed
+        ``EXISTS`` probe over the latest snapshot, mirroring
+        :meth:`has_placeholder_stock_economics`.
+        """
+        self._ensure_open()
+        sql = (
+            "SELECT EXISTS ("
+            "  SELECT 1 FROM instruments "
+            "  WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM instruments) "
+            "  AND instrument = 'IDX' "
+            "  AND ("
+            "    (symbol_name IN ('NIFTY', 'BANKNIFTY', 'SENSEX') "
+            "     AND reference_only = TRUE) "
+            "    OR (symbol_name = 'INDIA VIX' AND reference_only = FALSE)"
+            "  )"
+            ")"
+        )
+        row = self._conn.execute(sql).fetchone()
+        return bool(row[0]) if row else False
+
     def prune_to_latest_snapshot(self) -> int:
         """Delete every instrument row except those of the newest ``snapshot_date``.
 

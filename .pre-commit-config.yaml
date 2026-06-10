@@ -56,7 +56,12 @@ repos:
     hooks:
       - id: mypy
         name: mypy --strict
-        args: [--strict, --ignore-missing-imports]
+        # --follow-imports=silent: the isolated hook env lacks the native wheels
+        # (blake3/polars/lmdb), so following imports into UNCHANGED modules
+        # yields env-dependent phantom errors (the #575/#579 whack-a-mole class).
+        # The hook checks exactly the files it is given; the BINDING full-package
+        # gate stays ci.yml mypy --strict over all 214 files (venv-faithful).
+        args: [--strict, --ignore-missing-imports, --follow-imports=silent]
         files: ^brutex/
         additional_dependencies:
           - pydantic>=2.7

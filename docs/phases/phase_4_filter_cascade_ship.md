@@ -11,8 +11,9 @@ Build Stage 4 — the statistical filter cascade (Deflated Sharpe Ratio
 with effective-N + CPCV + WFO + Lockbox) that takes Phase 3's top 100
 candidates down to the FINAL **top 3 production strategies**.
 
-Then run the **first overnight production sweep** (~10-20 hours
-end-to-end on M4 Pro alone, no AWS).
+Then run the **first production sweep** (baseline 2-4 days on the M4 Pro
+envelope, no AWS; the former "overnight" figure assumed the abandoned
+Stage-2.5 — DEC-SPRT-SLA-RETIRE-001).
 
 This is the LAST PHASE. After Phase 4 ship: top 3 strategies are
 **ready** for forward-paper-trading or the Options Track translation.
@@ -86,7 +87,7 @@ This is the LAST PHASE. After Phase 4 ship: top 3 strategies are
 - [ ] `brutex pull` — refresh latest data (incremental)
 - [ ] `brutex sweep --stage 1A --inst NIFTY --tf 15m` — pattern discovery
 - [ ] `brutex sweep --stage 1B` — expansion to 63 inst-TF
-- [ ] `brutex sweep --stage 2 --night-mode` — full brute force (~10-20 hours with GPU + Stage 2.5)
+- [ ] `brutex sweep --stage 2 --night-mode` — full brute force (baseline 2-4 days; GPU projection pending measurement — Stage 2.5 abandoned, DEC-SPRT-SLA-RETIRE-001)
 - [ ] `brutex sweep --stage 3` — CMA-ES refine top 100
 - [ ] `brutex sweep --stage 4 --filter-cascade` — DSR → CPCV → WFO → Lockbox
 - [ ] Wake up to top 3 production candidates ready
