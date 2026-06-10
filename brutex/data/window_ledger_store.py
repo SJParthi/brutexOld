@@ -324,6 +324,7 @@ def plan_windows(
     start: date,
     end: date,
     now: datetime | None = None,
+    now_ist: datetime | None = None,
 ) -> int:
     """Upsert every planned window for the pull as ``PLANNED`` — returns the count.
 
@@ -340,15 +341,35 @@ def plan_windows(
     accumulating one orphan per series per day. O(windows) plan + one O(rows)
     prune scan, once at pull start. Generic over the instrument's
     ``exch_id``/``segment``/``symbol_name``, so it serves spot AND option series.
+
+    CLAMP PARITY (DEC-PLAN-CLAMP-PARITY-001): the planner tiles the SAME
+    settled-data bound the fetch spine does —
+    :func:`~brutex.adapters.dhan.ingest.clamp_window_end` per interval
+    (DEC-DAILY-CANDLE-CLAMP-001: daily → ``today``; intraday → ``today + 1``
+    only from the 15:30 IST close). Planning the RAW ``end`` while the fetch
+    clamps minted a key the fetch could never record (one permanently-PLANNED
+    ghost per ``(instrument, interval)`` per pull — the operator's live 783
+    pending rows), and :meth:`~WindowLedger.prune_superseded`'s shorter-end
+    rule kept them (the ghost's end is LONGER than every later clamped plan).
+    ``now_ist`` injects the clock for tests; the boundary race (the clamp
+    moving between this plan and a fetch crossing 15:30 IST) self-heals on the
+    next pull's plan→prune cycle.
     """
-    from brutex.adapters.dhan.ingest import _MARKET, _windows
+    from brutex.adapters.dhan.ingest import _MARKET, _now_ist, _windows, clamp_window_end
 
     stamp = now if now is not None else datetime.now(UTC)
+    ist = now_ist if now_ist is not None else _now_ist()
     # ONE tiling per interval (the tiler is pure in (interval, start, end)) with
     # its ISO bounds materialised once — the GC index below then shares those
-    # exact strings instead of re-serialising per (instrument × window).
+    # exact strings instead of re-serialising per (instrument × window). The end
+    # bound is CLAMPED exactly as `ingest_spot` clamps it (including the
+    # start < clamped_end empty-range guard), so planned keys == fetched keys.
+    clamped_ends: dict[str, date] = {
+        interval: clamp_window_end(interval, end, now_ist=ist) for interval in intervals
+    }
     tiles_by_interval: dict[str, list[tuple[date, date]]] = {
-        interval: _windows(interval, start, end) for interval in intervals
+        interval: (_windows(interval, start, clamped) if start < clamped else [])
+        for interval, clamped in clamped_ends.items()
     }
     tiles_iso: dict[str, dict[str, str]] = {
         interval: {ws.isoformat(): we.isoformat() for ws, we in tiles}
