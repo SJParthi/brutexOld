@@ -144,6 +144,31 @@ def is_no_data_error(exc: DhanError) -> bool:
 _TOKEN_INVALID_MARKERS: tuple[str, ...] = ("DH-906", "Invalid Token")
 
 
+def is_auth_failure_message(text: str) -> bool:
+    """True if *text* carries a Dhan token-invalid marker (``DH-906`` / "Invalid Token").
+
+    The STRING-level twin of :func:`is_auth_failure` for callers that hold only a
+    quarantined failure's serialised ``str(exc)`` — the auth analog of
+    :func:`is_no_data_message`, sharing the same :data:`_TOKEN_INVALID_MARKERS`
+    so "the token died" lives in ONE place (CLAUDE.md §11 COMMON). AUTH OUTRANKS
+    NO-DATA (DEC-OPTION-DH905-CONTINUE-001, hostile finding 1): a 400 carrying
+    BOTH marker families must classify as an auth death, never a benign known
+    gap — string-level consumers test this BEFORE (or alongside)
+    :func:`is_no_data_message`.
+
+    Parameters
+    ----------
+    text
+        A failure message (typically ``str(exc)`` of a quarantined series/pair).
+
+    Returns
+    -------
+    bool
+        ``True`` iff *text* contains any token-invalid marker.
+    """
+    return any(marker in text for marker in _TOKEN_INVALID_MARKERS)
+
+
 def is_auth_failure(exc: DhanError) -> bool:
     """True if *exc* means the Dhan access token is dead (expired/invalid).
 
@@ -173,8 +198,7 @@ def is_auth_failure(exc: DhanError) -> bool:
     if isinstance(exc, DhanAuthError):
         return True
     if isinstance(exc, DhanBadRequestError):
-        text = str(exc)
-        return any(marker in text for marker in _TOKEN_INVALID_MARKERS)
+        return is_auth_failure_message(str(exc))
     return False
 
 
@@ -202,6 +226,7 @@ __all__ = [
     "DhanTransportError",
     "from_http_status",
     "is_auth_failure",
+    "is_auth_failure_message",
     "is_no_data_error",
     "is_no_data_message",
     "is_rate_limit",

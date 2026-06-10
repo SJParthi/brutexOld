@@ -40,13 +40,28 @@ spine closes that gap the way the spot path does (DEC-DHAN-429-RETRY-001 +
   the rate governor has stepped down, so the retry waits the limiter out rather
   than fighting it (mirrors the spot DEC-DHAN-429-RETRY-001 rationale).
 * **Complete OR empty, never partial** — bars are STAGED per window and the sink
-  is written + coverage marked only in a final commit pass AFTER every cursor has
-  been fetched cleanly. If a cursor still fails after its retry budget (or a
-  TERMINAL error raises mid-fetch), the whole series ABORTS having committed
-  NOTHING — the partition stays EMPTY and the un-committed windows are deferred
-  to the next pull (coverage untouched ⇒ a re-pull re-fetches them). So the
-  partition the lake holds for a series is always whole or absent, never a
-  page-holed partial.
+  is written + the ledger's ``SUCCESS`` rows recorded only in a final commit pass
+  AFTER every cursor has been fetched cleanly. If a cursor still fails after its
+  retry budget (or a TERMINAL error raises mid-fetch), the whole series ABORTS
+  having committed NOTHING — the partition stays EMPTY and the un-committed
+  windows are deferred to the next pull (their ledger rows untouched ⇒ a re-pull
+  re-fetches them). So the partition the lake holds for a series is always whole
+  or absent, never a page-holed partial.
+* **A DH-905 cursor is a 0-bar KNOWN GAP, not a failure**
+  (DEC-OPTION-DH905-CONTINUE-001, superseding the DEC-WINDOW-LEDGER-001 Stage-c2
+  settle-then-quarantine). Dhan's "no data present" 400 is the vendor's
+  DEFINITIVE answer that THIS window has no bars, so the cursor is settled
+  ``SKIPPED`` in the ledger immediately and the series CONTINUES — a fully-dead
+  series (e.g. a far weekly expiry code that never listed) drains in ONE paced
+  pass instead of one window per pull (~67 pulls before). The gap settle writes
+  LEDGER state only, never bars, so the all-or-nothing invariant above is
+  untouched: "complete" means every window Dhan HAS data for is committed; a
+  known-gap window is a page Dhan does NOT have, never a hole. AUTH OUTRANKS
+  NO-DATA: a token-death 400 carrying both markers (``DH-905`` + ``DH-906``) is
+  an auth failure, never a gap — settling it would mask real windows ``SKIPPED``
+  forever on a dead token (the DEC-OPTION-DH905-CONTINUE-001 hostile review's
+  blocker finding 1). Non-DH-905 terminal errors still raise (quarantined
+  upstream, no settle).
 
 **Honest envelope (Golden Rule #10):** the staging buffer is
 O(session-bars in the series) SPACE, NOT O(1) — an all-or-nothing commit cannot
@@ -55,7 +70,13 @@ guarantees that DO hold are per-bar: the coverage probe, the dedup probe, and
 the coverage key build are each O(1). The retry COUNT is bounded by
 ``max_retry_passes`` (never infinite) and every fetch (initial + retry) is paced
 by the SAME ``≤ 5 r/s`` bucket (Rule #6); a token death / terminal error is
-non-retryable and raises straight out.
+non-retryable and raises straight out. A known-gap ``SKIPPED`` settle lands
+mid-Phase-1 (the vendor's per-window answer is independent of the series' fate
+and survives a later abort — strictly more forward progress); ``SKIPPED`` is
+settled on Dhan's DEFINITIVE no-data answer, so a systematic param/contract bug
+that mass-triggers DH-905 would settle real windows — recoverable via the
+documented ledger surgery runbook (``docs/runbooks/option-ledger-gap-unsettle.md``),
+disclosed in the decision entry, never silent (the gap-only verdict is loud).
 """
 
 from __future__ import annotations
@@ -204,11 +225,23 @@ class OptionIngestReport:
     """Cursors NOT committed because the series aborted (a cursor outran its retry budget).
 
     On an aborted series the partition is committed all-or-nothing as EMPTY, so
-    EVERY non-skipped window is deferred to the next pull (never marked complete —
-    the no-skip guarantee); this equals that deferred count. Equals
-    :attr:`transient_failures` (the same residual, under an explicit name mirroring
-    the spot :class:`~brutex.adapters.dhan.ingest.IngestReport`). Zero on a fully
-    committed (complete) series.
+    every non-skipped, non-known-gap window is deferred to the next pull (never
+    marked complete — the no-skip guarantee); this equals that deferred count.
+    Settled DH-905 known-gap windows are EXCLUDED — they are the vendor's
+    definitive no-data answer, never a failure (DEC-OPTION-DH905-CONTINUE-001).
+    Equals :attr:`transient_failures` (the same residual, under an explicit name
+    mirroring the spot :class:`~brutex.adapters.dhan.ingest.IngestReport`). Zero
+    on a fully committed (complete) series.
+    """
+
+    no_data_windows: int = 0
+    """Cursors Dhan answered DH-905 "no data" THIS pass — settled known gaps.
+
+    DEC-OPTION-DH905-CONTINUE-001: each is a 0-bar known-gap cursor, settled
+    ``SKIPPED`` in the ledger (when one is attached) and counted here — never a
+    failure, never part of :attr:`still_failed_windows`. A fully-dead N-window
+    series reports ``complete=True, bars_appended=0, no_data_windows=N`` after
+    ONE paced pass; the next pull skips all N via the ledger.
     """
 
     @property
@@ -217,7 +250,10 @@ class OptionIngestReport:
 
         The transactional invariant (DEC-OPTION-429-RECOVERY-001): a series either
         commits every window (``complete``) or commits nothing (``still_failed_windows
-        > 0``). Never a page-holed partial.
+        > 0``). Never a page-holed partial. A continued-with-gaps series IS
+        complete (DEC-OPTION-DH905-CONTINUE-001): its known-gap windows are
+        settled vendor answers, not residual work — "complete" means every window
+        Dhan HAS data for is committed.
         """
         return self.still_failed_windows == 0
 
@@ -290,7 +326,10 @@ def ingest_rolling_option_series(
     cleanly. If any cursor outruns its retry budget (or a terminal error raises),
     the whole series aborts having committed NOTHING — so the partition the lake
     holds is always complete or empty, never a page-holed partial
-    (DEC-OPTION-429-RECOVERY-001, audit Gap #2).
+    (DEC-OPTION-429-RECOVERY-001, audit Gap #2). A cursor Dhan answers DH-905
+    "no data" is a 0-bar KNOWN GAP, not a failure: it settles ``SKIPPED`` in the
+    ledger and the series CONTINUES (DEC-OPTION-DH905-CONTINUE-001), so a
+    fully-dead series drains in one paced pass.
 
     Parameters
     ----------
@@ -354,14 +393,18 @@ def ingest_rolling_option_series(
         Window count, total bars committed (session-filtered), the residual
         ``transient_failures`` / ``still_failed_windows`` (0 on a complete series;
         the deferred count on an aborted one), windows skipped as already-complete,
-        and ``retried_windows`` (distinct cursors re-attempted). ``report.complete``
-        is ``True`` iff the partition committed whole.
+        ``no_data_windows`` (DH-905 known gaps settled this pass —
+        DEC-OPTION-DH905-CONTINUE-001), and ``retried_windows`` (distinct cursors
+        re-attempted). ``report.complete`` is ``True`` iff the partition committed
+        whole — a continued-with-gaps series IS complete.
 
     Raises
     ------
     DhanError
-        On a terminal (non-retryable) fetch error — propagated before any commit,
-        so the partition stays empty and the series is quarantined upstream.
+        On a terminal (non-retryable) fetch error that is NOT a pure DH-905
+        no-data answer — propagated before any commit, so the partition stays
+        empty and the series is quarantined upstream. A DH-905 cursor never
+        raises: it settles as a known gap and the series continues.
     """
     windows = _window_dates(start, end)
     # Read the pull's correlation id ONCE (the controller bound it via
@@ -492,6 +535,7 @@ def ingest_rolling_option_series(
     # leaves the partition EMPTY rather than page-holed (audit Gap #2).
     staged: list[tuple[WindowKey, list[OptionBar]]] = []
     skipped = 0
+    no_data = 0
     for window_start, window_end in windows:
         key = _coverage_key(
             exchange_segment=exchange_segment,
@@ -526,26 +570,47 @@ def ingest_rolling_option_series(
             # A Dhan DH-905 "no data present" for THIS option window is the vendor's
             # DEFINITIVE no-data answer (a genuine gap — e.g. an illiquid strike /
             # far expiry with no trades in the range). Settle it SKIPPED in the
-            # unified ledger (DEC-WINDOW-LEDGER-001 Stage c2) so it stops ABORTING
-            # the whole series forever: the next pull skips this known-gap window
-            # and can commit the rest. It is STILL re-raised to the
-            # run_dhan_options_ingest quarantine — behaviour unchanged; this only
-            # enriches the ledger so the known gap is never re-fetched. A genuine
+            # unified ledger and CONTINUE the series — a 0-bar known-gap cursor,
+            # never a failure (DEC-OPTION-DH905-CONTINUE-001, superseding the
+            # Stage-c2 settle-then-quarantine): a fully-dead series drains in ONE
+            # paced pass instead of one window per pull. AUTH OUTRANKS NO-DATA
+            # (the hostile review's blocker finding 1): a token-death 400 carrying
+            # both markers (DH-905 + DH-906) must re-raise un-settled — settling it
+            # would mask real windows SKIPPED forever on a dead token. A genuine
             # retryable error never reaches here (it returns None from _fetch_cursor
-            # above); a non-DH-905 terminal error is re-raised WITHOUT a settle.
-            if ledger is not None and is_no_data_error(exc):
-                ledger.settle_known_gap(key, now=datetime.now(UTC), reason=type(exc).__name__)
+            # above); any other terminal error is re-raised WITHOUT a settle
+            # (quarantined upstream by ``run_dhan_options_ingest``).
+            if is_no_data_error(exc) and not is_auth_failure(exc):
+                if ledger is not None:
+                    # The full (truncated) vendor message as the reason, so the
+                    # browsable ledger row self-explains (hostile finding 5).
+                    ledger.settle_known_gap(key, now=datetime.now(UTC), reason=str(exc)[:200])
+                no_data += 1
+                _LOG.debug(
+                    "ingest.window",
+                    pull_id=pull_id,
+                    window_start=window_start.isoformat(),
+                    window_end=window_end.isoformat(),
+                    action="known_gap",
+                    error_type=type(exc).__name__,
+                    **series_fields,
+                )
+                continue
             raise
         if bars is None:
             # A cursor outran its retry budget → ABORT the whole series, committing
-            # NOTHING. Every non-skipped window is deferred to the next pull (the
-            # no-skip guarantee — ledger untouched ⇒ a re-pull re-fetches them).
-            still_failed = len(windows) - skipped
+            # NOTHING. Every non-skipped, non-known-gap window is deferred to the
+            # next pull (the no-skip guarantee — its ledger row untouched ⇒ a
+            # re-pull re-fetches it). Settled DH-905 gaps are NOT deferred — their
+            # settle is the vendor's answer and survives the abort (strictly more
+            # forward progress; DEC-OPTION-DH905-CONTINUE-001).
+            still_failed = len(windows) - skipped - no_data
             _LOG.warning(
                 "ingest.series.aborted",
                 pull_id=pull_id,
                 windows=len(windows),
                 skipped_windows=skipped,
+                no_data_windows=no_data,
                 still_failed_windows=still_failed,
                 committed=False,
                 note="cursor outran retry budget — partition NOT committed (empty, never partial)",
@@ -558,13 +623,17 @@ def ingest_rolling_option_series(
                 skipped_windows=skipped,
                 retried_windows=len(retried),
                 still_failed_windows=still_failed,
+                no_data_windows=no_data,
             )
         staged.append((key, bars))
 
     # ── Phase 2 — COMMIT (every cursor fetched cleanly) ──
-    # The only place the sink + ledger are mutated, so the partition is committed
-    # all-or-nothing. Each window's append + ledger record mirrors the prior
-    # per-window write, just deferred until the series is proven whole.
+    # The only place the SINK is written + SUCCESS rows recorded, so the bars
+    # partition is committed all-or-nothing. (Known-gap SKIPPED rows settle in
+    # Phase 1 — the vendor's per-window no-data answer is independent of the
+    # series' fate and writes ledger state only, never bars.) Each window's
+    # append + ledger record mirrors the prior per-window write, just deferred
+    # until the series is proven whole.
     bars_appended = 0
     for key, bars in staged:
         appended = sink.append_option_bars(
@@ -603,6 +672,7 @@ def ingest_rolling_option_series(
         bars_appended=bars_appended,
         transient_failures=0,
         skipped_windows=skipped,
+        no_data_windows=no_data,
         retried_windows=len(retried),
         still_failed_windows=0,
         **series_fields,
@@ -614,6 +684,7 @@ def ingest_rolling_option_series(
         skipped_windows=skipped,
         retried_windows=len(retried),
         still_failed_windows=0,
+        no_data_windows=no_data,
     )
 
 

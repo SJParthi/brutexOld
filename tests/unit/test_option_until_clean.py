@@ -34,7 +34,7 @@ from brutex.adapters.dhan.option_universe_ingest import (
 )
 from brutex.dashboard.option_pull_controller import pull_options
 from brutex.data.models import OptionBar
-from brutex.data.window_ledger_store import ledger_path
+from brutex.data.window_ledger_store import ledger_path, load_window_ledger
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.orchestrator.parallel import PoolRunParallel
 from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
@@ -246,8 +246,14 @@ class TestAuthGuardFanout:
         assert report.bars_appended == 1  # only the healthy series committed
         assert report.failed_series == 0  # an abort is NOT a quarantine
 
-    def test_no_data_quarantine_classified_as_gap_not_failure(self) -> None:
-        """A DH-905 quarantine reads as a benign gap in the report split."""
+    def test_no_data_series_completes_gap_only_not_failure(self) -> None:
+        """A DH-905 series completes GAP-ONLY in one pass — never a quarantine.
+
+        DEC-OPTION-DH905-CONTINUE-001 (supersedes the quarantine split this test
+        previously pinned): the spine settles each DH-905 cursor SKIPPED and
+        continues, so the dead series is COMPLETE with zero bars — counted in
+        ``gap_only_series``, with the quarantine counters all zero.
+        """
 
         class _NoDataClient:
             def post_json(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
@@ -264,9 +270,12 @@ class TestAuthGuardFanout:
             option_types=("CALL",),
             run_parallel=_SerialRun(),
         )
-        assert report.failed_series == 1
-        assert report.no_data_series == 1
+        assert report.failed_series == 0
+        assert report.no_data_series == 0
         assert report.real_failed_series == 0
+        assert report.gap_only_series == 1
+        assert report.no_data_windows == 1
+        assert report.still_failed_windows == 0  # a gap is never residual work
         assert report.auth_aborted is False
 
 
@@ -387,6 +396,128 @@ class TestUntilCleanLoop:
         assert report.real_failed_series + report.series_skipped_auth == 7
         assert report.total_series_completed == 0
 
+    def test_dead_series_universe_drains_in_one_round(self, tmp_path: Path) -> None:
+        """The DEC-OPTION-DH905-CONTINUE-001 root fix: a fully-dead universe drains
+        in ONE paced pass — every window settled SKIPPED, residual 0, stop_clean
+        after round 1, and the verdict reads ``known_gap_only`` (never a lying
+        ``clean`` and never the pre-fix ~one-window-per-pull crawl)."""
+        lock = threading.Lock()
+        state = {"calls": 0}
+
+        class _DeadClient:
+            def post_json(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
+                del endpoint, body
+                with lock:
+                    state["calls"] += 1
+                raise DhanBadRequestError("HTTP 400 bad request: DH-905 no data present")
+
+        def _factory(_lake_root: Path) -> tuple[JsonPoster, OptionBarSink]:
+            return _DeadClient(), _Sink()
+
+        sleeps: list[int] = []
+        report = pull_options(
+            [_stock_instrument()],  # EQ → ATM±3 = 7 series, one window each
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_NOW,
+            expiry_codes=(1,),
+            option_types=("CALL",),
+            client_factory=_factory,
+            until_clean=True,
+            until_clean_sleep=sleeps.append,
+        )
+        assert state["calls"] == 7  # ONE paced call per window — the whole drain
+        assert report.rounds_run == 1  # round 1 is already clean
+        assert sleeps == []  # no inter-round waits — nothing residual
+        assert report.still_failed_windows == 0
+        assert report.gap_only_series == 7
+        assert report.total_series_completed == 7  # gap-only series ARE complete
+        assert report.symbols[0].series_gap_only == 7  # attributed per symbol
+        assert report.total_series_failed == 0  # never a quarantine
+        assert report.verdict.kind == "known_gap_only"  # loud, honest, actionable
+        assert ledger_path(tmp_path).is_file()
+        # Every settled known gap is durable — the next pull skips all 7.
+        persisted = load_window_ledger(tmp_path)
+        assert persisted.count == 7
+        assert all(r.status == "SKIPPED" for r in persisted.records())
+
+    def test_quota_death_mid_round_keeps_gap_settles_durable(self, tmp_path: Path) -> None:
+        """Hostile finding 3: gap settles made BEFORE a mid-round quota death are
+        persisted by the ``finally`` ledger flush and SKIPPED on the next pull —
+        the quota reset never re-burns a settled known gap."""
+        # ATM's single window answers DH-905 on its first fetch (settling the
+        # gap), then ATM's SECOND window quota-dies — deterministic because both
+        # events live on the SAME series job thread (settle happens-before the
+        # job ends, which happens-before the drain raise + the finally persist).
+        lock = threading.Lock()
+        seen_atm = {"windows": 0}
+
+        class _GapThenQuotaClient:
+            def post_json(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
+                del endpoint
+                if str(body["strike"]) == "ATM":
+                    with lock:
+                        seen_atm["windows"] += 1
+                        nth = seen_atm["windows"]
+                    if nth == 1:
+                        raise DhanBadRequestError("HTTP 400 bad request: DH-905 no data present")
+                    raise DailyQuotaExceeded("daily quota of 100000 calls spent")
+                return _payload()
+
+        def _factory(_lake_root: Path) -> tuple[JsonPoster, OptionBarSink]:
+            return _GapThenQuotaClient(), _Sink()
+
+        # now=2021-03-01 → [2021-01-01, 2021-02-28] → TWO 30-day windows/series.
+        report = pull_options(
+            [_stock_instrument()],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=datetime(2021, 3, 1, tzinfo=UTC),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+            client_factory=_factory,
+            until_clean=True,
+            until_clean_sleep=lambda _i: None,
+        )
+        assert report.quota_exhausted is True
+        assert report.verdict.kind == "quota_exhausted"
+        # The settle survived the mid-round death (finally-guaranteed persist).
+        persisted = load_window_ledger(tmp_path)
+        skipped = [r for r in persisted.records() if r.status == "SKIPPED"]
+        assert any(r.last_error is not None and "DH-905" in r.last_error for r in skipped)
+        gap_row = next(r for r in skipped if r.last_error and "DH-905" in r.last_error)
+
+        # After the IST reset: a re-pull over the SAME lake never re-fetches the
+        # settled gap window (it skips in O(1) off the durable ledger row).
+        calls: list[tuple[str, str]] = []
+
+        class _OkRecordingClient:
+            def post_json(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
+                del endpoint
+                with lock:
+                    calls.append((str(body["strike"]), str(body["fromDate"])))
+                return _payload()
+
+        def _factory2(_lake_root: Path) -> tuple[JsonPoster, OptionBarSink]:
+            return _OkRecordingClient(), _Sink()
+
+        resumed = pull_options(
+            [_stock_instrument()],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=datetime(2021, 3, 1, tzinfo=UTC),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+            client_factory=_factory2,
+            until_clean=True,
+            until_clean_sleep=lambda _i: None,
+        )
+        assert resumed.verdict.kind == "clean"
+        assert resumed.still_failed_windows == 0
+        # The settled known-gap window was never re-fetched (fromDate is the
+        # body's daily-format date string).
+        assert ("ATM", gap_row.window_start) not in calls
+
     def test_dry_run_until_clean_is_one_clean_round(self, tmp_path: Path) -> None:
         """The synthetic path: round 1 clean → stop_clean; report carries the fields."""
         ticks: list[int] = []
@@ -416,6 +547,8 @@ class TestUntilCleanLoop:
             "series_skipped_auth",
             "no_data_series",
             "real_failed_series",
+            "gap_only_series",
             "rounds_run",
         ):
             assert key in payload
+        assert all("series_gap_only" in s for s in payload["symbols"])

@@ -356,6 +356,7 @@ class TestOptionsPullReport:
             "instrument": "OPTIDX",
             "series_completed": 4,
             "series_failed": 1,
+            "series_gap_only": 0,
             "bars_appended": 40,
             "windows": 4,
         }
@@ -365,6 +366,59 @@ class TestOptionsPullReport:
         assert report.total_symbols == 0
         assert report.total_bars == 0
         assert report.to_dict()["symbols"] == []
+
+    def test_all_gap_only_pull_reads_known_gap_only(self) -> None:
+        # DEC-OPTION-DH905-CONTINUE-001 verdict interplay: gap-only series count
+        # as no_data, not completed — a pull that found NOTHING but settled
+        # vendor gaps reads ``known_gap_only`` ("Dhan has no data"), never a
+        # lying ``clean``.
+        report = OptionsPullReport(
+            dry_run=False,
+            start_date="2021-01-01",
+            end_date="2021-01-05",
+            symbols=[
+                OptionSymbolResult(
+                    symbol="13",
+                    instrument="OPTIDX",
+                    series_completed=3,
+                    series_failed=0,
+                    bars_appended=0,
+                    windows=3,
+                    series_gap_only=3,
+                )
+            ],
+            gap_only_series=3,
+        )
+        verdict = report.verdict
+        assert verdict.kind == "known_gap_only"
+        assert verdict.no_data == 3
+        assert verdict.completed == 0  # the subtraction: 3 complete − 3 gap-only
+        assert verdict.needs_operator is False  # expected, not an error
+
+    def test_mixed_gap_and_real_bars_reads_clean(self) -> None:
+        # ANY series that committed real first-pass bars keeps the pull clean —
+        # the settled gaps are benign side-notes (never failures, never residual).
+        report = OptionsPullReport(
+            dry_run=False,
+            start_date="2021-01-01",
+            end_date="2021-01-05",
+            symbols=[
+                OptionSymbolResult(
+                    symbol="13",
+                    instrument="OPTIDX",
+                    series_completed=5,
+                    series_failed=0,
+                    bars_appended=120,
+                    windows=5,
+                    series_gap_only=2,
+                )
+            ],
+            gap_only_series=2,
+        )
+        verdict = report.verdict
+        assert verdict.kind == "clean"
+        assert verdict.completed == 3  # 5 complete − 2 gap-only
+        assert verdict.no_data == 2
 
 
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:

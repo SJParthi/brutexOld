@@ -183,6 +183,13 @@ class OptionSymbolResult:
     series_failed: int
     bars_appended: int
     windows: int
+    #: Of ``series_completed``, how many completed GAP-ONLY — whole, zero bars,
+    #: every fetched window a settled DH-905 known gap
+    #: (DEC-OPTION-DH905-CONTINUE-001). Keeps the per-symbol view honest: a dead
+    #: underlying reads ``series_completed=N, series_gap_only=N`` instead of the
+    #: pre-fix ``series_failed=N`` (hostile finding 5 — the semantic change is
+    #: attributable per symbol, not hidden in an aggregate).
+    series_gap_only: int = 0
 
 
 @dataclass(slots=True)
@@ -210,12 +217,18 @@ class OptionsPullReport:
     #: the IST-midnight reset.
     quota_exhausted: bool = False
     #: First-pass series accounting (hostile finding 6): aborted all-or-nothing
-    #: commits, latch-skipped series, benign DH-905 quarantines, genuine terminal
-    #: quarantines.
+    #: commits, latch-skipped series, benign DH-905 quarantines (defensive-only
+    #: since DEC-OPTION-DH905-CONTINUE-001), genuine terminal quarantines.
     series_aborted: int = 0
     series_skipped_auth: int = 0
     no_data_series: int = 0
     real_failed_series: int = 0
+    #: First-pass series that completed GAP-ONLY — whole, zero bars, every
+    #: fetched window a settled DH-905 known gap (DEC-OPTION-DH905-CONTINUE-001).
+    #: Counted inside the per-symbol ``series_completed`` (the series IS settled)
+    #: and carried separately so the verdict can read ``known_gap_only`` when a
+    #: pull found NOTHING but gaps.
+    gap_only_series: int = 0
     #: Until-clean rounds actually run (1 for a single-pass pull).
     rounds_run: int = 1
 
@@ -254,13 +267,23 @@ class OptionsPullReport:
         (still-failing windows OR genuine terminal quarantines), then
         ``known_gap_only`` / ``clean``. Built from the REPORT (never the loop
         outcome, which zeroes the failure counts — hostile finding 5).
+
+        GAP-ONLY series count as ``no_data``, not ``completed``
+        (DEC-OPTION-DH905-CONTINUE-001): an all-dead pull reads
+        ``known_gap_only`` ("Dhan has no data"), never a lying ``clean``; any
+        series that committed real first-pass bars keeps the pull ``clean``.
+        The subtraction can never go negative — a gap-only series is by
+        definition complete, so it is already inside ``total_series_completed``.
+        (Honest envelope: ``completed`` here is FIRST-pass-sourced — bars landed
+        by a later until-clean round are not in it, the pre-existing spot
+        contract.)
         """
         return classify_pull(
             auth_aborted=self.auth_aborted,
             still_failed_windows=self.still_failed_windows,
             failed_pairs=self.real_failed_series,
-            no_data=self.no_data_series,
-            completed=self.total_series_completed,
+            no_data=self.no_data_series + self.gap_only_series,
+            completed=self.total_series_completed - self.gap_only_series,
             auth_cause=self.auth_cause,
             quota_exhausted=self.quota_exhausted,
         )
@@ -284,6 +307,7 @@ class OptionsPullReport:
             "series_skipped_auth": self.series_skipped_auth,
             "no_data_series": self.no_data_series,
             "real_failed_series": self.real_failed_series,
+            "gap_only_series": self.gap_only_series,
             "rounds_run": self.rounds_run,
             "symbols": [
                 {
@@ -291,6 +315,7 @@ class OptionsPullReport:
                     "instrument": s.instrument,
                     "series_completed": s.series_completed,
                     "series_failed": s.series_failed,
+                    "series_gap_only": s.series_gap_only,
                     "bars_appended": s.bars_appended,
                     "windows": s.windows,
                 }
@@ -700,21 +725,33 @@ def pull_options(
         for failure in report.failures:
             failed_by_symbol[failure.security_id] = failed_by_symbol.get(failure.security_id, 0) + 1
             error_counts[failure.error] = error_counts.get(failure.error, 0) + 1
-        completed_by_symbol: dict[str, tuple[int, int, int]] = {}
+        completed_by_symbol: dict[str, tuple[int, int, int, int]] = {}
         for (security_id, *_rest), series_report in report.series.items():
-            prev_count, prev_bars, prev_windows = completed_by_symbol.get(security_id, (0, 0, 0))
+            prev_count, prev_bars, prev_windows, prev_gap_only = completed_by_symbol.get(
+                security_id, (0, 0, 0, 0)
+            )
+            # GAP-ONLY: complete with zero bars and ≥1 settled DH-905 known-gap
+            # window (DEC-OPTION-DH905-CONTINUE-001) — counted INSIDE completed
+            # (the series is settled) and attributed per symbol so a dead
+            # underlying is visible at a glance (hostile finding 5).
+            gap_only = (
+                series_report.complete
+                and series_report.bars_appended == 0
+                and series_report.no_data_windows > 0
+            )
             completed_by_symbol[security_id] = (
                 # An ABORTED series committed nothing — never a completion
                 # (hostile finding 6); its windows stay in the residual count.
                 prev_count + (1 if series_report.complete else 0),
                 prev_bars + series_report.bars_appended,
                 prev_windows + series_report.windows,
+                prev_gap_only + (1 if gap_only else 0),
             )
 
         results: list[OptionSymbolResult] = []
         for underlying in underlyings:
             sid = underlying.security_id
-            completed, bars, windows = completed_by_symbol.get(sid, (0, 0, 0))
+            completed, bars, windows, gap_only_count = completed_by_symbol.get(sid, (0, 0, 0, 0))
             results.append(
                 OptionSymbolResult(
                     symbol=sid,
@@ -723,6 +760,7 @@ def pull_options(
                     series_failed=failed_by_symbol.get(sid, 0),
                     bars_appended=bars,
                     windows=windows,
+                    series_gap_only=gap_only_count,
                 )
             )
 
@@ -739,6 +777,7 @@ def pull_options(
             series_skipped_auth=report.series_skipped_auth,
             no_data_series=report.no_data_series,
             real_failed_series=report.real_failed_series,
+            gap_only_series=report.gap_only_series,
             rounds_run=rounds_run,
         )
         # Surface WHY series failed (the silent-failure logging gap the operator
@@ -762,6 +801,7 @@ def pull_options(
             series_failed=pull_report.total_series_failed,
             series_aborted=pull_report.series_aborted,
             series_skipped_auth=pull_report.series_skipped_auth,
+            series_gap_only=pull_report.gap_only_series,
             still_failed_windows=pull_report.still_failed_windows,
             rounds_run=pull_report.rounds_run,
             verdict=pull_report.verdict.kind,

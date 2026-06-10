@@ -13,8 +13,9 @@ the empty-universe case, and custom fan-out axes.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date
+from typing import Any
 
 import pytest
 from brutex.adapters.dhan.errors import DhanBadRequestError
@@ -33,6 +34,7 @@ from brutex.adapters.dhan.option_universe_ingest import (
 )
 from brutex.data.models import OptionBar
 from brutex.observability.correlation import pull_id_scope
+from brutex.orchestrator.universe_phases import ItemResult
 from structlog.testing import capture_logs
 
 #: Index fan-out depth per (strike, type): WEEK fans 1..8 + MONTH fans 1..3
@@ -456,9 +458,11 @@ def test_on_progress_flags_failed_underlying() -> None:
 
 
 def test_on_progress_flags_no_data_gap_underlying() -> None:
-    """An underlying whose only empty series are DH-905 boundaries fires on_progress
-    with gap=True, failed=False — a benign no-data gap, NOT a failure
-    (DEC-DHAN-NO-DATA-GAP-COUNT-001, options arm)."""
+    """An underlying whose only series are DH-905 gaps fires on_progress with
+    gap=True, failed=False — a benign no-data gap, NOT a failure
+    (DEC-DHAN-NO-DATA-GAP-COUNT-001, options arm). Since
+    DEC-OPTION-DH905-CONTINUE-001 the series COMPLETES gap-only (settled in one
+    pass) instead of quarantining — failures stays EMPTY."""
     events: list[tuple[str, int, bool, bool]] = []
     report = run_dhan_options_ingest(
         _NoDataClient(),
@@ -472,8 +476,97 @@ def test_on_progress_flags_no_data_gap_underlying() -> None:
         on_progress=lambda label, bars, failed, gap: events.append((label, bars, failed, gap)),
     )
     assert events == [("13", 0, False, True)]  # gap, not a failure
-    # The DH-905 series is still RECORDED (re-tried next pull, never masked).
-    assert len(report.failures) == 1
+    # The series is COMPLETE gap-only — settled vendor no-data, never a quarantine.
+    assert report.failures == ()
+    assert report.no_data_series == 0  # the defensive drain classifier stays 0
+    assert report.gap_only_series == 1
+    assert report.no_data_windows == 1
+    assert report.series_count == 1
+    (series_report,) = report.series.values()
+    assert series_report.complete is True
+    assert series_report.bars_appended == 0
+
+
+def test_drain_classifies_dh905_from_another_path_as_gap() -> None:
+    """DEFENSIVE drain branch (DEC-OPTION-DH905-CONTINUE-001 hostile finding 8):
+    the series spine settles DH-905 cursors and never re-raises them, so this
+    branch has NO production arrival path — but a DH-905 DhanError reaching the
+    drain via any OTHER path must still classify as a benign gap, never a scary
+    failure. Driven by a fake runner that fabricates the failed outcome."""
+    job_seen: list[object] = []
+
+    def _fake_runner(
+        fn: Callable[[Any], Any],
+        items: Sequence[Any],
+    ) -> list[ItemResult[Any, Any]]:
+        del fn  # never dispatch — fabricate a drain-side DH-905 arrival
+        job_seen.extend(items)
+        return [
+            ItemResult(
+                item=items[0],
+                ok=False,
+                result=None,
+                exc=DhanBadRequestError("HTTP 400 bad request: DH-905 no data present"),
+            )
+        ]
+
+    with capture_logs() as logs:
+        report = run_dhan_options_ingest(
+            _OkClient(),
+            _Sink(),
+            underlyings=[_index("13", offsets=0)],
+            start=date(2021, 1, 4),
+            end=date(2021, 1, 5),
+            expiry_flags=("WEEK",),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+            run_parallel=_fake_runner,
+        )
+    assert len(job_seen) == 1
+    assert report.failed_series == 1
+    assert report.no_data_series == 1  # classified a gap …
+    assert report.real_failed_series == 0  # … not a real failure
+    gap_events = [e for e in logs if e["event"] == "ingest.known_gap"]
+    assert len(gap_events) == 1
+    assert gap_events[0]["log_level"] == "info"
+
+
+def test_drain_auth_outranks_no_data_on_both_marker_400() -> None:
+    """AUTH OUTRANKS NO-DATA at the drain too (hostile finding 1): a quarantined
+    400 carrying BOTH markers (DH-906 + DH-905) takes the dead-token path —
+    one loud auth alert, counted a REAL failure, never a benign gap."""
+
+    def _fake_runner(
+        fn: Callable[[Any], Any],
+        items: Sequence[Any],
+    ) -> list[ItemResult[Any, Any]]:
+        del fn
+        return [
+            ItemResult(
+                item=items[0],
+                ok=False,
+                result=None,
+                exc=DhanBadRequestError("HTTP 400: DH-906 Invalid Token (DH-905 no data)"),
+            )
+        ]
+
+    with capture_logs() as logs:
+        report = run_dhan_options_ingest(
+            _OkClient(),
+            _Sink(),
+            underlyings=[_index("13", offsets=0)],
+            start=date(2021, 1, 4),
+            end=date(2021, 1, 5),
+            expiry_flags=("WEEK",),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+            run_parallel=_fake_runner,
+        )
+    assert report.auth_aborted is True  # the drain tripped the latch
+    assert report.no_data_series == 0  # a both-marker token death is NEVER a gap …
+    assert report.real_failed_series == 1  # … it is a REAL failure (auth outranks)
+    assert [e for e in logs if e["event"] == "ingest.auth_aborted"] != []
+    assert [e for e in logs if e["event"] == "ingest.known_gap"] == []  # never a gap log
 
 
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
@@ -509,9 +602,39 @@ class TestOptionUniverseLogging:
         assert rollup["instrument"] == "OPTIDX"
         assert rollup["series_completed"] == 1
         assert rollup["series_failed"] == 0
+        assert rollup["series_gap_only"] == 0
         assert rollup["bars_appended"] == 1
         assert rollup["windows"] == 1
         assert _events(logs, "ingest.quarantine") == []
+
+    def test_gap_only_series_logs_info_and_rolls_up(self) -> None:
+        # DEC-OPTION-DH905-CONTINUE-001: a series whose every window settles as a
+        # DH-905 known gap COMPLETES gap-only — surfaced at INFO ``ingest.known_gap``
+        # (one glance per dead series, like the old quarantine was) and counted in
+        # the per-underlying rollup's ``series_gap_only``, INSIDE ``series_completed``.
+        with capture_logs() as logs, pull_id_scope("optuniv00003"):
+            report = run_dhan_options_ingest(
+                _NoDataClient(),
+                _Sink(),
+                underlyings=[_index("13", offsets=0)],
+                start=date(2021, 1, 4),
+                end=date(2021, 1, 5),
+                expiry_flags=("WEEK",),
+                expiry_codes=(1,),
+                option_types=("CALL",),
+            )
+        (gap,) = _events(logs, "ingest.known_gap")
+        assert gap["log_level"] == "info"
+        assert gap["pull_id"] == "optuniv00003"
+        assert gap["security_id"] == "13"
+        assert gap["strike"] == "ATM"
+        assert gap["no_data_windows"] == 1
+        (rollup,) = _events(logs, "ingest.underlying")
+        assert rollup["series_completed"] == 1  # the gap-only series IS complete
+        assert rollup["series_gap_only"] == 1
+        assert rollup["series_failed"] == 0  # never a failure
+        assert _events(logs, "ingest.quarantine") == []
+        assert report.gap_only_series == 1
 
     def test_quarantine_event_names_each_failed_series(self) -> None:
         with capture_logs() as logs, pull_id_scope("optuniv00002"):
