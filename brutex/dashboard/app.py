@@ -44,6 +44,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import structlog
 from pydantic import BaseModel
@@ -3025,7 +3026,17 @@ def _fill_default_dates(html: str) -> str:
     from brutex.dashboard.pull_controller import default_date_range
 
     from_iso, to_iso = default_date_range()
-    return html.replace("__BRUTEX_DATE_FROM__", from_iso).replace("__BRUTEX_DATE_TO__", to_iso)
+    # The picker ceiling is TODAY (IST) — a future to-date was silently
+    # clamped server-side, so the operator saw a date the pull never used
+    # (DEC-UNIVERSE-SELECTION-PRECISE-001); the browser now refuses it. The
+    # settled-data clamp (DEC-DAILY-CANDLE-CLAMP-001) still governs what a
+    # today-inclusive range actually fetches.
+    max_iso = datetime.now(tz=ZoneInfo("Asia/Kolkata")).date().isoformat()
+    return (
+        html.replace("__BRUTEX_DATE_FROM__", from_iso)
+        .replace("__BRUTEX_DATE_TO__", to_iso)
+        .replace("__BRUTEX_DATE_MAX__", max_iso)
+    )
 
 
 def _render_universe_html() -> str:
