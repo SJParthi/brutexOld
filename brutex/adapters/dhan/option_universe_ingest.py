@@ -49,9 +49,9 @@ DEC-DHAN-STOCK-MONTHLY-ONLY-001). The options lake is
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date
+from datetime import UTC, date, datetime
 
 import structlog
 
@@ -337,6 +337,96 @@ class OptionsUniverseReport:
         return self.failed_series - self.no_data_series
 
 
+def iter_series_jobs(
+    underlyings: Sequence[OptionUnderlying],
+    *,
+    expiry_flags: Sequence[str] | None = None,
+    expiry_codes: Sequence[int] | None = None,
+    option_types: Sequence[str] = DRV_OPTION_TYPES,
+) -> Iterator[_SeriesJob]:
+    """Yield every series job of the fan-out — the ONE enumeration (CLAUDE.md §11).
+
+    DEC-OPTION-WINDOW-PLAN-001 (hostile C4): the pre-pull window PLANNER and the
+    fetch runner MUST consume the SAME series enumeration — including the two
+    override resolutions (an explicit ``expiry_flags`` forces a uniform set vs
+    each underlying's per-kind default, DEC-DHAN-STOCK-MONTHLY-ONLY-001; an
+    explicit ``expiry_codes`` forces a uniform set vs the per-flag depth,
+    DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001) — so the PLANNED rows and the fetched
+    windows can never drift. Extracted verbatim from the runner's jobs loop;
+    ordering is deterministic (input order × flags × codes × strikes × types).
+    """
+    for idx, underlying in enumerate(underlyings):
+        strikes = strike_window(underlying.strike_offsets)
+        flags = underlying.expiry_flags if expiry_flags is None else expiry_flags
+        for expiry_flag in flags:
+            codes = expiry_codes_for_flag(expiry_flag) if expiry_codes is None else expiry_codes
+            for expiry_code in codes:
+                for strike in strikes:
+                    for drv_option_type in option_types:
+                        yield (idx, underlying, expiry_flag, expiry_code, strike, drv_option_type)
+
+
+def plan_option_pull_windows(
+    ledger: WindowLedger,
+    underlyings: Sequence[OptionUnderlying],
+    *,
+    start: date,
+    end: date,
+    expiry_flags: Sequence[str] | None = None,
+    expiry_codes: Sequence[int] | None = None,
+    option_types: Sequence[str] = DRV_OPTION_TYPES,
+    now: datetime | None = None,
+) -> int:
+    """PLAN every window of the pull's fan-out BEFORE any fetch — returns the count.
+
+    The options arm of the spot ``plan_windows`` (DEC-OPTION-WINDOW-PLAN-001):
+    every ``(series × 30-day window)`` the pull will touch gets a ``PLANNED``
+    ledger row up-front, so /coverage/windows shows the full PLANNED → SUCCESS
+    countdown and a never-reached window is visibly PLANNED instead of silently
+    absent. Keys are built by the SAME exported
+    :func:`~brutex.adapters.dhan.option_ingest.coverage_key` +
+    :func:`~brutex.adapters.dhan.option_ingest.window_dates` the fetch spine
+    probes, over the SAME :func:`iter_series_jobs` enumeration — planner and
+    fetcher cannot drift (hostile C4; the planner-keys == fetch-keys golden test
+    pins it). ``plan`` is idempotent and NEVER overwrites an existing row
+    (FAILED stays FAILED, settled stays settled — window_ledger semantics,
+    hostile finding 8). O(series × windows) once per pull, pure in-memory.
+
+    Honest envelope (Golden Rule #10): a 3-index full-history pull plans ~93k
+    rows (~50 MB ledger, ~3.7 s); a full-universe pull ~841k rows (~480 MB,
+    ~7 s) — measured in the DEC-OPTION-WINDOW-PLAN-001 review. NOT an O(1)
+    claim; the per-window ``plan`` probe is O(1).
+    """
+    from brutex.adapters.dhan.option_ingest import coverage_key, window_dates
+
+    stamp = now if now is not None else datetime.now(UTC)
+    tiles = window_dates(start, end)
+    planned = 0
+    for job in iter_series_jobs(
+        underlyings,
+        expiry_flags=expiry_flags,
+        expiry_codes=expiry_codes,
+        option_types=option_types,
+    ):
+        _idx, underlying, expiry_flag, expiry_code, strike, drv_option_type = job
+        for window_start, window_end in tiles:
+            ledger.plan(
+                coverage_key(
+                    exchange_segment=underlying.exchange_segment,
+                    security_id=underlying.security_id,
+                    expiry_flag=expiry_flag,
+                    expiry_code=expiry_code,
+                    strike=strike,
+                    drv_option_type=drv_option_type,
+                    window_start=window_start,
+                    window_end=window_end,
+                ),
+                now=stamp,
+            )
+            planned += 1
+    return planned
+
+
 def run_dhan_options_ingest(
     client: JsonPoster,
     sink: OptionBarSink,
@@ -476,27 +566,17 @@ def run_dhan_options_ingest(
     # Honest envelope (Rule #10): the audit-log ROW ORDER is arrival-order
     # (non-deterministic); only the lake bytes + chain integrity are reproducible —
     # NOT a bit-identical audit log.
-    jobs: list[_SeriesJob] = []
-    for idx, underlying in enumerate(underlyings):
-        strikes = strike_window(underlying.strike_offsets)
-        # Per-kind expiry set: each underlying carries its own (index WEEK+MONTH,
-        # stock MONTH-only; DEC-DHAN-STOCK-MONTHLY-ONLY-001). An explicit
-        # ``expiry_flags`` argument is a uniform override; ``None`` (the default)
-        # honours each underlying's own set.
-        flags = underlying.expiry_flags if expiry_flags is None else expiry_flags
-        for expiry_flag in flags:
-            # Per-flag expiry-code depth (DEC-DHAN-WEEKLY-EXPIRY-DEPTH-001): WEEK
-            # fans 1..8 (the deep historical weekly ladder), MONTH 1..3. An
-            # explicit ``expiry_codes`` argument forces that exact set on EVERY
-            # flag (uniform override for custom / test pulls); ``None`` (the
-            # default) honours the per-flag depth and never mixes the two.
-            codes = expiry_codes_for_flag(expiry_flag) if expiry_codes is None else expiry_codes
-            for expiry_code in codes:
-                for strike in strikes:
-                    for drv_option_type in option_types:
-                        jobs.append(
-                            (idx, underlying, expiry_flag, expiry_code, strike, drv_option_type)
-                        )
+    # The ONE enumeration (DEC-OPTION-WINDOW-PLAN-001 C4): the runner and the
+    # pre-pull planner both consume iter_series_jobs, including its override
+    # resolution — see its docstring; the inline loop moved there verbatim.
+    jobs: list[_SeriesJob] = list(
+        iter_series_jobs(
+            underlyings,
+            expiry_flags=expiry_flags,
+            expiry_codes=expiry_codes,
+            option_types=option_types,
+        )
+    )
 
     def _run_series(job: _SeriesJob) -> OptionIngestReport | None:
         """Pull ONE option series — runs in a worker thread under the fan-out.
@@ -723,6 +803,8 @@ __all__ = [
     "ProgressHook",
     "SeriesKey",
     "expiry_codes_for_flag",
+    "iter_series_jobs",
+    "plan_option_pull_windows",
     "run_dhan_options_ingest",
     "strike_window",
 ]

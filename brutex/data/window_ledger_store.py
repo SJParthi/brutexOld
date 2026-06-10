@@ -178,7 +178,7 @@ def load_window_ledger(
     try:
         import pyarrow.parquet as pq
 
-        table = pq.read_table(path)  # type: ignore[no-untyped-call]
+        table = pq.read_table(path)  # type: ignore[no-untyped-call, unused-ignore]
         present = set(table.schema.names)
         # The core 11 columns are REQUIRED — a missing one raises KeyError below and
         # degrades to empty (the wrong-shape guard). ``empty_streak`` is OPTIONAL: a
@@ -233,7 +233,7 @@ def save_window_ledger(ledger: WindowLedger, lake_root: Path) -> None:
     table = pa.table({name: by_col[name] for name in _COLUMNS}, schema=schema)
     path = ledger_path(lake_root)
     tmp = path.with_name(f"{LEDGER_FILENAME}.tmp")
-    pq.write_table(table, tmp)  # type: ignore[no-untyped-call]
+    pq.write_table(table, tmp)  # type: ignore[no-untyped-call, unused-ignore]
     os.replace(tmp, path)
 
 
@@ -457,6 +457,15 @@ def reconcile_ledger_with_lake(
     )
 
 
+#: Adaptive-throttle duty factor (DEC-OPTION-WINDOW-PLAN-001, hostile C2): the
+#: live flush waits at least ``_FLUSH_DUTY_FACTOR × last_save_duration`` between
+#: writes, so flushing can never consume more than ~1/factor of wall time. The
+#: review measured an 841k-row ledger save at ~3.94 s — ABOVE the fixed 2 s
+#: throttle, which degenerated to flush-per-tick (a 12.5k-outcome drain would
+#: have spent ~13.7 h rewriting Parquet). Factor 5 caps flush overhead at ~20%.
+_FLUSH_DUTY_FACTOR: float = 5.0
+
+
 def make_live_ledger_flush(
     ledger: WindowLedger | None,
     lake_root: Path,
@@ -467,24 +476,35 @@ def make_live_ledger_flush(
     """Return a THROTTLED mid-pull ledger-flush callback (live /db updates).
 
     During a long pull every window's outcome accumulates in *ledger* in memory;
-    this persists it MID-pull (throttled to once per *min_interval_s*) so /db +
-    /coverage/windows tick up live instead of jumping only at pull end. A ``None``
-    *ledger* (dry-run) yields a no-op callable. *clock* / *min_interval_s* are
-    injectable for deterministic tests; O(N) only on the calls that actually write.
+    this persists it MID-pull (throttled) so /db + /coverage/windows tick up live
+    instead of jumping only at pull end. A ``None`` *ledger* (dry-run) yields a
+    no-op callable. *clock* / *min_interval_s* are injectable for deterministic
+    tests; O(N) only on the calls that actually write.
+
+    The throttle is ADAPTIVE (DEC-OPTION-WINDOW-PLAN-001, hostile C2): the
+    effective interval is ``max(min_interval_s, _FLUSH_DUTY_FACTOR ×
+    last_save_duration)``, measured with the same injectable *clock*. A small
+    ledger keeps the snappy fixed cadence; a pre-planned universe-scale ledger
+    (~841k rows, ~4 s/save measured) self-paces so the flush can never dominate
+    wall time or hold the ledger lock back-to-back.
     """
     from time import monotonic
 
     tick = clock if clock is not None else monotonic
     last_write: list[float | None] = [None]
+    #: Seconds the LAST save took — drives the adaptive interval (0.0 until one runs).
+    last_duration: list[float] = [0.0]
 
     def _flush() -> None:
         if ledger is None:
             return
         now = tick()
-        if last_write[0] is not None and now - last_write[0] < min_interval_s:
+        interval = max(min_interval_s, _FLUSH_DUTY_FACTOR * last_duration[0])
+        if last_write[0] is not None and now - last_write[0] < interval:
             return
         last_write[0] = now
         save_window_ledger(ledger, lake_root)
+        last_duration[0] = max(tick() - now, 0.0)
 
     return _flush
 
