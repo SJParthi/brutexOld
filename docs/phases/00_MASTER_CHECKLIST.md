@@ -26,7 +26,7 @@ Last updated: 2026-05-26 (post-DEC-VENDOR-PIVOT-001 + Dhan wipe)
 | **0b — Empirical Groww probe** | ☐ Not started | 30 min ops + 30 min dev | Claude + operator (Groww API key required) | Probe transcripts in `docs/groww/probe/` — VIX presence, 1m candle, rate-limit bucket, data-drift Dhan↔Groww |
 | 1 — Verification Scaffolding | 🟡 Largely done (40%+) | done in pieces (PRs #45-#137) | Claude | Audit chain + Bloom + LMDB + SLA detector + Watchdog + Telegram wiring + MonitorLoop + L3 replay oracle + doctor (see "scaffolding done" below) |
 | 1.5 — Groww Adapter Phases 1-4 (post-DEC-VENDOR-PIVOT-001) | ⏸️ Blocked on Phase 0b | 40-50 hours dev | Claude (needs Groww token + Phase 0b transcripts) | `brutex/adapters/groww/` (10 modules, ~2,250 LoC) + Groww worker + errors taxonomy |
-| 2.5 — Bayesian Early-Stop | ☐ Not started | 1-2 weeks | Claude | Stage 2 trial reduction 61% |
+| 2.5 — Bayesian Early-Stop | 🚫 Abandoned (ADR-0006 / DEC-SPRT-INFEASIBLE-001) | — | — | retired: no leaderboard-safe kill exists; see DEC-SPRT-SLA-RETIRE-001 |
 | 3 — Brute-Force Engine | ☐ Not started | 6-10 weeks | Claude (requires 4-agent hostile review per CLAUDE.md §9) | Stage 1A precompute + 1B sweep (~33B trials) + Stage 2 DSR + Stage 3 CPCV + Stage 4 WFO + Lockbox |
 | 3.5 — Metal GPU Offload | ☐ Not started | 2-3 weeks | Claude | 2-5× speedup, 33B sweep in 1 overnight |
 | 4 — Filter Cascade + Ship | ☐ Not started | 2-3 weeks | Claude | First production sweep + top-3 candidates surfaced on dashboard |

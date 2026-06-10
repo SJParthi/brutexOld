@@ -15,11 +15,11 @@
 | Configuration | Effective trials | Throughput | Wall time |
 |---|---|---|---|
 | Baseline (CPU only, no early-stop) | 33 B | 80-150 K t/s | 2-4 days |
-| + Stage 2.5 only (CPU + Bayesian early-stop) | **~13 B** (61% saved) | 80-150 K t/s | **1.0-1.6 days** |
+| ~~+ Stage 2.5 only (CPU + Bayesian early-stop)~~ | 🚫 retired — Stage-2.5 ABANDONED (ADR-0006 / DEC-SPRT-INFEASIBLE-001) | — | — |
 | + Phase 3.5 only (CPU + Metal GPU) | 33 B | 160-400 K t/s | **0.95-2 days** |
-| **+ Both Stage 2.5 AND Phase 3.5** | **~13 B** | **160-400 K t/s** | **10-20 hours** ⚡ |
+| ~~+ Both Stage 2.5 AND Phase 3.5~~ | 🚫 retired — Stage-2.5 ABANDONED (ADR-0006 / DEC-SPRT-INFEASIBLE-001) | — | — |
 
-**Combined: 33B-equivalent sweep can finish in a single overnight session (22:00 → 07:00 IST) on M4 Pro alone.** No AWS, no cloud, no sharding.
+**Honest SLA (Golden Rule #10, DEC-SPRT-SLA-RETIRE-001):** the former "single-overnight" claim assumed Stage-2.5, which is ABANDONED (DEC-SPRT-INFEASIBLE-001). Baseline remains **2-4 days for ~33 B trials on the M4 Pro envelope** (CLAUDE.md §8); the Phase-3.5 GPU row is a projection — absolute wall-time claims only after measurement.
 
 ---
 
@@ -306,7 +306,8 @@ Estimated occupancy: **70-90%** for branchless integer kernel on M4 Pro
         ▼
    Phase 4     Filter cascade + first production sweep (1-2 weeks)
         │     - DSR + CPCV + WFO + Lockbox
-        │     - First overnight 33B sweep (target ~10-20 hours)
+        │     - First production 33B sweep (baseline 2-4 days; GPU-path
+        │       projection pending measurement — DEC-SPRT-SLA-RETIRE-001)
         ▼
    🚢 SHIP — top 3 production candidates
 ```
@@ -324,7 +325,7 @@ Additions to `MIGRATION.md` decision ledger:
 |---|---|
 | 100 | **Stage 2.5 — Bayesian adaptive early-stop locked.** Hybrid Bayesian posterior (Gaussian conjugate on 95th-percentile Sharpe) + Wald-style decision rule. Empirical-Bayes prior fit from Stage 1B Sharpe distribution. Prune if Pr(true Sharpe ≤ Stage-1B median) ≥ 0.95; promote if Pr(true Sharpe ≥ Stage-1B 99th pctile) ≥ 0.99. Hard floor 50K trials before decision. Expected 61% Stage-2 wall reduction (33B → ~13B effective). Verified by P-25 + P-26 property invariants AND `tests/integration/test_stage2_5_no_winner_loss.py` A/B oracle (top-3 recall ≥ 95%). References: Wald 1947 Sequential Analysis (Dover); Gelman BDA3 Ch. 2.5 (CRC 2013); Efron-Hastie 2016 Ch. 6 (Cambridge UP). Phase 2.5 implementation, 1 week effort, sits between Phase 2 and Phase 3 in build plan.
 | 101 | **Phase 3.5 — Apple Metal GPU offload locked.** Local M4 Pro 20-core GPU only (NO CUDA / NO OpenCL / NO AWS). Workload split: bitmask AND + indicator precompute on GPU (3-10× speedup projected); trade simulation stays on CPU (branchy). Apple unified memory (`MTLResourceStorageModeShared`) = zero PCIe copy. Rust↔Metal via `metal` crate v0.27 + `objc2` v0.5, gated `#[cfg(target_os="macos", target_arch="aarch64")]`. Bitmask kernel threadgroup (32, 8) = 256 threads, batch 8192 strats × 94K bars. CI gate `tests/bench/test_metal_kernel_speedup.py` asserts ≥ 2× CPU baseline + bit-exact numerical parity + audit-replay byte-identical Parquet. Fallback `BRUTEX_GPU_OFFLOAD=0` env flag → CPU-only path. Projected blended speedup ~2× → 33B wall 1-2 days CPU+GPU vs 2-4 days CPU-only. Phase 3.5 implementation, 3-4 weeks effort, sits after Phase 3 in build plan.
-| 102 | **Combined optimization impact projected**: Stage 2.5 + Phase 3.5 stack additively. Effective trials drop 33B → ~13B (Stage 2.5 prune); throughput rises 100K → 200-300K t/s (Phase 3.5 GPU); combined 33B-equivalent wall time drops to **~10-20 hours = 1 overnight session (22:00-07:00 IST) on M4 Pro alone, no cloud**. Subject to Phase 3 + 3.5 + 2.5 canary validation; SLA bands in spec §2.1 self-amend if measurements differ.
+| 102 | **Combined optimization impact projected**: Stage 2.5 + Phase 3.5 stack additively. Effective trials drop 33B → ~13B (Stage 2.5 prune); throughput rises 100K → 200-300K t/s (Phase 3.5 GPU); combined 33B-equivalent wall time drops to **~10-20 hours = 1 overnight session (22:00-07:00 IST) on M4 Pro alone, no cloud**. Subject to Phase 3 + 3.5 + 2.5 canary validation; SLA bands in spec §2.1 self-amend if measurements differ. **🚫 Amended 2026-06-10 (DEC-SPRT-SLA-RETIRE-001):** rows #100 and #102 are RETIRED — Stage-2.5 abandoned per ADR-0006 Final Verdict (DEC-SPRT-INFEASIBLE-001); the combined-impact projection is void.
 
 ---
 
@@ -359,6 +360,8 @@ Additions to `MIGRATION.md` decision ledger:
 ## 8. What This Means for the Final SLA
 
 Updated contingency SLA matrix in `TRACK1_BACKTEST_SPEC.md §2.1`:
+
+> **🚫 Note (2026-06-10, DEC-SPRT-SLA-RETIRE-001):** every "Phase 2.5 active = YES" row below is VOID — Stage-2.5 is abandoned (DEC-SPRT-INFEASIBLE-001). Only the CPU-baseline and GPU-only rows can ever publish, and only after measurement.
 
 | Phase 3 canary | Phase 2.5 active? | Phase 3.5 active? | Published SLA (33B) |
 |---|---|---|---|

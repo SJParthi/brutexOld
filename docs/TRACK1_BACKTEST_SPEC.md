@@ -182,9 +182,10 @@ Full trial count (post-DEC-MODE-002 — Mode C removed):
 - 52-condition bitmap matrix: ~770 MB (fits System Level Cache)
 - Per-mask scan: one streaming read of 770 MB at 150 GB/s = ~5 ms
 - Stage 2 single-pass: 2.9M masks × 2 dirs × 5 ms ≈ 8 hours
-- With Stage 1B 50% drop + Stage 2.5 61% early-stop:
-  effective Stage 2 ≈ 5-7 hours
-- **Total funnel: 14-20 hours overnight**
+- With the Stage-1B 50% drop (the Stage-2.5 early-stop is ABANDONED —
+  DEC-SPRT-INFEASIBLE-001): effective Stage 2 stays the dominant cost
+- **Total funnel: 2-4 days on the M4 Pro envelope (CLAUDE.md §8);
+  the Phase-3.5 GPU path is a projection pending measurement**
 
 **THE BOTTLENECK IS MEMORY BANDWIDTH, NOT COMPUTE.** Adding CPU threads
 past 6 P-cores yields zero gain (SoC fabric saturates at ~224 GB/s on
@@ -339,7 +340,7 @@ operator must HALT the sweep, modify the registry, restart the sweep
 - Drop bottom 50% of masks per (instrument, TF) pair
 - Survivors: ~1.45M masks per pair on average
 
-### Stage 2 — Full backtest on survivors (~5-7 hours with Stage 2.5)
+### Stage 2 — Full backtest on survivors (dominant cost of the 2-4 day funnel; the Stage-2.5 acceleration is ABANDONED per DEC-SPRT-INFEASIBLE-001)
 - For each `(mask, direction, instrument, TF, mode, params)` tuple, run
   full bar-by-bar backtest
 - Concurrency: **12 worker threads** (10 P + 2 E, leave 2 for OS)
@@ -348,7 +349,7 @@ operator must HALT the sweep, modify the registry, restart the sweep
 - No shared mutable state between workers
 - Result row written to streaming Parquet
 
-### Stage 2.5 — Bayesian early-stop (~61% reduction)
+### Stage 2.5 — Bayesian early-stop (🚫 ABANDONED — DEC-SPRT-INFEASIBLE-001)
 
 > 🚫 **ABANDONED — do NOT implement (DEC-SPRT-INFEASIBLE-001, ADR-0006 Final
 > Verdict).** A feasibility review proved a *provably* leaderboard-preserving
@@ -386,6 +387,7 @@ operator must HALT the sweep, modify the registry, restart the sweep
 > SLA). The pure deterministic decision **core** is built (opt-in, default-OFF,
 > NOT wired) per DEC-SPRT-EARLY-STOP-CORE-001 (`brutex/engine/early_stop.py`).
 
+_Historical algorithm (never wire — ADR-0006 Final Verdict):_
 - **Gaussian conjugate posterior** on 95th-percentile Sharpe per (instrument, TF)
 - **Wald SPRT** at α=0.05, β=0.10
 - Kill trial mid-flight if `Pr(true_sharpe > p95_threshold) < 0.10` after
@@ -393,7 +395,7 @@ operator must HALT the sweep, modify the registry, restart the sweep
 - Document SPRT thresholds and posterior update math in code comments
 
 ### Stage 3 — BIPOP-CMA-ES refinement (~1-2 hours)
-- **Outer:** Optuna TPE over top 10,000 survivor masks from Stage 2.5
+- **Outer:** Optuna TPE over top 10,000 survivor masks from Stage 2
 - **Inner:** pycma 3.4 BIPOP-CMA-ES per mask over (SL, TP) normalized [0,1]²
   - Dimension d = 2
   - Population λ = 6 (4 + ⌊3 ln 2⌋)
