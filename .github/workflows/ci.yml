@@ -911,6 +911,14 @@ jobs:
           else
             echo "(brutex.engine.stage3_select test file not present yet — gate inactive)"
           fi
+          # 19i1b · brutex.engine.stage3_refine — Stage-3 BIPOP-CMA-ES refinement
+          # runner (DEC-STAGE3-REFINE-001; the A/B determinism oracle, the ≤600
+          # hard budget, the run-scoped value cache — ADR-0007 conditions 4-6/8).
+          if compgen -G "tests/unit/test_engine_stage3_refine.py" > /dev/null; then
+            pytest --cov=brutex.engine.stage3_refine --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_stage3_refine.py
+          else
+            echo "(brutex.engine.stage3_refine test file not present yet — gate inactive)"
+          fi
           # 19i1a · brutex.engine.stage3_grid — Stage-3 [0,1] ↔ int-paisa Mode-A
           # grid bijection (DEC-STAGE3-GRID-001; pure, O(1) per call — ADR-0007
           # condition 3: quantize before the 9-field hash).
