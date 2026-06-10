@@ -149,3 +149,15 @@ def test_reports_opt_spot_badge_present() -> None:
     assert "s.option_pullable" in html, "the chip does not branch on option_pullable"
     assert ">OPT<" in html, "the OPT badge label is missing"
     assert ">SPOT<" in html, "the SPOT badge label is missing"
+
+
+def test_reports_fno_only_selector_present() -> None:
+    """The "F&O only" one-click selector (DEC-FNO-ONLY-FILTER-001): selects
+    exactly the option-pullable symbols so a report (and the option-chain
+    pulls it mirrors) can target the F&O universe alone."""
+    html = _render_reports_html()
+    assert '<button id="fno"' in html, "the F&O-only toolbar button is missing"
+    assert "F&amp;O only</button>" in html, "the button label is missing"
+    assert "allSymbols.filter(s => s.option_pullable)" in html, (
+        "the selector does not filter on option_pullable"
+    )

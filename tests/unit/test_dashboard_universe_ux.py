@@ -228,3 +228,18 @@ def test_universe_no_data_gap_live_stat_present() -> None:
     assert "no-data gaps" in html, "the no-data gaps live stat is missing"
     assert "s.gaps" in html, "the live stats do not read the gaps counter"
     assert ".bstat.gap" in html, "the amber gap stat style is missing"
+
+
+def test_universe_fno_only_toggle_present() -> None:
+    """The "F&O only" toggle (DEC-FNO-ONLY-FILTER-001): the operator can show
+    ONLY option-pullable rows — a client-side filter over the option_pullable
+    flag the explorer rows already carry, composed with the search box."""
+    html = _render_universe_html()
+    assert 'fnoBtn.id = "fno-only"' in html, "the F&O-only toggle is missing"
+    assert ".fnobtn" in html, "the toggle style is missing"
+    assert ".fnobtn.on" in html, "the toggle's active style is missing"
+    # The filter must compose with search: hidden rows are exactly the
+    # option_pullable === false ones, and only while the toggle is on.
+    assert "!fnoOnly || i.option_pullable !== false" in html, (
+        "the F&O-only predicate is not composed into renderInstruments"
+    )

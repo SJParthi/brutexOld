@@ -212,6 +212,7 @@
       <div class="toolbar">
         <button id="all">Select all</button>
         <button id="none">Clear</button>
+        <button id="fno" title="Select ONLY the F&amp;O (option-pullable) symbols — the option-chain universe (DEC-FNO-ONLY-FILTER-001)">⚡ F&amp;O only</button>
         <select id="idxpick" title="Add an index's F&amp;O-eligible constituent stocks to the selection in one go — instead of clicking each stock (fetched from NSE on your machine; membership rebalances)">
           <option value="">➕ add an index's stocks…</option>
           <option value="NIFTY">NIFTY 50</option>
@@ -313,6 +314,12 @@ document.getElementById("all").onclick = () => {
 };
 document.getElementById("none").onclick = () => {
   selected = new Set(); renderChips(); refreshCount();
+};
+document.getElementById("fno").onclick = () => {
+  // DEC-FNO-ONLY-FILTER-001: one click selects exactly the option-pullable
+  // (F&O) symbols — the report covers the option-chain universe alone.
+  selected = new Set(allSymbols.filter(s => s.option_pullable).map(s => s.symbol));
+  renderChips(); refreshCount();
 };
 /* ── Index quick-select (DEC-REPORTS-INDEX-DROPDOWN-001) ──
    Pick an index → add its F&O-eligible constituent stocks (held in the lake)
