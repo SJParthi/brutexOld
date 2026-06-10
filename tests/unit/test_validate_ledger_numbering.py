@@ -122,3 +122,26 @@ class TestCli:
 
     def test_missing_file_exits_two(self, gate: ModuleType, tmp_path: Path) -> None:
         assert gate.main(["prog", str(tmp_path / "absent.md")]) == 2
+
+
+class TestSiblingValidatorSuffixContract:
+    """The suffix scheme must stay legible to the SIBLING DEC-ID validator.
+
+    Regression: the first reconcile run suffixed entry #214 to 214a/214b and
+    the PR-body DEC-ID gate (scripts/ci/validate_dec_ids.py) stopped
+    resolving DEC-DEC-ID-VALIDATOR-001 — its header regex predated the
+    suffix form. Caught live by #580's own CI (DEC-LEDGER-RENUMBER-001).
+    """
+
+    def test_dec_id_validator_resolves_suffixed_headers(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "validate_dec_ids", _SCRIPT.parent / "validate_dec_ids.py"
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["validate_dec_ids"] = mod
+        spec.loader.exec_module(mod)
+
+        ledger = "214a. **DEC-SUFFIXED-001 — first**\n615. **DEC-BARE-001 — second**\n"
+        known = mod.load_known_dec_ids(ledger)
+        assert known == {"DEC-SUFFIXED-001", "DEC-BARE-001"}
