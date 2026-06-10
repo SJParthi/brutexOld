@@ -71,7 +71,7 @@ def _run(
         mask_run_id=_MASK_RUN_ID,
         start_sl_paisa=50,
         start_tp_paisa=100,
-        evaluate=cast("Evaluator", ev),
+        evaluate=cast(Evaluator, ev),
         budget=budget,
         audit=audit,  # type: ignore[arg-type]
     )
@@ -166,7 +166,7 @@ class TestBudgetAndCache:
             mask_run_id=_MASK_RUN_ID,
             start_sl_paisa=50,
             start_tp_paisa=100,
-            evaluate=cast("Evaluator", _NoneEvaluator()),
+            evaluate=cast(Evaluator, _NoneEvaluator()),
             budget=RefineBudget(max_fevals=10, max_restarts=1),
         )
         assert report.best_sharpe == 0.0
@@ -223,7 +223,7 @@ class TestGuards:
                 mask_run_id=_MASK_RUN_ID,
                 start_sl_paisa=51,  # off the 5-paisa tick
                 start_tp_paisa=100,
-                evaluate=cast("Evaluator", _BowlEvaluator()),
+                evaluate=cast(Evaluator, _BowlEvaluator()),
             )
 
     def test_budget_canonical_is_deterministic(self) -> None:
