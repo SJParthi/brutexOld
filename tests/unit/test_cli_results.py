@@ -55,7 +55,10 @@ def test_results_show_prints_named_winners(
     out = capsys.readouterr().out
     assert rc == cli.EXIT_OK
     assert "close_above_ema20 AND near_fib_618" in out
-    assert "gate=PASS" in out
+    # DEC-STAGE3-WIRE-001 (review F6): no per-row gate verdict — refined trees
+    # hold UNGATED Stage-3 trial rows, so the header scopes the claim instead.
+    assert "gate=PASS" not in out
+    assert "UNGATED Stage-3" in out
     assert "finalists=1" in out
 
 

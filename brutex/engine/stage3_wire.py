@@ -1,0 +1,864 @@
+"""Stage-3 launcher wiring — the audited post-pass over the persisted Stage-2 grid.
+
+DEC-STAGE3-WIRE-001 (ADR-0007 / DEC-STAGE3-DESIGN-LOCK-001 §5 slice 5, built to
+the 2026-06-10 slice-5 hostile review's conditions). The slice-4 refinement
+runner (:mod:`brutex.engine.stage3_refine`) is engine-seam-injected and knows
+nothing about bars, stores or grids; THIS module binds it into the
+``brutex sweep-all`` launcher:
+
+* **Condition 7 / Amendment A1 (review F1).** :func:`train_slice_bars` excludes
+  the most recent :data:`~brutex.metrics.lockbox.LOCKBOX_DEFAULT_WINDOW_DAYS`
+  trading days, mirroring the lockbox day-ordinal window EXACTLY (the shared
+  constant, the same IST-date ``toordinal`` axis the cascade feeds filter #8 —
+  never a re-derived boundary). Every refinement evaluates on that slice, and
+  every refined row is stamped with that slice's content-derived
+  :func:`data_snapshot_hash` — the launcher's own derivation, shared here as a
+  non-CLI helper (CLAUDE.md §11 COMMON).
+* **Review F4.** A persisted :class:`~brutex.engine.results_store.ResultRow`
+  does not carry its (SL, TP, proximity); :func:`recover_survivor_cell`
+  re-derives :func:`~brutex.engine.sweep_run.mask_run_id` over the grid's
+  ``stop_losses × take_profits × proximities`` axes and matches ``row.run_id``
+  — recovered deterministically, never guessed.
+* **Review F3.** Refined rows land in their OWN per-quantized-cell Parquet
+  files via the existing :func:`~brutex.engine.sweep_orchestrator.tuple_store_path`
+  with a constructed :class:`~brutex.engine.sweep_orchestrator.SweepTuple`
+  (``k = popcount(mask)``) under the TRAIN-hash grid context, so a refined cell
+  can never collide with (or silently extend) a Stage-2 grid file.
+  :func:`cascade_specs_for_refined_cells` then enumerates those cells for the
+  Stage-4 cascade, and :func:`stage3_manifest_record` records enablement + the
+  refined-cell list in the cascade manifest.
+* **Review F8.** The refined-cell cascade specs carry EVERY refined-eval row
+  UNTRIMMED (``top_k=None``) — each evaluation is a Bailey-LdP trial (ADR-0007
+  condition 6), so none may be dropped before the cascade's N.
+* **Review F9/F10.** Bars come from the launcher's in-memory slice memo
+  (``bars_for``) — same-process only; ``bar_bits`` are rebuilt per survivor
+  proximity via the golden-locked Stage-1A builder; the whole pass runs on a
+  single thread inside the launcher's open audit chain, bracketed by
+  ``STAGE_3_PASS_START`` / ``STAGE_3_PASS_COMPLETE`` lines around the per-mask
+  ``STAGE_3_REFINE_*`` triples.
+
+Idempotence (Golden Rule #7): survivor selection enumerates ONLY this grid's
+Stage-2 cell files (never the whole results tree), so refined-cell files from a
+previous run can never feed back into selection; a re-run re-derives the same
+evaluations and re-appends identical rows (the store's idempotent no-op),
+re-flushing byte-identical Parquet.
+
+Honest envelope (Golden Rule #10): every refined evaluation is a FULL backtest
+— O(bars) per eval, ≤ ``max_fevals × max_restarts`` (default ≤600) evals per
+mask — and building each refined row RE-SIMULATES the trades for its real OHLC
+price anchors (a second O(bars) walk per unique eval). Cell recovery is
+O(survivors × |SL|·|TP|·|proximities|) BLAKE3 hashes. NOTHING here is one of
+the Rule-#5 O(1) hot paths and no O(1) or wall-time claim is made; this is an
+offline between-stage pass.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import itertools
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
+
+import blake3
+import structlog
+
+from brutex.calendars.nse import IST
+from brutex.data.models import CandleBar
+from brutex.engine.cascade_wire import (
+    CascadeTupleSpec,
+    Stage3CellRecord,
+    Stage3ManifestRecord,
+    spec_from_store_rows,
+)
+from brutex.engine.combo_mask import popcount
+from brutex.engine.results_store import ResultRow, ResultsStore
+from brutex.engine.stage1a import build_bar_bits
+from brutex.engine.stage3_refine import (
+    Evaluator,
+    RefineBudget,
+    optimizer_versions,
+    refine_mask,
+)
+from brutex.engine.stage3_select import group_survivors
+from brutex.engine.sweep_driver import metrics_for_mask
+from brutex.engine.sweep_orchestrator import (
+    SweepGridConfig,
+    SweepTuple,
+    Timeframe,
+    iter_sweep_tuples,
+    load_or_create_store,
+    tuple_store_path,
+)
+from brutex.engine.sweep_run import (
+    _direction_label,
+    canonical_trade_params,
+    mask_run_id,
+    ranked_combo_to_result_row,
+)
+from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS
+from brutex.models import BruteXError
+from brutex.ranking import RankedCombo
+from brutex.strategies.types import Side
+from brutex.vocabulary import ProximityParams
+
+if TYPE_CHECKING:
+    # Annotation-only — keeps brutex.orchestrator.audit (and anything it pulls)
+    # out of this module's runtime import graph, mirroring the sweep_run /
+    # sweep_orchestrator discipline for the strict per-module coverage gates.
+    from brutex.metrics.compute import ResultMetrics
+    from brutex.orchestrator.audit import AuditWriter
+
+_LOG = structlog.get_logger("brutex.engine.stage3_wire")
+
+#: The two pass-level audit actions bracketing the per-mask STAGE_3_REFINE_*
+#: triples (review F10) — one START before the first refinement, one COMPLETE
+#: after the last cell flush, on the launcher's single hash-chained writer.
+# S105/B105 fire because the names contain PASS (in the linters' password
+# word-list) + string values — they are audit action labels, not credentials
+# (the same precedent as LockboxStatus.PASS).
+STAGE3_ACTION_PASS_START: Final[str] = "STAGE_3_PASS_START"  # noqa: S105 # nosec B105
+STAGE3_ACTION_PASS_COMPLETE: Final[str] = "STAGE_3_PASS_COMPLETE"  # noqa: S105 # nosec B105
+
+
+class Stage3WireError(BruteXError):
+    """Raised for any Stage-3 wiring failure.
+
+    Covers a missing ``optimize`` extra at pass time, non-chronological bars in
+    the train-slice helper, a survivor whose grid cell cannot be recovered by
+    run-identity match, an unknown direction label / timeframe label on a
+    persisted row, and a refined cell carrying a disabled (``None``) SL/TP leg.
+    """
+
+
+def ensure_stage3_runtime() -> tuple[str, str]:
+    """Fail fast (and loudly) when the pinned ``optimize`` extra is absent.
+
+    Called by the launcher BEFORE any Stage-3 work (and again at pass start) so
+    an enabled run can never crash on a missing ``cma`` import AFTER the whole
+    grid persisted — the same fail-fast rationale as the on-grid axis
+    validation in :class:`~brutex.engine.sweep_orchestrator.SweepGridConfig`.
+
+    Returns
+    -------
+    tuple[str, str]
+        ``(pycma_version, numpy_version)`` — the identity fields of ADR-0007
+        condition 4, proving both libraries import.
+
+    Raises
+    ------
+    Stage3WireError
+        If the ``optimize`` extra (exact-pinned pycma,
+        DEC-STAGE3-OPTIMIZE-EXTRA-001) is not installed.
+    """
+    try:
+        return optimizer_versions()
+    except ImportError as exc:
+        raise Stage3WireError(
+            "--stage3-enable requires the 'optimize' extra (pinned pycma) — "
+            "install with: pip install -e '.[optimize]' "
+            f"(import failed: {exc})"
+        ) from exc
+
+
+def data_snapshot_hash(
+    *,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+    slices: Mapping[tuple[str, str], Sequence[CandleBar]],
+) -> str:
+    """Return a real BLAKE3 content fingerprint of a loaded data window.
+
+    The SHARED snapshot-identity derivation (CLAUDE.md §11 COMMON): the
+    ``brutex sweep-all`` launcher hashes its full-window slices through this
+    helper, and :func:`run_stage3_pass` hashes the lockbox-excluded TRAIN
+    slices through the SAME derivation (ADR-0007 Amendment A1) — so a refined
+    row's ``data_snapshot_hash`` honestly encodes the data it was evaluated on.
+
+    Honest (Golden Rule #1/#10): a deterministic digest of the data SCOPE
+    (exchange/segment/window) plus, per ``(symbol, interval)`` slice, the bar
+    count and the first/last bar timestamps + closes — a real content-derived
+    snapshot identity, not a fabricated placeholder. Two different lake states
+    over the same window therefore hash differently.
+
+    Parameters
+    ----------
+    exchange, segment, start, end
+        The data scope labels (the lake partition + the requested ISO window).
+    slices
+        Every loaded ``(symbol, interval) -> bars`` slice (empty slices
+        participate as explicit zero-count entries).
+
+    Returns
+    -------
+    str
+        The 64-char lowercase BLAKE3 hex digest.
+    """
+    parts: list[str] = [f"{exchange}|{segment}|{start}|{end}"]
+    for (symbol, interval), bars in sorted(slices.items()):
+        if bars:
+            first, last = bars[0], bars[-1]
+            parts.append(
+                f"{symbol}|{interval}|{len(bars)}|{first.timestamp.isoformat()}|"
+                f"{first.close}|{last.timestamp.isoformat()}|{last.close}"
+            )
+        else:
+            parts.append(f"{symbol}|{interval}|0")
+    # str(...) keeps this typed `str` even where the blake3 wheel (and its
+    # stubs) is absent and the import degrades to Any — e.g. the isolated
+    # pre-commit mypy env (hook-portability, the #575 combo.py precedent).
+    return str(blake3.blake3("\n".join(parts).encode("utf-8")).hexdigest())
+
+
+def _ist_day_ordinal(bar: CandleBar) -> int:
+    """Return *bar*'s IST trading-day ordinal — the lockbox/cascade day axis.
+
+    EXACTLY the axis :func:`brutex.engine.cascade_wire.build_candidate_input`
+    feeds the lockbox filter (#8): the bar timestamp converted to IST, its
+    calendar date's ``toordinal()``.
+    """
+    return bar.timestamp.astimezone(IST).date().toordinal()
+
+
+def train_slice_bars(bars: Sequence[CandleBar]) -> tuple[CandleBar, ...]:
+    """Return the lockbox-excluded training slice of *bars* (ADR-0007 condition 7).
+
+    Mirrors :func:`brutex.metrics.lockbox.lockbox_evaluation`'s DEFAULT
+    day-ordinal window EXACTLY: with ``max_day`` the last bar's IST day ordinal,
+    the lockbox window starts at ``max_day - LOCKBOX_DEFAULT_WINDOW_DAYS + 1``
+    and the train slice keeps every bar strictly BEFORE that start. The window
+    length is the shared :data:`~brutex.metrics.lockbox.LOCKBOX_DEFAULT_WINDOW_DAYS`
+    constant — one source of truth, never a re-derived boundary (review F1).
+
+    Honest envelope (Golden Rule #10): this mirrors the lockbox's DEFAULT
+    window only. The lockbox's adaptive backward extension (when the default
+    window holds < 500 trades) can consume days from before this boundary at
+    cascade time — the uncontaminated arbiter stays the cascade's own lockbox
+    gate; Stage-3 simply never trains on the default held-out window.
+
+    Parameters
+    ----------
+    bars
+        Chronologically ordered bars for one ``(instrument, interval)``.
+
+    Returns
+    -------
+    tuple[CandleBar, ...]
+        The train-slice bars (empty when *bars* is empty or spans no more than
+        the lockbox window).
+
+    Raises
+    ------
+    Stage3WireError
+        If the bars' IST day ordinals are not non-decreasing (mirrors the
+        lockbox's chronological-input validation).
+    """
+    if not bars:
+        return ()
+    ordinals = [_ist_day_ordinal(bar) for bar in bars]
+    for prev, cur in itertools.pairwise(ordinals):
+        if cur < prev:
+            raise Stage3WireError(
+                "train_slice_bars: bars must be chronological (non-decreasing IST day ordinals)"
+            )
+    lockbox_start = ordinals[-1] - LOCKBOX_DEFAULT_WINDOW_DAYS + 1
+    return tuple(bar for bar, day in zip(bars, ordinals, strict=True) if day < lockbox_start)
+
+
+def recover_survivor_cell(
+    row: ResultRow, grid: SweepGridConfig
+) -> tuple[int, int, ProximityParams | None]:
+    """Recover *row*'s grid cell ``(sl_paisa, tp_paisa, proximity)`` by identity match.
+
+    A persisted row folds its trade-sim params into the BLAKE3 ``run_id`` but
+    does not store them as columns, so the survivor's refinement start cell is
+    re-derived (review F4): for each point of the grid's ``stop_losses ×
+    take_profits × proximities`` product, the 9-field
+    :func:`~brutex.engine.sweep_run.mask_run_id` is recomputed from the row's
+    own labels + the grid's shared context and compared to ``row.run_id``. The
+    first (cryptographically unique) match is the cell — never guessed.
+
+    Parameters
+    ----------
+    row
+        The persisted Stage-2 survivor row.
+    grid
+        The grid it was swept under (axes + shared identity context).
+
+    Returns
+    -------
+    tuple[int, int, ProximityParams | None]
+        The survivor's ``(sl_paisa, tp_paisa, proximity)`` start cell.
+
+    Raises
+    ------
+    Stage3WireError
+        If no grid cell reproduces ``row.run_id`` (the row does not belong to
+        this grid), or the matched cell has a disabled (``None``) SL/TP leg —
+        Stage-3 refinement needs an on-grid numeric start point (the enabled
+        config forbids ``None`` axes up front; this guards direct callers).
+    """
+    for sl, tp, proximity in itertools.product(
+        grid.stop_losses, grid.take_profits, grid.proximities
+    ):
+        params = canonical_trade_params(
+            sl_paisa=sl,
+            tp_paisa=tp,
+            prior_n=grid.prior_n,
+            proximity=proximity,
+            start_equity_paisa=grid.start_equity_paisa,
+        )
+        candidate = mask_run_id(
+            mask=row.mask_bits,
+            direction=row.direction,
+            instrument=row.instrument,
+            tf=row.tf,
+            mode=row.mode,
+            params=params,
+            data_snapshot_hash=grid.data_snapshot_hash,
+            indicator_version=grid.indicator_version,
+            code_commit_sha=grid.code_commit_sha,
+        )
+        if candidate == row.run_id:
+            if sl is None or tp is None:
+                raise Stage3WireError(
+                    f"recover_survivor_cell: run {row.run_id[:16]} matched a cell with a "
+                    f"disabled leg (sl={sl}, tp={tp}) — Stage-3 needs numeric on-grid legs"
+                )
+            return sl, tp, proximity
+    raise Stage3WireError(
+        f"recover_survivor_cell: no (sl × tp × proximity) cell of this grid reproduces "
+        f"run {row.run_id[:16]}… for mask {row.mask_bits:#x} — the row does not belong "
+        f"to this grid's identity context"
+    )
+
+
+def _side_for_direction(direction: str) -> Side:
+    """Map a persisted direction label back to its :class:`Side` (inverse of the sweep's)."""
+    if direction == "bull":
+        return Side.BUY
+    if direction == "bear":
+        return Side.SELL
+    raise Stage3WireError(f"unknown persisted direction label {direction!r} (expect bull/bear)")
+
+
+def _timeframe_for_label(label: str, grid: SweepGridConfig) -> Timeframe:
+    """Resolve a persisted row's tf *label* to the grid's :class:`Timeframe`."""
+    for tf in grid.timeframes:
+        if tf.label == label:
+            return tf
+    raise Stage3WireError(
+        f"persisted row tf label {label!r} is not one of this grid's timeframes "
+        f"{[tf.label for tf in grid.timeframes]}"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _WriterAuditSink:
+    """Adapt the launcher's :class:`AuditWriter` to the refine runner's ``AuditSink``.
+
+    The writer's ``append`` takes a concrete ``dict`` payload while the
+    :class:`~brutex.engine.stage3_refine.AuditSink` protocol passes a
+    ``Mapping`` — this thin adapter materialises the dict, nothing more, so the
+    per-mask STAGE_3_REFINE_* lines land on the SAME hash chain as the sweep's.
+    """
+
+    writer: AuditWriter
+
+    def append(self, *, action: str, subject: str, payload: Mapping[str, object]) -> object:
+        """Forward one hash-chained audit line to the wrapped writer."""
+        return self.writer.append(action=action, subject=subject, payload=dict(payload))
+
+
+def _make_evaluator(
+    *,
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    mask: int,
+    side: Side,
+    tf_minutes: int,
+    start_equity_paisa: int,
+) -> Evaluator:
+    """Bind one survivor's FULL-backtest evaluator over the TRAIN slice (condition 7).
+
+    The production binding of the slice-4 engine seam: each call is one
+    standalone :func:`~brutex.engine.sweep_driver.metrics_for_mask` backtest at
+    a quantized on-grid ``(sl_paisa, tp_paisa)`` — O(bars) per call, never O(1).
+    """
+
+    def _evaluate(sl_paisa: int, tp_paisa: int) -> ResultMetrics:
+        return metrics_for_mask(
+            bars,
+            bar_bits,
+            mask,
+            direction=side,
+            tf_minutes=tf_minutes,
+            stop_loss_paisa=sl_paisa,
+            take_profit_paisa=tp_paisa,
+            start_equity_paisa=start_equity_paisa,
+        )
+
+    return _evaluate
+
+
+@dataclass(frozen=True, slots=True)
+class Stage3RefinedCell:
+    """One refined quantized cell written by the pass (review F3).
+
+    Attributes
+    ----------
+    tuple_
+        The constructed :class:`SweepTuple` addressing the cell
+        (``k = popcount(mask)``; on-grid int SL/TP legs).
+    path
+        The cell's own Parquet file (under the TRAIN-hash grid context).
+    rows
+        Row count in the cell store after the flush.
+    """
+
+    tuple_: SweepTuple
+    path: Path
+    rows: int
+
+
+@dataclass(frozen=True, slots=True)
+class Stage3PassReport:
+    """The tally :func:`run_stage3_pass` returns (and stamps into the audit).
+
+    Attributes
+    ----------
+    enabled
+        ``False`` when the grid had ``stage3_enable=False`` (a no-op pass).
+    train_snapshot_hash
+        The content-derived hash of the lockbox-excluded training slices
+        (Amendment A1), or ``None`` when disabled.
+    leaderboards
+        Number of (instrument, TF, mode) leaderboards selected.
+    survivors_total
+        Total survivors selected across leaderboards (after the top-K trim).
+    masks_refined
+        Survivors actually refined (excludes skipped-empty-train leaderboards).
+    evals_total
+        Unique (cache-miss) evaluations across all refinement runs — the
+        DSR-N trial contribution of this pass (ADR-0007 condition 6).
+    cache_hits_total
+        CMA asks answered from the run-scoped value caches.
+    rows_appended
+        Refined rows NEWLY added to cell stores (an idempotent re-run of the
+        same pass re-derives identical rows and appends zero).
+    skipped_empty_train
+        Leaderboards skipped because their train slice was empty (a window no
+        longer than the lockbox window leaves nothing to train on).
+    cells
+        Every refined cell written, in deterministic order.
+    """
+
+    enabled: bool
+    train_snapshot_hash: str | None
+    leaderboards: int
+    survivors_total: int
+    masks_refined: int
+    evals_total: int
+    cache_hits_total: int
+    rows_appended: int
+    skipped_empty_train: int
+    cells: tuple[Stage3RefinedCell, ...]
+
+
+def _cell_sort_key(cell: SweepTuple) -> tuple[str, str, str, int, int, int, tuple[int, int, int]]:
+    """Deterministic ordering key for refined-cell writes (Golden Rule #4)."""
+    proximity = cell.proximity
+    prox_key = (
+        (-1, -1, -1)
+        if proximity is None
+        else (
+            proximity.pivot_proximity_bps,
+            proximity.pdh_pdl_proximity_bps,
+            proximity.fib_proximity_bps,
+        )
+    )
+    return (
+        cell.instrument,
+        cell.tf.label,
+        cell.direction.value,
+        cell.k,
+        cell.sl_paisa if cell.sl_paisa is not None else 0,
+        cell.tp_paisa if cell.tp_paisa is not None else 0,
+        prox_key,
+    )
+
+
+def run_stage3_pass(
+    grid: SweepGridConfig,
+    *,
+    results_root: Path,
+    bars_for: Callable[[str, str], Sequence[CandleBar]],
+    audit: AuditWriter,
+    exchange: str,
+    segment: str,
+    start: str,
+    end: str,
+) -> Stage3PassReport:
+    """Run the Stage-3 refinement post-pass over a persisted grid — single-threaded.
+
+    The launcher calls this INSIDE its open audit ``with``-block, right after
+    the supervised grid returns (review F10). Sequence:
+
+    1. No-op fast path when ``grid.stage3_enable`` is ``False``.
+    2. :func:`ensure_stage3_runtime` (fail fast on a missing ``optimize`` extra).
+    3. Select survivors from ONLY this grid's Stage-2 cell files
+       (:func:`~brutex.engine.sweep_orchestrator.iter_sweep_tuples` +
+       :func:`~brutex.engine.sweep_orchestrator.tuple_store_path`), grouped to
+       per-(instrument, TF, mode) top-K leaderboards in deterministic order
+       (:func:`~brutex.engine.stage3_select.group_survivors`).
+    4. Slice every loaded ``(instrument, tf)`` to its lockbox-excluded train
+       window (:func:`train_slice_bars`) and hash the train slices through the
+       shared :func:`data_snapshot_hash` (Amendment A1).
+    5. Emit ``STAGE_3_PASS_START``; per survivor (leaderboard order): recover
+       the start cell (review F4), rebuild ``bar_bits`` for its proximity over
+       the TRAIN bars (review F9, memoized per (instrument, tf, proximity)),
+       run the slice-4 :func:`~brutex.engine.stage3_refine.refine_mask`, and
+       project EVERY unique evaluation into a refined
+       :class:`~brutex.engine.results_store.ResultRow` stamped with the train
+       hash.
+    6. Write each refined cell's rows to its OWN Parquet file (review F3) in
+       deterministic cell order via the load-or-create store (idempotent).
+    7. Emit ``STAGE_3_PASS_COMPLETE`` with the full tally.
+
+    Parameters
+    ----------
+    grid
+        The validated grid that just swept (its ``stage3_*`` knobs drive the
+        pass).
+    results_root
+        The sweep results root the grid persisted under.
+    bars_for
+        The launcher's in-memory ``(instrument, tf_label) -> bars`` slice memo
+        — the SAME bars the sweep ran on (same-process only, review F9).
+    audit
+        The launcher's open hash-chained writer (single-threaded use).
+    exchange, segment, start, end
+        The data-scope labels the launcher hashed its full window with —
+        reused verbatim for the train-slice hash derivation.
+
+    Returns
+    -------
+    Stage3PassReport
+        The tally + the refined-cell list (the cascade-extension input).
+
+    Raises
+    ------
+    Stage3WireError
+        Missing ``optimize`` extra, an unrecoverable survivor cell, an unknown
+        direction/timeframe label, or non-chronological bars.
+    """
+    if not grid.stage3_enable:
+        return Stage3PassReport(
+            enabled=False,
+            train_snapshot_hash=None,
+            leaderboards=0,
+            survivors_total=0,
+            masks_refined=0,
+            evals_total=0,
+            cache_hits_total=0,
+            rows_appended=0,
+            skipped_empty_train=0,
+            cells=(),
+        )
+    ensure_stage3_runtime()
+
+    grid_rows: list[ResultRow] = []
+    for tuple_ in iter_sweep_tuples(grid):
+        path = tuple_store_path(results_root, tuple_, grid)
+        if path.exists():
+            grid_rows.extend(ResultsStore.load(path).rows())
+    leaderboards = group_survivors(grid_rows, top_k=grid.stage3_top_k)
+    survivors_total = sum(len(rows) for rows in leaderboards.values())
+
+    train_slices: dict[tuple[str, str], tuple[CandleBar, ...]] = {}
+    for instrument in grid.instruments:
+        for tf in grid.timeframes:
+            train_slices[(instrument, tf.label)] = train_slice_bars(bars_for(instrument, tf.label))
+    train_hash = data_snapshot_hash(
+        exchange=exchange, segment=segment, start=start, end=end, slices=train_slices
+    )
+    # The refined rows' store context: SAME grid, TRAIN-slice snapshot identity
+    # (Amendment A1) — so a refined cell file can never collide with a Stage-2
+    # grid cell file even at identical (instrument, tf, direction, k, sl, tp).
+    train_grid = dataclasses.replace(grid, data_snapshot_hash=train_hash)
+
+    budget = RefineBudget(max_fevals=grid.stage3_max_fevals, max_restarts=grid.stage3_max_restarts)
+    subject = f"stage3:{grid.data_snapshot_hash[:16]}"
+    audit.append(
+        action=STAGE3_ACTION_PASS_START,
+        subject=subject,
+        payload={
+            "stage3_top_k": grid.stage3_top_k,
+            "max_fevals": grid.stage3_max_fevals,
+            "max_restarts": grid.stage3_max_restarts,
+            "train_snapshot_hash": train_hash,
+            "leaderboards": len(leaderboards),
+            "survivors_total": survivors_total,
+        },
+    )
+    sink = _WriterAuditSink(audit)
+
+    masks_refined = 0
+    evals_total = 0
+    cache_hits_total = 0
+    skipped_empty_train = 0
+    cell_rows: dict[SweepTuple, list[ResultRow]] = {}
+    bits_memo: dict[tuple[str, str, ProximityParams | None], Sequence[int]] = {}
+    for key, survivors in leaderboards.items():
+        train_bars = train_slices.get((key.instrument, key.tf), ())
+        if not train_bars:
+            skipped_empty_train += 1
+            continue
+        tf = _timeframe_for_label(key.tf, grid)
+        for row in survivors:
+            side = _side_for_direction(row.direction)
+            start_sl, start_tp, proximity = recover_survivor_cell(row, grid)
+            memo_key = (key.instrument, key.tf, proximity)
+            bar_bits = bits_memo.get(memo_key)
+            if bar_bits is None:
+                bar_bits = build_bar_bits(train_bars, proximity=proximity, prior_n=grid.prior_n)
+                bits_memo[memo_key] = bar_bits
+            report = refine_mask(
+                mask_run_id=row.run_id,
+                start_sl_paisa=start_sl,
+                start_tp_paisa=start_tp,
+                evaluate=_make_evaluator(
+                    bars=train_bars,
+                    bar_bits=bar_bits,
+                    mask=row.mask_bits,
+                    side=side,
+                    tf_minutes=tf.minutes,
+                    start_equity_paisa=grid.start_equity_paisa,
+                ),
+                budget=budget,
+                audit=sink,
+            )
+            masks_refined += 1
+            evals_total += report.evals_total
+            cache_hits_total += report.cache_hits
+            for refined_eval in report.evals:
+                refined_id = mask_run_id(
+                    mask=row.mask_bits,
+                    direction=row.direction,
+                    instrument=row.instrument,
+                    tf=row.tf,
+                    mode=row.mode,
+                    params=canonical_trade_params(
+                        sl_paisa=refined_eval.sl_paisa,
+                        tp_paisa=refined_eval.tp_paisa,
+                        prior_n=grid.prior_n,
+                        proximity=proximity,
+                        start_equity_paisa=grid.start_equity_paisa,
+                    ),
+                    data_snapshot_hash=train_hash,
+                    indicator_version=grid.indicator_version,
+                    code_commit_sha=grid.code_commit_sha,
+                )
+                refined_row = ranked_combo_to_result_row(
+                    # An UNGATED Bailey-LdP trial: composite_score is the
+                    # pool-relative ranking term and is NOT defined per-eval
+                    # (ADR-0007 condition 2) — 0.0 placeholder, never ranked on.
+                    RankedCombo(
+                        mask=row.mask_bits,
+                        metrics=refined_eval.metrics,
+                        composite_score=0.0,
+                        deflated_sharpe=None,
+                    ),
+                    run_id=refined_id,
+                    instrument=row.instrument,
+                    tf=row.tf,
+                    direction=row.direction,
+                    mode=row.mode,
+                    bars=train_bars,
+                    bar_bits=bar_bits,
+                    tf_minutes=tf.minutes,
+                    sl_paisa=refined_eval.sl_paisa,
+                    tp_paisa=refined_eval.tp_paisa,
+                )
+                cell = SweepTuple(
+                    instrument=row.instrument,
+                    tf=tf,
+                    direction=side,
+                    k=popcount(row.mask_bits),
+                    sl_paisa=refined_eval.sl_paisa,
+                    tp_paisa=refined_eval.tp_paisa,
+                    proximity=proximity,
+                )
+                cell_rows.setdefault(cell, []).append(refined_row)
+
+    rows_appended = 0
+    cells: list[Stage3RefinedCell] = []
+    for cell in sorted(cell_rows, key=_cell_sort_key):
+        cell_path = tuple_store_path(results_root, cell, train_grid)
+        store = load_or_create_store(cell_path)
+        for refined_row in cell_rows[cell]:
+            # Identical re-derived rows (re-runs; the same refined cell reached
+            # from two survivors of the same mask) are idempotent no-ops.
+            if store.append(refined_row):
+                rows_appended += 1
+        store.flush()
+        cells.append(Stage3RefinedCell(tuple_=cell, path=cell_path, rows=len(store)))
+
+    payload = {
+        "masks_refined": masks_refined,
+        "evals_total": evals_total,
+        "cache_hits_total": cache_hits_total,
+        "cells_written": len(cells),
+        "rows_appended": rows_appended,
+        "skipped_empty_train": skipped_empty_train,
+        "train_snapshot_hash": train_hash,
+    }
+    audit.append(action=STAGE3_ACTION_PASS_COMPLETE, subject=subject, payload=payload)
+    _LOG.info("stage3_wire.pass_complete", subject=subject, **payload)
+    return Stage3PassReport(
+        enabled=True,
+        train_snapshot_hash=train_hash,
+        leaderboards=len(leaderboards),
+        survivors_total=survivors_total,
+        masks_refined=masks_refined,
+        evals_total=evals_total,
+        cache_hits_total=cache_hits_total,
+        rows_appended=rows_appended,
+        skipped_empty_train=skipped_empty_train,
+        cells=tuple(cells),
+    )
+
+
+def cascade_specs_for_refined_cells(
+    cells: Sequence[Stage3RefinedCell], *, grid: SweepGridConfig
+) -> list[CascadeTupleSpec]:
+    """Build the Stage-4 cascade specs for every refined cell (reviews F3 + F8).
+
+    Each refined cell becomes its own
+    :class:`~brutex.engine.cascade_wire.CascadeTupleSpec` carrying EVERY
+    refined-eval row UNTRIMMED (``top_k=None``): each evaluation is a
+    Bailey-LdP trial (ADR-0007 condition 6) and none may be dropped before the
+    cascade counts its N. The cascade then re-simulates each candidate at its
+    own quantized coordinates over the cascade's bars, exactly as Amendment A1
+    describes.
+
+    Parameters
+    ----------
+    cells
+        The pass report's refined cells (already in deterministic order).
+    grid
+        The owning grid (its shared ``prior_n`` / ``start_equity_paisa``).
+
+    Returns
+    -------
+    list[CascadeTupleSpec]
+        One spec per non-empty refined cell.
+    """
+    specs: list[CascadeTupleSpec] = []
+    for cell in cells:
+        tuple_ = cell.tuple_
+        proximity = tuple_.proximity
+        proximity_bps = (
+            None
+            if proximity is None
+            else (
+                proximity.pivot_proximity_bps,
+                proximity.pdh_pdl_proximity_bps,
+                proximity.fib_proximity_bps,
+            )
+        )
+        spec = spec_from_store_rows(
+            instrument=tuple_.instrument,
+            tf_label=tuple_.tf.label,
+            tf_minutes=tuple_.tf.minutes,
+            direction_label=_direction_label(tuple_.direction),
+            sl_paisa=tuple_.sl_paisa,
+            tp_paisa=tuple_.tp_paisa,
+            prior_n=grid.prior_n,
+            proximity_bps=proximity_bps,
+            start_equity_paisa=grid.start_equity_paisa,
+            rows=ResultsStore.load(cell.path).rows(),
+            top_k=None,
+        )
+        if spec is not None:
+            specs.append(spec)
+    return specs
+
+
+def stage3_manifest_record(report: Stage3PassReport) -> Stage3ManifestRecord:
+    """Project a pass report into the cascade manifest's Stage-3 record (review F3).
+
+    Records enablement, the train-slice snapshot hash, and the refined-cell
+    list — so a manifest reader can tell exactly which specs are ungated
+    Stage-3 refined cells versus gated Stage-2 grid cells.
+
+    Parameters
+    ----------
+    report
+        The :func:`run_stage3_pass` report (enabled or the disabled no-op).
+
+    Returns
+    -------
+    Stage3ManifestRecord
+        The manifest record (``enabled=False`` ⇒ no hash, no cells).
+
+    Raises
+    ------
+    Stage3WireError
+        If an enabled report carries a refined cell with a disabled (``None``)
+        SL/TP leg — refined cells are always quantized on-grid ints.
+    """
+    if not report.enabled:
+        return Stage3ManifestRecord(enabled=False, train_snapshot_hash=None, refined_cells=())
+    records: list[Stage3CellRecord] = []
+    for cell in report.cells:
+        tuple_ = cell.tuple_
+        if tuple_.sl_paisa is None or tuple_.tp_paisa is None:
+            raise Stage3WireError(
+                f"stage3_manifest_record: refined cell {tuple_.instrument}/{tuple_.tf.label} "
+                f"has a disabled leg (sl={tuple_.sl_paisa}, tp={tuple_.tp_paisa})"
+            )
+        proximity = tuple_.proximity
+        records.append(
+            Stage3CellRecord(
+                instrument=tuple_.instrument,
+                tf_label=tuple_.tf.label,
+                direction_label=_direction_label(tuple_.direction),
+                k=tuple_.k,
+                sl_paisa=tuple_.sl_paisa,
+                tp_paisa=tuple_.tp_paisa,
+                proximity_bps=(
+                    None
+                    if proximity is None
+                    else (
+                        proximity.pivot_proximity_bps,
+                        proximity.pdh_pdl_proximity_bps,
+                        proximity.fib_proximity_bps,
+                    )
+                ),
+            )
+        )
+    return Stage3ManifestRecord(
+        enabled=True,
+        train_snapshot_hash=report.train_snapshot_hash,
+        refined_cells=tuple(records),
+    )
+
+
+__all__ = [
+    "STAGE3_ACTION_PASS_COMPLETE",
+    "STAGE3_ACTION_PASS_START",
+    "Stage3PassReport",
+    "Stage3RefinedCell",
+    "Stage3WireError",
+    "cascade_specs_for_refined_cells",
+    "data_snapshot_hash",
+    "ensure_stage3_runtime",
+    "recover_survivor_cell",
+    "run_stage3_pass",
+    "stage3_manifest_record",
+    "train_slice_bars",
+]

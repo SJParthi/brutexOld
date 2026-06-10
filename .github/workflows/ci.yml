@@ -184,7 +184,14 @@ jobs:
   test:
     name: Unit tests + coverage (100% gate)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # 15 -> 25 (DEC-STAGE3-WIRE-001): the job already ran 12-14 min before this
+    # PR; the Stage-3 wiring adds real test work (the F11 A/B oracle's three
+    # full sweep+refine pipeline runs + the 19i1c stage3_wire strict gate), and
+    # on 2026-06-10 the push-event copy - racing the pull_request copy on
+    # shared runners - was CANCELLED at exactly 15:11 mid-way through the
+    # strict per-module gates, failing the CI OK aggregate with zero real
+    # failures. 25 keeps an honest hang guard with headroom for contention.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
       - name: Set up Python
@@ -930,6 +937,17 @@ jobs:
             pytest --cov=brutex.engine.stage3_grid --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_stage3_grid.py
           else
             echo "(brutex.engine.stage3_grid test file not present yet — gate inactive)"
+          fi
+          # 19i1c · brutex.engine.stage3_wire — Stage-3 launcher wiring
+          # (DEC-STAGE3-WIRE-001; the train-slice helper, survivor-cell
+          # recovery by run-id match, the audited refinement post-pass, the
+          # refined-cell cascade specs + manifest record, and the F11 A/B
+          # byte-identical-tree determinism oracle — needs the [optimize]
+          # extra installed in this job).
+          if compgen -G "tests/unit/test_engine_stage3_wire.py" > /dev/null; then
+            pytest --cov=brutex.engine.stage3_wire --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_stage3_wire.py
+          else
+            echo "(brutex.engine.stage3_wire test file not present yet — gate inactive)"
           fi
           # 19i2 · brutex.ranking — composite score + hard gates (DEC-RANKING-001)
           if compgen -G "tests/unit/test_ranking.py" > /dev/null; then

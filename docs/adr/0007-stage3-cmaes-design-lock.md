@@ -110,3 +110,27 @@ best quantized (SL,TP), and the eval count contributed to N.
 *Compiled from the 2026-06-10 hostile review; the full finding-by-finding
 record (BLOCKER/RISK/OK with file:line) is preserved in MIGRATION.md entry
 #623.*
+
+## 6. Amendment A1 (2026-06-10, DEC-STAGE3-WIRE-001) — condition 3 vs condition 7 reconciliation
+
+The slice-5 hostile review (MIGRATION.md entry for DEC-STAGE3-WIRE-001, F1)
+found conditions 3 and 7 mutually unsatisfiable as written: Stage 2 evaluates
+the FULL CLI window (the lockbox is enforced later, as cascade filter #8 over
+the same series' tail), so a refined candidate evaluated per condition 7 on
+the lockbox-excluded training slice produces DIFFERENT metrics under the SAME
+9-field run identity as a full-window grid cell — the identity's
+`data_snapshot_hash` field did not distinguish the windows, so condition 3's
+"dedup against grid survivors by the existing hash" would either collide
+(same id, different row → the store's run-identity conflict raise) or force a
+condition-7 violation.
+
+**Resolution (binding):** Stage-3 refined rows are stamped with the
+**content-derived `data_snapshot_hash` of the lockbox-excluded training
+slice** they were evaluated on (the same `_data_snapshot_hash` derivation the
+launcher applies to its slices). The 9-field hash then honestly encodes the
+evaluated data: a refined eval landing on a grid cell's (SL, TP) is a
+DISTINCT identity from the full-window grid row — both legitimately coexist
+in the merged pool, the cascade re-simulates each at its own coordinates, and
+no cross-window dedup is claimed or wanted. Condition 3's intra-Stage-3 dedup
+(the run-scoped value cache + identical refined evals across reruns) is
+unaffected.
