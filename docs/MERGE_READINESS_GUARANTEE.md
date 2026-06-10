@@ -72,7 +72,56 @@ that row's status.
    + an **Honest envelope** disclosing anything not green.
 4. No secret ever printed, logged, or committed; audit JSONL chain intact.
 5. **Never merged over a red or pending gate.** Red/conflict → diagnose →
-   fix → re-push → re-verify → merge. `mergeable_state` must be `clean`.
+   fix → re-push → re-verify → merge.
+
+   **`mergeable_state` envelope (DEC-AUTOMERGE-CLEAN-STRICT-001,
+   amends the original strict-`clean` wording):** strict
+   `mergeable_state == clean` is the **target**, reachable only once
+   server-side branch protection (G2,
+   `docs/runbooks/github-branch-protection-setup.md`) exists. Until G2,
+   GitHub computes the state from the head's check/status rollup, and at
+   the moment the auto-merge gate evaluates, that rollup is usually
+   non-passing — on the `ready_for_review` path the gate's own
+   in-progress `Auto-merge on green CI` check run structurally ALWAYS
+   sits `pending` on the PR head (that path can never observe `clean`);
+   on the `workflow_run` path the concurrent duplicate CI run is
+   typically still finishing. Measured (2026-06-03→06-10 run-log sample,
+   30 verified gate executions): `unstable` 21 — including every
+   `ready_for_review`-path merge; `clean` only 4 of 18 verified merges,
+   all `workflow_run`-path after every check completed; `dirty`/
+   `behind`/`blocked`/`has_hooks` never observed (full table in
+   MIGRATION.md DEC-AUTOMERGE-CLEAN-STRICT-001). Requiring strict
+   `clean` today would deterministically deadlock the
+   `ready_for_review` path and strand green PRs on the rest (the #304
+   failure mode DEC-AUTOMERGE-RACE-FIX-001 removed). The **enforced pre-G2 gate** is
+   a **denylist**: `mergeable == true` AND `mergeable_state` NOT IN
+   `{dirty, behind, blocked, unknown}` — every other value passes:
+   `clean`, `unstable` (the pre-G2 normal), and structurally also
+   `has_hooks` (GitHub-Enterprise-only pre-receive hooks; not expected
+   on github.com) or any future value. Red checks are refused UPSTREAM
+   by the all-green ci-check (DEC-AUTOMERGE-ALLGREEN-001: ANY failing
+   check run refuses; EVERY `CI OK (aggregate gate)` instance must be
+   success) **plus the CI-runs-complete rule (same DEC-ID): every
+   push/pull_request CI run on the head must be COMPLETED and at least
+   one pull_request-event CI run must be SUCCESS** — added because
+   "every CI OK instance green" is existence-blind: PR #571 merged at
+   19:56:26 while its pull_request CI run was still in flight (its
+   `CI OK` check run did not exist yet; it completed 19:57:03 — runs
+   27232004649 / 27231261106 / 27231295196). A tolerated `unstable`
+   therefore carries only pending NON-CI checks (the gate's own check
+   run and/or advisory third-party/nightly checks, whose completion
+   fires no auto-merge trigger and whose FAILURE the failing-check
+   filter refuses). **Known blind spot (disclosed, not guarded):**
+   legacy commit STATUSES (the pre-check-runs API) are invisible to
+   ci-check; no workflow in this repo posts them today — re-verify this
+   envelope if a status-posting integration (e.g. codecov) is ever
+   added. Pre-G2 no surface may claim "never merges over red" as an
+   absolute; the claim is "no failing check run, no missing CI verdict,
+   no conflict/stale/blocked/uncomputed state at merge time".
+   **Ratchet:** when G2 lands, tighten the allow-list to `clean` only
+   (tracked under the same DEC-ID). Pinned by
+   `tests/redteam/test_redteam_automerge_safety.py` both ways
+   (workflow ↔ charter).
 
 ## 5. Auto-handling (agent-in-the-loop — the honest version)
 
