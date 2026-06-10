@@ -5,8 +5,9 @@ the instrument→underlying mapping (IDX/EQ/blank/derivative) incl. the per-kind
 expiry set (index WEEK+MONTH vs stock MONTH-only,
 DEC-DHAN-STOCK-MONTHLY-ONLY-001), the report aggregation (completed series +
 quarantined failures grouped by underlying), the dry-run default path, the
-injected-factory (non-dry-run) branch, the empty-list no-op, and the
-``to_dict`` projection.
+injected-factory (non-dry-run) branch, the empty-list no-op, the dead-token
+pre-flight refusal gate (DEC-OPTIONS-TOKEN-PREFLIGHT-001 — zero fan-out calls
+on a dead token), and the ``to_dict`` projection.
 """
 
 from __future__ import annotations
@@ -312,6 +313,67 @@ class TestPullOptions:
         )
         assert report.start_date == "2021-01-01"
         assert report.total_symbols == 1
+
+    def test_preflight_dead_refuses_pull(self, tmp_path: Path) -> None:
+        """A DEAD pre-flight REFUSES the options pull — ZERO fan-out, loud ``auth_expired``.
+
+        DEC-OPTIONS-TOKEN-PREFLIGHT-001 (the spot DEC-TOKEN-PREFLIGHT-001 twin):
+        before the gate a dead token cost one doomed paced call + the AuthGuard
+        drain across the remaining series (DEC-OPTIONS-UNTIL-CLEAN-001); with the
+        gate it costs ZERO calls — the client factory itself must never run, and
+        the until-clean loop must never start (``rounds_run == 0``).
+        """
+        from brutex.adapters.dhan.token_preflight import classify_token_lifetime
+
+        built: list[int] = []
+
+        def factory(_lake_root: Path) -> tuple[JsonPoster, OptionBarSink]:
+            built.append(1)  # must NEVER run for a dead token
+            return SyntheticOptionClient(), NullOptionBarSink()
+
+        with capture_logs() as logs:
+            report = pull_options(
+                [_index(symbol="13"), _stock(symbol="1333")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_NOW,
+                client_factory=factory,
+                until_clean=True,  # the auto-resume loop must not start either
+                preflight=classify_token_lifetime(-60.0),  # dead
+            )
+
+        assert built == []  # the client was never built — zero paced fan-out calls
+        assert report.auth_aborted is True
+        assert report.symbols == []
+        assert report.rounds_run == 0  # not even one fan-out round ran
+        assert report.verdict.kind == "auth_expired"
+        assert report.verdict.needs_operator is True
+        assert "DEAD" in (report.auth_cause or "")
+        assert report.to_dict()["auth_aborted"] is True
+        # No ledger side effects either — the refusal precedes begin_pull_ledger.
+        assert not (tmp_path / "window_ledger").exists()
+        (refused,) = _events(logs, "universe.pull_options.preflight_refused")
+        assert refused["underlyings"] == 2
+        assert _events(logs, "universe.pull_options.start") == []
+
+    def test_preflight_alive_proceeds(self) -> None:
+        """A healthy pre-flight does NOT block the pull — it completes normally."""
+        from brutex.adapters.dhan.token_preflight import classify_token_lifetime
+
+        report = pull_options(
+            [_index()],
+            lake_root=Path("/unused"),
+            dry_run=True,
+            now=_NOW,
+            expiry_flags=("WEEK",),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+            preflight=classify_token_lifetime(20 * 3600.0),  # valid
+        )
+        assert report.auth_aborted is False
+        assert report.total_series_completed == 21
+        assert report.verdict.kind == "clean"
+        assert report.rounds_run == 1
 
 
 # ── report dataclasses ───────────────────────────────────────────────────
