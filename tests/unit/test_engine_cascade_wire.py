@@ -348,8 +348,23 @@ def _manual_report() -> cw.CascadeWireReport:
         n_input=2,
         n_survived=1,
         stage_survivors={FilterStage.HARD_GATES.value: 1},
+        # DEC-PBO-SIDECAR-001: a MEASURED pool PBO on one group...
+        pool_pbo=0.25,
     )
-    return cw.CascadeWireReport(sweep_id="a" * 64, groups=(("NIFTY", "1minute", inner),))
+    skipped = CascadeReport(
+        verdicts=(),
+        survivor_ids=(),
+        n_input=0,
+        n_survived=0,
+        stage_survivors={},
+        # ...and a SKIPPED (None → null) one on the other, so the serializer is
+        # value-pinned for BOTH states (hostile C1 — never only the default).
+        pool_pbo=None,
+    )
+    return cw.CascadeWireReport(
+        sweep_id="a" * 64,
+        groups=(("NIFTY", "1minute", inner), ("SENSEX", "5minute", skipped)),
+    )
 
 
 class TestReportSerialisation:
@@ -360,6 +375,16 @@ class TestReportSerialisation:
         verdicts = payload["groups"][0]["report"]["verdicts"]  # type: ignore[index]
         assert verdicts[0]["rejected_at"] is None
         assert verdicts[1]["rejected_at"] == FilterStage.HARD_GATES.value
+
+    def test_pool_pbo_serialises_measured_and_skipped(self) -> None:
+        # DEC-PBO-SIDECAR-001: the raw float round-trips (never rounded) and a
+        # skipped filter serialises as JSON null — both states pinned.
+        payload = cw.wire_report_to_dict(_manual_report())
+        assert payload["groups"][0]["report"]["pool_pbo"] == 0.25  # type: ignore[index]
+        assert payload["groups"][1]["report"]["pool_pbo"] is None  # type: ignore[index]
+        raw = cw.serialize_wire_report(_manual_report())
+        assert b'"pool_pbo":0.25' in raw
+        assert b'"pool_pbo":null' in raw
 
     def test_serialize_is_deterministic(self) -> None:
         report = _manual_report()

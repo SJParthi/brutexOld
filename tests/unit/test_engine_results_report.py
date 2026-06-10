@@ -26,6 +26,7 @@ from brutex.engine.results_report import (
     SORT_ALIASES,
     discover_result_files,
     load_results_tree,
+    render_cascade_sidecar,
     render_leaderboard,
     results_show_report,
 )
@@ -205,3 +206,98 @@ def test_sort_aliases_resolve_to_real_columns(tmp_path: Path) -> None:
     for alias in SORT_ALIASES:
         out = results_show_report(tmp_path, top=10, sort_by=alias)
         assert f"sort={alias}" in out
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# render_cascade_sidecar — the pool-PBO sidecar section (DEC-PBO-SIDECAR-001)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _write_sidecar(root: Path, body: str) -> Path:
+    path = root / "cascade" / "cascade-report.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _sidecar_json(groups: list[dict[str, object]], *, version: int = 1) -> str:
+    import json
+
+    return json.dumps({"version": version, "sweep_id": "a" * 64, "groups": groups})
+
+
+def _group(pbo: float | None, *, omit_key: bool = False) -> dict[str, object]:
+    report: dict[str, object] = {"n_input": 3, "n_survived": 2}
+    if not omit_key:
+        report["pool_pbo"] = pbo
+    return {"instrument": "NIFTY", "tf": "1minute", "report": report}
+
+
+class TestCascadeSidecar:
+    def test_absent_file_renders_empty(self, tmp_path: Path) -> None:
+        assert render_cascade_sidecar(tmp_path) == ""
+
+    def test_absent_file_show_report_is_byte_identical(self, tmp_path: Path) -> None:
+        # The hostile C8 pin: with no sidecar, results_show_report's bytes are
+        # EXACTLY the pre-sidecar render (header + leaderboard, nothing more).
+        _write_tree(tmp_path)
+        out = results_show_report(tmp_path, top=10)
+        assert render_cascade_sidecar(tmp_path) == ""
+        assert not out.endswith("\n")
+        assert "Stage-4 cascade sidecar" not in out
+
+    def test_measured_pool_pbo_renders_fixed_width(self, tmp_path: Path) -> None:
+        _write_sidecar(tmp_path, _sidecar_json([_group(0.6571428571428571)]))
+        out = render_cascade_sidecar(tmp_path)
+        assert "Stage-4 cascade sidecar" in out
+        assert "NIFTY 1minute  pool PBO=0.6571  in=3 survived=2" in out
+
+    def test_null_pool_pbo_renders_skipped(self, tmp_path: Path) -> None:
+        _write_sidecar(tmp_path, _sidecar_json([_group(None)]))
+        out = render_cascade_sidecar(tmp_path)
+        assert "pool PBO skipped (pool < 2 candidates / short series / pool empty at #5)" in out
+
+    def test_pre_sidecar_report_key_absent_is_distinguished(self, tmp_path: Path) -> None:
+        # Hostile C7a: key-ABSENT (pre-sidecar report) is a different honest
+        # state from null (measured skip) — never flattened into one dash.
+        _write_sidecar(tmp_path, _sidecar_json([_group(None, omit_key=True)]))
+        out = render_cascade_sidecar(tmp_path)
+        assert "pool PBO not recorded (pre-sidecar report)" in out
+        assert "skipped" not in out
+
+    def test_corrupt_json_is_loud(self, tmp_path: Path) -> None:
+        path = _write_sidecar(tmp_path, "{not json")
+        out = render_cascade_sidecar(tmp_path)
+        assert str(path) in out
+        assert "UNREADABLE:" in out
+
+    def test_non_dict_payload_is_loud(self, tmp_path: Path) -> None:
+        _write_sidecar(tmp_path, "[1, 2]")
+        assert "UNREADABLE: not a cascade report object" in render_cascade_sidecar(tmp_path)
+
+    def test_groups_not_a_list_is_loud(self, tmp_path: Path) -> None:
+        _write_sidecar(tmp_path, '{"version": 1, "groups": {"oops": 1}}')
+        assert "UNREADABLE: not a cascade report object" in render_cascade_sidecar(tmp_path)
+
+    def test_unsupported_version_is_loud(self, tmp_path: Path) -> None:
+        _write_sidecar(tmp_path, _sidecar_json([_group(0.5)], version=99))
+        assert "UNREADABLE: unsupported report version 99" in render_cascade_sidecar(tmp_path)
+
+    def test_group_entry_not_object_is_loud(self, tmp_path: Path) -> None:
+        _write_sidecar(tmp_path, '{"version": 1, "groups": [42]}')
+        assert "UNREADABLE: group entry is not an object" in render_cascade_sidecar(tmp_path)
+
+    def test_group_report_not_object_is_loud(self, tmp_path: Path) -> None:
+        _write_sidecar(tmp_path, '{"version": 1, "groups": [{"instrument": "NIFTY", "report": 7}]}')
+        assert "UNREADABLE: group report is not an object" in render_cascade_sidecar(tmp_path)
+
+    def test_empty_groups_render_placeholder(self, tmp_path: Path) -> None:
+        _write_sidecar(tmp_path, _sidecar_json([]))
+        assert "(no pooled slices)" in render_cascade_sidecar(tmp_path)
+
+    def test_show_report_appends_sidecar_section(self, tmp_path: Path) -> None:
+        _write_tree(tmp_path)
+        _write_sidecar(tmp_path, _sidecar_json([_group(0.25)]))
+        out = results_show_report(tmp_path, top=10)
+        assert "finalists=3" in out
+        assert out.rstrip().endswith("pool PBO=0.2500  in=3 survived=2")
