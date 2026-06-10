@@ -2607,8 +2607,10 @@ def build_app(
     async def api_db_window_ledger() -> JSONResponse:
         """GET /api/v1/db/window-ledger — the unified per-window skip/retry ledger.
 
-        DEC-WINDOW-LEDGER-001. EVERY spot + options fetch window the engine has
-        ever planned, as a browsable table row (market / security_id / interval /
+        DEC-WINDOW-LEDGER-001. EVERY spot + options fetch window of the live
+        tiling (superseded trailing keys are pruned at plan time,
+        DEC-WINDOW-TRAILING-GC-001), as a browsable table row (market /
+        security_id / interval /
         window dates / status / bars / attempts / last_error / streak). READ-ONLY:
         loads ``<lake>/window_ledger/ledger.parquet``; never raises (empty
         ``{columns, rows, total}`` when no lake / no pull yet, never a 500). Shape
