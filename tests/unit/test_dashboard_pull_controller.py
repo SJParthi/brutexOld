@@ -12,6 +12,7 @@ a real token + the ``urllib`` transport, both absent in CI
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -20,9 +21,11 @@ from pathlib import Path
 import pytest
 from brutex.adapters.dhan.errors import DhanBadRequestError
 from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
+from brutex.adapters.protocol import MarketAdapter
 from brutex.dashboard.pull_controller import (
     DHAN_FETCH_INTERVALS,
     DHAN_HISTORY_FLOOR,
+    BulkAdapterFactory,
     BulkSpotReport,
     PullCandlesReport,
     SessionRateController,
@@ -38,6 +41,7 @@ from brutex.dashboard.pull_controller import (
 from brutex.data.models import CandleBar
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
+from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from structlog.testing import capture_logs
 
 
@@ -270,6 +274,26 @@ class TestPullCandlesDryRun:
         d = report.to_dict()
         assert d["total_no_data"] == report.total_no_data
         assert d["total_skipped"] == 0
+
+    def test_on_progress_forwarded_per_pair(self, tmp_path: Path) -> None:
+        """pull_candles threads on_progress → fires once per (symbol, interval) pair.
+
+        The single-symbol twin of the bulk on_progress test: the dashboard's
+        background-job percent ticks per completed pair, so the hook must fire
+        for both fetched intervals (set-asserted — the parallel fan-out's
+        completion order is non-deterministic).
+        """
+        events: list[tuple[str, int, bool, bool]] = []
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            dry_run=True,
+            from_date="2021-01-04",
+            to_date="2021-01-08",
+            on_progress=lambda label, bars, failed, gap: events.append((label, bars, failed, gap)),
+        )
+        assert {e[0] for e in events} == {"13 1minute", "13 1day"}
+        assert all(failed is False for _, _, failed, _gap in events)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1082,3 +1106,126 @@ class TestPullPopulatesLedger:
 
         pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
         assert not ledger_path(tmp_path).exists()  # dry-run never pollutes the ledger
+
+
+class TestQuotaDeathMidRound:
+    """DEC-SPOT-QUOTA-MIDROUND-001: a mid-round ``DailyQuotaExceeded`` maps to the
+    loud ``quota_exhausted`` verdict with committed work kept — never a generic
+    job error that discards the settled-window history (the spot arm of the
+    options DEC-OPTIONS-UNTIL-CLEAN-001 mapping, the entry #625 noted follow-up).
+    """
+
+    @staticmethod
+    def _quota_death_scaffold() -> tuple[threading.Event, BulkAdapterFactory]:
+        """Build the deterministic mid-pull quota-death fake.
+
+        The ``1day`` fetch raises ``DailyQuotaExceeded`` — the NON-Dhan exception
+        the pace bucket raises inside a window worker when the 100k/day quota dies
+        mid-pass (never quarantined; the spine re-raises it). It first WAITS on the
+        returned event, which the test's ``on_progress`` hook sets when the
+        ``1minute`` pair has fully completed — so under the parallel fan-out the
+        success is always committed + recorded BEFORE the death, deterministically.
+        """
+        minute_done = threading.Event()
+
+        class _QuotaDiesOnDaily(SyntheticDhanAdapter):
+            def fetch_ohlcv(
+                self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+            ) -> list[CandleBar]:
+                if interval == "1day":
+                    minute_done.wait(timeout=30.0)
+                    raise DailyQuotaExceeded("daily quota of 100000 calls spent")
+                return super().fetch_ohlcv(
+                    symbol=symbol, exchange=exchange, interval=interval, start=start, end=end
+                )
+
+        def factory(_root: Path, _insts: Sequence[Instrument]) -> tuple[MarketAdapter, BarSink]:
+            return _QuotaDiesOnDaily(), NullBarSink()
+
+        return minute_done, factory
+
+    def _pull(
+        self,
+        tmp_path: Path,
+        *,
+        until_clean: bool,
+    ) -> tuple[BulkSpotReport, list[Mapping[str, object]]]:
+        """One quota-dying live-pattern pull over a tiny 5-day window (2 windows)."""
+        minute_done, factory = self._quota_death_scaffold()
+
+        def _on_progress(label: str, bars: int, failed: bool, gap: bool = False) -> None:
+            del bars, failed, gap
+            if "1minute" in label:
+                minute_done.set()
+
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                from_date="2021-01-04",
+                to_date="2021-01-08",
+                adapter_factory=factory,
+                on_progress=_on_progress,
+                until_clean=until_clean,
+            )
+        return report, logs
+
+    def test_quota_death_mid_pull_maps_verdict_and_keeps_ledger(self, tmp_path: Path) -> None:
+        """Single-pass Pull-ALL: the death becomes the quota verdict, not a crash."""
+        from brutex.data.window_ledger_store import ledger_path, load_window_ledger
+        from brutex.data.window_status_store import status_path
+
+        report, logs = self._pull(tmp_path, until_clean=False)
+        assert report.quota_exhausted is True
+        assert report.verdict.kind == "quota_exhausted"
+        assert report.auth_aborted is False
+        assert report.still_failed_windows == 0
+        # No pass COMPLETED, so the per-pair rollup claims nothing (the verdict
+        # carries the actionable state) — committed work lives in the ledger.
+        assert report.total_completed == 0
+        assert report.total_failed == 0
+        assert report.total_no_data == 0
+        # The finally-guaranteed persist: the settled 1minute window survives as
+        # SUCCESS; the never-run 1day window stays PLANNED — nothing discarded.
+        assert ledger_path(tmp_path).is_file()
+        assert status_path(tmp_path).is_file()
+        ledger = load_window_ledger(tmp_path)
+        assert ledger.count == 2
+        assert {r.status for r in ledger.records()} == {"SUCCESS", "PLANNED"}
+        # The loud warning — a quota death is never silent in /logs.
+        assert _events(logs, "universe.pull_all.quota_exhausted")
+
+    def test_quota_death_mid_round_until_clean_maps_verdict(self, tmp_path: Path) -> None:
+        """until_clean: a round-1 mid-round death maps identically (no doomed rounds)."""
+        from brutex.data.window_ledger_store import ledger_path
+
+        report, logs = self._pull(tmp_path, until_clean=True)
+        assert report.quota_exhausted is True
+        assert report.verdict.kind == "quota_exhausted"
+        assert report.auth_aborted is False
+        assert ledger_path(tmp_path).is_file()
+        assert _events(logs, "universe.pull_all.quota_exhausted")
+
+    def test_until_clean_zero_round_budget_is_a_safe_noop(self, tmp_path: Path) -> None:
+        """``until_clean_rounds=0`` returns the empty-report rollup, never IndexError.
+
+        ``run_until_clean(max_rounds=0)`` runs ZERO rounds (the disabled no-op), so
+        no pass exists — the pre-DEC-SPOT-QUOTA-MIDROUND-001 ``passes[0]`` crashed
+        here; the empty-report fallback now rolls every symbol up as zeros.
+        """
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            until_clean=True,
+            until_clean_rounds=0,
+        )
+        assert report.total_completed == 0
+        assert report.total_failed == 0
+        assert report.total_no_data == 0
+        assert report.quota_exhausted is False
+        assert report.auth_aborted is False
+        assert report.verdict.kind == "clean"  # nothing ran, nothing failed

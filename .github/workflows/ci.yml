@@ -1377,6 +1377,15 @@ jobs:
           else
             echo "(brutex.dashboard.option_pull_controller test file not present yet — gate inactive)"
           fi
+          # DEC-SPOT-QUOTA-MIDROUND-001: the SPOT pull controller joins the strict
+          # per-module gate (the option_pull_controller twin above) — the mid-round
+          # quota-death mapping + the finally-guaranteed ledger/status persist ship
+          # at 100% line+branch and must stay there.
+          if compgen -G "tests/unit/test_dashboard_pull_controller.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py
+          else
+            echo "(brutex.dashboard.pull_controller test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_dhan_chunks.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.chunks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_chunks.py
           else

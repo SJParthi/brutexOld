@@ -51,6 +51,7 @@ from brutex.adapters.dhan.auth import dhan_creds_present
 from brutex.adapters.dhan.errors import is_no_data_message
 from brutex.adapters.dhan.pull_verdict import PullVerdict, classify_pull
 from brutex.adapters.dhan.run_ingest import (
+    DhanIngestReport,
     ProgressHook,
     run_dhan_spot_ingest,
     run_dhan_spot_ingest_with_retry,
@@ -82,6 +83,7 @@ from brutex.orchestrator.parallel import (
     PoolRunParallel,
     workers_to_saturate,
 )
+from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
@@ -661,8 +663,10 @@ class BulkSpotReport:
     still_failed_windows: int = 0
     """Windows still failing after the in-run retry budget — deferred to the next pull."""
     quota_exhausted: bool = False
-    """True if the auto-resume paused on the daily Dhan quota (DEC-AUTO-RESUME-QUOTA-001)
-    — drives the loud ``quota_exhausted`` verdict (resume after the IST-midnight reset)."""
+    """True if the pull paused on the daily Dhan quota — the auto-resume's
+    between-round brake (DEC-AUTO-RESUME-QUOTA-001) OR a mid-round
+    ``DailyQuotaExceeded`` (DEC-SPOT-QUOTA-MIDROUND-001) — drives the loud
+    ``quota_exhausted`` verdict (resume after the IST-midnight reset)."""
 
     @property
     def total_symbols(self) -> int:
@@ -1259,14 +1263,18 @@ def pull_all_spot(
         # keeps ``auto_retry=False`` (a single pass) — byte-for-byte the prior
         # behaviour. BOTH paths share the same ingest spine (CLAUDE.md §11 COMMON);
         # ``report`` is always the ORIGINAL pass's report for the per-symbol rollup.
+        passes: list[SpotIngestWithRetry] = []
+
         def _one_pass(do_retry: bool) -> SpotIngestWithRetry:
             """Run ONE full pull-pass-with-auto-retry over the SHARED window ledger.
 
             The single ingest call site (CLAUDE.md §11 COMMON) — the one-shot path,
             every until-clean round, and the auto-retry inner loop all go through
-            here, so the args can never drift between them.
+            here, so the args can never drift between them. Every COMPLETED pass is
+            recorded in ``passes`` so a mid-round quota death can still report the
+            last finished round's state (DEC-SPOT-QUOTA-MIDROUND-001).
             """
-            return run_dhan_spot_ingest_with_retry(
+            res = run_dhan_spot_ingest_with_retry(
                 adapter,
                 sink,
                 instruments=instruments,
@@ -1283,52 +1291,103 @@ def pull_all_spot(
                 run_parallel=run_parallel,
                 auto_retry=do_retry,
             )
+            passes.append(res)
+            return res
 
-        # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded rounds
-        # — each a full pass over the SHARED window ledger (so it re-fetches ONLY
-        # the still-failed windows; rate-safe + idempotent) — until clean / token
-        # dead / outer budget spent. Reuses ``run_until_clean`` over the SAME
-        # ``retry_failed_windows`` engine; the round COUNT is bounded (never an
-        # O(1)-total claim). The per-symbol rollup uses the FIRST pass's report;
-        # the aggregate residual / auth state reflect the FINAL round.
-        if until_clean:
-            passes: list[SpotIngestWithRetry] = []
+        final_still_failed = 0
+        final_auth_aborted = False
+        final_auth_cause: str | None = None
+        final_quota_exhausted = False
+        try:
+            try:
+                # Re-pull-until-clean (DEC-TOKEN-PREFLIGHT-001): keep running bounded
+                # rounds — each a full pass over the SHARED window ledger (so it
+                # re-fetches ONLY the still-failed windows; rate-safe + idempotent) —
+                # until clean / token dead / outer budget spent. Reuses
+                # ``run_until_clean`` over the SAME ``retry_failed_windows`` engine;
+                # the round COUNT is bounded (never an O(1)-total claim). The
+                # per-symbol rollup uses the FIRST pass's report; the aggregate
+                # residual / auth state reflect the FINAL round.
+                if until_clean:
 
-            def _round_runner() -> UntilCleanRound:
-                """One until-clean round = one full pull pass; record it for the rollup."""
-                res = _one_pass(True)
-                passes.append(res)
-                return UntilCleanRound(
-                    still_failed_windows=res.report.still_failed_windows,
-                    auth_aborted=res.report.auth_aborted,
-                    auth_cause=res.report.auth_cause,
+                    def _round_runner() -> UntilCleanRound:
+                        """One until-clean round = one full pull pass."""
+                        res = _one_pass(True)
+                        return UntilCleanRound(
+                            still_failed_windows=res.report.still_failed_windows,
+                            auth_aborted=res.report.auth_aborted,
+                            auth_cause=res.report.auth_cause,
+                        )
+
+                    # Auto-resume (DEC-AUTO-RESUME-QUOTA-001): keep re-firing batches
+                    # with NO clicks until the ledger is 100% clean, stopping only on
+                    # a real limit — token dead (existing), the daily quota spent
+                    # (the mandatory brake; ``_rate_controller.quota_exhausted``
+                    # reads the persisted tracker), or a no-progress round
+                    # (``stop_when_stuck`` — what makes the large budget safe).
+                    # Dry-run / injected-factory pulls have no controller → quota
+                    # hook is ``None`` (never the limit), unchanged.
+                    quota_hook = (
+                        _rate_controller.quota_exhausted if _rate_controller is not None else None
+                    )
+                    until_outcome = run_until_clean(
+                        _round_runner,
+                        max_rounds=until_clean_rounds,
+                        quota_exhausted=quota_hook,
+                        stop_when_stuck=True,
+                    )
+                    final_still_failed = until_outcome.final_still_failed
+                    final_auth_aborted = until_outcome.auth_aborted or (
+                        bool(passes) and passes[0].report.auth_aborted
+                    )
+                    final_auth_cause = until_outcome.auth_cause or (
+                        passes[0].report.auth_cause if passes else None
+                    )
+                    final_quota_exhausted = until_outcome.stopped_on_quota
+                else:
+                    res = _one_pass(auto_retry)
+                    final_still_failed = res.report.still_failed_windows
+                    final_auth_aborted = res.report.auth_aborted
+                    final_auth_cause = res.report.auth_cause
+            except DailyQuotaExceeded as exc:
+                # The 100k daily quota died MID-round (DEC-SPOT-QUOTA-MIDROUND-001,
+                # the spot arm of the options DEC-OPTIONS-UNTIL-CLEAN-001 mapping):
+                # the until-clean loop's quota hook can only brake at round
+                # boundaries, so a worker's pace bucket raises this mid-pass — and
+                # it previously escaped as a generic job error BEFORE the ledger /
+                # status persist. Everything already committed survives: bars per
+                # pair via the sink, window records via the throttled flush + the
+                # finally below. Map to the loud quota verdict instead of a generic
+                # job error; the next pull (after IST midnight) resumes
+                # incrementally over the SAME ledger.
+                final_quota_exhausted = True
+                final_still_failed = passes[-1].report.still_failed_windows if passes else 0
+                final_auth_aborted = passes[-1].report.auth_aborted if passes else False
+                final_auth_cause = passes[-1].report.auth_cause if passes else None
+                _LOG.warning(
+                    "universe.pull_all.quota_exhausted",
+                    pull_id=pid,
+                    error=str(exc),
+                    rounds_completed=len(passes),
+                    note=(
+                        "daily Dhan quota spent mid-round — committed work kept; "
+                        "resume after IST midnight"
+                    ),
                 )
-
-            # Auto-resume (DEC-AUTO-RESUME-QUOTA-001): keep re-firing batches with
-            # NO clicks until the ledger is 100% clean, stopping only on a real
-            # limit — token dead (existing), the daily quota spent (the mandatory
-            # brake; ``_rate_controller.quota_exhausted`` reads the persisted
-            # tracker), or a no-progress round (``stop_when_stuck`` — what makes the
-            # large budget safe). Dry-run / injected-factory pulls have no controller
-            # → quota hook is ``None`` (never the limit), unchanged.
-            quota_hook = _rate_controller.quota_exhausted if _rate_controller is not None else None
-            until_outcome = run_until_clean(
-                _round_runner,
-                max_rounds=until_clean_rounds,
-                quota_exhausted=quota_hook,
-                stop_when_stuck=True,
-            )
-            report = passes[0].report
-            final_still_failed = until_outcome.final_still_failed
-            final_auth_aborted = until_outcome.auth_aborted or report.auth_aborted
-            final_quota_exhausted = until_outcome.stopped_on_quota
-        else:
-            report = _one_pass(auto_retry).report
-            final_still_failed = report.still_failed_windows
-            final_auth_aborted = report.auth_aborted
-            final_quota_exhausted = False
-        end_pull_status(status_log, lake_root, dry_run=dry_run)
-        end_pull_ledger(ledger, lake_root, dry_run=dry_run)
+        finally:
+            # ALWAYS persist the per-window status + ledger — a crash / abort /
+            # mid-round quota death must never discard the settled-window history
+            # (DEC-SPOT-QUOTA-MIDROUND-001; previously persisted only on a clean
+            # return, shielded just by the throttled mid-pull flushes). Idempotent
+            # with those flushes.
+            end_pull_status(status_log, lake_root, dry_run=dry_run)
+            end_pull_ledger(ledger, lake_root, dry_run=dry_run)
+        # Per-symbol rollup = the FIRST pass's report (the until-clean contract).
+        # A quota death before ANY pass completed leaves no per-pair information —
+        # the empty fallback rolls every symbol up as zeros (the quota verdict
+        # carries the actionable state). Also fixes the latent ``passes[0]``
+        # IndexError an ``until_clean_rounds=0`` no-op drive used to hit.
+        report = passes[0].report if passes else DhanIngestReport(pairs={}, failures=())
         _observe_rate(rate_observer, _rate_controller, adapter)
         # A Dhan DH-905 "no data present" is the vendor's DEFINITIVE answer that
         # the range has no bars (e.g. NIFTY NEXT 50 daily, whose history starts
@@ -1354,10 +1413,17 @@ def pull_all_spot(
                     failed += 1
                 elif key in known_gap_keys:
                     no_data += 1
-                elif report.pairs[key].bars_appended > 0:
-                    completed += 1
                 else:
-                    no_data += 1
+                    pair = report.pairs.get(key)
+                    if pair is None:
+                        # The quota died before this pair ran (the empty-report
+                        # fallback above) — its outcome is UNKNOWN, so claim
+                        # nothing (DEC-SPOT-QUOTA-MIDROUND-001).
+                        continue
+                    if pair.bars_appended > 0:
+                        completed += 1
+                    else:
+                        no_data += 1
             results.append(
                 SymbolPullResult(symbol=symbol, completed=completed, failed=failed, no_data=no_data)
             )
@@ -1367,7 +1433,7 @@ def pull_all_spot(
             end_date=(end - timedelta(days=1)).date().isoformat(),
             symbols=results,
             auth_aborted=final_auth_aborted,
-            auth_cause=report.auth_cause,
+            auth_cause=final_auth_cause,
             still_failed_windows=final_still_failed,
             quota_exhausted=final_quota_exhausted,
         )
