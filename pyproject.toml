@@ -227,6 +227,15 @@ disallow_untyped_defs = true
 disallow_incomplete_defs = true
 check_untyped_defs = true
 no_implicit_reexport = true
+# DEC-MUTATION-GATE-RANKING-002 (discovered pre-existing defect): the two PyO3
+# kernels ship their type stubs IN-REPO (rust/{fno-math,trading-core}/python/
+# */{py.typed,__init__.pyi}). The project venv resolves them via the maturin
+# .pth, but the pre-commit mypy hook runs in an ISOLATED env without the
+# wheels, so any staged brutex file whose import graph reaches a kernel call
+# site (e.g. strategies/combo.py -> fno_math.blake3_hash) failed the hook with
+# `no-any-return` on files the commit never touched. mypy_path lets BOTH envs
+# resolve the same in-repo stubs (mypy has no CLI flag for this — config only).
+mypy_path = ["rust/fno-math/python", "rust/trading-core/python"]
 # DEC-P0-004 Agent 5 HIGH fix: pyright [tool.pyright] exclude already
 # covers redteam planted-bug fixtures; mypy needs the same exclusion or
 # strict mode will trip on the intentional bugs on every PR.
@@ -251,6 +260,19 @@ module = [
     # `__init__.pyi` + `py.typed` via maturin's mixed Python+Rust layout.
 ]
 ignore_missing_imports = true
+
+# DEC-MUTATION-GATE-RANKING-002 follow-on: mypy_path (above) makes the in-repo
+# kernel shims resolvable for the isolated pre-commit hook env — but it also
+# PROMOTES them from the installed-package tier (diagnostics never reported)
+# to first-party source (diagnostics reported), which is env-dependent: CI's
+# wheel-install + mypy_path combination tripped `unused-ignore` inside
+# rust/trading-core/python/trading_core/__init__.py while the local .pth
+# resolution stayed silent. follow_imports=silent keeps the shims' types
+# AVAILABLE (the hook fix) while suppressing diagnostics INSIDE them in every
+# env — the same reporting behaviour they had before mypy_path existed.
+[[tool.mypy.overrides]]
+module = ["trading_core", "trading_core.*", "fno_math", "fno_math.*"]
+follow_imports = "silent"
 
 # Dashboard uses FastAPI decorators which are untyped — the file wraps
 # them internally and re-exports typed helpers, so untyped-decorator
