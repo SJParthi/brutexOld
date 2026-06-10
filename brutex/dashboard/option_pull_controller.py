@@ -67,6 +67,7 @@ from brutex.adapters.dhan.option_universe_ingest import (
     OptionsUniverseReport,
     OptionUnderlying,
     ProgressHook,
+    iter_series_jobs,
     plan_option_pull_windows,
     run_dhan_options_ingest,
 )
@@ -173,6 +174,40 @@ def instrument_to_option_underlying(instrument: Instrument) -> OptionUnderlying:
 #: given the lake root. The default builds the offline synthetic pair; the live
 #: path injects :func:`_build_live_options`.
 OptionClientFactory = Callable[[Path], tuple[JsonPoster, OptionBarSink]]
+
+
+def count_progress_units(
+    instruments: Sequence[Instrument],
+    *,
+    expiry_flags: Sequence[str] | None = None,
+    expiry_codes: Sequence[int] | None = None,
+    option_types: Sequence[str] = DRV_OPTION_TYPES,
+) -> int:
+    """Return the options pull's REAL progress-unit total: series + underlyings.
+
+    DEC-OPTIONS-PROGRESS-SERIES-001 (operator, 2026-06-10): the /universe
+    progress bar showed "0/3 chunks" for a 3-index pull whose true fan-out is
+    ~1,386 series — one tick per UNDERLYING, frozen at 0% for hours. The job
+    total is now the SERIES count (each series completion fires the existing
+    per-series tick = one unit) PLUS one unit per underlying (its final rollup
+    ``on_progress`` call, which carries the bars/failed/gap accounting). Counted
+    via the SAME :func:`~brutex.adapters.dhan.option_universe_ingest.iter_series_jobs`
+    enumeration the runner and the window planner consume (§11 COMMON — zero
+    drift, the DEC-OPTION-WINDOW-PLAN-001 C4 discipline). Pure O(series)
+    counting; instruments that cannot map to an underlying raise exactly as the
+    pull itself would (fail-fast before the job starts).
+    """
+    underlyings = [instrument_to_option_underlying(i) for i in instruments]
+    series = sum(
+        1
+        for _ in iter_series_jobs(
+            underlyings,
+            expiry_flags=expiry_flags,
+            expiry_codes=expiry_codes,
+            option_types=option_types,
+        )
+    )
+    return series + len(underlyings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -944,6 +979,7 @@ __all__ = [
     "OptionClientFactory",
     "OptionSymbolResult",
     "OptionsPullReport",
+    "count_progress_units",
     "instrument_to_option_underlying",
     "pull_options",
 ]

@@ -26,6 +26,7 @@ from brutex.dashboard.option_pull_controller import (
     OptionSymbolResult,
     _live_option_runtime,
     _LiveOptionRuntime,
+    count_progress_units,
     instrument_to_option_underlying,
     pull_options,
 )
@@ -564,3 +565,35 @@ class TestLiveOptionRuntime:
 
         runtime = _live_option_runtime(use_live_rate=False, session_rate=SessionRateController())
         assert runtime == _LiveOptionRuntime()
+
+
+class TestCountProgressUnits:
+    """DEC-OPTIONS-PROGRESS-SERIES-001 — the /universe bar total is the REAL fan-out.
+
+    The operator's live report: a 3-index options pull showed "0/3 chunks" (one
+    tick per UNDERLYING) and sat at 0% for hours while spot showed its true
+    678/1,566. The total is now series + underlyings, counted via the SAME
+    iter_series_jobs enumeration as the fetch and the window planner.
+    """
+
+    def test_three_indices_count_series_plus_underlyings(self) -> None:
+        # Index fan-out: (8 WEEK + 3 MONTH codes) × 21 strikes × CALL/PUT = 462.
+        instruments = [_index("13"), _index("25"), _index("51")]
+        assert count_progress_units(instruments) == 3 * 462 + 3  # 1,389 — not 3
+
+    def test_stock_counts_month_only_fan(self) -> None:
+        # Stock fan-out: 3 MONTH codes × 7 strikes × CALL/PUT = 42 (+1 rollup).
+        assert count_progress_units([_stock()]) == 42 + 1
+
+    def test_overrides_shrink_the_fan(self) -> None:
+        units = count_progress_units(
+            [_index("13")],
+            expiry_flags=("MONTH",),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+        )
+        assert units == 21 + 1  # 21 strikes × 1 code × 1 type, + the rollup
+
+    def test_bad_instrument_fails_fast_before_the_job_starts(self) -> None:
+        with pytest.raises(ValueError, match="only\\s+IDX / EQ"):
+            count_progress_units([_option_leg()])
