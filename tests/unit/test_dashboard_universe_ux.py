@@ -243,3 +243,29 @@ def test_universe_fno_only_toggle_present() -> None:
     assert "!fnoOnly || i.option_pullable !== false" in html, (
         "the F&O-only predicate is not composed into renderInstruments"
     )
+
+
+def test_universe_selection_respects_composed_visibility() -> None:
+    """DEC-UNIVERSE-SELECTION-PRECISE-001: the rendered list, "✓ all shown",
+    and the F&O-only prune share ONE visibility predicate, so what the
+    operator sees is exactly what bulk actions operate on (the live bug:
+    4 indices visible under ⚡F&O-only, yet "all shown" ticked all 33)."""
+    html = _render_universe_html()
+    assert "function isVisible(i)" in html, "the shared visibility predicate is missing"
+    assert "function visibleInstruments()" in html
+    # all-shown consumes the shared predicate, never its own copy.
+    assert "visibleInstruments().forEach(i => selMulti.set(i.symbol, i))" in html
+    # Tab switches clear the multi-select (a different universe).
+    assert "selMulti.clear();" in html
+    # F&O-only ON prunes non-pullable ticks so hidden rows can't ride a pull.
+    assert "if (v.option_pullable === false) selMulti.delete(k);" in html
+    # The single-highlight option flag is derived from the LIVE list.
+    assert "UNIV.find(i => i.symbol === selInst)" in html
+
+
+def test_universe_date_pickers_carry_today_ceiling() -> None:
+    """The pickers refuse future dates client-side; the rendered page carries
+    a real ISO max (the raw token never leaks)."""
+    html = _render_universe_html()
+    assert "__BRUTEX_DATE_MAX__" not in html, "the max token leaked unfilled"
+    assert html.count('max="2') == 2, "both pickers must carry the ISO max ceiling"

@@ -381,8 +381,8 @@
 
   <div class="pullbar">
     <div class="lead" id="pulllead">Select an instrument to pull its spot — or click a future / option contract to pull that contract</div>
-    <label style="color:var(--muted); font-size:12px;" title="Inclusive start date — defaults to 2021-01-01 (Track 1 history floor); clear to fall back to it.">from <input type="date" id="fromDate" min="2021-01-01" value="__BRUTEX_DATE_FROM__" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
-    <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — defaults to the previous trading day (pick today to include it).">to <input type="date" id="toDate" min="2021-01-01" value="__BRUTEX_DATE_TO__" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
+    <label style="color:var(--muted); font-size:12px;" title="Inclusive start date — defaults to 2021-01-01 (Track 1 history floor); clear to fall back to it.">from <input type="date" id="fromDate" min="2021-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_FROM__" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
+    <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — defaults to the previous trading day (pick today to include it).">to <input type="date" id="toDate" min="2021-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
     <button class="loadbtn" id="loadbtn" title="Download the public Dhan instrument master — no keys needed">⟳ Load instruments</button>
     <button class="optbtn" id="optbtn" title="Pull this underlying's full option grid (ATM window · CE+PE · weekly+monthly · near/next/far, 1-minute)" disabled>⛓ Pull options chain</button>
     <button class="pullbtn" id="pullbtn" title="Pull 1-minute + 1-day spot for the selected instrument(s) — tick rows for many, or click one. Blank dates = full history (2021 → prev day)." disabled>⤓ Pull spot</button>
@@ -471,6 +471,11 @@ function buildTabs(summary) {
     t.onclick = () => {
       filter = k;
       document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.k === k));
+      // A tab switch changes the universe — carrying ticks from the hidden
+      // tab into the next pull was the operator's "it pulled things I can't
+      // even see" bug (DEC-UNIVERSE-SELECTION-PRECISE-001).
+      selMulti.clear();
+      updateMultiBtn();
       loadInstruments();
     };
     tabsEl.appendChild(t);
@@ -486,6 +491,14 @@ function buildTabs(summary) {
   fnoBtn.onclick = () => {
     fnoOnly = !fnoOnly;
     fnoBtn.classList.toggle("on", fnoOnly);
+    if (fnoOnly) {
+      // Policy filter ON: drop non-F&O ticks so an invisible reference-only
+      // row can never ride into a pull (DEC-UNIVERSE-SELECTION-PRECISE-001).
+      [...selMulti.entries()].forEach(([k, v]) => {
+        if (v.option_pullable === false) selMulti.delete(k);
+      });
+      updateMultiBtn();
+    }
     renderInstruments();
   };
   tabsEl.appendChild(fnoBtn);
@@ -605,11 +618,19 @@ async function loadInstruments() {
   renderInstruments();
 }
 
-function renderInstruments() {
+/* THE one visibility predicate (DEC-UNIVERSE-SELECTION-PRECISE-001): the
+   rendered list, "✓ all shown", and the F&O-only prune all share it, so what
+   the operator SEES is exactly what bulk actions OPERATE on. */
+function isVisible(i) {
   const q = (search.value || "").toUpperCase();
-  const list = UNIV.filter(i => (!fnoOnly || i.option_pullable !== false)
+  return (!fnoOnly || i.option_pullable !== false)
     && (i.symbol.toUpperCase().includes(q)
-    || (i.name || "").toUpperCase().includes(q)));
+    || (i.name || "").toUpperCase().includes(q));
+}
+function visibleInstruments() { return UNIV.filter(isVisible); }
+
+function renderInstruments() {
+  const list = visibleInstruments();
   const el = document.getElementById("instruments");
   if (!list.length) {
     // Empty banner: when the whole universe is empty (not merely a search
@@ -902,7 +923,10 @@ function updateMultiBtn() {
   if (n > 0) {
     optEnabled = [...selMulti.values()].every(x => x.option_pullable !== false);
   } else {
-    optEnabled = !!selPullSymbol && selOptionPullable;
+    // Look the highlight up in the LIVE list — selOptionPullable goes stale
+    // across tab switches (DEC-UNIVERSE-SELECTION-PRECISE-001).
+    const cur = selInst ? UNIV.find(i => i.symbol === selInst) : null;
+    optEnabled = !!selPullSymbol && !!cur && cur.option_pullable !== false;
   }
   o.disabled = !optEnabled;
   o.title = (!o.disabled)
@@ -915,9 +939,10 @@ function updateMultiBtn() {
   m.disabled = n === 0 && !selPullSymbol;
 }
 document.getElementById("selallbtn").onclick = () => {
-  const q = (search.value || "").toUpperCase();
-  UNIV.filter(i => i.symbol.toUpperCase().includes(q) || (i.name || "").toUpperCase().includes(q))
-    .forEach(i => selMulti.set(i.symbol, i));
+  // EXACTLY the rendered rows — search AND F&O-only composed
+  // (DEC-UNIVERSE-SELECTION-PRECISE-001: the operator saw 4 indices under
+  // ⚡F&O-only yet "all shown" ticked all 33).
+  visibleInstruments().forEach(i => selMulti.set(i.symbol, i));
   updateMultiBtn();
   /* tick the visible checkboxes in place — no 243-row rebuild (O(visible), no animation). */
   document.querySelectorAll("#instruments .inst .msel").forEach(cb => { cb.checked = true; });

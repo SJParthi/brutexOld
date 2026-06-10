@@ -49,10 +49,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from time import sleep as _time_sleep
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -91,6 +92,43 @@ Pacer = Callable[[], None]
 
 #: Canonical daily interval — the only interval not tiled/session-filtered.
 _DAILY: str = "1day"
+
+#: IST clock pieces for the settled-data clamp (DEC-DAILY-CANDLE-CLAMP-001).
+_IST_ZONE = ZoneInfo("Asia/Kolkata")
+_MARKET_CLOSE_IST: time = time(15, 30)
+
+
+def _now_ist() -> datetime:
+    """The current IST wall-clock (the clamp's production default)."""
+    return datetime.now(tz=_IST_ZONE)
+
+
+def clamp_window_end(interval: str, end: date, *, now_ist: datetime) -> date:
+    """Clamp an end-EXCLUSIVE pull bound so unsettled CURRENT-DAY data is never requested.
+
+    Dhan reality (DEC-DAILY-CANDLE-CLAMP-001, operator-verified 2026-06-10 —
+    the live window ledger showed a same-evening 1day request for "today"
+    rejected with ``DhanBadRequestError``):
+
+    * the CURRENT day's **1-day** candle is published only the NEXT day —
+      requesting it same-day burns a quota hit and 400s, so the daily bound
+      is clamped to ``today`` (end-exclusive ⇒ the last requested candle is
+      yesterday's);
+    * the CURRENT day's **1-minute** bars are partial until the 15:30 IST
+      close — pulling a partial day would settle the window SUCCESS in the
+      ledger and the skip rule would never re-fetch the rest of the day, so
+      before close the intraday bound is clamped to ``today`` too; from
+      15:30 IST the full session exists and ``today + 1 day`` is allowed.
+
+    Pure + clock-injected — every branch unit-testable offline.
+    """
+    today = now_ist.date()
+    if interval == _DAILY:
+        return min(end, today)
+    if now_ist.time() >= _MARKET_CLOSE_IST:
+        return min(end, today + timedelta(days=1))
+    return min(end, today)
+
 
 #: The data-source namespace stamped on every coverage :class:`WindowKey`.
 _MARKET: str = "dhan"
@@ -216,6 +254,7 @@ def ingest_spot(
     max_retry_passes: int = _DEFAULT_MAX_RETRY_PASSES,
     retry_backoff: Callable[[int], None] | None = None,
     auth_guard: AuthGuard | None = None,
+    now_ist: Callable[[], datetime] | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink*.
 
@@ -304,7 +343,17 @@ def ingest_spot(
         :func:`~brutex.adapters.dhan.run_ingest.run_dhan_spot_ingest` quarantine
         sees the same terminal error it did when this spine ran sequentially.
     """
-    windows = _windows(interval, start, end)
+    clamped_end = clamp_window_end(interval, end, now_ist=(now_ist or _now_ist)())
+    if clamped_end != end:
+        _LOG.info(
+            "ingest.window.clamped",
+            symbol=instrument.symbol_name,
+            interval=interval,
+            requested_end=end.isoformat(),
+            clamped_end=clamped_end.isoformat(),
+            reason="unsettled current-day data (DEC-DAILY-CANDLE-CLAMP-001)",
+        )
+    windows = _windows(interval, start, clamped_end) if start < clamped_end else []
     runner: RunParallel = (
         run_parallel
         if run_parallel is not None

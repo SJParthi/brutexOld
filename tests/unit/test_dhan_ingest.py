@@ -18,7 +18,12 @@ from brutex.adapters.dhan.adapter import DhanMarketAdapter
 from brutex.adapters.dhan.auth_guard import AuthGuard
 from brutex.adapters.dhan.client import DhanClient
 from brutex.adapters.dhan.errors import DhanAuthError, DhanBadRequestError
-from brutex.adapters.dhan.ingest import IngestReport, ingest_spot, summarize_conflicts
+from brutex.adapters.dhan.ingest import (
+    IngestReport,
+    clamp_window_end,
+    ingest_spot,
+    summarize_conflicts,
+)
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
 from brutex.data.sink import SinkAppendResult
@@ -1285,3 +1290,81 @@ class TestAuthGuardFailFast:
         # First window raised; the runner stops the pass at the re-raise, so the
         # later windows were not reached — but crucially no guard was consulted.
         assert adapter.calls >= 1
+
+
+class TestCurrentDayClamp:
+    """clamp_window_end + its ingest_spot wiring (DEC-DAILY-CANDLE-CLAMP-001).
+
+    Dhan publishes the CURRENT day's 1-day candle only the NEXT day (the
+    operator's live ledger showed a same-evening request 400-ing), and the
+    current day's 1-minute bars are partial before the 15:30 IST close — a
+    partial-day SUCCESS window would be skip-ruled forever. End bounds are
+    exclusive throughout.
+    """
+
+    @staticmethod
+    def _ist(y: int, mo: int, d: int, h: int, mi: int) -> datetime:
+        from zoneinfo import ZoneInfo
+
+        return datetime(y, mo, d, h, mi, tzinfo=ZoneInfo("Asia/Kolkata"))
+
+    def test_daily_never_requests_today(self) -> None:
+        # End-exclusive today+2 would request today's unpublished candle.
+        now = self._ist(2026, 6, 10, 22, 0)
+        assert clamp_window_end("1day", date(2026, 6, 12), now_ist=now) == date(2026, 6, 10)
+
+    def test_daily_past_end_untouched(self) -> None:
+        now = self._ist(2026, 6, 10, 22, 0)
+        assert clamp_window_end("1day", date(2026, 6, 9), now_ist=now) == date(2026, 6, 9)
+
+    def test_intraday_before_close_excludes_today(self) -> None:
+        now = self._ist(2026, 6, 10, 12, 0)  # mid-session
+        assert clamp_window_end("1", date(2026, 6, 11), now_ist=now) == date(2026, 6, 10)
+
+    def test_intraday_from_close_includes_today(self) -> None:
+        now = self._ist(2026, 6, 10, 15, 30)  # close — session complete
+        assert clamp_window_end("1", date(2026, 6, 11), now_ist=now) == date(2026, 6, 11)
+
+    def test_ingest_clamps_daily_and_skips_empty_range(self) -> None:
+        # start == clamped end → zero windows, zero Dhan hits, clean report.
+        sink = _Sink()
+        report = ingest_spot(
+            _adapter(),
+            sink,
+            instrument=_INST,
+            interval="1day",
+            start=date(2026, 6, 10),
+            end=date(2026, 6, 11),
+            now_ist=lambda: self._ist(2026, 6, 10, 22, 0),
+        )
+        assert report == IngestReport(windows=0, bars_appended=0, transient_failures=0)
+        assert sink.appends == []
+
+    def test_ingest_clamped_but_nonempty_range_still_pulls(self) -> None:
+        # [yesterday, today+2) daily → clamped to [yesterday, today): 1 window.
+        sink = _Sink()
+        report = ingest_spot(
+            _adapter(),
+            sink,
+            instrument=_INST,
+            interval="1day",
+            start=date(2026, 6, 9),
+            end=date(2026, 6, 12),
+            now_ist=lambda: self._ist(2026, 6, 10, 22, 0),
+        )
+        assert report.windows == 1
+        assert sink.appends == [1]
+
+    def test_ingest_default_clock_no_op_for_past_ranges(self) -> None:
+        # The production default (_now_ist) path: a fully-past range is never
+        # clamped regardless of the real wall clock.
+        sink = _Sink()
+        report = ingest_spot(
+            _adapter(),
+            sink,
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+        )
+        assert report.windows == 1
