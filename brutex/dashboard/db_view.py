@@ -143,11 +143,24 @@ OPTIONS_DIR_NAME: Final = "options"
 
 #: A filesystem-safe option series segment is the writer's ``_safe_segment``
 #: output: a ``|``-joined series key with ``|`` rewritten to ``__``. The real
-#: parts are alnum + ``.`` + ``-`` (Dhan coordinates) joined by ``__``; we
-#: allow exactly that grammar so a discovered directory name can never carry a
-#: traversal/separator character into the read glob (``..`` rejected
-#: separately, matching the writer's own guard).
-_OPTION_SEGMENT_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
+#: parts are alnum + ``.`` + ``-`` + ``+`` (Dhan coordinates) joined by
+#: ``__``; we allow exactly that grammar so a discovered directory name can
+#: never carry a traversal/separator character into the read glob (``..``
+#: rejected separately, matching the writer's own guard).
+#:
+#: ``+`` is admitted because the writer stores it verbatim
+#: (DEC-DB-OPTION-DATASET-DECODE-001): the upper half of every strike chain
+#: uses the rolling-option ``ATM+N`` selector (``option_universe_ingest``
+#: emits ``ATM+1`` … ``ATM+10``), and ``_safe_segment`` only rewrites ``|`` —
+#: so the lake holds ``…__ATM+3__CALL`` directories. Before this fix those
+#: series were silently SKIPPED by :func:`list_option_datasets` AND refused by
+#: :func:`query_option_candles` (the read allowlist dropped what the write
+#: path stores). ``+`` is neither a path separator nor a DuckDB-glob
+#: metacharacter (``* ? [ ] { }``), so admitting it cannot widen the bound
+#: ``read_parquet`` glob or traverse the tree — the same allowlist-consistency
+#: class as DEC-PREOPEN-AMPERSAND-001 (``&``) and DEC-PREOPEN-SPACE-SYMBOL-001
+#: (space) on the spot side (CLAUDE.md §11 COMMON).
+_OPTION_SEGMENT_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+\-]*$")
 
 #: A candle symbol must match this allowlist before it is ever joined into
 #: a lake path / ``read_parquet`` glob — defence-in-depth against path
@@ -895,7 +908,45 @@ def _validate_option_segment(series: str) -> None:
         raise ValueError(f"illegal option series {series!r}")
 
 
-def list_option_datasets(lake_root: Path) -> list[dict[str, str]]:
+#: The on-disk separator the option writer substitutes for the series key's
+#: ``|`` (``option_parquet_writer._SAFE``, kept in lockstep like
+#: :data:`OPTIONS_DIR_NAME`).
+_OPTION_SEGMENT_SEP: Final = "__"
+
+#: The option series directory segment's part arity: the writer's partition
+#: key is ``<exchange_segment>|<security_id>|<expiry_flag>|<expiry_code>|
+#: <strike>|<drv_option_type>`` (``option_sink.append_option_bars``), so the
+#: on-disk segment splits into exactly 6 parts on ``__``.
+_OPTION_SERIES_ARITY: Final = 6
+
+
+def _decode_option_dataset(series: str, symbol_for_id: Mapping[str, str] | None) -> str | None:
+    """Decode one on-disk option series segment into a PRECISE display label.
+
+    The dataset-picker twin of :func:`_decode_option_window`
+    (DEC-DB-OPTION-DATASET-DECODE-001 — the #629 tracked follow-up): the /db
+    expired-options picker rendered the raw directory segment
+    (``NSE_FNO__25__MONTH__1__ATM-10__CALL`` — the numeric vendor id, not the
+    operator's symbol). Returns a ``"BANKNIFTY · MONTH#1 ATM-10 CALL · 1m"``-style
+    label, or ``None`` for any shape that does not parse (wrong part arity, an
+    empty part) — the caller keeps the raw segment as the label: fallback,
+    never an exception, never a hidden dataset. An unknown id keeps the numeric
+    id so the entry is still distinguishable. Display-only: the ``series`` KEY
+    the queries address is never touched.
+    """
+    parts = series.split(_OPTION_SEGMENT_SEP)
+    if len(parts) != _OPTION_SERIES_ARITY or not all(parts):
+        return None
+    _segment, sid, flag, code, strike, opt_type = parts
+    label = (symbol_for_id or {}).get(sid, sid)
+    return f"{label} · {flag}#{code} {strike} {opt_type} · 1m"
+
+
+def list_option_datasets(
+    lake_root: Path,
+    *,
+    symbol_for_id: Mapping[str, str] | None = None,
+) -> list[dict[str, str]]:
     """Discover which expired-option series exist under ``<lake>/options/``.
 
     Walks ``<lake_root>/options/<series>/`` (the layout
@@ -912,16 +963,29 @@ def list_option_datasets(lake_root: Path) -> list[dict[str, str]]:
     1-minute table, so we surface the ``series`` segment as the dataset
     coordinate and stamp ``"1minute"`` as the interval for a uniform picker.
 
+    Each entry additionally carries a display-only ``label``
+    (DEC-DB-OPTION-DATASET-DECODE-001): the series decoded to the operator's
+    coordinates (``BANKNIFTY · MONTH#1 ATM-10 CALL · 1m``) via
+    :func:`_decode_option_dataset`, falling back to the RAW segment for any
+    non-parsing shape — a dataset is never hidden and the ``series`` KEY stays
+    byte-unchanged (queries keep addressing the on-disk segment).
+
     Parameters
     ----------
     lake_root
         Top-level lake directory (the parent of ``options/``).
+    symbol_for_id
+        Optional ``str(SECURITY_ID) → engine symbol`` map (the
+        DEC-WINDOW-OPTION-DECODE-001 pattern) so the label shows the
+        underlying's symbol (``BANKNIFTY``) instead of the vendor id the
+        segment carries (``25``). ``None`` / a missing id keeps the numeric
+        id — display-only, never a data change.
 
     Returns
     -------
     list[dict[str, str]]
-        ``[{"kind": "option", "series", "interval"}]`` sorted by series — the
-        candle-viewer's option-dataset picker entries.
+        ``[{"kind": "option", "series", "interval", "label"}]`` sorted by
+        series — the candle-viewer's option-dataset picker entries.
     """
     options = lake_root / OPTIONS_DIR_NAME
     if not options.is_dir():
@@ -936,6 +1000,8 @@ def list_option_datasets(lake_root: Path) -> list[dict[str, str]]:
                     "kind": "option",
                     "series": series_dir.name,
                     "interval": "1minute",
+                    "label": _decode_option_dataset(series_dir.name, symbol_for_id)
+                    or series_dir.name,
                 }
             )
     return found
