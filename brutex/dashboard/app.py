@@ -2509,18 +2509,37 @@ def build_app(
         single dataset picker that distinguishes the two. Delegates to
         :func:`brutex.dashboard.db_view.list_candle_datasets` +
         :func:`brutex.dashboard.db_view.list_option_datasets`.
+
+        Each option entry carries a display-only ``label`` decoded to the
+        operator's coordinates (``BANKNIFTY · MONTH#1 ATM-10 CALL · 1m``) via
+        the id→symbol map (DEC-DB-OPTION-DATASET-DECODE-001); the ``series``
+        KEY stays byte-unchanged so ``/api/v1/db/options?series=…`` queries
+        keep working.
         """
         store = _require_store()
         lake_root = getattr(store, "path", None)
         if not isinstance(lake_root, Path):
             return JSONResponse({"datasets": [], "options": []})
         lake = lake_root.parent
-        return JSONResponse(
-            {
-                "datasets": list_candle_datasets(lake),
-                "options": list_option_datasets(lake),
+
+        def _datasets() -> dict[str, Any]:
+            """Discover the datasets + decode the option labels (threadpool).
+
+            DEC-DB-OPTION-DATASET-DECODE-001: the id→symbol map is built AND
+            used here on the SAME threadpool worker as the store read so the
+            store's RLock stays on one thread (DEC-DASHBOARD-FASTREAD-001, the
+            DEC-WINDOW-OPTION-DECODE-001 windows-route pattern); display-only.
+            The directory walks ride the same worker, off the event loop.
+            """
+            symbol_for_id = {
+                str(i.security_id): i.symbol_name for i in store.list_index_equity_instruments()
             }
-        )
+            return {
+                "datasets": list_candle_datasets(lake),
+                "options": list_option_datasets(lake, symbol_for_id=symbol_for_id),
+            }
+
+        return JSONResponse(await run_in_threadpool(_datasets))
 
     @app.get("/api/v1/db/candles")
     async def api_db_candles(
@@ -2607,8 +2626,10 @@ def build_app(
     async def api_db_window_ledger() -> JSONResponse:
         """GET /api/v1/db/window-ledger — the unified per-window skip/retry ledger.
 
-        DEC-WINDOW-LEDGER-001. EVERY spot + options fetch window the engine has
-        ever planned, as a browsable table row (market / security_id / interval /
+        DEC-WINDOW-LEDGER-001. EVERY spot + options fetch window of the live
+        tiling (superseded trailing keys are pruned at plan time,
+        DEC-WINDOW-TRAILING-GC-001), as a browsable table row (market /
+        security_id / interval /
         window dates / status / bars / attempts / last_error / streak). READ-ONLY:
         loads ``<lake>/window_ledger/ledger.parquet``; never raises (empty
         ``{columns, rows, total}`` when no lake / no pull yet, never a 500). Shape

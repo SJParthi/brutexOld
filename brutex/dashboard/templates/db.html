@@ -659,8 +659,12 @@ async function runCandleQuery() {
 function candleControlsHtml() {
   const dsOpts = cstate.datasets.map(d => {
     const k = dsKey(d);
+    /* Option entries show the server-decoded label (BANKNIFTY · MONTH#1
+       ATM-10 CALL · 1m — DEC-DB-OPTION-DATASET-DECODE-001), falling back to
+       the raw series when no label arrives (an older API). Display-only:
+       dsKey()/buildCandleUrl() still address the raw `series` key. */
     const label = d.kind === "option"
-      ? "[option] " + d.series + "·" + d.interval
+      ? "[option] " + (d.label || (d.series + "·" + d.interval))
       : "[spot] " + d.exchange + "·" + d.segment + "·" + d.symbol + "·" + d.interval;
     return '<option value="' + esc(k) + '"' + (k === cstate.key ? " selected" : "") + '>'
       + esc(label) + '</option>';
@@ -700,7 +704,9 @@ function renderCandleView(body, err) {
   const d = curDataset();
   const sub = body ? (Number(body.total || 0).toLocaleString() + " bars match") : "";
   let title = "candles", icon = "📈";
-  if (d && d.kind === "option") { title = esc(d.series + " · " + d.interval); icon = "🅾"; }
+  /* The grid title mirrors the picker: the decoded option label when the
+     server sent one (DEC-DB-OPTION-DATASET-DECODE-001), raw series fallback. */
+  if (d && d.kind === "option") { title = esc(d.label || (d.series + " · " + d.interval)); icon = "🅾"; }
   else if (d) { title = esc(d.symbol + " · " + d.interval); }
   const head = '<div class="datahead"><span class="dt">' + icon + ' ' + title + '</span><span class="sub">' + sub + '</span></div>';
   const grid = err

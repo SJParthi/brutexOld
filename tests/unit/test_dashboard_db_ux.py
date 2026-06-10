@@ -99,3 +99,29 @@ def test_query_controls_and_routes_unchanged() -> None:
         'id="applyq"',
     ):
         assert needle in html, f"a pre-existing /db control regressed: {needle}"
+
+
+def test_option_dataset_label_rendered_with_raw_series_fallback() -> None:
+    """Option datasets render the decoded label (DEC-DB-OPTION-DATASET-DECODE-001).
+
+    Both the picker option text and the grid title prefer the server-decoded
+    ``d.label`` (``BANKNIFTY · MONTH#1 ATM-10 CALL · 1m``) and fall back to the
+    raw series when no label arrives (an older API) — display-only, the
+    ``series`` query key is untouched (guarded below).
+    """
+    html = _render_db_html()
+    # The picker option text (candleControlsHtml).
+    assert '"[option] " + (d.label || (d.series + "·" + d.interval))' in html, (
+        "the dataset picker must prefer the decoded label with a raw-series fallback"
+    )
+    # The grid title (renderCandleView).
+    assert 'title = esc(d.label || (d.series + " · " + d.interval));' in html, (
+        "the grid title must prefer the decoded label with a raw-series fallback"
+    )
+    # The QUERY key stays the raw series — dsKey/buildCandleUrl byte-unchanged.
+    assert 'if (d.kind === "option") return "option:" + d.series;' in html, (
+        "dsKey must keep addressing the raw series key"
+    )
+    assert '"/api/v1/db/options?series=" + encodeURIComponent(d.series)' in html, (
+        "the option query URL must keep addressing the raw series key"
+    )
