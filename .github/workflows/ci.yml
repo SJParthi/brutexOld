@@ -931,6 +931,17 @@ jobs:
           else
             echo "(brutex.engine.stage3_grid test file not present yet — gate inactive)"
           fi
+          # 19i1c · brutex.engine.stage3_wire — Stage-3 launcher wiring
+          # (DEC-STAGE3-WIRE-001; the train-slice helper, survivor-cell
+          # recovery by run-id match, the audited refinement post-pass, the
+          # refined-cell cascade specs + manifest record, and the F11 A/B
+          # byte-identical-tree determinism oracle — needs the [optimize]
+          # extra installed in this job).
+          if compgen -G "tests/unit/test_engine_stage3_wire.py" > /dev/null; then
+            pytest --cov=brutex.engine.stage3_wire --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_stage3_wire.py
+          else
+            echo "(brutex.engine.stage3_wire test file not present yet — gate inactive)"
+          fi
           # 19i2 · brutex.ranking — composite score + hard gates (DEC-RANKING-001)
           if compgen -G "tests/unit/test_ranking.py" > /dev/null; then
             pytest --cov=brutex.ranking --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ranking.py

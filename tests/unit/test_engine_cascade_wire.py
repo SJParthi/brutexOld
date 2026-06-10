@@ -434,6 +434,155 @@ class TestManifestSerialisation:
             cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
 
 
+# ── Stage-3 manifest record (DEC-STAGE3-WIRE-001, review F3) ─────────────────
+
+
+def _stage3_cell(**overrides: object) -> cw.Stage3CellRecord:
+    base: dict[str, object] = {
+        "instrument": "NIFTY",
+        "tf_label": "1minute",
+        "direction_label": "bull",
+        "k": 1,
+        "sl_paisa": 80,
+        "tp_paisa": 50,
+        "proximity_bps": None,
+    }
+    base.update(overrides)
+    return cw.Stage3CellRecord(**base)  # type: ignore[arg-type]
+
+
+class TestStage3CellRecord:
+    @pytest.mark.parametrize("field", ["instrument", "tf_label"])
+    def test_empty_label_raises(self, field: str) -> None:
+        with pytest.raises(cw.CascadeWireError, match=f"{field} must be non-empty"):
+            _stage3_cell(**{field: ""})
+
+    def test_bad_direction_raises(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="'bull' or 'bear'"):
+            _stage3_cell(direction_label="long")
+
+    def test_negative_k_raises(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="k must be >= 0"):
+            _stage3_cell(k=-1)
+
+    @pytest.mark.parametrize("leg", ["sl_paisa", "tp_paisa"])
+    def test_non_positive_leg_raises(self, leg: str) -> None:
+        # Refined cells are always quantized on-grid ints — a disabled leg
+        # cannot reach the manifest.
+        with pytest.raises(cw.CascadeWireError, match=f"{leg} must be > 0"):
+            _stage3_cell(**{leg: 0})
+
+    def test_bad_proximity_length_raises(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="3-tuple or None"):
+            _stage3_cell(proximity_bps=(5, 10))
+
+    def test_valid_cell_with_proximity_constructs(self) -> None:
+        cell = _stage3_cell(proximity_bps=(5, 10, 25), k=0)
+        assert cell.proximity_bps == (5, 10, 25)
+        assert cell.k == 0
+
+
+class TestStage3ManifestRecord:
+    def test_enabled_requires_train_hash(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="requires a train_snapshot_hash"):
+            cw.Stage3ManifestRecord(enabled=True, train_snapshot_hash=None, refined_cells=())
+
+    def test_disabled_forbids_hash_and_cells(self) -> None:
+        with pytest.raises(cw.CascadeWireError, match="forbids"):
+            cw.Stage3ManifestRecord(enabled=False, train_snapshot_hash="ab" * 32, refined_cells=())
+        with pytest.raises(cw.CascadeWireError, match="forbids"):
+            cw.Stage3ManifestRecord(
+                enabled=False, train_snapshot_hash=None, refined_cells=(_stage3_cell(),)
+            )
+
+    def test_valid_records_construct(self) -> None:
+        disabled = cw.Stage3ManifestRecord(
+            enabled=False, train_snapshot_hash=None, refined_cells=()
+        )
+        enabled = cw.Stage3ManifestRecord(
+            enabled=True, train_snapshot_hash="ab" * 32, refined_cells=(_stage3_cell(),)
+        )
+        assert disabled.enabled is False
+        assert enabled.refined_cells[0].instrument == "NIFTY"
+
+
+class TestStage3ManifestSerialisation:
+    def test_round_trip_preserves_stage3_record(self) -> None:
+        # Cells exercise BOTH proximity legs (None + set).
+        record = cw.Stage3ManifestRecord(
+            enabled=True,
+            train_snapshot_hash="ab" * 32,
+            refined_cells=(_stage3_cell(), _stage3_cell(proximity_bps=(5, 10, 25))),
+        )
+        manifest = cw.CascadeManifest(
+            version=cw.MANIFEST_VERSION,
+            sweep_id="a" * 64,
+            cascade_config=cw.cascade_config_for_sweep("a" * 64),
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-02-01"
+            ),
+            specs=(_spec(),),
+            stage3=record,
+        )
+        restored = cw.manifest_from_json(cw.manifest_to_json(manifest))
+        assert restored == manifest
+        assert restored.stage3 == record
+
+    def test_stage3_none_round_trips(self) -> None:
+        restored = cw.manifest_from_json(cw.manifest_to_json(_manifest()))
+        assert restored.stage3 is None
+
+    def test_pre_stage3_manifest_without_key_parses(self) -> None:
+        # Backward compatibility: manifests written before DEC-STAGE3-WIRE-001
+        # carry no "stage3" key at all — they parse with stage3=None.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        del payload["stage3"]
+        restored = cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+        assert restored.stage3 is None
+
+    def test_bad_stage3_record_raises(self) -> None:
+        import json
+
+        record = cw.Stage3ManifestRecord(
+            enabled=True, train_snapshot_hash="ab" * 32, refined_cells=(_stage3_cell(),)
+        )
+        manifest = _manifest()
+        payload = json.loads(
+            cw.manifest_to_json(
+                cw.CascadeManifest(
+                    version=manifest.version,
+                    sweep_id=manifest.sweep_id,
+                    cascade_config=manifest.cascade_config,
+                    bars_context=manifest.bars_context,
+                    specs=manifest.specs,
+                    stage3=record,
+                )
+            )
+        )
+        del payload["stage3"]["refined_cells"][0]["sl_paisa"]
+        with pytest.raises(cw.CascadeWireError, match="invalid stage3 record"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
+    def test_auto_path_records_stage3_in_the_manifest(self, tmp_path: Path) -> None:
+        record = cw.Stage3ManifestRecord(
+            enabled=True, train_snapshot_hash="ab" * 32, refined_cells=(_stage3_cell(),)
+        )
+        cw.run_and_write_from_specs(
+            tmp_path,
+            sweep_id="a" * 64,
+            specs=[_spec()],
+            bars_for=_bars_for(_session_bars()),
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-02-01"
+            ),
+            cascade_config=cw.cascade_config_for_sweep("a" * 64),
+            stage3=record,
+        )
+        assert cw.load_manifest(tmp_path).stage3 == record
+
+
 # ── Spec building from persisted rows ─────────────────────────────────────────
 
 

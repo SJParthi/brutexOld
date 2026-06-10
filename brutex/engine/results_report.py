@@ -20,11 +20,15 @@ O(1)-total read of an N-row leaderboard (claiming so would be a hallucination). 
 10²–10⁴ finalists (``TRACK1_BACKTEST_SPEC.md``), so the whole merged set fits in
 memory — the same sizing :class:`~brutex.engine.results_store.ResultsStore` assumes.
 
-Every persisted row is, by construction, a **gate survivor** (the sweep only persists
-combos that cleared the hard rejection gates — and, when the overfit gate was active,
-the Deflated-Sharpe gate too). So the rendered ``gate`` column reads ``PASS`` for
-every row; a ``REJECT`` is never persisted and therefore never shown — stated plainly
-rather than implied (Golden Rule #10). Pure read + render — no lake, no network.
+Every Stage-2 grid row is, by construction, a **gate survivor** (the sweep only
+persists combos that cleared the hard rejection gates — and, when the overfit gate
+was active, the Deflated-Sharpe gate too); a ``REJECT`` is never persisted. A tree
+swept with ``--stage3-enable`` ADDITIONALLY holds Stage-3 refined-eval rows
+(DEC-STAGE3-WIRE-001), which are persisted **UNGATED** as Bailey-LdP trials
+(ADR-0007 condition 6) and are indistinguishable from grid rows at the row level
+— so NO per-row gate verdict is rendered (the prior unconditional ``gate=PASS``
+column would be FALSE for refined rows; stated plainly rather than implied,
+Golden Rule #10). Pure read + render — no lake, no network.
 """
 
 from __future__ import annotations
@@ -152,10 +156,13 @@ def render_leaderboard(rows: Sequence[ResultRow]) -> str:
     """Render *rows* (already in leaderboard order) as the readable winners table.
 
     Each finalist renders as two lines: a headline row (rank · instrument · tf ·
-    direction · net P&L · #trades · win-rate · Sharpe · Deflated-Sharpe · gate) and an
-    indented condition-NAMES line. Money goes through :func:`brutex.money.format_inr`
-    (2dp, DEC-MONEY-2DP-001); statistical metrics are only *displayed* to a fixed
-    width — the stored values are never rounded.
+    direction · net P&L · #trades · win-rate · Sharpe · Deflated-Sharpe) and an
+    indented condition-NAMES line. No per-row gate verdict is rendered — a row
+    cannot reveal whether it is a gated Stage-2 finalist or an ungated Stage-3
+    refined trial (see the module docstring; DEC-STAGE3-WIRE-001). Money goes
+    through :func:`brutex.money.format_inr` (2dp, DEC-MONEY-2DP-001);
+    statistical metrics are only *displayed* to a fixed width — the stored
+    values are never rounded.
 
     Parameters
     ----------
@@ -177,8 +184,7 @@ def render_leaderboard(rows: Sequence[ResultRow]) -> str:
             f"trades={row.total_trades}  "
             f"win={row.win_rate * 100:.1f}%  "
             f"sharpe={row.sharpe_ratio:+.3f}  "
-            f"dsr={_format_deflated(row.deflated_sharpe)}  "
-            f"gate=PASS\n"
+            f"dsr={_format_deflated(row.deflated_sharpe)}\n"
             f"    {_format_conditions(row.condition_names)}"
         )
     return "\n".join(lines)
@@ -218,7 +224,8 @@ def results_show_report(root: Path, *, top: int, sort_by: str = DEFAULT_SORT_BY)
         f"BruteX results — {root}\n"
         f"  files={len(files)}  finalists={len(store)}  "
         f"sort={sort_by}  showing top {len(leaders)}\n"
-        f"  (every persisted row is a gate survivor → gate=PASS for all)"
+        f"  (Stage-2 grid rows are gate survivors; a --stage3-enable sweep also "
+        f"persists UNGATED Stage-3 refined-eval trials — no per-row gate verdict)"
     )
     return f"{header}\n\n{render_leaderboard(leaders)}"
 

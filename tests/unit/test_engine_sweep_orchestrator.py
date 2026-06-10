@@ -243,6 +243,54 @@ class TestSweepGridConfig:
                 max_tuples=3,
             )
 
+    # ── Stage-3 knobs (DEC-STAGE3-WIRE-001, hostile F5/F13 fail-fast) ──
+
+    def test_stage3_defaults_are_off_and_spec_values(self) -> None:
+        grid = _grid()
+        assert grid.stage3_enable is False
+        assert grid.stage3_top_k == 10_000
+        assert grid.stage3_max_fevals == 200
+        assert grid.stage3_max_restarts == 3
+
+    def test_stage3_top_k_below_one_rejected(self) -> None:
+        with pytest.raises(ValueError, match="stage3_top_k must be >= 1"):
+            _grid(stage3_top_k=0)
+
+    def test_stage3_fevals_below_one_rejected(self) -> None:
+        with pytest.raises(ValueError, match="stage3_max_fevals and stage3_max_restarts"):
+            _grid(stage3_max_fevals=0)
+
+    def test_stage3_restarts_below_one_rejected(self) -> None:
+        with pytest.raises(ValueError, match="stage3_max_fevals and stage3_max_restarts"):
+            _grid(stage3_max_restarts=0)
+
+    def test_stage3_enable_rejects_none_stop_loss(self) -> None:
+        with pytest.raises(ValueError, match="stop_losses value\\s+to be a Mode-A grid"):
+            _grid(stage3_enable=True, stop_losses=[None])
+
+    def test_stage3_enable_rejects_off_grid_stop_loss(self) -> None:
+        # 7 is inside [5, 200] but off the 5-paisa tick.
+        with pytest.raises(ValueError, match="stop_losses value\\s+on the Mode-A grid"):
+            _grid(stage3_enable=True, stop_losses=[7])
+
+    def test_stage3_enable_rejects_none_take_profit(self) -> None:
+        with pytest.raises(ValueError, match="take_profits value\\s+to be a Mode-A grid"):
+            _grid(stage3_enable=True, take_profits=[None])
+
+    def test_stage3_enable_rejects_off_grid_take_profit(self) -> None:
+        # 505 exceeds the TP axis hi bound of 500.
+        with pytest.raises(ValueError, match="take_profits value\\s+on the Mode-A grid"):
+            _grid(stage3_enable=True, take_profits=[505])
+
+    def test_stage3_enable_accepts_on_grid_axes(self) -> None:
+        grid = _grid(stage3_enable=True, stop_losses=[80, 100], take_profits=[50, 120])
+        assert grid.stage3_enable is True
+
+    def test_stage3_disabled_skips_on_grid_validation(self) -> None:
+        # Off-grid + None legs are FINE when the pass is off (the default).
+        grid = _grid(stop_losses=[7, None], take_profits=[None])
+        assert grid.stage3_enable is False
+
 
 # ────── SweepTuple.to_run_config ──────
 

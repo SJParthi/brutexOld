@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
 __all__ = [
+    "LOCKBOX_DEFAULT_WINDOW_DAYS",
     "LockboxResult",
     "LockboxStatus",
     "lockbox_evaluation",
@@ -76,6 +77,13 @@ __all__ = [
 #: states the window in *calendar* 6 months; the ordinal-day axis is the
 #: caller's (calendar or session) so the default is expressed in days.
 _DEFAULT_WINDOW_DAYS: Final[int] = 182
+
+#: Public alias of the default lockbox window (DEC-STAGE3-WIRE-001 / ADR-0007
+#: condition 7 + Amendment A1): the Stage-3 train-slice helper
+#: (:func:`brutex.engine.stage3_wire.train_slice_bars`) must exclude EXACTLY
+#: this window, so it imports THIS constant — one source of truth, never a
+#: re-derived boundary (CLAUDE.md §11 COMMON).
+LOCKBOX_DEFAULT_WINDOW_DAYS: Final[int] = _DEFAULT_WINDOW_DAYS
 
 #: Hard floor on lockbox trade count (DEC-LOCK-001, spec line 452).
 _DEFAULT_MIN_TRADES: Final[int] = 500

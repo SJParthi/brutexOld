@@ -403,8 +403,15 @@ class SweepRunSummary:
     store_content_hash: str
 
 
-def _canonical_params(cfg: SweepRunConfig) -> dict[str, Any]:
-    """Return the deterministic params dict for the run-identity hash.
+def canonical_trade_params(
+    *,
+    sl_paisa: int | None,
+    tp_paisa: int | None,
+    prior_n: int,
+    proximity: ProximityParams | None,
+    start_equity_paisa: int,
+) -> dict[str, Any]:
+    """Return the deterministic trade-sim params dict for the run-identity hash.
 
     Bundles the trade-sim knobs into one JSON-canonicalisable dict (no floats,
     no objects — only ints / ``None``) so
@@ -412,22 +419,40 @@ def _canonical_params(cfg: SweepRunConfig) -> dict[str, Any]:
     proximity tolerances are flattened to their three integer bps values (or
     ``None`` when defaulted) so two configs with the same effective proximity
     hash identically.
+
+    This is the ONE source of the params layout inside every persisted mask
+    run-identity (CLAUDE.md §11 COMMON): the sweep hashes through it via
+    :func:`_canonical_params`, and the Stage-3 wiring re-derives survivor
+    identities through it to recover each survivor's grid cell + proximity by
+    ``run_id`` match (DEC-STAGE3-WIRE-001, hostile-review condition F4 — never
+    guessed, always re-derived).
     """
-    if cfg.proximity is None:
+    if proximity is None:
         proximity_bps: list[int] | None = None
     else:
         proximity_bps = [
-            cfg.proximity.pivot_proximity_bps,
-            cfg.proximity.pdh_pdl_proximity_bps,
-            cfg.proximity.fib_proximity_bps,
+            proximity.pivot_proximity_bps,
+            proximity.pdh_pdl_proximity_bps,
+            proximity.fib_proximity_bps,
         ]
     return {
-        "sl_paisa": cfg.sl_paisa,
-        "tp_paisa": cfg.tp_paisa,
-        "prior_n": cfg.prior_n,
+        "sl_paisa": sl_paisa,
+        "tp_paisa": tp_paisa,
+        "prior_n": prior_n,
         "proximity_bps": proximity_bps,
-        "start_equity_paisa": cfg.start_equity_paisa,
+        "start_equity_paisa": start_equity_paisa,
     }
+
+
+def _canonical_params(cfg: SweepRunConfig) -> dict[str, Any]:
+    """Project *cfg*'s trade-sim knobs through :func:`canonical_trade_params`."""
+    return canonical_trade_params(
+        sl_paisa=cfg.sl_paisa,
+        tp_paisa=cfg.tp_paisa,
+        prior_n=cfg.prior_n,
+        proximity=cfg.proximity,
+        start_equity_paisa=cfg.start_equity_paisa,
+    )
 
 
 def ranked_combo_to_result_row(
@@ -469,9 +494,11 @@ def ranked_combo_to_result_row(
       (at each trade's exit bar), snapped to the 2dp tick grid via
       :func:`brutex.money.round_money`. These are HONEST anchors drawn from real
       bars, never fabricated. Threading the exact fill price through
-      :class:`~brutex.metrics.types.ClosedTrade` is a tracked follow-up; a ranked
-      combo always has ``>= MIN_TRADES`` trades, so the zero-trade fallback
-      (``round_money(Decimal("0"))``) is a defensive guard only.
+      :class:`~brutex.metrics.types.ClosedTrade` is a tracked follow-up. A
+      sweep-ranked combo always has ``>= MIN_TRADES`` trades; a Stage-3 refined
+      evaluation (DEC-STAGE3-WIRE-001) is UNGATED and may have zero trades, in
+      which case both anchors are the 0.00 placeholder
+      (``round_money(Decimal("0"))``) — documented, not fabricated.
 
     Parameters
     ----------
@@ -510,7 +537,11 @@ def ranked_combo_to_result_row(
         exits = [ts_to_bar[t.exit_ts].close for t in trades]
         avg_entry = round_money(sum(entries, Decimal("0")) / len(entries))
         avg_exit = round_money(sum(exits, Decimal("0")) / len(exits))
-    else:  # pragma: no cover — a ranked combo always has >= MIN_TRADES trades.
+    else:
+        # REACHABLE since DEC-STAGE3-WIRE-001: a Stage-3 refined evaluation is
+        # an UNGATED Bailey-LdP trial (ADR-0007 condition 6) and may close zero
+        # trades on the training slice; its price anchors are then a 0.00
+        # placeholder pair (a sweep-ranked combo still always has >= MIN_TRADES).
         avg_entry = round_money(Decimal("0"))
         avg_exit = round_money(Decimal("0"))
 
@@ -785,6 +816,7 @@ __all__ = [
     "ComboDedup",
     "SweepRunConfig",
     "SweepRunSummary",
+    "canonical_trade_params",
     "mask_run_id",
     "ranked_combo_to_result_row",
     "run_persisted_sweep",

@@ -15,11 +15,32 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from brutex.metrics.lockbox import (
+    _DEFAULT_WINDOW_DAYS,
+    LOCKBOX_DEFAULT_WINDOW_DAYS,
     LockboxResult,
     LockboxStatus,
     _max_drawdown,
     lockbox_evaluation,
 )
+
+
+def test_public_window_constant_is_the_default_window() -> None:
+    # DEC-STAGE3-WIRE-001 (review F1): the Stage-3 train-slice helper imports
+    # THIS constant — pin it to the private default and the spec's ~6 months
+    # so the shared boundary can never silently drift.
+    assert LOCKBOX_DEFAULT_WINDOW_DAYS == _DEFAULT_WINDOW_DAYS
+    assert LOCKBOX_DEFAULT_WINDOW_DAYS == 182
+    # And the evaluation's default window IS this constant: the window start
+    # lands exactly at max_day - LOCKBOX_DEFAULT_WINDOW_DAYS + 1.
+    days = np.arange(1000, 1000 + 400)
+    r = lockbox_evaluation(
+        np.full(400, 0.01),
+        days,
+        training_sharpe=0.0,
+        training_max_drawdown=0.0,
+        min_trades=1,
+    )
+    assert r.window_start_day == int(days[-1]) - LOCKBOX_DEFAULT_WINDOW_DAYS + 1
 
 
 def test_pass_default_window() -> None:
