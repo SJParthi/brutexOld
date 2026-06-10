@@ -101,7 +101,7 @@ jobs:
           #    the Stage-3 overfit gate (brutex/ranking/overfit.py). A silent
           #    regression in any of these corrupts strategy selection, so all
           #    three are first-class ZERO-SURVIVOR targets. Verified 0/228
-          #    survivors locally (MIGRATION #611). The runner is the focused
+          #    survivors locally (MIGRATION #613). The runner is the focused
           #    pair of dedicated test files — a strict SUBSET of tests/unit,
           #    so focused-zero implies broad-zero, and each mutant dies in
           #    seconds instead of ~1 min (the measured 2026-06-09 main run
@@ -136,7 +136,7 @@ jobs:
           #    chain, rate limiter, store, partition/parser) — broad
           #    `tests/unit` runner, semantics UNCHANGED from the original job.
           #    KNOWN PRE-EXISTING LIMIT (discovered 2026-06-10, MIGRATION
-          #    #611 honest envelope): on shared runners this pass advances at
+          #    #613 honest envelope): on shared runners this pass advances at
           #    ~1 min/mutant (full-suite runner), so it exceeds the job
           #    timeout before finishing (the 2026-06-09 main run was cancelled
           #    at 123/804 with 26 early survivors). Restructuring it onto
