@@ -67,7 +67,7 @@ from brutex.dashboard.db_view import (
     summarize_spot_datasets,
     table_summary,
 )
-from brutex.dashboard.option_pull_controller import pull_options
+from brutex.dashboard.option_pull_controller import count_progress_units, pull_options
 from brutex.dashboard.preopen_report import (
     ReportBasis,
     ReportMode,
@@ -1668,10 +1668,23 @@ def build_app(
             residual over the SHARED window ledger until ``stop_clean`` /
             ``stop_dead`` (token died) / ``stop_quota`` (daily quota spent) / the
             bounded budget. The finished verdict is stamped into the SAME banner
-            slot the spot pull uses. Honest envelope: rounds re-fire on_progress,
-            so the percent bar can saturate at 100% while later rounds drain the
-            residual — the verdict banner is the authoritative finish signal.
+            slot the spot pull uses. Honest envelope: rounds re-fire the progress
+            hooks, so the percent bar can saturate at 100% while later rounds
+            drain the residual — the verdict banner is the authoritative finish
+            signal.
             """
+            # Per-SERIES progress (DEC-OPTIONS-PROGRESS-SERIES-001): one anonymous
+            # unit per completed series (the live "1,386 chunks" granularity the
+            # bar total now carries), composed with the throttled summary-cache
+            # invalidation on the SAME zero-arg tick. The per-underlying
+            # on_progress keeps the labelled bars/failed/gap accounting and is
+            # itself one unit (the rollup), matching the total below.
+            throttled_dirty = make_throttled(_summary_cache.mark_dirty)
+
+            def _series_tick() -> None:
+                throttled_dirty()
+                on_progress("", 0, False, False)
+
             report = pull_options(
                 instruments,
                 lake_root=lake_root,
@@ -1682,22 +1695,28 @@ def build_app(
                 # a single-underlying pull (whose per-underlying on_progress fires
                 # only at the very end). The 2 s throttle matches the cache TTL
                 # floor; the per-underlying on_progress already marks dirty too.
-                on_series_tick=make_throttled(_summary_cache.mark_dirty),
+                on_series_tick=_series_tick,
                 session_rate=_session_rate,
                 until_clean=True,
             )
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
 
-        # total = one progress tick per underlying (the options hook fires per underlying).
-        started = _pull_job.start(_work, total=len(instruments), detail=f"{label} options")
+        # total = the pull's REAL fan-out: one unit per SERIES (per-series tick)
+        # + one per underlying (its labelled rollup on_progress call) — a 3-index
+        # pull reads "0 / 1,389", climbing every few seconds, instead of the old
+        # one-tick-per-underlying "0/3" frozen for hours
+        # (DEC-OPTIONS-PROGRESS-SERIES-001; counted via the SAME iter_series_jobs
+        # enumeration as the fetch + the window planner, §11 COMMON).
+        total_units = count_progress_units(instruments)
+        started = _pull_job.start(_work, total=total_units, detail=f"{label} options")
         return JSONResponse(
             {
                 "started": started,
                 "kind": kind,
                 "symbol": symbol,
                 "symbols": symbols,
-                "total": len(instruments),
+                "total": total_units,
                 "dry_run": dry_run,
             }
         )
