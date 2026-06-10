@@ -670,10 +670,11 @@ def _ingest_one_window(
                 in_run_retry=True,
                 **series_fields,
             )
-            # Record the FAILED outcome in the browsable status table (DEC-WINDOW-
-            # STATUS-001) + the unified ledger (DEC-WINDOW-LEDGER-001) so the
-            # operator SEES which windows errored + how often. Both share the
-            # identical record() signature, so they never drift.
+            # Record the FAILED outcome in the unified ledger (DEC-WINDOW-
+            # LEDGER-001) so the operator SEES which windows errored + how often.
+            # The legacy status table is WRITE-RETIRED — no production caller
+            # passes ``status_log`` (DEC-STATUS-SIDECAR-WRITE-RETIRE-001); the
+            # branch stays (identical record signature) until Stage-6 deletes it.
             _failed_at = datetime.now(UTC)
             if status_log is not None:
                 status_log.record(
@@ -785,11 +786,13 @@ def _ingest_one_window(
     # ``result.bars_appended``) is the signal: a re-pull whose bars are all
     # already in the lake dedups to ``bars_appended == 0`` via keep-first yet the
     # window IS complete, so it must stay marked.
-    # Record the window's outcome in the browsable status table (DEC-WINDOW-
-    # STATUS-001) + the unified ledger (DEC-WINDOW-LEDGER-001): SUCCESS when the
-    # vendor returned bars, EMPTY on a clean 0-bar response. The mark below
-    # (skip-ledger) and these records share the same ``raw_bars > 0`` SUCCESS
-    # condition, so they never disagree.
+    # Record the window's outcome in the unified ledger (DEC-WINDOW-LEDGER-001):
+    # SUCCESS when the vendor returned bars, EMPTY on a clean 0-bar response.
+    # The mark below (skip-ledger) and these records share the same
+    # ``raw_bars > 0`` SUCCESS condition, so they never disagree. The legacy
+    # status table is WRITE-RETIRED — no production caller passes
+    # ``status_log`` (DEC-STATUS-SIDECAR-WRITE-RETIRE-001); the branch stays
+    # until Stage-6 deletes it.
     _done_at = datetime.now(UTC)
     if status_log is not None:
         status_log.record(

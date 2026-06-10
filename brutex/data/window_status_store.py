@@ -118,12 +118,17 @@ def make_live_status_flush(
 ) -> Callable[[], None]:
     """Return a THROTTLED mid-pull status-flush callback (DEC-WINDOW-STATUS-LIVE-001).
 
+    **WRITE-RETIRED** (DEC-STATUS-SIDECAR-WRITE-RETIRE-001): no production pull
+    drives this any more — the unified ledger's adaptive
+    :func:`~brutex.data.window_ledger_store.make_live_ledger_flush` is the live
+    mid-pull flush. Kept (with its tests) only until the Stage-6 deletion.
+
     During a long pull every window's SUCCESS / EMPTY / FAILED record accumulates
     in *log* in memory, but the sidecar is only written by :func:`end_pull_status`
     at the very END — so ``/coverage/windows`` shows ``0 windows`` for the whole
     run and only "jumps" to the final table once the pull finishes. This returns a
-    callable the ingest spine fires after each completed pair to persist *log*
-    MID-pull, so the page ticks up live.
+    callable fired after each completed pair to persist *log* MID-pull, so the
+    page ticks up live.
 
     Throttled to at most once per *min_interval_s* (default
     :data:`LIVE_FLUSH_MIN_INTERVAL_S`): a several-thousand-window JSON must not be
@@ -148,9 +153,12 @@ def make_live_status_flush(
 def begin_pull_status(lake_root: Path, *, dry_run: bool) -> WindowStatusLog | None:
     """Resolve the status log to thread into a pull (load the persisted one for a live run).
 
-    A **live** pull loads the persisted log so the status table reflects the full
-    cross-run history; a **dry-run** returns ``None`` (no recording, no disk
-    touch) — its synthetic fetch would otherwise pollute the real status table.
+    **WRITE-RETIRED** (DEC-STATUS-SIDECAR-WRITE-RETIRE-001): no production pull
+    calls this any more — the unified ledger lifecycle
+    (:func:`~brutex.data.window_ledger_store.begin_pull_ledger`) replaced it.
+    Kept until the Stage-6 deletion. A **live** pull loads the persisted log so
+    the status table reflects the full cross-run history; a **dry-run** returns
+    ``None`` (no recording, no disk touch).
     """
     if dry_run:
         return None
@@ -158,7 +166,11 @@ def begin_pull_status(lake_root: Path, *, dry_run: bool) -> WindowStatusLog | No
 
 
 def end_pull_status(log: WindowStatusLog | None, lake_root: Path, *, dry_run: bool) -> None:
-    """Persist *log* after a live pull — a no-op for dry-run or an absent log."""
+    """Persist *log* after a live pull — a no-op for dry-run or an absent log.
+
+    **WRITE-RETIRED** (DEC-STATUS-SIDECAR-WRITE-RETIRE-001): no production pull
+    calls this any more; kept until the Stage-6 deletion.
+    """
     if not dry_run and log is not None:
         save_window_status(log, lake_root)
 

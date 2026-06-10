@@ -138,10 +138,12 @@
   </div>
 
 <script>
-/* ── BruteX fetch windows (DEC-WINDOW-STATUS-001) ──
+/* ── BruteX fetch windows (DEC-WINDOW-LEDGER-001) ──
    Read-only: one row per fetch window the ingest recorded in the durable
-   <lake>/window_status.json sidecar — so the operator SEES exactly which windows
-   are stored (SUCCESS), genuinely empty (EMPTY), or failed and needing a re-pull
+   <lake>/window_ledger/ Parquet ledger (the legacy window_status.json sidecar
+   is WRITE-RETIRED, DEC-STATUS-SIDECAR-WRITE-RETIRE-001 — read only as the
+   pre-ledger fallback) — so the operator SEES exactly which windows are stored
+   (SUCCESS), genuinely empty (EMPTY), or failed and needing a re-pull
    (FAILED), with the attempt count + last error. Polls /api/v1/coverage/windows.
    Escape-before-innerHTML discipline (XSS). */
 const panel = document.getElementById("panel");
