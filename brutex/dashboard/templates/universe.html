@@ -73,6 +73,10 @@
   .tab .n { font-size:20px; font-weight:800; color:var(--text-bright); }
   .tab .lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; }
   .dot { width:8px; height:8px; border-radius:50%; }
+  .fnobtn { background:var(--surface); border:1px solid var(--border-strong);
+    border-radius:8px; padding:6px 10px; color:var(--muted); cursor:pointer;
+    font:inherit; font-size:12px; white-space:nowrap; }
+  .fnobtn.on { color:#7ee2a8; border-color:#7ee2a8; }
   .search { margin-left:auto; background:var(--surface); border:1px solid var(--border-strong);
     border-radius:10px; padding:10px 14px; color:var(--text); min-width:180px; }
 
@@ -448,6 +452,11 @@ function esc(s) {
 const TABS = [["index","Index","#9D7BFF"],["stock","Stocks","#5B8DEF"]];
 const tabsEl = document.getElementById("tabs");
 const search = document.createElement("input");
+// "F&O only" toggle (DEC-FNO-ONLY-FILTER-001): the operator's "show me the
+// F&O universe ALONE" ask — a pure client-side filter over the
+// option_pullable flag every row already carries (no API change).
+const fnoBtn = document.createElement("button");
+let fnoOnly = false;
 
 function buildTabs(summary) {
   tabsEl.innerHTML = "";
@@ -470,6 +479,16 @@ function buildTabs(summary) {
   search.placeholder = "Search symbol…";
   search.oninput = renderInstruments;
   tabsEl.appendChild(search);
+  fnoBtn.className = "fnobtn" + (fnoOnly ? " on" : "");
+  fnoBtn.id = "fno-only";
+  fnoBtn.title = "Show ONLY option-pullable (F&O) instruments — hides reference-only / spot-only rows (DEC-FNO-ONLY-FILTER-001)";
+  fnoBtn.textContent = "\u26a1 F&O only";
+  fnoBtn.onclick = () => {
+    fnoOnly = !fnoOnly;
+    fnoBtn.classList.toggle("on", fnoOnly);
+    renderInstruments();
+  };
+  tabsEl.appendChild(fnoBtn);
   // Inline legend so the row chips are self-explanatory (DEC-DASHBOARD-UNIVERSE-UX-001).
   const legend = document.createElement("div");
   legend.className = "legend";
@@ -588,8 +607,9 @@ async function loadInstruments() {
 
 function renderInstruments() {
   const q = (search.value || "").toUpperCase();
-  const list = UNIV.filter(i => i.symbol.toUpperCase().includes(q)
-    || (i.name || "").toUpperCase().includes(q));
+  const list = UNIV.filter(i => (!fnoOnly || i.option_pullable !== false)
+    && (i.symbol.toUpperCase().includes(q)
+    || (i.name || "").toUpperCase().includes(q)));
   const el = document.getElementById("instruments");
   if (!list.length) {
     // Empty banner: when the whole universe is empty (not merely a search

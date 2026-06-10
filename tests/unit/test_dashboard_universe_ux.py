@@ -33,9 +33,9 @@ def test_pull_bar_is_sticky() -> None:
     html = _render_universe_html()
     rule = re.search(r"\.pullbar \{[^}]*\}", html, re.DOTALL)
     assert rule is not None, "the .pullbar CSS rule is missing"
-    assert "position:sticky" in rule.group(0), (
-        "the pull bar must be sticky so it stays visible while scrolling the list"
-    )
+    assert "position:sticky" in rule.group(
+        0
+    ), "the pull bar must be sticky so it stays visible while scrolling the list"
 
 
 def test_accessibility_focus_ring_and_reduced_motion_present() -> None:
@@ -72,15 +72,15 @@ def test_pull_button_is_unified_single_or_many() -> None:
     """
     html = _render_universe_html()
     # (a) the second "Pull spot" button must be gone — single source of truth.
-    assert 'id="pullmulti"' not in html, (
-        "the separate multi-pull button must be removed (one unified Pull spot)"
-    )
-    assert 'getElementById("pullmulti")' not in html, (
-        "no code may reference the removed pullmulti element (would throw at load)"
-    )
-    assert "Pull N selected" not in html and "Pull 0 selected" not in html, (
-        "the old 'Pull N/0 selected' button text must be gone"
-    )
+    assert (
+        'id="pullmulti"' not in html
+    ), "the separate multi-pull button must be removed (one unified Pull spot)"
+    assert (
+        'getElementById("pullmulti")' not in html
+    ), "no code may reference the removed pullmulti element (would throw at load)"
+    assert (
+        "Pull N selected" not in html and "Pull 0 selected" not in html
+    ), "the old 'Pull N/0 selected' button text must be gone"
     # (b) the unified wiring: the selection helper, the in-flight guard, and the
     # single button's label all reference the one pullbtn.
     assert "function spotSelection" in html, "the one-or-many selection helper is missing"
@@ -102,9 +102,9 @@ def test_options_button_is_unified_single_or_many() -> None:
     assert "function optionSelection" in html, "the options one-or-many selection helper is missing"
     assert "pull-options?symbols=" in html, "the multi-underlying ?symbols= request is not wired"
     assert "pull-options?symbol=" in html, "the single-underlying ?symbol= path must remain"
-    assert "⛓ Pull options chain · " in html, (
-        "the options button must show the selected-count label when rows are ticked"
-    )
+    assert (
+        "⛓ Pull options chain · " in html
+    ), "the options button must show the selected-count label when rows are ticked"
 
 
 def test_multi_select_wiring_present() -> None:
@@ -122,9 +122,9 @@ def test_multi_select_wiring_present() -> None:
 def test_timeframe_storage_is_explained_honestly() -> None:
     """The page states only 1m+1d are stored; intraday TFs are derived, not written to disk."""
     html = _render_universe_html()
-    assert "fetches + stores 1-minute + 1-day only" in html, (
-        "the page must state the pull stores ONLY 1m + 1d (no 19-timeframe local-drive bloat)"
-    )
+    assert (
+        "fetches + stores 1-minute + 1-day only" in html
+    ), "the page must state the pull stores ONLY 1m + 1d (no 19-timeframe local-drive bloat)"
     assert "derived on demand, NOT written to your drive" in html, (
         "the page must state the intraday timeframes are derived on demand, not materialised; "
         "pre-materialising is a future external-drive (BRUTEX_LAKE_ROOT) step"
@@ -155,19 +155,19 @@ def test_intrusive_tf_dropdown_stays_removed_but_clean_button_replaces_it() -> N
             f"the intrusive derive-timeframes dropdown control {gone!r} must stay removed "
             "(DEC-UNIVERSE-TFS-DROPDOWN-REMOVE-001)"
         )
-    assert 'getElementById("derivebtn")' not in html, (
-        "no code may reference the removed dropdown button (would throw at load)"
-    )
+    assert (
+        'getElementById("derivebtn")' not in html
+    ), "no code may reference the removed dropdown button (would throw at load)"
     # The clean replacement button IS present + wired to the (kept) backend route.
     assert 'id="matbtn"' in html, "the single '⚙ Pre-build timeframes' button must be present"
     assert "⚙ Pre-build timeframes" in html, "the clean materialise button label is missing"
-    assert "function matSelection" in html, (
-        "the one-or-many materialise selection helper is missing"
-    )
+    assert (
+        "function matSelection" in html
+    ), "the one-or-many materialise selection helper is missing"
     assert "matInFlight" in html, "the materialise double-click re-entrancy guard is missing"
-    assert "derive-timeframes?symbol=" in html, (
-        "the clean button must POST the (kept) materialise route"
-    )
+    assert (
+        "derive-timeframes?symbol=" in html
+    ), "the clean button must POST the (kept) materialise route"
 
 
 def test_universe_visual_upgrade_present() -> None:
@@ -228,3 +228,18 @@ def test_universe_no_data_gap_live_stat_present() -> None:
     assert "no-data gaps" in html, "the no-data gaps live stat is missing"
     assert "s.gaps" in html, "the live stats do not read the gaps counter"
     assert ".bstat.gap" in html, "the amber gap stat style is missing"
+
+
+def test_universe_fno_only_toggle_present() -> None:
+    """The "F&O only" toggle (DEC-FNO-ONLY-FILTER-001): the operator can show
+    ONLY option-pullable rows — a client-side filter over the option_pullable
+    flag the explorer rows already carry, composed with the search box."""
+    html = _render_universe_html()
+    assert 'fnoBtn.id = "fno-only"' in html, "the F&O-only toggle is missing"
+    assert ".fnobtn" in html, "the toggle style is missing"
+    assert ".fnobtn.on" in html, "the toggle's active style is missing"
+    # The filter must compose with search: hidden rows are exactly the
+    # option_pullable === false ones, and only while the toggle is on.
+    assert (
+        "!fnoOnly || i.option_pullable !== false" in html
+    ), "the F&O-only predicate is not composed into renderInstruments"
