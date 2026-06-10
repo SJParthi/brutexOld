@@ -101,8 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     violations, entries = scan(text)
     if not violations:
         print(
-            f"ledger numbering OK: {len(entries)} entry headers, "
-            f"every (number,suffix) and DEC-ID unique"
+            f"ledger numbering OK: {len(entries)} entry headers, every (number,suffix) pair unique"
         )
         return 0
 
