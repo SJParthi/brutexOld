@@ -89,27 +89,67 @@ jobs:
         run: |
           set -e
           # Target the modules where silent regressions cause the biggest
-          # damage. Two groups:
+          # damage. Two groups, run as two sequential mutmut passes (shared
+          # cache) — the FAST proven-zero math pass FIRST, so its verdict is
+          # always reported even if the broad pass later hits the known
+          # pre-existing job-timeout (see the phase-2 comment below):
           #
-          # 1. Orchestration / data plumbing (the FSM, retry classifier, audit
-          #    chain, rate limiter, store, partition/parser) — broad
-          #    `tests/unit` runner.
-          # 2. Ranking / metrics MATH (DEC-MUTATION-GATE-RANKING-001): the
-          #    Deflated-Sharpe engine. A silent regression in the DSR corrupts
-          #    the Stage-3 overfit gate and therefore strategy selection, so it
-          #    is now a first-class mutation target alongside the orchestrator.
-          #    (compute.py [Sharpe] + ranking [composite] carry their own
-          #    hardening tests this PR landed; folding them into the
-          #    zero-survivor gate is the tracked next ratchet — they retain a
-          #    handful of provably-equivalent mutants, see MIGRATION #590.)
+          # 1. Ranking / metrics MATH (DEC-MUTATION-GATE-RANKING-001 + its
+          #    executed follow-up ratchet DEC-MUTATION-GATE-RANKING-002): the
+          #    Deflated-Sharpe engine, the composite-ranking functions
+          #    (brutex/ranking/__init__.py: gates + z-scores + composite) and
+          #    the Stage-3 overfit gate (brutex/ranking/overfit.py). A silent
+          #    regression in any of these corrupts strategy selection, so all
+          #    three are first-class ZERO-SURVIVOR targets. Verified 0/228
+          #    survivors locally (MIGRATION #611). The runner is the focused
+          #    pair of dedicated test files — a strict SUBSET of tests/unit,
+          #    so focused-zero implies broad-zero, and each mutant dies in
+          #    seconds instead of ~1 min (the measured 2026-06-09 main run
+          #    processed 123/804 mutants in ~116 min with the broad runner).
+          #    Provably-equivalent mutants (annotation-only `X | None` flips,
+          #    `cast(...)` type strings, z-score translation invariance) carry
+          #    documented `# pragma: no mutate` markers in the modules.
+          #    (compute.py [Sharpe] is the remaining ranking-math ratchet —
+          #    it retains its own equivalent mutants, see MIGRATION #590.)
           #
           # Tests on these already hit 100% line coverage; mutmut verifies that
           # the coverage is *meaningful* (the tests detect a behaviour change).
           mutmut run \
-            --paths-to-mutate brutex/orchestrator/state.py,brutex/orchestrator/retry.py,brutex/orchestrator/audit.py,brutex/orchestrator/rate_limiter.py,brutex/orchestrator/store.py,brutex/data/partition.py,brutex/data/parser.py,brutex/metrics/deflated_sharpe.py \
+            --paths-to-mutate brutex/metrics/deflated_sharpe.py,brutex/ranking/__init__.py,brutex/ranking/overfit.py \
+            --runner "pytest tests/unit/test_ranking.py tests/unit/test_deflated_sharpe.py -x -q --no-header" \
+            --simple-output
+          mutmut results | tee mutmut-results-math.txt
+          if grep -qE "^[0-9]+" mutmut-results-math.txt; then
+            echo "❌ Surviving mutants detected (ranking/DSR math pass)"
+            mutmut show all 2>&1 | head -200
+            exit 1
+          fi
+          echo "✅ No surviving mutants (ranking/DSR math pass)"
+          # Reset the cache between passes: mutmut caches the BASELINE test
+          # time in .mutmut-cache and reuses it ("Using cached time for
+          # baseline tests"), so the broad pass below would inherit the
+          # focused runner's ~2 s baseline and false-TIMEOUT every mutant of
+          # its ~90 s suite. The two passes mutate DISJOINT path sets, so no
+          # mutant results are lost — each pass has its own survivors check.
+          mv .mutmut-cache .mutmut-cache-math
+          # 2. Orchestration / data plumbing (the FSM, retry classifier, audit
+          #    chain, rate limiter, store, partition/parser) — broad
+          #    `tests/unit` runner, semantics UNCHANGED from the original job.
+          #    KNOWN PRE-EXISTING LIMIT (discovered 2026-06-10, MIGRATION
+          #    #611 honest envelope): on shared runners this pass advances at
+          #    ~1 min/mutant (full-suite runner), so it exceeds the job
+          #    timeout before finishing (the 2026-06-09 main run was cancelled
+          #    at 123/804 with 26 early survivors). Restructuring it onto
+          #    per-module focused runners — after enumerating + killing those
+          #    survivors — is the tracked follow-up (proposed
+          #    DEC-MUTATION-RUNTIME-001); hiding the timeout by deleting the
+          #    pass would silently drop the orchestrator gate (Golden Rule #10).
+          mutmut run \
+            --paths-to-mutate brutex/orchestrator/state.py,brutex/orchestrator/retry.py,brutex/orchestrator/audit.py,brutex/orchestrator/rate_limiter.py,brutex/orchestrator/store.py,brutex/data/partition.py,brutex/data/parser.py \
             --runner "pytest tests/unit -x -q --no-header" \
             --simple-output
-          # Fail if any mutants survived
+          # Fail if any mutants survived (this pass only — the math pass was
+          # checked above before its cache was set aside)
           mutmut results | tee mutmut-results.txt
           if grep -qE "^[0-9]+" mutmut-results.txt; then
             echo "❌ Surviving mutants detected"
@@ -122,7 +162,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: mutmut-cache
-          path: .mutmut-cache
+          path: |
+            .mutmut-cache
+            .mutmut-cache-math
           retention-days: 7
           if-no-files-found: ignore
       - name: Open GitHub issue on failure
