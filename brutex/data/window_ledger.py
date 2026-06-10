@@ -18,7 +18,11 @@ skip decision — a window is skipped **only** if its row is settled
 (``SUCCESS``/``SKIPPED``); any ``FAILED``/``PLANNED``/``EMPTY``-below-threshold or
 MISSING window is fetched. So a window can never be silently masked: the skip
 falls out of the primary record instead of a coarse derived set patched every
-pull (#597/#598).
+pull (#597/#598). "Every planned window" means every window of the CURRENT
+pull's tiling: a SUPERSEDED trailing row — one whose key the advancing ``end``
+re-tiled away, so the tiler can never emit it again for a same-or-longer range —
+is pruned at plan time (:meth:`WindowLedger.prune_superseded`,
+DEC-WINDOW-TRAILING-GC-001), not kept as a permanent orphan.
 
 This file is the PURE, in-memory model (PR-1 of the staged rollout): the durable
 DuckDB/Parquet backing + the pull wiring land in later slices
@@ -30,7 +34,7 @@ parallel window worker); the snapshot is O(N) over the recorded windows.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -289,6 +293,56 @@ class WindowLedger:
                 empty_streak=empty_streak,
             )
             return SKIPPED
+
+    def prune_superseded(
+        self, planned_tiles: Mapping[tuple[str, str, str], Mapping[str, str]]
+    ) -> int:
+        """Delete every SUPERSEDED trailing row of the given plan — returns the count.
+
+        DEC-WINDOW-TRAILING-GC-001. The tiler clips the trailing window of
+        ``[start, end)`` to *end*, so as *end* advances across daily pulls the
+        trailing window's KEY changes and yesterday's row becomes a permanent
+        orphan: the tiler re-emits that key only for the SAME end (an identical
+        re-pull — preserved by the equal-end rule below), never for a later one,
+        so the row is never probed again and only accumulates (~4.4M rows/year
+        at universe cadence, MIGRATION.md #632 follow-up ④).
+
+        *planned_tiles* maps each series identity ``(market, security_id,
+        interval)`` the CURRENT pull just planned to that pull's tiling
+        ``{window_start_iso: window_end_iso}`` (ISO ``YYYY-MM-DD`` — zero-padded,
+        so string order == date order). A row is pruned iff its series is
+        planned AND its ``window_start`` is on the tiling AND its ``window_end``
+        is STRICTLY shorter than the tile's planned end — ANY status (a settled
+        SUCCESS partial, the clamp-stranded ``PLANNED``, a ``FAILED``/``EMPTY``/
+        ``SKIPPED`` orphan) is superseded alike, because every retry surface
+        re-derives its work from the tiling, never from ledger rows.
+
+        **No-mask by construction (#598):** an absent row is never skippable
+        (:meth:`is_skippable` → ``False`` → fetch), so deleting rows can only
+        turn would-be skips into re-fetches (the idempotent keep-first sink
+        absorbs them), NEVER a fetch into a skip. Equal-end rows (the current
+        plan's own keys, including a same-day re-pull's settled trailing row)
+        and longer-end rows (a shrunk-range re-run's history) are always kept.
+
+        One O(rows) scan + O(pruned) deletes under the lock, once per pull
+        start — NOT an O(1) claim (measured 2026-06-10: 0.48 s over a 1.2M-row
+        ledger pruning 364k orphans, ~1.4 MB index; the per-window
+        plan/probe/record stay O(1)). Doomed keys are collected first, then
+        deleted — the map is never mutated mid-iteration, and no other
+        lock-taking method is called while the lock is held.
+        """
+        doomed: list[tuple[str, str, str, str, str]] = []
+        with self._lock:
+            for wk in self._by_window:
+                tiles = planned_tiles.get(wk[:3])
+                if tiles is None:
+                    continue
+                planned_end = tiles.get(wk[3])
+                if planned_end is not None and wk[4] < planned_end:
+                    doomed.append(wk)
+            for stale in doomed:
+                del self._by_window[stale]
+        return len(doomed)
 
     @property
     def count(self) -> int:

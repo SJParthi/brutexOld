@@ -52,7 +52,7 @@ DEC-DHAN-STOCK-MONTHLY-ONLY-001). The options lake is
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 
@@ -437,17 +437,32 @@ def plan_option_pull_windows(
     fetcher cannot drift (hostile C4; the planner-keys == fetch-keys golden test
     pins it). ``plan`` is idempotent and NEVER overwrites an existing row
     (FAILED stays FAILED, settled stays settled — window_ledger semantics,
-    hostile finding 8). O(series × windows) once per pull, pure in-memory.
+    hostile finding 8). A never-reached window of the CURRENT tiling stays
+    visibly ``PLANNED``; SUPERSEDED trailing rows of the planned series —
+    keys a previous pull's shorter ``end`` produced, which this tiling can
+    never emit again — are pruned afterwards
+    (:meth:`~brutex.data.window_ledger.WindowLedger.prune_superseded`,
+    DEC-WINDOW-TRAILING-GC-001), so the daily ``end`` advance stops minting
+    one orphan row per series per day (~4.4M/yr at universe cadence).
+    O(series × windows) plan + one O(rows) prune scan, once per pull, pure
+    in-memory.
 
     Honest envelope (Golden Rule #10): a 3-index full-history pull plans ~93k
     rows (~50 MB ledger, ~3.7 s); a full-universe pull ~841k rows (~480 MB,
-    ~7 s) — measured in the DEC-OPTION-WINDOW-PLAN-001 review. NOT an O(1)
-    claim; the per-window ``plan`` probe is O(1).
+    ~7 s) — measured in the DEC-OPTION-WINDOW-PLAN-001 review. The prune scan
+    measured 0.48 s over a 1.2M-row ledger with a ~1.4 MB series→tiles index
+    (DEC-WINDOW-TRAILING-GC-001). NOT an O(1) claim; the per-window ``plan``
+    probe is O(1).
     """
     from brutex.adapters.dhan.option_ingest import coverage_key, window_dates
 
     stamp = now if now is not None else datetime.now(UTC)
     tiles = window_dates(start, end)
+    # The tiling's ISO bounds, materialised ONCE and shared by every series'
+    # GC index entry (DEC-WINDOW-TRAILING-GC-001 hostile F3 — no per-window
+    # re-serialisation).
+    tiles_iso: dict[str, str] = {ws.isoformat(): we.isoformat() for ws, we in tiles}
+    planned_tiles: dict[tuple[str, str, str], Mapping[str, str]] = {}
     planned = 0
     for job in iter_series_jobs(
         underlyings,
@@ -457,20 +472,24 @@ def plan_option_pull_windows(
     ):
         _idx, underlying, expiry_flag, expiry_code, strike, drv_option_type = job
         for window_start, window_end in tiles:
-            ledger.plan(
-                coverage_key(
-                    exchange_segment=underlying.exchange_segment,
-                    security_id=underlying.security_id,
-                    expiry_flag=expiry_flag,
-                    expiry_code=expiry_code,
-                    strike=strike,
-                    drv_option_type=drv_option_type,
-                    window_start=window_start,
-                    window_end=window_end,
-                ),
-                now=stamp,
+            key = coverage_key(
+                exchange_segment=underlying.exchange_segment,
+                security_id=underlying.security_id,
+                expiry_flag=expiry_flag,
+                expiry_code=expiry_code,
+                strike=strike,
+                drv_option_type=drv_option_type,
+                window_start=window_start,
+                window_end=window_end,
             )
+            # The series identity comes off the SAME key builder the fetch
+            # spine probes (hostile C4 — no second folding to drift).
+            planned_tiles[(key.market, key.security_id, key.interval)] = tiles_iso
+            ledger.plan(key, now=stamp)
             planned += 1
+    pruned = ledger.prune_superseded(planned_tiles)
+    if pruned:
+        _LOG.info("window_ledger.pruned_superseded", pruned=pruned, planned=planned)
     return planned
 
 

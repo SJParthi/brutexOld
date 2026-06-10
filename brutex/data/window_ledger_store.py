@@ -34,7 +34,7 @@ one-shot load (run start) + save (run end) are O(N) over the recorded windows.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -331,18 +331,35 @@ def plan_windows(
     (:func:`~brutex.adapters.dhan.ingest._windows`, ONE source of truth — the same
     tiling the ingest fetches) yields the windows; each is
     :meth:`WindowLedger.plan`-ned (idempotent — a settled row is untouched). This
-    is what guarantees EVERY window the pull will touch has a row BEFORE any fetch,
-    so a window that is never reached still shows ``PLANNED`` (never silently
-    missing). O(windows) once at pull start. Generic over the instrument's
+    is what guarantees EVERY window of the CURRENT pull's tiling has a row BEFORE
+    any fetch, so a window that is never reached still shows ``PLANNED`` (never
+    silently missing). SUPERSEDED trailing rows of the planned series — keys a
+    previous pull's shorter ``end`` produced, which this tiling can never emit
+    again — are pruned afterwards (:meth:`WindowLedger.prune_superseded`,
+    DEC-WINDOW-TRAILING-GC-001), so the ledger tracks the live tiling instead of
+    accumulating one orphan per series per day. O(windows) plan + one O(rows)
+    prune scan, once at pull start. Generic over the instrument's
     ``exch_id``/``segment``/``symbol_name``, so it serves spot AND option series.
     """
     from brutex.adapters.dhan.ingest import _MARKET, _windows
 
     stamp = now if now is not None else datetime.now(UTC)
+    # ONE tiling per interval (the tiler is pure in (interval, start, end)) with
+    # its ISO bounds materialised once — the GC index below then shares those
+    # exact strings instead of re-serialising per (instrument × window).
+    tiles_by_interval: dict[str, list[tuple[date, date]]] = {
+        interval: _windows(interval, start, end) for interval in intervals
+    }
+    tiles_iso: dict[str, dict[str, str]] = {
+        interval: {ws.isoformat(): we.isoformat() for ws, we in tiles}
+        for interval, tiles in tiles_by_interval.items()
+    }
+    planned_tiles: dict[tuple[str, str, str], Mapping[str, str]] = {}
     planned = 0
     for instrument in instruments:
         for interval in intervals:
-            for window_start, window_end in _windows(interval, start, end):
+            planned_tiles[(_MARKET, instrument.symbol_name, interval)] = tiles_iso[interval]
+            for window_start, window_end in tiles_by_interval[interval]:
                 ledger.plan(
                     WindowKey(
                         market=_MARKET,
@@ -354,6 +371,9 @@ def plan_windows(
                     now=stamp,
                 )
                 planned += 1
+    pruned = ledger.prune_superseded(planned_tiles)
+    if pruned:
+        _LOG.info("window_ledger.pruned_superseded", pruned=pruned, planned=planned)
     return planned
 
 
