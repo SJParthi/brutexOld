@@ -8,15 +8,26 @@ gate + 8th term — and the pure :mod:`brutex.ranking.overfit` engine are covere
 here too (the strict ``--cov=brutex.ranking`` gate runs ONLY this file).
 """
 
+# Whitebox: `_zscores` is imported directly to pin the z-normalisation
+# arithmetic byte-exact for the mutation gate (DEC-MUTATION-GATE-RANKING-002).
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import Any
 
 import pytest
 from brutex.metrics.compute import ResultMetrics
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS, deflated_sharpe_ratio
-from brutex.ranking import OverfitGateConfig, RankedCombo, passes_gates, rank_combos
+from brutex.ranking import (
+    OverfitGateConfig,
+    RankedCombo,
+    _zscores,
+    passes_gates,
+    rank_combos,
+)
 from brutex.ranking.overfit import (
     PoolDispersion,
     deflated_sharpe_for,
@@ -111,6 +122,27 @@ class TestPassesGates:
     def test_reject_too_many_consecutive_losses(self) -> None:
         assert passes_gates(_m(max_consecutive_losses=11)) is False
 
+    def test_accept_profit_factor_exactly_at_floor(self) -> None:
+        # Boundary: profit_factor == 1.2 is the lowest rankable PF and must
+        # PASS — pins the `<` against a `<=` flip that would silently reject
+        # combos sitting exactly on the gate (DEC-MUTATION-GATE-RANKING-002).
+        assert passes_gates(_m(profit_factor=1.2)) is True
+
+    def test_accept_drawdown_exactly_at_cap(self) -> None:
+        # Boundary: max_drawdown_pct == 30.0 exactly is still investable and
+        # must PASS — pins the `>` against a `>=` flip.
+        assert passes_gates(_m(max_drawdown_pct=30.0)) is True
+
+    def test_accept_win_rate_exactly_at_floor_with_low_wlr(self) -> None:
+        # Boundary: win_rate == 25% exactly is NOT "low hit-rate", so a low
+        # win/loss-ratio alone must not reject — pins `<` against `<=`.
+        assert passes_gates(_m(win_rate=0.25, win_loss_ratio=0.5)) is True
+
+    def test_accept_exactly_max_consecutive_losses(self) -> None:
+        # Boundary: max_consecutive_losses == 10 is the worst acceptable
+        # streak and must PASS — pins the `<=` against a `<` flip.
+        assert passes_gates(_m(max_consecutive_losses=10)) is True
+
 
 # ────── rank_combos ──────
 
@@ -171,6 +203,138 @@ class TestRankCombos:
         ]
         ranked = rank_combos(cand)
         assert len(ranked) == 2
+
+
+# ────── _zscores — the z-normalisation engine behind every composite term ──────
+
+
+class TestZScores:
+    """Pin the z-score arithmetic + the [-3, +3] clamp byte-exact.
+
+    Every input is chosen so each intermediate (mean / variance / std / z) is
+    an exact binary float, so the assertions are ``==``, never approx — a
+    mutated mean/variance/std/clamp cannot hide inside float noise
+    (DEC-MUTATION-GATE-RANKING-002).
+    """
+
+    def test_symmetric_pair_is_plus_minus_one(self) -> None:
+        # mean 1.5, variance 1.0, std 1.0 → z exactly ±1.
+        assert _zscores([2.5, 0.5]) == [1.0, -1.0]
+
+    def test_quarter_variance_pair_is_plus_minus_one(self) -> None:
+        # values 1.5/0.5: mean 1.0, variance 0.25, std 0.5 → z exactly ±1.
+        # Variance ≠ 1.0 on purpose: it kills the std arithmetic mutants
+        # (variance*0.5, variance**1.5, /n → *n) that are INVISIBLE at unit
+        # variance, where x**0.5 == x*... degenerates to the same value.
+        assert _zscores([1.5, 0.5]) == [1.0, -1.0]
+
+    def test_clamps_positive_outlier_at_exactly_three(self) -> None:
+        # 17 values: mean 1.0, variance 16.0, std 4.0 — all exact — so the
+        # outlier's raw z is exactly +4.0 and must clamp to exactly +3.0
+        # (pins _Z_CLAMP == 3.0 against the 4.0 mutant); the 16 others sit
+        # at exactly -0.25, far from either clamp.
+        assert _zscores([0.0] * 16 + [17.0]) == [-0.25] * 16 + [3.0]
+
+    def test_clamps_negative_outlier_at_exactly_minus_three(self) -> None:
+        # Mirror case: raw z exactly -4.0 → clamped to exactly -3.0 (pins the
+        # lower clamp arm `max(-_Z_CLAMP, ...)`).
+        assert _zscores([0.0] * 16 + [-17.0]) == [0.25] * 16 + [-3.0]
+
+
+# ────── composite weight pins (DEC-MUTATION-GATE-RANKING-002) ──────
+
+
+class TestCompositeWeightPins:
+    """Each composite weight is pinned byte-exact through the public API.
+
+    Two survivors differ in exactly ONE metric, chosen so that term's
+    z-scores are exactly ±1.0 and every other term has zero variance
+    (z = 0). The composite is then exactly ±weight — killing the
+    weight-constant (+1.0) mutants and the `+` → `-` sign flips in the
+    composite sum, which pure ordering assertions cannot distinguish.
+    """
+
+    def _pin(self, hi: dict[str, Any], lo: dict[str, Any], weight: float) -> None:
+        # The hi-override combo must rank first with composite exactly
+        # +weight, the lo-override combo last with exactly -weight.
+        ranked = rank_combos([(1, _m(**hi)), (2, _m(**lo))])
+        assert [rc.mask for rc in ranked] == [1, 2]
+        assert ranked[0].composite_score == weight
+        assert ranked[1].composite_score == -weight
+
+    def test_sharpe_weight_exactly_0_25(self) -> None:
+        self._pin({"sharpe_ratio": 2.5}, {"sharpe_ratio": 0.5}, 0.25)
+
+    def test_sortino_weight_exactly_0_20(self) -> None:
+        self._pin({"sortino_ratio": 3.0}, {"sortino_ratio": 1.0}, 0.20)
+
+    def test_calmar_weight_exactly_0_15(self) -> None:
+        self._pin({"calmar_ratio": 3.0}, {"calmar_ratio": 1.0}, 0.15)
+
+    def test_profit_factor_weight_exactly_0_15(self) -> None:
+        # PF 2.5/1.5 → (PF - 1.0) values 1.5/0.5: term variance 0.25 ≠ 1.0,
+        # which also kills the std mutants invisible at unit variance.
+        self._pin({"profit_factor": 2.5}, {"profit_factor": 1.5}, 0.15)
+
+    def test_recovery_weight_exactly_0_10(self) -> None:
+        self._pin({"recovery_factor": 3.0}, {"recovery_factor": 1.0}, 0.10)
+
+    def test_win_wlr_weight_exactly_0_10(self) -> None:
+        # win_rate fixed at 0.5 so the win_rate × WLR products are exactly
+        # 2.0 vs 1.0; a win_rate/WLR quotient mutant gives 0.125 vs 0.25 and
+        # FLIPS the ordering, so the mask assertion kills it too.
+        self._pin(
+            {"win_rate": 0.5, "win_loss_ratio": 4.0},
+            {"win_rate": 0.5, "win_loss_ratio": 2.0},
+            0.10,
+        )
+
+    def test_risk_efficiency_weight_exactly_0_15(self) -> None:
+        # MFE/MAE ratios exactly 3.0 vs 1.0 (int paisa → exact floats).
+        self._pin(
+            {"avg_mfe_paisa": 300, "avg_mae_paisa": 100},
+            {"avg_mfe_paisa": 100, "avg_mae_paisa": 100},
+            0.15,
+        )
+
+    def test_none_term_contributes_exactly_zero(self) -> None:
+        # A None sortino must contribute exactly like 0.0 — the {None, 0.0}
+        # sortino pair has zero variance, so ONLY the Sharpe term scores: a
+        # `_f(None) → 1.0` fallback mutant would add a spurious ±0.20 and
+        # break the exact ±0.25.
+        ranked = rank_combos(
+            [
+                (1, _m(sortino_ratio=None, sharpe_ratio=2.5)),
+                (2, _m(sortino_ratio=0.0, sharpe_ratio=0.5)),
+            ]
+        )
+        assert [rc.mask for rc in ranked] == [1, 2]
+        assert ranked[0].composite_score == 0.25
+        assert ranked[1].composite_score == -0.25
+
+
+# ────── RankedCombo dataclass discipline ──────
+
+
+class TestRankedComboDataclass:
+    def _rc(self) -> RankedCombo:
+        return RankedCombo(mask=1, metrics=_m(), composite_score=0.0)
+
+    def test_frozen(self) -> None:
+        # frozen=True — a leaderboard row is immutable once scored.
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            self._rc().mask = 2  # type: ignore[misc]
+
+    def test_slots(self) -> None:
+        # slots=True — a slotted instance carries no per-instance __dict__.
+        assert not hasattr(self._rc(), "__dict__")
+        assert hasattr(RankedCombo, "__slots__")
+
+    def test_deflated_sharpe_defaults_to_none(self) -> None:
+        # Legacy construction defaults the DSR field to None (NOT "" or any
+        # sentinel) — pins the default whose line-scoped `pragma: no mutate`
+        # (equivalent annotation flip) hides it from mutmut.
+        assert self._rc().deflated_sharpe is None
 
 
 # ────── risk-efficiency term (DEC-RANKING-RISK-EFFICIENCY-001) ──────
@@ -239,6 +403,48 @@ class TestOverfitGateConfig:
         with pytest.raises(ValueError, match="default_excess_kurtosis"):
             OverfitGateConfig(default_excess_kurtosis=math.nan)
 
+    def test_weight_zero_boundary_ok(self) -> None:
+        # Boundary: weight == 0.0 is a valid no-op DSR weight and must NOT
+        # raise — pins `<` against a `<=` flip (DEC-MUTATION-GATE-RANKING-002).
+        assert OverfitGateConfig(weight=0.0).weight == 0.0
+
+    def test_dsr_min_error_message_byte_exact(self) -> None:
+        # Byte-exact str(exc): a substring `match=` still passes mutmut's
+        # "XX…XX"-wrapped string mutant (same discipline as
+        # test_deflated_sharpe.py — DEC-MUTATION-GATE-RANKING-001).
+        with pytest.raises(ValueError) as exc:
+            OverfitGateConfig(dsr_min=1.5)
+        assert str(exc.value) == (
+            "OverfitGateConfig.dsr_min must be a probability in [0, 1], got 1.5"
+        )
+
+    def test_weight_error_message_byte_exact(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            OverfitGateConfig(weight=-0.5)
+        assert str(exc.value) == "OverfitGateConfig.weight must be >= 0, got -0.5"
+
+    def test_skew_error_message_byte_exact(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            OverfitGateConfig(default_skew=math.inf)
+        assert str(exc.value) == "OverfitGateConfig.default_skew must be finite, got inf"
+
+    def test_kurtosis_error_message_byte_exact(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            OverfitGateConfig(default_excess_kurtosis=math.nan)
+        assert str(exc.value) == (
+            "OverfitGateConfig.default_excess_kurtosis must be finite, got nan"
+        )
+
+    def test_frozen(self) -> None:
+        # frozen=True — a gate config is immutable once constructed.
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            OverfitGateConfig().dsr_min = 0.5  # type: ignore[misc]
+
+    def test_slots(self) -> None:
+        # slots=True — no per-instance __dict__.
+        assert not hasattr(OverfitGateConfig(), "__dict__")
+        assert hasattr(OverfitGateConfig, "__slots__")
+
 
 # ────── pool dispersion ──────
 
@@ -270,6 +476,18 @@ class TestPoolSharpeDispersion:
         disp = pool_sharpe_dispersion([1.0, 3.0])
         assert disp.variance == 1.0
         assert disp.deflatable is True
+
+    def test_frozen(self) -> None:
+        # frozen=True — a measured pool dispersion is immutable.
+        disp = PoolDispersion(variance=0.0, n_finite=0)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            disp.variance = 1.0  # type: ignore[misc]
+
+    def test_slots(self) -> None:
+        # slots=True — no per-instance __dict__.
+        disp = PoolDispersion(variance=0.0, n_finite=0)
+        assert not hasattr(disp, "__dict__")
+        assert hasattr(PoolDispersion, "__slots__")
 
 
 # ────── per-combo deflation ──────

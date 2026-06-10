@@ -123,7 +123,12 @@ class RankedCombo:
     #: 6th overfit gate ran for this leaderboard, else ``None`` (legacy ranking, or
     #: a pool that could not be deflated). Exposed for leaderboard transparency —
     #: the selection-bias-corrected confidence behind this combo's overfit survival.
-    deflated_sharpe: float | None = None
+    #: ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): mutmut's
+    #: ``float | None`` → ``float & None`` annotation flip is provably equivalent
+    #: (PEP 563 ``from __future__ import annotations`` — field annotations are
+    #: never evaluated). The pragma is line-scoped, so the ``None`` default it
+    #: also skips is pinned by ``test_deflated_sharpe_defaults_to_none`` instead.
+    deflated_sharpe: float | None = None  # pragma: no mutate
 
     @property
     def risk_efficiency(self) -> float:
@@ -151,7 +156,12 @@ def passes_gates(m: ResultMetrics) -> bool:
         return False
     # win_rate < 25% AND win/loss-ratio < 2.0 → reject (a low hit-rate is only
     # acceptable if the winners are much bigger than the losers).
-    wlr = m.win_loss_ratio if m.win_loss_ratio is not None else 0.0
+    # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): the ``0.0`` fallback
+    # feeds ONLY the ``wlr < _MIN_WIN_LOSS_RATIO`` comparison below, so every
+    # sub-2.0 constant is behaviourally identical — mutmut's ``0.0 → 1.0`` mutant
+    # is provably equivalent. The ``is not None`` branch the pragma also skips
+    # stays pinned by ``test_low_winrate_with_none_wlr_rejected``.
+    wlr = m.win_loss_ratio if m.win_loss_ratio is not None else 0.0  # pragma: no mutate
     if m.win_rate < _MIN_WIN_RATE and wlr < _MIN_WIN_LOSS_RATIO:
         return False
     return m.max_consecutive_losses <= _MAX_CONSECUTIVE_LOSSES
@@ -238,7 +248,10 @@ def _overfit_gate(
             kept.append((mask, m))
             # passes_overfit_gate guarantees dsr is a float (never None) here; the
             # cast keeps the typed DSR leaderboard precise without re-checking.
-            kept_dsrs.append(cast("float", dsr))
+            # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): ``typing.cast``
+            # is a runtime no-op, so mutmut's type-string mutant ("float" →
+            # "XXfloatXX") is provably equivalent — nothing behavioural on this line.
+            kept_dsrs.append(cast("float", dsr))  # pragma: no mutate
     return kept, kept_dsrs
 
 
@@ -275,7 +288,10 @@ def rank_combos(
     """
     survivors = [(mask, m) for mask, m in candidates if passes_gates(m)]
 
-    dsr_by_survivor: list[float] | None = None
+    # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): a local-variable
+    # annotation is never evaluated at runtime, so mutmut's ``| None`` → ``& None``
+    # flip is provably equivalent — nothing behavioural on this line.
+    dsr_by_survivor: list[float] | None = None  # pragma: no mutate
     if overfit is not None and survivors:
         survivors, dsr_by_survivor = _overfit_gate(candidates, survivors, overfit)
 
@@ -285,7 +301,14 @@ def rank_combos(
     z_sharpe = _zscores([_f(m.sharpe_ratio) for _, m in survivors])
     z_sortino = _zscores([_f(m.sortino_ratio) for _, m in survivors])
     z_calmar = _zscores([_f(m.calmar_ratio) for _, m in survivors])
-    z_pf = _zscores([_f(m.profit_factor) - 1.0 for _, m in survivors])
+    # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): z-scores are
+    # translation-invariant — shifting every survivor's (PF − 1.0) by the same
+    # constant leaves (v − mean)/std mathematically identical (float rounding can
+    # differ at ULP level on some pools, which cannot meaningfully reorder a
+    # leaderboard) — so mutmut's ``- 1.0`` → ``+ 1.0`` / ``- 2.0`` mutants are
+    # provably equivalent. The spec's ``Profit_Factor - 1.0`` form is kept for
+    # readability, not arithmetic effect.
+    z_pf = _zscores([_f(m.profit_factor) - 1.0 for _, m in survivors])  # pragma: no mutate
     z_recovery = _zscores([_f(m.recovery_factor) for _, m in survivors])
     z_win_wlr = _zscores([m.win_rate * _f(m.win_loss_ratio) for _, m in survivors])
     z_risk_eff = _zscores([_risk_efficiency(m) for _, m in survivors])
@@ -294,7 +317,12 @@ def rank_combos(
     # exactly when ``dsr_by_survivor`` is a list (the gate ran and was deflatable).
     if dsr_by_survivor is not None:
         z_dsr = _zscores(dsr_by_survivor)
-        dsr_contrib = [cast("OverfitGateConfig", overfit).weight * z for z in z_dsr]
+        # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): ``typing.cast``
+        # is a runtime no-op, so its type-string mutant is provably equivalent.
+        # The cast sits on its own line so the ``weight * z`` arithmetic below
+        # STAYS inside the mutation surface.
+        overfit_cfg = cast("OverfitGateConfig", overfit)  # pragma: no mutate
+        dsr_contrib = [overfit_cfg.weight * z for z in z_dsr]
     else:
         dsr_contrib = [0.0] * len(survivors)
 

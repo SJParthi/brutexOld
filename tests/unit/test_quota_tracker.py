@@ -28,6 +28,7 @@ from brutex.orchestrator.quota_tracker import (
     DailyQuotaExceeded,
     DailyQuotaTracker,
     QuotaInvariantError,
+    _default_quota_path,
 )
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -105,6 +106,26 @@ class TestConstruction:
             assert nested.parent.exists()
         finally:
             tracker.close()
+
+    def test_default_quota_path_is_per_user_home(self) -> None:
+        """The default LMDB path is the MIGRATION.md item-91 location.
+
+        Pure path construction — no LMDB env is opened. Pins the
+        per-user (NOT per-run) persistence convention
+        (DEC-ORCH-STRICT-GATES-001 standalone-gap closure).
+        """
+        assert _default_quota_path() == Path.home() / ".brutex" / "quota" / "quota.lmdb"
+
+    def test_close_before_env_assignment_is_safe(self) -> None:
+        """``close()`` no-ops when ``_env`` was never assigned.
+
+        Mirrors the failure mode close() defends against: __post_init__
+        raising BEFORE the LMDB env exists (e.g. the daily_limit
+        ValueError) followed by a defensive close() in caller cleanup
+        (DEC-ORCH-STRICT-GATES-001 standalone-gap closure).
+        """
+        tracker = DailyQuotaTracker.__new__(DailyQuotaTracker)
+        tracker.close()  # must not raise — getattr falls back to None
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -391,6 +412,46 @@ class TestThresholds:
         finally:
             tracker2.close()
 
+    def test_no_persisted_state_returns_empty(self, tmp_path: Path) -> None:
+        """A fresh tracker (zero acquires) reports no crossings.
+
+        Covers the persisted-is-None early return (quota_tracker.py:362,
+        DEC-ORCH-STRICT-GATES-001 standalone-gap closure).
+        """
+        tracker = DailyQuotaTracker(
+            daily_limit=10,
+            store_path=tmp_path / "quota.lmdb",
+            clock=_make_static_clock(datetime(2026, 5, 18, 9, 15, tzinfo=_IST)),
+        )
+        try:
+            assert tracker.newly_crossed_thresholds() == []
+        finally:
+            tracker.close()
+
+    def test_stale_persisted_day_returns_empty(self, tmp_path: Path) -> None:
+        """Yesterday's persisted count reports no crossings today.
+
+        The read-only query must not fire thresholds against a stale
+        day — rollover happens in acquire_or_raise, never here
+        (quota_tracker.py:366, DEC-ORCH-STRICT-GATES-001 gap closure).
+        """
+        clock = _make_clock(
+            [
+                datetime(2026, 5, 18, 23, 50, tzinfo=_IST),  # acquire (day 1)
+                datetime(2026, 5, 19, 9, 15, tzinfo=_IST),  # query (day 2)
+            ]
+        )
+        tracker = DailyQuotaTracker(
+            daily_limit=10,
+            store_path=tmp_path / "quota.lmdb",
+            clock=clock,
+        )
+        try:
+            tracker.acquire_or_raise()
+            assert tracker.newly_crossed_thresholds() == []
+        finally:
+            tracker.close()
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Corruption guards — Agent 2 §D
@@ -448,6 +509,50 @@ class TestCorruptionGuards:
         clock = _make_static_clock(datetime(2026, 5, 18, 9, 15, tzinfo=_IST))
         with pytest.raises(QuotaInvariantError):
             DailyQuotaTracker(daily_limit=10, store_path=path, clock=clock)
+
+    @pytest.mark.parametrize(
+        ("payload", "detail"),
+        [
+            pytest.param(b"[1,2]", "not a dict", id="json-array-not-dict"),
+            pytest.param(b'{"date":5,"count":1}', "date is not a string", id="date-not-str"),
+            pytest.param(
+                b'{"date":"2026-05-18","count":"5"}', "count is not an int", id="count-str"
+            ),
+            pytest.param(
+                b'{"date":"2026-05-18","count":true}', "count is not an int", id="count-bool"
+            ),
+            pytest.param(b'{"date":"18/05/2026","count":1}', "not ISO-format", id="date-not-iso"),
+        ],
+    )
+    def test_schema_violation_payloads_raise(
+        self, tmp_path: Path, payload: bytes, detail: str
+    ) -> None:
+        """Every remaining documented schema deviation raises the guard.
+
+        Completes the on-disk tamper matrix (Agent 2 §D): non-dict JSON,
+        non-string date, non-int count (str AND the bool look-alike —
+        ``isinstance(True, int)`` is True in Python), non-ISO date
+        (quota_tracker.py:416/426/430/437-438,
+        DEC-ORCH-STRICT-GATES-001 standalone-gap closure). ``str(exc)``
+        stays the categorical safe message; the specific cause lives in
+        the detailed message (``args[0]``) for local debugging only.
+        """
+        import lmdb
+
+        path = tmp_path / "quota.lmdb"
+        path.mkdir(parents=True, exist_ok=True)
+        env = lmdb.open(str(path), map_size=1024 * 1024, subdir=True, create=True)
+        try:
+            with env.begin(write=True) as txn:
+                txn.put(b"quota", payload)
+        finally:
+            env.close()
+
+        clock = _make_static_clock(datetime(2026, 5, 18, 9, 15, tzinfo=_IST))
+        with pytest.raises(QuotaInvariantError) as exc_info:
+            DailyQuotaTracker(daily_limit=10, store_path=path, clock=clock)
+        assert str(exc_info.value) == "Persisted quota state is corrupt or malformed"
+        assert detail in str(exc_info.value.args[0])
 
 
 # ────────────────────────────────────────────────────────────────────────

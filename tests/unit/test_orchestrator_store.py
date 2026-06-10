@@ -25,6 +25,8 @@ from brutex.orchestrator.store import (
     StoreError,
     StoreKeyError,
     WorkItemStore,
+    _deserialize_item,
+    _serialize_item,
 )
 
 # ────────────────────────────────────────────────────────────────────────
@@ -118,6 +120,42 @@ class TestOpen:
             s.put(_make_item())
         with pytest.raises(StoreError, match="closed"):
             s.get(IngestPhase.A_INSTRUMENTS, _make_hash("x"))
+
+    def test_every_remaining_operation_after_close_raises(self, store_path: Path) -> None:
+        """EVERY public read/write path guards the closed store.
+
+        Complements ``test_operations_after_close_raise`` (put/get) with
+        the five remaining guard sites — put_many, maybe_seen_terminal,
+        iter_phase, count_phase, delete_phase
+        (DEC-ORCH-STRICT-GATES-001 standalone-gap closure).
+        """
+        s = WorkItemStore.open(store_path)
+        s.close()
+        with pytest.raises(StoreError, match="closed"):
+            s.put_many([_make_item()])
+        with pytest.raises(StoreError, match="closed"):
+            s.maybe_seen_terminal(IngestPhase.A_INSTRUMENTS, _make_hash("x"))
+        with pytest.raises(StoreError, match="closed"):
+            # iter_phase is a generator — the guard fires on first pull.
+            list(s.iter_phase(IngestPhase.A_INSTRUMENTS))
+        with pytest.raises(StoreError, match="closed"):
+            s.count_phase(IngestPhase.A_INSTRUMENTS)
+        with pytest.raises(StoreError, match="closed"):
+            s.delete_phase(IngestPhase.A_INSTRUMENTS)
+
+    def test_flush_syncs_open_store_and_noops_when_closed(self, store_path: Path) -> None:
+        """``flush()`` syncs an open env and silently no-ops post-close.
+
+        The post-close call must NOT raise — flush is the one maintenance
+        path that degrades gracefully (belt-and-braces durability before a
+        pause must never crash a shutdown sequence).
+        """
+        s = WorkItemStore.open(store_path)
+        s.put(_make_item(hash_seed="flushed"))
+        s.flush()
+        s.flush(force=True)
+        s.close()
+        s.flush()  # no raise — closed flush is a no-op
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -374,6 +412,31 @@ class TestCorruption:
 
         with WorkItemStore.open(store_path) as s, pytest.raises(StoreCorruptionError):
             s.get(IngestPhase.A_INSTRUMENTS, "00" * CONTENT_HASH_BYTES)
+
+    def test_missing_required_fields_raises(self) -> None:
+        """Valid JSON lacking required WorkItem fields names the gaps.
+
+        Covers the schema-drift guard (store.py:174) — a value written by
+        an OLDER WorkItem schema deserialises into a clear
+        StoreCorruptionError, not a KeyError
+        (DEC-ORCH-STRICT-GATES-001 standalone-gap closure).
+        """
+        with pytest.raises(StoreCorruptionError, match="missing required fields"):
+            _deserialize_item(b'{"item_id": "only-one-field"}')
+
+    def test_malformed_field_value_raises(self) -> None:
+        """A field that fails enum/timestamp coercion raises corruption.
+
+        Covers the malformed-field guard (store.py:191-192): all required
+        keys present but ``phase`` is not a valid IngestPhase value
+        (DEC-ORCH-STRICT-GATES-001 standalone-gap closure).
+        """
+        import json
+
+        good = json.loads(_serialize_item(_make_item()))
+        good["phase"] = "NOT_A_PHASE"
+        with pytest.raises(StoreCorruptionError, match="malformed field"):
+            _deserialize_item(json.dumps(good).encode("utf-8"))
 
 
 # ────────────────────────────────────────────────────────────────────────
