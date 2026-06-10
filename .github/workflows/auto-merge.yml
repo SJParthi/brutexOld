@@ -115,7 +115,22 @@ jobs:
           set -euo pipefail
           if [[ -n "${MANUAL_PR}" ]]; then
             echo "Using manually-specified PR #${MANUAL_PR}"
+            # DEC-AUTOMERGE-CLEAN-STRICT-001: the original dispatch path
+            # emitted ONLY pr_number, so trust-check read empty
+            # AUTHOR/HEAD_REF/IS_DRAFT and always fell through to
+            # trusted=false — the documented "manual escape hatch" could
+            # never actually merge anything (dead code, found by the F-4
+            # hostile review). Resolve the PR's metadata here so the SAME
+            # trust + all-green + mergeability gates apply to manual runs;
+            # a bad PR number fails the step visibly (set -e).
+            meta=$(gh pr view "${MANUAL_PR}" --repo "${REPO}" \
+              --json author,headRefName,isDraft \
+              --jq '[.author.login, .headRefName, (.isDraft|tostring)] | @tsv')
+            IFS=$'\t' read -r author head_ref is_draft <<<"${meta}"
             echo "pr_number=${MANUAL_PR}" >> "$GITHUB_OUTPUT"
+            echo "author=${author}" >> "$GITHUB_OUTPUT"
+            echo "head_ref=${head_ref}" >> "$GITHUB_OUTPUT"
+            echo "is_draft=${is_draft}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -242,7 +257,47 @@ jobs:
             echo "green=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "all checks green + CI OK success on ${HEAD_SHA}"
+          # DEC-AUTOMERGE-CLEAN-STRICT-001 (2026-06-10): close the
+          # EXISTENCE variant of the #366 hole. The all-green rules above
+          # are conclusion-based and existence-blind: on PR #571 (head
+          # 01f60e82) the push-event CI run completed green at 19:56:12 and
+          # this gate merged at 19:56:26 while the pull_request-event CI
+          # run — the one that actually enforces the PR-only gates — was
+          # still IN PROGRESS (completed 19:57:03): its "Unit tests +
+          # coverage (100% gate)" check was pending and its "CI OK
+          # (aggregate gate)" check run DID NOT EXIST YET, so "every CI OK
+          # instance is success" passed vacuously (auto-merge run
+          # 27232004649; CI runs 27231261106 push / 27231295196
+          # pull_request). FIX (no verdict = no merge): require every
+          # push/pull_request CI workflow run on the head to be COMPLETED,
+          # and at least one pull_request-event CI run to be SUCCESS.
+          # Refusing on an in-progress CI run is SELF-HEALING, not
+          # stranding: that run's own completion re-fires this workflow
+          # (workflow_run watches "CI"), unlike third-party/nightly checks
+          # whose completion fires nothing — which is why this rule
+          # inspects ONLY the CI workflow's runs (an offline M4-Pro
+          # bench runner must never strand a merge, DEC-M4PRO-PR-TRIGGER-001).
+          ci_runs=$(gh api "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${HEAD_SHA}&per_page=100" \
+            --jq ".workflow_runs[] | select(.head_sha == \"${HEAD_SHA}\")
+                  | select(.event == \"push\" or .event == \"pull_request\")
+                  | [.status, (.conclusion // \"none\"), .event] | @tsv")
+          printf 'CI workflow runs on %s:\n%s\n' "${HEAD_SHA}" "${ci_runs}"
+          incomplete=$(printf '%s\n' "${ci_runs}" | awk -F'\t' \
+            '$1 != "completed" && NF > 0 {print $3" = "$1}')
+          if [[ -n "${incomplete}" ]]; then
+            echo "::notice::refusing merge — CI run(s) still running on ${HEAD_SHA} (their completion re-triggers this gate):"
+            printf '%s\n' "${incomplete}"
+            echo "green=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pr_verdicts=$(printf '%s\n' "${ci_runs}" | awk -F'\t' \
+            '$3 == "pull_request" && $2 == "success" {n += 1} END {print n + 0}')
+          if [[ "${pr_verdicts}" -lt 1 ]]; then
+            echo "::notice::no completed+success pull_request-event CI run on ${HEAD_SHA} — the PR-only gates have no green verdict; skipping"
+            echo "green=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "all checks green + CI OK success + all CI runs complete (incl. a green pull_request run) on ${HEAD_SHA}"
           echo "green=true" >> "$GITHUB_OUTPUT"
 
       - name: Verify PR is mergeable (no conflict / not behind base)
@@ -254,31 +309,77 @@ jobs:
           PR_NUMBER: ${{ steps.find-pr.outputs.pr_number }}
         # DEC-AUTOMERGE-SAFETY-001 (G1): the previous version merged on a
         # green `CI OK` check alone and NEVER consulted GitHub's own
-        # mergeability. docs/MERGE_READINESS_GUARANTEE.md §3 (line 75)
-        # mandates `mergeable_state == clean` before merge. The 5-agent
-        # verification (DEC-WORKSPACE-VERIFY-001, MIGRATION.md #398) found
-        # this gap: PR #302 reached a `dirty` (conflicting) state with a
-        # green CI-OK and would have been auto-merged over the conflict.
+        # mergeability. The 5-agent verification (DEC-WORKSPACE-VERIFY-001,
+        # MIGRATION.md #398) found this gap: PR #302 reached a `dirty`
+        # (conflicting) state with a green CI-OK and would have been
+        # auto-merged over the conflict.
         #
-        # Honest envelope (Golden Rule #10): a strict `clean` requirement
-        # is only reachable once server-side branch protection (G2) is
-        # applied — without it GitHub reports `unstable` for every PR
-        # (no required checks server-side), which is the NORMAL,
-        # safe-to-merge state here. So this gate REJECTS the genuinely
-        # dangerous states — `dirty` (merge conflict) and `behind` (base
-        # advanced; squash would merge a stale tree) — and any
-        # `mergeable == false`, while allowing `clean` / `unstable` /
-        # `has_hooks`. `mergeable`/`mergeable_state` are computed async by
-        # GitHub, so poll until non-null. Once G2 lands, tighten the
-        # allow-list to `clean` only (tracked in the same DEC-ID).
+        # DEC-AUTOMERGE-CLEAN-STRICT-001 (2026-06-10, DEC-WORKSPACE-VERIFY-002
+        # follow-up F-4): this gate's allow-list is the charter's documented
+        # pre-G2 envelope — docs/MERGE_READINESS_GUARANTEE.md §4 item 5.
+        # Strict `clean` is the target once server-side branch protection
+        # (G2) lands; TODAY it would deadlock: on the ready_for_review
+        # path this workflow's OWN `Auto-merge on green CI` check run
+        # structurally ALWAYS sits `pending` on the PR head while this
+        # step evaluates (visible in the ci-check listing), so that path
+        # can NEVER observe `clean`; on the workflow_run path the
+        # concurrent duplicate CI run is typically still finishing.
+        # Run-log evidence (2026-06-03→06-10 sample, 30 verified gate
+        # executions): `unstable` 21 — including EVERY ready_for_review
+        # -path merge (e.g. #572 run 27248690518) and a merge over an
+        # in-flight duplicate CI run (#571 run 27232004649); `clean` only
+        # 4 of 18 verified merges, ALL workflow_run-path after every check
+        # completed (e.g. #567 run 27216794460); `dirty`/`behind`/
+        # `blocked`/`has_hooks` never observed. Requiring `clean` would
+        # deterministically deadlock the ready_for_review path and refuse
+        # most workflow_run-path merges with NO guaranteed later trigger
+        # (an advisory check's completion fires nothing) — stranding green
+        # PRs, the #304 failure mode DEC-AUTOMERGE-RACE-FIX-001 removed.
+        #
+        # So this gate is a DENYLIST: it REJECTS the genuinely dangerous
+        # states — `dirty` (merge conflict), `behind` (base advanced;
+        # squash would merge a stale tree), `blocked`, `unknown` — and any
+        # `mergeable == false`; every other value passes — `clean`,
+        # `unstable` (the pre-G2 normal), and structurally also `has_hooks`
+        # (pre-receive hooks are GitHub Enterprise Server only, so that
+        # state is not expected on github.com) or any future value. Red
+        # checks cannot reach this step: the ci-check above refuses ANY
+        # failing check run, requires EVERY `CI OK (aggregate gate)`
+        # instance to be success (DEC-AUTOMERGE-ALLGREEN-001), and — since
+        # DEC-AUTOMERGE-CLEAN-STRICT-001 — requires every push/pull_request
+        # CI run on the head to be COMPLETED with a green pull_request
+        # verdict. An allowed `unstable` therefore carries only pending
+        # NON-CI checks: this workflow's own in-progress check run and/or
+        # advisory third-party/nightly checks (tolerated by design — their
+        # completion fires no auto-merge trigger, and an offline self-hosted
+        # runner must never strand a merge; if they FAIL, the failing-check
+        # filter refuses). Known blind spot, disclosed in the charter §4.5:
+        # legacy commit STATUSES (the pre-check-runs API) are invisible to
+        # ci-check; nothing in this repo's CI posts them today.
+        # `mergeable`/`mergeable_state` are computed async by GitHub, so
+        # poll until non-null. Once G2 lands, tighten the allow-list to
+        # `clean` only (ratchet tracked under DEC-AUTOMERGE-CLEAN-STRICT-001;
+        # update the charter §4.5 envelope in the same PR — the redteam
+        # suite pins workflow ↔ charter consistency).
         run: |
           set -euo pipefail
           mergeable=""
           state=""
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            # DEC-AUTOMERGE-CLEAN-STRICT-001: default null fields to the
+            # STRING "null" in jq. The old `[.mergeable, .mergeable_state]`
+            # rendered an uncomputed `mergeable: null` as an EMPTY first
+            # TSV field; `read -r` strips the leading tab, FIELD-SHIFTING
+            # `mergeable_state`'s "unknown" into ${mergeable} — so the
+            # poll loop broke on attempt 1 and refused instantly with the
+            # misleading "refusing to merge over a conflict", and the
+            # DEC-AUTOMERGE-RACE-FIX-001 null-deferral below was DEAD CODE
+            # (observed on every refusal in the 06-03→06-10 run-log sample:
+            # `mergeable=unknown mergeable_state=` — runs 26870881771,
+            # 27009685623, 27064096938, 27093267053).
             read -r mergeable state < <(
               gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
-                --jq '[.mergeable, .mergeable_state] | @tsv'
+                --jq '[(.mergeable // "null"), (.mergeable_state // "null")] | @tsv'
             )
             echo "attempt ${attempt}: mergeable=${mergeable:-null} mergeable_state=${state:-null}"
             if [[ "${mergeable}" != "null" && -n "${mergeable}" ]]; then

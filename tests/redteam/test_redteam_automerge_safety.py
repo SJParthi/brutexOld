@@ -27,6 +27,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 AUTO_MERGE_YML = REPO_ROOT / ".github" / "workflows" / "auto-merge.yml"
+CHARTER_MD = REPO_ROOT / "docs" / "MERGE_READINESS_GUARANTEE.md"
 
 
 def _load_jobs(path: Path) -> dict[str, Any]:
@@ -56,9 +57,8 @@ def test_conv_commits_result_is_checked_in_the_aggregate_loop() -> None:
     # The ci-ok step builds a `for result in ...` list of `needs.X.result`
     # expressions; conv-commits must be one of them, else it sits in
     # needs: but its failure is never inspected.
-    assert "needs.conv-commits.result" in ci_text, (
-        "conv-commits result not evaluated in the ci-ok aggregate loop"
-    )
+    msg = "conv-commits result not evaluated in the ci-ok aggregate loop"
+    assert "needs.conv-commits.result" in ci_text, msg
 
 
 def test_auto_merge_has_a_mergeability_gate() -> None:
@@ -78,13 +78,11 @@ def test_auto_merge_rejects_dirty_and_behind_states() -> None:
     text = AUTO_MERGE_YML.read_text(encoding="utf-8")
     # The gate rejects the genuinely dangerous mergeable_state values.
     for forbidden in ("dirty", "behind", "blocked"):
-        assert forbidden in text, (
-            f"auto-merge no longer guards against mergeable_state={forbidden!r}"
-        )
+        msg = f"auto-merge no longer guards against mergeable_state={forbidden!r}"
+        assert forbidden in text, msg
     # And it must require mergeable == true.
-    assert 'mergeable" != "true"' in text or 'mergeable}" != "true' in text, (
-        "auto-merge no longer requires GitHub mergeable == true"
-    )
+    msg = "auto-merge no longer requires GitHub mergeable == true"
+    assert 'mergeable" != "true"' in text or 'mergeable}" != "true' in text, msg
 
 
 def test_merge_step_depends_on_the_mergeability_gate() -> None:
@@ -97,9 +95,8 @@ def test_merge_step_depends_on_the_mergeability_gate() -> None:
         if isinstance(s, dict) and str(s.get("name", "")).startswith("Squash-merge")
     )
     guard = str(merge_step.get("if", ""))
-    assert "mergeable-check.outputs.safe == 'true'" in guard, (
-        "the squash-merge step is not gated on the mergeability check — G1 fix is bypassable"
-    )
+    msg = "the squash-merge step is not gated on the mergeability gate (G1 bypass)"
+    assert "mergeable-check.outputs.safe == 'true'" in guard, msg
 
 
 def test_auto_merge_accepts_push_event_ci_completions() -> None:
@@ -151,11 +148,139 @@ def test_ci_check_requires_all_green_not_head_1() -> None:
         "run can mask a red pull_request run (regression of the #366 merge hole)"
     )
     # (a) refuse on ANY failing check conclusion (no green = no merge).
-    assert "failure" in run and "timed_out" in run, (
-        "ci-check no longer blocks on failing check conclusions (no green = no merge)"
-    )
+    msg = "ci-check no longer blocks on failing check conclusions (no green)"
+    assert "failure" in run and "timed_out" in run, msg
     # (b) require EVERY CI OK (aggregate gate) instance to be success.
     assert "CI OK (aggregate gate)" in run and "grep -qvx success" in run, (
         "ci-check no longer requires EVERY CI OK run to be success — a single "
         "green run could mask a red one"
     )
+
+
+def test_ci_check_requires_all_ci_runs_complete_with_pr_verdict() -> None:
+    """DEC-AUTOMERGE-CLEAN-STRICT-001: the EXISTENCE variant of the #366
+    hole. "Every CI OK instance is success" is conclusion-based and
+    existence-blind: PR #571 merged while its pull_request-event CI run —
+    the one enforcing the PR-only gates — was still in flight, because
+    that run's ``CI OK`` check run did not exist yet (auto-merge run
+    27232004649; CI runs 27231261106 push / 27231295196 pull_request,
+    completed 37s AFTER the merge). ci-check must therefore (a) list the
+    CI workflow's runs for the PR's current head, (b) refuse while any
+    push/pull_request run is incomplete (self-healing: that run's own
+    completion re-triggers the workflow), and (c) require a
+    completed+success pull_request-event run to exist."""
+    jobs = _load_jobs(AUTO_MERGE_YML)
+    steps = jobs["auto-merge"]["steps"]
+    ci_step = next(s for s in steps if isinstance(s, dict) and str(s.get("id", "")) == "ci-check")
+    run = str(ci_step.get("run", ""))
+    assert "actions/workflows/ci.yml/runs?head_sha=" in run, (
+        "ci-check no longer lists the CI workflow runs for the head — the "
+        "in-flight-CI existence hole (#571 merge-over-pending) is open again"
+    )
+    msg = "ci-check no longer refuses while a CI run is incomplete on the head"
+    assert "still running" in run, msg
+    assert "awk" in run and '"pull_request"' in run and '"success"' in run, (
+        "ci-check no longer requires a completed+success pull_request-event "
+        "CI run — the PR-only gates can be bypassed by a green push run again"
+    )
+
+
+def test_mergeable_null_is_parsed_without_field_shift() -> None:
+    """DEC-AUTOMERGE-CLEAN-STRICT-001: an uncomputed ``mergeable: null``
+    rendered as an EMPTY first TSV field; ``read -r`` stripped the leading
+    tab and FIELD-SHIFTED ``mergeable_state``'s "unknown" into
+    ``${mergeable}`` — the poll loop broke on attempt 1, the gate refused
+    instantly with a misleading conflict message, and the
+    DEC-AUTOMERGE-RACE-FIX-001 null-deferral was dead code (every sampled
+    refusal echoed ``mergeable=unknown mergeable_state=``). The jq
+    expression must default BOTH fields to the string "null" so the poll
+    loop and the deferral behave as designed."""
+    jobs = _load_jobs(AUTO_MERGE_YML)
+    steps = jobs["auto-merge"]["steps"]
+    m_step = next(
+        s for s in steps if isinstance(s, dict) and str(s.get("id", "")) == "mergeable-check"
+    )
+    run = str(m_step.get("run", ""))
+    assert '(.mergeable // "null")' in run and '(.mergeable_state // "null")' in run, (
+        "mergeable-check lost the null-defaulting jq — an uncomputed "
+        "mergeable field-shifts and instantly refuses again (dead deferral)"
+    )
+
+
+def test_workflow_dispatch_path_resolves_pr_metadata() -> None:
+    """DEC-AUTOMERGE-CLEAN-STRICT-001: the original ``workflow_dispatch``
+    path emitted ONLY ``pr_number``, so trust-check read empty
+    AUTHOR/HEAD_REF/IS_DRAFT and always fell through to ``trusted=false``
+    — the documented "manual escape hatch" was dead code (zero dispatch
+    runs in history). The MANUAL_PR branch must resolve the PR's
+    author/headRefName/isDraft so manual runs pass through the SAME
+    trust + all-green + mergeability gates."""
+    jobs = _load_jobs(AUTO_MERGE_YML)
+    steps = jobs["auto-merge"]["steps"]
+    find_step = next(s for s in steps if isinstance(s, dict) and str(s.get("id", "")) == "find-pr")
+    run = str(find_step.get("run", ""))
+    assert 'gh pr view "${MANUAL_PR}"' in run and "author,headRefName,isDraft" in run, (
+        "find-pr's workflow_dispatch branch no longer resolves PR metadata — "
+        "the manual escape hatch is dead code again (trusted=false on empty "
+        "AUTHOR)"
+    )
+
+
+def test_auto_merge_refusal_list_includes_unknown() -> None:
+    """DEC-AUTOMERGE-CLEAN-STRICT-001: the full refusal case pattern is
+    ``dirty|behind|blocked|unknown`` — the charter §4.5 pre-G2 envelope. A
+    silent drop of ``unknown`` (an uncomputed state) would let a merge
+    proceed on a mergeability GitHub never finished evaluating."""
+    text = AUTO_MERGE_YML.read_text(encoding="utf-8")
+    assert "dirty|behind|blocked|unknown)" in text, (
+        "auto-merge's mergeable_state refusal case-pattern no longer matches "
+        "the charter §4.5 envelope (dirty|behind|blocked|unknown)"
+    )
+
+
+def test_mergeable_state_envelope_is_pinned_workflow_to_charter() -> None:
+    """DEC-AUTOMERGE-CLEAN-STRICT-001 (DEC-WORKSPACE-VERIFY-002 follow-up
+    F-4): the workflow's pre-G2 ``mergeable_state`` allowance (``clean`` /
+    ``unstable`` / ``has_hooks``) and the charter's §4.5 envelope must move
+    TOGETHER. The 2026-06-10 verification found the workflow allowing
+    ``unstable``/``has_hooks`` while the charter demanded strict ``clean``
+    — every sampled auto-merge (PRs #569/#571/#572) had in fact merged
+    with ``mergeable_state=unstable``, so the charter was amended to
+    document the allowance rather than the gate tightened (which would
+    deadlock: the gate's own pending check run keeps the head's rollup
+    non-passing). This test fails if EITHER side is edited without the
+    other: both must cite the DEC-ID, and the charter must document the
+    tolerated states the workflow actually allows."""
+    workflow = AUTO_MERGE_YML.read_text(encoding="utf-8")
+    charter = CHARTER_MD.read_text(encoding="utf-8")
+    assert "DEC-AUTOMERGE-CLEAN-STRICT-001" in workflow, (
+        "auto-merge.yml no longer cites DEC-AUTOMERGE-CLEAN-STRICT-001 — the "
+        "mergeable_state allowance lost its link to the charter envelope"
+    )
+    assert "DEC-AUTOMERGE-CLEAN-STRICT-001" in charter, (
+        "the charter no longer documents the DEC-AUTOMERGE-CLEAN-STRICT-001 "
+        "envelope — the workflow's allowance is undocumented law again "
+        "(regression of DEC-WORKSPACE-VERIFY-002 follow-up F-4)"
+    )
+    for state in ("unstable", "has_hooks"):
+        assert state in charter, (
+            f"the charter no longer documents the tolerated "
+            f"mergeable_state={state!r} — workflow and charter have drifted "
+            "apart again"
+        )
+
+
+def test_strict_clean_ratchet_is_recorded_on_both_surfaces() -> None:
+    """DEC-AUTOMERGE-CLEAN-STRICT-001: the pre-G2 allowance is a RATCHET,
+    not a license — both the workflow and the charter must keep the
+    commitment to tighten the allow-list to ``clean`` only once server-side
+    branch protection (G2) lands. Dropping the ratchet from either surface
+    silently converts the honest envelope into a permanent loosening."""
+    workflow = AUTO_MERGE_YML.read_text(encoding="utf-8")
+    charter = CHARTER_MD.read_text(encoding="utf-8")
+    for surface, text in (("auto-merge.yml", workflow), ("charter", charter)):
+        assert "tighten the allow-list to" in text and "`clean` only" in text, (
+            f"the {surface} lost the G2 strict-clean ratchet — the pre-G2 "
+            "mergeable_state allowance must stay a tracked ratchet, not "
+            "become permanent"
+        )
