@@ -59,6 +59,18 @@ ui = [
     "fastapi>=0.110,<1.0",
     "uvicorn[standard]>=0.29,<1.0",
 ]
+# DEC-STAGE3-OPTIMIZE-EXTRA-001 (ADR-0007 condition 9, Stage-3 slice 1): the
+# BIPOP-CMA-ES refinement optimizer (pycma — PyPI name `cma`, numpy-only).
+# EXACT pin, deliberately violating the DEC-P0-012 "always latest" range
+# convention: optimizer version bumps silently change search trajectories,
+# and the refinement-run identity is blake3(... ‖ pycma/numpy versions), so
+# a bump invalidates every cached refinement run. Bumping is a deliberate,
+# decision-ID'd act; Renovate auto-bumps are carved out in renovate.json
+# (mirrors the python-data-lake lock-step precedent). Optuna is NOT adopted
+# (ADR-0007 condition 1 — the TPE outer layer selects nothing).
+optimize = [
+    "cma==3.4.0",
+]
 # DEC-DHAN-FINALIZE-001 (2026-06-01): the `groww` optional extra (growwapi +
 # pyotp) was REMOVED with the Groww adapter — BruteX is Dhan-only. Dhan auth is
 # a manual access-token + client-id (no vendor SDK, no TOTP dep); the Dhan
