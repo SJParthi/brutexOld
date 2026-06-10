@@ -18,7 +18,11 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-03 (DEC-SHARED-CORE-001 Phase 2b, MIGRATION.md
+_Last updated: 2026-06-10 (DEC-WORKSPACE-VERIFY-002, MIGRATION.md #609 —
+§6 `dhan/constants.py` line citations refreshed after the 5-agent
+workspace verification found 4 rows drifted by 7 lines; §1/§3 active
+branch refreshed). Earlier: 2026-06-03 (DEC-SHARED-CORE-001 Phase 2b,
+MIGRATION.md
 #441 — BruteX's 52-condition vocab now delegates to the shared
 `rust/trading-core/` crate; §1/§5 reconciled). Earlier: 2026-06-01
 (DEC-DASHBOARD-OMIT-AUDIT-001 — vendor docs reconciled Groww → Dhan
@@ -56,7 +60,7 @@ Track 1 spec locked after 4-agent hostile-review pass._
   placement, portfolio, funds, multi-user SaaS. (Per DEC-P0-063 the LAKE
   additionally ingests F&O single-stock spot+options as REFERENCE_ONLY;
   the BRUTE-FORCE ENGINE remains the 3 indexes — see §2 Rule 3.)
-- **Active branch:** `claude/automated-merge-ready-pipeline-IpP85`
+- **Active branch:** `claude/sharp-mendel-lgbckj`
 
 ---
 
@@ -207,7 +211,7 @@ Track 1 spec locked after 4-agent hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/automated-merge-ready-pipeline-IpP85`
+- **Active feature branch:** `claude/sharp-mendel-lgbckj`
 - **Never push to `main`** without explicit user instruction.
 - **Commit style:** Conventional Commits.
   - `docs(track1): add 52-condition vocabulary appendix`
@@ -361,8 +365,8 @@ bruteX/
 | Historical depth — daily | **back to instrument inception** | `dhan-ref/05...:84` |
 | Candle intervals (Dhan supports) | `"1","5","15","25","60"` (minutes) | `dhan/constants.py:60`; `dhan-ref/05...:43` |
 | Candle interval — Track 1 spot+options | **`"1"` (1-minute) ONLY** (DEC-DHAN-1M-ONLY-001; other TFs resampled) | `dhan/constants.py:63,66`; `dhan-ref/05...:89-91` |
-| Chunk window — intraday | **90 days per call** (single cap, no tiering) | `dhan/constants.py:93`; `dhan-ref/05...:83` |
-| Chunk window — options | **30 days per call** | `dhan/constants.py:96`; `dhan-ref/06...:18` |
+| Chunk window — intraday | **90 days per call** (single cap, no tiering) | `dhan/constants.py:100`; `dhan-ref/05...:83` |
+| Chunk window — options | **30 days per call** | `dhan/constants.py:103`; `dhan-ref/06...:18` |
 | Candle response shape — spot | **Columnar parallel arrays** `{open[],high[],low[],close[],volume[],timestamp[],open_interest[]}` (NOT row-arrays) | `dhan/parser.py:5-15`; `dhan-ref/05...:54-63` |
 | Candle response shape — options | **Per-side columnar** `{ce:{iv[],oi[],strike[],spot[],open[],...}, pe:null}` (null side allowed) | `dhan-ref/06...:54-62` |
 | **Price unit** | **RUPEES (float)** from Dhan — kept as exact `Decimal` rupees through the lake (Parquet `Float64`); int64 paisa is the cost/display unit only, NOT price storage (DEC-PAISA-DOC-RECONCILE-001) | `data/candle_fields.py` (`to_price`→`Decimal`); `data/models.py:142-144`; `dhan-ref/05...:72-73` |
@@ -371,7 +375,7 @@ bruteX/
 | Options strike addressing | **Relative-to-spot ATM±N** (ATM±10 index near-expiry, ATM±3 other), NOT absolute strikes | `dhan-ref/06...:43-44` |
 | Options instrument type | **`CALL` / `PUT`** (NOT `CE`/`PE`) | `dhan/constants.py:79`; `dhan-ref/06...:45` |
 | Exchanges | NSE, BSE, MCX | `dhan-ref/09...:34` |
-| Rate limit — Data APIs | **5 r/s, 100,000/day** (single Data bucket) | `dhan/constants.py:86-89`; `dhan-ref/01...:22-26` |
+| Rate limit — Data APIs | **5 r/s, 100,000/day** (single Data bucket) | `dhan/constants.py:93,96`; `dhan-ref/01...:22-26` |
 | Adapter effective cap | **Adaptive [3..5] r/s** (token bucket, step-down on 429) | `dhan/rate_control.py:1-153` + this file §2 rule 6 |
 | Data-API bucket isolation | **UNVERIFIED** — no explicit sharing rule in docs; treat 5 r/s as binding | `dhan-ref/01...:49-57` |
 | Auth — default approach | **Manual web-generated token + `RenewToken`** (operator 2026-05-31); header `access-token` (JWT, 24h) + `dhanClientId`. `RenewToken` is an **HTTP GET — headers-only, NO body** (DEC-DHAN-RENEWTOKEN-GET-001; source: official SDK `dhan-oss/DhanHQ-py` `src/dhanhq/auth.py` `requests.get(url, headers=headers)`) — a POST+body is rejected `HTTP 400 DH-905` | `dhan/auth.py`; `dhan/constants.py:53,56`; `dhan-ref/02...:19-35,67-72` |
