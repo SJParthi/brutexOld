@@ -1260,6 +1260,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
                 stock_count=summary["stock_count"],
                 legs_present=store.has_derivative_legs(),
                 stale_economics=store.has_placeholder_stock_economics(),
+                stale_eligibility=store.has_stale_option_eligibility(),
             ):
                 counts = load_instrument_master(store)
                 _log.info(
@@ -2108,7 +2109,10 @@ def _data_snapshot_hash(  # pragma: no cover — cli-omitted; pure helper tested
             )
         else:
             parts.append(f"{symbol}|{interval}|0")
-    return blake3.blake3("\n".join(parts).encode("utf-8")).hexdigest()
+    # str(...) keeps this typed `str` even where the blake3 wheel (and its
+    # stubs) is absent and the import degrades to Any — e.g. the isolated
+    # pre-commit mypy env (hook-portability, the #575 combo.py precedent).
+    return str(blake3.blake3("\n".join(parts).encode("utf-8")).hexdigest())
 
 
 def _parse_paisa_list(raw: str) -> list[int | None]:
