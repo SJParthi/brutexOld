@@ -198,7 +198,11 @@ jobs:
         # — previously SILENTLY SKIPPED on CI via importorskip("fastapi"/"httpx")
         # — now actually RUN and gate. This closes the masking hole that let a
         # broken dashboard PR auto-merge green.
-        run: pip install -e ".[dev,data,ui]"
+        # DEC-STAGE3-OPTIMIZE-EXTRA-001: added `[optimize]` (exact-pinned pycma)
+        # so the Stage-3 optimizer pin + determinism smoke ACTUALLY RUNS on CI
+        # (importorskip would silently skip it otherwise — the same masking
+        # class the dashboard unmask closed).
+        run: pip install -e ".[dev,data,ui,optimize]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-050 (PR-K): the fno-math Rust extension is built via
         # maturin (PEP 517) at install time. ubuntu-24.04's pre-installed
