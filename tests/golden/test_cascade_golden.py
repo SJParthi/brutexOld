@@ -103,6 +103,10 @@ def test_golden_cascade() -> None:
     assert by["beta"].passed and by["beta"].composite_score == 0.0
     assert by["junk"].rejected_at is FilterStage.HARD_GATES
     assert by["junk"].composite_score is None
+    # DEC-PBO-SIDECAR-001: the measured pool PBO is now SURFACED on the report
+    # (previously computed then dropped on the pass path). Exact literal —
+    # CSCV is exhaustive (no RNG): 46 overfit logits of C(8,4)=70 splits.
+    assert rep.pool_pbo == 0.6571428571428571
 
 
 def test_golden_cascade_determinism() -> None:

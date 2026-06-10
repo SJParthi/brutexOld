@@ -28,11 +28,15 @@ swept with ``--stage3-enable`` ADDITIONALLY holds Stage-3 refined-eval rows
 (ADR-0007 condition 6) and are indistinguishable from grid rows at the row level
 — so NO per-row gate verdict is rendered (the prior unconditional ``gate=PASS``
 column would be FALSE for refined rows; stated plainly rather than implied,
-Golden Rule #10). Pure read + render — no lake, no network.
+Golden Rule #10). Pure read + render — no lake, no network; the only files read
+are the results Parquet tree and (when present) the Stage-4 cascade sidecar
+``cascade/cascade-report.json`` (DEC-PBO-SIDECAR-001), whose per-slice measured
+pool PBO is appended as an optional trailing section.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -190,6 +194,70 @@ def render_leaderboard(rows: Sequence[ResultRow]) -> str:
     return "\n".join(lines)
 
 
+def _render_sidecar_group(entry: object) -> str:
+    """Render one cascade-sidecar group line, or raise ``ValueError`` on a bad shape.
+
+    The three honest states (DEC-PBO-SIDECAR-001, hostile C7a — never flattened
+    into one dash): ``pool_pbo`` key ABSENT → a pre-sidecar report (the value was
+    never recorded); ``null`` → the filter measurably SKIPPED (pool < 2
+    candidates, series shorter than one split block, or the pool was already
+    empty at filter #5); a float → the measured COMBINED-DIRECTION pool PBO,
+    displayed fixed-width — the stored JSON value is the raw float, never
+    rounded (the ``_format_deflated`` precedent).
+    """
+    if not isinstance(entry, dict):
+        raise ValueError("group entry is not an object")
+    report = entry.get("report")
+    if not isinstance(report, dict):
+        raise ValueError("group report is not an object")
+    label = f"{entry.get('instrument', '?')} {entry.get('tf', '?')}"
+    counts = f"in={report.get('n_input', '?')} survived={report.get('n_survived', '?')}"
+    if "pool_pbo" not in report:
+        return f"  {label}  pool PBO not recorded (pre-sidecar report)  {counts}"
+    pbo = report["pool_pbo"]
+    if pbo is None:
+        return (
+            f"  {label}  pool PBO skipped (pool < 2 candidates / short series / "
+            f"pool empty at #5)  {counts}"
+        )
+    return f"  {label}  pool PBO={float(pbo):.4f}  {counts}"
+
+
+def render_cascade_sidecar(root: Path) -> str:
+    """Render the optional Stage-4 cascade sidecar section — ``""`` when absent.
+
+    Reads ``<root>/cascade/cascade-report.json`` (the path + version constants
+    are imported from :mod:`brutex.engine.cascade_wire`, the single source —
+    function-local so ``import brutex.engine`` stays lean, the ``cli`` pattern).
+    A present-but-unreadable sidecar (corrupt JSON, wrong shape, unsupported
+    version) renders a LOUD ``UNREADABLE`` section naming the path and reason —
+    never a silent skip (Golden Rule #10); the leaderboard above it still
+    renders (the sidecar is supplementary, not load-bearing).
+    """
+    from brutex.engine.cascade_wire import REPORT_VERSION, report_path
+
+    path = report_path(root)
+    if not path.is_file():
+        return ""
+    header = f"Stage-4 cascade sidecar — {path}"
+    try:
+        payload: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return f"{header}\n  UNREADABLE: {exc}"
+    if not isinstance(payload, dict) or not isinstance(payload.get("groups"), list):
+        return f"{header}\n  UNREADABLE: not a cascade report object"
+    version = payload.get("version")
+    if version != REPORT_VERSION:
+        return f"{header}\n  UNREADABLE: unsupported report version {version!r}"
+    try:
+        groups = [_render_sidecar_group(entry) for entry in payload["groups"]]
+    except ValueError as exc:
+        return f"{header}\n  UNREADABLE: {exc}"
+    if not groups:
+        return f"{header}\n  (no pooled slices)"
+    return "\n".join([header, *groups])
+
+
 def results_show_report(root: Path, *, top: int, sort_by: str = DEFAULT_SORT_BY) -> str:
     """Load the results tree under *root* and render the top-*top* winners leaderboard.
 
@@ -206,7 +274,11 @@ def results_show_report(root: Path, *, top: int, sort_by: str = DEFAULT_SORT_BY)
     -------
     str
         A self-describing header (root · file count · finalist count · sort key)
-        followed by the ranked winners table.
+        followed by the ranked winners table, then — ONLY when
+        ``<root>/cascade/cascade-report.json`` exists — the Stage-4 cascade
+        sidecar section (per-slice measured pool PBO, DEC-PBO-SIDECAR-001).
+        With no sidecar file the output is byte-identical to the pre-sidecar
+        render.
 
     Raises
     ------
@@ -227,7 +299,9 @@ def results_show_report(root: Path, *, top: int, sort_by: str = DEFAULT_SORT_BY)
         f"  (Stage-2 grid rows are gate survivors; a --stage3-enable sweep also "
         f"persists UNGATED Stage-3 refined-eval trials — no per-row gate verdict)"
     )
-    return f"{header}\n\n{render_leaderboard(leaders)}"
+    sidecar = render_cascade_sidecar(root)
+    body = f"{header}\n\n{render_leaderboard(leaders)}"
+    return f"{body}\n\n{sidecar}" if sidecar else body
 
 
 __all__ = [
@@ -235,6 +309,7 @@ __all__ = [
     "SORT_ALIASES",
     "discover_result_files",
     "load_results_tree",
+    "render_cascade_sidecar",
     "render_leaderboard",
     "results_show_report",
 ]
