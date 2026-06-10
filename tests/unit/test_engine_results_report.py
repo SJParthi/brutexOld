@@ -142,8 +142,14 @@ class TestRender:
         out = render_leaderboard([_row(1, mask_bits=(1 << 0) | (1 << 23))])
         assert "#1  NIFTY 5m bull" in out
         assert "close_above_ema20 AND near_fib_618" in out
-        assert "gate=PASS" in out
         assert "dsr=+0.9700" in out
+
+    def test_no_per_row_gate_verdict_is_rendered(self) -> None:
+        # DEC-STAGE3-WIRE-001 (review F6): a row cannot reveal whether it is a
+        # gated Stage-2 finalist or an UNGATED Stage-3 refined trial, so the
+        # old unconditional per-row `gate=PASS` claim was scoped out.
+        out = render_leaderboard([_row(1, mask_bits=1)])
+        assert "gate=" not in out
 
     def test_no_condition_mask_and_deflated_none(self) -> None:
         out = render_leaderboard([_row(1, mask_bits=0, deflated_sharpe=None)])

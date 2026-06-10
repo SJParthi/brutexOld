@@ -182,6 +182,41 @@ def _add_sweep_grid_args(
             "per leaderboard (DEC-RANKING-OVERFIT-001); off by default"
         ),
     )
+    # ── Stage-3 BIPOP-CMA-ES refinement pass (DEC-STAGE3-WIRE-001) ──
+    # Defaults are None so SweepGridConfig stays the ONE source of the engine
+    # defaults (top-K 10,000 · 200 fevals/restart · 3 restarts — ADR-0007
+    # condition 8); the CLI only overrides what the operator sets explicitly.
+    parser.add_argument(
+        "--stage3-enable",
+        action="store_true",
+        dest="stage3_enable",
+        help=(
+            "Enable the Stage-3 BIPOP-CMA-ES (SL, TP) refinement post-pass over each "
+            "leaderboard's top-K survivors (ADR-0007 / DEC-STAGE3-WIRE-001; requires the "
+            "'optimize' extra and every --sl/--tp value on the Mode-A grid); off by default"
+        ),
+    )
+    parser.add_argument(
+        "--stage3-top-k",
+        type=int,
+        default=None,
+        dest="stage3_top_k",
+        help="Refine each (instrument, TF, mode) leaderboard's top-K survivors (default 10000)",
+    )
+    parser.add_argument(
+        "--stage3-fevals",
+        type=int,
+        default=None,
+        dest="stage3_fevals",
+        help="CMA-ES evaluations per restart for each refined mask (default 200)",
+    )
+    parser.add_argument(
+        "--stage3-restarts",
+        type=int,
+        default=None,
+        dest="stage3_restarts",
+        help="Hard restart cap per refined mask — bounds a mask at fevals×restarts (default 3)",
+    )
     parser.add_argument(
         "--dsr-min",
         type=float,
@@ -2081,7 +2116,7 @@ def _indicator_version() -> str:  # pragma: no cover — cli-omitted thin string
         return f"brutex-{__version__}"
 
 
-def _data_snapshot_hash(  # pragma: no cover — cli-omitted; pure helper tested via engine layer
+def _data_snapshot_hash(  # pragma: no cover — cli-omitted thin delegate (helper tested in engine)
     *,
     exchange: str,
     segment: str,
@@ -2091,28 +2126,17 @@ def _data_snapshot_hash(  # pragma: no cover — cli-omitted; pure helper tested
 ) -> str:
     """Return a real BLAKE3 content fingerprint of the loaded data window.
 
-    Honest (Golden Rule #1/#10): a deterministic digest of the data SCOPE
-    (exchange/segment/window) plus, per ``(symbol, interval)`` slice, the bar
-    count and the first/last bar timestamps + closes — a real content-derived
-    snapshot identity, not a fabricated placeholder. Two different lake states
-    over the same window therefore hash differently.
+    Thin delegate to the SHARED non-CLI helper
+    :func:`brutex.engine.stage3_wire.data_snapshot_hash` (DEC-STAGE3-WIRE-001,
+    CLAUDE.md §11 COMMON): the Stage-3 pass stamps refined rows with the SAME
+    derivation over the lockbox-excluded train slices (ADR-0007 Amendment A1),
+    so the two surfaces can never drift apart.
     """
-    import blake3
+    from brutex.engine.stage3_wire import data_snapshot_hash
 
-    parts: list[str] = [f"{exchange}|{segment}|{start}|{end}"]
-    for (symbol, interval), bars in sorted(slices.items()):
-        if bars:
-            first, last = bars[0], bars[-1]
-            parts.append(
-                f"{symbol}|{interval}|{len(bars)}|{first.timestamp.isoformat()}|"
-                f"{first.close}|{last.timestamp.isoformat()}|{last.close}"
-            )
-        else:
-            parts.append(f"{symbol}|{interval}|0")
-    # str(...) keeps this typed `str` even where the blake3 wheel (and its
-    # stubs) is absent and the import degrades to Any — e.g. the isolated
-    # pre-commit mypy env (hook-portability, the #575 combo.py precedent).
-    return str(blake3.blake3("\n".join(parts).encode("utf-8")).hexdigest())
+    return data_snapshot_hash(
+        exchange=exchange, segment=segment, start=start, end=end, slices=slices
+    )
 
 
 def _parse_paisa_list(raw: str) -> list[int | None]:
@@ -2152,6 +2176,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     options_sim: bool = True,
     options_expiry: str = "weekly",
     options_broker: str = "groww",
+    stage3_enable: bool = False,
+    stage3_top_k: int | None = None,
+    stage3_fevals: int | None = None,
+    stage3_restarts: int | None = None,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -2291,12 +2319,34 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         grid_kwargs["max_combos"] = max_combos
     if overfit_gate:
         grid_kwargs["overfit"] = OverfitGateConfig(dsr_min=dsr_min)
+    # Stage-3 knobs (DEC-STAGE3-WIRE-001): None ⇒ keep the SweepGridConfig
+    # defaults (the ONE source of the engine defaults). The on-grid SL/TP
+    # fail-fast runs inside SweepGridConfig.__post_init__ (review F5).
+    grid_kwargs["stage3_enable"] = stage3_enable
+    if stage3_top_k is not None:
+        grid_kwargs["stage3_top_k"] = stage3_top_k
+    if stage3_fevals is not None:
+        grid_kwargs["stage3_max_fevals"] = stage3_fevals
+    if stage3_restarts is not None:
+        grid_kwargs["stage3_max_restarts"] = stage3_restarts
 
     try:
         grid = SweepGridConfig(**grid_kwargs)
     except ValueError as exc:
         print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
+
+    # Stage-3 fail-fast twin of the on-grid validation (review F5): a missing
+    # 'optimize' extra must surface BEFORE the sweep runs, never crash the
+    # post-pass after the whole grid persisted.
+    if grid.stage3_enable:
+        from brutex.engine.stage3_wire import Stage3WireError, ensure_stage3_runtime
+
+        try:
+            ensure_stage3_runtime()
+        except Stage3WireError as exc:
+            print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
 
     dedup = ComboDedup(OptionDedupIndex(capacity=bloom_capacity_hint(grid), fpr_target=1e-7))
     audit_path = out_root / "audit" / "sweep-all.jsonl"
@@ -2364,6 +2414,25 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             on_progress=_on_progress,
             watchdog_poll_seconds=watchdog.timeout_seconds / 3.0,
         )
+        # ── Stage-3 BIPOP-CMA-ES refinement post-pass (DEC-STAGE3-WIRE-001) ──
+        # Runs INSIDE the open audit with-block on this single thread (review
+        # F10): the per-mask STAGE_3_REFINE_* triples land on the SAME ingest
+        # hash chain as the sweep's lines, bracketed by STAGE_3_PASS_START /
+        # STAGE_3_PASS_COMPLETE. Bars come from the in-memory slice memo the
+        # sweep just ran on (review F9); refinement evaluates the
+        # lockbox-excluded train slice only (ADR-0007 condition 7 + A1).
+        from brutex.engine.stage3_wire import run_stage3_pass
+
+        stage3_report = run_stage3_pass(
+            grid,
+            results_root=out_root,
+            bars_for=_bars_for,
+            audit=ingest_audit,
+            exchange=exchange,
+            segment=segment,
+            start=start,
+            end=end,
+        )
     # Fire the AUTOMATIC sweep-complete Telegram alert (best-effort, no-op when
     # disabled) now that the supervised grid returned cleanly (DEC-TELEGRAM-WIRE-001).
     alerter.sweep_complete(result)
@@ -2373,6 +2442,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         f"resumed={result.skipped_resume}) evaluated={result.evaluated} "
         f"ranked={result.ranked} persisted={result.persisted}"
     )
+    if stage3_report.enabled:
+        print(
+            f"[brutex] stage3 — masks_refined={stage3_report.masks_refined} "
+            f"evals={stage3_report.evals_total} cells={len(stage3_report.cells)} "
+            f"rows_appended={stage3_report.rows_appended} "
+            f"skipped_empty_train={stage3_report.skipped_empty_train} "
+            f"train_snapshot={stage3_report.train_snapshot_hash}"
+        )
     print(f"[brutex] results: {out_root}  ·  audit: {audit_path}  ·  supervisor: {sup_audit_path}")
     print(f"[brutex] live progress: {progress_path}  ·  checkpoint: {checkpoint_path}")
 
@@ -2406,6 +2483,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         spec_from_store_rows,
     )
     from brutex.engine.results_store import ResultsStore
+    from brutex.engine.stage3_wire import cascade_specs_for_refined_cells, stage3_manifest_record
     from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
     from brutex.engine.sweep_run import _direction_label
 
@@ -2439,6 +2517,11 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         if spec is not None:
             cascade_specs.append(spec)
 
+    # ALSO enumerate the Stage-3 refined cells (DEC-STAGE3-WIRE-001, review F3)
+    # so Stage-4 sees them — every refined-eval row UNTRIMMED (review F8); the
+    # manifest records stage-3 enablement + the refined-cell list.
+    cascade_specs.extend(cascade_specs_for_refined_cells(stage3_report.cells, grid=grid))
+
     if cascade_specs:
         sweep_id = grid_identity(grid)
         cascade_report = run_and_write_from_specs(
@@ -2448,6 +2531,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             bars_for=_bars_for,
             bars_context=BarsContext(exchange=exchange, segment=segment, start=start, end=end),
             cascade_config=cascade_config_for_sweep(sweep_id),
+            stage3=stage3_manifest_record(stage3_report),
         )
         print(
             f"[brutex] cascade — pools={len(cascade_report.groups)} "
@@ -2590,8 +2674,9 @@ def cmd_results_show(*, results_root: Path, top: int, sort_by: str) -> int:
     Thin shell over :func:`brutex.engine.results_report.results_show_report` (the
     100%-tested engine module): discovers every per-tuple Parquet under
     *results_root*, merges them, and prints the leaderboard showing each finalist's
-    winning conditions BY NAME plus net P&L, trades, win-rate, Sharpe,
-    Deflated-Sharpe and the gate verdict (DEC-SWEEP-WINNERS-BY-NAME-001). A missing
+    winning conditions BY NAME plus net P&L, trades, win-rate, Sharpe and
+    Deflated-Sharpe (DEC-SWEEP-WINNERS-BY-NAME-001; no per-row gate verdict is
+    rendered since DEC-STAGE3-WIRE-001 — refined trees hold ungated rows). A missing
     root, empty ``top`` or unknown sort key surfaces as a clear user error, never a
     traceback.
     """
@@ -3217,6 +3302,10 @@ def main(argv: list[str] | None = None) -> int:
             options_sim=args.options_sim,
             options_expiry=args.options_expiry,
             options_broker=args.options_broker,
+            stage3_enable=args.stage3_enable,
+            stage3_top_k=args.stage3_top_k,
+            stage3_fevals=args.stage3_fevals,
+            stage3_restarts=args.stage3_restarts,
         )
     # Scheduled/daemon sweep runner (DEC-SWEEP-SCHEDULER-001) — reuses cmd_sweep_all
     # for the grid; the scheduler core decides only WHEN each cycle fires.
@@ -3250,6 +3339,10 @@ def main(argv: list[str] | None = None) -> int:
             options_sim=args.options_sim,
             options_expiry=args.options_expiry,
             options_broker=args.options_broker,
+            stage3_enable=args.stage3_enable,
+            stage3_top_k=args.stage3_top_k,
+            stage3_fevals=args.stage3_fevals,
+            stage3_restarts=args.stage3_restarts,
         )
     # Thin dispatch over cmd_results_show (DEC-SWEEP-WINNERS-BY-NAME-001).
     if args.command == "results" and args.results_command == "show":

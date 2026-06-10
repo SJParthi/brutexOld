@@ -234,6 +234,105 @@ class BarsContext:
 
 
 @dataclass(frozen=True, slots=True)
+class Stage3CellRecord:
+    """One Stage-3 refined quantized cell recorded in the manifest (DEC-STAGE3-WIRE-001).
+
+    Identifies which manifest specs are UNGATED Stage-3 refined cells (vs gated
+    Stage-2 grid cells): the cell's coordinates as the launcher constructed its
+    :class:`~brutex.engine.sweep_orchestrator.SweepTuple` (``k = popcount(mask)``,
+    on-grid int SL/TP legs — review F3).
+
+    Parameters
+    ----------
+    instrument, tf_label, direction_label
+        Context labels; non-empty, ``direction_label`` is ``"bull"``/``"bear"``.
+    k
+        The refined mask's popcount (``>= 0``).
+    sl_paisa, tp_paisa
+        The quantized Mode-A cell legs (``> 0`` — refined cells never carry a
+        disabled leg).
+    proximity_bps
+        ``(pivot, pdh_pdl, fib)`` proximity tolerances in bps, or ``None``.
+
+    Raises
+    ------
+    CascadeWireError
+        On an empty label, a bad direction, a negative ``k``, a non-positive
+        leg, or a malformed proximity tuple.
+    """
+
+    instrument: str
+    tf_label: str
+    direction_label: str
+    k: int
+    sl_paisa: int
+    tp_paisa: int
+    proximity_bps: tuple[int, int, int] | None
+
+    def __post_init__(self) -> None:
+        for name in ("instrument", "tf_label"):
+            if not getattr(self, name):
+                raise CascadeWireError(f"Stage3CellRecord.{name} must be non-empty")
+        if self.direction_label not in ("bull", "bear"):
+            raise CascadeWireError(
+                f"Stage3CellRecord.direction_label must be 'bull' or 'bear', "
+                f"got {self.direction_label!r}"
+            )
+        if self.k < 0:
+            raise CascadeWireError(f"Stage3CellRecord.k must be >= 0, got {self.k}")
+        for name in ("sl_paisa", "tp_paisa"):
+            if getattr(self, name) <= 0:
+                raise CascadeWireError(
+                    f"Stage3CellRecord.{name} must be > 0, got {getattr(self, name)}"
+                )
+        if self.proximity_bps is not None and len(self.proximity_bps) != _PROXIMITY_LEN:
+            raise CascadeWireError(
+                f"Stage3CellRecord.proximity_bps must be a 3-tuple or None, "
+                f"got {self.proximity_bps!r}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class Stage3ManifestRecord:
+    """The manifest's Stage-3 provenance record (DEC-STAGE3-WIRE-001, review F3).
+
+    Records whether the sweep ran the Stage-3 refinement pass, the
+    content-derived snapshot hash of the lockbox-excluded training slice the
+    refined rows were evaluated on (ADR-0007 Amendment A1), and the refined
+    cells whose specs joined the cascade input.
+
+    Parameters
+    ----------
+    enabled
+        Whether ``--stage3-enable`` was active for this sweep.
+    train_snapshot_hash
+        The train-slice snapshot hash; required when enabled, forbidden when
+        disabled.
+    refined_cells
+        The refined cells, in deterministic order; must be empty when disabled.
+
+    Raises
+    ------
+    CascadeWireError
+        If enabled without a hash, or disabled with a hash / cells.
+    """
+
+    enabled: bool
+    train_snapshot_hash: str | None
+    refined_cells: tuple[Stage3CellRecord, ...]
+
+    def __post_init__(self) -> None:
+        if self.enabled and not self.train_snapshot_hash:
+            raise CascadeWireError(
+                "Stage3ManifestRecord: enabled=True requires a train_snapshot_hash"
+            )
+        if not self.enabled and (self.train_snapshot_hash is not None or self.refined_cells):
+            raise CascadeWireError(
+                "Stage3ManifestRecord: enabled=False forbids a train_snapshot_hash / cells"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class CascadeManifest:
     """The full replayable cascade input set written by the AUTOMATIC path.
 
@@ -250,6 +349,10 @@ class CascadeManifest:
         The :class:`BarsContext` for the MANUAL bar reload.
     specs
         Every tuple's :class:`CascadeTupleSpec`.
+    stage3
+        Optional :class:`Stage3ManifestRecord` (DEC-STAGE3-WIRE-001) — Stage-3
+        enablement + the refined-cell list. ``None`` for manifests written
+        before the Stage-3 wiring (backward-compatible parse).
     """
 
     version: int
@@ -257,6 +360,7 @@ class CascadeManifest:
     cascade_config: CascadeConfig
     bars_context: BarsContext
     specs: tuple[CascadeTupleSpec, ...]
+    stage3: Stage3ManifestRecord | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -735,6 +839,58 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
         raise CascadeWireError(f"invalid cascade tuple spec in manifest: {exc}") from exc
 
 
+def _stage3_to_dict(record: Stage3ManifestRecord) -> dict[str, object]:
+    """Serialise one :class:`Stage3ManifestRecord` into a JSON-native dict."""
+    return {
+        "enabled": record.enabled,
+        "train_snapshot_hash": record.train_snapshot_hash,
+        "refined_cells": [
+            {
+                "instrument": cell.instrument,
+                "tf_label": cell.tf_label,
+                "direction_label": cell.direction_label,
+                "k": cell.k,
+                "sl_paisa": cell.sl_paisa,
+                "tp_paisa": cell.tp_paisa,
+                "proximity_bps": None if cell.proximity_bps is None else list(cell.proximity_bps),
+            }
+            for cell in record.refined_cells
+        ],
+    }
+
+
+def _stage3_from_dict(data: dict[str, object]) -> Stage3ManifestRecord:
+    """Rebuild a :class:`Stage3ManifestRecord` from :func:`_stage3_to_dict` output."""
+    raw = cast(dict[str, Any], data)
+    try:
+        cells: list[Stage3CellRecord] = []
+        for cell in raw["refined_cells"]:
+            proximity = cell["proximity_bps"]
+            cells.append(
+                Stage3CellRecord(
+                    instrument=str(cell["instrument"]),
+                    tf_label=str(cell["tf_label"]),
+                    direction_label=str(cell["direction_label"]),
+                    k=int(cell["k"]),
+                    sl_paisa=int(cell["sl_paisa"]),
+                    tp_paisa=int(cell["tp_paisa"]),
+                    proximity_bps=(
+                        None
+                        if proximity is None
+                        else (int(proximity[0]), int(proximity[1]), int(proximity[2]))
+                    ),
+                )
+            )
+        hash_raw = raw["train_snapshot_hash"]
+        return Stage3ManifestRecord(
+            enabled=bool(raw["enabled"]),
+            train_snapshot_hash=None if hash_raw is None else str(hash_raw),
+            refined_cells=tuple(cells),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CascadeWireError(f"invalid stage3 record in manifest: {exc}") from exc
+
+
 def manifest_to_json(manifest: CascadeManifest) -> bytes:
     """Return the deterministic JSON bytes of *manifest* (sorted keys)."""
     payload = {
@@ -748,6 +904,7 @@ def manifest_to_json(manifest: CascadeManifest) -> bytes:
             "end": manifest.bars_context.end,
         },
         "specs": [_spec_to_dict(spec) for spec in manifest.specs],
+        "stage3": None if manifest.stage3 is None else _stage3_to_dict(manifest.stage3),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
         "utf-8"
@@ -782,12 +939,16 @@ def manifest_from_json(data: bytes) -> CascadeManifest:
             end=str(bars_raw["end"]),
         )
         specs = tuple(_spec_from_dict(spec) for spec in payload["specs"])
+        # `stage3` is absent from pre-DEC-STAGE3-WIRE-001 manifests → None
+        # (backward-compatible parse; same MANIFEST_VERSION, purely additive).
+        stage3_raw = payload.get("stage3")
         return CascadeManifest(
             version=MANIFEST_VERSION,
             sweep_id=str(payload["sweep_id"]),
             cascade_config=cascade_config_from_dict(payload["cascade_config"]),
             bars_context=bars_context,
             specs=specs,
+            stage3=None if stage3_raw is None else _stage3_from_dict(stage3_raw),
         )
     except (KeyError, TypeError) as exc:
         raise CascadeWireError(f"cascade manifest missing/invalid field: {exc}") from exc
@@ -908,13 +1069,16 @@ def run_and_write_from_specs(
     bars_for: Callable[[str, str], Sequence[CandleBar]],
     bars_context: BarsContext,
     cascade_config: CascadeConfig,
+    stage3: Stage3ManifestRecord | None = None,
 ) -> CascadeWireReport:
     """AUTOMATIC path: run the cascade + write the manifest AND the report.
 
     Builds the :class:`CascadeManifest` from *specs* (so the MANUAL path can
     replay it bit-for-bit), runs :func:`run_cascade_over_specs`, then writes both
     ``cascade/manifest.json`` and ``cascade/cascade-report.json`` under
-    *results_root*.
+    *results_root*. When the sweep ran the Stage-3 refinement pass
+    (DEC-STAGE3-WIRE-001), its :class:`Stage3ManifestRecord` is recorded in the
+    manifest so refined-cell specs stay distinguishable from grid-cell specs.
 
     Returns
     -------
@@ -927,6 +1091,7 @@ def run_and_write_from_specs(
         cascade_config=cascade_config,
         bars_context=bars_context,
         specs=tuple(specs),
+        stage3=stage3,
     )
     report = run_cascade_over_specs(
         specs, bars_for=bars_for, config=cascade_config, sweep_id=sweep_id
@@ -1051,6 +1216,8 @@ __all__ = [
     "CascadeTupleSpec",
     "CascadeWireError",
     "CascadeWireReport",
+    "Stage3CellRecord",
+    "Stage3ManifestRecord",
     "build_candidate_input",
     "candidates_for_spec",
     "cascade_config_for_sweep",

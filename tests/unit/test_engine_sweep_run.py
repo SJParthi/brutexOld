@@ -31,6 +31,7 @@ from brutex.engine.sweep_run import (
     ComboDedup,
     SweepRunConfig,
     SweepRunSummary,
+    canonical_trade_params,
     mask_run_id,
     ranked_combo_to_result_row,
     run_persisted_sweep,
@@ -380,6 +381,100 @@ class TestRankedComboToResultRow:
         assert row.sortino_ratio == 0.0
         assert row.calmar_ratio == 0.0
         assert row.profit_factor == 0.0
+
+    def test_zero_trade_combo_gets_placeholder_price_anchors(self) -> None:
+        # DEC-STAGE3-WIRE-001 (review F6): a Stage-3 refined evaluation is an
+        # UNGATED Bailey-LdP trial and can close ZERO trades on the training
+        # slice — the conflict mask (bullish AND bearish) provably never fires,
+        # so the projector's zero-trade arm is real behaviour, not a stub.
+        bars = _trending_bars()
+        bar_bits = build_bar_bits(bars)
+        mask = (1 << BIT_BAR_BULLISH) | (1 << BIT_BAR_BEARISH)
+        metrics = metrics_for_mask(
+            bars,
+            bar_bits,
+            mask,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=80,
+            take_profit_paisa=50,
+            start_equity_paisa=10_000_000,
+        )
+        assert metrics.total_trades == 0
+        rc = RankedCombo(mask=mask, metrics=metrics, composite_score=0.0)
+        row = ranked_combo_to_result_row(
+            rc,
+            run_id=mask_run_id(mask=mask, params=_PARAMS, **_CTX),
+            instrument="NIFTY",
+            tf="1m",
+            direction="bull",
+            mode="A",
+            bars=bars,
+            bar_bits=bar_bits,
+            tf_minutes=1,
+            sl_paisa=80,
+            tp_paisa=50,
+        )
+        assert row.total_trades == 0
+        assert row.avg_entry_price == Decimal("0.00")
+        assert row.avg_exit_price == Decimal("0.00")
+
+
+# ────── canonical_trade_params (the ONE params layout — DEC-STAGE3-WIRE-001 F4) ──────
+
+
+class TestCanonicalTradeParams:
+    def test_layout_matches_the_run_identity_contract(self) -> None:
+        params = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+        )
+        assert params == {
+            "sl_paisa": 80,
+            "tp_paisa": 50,
+            "prior_n": 3,
+            "proximity_bps": None,
+            "start_equity_paisa": 10_000_000,
+        }
+
+    def test_proximity_flattens_to_three_bps_ints(self) -> None:
+        params = canonical_trade_params(
+            sl_paisa=None,
+            tp_paisa=None,
+            prior_n=2,
+            proximity=ProximityParams(
+                pivot_proximity_bps=5, pdh_pdl_proximity_bps=10, fib_proximity_bps=25
+            ),
+            start_equity_paisa=1,
+        )
+        assert params["proximity_bps"] == [5, 10, 25]
+        assert params["sl_paisa"] is None and params["tp_paisa"] is None
+
+    def test_sweep_config_identity_routes_through_it(self) -> None:
+        # §11 COMMON: the sweep's run-identity params ARE this helper's output —
+        # the Stage-3 cell recovery re-derives identities through the same
+        # layout, so the two surfaces can never drift apart.
+        proximity = ProximityParams(
+            pivot_proximity_bps=5, pdh_pdl_proximity_bps=10, fib_proximity_bps=25
+        )
+        cfg = _make_config(proximity=proximity)
+        expected = canonical_trade_params(
+            sl_paisa=cfg.sl_paisa,
+            tp_paisa=cfg.tp_paisa,
+            prior_n=cfg.prior_n,
+            proximity=proximity,
+            start_equity_paisa=cfg.start_equity_paisa,
+        )
+        rid_via_helper = mask_run_id(mask=1, params=expected, **_CTX)
+        # Run the real sweep identity derivation for the same mask + config and
+        # confirm the persisted run identity matches the helper-built one.
+        from brutex.engine.sweep_run import _canonical_params
+
+        assert _canonical_params(cfg) == expected
+        assert mask_run_id(mask=1, params=_canonical_params(cfg), **_CTX) == rid_via_helper
 
 
 # ────── run_persisted_sweep ──────

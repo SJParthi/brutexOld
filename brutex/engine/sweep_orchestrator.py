@@ -228,6 +228,16 @@ class SweepGridConfig:
     top_k: int | None = None
     min_hits: int = MIN_TRADES
     overfit: OverfitGateConfig | None = None
+    #: Stage-3 refinement pass (DEC-STAGE3-WIRE-001, ADR-0007 §5 slice 5) —
+    #: DEFAULT-OFF. When enabled, after every grid tuple persists, the launcher
+    #: runs the BIPOP-CMA-ES refinement over each (instrument, tf, mode)
+    #: leaderboard's top-`stage3_top_k` survivors on the lockbox-excluded
+    #: training slice (ADR-0007 Amendment A1) and merges every evaluation into
+    #: the same results tree as its own per-quantized-cell file.
+    stage3_enable: bool = False
+    stage3_top_k: int = 10_000
+    stage3_max_fevals: int = 200
+    stage3_max_restarts: int = 3
 
     def __post_init__(self) -> None:
         # Order-preserving de-dup of every axis (set semantics, deterministic
@@ -307,6 +317,44 @@ class SweepGridConfig:
                 f"SweepGridConfig: {total} tuples exceed max_tuples={self.max_tuples}; "
                 f"raise max_tuples explicitly to run a grid this large"
             )
+        # Stage-3 guards (DEC-STAGE3-WIRE-001, hostile F5/F13): the refinement
+        # x0 must normalize on the Mode-A grid, so an enabled pass REQUIRES
+        # every SL/TP axis value to be non-None and on-grid — checked HERE,
+        # before any bar load, so the post-pass can never crash after the whole
+        # grid persisted. Silent snapping is forbidden (the slice-3 rationale).
+        if self.stage3_top_k < 1:
+            raise ValueError(f"SweepGridConfig.stage3_top_k must be >= 1, got {self.stage3_top_k}")
+        if self.stage3_max_fevals < 1 or self.stage3_max_restarts < 1:
+            raise ValueError(
+                "SweepGridConfig.stage3_max_fevals and stage3_max_restarts must be >= 1, "
+                f"got {self.stage3_max_fevals}/{self.stage3_max_restarts}"
+            )
+        if self.stage3_enable:
+            from brutex.engine.stage3_grid import (
+                MODE_A_SL_AXIS,
+                MODE_A_TP_AXIS,
+                GridAxis,
+                Stage3GridError,
+            )
+
+            def _require_on_grid(label: str, axis: GridAxis, values: Sequence[int | None]) -> None:
+                for value in values:
+                    if value is None:
+                        raise ValueError(
+                            f"SweepGridConfig.stage3_enable requires every {label} value "
+                            f"to be a Mode-A grid paisa int — got None (the refinement x0 "
+                            f"must normalize on the grid; ADR-0007 condition 3)"
+                        )
+                    try:
+                        axis.normalize(value)
+                    except Stage3GridError as exc:
+                        raise ValueError(
+                            f"SweepGridConfig.stage3_enable requires every {label} value "
+                            f"on the Mode-A grid: {exc}"
+                        ) from exc
+
+            _require_on_grid("stop_losses", MODE_A_SL_AXIS, self.stop_losses)
+            _require_on_grid("take_profits", MODE_A_TP_AXIS, self.take_profits)
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,7 +607,9 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
         "code_commit_sha": grid.code_commit_sha,
     }
     canonical = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
-    return blake3.blake3(canonical.encode("utf-8")).hexdigest()[:_PATH_DIGEST_LEN]
+    # str(...) keeps this typed str where the blake3 stubs are absent (the
+    # isolated pre-commit mypy env — the #575 hook-portability precedent).
+    return str(blake3.blake3(canonical.encode("utf-8")).hexdigest())[:_PATH_DIGEST_LEN]
 
 
 def tuple_store_path(root: Path, tuple_: SweepTuple, grid: SweepGridConfig) -> Path:
