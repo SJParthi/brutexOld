@@ -261,6 +261,19 @@ module = [
 ]
 ignore_missing_imports = true
 
+# DEC-MUTATION-GATE-RANKING-002 follow-on: mypy_path (above) makes the in-repo
+# kernel shims resolvable for the isolated pre-commit hook env — but it also
+# PROMOTES them from the installed-package tier (diagnostics never reported)
+# to first-party source (diagnostics reported), which is env-dependent: CI's
+# wheel-install + mypy_path combination tripped `unused-ignore` inside
+# rust/trading-core/python/trading_core/__init__.py while the local .pth
+# resolution stayed silent. follow_imports=silent keeps the shims' types
+# AVAILABLE (the hook fix) while suppressing diagnostics INSIDE them in every
+# env — the same reporting behaviour they had before mypy_path existed.
+[[tool.mypy.overrides]]
+module = ["trading_core", "trading_core.*", "fno_math", "fno_math.*"]
+follow_imports = "silent"
+
 # Dashboard uses FastAPI decorators which are untyped — the file wraps
 # them internally and re-exports typed helpers, so untyped-decorator
 # checks here are noise.
