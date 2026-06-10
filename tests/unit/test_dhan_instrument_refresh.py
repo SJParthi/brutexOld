@@ -33,6 +33,7 @@ _HEADER = [
     "TICK_SIZE",
     "SM_FREEZE_QTY",
     "UNDERLYING_SYMBOL",
+    "UNDERLYING_SECURITY_ID",
     "OPTION_TYPE",
     "STRIKE_PRICE",
     "SM_EXPIRY_DATE",
@@ -410,3 +411,118 @@ def test_refresh_tags_spot_only_index_reference_only() -> None:
     assert ref_of(by_name["NIFTY"]) is False
     assert by_name["NIFTY 100"].security_id in up["reference_only_ids"]
     assert by_name["NIFTY"].security_id not in up["reference_only_ids"]
+
+
+def _rows_vendor_id_namespaces() -> list[dict[str, str]]:
+    # The REAL vendor id-namespace shape (DEC-OPTIONS-ELIGIBLE-PRECISE-001,
+    # measured from the operator-supplied detailed master 2026-06-10):
+    #   - NIFTY's OPTIDX legs point at underlying id 26000, NOT the spot id 13;
+    #   - an OPTSTK decoy (ABB) carries underlying id 13 — the OLD pooled-id arm
+    #     blessed NIFTY through it by pure collision;
+    #   - a BSE SENSEX OPTIDX leg carries underlying id 1, which is NSE
+    #     'NIFTY MIDCAP 150''s spot id — the OLD arm wrongly blessed that index;
+    #   - 'NIFTY NEXT 50' spot vs 'NIFTYNXT50' option legs (vendor name skew).
+    return [
+        _row(
+            EXCH_ID="NSE",
+            SECURITY_ID="13",
+            INSTRUMENT="INDEX",
+            SYMBOL_NAME="NIFTY",
+            DISPLAY_NAME="Nifty 50",
+        ),
+        _row(
+            EXCH_ID="NSE",
+            SECURITY_ID="1",
+            INSTRUMENT="INDEX",
+            SYMBOL_NAME="NIFTY MIDCAP 150",
+            DISPLAY_NAME="NIFTY Midcap 150",
+        ),
+        _row(
+            EXCH_ID="NSE",
+            SECURITY_ID="38",
+            INSTRUMENT="INDEX",
+            SYMBOL_NAME="NIFTY NEXT 50",
+            DISPLAY_NAME="NIFTY NEXT 50",
+        ),
+        # NIFTY's real OPTIDX leg — underlying id 26000 (derivatives space).
+        _row(
+            EXCH_ID="NSE",
+            SECURITY_ID="41000",
+            INSTRUMENT="OPTIDX",
+            SYMBOL_NAME="NIFTY-OPT",
+            DISPLAY_NAME="Nifty CE",
+            OPTION_TYPE="CE",
+            UNDERLYING_SYMBOL="NIFTY",
+            UNDERLYING_SECURITY_ID="26000",
+            STRIKE_PRICE="20000",
+            SM_EXPIRY_DATE="2026-06-25",
+            LOT_SIZE="75",
+        ),
+        # NIFTYNXT50's OPTIDX leg — the alias-skewed spelling.
+        _row(
+            EXCH_ID="NSE",
+            SECURITY_ID="41001",
+            INSTRUMENT="OPTIDX",
+            SYMBOL_NAME="NXT-OPT",
+            DISPLAY_NAME="Nxt50 CE",
+            OPTION_TYPE="CE",
+            UNDERLYING_SYMBOL="NIFTYNXT50",
+            UNDERLYING_SECURITY_ID="26013",
+            STRIKE_PRICE="60000",
+            SM_EXPIRY_DATE="2026-06-25",
+            LOT_SIZE="25",
+        ),
+        # OPTSTK decoy: ABB's equity underlying id is 13 == NIFTY's spot id.
+        _row(
+            EXCH_ID="NSE",
+            SECURITY_ID="41002",
+            INSTRUMENT="OPTSTK",
+            SYMBOL_NAME="ABB-OPT",
+            DISPLAY_NAME="ABB CE",
+            OPTION_TYPE="CE",
+            UNDERLYING_SYMBOL="ABB",
+            UNDERLYING_SECURITY_ID="13",
+            STRIKE_PRICE="8000",
+            SM_EXPIRY_DATE="2026-06-25",
+            LOT_SIZE="125",
+        ),
+        # BSE SENSEX OPTIDX decoy: underlying id 1 == NSE 'NIFTY MIDCAP 150'.
+        _row(
+            EXCH_ID="BSE",
+            SECURITY_ID="41003",
+            INSTRUMENT="OPTIDX",
+            SYMBOL_NAME="SENSEX-OPT",
+            DISPLAY_NAME="Sensex CE",
+            OPTION_TYPE="CE",
+            UNDERLYING_SYMBOL="SENSEX",
+            UNDERLYING_SECURITY_ID="1",
+            STRIKE_PRICE="80000",
+            SM_EXPIRY_DATE="2026-06-25",
+            LOT_SIZE="10",
+        ),
+    ]
+
+
+def test_refresh_index_eligibility_survives_vendor_id_namespaces() -> None:
+    # Regression for DEC-OPTIONS-ELIGIBLE-PRECISE-001: with the OLD pooled-id
+    # arm this fixture tagged 'NIFTY MIDCAP 150' option-pullable (blessed by the
+    # BSE SENSEX leg's underlying id 1) and 'NIFTY NEXT 50' reference_only
+    # (both arms missed it). The precise symbol-only arm must get all three
+    # right: NIFTY pullable (exact symbol), NIFTY NEXT 50 pullable (alias),
+    # NIFTY MIDCAP 150 blocked (no OPTIDX leg names it).
+    store = _Store()
+    text = _csv(_rows_vendor_id_namespaces())
+    refresh_instruments(store, lambda _url: text, snapshot_date=date(2026, 6, 10), run_id="run-ns")
+    up = store.upserts[0]
+    persisted = up["instruments"]
+    assert isinstance(persisted, list)
+    by_name = {i.symbol_name: i for i in persisted}
+    assert {"NIFTY", "NIFTY MIDCAP 150", "NIFTY NEXT 50"} <= set(by_name)
+    ref_of = up["reference_only_of"]
+    assert callable(ref_of)
+    assert ref_of(by_name["NIFTY"]) is False  # exact symbol match
+    assert ref_of(by_name["NIFTY NEXT 50"]) is False  # via the NIFTYNXT50 alias
+    assert ref_of(by_name["NIFTY MIDCAP 150"]) is True  # id-collision decoy cured
+    assert by_name["NIFTY MIDCAP 150"].security_id in up["reference_only_ids"]
+    assert by_name["NIFTY"].security_id not in up["reference_only_ids"]
+    assert by_name["NIFTY NEXT 50"].security_id not in up["reference_only_ids"]

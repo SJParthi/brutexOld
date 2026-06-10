@@ -836,6 +836,27 @@ class TestErrorMessagePinning:
         assert item.item_id in msg
         assert "unhandled outcome" in msg
 
+    def test_unhandled_outcome_raises_transition_error(self) -> None:
+        """Actually EXERCISE the exhaustive-fallback raise (state.py:399).
+
+        ``transition()`` handles every shipped ``Outcome`` member, so the
+        fallback is unreachable with a genuine enum value. A duck-typed
+        stand-in (only a ``.value`` attribute, never equal to any member,
+        not in the transient set) simulates a FUTURE Outcome member added
+        without a matching transition arm — the exact bug class the guard
+        defends against (DEC-ORCH-STRICT-GATES-001 standalone-gap closure).
+        """
+        from typing import cast
+
+        class _UnknownOutcome:
+            """Stand-in for an Outcome member the FSM does not handle."""
+
+            value = "FAKE_VALUE"
+
+        item = _in_flight_item()
+        with pytest.raises(TransitionError, match="unhandled outcome FAKE_VALUE"):
+            transition(item, cast("Outcome", _UnknownOutcome()))
+
     def test_resolve_quarantine_terminal_error_mentions_state(self) -> None:
         """Resolve_quarantine on non-quarantined item must mention state."""
         item = _in_flight_item()

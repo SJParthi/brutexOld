@@ -137,17 +137,19 @@ def refresh_instruments(
     )
 
     def _index_has_options(instrument: Instrument) -> bool:
-        # OPTIONS-ONLY eligibility (DEC-OPTIONS-ELIGIBLE-GUARD-001). An admitted
-        # index is option-pullable ONLY if it has a listed OPTSTK/OPTIDX leg —
-        # matched by EITHER its spot SECURITY_ID (string-free, robust) OR its
-        # UPPER-CASED symbol (catches a vendor id/name skew). Belt-and-suspenders so
-        # the brute-force 3 (NIFTY/BANKNIFTY/SENSEX) are never wrongly blocked: an
-        # option index must miss BOTH arms to be tagged reference_only. Futures are
-        # excluded upstream — a FUT-only index is correctly NOT eligible.
-        return (
-            instrument.security_id in report.options_eligible_security_ids
-            or instrument.symbol_name.upper() in report.options_eligible_symbols
-        )
+        # OPTIONS-ONLY eligibility, PRECISE arm (DEC-OPTIONS-ELIGIBLE-PRECISE-001,
+        # supersedes the #603 two-arm check). An admitted index is option-pullable
+        # ONLY if an OPTIDX leg names it — by alias-normalized UPPER-CASED symbol.
+        # The former SECURITY_ID arm was VERIFIED WRONG against the real master
+        # (2026-06-10): option legs point at the derivatives id space (NIFTY spot
+        # id 13, but its options say underlying 26000) and the pooled ids collide
+        # across namespaces — NIFTY "matched" via ABB's equity id 13, BANKNIFTY via
+        # ADANIENT's 25, and BSE SENSEX/BANKEX underlying ids 1/12 wrongly blessed
+        # NSE 'NIFTY MIDCAP 150'/'NIFTY ALPHA 50'. The symbol set is OPTIDX-only
+        # (an OPTSTK ticker can never make an index pullable) with the sourced
+        # NIFTYNXT50 ↔ 'NIFTY NEXT 50' alias, so the brute-force 3 plus every real
+        # option index match exactly and nothing matches by id luck.
+        return instrument.symbol_name.upper() in report.index_options_symbols
 
     def _is_reference(instrument: Instrument) -> bool:
         # Tag the admitted constituents (by id) AND India VIX (the default rule)
