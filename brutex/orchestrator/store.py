@@ -572,7 +572,13 @@ class WorkItemStore:
         """
         if self._closed:
             raise StoreError(f"Store {self._path} is closed")
-        count = 0
+        # ``# pragma: no mutate`` (DEC-MUTATION-RUNTIME-001): dead store —
+        # ``count`` is unconditionally reassigned from ``txn.stat(...)`` before
+        # its only read (``return int(count)``), and any exception inside the
+        # txn body propagates before that read, so the ``0 → 1`` / ``0 → None``
+        # initialiser mutants are provably equivalent. The live reassignment
+        # below stays in the mutation surface, pinned by ``test_drops_all_items``.
+        count = 0  # pragma: no mutate
         with self._env.begin(write=True) as txn:
             # `drop` clears a sub-database without deleting it
             count = txn.stat(db=self._dbs[phase])["entries"]

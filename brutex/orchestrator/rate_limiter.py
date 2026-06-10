@@ -134,8 +134,14 @@ class RateLimiterEvent:
 
     kind: str  # one of: "downshift" | "upshift" | "rate_limit_hit"
     at: float  # monotonic seconds
-    from_rps: float | None = None
-    to_rps: float | None = None
+    # ``# pragma: no mutate`` ×2 (DEC-MUTATION-RUNTIME-001): mutmut's
+    # ``float | None`` → ``float & None`` annotation flips are provably
+    # equivalent (PEP 563 ``from __future__ import annotations`` — field
+    # annotations are never evaluated). The pragmas are line-scoped, so the
+    # ``None`` defaults they also skip are pinned byte-exact by
+    # ``test_optional_fields_default_byte_exact``.
+    from_rps: float | None = None  # pragma: no mutate
+    to_rps: float | None = None  # pragma: no mutate
     recent_429_count: int = 0
 
 
@@ -191,7 +197,12 @@ class AdaptiveTokenBucket:
     #: 150µs LMDB latency into observability reads). When ``None``, the
     #: bucket runs in legacy "bucket-only" mode (production callers
     #: MUST always pass a tracker; ``None`` is for test fixtures only).
-    quota_tracker: DailyQuotaTracker | None = None
+    #: ``# pragma: no mutate`` (DEC-MUTATION-RUNTIME-001): the ``| None`` →
+    #: ``& None`` annotation flip is provably equivalent (PEP 563 — never
+    #: evaluated; ``DailyQuotaTracker`` is a TYPE_CHECKING-only name). The
+    #: ``None`` default the line-scoped pragma also skips stays pinned by
+    #: ``test_quota_tracker_none_is_legacy_path``.
+    quota_tracker: DailyQuotaTracker | None = None  # pragma: no mutate
     #: Ease-in: start the bucket EMPTY (0 tokens) instead of full (``burst``).
     #: With the default ``False`` the bucket grants its ``burst`` allowance
     #: immediately (legacy behaviour). The Dhan controller passes ``True`` so
@@ -284,7 +295,12 @@ class AdaptiveTokenBucket:
                         # should converge in 1-2 iterations; 16 is a hard
                         # cap so tests can't deadlock on us.
                         self._tokens = 1.0
-                        break
+                        # ``# pragma: no mutate`` (DEC-MUTATION-RUNTIME-001):
+                        # ``_tokens`` was just set to 1.0, so the loop guard
+                        # ``_tokens < 1.0 - eps`` is statically False — mutmut's
+                        # ``break`` → ``continue`` re-tests the guard and exits
+                        # identically. Provably equivalent.
+                        break  # pragma: no mutate
                     more_wait = max((1.0 - self._tokens) / self._current_rps, eps)
                     self.sleep(more_wait)
                     self._refill_locked()
@@ -436,7 +452,14 @@ class AdaptiveTokenBucket:
         """Refill the token bucket based on elapsed wall-clock time (caller holds the lock)."""
         now = self.clock()
         elapsed = now - self._last_refill
-        if elapsed <= 0:
+        # ``# pragma: no mutate`` (DEC-MUTATION-RUNTIME-001): at ``elapsed == 0``
+        # the body below is a no-op (``tokens + 0 * rps == tokens``; the ``min``
+        # clamp is inert under the ``tokens <= burst`` invariant every writer
+        # preserves; ``_last_refill = now`` rewrites the identical value), so
+        # mutmut's ``<=`` → ``<`` flip is provably equivalent. The ``0 → 1`` flip
+        # the line-scoped pragma also skips is a REAL mutant — pinned byte-exact
+        # by ``test_subsecond_elapsed_refill_pinned``.
+        if elapsed <= 0:  # pragma: no mutate
             return
         self._tokens = min(
             float(self.burst),
@@ -462,8 +485,13 @@ class AdaptiveTokenBucket:
         if self._recent_429s:
             return None
         # No 429s in the recent window — how long since the last one?
-        since_last_429 = now - (self._last_success_at - self.upshift_recovery)
-        _ = since_last_429  # readable but the check below is the gate
+        # ``# pragma: no mutate`` ×2 (DEC-MUTATION-RUNTIME-001): both lines below
+        # are dead by construction — ``since_last_429`` feeds ONLY the throwaway
+        # ``_`` and ``_`` is never read again (pure float arithmetic, no side
+        # effects, no exception paths), so every mutant on them is provably
+        # equivalent.
+        since_last_429 = now - (self._last_success_at - self.upshift_recovery)  # pragma: no mutate
+        _ = since_last_429  # readable but the check below is the gate  # pragma: no mutate
         # Simpler check: enough recovery time since the last 429
         # (or since startup, if we never got one).
         if now - self._last_success_at < 0:

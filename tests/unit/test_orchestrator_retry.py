@@ -162,6 +162,18 @@ class TestClassifyExceptionName:
             assert "BROKER_EXCEPTION_CLASSIFICATION" in msg
             assert "test_orchestrator_retry.py" in msg
 
+    def test_unknown_name_error_message_is_byte_exact(self) -> None:
+        """The remediation message is operator-facing — pinned byte-for-byte
+        with ``==`` (a substring ``match=`` cannot kill the per-segment
+        string mutants; DEC-MUTATION-RUNTIME-001)."""
+        with pytest.raises(UnknownExceptionError) as excinfo:
+            classify_exception_name("VendorAPITotallyNewException")
+        assert str(excinfo.value) == (
+            "Unknown Dhan API exception class: 'VendorAPITotallyNewException'. "
+            "Add it to BROKER_EXCEPTION_CLASSIFICATION in brutex/orchestrator/retry.py "
+            "and re-run tests/unit/test_orchestrator_retry.py."
+        )
+
 
 # ────────────────────────────────────────────────────────────────────────
 # classify_exception (instance dispatch via MRO)
@@ -227,6 +239,20 @@ class TestClassifyException:
     def test_os_error_raises(self) -> None:
         with pytest.raises(UnknownExceptionError):
             classify_exception(OSError("oops"))
+
+    def test_no_match_error_message_is_byte_exact(self) -> None:
+        """The classifier-bug message (name + full MRO + remediation) is
+        pinned byte-for-byte with ``==`` — a substring ``match=`` cannot
+        kill the per-segment string mutants (DEC-MUTATION-RUNTIME-001)."""
+        with pytest.raises(UnknownExceptionError) as excinfo:
+            classify_exception(ValueError("unrelated"))
+        assert str(excinfo.value) == (
+            "Exception 'ValueError' (MRO: "
+            "['ValueError', 'Exception', 'BaseException', 'object']) does not match "
+            "any entry in BROKER_EXCEPTION_CLASSIFICATION. "
+            "This exception should not have reached the retry classifier — "
+            "verify the adapter only catches Dhan API exceptions."
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -299,6 +325,86 @@ class TestBackoffDelay:
         for retry in range(1, 11):
             assert backoff_delay(retry, rng=rng1) == backoff_delay(retry, rng=rng2)
 
+    def test_schedule_slots_are_pinned_byte_exact(self) -> None:
+        """Every slot of the FR-ING-008 ladder pinned by value — kills the
+        per-slot ``+1.0`` constant mutants (32→33 … 900→901) that the
+        ratio/length asserts cannot see (DEC-MUTATION-RUNTIME-001)."""
+        assert BACKOFF_SCHEDULE_SECONDS == (
+            2.0,
+            4.0,
+            8.0,
+            16.0,
+            32.0,
+            60.0,
+            120.0,
+            240.0,
+            480.0,
+            900.0,
+        )
+
+    def test_retry_count_error_message_is_byte_exact(self) -> None:
+        """Byte-exact ``==`` pin on the guard message — a substring
+        ``match=`` cannot kill the string mutant (DEC-MUTATION-RUNTIME-001)."""
+        with pytest.raises(ValueError) as excinfo:
+            backoff_delay(0)
+        assert str(excinfo.value) == "retry_count must be >= 1, got 0"
+
+    def test_seeded_jitter_value_is_byte_exact(self) -> None:
+        """Pin the exact jittered delay for a seeded RNG (DEC-MUTATION-RUNTIME-001).
+
+        Byte-exact ``==`` on ``base + uniform(-f, +f) * base`` kills the
+        ``== 0.0`` → ``!= 0.0`` early-return flip (returns the bare base), the
+        ``uniform(+f, +f)`` sign flip (the constant ``+f`` jitter), the
+        ``* base`` → ``/ base`` flip, and the ``base - jitter`` flip — all of
+        which stay inside the ±20% RANGE asserts above.
+        """
+        base = BACKOFF_SCHEDULE_SECONDS[0]  # 2.0
+        expected = base + random.Random(42).uniform(-JITTER_FRACTION, JITTER_FRACTION) * base
+        assert expected != base  # guard: seed 42 draws a non-zero jitter
+        assert expected != base * (1 + JITTER_FRACTION)  # guard: …and not the +f constant
+        assert backoff_delay(1, rng=random.Random(42)) == expected
+
+    def test_jitter_fraction_one_still_jitters(self) -> None:
+        """``jitter_fraction=1.0`` must take the jitter path — pins the
+        ``0.0`` sentinel in ``jitter_fraction == 0.0`` against the
+        ``0.0 → 1.0`` constant mutant, which would silently return the
+        un-jittered base for ±100% jitter (DEC-MUTATION-RUNTIME-001)."""
+        base = BACKOFF_SCHEDULE_SECONDS[0]
+        expected = base + random.Random(11).uniform(-1.0, 1.0) * base
+        assert expected != base  # guard: seed 11 draws a non-zero jitter
+        assert backoff_delay(1, jitter_fraction=1.0, rng=random.Random(11)) == expected
+
+    def test_unseeded_path_uses_module_random_uniform(self) -> None:
+        """The ``rng=None`` production path must draw
+        ``random.uniform(-f, +f) * base`` from the module RNG.
+
+        Seeds the module RNG (state restored) so the expected delay is exact —
+        kills the production-branch sign flip, ``* base`` → ``/ base`` flip,
+        and ``jitter = None`` mutants that the rng-injected tests can never
+        reach (DEC-MUTATION-RUNTIME-001).
+        """
+        base = BACKOFF_SCHEDULE_SECONDS[0]
+        state = random.getstate()
+        try:
+            random.seed(1234)
+            expected = base + random.uniform(-JITTER_FRACTION, JITTER_FRACTION) * base
+            random.seed(1234)
+            actual = backoff_delay(1)
+        finally:
+            random.setstate(state)
+        assert expected != base  # guard: seed 1234 draws a non-zero jitter
+        assert expected != base * (1 + JITTER_FRACTION)  # guard: …and not the +f constant
+        assert actual == expected
+
+    def test_sub_second_delay_is_not_clamped_upward(self) -> None:
+        """A jittered delay below 1.0s must pass through unchanged — pins the
+        ``max(0.0, delay)`` floor against the ``0.0 → 1.0`` mutant, which
+        would silently round sub-second delays up to a full second
+        (DEC-MUTATION-RUNTIME-001)."""
+        expected = 0.5 + random.Random(7).uniform(-JITTER_FRACTION, JITTER_FRACTION) * 0.5
+        assert 0.0 < expected < 1.0  # guard: meaningful for the floor pin
+        assert backoff_delay(1, schedule=(0.5,), rng=random.Random(7)) == expected
+
 
 # ────────────────────────────────────────────────────────────────────────
 # outcome_severity
@@ -343,6 +449,46 @@ class TestRetryCall:
     """Transient → backoff + retry; permanent → surface at once; non-vendor
     → never caught. Deterministic via injected ``sleep`` recorder + seeded RNG.
     """
+
+    # NOTE: this test is deliberately FIRST in the class. The ``attempts = 1``
+    # mutant of ``attempts += 1`` makes every always-failing retry_call test
+    # below spin forever (the counter never reaches max_attempts), so under
+    # mutmut's ``pytest -x`` runner the kill must land BEFORE any of them run
+    # — converting that hang into a fast deterministic kill
+    # (DEC-MUTATION-RUNTIME-001).
+    def test_attempt_counter_increments_by_exactly_one(self) -> None:
+        """``attempts += 1`` pinned: two transient failures then success must
+        sleep exactly ``backoff_delay(1)`` then ``backoff_delay(2)``.
+
+        ``attempts = 1`` repeats the slot-1 delay, which the exact sleep pin
+        rejects (slot-1 max 2.4s < slot-2 min 3.2s, the ranges never overlap);
+        ``attempts -= 1`` feeds ``backoff_delay(-1)`` → ValueError on the
+        first retry. The thunk is bounded — it returns on call 3 — so no
+        mutant variant can hang this test.
+        """
+        seed = 5
+        calls = {"n": 0}
+
+        def _flaky() -> str:
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise VendorAPIRateLimitException("429")
+            return "done"
+
+        sleeps: list[float] = []
+        result = retry_call(
+            _flaky,
+            retry_on=VendorBaseException,
+            max_attempts=3,
+            sleep=sleeps.append,
+            rng=random.Random(seed),
+        )
+        assert result == "done"
+        assert calls["n"] == 3
+        replay = random.Random(seed)
+        expected = [backoff_delay(1, rng=replay), backoff_delay(2, rng=replay)]
+        assert expected[0] != expected[1]  # guard: slot-1 vs slot-2 delays differ
+        assert sleeps == expected
 
     def test_retryable_outcomes_are_the_warn_tier(self) -> None:
         assert (
@@ -466,3 +612,22 @@ class TestRetryCall:
         with pytest.raises(KeyError):
             retry_call(_bug, retry_on=VendorBaseException, sleep=sleeps.append)
         assert sleeps == []  # a non-vendor bug must surface, never spin
+
+    def test_max_attempts_of_exactly_one_is_accepted(self) -> None:
+        """Boundary pin for ``max_attempts < 1``: exactly 1 is VALID (one
+        attempt, no retry) — kills the ``< 1`` → ``<= 1`` / ``< 2`` flips
+        that would reject the legal single-attempt mode
+        (DEC-MUTATION-RUNTIME-001)."""
+        sleeps: list[float] = []
+        result = retry_call(
+            lambda: "ok", retry_on=VendorBaseException, max_attempts=1, sleep=sleeps.append
+        )
+        assert result == "ok"
+        assert sleeps == []
+
+    def test_max_attempts_error_message_is_byte_exact(self) -> None:
+        """Byte-exact ``==`` pin on the guard message — a substring
+        ``match=`` cannot kill the string mutant (DEC-MUTATION-RUNTIME-001)."""
+        with pytest.raises(ValueError) as excinfo:
+            retry_call(lambda: "ok", retry_on=VendorBaseException, max_attempts=0)
+        assert str(excinfo.value) == "max_attempts must be >= 1, got 0"

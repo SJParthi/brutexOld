@@ -287,3 +287,253 @@ class TestPartitionForTimestamp:
         ts = datetime(2024, 1, 1, 0, 0)  # naive
         with pytest.raises(PartitionError, match="tz-aware"):
             partition_for_timestamp(ts)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Mutation-kill pins (DEC-MUTATION-RUNTIME-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestIntervalWhitelistPins:
+    """Every one of the 12 canonical intervals must be ACCEPTED by name.
+
+    mutmut's "XX…XX"-wrapped frozenset-member mutants silently drop the
+    real spelling from ``VALID_INTERVALS``; pinning acceptance of each
+    literal turns every such mutant into a PartitionError, killing it
+    (DEC-MUTATION-RUNTIME-001).
+    """
+
+    @pytest.mark.parametrize(
+        "interval",
+        [
+            "1minute",
+            "2minute",
+            "3minute",
+            "5minute",
+            "10minute",
+            "15minute",
+            "30minute",
+            "1hour",
+            "4hour",
+            "1day",
+            "1week",
+            "1month",
+        ],
+    )
+    def test_accepts_each_canonical_interval(self, tmp_path: Path, interval: str) -> None:
+        p = build_partition_path(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol="X",
+            interval=interval,
+            year=2024,
+            month=1,
+        )
+        assert p.parts[-3] == interval
+
+
+class TestYearBoundaryPins:
+    """Pin the inclusive ``[2000, 2100]`` year envelope at both edges.
+
+    Accepting EXACTLY 2000 kills both the ``MIN_PARTITION_YEAR`` 2000 →
+    2001 constant mutant and the ``year < MIN`` → ``year <= MIN`` flip;
+    accepting EXACTLY 2100 kills the ``year > MAX`` → ``year >= MAX``
+    flip. The existing reject tests (1999 / 2101) cannot see any of the
+    three (DEC-MUTATION-RUNTIME-001).
+    """
+
+    def test_accepts_min_year_exactly_2000(self, tmp_path: Path) -> None:
+        p = build_partition_path(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol="X",
+            interval="1minute",
+            year=2000,
+            month=1,
+        )
+        assert p.parts[-2] == "2000"
+
+    def test_accepts_max_year_exactly_2100(self, tmp_path: Path) -> None:
+        p = build_partition_path(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="FNO",
+            symbol="X",
+            interval="1minute",
+            year=2100,
+            month=12,
+        )
+        assert p.parts[-2] == "2100"
+
+
+class TestForbiddenSymbolCharPins:
+    """All 10 forbidden filesystem chars are rejected, message byte-exact.
+
+    The 5-char sample above leaves the ``\\``, ``*``, ``"``, ``>``, ``|``
+    and NUL set-member mutants alive; covering every member makes each
+    "XX…XX" frozenset-member mutant flip an expected rejection into an
+    accepted path. The ``==`` on ``str(exc.value)`` additionally kills
+    the wrapped-message mutant, which a substring ``match=`` cannot
+    (DEC-MUTATION-RUNTIME-001).
+    """
+
+    @pytest.mark.parametrize("ch", ["/", "\\", ":", "*", "?", '"', "<", ">", "|", "\0"])
+    def test_rejects_each_forbidden_char(self, tmp_path: Path, ch: str) -> None:
+        symbol = f"a{ch}b"
+        with pytest.raises(PartitionError) as exc:
+            build_partition_path(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol=symbol,
+                interval="1minute",
+                year=2024,
+                month=1,
+            )
+        assert str(exc.value) == f"symbol {symbol!r} contains forbidden characters: [{ch!r}]"
+
+
+class TestErrorMessagesByteExact:
+    """Every PartitionError message is pinned with byte-exact ``==``.
+
+    ``pytest.raises(match=...)`` is a regex *search*, so mutmut's
+    "XX…XX"-wrapped f-string mutants sail straight through the existing
+    ``match=`` assertions; only full-string equality kills them — same
+    discipline as test_ranking.py (DEC-MUTATION-GATE-RANKING-002,
+    extended here by DEC-MUTATION-RUNTIME-001).
+    """
+
+    def test_exchange_message_byte_exact(self, tmp_path: Path) -> None:
+        with pytest.raises(PartitionError) as exc:
+            build_partition_path(
+                lake_root=tmp_path,
+                exchange="MCX",
+                segment="FNO",
+                symbol="X",
+                interval="1minute",
+                year=2024,
+                month=1,
+            )
+        assert str(exc.value) == "exchange must be one of ['BSE', 'NSE'], got 'MCX'"
+
+    def test_segment_message_byte_exact(self, tmp_path: Path) -> None:
+        with pytest.raises(PartitionError) as exc:
+            build_partition_path(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="COMMODITY",
+                symbol="X",
+                interval="1minute",
+                year=2024,
+                month=1,
+            )
+        assert str(exc.value) == "segment must be one of ['CASH', 'FNO', 'INDEX'], got 'COMMODITY'"
+
+    def test_interval_message_byte_exact(self, tmp_path: Path) -> None:
+        with pytest.raises(PartitionError) as exc:
+            build_partition_path(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol="X",
+                interval="2hour",
+                year=2024,
+                month=1,
+            )
+        assert str(exc.value) == "interval must be one of the 12 canonical intervals, got '2hour'"
+
+    def test_empty_symbol_message_byte_exact(self, tmp_path: Path) -> None:
+        with pytest.raises(PartitionError) as exc:
+            build_partition_path(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol="",
+                interval="1minute",
+                year=2024,
+                month=1,
+            )
+        assert str(exc.value) == "symbol must be a non-empty string"
+
+    def test_year_message_byte_exact(self, tmp_path: Path) -> None:
+        # One pin covers BOTH f-string fragments of the two-line message.
+        with pytest.raises(PartitionError) as exc:
+            build_partition_path(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol="X",
+                interval="1minute",
+                year=1999,
+                month=1,
+            )
+        assert str(exc.value) == ("year must be a 4-digit Gregorian year in [2000, 2100], got 1999")
+
+    def test_month_message_byte_exact(self, tmp_path: Path) -> None:
+        with pytest.raises(PartitionError) as exc:
+            build_partition_path(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="FNO",
+                symbol="X",
+                interval="1minute",
+                year=2024,
+                month=13,
+            )
+        assert str(exc.value) == "month must be in [1, 12], got 13"
+
+    def test_outside_lake_root_message_byte_exact(self, tmp_path: Path) -> None:
+        outside = tmp_path / "other" / "bars" / "NSE" / "FNO" / "X" / "1minute" / "2024"
+        outside_file = outside / "01.parquet"
+        outside_file.parent.mkdir(parents=True)
+        outside_file.touch()
+        lake_root = tmp_path / "lake"
+        with pytest.raises(PartitionError) as exc:
+            parse_partition_path(outside_file, lake_root=lake_root)
+        # The path embeds tmp_path, so the expected string is computed —
+        # the mutant's XX-wrapped literal fragments still cannot match.
+        assert str(exc.value) == f"path {outside_file!r} is not inside lake_root {lake_root!r}"
+
+    def test_too_short_path_message_byte_exact(self) -> None:
+        # One pin covers all THREE f-string fragments of the message.
+        with pytest.raises(PartitionError) as exc:
+            parse_partition_path(Path("bars/NSE/FNO/01.parquet"))
+        assert str(exc.value) == (
+            "partition path must have at least 7 components "
+            "(bars / exchange / segment / symbol / interval / yyyy / mm.parquet), "
+            "got 4: ('bars', 'NSE', 'FNO', '01.parquet')"
+        )
+
+    def test_missing_bars_dir_message_byte_exact(self) -> None:
+        bogus = Path("not_bars/NSE/FNO/NSE-NIFTY/1minute/2024/01.parquet")
+        with pytest.raises(PartitionError) as exc:
+            parse_partition_path(bogus)
+        assert str(exc.value) == "partition must live under bars/, got 'not_bars'"
+
+    def test_non_parquet_message_byte_exact(self) -> None:
+        bogus = Path("bars/NSE/FNO/NSE-NIFTY/1minute/2024/01.json")
+        with pytest.raises(PartitionError) as exc:
+            parse_partition_path(bogus)
+        assert str(exc.value) == "partition filename must end with .parquet, got '01.json'"
+
+    def test_non_integer_year_message_byte_exact(self) -> None:
+        bogus = Path("bars/NSE/FNO/NSE-NIFTY/1minute/twenty24/01.parquet")
+        with pytest.raises(PartitionError) as exc:
+            parse_partition_path(bogus)
+        assert str(exc.value) == "year segment must be an integer, got 'twenty24'"
+
+    def test_non_integer_month_message_byte_exact(self) -> None:
+        bogus = Path("bars/NSE/FNO/NSE-NIFTY/1minute/2024/Jan.parquet")
+        with pytest.raises(PartitionError) as exc:
+            parse_partition_path(bogus)
+        assert str(exc.value) == "month filename must be <mm>.parquet, got 'Jan.parquet'"
+
+    def test_naive_timestamp_message_byte_exact(self) -> None:
+        with pytest.raises(PartitionError) as exc:
+            partition_for_timestamp(datetime(2024, 1, 1, 0, 0))
+        assert str(exc.value) == (
+            "partition_for_timestamp requires tz-aware datetime, "
+            "got naive datetime.datetime(2024, 1, 1, 0, 0)"
+        )
