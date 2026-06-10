@@ -68,10 +68,17 @@ from typing import Protocol
 
 import structlog
 
+from brutex.adapters.dhan.auth_guard import AuthGuard
 from brutex.adapters.dhan.body import build_rolling_option_body
 from brutex.adapters.dhan.chunks import plan_option_windows
 from brutex.adapters.dhan.constants import ENDPOINT_ROLLING_OPTION, TRACK1_OPTIONS_INTERVAL
-from brutex.adapters.dhan.errors import DhanError, is_no_data_error, is_rate_limit, is_retryable
+from brutex.adapters.dhan.errors import (
+    DhanError,
+    is_auth_failure,
+    is_no_data_error,
+    is_rate_limit,
+    is_retryable,
+)
 from brutex.adapters.dhan.option_parser import parse_rolling_option_sides
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.models import OptionBar
@@ -272,6 +279,7 @@ def ingest_rolling_option_series(
     ledger: WindowLedger | None = None,
     max_retry_passes: int = _DEFAULT_MAX_RETRY_PASSES,
     retry_backoff: Callable[[int], None] | None = None,
+    auth_guard: AuthGuard | None = None,
 ) -> OptionIngestReport:
     """Pull one expired-option series' 1-minute OHLC over ``[start, end)`` — transactionally.
 
@@ -327,6 +335,18 @@ def ingest_rolling_option_series(
         Injected ``(attempt_index) -> None`` sleep hook called before each in-run
         retry (``None`` → :func:`_default_retry_backoff`, a bounded exponential
         seconds-scale wait). Tests pass a no-op recorder so no real sleep occurs.
+    auth_guard
+        Optional shared :class:`~brutex.adapters.dhan.auth_guard.AuthGuard` —
+        the pull-wide "token is dead" latch (DEC-OPTIONS-UNTIL-CLEAN-001, the
+        options arm of DEC-DHAN-AUTH-FAILFAST-RENEW-001). Tripped HERE, at the
+        failure source, the moment a terminal fetch error classifies as an auth
+        death (:func:`~brutex.adapters.dhan.errors.is_auth_failure`), so the
+        fan-out's not-yet-dispatched series short-circuit without waiting for
+        the controller drain (closes the pool-width doomed-call window). A dead
+        token can never be burned by the in-run retry: auth errors are
+        NON-retryable (``is_retryable`` excludes them), so the series aborts on
+        its FIRST window. ``None`` (the default) preserves the standalone
+        single-series behaviour byte-for-byte.
 
     Returns
     -------
@@ -391,6 +411,12 @@ def ingest_rolling_option_series(
                 payload = client.post_json(ENDPOINT_ROLLING_OPTION, body)
             except DhanError as exc:
                 if not is_retryable(exc):
+                    # Trip the shared dead-token latch AT THE SOURCE so series not
+                    # yet dispatched by the fan-out drain instantly — the options
+                    # arm of DEC-DHAN-AUTH-FAILFAST-RENEW-001 (the controller-side
+                    # drain alone leaves a pool-width doomed-call window).
+                    if auth_guard is not None and is_auth_failure(exc):
+                        auth_guard.trip(str(exc))
                     # TERMINAL — propagate before any commit (empty partition);
                     # quarantined upstream by ``run_dhan_options_ingest``.
                     raise

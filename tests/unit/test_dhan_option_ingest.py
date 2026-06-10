@@ -16,8 +16,10 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from brutex.adapters.dhan.auth_guard import AuthGuard
 from brutex.adapters.dhan.constants import ENDPOINT_ROLLING_OPTION
 from brutex.adapters.dhan.errors import (
+    DhanAuthError,
     DhanBadRequestError,
     DhanRateLimitError,
     DhanServerError,
@@ -112,6 +114,7 @@ def _run(
     on_success: object = None,
     max_retry_passes: int = 0,
     retry_backoff: object = lambda _i: None,
+    auth_guard: AuthGuard | None = None,
 ) -> OptionIngestReport:
     # ``max_retry_passes`` defaults to 0 here so a single error response is a
     # single attempt (the in-run resume-cursor retry, DEC-OPTION-429-RECOVERY-001,
@@ -137,6 +140,7 @@ def _run(
         on_success=on_success,  # type: ignore[arg-type]
         max_retry_passes=max_retry_passes,
         retry_backoff=retry_backoff,  # type: ignore[arg-type]
+        auth_guard=auth_guard,
     )
 
 
@@ -217,6 +221,35 @@ def test_terminal_error_propagates() -> None:
     sink = _FakeSink()
     with pytest.raises(DhanBadRequestError):
         _run(client, sink)
+
+
+def test_auth_failure_trips_guard_at_source() -> None:
+    # DEC-OPTIONS-UNTIL-CLEAN-001 (the options arm of
+    # DEC-DHAN-AUTH-FAILFAST-RENEW-001): a dead-token terminal error trips the
+    # SHARED latch INSIDE the series — at the failure source, before the fan-out
+    # drain — so not-yet-dispatched sibling series short-circuit without waiting
+    # out the pool-width doomed-call window. The error still propagates (empty
+    # partition, quarantined upstream).
+    guard = AuthGuard()
+    client = _FakeClient([DhanAuthError("HTTP 401 unauthorized: token expired")])
+    sink = _FakeSink()
+    with pytest.raises(DhanAuthError):
+        _run(client, sink, auth_guard=guard)
+    assert guard.tripped() is True
+    cause = guard.cause()
+    assert cause is not None and "401" in cause
+    assert sink.batches == []  # all-or-nothing: nothing committed
+
+
+def test_non_auth_terminal_never_trips_guard() -> None:
+    # A genuine terminal error (real 400, not a dead token) must NOT trip the
+    # dead-token latch — the rest of the fan-out keeps pulling.
+    guard = AuthGuard()
+    client = _FakeClient([DhanBadRequestError("HTTP 400")])
+    sink = _FakeSink()
+    with pytest.raises(DhanBadRequestError):
+        _run(client, sink, auth_guard=guard)
+    assert guard.tripped() is False
 
 
 def test_on_success_fires_per_clean_window() -> None:

@@ -1660,8 +1660,19 @@ def build_app(
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
-            """Background body: fan the options pull over the targets, streaming progress."""
-            return pull_options(
+            """Background body: fan the options pull over the targets, streaming progress.
+
+            Runs the AUTO-RESUME-UNTIL-CLEAN loop (DEC-OPTIONS-UNTIL-CLEAN-001 —
+            the options arm of DEC-AUTO-RESUME-DEFAULT-001): after the saturating
+            first pass, bounded extra rounds re-fetch ONLY the aborted-series
+            residual over the SHARED window ledger until ``stop_clean`` /
+            ``stop_dead`` (token died) / ``stop_quota`` (daily quota spent) / the
+            bounded budget. The finished verdict is stamped into the SAME banner
+            slot the spot pull uses. Honest envelope: rounds re-fire on_progress,
+            so the percent bar can saturate at 100% while later rounds drain the
+            residual — the verdict banner is the authoritative finish signal.
+            """
+            report = pull_options(
                 instruments,
                 lake_root=lake_root,
                 dry_run=dry_run,
@@ -1673,7 +1684,10 @@ def build_app(
                 # floor; the per-underlying on_progress already marks dirty too.
                 on_series_tick=make_throttled(_summary_cache.mark_dirty),
                 session_rate=_session_rate,
+                until_clean=True,
             )
+            _last_pull_verdict["verdict"] = report.verdict.to_dict()
+            return report
 
         # total = one progress tick per underlying (the options hook fires per underlying).
         started = _pull_job.start(_work, total=len(instruments), detail=f"{label} options")
