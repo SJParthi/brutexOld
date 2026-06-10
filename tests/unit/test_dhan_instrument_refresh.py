@@ -526,3 +526,36 @@ def test_refresh_index_eligibility_survives_vendor_id_namespaces() -> None:
     assert by_name["NIFTY MIDCAP 150"].security_id in up["reference_only_ids"]
     assert by_name["NIFTY"].security_id not in up["reference_only_ids"]
     assert by_name["NIFTY NEXT 50"].security_id not in up["reference_only_ids"]
+
+
+def test_refresh_index_immune_to_constituent_id_collision() -> None:
+    # DEC-REFERENCE-ID-SCOPE-001 regression (operator's live /universe,
+    # 2026-06-10): reference_security_ids holds NTM constituent EQUITY ids,
+    # and the NSE equity id space collides with the index space (ABB=13 ≡
+    # NIFTY's spot id). The unscoped membership test tagged NIFTY
+    # reference_only — killing its option pull AND making the
+    # DEC-ELIGIBILITY-AUTOHEAL-001 boot probe re-fire every boot. The id
+    # route is now equity-scoped; NIFTY (which has an OPTIDX leg in _rows)
+    # must stay pullable even when id 13 is in the reference set.
+    store = _Store()
+    text = _csv(_rows())  # NIFTY index id=13 + its OPTIDX leg
+    refresh_instruments(
+        store,
+        lambda _url: text,
+        snapshot_date=date(2026, 6, 10),
+        run_id="run-collide",
+        reference_security_ids=frozenset({13}),  # ABB the constituent ≡ NIFTY's id
+    )
+    up = store.upserts[0]
+    persisted = up["instruments"]
+    assert isinstance(persisted, list)
+    by_name = {i.symbol_name: i for i in persisted}
+    ref_of = up["reference_only_of"]
+    assert callable(ref_of)
+    # The index is NOT captured by the equity-scoped constituent route.
+    assert ref_of(by_name["NIFTY"]) is False
+    assert by_name["NIFTY"].security_id not in up["reference_only_ids"]
+    # An EQUITY whose id is in the set IS still tagged (RELIANCE is
+    # F&O-eligible in _rows, so use its id to prove the scope only —
+    # F&O-eligibility still wins per DEC-OPTIONS-PULL-GUARD-001.)
+    assert ref_of(by_name["RELIANCE"]) is False  # F&O carve-out intact

@@ -15,6 +15,8 @@ gate, beam not ``display:none``, no ``.running`` toggle) and pass after it.
 from __future__ import annotations
 
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from brutex.dashboard.app import _render_universe_html
 
@@ -54,7 +56,8 @@ def test_date_pickers_prefilled_with_canonical_default() -> None:
 
     html = _render_universe_html()
     from_iso, to_iso = default_date_range()
+    max_iso = datetime.now(tz=ZoneInfo("Asia/Kolkata")).date().isoformat()
     assert from_iso == "2021-01-01"
-    assert f'id="fromDate" min="2021-01-01" value="{from_iso}"' in html
-    assert f'id="toDate" min="2021-01-01" value="{to_iso}"' in html
+    assert f'id="fromDate" min="2021-01-01" max="{max_iso}" value="{from_iso}"' in html
+    assert f'id="toDate" min="2021-01-01" max="{max_iso}" value="{to_iso}"' in html
     assert "__BRUTEX_DATE_" not in html  # the placeholder tokens were all substituted

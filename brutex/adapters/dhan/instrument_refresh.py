@@ -159,7 +159,19 @@ def refresh_instruments(
         # ~211 F&O NTM constituents (e.g. RELIANCE) would be wrongly tagged
         # reference_only and lose option-pull. The index branch (NTM / VIX) is
         # unaffected — an index symbol is never in the stock F&O-eligible set.
-        is_ref = instrument.security_id in reference_security_ids or is_reference_only(instrument)
+        # CONSTITUENT id-membership applies to EQUITIES ONLY
+        # (DEC-REFERENCE-ID-SCOPE-001): ``reference_security_ids`` holds NTM
+        # constituent EQUITY ids, and the NSE equity id space collides with the
+        # index id space (ABB=13 ≡ NIFTY, ADANIENT=25 ≡ BANKNIFTY — the same
+        # vendor namespace measured in DEC-OPTIONS-ELIGIBLE-PRECISE-001), so an
+        # unscoped membership test wrongly tagged the brute-force indices
+        # reference_only (operator's live /universe, 2026-06-10) and made the
+        # DEC-ELIGIBILITY-AUTOHEAL-001 boot probe re-fire every boot. Indices
+        # never need the id route: every option-less index (the NTM index
+        # included) is tagged by the ``_index_has_options`` guard below.
+        is_ref = (
+            not instrument.is_index and instrument.security_id in reference_security_ids
+        ) or is_reference_only(instrument)
         # OPTION-PULL QUOTA GUARD (DEC-OPTIONS-ELIGIBLE-GUARD-001): an admitted
         # index with NO listed option chain (e.g. NIFTY 100, NIFTY AUTO) is tagged
         # reference_only so a mis-click can't waste Dhan quota on an empty option
