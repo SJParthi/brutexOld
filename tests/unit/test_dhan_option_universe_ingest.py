@@ -792,3 +792,59 @@ class TestPlanFetchKeyParity:
         # index: (8 WEEK + 3 MONTH codes) × 3 strikes; stock: 3 MONTH codes × 7 strikes
         assert len(jobs) == (8 + 3) * 3 + 3 * 7
         assert all(job[1] in underlyings for job in jobs)
+
+    def test_plan_prunes_superseded_trailing_rows(self) -> None:
+        # DEC-WINDOW-TRAILING-GC-001: the 30-day tiling clips its trailing
+        # window to ``end``, so yesterday's pull leaves a key today's longer
+        # ``end`` can never re-emit. Re-planning must prune that orphan while
+        # keeping the settled FULL tile and every current-plan key.
+        from datetime import UTC as _UTC
+        from datetime import date as _date
+        from datetime import datetime as _datetime
+
+        from brutex.adapters.dhan.option_ingest import coverage_key
+        from brutex.data.window_ledger import WindowLedger
+
+        underlyings = [_index(offsets=0)]  # one series (ATM CALL)
+        start = _date(2021, 1, 4)
+        ledger = WindowLedger()
+        plan_option_pull_windows(
+            ledger,
+            underlyings,
+            start=start,
+            end=_date(2021, 2, 9),  # yesterday: trailing clip [02-03, 02-09)
+            expiry_flags=("WEEK",),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+        )
+        full_tile = coverage_key(
+            exchange_segment="NSE_FNO",
+            security_id="13",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            window_start=start,
+            window_end=_date(2021, 2, 3),
+        )
+        ledger.record(
+            key=full_tile,
+            raw_bars=7,
+            error_type=None,
+            bars_appended=7,
+            now=_datetime(2026, 6, 10, tzinfo=_UTC),
+        )
+        planned_today = plan_option_pull_windows(
+            ledger,
+            underlyings,
+            start=start,
+            end=_date(2021, 2, 10),  # today: trailing clip [02-03, 02-10)
+            expiry_flags=("WEEK",),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+        )
+        assert ledger.count == planned_today  # the orphan is gone
+        ends = {r.window_end for r in ledger.records()}
+        assert "2021-02-09" not in ends  # yesterday's trailing orphan pruned
+        assert "2021-02-10" in ends  # today's trailing key planned
+        assert ledger.is_skippable(full_tile) is True  # settled full tile kept

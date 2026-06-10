@@ -1279,6 +1279,21 @@ jobs:
           else
             echo "(brutex.data.window_status_store test file not present yet — gate inactive)"
           fi
+          # DEC-WINDOW-LEDGER-001 + DEC-WINDOW-TRAILING-GC-001: the unified
+          # per-window skip/retry ledger (pure model incl. the trailing-orphan
+          # prune + its no-mask property suite) and its durable Parquet store
+          # (plan/prune wiring, migration, live flush). Both were 100%-covered
+          # by their unit suites but had NO standalone gate until the GC PR.
+          if compgen -G "tests/unit/test_window_ledger.py" > /dev/null; then
+            pytest --cov=brutex.data.window_ledger --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_window_ledger.py tests/property/test_window_ledger_prune_properties.py
+          else
+            echo "(brutex.data.window_ledger test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_window_ledger_store.py" > /dev/null; then
+            pytest --cov=brutex.data.window_ledger_store --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_window_ledger_store.py
+          else
+            echo "(brutex.data.window_ledger_store test file not present yet — gate inactive)"
+          fi
           # DEC-OPTIONS-LIVE-STATUS-001: the generic throttled-callback helper
           # (the options analog of make_live_status_flush). Pure + import-light —
           # held at 100% line+branch by its own unit suite (fake clock).
@@ -1388,6 +1403,15 @@ jobs:
             pytest --cov=brutex.dashboard.option_pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_option_until_clean.py
           else
             echo "(brutex.dashboard.option_pull_controller test file not present yet — gate inactive)"
+          fi
+          # DEC-SPOT-QUOTA-MIDROUND-001: the SPOT pull controller joins the strict
+          # per-module gate (the option_pull_controller twin above) — the mid-round
+          # quota-death mapping + the finally-guaranteed ledger/status persist ship
+          # at 100% line+branch and must stay there.
+          if compgen -G "tests/unit/test_dashboard_pull_controller.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py
+          else
+            echo "(brutex.dashboard.pull_controller test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_dhan_chunks.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.chunks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_chunks.py

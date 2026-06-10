@@ -259,6 +259,134 @@ class TestSeedLakeSuccess:
         assert ledger.records()[0].status == PLANNED
 
 
+def _tkey(end: date, start: date = date(2026, 6, 1)) -> WindowKey:
+    """A trailing-tile key: fixed start, the *end* a given pull's clip produced."""
+    return WindowKey(market="dhan", security_id="NIFTY", interval="1minute", start=start, end=end)
+
+
+def _plan_index(*keys: WindowKey) -> dict[tuple[str, str, str], dict[str, str]]:
+    """The series→tiles GC index a planner would build for *keys*."""
+    index: dict[tuple[str, str, str], dict[str, str]] = {}
+    for key in keys:
+        tiles = index.setdefault((key.market, key.security_id, key.interval), {})
+        tiles[key.start.isoformat()] = key.end.isoformat()
+    return index
+
+
+class TestPruneSuperseded:
+    """DEC-WINDOW-TRAILING-GC-001 — superseded trailing rows pruned, nothing else.
+
+    The no-mask theorem: pruning deletes rows, an absent row is never skippable,
+    so GC can only turn skips into re-fetches — never a fetch into a skip.
+    """
+
+    def test_shorter_end_orphan_is_pruned(self) -> None:
+        # Yesterday's settled trailing partial — superseded by today's longer tile.
+        ledger = WindowLedger()
+        orphan = _tkey(end=date(2026, 6, 9))
+        ledger.record(orphan, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        planned = _tkey(end=date(2026, 6, 10))
+        ledger.plan(planned, now=_LATER)
+        assert ledger.prune_superseded(_plan_index(planned)) == 1
+        assert ledger.count == 1
+        assert ledger.is_skippable(orphan) is False  # gone, not masked
+        assert ledger.records()[0].window_end == "2026-06-10"
+
+    def test_every_status_class_is_superseded_alike(self) -> None:
+        # SUCCESS / FAILED / EMPTY / PLANNED / SKIPPED orphans: all unreachable
+        # by the tiler once end advanced, all pruned (retries re-derive from the
+        # tiling, never from ledger rows — hostile A2).
+        ledger = WindowLedger()
+        ledger.record(
+            _tkey(date(2026, 6, 4)), raw_bars=5, error_type=None, bars_appended=5, now=_NOW
+        )
+        ledger.record(
+            _tkey(date(2026, 6, 5)),
+            raw_bars=0,
+            error_type="DhanServerError",
+            bars_appended=0,
+            now=_NOW,
+        )
+        ledger.record(
+            _tkey(date(2026, 6, 6)), raw_bars=0, error_type=None, bars_appended=0, now=_NOW
+        )
+        ledger.plan(_tkey(date(2026, 6, 7)), now=_NOW)
+        ledger.settle_known_gap(_tkey(date(2026, 6, 8)), now=_NOW)
+        planned = _tkey(end=date(2026, 6, 10))
+        ledger.plan(planned, now=_LATER)
+        assert ledger.prune_superseded(_plan_index(planned)) == 5
+        assert [r.window_end for r in ledger.records()] == ["2026-06-10"]
+
+    def test_equal_end_row_is_kept(self) -> None:
+        # A same-day re-pull re-emits the IDENTICAL trailing key — its settled
+        # row must survive so the second pull still skips it.
+        ledger = WindowLedger()
+        planned = _tkey(end=date(2026, 6, 10))
+        ledger.record(planned, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        assert ledger.prune_superseded(_plan_index(planned)) == 0
+        assert ledger.is_skippable(planned) is True
+
+    def test_longer_end_row_is_kept(self) -> None:
+        # A shrunk-range re-run: the longer historical row carries real settled
+        # state and is NOT superseded by the shorter plan.
+        ledger = WindowLedger()
+        longer = _tkey(end=date(2026, 6, 12))
+        ledger.record(longer, raw_bars=9, error_type=None, bars_appended=9, now=_NOW)
+        planned = _tkey(end=date(2026, 6, 10))
+        ledger.plan(planned, now=_LATER)
+        assert ledger.prune_superseded(_plan_index(planned)) == 0
+        assert ledger.count == 2
+
+    def test_unplanned_series_is_kept(self) -> None:
+        # An options-only / single-symbol pull must not touch other series' rows.
+        ledger = WindowLedger()
+        other = WindowKey(
+            market="dhan",
+            security_id="SENSEX",
+            interval="1minute",
+            start=date(2026, 6, 1),
+            end=date(2026, 6, 9),
+        )
+        ledger.record(other, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        planned = _tkey(end=date(2026, 6, 10))  # NIFTY only
+        ledger.plan(planned, now=_LATER)
+        assert ledger.prune_superseded(_plan_index(planned)) == 0
+        assert ledger.is_skippable(other) is True
+
+    def test_off_tiling_start_is_kept(self) -> None:
+        # A grid-shift orphan (changed pull start): its window_start is not on
+        # the planned tiling — out of this decision's scope, left untouched.
+        ledger = WindowLedger()
+        shifted = _tkey(end=date(2026, 6, 9), start=date(2026, 5, 15))
+        ledger.record(shifted, raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+        planned = _tkey(end=date(2026, 6, 10))  # tiling anchored 2026-06-01
+        ledger.plan(planned, now=_LATER)
+        assert ledger.prune_superseded(_plan_index(planned)) == 0
+        assert ledger.count == 2
+
+    def test_prune_is_idempotent(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _tkey(date(2026, 6, 9)), raw_bars=5, error_type=None, bars_appended=5, now=_NOW
+        )
+        planned = _tkey(end=date(2026, 6, 10))
+        ledger.plan(planned, now=_LATER)
+        index = _plan_index(planned)
+        assert ledger.prune_superseded(index) == 1
+        assert ledger.prune_superseded(index) == 0  # fixed point
+
+    def test_empty_index_is_a_noop(self) -> None:
+        ledger = WindowLedger()
+        ledger.record(
+            _tkey(date(2026, 6, 9)), raw_bars=5, error_type=None, bars_appended=5, now=_NOW
+        )
+        assert ledger.prune_superseded({}) == 0
+        assert ledger.count == 1
+
+    def test_empty_ledger_prunes_nothing(self) -> None:
+        assert WindowLedger().prune_superseded(_plan_index(_tkey(date(2026, 6, 10)))) == 0
+
+
 def test_records_are_sorted() -> None:
     ledger = WindowLedger()
     ledger.plan(_key("SENSEX"), now=_NOW)

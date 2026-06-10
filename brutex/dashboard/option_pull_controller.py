@@ -732,8 +732,9 @@ def pull_options(
     with pull_id_scope(pull_id) as pid:
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001, PR-4b): load/migrate the
         # durable ledger so each committed option cursor is recorded into the SAME
-        # browsable DB table as spot. (Option windows are keyed per-series, so they
-        # are recorded as they commit — not pre-PLANNED like spot.)
+        # browsable DB table as spot — and pre-PLANNED below exactly like spot
+        # (DEC-OPTION-WINDOW-PLAN-001 superseded this comment's original
+        # "recorded only at commit" wiring).
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
         if ledger is not None:
             # PRE-PLAN every (series × window) of this pull's fan-out as PLANNED
