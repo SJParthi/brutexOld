@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 from brutex.orchestrator.rate_limiter import (
+    _ACQUIRE_LOOP_CAP,
     DEFAULT_DOWNSHIFT_RPS,
     DEFAULT_INITIAL_RPS,
     AdaptiveTokenBucket,
@@ -92,6 +93,16 @@ class TestConstruction:
     def test_zero_trigger_rejected(self) -> None:
         with pytest.raises(RateLimiterError):
             AdaptiveTokenBucket(downshift_trigger=0)
+
+    def test_zero_downshift_rps_rejected(self) -> None:
+        """``downshift_rps <= 0`` fails fast (rate_limiter.py:227).
+
+        Distinct from the downshift-vs-initial ordering check — a zero
+        downshift rate would stall every post-429 acquire forever
+        (DEC-ORCH-STRICT-GATES-001 standalone-gap closure).
+        """
+        with pytest.raises(RateLimiterError, match="downshift_rps must be > 0"):
+            AdaptiveTokenBucket(downshift_rps=0.0)
 
     def test_zero_burst_rejected(self) -> None:
         with pytest.raises(RateLimiterError):
@@ -231,6 +242,112 @@ class TestDownshiftedThroughput:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Upshift — recovery back to initial_rps after a clean window
+# (DEC-ORCH-STRICT-GATES-001 standalone-gap closure: the upshift arm
+# of _maybe_upshift_locked + the pending_events drain were exercised
+# only by the aggregate --cov=brutex run before this class.)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestUpshift:
+    def _downshift(self, bucket: AdaptiveTokenBucket) -> None:
+        """Drive the bucket into the downshifted state via 3 quick 429s."""
+        for _ in range(3):
+            bucket.record_rate_limit_hit()
+        assert bucket.current_rps() == 10.0
+
+    def test_clean_window_upshifts_back_to_initial(
+        self, bucket: AdaptiveTokenBucket, clock: FakeClock
+    ) -> None:
+        """Once the 429 window is clean, acquire restores initial_rps.
+
+        Also covers the stale-429 eviction inside the upshift check
+        (rate_limiter.py:461) and the upshift event construction
+        (rate_limiter.py:477-487).
+        """
+        self._downshift(bucket)
+        # Move past the 60s rolling window so the 3 hits age out.
+        clock.advance(61.0)
+        bucket.acquire()
+        assert bucket.current_rps() == 15.0
+
+    def test_upshift_event_drained_via_pending_events(
+        self, bucket: AdaptiveTokenBucket, clock: FakeClock
+    ) -> None:
+        """The upshift event lands in the batch queue and drains ONCE.
+
+        Covers the pending_events drain (rate_limiter.py:428-431) — the
+        upshift arm is the only producer of batched events today.
+        """
+        self._downshift(bucket)
+        clock.advance(61.0)
+        bucket.acquire()
+
+        events = bucket.pending_events()
+        assert len(events) == 1
+        event = events[0]
+        assert event.kind == "upshift"
+        assert event.from_rps == 10.0
+        assert event.to_rps == 15.0
+        assert event.recent_429_count == 0
+        # Drained — a second read returns nothing.
+        assert bucket.pending_events() == []
+
+    def test_429_still_in_window_blocks_upshift(
+        self, bucket: AdaptiveTokenBucket, clock: FakeClock
+    ) -> None:
+        """A 429 still inside the rolling window keeps the lower rate."""
+        self._downshift(bucket)
+        clock.advance(10.0)  # hits recorded 10s ago — well within 60s
+        bucket.acquire()
+        assert bucket.current_rps() == 10.0
+        assert bucket.pending_events() == []
+
+    def test_clock_anomaly_now_before_last_success_blocks_upshift(
+        self, bucket: AdaptiveTokenBucket, clock: FakeClock
+    ) -> None:
+        """Defensive guard: ``now < last_success_at`` defers the upshift.
+
+        Unreachable under a true monotonic clock — pins the
+        rate_limiter.py:469-470 anomaly guard so a backwards-stepping
+        injected clock can never upshift early.
+        """
+        self._downshift(bucket)
+        clock.advance(200.0)
+        bucket.record_success()  # last_success_at = t+200
+        clock.advance(-90.0)  # rewind: now (t+110) < last_success (t+200)
+        bucket.acquire()  # 429s aged out (cutoff t+50) but guard holds
+        assert bucket.current_rps() == 10.0
+        assert bucket.pending_events() == []
+
+    def test_nonpositive_last_success_stamp_blocks_upshift(self) -> None:
+        """Defensive guard: ``last_success_at <= 0`` defers the upshift.
+
+        A monotonic clock CAN legitimately start at 0.0 — the
+        rate_limiter.py:474-475 guard then waits for one recorded
+        success before trusting the recovery window.
+        """
+        clock = FakeClock(start=0.0)  # construction stamps last_success_at=0.0
+        bucket = AdaptiveTokenBucket(
+            initial_rps=15.0,
+            downshift_rps=10.0,
+            downshift_trigger=3,
+            downshift_window=60.0,
+            upshift_recovery=120.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+        for _ in range(3):
+            bucket.record_rate_limit_hit()
+        assert bucket.current_rps() == 10.0
+        clock.advance(61.0)  # 429s age out of the window
+        bucket.acquire()
+        assert bucket.current_rps() == 10.0
+        assert bucket.pending_events() == []
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Stats — dashboard hooks
 # ────────────────────────────────────────────────────────────────────────
 
@@ -306,6 +423,29 @@ class TestNeverDropGuarantee:
         bucket.record_success()
         # Still at initial rps
         assert bucket.current_rps() == 15.0
+
+    def test_acquire_terminates_even_on_frozen_clock(self) -> None:
+        """The _ACQUIRE_LOOP_CAP safety net guarantees termination.
+
+        A clock whose sleep never advances time (the worst-case
+        injected-fake round-off scenario the cap defends against) would
+        otherwise spin the refill micro-wait loop forever; the cap
+        force-grants the token after 16 iterations
+        (rate_limiter.py:286-287, DEC-ORCH-STRICT-GATES-001 gap closure).
+        """
+        clock = FakeClock()
+        sleeps: list[float] = []
+        bucket = AdaptiveTokenBucket(
+            initial_rps=15.0,
+            downshift_rps=10.0,
+            clock=clock.now,
+            sleep=sleeps.append,  # records but NEVER advances the clock
+            start_empty=True,
+        )
+        wait = bucket.acquire()  # must return, not hang
+        assert wait > 0.0
+        # One initial wait + one micro-wait per capped loop iteration.
+        assert len(sleeps) == 1 + _ACQUIRE_LOOP_CAP
 
 
 # ────────────────────────────────────────────────────────────────────────

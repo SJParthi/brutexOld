@@ -733,10 +733,10 @@ jobs:
           # DEC-ORCH-LAZY-BLOOM-001 (2026-06-08, MIGRATION entry #589): the
           # lazy fastbloom_rs import also unblocks three more orchestrator
           # modules that reach 100% line+branch standalone with their
-          # dedicated test files. (state / store / pipeline / rate_limiter /
-          # quota_tracker / bloom carry residual standalone-coverage gaps —
-          # lines exercised only by the aggregate --cov=brutex run — tracked
-          # as the next ratchet; their ABI3 import blocker is now gone too.)
+          # dedicated test files. (The remaining six — state / store /
+          # pipeline / rate_limiter / quota_tracker / bloom — carried
+          # residual standalone-coverage gaps; CLOSED by
+          # DEC-ORCH-STRICT-GATES-001 below.)
           if compgen -G "tests/unit/test_orchestrator_audit.py" > /dev/null; then
             pytest --cov=brutex.orchestrator.audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit.py
           else
@@ -751,6 +751,56 @@ jobs:
             pytest --cov=brutex.orchestrator.adaptive_rate_limiter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_adaptive_rate_limiter.py
           else
             echo "(brutex.orchestrator.adaptive_rate_limiter test file not present yet — gate inactive)"
+          fi
+          # DEC-ORCH-STRICT-GATES-001 (2026-06-10, MIGRATION entry #613):
+          # the final six orchestrator modules promoted from
+          # global-coverage-only to strict standalone per-module 100%
+          # gates. Each dedicated unit file got surgical gap-closing
+          # tests (state: exhaustive-fallback raise; store: closed-store
+          # guards + decode corruption + flush — which exposed and fixed
+          # a latent lmdb sync() TypeError; pipeline: PhaseResult
+          # properties + IterationLimitError + subscribe; rate_limiter:
+          # upshift arm + pending_events + loop-cap + zero-downshift;
+          # quota_tracker: decode-guard matrix + default path +
+          # threshold edge days; bloom: saturated/log-collapse
+          # estimator clips). Every gate below verified locally at
+          # 100.00% line+branch on Python 3.12. With these, ALL
+          # brutex.orchestrator.* submodules with dedicated test files
+          # are strict-gated — the entry #261 operator-accepted ABI3
+          # limit is fully retired.
+          if compgen -G "tests/unit/test_orchestrator_state.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.state --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_state.py
+          else
+            echo "(brutex.orchestrator.state test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_orchestrator_store.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.store --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_store.py
+          else
+            echo "(brutex.orchestrator.store test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_orchestrator_pipeline.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.pipeline --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_pipeline.py
+          else
+            echo "(brutex.orchestrator.pipeline test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_orchestrator_rate_limiter.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.rate_limiter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_rate_limiter.py
+          else
+            echo "(brutex.orchestrator.rate_limiter test file not present yet — gate inactive)"
+          fi
+          # quota_tracker composes TWO files: the dedicated unit file plus
+          # the DEC-QUOTA-ENV-SINGLE-OPEN-001 regression file, which owns
+          # the process-shared env-registry paths (registry hit + ref-
+          # counted release) — composed, not duplicated (Golden Rule COMMON).
+          if compgen -G "tests/unit/test_quota_tracker.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.quota_tracker --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_quota_tracker.py tests/unit/test_bugfix_quota_env_share.py
+          else
+            echo "(brutex.orchestrator.quota_tracker test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_orchestrator_bloom.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.bloom --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_bloom.py
+          else
+            echo "(brutex.orchestrator.bloom test file not present yet — gate inactive)"
           fi
           # DEC-COV-001 step 18: 3-module indicator backfill batch
           # (DEC-INDICATOR-COVERAGE-001, ratchets the last 3 Track 1
@@ -1278,15 +1328,15 @@ jobs:
             echo "(brutex.data.option_sink test file not present yet — gate inactive)"
           fi
           # DEC-COVERAGE-INCREMENTAL-001: modules taken to 100% line+branch.
-          # NOTE: only NON-orchestrator modules get a per-module pytest-cov gate.
-          # A `--cov=brutex.orchestrator.*` target makes pytest-cov PRE-IMPORT the
-          # module (→ orchestrator/__init__ → bloom → fastbloom_rs), and that PyO3
-          # wheel may init only ONCE per interpreter — the test's own import then
-          # double-inits and collection errors. (This is why no existing
-          # orchestrator per-module gate is active.) audit.py +
-          # adaptive_rate_limiter.py reach 100% in the whole-package `--cov=brutex`
-          # run above (their tests are added in this PR); they are NOT given an
-          # isolated per-module gate for that reason.
+          # HISTORICAL NOTE (resolved): orchestrator modules originally could
+          # NOT get a per-module pytest-cov gate — a `--cov=brutex.orchestrator.*`
+          # target made pytest-cov PRE-IMPORT the module (→ orchestrator/__init__
+          # → bloom → fastbloom_rs), and that abi3≤3.8 PyO3 wheel may init only
+          # ONCE per interpreter, so the test's own import double-inited and
+          # collection errored. RESOLVED by DEC-ORCH-LAZY-BLOOM-001 (entry #589,
+          # lazy fastbloom_rs import); every orchestrator submodule with a
+          # dedicated test file is now strict-gated above
+          # (DEC-ORCH-STRICT-GATES-001, entry #613).
           if compgen -G "tests/unit/test_data_sink.py" > /dev/null; then
             pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py
           else
@@ -1387,9 +1437,11 @@ jobs:
           # DEC-COVERAGE-LEDGER-001 (entry #165): strict gates on the two pure
           # completeness-ledger modules. Both are import-light (brutex.data /
           # brutex.dashboard package inits do NOT pull in fastbloom_rs), so they
-          # are standalone-gateable — unlike any brutex.orchestrator.* submodule,
-          # which is why coverage_ledger lives under brutex.data, not
-          # brutex.orchestrator (see the module docstring + MIGRATION entry #165).
+          # were standalone-gateable from day one — at the time, unlike any
+          # brutex.orchestrator.* submodule, which is why coverage_ledger lives
+          # under brutex.data, not brutex.orchestrator (see the module docstring
+          # + MIGRATION entry #165; the orchestrator ABI3 blocker was since
+          # lifted by DEC-ORCH-LAZY-BLOOM-001 entry #589).
           if compgen -G "tests/unit/test_coverage_ledger.py" > /dev/null; then
             pytest --cov=brutex.data.coverage_ledger --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_coverage_ledger.py
           else

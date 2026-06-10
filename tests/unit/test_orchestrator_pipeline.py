@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from brutex.orchestrator.audit import AuditWriter, verify_chain
 from brutex.orchestrator.pipeline import (
+    IterationLimitError,
     PhaseHaltError,
     PhaseResult,
     PhaseRunner,
@@ -218,6 +219,33 @@ class TestDriveItemToTerminal:
                 max_iterations=5,
             )
 
+    def test_iteration_budget_exhaustion_raises_iteration_limit(self) -> None:
+        """An adapter stuck on RETRYING forever must hit IterationLimitError.
+
+        The state machine normally escalates to QUARANTINED after 10
+        retries, so the iteration budget is belt-and-braces — simulate the
+        "deeper issue" it guards against with an invoke that returns a
+        RETRYING item WITHOUT ever bumping retry_count toward escalation
+        (DEC-ORCH-STRICT-GATES-001 standalone-gap closure, pipeline.py:303).
+        """
+        from dataclasses import replace
+
+        def stuck_invoke(item: WorkItem) -> tuple[WorkItem, Any]:
+            # Bypass transition() so retry_count never reaches the FSM's
+            # quarantine escalation — the item is perpetually RETRYING.
+            # retry_count pins at 1: a valid backoff_delay input, far from
+            # the MAX_SOFT_RETRIES=10 escalation.
+            return replace(item, state=WorkItemState.RETRYING, retry_count=1), None
+
+        item = _make_item("stuck")
+        with pytest.raises(IterationLimitError, match="did not reach terminal state after 3"):
+            drive_item_to_terminal(
+                work_item=item,
+                invoke=stuck_invoke,
+                sleep=lambda _: None,
+                max_iterations=3,
+            )
+
 
 # ────────────────────────────────────────────────────────────────────────
 # PhaseRunner — multi-item aggregation
@@ -395,6 +423,65 @@ class TestPhaseRunner:
         # Should NOT raise
         result = runner.run([_make_item("x")])
         assert result.success == 1
+
+    def test_subscribe_registers_additional_subscriber(
+        self, store: WorkItemStore, audit: AuditWriter
+    ) -> None:
+        """``subscribe()`` after construction must receive every event.
+
+        Covers the post-construction registration path (pipeline.py:381)
+        the dashboard/Telegram wiring uses when the runner is built before
+        its consumers exist (DEC-ORCH-STRICT-GATES-001 gap closure).
+        """
+        events: list[PipelineEvent] = []
+        runner = PhaseRunner(
+            phase=IngestPhase.A_INSTRUMENTS,
+            store=store,
+            audit=audit,
+            invoke=FakeInvoke(default=Outcome.OK_WITH_DATA),
+            sleep=lambda _: None,
+            run_id="run-1",
+        )
+        runner.subscribe(events.append)
+        result = runner.run([_make_item("late-sub")])
+        assert result.success == 1
+        kinds = [e.kind for e in events]
+        assert PipelineEventKind.PHASE_START in kinds
+        assert PipelineEventKind.PHASE_COMPLETE in kinds
+
+
+# ────────────────────────────────────────────────────────────────────────
+# PhaseResult derived properties
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPhaseResultProperties:
+    """Pin the two derived stats the report/aggregator layer reads."""
+
+    @staticmethod
+    def _result(*, success: int, no_data: int, quarantined: int) -> PhaseResult:
+        return PhaseResult(
+            phase=IngestPhase.A_INSTRUMENTS,
+            total=success + no_data + quarantined,
+            success=success,
+            no_data=no_data,
+            quarantined=quarantined,
+            retried=0,
+            elapsed_seconds=0.1,
+        )
+
+    def test_terminal_sums_all_terminal_counts(self) -> None:
+        """``terminal`` is success + no_data + quarantined (pipeline.py:216)."""
+        result = self._result(success=3, no_data=2, quarantined=1)
+        assert result.terminal == 6
+
+    def test_had_quarantines_true_when_any_quarantined(self) -> None:
+        """``had_quarantines`` flags a non-zero quarantine count (pipeline.py:221)."""
+        assert self._result(success=1, no_data=0, quarantined=2).had_quarantines is True
+
+    def test_had_quarantines_false_when_clean(self) -> None:
+        """A clean phase reports no quarantines."""
+        assert self._result(success=4, no_data=1, quarantined=0).had_quarantines is False
 
     def test_audit_entries_on_phase_events(
         self, store: WorkItemStore, audit: AuditWriter, audit_path: Path

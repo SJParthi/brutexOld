@@ -259,6 +259,37 @@ class TestEstimators:
             bf.add(hashlib.sha256(str(i).encode()).digest())
         assert bf.empirical_fpr <= bf.fpr_target * 10
 
+    def test_saturated_bit_array_estimates_capacity(self) -> None:
+        """A fully-set bit array diverges the estimator → return capacity.
+
+        ``bits_set >= m_bits`` is unreachable through the public API (the
+        FAIL_CLOSED capacity gate stops insertions long before saturation),
+        so the popcount is stubbed to report a saturated array
+        (DEC-ORCH-STRICT-GATES-001 gap closure, bloom.py:482).
+        """
+        bf = BloomFilter(capacity=10, fpr_target=1e-3)
+        bf.add(hashlib.sha256(b"one").digest())
+        with patch("brutex.orchestrator.bloom._popcount_bytes", return_value=bf.m_bits):
+            assert bf.unique_count_estimate == bf.capacity
+
+    def test_log_domain_error_estimates_capacity(self) -> None:
+        """A float-collapse inside ``math.log`` clips to capacity.
+
+        The ``bits_set >= m_bits`` guard makes ``1 - bits_set/m_bits``
+        strictly positive in exact arithmetic, but the defensive
+        ``except ValueError`` (bloom.py:485-486) protects against float
+        round-off collapsing the log argument to 0.0 on filters whose
+        ``m_bits`` exceeds the float mantissa — forced here by stubbing
+        ``math.log`` (DEC-ORCH-STRICT-GATES-001 gap closure).
+        """
+        bf = BloomFilter(capacity=10, fpr_target=1e-3)
+        bf.add(hashlib.sha256(b"one").digest())
+        with patch(
+            "brutex.orchestrator.bloom.math.log",
+            side_effect=ValueError("math domain error"),
+        ):
+            assert bf.unique_count_estimate == bf.capacity
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Cross-hash compatibility (sha256 + blake3)
