@@ -903,6 +903,14 @@ jobs:
           else
             echo "(brutex.engine.combo_mask test file not present yet — gate inactive)"
           fi
+          # 19i1 · brutex.engine.stage3_select — Stage-3 per-leaderboard top-K
+          # survivor query (DEC-STAGE3-TOPK-001; 32 stmts / 8 branches measured
+          # AFTER the DEC-COVERAGE-ELLIPSIS-UNMASK-001 exclude fix).
+          if compgen -G "tests/unit/test_engine_stage3_select.py" > /dev/null; then
+            pytest --cov=brutex.engine.stage3_select --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_stage3_select.py
+          else
+            echo "(brutex.engine.stage3_select test file not present yet — gate inactive)"
+          fi
           # 19i2 · brutex.ranking — composite score + hard gates (DEC-RANKING-001)
           if compgen -G "tests/unit/test_ranking.py" > /dev/null; then
             pytest --cov=brutex.ranking --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ranking.py

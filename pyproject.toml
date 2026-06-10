@@ -462,7 +462,16 @@ exclude_lines = [
     "raise NotImplementedError",
     "if TYPE_CHECKING:",
     "if __name__ == .__main__.:",
-    "\\.\\.\\.",
+    # Bare `...` STUB BODIES only (Protocol/overload stubs), ANCHORED.
+    # The previous unanchored "\\.\\.\\." matched ANY line containing an
+    # ellipsis — including `-> tuple[X, ...]:` return annotations on def
+    # lines, and coverage excludes the ENTIRE BODY of a function whose def
+    # line matches. 78 files carry `...]` in annotations, so whole tested
+    # functions (e.g. ResultsStore.top_k, expiry_codes_for_flag) were
+    # silently OUTSIDE the measured surface while reporting "100.00%"
+    # (DEC-COVERAGE-ELLIPSIS-UNMASK-001 — found by the slice-2 gate showing
+    # 14 statements for a 32-statement module).
+    "^\\s*\\.\\.\\.\\s*$",
 ]
 
 [tool.bandit]
