@@ -1,6 +1,6 @@
 """Memory-leak stress harness — O(1)-bounded memory over ≥100K sustained events.
 
-DEC-MEMLEAK-GATE-001 (MIGRATION.md entry #615). Four long-running hot paths are
+DEC-MEMLEAK-GATE-001 (MIGRATION.md entry #616). Four long-running hot paths are
 proven to hold a FLAT Python-heap footprint under sustained event load — the
 leak class that one-shot unit tests structurally cannot catch:
 
@@ -74,7 +74,7 @@ carry ≥20× headroom over measured (≥5000× for tests 1-3); the peak ceiling
 ~2.7 B/event for test 4. Whole module ≈ 44 s at the default. Numbers WILL
 differ on other platforms / CPython versions — recalibrate before tightening.
 Shared-GHA wall time is plausibly 2-3× the container numbers; the per-push
-budget cost is stated in MIGRATION.md entry #615, not hidden.
+budget cost is stated in MIGRATION.md entry #616, not hidden.
 
 Budget / knob (``STRESS_MEMLEAK_EVENTS``)
 -----------------------------------------
