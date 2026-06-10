@@ -18,7 +18,10 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-10 (DEC-WORKSPACE-VERIFY-002, MIGRATION.md #609 —
+_Last updated: 2026-06-10 (DEC-AUTOMERGE-CLEAN-STRICT-001, MIGRATION.md
+#612 — §2 Rule 13(a) `mergeable_state` invariant aligned with the
+charter §4.5 pre-G2 envelope per DEC-WORKSPACE-VERIFY-002 follow-up
+F-4). Earlier: 2026-06-10 (DEC-WORKSPACE-VERIFY-002, MIGRATION.md #609 —
 §6 `dhan/constants.py` line citations refreshed after the 5-agent
 workspace verification found 4 rows drifted by 7 lines; §1/§3 active
 branch refreshed). Earlier: 2026-06-03 (DEC-SHARED-CORE-001 Phase 2b,
@@ -199,8 +202,12 @@ Track 1 spec locked after 4-agent hostile-review pass._
     (Correctness > Reliability > Recoverability > Observability >
     Performance > Scalability), the §3 merge-ready gate matrix, and the
     §4 Definition of Done. Two hard invariants: (a) **never merge over a
-    red or pending gate** — `mergeable_state` must be `clean` and every
-    ✅ gate green, verified not assumed; (b) **honesty** — per Golden
+    red or pending gate** — every ✅ gate green, verified not assumed,
+    and `mergeable_state` within the charter §4.5 envelope (strict
+    `clean` is the G2-gated target; until server-side branch protection
+    lands, `dirty`/`behind`/`blocked`/`unknown` are refused and
+    pending-only `unstable` is tolerated —
+    DEC-AUTOMERGE-CLEAN-STRICT-001); (b) **honesty** — per Golden
     Rule #10, never claim "100% / fully / guaranteed" for a 🟡/📋/🚫
     tier row; state what is green, partial, and out of scope. The
     charter is enforced on every surface via §8 (this file for sessions,

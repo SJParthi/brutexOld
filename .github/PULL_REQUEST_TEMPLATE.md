@@ -3,7 +3,10 @@
 > **Merge-Readiness Charter (DEC-MERGE-GUARANTEE-001):** this PR obeys
 > [`docs/MERGE_READINESS_GUARANTEE.md`](../docs/MERGE_READINESS_GUARANTEE.md)
 > — the §3 gate matrix + §4 Definition of Done. **Never merge over a red or
-> pending gate** (`mergeable_state` must be `clean`). Per Golden Rule #10,
+> pending gate** (`mergeable_state` within the charter §4.5 envelope —
+> strict `clean` once G2 branch protection lands; `dirty`/`behind`/
+> `blocked`/`unknown` always refused, DEC-AUTOMERGE-CLEAN-STRICT-001).
+> Per Golden Rule #10,
 > do not claim "100% / fully / guaranteed" for any partial/roadmap/out-of-scope
 > row; disclose it in the Honest envelope.
 
