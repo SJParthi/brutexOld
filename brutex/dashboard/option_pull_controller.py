@@ -98,6 +98,7 @@ from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
     from brutex.adapters.dhan.rate_control import DhanRateController
+    from brutex.adapters.dhan.token_preflight import TokenPreflight
 
 _LOG = structlog.get_logger(__name__)
 
@@ -229,7 +230,8 @@ class OptionsPullReport:
     #: and carried separately so the verdict can read ``known_gap_only`` when a
     #: pull found NOTHING but gaps.
     gap_only_series: int = 0
-    #: Until-clean rounds actually run (1 for a single-pass pull).
+    #: Until-clean rounds actually run (1 for a single-pass pull; 0 for a
+    #: pre-flight refusal — zero paced calls fired, DEC-OPTIONS-TOKEN-PREFLIGHT-001).
     rounds_run: int = 1
 
     @property
@@ -463,6 +465,49 @@ def _build_live_option_controller() -> DhanRateController:  # pragma: no cover �
     return DhanRateController()
 
 
+def _options_preflight_refusal(
+    preflight: TokenPreflight,
+    *,
+    dry_run: bool,
+    start: datetime,
+    end: datetime,
+    underlyings_len: int,
+    pid: str | None,
+) -> OptionsPullReport:
+    """Build + loudly log the ``auth_expired`` refusal for a DEAD pre-flight token.
+
+    DEC-OPTIONS-TOKEN-PREFLIGHT-001 — the options twin of the spot
+    ``_preflight_refusal`` (DEC-TOKEN-PREFLIGHT-001). Shared by BOTH the
+    injected-pre-flight gate (the tested path) and the live auto-probe gate
+    (``# pragma: no cover``): returns an ``auth_aborted``
+    :class:`OptionsPullReport` whose ``.verdict`` is the loud ``auth_expired``
+    (reusing ``classify_pull`` — no second vocabulary) and emits ONE
+    ``universe.pull_options.preflight_refused`` WARNING so a refused pull is
+    never silent. NO fan-out runs — ``rounds_run=0`` (zero paced calls; a dead
+    token can never land a bar).
+    """
+    refusal = OptionsPullReport(
+        dry_run=dry_run,
+        start_date=start.date().isoformat(),
+        end_date=(end - timedelta(days=1)).date().isoformat(),
+        symbols=[],
+        auth_aborted=True,
+        auth_cause=preflight.reason,
+        rounds_run=0,
+    )
+    verdict = refusal.verdict
+    _LOG.warning(
+        "universe.pull_options.preflight_refused",
+        pull_id=pid,
+        underlyings=underlyings_len,
+        verdict=verdict.kind,
+        headline=verdict.headline,
+        action=verdict.action,
+        reason=preflight.reason,
+    )
+    return refusal
+
+
 def pull_options(
     instruments: Sequence[Instrument],
     *,
@@ -477,6 +522,7 @@ def pull_options(
     on_series_tick: Callable[[], None] | None = None,
     pull_id: str | None = None,
     session_rate: SessionRateController | None = None,
+    preflight: TokenPreflight | None = None,
     until_clean: bool = False,
     until_clean_rounds: int = AUTO_RESUME_MAX_ROUNDS,
     until_clean_sleep: Callable[[int], None] | None = None,
@@ -518,6 +564,21 @@ def pull_options(
         Override the ``(client, sink)`` builder; defaults to the synthetic
         builder when *dry_run* else the live builder. Tests inject a fake
         factory to exercise the non-dry-run branch without network.
+    preflight
+        Optional pre-flight token classification (DEC-OPTIONS-TOKEN-PREFLIGHT-001,
+        the spot DEC-TOKEN-PREFLIGHT-001 twin). When a DEAD
+        :class:`~brutex.adapters.dhan.token_preflight.TokenPreflight` is
+        injected, this REFUSES to start — it returns an ``auth_aborted``
+        :class:`OptionsPullReport` (whose ``.verdict`` is the loud
+        ``auth_expired``) WITHOUT firing a single paced fan-out call, instead
+        of burning one doomed call + the AuthGuard drain a dead token forces
+        today. ``None`` (the default) defers to the live auto-probe below for
+        a default live pull, else skips the gate entirely (the in-pull
+        AuthGuard still catches a mid-pull death,
+        DEC-OPTIONS-UNTIL-CLEAN-001). Tests inject the classification
+        directly; the live path computes it via the SAME
+        :func:`~brutex.adapters.dhan.token_preflight.probe_token_data_live`
+        probe spot uses (``# pragma: no cover``).
     on_series_tick
         Optional **observability-only** zero-arg hook threaded to the ingest
         spine, fired once per SERIES as it completes (DEC-OPTIONS-LIVE-STATUS-001).
@@ -573,10 +634,59 @@ def pull_options(
         year=None,
         now=now if now is not None else datetime.now(UTC),
     )
+    # Pre-flight gate (DEC-OPTIONS-TOKEN-PREFLIGHT-001, the spot
+    # DEC-TOKEN-PREFLIGHT-001 twin): a DEAD token can NEVER satisfy a paced
+    # ≤ 5 r/s options fan-out — the first series would fire a doomed 401/DH-906
+    # and the AuthGuard would drain the rest (DEC-OPTIONS-UNTIL-CLEAN-001).
+    # REFUSE up front, returning the loud ``auth_expired`` verdict (reusing
+    # classify_pull via OptionsPullReport.verdict — no second vocabulary),
+    # BEFORE the client is even built. ``None`` preflight skips this gate (the
+    # in-pull AuthGuard still catches a mid-pull death).
+    if preflight is not None and preflight.is_dead:
+        with pull_id_scope(pull_id) as pid:
+            return _options_preflight_refusal(
+                preflight,
+                dry_run=dry_run,
+                start=start,
+                end=end,
+                underlyings_len=len(underlyings),
+                pid=pid,
+            )
     use_live_rate = client_factory is None and not dry_run
     if client_factory is None:
         client_factory = _build_dry_run_options if dry_run else _build_live_options
     client, sink = client_factory(lake_root)
+    # Auto pre-flight on a DEFAULT live options pull (no injected factory +
+    # creds present): probe the token ONCE before any paced fan-out call so a
+    # dead token short-circuits to the same refusal — the options analog of the
+    # spot "Pull ALL" automatic guard. Reuses the spot pre-flight ENGINE
+    # (CLAUDE.md §11 COMMON — no re-implementation): ONE tiny ``charts/intraday``
+    # data call over the first spot underlying, dead ONLY on a genuine auth
+    # failure (is_auth_failure), so a transient 429 / 5xx / timeout never
+    # false-aborts a working pull (DEC-TOKEN-PREFLIGHT-DATAPROBE-001). An
+    # injected ``preflight`` (handled above) or a dry-run / injected-factory
+    # pull skips this. ``# pragma: no cover`` — needs a real token + the data
+    # network.
+    if (
+        preflight is None and use_live_rate and instruments
+    ):  # pragma: no cover — live token + network
+        from brutex.adapters.dhan.adapter import DhanMarketAdapter
+        from brutex.adapters.dhan.client import DhanClient
+        from brutex.adapters.dhan.token_preflight import probe_token_data_live
+
+        if isinstance(client, DhanClient):
+            probe_adapter = DhanMarketAdapter(client=client, instruments=tuple(instruments))
+            live_pf = probe_token_data_live(probe_adapter, instruments[0])
+            if live_pf.is_dead:
+                with pull_id_scope(pull_id) as pid:
+                    return _options_preflight_refusal(
+                        live_pf,
+                        dry_run=dry_run,
+                        start=start,
+                        end=end,
+                        underlyings_len=len(underlyings),
+                        pid=pid,
+                    )
 
     # Open the pull's correlation scope (DEC-DHAN-INGEST-LOGGING-001): ``pid`` is
     # bound into the structlog contextvars for the whole fan-out, so this

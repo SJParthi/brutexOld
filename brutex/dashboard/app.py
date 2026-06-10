@@ -1935,7 +1935,22 @@ def build_app(
         if not isinstance(lake_root, Path):
             return JSONResponse({"source": "none", "count": 0, "windows": []})
         lake = lake_root.parent
-        return JSONResponse(await run_in_threadpool(build_window_payload, lake))
+
+        def _payload() -> dict[str, Any]:
+            """Build the payload with the id→symbol map for PRECISE option rows.
+
+            DEC-WINDOW-OPTION-DECODE-001: option window keys carry the numeric
+            Dhan SECURITY_ID (``25|NSE_FNO``), so the map lets the projection
+            display the operator's symbol (``BANKNIFTY``) instead. Built here on
+            the SAME threadpool worker as the read so the store's RLock stays on
+            one thread (DEC-DASHBOARD-FASTREAD-001); display-only.
+            """
+            symbol_for_id = {
+                str(i.security_id): i.symbol_name for i in store.list_index_equity_instruments()
+            }
+            return build_window_payload(lake, symbol_for_id=symbol_for_id)
+
+        return JSONResponse(await run_in_threadpool(_payload))
 
     @app.get("/api/v1/coverage/options")
     async def api_coverage_options() -> JSONResponse:

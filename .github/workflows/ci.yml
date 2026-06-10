@@ -911,6 +911,14 @@ jobs:
           else
             echo "(brutex.engine.stage3_select test file not present yet — gate inactive)"
           fi
+          # 19i1a · brutex.engine.stage3_grid — Stage-3 [0,1] ↔ int-paisa Mode-A
+          # grid bijection (DEC-STAGE3-GRID-001; pure, O(1) per call — ADR-0007
+          # condition 3: quantize before the 9-field hash).
+          if compgen -G "tests/unit/test_engine_stage3_grid.py" > /dev/null; then
+            pytest --cov=brutex.engine.stage3_grid --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_stage3_grid.py
+          else
+            echo "(brutex.engine.stage3_grid test file not present yet — gate inactive)"
+          fi
           # 19i2 · brutex.ranking — composite score + hard gates (DEC-RANKING-001)
           if compgen -G "tests/unit/test_ranking.py" > /dev/null; then
             pytest --cov=brutex.ranking --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ranking.py
