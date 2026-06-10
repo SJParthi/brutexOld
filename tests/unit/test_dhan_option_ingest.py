@@ -429,15 +429,200 @@ class TestResumeCursorAndTransactionalCommit:
         assert len(records) == 2  # both committed cursors recorded
         assert {r.status for r in records} == {SUCCESS}
 
-    def test_dh905_terminal_settles_skipped_in_ledger_and_reraises(self) -> None:
-        # DEC-WINDOW-LEDGER-001 Stage c2: a Dhan DH-905 "no data present" for an
-        # option window is settled SKIPPED in the ledger (so it stops aborting the
-        # series forever) BUT still re-raised to the run_dhan_options_ingest
-        # quarantine — behaviour unchanged, only the ledger is enriched.
+    def test_dh905_settles_skipped_and_continues(self) -> None:
+        # DEC-OPTION-DH905-CONTINUE-001 (supersedes the Stage-c2 settle-then-
+        # quarantine): a Dhan DH-905 "no data present" cursor is the vendor's
+        # DEFINITIVE 0-bar answer — settled SKIPPED in the ledger and the series
+        # CONTINUES (no raise, never a failure). A fully-dead 2-window series
+        # drains in ONE paced pass: both windows settled, report COMPLETE.
         from brutex.data.window_ledger import SKIPPED, WindowLedger
 
         ledger = WindowLedger()
-        client = _FakeClient([DhanBadRequestError("HTTP 400 DH-905 no data present")])
+        client = _FakeClient(
+            [
+                DhanBadRequestError("HTTP 400 DH-905 no data present"),
+                DhanBadRequestError("HTTP 400 DH-905 no data present"),
+            ]
+        )
+        sink = _FakeSink()
+        report = ingest_rolling_option_series(
+            client,
+            sink,
+            security_id="13",
+            exch_id="NSE",
+            underlying_symbol="NIFTY",
+            exchange_segment="NSE_FNO",
+            instrument="OPTIDX",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            start=self._START,
+            end=self._END,
+            ledger=ledger,
+            max_retry_passes=0,
+            retry_backoff=lambda _i: None,
+        )
+        assert len(client.calls) == 2  # the whole series drained in one pass
+        assert report.complete is True  # a continued-with-gaps series IS complete
+        assert report.no_data_windows == 2
+        assert report.still_failed_windows == 0  # a gap is never a failure
+        assert report.bars_appended == 0
+        assert sink.batches == []  # ledger state only — never bars
+        records = ledger.records()
+        assert [r.status for r in records] == [SKIPPED, SKIPPED]
+        # The settle reason carries the (truncated) vendor message, so the
+        # browsable ledger row self-explains (hostile finding 5).
+        assert all(r.last_error is not None and "DH-905" in r.last_error for r in records)
+
+    def test_dh905_settled_series_skips_on_repull(self) -> None:
+        # The next pull over the SAME ledger skips every settled known-gap window
+        # in O(1) — zero vendor calls (the ~67-pulls-to-drain pathology is gone).
+        from brutex.data.window_ledger import WindowLedger
+
+        ledger = WindowLedger()
+        ingest_rolling_option_series(
+            _FakeClient([DhanBadRequestError("HTTP 400 DH-905 no data present")] * 2),
+            _FakeSink(),
+            security_id="13",
+            exch_id="NSE",
+            underlying_symbol="NIFTY",
+            exchange_segment="NSE_FNO",
+            instrument="OPTIDX",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            start=self._START,
+            end=self._END,
+            ledger=ledger,
+            max_retry_passes=0,
+            retry_backoff=lambda _i: None,
+        )
+        repull_client = _FakeClient([])  # any vendor call would IndexError
+        report = ingest_rolling_option_series(
+            repull_client,
+            _FakeSink(),
+            security_id="13",
+            exch_id="NSE",
+            underlying_symbol="NIFTY",
+            exchange_segment="NSE_FNO",
+            instrument="OPTIDX",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            start=self._START,
+            end=self._END,
+            ledger=ledger,
+            max_retry_passes=0,
+            retry_backoff=lambda _i: None,
+        )
+        assert repull_client.calls == []
+        assert report.skipped_windows == 2
+        assert report.no_data_windows == 0  # nothing freshly answered this pass
+        assert report.complete is True
+
+    def test_dh905_mixed_series_commits_bars_and_settles_gaps(self) -> None:
+        # MIXED series (the hostile review's attack B): window 0 has real bars,
+        # window 1 is a DH-905 gap → the real bars COMMIT and the gap settles —
+        # complete, never a quarantine. Ledger: SUCCESS + SKIPPED.
+        from brutex.data.window_ledger import SKIPPED, SUCCESS, WindowLedger
+
+        ledger = WindowLedger()
+        client = _FakeClient(
+            [
+                {"data": {"ce": _side(), "pe": None}},
+                DhanBadRequestError("HTTP 400 DH-905 no data present"),
+            ]
+        )
+        sink = _FakeSink()
+        report = ingest_rolling_option_series(
+            client,
+            sink,
+            security_id="13",
+            exch_id="NSE",
+            underlying_symbol="NIFTY",
+            exchange_segment="NSE_FNO",
+            instrument="OPTIDX",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            start=self._START,
+            end=self._END,
+            ledger=ledger,
+            max_retry_passes=0,
+            retry_backoff=lambda _i: None,
+        )
+        assert report.complete is True
+        assert report.bars_appended == 1  # the real window committed
+        assert report.no_data_windows == 1  # the gap settled
+        assert len(sink.batches) == 1  # the gap window never reached the sink
+        assert sorted(r.status for r in ledger.records()) == sorted([SUCCESS, SKIPPED])
+
+    def test_gap_then_transient_abort_keeps_gap_settled(self) -> None:
+        # The all-or-nothing invariant for TRANSIENT failures is preserved
+        # EXACTLY: window 0 settles as a DH-905 gap, window 1 outruns its (0)
+        # retry budget → the series ABORTS committing NOTHING — but the gap
+        # settle SURVIVES (the vendor's answer is independent of the series'
+        # fate) and is EXCLUDED from the still-failed residual.
+        from brutex.data.window_ledger import SKIPPED, WindowLedger
+
+        ledger = WindowLedger()
+        client = _FakeClient(
+            [
+                DhanBadRequestError("HTTP 400 DH-905 no data present"),
+                DhanRateLimitError("HTTP 429"),
+            ]
+        )
+        sink = _FakeSink()
+        report = ingest_rolling_option_series(
+            client,
+            sink,
+            security_id="13",
+            exch_id="NSE",
+            underlying_symbol="NIFTY",
+            exchange_segment="NSE_FNO",
+            instrument="OPTIDX",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            start=self._START,
+            end=self._END,
+            ledger=ledger,
+            max_retry_passes=0,
+            retry_backoff=lambda _i: None,
+        )
+        assert report.complete is False
+        assert report.bars_appended == 0
+        assert sink.batches == []  # nothing committed on the abort
+        assert report.no_data_windows == 1  # the gap is settled, not deferred
+        assert report.still_failed_windows == 1  # ONLY the transient window
+        assert report.transient_failures == 1  # same residual, both names
+        # Two ledger rows: the gap settled SKIPPED (this decision) + the aborting
+        # 429 cursor recorded FAILED for /coverage/windows visibility
+        # (DEC-OPTION-WINDOW-PLAN-001) — FAILED is NOT skippable, so the
+        # transient window still re-fetches next pull (redo-not-skip).
+        from brutex.data.window_ledger import FAILED
+
+        statuses = sorted(r.status for r in ledger.records())
+        assert statuses == sorted([SKIPPED, FAILED])
+
+    def test_both_marker_400_is_auth_not_gap(self) -> None:
+        # AUTH OUTRANKS NO-DATA (the hostile review's BLOCKER finding 1): a
+        # token-death 400 carrying BOTH markers (DH-906 Invalid Token + DH-905
+        # no data) must NEVER settle a window SKIPPED — it re-raises (quarantined
+        # upstream) and trips the dead-token latch, or a dead token would mask
+        # real windows as permanent known gaps.
+        from brutex.data.window_ledger import WindowLedger
+
+        guard = AuthGuard()
+        ledger = WindowLedger()
+        client = _FakeClient(
+            [DhanBadRequestError("HTTP 400: DH-906 Invalid Token (no data present DH-905)")]
+        )
         with pytest.raises(DhanBadRequestError):
             ingest_rolling_option_series(
                 client,
@@ -456,9 +641,27 @@ class TestResumeCursorAndTransactionalCommit:
                 ledger=ledger,
                 max_retry_passes=0,
                 retry_backoff=lambda _i: None,
+                auth_guard=guard,
             )
-        # The first window is settled SKIPPED (the known gap), not left pending.
-        assert ledger.records()[0].status == SKIPPED
+        assert ledger.count == 0  # NO settle — never mask a token death as a gap
+        assert guard.tripped() is True  # the latch fired at the source
+
+    def test_dh905_without_ledger_still_continues(self) -> None:
+        # A ledger-less run (e.g. standalone/dry-run) gets the SAME control flow:
+        # the gap window is counted no-data and the series continues — there is
+        # just no skip authority to settle into (a re-pull re-fetches, exactly
+        # like every other window of a ledger-less run).
+        client = _FakeClient(
+            [
+                DhanBadRequestError("HTTP 400 DH-905 no data present"),
+                {"data": {"ce": _side(), "pe": None}},
+            ]
+        )
+        sink = _FakeSink()
+        report = _run(client, sink, start=self._START, end=self._END)
+        assert report.complete is True
+        assert report.no_data_windows == 1
+        assert report.bars_appended == 1  # the healthy window still committed
 
     def test_non_dh905_terminal_does_not_settle(self) -> None:
         # A non-DH-905 terminal 400 (a genuine malformed request) is re-raised
@@ -791,6 +994,28 @@ class TestOptionIngestLogging:
         assert series["windows"] == 1
         assert series["bars_appended"] == 0
         assert series["skipped_windows"] == 1
+
+    def test_known_gap_window_lights_the_gap_nook(self) -> None:
+        # DEC-OPTION-DH905-CONTINUE-001: a settled known-gap cursor emits a DEBUG
+        # ``ingest.window`` with action="known_gap" + the full series coordinate
+        # (a 16k-series fan-out must not flood INFO per window; the per-series
+        # INFO rollup lives one layer up in option_universe_ingest).
+        client = _FakeClient([DhanBadRequestError("HTTP 400 DH-905 no data present")])
+        with capture_logs() as logs, pull_id_scope("optpull00003"):
+            _run(client, _FakeSink())
+        (window,) = _events(logs, "ingest.window")
+        assert window["log_level"] == "debug"
+        assert window["action"] == "known_gap"
+        assert window["pull_id"] == "optpull00003"
+        assert window["error_type"] == "DhanBadRequestError"
+        assert window["strike"] == "ATM"
+        assert window["drv_option_type"] == "CALL"
+        # The 0-bar gap cursor produces no parse / lake-write events.
+        assert _events(logs, "ingest.parse") == []
+        assert _events(logs, "ingest.lake_write") == []
+        (series,) = _events(logs, "ingest.series")
+        assert series["no_data_windows"] == 1
+        assert series["bars_appended"] == 0
 
     def test_pull_id_is_empty_string_outside_a_scope(self) -> None:
         client = _FakeClient([{"data": {"ce": _side(), "pe": None}}])
