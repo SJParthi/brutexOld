@@ -21,11 +21,6 @@ plus the invariants that survive every interleaving:
 * a pre-settled window never costs a vendor call.
 """
 
-# Whitebox use of the module-private `_window_dates` / `_coverage_key` (the
-# tiling + key oracles) is sanctioned for tests, mirroring
-# `test_dhan_option_429_recovery_properties.py`.
-# pyright: reportPrivateUsage=none
-
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -33,9 +28,9 @@ from datetime import UTC, date, datetime, timedelta
 
 from brutex.adapters.dhan.errors import DhanBadRequestError, DhanRateLimitError
 from brutex.adapters.dhan.option_ingest import (
-    _coverage_key,
-    _window_dates,
+    coverage_key,
     ingest_rolling_option_series,
+    window_dates,
 )
 from brutex.data.models import OptionBar
 from brutex.data.window_ledger import SKIPPED, SUCCESS, WindowLedger
@@ -120,7 +115,7 @@ def test_window_partition_arithmetic_over_gap_interleavings(
 ) -> None:
     start = date(2021, 1, 4)
     end = start + timedelta(days=days)
-    windows = _window_dates(start, end)
+    windows = window_dates(start, end)
     n = len(windows)
     outcomes = [outcome_seed[i % len(outcome_seed)] for i in range(n)]
     presettled = [presettle_seed[i % len(presettle_seed)] for i in range(n)]
@@ -128,7 +123,7 @@ def test_window_partition_arithmetic_over_gap_interleavings(
     ledger = WindowLedger()
     for (w_start, w_end), is_pre in zip(windows, presettled, strict=True):
         if is_pre:
-            key = _coverage_key(
+            key = coverage_key(
                 exchange_segment="NSE_FNO",
                 security_id="13",
                 expiry_flag="WEEK",

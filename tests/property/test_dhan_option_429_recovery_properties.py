@@ -17,7 +17,7 @@ plus the heal/abort decision matches the budget arithmetic:
     series completes  ⇔  the failing cursor recovers within the retry budget.
 """
 
-# Whitebox use of the module-private `_window_dates` (the tiling oracle) is
+# The tiling oracle `window_dates` went PUBLIC in DEC-OPTION-WINDOW-PLAN-001
 # sanctioned for tests, mirroring `test_dhan_option_universe_ingest.py`.
 # pyright: reportPrivateUsage=none
 
@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 
 from brutex.adapters.dhan.errors import DhanRateLimitError
-from brutex.adapters.dhan.option_ingest import _window_dates, ingest_rolling_option_series
+from brutex.adapters.dhan.option_ingest import ingest_rolling_option_series, window_dates
 from brutex.data.models import OptionBar
 from hypothesis import assume, given
 from hypothesis import strategies as st
@@ -149,7 +149,7 @@ def test_partition_is_complete_or_empty_never_partial(
 ) -> None:
     start = date(2021, 1, 4)
     end = start + timedelta(days=days)
-    windows = _window_dates(start, end)
+    windows = window_dates(start, end)
     n = len(windows)
     assume(n >= 1)
     fail_cursor = int(cursor_frac * n)  # ∈ [0, n-1]

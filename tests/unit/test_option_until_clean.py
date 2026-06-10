@@ -518,6 +518,33 @@ class TestUntilCleanLoop:
         # body's daily-format date string).
         assert ("ATM", gap_row.window_start) not in calls
 
+    def test_live_pull_preplans_every_window_then_settles(self, tmp_path: Path) -> None:
+        # DEC-OPTION-WINDOW-PLAN-001: a live pull PLANs every (series × window)
+        # BEFORE any fetch — the /coverage/windows PLANNED→SUCCESS countdown —
+        # and a fully-clean pull settles every planned row.
+        class _OkClient:
+            def post_json(self, endpoint: str, body: Mapping[str, object]) -> dict[str, object]:
+                del endpoint, body
+                return _payload()
+
+        def _factory(_lake_root: Path) -> tuple[JsonPoster, OptionBarSink]:
+            return _OkClient(), _Sink()
+
+        pull_options(
+            [_stock_instrument()],  # EQ → 7 strikes, MONTH-only
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_NOW,  # → ONE 30-day window per series
+            expiry_codes=(1,),
+            option_types=("CALL",),
+            client_factory=_factory,
+            until_clean=True,
+            until_clean_sleep=lambda _i: None,
+        )
+        ledger = load_window_ledger(tmp_path)
+        assert ledger.count == 7  # 7 strikes × 1 window — ALL pre-planned
+        assert {r.status for r in ledger.records()} == {"SUCCESS"}  # …and ALL settled
+
     def test_dry_run_until_clean_is_one_clean_round(self, tmp_path: Path) -> None:
         """The synthetic path: round 1 clean → stop_clean; report carries the fields."""
         ticks: list[int] = []

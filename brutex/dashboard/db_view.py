@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 from collections.abc import Mapping
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -1617,8 +1618,61 @@ def _window_row(
     }
 
 
+#: Hard cap on rows returned by :func:`build_window_payload` (hostile C3,
+#: DEC-OPTION-WINDOW-PLAN-001): a pre-planned full-universe options pull holds
+#: ~841k ledger rows — the un-capped projection measured 247 MB of JSON and
+#: ~22 s per request against the page's 4 s poll (threadpool starvation, tab
+#: death). Counts are ALWAYS complete; only the row list is capped.
+WINDOW_ROWS_CAP: int = 20_000
+
+#: Severity-first display order for the capped row list: actionable rows
+#: (FAILED, then EMPTY) surface before the bulk statuses, so the cap can never
+#: hide what the operator must act on.
+_WINDOW_STATUS_ORDER: Final[dict[str, int]] = {
+    "FAILED": 0,
+    "EMPTY": 1,
+    "SUCCESS": 2,
+    "SKIPPED": 3,
+    "PLANNED": 4,
+}
+
+#: mtime-keyed single-entry ledger-records cache (hostile C3): the windows page
+#: polls every 4 s and the coverage hub hits the same endpoint; re-reading an
+#: 841k-row Parquet per poll measured ~13.6 s. Keyed by (path, mtime_ns) so any
+#: flush invalidates it; guarded by a lock (route runs on threadpool workers).
+_WINDOW_CACHE_LOCK = threading.Lock()
+_WINDOW_CACHE: dict[str, tuple[int, tuple[Any, ...]]] = {}
+
+
+def _ledger_records_cached(lake_root: Path) -> tuple[Any, ...]:
+    """Load the ledger's records with an mtime-keyed cache (C3 read path)."""
+    from brutex.data.window_ledger_store import ledger_path, load_window_ledger
+
+    path = ledger_path(lake_root)
+    mtime_ns = path.stat().st_mtime_ns
+    key = str(path)
+    with _WINDOW_CACHE_LOCK:
+        hit = _WINDOW_CACHE.get(key)
+        if hit is not None and hit[0] == mtime_ns:
+            return hit[1]
+    records = tuple(load_window_ledger(lake_root).records())
+    with _WINDOW_CACHE_LOCK:
+        _WINDOW_CACHE[key] = (mtime_ns, records)
+    return records
+
+
+def _window_market_bucket(market: str) -> str:
+    """Map a ledger ``market`` namespace to the page's filter bucket."""
+    return "options" if market == _OPTION_WINDOW_MARKET else "spot"
+
+
 def build_window_payload(
-    lake_root: Path, *, symbol_for_id: Mapping[str, str] | None = None
+    lake_root: Path,
+    *,
+    symbol_for_id: Mapping[str, str] | None = None,
+    market: str | None = None,
+    status: str | None = None,
+    limit: int = WINDOW_ROWS_CAP,
 ) -> dict[str, Any]:
     """Project the per-window state for ``/coverage/windows`` — the unified ledger if present.
 
@@ -1631,6 +1685,17 @@ def build_window_payload(
     loaders degrade to an empty record set). The ``source`` field tells the UI
     which backing answered.
 
+    Server-side scale guards (DEC-OPTION-WINDOW-PLAN-001, hostile C3 — measured
+    at the pre-planned universe scale of ~841k rows): ``counts`` (status ×
+    spot/options bucket) are ALWAYS computed over EVERY record; the ROW list is
+    filtered (*market*/*status*), ordered severity-first
+    (:data:`_WINDOW_STATUS_ORDER` — FAILED/EMPTY can never be hidden by the
+    cap), and truncated to *limit*. ``PLANNED`` rows are returned ONLY when
+    explicitly requested via ``status="PLANNED"`` — they are the bulk of a
+    freshly-planned pull and carry no per-row information beyond their count.
+    The ledger read is cached keyed on the Parquet's mtime (any flush
+    invalidates), so the 4 s page poll stops re-paying the full load.
+
     Parameters
     ----------
     lake_root
@@ -1641,33 +1706,59 @@ def build_window_payload(
         underlying's PRECISE symbol (``BANKNIFTY``) instead of the vendor id
         the coverage key carries (``25|NSE_FNO``). ``None`` / a missing id
         keeps the raw coordinate — display-only, never a data change.
+    market
+        ``"spot"`` / ``"options"`` row filter (``None`` = both).
+    status
+        Exact status row filter (``"FAILED"`` …). ``"PLANNED"`` is the ONLY way
+        PLANNED rows enter the row list.
+    limit
+        Row-list cap (clamped to ``[1, WINDOW_ROWS_CAP]``).
 
     Returns
     -------
     dict[str, Any]
-        ``{"source": "ledger"|"status_log", "count": int, "windows": [...]}``.
+        ``{"source", "count", "counts", "matched", "returned", "capped",
+        "windows"}`` — ``count`` is the TOTAL recorded (back-compat),
+        ``matched`` the post-filter row count, ``returned`` the rows shipped.
     """
-    from brutex.data.window_ledger_store import ledger_path, load_window_ledger
+    from brutex.data.window_ledger_store import ledger_path
 
+    limit = max(1, min(int(limit), WINDOW_ROWS_CAP))
     if ledger_path(lake_root).is_file():
-        ledger = load_window_ledger(lake_root)
-        return {
-            "source": "ledger",
-            "count": ledger.count,
-            "windows": [
-                _window_row(r, first_seen_at=r.first_seen_at, symbol_for_id=symbol_for_id)
-                for r in ledger.records()
-            ],
-        }
-    from brutex.data.window_status_store import load_window_status
+        source = "ledger"
+        records: tuple[Any, ...] = _ledger_records_cached(lake_root)
+    else:
+        from brutex.data.window_status_store import load_window_status
 
-    log = load_window_status(lake_root)
+        source = "status_log"
+        records = tuple(load_window_status(lake_root).records())
+
+    counts: dict[str, dict[str, int]] = {"spot": {}, "options": {}}
+    for r in records:
+        bucket = counts[_window_market_bucket(r.market)]
+        bucket[r.status] = bucket.get(r.status, 0) + 1
+
+    wanted_status = status.upper() if status else None
+    selected = [
+        r
+        for r in records
+        if (market is None or _window_market_bucket(r.market) == market)
+        and (wanted_status == r.status if wanted_status else r.status != "PLANNED")
+    ]
+    selected.sort(key=lambda r: _WINDOW_STATUS_ORDER.get(r.status, 9))
+    rows = [
+        # The legacy status log has no first_seen_at — getattr keeps ONE shape.
+        _window_row(r, first_seen_at=getattr(r, "first_seen_at", None), symbol_for_id=symbol_for_id)
+        for r in selected[:limit]
+    ]
     return {
-        "source": "status_log",
-        "count": log.count,
-        "windows": [
-            _window_row(r, first_seen_at=None, symbol_for_id=symbol_for_id) for r in log.records()
-        ],
+        "source": source,
+        "count": len(records),
+        "counts": counts,
+        "matched": len(selected),
+        "returned": len(rows),
+        "capped": len(selected) > limit,
+        "windows": rows,
     }
 
 

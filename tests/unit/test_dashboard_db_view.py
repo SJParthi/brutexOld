@@ -321,8 +321,13 @@ def test_build_window_payload_reads_the_ledger_when_present(tmp_path: Path) -> N
     payload = build_window_payload(tmp_path)
     assert payload["source"] == "ledger"
     assert payload["count"] == 2
+    # PLANNED rows are counted but NOT in the default row list (hostile C3 —
+    # they are the bulk of a freshly-planned pull); explicit status fetches them.
+    assert payload["counts"]["spot"] == {"PLANNED": 1, "SUCCESS": 1}
     by_symbol = {w["symbol"]: w for w in payload["windows"]}
-    assert by_symbol["SENSEX"]["status"] == "PLANNED"
+    assert "SENSEX" not in by_symbol
+    planned = build_window_payload(tmp_path, status="PLANNED")["windows"]
+    assert [w["symbol"] for w in planned] == ["SENSEX"]
     assert by_symbol["NIFTY"]["status"] == "SUCCESS"
     # Displayed as clean IST (CLAUDE.md §6): _WINDOW_NOW = 12:00 UTC → 17:30 IST.
     assert by_symbol["NIFTY"]["first_seen_at"] == _WINDOW_NOW.astimezone(IST).strftime(
@@ -364,7 +369,15 @@ def test_build_window_payload_falls_back_to_status_sidecar(tmp_path: Path) -> No
 
 
 def test_build_window_payload_empty_when_neither_exists(tmp_path: Path) -> None:
-    assert build_window_payload(tmp_path) == {"source": "status_log", "count": 0, "windows": []}
+    assert build_window_payload(tmp_path) == {
+        "source": "status_log",
+        "count": 0,
+        "counts": {"spot": {}, "options": {}},
+        "matched": 0,
+        "returned": 0,
+        "capped": False,
+        "windows": [],
+    }
 
 
 # ── option-window decode (DEC-WINDOW-OPTION-DECODE-001) ──────────────────
@@ -446,6 +459,88 @@ class TestOptionWindowDecode:
         (window,) = build_window_payload(tmp_path, symbol_for_id={"25": "BANKNIFTY"})["windows"]
         assert window["symbol"] == "25"
         assert window["interval"] == "OPT|WEEK|1"
+
+    def test_window_market_and_status_filters(self, tmp_path: Path) -> None:
+        # C3 (DEC-OPTION-WINDOW-PLAN-001): server-side filters — the page no
+        # longer ships every row to the browser.
+        ledger = WindowLedger()
+        ledger.record(
+            _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+        )
+        ledger.record(
+            _option_window_key(), raw_bars=375, error_type=None, bars_appended=375, now=_WINDOW_NOW
+        )
+        save_window_ledger(ledger, tmp_path)
+
+        spot = build_window_payload(tmp_path, market="spot")
+        assert [w["symbol"] for w in spot["windows"]] == ["NIFTY"]
+        options = build_window_payload(tmp_path, market="options")
+        assert [w["market"] for w in options["windows"]] == ["dhan-option"]
+        assert options["counts"]["spot"] == {"SUCCESS": 1}
+        assert options["counts"]["options"] == {"SUCCESS": 1}
+
+    def test_row_cap_keeps_failed_and_empty_first(self, tmp_path: Path) -> None:
+        # The cap can never hide actionable rows: severity-first ordering puts
+        # FAILED, then EMPTY, ahead of the bulk statuses (hostile C3).
+        ledger = WindowLedger()
+        for i in range(3):
+            ledger.record(
+                _window_key(f"OK{i}"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+            )
+        ledger.record(
+            _window_key("BROKEN"),
+            raw_bars=0,
+            error_type="DhanRateLimitError",
+            bars_appended=0,
+            now=_WINDOW_NOW,
+        )
+        ledger.record(
+            _window_key("HOLLOW"), raw_bars=0, error_type=None, bars_appended=0, now=_WINDOW_NOW
+        )
+        save_window_ledger(ledger, tmp_path)
+
+        payload = build_window_payload(tmp_path, limit=2)
+        assert payload["capped"] is True
+        assert payload["matched"] == 5
+        assert payload["returned"] == 2
+        assert [w["symbol"] for w in payload["windows"]] == ["BROKEN", "HOLLOW"]
+
+    def test_ledger_read_is_cached_until_the_file_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # C3: the 4 s page poll must not re-pay the full Parquet load — the read
+        # is cached on the file's mtime and ANY flush invalidates it.
+        import os
+
+        from brutex.data import window_ledger_store as store_module
+        from brutex.data.window_ledger_store import ledger_path
+
+        ledger = WindowLedger()
+        ledger.record(
+            _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+        )
+        save_window_ledger(ledger, tmp_path)
+
+        calls = {"n": 0}
+        real_load = store_module.load_window_ledger
+
+        def _counting_load(root: Path, **kwargs: object) -> object:
+            calls["n"] += 1
+            return real_load(root, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(store_module, "load_window_ledger", _counting_load)
+
+        first = build_window_payload(tmp_path)
+        second = build_window_payload(tmp_path)
+        assert first["windows"] == second["windows"]
+        assert calls["n"] <= 1  # the second poll was served from the cache
+
+        # Any flush bumps the mtime → the cache MUST refresh.
+        path = ledger_path(tmp_path)
+        os.utime(path, ns=(path.stat().st_atime_ns + 1, path.stat().st_mtime_ns + 1))
+        loaded_before = calls["n"]
+        build_window_payload(tmp_path)
+        assert calls["n"] == loaded_before + 1
 
     def test_spot_rows_are_byte_unchanged_by_the_map(self, tmp_path: Path) -> None:
         ledger = WindowLedger()

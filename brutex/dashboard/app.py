@@ -1916,7 +1916,11 @@ def build_app(
         return JSONResponse(build_spot_coverage_payload(rows))
 
     @app.get("/api/v1/coverage/windows")
-    async def api_coverage_windows() -> JSONResponse:
+    async def api_coverage_windows(
+        market: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=20_000, ge=1),
+    ) -> JSONResponse:
         """GET /api/v1/coverage/windows — per-window PLANNED / SUCCESS / EMPTY / FAILED / SKIPPED.
 
         The browsable per-window record: one row per fetch window with its status,
@@ -1927,6 +1931,13 @@ def build_app(
         falls back to the legacy ``window_status.json`` sidecar — never runs a
         pull. Empty when no lake root is wired or no window has been recorded yet
         (never a 500). ``source`` reports which backing answered.
+
+        Scale guards (DEC-OPTION-WINDOW-PLAN-001, hostile C3): ``counts`` are
+        always complete; the row list honours ``?market=spot|options`` +
+        ``?status=...`` and is capped severity-first (FAILED/EMPTY can never be
+        hidden); ``PLANNED`` rows ship only on explicit ``?status=PLANNED``. The
+        ledger read is mtime-cached so the 4 s page poll stops re-paying the
+        full Parquet load at pre-planned-universe scale (~841k rows measured).
         """
         from brutex.dashboard.db_view import build_window_payload
 
@@ -1948,7 +1959,13 @@ def build_app(
             symbol_for_id = {
                 str(i.security_id): i.symbol_name for i in store.list_index_equity_instruments()
             }
-            return build_window_payload(lake, symbol_for_id=symbol_for_id)
+            return build_window_payload(
+                lake,
+                symbol_for_id=symbol_for_id,
+                market=market,
+                status=status,
+                limit=limit,
+            )
 
         return JSONResponse(await run_in_threadpool(_payload))
 

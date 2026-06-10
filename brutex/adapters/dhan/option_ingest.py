@@ -258,7 +258,7 @@ class OptionIngestReport:
         return self.still_failed_windows == 0
 
 
-def _coverage_key(
+def coverage_key(
     *,
     exchange_segment: str,
     security_id: str,
@@ -286,7 +286,7 @@ def _coverage_key(
     )
 
 
-def _window_dates(start: date, end: date) -> list[tuple[date, date]]:
+def window_dates(start: date, end: date) -> list[tuple[date, date]]:
     """Tile ``[start, end)`` into 30-day rolling-option fetch windows."""
     planned = plan_option_windows(datetime.combine(start, time()), datetime.combine(end, time()))
     return [(date.fromisoformat(w.start[:10]), date.fromisoformat(w.end[:10])) for w in planned]
@@ -406,7 +406,7 @@ def ingest_rolling_option_series(
         empty and the series is quarantined upstream. A DH-905 cursor never
         raises: it settles as a known gap and the series continues.
     """
-    windows = _window_dates(start, end)
+    windows = window_dates(start, end)
     # Read the pull's correlation id ONCE (the controller bound it via
     # ``pull_id_scope``); stamp it + the full series coordinate on every
     # ``ingest.*`` event so one pull greps end-to-end. Observability only — no
@@ -422,16 +422,22 @@ def ingest_rolling_option_series(
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
     retried: set[tuple[date, date]] = set()
 
-    def _fetch_cursor(window_start: date, window_end: date) -> list[OptionBar] | None:
-        """Fetch ONE cursor with bounded in-run retry; return staged bars or ``None`` if exhausted.
+    def _fetch_cursor(
+        window_start: date, window_end: date
+    ) -> tuple[list[OptionBar] | None, str | None]:
+        """Fetch ONE cursor with bounded in-run retry — ``(bars, last_error_type)``.
 
         Resume-cursor (DEC-OPTION-429-RECOVERY-001): a RETRYABLE error
         (429 / 5xx / timeout / transport) is re-fetched in-run up to
-        *max_retry_passes* EXTRA attempts after the injected backoff. Returns the
-        parsed, session-filtered bars on a clean fetch (NOT yet written — the
-        caller's COMMIT pass does that), or ``None`` when the retry budget is spent
-        (the caller then ABORTS the whole series without committing). A TERMINAL
-        (non-retryable) :class:`DhanError` propagates unchanged.
+        *max_retry_passes* EXTRA attempts after the injected backoff. Returns
+        ``(bars, None)`` on a clean fetch (parsed + session-filtered, NOT yet
+        written — the caller's COMMIT pass does that), or ``(None, error_type)``
+        when the retry budget is spent — the LAST exception's type name, so the
+        caller can record the cursor FAILED (DEC-OPTION-WINDOW-PLAN-001 C1:
+        recording with ``error_type=None`` would classify EMPTY and SKIP-mask the
+        window after 3 aborted pulls — the #598 masking class). The caller then
+        ABORTS the whole series without committing. A TERMINAL (non-retryable)
+        :class:`DhanError` propagates unchanged.
         """
         body = build_rolling_option_body(
             security_id=security_id,
@@ -484,7 +490,7 @@ def ingest_rolling_option_series(
                         attempts=attempt + 1,
                         **series_fields,
                     )
-                    return None
+                    return None, type(exc).__name__
                 # Resume the cursor after a bounded backoff: by now the opening 429
                 # burst is over + the governor has stepped down, so the retry waits
                 # the limiter out rather than fighting it (DEC-OPTION-429-RECOVERY-001).
@@ -527,7 +533,7 @@ def ingest_rolling_option_series(
                 action="fetched",
                 **series_fields,
             )
-            return bars
+            return bars, None
 
     # ── Phase 1 — STAGE every cursor (no sink write, no coverage mark yet) ──
     # Fetch each window (with the in-run resume-cursor retry); buffer its bars.
@@ -537,7 +543,7 @@ def ingest_rolling_option_series(
     skipped = 0
     no_data = 0
     for window_start, window_end in windows:
-        key = _coverage_key(
+        key = coverage_key(
             exchange_segment=exchange_segment,
             security_id=security_id,
             expiry_flag=expiry_flag,
@@ -565,7 +571,7 @@ def ingest_rolling_option_series(
             )
             continue
         try:
-            bars = _fetch_cursor(window_start, window_end)
+            bars, cursor_error_type = _fetch_cursor(window_start, window_end)
         except DhanError as exc:
             # A Dhan DH-905 "no data present" for THIS option window is the vendor's
             # DEFINITIVE no-data answer (a genuine gap — e.g. an illiquid strike /
@@ -600,10 +606,23 @@ def ingest_rolling_option_series(
         if bars is None:
             # A cursor outran its retry budget → ABORT the whole series, committing
             # NOTHING. Every non-skipped, non-known-gap window is deferred to the
-            # next pull (the no-skip guarantee — its ledger row untouched ⇒ a
-            # re-pull re-fetches it). Settled DH-905 gaps are NOT deferred — their
-            # settle is the vendor's answer and survives the abort (strictly more
-            # forward progress; DEC-OPTION-DH905-CONTINUE-001).
+            # next pull (the no-skip guarantee). The FAILING cursor itself is
+            # recorded FAILED for /coverage/windows visibility
+            # (DEC-OPTION-WINDOW-PLAN-001) — with its REAL error type, never None
+            # (C1: a None error_type classifies EMPTY and SKIP-masks the window
+            # after 3 aborted pulls). FAILED rows are NOT skippable, so
+            # redo-not-skip is unchanged; the staged-but-discarded clean cursors
+            # stay PLANNED/absent (they did not fail). Settled DH-905 gaps are NOT
+            # deferred — their settle is the vendor's answer and survives the
+            # abort (strictly more forward progress; DEC-OPTION-DH905-CONTINUE-001).
+            if ledger is not None:
+                ledger.record(
+                    key,
+                    raw_bars=0,
+                    error_type=cursor_error_type or "OptionCursorRetryBudgetSpent",
+                    bars_appended=0,
+                    now=datetime.now(UTC),
+                )
             still_failed = len(windows) - skipped - no_data
             _LOG.warning(
                 "ingest.series.aborted",
@@ -694,5 +713,7 @@ __all__ = [
     "OptionBarSink",
     "OptionIngestReport",
     "Pacer",
+    "coverage_key",
     "ingest_rolling_option_series",
+    "window_dates",
 ]

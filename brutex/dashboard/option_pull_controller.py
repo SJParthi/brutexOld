@@ -67,6 +67,7 @@ from brutex.adapters.dhan.option_universe_ingest import (
     OptionsUniverseReport,
     OptionUnderlying,
     ProgressHook,
+    plan_option_pull_windows,
     run_dhan_options_ingest,
 )
 from brutex.adapters.dhan.pull_verdict import PullVerdict, classify_pull
@@ -699,6 +700,24 @@ def pull_options(
         # browsable DB table as spot. (Option windows are keyed per-series, so they
         # are recorded as they commit — not pre-PLANNED like spot.)
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
+        if ledger is not None:
+            # PRE-PLAN every (series × window) of this pull's fan-out as PLANNED
+            # (DEC-OPTION-WINDOW-PLAN-001 — the options arm of spot's
+            # plan_windows): /coverage/windows shows the full PLANNED → SUCCESS
+            # countdown from t=0 and a never-reached window is visibly PLANNED,
+            # never silently absent. Same enumeration + key builders as the
+            # fetch spine (hostile C4), idempotent on re-pull, live pulls only
+            # (a dry-run has no ledger). O(series × windows) once per pull.
+            planned = plan_option_pull_windows(
+                ledger,
+                underlyings,
+                start=start.date(),
+                end=end.date(),
+                expiry_flags=expiry_flags,
+                expiry_codes=expiry_codes,
+                option_types=option_types,
+            )
+            _LOG.info("universe.pull_options.planned", pull_id=pid, windows_planned=planned)
 
         _LOG.info(
             "universe.pull_options.start",
