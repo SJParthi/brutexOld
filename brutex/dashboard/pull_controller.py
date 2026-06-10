@@ -71,11 +71,6 @@ from brutex.data.window_ledger_store import (
     plan_windows,
     reconcile_ledger_with_lake,
 )
-from brutex.data.window_status_store import (
-    begin_pull_status,
-    end_pull_status,
-    make_live_status_flush,
-)
 from brutex.models import Instrument
 from brutex.observability.correlation import pull_id_scope
 from brutex.orchestrator.parallel import (
@@ -1190,15 +1185,15 @@ def pull_all_spot(
         # ledger is the SOLE skip authority, so its own per-window record + the
         # cold-start `reconcile_ledger_with_lake` below replace every coarse
         # coverage-set patch (the FetchCoverage set was deleted in Stage e).
-        # Per-window status (DEC-WINDOW-STATUS-001) stays: a browsable
-        # SUCCESS/EMPTY/FAILED record, loaded for the run + persisted at pull end.
-        status_log = begin_pull_status(lake_root, dry_run=dry_run)
+        # The legacy window_status.json sidecar is WRITE-RETIRED
+        # (DEC-STATUS-SIDECAR-WRITE-RETIRE-001): the ledger below is the page's
+        # primary source; the sidecar stays on disk read-only (db_view fallback
+        # + the one-shot ledger migration) until the Stage-6 deletion.
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load (one-shot
         # migrate) the durable Parquet ledger + PLAN every window the pull will
         # touch as PLANNED, so EVERY spot window has a DB row BEFORE any fetch.
-        # The ingest then records each outcome into it alongside the status log
-        # (identical record signature). Persisted to <lake>/window_ledger/ — the
-        # single source of truth /coverage/windows surfaces.
+        # The ingest then records each outcome into it. Persisted to
+        # <lake>/window_ledger/ — the single source /coverage/windows surfaces.
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
         if ledger is not None:
             plan_windows(
@@ -1244,16 +1239,16 @@ def pull_all_spot(
         # renewer: it renews ONLY when <12h remain (learning the expiry offline from
         # the token's JWT ``exp`` — no needless rotation) AND writes the fresh token
         # into the holder the client reads (DEC-DHAN-TOKEN-KEEPALIVE-001).
-        # Live status (DEC-WINDOW-STATUS-LIVE-001): flush the per-window status
-        # sidecar MID-pull (throttled) after each completed pair, so
-        # /coverage/windows ticks up live instead of staying 0 until pull end.
-        status_flush = make_live_status_flush(status_log, lake_root)
+        # Live ledger flush (DEC-WINDOW-STATUS-LIVE-001 semantics on the LEDGER):
+        # flush the unified ledger MID-pull (adaptive throttle) after each
+        # completed pair, so /coverage/windows ticks up live instead of staying
+        # 0 until pull end. The legacy status-sidecar flush was write-retired
+        # (DEC-STATUS-SIDECAR-WRITE-RETIRE-001).
         ledger_flush = make_live_ledger_flush(ledger, lake_root)
 
         def _progress_then_flush(label: str, bars: int, failed: bool, gap: bool = False) -> None:
             if on_progress is not None:
                 on_progress(label, bars, failed, gap)
-            status_flush()
             ledger_flush()
 
         # The "Retry failed windows" button passes ``auto_retry=True`` so leftover
@@ -1286,7 +1281,6 @@ def pull_all_spot(
                 on_timeout=on_timeout,
                 on_success=on_success,
                 on_progress=_progress_then_flush,
-                status_log=status_log,
                 ledger=ledger,
                 run_parallel=run_parallel,
                 auto_retry=do_retry,
@@ -1375,18 +1369,14 @@ def pull_all_spot(
                     ),
                 )
         finally:
-            # ALWAYS persist the per-window status + ledger — a crash / abort /
-            # mid-round quota death must never discard the settled-window history
+            # ALWAYS persist the ledger — a crash / abort / mid-round quota death
+            # must never discard the settled-window history
             # (DEC-SPOT-QUOTA-MIDROUND-001; previously persisted only on a clean
             # return, shielded just by the throttled mid-pull flushes). Idempotent
-            # with those flushes. Nested so a status-persist failure (e.g. a
-            # disk-full OSError) can never skip the LEDGER persist — the ledger
-            # is the skip authority (DEC-WINDOW-LEDGER-001), the more critical
-            # of the two stores.
-            try:
-                end_pull_status(status_log, lake_root, dry_run=dry_run)
-            finally:
-                end_pull_ledger(ledger, lake_root, dry_run=dry_run)
+            # with those flushes. The legacy status-sidecar persist that used to
+            # nest here was write-retired (DEC-STATUS-SIDECAR-WRITE-RETIRE-001) —
+            # the ledger is the skip authority (DEC-WINDOW-LEDGER-001).
+            end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         # Per-symbol rollup = the FIRST pass's report (the until-clean contract).
         # A quota death before ANY pass completed leaves no per-pair information —
         # the empty fallback rolls every symbol up as zeros (the quota verdict
@@ -1571,11 +1561,11 @@ def pull_candles(
         # The coverage reconcile band-aids are RETIRED (DEC-WINDOW-LEDGER-001,
         # Stage d) — the ledger's per-window record + the cold-start
         # `reconcile_ledger_with_lake` below are the sole skip source (the
-        # FetchCoverage set was deleted in Stage e).
-        # Per-window status (DEC-WINDOW-STATUS-001): browsable SUCCESS/EMPTY/FAILED.
-        status_log = begin_pull_status(lake_root, dry_run=dry_run)
+        # FetchCoverage set was deleted in Stage e). The legacy window_status.json
+        # sidecar is WRITE-RETIRED (DEC-STATUS-SIDECAR-WRITE-RETIRE-001) — kept on
+        # disk read-only for the db_view fallback + one-shot ledger migration.
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load/migrate + PLAN
-        # this symbol's windows, then record each outcome alongside the status log.
+        # this symbol's windows, then record each outcome into it.
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
         if ledger is not None:
             plan_windows(
@@ -1618,15 +1608,16 @@ def pull_candles(
         # killed the live token and the pull ran on the corpse (DH-906). The 12h
         # TokenKeepalive is the SINGLE renewer (renews only <12h, into the holder
         # the client reads). See the bulk-pull path for the full rationale.
-        # Live status (DEC-WINDOW-STATUS-LIVE-001): flush mid-pull (throttled) per
-        # completed interval so /coverage/windows ticks up live, not only at end.
-        status_flush = make_live_status_flush(status_log, lake_root)
+        # Live ledger flush (DEC-WINDOW-STATUS-LIVE-001 semantics on the LEDGER):
+        # flush mid-pull (adaptive throttle) per completed interval so
+        # /coverage/windows ticks up live, not only at end. The legacy
+        # status-sidecar flush was write-retired
+        # (DEC-STATUS-SIDECAR-WRITE-RETIRE-001).
         ledger_flush = make_live_ledger_flush(ledger, lake_root)
 
         def _progress_then_flush(label: str, bars: int, failed: bool, gap: bool = False) -> None:
             if on_progress is not None:
                 on_progress(label, bars, failed, gap)
-            status_flush()
             ledger_flush()
 
         report = run_dhan_spot_ingest(
@@ -1641,11 +1632,9 @@ def pull_candles(
             on_timeout=on_timeout,
             on_success=on_success,
             on_progress=_progress_then_flush,
-            status_log=status_log,
             ledger=ledger,
             run_parallel=run_parallel,
         )
-        end_pull_status(status_log, lake_root, dry_run=dry_run)
         end_pull_ledger(ledger, lake_root, dry_run=dry_run)
         _observe_rate(rate_observer, _rate_controller, adapter)
 
