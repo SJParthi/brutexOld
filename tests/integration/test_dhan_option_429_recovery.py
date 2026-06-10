@@ -19,7 +19,7 @@ Each cursor returns a DISTINCT in-session timestamp so the real dedup index
 admits every window (no false collapse), making "all N committed" observable.
 """
 
-# Whitebox use of the module-private `_window_dates` (the tiling oracle) is
+# The tiling oracle `window_dates` went PUBLIC in DEC-OPTION-WINDOW-PLAN-001
 # sanctioned for tests, mirroring `test_dhan_option_universe_ingest.py`.
 # pyright: reportPrivateUsage=none
 
@@ -30,7 +30,7 @@ from datetime import date
 from pathlib import Path
 
 from brutex.adapters.dhan.errors import DhanRateLimitError
-from brutex.adapters.dhan.option_ingest import _window_dates, ingest_rolling_option_series
+from brutex.adapters.dhan.option_ingest import ingest_rolling_option_series, window_dates
 from brutex.data.models import OptionBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.data.option_parquet_writer import OptionSeriesCoordinate
@@ -141,7 +141,7 @@ def _ingest(
 
 
 def test_resumed_429_commits_whole_partition_and_chain_intact(tmp_path: Path) -> None:
-    n = len(_window_dates(_START, _END))
+    n = len(window_dates(_START, _END))
     assert n >= 2  # a genuine multi-cursor chain
     writer = _RecordingWriter()
     audit_path = tmp_path / "options-resume.jsonl"
@@ -165,7 +165,7 @@ def test_resumed_429_commits_whole_partition_and_chain_intact(tmp_path: Path) ->
 
 
 def test_permanent_429_leaves_partition_empty_and_chain_intact(tmp_path: Path) -> None:
-    n = len(_window_dates(_START, _END))
+    n = len(window_dates(_START, _END))
     assert n >= 2
     writer = _RecordingWriter()
     audit_path = tmp_path / "options-abort.jsonl"

@@ -30,6 +30,7 @@ from brutex.adapters.dhan.option_ingest import (
     ingest_rolling_option_series,
 )
 from brutex.data.models import OptionBar
+from brutex.data.window_ledger import WindowLedger
 from brutex.observability.correlation import pull_id_scope
 from structlog.testing import capture_logs
 
@@ -512,7 +513,7 @@ class TestResumeCursorAndTransactionalCommit:
     def test_default_backoff_is_bounded_exponential(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # _default_retry_backoff: base 1.0 × 2**k, clamped to the 8.0 s ceiling —
         # no real sleep (the worst-case far-attempt index must NOT sleep unbounded).
-        from brutex.adapters.dhan.option_ingest import (  # type: ignore[reportPrivateUsage]
+        from brutex.adapters.dhan.option_ingest import (
             _default_retry_backoff,
         )
 
@@ -585,6 +586,121 @@ def test_ledger_marks_then_skips_already_pulled_window() -> None:
     assert second.skipped_windows == 1
     assert second.bars_appended == 0
     assert second_client.calls == []  # never hit the vendor
+
+
+class TestAbortRecordsFailedCursor:
+    """DEC-OPTION-WINDOW-PLAN-001 C1 — the aborting cursor is recorded FAILED, precisely.
+
+    The hostile review's blocker: recording an aborted cursor with
+    ``error_type=None`` classifies EMPTY and SKIP-masks the window after
+    ``EMPTY_TERMINAL_THRESHOLD=3`` aborted pulls — the exact #598 masking class
+    the ledger exists to kill. The error TYPE must survive the abort.
+    """
+
+    def _abort_once(self, ledger: WindowLedger, *, windows_end: date = date(2021, 1, 5)) -> None:
+        client = _FakeClient([DhanRateLimitError("HTTP 429 too many requests")])
+        ingest_rolling_option_series(
+            client,
+            _FakeSink(),
+            security_id="13",
+            exch_id="NSE",
+            underlying_symbol="NIFTY",
+            exchange_segment="NSE_FNO",
+            instrument="OPTIDX",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            start=date(2021, 1, 4),
+            end=windows_end,
+            ledger=ledger,
+            max_retry_passes=0,
+            retry_backoff=lambda _i: None,
+        )
+
+    def test_aborted_cursor_recorded_failed_with_its_error_type(self) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
+        ledger = WindowLedger()
+        self._abort_once(ledger)
+        (record,) = ledger.records()
+        assert record.status == "FAILED"
+        assert record.last_error == "DhanRateLimitError"
+
+    def test_three_consecutive_aborts_stay_failed_never_skipped(self) -> None:
+        # THE C1 regression: with error_type=None these three records would
+        # classify EMPTY → empty_streak 3 → promoted SKIPPED → the storm-stuck
+        # cursor permanently masked from every future pull.
+        from brutex.data.window_ledger import WindowLedger
+
+        ledger = WindowLedger()
+        for _ in range(3):
+            self._abort_once(ledger)
+        (record,) = ledger.records()
+        assert record.status == "FAILED"
+        assert record.attempts == 3
+        # Still re-fetched: a FAILED row is never skippable — the next pull's
+        # client IS called (one response consumed, proving the vendor hit).
+        retry_client = _FakeClient([{"data": {"ce": _side(), "pe": None}}])
+        ingest_rolling_option_series(
+            retry_client,
+            _FakeSink(),
+            security_id="13",
+            exch_id="NSE",
+            underlying_symbol="NIFTY",
+            exchange_segment="NSE_FNO",
+            instrument="OPTIDX",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            start=date(2021, 1, 4),
+            end=date(2021, 1, 5),
+            ledger=ledger,
+            max_retry_passes=0,
+            retry_backoff=lambda _i: None,
+        )
+        assert len(retry_client.calls) == 1
+        (record,) = ledger.records()
+        assert record.status == "SUCCESS"
+
+    def test_multiwindow_abort_marks_only_the_failing_cursor(self) -> None:
+        # Window 1 fetches clean (staged), window 2 exhausts its budget → the
+        # series aborts committing NOTHING; ONLY window 2 is FAILED — the
+        # staged-but-discarded window 1 stays absent/PLANNED (it did not fail).
+        from brutex.data.window_ledger import WindowLedger
+
+        ledger = WindowLedger()
+        client = _FakeClient(
+            [
+                {"data": {"ce": _side(), "pe": None}},
+                DhanRateLimitError("HTTP 429 too many requests"),
+            ]
+        )
+        sink = _FakeSink()
+        report = ingest_rolling_option_series(
+            client,
+            sink,
+            security_id="13",
+            exch_id="NSE",
+            underlying_symbol="NIFTY",
+            exchange_segment="NSE_FNO",
+            instrument="OPTIDX",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            start=date(2021, 1, 4),
+            end=date(2021, 2, 10),  # two 30-day windows
+            ledger=ledger,
+            max_retry_passes=0,
+            retry_backoff=lambda _i: None,
+        )
+        assert report.complete is False
+        assert sink.batches == []  # all-or-nothing: nothing committed
+        (record,) = ledger.records()  # ONLY the failing cursor was recorded
+        assert record.status == "FAILED"
+        assert record.window_start == "2021-02-03"
 
 
 def test_no_ledger_always_refetches_options() -> None:

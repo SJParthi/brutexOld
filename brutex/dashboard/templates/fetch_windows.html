@@ -111,12 +111,24 @@
   <div class="band">
     <div class="kpi"><span class="v ok" id="winc">—</span><span class="l">windows recorded</span></div>
     <div class="kpi"><span class="v bad" id="failc">—</span><span class="l">failed windows</span></div>
-    <!-- Market filter (DEC-WINDOW-OPTION-DECODE-001): option windows sort after
-         20k+ spot rows, so without this the operator never SEES them. -->
+    <div class="kpi"><span class="v" id="planc">—</span><span class="l">planned (pending)</span></div>
+    <!-- Server-side filters (DEC-WINDOW-OPTION-DECODE-001 +
+         DEC-OPTION-WINDOW-PLAN-001 C3): the row list is filtered + capped on
+         the SERVER (counts stay complete), so a pre-planned universe-scale
+         ledger can never melt the page. PLANNED rows ship only on the explicit
+         Planned chip; the FAILED KPI counts ONE row per aborted series' failing
+         cursor — the verdict banner's pending count is the full deferred set. -->
     <div class="subnav" style="border:none;padding:0;" id="mktfilter">
-      <a href="#" data-mkt="all" class="active">All</a>
+      <a href="#" data-mkt="" class="active">All</a>
       <a href="#" data-mkt="spot">📈 Spot</a>
       <a href="#" data-mkt="options">⛓️ Options</a>
+    </div>
+    <div class="subnav" style="border:none;padding:0;" id="stfilter">
+      <a href="#" data-st="" class="active">Active</a>
+      <a href="#" data-st="FAILED">FAILED</a>
+      <a href="#" data-st="EMPTY">EMPTY</a>
+      <a href="#" data-st="PLANNED">Planned</a>
+      <a href="#" data-st="SUCCESS">SUCCESS</a>
     </div>
     <span id="status"></span>
   </div>
@@ -154,33 +166,29 @@ function winStatus(s) {
   return '<span style="color:' + color + ';font-weight:700;">' + esc(v || "—") + "</span>";
 }
 
-/* Market filter (DEC-WINDOW-OPTION-DECODE-001): "options" = the dhan-option
-   ledger namespace; "spot" = everything else. Re-renders the cached payload —
-   no extra fetch. */
-let marketFilter = "all";
-let lastRows = [];
-function rowMatchesFilter(r) {
-  const isOption = String(r.market || "") === "dhan-option";
-  if (marketFilter === "options") return isOption;
-  if (marketFilter === "spot") return !isOption;
-  return true;
-}
-document.querySelectorAll("#mktfilter a").forEach(a => {
-  a.addEventListener("click", ev => {
-    ev.preventDefault();
-    marketFilter = a.dataset.mkt;
-    document.querySelectorAll("#mktfilter a").forEach(x => x.classList.toggle("active", x === a));
-    renderWindows(lastRows);
+/* Server-side filters (DEC-OPTION-WINDOW-PLAN-001 C3): the chips drive query
+   params and RE-FETCH — rows are filtered, severity-ordered and capped on the
+   server; counts are always complete. */
+let marketFilter = "";
+let statusFilter = "";
+function wireChips(boxId, key, setter) {
+  document.querySelectorAll("#" + boxId + " a").forEach(a => {
+    a.addEventListener("click", ev => {
+      ev.preventDefault();
+      setter(a.dataset[key]);
+      document.querySelectorAll("#" + boxId + " a").forEach(x => x.classList.toggle("active", x === a));
+      poll();
+    });
   });
-});
+}
+wireChips("mktfilter", "mkt", v => { marketFilter = v; });
+wireChips("stfilter", "st", v => { statusFilter = v; });
 
 function renderWindows(rows) {
-  lastRows = rows;
-  rows = rows.filter(rowMatchesFilter);
   if (!rows.length) {
     panel.innerHTML = marketFilter === "options"
-      ? '<div class="empty">no OPTION windows recorded yet — an option series commits ALL its windows at once when the whole series fetches cleanly (all-or-nothing, DEC-OPTION-429-RECOVERY-001), so rows appear in batches as each series completes during a pull</div>'
-      : '<div class="empty">no fetch windows recorded yet — pull a symbol on /universe; each fetch window then logs SUCCESS / EMPTY / FAILED here (DEC-WINDOW-STATUS-001)</div>';
+      ? '<div class="empty">no OPTION windows match — option windows are PLANNED up-front (see the Planned chip) and commit ALL at once when a whole series fetches cleanly (all-or-nothing, DEC-OPTION-429-RECOVERY-001), so completed rows appear in batches as each series finishes</div>'
+      : '<div class="empty">no fetch windows match — pull a symbol on /universe; each fetch window then logs PLANNED / SUCCESS / EMPTY / FAILED here (DEC-WINDOW-STATUS-001)</div>';
     return;
   }
   const body = rows.map(r =>
@@ -203,19 +211,30 @@ function renderWindows(rows) {
     + "</tr></thead><tbody>" + body + "</tbody></table>";
 }
 
+function countStatus(counts, st) {
+  let n = 0;
+  for (const bucket of Object.values(counts || {})) n += bucket[st] || 0;
+  return n;
+}
+
 async function poll() {
   try {
-    const r = await fetch("/api/v1/coverage/windows");
+    const qs = new URLSearchParams();
+    if (marketFilter) qs.set("market", marketFilter);
+    if (statusFilter) qs.set("status", statusFilter);
+    const r = await fetch("/api/v1/coverage/windows" + (qs.size ? "?" + qs.toString() : ""));
     if (!r.ok) { liveTxt.textContent = "error " + r.status; return; }
     const body = await r.json();
     const rows = body.windows || [];
-    const failed = rows.filter(w => String(w.status || "").toUpperCase() === "FAILED").length;
-    wincEl.textContent = body.count ?? "—";
-    failcEl.textContent = num(failed);
-    statusEl.textContent = (body.count ?? "—")
-      + " windows · per-window SUCCESS / EMPTY / FAILED (DEC-WINDOW-STATUS-001)";
+    wincEl.textContent = num(body.count ?? 0);
+    failcEl.textContent = num(countStatus(body.counts, "FAILED"));
+    const planEl = document.getElementById("planc");
+    if (planEl) planEl.textContent = num(countStatus(body.counts, "PLANNED"));
+    statusEl.textContent = num(body.matched ?? rows.length) + " matched · "
+      + num(body.returned ?? rows.length) + " shown"
+      + (body.capped ? " · CAPPED (severity-first — FAILED/EMPTY always shown)" : "");
     renderWindows(rows);
-    liveTxt.textContent = "live · " + rows.length + " windows";
+    liveTxt.textContent = "live · " + rows.length + " rows";
   } catch (e) {
     liveTxt.textContent = "offline";
   }

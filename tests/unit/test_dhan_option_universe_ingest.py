@@ -28,6 +28,8 @@ from brutex.adapters.dhan.option_universe_ingest import (
     OptionUnderlying,
     _with_paced_client,
     expiry_codes_for_flag,
+    iter_series_jobs,
+    plan_option_pull_windows,
     run_dhan_options_ingest,
     strike_window,
 )
@@ -554,3 +556,116 @@ class TestOptionUniverseLogging:
                 option_types=("CALL",),
             )
         assert _events(logs, "ingest.underlying")[0]["pull_id"] == ""
+
+
+def _ledger_keys(ledger: object) -> set[tuple[str, str, str, str, str]]:
+    """Project a ledger's rows to comparable (market, id, interval, start, end) keys."""
+    return {
+        (r.market, r.security_id, r.interval, r.window_start, r.window_end)
+        for r in ledger.records()  # type: ignore[attr-defined]
+    }
+
+
+class TestPlanFetchKeyParity:
+    """DEC-OPTION-WINDOW-PLAN-001 C4 — the planner and the fetch can never drift.
+
+    The golden parity: ``plan_option_pull_windows`` and the REAL ingest spine
+    must touch IDENTICAL coverage keys (same enumeration, same tiler, same key
+    builder). A drift in either direction would mean phantom PLANNED rows that
+    never settle, or fetched windows the plan never showed.
+    """
+
+    def test_planner_keys_equal_fetch_keys(self) -> None:
+        from datetime import date as _date
+
+        from brutex.data.window_ledger import WindowLedger
+
+        underlyings = [_index(offsets=1)]  # 3 strikes
+        start, end = _date(2021, 1, 4), _date(2021, 2, 10)  # two 30-day windows
+
+        planned = WindowLedger()
+        count = plan_option_pull_windows(
+            planned,
+            underlyings,
+            start=start,
+            end=end,
+            expiry_flags=("WEEK",),
+            expiry_codes=(1, 2),
+            option_types=("CALL",),
+        )
+        assert count == 3 * 2 * 2  # strikes × codes × windows
+
+        fetched = WindowLedger()
+        run_dhan_options_ingest(
+            _OkClient(),
+            _Sink(),
+            underlyings=underlyings,
+            start=start,
+            end=end,
+            ledger=fetched,
+            expiry_flags=("WEEK",),
+            expiry_codes=(1, 2),
+            option_types=("CALL",),
+        )
+        assert _ledger_keys(fetched) == _ledger_keys(planned)
+        # Every planned key SETTLED on the fully-successful run.
+        assert {r.status for r in fetched.records()} == {"SUCCESS"}
+
+    def test_plan_never_resets_an_existing_row(self) -> None:
+        # Hostile finding 8: plan() is a no-op on ANY existing row — a FAILED
+        # cursor must survive a re-plan un-masked (never back to PLANNED).
+        from datetime import UTC as _UTC
+        from datetime import date as _date
+        from datetime import datetime as _datetime
+
+        from brutex.adapters.dhan.option_ingest import coverage_key
+        from brutex.data.window_ledger import WindowLedger
+
+        underlyings = [_index(offsets=0)]
+        start, end = _date(2021, 1, 4), _date(2021, 1, 5)
+        ledger = WindowLedger()
+        plan_option_pull_windows(
+            ledger,
+            underlyings,
+            start=start,
+            end=end,
+            expiry_flags=("WEEK",),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+        )
+        key = coverage_key(
+            exchange_segment="NSE_FNO",
+            security_id="13",
+            expiry_flag="WEEK",
+            expiry_code=1,
+            strike="ATM",
+            drv_option_type="CALL",
+            window_start=start,
+            window_end=_date(2021, 1, 5),
+        )
+        ledger.record(
+            key,
+            raw_bars=0,
+            error_type="DhanRateLimitError",
+            bars_appended=0,
+            now=_datetime(2026, 6, 10, tzinfo=_UTC),
+        )
+        plan_option_pull_windows(
+            ledger,
+            underlyings,
+            start=start,
+            end=end,
+            expiry_flags=("WEEK",),
+            expiry_codes=(1,),
+            option_types=("CALL",),
+        )
+        (record,) = ledger.records()
+        assert record.status == "FAILED"
+
+    def test_runner_consumes_the_same_generator(self) -> None:
+        # The runner's job list IS the generator's output (no second enumeration).
+        underlyings = [_index(offsets=1), _stock()]
+        jobs = list(iter_series_jobs(underlyings, option_types=("CALL",)))
+        # index: (8 WEEK + 3 MONTH codes) × 3 strikes; stock: 3 MONTH codes × 7 strikes
+        assert len(jobs) == (8 + 3) * 3 + 3 * 7
+        assert all(job[1] in underlyings for job in jobs)

@@ -241,7 +241,17 @@ class TestWindowStatusApi:
         assert resp.status_code == 200
         # DEC-WINDOW-LEDGER-001 (PR-3): the payload now carries a `source` field
         # (which backing answered) — falls back to the status log when no ledger.
-        assert resp.json() == {"source": "status_log", "count": 0, "windows": []}
+        # DEC-OPTION-WINDOW-PLAN-001 (hostile C3): plus the always-complete
+        # counts + the capped-row-list accounting fields.
+        assert resp.json() == {
+            "source": "status_log",
+            "count": 0,
+            "counts": {"spot": {}, "options": {}},
+            "matched": 0,
+            "returned": 0,
+            "capped": False,
+            "windows": [],
+        }
 
     def test_windows_reports_recorded_status(self, store: InstrumentStore, tmp_path: Path) -> None:
         from brutex.data.fetch_coverage import WindowKey

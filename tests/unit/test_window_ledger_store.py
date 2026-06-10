@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import pytest
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import SKIPPED, SUCCESS, WindowLedger
 from brutex.data.window_ledger_store import (
@@ -211,6 +212,37 @@ class TestLiveFlush:
         ledger.record(_key(), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
         make_live_ledger_flush(ledger, tmp_path)()  # clock=None → monotonic branch
         assert ledger_path(tmp_path).is_file()
+
+    def test_adaptive_throttle_scales_with_save_duration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Hostile C2 (DEC-OPTION-WINDOW-PLAN-001): at a pre-planned universe
+        # scale a save measured ~3.94 s > the fixed 2 s interval, degenerating
+        # the throttle to flush-per-tick (~13.7 h of pure Parquet rewriting on
+        # a 12.5k-outcome drain). The interval must scale to
+        # _FLUSH_DUTY_FACTOR × the LAST save duration.
+        from brutex.data import window_ledger_store as store_module
+
+        ledger = WindowLedger()
+        ledger.record(_key(), raw_bars=1, error_type=None, bars_appended=1, now=_NOW)
+        clock = [100.0]
+        saves: list[float] = []
+
+        def _slow_counting_save(_ledger: WindowLedger, _root: Path) -> None:
+            saves.append(clock[0])
+            clock[0] += 4.0  # the save itself takes 4 simulated seconds
+
+        monkeypatch.setattr(store_module, "save_window_ledger", _slow_counting_save)
+        flush = make_live_ledger_flush(ledger, tmp_path, min_interval_s=2.0, clock=lambda: clock[0])
+
+        flush()  # first write — measures the 4 s save
+        assert len(saves) == 1
+        clock[0] += 3.0  # 3 s later: past the FIXED 2 s, but < 5 × 4 s = 20 s
+        flush()
+        assert len(saves) == 1  # adaptive interval held — no flush-per-tick
+        clock[0] += 25.0  # well past 20 s → writes again
+        flush()
+        assert len(saves) == 2
 
 
 class TestBeginEnd:
