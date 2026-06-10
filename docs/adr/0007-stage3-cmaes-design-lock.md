@@ -1,0 +1,112 @@
+# ADR-0007 — Stage-3 BIPOP-CMA-ES refinement: design lock (IMPLEMENTABLE-WITH-CONDITIONS)
+
+> **Decision:** DEC-STAGE3-DESIGN-LOCK-001 (MIGRATION.md entry #623)
+> **Date:** 2026-06-10 · **Status:** ACCEPTED — implementation may begin only
+> against the 9 locked conditions below.
+> **Method:** Golden-Rule-#9 review-before-code — a facts agent mapped the
+> current surface (no prior verdict blocks Stage-3; the Stage-2 output the
+> stage consumes is built) and a hostile reviewer attacked reproducibility,
+> statistical validity, look-ahead, SLA honesty, and dependency risk.
+> **Verdict:** IMPLEMENTABLE-WITH-CONDITIONS — unlike Stage-2.5 SPRT
+> (ADR-0006: structurally infeasible, kills needed the very data they
+> skipped), Stage-3 has no closed circle: it ADDS exactly-measured
+> candidates and deletes nothing unmeasured.
+
+## 1. What Stage-3 is (as locked here)
+
+A deterministic refinement pass over the Stage-2 survivor set: for each of
+the top-K survivor masks (per instrument × TF × mode leaderboard), an inner
+BIPOP-CMA-ES (pycma) searches the continuous (SL, TP) plane — normalized
+[0,1]², denormalized and **snapped to the int-paisa grid before every
+evaluation** — each evaluation being one full standalone backtest through
+the unchanged engine path. Refined candidates merge into ONE pool with the
+grid survivors, deduped by the existing 9-field combo hash, ranked once,
+and flow into Stage 4 unchanged.
+
+## 2. The 9 locked conditions (each binds implementation; violating any = red review)
+
+1. **Optuna is DROPPED (D0).** The spec's outer "Optuna TPE over the top
+   10,000 masks" with a budget of 10,000 × 200 selects nothing — every mask
+   gets an inner run, so TPE is a dead dependency plus an extra RNG; and TPE
+   over a 10,000-way unordered categorical with ≤1 observation per category
+   degenerates to random sampling. The outer layer is a **deterministic loop
+   over the configured top-K masks in leaderboard order**. (Also removes the
+   alembic/sqlalchemy/colorlog/tqdm/PyYAML supply-chain surface — X2.)
+2. **The per-eval objective is the pool-independent scalar `sharpe_ratio`
+   (D1)**, computed by the existing engine. The 8-term composite is
+   pool-z-scored and undefined for a single evaluation. The divergence is
+   disclosed: CMA-ES may converge to Sharpe-optimal (SL,TP) that is
+   composite-suboptimal; this is acceptable because Stage-3 only ADDS
+   candidates — the merged pool is re-ranked by the composite as always.
+3. **Quantize before hashing (R2) + fixed denorm bounds (L2).** [0,1]² maps
+   onto the spec's Mode-A grid bounds (SL ∈ [5,200] paisa, TP ∈ [10,500]
+   paisa — constants, never data-derived) and snaps to the 5/10-paisa
+   ticks BEFORE `combo_hash`; identity for a refined candidate is exactly
+   the existing 9-field hash over the quantized int params. Floats never
+   reach the hash.
+4. **Refinement-run identity + value cache (R3).** The resumable/dedup unit
+   is the WHOLE per-mask refinement run, identified by
+   `blake3(mask_run_id ‖ optimizer-config ‖ seed ‖ budget ‖
+   pycma/numpy versions)`. Per-eval results live in a run-id-keyed VALUE
+   cache (the optimizer needs f(x), not membership); the global mark-seen
+   happens only at refinement-run completion (redo-not-skip preserved).
+5. **Determinism (R1/R4).** Seeds derive from the mask's BLAKE3 run
+   identity (low 64 bits); the inner optimizer runs single-threaded.
+   Reproducibility is claimed for same commit + same lockfile + same
+   platform ONLY — CMA-ES eigendecomposition is ULP-sensitive to BLAS
+   backends and neither pycma nor numpy guarantees cross-version seed-stream
+   stability (Golden Rule #10).
+6. **Every evaluation is a Bailey-LdP trial (S1/S3).** All eval Sharpes
+   enter the per-leaderboard DSR trial count N and cross-trial variance V,
+   and the SPA best-of-N pool — never just the per-mask optima. The honest
+   envelope states that adaptive (non-independent) trials keep even
+   correct-N DSR somewhat anti-conservative. One merged pool, ranked once.
+7. **Train-window only (S2).** The Stage-3 objective is evaluated strictly
+   on the lockbox-excluded training window, code-enforced exactly like the
+   Stage-4.8 lockbox guard; the lockbox remains the uncontaminated arbiter.
+8. **Honest SLA (P1/P2).** The "~1-2 hours" figure is RETIRED until
+   measured: it implied ~280-560 full backtests/s while the production
+   sweep is the Python `metrics_for_mask` loop and the Rust resident sim is
+   unwired. The BIPOP budget contradiction is fixed: 200 MaxFEvals per
+   restart × a hard per-mask cap of 3 restarts (≤600 evals/mask, ≤6M total
+   at K=10,000 — the previous "2M" assumed zero restarts from a restart
+   strategy). TolX/TolFun on a paisa-quantized piecewise-constant objective
+   cause flat-fitness restart churn — the cap bounds it; tuning is an
+   implementation concern measured at bench time.
+9. **Dependency policy (X1).** `pycma` (numpy-only) enters a new
+   `optimize` extra with a dedicated decision row; it is carved out of the
+   Renovate "always latest" automerge (lockstep-pinned like the
+   polars/duckdb/pyarrow rule) because optimizer version bumps silently
+   change search trajectories. Optuna is not adopted (condition 1).
+
+## 3. Spec corrections carried with this ADR
+
+- `TRACK1_BACKTEST_SPEC.md` §Stage 3 rewritten to the locked design
+  (deterministic outer loop, quantize-before-hash, seed policy, train-window
+  scope, honest budget/SLA); the Optuna row leaves the toolchain table.
+- MIGRATION.md decision row #37 ("refine top 100, ~15-20 min") amended
+  in place: Stage-3 consumes the top-K (default 10,000) survivors and
+  emits the merged re-ranked pool; "top 100" was the post-Stage-3 trim
+  consumed by Stage 4, and the wall-time figure is retired with the SLA.
+
+## 4. What Stage-3 must emit (observability)
+
+`STAGE_3_REFINE_START / STAGE_3_REFINE_FLUSH / STAGE_3_REFINE_COMPLETE`
+hash-chained audit lines per refinement run (mirroring the sweep's three-line
+O(1) pattern), carrying the refinement-run identity, seed, budget consumed,
+best quantized (SL,TP), and the eval count contributed to N.
+
+## 5. Implementation slices (each its own PR, strict-100% gated)
+
+1. `optimize` extra + pinned pycma + Renovate carve-out (deps ADR row).
+2. Top-K survivor query over the persisted leaderboard (the audit found it
+   is a stub today).
+3. Pure normalization/quantization module (the [0,1]² ↔ paisa bijection on
+   the grid) + property tests (round-trip, bounds, tick-snap).
+4. The refinement runner (loop + CMA-ES + value cache + audit) behind a
+   default-OFF config flag, with the A/B merged-pool determinism oracle.
+5. CLI/orchestrator wiring + cascade handoff.
+
+*Compiled from the 2026-06-10 hostile review; the full finding-by-finding
+record (BLOCKER/RISK/OK with file:line) is preserved in MIGRATION.md entry
+#623.*

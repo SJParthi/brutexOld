@@ -200,8 +200,8 @@ the indicator precompute (Stage 1A) and the bitmask AND (Stage 1B).
 | Concurrency | Rayon | 1.10 | Work-stealing parallelism |
 | GPU (Stage 1B only) | Metal Shading Language | 4.0 | 32-thread simdgroups (WWDC20) |
 | BLAS | accelerate-src | 0.3 | Apple AMX coprocessor |
-| Outer optimizer | Optuna | 4.1 | TPE sampler for mask layer (4.8 not yet released) |
-| Inner optimizer | pycma | 3.4.0 | Hansen BIPOP-CMA-ES |
+| ~~Outer optimizer~~ | ~~Optuna~~ | — | NOT adopted — dead dependency as specified (ADR-0007 condition 1) |
+| Inner optimizer | pycma | 3.4.0 (pinned; Renovate carve-out per ADR-0007 condition 9) | Hansen BIPOP-CMA-ES |
 | Data | Polars | 1.18 | Columnar AArch64 native (was 0.20; bumped to stable 1.x) |
 | Storage | Parquet + Zstd 9 | Arrow 18 (arrow-rs v53) | Industry standard |
 | Query | DuckDB | 1.1 | Ad-hoc SQL on results |
@@ -394,18 +394,34 @@ _Historical algorithm (never wire — ADR-0006 Final Verdict):_
   minimum 50 trades
 - Document SPRT thresholds and posterior update math in code comments
 
-### Stage 3 — BIPOP-CMA-ES refinement (~1-2 hours)
-- **Outer:** Optuna TPE over top 10,000 survivor masks from Stage 2
-- **Inner:** pycma 3.4 BIPOP-CMA-ES per mask over (SL, TP) normalized [0,1]²
-  - Dimension d = 2
-  - Population λ = 6 (4 + ⌊3 ln 2⌋)
-  - Parents μ = 3
-  - Initial step σ₀ = 0.3
-  - TolX = TolFun = 1e-6
-  - MaxFEvals per restart = 200
-  - Restart strategy: BIPOP (Hansen GECCO 2009)
-- Total inner budget: 10K masks × 200 evals = 2M backtest calls
-- **CMA-ES must NOT cross discrete dimensions** — mask layer is OUTER only
+### Stage 3 — BIPOP-CMA-ES refinement (DESIGN LOCKED — ADR-0007 / DEC-STAGE3-DESIGN-LOCK-001, 2026-06-10; wall time UNMEASURED until benched)
+
+> **The 2026-06-10 hostile review locked 9 binding conditions
+> (`docs/adr/0007-stage3-cmaes-design-lock.md`) and corrected this section's
+> two self-contradictions: the Optuna outer layer selected nothing (every
+> top-K mask got an inner run — a dead dependency) and the "2M total"
+> budget assumed ZERO restarts from a restart strategy. The "~1-2 hours"
+> figure is RETIRED until measured (Golden Rule #10).**
+
+- **Outer:** DETERMINISTIC loop over the top-K survivor masks
+  (default K = 10,000) per (instrument, TF, mode) leaderboard, in
+  leaderboard order. Optuna is NOT adopted (ADR-0007 condition 1).
+- **Inner:** pycma BIPOP-CMA-ES per mask over (SL, TP) normalized [0,1]²,
+  denormalized onto the FIXED Mode-A grid bounds (SL ∈ [5,200] paisa,
+  TP ∈ [10,500] paisa — constants, never data-derived) and **snapped to
+  the 5/10-paisa ticks BEFORE every evaluation and BEFORE hashing**
+  (identity = the unchanged 9-field combo hash on quantized int params).
+  - Dimension d = 2 · Population λ = 6 · Parents μ = 3 · σ₀ = 0.3
+  - MaxFEvals per restart = 200; **hard per-mask cap = 3 restarts
+    (≤600 evals/mask, ≤6M total at K=10,000)**
+  - Seeds derive from the mask's BLAKE3 run identity; single-threaded
+    inner; reproducible per commit+lockfile+platform ONLY
+- **Objective:** the pool-independent per-eval `sharpe_ratio`, evaluated
+  STRICTLY on the lockbox-excluded training window (code-enforced).
+- **Statistics:** every evaluation enters the per-leaderboard DSR trial
+  count N and variance V and the SPA pool; refined candidates merge into
+  ONE pool with the grid survivors, deduped by combo hash, ranked once.
+- **CMA-ES must NOT cross discrete dimensions** — mask layer is OUTER only.
 
 ### Stage 4 — Statistical filters (pipeline order matters)
 
