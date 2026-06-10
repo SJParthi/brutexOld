@@ -138,7 +138,7 @@ Telegram notification path exists and is coverage-gated.
 | D2 P-06 accessor was a skip stub | ✅ FIXED (runtime) | `LookAheadBarrier` LIVE (DEC-LOOKAHEAD-BARRIER-001); catalog row now *delegates* to `tests/golden/test_lookahead_golden.py` + `tests/property/test_lookahead_properties.py` |
 | D3 stale per-module gate count | ✅ FIXED | STANDARDS_100PCT.md reconciled (DEC-ORCH-LAZY-BLOOM-001 lifted the ABI3 blocker) |
 | D4 stale [4..8] r/s Groww band | ✅ FIXED | STANDARDS_100PCT.md re-pinned to Dhan `[3..5]` (`rate_control.py`) |
-| D5 `test_store_o1.py` docstring 3×-vs-5× nit | 🟡 STILL OPEN | docstring prose vs `ratio_ceiling(5.0)` assertion; code correct, prose stale — follow-up §7 |
+| D5 `test_store_o1.py` docstring 3×-vs-5× nit | ✅ FIXED *(amended same day)* | re-grepped in the DEC-O1-BENCH-GAPS-002 follow-up: the docstring already reads `5×` matching `ratio_ceiling(5.0)` and labels the `REQUIREMENTS.md` mention as the retired stub — the audit-agent claim was stale (its third stale claim alongside G1/G3) |
 | D6 Groww spec lacked SUPERSEDED banner | ✅ FIXED | `docs/TRACK1_GROWW_ADAPTER.md:1-10` carries the ⛔ banner |
 | D7 "bit-for-bit reproducible" not provable | 🟡 OPEN BY DESIGN | honestly enveloped in STANDARDS §8; L3 replay oracle live; Parquet bit-equality is Phase 2/3 |
 | G1 auto-merge ignored `mergeable_state` | ✅ FIXED (materially) | DEC-AUTOMERGE-SAFETY-001 refuses dirty/behind/blocked/unknown; residual nuance: `unstable`/`has_hooks` allowed vs the charter's strict `clean` — noted, not a red gate |
@@ -264,8 +264,8 @@ Telegram notification path exists and is coverage-gated.
 | # | Item | Why | Suggested decision ID |
 |---|---|---|---|
 | F-1 | Reconcile MIGRATION.md duplicate entry numbers (28 collisions; keep DEC-ID as primary key, add disambiguators rather than renumber history) | "entry #NNN" citations in the 578-592 range are ambiguous | DEC-LEDGER-RENUMBER-001 |
-| F-2 | Dedicated O(1) ratio benches for ReplayFeed bar-index lookup + indicator-value lookup | the last 2 of the 5 Golden-Rule-#5 hot paths without an isolated gate | DEC-O1-BENCH-GAPS-002 |
-| F-3 | Fix `tests/bench/test_store_o1.py` docstring (3× prose vs 5× assertion) | D5 residue; prose-only | (fold into F-2 PR) |
+| F-2 | ~~Dedicated O(1) ratio benches for bar-index lookup + indicator-value lookup~~ **CLOSED same day** by DEC-O1-BENCH-GAPS-002 (`tests/bench/test_bar_lookup_o1.py` + `test_indicator_lookup_o1.py`) | the last 2 of the 5 Golden-Rule-#5 hot paths now have isolated gates | DEC-O1-BENCH-GAPS-002 |
+| F-3 | ~~Fix `tests/bench/test_store_o1.py` docstring~~ **NO CHANGE NEEDED** — re-checked in the F-2 follow-up: already correct; the D5 agent claim was stale | D5 residue dissolved | — |
 | F-4 | Tighten auto-merge to the charter's strict `mergeable_state == clean` or amend the charter to document the `unstable`/`has_hooks` allowance | G1 residual nuance | DEC-AUTOMERGE-CLEAN-STRICT-001 |
 
 ---
@@ -274,3 +274,8 @@ Telegram notification path exists and is coverage-gated.
 figure traces to a command executed in this session or a file:line cited
 inline. Predecessors: `VERIFICATION_2026-06-02.md`,
 `VERIFICATION_2026-06-06.md`, `WORKSPACE_HEALTH_AND_ROADMAP.md`.*
+
+*Amendment (2026-06-10, DEC-O1-BENCH-GAPS-002, MIGRATION.md #610): F-2
+closed (two new bench gates; measured ratios 1.07×–2.61× vs the 5×
+ceiling), F-3 dissolved and the D5 scorecard row corrected — the
+docstring was already fixed and the audit-agent claim was stale.*
