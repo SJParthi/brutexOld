@@ -526,7 +526,10 @@ def test_results_store_append_memory_flat(tmp_path: Path) -> None:
     """
     store = ResultsStore(path=tmp_path / "memleak_results.parquet")
     for i in range(_RESULT_ROWS):
-        assert store.append(_result_row(i)), "seed insert must be new"
+        # Side-effecting call OUTSIDE the assert (py/side-effect-in-assert):
+        # the seed insert is load-bearing and must survive `python -O`.
+        seeded = store.append(_result_row(i))
+        assert seeded, "seed insert must be new"
     tick = 0
 
     def pump(events: int) -> None:
@@ -534,7 +537,8 @@ def test_results_store_append_memory_flat(tmp_path: Path) -> None:
         nonlocal tick
         for _ in range(events):
             row = _result_row(tick % _RESULT_ROWS)
-            assert store.append(row) is False, "re-append must be the idempotent no-op"
+            added = store.append(row)  # the hot-path call itself — never in assert
+            assert added is False, "re-append must be the idempotent no-op"
             tick += 1
 
     pump(_WARMUP)
