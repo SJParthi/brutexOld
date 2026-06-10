@@ -888,7 +888,82 @@ def test_list_option_datasets_skips_foreign_and_empty_dirs(tmp_path: Path) -> No
     # A separator-shaped dir name (skipped).
     (options / "bad series!").mkdir(parents=True)
     found = list_option_datasets(tmp_path)
-    assert found == [{"kind": "option", "series": _OPT_SERIES, "interval": "1minute"}]
+    assert found == [
+        {
+            "kind": "option",
+            "series": _OPT_SERIES,
+            "interval": "1minute",
+            # No id→symbol map here → the label decodes with the numeric id
+            # (DEC-DB-OPTION-DATASET-DECODE-001).
+            "label": "13 · WEEK#0 ATM CALL · 1m",
+        }
+    ]
+
+
+# ── option dataset labels (DEC-DB-OPTION-DATASET-DECODE-001) ───────────
+
+
+def test_list_option_datasets_decodes_label_with_symbol_map(tmp_path: Path) -> None:
+    # The #629 tracked follow-up: the /db picker showed the raw vendor segment
+    # (NSE_FNO__25__MONTH__1__ATM-10__CALL); the id→symbol map decodes it to
+    # the operator's coordinates. The series KEY stays byte-unchanged so
+    # queries keep addressing the on-disk segment.
+    _write_options(tmp_path, partition_key="NSE_FNO|25|MONTH|1|ATM-10|CALL")
+    (found,) = list_option_datasets(tmp_path, symbol_for_id={"25": "BANKNIFTY"})
+    assert found == {
+        "kind": "option",
+        "series": "NSE_FNO__25__MONTH__1__ATM-10__CALL",
+        "interval": "1minute",
+        "label": "BANKNIFTY · MONTH#1 ATM-10 CALL · 1m",
+    }
+
+
+def test_list_option_datasets_unknown_id_keeps_numeric_id(tmp_path: Path) -> None:
+    _write_options(tmp_path)  # security_id 13 — absent from the map
+    (found,) = list_option_datasets(tmp_path, symbol_for_id={"25": "BANKNIFTY"})
+    # Still decoded, still distinguishable — never hidden, never a crash.
+    assert found["label"] == "13 · WEEK#0 ATM CALL · 1m"
+
+
+def test_list_option_datasets_label_falls_back_raw_on_non_parsing_shape(tmp_path: Path) -> None:
+    # A segment-grammar-valid directory whose name is NOT a 6-part series key
+    # (wrong arity / an empty part) keeps its RAW name as the label — fallback,
+    # never an exception, never a hidden dataset. list_option_datasets only
+    # globs for *.parquet PRESENCE (content is never read here), so an empty
+    # file is enough to make the directory a dataset.
+    options = tmp_path / "options"
+    for weird in ("WEIRD__SHAPE", "NSE_FNO____MONTH__1__ATM__CALL"):
+        (options / weird).mkdir(parents=True)
+        (options / weird / "2024-01.parquet").write_bytes(b"")
+    found = list_option_datasets(tmp_path, symbol_for_id={"25": "BANKNIFTY"})
+    # Sorted by series; every label is the raw segment (wrong arity for
+    # WEIRD__SHAPE, an empty part for the quadruple-underscore name).
+    assert [d["series"] for d in found] == [
+        "NSE_FNO____MONTH__1__ATM__CALL",
+        "WEIRD__SHAPE",
+    ]
+    assert [d["label"] for d in found] == [d["series"] for d in found]
+
+
+def test_list_option_datasets_finds_plus_strike_series_and_queries(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Regression (DEC-DB-OPTION-DATASET-DECODE-001 bundled allowlist fix —
+    # FAILED before it): the writer stores the rolling-option ATM+N selector
+    # VERBATIM (ATM+3 → an …__ATM+3__CALL directory), but the old segment
+    # grammar had no `+` — the upper half of every strike chain was silently
+    # MISSING from the /db picker AND refused by query_option_candles (the
+    # read allowlist dropped what the write path stores, the
+    # DEC-PREOPEN-AMPERSAND-001 class). Now: discovered, decoded, queryable.
+    _write_options(
+        tmp_path, partition_key="NSE_FNO|25|WEEK|1|ATM+3|CALL", underlying_symbol="BANKNIFTY"
+    )
+    (found,) = list_option_datasets(tmp_path, symbol_for_id={"25": "BANKNIFTY"})
+    assert found["series"] == "NSE_FNO__25__WEEK__1__ATM+3__CALL"
+    assert found["label"] == "BANKNIFTY · WEEK#1 ATM+3 CALL · 1m"
+    # The discovered KEY round-trips through the reader (picker → query loop).
+    page = query_option_candles(store.connection, tmp_path, series=found["series"], limit=50)
+    assert page["total"] == 4  # 2 sides × 2 trading days
 
 
 # ────────────────────────────────────────────────────────────────────────
