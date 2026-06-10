@@ -311,18 +311,27 @@ class WindowLedger:
         interval)`` the CURRENT pull just planned to that pull's tiling
         ``{window_start_iso: window_end_iso}`` (ISO ``YYYY-MM-DD`` — zero-padded,
         so string order == date order). A row is pruned iff its series is
-        planned AND its ``window_start`` is on the tiling AND its ``window_end``
-        is STRICTLY shorter than the tile's planned end — ANY status (a settled
-        SUCCESS partial, the clamp-stranded ``PLANNED``, a ``FAILED``/``EMPTY``/
-        ``SKIPPED`` orphan) is superseded alike, because every retry surface
-        re-derives its work from the tiling, never from ledger rows.
+        planned AND its ``window_start`` is on the tiling AND either:
+
+        * its ``window_end`` is STRICTLY shorter than the tile's planned end —
+          ANY status (a settled SUCCESS partial, a clamp-stranded ``PLANNED``,
+          a ``FAILED``/``EMPTY``/``SKIPPED`` orphan) is superseded alike,
+          because every retry surface re-derives its work from the tiling,
+          never from ledger rows; or
+        * its ``window_end`` is STRICTLY longer AND the row is ``PLANNED`` with
+          ``attempts == 0`` (DEC-PLAN-CLAMP-PARITY-001): pure stale INTENT a
+          previous planner minted past the clamped fetch bound — zero fetch
+          history, unfetchable under the current tiling, and invisible to the
+          shorter-end rule because every later plan's end is SHORTER than the
+          ghost's. Longer-end rows with ANY recorded attempt (a shrunk-range
+          re-run's settled/failed history) are always kept.
 
         **No-mask by construction (#598):** an absent row is never skippable
         (:meth:`is_skippable` → ``False`` → fetch), so deleting rows can only
         turn would-be skips into re-fetches (the idempotent keep-first sink
-        absorbs them), NEVER a fetch into a skip. Equal-end rows (the current
-        plan's own keys, including a same-day re-pull's settled trailing row)
-        and longer-end rows (a shrunk-range re-run's history) are always kept.
+        absorbs them), NEVER a fetch into a skip (a ``PLANNED`` row was never
+        skippable to begin with). Equal-end rows (the current plan's own keys,
+        including a same-day re-pull's settled trailing row) are always kept.
 
         One O(rows) scan + O(pruned) deletes under the lock, once per pull
         start — NOT an O(1) claim (measured 2026-06-10: 0.48 s over a 1.2M-row
@@ -333,12 +342,18 @@ class WindowLedger:
         """
         doomed: list[tuple[str, str, str, str, str]] = []
         with self._lock:
-            for wk in self._by_window:
+            for wk, row in self._by_window.items():
                 tiles = planned_tiles.get(wk[:3])
                 if tiles is None:
                     continue
                 planned_end = tiles.get(wk[3])
-                if planned_end is not None and wk[4] < planned_end:
+                if planned_end is None:
+                    continue
+                superseded = wk[4] < planned_end
+                # Longer-end PURE-INTENT ghost (DEC-PLAN-CLAMP-PARITY-001):
+                # PLANNED + zero attempts past the clamped bound — unfetchable.
+                ghost = wk[4] > planned_end and row.status == PLANNED and row.attempts == 0
+                if superseded or ghost:
                     doomed.append(wk)
             for stale in doomed:
                 del self._by_window[stale]

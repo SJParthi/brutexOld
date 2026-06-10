@@ -343,10 +343,15 @@ def test_build_window_payload_reads_the_ledger_when_present(tmp_path: Path) -> N
         "status",
         "bars",
         "attempts",
+        "empty_streak",
         "last_error",
         "first_seen_at",
         "last_attempt_at",
     }
+    # R1 visibility (DEC-EMPTY-STREAK-VISIBLE-001): the consecutive-EMPTY
+    # streak ships per row and the promotion bound ships once at the top.
+    assert by_symbol["NIFTY"]["empty_streak"] == 0
+    assert payload["empty_threshold"] == 3
 
 
 def test_build_window_payload_falls_back_to_status_sidecar(tmp_path: Path) -> None:
@@ -366,6 +371,26 @@ def test_build_window_payload_falls_back_to_status_sidecar(tmp_path: Path) -> No
     window = payload["windows"][0]
     assert window["status"] == "FAILED"
     assert window["first_seen_at"] is None  # legacy log has no first_seen_at
+    assert window["empty_streak"] == 0  # legacy log has no streak — defaulted
+
+
+def test_build_window_payload_ships_the_live_empty_streak(tmp_path: Path) -> None:
+    # DEC-EMPTY-STREAK-VISIBLE-001: an EMPTY row at attempts 3 with interleaved
+    # FAILED resets shows streak 1/3 — the page can now SAY why it is not yet
+    # SKIPPED (R1 promotes on CONSECUTIVE clean EMPTYs, not total attempts).
+    ledger = WindowLedger()
+    key = _window_key("NIFTY")
+    ledger.record(key, raw_bars=0, error_type=None, bars_appended=0, now=_WINDOW_NOW)
+    ledger.record(
+        key, raw_bars=0, error_type="DhanRateLimitError", bars_appended=0, now=_WINDOW_NOW
+    )
+    ledger.record(key, raw_bars=0, error_type=None, bars_appended=0, now=_WINDOW_NOW)
+    save_window_ledger(ledger, tmp_path)
+
+    (window,) = build_window_payload(tmp_path, status="EMPTY")["windows"]
+    assert window["status"] == "EMPTY"
+    assert window["attempts"] == 3
+    assert window["empty_streak"] == 1  # the FAILED reset the streak
 
 
 def test_build_window_payload_empty_when_neither_exists(tmp_path: Path) -> None:
@@ -373,6 +398,7 @@ def test_build_window_payload_empty_when_neither_exists(tmp_path: Path) -> None:
         "source": "status_log",
         "count": 0,
         "counts": {"spot": {}, "options": {}},
+        "empty_threshold": 3,
         "matched": 0,
         "returned": 0,
         "capped": False,

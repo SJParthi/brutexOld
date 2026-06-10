@@ -22,6 +22,7 @@ from brutex.metrics.cascade import (
     _zscore_clamped,
     run_stage4_cascade,
 )
+from brutex.metrics.pbo import pbo_probability
 
 # pyright: reportPrivateUsage=none
 
@@ -114,6 +115,13 @@ def test_full_pass_two_survivors_ranked() -> None:
     scores = {v.candidate_id: v.composite_score for v in rep.verdicts}
     assert scores[rep.survivor_ids[0]] >= scores[rep.survivor_ids[1]]  # type: ignore[operator]
     assert rep.stage_survivors[FilterStage.MONTE_CARLO.value] == 2
+    # DEC-PBO-SIDECAR-001: the PASS path records the measured pool PBO — pinned
+    # against the pure-function oracle over the SAME matrix the filter builds
+    # (both candidates survive to #5 in input order; 32 obs, usable = 32).
+    expected = pbo_probability(
+        [[float(c.returns[t]) for c in cands] for t in range(32)], n_splits=8
+    ).pbo
+    assert rep.pool_pbo == expected
 
 
 def test_run_hard_gates_disabled() -> None:
@@ -167,13 +175,24 @@ def test_spa_rejects_noise_pool() -> None:
     rep = run_stage4_cascade([_candidate("x", seed=1, returns=noise)], cfg)
     (v,) = rep.verdicts
     assert v.rejected_at is FilterStage.REALITY_CHECK_SPA
+    # DEC-PBO-SIDECAR-001 None-cause (a): the pool is already EMPTY when
+    # filter #5 is reached, so no pool PBO was measured.
+    assert rep.pool_pbo is None
 
 
 def test_pbo_rejects_overfit_pool() -> None:
     # pbo_max = -1 makes any PBO probability exceed it → pool rejected at PBO.
     cfg = _pass_config(pbo_max=-1.0)
-    rep = run_stage4_cascade([_candidate("a", seed=1), _candidate("b", seed=2)], cfg)
+    cands = [_candidate("a", seed=1), _candidate("b", seed=2)]
+    rep = run_stage4_cascade(cands, cfg)
     assert all(v.rejected_at is FilterStage.PBO for v in rep.verdicts)
+    # DEC-PBO-SIDECAR-001: the REJECT path also records the measured value —
+    # oracle-pinned, and it is the SAME number quoted in the reject detail.
+    expected = pbo_probability(
+        [[float(c.returns[t]) for c in cands] for t in range(32)], n_splits=8
+    ).pbo
+    assert rep.pool_pbo == expected
+    assert all(f"{expected:.4f}" in v.detail for v in rep.verdicts)
 
 
 def test_pbo_skipped_for_single_survivor() -> None:
@@ -183,6 +202,7 @@ def test_pbo_skipped_for_single_survivor() -> None:
     rep = run_stage4_cascade([_candidate("solo", seed=1)], cfg)
     (v,) = rep.verdicts
     assert v.rejected_at is not FilterStage.PBO  # PBO was skipped
+    assert rep.pool_pbo is None  # None-cause (b): lone survivor
 
 
 def test_pbo_skipped_for_short_series() -> None:
@@ -196,6 +216,7 @@ def test_pbo_skipped_for_short_series() -> None:
     ]
     rep = run_stage4_cascade(cands, cfg)
     assert all(v.rejected_at is not FilterStage.PBO for v in rep.verdicts)
+    assert rep.pool_pbo is None  # None-cause (c): series shorter than one block
 
 
 def test_romano_wolf_keeps_real_set() -> None:

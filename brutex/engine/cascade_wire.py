@@ -103,7 +103,11 @@ MANIFEST_FILENAME: Final[str] = "manifest.json"
 REPORT_FILENAME: Final[str] = "cascade-report.json"
 #: Manifest schema version (bump on any incompatible field change).
 MANIFEST_VERSION: Final[int] = 1
-#: Report schema version.
+#: Report schema version. ADDITIVE-AT-VERSION-1 (DEC-PBO-SIDECAR-001): the
+#: per-group ``pool_pbo`` key was added without a bump — purely additive, no
+#: reader rejects unknown keys, and a pre-sidecar report (key ABSENT) stays
+#: distinguishable from a measured skip (key ``null``) — the same precedent as
+#: the manifest's additive ``stage3`` block (see ``manifest_from_json``).
 REPORT_VERSION: Final[int] = 1
 
 #: 64-char lowercase-hex BLAKE3 run-identity length (mirrors COMBO_HASH_HEX_LEN).
@@ -745,10 +749,16 @@ def run_cascade_over_specs(
 
 
 def _report_to_dict(report: CascadeReport) -> dict[str, object]:
-    """Serialise one :class:`CascadeReport` into a JSON-native dict."""
+    """Serialise one :class:`CascadeReport` into a JSON-native dict.
+
+    ``pool_pbo`` (DEC-PBO-SIDECAR-001) is the slice's measured CSCV pool PBO —
+    the RAW float (round-trippable ``repr``, never rounded) or ``null`` when
+    filter #5 was skipped (see :class:`~brutex.metrics.cascade.CascadeReport`).
+    """
     return {
         "n_input": report.n_input,
         "n_survived": report.n_survived,
+        "pool_pbo": report.pool_pbo,
         "survivor_ids": list(report.survivor_ids),
         "stage_survivors": dict(report.stage_survivors),
         "verdicts": [

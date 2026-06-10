@@ -119,3 +119,57 @@ def test_prune_never_masks_and_tracks_the_live_tiling(
                     bars_appended=raw_bars,
                     now=_NOW,
                 )
+
+
+@given(
+    end_offsets=st.lists(st.integers(min_value=1, max_value=40), min_size=2, max_size=6),
+    span_days=st.integers(min_value=3, max_value=15),
+    outcome_picks=st.lists(st.sampled_from(_OUTCOMES), min_size=1, max_size=64),
+)
+def test_no_planned_ghost_survives_any_end_history(
+    end_offsets: list[int],
+    span_days: int,
+    outcome_picks: list[tuple[int, str | None] | None],
+) -> None:
+    """DEC-PLAN-CLAMP-PARITY-001 — the ghost-free invariant under ANY end history.
+
+    Ends here are NOT cumulative: the sequence may shrink as well as grow,
+    exactly what the settled-data clamp does around the 15:30 IST close and the
+    daily bound (and what the pre-parity planner did vs the clamped fetch).
+    After every plan→prune cycle, a surviving ``PLANNED`` row with zero attempts
+    whose start is on the current tiling ends EXACTLY at its planned tile end —
+    stale intent (shorter OR longer) never accumulates. Settled/attempted rows
+    are exempt (history is never deleted by the longer-end rule), and the
+    current plan is always complete.
+    """
+    ledger = WindowLedger()
+    picks = iter(outcome_picks * (len(end_offsets) * 50))
+    for offset in end_offsets:
+        tiles = _tiles(offset, span_days=span_days)
+        tiles_iso = {ws.isoformat(): we.isoformat() for ws, we in tiles}
+        planned_index = {("dhan", "NIFTY", "1minute"): tiles_iso}
+        for ws, we in tiles:
+            ledger.plan(_key("NIFTY", ws, we), now=_NOW)
+        ledger.prune_superseded(planned_index)
+
+        surviving = {(r.window_start, r.window_end) for r in ledger.records()}
+        for ws, we in tiles:  # plan completeness
+            assert (ws.isoformat(), we.isoformat()) in surviving
+        for r in ledger.records():  # ghost-free: pure intent sits ONLY on the plan
+            planned_end = tiles_iso.get(r.window_start)
+            if planned_end is not None and r.status == "PLANNED" and r.attempts == 0:
+                assert r.window_end == planned_end
+        assert ledger.prune_superseded(planned_index) == 0  # fixed point
+
+        for ws, we in tiles:  # seed outcomes for the next (maybe shorter) plan
+            pick = next(picks)
+            if pick is None:
+                continue
+            raw_bars, error_type = pick
+            ledger.record(
+                _key("NIFTY", ws, we),
+                raw_bars=raw_bars,
+                error_type=error_type,
+                bars_appended=raw_bars,
+                now=_NOW,
+            )

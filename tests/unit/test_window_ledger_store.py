@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from brutex.data.fetch_coverage import WindowKey
@@ -312,6 +313,107 @@ class TestPruneOnPlan:
         assert yesterday_end.isoformat() not in ends  # pruned key NOT re-seeded
         current = {we.isoformat() for _ws, we in _windows("1day", _START, _END)}
         assert current <= ends  # every current-plan key present
+
+
+class TestPlanClampParity:
+    """DEC-PLAN-CLAMP-PARITY-001 — the planner tiles the SAME clamped end the fetch does.
+
+    The live 2026-06-10 ghost class: `plan_windows` tiled the RAW pull end while
+    `ingest_spot` tiled the `clamp_window_end` bound (DEC-DAILY-CANDLE-CLAMP-001),
+    so every (instrument, 1day) pull minted a PLANNED key the fetch could never
+    record — 783 permanently-pending rows on /coverage/windows after one
+    universe pull. The planner now clamps per interval with an injected clock.
+    """
+
+    _IST = ZoneInfo("Asia/Kolkata")
+
+    def test_daily_plan_is_clamped_to_today(self) -> None:
+        ledger = WindowLedger()
+        plan_windows(
+            ledger,
+            instruments=[_FakeInstrument("NIFTY")],
+            intervals=["1day"],
+            start=_START,
+            end=date(2026, 6, 11),
+            now=_NOW,
+            now_ist=datetime(2026, 6, 10, 21, 51, tzinfo=self._IST),  # post-close
+        )
+        # The planned key is the FETCH key (end-exclusive yesterday's candle),
+        # never the raw tomorrow-ending ghost.
+        assert {r.window_end for r in ledger.records()} == {"2026-06-10"}
+
+    def test_intraday_clamp_follows_the_1530_close(self) -> None:
+        pre = WindowLedger()
+        plan_windows(
+            pre,
+            instruments=[_FakeInstrument("NIFTY")],
+            intervals=["1minute"],
+            start=date(2026, 6, 9),
+            end=date(2026, 6, 11),
+            now=_NOW,
+            now_ist=datetime(2026, 6, 10, 14, 0, tzinfo=self._IST),  # mid-session
+        )
+        assert max(r.window_end for r in pre.records()) == "2026-06-10"
+        post = WindowLedger()
+        plan_windows(
+            post,
+            instruments=[_FakeInstrument("NIFTY")],
+            intervals=["1minute"],
+            start=date(2026, 6, 9),
+            end=date(2026, 6, 11),
+            now=_NOW,
+            now_ist=datetime(2026, 6, 10, 15, 30, tzinfo=self._IST),  # at close
+        )
+        assert max(r.window_end for r in post.records()) == "2026-06-11"
+
+    def test_fully_clamped_interval_plans_nothing(self) -> None:
+        # start == clamped end (a same-day 1day-only pull) → zero tiles, zero
+        # rows — the same `start < clamped_end` empty-range guard as ingest_spot.
+        ledger = WindowLedger()
+        planned = plan_windows(
+            ledger,
+            instruments=[_FakeInstrument("NIFTY")],
+            intervals=["1day"],
+            start=date(2026, 6, 10),
+            end=date(2026, 6, 11),
+            now=_NOW,
+            now_ist=datetime(2026, 6, 10, 21, 0, tzinfo=self._IST),
+        )
+        assert planned == 0
+        assert ledger.count == 0
+
+    def test_operator_ghost_self_heals_on_next_plan(self) -> None:
+        # The LIVE lake state this decision fixes: a PLANNED ghost at the raw
+        # end (attempts 0) beside the settled clamped row. The next pull's
+        # plan→prune cycle deletes the ghost and keeps the history skippable.
+        ledger = WindowLedger()
+        ghost = WindowKey(
+            market="dhan",
+            security_id="NIFTY",
+            interval="1day",
+            start=_START,
+            end=date(2026, 6, 11),
+        )
+        settled = WindowKey(
+            market="dhan",
+            security_id="NIFTY",
+            interval="1day",
+            start=_START,
+            end=date(2026, 6, 10),
+        )
+        ledger.plan(ghost, now=_NOW)
+        ledger.record(settled, raw_bars=9, error_type=None, bars_appended=9, now=_NOW)
+        plan_windows(
+            ledger,
+            instruments=[_FakeInstrument("NIFTY")],
+            intervals=["1day"],
+            start=_START,
+            end=date(2026, 6, 11),
+            now=_NOW,
+            now_ist=datetime(2026, 6, 10, 21, 51, tzinfo=self._IST),
+        )
+        assert "2026-06-11" not in {r.window_end for r in ledger.records()}  # ghost gone
+        assert ledger.is_skippable(settled) is True  # settled history untouched
 
 
 class TestLiveFlush:

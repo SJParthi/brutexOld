@@ -286,6 +286,16 @@ class CascadeReport:
     n_input: int
     n_survived: int
     stage_survivors: dict[str, int]  # FilterStage.value -> count still alive after it
+    #: The MEASURED CSCV pool PBO from filter #5 (DEC-PBO-SIDECAR-001) — the raw
+    #: probability, full precision, NEVER rounded (DEC-STAT-DSR-PBO-001). This is
+    #: the COMBINED-DIRECTION pool statistic for the whole pooled slice (the wire
+    #: pools bull AND bear specs of one ``(instrument, tf)`` together), NOT a
+    #: per-direction or per-candidate number. ``None`` iff the filter never ran,
+    #: which has exactly THREE causes: (a) the pool was already empty when #5 was
+    #: reached (everything died at an earlier filter); (b) a lone survivor
+    #: (CSCV needs >= 2 candidates); (c) the return series is shorter than one
+    #: split block (``usable < pbo_n_splits``).
+    pool_pbo: float | None = None
 
     @property
     def rejected_ids(self) -> tuple[str, ...]:
@@ -532,6 +542,10 @@ def run_stage4_cascade(
     # shorter than one split-block is skipped.
     n_obs_pbo = len(survivors[0].returns) if survivors else 0
     usable = (n_obs_pbo // config.pbo_n_splits) * config.pbo_n_splits
+    # DEC-PBO-SIDECAR-001: the MEASURED pool PBO is recorded on the report
+    # whether the filter passes or rejects — it was previously dropped on the
+    # pass path, leaving the cascade's headline overfitting statistic invisible.
+    pool_pbo: float | None = None
     if len(survivors) >= _MIN_POOL_FOR_PBO and usable >= config.pbo_n_splits:
         result = pbo_probability(
             [
@@ -540,6 +554,7 @@ def run_stage4_cascade(
             ],
             n_splits=config.pbo_n_splits,
         )
+        pool_pbo = result.pbo
         if result.pbo > config.pbo_max:
             for c in survivors:
                 reject(c, FilterStage.PBO, f"pool PBO {result.pbo:.4f} > {config.pbo_max}")
@@ -660,4 +675,5 @@ def run_stage4_cascade(
         n_input=len(pool),
         n_survived=len(ranked),
         stage_survivors=stage_survivors,
+        pool_pbo=pool_pbo,
     )
