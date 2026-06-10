@@ -752,7 +752,7 @@ jobs:
           else
             echo "(brutex.orchestrator.adaptive_rate_limiter test file not present yet — gate inactive)"
           fi
-          # DEC-ORCH-STRICT-GATES-001 (2026-06-10, MIGRATION entry #612):
+          # DEC-ORCH-STRICT-GATES-001 (2026-06-10, MIGRATION entry #613):
           # the final six orchestrator modules promoted from
           # global-coverage-only to strict standalone per-module 100%
           # gates. Each dedicated unit file got surgical gap-closing
@@ -1336,7 +1336,7 @@ jobs:
           # collection errored. RESOLVED by DEC-ORCH-LAZY-BLOOM-001 (entry #589,
           # lazy fastbloom_rs import); every orchestrator submodule with a
           # dedicated test file is now strict-gated above
-          # (DEC-ORCH-STRICT-GATES-001, entry #612).
+          # (DEC-ORCH-STRICT-GATES-001, entry #613).
           if compgen -G "tests/unit/test_data_sink.py" > /dev/null; then
             pytest --cov=brutex.data.sink --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_sink.py
           else
