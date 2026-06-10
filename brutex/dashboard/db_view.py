@@ -52,6 +52,7 @@ from brutex.data.partition import (
 )
 from brutex.data.session import format_ist_clock
 from brutex.data.spot_features import pct_change
+from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD
 
 #: Structured logger — surfaces the otherwise-silent coverage-read degradation
 #: (a single corrupt / version-incompatible Parquet file is SKIPPED, logged as
@@ -1675,6 +1676,12 @@ def _window_row(
         "status": record.status,
         "bars": record.bars,
         "attempts": record.attempts,
+        # The CONSECUTIVE genuine-EMPTY count (window_ledger R1) — surfaces WHY
+        # an EMPTY row at attempts 5-6 is not yet SKIPPED: interleaved FAILED
+        # outcomes reset the streak, so promotion needs `empty_threshold` clean
+        # EMPTYs RUNNING, not in total (DEC-EMPTY-STREAK-VISIBLE-001). The
+        # legacy status log has no streak — getattr keeps ONE row shape.
+        "empty_streak": getattr(record, "empty_streak", 0),
         "last_error": record.last_error,
         # Display the stored UTC stamps as clean IST (CLAUDE.md §6 store-UTC /
         # display-IST; §11 COMMON via `format_ist_clock`) so /coverage/windows
@@ -1783,9 +1790,10 @@ def build_window_payload(
     Returns
     -------
     dict[str, Any]
-        ``{"source", "count", "counts", "matched", "returned", "capped",
-        "windows"}`` — ``count`` is the TOTAL recorded (back-compat),
-        ``matched`` the post-filter row count, ``returned`` the rows shipped.
+        ``{"source", "count", "counts", "empty_threshold", "matched",
+        "returned", "capped", "windows"}`` — ``count`` is the TOTAL recorded
+        (back-compat), ``matched`` the post-filter row count, ``returned`` the
+        rows shipped, ``empty_threshold`` the R1 EMPTY→SKIPPED promotion bound.
     """
     from brutex.data.window_ledger_store import ledger_path
 
@@ -1821,6 +1829,10 @@ def build_window_payload(
         "source": source,
         "count": len(records),
         "counts": counts,
+        # The R1 promotion threshold (EMPTY → SKIPPED after this many
+        # CONSECUTIVE clean EMPTYs) so the page can render each EMPTY row's
+        # `empty_streak`/threshold progress without hardcoding the constant.
+        "empty_threshold": EMPTY_TERMINAL_THRESHOLD,
         "matched": len(selected),
         "returned": len(rows),
         "capped": len(selected) > limit,

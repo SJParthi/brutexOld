@@ -337,6 +337,48 @@ class TestPruneSuperseded:
         assert ledger.prune_superseded(_plan_index(planned)) == 0
         assert ledger.count == 2
 
+    def test_longer_end_planned_ghost_is_pruned(self) -> None:
+        # DEC-PLAN-CLAMP-PARITY-001 (operator live, 2026-06-10): the pre-parity
+        # planner tiled the RAW end while the fetch clamped — one PLANNED row
+        # per (instrument, interval) ending PAST every later clamped plan, so
+        # the shorter-end rule could never reach it. A longer-end row that is
+        # pure intent (PLANNED, zero attempts) is pruned by the current plan.
+        ledger = WindowLedger()
+        ghost = _tkey(end=date(2026, 6, 11))  # raw end the fetch never records
+        ledger.plan(ghost, now=_NOW)
+        planned = _tkey(end=date(2026, 6, 10))  # the clamped tiling
+        ledger.plan(planned, now=_LATER)
+        assert ledger.prune_superseded(_plan_index(planned)) == 1
+        assert [r.window_end for r in ledger.records()] == ["2026-06-10"]
+        assert ledger.is_skippable(ghost) is False  # never skippable, now gone
+
+    def test_longer_end_planned_with_attempts_is_kept(self) -> None:
+        # Defensive guard: a loaded row that claims PLANNED yet carries attempt
+        # history (impossible via the live API — record() always re-classifies)
+        # is NOT pure intent, so the ghost rule leaves it alone.
+        ledger = WindowLedger.from_rows(
+            [
+                (
+                    "dhan",
+                    "NIFTY",
+                    "1minute",
+                    "2026-06-01",
+                    "2026-06-12",
+                    "PLANNED",
+                    0,
+                    1,
+                    None,
+                    _NOW.isoformat(),
+                    _NOW.isoformat(),
+                    0,
+                )
+            ]
+        )
+        planned = _tkey(end=date(2026, 6, 10))
+        ledger.plan(planned, now=_LATER)
+        assert ledger.prune_superseded(_plan_index(planned)) == 0
+        assert ledger.count == 2
+
     def test_unplanned_series_is_kept(self) -> None:
         # An options-only / single-symbol pull must not touch other series' rows.
         ledger = WindowLedger()

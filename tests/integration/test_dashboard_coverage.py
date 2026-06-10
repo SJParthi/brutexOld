@@ -243,10 +243,12 @@ class TestWindowStatusApi:
         # (which backing answered) — falls back to the status log when no ledger.
         # DEC-OPTION-WINDOW-PLAN-001 (hostile C3): plus the always-complete
         # counts + the capped-row-list accounting fields.
+        # DEC-EMPTY-STREAK-VISIBLE-001: plus the R1 EMPTY→SKIPPED promotion bound.
         assert resp.json() == {
             "source": "status_log",
             "count": 0,
             "counts": {"spot": {}, "options": {}},
+            "empty_threshold": 3,
             "matched": 0,
             "returned": 0,
             "capped": False,
