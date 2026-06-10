@@ -1149,7 +1149,7 @@ class TestQuotaDeathMidRound:
         tmp_path: Path,
         *,
         until_clean: bool,
-    ) -> tuple[BulkSpotReport, list[Mapping[str, object]]]:
+    ) -> tuple[BulkSpotReport, Sequence[Mapping[str, object]]]:
         """One quota-dying live-pattern pull over a tiny 5-day window (2 windows)."""
         minute_done, factory = self._quota_death_scaffold()
 
