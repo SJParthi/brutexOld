@@ -281,7 +281,7 @@ ceiling), F-3 dissolved and the D5 scorecard row corrected — the
 docstring was already fixed and the audit-agent claim was stale.*
 
 *Amendment (2026-06-10, DEC-AUTOMERGE-CLEAN-STRICT-001, MIGRATION.md
-#611): F-4 closed and the G1 scorecard row's residual nuance dissolved.
+#612): F-4 closed and the G1 scorecard row's residual nuance dissolved.
 Auto-merge run-log evidence (2026-06-03→06-10 sample: 1,230 runs
 listed, 30 gate executions verified — `unstable` 21 incl. EVERY
 `ready_for_review`-path merge, whose own pending check run makes

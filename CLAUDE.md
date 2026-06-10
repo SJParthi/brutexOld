@@ -19,7 +19,7 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-06-10 (DEC-AUTOMERGE-CLEAN-STRICT-001, MIGRATION.md
-#611 — §2 Rule 13(a) `mergeable_state` invariant aligned with the
+#612 — §2 Rule 13(a) `mergeable_state` invariant aligned with the
 charter §4.5 pre-G2 envelope per DEC-WORKSPACE-VERIFY-002 follow-up
 F-4). Earlier: 2026-06-10 (DEC-WORKSPACE-VERIFY-002, MIGRATION.md #609 —
 §6 `dhan/constants.py` line citations refreshed after the 5-agent
