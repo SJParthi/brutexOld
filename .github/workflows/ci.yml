@@ -149,8 +149,12 @@ jobs:
         # fastapi/pydantic/polars/duckdb types (not Unknown). Previously [dev]-only,
         # which silently masked dashboard type errors (mirror of the #376/#280
         # test-masking finding).
+        # DEC-STAGE3-REFINE-001: [optimize] added so mypy/pyright resolve the
+        # pinned pycma the same way the venv + unit job do (without it the
+        # stage3_refine import errors import-not-found here, a THIRD env-specific
+        # code the dual-env ignore can't cover).
         run: |
-          pip install -e ".[dev,data,ui]"
+          pip install -e ".[dev,data,ui,optimize]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-050: required by pyright's strict mode which walks
         # `tests/unit/test_fno_math_bridge.py` and needs the module
@@ -910,6 +914,14 @@ jobs:
             pytest --cov=brutex.engine.stage3_select --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_stage3_select.py
           else
             echo "(brutex.engine.stage3_select test file not present yet — gate inactive)"
+          fi
+          # 19i1b · brutex.engine.stage3_refine — Stage-3 BIPOP-CMA-ES refinement
+          # runner (DEC-STAGE3-REFINE-001; the A/B determinism oracle, the ≤600
+          # hard budget, the run-scoped value cache — ADR-0007 conditions 4-6/8).
+          if compgen -G "tests/unit/test_engine_stage3_refine.py" > /dev/null; then
+            pytest --cov=brutex.engine.stage3_refine --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_stage3_refine.py
+          else
+            echo "(brutex.engine.stage3_refine test file not present yet — gate inactive)"
           fi
           # 19i1a · brutex.engine.stage3_grid — Stage-3 [0,1] ↔ int-paisa Mode-A
           # grid bijection (DEC-STAGE3-GRID-001; pure, O(1) per call — ADR-0007
