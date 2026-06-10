@@ -141,7 +141,7 @@ Telegram notification path exists and is coverage-gated.
 | D5 `test_store_o1.py` docstring 3×-vs-5× nit | ✅ FIXED *(amended same day)* | re-grepped in the DEC-O1-BENCH-GAPS-002 follow-up: the docstring already reads `5×` matching `ratio_ceiling(5.0)` and labels the `REQUIREMENTS.md` mention as the retired stub — the audit-agent claim was stale (its third stale claim alongside G1/G3) |
 | D6 Groww spec lacked SUPERSEDED banner | ✅ FIXED | `docs/TRACK1_GROWW_ADAPTER.md:1-10` carries the ⛔ banner |
 | D7 "bit-for-bit reproducible" not provable | 🟡 OPEN BY DESIGN | honestly enveloped in STANDARDS §8; L3 replay oracle live; Parquet bit-equality is Phase 2/3 |
-| G1 auto-merge ignored `mergeable_state` | ✅ FIXED (materially) | DEC-AUTOMERGE-SAFETY-001 refuses dirty/behind/blocked/unknown; residual nuance: `unstable`/`has_hooks` allowed vs the charter's strict `clean` — noted, not a red gate |
+| G1 auto-merge ignored `mergeable_state` | ✅ FIXED (materially) | DEC-AUTOMERGE-SAFETY-001 refuses dirty/behind/blocked/unknown; residual nuance *(closed same day)*: the `unstable` allowance is now the charter §4.5 documented pre-G2 envelope (DEC-AUTOMERGE-CLEAN-STRICT-001) — run-log sample: `unstable` 21/30 gate executions incl. every ready_for_review-path merge, `clean` only 4/18 merges (workflow_run path); strict `clean` stays the G2-gated ratchet |
 | G2 server-side branch protection unapplied | 🟡 STILL OPEN | operator one-time UI setup (`docs/runbooks/github-branch-protection-setup.md`); `branch-protection-drift.yml` detects + alerts only |
 | G3 conv-commits not in `ci-ok.needs` | ✅ FIXED | `ci.yml:2812` (commented "DEC-AUTOMERGE-SAFETY-001 (G3)") |
 
@@ -266,7 +266,7 @@ Telegram notification path exists and is coverage-gated.
 | F-1 | Reconcile MIGRATION.md duplicate entry numbers (28 collisions; keep DEC-ID as primary key, add disambiguators rather than renumber history) | "entry #NNN" citations in the 578-592 range are ambiguous | DEC-LEDGER-RENUMBER-001 |
 | F-2 | ~~Dedicated O(1) ratio benches for bar-index lookup + indicator-value lookup~~ **CLOSED same day** by DEC-O1-BENCH-GAPS-002 (`tests/bench/test_bar_lookup_o1.py` + `test_indicator_lookup_o1.py`) | the last 2 of the 5 Golden-Rule-#5 hot paths now have isolated gates | DEC-O1-BENCH-GAPS-002 |
 | F-3 | ~~Fix `tests/bench/test_store_o1.py` docstring~~ **NO CHANGE NEEDED** — re-checked in the F-2 follow-up: already correct; the D5 agent claim was stale | D5 residue dissolved | — |
-| F-4 | Tighten auto-merge to the charter's strict `mergeable_state == clean` or amend the charter to document the `unstable`/`has_hooks` allowance | G1 residual nuance | DEC-AUTOMERGE-CLEAN-STRICT-001 |
+| F-4 | ~~Tighten auto-merge to strict `clean` or amend the charter~~ **CLOSED same day** by DEC-AUTOMERGE-CLEAN-STRICT-001 — run-log evidence (`unstable` 21/30 gate executions; the ready_for_review path can NEVER observe `clean` — the gate's own pending check run keeps the head's rollup non-passing; `clean` only 4/18 merges, all workflow_run-path) chose AMEND: charter §4.5 now documents the pre-G2 denylist envelope; strict `clean` is the G2-gated ratchet; redteam pins workflow ↔ charter. The same review closed 3 latent gate bugs found en route (in-flight-CI existence hole observed on #571, the null field-shift refusal, the dead workflow_dispatch hatch) | G1 residual nuance dissolved | DEC-AUTOMERGE-CLEAN-STRICT-001 |
 
 ---
 
@@ -279,3 +279,33 @@ inline. Predecessors: `VERIFICATION_2026-06-02.md`,
 closed (two new bench gates; measured ratios 1.07×–2.61× vs the 5×
 ceiling), F-3 dissolved and the D5 scorecard row corrected — the
 docstring was already fixed and the audit-agent claim was stale.*
+
+*Amendment (2026-06-10, DEC-AUTOMERGE-CLEAN-STRICT-001, MIGRATION.md
+#611): F-4 closed and the G1 scorecard row's residual nuance dissolved.
+Auto-merge run-log evidence (2026-06-03→06-10 sample: 1,230 runs
+listed, 30 gate executions verified — `unstable` 21 incl. EVERY
+`ready_for_review`-path merge, whose own pending check run makes
+`clean` structurally unobservable; `clean` only 4 of 18 verified
+merges, all `workflow_run`-path; `dirty`/`behind`/`blocked`/
+`has_hooks` never observed) chose AMEND over TIGHTEN: strict `clean`
+today would deadlock auto-merge. Charter §4.5 now documents the pre-G2
+denylist envelope (refuse `dirty`/`behind`/`blocked`/`unknown`; every
+other state passes, red checks refused upstream by the all-green
+ci-check); CLAUDE.md §13(a) + the PR template banner aligned; the
+strict-`clean` ratchet stays tied to G2; redteam pins workflow ↔
+charter both ways. The hostile review additionally found and the same
+PR FIXED three latent gate bugs: (1) the in-flight-CI existence hole —
+PR #571 merged 19:56:26 while its pull_request CI run (whose `CI OK`
+check run did not exist yet) ran until 19:57:03 (runs 27231261106 /
+27231295196); ci-check now requires every push/pull_request CI run on
+the head COMPLETED + a green pull_request verdict (self-healing: a
+refused in-flight run re-triggers on its own completion); (2) the
+null field-shift — an uncomputed `mergeable: null` rendered as an
+empty TSV field, `read` shifted "unknown" into `mergeable`, the poll
+loop broke on attempt 1 and the DEC-AUTOMERGE-RACE-FIX-001 deferral
+was dead code (all 4 sampled refusals show `mergeable=unknown
+mergeable_state=`); jq now defaults null fields to the string "null";
+(3) the `workflow_dispatch` "manual escape hatch" was dead code (it
+emitted only `pr_number`, so trust-check always read empty metadata →
+`trusted=false`; zero dispatch runs exist in history); it now resolves
+author/head_ref/is_draft and passes through the same gates.*
