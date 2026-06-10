@@ -1148,3 +1148,54 @@ class TestReferenceOnlyColumn:
             assert s.reference_only_security_ids(as_of=date(2026, 6, 1)) == frozenset(
                 {_idx("INDIAVIX").security_id}
             )
+
+
+class TestStaleOptionEligibility:
+    """has_stale_option_eligibility() — DEC-ELIGIBILITY-AUTOHEAL-001.
+
+    The pre-DEC-OPTIONS-ELIGIBLE-PRECISE-001 fingerprint: a brute-force index
+    wrongly reference_only, or INDIA VIX wrongly option-pullable — either
+    means the OPT/REF flags were written by the retired id-collision tagger
+    and the boot auto-heal must re-load + re-tag.
+    """
+
+    def test_true_when_brute_force_index_is_reference_only(self, tmp_path: Path) -> None:
+        """NIFTY tagged reference_only is impossible under the precise tagger."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY")],
+                snapshot_date=date(2026, 6, 10),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+                reference_only_of=lambda _i: True,
+            )
+            assert s.has_stale_option_eligibility() is True
+
+    def test_true_when_india_vix_is_option_pullable(self, tmp_path: Path) -> None:
+        """INDIA VIX is REFERENCE ONLY by decree — pullable means stale flags."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("INDIA VIX")],
+                snapshot_date=date(2026, 6, 10),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+                reference_only_of=lambda _i: False,
+            )
+            assert s.has_stale_option_eligibility() is True
+
+    def test_false_on_precisely_tagged_lake(self, tmp_path: Path) -> None:
+        """The post-precise shape — NIFTY pullable, VIX reference — is healthy."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            s.upsert_many(
+                [_idx("NIFTY"), _idx("INDIA VIX"), _eq("RELIANCE")],
+                snapshot_date=date(2026, 6, 10),
+                run_id="r",
+                csv_source_sha256=_csv_hash(),
+                reference_only_of=lambda i: i.symbol_name == "INDIA VIX",
+            )
+            assert s.has_stale_option_eligibility() is False
+
+    def test_false_on_empty_store(self, tmp_path: Path) -> None:
+        """No rows → no fingerprint (the empty-lake trigger reloads anyway)."""
+        with InstrumentStore.open(tmp_path / "db") as s:
+            assert s.has_stale_option_eligibility() is False

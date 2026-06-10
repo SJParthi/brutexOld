@@ -15,6 +15,8 @@ from brutex.dashboard.auto_pull import should_reload_instrument_master
 @pytest.mark.parametrize(
     ("index_count", "stock_count", "legs_present", "stale_economics", "expected"),
     [
+        # Stale eligibility cases are exercised separately below — this matrix
+        # pins the four pre-DEC-ELIGIBILITY-AUTOHEAL-001 triggers unchanged.
         # Wholly empty lake (fresh) → reload.
         (0, 0, False, False, True),
         # Stale lake: stocks present but ZERO indices (pre-fix build) → reload.
@@ -60,6 +62,30 @@ def test_should_reload_defaults_stale_economics_false() -> None:
     """``stale_economics`` defaults to False (back-compat with 3-arg callers)."""
     assert (
         should_reload_instrument_master(index_count=25, stock_count=211, legs_present=False)
+        is False
+    )
+
+
+def test_should_reload_on_stale_eligibility() -> None:
+    """Stale OPT/REF flags alone trigger the reload (DEC-ELIGIBILITY-AUTOHEAL-001)."""
+    assert (
+        should_reload_instrument_master(
+            index_count=25,
+            stock_count=211,
+            legs_present=False,
+            stale_economics=False,
+            stale_eligibility=True,
+        )
+        is True
+    )
+
+
+def test_should_reload_defaults_stale_eligibility_false() -> None:
+    """``stale_eligibility`` defaults to False (back-compat with 4-arg callers)."""
+    assert (
+        should_reload_instrument_master(
+            index_count=25, stock_count=211, legs_present=False, stale_economics=False
+        )
         is False
     )
 

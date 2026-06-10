@@ -29,10 +29,11 @@ def should_reload_instrument_master(
     stock_count: int,
     legs_present: bool = False,
     stale_economics: bool = False,
+    stale_eligibility: bool = False,
 ) -> bool:
     """Return whether the keyless instrument master should be (re)loaded on run.
 
-    Reloads when the lake is in any of four known-bad states:
+    Reloads when the lake is in any of five known-bad states:
 
     * **empty** — nothing loaded yet (``index_count == stock_count == 0``);
     * **indices missing** — holds stocks yet **zero indices**, the fingerprint
@@ -50,7 +51,14 @@ def should_reload_instrument_master(
       serving ``lot_size = 1`` forever, because the placeholder economics did
       not change the index/stock counts and the lean lake carries no legs
       (DEC-STALE-ECONOMICS-HEAL-001). A clean re-load enriches every stock
-      from its derivative legs.
+      from its derivative legs;
+    * **stale eligibility** — the OPT/REF flags were written by the retired
+      id-collision tagger (``stale_eligibility``; the probe keys on a
+      brute-force index wrongly ``reference_only`` or INDIA VIX wrongly
+      option-pullable — DEC-ELIGIBILITY-AUTOHEAL-001). A re-load re-tags every
+      row with the precise OPTIDX-only arm (DEC-OPTIONS-ELIGIBLE-PRECISE-001),
+      so an upgraded build heals itself instead of waiting for the operator to
+      remember the manual "Load instruments" click.
 
     Re-loading is safe + idempotent: the lean refresh replaces the whole
     snapshot deterministically, and a fully-enriched lake clears
@@ -70,16 +78,21 @@ def should_reload_instrument_master(
         ``True`` iff the lake holds an F&O-eligible equity with placeholder
         (un-enriched) ``lot_size``. Cheaply probed via
         :meth:`~brutex.data.instrument_store.InstrumentStore.has_placeholder_stock_economics`.
+    stale_eligibility
+        ``True`` iff the latest snapshot carries pre-precise OPT/REF flags.
+        Cheaply probed via
+        :meth:`~brutex.data.instrument_store.InstrumentStore.has_stale_option_eligibility`.
 
     Returns
     -------
     bool
-        ``True`` iff the lake is empty, missing indices, non-lean, OR carries
-        stale (un-enriched) stock economics.
+        ``True`` iff the lake is empty, missing indices, non-lean, carries
+        stale (un-enriched) stock economics, OR carries stale OPT/REF
+        eligibility flags.
     """
     lake_is_empty = index_count == 0 and stock_count == 0
     indices_missing = index_count == 0
-    return lake_is_empty or indices_missing or legs_present or stale_economics
+    return lake_is_empty or indices_missing or legs_present or stale_economics or stale_eligibility
 
 
 # NOTE: ``should_auto_pull_universe`` was removed in DEC-UNIVERSE-PULL-PHASED-001
