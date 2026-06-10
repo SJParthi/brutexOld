@@ -44,9 +44,9 @@ def test_skeleton_chips_on_load() -> None:
     assert "function showSkeleton" in html, "the skeleton helper is missing"
     assert "showSkeleton();" in html, "loadSymbols must show the skeleton before fetching"
     # The bare 'loading symbols…' text is replaced by the skeleton.
-    assert (
-        ">loading symbols…<" not in html
-    ), "the bare loading text must be replaced by the skeleton"
+    assert ">loading symbols…<" not in html, (
+        "the bare loading text must be replaced by the skeleton"
+    )
 
 
 def test_animated_count_pop() -> None:
@@ -63,9 +63,9 @@ def test_empty_state_art_present() -> None:
     assert "@keyframes floatArt" in html, "the empty-state float animation is missing"
     assert '<span class="art">' in html, "the empty-state art glyph is missing"
     # Both the no-data and the fetch-failure branches use the art empty-state.
-    assert (
-        html.count('class="empty"><span class="art">') >= 2
-    ), "both the no-symbols and the load-failure empty states should carry the art glyph"
+    assert html.count('class="empty"><span class="art">') >= 2, (
+        "both the no-symbols and the load-failure empty states should carry the art glyph"
+    )
 
 
 def test_stale_logs_reference_is_gone() -> None:
@@ -158,6 +158,6 @@ def test_reports_fno_only_selector_present() -> None:
     html = _render_reports_html()
     assert '<button id="fno"' in html, "the F&O-only toolbar button is missing"
     assert "F&amp;O only</button>" in html, "the button label is missing"
-    assert (
-        "allSymbols.filter(s => s.option_pullable)" in html
-    ), "the selector does not filter on option_pullable"
+    assert "allSymbols.filter(s => s.option_pullable)" in html, (
+        "the selector does not filter on option_pullable"
+    )
