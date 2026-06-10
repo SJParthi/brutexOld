@@ -27,19 +27,60 @@
 #
 # Usage:
 #   check-conventional-commits.sh <from-rev> <to-rev>
+#   check-conventional-commits.sh --msg-file <path>
 #
 # In CI (GitHub Actions PR event):
 #   check-conventional-commits.sh $PR_BASE_SHA $PR_HEAD_SHA
 #
 # In pre-commit (commit-msg stage):
-#   check-conventional-commits.sh HEAD~1 HEAD
+#   check-conventional-commits.sh --msg-file "$COMMIT_MSG_FILE"
+#
+# DEC-WINDOW-OPTION-DECODE-001 hardening: the commit-msg hook previously ran
+# `HEAD~1 HEAD`, which at commit-msg time validates the PREVIOUS commit — never
+# the message being written. The moment a non-conforming title landed on main
+# (PR #588's dual-type squash title `fix(coverage)+feat(engine): …`), EVERY
+# subsequent local commit failed regardless of its own message. `--msg-file`
+# validates exactly the new message; the range mode stays for CI.
 
 set -euo pipefail
 
+REGEX='^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\([a-z0-9_/-]+\))?!?: .+'
+
+print_help() {
+    cat >&2 <<'EOF'
+
+Required format:
+  <type>(<optional-scope>): <description>
+
+Allowed types: feat, fix, docs, style, refactor, perf, test, chore,
+               build, ci, revert
+
+Examples:
+  feat(adapter): add Groww instrument snapshot pull
+  fix(engine): O(1) regression in bar lookup
+  docs(requirements): add FR-MATH section
+  chore(claude): update CLAUDE.md rules
+EOF
+}
+
+if [[ "${1:-}" == "--msg-file" ]]; then
+    MSG_FILE="${2:?--msg-file requires the commit-message path}"
+    subject="$(head -n 1 "$MSG_FILE")"
+    # Merge commits are exempt (the commitlint defaultIgnores rule; force-push
+    # is denied here, so conflict resolution NEEDS merge commits).
+    if [[ "$subject" == Merge* ]] || [[ "$subject" =~ $REGEX ]]; then
+        echo "✅ commit message follows Conventional Commits."
+        exit 0
+    fi
+    echo "❌ ${subject}" >&2
+    echo "" >&2
+    echo "This commit message does not follow Conventional Commits." >&2
+    print_help
+    exit 1
+fi
+
 FROM="${1:-HEAD~1}"
 TO="${2:-HEAD}"
-
-REGEX='^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\([a-z0-9_/-]+\))?!?: .+'
 
 FAILED=0
 COUNT=0
@@ -69,24 +110,11 @@ fi
 
 if [[ $FAILED -ne 0 ]]; then
     echo "" >&2
-    cat >&2 <<'EOF'
-One or more commits in this range do not follow Conventional Commits.
-
-Required format:
-  <type>(<optional-scope>): <description>
-
-Allowed types: feat, fix, docs, style, refactor, perf, test, chore,
-               build, ci, revert
-
-Examples:
-  feat(adapter): add Groww instrument snapshot pull
-  fix(engine): O(1) regression in bar lookup
-  docs(requirements): add FR-MATH section
-  chore(claude): update CLAUDE.md rules
-
-To amend the last commit: git commit --amend
-To rewrite multiple: git rebase -i <from-sha>
-EOF
+    echo "One or more commits in this range do not follow Conventional Commits." >&2
+    print_help
+    echo "" >&2
+    echo "To amend the last commit: git commit --amend" >&2
+    echo "To rewrite multiple: git rebase -i <from-sha>" >&2
     exit 1
 fi
 

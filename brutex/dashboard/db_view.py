@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping
 from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
@@ -1542,18 +1543,66 @@ def _parse_iso_date(value: str, field_name: str) -> date:
         raise ValueError(f"{field_name} must be ISO YYYY-MM-DD, got {value!r}") from exc
 
 
-def _window_row(record: Any, *, first_seen_at: str | None) -> dict[str, Any]:
+#: The unified ledger's option-window namespace — must match the coverage-key
+#: builder in :mod:`brutex.adapters.dhan.option_ingest` (``_COVERAGE_MARKET``).
+_OPTION_WINDOW_MARKET = "dhan-option"
+
+#: The option coverage key's folded-interval arity:
+#: ``OPT|<flag>|<code>|<strike>|<type>`` (option_ingest._coverage_key).
+_OPTION_INTERVAL_ARITY = 5
+
+
+def _decode_option_window(
+    record: Any, symbol_for_id: Mapping[str, str] | None
+) -> tuple[str, str] | None:
+    """Decode one dhan-option ledger row into PRECISE display coordinates.
+
+    The option window key folds the whole series into the reusable
+    ``WindowKey`` (DEC-WINDOW-LEDGER-001): ``security_id = "<id>|<segment>"``
+    and ``interval = "OPT|<flag>|<code>|<strike>|<type>"``. Rendered raw those
+    read ``25|NSE_FNO`` / ``OPT|WEEK|1|ATM+3|CALL`` — vendor ids, not the
+    operator's symbols — which is exactly the live /coverage/windows complaint
+    (DEC-WINDOW-OPTION-DECODE-001). Returns
+    ``("BANKNIFTY · NSE_FNO", "WEEK#1 ATM+3 CALL · 1m")``-style display pairs,
+    or ``None`` for any shape that does not parse (the caller keeps the raw
+    row — fallback, never an exception; an unknown id keeps the numeric id so
+    the row is still distinguishable).
+    """
+    sid, sep, segment = str(record.security_id).partition("|")
+    parts = str(record.interval).split("|")
+    if not sep or len(parts) != _OPTION_INTERVAL_ARITY:
+        return None
+    _opt, flag, code, strike, opt_type = parts
+    label = (symbol_for_id or {}).get(sid, sid)
+    return (f"{label} · {segment}", f"{flag}#{code} {strike} {opt_type} · 1m")
+
+
+def _window_row(
+    record: Any,
+    *,
+    first_seen_at: str | None,
+    symbol_for_id: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     """Project one per-window record to the ``/coverage/windows`` JSON row (ONE shape).
 
     Shared by both sources (the unified ledger + the legacy status log) so the two
     can never drift — CLAUDE.md §11 COMMON. Both record types expose the same
     field names; only the ledger carries ``first_seen_at`` (``None`` for the
-    legacy log).
+    legacy log). Option windows (``dhan-option``) are decoded to the operator's
+    PRECISE coordinates — underlying symbol + ``FLAG#code strike type`` — via
+    :func:`_decode_option_window` (DEC-WINDOW-OPTION-DECODE-001); spot rows are
+    byte-unchanged.
     """
+    symbol = record.security_id
+    interval = record.interval
+    if record.market == _OPTION_WINDOW_MARKET:
+        decoded = _decode_option_window(record, symbol_for_id)
+        if decoded is not None:
+            symbol, interval = decoded
     return {
         "market": record.market,
-        "symbol": record.security_id,
-        "interval": record.interval,
+        "symbol": symbol,
+        "interval": interval,
         "window_start": record.window_start,
         "window_end": record.window_end,
         "status": record.status,
@@ -1568,7 +1617,9 @@ def _window_row(record: Any, *, first_seen_at: str | None) -> dict[str, Any]:
     }
 
 
-def build_window_payload(lake_root: Path) -> dict[str, Any]:
+def build_window_payload(
+    lake_root: Path, *, symbol_for_id: Mapping[str, str] | None = None
+) -> dict[str, Any]:
     """Project the per-window state for ``/coverage/windows`` — the unified ledger if present.
 
     DEC-WINDOW-LEDGER-001 (PR-3). Reads the durable ledger Parquet
@@ -1579,6 +1630,17 @@ def build_window_payload(lake_root: Path) -> dict[str, Any]:
     ingest-switch slice (PR-4) writes the ledger. READ-ONLY; never raises (both
     loaders degrade to an empty record set). The ``source`` field tells the UI
     which backing answered.
+
+    Parameters
+    ----------
+    lake_root
+        The lake directory holding the ledger / legacy sidecar.
+    symbol_for_id
+        Optional ``str(SECURITY_ID) → engine symbol`` map
+        (DEC-WINDOW-OPTION-DECODE-001) so option windows display the
+        underlying's PRECISE symbol (``BANKNIFTY``) instead of the vendor id
+        the coverage key carries (``25|NSE_FNO``). ``None`` / a missing id
+        keeps the raw coordinate — display-only, never a data change.
 
     Returns
     -------
@@ -1592,7 +1654,10 @@ def build_window_payload(lake_root: Path) -> dict[str, Any]:
         return {
             "source": "ledger",
             "count": ledger.count,
-            "windows": [_window_row(r, first_seen_at=r.first_seen_at) for r in ledger.records()],
+            "windows": [
+                _window_row(r, first_seen_at=r.first_seen_at, symbol_for_id=symbol_for_id)
+                for r in ledger.records()
+            ],
         }
     from brutex.data.window_status_store import load_window_status
 
@@ -1600,7 +1665,9 @@ def build_window_payload(lake_root: Path) -> dict[str, Any]:
     return {
         "source": "status_log",
         "count": log.count,
-        "windows": [_window_row(r, first_seen_at=None) for r in log.records()],
+        "windows": [
+            _window_row(r, first_seen_at=None, symbol_for_id=symbol_for_id) for r in log.records()
+        ],
     }
 
 
