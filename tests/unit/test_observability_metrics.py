@@ -1,5 +1,10 @@
 """Unit tests for brutex.observability.metrics."""
 
+# Whitebox test of the module-private `_validate_same_definition` defensive
+# kind-mismatch guard (sanctioned per the house pattern, mirroring
+# test_dhan_option_universe_ingest.py).
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 import math
@@ -57,6 +62,57 @@ class TestRegistration:
         r = MetricRegistry()
         with pytest.raises(MetricsError, match="\\+Inf"):
             r.histogram("h", "h", buckets=(1.0, 2.0))
+
+    # The gauge/histogram re-registration paths below were INVISIBLE to
+    # coverage until DEC-COVERAGE-ELLIPSIS-UNMASK-001: the unanchored `\.\.\.`
+    # exclude matched the `tuple[str, ...]` label annotations on these
+    # methods' def lines, excluding their whole bodies from measurement.
+
+    def test_gauge_reregistration_is_idempotent(self) -> None:
+        r = MetricRegistry()
+        r.gauge("g", "g", labels=("a",))
+        r.gauge("g", "g", labels=("a",))  # same definition → silent no-op
+        assert r.gauge_value("g", labels=("x",)) == 0.0
+
+    def test_gauge_redefine_with_different_labels_raises(self) -> None:
+        r = MetricRegistry()
+        r.gauge("g", "g", labels=("a",))
+        with pytest.raises(MetricsError, match="different"):
+            r.gauge("g", "g", labels=("a", "b"))
+
+    def test_histogram_reregistration_is_idempotent(self) -> None:
+        r = MetricRegistry()
+        r.histogram("h", "h")
+        r.histogram("h", "h")  # same definition → silent no-op
+        assert r.histogram_count("h") == 0
+
+    def test_histogram_redefine_with_different_labels_raises(self) -> None:
+        r = MetricRegistry()
+        r.histogram("h", "h", labels=("a",))
+        with pytest.raises(MetricsError, match="different"):
+            r.histogram("h", "h", labels=("a", "b"))
+
+    def test_set_on_unregistered_gauge_raises(self) -> None:
+        r = MetricRegistry()
+        with pytest.raises(MetricsError, match="not registered"):
+            r.set("unknown_gauge", 1.0)
+
+    def test_observe_on_unregistered_histogram_raises(self) -> None:
+        r = MetricRegistry()
+        with pytest.raises(MetricsError, match="not registered"):
+            r.observe("unknown_histogram", 1.0)
+
+    def test_validate_same_definition_kind_mismatch_raises(self) -> None:
+        # Whitebox: each declare method validates against the kind of the dict
+        # it found the name in, so the kind-mismatch raise is DEFENSIVE —
+        # exercised directly so the guard stays proven, not assumed.
+        from brutex.observability.metrics import MetricKind
+
+        r = MetricRegistry()
+        r.counter("c_total", "c")
+        existing = r._counters["c_total"].definition
+        with pytest.raises(MetricsError, match="cannot redefine"):
+            r._validate_same_definition(existing, (), MetricKind.GAUGE)
 
 
 # ────────────────────────────────────────────────────────────────────────
