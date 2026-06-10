@@ -149,8 +149,12 @@ jobs:
         # fastapi/pydantic/polars/duckdb types (not Unknown). Previously [dev]-only,
         # which silently masked dashboard type errors (mirror of the #376/#280
         # test-masking finding).
+        # DEC-STAGE3-REFINE-001: [optimize] added so mypy/pyright resolve the
+        # pinned pycma the same way the venv + unit job do (without it the
+        # stage3_refine import errors import-not-found here, a THIRD env-specific
+        # code the dual-env ignore can't cover).
         run: |
-          pip install -e ".[dev,data,ui]"
+          pip install -e ".[dev,data,ui,optimize]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-050: required by pyright's strict mode which walks
         # `tests/unit/test_fno_math_bridge.py` and needs the module
