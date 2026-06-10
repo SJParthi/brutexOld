@@ -20,6 +20,7 @@ from brutex.adapters.dhan.instruments import (
     discover_index,
     fno_underlying_security_ids,
     fno_underlying_symbols,
+    index_options_underlying_symbols,
     options_underlying_security_ids,
     options_underlying_symbols,
     parse_instrument_row,
@@ -1058,3 +1059,62 @@ class TestParseNseEquities:
     def test_empty_when_no_equities(self) -> None:
         rows = [_row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY 50", SECURITY_ID="13")]
         assert parse_nse_equities(rows) == []
+
+
+class TestIndexOptionsPrecise:
+    """The PRECISE index arm of the option-pull guard
+    (DEC-OPTIONS-ELIGIBLE-PRECISE-001): OPTIDX-only, alias-normalized symbols.
+    Pinned to the REAL vendor shape measured from the operator-supplied
+    detailed master (2026-06-10): option legs point at the derivatives id
+    space (NIFTY spot id 13, options underlying id 26000) and pooled ids
+    collide across namespaces — so index eligibility is symbol-only.
+    """
+
+    def test_collects_optidx_only_never_optstk(self) -> None:
+        # An OPTSTK ticker must never make an index option-pullable.
+        rows = [
+            _row(INSTRUMENT="OPTSTK", SYMBOL_NAME="REL-OPT", UNDERLYING_SYMBOL="RELIANCE"),
+            _row(INSTRUMENT="OPTIDX", SYMBOL_NAME="NIFTY-OPT", UNDERLYING_SYMBOL="nifty"),
+        ]
+        assert index_options_underlying_symbols(rows) == frozenset({"NIFTY"})
+
+    def test_bridges_the_niftynxt50_vendor_alias_both_spellings(self) -> None:
+        # Vendor skew (measured 2026-06-10): spot row 'NIFTY NEXT 50' vs OPTIDX
+        # legs 'NIFTYNXT50'. Both spellings must be in the set so either side
+        # of the skew matches.
+        rows = [
+            _row(INSTRUMENT="OPTIDX", SYMBOL_NAME="NXT-OPT", UNDERLYING_SYMBOL="NIFTYNXT50"),
+        ]
+        assert index_options_underlying_symbols(rows) == frozenset({"NIFTYNXT50", "NIFTY NEXT 50"})
+
+    def test_skips_futures_off_exchange_blank_and_test_scrips(self) -> None:
+        rows = [
+            # Futures are never options.
+            _row(INSTRUMENT="FUTIDX", SYMBOL_NAME="NIFTY-FUT", UNDERLYING_SYMBOL="NIFTY"),
+            # Off-exchange (MCX) option leg → skipped.
+            _row(
+                EXCH_ID="MCX",
+                INSTRUMENT="OPTIDX",
+                SYMBOL_NAME="BULL-OPT",
+                UNDERLYING_SYMBOL="MCXBULLDEX",
+            ),
+            # Blank underlying → contributes nothing.
+            _row(INSTRUMENT="OPTIDX", SYMBOL_NAME="X-OPT", UNDERLYING_SYMBOL=""),
+            # TEST scrip (Dhan "NSETEST" marker) → excluded.
+            _row(INSTRUMENT="OPTIDX", SYMBOL_NAME="NSETEST-OPT", UNDERLYING_SYMBOL="NSETEST"),
+        ]
+        assert index_options_underlying_symbols(rows) == frozenset()
+
+    def test_report_exposes_index_options_set(self) -> None:
+        rows = [
+            _row(INSTRUMENT="INDEX", SYMBOL_NAME="NIFTY", SECURITY_ID="13", LOT_SIZE="0"),
+            _row(
+                INSTRUMENT="OPTIDX",
+                SYMBOL_NAME="NIFTY-OPT",
+                SECURITY_ID="3002",
+                UNDERLYING_SYMBOL="NIFTY",
+                UNDERLYING_SECURITY_ID="26000",
+            ),
+        ]
+        report = select_universe_report(rows)
+        assert report.index_options_symbols == frozenset({"NIFTY"})

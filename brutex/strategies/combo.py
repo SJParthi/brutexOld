@@ -177,7 +177,10 @@ def combo_hash(
             code_commit_sha,
         ]
     )
-    return fno_math.blake3_hash(payload.encode("utf-8")).hex()
+    # str(...) keeps this typed `str` even where the fno_math wheel (and its
+    # stubs) is absent and the import degrades to Any — e.g. the isolated
+    # pre-commit mypy env (hook-portability, DEC-OPTIONS-ELIGIBLE-PRECISE-001).
+    return str(fno_math.blake3_hash(payload.encode("utf-8")).hex())
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -214,9 +217,9 @@ def _canonicalise_value(value: Any) -> Any:
                 )
             out[k] = _canonicalise_value(v)
         return out
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [_canonicalise_value(v) for v in value]
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
         return [_canonicalise_value(v) for v in value]
     raise StrategyError(
         f"canonicalise_params: unsupported value type {type(value).__name__}: {value!r}"
