@@ -1,6 +1,8 @@
 # Phase 2.5 — Stage 2.5 Bayesian Early-Stop
 
-## Status: ☐ Not started
+> **🚫 SUPERSEDED + ABANDONED (2026-06-08 verdict; banner added 2026-06-10, DEC-SPRT-SLA-RETIRE-001).** Stage-2.5 SPRT early-stop is ABANDONED as a sweep accelerator (ADR-0006 Final Verdict / DEC-SPRT-INFEASIBLE-001): a provably leaderboard-preserving kill is infeasible (pool-coupled z-scores + DSR trial-count). This phase doc describes the rejected inter-backtest `DashMap` design (ADR-0006 B3) and a "61% savings" SLA retired per Golden Rule #10. Retained for history only — do NOT build. Canonical record: `TRACK1_BACKTEST_SPEC.md` §"Stage 2.5" + `docs/adr/0006-stage2.5-sprt-design-block.md`. Leaderboard-safe speedups: the exact Stage-1B prefilter (in tree) + the Phase-3.5 bit-exact GPU path.
+
+## Status: 🚫 ABANDONED (ADR-0006 / DEC-SPRT-INFEASIBLE-001)
 
 ## Effort: 1 week
 ## Owner: Claude (entirely)

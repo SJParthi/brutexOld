@@ -157,7 +157,7 @@ tests/bench/test_metal_vec_add.py                     (POC test)
 | | Before | After |
 |---|---|---|
 | Engine throughput | 80-150K t/s (CPU only) | 160-400K t/s (CPU + GPU) |
-| 33B wall (with Stage 2.5) | 1.0-1.6 days | 10-20 hours (1 overnight) |
+| 33B wall (Stage 2.5 ABANDONED — DEC-SPRT-INFEASIBLE-001) | 2-4 days (CPU baseline) | projection pending measurement |
 | GPU code paths | absent | shipped + fallback flag |
 | Apple Silicon-specific tests | absent | added (skip on Linux/x86) |
 | MIGRATION decisions | ~140 | ~150 |
