@@ -3,8 +3,9 @@
 
 DEC-LEDGER-RENUMBER-001 (executes follow-up F-1 of DEC-WORKSPACE-VERIFY-002,
 ``docs/MIGRATION.md`` entry #609). Parallel sessions appending independently
-produced entry-number collisions (29 duplicated numbers measured on main,
-2026-06-10 — e.g. four decisions racing for #613 in one afternoon). DEC-IDs
+produced entry-number collisions (30 collision groups / 63 headers at the
+2026-06-10 reconcile — e.g. four decisions racing for #613 in one
+afternoon). DEC-IDs
 stay unique, so the ledger is unambiguous BY DEC-ID; this gate makes the
 NUMBERS trustworthy again and keeps them that way:
 
@@ -19,8 +20,8 @@ NUMBERS trustworthy again and keeps them that way:
 Deliberately NOT a rule: a DEC-ID heading multiple entries. That is the
 house multi-slice/amend pattern (e.g. DEC-OPTIONS-ELIGIBLE-GUARD-001 heads
 the foundation/wiring/UI slices as three entries) — only the NUMBERS must
-be unique; the one historical pasted-text duplicate (#214) was folded in
-the reconcile pass that introduced this gate.
+be unique; the historical pasted-text duplicate (#214) was suffixed like
+every other collision (214a/214b — both copies preserved).
 
 Usage::
 
