@@ -1190,7 +1190,9 @@ class TestQuotaDeathMidRound:
         # The finally-guaranteed persist: the settled 1minute window survives as
         # SUCCESS; the never-run 1day window stays PLANNED — nothing discarded.
         assert ledger_path(tmp_path).is_file()
-        assert status_path(tmp_path).is_file()
+        # DEC-STATUS-SIDECAR-WRITE-RETIRE-001: the legacy window_status.json is
+        # NEVER written any more — the ledger is the sole persisted store.
+        assert not status_path(tmp_path).is_file()
         ledger = load_window_ledger(tmp_path)
         assert ledger.count == 2
         assert {r.status for r in ledger.records()} == {"SUCCESS", "PLANNED"}
@@ -1301,3 +1303,67 @@ class TestQuotaDeathMidRound:
         assert report.quota_exhausted is False
         assert report.auth_aborted is False
         assert report.verdict.kind == "clean"  # nothing ran, nothing failed
+
+
+class TestStatusSidecarWriteRetired:
+    """DEC-STATUS-SIDECAR-WRITE-RETIRE-001 — the legacy sidecar's write path is dead.
+
+    The unified ledger (DEC-WINDOW-LEDGER-001) is the sole store a pull writes;
+    ``window_status.json`` is stop-write-not-delete: pre-existing files stay
+    byte-identical on disk (the read fallback + one-shot migration source) and a
+    fresh lake never grows one.
+    """
+
+    def test_live_pull_writes_ledger_and_never_the_status_sidecar(self, tmp_path: Path) -> None:
+        from brutex.data.window_ledger_store import ledger_path
+        from brutex.data.window_status_store import status_path
+
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=lambda _root, _insts: (_DailyGapAdapter(), NullBarSink()),
+        )
+        assert report.verdict.kind == "clean"
+        assert ledger_path(tmp_path).is_file()
+        assert not status_path(tmp_path).is_file()  # never written again
+
+    def test_preexisting_sidecar_is_untouched_and_still_migrates(self, tmp_path: Path) -> None:
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger_store import load_window_ledger
+        from brutex.data.window_status import WindowStatusLog
+        from brutex.data.window_status_store import save_window_status, status_path
+
+        # A pre-ledger lake: the legacy sidecar holds one settled legacy window.
+        log = WindowStatusLog()
+        log.record(
+            WindowKey(
+                market="dhan",
+                security_id="LEGACY",
+                interval="1minute",
+                start=date(2020, 1, 6),
+                end=date(2020, 1, 7),
+            ),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=_BULK_NOW,
+        )
+        save_window_status(log, tmp_path)
+        before = status_path(tmp_path).read_bytes()
+
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=lambda _root, _insts: (_DailyGapAdapter(), NullBarSink()),
+        )
+        # Stop-write, not delete: the legacy file is byte-identical...
+        assert status_path(tmp_path).read_bytes() == before
+        # ...and its rows were folded into the ledger by the one-shot migration
+        # (the rollback net DEC-WINDOW-LEDGER-001 keeps until Stage 6).
+        legacy = [r for r in load_window_ledger(tmp_path).records() if r.security_id == "LEGACY"]
+        assert len(legacy) == 1
+        assert legacy[0].status == "SUCCESS"

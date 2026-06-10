@@ -8,10 +8,14 @@ window, stamped with an explicit status, attempt count, bars, and last error, so
 the operator can SEE exactly which windows are stored, genuinely empty, or
 failed (and need a re-pull).
 
-It is the **visibility layer** that complements DEC-LAKE-RECONCILE-001 (#463,
-which already decides the skip): a window is recorded here whenever the ingest
-attempts it, so the status table is the single human-readable answer to "what is
-the state of every window?".
+It was the **visibility layer** that complemented DEC-LAKE-RECONCILE-001 (#463,
+which then decided the skip). **WRITE-RETIRED** (DEC-STATUS-SIDECAR-WRITE-
+RETIRE-001): the unified window ledger (DEC-WINDOW-LEDGER-001) superseded this
+store as the single skip + visibility authority and NO production caller
+records into it any more — the module survives ONLY as (a) the read FALLBACK
+for pre-ledger lakes on /coverage/windows and (b) the one-shot migration source
+for :func:`~brutex.data.window_ledger_store.load_or_migrate_window_ledger`.
+Full deletion is the DEC-WINDOW-LEDGER-001 Stage-6 item.
 
 ## Status semantics (aligned with the ingest mark rule, DEC-LAKE-RECONCILE-001)
 

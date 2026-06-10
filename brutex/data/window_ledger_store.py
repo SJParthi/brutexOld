@@ -307,8 +307,11 @@ def load_or_migrate_window_ledger(
 
     Steady state: the Parquet exists → :func:`load_window_ledger`. First run after
     the unification: no Parquet → fold ``window_status.json``
-    (:func:`_migrate_legacy_sidecars`). The legacy file is LEFT on disk (a
-    one-release rollback net); a later slice removes it. (The ``fetch_coverage.json``
+    (:func:`_migrate_legacy_sidecars`). The legacy file is LEFT on disk as a
+    rollback net — and since DEC-STATUS-SIDECAR-WRITE-RETIRE-001 retired its
+    WRITE path it is a FROZEN pre-retirement snapshot, not a live mirror (a
+    ledger loss re-migrates that snapshot; newer windows simply re-fetch,
+    idempotent keep-first). Stage-6 deletes it. (The ``fetch_coverage.json``
     fold was retired with the coverage set in DEC-WINDOW-LEDGER-001 Stage e.)
     """
     if ledger_path(lake_root).is_file():
