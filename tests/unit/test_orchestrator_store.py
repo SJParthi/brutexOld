@@ -7,6 +7,7 @@ in an isolated directory and cleaned up automatically.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -21,11 +22,14 @@ from brutex.orchestrator.state import (
 )
 from brutex.orchestrator.store import (
     CONTENT_HASH_BYTES,
+    DEFAULT_MAP_SIZE_MB,
+    MAX_DBS,
     StoreCorruptionError,
     StoreError,
     StoreKeyError,
     WorkItemStore,
     _deserialize_item,
+    _encode_key,
     _serialize_item,
 )
 
@@ -590,3 +594,247 @@ class TestBloomIntegration:
             assert s.exists_terminal(item.phase, item.content_hash) is True
             # exists_terminal returns False on absent hashes.
             assert s.exists_terminal(IngestPhase.A_INSTRUMENTS, _make_hash("z")) is False
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Mutation-kill pins (DEC-MUTATION-RUNTIME-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestConstantPins:
+    """Module sizing constants pinned ``==`` (DEC-MUTATION-RUNTIME-001).
+
+    Both constants are public API (``__all__``) and shape the LMDB
+    environment geometry; a mutated value silently changes every store
+    opened with defaults, so each is pinned byte-exact (house style per
+    tests/unit/test_ranking.py TestCompositeWeightPins).
+    """
+
+    def test_default_map_size_mb_exactly_10240(self) -> None:
+        assert DEFAULT_MAP_SIZE_MB == 10_240
+
+    def test_max_dbs_exactly_8(self) -> None:
+        assert MAX_DBS == 8
+
+
+class TestExactErrorMessagePins:
+    """Every store error message pinned via byte-exact ``str(exc.value)``.
+
+    ``pytest.raises(..., match=...)`` is a regex *search* (substring), so
+    an XX-wrapped string mutant still matches — only full-string ``==``
+    kills it (DEC-MUTATION-RUNTIME-001; house style per
+    tests/unit/test_ranking.py). Messages embedding a stdlib exception's
+    text are built from the SAME triggering call so the pins stay
+    version-proof.
+    """
+
+    def test_short_hash_message_byte_exact(self) -> None:
+        with pytest.raises(StoreKeyError) as exc_info:
+            _encode_key("abc123")
+        assert str(exc_info.value) == "content_hash must be 64 hex chars (got 6)"
+
+    def test_non_hex_hash_message_byte_exact(self) -> None:
+        bad = "z" * 64
+        with pytest.raises(ValueError, match="non-hexadecimal") as raw_exc:
+            bytes.fromhex(bad)
+        with pytest.raises(StoreKeyError) as exc_info:
+            _encode_key(bad)
+        assert str(exc_info.value) == f"content_hash is not valid hex: {raw_exc.value}"
+
+    def test_invalid_json_message_byte_exact(self) -> None:
+        import json
+
+        raw = b"definitely not json"
+        with pytest.raises(json.JSONDecodeError) as raw_exc:
+            json.loads(raw)
+        with pytest.raises(StoreCorruptionError) as exc_info:
+            _deserialize_item(raw)
+        assert str(exc_info.value) == f"Store entry is not valid JSON: {raw_exc.value}"
+
+    def test_missing_required_fields_message_byte_exact(self) -> None:
+        """A payload missing EXACTLY ``content_hash`` names exactly it.
+
+        Pins both the required-set member spelling (the
+        ``"XXcontent_hashXX"`` set mutant reports the wrong field name)
+        and the message text around ``sorted(missing)``.
+        """
+        import json
+
+        data = json.loads(_serialize_item(_make_item()))
+        del data["content_hash"]
+        with pytest.raises(StoreCorruptionError) as exc_info:
+            _deserialize_item(json.dumps(data).encode("utf-8"))
+        assert str(exc_info.value) == "Store entry missing required fields: ['content_hash']"
+
+    def test_malformed_field_message_byte_exact(self) -> None:
+        import json
+
+        data = json.loads(_serialize_item(_make_item()))
+        data["phase"] = "NOT_A_PHASE"
+        with pytest.raises(ValueError, match="NOT_A_PHASE") as raw_exc:
+            IngestPhase("NOT_A_PHASE")
+        with pytest.raises(StoreCorruptionError) as exc_info:
+            _deserialize_item(json.dumps(data).encode("utf-8"))
+        assert str(exc_info.value) == f"Store entry has malformed field: {raw_exc.value}"
+
+    def test_closed_message_byte_exact_at_every_guard_site(self, store_path: Path) -> None:
+        """All 7 ``_closed`` guard sites render the same byte-exact message.
+
+        Exact equality also pins ``self._path`` — the ``_path = None``
+        constructor mutant renders ``Store None is closed`` at every site.
+        """
+        s = WorkItemStore.open(store_path)
+        s.close()
+        guarded_ops: list[Callable[[], object]] = [
+            lambda: s.put(_make_item()),
+            lambda: s.put_many([_make_item()]),
+            lambda: s.get(IngestPhase.A_INSTRUMENTS, _make_hash("x")),
+            lambda: s.maybe_seen_terminal(IngestPhase.A_INSTRUMENTS, _make_hash("x")),
+            lambda: list(s.iter_phase(IngestPhase.A_INSTRUMENTS)),
+            lambda: s.count_phase(IngestPhase.A_INSTRUMENTS),
+            lambda: s.delete_phase(IngestPhase.A_INSTRUMENTS),
+        ]
+        for op in guarded_ops:
+            with pytest.raises(StoreError) as exc_info:
+                op()
+            assert str(exc_info.value) == f"Store {store_path} is closed"
+
+
+class TestSerializationEncodingPin:
+    """``ensure_ascii=False`` is load-bearing (DEC-MUTATION-RUNTIME-001)."""
+
+    def test_serialize_emits_raw_utf8_not_ascii_escapes(self) -> None:
+        """Non-ASCII params serialise as raw UTF-8 bytes, never ``\\uXXXX``.
+
+        The ``ensure_ascii=True`` mutant escapes ``₹`` to ``\\u20b9`` —
+        same JSON value but different stored bytes, which breaks the
+        byte-for-byte idempotence oracle (Golden Rule #7).
+        """
+        item = WorkItem.new(
+            phase=IngestPhase.A_INSTRUMENTS,
+            content_hash=_make_hash("inr"),
+            params={"symbol": "₹NIFTY"},
+        )
+        raw = _serialize_item(item)
+        assert "₹NIFTY".encode() in raw
+        assert b"\\u20b9" not in raw
+
+
+class TestOpenGeometryPins:
+    """LMDB environment geometry pinned exact (DEC-MUTATION-RUNTIME-001)."""
+
+    def test_map_size_mb_is_exact_mib_multiplier(self, store_path: Path) -> None:
+        # 64 MiB exactly — either ``× 1025`` mutant lands at 67_174_400.
+        with WorkItemStore.open(store_path, map_size_mb=64) as s:
+            assert s._env.info()["map_size"] == 67_108_864  # type: ignore[reportPrivateUsage]
+
+    def test_open_creates_reader_lock_table(self, store_path: Path) -> None:
+        # ``lock=True`` materialises lock.mdb on disk; the ``lock=False``
+        # mutant omits it and read-only processes lose writer coordination.
+        with WorkItemStore.open(store_path):
+            assert (store_path / "lock.mdb").exists()
+
+    def test_read_only_never_creates_missing_subdbs(self, store_path: Path) -> None:
+        """Read-only open of an env without the phase sub-dbs is NotFound.
+
+        ``create=False`` surfaces ``lmdb.NotFoundError`` (operator opened
+        a never-written store); the ``create=True`` mutant instead trips
+        LMDB's EACCES → ``lmdb.ReadonlyError``, masking the real cause.
+        """
+        import lmdb
+
+        env = lmdb.open(str(store_path), max_dbs=MAX_DBS, subdir=True)
+        env.close()
+        with pytest.raises(lmdb.NotFoundError):
+            WorkItemStore.open(store_path, read_only=True)
+
+    def test_closed_flag_is_exactly_false_then_true(self, store_path: Path) -> None:
+        # Pins ``self._closed = False`` (the ``None`` mutant is truthiness-
+        # equivalent everywhere, so only an identity pin can kill it).
+        s = WorkItemStore.open(store_path)
+        try:
+            assert s._closed is False  # type: ignore[reportPrivateUsage]
+        finally:
+            s.close()
+        assert s._closed is True  # type: ignore[reportPrivateUsage]
+
+
+class TestFlushForcePin:
+    """``flush`` forwards ``force`` with default exactly ``False``."""
+
+    def test_flush_force_default_exactly_false_and_forwards(
+        self, store_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Record the value ``env.sync`` receives per flush call.
+
+        The ``force: bool = True`` default mutant records ``[True, True]``
+        — silently upgrading every routine flush to a blocking full
+        fsync (DEC-MUTATION-RUNTIME-001).
+        """
+        calls: list[bool] = []
+        with WorkItemStore.open(store_path) as s:
+            real_env = s._env  # type: ignore[reportPrivateUsage]
+
+            class _RecordingEnv:
+                def sync(self, force: bool) -> None:
+                    calls.append(force)
+                    real_env.sync(force)
+
+            monkeypatch.setattr(s, "_env", _RecordingEnv())
+            s.flush()
+            s.flush(force=True)
+            monkeypatch.setattr(s, "_env", real_env)
+        assert calls == [False, True]
+
+
+class TestBloomPreflightPins:
+    """Byte-exact pins on the put_many pre-flight + cold-start rebuild."""
+
+    def test_put_many_exactly_at_capacity_succeeds(self, store_path: Path) -> None:
+        """A batch landing EXACTLY at capacity must commit.
+
+        Pins the strict ``projected > capacity`` boundary — the ``>=``
+        mutant rejects a legal full-to-the-brim batch
+        (DEC-MUTATION-RUNTIME-001).
+        """
+        from brutex.orchestrator.bloom import BloomFilter
+
+        bloom = BloomFilter(capacity=3, fpr_target=1e-3)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            s.put_many([_make_item(hash_seed=f"edge-{i}") for i in range(3)])
+            assert bloom.insertions_attempted == 3
+            assert s.count_phase(IngestPhase.A_INSTRUMENTS) == 3
+
+    def test_put_many_capacity_message_byte_exact(self, store_path: Path) -> None:
+        from brutex.orchestrator.bloom import BloomCapacityExceeded, BloomFilter
+
+        bloom = BloomFilter(capacity=3, fpr_target=1e-3)
+        with WorkItemStore.open(store_path, bloom=bloom) as s:
+            with pytest.raises(BloomCapacityExceeded) as exc_info:
+                s.put_many([_make_item(hash_seed=f"cap-{i}") for i in range(5)])
+            assert str(exc_info.value) == (
+                "put_many would push Bloom past capacity: current=0 + batch=5 > capacity=3"
+            )
+
+    def test_cold_start_rebuild_logs_exact_event_and_count(self, store_path: Path) -> None:
+        """The rebuild emits ONE ``bloom_rebuild_complete`` with the true count.
+
+        Pins the event name + the ``items_rebuilt`` accumulator (init 0,
+        step +1) — the observability contract the audit oracle replays
+        (DEC-MUTATION-RUNTIME-001).
+        """
+        from brutex.orchestrator.bloom import BloomFilter
+        from structlog.testing import capture_logs
+
+        with WorkItemStore.open(store_path) as s:
+            for i in range(3):
+                s.put(_make_item(hash_seed=f"log-{i}"))
+        bloom = BloomFilter(capacity=1000, fpr_target=1e-6)
+        with capture_logs() as logs, WorkItemStore.open(store_path, bloom=bloom):
+            pass
+        events = [e for e in logs if e["event"] == "bloom_rebuild_complete"]
+        assert len(events) == 1
+        assert events[0]["items_rebuilt"] == 3
+        assert events[0]["store_path"] == str(store_path)
+        assert events[0]["bloom_capacity"] == 1000
+        assert events[0]["bloom_fpr_target"] == 1e-6

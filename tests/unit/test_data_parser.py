@@ -1,11 +1,18 @@
 """Unit tests for brutex.data.parser — the Groww candle row → CandleBar."""
 
+# Whitebox: `_IST` is imported directly to pin the timezone constant's
+# name + offset byte-exact for the mutation gate (DEC-MUTATION-RUNTIME-001).
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
-from datetime import UTC, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
+from brutex.data.parser import (
+    _IST as _PARSER_IST,
+)
 from brutex.data.parser import (
     CandleRowError,
     parse_candle_row,
@@ -165,3 +172,99 @@ class TestDecimalCoercion:
         # IST 09:15 == UTC 03:45
         assert bar.timestamp.hour == 3
         assert bar.timestamp.minute == 45
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Mutation-runtime pins (DEC-MUTATION-RUNTIME-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestMutationPins:
+    """Pin every parser error message + constant byte-exact for the
+    mutation gate (DEC-MUTATION-RUNTIME-001).
+
+    ``pytest.raises(match=...)`` is a substring/regex search, so mutmut's
+    string mutants (``"open"`` → ``"XXopenXX"``, f-string fragments wrapped
+    in ``XX..XX``) survive it. Every test below asserts ``str(exc.value)``
+    with ``==`` — any single mutated byte in a message, or in the field
+    name threaded into ``_to_decimal``, fails the test.
+    """
+
+    def test_ist_constant_name_and_offset_pinned(self) -> None:
+        # Kills the `name="IST"` string mutant: the tz name is observable
+        # ONLY via tzname()/repr (every parsed bar is already astimezone'd
+        # to UTC), so it is pinned on the constant directly. The +05:30
+        # offset on the same line stays pinned through the public API too
+        # (test_fno_row_ist_to_utc: 09:15 IST == 03:45 UTC).
+        assert _PARSER_IST.tzname(None) == "IST"
+        assert _PARSER_IST.utcoffset(None) == timedelta(hours=5, minutes=30)
+
+    def test_wrong_length_message_byte_exact(self) -> None:
+        # Pins BOTH halves of the two-fragment f-string (mutants on the
+        # "must have N elements" prefix AND the "[ts, ...]: row" suffix).
+        with pytest.raises(CandleRowError) as exc:
+            parse_candle_row(["2024-01-25T09:15:00", 1.0, 1.0, 1.0, 1.0, 0])
+        assert str(exc.value) == (
+            "the candle row must have 7 elements [ts, o, h, l, c, v, oi], "
+            "got 6: ['2024-01-25T09:15:00', 1.0, 1.0, 1.0, 1.0, 0]"
+        )
+
+    def test_non_string_timestamp_message_byte_exact(self) -> None:
+        with pytest.raises(CandleRowError) as exc:
+            parse_candle_row([1234567890, 1.0, 1.0, 1.0, 1.0, 0, None])
+        assert str(exc.value) == "timestamp must be an ISO string, got int"
+
+    def test_bad_iso_message_byte_exact(self) -> None:
+        with pytest.raises(CandleRowError) as exc:
+            parse_candle_row(["not-a-date", 1.0, 1.0, 1.0, 1.0, 0, None])
+        assert str(exc.value) == "timestamp 'not-a-date' is not valid ISO-8601"
+
+    def test_naive_ist_timestamp_parses_to_exact_utc_datetime(self) -> None:
+        # Kills the `naive = datetime.fromisoformat(ts_raw)` → `naive = None`
+        # statement mutant (AttributeError under the mutant) and pins the
+        # whole IST→UTC conversion as ONE exact aware datetime, not just
+        # hour/minute fields.
+        bar = parse_candle_row(["2024-01-25T09:15:00", 1.0, 1.0, 1.0, 1.0, 0, None])
+        assert bar.timestamp == datetime(2024, 1, 25, 3, 45, 0, tzinfo=UTC)
+
+    def test_non_numeric_open_message_byte_exact(self) -> None:
+        # Pins the "open" field name AND the full `_to_decimal` ValueError
+        # text (re-raised verbatim as CandleRowError via str(exc)).
+        with pytest.raises(CandleRowError) as exc:
+            parse_candle_row(["2024-01-25T09:15:00", None, 1.0, 1.0, 1.0, 0, None])
+        assert str(exc.value) == "open must be numeric, got NoneType: None"
+
+    def test_non_numeric_high_message_byte_exact(self) -> None:
+        with pytest.raises(CandleRowError) as exc:
+            parse_candle_row(["2024-01-25T09:15:00", 1.0, None, 1.0, 1.0, 0, None])
+        assert str(exc.value) == "high must be numeric, got NoneType: None"
+
+    def test_non_numeric_low_message_byte_exact(self) -> None:
+        with pytest.raises(CandleRowError) as exc:
+            parse_candle_row(["2024-01-25T09:15:00", 1.0, 1.0, None, 1.0, 0, None])
+        assert str(exc.value) == "low must be numeric, got NoneType: None"
+
+    def test_non_numeric_close_message_byte_exact(self) -> None:
+        with pytest.raises(CandleRowError) as exc:
+            parse_candle_row(["2024-01-25T09:15:00", 1.0, 1.0, 1.0, None, 0, None])
+        assert str(exc.value) == "close must be numeric, got NoneType: None"
+
+    def test_non_integer_volume_message_byte_exact(self) -> None:
+        with pytest.raises(CandleRowError) as exc:
+            parse_candle_row(["2024-01-25T09:15:00", 1.0, 1.0, 1.0, 1.0, "twelve", None])
+        assert str(exc.value) == "volume 'twelve' is not an integer"
+
+    def test_non_integer_oi_message_byte_exact(self) -> None:
+        with pytest.raises(CandleRowError) as exc:
+            parse_candle_row(["2024-01-25T09:15:00", 1.0, 1.0, 1.0, 1.0, 0, "fifty"])
+        assert str(exc.value) == "open_interest 'fifty' is not an integer or None"
+
+    def test_invalid_bar_content_message_byte_exact(self) -> None:
+        # CandleBar.__post_init__ rejects high < low; the parser re-wraps it
+        # with the "invalid bar content: " prefix. Decimal str() keeps the
+        # trailing ".0" (prices arrive as Decimal rupees, DEC-MONEY-2DP-001).
+        with pytest.raises(CandleRowError) as exc:
+            parse_candle_row(["2024-01-25T09:15:00", 100.0, 99.0, 100.0, 100.0, 0, None])
+        assert str(exc.value) == (
+            "invalid bar content: CandleBar: high (99.0) must be >= low (100.0)"
+        )

@@ -8,13 +8,22 @@ of the timing the caller reports.
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Callable
+
 import pytest
 from brutex.orchestrator.rate_limiter import (
     _ACQUIRE_LOOP_CAP,
+    _LEGACY_HARD_CAP_RPS,
+    DEFAULT_BURST,
     DEFAULT_DOWNSHIFT_RPS,
+    DEFAULT_DOWNSHIFT_TRIGGER,
+    DEFAULT_DOWNSHIFT_WINDOW,
     DEFAULT_INITIAL_RPS,
+    DEFAULT_UPSHIFT_RECOVERY,
     AdaptiveTokenBucket,
     RateLimiterError,
+    RateLimiterEvent,
 )
 
 # ────────────────────────────────────────────────────────────────────────
@@ -108,6 +117,164 @@ class TestConstruction:
         with pytest.raises(RateLimiterError):
             AdaptiveTokenBucket(burst=0)
 
+    # ── Byte-exact gate pins (DEC-MUTATION-RUNTIME-001) ────────────
+    # `match=` is a substring search, so it cannot kill mutmut's
+    # XX-wrapped message mutants; each guard message is pinned with
+    # `==` on str(exc.value), and each `<`/`<=` boundary is pinned by
+    # constructing AT the boundary (house style: test_ranking.py).
+
+    def test_zero_initial_rps_message_byte_exact(self) -> None:
+        """Kills the `<= 0` → `< 0` flip too: at 0.0 the mutant falls
+        through to the ordering guard, whose message differs."""
+        with pytest.raises(RateLimiterError) as exc:
+            AdaptiveTokenBucket(initial_rps=0.0)
+        assert str(exc.value) == "initial_rps must be > 0, got 0.0"
+
+    def test_initial_rps_of_exactly_one_accepted(self) -> None:
+        """Boundary pin: `initial_rps <= 0` must NOT drift to `<= 1`."""
+        b = AdaptiveTokenBucket(initial_rps=1.0, downshift_rps=0.5)
+        assert b.initial_rps == 1.0
+
+    def test_zero_downshift_rps_message_byte_exact(self) -> None:
+        with pytest.raises(RateLimiterError) as exc:
+            AdaptiveTokenBucket(downshift_rps=0.0)
+        assert str(exc.value) == "downshift_rps must be > 0, got 0.0"
+
+    def test_downshift_rps_of_exactly_one_accepted(self) -> None:
+        """Boundary pin: `downshift_rps <= 0` must NOT drift to `<= 1`."""
+        b = AdaptiveTokenBucket(initial_rps=3.0, downshift_rps=1.0)
+        assert b.downshift_rps == 1.0
+
+    def test_downshift_ordering_message_byte_exact(self) -> None:
+        with pytest.raises(RateLimiterError) as exc:
+            AdaptiveTokenBucket(initial_rps=15.0, downshift_rps=20.0)
+        assert str(exc.value) == "downshift_rps (20.0) must be < initial_rps (15.0)"
+
+    def test_trigger_of_exactly_one_accepted(self) -> None:
+        """Boundary pin: `downshift_trigger < 1` must NOT drift to
+        `<= 1` or `< 2` — a single-429 trigger stays constructible."""
+        b = AdaptiveTokenBucket(downshift_trigger=1)
+        assert b.downshift_trigger == 1
+
+    def test_zero_trigger_message_byte_exact(self) -> None:
+        with pytest.raises(RateLimiterError) as exc:
+            AdaptiveTokenBucket(downshift_trigger=0)
+        assert str(exc.value) == "downshift_trigger must be ≥ 1, got 0"
+
+    def test_zero_burst_message_byte_exact(self) -> None:
+        with pytest.raises(RateLimiterError) as exc:
+            AdaptiveTokenBucket(burst=0)
+        assert str(exc.value) == "burst must be ≥ 1, got 0"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Byte-exact constant + default pins (DEC-MUTATION-RUNTIME-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestConstantPins:
+    """Pin every module constant byte-exact.
+
+    The rate-limit constants are SAFETY-CRITICAL (CLAUDE.md §2 rule 6:
+    Dhan 5 r/s cap, adaptive [3..5] r/s band, never raise) — a silent
+    constant drift is exactly the mutant class these pins kill.
+    """
+
+    def test_module_constants_byte_exact(self) -> None:
+        assert DEFAULT_INITIAL_RPS == 3.0
+        assert DEFAULT_DOWNSHIFT_RPS == 1.5
+        assert DEFAULT_DOWNSHIFT_TRIGGER == 3
+        assert DEFAULT_DOWNSHIFT_WINDOW == 60.0
+        assert DEFAULT_UPSHIFT_RECOVERY == 120.0
+        assert DEFAULT_BURST == 5
+        assert _LEGACY_HARD_CAP_RPS == 5.0
+        assert _ACQUIRE_LOOP_CAP == 16
+
+    def test_field_defaults_byte_exact(self) -> None:
+        """The dataclass field defaults (not just the constants) are pinned —
+        kills the `DEFAULT_* → None` field-default mutants and the
+        `start_empty: False → None` flip (None is falsy, so only an
+        identity pin can tell them apart)."""
+        b = AdaptiveTokenBucket()
+        assert b.downshift_window == 60.0
+        assert b.upshift_recovery == 120.0
+        assert b.burst == 5
+        assert b.start_empty is False
+        assert b.quota_tracker is None
+
+    def test_last_refill_stamped_from_injected_clock(self) -> None:
+        """__post_init__ stamps `_last_refill` from the injected clock
+        (rate_limiter.py:245) — pinned via the fake clock's start value
+        so a `None` stamp fails HERE, fast, not as a TypeError deep
+        inside a later refill."""
+        clock = FakeClock()
+        b = AdaptiveTokenBucket(
+            initial_rps=15.0,
+            downshift_rps=10.0,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+        assert b._last_refill == 1000.0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Dataclass discipline (DEC-MUTATION-RUNTIME-001; house style:
+# test_ranking.py TestRankedComboDataclass)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestEventDataclass:
+    def _ev(self) -> RateLimiterEvent:
+        return RateLimiterEvent(kind="rate_limit_hit", at=1000.0)
+
+    def test_frozen(self) -> None:
+        # frozen=True — a published event is immutable once emitted.
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            self._ev().kind = "upshift"  # type: ignore[misc]
+
+    def test_slots(self) -> None:
+        # slots=True — a slotted instance carries no per-instance __dict__.
+        assert not hasattr(self._ev(), "__dict__")
+        assert hasattr(RateLimiterEvent, "__slots__")
+
+    def test_optional_fields_default_byte_exact(self) -> None:
+        # Pins the defaults whose lines carry a line-scoped
+        # `pragma: no mutate` (equivalent PEP 563 annotation flips) —
+        # None (NOT "" or any sentinel) and exactly 0.
+        ev = self._ev()
+        assert ev.from_rps is None
+        assert ev.to_rps is None
+        assert ev.recent_429_count == 0
+
+
+class TestBucketDataclassDiscipline:
+    def test_slots(self, bucket: AdaptiveTokenBucket) -> None:
+        # slots=True — O(1) attribute access, no stray per-instance dict.
+        assert not hasattr(bucket, "__dict__")
+        assert hasattr(AdaptiveTokenBucket, "__slots__")
+
+    def test_runtime_state_fields_not_in_init(self) -> None:
+        """Every runtime-state field is `field(init=False)` with NO
+        default — callers can never smuggle state through the
+        constructor (kills both the `init=True` flips and the
+        `field(...) → None` plain-default mutants)."""
+        by_name = {f.name: f for f in dataclasses.fields(AdaptiveTokenBucket)}
+        for name in (
+            "_current_rps",
+            "_tokens",
+            "_last_refill",
+            "_recent_429s",
+            "_last_success_at",
+            "_lock",
+        ):
+            f = by_name[name]
+            assert f.init is False, name
+            assert f.default is dataclasses.MISSING, name
+            assert f.default_factory is dataclasses.MISSING, name
+        pending = by_name["_pending_events"]
+        assert pending.init is False
+        assert pending.default_factory is list
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Happy-path acquire
@@ -143,6 +310,172 @@ class TestAcquireBurst:
             bucket.acquire()
         elapsed = clock.now() - start
         assert elapsed == pytest.approx(1.0, abs=0.05)
+
+    def test_partial_token_wait_is_remaining_fraction(self, clock: FakeClock) -> None:
+        """A HALF-refilled bucket waits only for the missing half.
+
+        2 r/s, burst 1: drain the burst, refill 0.25 s → 0.5 token; the
+        wait must be exactly (1.0 − 0.5) / 2 = 0.25 s (all exact binary
+        floats). Kills the `needed = 1.0 - tokens` → `1.0 + tokens`
+        mutant, which is INVISIBLE at tokens == 0 where every other
+        test sits (DEC-MUTATION-RUNTIME-001).
+        """
+        b = AdaptiveTokenBucket(
+            initial_rps=2.0,
+            downshift_rps=1.0,
+            burst=1,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+        assert b.acquire() == 0.0  # the free burst token
+        clock.advance(0.25)  # 0.25 s × 2 r/s = exactly 0.5 token
+        assert b.acquire() == 0.25
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Micro-wait loop arithmetic (DEC-MUTATION-RUNTIME-001)
+#
+# Each test injects a sleep that UNDER-delivers wall-clock time, so the
+# post-sleep refill lands a hair short of one token and the micro-wait
+# loop becomes observable. All clocks are fake (zero real sleeping) and
+# every path is bounded by _ACQUIRE_LOOP_CAP, so a mutated loop can
+# never hang the suite — the observable (return value / sleep count /
+# leftover tokens) is asserted immediately after the bounded acquire.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestAcquireMicroWaitLoop:
+    def _bucket(
+        self,
+        clock: FakeClock,
+        sleep: Callable[[float], None],
+    ) -> AdaptiveTokenBucket:
+        return AdaptiveTokenBucket(
+            initial_rps=1.0,
+            downshift_rps=0.5,
+            burst=1,
+            start_empty=True,
+            clock=clock.now,
+            sleep=sleep,
+        )
+
+    def test_exact_eps_boundary_consumes_without_micro_wait(self) -> None:
+        """tokens == 1.0 − eps EXACTLY must consume, not micro-wait.
+
+        The clock starts at 0.0 and the sleep undershoots by exactly
+        1e-9, so the refill leaves tokens at the very float the loop
+        guard compares against (1 r/s ⇒ tokens ≡ elapsed). Pins the
+        strict `<` in `while tokens < 1.0 - eps` against the `<=` flip,
+        which would burn ≥ 1 extra micro-wait and return > 1.0.
+        """
+        clock = FakeClock(start=0.0)
+
+        def undershoot_sleep(seconds: float) -> None:
+            clock.advance(seconds - 1e-9)
+
+        b = self._bucket(clock, undershoot_sleep)
+        assert b.acquire() == 1.0
+
+    def test_loop_counter_increments_by_exactly_one(self) -> None:
+        """The micro-wait counter advances by exactly +1 per iteration.
+
+        The sleep callable HARD-STOPS after cap+3 micro-waits, so this is
+        the one cap-path test that cannot hang even when the loop bound
+        itself is broken: under the ``iterations += 1`` → ``= 1`` / ``-= 1``
+        mutants the safety net is unreachable and the guard trips at call
+        cap+4 in microseconds (previously those two mutants could only die
+        by mutmut TIMEOUT — a red, slow verdict — because every cap test
+        relied on the cap for termination, DEC-MUTATION-RUNTIME-001). On
+        real code the cap fires first: exactly 1 + _ACQUIRE_LOOP_CAP sleeps.
+        MUST run before test_eps_drift_floor_pinned_at_1e_9 (the first
+        hang-capable test) so the `-x` mutation runner fails fast.
+        """
+        clock = FakeClock(start=0.0)
+        sleeps: list[float] = []
+
+        def bounded_undershoot_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            if len(sleeps) > 3 + _ACQUIRE_LOOP_CAP:
+                raise AssertionError(
+                    "micro-wait loop escaped _ACQUIRE_LOOP_CAP — the "
+                    "iteration counter is not incrementing by +1"
+                )
+            clock.advance(seconds - 1.5e-9)
+
+        b = self._bucket(clock, bounded_undershoot_sleep)
+        b.acquire()
+        assert len(sleeps) == 1 + _ACQUIRE_LOOP_CAP
+
+    def test_eps_drift_floor_pinned_at_1e_9(self) -> None:
+        """eps == 1e-9 byte-exact, via a deficit BETWEEN 1e-9 and 2e-9.
+
+        The sleep undershoots by 1.5e-9, so tokens land strictly inside
+        (1.0 − 2e-9, 1.0 − 1e-9): with eps = 1e-9 the micro-wait loop
+        runs to the cap (clock is frozen at nanoscale) and the wait
+        exceeds the ideal 1.0 s; under the `eps → 2e-09` mutant the
+        guard is already satisfied and acquire returns exactly 1.0
+        after a single sleep.
+        """
+        clock = FakeClock(start=0.0)
+        sleeps: list[float] = []
+
+        def undershoot_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock.advance(seconds - 1.5e-9)
+
+        b = self._bucket(clock, undershoot_sleep)
+        wait = b.acquire()
+        assert wait > 1.0
+        assert len(sleeps) == 1 + _ACQUIRE_LOOP_CAP
+
+    def test_micro_wait_tops_up_to_exactly_one_token(self, clock: FakeClock) -> None:
+        """One micro-wait iteration, byte-exact wait accounting.
+
+        2 r/s, burst 1, start empty: the first sleep (0.5 s requested)
+        delivers only half, leaving 0.5 token; ONE micro-wait of
+        exactly (1.0 − 0.5) / 2 = 0.25 s tops the bucket up. Pins
+        `more_wait = (1.0 - tokens) / rps` against the `2.0 - tokens` /
+        `1.0 + tokens` mutants (both would request 0.75 s) and
+        `wait_seconds += more_wait` against the `=` overwrite (which
+        would report 0.25 instead of 0.5 + 0.25).
+        """
+        calls: list[float] = []
+
+        def first_sleep_short(seconds: float) -> None:
+            calls.append(seconds)
+            # First sleep under-delivers half; later sleeps deliver fully.
+            clock.advance(seconds / 2.0 if len(calls) == 1 else seconds)
+
+        b = AdaptiveTokenBucket(
+            initial_rps=2.0,
+            downshift_rps=1.0,
+            burst=1,
+            start_empty=True,
+            clock=clock.now,
+            sleep=first_sleep_short,
+        )
+        assert b.acquire() == 0.75
+        assert calls == [0.5, 0.25]
+
+    def test_loop_cap_force_grant_leaves_zero_tokens(self) -> None:
+        """The cap's force-grant sets tokens to exactly 1.0 — not more.
+
+        On a frozen clock the capped acquire consumes its force-granted
+        token and must leave the bucket at exactly 0.0 (a `1.0 → 2.0`
+        force-grant would leak a free extra token over the rate cap,
+        violating CLAUDE.md §2 rule 6).
+        """
+        clock = FakeClock()
+        sleeps: list[float] = []
+        b = AdaptiveTokenBucket(
+            initial_rps=15.0,
+            downshift_rps=10.0,
+            clock=clock.now,
+            sleep=sleeps.append,  # records but NEVER advances the clock
+            start_empty=True,
+        )
+        b.acquire()
+        assert b.available_tokens() == 0.0
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -212,6 +545,51 @@ class TestDownshift:
         event = bucket.record_rate_limit_hit()
         assert event is not None
         assert event.kind == "downshift"
+
+    def test_hit_exactly_at_window_edge_still_counts(
+        self, bucket: AdaptiveTokenBucket, clock: FakeClock
+    ) -> None:
+        """A 429 EXACTLY `downshift_window` seconds old is still in-window.
+
+        Eviction is strict (`hit < cutoff`, rate_limiter.py): two hits at
+        t=1000 plus one at t=1060 (cutoff exactly 1000.0 — all exact
+        floats) make THREE in-window hits → downshift. The `<` → `<=`
+        eviction flip would evict both edge hits and see only one
+        (DEC-MUTATION-RUNTIME-001 boundary pin).
+        """
+        bucket.record_rate_limit_hit()
+        bucket.record_rate_limit_hit()
+        clock.advance(60.0)
+        event = bucket.record_rate_limit_hit()
+        assert event is not None
+        assert event.kind == "downshift"
+        assert event.recent_429_count == 3
+
+    def test_downshift_gate_tolerance_pinned_at_1e_6(self, clock: FakeClock) -> None:
+        """The at-full-rate gate's rel_tol is exactly 1e-6.
+
+        A bucket whose two rates differ by a RELATIVE 1.5e-6 sits between
+        rel_tol 1e-6 (not close → no re-downshift) and the 2e-06 mutant
+        (close → spurious second downshift event): after downshifting,
+        a 4th 429 must report plain `rate_limit_hit`
+        (DEC-MUTATION-RUNTIME-001).
+        """
+        b = AdaptiveTokenBucket(
+            initial_rps=1.0,
+            downshift_rps=1.0 - 1.5e-6,
+            downshift_trigger=3,
+            downshift_window=60.0,
+            upshift_recovery=120.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+        for _ in range(3):
+            b.record_rate_limit_hit()
+        assert b.current_rps() == 1.0 - 1.5e-6  # downshifted
+        event = b.record_rate_limit_hit()
+        assert event is not None
+        assert event.kind == "rate_limit_hit"  # NOT a second downshift
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -320,6 +698,92 @@ class TestUpshift:
         assert bucket.current_rps() == 10.0
         assert bucket.pending_events() == []
 
+    def test_429_exactly_at_window_edge_blocks_upshift(
+        self, bucket: AdaptiveTokenBucket, clock: FakeClock
+    ) -> None:
+        """A 429 EXACTLY `downshift_window` seconds old still blocks.
+
+        The upshift check evicts strictly (`hit < cutoff`): hits at
+        t=1000 with the acquire at t=1060 (cutoff exactly 1000.0) stay
+        in-window, so the rate must HOLD at 10 — the `<` → `<=` flip
+        would evict them and upshift one tick early
+        (DEC-MUTATION-RUNTIME-001 boundary pin; Golden Rule #6: never
+        recover faster than specified).
+        """
+        self._downshift(bucket)
+        clock.advance(60.0)
+        bucket.acquire()
+        assert bucket.current_rps() == 10.0
+        assert bucket.pending_events() == []
+
+    def test_upshift_when_now_equals_last_success(
+        self, bucket: AdaptiveTokenBucket, clock: FakeClock
+    ) -> None:
+        """`now == last_success_at` exactly must still upshift.
+
+        The anomaly guard is strict (`now - last_success_at < 0`): a
+        success recorded at the very same fake-clock instant as the
+        acquire gives a 0.0 difference, which is NOT an anomaly. Pins
+        the rate_limiter.py guard against both the `< 0` → `<= 0` and
+        `< 0` → `< 1` flips (each would defer this upshift).
+        """
+        self._downshift(bucket)
+        clock.advance(61.0)  # the 3 hits age out of the 60s window
+        bucket.record_success()  # last_success_at == now exactly
+        bucket.acquire()
+        assert bucket.current_rps() == 15.0
+
+    def test_small_positive_last_success_stamp_allows_upshift(self) -> None:
+        """`last_success_at` in (0, 1] is a VALID stamp — upshift runs.
+
+        Mirror of the 0.0-stamp guard test: a monotonic clock starting
+        at 0.5 stamps last_success_at = 0.5 at construction, which must
+        NOT be treated as "never succeeded" — pins `last_success_at <= 0`
+        against the `<= 1` drift.
+        """
+        clock = FakeClock(start=0.5)
+        bucket = AdaptiveTokenBucket(
+            initial_rps=15.0,
+            downshift_rps=10.0,
+            downshift_trigger=3,
+            downshift_window=60.0,
+            upshift_recovery=120.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+        for _ in range(3):
+            bucket.record_rate_limit_hit()
+        assert bucket.current_rps() == 10.0
+        clock.advance(61.0)  # 429s age out of the window
+        bucket.acquire()
+        assert bucket.current_rps() == 15.0
+
+    def test_upshift_gate_tolerance_pinned_at_1e_6(self, clock: FakeClock) -> None:
+        """The already-at-full-rate early-return rel_tol is exactly 1e-6.
+
+        With a relative 1.5e-6 gap between the two rates the gate must
+        see "NOT at full rate" and upshift after a clean window; the
+        2e-06 mutant deems the rates equal and silently never recovers
+        (DEC-MUTATION-RUNTIME-001).
+        """
+        b = AdaptiveTokenBucket(
+            initial_rps=1.0,
+            downshift_rps=1.0 - 1.5e-6,
+            downshift_trigger=3,
+            downshift_window=60.0,
+            upshift_recovery=120.0,
+            burst=5,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+        for _ in range(3):
+            b.record_rate_limit_hit()
+        assert b.current_rps() == 1.0 - 1.5e-6
+        clock.advance(61.0)
+        b.acquire()
+        assert b.current_rps() == 1.0  # upshifted: the gap exceeds 1e-6
+
     def test_nonpositive_last_success_stamp_blocks_upshift(self) -> None:
         """Defensive guard: ``last_success_at <= 0`` defers the upshift.
 
@@ -385,6 +849,35 @@ class TestStats:
         bucket.record_rate_limit_hit()
         clock.advance(61.0)
         assert bucket.recent_429_count() == 0
+
+    def test_recent_429_count_keeps_hit_exactly_at_window_edge(
+        self, bucket: AdaptiveTokenBucket, clock: FakeClock
+    ) -> None:
+        """A hit EXACTLY `downshift_window` seconds old still counts.
+
+        The dashboard counter evicts strictly (`hit < cutoff`): hit at
+        t=1000, read at t=1060 → cutoff exactly 1000.0 → kept. Pins the
+        eviction `<` against the `<=` flip
+        (DEC-MUTATION-RUNTIME-001 boundary pin).
+        """
+        bucket.record_rate_limit_hit()
+        clock.advance(60.0)
+        assert bucket.recent_429_count() == 1
+
+    def test_subsecond_elapsed_refill_pinned(
+        self, bucket: AdaptiveTokenBucket, clock: FakeClock
+    ) -> None:
+        """A 0.25 s elapsed refills exactly 0.25 × 15 = 3.75 tokens.
+
+        Pins the `_refill_locked` early-return threshold (`elapsed <= 0`)
+        against the `0 → 1` flip, which would skip every sub-second
+        refill — the dominant case at 3-15 r/s. Named in the line-scoped
+        `pragma: no mutate` on that guard (DEC-MUTATION-RUNTIME-001).
+        """
+        for _ in range(5):
+            bucket.acquire()  # drain the burst; tokens == 0.0 exactly
+        clock.advance(0.25)
+        assert bucket.available_tokens() == 3.75
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -729,6 +1222,32 @@ class TestSetRate:
         b = self._bucket(clock)
         b.set_rate(4.0)
         assert b.acquire() == 1.0 / 4.0
+
+    def test_set_rate_of_exactly_one_accepted(self, clock: FakeClock) -> None:
+        """Boundary pin: `new_rps <= 0` must NOT drift to `<= 1` — the
+        controller's lowest legal step stays settable
+        (DEC-MUTATION-RUNTIME-001)."""
+        b = self._bucket(clock)
+        b.set_rate(1.0)
+        assert b.current_rps() == 1.0
+
+    def test_set_rate_zero_message_byte_exact(self, clock: FakeClock) -> None:
+        """`match=` is substring-only; the guard message is pinned with
+        `==` so an XX-wrapped mutant cannot hide."""
+        b = self._bucket(clock)
+        with pytest.raises(RateLimiterError) as exc:
+            b.set_rate(0.0)
+        assert str(exc.value) == "new_rps must be > 0, got 0.0"
+
+    def test_set_rate_rederives_downshift_rps_as_half(self, clock: FakeClock) -> None:
+        # set_rate moves BOTH thresholds with the new rate: initial_rps
+        # becomes the rate itself and the (dormant) downshift_rps is
+        # re-derived as exactly new_rps / 2.0 — pinned byte-exact so the
+        # `/ 2.0` → `* 2.0` / `/ 3.0` / `None` mutants all surface.
+        b = self._bucket(clock)
+        b.set_rate(4.0)
+        assert b.initial_rps == 4.0
+        assert b.downshift_rps == 2.0
 
     def test_internal_upshift_stays_dormant(self, clock: FakeClock) -> None:
         # set_rate moves initial_rps WITH the rate, so the bucket's own
