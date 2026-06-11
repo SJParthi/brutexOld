@@ -178,9 +178,14 @@ Track 1 spec locked after 4-agent hostile-review pass._
     **Honest envelope (Golden Rule #10 + DEC-P0-040 / DEC-P0-042
     rebaselining):** The 18-requirement decree above is the **target**.
     The actual CI enforcement matrix in `docs/STANDARDS_100PCT.md` §1
-    is **15 of 21 sub-rows 🟢 ENFORCED + 2 🟡 PARTIAL + 1 📋 ROADMAP +
-    3 👁️ MANUAL** (~71% fully enforced, per the summary count at
-    `docs/STANDARDS_100PCT.md:67-86`, post-DEC-STRESS-001 2026-05-24).
+    is **14 of 21 sub-rows 🟢 ENFORCED + 3 🟡 PARTIAL + 1 📋 ROADMAP +
+    3 👁️ MANUAL** (~67% fully enforced, per the summary count at
+    `docs/STANDARDS_100PCT.md:67-90`, post-DEC-MUTATION-GATE-RANKING-002
+    2026-06-10 — row 3 honestly re-classified 🟡 while the orchestrator
+    mutation pass exceeds its weekly budget, DEC-MUTATION-RUNTIME-001;
+    the prior "15/2 (~71%)" wording here was the pre-re-classification
+    snapshot, caught by the 2026-06-11 honesty audit per this file's own
+    that-doc-wins rule and reconciled by DEC-HONESTY-AUDIT-RECONCILE-001).
     The earlier "9 of 21 / ~22%" wording here was a stale 2026-05-16
     snapshot from before the DEC-STANDARDS-AUDIT-001 → DEC-STRESS-001
     ratchet arc (audit + CROSSWALK + PYLINT-DROP + DOCTOR + STRESS
