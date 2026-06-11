@@ -483,3 +483,33 @@ class TestDerivedFreshness:
         result = check_derived_freshness(tmp_path)
         assert result.status == "FAIL"
         assert "5minute" in result.detail
+
+    def test_skip_when_symbol_has_derived_but_no_1minute_base(self, tmp_path: Path) -> None:
+        # A derived partition with NO 1minute base: the symbol cannot be
+        # verified, so it is passed over (covering the no-base continue) and
+        # the probe lands on the honest SKIP.
+        import polars as pl
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        _write_lake_partition(tmp_path, "5minute", resample_1m_to_tf(df_1m, 5))
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "SKIP"
+        assert "no symbol has stored derived timeframes" in result.detail
+
+    def test_fail_when_probe_errors_on_corrupt_parquet(self, tmp_path: Path) -> None:
+        # A corrupt 1minute parquet makes the probe raise — the check must
+        # REPORT the error as a FAIL, never crash the doctor run.
+        import polars as pl
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        _write_lake_partition(tmp_path, "5minute", resample_1m_to_tf(df_1m, 5))
+        corrupt = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2025"
+        corrupt.mkdir(parents=True, exist_ok=True)
+        (corrupt / "06.parquet").write_bytes(b"this is not a parquet file")
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "FAIL"
+        assert "freshness probe errored" in result.detail
