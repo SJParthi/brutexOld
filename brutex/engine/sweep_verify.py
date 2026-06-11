@@ -693,12 +693,162 @@ def verify_identity(
     return report
 
 
+# ── Tier 3 — RECOUNT compare (the shadow re-sweep's byte-diff) ───────────────
+
+
+def compare_recount(
+    original_root: Path,
+    scratch_root: Path,
+    plan: dict[Path, tuple[SweepTuple, SweepGridConfig, bool]],
+    *,
+    context_match: bool,
+) -> TreeVerifyReport:
+    """Tier 3: byte-diff the original tree against a freshly re-swept scratch tree.
+
+    The recount itself is NOT performed here (§11 COMMON — the caller composes
+    the existing 100%-tested ``run_sweep_grid`` into *scratch_root*, exactly
+    the shipped A/B tree-oracle pattern, never a hand-rolled re-implementation
+    that could drift from the engine). This function is the pure comparator:
+    for every *plan*-expected tuple it diffs the store, the trial-stats
+    sidecar, and the completion sentinel byte-for-byte.
+
+    The VALIDITY GATE (the hostile review's condition 3b): *context_match*
+    states whether ALL THREE recorded reproducibility strings match the
+    current environment (code commit, indicator version, a fresh
+    data-snapshot derivation over the loaded bars). Divergence is
+    verdict-grade ``recount_divergence`` (corrupt) ONLY under a full match;
+    under any mismatch it degrades to ``recount_divergence_inconclusive``
+    (warn) — a recount under changed inputs is NOT evidence of corruption
+    (ADR-0008's two drift channels), and condemning a good store on wrong
+    inputs is the catastrophic failure mode this gate exists to prevent.
+    Byte-identity under a MISMATCH is still reported clean (silence): it is
+    strong reassurance, never a downgrade.
+
+    Parameters
+    ----------
+    original_root, scratch_root
+        The verified tree and the scratch tree the shadow re-sweep produced.
+        Must be distinct directories (the recount must never write into the
+        original tree — the preload at ``load_or_create_store`` would mask
+        inflation otherwise).
+    plan
+        :func:`plan_expected_stores` output for *original_root* (the
+        attribution map; scratch paths re-derive by relative path).
+    context_match
+        Whether the recorded context fully matches the current environment.
+
+    Raises
+    ------
+    SweepVerifyError
+        If either root is not a directory, or the roots are not distinct.
+    """
+    for name, root in (("original_root", original_root), ("scratch_root", scratch_root)):
+        if not root.is_dir():
+            raise SweepVerifyError(f"{name} not found or not a directory: {root}")
+    if original_root.resolve() == scratch_root.resolve():
+        raise SweepVerifyError(
+            "scratch_root must be DISTINCT from original_root — the recount "
+            "never writes into the verified tree"
+        )
+    findings: list[VerifyFinding] = []
+    checked = 0
+    for store_path in sorted(plan):
+        artifacts = (
+            store_path,
+            trial_stats_sidecar_path(store_path),
+            completion_sentinel_path(store_path),
+        )
+        for original in artifacts:
+            scratch = scratch_root / original.relative_to(original_root)
+            rel = _rel(original_root, original)
+            original_exists = original.exists()
+            scratch_exists = scratch.exists()
+            if not original_exists and not scratch_exists:
+                continue  # a no-bars tuple in BOTH worlds — nothing to compare
+            checked += 1
+            if not scratch_exists:
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code="recount_scratch_absent",
+                        severity="warn",
+                        detail=(
+                            "the shadow re-sweep produced no counterpart — "
+                            "bars unavailable in the current lake; "
+                            "unverifiable at this tier, never condemned"
+                        ),
+                    )
+                )
+                continue
+            if not original_exists:
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code="recount_original_absent",
+                        severity="warn",
+                        detail=(
+                            "the recount produced this artifact but the tree "
+                            "lacks it — a mid-sweep PENDING tuple or a lost "
+                            "artifact; not classified as corruption"
+                        ),
+                    )
+                )
+                continue
+            if original.read_bytes() == scratch.read_bytes():
+                continue  # byte-identical — verified (silence is the verdict)
+            if context_match:
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code="recount_divergence",
+                        severity="corrupt",
+                        detail=(
+                            "bytes diverge from the shadow re-sweep under a "
+                            "FULLY MATCHED recorded context — verdict-grade "
+                            "corruption (the only state heal-grade evidence "
+                            "may ever come from)"
+                        ),
+                    )
+                )
+            else:
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code="recount_divergence_inconclusive",
+                        severity="warn",
+                        detail=(
+                            "bytes diverge BUT the recorded context does not "
+                            "match the current environment — NOT evidence of "
+                            "corruption (changed code/indicators/lake change "
+                            "results legitimately; ADR-0008 drift channels)"
+                        ),
+                    )
+                )
+    report = TreeVerifyReport(
+        root=str(original_root),
+        tier="recount",
+        checked_stores=checked,
+        findings=tuple(findings),
+    )
+    _LOG.info(
+        "sweep_verify.recount",
+        root=str(original_root),
+        scratch=str(scratch_root),
+        context_match=context_match,
+        artifacts=checked,
+        corrupt=len(report.corrupt),
+        findings=len(report.findings),
+    )
+    return report
+
+
 __all__ = [
     "SEVERITIES",
     "RecordedContext",
     "SweepVerifyError",
     "TreeVerifyReport",
     "VerifyFinding",
+    "compare_recount",
     "plan_expected_stores",
     "recorded_context_from_audit",
     "verify_identity",
