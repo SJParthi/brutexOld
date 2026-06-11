@@ -510,7 +510,11 @@ class ResultsStore:
         Raises
         ------
         ResultsStoreError
-            If *path* does not exist or ``polars`` is not installed.
+            If *path* does not exist, ``polars`` is not installed, or the file
+            is not a readable results-store Parquet (corrupt/truncated/foreign
+            bytes are wrapped into the store's OWN typed error so every reader
+            — including the sweep-verify doctor — handles damage uniformly,
+            DEC-SWEEP-VERIFY-001).
         """
         if not path.exists():
             raise ResultsStoreError(f"results store not found at {path}")
@@ -520,7 +524,10 @@ class ResultsStore:
             raise ResultsStoreError(_POLARS_HINT) from exc
 
         store = cls(path=path)
-        df = pl.read_parquet(path)
+        try:
+            df = pl.read_parquet(path)
+        except (pl.exceptions.PolarsError, OSError) as exc:
+            raise ResultsStoreError(f"unreadable results store at {path}: {exc}") from exc
         for record in df.iter_rows(named=True):
             store.append(_row_from_record(record))
         _LOG.info("results_store.load", path=str(path), row_count=len(store))
