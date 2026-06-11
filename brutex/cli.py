@@ -77,6 +77,10 @@ EXIT_INTERNAL_ERROR = 2
 #: are DISTINCT outcomes an operator script must be able to tell apart.
 EXIT_VERIFY_FINDINGS = 3
 EXIT_VERIFY_INCONCLUSIVE = 4
+#: sweep-heal refusal (DEC-SWEEP-HEAL-001): stale evidence / mass-quarantine
+#: threshold / concurrent sweep — distinct from the verify codes so operator
+#: scripts can tell "found corruption" from "refused to act".
+EXIT_HEAL_REFUSED = 5
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -947,6 +951,56 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Run --recount even when the recorded context mismatches the current "
             "environment — divergence then reports INCONCLUSIVE, never CORRUPT"
+        ),
+    )
+    sweep_verify.add_argument(
+        "--emit-heal-plan",
+        action="store_true",
+        dest="emit_heal_plan",
+        help=(
+            "With --recount under a MATCHED context: write the structured heal "
+            "plan (frozen evidence hashes) to <root>/heal/ for `brutex sweep-heal` "
+            "(DEC-SWEEP-HEAL-001 condition C1 — heal evidence is never re-typed flags)"
+        ),
+    )
+
+    # ── sweep-heal (DEC-SWEEP-HEAL-001) — quarantine, never delete ──
+    sweep_heal = sub.add_parser(
+        "sweep-heal",
+        help=(
+            "Quarantine the tuples a sweep-verify --recount --emit-heal-plan "
+            "condemned, then wipe the checkpoint + dedup-cache so the next "
+            "sweep-all redoes ONLY them (intact tuples sentinel-short-circuit). "
+            "DRY-RUN by default; --execute to act. Never deletes — artifacts "
+            "move to <root>/quarantine/."
+        ),
+    )
+    sweep_heal.add_argument("plan", type=Path, help="The heal plan JSON the doctor emitted")
+    sweep_heal.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root (default $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    sweep_heal.add_argument(
+        "--results-root",
+        type=Path,
+        default=None,
+        dest="results_root",
+        help="Results root (default <lake-root>/sweeps)",
+    )
+    sweep_heal.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually quarantine + wipe (default: dry-run preview only)",
+    )
+    sweep_heal.add_argument(
+        "--allow-mass-quarantine",
+        action="store_true",
+        dest="allow_mass_quarantine",
+        help=(
+            "Override the >=50%% refusal threshold (C7 — a venv/library drift can "
+            "byte-diverge EVERYTHING under a 'matched' context; be sure first)"
         ),
     )
 
@@ -2918,6 +2972,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     recount: bool,
     scratch_root: Path | None,
     allow_context_mismatch: bool,
+    emit_heal_plan: bool = False,
 ) -> int:
     """Verify a sweep results tree — the doctor's CLI (DEC-SWEEP-VERIFY-001).
 
@@ -3153,11 +3208,128 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 f.code == "recount_divergence_inconclusive" for f in rec_report.findings
             ):
                 inconclusive_only = True
+            # Heal-plan emission (DEC-SWEEP-HEAL-001 C1/C2): heal-grade
+            # evidence exists ONLY under a matched context — the plan freezes
+            # the condemnation-time hashes for `brutex sweep-heal`.
+            if emit_heal_plan:
+                if not context_match:
+                    print(
+                        "[brutex] no heal plan emitted: divergence under a context "
+                        "mismatch is INCONCLUSIVE, never heal-grade (C1)"
+                    )
+                elif not rec_report.clean:
+                    from datetime import UTC, datetime
+
+                    from brutex.engine.sweep_heal import build_heal_plan, write_heal_plan
+                    from brutex.engine.sweep_supervisor import grid_identity
+                    from brutex.engine.sweep_verify import RecordedContext
+
+                    heal_plan = build_heal_plan(
+                        rec_report,
+                        plan_expected_stores(out_root, grid),
+                        root=out_root,
+                        grid_identity=grid_identity(grid),
+                        context=RecordedContext(
+                            data_snapshot_hash=snapshot,
+                            indicator_version=indicator,
+                            code_commit_sha=code_sha,
+                        ),
+                        created_utc=datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"),
+                    )
+                    plan_path = write_heal_plan(out_root, heal_plan)
+                    print(
+                        f"[brutex] heal plan written: {plan_path} "
+                        f"({len(heal_plan.entries)} condemned tuple(s)) — review, then "
+                        f"`brutex sweep-heal {plan_path}` (dry-run) / `--execute`"
+                    )
+                else:
+                    print("[brutex] no heal plan emitted: recount found no corruption")
 
     if any(not report.clean for report in reports):
         return EXIT_VERIFY_FINDINGS
     if inconclusive_only:
         return EXIT_VERIFY_INCONCLUSIVE
+    return EXIT_OK
+
+
+def cmd_sweep_heal(  # pragma: no cover — orchestration shim over the 100%-tested sweep_heal core
+    *,
+    plan: Path,
+    lake_root: Path | None,
+    results_root: Path | None,
+    execute: bool,
+    allow_mass_quarantine: bool,
+) -> int:
+    """Quarantine doctor-condemned tuples + wipe the resume-skip stores.
+
+    DRY-RUN by default (the assessment IS the preview — preview ≡ action);
+    ``--execute`` acts. Refuses on stale evidence (C2, whole-heal), a running
+    sweep (C6), or a mass quarantine without the override (C7) — exit
+    :data:`EXIT_HEAL_REFUSED`. Never deletes: the trio moves to
+    ``<root>/quarantine/`` and the wiped checkpoint/dedup-cache regenerate on
+    the next sweep (DEC-SWEEP-HEAL-001).
+    """
+    import time
+
+    from brutex.engine.sweep_heal import (
+        SweepHealError,
+        assess_heal,
+        execute_heal,
+        read_heal_plan,
+    )
+    from brutex.engine.sweep_supervisor import read_progress
+    from brutex.orchestrator.audit import AuditWriter
+
+    resolved_lake = _resolve_lake_root(lake_root)
+    out_root = results_root if results_root is not None else resolved_lake / "sweeps"
+    try:
+        heal_plan = read_heal_plan(plan)
+    except SweepHealError as exc:
+        print(f"[brutex] sweep-heal error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # C6 best-effort guard: a fresh "running" progress snapshot refuses. A
+    # snapshot older than this is a crashed sweep's leftover, not a live one.
+    progress_fresh_seconds = 600.0
+    progress = read_progress(out_root / "progress" / "sweep-progress.json")
+    fresh = (time.time() - float(progress.get("updated_at") or 0.0)) < progress_fresh_seconds
+    sweep_running = bool(progress.get("running")) and fresh
+
+    try:
+        assessment = assess_heal(
+            out_root,
+            heal_plan,
+            sweep_running=sweep_running,
+            allow_mass_quarantine=allow_mass_quarantine,
+        )
+    except SweepHealError as exc:
+        print(f"[brutex] sweep-heal error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    print(assessment.render(out_root, heal_plan))
+    if not assessment.ok:
+        return EXIT_HEAL_REFUSED
+    if not execute:
+        print("[brutex] DRY-RUN (no changes made) — re-run with --execute to act")
+        return EXIT_OK
+
+    audit_path = out_root / "audit" / "sweep-all.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
+            report = execute_heal(out_root, heal_plan, assessment, audit=audit)
+    except SweepHealError as exc:
+        print(f"[brutex] sweep-heal error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    print(
+        f"[brutex] healed — moved={report.moved} completed_partial={report.completed_partial} "
+        f"already_quarantined={report.already_quarantined} wiped={list(report.wiped)}"
+    )
+    print(
+        "[brutex] NOW re-run `brutex sweep-all` with the SAME flags BEFORE any lake "
+        "change (C11 — the path digest folds in the data snapshot; a drifted lake "
+        "re-sweeps to new paths). Intact tuples short-circuit at their sentinels; "
+        "the cascade/ report is stale until that re-run."
+    )
     return EXIT_OK
 
 
@@ -3752,6 +3924,16 @@ def main(argv: list[str] | None = None) -> int:
             recount=args.recount,
             scratch_root=args.scratch_root,
             allow_context_mismatch=args.allow_context_mismatch,
+            emit_heal_plan=args.emit_heal_plan,
+        )
+    # Quarantine heal (DEC-SWEEP-HEAL-001) — dry-run by default.
+    if args.command == "sweep-heal":
+        return cmd_sweep_heal(
+            plan=args.plan,
+            lake_root=args.lake_root,
+            results_root=args.results_root,
+            execute=args.execute,
+            allow_mass_quarantine=args.allow_mass_quarantine,
         )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits

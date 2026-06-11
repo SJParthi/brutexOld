@@ -68,14 +68,25 @@ SORT_ALIASES: Final[dict[str, str]] = {
 #: Default leaderboard sort key (the headline risk-adjusted metric).
 DEFAULT_SORT_BY: Final[str] = "sharpe"
 
+#: The heal protocol's quarantine subtree (DEC-SWEEP-HEAL-001, hostile-review
+#: condition C3) — quarantined stores hold the SAME run-ids as their redone
+#: replacements with different metrics, so merging them would raise the
+#: cross-file append conflict on a perfectly healed tree. MUST equal
+#: ``brutex.engine.sweep_verify.QUARANTINE_DIRNAME`` — pinned by test, not
+#: imported: this module stays a pure read+render surface free of the
+#: orchestrator import graph (the ``_TUPLE_DIGEST_LEN`` precedent).
+_QUARANTINE_DIRNAME: Final[str] = "quarantine"
+
 
 def discover_result_files(root: Path) -> list[Path]:
     """Return every per-tuple ``*.parquet`` under *root*, in deterministic sorted order.
 
     Recursively globs ``**/*.parquet`` so the orchestrator's
-    ``<root>/<instrument>/<tf>/<file>.parquet`` layout is fully covered. The sorted
-    order makes the merge + the leaderboard reproducible regardless of filesystem
-    enumeration order (Golden Rule #4).
+    ``<root>/<instrument>/<tf>/<file>.parquet`` layout is fully covered, then
+    EXCLUDES the heal protocol's ``quarantine/`` subtree (condition C3 — see
+    :data:`_QUARANTINE_DIRNAME`). The sorted order makes the merge + the
+    leaderboard reproducible regardless of filesystem enumeration order
+    (Golden Rule #4).
 
     Parameters
     ----------
@@ -94,7 +105,11 @@ def discover_result_files(root: Path) -> list[Path]:
     """
     if not root.is_dir():
         raise ResultsStoreError(f"results root not found or not a directory: {root}")
-    return sorted(root.glob("**/*.parquet"))
+    return [
+        path
+        for path in sorted(root.glob("**/*.parquet"))
+        if _QUARANTINE_DIRNAME not in path.relative_to(root).parts
+    ]
 
 
 def load_results_tree(root: Path) -> ResultsStore:

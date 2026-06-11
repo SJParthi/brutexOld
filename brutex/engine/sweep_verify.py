@@ -102,6 +102,19 @@ _CONTEXT_KEYS: Final[tuple[str, ...]] = (
 )
 
 
+#: The heal protocol's quarantine subtree under a results root
+#: (DEC-SWEEP-HEAL-001) — EXCLUDED from every results-tree glob here and in
+#: ``results_report`` (hostile-review condition C3): quarantined artifacts keep
+#: intact pairing and the same run-ids as their redone replacements, so
+#: re-scanning them would re-condemn a healed tree / crash the merged read-back.
+QUARANTINE_DIRNAME: Final[str] = "quarantine"
+
+
+def _outside_quarantine(root: Path, paths: list[Path]) -> list[Path]:
+    """Filter *paths* (under *root*) to those NOT inside the quarantine subtree."""
+    return [p for p in paths if QUARANTINE_DIRNAME not in p.relative_to(root).parts]
+
+
 class SweepVerifyError(BruteXError):
     """Raised for verifier USAGE failures (bad inputs) — never for tree findings.
 
@@ -305,7 +318,7 @@ def verify_structural(root: Path) -> TreeVerifyReport:
             VerifyFinding(path=_rel(root, path), code=code, severity=severity, detail=detail)
         )
 
-    stores = sorted(root.glob("**/*.parquet"))
+    stores = _outside_quarantine(root, sorted(root.glob("**/*.parquet")))
     for store_path in stores:
         try:
             ResultsStore.load(store_path)
@@ -410,7 +423,7 @@ def verify_structural(root: Path) -> TreeVerifyReport:
 
     store_names = {p.name for p in stores}
     for suffix, code in ((".trials.json", "orphan_sidecar"), (".complete.json", "orphan_sentinel")):
-        for orphan in sorted(root.glob(f"**/*{suffix}")):
+        for orphan in _outside_quarantine(root, sorted(root.glob(f"**/*{suffix}"))):
             if orphan.name.removesuffix(suffix) not in store_names:
                 add(orphan, code, "warn", "paired store file is missing")
 
@@ -623,7 +636,7 @@ def verify_identity(
         raise SweepVerifyError(f"results root not found or not a directory: {root}")
     findings: list[VerifyFinding] = []
     plan = plan_expected_stores(root, grid, stage3=stage3)
-    found = sorted(root.glob("**/*.parquet"))
+    found = _outside_quarantine(root, sorted(root.glob("**/*.parquet")))
 
     if plan and found and not any(path in plan for path in found):
         findings.append(
@@ -843,6 +856,7 @@ def compare_recount(
 
 
 __all__ = [
+    "QUARANTINE_DIRNAME",
     "SEVERITIES",
     "RecordedContext",
     "SweepVerifyError",
