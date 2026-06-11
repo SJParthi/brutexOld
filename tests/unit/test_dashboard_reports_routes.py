@@ -172,6 +172,10 @@ def test_xlsx_download_matches_nse(tmp_path: Path) -> None:
     assert resp.status_code == 200
     assert "spreadsheetml.sheet" in resp.headers["content-type"]
     assert "attachment" in resp.headers["content-disposition"]
+    # DEC-REPORT-FILENAME-001: the name is self-describing — basis + selection + range.
+    assert (
+        "preopen_day_all-symbols_2024-01-01_2024-12-31.xlsx" in resp.headers["content-disposition"]
+    )
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         sheet = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
     assert "COALINDIA" in sheet
@@ -289,7 +293,12 @@ def test_zip_all_mode_download(tmp_path: Path) -> None:
     )
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"
-    assert "preopen_report.zip" in resp.headers["content-disposition"]
+    # DEC-REPORT-FILENAME-001: the static "preopen_report.zip" is replaced by
+    # the self-describing selection name (mode + basis + symbols + range).
+    assert (
+        "preopen_all_day_all-symbols_2024-01-01_2024-12-31.zip"
+        in resp.headers["content-disposition"]
+    )
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         names = zf.namelist()
     assert names == ["preopen_all_2024.xlsx"]  # one .xlsx for the single year

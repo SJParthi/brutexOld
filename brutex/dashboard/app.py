@@ -75,6 +75,7 @@ from brutex.dashboard.preopen_report import (
     build_preopen_rows,
     render_report_zip,
     render_xlsx,
+    report_filename,
     resolve_report_datasets,
 )
 from brutex.dashboard.pull_controller import (
@@ -2172,7 +2173,15 @@ def build_app(
             if isinstance(lake_root, Path)
             else []
         )
-        filename = f"preopen_{start_d.isoformat()}_{end_d.isoformat()}.xlsx"
+        # Self-describing download name (DEC-REPORT-FILENAME-001): basis +
+        # the selected symbols + the range — never a selection-blind static name.
+        filename = report_filename(
+            extension=".xlsx",
+            start=start_d,
+            end=end_d,
+            basis=report_basis,
+            symbols=wanted,
+        )
         title = f"Pre-Open Market: {start_d.isoformat()} to {end_d.isoformat()}"
         return Response(
             content=render_xlsx(rows, title=title),
@@ -2243,10 +2252,22 @@ def build_app(
             else []
         )
         blob = render_report_zip(rows, mode=report_mode, min_pct=Decimal(str(min_pct)))
+        # Self-describing download name (DEC-REPORT-FILENAME-001): mode (+ the
+        # top-mover threshold where it applies) + basis + the selected symbols +
+        # the range — replaces the selection-blind static "preopen_report.zip".
+        zip_name = report_filename(
+            extension=".zip",
+            start=start_d,
+            end=end_d,
+            basis=report_basis,
+            symbols=wanted,
+            mode=report_mode,
+            min_pct=Decimal(str(min_pct)),
+        )
         return Response(
             content=blob,
             media_type="application/zip",
-            headers={"Content-Disposition": 'attachment; filename="preopen_report.zip"'},
+            headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
         )
 
     @app.get("/reports", response_class=HTMLResponse)
