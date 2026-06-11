@@ -201,6 +201,9 @@ class TestSpotCoverageApi:
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         body = client.get("/api/v1/coverage/spot").json()
         assert body["headline"] == {"datasets": 1, "total_bars": 2}
+        # DEC-SPOT-COVERAGE-COMPLETENESS-001: rows carry the fetch-window chip
+        # fields; a lake with NO window ledger is an honest "no_ledger_record"
+        # (counts null), never implied-settled.
         assert body["rows"] == [
             {
                 "exchange": "NSE",
@@ -210,8 +213,52 @@ class TestSpotCoverageApi:
                 "bars": 2,
                 "first_date": "2024-03-01",
                 "last_date": "2024-03-02",
+                "completeness": "no_ledger_record",
+                "windows_settled": None,
+                "windows_pending": None,
+                "windows_failed": None,
             }
         ]
+
+    def test_spot_chip_settled_from_window_ledger(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # DEC-SPOT-COVERAGE-COMPLETENESS-001 e2e: a lake whose window ledger has
+        # every window settled for the dataset renders the SETTLED counts.
+        from datetime import date
+
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            interval="1minute",
+            bars=[_bar(datetime(2024, 3, 1, 9, 15, tzinfo=UTC), "100.4")],
+        )
+        ledger = WindowLedger()
+        ledger.record(
+            WindowKey(
+                market="dhan",
+                security_id="NSE-NIFTY",
+                interval="1minute",
+                start=date(2024, 3, 1),
+                end=date(2024, 3, 2),
+            ),
+            raw_bars=1,
+            error_type=None,
+            bars_appended=1,
+            now=datetime(2024, 3, 2, 12, 0, tzinfo=UTC),
+        )
+        save_window_ledger(ledger, tmp_path)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        (row,) = client.get("/api/v1/coverage/spot").json()["rows"]
+        assert row["completeness"] == "settled"
+        assert row["windows_settled"] == 1
+        assert row["windows_pending"] == 0
+        assert row["windows_failed"] == 0
 
     def test_spot_503_when_store_unwired(self) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=None))

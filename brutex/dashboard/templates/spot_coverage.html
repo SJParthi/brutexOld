@@ -86,7 +86,7 @@
 <body>
   <header>
     <div class="logo">BruteX</div>
-    <div class="sub">Spot coverage — one row per dataset · present-in-lake = pulled (date-range completeness not asserted)</div>
+    <div class="sub">Spot coverage — one row per dataset · fetch-window chip = ledger-settled within planned ranges (trading-day gap audit not claimed)</div>
     <nav class="topnav">
       <a href="/credentials">Credentials</a>
       <span class="sep">·</span>
@@ -117,11 +117,14 @@
   </div>
 
 <script>
-/* ── BruteX spot coverage (DEC-COVERAGE-SPOT-001) ──
+/* ── BruteX spot coverage (DEC-COVERAGE-SPOT-001 + DEC-SPOT-COVERAGE-COMPLETENESS-001) ──
    Read-only: one aggregate row per spot dataset (exchange · segment · symbol ·
    interval) with its bar count + first/last date, read from the candle lake via
-   /api/v1/coverage/spot. A dataset present in the lake counts as "pulled"; the
-   date range is shown but NOT asserted complete. Escape-before-innerHTML (XSS). */
+   /api/v1/coverage/spot. The "Fetch windows" chip asserts ONLY ledger-settledness
+   over planner-planned ranges (SETTLED / PENDING n / FAILED m); resampled
+   intervals are "derived from 1m" (the fetch ledger does not apply) and a lake
+   with no ledger shows an honest "no ledger record" — a trading-day gap audit
+   is NOT claimed. Escape-before-innerHTML (XSS). */
 const panel = document.getElementById("panel");
 const dsEl = document.getElementById("ds");
 const barzEl = document.getElementById("barz");
@@ -138,6 +141,21 @@ function esc(s) {
 }
 function num(n) { return Number(n || 0).toLocaleString("en-IN"); }
 
+/* The completeness chip (DEC-SPOT-COVERAGE-COMPLETENESS-001) — every state
+   carries its honest scope; "settled" is deliberately NOT called "complete". */
+function completenessChip(r) {
+  const c = r.completeness;
+  if (c === "settled") return '<span style="color:#34d399;font-weight:700;">SETTLED</span>';
+  if (c === "pending")
+    return '<span style="color:#FFB74D;font-weight:700;">PENDING ' + esc(num(r.windows_pending)) + "</span>";
+  if (c === "failed")
+    return '<span style="color:#f87171;font-weight:700;">FAILED ' + esc(num(r.windows_failed)) + "</span>";
+  if (c === "derived") return '<span style="color:#9aa4b2;">derived from 1m</span>';
+  if (c === "ambiguous")
+    return '<span style="color:#FFB74D;">shared symbol — see /coverage/windows</span>';
+  return '<span style="color:#9aa4b2;">no ledger record</span>';
+}
+
 function renderSpot(rows) {
   if (!rows.length) {
     panel.innerHTML = '<div class="empty">no spot datasets in the lake yet — pull a spot symbol (e.g. NIFTY 1minute) from the Database page</div>';
@@ -152,12 +170,13 @@ function renderSpot(rows) {
     + '<td class="num">' + esc(num(r.bars)) + "</td>"
     + "<td>" + esc(r.first_date || "") + "</td>"
     + "<td>" + esc(r.last_date || "") + "</td>"
+    + "<td>" + completenessChip(r) + "</td>"
     + "</tr>"
   ).join("");
   panel.innerHTML =
     "<table><thead><tr>"
     + "<th>Symbol</th><th>Exchange</th><th>Segment</th><th>Interval</th>"
-    + "<th>Bars</th><th>First date</th><th>Last date</th>"
+    + "<th>Bars</th><th>First date</th><th>Last date</th><th>Fetch windows</th>"
     + "</tr></thead><tbody>" + body + "</tbody></table>";
 }
 
@@ -170,7 +189,7 @@ async function poll() {
     dsEl.textContent = h.datasets ?? "—";
     barzEl.textContent = num(h.total_bars);
     statusEl.textContent = (h.datasets ?? "—") + " datasets · " + num(h.total_bars)
-      + " bars · present-in-lake = pulled (date-range completeness not asserted)";
+      + " bars · chip = ledger-settled within planned ranges (gap audit not claimed)";
     renderSpot(body.rows || []);
     liveTxt.textContent = "live · " + (body.rows || []).length + " datasets";
   } catch (e) {

@@ -1739,6 +1739,70 @@ def _window_market_bucket(market: str) -> str:
     return "options" if market == _OPTION_WINDOW_MARKET else "spot"
 
 
+#: The SPOT fetch-window market namespace. MUST MATCH
+#: ``brutex.adapters.dhan.ingest._MARKET`` ("dhan") — mirrored here (the
+#: ``_OPTION_WINDOW_MARKET`` precedent) so the read-only viewer never imports
+#: the adapter stack. The EXACT-match filter matters: ``_window_market_bucket``
+#: maps EVERY non-option market to the "spot" display bucket, which is a
+#: rendering choice, not a join identity (DEC-SPOT-COVERAGE-COMPLETENESS-001).
+_SPOT_WINDOW_MARKET: Final[str] = "dhan"
+
+#: mtime-keyed single-entry cache for the spot completeness GROUPING — the
+#: /coverage spot endpoint is polled every 4 s by two pages, and grouping a
+#: universe-scale (~1M-row) ledger per poll would be an O(rows) Python loop per
+#: request. Same invalidation rule as ``_WINDOW_CACHE`` (any flush bumps the
+#: Parquet mtime), same lock (DEC-SPOT-COVERAGE-COMPLETENESS-001).
+_SPOT_ROLLUP_CACHE: dict[str, tuple[int, dict[tuple[str, str], tuple[int, int, int]]]] = {}
+
+
+def spot_window_rollup(lake_root: Path) -> dict[tuple[str, str], tuple[int, int, int]]:
+    """Group the spot fetch-window ledger into ``(symbol, interval) → (settled, pending, failed)``.
+
+    The completeness source for the /coverage spot chips
+    (DEC-SPOT-COVERAGE-COMPLETENESS-001): counts come ONLY from the unified
+    window ledger — settled is the ledger's OWN skip authority
+    (:data:`~brutex.data.window_ledger.SETTLED_STATUSES` = SUCCESS+SKIPPED),
+    failed is ``FAILED``, and everything else (PLANNED + below-threshold EMPTY)
+    is pending work the next pull re-fetches. Option rows
+    (``market == "dhan-option"``) are excluded by the EXACT spot-market filter.
+
+    A lake with NO ledger Parquet returns ``{}`` (every fetch-interval chip
+    renders "no ledger record") — deliberately NO ``window_status.json``
+    fallback, unlike ``build_window_payload``: that sidecar is a frozen,
+    write-retired snapshot (DEC-STATUS-SIDECAR-WRITE-RETIRE-001) and a stale
+    completeness claim is worse than an honest unknown.
+
+    O(rows) once per ledger flush (mtime-keyed cache); O(1) per cached call.
+    """
+    from brutex.data.window_ledger import FAILED, SETTLED_STATUSES
+    from brutex.data.window_ledger_store import ledger_path
+
+    path = ledger_path(lake_root)
+    if not path.is_file():
+        return {}
+    mtime_ns = path.stat().st_mtime_ns
+    key = str(path)
+    with _WINDOW_CACHE_LOCK:
+        hit = _SPOT_ROLLUP_CACHE.get(key)
+        if hit is not None and hit[0] == mtime_ns:
+            return hit[1]
+    counts: dict[tuple[str, str], list[int]] = {}
+    for record in _ledger_records_cached(lake_root):
+        if record.market != _SPOT_WINDOW_MARKET:
+            continue
+        cell = counts.setdefault((record.security_id, record.interval), [0, 0, 0])
+        if record.status in SETTLED_STATUSES:
+            cell[0] += 1
+        elif record.status == FAILED:
+            cell[2] += 1
+        else:  # PLANNED + below-threshold EMPTY — outstanding work
+            cell[1] += 1
+    rollup = {k: (v[0], v[1], v[2]) for k, v in counts.items()}
+    with _WINDOW_CACHE_LOCK:
+        _SPOT_ROLLUP_CACHE[key] = (mtime_ns, rollup)
+    return rollup
+
+
 def build_window_payload(
     lake_root: Path,
     *,
@@ -1858,6 +1922,7 @@ __all__ = [
     "query_option_candles",
     "query_table",
     "sample_rows",
+    "spot_window_rollup",
     "summarize_option_datasets",
     "summarize_spot_datasets",
     "table_summary",
