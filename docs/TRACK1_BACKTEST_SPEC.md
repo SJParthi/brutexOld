@@ -438,6 +438,19 @@ _Historical algorithm (never wire — ADR-0006 Final Verdict):_
    COMPUTE PER (instrument, TF) LEADERBOARD with N ≤ 10⁷, **NOT pool-wide**.
    Pool-wide N=10¹² gives threshold ≈ 7.4σ ≈ Sharpe 23 (impossible).
    Per-leaderboard N=10⁷ gives threshold ≈ 5.3σ ≈ Sharpe 2-3 (realistic).
+
+   > **N source (ADR-0008 / DEC-TRIAL-STATS-CONSUME-001):** the cascade
+   > deflates against the **rank-time-persisted per-leaderboard trial
+   > stats** — the `*.trials.json` sidecar each sweep tuple writes at
+   > flush time (slice 2), aggregated per (instrument, TF) into the
+   > manifest's frozen `leaderboard_trials` records (slice 3) and fed to
+   > filter #2 as `DsrTrialStats` (slice 4). The report stamps
+   > `dsr_n_source: "leaderboard"`. When no complete, deflatable frozen
+   > record exists for a slice, the cascade falls back to the candidate
+   > pool's own size/variance and stamps `dsr_n_source: "pool"` with a
+   > structlog warning — the fallback is LOUD, never silent, because
+   > pool-N (≈ top_k finalists) under-counts trials and is
+   > anti-conservative (the exact defect ADR-0008 fixed).
 3. **CPCV** (López de Prado, Adv ML in Finance 2018, Ch 12):
    S = 16 sub-periods, C(16,8) = 12,870 splits
    Embargo = max indicator lookback bars (NOT 1% of timeline)

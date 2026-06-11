@@ -107,6 +107,12 @@ def test_golden_cascade() -> None:
     # (previously computed then dropped on the pass path). Exact literal —
     # CSCV is exhaustive (no RNG): 46 overfit logits of C(8,4)=70 splits.
     assert rep.pool_pbo == 0.6571428571428571
+    # ADR-0008 / DEC-TRIAL-STATS-CONSUME-001: with no trial_stats supplied the
+    # legacy pool source is STAMPED, with the exact N and V echoed — all three
+    # candidates share sharpe_ratio=2.0, so the pool dispersion is exactly 0.
+    assert rep.dsr_n_source == "pool"
+    assert rep.dsr_n_trials == 3
+    assert rep.dsr_trial_variance == 0.0
 
 
 def test_golden_cascade_determinism() -> None:
