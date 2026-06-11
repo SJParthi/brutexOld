@@ -548,3 +548,33 @@ class TestQuarantineExclusion:
             )
         store = load_results_tree(root)  # must NOT raise on the healed tree
         assert len(store) > 0
+
+
+class TestCellFindingsNeverReachHeal:
+    def test_mixed_grid_and_cell_report_emits_the_grid_plan(self, tmp_path: Path) -> None:
+        # DEC-STAGE3-RECOUNT-001 condition B2/B7: cell findings carry a
+        # DISTINCT code, so a mixed report builds the GRID heal plan without
+        # raising — cells stay structurally unreachable by heal evidence.
+        original, _, grid, report = _condemned_tree(tmp_path)
+        cell_finding = VerifyFinding(
+            path="NIFTY/1minute/BUY_k1_ffffffffffffffff.parquet",
+            code="cell_recount_divergence",
+            severity="corrupt",
+            detail="cell divergence — verdict-grade but NOT heal-grade",
+        )
+        mixed = TreeVerifyReport(
+            root=report.root,
+            tier="recount",
+            checked_stores=report.checked_stores,
+            findings=(*report.findings, cell_finding),
+        )
+        plan_map = plan_expected_stores(original, grid)  # type: ignore[arg-type]
+        plan = build_heal_plan(
+            mixed,
+            plan_map,
+            root=original,
+            grid_identity=_GID,
+            context=_CTX,
+            created_utc="20260611T130000Z",
+        )
+        assert len(plan.entries) == 1  # only the GRID divergence is heal-grade

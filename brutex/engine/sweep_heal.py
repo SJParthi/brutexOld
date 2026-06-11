@@ -44,8 +44,12 @@ Honest envelope (Golden Rule #10)
 * Heal+redo requires an UNCHANGED lake: the store-path digest folds in
   ``data_snapshot_hash``, so a drifted lake re-sweeps to new paths while the
   healed paths stay missing (the caller prints this, C11).
-* Stage-3 cell stores are NOT healable — no recount evidence exists for them
-  (#657); plan construction refuses non-grid-tuple paths (C10).
+* Stage-3 cell stores are NOT healable: they now carry their OWN recount
+  evidence codes (``cell_recount_divergence*``, DEC-STAGE3-RECOUNT-001) which
+  this module deliberately does not consume — cells have no sentinels, need no
+  checkpoint/dedup wipe to redo (``run_stage3_pass`` re-derives every cell on
+  any ``--stage3-enable`` sweep), and healing stays grid-only (C10); plan
+  construction refuses non-grid-tuple paths.
 """
 
 from __future__ import annotations
