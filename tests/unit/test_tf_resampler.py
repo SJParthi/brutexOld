@@ -258,3 +258,103 @@ class TestBucketTimestamps:
         ]
         assert stamps[:3] == ["05-13 09:15", "05-13 09:17", "05-13 09:19"]
         assert stamps[3:6] == ["05-14 09:15", "05-14 09:17", "05-14 09:19"]
+
+
+_SESSION_OPEN_UTC = datetime(2025, 6, 9, 3, 45, tzinfo=UTC).replace(tzinfo=None)
+
+
+class TestFixedArithmeticAnchor:
+    """DEC-RESAMPLE-ANCHOR-002: the grid depends on calendar TIME, not bars.
+
+    The prior ``start_by="datapoint"`` anchoring keyed each session's grid to
+    its FIRST bar — a vendor gap at the 09:15 open silently shifted the whole
+    day's grid for every timeframe. The fixed-arithmetic anchor is immune.
+    """
+
+    def test_missing_open_bar_does_not_shift_the_grid(self) -> None:
+        # Session whose 09:15 IST bar is MISSING (first bar at 09:16 IST).
+        full = _make_1m_session(_SESSION_OPEN_UTC, 10)
+        gapped = full.slice(1)  # drop the 09:15 bar
+
+        out = resample_1m_to_tf(gapped, 2)
+        labels = out["ts_utc"].to_list()
+        # Grid stays 09:15 + k*2m (03:45 UTC + k*2m) — NOT 09:16-anchored.
+        expected_grid = [_SESSION_OPEN_UTC + timedelta(minutes=2 * k) for k in range(5)]
+        assert labels == expected_grid
+        # The first bucket [09:15, 09:17) holds ONLY the surviving 09:16 bar.
+        first = out.row(0, named=True)
+        src = gapped.row(0, named=True)
+        assert first["open"] == src["open"]
+        assert first["close"] == src["close"]
+        assert first["volume"] == 1000
+
+    def test_missing_open_bar_daily_label_still_session_open(self) -> None:
+        gapped = _make_1m_session(_SESSION_OPEN_UTC, 375).slice(2)  # first bar 09:17 IST
+        out = resample_1m_to_tf(gapped, 375)
+        assert out.height == 1
+        # Label pinned to the 09:15 IST session open (03:45 UTC), not 09:17.
+        assert out["ts_utc"].to_list() == [_SESSION_OPEN_UTC]
+
+    def test_mid_session_gap_keeps_grid_and_conserves_ohlcv(self) -> None:
+        full = _make_1m_session(_SESSION_OPEN_UTC, 30)
+        # Drop minutes 10..14 (a 5-minute mid-session halt).
+        gapped = pl.concat([full.slice(0, 10), full.slice(15)])
+        out = resample_1m_to_tf(gapped, 5)
+        # Bucket 10:15 (minutes 10-14) must be ABSENT (no fabricated bars);
+        # every other bucket sits on the 09:15 + k*5m grid.
+        labels = out["ts_utc"].to_list()
+        expected = [_SESSION_OPEN_UTC + timedelta(minutes=5 * k) for k in (0, 1, 3, 4, 5)]
+        assert labels == expected
+        # Conservation on a surviving bucket (minutes 15-19).
+        bucket = out.filter(pl.col("ts_utc") == _SESSION_OPEN_UTC + timedelta(minutes=15)).row(
+            0, named=True
+        )
+        window = full.slice(15, 5)
+        assert bucket["open"] == window["open"][0]
+        assert bucket["high"] == window["high"].max()
+        assert bucket["low"] == window["low"].min()
+        assert bucket["close"] == window["close"][-1]
+        assert bucket["volume"] == window["volume"].sum()
+
+
+class TestCompletenessLaws:
+    """DEC-RESAMPLE-ANCHOR-002 completeness laws over ALL 21 timeframes."""
+
+    def test_full_session_bar_count_law(self) -> None:
+        # A gap-free 375-minute session yields exactly ceil(375/tf) bars.
+        from brutex.data.timeframes import ALL_TF_MINUTES
+
+        full = _make_1m_session(_SESSION_OPEN_UTC, 375)
+        for tf in ALL_TF_MINUTES:
+            out = resample_1m_to_tf(full, tf)
+            expected = -(-375 // tf)  # ceil
+            assert out.height == expected, f"tf={tf}: {out.height} != {expected}"
+
+    def test_every_bucket_on_the_session_grid(self) -> None:
+        from brutex.data.timeframes import ALL_TF_MINUTES, DAILY_TF_MINUTES
+
+        full = _make_1m_session(_SESSION_OPEN_UTC, 375)
+        for tf in ALL_TF_MINUTES:
+            if tf == DAILY_TF_MINUTES:
+                continue
+            out = resample_1m_to_tf(full, tf)
+            for ts in out["ts_utc"].to_list():
+                offset = (ts - _SESSION_OPEN_UTC).total_seconds() / 60
+                assert offset >= 0 and offset % tf == 0, f"tf={tf}: off-grid label {ts}"
+
+    def test_no_bucket_straddles_sessions(self) -> None:
+        # Two consecutive sessions; every bucket's bars share ONE IST date.
+        from brutex.data.timeframes import ALL_TF_MINUTES
+
+        day1 = _make_1m_session(_SESSION_OPEN_UTC, 375)
+        day2 = _make_1m_session(_SESSION_OPEN_UTC + timedelta(days=1), 375, base_price=200.0)
+        both = pl.concat([day1, day2])
+        for tf in ALL_TF_MINUTES:
+            out = resample_1m_to_tf(both, tf)
+            per_day = -(-375 // tf) if tf != 375 else 1
+            assert out.height == 2 * per_day, f"tf={tf}: cross-session merge suspected"
+            # Day-2 first bucket opens at day-2's first price — no day-1 leak.
+            d2_first = out.filter(pl.col("ts_utc") >= _SESSION_OPEN_UTC + timedelta(days=1)).row(
+                0, named=True
+            )
+            assert d2_first["open"] == day2["open"][0], f"tf={tf}: day-1 data leaked"

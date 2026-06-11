@@ -22,11 +22,15 @@ For each bucket [bucket_start, bucket_start + tf):
 
 ## Anchor
 
-All buckets anchored at 09:15 IST (session open). The first 1m bar
-of a session is at 09:15:00 IST. A 5m bar at 09:15:00 IST covers
-[09:15:00, 09:20:00).
+All buckets anchored at 09:15 IST (session open) by FIXED ARITHMETIC
+(DEC-RESAMPLE-ANCHOR-002): ``bucket = session_open + floor((ts -
+session_open)/tf)*tf``, where ``session_open`` is the bar's IST date at
+09:15. The grid depends only on calendar time — a missing 09:15 bar can
+NEVER shift it (the prior first-bar anchoring could). A 5m bar at
+09:15:00 IST covers [09:15:00, 09:20:00).
 
-For daily TF: one bar per trading day, covering [session_open, session_close).
+For daily TF: one bar per trading day, covering [session_open,
+session_close), labeled at the 09:15 IST session open.
 
 ## Polars implementation
 
@@ -123,63 +127,42 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
     if target_tf_minutes == 1:
         return df_1m.clone()
 
-    if is_intraday(target_tf_minutes):
-        # Minute-multiple bucketing, anchored PER TRADING SESSION to the
-        # 09:15 IST open (DEC-RESAMPLE-ANCHOR-001).
-        #
-        # Plain group_by_dynamic anchors buckets to the UTC epoch, which is
-        # wrong for any timeframe that does not evenly divide the 225-minute
-        # offset between UTC-midnight and the 09:15-IST open. The two-minute
-        # timeframe landed its first bucket at 09:14 IST instead of 09:15;
-        # only the three, five, nine and fifteen minute timeframes aligned by
-        # luck. Grouping by the IST trading-day plus start_by datapoint
-        # re-anchors EACH session to its own first bar at 09:15.
-        bucket_str = f"{target_tf_minutes}m"
-        return (
-            df_1m.with_columns(
-                (pl.col("ts_utc") + pl.duration(hours=5, minutes=30))
-                .dt.date()
-                .alias("_trading_day")
-            )
-            .group_by_dynamic(
-                index_column="ts_utc",
-                every=bucket_str,
-                closed="left",
-                label="left",
-                group_by="_trading_day",
-                start_by="datapoint",
-            )
-            .agg(
-                pl.col("open").first().alias("open"),
-                pl.col("high").max().alias("high"),
-                pl.col("low").min().alias("low"),
-                pl.col("close").last().alias("close"),
-                pl.col("volume").sum().alias("volume"),
-            )
-            .drop("_trading_day")
-            .sort("ts_utc")
-        )
+    # FIXED-ARITHMETIC session anchor (DEC-RESAMPLE-ANCHOR-002, hardening
+    # DEC-RESAMPLE-ANCHOR-001): each row's bucket label is its IST date's
+    # 09:15 session open plus floor-of-elapsed-minutes-over-tf whole buckets.
+    # Pure column math — the grid depends ONLY on the calendar TIME, never on
+    # which bars happen to exist. The prior ``group_by_dynamic(start_by=
+    # "datapoint")`` anchored each session's grid to its FIRST BAR, so a
+    # vendor gap at the 09:15 open silently shifted the WHOLE day's grid for
+    # every timeframe (the hazard the 2026-06-11 4-agent review flagged).
+    # Buckets can never straddle sessions: every label shares the bar's IST
+    # trading date by construction. IST is a fixed +05:30 (no DST), so the
+    # arithmetic needs no calendar module for Track 1's intraday TFs.
+    ist = pl.col("ts_utc") + pl.duration(hours=5, minutes=30)
+    session_open_ist = ist.dt.truncate("1d") + pl.duration(hours=9, minutes=15)
 
-    # Daily TF (375 minutes). Group by trading-day IST date.
-    # IST = UTC + 5h30m. Daily boundary = 09:15 IST = 03:45 UTC.
-    # We assign each bar to a "trading day" based on its IST date,
-    # which effectively groups bars from the same session together.
-    return (
-        df_1m
-        # Add a "trading_day" column derived from IST date
-        .with_columns(
-            (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date().alias("trading_day")
+    if is_intraday(target_tf_minutes):
+        offset_minutes = (ist - session_open_ist).dt.total_minutes()
+        bucket_minutes = (offset_minutes // target_tf_minutes) * target_tf_minutes
+        bucket_utc = (session_open_ist + pl.duration(minutes=bucket_minutes)) - pl.duration(
+            hours=5, minutes=30
         )
-        .group_by("trading_day", maintain_order=True)
+    else:
+        # Daily TF (375 minutes): one bucket per IST trading day, labeled at
+        # the 09:15 session open (NOT the first bar — same gap immunity).
+        bucket_utc = session_open_ist - pl.duration(hours=5, minutes=30)
+
+    return (
+        df_1m.with_columns(bucket_utc.alias("_bucket_ts"))
+        .group_by("_bucket_ts", maintain_order=True)
         .agg(
-            pl.col("ts_utc").min().alias("ts_utc"),
             pl.col("open").first().alias("open"),
             pl.col("high").max().alias("high"),
             pl.col("low").min().alias("low"),
             pl.col("close").last().alias("close"),
             pl.col("volume").sum().alias("volume"),
         )
-        .drop("trading_day")
+        .rename({"_bucket_ts": "ts_utc"})
         .sort("ts_utc")
     )
 
