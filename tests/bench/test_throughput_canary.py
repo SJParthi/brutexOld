@@ -62,7 +62,7 @@ from brutex.vocabulary.evaluator import (
     evaluate_atoms,
 )
 
-from tests.bench._o1_tiers import ratio_ceiling
+from tests.bench._o1_tiers import cache_tier_ceiling, ratio_ceiling
 
 # Required-mask: 4 bits set out of 64 — matches the canonical strategy
 # combo size in `docs/TRACK1_VOCABULARY.md` (5-6 conditions per strategy).
@@ -182,9 +182,11 @@ class TestThroughputCanary:
             f"absolute={ops_per_sec_large:,.0f} ops/s"
         )
 
-        assert ratio < _RATIO_CEILING, (
+        # 1M-elem arrays spill the M4's cache; 100K fit (DEC-O1-CACHE-TIER-001).
+        ceiling = cache_tier_ceiling(8.0)
+        assert ratio < ceiling, (
             f"vectorized mask AND ratio {ratio:.2f}× (1M vs 100K) exceeds "
-            f"{_RATIO_CEILING}× — possible O(n²) regression. "
+            f"{ceiling}× — possible O(n²) regression. "
             f"t_small={t_small:.2f}ns, t_large={t_large:.2f}ns."
         )
 
@@ -264,7 +266,8 @@ class TestThroughputCanary:
         )
 
         # Cache-hierarchy-tolerant ceiling (see docstring rationale).
-        dict_ratio_ceiling = ratio_ceiling(10.0)
+        # A 1M-key dict cannot stay cache-resident like a 100K one (DEC-O1-CACHE-TIER-001).
+        dict_ratio_ceiling = cache_tier_ceiling(10.0)
         assert ratio < dict_ratio_ceiling, (
             f"dict lookup ratio {ratio:.2f}× (1M dict vs 100K dict) exceeds "
             f"{dict_ratio_ceiling}× — possible hash-collision/linear-scan regression. "

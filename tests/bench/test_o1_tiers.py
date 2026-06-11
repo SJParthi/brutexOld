@@ -10,8 +10,10 @@ from __future__ import annotations
 import pytest
 
 from tests.bench._o1_tiers import (
+    CACHE_TIER_STRICT_CEILING,
     ENV_M4PRO_STRICT,
     STRICT_RATIO_CEILING,
+    cache_tier_ceiling,
     m4pro_strict_active,
     ratio_ceiling,
 )
@@ -42,3 +44,31 @@ def test_only_literal_one_activates(monkeypatch: pytest.MonkeyPatch, val: str) -
     expected_active = val.strip() == "1"
     assert m4pro_strict_active() is expected_active
     assert ratio_ceiling(5.0) == (1.1 if expected_active else 5.0)
+
+
+def test_cache_tier_shared_ci_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the strict env unset, cross-cache-tier tests keep their shared ceiling."""
+    monkeypatch.delenv(ENV_M4PRO_STRICT, raising=False)
+    assert cache_tier_ceiling(5.0) == 5.0
+    assert cache_tier_ceiling(8.0) == 8.0
+    assert cache_tier_ceiling(10.0) == 10.0
+
+
+def test_cache_tier_strict_uses_measured_allowance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strict tier tightens cross-cache-tier tests to the measured 3.0x allowance."""
+    monkeypatch.setenv(ENV_M4PRO_STRICT, "1")
+    assert CACHE_TIER_STRICT_CEILING == 3.0
+    assert cache_tier_ceiling(5.0) == 3.0
+    assert cache_tier_ceiling(8.0) == 3.0
+    assert cache_tier_ceiling(10.0) == 3.0
+
+
+def test_cache_tier_never_looser_than_shared_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The strict tier can only TIGHTEN: a shared default below 3.0x wins."""
+    monkeypatch.setenv(ENV_M4PRO_STRICT, "1")
+    assert cache_tier_ceiling(2.0) == 2.0
+    assert cache_tier_ceiling(3.0) == 3.0
