@@ -17,11 +17,12 @@ and runs the nine-filter cascade per ``(instrument, tf)`` pool. Covers:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -34,6 +35,7 @@ from brutex.metrics.cascade import (
     CascadeReport,
     FilterStage,
 )
+from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -352,6 +354,12 @@ def _manual_report() -> cw.CascadeWireReport:
         stage_survivors={FilterStage.HARD_GATES.value: 1},
         # DEC-PBO-SIDECAR-001: a MEASURED pool PBO on one group...
         pool_pbo=0.25,
+        # ...and DEC-TRIAL-STATS-CONSUME-001: a LEADERBOARD-sourced DSR stamp
+        # here vs the "pool"/None defaults on the skipped group below, so the
+        # serializer is value-pinned for BOTH states (the same hostile-C1 rule).
+        dsr_n_source="leaderboard",
+        dsr_n_trials=841,
+        dsr_trial_variance=0.0625,
     )
     skipped = CascadeReport(
         verdicts=(),
@@ -387,6 +395,22 @@ class TestReportSerialisation:
         raw = cw.serialize_wire_report(_manual_report())
         assert b'"pool_pbo":0.25' in raw
         assert b'"pool_pbo":null' in raw
+
+    def test_dsr_stamp_serialises_both_states(self) -> None:
+        # DEC-TRIAL-STATS-CONSUME-001: the deflation-source stamp round-trips
+        # for the leaderboard state AND the legacy pool/None defaults.
+        payload = cw.wire_report_to_dict(_manual_report())
+        first = payload["groups"][0]["report"]  # type: ignore[index]
+        assert first["dsr_n_source"] == "leaderboard"  # type: ignore[index]
+        assert first["dsr_n_trials"] == 841  # type: ignore[index]
+        assert first["dsr_trial_variance"] == 0.0625  # type: ignore[index]
+        second = payload["groups"][1]["report"]  # type: ignore[index]
+        assert second["dsr_n_source"] == "pool"  # type: ignore[index]
+        assert second["dsr_n_trials"] is None  # type: ignore[index]
+        raw = cw.serialize_wire_report(_manual_report())
+        assert b'"dsr_n_source":"leaderboard"' in raw
+        assert b'"dsr_n_source":"pool"' in raw
+        assert b'"dsr_n_trials":null' in raw
 
     def test_serialize_is_deterministic(self) -> None:
         report = _manual_report()
@@ -932,6 +956,104 @@ class TestLeaderboardTrialsManifest:
             leaderboard_trials=records,
         )
         assert cw.load_manifest(tmp_path).leaderboard_trials == records
+
+
+# ── Frozen-N consumption by filter #2 (DEC-TRIAL-STATS-CONSUME-001) ──────────
+
+
+class TestDsrTrialStatsConsumption:
+    """The slice-4 wiring: the cascade deflates against the frozen leaderboard N.
+
+    ADR-0008 condition 6 (all-or-fallback): a group's record must be PRESENT,
+    COMPLETE and DEFLATABLE to be consumed; anything less falls back to pool-N
+    with a LOUD ``cascade_wire.dsr_pool_fallback`` warning and a ``"pool"``
+    stamp — a knowingly partial N is never deflated against.
+    """
+
+    def _run(self, records: tuple[cw.LeaderboardTrialsRecord, ...] | None) -> cw.CascadeWireReport:
+        return cw.run_cascade_over_specs(
+            [_spec()],
+            bars_for=_bars_for(_session_bars()),
+            config=cw.cascade_config_for_sweep("a" * 64),
+            sweep_id="a" * 64,
+            leaderboard_trials=records,
+        )
+
+    @staticmethod
+    def _fallbacks(
+        logs: list[MutableMapping[str, Any]],
+    ) -> list[MutableMapping[str, Any]]:
+        return [e for e in logs if e["event"] == "cascade_wire.dsr_pool_fallback"]
+
+    def test_no_records_stamps_pool_silently(self) -> None:
+        # Legacy launchers pass nothing: the pool fallback is the EXPECTED
+        # state, so no warning fires (there is nothing to fall back FROM).
+        with capture_logs() as logs:
+            report = self._run(None)
+        (_, _, group) = report.groups[0]
+        assert group.dsr_n_source == "pool"
+        assert group.dsr_n_trials == 1
+        assert self._fallbacks(logs) == []
+
+    def test_complete_record_stamps_leaderboard(self) -> None:
+        record = _lbt()
+        with capture_logs() as logs:
+            report = self._run((record,))
+        (_, _, group) = report.groups[0]
+        assert group.dsr_n_source == "leaderboard"
+        assert group.dsr_n_trials == record.n_trials
+        assert group.dsr_trial_variance == record.to_stats().variance
+        assert self._fallbacks(logs) == []
+
+    def test_missing_slice_record_falls_back_loudly(self) -> None:
+        # Records were supplied but none covers THIS slice → loud pool fallback.
+        with capture_logs() as logs:
+            report = self._run((_lbt(instrument="BANKNIFTY"),))
+        (_, _, group) = report.groups[0]
+        assert group.dsr_n_source == "pool"
+        (event,) = self._fallbacks(logs)
+        assert event["reason"] == "no frozen leaderboard record for this slice"
+
+    def test_incomplete_record_falls_back_loudly(self) -> None:
+        with capture_logs() as logs:
+            report = self._run((_lbt(complete=False),))
+        (_, _, group) = report.groups[0]
+        assert group.dsr_n_source == "pool"
+        (event,) = self._fallbacks(logs)
+        assert event["reason"] == "incomplete"
+
+    def test_undeflatable_record_falls_back_loudly(self) -> None:
+        # Zero finite Sharpes → no dispersion → the Bailey-LdP expected-max
+        # benchmark is undefined; deflating would fabricate significance.
+        record = _lbt(n_finite=0, sum_sharpe=0.0, sum_sharpe_sq=0.0)
+        with capture_logs() as logs:
+            report = self._run((record,))
+        (_, _, group) = report.groups[0]
+        assert group.dsr_n_source == "pool"
+        (event,) = self._fallbacks(logs)
+        assert event["reason"] == "undeflatable"
+
+    def test_auto_equals_manual_with_frozen_records(self, tmp_path: Path) -> None:
+        # Condition 1: the manifest freeze IS the replay input — the MANUAL
+        # path re-reads the frozen records (never the sidecars) and reproduces
+        # the AUTOMATIC report byte-for-byte, leaderboard stamp included.
+        bars_for = _bars_for(_session_bars())
+        auto = cw.run_and_write_from_specs(
+            tmp_path,
+            sweep_id="a" * 64,
+            specs=[_spec()],
+            bars_for=bars_for,
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-02-01"
+            ),
+            cascade_config=cw.cascade_config_for_sweep("a" * 64),
+            leaderboard_trials=(_lbt(),),
+        )
+        auto_bytes = cw.report_path(tmp_path).read_bytes()
+        assert b'"dsr_n_source":"leaderboard"' in auto_bytes
+        manual = cw.run_and_write_from_manifest(tmp_path, bars_for=bars_for)
+        assert cw.report_path(tmp_path).read_bytes() == auto_bytes
+        assert cw.serialize_wire_report(manual) == cw.serialize_wire_report(auto)
 
 
 # ── Spec building from persisted rows ─────────────────────────────────────────

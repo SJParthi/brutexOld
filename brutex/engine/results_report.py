@@ -8,8 +8,17 @@ module is the **operator read-back**: it discovers every per-tuple Parquet under
 root, merges them into one in-memory store, and renders a single ranked leaderboard
 that shows — for each finalist — the **winning conditions BY NAME**
 (``ResultRow.condition_names``, decoded from ``mask_bits`` via the single-source
-vocabulary table), alongside net P&L, trade count, win-rate, Sharpe, the
-Deflated-Sharpe ratio, and the gate verdict.
+vocabulary table), alongside net P&L, trade count, win-rate, Sharpe, and the
+row's Deflated-Sharpe.
+
+A candidate can carry TWO deflated numbers (ADR-0008 condition 7 /
+DEC-TRIAL-STATS-CONSUME-001), so every surface here labels which ``N`` was
+deflated against: the per-row ``dsr@tupleN`` (the in-sweep overfit gate's value,
+deflated against that ONE tuple's trial count at rank time) and the Stage-4
+cascade's DSR (deflated against the full per-(instrument, TF) leaderboard N),
+whose source stamp ``dsr_n_source`` renders in the cascade sidecar section. The
+cascade's larger-N deflation is strictly stricter — it supersedes, never
+double-spends, the per-tuple gate.
 
 Honest envelope (Golden Rule #10)
 ---------------------------------
@@ -161,7 +170,10 @@ def render_leaderboard(rows: Sequence[ResultRow]) -> str:
 
     Each finalist renders as two lines: a headline row (rank · instrument · tf ·
     direction · net P&L · #trades · win-rate · Sharpe · Deflated-Sharpe) and an
-    indented condition-NAMES line. No per-row gate verdict is rendered — a row
+    indented condition-NAMES line. The row's deflated number is labelled
+    ``dsr@tupleN`` — it was deflated against that ONE tuple's rank-time trial
+    count, NOT the leaderboard N the Stage-4 cascade uses (ADR-0008 condition 7;
+    see the module docstring). No per-row gate verdict is rendered — a row
     cannot reveal whether it is a gated Stage-2 finalist or an ungated Stage-3
     refined trial (see the module docstring; DEC-STAGE3-WIRE-001). Money goes
     through :func:`brutex.money.format_inr` (2dp, DEC-MONEY-2DP-001);
@@ -188,7 +200,7 @@ def render_leaderboard(rows: Sequence[ResultRow]) -> str:
             f"trades={row.total_trades}  "
             f"win={row.win_rate * 100:.1f}%  "
             f"sharpe={row.sharpe_ratio:+.3f}  "
-            f"dsr={_format_deflated(row.deflated_sharpe)}\n"
+            f"dsr@tupleN={_format_deflated(row.deflated_sharpe)}\n"
             f"    {_format_conditions(row.condition_names)}"
         )
     return "\n".join(lines)
@@ -204,6 +216,16 @@ def _render_sidecar_group(entry: object) -> str:
     empty at filter #5); a float → the measured COMBINED-DIRECTION pool PBO,
     displayed fixed-width — the stored JSON value is the raw float, never
     rounded (the ``_format_deflated`` precedent).
+
+    Each line also labels which trial population the cascade's DSR filter #2
+    deflated against (ADR-0008 condition 7 / DEC-TRIAL-STATS-CONSUME-001), the
+    same additive three-state convention: ``dsr_n_source`` key ABSENT → a
+    pre-ADR-0008 report (the stamp was never recorded); ``"leaderboard"`` →
+    the frozen per-(instrument, TF) trial stats (the spec-mandated N);
+    ``"pool"`` → the legacy entering-pool fallback (an anti-conservative
+    under-count, shown so it can never masquerade as the corrected figure).
+    The N is echoed verbatim — distinct from the leaderboard rows' per-tuple
+    ``dsr@tupleN`` label above it.
     """
     if not isinstance(entry, dict):
         raise ValueError("group entry is not an object")
@@ -212,15 +234,19 @@ def _render_sidecar_group(entry: object) -> str:
         raise ValueError("group report is not an object")
     label = f"{entry.get('instrument', '?')} {entry.get('tf', '?')}"
     counts = f"in={report.get('n_input', '?')} survived={report.get('n_survived', '?')}"
+    if "dsr_n_source" not in report:
+        dsr = "dsr N not stamped (pre-ADR-0008 report)"
+    else:
+        dsr = f"dsr N={report.get('dsr_n_trials', '?')} source={report['dsr_n_source']}"
     if "pool_pbo" not in report:
-        return f"  {label}  pool PBO not recorded (pre-sidecar report)  {counts}"
+        return f"  {label}  pool PBO not recorded (pre-sidecar report)  {counts}  {dsr}"
     pbo = report["pool_pbo"]
     if pbo is None:
         return (
             f"  {label}  pool PBO skipped (pool < 2 candidates / short series / "
-            f"pool empty at #5)  {counts}"
+            f"pool empty at #5)  {counts}  {dsr}"
         )
-    return f"  {label}  pool PBO={float(pbo):.4f}  {counts}"
+    return f"  {label}  pool PBO={float(pbo):.4f}  {counts}  {dsr}"
 
 
 def render_cascade_sidecar(root: Path) -> str:

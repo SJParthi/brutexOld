@@ -32,21 +32,31 @@ is FORBIDDEN (Golden Rule #1). The full cascade is reachable only via a future
 return-series sidecar adapter (the same adapter ``cascade.py`` already documents as
 out of scope); this module is its scalar-only DSR subset, not a replacement.
 
-``N`` is authoritative only INLINE, never post-persistence
-----------------------------------------------------------
+``N`` is authoritative only INLINE — or via the rank-time-persisted sidecar
+---------------------------------------------------------------------------
 ``TRACK1_BACKTEST_SPEC.md`` §"Stage 4" (lines 383-385) pins ``N`` to the
 **per-(instrument, TF) leaderboard trial count** (``N <= 1e7``), and warns that a
 wrong ``N`` corrupts the threshold (pool-wide ``N=1e12`` ⇒ an impossible Sharpe-23
 bar; per-leaderboard ``N=1e7`` ⇒ a realistic Sharpe 2-3 bar). The correct ``N`` is
 ``len(candidates)`` — the combos a sweep actually backtested for one tuple — and it
 is known **only at ranking time**: after persistence only the ``top_k`` finalists
-survive and ``N`` is gone. A post-store re-deflation against ``N = len(rows)``
-would deflate against far too few trials and stamp a 0.95+ "overfit-cleared"
-verdict on noise — the precise dishonesty the DSR exists to prevent. So the gate
-runs **inline in** :func:`brutex.ranking.rank_combos` (consumed by W2-a's
-``run_persisted_sweep``); W2-a's persisted ``ResultsStore`` output is, by
-construction, the overfit-gated leaderboard. No statistically-valid post-store
-re-gate is possible from scalars alone, so none is offered.
+survive and ``N`` is gone *from the rows*. A post-store re-deflation against
+``N = len(rows)`` would deflate against far too few trials and stamp a 0.95+
+"overfit-cleared" verdict on noise — the precise dishonesty the DSR exists to
+prevent. So the gate runs **inline in** :func:`brutex.ranking.rank_combos`
+(consumed by W2-a's ``run_persisted_sweep``); W2-a's persisted ``ResultsStore``
+output is, by construction, the overfit-gated leaderboard.
+
+**The ONE valid post-persistence ``N`` (ADR-0008 / DEC-TRIAL-STATS-CONSUME-001):**
+the rank-time-recorded trial counts are now THEMSELVES persisted — each sweep
+tuple writes a ``*.trials.json`` sidecar at flush time
+(:mod:`brutex.engine.trial_stats`), aggregated per (instrument, TF) into the
+cascade manifest's frozen ``leaderboard_trials`` records and consumed by the
+Stage-4 cascade's filter #2 as
+:class:`~brutex.metrics.cascade.DsrTrialStats` (``dsr_n_source:
+"leaderboard"``). That path replays the rank-time ``N``, it does not re-derive
+one — re-deriving ``N`` from persisted rows (``len(rows)``) remains FORBIDDEN
+and is never offered here.
 
 Distribution + dispersion assumptions (state them, don't over-claim significance)
 ---------------------------------------------------------------------------------

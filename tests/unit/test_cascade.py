@@ -10,6 +10,7 @@ edge guards (empty pool, duplicate id, unequal-length pool matrix).
 from __future__ import annotations
 
 import math
+import statistics
 
 import numpy as np
 import numpy.typing as npt
@@ -18,6 +19,7 @@ from brutex.metrics.cascade import (
     CandidateInput,
     CascadeConfig,
     CascadeReport,
+    DsrTrialStats,
     FilterStage,
     _zscore_clamped,
     run_stage4_cascade,
@@ -303,6 +305,94 @@ def test_zscore_clamped_helper() -> None:
     # A lone outlier among many zeros clamps to +3.0 (z ~ 4.5 before clamping).
     z = _zscore_clamped([0.0] * 20 + [1.0])
     assert max(z) == 3.0
+
+
+# ── DSR deflation source (ADR-0008 / DEC-TRIAL-STATS-CONSUME-001) ──
+
+
+class TestDsrTrialStats:
+    def test_valid_constructs(self) -> None:
+        stats = DsrTrialStats(n_trials=10, sharpe_variance=0.25, n_finite=8)
+        assert stats.n_trials == 10
+        assert stats.sharpe_variance == 0.25
+        assert stats.n_finite == 8
+
+    def test_n_trials_below_one_raises(self) -> None:
+        with pytest.raises(ValueError, match="n_trials must be >= 1"):
+            DsrTrialStats(n_trials=0, sharpe_variance=0.25, n_finite=0)
+
+    @pytest.mark.parametrize("n_finite", [-1, 11])
+    def test_n_finite_out_of_range_raises(self, n_finite: int) -> None:
+        with pytest.raises(ValueError, match=r"n_finite must be in \[0, n_trials\]"):
+            DsrTrialStats(n_trials=10, sharpe_variance=0.25, n_finite=n_finite)
+
+    @pytest.mark.parametrize("variance", [-0.1, math.nan, math.inf])
+    def test_bad_variance_raises(self, variance: float) -> None:
+        with pytest.raises(ValueError, match="sharpe_variance must be finite"):
+            DsrTrialStats(n_trials=10, sharpe_variance=variance, n_finite=8)
+
+
+def test_report_defaults_stamp_pool_source() -> None:
+    # A report built without the new fields (the pre-ADR-0008 construction
+    # shape) reads as the pool-source legacy state, never as "leaderboard".
+    rep = CascadeReport(verdicts=(), survivor_ids=(), n_input=0, n_survived=0, stage_survivors={})
+    assert rep.dsr_n_source == "pool"
+    assert rep.dsr_n_trials is None
+    assert rep.dsr_trial_variance is None
+
+
+def test_pool_fallback_stamps_pool_and_echoes_n_v() -> None:
+    # Without trial_stats the report stamps the legacy pool source and echoes
+    # the exact N and V filter #2 deflated against (full precision).
+    cands = [_candidate("a", seed=1), _candidate("b", seed=2, sharpe_ratio=1.0)]
+    rep = run_stage4_cascade(cands, _pass_config())
+    assert rep.dsr_n_source == "pool"
+    assert rep.dsr_n_trials == 2
+    assert rep.dsr_trial_variance == statistics.pvariance([2.0, 1.0])
+
+
+def test_single_candidate_pool_dispersion_is_zero() -> None:
+    # The < _MIN_FOR_DISPERSION arm: a pool of one has no dispersion estimate.
+    rep = run_stage4_cascade([_candidate("a", seed=1)], _pass_config())
+    assert rep.dsr_n_source == "pool"
+    assert rep.dsr_n_trials == 1
+    assert rep.dsr_trial_variance == 0.0
+
+
+def test_trial_stats_stamp_leaderboard_and_echo() -> None:
+    stats = DsrTrialStats(n_trials=500, sharpe_variance=0.25, n_finite=480)
+    rep = run_stage4_cascade([_candidate("a", seed=1)], _pass_config(), trial_stats=stats)
+    assert rep.dsr_n_source == "leaderboard"
+    assert rep.dsr_n_trials == 500
+    assert rep.dsr_trial_variance == 0.25
+
+
+def test_leaderboard_n_supersedes_the_laxer_pool_n() -> None:
+    # THE defect ADR-0008 fixed: a lone finalist deflated against pool-N=1
+    # sails through filter #2; the SAME candidate deflated against the true
+    # leaderboard population (large N, real V) is rejected. Condition 7: the
+    # larger-N deflation is strictly stricter — no alpha is double-spent.
+    cfg = _pass_config(dsr_min=0.95)
+    cand = _candidate("x", seed=1)
+    (pool_verdict,) = run_stage4_cascade([cand], cfg).verdicts
+    assert pool_verdict.rejected_at is not FilterStage.DEFLATED_SHARPE
+    big = DsrTrialStats(n_trials=1_000_000, sharpe_variance=1.0, n_finite=1_000_000)
+    (lb_verdict,) = run_stage4_cascade([cand], cfg, trial_stats=big).verdicts
+    assert lb_verdict.rejected_at is FilterStage.DEFLATED_SHARPE
+
+
+def test_dsr_is_monotone_in_n_trials() -> None:
+    # ADR-0008 condition 9: N↑ at fixed V>0 ⇒ DSR↓ ⇒ never more survivors.
+    cfg = _pass_config(dsr_min=0.95)
+    cand = _candidate("x", seed=1)
+    small = DsrTrialStats(n_trials=2, sharpe_variance=1.0, n_finite=2)
+    large = DsrTrialStats(n_trials=10_000_000, sharpe_variance=1.0, n_finite=10_000_000)
+    rep_small = run_stage4_cascade([cand], cfg, trial_stats=small)
+    rep_large = run_stage4_cascade([cand], cfg, trial_stats=large)
+    assert (
+        rep_large.stage_survivors[FilterStage.DEFLATED_SHARPE.value]
+        <= rep_small.stage_survivors[FilterStage.DEFLATED_SHARPE.value]
+    )
 
 
 # ── CandidateInput construction-time validation (no NaN/inf, non-empty id) ──
