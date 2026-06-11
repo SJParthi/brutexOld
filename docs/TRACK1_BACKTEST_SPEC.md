@@ -845,7 +845,11 @@ If both green → Day 1 sprint executes in one continuous session.
 
 **VALIDATION GATE 1:**
 - 50 random bars match TradingView within 0.05% on prices
-- All 21 timeframes generated, no partial bars
+- All 21 timeframes generated, no CROSS-SESSION bars (DEC-RESAMPLE-ANCHOR-002:
+  "no partial bars" means no bucket may mix two trading days; the trailing
+  session-clipped bar of TFs that don't tile 375 minutes — e.g. the 15:15
+  bar on 60m — IS emitted, because dropping it would delete the 15:20
+  forced-exit window from 16 of 21 TFs)
 - NSE holiday list complete 2021-2026
 - Save report to `/Volumes/QuantData/validation/gate1_report.json`
 
