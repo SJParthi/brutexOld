@@ -938,6 +938,15 @@ jobs:
           else
             echo "(brutex.engine.stage3_grid test file not present yet — gate inactive)"
           fi
+          # 19i1d · brutex.engine.trial_stats — the per-tuple (N, V-moments)
+          # sidecar core (DEC-TRIAL-STATS-CORE-001; ADR-0008 slice 1 — the
+          # finite-Sharpe population, the exact-union merge, the atomic
+          # byte-deterministic sidecar IO + golden byte pin).
+          if compgen -G "tests/unit/test_engine_trial_stats.py" > /dev/null; then
+            pytest --cov=brutex.engine.trial_stats --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_trial_stats.py
+          else
+            echo "(brutex.engine.trial_stats test file not present yet — gate inactive)"
+          fi
           # 19i1c · brutex.engine.stage3_wire — Stage-3 launcher wiring
           # (DEC-STAGE3-WIRE-001; the train-slice helper, survivor-cell
           # recovery by run-id match, the audited refinement post-pass, the
