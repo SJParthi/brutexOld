@@ -307,12 +307,101 @@ def check_runtime_file(runtime_file: Path) -> CheckResult:
 # ────────────────────────────────────────────────────────────────────────
 
 
+def check_derived_freshness(lake_root: Path) -> CheckResult:
+    """Verify stored derived-TF tables still equal a fresh re-derivation.
+
+    The DEC-TF-MATERIALIZE-002 freshness probe: for the FIRST symbol that
+    has both a stored ``1minute`` partition and at least one stored derived
+    timeframe partition, re-derive each stored timeframe from the 1-minute
+    base via the canonical session-anchored resampler and compare
+    frame-for-frame (:func:`brutex.data.tf_autoderive.compare_derived_freshness`).
+    Any drift — a stale table left behind by a 1m backfill, or a
+    pre-DEC-RESAMPLE-ANCHOR-002 gapped-day grid — is a loud ``FAIL``.
+
+    SKIP (a valid state, not a failure) when: the lake root is absent, no
+    symbol has derived partitions yet (the auto-derive opt-in is OFF), or
+    polars is unavailable.
+    """
+    bars_root = lake_root / "bars"
+    if not bars_root.is_dir():
+        return CheckResult(
+            name="derived_freshness",
+            status="SKIP",
+            detail=f"no lake at {lake_root} — nothing to verify",
+        )
+    try:
+        import polars as pl
+
+        from brutex.data.tf_autoderive import compare_derived_freshness
+        from brutex.data.timeframe_materialize import INTRADAY_TF_INTERVALS
+        from brutex.data.timeframes import parse_label
+
+        interval_to_label = {v: k for k, v in INTRADAY_TF_INTERVALS.items()}
+
+        def _read(symbol_dir: Path, interval: str) -> pl.DataFrame:
+            return (
+                pl.read_parquet((symbol_dir / interval).as_posix() + "/**/*.parquet")
+                .rename({"timestamp": "ts_utc"})
+                .select("ts_utc", "open", "high", "low", "close", "volume")
+                .sort("ts_utc")
+            )
+
+        for symbol_dir in sorted(p for p in bars_root.glob("*/*/*") if p.is_dir()):
+            base = symbol_dir / "1minute"
+            if not (base.is_dir() and any(base.rglob("*.parquet"))):
+                continue
+            stored_intervals = sorted(
+                d.name
+                for d in symbol_dir.iterdir()
+                if d.is_dir() and d.name in interval_to_label and any(d.rglob("*.parquet"))
+            )
+            if not stored_intervals:
+                continue
+            df_1m = _read(symbol_dir, "1minute")
+            stale: list[str] = []
+            for interval in stored_intervals:
+                tf_minutes = parse_label(interval_to_label[interval])
+                verdict = compare_derived_freshness(df_1m, _read(symbol_dir, interval), tf_minutes)
+                if verdict != "fresh":
+                    stale.append(interval)
+            symbol = symbol_dir.name
+            if stale:
+                return CheckResult(
+                    name="derived_freshness",
+                    status="FAIL",
+                    detail=(
+                        f"{symbol}: stored derived TFs drift from a fresh re-derivation: "
+                        f"{stale} — re-derive via POST /api/v1/universe/derive-timeframes"
+                    ),
+                )
+            return CheckResult(
+                name="derived_freshness",
+                status="PASS",
+                detail=(
+                    f"{symbol}: {len(stored_intervals)} stored derived TFs byte-equal "
+                    "a fresh re-derivation"
+                ),
+            )
+        return CheckResult(
+            name="derived_freshness",
+            status="SKIP",
+            detail="no symbol has stored derived timeframes yet (auto-derive opt-in OFF)",
+        )
+    except Exception as exc:
+        return CheckResult(
+            name="derived_freshness",
+            status="FAIL",
+            detail=f"freshness probe errored: {exc}",
+        )
+
+
 def run_doctor(
     audit_file: Path | None = None,
     audit_dir: Path = DEFAULT_AUDIT_DIR,
     runtime_file: Path = DEFAULT_RUNTIME_FILE,
     live_subjects_file: Path | None = None,
     replay_action_filter: str = "add",
+    lake_root: Path | None = None,
 ) -> DoctorReport:
     """Run all health checks and return the aggregated report.
 
@@ -352,6 +441,9 @@ def run_doctor(
             action_filter=replay_action_filter,
         )
     )
+    from brutex.config.paths import resolve_lake_root
+
+    report.add(check_derived_freshness(lake_root if lake_root is not None else resolve_lake_root()))
     return report
 
 
@@ -361,6 +453,7 @@ def main(
     runtime_file: Path = DEFAULT_RUNTIME_FILE,
     live_subjects_file: Path | None = None,
     replay_action_filter: str = "add",
+    lake_root: Path | None = None,
 ) -> int:
     """CLI entry point. Print report to stdout; return 0 on PASS, 1 on FAIL."""
     report = run_doctor(
@@ -369,6 +462,7 @@ def main(
         runtime_file=runtime_file,
         live_subjects_file=live_subjects_file,
         replay_action_filter=replay_action_filter,
+        lake_root=lake_root,
     )
     print(report.format())
     return 0 if report.ok else 1

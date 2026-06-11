@@ -9,12 +9,15 @@ This module **materialises** a selected derived timeframe **once** — writing i
 as its own stored interval partition — so the sweep then reads a 5m / 15m / 60m
 bar in **O(1)** (a direct Parquet read), CLAUDE.md §5.
 
-## Manual only
+## Manual route + automatic pull-settle trigger
 
-There is **no automatic trigger** here. Materialisation runs only when an
-operator explicitly asks for it (the ``POST /api/v1/universe/derive-timeframes``
-route). Storage is operator-approved (external-drive-backed via
-``$BRUTEX_LAKE_ROOT``).
+The original surface is the manual ``POST /api/v1/universe/derive-timeframes``
+route (DEC-TF-MATERIALIZE-001). DEC-TF-MATERIALIZE-002 adds an AUTOMATIC
+trigger: when a spot pull settles with new 1-minute bars, the pull
+controller re-materialises the settled symbols through this same core —
+gated behind the ``BRUTEX_AUTO_DERIVE_TFS=1`` opt-in (default OFF; storage
+stays operator-approved, external-drive-backed via ``$BRUTEX_LAKE_ROOT``).
+See :mod:`brutex.data.tf_autoderive` for the planner.
 
 ## Pure core, injected I/O (CLAUDE.md §11 COMMON / §4 testability)
 
@@ -53,6 +56,7 @@ from brutex.data.timeframes import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+    from pathlib import Path
 
     import polars as pl
 
@@ -165,5 +169,97 @@ __all__ = [
     "INTRADAY_TF_INTERVALS",
     "MATERIALIZABLE_TFS",
     "MaterializeResult",
+    "make_lake_read_1m",
+    "make_lake_write_tf",
     "materialize_timeframes",
 ]
+
+
+def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested (DEC-TF-MATERIALIZE-001)
+    *,
+    lake_root: Path,
+    exchange: str,
+    segment: str,
+    symbol: str,
+) -> Callable[[], pl.DataFrame]:
+    """Build the injected 1-minute reader for :func:`materialize_timeframes`.
+
+    Returns a zero-arg callable that reads the symbol's stored ``1minute``
+    Parquet partitions into a sorted :class:`polars.DataFrame` with exactly
+    the columns the resampler requires (``ts_utc, open, high, low, close,
+    volume``). Raw lake I/O — ``# pragma: no cover``; exercised by
+    ``tests/integration/test_timeframe_materialize_roundtrip.py``. Moved
+    here from the dashboard route glue (DEC-TF-MATERIALIZE-002) so the
+    manual route AND the pull-settle auto-derive share ONE builder
+    (CLAUDE.md §11 COMMON).
+    """
+    import polars as pl
+
+    def _read() -> pl.DataFrame:
+        base = lake_root / "bars" / exchange / segment / symbol / "1minute"
+        if not (base.is_dir() and any(base.rglob("*.parquet"))):
+            raise ValueError(
+                f"no stored 1minute bars for {exchange}/{segment}/{symbol} — "
+                "pull the 1-minute spot first, then derive timeframes"
+            )
+        df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
+        return (
+            df.rename({"timestamp": "ts_utc"})
+            .select("ts_utc", "open", "high", "low", "close", "volume")
+            .sort("ts_utc")
+        )
+
+    return _read
+
+
+def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-tested (DEC-TF-MATERIALIZE-001)
+    *,
+    lake_root: Path,
+    exchange: str,
+    segment: str,
+    symbol: str,
+) -> Callable[[str, pl.DataFrame], int]:
+    """Build the injected per-timeframe writer for :func:`materialize_timeframes`.
+
+    Returns a ``(tf_label, frame) -> bars_written`` callable that converts the
+    resampled polars frame's rows to :class:`~brutex.data.models.CandleBar`
+    objects (``open_interest=0`` for spot) and appends them to the lake via a
+    :class:`~brutex.data.sink.ParquetBarSink` under the TF's own stored interval
+    partition (:data:`INTRADAY_TF_INTERVALS`). The sink snaps prices to the
+    2-decimal tick grid + merges idempotently by ``(year, month)`` (CLAUDE.md §7
+    / DEC-SPOT-PRICE-2DP-001). Raw lake I/O — ``# pragma: no cover``; exercised
+    by the round-trip integration test. Moved here from the dashboard route
+    glue (DEC-TF-MATERIALIZE-002) — one builder for every caller.
+    """
+    from decimal import Decimal
+
+    from brutex.data.models import CandleBar
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+
+    def _write(tf_label: str, frame: pl.DataFrame) -> int:
+        interval = INTRADAY_TF_INTERVALS[tf_label]
+        bars = [
+            CandleBar(
+                timestamp=row["ts_utc"],
+                open=Decimal(str(row["open"])),
+                high=Decimal(str(row["high"])),
+                low=Decimal(str(row["low"])),
+                close=Decimal(str(row["close"])),
+                volume=int(row["volume"]),
+                open_interest=0,
+            )
+            for row in frame.iter_rows(named=True)
+        ]
+        result = sink.append(
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            interval=interval,
+            bars=bars,
+        )
+        return result.bars_appended
+
+    return _write
