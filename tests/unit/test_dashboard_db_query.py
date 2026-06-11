@@ -423,7 +423,7 @@ def test_list_candle_datasets_skips_foreign_and_empty_dirs(tmp_path: Path) -> No
     # Foreign segment dir (skipped).
     (bars / "NSE" / "JUNK" / "FOO" / "1minute").mkdir(parents=True)
     # Invalid interval dir (skipped).
-    (bars / "NSE" / "CASH" / "BAR" / "7minute").mkdir(parents=True)
+    (bars / "NSE" / "CASH" / "BAR" / "45minute").mkdir(parents=True)
     # Valid interval dir but NO parquet inside (skipped — empty).
     (bars / "NSE" / "CASH" / "EMPTY" / "1minute").mkdir(parents=True)
     found = list_candle_datasets(tmp_path)
@@ -644,7 +644,7 @@ def test_query_candles_empty_partition_default_columns(
     [
         ("MCX", "CASH", "NSE-NIFTY", "1minute", "unknown exchange"),
         ("NSE", "JUNK", "NSE-NIFTY", "1minute", "unknown segment"),
-        ("NSE", "CASH", "NSE-NIFTY", "7minute", "unknown interval"),
+        ("NSE", "CASH", "NSE-NIFTY", "45minute", "unknown interval"),
         ("NSE", "CASH", "../etc/passwd", "1minute", "illegal candle symbol"),
         ("NSE", "CASH", "bad symbol!", "1minute", "illegal candle symbol"),
     ],

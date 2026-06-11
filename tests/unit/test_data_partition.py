@@ -128,7 +128,7 @@ class TestBuildPartitionValidation:
                 exchange="NSE",
                 segment="FNO",
                 symbol="X",
-                interval="2hour",  # not in the 12-interval whitelist
+                interval="45minute",  # not in the 23-interval whitelist
                 year=2024,
                 month=1,
             )
@@ -295,7 +295,7 @@ class TestPartitionForTimestamp:
 
 
 class TestIntervalWhitelistPins:
-    """Every one of the 12 canonical intervals must be ACCEPTED by name.
+    """Every one of the 23 canonical intervals must be ACCEPTED by name.
 
     mutmut's "XX…XX"-wrapped frozenset-member mutants silently drop the
     real spelling from ``VALID_INTERVALS``; pinning acceptance of each
@@ -309,11 +309,22 @@ class TestIntervalWhitelistPins:
             "1minute",
             "2minute",
             "3minute",
+            "4minute",
             "5minute",
+            "6minute",
+            "7minute",
+            "8minute",
+            "9minute",
             "10minute",
+            "11minute",
+            "12minute",
+            "13minute",
+            "14minute",
             "15minute",
             "30minute",
             "1hour",
+            "2hour",
+            "3hour",
             "4hour",
             "1day",
             "1week",
@@ -438,11 +449,13 @@ class TestErrorMessagesByteExact:
                 exchange="NSE",
                 segment="FNO",
                 symbol="X",
-                interval="2hour",
+                interval="45minute",
                 year=2024,
                 month=1,
             )
-        assert str(exc.value) == "interval must be one of the 12 canonical intervals, got '2hour'"
+        assert str(exc.value) == (
+            "interval must be one of the 23 canonical intervals, got '45minute'"
+        )
 
     def test_empty_symbol_message_byte_exact(self, tmp_path: Path) -> None:
         with pytest.raises(PartitionError) as exc:
