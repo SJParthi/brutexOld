@@ -96,8 +96,9 @@ from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.timeframe_materialize import (
-    INTRADAY_TF_INTERVALS,
     MATERIALIZABLE_TFS,
+    make_lake_read_1m,
+    make_lake_write_tf,
     materialize_timeframes,
 )
 from brutex.models import Exchange, Instrument, InstrumentType
@@ -2788,82 +2789,12 @@ def build_app(
     return app
 
 
-def _make_read_1m(  # pragma: no cover — raw lake read, integration-tested (DEC-TF-MATERIALIZE-001)
-    *, lake_root: Path, exchange: str, segment: str, symbol: str
-) -> Callable[[], Any]:
-    """Build the injected 1-minute reader for :func:`materialize_timeframes`.
-
-    Returns a zero-arg callable that reads the symbol's stored ``1minute``
-    Parquet partitions into a sorted :class:`polars.DataFrame` with exactly the
-    columns the resampler requires (``ts_utc, open, high, low, close,
-    volume``). Raw lake I/O — ``# pragma: no cover``; exercised by
-    ``tests/integration/test_timeframe_materialize_roundtrip.py``.
-    """
-    import polars as pl
-
-    def _read() -> Any:
-        base = lake_root / "bars" / exchange / segment / symbol / "1minute"
-        if not (base.is_dir() and any(base.rglob("*.parquet"))):
-            raise ValueError(
-                f"no stored 1minute bars for {exchange}/{segment}/{symbol} — "
-                "pull the 1-minute spot first, then derive timeframes"
-            )
-        df = pl.read_parquet(base.as_posix() + "/**/*.parquet")
-        return (
-            df.rename({"timestamp": "ts_utc"})
-            .select("ts_utc", "open", "high", "low", "close", "volume")
-            .sort("ts_utc")
-        )
-
-    return _read
-
-
-def _make_write_tf(  # pragma: no cover — raw lake write, integration-tested (DEC-TF-MATERIALIZE-001)
-    *, lake_root: Path, exchange: str, segment: str, symbol: str
-) -> Callable[[str, Any], int]:
-    """Build the injected per-timeframe writer for :func:`materialize_timeframes`.
-
-    Returns a ``(tf_label, frame) -> bars_written`` callable that converts the
-    resampled polars frame's rows to :class:`~brutex.data.models.CandleBar`
-    objects (``open_interest=0`` for spot) and appends them to the lake via a
-    :class:`~brutex.data.sink.ParquetBarSink` under the TF's own stored interval
-    partition (:data:`INTRADAY_TF_INTERVALS`). The sink snaps prices to the
-    2-decimal tick grid + merges idempotently by ``(year, month)`` (CLAUDE.md §7
-    / DEC-SPOT-PRICE-2DP-001). Raw lake I/O — ``# pragma: no cover``; exercised
-    by the round-trip integration test.
-    """
-    from decimal import Decimal
-
-    from brutex.data.models import CandleBar
-    from brutex.data.parquet_writer import ParquetWriter
-    from brutex.data.sink import ParquetBarSink
-
-    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
-
-    def _write(tf_label: str, frame: Any) -> int:
-        interval = INTRADAY_TF_INTERVALS[tf_label]
-        bars = [
-            CandleBar(
-                timestamp=row["ts_utc"],
-                open=Decimal(str(row["open"])),
-                high=Decimal(str(row["high"])),
-                low=Decimal(str(row["low"])),
-                close=Decimal(str(row["close"])),
-                volume=int(row["volume"]),
-                open_interest=0,
-            )
-            for row in frame.iter_rows(named=True)
-        ]
-        result = sink.append(
-            exchange=exchange,
-            segment=segment,
-            symbol=symbol,
-            interval=interval,
-            bars=bars,
-        )
-        return result.bars_appended
-
-    return _write
+# The lake read/write builders moved to brutex.data.timeframe_materialize
+# (DEC-TF-MATERIALIZE-002) so the manual derive route AND the pull-settle
+# auto-derive share ONE pair of builders (CLAUDE.md §11 COMMON). Thin
+# aliases keep this module's call sites unchanged.
+_make_read_1m = make_lake_read_1m
+_make_write_tf = make_lake_write_tf
 
 
 def _resolve_pull_lake_root(instrument_store: Any, *, dry_run: bool) -> Path:

@@ -1091,6 +1091,16 @@ jobs:
           else
             echo "(brutex.data.timeframe_materialize test file not present yet — gate inactive)"
           fi
+          #          AUTO derived-TF materialisation planner (DEC-TF-MATERIALIZE-002)
+          #          — opt-in strict decoder, settle planner, quarantining runner,
+          #          freshness compare core. 100% line+branch via
+          #          tests/unit/test_tf_autoderive.py (fakes; the pull-settle glue
+          #          is # pragma: no cover raw I/O over this tested core).
+          if compgen -G "tests/unit/test_tf_autoderive.py" > /dev/null; then
+            pytest --cov=brutex.data.tf_autoderive --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_autoderive.py
+          else
+            echo "(brutex.data.tf_autoderive test file not present yet — gate inactive)"
+          fi
           # 21d · brutex.options.strike_rules (41 stmts post-pragma, 10 branches,
           #       33 tests). Closes 93.22→100% via 2 `# pragma: no cover
           #       — defensive module-load assertion` on the rule-count +
