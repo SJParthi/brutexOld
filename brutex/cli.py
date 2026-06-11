@@ -72,6 +72,11 @@ from brutex.config.runtime import read_runtime_file
 EXIT_OK = 0
 EXIT_USER_ERROR = 1
 EXIT_INTERNAL_ERROR = 2
+#: sweep-verify verdict codes (DEC-SWEEP-VERIFY-001): corrupt findings vs an
+#: inconclusive-only run (recount refused/uncertain under a context mismatch)
+#: are DISTINCT outcomes an operator script must be able to tell apart.
+EXIT_VERIFY_FINDINGS = 3
+EXIT_VERIFY_INCONCLUSIVE = 4
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -895,6 +900,55 @@ def build_parser() -> argparse.ArgumentParser:
     verify_la.add_argument("--interval", default="1minute", help="Bar interval (default 1minute)")
     verify_la.add_argument("--start", required=True, help="Slice start date/ISO (UTC)")
     verify_la.add_argument("--end", required=True, help="Slice end date/ISO (UTC)")
+
+    # ── sweep-verify (DEC-SWEEP-VERIFY-001) — the results-tree doctor ──
+    sweep_verify = sub.add_parser(
+        "sweep-verify",
+        help=(
+            "Verify a sweep results tree: Tier-1 structural pairing + Tier-2 "
+            "row-identity re-derivation (bars-free; detects the #650 top_k "
+            "inflation), optional Tier-3 --recount shadow re-sweep byte-diff. "
+            "REPORT-ONLY — never modifies the tree. Pass the SAME grid flags "
+            "the sweep ran with."
+        ),
+    )
+    _add_sweep_grid_args(sweep_verify)
+    sweep_verify.add_argument(
+        "--indicator-version",
+        default=None,
+        dest="indicator_version",
+        help="Override the tree's recorded indicator version (default: read from the audit log)",
+    )
+    sweep_verify.add_argument(
+        "--code-commit-sha",
+        default=None,
+        dest="code_commit_sha",
+        help="Override the tree's recorded code commit SHA (default: read from the audit log)",
+    )
+    sweep_verify.add_argument(
+        "--recount",
+        action="store_true",
+        help=(
+            "Tier 3: shadow re-sweep the grid into a scratch root and byte-diff "
+            "(costs a full sweep; an oracle ONLY under a matched recorded context)"
+        ),
+    )
+    sweep_verify.add_argument(
+        "--scratch-root",
+        type=Path,
+        default=None,
+        dest="scratch_root",
+        help="Scratch root for --recount (default: a fresh temp directory; NEVER the tree itself)",
+    )
+    sweep_verify.add_argument(
+        "--allow-context-mismatch",
+        action="store_true",
+        dest="allow_context_mismatch",
+        help=(
+            "Run --recount even when the recorded context mismatches the current "
+            "environment — divergence then reports INCONCLUSIVE, never CORRUPT"
+        ),
+    )
 
     return parser
 
@@ -2838,6 +2892,275 @@ def cmd_verify_lookahead(  # pragma: no cover — real-lake I/O shim over the 10
     return EXIT_OK
 
 
+def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-tested sweep_verify core
+    *,
+    lake_root: Path | None,
+    catalog_path: Path | None,
+    results_root: Path | None,
+    exchange: str,
+    segment: str,
+    symbols: str,
+    intervals: str,
+    start: str,
+    end: str,
+    directions: str,
+    k: str,
+    conditions: str | None,
+    sl: str,
+    tp: str,
+    top: int,
+    mode: str,
+    max_tuples: int | None,
+    max_combos: int | None,
+    data_snapshot_hash: str | None,
+    indicator_version: str | None,
+    code_commit_sha: str | None,
+    recount: bool,
+    scratch_root: Path | None,
+    allow_context_mismatch: bool,
+) -> int:
+    """Verify a sweep results tree — the doctor's CLI (DEC-SWEEP-VERIFY-001).
+
+    Tier 1 (structural) always runs; Tier 2 (identity) runs when the recorded
+    context is available (the audit log, or explicit overrides); Tier 3
+    (``--recount``) shadow re-sweeps the grid into a scratch root with the
+    SAME 100%-tested ``run_sweep_grid`` and byte-diffs — verdict-grade ONLY
+    under a fully matched recorded context (the hostile review's validity
+    gate). REPORT-ONLY: this command never modifies the verified tree.
+    """
+    from brutex.engine.sweep_verify import (
+        SweepVerifyError,
+        compare_recount,
+        plan_expected_stores,
+        recorded_context_from_audit,
+        verify_identity,
+        verify_structural,
+    )
+
+    resolved_lake = _resolve_lake_root(lake_root)
+    out_root = results_root if results_root is not None else resolved_lake / "sweeps"
+
+    try:
+        structural = verify_structural(out_root)
+    except SweepVerifyError as exc:
+        print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    print(structural.render())
+    reports = [structural]
+
+    # The recorded context (review condition 2a): the tree describes itself
+    # via its audit chain; explicit flags override; NEVER the operator's memory.
+    try:
+        recorded = recorded_context_from_audit(out_root / "audit" / "sweep-all.jsonl")
+    except SweepVerifyError as exc:
+        print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    snapshot = data_snapshot_hash or (recorded.data_snapshot_hash if recorded else None)
+    indicator = indicator_version or (recorded.indicator_version if recorded else None)
+    code_sha = code_commit_sha or (recorded.code_commit_sha if recorded else None)
+    if snapshot is None or indicator is None or code_sha is None:
+        print(
+            "[brutex] sweep-verify: no recorded context (no audit log under the tree) "
+            "and no --data-snapshot-hash/--indicator-version/--code-commit-sha "
+            "overrides — identity/recount tiers skipped (structural-only verdict)"
+        )
+        return EXIT_OK if structural.clean else EXIT_VERIFY_FINDINGS
+
+    from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
+    from brutex.feed.resampler import INTERVAL_SECONDS
+    from brutex.strategies.types import Side
+
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    interval_list = [i.strip() for i in intervals.split(",") if i.strip()]
+    for interval in interval_list:
+        if interval not in INTERVAL_SECONDS:
+            print(
+                f"[brutex] unknown --intervals label {interval!r}; choose from "
+                f"{sorted(INTERVAL_SECONDS)}",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
+    direction_list = [
+        Side.BUY if d.strip().upper() == "BUY" else Side.SELL
+        for d in directions.split(",")
+        if d.strip()
+    ]
+    k_list = [int(tok) for tok in k.split(",") if tok.strip()]
+    condition_bits = (
+        [int(tok) for tok in conditions.split(",") if tok.strip()]
+        if conditions
+        else list(range(52))
+    )
+    grid_kwargs: dict[str, Any] = {
+        "instruments": symbol_list,
+        "timeframes": [
+            Timeframe(interval, INTERVAL_SECONDS[interval] // 60) for interval in interval_list
+        ],
+        "directions": direction_list,
+        "k_values": k_list,
+        "condition_bits": condition_bits,
+        "stop_losses": _parse_paisa_list(sl),
+        "take_profits": _parse_paisa_list(tp),
+        "proximities": [None],
+        "mode": mode,
+        "data_snapshot_hash": snapshot,
+        "indicator_version": indicator,
+        "code_commit_sha": code_sha,
+        "top_k": top,
+    }
+    if max_tuples is not None:
+        grid_kwargs["max_tuples"] = max_tuples
+    if max_combos is not None:
+        grid_kwargs["max_combos"] = max_combos
+    grid = SweepGridConfig(**grid_kwargs)
+
+    # Stage-3 cell attribution via the cascade manifest (condition 2c) —
+    # absent/unreadable manifest leaves cells honestly unattributed.
+    import contextlib
+
+    from brutex.engine.cascade_wire import CascadeWireError, load_manifest
+
+    stage3 = None
+    with contextlib.suppress(CascadeWireError):
+        stage3 = load_manifest(out_root).stage3
+
+    current_sha = _resolve_code_commit_sha()
+    current_indicator = _indicator_version()
+    vocabulary_trusted = code_sha == current_sha and indicator == current_indicator
+    try:
+        identity = verify_identity(
+            out_root, grid, stage3=stage3, vocabulary_trusted=vocabulary_trusted
+        )
+    except SweepVerifyError as exc:
+        print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    print(identity.render())
+    reports.append(identity)
+
+    inconclusive_only = False
+    if recount:
+        import tempfile
+
+        from brutex.data.catalog import Catalog
+        from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+        from brutex.data.option_dedup import OptionDedupIndex
+        from brutex.engine.sweep_orchestrator import (
+            bloom_capacity_hint,
+            make_store_for,
+            run_sweep_grid,
+        )
+        from brutex.engine.sweep_run import ComboDedup
+        from brutex.feed.replay import ReplayFeed
+        from brutex.orchestrator.audit import AuditWriter
+
+        catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
+        slices: dict[tuple[str, str], list[Any]] = {}
+        with Catalog.open(catalog) as cat:
+            for symbol in symbol_list:
+                for interval in interval_list:
+                    reconcile_catalog_from_lake(
+                        lake_root=resolved_lake,
+                        catalog=cat,
+                        exchange=exchange,
+                        segment=segment,
+                        symbol=symbol,
+                        interval=interval,
+                    )
+                    feed = ReplayFeed(
+                        catalog=cat,
+                        lake_root=resolved_lake,
+                        exchange=exchange,
+                        segment=segment,
+                        symbols=[symbol],
+                        interval=interval,
+                        start=_parse_dt(start),
+                        end=_parse_dt(end),
+                    )
+                    slices[(symbol, interval)] = [event.bar for event in feed]
+        if not any(slices.values()):
+            print(
+                f"[brutex] sweep-verify --recount: no bars for any {symbol_list} × "
+                f"{interval_list} under {exchange}/{segment} (lake={resolved_lake})",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
+        fresh_snapshot = _data_snapshot_hash(
+            exchange=exchange, segment=segment, start=start, end=end, slices=slices
+        )
+        # The validity gate (review condition 3b): ALL THREE recorded strings
+        # must match the current environment for divergence to be verdict-grade.
+        mismatches = [
+            f"{name}: recorded {rec!r} vs current {cur!r}"
+            for name, rec, cur in (
+                ("code_commit_sha", code_sha, current_sha),
+                ("indicator_version", indicator, current_indicator),
+                ("data_snapshot_hash", snapshot, fresh_snapshot),
+            )
+            if rec != cur
+        ]
+        context_match = not mismatches
+        if mismatches:
+            print(
+                "[brutex] sweep-verify --recount: recorded context does NOT match the "
+                "current environment:\n  " + "\n  ".join(mismatches)
+            )
+        if mismatches and not allow_context_mismatch:
+            print(
+                "[brutex] recount REFUSED (a recount under changed inputs is not an "
+                "oracle — ADR-0008 drift channels); re-run with "
+                "--allow-context-mismatch for compare-with-caveat (INCONCLUSIVE, "
+                "never CORRUPT)"
+            )
+            inconclusive_only = True
+        else:
+            scratch = (
+                scratch_root
+                if scratch_root is not None
+                else Path(tempfile.mkdtemp(prefix="brutex-sweep-verify-"))
+            )
+            if stage3 is not None and stage3.enabled:
+                print(
+                    "[brutex] note: Stage-3 refined cells are NOT recounted in this "
+                    "slice — tiers 1-2 cover their pairing/identity (honest envelope, "
+                    "MIGRATION.md DEC-SWEEP-VERIFY-001)"
+                )
+            print(f"[brutex] recount: shadow re-sweep into {scratch} (costs a full sweep)")
+            audit_path = scratch / "audit.jsonl"
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            with AuditWriter.open(audit_path) as audit:
+                run_sweep_grid(
+                    grid,
+                    bars_for=lambda s, i: slices.get((s, i), []),
+                    store_for=make_store_for(scratch, grid),
+                    dedup=ComboDedup(
+                        OptionDedupIndex(capacity=bloom_capacity_hint(grid), fpr_target=1e-7)
+                    ),
+                    audit=audit,
+                )
+            try:
+                rec_report = compare_recount(
+                    out_root,
+                    scratch,
+                    plan_expected_stores(out_root, grid),
+                    context_match=context_match,
+                )
+            except SweepVerifyError as exc:
+                print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+                return EXIT_USER_ERROR
+            print(rec_report.render())
+            reports.append(rec_report)
+            if not context_match and any(
+                f.code == "recount_divergence_inconclusive" for f in rec_report.findings
+            ):
+                inconclusive_only = True
+
+    if any(not report.clean for report in reports):
+        return EXIT_VERIFY_FINDINGS
+    if inconclusive_only:
+        return EXIT_VERIFY_INCONCLUSIVE
+    return EXIT_OK
+
+
 # ────────────────────────────────────────────────────────────────────────
 # options-sim (DEC-OPTIONS-EXECUTOR-001) — winning spot run → priced options
 # ────────────────────────────────────────────────────────────────────────
@@ -3401,6 +3724,34 @@ def main(argv: list[str] | None = None) -> int:
             start=args.start,
             end=args.end,
             run_id=args.run_id,
+        )
+    # Results-tree doctor (DEC-SWEEP-VERIFY-001) — report-only verification.
+    if args.command == "sweep-verify":
+        return cmd_sweep_verify(
+            lake_root=args.lake_root,
+            catalog_path=args.catalog_path,
+            results_root=args.results_root,
+            exchange=args.exchange,
+            segment=args.segment,
+            symbols=args.symbols,
+            intervals=args.intervals,
+            start=args.start,
+            end=args.end,
+            directions=args.directions,
+            k=args.k,
+            conditions=args.conditions,
+            sl=args.sl,
+            tp=args.tp,
+            top=args.top,
+            mode=args.mode,
+            max_tuples=args.max_tuples,
+            max_combos=args.max_combos,
+            data_snapshot_hash=args.data_snapshot_hash,
+            indicator_version=args.indicator_version,
+            code_commit_sha=args.code_commit_sha,
+            recount=args.recount,
+            scratch_root=args.scratch_root,
+            allow_context_mismatch=args.allow_context_mismatch,
         )
     parser.error(f"unknown command: {args.command}")
     return EXIT_USER_ERROR  # type: ignore[unreachable]  # parser.error exits
