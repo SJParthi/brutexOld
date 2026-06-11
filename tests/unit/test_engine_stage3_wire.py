@@ -183,10 +183,16 @@ def _run_full(out_root: Path, bars: list[CandleBar], grid: SweepGridConfig) -> S
 
 
 def _tree_hashes(root: Path) -> dict[str, str]:
-    """Map every Parquet file under *root* (relative path) to its SHA-256."""
+    """Map every results-tree artifact under *root* (relative path) to its SHA-256.
+
+    Covers the per-tuple Parquet stores AND their trial-stats sidecars
+    (DEC-TRIAL-STATS-WRITE-001) — the F11 byte-identity contract extends to
+    both; audit/checkpoint/progress files stay excluded (timestamps).
+    """
+    artifacts = sorted(root.glob("**/*.parquet")) + sorted(root.glob("**/*.trials.json"))
     return {
         str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(root.glob("**/*.parquet"))
+        for path in sorted(artifacts)
     }
 
 
@@ -668,6 +674,64 @@ class TestCascadeSpecsForRefinedCells:
         )
         (spec,) = cascade_specs_for_refined_cells([cell], grid=_grid())
         assert spec.proximity_bps == (5, 10, 25)
+
+
+# ────── per-cell trial-stats sidecars (DEC-TRIAL-STATS-WRITE-001) ──────
+
+
+class TestCellTrialStatsSidecars:
+    def test_every_cell_gets_a_paired_sidecar(
+        self, pipeline: tuple[Path, Stage3PassReport]
+    ) -> None:
+        import dataclasses
+        import hashlib as _hashlib
+
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+        from brutex.engine.trial_stats import (
+            read_tuple_trial_stats,
+            trial_stats_sidecar_path,
+        )
+
+        _, report = pipeline
+        assert report.cells
+        grid = _grid()
+        assert report.train_snapshot_hash is not None
+        train_grid = dataclasses.replace(grid, data_snapshot_hash=report.train_snapshot_hash)
+        for cell in report.cells:
+            stats = read_tuple_trial_stats(trial_stats_sidecar_path(cell.path))
+            # The N population == the persisted unique rows (condition 4: the
+            # dedup-by-refined_id accumulation, never evals_total).
+            assert stats.n_backtested == cell.rows
+            assert stats.n_finite <= stats.n_backtested
+            # Pairing identity (condition 5): digest + store content hash.
+            assert stats.tuple_digest == _tuple_digest(cell.tuple_, train_grid)
+            assert stats.store_content_hash == _hashlib.sha256(cell.path.read_bytes()).hexdigest()
+
+    def test_foreign_row_in_cell_store_skips_the_sidecar_loudly(self, tmp_path: Path) -> None:
+        # A cell store holding a row THIS pass did not derive (a differently-
+        # configured earlier run) must NOT get a fresh sidecar — a partial N
+        # would under-count; the stale pairing hash stays detectable instead.
+        from brutex.engine.trial_stats import read_tuple_trial_stats, trial_stats_sidecar_path
+
+        bars = _trending_bars(_N_DAYS)
+        grid = _grid()
+        report1 = _run_full(tmp_path, bars, grid)
+        target = report1.cells[0]
+        stale_stats = read_tuple_trial_stats(trial_stats_sidecar_path(target.path))
+        store = ResultsStore.load(target.path)
+        foreign = ResultsStore.load(target.path).rows()[0]
+        # Re-key the row under a fresh valid identity the pass never derives.
+        from dataclasses import replace as _replace
+
+        store.append(_replace(foreign, run_id="ab" * 32))
+        store.flush()
+
+        report2 = _run_full(tmp_path, bars, grid)
+        refreshed = read_tuple_trial_stats(trial_stats_sidecar_path(target.path))
+        # The sidecar was SKIPPED (preserved), so it still pairs with the OLD
+        # store bytes, not the foreign-row store — drift stays detectable.
+        assert refreshed == stale_stats
+        assert report2.sidecars_written == len(report2.cells) - 1
 
 
 # ────── stage3_manifest_record (review F3 — manifest provenance) ──────

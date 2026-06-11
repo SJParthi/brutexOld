@@ -477,6 +477,155 @@ class TestCanonicalTradeParams:
         assert mask_run_id(mask=1, params=_canonical_params(cfg), **_CTX) == rid_via_helper
 
 
+# ────── trial-stats sidecar write point (DEC-TRIAL-STATS-WRITE-001) ──────
+
+
+class TestTrialStatsSidecar:
+    _DIGEST = "ab12cd34ef56ab12"
+
+    def test_full_evaluation_writes_a_paired_sidecar(self, tmp_path: Path) -> None:
+        from brutex.engine.trial_stats import read_tuple_trial_stats, trial_stats_sidecar_path
+        from brutex.orchestrator.audit import read_entries
+
+        bars = _trending_bars()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        audit_path = tmp_path / "a.jsonl"
+        with AuditWriter.open(audit_path) as audit:
+            summary = run_persisted_sweep(
+                bars,
+                _make_config(),
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest=self._DIGEST,
+            )
+        assert summary.trial_sidecar_written is True
+        assert summary.backtested == summary.evaluated - summary.minhits_dropped
+        stats = read_tuple_trial_stats(trial_stats_sidecar_path(store.path))
+        # Condition 3: N == the combos that actually ran metrics_for_mask.
+        assert stats.n_backtested == summary.backtested
+        assert stats.n_finite == summary.trial_n_finite
+        assert stats.sum_sharpe == summary.trial_sum_sharpe
+        assert stats.sum_sharpe_sq == summary.trial_sum_sharpe_sq
+        # Condition 5: the pairing identity binds sidecar ↔ store bytes.
+        assert stats.tuple_digest == self._DIGEST
+        assert stats.store_content_hash == summary.store_content_hash
+        # The SWEEP_FLUSH payload carries the additive trial tallies.
+        flush_payloads = [e.payload for e in read_entries(audit_path) if e.action == "SWEEP_FLUSH"]
+        assert flush_payloads[0]["backtested"] == summary.backtested
+        assert flush_payloads[0]["trial_sidecar_written"] is True
+
+    def test_no_digest_writes_no_sidecar(self, tmp_path: Path) -> None:
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
+                _trending_bars(), _make_config(), store=store, dedup=_dedup(), audit=audit
+            )
+        assert summary.trial_sidecar_written is False
+        assert not trial_stats_sidecar_path(store.path).exists()
+
+    def test_full_resume_preserves_the_existing_sidecar(self, tmp_path: Path) -> None:
+        # Condition 2: skipped_dedup > 0 ⇒ PRESERVE — a partial population must
+        # never overwrite the full-run stats (the resumed-completed-tuple corner).
+        from brutex.engine.sweep_orchestrator import load_or_create_store
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+
+        bars = _trending_bars()
+        dedup = _dedup()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            run_persisted_sweep(
+                bars,
+                _make_config(),
+                store=store,
+                dedup=dedup,
+                audit=audit,
+                trial_stats_digest=self._DIGEST,
+            )
+        sidecar = trial_stats_sidecar_path(store.path)
+        sentinel = b"SENTINEL-DO-NOT-OVERWRITE"
+        sidecar.write_bytes(sentinel)
+        with AuditWriter.open(tmp_path / "b.jsonl") as audit:
+            resumed = run_persisted_sweep(
+                bars,
+                _make_config(),
+                store=load_or_create_store(store.path),
+                dedup=dedup,  # every mask already marked → skipped_dedup > 0
+                audit=audit,
+                trial_stats_digest=self._DIGEST,
+            )
+        assert resumed.skipped_dedup > 0
+        assert resumed.trial_sidecar_written is False
+        assert sidecar.read_bytes() == sentinel  # byte-untouched
+
+    def test_subset_marked_dedup_never_writes(self, tmp_path: Path) -> None:
+        # The partial-mark_many crash corner: a re-run over a partially-marked
+        # dedup sees a SUBSET population — no sidecar may be written from it.
+        from brutex.engine.sweep_run import _canonical_params
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+
+        cfg = _make_config()
+        rid = mask_run_id(
+            mask=1 << cfg.condition_bits[0],
+            direction="bull",
+            instrument=cfg.instrument,
+            tf=cfg.tf,
+            mode=cfg.mode,
+            params=_canonical_params(cfg),
+            data_snapshot_hash=cfg.data_snapshot_hash,
+            indicator_version=cfg.indicator_version,
+            code_commit_sha=cfg.code_commit_sha,
+        )
+        dedup = _dedup()
+        dedup.mark(rid)  # one of the five masks pre-marked
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
+                _trending_bars(),
+                cfg,
+                store=store,
+                dedup=dedup,
+                audit=audit,
+                trial_stats_digest=self._DIGEST,
+            )
+        assert summary.skipped_dedup == 1
+        assert summary.trial_sidecar_written is False
+        assert not trial_stats_sidecar_path(store.path).exists()
+
+    def test_redo_after_flush_rewrites_byte_identical(self, tmp_path: Path) -> None:
+        # The flush-then-die corner: a crash before mark_many redoes the whole
+        # tuple with a FRESH view → the rewritten sidecar is byte-identical.
+        from brutex.engine.sweep_orchestrator import load_or_create_store
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+
+        bars = _trending_bars()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            run_persisted_sweep(
+                bars,
+                _make_config(),
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest=self._DIGEST,
+            )
+        sidecar = trial_stats_sidecar_path(store.path)
+        first = sidecar.read_bytes()
+        # Fresh dedup = the post-crash redo (nothing was marked).
+        with AuditWriter.open(tmp_path / "b.jsonl") as audit:
+            run_persisted_sweep(
+                bars,
+                _make_config(),
+                store=load_or_create_store(store.path),
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest=self._DIGEST,
+            )
+        assert sidecar.read_bytes() == first
+
+
 # ────── run_persisted_sweep ──────
 
 

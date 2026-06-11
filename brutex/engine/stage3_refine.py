@@ -31,7 +31,12 @@ Design (the nine ADR-0007 conditions this module owns):
   evaluation is returned in :attr:`RefineMaskReport.evals` so the caller
   appends each as a :class:`~brutex.engine.results_store.ResultRow` into the
   SAME pool as the grid survivors (slice-5 wiring) — never just the per-mask
-  optimum. ``evals_total`` is exactly the DSR-N contribution.
+  optimum. ``evals_total`` is this RUN's unique-eval count (an audit metric);
+  the pass-level DSR-N contribution is the UNIQUE persisted refined rows —
+  two survivors sharing a mask can each pay a cache-miss for the same
+  quantized point that persists as ONE row, so ``Σ evals_total ≥ unique
+  trials`` (corrected per ADR-0008 condition 4 / DEC-CASCADE-N-DESIGN-LOCK-001
+  finding F8).
 * **Condition 8 — honest bounded budget.** ``max_fevals`` asks per restart ×
   a HARD ``max_restarts`` cap (defaults 200 × 3 = ≤600 unique evals/mask; a
   flat-fitness early stop just moves on to the next restart, the cap bounds
@@ -195,7 +200,9 @@ class RefineMaskReport:
     refinement_run_id: str
     seed: int
     restarts_run: int
-    #: Unique (cache-miss) evaluations — the exact DSR-N contribution.
+    #: Unique (cache-miss) evaluations of THIS run — an audit metric. NOT the
+    #: pass-level DSR-N contribution: identical evals across survivors sharing
+    #: a mask collapse to ONE persisted row (ADR-0008 condition 4 / F8).
     evals_total: int
     #: CMA asks answered from the value cache (re-proposed grid points).
     cache_hits: int
