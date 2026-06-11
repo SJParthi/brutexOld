@@ -76,10 +76,8 @@ def test_unknown_tf_is_skipped_not_written() -> None:
     df = _df_1m()
     rec = _Recorder()
 
-    # "120m" is a real derived TF but NOT in the storable set; "99m" is bogus.
-    # Both are absent from what we'd write — the core skips any label the
-    # derivation does not yield. "120m" IS yielded by derive_intraday_tfs, so to
-    # exercise the skip branch we use a label the derivation never produces.
+    # Since DEC-TF-VOCAB-21-001 every derived TF is storable, so the skip
+    # branch is exercised with "99m" — a label the derivation never produces.
     result = materialize_timeframes(
         tfs=("5m", "99m"),
         read_1m=lambda: df,
@@ -165,3 +163,37 @@ def test_materializable_tfs_all_map_to_valid_partition_intervals() -> None:
 )
 def test_total_bars_property_sums_written(written: dict[str, int], expected: int) -> None:
     assert MaterializeResult(written=written, skipped=()).total_bars == expected
+
+
+class TestStorableLadderComplete:
+    """DEC-TF-VOCAB-21-001: all 19 derived intraday TFs are storable."""
+
+    def test_19_storable_timeframes(self) -> None:
+        assert len(INTRADAY_TF_INTERVALS) == 19
+        assert set(MATERIALIZABLE_TFS) == set(INTRADAY_TF_INTERVALS)
+
+    def test_excludes_base_and_daily(self) -> None:
+        # 1m is the fetched base; 1d is fetched natively — neither is derived.
+        assert "1m" not in INTRADAY_TF_INTERVALS
+        assert "1d" not in INTRADAY_TF_INTERVALS
+
+    def test_every_value_is_a_valid_lake_interval(self) -> None:
+        from brutex.data.partition import VALID_INTERVALS
+
+        for interval in INTRADAY_TF_INTERVALS.values():
+            assert interval in VALID_INTERVALS
+
+    def test_matches_canonical_timeframes_map(self) -> None:
+        from brutex.data.timeframes import (
+            ALL_TF_MINUTES,
+            DAILY_TF_MINUTES,
+            LAKE_INTERVAL_LABELS,
+            TF_LABELS,
+        )
+
+        expected = {
+            TF_LABELS[m]: LAKE_INTERVAL_LABELS[m]
+            for m in ALL_TF_MINUTES
+            if m not in (1, DAILY_TF_MINUTES)
+        }
+        assert expected == INTRADAY_TF_INTERVALS

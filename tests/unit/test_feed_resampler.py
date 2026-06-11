@@ -61,19 +61,24 @@ def _bar(
 
 
 class TestStaticTables:
-    def test_interval_seconds_contains_nine_intervals(self) -> None:
-        assert set(INTERVAL_SECONDS.keys()) == {
-            "1minute",
-            "2minute",
-            "3minute",
-            "5minute",
-            "10minute",
-            "15minute",
-            "30minute",
-            "1hour",
-            "4hour",
-            "1day",
-        }
+    def test_interval_seconds_contains_all_21_lake_labels(self) -> None:
+        # DEC-TF-VOCAB-21-001: every Track 1 lake label is addressable here.
+        from brutex.data.timeframes import LAKE_INTERVAL_LABELS
+
+        assert set(INTERVAL_SECONDS.keys()) == set(LAKE_INTERVAL_LABELS.values())
+        assert len(INTERVAL_SECONDS) == 21
+
+    def test_interval_seconds_sync_with_canonical_minutes(self) -> None:
+        # Wall-clock seconds match the canonical minute ladder for every
+        # intraday label; 1day is wall-clock 86400 (the 375-min TRADING
+        # session lives in trading_minutes_for_lake_interval, not here).
+        from brutex.data.timeframes import LAKE_INTERVAL_LABELS
+
+        for minutes, label in LAKE_INTERVAL_LABELS.items():
+            if label == "1day":
+                assert INTERVAL_SECONDS[label] == 86400
+            else:
+                assert INTERVAL_SECONDS[label] == minutes * 60
 
     def test_resampleable_intervals_excludes_1day(self) -> None:
         # 1day is in INTERVAL_SECONDS for completeness but calendar-
@@ -82,10 +87,33 @@ class TestStaticTables:
         assert "1minute" in RESAMPLEABLE_INTERVALS
         assert "4hour" in RESAMPLEABLE_INTERVALS
 
+    def test_resampleable_intervals_excludes_vocab21_additions(self) -> None:
+        # DEC-TF-VOCAB-21-001 adds the labels for ADDRESSING only — this v1
+        # epoch-anchored bucketer must keep refusing them until the
+        # session-anchored derivation path (data.tf_resampler) is the one
+        # used (DEC-RESAMPLE-ANCHOR-001).
+        for label in (
+            "4minute",
+            "6minute",
+            "7minute",
+            "8minute",
+            "9minute",
+            "11minute",
+            "12minute",
+            "13minute",
+            "14minute",
+            "2hour",
+            "3hour",
+        ):
+            assert label in INTERVAL_SECONDS
+            assert label not in RESAMPLEABLE_INTERVALS
+
     def test_interval_seconds_match_minute_math(self) -> None:
         assert INTERVAL_SECONDS["1minute"] == 60
         assert INTERVAL_SECONDS["5minute"] == 300
         assert INTERVAL_SECONDS["1hour"] == 3600
+        assert INTERVAL_SECONDS["2hour"] == 7200
+        assert INTERVAL_SECONDS["3hour"] == 10800
         assert INTERVAL_SECONDS["4hour"] == 14400
 
 

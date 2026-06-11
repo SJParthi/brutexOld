@@ -58,11 +58,22 @@ INTERVAL_SECONDS: Final[dict[str, int]] = {
     "1minute": 60,
     "2minute": 120,
     "3minute": 180,
+    "4minute": 240,
     "5minute": 300,
+    "6minute": 360,
+    "7minute": 420,
+    "8minute": 480,
+    "9minute": 540,
     "10minute": 600,
+    "11minute": 660,
+    "12minute": 720,
+    "13minute": 780,
+    "14minute": 840,
     "15minute": 900,
     "30minute": 1800,
     "1hour": 3600,
+    "2hour": 7200,
+    "3hour": 10800,
     "4hour": 14400,
     "1day": 86400,
 }
@@ -70,7 +81,12 @@ INTERVAL_SECONDS: Final[dict[str, int]] = {
 #: The subset of :data:`INTERVAL_SECONDS` that the v1 resampler accepts
 #: on both sides of the conversion. Tighter than the full set so the
 #: user gets a clear ``ResampleError`` if they try ``1week`` before
-#: the calendar module lands.
+#: the calendar module lands. The 11 labels added by DEC-TF-VOCAB-21-001
+#: (``4minute`` … ``14minute``, ``2hour``, ``3hour``) are deliberately NOT
+#: resampleable here: this v1 bucketer is epoch-anchored (session-naive),
+#: and per DEC-RESAMPLE-ANCHOR-001 the 09:15-IST session anchor is
+#: mandatory for derived TFs — the session-anchored
+#: :mod:`brutex.data.tf_resampler` is the canonical derivation path.
 RESAMPLEABLE_INTERVALS: Final[frozenset[str]] = frozenset(
     {
         "1minute",
