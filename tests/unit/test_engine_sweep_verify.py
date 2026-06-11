@@ -34,6 +34,7 @@ from brutex.engine.sweep_verify import (
     SweepVerifyError,
     TreeVerifyReport,
     VerifyFinding,
+    compare_recount,
     plan_expected_stores,
     recorded_context_from_audit,
     verify_identity,
@@ -553,3 +554,91 @@ class TestStage3Plan:
         _store_path(tree, _grid()).unlink()
         report = verify_identity(tree, grid, stage3=record)  # type: ignore[arg-type]
         assert "rows_exceed_top_k" not in _codes(report)
+
+
+# ── Tier 3 — compare_recount (the shadow re-sweep byte-diff) ─────────────────
+
+
+class TestRecountCompare:
+    def _two_trees(
+        self, tmp_path: Path, **grid_overrides: object
+    ) -> tuple[Path, Path, SweepGridConfig]:
+        """Sweep the SAME grid into two roots — deterministic ⇒ byte-identical."""
+        grid = _grid(**grid_overrides)
+        original, scratch = tmp_path / "original", tmp_path / "scratch"
+        for root in (original, scratch):
+            root.mkdir()
+            _sweep(root, grid)
+        return original, scratch, grid
+
+    def test_missing_roots_and_same_root_raise(self, tmp_path: Path) -> None:
+        (tmp_path / "a").mkdir()
+        with pytest.raises(SweepVerifyError, match="original_root not found"):
+            compare_recount(tmp_path / "nope", tmp_path / "a", {}, context_match=True)
+        with pytest.raises(SweepVerifyError, match="scratch_root not found"):
+            compare_recount(tmp_path / "a", tmp_path / "nope", {}, context_match=True)
+        with pytest.raises(SweepVerifyError, match="must be DISTINCT"):
+            compare_recount(tmp_path / "a", tmp_path / "a", {}, context_match=True)
+
+    def test_identical_trees_verify_clean(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(tmp_path)
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert report.tier == "recount"
+        assert report.findings == ()
+        assert report.clean is True
+        assert report.checked_stores == 3  # store + sidecar + sentinel
+
+    def test_divergence_under_matched_context_is_corrupt(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(tmp_path)
+        store = _store_path(original, grid)
+        store.write_bytes(store.read_bytes() + b"tampered")
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert "recount_divergence" in _codes(report)
+        assert not report.clean
+
+    def test_divergence_under_mismatch_is_inconclusive_never_condemned(
+        self, tmp_path: Path
+    ) -> None:
+        original, scratch, grid = self._two_trees(tmp_path)
+        store = _store_path(original, grid)
+        store.write_bytes(store.read_bytes() + b"tampered")
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=False)
+        assert "recount_divergence_inconclusive" in _codes(report)
+        assert "recount_divergence" not in _codes(report)
+        assert report.clean is True  # NOT evidence of corruption
+
+    def test_scratch_absent_is_unverifiable_warn(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(tmp_path)
+        _store_path(scratch, grid).unlink()
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert "recount_scratch_absent" in _codes(report)
+        assert report.clean is True
+
+    def test_original_absent_is_pending_warn(self, tmp_path: Path) -> None:
+        original, scratch, grid = self._two_trees(tmp_path)
+        _store_path(original, grid).unlink()
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert "recount_original_absent" in _codes(report)
+        assert report.clean is True
+
+    def test_absent_in_both_worlds_is_silent(self, tmp_path: Path) -> None:
+        # A tuple with no artifacts ANYWHERE (e.g. no-bars in both sweeps)
+        # contributes nothing — not even a count.
+        original, scratch, grid = self._two_trees(tmp_path, directions=[Side.BUY, Side.SELL])
+        plan = plan_expected_stores(original, grid)
+        assert len(plan) == 2
+        for store, (tuple_, _, _) in plan.items():
+            if tuple_.direction is Side.SELL:
+                for root in (original, scratch):
+                    rel = store.relative_to(original)
+                    (root / rel).unlink()
+                    trial_stats_sidecar_path(root / rel).unlink()
+                    completion_sentinel_path(root / rel).unlink()
+        report = compare_recount(original, scratch, plan, context_match=True)
+        assert report.findings == ()
+        assert report.checked_stores == 3  # only the surviving tuple's triple
