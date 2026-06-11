@@ -38,6 +38,7 @@ from brutex.dashboard.preopen_report import (
     render_month_workbook,
     render_report_zip,
     render_xlsx,
+    report_filename,
     resolve_report_datasets,
     select_all_symbols,
     select_rows,
@@ -1108,3 +1109,100 @@ def test_zip_is_deterministic() -> None:
     a = render_report_zip(rows, mode="all", min_pct=Decimal("0"))
     b = render_report_zip(rows, mode="all", min_pct=Decimal("0"))
     assert a == b  # fixed _ZIP_EPOCH → byte-identical
+
+
+class TestReportFilename:
+    """DEC-REPORT-FILENAME-001 — the self-describing download name."""
+
+    def test_xlsx_no_mode_no_symbols(self) -> None:
+        name = report_filename(
+            extension=".xlsx",
+            start=date(2026, 6, 1),
+            end=date(2026, 6, 11),
+            basis="day",
+            symbols=None,
+        )
+        assert name == "preopen_day_all-symbols_2026-06-01_2026-06-11.xlsx"
+
+    def test_zip_topmover_carries_the_threshold(self) -> None:
+        name = report_filename(
+            extension=".zip",
+            start=date(2026, 6, 1),
+            end=date(2026, 6, 11),
+            basis="minute",
+            symbols=["NIFTY", "BANKNIFTY"],
+            mode="topmover",
+            min_pct=Decimal("2.5"),
+        )
+        assert name == "preopen_topmover-min2.5pct_minute_NIFTY-BANKNIFTY_2026-06-01_2026-06-11.zip"
+
+    def test_min_pct_display_is_normalized_not_rounded(self) -> None:
+        # 2.0 reads "2" (display normalization of a threshold — NEVER money
+        # rounding; DEC-MONEY-2DP-001 is money-only).
+        name = report_filename(
+            extension=".zip",
+            start=date(2026, 6, 1),
+            end=date(2026, 6, 2),
+            basis="day",
+            symbols=None,
+            mode="topmover",
+            min_pct=Decimal("2.0"),
+        )
+        assert "topmover-min2pct" in name
+
+    def test_mode_all_ignores_min_pct(self) -> None:
+        name = report_filename(
+            extension=".zip",
+            start=date(2026, 6, 1),
+            end=date(2026, 6, 2),
+            basis="day",
+            symbols=None,
+            mode="all",
+            min_pct=Decimal("3"),
+        )
+        assert "_all_" in name
+        assert "pct" not in name
+
+    def test_topmover_without_threshold_falls_back_to_plain_mode(self) -> None:
+        name = report_filename(
+            extension=".zip",
+            start=date(2026, 6, 1),
+            end=date(2026, 6, 2),
+            basis="day",
+            symbols=None,
+            mode="topmover",
+            min_pct=None,
+        )
+        assert "_topmover_" in name
+        assert "pct" not in name
+
+    def test_symbol_overflow_collapses_to_count(self) -> None:
+        symbols = [f"SYM{i}" for i in range(8)]
+        name = report_filename(
+            extension=".zip",
+            start=date(2026, 6, 1),
+            end=date(2026, 6, 2),
+            basis="day",
+            symbols=symbols,
+        )
+        assert "SYM0-SYM1-SYM2-SYM3-SYM4+3more" in name
+
+    def test_unsafe_symbol_is_sanitized(self) -> None:
+        # M&M must not smuggle '&' (or quotes/separators) into the header name.
+        name = report_filename(
+            extension=".xlsx",
+            start=date(2026, 6, 1),
+            end=date(2026, 6, 2),
+            basis="day",
+            symbols=["M&M", 'BAD"/NAME'],
+        )
+        assert "M-M-BAD-NAME" in name
+
+    def test_all_unsafe_token_degrades_to_x(self) -> None:
+        assert "_X_" in report_filename(
+            extension=".xlsx",
+            start=date(2026, 6, 1),
+            end=date(2026, 6, 2),
+            basis="day",
+            symbols=["///"],
+        )
