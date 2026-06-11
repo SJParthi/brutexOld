@@ -2523,6 +2523,22 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     cascade_specs.extend(cascade_specs_for_refined_cells(stage3_report.cells, grid=grid))
 
     if cascade_specs:
+        # Freeze the per-leaderboard trial statistics into the manifest
+        # (DEC-TRIAL-STATS-FREEZE-001, ADR-0008 condition 1): aggregated from
+        # the sidecars exactly ONCE here; the MANUAL replay reads only the
+        # frozen numbers, never the sidecars.
+        import dataclasses as _dataclasses
+
+        from brutex.engine.cascade_wire import build_leaderboard_trials
+
+        stage3_grid = (
+            _dataclasses.replace(grid, data_snapshot_hash=stage3_report.train_snapshot_hash)
+            if stage3_report.enabled and stage3_report.train_snapshot_hash is not None
+            else None
+        )
+        leaderboard_trials = build_leaderboard_trials(
+            out_root, grid, stage3_cells=stage3_report.cells, stage3_grid=stage3_grid
+        )
         sweep_id = grid_identity(grid)
         cascade_report = run_and_write_from_specs(
             out_root,
@@ -2532,6 +2548,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             bars_context=BarsContext(exchange=exchange, segment=segment, start=start, end=end),
             cascade_config=cascade_config_for_sweep(sweep_id),
             stage3=stage3_manifest_record(stage3_report),
+            leaderboard_trials=leaderboard_trials,
         )
         print(
             f"[brutex] cascade — pools={len(cascade_report.groups)} "
