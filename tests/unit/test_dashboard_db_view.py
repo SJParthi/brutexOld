@@ -568,6 +568,117 @@ class TestOptionWindowDecode:
         build_window_payload(tmp_path)
         assert calls["n"] == loaded_before + 1
 
+
+class TestSpotWindowRollup:
+    """DEC-SPOT-COVERAGE-COMPLETENESS-001 — the (symbol, interval) ledger rollup."""
+
+    def test_no_ledger_file_is_empty(self, tmp_path: Path) -> None:
+        # The is_file() guard — never a FileNotFoundError on a fresh lake.
+        from brutex.dashboard.db_view import spot_window_rollup
+
+        assert spot_window_rollup(tmp_path) == {}
+
+    def test_groups_settled_pending_failed_and_excludes_options(self, tmp_path: Path) -> None:
+        from brutex.dashboard.db_view import spot_window_rollup
+
+        ledger = WindowLedger()
+        # SUCCESS + SKIPPED → settled; PLANNED + EMPTY → pending; FAILED → failed.
+        ledger.record(
+            _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+        )
+        ledger.settle_known_gap(
+            WindowKey(
+                market="dhan",
+                security_id="NIFTY",
+                interval="1minute",
+                start=date(2021, 4, 1),
+                end=date(2021, 7, 1),
+            ),
+            now=_WINDOW_NOW,
+        )
+        ledger.plan(
+            WindowKey(
+                market="dhan",
+                security_id="NIFTY",
+                interval="1minute",
+                start=date(2021, 7, 1),
+                end=date(2021, 10, 1),
+            ),
+            now=_WINDOW_NOW,
+        )
+        ledger.record(
+            WindowKey(
+                market="dhan",
+                security_id="NIFTY",
+                interval="1minute",
+                start=date(2021, 10, 1),
+                end=date(2022, 1, 1),
+            ),
+            raw_bars=0,
+            error_type=None,  # clean EMPTY (below threshold) — outstanding work
+            bars_appended=0,
+            now=_WINDOW_NOW,
+        )
+        ledger.record(
+            WindowKey(
+                market="dhan",
+                security_id="NIFTY",
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2022, 1, 1),
+            ),
+            raw_bars=0,
+            error_type="DhanRateLimitError",
+            bars_appended=0,
+            now=_WINDOW_NOW,
+        )
+        # An option row MUST be excluded by the exact spot-market filter.
+        ledger.plan(_option_window_key(), now=_WINDOW_NOW)
+        save_window_ledger(ledger, tmp_path)
+
+        rollup = spot_window_rollup(tmp_path)
+        assert rollup == {
+            ("NIFTY", "1minute"): (2, 2, 0),
+            ("NIFTY", "1day"): (0, 0, 1),
+        }
+
+    def test_rollup_is_cached_until_the_file_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The grouping is O(rows) at universe scale — it must run once per
+        # ledger flush, not once per 4 s poll (hostile C7).
+        import os
+
+        from brutex.dashboard import db_view as db_view_module
+        from brutex.dashboard.db_view import spot_window_rollup
+        from brutex.data.window_ledger_store import ledger_path
+
+        ledger = WindowLedger()
+        ledger.record(
+            _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+        )
+        save_window_ledger(ledger, tmp_path)
+
+        calls = {"n": 0}
+        real_records = db_view_module._ledger_records_cached
+
+        def _counting_records(root: Path) -> tuple[object, ...]:
+            calls["n"] += 1
+            return real_records(root)
+
+        monkeypatch.setattr(db_view_module, "_ledger_records_cached", _counting_records)
+
+        first = spot_window_rollup(tmp_path)
+        second = spot_window_rollup(tmp_path)
+        assert first == second
+        assert calls["n"] <= 1  # second poll served from the rollup cache
+
+        path = ledger_path(tmp_path)
+        os.utime(path, ns=(path.stat().st_atime_ns + 1, path.stat().st_mtime_ns + 1))
+        before = calls["n"]
+        spot_window_rollup(tmp_path)
+        assert calls["n"] == before + 1  # mtime bump re-groups exactly once
+
     def test_spot_rows_are_byte_unchanged_by_the_map(self, tmp_path: Path) -> None:
         ledger = WindowLedger()
         ledger.record(

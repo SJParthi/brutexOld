@@ -207,16 +207,90 @@ def spot_coverage_headline(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def build_spot_coverage_payload(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+#: The two Dhan FETCH intervals the window ledger plans/records — every other
+#: lake interval is RESAMPLED from 1minute (DEC-DHAN-1M-ONLY-001) and so has NO
+#: ledger rows BY DESIGN. MUST MATCH
+#: ``brutex.dashboard.pull_controller.DHAN_FETCH_INTERVALS`` — mirrored here
+#: (the ``db_view._OPTION_WINDOW_MARKET`` precedent) so this pure projection
+#: module never imports the pull/adapter stack
+#: (DEC-SPOT-COVERAGE-COMPLETENESS-001).
+FETCH_INTERVALS: Final[frozenset[str]] = frozenset({"1minute", "1day"})
+
+#: Completeness chip states for the spot coverage rows
+#: (DEC-SPOT-COVERAGE-COMPLETENESS-001). Deliberately NOT named "complete":
+#: ``settled`` asserts ONLY "the fetch ledger has no outstanding work for the
+#: ranges a pull ever planned" — a weaker, honestly-scoped claim than a
+#: trading-day gap audit (which remains a follow-up).
+COMPLETENESS_SETTLED: Final[str] = "settled"
+COMPLETENESS_PENDING: Final[str] = "pending"
+COMPLETENESS_FAILED: Final[str] = "failed"
+COMPLETENESS_DERIVED: Final[str] = "derived"
+COMPLETENESS_NO_RECORD: Final[str] = "no_ledger_record"
+COMPLETENESS_AMBIGUOUS: Final[str] = "ambiguous"
+
+
+def _classify_completeness(
+    row: dict[str, Any],
+    rollup: dict[tuple[str, str], tuple[int, int, int]],
+    duplicated: set[tuple[str, str]],
+) -> tuple[str, int | None, int | None, int | None]:
+    """Classify ONE spot dataset row → ``(completeness, settled, pending, failed)``.
+
+    The honest-state ladder (every branch carries its own scope):
+
+    * a NON-fetch interval is ``derived`` (resampled from 1minute — the fetch
+      ledger does not apply; counts are ``None``, never ``0``, because ``0``
+      would assert "ledger consulted, found nothing");
+    * a ``(symbol, interval)`` that appears under MULTIPLE (exchange, segment)
+      directories is ``ambiguous`` — the ledger key carries neither exchange
+      nor segment, so its counts cannot be attributed to one of the rows
+      without guessing (hostile C4: surfaced, not silently misattributed);
+    * a fetch interval with no ledger rows is ``no_ledger_record`` (e.g. a
+      lake copied in externally) — an honest unknown, never implied-settled;
+    * otherwise the ledger counts decide: any FAILED → ``failed``; else any
+      outstanding (PLANNED + below-threshold EMPTY) → ``pending``; else
+      ``settled``.
+    """
+    cell = (str(row["symbol"]), str(row["interval"]))
+    if cell[1] not in FETCH_INTERVALS:
+        return COMPLETENESS_DERIVED, None, None, None
+    if cell in duplicated:
+        return COMPLETENESS_AMBIGUOUS, None, None, None
+    counts = rollup.get(cell)
+    if counts is None:
+        return COMPLETENESS_NO_RECORD, None, None, None
+    settled, pending, failed = counts
+    if failed > 0:
+        return COMPLETENESS_FAILED, settled, pending, failed
+    if pending > 0:
+        return COMPLETENESS_PENDING, settled, pending, failed
+    return COMPLETENESS_SETTLED, settled, pending, failed
+
+
+def build_spot_coverage_payload(
+    rows: Iterable[dict[str, Any]],
+    rollup: dict[tuple[str, str], tuple[int, int, int]] | None = None,
+) -> dict[str, Any]:
     """Return the full ``/api/v1/coverage/spot`` payload — headline + rows.
 
     Composer mirroring :func:`build_coverage_payload` for the SPOT section of
     the ``/coverage`` page (DEC-COVERAGE-SPOT-001). *rows* are the per-dataset
     stats from :func:`brutex.dashboard.db_view.summarize_spot_datasets`
     (``exchange`` · ``segment`` · ``symbol`` · ``interval`` · ``bars`` ·
-    ``first_date`` · ``last_date``). Pure projection: materialise once, derive
-    the headline, pass the rows through unchanged — so the FastAPI route stays a
-    thin delegating wrapper and this surface is 100% unit-testable offline.
+    ``first_date`` · ``last_date``). Pure projection — so the FastAPI route
+    stays a thin delegating wrapper and this surface is 100% unit-testable
+    offline.
+
+    DEC-SPOT-COVERAGE-COMPLETENESS-001 (partially executes the
+    DEC-COVERAGE-SPOT-001 #397 follow-up — planner-planned ranges only, NOT a
+    trading-day gap audit): when *rollup* (the
+    :func:`brutex.dashboard.db_view.spot_window_rollup` grouping, passed as a
+    plain argument — no cross-import) is provided, every row is annotated with
+    ``windows_settled`` / ``windows_pending`` / ``windows_failed``
+    (``int | None``) and a ``completeness`` state (see
+    :func:`_classify_completeness`). ``rollup=None`` (the pre-ledger caller
+    shape) annotates fetch-interval rows ``no_ledger_record``. The headline is
+    UNCHANGED (pinned by the invalidate integration suite).
 
     Returns
     -------
@@ -224,9 +298,29 @@ def build_spot_coverage_payload(rows: Iterable[dict[str, Any]]) -> dict[str, Any
         ``{"headline": {"datasets", "total_bars"}, "rows": [...]}``.
     """
     materialised = list(rows)
+    effective = rollup if rollup is not None else {}
+    seen: set[tuple[str, str]] = set()
+    duplicated: set[tuple[str, str]] = set()
+    for row in materialised:
+        cell = (str(row["symbol"]), str(row["interval"]))
+        if cell in seen:
+            duplicated.add(cell)
+        seen.add(cell)
+    annotated: list[dict[str, Any]] = []
+    for row in materialised:
+        completeness, settled, pending, failed = _classify_completeness(row, effective, duplicated)
+        annotated.append(
+            {
+                **row,
+                "completeness": completeness,
+                "windows_settled": settled,
+                "windows_pending": pending,
+                "windows_failed": failed,
+            }
+        )
     return {
         "headline": spot_coverage_headline(materialised),
-        "rows": materialised,
+        "rows": annotated,
     }
 
 
@@ -280,6 +374,13 @@ def build_option_coverage_payload(rows: Iterable[dict[str, Any]]) -> dict[str, A
 
 
 __all__ = [
+    "COMPLETENESS_AMBIGUOUS",
+    "COMPLETENESS_DERIVED",
+    "COMPLETENESS_FAILED",
+    "COMPLETENESS_NO_RECORD",
+    "COMPLETENESS_PENDING",
+    "COMPLETENESS_SETTLED",
+    "FETCH_INTERVALS",
     "STATUS_MISSING",
     "build_coverage_payload",
     "build_coverage_rows",

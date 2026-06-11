@@ -266,6 +266,87 @@ class TestBuildSpotCoveragePayload:
         assert payload["rows"][0]["symbol"] == "NSE-NIFTY"
 
 
+class TestSpotCompleteness:
+    """DEC-SPOT-COVERAGE-COMPLETENESS-001 — the honest-state chip ladder.
+
+    The green state is "settled" (the fetch ledger has no outstanding work for
+    planner-planned ranges), deliberately NOT "complete" — a trading-day gap
+    audit is a separate follow-up and is never implied.
+    """
+
+    def _row(self, payload: dict[str, object]) -> dict[str, object]:
+        rows = payload["rows"]
+        assert isinstance(rows, list)
+        return rows[0]  # type: ignore[no-any-return]
+
+    def test_rollup_omitted_is_no_ledger_record(self) -> None:
+        row = self._row(build_spot_coverage_payload([_spot("NIFTY")]))
+        assert row["completeness"] == "no_ledger_record"
+        # None, never 0 — 0 would assert "ledger consulted, found nothing".
+        assert row["windows_settled"] is None
+        assert row["windows_pending"] is None
+        assert row["windows_failed"] is None
+
+    def test_settled_when_no_outstanding_windows(self) -> None:
+        row = self._row(
+            build_spot_coverage_payload([_spot("NIFTY")], {("NIFTY", "1minute"): (21, 0, 0)})
+        )
+        assert row["completeness"] == "settled"
+        assert row["windows_settled"] == 21
+        assert row["windows_pending"] == 0
+        assert row["windows_failed"] == 0
+
+    def test_pending_when_outstanding_windows(self) -> None:
+        row = self._row(
+            build_spot_coverage_payload([_spot("NIFTY")], {("NIFTY", "1minute"): (20, 3, 0)})
+        )
+        assert row["completeness"] == "pending"
+        assert row["windows_pending"] == 3
+
+    def test_failed_outranks_pending(self) -> None:
+        # FAILED is the actionable state — it wins even with pending present.
+        row = self._row(
+            build_spot_coverage_payload([_spot("NIFTY")], {("NIFTY", "1minute"): (20, 3, 2)})
+        )
+        assert row["completeness"] == "failed"
+        assert row["windows_failed"] == 2
+
+    def test_resampled_interval_is_derived(self) -> None:
+        # A 5minute partition is RESAMPLED from 1minute — the fetch ledger does
+        # not apply, so it is "derived" (never "no_ledger_record" as if suspect,
+        # never inheriting the 1minute state — materialisation is manual and can
+        # be stale relative to a later 1minute pull).
+        spot = dict(_spot("NIFTY"), interval="5minute")
+        row = self._row(build_spot_coverage_payload([spot], {("NIFTY", "1minute"): (21, 0, 0)}))
+        assert row["completeness"] == "derived"
+        assert row["windows_settled"] is None
+
+    def test_fetch_interval_without_ledger_rows_is_no_record(self) -> None:
+        row = self._row(
+            build_spot_coverage_payload([_spot("NIFTY")], {("OTHER", "1minute"): (1, 0, 0)})
+        )
+        assert row["completeness"] == "no_ledger_record"
+
+    def test_duplicate_symbol_interval_is_ambiguous(self) -> None:
+        # The ledger key has no exchange/segment — the SAME (symbol, interval)
+        # under two directories cannot be attributed without guessing
+        # (hostile C4): both rows degrade to an explicit ambiguous state.
+        nse = _spot("NIFTY")
+        bse = dict(_spot("NIFTY"), exchange="BSE", segment="INDEX")
+        payload = build_spot_coverage_payload([nse, bse], {("NIFTY", "1minute"): (21, 0, 0)})
+        rows = payload["rows"]
+        assert isinstance(rows, list)
+        assert [r["completeness"] for r in rows] == ["ambiguous", "ambiguous"]
+        assert all(r["windows_settled"] is None for r in rows)
+
+    def test_headline_is_unchanged_by_annotation(self) -> None:
+        # The hub's pinned headline shape never changes (hostile C1/F10).
+        payload = build_spot_coverage_payload(
+            [_spot("NIFTY", bars=4)], {("NIFTY", "1minute"): (1, 0, 0)}
+        )
+        assert payload["headline"] == {"datasets": 1, "total_bars": 4}
+
+
 def _option(underlying: str, *, series: int, bars: int) -> dict[str, object]:
     """One per-underlying expired-options coverage row (summarize_option_datasets shape)."""
     return {
