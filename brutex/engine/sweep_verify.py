@@ -709,14 +709,118 @@ def verify_identity(
 # ── Tier 3 — RECOUNT compare (the shadow re-sweep's byte-diff) ───────────────
 
 
+@dataclass(frozen=True, slots=True)
+class RecordedStage3Knobs:
+    """The Stage-3 refinement knobs a sweep RECORDED (DEC-STAGE3-RECOUNT-001).
+
+    Read from the tree's own ``STAGE_3_PASS_START`` audit payload — emitted by
+    every stage3-enabled sweep since the pass first shipped — never from the
+    operator's memory (the condition-2a discipline). Knob-shifted recounts can
+    byte-diverge SAME-coordinate cell stores, so a knob match is a binding
+    part of cell evidence (hostile-review condition B1).
+    """
+
+    stage3_top_k: int
+    max_fevals: int
+    max_restarts: int
+    train_snapshot_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedStage3Audit:
+    """Everything the audit chain says about the tree's Stage-3 history.
+
+    Parameters
+    ----------
+    knobs
+        The recorded knobs, or ``None`` when no ``STAGE_3_PASS_START`` line
+        exists (a grid-only tree, or a pre-stage3/audit-less one).
+    consistent
+        ``False`` when MULTIPLE pass lines disagree (a mixed-knob history —
+        its cell stores hold preloaded foreign-knob rows and are honestly
+        non-reproducible; condition B4: cells inconclusive, never compared).
+    optimizer_versions
+        The sorted unique ``(pycma, numpy)`` pairs from ``STAGE_3_REFINE_START``
+        lines — the refined-row identity folds them, so a drift changes
+        trajectories without changing the context triple (condition B3).
+    """
+
+    knobs: RecordedStage3Knobs | None
+    consistent: bool
+    optimizer_versions: tuple[tuple[str, str], ...]
+
+
+def recorded_stage3_from_audit(audit_path: Path) -> RecordedStage3Audit:
+    """Read the tree's recorded Stage-3 knob history from its audit log.
+
+    Returns the no-history record when the file or the pass lines are absent.
+
+    Raises
+    ------
+    SweepVerifyError
+        If the audit log is unreadable or a pass payload is missing a knob key
+        (a malformed tree is not a verifiable tree).
+    """
+    if not audit_path.exists():
+        return RecordedStage3Audit(knobs=None, consistent=True, optimizer_versions=())
+    from brutex.orchestrator.audit import AuditError, read_entries
+
+    try:
+        entries: list[AuditEntry] = list(read_entries(audit_path))
+    except AuditError as exc:
+        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+    knobs: RecordedStage3Knobs | None = None
+    consistent = True
+    versions: set[tuple[str, str]] = set()
+    for entry in entries:
+        if entry.action == "STAGE_3_REFINE_START":
+            payload = entry.payload
+            versions.add((str(payload.get("pycma_version")), str(payload.get("numpy_version"))))
+            continue
+        if entry.action != "STAGE_3_PASS_START":
+            continue
+        payload = entry.payload
+        missing = [
+            key
+            for key in ("stage3_top_k", "max_fevals", "max_restarts", "train_snapshot_hash")
+            if key not in payload
+        ]
+        if missing:
+            raise SweepVerifyError(
+                f"STAGE_3_PASS_START payload at {audit_path} (seq {entry.seq}) missing {missing}"
+            )
+        found = RecordedStage3Knobs(
+            stage3_top_k=int(payload["stage3_top_k"]),
+            max_fevals=int(payload["max_fevals"]),
+            max_restarts=int(payload["max_restarts"]),
+            train_snapshot_hash=str(payload["train_snapshot_hash"]),
+        )
+        if knobs is None:
+            knobs = found
+        elif knobs != found:
+            consistent = False
+    return RecordedStage3Audit(
+        knobs=knobs, consistent=consistent, optimizer_versions=tuple(sorted(versions))
+    )
+
+
 def compare_recount(
     original_root: Path,
     scratch_root: Path,
     plan: dict[Path, tuple[SweepTuple, SweepGridConfig, bool]],
     *,
     context_match: bool,
+    cell_evidence: bool = False,
 ) -> TreeVerifyReport:
     """Tier 3: byte-diff the original tree against a freshly re-swept scratch tree.
+
+    Stage-3 CELL stores (``is_grid_tuple=False`` plan entries) route to a
+    DISTINCT finding-code family gated by *cell_evidence* (DEC-STAGE3-RECOUNT-001
+    conditions B1/B2/B5): cell divergence is verdict-grade only under the full
+    cell gate (context AND recorded knobs AND optimizer versions — the caller
+    computes it), degrades to a dependent warn when the same leaderboard's GRID
+    recount diverged (scratch cells derive from scratch grid stores), and never
+    aliases ``recount_divergence`` (the heal's evidence code).
 
     The recount itself is NOT performed here (§11 COMMON — the caller composes
     the existing 100%-tested ``run_sweep_grid`` into *scratch_root*, exactly
@@ -765,7 +869,10 @@ def compare_recount(
         )
     findings: list[VerifyFinding] = []
     checked = 0
-    for store_path in sorted(plan):
+    grid_corrupt_leaderboards: set[tuple[str, str]] = set()
+
+    def _diff_store(store_path: Path, *, is_grid_tuple: bool, leaderboard: tuple[str, str]) -> None:
+        nonlocal checked
         artifacts = (
             store_path,
             trial_stats_sidecar_path(store_path),
@@ -777,7 +884,7 @@ def compare_recount(
             original_exists = original.exists()
             scratch_exists = scratch.exists()
             if not original_exists and not scratch_exists:
-                continue  # a no-bars tuple in BOTH worlds — nothing to compare
+                continue  # absent in BOTH worlds — nothing to compare
             checked += 1
             if not scratch_exists:
                 findings.append(
@@ -809,17 +916,68 @@ def compare_recount(
                 continue
             if original.read_bytes() == scratch.read_bytes():
                 continue  # byte-identical — verified (silence is the verdict)
-            if context_match:
+            if is_grid_tuple:
+                if context_match:
+                    grid_corrupt_leaderboards.add(leaderboard)
+                    findings.append(
+                        VerifyFinding(
+                            path=rel,
+                            code="recount_divergence",
+                            severity="corrupt",
+                            detail=(
+                                "bytes diverge from the shadow re-sweep under a "
+                                "FULLY MATCHED recorded context — verdict-grade "
+                                "corruption (the only state heal-grade evidence "
+                                "may ever come from)"
+                            ),
+                        )
+                    )
+                else:
+                    findings.append(
+                        VerifyFinding(
+                            path=rel,
+                            code="recount_divergence_inconclusive",
+                            severity="warn",
+                            detail=(
+                                "bytes diverge BUT the recorded context does not "
+                                "match the current environment — NOT evidence of "
+                                "corruption (changed code/indicators/lake change "
+                                "results legitimately; ADR-0008 drift channels)"
+                            ),
+                        )
+                    )
+            # Stage-3 cell stores (DEC-STAGE3-RECOUNT-001): a DISTINCT code
+            # family — the heal consumes ONLY `recount_divergence` (its C1
+            # gate raises on non-grid paths), so cell findings must never
+            # alias the grid code (condition B2).
+            elif leaderboard in grid_corrupt_leaderboards:
+                # Condition B5: scratch cells derive from scratch GRID stores,
+                # so cell divergence under grid corruption in the same
+                # leaderboard is collateral, not independent evidence.
                 findings.append(
                     VerifyFinding(
                         path=rel,
-                        code="recount_divergence",
+                        code="cell_recount_divergence_dependent",
+                        severity="warn",
+                        detail=(
+                            "cell bytes diverge, but this leaderboard's GRID "
+                            "recount already diverged — the scratch cells derive "
+                            "from the scratch grid stores, so this is collateral, "
+                            "not independent evidence"
+                        ),
+                    )
+                )
+            elif context_match and cell_evidence:
+                findings.append(
+                    VerifyFinding(
+                        path=rel,
+                        code="cell_recount_divergence",
                         severity="corrupt",
                         detail=(
-                            "bytes diverge from the shadow re-sweep under a "
-                            "FULLY MATCHED recorded context — verdict-grade "
-                            "corruption (the only state heal-grade evidence "
-                            "may ever come from)"
+                            "Stage-3 cell bytes diverge under a fully matched "
+                            "context AND matched recorded knobs/optimizer "
+                            "versions — verdict-grade (NOT heal-grade: cells "
+                            "carry no sentinels and healing stays grid-only)"
                         ),
                     )
                 )
@@ -827,16 +985,36 @@ def compare_recount(
                 findings.append(
                     VerifyFinding(
                         path=rel,
-                        code="recount_divergence_inconclusive",
+                        code="cell_recount_divergence_inconclusive",
                         severity="warn",
                         detail=(
-                            "bytes diverge BUT the recorded context does not "
-                            "match the current environment — NOT evidence of "
-                            "corruption (changed code/indicators/lake change "
-                            "results legitimately; ADR-0008 drift channels)"
+                            "Stage-3 cell bytes diverge without full cell "
+                            "evidence (context/knobs/optimizer-version gate not "
+                            "fully matched) — NOT evidence of corruption "
+                            "(condition B1)"
                         ),
                     )
                 )
+
+    # GRID stores first — their verdicts feed the cell collateral rule (B5).
+    ordered = sorted(plan)
+    for store_path in ordered:
+        tuple_, _, is_grid = plan[store_path]
+        if is_grid:
+            _diff_store(
+                store_path,
+                is_grid_tuple=True,
+                leaderboard=(tuple_.instrument, tuple_.tf.label),
+            )
+    for store_path in ordered:
+        tuple_, _, is_grid = plan[store_path]
+        if not is_grid:
+            _diff_store(
+                store_path,
+                is_grid_tuple=False,
+                leaderboard=(tuple_.instrument, tuple_.tf.label),
+            )
+
     report = TreeVerifyReport(
         root=str(original_root),
         tier="recount",
@@ -848,6 +1026,7 @@ def compare_recount(
         root=str(original_root),
         scratch=str(scratch_root),
         context_match=context_match,
+        cell_evidence=cell_evidence,
         artifacts=checked,
         corrupt=len(report.corrupt),
         findings=len(report.findings),
@@ -859,12 +1038,15 @@ __all__ = [
     "QUARANTINE_DIRNAME",
     "SEVERITIES",
     "RecordedContext",
+    "RecordedStage3Audit",
+    "RecordedStage3Knobs",
     "SweepVerifyError",
     "TreeVerifyReport",
     "VerifyFinding",
     "compare_recount",
     "plan_expected_stores",
     "recorded_context_from_audit",
+    "recorded_stage3_from_audit",
     "verify_identity",
     "verify_structural",
 ]

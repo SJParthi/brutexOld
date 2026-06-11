@@ -23,6 +23,7 @@ from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
+    SweepTuple,
     Timeframe,
     iter_sweep_tuples,
     run_sweep_grid,
@@ -37,6 +38,7 @@ from brutex.engine.sweep_verify import (
     compare_recount,
     plan_expected_stores,
     recorded_context_from_audit,
+    recorded_stage3_from_audit,
     verify_identity,
     verify_structural,
 )
@@ -642,3 +644,140 @@ class TestRecountCompare:
         report = compare_recount(original, scratch, plan, context_match=True)
         assert report.findings == ()
         assert report.checked_stores == 3  # only the surviving tuple's triple
+
+
+# ── Stage-3 recount support (DEC-STAGE3-RECOUNT-001) ─────────────────────────
+
+
+class TestRecordedStage3FromAudit:
+    def test_absent_audit_is_no_history(self, tmp_path: Path) -> None:
+        record = recorded_stage3_from_audit(tmp_path / "nope.jsonl")
+        assert record.knobs is None
+        assert record.consistent is True
+        assert record.optimizer_versions == ()
+
+    def _pass_payload(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "stage3_top_k": 3,
+            "max_fevals": 50,
+            "max_restarts": 1,
+            "train_snapshot_hash": "ab" * 32,
+        }
+        base.update(overrides)
+        return base
+
+    def test_reads_knobs_and_versions(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="STAGE_3_PASS_START", subject="s", payload=self._pass_payload())
+            audit.append(
+                action="STAGE_3_REFINE_START",
+                subject="s",
+                payload={"pycma_version": "3.4.0", "numpy_version": "2.1.0"},
+            )
+        record = recorded_stage3_from_audit(path)
+        assert record.knobs is not None
+        assert record.knobs.stage3_top_k == 3
+        assert record.knobs.max_fevals == 50
+        assert record.knobs.max_restarts == 1
+        assert record.knobs.train_snapshot_hash == "ab" * 32
+        assert record.consistent is True
+        assert record.optimizer_versions == (("3.4.0", "2.1.0"),)
+
+    def test_agreeing_repeat_lines_stay_consistent(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="STAGE_3_PASS_START", subject="s", payload=self._pass_payload())
+            audit.append(action="STAGE_3_PASS_START", subject="s", payload=self._pass_payload())
+        assert recorded_stage3_from_audit(path).consistent is True
+
+    def test_disagreeing_lines_flag_inconsistent(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="STAGE_3_PASS_START", subject="s", payload=self._pass_payload())
+            audit.append(
+                action="STAGE_3_PASS_START",
+                subject="s",
+                payload=self._pass_payload(stage3_top_k=9),
+            )
+        record = recorded_stage3_from_audit(path)
+        assert record.consistent is False  # B4: cells honestly non-reproducible
+
+    def test_missing_knob_key_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        payload = self._pass_payload()
+        del payload["max_fevals"]
+        with AuditWriter.open(path) as audit:
+            audit.append(action="STAGE_3_PASS_START", subject="s", payload=payload)
+        with pytest.raises(SweepVerifyError, match="missing"):
+            recorded_stage3_from_audit(path)
+
+    def test_unreadable_audit_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        path.write_text("{not jsonl\n", encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_stage3_from_audit(path)
+
+
+class TestCellRecountCodes:
+    """compare_recount routes Stage-3 cell stores to the DISTINCT code family."""
+
+    def _trees_with_cell(
+        self, tmp_path: Path
+    ) -> tuple[Path, Path, dict[Path, tuple[SweepTuple, SweepGridConfig, bool]], Path]:
+        """Two identical swept trees + an identical planted CELL store in each."""
+        grid = _grid()
+        original, scratch = tmp_path / "original", tmp_path / "scratch"
+        for root in (original, scratch):
+            root.mkdir()
+            _sweep(root, grid)
+        record = _stage3_record()
+        plan = plan_expected_stores(original, grid, stage3=record)  # type: ignore[arg-type]
+        (cell_rel,) = [
+            p.relative_to(original) for p, (_, _, is_grid) in plan.items() if not is_grid
+        ]
+        grid_store = _store_path(original, grid)
+        for root in (original, scratch):
+            dest = root / cell_rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(root / grid_store.relative_to(original), dest)
+        return original, scratch, plan, original / cell_rel
+
+    def test_identical_cells_verify_silently(self, tmp_path: Path) -> None:
+        original, scratch, plan, _cell = self._trees_with_cell(tmp_path)
+        report = compare_recount(original, scratch, plan, context_match=True, cell_evidence=True)
+        assert report.findings == ()
+
+    def test_cell_divergence_with_evidence_is_corrupt(self, tmp_path: Path) -> None:
+        original, scratch, plan, cell = self._trees_with_cell(tmp_path)
+        cell.write_bytes(cell.read_bytes() + b"tampered")
+        report = compare_recount(original, scratch, plan, context_match=True, cell_evidence=True)
+        assert _codes(report) == {"cell_recount_divergence"}
+        assert not report.clean
+
+    def test_cell_divergence_without_evidence_is_inconclusive(self, tmp_path: Path) -> None:
+        original, scratch, plan, cell = self._trees_with_cell(tmp_path)
+        cell.write_bytes(cell.read_bytes() + b"tampered")
+        report = compare_recount(original, scratch, plan, context_match=True, cell_evidence=False)
+        assert _codes(report) == {"cell_recount_divergence_inconclusive"}
+        assert report.clean is True  # B1: never condemns without the full gate
+
+    def test_cell_divergence_under_grid_corruption_is_dependent(self, tmp_path: Path) -> None:
+        # B5: scratch cells derive from scratch grid stores — collateral only.
+        original, scratch, plan, cell = self._trees_with_cell(tmp_path)
+        grid_store = _store_path(original, _grid())
+        grid_store.write_bytes(grid_store.read_bytes() + b"tampered")
+        cell.write_bytes(cell.read_bytes() + b"tampered")
+        report = compare_recount(original, scratch, plan, context_match=True, cell_evidence=True)
+        codes = _codes(report)
+        assert "recount_divergence" in codes  # the grid verdict stands
+        assert "cell_recount_divergence_dependent" in codes
+        assert "cell_recount_divergence" not in codes  # never independent here
+
+    def test_grid_only_audit_has_no_stage3_history(self, tree: Path) -> None:
+        # A real grid-only sweep audit (SWEEP_START/FLUSH/COMPLETE lines, no
+        # stage3 pass) reads as the honest no-history record.
+        record = recorded_stage3_from_audit(tree / "audit.jsonl")
+        assert record.knobs is None
+        assert record.consistent is True
+        assert record.optimizer_versions == ()
