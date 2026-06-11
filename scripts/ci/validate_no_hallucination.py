@@ -62,6 +62,7 @@ from pathlib import Path
 EXTERNAL_CLAIM_KEYWORDS = re.compile(
     r"\b("
     r"groww(?:hq)?|"
+    r"dhan(?:hq)?|"
     r"nse(?:india)?|"
     r"bse(?:india)?|"
     r"sebi|"
@@ -93,6 +94,11 @@ CITATION_PATTERNS = [
     re.compile(r"TRACK[12]_[A-Z_]+\.md", re.IGNORECASE),
     re.compile(r"STANDARDS_100PCT\.md\s*§", re.IGNORECASE),
     re.compile(r"groww\.in/trade-api/docs", re.IGNORECASE),
+    # Dhan is the LIVE vendor (DEC-GROWW-DHAN-REVERT-001 / ADR-0002); the
+    # 2026-06-11 honesty audit found this scanner still Groww-only.
+    re.compile(r"api\.dhan\.co", re.IGNORECASE),
+    re.compile(r"dhan-ref/", re.IGNORECASE),
+    re.compile(r"\bper\s+(the\s+)?dhan", re.IGNORECASE),
     re.compile(r"nseindia\.com", re.IGNORECASE),
     # Decision IDs (DEC-FOO-NNN) also count — those resolve to ledger entries.
     re.compile(r"\bDEC-[A-Z][A-Z0-9_-]*-\d{3,}\b"),
