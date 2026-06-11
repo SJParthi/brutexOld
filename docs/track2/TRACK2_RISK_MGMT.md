@@ -14,7 +14,10 @@ NIFTY 50, BANKNIFTY, and SENSEX under Groww (primary) or Zerodha
 - Live order placement (signal-replay only; no execution against real markets)
 - Portfolio-level cross-strategy netting (each strategy evaluated standalone)
 - Counterparty default risk (clearing corp insurance assumed sufficient)
-- Single-stock derivatives (Track 1 universe is indices only)
+- Single-stock derivatives as a TRADED universe (the Track 1 BRUTE-FORCE
+  ENGINE is indices only; the Track 1 LAKE additionally ingests 200
+  F&O-eligible single-stock spot + options as REFERENCE_ONLY per
+  DEC-P0-063 — not traded, not risk-managed here)
 
 **Single source of truth for numeric constants:** this document.
 Numeric constants will eventually move to `brutex/risk/limits.py`.

@@ -95,9 +95,13 @@ Track 1 spec locked after 4-agent hostile-review pass._
    lake ready for future brute-force expansion (separate decision; not
    authorized here). The "4 index instruments / no F&O contracts"
    wording above describes the ENGINE; the LAKE is the expanded surface
-   per DEC-P0-063. Full §3 / cross-spec reconciliation across the
-   ~15 remaining stale-text locations is a tracked follow-up PR; until
-   then DEC-P0-063 is authoritative for the stock-options expansion.
+   per DEC-P0-063. The §3 / cross-spec stale-text reconciliation is
+   COMPLETE (DEC-P0-063-RECONCILE-COMPLETE-001 — a very-thorough survey
+   found the "~15" estimate stale: the DEC-SPEC-CONSISTENCY series
+   #262-#266 had already reconciled 11 locations; the 2 genuinely-stale
+   remainders were fixed and 1 immutable ADR record correctly left
+   as-is). DEC-P0-063 remains authoritative for the stock-options
+   expansion.
 
    **Amended by DEC-INSTRUMENT-UNIVERSE-FAST-001 (2026-05-29, MIGRATION.md
    entry #160):** lean ingest — the `instruments` table now persists ONLY
