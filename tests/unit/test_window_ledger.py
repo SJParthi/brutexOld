@@ -16,7 +16,9 @@ from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import (
     EMPTY_TERMINAL_THRESHOLD,
     PLANNED,
+    SETTLED_STATUSES,
     SKIPPED,
+    SUCCESS,
     WindowLedger,
 )
 
@@ -427,6 +429,17 @@ class TestPruneSuperseded:
 
     def test_empty_ledger_prunes_nothing(self) -> None:
         assert WindowLedger().prune_superseded(_plan_index(_tkey(date(2026, 6, 10)))) == 0
+
+
+def test_settled_statuses_is_the_skip_authority() -> None:
+    # DEC-SPOT-COVERAGE-COMPLETENESS-001: the public settled set is EXACTLY the
+    # statuses is_skippable() honours — read-only consumers classify with the
+    # ledger's own authority, never a hand-typed mirror list.
+    assert frozenset({SUCCESS, SKIPPED}) == SETTLED_STATUSES
+    ledger = WindowLedger()
+    ledger.record(_key(), raw_bars=5, error_type=None, bars_appended=5, now=_NOW)
+    record = ledger.records()[0]
+    assert (record.status in SETTLED_STATUSES) == ledger.is_skippable(_key())
 
 
 def test_records_are_sorted() -> None:

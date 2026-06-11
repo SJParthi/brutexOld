@@ -46,6 +46,7 @@ __all__ = [
     "EMPTY_TERMINAL_THRESHOLD",
     "FAILED",
     "PLANNED",
+    "SETTLED_STATUSES",
     "SKIPPED",
     "SUCCESS",
     "WindowLedger",
@@ -72,6 +73,13 @@ EMPTY_TERMINAL_THRESHOLD: int = 3
 
 #: The two settled statuses — a window in either is skipped on the next pull.
 _SKIPPABLE: frozenset[str] = frozenset({SUCCESS, SKIPPED})
+
+#: PUBLIC alias of the settled set (DEC-SPOT-COVERAGE-COMPLETENESS-001): read-only
+#: consumers (the /coverage spot completeness rollup) classify "settled vs still
+#: outstanding" with the LEDGER'S OWN skip authority instead of minting another
+#: hand-typed status list — anything NOT in this set (and not FAILED) is pending
+#: work the next pull re-fetches.
+SETTLED_STATUSES: frozenset[str] = _SKIPPABLE
 
 
 @dataclass(frozen=True, slots=True)

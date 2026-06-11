@@ -63,6 +63,7 @@ from brutex.dashboard.db_view import (
     query_option_candles,
     query_table,
     sample_rows,
+    spot_window_rollup,
     summarize_option_datasets,
     summarize_spot_datasets,
     table_summary,
@@ -1913,9 +1914,12 @@ def build_app(
         (the pure projection). READ-ONLY — no pull logic.
 
         **Honest envelope (Golden Rule #10):** a dataset present in the lake
-        counts as *pulled*; partial-date-range detection is an explicit
-        follow-up, not claimed here. When no lake root is wired (a store opened
-        without a filesystem path) the payload is an empty summary, never a 500.
+        counts as *pulled*; each row's ``completeness`` chip asserts ONLY
+        ledger-settledness over planner-planned ranges
+        (DEC-SPOT-COVERAGE-COMPLETENESS-001 — partially executes the #397
+        follow-up; a trading-day gap audit is NOT claimed). When no lake root
+        is wired (a store opened without a filesystem path) the payload is an
+        empty summary, never a 500.
         """
         store = _require_store()
         lake_root = getattr(store, "path", None)
@@ -1931,8 +1935,19 @@ def build_app(
             # thread (DEC-DASHBOARD-FASTREAD-001).
             return summarize_spot_datasets(store.connection, lake)
 
-        rows = await run_in_threadpool(_summary_cache.get_or_refresh, SPOT, recompute=_recompute)
-        return JSONResponse(build_spot_coverage_payload(rows))
+        def _rows_and_rollup() -> dict[str, Any]:
+            """Lake rows via SummaryCache + the ledger rollup PER REQUEST.
+
+            The rollup deliberately lives OUTSIDE the SummaryCache (hostile C8):
+            ledger flushes never bump that cache's generation, so fusing the
+            join into ``_recompute`` would freeze the chips until the next LAKE
+            write. ``spot_window_rollup`` carries its own mtime-keyed cache, so
+            the per-request cost is O(datasets) between ledger flushes.
+            """
+            rows = _summary_cache.get_or_refresh(SPOT, recompute=_recompute)
+            return build_spot_coverage_payload(rows, spot_window_rollup(lake))
+
+        return JSONResponse(await run_in_threadpool(_rows_and_rollup))
 
     @app.get("/api/v1/coverage/windows")
     async def api_coverage_windows(
