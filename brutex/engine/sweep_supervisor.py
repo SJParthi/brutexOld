@@ -60,17 +60,25 @@ Honest envelope (Golden Rule #10) — what each layer does and does NOT guarante
 Crash-safety contract
 ---------------------
 The checkpoint is recorded **after** ``run_one_tuple`` returns (and after the
-store flush + ``ComboDedup`` mark inside it). A ``SIGKILL`` mid-tuple therefore
-leaves that tuple's index un-recorded → it is re-processed on resume, where
-``ComboDedup`` skips every already-flushed mask (O(masks), cheap) and
-:func:`~brutex.engine.sweep_orchestrator.load_or_create_store` re-flushes the
-SAME rows byte-identically (redo-not-skip; never a silent hole, never a double
-persist). The :class:`SweepCache` tuple key is the **full** tuple+grid identity
-(incl. ``condition_bits``, ``k``, ``top_k``, ``min_hits``, ``max_combos`` + the
-three reproducibility hashes) so a re-run with ANY changed knob computes a
-different key and is never falsely skipped — the cache-skip path has no
-preload-and-reflush safety net, so its key is intentionally stricter than the
-per-tuple Parquet path digest.
+store flush + sidecar + ``ComboDedup`` mark + completion sentinel inside it). A
+``SIGKILL`` mid-tuple therefore leaves that tuple's index un-recorded → it is
+re-processed on resume, where the tuple's COMPLETION SENTINEL decides
+(DEC-MARK-MANY-SENTINEL-001): a PAIRED sentinel short-circuits the tuple
+entirely (O(1) check + one store re-hash — no re-evaluation); an
+absent/unpaired sentinel forces a FULL re-evaluation with dedup probes
+bypassed, where :func:`~brutex.engine.sweep_orchestrator.load_or_create_store`
++ idempotent appends re-flush the SAME rows byte-identically (redo-not-skip;
+never a silent hole, never a double persist, never a SUBSET re-rank). The
+prior claim here that ``ComboDedup`` "skips every already-flushed mask" on
+resume was FALSE cross-process (the production dedup is in-memory — a new
+process starts with no marks) and unsafe same-process (a crash inside the
+per-key mark loop leaves a subset; MIGRATION.md #650) — corrected per
+DEC-MARK-MANY-SENTINEL-001. The :class:`SweepCache` tuple key is the **full**
+tuple+grid identity (incl. ``condition_bits``, ``k``, ``top_k``, ``min_hits``,
+``max_combos`` + the three reproducibility hashes) so a re-run with ANY
+changed knob computes a different key and is never falsely skipped — the
+cache-skip path has no preload-and-reflush safety net, so its key is
+intentionally stricter than the per-tuple Parquet path digest.
 """
 
 from __future__ import annotations

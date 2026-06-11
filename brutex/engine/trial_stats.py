@@ -404,12 +404,16 @@ def write_tuple_trial_stats(path: Path, stats: TupleTrialStats) -> Path:
 
     A kill mid-write never leaves a half-written sidecar (the results-store
     atomic-write discipline, reused). POLICY CONTRACT (ADR-0008 condition 2,
-    enforced by the slice-2 caller, restated here because this is the only
-    write surface): the sweep overwrites a sidecar **iff** the run evaluated
-    the tuple's FULL mask population (``skipped_dedup == 0``) and PRESERVES
-    it otherwise — merging accumulated scalars across partial runs is
-    forbidden (a partial redo would double-count; there is no keyed dedup
-    for sums).
+    enforced by the sweep caller, restated here because this is the only
+    write surface): a sidecar must only ever be written from the tuple's
+    FULL mask population — merging accumulated scalars across partial runs
+    is forbidden (a partial redo would double-count; there is no keyed dedup
+    for sums). The slice-2 caller enforced this via the
+    ``skipped_dedup == 0`` guard; since DEC-MARK-MANY-SENTINEL-001 the
+    guarantee is STRUCTURAL — the sentinel-authoritative redo bypasses dedup
+    probes on the digest path, so a subset population cannot occur and every
+    write is a byte-identical full-population rewrite (a PAIRED sentinel
+    short-circuits before any write; an unpaired one forces the full redo).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     # The results store's atomic writer is the ONE source of the

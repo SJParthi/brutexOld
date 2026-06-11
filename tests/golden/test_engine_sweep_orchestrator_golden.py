@@ -116,7 +116,7 @@ def test_golden_determinism_across_independent_runs(tmp_path: Path) -> None:
 
 
 def test_golden_idempotent_resume_is_lossless(tmp_path: Path) -> None:
-    """Re-run with a SHARED populated dedup → byte-identical files, evaluated==0."""
+    """Re-run over the SAME root → sentinel short-circuit, byte-identical files."""
     pytest.importorskip("polars")
     bars = _trending_bars()
     root = tmp_path / "results"
@@ -134,9 +134,12 @@ def test_golden_idempotent_resume_is_lossless(tmp_path: Path) -> None:
 
     # Re-run against the SAME root + the SAME (now populated) dedup.
     second = _run(root, tmp_path / "run2.jsonl", shared, bars)
-    # Every mask is dedup-skipped on the re-run …
+    # Every tuple is short-circuited by its PAIRED completion sentinel
+    # (DEC-MARK-MANY-SENTINEL-001) — nothing re-evaluated, and the dedup is
+    # never consulted (its marks are advisory; pre-sentinel this re-run was
+    # instead dedup-skipped with skipped_dedup == first.evaluated) …
     assert second.evaluated == 0
-    assert second.skipped_dedup == first.evaluated
+    assert second.skipped_dedup == 0
     # … and the files are byte-IDENTICAL, never overwritten with an empty store.
     for path, original in before.items():
         assert path.read_bytes() == original, "resume re-run must not lose results"
