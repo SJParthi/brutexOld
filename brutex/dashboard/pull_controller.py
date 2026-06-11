@@ -64,6 +64,7 @@ from brutex.adapters.dhan.until_clean import (
 )
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.sink import BarSink, NullBarSink
+from brutex.data.tf_autoderive import autoderive_enabled
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
     end_pull_ledger,
@@ -1457,7 +1458,80 @@ def pull_all_spot(
                 pending_windows=verdict.pending_windows,
                 auth_cause=verdict.auth_cause,
             )
+        # AUTOMATIC derived-TF materialisation on settle (DEC-TF-MATERIALIZE-002):
+        # re-derive the 19 intraday timeframes for every symbol that landed NEW
+        # 1-minute bars — zero clicks, gated behind the BRUTEX_AUTO_DERIVE_TFS=1
+        # opt-in (default OFF per the operator's 2026-06-11 storage decision).
+        # Quarantined end-to-end: auto-derive can NEVER fail or slow a pull's
+        # verdict (the pull already returned its bars + ledger state).
+        if not dry_run and autoderive_enabled():  # pragma: no cover — raw lake I/O glue
+            _autoderive_after_pull(
+                instruments=instruments, bulk=bulk, lake_root=lake_root, pull_id=pid
+            )
     return bulk
+
+
+def _autoderive_after_pull(  # pragma: no cover — raw lake I/O glue; planner core is 100%-unit-tested
+    *,
+    instruments: Sequence[Instrument],
+    bulk: BulkSpotReport,
+    lake_root: Path,
+    pull_id: str,
+) -> None:
+    """Re-materialise the 19 derived TFs for every symbol the pull refreshed.
+
+    The pull-settle arm of DEC-TF-MATERIALIZE-002: binds the SHARED lake
+    read/write builders (the same pair the manual derive route uses —
+    CLAUDE.md §11 COMMON) per settled symbol and runs the quarantining
+    planner. Wrapped so NO failure here can ever surface as a pull error —
+    the pull's verdict is already final when this runs.
+    """
+    from brutex.data.tf_autoderive import plan_autoderive_symbols, run_autoderive
+    from brutex.data.timeframe_materialize import (
+        MATERIALIZABLE_TFS,
+        MaterializeResult,
+        make_lake_read_1m,
+        make_lake_write_tf,
+        materialize_timeframes,
+    )
+
+    try:
+        by_symbol = {inst.symbol_name: inst for inst in instruments}
+        planned = plan_autoderive_symbols(bulk.symbols)
+
+        def _materialize_one(symbol: str) -> MaterializeResult:
+            inst = by_symbol[symbol]
+            exchange = inst.exch_id.value
+            segment = inst.segment.value
+            return materialize_timeframes(
+                tfs=MATERIALIZABLE_TFS,
+                read_1m=make_lake_read_1m(
+                    lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
+                ),
+                write_tf=make_lake_write_tf(
+                    lake_root=lake_root, exchange=exchange, segment=segment, symbol=symbol
+                ),
+            )
+
+        report = run_autoderive(symbols=planned, materialize_one=_materialize_one)
+    except Exception as exc:
+        _LOG.warning("universe.autoderive.error", pull_id=pull_id, error=str(exc))
+        return
+    _LOG.info(
+        "universe.autoderive.done",
+        pull_id=pull_id,
+        symbols_planned=len(planned),
+        symbols_ok=report.symbols_ok,
+        symbols_failed=report.symbols_failed,
+        derived_bars=report.total_bars,
+    )
+    if report.symbols_failed:
+        _LOG.warning(
+            "universe.autoderive.quarantined",
+            pull_id=pull_id,
+            symbols=[o.symbol for o in report.outcomes if not o.ok],
+            note="auto-derive quarantined these symbols; the pull itself is unaffected",
+        )
 
 
 def pull_candles(

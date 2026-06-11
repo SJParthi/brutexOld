@@ -20,6 +20,7 @@ from brutex.doctor import (
     DoctorReport,
     check_audit_chain,
     check_audit_replay_consistency,
+    check_derived_freshness,
     check_runtime_file,
     main,
     run_doctor,
@@ -299,15 +300,17 @@ class TestRunDoctor:
             audit_file=None,
             audit_dir=tmp_path / "no_audit",
             runtime_file=tmp_path / "no_runtime.json",
+            lake_root=tmp_path / "no_lake",
         )
         assert report.ok is True
-        # 3 checks: audit_chain + runtime_file + audit_replay
-        assert len(report.checks) == 3
+        # 4 checks: audit_chain + runtime_file + audit_replay + derived_freshness
+        assert len(report.checks) == 4
         statuses = {c.name: c.status for c in report.checks}
         assert statuses == {
             "audit_chain": "SKIP",
             "runtime_file": "SKIP",
             "audit_replay": "SKIP",
+            "derived_freshness": "SKIP",
         }
 
     def test_audit_pass_runtime_skip(self, good_audit_log: Path, tmp_path: Path) -> None:
@@ -315,6 +318,7 @@ class TestRunDoctor:
             audit_file=good_audit_log,
             audit_dir=tmp_path,
             runtime_file=tmp_path / "no_runtime.json",
+            lake_root=tmp_path / "no_lake",
         )
         assert report.ok is True
         statuses = {c.name: c.status for c in report.checks}
@@ -327,6 +331,7 @@ class TestRunDoctor:
             audit_file=tmp_path / "missing.jsonl",
             audit_dir=tmp_path,
             runtime_file=tmp_path / "no_runtime.json",
+            lake_root=tmp_path / "no_lake",
         )
         assert report.ok is False
 
@@ -343,6 +348,7 @@ class TestRunDoctor:
             audit_dir=tmp_path,
             runtime_file=tmp_path / "no_runtime.json",
             live_subjects_file=live,
+            lake_root=tmp_path / "no_lake",
         )
         statuses = {c.name: c.status for c in report.checks}
         assert statuses["audit_replay"] == "PASS"
@@ -356,6 +362,7 @@ class TestRunDoctor:
             audit_dir=tmp_path,
             runtime_file=tmp_path / "no_runtime.json",
             live_subjects_file=live,
+            lake_root=tmp_path / "no_lake",
         )
         assert report.ok is False
         statuses = {c.name: c.status for c in report.checks}
@@ -377,6 +384,7 @@ class TestMain:
             audit_file=good_audit_log,
             audit_dir=tmp_path,
             runtime_file=tmp_path / "absent.json",
+            lake_root=tmp_path / "no_lake",
         )
         assert rc == 0
         captured = capsys.readouterr()
@@ -390,7 +398,118 @@ class TestMain:
             audit_file=tmp_path / "missing.jsonl",
             audit_dir=tmp_path,
             runtime_file=tmp_path / "absent.json",
+            lake_root=tmp_path / "no_lake",
         )
         assert rc == 1
         captured = capsys.readouterr()
         assert "FAIL" in captured.out
+
+
+# ────────────────────────────────────────────────────────────────────────
+# derived_freshness (DEC-TF-MATERIALIZE-002)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _write_lake_partition(lake_root: Path, interval: str, frame: object) -> None:
+    """Write one synthetic month partition in the canonical lake layout."""
+    import polars as pl
+
+    out = lake_root / "bars" / "NSE" / "INDEX" / "NIFTY" / interval / "2025"
+    out.mkdir(parents=True, exist_ok=True)
+    assert isinstance(frame, pl.DataFrame)
+    frame.rename({"ts_utc": "timestamp"}).write_parquet(out / "06.parquet")
+
+
+def _synthetic_1m() -> object:
+    from datetime import UTC, datetime, timedelta
+
+    import polars as pl
+
+    open_utc = datetime(2025, 6, 9, 3, 45, tzinfo=UTC).replace(tzinfo=None)
+    closes = [100.0 + i * 0.1 for i in range(30)]
+    return pl.DataFrame(
+        {
+            "ts_utc": [open_utc + timedelta(minutes=i) for i in range(30)],
+            "open": [c - 0.05 for c in closes],
+            "high": [c + 0.05 for c in closes],
+            "low": [c - 0.1 for c in closes],
+            "close": closes,
+            "volume": [1000] * 30,
+        },
+        schema={
+            "ts_utc": pl.Datetime,
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+        },
+    )
+
+
+class TestDerivedFreshness:
+    def test_skip_when_no_lake(self, tmp_path: Path) -> None:
+        result = check_derived_freshness(tmp_path / "no_lake")
+        assert result.status == "SKIP"
+        assert "nothing to verify" in result.detail
+
+    def test_skip_when_no_derived_partitions(self, tmp_path: Path) -> None:
+        _write_lake_partition(tmp_path, "1minute", _synthetic_1m())
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "SKIP"
+        assert "no symbol has stored derived timeframes" in result.detail
+
+    def test_pass_when_stored_equals_rederivation(self, tmp_path: Path) -> None:
+        import polars as pl
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        _write_lake_partition(tmp_path, "1minute", df_1m)
+        _write_lake_partition(tmp_path, "5minute", resample_1m_to_tf(df_1m, 5))
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "PASS"
+        assert "NIFTY" in result.detail
+
+    def test_fail_when_stored_table_is_stale(self, tmp_path: Path) -> None:
+        import polars as pl
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        _write_lake_partition(tmp_path, "1minute", df_1m)
+        stale = resample_1m_to_tf(df_1m, 5).with_columns((pl.col("close") + 1.0).alias("close"))
+        _write_lake_partition(tmp_path, "5minute", stale)
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "FAIL"
+        assert "5minute" in result.detail
+
+    def test_skip_when_symbol_has_derived_but_no_1minute_base(self, tmp_path: Path) -> None:
+        # A derived partition with NO 1minute base: the symbol cannot be
+        # verified, so it is passed over (covering the no-base continue) and
+        # the probe lands on the honest SKIP.
+        import polars as pl
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        _write_lake_partition(tmp_path, "5minute", resample_1m_to_tf(df_1m, 5))
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "SKIP"
+        assert "no symbol has stored derived timeframes" in result.detail
+
+    def test_fail_when_probe_errors_on_corrupt_parquet(self, tmp_path: Path) -> None:
+        # A corrupt 1minute parquet makes the probe raise — the check must
+        # REPORT the error as a FAIL, never crash the doctor run.
+        import polars as pl
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        _write_lake_partition(tmp_path, "5minute", resample_1m_to_tf(df_1m, 5))
+        corrupt = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2025"
+        corrupt.mkdir(parents=True, exist_ok=True)
+        (corrupt / "06.parquet").write_bytes(b"this is not a parquet file")
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "FAIL"
+        assert "freshness probe errored" in result.detail
