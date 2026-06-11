@@ -143,7 +143,11 @@ class TestRender:
         out = render_leaderboard([_row(1, mask_bits=(1 << 0) | (1 << 23))])
         assert "#1  NIFTY 5m bull" in out
         assert "close_above_ema20 AND near_fib_618" in out
-        assert "dsr=+0.9700" in out
+        # ADR-0008 condition 7: the row's deflated number is LABELLED with the
+        # N it was deflated against (the per-tuple rank-time count) — the bare
+        # ambiguous `dsr=` label is gone.
+        assert "dsr@tupleN=+0.9700" in out
+        assert " dsr=" not in out
 
     def test_no_per_row_gate_verdict_is_rendered(self) -> None:
         # DEC-STAGE3-WIRE-001 (review F6): a row cannot reveal whether it is a
@@ -155,7 +159,7 @@ class TestRender:
     def test_no_condition_mask_and_deflated_none(self) -> None:
         out = render_leaderboard([_row(1, mask_bits=0, deflated_sharpe=None)])
         assert "(no conditions — enters every bar)" in out
-        assert "dsr=—" in out
+        assert "dsr@tupleN=—" in out
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -226,10 +230,18 @@ def _sidecar_json(groups: list[dict[str, object]], *, version: int = 1) -> str:
     return json.dumps({"version": version, "sweep_id": "a" * 64, "groups": groups})
 
 
-def _group(pbo: float | None, *, omit_key: bool = False) -> dict[str, object]:
+def _group(
+    pbo: float | None,
+    *,
+    omit_key: bool = False,
+    dsr: tuple[str, int] | None = None,
+) -> dict[str, object]:
     report: dict[str, object] = {"n_input": 3, "n_survived": 2}
     if not omit_key:
         report["pool_pbo"] = pbo
+    if dsr is not None:
+        report["dsr_n_source"] = dsr[0]
+        report["dsr_n_trials"] = dsr[1]
     return {"instrument": "NIFTY", "tf": "1minute", "report": report}
 
 
@@ -251,6 +263,27 @@ class TestCascadeSidecar:
         out = render_cascade_sidecar(tmp_path)
         assert "Stage-4 cascade sidecar" in out
         assert "NIFTY 1minute  pool PBO=0.6571  in=3 survived=2" in out
+
+    def test_dsr_leaderboard_source_renders_n(self, tmp_path: Path) -> None:
+        # ADR-0008 condition 7: the cascade group line labels which trial
+        # population filter #2 deflated against, echoing the frozen N.
+        _write_sidecar(tmp_path, _sidecar_json([_group(0.25, dsr=("leaderboard", 841))]))
+        out = render_cascade_sidecar(tmp_path)
+        assert "dsr N=841 source=leaderboard" in out
+
+    def test_dsr_pool_fallback_renders_loudly(self, tmp_path: Path) -> None:
+        # The "pool" stamp can never masquerade as the corrected figure.
+        _write_sidecar(tmp_path, _sidecar_json([_group(0.25, dsr=("pool", 3))]))
+        out = render_cascade_sidecar(tmp_path)
+        assert "dsr N=3 source=pool" in out
+
+    def test_pre_adr0008_report_dsr_stamp_absent_is_distinguished(self, tmp_path: Path) -> None:
+        # Three-state honesty: a report serialized before the stamp existed is
+        # a DIFFERENT state from either source value — never flattened.
+        _write_sidecar(tmp_path, _sidecar_json([_group(0.25)]))
+        out = render_cascade_sidecar(tmp_path)
+        assert "dsr N not stamped (pre-ADR-0008 report)" in out
+        assert "source=" not in out
 
     def test_null_pool_pbo_renders_skipped(self, tmp_path: Path) -> None:
         _write_sidecar(tmp_path, _sidecar_json([_group(None)]))
@@ -297,7 +330,9 @@ class TestCascadeSidecar:
 
     def test_show_report_appends_sidecar_section(self, tmp_path: Path) -> None:
         _write_tree(tmp_path)
-        _write_sidecar(tmp_path, _sidecar_json([_group(0.25)]))
+        _write_sidecar(tmp_path, _sidecar_json([_group(0.25, dsr=("leaderboard", 12))]))
         out = results_show_report(tmp_path, top=10)
         assert "finalists=3" in out
-        assert out.rstrip().endswith("pool PBO=0.2500  in=3 survived=2")
+        assert out.rstrip().endswith(
+            "pool PBO=0.2500  in=3 survived=2  dsr N=12 source=leaderboard"
+        )

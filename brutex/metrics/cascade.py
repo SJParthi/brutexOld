@@ -102,6 +102,7 @@ __all__ = [
     "CandidateVerdict",
     "CascadeConfig",
     "CascadeReport",
+    "DsrTrialStats",
     "FilterStage",
     "run_stage4_cascade",
 ]
@@ -278,6 +279,45 @@ class CandidateVerdict:
 
 
 @dataclass(frozen=True, slots=True)
+class DsrTrialStats:
+    """Externally-supplied leaderboard deflation inputs for filter #2 (ADR-0008).
+
+    The FROZEN per-(instrument, tf) trial population the cascade deflates
+    against when the launcher supplies it (DEC-TRIAL-STATS-CONSUME-001):
+    ``n_trials`` = every backtested combo + every unique Stage-3 refined row
+    of the leaderboard (the spec's per-leaderboard N), and
+    ``sharpe_variance`` = the population variance of the finite trial Sharpes
+    (the same population — the Bailey-LdP requirement). Built by
+    ``brutex.engine.cascade_wire`` from the manifest-frozen records; this
+    module stays engine-agnostic.
+
+    Raises
+    ------
+    ValueError
+        If ``n_trials < 1``, ``n_finite`` is negative or exceeds ``n_trials``,
+        or ``sharpe_variance`` is negative/non-finite.
+    """
+
+    n_trials: int
+    sharpe_variance: float
+    n_finite: int
+
+    def __post_init__(self) -> None:
+        """Validate the deflation inputs at construction time."""
+        if self.n_trials < 1:
+            raise ValueError(f"DsrTrialStats.n_trials must be >= 1, got {self.n_trials}")
+        if not 0 <= self.n_finite <= self.n_trials:
+            raise ValueError(
+                f"DsrTrialStats.n_finite must be in [0, n_trials], got {self.n_finite}"
+            )
+        if not math.isfinite(self.sharpe_variance) or self.sharpe_variance < 0.0:
+            raise ValueError(
+                f"DsrTrialStats.sharpe_variance must be finite and >= 0, "
+                f"got {self.sharpe_variance!r}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class CascadeReport:
     """The full cascade outcome."""
 
@@ -296,6 +336,18 @@ class CascadeReport:
     #: (CSCV needs >= 2 candidates); (c) the return series is shorter than one
     #: split block (``usable < pbo_n_splits``).
     pool_pbo: float | None = None
+    #: Which trial population filter #2 deflated against
+    #: (DEC-TRIAL-STATS-CONSUME-001): ``"leaderboard"`` — the frozen
+    #: per-(instrument, tf) trial stats supplied by the wire (the honest,
+    #: spec-mandated N); ``"pool"`` — the legacy entering-pool fallback (an
+    #: anti-conservative under-count, stamped so it can never masquerade as
+    #: the corrected figure). Reports serialized before this field existed
+    #: simply lack the key (the three-state additive precedent).
+    dsr_n_source: str = "pool"
+    #: The N and V filter #2 actually used (echoed for transparency; full
+    #: precision, never rounded — DEC-STAT-DSR-PBO-001).
+    dsr_n_trials: int | None = None
+    dsr_trial_variance: float | None = None
 
     @property
     def rejected_ids(self) -> tuple[str, ...]:
@@ -394,7 +446,10 @@ def _composite_scores(survivors: list[CandidateInput]) -> dict[str, float]:
 
 
 def run_stage4_cascade(
-    candidates: Sequence[CandidateInput], config: CascadeConfig
+    candidates: Sequence[CandidateInput],
+    config: CascadeConfig,
+    *,
+    trial_stats: DsrTrialStats | None = None,
 ) -> CascadeReport:
     """Run the full Stage-4 cascade over a candidate pool.
 
@@ -410,12 +465,18 @@ def run_stage4_cascade(
         ``candidate_id``\\s.
     config
         The :class:`CascadeConfig` (thresholds + mandatory seed).
+    trial_stats
+        Optional FROZEN leaderboard deflation inputs (ADR-0008 /
+        DEC-TRIAL-STATS-CONSUME-001): when supplied, filter #2 deflates
+        against ``trial_stats.n_trials`` / ``trial_stats.sharpe_variance``
+        instead of the entering pool's own count + dispersion; the report's
+        ``dsr_n_source`` records which source was used either way.
 
     Returns
     -------
     CascadeReport
-        Per-candidate verdicts, the ranked survivor ids, and the per-stage
-        survivor counts (audit trail).
+        Per-candidate verdicts, the ranked survivor ids, the per-stage
+        survivor counts (audit trail), and the DSR deflation-source stamp.
 
     Raises
     ------
@@ -440,7 +501,6 @@ def run_stage4_cascade(
 
     survivors = pool
     boot = config.bootstrap()
-    n_trials = len(pool)
 
     # ── HARD GATES (scalar, spec 595-600) ──
     if config.run_hard_gates:
@@ -454,13 +514,25 @@ def run_stage4_cascade(
         survivors = kept
     stage_survivors[FilterStage.HARD_GATES.value] = len(survivors)
 
-    # ── #2 DEFLATED SHARPE (per-candidate; the full pool's trial count + Sharpe
-    # dispersion are the deflation inputs — both taken over the *entering* pool
-    # so N and the variance describe the same population). ──
-    pool_sharpes = [c.sharpe_ratio for c in pool]
-    trial_var = (
-        statistics.pvariance(pool_sharpes) if len(pool_sharpes) >= _MIN_FOR_DISPERSION else 0.0
-    )
+    # ── #2 DEFLATED SHARPE (per-candidate). The deflation inputs come from ONE
+    # of two same-population sources (ADR-0008 condition 3 / DEC-TRIAL-STATS-
+    # CONSUME-001): the FROZEN leaderboard trial stats when supplied — N = every
+    # backtested combo + every unique Stage-3 refined row, V = the variance of
+    # that population's finite Sharpes (the spec's per-leaderboard N,
+    # `TRACK1_BACKTEST_SPEC.md` §Stage 4) — or, as the LOUDLY-STAMPED legacy
+    # fallback, the *entering* pool's own count + Sharpe dispersion (an
+    # anti-conservative under-count, kept only for old trees/manifests). ──
+    if trial_stats is not None:
+        n_trials = trial_stats.n_trials
+        trial_var = trial_stats.sharpe_variance
+        dsr_n_source = "leaderboard"
+    else:
+        pool_sharpes = [c.sharpe_ratio for c in pool]
+        n_trials = len(pool)
+        trial_var = (
+            statistics.pvariance(pool_sharpes) if len(pool_sharpes) >= _MIN_FOR_DISPERSION else 0.0
+        )
+        dsr_n_source = "pool"
     kept = []
     for c in survivors:
         try:
@@ -676,4 +748,7 @@ def run_stage4_cascade(
         n_survived=len(ranked),
         stage_survivors=stage_survivors,
         pool_pbo=pool_pbo,
+        dsr_n_source=dsr_n_source,
+        dsr_n_trials=n_trials,
+        dsr_trial_variance=trial_var,
     )

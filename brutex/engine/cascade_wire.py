@@ -700,6 +700,7 @@ def run_cascade_over_specs(
     bars_for: Callable[[str, str], Sequence[CandleBar]],
     config: CascadeConfig,
     sweep_id: str,
+    leaderboard_trials: Sequence[LeaderboardTrialsRecord] | None = None,
 ) -> CascadeWireReport:
     """Run the Stage-4 cascade per ``(instrument, tf)`` pool → one aggregate report.
 
@@ -724,7 +725,43 @@ def run_cascade_over_specs(
     CascadeWireReport
         One :class:`CascadeReport` per pooled slice, sorted by ``(instrument, tf)``.
     """
-    from brutex.metrics.cascade import run_stage4_cascade
+    from brutex.metrics.cascade import DsrTrialStats, run_stage4_cascade
+
+    # The frozen per-leaderboard deflation inputs (DEC-TRIAL-STATS-CONSUME-001,
+    # ADR-0008 condition 6): a group's record must be PRESENT, COMPLETE and
+    # deflatable to be used; anything less falls back to pool-N LOUDLY — a
+    # knowingly partial N is never deflated against.
+    trials_by_key: dict[tuple[str, str], LeaderboardTrialsRecord] = {}
+    for record in leaderboard_trials or ():
+        trials_by_key[(record.instrument, record.tf_label)] = record
+
+    def _trial_stats_for(instrument: str, tf_label: str) -> DsrTrialStats | None:
+        record = trials_by_key.get((instrument, tf_label))
+        if record is None:
+            if trials_by_key:
+                _LOG.warning(
+                    "cascade_wire.dsr_pool_fallback",
+                    instrument=instrument,
+                    tf=tf_label,
+                    reason="no frozen leaderboard record for this slice",
+                )
+            return None
+        stats = record.to_stats()
+        if not record.complete or not stats.deflatable:
+            _LOG.warning(
+                "cascade_wire.dsr_pool_fallback",
+                instrument=instrument,
+                tf=tf_label,
+                reason="incomplete" if not record.complete else "undeflatable",
+                n_trials=record.n_trials,
+                n_finite=record.n_finite,
+            )
+            return None
+        return DsrTrialStats(
+            n_trials=record.n_trials,
+            sharpe_variance=stats.variance,
+            n_finite=record.n_finite,
+        )
 
     grouped: dict[tuple[str, str], list[CascadeTupleSpec]] = {}
     for spec in specs:
@@ -740,7 +777,9 @@ def run_cascade_over_specs(
             candidates.extend(candidates_for_spec(spec, bars))
         if not candidates:
             continue
-        report = run_stage4_cascade(candidates, config)
+        report = run_stage4_cascade(
+            candidates, config, trial_stats=_trial_stats_for(instrument, tf_label)
+        )
         groups.append((instrument, tf_label, report))
 
     _LOG.info(
@@ -766,6 +805,9 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
     return {
         "n_input": report.n_input,
         "n_survived": report.n_survived,
+        "dsr_n_source": report.dsr_n_source,
+        "dsr_n_trials": report.dsr_n_trials,
+        "dsr_trial_variance": report.dsr_trial_variance,
         "pool_pbo": report.pool_pbo,
         "survivor_ids": list(report.survivor_ids),
         "stage_survivors": dict(report.stage_survivors),
@@ -1373,7 +1415,11 @@ def run_and_write_from_specs(
         leaderboard_trials=leaderboard_trials,
     )
     report = run_cascade_over_specs(
-        specs, bars_for=bars_for, config=cascade_config, sweep_id=sweep_id
+        specs,
+        bars_for=bars_for,
+        config=cascade_config,
+        sweep_id=sweep_id,
+        leaderboard_trials=leaderboard_trials,
     )
     write_manifest(results_root, manifest)
     write_report(results_root, report)
@@ -1408,6 +1454,9 @@ def run_and_write_from_manifest(
         bars_for=bars_for,
         config=manifest.cascade_config,
         sweep_id=manifest.sweep_id,
+        # The FROZEN numbers — the manifest is the only replay-time source
+        # (ADR-0008 condition 1; sidecars are never re-read here).
+        leaderboard_trials=manifest.leaderboard_trials,
     )
     write_report(results_root, report)
     return report
