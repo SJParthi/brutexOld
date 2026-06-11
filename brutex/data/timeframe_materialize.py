@@ -30,11 +30,13 @@ re-implements it.
 
 ## Storable timeframes
 
-The resampler emits all **19** derived intraday timeframes, but the lake
-partition layer (``brutex.data.partition.VALID_INTERVALS``) only addresses a
-subset. :data:`INTRADAY_TF_INTERVALS` is the canonical TF-label → partition
-interval map (the storable set); a requested label absent from a derivation —
-or absent from the derived dict — is reported as ``skipped``, never written.
+The resampler emits all **19** derived intraday timeframes, and since
+DEC-TF-VOCAB-21-001 the lake partition layer
+(``brutex.data.partition.VALID_INTERVALS``) addresses every one of them.
+:data:`INTRADAY_TF_INTERVALS` is the canonical TF-label → partition interval
+map (all 19, derived from ``brutex.data.timeframes``); a requested label
+absent from a derivation — or absent from the derived dict — is reported as
+``skipped``, never written.
 """
 
 from __future__ import annotations
@@ -42,27 +44,31 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
+from brutex.data.timeframes import (
+    ALL_TF_MINUTES,
+    DAILY_TF_MINUTES,
+    LAKE_INTERVAL_LABELS,
+    TF_LABELS,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     import polars as pl
 
-#: Canonical TF-label → lake partition interval map (CLAUDE.md §11 COMMON — the
-#: ONE place this correspondence lives). Keys are the
-#: :data:`~brutex.data.timeframes.TF_LABELS` the resampler emits; values are the
-#: ``brutex.data.partition.VALID_INTERVALS`` member each materialises into. Only
-#: the timeframes the lake can address appear here — the resampler's other
-#: derived labels (``4m, 6m … 14m, 120m, 180m``) have no canonical partition
-#: interval, so they are NOT storable and are reported as ``skipped``.
+#: Canonical TF-label → lake partition interval map for ALL 19 derived
+#: intraday timeframes (DEC-TF-VOCAB-21-001 — derived from the canonical
+#: ``brutex.data.timeframes`` maps, CLAUDE.md §11 COMMON). Keys are the
+#: :data:`~brutex.data.timeframes.TF_LABELS` the resampler emits; values are
+#: the ``brutex.data.partition.VALID_INTERVALS`` member each materialises
+#: into. Pre-DEC-TF-VOCAB-21-001 only 8 of the 19 were storable (the lake
+#: lacked labels for ``4m, 6m … 14m, 120m, 180m``); the full ladder is now
+#: addressable, so every derived TF is storable. An unknown / non-derived
+#: requested label is still reported as ``skipped``, never written.
 INTRADAY_TF_INTERVALS: Final[dict[str, str]] = {
-    "2m": "2minute",
-    "3m": "3minute",
-    "5m": "5minute",
-    "10m": "10minute",
-    "15m": "15minute",
-    "30m": "30minute",
-    "60m": "1hour",
-    "240m": "4hour",
+    TF_LABELS[minutes]: LAKE_INTERVAL_LABELS[minutes]
+    for minutes in ALL_TF_MINUTES
+    if minutes not in (1, DAILY_TF_MINUTES)  # 1m is the fetched base; 1d is fetched natively
 }
 
 #: The materialisable timeframe labels, in canonical (ascending-minutes) order —

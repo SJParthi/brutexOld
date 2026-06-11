@@ -2128,15 +2128,16 @@ def cmd_sweep(
     API's ``IDX_I`` request segment).
     """
     from brutex.data.catalog import Catalog
+    from brutex.data.timeframes import trading_minutes_for_lake_interval
     from brutex.engine.sweep_report import sweep_report
     from brutex.feed.replay import ReplayFeed
-    from brutex.feed.resampler import INTERVAL_SECONDS
     from brutex.ranking import MIN_TRADES
     from brutex.strategies.types import Side
 
     resolved_lake = _resolve_lake_root(lake_root)
     catalog = catalog_path if catalog_path is not None else resolved_lake / "catalog.duckdb"
-    tf_minutes = INTERVAL_SECONDS[interval] // 60
+    # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
+    tf_minutes = trading_minutes_for_lake_interval(interval)
     side = Side.BUY if direction.upper() == "BUY" else Side.SELL
     condition_bits = (
         [int(tok) for tok in conditions.split(",") if tok.strip()]
@@ -2302,6 +2303,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     """
     from brutex.data.catalog import Catalog
     from brutex.data.option_dedup import OptionDedupIndex
+    from brutex.data.timeframes import trading_minutes_for_lake_interval
     from brutex.engine.sweep_audit import SweepAuditWriter
     from brutex.engine.sweep_cache import SweepCache
     from brutex.engine.sweep_checkpoint import SweepCheckpointStore
@@ -2399,8 +2401,10 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         )
         return EXIT_USER_ERROR
 
+    # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
     timeframes = [
-        Timeframe(interval, INTERVAL_SECONDS[interval] // 60) for interval in interval_list
+        Timeframe(interval, trading_minutes_for_lake_interval(interval))
+        for interval in interval_list
     ]
     snapshot = data_snapshot_hash or _data_snapshot_hash(
         exchange=exchange, segment=segment, start=start, end=end, slices=slices
@@ -3458,6 +3462,7 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     """
     from brutex.data.catalog import Catalog
     from brutex.data.catalog_reconcile import reconcile_catalog_from_lake
+    from brutex.data.timeframes import trading_minutes_for_lake_interval
     from brutex.engine.combo_mask import mask_to_entry_signals
     from brutex.engine.stage1a import build_bar_bits
     from brutex.engine.trade_sim import simulate_trades
@@ -3471,7 +3476,8 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     interval = row.tf
     if interval not in INTERVAL_SECONDS:
         raise ValueError(f"unknown timeframe label {interval!r} on result row")
-    tf_minutes = INTERVAL_SECONDS[interval] // 60
+    # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
+    tf_minutes = trading_minutes_for_lake_interval(interval)
     is_bull = row.direction.lower() in ("bull", "buy", "long")
     side = Side.BUY if is_bull else Side.SELL
     direction = TradeDirection.BULL if is_bull else TradeDirection.BEAR

@@ -8,11 +8,14 @@ from brutex.data.timeframes import (
     DAILY_TF_MINUTES,
     INTRADAY_MINUTE_TFS,
     INTRADAY_MULTIMINUTE_TFS,
+    LAKE_INTERVAL_LABELS,
     TF_LABELS,
     is_intraday,
     is_minute_multiple_of,
     label,
+    lake_interval_label,
     parse_label,
+    trading_minutes_for_lake_interval,
 )
 
 
@@ -125,3 +128,67 @@ class TestSpecAlignment:
 
     def test_no_duplicates_in_all_tfs(self) -> None:
         assert len(set(ALL_TF_MINUTES)) == len(ALL_TF_MINUTES)
+
+
+class TestLakeIntervalLabels:
+    """The canonical minutes ↔ lake-label map (DEC-TF-VOCAB-21-001)."""
+
+    def test_covers_all_21_timeframes(self) -> None:
+        assert set(LAKE_INTERVAL_LABELS.keys()) == set(ALL_TF_MINUTES)
+        assert len(LAKE_INTERVAL_LABELS) == 21
+
+    def test_all_lake_labels_unique(self) -> None:
+        assert len(set(LAKE_INTERVAL_LABELS.values())) == len(LAKE_INTERVAL_LABELS)
+
+    @pytest.mark.parametrize(
+        ("tf", "expected"),
+        [
+            (1, "1minute"),
+            (4, "4minute"),
+            (9, "9minute"),
+            (14, "14minute"),
+            (15, "15minute"),
+            (30, "30minute"),
+            (60, "1hour"),
+            (120, "2hour"),
+            (180, "3hour"),
+            (240, "4hour"),
+            (375, "1day"),
+        ],
+    )
+    def test_lake_interval_label(self, tf: int, expected: str) -> None:
+        assert lake_interval_label(tf) == expected
+
+    def test_lake_interval_label_invalid_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unsupported timeframe: 45"):
+            lake_interval_label(45)
+
+    @pytest.mark.parametrize(
+        ("interval", "expected"),
+        [
+            ("1minute", 1),
+            ("7minute", 7),
+            ("13minute", 13),
+            ("30minute", 30),
+            ("1hour", 60),
+            ("2hour", 120),
+            ("3hour", 180),
+            ("4hour", 240),
+        ],
+    )
+    def test_trading_minutes(self, interval: str, expected: int) -> None:
+        assert trading_minutes_for_lake_interval(interval) == expected
+
+    def test_trading_minutes_1day_is_the_375_minute_session(self) -> None:
+        # Regression for the latent cmd_sweep_all 1day=1440 bug
+        # (DEC-TF-VOCAB-21-001): the trade-sim forced-exit logic means the
+        # 375-minute NSE session, never 1440 wall-clock minutes.
+        assert trading_minutes_for_lake_interval("1day") == DAILY_TF_MINUTES == 375
+
+    def test_trading_minutes_invalid_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown lake interval label: '45minute'"):
+            trading_minutes_for_lake_interval("45minute")
+
+    def test_round_trip(self) -> None:
+        for tf in ALL_TF_MINUTES:
+            assert trading_minutes_for_lake_interval(lake_interval_label(tf)) == tf

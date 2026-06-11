@@ -12,8 +12,9 @@ reproducibility.
 
 ## Interval whitelist
 
-Only the 12 canonical candle intervals are accepted. Passing any other
-string raises :class:`PartitionError`.
+Only the 23 canonical candle intervals are accepted (the 21 Track 1
+timeframe labels + ``1week``/``1month``, DEC-TF-VOCAB-21-001). Passing any
+other string raises :class:`PartitionError`.
 
 ## Symbol sanitisation
 
@@ -31,6 +32,7 @@ from pathlib import Path, PurePosixPath
 from typing import Final
 
 from brutex.data.errors import PartitionError
+from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 
 # ────────────────────────────────────────────────────────────────────────
 # Constants
@@ -59,20 +61,13 @@ MONTHS_PER_YEAR: Final[int] = 12
 #: ``bars / exchange / segment / symbol / interval / yyyy / mm.parquet``
 PARTITION_PATH_COMPONENTS: Final[int] = 7
 
-#: The 12 canonical candle intervals accepted in partition paths. Must be
-#: kept in sync with ``the deleted broker adapter``.
-VALID_INTERVALS: Final[frozenset[str]] = frozenset(
+#: The 23 canonical candle intervals accepted in partition paths: the 21
+#: Track 1 timeframe labels (DEC-TF-VOCAB-21-001 — derived from the canonical
+#: ``brutex.data.timeframes.LAKE_INTERVAL_LABELS`` map, the single source of
+#: truth) plus the two calendar-aware labels (``1week``/``1month``, P3
+#: ADR-0014) that pre-date the 21-TF ladder.
+VALID_INTERVALS: Final[frozenset[str]] = frozenset(LAKE_INTERVAL_LABELS.values()) | frozenset(
     {
-        "1minute",
-        "2minute",
-        "3minute",
-        "5minute",
-        "10minute",
-        "15minute",
-        "30minute",
-        "1hour",
-        "4hour",
-        "1day",
         "1week",
         "1month",
     }
@@ -120,7 +115,8 @@ def _validate_interval(interval: str) -> None:
     """Raise PartitionError if *interval* is not a canonical interval name."""
     if interval not in VALID_INTERVALS:
         raise PartitionError(
-            f"interval must be one of the 12 canonical intervals, got {interval!r}"
+            f"interval must be one of the {len(VALID_INTERVALS)} canonical intervals, "
+            f"got {interval!r}"
         )
 
 

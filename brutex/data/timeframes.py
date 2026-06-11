@@ -100,6 +100,82 @@ if set(TF_LABELS.keys()) != set(
     raise AssertionError("TF_LABELS keys must match ALL_TF_MINUTES exactly")
 
 
+# Canonical long-form LAKE interval labels (Parquet partition directory names,
+# ``brutex.data.partition.VALID_INTERVALS`` members) for every Track 1
+# timeframe (DEC-TF-VOCAB-21-001 — the ONE place the minutes ↔ lake-label
+# correspondence lives; ``partition.VALID_INTERVALS`` and
+# ``feed.resampler.INTERVAL_SECONDS`` derive from / sync-test against it).
+LAKE_INTERVAL_LABELS: Final[dict[int, str]] = {
+    1: "1minute",
+    2: "2minute",
+    3: "3minute",
+    4: "4minute",
+    5: "5minute",
+    6: "6minute",
+    7: "7minute",
+    8: "8minute",
+    9: "9minute",
+    10: "10minute",
+    11: "11minute",
+    12: "12minute",
+    13: "13minute",
+    14: "14minute",
+    15: "15minute",
+    30: "30minute",
+    60: "1hour",
+    120: "2hour",
+    180: "3hour",
+    240: "4hour",
+    375: "1day",
+}
+
+if set(LAKE_INTERVAL_LABELS.keys()) != set(
+    ALL_TF_MINUTES
+):  # pragma: no cover — defensive module-load assertion
+    raise AssertionError("LAKE_INTERVAL_LABELS keys must match ALL_TF_MINUTES exactly")
+
+
+def lake_interval_label(tf_minutes: int) -> str:
+    """Map minute-count to the canonical long-form LAKE interval label.
+
+    Examples:
+        >>> lake_interval_label(1)
+        '1minute'
+        >>> lake_interval_label(60)
+        '1hour'
+        >>> lake_interval_label(375)
+        '1day'
+    """
+    if tf_minutes not in LAKE_INTERVAL_LABELS:
+        raise ValueError(
+            f"Unsupported timeframe: {tf_minutes} minutes. "
+            f"Must be one of {sorted(LAKE_INTERVAL_LABELS.keys())}."
+        )
+    return LAKE_INTERVAL_LABELS[tf_minutes]
+
+
+def trading_minutes_for_lake_interval(interval: str) -> int:
+    """Parse a lake interval label back to its TRADING-minute count.
+
+    The daily label maps to the 375-minute NSE session (NOT 1440 wall-clock
+    minutes) — this is the ``Timeframe.minutes`` the trade-sim forced-exit
+    logic means (DEC-TF-VOCAB-21-001; was the latent ``1day``=1440 bug in
+    ``cmd_sweep_all``'s ``INTERVAL_SECONDS // 60`` derivation).
+
+    Examples:
+        >>> trading_minutes_for_lake_interval("1minute")
+        1
+        >>> trading_minutes_for_lake_interval("1day")
+        375
+    """
+    inverse = {v: k for k, v in LAKE_INTERVAL_LABELS.items()}
+    if interval not in inverse:
+        raise ValueError(
+            f"Unknown lake interval label: {interval!r}. Must be one of {sorted(inverse.keys())}."
+        )
+    return inverse[interval]
+
+
 def label(tf_minutes: int) -> str:
     """Map minute-count to canonical TF label.
 
