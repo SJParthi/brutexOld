@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import bisect
 import io
+import re
 import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -985,6 +986,72 @@ def render_xlsx(rows: list[PreOpenRow], *, title: str | None = None) -> bytes:
     return buffer.getvalue()
 
 
+#: How many symbols a filename spells out before collapsing to ``+Nmore`` —
+#: keeps a many-symbol selection's name readable and well under filesystem
+#: name limits while staying a precise reference (DEC-REPORT-FILENAME-001).
+_FILENAME_SYMBOL_CAP: Final[int] = 5
+
+
+def _filename_token(value: str) -> str:
+    """Sanitize one filename token to ``[A-Za-z0-9-]`` (``M&M`` → ``M-M``).
+
+    Every non-safe run collapses to a single ``-`` and edge dashes are
+    trimmed, so the token can never smuggle a path separator, a quote (the
+    ``Content-Disposition`` header wraps the name in quotes), or whitespace
+    into the download name. An all-unsafe input degrades to ``X`` rather
+    than an empty token.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9-]+", "-", value).strip("-")
+    return cleaned or "X"
+
+
+def report_filename(
+    *,
+    extension: str,
+    start: date,
+    end: date,
+    basis: str,
+    symbols: Sequence[str] | None,
+    mode: str | None = None,
+    min_pct: Decimal | None = None,
+) -> str:
+    """Build the SELF-DESCRIBING download filename (DEC-REPORT-FILENAME-001).
+
+    The operator's reference problem: a static ``preopen_report.zip`` says
+    nothing about WHICH selection produced it. The name now encodes every
+    selection knob, in order: report kind · mode (``all`` /
+    ``topmover-minNpct`` — the threshold only where it applies) · price basis
+    (``day``/``minute``) · the selected symbols (spelled out up to
+    :data:`_FILENAME_SYMBOL_CAP`, then ``+Nmore``; ``all-symbols`` when no
+    filter) · the inclusive date range. Examples::
+
+        preopen_day_all-symbols_2026-06-01_2026-06-11.xlsx
+        preopen_topmover-min2.5pct_minute_NIFTY-BANKNIFTY_2026-06-01_2026-06-11.zip
+
+    Pure + deterministic (offline-testable; the routes stay thin wrappers).
+    ``min_pct`` is rendered via ``Decimal.normalize`` so ``2.0`` reads
+    ``2`` and ``2.5`` stays ``2.5`` — display formatting of a threshold,
+    never money rounding (DEC-MONEY-2DP-001 is money-only).
+    """
+    parts = ["preopen"]
+    if mode is not None:
+        if mode == "topmover" and min_pct is not None:
+            parts.append(f"topmover-min{format(min_pct.normalize(), 'f')}pct")
+        else:
+            parts.append(_filename_token(mode))
+    parts.append(_filename_token(basis))
+    if symbols:
+        label = "-".join(_filename_token(s) for s in symbols[:_FILENAME_SYMBOL_CAP])
+        if len(symbols) > _FILENAME_SYMBOL_CAP:
+            label += f"+{len(symbols) - _FILENAME_SYMBOL_CAP}more"
+        parts.append(label)
+    else:
+        parts.append("all-symbols")
+    parts.append(start.isoformat())
+    parts.append(end.isoformat())
+    return "_".join(parts) + extension
+
+
 __all__ = [
     "REPORT_COLUMNS",
     "PreOpenRow",
@@ -993,6 +1060,7 @@ __all__ = [
     "render_month_workbook",
     "render_report_zip",
     "render_xlsx",
+    "report_filename",
     "resolve_report_datasets",
     "select_all_symbols",
     "select_rows",
