@@ -776,6 +776,9 @@ def run_one_tuple(
         dedup=dedup,
         audit=audit,
         kernel=kernel,
+        # Enables the per-tuple trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001):
+        # the digest is the same collision guard the store filename carries.
+        trial_stats_digest=_tuple_digest(tuple_, grid),
     )
 
 
