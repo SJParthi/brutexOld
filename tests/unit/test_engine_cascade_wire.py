@@ -18,6 +18,7 @@ and runs the nine-filter cascade per ``(instrument, tf)`` pool. Covers:
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -27,6 +28,7 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.engine import cascade_wire as cw
 from brutex.engine.results_store import ResultRow
+from brutex.engine.sweep_orchestrator import SweepTuple
 from brutex.metrics.cascade import (
     CandidateVerdict,
     CascadeReport,
@@ -606,6 +608,330 @@ class TestStage3ManifestSerialisation:
             stage3=record,
         )
         assert cw.load_manifest(tmp_path).stage3 == record
+
+
+# ── Per-leaderboard trial-stats freeze (DEC-TRIAL-STATS-FREEZE-001) ──────────
+
+
+def _lbt(**overrides: object) -> cw.LeaderboardTrialsRecord:
+    base: dict[str, object] = {
+        "instrument": "NIFTY",
+        "tf_label": "1minute",
+        "n_trials": 10,
+        "n_finite": 8,
+        "sum_sharpe": 1.5,
+        "sum_sharpe_sq": 2.25,
+        "complete": True,
+    }
+    base.update(overrides)
+    return cw.LeaderboardTrialsRecord(**base)  # type: ignore[arg-type]
+
+
+class TestLeaderboardTrialsRecord:
+    @pytest.mark.parametrize("field", ["instrument", "tf_label"])
+    def test_empty_label_raises(self, field: str) -> None:
+        with pytest.raises(cw.CascadeWireError, match=f"{field} must be non-empty"):
+            _lbt(**{field: ""})
+
+    def test_invalid_moments_delegate_to_the_core_validation(self) -> None:
+        # §11 COMMON: the slice-1 core owns the invariants; the record re-types.
+        with pytest.raises(cw.CascadeWireError, match="invalid leaderboard trial stats"):
+            _lbt(n_trials=2, n_finite=5)
+
+    def test_to_stats_round_trips_variance(self) -> None:
+        from brutex.engine.trial_stats import LeaderboardTrialStats
+
+        stats = _lbt().to_stats()
+        assert isinstance(stats, LeaderboardTrialStats)
+        assert stats.n_trials == 10
+        assert stats.variance >= 0.0
+
+
+def _swept_tree(root: Path) -> cw.SweepGridConfig:  # type: ignore[name-defined]
+    """Run a tiny REAL grid sweep so the tree carries stores + sidecars."""
+    from brutex.data.option_dedup import OptionDedupIndex
+    from brutex.engine.sweep_orchestrator import (
+        SweepGridConfig,
+        Timeframe,
+        make_store_for,
+        run_sweep_grid,
+    )
+    from brutex.engine.sweep_run import ComboDedup
+    from brutex.orchestrator.audit import AuditWriter
+    from brutex.strategies.types import Side
+
+    grid = SweepGridConfig(
+        instruments=["NIFTY"],
+        timeframes=[Timeframe("1minute", 1)],
+        directions=[Side.BUY, Side.SELL],
+        k_values=[1],
+        condition_bits=[0, 1],
+        stop_losses=[80],
+        take_profits=[50],
+        proximities=[None],
+        mode="A",
+        data_snapshot_hash="snap0001",
+        indicator_version="ind-v1",
+        code_commit_sha="deadbeef",
+        min_hits=0,  # tiny bars: keep every backtested combo in the population
+    )
+    with AuditWriter.open(root / "audit.jsonl") as audit:
+        run_sweep_grid(
+            grid,
+            bars_for=lambda _i, _t: _session_bars(),
+            store_for=make_store_for(root, grid),
+            dedup=ComboDedup(OptionDedupIndex(capacity=1_000, fpr_target=1e-6)),
+            audit=audit,
+        )
+    return grid
+
+
+@dataclass(frozen=True)
+class _FakeRefinedCell:
+    """A minimal structural stand-in for ``stage3_wire.Stage3RefinedCell``."""
+
+    tuple_: SweepTuple
+    path: Path
+
+
+class TestBuildLeaderboardTrials:
+    def test_aggregates_every_tuple_sidecar_per_leaderboard(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+        from brutex.engine.trial_stats import read_tuple_trial_stats, trial_stats_sidecar_path
+
+        grid = _swept_tree(tmp_path)
+        records = cw.build_leaderboard_trials(tmp_path, grid)
+        assert len(records) == 1  # one (instrument, tf) leaderboard, both directions
+        record = records[0]
+        assert (record.instrument, record.tf_label) == ("NIFTY", "1minute")
+        assert record.complete is True
+        expected_n = sum(
+            read_tuple_trial_stats(
+                trial_stats_sidecar_path(tuple_store_path(tmp_path, t, grid))
+            ).n_backtested
+            for t in iter_sweep_tuples(grid)
+        )
+        assert record.n_trials == expected_n
+        assert expected_n > 0
+        assert record.to_stats().variance >= 0.0
+
+    def test_missing_sidecar_marks_the_leaderboard_incomplete(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+
+        grid = _swept_tree(tmp_path)
+        first = next(iter_sweep_tuples(grid))
+        trial_stats_sidecar_path(tuple_store_path(tmp_path, first, grid)).unlink()
+        (record,) = cw.build_leaderboard_trials(tmp_path, grid)
+        assert record.complete is False
+
+    def test_unreadable_sidecar_fails_loudly(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+
+        grid = _swept_tree(tmp_path)
+        first = next(iter_sweep_tuples(grid))
+        sidecar = trial_stats_sidecar_path(tuple_store_path(tmp_path, first, grid))
+        sidecar.write_text("{corrupt")
+        with pytest.raises(cw.CascadeWireError, match="unreadable trial-stats sidecar"):
+            cw.build_leaderboard_trials(tmp_path, grid)
+
+    def test_digest_mismatch_fails_loudly(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+        from brutex.engine.trial_stats import (
+            read_tuple_trial_stats,
+            trial_stats_sidecar_path,
+            write_tuple_trial_stats,
+        )
+
+        grid = _swept_tree(tmp_path)
+        first = next(iter_sweep_tuples(grid))
+        store_path = tuple_store_path(tmp_path, first, grid)
+        sidecar = trial_stats_sidecar_path(store_path)
+        stats = read_tuple_trial_stats(sidecar)
+        from dataclasses import replace
+
+        write_tuple_trial_stats(sidecar, replace(stats, tuple_digest="0" * 16))
+        with pytest.raises(cw.CascadeWireError, match="pairing mismatch.*digest"):
+            cw.build_leaderboard_trials(tmp_path, grid)
+
+    def test_store_content_drift_fails_loudly(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
+
+        grid = _swept_tree(tmp_path)
+        first = next(iter_sweep_tuples(grid))
+        store_path = tuple_store_path(tmp_path, first, grid)
+        store_path.write_bytes(store_path.read_bytes() + b"tampered")
+        with pytest.raises(cw.CascadeWireError, match="pairing mismatch.*store"):
+            cw.build_leaderboard_trials(tmp_path, grid)
+
+    def test_absent_store_contributes_nothing(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
+        from brutex.strategies.types import Side
+
+        grid = SweepGridConfig(
+            instruments=["NIFTY"],
+            timeframes=[Timeframe("1minute", 1)],
+            directions=[Side.BUY],
+            k_values=[1],
+            condition_bits=[0],
+            stop_losses=[80],
+            take_profits=[50],
+            proximities=[None],
+            mode="A",
+            data_snapshot_hash="snap0001",
+            indicator_version="ind-v1",
+            code_commit_sha="deadbeef",
+        )
+        assert cw.build_leaderboard_trials(tmp_path, grid) == ()
+
+    def test_cells_without_grid_context_rejected(self, tmp_path: Path) -> None:
+        from brutex.engine.sweep_orchestrator import Timeframe
+        from brutex.strategies.types import Side
+
+        grid = _swept_tree(tmp_path)
+        cell = _FakeRefinedCell(
+            tuple_=SweepTuple(
+                instrument="NIFTY",
+                tf=Timeframe("1minute", 1),
+                direction=Side.BUY,
+                k=1,
+                sl_paisa=85,
+                tp_paisa=60,
+                proximity=None,
+            ),
+            path=tmp_path / "x.parquet",
+        )
+        with pytest.raises(cw.CascadeWireError, match="without stage3_grid"):
+            cw.build_leaderboard_trials(
+                tmp_path,
+                grid,
+                stage3_cells=[cell],
+            )
+
+    def test_stage3_cells_join_the_leaderboard(self, tmp_path: Path) -> None:
+        import dataclasses
+
+        from brutex.engine.results_store import ResultsStore
+        from brutex.engine.sweep_orchestrator import (
+            SweepTuple,
+            Timeframe,
+            _tuple_digest,
+            tuple_store_path,
+        )
+        from brutex.engine.trial_stats import (
+            trial_stats_sidecar_path,
+            tuple_trial_stats_from_sharpes,
+            write_tuple_trial_stats,
+        )
+        from brutex.strategies.types import Side
+
+        grid = _swept_tree(tmp_path)
+        baseline = cw.build_leaderboard_trials(tmp_path, grid)[0]
+
+        train_grid = dataclasses.replace(grid, data_snapshot_hash="ff" * 32)
+        cell_tuple = SweepTuple(
+            instrument="NIFTY",
+            tf=Timeframe("1minute", 1),
+            direction=Side.BUY,
+            k=1,
+            sl_paisa=85,
+            tp_paisa=60,
+            proximity=None,
+        )
+        cell_path = tuple_store_path(tmp_path, cell_tuple, train_grid)
+        store = ResultsStore(path=cell_path)
+        flush = store.flush()  # an empty refined-cell store is a valid pairing target
+        write_tuple_trial_stats(
+            trial_stats_sidecar_path(cell_path),
+            tuple_trial_stats_from_sharpes(
+                [0.5, None, 1.25],
+                n_enumerated=3,
+                n_conflict_pruned=0,
+                n_minhits_dropped=0,
+                tuple_digest=_tuple_digest(cell_tuple, train_grid),
+                store_content_hash=flush.content_hash,
+            ),
+        )
+        cell = _FakeRefinedCell(tuple_=cell_tuple, path=cell_path)
+        (record,) = cw.build_leaderboard_trials(
+            tmp_path,
+            grid,
+            stage3_cells=[cell],
+            stage3_grid=train_grid,
+        )
+        assert record.n_trials == baseline.n_trials + 3
+        assert record.n_finite == baseline.n_finite + 2
+        assert record.complete is True
+
+        # And an absent CELL sidecar flips the leaderboard incomplete.
+        trial_stats_sidecar_path(cell_path).unlink()
+        (record2,) = cw.build_leaderboard_trials(
+            tmp_path,
+            grid,
+            stage3_cells=[cell],
+            stage3_grid=train_grid,
+        )
+        assert record2.complete is False
+        assert record2.n_trials == baseline.n_trials
+
+
+class TestLeaderboardTrialsManifest:
+    def test_round_trip_preserves_records(self) -> None:
+        manifest = _manifest()
+        with_lbt = cw.CascadeManifest(
+            version=manifest.version,
+            sweep_id=manifest.sweep_id,
+            cascade_config=manifest.cascade_config,
+            bars_context=manifest.bars_context,
+            specs=manifest.specs,
+            leaderboard_trials=(_lbt(), _lbt(instrument="BANKNIFTY", complete=False)),
+        )
+        restored = cw.manifest_from_json(cw.manifest_to_json(with_lbt))
+        assert restored == with_lbt
+
+    def test_absent_key_parses_to_none(self) -> None:
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        del payload["leaderboard_trials"]
+        restored = cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+        assert restored.leaderboard_trials is None
+
+    def test_bad_record_raises(self) -> None:
+        import json
+
+        manifest = _manifest()
+        payload = json.loads(
+            cw.manifest_to_json(
+                cw.CascadeManifest(
+                    version=manifest.version,
+                    sweep_id=manifest.sweep_id,
+                    cascade_config=manifest.cascade_config,
+                    bars_context=manifest.bars_context,
+                    specs=manifest.specs,
+                    leaderboard_trials=(_lbt(),),
+                )
+            )
+        )
+        del payload["leaderboard_trials"][0]["n_trials"]
+        with pytest.raises(cw.CascadeWireError, match="invalid leaderboard_trials record"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
+    def test_auto_path_records_the_freeze(self, tmp_path: Path) -> None:
+        records = (_lbt(),)
+        cw.run_and_write_from_specs(
+            tmp_path,
+            sweep_id="a" * 64,
+            specs=[_spec()],
+            bars_for=_bars_for(_session_bars()),
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-02-01"
+            ),
+            cascade_config=cw.cascade_config_for_sweep("a" * 64),
+            leaderboard_trials=records,
+        )
+        assert cw.load_manifest(tmp_path).leaderboard_trials == records
 
 
 # ── Spec building from persisted rows ─────────────────────────────────────────
