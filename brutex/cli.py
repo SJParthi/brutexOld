@@ -139,7 +139,14 @@ def _add_sweep_grid_args(
         help="Comma-separated take-profit paisa values; use 'none' to disable a leg (default none)",
     )
     parser.add_argument(
-        "--top", type=int, default=20, help="Persist the top-N ranked combos per tuple (default 20)"
+        "--top",
+        type=int,
+        default=20,
+        help=(
+            "Persist the top-N composite-ranked combos per tuple (default 20 for fast "
+            "operator runs; the spec's Stage-4 filter #1 production sizing is 1000 — "
+            "TRACK1_BACKTEST_SPEC.md, DEC-SPEC-TOPK-RECONCILE-001)"
+        ),
     )
     parser.add_argument(
         "--mode", default="A", help="Run mode label stamped on the run identity (default A)"

@@ -434,6 +434,20 @@ _Historical algorithm (never wire — ADR-0006 Final Verdict):_
 
 1. **Top-K composite:** keep top 1,000 per (strategy_template, instrument, mode)
    from Stage 3
+
+   > **Implementation relationship (DEC-SPEC-TOPK-RECONCILE-001):** filter #1
+   > IS the staging truncation, not a cascade-internal stage: the launcher's
+   > `--top` flag persists the top-N composite-ranked combos **per grid
+   > tuple** (`SweepGridConfig.top_k`; engine default `None` = persist all)
+   > and those persisted finalists are what filters #2-#9 receive, pooled per
+   > `(instrument, tf)`. The CLI default is **20** (fast operator runs — each
+   > cascade candidate costs an O(bars) re-simulation plus 1,000 Monte-Carlo
+   > permutation re-runs, so 1,000 is a ~50× Stage-4 wall-time multiplier);
+   > the **1,000 above is the production-envelope sizing**, reachable via
+   > `--top 1000`. Stage-3 refined rows additionally enter the cascade
+   > UNTRIMMED per ADR-0007 condition 6. The `strategy_template` grouping
+   > axis is NOT implemented — truncation groups per grid tuple and the
+   > cascade pools per `(instrument, tf)`.
 2. **Deflated Sharpe Ratio** (Bailey & López de Prado, JPM 2014):
    COMPUTE PER (instrument, TF) LEADERBOARD with N ≤ 10⁷, **NOT pool-wide**.
    Pool-wide N=10¹² gives threshold ≈ 7.4σ ≈ Sharpe 23 (impossible).
