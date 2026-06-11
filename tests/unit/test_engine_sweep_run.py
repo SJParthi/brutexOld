@@ -17,6 +17,7 @@ OHLC (Golden Rule #1 — real-shaped data, no fabrication).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -526,9 +527,11 @@ class TestTrialStatsSidecar:
         assert summary.trial_sidecar_written is False
         assert not trial_stats_sidecar_path(store.path).exists()
 
-    def test_full_resume_preserves_the_existing_sidecar(self, tmp_path: Path) -> None:
-        # Condition 2: skipped_dedup > 0 ⇒ PRESERVE — a partial population must
-        # never overwrite the full-run stats (the resumed-completed-tuple corner).
+    def test_corrupted_sidecar_invalidates_sentinel_and_self_heals(self, tmp_path: Path) -> None:
+        # DEC-MARK-MANY-SENTINEL-001 superseded the slice-2 preserve-on-skips
+        # arm: a corrupt sidecar UNPAIRS the completion sentinel, so the redo
+        # re-runs the FULL population (dedup probes bypassed) and RESTORES the
+        # sidecar byte-identical — self-healing, never preserved-corrupt.
         from brutex.engine.sweep_orchestrator import load_or_create_store
         from brutex.engine.trial_stats import trial_stats_sidecar_path
 
@@ -545,28 +548,43 @@ class TestTrialStatsSidecar:
                 trial_stats_digest=self._DIGEST,
             )
         sidecar = trial_stats_sidecar_path(store.path)
-        sentinel = b"SENTINEL-DO-NOT-OVERWRITE"
-        sidecar.write_bytes(sentinel)
+        original = sidecar.read_bytes()
+        sidecar.write_bytes(b"{corrupt")
         with AuditWriter.open(tmp_path / "b.jsonl") as audit:
             resumed = run_persisted_sweep(
                 bars,
                 _make_config(),
                 store=load_or_create_store(store.path),
-                dedup=dedup,  # every mask already marked → skipped_dedup > 0
+                dedup=dedup,  # every mask marked — yet the marks are ADVISORY
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
             )
-        assert resumed.skipped_dedup > 0
-        assert resumed.trial_sidecar_written is False
-        assert sidecar.read_bytes() == sentinel  # byte-untouched
+        assert resumed.resumed_complete is False
+        assert resumed.skipped_dedup == 0  # probes bypassed — full population
+        assert resumed.trial_sidecar_written is True
+        assert sidecar.read_bytes() == original  # healed, byte-identical
 
-    def test_subset_marked_dedup_never_writes(self, tmp_path: Path) -> None:
-        # The partial-mark_many crash corner: a re-run over a partially-marked
-        # dedup sees a SUBSET population — no sidecar may be written from it.
+    def test_partially_marked_dedup_writes_full_population_sidecar(self, tmp_path: Path) -> None:
+        # THE #650 regression (sidecar surface): a partially-marked dedup with
+        # no sentinel must yield the FULL-population sidecar — byte-identical
+        # to a clean run's — never a subset view and never a skipped write.
         from brutex.engine.sweep_run import _canonical_params
         from brutex.engine.trial_stats import trial_stats_sidecar_path
 
         cfg = _make_config()
+        bars = _trending_bars()
+        clean_store = ResultsStore(path=tmp_path / "clean" / "r.parquet")
+        with AuditWriter.open(tmp_path / "clean" / "a.jsonl") as audit:
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=clean_store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest=self._DIGEST,
+            )
+        baseline = trial_stats_sidecar_path(clean_store.path).read_bytes()
+
         rid = mask_run_id(
             mask=1 << cfg.condition_bits[0],
             direction="bull",
@@ -579,26 +597,28 @@ class TestTrialStatsSidecar:
             code_commit_sha=cfg.code_commit_sha,
         )
         dedup = _dedup()
-        dedup.mark(rid)  # one of the five masks pre-marked
-        store = ResultsStore(path=tmp_path / "r.parquet")
-        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+        dedup.mark(rid)  # one of the five masks pre-marked (the crash subset)
+        store = ResultsStore(path=tmp_path / "redo" / "r.parquet")
+        with AuditWriter.open(tmp_path / "redo" / "a.jsonl") as audit:
             summary = run_persisted_sweep(
-                _trending_bars(),
+                bars,
                 cfg,
                 store=store,
                 dedup=dedup,
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
             )
-        assert summary.skipped_dedup == 1
-        assert summary.trial_sidecar_written is False
-        assert not trial_stats_sidecar_path(store.path).exists()
+        assert summary.skipped_dedup == 0  # the stale mark was never consulted
+        assert summary.trial_sidecar_written is True
+        assert trial_stats_sidecar_path(store.path).read_bytes() == baseline
 
     def test_redo_after_flush_rewrites_byte_identical(self, tmp_path: Path) -> None:
-        # The flush-then-die corner: a crash before mark_many redoes the whole
-        # tuple with a FRESH view → the rewritten sidecar is byte-identical.
+        # The flush-then-die corner (crash before the sentinel write): the
+        # sentinel is absent, so the redo re-does the whole tuple with a fresh
+        # view → the rewritten sidecar is byte-identical.
         from brutex.engine.sweep_orchestrator import load_or_create_store
         from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
 
         bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
@@ -613,9 +633,11 @@ class TestTrialStatsSidecar:
             )
         sidecar = trial_stats_sidecar_path(store.path)
         first = sidecar.read_bytes()
-        # Fresh dedup = the post-crash redo (nothing was marked).
+        # Simulate the crash-before-sentinel window: sentinel never landed.
+        completion_sentinel_path(store.path).unlink()
+        # Fresh dedup = the post-crash redo (in-memory marks died with it).
         with AuditWriter.open(tmp_path / "b.jsonl") as audit:
-            run_persisted_sweep(
+            redone = run_persisted_sweep(
                 bars,
                 _make_config(),
                 store=load_or_create_store(store.path),
@@ -623,7 +645,328 @@ class TestTrialStatsSidecar:
                 audit=audit,
                 trial_stats_digest=self._DIGEST,
             )
+        assert redone.resumed_complete is False
+        assert redone.sentinel_written is True  # the redo healed the sentinel
         assert sidecar.read_bytes() == first
+
+
+# ────── completion sentinel — the redo authority (DEC-MARK-MANY-SENTINEL-001) ──────
+
+
+class _MarkCrashDedup(ComboDedup):
+    """A dedup whose ``mark_many`` dies after the first key — the W4 crash."""
+
+    def __init__(self) -> None:
+        super().__init__(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+
+    def mark_many(self, run_id_hexes: Iterable[str]) -> int:
+        marked = 0
+        for run_id_hex in run_id_hexes:
+            if marked >= 1:
+                raise RuntimeError("simulated crash inside the mark loop")
+            self.mark(run_id_hex)
+            marked += 1
+        return marked
+
+
+class TestCompletionSentinel:
+    _DIGEST = "ab12cd34ef56ab12"
+
+    def _clean_run(
+        self, root: Path, cfg: SweepRunConfig, bars: list[CandleBar]
+    ) -> tuple[Path, SweepRunSummary]:
+        """Run one clean digest sweep under *root*; return (store path, summary)."""
+        store = ResultsStore(path=root / "r.parquet")
+        with AuditWriter.open(root / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest=self._DIGEST,
+            )
+        return store.path, summary
+
+    def _redo(
+        self,
+        store_path: Path,
+        cfg: SweepRunConfig,
+        bars: list[CandleBar],
+        *,
+        dedup: ComboDedup | None = None,
+        fresh_store: bool = False,
+    ) -> SweepRunSummary:
+        """Re-enter the tuple (fresh audit), optionally with a forged dedup/store."""
+        from brutex.engine.sweep_orchestrator import load_or_create_store
+
+        store = ResultsStore(path=store_path) if fresh_store else load_or_create_store(store_path)
+        with AuditWriter.open(store_path.parent / "b.jsonl") as audit:
+            return run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=dedup if dedup is not None else _dedup(),
+                audit=audit,
+                trial_stats_digest=self._DIGEST,
+            )
+
+    def _rid(self, cfg: SweepRunConfig, bit: int) -> str:
+        from brutex.engine.sweep_run import _canonical_params
+
+        return mask_run_id(
+            mask=1 << bit,
+            direction="bull",
+            instrument=cfg.instrument,
+            tf=cfg.tf,
+            mode=cfg.mode,
+            params=_canonical_params(cfg),
+            data_snapshot_hash=cfg.data_snapshot_hash,
+            indicator_version=cfg.indicator_version,
+            code_commit_sha=cfg.code_commit_sha,
+        )
+
+    def test_digest_run_writes_paired_sentinel(self, tmp_path: Path) -> None:
+        from brutex.engine.tuple_complete import completion_sentinel_path, read_completion_sentinel
+
+        cfg = _make_config()
+        store_path, summary = self._clean_run(tmp_path, cfg, _trending_bars())
+        assert summary.sentinel_written is True
+        sentinel = read_completion_sentinel(completion_sentinel_path(store_path))
+        assert sentinel.tuple_digest == self._DIGEST
+        assert sentinel.store_content_hash == summary.store_content_hash
+        assert sentinel.sidecar_written is True
+        assert sentinel.n_marked == summary.evaluated
+
+    def test_no_digest_writes_no_sentinel(self, tmp_path: Path) -> None:
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(
+                _trending_bars(), _make_config(), store=store, dedup=_dedup(), audit=audit
+            )
+        assert summary.sentinel_written is False
+        assert not completion_sentinel_path(store.path).exists()
+
+    def test_paired_sentinel_short_circuits_touching_nothing(self, tmp_path: Path) -> None:
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import completion_sentinel_path
+        from brutex.orchestrator.audit import read_entries
+
+        cfg = _make_config()
+        bars = _trending_bars()
+        store_path, first = self._clean_run(tmp_path, cfg, bars)
+        snapshots = {
+            p: p.read_bytes()
+            for p in (
+                store_path,
+                trial_stats_sidecar_path(store_path),
+                completion_sentinel_path(store_path),
+            )
+        }
+        fresh_dedup = _dedup()
+        resumed = self._redo(store_path, cfg, bars, dedup=fresh_dedup)
+        assert resumed.resumed_complete is True
+        assert resumed.store_content_hash == first.store_content_hash
+        assert (
+            resumed.enumerated
+            == resumed.evaluated
+            == resumed.ranked
+            == resumed.persisted
+            == resumed.skipped_dedup
+            == 0
+        )
+        assert resumed.sentinel_written is False
+        assert resumed.trial_sidecar_written is False
+        for path, before in snapshots.items():
+            assert path.read_bytes() == before  # byte-untouched
+        # The dedup was never consulted or marked on the short-circuit path.
+        assert not fresh_dedup.seen(self._rid(cfg, cfg.condition_bits[0]))
+        # Exactly ONE audit line — SWEEP_RESUMED — and the chain still verifies.
+        entries = read_entries(store_path.parent / "b.jsonl")
+        assert [e.action for e in entries] == ["SWEEP_RESUMED"]
+        assert entries[0].payload["store_content_hash"] == first.store_content_hash
+        assert verify_chain(store_path.parent / "b.jsonl") == 1
+
+    def test_overfit_wedge_regression(self, tmp_path: Path) -> None:
+        # THE #650 hole, arm (a): under --overfit-gate the OLD subset re-rank
+        # deflated against the subset N → differing deflated_sharpe → store
+        # append conflict (a wedge). The sentinel fix re-runs the FULL
+        # population, so the redo is conflict-free and byte-identical.
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        cfg = _make_config(overfit=OverfitGateConfig(dsr_min=0.0))
+        bars = _trending_bars()
+        store_path, _ = self._clean_run(tmp_path, cfg, bars)
+        baseline = store_path.read_bytes()
+        completion_sentinel_path(store_path).unlink()  # crash before sentinel
+        subset = _dedup()
+        subset.mark(self._rid(cfg, cfg.condition_bits[0]))  # partial mark loop
+        redone = self._redo(store_path, cfg, bars, dedup=subset)  # must NOT raise
+        assert redone.resumed_complete is False
+        assert redone.skipped_dedup == 0
+        assert store_path.read_bytes() == baseline
+
+    def test_topk_inflation_regression(self, tmp_path: Path) -> None:
+        # THE #650 hole, arm (b): under top_k truncation the OLD subset re-rank
+        # appended the subset's own top-K — EXTRA rows, silently breaking tree
+        # byte-identity. The sentinel fix re-runs the full population.
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        cfg = _make_config(top_k=1)
+        bars = _trending_bars()
+        store_path, first = self._clean_run(tmp_path, cfg, bars)
+        assert first.persisted == 1
+        baseline = store_path.read_bytes()
+        completion_sentinel_path(store_path).unlink()  # crash before sentinel
+        subset = _dedup()
+        subset.mark(self._rid(cfg, cfg.condition_bits[0]))  # partial mark loop
+        redone = self._redo(store_path, cfg, bars, dedup=subset)
+        assert redone.persisted == 1  # never inflated
+        assert store_path.read_bytes() == baseline
+
+    def test_mark_crash_leaves_no_sentinel_then_heals(self, tmp_path: Path) -> None:
+        # Ordering pin: the sentinel lands STRICTLY AFTER mark_many — a crash
+        # inside the mark loop leaves it absent, so the next run fully redoes.
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        cfg = _make_config()
+        bars = _trending_bars()
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(RuntimeError, match="simulated crash inside the mark loop"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_MarkCrashDedup(),
+                audit=audit,
+                trial_stats_digest=self._DIGEST,
+            )
+        assert not completion_sentinel_path(store.path).exists()
+        healed = self._redo(store.path, cfg, bars)
+        assert healed.resumed_complete is False
+        assert healed.sentinel_written is True
+
+    def test_sentinel_without_sidecar_record_skips_the_sidecar_check(self, tmp_path: Path) -> None:
+        # A sentinel recording sidecar_written=False pairs WITHOUT consulting
+        # the sidecar (the schema allows sidecar-less completions; today's
+        # digest path always writes one, but the check honours the record).
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+        from brutex.engine.tuple_complete import (
+            TupleCompletionSentinel,
+            completion_sentinel_path,
+            read_completion_sentinel,
+            write_completion_sentinel,
+        )
+
+        cfg = _make_config()
+        bars = _trending_bars()
+        store_path, _ = self._clean_run(tmp_path, cfg, bars)
+        recorded = read_completion_sentinel(completion_sentinel_path(store_path))
+        write_completion_sentinel(
+            completion_sentinel_path(store_path),
+            TupleCompletionSentinel(
+                tuple_digest=recorded.tuple_digest,
+                store_content_hash=recorded.store_content_hash,
+                sidecar_written=False,
+                n_marked=recorded.n_marked,
+            ),
+        )
+        trial_stats_sidecar_path(store_path).unlink()  # would fail if consulted
+        resumed = self._redo(store_path, cfg, bars)
+        assert resumed.resumed_complete is True
+
+    def test_corrupt_sentinel_forces_full_redo(self, tmp_path: Path) -> None:
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        cfg = _make_config()
+        bars = _trending_bars()
+        store_path, _ = self._clean_run(tmp_path, cfg, bars)
+        sentinel_path = completion_sentinel_path(store_path)
+        original = sentinel_path.read_bytes()
+        sentinel_path.write_bytes(b"{corrupt")
+        redone = self._redo(store_path, cfg, bars)
+        assert redone.resumed_complete is False
+        assert sentinel_path.read_bytes() == original  # healed, byte-identical
+
+    def test_digest_mismatch_forces_full_redo(self, tmp_path: Path) -> None:
+        from brutex.engine.tuple_complete import (
+            TupleCompletionSentinel,
+            completion_sentinel_path,
+            read_completion_sentinel,
+            write_completion_sentinel,
+        )
+
+        cfg = _make_config()
+        bars = _trending_bars()
+        store_path, _ = self._clean_run(tmp_path, cfg, bars)
+        sentinel_path = completion_sentinel_path(store_path)
+        recorded = read_completion_sentinel(sentinel_path)
+        write_completion_sentinel(
+            sentinel_path,
+            TupleCompletionSentinel(
+                tuple_digest="0" * 16,  # a DIFFERENT tuple's sentinel
+                store_content_hash=recorded.store_content_hash,
+                sidecar_written=recorded.sidecar_written,
+                n_marked=recorded.n_marked,
+            ),
+        )
+        redone = self._redo(store_path, cfg, bars)
+        assert redone.resumed_complete is False
+        assert read_completion_sentinel(sentinel_path).tuple_digest == self._DIGEST
+
+    def test_missing_store_forces_full_redo(self, tmp_path: Path) -> None:
+        cfg = _make_config()
+        bars = _trending_bars()
+        store_path, _ = self._clean_run(tmp_path, cfg, bars)
+        baseline = store_path.read_bytes()
+        store_path.unlink()  # sentinel present, store gone (operator damage)
+        redone = self._redo(store_path, cfg, bars, fresh_store=True)
+        assert redone.resumed_complete is False
+        assert store_path.read_bytes() == baseline  # healed, byte-identical
+
+    def test_tampered_store_forces_full_redo(self, tmp_path: Path) -> None:
+        cfg = _make_config()
+        bars = _trending_bars()
+        store_path, _ = self._clean_run(tmp_path, cfg, bars)
+        baseline = store_path.read_bytes()
+        store_path.write_bytes(baseline + b"tampered")
+        redone = self._redo(store_path, cfg, bars, fresh_store=True)
+        assert redone.resumed_complete is False
+        assert store_path.read_bytes() == baseline  # healed, byte-identical
+
+    def test_sidecar_pairing_mismatch_forces_full_redo(self, tmp_path: Path) -> None:
+        # A VALID sidecar paired to the WRONG store bytes must unpair the
+        # sentinel — the sidecar read succeeds, the hash comparison fails.
+        from brutex.engine.trial_stats import (
+            trial_stats_sidecar_path,
+            tuple_trial_stats_from_sharpes,
+            write_tuple_trial_stats,
+        )
+
+        cfg = _make_config()
+        bars = _trending_bars()
+        store_path, _ = self._clean_run(tmp_path, cfg, bars)
+        sidecar_path = trial_stats_sidecar_path(store_path)
+        original = sidecar_path.read_bytes()
+        write_tuple_trial_stats(
+            sidecar_path,
+            tuple_trial_stats_from_sharpes(
+                [0.5],
+                n_enumerated=1,
+                n_conflict_pruned=0,
+                n_minhits_dropped=0,
+                tuple_digest=self._DIGEST,
+                store_content_hash="0" * 64,  # pairs to some OTHER store bytes
+            ),
+        )
+        redone = self._redo(store_path, cfg, bars)
+        assert redone.resumed_complete is False
+        assert sidecar_path.read_bytes() == original  # healed, byte-identical
 
 
 # ────── run_persisted_sweep ──────

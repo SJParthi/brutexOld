@@ -185,11 +185,16 @@ def _run_full(out_root: Path, bars: list[CandleBar], grid: SweepGridConfig) -> S
 def _tree_hashes(root: Path) -> dict[str, str]:
     """Map every results-tree artifact under *root* (relative path) to its SHA-256.
 
-    Covers the per-tuple Parquet stores AND their trial-stats sidecars
-    (DEC-TRIAL-STATS-WRITE-001) — the F11 byte-identity contract extends to
-    both; audit/checkpoint/progress files stay excluded (timestamps).
+    Covers the per-tuple Parquet stores, their trial-stats sidecars
+    (DEC-TRIAL-STATS-WRITE-001), AND their completion sentinels
+    (DEC-MARK-MANY-SENTINEL-001) — the F11 byte-identity contract extends to
+    all three; audit/checkpoint/progress files stay excluded (timestamps).
     """
-    artifacts = sorted(root.glob("**/*.parquet")) + sorted(root.glob("**/*.trials.json"))
+    artifacts = (
+        sorted(root.glob("**/*.parquet"))
+        + sorted(root.glob("**/*.trials.json"))
+        + sorted(root.glob("**/*.complete.json"))
+    )
     return {
         str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(artifacts)

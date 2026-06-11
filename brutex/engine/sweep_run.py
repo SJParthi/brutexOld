@@ -24,15 +24,23 @@ Three invariants make this a *sweep RUN*, not just a sweep:
   ``strategy_id = "mask:%016x"`` of the u64 mask (DEC-MASK-IDENTITY-001 — the
   mask *is* the strategy). Same inputs → same run-ids → same
   :class:`~brutex.engine.results_store.FlushResult.content_hash`, bit-for-bit.
-* **Idempotence (Golden Rule #7).** A re-run against the same dedup state skips
-  every previously-evaluated mask (Bloom→exact-confirm, O(1) per mask, BEFORE
-  the expensive trade sim) and re-produces a byte-identical store. Dedup keys
-  are marked seen **after** the store flush, so a crash between evaluation and
-  flush re-does work rather than skipping it (redo-not-skip — never a silent
-  hole).
+* **Idempotence (Golden Rule #7).** On the digest path (the production
+  launcher), redo is decided by the per-tuple COMPLETION SENTINEL
+  (:mod:`brutex.engine.tuple_complete`, DEC-MARK-MANY-SENTINEL-001): a paired
+  sentinel short-circuits the whole tuple; an absent/unpaired sentinel forces
+  a FULL re-evaluation with dedup probes BYPASSED — never a subset re-rank —
+  then rewrites every artifact byte-identically. This closed the
+  partial-``mark_many`` redo hole (MIGRATION.md #650): the per-key mark loop
+  is not atomic, so its marks are ADVISORY, never the redo authority. Legacy
+  no-digest callers keep the probe semantics: a re-run against the same dedup
+  state skips every previously-evaluated mask (Bloom→exact-confirm, O(1) per
+  mask, BEFORE the expensive trade sim) and re-produces a byte-identical
+  store; dedup keys are marked seen **after** the store flush (redo-not-skip
+  — never a silent hole).
 * **Audit trail (Golden Rule #8).** Exactly THREE hash-chained audit lines per
-  sweep — ``SWEEP_START`` / ``SWEEP_FLUSH`` / ``SWEEP_COMPLETE`` — never one
-  per combo (the audit cost is O(1) in the combo count, not O(N)).
+  full sweep — ``SWEEP_START`` / ``SWEEP_FLUSH`` / ``SWEEP_COMPLETE`` — never
+  one per combo (the audit cost is O(1) in the combo count, not O(N)). A
+  sentinel short-circuit emits exactly ONE line (``SWEEP_RESUMED``).
 
 Honest envelope (Golden Rule #10): :func:`run_persisted_sweep` refuses to
 enumerate more than ``cfg.max_combos`` masks (raising before any ``bar_bits``
@@ -42,9 +50,11 @@ uses — an oversized sweep is a conscious choice, not an accident.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
@@ -65,9 +75,18 @@ from brutex.engine.sweep_driver import (
 )
 from brutex.engine.trade_sim import simulate_trades
 from brutex.engine.trial_stats import (
+    TrialStatsError,
+    read_tuple_trial_stats,
     trial_stats_sidecar_path,
     tuple_trial_stats_from_sharpes,
     write_tuple_trial_stats,
+)
+from brutex.engine.tuple_complete import (
+    TupleCompletionError,
+    TupleCompletionSentinel,
+    completion_sentinel_path,
+    read_completion_sentinel,
+    write_completion_sentinel,
 )
 from brutex.metrics.compute import ResultMetrics
 from brutex.money import round_money
@@ -91,10 +110,12 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger("brutex.engine.sweep_run")
 
-#: Audit action labels — the three (and only three) lines a sweep emits.
+#: Audit action labels — the three lines a full sweep emits, plus the single
+#: line a sentinel short-circuit emits (DEC-MARK-MANY-SENTINEL-001).
 _ACTION_START: Final[str] = "SWEEP_START"
 _ACTION_FLUSH: Final[str] = "SWEEP_FLUSH"
 _ACTION_COMPLETE: Final[str] = "SWEEP_COMPLETE"
+_ACTION_RESUMED: Final[str] = "SWEEP_RESUMED"
 
 
 def _direction_label(direction: Side) -> str:
@@ -416,10 +437,21 @@ class SweepRunSummary:
     trial_n_finite: int = 0
     trial_sum_sharpe: float = 0.0
     trial_sum_sharpe_sq: float = 0.0
-    #: ``True`` iff this run wrote/overwrote the tuple's trial-stats sidecar
-    #: (DEC-TRIAL-STATS-WRITE-001 condition 2: written iff a digest was
-    #: supplied AND ``skipped_dedup == 0`` — preserved on any partial resume).
+    #: ``True`` iff this run wrote/overwrote the tuple's trial-stats sidecar.
+    #: With a digest supplied this is every non-short-circuited run: the
+    #: sentinel-authoritative redo BYPASSES dedup probes, so the population is
+    #: always FULL — ADR-0008 condition 2's preserve-on-partial-resume rule is
+    #: now enforced structurally (a partial population cannot occur on the
+    #: digest path; DEC-MARK-MANY-SENTINEL-001).
     trial_sidecar_written: bool = False
+    #: ``True`` iff the tuple was short-circuited by a PAIRED completion
+    #: sentinel (DEC-MARK-MANY-SENTINEL-001): nothing was evaluated, flushed,
+    #: written, or marked — every other tally is zero and
+    #: ``store_content_hash`` echoes the sentinel's recorded hash.
+    resumed_complete: bool = False
+    #: ``True`` iff this run wrote the tuple's completion sentinel (strictly
+    #: last, after ``mark_many``).
+    sentinel_written: bool = False
 
 
 def canonical_trade_params(
@@ -602,6 +634,53 @@ def _metric_or_zero(value: float | None) -> float:
     return value if value is not None else 0.0
 
 
+def _sentinel_resume(store_path: Path, digest: str) -> TupleCompletionSentinel | None:
+    """Return the tuple's PAIRED completion sentinel, or ``None`` to force a full redo.
+
+    The redo decision authority (DEC-MARK-MANY-SENTINEL-001): COMPLETE iff the
+    sentinel exists, reads valid, carries this tuple's *digest*, its recorded
+    ``store_content_hash`` matches a re-hash of the actual store bytes, and —
+    when it records a written trial-stats sidecar — that sidecar still reads
+    and pairs. ANY failure is logged loudly (``sweep_run.sentinel_unpaired``)
+    and returns ``None``: the caller re-runs the FULL population and rewrites
+    every artifact, so a stale/tampered/corrupt state self-heals rather than
+    being falsely skipped or crashing the grid.
+    """
+    path = completion_sentinel_path(store_path)
+    if not path.exists():
+        return None
+
+    def _unpaired(reason: str) -> None:
+        _LOG.warning("sweep_run.sentinel_unpaired", path=str(path), reason=reason)
+
+    try:
+        sentinel = read_completion_sentinel(path)
+    except TupleCompletionError as exc:
+        _unpaired(f"unreadable sentinel: {exc}")
+        return None
+    if sentinel.tuple_digest != digest:
+        _unpaired("tuple digest mismatch")
+        return None
+    try:
+        content = store_path.read_bytes()
+    except OSError as exc:
+        _unpaired(f"store unreadable: {exc}")
+        return None
+    if hashlib.sha256(content).hexdigest() != sentinel.store_content_hash:
+        _unpaired("store content hash mismatch")
+        return None
+    if sentinel.sidecar_written:
+        try:
+            stats = read_tuple_trial_stats(trial_stats_sidecar_path(store_path))
+        except TrialStatsError as exc:
+            _unpaired(f"sidecar unreadable: {exc}")
+            return None
+        if stats.tuple_digest != digest or stats.store_content_hash != sentinel.store_content_hash:
+            _unpaired("sidecar pairing mismatch")
+            return None
+    return sentinel
+
+
 def run_persisted_sweep(
     bars: Sequence[CandleBar],
     cfg: SweepRunConfig,
@@ -620,23 +699,31 @@ def run_persisted_sweep(
     1. Validate (non-empty bars; ``HOLD`` rejected; combo count within
        ``cfg.max_combos`` — the honest opt-in guard, raising BEFORE the Stage-1A
        build).
-    2. Emit the ``SWEEP_START`` audit line.
-    3. Build the Stage-1A ``bar_bits`` **once**.
-    4. Enumerate the K-of-bits masks; for each: prune conflicts, skip already-seen
-       identities (O(1) Bloom→exact, BEFORE any trade sim), else collect the
-       ``(mask, run_id)`` survivor.
-    5. Stage-1B coarse pre-filter (``cfg.min_hits``): drop survivors that fire on
+    2. **Completion-sentinel check** (digest path only,
+       DEC-MARK-MANY-SENTINEL-001): a PAIRED sentinel proves the tuple's full
+       write sequence completed — emit one ``SWEEP_RESUMED`` audit line and
+       short-circuit, touching nothing. Absent/unpaired → fall through to a
+       FULL re-run with dedup probes BYPASSED (the marks are advisory; a
+       partially-marked dedup must never produce a subset re-rank —
+       MIGRATION.md #650).
+    3. Emit the ``SWEEP_START`` audit line.
+    4. Build the Stage-1A ``bar_bits`` **once**.
+    5. Enumerate the K-of-bits masks; for each: prune conflicts; on the legacy
+       no-digest path, skip already-seen identities (O(1) Bloom→exact, BEFORE
+       any trade sim); else collect the ``(mask, run_id)`` survivor.
+    6. Stage-1B coarse pre-filter (``cfg.min_hits``): drop survivors that fire on
        too few bars to ever rank (still counted as ``evaluated`` + marked seen).
-    6. Backtest the kept survivors (:func:`~brutex.engine.sweep_driver.metrics_for_mask`),
+    7. Backtest the kept survivors (:func:`~brutex.engine.sweep_driver.metrics_for_mask`),
        rank them (:func:`brutex.ranking.rank_combos`), take the top ``cfg.top_k``.
-    7. Project each finalist to a :class:`ResultRow` and append to the store.
-    8. Flush the store, then mark **all** evaluated identities seen (after the
-       flush — redo-not-skip on a crash).
-    9. Emit ``SWEEP_FLUSH`` + ``SWEEP_COMPLETE`` audit lines.
+    8. Project each finalist to a :class:`ResultRow` and append to the store.
+    9. Flush the store; write the trial-stats sidecar (digest path); mark
+       **all** evaluated identities seen; then write the completion sentinel
+       STRICTLY LAST (digest path) — its presence proves the whole sequence.
+    10. Emit ``SWEEP_FLUSH`` + ``SWEEP_COMPLETE`` audit lines.
 
-    Exactly three audit lines per sweep regardless of combo count (Golden Rule
-    #8 — O(1) audit cost). Dedup is checked before evaluation; the store receives
-    only finalists.
+    Exactly three audit lines per full sweep regardless of combo count (Golden
+    Rule #8 — O(1) audit cost); one line for a sentinel short-circuit. The
+    store receives only finalists.
 
     Parameters
     ----------
@@ -664,14 +751,18 @@ def run_persisted_sweep(
         work is removed. ``None`` (default) builds + counts inline as before. The
         kernel MUST be built from the SAME ``bars`` (a length mismatch raises).
     trial_stats_digest
-        The tuple's 16-hex path digest, enabling the trial-stats sidecar write
-        (DEC-TRIAL-STATS-WRITE-001 / ADR-0008 condition 2): when provided AND
-        this run evaluated the full mask population (``skipped_dedup == 0``),
-        the per-tuple (N, V-moments) sidecar is atomically written beside the
-        store between flush and dedup-mark; on any partial resume the existing
-        sidecar is PRESERVED. ``None`` (default) writes no sidecar (legacy
-        callers; the launcher path supplies it via
-        :func:`~brutex.engine.sweep_orchestrator.run_one_tuple`).
+        The tuple's 16-hex path digest, enabling the SENTINEL-AUTHORITATIVE
+        redo protocol (DEC-MARK-MANY-SENTINEL-001) and the trial-stats sidecar
+        write (DEC-TRIAL-STATS-WRITE-001): when provided, a PAIRED completion
+        sentinel short-circuits the tuple; otherwise the run BYPASSES dedup
+        probes (full population, ``skipped_dedup == 0`` by construction),
+        atomically writes the per-tuple (N, V-moments) sidecar between flush
+        and dedup-mark, and writes the completion sentinel strictly last.
+        ADR-0008 condition 2's preserve-on-partial-resume rule is thereby
+        enforced structurally — a partial population cannot occur on this
+        path. ``None`` (default) keeps the legacy probe semantics and writes
+        no sidecar/sentinel (library callers; the launcher path supplies the
+        digest via :func:`~brutex.engine.sweep_orchestrator.run_one_tuple`).
 
     Returns
     -------
@@ -699,6 +790,32 @@ def run_persisted_sweep(
 
     params = _canonical_params(cfg)
     subject = f"sweep:{cfg.instrument}:{cfg.tf}:{direction_label}:k={cfg.k}"
+
+    # ── Completion-sentinel resume check (DEC-MARK-MANY-SENTINEL-001) ──
+    # The sentinel — never the dedup marks — decides whether this tuple is
+    # already complete. A paired sentinel short-circuits everything below.
+    if trial_stats_digest is not None:
+        sentinel = _sentinel_resume(store.path, trial_stats_digest)
+        if sentinel is not None:
+            resume_payload = {
+                "tuple_digest": trial_stats_digest,
+                "store_content_hash": sentinel.store_content_hash,
+                "sidecar_written": sentinel.sidecar_written,
+                "n_marked": sentinel.n_marked,
+            }
+            audit.append(action=_ACTION_RESUMED, subject=subject, payload=resume_payload)
+            _LOG.info("sweep_run.resumed_complete", subject=subject, **resume_payload)
+            return SweepRunSummary(
+                enumerated=0,
+                conflict_pruned=0,
+                skipped_dedup=0,
+                evaluated=0,
+                ranked=0,
+                persisted=0,
+                store_content_hash=sentinel.store_content_hash,
+                resumed_complete=True,
+            )
+
     audit.append(
         action=_ACTION_START,
         subject=subject,
@@ -727,6 +844,12 @@ def run_persisted_sweep(
             )
         bar_bits = kernel.bar_bits
 
+    # Sentinel-authoritative redo (DEC-MARK-MANY-SENTINEL-001): with a digest
+    # and NO paired sentinel, the marks cannot be trusted (a crash inside the
+    # per-key mark loop leaves a subset — MIGRATION.md #650), so probes are
+    # BYPASSED: the FULL population re-runs and every artifact rewrites
+    # byte-identically. Only legacy no-digest callers consult the probes.
+    bypass_dedup = trial_stats_digest is not None
     enumerated = 0
     conflict_pruned = 0
     skipped_dedup = 0
@@ -747,7 +870,7 @@ def run_persisted_sweep(
             indicator_version=cfg.indicator_version,
             code_commit_sha=cfg.code_commit_sha,
         )
-        if dedup.seen(run_id):
+        if not bypass_dedup and dedup.seen(run_id):
             skipped_dedup += 1
             continue
         survivors.append((mask, run_id))
@@ -810,17 +933,19 @@ def run_persisted_sweep(
         persisted += 1
 
     flush = store.flush()
-    # Trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001, ADR-0008 condition 2):
-    # written BETWEEN flush and mark — a crash in this window re-does the whole
-    # tuple (redo-not-skip) and rewrites a byte-identical sidecar. Overwritten
-    # IFF this run evaluated the FULL mask population (``skipped_dedup == 0``);
-    # on ANY partial resume the existing sidecar is PRESERVED — merging
-    # accumulated scalars is forbidden (a partial redo would double-count).
+    # Trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001): written BETWEEN flush
+    # and mark — a crash in this window re-does the whole tuple and rewrites a
+    # byte-identical sidecar. ADR-0008 condition 2 required the FULL mask
+    # population; the dedup bypass above guarantees it structurally on this
+    # path (``skipped_dedup == 0`` by construction), so the old
+    # preserve-on-partial-resume arm is unreachable and removed
+    # (DEC-MARK-MANY-SENTINEL-001) — a subset population can no longer exist
+    # to be preserved against.
     sidecar_written = False
     trial_n_finite = 0
     trial_sum_sharpe = 0.0
     trial_sum_sharpe_sq = 0.0
-    if trial_stats_digest is not None and skipped_dedup == 0:
+    if trial_stats_digest is not None:
         stats = tuple_trial_stats_from_sharpes(
             [metrics.sharpe_ratio for _, metrics in pairs],
             n_enumerated=enumerated,
@@ -835,8 +960,25 @@ def run_persisted_sweep(
         trial_sum_sharpe = stats.sum_sharpe
         trial_sum_sharpe_sq = stats.sum_sharpe_sq
     # Mark seen AFTER the flush so a crash between evaluation and flush re-does
-    # the work rather than skipping it (redo-not-skip; Golden Rule #7).
-    dedup.mark_many(run_id for _, run_id in survivors)
+    # the work rather than skipping it (redo-not-skip; Golden Rule #7). The
+    # marks are ADVISORY on the digest path (the sentinel below is the redo
+    # authority); they remain load-bearing only for legacy no-digest callers.
+    marked = dedup.mark_many(run_id for _, run_id in survivors)
+    # Completion sentinel STRICTLY LAST (DEC-MARK-MANY-SENTINEL-001): its
+    # presence proves flush + sidecar + mark all completed; a crash anywhere
+    # before this line leaves it absent → the next run redoes the FULL tuple.
+    sentinel_written = False
+    if trial_stats_digest is not None:
+        write_completion_sentinel(
+            completion_sentinel_path(store.path),
+            TupleCompletionSentinel(
+                tuple_digest=trial_stats_digest,
+                store_content_hash=flush.content_hash,
+                sidecar_written=sidecar_written,
+                n_marked=marked,
+            ),
+        )
+        sentinel_written = True
 
     tallies = {
         "enumerated": enumerated,
@@ -851,6 +993,8 @@ def run_persisted_sweep(
         "minhits_dropped": evaluated - len(kept),
         "trial_n_finite": trial_n_finite,
         "trial_sidecar_written": sidecar_written,
+        # Additive sentinel tally (DEC-MARK-MANY-SENTINEL-001) — chain-safe.
+        "sentinel_written": sentinel_written,
     }
     audit.append(
         action=_ACTION_FLUSH,
@@ -874,6 +1018,7 @@ def run_persisted_sweep(
         trial_sum_sharpe=trial_sum_sharpe,
         trial_sum_sharpe_sq=trial_sum_sharpe_sq,
         trial_sidecar_written=sidecar_written,
+        sentinel_written=sentinel_written,
     )
 
 
