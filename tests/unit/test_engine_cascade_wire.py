@@ -18,6 +18,7 @@ and runs the nine-filter cascade per ``(instrument, tf)`` pool. Covers:
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -27,6 +28,7 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.engine import cascade_wire as cw
 from brutex.engine.results_store import ResultRow
+from brutex.engine.sweep_orchestrator import SweepTuple
 from brutex.metrics.cascade import (
     CandidateVerdict,
     CascadeReport,
@@ -684,6 +686,14 @@ def _swept_tree(root: Path) -> cw.SweepGridConfig:  # type: ignore[name-defined]
     return grid
 
 
+@dataclass(frozen=True)
+class _FakeRefinedCell:
+    """A minimal structural stand-in for ``stage3_wire.Stage3RefinedCell``."""
+
+    tuple_: SweepTuple
+    path: Path
+
+
 class TestBuildLeaderboardTrials:
     def test_aggregates_every_tuple_sidecar_per_leaderboard(self, tmp_path: Path) -> None:
         from brutex.engine.sweep_orchestrator import iter_sweep_tuples, tuple_store_path
@@ -776,20 +786,31 @@ class TestBuildLeaderboardTrials:
         assert cw.build_leaderboard_trials(tmp_path, grid) == ()
 
     def test_cells_without_grid_context_rejected(self, tmp_path: Path) -> None:
-        from types import SimpleNamespace
+        from brutex.engine.sweep_orchestrator import Timeframe
+        from brutex.strategies.types import Side
 
         grid = _swept_tree(tmp_path)
-        cell = SimpleNamespace(tuple_=None, path=tmp_path / "x.parquet")
+        cell = _FakeRefinedCell(
+            tuple_=SweepTuple(
+                instrument="NIFTY",
+                tf=Timeframe("1minute", 1),
+                direction=Side.BUY,
+                k=1,
+                sl_paisa=85,
+                tp_paisa=60,
+                proximity=None,
+            ),
+            path=tmp_path / "x.parquet",
+        )
         with pytest.raises(cw.CascadeWireError, match="without stage3_grid"):
             cw.build_leaderboard_trials(
                 tmp_path,
                 grid,
-                stage3_cells=[cell],  # type: ignore[list-item]
+                stage3_cells=[cell],
             )
 
     def test_stage3_cells_join_the_leaderboard(self, tmp_path: Path) -> None:
         import dataclasses
-        from types import SimpleNamespace
 
         from brutex.engine.results_store import ResultsStore
         from brutex.engine.sweep_orchestrator import (
@@ -832,12 +853,12 @@ class TestBuildLeaderboardTrials:
                 store_content_hash=flush.content_hash,
             ),
         )
-        cell = SimpleNamespace(tuple_=cell_tuple, path=cell_path)
+        cell = _FakeRefinedCell(tuple_=cell_tuple, path=cell_path)
         (record,) = cw.build_leaderboard_trials(
             tmp_path,
             grid,
             stage3_cells=[cell],
-            stage3_grid=train_grid,  # type: ignore[list-item]
+            stage3_grid=train_grid,
         )
         assert record.n_trials == baseline.n_trials + 3
         assert record.n_finite == baseline.n_finite + 2
@@ -849,7 +870,7 @@ class TestBuildLeaderboardTrials:
             tmp_path,
             grid,
             stage3_cells=[cell],
-            stage3_grid=train_grid,  # type: ignore[list-item]
+            stage3_grid=train_grid,
         )
         assert record2.complete is False
         assert record2.n_trials == baseline.n_trials
