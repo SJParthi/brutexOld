@@ -412,8 +412,17 @@
 
   <div id="pullpanel">
     <div class="beam"></div>
-    <div class="title"><b id="pulltitle">Pulling…</b><span class="counter" id="counter">0</span><span class="sub">chunks</span></div>
+    <div class="title"><b id="pulltitle">Pulling…</b><span class="counter" id="counter">0</span><span class="sub">units</span></div>
     <div class="tfgrid" id="tfgrid"></div>
+    <!-- DEC-PROGRESS-WINDOW-UNITS-001: the card counts COARSE units (spot:
+         symbol×interval chunks; options: all-or-nothing SERIES of ~dozens of
+         windows each) while /coverage/windows counts fine-grained fetch
+         windows — two honest scales for one pull. This line shows the
+         window-scale state from the SAME ledger that page reads, so the two
+         surfaces finally speak one language. Counts are bucket-global
+         (all recorded windows for spot/options), not per-pull — said here
+         plainly. -->
+    <div id="windowsline" style="font-size:12px;color:var(--muted);margin-top:6px;"></div>
   </div>
 
   <div class="grid">
@@ -793,6 +802,8 @@ async function runPull(symbol, label) {
     ? ` · ${fromDate || "2021-01-01"} → ${toDate || "prev day"}`
     : "";
   document.getElementById("pulltitle").textContent = `Pulling ${label} · 1-minute${range}`;
+  windowsBucket = 'spot';
+  refreshWindowsLine();
   const grid = document.getElementById("tfgrid");
   grid.innerHTML = "";
   document.getElementById("counter").textContent = "0";
@@ -1141,6 +1152,33 @@ BULK_BTNS.forEach(btn => {
 const PROGRESS_MS = 600;
 let pollTimer = null;
 
+/* DEC-PROGRESS-WINDOW-UNITS-001: window-scale companion to the coarse unit
+   counter — reads the SAME /api/v1/coverage/windows counts the fetch-windows
+   page renders (mtime-cached server-side; cheap at a 5 s cadence). settled =
+   SUCCESS+SKIPPED (the ledger's own skip authority), pending = PLANNED+EMPTY
+   (work the next pass re-fetches), failed = FAILED. Bucket-global, not
+   per-pull — the honest scope of the counts API. */
+let windowsBucket = null;
+async function refreshWindowsLine() {
+  if (!windowsBucket) return;
+  try {
+    const r = await fetch('/api/v1/coverage/windows');
+    if (!r.ok) return;
+    const c = ((await r.json()).counts || {})[windowsBucket] || {};
+    const settled = (c.SUCCESS || 0) + (c.SKIPPED || 0);
+    const pending = (c.PLANNED || 0) + (c.EMPTY || 0);
+    const failed = c.FAILED || 0;
+    const total = settled + pending + failed;
+    document.getElementById('windowsline').textContent =
+      'fetch windows (' + windowsBucket + ', all recorded): '
+      + settled.toLocaleString('en-IN') + ' settled · '
+      + pending.toLocaleString('en-IN') + ' pending · '
+      + failed.toLocaleString('en-IN') + ' failed · '
+      + total.toLocaleString('en-IN') + ' total';
+  } catch (e) { /* transient poll miss — keep the last line */ }
+}
+setInterval(refreshWindowsLine, 5000);
+
 async function startAndPoll(path, label) {
   const panel = document.getElementById('pullpanel');
   panel.classList.add('on', 'running');   // beam animates only while in flight
@@ -1149,6 +1187,8 @@ async function startAndPoll(path, label) {
   document.getElementById('pulltitle').textContent = `Starting ${label}…`;
   document.getElementById('tfgrid').innerHTML = '';
   document.getElementById('counter').textContent = '0';
+  windowsBucket = path.includes('option') ? 'options' : 'spot';
+  refreshWindowsLine();
   try {
     const r = await fetch(path, {method: 'POST'});
     const body = await r.json();
