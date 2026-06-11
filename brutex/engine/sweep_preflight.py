@@ -1,0 +1,98 @@
+"""Sweep slice PREFLIGHT — refuse silent no-bars tuples (DEC-SWEEP-PREFLIGHT-001).
+
+PR 4 of the Phase 9.5 unblocking plan (the 4-agent review recorded in
+MIGRATION.md #658): ``sweep-all`` pre-loads every ``(symbol, interval)``
+slice, and the orchestrator SKIPS empty slices (``tuples_skipped_no_bars``)
+— audited but quiet. For an operator who requested 21 timeframes that is a
+trap: a forgotten materialization silently turns most of the grid into
+no-ops while the sweep "completes". The pilot's coverage promise (all 3
+instruments × all 21 TFs) demands a LOUD refusal instead.
+
+This module is the pure core: given the pre-loaded slice sizes, name every
+requested ``(symbol, interval)`` pair with ZERO bars and compose the exact
+remediation. The CLI shim refuses to launch unless every requested pair has
+bars — or the operator explicitly opts into partial coverage with
+``--allow-missing-slices`` (deliberate, never accidental).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping, Sequence
+
+#: The base intervals the pull fetches directly from Dhan; anything else is a
+#: derived timeframe whose remedy is materialization, not a re-pull.
+_FETCHED_INTERVALS: frozenset[str] = frozenset({"1minute", "1day"})
+
+
+@dataclass(frozen=True, slots=True)
+class PreflightReport:
+    """Outcome of the sweep slice preflight.
+
+    Attributes
+    ----------
+    missing
+        Every requested ``(symbol, interval)`` pair whose pre-loaded slice
+        holds ZERO bars, in deterministic (symbol-major, request) order.
+    requested
+        Total requested pairs (symbols × intervals).
+    """
+
+    missing: tuple[tuple[str, str], ...]
+    requested: int
+
+    @property
+    def ok(self) -> bool:
+        """True iff every requested pair has at least one bar."""
+        return not self.missing
+
+    def remediation(self) -> str:
+        """The exact operator remedy for each class of missing pair.
+
+        Derived timeframes are missing because they were never
+        materialized (the remedy is the derive route / the
+        ``BRUTEX_AUTO_DERIVE_TFS=1`` opt-in, DEC-TF-MATERIALIZE-002);
+        fetched intervals (``1minute``/``1day``) are missing because the
+        pull never covered them (the remedy is a pull).
+        """
+        derived = sorted({i for _, i in self.missing if i not in _FETCHED_INTERVALS})
+        fetched = sorted({i for _, i in self.missing if i in _FETCHED_INTERVALS})
+        lines: list[str] = []
+        if derived:
+            lines.append(
+                f"derived TFs never materialized ({', '.join(derived)}): run "
+                "POST /api/v1/universe/derive-timeframes per symbol (or enable "
+                "BRUTEX_AUTO_DERIVE_TFS=1 so every pull settles them automatically)"
+            )
+        if fetched:
+            lines.append(
+                f"fetched intervals with no bars ({', '.join(fetched)}): pull the "
+                "symbol's spot history first (dashboard Pull / `brutex fetch`)"
+            )
+        return "; ".join(lines)
+
+
+def preflight_slices(
+    slice_sizes: Mapping[tuple[str, str], int],
+    *,
+    symbols: Sequence[str],
+    intervals: Iterable[str],
+) -> PreflightReport:
+    """Name every requested ``(symbol, interval)`` pair with zero bars.
+
+    ``slice_sizes`` maps each pre-loaded pair to its bar count (absent keys
+    count as zero — the loader only records what it found). Deterministic
+    output order: symbols in request order, intervals in request order
+    within each symbol.
+    """
+    interval_list = list(intervals)
+    missing = tuple(
+        (symbol, interval)
+        for symbol in symbols
+        for interval in interval_list
+        if slice_sizes.get((symbol, interval), 0) == 0
+    )
+    return PreflightReport(missing=missing, requested=len(symbols) * len(interval_list))

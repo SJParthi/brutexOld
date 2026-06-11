@@ -1,0 +1,68 @@
+"""Tests for `brutex.engine.sweep_preflight` (DEC-SWEEP-PREFLIGHT-001).
+
+The loud no-bars refusal core: every requested (symbol, interval) pair with
+zero bars is NAMED in deterministic order, with the per-class remediation
+(derived TFs → materialize / opt-in; fetched intervals → pull).
+"""
+
+from __future__ import annotations
+
+from brutex.engine.sweep_preflight import PreflightReport, preflight_slices
+
+
+class TestPreflightSlices:
+    def test_ok_when_every_pair_has_bars(self) -> None:
+        report = preflight_slices(
+            {("NIFTY", "1minute"): 100, ("NIFTY", "5minute"): 20},
+            symbols=["NIFTY"],
+            intervals=["1minute", "5minute"],
+        )
+        assert report.ok
+        assert report.missing == ()
+        assert report.requested == 2
+
+    def test_missing_pairs_named_in_request_order(self) -> None:
+        report = preflight_slices(
+            {
+                ("NIFTY", "1minute"): 100,
+                ("NIFTY", "5minute"): 0,  # explicit zero
+                ("SENSEX", "1minute"): 50,
+                # ("SENSEX", "5minute") absent entirely — counts as zero
+            },
+            symbols=["NIFTY", "SENSEX"],
+            intervals=["1minute", "5minute"],
+        )
+        assert not report.ok
+        assert report.missing == (("NIFTY", "5minute"), ("SENSEX", "5minute"))
+        assert report.requested == 4
+
+    def test_empty_request_is_trivially_ok(self) -> None:
+        report = preflight_slices({}, symbols=[], intervals=[])
+        assert report.ok
+        assert report.requested == 0
+
+
+class TestRemediation:
+    def test_derived_only_points_at_materialization(self) -> None:
+        report = PreflightReport(missing=(("NIFTY", "5minute"), ("NIFTY", "2hour")), requested=4)
+        remedy = report.remediation()
+        assert "derive-timeframes" in remedy
+        assert "BRUTEX_AUTO_DERIVE_TFS=1" in remedy
+        assert "2hour, 5minute" in remedy
+        assert "pull" not in remedy.split("derive-timeframes")[0]
+
+    def test_fetched_only_points_at_pull(self) -> None:
+        report = PreflightReport(missing=(("NIFTY", "1minute"), ("SENSEX", "1day")), requested=4)
+        remedy = report.remediation()
+        assert "pull the" in remedy
+        assert "1day, 1minute" in remedy
+        assert "derive-timeframes" not in remedy
+
+    def test_mixed_names_both_remedies(self) -> None:
+        report = PreflightReport(missing=(("NIFTY", "1minute"), ("NIFTY", "5minute")), requested=2)
+        remedy = report.remediation()
+        assert "derive-timeframes" in remedy
+        assert "pull the" in remedy
+
+    def test_ok_report_remediation_is_empty(self) -> None:
+        assert PreflightReport(missing=(), requested=2).remediation() == ""
