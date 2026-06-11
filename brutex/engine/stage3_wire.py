@@ -87,6 +87,7 @@ from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
     SweepTuple,
     Timeframe,
+    _tuple_digest,
     iter_sweep_tuples,
     load_or_create_store,
     tuple_store_path,
@@ -96,6 +97,11 @@ from brutex.engine.sweep_run import (
     canonical_trade_params,
     mask_run_id,
     ranked_combo_to_result_row,
+)
+from brutex.engine.trial_stats import (
+    trial_stats_sidecar_path,
+    tuple_trial_stats_from_sharpes,
+    write_tuple_trial_stats,
 )
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS
 from brutex.models import BruteXError
@@ -442,13 +448,19 @@ class Stage3PassReport:
     masks_refined
         Survivors actually refined (excludes skipped-empty-train leaderboards).
     evals_total
-        Unique (cache-miss) evaluations across all refinement runs — the
-        DSR-N trial contribution of this pass (ADR-0007 condition 6).
+        Unique (cache-miss) evaluations summed across the refinement runs —
+        an audit metric. NOT the DSR-N contribution: the honest N contribution
+        is the UNIQUE persisted refined rows (cross-survivor duplicate evals
+        collapse by identity; ADR-0008 condition 4 / F8).
     cache_hits_total
         CMA asks answered from the run-scoped value caches.
     rows_appended
         Refined rows NEWLY added to cell stores (an idempotent re-run of the
         same pass re-derives identical rows and appends zero).
+    sidecars_written
+        Cell trial-stats sidecars written this pass (DEC-TRIAL-STATS-WRITE-001;
+        a cell whose store holds rows this pass did not derive is SKIPPED
+        loudly — its count is ``len(cells) - sidecars_written``).
     skipped_empty_train
         Leaderboards skipped because their train slice was empty (a window no
         longer than the lockbox window leaves nothing to train on).
@@ -466,6 +478,7 @@ class Stage3PassReport:
     rows_appended: int
     skipped_empty_train: int
     cells: tuple[Stage3RefinedCell, ...]
+    sidecars_written: int = 0
 
 
 def _cell_sort_key(cell: SweepTuple) -> tuple[str, str, str, int, int, int, tuple[int, int, int]]:
@@ -611,6 +624,7 @@ def run_stage3_pass(
     cache_hits_total = 0
     skipped_empty_train = 0
     cell_rows: dict[SweepTuple, list[ResultRow]] = {}
+    cell_sharpes: dict[SweepTuple, dict[str, float | None]] = {}
     bits_memo: dict[tuple[str, str, ProximityParams | None], Sequence[int]] = {}
     for key, survivors in leaderboards.items():
         train_bars = train_slices.get((key.instrument, key.tf), ())
@@ -693,8 +707,13 @@ def run_stage3_pass(
                     proximity=proximity,
                 )
                 cell_rows.setdefault(cell, []).append(refined_row)
+                # Raw float|None Sharpe keyed by refined_id — the V-moment
+                # source, deduped by identity (ADR-0008 condition 4: never the
+                # row's None→0.0 projection, never evals_total).
+                cell_sharpes.setdefault(cell, {})[refined_id] = refined_eval.metrics.sharpe_ratio
 
     rows_appended = 0
+    sidecars_written = 0
     cells: list[Stage3RefinedCell] = []
     for cell in sorted(cell_rows, key=_cell_sort_key):
         cell_path = tuple_store_path(results_root, cell, train_grid)
@@ -704,7 +723,37 @@ def run_stage3_pass(
             # from two survivors of the same mask) are idempotent no-ops.
             if store.append(refined_row):
                 rows_appended += 1
-        store.flush()
+        cell_flush = store.flush()
+        # Per-cell trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001): the pass
+        # re-derives every cell deterministically, so recompute-and-overwrite
+        # is the idempotent policy HERE (the grid tuples' preserve-on-skips
+        # rule guards partial resumes; a Stage-3 pass has none). Written ONLY
+        # when this pass derived EVERY row in the store — a count mismatch
+        # means the store holds rows from a differently-configured earlier run
+        # and a sidecar from this pass alone would UNDER-COUNT N: skip loudly;
+        # the stale/absent sidecar then fails the condition-5 pairing check at
+        # cascade-build time instead of fabricating a partial N.
+        derived = cell_sharpes[cell]
+        if len(store) == len(derived):
+            write_tuple_trial_stats(
+                trial_stats_sidecar_path(cell_path),
+                tuple_trial_stats_from_sharpes(
+                    [derived[refined_id] for refined_id in sorted(derived)],
+                    n_enumerated=len(derived),
+                    n_conflict_pruned=0,
+                    n_minhits_dropped=0,
+                    tuple_digest=_tuple_digest(cell, train_grid),
+                    store_content_hash=cell_flush.content_hash,
+                ),
+            )
+            sidecars_written += 1
+        else:
+            _LOG.warning(
+                "stage3_wire.cell_sidecar_skipped",
+                cell_path=str(cell_path),
+                store_rows=len(store),
+                derived_rows=len(derived),
+            )
         cells.append(Stage3RefinedCell(tuple_=cell, path=cell_path, rows=len(store)))
 
     payload = {
@@ -713,6 +762,7 @@ def run_stage3_pass(
         "cache_hits_total": cache_hits_total,
         "cells_written": len(cells),
         "rows_appended": rows_appended,
+        "sidecars_written": sidecars_written,
         "skipped_empty_train": skipped_empty_train,
         "train_snapshot_hash": train_hash,
     }
@@ -729,6 +779,7 @@ def run_stage3_pass(
         rows_appended=rows_appended,
         skipped_empty_train=skipped_empty_train,
         cells=tuple(cells),
+        sidecars_written=sidecars_written,
     )
 
 

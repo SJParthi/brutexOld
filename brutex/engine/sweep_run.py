@@ -64,6 +64,11 @@ from brutex.engine.sweep_driver import (
     metrics_for_mask,
 )
 from brutex.engine.trade_sim import simulate_trades
+from brutex.engine.trial_stats import (
+    trial_stats_sidecar_path,
+    tuple_trial_stats_from_sharpes,
+    write_tuple_trial_stats,
+)
 from brutex.metrics.compute import ResultMetrics
 from brutex.money import round_money
 from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
@@ -401,6 +406,20 @@ class SweepRunSummary:
     ranked: int
     persisted: int
     store_content_hash: str
+    #: Combos that actually ran ``metrics_for_mask`` (the Bailey-LdP trial
+    #: population — ADR-0008 condition 3); ``evaluated - minhits_dropped``.
+    backtested: int = 0
+    #: Stage-1B drops among the evaluated survivors (audit context).
+    minhits_dropped: int = 0
+    #: Finite-Sharpe trials + their fsum moments (the sidecar's V inputs;
+    #: zero when no sidecar was written this run).
+    trial_n_finite: int = 0
+    trial_sum_sharpe: float = 0.0
+    trial_sum_sharpe_sq: float = 0.0
+    #: ``True`` iff this run wrote/overwrote the tuple's trial-stats sidecar
+    #: (DEC-TRIAL-STATS-WRITE-001 condition 2: written iff a digest was
+    #: supplied AND ``skipped_dedup == 0`` — preserved on any partial resume).
+    trial_sidecar_written: bool = False
 
 
 def canonical_trade_params(
@@ -591,6 +610,7 @@ def run_persisted_sweep(
     dedup: ComboDedup,
     audit: AuditWriter,
     kernel: ResidentSweepKernel | None = None,
+    trial_stats_digest: str | None = None,
 ) -> SweepRunSummary:
     """Run a reproducible, deduped, audited K-of-bits sweep over ONE (instrument, TF).
 
@@ -643,6 +663,15 @@ def run_persisted_sweep(
         the same SUPERSET kernel; Golden Rule #4); only redundant rebuild/re-marshal
         work is removed. ``None`` (default) builds + counts inline as before. The
         kernel MUST be built from the SAME ``bars`` (a length mismatch raises).
+    trial_stats_digest
+        The tuple's 16-hex path digest, enabling the trial-stats sidecar write
+        (DEC-TRIAL-STATS-WRITE-001 / ADR-0008 condition 2): when provided AND
+        this run evaluated the full mask population (``skipped_dedup == 0``),
+        the per-tuple (N, V-moments) sidecar is atomically written beside the
+        store between flush and dedup-mark; on any partial resume the existing
+        sidecar is PRESERVED. ``None`` (default) writes no sidecar (legacy
+        callers; the launcher path supplies it via
+        :func:`~brutex.engine.sweep_orchestrator.run_one_tuple`).
 
     Returns
     -------
@@ -781,6 +810,30 @@ def run_persisted_sweep(
         persisted += 1
 
     flush = store.flush()
+    # Trial-stats sidecar (DEC-TRIAL-STATS-WRITE-001, ADR-0008 condition 2):
+    # written BETWEEN flush and mark — a crash in this window re-does the whole
+    # tuple (redo-not-skip) and rewrites a byte-identical sidecar. Overwritten
+    # IFF this run evaluated the FULL mask population (``skipped_dedup == 0``);
+    # on ANY partial resume the existing sidecar is PRESERVED — merging
+    # accumulated scalars is forbidden (a partial redo would double-count).
+    sidecar_written = False
+    trial_n_finite = 0
+    trial_sum_sharpe = 0.0
+    trial_sum_sharpe_sq = 0.0
+    if trial_stats_digest is not None and skipped_dedup == 0:
+        stats = tuple_trial_stats_from_sharpes(
+            [metrics.sharpe_ratio for _, metrics in pairs],
+            n_enumerated=enumerated,
+            n_conflict_pruned=conflict_pruned,
+            n_minhits_dropped=evaluated - len(kept),
+            tuple_digest=trial_stats_digest,
+            store_content_hash=flush.content_hash,
+        )
+        write_tuple_trial_stats(trial_stats_sidecar_path(store.path), stats)
+        sidecar_written = True
+        trial_n_finite = stats.n_finite
+        trial_sum_sharpe = stats.sum_sharpe
+        trial_sum_sharpe_sq = stats.sum_sharpe_sq
     # Mark seen AFTER the flush so a crash between evaluation and flush re-does
     # the work rather than skipping it (redo-not-skip; Golden Rule #7).
     dedup.mark_many(run_id for _, run_id in survivors)
@@ -792,6 +845,12 @@ def run_persisted_sweep(
         "evaluated": evaluated,
         "ranked": len(ranked),
         "persisted": persisted,
+        # Additive trial-stats tallies (DEC-TRIAL-STATS-WRITE-001) — the
+        # hash-chain is per-line, so new payload keys are chain-safe.
+        "backtested": len(pairs),
+        "minhits_dropped": evaluated - len(kept),
+        "trial_n_finite": trial_n_finite,
+        "trial_sidecar_written": sidecar_written,
     }
     audit.append(
         action=_ACTION_FLUSH,
@@ -809,6 +868,12 @@ def run_persisted_sweep(
         ranked=len(ranked),
         persisted=persisted,
         store_content_hash=flush.content_hash,
+        backtested=len(pairs),
+        minhits_dropped=evaluated - len(kept),
+        trial_n_finite=trial_n_finite,
+        trial_sum_sharpe=trial_sum_sharpe,
+        trial_sum_sharpe_sq=trial_sum_sharpe_sq,
+        trial_sidecar_written=sidecar_written,
     )
 
 
