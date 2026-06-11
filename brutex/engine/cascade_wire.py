@@ -76,7 +76,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import structlog
 
@@ -91,6 +91,8 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 
     from brutex.data.models import CandleBar
     from brutex.engine.results_store import ResultRow
+    from brutex.engine.sweep_orchestrator import SweepGridConfig, SweepTuple
+    from brutex.engine.trial_stats import LeaderboardTrialStats
     from brutex.metrics.cascade import CandidateInput, CascadeConfig, CascadeReport
 
 _LOG = structlog.get_logger("brutex.engine.cascade_wire")
@@ -357,6 +359,11 @@ class CascadeManifest:
         Optional :class:`Stage3ManifestRecord` (DEC-STAGE3-WIRE-001) — Stage-3
         enablement + the refined-cell list. ``None`` for manifests written
         before the Stage-3 wiring (backward-compatible parse).
+    leaderboard_trials
+        Optional FROZEN per-leaderboard trial statistics
+        (DEC-TRIAL-STATS-FREEZE-001, ADR-0008 condition 1) — built once from
+        the sidecars by the AUTOMATIC path; the slice-4 consumer reads ONLY
+        these. ``None`` for pre-freeze manifests (backward-compatible parse).
     """
 
     version: int
@@ -365,6 +372,7 @@ class CascadeManifest:
     bars_context: BarsContext
     specs: tuple[CascadeTupleSpec, ...]
     stage3: Stage3ManifestRecord | None = None
+    leaderboard_trials: tuple[LeaderboardTrialsRecord, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -802,6 +810,224 @@ def serialize_wire_report(report: CascadeWireReport) -> bytes:
     ).encode("utf-8")
 
 
+# ── Per-leaderboard trial-stats freeze (DEC-TRIAL-STATS-FREEZE-001) ──────────
+
+
+@dataclass(frozen=True, slots=True)
+class LeaderboardTrialsRecord:
+    """One (instrument, tf) leaderboard's FROZEN trial statistics (ADR-0008 cond. 1).
+
+    The manifest-serialisable projection of
+    :class:`~brutex.engine.trial_stats.LeaderboardTrialStats`: the AUTOMATIC
+    path aggregates the per-tuple sidecars exactly once at cascade-build time
+    and freezes the merged numbers here; BOTH cascade paths consume only the
+    frozen record (sidecars are build-time inputs, never replay-time inputs).
+
+    Parameters
+    ----------
+    instrument, tf_label
+        The leaderboard key (the wire's pooling axis); non-empty.
+    n_trials, n_finite
+        The leaderboard N (every backtested combo + every unique Stage-3
+        refined row) and its finite-Sharpe subset (``n_finite <= n_trials``).
+    sum_sharpe, sum_sharpe_sq
+        The merged fsum V-moments (finite floats; ``0.0`` when ``n_finite==0``).
+    complete
+        ``False`` when ANY contributing tuple/cell store lacked a paired
+        sidecar (an old tree or a slice-2 mismatch-skip) — consumers must
+        treat an incomplete record as pool-fallback, NEVER deflate against a
+        knowingly partial N (ADR-0008 condition 6).
+
+    Raises
+    ------
+    CascadeWireError
+        On an empty label or any moment/count invariant violation (delegated
+        to the slice-1 core's own validation).
+    """
+
+    instrument: str
+    tf_label: str
+    n_trials: int
+    n_finite: int
+    sum_sharpe: float
+    sum_sharpe_sq: float
+    complete: bool
+
+    def __post_init__(self) -> None:
+        for name in ("instrument", "tf_label"):
+            if not getattr(self, name):
+                raise CascadeWireError(f"LeaderboardTrialsRecord.{name} must be non-empty")
+        # One validation source (CLAUDE.md §11 COMMON): the slice-1 core owns
+        # the count/moment invariants — construct-to-validate, re-raise typed.
+        from brutex.engine.trial_stats import TrialStatsError
+
+        try:
+            self.to_stats()
+        except TrialStatsError as exc:
+            raise CascadeWireError(f"invalid leaderboard trial stats: {exc}") from exc
+
+    def to_stats(self) -> LeaderboardTrialStats:
+        """Project back to the slice-1 :class:`LeaderboardTrialStats` (validated)."""
+        from brutex.engine.trial_stats import LeaderboardTrialStats
+
+        return LeaderboardTrialStats(
+            n_trials=self.n_trials,
+            n_finite=self.n_finite,
+            sum_sharpe=self.sum_sharpe,
+            sum_sharpe_sq=self.sum_sharpe_sq,
+            complete=self.complete,
+        )
+
+
+class _RefinedCellLike(Protocol):
+    """The (tuple_, path) slice of a Stage-3 refined cell (structural typing).
+
+    ``stage3_wire.Stage3RefinedCell`` satisfies this; cascade_wire cannot
+    import it directly (stage3_wire imports THIS module — a cycle).
+    """
+
+    @property
+    def tuple_(self) -> SweepTuple:
+        """The cell's constructed sweep tuple."""
+        ...  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def path(self) -> Path:
+        """The cell's Parquet store path."""
+        ...  # pragma: no cover — Protocol stub, never executed
+
+
+def build_leaderboard_trials(
+    results_root: Path,
+    grid: SweepGridConfig,
+    *,
+    stage3_cells: Sequence[_RefinedCellLike] = (),
+    stage3_grid: SweepGridConfig | None = None,
+) -> tuple[LeaderboardTrialsRecord, ...]:
+    """Aggregate every trial-stats sidecar into per-leaderboard frozen records.
+
+    The ADR-0008 condition-1 builder: iterates the GRID TUPLES (not the specs
+    — a tuple that backtested thousands of combos but ranked zero finalists
+    still contributes its trials), then the Stage-3 refined cells, validating
+    each sidecar's pairing identity (condition 5) and merging the moments in
+    deterministic order via the slice-1 core.
+
+    Per tuple/cell: store file ABSENT → the tuple never ran (no-bars skip) —
+    not counted; store present + sidecar ABSENT → the leaderboard is marked
+    ``complete=False`` (an old tree or a slice-2 preserve/mismatch skip);
+    sidecar present → its ``tuple_digest`` AND ``store_content_hash`` must
+    match the recomputed values or the build FAILS LOUDLY — drift is never
+    silently absorbed into N.
+
+    Parameters
+    ----------
+    results_root
+        The sweep results root the grid persisted under.
+    grid
+        The grid config (its context recomputes each tuple's digest).
+    stage3_cells
+        The Stage-3 pass report's refined cells (empty when disabled).
+    stage3_grid
+        The TRAIN-hash grid context the cells' digests were written under
+        (``dataclasses.replace(grid, data_snapshot_hash=train_hash)``);
+        required when *stage3_cells* is non-empty.
+
+    Returns
+    -------
+    tuple[LeaderboardTrialsRecord, ...]
+        One record per (instrument, tf) leaderboard, sorted by key.
+
+    Raises
+    ------
+    CascadeWireError
+        On a pairing-identity mismatch (digest or store hash), an unreadable
+        sidecar, or cells supplied without their grid context.
+    """
+    import hashlib
+
+    from brutex.engine.sweep_orchestrator import (
+        _tuple_digest,
+        iter_sweep_tuples,
+        tuple_store_path,
+    )
+    from brutex.engine.trial_stats import (
+        TrialStatsError,
+        TupleTrialStats,
+        merge_tuple_trial_stats,
+        read_tuple_trial_stats,
+        trial_stats_sidecar_path,
+    )
+
+    if stage3_cells and stage3_grid is None:
+        raise CascadeWireError(
+            "build_leaderboard_trials: stage3_cells supplied without stage3_grid "
+            "(the train-hash context their sidecar digests were written under)"
+        )
+
+    def _read_paired(store_path: Path, expected_digest: str) -> TupleTrialStats | None:
+        """Read + pairing-validate one sidecar; ``None`` when absent (incomplete)."""
+        sidecar = trial_stats_sidecar_path(store_path)
+        if not sidecar.exists():
+            return None
+        try:
+            stats = read_tuple_trial_stats(sidecar)
+        except TrialStatsError as exc:
+            raise CascadeWireError(f"unreadable trial-stats sidecar at {sidecar}: {exc}") from exc
+        if stats.tuple_digest != expected_digest:
+            raise CascadeWireError(
+                f"trial-stats pairing mismatch at {sidecar}: sidecar digest "
+                f"{stats.tuple_digest} != expected tuple digest {expected_digest}"
+            )
+        actual_hash = hashlib.sha256(store_path.read_bytes()).hexdigest()
+        if stats.store_content_hash != actual_hash:
+            raise CascadeWireError(
+                f"trial-stats pairing mismatch at {sidecar}: sidecar store hash "
+                f"{stats.store_content_hash} != actual store content {actual_hash}"
+            )
+        return stats
+
+    parts: dict[tuple[str, str], list[TupleTrialStats]] = {}
+    complete: dict[tuple[str, str], bool] = {}
+
+    for tuple_ in iter_sweep_tuples(grid):
+        store_path = tuple_store_path(results_root, tuple_, grid)
+        if not store_path.exists():
+            continue  # the tuple never ran (no bars) — contributes no trials
+        key = (tuple_.instrument, tuple_.tf.label)
+        complete.setdefault(key, True)
+        stats = _read_paired(store_path, _tuple_digest(tuple_, grid))
+        if stats is None:
+            complete[key] = False
+        else:
+            parts.setdefault(key, []).append(stats)
+
+    if stage3_cells and stage3_grid is not None:
+        for cell in stage3_cells:
+            key = (cell.tuple_.instrument, cell.tuple_.tf.label)
+            complete.setdefault(key, True)
+            stats = _read_paired(cell.path, _tuple_digest(cell.tuple_, stage3_grid))
+            if stats is None:
+                complete[key] = False
+            else:
+                parts.setdefault(key, []).append(stats)
+
+    records: list[LeaderboardTrialsRecord] = []
+    for key in sorted(complete):
+        merged = merge_tuple_trial_stats(parts.get(key, []), complete=complete[key])
+        records.append(
+            LeaderboardTrialsRecord(
+                instrument=key[0],
+                tf_label=key[1],
+                n_trials=merged.n_trials,
+                n_finite=merged.n_finite,
+                sum_sharpe=merged.sum_sharpe,
+                sum_sharpe_sq=merged.sum_sharpe_sq,
+                complete=merged.complete,
+            )
+        )
+    return tuple(records)
+
+
 # ── Manifest serialisation ────────────────────────────────────────────────────
 
 
@@ -901,6 +1127,36 @@ def _stage3_from_dict(data: dict[str, object]) -> Stage3ManifestRecord:
         raise CascadeWireError(f"invalid stage3 record in manifest: {exc}") from exc
 
 
+def _lbt_to_dict(record: LeaderboardTrialsRecord) -> dict[str, object]:
+    """Serialise one :class:`LeaderboardTrialsRecord` into a JSON-native dict."""
+    return {
+        "instrument": record.instrument,
+        "tf_label": record.tf_label,
+        "n_trials": record.n_trials,
+        "n_finite": record.n_finite,
+        "sum_sharpe": record.sum_sharpe,
+        "sum_sharpe_sq": record.sum_sharpe_sq,
+        "complete": record.complete,
+    }
+
+
+def _lbt_from_dict(data: dict[str, object]) -> LeaderboardTrialsRecord:
+    """Rebuild a :class:`LeaderboardTrialsRecord` from :func:`_lbt_to_dict` output."""
+    raw = cast(dict[str, Any], data)
+    try:
+        return LeaderboardTrialsRecord(
+            instrument=str(raw["instrument"]),
+            tf_label=str(raw["tf_label"]),
+            n_trials=int(raw["n_trials"]),
+            n_finite=int(raw["n_finite"]),
+            sum_sharpe=float(raw["sum_sharpe"]),
+            sum_sharpe_sq=float(raw["sum_sharpe_sq"]),
+            complete=bool(raw["complete"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CascadeWireError(f"invalid leaderboard_trials record in manifest: {exc}") from exc
+
+
 def manifest_to_json(manifest: CascadeManifest) -> bytes:
     """Return the deterministic JSON bytes of *manifest* (sorted keys)."""
     payload = {
@@ -915,6 +1171,11 @@ def manifest_to_json(manifest: CascadeManifest) -> bytes:
         },
         "specs": [_spec_to_dict(spec) for spec in manifest.specs],
         "stage3": None if manifest.stage3 is None else _stage3_to_dict(manifest.stage3),
+        "leaderboard_trials": (
+            None
+            if manifest.leaderboard_trials is None
+            else [_lbt_to_dict(record) for record in manifest.leaderboard_trials]
+        ),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
         "utf-8"
@@ -952,6 +1213,9 @@ def manifest_from_json(data: bytes) -> CascadeManifest:
         # `stage3` is absent from pre-DEC-STAGE3-WIRE-001 manifests → None
         # (backward-compatible parse; same MANIFEST_VERSION, purely additive).
         stage3_raw = payload.get("stage3")
+        # `leaderboard_trials` is absent from pre-DEC-TRIAL-STATS-FREEZE-001
+        # manifests → None (the same additive-at-version-1 pattern as stage3).
+        lbt_raw = payload.get("leaderboard_trials")
         return CascadeManifest(
             version=MANIFEST_VERSION,
             sweep_id=str(payload["sweep_id"]),
@@ -959,6 +1223,9 @@ def manifest_from_json(data: bytes) -> CascadeManifest:
             bars_context=bars_context,
             specs=specs,
             stage3=None if stage3_raw is None else _stage3_from_dict(stage3_raw),
+            leaderboard_trials=(
+                None if lbt_raw is None else tuple(_lbt_from_dict(item) for item in lbt_raw)
+            ),
         )
     except (KeyError, TypeError) as exc:
         raise CascadeWireError(f"cascade manifest missing/invalid field: {exc}") from exc
@@ -1080,6 +1347,7 @@ def run_and_write_from_specs(
     bars_context: BarsContext,
     cascade_config: CascadeConfig,
     stage3: Stage3ManifestRecord | None = None,
+    leaderboard_trials: tuple[LeaderboardTrialsRecord, ...] | None = None,
 ) -> CascadeWireReport:
     """AUTOMATIC path: run the cascade + write the manifest AND the report.
 
@@ -1102,6 +1370,7 @@ def run_and_write_from_specs(
         bars_context=bars_context,
         specs=tuple(specs),
         stage3=stage3,
+        leaderboard_trials=leaderboard_trials,
     )
     report = run_cascade_over_specs(
         specs, bars_for=bars_for, config=cascade_config, sweep_id=sweep_id
@@ -1226,9 +1495,11 @@ __all__ = [
     "CascadeTupleSpec",
     "CascadeWireError",
     "CascadeWireReport",
+    "LeaderboardTrialsRecord",
     "Stage3CellRecord",
     "Stage3ManifestRecord",
     "build_candidate_input",
+    "build_leaderboard_trials",
     "candidates_for_spec",
     "cascade_config_for_sweep",
     "cascade_config_from_dict",
