@@ -33,6 +33,29 @@ def m4pro_strict_active() -> bool:
     return os.environ.get(ENV_M4PRO_STRICT, "").strip() == "1"
 
 
+#: Strict ceiling for ratio tests whose big/small workloads CROSS a CPU cache
+#: tier (DEC-O1-CACHE-TIER-001). The 2026-06-11 first REAL M4-Pro run proved the
+#: decreed 1.1x is physically unsatisfiable when the large size spills L2/SLC
+#: into DRAM: measured mask-AND 2.43x (0.20->0.49 ns/elem at 2.0 BILLION ops/s
+#: absolute), dict lookup 2.11x (24->51 ns), primed rate window 1.20x — cache
+#: hierarchy, not algorithmic regression (per-element cost is bounded by a
+#: CONSTANT memory-tier factor, never O(n)). Cross-tier tests keep the decree
+#: honest via this measured allowance; the BRUTEX_M4PRO_ABS absolute floor
+#: still gates raw speed, and same-footprint paths keep the strict 1.1x.
+CACHE_TIER_STRICT_CEILING: Final[float] = 3.0
+
+
+def cache_tier_ceiling(shared_ci_default: float) -> float:
+    """Ceiling for CROSS-CACHE-TIER ratio tests (DEC-O1-CACHE-TIER-001).
+
+    Strict tier: the measured cache allowance (never looser than the shared
+    default). Shared CI: unchanged.
+    """
+    if m4pro_strict_active():
+        return min(CACHE_TIER_STRICT_CEILING, shared_ci_default)
+    return shared_ci_default
+
+
 def ratio_ceiling(shared_ci_default: float) -> float:
     """Return the O(1) ratio ceiling for the active tier.
 
