@@ -2977,6 +2977,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     scratch_root: Path | None,
     allow_context_mismatch: bool,
     emit_heal_plan: bool = False,
+    stage3_enable: bool = False,
+    stage3_top_k: int | None = None,
+    stage3_fevals: int | None = None,
+    stage3_restarts: int | None = None,
 ) -> int:
     """Verify a sweep results tree — the doctor's CLI (DEC-SWEEP-VERIFY-001).
 
@@ -3050,10 +3054,17 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         if conditions
         else list(range(52))
     )
+    # tf_minutes via the SHARED trading-minutes parser (DEC-STAGE3-RECOUNT-001
+    # condition B9): the `// 60` form maps 1day to 1440 wall-clock minutes while
+    # the launcher uses the 375-minute session — tf_minutes is in every tuple
+    # digest, so the drift read EVERY daily-TF tree as a false grid_mismatch.
+    from brutex.data.timeframes import trading_minutes_for_lake_interval
+
     grid_kwargs: dict[str, Any] = {
         "instruments": symbol_list,
         "timeframes": [
-            Timeframe(interval, INTERVAL_SECONDS[interval] // 60) for interval in interval_list
+            Timeframe(interval, trading_minutes_for_lake_interval(interval))
+            for interval in interval_list
         ],
         "directions": direction_list,
         "k_values": k_list,
@@ -3177,15 +3188,100 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 if scratch_root is not None
                 else Path(tempfile.mkdtemp(prefix="brutex-sweep-verify-"))
             )
+            # Stage-3 cell recount (DEC-STAGE3-RECOUNT-001): compose the SAME
+            # run_stage3_pass into the scratch using the knobs the tree
+            # RECORDED (STAGE_3_PASS_START audit payloads — condition B1);
+            # operator --stage3-* flags are the audit-less fallback only
+            # (condition B8), and a disagreement refuses cells, never silently
+            # prefers either side.
+            stage3_grid = None
+            cells_note: str | None = None
+            cell_evidence = False
+            knobs_from_audit = False
+            recorded_train_hash: str | None = None
+            stage3_kwargs: dict[str, Any] | None = None
             if stage3 is not None and stage3.enabled:
-                print(
-                    "[brutex] note: Stage-3 refined cells are NOT recounted in this "
-                    "slice — tiers 1-2 cover their pairing/identity (honest envelope, "
-                    "MIGRATION.md DEC-SWEEP-VERIFY-001)"
-                )
+                from brutex.engine.sweep_verify import recorded_stage3_from_audit
+
+                recorded_train_hash = stage3.train_snapshot_hash
+                stage3_audit = recorded_stage3_from_audit(out_root / "audit" / "sweep-all.jsonl")
+                knobs = stage3_audit.knobs
+                if not stage3_audit.consistent:
+                    cells_note = (
+                        "mixed Stage-3 knob history in the audit (condition B4) — "
+                        "the cell stores hold accreted foreign-knob rows and are "
+                        "honestly non-reproducible"
+                    )
+                elif knobs is not None:
+                    flag_mismatch = [
+                        f"{name}: recorded {rec} vs --flag {flag}"
+                        for name, rec, flag in (
+                            ("stage3_top_k", knobs.stage3_top_k, stage3_top_k),
+                            ("stage3_fevals", knobs.max_fevals, stage3_fevals),
+                            ("stage3_restarts", knobs.max_restarts, stage3_restarts),
+                        )
+                        if flag is not None and flag != rec
+                    ]
+                    if flag_mismatch:
+                        cells_note = (
+                            "the --stage3-* flags disagree with the tree's recorded "
+                            "knobs: " + "; ".join(flag_mismatch)
+                        )
+                    else:
+                        knobs_from_audit = True
+                        stage3_kwargs = {
+                            "stage3_enable": True,
+                            "stage3_top_k": knobs.stage3_top_k,
+                            "stage3_max_fevals": knobs.max_fevals,
+                            "stage3_max_restarts": knobs.max_restarts,
+                        }
+                elif stage3_enable:
+                    # Audit-less fallback: recount with the operator's knobs —
+                    # cells stay INCONCLUSIVE (evidence requires RECORDED knobs).
+                    stage3_kwargs = {"stage3_enable": True}
+                    for key, value in (
+                        ("stage3_top_k", stage3_top_k),
+                        ("stage3_max_fevals", stage3_fevals),
+                        ("stage3_max_restarts", stage3_restarts),
+                    ):
+                        if value is not None:
+                            stage3_kwargs[key] = value
+                else:
+                    cells_note = (
+                        "no recorded Stage-3 knobs in the audit and no --stage3-* flags supplied"
+                    )
+                if cells_note is None and stage3_kwargs is not None:
+                    import dataclasses as _dataclasses
+
+                    from brutex.engine.stage3_wire import (
+                        Stage3WireError,
+                        ensure_stage3_runtime,
+                    )
+
+                    try:
+                        current_versions = ensure_stage3_runtime()
+                    except Stage3WireError as exc:
+                        cells_note = f"stage3 runtime unavailable: {exc}"
+                        stage3_grid = None
+                    else:
+                        stage3_grid = _dataclasses.replace(grid, **stage3_kwargs)
+                        versions_ok = stage3_audit.optimizer_versions in (
+                            (),
+                            (current_versions,),
+                        )
+                        if not versions_ok:
+                            cells_note = (
+                                f"optimizer versions drifted: recorded "
+                                f"{list(stage3_audit.optimizer_versions)} vs current "
+                                f"{current_versions} (condition B3) — cell divergence "
+                                f"will be INCONCLUSIVE"
+                            )
+                if cells_note is not None:
+                    print(f"[brutex] stage3 cells degraded to INCONCLUSIVE: {cells_note}")
             print(f"[brutex] recount: shadow re-sweep into {scratch} (costs a full sweep)")
             audit_path = scratch / "audit.jsonl"
             audit_path.parent.mkdir(parents=True, exist_ok=True)
+            train_hash_ok = True
             with AuditWriter.open(audit_path) as audit:
                 run_sweep_grid(
                     grid,
@@ -3196,21 +3292,55 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     ),
                     audit=audit,
                 )
+                if stage3_grid is not None:
+                    from brutex.engine.stage3_wire import run_stage3_pass
+
+                    pass_report = run_stage3_pass(
+                        stage3_grid,
+                        results_root=scratch,
+                        bars_for=lambda s, i: slices.get((s, i), []),
+                        audit=audit,
+                        exchange=exchange,
+                        segment=segment,
+                        start=start,
+                        end=end,
+                    )
+                    # Condition B6: the recomputed train hash must match the
+                    # manifest's recorded one — the cell path digests fold it.
+                    if pass_report.train_snapshot_hash != recorded_train_hash:
+                        train_hash_ok = False
+                        print(
+                            "[brutex] stage3 cells degraded to INCONCLUSIVE: recount "
+                            f"train hash {pass_report.train_snapshot_hash!r} != "
+                            f"manifest's {recorded_train_hash!r} (condition B6)"
+                        )
+            cell_evidence = (
+                context_match
+                and stage3_grid is not None
+                and cells_note is None
+                and train_hash_ok
+                and knobs_from_audit
+            )
             try:
                 rec_report = compare_recount(
                     out_root,
                     scratch,
-                    plan_expected_stores(out_root, grid),
+                    plan_expected_stores(
+                        out_root, grid, stage3=stage3 if stage3_grid is not None else None
+                    ),
                     context_match=context_match,
+                    cell_evidence=cell_evidence,
                 )
             except SweepVerifyError as exc:
                 print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
                 return EXIT_USER_ERROR
             print(rec_report.render())
             reports.append(rec_report)
-            if not context_match and any(
-                f.code == "recount_divergence_inconclusive" for f in rec_report.findings
-            ):
+            if any(
+                f.code
+                in ("recount_divergence_inconclusive", "cell_recount_divergence_inconclusive")
+                for f in rec_report.findings
+            ) or (stage3 is not None and stage3.enabled and stage3_grid is None):
                 inconclusive_only = True
             # Heal-plan emission (DEC-SWEEP-HEAL-001 C1/C2): heal-grade
             # evidence exists ONLY under a matched context — the plan freezes
@@ -3931,6 +4061,10 @@ def main(argv: list[str] | None = None) -> int:
             scratch_root=args.scratch_root,
             allow_context_mismatch=args.allow_context_mismatch,
             emit_heal_plan=args.emit_heal_plan,
+            stage3_enable=args.stage3_enable,
+            stage3_top_k=args.stage3_top_k,
+            stage3_fevals=args.stage3_fevals,
+            stage3_restarts=args.stage3_restarts,
         )
     # Quarantine heal (DEC-SWEEP-HEAL-001) — dry-run by default.
     if args.command == "sweep-heal":
