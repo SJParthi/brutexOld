@@ -1,6 +1,6 @@
 # ADR-0009 — Re-migrate Backtesting Data Source Dhan → Groww
 
-**Decision ID:** `DEC-DHAN-GROWW-REMIGRATE-001` (MIGRATION.md entry #666)
+**Decision ID:** `DEC-DHAN-GROWW-REMIGRATE-001` (MIGRATION.md entry #667)
 **Date:** 2026-06-12
 **Status:** ACCEPTED — operator directive, override of a 4-agent hostile-review
 NO-GO (logged honestly per Golden Rule #10). Implementation is GATED on the
