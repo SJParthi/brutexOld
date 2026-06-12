@@ -23,54 +23,13 @@ emitted window (DEC-EXTREME-PERF-AUTOMATION-001 #342).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from brutex.adapters.dhan.constants import (
     INTRADAY_WINDOW_DAYS,
     ROLLING_OPTION_WINDOW_DAYS,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class DateWindow:
-    """A half-open ``[start, end)`` fetch window, ISO-8601 string bounds."""
-
-    start: str
-    end: str
-
-
-def plan_windows(start: datetime, end: datetime, *, window_days: int) -> list[DateWindow]:
-    """Tile ``[start, end)`` into windows no wider than *window_days*.
-
-    Parameters
-    ----------
-    start, end
-        Range to cover. If ``start >= end`` the result is empty.
-    window_days
-        Maximum width (days) of each emitted window. Must be positive.
-
-    Returns
-    -------
-    list[DateWindow]
-        Contiguous, non-overlapping windows (ISO-string bounds); the final
-        window is clipped to *end*.
-
-    Raises
-    ------
-    ValueError
-        If *window_days* is not positive.
-    """
-    if window_days <= 0:
-        raise ValueError(f"window_days must be positive, got {window_days}")
-    windows: list[DateWindow] = []
-    cursor = start
-    span = timedelta(days=window_days)
-    while cursor < end:
-        window_end = min(cursor + span, end)
-        windows.append(DateWindow(start=cursor.isoformat(), end=window_end.isoformat()))
-        cursor = window_end
-    return windows
+from brutex.adapters.ingest_common import DateWindow, plan_windows
 
 
 def plan_spot_intraday_windows(start: datetime, end: datetime) -> list[DateWindow]:

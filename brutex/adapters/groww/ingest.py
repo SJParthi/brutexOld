@@ -45,10 +45,10 @@ correlation re-bind inside each worker thread.
 * **status_log.** OMITTED. The Dhan spine still carries a write-retired
   ``status_log`` branch (DEC-STATUS-SIDECAR-WRITE-RETIRE-001); the Groww mirror
   drops it entirely — the unified ledger is the sole record surface.
-* **Conflict summary.** :func:`~brutex.adapters.dhan.ingest.summarize_conflicts`
-  is vendor-neutral; it is IMPORTED from the Dhan package rather than copied
-  (CLAUDE.md §11 COMMON — no duplication). The cutover relocates it to a
-  vendor-neutral home.
+* **Conflict summary.** :func:`~brutex.adapters.ingest_common.summarize_conflicts`
+  is vendor-neutral; it is IMPORTED from the shared
+  :mod:`brutex.adapters.ingest_common` home rather than copied (CLAUDE.md §11
+  COMMON — no duplication), so the Groww package no longer depends on the Dhan one.
 
 **Honest envelope (Golden Rule #10):** the fan-out lets one symbol's windows be
 in flight at once so the pull saturates UP TO the rate ceiling when Groww is
@@ -63,15 +63,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime
 from time import sleep as _time_sleep
-from zoneinfo import ZoneInfo
 
 import structlog
 
-from brutex.adapters.dhan.ingest import summarize_conflicts
-from brutex.adapters.groww.chunks import plan_candle_windows
+from brutex.adapters.groww.chunks import window_days_for_interval
 from brutex.adapters.groww.errors import GrowwError, is_rate_limit, is_retryable
+from brutex.adapters.ingest_common import (
+    clamp_window_end,
+    summarize_conflicts,
+    tile_windows,
+)
+from brutex.adapters.ingest_common import (
+    now_ist as _now_ist,
+)
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.session import filter_intraday_session, is_session_exempt
@@ -93,41 +99,6 @@ Pacer = Callable[[], None]
 
 #: Canonical daily interval — the only interval not session-filtered.
 _DAILY: str = "1day"
-
-#: IST clock pieces for the settled-data clamp (same NSE/BSE reality as Dhan).
-_IST_ZONE = ZoneInfo("Asia/Kolkata")
-_MARKET_CLOSE_IST: time = time(15, 30)
-
-
-def _now_ist() -> datetime:
-    """The current IST wall-clock (the clamp's production default)."""
-    return datetime.now(tz=_IST_ZONE)
-
-
-def clamp_window_end(interval: str, end: date, *, now_ist: datetime) -> date:
-    """Clamp an end-EXCLUSIVE pull bound so unsettled CURRENT-DAY data is never requested.
-
-    The market is the same NSE/BSE, so the Dhan clamp reality carries over
-    unchanged:
-
-    * the CURRENT day's **1-day** candle is published only the NEXT day, so the
-      daily bound is clamped to ``today`` (end-exclusive ⇒ the last requested
-      candle is yesterday's);
-    * the CURRENT day's intraday bars are partial until the 15:30 IST close —
-      pulling a partial day would settle the window SUCCESS in the ledger and the
-      skip rule would never re-fetch the rest of the day, so before close the
-      intraday bound is clamped to ``today`` too; from 15:30 IST the full session
-      exists and ``today + 1 day`` is allowed.
-
-    Pure + clock-injected — every branch unit-testable offline.
-    """
-    today = now_ist.date()
-    if interval == _DAILY:
-        return min(end, today)
-    if now_ist.time() >= _MARKET_CLOSE_IST:
-        return min(end, today + timedelta(days=1))
-    return min(end, today)
-
 
 #: The data-source namespace stamped on every coverage :class:`WindowKey`. ``"groww"``
 #: keeps Groww windows from colliding with Dhan's on the shared lake ledger.
@@ -214,15 +185,15 @@ class _WindowOutcome:
 def _windows(interval: str, start: date, end: date) -> list[tuple[date, date]]:
     """Tile ``[start, end)`` into fetch windows for *interval*'s Groww tier.
 
-    Daily tiles at 180 days, 1-5m at 30, 10/15/30m at 90 — all via the
-    interval-aware :func:`~brutex.adapters.groww.chunks.plan_candle_windows`. The
-    ISO-string :class:`~brutex.adapters.dhan.chunks.DateWindow` bounds are decoded
-    back to :class:`datetime.date` (the date is the meaningful granularity here).
+    Daily tiles at 180 days, 1-5m at 30, 10/15/30m at 90 — the interval→width
+    policy is :func:`~brutex.adapters.groww.chunks.window_days_for_interval`,
+    injected into the shared
+    :func:`~brutex.adapters.ingest_common.tile_windows` so the tiling MECHANISM is
+    vendor-neutral and there is no duplicated window-list builder (CLAUDE.md §11
+    COMMON). Groww has no un-tiled daily case (every tier has a finite width), so
+    *window_days_for* never returns ``None`` here.
     """
-    planned = plan_candle_windows(
-        datetime.combine(start, time()), datetime.combine(end, time()), interval=interval
-    )
-    return [(date.fromisoformat(w.start[:10]), date.fromisoformat(w.end[:10])) for w in planned]
+    return tile_windows(interval, start, end, window_days_for=window_days_for_interval)
 
 
 def ingest_spot(

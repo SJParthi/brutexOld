@@ -47,27 +47,29 @@ drive a synchronous fake with zero threads (mirrors
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
-from decimal import Decimal
+from datetime import UTC, date, datetime
 from time import sleep as _time_sleep
-from typing import TYPE_CHECKING
-from zoneinfo import ZoneInfo
 
 import structlog
 
-if TYPE_CHECKING:
-    from brutex.data.parquet_writer import BarConflict
-
 from brutex.adapters.dhan.auth_guard import AuthGuard
-from brutex.adapters.dhan.chunks import plan_spot_intraday_windows
+from brutex.adapters.dhan.constants import INTRADAY_WINDOW_DAYS
 from brutex.adapters.dhan.errors import (
     DhanError,
     is_auth_failure,
     is_no_data_error,
     is_rate_limit,
     is_retryable,
+)
+from brutex.adapters.ingest_common import (
+    clamp_window_end,
+    summarize_conflicts,
+    tile_windows,
+)
+from brutex.adapters.ingest_common import (
+    now_ist as _now_ist,
 )
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import WindowKey
@@ -93,45 +95,20 @@ Pacer = Callable[[], None]
 #: Canonical daily interval — the only interval not tiled/session-filtered.
 _DAILY: str = "1day"
 
-#: IST clock pieces for the settled-data clamp (DEC-DAILY-CANDLE-CLAMP-001).
-_IST_ZONE = ZoneInfo("Asia/Kolkata")
-_MARKET_CLOSE_IST: time = time(15, 30)
-
-
-def _now_ist() -> datetime:
-    """The current IST wall-clock (the clamp's production default)."""
-    return datetime.now(tz=_IST_ZONE)
-
-
-def clamp_window_end(interval: str, end: date, *, now_ist: datetime) -> date:
-    """Clamp an end-EXCLUSIVE pull bound so unsettled CURRENT-DAY data is never requested.
-
-    Dhan reality (DEC-DAILY-CANDLE-CLAMP-001, operator-verified 2026-06-10 —
-    the live window ledger showed a same-evening 1day request for "today"
-    rejected with ``DhanBadRequestError``):
-
-    * the CURRENT day's **1-day** candle is published only the NEXT day —
-      requesting it same-day burns a quota hit and 400s, so the daily bound
-      is clamped to ``today`` (end-exclusive ⇒ the last requested candle is
-      yesterday's);
-    * the CURRENT day's **1-minute** bars are partial until the 15:30 IST
-      close — pulling a partial day would settle the window SUCCESS in the
-      ledger and the skip rule would never re-fetch the rest of the day, so
-      before close the intraday bound is clamped to ``today`` too; from
-      15:30 IST the full session exists and ``today + 1 day`` is allowed.
-
-    Pure + clock-injected — every branch unit-testable offline.
-    """
-    today = now_ist.date()
-    if interval == _DAILY:
-        return min(end, today)
-    if now_ist.time() >= _MARKET_CLOSE_IST:
-        return min(end, today + timedelta(days=1))
-    return min(end, today)
-
-
 #: The data-source namespace stamped on every coverage :class:`WindowKey`.
 _MARKET: str = "dhan"
+
+
+def _dhan_window_days_for(interval: str) -> int | None:
+    """Resolve a Dhan interval to its tiling width — ``None`` (single window) for daily.
+
+    The Dhan per-call cap is a flat 90 days for intraday; the daily endpoint takes
+    the whole range in ONE call (``None`` ⇒ :func:`~brutex.adapters.ingest_common.tile_windows`
+    emits a single un-tiled window). Injected into the shared tiler so the tiling
+    MECHANISM is vendor-neutral while this width policy stays Dhan-owned.
+    """
+    return None if interval == _DAILY else INTRADAY_WINDOW_DAYS
+
 
 #: In-run transient-window auto-retry budget (DEC-DHAN-WINDOW-RETRY-001). After the
 #: first fan-out pass, windows that returned a RETRYABLE error (a transient network
@@ -227,13 +204,13 @@ class _WindowOutcome:
 
 
 def _windows(interval: str, start: date, end: date) -> list[tuple[date, date]]:
-    """Tile ``[start, end)`` into fetch windows for *interval* (1m → 90d; 1d → one)."""
-    if interval == _DAILY:
-        return [(start, end)]
-    planned = plan_spot_intraday_windows(
-        datetime.combine(start, time()), datetime.combine(end, time())
-    )
-    return [(date.fromisoformat(w.start[:10]), date.fromisoformat(w.end[:10])) for w in planned]
+    """Tile ``[start, end)`` into fetch windows for *interval* (1m → 90d; 1d → one).
+
+    Thin Dhan binding of the shared
+    :func:`~brutex.adapters.ingest_common.tile_windows` with the Dhan width policy
+    (:func:`_dhan_window_days_for`) — one tiler, no duplication (CLAUDE.md §11 COMMON).
+    """
+    return tile_windows(interval, start, end, window_days_for=_dhan_window_days_for)
 
 
 def ingest_spot(
@@ -502,51 +479,6 @@ def _pace_rps(pace: Pacer | None) -> float:
     if isinstance(rps, (int, float)) and rps > 0.0:
         return float(rps)
     return 5.0
-
-
-#: OHLCV+OI fields compared bar-for-bar to detect a keep-first conflict — the
-#: SAME tuple :meth:`ParquetWriter._bar_values_equal` compares, kept here so the
-#: summary reports WHICH field a vendor re-statement touched (CLAUDE.md §11 COMMON).
-_CONFLICT_FIELDS: tuple[str, ...] = ("open", "high", "low", "close", "volume", "open_interest")
-
-
-def summarize_conflicts(conflicts: Sequence[BarConflict]) -> dict[str, object]:
-    """Aggregate a window's keep-first conflicts into ONE log payload.
-
-    DEC-LAKE-CONFLICT-LOG-AGG-001. The prior per-bar ``ingest.conflict`` WARNING
-    flooded the log (hundreds of lines on a re-pull) AND printed only ``close`` —
-    so a bar whose ``open``/``high``/``low`` was re-stated by the vendor looked
-    like a *false* conflict (equal closes). This collapses a window's conflicts to
-    one summary: the count, the sorted set of OHLCV+OI fields that ACTUALLY differ,
-    the max absolute close delta, and the first/last conflicting timestamps.
-
-    Parameters
-    ----------
-    conflicts
-        The window's :class:`~brutex.data.parquet_writer.BarConflict` records
-        (stored kept, vendor discarded — keep-first, Golden Rule #7).
-
-    Returns
-    -------
-    dict
-        ``conflicts`` (count), ``differing_fields`` (comma-joined, sorted),
-        ``max_close_delta`` (str Decimal), ``first_ts`` / ``last_ts`` (ISO or None).
-    """
-    differing: set[str] = set()
-    max_close_delta = Decimal(0)
-    for c in conflicts:
-        for field_name in _CONFLICT_FIELDS:
-            if getattr(c.stored, field_name) != getattr(c.vendor, field_name):
-                differing.add(field_name)
-        max_close_delta = max(max_close_delta, abs(c.vendor.close - c.stored.close))
-    timestamps = [c.timestamp for c in conflicts]
-    return {
-        "conflicts": len(conflicts),
-        "differing_fields": ",".join(sorted(differing)),
-        "max_close_delta": str(max_close_delta),
-        "first_ts": min(timestamps).isoformat() if timestamps else None,
-        "last_ts": max(timestamps).isoformat() if timestamps else None,
-    }
 
 
 def _ingest_one_window(

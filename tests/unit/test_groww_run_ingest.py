@@ -535,7 +535,7 @@ class TestRunGrowwSpotIngestWithRetry:
         assert result.retry.auth_aborted is True
 
     def test_still_failed_windows_property_prefers_retry(self) -> None:
-        from brutex.adapters.dhan.auto_retry import RetryOutcome
+        from brutex.adapters.ingest_common import RetryOutcome
 
         original = _report(still_failed=84)
         retry = RetryOutcome(

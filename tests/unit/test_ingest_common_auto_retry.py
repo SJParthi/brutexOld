@@ -1,12 +1,14 @@
-"""Tests for `brutex.adapters.dhan.auto_retry` — post-run leftover-window retry.
+"""Tests for `brutex.adapters.ingest_common` — post-run leftover-window retry.
 
-100% line+branch on the wheel-free auto-retry round loop (DEC-INGEST-AUTO-RETRY-001)
+100% line+branch on the vendor-neutral auto-retry round loop (DEC-INGEST-AUTO-RETRY-001)
 via a fake ``run_pass`` (a scripted sequence of fake ingest reports) + an injected
 no-op backoff recorder (no real sleeps). Covers:
 
 * clean-after-one-round (residual drains in the first round),
 * residual-after-budget-exhausted (storm never clears within the budget),
-* known-gap NOT retried (a ``DH-905`` quarantine does not drive a round),
+* known-gap NOT retried via an INJECTED ``is_known_gap`` predicate (the Dhan
+  ``DH-905`` path) AND the DEFAULT (``is_known_gap=None``) treating nothing as a
+  known gap (the Groww path),
 * auth-death halts the loop early,
 * ``max_rounds=0`` disables the loop while keeping the same code path,
 * the default backoff hook is bounded + exponential,
@@ -15,16 +17,16 @@ no-op backoff recorder (no real sleeps). Covers:
   and ``rounds_run`` never exceeds ``max_rounds``.
 
 The fake report duck-types the three fields the engine reads
-(``still_failed_windows`` / ``failures`` / ``auth_aborted``), so these tests stay
-wheel-free (they never import the PEP-695 ``run_ingest`` chain — Python 3.11
-sandbox limitation; CI 3.12 is the oracle for the wired wrapper).
+(``still_failed_windows`` / ``failures`` / ``auth_aborted``), and a small
+``DH-905``-marker predicate stands in for the Dhan known-gap injection, so these
+tests stay wheel-free (they never import the PEP-695 ``run_ingest`` chain).
 """
 
 from __future__ import annotations
 
-# The fake report duck-types DhanIngestReport's 3 read fields (sanctioned: keeps
-# these tests wheel-free, never importing the PEP-695 run_ingest chain). pyright
-# can't see the structural match against the nominal type, so the engine-call
+# The fake report duck-types the report's 3 read fields (sanctioned: keeps these
+# tests wheel-free, never importing the PEP-695 run_ingest chain). pyright can't
+# see the structural match against the nominal Protocol, so the engine-call
 # arg-type is intentionally relaxed for this whitebox test module.
 # pyright: reportArgumentType=false
 # Whitebox test of module-private backoff constants/helpers (sanctioned per pyproject.toml).
@@ -33,14 +35,25 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import pytest
-from brutex.adapters.dhan import auto_retry as mod
-from brutex.adapters.dhan.auto_retry import (
+from brutex.adapters import ingest_common as mod
+from brutex.adapters.ingest_common import (
     RetryOutcome,
     RetryRound,
     retry_failed_windows,
 )
 from hypothesis import given
 from hypothesis import strategies as st
+
+
+def _is_dh905(failure: object) -> bool:
+    """Stand-in Dhan known-gap predicate: a fake failure whose error carries DH-905.
+
+    Mirrors what ``run_dhan_spot_ingest_with_retry`` injects (an
+    ``is_no_data_message``-based classifier over a ``PairFailure.error``), without
+    importing the PEP-695 run_ingest chain.
+    """
+    error = getattr(failure, "error", "")
+    return "DH-905" in error or "no data present" in error
 
 
 @dataclass(frozen=True)
@@ -155,7 +168,10 @@ def test_residual_after_budget_exhausted() -> None:
 
 
 def test_known_gap_not_retried() -> None:
-    """A ``DH-905`` known-gap quarantine is counted, NEVER drives another round."""
+    """A ``DH-905`` known-gap quarantine is counted, NEVER drives another round.
+
+    The Dhan path: ``is_known_gap`` is the injected DH-905 predicate.
+    """
     run_pass, calls = _scripted_run_pass(
         [
             _FakeReport(
@@ -169,7 +185,7 @@ def test_known_gap_not_retried() -> None:
     )
     backoff, _seen = _no_sleep()
 
-    outcome = retry_failed_windows(run_pass, max_rounds=3, backoff=backoff)
+    outcome = retry_failed_windows(run_pass, max_rounds=3, backoff=backoff, is_known_gap=_is_dh905)
 
     # still_failed is 0, so the loop stops after round 1 even though 2 known-gaps exist.
     assert calls == [0]
@@ -195,11 +211,40 @@ def test_known_gap_does_not_count_a_transient() -> None:
     )
     backoff, _seen = _no_sleep()
 
-    outcome = retry_failed_windows(run_pass, max_rounds=3, backoff=backoff)
+    outcome = retry_failed_windows(run_pass, max_rounds=3, backoff=backoff, is_known_gap=_is_dh905)
 
     assert outcome.rounds_run == 2
     assert outcome.rounds[0].known_gaps == 0  # the 429 failure is NOT a known-gap
     assert outcome.rounds[1].known_gaps == 1
+    assert outcome.clean is True
+
+
+def test_default_predicate_treats_nothing_as_known_gap() -> None:
+    """The DEFAULT (``is_known_gap=None``, the Groww path) counts ZERO known-gaps.
+
+    Even a failure that LOOKS like a Dhan no-data marker is NOT a known gap when no
+    predicate is injected — the engine stays vendor-neutral (a vendor with no
+    no-data concept never has a known gap).
+    """
+    run_pass, _calls = _scripted_run_pass(
+        [
+            _FakeReport(
+                still_failed_windows=0,
+                failures=(
+                    _FakeFailure(error="DH-905 no data present"),
+                    _FakeFailure(error="some terminal groww error"),
+                ),
+            )
+        ]
+    )
+    backoff, _seen = _no_sleep()
+
+    outcome = retry_failed_windows(
+        run_pass, max_rounds=3, backoff=backoff
+    )  # is_known_gap defaults None
+
+    assert outcome.rounds_run == 1
+    assert outcome.rounds[0].known_gaps == 0  # nothing is a known-gap without a predicate
     assert outcome.clean is True
 
 

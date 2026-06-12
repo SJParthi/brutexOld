@@ -41,16 +41,21 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
 if TYPE_CHECKING:
-    from brutex.adapters.dhan.auto_retry import RetryOutcome
+    from brutex.adapters.ingest_common import RetryOutcome
     from brutex.orchestrator.audit import AuditWriter
 
 from brutex.adapters.dhan.auth_guard import AuthGuard
-from brutex.adapters.dhan.errors import DhanError, is_auth_failure, is_no_data_error
+from brutex.adapters.dhan.errors import (
+    DhanError,
+    is_auth_failure,
+    is_no_data_error,
+    is_no_data_message,
+)
 from brutex.adapters.dhan.ingest import IngestReport, Pacer, ingest_spot
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.sink import BarSink
@@ -622,10 +627,10 @@ def run_dhan_spot_ingest_with_retry(
         :class:`~brutex.adapters.dhan.auto_retry.RetryOutcome` (``None`` when no
         retry ran — auto-retry off, or the original pull was already clean).
     """
-    # Local import: the auto-retry engine type-imports DhanIngestReport from THIS
-    # module, so importing it at module top would be a cycle. The import is paid
-    # once per pull, never on the hot path (CLAUDE.md §11 COMMON — one engine).
-    from brutex.adapters.dhan.auto_retry import retry_failed_windows
+    # The shared, vendor-neutral auto-retry round loop (CLAUDE.md §11 COMMON — one
+    # engine for both vendors). Imported here (not at module top) to keep this
+    # module's import graph lean; paid once per pull, never on the hot path.
+    from brutex.adapters.ingest_common import retry_failed_windows
 
     def _one_pass() -> DhanIngestReport:
         """Run ONE full spot-ingest pass with the original call's bindings."""
@@ -647,6 +652,19 @@ def run_dhan_spot_ingest_with_retry(
             audit=audit,
         )
 
+    def _is_dhan_known_gap(failure: object) -> bool:
+        """Classify a quarantined :class:`PairFailure` as a benign Dhan known gap.
+
+        DEC-INGEST-AUTO-RETRY-001 / Golden Rule #1: a failure whose serialised
+        error carries a ``DH-905`` no-data marker is an EXPECTED data boundary,
+        counted but NEVER retried. Injected into the shared, vendor-neutral
+        :func:`~brutex.adapters.ingest_common.retry_failed_windows` engine so the
+        engine itself stays vendor-agnostic (Groww, with no no-data marker, passes
+        nothing — see ``run_groww_spot_ingest_with_retry``). The engine only ever
+        hands it this pull's :class:`PairFailure` records, so the cast is exact.
+        """
+        return is_no_data_message(cast("PairFailure", failure).error)
+
     report = _one_pass()
     # Only spend a retry round when auto-retry is ON and the original pull actually
     # left a TRANSIENT residual (a clean pull / a pull whose only failures were
@@ -657,6 +675,7 @@ def run_dhan_spot_ingest_with_retry(
         _one_pass,
         max_rounds=max_retry_rounds,
         backoff=retry_backoff,
+        is_known_gap=_is_dhan_known_gap,
     )
     return SpotIngestWithRetry(report=report, retry=retry)
 

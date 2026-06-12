@@ -766,10 +766,40 @@ class TestRunDhanSpotIngestWithRetry:
         assert calls == [0]
         assert result.retry is None
 
+    def test_retry_round_classifies_known_gap_via_injected_predicate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The original pull leaves a TRANSIENT residual (so a retry round runs); the
+        # retry round's report carries a DH-905 PairFailure. The Dhan known-gap
+        # predicate injected into the shared engine classifies it, so the round's
+        # ``known_gaps`` count is 1 while the transient residual still drives the loop.
+        calls = self._patch_passes(
+            monkeypatch,
+            [
+                _report(still_failed=5),  # original: transient residual ⇒ retry runs
+                _report(still_failed=0, known_gap=True),  # retry round: a DH-905 known-gap
+            ],
+        )
+        result = run_dhan_spot_ingest_with_retry(
+            object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            instruments=[_index("13")],
+            intervals=["1minute"],
+            start=_START,
+            end=_END,
+            max_retry_rounds=3,
+            retry_backoff=lambda _i: None,
+        )
+        assert calls == [0, 1]  # original + one retry round
+        assert result.retry is not None
+        assert result.retry.rounds[0].known_gaps == 1  # the DH-905 was classified
+        assert result.retry.final_still_failed == 0
+        assert result.retry.clean is True
+
     def test_still_failed_windows_property_prefers_retry(self) -> None:
         # Direct unit of the SpotIngestWithRetry.still_failed_windows property:
         # when a retry ran, the final residual wins over the original.
-        from brutex.adapters.dhan.auto_retry import RetryOutcome
+        from brutex.adapters.ingest_common import RetryOutcome
 
         original = _report(still_failed=84)
         retry = RetryOutcome(

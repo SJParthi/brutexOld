@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 if TYPE_CHECKING:
-    from brutex.adapters.dhan.auto_retry import RetryOutcome
+    from brutex.adapters.ingest_common import RetryOutcome
     from brutex.orchestrator.audit import AuditWriter
 
 from brutex.adapters.groww.errors import GrowwError, is_auth_failure
@@ -405,7 +405,7 @@ class SpotIngestWithRetry:
 
     What :func:`run_groww_spot_ingest_with_retry` returns: the FIRST full-pull
     :class:`GrowwIngestReport` plus the
-    :class:`~brutex.adapters.dhan.auto_retry.RetryOutcome` of the leftover-window
+    :class:`~brutex.adapters.ingest_common.RetryOutcome` of the leftover-window
     recovery rounds (``None`` when no retry ran).
     """
 
@@ -449,7 +449,7 @@ def run_groww_spot_ingest_with_retry(
     Run one full :func:`run_groww_spot_ingest` pass, and — when it leaves
     TRANSIENT residual windows (``still_failed_windows`` > 0) AND *auto_retry* is
     on — re-run additional bounded rounds via the SHARED
-    :func:`~brutex.adapters.dhan.auto_retry.retry_failed_windows` engine (CLAUDE.md
+    :func:`~brutex.adapters.ingest_common.retry_failed_windows` engine (CLAUDE.md
     §11 COMMON — that round-loop is vendor-neutral; it reads only
     ``still_failed_windows`` / ``auth_aborted`` / ``failures`` off the report, all
     of which :class:`GrowwIngestReport` exposes). Each round re-fetches ONLY the
@@ -464,13 +464,13 @@ def run_groww_spot_ingest_with_retry(
     -------
     SpotIngestWithRetry
         The original :class:`GrowwIngestReport` plus the
-        :class:`~brutex.adapters.dhan.auto_retry.RetryOutcome` (``None`` when no
+        :class:`~brutex.adapters.ingest_common.RetryOutcome` (``None`` when no
         retry ran).
     """
     # Local import: the auto-retry engine is the shared, vendor-neutral round-loop
     # (CLAUDE.md §11 COMMON — one engine for both vendors); imported here, paid once
     # per pull, never on the hot path.
-    from brutex.adapters.dhan.auto_retry import retry_failed_windows
+    from brutex.adapters.ingest_common import retry_failed_windows
 
     def _one_pass() -> GrowwIngestReport:
         """Run ONE full spot-ingest pass with the original call's bindings."""
@@ -497,8 +497,11 @@ def run_groww_spot_ingest_with_retry(
     # needs no re-pull — those are not retryable).
     if not auto_retry or report.still_failed_windows == 0:
         return SpotIngestWithRetry(report=report, retry=None)
+    # No ``is_known_gap`` predicate: Groww has no no-data marker (Golden Rule #1 —
+    # no invented vendor code), so the shared engine's default treats nothing as a
+    # known gap (every Groww terminal failure is a uniform quarantine).
     retry = retry_failed_windows(
-        _one_pass,  # type: ignore[arg-type]  # duck-typed: reads still_failed/auth_aborted/failures
+        _one_pass,
         max_rounds=max_retry_rounds,
         backoff=retry_backoff,
     )
