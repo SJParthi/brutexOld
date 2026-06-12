@@ -1,8 +1,9 @@
 """Tests for the ``brutex results show`` command (DEC-SWEEP-WINNERS-BY-NAME-001).
 
-``brutex/cli.py`` is coverage-omitted, but ``cmd_results_show`` carries real
-behaviour — delegation to the engine read-back, the success print, and the
-clean user-error path on a bad root — so it is unit-tested here for correctness.
+``brutex/cli.py`` is measured at 100% line+branch (DEC-COV-CLI-HARNESS-001 —
+no longer coverage-omitted). ``cmd_results_show`` carries real behaviour —
+delegation to the engine read-back, the success print, and the clean
+user-error path on a bad root — so it is unit-tested here for correctness.
 """
 
 from __future__ import annotations

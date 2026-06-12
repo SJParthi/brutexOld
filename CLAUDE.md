@@ -189,11 +189,14 @@ Track 1 spec locked after 4-agent hostile-review pass._
     **Honest envelope (Golden Rule #10 + DEC-P0-040 / DEC-P0-042
     rebaselining):** The 18-requirement decree above is the **target**.
     The actual CI enforcement matrix in `docs/STANDARDS_100PCT.md` §1
-    is **14 of 21 sub-rows 🟢 ENFORCED + 3 🟡 PARTIAL + 1 📋 ROADMAP +
-    3 👁️ MANUAL** (~67% fully enforced, per the summary count at
-    `docs/STANDARDS_100PCT.md:67-90`, post-DEC-MUTATION-GATE-RANKING-002
-    2026-06-10 — row 3 honestly re-classified 🟡 while the orchestrator
-    mutation pass exceeds its weekly budget, DEC-MUTATION-RUNTIME-001;
+    is **16 of 21 sub-rows 🟢 ENFORCED + 1 🟡 PARTIAL + 1 📋 ROADMAP +
+    3 👁️ MANUAL** (~76% fully enforced, per the summary count in
+    `docs/STANDARDS_100PCT.md` §1, post-DEC-COV-CLI-HARNESS-001
+    2026-06-12 — coverage rows 1/2 flipped 🟢 when the omit list was
+    deleted at a measured package-wide 100.00% line+branch; the one
+    🟡 is row 3 pending DEC-MUTATION-RUNTIME-002's verification run.
+    Earlier: row 3 honestly re-classified 🟡 while the orchestrator
+    mutation pass exceeded its weekly budget, DEC-MUTATION-RUNTIME-001;
     the prior "15/2 (~71%)" wording here was the pre-re-classification
     snapshot, caught by the 2026-06-11 honesty audit per this file's own
     that-doc-wins rule and reconciled by DEC-HONESTY-AUDIT-RECONCILE-001).

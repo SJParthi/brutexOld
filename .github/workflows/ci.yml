@@ -237,13 +237,15 @@ jobs:
           # Coverage floor at 100 (DEC-COV-APP-BACKFILL-001, 2026-06-12):
           # dashboard/app.py — the last sub-100 module — was backfilled
           # to 100.00% line+branch (46 targeted tests), making EVERY
-          # un-omitted module 100.00%; the measured aggregate is exactly
-          # 100.00% (18746 stmts / 4408 branches / 0 missed, 6677 tests).
-          # The [tool.coverage.run].omit list is still JUST the CLI layer
-          # (cli.py / __main__.py, pending a CLI snapshot harness —
-          # DEC-COV-001); when it un-omits it must arrive at 100%.
+          # un-omitted module 100.00%.
+          # The [tool.coverage.run].omit list is now EMPTY — the key is
+          # REMOVED (DEC-COV-CLI-HARNESS-001, 2026-06-12): cli.py and
+          # __main__.py, its last two entries, were backfilled to 100.00%
+          # line+branch (test_cli_run.py / test_cli_retry_storm.py /
+          # test_cli_backfill.py + the integration CLI suites), so this
+          # fail_under=100 floor now covers the WHOLE brutex package.
           # Ratchet history: 90 -> 99 (DEC-COV-SMALL-GAPS-001) -> 100
-          # (this); earlier un-omits: execution/driver
+          # (DEC-COV-APP-BACKFILL-001); earlier un-omits: execution/driver
           # (DEC-COVERAGE-DRIVER-001), data/catalog (DEC-COVERAGE-CATALOG-001),
           # data/instrument_store (DEC-COVERAGE-INSTRUMENT-STORE-001),
           # the #377 batch.
@@ -311,7 +313,8 @@ jobs:
           # DEC-AUDIT-VERIFY-UNIFY-001 (MIGRATION.md #560): the unified
           # audit-chain verifier (auto-detect SHA-256 ingest vs BLAKE3
           # supervisor) ships at 100% line+branch; the CLI shim it backs
-          # lives in the coverage-omitted brutex/cli.py.
+          # (brutex/cli.py) is no longer coverage-omitted and is measured
+          # at 100% under the aggregate gate (DEC-COV-CLI-HARNESS-001).
           if compgen -G "tests/unit/test_audit_verify.py" > /dev/null; then
             pytest --cov=brutex.audit_verify --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_audit_verify.py
           else
@@ -648,7 +651,9 @@ jobs:
           # wheel-free at import (telegram channel only); the default lazy
           # singleton resolver is # pragma: no cover (delegates to the
           # already-100% brutex.notifications.wiring), and the CLI/pull
-          # wiring sites live in the coverage-omitted cli.py / live pull path.
+          # wiring sites live in cli.py (no longer omitted — measured at 100%
+          # under the aggregate gate, DEC-COV-CLI-HARNESS-001) / the
+          # pragma'd live pull path.
           if compgen -G "tests/unit/test_notifications_sweep_alerts.py" > /dev/null; then
             pytest --cov=brutex.notifications.sweep_alerts --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_notifications_sweep_alerts.py
           else

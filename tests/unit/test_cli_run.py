@@ -1,16 +1,25 @@
-"""Tests for the one-click ``brutex run`` command (DEC-ONECLICK-RUN-001).
+"""Tests for the one-click ``brutex run`` + ``brutex dashboard`` commands.
 
-``brutex/cli.py`` is coverage-omitted (CLI snapshot harness is a separate
-PR), but ``cmd_run`` carries real logic — lake-root resolution, the
-browser-open decision, and delegation to ``cmd_dashboard`` — so it is
-unit-tested here for correctness.
+``cmd_run`` (DEC-ONECLICK-RUN-001) carries real logic — lake-root resolution,
+the browser-open decision, and delegation to ``cmd_dashboard`` — and
+``cmd_dashboard`` carries the [ui]-extra guard, the rotating-log stdout
+mirror (DEC-RUN-LOG-CAPTURE-001), the instrument-store wiring, and the
+uvicorn launch, so both are unit-tested here (offline: uvicorn.run and the
+instrument-master auto-load are faked — no server bind, no network).
+DEC-COV-CLI-HARNESS-001.
 """
 
 from __future__ import annotations
 
+import builtins
+import importlib
+import logging
+import sys
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
+import pytest
 from brutex import cli
 
 
@@ -58,7 +67,9 @@ def test_run_falls_back_to_home_default_when_no_env() -> None:
         mock.patch.object(cli, "cmd_dashboard", return_value=0) as dash,
         mock.patch.object(cli, "_open_browser"),
         mock.patch.dict("os.environ", {}, clear=True),
-        mock.patch.object(cli.Path, "home", return_value=Path("/home/op")),
+        # cli.Path IS pathlib.Path (module re-use); patch the class directly so
+        # the access stays explicit for mypy's no_implicit_reexport.
+        mock.patch.object(Path, "home", return_value=Path("/home/op")),
     ):
         cli.cmd_run(None, "127.0.0.1", 9080, open_browser=False)
 
@@ -95,3 +106,196 @@ def test_main_dispatch_universe_defaults_false_without_flag() -> None:
 
     _, kwargs = fetch.call_args
     assert kwargs["universe"] is False
+
+
+def test_main_dispatch_run_threads_browser_flag() -> None:
+    """``main`` maps --no-browser to ``open_browser=False`` on ``cmd_run``."""
+    with mock.patch.object(cli, "cmd_run", return_value=0) as run:
+        rc = cli.main(["run", "--no-browser", "--lake-root", "/tmp/lake"])
+    assert rc == 0
+    run.assert_called_once_with(
+        lake_root=Path("/tmp/lake"), host="127.0.0.1", port=9080, open_browser=False
+    )
+
+
+def test_main_dispatch_dashboard_threads_defaults() -> None:
+    """``main`` routes ``dashboard`` with the default host and parsed port."""
+    with mock.patch.object(cli, "cmd_dashboard", return_value=0) as dash:
+        rc = cli.main(["dashboard", "--port", "9191"])
+    assert rc == 0
+    dash.assert_called_once_with(lake_root=None, host="127.0.0.1", port=9191)
+
+
+# ── cmd_dashboard (offline: uvicorn.run + auto-load faked) ──────────────
+
+
+class _RecordingStream:
+    """Stand-in for the real stdout the dashboard mirror wraps (TTY, fd 7)."""
+
+    def __init__(self) -> None:
+        self.chunks: list[str] = []
+        self.flushes = 0
+
+    def write(self, data: str) -> int:
+        """Record the chunk and report its length like a real stream."""
+        self.chunks.append(data)
+        return len(data)
+
+    def flush(self) -> None:
+        """Count flushes so the mirror's flush proxy is observable."""
+        self.flushes += 1
+
+    def isatty(self) -> bool:
+        """Pretend to be a TTY so the mirror's isatty proxy is observable."""
+        return True
+
+    def fileno(self) -> int:
+        """Expose a fixed fd so the mirror's fileno proxy is observable."""
+        return 7
+
+
+def _stub_dashboard_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    probes: dict[str, Any],
+    *,
+    probe_stream: bool = True,
+) -> None:
+    """Stub logging config + instrument auto-load + uvicorn.run (offline).
+
+    With ``probe_stream`` the fake server also exercises the stdout mirror's
+    proxy methods (isatty/fileno/flush + a blank-line write) — only valid when
+    the test installed its own stream, since pytest's capture has no fd.
+    """
+    obs_logging = importlib.import_module("brutex.observability.logging")
+    monkeypatch.setattr(obs_logging, "configure_logging", lambda **kwargs: tmp_path / "brutex.log")
+    auto_pull = importlib.import_module("brutex.dashboard.auto_pull")
+    monkeypatch.setattr(auto_pull, "should_reload_instrument_master", lambda **kwargs: False)
+    uvicorn_mod = importlib.import_module("uvicorn")
+
+    def fake_run(app: Any, *, host: str, port: int, log_config: Any) -> None:
+        """Record the bind and probe the stdout proxies in place of a server."""
+        probes["host"] = host
+        probes["port"] = port
+        probes["log_config"] = log_config
+        if probe_stream:
+            probes["isatty"] = sys.stdout.isatty()
+            probes["fileno"] = sys.stdout.fileno()
+            sys.stdout.write("\n")  # blank line → the mirror's strip()-False arm
+            sys.stdout.flush()
+
+    monkeypatch.setattr(uvicorn_mod, "run", fake_run)
+
+
+def test_dashboard_missing_uvicorn_is_user_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without the [ui] extra the dashboard prints the pip hint and exits 1."""
+    real_import = builtins.__import__
+
+    def deny_uvicorn(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "uvicorn":
+            raise ImportError("No module named 'uvicorn'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", deny_uvicorn)
+    rc = cli.cmd_dashboard(None, "127.0.0.1", 9080)
+    assert rc == cli.EXIT_USER_ERROR
+    err = capsys.readouterr().err
+    assert '[brutex] dashboard requires fastapi+uvicorn — run: pip install -e ".[ui]"' in err
+
+
+def test_dashboard_with_lake_mirrors_stdout_and_serves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file-handler session installs the stdout mirror and serves via uvicorn.
+
+    Covers the DEC-RUN-LOG-CAPTURE-001 tee: the mirror proxies write/flush/
+    isatty/fileno to the real stream, the lake branch opens a real (empty)
+    InstrumentStore, and uvicorn.run receives log_config=None.
+    """
+    pytest.importorskip("fastapi", reason="dashboard needs the [ui] extra")
+    pytest.importorskip("uvicorn", reason="dashboard needs the [ui] extra")
+    pytest.importorskip("duckdb", reason="the instrument store needs duckdb")
+    probes: dict[str, Any] = {}
+    _stub_dashboard_runtime(monkeypatch, tmp_path, probes)
+
+    marker = logging.NullHandler()
+    setattr(marker, "_brutex_file_handler", True)  # noqa: B010 — runtime marker attr
+    root = logging.getLogger()
+    root.addHandler(marker)
+    stream = _RecordingStream()
+    monkeypatch.setattr(sys, "stdout", stream)
+    try:
+        rc = cli.cmd_dashboard(tmp_path, "127.0.0.1", 9080)
+    finally:
+        root.removeHandler(marker)
+
+    assert rc == cli.EXIT_OK
+    text = "".join(stream.chunks)
+    assert "[brutex] dashboard → http://127.0.0.1:9080  (Ctrl-C to stop)" in text
+    assert f"[brutex] logs → {tmp_path / 'brutex.log'}" in text
+    assert probes["host"] == "127.0.0.1"
+    assert probes["port"] == 9080
+    assert probes["log_config"] is None
+    assert probes["isatty"] is True
+    assert probes["fileno"] == 7
+    assert stream.flushes >= 1
+    assert (tmp_path / "instruments.duckdb").exists()
+
+
+def test_dashboard_autoload_failure_never_blocks_serving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failing instrument-master auto-load is swallowed; the dashboard serves.
+
+    DEC-INDEX-PARSE-FIX-001: the startup auto-load is best-effort — a network
+    failure must NOT stop the dashboard, so the broad except logs a warning
+    and the launch continues to ``uvicorn.run``.
+    """
+    pytest.importorskip("fastapi", reason="dashboard needs the [ui] extra")
+    pytest.importorskip("uvicorn", reason="dashboard needs the [ui] extra")
+    pytest.importorskip("duckdb", reason="the instrument store needs duckdb")
+    probes: dict[str, Any] = {}
+    _stub_dashboard_runtime(monkeypatch, tmp_path, probes, probe_stream=False)
+
+    def boom(**kwargs: Any) -> bool:
+        raise RuntimeError("offline: no public CSV reachable")
+
+    auto_pull = importlib.import_module("brutex.dashboard.auto_pull")
+    monkeypatch.setattr(auto_pull, "should_reload_instrument_master", boom)
+
+    rc = cli.cmd_dashboard(tmp_path, "127.0.0.1", 9082)
+    assert rc == cli.EXIT_OK
+    assert probes["port"] == 9082
+    out = capsys.readouterr().out
+    assert "[brutex] dashboard → http://127.0.0.1:9082  (Ctrl-C to stop)" in out
+
+
+def test_dashboard_without_file_handler_keeps_plain_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No rotating-file handler → stdout is NOT wrapped; no-lake branch serves."""
+    pytest.importorskip("fastapi", reason="dashboard needs the [ui] extra")
+    pytest.importorskip("uvicorn", reason="dashboard needs the [ui] extra")
+    probes: dict[str, Any] = {}
+    _stub_dashboard_runtime(monkeypatch, tmp_path, probes, probe_stream=False)
+    monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(tmp_path))
+
+    root = logging.getLogger()
+    marked = [h for h in root.handlers if getattr(h, "_brutex_file_handler", False)]
+    for handler in marked:
+        root.removeHandler(handler)
+    before = sys.stdout
+    try:
+        rc = cli.cmd_dashboard(None, "0.0.0.0", 9095)
+        assert sys.stdout is before
+    finally:
+        for handler in marked:
+            root.addHandler(handler)
+
+    assert rc == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "[brutex] dashboard → http://0.0.0.0:9095  (Ctrl-C to stop)" in out
+    assert probes["port"] == 9095
+    assert not (tmp_path / "instruments.duckdb").exists()
