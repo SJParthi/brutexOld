@@ -238,14 +238,17 @@ class _RetryReport(Protocol):
     @property
     def still_failed_windows(self) -> int:
         """Transient windows still failing after this pass — the retryable residual."""
+        ...
 
     @property
     def auth_aborted(self) -> bool:
         """Whether the token died mid-pass (halts the loop)."""
+        ...
 
     @property
     def failures(self) -> Sequence[object]:
         """The pass's quarantined per-pair failures (scanned by *is_known_gap*)."""
+        ...
 
 
 #: Default bounded round budget. Small + finite (Golden Rule #10 — never an
