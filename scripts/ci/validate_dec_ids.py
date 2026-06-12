@@ -46,24 +46,21 @@ import re
 import sys
 from pathlib import Path
 
+# These gate scripts run BOTH as scripts (CI: python scripts/ci/<name>.py,
+# where the script dir is sys.path[0]) AND as importlib-loaded MODULES
+# (the sibling-contract tests load them via spec_from_file_location, where
+# it is not). Inject the script directory so the shared _textscan helper
+# resolves in both modes (DEC-TEXTSCAN-COMMON-001).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _textscan import strip_code_spans
+
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_FILE = ROOT / "docs" / "MIGRATION.md"
 
 # Pattern: DEC-FOO-NNN or DEC-FOO-BAR-NNN, etc.
 # Anchored to be a "real" token, not a substring inside a larger word.
 DEC_ID_PATTERN = re.compile(r"\bDEC-[A-Z][A-Z0-9_-]*-\d{3,}\b")
-
-
-def strip_code_spans(text: str) -> str:
-    """Remove markdown code spans (single + triple backticks) so example DEC-IDs
-    in PR-body documentation (``"e.g., DEC-NONEXISTENT-999"``) don't trip the
-    validator. Reviewer judgement still applies to whether a NON-code-span
-    DEC-ID is real.
-    """
-    # Triple-backtick fenced blocks: ```...``` (greedy across newlines)
-    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
-    # Single-backtick inline code spans: `...`
-    return re.sub(r"`[^`]*`", " ", text)
 
 
 def extract_dec_ids(text: str) -> list[str]:

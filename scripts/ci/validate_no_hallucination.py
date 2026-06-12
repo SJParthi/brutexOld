@@ -56,6 +56,12 @@ import re
 import sys
 from pathlib import Path
 
+# Script-AND-module import resolution for the shared helper — see the
+# identical block in validate_dec_ids.py (DEC-TEXTSCAN-COMMON-001).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _textscan import strip_fenced_blocks, strip_inline_code
+
 # Sentences containing these keywords are scrutinised for nearby citations.
 # These are the external systems where Golden Rule #1 hallucination risk
 # is highest (per CLAUDE.md §6 verified-facts table).
@@ -106,20 +112,6 @@ CITATION_PATTERNS = [
     re.compile(r"\bper\s+(the\s+)?groww", re.IGNORECASE),
     re.compile(r"\bcited\s+(in|at)\b", re.IGNORECASE),
 ]
-
-
-_FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
-_INLINE_CODE_RE = re.compile(r"`[^`]*`")
-
-
-def strip_fenced_blocks(text: str) -> str:
-    """Remove fenced code blocks (which may span paragraphs) from *text*."""
-    return _FENCED_CODE_RE.sub(" ", text)
-
-
-def strip_inline_code(text: str) -> str:
-    """Remove inline code spans from *text* (single-backtick runs)."""
-    return _INLINE_CODE_RE.sub(" ", text)
 
 
 def split_into_paragraphs(text: str) -> list[str]:
