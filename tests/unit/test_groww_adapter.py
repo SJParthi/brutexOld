@@ -9,7 +9,7 @@ and the daily vs intraday open/close time selection.
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -21,15 +21,12 @@ from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.constants import (
     CANDLE_INTERVAL_1D,
     CANDLE_INTERVAL_1M,
-    CANDLE_INTERVAL_1W,
     HISTORY_START,
-    MARKET_CLOSE_IST,
     MARKET_OPEN_IST,
     RATE_LIMIT_INITIAL_RPS,
 )
 from brutex.adapters.groww.instruments import build_brute_force_registry, build_registry
-from brutex.models import Exchange, InstrumentType, OutOfScopeError
-
+from brutex.models import Exchange, OutOfScopeError
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -83,10 +80,7 @@ def _make_adapter(
 ) -> GrowwMarketAdapter:
     auth = _make_auth(tmp_path)
     client = GrowwClient(auth=auth, transport=_ok_transport(candles))
-    if csv_text is None:
-        registry = build_brute_force_registry()
-    else:
-        registry = build_registry(csv_text)
+    registry = build_brute_force_registry() if csv_text is None else build_registry(csv_text)
     return GrowwMarketAdapter(client=client, registry=registry)
 
 

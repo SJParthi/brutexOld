@@ -27,7 +27,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from urllib.parse import urlparse
 
 import structlog
 
@@ -160,7 +160,7 @@ def _derive_symbol_name(groww_symbol: str, trading_symbol: str) -> str:
     For FNO contracts: use the trading_symbol directly.
     """
     parts = groww_symbol.split("-", 1)
-    if len(parts) == 2 and parts[1]:
+    if len(parts) == 2 and parts[1]:  # noqa: PLR2004
         return parts[1]
     return trading_symbol
 
@@ -209,8 +209,12 @@ def _row_to_groww_instrument(row: dict[str, str]) -> GrowwInstrument | None:
 
 def _download_csv(url: str) -> str:  # pragma: no cover — network, smoke only
     """Download the instrument CSV and return as a raw string."""
-    with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
-        return resp.read().decode("utf-8")
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not (parsed.hostname or "").endswith(".groww.in"):
+        raise ValueError(f"Instrument CSV URL must be HTTPS on *.groww.in: {url!r}")
+    with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310  # nosec B310
+        raw: bytes = resp.read()
+        return raw.decode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,12 +264,10 @@ def build_registry(
     by_groww: dict[str, GrowwInstrument] = {}
     items: list[GrowwInstrument] = []
     for row in reader:
-        if instrument_types is not None:
-            if row.get("instrument_type", "").strip().upper() not in instrument_types:
-                continue
-        if exchanges is not None:
-            if row.get("exchange", "").strip().upper() not in exchanges:
-                continue
+        if instrument_types is not None and row.get("instrument_type", "").strip().upper() not in instrument_types:
+            continue
+        if exchanges is not None and row.get("exchange", "").strip().upper() not in exchanges:
+            continue
         gi = _row_to_groww_instrument(row)
         if gi is None:
             continue

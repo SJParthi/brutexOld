@@ -70,8 +70,8 @@ def _default_post_transport(
     import urllib.request
 
     data = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")  # noqa: S310
+    with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310  # nosec B310
         return resp.status, resp.read()
 
 
@@ -112,7 +112,7 @@ def _fetch_token(
     headers = _build_auth_headers(api_key)
     body: dict[str, Any] = {"key_type": AUTH_KEY_TYPE_TOTP, "totp": totp_code}
     status, raw = transport(GROWW_AUTH_URL, headers, body)
-    if status == 200:
+    if status == 200:  # noqa: PLR2004
         try:
             payload = json.loads(raw)
             token = payload.get("token") or payload
@@ -199,6 +199,7 @@ class GrowwAuth:
         return self._refresh()
 
     def _refresh(self) -> str:
+        """Fetch a fresh token via TOTP and persist it to the cache."""
         totp_code = self.totp_generator()
         _LOG.info("groww.auth.refresh", token_path=str(self.token_path))
         token = _fetch_token(self.api_key, totp_code, self.transport)
@@ -228,7 +229,7 @@ def build_from_env(
     token_path_str = os.environ.get(ENV_TOKEN_PATH, DEFAULT_TOKEN_PATH)
     token_path = Path(token_path_str).expanduser()
     try:
-        import pyotp  # noqa: PLC0415  # optional dep — imported lazily
+        import pyotp  # optional dep — imported lazily
     except ImportError as exc:
         raise ImportError(
             "pyotp is required for Groww TOTP auth. "
@@ -244,9 +245,9 @@ def build_from_env(
 
 
 __all__ = [
-    "GrowwAuth",
     "MAX_REFRESH_ATTEMPTS",
-    "PostTransport",
     "REQUIRED_FILE_MODE",
+    "GrowwAuth",
+    "PostTransport",
     "build_from_env",
 ]

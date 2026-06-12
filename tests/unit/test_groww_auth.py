@@ -11,16 +11,15 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 from brutex.adapters.groww.auth import (
-    GrowwAuth,
     MAX_REFRESH_ATTEMPTS,
     REQUIRED_FILE_MODE,
+    GrowwAuth,
     _build_auth_headers,
     _fetch_token,
     _read_cached_token,
@@ -28,7 +27,6 @@ from brutex.adapters.groww.auth import (
     build_from_env,
 )
 from brutex.adapters.groww.errors import GrowwAuthError
-
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -129,7 +127,7 @@ class TestReadCachedToken:
     ) -> None:
         p = tmp_path / "token.json"
         p.write_text(json.dumps({"access_token": "tok"}))
-        os.chmod(p, 0o644)  # wrong perms
+        os.chmod(p, 0o644)  # wrong perms  # nosec B103
         result = _read_cached_token(p)
         # Should still return the token (warns but doesn't fail)
         assert result == "tok"
@@ -230,9 +228,8 @@ class TestBuildFromEnv:
     ) -> None:
         monkeypatch.setenv("BRUTEX_GROWW_API_KEY", "somekey")
         monkeypatch.setenv("BRUTEX_GROWW_TOTP_SECRET", "JBSWY3DPEHPK3PXP")
-        with patch.dict("sys.modules", {"pyotp": None}):
-            with pytest.raises(ImportError, match="pyotp"):
-                build_from_env(transport=_transport_ok)
+        with patch.dict("sys.modules", {"pyotp": None}), pytest.raises(ImportError, match="pyotp"):
+            build_from_env(transport=_transport_ok)
 
     def test_happy_path_returns_groww_auth(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

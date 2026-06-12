@@ -54,7 +54,6 @@ from brutex.adapters.groww.errors import (
     GrowwAuthError,
     GrowwTransportError,
     from_http_status,
-    is_auth_failure,
 )
 
 _LOG = structlog.get_logger("brutex.adapters.groww.client")
@@ -75,8 +74,8 @@ def urllib_transport(
     """Real urllib-based GET transport."""
     import urllib.request
 
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+    req = urllib.request.Request(url, headers=headers, method="GET")  # noqa: S310
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310  # nosec B310
         return resp.status, resp.read()
 
 
@@ -119,7 +118,7 @@ def _parse_response(status: int, raw: bytes) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise from_http_status(status, f"non-JSON response: {raw[:200]!r}") from exc
 
-    if status != 200:
+    if status != 200:  # noqa: PLR2004
         msg = str(body) if body else raw.decode(errors="replace")[:200]
         raise from_http_status(status, msg)
 
@@ -127,7 +126,7 @@ def _parse_response(status: int, raw: bytes) -> dict[str, Any]:
         error = body.get("error", {})
         code = str(error.get("code", "UNKNOWN"))
         message = str(error.get("message", "no message"))
-        from brutex.adapters.groww.errors import GrowwApiFailureError  # noqa: PLC0415
+        from brutex.adapters.groww.errors import GrowwApiFailureError
         raise GrowwApiFailureError(code, message)
 
     payload = body.get("payload", body)
@@ -188,7 +187,7 @@ class GrowwClient:
                 token = self.auth.refresh()
             except GrowwAdapterError:
                 raise
-        assert last_exc is not None  # noqa: S101 — guaranteed by loop logic
+        assert last_exc is not None  # noqa: S101  # nosec B101 — guaranteed by loop logic
         raise last_exc
 
     def get_candles(
@@ -299,7 +298,7 @@ class GrowwClient:
 
 def is_smoke_enabled() -> bool:
     """Return ``True`` if ``BRUTEX_GROWW_SMOKE=1`` is set in the environment."""
-    import os  # noqa: PLC0415
+    import os
 
     return os.environ.get(ENV_SMOKE, "") == "1"
 

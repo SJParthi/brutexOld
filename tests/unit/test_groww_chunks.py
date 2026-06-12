@@ -12,10 +12,10 @@ from datetime import date, timedelta
 import pytest
 from brutex.adapters.groww.chunks import chunk_count, chunk_window, iter_chunks
 from brutex.adapters.groww.constants import (
-    CANDLE_INTERVAL_10M,
     CANDLE_INTERVAL_1D,
     CANDLE_INTERVAL_1H,
     CANDLE_INTERVAL_1M,
+    CANDLE_INTERVAL_10M,
     CANDLE_INTERVAL_30M,
     CHUNK_WINDOW_LONG_DAYS,
     CHUNK_WINDOW_MED_DAYS,

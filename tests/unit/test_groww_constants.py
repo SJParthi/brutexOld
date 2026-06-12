@@ -45,7 +45,7 @@ class TestHeaders:
 
 class TestSsrfGuard:
     def test_only_api_groww_in_allowed(self) -> None:
-        assert c.ALLOWED_HOSTS == frozenset({"api.groww.in"})
+        assert frozenset({"api.groww.in"}) == c.ALLOWED_HOSTS
 
     def test_auth_url_host_not_in_allowed(self) -> None:
         # Auth URL uses the SAME host — ensure it's covered.
@@ -130,7 +130,7 @@ class TestChunkWindows:
 
 class TestHistoryStart:
     def test_history_starts_2020(self) -> None:
-        assert c.HISTORY_START == date(2020, 1, 1)
+        assert date(2020, 1, 1) == c.HISTORY_START
 
 
 class TestRateLimit:

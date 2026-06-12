@@ -165,33 +165,33 @@ BRUTE_FORCE_UNIVERSE: Final[dict[str, tuple[str, str, str]]] = {
 
 # ── Auth env vars ─────────────────────────────────────────────────────────
 ENV_API_KEY: Final[str] = "BRUTEX_GROWW_API_KEY"
-ENV_TOTP_SECRET: Final[str] = "BRUTEX_GROWW_TOTP_SECRET"
-ENV_TOKEN_PATH: Final[str] = "BRUTEX_GROWW_TOKEN_PATH"
+ENV_TOTP_SECRET: Final[str] = "BRUTEX_GROWW_TOTP_SECRET"  # noqa: S105
+ENV_TOKEN_PATH: Final[str] = "BRUTEX_GROWW_TOKEN_PATH"  # noqa: S105
 ENV_SMOKE: Final[str] = "BRUTEX_GROWW_SMOKE"
-DEFAULT_TOKEN_PATH: Final[str] = "~/.brutex/groww/access_token.json"
+DEFAULT_TOKEN_PATH: Final[str] = "~/.brutex/groww/access_token.json"  # noqa: S105
 
 # ── Request timeout ───────────────────────────────────────────────────────
 #: Default per-call timeout seconds (generous for bulk historical pulls).
 DEFAULT_TIMEOUT_SEC: Final[int] = 30
 
 __all__ = [
-    "ALL_INTERVALS",
     "ALLOWED_HOSTS",
+    "ALL_INTERVALS",
     "AUTH_KEY_TYPE_TOTP",
     "BRUTE_FORCE_UNIVERSE",
-    "CANDLE_INTERVAL_10M",
-    "CANDLE_INTERVAL_15M",
+    "CANDLES_PATH",
     "CANDLE_INTERVAL_1D",
     "CANDLE_INTERVAL_1H",
     "CANDLE_INTERVAL_1M",
     "CANDLE_INTERVAL_1MO",
     "CANDLE_INTERVAL_1W",
     "CANDLE_INTERVAL_2M",
-    "CANDLE_INTERVAL_30M",
     "CANDLE_INTERVAL_3M",
     "CANDLE_INTERVAL_4H",
     "CANDLE_INTERVAL_5M",
-    "CANDLES_PATH",
+    "CANDLE_INTERVAL_10M",
+    "CANDLE_INTERVAL_15M",
+    "CANDLE_INTERVAL_30M",
     "CHUNK_WINDOW_LONG_DAYS",
     "CHUNK_WINDOW_MED_DAYS",
     "CHUNK_WINDOW_SHORT_DAYS",

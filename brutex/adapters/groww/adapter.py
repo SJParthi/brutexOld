@@ -32,7 +32,6 @@ from brutex.adapters.groww.constants import (
     MARKET_OPEN_IST,
     RATE_LIMIT_INITIAL_RPS,
     TRACK1_DAILY_INTERVAL,
-    TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.groww.instruments import GrowwInstrument, InstrumentRegistry
 from brutex.adapters.groww.parser import parse_candle_rows
@@ -69,6 +68,7 @@ def _format_ist_time(day: date, time_str: str) -> str:
 
 
 def _is_index(instrument: Instrument) -> bool:
+    """Return ``True`` if *instrument* is an index type (``IDX``)."""
     return instrument.instrument is InstrumentType.IDX
 
 

@@ -30,8 +30,8 @@ lake stores Parquet Float64, parser delivers Decimal for CandleBar contract).
 
 from __future__ import annotations
 
-from decimal import Decimal
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 

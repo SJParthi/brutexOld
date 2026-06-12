@@ -34,7 +34,6 @@ from brutex.adapters.groww.errors import (
     GrowwTransportError,
 )
 
-
 # ── fakes ─────────────────────────────────────────────────────────────────
 
 def _fixed_transport(
@@ -60,7 +59,7 @@ def _recording_transport(responses: list[tuple[int, bytes]]) -> Any:
     return transport
 
 
-def _make_auth(tmp_path: Path, token: str = "tok") -> GrowwAuth:
+def _make_auth(tmp_path: Path, token: str = "tok") -> GrowwAuth:  # noqa: S107
     token_path = tmp_path / "token.json"
     token_path.write_text(json.dumps({"access_token": token}))
     return GrowwAuth(
@@ -140,7 +139,8 @@ class TestParseResponse:
             "status": "FAILURE",
             "error": {},
         }).encode()
-        exc = pytest.raises(GrowwApiFailureError, _parse_response, 200, body)
+        with pytest.raises(GrowwApiFailureError) as exc:
+            _parse_response(200, body)
         assert exc.value.code == "UNKNOWN"
 
     def test_http_400_raises_bad_request(self) -> None:
