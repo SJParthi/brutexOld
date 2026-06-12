@@ -491,6 +491,82 @@ def test_cmd_fetch_live_persisting_pull_succeeds(
     assert (tmp_path / "audit" / "spot-ingest.jsonl").exists()
 
 
+def test_cmd_fetch_live_persisting_pull_seeds_groww_ledger_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live persisting pull seeds the durable ledger in the GROWW namespace.
+
+    Regression for the latent CLI ledger bug DEC-DASHBOARD-GROWW-SPOT-001 (#689)
+    flagged in ``cli.py`` and fixed here: ``cmd_fetch`` must thread
+    ``GROWW_COVERAGE_MARKET`` + Groww's 30-day ``window_days_for`` into
+    ``plan_windows`` / ``reconcile_ledger_with_lake`` so the ``PLANNED`` keys it
+    seeds share the SAME ``(market, tile-width)`` namespace the Groww spot spine
+    settles in. Before the fix the calls defaulted to the Dhan namespace
+    (``"dhan"`` + a single 90-day window), so a multi-month pull's planned rows
+    could never match the fetched ones → orphan ``PLANNED`` rows / re-pull loops.
+
+    Over a 54-day range (> 30, ≤ 90) this asserts EVERY seeded row carries
+    ``market == "groww"`` (never ``"dhan"``) AND that the 1-minute series tiled at
+    Groww's 30-day width — ≥ 2 windows, each ≤ 30 days — rather than Dhan's single
+    90-day window (which would have left one 54-day window). Everything
+    network-shaped is faked (no creds, no network); the fake ingest writes no
+    bars, so ``reconcile_ledger_with_lake`` seeds nothing and the ledger holds
+    only the ``plan_windows`` rows under test.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    pytest.importorskip("pyarrow")
+    from datetime import date
+
+    from brutex.data.window_ledger_store import load_window_ledger
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(
+        cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), object())
+    )
+
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+    result = _FakeIngestResult(
+        report=_FakeIngestReport(
+            windows=2,
+            bars_appended=0,
+            failed_pairs=0,
+            transient_failures=0,
+            still_failed_windows=0,
+        ),
+        retry=None,
+    )
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", lambda *a, **k: result)
+
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-02-25",  # 54 days: Groww 30-day tiling → ≥ 2 windows; Dhan 90-day → 1
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=5,
+    )
+    assert rc == cli.EXIT_OK
+
+    records = load_window_ledger(tmp_path).records()
+    assert records, "the persisting pull must have seeded PLANNED ledger rows"
+    # The bug: defaulting to the Dhan namespace would stamp market="dhan".
+    assert {r.market for r in records} == {"groww"}
+    oneminute = [r for r in records if r.interval == "1minute"]
+    # Groww tiles 1-minute at 30 days, so a 54-day range splits into ≥ 2 windows,
+    # each ≤ 30 days wide — Dhan's 90-day width would have left a single 54-day one.
+    assert len(oneminute) >= 2
+    for row in oneminute:
+        span = date.fromisoformat(row.window_end) - date.fromisoformat(row.window_start)
+        assert span.days <= 30
+
+
 def test_cmd_fetch_live_missing_groww_creds_is_user_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1840,7 +1840,9 @@ def cmd_fetch(
         print(f"[brutex] lake: {resolved_instruments}")
         return EXIT_OK
 
+    from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
     from brutex.adapters.groww.run_ingest import run_groww_spot_ingest_with_retry
+    from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
     from brutex.dashboard.pull_controller import DHAN_HISTORY_FLOOR
     from brutex.data.catalog import Catalog
     from brutex.data.parquet_writer import ParquetWriter
@@ -1992,16 +1994,25 @@ def cmd_fetch(
         # so the ledger is None (no skip, no disk touch).
         _no_persist = dry_run or inspect
         ledger = begin_pull_ledger(resolved, dry_run=_no_persist)
-        if ledger is not None:  # pragma: no cover — live (non-dry, non-inspect) only
-            # plan_windows + reconcile_ledger_with_lake are themselves 100%-covered in
-            # test_window_ledger_store.py; only this live wiring is excluded, exactly
-            # as the live `_build_live_dhan_spot` adapter build above is.
+        if ledger is not None:
+            # Seed the durable ledger in the SAME (market, tile-width) namespace the
+            # Groww spot spine fetches+records in (DEC-DASHBOARD-GROWW-SPOT-001 fixed
+            # the identical bug on the dashboard path): pass GROWW_COVERAGE_MARKET +
+            # Groww's 30-day `window_days_for` so the PLANNED keys this seeds == the
+            # keys the Groww ingest later settles. Without them `plan_windows` defaults
+            # to the Dhan namespace ("dhan" + 90-day width), so the planned rows would
+            # never match the fetched ones → orphan PLANNED rows / re-pull loops
+            # (CLAUDE.md §11 COMMON). `plan_windows` + `reconcile_ledger_with_lake`
+            # are themselves 100%-covered in test_window_ledger_store.py; this wiring is
+            # exercised by the live-persisting tests in test_cli_retry_storm.py.
             plan_windows(
                 ledger,
                 instruments=fetch_instruments,
                 intervals=intervals,
                 start=start_dt.date(),
                 end=end_dt.date(),
+                market=GROWW_COVERAGE_MARKET,
+                window_days_for=groww_window_days_for,
             )
             reconcile_ledger_with_lake(
                 ledger,
@@ -2010,6 +2021,8 @@ def cmd_fetch(
                 intervals=intervals,
                 start=start_dt.date(),
                 end=end_dt.date(),
+                market=GROWW_COVERAGE_MARKET,
+                window_days_for=groww_window_days_for,
             )
         # `--retry-failed` (the manual trigger) ALWAYS retries on demand; otherwise
         # the post-pull auto-retry is on unless `--no-auto-retry` was passed. Both
