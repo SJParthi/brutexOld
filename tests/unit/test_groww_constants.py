@@ -86,10 +86,18 @@ class TestCandleIntervals:
 
     def test_all_intervals_contains_each_constant(self) -> None:
         expected = {
-            c.CANDLE_INTERVAL_1M, c.CANDLE_INTERVAL_2M, c.CANDLE_INTERVAL_3M,
-            c.CANDLE_INTERVAL_5M, c.CANDLE_INTERVAL_10M, c.CANDLE_INTERVAL_15M,
-            c.CANDLE_INTERVAL_30M, c.CANDLE_INTERVAL_1H, c.CANDLE_INTERVAL_4H,
-            c.CANDLE_INTERVAL_1D, c.CANDLE_INTERVAL_1W, c.CANDLE_INTERVAL_1MO,
+            c.CANDLE_INTERVAL_1M,
+            c.CANDLE_INTERVAL_2M,
+            c.CANDLE_INTERVAL_3M,
+            c.CANDLE_INTERVAL_5M,
+            c.CANDLE_INTERVAL_10M,
+            c.CANDLE_INTERVAL_15M,
+            c.CANDLE_INTERVAL_30M,
+            c.CANDLE_INTERVAL_1H,
+            c.CANDLE_INTERVAL_4H,
+            c.CANDLE_INTERVAL_1D,
+            c.CANDLE_INTERVAL_1W,
+            c.CANDLE_INTERVAL_1MO,
         }
         assert expected == c.ALL_INTERVALS
 
@@ -114,8 +122,12 @@ class TestChunkWindows:
         assert set(c.INTERVAL_CHUNK_WINDOW.keys()) == c.ALL_INTERVALS
 
     def test_short_window_intervals(self) -> None:
-        for iv in (c.CANDLE_INTERVAL_1M, c.CANDLE_INTERVAL_2M,
-                   c.CANDLE_INTERVAL_3M, c.CANDLE_INTERVAL_5M):
+        for iv in (
+            c.CANDLE_INTERVAL_1M,
+            c.CANDLE_INTERVAL_2M,
+            c.CANDLE_INTERVAL_3M,
+            c.CANDLE_INTERVAL_5M,
+        ):
             assert c.INTERVAL_CHUNK_WINDOW[iv] == c.CHUNK_WINDOW_SHORT_DAYS
 
     def test_med_window_intervals(self) -> None:
@@ -123,8 +135,13 @@ class TestChunkWindows:
             assert c.INTERVAL_CHUNK_WINDOW[iv] == c.CHUNK_WINDOW_MED_DAYS
 
     def test_long_window_intervals(self) -> None:
-        for iv in (c.CANDLE_INTERVAL_1H, c.CANDLE_INTERVAL_4H,
-                   c.CANDLE_INTERVAL_1D, c.CANDLE_INTERVAL_1W, c.CANDLE_INTERVAL_1MO):
+        for iv in (
+            c.CANDLE_INTERVAL_1H,
+            c.CANDLE_INTERVAL_4H,
+            c.CANDLE_INTERVAL_1D,
+            c.CANDLE_INTERVAL_1W,
+            c.CANDLE_INTERVAL_1MO,
+        ):
             assert c.INTERVAL_CHUNK_WINDOW[iv] == c.CHUNK_WINDOW_LONG_DAYS
 
 

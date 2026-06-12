@@ -30,13 +30,12 @@ from brutex.adapters.groww.errors import GrowwAuthError
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
+
 def _transport_ok(url: str, headers: dict[str, str], body: dict[str, Any]) -> tuple[int, bytes]:
     return 200, json.dumps({"token": "access-token-abc123"}).encode()
 
 
-def _transport_fail(
-    url: str, headers: dict[str, str], body: dict[str, Any]
-) -> tuple[int, bytes]:
+def _transport_fail(url: str, headers: dict[str, str], body: dict[str, Any]) -> tuple[int, bytes]:
     return 401, b'{"error": "invalid totp"}'
 
 
@@ -57,6 +56,7 @@ def _totp_gen() -> str:
 
 
 # ── unit tests ────────────────────────────────────────────────────────────
+
 
 class TestBuildAuthHeaders:
     def test_includes_bearer_token(self) -> None:
@@ -122,12 +122,10 @@ class TestReadCachedToken:
         p.write_text(json.dumps({"access_token": ""}))
         assert _read_cached_token(p) is None
 
-    def test_wrong_perms_logs_warning_but_still_returns_token(
-        self, tmp_path: Path
-    ) -> None:
+    def test_wrong_perms_logs_warning_but_still_returns_token(self, tmp_path: Path) -> None:
         p = tmp_path / "token.json"
         p.write_text(json.dumps({"access_token": "tok"}))
-        os.chmod(p, 0o644)  # wrong perms  # nosec B103
+        os.chmod(p, 0o644)  # wrong perms  # nosec B103  # lgtm[py/overly-permissive-file]
         result = _read_cached_token(p)
         # Should still return the token (warns but doesn't fail)
         assert result == "tok"
@@ -223,9 +221,7 @@ class TestBuildFromEnv:
         with pytest.raises(OSError, match="BRUTEX_GROWW_TOTP_SECRET"):
             build_from_env(transport=_transport_ok)
 
-    def test_missing_pyotp_raises_import_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_missing_pyotp_raises_import_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("BRUTEX_GROWW_API_KEY", "somekey")
         monkeypatch.setenv("BRUTEX_GROWW_TOTP_SECRET", "JBSWY3DPEHPK3PXP")
         with patch.dict("sys.modules", {"pyotp": None}), pytest.raises(ImportError, match="pyotp"):

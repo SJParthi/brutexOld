@@ -110,9 +110,7 @@ def parse_candle_rows(
             )
         ts_raw = row[_IDX_TIMESTAMP]
         if not isinstance(ts_raw, str):
-            raise ValueError(
-                f"candle row {idx} timestamp is not a string: {ts_raw!r}"
-            )
+            raise ValueError(f"candle row {idx} timestamp is not a string: {ts_raw!r}")
         ts_utc = _to_utc(ts_raw)
         open_ = _to_decimal(row[_IDX_OPEN])
         high = _to_decimal(row[_IDX_HIGH])

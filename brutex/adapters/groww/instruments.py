@@ -264,7 +264,10 @@ def build_registry(
     by_groww: dict[str, GrowwInstrument] = {}
     items: list[GrowwInstrument] = []
     for row in reader:
-        if instrument_types is not None and row.get("instrument_type", "").strip().upper() not in instrument_types:
+        if (
+            instrument_types is not None
+            and row.get("instrument_type", "").strip().upper() not in instrument_types
+        ):
             continue
         if exchanges is not None and row.get("exchange", "").strip().upper() not in exchanges:
             continue

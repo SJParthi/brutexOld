@@ -37,8 +37,7 @@ _CSV_HEADER = (
 )
 
 _NIFTY_ROW = (
-    "NSE,99926004,NIFTY,NSE-NIFTY,Nifty 50,"
-    "IDX,CASH,EQ,nan,nan,nan,nan,nan,0,0.05,nan,0,True,True\n"
+    "NSE,99926004,NIFTY,NSE-NIFTY,Nifty 50,IDX,CASH,EQ,nan,nan,nan,nan,nan,0,0.05,nan,0,True,True\n"
 )
 
 _BANKNIFTY_ROW = (
@@ -61,10 +60,13 @@ _BSE_SENSEX_ROW = (
     "IDX,CASH,EQ,nan,nan,nan,nan,nan,0,0.01,nan,0,True,True\n"
 )
 
-_MINIMAL_CSV = _CSV_HEADER + _NIFTY_ROW + _BANKNIFTY_ROW + _RELIANCE_ROW + _FNO_ROW + _BSE_SENSEX_ROW
+_MINIMAL_CSV = (
+    _CSV_HEADER + _NIFTY_ROW + _BANKNIFTY_ROW + _RELIANCE_ROW + _FNO_ROW + _BSE_SENSEX_ROW
+)
 
 
 # ── null sentinel helpers ─────────────────────────────────────────────────
+
 
 class TestOptStr:
     @pytest.mark.parametrize("null", ["nan", "NaN", "", "None", "none"])
@@ -112,6 +114,7 @@ class TestOptDate:
 
     def test_valid_iso_date_parsed(self) -> None:
         from datetime import date
+
         assert _opt_date("2021-01-28") == date(2021, 1, 28)
 
     def test_invalid_date_returns_none(self) -> None:

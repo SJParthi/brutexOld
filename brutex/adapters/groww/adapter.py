@@ -51,7 +51,7 @@ _GROWW_CAPABILITIES: MarketCapabilities = MarketCapabilities(
     market_id="groww",
     display_name="Groww (NSE/BSE spot — Track 1)",
     exchanges=frozenset({Exchange.NSE, Exchange.BSE}),
-    has_derivatives=False,    # spot only in Track 1; option_ingest handles F&O
+    has_derivatives=False,  # spot only in Track 1; option_ingest handles F&O
     has_expiries=False,
     has_option_chains=False,
     supports_intraday=True,
@@ -87,18 +87,12 @@ class GrowwMarketAdapter:
 
     client: GrowwClient
     registry: InstrumentRegistry
-    _sym_index: dict[str, GrowwInstrument] = field(
-        init=False, repr=False, compare=False
-    )
-    _instruments: tuple[Instrument, ...] = field(
-        init=False, repr=False, compare=False
-    )
+    _sym_index: dict[str, GrowwInstrument] = field(init=False, repr=False, compare=False)
+    _instruments: tuple[Instrument, ...] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Build internal indices from the registry."""
-        object.__setattr__(
-            self, "_sym_index", dict(self.registry.by_symbol_name)
-        )
+        object.__setattr__(self, "_sym_index", dict(self.registry.by_symbol_name))
         object.__setattr__(
             self,
             "_instruments",

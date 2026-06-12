@@ -32,9 +32,7 @@ EXPIRIES_PATH: Final[str] = "historical/expiries"
 CONTRACTS_PATH: Final[str] = "historical/contracts"
 
 #: Instrument master CSV — all live tradable instruments.
-INSTRUMENT_CSV_URL: Final[str] = (
-    "https://growwapi-assets.groww.in/instruments/instrument.csv"
-)
+INSTRUMENT_CSV_URL: Final[str] = "https://growwapi-assets.groww.in/instruments/instrument.csv"
 
 # ── Auth header constants (verified from SDK source: _build_headers) ─────
 HEADER_AUTHORIZATION: Final[str] = "Authorization"

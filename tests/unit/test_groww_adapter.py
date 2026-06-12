@@ -37,11 +37,6 @@ _CSV_HEADER = (
     "tick_size,freeze_quantity,is_reserved,buy_allowed,sell_allowed\n"
 )
 
-_NIFTY_CSV_ROW = (
-    "NSE,99926004,NIFTY,NSE-NIFTY,Nifty 50,"
-    "IDX,CASH,EQ,nan,nan,nan,nan,nan,0,0.05,nan,0,True,True\n"
-)
-
 _RELIANCE_CSV_ROW = (
     "NSE,2885,RELIANCE,NSE-RELIANCE,Reliance Industries,"
     "EQ,CASH,EQ,INE002A01018,nan,nan,nan,nan,1,0.05,5000,0,True,True\n"
@@ -86,6 +81,7 @@ def _make_adapter(
 
 # ── capabilities ──────────────────────────────────────────────────────────
 
+
 class TestCapabilities:
     def test_market_id(self, tmp_path: Path) -> None:
         adapter = _make_adapter(tmp_path)
@@ -119,6 +115,7 @@ class TestCapabilities:
 
 # ── list_instruments ──────────────────────────────────────────────────────
 
+
 class TestListInstruments:
     def test_first_page_returns_all(self, tmp_path: Path) -> None:
         adapter = _make_adapter(tmp_path)
@@ -134,16 +131,16 @@ class TestListInstruments:
 
 # ── list_derivatives ──────────────────────────────────────────────────────
 
+
 class TestListDerivatives:
     def test_yields_nothing(self, tmp_path: Path) -> None:
         adapter = _make_adapter(tmp_path)
-        result = list(adapter.list_derivatives(
-            underlying_symbol="NIFTY", exchange=Exchange.NSE
-        ))
+        result = list(adapter.list_derivatives(underlying_symbol="NIFTY", exchange=Exchange.NSE))
         assert result == []
 
 
 # ── fetch_ohlcv ───────────────────────────────────────────────────────────
+
 
 class TestFetchOhlcv:
     def test_returns_candle_bars(self, tmp_path: Path) -> None:
@@ -193,9 +190,12 @@ class TestFetchOhlcv:
 
     def test_index_volume_is_zero(self, tmp_path: Path) -> None:
         # NIFTY is IDX — drop_volume should zero out any vendor volume
-        adapter = _make_adapter(tmp_path, candles=[
-            ["2024-06-03T09:15:00", 22000.0, 22100.0, 21900.0, 22050.0, 99999],
-        ])
+        adapter = _make_adapter(
+            tmp_path,
+            candles=[
+                ["2024-06-03T09:15:00", 22000.0, 22100.0, 21900.0, 22050.0, 99999],
+            ],
+        )
         bars = adapter.fetch_ohlcv(
             symbol="NIFTY",
             exchange=Exchange.NSE,
@@ -207,9 +207,13 @@ class TestFetchOhlcv:
 
     def test_equity_volume_preserved(self, tmp_path: Path) -> None:
         csv = _CSV_HEADER + _RELIANCE_CSV_ROW
-        adapter = _make_adapter(tmp_path, candles=[
-            ["2024-06-03T09:15:00", 2500.0, 2510.0, 2490.0, 2505.0, 12345],
-        ], csv_text=csv)
+        adapter = _make_adapter(
+            tmp_path,
+            candles=[
+                ["2024-06-03T09:15:00", 2500.0, 2510.0, 2490.0, 2505.0, 12345],
+            ],
+            csv_text=csv,
+        )
         bars = adapter.fetch_ohlcv(
             symbol="RELIANCE",
             exchange=Exchange.NSE,
@@ -306,6 +310,7 @@ class TestFetchOhlcv:
 
 
 # ── post_init index building ──────────────────────────────────────────────
+
 
 class TestPostInit:
     def test_sym_index_built_from_registry(self, tmp_path: Path) -> None:

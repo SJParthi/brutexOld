@@ -36,10 +36,10 @@ from brutex.adapters.groww.errors import (
 
 # ── fakes ─────────────────────────────────────────────────────────────────
 
-def _fixed_transport(
-    status: int, body: bytes
-) -> Any:
+
+def _fixed_transport(status: int, body: bytes) -> Any:
     """Return a transport callable that always yields the given (status, body)."""
+
     def transport(url: str, headers: dict[str, str], timeout: int) -> tuple[int, bytes]:
         return status, body
 
@@ -77,6 +77,7 @@ def _ok_body(candles: list[Any] | None = None) -> bytes:
 
 # ── unit tests ────────────────────────────────────────────────────────────
 
+
 class TestSsrfGuard:
     def test_api_groww_in_allowed(self) -> None:
         _ssrf_guard("https://api.groww.in/v1/historical/candles?foo=bar")
@@ -105,6 +106,7 @@ class TestBuildRequestHeaders:
 
     def test_request_id_is_uuid_format(self) -> None:
         import re
+
         h = _build_request_headers("t")
         uuid_re = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
         assert re.match(uuid_re, h["x-request-id"])
@@ -126,19 +128,23 @@ class TestParseResponse:
         assert result == {"candles": [], "other": 1}
 
     def test_failure_status_raises_api_failure(self) -> None:
-        body = json.dumps({
-            "status": "FAILURE",
-            "error": {"code": "INVALID_SYMBOL", "message": "not found"},
-        }).encode()
+        body = json.dumps(
+            {
+                "status": "FAILURE",
+                "error": {"code": "INVALID_SYMBOL", "message": "not found"},
+            }
+        ).encode()
         with pytest.raises(GrowwApiFailureError) as exc_info:
             _parse_response(200, body)
         assert exc_info.value.code == "INVALID_SYMBOL"
 
     def test_failure_with_unknown_code(self) -> None:
-        body = json.dumps({
-            "status": "FAILURE",
-            "error": {},
-        }).encode()
+        body = json.dumps(
+            {
+                "status": "FAILURE",
+                "error": {},
+            }
+        ).encode()
         with pytest.raises(GrowwApiFailureError) as exc:
             _parse_response(200, body)
         assert exc.value.code == "UNKNOWN"
@@ -194,8 +200,11 @@ class TestGetCandlesHappyPath:
 
         client = GrowwClient(auth=_make_auth(tmp_path), transport=recording)
         client.get_candles(
-            exchange="NSE", segment="CASH", groww_symbol="NSE-BANKNIFTY",
-            start_time="2024-01-01 09:15:00", end_time="2024-01-01 15:30:00",
+            exchange="NSE",
+            segment="CASH",
+            groww_symbol="NSE-BANKNIFTY",
+            start_time="2024-01-01 09:15:00",
+            end_time="2024-01-01 15:30:00",
             candle_interval="1minute",
         )
         assert "NSE-BANKNIFTY" in calls[0]
@@ -223,13 +232,18 @@ class TestAuthRefresh:
         token_path = tmp_path / "token.json"
         token_path.write_text(json.dumps({"access_token": "expired-tok"}))
         auth = GrowwAuth(
-            api_key="key", totp_generator=lambda: "999999",
-            token_path=token_path, transport=refreshing_transport,
+            api_key="key",
+            totp_generator=lambda: "999999",
+            token_path=token_path,
+            transport=refreshing_transport,
         )
         client = GrowwClient(auth=auth, transport=transport)
         client.get_candles(
-            exchange="NSE", segment="CASH", groww_symbol="NSE-NIFTY",
-            start_time="2024-06-03 09:15:00", end_time="2024-06-03 15:30:00",
+            exchange="NSE",
+            segment="CASH",
+            groww_symbol="NSE-NIFTY",
+            start_time="2024-06-03 09:15:00",
+            end_time="2024-06-03 15:30:00",
             candle_interval="1minute",
         )
         assert refreshed
@@ -243,8 +257,11 @@ class TestAuthRefresh:
         client = GrowwClient(auth=auth, transport=always_401)
         with pytest.raises(GrowwAuthError):
             client.get_candles(
-                exchange="NSE", segment="CASH", groww_symbol="NSE-NIFTY",
-                start_time="2024-06-03 09:15:00", end_time="2024-06-03 15:30:00",
+                exchange="NSE",
+                segment="CASH",
+                groww_symbol="NSE-NIFTY",
+                start_time="2024-06-03 09:15:00",
+                end_time="2024-06-03 15:30:00",
                 candle_interval="1minute",
             )
 
@@ -290,9 +307,9 @@ class TestGetExpiries:
 
 class TestGetContracts:
     def test_returns_contract_list(self, tmp_path: Path) -> None:
-        body = json.dumps({
-            "payload": {"contracts": ["NSE-NIFTY-23Jan21-13000-CE", "NSE-NIFTY-23Jan21-13000-PE"]}
-        }).encode()
+        body = json.dumps(
+            {"payload": {"contracts": ["NSE-NIFTY-23Jan21-13000-CE", "NSE-NIFTY-23Jan21-13000-PE"]}}
+        ).encode()
         transport = _fixed_transport(200, body)
         client = GrowwClient(auth=_make_auth(tmp_path), transport=transport)
         result = client.get_contracts("NSE", "NIFTY", "2021-01-28")

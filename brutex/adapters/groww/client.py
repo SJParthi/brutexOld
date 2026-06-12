@@ -127,6 +127,7 @@ def _parse_response(status: int, raw: bytes) -> dict[str, Any]:
         code = str(error.get("code", "UNKNOWN"))
         message = str(error.get("message", "no message"))
         from brutex.adapters.groww.errors import GrowwApiFailureError
+
         raise GrowwApiFailureError(code, message)
 
     payload = body.get("payload", body)
@@ -173,7 +174,9 @@ class GrowwClient:
                 attempt=attempt + 1,
             )
             try:
-                status, raw = self.transport(full_url, headers, self.timeout_sec)
+                status, raw = self.transport(  # lgtm[py/wrong-number-of-arguments]
+                    full_url, headers, self.timeout_sec
+                )
                 return _parse_response(status, raw)
             except GrowwAuthError as exc:
                 last_exc = exc

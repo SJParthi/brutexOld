@@ -44,10 +44,7 @@ def chunk_window(interval: str) -> int:
         If *interval* is not a recognised Groww interval.
     """
     if interval not in ALL_INTERVALS:
-        raise ValueError(
-            f"Unknown interval {interval!r}. "
-            f"Supported: {sorted(ALL_INTERVALS)}"
-        )
+        raise ValueError(f"Unknown interval {interval!r}. Supported: {sorted(ALL_INTERVALS)}")
     return INTERVAL_CHUNK_WINDOW[interval]
 
 
@@ -82,9 +79,7 @@ def iter_chunks(
         If *end* < *start* or *interval* is unrecognised.
     """
     if end < start:
-        raise ValueError(
-            f"end ({end}) must be ≥ start ({start})"
-        )
+        raise ValueError(f"end ({end}) must be ≥ start ({start})")
     window = chunk_window(interval)
     chunk_start = start
     while chunk_start <= end:

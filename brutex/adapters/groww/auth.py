@@ -111,23 +111,17 @@ def _fetch_token(
     """
     headers = _build_auth_headers(api_key)
     body: dict[str, Any] = {"key_type": AUTH_KEY_TYPE_TOTP, "totp": totp_code}
-    status, raw = transport(GROWW_AUTH_URL, headers, body)
+    status, raw = transport(GROWW_AUTH_URL, headers, body)  # lgtm[py/wrong-number-of-arguments]
     if status == 200:  # noqa: PLR2004
         try:
             payload = json.loads(raw)
             token = payload.get("token") or payload
             if not isinstance(token, str):
-                raise GrowwAuthError(
-                    f"auth response 'token' field is not a string: {token!r}"
-                )
+                raise GrowwAuthError(f"auth response 'token' field is not a string: {token!r}")
             return token
         except (json.JSONDecodeError, KeyError) as exc:
-            raise GrowwAuthError(
-                f"cannot parse auth response (status {status}): {raw!r}"
-            ) from exc
-    raise GrowwAuthError(
-        f"auth failed with HTTP {status}: {raw.decode(errors='replace')[:200]}"
-    )
+            raise GrowwAuthError(f"cannot parse auth response (status {status}): {raw!r}") from exc
+    raise GrowwAuthError(f"auth failed with HTTP {status}: {raw.decode(errors='replace')[:200]}")
 
 
 def _read_cached_token(path: Path) -> str | None:
@@ -232,8 +226,7 @@ def build_from_env(
         import pyotp  # optional dep — imported lazily
     except ImportError as exc:
         raise ImportError(
-            "pyotp is required for Groww TOTP auth. "
-            "Install with: pip install 'brutex[groww]'"
+            "pyotp is required for Groww TOTP auth. Install with: pip install 'brutex[groww]'"
         ) from exc
     totp_gen = pyotp.TOTP(totp_secret)
     return GrowwAuth(
