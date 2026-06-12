@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -153,3 +154,24 @@ class TestComboResultSerialisation:
         assert restored.run_at == original.run_at
         # from_json flips cache_hit.
         assert restored.cache_hit is True
+
+
+class TestLmdbDependencyGuard:
+    def test_open_without_lmdb_raises_strategy_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A missing ``lmdb`` dependency fails loud with the install hint.
+
+        DEC-COV-001: covers the ``ImportError`` arm of ``ComboCache.open``
+        — ``sys.modules['lmdb'] = None`` makes ``import lmdb`` raise
+        exactly as it would in an environment without the extra. Message
+        pinned byte-exact (the mutation-gate lesson, DEC-MUTATION-RUNTIME-001).
+        """
+        monkeypatch.setitem(sys.modules, "lmdb", None)
+        with pytest.raises(StrategyError) as exc:
+            ComboCache.open(tmp_path / "cache")
+        assert str(exc.value) == (
+            "ComboCache requires 'lmdb' — install with "
+            "'pip install -e .[data]' or the top-level 'lmdb' extra"
+        )
+        assert isinstance(exc.value.__cause__, ImportError)
