@@ -46,6 +46,13 @@ import re
 import sys
 from pathlib import Path
 
+# These gate scripts run BOTH as scripts (CI: python scripts/ci/<name>.py,
+# where the script dir is sys.path[0]) AND as importlib-loaded MODULES
+# (the sibling-contract tests load them via spec_from_file_location, where
+# it is not). Inject the script directory so the shared _textscan helper
+# resolves in both modes (DEC-TEXTSCAN-COMMON-001).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from _textscan import strip_code_spans
 
 ROOT = Path(__file__).resolve().parents[2]

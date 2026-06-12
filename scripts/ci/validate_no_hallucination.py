@@ -56,6 +56,10 @@ import re
 import sys
 from pathlib import Path
 
+# Script-AND-module import resolution for the shared helper — see the
+# identical block in validate_dec_ids.py (DEC-TEXTSCAN-COMMON-001).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from _textscan import strip_fenced_blocks, strip_inline_code
 
 # Sentences containing these keywords are scrutinised for nearby citations.
