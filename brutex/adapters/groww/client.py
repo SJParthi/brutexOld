@@ -21,9 +21,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlencode, urlparse
 
 import structlog
@@ -61,9 +60,22 @@ _LOG = structlog.get_logger("brutex.adapters.groww.client")
 #: Maximum automatic auth-refresh attempts per call before propagating the error.
 _MAX_AUTH_RETRIES: int = 2
 
-#: Type alias for the injected GET transport.
-#: Signature: ``(url_with_params, headers, timeout) → (status_code, response_bytes)``
-GetTransport = Callable[[str, dict[str, str], int], tuple[int, bytes]]
+
+class GetTransport(Protocol):
+    """Injectable HTTP GET callable for Groww data endpoints.
+
+    Signature: ``(url_with_params, headers, timeout) → (status_code, response_bytes)``.
+    Implemented by :func:`urllib_transport`; replaced in tests.
+    """
+
+    def __call__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        timeout: int,
+    ) -> tuple[int, bytes]:
+        """Execute an HTTP GET and return ``(status_code, raw_response)``."""
+        ...
 
 
 def urllib_transport(  # pragma: no cover

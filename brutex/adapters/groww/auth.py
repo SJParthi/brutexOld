@@ -34,7 +34,7 @@ import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 
@@ -56,9 +56,22 @@ MAX_REFRESH_ATTEMPTS: int = 3
 #: Required file permission mode for the cached token (owner read/write only).
 REQUIRED_FILE_MODE: int = 0o600
 
-#: Type alias for the injected POST transport.
-#: Signature: ``(url, headers, json_body) → (status_code, response_bytes)``
-PostTransport = Callable[[str, dict[str, str], dict[str, Any]], tuple[int, bytes]]
+
+class PostTransport(Protocol):
+    """Injectable HTTP POST callable for the Groww auth endpoint.
+
+    Signature: ``(url, headers, json_body) → (status_code, response_bytes)``.
+    Implemented by :func:`_default_post_transport`; replaced in tests.
+    """
+
+    def __call__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        body: dict[str, Any],
+    ) -> tuple[int, bytes]:
+        """Execute an HTTP POST and return ``(status_code, raw_response)``."""
+        ...
 
 
 def _default_post_transport(  # pragma: no cover
