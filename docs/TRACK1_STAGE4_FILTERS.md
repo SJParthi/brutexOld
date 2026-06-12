@@ -25,7 +25,7 @@ the last two — Lockbox + Monte-Carlo).
 
 | # | Filter | The lie it catches (plain English) | Pass rule | Built |
 |---|---|---|---|---|
-| 1 | Top-K composite | "keep only the genuinely best candidates" — a ranking pre-filter | keep top-K per group | ✅ (staging) |
+| 1 | Top-K composite | "keep only the genuinely best candidates" — a ranking pre-filter | keep top-K per group | ✅ (staging — the launcher's per-tuple `--top` truncation, default 20; 1,000 is the production-envelope sizing. See `TRACK1_BACKTEST_SPEC.md` §Stage-4 #1, DEC-SPEC-TOPK-RECONCILE-001) |
 | 2 | **Deflated Sharpe** | "a high Sharpe is unremarkable once you tried thousands of strategies" | `DSR` clears the deflated bar | ✅ #430 |
 | 3 | **CPCV** | "it only worked on one lucky train/test split" | positive Sharpe on enough of the `C(16,8)` folds | ✅ #428 |
 | 4 | **Reality Check / SPA** | "the *best-of-N* beating the benchmark is just best-of-N luck" | SPA p-value `< 0.05` | ✅ #431 |

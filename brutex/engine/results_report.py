@@ -144,10 +144,54 @@ def load_results_tree(root: Path) -> ResultsStore:
 
 def _merge_files(root: Path, files: Sequence[Path]) -> ResultsStore:
     """Merge already-discovered *files* into one read-only store rooted at *root*."""
-    merged = ResultsStore(path=root)
-    for file in files:
-        merged.extend(ResultsStore.load(file).rows())
+    merged, _ = _merge_files_with_sources(root, files)
     return merged
+
+
+def _merge_files_with_sources(
+    root: Path, files: Sequence[Path]
+) -> tuple[ResultsStore, dict[str, str]]:
+    """Merge *files* AND keep each row's source file (root-relative POSIX path).
+
+    The provenance map (DEC-ROW-PROVENANCE-001) is what lets the read-back
+    label refined rows: the row itself carries no provenance, but its SOURCE
+    FILE does — refined cells are distinct files the cascade manifest names.
+    """
+    merged = ResultsStore(path=root)
+    sources: dict[str, str] = {}
+    for file in files:
+        rel = file.relative_to(root).as_posix()
+        rows = ResultsStore.load(file).rows()
+        merged.extend(rows)
+        for row in rows:
+            sources[row.run_id] = rel
+    return merged, sources
+
+
+def _stage3_rel_paths(root: Path) -> frozenset[str] | None:
+    """Return the manifest-attributed Stage-3 cell paths, or ``None`` = unknown.
+
+    The three honest states (DEC-ROW-PROVENANCE-001): a readable manifest
+    whose every refined cell carries ``rel_path`` → the attribution set
+    (possibly empty when Stage-3 was disabled — then every row is a grid
+    row); a manifest that is absent, unreadable, or PRE-provenance (any cell
+    missing ``rel_path``) → ``None`` — the caller keeps the blanket
+    disclaimer rather than guessing (Golden Rule #1).
+    """
+    from brutex.engine.cascade_wire import CascadeWireError, load_manifest
+
+    try:
+        stage3 = load_manifest(root).stage3
+    except CascadeWireError:
+        return None
+    if stage3 is None:
+        return None
+    if not stage3.enabled:
+        return frozenset()
+    rel_paths = [cell.rel_path for cell in stage3.refined_cells]
+    if any(rel is None for rel in rel_paths):
+        return None  # pre-DEC-ROW-PROVENANCE-001 manifest — no attribution
+    return frozenset(rel for rel in rel_paths if rel is not None)
 
 
 def _resolve_sort_field(sort_by: str) -> str:
@@ -180,7 +224,7 @@ def _format_conditions(condition_names: str) -> str:
     return condition_names
 
 
-def render_leaderboard(rows: Sequence[ResultRow]) -> str:
+def render_leaderboard(rows: Sequence[ResultRow], *, origins: dict[str, str] | None = None) -> str:
     """Render *rows* (already in leaderboard order) as the readable winners table.
 
     Each finalist renders as two lines: a headline row (rank · instrument · tf ·
@@ -188,17 +232,22 @@ def render_leaderboard(rows: Sequence[ResultRow]) -> str:
     indented condition-NAMES line. The row's deflated number is labelled
     ``dsr@tupleN`` — it was deflated against that ONE tuple's rank-time trial
     count, NOT the leaderboard N the Stage-4 cascade uses (ADR-0008 condition 7;
-    see the module docstring). No per-row gate verdict is rendered — a row
-    cannot reveal whether it is a gated Stage-2 finalist or an ungated Stage-3
-    refined trial (see the module docstring; DEC-STAGE3-WIRE-001). Money goes
-    through :func:`brutex.money.format_inr` (2dp, DEC-MONEY-2DP-001);
-    statistical metrics are only *displayed* to a fixed width — the stored
-    values are never rounded.
+    see the module docstring). With *origins* supplied (DEC-ROW-PROVENANCE-001)
+    each headline row additionally carries ``src=grid`` (a gate survivor) or
+    ``src=stage3`` (an UNGATED refined trial) — the per-row honesty the old
+    blanket disclaimer could not give; with ``origins=None`` no marker renders
+    and a row cannot reveal which it is (the DEC-STAGE3-WIRE-001 fallback).
+    Money goes through :func:`brutex.money.format_inr` (2dp,
+    DEC-MONEY-2DP-001); statistical metrics are only *displayed* to a fixed
+    width — the stored values are never rounded.
 
     Parameters
     ----------
     rows
         The finalists to render, in the desired order (see :func:`results_show_report`).
+    origins
+        Optional ``run_id → "grid" | "stage3"`` attribution (built by
+        :func:`results_show_report` from the cascade manifest's cell paths).
 
     Returns
     -------
@@ -209,13 +258,18 @@ def render_leaderboard(rows: Sequence[ResultRow]) -> str:
         return "(no persisted results)"
     lines: list[str] = []
     for rank, row in enumerate(rows, start=1):
+        # Per-row provenance marker (DEC-ROW-PROVENANCE-001): rendered ONLY
+        # when the cascade manifest attributes the tree's files — `grid` rows
+        # are gate survivors, `stage3` rows are UNGATED refined trials. With
+        # no attribution the output is byte-identical to the unmarked render.
+        marker = "" if origins is None else f"  src={origins.get(row.run_id, '?')}"
         lines.append(
             f"#{rank}  {row.instrument} {row.tf} {row.direction}  "
             f"pnl={format_inr(row.net_pnl_paisa)}  "
             f"trades={row.total_trades}  "
             f"win={row.win_rate * 100:.1f}%  "
             f"sharpe={row.sharpe_ratio:+.3f}  "
-            f"dsr@tupleN={_format_deflated(row.deflated_sharpe)}\n"
+            f"dsr@tupleN={_format_deflated(row.deflated_sharpe)}{marker}\n"
             f"    {_format_conditions(row.condition_names)}"
         )
     return "\n".join(lines)
@@ -331,17 +385,36 @@ def results_show_report(root: Path, *, top: int, sort_by: str = DEFAULT_SORT_BY)
         raise ResultsStoreError(f"top must be >= 1, got {top}")
     field = _resolve_sort_field(sort_by)
     files = discover_result_files(root)
-    store = _merge_files(root, files)
+    store, sources = _merge_files_with_sources(root, files)
     leaders = store.top_k(min(top, len(store)), by=field) if len(store) else ()
+    # Per-row provenance (DEC-ROW-PROVENANCE-001): attribution exists ONLY
+    # when the cascade manifest names every refined cell's path — then each
+    # row labels src=grid|stage3; otherwise the blanket disclaimer stands.
+    stage3_files = _stage3_rel_paths(root)
+    origins: dict[str, str] | None = None
+    if stage3_files is not None:
+        origins = {
+            run_id: ("stage3" if rel in stage3_files else "grid") for run_id, rel in sources.items()
+        }
+    if origins is None:
+        provenance_note = (
+            "  (Stage-2 grid rows are gate survivors; a --stage3-enable sweep also "
+            "persists UNGATED Stage-3 refined-eval trials — no per-row gate verdict)"
+        )
+    else:
+        provenance_note = (
+            "  (per-row src= markers from the cascade manifest: src=grid rows are "
+            "gate survivors; src=stage3 rows are UNGATED refined trials — "
+            "DEC-ROW-PROVENANCE-001)"
+        )
     header = (
         f"BruteX results — {root}\n"
         f"  files={len(files)}  finalists={len(store)}  "
         f"sort={sort_by}  showing top {len(leaders)}\n"
-        f"  (Stage-2 grid rows are gate survivors; a --stage3-enable sweep also "
-        f"persists UNGATED Stage-3 refined-eval trials — no per-row gate verdict)"
+        f"{provenance_note}"
     )
     sidecar = render_cascade_sidecar(root)
-    body = f"{header}\n\n{render_leaderboard(leaders)}"
+    body = f"{header}\n\n{render_leaderboard(leaders, origins=origins)}"
     return f"{body}\n\n{sidecar}" if sidecar else body
 
 

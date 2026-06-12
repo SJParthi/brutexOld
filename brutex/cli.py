@@ -139,7 +139,14 @@ def _add_sweep_grid_args(
         help="Comma-separated take-profit paisa values; use 'none' to disable a leg (default none)",
     )
     parser.add_argument(
-        "--top", type=int, default=20, help="Persist the top-N ranked combos per tuple (default 20)"
+        "--top",
+        type=int,
+        default=20,
+        help=(
+            "Persist the top-N composite-ranked combos per tuple (default 20 for fast "
+            "operator runs; the spec's Stage-4 filter #1 production sizing is 1000 — "
+            "TRACK1_BACKTEST_SPEC.md, DEC-SPEC-TOPK-RECONCILE-001)"
+        ),
     )
     parser.add_argument(
         "--mode", default="A", help="Run mode label stamped on the run identity (default A)"
@@ -2696,7 +2703,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             bars_for=_bars_for,
             bars_context=BarsContext(exchange=exchange, segment=segment, start=start, end=end),
             cascade_config=cascade_config_for_sweep(sweep_id),
-            stage3=stage3_manifest_record(stage3_report),
+            stage3=stage3_manifest_record(stage3_report, results_root=out_root),
             leaderboard_trials=leaderboard_trials,
         )
         print(
