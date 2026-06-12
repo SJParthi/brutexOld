@@ -49,18 +49,21 @@ import structlog
 
 from brutex.adapters.dhan.auth import dhan_creds_present
 from brutex.adapters.dhan.errors import is_no_data_message
-from brutex.adapters.dhan.pull_verdict import PullVerdict, classify_pull
 from brutex.adapters.dhan.run_ingest import (
     DhanIngestReport,
     ProgressHook,
     run_dhan_spot_ingest,
     run_dhan_spot_ingest_with_retry,
 )
-from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
-from brutex.adapters.dhan.until_clean import (
+from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
+    PullVerdict,
     UntilCleanRound,
+    classify_pull,
     run_until_clean,
+)
+from brutex.adapters.ingest_common import (
+    SyntheticSpotAdapter as SyntheticDhanAdapter,
 )
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.sink import BarSink, NullBarSink
@@ -83,11 +86,11 @@ from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
-    from brutex.adapters.dhan.rate_control import DhanRateController
     from brutex.adapters.dhan.run_ingest import SpotIngestWithRetry
     from brutex.adapters.dhan.token_holder import TokenHolder
     from brutex.adapters.dhan.token_keepalive import TokenKeepalive
     from brutex.adapters.dhan.token_preflight import TokenPreflight
+    from brutex.adapters.rate_common import RateController as DhanRateController
 
 _LOG = structlog.get_logger(__name__)
 
@@ -795,10 +798,10 @@ def _build_live_controller() -> DhanRateController:  # pragma: no cover — live
     makes every paced dashboard call increment + check the quota, surfaces the
     gauge on the rate panel, and gives the auto-resume loop its hard brake.
     """
-    from brutex.adapters.dhan.rate_control import DhanRateController
+    from brutex.adapters.rate_common import RateController
     from brutex.orchestrator.quota_tracker import DailyQuotaTracker
 
-    return DhanRateController(quota_tracker=DailyQuotaTracker())
+    return RateController(quota_tracker=DailyQuotaTracker())
 
 
 class SessionRateController:

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 
-from brutex.adapters.dhan.pull_verdict import classify_pull
+from brutex.adapters.ingest_common import classify_pull
 from brutex.dashboard.verdict_banner import banner_for
 
 

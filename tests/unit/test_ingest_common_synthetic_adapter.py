@@ -1,4 +1,4 @@
-"""Tests for `brutex.adapters.dhan.synthetic_adapter.SyntheticDhanAdapter`.
+"""Tests for `brutex.adapters.ingest_common.SyntheticSpotAdapter`.
 
 100% line+branch: the protocol surface (capabilities / list_instruments with
 and without a cursor / empty list_derivatives / fetch_ohlcv), the default
@@ -12,7 +12,7 @@ from datetime import date
 from decimal import Decimal
 
 from brutex.adapters.dhan.run_ingest import run_dhan_spot_ingest
-from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
+from brutex.adapters.ingest_common import SyntheticSpotAdapter
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.session import in_session
 from brutex.data.sink import NullBarSink
@@ -42,11 +42,11 @@ def _instrument(symbol: str = "13") -> Instrument:
 
 
 def test_is_a_market_adapter() -> None:
-    assert isinstance(SyntheticDhanAdapter(), MarketAdapter)
+    assert isinstance(SyntheticSpotAdapter(), MarketAdapter)
 
 
 def test_capabilities() -> None:
-    caps = SyntheticDhanAdapter().capabilities
+    caps = SyntheticSpotAdapter().capabilities
     assert caps.market_id == "dhan"
     assert caps.has_derivatives is False
     assert caps.supported_intervals == frozenset({"1minute", "1day"})
@@ -54,7 +54,7 @@ def test_capabilities() -> None:
 
 def test_list_instruments_one_page_then_exhausted() -> None:
     inst = _instrument()
-    adapter = SyntheticDhanAdapter(instruments=(inst,))
+    adapter = SyntheticSpotAdapter(instruments=(inst,))
     page = adapter.list_instruments()
     assert page.instruments == (inst,)
     assert page.next_cursor is None
@@ -65,12 +65,12 @@ def test_list_instruments_one_page_then_exhausted() -> None:
 
 
 def test_list_derivatives_is_empty() -> None:
-    adapter = SyntheticDhanAdapter()
+    adapter = SyntheticSpotAdapter()
     assert list(adapter.list_derivatives(underlying_symbol="NIFTY", exchange=Exchange.NSE)) == []
 
 
 def test_fetch_ohlcv_returns_in_session_bars() -> None:
-    adapter = SyntheticDhanAdapter(bars_per_window=3)
+    adapter = SyntheticSpotAdapter(bars_per_window=3)
     bars = adapter.fetch_ohlcv(
         symbol="13",
         exchange=Exchange.NSE,
@@ -83,7 +83,7 @@ def test_fetch_ohlcv_returns_in_session_bars() -> None:
 
 
 def test_default_bars_per_window() -> None:
-    bars = SyntheticDhanAdapter().fetch_ohlcv(
+    bars = SyntheticSpotAdapter().fetch_ohlcv(
         symbol="13",
         exchange=Exchange.NSE,
         interval="1minute",
@@ -95,7 +95,7 @@ def test_default_bars_per_window() -> None:
 
 def test_drives_the_ingest_spine_offline() -> None:
     """The synthetic adapter is a drop-in: it runs the real spine with no I/O."""
-    adapter = SyntheticDhanAdapter(bars_per_window=4)
+    adapter = SyntheticSpotAdapter(bars_per_window=4)
     report = run_dhan_spot_ingest(
         adapter,
         NullBarSink(),

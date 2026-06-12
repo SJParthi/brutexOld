@@ -15,8 +15,8 @@ leak class that one-shot unit tests structurally cannot catch:
    — idempotent re-appends of an existing run-identity must be allocation-flat
    no-ops, including the full ``ResultRow`` construction + validation +
    ``condition_names`` derivation each event (the real per-batch hot path).
-4. **Dhan rate controller** (``brutex.adapters.dhan.rate_control
-   .DhanRateController``) — ``pace``/``on_rate_limit``/``on_timeout``/
+4. **Dhan rate controller** (``brutex.adapters.rate_common
+   .RateController``) — ``pace``/``on_rate_limit``/``on_timeout``/
    ``on_success`` across full deterministic 5→…→1→…→5 ladder cycles; the
    ``_hits``/``_timeouts`` deques are bounded by window eviction at any
    physical rate ≤ the 5 r/s ceiling (CLAUDE.md §6).
@@ -142,12 +142,12 @@ from pathlib import Path
 from typing import Final
 
 import pytest
-from brutex.adapters.dhan.rate_control import (
+from brutex.adapters.rate_common import (
     CEILING_RPS,
     FLOOR_RPS,
     STEP_DOWN_WINDOW,
     TIMEOUT_FLOOR_RPS,
-    DhanRateController,
+    RateController,
 )
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import EMPTY, FAILED, WindowLedger
@@ -610,7 +610,7 @@ def test_rate_controller_memory_flat() -> None:
     inside the physical window×rate bound even while pinned at the floor.
     """
     clock = _FakeClock()
-    controller = DhanRateController(quota_tracker=None, clock=clock.now, sleep=clock.sleep)
+    controller = RateController(quota_tracker=None, clock=clock.now, sleep=clock.sleep)
     tick = 0
 
     def drive(events: int) -> None:

@@ -1,20 +1,22 @@
-"""Adaptive Dhan rate controller — start at 5 r/s, step 5→4→3 under heavy 429s.
+"""Adaptive rate controller — start at the ceiling, step down under heavy 429s.
 
-The Dhan Data API ceiling is **5 req/s** (verified, ``docs/dhan-ref/01``). This
-controller (DEC-DHAN-ADAPTIVE-RPS-001) runs the pull at the **max 5 r/s** when
-Dhan is healthy and only **steps down 1 r/s** (5 → 4 → 3) under *sustained*
-rate-limiting, recovering 1 r/s at a time (3 → 4 → 5) once the pressure clears.
-It never exceeds **5** (the hard ceiling). The 429 ladder reaches the SOFT
+Vendor-neutral home (PR-J4a of the Dhan→Groww cutover — CLAUDE.md §11 COMMON,
+one source of truth, no copy-paste between modules). The controller (formerly
+``DhanRateController``, DEC-DHAN-ADAPTIVE-RPS-001) runs a pull at the **ceiling
+rate** (injected per vendor; the verified Dhan Data-API ceiling is **5 req/s**,
+``docs/dhan-ref/01`` — :data:`CEILING_RPS`) when the vendor is healthy and only
+**steps down 1 r/s** under *sustained* rate-limiting, recovering 1 r/s at a time
+once the pressure clears. It never exceeds the ceiling. The 429 ladder reaches the SOFT
 :data:`FLOOR_RPS` (**3**) quickly on a brief burst (a quota nudge is no reason to
 crawl), and under a SUSTAINED 429 storm — every call rejected even at 3 r/s — eases
 FURTHER to :data:`RATE_LIMIT_STORM_FLOOR_RPS` (**1**) on the higher
 :data:`STORM_HITS` evidence threshold (DEC-DHAN-RATE-STORM-FLOOR-001), exactly as a
 SUSTAINED *timeout* storm on a heavy / flaky endpoint already eases to
 :data:`TIMEOUT_FLOOR_RPS` (1) (DEC-DHAN-OPTION-TIMEOUT-STORM-001) — then recovers up
-to the ceiling once the pressure clears. Maximises throughput while staying inside Dhan's limit (CLAUDE.md §2
-Rule 6).
+to the ceiling once the pressure clears. Maximises throughput while staying inside the
+vendor's limit (CLAUDE.md §2 Rule 6).
 
-It owns only the small Dhan-specific step ladder; the **O(1) blocking pace** +
+It owns only the small step ladder; the **O(1) blocking pace** +
 the daily-quota gate are reused from
 :class:`~brutex.orchestrator.rate_limiter.AdaptiveTokenBucket` (CLAUDE.md §11
 COMMON — no re-implementation of the token math). On a (rare) step the ONE
@@ -43,7 +45,6 @@ from collections.abc import Callable
 
 import structlog
 
-from brutex.adapters.dhan.constants import DATA_RATE_LIMIT_RPS
 from brutex.orchestrator.quota_tracker import DailyQuotaTracker
 from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 
@@ -51,10 +52,14 @@ from brutex.orchestrator.rate_limiter import AdaptiveTokenBucket
 #: (``rate.429``), a step DOWN under sustained pressure (``rate.stepdown``), and
 #: the recovery back up (``rate.stepup``) into the ``/logs`` stream so the
 #: operator SEES exactly when/why effective r/s dropped (DEC-DHAN-RATE-LOGGING-001).
-_LOG = structlog.get_logger("brutex.adapters.dhan.rate_control")
+_LOG = structlog.get_logger("brutex.adapters.rate_common")
 
-#: Dhan's verified Data-API ceiling — the hard cap we never exceed (and start at).
-CEILING_RPS: float = float(DATA_RATE_LIMIT_RPS)
+#: The verified Dhan Data-API ceiling (5 r/s, ``docs/dhan-ref/01``), kept here as
+#: the DEFAULT ceiling so this vendor-neutral controller needs NO dhan import
+#: (relocated from ``dhan.constants.DATA_RATE_LIMIT_RPS`` in PR-J4a — same value,
+#: which ``dhan.constants`` remains the verified source of truth for). A different
+#: vendor injects its own ``ceiling_rps`` (e.g. the Groww cutover, PR-J2).
+CEILING_RPS: float = 5.0
 
 #: The SOFT floor the 429 ladder reaches quickly on a brief burst (a quota nudge is
 #: no reason to crawl). A SUSTAINED 429 storm eases BELOW it toward
@@ -129,7 +134,7 @@ STEP_UP_WINDOW: float = 300.0
 BURST: int = 1
 
 
-class DhanRateController:
+class RateController:
     """Adaptive [1..5] r/s controller: start 5, step down on heavy 429s, recover up.
 
     Steady-state envelope is [3..5] (the 429 ladder reaches the soft
@@ -185,8 +190,7 @@ class DhanRateController:
             rate here (the Groww vendor cutover, DEC-DHAN-GROWW-REMIGRATE-001 PR-J2,
             feeds the UNVERIFIED Groww backtesting rate). The 429/timeout ladders
             still step DOWN to their existing soft/deep floors — only the start +
-            upshift cap moves. J4/cleanup relocates+renames this module to a
-            vendor-neutral home.
+            upshift cap moves.
         """
         self._clock = clock
         self._sleep = sleep
@@ -460,5 +464,5 @@ __all__ = [
     "STEP_UP_WINDOW",
     "STORM_HITS",
     "TIMEOUT_FLOOR_RPS",
-    "DhanRateController",
+    "RateController",
 ]

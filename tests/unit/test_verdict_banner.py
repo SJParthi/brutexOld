@@ -10,7 +10,7 @@ and the JSON ``to_dict`` shape.
 from __future__ import annotations
 
 import pytest
-from brutex.adapters.dhan.pull_verdict import PullVerdictKind, classify_pull
+from brutex.adapters.ingest_common import PullVerdictKind, classify_pull
 from brutex.dashboard.verdict_banner import VerdictBanner, banner_for
 
 

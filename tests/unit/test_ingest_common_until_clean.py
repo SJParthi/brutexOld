@@ -1,4 +1,4 @@
-"""Tests for `brutex.adapters.dhan.until_clean` — the pure re-pull-until-clean controller.
+"""Tests for `brutex.adapters.ingest_common` — the pure re-pull-until-clean controller.
 
 100% line+branch on the wheel-free pure controller + driver (DEC-TOKEN-PREFLIGHT-001)
 via a fake ``round_runner`` (a scripted sequence of :class:`UntilCleanRound`) + an
@@ -17,8 +17,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 import pytest
-from brutex.adapters.dhan import until_clean as mod
-from brutex.adapters.dhan.until_clean import (
+from brutex.adapters import ingest_common as mod
+from brutex.adapters.ingest_common import (
     DEFAULT_MAX_ROUNDS,
     UntilCleanOutcome,
     UntilCleanRound,
@@ -373,13 +373,13 @@ def test_default_backoff_is_bounded_and_exponential(monkeypatch: pytest.MonkeyPa
     slept: list[float] = []
     monkeypatch.setattr(mod, "_time_sleep", slept.append)
 
-    mod._default_round_backoff(2)  # base × 2**0 = 5.0 (first pre-wait, round 2)
-    mod._default_round_backoff(3)  # base × 2**1 = 10.0
-    mod._default_round_backoff(100)  # clamped to the 60.0 ceiling
+    mod._until_clean_default_backoff(2)  # base × 2**0 = 5.0 (first pre-wait, round 2)
+    mod._until_clean_default_backoff(3)  # base × 2**1 = 10.0
+    mod._until_clean_default_backoff(100)  # clamped to the 60.0 ceiling
 
-    assert slept[0] == pytest.approx(mod._DEFAULT_ROUND_BACKOFF_S)
-    assert slept[1] == pytest.approx(mod._DEFAULT_ROUND_BACKOFF_S * 2.0)
-    assert slept[2] == pytest.approx(mod._MAX_ROUND_BACKOFF_S)
+    assert slept[0] == pytest.approx(mod._UC_DEFAULT_ROUND_BACKOFF_S)
+    assert slept[1] == pytest.approx(mod._UC_DEFAULT_ROUND_BACKOFF_S * 2.0)
+    assert slept[2] == pytest.approx(mod._UC_MAX_ROUND_BACKOFF_S)
 
 
 def test_custom_decide_is_honoured() -> None:

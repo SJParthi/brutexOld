@@ -15,7 +15,7 @@ from brutex.adapters.dhan.token_preflight import (
     classify_token_lifetime,
     preflight_pull_verdict,
 )
-from brutex.adapters.dhan.until_clean import UntilCleanOutcome, UntilCleanRound
+from brutex.adapters.ingest_common import UntilCleanOutcome, UntilCleanRound
 
 
 def test_token_state_summaries_are_byte_stable() -> None:
