@@ -149,6 +149,76 @@ class TestOnPipelineEvent:
         assert snap.success == 5
         assert snap.elapsed_seconds == 1.23
 
+    def test_phase_progress_without_counts_leaves_snapshot_untouched(self) -> None:
+        """A PHASE_PROGRESS event with every count ``None`` changes nothing."""
+        state = DashboardState()
+        state.on_pipeline_event(
+            _event(
+                PipelineEventKind.PHASE_START,
+                phase=IngestPhase.A_INSTRUMENTS,
+                total=7,
+            )
+        )
+        state.on_pipeline_event(
+            _event(PipelineEventKind.PHASE_PROGRESS, phase=IngestPhase.A_INSTRUMENTS)
+        )
+        snap = state.phases["A_INSTRUMENTS"]
+        assert snap.total == 7
+        assert snap.done == 0
+        assert snap.success == 0
+        assert snap.no_data == 0
+        assert snap.quarantined == 0
+
+    def test_phase_complete_records_no_data_quarantined_retried(self) -> None:
+        """PHASE_COMPLETE copies no_data / quarantined / retried; ``None`` total is kept."""
+        state = DashboardState()
+        state.on_pipeline_event(
+            _event(
+                PipelineEventKind.PHASE_START,
+                phase=IngestPhase.A_INSTRUMENTS,
+                total=9,
+            )
+        )
+        state.on_pipeline_event(
+            _event(
+                PipelineEventKind.PHASE_COMPLETE,
+                phase=IngestPhase.A_INSTRUMENTS,
+                no_data=2,
+                quarantined=1,
+                retried=3,
+            )
+        )
+        snap = state.phases["A_INSTRUMENTS"]
+        assert snap.status == "done"
+        # total / success were None on the event → the started values survive.
+        assert snap.total == 9
+        assert snap.done == 0
+        assert snap.success == 0
+        assert snap.no_data == 2
+        assert snap.quarantined == 1
+        assert snap.retried == 3
+
+    def test_item_complete_with_phase_changes_no_phase_status(self) -> None:
+        """A non-lifecycle kind (ITEM_COMPLETE) with a phase set leaves the snapshot as-is."""
+        state = DashboardState()
+        state.on_pipeline_event(
+            _event(
+                PipelineEventKind.PHASE_START,
+                phase=IngestPhase.A_INSTRUMENTS,
+                total=5,
+            )
+        )
+        state.on_pipeline_event(
+            _event(
+                PipelineEventKind.ITEM_COMPLETE,
+                phase=IngestPhase.A_INSTRUMENTS,
+                item_id="223|NSE_EQ",
+            )
+        )
+        snap = state.phases["A_INSTRUMENTS"]
+        assert snap.status == "running"
+        assert snap.total == 5
+
     def test_phase_halted_marks_halted_and_run(self) -> None:
         state = DashboardState()
         state.on_pipeline_event(
