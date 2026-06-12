@@ -73,7 +73,6 @@ class GetTransport(Protocol):
         url: str,
         headers: dict[str, str],
         timeout: int,
-        /,
     ) -> tuple[int, bytes]:
         """Execute an HTTP GET and return ``(status_code, raw_response)``."""
         raise NotImplementedError  # Protocol abstract method — never called directly

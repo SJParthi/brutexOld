@@ -66,7 +66,7 @@ def _make_auth(tmp_path: Path, token: str = "tok") -> GrowwAuth:  # noqa: S107
         api_key="apikey",
         totp_generator=lambda: "123456",
         token_path=token_path,
-        transport=lambda url, h, b: (200, json.dumps({"token": "refreshed"}).encode()),
+        transport=lambda url, headers, body: (200, json.dumps({"token": "refreshed"}).encode()),
     )
 
 

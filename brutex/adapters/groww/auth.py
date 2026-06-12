@@ -69,7 +69,6 @@ class PostTransport(Protocol):
         url: str,
         headers: dict[str, str],
         body: dict[str, Any],
-        /,
     ) -> tuple[int, bytes]:
         """Execute an HTTP POST and return ``(status_code, raw_response)``."""
         raise NotImplementedError  # Protocol abstract method — never called directly
