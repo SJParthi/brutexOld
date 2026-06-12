@@ -10,6 +10,7 @@ Skipped cleanly when the ``[ui]`` extra (FastAPI) is absent.
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -108,8 +109,8 @@ def _patch_probe(
     run: object = None,
 ) -> None:
     """Monkeypatch the lazily-imported probe seam on its source modules."""
-    import brutex.adapters.groww.live as live_mod
-    import brutex.adapters.groww.probe as probe_mod
+    live_mod = importlib.import_module("brutex.adapters.groww.live")
+    probe_mod = importlib.import_module("brutex.adapters.groww.probe")
 
     if build is not None:
         monkeypatch.setattr(live_mod, "build_live_client", build)
@@ -195,7 +196,7 @@ def test_test_route_other_groww_error_502(
 
 def test_groww_template_loader_caches_both_branches() -> None:
     """The cached template loader covers the load branch AND the cached branch."""
-    import brutex.dashboard.app as app_mod
+    app_mod = importlib.import_module("brutex.dashboard.app")
 
     # Force the cold (cache-is-None) branch, then the warm (cached) branch.
     app_mod._GROWW_CREDENTIALS_TEMPLATE_CACHE = None
