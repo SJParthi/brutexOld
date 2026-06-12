@@ -464,7 +464,10 @@ skip_covered = false
 #          tests/unit/test_costs_*.py
 #
 # As each module hits 100%, it's added to the strict pass list.
-fail_under = 90
+# RATCHETED 90 -> 99 by DEC-COV-SMALL-GAPS-001 (2026-06-12): measured
+# aggregate 99.29% before the 3 small-gap closures; dashboard/app.py is
+# the only remaining sub-100 module and rides its own backfill PR.
+fail_under = 99
 exclude_lines = [
     "pragma: no cover",
     "raise NotImplementedError",

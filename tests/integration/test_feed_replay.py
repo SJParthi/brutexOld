@@ -118,6 +118,28 @@ class TestReplayFeedConstruction:
                 end=datetime(2024, 1, 1, tzinfo=UTC),
             )
 
+    def test_symbols_and_interval_properties(self, tmp_path: Path) -> None:
+        """The configured symbol tuple + interval are exposed read-only.
+
+        DEC-COV-001: pins the ``symbols`` / ``interval`` accessor
+        properties (the symbol tuple is a defensive copy — an immutable
+        tuple, not the internal list).
+        """
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            feed = ReplayFeed(
+                catalog=cat,
+                lake_root=tmp_path / "lake",
+                exchange="NSE",
+                segment="FNO",
+                symbols=["NIFTY", "BANKNIFTY"],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 1, 2, tzinfo=UTC),
+            )
+            assert feed.symbols == ("NIFTY", "BANKNIFTY")
+            assert isinstance(feed.symbols, tuple)
+            assert feed.interval == "1minute"
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Chronological single-symbol replay
