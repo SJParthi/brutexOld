@@ -57,6 +57,7 @@ import contextlib
 import os
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1545,9 +1546,9 @@ def _resolve_dhan_fetch_intervals(interval: str) -> list[str]:
 def _synthetic_index_instrument(spec: Any) -> Any:
     """Build a placeholder spot index ``Instrument`` from a brute-force spec.
 
-    The dry-run :class:`SyntheticDhanAdapter` ignores the symbol when
+    The dry-run :class:`_DryRunGrowwSpotAdapter` ignores the symbol when
     generating bars, so the ``symbol_name`` is the index's own name — a
-    real ``InstrumentStore`` (with numeric Dhan SECURITY_IDs) is not required
+    real ``InstrumentStore`` (with numeric vendor SECURITY_IDs) is not required
     for an offline ``fetch --dry-run`` (DEC-VENDOR-PIVOT-001).
     """
     from decimal import Decimal
@@ -1603,32 +1604,92 @@ def _resolve_brute_force_instruments(  # pragma: no cover — opens DuckDB store
     return resolved
 
 
-def _build_live_dhan_spot(  # pragma: no cover — live Dhan token + transport + network
-    lake_root: Path, instruments: list[Any], catalog: Any = None
+def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK + network
+    lake_root: Path, catalog: Any = None
 ) -> tuple[Any, Any]:
-    """Wire the real Dhan client + persisting Parquet sink → ``(adapter, sink)``.
+    """Wire the real Groww client + persisting Parquet sink → ``(adapter, sink)``.
 
-    Mirrors :func:`brutex.dashboard.pull_controller._build_live_pull_adapter`
-    (CLAUDE.md §11 COMMON): a token-authenticated ``DhanClient`` over the real
-    ``urllib`` transport, a ``DhanMarketAdapter`` carrying the resolved
-    instruments (its O(1) index must contain every symbol it fetches), and a
+    PR-J2 vendor cutover (DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009 §5): the live
+    spot pull now runs on Groww. Resolves the TOTP credentials (env-first,
+    file-fallback), builds a live SDK-backed
+    :class:`~brutex.adapters.groww.client.GrowwClient` via the
+    :func:`~brutex.adapters.groww.live.build_live_client` composition seam, loads
+    the Groww instrument master into the O(1)
+    :class:`~brutex.adapters.groww.instruments.InstrumentIndex` (the adapter
+    resolves every fetched symbol through it), and writes through a
     ``ParquetBarSink`` over *lake_root*.
+
+    Unlike the retired Dhan builder there is no ``transport`` to inject — Groww
+    talks through its SDK client, not a urllib transport — and no preset
+    instrument list: the adapter carries the whole master index and resolves
+    each fetched symbol in O(1).
     """
-    from brutex.adapters.dhan.adapter import DhanMarketAdapter
-    from brutex.adapters.dhan.auth import resolve_dhan_credentials
-    from brutex.adapters.dhan.client import DhanClient, default_dhan_transport
+    from brutex.adapters.groww.adapter import GrowwMarketAdapter
+    from brutex.adapters.groww.auth import GrowwCredentials
+    from brutex.adapters.groww.instrument_loader import load_index, urllib_http_get
+    from brutex.adapters.groww.live import build_live_client
+    from brutex.config.credentials import resolve_groww_file_credentials
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
 
-    creds = resolve_dhan_credentials()
-    client = DhanClient(
-        access_token=creds.access_token,
-        client_id=creds.client_id,
-        transport=default_dhan_transport(),
-    )
-    adapter = DhanMarketAdapter(client=client, instruments=tuple(instruments))
+    file_creds = resolve_groww_file_credentials()
+    creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
+    client = build_live_client(creds)
+    index = load_index(urllib_http_get)
+    adapter = GrowwMarketAdapter(client=client, index=index)
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root), catalog=catalog)
     return adapter, sink
+
+
+@dataclass(frozen=True, slots=True)
+class _DryRunGrowwSpotAdapter:
+    """Offline dry-run spot adapter for ``brutex fetch --dry-run`` on Groww.
+
+    PR-J2 has no Groww synthetic adapter yet (that lands in a later K PR), so —
+    to keep ``--dry-run`` a real, no-network proof that the fetch → session-filter
+    → sink pipeline works — this minimal deterministic stand-in returns valid
+    in-session :class:`~brutex.data.models.CandleBar` rows from the vendor-neutral
+    pure :func:`~brutex.adapters.dhan.synthetic.synthetic_spot_bars` generator
+    (a pure bar builder, not the Dhan *adapter*). It satisfies the
+    :class:`~brutex.adapters.protocol.MarketAdapter` shape the Groww spot spine
+    drives, with NO client, NO credentials and NO network — so it is fully
+    deterministic and unit-testable.
+    """
+
+    bars_per_window: int = 5
+
+    @property
+    def capabilities(self) -> Any:
+        """Groww spot capabilities (so the spine plans the dry-run as it would live)."""
+        from brutex.adapters.groww.adapter import GROWW_CAPABILITIES
+
+        return GROWW_CAPABILITIES
+
+    def list_instruments(self, *, cursor: str | None = None) -> Any:
+        """Return an empty single page — the spine fans out over an explicit list."""
+        from brutex.adapters.protocol import single_instrument_page
+
+        return single_instrument_page((), cursor)
+
+    def list_derivatives(self, *, underlying_symbol: str, exchange: Any) -> Any:
+        """Yield nothing — Track-1 spot is derivative-free (CLAUDE.md §3)."""
+        del underlying_symbol, exchange  # spot scope — intentionally no contracts
+        return iter(())
+
+    def fetch_ohlcv(
+        self,
+        *,
+        symbol: str,
+        exchange: Any,
+        interval: str,
+        start: Any,
+        end: Any,
+    ) -> Any:
+        """Return *bars_per_window* deterministic in-session bars for *start*'s day."""
+        from brutex.adapters.dhan.synthetic import synthetic_spot_bars
+
+        del symbol, exchange, interval, end  # deterministic offline stand-in
+        return synthetic_spot_bars(start, count=self.bars_per_window)
 
 
 def _run_instrument_master_load(  # pragma: no cover — opens DuckDB store + live network
@@ -1662,10 +1723,10 @@ def _arm_retry_storm_guard(
     instruments: Sequence[Any],
     intervals: Sequence[str],
     stack: contextlib.ExitStack,
-) -> Callable[[str, int, bool, bool], None] | None:
+) -> Callable[[str, int, bool], None] | None:
     """Build + arm the retry-storm give-up guard for one pull (DEC-RATE-STORM-WATCHDOG-001).
 
-    Returns a ``run_ingest`` ``ProgressHook`` ``(label, bars, failed, gap)`` that feeds
+    Returns a Groww ``run_ingest`` ``ProgressHook`` ``(label, bars, failed)`` that feeds
     every window outcome into a :class:`~brutex.orchestrator.watchdog.RetryStormWatchdog`
     (a terminal window-failure gives up + stamps a hash-chained ``RETRY_GIVE_UP``
     audit row; a symbol reaching 100%% window-failure stamps ``SYMBOL_WINDOW_FAILURE``
@@ -1693,7 +1754,16 @@ def _arm_retry_storm_guard(
         f"continuous failure; audit → {audit_path}",
         file=sys.stderr,
     )
-    return watchdog.progress_hook()
+    # The watchdog hook is the shared 4-arg ``(label, bars, failed, gap)`` shape;
+    # Groww's ``ProgressHook`` is 3-arg (no known-gap branch — the documented
+    # divergence), so adapt to it with ``gap`` pinned False (Groww never emits a gap).
+    watchdog_hook = watchdog.progress_hook()
+
+    def _groww_progress(label: str, bars: int, failed: bool) -> None:
+        """Feed a Groww window outcome into the shared watchdog (gap is always False)."""
+        watchdog_hook(label, bars, failed, False)
+
+    return _groww_progress
 
 
 def cmd_fetch(
@@ -1716,13 +1786,14 @@ def cmd_fetch(
 ) -> int:
     """Fetch candles for the 3 brute-force indices into the lake (§13.9 step 3).
 
-    Drives the Dhan spot spine (:func:`~brutex.adapters.dhan.run_ingest.run_dhan_spot_ingest`):
-    Dhan fetches only ``1minute`` + ``1day`` and the 19 intraday timeframes are
-    resampled from the 1-minute base (DEC-DHAN-1M-ONLY-001), so ``--interval all``
-    pulls the two base timeframes. ``--dry-run`` uses
-    :class:`~brutex.adapters.dhan.synthetic_adapter.SyntheticDhanAdapter` so the
-    full fetch → session-filter → sink pipeline runs offline (no Dhan creds);
-    the live path resolves the brute-force index ``Instrument``s from the store.
+    Drives the Groww spot spine
+    (:func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest`): the vendor
+    fetches only ``1minute`` + ``1day`` and the 19 intraday timeframes are
+    resampled from the 1-minute base (1m-only ingest), so ``--interval all``
+    pulls the two base timeframes. ``--dry-run`` uses an in-CLI deterministic
+    spot adapter so the full fetch → session-filter → sink pipeline runs offline
+    (no creds); the live path resolves the brute-force index ``Instrument``s from
+    the store and builds a :class:`~brutex.adapters.groww.adapter.GrowwMarketAdapter`.
     ``--universe`` first ingests the instrument master into the lake (the LAKE
     surface authorised by DEC-P0-063) BEFORE the index candle pull — the turnkey
     "pull everything" command. ``--instruments`` loads ONLY the keyless public
@@ -1769,8 +1840,7 @@ def cmd_fetch(
         print(f"[brutex] lake: {resolved_instruments}")
         return EXIT_OK
 
-    from brutex.adapters.dhan.run_ingest import run_dhan_spot_ingest_with_retry
-    from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
+    from brutex.adapters.groww.run_ingest import run_groww_spot_ingest_with_retry
     from brutex.dashboard.pull_controller import DHAN_HISTORY_FLOOR
     from brutex.data.catalog import Catalog
     from brutex.data.parquet_writer import ParquetWriter
@@ -1860,7 +1930,7 @@ def cmd_fetch(
     ):
         if dry_run:
             fetch_instruments = [_synthetic_index_instrument(spec) for spec in BRUTE_FORCE_INDICES]
-            adapter = SyntheticDhanAdapter(bars_per_window=rows_per_chunk)
+            adapter = _DryRunGrowwSpotAdapter(bars_per_window=rows_per_chunk)
             sink = (
                 NullBarSink()
                 if inspect
@@ -1868,15 +1938,42 @@ def cmd_fetch(
             )
             print("[brutex] fetch --dry-run → synthetic candles", file=sys.stderr)
         else:
+            # Groww auth is TOTP (no Dhan-style 24h JWT + RenewToken pre-flight): a
+            # missing-creds resolve is the only up-front gate (DEC-DHAN-GROWW-REMIGRATE-001,
+            # PR-J2). Refuse loudly BEFORE burning a paced pull when creds are absent;
+            # there is no Groww token-liveness probe to invent (Golden Rule #1).
+            from brutex.config.credentials import (
+                CredentialsError,
+                groww_credentials_present,
+            )
+
+            if not groww_credentials_present():
+                print(
+                    "[brutex] no Groww credentials — set them via the dashboard Groww "
+                    "Credentials page, or export BRUTEX_GROWW_API_KEY / "
+                    "BRUTEX_GROWW_TOTP_SECRET, then re-run `brutex fetch`.",
+                    file=sys.stderr,
+                )
+                return EXIT_USER_ERROR
             fetch_instruments = _resolve_brute_force_instruments(resolved)
-            adapter, sink = _build_live_dhan_spot(resolved, fetch_instruments, catalog=cat)
+            try:
+                adapter, sink = _build_live_groww_spot(resolved, catalog=cat)
+            except CredentialsError as exc:  # pragma: no cover — race: creds removed mid-run
+                print(f"[brutex] {exc}", file=sys.stderr)
+                return EXIT_USER_ERROR
             if inspect:
                 sink = NullBarSink()
-            # Adaptive [3..5] r/s throttle for the live pull (DEC-DHAN-ADAPTIVE-RPS-001).
+            # Token-bucket pacing for the live pull. Groww's backtesting r/s is
+            # UNVERIFIED (constants.GROWW_RATE_LIMIT_RPS_UNVERIFIED), so we feed that
+            # rate as the controller's CEILING into the existing adaptive token-bucket
+            # MECHANISM rather than hardcoding a verified rate (Golden Rule #1/#10).
+            # The controller still lives under dhan/ in PR-J2 (dhan stays importable);
+            # J4/cleanup relocates+renames it to a vendor-neutral home.
             from brutex.adapters.dhan.rate_control import DhanRateController
+            from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_RPS_UNVERIFIED
             from brutex.notifications.sweep_alerts import SweepAlerter
 
-            _rate = DhanRateController()
+            _rate = DhanRateController(ceiling_rps=GROWW_RATE_LIMIT_RPS_UNVERIFIED)
             # AUTOMATIC rate.breach alert (DEC-TELEGRAM-WIRE-001): wrap the
             # controller's own on_rate_limit so a sustained 429 storm also fires a
             # best-effort Telegram push (coalesced by the notifier's 60 s dedupe).
@@ -1884,29 +1981,7 @@ def cmd_fetch(
             _alerter = SweepAlerter()
             pace, on_success = _rate.pace, _rate.on_success
             on_rate_limit = _alerter.rate_breach_callback(_rate)
-            print("[brutex] fetch (live Dhan)", file=sys.stderr)
-            # Pre-flight gate (DEC-TOKEN-PREFLIGHT-001): probe the token ONCE before
-            # burning a paced ≤5 r/s pull. A DEAD token can NEVER land a bar, so
-            # REFUSE up front with the loud auth_expired verdict instead of firing
-            # ~800 doomed 401s and grinding through the whole universe. Paced through
-            # the same bucket so the probe is itself ≤5 r/s. # pragma: no cover —
-            # live token + RenewToken network (the classification is 100%-covered in
-            # token_preflight's pure tests).
-            from brutex.adapters.dhan.token_preflight import (  # pragma: no cover — live
-                preflight_pull_verdict,
-                probe_token_data_live,
-            )
-
-            # DATA probe (DEC-TOKEN-PREFLIGHT-DATAPROBE-001): a tiny charts/intraday
-            # call over the first fetched instrument, dead ONLY on a real auth
-            # failure — so a transient hiccup (or a RenewToken-ineligible token that
-            # is valid for data) no longer false-aborts the pull.
-            _refuse = preflight_pull_verdict(  # pragma: no cover — live
-                probe_token_data_live(adapter, fetch_instruments[0])
-            )
-            if _refuse is not None:  # pragma: no cover — live
-                print(f"[brutex] {_refuse.headline} {_refuse.action}", file=sys.stderr)
-                return EXIT_INTERNAL_ERROR
+            print("[brutex] fetch (live Groww)", file=sys.stderr)
 
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001, Stage b3 — R7): the CLI
         # threads the SAME ledger the dashboard does so it is the SOLE skip
@@ -1940,7 +2015,7 @@ def cmd_fetch(
             )
         # `--retry-failed` (the manual trigger) ALWAYS retries on demand; otherwise
         # the post-pull auto-retry is on unless `--no-auto-retry` was passed. Both
-        # routes drive the SAME run_dhan_spot_ingest_with_retry → retry_failed_windows
+        # routes drive the SAME run_groww_spot_ingest_with_retry → retry_failed_windows
         # engine (CLAUDE.md §11 COMMON) — no duplicated round loop.
         do_retry = retry_failed or auto_retry
 
@@ -1959,7 +2034,7 @@ def cmd_fetch(
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
-            return run_dhan_spot_ingest_with_retry(
+            return run_groww_spot_ingest_with_retry(
                 adapter,
                 sink,
                 instruments=fetch_instruments,
@@ -1981,7 +2056,10 @@ def cmd_fetch(
             # rounds — each a full pass over the SHARED window ledger (re-fetches
             # ONLY the still-failed windows; rate-safe + idempotent) — reusing the
             # SAME retry engine via run_until_clean, until clean / token dead / outer
-            # budget spent. Bounded round count (never an O(1)-total claim).
+            # budget spent. Bounded round count (never an O(1)-total claim). The
+            # driver itself is vendor-neutral (pure 4-way decision + an injected
+            # round_runner); it still lives under dhan/ in PR-J2 (dhan stays
+            # importable) — J4/cleanup relocates it to a vendor-neutral home.
             from brutex.adapters.dhan.until_clean import (
                 DEFAULT_MAX_ROUNDS,
                 UntilCleanRound,
@@ -1991,13 +2069,17 @@ def cmd_fetch(
             fetch_passes: list[Any] = []
 
             def _round_runner() -> UntilCleanRound:
-                """One until-clean round = one full fetch pass; recorded for the summary."""
+                """One until-clean round = one full fetch pass; recorded for the summary.
+
+                Groww's report has no ``auth_cause`` string (no fail-fast latch — the
+                documented divergence; it derives ``auth_aborted`` from the quarantined
+                failures), so the round leaves ``auth_cause`` at its ``None`` default.
+                """
                 res = _one_fetch_pass(True)
                 fetch_passes.append(res)
                 return UntilCleanRound(
                     still_failed_windows=res.report.still_failed_windows,
                     auth_aborted=res.report.auth_aborted,
-                    auth_cause=res.report.auth_cause,
                 )
 
             rounds_budget = (

@@ -166,8 +166,9 @@ class DhanRateController:
         quota_tracker: DailyQuotaTracker | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        ceiling_rps: float = CEILING_RPS,
     ) -> None:
-        """Build a controller starting at the ceiling rate (5 r/s).
+        """Build a controller starting at the ceiling rate (default 5 r/s).
 
         Parameters
         ----------
@@ -177,11 +178,21 @@ class DhanRateController:
         clock, sleep
             Injected for deterministic testing (default the real monotonic clock
             + sleep). Threaded into the reused token bucket.
+        ceiling_rps
+            The start rate AND the upshift cap (default :data:`CEILING_RPS`, the
+            Dhan verified 5 r/s). Injected so the SAME adaptive mechanism can pace
+            a different vendor at a different ceiling WITHOUT hardcoding a verified
+            rate here (the Groww vendor cutover, DEC-DHAN-GROWW-REMIGRATE-001 PR-J2,
+            feeds the UNVERIFIED Groww backtesting rate). The 429/timeout ladders
+            still step DOWN to their existing soft/deep floors — only the start +
+            upshift cap moves. J4/cleanup relocates+renames this module to a
+            vendor-neutral home.
         """
         self._clock = clock
         self._sleep = sleep
         self._quota = quota_tracker
-        self._rps: float = CEILING_RPS
+        self._ceiling: float = ceiling_rps
+        self._rps: float = ceiling_rps
         self._hits: deque[float] = deque()
         #: Server-stress stalls (timeout / transport / 5xx) inside the rolling
         #: STEP_DOWN_WINDOW — the gentle adaptive timeout ladder's evidence
@@ -388,7 +399,7 @@ class DhanRateController:
             # below the floor (where no further step clears the deque) a real
             # >= STEP_DOWN_HITS drip is what holds recovery. O(1): len() on a deque.
             if (
-                self._rps < CEILING_RPS
+                self._rps < self._ceiling
                 and len(self._hits) < STEP_DOWN_HITS
                 and len(self._timeouts) < STEP_DOWN_TIMEOUT_HITS
                 and now - self._last_step >= STEP_UP_WINDOW
@@ -398,7 +409,7 @@ class DhanRateController:
                 self._bucket.set_rate(self._rps)
                 self._last_step = now
                 _LOG.info(
-                    "rate.stepup", from_rps=old_rps, to_rps=self._rps, ceiling_rps=CEILING_RPS
+                    "rate.stepup", from_rps=old_rps, to_rps=self._rps, ceiling_rps=self._ceiling
                 )
 
     def snapshot(self) -> dict[str, object]:
