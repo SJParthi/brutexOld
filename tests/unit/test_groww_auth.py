@@ -10,10 +10,9 @@ guard (pyotp import path is covered via the ImportError branch).
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from brutex.adapters.groww.auth import (
@@ -125,9 +124,12 @@ class TestReadCachedToken:
     def test_wrong_perms_logs_warning_but_still_returns_token(self, tmp_path: Path) -> None:
         p = tmp_path / "token.json"
         p.write_text(json.dumps({"access_token": "tok"}))
-        os.chmod(p, 0o644)  # wrong perms  # nosec B103  # lgtm[py/overly-permissive-file]
-        result = _read_cached_token(p)
-        # Should still return the token (warns but doesn't fail)
+        # Simulate wrong permissions via mock (avoids os.chmod with insecure mode).
+        # 0o100644 = regular file rw-r--r-- — deliberately not 0o600.
+        fake_stat = MagicMock()
+        fake_stat.st_mode = 0o100644
+        with patch.object(Path, "stat", return_value=fake_stat):
+            result = _read_cached_token(p)
         assert result == "tok"
 
 

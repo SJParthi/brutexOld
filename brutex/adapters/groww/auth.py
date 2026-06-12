@@ -61,12 +61,12 @@ REQUIRED_FILE_MODE: int = 0o600
 PostTransport = Callable[[str, dict[str, str], dict[str, Any]], tuple[int, bytes]]
 
 
-def _default_post_transport(
+def _default_post_transport(  # pragma: no cover
     url: str,
     headers: dict[str, str],
     body: dict[str, Any],
-) -> tuple[int, bytes]:  # pragma: no cover — real network, tested via smoke only
-    """Real urllib-based POST transport."""
+) -> tuple[int, bytes]:
+    """Real urllib-based POST transport. Real network; tested via smoke tests only."""
     import urllib.request
 
     data = json.dumps(body).encode()

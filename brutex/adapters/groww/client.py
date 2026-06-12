@@ -66,12 +66,12 @@ _MAX_AUTH_RETRIES: int = 2
 GetTransport = Callable[[str, dict[str, str], int], tuple[int, bytes]]
 
 
-def urllib_transport(
+def urllib_transport(  # pragma: no cover
     url: str,
     headers: dict[str, str],
     timeout: int,
-) -> tuple[int, bytes]:  # pragma: no cover — real network, tested via smoke only
-    """Real urllib-based GET transport."""
+) -> tuple[int, bytes]:
+    """Real urllib-based GET transport. Real network; tested via smoke tests only."""
     import urllib.request
 
     req = urllib.request.Request(url, headers=headers, method="GET")  # noqa: S310
