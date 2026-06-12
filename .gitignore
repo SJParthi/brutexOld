@@ -113,3 +113,6 @@ Cargo.lock
 
 # Claude Code transient state — isolated background-agent worktrees (auto-cleaned)
 .claude/worktrees/
+
+# Personal Claude Code local settings (not shared)
+.claude/settings.local.json
