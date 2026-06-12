@@ -180,7 +180,8 @@ def test_with_paced_client_three_branches() -> None:
         def get_contracts(self, **_kwargs: object) -> Mapping[str, object]:
             return {}
 
-    def _pace() -> None: ...
+    def _pace() -> None:
+        pass
 
     index = InstrumentIndex(by_groww_symbol={}, by_exchange_symbol={}, universe=())
     client = GrowwClient(sdk=_FakeSDK())  # type: ignore[arg-type]
