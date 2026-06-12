@@ -48,7 +48,7 @@ def urllib_http_get(url: str) -> str:  # pragma: no cover — real network shim
     import urllib.request
 
     _check_url(url)
-    with urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT) as resp:  # noqa: S310 — host allowlisted by _check_url
+    with urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT) as resp:  # nosec B310 — https + host allowlisted by _check_url  # noqa: S310
         return str(resp.read().decode("utf-8"))
 
 
