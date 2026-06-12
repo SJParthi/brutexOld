@@ -41,7 +41,15 @@ permissions:
   issues: write
 
 concurrency:
-  group: mutation-${{ github.ref }}
+  # DEC-MUTATION-RUNTIME-002: the group is keyed by EVENT as well as ref —
+  # measured 2026-06-12 from the run history: 24 of the 30 most recent runs
+  # were CANCELLED by this group (every push-to-main superseded the in-flight
+  # run, including the WEEKLY scheduled pass, e.g. run 27118349051 killed
+  # 25 min in), so on busy days the mutation gate never finished at all.
+  # Push runs still supersede each other (freshness probes); the scheduled
+  # weekly pass and manual dispatches get their own groups and always run to
+  # completion.
+  group: mutation-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -222,10 +230,18 @@ jobs:
         with:
           tool: cargo-mutants
       - name: Run cargo-mutants
+        # DEC-MUTATION-RUNTIME-002: `--jobs 2` — the serial pass was MEASURED
+        # hitting the full 120-min job timeout (run 27125614548, 2026-06-08:
+        # the step ran exactly 08:34:48→10:34:48 and was killed). Two parallel
+        # mutant builds on the 4-vCPU shared runner roughly halve wall time
+        # (cargo-mutants' own guidance caps -j low for disk/IO contention).
+        # Completion proof = the next SCHEDULED run finishing green inside the
+        # budget; if it still overruns, the next ratchet rides its own DEC-ID.
         run: |
           cargo mutants \
             --test-tool cargo \
             --no-shuffle \
+            --jobs 2 \
             --timeout 300 \
             --output cargo-mutants.out \
             -- \
