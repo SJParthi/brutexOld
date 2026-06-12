@@ -964,3 +964,107 @@ def test_stage4_pbo_uses_default_sixteen_splits() -> None:
     )
     assert result.pbo_probability is not None
     assert result.pbo_probability == pbo_probability(matrix, n_splits=16).pbo
+
+
+# ── DEC-MUTATION-GATE-COMPUTE-001: mutation-survivor kill pins ──────
+
+
+def test_compute_rows_stage4_defaults_are_none() -> None:
+    """Both Stage-4 fields default to exactly ``None`` on every compute row.
+
+    Kills the dataclass default-literal mutants (``None`` → ``""``) on
+    ``deflated_sharpe_ratio`` / ``pbo_probability`` — named as the pinned
+    protection in the field-line pragma justification. Checks the
+    zero-trade row AND a traded row (both construction paths omit the
+    two Stage-4 kwargs).
+    """
+    empty = compute_metrics([], _curve([1_000_000]), total_bars=1)
+    traded = compute_metrics([_trade(10)], _curve([1_000_000, 1_000_010]), total_bars=10)
+    for row in (empty, traded):
+        assert row.deflated_sharpe_ratio is None
+        assert row.pbo_probability is None
+
+
+def test_avg_mfe_mae_single_trade_exact() -> None:
+    """With one trade the MFE/MAE averages equal the trade's values exactly.
+
+    Kills the accumulator-initialiser mutants (``sum_mfe = 0`` → ``1``,
+    ``sum_mae = 0`` → ``1``): at ``n == 1`` the floor division cannot
+    absorb an off-by-one in the sum.
+    """
+    m = compute_metrics(
+        [_trade(10, mfe=7, mae=3)],
+        _curve([1_000_000, 1_000_010]),
+        total_bars=10,
+    )
+    assert m.avg_mfe_paisa == 7
+    assert m.avg_mae_paisa == 3
+
+
+def test_largest_losing_trade_zero_when_no_losers() -> None:
+    """An all-winner result reports ``largest_losing_trade_paisa == 0``.
+
+    Kills the ``largest_loss = 0`` → ``1`` initialiser mutant: with no
+    losers the initial value IS the reported value.
+    """
+    m = compute_metrics(
+        [_trade(100), _trade(50)],
+        _curve([1_000_000, 1_000_100, 1_000_150]),
+        total_bars=10,
+    )
+    assert m.largest_losing_trade_paisa == 0
+
+
+def test_cagr_terminal_equity_one_paisa_not_ruin() -> None:
+    """``end_equity == 1`` (one paisa left) is NOT the ruin branch.
+
+    Kills the ruin-boundary comparison mutants (``< 1`` → ``<= 1`` /
+    ``< 2``): under either flip this row would clamp to exactly -100.0,
+    but the real else-branch computes the annualised figure from
+    ``growth == 1 / 1_000_000``.
+    """
+    m = compute_metrics(
+        [_trade(-999_999)],
+        _curve([1_000_000, 1]),
+        total_bars=10,
+    )
+    growth = 1 / 1_000_000
+    assert m.cagr_pct == 100.0 * (growth - 1.0)
+    assert m.cagr_pct != -100.0
+
+
+def test_cagr_terminal_equity_zero_is_ruin() -> None:
+    """``end_equity == 0`` takes the ruin branch and clamps to exactly -100.0."""
+    m = compute_metrics(
+        [_trade(-1_000_000)],
+        _curve([1_000_000, 0]),
+        total_bars=10,
+    )
+    assert m.cagr_pct == -100.0
+
+
+def test_sortino_exact_value_excludes_scratch_and_positive() -> None:
+    """Sortino downside sum is byte-exact over ONLY the negative returns.
+
+    Kills the downside-filter threshold mutants (``0.0`` → a positive
+    threshold would admit the +0.02 / +0.03 returns; named as the pinned
+    protection in the filter-line pragma justification) and pins that a
+    scratch trade (pnl == 0) contributes nothing. The expectation
+    replicates the implementation's expressions exactly (same Welford
+    mean, same single-element RMS), so the assertion is ``==``, not
+    ``approx``.
+    """
+    trades = [_trade(20_000), _trade(-10_000), _trade(0), _trade(30_000)]
+    m = compute_metrics(trades, _curve([1_000_000]), total_bars=10)
+    rets = [20_000 / 1_000_000, -10_000 / 1_000_000, 0 / 1_000_000, 30_000 / 1_000_000]
+    mom = _accumulate_moments(rets)
+    neg = -10_000 / 1_000_000
+    downside_dev = math.sqrt((neg * neg) / 4)
+    assert m.sortino_ratio == mom.mean / downside_dev
+
+
+def test_result_metrics_uses_slots() -> None:
+    """``ResultMetrics`` is ``slots=True`` — kills the ``slots`` flip."""
+    m = compute_metrics([], _curve([1_000_000]), total_bars=1)
+    assert not hasattr(m, "__dict__")
+    assert hasattr(ResultMetrics, "__slots__")

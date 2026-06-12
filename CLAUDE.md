@@ -19,7 +19,8 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-06-12 (DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001,
-MIGRATION.md #667 — §2 Rule 4's run-identity citation refreshed
+MIGRATION.md #669 — renumbered from #667 by PR #629's duplicate-repair;
+§2 Rule 4's run-identity citation refreshed
 `TRACK1_BACKTEST_SPEC.md:654` → `:743`; spec growth had moved the
 blake3 formula block and the stale line pointed mid-section). Earlier:
 2026-06-10 (DEC-AUTOMERGE-CLEAN-STRICT-001, MIGRATION.md
