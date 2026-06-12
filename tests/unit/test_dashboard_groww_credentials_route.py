@@ -194,12 +194,15 @@ def test_test_route_other_groww_error_502(
 # ── template loader (whitebox: both cache branches + key UX strings) ─────────
 
 
-def test_groww_template_loader_caches_both_branches() -> None:
+def test_groww_template_loader_caches_both_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     """The cached template loader covers the load branch AND the cached branch."""
     app_mod = importlib.import_module("brutex.dashboard.app")
 
     # Force the cold (cache-is-None) branch, then the warm (cached) branch.
-    app_mod._GROWW_CREDENTIALS_TEMPLATE_CACHE = None
+    # monkeypatch.setattr (a method, not builtin setattr) keeps ruff B010 happy
+    # AND pyright happy with the importlib-resolved ModuleType, while staying
+    # CodeQL import-mix-clean (auto-restored after the test).
+    monkeypatch.setattr(app_mod, "_GROWW_CREDENTIALS_TEMPLATE_CACHE", None)
     cold = app_mod._render_groww_credentials_html()
     warm = app_mod._render_groww_credentials_html()
     assert cold == warm
