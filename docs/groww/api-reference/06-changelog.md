@@ -1,177 +1,106 @@
----
-source_url: https://groww.in/trade-api/docs/python-sdk/changelog
-fetched_at: 2026-05-26
-api: Groww Trading API Python SDK
-section: Changelog
-latest_version: 1.5.0
----
+# 06 — Changelog · Groww Trading API (Python SDK)
 
-# Changelog
+> **Source:** https://groww.in/trade-api/docs/python-sdk/changelog
+> **Verified:** 12 June 2026 · **Latest version shown:** `1.5.0` (3 Dec 2025)
 
 Track all notable changes, improvements, and new features added to the Groww Python SDK.
 
-# Releases
-
 ## [1.5.0] — 3rd December, 2025
-
-### Added
-
+**Added**
 - Commodity trading support on MCX exchange
 
----
-
 ## [1.4.0] — 2nd December, 2025
-
-### Added
-
-- Support for retrieving user profile information via the `get_user_profile` API.
-
----
+**Added**
+- Support for retrieving user profile information via the `get_user_profile` API
 
 ## [1.3.0] — 24th November, 2025
-
-### Added
-
+**Added**
 - Option Chain retrieval API
 
----
-
 ## [1.2.0] — 29th October, 2025
-
-### Added
-
+**Added**
 - Smart Orders support (GTT, OCO) with client and examples
 
-### Documentation
-
+**Documentation**
 - Portfolio, annexures and index updates: add MCX-not-supported note; include `realised_pnl` in positions payloads and schemas
 
----
-
 ## [1.1.0] — 8th October, 2025
-
-### Fixed
-
+**Fixed**
 - NATS ping handling stability improvements
 
----
-
 ## [1.0.0] — 3rd October, 2025
-
-### Added
-
+**Added**
 - Historical data retrieval APIs
 
-### Documentation
-
+**Documentation**
 - Backtesting documentation: comprehensive guide and payload updates
 
----
-
 ## [0.0.10] — 22nd September, 2025
-
-### Fixed
-
+**Fixed**
 - Standardized header builder; fix Authorization formatting
 
-### Documentation
-
+**Documentation**
 - New authentication documentation
 
----
-
 ## [0.0.9] — 4th September, 2025
-
-### Added
-
+**Added**
 - Checksum-based token generation for authentication
 
----
-
 ## [0.0.8] — 11th June, 2025
-
-### Added
-
+**Added**
 - TOTP (Time-based One-Time Password) support
 
----
-
 ## [0.0.7] — 21st May, 2025
-
-### Fixed
-
+**Fixed**
 - Feed issue with parallel thread execution
 - Feed live-data unsubscribe response handling
 - Protobuf response parsing
 
-### Improved
-
+**Improved**
 - Feed changes and historical data interval updates
 
-### Documentation
-
+**Documentation**
 - Changelog and docs updates
 
----
-
 ## [0.0.5] — 21st April, 2025
-
-### Changed
-
+**Changed**
 - Packaging and licensing updates; project cleanup
 
----
-
 ## [0.0.4] — 25th March, 2025
-
-### Added
-
+**Added**
 - Exception handling in feed
 
----
-
 ## [0.0.3] — 25th March, 2025
-
-### Added
-
+**Added**
 - Multiple instrument support in feed with tests
 - Order margin API
 - Bulk LTP support
 - Instruments as DataFrame helper
 - Segment parameter in `get_position_for_trading_symbol`
 
-### Fixed
-
+**Fixed**
 - Order detail retrieval
 - Base SDK NATS testing and fixes
 
-### Improved
-
+**Improved**
 - Default page value set to zero
 - Renamed `get_latest_price_data` to `get_quote`
 - Changed `GrowwClient` to `GrowwAPI`
 - Request/response structure adjustments
 
-### Documentation
-
+**Documentation**
 - NATS Order/Positions feed documentation
 - Documentation structure improvements and updates
 
----
-
 ## [0.0.1] — 27th February, 2025
+**Initial Release** — the foundational release of the Groww Python SDK with core trading capabilities.
 
-### Initial Release
-
-The foundational release of the Groww Python SDK with core trading capabilities.
-
-#### Core Features
-
-- **Order Management**: Complete order lifecycle management
+**Core Features**
+- **Order Management:** Complete order lifecycle management
   - Place, modify, and cancel orders across Equity & F&O segments
   - Support for multiple order types: Market, Limit, Stop Loss, and Stop Loss Market
   - Order detail retrieval and tracking
-- **Portfolio Management**:
+- **Portfolio Management:**
   - Fetch holdings with detailed quantity breakdowns
   - Access positions for both CASH and F&O segments
   - Real-time position tracking
@@ -180,17 +109,21 @@ The foundational release of the Groww Python SDK with core trading capabilities.
   - Order book depth (market depth) updates
   - Order and position update feeds
   - Custom callback support for event-driven applications
-- **Instrument Management**:
+- **Instrument Management:**
   - Download and search instrument master data
   - Support for Equity, F&O, Currency, and Commodity segments
   - ETF instrument type support
-- **Historical Data**:
+- **Historical Data:**
   - Historical candle data retrieval
   - Support for multiple timeframes
-- **Authentication & Security**:
+- **Authentication & Security:**
   - API Key based authentication
   - Secure token management
-- **Developer Experience**:
+- **Developer Experience:**
   - Comprehensive error handling with custom exception classes
   - Detailed documentation with code examples
   - Python 3.9+ compatibility
+
+---
+
+> **Naming history to watch for in old code:** `GrowwClient` → **`GrowwAPI`** (since 0.0.3); `get_latest_price_data` → **`get_quote`** (since 0.0.3).
