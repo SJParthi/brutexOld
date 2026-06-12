@@ -108,12 +108,18 @@ CITATION_PATTERNS = [
 ]
 
 
-def strip_code_spans(text: str) -> str:
-    """Remove fenced + inline code spans so example claims inside
-    backticks don't trip the scanner.
-    """
-    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
-    return re.sub(r"`[^`]*`", " ", text)
+_FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
+
+def strip_fenced_blocks(text: str) -> str:
+    """Remove fenced code blocks (which may span paragraphs) from *text*."""
+    return _FENCED_CODE_RE.sub(" ", text)
+
+
+def strip_inline_code(text: str) -> str:
+    """Remove inline code spans from *text* (single-backtick runs)."""
+    return _INLINE_CODE_RE.sub(" ", text)
 
 
 def split_into_paragraphs(text: str) -> list[str]:
@@ -129,25 +135,30 @@ def has_citation(paragraph: str) -> bool:
 def find_uncited_external_claims(text: str) -> list[str]:
     """Return paragraphs that mention external systems but lack a citation.
 
-    A paragraph is "uncited" if the STRIPPED version (code spans removed)
-    contains an EXTERNAL_CLAIM_KEYWORDS match AND the ORIGINAL version
-    contains no CITATION_PATTERNS match.
+    Fenced code blocks are removed FIRST, then the text is split into
+    paragraphs ONCE, and each paragraph is checked against itself:
+    keywords on the inline-code-stripped view, citations on the
+    paragraph as written. Splitting a single fence-free text is what
+    guarantees the keyword view and the citation view describe the SAME
+    paragraph (DEC-SCANNER-PARAGRAPH-ALIGN-001 — the previous
+    implementation split the original and the stripped text separately
+    and zipped BY INDEX; deleting a fenced block removed a whole
+    paragraph from the stripped list and shifted every later pairing,
+    so a keyword paragraph could be "checked" against an unrelated
+    original — proven live on PR #628, where the flagged paragraph was
+    a bare section header).
 
-    Citations are checked on the ORIGINAL text (not stripped) because
-    citation markers themselves are often inside backticks — e.g.,
-    ``per `CLAUDE.md §6` `` legitimately wraps the citation as inline
-    code, but the citation IS a citation regardless of its formatting.
-    Keywords are checked on the STRIPPED text so example claims inside
-    backticks (``the scanner looks for `groww` keyword``) don't trigger.
+    Citations inside INLINE backticks still count (``per `CLAUDE.md §6` ``
+    wraps the citation as code, but it IS a citation). Citations inside
+    FENCED blocks do NOT count — a quoted log or example cannot satisfy
+    the citation duty for prose claims; quote logs as inline code or cite
+    in prose. Keywords inside any code span never trigger.
     """
-    paragraphs_original = split_into_paragraphs(text)
-    paragraphs_stripped = split_into_paragraphs(strip_code_spans(text))
-    # Pair them by index (split_into_paragraphs is deterministic — both
-    # versions produce the same paragraph count + order).
     uncited: list[str] = []
-    for original, stripped in zip(paragraphs_original, paragraphs_stripped, strict=False):
-        if EXTERNAL_CLAIM_KEYWORDS.search(stripped) and not has_citation(original):
-            uncited.append(original[:200])
+    for paragraph in split_into_paragraphs(strip_fenced_blocks(text)):
+        keyword_view = strip_inline_code(paragraph)
+        if EXTERNAL_CLAIM_KEYWORDS.search(keyword_view) and not has_citation(paragraph):
+            uncited.append(paragraph[:200])
     return uncited
 
 
