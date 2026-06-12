@@ -50,6 +50,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from brutex.adapters.groww.auth import ENV_API_KEY as ENV_GROWW_API_KEY
+from brutex.adapters.groww.auth import ENV_TOTP_SECRET as ENV_GROWW_TOTP_SECRET
+
 #: Env var that overrides the credentials file location (path, not a secret).
 ENV_CREDENTIALS_FILE: Final[str] = "BRUTEX_CREDENTIALS_FILE"
 
@@ -62,8 +65,20 @@ ENV_CLIENT_ID: Final[str] = "BRUTEX_DHAN_CLIENT_ID"
 #: Permission bits that, if set, mean the file is group / world accessible.
 _INSECURE_MODE_BITS: Final[int] = 0o077
 
-#: JSON top-level section the credentials live under.
+#: JSON top-level section the Dhan credentials live under.
 _SECTION: Final[str] = "dhan"
+
+#: JSON top-level section the Groww credentials live under. Groww + Dhan
+#: sections coexist in ONE file (read-merge-write), so saving one vendor's
+#: credentials never drops the other's (DEC-DHAN-GROWW-REMIGRATE-001).
+_GROWW_SECTION: Final[str] = "groww"
+
+#: How to set Groww credentials, appended to "missing field" errors. Names the
+#: supported mechanisms; contains NO secret values.
+_GROWW_HOW_TO_SET: Final[str] = (
+    "use the dashboard Groww Credentials page, or export "
+    "BRUTEX_GROWW_API_KEY / BRUTEX_GROWW_TOTP_SECRET"
+)
 
 #: How to set credentials, appended to "missing field" errors. Names the
 #: three supported mechanisms; contains NO secret values.
@@ -161,6 +176,23 @@ def token_shape_problem(token: str) -> str | None:
 
 
 @dataclass(frozen=True, slots=True)
+class GrowwFileCredentials:
+    """An immutable pair of Groww TOTP credentials as stored on disk.
+
+    Attributes
+    ----------
+    api_key
+        The Groww TOTP api key (``BRUTEX_GROWW_API_KEY``).
+    totp_secret
+        The Groww TOTP shared secret (``BRUTEX_GROWW_TOTP_SECRET``), held only
+        to mint the 6-digit code.
+    """
+
+    api_key: str
+    totp_secret: str
+
+
+@dataclass(frozen=True, slots=True)
 class DhanFileCredentials:
     """An immutable pair of Dhan credentials as stored on disk.
 
@@ -198,6 +230,89 @@ def credentials_path(env: Mapping[str, str] | None = None) -> Path:
     return Path.home() / ".brutex" / "credentials.json"
 
 
+def _read_raw_sections(target: Path) -> dict[str, object]:
+    """Return the parsed top-level object of *target*, or ``{}`` when absent.
+
+    The READ half of the read-merge-write that lets the Dhan + Groww sections
+    coexist: saving one vendor's credentials reads the existing file first so the
+    OTHER vendor's section is preserved (it was previously clobbered by a
+    whole-file ``json.dumps`` — DEC-DHAN-GROWW-REMIGRATE-001). Mirrors the
+    security posture of :func:`load_dhan_credentials`: ``O_NOFOLLOW`` open +
+    insecure-permission refusal on the same fd (TOCTOU-safe). A corrupt /
+    wrong-shape existing file is refused rather than silently overwritten, so a
+    save can never destroy an unreadable-but-present file's contents.
+
+    Raises
+    ------
+    CredentialsError
+        If the file exists but is a symlink, group / world accessible, or
+        corrupt / not a JSON object.
+    """
+    try:
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise CredentialsError(
+            f"credentials file {target} could not be opened securely "
+            f"(is it a symlink?); recreate it via the dashboard Credentials page"
+        ) from exc
+
+    with os.fdopen(fd, encoding="utf-8") as handle:
+        mode = stat.S_IMODE(os.fstat(handle.fileno()).st_mode)
+        if mode & _INSECURE_MODE_BITS:
+            raise CredentialsError(
+                f"credentials file {target} has insecure permissions "
+                f"(mode {oct(mode)}); run `chmod 600 {target}`"
+            )
+        try:
+            raw = json.loads(handle.read())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CredentialsError(f"credentials file {target} is corrupt or unreadable") from exc
+
+    if not isinstance(raw, dict):
+        raise CredentialsError(f"credentials file {target} has an invalid shape")
+    return raw
+
+
+def _atomic_write(target: Path, payload: str) -> None:
+    """Atomically write *payload* to *target* at mode 0600 (parent dir 0700).
+
+    The WRITE half of the read-merge-write, shared by the Dhan + Groww saves. A
+    :func:`tempfile.NamedTemporaryFile` in the destination directory is
+    ``chmod``-ed 0600, then ``os.replace``-d over *target* — so the file never
+    exists world-readable, even briefly. On any failure the temp file is removed.
+    """
+    parent = target.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
+        mode="w", dir=parent, prefix=".credentials-", suffix=".tmp", delete=False
+    )
+    tmp_path = Path(tmp.name)
+    try:
+        tmp.write(payload)
+        tmp.flush()
+        tmp.close()
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, target)
+    except OSError:
+        tmp.close()
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _save_section(target: Path, section: str, values: dict[str, str]) -> None:
+    """Read-merge-write *values* into *section* of *target*, preserving others.
+
+    Reads the existing file (:func:`_read_raw_sections`), replaces only
+    *section*, and writes the whole object back atomically — so a Dhan save never
+    drops a stored Groww section and vice versa (DEC-DHAN-GROWW-REMIGRATE-001).
+    """
+    raw = _read_raw_sections(target)
+    raw[section] = values
+    _atomic_write(target, json.dumps(raw))
+
+
 def save_dhan_credentials(creds: DhanFileCredentials, *, path: Path | None = None) -> Path:
     """Atomically write *creds* to *path* at mode 0600 (parent dir 0700).
 
@@ -221,10 +336,12 @@ def save_dhan_credentials(creds: DhanFileCredentials, *, path: Path | None = Non
 
     Notes
     -----
-    The write is atomic: a :func:`tempfile.NamedTemporaryFile` is created
-    in the destination directory, ``chmod``-ed 0600, then ``os.replace``-d
-    over *path* — so the file never exists world-readable, even briefly.
-    On any failure the temp file is removed.
+    The write is a **read-merge-write** (:func:`_save_section`): the existing
+    file is read first so a stored Groww section is preserved, then only the
+    ``dhan`` section is replaced and the whole object written atomically — a
+    :func:`tempfile.NamedTemporaryFile` ``chmod``-ed 0600 then ``os.replace``-d
+    over *path*, so the file never exists world-readable. On any failure the
+    temp file is removed.
     """
     if not creds.access_token.strip():
         raise CredentialsError("access_token must not be blank")
@@ -238,28 +355,7 @@ def save_dhan_credentials(creds: DhanFileCredentials, *, path: Path | None = Non
     client_id = normalise_token(creds.client_id)
 
     target = credentials_path() if path is None else path
-    parent = target.parent
-    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-
-    payload = json.dumps({_SECTION: {"access_token": access_token, "client_id": client_id}})
-    # Atomic, never-world-readable write: NamedTemporaryFile in the SAME
-    # dir as the target (so os.replace is atomic), chmod 0600 before the
-    # rename, then os.replace. No predictable-name temp file and no
-    # world-readable window — bandit raises no finding here.
-    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
-        mode="w", dir=parent, prefix=".credentials-", suffix=".tmp", delete=False
-    )
-    tmp_path = Path(tmp.name)
-    try:
-        tmp.write(payload)
-        tmp.flush()
-        tmp.close()
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, target)
-    except OSError:
-        tmp.close()
-        tmp_path.unlink(missing_ok=True)
-        raise
+    _save_section(target, _SECTION, {"access_token": access_token, "client_id": client_id})
     return target
 
 
@@ -487,19 +583,241 @@ def clear_dhan_credentials(*, path: Path | None = None) -> bool:
     return True
 
 
+def save_groww_credentials(creds: GrowwFileCredentials, *, path: Path | None = None) -> Path:
+    """Atomically write Groww *creds* into the ``groww`` section (mode 0600).
+
+    A **read-merge-write** (:func:`_save_section`): the existing file is read
+    first so a stored ``dhan`` section is preserved, then only the ``groww``
+    section is replaced and the whole object written atomically — saving Groww
+    credentials never drops the Dhan section (DEC-DHAN-GROWW-REMIGRATE-001).
+
+    Parameters
+    ----------
+    creds
+        The credentials to persist. Both fields must be non-blank.
+    path
+        Destination file. Defaults to :func:`credentials_path`.
+
+    Returns
+    -------
+    Path
+        The path written.
+
+    Raises
+    ------
+    CredentialsError
+        If ``api_key`` or ``totp_secret`` is blank (after strip). The message
+        names the field, never its value.
+    """
+    if not creds.api_key.strip():
+        raise CredentialsError("api_key must not be blank")
+    if not creds.totp_secret.strip():
+        raise CredentialsError("totp_secret must not be blank")
+
+    api_key = normalise_token(creds.api_key)
+    totp_secret = normalise_token(creds.totp_secret)
+
+    target = credentials_path() if path is None else path
+    _save_section(target, _GROWW_SECTION, {"api_key": api_key, "totp_secret": totp_secret})
+    return target
+
+
+def load_groww_credentials(*, path: Path | None = None) -> GrowwFileCredentials | None:
+    """Load the stored Groww credentials, or ``None`` when the file is absent.
+
+    Parameters
+    ----------
+    path
+        File to read. Defaults to :func:`credentials_path`.
+
+    Returns
+    -------
+    GrowwFileCredentials | None
+        The stored credentials, ``None`` when *path* does not exist OR exists
+        but has no ``groww`` section (a Dhan-only file). A present-but-broken
+        ``groww`` section (blank field) is surfaced, NOT silently ``None``.
+
+    Raises
+    ------
+    CredentialsError
+        If the file is group / world accessible, a symlink, corrupt /
+        wrong-shape, or its ``groww`` section is the wrong shape / has a blank
+        field.
+    """
+    target = credentials_path() if path is None else path
+    raw = _read_raw_sections(target)
+    if not raw:
+        return None
+    section = raw.get(_GROWW_SECTION)
+    if section is None:
+        return None
+    if not isinstance(section, dict):
+        raise CredentialsError(
+            f"credentials file {target} has an invalid '{_GROWW_SECTION}' section"
+        )
+    api_key = section.get("api_key")
+    totp_secret = section.get("totp_secret")
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise CredentialsError(f"credentials file {target} has a missing or blank api_key")
+    if not isinstance(totp_secret, str) or not totp_secret.strip():
+        raise CredentialsError(f"credentials file {target} has a missing or blank totp_secret")
+    return GrowwFileCredentials(api_key=api_key, totp_secret=totp_secret)
+
+
+def resolve_groww_file_credentials(
+    env: Mapping[str, str] | None = None, *, path: Path | None = None
+) -> GrowwFileCredentials:
+    """Resolve Groww credentials per-field: env-first, saved-file fallback.
+
+    Each field is taken from its env var (:data:`ENV_GROWW_API_KEY` /
+    :data:`ENV_GROWW_TOTP_SECRET`) when non-blank, otherwise from the saved
+    file. This lets an operator override one field from the environment without
+    rewriting the file.
+
+    Parameters
+    ----------
+    env
+        Environment mapping. Defaults to :data:`os.environ`.
+    path
+        Credentials file. Defaults to :func:`credentials_path`.
+
+    Returns
+    -------
+    GrowwFileCredentials
+        The resolved credentials (whitespace-normalised).
+
+    Raises
+    ------
+    CredentialsError
+        If either field cannot be resolved from env or file. The message names
+        WHICH field(s) are missing and how to set them — never a value.
+    """
+    source = os.environ if env is None else env
+    stored = load_groww_credentials(path=path)
+
+    env_api_key = source.get(ENV_GROWW_API_KEY)
+    env_totp = source.get(ENV_GROWW_TOTP_SECRET)
+
+    api_key: str | None = None
+    if env_api_key is not None and env_api_key.strip():
+        api_key = env_api_key
+    elif stored is not None:
+        api_key = stored.api_key
+
+    totp_secret: str | None = None
+    if env_totp is not None and env_totp.strip():
+        totp_secret = env_totp
+    elif stored is not None:
+        totp_secret = stored.totp_secret
+
+    missing: list[str] = []
+    if api_key is None:
+        missing.append(ENV_GROWW_API_KEY)
+    if totp_secret is None:
+        missing.append(ENV_GROWW_TOTP_SECRET)
+    if api_key is None or totp_secret is None:
+        raise CredentialsError(
+            f"missing Groww credentials: {', '.join(missing)}; {_GROWW_HOW_TO_SET}"
+        )
+    return GrowwFileCredentials(
+        api_key=normalise_token(api_key),
+        totp_secret=normalise_token(totp_secret),
+    )
+
+
+def groww_credentials_present(
+    env: Mapping[str, str] | None = None, *, path: Path | None = None
+) -> bool:
+    """Return ``True`` iff :func:`resolve_groww_file_credentials` would succeed.
+
+    Returns ``False`` on any :class:`CredentialsError` (including an
+    insecure-permissions file) so a status surface degrades gracefully.
+    """
+    try:
+        resolve_groww_file_credentials(env, path=path)
+    except CredentialsError:
+        return False
+    return True
+
+
+def groww_credentials_preview(
+    env: Mapping[str, str] | None = None, *, path: Path | None = None
+) -> dict[str, object]:
+    """Return a NON-SECRET masked preview of the stored Groww credentials.
+
+    Mirrors :func:`credentials_preview`: a masked ``head…tail`` preview + length
+    of each resolved field so the paste can be VERIFIED at a glance, never the
+    raw secret.
+
+    Returns
+    -------
+    dict[str, object]
+        ``{"present": False}`` when credentials do not resolve, else
+        ``{"present": True, "api_key_preview", "api_key_len",
+        "totp_secret_preview", "totp_secret_len"}``.
+    """
+    try:
+        creds = resolve_groww_file_credentials(env, path=path)
+    except CredentialsError:
+        return {"present": False}
+    return {
+        "present": True,
+        "api_key_preview": _mask_secret(creds.api_key, head=6, tail=4),
+        "api_key_len": len(creds.api_key),
+        "totp_secret_preview": _mask_secret(creds.totp_secret, head=2, tail=2),
+        "totp_secret_len": len(creds.totp_secret),
+    }
+
+
+def clear_groww_credentials(*, path: Path | None = None) -> bool:
+    """Remove only the ``groww`` section from the credentials file.
+
+    Unlike :func:`clear_dhan_credentials` (which deletes the whole single-vendor
+    file), this is a read-merge-write that drops only the ``groww`` section so a
+    coexisting ``dhan`` section is preserved.
+
+    Parameters
+    ----------
+    path
+        File to edit. Defaults to :func:`credentials_path`.
+
+    Returns
+    -------
+    bool
+        ``True`` if a ``groww`` section was present and removed, ``False`` if the
+        file was absent or had no ``groww`` section.
+    """
+    target = credentials_path() if path is None else path
+    raw = _read_raw_sections(target)
+    if _GROWW_SECTION not in raw:
+        return False
+    del raw[_GROWW_SECTION]
+    _atomic_write(target, json.dumps(raw))
+    return True
+
+
 __all__ = [
     "ENV_ACCESS_TOKEN",
     "ENV_CLIENT_ID",
     "ENV_CREDENTIALS_FILE",
+    "ENV_GROWW_API_KEY",
+    "ENV_GROWW_TOTP_SECRET",
     "CredentialsError",
     "DhanFileCredentials",
+    "GrowwFileCredentials",
     "clear_dhan_credentials",
+    "clear_groww_credentials",
     "credentials_path",
     "credentials_present",
     "credentials_preview",
+    "groww_credentials_present",
+    "groww_credentials_preview",
     "load_dhan_credentials",
+    "load_groww_credentials",
     "normalise_token",
     "resolve_dhan_file_credentials",
+    "resolve_groww_file_credentials",
     "save_dhan_credentials",
+    "save_groww_credentials",
     "token_shape_problem",
 ]

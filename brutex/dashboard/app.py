@@ -141,6 +141,21 @@ class CredentialsIn(BaseModel):  # pyright: ignore[reportUntypedBaseClass]
     client_id: str
 
 
+class GrowwCredentialsIn(BaseModel):  # pyright: ignore[reportUntypedBaseClass]
+    """Request body for ``POST /api/v1/groww/credentials``.
+
+    Defined at **module scope** (not inside :func:`build_app`) for the same
+    reason as :class:`CredentialsIn`: a function-local Pydantic model is
+    mis-classified by FastAPI as a query parameter (the 422 bug,
+    DEC-CREDS-422-FIX-001). The api key + TOTP secret are accepted in the BODY
+    (never query params, which leak into access logs) and passed straight to
+    :func:`brutex.config.credentials.save_groww_credentials` — never logged.
+    """
+
+    api_key: str
+    totp_secret: str
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Snapshot dataclasses
 # ────────────────────────────────────────────────────────────────────────
@@ -2394,6 +2409,92 @@ def build_app(
         """GET /credentials — the Credentials page (DEC-CREDENTIALS-STORE-001)."""
         return _render_credentials_html()
 
+    # ── Groww credentials store + live probe (DEC-DHAN-GROWW-REMIGRATE-001) ──
+    # GrowwCredentialsIn is module-scope (see top of file) so FastAPI resolves
+    # it as a request body, not a query param (DEC-CREDS-422-FIX-001). These
+    # routes are ADDITIVE — the Dhan routes + live-pull wiring are untouched.
+
+    @app.post("/api/v1/groww/credentials")
+    async def api_groww_credentials_set(body: GrowwCredentialsIn) -> JSONResponse:
+        """POST /api/v1/groww/credentials — save the Groww TOTP credentials (mode 0600).
+
+        Accepts the api key + TOTP secret in the request BODY (never query
+        params, which leak into access logs). The body is NOT logged. The save is
+        a read-merge-write (:func:`save_groww_credentials`) so a stored Dhan
+        section is preserved. A blank field raises :class:`CredentialsError`,
+        mapped to HTTP 400 naming the field but NEVER its value. Returns only the
+        masked preview — never echoes a value back.
+        """
+        from brutex.config.credentials import (
+            CredentialsError,
+            GrowwFileCredentials,
+            groww_credentials_preview,
+            save_groww_credentials,
+        )
+
+        try:
+            save_groww_credentials(
+                GrowwFileCredentials(api_key=body.api_key, totp_secret=body.totp_secret)
+            )
+        except CredentialsError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(groww_credentials_preview())
+
+    @app.get("/api/v1/groww/credentials/status")
+    async def api_groww_credentials_status() -> JSONResponse:
+        """GET /api/v1/groww/credentials/status — presence + a masked, non-secret preview."""
+        from brutex.config.credentials import groww_credentials_preview
+
+        return JSONResponse(groww_credentials_preview())
+
+    @app.post("/api/v1/groww/credentials/test")
+    async def api_groww_credentials_test() -> JSONResponse:
+        """POST /api/v1/groww/credentials/test — run the live Phase-0 Groww probe.
+
+        Resolves the STORED Groww credentials (env-first, file-fallback), builds
+        a live client via the lazily-imported (monkeypatchable)
+        :func:`brutex.adapters.groww.live.build_live_client`, and runs
+        :func:`brutex.adapters.groww.probe.run_probe`. Returns
+        ``{"results": [...]}`` — each :class:`ProbeResult` as a dict. Missing
+        credentials → 400; a :class:`GrowwAuthError` → 400 with the redacting
+        ``safe_message``; any other :class:`GrowwError` → 502. No secret value is
+        ever surfaced (every message goes through ``str(exc)``, which is the
+        redacted form for the auth/groww errors).
+        """
+        from dataclasses import asdict
+
+        from brutex.adapters.groww.auth import GrowwCredentials
+        from brutex.adapters.groww.errors import GrowwAuthError, GrowwError
+        from brutex.adapters.groww.live import build_live_client
+        from brutex.adapters.groww.probe import run_probe
+        from brutex.config.credentials import (
+            CredentialsError,
+            resolve_groww_file_credentials,
+        )
+
+        def _run() -> tuple[int, dict[str, object]]:
+            try:
+                file_creds = resolve_groww_file_credentials()
+            except CredentialsError as exc:
+                return 400, {"detail": str(exc)}
+            creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
+            try:
+                client = build_live_client(creds)
+                results = run_probe(client)
+            except GrowwAuthError as exc:
+                return 400, {"detail": str(exc)}
+            except GrowwError as exc:
+                return 502, {"detail": str(exc)}
+            return 200, {"results": [asdict(r) for r in results]}
+
+        status_code, payload = await run_in_threadpool(_run)
+        return JSONResponse(payload, status_code=status_code)
+
+    @app.get("/groww-credentials", response_class=HTMLResponse)
+    async def groww_credentials_page() -> str:
+        """GET /groww-credentials — the Groww Credentials page (DEC-DHAN-GROWW-REMIGRATE-001)."""
+        return _render_groww_credentials_html()
+
     @app.get("/api/v1/logs")
     async def api_logs(
         lines: int = Query(default=200),
@@ -3306,6 +3407,35 @@ def _load_credentials_template() -> str:
 def _render_credentials_html() -> str:
     """Return the Credentials page HTML (DEC-CREDENTIALS-STORE-001)."""
     return _load_credentials_template()
+
+
+_GROWW_CREDENTIALS_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent / "templates" / "groww_credentials.html"
+)
+_GROWW_CREDENTIALS_TEMPLATE_CACHE: str | None = None
+
+
+def _load_groww_credentials_template() -> str:
+    """Load + cache the Groww Credentials page template (DEC-DHAN-GROWW-REMIGRATE-001).
+
+    Ships as a package-relative resource at
+    ``brutex/dashboard/templates/groww_credentials.html``. The page POSTs the
+    api key + TOTP secret to ``/api/v1/groww/credentials`` (body, never query),
+    GETs ``/api/v1/groww/credentials/status`` for the masked status line, and
+    POSTs ``/api/v1/groww/credentials/test`` to run the live probe — it never
+    displays a secret value. Loaded once, then served verbatim.
+    """
+    global _GROWW_CREDENTIALS_TEMPLATE_CACHE  # noqa: PLW0603 — single-load module cache
+    if _GROWW_CREDENTIALS_TEMPLATE_CACHE is None:
+        _GROWW_CREDENTIALS_TEMPLATE_CACHE = _GROWW_CREDENTIALS_TEMPLATE_PATH.read_text(
+            encoding="utf-8"
+        )
+    return _GROWW_CREDENTIALS_TEMPLATE_CACHE
+
+
+def _render_groww_credentials_html() -> str:
+    """Return the Groww Credentials page HTML (DEC-DHAN-GROWW-REMIGRATE-001)."""
+    return _load_groww_credentials_template()
 
 
 _DB_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "db.html"
