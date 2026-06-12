@@ -2,7 +2,7 @@
 
 Covers the testable surface: the new measured ``effective_rps`` / ``latency_ms_p95``
 panel fields, ``DashboardState.update_throughput``, the ``make_rate_observer``
-factory that maps a (``DhanRateController``, ``CallMeter``) snapshot pair onto the
+factory that maps a (``RateController``, ``CallMeter``) snapshot pair onto the
 panel, the ``/api/v1/state`` exposure, and the dedicated O(1) ``/api/v1/rate``
 route, plus ``_observe_rate``'s no-op guards. The live PUSH that feeds these
 during a real Dhan pull is per-pull live-only glue (``# pragma: no cover``,
@@ -116,8 +116,8 @@ def test_observe_rate_skips_without_observer_or_controller() -> None:
     """The live push helper is a no-op for a default (no observer) / dry-run (no controller) pull."""
     from typing import cast
 
-    from brutex.adapters.dhan.rate_control import DhanRateController
     from brutex.adapters.protocol import MarketAdapter
+    from brutex.adapters.rate_common import RateController
     from brutex.dashboard.pull_controller import _observe_rate
 
     calls: list[object] = []
@@ -128,7 +128,7 @@ def test_observe_rate_skips_without_observer_or_controller() -> None:
     # The guard returns BEFORE touching the adapter/controller, so these dummy
     # casts are never dereferenced — they only satisfy the static types.
     adapter = cast(MarketAdapter, object())
-    controller = cast(DhanRateController, object())
+    controller = cast(RateController, object())
     _observe_rate(None, controller, adapter)  # observer None → skip
     _observe_rate(_obs, None, adapter)  # controller None (dry-run) → skip
     assert calls == []

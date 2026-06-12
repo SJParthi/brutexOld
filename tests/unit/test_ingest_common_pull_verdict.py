@@ -1,4 +1,4 @@
-"""Tests for `brutex.adapters.dhan.pull_verdict` — the actionable pull verdict.
+"""Tests for `brutex.adapters.ingest_common` — the actionable pull verdict.
 
 100% line+branch on the pure classifier: the four prioritised kinds
 (auth_expired > transient_residual > known_gap_only > clean), the priority
@@ -8,7 +8,7 @@ preservation, and the JSON ``to_dict`` shape (DEC-PULL-VERDICT-001).
 
 from __future__ import annotations
 
-from brutex.adapters.dhan.pull_verdict import PullVerdict, classify_pull
+from brutex.adapters.ingest_common import PullVerdict, classify_pull
 
 
 class TestClassifyPull:

@@ -1,6 +1,6 @@
 """Pool-sizing seam for the dashboard pull controllers (DEC-DHAN-PARALLEL-INGEST-001).
 
-The dashboard threads its shared :class:`~brutex.adapters.dhan.rate_control.DhanRateController`
+The dashboard threads its shared :class:`~brutex.adapters.rate_common.RateController`
 into the fan-out pool sizing so the pool width tracks the controller's current
 rate (Little's law). These tests cover the pure sizing seam directly — the live
 controller *construction* is ``# pragma: no cover`` (needs creds/network), but
@@ -20,7 +20,7 @@ whitebox-test convention).
 # pyright: reportPrivateUsage=none
 from __future__ import annotations
 
-from brutex.adapters.dhan.rate_control import CEILING_RPS, DhanRateController
+from brutex.adapters.rate_common import CEILING_RPS, RateController
 from brutex.dashboard.option_pull_controller import _options_run_parallel
 from brutex.dashboard.pull_controller import _spot_run_parallel
 from brutex.orchestrator.parallel import (
@@ -37,7 +37,7 @@ class TestSpotPoolSizing:
         assert _spot_run_parallel(None) is None
 
     def test_real_controller_sizes_pool_to_rate(self) -> None:
-        controller = DhanRateController(sleep=lambda _s: None)
+        controller = RateController(sleep=lambda _s: None)
         pool = _spot_run_parallel(controller)
         assert isinstance(pool, PoolRunParallel)
         # Sized to saturate the controller's current (ceiling) rate × latency.
@@ -52,7 +52,7 @@ class TestOptionPoolSizing:
         assert _options_run_parallel(None) is None
 
     def test_real_controller_sizes_pool_to_rate(self) -> None:
-        controller = DhanRateController(sleep=lambda _s: None)
+        controller = RateController(sleep=lambda _s: None)
         pool = _options_run_parallel(controller)
         assert isinstance(pool, PoolRunParallel)
         expected = workers_to_saturate(CEILING_RPS, DEFAULT_LATENCY_BUDGET_S)

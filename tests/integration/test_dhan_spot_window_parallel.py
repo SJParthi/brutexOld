@@ -43,7 +43,7 @@ from pathlib import Path
 import pytest
 from brutex.adapters.dhan.errors import DhanNotFoundError
 from brutex.adapters.dhan.ingest import ingest_spot
-from brutex.adapters.dhan.rate_control import BURST, CEILING_RPS, DhanRateController
+from brutex.adapters.rate_common import BURST, CEILING_RPS, RateController
 from brutex.data.models import CandleBar
 from brutex.data.sink import NullBarSink
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
@@ -323,7 +323,7 @@ class TestSingleSeriesWindowThroughput:
 class TestRealRateControllerAcrossWindows:
     """The shared bucket holds ≤ 5 r/s when one series' windows pace concurrently.
 
-    Uses the REAL DhanRateController + AdaptiveTokenBucket over a VIRTUAL clock,
+    Uses the REAL RateController + AdaptiveTokenBucket over a VIRTUAL clock,
     driven through the real ``ingest_spot`` window fan-out on real threads, and
     asserts the measured physical inter-arrival rate never exceeds the ceiling.
     """
@@ -340,7 +340,7 @@ class TestRealRateControllerAcrossWindows:
             with clock_lock:
                 now[0] += seconds
 
-        controller = DhanRateController(clock=clock, sleep=sleep)
+        controller = RateController(clock=clock, sleep=sleep)
         starts: list[float] = []
         rec_lock = threading.Lock()
 
@@ -624,8 +624,8 @@ class TestDefaultPoolSizing:
 
     def test_default_pool_runs_when_run_parallel_omitted(self) -> None:
         # No run_parallel → the real bounded PoolRunParallel runs the windows on
-        # threads; with a DhanRateController pace it sizes to the controller rate.
-        controller = DhanRateController()
+        # threads; with a RateController pace it sizes to the controller rate.
+        controller = RateController()
         adapter = _CountingAdapter()
         report = ingest_spot(
             adapter,  # type: ignore[arg-type]
@@ -642,8 +642,8 @@ class TestDefaultPoolSizing:
     def test_default_pool_sizes_from_plain_pace_and_none(self) -> None:
         from brutex.adapters.dhan.ingest import _pace_rps
 
-        # A DhanRateController-bound pace exposes current_rps (→ that rate).
-        controller = DhanRateController()
+        # A RateController-bound pace exposes current_rps (→ that rate).
+        controller = RateController()
         assert _pace_rps(controller.pace) == pytest.approx(CEILING_RPS)
         # A plain callable with no controller __self__ → the 5.0 ceiling fallback.
         assert _pace_rps(lambda: None) == pytest.approx(5.0)

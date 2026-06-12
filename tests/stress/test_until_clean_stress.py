@@ -1,6 +1,6 @@
 """Sustained stress for the until-clean controller (DEC-TOKEN-PREFLIGHT-001).
 
-Drives :func:`~brutex.adapters.dhan.until_clean.run_until_clean` over many
+Drives :func:`~brutex.adapters.ingest_common.run_until_clean` over many
 high-budget loops with adversarial residual scripts (slow drains, never-clearing
 storms, late token deaths) to prove the honest-envelope guarantee holds at scale:
 the loop ALWAYS terminates, ``rounds_run`` is ALWAYS bounded by the budget, and
@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 
 import pytest
-from brutex.adapters.dhan.until_clean import UntilCleanRound, run_until_clean
+from brutex.adapters.ingest_common import UntilCleanRound, run_until_clean
 
 #: All stress tests carry the ``stress`` marker (registered in pyproject.toml) so the
 #: nightly ``pytest tests/stress -m stress`` soak selects them (DEC-STRESS-001).

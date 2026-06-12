@@ -71,10 +71,11 @@ from brutex.adapters.dhan.option_universe_ingest import (
     plan_option_pull_windows,
     run_dhan_options_ingest,
 )
-from brutex.adapters.dhan.pull_verdict import PullVerdict, classify_pull
-from brutex.adapters.dhan.until_clean import (
+from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
+    PullVerdict,
     UntilCleanRound,
+    classify_pull,
     run_until_clean,
 )
 from brutex.dashboard.pull_controller import (
@@ -99,8 +100,8 @@ from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
-    from brutex.adapters.dhan.rate_control import DhanRateController
     from brutex.adapters.dhan.token_preflight import TokenPreflight
+    from brutex.adapters.rate_common import RateController as DhanRateController
 
 _LOG = structlog.get_logger(__name__)
 
@@ -496,9 +497,9 @@ def _live_option_runtime(
 
 def _build_live_option_controller() -> DhanRateController:  # pragma: no cover — live controller
     """Construct the shared adaptive [3..5] r/s controller for a live options pull."""
-    from brutex.adapters.dhan.rate_control import DhanRateController
+    from brutex.adapters.rate_common import RateController
 
-    return DhanRateController()
+    return RateController()
 
 
 def _options_preflight_refusal(

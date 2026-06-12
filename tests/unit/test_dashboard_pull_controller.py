@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 from brutex.adapters.dhan.errors import DhanBadRequestError
-from brutex.adapters.dhan.synthetic_adapter import SyntheticDhanAdapter
+from brutex.adapters.ingest_common import SyntheticSpotAdapter
 from brutex.adapters.protocol import MarketAdapter
 from brutex.dashboard.pull_controller import (
     DHAN_FETCH_INTERVALS,
@@ -67,7 +67,7 @@ def _index(symbol: str = "13") -> Instrument:
     )
 
 
-class _EmptyAdapter(SyntheticDhanAdapter):
+class _EmptyAdapter(SyntheticSpotAdapter):
     """A :class:`MarketAdapter` whose every fetch returns no bars (NO_DATA).
 
     Drives the per-interval ``no_data`` branch — the vendor ran cleanly but
@@ -83,7 +83,7 @@ class _EmptyAdapter(SyntheticDhanAdapter):
         return []
 
 
-class _FailingAdapter(SyntheticDhanAdapter):
+class _FailingAdapter(SyntheticSpotAdapter):
     """A :class:`MarketAdapter` whose every fetch raises a terminal Dhan error.
 
     ``DhanBadRequestError`` is non-retryable (``is_retryable`` → False), so
@@ -99,7 +99,7 @@ class _FailingAdapter(SyntheticDhanAdapter):
         raise DhanBadRequestError(f"boom for {interval}")
 
 
-class _NoDataDH905Adapter(SyntheticDhanAdapter):
+class _NoDataDH905Adapter(SyntheticSpotAdapter):
     """Every fetch raises Dhan's ``DH-905`` "no data present" 400.
 
     The vendor's DEFINITIVE "no bars exist for this range" answer (not a defect).
@@ -119,7 +119,7 @@ class _NoDataDH905Adapter(SyntheticDhanAdapter):
         )
 
 
-class _DailyGapAdapter(SyntheticDhanAdapter):
+class _DailyGapAdapter(SyntheticSpotAdapter):
     """The EXACT operator case: ``1minute`` returns bars, ``1day`` is a ``DH-905`` gap.
 
     Mirrors NIFTY NEXT 50 (daily history starts after 2021-01-01). The symbol must
@@ -307,10 +307,10 @@ class TestPullCandlesInjectedFactory:
 
         def factory(
             lake_root: Path, instrument: Instrument
-        ) -> tuple[SyntheticDhanAdapter, BarSink]:
+        ) -> tuple[SyntheticSpotAdapter, BarSink]:
             seen["lake_root"] = lake_root
             seen["symbol_name"] = instrument.symbol_name
-            return SyntheticDhanAdapter(), NullBarSink()
+            return SyntheticSpotAdapter(), NullBarSink()
 
         report = pull_candles(
             _index(),
@@ -684,9 +684,9 @@ class TestPullAllSpot:
 
         built: list[int] = []
 
-        def factory(_root: Path, _insts: object) -> tuple[SyntheticDhanAdapter, BarSink]:
+        def factory(_root: Path, _insts: object) -> tuple[SyntheticSpotAdapter, BarSink]:
             built.append(1)  # must NEVER run for a dead token
-            return SyntheticDhanAdapter(), NullBarSink()
+            return SyntheticSpotAdapter(), NullBarSink()
 
         with capture_logs() as logs:
             report = pull_all_spot(
@@ -744,9 +744,9 @@ class TestPullAllSpot:
     def test_factory_receives_the_full_instrument_list(self, tmp_path: Path) -> None:
         seen: dict[str, int] = {}
 
-        def factory(lake_root: Path, instruments: object) -> tuple[SyntheticDhanAdapter, BarSink]:
+        def factory(lake_root: Path, instruments: object) -> tuple[SyntheticSpotAdapter, BarSink]:
             seen["count"] = len(list(instruments))  # type: ignore[arg-type]
-            return SyntheticDhanAdapter(), NullBarSink()
+            return SyntheticSpotAdapter(), NullBarSink()
 
         report = pull_all_spot(
             [_index("13"), _index("25"), _index("99")],
@@ -867,12 +867,12 @@ class TestSessionRateController:
     """
 
     def test_get_returns_same_instance_and_builds_once(self) -> None:
-        from brutex.adapters.dhan.rate_control import DhanRateController
+        from brutex.adapters.rate_common import RateController
 
-        built: list[DhanRateController] = []
+        built: list[RateController] = []
 
-        def _factory() -> DhanRateController:
-            ctl = DhanRateController()
+        def _factory() -> RateController:
+            ctl = RateController()
             built.append(ctl)
             return ctl
 
@@ -883,11 +883,11 @@ class TestSessionRateController:
         assert len(built) == 1  # built ONCE, not per pull
 
     def test_default_factory_builds_a_real_controller(self) -> None:
-        from brutex.adapters.dhan.rate_control import DhanRateController
+        from brutex.adapters.rate_common import RateController
 
         holder = SessionRateController()  # default factory = _build_live_controller
         ctl = holder.get()
-        assert isinstance(ctl, DhanRateController)
+        assert isinstance(ctl, RateController)
         assert holder.get() is ctl  # cached on subsequent calls
 
 
@@ -1071,7 +1071,7 @@ class TestPullPopulatesLedger:
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
-            adapter_factory=lambda _root, _insts: (SyntheticDhanAdapter(), NullBarSink()),
+            adapter_factory=lambda _root, _insts: (SyntheticSpotAdapter(), NullBarSink()),
         )
         assert report.dry_run is False
         assert ledger_path(tmp_path).is_file()  # durable Parquet written
@@ -1128,7 +1128,7 @@ class TestQuotaDeathMidRound:
         """
         minute_done = threading.Event()
 
-        class _QuotaDiesOnDaily(SyntheticDhanAdapter):
+        class _QuotaDiesOnDaily(SyntheticSpotAdapter):
             def fetch_ohlcv(
                 self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
             ) -> list[CandleBar]:
@@ -1232,12 +1232,12 @@ class TestQuotaDeathMidRound:
         force the second round — the quota exception itself still originates INSIDE
         a real worker pass and propagates through the real except/finally path.
         """
-        from brutex.adapters.dhan.until_clean import UntilCleanOutcome, UntilCleanRound
+        from brutex.adapters.ingest_common import UntilCleanOutcome, UntilCleanRound
         from brutex.data.window_ledger_store import ledger_path
 
         state = {"round": 1}
 
-        class _DiesInRoundTwo(SyntheticDhanAdapter):
+        class _DiesInRoundTwo(SyntheticSpotAdapter):
             def fetch_ohlcv(
                 self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
             ) -> list[CandleBar]:

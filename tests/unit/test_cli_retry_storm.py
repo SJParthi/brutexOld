@@ -562,7 +562,7 @@ def test_cmd_fetch_until_clean_dead_token_needs_operator(
     pytest.importorskip("polars")
     pytest.importorskip("duckdb")
     pytest.importorskip("pyarrow")
-    until_clean_mod = importlib.import_module("brutex.adapters.dhan.until_clean")
+    until_clean_mod = importlib.import_module("brutex.adapters.ingest_common")
     budgets: list[int] = []
 
     def fake_run_until_clean(round_runner: Any, *, max_rounds: int) -> Any:

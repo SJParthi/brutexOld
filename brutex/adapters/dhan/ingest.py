@@ -55,7 +55,6 @@ from time import sleep as _time_sleep
 import structlog
 
 from brutex.adapters.dhan.auth_guard import AuthGuard
-from brutex.adapters.dhan.constants import INTRADAY_WINDOW_DAYS
 from brutex.adapters.dhan.errors import (
     DhanError,
     is_auth_failure,
@@ -64,12 +63,16 @@ from brutex.adapters.dhan.errors import (
     is_retryable,
 )
 from brutex.adapters.ingest_common import (
+    COVERAGE_MARKET,
     clamp_window_end,
     summarize_conflicts,
     tile_windows,
 )
 from brutex.adapters.ingest_common import (
     now_ist as _now_ist,
+)
+from brutex.adapters.ingest_common import (
+    window_days_for_interval as _dhan_window_days_for,
 )
 from brutex.adapters.protocol import MarketAdapter
 from brutex.data.fetch_coverage import WindowKey
@@ -95,19 +98,11 @@ Pacer = Callable[[], None]
 #: Canonical daily interval — the only interval not tiled/session-filtered.
 _DAILY: str = "1day"
 
-#: The data-source namespace stamped on every coverage :class:`WindowKey`.
-_MARKET: str = "dhan"
-
-
-def _dhan_window_days_for(interval: str) -> int | None:
-    """Resolve a Dhan interval to its tiling width — ``None`` (single window) for daily.
-
-    The Dhan per-call cap is a flat 90 days for intraday; the daily endpoint takes
-    the whole range in ONE call (``None`` ⇒ :func:`~brutex.adapters.ingest_common.tile_windows`
-    emits a single un-tiled window). Injected into the shared tiler so the tiling
-    MECHANISM is vendor-neutral while this width policy stays Dhan-owned.
-    """
-    return None if interval == _DAILY else INTRADAY_WINDOW_DAYS
+#: The data-source namespace stamped on every coverage :class:`WindowKey`. A local
+#: alias of the vendor-neutral :data:`~brutex.adapters.ingest_common.COVERAGE_MARKET`
+#: (its single home since PR-J4a — value unchanged, ``"dhan"``). The
+#: ``_dhan_window_days_for`` tiling-width policy is likewise imported above.
+_MARKET: str = COVERAGE_MARKET
 
 
 #: In-run transient-window auto-retry budget (DEC-DHAN-WINDOW-RETRY-001). After the

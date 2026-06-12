@@ -1303,20 +1303,15 @@ jobs:
           else
             echo "(brutex.adapters.dhan.constants test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_dhan_synthetic.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.synthetic --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_synthetic.py
+          # Vendor-neutral rate controller gate (PR-J4a relocation): rate_control
+          # moved + renamed to brutex.adapters.rate_common.RateController. (The
+          # synthetic / synthetic_adapter / pull_verdict / until_clean modules also
+          # relocated in PR-J4a — folded into the brutex.adapters.ingest_common gate
+          # below, which now carries their moved test files.)
+          if compgen -G "tests/unit/test_rate_common.py" > /dev/null; then
+            pytest --cov=brutex.adapters.rate_common --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_rate_common.py tests/unit/test_dhan_parallel_locks.py tests/integration/test_dhan_spot_parallel.py tests/unit/test_dashboard_pull_pool_sizing.py
           else
-            echo "(brutex.adapters.dhan.synthetic test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_synthetic_adapter.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.synthetic_adapter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_synthetic_adapter.py
-          else
-            echo "(brutex.adapters.dhan.synthetic_adapter test file not present yet — gate inactive)"
-          fi
-          if compgen -G "tests/unit/test_dhan_rate_control.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.rate_control --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_rate_control.py tests/unit/test_dhan_parallel_locks.py tests/integration/test_dhan_spot_parallel.py tests/unit/test_dashboard_pull_pool_sizing.py
-          else
-            echo "(brutex.adapters.dhan.rate_control test file not present yet — gate inactive)"
+            echo "(brutex.adapters.rate_common test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_dhan_option_synthetic.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.option_synthetic --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_option_synthetic.py
@@ -1395,8 +1390,10 @@ jobs:
           # the window-tiling/clamp helpers, consumed by BOTH dhan and groww) into
           # the strict per-module 100% gate. Wheel-free: covered by fakes + injected
           # backoff + the injected known-gap predicate (both the passed + default arms).
+          # PR-J4a additionally relocated synthetic / synthetic_adapter / pull_verdict /
+          # until_clean into this module; their moved test files join this gate.
           if compgen -G "tests/unit/test_ingest_common.py" > /dev/null; then
-            pytest --cov=brutex.adapters.ingest_common --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ingest_common.py tests/unit/test_ingest_common_auto_retry.py
+            pytest --cov=brutex.adapters.ingest_common --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ingest_common.py tests/unit/test_ingest_common_auto_retry.py tests/unit/test_ingest_common_pull_verdict.py tests/unit/test_ingest_common_until_clean.py tests/unit/test_ingest_common_synthetic.py tests/unit/test_ingest_common_synthetic_adapter.py
           else
             echo "(brutex.adapters.ingest_common test file not present yet — gate inactive)"
           fi
@@ -1409,14 +1406,17 @@ jobs:
           else
             echo "(brutex.adapters.dhan.token_preflight test file not present yet — gate inactive)"
           fi
-          # Ratchet `brutex.adapters.dhan.until_clean` (the PURE re-pull-until-clean
-          # loop-controller: continue/stop_clean/stop_dead/stop_budget + the bounded
-          # driver — DEC-TOKEN-PREFLIGHT-001) into the strict per-module 100% gate.
-          # Wheel-free; driven by a fake clock + fake round-runner (no real sleeps).
-          if compgen -G "tests/unit/test_dhan_until_clean.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.until_clean --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_until_clean.py tests/property/test_until_clean_properties.py tests/golden/test_token_preflight_golden.py
+          # The PURE re-pull-until-clean loop-controller (continue/stop_clean/
+          # stop_dead/stop_budget + the bounded driver — DEC-TOKEN-PREFLIGHT-001)
+          # relocated into brutex.adapters.ingest_common in PR-J4a. Its 100% line+branch
+          # is asserted by the brutex.adapters.ingest_common strict gate above (which
+          # carries test_ingest_common_until_clean.py). Here we additionally RUN its
+          # property + golden suites (no second 100% gate — they exercise invariants,
+          # not the per-module coverage contract).
+          if compgen -G "tests/property/test_until_clean_properties.py" > /dev/null; then
+            pytest tests/property/test_until_clean_properties.py tests/golden/test_token_preflight_golden.py
           else
-            echo "(brutex.adapters.dhan.until_clean test file not present yet — gate inactive)"
+            echo "(re-pull-until-clean property test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_dhan_universe_ingest.py" > /dev/null; then
             pytest --cov=brutex.adapters.dhan.universe_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_universe_ingest.py

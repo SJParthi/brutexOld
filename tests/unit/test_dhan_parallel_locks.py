@@ -5,7 +5,7 @@ mutable object the parallelised Dhan ingest fan-out touches concurrently. These
 tests run each guarded object under a high-contention barrier-synchronised
 thread storm and assert the lock holds its invariant:
 
-* ``DhanRateController`` — concurrent ``on_rate_limit`` / ``on_success`` /
+* ``RateController`` — concurrent ``on_rate_limit`` / ``on_success`` /
   ``pace`` / ``snapshot`` never corrupt the step-ladder state.
 * ``CallMeter.record`` — every concurrent record is counted exactly once (the
   running aggregates never tear).
@@ -26,10 +26,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from brutex.adapters.dhan.client import CallMeter
-from brutex.adapters.dhan.rate_control import (
+from brutex.adapters.rate_common import (
     CEILING_RPS,
     RATE_LIMIT_STORM_FLOOR_RPS,
-    DhanRateController,
+    RateController,
 )
 from brutex.data.catalog import Catalog
 from brutex.data.models import CatalogEntry
@@ -76,12 +76,12 @@ class _Clock:
         return self.t
 
 
-class TestDhanRateControllerConcurrency:
+class TestRateControllerConcurrency:
     """The shared GOVERNOR survives concurrent hooks without corrupting state."""
 
     def test_concurrent_hooks_keep_rps_in_envelope(self) -> None:
         clock = _Clock()
-        ctl = DhanRateController(clock=clock, sleep=lambda _s: None)
+        ctl = RateController(clock=clock, sleep=lambda _s: None)
 
         def op(idx: int, _op: int) -> None:
             # Mix every public hook so all four critical sections contend.
@@ -116,7 +116,7 @@ class TestDhanRateControllerConcurrency:
         # 800 hits on a frozen clock cross both the 3-hit soft-floor rungs (5→4→3)
         # and the 30-hit STORM_HITS rungs (3→2→1) (DEC-DHAN-RATE-STORM-FLOOR-001).
         clock = _Clock()
-        ctl = DhanRateController(clock=clock, sleep=lambda _s: None)
+        ctl = RateController(clock=clock, sleep=lambda _s: None)
 
         def op(_idx: int, _op: int) -> None:
             ctl.on_rate_limit()

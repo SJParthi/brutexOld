@@ -1,4 +1,4 @@
-"""Tests for `brutex.adapters.dhan.synthetic` — dry-run spot-bar generator.
+"""Tests for `brutex.adapters.ingest_common` — dry-run spot-bar generator.
 
 100% line+branch: count/spacing, valid OHLC ordering, in-session timestamps
 (09:15 IST start, every bar survives the session filter), defaults, and the
@@ -11,7 +11,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
-from brutex.adapters.dhan.synthetic import synthetic_spot_bars
+from brutex.adapters.ingest_common import synthetic_spot_bars
 from brutex.data.session import in_session
 
 

@@ -358,18 +358,23 @@ def plan_windows(
     moving between this plan and a fetch crossing 15:30 IST) self-heals on the
     next pull's plan→prune cycle.
     """
-    # Vendor-neutral tiling/clamp helpers live in ingest_common (CLAUDE.md §11
-    # COMMON); the Dhan interval→width policy is the spine's own resolver. The
-    # coverage market namespace is passed explicitly (this store plans the Dhan
-    # spine's windows). Imported locally to avoid an import cycle (this module is
-    # in brutex.data, which the ingest spines depend on).
-    from brutex.adapters.dhan.ingest import _MARKET, _dhan_window_days_for
+    # Vendor-neutral tiling/clamp helpers + the (relocated-to-neutral) interval→width
+    # policy + coverage market namespace all live in ingest_common (CLAUDE.md §11
+    # COMMON; relocated out of the Dhan package in PR-J4a — _MARKET's value unchanged).
+    # Imported locally to avoid an import cycle (this module is in brutex.data, which
+    # the ingest spines depend on).
+    from brutex.adapters.ingest_common import (
+        COVERAGE_MARKET as _MARKET,
+    )
     from brutex.adapters.ingest_common import (
         clamp_window_end,
         tile_windows,
     )
     from brutex.adapters.ingest_common import (
         now_ist as _now_ist,
+    )
+    from brutex.adapters.ingest_common import (
+        window_days_for_interval as _dhan_window_days_for,
     )
 
     stamp = now if now is not None else datetime.now(UTC)
@@ -440,11 +445,19 @@ def reconcile_ledger_windows(
     *spans* is the :func:`~brutex.dashboard.coverage_reconcile.load_lake_spans`
     shape. O(windows) once at pull start. Returns the number of windows seeded.
     """
-    # Shared vendor-neutral tiler + the Dhan width policy (CLAUDE.md §11 COMMON);
-    # the coverage market namespace is passed explicitly. Local import avoids the
-    # brutex.data ↔ ingest spine import cycle.
-    from brutex.adapters.dhan.ingest import _MARKET, _dhan_window_days_for
-    from brutex.adapters.ingest_common import tile_windows
+    # Shared vendor-neutral tiler + the (relocated-to-neutral) width policy +
+    # coverage market namespace, all in ingest_common (CLAUDE.md §11 COMMON; moved
+    # out of the Dhan package in PR-J4a — _MARKET's value unchanged). Local import
+    # avoids the brutex.data ↔ ingest spine import cycle.
+    from brutex.adapters.ingest_common import (
+        COVERAGE_MARKET as _MARKET,
+    )
+    from brutex.adapters.ingest_common import (
+        tile_windows,
+    )
+    from brutex.adapters.ingest_common import (
+        window_days_for_interval as _dhan_window_days_for,
+    )
 
     stamp = now if now is not None else datetime.now(UTC)
     span_by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {

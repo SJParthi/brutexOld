@@ -52,8 +52,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from brutex.adapters.dhan.errors import DhanError, is_auth_failure
-from brutex.adapters.dhan.pull_verdict import PullVerdict, classify_pull
 from brutex.adapters.dhan.token_keepalive import RENEW_BEFORE_EXPIRY_S
+from brutex.adapters.ingest_common import PullVerdict, classify_pull
 
 if TYPE_CHECKING:
     from collections.abc import Callable

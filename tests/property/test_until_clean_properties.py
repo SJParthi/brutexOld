@@ -1,4 +1,4 @@
-"""Property invariants for `brutex.adapters.dhan.until_clean` (DEC-TOKEN-PREFLIGHT-001).
+"""Property invariants for `brutex.adapters.ingest_common` (DEC-TOKEN-PREFLIGHT-001).
 
 The re-pull-until-clean driver must ALWAYS reach a terminal state within a bounded
 number of rounds — the honest-envelope guarantee (Golden Rule #10: bounded, never
@@ -16,7 +16,7 @@ of the three :class:`TokenPreflight` states, ordered correctly by the threshold.
 from __future__ import annotations
 
 from brutex.adapters.dhan.token_preflight import classify_token_lifetime
-from brutex.adapters.dhan.until_clean import UntilCleanRound, run_until_clean
+from brutex.adapters.ingest_common import UntilCleanRound, run_until_clean
 from hypothesis import given
 from hypothesis import strategies as st
 

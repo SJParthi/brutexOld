@@ -32,8 +32,8 @@ from decimal import Decimal
 
 import pytest
 from brutex.adapters.dhan.errors import DhanNotFoundError
-from brutex.adapters.dhan.rate_control import BURST, CEILING_RPS, DhanRateController
 from brutex.adapters.dhan.run_ingest import run_dhan_spot_ingest
+from brutex.adapters.rate_common import BURST, CEILING_RPS, RateController
 from brutex.data.models import CandleBar
 from brutex.data.sink import NullBarSink
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
@@ -313,7 +313,7 @@ class TestThroughputSaturation:
 class TestRateCapUnderRealConcurrency:
     """The shared token bucket holds ≤ 5 r/s even with 32 workers pacing at once.
 
-    Uses the REAL DhanRateController + AdaptiveTokenBucket over a VIRTUAL clock
+    Uses the REAL RateController + AdaptiveTokenBucket over a VIRTUAL clock
     (injected clock/sleep), driven from many real threads, and asserts the
     measured physical inter-arrival rate never exceeds the 5 r/s ceiling.
     """
@@ -332,7 +332,7 @@ class TestRateCapUnderRealConcurrency:
             with clock_lock:
                 now[0] += seconds
 
-        controller = DhanRateController(clock=clock, sleep=sleep)
+        controller = RateController(clock=clock, sleep=sleep)
         n_workers = 32
         per_worker = 10
         barrier = threading.Barrier(n_workers)

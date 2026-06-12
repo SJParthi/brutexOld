@@ -21,7 +21,6 @@ from brutex.adapters.dhan.errors import (
     DhanTimeoutError,
     DhanTransportError,
 )
-from brutex.adapters.dhan.pull_verdict import PullVerdict
 from brutex.adapters.dhan.token_keepalive import RENEW_BEFORE_EXPIRY_S
 from brutex.adapters.dhan.token_preflight import (
     TokenPreflight,
@@ -30,6 +29,7 @@ from brutex.adapters.dhan.token_preflight import (
     classify_token_lifetime,
     preflight_pull_verdict,
 )
+from brutex.adapters.ingest_common import PullVerdict
 
 
 def test_threshold_matches_keepalive_renew_window() -> None:

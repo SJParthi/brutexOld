@@ -1,6 +1,6 @@
 """O(1) benchmark for the until-clean controller decision (DEC-TOKEN-PREFLIGHT-001).
 
-:func:`~brutex.adapters.dhan.until_clean.decide_until_clean` and
+:func:`~brutex.adapters.ingest_common.decide_until_clean` and
 :func:`~brutex.adapters.dhan.token_preflight.classify_token_lifetime` are PER-CALL
 O(1) — a constant number of comparisons whose cost must be **independent** of the
 residual magnitude / how far behind the loop fell / the token's remaining life. A
@@ -21,7 +21,7 @@ from __future__ import annotations
 import time
 
 from brutex.adapters.dhan.token_preflight import classify_token_lifetime
-from brutex.adapters.dhan.until_clean import decide_until_clean
+from brutex.adapters.ingest_common import decide_until_clean
 
 from tests.bench._o1_tiers import ratio_ceiling
 

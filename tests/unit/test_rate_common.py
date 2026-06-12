@@ -1,4 +1,4 @@
-"""Tests for `brutex.adapters.dhan.rate_control.DhanRateController`.
+"""Tests for `brutex.adapters.rate_common.RateController`.
 
 100% line+branch with an injected fake clock (no real sleeping): starts at the
 5 r/s ceiling, steps down 5→4→3 on sustained 429s, rests at the SOFT 3 r/s floor
@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from brutex.adapters.dhan.rate_control import (
+from brutex.adapters.rate_common import (
     CEILING_RPS,
     FLOOR_RPS,
     RATE_LIMIT_STORM_FLOOR_RPS,
@@ -25,7 +25,7 @@ from brutex.adapters.dhan.rate_control import (
     STEP_UP_WINDOW,
     STORM_HITS,
     TIMEOUT_FLOOR_RPS,
-    DhanRateController,
+    RateController,
 )
 from brutex.orchestrator.quota_tracker import DailyQuotaTracker
 from structlog.testing import capture_logs
@@ -58,11 +58,11 @@ class _Clock:
         self.t += seconds
 
 
-def _controller(clock: _Clock) -> DhanRateController:
-    return DhanRateController(clock=clock, sleep=lambda _s: None)
+def _controller(clock: _Clock) -> RateController:
+    return RateController(clock=clock, sleep=lambda _s: None)
 
 
-def _hammer(ctl: DhanRateController, clock: _Clock, *, hits: int, spread: float = 1.0) -> None:
+def _hammer(ctl: RateController, clock: _Clock, *, hits: int, spread: float = 1.0) -> None:
     """Feed *hits* rate-limit hits, advancing the clock *spread* s between each."""
     for _ in range(hits):
         ctl.on_rate_limit()
@@ -248,9 +248,7 @@ def test_recovery_unblocked_after_storm_hits_age_out() -> None:
     assert ctl.snapshot()["recent_hits"] == 0  # the aged 429 hits were evicted by on_success
 
 
-def _hammer_timeouts(
-    ctl: DhanRateController, clock: _Clock, *, hits: int, spread: float = 1.0
-) -> None:
+def _hammer_timeouts(ctl: RateController, clock: _Clock, *, hits: int, spread: float = 1.0) -> None:
     """Feed *hits* server-stress stalls, advancing the clock *spread* s between each."""
     for _ in range(hits):
         ctl.on_timeout()
@@ -449,7 +447,7 @@ def test_pace_delegates_without_error() -> None:
         slept.append(seconds)
         clock.advance(seconds)  # sleeping advances time → the bucket refills
 
-    ctl = DhanRateController(clock=clock, sleep=_sleep)
+    ctl = RateController(clock=clock, sleep=_sleep)
     ctl.pace()
     assert slept == [1.0 / CEILING_RPS]  # first call paced, not a free burst
 
@@ -466,7 +464,7 @@ def test_eases_in_no_opening_burst() -> None:
         slept.append(seconds)
         clock.advance(seconds)  # sleeping advances time → the bucket refills
 
-    ctl = DhanRateController(clock=clock, sleep=_sleep)
+    ctl = RateController(clock=clock, sleep=_sleep)
     ctl.pace()  # 1st: empty bucket → paced
     ctl.pace()  # 2nd: still paced at the ceiling
     assert slept == [1.0 / CEILING_RPS, 1.0 / CEILING_RPS]
@@ -485,7 +483,7 @@ def test_stepdown_drains_to_empty_no_free_burst() -> None:
         slept.append(seconds)
         clock.advance(seconds)
 
-    ctl = DhanRateController(clock=clock, sleep=_sleep)
+    ctl = RateController(clock=clock, sleep=_sleep)
     for _ in range(STEP_DOWN_HITS):  # 3 hits at the same instant → 5→4 (in place)
         ctl.on_rate_limit()
     assert ctl.current_rps == 4.0
@@ -527,7 +525,7 @@ class TestQuotaWiring:
     """The daily-quota gauge + brake (DEC-AUTO-RESUME-QUOTA-001)."""
 
     def test_snapshot_includes_quota_when_tracker_wired(self, tmp_path: Path) -> None:
-        ctl = DhanRateController(
+        ctl = RateController(
             clock=_Clock(), sleep=lambda _s: None, quota_tracker=_quota(tmp_path, limit=10, used=4)
         )
         snap = ctl.snapshot()
@@ -545,13 +543,13 @@ class TestQuotaWiring:
         }
 
     def test_quota_exhausted_true_at_limit(self, tmp_path: Path) -> None:
-        ctl = DhanRateController(
+        ctl = RateController(
             clock=_Clock(), sleep=lambda _s: None, quota_tracker=_quota(tmp_path, limit=2, used=2)
         )
         assert ctl.quota_exhausted() is True
 
     def test_quota_exhausted_false_with_remaining(self, tmp_path: Path) -> None:
-        ctl = DhanRateController(
+        ctl = RateController(
             clock=_Clock(), sleep=lambda _s: None, quota_tracker=_quota(tmp_path, limit=5, used=1)
         )
         assert ctl.quota_exhausted() is False

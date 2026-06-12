@@ -1649,7 +1649,7 @@ class _DryRunGrowwSpotAdapter:
     to keep ``--dry-run`` a real, no-network proof that the fetch → session-filter
     → sink pipeline works — this minimal deterministic stand-in returns valid
     in-session :class:`~brutex.data.models.CandleBar` rows from the vendor-neutral
-    pure :func:`~brutex.adapters.dhan.synthetic.synthetic_spot_bars` generator
+    pure :func:`~brutex.adapters.ingest_common.synthetic_spot_bars` generator
     (a pure bar builder, not the Dhan *adapter*). It satisfies the
     :class:`~brutex.adapters.protocol.MarketAdapter` shape the Groww spot spine
     drives, with NO client, NO credentials and NO network — so it is fully
@@ -1686,7 +1686,7 @@ class _DryRunGrowwSpotAdapter:
         end: Any,
     ) -> Any:
         """Return *bars_per_window* deterministic in-session bars for *start*'s day."""
-        from brutex.adapters.dhan.synthetic import synthetic_spot_bars
+        from brutex.adapters.ingest_common import synthetic_spot_bars
 
         del symbol, exchange, interval, end  # deterministic offline stand-in
         return synthetic_spot_bars(start, count=self.bars_per_window)
@@ -1815,7 +1815,7 @@ def cmd_fetch(
     rounds — each a full pass over the SHARED coverage ledger — until the ledger is
     CLEAN, OR the token dies (stop + the loud ``auth_expired`` verdict), OR the
     ``--until-clean-rounds`` OUTER budget is spent. It REUSES
-    :func:`~brutex.adapters.dhan.until_clean.run_until_clean` over the SAME retry
+    :func:`~brutex.adapters.ingest_common.run_until_clean` over the SAME retry
     engine (no duplicated round loop); honest envelope (Golden Rule #10): the round
     count is bounded (NOT infinite), each round is one ``≤ 5 r/s`` pass, and the
     work is ``O(failed_windows)`` per round — never an "O(1)-total" claim.
@@ -1967,13 +1967,11 @@ def cmd_fetch(
             # UNVERIFIED (constants.GROWW_RATE_LIMIT_RPS_UNVERIFIED), so we feed that
             # rate as the controller's CEILING into the existing adaptive token-bucket
             # MECHANISM rather than hardcoding a verified rate (Golden Rule #1/#10).
-            # The controller still lives under dhan/ in PR-J2 (dhan stays importable);
-            # J4/cleanup relocates+renames it to a vendor-neutral home.
-            from brutex.adapters.dhan.rate_control import DhanRateController
             from brutex.adapters.groww.constants import GROWW_RATE_LIMIT_RPS_UNVERIFIED
+            from brutex.adapters.rate_common import RateController
             from brutex.notifications.sweep_alerts import SweepAlerter
 
-            _rate = DhanRateController(ceiling_rps=GROWW_RATE_LIMIT_RPS_UNVERIFIED)
+            _rate = RateController(ceiling_rps=GROWW_RATE_LIMIT_RPS_UNVERIFIED)
             # AUTOMATIC rate.breach alert (DEC-TELEGRAM-WIRE-001): wrap the
             # controller's own on_rate_limit so a sustained 429 storm also fires a
             # best-effort Telegram push (coalesced by the notifier's 60 s dedupe).
@@ -2058,9 +2056,8 @@ def cmd_fetch(
             # SAME retry engine via run_until_clean, until clean / token dead / outer
             # budget spent. Bounded round count (never an O(1)-total claim). The
             # driver itself is vendor-neutral (pure 4-way decision + an injected
-            # round_runner); it still lives under dhan/ in PR-J2 (dhan stays
-            # importable) — J4/cleanup relocates it to a vendor-neutral home.
-            from brutex.adapters.dhan.until_clean import (
+            # round_runner) and lives in the vendor-neutral ingest_common home.
+            from brutex.adapters.ingest_common import (
                 DEFAULT_MAX_ROUNDS,
                 UntilCleanRound,
                 run_until_clean,
