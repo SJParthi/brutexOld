@@ -591,9 +591,11 @@ jobs:
           # DEC-CREDS-JWT-SHAPE-001: the secure Dhan credentials store —
           # save/load/resolve/preview + the new token_shape_problem JWT-shape
           # guard that rejects a truncated paste (the DH-906 root cause) at the
-          # web-form save boundary. 100% line+branch (138 stmts, 36 branches).
+          # web-form save boundary. 100% line+branch. DEC-GROWW-DASHBOARD-CREDS-PROBE-001
+          # added the parallel "groww" section (read-merge-write coexistence), so the
+          # gate now also runs test_groww_credentials.py to keep the module at 100%.
           if compgen -G "tests/unit/test_credentials.py" > /dev/null; then
-            pytest --cov=brutex.config.credentials --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_credentials.py
+            pytest --cov=brutex.config.credentials --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_credentials.py tests/unit/test_groww_credentials.py
           else
             echo "(brutex.config.credentials test file not present yet — gate inactive)"
           fi
@@ -1259,6 +1261,19 @@ jobs:
             pytest --cov=brutex.adapters.groww.catalog --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_catalog.py
           else
             echo "(brutex.adapters.groww.catalog test file not present yet — gate inactive)"
+          fi
+          # DEC-GROWW-DASHBOARD-CREDS-PROBE-001: strict gates on the live-probe
+          # modules. Both are injectable (fake GrowwClient / fake sdk_factory), so
+          # standalone-gateable with no growwapi/network. 100% line+branch.
+          if compgen -G "tests/unit/test_groww_probe.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.probe --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_probe.py
+          else
+            echo "(brutex.adapters.groww.probe test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_groww_live.py" > /dev/null; then
+            pytest --cov=brutex.adapters.groww.live --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_live.py
+          else
+            echo "(brutex.adapters.groww.live test file not present yet — gate inactive)"
           fi
           # DEC-GROWW-DHAN-REVERT-001 (#341): strict gates on the Dhan adapter
           # modules + the shared candle-field rules. Import-light (pure data /
