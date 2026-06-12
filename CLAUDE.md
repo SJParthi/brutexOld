@@ -18,7 +18,11 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-06-10 (DEC-AUTOMERGE-CLEAN-STRICT-001, MIGRATION.md
+_Last updated: 2026-06-12 (DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001,
+MIGRATION.md #667 — §2 Rule 4's run-identity citation refreshed
+`TRACK1_BACKTEST_SPEC.md:654` → `:743`; spec growth had moved the
+blake3 formula block and the stale line pointed mid-section). Earlier:
+2026-06-10 (DEC-AUTOMERGE-CLEAN-STRICT-001, MIGRATION.md
 #612 — §2 Rule 13(a) `mergeable_state` invariant aligned with the
 charter §4.5 pre-G2 envelope per DEC-WORKSPACE-VERIFY-002 follow-up
 F-4). Earlier: 2026-06-10 (DEC-WORKSPACE-VERIFY-002, MIGRATION.md #609 —
@@ -116,8 +120,10 @@ Track 1 spec locked after 4-agent hostile-review pass._
    strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params
    ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_hash)`. No
    computation without that hash recorded. (Was `sha256(...)` pre-DEC-CALIBRATE-001;
-   corrected 2026-05-24 to match `TRACK1_BACKTEST_SPEC.md:654` which has used
-   blake3 since the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
+   corrected 2026-05-24 to match the spec's run-identity formula — now at
+   `TRACK1_BACKTEST_SPEC.md:743` after spec growth moved it from :654
+   (DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001) — which has used blake3 since
+   the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
    append must all be O(1). CI gates: `p99(N=1M) / p99(N=1K) ≤ 1.1`
