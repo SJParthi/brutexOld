@@ -25,7 +25,7 @@ from brutex.engine.sweep_cache import (
     SweepCacheError,
     combo_digest,
 )
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 #: Frozen golden digests — any change to the canonicalisation breaks these.
@@ -137,6 +137,13 @@ def test_record_digest_new_then_idempotent(tmp_path: Path) -> None:
 # ── property + persistence ──────────────────────────────────────────────────
 
 
+# deadline=None: each example opens a SweepCache (an LMDB environment ON
+# DISK) — env create + mmap under a loaded runner routinely exceeds
+# hypothesis's default 200 ms per-example deadline, making the test flake
+# ~20% under contention (measured 4/20 locally, DEC-SWEEP-CACHE-DEADLINE-001).
+# The house convention for I/O-touching property tests (tests/property/*)
+# is deadline=None; correctness is untouched — examples still run.
+@settings(deadline=None)
 @given(
     combos=st.lists(
         st.tuples(
