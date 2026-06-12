@@ -234,20 +234,25 @@ jobs:
         run: pip install ./rust/trading-core
       - name: pytest with coverage gate
         run: |
-          # Coverage floor is 90% for P1. The [tool.coverage.run].omit list
-          # is now JUST the CLI layer (cli.py / __main__.py, pending a CLI
-          # snapshot harness). All three former below-floor modules are
-          # un-omitted at 100% + per-module-gated: execution/driver
+          # Coverage floor RATCHETED 90 -> 99 (DEC-COV-SMALL-GAPS-001,
+          # 2026-06-12): the CI-equivalent local measurement was 99.29%
+          # with exactly 4 modules below 100; feed/replay,
+          # strategies/sweep and dashboard/__init__ were closed to
+          # 100.00% line+branch in the same PR, leaving dashboard/app.py
+          # (85%, its own backfill PR) as the only sub-100 module. The
+          # [tool.coverage.run].omit list is still JUST the CLI layer
+          # (cli.py / __main__.py, pending a CLI snapshot harness —
+          # DEC-COV-001); the floor rises to 100% as app.py + the CLI
+          # harness land. Earlier history: execution/driver
           # (DEC-COVERAGE-DRIVER-001), data/catalog (DEC-COVERAGE-CATALOG-001),
-          # data/instrument_store (DEC-COVERAGE-INSTRUMENT-STORE-001);
-          # dashboard / parquet_writer / sink were un-omitted in #377.
-          # Aggregate ~97.9%; the floor rises to 100% as the CLI harness lands.
+          # data/instrument_store (DEC-COVERAGE-INSTRUMENT-STORE-001) and
+          # the #377 un-omits.
           pytest \
             --cov=brutex \
             --cov-branch \
             --cov-report=term-missing \
             --cov-report=xml \
-            --cov-fail-under=90 \
+            --cov-fail-under=99 \
             --ignore=tests/bench \
             tests/unit tests/integration tests/property
       - name: Smoke + red-team gates (DEC-DASHBOARD-OMIT-AUDIT-001)
