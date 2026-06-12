@@ -1505,6 +1505,13 @@ def build_app(
             zero manual "Re-pull to finish" clicks (CLAUDE.md §11 AUTOMATED), bounded
             + quota-safe (Golden Rule #10 — never an infinite or quota-burning loop).
             """
+
+            # Adapt the job's 4-arg hook (label, bars, failed, gap) onto the
+            # Groww spot ProgressHook (label, bars, failed) — Groww has no
+            # known-gap concept, so ``gap`` is always ``False`` here (PR-J4b).
+            def _spot_progress(label: str, bars: int, failed: bool) -> None:
+                on_progress(label, bars, failed, False)
+
             report = pull_all_spot(
                 instruments,
                 lake_root=lake_root,
@@ -1512,7 +1519,7 @@ def build_app(
                 from_date=from_date,
                 to_date=to_date,
                 year=year,
-                on_progress=on_progress,
+                on_progress=_spot_progress,
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
                 auto_retry=True,
@@ -1600,6 +1607,13 @@ def build_app(
             twin of ``brutex fetch --until-clean``; default-off keeps the prior
             single auto-retry pass.
             """
+
+            # Adapt the job's 4-arg hook (label, bars, failed, gap) onto the
+            # Groww spot ProgressHook (label, bars, failed) — Groww has no
+            # known-gap concept, so ``gap`` is always ``False`` here (PR-J4b).
+            def _spot_progress(label: str, bars: int, failed: bool) -> None:
+                on_progress(label, bars, failed, False)
+
             report = pull_all_spot(
                 instruments,
                 lake_root=lake_root,
@@ -1607,7 +1621,7 @@ def build_app(
                 from_date=from_date,
                 to_date=to_date,
                 year=year,
-                on_progress=on_progress,
+                on_progress=_spot_progress,
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
                 auto_retry=True,

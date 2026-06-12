@@ -1,14 +1,17 @@
-"""Tests for ``brutex.dashboard.instrument_loader`` — keyless instrument load.
+"""Tests for ``brutex.dashboard.instrument_loader`` — keyless Groww load.
 
-Injects a fake ``http_get`` returning a small valid **Dhan detailed scrip
-master** CSV against a REAL temp
-:class:`~brutex.data.instrument_store.InstrumentStore` and asserts the loader
-parses/filters correctly, re-summarises the stored snapshot into
-``index_count`` / ``stock_count``, aborts on a malformed header, and handles
-an empty CSV. NO Dhan token / creds anywhere — the master is a public CSV
-(DEC-VENDOR-PIVOT-001).
+PR-J4b vendor cutover (DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009 §5): the keyless
+instrument-master load was repointed from the Dhan 31-column detailed scrip
+master to the Groww 21-column instrument master. These tests inject a fake
+``http_get`` returning a small valid **Groww instrument master** CSV against a
+REAL temp :class:`~brutex.data.instrument_store.InstrumentStore` and assert the
+loader parses/filters correctly, persists the LEAN universe (IDX + F&O-eligible
+EQ; legs dropped), re-summarises the stored snapshot into ``index_count`` /
+``stock_count``, aborts on a malformed header, handles an empty CSV, and reports
+NTM as a deliberate Groww no-op. NO Groww token / creds anywhere — the master is
+a public CSV (DEC-VENDOR-PIVOT-001).
 
-CSV patterns follow ``tests/unit/test_dhan_instruments.py``; the real store
+CSV patterns follow ``tests/unit/test_groww_instruments.py``; the real store
 usage follows ``tests/integration/test_universe_explorer_store.py``.
 """
 
@@ -17,32 +20,88 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from brutex.adapters.groww.constants import INSTRUMENT_CSV_COLUMNS
 from brutex.dashboard.instrument_loader import load_instrument_master
 from brutex.data.instrument_store import InstrumentStore
 from brutex.models import InstrumentFormatError
 
-# Dhan detailed scrip-master header (the columns the parser requires + the
-# optional ones these rows use).
-_HEADER = (
-    "EXCH_ID,SECURITY_ID,INSTRUMENT,SYMBOL_NAME,DISPLAY_NAME,LOT_SIZE,TICK_SIZE,"
-    "SM_FREEZE_QTY,UNDERLYING_SYMBOL,OPTION_TYPE,STRIKE_PRICE,SM_EXPIRY_DATE,SERIES,ISIN,"
-    "UNDERLYING_SECURITY_ID,ASM_GSM_FLAG"
+_HEADER = ",".join(INSTRUMENT_CSV_COLUMNS)
+
+
+def _row(**over: str) -> str:
+    """Build one 21-field Groww CSV row; every column defaults blank."""
+    cells = dict.fromkeys(INSTRUMENT_CSV_COLUMNS, "")
+    cells.update(over)
+    return ",".join(cells[col] for col in INSTRUMENT_CSV_COLUMNS)
+
+
+# Two NSE indices (IDX, lot/tick blank → 0), one F&O-eligible stock (WIPRO) made
+# eligible by a WIPRO option leg, plus a WIPRO CE leg, and one out-of-scope MCX
+# COMMODITY row that the Groww parser skips BEFORE the index. The lean universe
+# persists the 2 indices + WIPRO (3); the option leg is dropped; MCX is filtered.
+_NIFTY = _row(
+    exchange="NSE",
+    exchange_token="NIFTY",
+    trading_symbol="NIFTY",
+    groww_symbol="NSE-NIFTY",
+    name="NIFTY 50",
+    instrument_type="IDX",
+    segment="CASH",
 )
-# Two NSE indices (lot/tick 0), one F&O-eligible stock (RELIANCE) + a RELIANCE
-# option leg that makes the stock F&O-eligible, plus one out-of-scope MCX row
-# that must be filtered (not parsed). The lean universe persists the 2 indices
-# + RELIANCE (3); the option leg is dropped; MCX is filtered.
-_ROWS = [
-    "NSE,13,INDEX,NIFTY,Nifty 50,0,0,,,,,,,,,",
-    "NSE,25,INDEX,BANKNIFTY,Nifty Bank,0,0,,,,,,,,,",
-    "NSE,2885,EQUITY,RELIANCE INDUSTRIES LTD,Reliance,1,0.05,,RELIANCE,,,,EQ,INE002A01018,,",
-    "NSE,3001,OPTSTK,RELIANCE-OPT,Reliance CE,250,0.05,1800,RELIANCE,CE,2600,2025-01-30,,,2885,",
-    "MCX,7777,FUTCOM,GOLD,Gold,100,1,,GOLD,,,,,,7777,",
-]
+_BANKNIFTY = _row(
+    exchange="NSE",
+    exchange_token="BANKNIFTY",
+    trading_symbol="BANKNIFTY",
+    groww_symbol="NSE-BANKNIFTY",
+    name="NIFTY Bank",
+    instrument_type="IDX",
+    segment="CASH",
+)
+_WIPRO = _row(
+    exchange="NSE",
+    exchange_token="3787",
+    trading_symbol="WIPRO",
+    groww_symbol="NSE-WIPRO",
+    name="Wipro",
+    instrument_type="EQ",
+    segment="CASH",
+    series="EQ",
+    isin="INE075A01022",
+    lot_size="1",
+    tick_size="0.05",
+)
+_WIPRO_CE = _row(
+    exchange="NSE",
+    exchange_token="50467",
+    trading_symbol="WIPRO2661621800CE",
+    groww_symbol="NSE-WIPRO-16Jun26-300-CE",
+    instrument_type="CE",
+    segment="FNO",
+    underlying_symbol="WIPRO",
+    underlying_exchange_token="3787",
+    expiry_date="2026-06-16",
+    strike_price="300",
+    lot_size="1500",
+    tick_size="0.05",
+)
+_COMMODITY = _row(
+    exchange="MCX",
+    exchange_token="1",
+    trading_symbol="GOLD",
+    groww_symbol="MCX-GOLD",
+    instrument_type="FUT",
+    segment="COMMODITY",
+    underlying_symbol="GOLD",
+    expiry_date="2026-08-25",
+    lot_size="100",
+    tick_size="1",
+)
+
+_ROWS = [_NIFTY, _BANKNIFTY, _WIPRO, _WIPRO_CE, _COMMODITY]
 
 
 def _csv(rows: list[str]) -> str:
-    """Join *rows* under the canonical Dhan header into a CSV text blob."""
+    """Join *rows* under the canonical Groww header into a CSV text blob."""
     return "\n".join([_HEADER, *rows]) + "\n"
 
 
@@ -59,20 +118,22 @@ def test_loads_and_summarises_keyless(tmp_path: Path) -> None:
         http_get=lambda _url: _csv(_ROWS),
         run_id_factory=lambda: "test-load",
     )
-    # NIFTY idx + BANKNIFTY idx + RELIANCE eq + RELIANCE option = 4 in-scope
-    # rows parsed; the MCX row is out-of-scope → filtered.
+    # NIFTY idx + BANKNIFTY idx + WIPRO eq + WIPRO CE = 4 in-scope rows parsed;
+    # the MCX COMMODITY row is out-of-scope → skipped by the Groww parser.
     assert result["parsed"] == 4
-    assert result["filtered"] == 1
-    assert result["quarantined"] == 0  # Dhan fails closed — no quarantine bucket
-    # Lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001): NIFTY + BANKNIFTY (INDEX)
-    # + RELIANCE (F&O-eligible EQUITY) persist (3); the RELIANCE option leg is
-    # dropped.
+    assert result["filtered"] == 0  # Groww parser skips out-of-scope before the index
+    assert result["quarantined"] == 0  # Groww fails closed — no quarantine bucket
+    # Lean ingest (DEC-INSTRUMENT-UNIVERSE-FAST-001): NIFTY + BANKNIFTY (IDX)
+    # + WIPRO (F&O-eligible EQ) persist (3); the WIPRO CE option leg is dropped.
     assert result["persisted"] == 3
     assert result["legs_dropped"] == 1
     # Summary over the persisted universe underlyings: 2 indices, 1 stock.
     assert result["index_count"] == 2
     assert result["stock_count"] == 1
     assert result["total"] == 3
+    # NTM auto-admission is Dhan-only → a deliberate Groww no-op note.
+    assert result["ntm"]["admitted"] is False
+    assert "Dhan-only" in result["ntm"]["reason"]
 
 
 def test_default_run_id_factory(tmp_path: Path) -> None:
@@ -84,10 +145,10 @@ def test_default_run_id_factory(tmp_path: Path) -> None:
 
 
 def test_malformed_header_raises(tmp_path: Path) -> None:
-    """A CSV missing a required column aborts with InstrumentFormatError."""
+    """A CSV with a drifted Groww header aborts with InstrumentFormatError."""
     store = _store(tmp_path)
-    bad_header = _HEADER.replace("TICK_SIZE,", "")  # drop a required column
-    with pytest.raises(InstrumentFormatError, match="missing required columns"):
+    bad_header = _HEADER.replace("tick_size,", "")  # drop a required column
+    with pytest.raises(InstrumentFormatError, match="header drift"):
         load_instrument_master(store, http_get=lambda _url: bad_header + "\n")
 
 
@@ -95,14 +156,9 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     """An empty (header-only) CSV loads zero instruments → all counts 0."""
     store = _store(tmp_path)
     result = load_instrument_master(store, http_get=lambda _url: _csv([]))
-    # NTM enrichment skips an empty master (no INDEX row) with no network call.
-    assert result.pop("ntm") == {
-        "admitted": False,
-        "error": (
-            "no NSE INDEX row matched /TOTAL\\s*M(?:AR)?K(?:E)?T/i among 0 NSE INDEX "
-            "rows — loosen the pattern or confirm the index is present in the master"
-        ),
-    }
+    ntm = result.pop("ntm")
+    assert ntm["admitted"] is False
+    assert "Dhan-only" in ntm["reason"]
     assert result == {
         "parsed": 0,
         "persisted": 0,
@@ -115,155 +171,33 @@ def test_empty_csv_yields_zero_counts(tmp_path: Path) -> None:
     }
 
 
-def test_ntm_admitted_with_constituents(tmp_path: Path) -> None:
-    """NTM is auto-admitted on the keyless load (DEC-NIFTY-TOTAL-MARKET-LOAD-001).
+def test_non_fno_equity_dropped_from_lean_universe(tmp_path: Path) -> None:
+    """A non-F&O equity (no derivative names it) is NOT persisted (lean ingest).
 
-    The master carries an NTM ``INDEX`` row (id 46) + two NSE equities whose ISINs
-    appear in the injected constituent CSV. After the load: NTM is a recognised
-    index (index_count 3) and its constituents are admitted as REFERENCE_ONLY
-    stocks — exactly what the operator expects to SEE in /universe + /db.
+    Mirrors DEC-INSTRUMENT-UNIVERSE-FAST-001: only F&O-eligible equities join the
+    indices; a cash equity with no option/future leg is parsed (so it is counted
+    in ``parsed``) but dropped from the persisted universe (``legs_dropped``).
     """
     store = _store(tmp_path)
-    rows = [
-        *_ROWS,
-        "NSE,46,INDEX,NIFTY TOTAL MKT,Nifty Total Market,0,0,,,,,,,,,",
-        "NSE,5001,EQUITY,SMALLCO ONE LTD,SmallCo One,1,0.05,,,,,,EQ,INE111A01011,,",
-        "NSE,5002,EQUITY,SMALLCO TWO LTD,SmallCo Two,1,0.05,,,,,,EQ,INE222A01012,,",
-    ]
-    constituent_csv = (
-        "Company Name,Industry,Symbol,Series,ISIN Code\n"
-        "SmallCo One Ltd.,X,SMALLCO1,EQ,INE111A01011\n"
-        "SmallCo Two Ltd.,Y,SMALLCO2,EQ,INE222A01012\n"
-        # RELIANCE is already F&O-eligible (in _ROWS); include it so the basket
-        # overlaps the existing universe too.
-        "Reliance Industries Ltd.,Energy,RELIANCE,EQ,INE002A01018\n"
+    non_fno = _row(
+        exchange="NSE",
+        exchange_token="9999",
+        trading_symbol="SMALLCO",
+        groww_symbol="NSE-SMALLCO",
+        name="SmallCo Ltd",
+        instrument_type="EQ",
+        segment="CASH",
+        series="EQ",
+        isin="INE999A01010",
+        lot_size="1",
+        tick_size="0.05",
     )
-    result = load_instrument_master(
-        store,
-        http_get=lambda _url: _csv(rows),
-        constituent_opener=lambda _url: constituent_csv,
-        constituent_cache_dir=tmp_path / "ntmcache",  # isolated (also seeds the cache)
-    )
-
-    assert result["ntm"]["admitted"] is True
-    assert result["ntm"]["index_security_id"] == 46
-    assert result["ntm"]["index_symbol"] == "NIFTY TOTAL MKT"
-    assert result["ntm"]["constituents"] == 3  # all three ISINs resolved
-    # NTM shows up as a third index (NIFTY + BANKNIFTY + NIFTY TOTAL MKT) …
-    assert result["index_count"] == 3
-    # … and the two non-F&O constituents joined RELIANCE under stocks.
-    assert result["stock_count"] == 3
-
-
-def test_ntm_index_only_when_constituent_fetch_fails(tmp_path: Path) -> None:
-    """A constituent-fetch failure degrades to INDEX-ONLY — NTM still appears,
-    the core load is unbroken, and the reason is surfaced."""
-    store = _store(tmp_path)
-    rows = [*_ROWS, "NSE,46,INDEX,NIFTY TOTAL MKT,Nifty Total Market,0,0,,,,,,,,,"]
-
-    def _boom(_url: str) -> str:
-        raise OSError("nseindia 403 Forbidden")
-
-    result = load_instrument_master(
-        store,
-        http_get=lambda _url: _csv(rows),
-        constituent_opener=_boom,
-        constituent_cache_dir=tmp_path / "ntmcache",  # isolated + EMPTY → no fallback
-    )
-    assert result["ntm"]["admitted"] is True
-    assert result["ntm"]["constituents"] == 0
-    note = result["ntm"]["constituent_note"]
-    assert "admitted as an index" in note  # NTM-the-index is fine, only constituents missing
-    assert "nseindia 403 Forbidden" in note  # the underlying cause is surfaced
-    assert "ntm_constituents.csv" in note  # the one-time browser-download fix
-    # NTM the index is still admitted (NIFTY + BANKNIFTY + NTM = 3).
-    assert result["index_count"] == 3
-
-
-def test_ntm_index_only_when_constituent_csv_empty(tmp_path: Path) -> None:
-    """An empty constituent body (opener returns "") → INDEX-ONLY admission with
-    the 'no constituent CSV mapping' note; NTM the index still appears."""
-    store = _store(tmp_path)
-    rows = [*_ROWS, "NSE,46,INDEX,NIFTY TOTAL MKT,Nifty Total Market,0,0,,,,,,,,,"]
-    result = load_instrument_master(
-        store,
-        http_get=lambda _url: _csv(rows),
-        constituent_opener=lambda _url: "",
-        constituent_cache_dir=tmp_path / "ntmcache",  # isolated + EMPTY → no fallback
-    )
-    assert result["ntm"]["admitted"] is True
-    assert result["ntm"]["constituents"] == 0
-    assert result["ntm"]["constituent_note"] == "no constituent CSV mapping for NIFTY TOTAL MARKET"
-    assert result["index_count"] == 3
-
-
-def test_ntm_constituent_fetch_falls_back_to_cache(tmp_path: Path) -> None:
-    """DEC-NTM-CONSTITUENT-CACHE-001: a live fetch seeds the cache; a LATER failed
-    fetch falls back to it so the ~750 constituents survive a niftyindices timeout."""
-    cache = tmp_path / "ntmcache"
-    rows = [
-        *_ROWS,
-        "NSE,46,INDEX,NIFTY TOTAL MKT,Nifty Total Market,0,0,,,,,,,,,",
-        "NSE,5001,EQUITY,SMALLCO ONE LTD,SmallCo One,1,0.05,,,,,,EQ,INE111A01011,,",
-    ]
-    csv_text = (
-        "Company Name,Industry,Symbol,Series,ISIN Code\n"
-        "SmallCo One Ltd.,X,SMALLCO1,EQ,INE111A01011\n"
-    )
-    store = _store(tmp_path)
-
-    # 1) Live fetch SUCCEEDS → the constituent is admitted AND the cache is seeded.
-    r1 = load_instrument_master(
-        store,
-        http_get=lambda _url: _csv(rows),
-        constituent_opener=lambda _url: csv_text,
-        constituent_cache_dir=cache,
-    )
-    assert r1["ntm"]["constituents"] == 1
-    assert "constituent_note" not in r1["ntm"]  # clean live load, no fallback note
-
-    # 2) Live fetch now FAILS (niftyindices timeout) → falls back to the cache, so
-    #    the constituent is STILL admitted (universe does not crater to the base set).
-    def _boom(_url: str) -> str:
-        raise OSError("The read operation timed out")
-
-    r2 = load_instrument_master(
-        store,
-        http_get=lambda _url: _csv(rows),
-        constituent_opener=_boom,
-        constituent_cache_dir=cache,
-    )
-    assert r2["ntm"]["constituents"] == 1  # preserved by the cache fallback
-    assert "used last-good cache" in r2["ntm"]["constituent_note"]
-
-
-def test_ntm_uses_operator_dropped_cache_file(tmp_path: Path) -> None:
-    """The operator can pre-seed the cache by dropping the browser-downloaded CSV.
-
-    Mirrors the real workaround: niftyindices bot-blocks urllib but the operator's
-    browser CAN download ``ind_niftytotalmarket_list.csv``; saving it at the cache
-    path makes the failing live fetch fall back to it (DEC-NTM-CONSTITUENT-CACHE-001).
-    """
-    from brutex.dashboard.ntm_cache import save_constituent_csv
-
-    cache = tmp_path / "ntmcache"
-    save_constituent_csv(
-        "Company Name,Industry,Symbol,Series,ISIN Code\n"
-        "SmallCo One Ltd.,X,SMALLCO1,EQ,INE111A01011\n",
-        cache_dir=cache,
-    )
-    rows = [
-        *_ROWS,
-        "NSE,46,INDEX,NIFTY TOTAL MKT,Nifty Total Market,0,0,,,,,,,,,",
-        "NSE,5001,EQUITY,SMALLCO ONE LTD,SmallCo One,1,0.05,,,,,,EQ,INE111A01011,,",
-    ]
-    # Live opener returns EMPTY (e.g. blocked → empty body) → falls back to the
-    # operator-dropped cache (covers the live-empty + cache-present branch).
-    result = load_instrument_master(
-        _store(tmp_path),
-        http_get=lambda _url: _csv(rows),
-        constituent_opener=lambda _url: "",
-        constituent_cache_dir=cache,
-    )
-    assert result["ntm"]["constituents"] == 1  # operator-dropped CSV used as fallback
-    assert "used last-good cache" in result["ntm"]["constituent_note"]
+    result = load_instrument_master(store, http_get=lambda _url: _csv([*_ROWS, non_fno]))
+    # 5 in-scope rows parsed (NIFTY, BANKNIFTY, WIPRO, WIPRO CE, SMALLCO).
+    assert result["parsed"] == 5
+    # WIPRO CE leg + the non-F&O SMALLCO equity are both dropped from the lean set.
+    assert result["legs_dropped"] == 2
+    assert result["persisted"] == 3
+    # SMALLCO never reaches the explorer — still 2 indices + 1 stock (WIPRO).
+    assert result["index_count"] == 2
+    assert result["stock_count"] == 1
