@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import importlib
 import time
 from collections.abc import Iterator
 from datetime import date
@@ -30,7 +31,6 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 
-import brutex.dashboard.app as app_module
 from brutex.config.credentials import ENV_CREDENTIALS_FILE
 from brutex.dashboard.app import (
     DashboardState,
@@ -47,6 +47,13 @@ from brutex.data.timeframe_materialize import MaterializeResult
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
+
+# The monkeypatch target for the route handlers' module-level
+# collaborators (pull_candles / pull_all_spot / ...). Resolved via the
+# module machinery so brutex.dashboard.app has ONE import style in this
+# file (CodeQL import/import-from mixing — the test_dashboard_lazy_exports
+# precedent).
+app_module = importlib.import_module("brutex.dashboard.app")
 
 # ────────────────────────────────────────────────────────────────────────
 # Fixtures + fakes
