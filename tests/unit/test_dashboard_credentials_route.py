@@ -68,3 +68,41 @@ def test_valid_jwt_saves_and_returns_masked_preview(client: TestClient, tmp_path
     # The full secret is never echoed back.
     assert _VALID_JWT not in str(body)
     assert (tmp_path / "credentials.json").exists()
+
+
+def test_blank_client_id_maps_credentials_error_to_400(client: TestClient, tmp_path: Path) -> None:
+    """A blank client_id raises CredentialsError in the store → HTTP 400 naming the field."""
+    resp = client.post(
+        "/api/v1/credentials",
+        json={"access_token": _VALID_JWT, "client_id": ""},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "client_id must not be blank"
+    # Nothing was persisted — the save failed validation before writing.
+    assert not (tmp_path / "credentials.json").exists()
+
+
+def test_status_reports_absent_then_present(client: TestClient) -> None:
+    """GET /api/v1/credentials/status flips present false → true after a valid save."""
+    before = client.get("/api/v1/credentials/status")
+    assert before.status_code == 200
+    assert before.json()["present"] is False
+    save = client.post(
+        "/api/v1/credentials",
+        json={"access_token": _VALID_JWT, "client_id": _CLIENT_ID},
+    )
+    assert save.status_code == 200
+    after = client.get("/api/v1/credentials/status")
+    assert after.status_code == 200
+    body = after.json()
+    assert body["present"] is True
+    # The status preview never echoes a usable secret.
+    assert _VALID_JWT not in str(body)
+
+
+def test_credentials_page_serves_html(client: TestClient) -> None:
+    """GET /credentials serves the Credentials page HTML (DEC-CREDENTIALS-STORE-001)."""
+    resp = client.get("/credentials")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    assert "/api/v1/credentials" in resp.text
