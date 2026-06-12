@@ -413,33 +413,14 @@ filterwarnings = [
 source = ["brutex"]
 branch = true
 parallel = true
-omit = [
-    # CLI layer — exercised manually via dry-run smoke tests; full
-    # automated coverage comes in a follow-up PR alongside a CLI
-    # snapshot-test harness.
-    "brutex/cli.py",
-    # `python -m brutex` launcher — a 3-line shim delegating to cli.main;
-    # exercised manually, same rationale as cli.py above.
-    "brutex/__main__.py",
-    # DEC-DASHBOARD-OMIT-AUDIT-001 (2026-06-01): the 5-agent verification
-    # found the old "needs [data]/[ui] extras, not installed in CI" rationale
-    # was STALE — [data] (DEC-P0-001) and [ui] (DEC-DASHBOARD-CI-UNMASK-001,
-    # #279) are BOTH installed in the CI test job, and tests/integration runs
-    # there. So feed/replay (100%), strategies/sweep (99%), strategies/runner
-    # (98%), data/sink (96%), data/parquet_writer (93%), and dashboard/app.py
-    # (~75%, exercised by the now-un-skipped dashboard suite) were UN-OMITTED;
-    # their coverage now counts toward the 90% floor (verified aggregate
-    # 97.70%). `execution/driver.py` was UN-OMITTED at 100% line+branch
-    # (DEC-COVERAGE-DRIVER-001 — tests/unit/test_execution_driver_edges.py +
-    # tests/integration/test_execution_driver.py); `data/catalog.py` was
-    # UN-OMITTED at 100% line+branch (DEC-COVERAGE-CATALOG-001 —
-    # tests/integration/test_data_lake_real.py + tests/integration/test_catalog.py).
-    # `data/instrument_store.py` was UN-OMITTED at 100% line+branch
-    # (DEC-COVERAGE-INSTRUMENT-STORE-001, MIGRATION.md #392 —
-    # tests/integration/test_instrument_store.py +
-    # tests/integration/test_instrument_store_edges.py); its coverage now
-    # counts toward the 90% floor.
-]
+# The omit list is now EMPTY and the key is removed (DEC-COV-CLI-HARNESS-001,
+# 2026-06-12): brutex/cli.py + brutex/__main__.py — the last two omitted
+# modules — were backfilled to 100.00% line+branch (tests/unit/test_cli_run.py
+# / test_cli_retry_storm.py / test_cli_backfill.py plus the existing
+# tests/integration CLI suites), so the fail_under=100 floor below covers the
+# WHOLE package. Prior un-omit history (DEC-DASHBOARD-OMIT-AUDIT-001,
+# DEC-COVERAGE-DRIVER-001, DEC-COVERAGE-CATALOG-001,
+# DEC-COVERAGE-INSTRUMENT-STORE-001) lives in docs/MIGRATION.md.
 
 [tool.coverage.report]
 precision = 2

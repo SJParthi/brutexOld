@@ -4,9 +4,9 @@
 Proves the operability gap is closed: the BLAKE3 sweep-supervisor chain that
 previously raised a FALSE ``AUDIT CHAIN CORRUPT`` now verifies cleanly, and the
 exit-code contract (0 OK / 1 user error / 2 corruption) holds across both
-formats and the ``--format`` override. ``brutex/cli.py`` is coverage-omitted
-(per pyproject [tool.coverage.run].omit), so these live in integration to prove
-the wiring rather than to hit a coverage gate.
+formats and the ``--format`` override. ``brutex/cli.py`` is measured at 100%
+line+branch (DEC-COV-CLI-HARNESS-001 — no longer coverage-omitted); these live
+in integration because they prove the real-file wiring end to end.
 """
 
 from __future__ import annotations
