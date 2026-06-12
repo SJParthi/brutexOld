@@ -164,6 +164,15 @@ def _add_sweep_grid_args(
         help="Refuse any tuple whose mask count exceeds this (honest opt-in guard)",
     )
     parser.add_argument(
+        "--allow-missing-slices",
+        action="store_true",
+        help=(
+            "Proceed even when some requested (symbol, interval) pairs have ZERO "
+            "bars (those tuples skip as no-bars). Default: REFUSE with the exact "
+            "missing list + remediation (DEC-SWEEP-PREFLIGHT-001)"
+        ),
+    )
+    parser.add_argument(
         "--data-snapshot-hash",
         default=None,
         dest="data_snapshot_hash",
@@ -2296,6 +2305,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     stage3_top_k: int | None = None,
     stage3_fevals: int | None = None,
     stage3_restarts: int | None = None,
+    allow_missing_slices: bool = False,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -2407,6 +2417,33 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
+
+    # LOUD slice preflight (DEC-SWEEP-PREFLIGHT-001): a requested pair with zero
+    # bars must REFUSE the launch (naming every missing pair + the exact remedy)
+    # instead of silently skipping its tuples as no-bars — unless the operator
+    # deliberately opted into partial coverage with --allow-missing-slices.
+    from brutex.engine.sweep_preflight import preflight_slices
+
+    preflight = preflight_slices(
+        {key: len(bars) for key, bars in slices.items()},
+        symbols=symbol_list,
+        intervals=interval_list,
+    )
+    if not preflight.ok:
+        missing_str = ", ".join(f"{s}/{i}" for s, i in preflight.missing)
+        if not allow_missing_slices:
+            print(
+                f"[brutex] REFUSED: {len(preflight.missing)} of {preflight.requested} "
+                f"requested (symbol, interval) pairs have ZERO bars: {missing_str}. "
+                f"Remedy: {preflight.remediation()} — or re-run with "
+                "--allow-missing-slices to sweep partial coverage deliberately.",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
+        print(
+            f"[brutex] WARNING: sweeping PARTIAL coverage (--allow-missing-slices): "
+            f"{len(preflight.missing)} empty pairs will skip as no-bars: {missing_str}"
+        )
 
     # Trading minutes, not wall-clock (1day -> 375-min session, NOT 1440 — DEC-TF-VOCAB-21-001).
     timeframes = [
@@ -3961,6 +3998,7 @@ def main(argv: list[str] | None = None) -> int:
             stage3_top_k=args.stage3_top_k,
             stage3_fevals=args.stage3_fevals,
             stage3_restarts=args.stage3_restarts,
+            allow_missing_slices=args.allow_missing_slices,
         )
     # Scheduled/daemon sweep runner (DEC-SWEEP-SCHEDULER-001) — reuses cmd_sweep_all
     # for the grid; the scheduler core decides only WHEN each cycle fires.
