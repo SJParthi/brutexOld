@@ -128,7 +128,7 @@ The probe MUST resolve, with committed transcripts, all of:
 
 | PR | What lands | Reversible? |
 |---|---|---|
-| **A (this PR)** | ADR-0009 + `scripts/groww_probe.py` + MIGRATION entry #636 | Trivial (docs + standalone script) |
+| **A (this PR)** | ADR-0009 + `scripts/groww_probe.py` + MIGRATION entry #667 | Trivial (docs + standalone script) |
 | **A.1 (operator)** | Probe transcripts committed to `docs/groww/probe/` | Data only |
 | **B** | `pyproject.toml` `groww` extra re-added (`growwapi`+`pyotp`), passing `pip-audit`/`safety`/`cargo deny` | Pure addition |
 | **C** | `brutex/adapters/groww/{__init__,constants,auth,errors,client,parser,chunks}` | Pure addition (no callers) |
