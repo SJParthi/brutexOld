@@ -1,0 +1,269 @@
+"""Groww instrument-master parsing + the O(1) lookup index.
+
+DEC-GROWW-ADAPTER-LEAF-001 follow-up (PR-D, ADR-0009 §5). Parses the verified
+21-column Groww instrument master (``docs/groww/probe/INSTRUMENT_MASTER_FINDINGS.md``)
+into the vendor-neutral :class:`brutex.models.Instrument`, and builds the two
+in-memory dicts that guarantee **O(1) instrument lookup + symbol mapping** (the
+operator's hard requirement):
+
+* ``by_groww_symbol``      — ``"NSE-NIFTY" -> Instrument``            (O(1))
+* ``by_exchange_symbol``   — ``(Exchange.NSE, "NIFTY") -> Instrument`` (O(1))
+
+The CSV is parsed once in a single O(n) pass (:func:`build_index`); every
+downstream resolution is O(1) ``dict`` access — no list scans anywhere. Out-of-
+scope rows (MCX / COMMODITY / unknown type) are filtered, never raised. The live
+download (HTTP fetch behind the ``GROWW_CSV_ALLOWED_HOST`` SSRF allowlist) lands
+in PR-E; this module takes already-fetched CSV text so it is fully testable with
+golden fixtures — no live API.
+
+The Groww → ``Instrument`` field mapping (operator-approved "reuse the model"):
+``exch_id`` ← exchange · ``security_id`` ← exchange_token · ``symbol_name`` ←
+trading_symbol · ``display_name`` ← name · ``instrument`` ← instrument_type
+(already ``IDX/EQ/FUT/CE/PE``) · index rows → ``Segment.INDEX`` (else CASH/FNO).
+"""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal, InvalidOperation
+from io import StringIO
+
+from brutex.adapters.groww.constants import (
+    EXCLUDED_SEGMENTS,
+    GROWW_EXCHANGES,
+    GROWW_INSTRUMENT_TYPES,
+    INSTRUMENT_CSV_COLUMNS,
+)
+from brutex.models import (
+    Exchange,
+    Instrument,
+    InstrumentFormatError,
+    InstrumentType,
+    Segment,
+)
+
+_OPTION_TYPES = frozenset({InstrumentType.CE, InstrumentType.PE})
+
+
+def _clean(value: str | None) -> str | None:
+    """Return a stripped non-empty cell, or ``None`` for blank/absent."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _int_or_zero(value: str | None, *, field: str, gsym: str) -> int:
+    """Parse an int cell; a blank maps to ``0`` (indices have no lot/freeze)."""
+    text = _clean(value)
+    if text is None:
+        return 0
+    try:
+        return int(text)
+    except ValueError as exc:
+        raise InstrumentFormatError(f"{gsym}: unparseable {field}: {value!r}") from exc
+
+
+def _security_id(token: str | None, *, gsym: str) -> int:
+    """Resolve the model's int ``security_id`` from Groww's ``exchange_token``.
+
+    Options/equities carry a numeric token (e.g. ``50467``) → used directly.
+    Indices carry a STRING token (e.g. ``INDIAVIX`` / ``NIFTY``), but the model's
+    ``security_id`` is ``int`` and the ``groww_symbol`` dict is the real identity
+    key — so for a non-numeric token we derive a DETERMINISTIC surrogate from the
+    ``groww_symbol`` (a stable blake2b-4byte int). This is an internal surrogate,
+    explicitly NOT a vendor id (Golden Rule #1); index identity stays unique via
+    the distinct ``groww_symbol`` + the ``Segment.INDEX`` PK partition.
+    """
+    text = _clean(token)
+    if text is not None and text.isdigit():
+        return int(text)
+    return int.from_bytes(hashlib.blake2b(gsym.encode(), digest_size=4).digest(), "big")
+
+
+def _opt_int(value: str | None, *, field: str, gsym: str) -> int | None:
+    """Parse an optional int cell; blank → ``None``, malformed → raise."""
+    text = _clean(value)
+    if text is None:
+        return None
+    try:
+        return int(text)
+    except ValueError as exc:
+        raise InstrumentFormatError(f"{gsym}: unparseable {field}: {value!r}") from exc
+
+
+def _opt_decimal(value: str | None, *, field: str, gsym: str) -> Decimal | None:
+    """Parse an optional Decimal cell (exact via str); blank → ``None``."""
+    text = _clean(value)
+    if text is None:
+        return None
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation as exc:
+        raise InstrumentFormatError(f"{gsym}: unparseable {field}: {value!r}") from exc
+    if not parsed.is_finite():
+        raise InstrumentFormatError(f"{gsym}: non-finite {field}: {value!r}")
+    return parsed
+
+
+def _opt_date(value: str | None, *, field: str, gsym: str) -> date | None:
+    """Parse an optional ISO ``YYYY-MM-DD`` date cell; blank → ``None``."""
+    text = _clean(value)
+    if text is None:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError as exc:
+        raise InstrumentFormatError(f"{gsym}: unparseable {field}: {value!r}") from exc
+
+
+def _segment_for(itype: InstrumentType, groww_segment: str | None, *, gsym: str) -> Segment:
+    """Map a Groww segment to the neutral :class:`Segment`.
+
+    Indices take ``Segment.INDEX`` regardless of the Groww ``CASH`` label
+    (DEC-INDEX-SEGMENT-PK-FIX-001 keeps indices off the cash PK).
+    """
+    if itype == InstrumentType.IDX:
+        return Segment.INDEX
+    if groww_segment == "CASH":
+        return Segment.CASH
+    if groww_segment == "FNO":
+        return Segment.FNO
+    raise InstrumentFormatError(f"{gsym}: unmappable segment {groww_segment!r}")
+
+
+def is_in_scope_row(row: dict[str, str]) -> bool:
+    """True if a CSV row is in Track-1 scope (NSE/BSE, not COMMODITY, known type).
+
+    Filters MCX, the COMMODITY segment, and any unknown instrument type — those
+    are skipped (never raised), so an out-of-scope row never reaches the model.
+    """
+    return (
+        _clean(row.get("exchange")) in GROWW_EXCHANGES
+        and _clean(row.get("segment")) not in EXCLUDED_SEGMENTS
+        and _clean(row.get("instrument_type")) in GROWW_INSTRUMENT_TYPES
+    )
+
+
+def parse_instrument_row(row: dict[str, str]) -> tuple[str, Instrument]:
+    """Map one in-scope 21-column Groww CSV row to ``(groww_symbol, Instrument)``.
+
+    Raises :class:`InstrumentFormatError` on a malformed required field (the
+    :class:`Instrument` constructor additionally enforces the derivative /
+    option / lot-tick invariants).
+    """
+    gsym = _clean(row.get("groww_symbol"))
+    if gsym is None:
+        raise InstrumentFormatError(f"row missing groww_symbol: {row!r}")
+    itype = InstrumentType(row["instrument_type"].strip())
+    is_option = itype in _OPTION_TYPES
+
+    instrument = Instrument(
+        exch_id=Exchange(row["exchange"].strip()),
+        security_id=_security_id(row.get("exchange_token"), gsym=gsym),
+        symbol_name=row["trading_symbol"].strip(),
+        display_name=_clean(row.get("name")),
+        instrument=itype,
+        segment=_segment_for(itype, _clean(row.get("segment")), gsym=gsym),
+        series=_clean(row.get("series")),
+        isin=_clean(row.get("isin")),
+        underlying_symbol=_clean(row.get("underlying_symbol")),
+        underlying_security_id=_opt_int(
+            row.get("underlying_exchange_token"), field="underlying_exchange_token", gsym=gsym
+        ),
+        lot_size=_int_or_zero(row.get("lot_size"), field="lot_size", gsym=gsym),
+        tick_size=_opt_decimal(row.get("tick_size"), field="tick_size", gsym=gsym) or Decimal(0),
+        sm_freeze_qty=_opt_int(row.get("freeze_quantity"), field="freeze_quantity", gsym=gsym),
+        sm_expiry_date=_opt_date(row.get("expiry_date"), field="expiry_date", gsym=gsym),
+        strike_price=_opt_decimal(row.get("strike_price"), field="strike_price", gsym=gsym),
+        option_type=itype.value if is_option else None,
+        expiry_flag=None,
+        asm_gsm_flag=_clean(row.get("is_reserved")) == "1",
+    )
+    return gsym, instrument
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentIndex:
+    """O(1) instrument lookup built in one pass over the master.
+
+    ``by_groww_symbol`` keys on the Groww-native ``"EXCH-SYMBOL[-…]"`` string;
+    ``by_exchange_symbol`` keys on ``(Exchange, trading_symbol)``. Both resolve
+    in O(1); ``universe`` is the immutable in-scope page.
+    """
+
+    by_groww_symbol: dict[str, Instrument]
+    by_exchange_symbol: dict[tuple[Exchange, str], Instrument]
+    universe: tuple[Instrument, ...]
+
+
+def build_index(pairs: Iterable[tuple[str, Instrument]]) -> InstrumentIndex:
+    """Build the two O(1) dicts in a single O(n) pass (first-wins dedup).
+
+    A duplicate ``groww_symbol`` keeps the first occurrence (the master
+    occasionally repeats a key); the dedup is O(1) per row via ``dict`` membership
+    — never a nested scan.
+    """
+    by_groww: dict[str, Instrument] = {}
+    by_pair: dict[tuple[Exchange, str], Instrument] = {}
+    universe: list[Instrument] = []
+    for gsym, instrument in pairs:
+        if gsym in by_groww:
+            continue  # first-wins dedup, O(1)
+        by_groww[gsym] = instrument
+        by_pair[(instrument.exch_id, instrument.symbol_name)] = instrument
+        universe.append(instrument)
+    return InstrumentIndex(
+        by_groww_symbol=by_groww,
+        by_exchange_symbol=by_pair,
+        universe=tuple(universe),
+    )
+
+
+def parse_instrument_csv(text: str) -> list[tuple[str, Instrument]]:
+    """Parse Groww instrument-master CSV text into in-scope ``(gsym, Instrument)``.
+
+    Validates the header against the verified 21-column schema (fail-loud on
+    drift — Golden Rule #1), then parses each in-scope row. Out-of-scope rows
+    (MCX / COMMODITY / unknown type) are skipped.
+    """
+    reader = csv.DictReader(StringIO(text))
+    if tuple(reader.fieldnames or ()) != INSTRUMENT_CSV_COLUMNS:
+        raise InstrumentFormatError(f"Groww instrument header drift: got {reader.fieldnames!r}")
+    parsed: list[tuple[str, Instrument]] = []
+    for row in reader:
+        if not is_in_scope_row(row):
+            continue
+        parsed.append(parse_instrument_row(row))
+    return parsed
+
+
+def load_index_from_csv(text: str) -> InstrumentIndex:
+    """Convenience: parse CSV text and build the O(1) index in one call."""
+    return build_index(parse_instrument_csv(text))
+
+
+def resolve(index: InstrumentIndex, groww_symbol: str) -> Instrument:
+    """O(1) lookup by ``groww_symbol``; raises ``KeyError`` if absent."""
+    return index.by_groww_symbol[groww_symbol]
+
+
+def resolve_by_pair(index: InstrumentIndex, exchange: Exchange, trading_symbol: str) -> Instrument:
+    """O(1) lookup by ``(exchange, trading_symbol)``; raises ``KeyError`` if absent."""
+    return index.by_exchange_symbol[(exchange, trading_symbol)]
+
+
+__all__ = [
+    "InstrumentIndex",
+    "build_index",
+    "is_in_scope_row",
+    "load_index_from_csv",
+    "parse_instrument_csv",
+    "parse_instrument_row",
+    "resolve",
+    "resolve_by_pair",
+]
