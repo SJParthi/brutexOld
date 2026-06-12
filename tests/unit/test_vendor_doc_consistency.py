@@ -1,13 +1,16 @@
 """Vendor single-source-of-truth guard (DEC-DHAN-DOC-RECONCILE-001).
 
-Regression test for the Groww -> Dhan reconciliation: the live vendor is
-Dhan Data API v2 (DEC-GROWW-DHAN-REVERT-001, ADR-0002). These assertions
-fail if a future change re-introduces the breaking Groww-era operator
-instructions that the reconciliation PR repaired:
+Vendor-state guard, updated for the Dhan → Groww re-migration
+(DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009). The `groww` optional extra is now
+RE-ADDED (PR-B) because the vendor SDK returns; but the OPERATOR-FACING auth
+docs still describe Dhan until the cutover PR, and ``bootstrap.sh`` still must
+NOT install the optional extra (installing it is what broke ``make setup``
+historically). So these assertions now check:
 
-* the removed ``groww`` pip extra (which broke ``make setup``), or
-* the wrong ``BRUTEX_GROWW_*`` auth env vars in the operator-facing docs
-  (which silently mis-authenticate a live Dhan pull).
+* the ``groww`` pip extra IS present and declares ``growwapi`` (re-migration), AND
+* ``bootstrap.sh`` does NOT pip-install it (it stays optional — unchanged), AND
+* the operator-facing docs still carry the live Dhan auth env vars and do NOT
+  yet carry ``BRUTEX_GROWW_*`` auth vars (those land at cutover, not now).
 
 Scope is deliberately narrow (the *breaking* surfaces only): the pre-Dhan
 ``brutex.orchestrator.adaptive_rate_limiter`` still reads legacy
@@ -48,12 +51,21 @@ _DHAN_AUTH_VARS: tuple[str, ...] = (
 _GROWW_EXTRA_RE = re.compile(r"\.\[[^\]]*groww[^\]]*\]")
 
 
-def test_pyproject_has_no_groww_extra() -> None:
-    """The ``groww`` optional-dependency extra was removed (Dhan needs no SDK)."""
+def test_pyproject_has_groww_extra() -> None:
+    """The ``groww`` optional extra is RE-ADDED for the re-migration.
+
+    DEC-DHAN-GROWW-REMIGRATE-001 (ADR-0009) reverses the DEC-DHAN-FINALIZE-001
+    removal: the vendor SDK returns, so the extra must exist and declare
+    ``growwapi``. It stays OPTIONAL (``bootstrap.sh`` must not install it —
+    asserted by :func:`test_bootstrap_does_not_install_groww_extra`).
+    """
     raw = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     data = tomllib.loads(raw)
     extras = data["project"]["optional-dependencies"]
-    assert "groww" not in extras, f"groww extra is back in pyproject: {sorted(extras)}"
+    assert "groww" in extras, f"groww extra missing from pyproject: {sorted(extras)}"
+    assert any("growwapi" in dep for dep in extras["groww"]), (
+        f"groww extra must declare growwapi: {extras['groww']}"
+    )
 
 
 def test_bootstrap_does_not_install_groww_extra() -> None:
