@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase-0 empirical probe for the Dhan -> Groww re-migration (ADR-0009).
 
-`DEC-DHAN-GROWW-REMIGRATE-001` (MIGRATION.md #664). ADR-0009 reverses ADR-0002
+`DEC-DHAN-GROWW-REMIGRATE-001` (MIGRATION.md #666). ADR-0009 reverses ADR-0002
 (Dhan) back to Groww on operator directive, OVERRIDING a 4-agent hostile-review
 NO-GO. The override is conditional on this probe: several Groww facts are
 UNVERIFIED and MUST NOT be encoded as fact in adapter code until a committed
