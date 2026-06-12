@@ -155,7 +155,11 @@ class TestMigration:
 
 class TestPlanWindows:
     def test_plans_every_tile_idempotently(self, tmp_path: Path) -> None:
-        from brutex.adapters.dhan.ingest import _windows
+        from brutex.adapters.dhan.ingest import _dhan_window_days_for
+        from brutex.adapters.ingest_common import tile_windows
+
+        def _windows(interval: str, start: date, end: date) -> list[tuple[date, date]]:
+            return tile_windows(interval, start, end, window_days_for=_dhan_window_days_for)
 
         ledger = WindowLedger()
         instruments = [_FakeInstrument("NIFTY"), _FakeInstrument("SENSEX")]
@@ -279,7 +283,11 @@ class TestPruneOnPlan:
         # plan's tiling, whose keys the prune always keeps (equal-end rule).
         # Pin that after plan→prune→reconcile, no pruned (shorter-end) key has
         # been re-seeded and every current-plan key survived the prune.
-        from brutex.adapters.dhan.ingest import _windows
+        from brutex.adapters.dhan.ingest import _dhan_window_days_for
+        from brutex.adapters.ingest_common import tile_windows
+
+        def _windows(interval: str, start: date, end: date) -> list[tuple[date, date]]:
+            return tile_windows(interval, start, end, window_days_for=_dhan_window_days_for)
 
         ledger = WindowLedger()
         instrument = _inst(symbol="NIFTY")

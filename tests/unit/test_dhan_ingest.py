@@ -22,7 +22,6 @@ from brutex.adapters.dhan.ingest import (
     IngestReport,
     clamp_window_end,
     ingest_spot,
-    summarize_conflicts,
 )
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
@@ -996,33 +995,6 @@ class TestPaceRps:
         from brutex.adapters.dhan.ingest import _pace_rps  # type: ignore[reportPrivateUsage]
 
         assert _pace_rps(None) == 5.0
-
-
-class TestSummarizeConflicts:
-    """Direct unit cover for the pure ``summarize_conflicts`` helper
-    (DEC-LAKE-CONFLICT-LOG-AGG-001)."""
-
-    def test_empty_is_zero_and_none(self) -> None:
-        """No conflicts → zero count, empty fields, zero delta, null timestamps."""
-        assert summarize_conflicts([]) == {
-            "conflicts": 0,
-            "differing_fields": "",
-            "max_close_delta": "0",
-            "first_ts": None,
-            "last_ts": None,
-        }
-
-    def test_first_and_last_ts_are_order_independent(self) -> None:
-        """``first_ts`` / ``last_ts`` are the min / max regardless of input order."""
-        early = datetime.fromtimestamp(1609733100, tz=UTC)
-        late = datetime.fromtimestamp(1609740000, tz=UTC)
-        # Feed LATE first, EARLY second — min/max must still bracket correctly.
-        c_late = _make_conflict(ts_epoch=int(late.timestamp()))
-        c_early = _make_conflict(ts_epoch=int(early.timestamp()))
-        summary = summarize_conflicts([c_late, c_early])
-        assert summary["conflicts"] == 2
-        assert summary["first_ts"] == early.isoformat()
-        assert summary["last_ts"] == late.isoformat()
 
 
 class TestIngestSpotConflicts:

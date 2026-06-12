@@ -358,7 +358,19 @@ def plan_windows(
     moving between this plan and a fetch crossing 15:30 IST) self-heals on the
     next pull's plan→prune cycle.
     """
-    from brutex.adapters.dhan.ingest import _MARKET, _now_ist, _windows, clamp_window_end
+    # Vendor-neutral tiling/clamp helpers live in ingest_common (CLAUDE.md §11
+    # COMMON); the Dhan interval→width policy is the spine's own resolver. The
+    # coverage market namespace is passed explicitly (this store plans the Dhan
+    # spine's windows). Imported locally to avoid an import cycle (this module is
+    # in brutex.data, which the ingest spines depend on).
+    from brutex.adapters.dhan.ingest import _MARKET, _dhan_window_days_for
+    from brutex.adapters.ingest_common import (
+        clamp_window_end,
+        tile_windows,
+    )
+    from brutex.adapters.ingest_common import (
+        now_ist as _now_ist,
+    )
 
     stamp = now if now is not None else datetime.now(UTC)
     ist = now_ist if now_ist is not None else _now_ist()
@@ -371,7 +383,11 @@ def plan_windows(
         interval: clamp_window_end(interval, end, now_ist=ist) for interval in intervals
     }
     tiles_by_interval: dict[str, list[tuple[date, date]]] = {
-        interval: (_windows(interval, start, clamped) if start < clamped else [])
+        interval: (
+            tile_windows(interval, start, clamped, window_days_for=_dhan_window_days_for)
+            if start < clamped
+            else []
+        )
         for interval, clamped in clamped_ends.items()
     }
     tiles_iso: dict[str, dict[str, str]] = {
@@ -424,7 +440,11 @@ def reconcile_ledger_windows(
     *spans* is the :func:`~brutex.dashboard.coverage_reconcile.load_lake_spans`
     shape. O(windows) once at pull start. Returns the number of windows seeded.
     """
-    from brutex.adapters.dhan.ingest import _MARKET, _windows
+    # Shared vendor-neutral tiler + the Dhan width policy (CLAUDE.md §11 COMMON);
+    # the coverage market namespace is passed explicitly. Local import avoids the
+    # brutex.data ↔ ingest spine import cycle.
+    from brutex.adapters.dhan.ingest import _MARKET, _dhan_window_days_for
+    from brutex.adapters.ingest_common import tile_windows
 
     stamp = now if now is not None else datetime.now(UTC)
     span_by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {
@@ -451,7 +471,9 @@ def reconcile_ledger_windows(
                 continue
             first_date = date.fromisoformat(str(entry["first_date"]))
             last_date = date.fromisoformat(str(entry["last_date"]))
-            for window_start, window_end in _windows(interval, start, end):
+            for window_start, window_end in tile_windows(
+                interval, start, end, window_days_for=_dhan_window_days_for
+            ):
                 if not (first_date <= window_start and window_end <= last_date):
                     continue
                 if ledger.seed_lake_success(

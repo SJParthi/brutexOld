@@ -1389,14 +1389,16 @@ jobs:
           else
             echo "(brutex.adapters.dhan.run_ingest test file not present yet — gate inactive)"
           fi
-          # Ratchet `brutex.adapters.dhan.auto_retry` (post-run leftover-window
-          # auto-retry round loop — DEC-INGEST-AUTO-RETRY-001) into the strict
-          # per-module 100% gate. The module is wheel-free, so its unit suite
-          # covers every line + branch via a fake run_pass + injected backoff.
-          if compgen -G "tests/unit/test_dhan_auto_retry.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.auto_retry --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_auto_retry.py
+          # Ratchet `brutex.adapters.ingest_common` (the VENDOR-NEUTRAL ingest
+          # utilities extracted out of the dhan package — DEC-INGEST-COMMON-001:
+          # retry_failed_windows + summarize_conflicts + DateWindow/plan_windows +
+          # the window-tiling/clamp helpers, consumed by BOTH dhan and groww) into
+          # the strict per-module 100% gate. Wheel-free: covered by fakes + injected
+          # backoff + the injected known-gap predicate (both the passed + default arms).
+          if compgen -G "tests/unit/test_ingest_common.py" > /dev/null; then
+            pytest --cov=brutex.adapters.ingest_common --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_ingest_common.py tests/unit/test_ingest_common_auto_retry.py
           else
-            echo "(brutex.adapters.dhan.auto_retry test file not present yet — gate inactive)"
+            echo "(brutex.adapters.ingest_common test file not present yet — gate inactive)"
           fi
           # Ratchet `brutex.adapters.dhan.token_preflight` (the PURE token-state
           # classifier valid/expiring-soon/dead + the DEAD→auth_expired verdict —

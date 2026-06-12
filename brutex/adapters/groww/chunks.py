@@ -10,17 +10,16 @@ Groww caps the date range per backtesting call by **interval tier**
 This is richer than Dhan's single 90/30 split, so the only Groww-specific logic
 here is :func:`window_days_for_interval` (interval → window width). The actual
 tiling reuses the **vendor-neutral, symbol-free**
-:func:`brutex.adapters.dhan.chunks.plan_windows` (CLAUDE.md §11 COMMON — no
-copy-paste; the jscpd gate enforces this). PR-F extracts that shared tiler to
-``brutex/adapters/_common/`` when Dhan is deleted; until then importing it is
-the minimum-new-code, duplication-free choice.
+:func:`brutex.adapters.ingest_common.plan_windows` (CLAUDE.md §11 COMMON — no
+copy-paste; the jscpd gate enforces this). The shared tiler + :class:`DateWindow`
+live in :mod:`brutex.adapters.ingest_common`, imported by BOTH vendor chunk
+planners, so neither vendor package depends on the other.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from brutex.adapters.dhan.chunks import DateWindow, plan_windows
 from brutex.adapters.groww.constants import (
     CHUNK_WINDOW_30D_INTERVALS,
     CHUNK_WINDOW_90D_INTERVALS,
@@ -29,6 +28,7 @@ from brutex.adapters.groww.constants import (
     WINDOW_DAYS_90,
     WINDOW_DAYS_180,
 )
+from brutex.adapters.ingest_common import DateWindow, plan_windows
 
 
 def window_days_for_interval(interval: str) -> int:
