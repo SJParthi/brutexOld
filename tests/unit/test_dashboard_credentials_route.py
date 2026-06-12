@@ -100,9 +100,18 @@ def test_status_reports_absent_then_present(client: TestClient) -> None:
     assert _VALID_JWT not in str(body)
 
 
-def test_credentials_page_serves_html(client: TestClient) -> None:
-    """GET /credentials serves the Credentials page HTML (DEC-CREDENTIALS-STORE-001)."""
-    resp = client.get("/credentials")
+def test_credentials_page_redirects_to_groww(client: TestClient) -> None:
+    """GET /credentials 307-redirects to the now-PRIMARY Groww page (DEC-DHAN-GROWW-REMIGRATE-001)."""
+    resp = client.get("/credentials", follow_redirects=False)
+    assert resp.status_code == 307
+    assert resp.headers["location"] == "/groww-credentials"
+
+
+def test_credentials_page_redirect_lands_on_groww_html(client: TestClient) -> None:
+    """Following the /credentials redirect serves the Groww credentials page."""
+    resp = client.get("/credentials")  # default: follow the redirect
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
-    assert "/api/v1/credentials" in resp.text
+    # The followed page is the Groww form, not the legacy Dhan one.
+    assert "/api/v1/groww/credentials" in resp.text
+    assert "Groww API credentials" in resp.text

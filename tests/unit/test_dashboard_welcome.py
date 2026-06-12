@@ -38,7 +38,7 @@ def test_welcome_links_into_every_app_page() -> None:
         'href="/coverage"',
         'href="/reports"',
         'href="/db"',
-        'href="/credentials"',
+        'href="/groww-credentials"',
     ):
         assert href in html, f"welcome page missing nav link {href}"
     # The /logs webpage was removed (DEC-DASHBOARD-LOGS-REMOVE-001).
