@@ -1,10 +1,16 @@
-"""Unit tests for :mod:`brutex.dashboard.pull_controller` (Dhan model).
+"""Unit tests for :mod:`brutex.dashboard.pull_controller` (Groww model).
 
 Offline only — exercises the dry-run synthetic path (no creds / network)
-and the injected-factory path. The live Dhan builder
+and the injected-factory path. The live Groww builder
 (:func:`_build_live_pull_adapter`) is ``# pragma: no cover`` because it needs
-a real token + the ``urllib`` transport, both absent in CI
-(DEC-VENDOR-PIVOT-001).
+a real TOTP token + the Groww SDK, both absent in CI (DEC-VENDOR-PIVOT-001).
+
+PR-J4b vendor cutover: the SPOT pull now runs on the Groww spine
+(``run_groww_spot_ingest`` → ``market="groww"`` ledger rows), which — unlike the
+retired Dhan spine — has NO ``DH-905`` known-gap concept (Golden Rule #1: no
+invented twin). A terminal Groww error is a uniform quarantine → ``failed``; a
+clean 0-bar fetch is the only ``no_data`` source (recorded ``EMPTY``, never a
+settled ``SKIPPED``). The token-lifecycle + options seams stay on ``dhan`` (J4c).
 """
 
 # Whitebox test of the module-private `_maybe_renew_adapter_token` (sanctioned per pyproject.toml).
@@ -19,7 +25,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from brutex.adapters.dhan.errors import DhanBadRequestError
+from brutex.adapters.groww.errors import GrowwBadRequestError
 from brutex.adapters.ingest_common import SyntheticSpotAdapter
 from brutex.adapters.protocol import MarketAdapter
 from brutex.dashboard.pull_controller import (
@@ -84,57 +90,38 @@ class _EmptyAdapter(SyntheticSpotAdapter):
 
 
 class _FailingAdapter(SyntheticSpotAdapter):
-    """A :class:`MarketAdapter` whose every fetch raises a terminal Dhan error.
+    """A :class:`MarketAdapter` whose every fetch raises a terminal Groww error.
 
-    ``DhanBadRequestError`` is non-retryable (``is_retryable`` → False), so
-    :func:`ingest_spot` re-raises and :func:`run_dhan_spot_ingest` quarantines
+    ``GrowwBadRequestError`` is non-retryable (``is_retryable`` → False), so
+    :func:`ingest_spot` re-raises and :func:`run_groww_spot_ingest` quarantines
     the ``(symbol, interval)`` pair into ``failures`` → the ``failed`` branch.
     """
 
     def fetch_ohlcv(
         self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
     ) -> list[CandleBar]:
-        """Always raise a terminal Dhan error — drives the failure branch."""
+        """Always raise a terminal Groww error — drives the failure branch."""
         del symbol, exchange, start, end
-        raise DhanBadRequestError(f"boom for {interval}")
-
-
-class _NoDataDH905Adapter(SyntheticSpotAdapter):
-    """Every fetch raises Dhan's ``DH-905`` "no data present" 400.
-
-    The vendor's DEFINITIVE "no bars exist for this range" answer (not a defect).
-    It must be classified as ``no_data`` (settled / EMPTY), NOT ``failed`` — so it
-    can never pin the pull at ``transient_residual`` / a manual re-pull
-    (DEC-DHAN-NODATA-SETTLED-001).
-    """
-
-    def fetch_ohlcv(
-        self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
-    ) -> list[CandleBar]:
-        """Always raise a ``DH-905`` no-data 400 — drives the known-gap branch."""
-        del symbol, exchange, interval, start, end
-        raise DhanBadRequestError(
-            'HTTP 400 bad request: {"errorCode":"DH-905",'
-            '"errorMessage":"System is unable to fetch data ... or no data present"}'
-        )
+        raise GrowwBadRequestError(f"boom for {interval}")
 
 
 class _DailyGapAdapter(SyntheticSpotAdapter):
-    """The EXACT operator case: ``1minute`` returns bars, ``1day`` is a ``DH-905`` gap.
+    """The EXACT operator case: ``1minute`` returns bars, ``1day`` returns NO bars.
 
-    Mirrors NIFTY NEXT 50 (daily history starts after 2021-01-01). The symbol must
-    finish ``completed=1`` (1m) + ``no_data=1`` (1d known gap) → verdict ``clean``,
-    NOT ``transient_residual`` (DEC-DHAN-NODATA-SETTLED-001).
+    Mirrors NIFTY NEXT 50 (daily history starts after 2021-01-01). Under the Groww
+    spine there is no ``DH-905`` known-gap marker (Golden Rule #1): the vendor's
+    "no data for this range" answer is simply a clean 0-bar fetch, recorded
+    ``EMPTY``. The symbol must finish ``completed=1`` (1m) + ``no_data=1`` (1d
+    empty) → verdict ``clean``, never ``transient_residual`` (the 1day miss is a
+    settled empty, not a quarantined failure).
     """
 
     def fetch_ohlcv(
         self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
     ) -> list[CandleBar]:
-        """Return bars for ``1minute``; raise ``DH-905`` for the ``1day`` series."""
+        """Return bars for ``1minute``; return an empty list for the ``1day`` series."""
         if interval == "1day":
-            raise DhanBadRequestError(
-                'HTTP 400 bad request: {"errorCode":"DH-905","errorMessage":"... no data present"}'
-            )
+            return []
         return super().fetch_ohlcv(
             symbol=symbol, exchange=exchange, interval=interval, start=start, end=end
         )
@@ -283,17 +270,17 @@ class TestPullCandlesDryRun:
         for both fetched intervals (set-asserted — the parallel fan-out's
         completion order is non-deterministic).
         """
-        events: list[tuple[str, int, bool, bool]] = []
+        events: list[tuple[str, int, bool]] = []
         pull_candles(
             _index(),
             lake_root=tmp_path,
             dry_run=True,
             from_date="2021-01-04",
             to_date="2021-01-08",
-            on_progress=lambda label, bars, failed, gap: events.append((label, bars, failed, gap)),
+            on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
         )
         assert {e[0] for e in events} == {"13 1minute", "13 1day"}
-        assert all(failed is False for _, _, failed, _gap in events)
+        assert all(failed is False for _, _, failed in events)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -638,21 +625,21 @@ class TestPullAllSpot:
         assert failed.verdict.pending_windows == 2
         assert failed.to_dict()["verdict"]["needs_operator"] is True
 
-    def test_dh905_no_data_is_settled_not_a_failure(self, tmp_path: Path) -> None:
-        # DEC-DHAN-NODATA-SETTLED-001: a Dhan DH-905 "no data present" is the
-        # vendor's DEFINITIVE answer (no bars for this range), NOT a transient
-        # failure. It must count as no_data (settled), never as a failed/pending
-        # window — so it can NEVER pin the pull at transient_residual / the manual
-        # "Re-pull to finish" button (the operator's NIFTY NEXT 50 daily trap).
+    def test_empty_fetch_is_no_data_not_a_failure(self, tmp_path: Path) -> None:
+        # Groww has NO DH-905 known-gap marker (Golden Rule #1: no invented twin):
+        # the vendor's "no bars for this range" answer is a clean 0-bar fetch,
+        # counted as no_data (recorded EMPTY), NEVER a failed/pending window — so it
+        # can never pin the pull at transient_residual / a manual "Re-pull to
+        # finish" (the operator's NIFTY NEXT 50 daily trap stays solved).
         all_gap = pull_all_spot(
             [_index("13")],
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
-            adapter_factory=lambda _root, _insts: (_NoDataDH905Adapter(), NullBarSink()),
+            adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
         )
         assert all_gap.total_failed == 0  # NOT counted as a failure
-        assert all_gap.total_no_data == 2  # both intervals settled as known-gap
+        assert all_gap.total_no_data == 2  # both intervals are settled no-data (EMPTY)
         # Nothing completed + only no-data → known_gap_only (no operator action),
         # NOT transient_residual — zero manual re-pull is asked.
         assert all_gap.verdict.kind == "known_gap_only"
@@ -769,13 +756,13 @@ class TestPullAllSpot:
         and all are clean. (The deterministic, order-stable surface is the
         ``ingest.underlying`` rollup, covered separately.)
         """
-        events: list[tuple[str, int, bool, bool]] = []
+        events: list[tuple[str, int, bool]] = []
         pull_all_spot(
             [_index("13"), _index("25")],
             lake_root=tmp_path,
             dry_run=True,
             now=_BULK_NOW,
-            on_progress=lambda label, bars, failed, gap: events.append((label, bars, failed, gap)),
+            on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
         )
         # 2 symbols × 2 fetched intervals (1m + 1d) = 4 progress events, all clean.
         assert {e[0] for e in events} == {
@@ -785,7 +772,7 @@ class TestPullAllSpot:
             "25 1day",
         }
         assert len(events) == 4
-        assert all(failed is False for _, _, failed, _gap in events)
+        assert all(failed is False for _, _, failed in events)
 
 
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
@@ -1079,14 +1066,17 @@ class TestPullPopulatesLedger:
         statuses = {r.status for r in ledger.records()}
         assert ledger.count > 0
         assert statuses == {"SUCCESS"}  # every planned window fetched + recorded
-        # The ledger now backs /coverage/windows (every window has a row).
-        assert all(r.market == "dhan" and r.security_id == "13" for r in ledger.records())
+        # The ledger now backs /coverage/windows (every window has a row). The
+        # Groww spot pull stamps the "groww" namespace on both the PLANNED seeds
+        # and the recorded SUCCESS rows, so they reconcile (PR-J4b).
+        assert all(r.market == "groww" and r.security_id == "13" for r in ledger.records())
 
-    def test_dh905_windows_are_settled_skipped(self, tmp_path: Path) -> None:
-        # A DH-905 known-gap is the vendor's definitive no-data; the ingest now
-        # settles it as SKIPPED in the ledger (DEC-WINDOW-LEDGER-001 Stage a) — so
-        # every window is captured in the DB (nothing silently missing) AND its
-        # true settled state is recorded, not a perpetual "pending" row.
+    def test_empty_windows_are_recorded_empty(self, tmp_path: Path) -> None:
+        # Groww has no DH-905 known-gap → no SKIPPED settling (Golden Rule #1). A
+        # clean 0-bar fetch is recorded EMPTY in the ledger so every window is
+        # captured in the DB (nothing silently missing) with its true outcome, not
+        # a perpetual "pending" PLANNED row. (An EMPTY seen EMPTY_TERMINAL_THRESHOLD
+        # separate pulls later promotes to SKIPPED — out of scope for one pull.)
         from brutex.data.window_ledger_store import ledger_path, load_window_ledger
 
         pull_all_spot(
@@ -1094,12 +1084,12 @@ class TestPullPopulatesLedger:
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
-            adapter_factory=lambda _root, _insts: (_NoDataDH905Adapter(), NullBarSink()),
+            adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
         )
         assert ledger_path(tmp_path).is_file()
         ledger = load_window_ledger(tmp_path)
         assert ledger.count > 0
-        assert {r.status for r in ledger.records()} == {"SKIPPED"}  # settled known-gap
+        assert {r.status for r in ledger.records()} == {"EMPTY"}  # settled empty, never SKIPPED
 
     def test_dry_run_writes_no_ledger(self, tmp_path: Path) -> None:
         from brutex.data.window_ledger_store import ledger_path
@@ -1153,8 +1143,8 @@ class TestQuotaDeathMidRound:
         """One quota-dying live-pattern pull over a tiny 5-day window (2 windows)."""
         minute_done, factory = self._quota_death_scaffold()
 
-        def _on_progress(label: str, bars: int, failed: bool, gap: bool = False) -> None:
-            del bars, failed, gap
+        def _on_progress(label: str, bars: int, failed: bool) -> None:
+            del bars, failed
             if "1minute" in label:
                 minute_done.set()
 
@@ -1244,7 +1234,7 @@ class TestQuotaDeathMidRound:
                 if interval == "1day":
                     if state["round"] >= 2:
                         raise DailyQuotaExceeded("daily quota of 100000 calls spent")
-                    raise DhanBadRequestError("boom 1day")  # round 1: terminal quarantine
+                    raise GrowwBadRequestError("boom 1day")  # round 1: terminal quarantine
                 return super().fetch_ohlcv(
                     symbol=symbol, exchange=exchange, interval=interval, start=start, end=end
                 )

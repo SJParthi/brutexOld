@@ -71,6 +71,7 @@ import structlog
 from brutex.adapters.groww.chunks import window_days_for_interval
 from brutex.adapters.groww.errors import GrowwError, is_rate_limit, is_retryable
 from brutex.adapters.ingest_common import (
+    GROWW_COVERAGE_MARKET,
     clamp_window_end,
     summarize_conflicts,
     tile_windows,
@@ -101,8 +102,10 @@ Pacer = Callable[[], None]
 _DAILY: str = "1day"
 
 #: The data-source namespace stamped on every coverage :class:`WindowKey`. ``"groww"``
-#: keeps Groww windows from colliding with Dhan's on the shared lake ledger.
-_MARKET: str = "groww"
+#: keeps Groww windows from colliding with Dhan's on the shared lake ledger. Sourced
+#: from the shared :data:`~brutex.adapters.ingest_common.GROWW_COVERAGE_MARKET` so the
+#: spine AND the ledger-seeding helpers carry ONE literal (CLAUDE.md §11 COMMON).
+_MARKET: str = GROWW_COVERAGE_MARKET
 
 #: In-run transient-window auto-retry budget (mirrors the Dhan spine). After the
 #: first fan-out pass, windows that returned a RETRYABLE Groww error (rate-limit /

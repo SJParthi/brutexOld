@@ -217,6 +217,15 @@ def tile_windows(
 #: its prior Dhan home).
 COVERAGE_MARKET: str = "dhan"
 
+#: The Groww-spine coverage namespace stamped on every Groww :class:`WindowKey`
+#: (``"groww"``), kept distinct from :data:`COVERAGE_MARKET` so Dhan and Groww
+#: windows never collide on the shared lake ledger. PUBLIC so the Groww ingest
+#: spine AND the ledger-seeding helpers (``plan_windows`` /
+#: ``reconcile_ledger_with_lake``) share ONE literal (CLAUDE.md §11 COMMON) — the
+#: dashboard + CLI Groww spot pulls pass it so the PLANNED rows they seed match
+#: the SUCCESS rows the Groww spine records (PR-J4b).
+GROWW_COVERAGE_MARKET: str = "groww"
+
 #: Dhan intraday per-call cap (days). Relocated from
 #: ``dhan.constants.INTRADAY_WINDOW_DAYS`` (same value 90) so the width policy has
 #: NO dhan import here; ``dhan.constants`` remains the verified source of truth.
@@ -1167,6 +1176,7 @@ __all__ = [
     "AUTO_RESUME_MAX_ROUNDS",
     "COVERAGE_MARKET",
     "DEFAULT_MAX_ROUNDS",
+    "GROWW_COVERAGE_MARKET",
     "DateWindow",
     "LoopVerdict",
     "PullVerdict",

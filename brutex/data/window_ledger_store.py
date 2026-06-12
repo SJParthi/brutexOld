@@ -34,7 +34,7 @@ one-shot load (run start) + save (run end) are O(N) over the recorded windows.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -328,6 +328,8 @@ def plan_windows(
     end: date,
     now: datetime | None = None,
     now_ist: datetime | None = None,
+    market: str | None = None,
+    window_days_for: Callable[[str], int | None] | None = None,
 ) -> int:
     """Upsert every planned window for the pull as ``PLANNED`` — returns the count.
 
@@ -364,9 +366,7 @@ def plan_windows(
     # Imported locally to avoid an import cycle (this module is in brutex.data, which
     # the ingest spines depend on).
     from brutex.adapters.ingest_common import (
-        COVERAGE_MARKET as _MARKET,
-    )
-    from brutex.adapters.ingest_common import (
+        COVERAGE_MARKET,
         clamp_window_end,
         tile_windows,
     )
@@ -377,6 +377,13 @@ def plan_windows(
         window_days_for_interval as _dhan_window_days_for,
     )
 
+    # Default to the Dhan coverage namespace + tiling-width policy (back-compat); a
+    # Groww spot pull passes ``market=GROWW_COVERAGE_MARKET`` AND Groww's
+    # ``window_days_for`` so the PLANNED rows it seeds carry the SAME namespace AND
+    # the SAME tile boundaries as the windows the Groww ingest fetches+records — the
+    # "planned keys == fetched keys" invariant holds per vendor (PR-J4b, CLAUDE.md §11).
+    coverage_market = market if market is not None else COVERAGE_MARKET
+    width_for = window_days_for if window_days_for is not None else _dhan_window_days_for
     stamp = now if now is not None else datetime.now(UTC)
     ist = now_ist if now_ist is not None else _now_ist()
     # ONE tiling per interval (the tiler is pure in (interval, start, end)) with
@@ -389,7 +396,7 @@ def plan_windows(
     }
     tiles_by_interval: dict[str, list[tuple[date, date]]] = {
         interval: (
-            tile_windows(interval, start, clamped, window_days_for=_dhan_window_days_for)
+            tile_windows(interval, start, clamped, window_days_for=width_for)
             if start < clamped
             else []
         )
@@ -403,11 +410,11 @@ def plan_windows(
     planned = 0
     for instrument in instruments:
         for interval in intervals:
-            planned_tiles[(_MARKET, instrument.symbol_name, interval)] = tiles_iso[interval]
+            planned_tiles[(coverage_market, instrument.symbol_name, interval)] = tiles_iso[interval]
             for window_start, window_end in tiles_by_interval[interval]:
                 ledger.plan(
                     WindowKey(
-                        market=_MARKET,
+                        market=coverage_market,
                         security_id=instrument.symbol_name,
                         interval=interval,
                         start=window_start,
@@ -431,6 +438,8 @@ def reconcile_ledger_windows(
     start: date,
     end: date,
     now: datetime | None = None,
+    market: str | None = None,
+    window_days_for: Callable[[str], int | None] | None = None,
 ) -> int:
     """Seed ``SUCCESS`` for every lake-enclosed window with no ledger row — **pure** (cold-start).
 
@@ -450,15 +459,19 @@ def reconcile_ledger_windows(
     # out of the Dhan package in PR-J4a — _MARKET's value unchanged). Local import
     # avoids the brutex.data ↔ ingest spine import cycle.
     from brutex.adapters.ingest_common import (
-        COVERAGE_MARKET as _MARKET,
-    )
-    from brutex.adapters.ingest_common import (
+        COVERAGE_MARKET,
         tile_windows,
     )
     from brutex.adapters.ingest_common import (
         window_days_for_interval as _dhan_window_days_for,
     )
 
+    # Default to the Dhan namespace + tiling width (back-compat); the Groww spot
+    # pull passes ``market=GROWW_COVERAGE_MARKET`` AND Groww's ``window_days_for`` so
+    # cold-start SUCCESS seeds match the namespace + tile boundaries the Groww ingest
+    # records (PR-J4b, CLAUDE.md §11 COMMON).
+    coverage_market = market if market is not None else COVERAGE_MARKET
+    width_for = window_days_for if window_days_for is not None else _dhan_window_days_for
     stamp = now if now is not None else datetime.now(UTC)
     span_by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {
         (str(s["exchange"]), str(s["segment"]), str(s["symbol"]), str(s["interval"])): s
@@ -485,13 +498,13 @@ def reconcile_ledger_windows(
             first_date = date.fromisoformat(str(entry["first_date"]))
             last_date = date.fromisoformat(str(entry["last_date"]))
             for window_start, window_end in tile_windows(
-                interval, start, end, window_days_for=_dhan_window_days_for
+                interval, start, end, window_days_for=width_for
             ):
                 if not (first_date <= window_start and window_end <= last_date):
                     continue
                 if ledger.seed_lake_success(
                     WindowKey(
-                        market=_MARKET,
+                        market=coverage_market,
                         security_id=instrument.symbol_name,
                         interval=interval,
                         start=window_start,
@@ -513,6 +526,8 @@ def reconcile_ledger_with_lake(
     start: date,
     end: date,
     now: datetime | None = None,
+    market: str | None = None,
+    window_days_for: Callable[[str], int | None] | None = None,
 ) -> int:
     """Load the lake spans + seed the ledger cold-start (the wired entry point).
 
@@ -533,6 +548,8 @@ def reconcile_ledger_with_lake(
         start=start,
         end=end,
         now=now,
+        market=market,
+        window_days_for=window_days_for,
     )
 
 

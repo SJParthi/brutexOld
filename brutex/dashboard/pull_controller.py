@@ -1,29 +1,38 @@
-"""Click-to-pull controller — ingest ONE instrument's candle data (Dhan).
+"""Click-to-pull controller — ingest ONE instrument's spot candle data (Groww).
 
 Powers the F&O Universe Explorer's "⤓ Pull" button
 (DEC-UNIVERSE-DASHBOARD-001). The controller is **instrument-agnostic**: it
 pulls spot OHLCV for any resolved :class:`~brutex.models.Instrument` — a spot
 index/stock or (lake-side) a contract — keyed by ``symbol_name`` (the engine
 symbol; ADR-0003). When the operator clicks a universe row and hits pull,
-:func:`pull_candles` ingests that instrument's candles across the Dhan
+:func:`pull_candles` ingests that instrument's candles across the
 **fetched** base timeframes
 (:data:`DHAN_FETCH_INTERVALS` — ``1minute`` + ``1day``; the 19 intraday
 timeframes are resampled from the 1-minute base, never fetched, per
 DEC-DHAN-1M-ONLY-001), reusing the proven
-:func:`~brutex.adapters.dhan.run_ingest.run_dhan_spot_ingest` orchestration
+:func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` orchestration
 core (CLAUDE.md §11 COMMON — no copy-paste of the fan-out/quarantine spine).
+
+PR-J4b vendor cutover (DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009 §5): the SPOT
+pull + instrument-master load now run on Groww — the J2-equivalent the
+dashboard never got (J3 only swapped the credentials gate). The OPTIONS pull +
+TOKEN-LIFECYCLE features (``start_token_keepalive`` / ``refresh_live_token`` /
+the holder + keepalive seams + the re-exported ``dhan_creds_present``) keep
+importing from ``brutex.adapters.dhan`` transitionally — they are rewired
+separately in J4c; ``brutex.adapters.dhan`` stays importable until J4d.
 
 ## Offline-first
 
 The default and the CI-tested path is **dry-run**: a
-:class:`~brutex.adapters.dhan.synthetic_adapter.SyntheticDhanAdapter` emits
-valid in-session candle rows into a
-:class:`~brutex.data.sink.NullBarSink` so the whole fetch → session-filter →
-sink pipeline runs with NO Dhan credentials and NO network. The LIVE Dhan
-wiring lives in :func:`_build_live_pull_adapter`, which is ``# pragma: no
-cover`` because it needs a real token + the ``urllib`` transport. The network
-is blocked in CI, so the live path is intentionally not unit-covered — its
-pure orchestration is exercised end-to-end through the dry-run path
+``SyntheticSpotAdapter`` (the vendor-neutral
+:class:`~brutex.adapters.ingest_common.SyntheticSpotAdapter`, aliased
+``SyntheticDhanAdapter`` for back-compat) emits valid in-session candle rows
+into a :class:`~brutex.data.sink.NullBarSink` so the whole fetch →
+session-filter → sink pipeline runs with NO credentials and NO network. The
+LIVE Groww wiring lives in :func:`_build_live_spot_adapter`, which is
+``# pragma: no cover`` because it needs a real TOTP token + the Groww SDK. The
+network is blocked in CI, so the live path is intentionally not unit-covered —
+its pure orchestration is exercised end-to-end through the dry-run path
 (DEC-VENDOR-PIVOT-001).
 
 ## Scope (Golden Rule §3)
@@ -48,15 +57,16 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 import structlog
 
 from brutex.adapters.dhan.auth import dhan_creds_present
-from brutex.adapters.dhan.errors import is_no_data_message
-from brutex.adapters.dhan.run_ingest import (
-    DhanIngestReport,
+from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
+from brutex.adapters.groww.run_ingest import (
+    GrowwIngestReport,
     ProgressHook,
-    run_dhan_spot_ingest,
-    run_dhan_spot_ingest_with_retry,
+    run_groww_spot_ingest,
+    run_groww_spot_ingest_with_retry,
 )
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
+    GROWW_COVERAGE_MARKET,
     PullVerdict,
     UntilCleanRound,
     classify_pull,
@@ -86,10 +96,10 @@ from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
 from brutex.orchestrator.universe_phases import RunParallel
 
 if TYPE_CHECKING:
-    from brutex.adapters.dhan.run_ingest import SpotIngestWithRetry
     from brutex.adapters.dhan.token_holder import TokenHolder
     from brutex.adapters.dhan.token_keepalive import TokenKeepalive
     from brutex.adapters.dhan.token_preflight import TokenPreflight
+    from brutex.adapters.groww.run_ingest import SpotIngestWithRetry
     from brutex.adapters.rate_common import RateController as DhanRateController
 
 _LOG = structlog.get_logger(__name__)
@@ -466,41 +476,47 @@ def _build_dry_run_adapter(
     return SyntheticDhanAdapter(), NullBarSink()
 
 
-def _build_live_spot_adapter(  # pragma: no cover — live Dhan token + transport + network
+def _build_live_spot_adapter(  # pragma: no cover — live Groww TOTP token + SDK + network
     lake_root: Path,
     instruments: Sequence[Instrument],
 ) -> tuple[MarketAdapter, BarSink]:
-    """Wire the real Dhan client + a :class:`DhanMarketAdapter` over *instruments*.
+    """Wire the real Groww client + a :class:`GrowwMarketAdapter` for the spot pull.
 
-    The single source of the live spot wiring (CLAUDE.md §11 COMMON) — shared
-    by the single-instrument and bulk builders. Builds a token-authenticated
-    :class:`~brutex.adapters.dhan.client.DhanClient` over the real ``urllib``
-    transport, a :class:`~brutex.adapters.dhan.adapter.DhanMarketAdapter`
-    carrying every *instrument* (its O(1) index must contain each symbol it
-    fetches), and a :class:`~brutex.data.sink.ParquetBarSink` over *lake_root*.
+    PR-J4b vendor cutover (DEC-DHAN-GROWW-REMIGRATE-001, ADR-0009 §5): the
+    dashboard live spot pull now runs on Groww — the J2-equivalent the dashboard
+    never got (J3 only swapped the credentials gate). Mirrors the CLI's
+    :func:`~brutex.cli._build_live_groww_spot` exactly (CLAUDE.md §11 COMMON):
+    resolve the Groww TOTP credentials (env-first, file-fallback) via
+    :func:`~brutex.config.credentials.resolve_groww_file_credentials`, build a
+    live SDK-backed client through the
+    :func:`~brutex.adapters.groww.live.build_live_client` composition seam, load
+    the Groww instrument master into the O(1)
+    :class:`~brutex.adapters.groww.instruments.InstrumentIndex` (the adapter
+    resolves every fetched symbol through it), and write through a
+    :class:`~brutex.data.sink.ParquetBarSink` over *lake_root*.
+
+    Unlike the retired Dhan builder there is NO ``transport`` to inject — Groww
+    talks through its SDK client, not a urllib transport — and the *instruments*
+    are NOT threaded into the adapter: it carries the whole master index and
+    resolves each fetched symbol in O(1). *instruments* is kept in the signature
+    so the single-instrument / bulk builder seams stay shape-identical
+    (the fan-out worklist still drives WHICH symbols are pulled).
     ``# pragma: no cover`` — needs real credentials + network, absent in CI.
     """
-    from brutex.adapters.dhan.adapter import DhanMarketAdapter
-    from brutex.adapters.dhan.auth import resolve_dhan_credentials
-    from brutex.adapters.dhan.client import DhanClient, default_dhan_transport
+    from brutex.adapters.groww.adapter import GrowwMarketAdapter
+    from brutex.adapters.groww.auth import GrowwCredentials
+    from brutex.adapters.groww.instrument_loader import load_index, urllib_http_get
+    from brutex.adapters.groww.live import build_live_client
+    from brutex.config.credentials import resolve_groww_file_credentials
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
 
-    creds = resolve_dhan_credentials()
-    # Wire the live keepalive's shared token holder (if installed at app startup)
-    # so EVERY pull and every in-flight window worker reads the LIVE token through
-    # ``token_provider`` — a mid-life RenewToken (which invalidates the old token)
-    # propagates instantly instead of 401-ing on the stale captured string
-    # (DEC-DHAN-TOKEN-KEEPALIVE-001). No holder installed (e.g. CLI/no keepalive) →
-    # ``token_provider`` stays ``None`` and the static token is used, byte-unchanged.
-    holder = _LIVE_TOKEN_HOLDER
-    client = DhanClient(
-        access_token=creds.access_token,
-        client_id=creds.client_id,
-        transport=default_dhan_transport(),
-        token_provider=holder.get if holder is not None else None,
-    )
-    adapter = DhanMarketAdapter(client=client, instruments=tuple(instruments))
+    del instruments  # the Groww adapter carries the whole master index (O(1) resolve)
+    file_creds = resolve_groww_file_credentials()
+    creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
+    client = build_live_client(creds)
+    index = load_index(urllib_http_get)
+    adapter = GrowwMarketAdapter(client=client, index=index)
     sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
     return adapter, sink
 
@@ -1206,6 +1222,8 @@ def pull_all_spot(
                 intervals=DHAN_FETCH_INTERVALS,
                 start=start.date(),
                 end=end.date(),
+                market=GROWW_COVERAGE_MARKET,
+                window_days_for=groww_window_days_for,
             )
             # Cold-start seed (DEC-WINDOW-LEDGER-001, Stage b1): on a fresh clone
             # the ledger is empty but the lake may already hold years of bars.
@@ -1214,6 +1232,8 @@ def pull_all_spot(
             # upcoming is_skippable flip will NOT re-pull the entire history. A
             # non-None ledger already implies a live (non-dry-run) pull —
             # ``begin_pull_ledger`` returns None for dry_run — so no extra guard.
+            # ``market=GROWW_COVERAGE_MARKET`` so the seeded rows share the Groww
+            # spine's namespace (PR-J4b).
             reconcile_ledger_with_lake(
                 ledger,
                 lake_root,
@@ -1221,6 +1241,8 @@ def pull_all_spot(
                 intervals=DHAN_FETCH_INTERVALS,
                 start=start.date(),
                 end=end.date(),
+                market=GROWW_COVERAGE_MARKET,
+                window_days_for=groww_window_days_for,
             )
 
         _LOG.info(
@@ -1250,9 +1272,9 @@ def pull_all_spot(
         # (DEC-STATUS-SIDECAR-WRITE-RETIRE-001).
         ledger_flush = make_live_ledger_flush(ledger, lake_root)
 
-        def _progress_then_flush(label: str, bars: int, failed: bool, gap: bool = False) -> None:
+        def _progress_then_flush(label: str, bars: int, failed: bool) -> None:
             if on_progress is not None:
-                on_progress(label, bars, failed, gap)
+                on_progress(label, bars, failed)
             ledger_flush()
 
         # The "Retry failed windows" button passes ``auto_retry=True`` so leftover
@@ -1273,7 +1295,7 @@ def pull_all_spot(
             recorded in ``passes`` so a mid-round quota death can still report the
             last finished round's state (DEC-SPOT-QUOTA-MIDROUND-001).
             """
-            res = run_dhan_spot_ingest_with_retry(
+            res = run_groww_spot_ingest_with_retry(
                 adapter,
                 sink,
                 instruments=instruments,
@@ -1309,12 +1331,17 @@ def pull_all_spot(
                 if until_clean:
 
                     def _round_runner() -> UntilCleanRound:
-                        """One until-clean round = one full pull pass."""
+                        """One until-clean round = one full pull pass.
+
+                        Groww's report has no ``auth_cause`` string (no fail-fast
+                        latch — the documented divergence; it DERIVES ``auth_aborted``
+                        from the quarantined failures), so the round leaves
+                        ``auth_cause`` at its ``None`` default (mirrors the CLI).
+                        """
                         res = _one_pass(True)
                         return UntilCleanRound(
                             still_failed_windows=res.report.still_failed_windows,
                             auth_aborted=res.report.auth_aborted,
-                            auth_cause=res.report.auth_cause,
                         )
 
                     # Auto-resume (DEC-AUTO-RESUME-QUOTA-001): keep re-firing batches
@@ -1338,15 +1365,15 @@ def pull_all_spot(
                     final_auth_aborted = until_outcome.auth_aborted or (
                         bool(passes) and passes[0].report.auth_aborted
                     )
-                    final_auth_cause = until_outcome.auth_cause or (
-                        passes[0].report.auth_cause if passes else None
-                    )
+                    # Groww has no auth_cause string (the documented divergence) — the
+                    # cause stays None; auth_aborted alone drives the loud verdict.
+                    final_auth_cause = None
                     final_quota_exhausted = until_outcome.stopped_on_quota
                 else:
                     res = _one_pass(auto_retry)
                     final_still_failed = res.report.still_failed_windows
                     final_auth_aborted = res.report.auth_aborted
-                    final_auth_cause = res.report.auth_cause
+                    final_auth_cause = None
             except DailyQuotaExceeded as exc:
                 # The 100k daily quota died MID-round (DEC-SPOT-QUOTA-MIDROUND-001,
                 # the spot arm of the options DEC-OPTIONS-UNTIL-CLEAN-001 mapping):
@@ -1361,14 +1388,15 @@ def pull_all_spot(
                 final_quota_exhausted = True
                 final_still_failed = passes[-1].report.still_failed_windows if passes else 0
                 final_auth_aborted = passes[-1].report.auth_aborted if passes else False
-                final_auth_cause = passes[-1].report.auth_cause if passes else None
+                # Groww has no auth_cause string (the documented divergence) — None.
+                final_auth_cause = None
                 _LOG.warning(
                     "universe.pull_all.quota_exhausted",
                     pull_id=pid,
                     error=str(exc),
                     rounds_completed=len(passes),
                     note=(
-                        "daily Dhan quota spent mid-round — committed work kept; "
+                        "daily quota spent mid-round — committed work kept; "
                         "resume after IST midnight"
                     ),
                 )
@@ -1386,22 +1414,16 @@ def pull_all_spot(
         # the empty fallback rolls every symbol up as zeros (the quota verdict
         # carries the actionable state). Also fixes the latent ``passes[0]``
         # IndexError an ``until_clean_rounds=0`` no-op drive used to hit.
-        report = passes[0].report if passes else DhanIngestReport(pairs={}, failures=())
+        report = passes[0].report if passes else GrowwIngestReport(pairs={}, failures=())
         _observe_rate(rate_observer, _rate_controller, adapter)
-        # A Dhan DH-905 "no data present" is the vendor's DEFINITIVE answer that
-        # the range has no bars (e.g. NIFTY NEXT 50 daily, whose history starts
-        # after 2021-01-01) — NOT a transient failure. Counting it as a failed
-        # pair pinned the pull at `transient_residual` ("⏳ Re-pull to finish")
-        # FOREVER, since a re-pull just hits DH-905 again — the manual-retry trap
-        # the operator saw (DEC-DHAN-NODATA-SETTLED-001). Split those known-gap
-        # pairs out of `failed` and count them as `no_data` (settled / EMPTY), so
-        # the verdict is `clean` and zero manual re-pull is asked. A GENUINE
-        # terminal error (real 400/404 — auth is handled separately) still counts
-        # as `failed` → `transient_residual`, exactly as before.
-        known_gap_keys = {
-            (f.symbol, f.interval) for f in report.failures if is_no_data_message(f.error)
-        }
-        failure_keys = {(f.symbol, f.interval) for f in report.failures} - known_gap_keys
+        # Groww has NO no-data marker — unlike Dhan's DH-905 "no data present" 400,
+        # which was special-cased as a benign KNOWN_GAP. Per Golden Rule #1 we do not
+        # invent a Groww twin, so every terminal Groww error is a uniform terminal
+        # quarantine → `failed` (`transient_residual`). A settled EMPTY window is
+        # still surfaced as `no_data` below when a pair ran cleanly but returned zero
+        # bars; there is no known-gap split (no_data from a terminal failure has no
+        # Groww source).
+        failure_keys = {(f.symbol, f.interval) for f in report.failures}
         results: list[SymbolPullResult] = []
         for instrument in instruments:
             symbol = instrument.symbol_name
@@ -1410,8 +1432,6 @@ def pull_all_spot(
                 key = (symbol, fetch_interval)
                 if key in failure_keys:
                     failed += 1
-                elif key in known_gap_keys:
-                    no_data += 1
                 else:
                     pair = report.pairs.get(key)
                     if pair is None:
@@ -1651,12 +1671,15 @@ def pull_candles(
                 intervals=DHAN_FETCH_INTERVALS,
                 start=start.date(),
                 end=end.date(),
+                market=GROWW_COVERAGE_MARKET,
+                window_days_for=groww_window_days_for,
             )
             # Cold-start seed (DEC-WINDOW-LEDGER-001, Stage b1): seed SUCCESS for
             # this symbol's lake-enclosed ABSENT windows so the upcoming
             # is_skippable flip won't re-pull bars the lake already holds. A
             # non-None ledger already implies a live pull (begin_pull_ledger
             # returns None for dry_run), so no extra dry-run guard is needed.
+            # ``market=GROWW_COVERAGE_MARKET`` matches the Groww spine namespace.
             reconcile_ledger_with_lake(
                 ledger,
                 lake_root,
@@ -1664,6 +1687,8 @@ def pull_candles(
                 intervals=DHAN_FETCH_INTERVALS,
                 start=start.date(),
                 end=end.date(),
+                market=GROWW_COVERAGE_MARKET,
+                window_days_for=groww_window_days_for,
             )
 
         _LOG.info(
@@ -1692,12 +1717,12 @@ def pull_candles(
         # (DEC-STATUS-SIDECAR-WRITE-RETIRE-001).
         ledger_flush = make_live_ledger_flush(ledger, lake_root)
 
-        def _progress_then_flush(label: str, bars: int, failed: bool, gap: bool = False) -> None:
+        def _progress_then_flush(label: str, bars: int, failed: bool) -> None:
             if on_progress is not None:
-                on_progress(label, bars, failed, gap)
+                on_progress(label, bars, failed)
             ledger_flush()
 
-        report = run_dhan_spot_ingest(
+        report = run_groww_spot_ingest(
             adapter,
             sink,
             instruments=[instrument],
