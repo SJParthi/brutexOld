@@ -46,24 +46,14 @@ import re
 import sys
 from pathlib import Path
 
+from _textscan import strip_code_spans
+
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_FILE = ROOT / "docs" / "MIGRATION.md"
 
 # Pattern: DEC-FOO-NNN or DEC-FOO-BAR-NNN, etc.
 # Anchored to be a "real" token, not a substring inside a larger word.
 DEC_ID_PATTERN = re.compile(r"\bDEC-[A-Z][A-Z0-9_-]*-\d{3,}\b")
-
-
-def strip_code_spans(text: str) -> str:
-    """Remove markdown code spans (single + triple backticks) so example DEC-IDs
-    in PR-body documentation (``"e.g., DEC-NONEXISTENT-999"``) don't trip the
-    validator. Reviewer judgement still applies to whether a NON-code-span
-    DEC-ID is real.
-    """
-    # Triple-backtick fenced blocks: ```...``` (greedy across newlines)
-    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
-    # Single-backtick inline code spans: `...`
-    return re.sub(r"`[^`]*`", " ", text)
 
 
 def extract_dec_ids(text: str) -> list[str]:
