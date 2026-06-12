@@ -1,7 +1,8 @@
 """End-to-end proof for ``brutex sweep`` (DEC-SWEEP-CLI-001).
 
-The CLI shell is coverage-omitted (it is the lake-touching layer), so this
-INTEGRATION test is the honest validation that the command actually loads real
+The CLI shell is measured at 100% line+branch (DEC-COV-CLI-HARNESS-001 — no
+longer coverage-omitted), and this INTEGRATION test is the honest validation
+that the command actually loads real
 bars from a Parquet lake, runs the assembled funnel, and prints the ranked report
 — not just that the pure core works. It persists a tiny lake with
 ``ParquetWriter`` / ``ParquetBarSink`` (the same writers ingest uses), then runs
