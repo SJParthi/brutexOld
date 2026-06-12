@@ -336,3 +336,114 @@ class TestCascadeSidecar:
         assert out.rstrip().endswith(
             "pool PBO=0.2500  in=3 survived=2  dsr N=12 source=leaderboard"
         )
+
+
+# ── Per-row provenance markers (DEC-ROW-PROVENANCE-001) ──────────────────────
+
+
+class TestRowProvenance:
+    def _manifest_with(self, root: Path, cells: tuple[object, ...], *, enabled: bool) -> None:
+        from brutex.engine.cascade_wire import (
+            BarsContext,
+            CascadeManifest,
+            Stage3ManifestRecord,
+            cascade_config_for_sweep,
+            write_manifest,
+        )
+
+        write_manifest(
+            root,
+            CascadeManifest(
+                version=1,
+                sweep_id="a" * 64,
+                cascade_config=cascade_config_for_sweep("a" * 64),
+                bars_context=BarsContext(
+                    exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-02-01"
+                ),
+                specs=(),
+                stage3=Stage3ManifestRecord(
+                    enabled=enabled,
+                    train_snapshot_hash=("ab" * 32) if enabled else None,
+                    refined_cells=cells,  # type: ignore[arg-type]
+                ),
+            ),
+        )
+
+    def _cell(self, rel_path: str | None) -> object:
+        from brutex.engine.cascade_wire import Stage3CellRecord
+
+        return Stage3CellRecord(
+            instrument="NIFTY",
+            tf_label="5m",
+            direction_label="bull",
+            k=1,
+            sl_paisa=80,
+            tp_paisa=50,
+            proximity_bps=None,
+            rel_path=rel_path,
+        )
+
+    def test_no_manifest_keeps_blanket_disclaimer_byte_identical(self, tmp_path: Path) -> None:
+        _write_tree(tmp_path)
+        out = results_show_report(tmp_path, top=10)
+        assert "src=" not in out
+        assert "no per-row gate verdict" in out
+
+    def test_manifest_attribution_labels_rows(self, tmp_path: Path) -> None:
+        _write_tree(tmp_path)
+        # Attribute the BANKNIFTY store as the Stage-3 cell file.
+        cell_rel = "BANKNIFTY/15m/bull_k1_bbbb.parquet"
+        self._manifest_with(tmp_path, (self._cell(cell_rel),), enabled=True)
+        out = results_show_report(tmp_path, top=10)
+        assert "DEC-ROW-PROVENANCE-001" in out
+        assert "no per-row gate verdict" not in out
+        for line in out.splitlines():
+            if line.startswith("#") and "BANKNIFTY" in line:
+                assert "src=stage3" in line
+            elif line.startswith("#") and "NIFTY" in line:
+                assert "src=grid" in line
+
+    def test_disabled_stage3_manifest_labels_everything_grid(self, tmp_path: Path) -> None:
+        _write_tree(tmp_path)
+        self._manifest_with(tmp_path, (), enabled=False)
+        out = results_show_report(tmp_path, top=10)
+        row_lines = [line for line in out.splitlines() if line.startswith("#")]
+        assert row_lines
+        assert all("src=grid" in line for line in row_lines)
+        assert not any("src=stage3" in line for line in row_lines)
+
+    def test_pre_provenance_manifest_falls_back(self, tmp_path: Path) -> None:
+        # A manifest whose cells lack rel_path (written before this decision)
+        # must NOT guess — the blanket disclaimer stands (Golden Rule #1).
+        _write_tree(tmp_path)
+        self._manifest_with(tmp_path, (self._cell(None),), enabled=True)
+        out = results_show_report(tmp_path, top=10)
+        assert "src=" not in out
+        assert "no per-row gate verdict" in out
+
+    def test_manifest_without_stage3_record_falls_back(self, tmp_path: Path) -> None:
+        # A manifest with NO stage3 record (a pure grid sweep written before
+        # the stage3 wiring) carries no attribution — disclaimer stands.
+        from brutex.engine.cascade_wire import (
+            BarsContext,
+            CascadeManifest,
+            cascade_config_for_sweep,
+            write_manifest,
+        )
+
+        _write_tree(tmp_path)
+        write_manifest(
+            tmp_path,
+            CascadeManifest(
+                version=1,
+                sweep_id="a" * 64,
+                cascade_config=cascade_config_for_sweep("a" * 64),
+                bars_context=BarsContext(
+                    exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-02-01"
+                ),
+                specs=(),
+            ),
+        )
+        out = results_show_report(tmp_path, top=10)
+        assert "src=" not in out
+        assert "no per-row gate verdict" in out
