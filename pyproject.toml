@@ -102,6 +102,10 @@ dev = [
     # on CI — paired with installing the `[ui]` extra in the CI test job.
     "httpx>=0.27,<1.0",
     "httpx2>=2.0,<3.0",
+    # DEC-GROWW-REPIVOT-001: pyotp needed for Groww TOTP auth tests.
+    # Listed here so `pip install -e ".[dev,...]"` in CI can run the
+    # test_groww_auth happy-path tests that call build_from_env().
+    "pyotp>=2.9,<3.0",
 ]
 
 [project.scripts]

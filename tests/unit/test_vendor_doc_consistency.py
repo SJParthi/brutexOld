@@ -48,12 +48,20 @@ _DHAN_AUTH_VARS: tuple[str, ...] = (
 _GROWW_EXTRA_RE = re.compile(r"\.\[[^\]]*groww[^\]]*\]")
 
 
-def test_pyproject_has_no_groww_extra() -> None:
-    """The ``groww`` optional-dependency extra was removed (Dhan needs no SDK)."""
+def test_pyproject_groww_extra_is_pyotp_only() -> None:
+    """The ``groww`` optional extra exists for DEC-GROWW-REPIVOT-001 (pyotp only).
+
+    The Groww backtesting adapter uses TOTP auth (pyotp) and plain urllib —
+    no heavy growwapi SDK (pandas/nats/protobuf). Guard that the extra stays
+    minimal: exactly one dep starting with "pyotp".
+    """
     raw = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     data = tomllib.loads(raw)
     extras = data["project"]["optional-dependencies"]
-    assert "groww" not in extras, f"groww extra is back in pyproject: {sorted(extras)}"
+    assert "groww" in extras, "groww extra missing from pyproject (DEC-GROWW-REPIVOT-001)"
+    groww_deps = extras["groww"]
+    assert len(groww_deps) == 1, f"groww extra should have exactly 1 dep: {groww_deps}"
+    assert groww_deps[0].startswith("pyotp"), f"unexpected dep in groww extra: {groww_deps}"
 
 
 def test_bootstrap_does_not_install_groww_extra() -> None:
