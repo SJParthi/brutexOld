@@ -76,6 +76,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import structlog
@@ -259,12 +260,21 @@ class Stage3CellRecord:
         disabled leg).
     proximity_bps
         ``(pivot, pdh_pdl, fib)`` proximity tolerances in bps, or ``None``.
+    rel_path
+        The cell store's path RELATIVE to the results root
+        (DEC-ROW-PROVENANCE-001) — the machine-readable attribution the
+        read-back uses to label refined rows by SOURCE FILE (coordinates
+        alone cannot disambiguate: a grid tuple and a refined cell can share
+        instrument/tf/direction/k, and ``ResultRow`` carries no SL/TP).
+        ``None`` for manifests written before the provenance field (the
+        additive-at-version-1 parse precedent) — readers fall back to the
+        blanket disclaimer.
 
     Raises
     ------
     CascadeWireError
         On an empty label, a bad direction, a negative ``k``, a non-positive
-        leg, or a malformed proximity tuple.
+        leg, a malformed proximity tuple, or an absolute/empty ``rel_path``.
     """
 
     instrument: str
@@ -274,6 +284,7 @@ class Stage3CellRecord:
     sl_paisa: int
     tp_paisa: int
     proximity_bps: tuple[int, int, int] | None
+    rel_path: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label"):
@@ -295,6 +306,13 @@ class Stage3CellRecord:
             raise CascadeWireError(
                 f"Stage3CellRecord.proximity_bps must be a 3-tuple or None, "
                 f"got {self.proximity_bps!r}"
+            )
+        if self.rel_path is not None and (
+            not self.rel_path or PurePosixPath(self.rel_path).is_absolute()
+        ):
+            raise CascadeWireError(
+                f"Stage3CellRecord.rel_path must be a non-empty relative path or None, "
+                f"got {self.rel_path!r}"
             )
 
 
@@ -1131,6 +1149,7 @@ def _stage3_to_dict(record: Stage3ManifestRecord) -> dict[str, object]:
                 "sl_paisa": cell.sl_paisa,
                 "tp_paisa": cell.tp_paisa,
                 "proximity_bps": None if cell.proximity_bps is None else list(cell.proximity_bps),
+                "rel_path": cell.rel_path,
             }
             for cell in record.refined_cells
         ],
@@ -1157,6 +1176,8 @@ def _stage3_from_dict(data: dict[str, object]) -> Stage3ManifestRecord:
                         if proximity is None
                         else (int(proximity[0]), int(proximity[1]), int(proximity[2]))
                     ),
+                    # Absent on pre-DEC-ROW-PROVENANCE-001 manifests (additive parse).
+                    rel_path=(None if cell.get("rel_path") is None else str(cell["rel_path"])),
                 )
             )
         hash_raw = raw["train_snapshot_hash"]

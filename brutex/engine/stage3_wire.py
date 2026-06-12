@@ -839,17 +839,26 @@ def cascade_specs_for_refined_cells(
     return specs
 
 
-def stage3_manifest_record(report: Stage3PassReport) -> Stage3ManifestRecord:
+def stage3_manifest_record(
+    report: Stage3PassReport, *, results_root: Path | None = None
+) -> Stage3ManifestRecord:
     """Project a pass report into the cascade manifest's Stage-3 record (review F3).
 
     Records enablement, the train-slice snapshot hash, and the refined-cell
     list — so a manifest reader can tell exactly which specs are ungated
-    Stage-3 refined cells versus gated Stage-2 grid cells.
+    Stage-3 refined cells versus gated Stage-2 grid cells. With *results_root*
+    supplied, each cell record additionally carries its store path RELATIVE to
+    that root (DEC-ROW-PROVENANCE-001) — the machine-readable attribution the
+    read-back uses to label refined rows by source file; ``None`` (legacy
+    callers) omits it and readers fall back to the blanket disclaimer.
 
     Parameters
     ----------
     report
         The :func:`run_stage3_pass` report (enabled or the disabled no-op).
+    results_root
+        The sweep results root the cells were written under (the launcher
+        passes it; every cell path must live beneath it).
 
     Returns
     -------
@@ -860,7 +869,8 @@ def stage3_manifest_record(report: Stage3PassReport) -> Stage3ManifestRecord:
     ------
     Stage3WireError
         If an enabled report carries a refined cell with a disabled (``None``)
-        SL/TP leg — refined cells are always quantized on-grid ints.
+        SL/TP leg — refined cells are always quantized on-grid ints — or a
+        cell path outside *results_root*.
     """
     if not report.enabled:
         return Stage3ManifestRecord(enabled=False, train_snapshot_hash=None, refined_cells=())
@@ -872,6 +882,15 @@ def stage3_manifest_record(report: Stage3PassReport) -> Stage3ManifestRecord:
                 f"stage3_manifest_record: refined cell {tuple_.instrument}/{tuple_.tf.label} "
                 f"has a disabled leg (sl={tuple_.sl_paisa}, tp={tuple_.tp_paisa})"
             )
+        rel_path: str | None = None
+        if results_root is not None:
+            try:
+                rel_path = cell.path.relative_to(results_root).as_posix()
+            except ValueError as exc:
+                raise Stage3WireError(
+                    f"stage3_manifest_record: cell store {cell.path} is not under "
+                    f"the results root {results_root}"
+                ) from exc
         proximity = tuple_.proximity
         records.append(
             Stage3CellRecord(
@@ -890,6 +909,7 @@ def stage3_manifest_record(report: Stage3PassReport) -> Stage3ManifestRecord:
                         proximity.fib_proximity_bps,
                     )
                 ),
+                rel_path=rel_path,
             )
         )
     return Stage3ManifestRecord(

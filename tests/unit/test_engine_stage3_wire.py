@@ -835,3 +835,50 @@ class TestStage3ManifestRecord:
         )
         with pytest.raises(Stage3WireError, match="disabled leg"):
             stage3_manifest_record(report)
+
+
+class TestManifestRecordRelPath:
+    """DEC-ROW-PROVENANCE-001: results_root threads the cell's relative path."""
+
+    def _report_with_cell(self, path: Path) -> Stage3PassReport:
+        cell = Stage3RefinedCell(
+            tuple_=SweepTuple(
+                instrument="NIFTY",
+                tf=Timeframe("1minute", 1),
+                direction=Side.BUY,
+                k=1,
+                sl_paisa=80,
+                tp_paisa=50,
+                proximity=None,
+            ),
+            path=path,
+            rows=1,
+        )
+        return Stage3PassReport(
+            enabled=True,
+            train_snapshot_hash="ab" * 32,
+            leaderboards=1,
+            survivors_total=1,
+            masks_refined=1,
+            evals_total=1,
+            cache_hits_total=0,
+            rows_appended=1,
+            skipped_empty_train=0,
+            cells=(cell,),
+        )
+
+    def test_results_root_threads_the_relative_path(self, tmp_path: Path) -> None:
+        cell_path = tmp_path / "NIFTY" / "1minute" / ("BUY_k1_" + "ab" * 8 + ".parquet")
+        record = stage3_manifest_record(self._report_with_cell(cell_path), results_root=tmp_path)
+        assert record.refined_cells[0].rel_path == ("NIFTY/1minute/BUY_k1_" + "ab" * 8 + ".parquet")
+
+    def test_no_results_root_omits_the_path(self, tmp_path: Path) -> None:
+        cell_path = tmp_path / "NIFTY" / "1minute" / ("BUY_k1_" + "ab" * 8 + ".parquet")
+        record = stage3_manifest_record(self._report_with_cell(cell_path))
+        assert record.refined_cells[0].rel_path is None
+
+    def test_cell_outside_root_raises(self, tmp_path: Path) -> None:
+        outside = tmp_path / "elsewhere" / "x.parquet"
+        (tmp_path / "root").mkdir()
+        with pytest.raises(Stage3WireError, match="not under"):
+            stage3_manifest_record(self._report_with_cell(outside), results_root=tmp_path / "root")

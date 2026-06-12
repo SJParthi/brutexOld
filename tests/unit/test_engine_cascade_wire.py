@@ -488,6 +488,20 @@ class TestManifestSerialisation:
 # ── Stage-3 manifest record (DEC-STAGE3-WIRE-001, review F3) ─────────────────
 
 
+def _stage3_cell_with(*, rel_path: str | None) -> cw.Stage3CellRecord:
+    """A valid cell record with an explicit rel_path (DEC-ROW-PROVENANCE-001)."""
+    return cw.Stage3CellRecord(
+        instrument="NIFTY",
+        tf_label="1minute",
+        direction_label="bull",
+        k=1,
+        sl_paisa=85,
+        tp_paisa=60,
+        proximity_bps=None,
+        rel_path=rel_path,
+    )
+
+
 def _stage3_cell(**overrides: object) -> cw.Stage3CellRecord:
     base: dict[str, object] = {
         "instrument": "NIFTY",
@@ -1205,3 +1219,53 @@ class TestEndToEnd:
 
         assert manual_bytes == auto_bytes
         assert cw.serialize_wire_report(manual) == cw.serialize_wire_report(auto)
+
+
+class TestStage3CellRelPath:
+    """DEC-ROW-PROVENANCE-001: the additive cell-path attribution field."""
+
+    def test_round_trip_preserves_rel_path(self) -> None:
+        record = cw.Stage3ManifestRecord(
+            enabled=True,
+            train_snapshot_hash="ab" * 32,
+            refined_cells=(
+                _stage3_cell_with(rel_path="NIFTY/1minute/bull_k1_" + "ab" * 8 + ".parquet"),
+            ),
+        )
+        manifest = _manifest()
+        with_cells = cw.CascadeManifest(
+            version=manifest.version,
+            sweep_id=manifest.sweep_id,
+            cascade_config=manifest.cascade_config,
+            bars_context=manifest.bars_context,
+            specs=manifest.specs,
+            stage3=record,
+        )
+        assert cw.manifest_from_json(cw.manifest_to_json(with_cells)) == with_cells
+
+    def test_absent_key_parses_to_none(self) -> None:
+        # Pre-DEC-ROW-PROVENANCE-001 manifests carry no rel_path key at all.
+        import json
+
+        manifest = cw.CascadeManifest(
+            version=_manifest().version,
+            sweep_id=_manifest().sweep_id,
+            cascade_config=_manifest().cascade_config,
+            bars_context=_manifest().bars_context,
+            specs=_manifest().specs,
+            stage3=cw.Stage3ManifestRecord(
+                enabled=True,
+                train_snapshot_hash="ab" * 32,
+                refined_cells=(_stage3_cell_with(rel_path=None),),
+            ),
+        )
+        payload = json.loads(cw.manifest_to_json(manifest))
+        del payload["stage3"]["refined_cells"][0]["rel_path"]
+        restored = cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+        assert restored.stage3 is not None
+        assert restored.stage3.refined_cells[0].rel_path is None
+
+    @pytest.mark.parametrize("bad", ["", "/abs/cell.parquet"])
+    def test_bad_rel_path_raises(self, bad: str) -> None:
+        with pytest.raises(cw.CascadeWireError, match="rel_path"):
+            _stage3_cell_with(rel_path=bad)
