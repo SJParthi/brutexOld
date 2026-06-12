@@ -229,8 +229,14 @@ class ResultMetrics:
     # dispersion, CSCV matrix). The other four Stage-4 fields (cpcv_pass_rate,
     # wfo_pass_rate, lockbox_sharpe, lockbox_mdd_pct — spec 584-587) remain
     # deferred (DEC-STAT-DSR-PBO-001 scope = DSR + PBO only).
-    deflated_sharpe_ratio: float | None = None
-    pbo_probability: float | None = None
+    # pragma justification (DEC-MUTATION-GATE-COMPUTE-001): the only
+    # unkillable mutants here are the annotation-only `| None` -> `& None`
+    # flips — under `from __future__ import annotations` (PEP 563) field
+    # annotations are never evaluated, so the flip is a runtime no-op. The
+    # REAL mutants these lines also carry (default `None` -> `""`) stay
+    # pinned by test_compute_rows_stage4_defaults_are_none.
+    deflated_sharpe_ratio: float | None = None  # pragma: no mutate
+    pbo_probability: float | None = None  # pragma: no mutate
 
 
 def _percentile(sorted_values: Sequence[float], pct: float) -> float:
@@ -288,7 +294,11 @@ def _drawdown_stats(equity: EquityCurve) -> tuple[int, float, int, float]:
     max_dd_paisa = 0
     max_dd_pct = 0.0
     sum_sq_pct = 0.0
-    current_dd_bars = 0
+    # pragma justification (DEC-MUTATION-GATE-COMPUTE-001): dead store — the
+    # first loop iteration always has drop == 0 (peak is initialised to the
+    # first sample), so the else-branch reassigns current_dd_bars before any
+    # read; no initial value is observable.
+    current_dd_bars = 0  # pragma: no mutate
     max_dd_bars = 0
     for value in equity.equity_paisa:
         peak = max(peak, value)
@@ -469,7 +479,11 @@ def compute_metrics(
     sum_mfe = 0
     sum_mae = 0
     sum_holding = 0
-    max_holding = 0
+    # pragma justification (DEC-MUTATION-GATE-COMPUTE-001): every trade has
+    # holding_bars >= 1 (ClosedTrade validation) and trades is non-empty on
+    # this path (the zero-trade row returned above), so the running max is
+    # >= 1 regardless of an initial 0 or 1 — the initialiser is unobservable.
+    max_holding = 0  # pragma: no mutate
     largest_loss = 0  # most-negative pnl, stored signed
     for trade in trades:
         net_pnl += trade.pnl_paisa
@@ -493,7 +507,11 @@ def compute_metrics(
     # cagr_pct: annualised geometric growth (spec line 535 "annualized").
     # ending/starting ratio; start_equity_paisa > 0 by EquityCurve invariant.
     end_equity = equity.start_equity_paisa + net_pnl
-    if end_equity <= 0:
+    # "< 1" is identical to "<= 0" on ints; phrased this way every comparison
+    # mutant of the ruin boundary is observable (at end_equity == 0 the
+    # else-branch would compute growth 0.0 -> exactly -100.0 anyway, making a
+    # "<= 0" vs "< 0" flip unkillable — DEC-MUTATION-GATE-COMPUTE-001).
+    if end_equity < 1:
         # Total ruin — CAGR of a non-positive terminal equity is not a
         # real number; clamp to -100% (capital fully lost p.a.).
         cagr_pct = -100.0
@@ -507,7 +525,13 @@ def compute_metrics(
             annualised_growth = growth ** (1.0 / equity.span_years)
         except OverflowError:
             annualised_growth = math.inf
-        cagr_pct = max(-100.0, min(100.0 * (annualised_growth - 1.0), _CAGR_CAP_PCT))
+        uncapped_cagr = min(100.0 * (annualised_growth - 1.0), _CAGR_CAP_PCT)
+        # pragma justification (DEC-MUTATION-GATE-COMPUTE-001): the lower
+        # clamp is defensive-only — annualised_growth >= 0.0 (a positive
+        # base to a positive power, or 0.0 on underflow), so the uncapped
+        # value is always >= -100.0 after rounding and any bound <= -100 is
+        # behaviourally identical. The cap arithmetic above stays mutable.
+        cagr_pct = max(-100.0, uncapped_cagr)  # pragma: no mutate
 
     # ── Drawdown (spec lines 547-555) ────────────────────────────────
     max_dd_paisa, max_dd_pct, max_dd_bars, ulcer = _drawdown_stats(equity)
@@ -550,8 +574,15 @@ def compute_metrics(
     # Sortino = mean(return) / downside-deviation, where downside
     # deviation is the RMS of negative returns about a zero target
     # (spec line 541 "downside-only volatility").
-    downside_sq = sum(r * r for r in returns if r < 0.0)
-    downside_dev = math.sqrt(downside_sq / n_trades) if n_trades else 0.0
+    # pragma justification (DEC-MUTATION-GATE-COMPUTE-001): the strict "<"
+    # boundary is unobservable — an r == 0.0 admitted by a "<=" flip would
+    # contribute r * r == 0.0 to the sum. The filter threshold's REAL
+    # mutants (0.0 -> 1.0 would admit positive returns) stay pinned by
+    # test_sortino_known_value's exact-value assertion. The RMS arithmetic
+    # below stays mutable; n_trades >= 1 here (zero-trade rows returned
+    # above), so no division guard is needed.
+    downside = [r for r in returns if r < 0.0]  # pragma: no mutate
+    downside_dev = math.sqrt(sum(r * r for r in downside) / n_trades)
     sortino = None if downside_dev == 0.0 else moments.mean / downside_dev
     # calmar = CAGR / MaxDD (spec line 542). MaxDD as a percentage.
     calmar = _safe_ratio(cagr_pct, max_dd_pct)
@@ -676,7 +707,13 @@ def with_stage4_statistics(
         A new row (``metrics`` is frozen) with the two Stage-4 fields set.
         The remaining metrics are copied unchanged.
     """
-    dsr: float | None = None
+    # pragma justification (DEC-MUTATION-GATE-COMPUTE-001, here and on pbo
+    # below): the only unkillable mutants are the annotation-only
+    # `| None` -> `& None` flips — local variable annotations are never
+    # evaluated at runtime. The REAL `None -> ""` mutants sharing the lines
+    # stay pinned by test_stage4_dsr_none_when_sharpe_missing /
+    # test_stage4_pbo_none_without_performance_matrix (both assert `is None`).
+    dsr: float | None = None  # pragma: no mutate
     if (
         metrics.sharpe_ratio is not None
         and metrics.skewness is not None
@@ -692,7 +729,7 @@ def with_stage4_statistics(
             kurtosis=metrics.kurtosis + GAUSSIAN_KURTOSIS,
         ).deflated_sharpe_ratio
 
-    pbo: float | None = None
+    pbo: float | None = None  # pragma: no mutate
     if pbo_performance is not None:
         pbo = pbo_probability(pbo_performance, n_splits=pbo_n_splits).pbo
 

@@ -121,8 +121,9 @@ jobs:
           #    strategy selection. Verified 0/228 survivors locally
           #    (MIGRATION #615). Provably-equivalent mutants carry documented
           #    `# pragma: no mutate` markers in the modules.
-          #    (compute.py [Sharpe] is the remaining ranking-math ratchet —
-          #    it retains its own equivalent mutants, see MIGRATION #590.)
+          #    (compute.py [Sharpe/moments] — formerly the remaining
+          #    ranking-math ratchet, MIGRATION #590 — is now in the
+          #    per-module loop below, DEC-MUTATION-GATE-COMPUTE-001.)
           #
           # Tests on these already hit 100% line coverage; mutmut verifies that
           # the coverage is *meaningful* (the tests detect a behaviour change).
@@ -151,7 +152,14 @@ jobs:
           #    survivors of the per-module enumeration were killed by
           #    targeted tests; the handful of provably-equivalent mutants
           #    carry documented in-module pragmas).
+          #    metrics/compute.py (Sharpe/drawdown/moments — the last
+          #    ranking-math module outside the gate since #590) joined the
+          #    loop per DEC-MUTATION-GATE-COMPUTE-001: measured 16 survivors
+          #    + 3 untested, driven to zero by 7 targeted tests + documented
+          #    in-module pragmas (its dedicated file runs in ~2 s, same
+          #    focused-runner subset argument as the rest of the loop).
           for pair in \
+            "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py" \
             "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py" \
             "brutex/orchestrator/retry.py:tests/unit/test_orchestrator_retry.py" \
             "brutex/orchestrator/audit.py:tests/unit/test_orchestrator_audit.py" \
