@@ -238,17 +238,17 @@ class _RetryReport(Protocol):
     @property
     def still_failed_windows(self) -> int:
         """Transient windows still failing after this pass — the retryable residual."""
-        ...
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never called
 
     @property
     def auth_aborted(self) -> bool:
         """Whether the token died mid-pass (halts the loop)."""
-        ...
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never called
 
     @property
     def failures(self) -> Sequence[object]:
         """The pass's quarantined per-pair failures (scanned by *is_known_gap*)."""
-        ...
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never called
 
 
 #: Default bounded round budget. Small + finite (Golden Rule #10 — never an
