@@ -49,6 +49,7 @@ from zoneinfo import ZoneInfo
 import structlog
 from pydantic import BaseModel
 
+from brutex.config.credentials import groww_credentials_present
 from brutex.dashboard.coverage_view import (
     build_coverage_payload,
     build_option_coverage_payload,
@@ -719,7 +720,13 @@ def build_app(
     try:
         from fastapi import FastAPI, HTTPException, Query
         from fastapi.concurrency import run_in_threadpool
-        from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+        from fastapi.responses import (
+            HTMLResponse,
+            JSONResponse,
+            PlainTextResponse,
+            RedirectResponse,
+            Response,
+        )
     except ImportError as exc:
         raise RuntimeError(
             "FastAPI is not installed. Install with `pip install "
@@ -1258,13 +1265,14 @@ def build_app(
         Track-1 history ``[2021-01-01, previous day]``. A malformed date or
         a ``from`` after ``to`` surfaces as a 400 with the real reason
         (DEC-PULL-ERROR-VISIBILITY-001).
-        ``dry_run`` is forced ``True`` automatically when Dhan
-        credentials are not present in the environment (via the testable
-        :func:`brutex.dashboard.pull_controller.dhan_creds_present`
-        gate, mirroring the CLI's offline default), so the page never
-        attempts a live network call without creds.
+        ``dry_run`` is forced ``True`` automatically when Groww
+        credentials are not present (via the testable
+        :func:`brutex.config.credentials.groww_credentials_present`
+        gate — Groww is the PRIMARY spot surface post-cutover,
+        DEC-DHAN-GROWW-REMIGRATE-001), so the page never attempts a live
+        network call without creds.
         """
-        dry_run = not dhan_creds_present()
+        dry_run = not groww_credentials_present()
         _LOG.info(
             "universe.pull.requested",
             symbol=symbol,
@@ -1441,9 +1449,10 @@ def build_app(
         ALL are blank the full Track-1 history applies (the Pull-ALL default, so
         the ``?kind=`` callers are byte-for-byte unchanged). Single-flight; an empty
         / unknown ``?symbols=`` id fails CLOSED (400, naming offenders — never a
-        silent partial). ``dry_run`` is forced when Dhan creds are absent.
+        silent partial). ``dry_run`` is forced when Groww creds are absent
+        (the PRIMARY spot gate post-cutover, DEC-DHAN-GROWW-REMIGRATE-001).
         """
-        dry_run = not dhan_creds_present()
+        dry_run = not groww_credentials_present()
         if symbols is not None:
             try:
                 instruments = resolve_pull_symbols(symbols, _require_store().get)
@@ -1548,8 +1557,11 @@ def build_app(
         ``?symbols=`` / ``?symbol=`` / ``?kind=`` the full admitted spot universe
         is targeted (index + stock). The persisted coverage ledger means windows
         already in the lake are skipped, so this re-pulls only the gaps.
+
+        ``dry_run`` is forced when Groww creds are absent (the PRIMARY spot gate
+        post-cutover, DEC-DHAN-GROWW-REMIGRATE-001).
         """
-        dry_run = not dhan_creds_present()
+        dry_run = not groww_credentials_present()
         if symbols is not None:
             try:
                 instruments = resolve_pull_symbols(symbols, _require_store().get)
@@ -2404,10 +2416,20 @@ def build_app(
 
         return JSONResponse(credentials_preview())
 
-    @app.get("/credentials", response_class=HTMLResponse)
-    async def credentials_page() -> str:
-        """GET /credentials — the Credentials page (DEC-CREDENTIALS-STORE-001)."""
-        return _render_credentials_html()
+    @app.get("/credentials", include_in_schema=False)
+    async def credentials_page() -> RedirectResponse:
+        """GET /credentials — redirect to the now-PRIMARY Groww page (DEC-DHAN-GROWW-REMIGRATE-001).
+
+        Groww is the primary credentials surface for the Dhan → Groww cutover
+        (ADR-0009): the legacy ``/credentials`` path 307-redirects to
+        ``/groww-credentials`` so any bookmarked link, old nav entry, or
+        ``save a token`` hint lands on the Groww form rather than the deprecated
+        Dhan page. The Dhan credentials API routes + the Dhan page renderer are
+        kept (still exercised by the visual-regression / a11y / mobile suites)
+        until J4 removes the Dhan surface entirely. 307 (temporary) preserves the
+        GET method and signals the move is transitional, not permanent.
+        """
+        return RedirectResponse(url="/groww-credentials", status_code=307)
 
     # ── Groww credentials store + live probe (DEC-DHAN-GROWW-REMIGRATE-001) ──
     # GrowwCredentialsIn is module-scope (see top of file) so FastAPI resolves

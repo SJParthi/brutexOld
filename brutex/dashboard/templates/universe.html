@@ -298,7 +298,7 @@
     <div class="logo">BruteX</div>
     <div class="sub">F&amp;O Universe Explorer</div>
     <nav class="topnav" style="margin-left:18px; display:flex; gap:14px; font-size:13px;">
-      <a href="/credentials" style="color:var(--blue); text-decoration:none;">Credentials</a>
+      <a href="/groww-credentials" style="color:var(--blue); text-decoration:none;">Credentials</a>
       <span style="color:var(--muted);">·</span>
       <a href="/db" style="color:var(--blue); text-decoration:none;">Database</a>
       <span style="color:var(--muted);">·</span>
@@ -320,8 +320,8 @@
        background:linear-gradient(90deg, rgba(255,183,77,.10), rgba(255,183,77,.03));
        border:1px solid var(--yellow); border-radius:12px; display:none;
        align-items:center; gap:12px;">
-    <span style="font-weight:700; color:var(--yellow);">⚠ Set Dhan credentials to auto-pull expiries &amp; contracts</span>
-    <a href="/credentials" style="color:var(--blue); text-decoration:none; font-weight:700;">Set credentials →</a>
+    <span style="font-weight:700; color:var(--yellow);">⚠ Set Groww credentials to auto-pull expiries &amp; contracts</span>
+    <a href="/groww-credentials" style="color:var(--blue); text-decoration:none; font-weight:700;">Set credentials →</a>
     <button id="credBannerDismiss" title="Dismiss" style="margin-left:auto; background:transparent;
          border:none; color:var(--muted); cursor:pointer; font-size:16px; line-height:1;">✕</button>
   </div>
@@ -375,7 +375,7 @@
       logs: <code>~/.brutex/logs/brutex.log</code> &nbsp;|&nbsp;
       Other views: <a href="/" style="color:var(--blue)">Report</a> ·
       <a href="/db" style="color:var(--blue)">Database</a> ·
-      <a href="/credentials" style="color:var(--blue)">Credentials</a>
+      <a href="/groww-credentials" style="color:var(--blue)">Credentials</a>
     </div>
   </div>
 
@@ -1312,14 +1312,15 @@ function renderLiveStats(s) {
 }
 
 /* ── Credentials banner (DEC-INSTRUMENT-UNIVERSE-FAST-001) ──
-   Shown only when GET /api/v1/credentials/status reports creds absent, so the
-   operator knows expiry/contract auto-pull needs keys. Dismissible per page
+   Shown only when GET /api/v1/groww/credentials/status reports creds absent
+   (Groww is the PRIMARY surface post-cutover, DEC-DHAN-GROWW-REMIGRATE-001), so
+   the operator knows expiry/contract auto-pull needs keys. Dismissible per page
    load (no persistence — a fresh load re-checks status). */
 async function checkCredentialsBanner() {
   const banner = document.getElementById('credBanner');
   if (!banner) return;
   try {
-    const r = await fetch('/api/v1/credentials/status');
+    const r = await fetch('/api/v1/groww/credentials/status');
     if (!r.ok) return;
     const body = await r.json();
     banner.style.display = body && body.present ? 'none' : 'flex';

@@ -170,8 +170,14 @@ def _wait_for_job(client: TestClient, *, timeout: float = 10.0) -> dict[str, Any
 
 
 def _force_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the creds gate closed so every pull is the offline dry-run."""
+    """Pin BOTH creds gates closed so every pull is the offline dry-run.
+
+    The spot routes now gate on Groww (DEC-DHAN-GROWW-REMIGRATE-001) while the
+    options route still gates on Dhan; pin both so every selection form
+    deterministically dry-runs regardless of the ambient environment.
+    """
     monkeypatch.setattr(app_module, "dhan_creds_present", lambda: False)
+    monkeypatch.setattr(app_module, "groww_credentials_present", lambda: False)
 
 
 # ────────────────────────────────────────────────────────────────────────
