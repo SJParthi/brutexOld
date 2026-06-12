@@ -7,8 +7,9 @@ validation, and the :func:`brutex.cli._arm_retry_storm_guard` factory that
 builds the guard, opens the hash-chained audit writer, and returns the ingest
 progress hook — plus ``cmd_fetch``'s execution paths: the offline ``--dry-run``
 synthetic pipeline, ``--inspect``, ``--instruments``, the retired
-``--universe``, the live wiring (adapter/preflight/ingest faked — no network,
-no Dhan credentials), and the bounded ``--until-clean`` rounds.
+``--universe``, the live Groww wiring (creds-gate / adapter / ingest faked — no
+network, no Groww credentials; PR-J2 vendor cutover), and the bounded
+``--until-clean`` rounds.
 """
 
 from __future__ import annotations
@@ -102,10 +103,12 @@ def test_arm_guard_builds_hook_audits_terminal_failure(tmp_path: Path) -> None:
             stack=stack,
         )
         assert hook is not None
-        # A success outcome must not give up; a terminal failure must.
-        hook("NIFTY 1minute", 375, False, False)
-        hook("NIFTY 1minute", 0, True, False)
-        hook("NIFTY 1day", 0, True, False)  # 2/2 windows of NIFTY → 100% → symbol row
+        # A success outcome must not give up; a terminal failure must. The Groww
+        # ProgressHook is 3-arg ``(label, bars, failed)`` — no ``gap`` (the documented
+        # divergence: Groww has no known-gap branch).
+        hook("NIFTY 1minute", 375, False)
+        hook("NIFTY 1minute", 0, True)
+        hook("NIFTY 1day", 0, True)  # 2/2 windows of NIFTY → 100% → symbol row
 
     # The audit file was opened under <lake>/audit/ and its chain verifies.
     audit_files = list((tmp_path / "audit").glob("retry-storm-*.jsonl"))
@@ -209,6 +212,37 @@ def test_cmd_fetch_instruments_only_loads_master(
         "· indices=2 stocks=3 total=5\n"
         f"[brutex] lake: {tmp_path}\n"
     )
+
+
+# ── _DryRunGrowwSpotAdapter (offline dry-run spot stand-in) ─────────────
+
+
+def test_dry_run_groww_adapter_protocol_surface() -> None:
+    """The dry-run adapter satisfies the spot MarketAdapter shape with no network.
+
+    ``capabilities`` returns the Groww spot capabilities, ``list_instruments``
+    yields one empty page (the spine fans out over an explicit list), and
+    ``list_derivatives`` yields nothing (Track-1 spot is derivative-free).
+    """
+    from datetime import date
+
+    from brutex.adapters.groww.adapter import GROWW_CAPABILITIES
+    from brutex.models import Exchange
+
+    adapter = cli._DryRunGrowwSpotAdapter(bars_per_window=3)
+    assert adapter.capabilities is GROWW_CAPABILITIES
+    page = adapter.list_instruments()
+    assert tuple(page.instruments) == ()
+    assert page.next_cursor is None
+    assert list(adapter.list_derivatives(underlying_symbol="NIFTY", exchange=Exchange.NSE)) == []
+    bars = adapter.fetch_ohlcv(
+        symbol="NIFTY",
+        exchange=Exchange.NSE,
+        interval="1minute",
+        start=date(2024, 1, 2),
+        end=date(2024, 1, 2),
+    )
+    assert len(bars) == 3  # deterministic offline bars for start's day
 
 
 # ── cmd_fetch dry-run execution paths (offline synthetic pipeline) ──────
@@ -318,11 +352,12 @@ class _FakeIngestResult:
 def test_cmd_fetch_live_inspect_reports_failures(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The live (non-dry-run) wiring builds the rate-limited adapter and
+    """The live (non-dry-run) wiring builds the rate-limited Groww adapter and
     surfaces a still-failing pull as an internal error with the retry tally.
 
-    Everything network-shaped is faked: instrument resolution, the live
-    adapter build, the token preflight, and the ingest engine itself.
+    Everything network-shaped is faked: the creds-present gate, instrument
+    resolution, the live Groww adapter build, and the ingest engine itself
+    (there is NO Dhan-style token preflight on the Groww path — TOTP auth).
     ``--inspect`` keeps the run persistence-free (NullBarSink, no ledger).
     """
     pytest.importorskip("polars")
@@ -333,16 +368,15 @@ def test_cmd_fetch_live_inspect_reports_failures(
     monkeypatch.setattr(
         cli, "_resolve_brute_force_instruments", lambda lake: [FakeInstrument("NIFTY")]
     )
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
     monkeypatch.setattr(
         cli,
-        "_build_live_dhan_spot",
-        lambda lake, instruments, catalog=None: (adapter, object()),
+        "_build_live_groww_spot",
+        lambda lake, catalog=None: (adapter, object()),
     )
-    preflight = importlib.import_module("brutex.adapters.dhan.token_preflight")
-    monkeypatch.setattr(preflight, "probe_token_data_live", lambda adapter, instrument: "alive")
-    monkeypatch.setattr(preflight, "preflight_pull_verdict", lambda probe: None)
 
-    run_ingest = importlib.import_module("brutex.adapters.dhan.run_ingest")
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
     result = _FakeIngestResult(
         report=_FakeIngestReport(
             windows=2,
@@ -362,7 +396,7 @@ def test_cmd_fetch_live_inspect_reports_failures(
         seen.update(kwargs)
         return result
 
-    monkeypatch.setattr(run_ingest, "run_dhan_spot_ingest_with_retry", fake_ingest)
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
 
     rc = cli.cmd_fetch(
         tmp_path,
@@ -376,7 +410,7 @@ def test_cmd_fetch_live_inspect_reports_failures(
     )
     assert rc == cli.EXIT_INTERNAL_ERROR
     captured = capsys.readouterr()
-    assert "[brutex] fetch (live Dhan)" in captured.err
+    assert "[brutex] fetch (live Groww)" in captured.err
     assert "[brutex] fetch done — windows=2 bars_appended=0 failed_pairs=1 transient=1" in (
         captured.out
     )
@@ -409,14 +443,11 @@ def test_cmd_fetch_live_persisting_pull_succeeds(
     # segment enums), so resolve a full synthetic index instrument.
     instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
     monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
-    monkeypatch.setattr(
-        cli, "_build_live_dhan_spot", lambda lake, instruments, catalog=None: (object(), sink)
-    )
-    preflight = importlib.import_module("brutex.adapters.dhan.token_preflight")
-    monkeypatch.setattr(preflight, "probe_token_data_live", lambda adapter, instrument: "alive")
-    monkeypatch.setattr(preflight, "preflight_pull_verdict", lambda probe: None)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: True)
+    monkeypatch.setattr(cli, "_build_live_groww_spot", lambda lake, catalog=None: (object(), sink))
 
-    run_ingest = importlib.import_module("brutex.adapters.dhan.run_ingest")
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
     result = _FakeIngestResult(
         report=_FakeIngestReport(
             windows=1,
@@ -435,7 +466,7 @@ def test_cmd_fetch_live_persisting_pull_succeeds(
         seen.update(kwargs)
         return result
 
-    monkeypatch.setattr(run_ingest, "run_dhan_spot_ingest_with_retry", fake_ingest)
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", fake_ingest)
 
     rc = cli.cmd_fetch(
         tmp_path,
@@ -449,7 +480,7 @@ def test_cmd_fetch_live_persisting_pull_succeeds(
     )
     assert rc == cli.EXIT_OK
     captured = capsys.readouterr()
-    assert "[brutex] fetch (live Dhan)" in captured.err
+    assert "[brutex] fetch (live Groww)" in captured.err
     assert "[brutex] fetch done — windows=1 bars_appended=375 failed_pairs=0 transient=0" in (
         captured.out
     )
@@ -458,6 +489,43 @@ def test_cmd_fetch_live_persisting_pull_succeeds(
     assert seen["audit"] is not None  # the hash-chained ingest audit is threaded
     assert (tmp_path / "catalog.duckdb").exists()
     assert (tmp_path / "audit" / "spot-ingest.jsonl").exists()
+
+
+def test_cmd_fetch_live_missing_groww_creds_is_user_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live pull with NO Groww credentials refuses up front (exit 1), no network.
+
+    Groww auth is TOTP (no Dhan JWT/RenewToken pre-flight) — the creds-present
+    resolve is the only up-front gate (DEC-DHAN-GROWW-REMIGRATE-001 PR-J2). A
+    missing-creds resolve returns the user-error code BEFORE any adapter build or
+    instrument resolution, so neither is reached.
+    """
+    pytest.importorskip("polars")
+    pytest.importorskip("duckdb")
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_present", lambda: False)
+
+    def _never(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("must refuse before building the adapter")
+
+    monkeypatch.setattr(cli, "_build_live_groww_spot", _never)
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", _never)
+
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=5,
+    )
+    assert rc == cli.EXIT_USER_ERROR
+    captured = capsys.readouterr()
+    assert "[brutex] no Groww credentials" in captured.err
+    assert "BRUTEX_GROWW_API_KEY / BRUTEX_GROWW_TOTP_SECRET" in captured.err
 
 
 # ── cmd_fetch --until-clean (bounded rounds, DEC-TOKEN-PREFLIGHT-001) ───
