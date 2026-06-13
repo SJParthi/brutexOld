@@ -476,11 +476,25 @@ class TestFuturesApi:
         assert body["instrument_count"] == 0
         assert "pull the F&O futures first" in body["note"]
 
-    def test_options_asset_is_pending(self, store: InstrumentStore) -> None:
-        client = TestClient(build_app(DashboardState(), instrument_store=store))
+    def test_options_asset_is_now_wired(self) -> None:
+        # Milestone 3 wired Options — `asset=options` no longer returns the
+        # "ships after Spot" pending note; with no lake it degrades to the
+        # options reader's own "pull the F&O options first" empty payload.
+        from types import SimpleNamespace
+
+        fake = SimpleNamespace(path=None)
+        client = TestClient(build_app(DashboardState(), instrument_store=fake))
         body = client.get("/api/v1/movers", params={"asset": "options"}).json()
         assert body["instrument_count"] == 0
-        assert "Options" in body["note"]
+        assert "pull the F&O options first" in body["note"]
+
+    def test_unknown_asset_is_pending(self, store: InstrumentStore) -> None:
+        # An unknown asset (not spot/futures/options) still gets the honest
+        # "ships after Spot" pending payload.
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/movers", params={"asset": "commodity"}).json()
+        assert body["instrument_count"] == 0
+        assert "Commodity" in body["note"]
         assert "Spot" in body["note"]
 
     def test_malformed_date_is_400(self, store: InstrumentStore) -> None:
