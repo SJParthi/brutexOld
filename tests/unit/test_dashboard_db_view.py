@@ -22,6 +22,11 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from brutex.adapters.groww.constants import (
+    GROWW_FUTURE_COVERAGE_MARKET,
+    GROWW_OPTION_COVERAGE_MARKET,
+)
+from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.dashboard.db_view import (
     KNOWN_TABLES,
     _json_safe,
@@ -302,7 +307,7 @@ _WINDOW_NOW = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
 
 def _window_key(security_id: str = "NIFTY", interval: str = "1minute") -> WindowKey:
     return WindowKey(
-        market="spot",
+        market=GROWW_COVERAGE_MARKET,
         security_id=security_id,
         interval=interval,
         start=date(2021, 1, 1),
@@ -397,7 +402,7 @@ def test_build_window_payload_empty_when_neither_exists(tmp_path: Path) -> None:
     assert build_window_payload(tmp_path) == {
         "source": "status_log",
         "count": 0,
-        "counts": {"spot": {}, "options": {}},
+        "counts": {"spot": {}, "options": {}, "futures": {}},
         "empty_threshold": 3,
         "matched": 0,
         "returned": 0,
@@ -414,7 +419,7 @@ def _option_window_key(
 ) -> WindowKey:
     """An option-series ledger key exactly as option_ingest._coverage_key folds it."""
     return WindowKey(
-        market="spot-option",
+        market=GROWW_OPTION_COVERAGE_MARKET,
         security_id=security_id,
         interval=interval,
         start=date(2021, 1, 1),
@@ -441,7 +446,7 @@ class TestOptionWindowDecode:
         (window,) = payload["windows"]
         assert window["symbol"] == "BANKNIFTY · NSE_FNO"
         assert window["interval"] == "WEEK#1 ATM+3 CALL · 1m"
-        assert window["market"] == "spot-option"  # the filter key stays raw
+        assert window["market"] == GROWW_OPTION_COVERAGE_MARKET  # the filter key stays raw
 
     def test_unknown_id_keeps_numeric_id_not_a_crash(self, tmp_path: Path) -> None:
         ledger = WindowLedger()
@@ -501,9 +506,44 @@ class TestOptionWindowDecode:
         spot = build_window_payload(tmp_path, market="spot")
         assert [w["symbol"] for w in spot["windows"]] == ["NIFTY"]
         options = build_window_payload(tmp_path, market="options")
-        assert [w["market"] for w in options["windows"]] == ["spot-option"]
+        assert [w["market"] for w in options["windows"]] == [GROWW_OPTION_COVERAGE_MARKET]
         assert options["counts"]["spot"] == {"SUCCESS": 1}
         assert options["counts"]["options"] == {"SUCCESS": 1}
+
+    def test_futures_window_buckets_separately(self, tmp_path: Path) -> None:
+        # DEC-COVERAGE-GROWW-NAMESPACE-001: a ``groww-future`` window lands in its
+        # OWN "futures" bucket, NOT lumped into "spot" (the pre-fix bug);
+        # ``?market=futures`` filters to it; the spot completeness rollup (exact
+        # spot-market match) excludes it.
+        from brutex.dashboard.db_view import spot_window_rollup
+
+        ledger = WindowLedger()
+        ledger.record(
+            _window_key("NIFTY"), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+        )
+        ledger.record(
+            WindowKey(
+                market=GROWW_FUTURE_COVERAGE_MARKET,
+                security_id="NSE-NIFTY-25Jan24-FUT",
+                interval="1day",
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 26),
+            ),
+            raw_bars=375,
+            error_type=None,
+            bars_appended=375,
+            now=_WINDOW_NOW,
+        )
+        save_window_ledger(ledger, tmp_path)
+
+        payload = build_window_payload(tmp_path)
+        assert payload["counts"]["futures"] == {"SUCCESS": 1}
+        assert payload["counts"]["spot"] == {"SUCCESS": 1}  # the future is NOT lumped here
+        futures = build_window_payload(tmp_path, market="futures")
+        assert [w["symbol"] for w in futures["windows"]] == ["NSE-NIFTY-25Jan24-FUT"]
+        assert [w["market"] for w in futures["windows"]] == [GROWW_FUTURE_COVERAGE_MARKET]
+        # The spot completeness rollup excludes futures (exact spot-market match).
+        assert spot_window_rollup(tmp_path) == {("NIFTY", "1minute"): (1, 0, 0)}
 
     def test_row_cap_keeps_failed_and_empty_first(self, tmp_path: Path) -> None:
         # The cap can never hide actionable rows: severity-first ordering puts
@@ -588,7 +628,7 @@ class TestSpotWindowRollup:
         )
         ledger.settle_known_gap(
             WindowKey(
-                market="spot",
+                market=GROWW_COVERAGE_MARKET,
                 security_id="NIFTY",
                 interval="1minute",
                 start=date(2021, 4, 1),
@@ -598,7 +638,7 @@ class TestSpotWindowRollup:
         )
         ledger.plan(
             WindowKey(
-                market="spot",
+                market=GROWW_COVERAGE_MARKET,
                 security_id="NIFTY",
                 interval="1minute",
                 start=date(2021, 7, 1),
@@ -608,7 +648,7 @@ class TestSpotWindowRollup:
         )
         ledger.record(
             WindowKey(
-                market="spot",
+                market=GROWW_COVERAGE_MARKET,
                 security_id="NIFTY",
                 interval="1minute",
                 start=date(2021, 10, 1),
@@ -621,7 +661,7 @@ class TestSpotWindowRollup:
         )
         ledger.record(
             WindowKey(
-                market="spot",
+                market=GROWW_COVERAGE_MARKET,
                 security_id="NIFTY",
                 interval="1day",
                 start=date(2021, 1, 1),
