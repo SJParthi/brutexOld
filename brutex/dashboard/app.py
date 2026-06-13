@@ -100,6 +100,12 @@ from brutex.dashboard.pull_controller import (
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.request_logging import emit_request_log
 from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
+from brutex.dashboard.sweep_runner import (
+    default_results_root,
+    resolve_sweep_request,
+    run_sweep_from_request,
+    sweep_progress_file,
+)
 from brutex.dashboard.universe_pull import select_pull_instruments
 from brutex.dashboard.universe_query import list_underlyings, universe_summary
 from brutex.dashboard.verdict_banner import banner_for
@@ -2394,6 +2400,89 @@ def build_app(
 
         status_code, payload = await run_in_threadpool(_run)
         return JSONResponse(payload, status_code=status_code)
+
+    @app.post("/api/v1/sweep/run")
+    async def api_sweep_run(
+        symbols: str | None = Query(default=None),
+        intervals: str | None = Query(default=None),
+        directions: str | None = Query(default=None),
+        k: str | None = Query(default=None),
+        sl: str | None = Query(default=None),
+        tp: str | None = Query(default=None),
+        top: int | None = Query(default=None),
+        mode: str | None = Query(default=None),
+        exchange: str | None = Query(default=None),
+        segment: str | None = Query(default=None),
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/sweep/run — launch the brute-force grid sweep from the dashboard.
+
+        The "🚀 Run Sweep" button (DEC-SWEEP-RUN-BUTTON-001): the ONE-CLICK web
+        replacement for the ``brutex sweep-all …`` terminal command. Every form
+        field is normalised + validated by the pure
+        :func:`~brutex.dashboard.sweep_runner.resolve_sweep_request` (a bad field is
+        a 400 with a clear message — never a deep background crash); the resolved
+        request runs the SAME ``cmd_sweep_all`` engine the CLI uses on the
+        **single-flight** background job (poll the live tick at
+        ``/api/v1/sweep-progress``). Defaults mirror the CLI: NSE index symbols on
+        the ``INDEX`` segment over ``2021-01-01 → today``. A second click while a
+        pull OR sweep is already running is a no-op (``{"started": false}``) — one
+        lake, one writer (CLAUDE.md §2 Rule 7 idempotence).
+
+        The sweep reads the LOCAL lake (no vendor creds, no network); an empty /
+        partly-pulled lake simply sweeps whatever slices exist and reports the
+        honest tuple count in the progress feed (Golden Rule #10).
+        """
+        store = _require_store()
+        lake_root = getattr(store, "path", None)
+        if not isinstance(lake_root, Path):
+            raise HTTPException(status_code=400, detail="no lake configured for sweep")
+        lake = lake_root.parent
+        try:
+            request = resolve_sweep_request(
+                symbols=symbols,
+                intervals=intervals,
+                directions=directions,
+                k=k,
+                sl=sl,
+                tp=tp,
+                top=top,
+                mode=mode,
+                exchange=exchange,
+                segment=segment,
+                start=start,
+                end=end,
+                today=date.today(),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        results_root = default_results_root(lake)
+        # Point the live sweep-progress panel at the exact file cmd_sweep_all
+        # publishes to, so GET /api/v1/sweep-progress serves THIS run with no new
+        # plumbing (the cross-process file bridge — DEC-SWEEP-WIRE-GA-001).
+        state.sweep_progress_path = sweep_progress_file(results_root)
+        _LOG.info(
+            "sweep.run.requested",
+            symbols=request.symbols,
+            intervals=request.intervals,
+            directions=request.directions,
+            k=request.k,
+            exchange=request.exchange,
+            segment=request.segment,
+            start=request.start,
+            end=request.end,
+        )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: run the grid sweep; the live tick streams to the progress file."""
+            return run_sweep_from_request(request, lake_root=lake, results_root=results_root)
+
+        started = _pull_job.start(_work, total=1, detail=f"sweep {request.symbols}")
+        payload = request.to_dict()
+        payload["started"] = started
+        return JSONResponse(payload)
 
     # ── Groww credentials store + live probe (DEC-DHAN-GROWW-REMIGRATE-001) ──
     # GrowwCredentialsIn is module-scope (see top of file) so FastAPI resolves
