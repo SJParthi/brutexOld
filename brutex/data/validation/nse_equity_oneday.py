@@ -78,11 +78,16 @@ from brutex.money import round_money
 # Constants + env-overridable knobs
 # ────────────────────────────────────────────────────────────────────────────
 
-#: NSE full security bhavcopy URL template (BEST-EFFORT — verify; may change;
-#: env-overridable). ``{ddmmyyyy}`` is substituted with the trade date. Shares the
-#: ``nsearchives.nseindia.com`` host family the index harness + constituents helper
-#: already use. The "sec_bhavdata_full" file carries SYMBOL/SERIES/OHLC + the
-#: total-traded-quantity (volume) column this harness needs.
+#: NSE full security bhavcopy URL template — **verified 2026-06-13** against the
+#: live file format (``nsearchives.nseindia.com/products/content/sec_bhavdata_full_DDMMYYYY.csv``;
+#: date = ``%d%m%Y``, e.g. ``…_20012025.csv``), corroborated by independent mirrors
+#: (the chartiny/nse-sec-bhavdata-full daily archive) + community parsers. This is
+#: the security-wise "full bhavdata" report (OHLC + ``TTL_TRD_QNTY`` volume +
+#: delivery) — NOT the ``cm`` cash bhavcopy NSE retired July-2024 for CM-UDiFF, so
+#: it is the correct still-live file for a Volume cross-check. Still
+#: ``{ddmmyyyy}``-templated + env-overridable (NSE may relocate it; a wrong guess
+#: degrades to ``unavailable``, never a false verdict — Golden Rule #1). The older
+#: ``archives.nseindia.com`` host serves the same file as a fallback.
 _NSE_BHAVCOPY_URL_TEMPLATE: Final[str] = (
     f"{NSE_OFFICIAL_BASE_URL}/products/content/sec_bhavdata_full_{{ddmmyyyy}}.csv"
 )
@@ -160,9 +165,15 @@ class EquityCsvSpec:
         self.volume_column = volume_column
 
 
-#: Default bhavcopy column labels — BEST-EFFORT (NSE "sec_bhavdata_full"). The
-#: parser is whitespace/case tolerant, so the real file's leading-space headers
-#: (e.g. ``" SERIES"``) still resolve.
+#: Default bhavcopy column labels — **verified 2026-06-13** against the live
+#: ``sec_bhavdata_full`` header
+#: ``SYMBOL, SERIES, DATE1, PREV_CLOSE, OPEN_PRICE, HIGH_PRICE, LOW_PRICE,
+#: LAST_PRICE, CLOSE_PRICE, AVG_PRICE, TTL_TRD_QNTY, …``. Every column AFTER
+#: ``SYMBOL`` carries a LEADING SPACE (``" SERIES"``, ``" OPEN_PRICE"``) and every
+#: VALUE is leading-space-padded with NO thousands commas (``" 311.15"``,
+#: ``" 133716"``); the whitespace/case-tolerant resolver + ``Decimal`` /
+#: ``_parse_volume`` strip handle both. Still env-overridable should NSE rename a
+#: column (a wrong label degrades to ``unavailable``, never a false verdict).
 DEFAULT_EQUITY_CSV_SPEC: Final[EquityCsvSpec] = EquityCsvSpec(
     symbol_column="SYMBOL",
     series_column="SERIES",

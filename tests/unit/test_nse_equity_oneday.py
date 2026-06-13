@@ -153,6 +153,34 @@ def test_parse_happy() -> None:
     assert quote.source == "nse"
 
 
+def test_parse_real_nse_bhavcopy_row() -> None:
+    """Golden: parse a BYTE-REAL ``sec_bhavdata_full`` header + row (verified 2026-06-13).
+
+    Locks the parser against the ACTUAL live NSE format: every column after SYMBOL
+    has a leading space (`` SERIES``, `` OPEN_PRICE``) and every value is
+    leading-space-padded with no thousands commas — sourced from the
+    chartiny/nse-sec-bhavdata-full mirror (2024-09-26).
+    """
+    real_header = (
+        "SYMBOL, SERIES, DATE1, PREV_CLOSE, OPEN_PRICE, HIGH_PRICE, LOW_PRICE, "
+        "LAST_PRICE, CLOSE_PRICE, AVG_PRICE, TTL_TRD_QNTY, TURNOVER_LACS, "
+        "NO_OF_TRADES, DELIV_QTY, DELIV_PER"
+    )
+    real_row = (
+        "20MICRONS, EQ, 26-Sep-2024, 310.55, 311.15, 313.80, 301.50, 303.00, "
+        "302.80, 304.71, 133716, 407.45, 6260, 68759, 51.42"
+    )
+    quote = parse_bhavcopy_quote(
+        "\n".join([real_header, real_row]), symbol="20MICRONS", trade_date=_DAY
+    )
+    assert quote is not None
+    assert quote.open == Decimal("311.15")
+    assert quote.high == Decimal("313.80")
+    assert quote.low == Decimal("301.50")
+    assert quote.close == Decimal("302.80")
+    assert quote.volume == 133716  # leading-space value, no comma
+
+
 def test_parse_no_header_returns_none() -> None:
     assert parse_bhavcopy_quote("", symbol="RELIANCE", trade_date=_DAY) is None
 
