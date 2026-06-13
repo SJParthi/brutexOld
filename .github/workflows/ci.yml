@@ -559,6 +559,14 @@ jobs:
           else
             echo "(brutex.adapters.protocol test file not present yet — gate inactive)"
           fi
+          # DEC-SYNTHETIC-ADAPTER-001 (entry #694): the synthetic offline adapter
+          #       package — seeded deterministic generator + O(1)-per-bar candle
+          #       maths + instrument index + MarketAdapter composition.
+          if compgen -G "tests/unit/test_synthetic_adapter.py" > /dev/null; then
+            pytest --cov=brutex.adapters.synthetic --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_synthetic_adapter.py
+          else
+            echo "(brutex.adapters.synthetic test file not present yet — gate inactive)"
+          fi
           # 13b · brutex.data.partition (79 stmts, 24 branches, 70 tests — DEC-MUTATION-RUNTIME-001 mutation pins)
           #       Lake partition path computation (year/month/symbol/tf)
           if compgen -G "tests/unit/test_data_partition.py" > /dev/null; then
