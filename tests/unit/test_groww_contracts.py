@@ -237,8 +237,9 @@ class TestOptionContractsFilter:
 
 class TestEnumerateContracts:
     def test_yields_contracts_per_year(self) -> None:
-        exp_by_year = {2023: ["2023-12-28"], 2024: ["2024-01-25"]}
-        con_by_expiry = {
+        # object keys: the fake routes on the SDK kwargs, which are typed object.
+        exp_by_year: dict[object, list[str]] = {2023: ["2023-12-28"], 2024: ["2024-01-25"]}
+        con_by_expiry: dict[object, list[str]] = {
             "2023-12-28": ["NSE-NIFTY-28Dec23-100-CE"],
             "2024-01-25": ["NSE-NIFTY-25Jan24-200-PE"],
         }

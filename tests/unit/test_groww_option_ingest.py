@@ -6,24 +6,25 @@ filter, bounded transient retry, terminal propagation, conflict summary, every
 ``on_*``/``pace``/``ledger`` present-vs-absent branch), the sequential multi-contract
 driver (quarantine + report sums + auth-abort + non-Groww propagation), and the
 full underlying path (resolve → CE/PE → ingest, resolution-error propagation).
-Driven by FAKE clients + a recording sink — no ``growwapi``, no network, no lake.
+
+Driven by a FAKE SDK behind a REAL :class:`GrowwClient` (the repo pattern — the
+SDK satisfies the ``GrowwSDK`` Protocol structurally), so error injection uses the
+SDK-named exceptions :func:`from_groww_exception` maps; no ``growwapi``, no network.
+The client is built with ``max_attempts=1`` so its own timeout fast-retry never
+fires — the ingest-level retry is what the tests exercise.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from brutex.adapters.groww import option_ingest as _oi
+from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.constants import GROWW_OPTION_COVERAGE_MARKET, OPTION_SEGMENT
-from brutex.adapters.groww.errors import (
-    GrowwAuthError,
-    GrowwBadRequestError,
-    GrowwRateLimitError,
-    GrowwTimeoutError,
-)
 from brutex.adapters.groww.option_ingest import (
     GrowwOptionIngestReport,
     OptionPairFailure,
@@ -42,9 +43,25 @@ from brutex.data.sink import SinkAppendResult
 from brutex.data.window_ledger import WindowLedger
 from structlog.testing import capture_logs
 
-# A frozen "now" so the current-day clamp is deterministic; every test pulls
-# PAST contract ranges (2024/2025), for which the clamp is a no-op.
-_NOW = lambda: datetime(2026, 6, 13, 8, 0, tzinfo=UTC)  # noqa: E731 — tiny test clock
+
+def _now() -> datetime:
+    """A frozen IST clock so the current-day clamp is deterministic (all ranges are past)."""
+    return datetime(2026, 6, 13, 8, 0, tzinfo=UTC)
+
+
+# SDK-named exception fakes — `from_groww_exception` maps them by class name to the
+# neutral GrowwError tree (mirrors tests/unit/test_groww_client.py).
+class GrowwAPIRateLimitException(Exception): ...
+
+
+class GrowwAPITimeoutException(Exception): ...
+
+
+class GrowwAPIBadRequestException(Exception): ...
+
+
+class GrowwAPIAuthenticationException(Exception): ...
+
 
 # In-session: 09:30 IST → kept by the intraday session filter. Out-of-session:
 # 17:30 IST → dropped intraday, kept daily (a daily bar has no intraday time).
@@ -56,18 +73,8 @@ def _candles(ts: str = _IN_SESSION, *, volume: int = 50, oi: int = 7) -> Mapping
     return {"candles": [[ts, 100.0, 110.0, 90.0, 105.0, volume, oi]]}
 
 
-def _ce(symbol: str = "NSE-NIFTY-02Jan25-28500-CE") -> DerivativeContract:
-    return DerivativeContract(
-        underlying_symbol="NIFTY",
-        expiry=date(2025, 1, 2),
-        symbol=symbol,
-        contract_type="CE",
-        strike=28500.0,
-    )
-
-
-class _FakeClient:
-    """A duck-typed :class:`GrowwClient`: candle payloads + optional error scripts.
+class _FakeSDK:
+    """A ``GrowwSDK``-shaped fake: candle payloads + optional error scripts.
 
     * ``script`` — a per-call list (``Exception`` raises, ``None`` returns the
       default payload), clamped to its last entry (for retry sequences).
@@ -81,8 +88,8 @@ class _FakeClient:
         payload: Mapping[str, object] | None = None,
         script: Sequence[Exception | None] | None = None,
         raise_for: Mapping[str, Exception] | None = None,
-        expiries=None,
-        contracts=None,
+        expiries: Callable[..., Mapping[str, object]] | None = None,
+        contracts: Callable[..., Mapping[str, object]] | None = None,
     ) -> None:
         self._payload = payload if payload is not None else _candles()
         self._script = list(script) if script is not None else None
@@ -91,7 +98,11 @@ class _FakeClient:
         self._contracts = contracts or (lambda **_kw: {"contracts": []})
         self.symbols: list[str] = []
 
-    def historical_candles(self, **kw: object) -> Mapping[str, object]:
+    @property
+    def calls(self) -> int:
+        return len(self.symbols)
+
+    def get_historical_candles(self, **kw: object) -> Mapping[str, object]:
         self.symbols.append(str(kw["groww_symbol"]))
         if self._script is not None:
             item = self._script[min(len(self.symbols) - 1, len(self._script) - 1)]
@@ -103,11 +114,27 @@ class _FakeClient:
             raise exc
         return self._payload
 
-    def expiries(self, **kw: object) -> Mapping[str, object]:
+    def get_expiries(self, **kw: object) -> Mapping[str, object]:
         return self._expiries(**kw)
 
-    def contracts(self, **kw: object) -> Mapping[str, object]:
+    def get_contracts(self, **kw: object) -> Mapping[str, object]:
         return self._contracts(**kw)
+
+
+def _client(sdk: _FakeSDK) -> GrowwClient:
+    # max_attempts=1 → the client never fast-retries a timeout, so the ingest-level
+    # retry is the only retry under test.
+    return GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1)
+
+
+def _ce(symbol: str = "NSE-NIFTY-02Jan25-28500-CE") -> DerivativeContract:
+    return DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2025, 1, 2),
+        symbol=symbol,
+        contract_type="CE",
+        strike=28500.0,
+    )
 
 
 class _Sink:
@@ -136,7 +163,7 @@ class _Sink:
             conflict = BarConflict(timestamp=stored.timestamp, stored=stored, vendor=vendor)
             write_results = (
                 WriteResult(
-                    path=__import__("pathlib").Path("x.parquet"),
+                    path=Path("x.parquet"),
                     row_count=len(bars),
                     raw_hash="0" * 64,
                     first_ts=stored.timestamp,
@@ -148,6 +175,16 @@ class _Sink:
         return SinkAppendResult(
             bars_appended=len(bars), partitions_written=1, write_results=write_results
         )
+
+
+class _RaisingSink:
+    """A sink whose append raises a NON-Groww error (a genuine bug path)."""
+
+    def append(
+        self, *, exchange: str, segment: str, symbol: str, interval: str, bars: Sequence[CandleBar]
+    ) -> SinkAppendResult:
+        del exchange, segment, symbol, interval, bars
+        raise RuntimeError("genuine bug in the sink")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -167,9 +204,9 @@ def test_contract_exchange_no_dash_raises() -> None:
 
 
 def test_fetch_option_candles_is_fno_and_keeps_volume_oi() -> None:
-    client = _FakeClient(payload=_candles(volume=321, oi=99))
+    sdk = _FakeSDK(payload=_candles(volume=321, oi=99))
     bars = fetch_option_candles(
-        client, contract=_ce(), interval="1day", start=date(2024, 1, 1), end=date(2024, 1, 2)
+        _client(sdk), contract=_ce(), interval="1day", start=date(2024, 1, 1), end=date(2024, 1, 2)
     )
     assert len(bars) == 1
     assert bars[0].volume == 321  # options trade → volume kept (drop_volume=False)
@@ -180,16 +217,16 @@ def test_fetch_option_candles_is_fno_and_keeps_volume_oi() -> None:
 # ingest_option_contract — happy / skip / clamp
 # ─────────────────────────────────────────────────────────────────────────
 def test_ingest_success_no_ledger_no_hooks() -> None:
-    client = _FakeClient(payload=_candles(_OUT_SESSION))  # daily → not filtered
+    sdk = _FakeSDK(payload=_candles(_OUT_SESSION))  # daily → not filtered
     sink = _Sink()
     report = ingest_option_contract(
-        client,
+        _client(sdk),
         sink,
         contract=_ce(),
         interval="1day",
         start=date(2024, 1, 1),
         end=date(2024, 1, 2),
-        now_ist=_NOW,
+        now_ist=_now,
     )
     assert report.windows == 1 and report.bars_appended == 1 and report.retried_windows == 0
     exch, seg, sym, interval, n = sink.appends[0]
@@ -198,13 +235,13 @@ def test_ingest_success_no_ledger_no_hooks() -> None:
 
 
 def test_ingest_success_with_ledger_pace_and_on_success() -> None:
-    client = _FakeClient(payload=_candles())
+    sdk = _FakeSDK(payload=_candles())
     sink = _Sink()
     ledger = WindowLedger()
     paces: list[int] = []
     successes: list[int] = []
     report = ingest_option_contract(
-        client,
+        _client(sdk),
         sink,
         contract=_ce(),
         interval="1minute",
@@ -213,7 +250,7 @@ def test_ingest_success_with_ledger_pace_and_on_success() -> None:
         pace=lambda: paces.append(1),
         on_success=lambda: successes.append(1),
         ledger=ledger,
-        now_ist=_NOW,
+        now_ist=_now,
     )
     assert report.bars_appended == 1
     assert paces == [1] and successes == [1]
@@ -228,7 +265,7 @@ def test_ingest_success_with_ledger_pace_and_on_success() -> None:
 
 
 def test_ingest_skips_settled_window() -> None:
-    client = _FakeClient(payload=_candles())
+    sdk = _FakeSDK(payload=_candles())
     sink = _Sink()
     ledger = WindowLedger()
     key = WindowKey(
@@ -240,81 +277,81 @@ def test_ingest_skips_settled_window() -> None:
     )
     ledger.record(key, raw_bars=5, error_type=None, bars_appended=5, now=datetime.now(UTC))
     report = ingest_option_contract(
-        client,
+        _client(sdk),
         sink,
         contract=_ce(),
         interval="1day",
         start=date(2024, 1, 1),
         end=date(2024, 1, 2),
         ledger=ledger,
-        now_ist=_NOW,
+        now_ist=_now,
     )
     assert report.skipped_windows == 1 and report.bars_appended == 0
-    assert client.symbols == [] and sink.appends == []  # no vendor call
+    assert sdk.symbols == [] and sink.appends == []  # no vendor call
 
 
 def test_ingest_empty_range_after_clamp() -> None:
-    client = _FakeClient()
+    sdk = _FakeSDK()
     sink = _Sink()
     report = ingest_option_contract(
-        client,
+        _client(sdk),
         sink,
         contract=_ce(),
         interval="1day",
         start=date(2024, 1, 2),
         end=date(2024, 1, 1),
-        now_ist=_NOW,  # start >= end
+        now_ist=_now,  # start >= end
     )
     assert report.windows == 0 and report.bars_appended == 0
-    assert client.symbols == []
+    assert sdk.symbols == []
 
 
 # ─────────────────────────────────────────────────────────────────────────
 # ingest_option_contract — session filter
 # ─────────────────────────────────────────────────────────────────────────
 def test_ingest_intraday_filters_out_of_session() -> None:
-    client = _FakeClient(payload=_candles(_OUT_SESSION))
+    sdk = _FakeSDK(payload=_candles(_OUT_SESSION))
     sink = _Sink()
     report = ingest_option_contract(
-        client,
+        _client(sdk),
         sink,
         contract=_ce(),
         interval="1minute",
         start=date(2024, 1, 1),
         end=date(2024, 1, 2),
-        now_ist=_NOW,
+        now_ist=_now,
     )
     assert report.bars_appended == 0  # out-of-session bar dropped before the sink
     assert sink.appends[0][4] == 0
 
 
 def test_ingest_intraday_keeps_in_session() -> None:
-    client = _FakeClient(payload=_candles(_IN_SESSION))
+    sdk = _FakeSDK(payload=_candles(_IN_SESSION))
     sink = _Sink()
     report = ingest_option_contract(
-        client,
+        _client(sdk),
         sink,
         contract=_ce(),
         interval="1minute",
         start=date(2024, 1, 1),
         end=date(2024, 1, 2),
-        now_ist=_NOW,
+        now_ist=_now,
     )
     assert report.bars_appended == 1
 
 
 def test_ingest_conflict_summary_logged() -> None:
-    client = _FakeClient(payload=_candles())
+    sdk = _FakeSDK(payload=_candles())
     sink = _Sink(with_conflict=True)
     with capture_logs() as logs:
         report = ingest_option_contract(
-            client,
+            _client(sdk),
             sink,
             contract=_ce(),
             interval="1day",
             start=date(2024, 1, 1),
             end=date(2024, 1, 2),
-            now_ist=_NOW,
+            now_ist=_now,
         )
     assert report.conflicts == 1
     assert any(e["event"] == "option.ingest.conflict.summary" for e in logs)
@@ -324,13 +361,13 @@ def test_ingest_conflict_summary_logged() -> None:
 # ingest_option_contract — transient retry + terminal
 # ─────────────────────────────────────────────────────────────────────────
 def test_ingest_timeout_retry_then_success() -> None:
-    client = _FakeClient(payload=_candles(), script=[GrowwTimeoutError("stall"), None])
+    sdk = _FakeSDK(payload=_candles(), script=[GrowwAPITimeoutException("stall"), None])
     sink = _Sink()
     ledger = WindowLedger()
     timeouts: list[int] = []
     slept: list[int] = []
     report = ingest_option_contract(
-        client,
+        _client(sdk),
         sink,
         contract=_ce(),
         interval="1day",
@@ -340,19 +377,19 @@ def test_ingest_timeout_retry_then_success() -> None:
         backoff=slept.append,
         ledger=ledger,
         max_attempts=2,
-        now_ist=_NOW,
+        now_ist=_now,
     )
     assert report.bars_appended == 1 and report.retried_windows == 1
     assert timeouts == [1] and slept == [0]  # one timeout fed, one backoff before retry
 
 
 def test_ingest_ratelimit_exhausted_records_failed() -> None:
-    client = _FakeClient(script=[GrowwRateLimitError("429")])
+    sdk = _FakeSDK(script=[GrowwAPIRateLimitException("429")])
     sink = _Sink()
     ledger = WindowLedger()
     hits: list[int] = []
     report = ingest_option_contract(
-        client,
+        _client(sdk),
         sink,
         contract=_ce(),
         interval="1day",
@@ -361,7 +398,7 @@ def test_ingest_ratelimit_exhausted_records_failed() -> None:
         on_rate_limit=lambda: hits.append(1),
         ledger=ledger,
         max_attempts=0,
-        now_ist=_NOW,  # 0 retries → single attempt
+        now_ist=_now,  # 0 retries → single attempt
     )
     assert report.still_failed_windows == 1 and report.transient_failures == 1
     assert report.retried_windows == 0 and hits == [1]
@@ -377,46 +414,48 @@ def test_ingest_ratelimit_exhausted_records_failed() -> None:
 
 def test_ingest_transient_no_hooks_no_ledger() -> None:
     # timeout with on_timeout=None + ledger=None — exercises the no-hook branches.
-    client = _FakeClient(script=[GrowwTimeoutError("stall")])
+    sdk = _FakeSDK(script=[GrowwAPITimeoutException("stall")])
     report = ingest_option_contract(
-        client,
+        _client(sdk),
         _Sink(),
         contract=_ce(),
         interval="1day",
         start=date(2024, 1, 1),
         end=date(2024, 1, 2),
         max_attempts=0,
-        now_ist=_NOW,
+        now_ist=_now,
     )
     assert report.still_failed_windows == 1
 
 
 def test_ingest_ratelimit_no_hook_no_ledger() -> None:
-    client = _FakeClient(script=[GrowwRateLimitError("429")])
+    sdk = _FakeSDK(script=[GrowwAPIRateLimitException("429")])
     report = ingest_option_contract(
-        client,
+        _client(sdk),
         _Sink(),
         contract=_ce(),
         interval="1day",
         start=date(2024, 1, 1),
         end=date(2024, 1, 2),
         max_attempts=0,
-        now_ist=_NOW,
+        now_ist=_now,
     )
     assert report.still_failed_windows == 1
 
 
 def test_ingest_terminal_error_propagates() -> None:
-    client = _FakeClient(script=[GrowwBadRequestError("bad")])
+    from brutex.adapters.groww.errors import GrowwBadRequestError
+
+    sdk = _FakeSDK(script=[GrowwAPIBadRequestException("bad")])
     with pytest.raises(GrowwBadRequestError):
         ingest_option_contract(
-            client,
+            _client(sdk),
             _Sink(),
             contract=_ce(),
             interval="1day",
             start=date(2024, 1, 1),
             end=date(2024, 1, 2),
-            now_ist=_NOW,
+            now_ist=_now,
         )
 
 
@@ -429,17 +468,17 @@ def _ce2() -> DerivativeContract:
 
 def test_run_multi_contract_success_and_quarantine() -> None:
     ok1, ok2, bad = _ce(), _ce2(), _ce("NSE-NIFTY-02Jan25-99999-PE")
-    client = _FakeClient(payload=_candles(), raise_for={bad.symbol: GrowwBadRequestError("nope")})
+    sdk = _FakeSDK(payload=_candles(), raise_for={bad.symbol: GrowwAPIBadRequestException("nope")})
     sink = _Sink()
     progress: list[tuple[str, int, bool]] = []
     report = run_groww_option_ingest(
-        client,
+        _client(sdk),
         sink,
         contracts=[ok1, ok2, bad],
         intervals=["1day"],
         start=date(2024, 1, 1),
         end=date(2024, 1, 2),
-        now_ist=_NOW,
+        now_ist=_now,
         on_progress=lambda label, bars, failed: progress.append((label, bars, failed)),
     )
     assert set(report.pairs) == {(ok1.symbol, "1day"), (ok2.symbol, "1day")}
@@ -451,44 +490,46 @@ def test_run_multi_contract_success_and_quarantine() -> None:
 
 def test_run_auth_failure_sets_auth_aborted() -> None:
     bad = _ce()
-    client = _FakeClient(raise_for={bad.symbol: GrowwAuthError("dead token")})
+    sdk = _FakeSDK(raise_for={bad.symbol: GrowwAPIAuthenticationException("dead token")})
     report = run_groww_option_ingest(
-        client,
+        _client(sdk),
         _Sink(),
         contracts=[bad],
         intervals=["1day"],
         start=date(2024, 1, 1),
         end=date(2024, 1, 2),
-        now_ist=_NOW,
+        now_ist=_now,
     )
     assert report.failed_pairs == 1 and report.auth_aborted
     assert report.failures[0].auth_failure is True
 
 
 def test_run_non_groww_error_propagates() -> None:
-    client = _FakeClient(script=[ValueError("genuine bug")])
-    with pytest.raises(ValueError, match="genuine bug"):
+    # The sink raising a non-Groww error proves run_groww_option_ingest never
+    # swallows a genuine bug (only GrowwError is quarantined).
+    sdk = _FakeSDK(payload=_candles())
+    with pytest.raises(RuntimeError, match="genuine bug"):
         run_groww_option_ingest(
-            client,
-            _Sink(),
+            _client(sdk),
+            _RaisingSink(),
             contracts=[_ce()],
             intervals=["1day"],
             start=date(2024, 1, 1),
             end=date(2024, 1, 2),
-            now_ist=_NOW,
+            now_ist=_now,
         )
 
 
 def test_run_report_property_sums() -> None:
-    client = _FakeClient(payload=_candles())
+    sdk = _FakeSDK(payload=_candles())
     report = run_groww_option_ingest(
-        client,
+        _client(sdk),
         _Sink(),
         contracts=[_ce(), _ce2()],
         intervals=["1day"],
         start=date(2024, 1, 1),
         end=date(2024, 1, 2),
-        now_ist=_NOW,
+        now_ist=_now,
     )
     assert report.transient_failures == 0 and report.skipped_windows == 0
     assert report.retried_windows == 0 and report.still_failed_windows == 0
@@ -513,7 +554,7 @@ def test_default_backoff_is_bounded_exponential(monkeypatch: pytest.MonkeyPatch)
 # ingest_underlying_options — full path
 # ─────────────────────────────────────────────────────────────────────────
 def test_ingest_underlying_options_full_path() -> None:
-    client = _FakeClient(
+    sdk = _FakeSDK(
         payload=_candles(),
         expiries=lambda **kw: {"expiries": ["2024-01-25"]} if kw.get("year") == 2024 else {},
         contracts=lambda **_kw: {
@@ -522,7 +563,7 @@ def test_ingest_underlying_options_full_path() -> None:
     )
     sink = _Sink()
     report = ingest_underlying_options(
-        client,
+        _client(sdk),
         sink,
         exchange="NSE",
         underlying_symbol="NIFTY",
@@ -530,7 +571,7 @@ def test_ingest_underlying_options_full_path() -> None:
         intervals=["1day"],
         start=date(2024, 1, 1),
         end=date(2024, 1, 26),
-        now_ist=_NOW,
+        now_ist=_now,
     )
     # only the CE leg is ingested (futures are filtered by option_contracts)
     assert set(report.pairs) == {("NSE-NIFTY-25Jan24-100-CE", "1day")}
@@ -539,12 +580,14 @@ def test_ingest_underlying_options_full_path() -> None:
 
 def test_ingest_underlying_options_resolution_error_propagates() -> None:
     def _boom(**_kw: object) -> Mapping[str, object]:
-        raise GrowwAuthError("dead token during resolution")
+        raise GrowwAPIAuthenticationException("dead token during resolution")
 
-    client = _FakeClient(expiries=_boom)
+    sdk = _FakeSDK(expiries=_boom)
+    from brutex.adapters.groww.errors import GrowwAuthError
+
     with pytest.raises(GrowwAuthError):
         ingest_underlying_options(
-            client,
+            _client(sdk),
             _Sink(),
             exchange="NSE",
             underlying_symbol="NIFTY",
@@ -552,5 +595,5 @@ def test_ingest_underlying_options_resolution_error_propagates() -> None:
             intervals=["1day"],
             start=date(2024, 1, 1),
             end=date(2024, 1, 26),
-            now_ist=_NOW,
+            now_ist=_now,
         )

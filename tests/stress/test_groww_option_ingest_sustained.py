@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 
+from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.option_ingest import run_groww_option_ingest
 from brutex.adapters.protocol import DerivativeContract
 from brutex.data.models import CandleBar
@@ -19,16 +20,25 @@ from brutex.data.sink import SinkAppendResult
 from brutex.data.window_ledger import WindowLedger
 
 _N = 2_000  # leg-set scale (index strikes × CE/PE × expiries fan out to this order)
-_NOW = lambda: datetime(2026, 6, 13, 8, 0, tzinfo=UTC)  # noqa: E731 — tiny test clock
 
 
-class _Client:
+def _now() -> datetime:
+    return datetime(2026, 6, 13, 8, 0, tzinfo=UTC)
+
+
+class _FakeSDK:
     def __init__(self) -> None:
         self.calls = 0
 
-    def historical_candles(self, **_kw: object) -> Mapping[str, object]:
+    def get_historical_candles(self, **_kw: object) -> Mapping[str, object]:
         self.calls += 1
         return {"candles": [["2024-01-02T09:30:00", 100.0, 110.0, 90.0, 105.0, 5, 1]]}
+
+    def get_expiries(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        return {"expiries": []}
+
+    def get_contracts(self, **_kw: object) -> Mapping[str, object]:  # pragma: no cover
+        return {"contracts": []}
 
 
 class _Sink:
@@ -54,23 +64,36 @@ def _chain(n: int) -> list[DerivativeContract]:
 
 def test_sustained_ingest_then_idempotent_repull() -> None:
     contracts = _chain(_N)
-    client, sink, ledger = _Client(), _Sink(), WindowLedger()
-    kw: dict[str, object] = {
-        "intervals": ["1minute"],
-        "start": date(2024, 1, 1),
-        "end": date(2024, 1, 26),
-        "ledger": ledger,
-        "now_ist": _NOW,
-    }
+    sdk = _FakeSDK()
+    client = GrowwClient(sdk=sdk, sleep=lambda _s: None, max_attempts=1)
+    sink, ledger = _Sink(), WindowLedger()
 
-    first = run_groww_option_ingest(client, sink, contracts=contracts, **kw)
+    first = run_groww_option_ingest(
+        client,
+        sink,
+        contracts=contracts,
+        intervals=["1minute"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 26),
+        ledger=ledger,
+        now_ist=_now,
+    )
     assert len(first.pairs) == _N and first.failed_pairs == 0
     assert first.bars_appended == _N and first.skipped_windows == 0
-    assert client.calls == _N  # one vendor call per contract
+    assert sdk.calls == _N  # one vendor call per contract
 
-    calls_after_first = client.calls
-    second = run_groww_option_ingest(client, sink, contracts=contracts, **kw)
+    calls_after_first = sdk.calls
+    second = run_groww_option_ingest(
+        client,
+        sink,
+        contracts=contracts,
+        intervals=["1minute"],
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 26),
+        ledger=ledger,
+        now_ist=_now,
+    )
     # Every window settled SUCCESS on pass 1 → pass 2 skips them all, NO vendor calls.
     assert second.skipped_windows == _N and second.bars_appended == 0
-    assert client.calls == calls_after_first  # zero new vendor calls
+    assert sdk.calls == calls_after_first  # zero new vendor calls
     assert ledger.count == _N  # one ledger row per contract — no duplication/leak
