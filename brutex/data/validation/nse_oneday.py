@@ -1017,6 +1017,144 @@ def validate_brute_force_indices(
     return BatchReport(trade_date=trade_date, verdicts=verdicts)
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# All-indices snapshot (NSE `ind_close_all` Route A) — the LIVE index universe
+# ────────────────────────────────────────────────────────────────────────────
+#
+# The one-day verify above pulls only the 3 brute-force index ROWS out of the
+# `ind_close_all_<DDMMYYYY>.csv` file. That same file is a single daily CSV that
+# carries EVERY published NSE index as a row (broad-based + sectoral + thematic +
+# strategy). This section exposes the file's full content — REFERENCE_ONLY
+# (CLAUDE.md §3): index EOD context + the live index universe, NEVER an engine /
+# 52-vocab input. The KEY INSIGHT (per the NSE index-data reference): the
+# authoritative live index set is the file's own `Index Name` column — never
+# hardcode it. Reuses this module's URL template + column spec + opener
+# (CLAUDE.md §11 COMMON — no duplicated NSE plumbing).
+
+
+@dataclass(frozen=True, slots=True)
+class IndexSnapshotRow:
+    """One index's one-day EOD OHLC from the NSE all-indices snapshot.
+
+    REFERENCE_ONLY (CLAUDE.md §3) — index EOD context, never an engine/vocab input.
+    Prices are 2-dp Decimal rupees (snapped via :func:`~brutex.money.round_money`,
+    DEC-SPOT-PRICE-2DP-001). ``index_name`` is the file's ``Index Name`` column,
+    trimmed (e.g. ``"Nifty 50"``). Index ``Volume`` is 0 (indices aren't traded),
+    so it is deliberately NOT carried here.
+
+    Attributes
+    ----------
+    index_name
+        The published index name (the file's authoritative label).
+    trade_date
+        The IST trading day this snapshot row represents.
+    open, high, low, close
+        2-dp Decimal rupee index values.
+    """
+
+    index_name: str
+    trade_date: date
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+
+
+def daily_indices_url(trade_date: date) -> str:
+    """Render the NSE all-indices snapshot CSV URL for *trade_date* (Route A).
+
+    ONE CSV holds every published NSE index as a row. The date token is
+    **``DDMMYYYY``** (NOT the bhavcopy's ``YYYYMMDD`` — easy to mix up). BEST-EFFORT
+    + env-overridable via ``BRUTEX_NSE_OFFICIAL_BASE_URL`` (verify; NSE may change
+    the path). Same host family the constituents helper already uses.
+    """
+    return _NSE_DAILY_INDICES_URL_TEMPLATE.format(ddmmyyyy=trade_date.strftime("%d%m%Y"))
+
+
+def list_index_names(csv_text: str, *, spec: CsvQuoteSpec | None = None) -> list[str]:
+    """Return the unique, sorted index names in an all-indices snapshot (pure).
+
+    The reference's KEY INSIGHT: the authoritative live index set is the file's own
+    ``Index Name`` column — derive it, never hardcode, so new/renamed indices flow
+    through automatically. Blank names are dropped. Returns ``[]`` for empty /
+    header-less text or a missing index-name column (degrade, never raise).
+    """
+    resolved_spec = spec if spec is not None else _csv_quote_spec()
+    reader = csv.DictReader(io.StringIO(csv_text))
+    if reader.fieldnames is None:
+        return []
+    columns = _resolve_columns(reader.fieldnames, resolved_spec)
+    if columns is None:
+        return []
+    names = {(row.get(columns["index"]) or "").strip() for row in reader}
+    names.discard("")
+    return sorted(names)
+
+
+def parse_index_snapshot(
+    csv_text: str, trade_date: date, *, spec: CsvQuoteSpec | None = None
+) -> list[IndexSnapshotRow]:
+    """Parse an all-indices snapshot CSV → one :class:`IndexSnapshotRow` per index (pure).
+
+    Reuses the SAME column resolution + strict price parse as
+    :func:`parse_official_quote` (CLAUDE.md §11 COMMON). A row with a blank index
+    name OR a malformed / non-finite OHLC value is SKIPPED — the whole file is
+    never crashed by one bad row, and no number is ever fabricated (Golden Rule
+    #1/#10). Returns ``[]`` for empty / header-less text or a missing required
+    column. Prices are snapped to the 2-dp grid (``ROUND_HALF_UP``).
+    """
+    resolved_spec = spec if spec is not None else _csv_quote_spec()
+    reader = csv.DictReader(io.StringIO(csv_text))
+    if reader.fieldnames is None:
+        return []
+    columns = _resolve_columns(reader.fieldnames, resolved_spec)
+    if columns is None:
+        return []
+    rows: list[IndexSnapshotRow] = []
+    for row in reader:
+        name = (row.get(columns["index"]) or "").strip()
+        if not name:
+            continue
+        try:
+            rows.append(
+                IndexSnapshotRow(
+                    index_name=name,
+                    trade_date=trade_date,
+                    open=round_money(to_price(row.get(columns["open"]), "open")),
+                    high=round_money(to_price(row.get(columns["high"]), "high")),
+                    low=round_money(to_price(row.get(columns["low"]), "low")),
+                    close=round_money(to_price(row.get(columns["close"]), "close")),
+                )
+            )
+        except CandleParseError:
+            continue  # malformed/non-finite price → skip this row, never fabricate
+    return rows
+
+
+def fetch_index_snapshot(
+    trade_date: date,
+    *,
+    official_opener: OfficialOpener | None = None,
+    spec: CsvQuoteSpec | None = None,
+) -> list[IndexSnapshotRow] | None:
+    """Fetch + parse the NSE all-indices snapshot for *trade_date* (degrade-safe).
+
+    Route A live entrypoint. The opener defaults to the live NSE opener
+    (:func:`_default_official_opener`, ``# pragma: no cover`` — NSE bot-blocks +
+    this build env network-blocks the host); tests inject a fake. A fetch failure
+    (weekend/holiday ``404``, bot-block, timeout — all surface as ``OSError``)
+    returns ``None`` (no snapshot that day), NEVER crashes the caller. On success
+    returns the parsed rows (possibly ``[]`` if the file shape was unusable).
+    """
+    url = daily_indices_url(trade_date)
+    opener = official_opener if official_opener is not None else _default_official_opener
+    try:
+        csv_text = opener(url)
+    except OSError:
+        return None
+    return parse_index_snapshot(csv_text, trade_date, spec=spec)
+
+
 __all__ = [
     "CSV_QUOTE_SPEC_OVERRIDE_ENV",
     "DEFAULT_CSV_QUOTE_SPEC",
