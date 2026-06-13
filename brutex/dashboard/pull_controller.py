@@ -1514,7 +1514,9 @@ def pull_candles(
         # 1day-only during the verify-first phase, DEC-PULL-1DAY-FIRST-001) — NOT a
         # hardcoded 1m+1d pair, which KeyError'd on report.pairs when 1-minute was
         # gated off. The label map gives the dashboard's ``1m``/``1d`` display label.
-        label_for = dict(_FETCH_INTERVAL_LABELS)
+        # Explicit ``dict[str, str]`` so the keys are plain ``str`` (not the literal
+        # union pyright would infer from the tuple), matching the ``str`` *intervals*.
+        label_for: dict[str, str] = dict(_FETCH_INTERVAL_LABELS)
         timeframes: list[TimeframeResult] = []
         for fetch_interval in intervals:
             label = label_for.get(fetch_interval, fetch_interval)
