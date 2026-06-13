@@ -11,7 +11,7 @@ oracle: it pins that the % change keeps full Decimal precision and is NEVER
 money-rounded (CLAUDE.md §4 / ``DEC-MONEY-2DP-001`` is display-money-only).
 
 Regenerate the constant only on a deliberate behaviour change and record it in
-``docs/MIGRATION.md`` (entry #699).
+``docs/MIGRATION.md`` (entry #700).
 """
 
 from __future__ import annotations

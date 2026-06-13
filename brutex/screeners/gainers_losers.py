@@ -56,7 +56,7 @@ count — it does NOT scan the window).
   reported as *skipped*, never invented. No prices are fabricated
   (Golden Rule #1).
 
-Decision ID: ``DEC-MOVERS-GAINERS-001`` (``docs/MIGRATION.md`` entry #699).
+Decision ID: ``DEC-MOVERS-GAINERS-001`` (``docs/MIGRATION.md`` entry #700).
 """
 
 from __future__ import annotations
