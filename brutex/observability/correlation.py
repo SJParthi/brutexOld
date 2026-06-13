@@ -3,8 +3,7 @@
 The COMMON (CLAUDE.md §11) correlation primitive for the Dhan ingest path
 (DEC-DHAN-INGEST-LOGGING-001). Every operator-facing pull
 (:func:`~brutex.dashboard.pull_controller.pull_candles` /
-:func:`~brutex.dashboard.pull_controller.pull_all_spot` /
-:func:`~brutex.dashboard.option_pull_controller.pull_options`) opens a
+:func:`~brutex.dashboard.pull_controller.pull_all_spot`) opens a
 :func:`pull_id_scope`, which BINDS a single ``pull_id`` into the structlog
 context-vars for the whole pull. Two things then carry that id for free:
 

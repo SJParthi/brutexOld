@@ -349,21 +349,18 @@ async function loadTables() {
       + '<span class="nm">🅾 expired options</span>'
       + '<span class="badge" style="color:var(--pink);background:rgba(255,107,157,.13)">options</span>'
       + '</div>';
-    /* The unified window ledger + token-events lake live in Parquet sidecars
-       (`window_ledger/` + `token_events/`), NOT DuckDB tables — surface each as
-       its OWN clickable read-only row (DEC-WINDOW-LEDGER-001 / DEC-TOKEN-EVENTS-001)
-       so EVERY fetch window + every token event is browsable right here on /db. */
+    /* The unified window ledger lives in a Parquet sidecar (`window_ledger/`),
+       NOT a DuckDB table — surface it as its OWN clickable read-only row
+       (DEC-WINDOW-LEDGER-001) so EVERY fetch window is browsable right here on /db.
+       (The Dhan token-events viewer was retired in PR-J4c with the token
+       lifecycle.) */
     const ledgerRow = '<div class="tbl" data-ledger="window_ledger">'
       + '<span class="nm">🪟 window ledger</span>'
       + '<span class="badge" style="color:var(--green);background:rgba(74,222,128,.13)">windows</span>'
       + '</div>';
-    const tokenRow = '<div class="tbl" data-ledger="token_events">'
-      + '<span class="nm">🔑 token events</span>'
-      + '<span class="badge" style="color:var(--purple);background:rgba(157,123,255,.13)">tokens</span>'
-      + '</div>';
     tablesEl.innerHTML = '<h3>Tables</h3>' + tableRows
       + '<h3 style="margin-top:14px">Candle lake</h3>' + candleRow + optionRow
-      + '<h3 style="margin-top:14px">Window ledger</h3>' + ledgerRow + tokenRow;
+      + '<h3 style="margin-top:14px">Window ledger</h3>' + ledgerRow;
     tablesEl.querySelectorAll(".badge[data-count]").forEach(b => countUp(b, b.getAttribute("data-count")));
     tablesEl.querySelectorAll(".tbl[data-table]").forEach(el => {
       el.addEventListener("click", () => selectTable(el.getAttribute("data-table")));
@@ -397,11 +394,7 @@ function markCandles() {
   });
 }
 
-/* ── Window ledger / token events (Parquet sidecar tables) ── */
-/* The fixed token-events column order (mirrors token_events.to_payload — the
-   masked, secret-free allowlist; NEVER a token column). */
-const TOKEN_COLS = ["event_at", "action", "status", "expiry_at", "client_id_masked", "reason"];
-
+/* ── Window ledger (Parquet sidecar table) ── */
 function markLedger(kind) {
   tablesEl.querySelectorAll(".tbl").forEach(el => {
     el.classList.toggle("sel", el.getAttribute("data-ledger") === kind);
@@ -409,34 +402,24 @@ function markLedger(kind) {
 }
 
 async function selectLedger(kind) {
-  /* Render a Parquet sidecar table read-only in the grid. `window_ledger`
-     returns the grid shape directly; `token_events` returns {events:[…]} which
-     we project to columns/rows here (the secret-free, masked payload). */
+  /* Render the window-ledger Parquet sidecar read-only in the grid — it returns
+     the grid shape (columns/rows) directly. */
   mode = "ledger";
   selected = null;
   markLedger(kind);
-  const isToken = kind === "token_events";
-  const url = isToken ? "/api/v1/db/token-events" : "/api/v1/db/window-ledger";
-  const label = isToken ? "token events" : "window ledger";
+  const label = "window ledger";
   dataEl.innerHTML = '<div class="empty">loading ' + label + '…</div>';
   try {
-    const r = await fetch(url);
+    const r = await fetch("/api/v1/db/window-ledger");
     const body = await r.json();
     if (!r.ok) { dataEl.innerHTML = '<div class="empty qerr">error ' + r.status + '</div>'; return; }
-    let cols, rows;
-    if (isToken) {
-      const events = body.events || [];
-      cols = TOKEN_COLS;
-      rows = events.map(e => cols.map(c => e[c] === undefined || e[c] === null ? "" : e[c]));
-    } else {
-      cols = body.columns || [];
-      rows = body.rows || [];
-    }
+    const cols = body.columns || [];
+    const rows = body.rows || [];
     const total = rows.length;
     const sub = cols.length + " cols · " + Number(total).toLocaleString() + " rows";
     const head = '<div class="datahead"><span class="dt">' + esc(label) + '</span><span class="sub">' + esc(sub) + '</span></div>';
     const grid = total === 0
-      ? '<div class="empty">no ' + esc(label) + ' yet — ' + (isToken ? "save a token on /credentials" : "pull a symbol on /universe") + ', then it appears here</div>'
+      ? '<div class="empty">no ' + esc(label) + ' yet — pull a symbol on /universe, then it appears here</div>'
       : gridAndPager(cols, rows, total, 0, total);
     dataEl.innerHTML = head + grid;
   } catch (e) {

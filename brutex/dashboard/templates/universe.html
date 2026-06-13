@@ -219,15 +219,9 @@
   .bulkbtn.idx { border-color:rgba(157,123,255,.4); }
   .bulkbtn.idx:hover { box-shadow:0 0 24px rgba(157,123,255,.45); }
   .bulkbtn.stk { border-color:rgba(91,141,239,.4); }
-  .bulkbtn.opt .blabel::after { content:" ⛓"; color:var(--green); }
   .bulkbtn .shine { position:absolute; inset:0; background:linear-gradient(110deg,
     transparent 30%, rgba(255,255,255,.06) 50%, transparent 70%); background-size:200% 100%;
     animation: shimmer 3.2s linear infinite; pointer-events:none; }
-  .optbtn { cursor:pointer; border:1px solid rgba(38,217,176,.5); border-radius:10px;
-    padding:11px 16px; font-weight:800; color:var(--green-bright); background:rgba(38,217,176,.10);
-    transition:.15s; }
-  .optbtn:hover { box-shadow:0 0 22px rgba(38,217,176,.4); transform:translateY(-1px); }
-  .optbtn:disabled { opacity:.45; cursor:default; box-shadow:none; transform:none; }
   .bulkrow { display:flex; gap:18px; flex-wrap:wrap; margin-top:8px; }
   .bstat { display:flex; flex-direction:column; }
   .bstat .bv { font-size:22px; font-weight:800; color:var(--text-bright); }
@@ -341,20 +335,10 @@
         <span class="bicon">📈</span><span class="blabel">Indices · Spot</span>
         <span class="bmeta">all index 1m + 1d</span>
       </button>
-      <button class="bulkbtn idx opt" id="bulkIdxOpt" data-surface="options" data-kind="index">
-        <span class="shine"></span><span class="bnum">②</span>
-        <span class="bicon">🧩</span><span class="blabel">Indices · Options</span>
-        <span class="bmeta">ATM±10 · CE/PE · WK+MN</span>
-      </button>
       <button class="bulkbtn stk" id="bulkStkSpot" data-surface="spot" data-kind="stock">
-        <span class="shine"></span><span class="bnum">③</span>
+        <span class="shine"></span><span class="bnum">②</span>
         <span class="bicon">📊</span><span class="blabel">Stocks · Spot</span>
         <span class="bmeta">all F&amp;O stock 1m + 1d</span>
-      </button>
-      <button class="bulkbtn stk opt" id="bulkStkOpt" data-surface="options" data-kind="stock">
-        <span class="shine"></span><span class="bnum">④</span>
-        <span class="bicon">🔗</span><span class="blabel">Stocks · Options</span>
-        <span class="bmeta">ATM±3 · CE/PE · WK+MN</span>
       </button>
     </div>
   </div>
@@ -384,7 +368,6 @@
     <label style="color:var(--muted); font-size:12px;" title="Inclusive start date — defaults to 2021-01-01 (Track 1 history floor); clear to fall back to it.">from <input type="date" id="fromDate" min="2021-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_FROM__" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
     <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — defaults to the previous trading day (pick today to include it).">to <input type="date" id="toDate" min="2021-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
     <button class="loadbtn" id="loadbtn" title="Download the public Dhan instrument master — no keys needed">⟳ Load instruments</button>
-    <button class="optbtn" id="optbtn" title="Pull this underlying's full option grid (ATM window · CE+PE · weekly+monthly · near/next/far, 1-minute)" disabled>⛓ Pull options chain</button>
     <button class="pullbtn" id="pullbtn" title="Pull 1-minute + 1-day spot for the selected instrument(s) — tick rows for many, or click one. Blank dates = full history (2021 → prev day)." disabled>⤓ Pull spot</button>
     <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. Optional speed lever — writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
     <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
@@ -441,7 +424,6 @@ let filter = "index";          // active tab kind
 let UNIV = [];                 // [{symbol,pull_symbol,name,kind,exchange}]
 let selInst = null;            // selected instrument's display symbol (trading_symbol)
 let selPullSymbol = null;      // selected instrument's vendor symbol (Dhan SECURITY_ID)
-let selOptionPullable = true;  // whether the single-clicked instrument has an option chain (DEC-OPTIONS-PULL-GUARD-001)
 let selExp = null;             // selected expiry ISO date
 let selMulti = new Map();      // multi-select: symbol → instrument, for the unified "⤓ Pull spot"
 let listAnimated = false;      // entrance animation plays ONCE per fresh load, never on re-render
@@ -687,7 +669,6 @@ function renderInstruments() {
 
 async function selectInstrument(i) {
   selInst = i.symbol; selPullSymbol = i.pull_symbol; selExp = null;
-  selOptionPullable = (i.option_pullable !== false);  // NTM + reference-only/non-F&O → no option chain
   /* O(1) selection: swap the .sel class on just the affected rows — NOT a 243-row
      rebuild (which restarted the entrance animation and ate the next click). The
      list DOM is untouched, so clicks stay instant. */
@@ -922,27 +903,6 @@ function updateMultiBtn() {
   const b = document.getElementById("pullbtn");
   b.textContent = n > 0 ? `⤓ Pull spot · ${n} selected` : "⤓ Pull spot";
   b.disabled = n === 0 && !selPullSymbol;
-  // The unified "⛓ Pull options chain" mirrors it (DEC-UNIVERSE-OPTIONS-MULTIPULL-001):
-  // one button for one OR many — ticked rows fan all their option grids in one pass.
-  // GUARD (DEC-OPTIONS-PULL-GUARD-001): the option chain only applies to F&O-bearing
-  // underlyings, so the button is DISABLED whenever the selection includes a
-  // reference-only / non-F&O target (NIFTY Total Market + its non-F&O constituents,
-  // India VIX) — the server also fail-closes, this just greys it pre-emptively.
-  const o = document.getElementById("optbtn");
-  o.textContent = n > 0 ? `⛓ Pull options chain · ${n} selected` : "⛓ Pull options chain";
-  let optEnabled;
-  if (n > 0) {
-    optEnabled = [...selMulti.values()].every(x => x.option_pullable !== false);
-  } else {
-    // Look the highlight up in the LIVE list — selOptionPullable goes stale
-    // across tab switches (DEC-UNIVERSE-SELECTION-PRECISE-001).
-    const cur = selInst ? UNIV.find(i => i.symbol === selInst) : null;
-    optEnabled = !!selPullSymbol && !!cur && cur.option_pullable !== false;
-  }
-  o.disabled = !optEnabled;
-  o.title = (!o.disabled)
-    ? "Pull this underlying's full option grid (ATM window · CE+PE · weekly+monthly · near/next/far, 1-minute)"
-    : "Option chain unavailable for reference-only / non-F&O underlyings (e.g. NIFTY Total Market + its non-F&O constituents, India VIX) — select an F&O-eligible underlying";
   // The "⚙ Pre-build timeframes" materialise button is selection-driven too
   // (DEC-UNIVERSE-TF-MATERIALIZE-BUTTON-001): one OR many, same enable rule.
   const m = document.getElementById("matbtn");
@@ -1029,32 +989,6 @@ document.getElementById("tickconstbtn").onclick = async () => {
   btn.disabled = false;
 };
 
-/* ── Unified OPTIONS pull (DEC-UNIVERSE-OPTIONS-MULTIPULL-001): ONE button for
-   one OR many, mirroring the unified "⤓ Pull spot". If rows are ticked it sends
-   the whole selection as ?symbols=a,b,c so the backend fans EVERY underlying's
-   option grid (ATM window · CE+PE · weekly+monthly · near/next/far, 1-minute) in
-   ONE background job (the live panel ticks per underlying); otherwise it pulls
-   the single highlighted underlying via ?symbol=. The selection helper mirrors
-   spotSelection(); startAndPoll is itself single-flight (the server returns
-   {started:false} if a pull is already running). ── */
-function optionSelection() {
-  if (selMulti.size > 0) return [...selMulti.values()];
-  if (selPullSymbol) return [{ symbol: selInst, pull_symbol: selPullSymbol }];
-  return [];
-}
-document.getElementById("optbtn").onclick = () => {
-  const items = optionSelection();
-  if (!items.length) return;
-  if (items.length > 1) {
-    const ids = items.map(it => it.pull_symbol).join(",");
-    startAndPoll('/api/v1/universe/pull-options?symbols=' + encodeURIComponent(ids),
-      `${items.length} underlyings options chain`);
-  } else {
-    startAndPoll('/api/v1/universe/pull-options?symbol=' + encodeURIComponent(items[0].pull_symbol),
-      `${items[0].symbol} options chain`);
-  }
-};
-
 /* ── "⚙ Pre-build timeframes" (DEC-UNIVERSE-TF-MATERIALIZE-BUTTON-001) ──
    The single, explicit successor to the intrusive auto-appearing TF dropdown
    that was removed (DEC-UNIVERSE-TFS-DROPDOWN-REMOVE-001): ONE clean button that
@@ -1121,10 +1055,10 @@ document.getElementById("matbtn").onclick = async () => {
   }
 };
 
-/* ── Bulk pull (buttons ① ② ③ ④) — one click fans the whole kind ──
-   surface=spot → /pull-all?kind=…   ·   surface=options → /pull-options?kind=…
+/* ── Bulk spot pull (buttons ① ②) — one click fans the whole kind ──
+   surface=spot → /pull-all?kind=…
    Disables every bulk button while one runs so two universe pulls can't race. */
-const BULK_BTNS = ['bulkIdxSpot','bulkIdxOpt','bulkStkSpot','bulkStkOpt']
+const BULK_BTNS = ['bulkIdxSpot','bulkStkSpot']
   .map(id => document.getElementById(id));
 
 function setBulkDisabled(on) {
@@ -1134,13 +1068,10 @@ function setBulkDisabled(on) {
 BULK_BTNS.forEach(btn => {
   if (!btn) return;
   btn.addEventListener('click', () => {
-    const surface = btn.dataset.surface;       // "spot" | "options"
     const kind = btn.dataset.kind;             // "index" | "stock"
-    const path = surface === 'options'
-      ? '/api/v1/universe/pull-options?kind=' + encodeURIComponent(kind)
-      : '/api/v1/universe/pull-all?kind=' + encodeURIComponent(kind);
+    const path = '/api/v1/universe/pull-all?kind=' + encodeURIComponent(kind);
     const noun = kind === 'index' ? 'indices' : 'stocks';
-    startAndPoll(path, `ALL ${noun} ${surface}`);
+    startAndPoll(path, `ALL ${noun} spot`);
   });
 });
 
@@ -1183,11 +1114,10 @@ async function startAndPoll(path, label) {
   const panel = document.getElementById('pullpanel');
   panel.classList.add('on', 'running');   // beam animates only while in flight
   setBulkDisabled(true);
-  document.getElementById('optbtn').disabled = true;
   document.getElementById('pulltitle').textContent = `Starting ${label}…`;
   document.getElementById('tfgrid').innerHTML = '';
   document.getElementById('counter').textContent = '0';
-  windowsBucket = path.includes('option') ? 'options' : 'spot';
+  windowsBucket = 'spot';
   refreshWindowsLine();
   try {
     const r = await fetch(path, {method: 'POST'});

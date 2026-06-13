@@ -1375,7 +1375,7 @@ jobs:
             echo "(brutex.adapters.dhan.option_ingest test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_dhan_option_universe_ingest.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.option_universe_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_option_universe_ingest.py tests/unit/test_dhan_options_parallel_wiring.py tests/integration/test_dhan_options_audit_chain.py tests/unit/test_option_until_clean.py
+            pytest --cov=brutex.adapters.dhan.option_universe_ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_option_universe_ingest.py tests/unit/test_dhan_options_parallel_wiring.py tests/integration/test_dhan_options_audit_chain.py
           else
             echo "(brutex.adapters.dhan.option_universe_ingest test file not present yet — gate inactive)"
           fi
@@ -1463,15 +1463,11 @@ jobs:
           else
             echo "(brutex.data.option_parquet_writer test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_option_pull_controller.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.option_pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py tests/unit/test_option_until_clean.py
-          else
-            echo "(brutex.dashboard.option_pull_controller test file not present yet — gate inactive)"
-          fi
-          # DEC-SPOT-QUOTA-MIDROUND-001: the SPOT pull controller joins the strict
-          # per-module gate (the option_pull_controller twin above) — the mid-round
-          # quota-death mapping + the finally-guaranteed ledger/status persist ship
-          # at 100% line+branch and must stay there.
+          # DEC-SPOT-QUOTA-MIDROUND-001: the SPOT pull controller is held to the
+          # strict per-module gate — the mid-round quota-death mapping + the
+          # finally-guaranteed ledger/status persist ship at 100% line+branch and
+          # must stay there. (The option_pull_controller twin was retired in PR-J4c
+          # with the dashboard options-pull feature.)
           if compgen -G "tests/unit/test_dashboard_pull_controller.py" > /dev/null; then
             pytest --cov=brutex.dashboard.pull_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_pull_controller.py tests/unit/test_dashboard_pull_pool_sizing.py
           else

@@ -3,7 +3,7 @@
 
 Closes the residual line + branch gaps the route-family suites leave open
 (100% line+branch gate, CLAUDE.md §2 Rule 12): the FastAPI-missing guard in
-``build_app``, the no-lake-root degrade branches, the pull-all / pull-options /
+``build_app``, the no-lake-root degrade branches, the pull-all /
 derive-timeframes selection forms (background job bodies replaced by offline
 fakes — NEVER a real network call), the error→HTTP mapping arms of the db
 viewer routes, and the WebSocket disconnect return.
@@ -40,7 +40,6 @@ from brutex.dashboard.app import (
     build_app,
 )
 from brutex.dashboard.db_view import ALLOWED_OPERATORS, KNOWN_TABLES
-from brutex.dashboard.option_pull_controller import count_progress_units
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.partition import VALID_INTERVALS
 from brutex.data.timeframe_materialize import MaterializeResult
@@ -152,11 +151,6 @@ def _fake_pull_all_spot(instruments: list[Instrument], **kwargs: Any) -> _FakeRe
     return _FakeReport()
 
 
-def _fake_pull_options(instruments: list[Instrument], **kwargs: Any) -> _FakeReport:
-    """Offline stand-in for the options pull (no network, returns at once)."""
-    return _FakeReport()
-
-
 def _wait_for_job(client: TestClient, *, timeout: float = 10.0) -> dict[str, Any]:
     """Poll /pull-progress until the background job settles (done/error)."""
     deadline = time.monotonic() + timeout
@@ -170,13 +164,12 @@ def _wait_for_job(client: TestClient, *, timeout: float = 10.0) -> dict[str, Any
 
 
 def _force_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin BOTH creds gates closed so every pull is the offline dry-run.
+    """Pin the Groww creds gate closed so every pull is the offline dry-run.
 
-    The spot routes now gate on Groww (DEC-DHAN-GROWW-REMIGRATE-001) while the
-    options route still gates on Dhan; pin both so every selection form
-    deterministically dry-runs regardless of the ambient environment.
+    The spot routes gate on Groww (DEC-DHAN-GROWW-REMIGRATE-001); pinning it
+    closed makes every selection form deterministically dry-run regardless of
+    the ambient environment.
     """
-    monkeypatch.setattr(app_module, "dhan_creds_present", lambda: False)
     monkeypatch.setattr(app_module, "groww_credentials_present", lambda: False)
 
 
@@ -372,6 +365,26 @@ def test_universe_instruments_invalid_kind_400(client: TestClient) -> None:
     assert resp.json()["detail"] == "kind must be one of ('index', 'stock') or None, got 'bogus'"
 
 
+def test_universe_instruments_index_happy_path(client: TestClient) -> None:
+    """A valid ?kind=index filter returns HTTP 200 with the explorer payload."""
+    resp = client.get("/api/v1/universe/instruments", params={"kind": "index"})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["kind"] == "index"
+    assert "instruments" in payload
+    assert isinstance(payload["instruments"], list)
+
+
+def test_universe_instruments_stock_happy_path(client: TestClient) -> None:
+    """A valid ?kind=stock filter returns HTTP 200 with the explorer payload."""
+    resp = client.get("/api/v1/universe/instruments", params={"kind": "stock"})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["kind"] == "stock"
+    assert "instruments" in payload
+    assert isinstance(payload["instruments"], list)
+
+
 def test_load_instruments_returns_counts(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -527,61 +540,6 @@ def test_pull_all_requires_a_selection_form(
     resp = client.post("/api/v1/universe/pull-all")
     assert resp.status_code == 400
     assert resp.json()["detail"] == "pull-all requires ?symbols=..., ?symbol=... or ?kind=..."
-
-
-# ────────────────────────────────────────────────────────────────────────
-# Options pull — selection forms (DEC-UNIVERSE-OPTIONS-MULTIPULL-001)
-# ────────────────────────────────────────────────────────────────────────
-
-
-def test_pull_options_unknown_single_symbol_400(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An unknown ?symbol= on pull-options fails closed with the real reason."""
-    _force_dry_run(monkeypatch)
-    resp = client.post("/api/v1/universe/pull-options", params={"symbol": "NOPE"})
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "unknown security_id 'NOPE' — not in the instrument store"
-
-
-def test_pull_options_symbols_form_starts_background_job(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """?symbols= with an option-pullable underlying passes the guard and starts the job."""
-    _force_dry_run(monkeypatch)
-    monkeypatch.setattr(app_module, "pull_options", _fake_pull_options)
-    expected_units = count_progress_units([_nifty()])
-    resp = client.post("/api/v1/universe/pull-options", params={"symbols": "NIFTY"})
-    assert resp.status_code == 200
-    assert resp.json() == {
-        "started": True,
-        "kind": None,
-        "symbol": None,
-        "symbols": "NIFTY",
-        "total": expected_units,
-        "dry_run": True,
-    }
-    assert _wait_for_job(client)["state"] == "done"
-
-
-def test_pull_options_kind_form_filters_to_pullable(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """?kind=index silently keeps only option-pullable underlyings and starts the job."""
-    _force_dry_run(monkeypatch)
-    monkeypatch.setattr(app_module, "pull_options", _fake_pull_options)
-    expected_units = count_progress_units([_nifty()])
-    resp = client.post("/api/v1/universe/pull-options", params={"kind": "index"})
-    assert resp.status_code == 200
-    assert resp.json() == {
-        "started": True,
-        "kind": "index",
-        "symbol": None,
-        "symbols": None,
-        "total": expected_units,
-        "dry_run": True,
-    }
-    assert _wait_for_job(client)["state"] == "done"
 
 
 # ────────────────────────────────────────────────────────────────────────

@@ -88,25 +88,6 @@ def test_pull_button_is_unified_single_or_many() -> None:
     assert "⤓ Pull spot" in html, "the unified button label is missing"
 
 
-def test_options_button_is_unified_single_or_many() -> None:
-    """ONE "⛓ Pull options chain" drives single OR ticked-many
-    (DEC-UNIVERSE-OPTIONS-MULTIPULL-001).
-
-    Mirrors the unified spot button: nothing ticked + a single highlight → pull
-    that one underlying's option grid via ``?symbol=``; ticked rows → send the
-    whole selection as ``?symbols=a,b,c`` so the backend fans them all in one
-    pass. Guards the selection helper, the multi label, and the ``?symbols=``
-    request shape so the wiring cannot silently regress to single-only.
-    """
-    html = _render_universe_html()
-    assert "function optionSelection" in html, "the options one-or-many selection helper is missing"
-    assert "pull-options?symbols=" in html, "the multi-underlying ?symbols= request is not wired"
-    assert "pull-options?symbol=" in html, "the single-underlying ?symbol= path must remain"
-    assert "⛓ Pull options chain · " in html, (
-        "the options button must show the selected-count label when rows are ticked"
-    )
-
-
 def test_multi_select_wiring_present() -> None:
     """The state + toggle + the sequential 'pull each' loop are wired."""
     html = _render_universe_html()
@@ -259,8 +240,6 @@ def test_universe_selection_respects_composed_visibility() -> None:
     assert "selMulti.clear();" in html
     # F&O-only ON prunes non-pullable ticks so hidden rows can't ride a pull.
     assert "if (v.option_pullable === false) selMulti.delete(k);" in html
-    # The single-highlight option flag is derived from the LIVE list.
-    assert "UNIV.find(i => i.symbol === selInst)" in html
 
 
 def test_universe_date_pickers_carry_today_ceiling() -> None:

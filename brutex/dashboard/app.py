@@ -69,7 +69,6 @@ from brutex.dashboard.db_view import (
     summarize_spot_datasets,
     table_summary,
 )
-from brutex.dashboard.option_pull_controller import count_progress_units, pull_options
 from brutex.dashboard.preopen_report import (
     ReportBasis,
     ReportMode,
@@ -81,14 +80,9 @@ from brutex.dashboard.preopen_report import (
 )
 from brutex.dashboard.pull_controller import (
     SessionRateController,
-    dhan_creds_present,
     pull_all_spot,
     pull_candles,
-    refresh_live_token,
     resolve_pull_symbols,
-    set_live_keepalive,
-    set_live_token_holder,
-    start_token_keepalive,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
 from brutex.dashboard.request_logging import emit_request_log
@@ -104,13 +98,12 @@ from brutex.data.timeframe_materialize import (
 )
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.observability.correlation import request_id_scope
-from brutex.observability.throttle import make_throttled
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
     PipelineEventKind,
 )
 from brutex.orchestrator.state import IngestPhase
-from brutex.universe import derive_lake_underlyings, is_option_pullable
+from brutex.universe import derive_lake_underlyings
 
 #: Module logger — every material dashboard action (especially a pull that
 #: fails) lands in the same ``.brutex-logs/brutex.log`` JSONL the operator
@@ -125,29 +118,12 @@ _FILTER_TOKEN_COUNT = 3
 # pydantic v2 BaseModel trips pyright strict `reportUntypedBaseClass` — a known
 # false positive (the base IS typed); silence per-site so the gate stays honest
 # everywhere else (DEC-PYRIGHT-UNMASK-001).
-class CredentialsIn(BaseModel):  # pyright: ignore[reportUntypedBaseClass]
-    """Request body for ``POST /api/v1/credentials``.
-
-    Defined at **module scope** (not inside :func:`build_app`) so FastAPI
-    correctly resolves it as a request-BODY model. A function-local Pydantic
-    model is not recognised as a body by FastAPI's parameter analysis — it
-    is mis-classified as a query parameter (``loc: ["query", "body"]``),
-    which made every POST return 422 (DEC-CREDS-422-FIX-001). The fields are
-    accepted in the BODY (never as query params, which leak into access
-    logs) and are passed straight to
-    :func:`brutex.config.credentials.save_dhan_credentials` — never logged.
-    """
-
-    access_token: str
-    client_id: str
-
-
 class GrowwCredentialsIn(BaseModel):  # pyright: ignore[reportUntypedBaseClass]
     """Request body for ``POST /api/v1/groww/credentials``.
 
-    Defined at **module scope** (not inside :func:`build_app`) for the same
-    reason as :class:`CredentialsIn`: a function-local Pydantic model is
-    mis-classified by FastAPI as a query parameter (the 422 bug,
+    Defined at **module scope** (not inside :func:`build_app`) so FastAPI
+    correctly resolves it as a request-BODY model: a function-local Pydantic
+    model is mis-classified by FastAPI as a query parameter (the 422 bug,
     DEC-CREDS-422-FIX-001). The api key + TOTP secret are accepted in the BODY
     (never query params, which leak into access logs) and passed straight to
     :func:`brutex.config.credentials.save_groww_credentials` — never logged.
@@ -724,7 +700,6 @@ def build_app(
             HTMLResponse,
             JSONResponse,
             PlainTextResponse,
-            RedirectResponse,
             Response,
         )
     except ImportError as exc:
@@ -734,42 +709,13 @@ def build_app(
             "state model do not need FastAPI."
         ) from exc
 
-    from collections.abc import AsyncGenerator
-    from contextlib import asynccontextmanager
-
-    from brutex.adapters.dhan.token_keepalive import TokenKeepalive
     from brutex.observability.metrics import get_registry, render_prometheus
 
-    # Continuous 12h token keepalive (DEC-DHAN-TOKEN-KEEPALIVE-001): one holder +
-    # one background thread for the app's lifetime keep the 24h Dhan web token
-    # alive so a live pull never 401s on expiry mid-run. Started on app startup +
-    # stopped on shutdown via the modern FastAPI LIFESPAN handler (NOT the
-    # deprecated ``@app.on_event`` hooks, which raise a DeprecationWarning the
-    # dashboard test suite treats as an error). Holds the started TokenKeepalive
-    # (or None when no live creds / dry-run) so shutdown can stop it; references
-    # ``_session_rate`` (assigned below, before startup fires) by late-bound closure.
-    _token_keepalive: list[TokenKeepalive | None] = [None]
-
-    @asynccontextmanager
-    async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:  # pragma: no cover
-        """Start the 12h token keepalive on startup; stop it + clear the holder on shutdown.
-
-        Best-effort (DEC-DHAN-TOKEN-KEEPALIVE-001): :func:`start_token_keepalive`
-        returns ``None`` (a no-op) when no live creds resolve, so a dry-run
-        dashboard is unaffected. Uses the modern lifespan context manager rather
-        than the deprecated ``@app.on_event`` hooks.
-        """
-        _token_keepalive[0] = start_token_keepalive(session_rate=_session_rate)
-        try:
-            yield
-        finally:
-            keepalive = _token_keepalive[0]
-            if keepalive is not None:
-                keepalive.stop()
-            set_live_keepalive(None)
-            set_live_token_holder(None)
-
-    app = FastAPI(title="BruteX Dashboard", version="0.1.0a0", lifespan=_lifespan)
+    # The Dhan 24h-JWT token keepalive was retired here (PR-J4c): the dashboard
+    # now authenticates via Groww TOTP, so the vestigial Dhan keepalive lifespan
+    # wiring was removed. ``brutex.adapters.dhan.token_keepalive`` stays importable
+    # (a later PR deletes the package); the dashboard simply no longer drives it.
+    app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
 
     @app.middleware("http")
     async def _log_request(request: Any, call_next: Any) -> Any:  # pragma: no cover — FastAPI glue
@@ -1363,46 +1309,6 @@ def build_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    def _is_option_pullable(instrument: Instrument) -> bool:
-        """Whether *instrument* has a pullable option chain (DEC-OPTIONS-PULL-GUARD-001).
-
-        Reads the lake's F&O-eligible set + the ``reference_only`` id set and
-        delegates to the single source of truth
-        :func:`brutex.universe.is_option_pullable` — so NTM + its reference-only /
-        non-F&O constituents + India VIX can never start an options pull, while
-        F&O-eligible stocks (even NTM constituents) keep their options.
-        """
-        store = _require_store()
-        return is_option_pullable(
-            instrument, reference_only_ids=store.reference_only_security_ids()
-        )
-
-    def _reject_non_option_pullable(instruments: list[Instrument]) -> None:
-        """Fail CLOSED (400) if any EXPLICITLY-requested underlying has no options.
-
-        For ``?symbol=`` / ``?symbols=`` (a deliberate selection) a non-pullable
-        target — NTM, a reference-only non-F&O constituent, or India VIX — is a
-        user error, so we reject the whole request naming the offenders rather
-        than silently pulling nothing for them (DEC-OPTIONS-PULL-GUARD-001).
-        """
-        store = _require_store()
-        reference_only_ids = store.reference_only_security_ids()
-        blocked = [
-            inst.symbol_name
-            for inst in instruments
-            if not is_option_pullable(inst, reference_only_ids=reference_only_ids)
-        ]
-        if blocked:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "option chain is not available for reference-only / non-F&O "
-                    f"underlyings: {', '.join(sorted(blocked))} — these (e.g. NIFTY "
-                    "Total Market + its non-F&O constituents, India VIX) carry no "
-                    "options; select an F&O-eligible underlying instead"
-                ),
-            )
-
     # The single-flight background pull job that powers the LIVE feed
     # (DEC-PULL-PROGRESS-LIVE-001): one universe pull at a time across the whole
     # server; the page polls /pull-progress for the per-unit tick. Owned by this
@@ -1641,127 +1547,6 @@ def build_app(
                 "dry_run": dry_run,
                 "retry_failed": True,
                 "until_clean": until_clean,
-            }
-        )
-
-    @app.post("/api/v1/universe/pull-options")
-    async def api_universe_pull_options(
-        kind: str | None = Query(default=None),
-        symbol: str | None = Query(default=None),
-        symbols: str | None = Query(default=None),
-    ) -> JSONResponse:
-        """POST /api/v1/universe/pull-options — start a multi / per-symbol / bulk OPTIONS pull.
-
-        Backs the unified "⛓ Pull options chain" button (single OR ticked many)
-        + the bulk-by-kind buttons. Launches
-        :func:`brutex.dashboard.option_pull_controller.pull_options` on the
-        **background job** (returns at once; poll ``/pull-progress``). Precedence:
-        ``symbols`` (the ticked SELECTION — a comma list, fans every one in ONE
-        pass; DEC-UNIVERSE-OPTIONS-MULTIPULL-001) > ``symbol`` (one underlying) >
-        ``kind`` (every admitted underlying of index/stock). Exactly one form is
-        required (else 400); an empty / unknown ``symbols`` id fails CLOSED (400,
-        naming the offenders — never a silent partial pull). Single-flight +
-        forced ``dry_run`` when Dhan creds are absent, exactly like the bulk pull.
-        """
-        dry_run = not dhan_creds_present()
-        if symbols is not None:
-            try:
-                instruments = resolve_pull_symbols(symbols, _require_store().get)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            _reject_non_option_pullable(instruments)
-        elif symbol is not None:
-            store = _require_store()
-            instrument = store.get(symbol)
-            if instrument is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"unknown security_id {symbol!r} — not in the instrument store",
-                )
-            instruments = [instrument]
-            _reject_non_option_pullable(instruments)
-        elif kind is not None:
-            # Bulk-by-kind: silently SKIP non-option-pullable underlyings (NTM +
-            # its reference-only / non-F&O constituents + VIX) rather than fail —
-            # a bulk pull is a "pull everything that has options" action.
-            instruments = [i for i in _select_bulk_targets(kind) if _is_option_pullable(i)]
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="pull-options requires ?symbols=..., ?symbol=... or ?kind=...",
-            )
-        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
-        # A human-friendly label for the live panel: the count for a multi-select,
-        # else the single symbol / kind.
-        label = f"{len(instruments)} underlyings" if symbols is not None else (kind or symbol)
-        _LOG.info(
-            "universe.pull_options.requested",
-            kind=kind,
-            symbol=symbol,
-            symbols=symbols,
-            count=len(instruments),
-            dry_run=dry_run,
-        )
-
-        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
-            """Background body: fan the options pull over the targets, streaming progress.
-
-            Runs the AUTO-RESUME-UNTIL-CLEAN loop (DEC-OPTIONS-UNTIL-CLEAN-001 —
-            the options arm of DEC-AUTO-RESUME-DEFAULT-001): after the saturating
-            first pass, bounded extra rounds re-fetch ONLY the aborted-series
-            residual over the SHARED window ledger until ``stop_clean`` /
-            ``stop_dead`` (token died) / ``stop_quota`` (daily quota spent) / the
-            bounded budget. The finished verdict is stamped into the SAME banner
-            slot the spot pull uses. Honest envelope: rounds re-fire the progress
-            hooks, so the percent bar can saturate at 100% while later rounds
-            drain the residual — the verdict banner is the authoritative finish
-            signal.
-            """
-            # Per-SERIES progress (DEC-OPTIONS-PROGRESS-SERIES-001): one anonymous
-            # unit per completed series (the live "1,386 chunks" granularity the
-            # bar total now carries), composed with the throttled summary-cache
-            # invalidation on the SAME zero-arg tick. The per-underlying
-            # on_progress keeps the labelled bars/failed/gap accounting and is
-            # itself one unit (the rollup), matching the total below.
-            throttled_dirty = make_throttled(_summary_cache.mark_dirty)
-
-            def _series_tick() -> None:
-                throttled_dirty()
-                on_progress("", 0, False, False)
-
-            report = pull_options(
-                instruments,
-                lake_root=lake_root,
-                dry_run=dry_run,
-                on_progress=on_progress,
-                # Live status (DEC-OPTIONS-LIVE-STATUS-001): a THROTTLED per-series
-                # summary-cache invalidation so /coverage/options ticks live during
-                # a single-underlying pull (whose per-underlying on_progress fires
-                # only at the very end). The 2 s throttle matches the cache TTL
-                # floor; the per-underlying on_progress already marks dirty too.
-                on_series_tick=_series_tick,
-                session_rate=_session_rate,
-                until_clean=True,
-            )
-            _last_pull_verdict["verdict"] = report.verdict.to_dict()
-            return report
-
-        # total = the pull's REAL fan-out: one unit per SERIES (per-series tick)
-        # + one per underlying (its labelled rollup on_progress call) — a 3-index
-        # pull reads "0 / 1,389", climbing every few seconds, instead of the old
-        # one-tick-per-underlying "0/3" frozen for hours
-        # (DEC-OPTIONS-PROGRESS-SERIES-001; counted via the SAME iter_series_jobs
-        # enumeration as the fetch + the window planner, §11 COMMON).
-        total_units = count_progress_units(instruments)
-        started = _pull_job.start(_work, total=total_units, detail=f"{label} options")
-        return JSONResponse(
-            {
-                "started": started,
-                "kind": kind,
-                "symbol": symbol,
-                "symbols": symbols,
-                "total": total_units,
-                "dry_run": dry_run,
             }
         )
 
@@ -2362,93 +2147,9 @@ def build_app(
         status_code, payload = await run_in_threadpool(_run)
         return JSONResponse(payload, status_code=status_code)
 
-    # ── Credentials store (DEC-CREDENTIALS-STORE-001) ───────────────
-    # CredentialsIn is module-scope (see top of file) so FastAPI resolves
-    # it as a request body, not a query param (DEC-CREDS-422-FIX-001).
-
-    @app.post("/api/v1/credentials")
-    async def api_credentials_set(body: CredentialsIn) -> JSONResponse:
-        """POST /api/v1/credentials — save the Dhan credentials (mode 0600).
-
-        Accepts the access token + client id in the request BODY (never query
-        params, which leak into access logs). The body is NOT logged. Before
-        saving, the access token is checked for a well-formed JWT shape
-        (:func:`brutex.config.credentials.token_shape_problem`,
-        DEC-CREDS-JWT-SHAPE-001): a truncated paste — the dominant cause of the
-        opaque ``DH-906 Invalid Token`` failures — is rejected here with a
-        clear "re-paste the FULL token" 400 instead of silently saving a doomed
-        token. On a validation error (blank field) the credentials store raises
-        :class:`CredentialsError`, mapped here to HTTP 400 with a message
-        that names the offending field but NEVER its value. Returns only
-        the masked preview — never echoes a value back. Saving here ENABLES
-        live pulls: the Dhan adapter resolver reads this file (env-first,
-        file-fallback) so the spot/options buttons flip to live
-        (DEC-DHAN-CREDS-WIRING-001).
-        """
-        from brutex.config.credentials import (
-            CredentialsError,
-            DhanFileCredentials,
-            credentials_preview,
-            save_dhan_credentials,
-            token_shape_problem,
-        )
-
-        # Reject a truncated/corrupt paste up front (DEC-CREDS-JWT-SHAPE-001) so
-        # a doomed token never reaches the store — the reason is secret-free.
-        shape_problem = token_shape_problem(body.access_token)
-        if shape_problem is not None:
-            raise HTTPException(status_code=400, detail=shape_problem)
-
-        try:
-            save_dhan_credentials(
-                DhanFileCredentials(access_token=body.access_token, client_id=body.client_id)
-            )
-        except CredentialsError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        # Propagate the new token to the LIVE session WITHOUT a restart
-        # (DEC-DHAN-TOKEN-SINGLE-SOURCE-001): saving updated the file, but the
-        # in-memory holder every live DhanClient reads via ``token_provider`` still
-        # held the STALE startup token → every pull 401/DH-906'd (``auth_expired``)
-        # even with a valid fresh token. ``refresh_live_token`` updates the holder in
-        # place (write-through) + tells the keepalive to re-learn the new expiry; a
-        # no-op (``False``) when no live session is running (dry-run / no creds).
-        # Resolve the lake root best-effort so a `saved` token event is recorded
-        # into the durable token-events table (DEC-TOKEN-EVENTS-001) — with the
-        # JWT-derived expiry + the MASKED client id, never the secret. None when
-        # no store/lake is wired (the event is simply skipped).
-        store_path = getattr(instrument_store, "path", None)
-        events_lake = store_path.parent if isinstance(store_path, Path) else None
-        refresh_live_token(body.access_token, lake_root=events_lake, client_id=body.client_id)
-        # Echo back the masked preview so the page can confirm the paste landed
-        # (right value/length, not empty) — never a usable secret.
-        return JSONResponse(credentials_preview())
-
-    @app.get("/api/v1/credentials/status")
-    async def api_credentials_status() -> JSONResponse:
-        """GET /api/v1/credentials/status — presence + a masked, non-secret preview."""
-        from brutex.config.credentials import credentials_preview
-
-        return JSONResponse(credentials_preview())
-
-    @app.get("/credentials", include_in_schema=False)
-    async def credentials_page() -> RedirectResponse:
-        """GET /credentials — redirect to the now-PRIMARY Groww page (DEC-DHAN-GROWW-REMIGRATE-001).
-
-        Groww is the primary credentials surface for the Dhan → Groww cutover
-        (ADR-0009): the legacy ``/credentials`` path 307-redirects to
-        ``/groww-credentials`` so any bookmarked link, old nav entry, or
-        ``save a token`` hint lands on the Groww form rather than the deprecated
-        Dhan page. The Dhan credentials API routes + the Dhan page renderer are
-        kept (still exercised by the visual-regression / a11y / mobile suites)
-        until J4 removes the Dhan surface entirely. 307 (temporary) preserves the
-        GET method and signals the move is transitional, not permanent.
-        """
-        return RedirectResponse(url="/groww-credentials", status_code=307)
-
     # ── Groww credentials store + live probe (DEC-DHAN-GROWW-REMIGRATE-001) ──
     # GrowwCredentialsIn is module-scope (see top of file) so FastAPI resolves
-    # it as a request body, not a query param (DEC-CREDS-422-FIX-001). These
-    # routes are ADDITIVE — the Dhan routes + live-pull wiring are untouched.
+    # it as a request body, not a query param (DEC-CREDS-422-FIX-001).
 
     @app.post("/api/v1/groww/credentials")
     async def api_groww_credentials_set(body: GrowwCredentialsIn) -> JSONResponse:
@@ -2764,37 +2465,6 @@ def build_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(payload)
-
-    @app.get("/api/v1/db/token-events")
-    async def api_db_token_events() -> JSONResponse:
-        """GET /api/v1/db/token-events — the durable token-lifecycle event log.
-
-        DEC-TOKEN-EVENTS-001. One row per token event (saved / renewed / expired /
-        refused) with its JWT-derived expiry + a MASKED client id — NEVER the token
-        secret (the schema has no token column). READ-ONLY: loads
-        ``<lake>/token_events/events.parquet``; never raises (empty when no lake /
-        no event yet, never a 500).
-        """
-        from brutex.adapters.dhan.token_events import load_token_events, to_payload
-
-        store = _require_store()
-        lake_root = getattr(store, "path", None)
-        if not isinstance(lake_root, Path):
-            return JSONResponse({"count": 0, "events": []})
-        lake = lake_root.parent
-
-        def _load() -> dict[str, Any]:
-            """Load the token-events Parquet + project it to the JSON payload (threadpool)."""
-            from brutex.data.session import format_ist_clock
-
-            events = to_payload(load_token_events(lake))
-            # Display the stored UTC stamps as clean IST (CLAUDE.md §6 / §11 COMMON).
-            for event in events:
-                event["event_at"] = format_ist_clock(event["event_at"])
-                event["expiry_at"] = format_ist_clock(event["expiry_at"])
-            return {"count": len(events), "events": events}
-
-        return JSONResponse(await run_in_threadpool(_load))
 
     @app.get("/api/v1/db/window-ledger")
     async def api_db_window_ledger() -> JSONResponse:
@@ -3811,7 +3481,6 @@ __all__ = [
     "list_underlyings",
     "pull_all_spot",
     "pull_candles",
-    "pull_options",
     "select_pull_instruments",
     "snapshot_to_json",
     "universe_summary",

@@ -37,7 +37,6 @@ from brutex.dashboard.pull_controller import (
     SessionRateController,
     TimeframeResult,
     default_date_range,
-    dhan_creds_present,
     parse_symbol_list,
     pull_all_spot,
     pull_candles,
@@ -170,45 +169,6 @@ class TestPullCandlesReport:
         assert report.total_failed == 0
         assert report.total_no_data == 0
         assert report.total_skipped == 0
-
-
-# ────────────────────────────────────────────────────────────────────────
-# dhan_creds_present — testable creds / dry-run safety gate (re-export, H1)
-# ────────────────────────────────────────────────────────────────────────
-
-
-class TestDhanCredsPresent:
-    """The dry-run gate re-exported from ``brutex.adapters.dhan.auth``.
-
-    Reads ``BRUTEX_DHAN_ACCESS_TOKEN`` + ``BRUTEX_DHAN_CLIENT_ID`` directly
-    from the env mapping; never raises (DEC-VENDOR-PIVOT-001).
-    """
-
-    def test_both_present_is_true(self) -> None:
-        env = {"BRUTEX_DHAN_ACCESS_TOKEN": "t", "BRUTEX_DHAN_CLIENT_ID": "c"}
-        assert dhan_creds_present(env) is True
-
-    def test_both_absent_is_false(self) -> None:
-        assert dhan_creds_present({}) is False
-
-    def test_token_missing_is_false(self) -> None:
-        assert dhan_creds_present({"BRUTEX_DHAN_CLIENT_ID": "c"}) is False
-
-    def test_client_missing_is_false(self) -> None:
-        assert dhan_creds_present({"BRUTEX_DHAN_ACCESS_TOKEN": "t"}) is False
-
-    def test_blank_value_is_false(self) -> None:
-        env = {"BRUTEX_DHAN_ACCESS_TOKEN": "t", "BRUTEX_DHAN_CLIENT_ID": "   "}
-        assert dhan_creds_present(env) is False
-
-    def test_defaults_to_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Default env=None reads os.environ.
-        monkeypatch.delenv("BRUTEX_DHAN_ACCESS_TOKEN", raising=False)
-        monkeypatch.delenv("BRUTEX_DHAN_CLIENT_ID", raising=False)
-        assert dhan_creds_present() is False
-        monkeypatch.setenv("BRUTEX_DHAN_ACCESS_TOKEN", "t")
-        monkeypatch.setenv("BRUTEX_DHAN_CLIENT_ID", "c")
-        assert dhan_creds_present() is True
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -878,32 +838,7 @@ class TestSessionRateController:
         assert holder.get() is ctl  # cached on subsequent calls
 
 
-class TestLiveTokenHolderSeam:
-    """The process-wide live-token holder seam (DEC-DHAN-TOKEN-KEEPALIVE-001).
-
-    ``set_live_token_holder`` installs the holder the live builders wire into every
-    ``DhanClient`` via ``token_provider`` so a mid-life renew propagates instantly.
-    The live builder itself is ``# pragma: no cover`` (network), but the install /
-    clear seam IS testable.
-    """
-
-    def test_install_and_clear_round_trips(self) -> None:
-        import brutex.dashboard.pull_controller as pc
-        from brutex.adapters.dhan.token_holder import TokenHolder
-
-        previous = pc._LIVE_TOKEN_HOLDER
-        try:
-            assert pc._LIVE_TOKEN_HOLDER is None
-            holder = TokenHolder("seed-jwt")
-            pc.set_live_token_holder(holder)
-            assert pc._LIVE_TOKEN_HOLDER is holder
-            pc.set_live_token_holder(None)
-            assert pc._LIVE_TOKEN_HOLDER is None
-        finally:
-            pc.set_live_token_holder(previous)
-
-
-# ── parse_symbol_list + resolve_pull_symbols — the multi-select OPTIONS pull ──
+# ── parse_symbol_list + resolve_pull_symbols — the multi-select pull ──
 # (DEC-UNIVERSE-OPTIONS-MULTIPULL-001) — the ?symbols= backend resolution
 
 
@@ -943,108 +878,6 @@ class TestResolvePullSymbols:
         store = {"NIFTY": _index("NIFTY")}
         (only,) = resolve_pull_symbols("NIFTY", store.get)
         assert only.symbol_name == "NIFTY"
-
-
-class _FakeKeepalive:
-    """A minimal keepalive double — records forget_expiry() calls."""
-
-    def __init__(self) -> None:
-        self.forgot = 0
-
-    def forget_expiry(self) -> None:
-        self.forgot += 1
-
-
-class TestRefreshLiveToken:
-    """refresh_live_token + set_live_keepalive (DEC-DHAN-TOKEN-SINGLE-SOURCE-001).
-
-    A mid-session credential save must propagate to the in-memory holder the live
-    clients read (no restart) and tell the keepalive to re-learn the new expiry.
-    These mutate the process-wide live-session singletons, so each resets them in a
-    ``finally`` to stay isolated.
-    """
-
-    def test_no_holder_installed_is_noop_false(self) -> None:
-        from brutex.dashboard.pull_controller import (
-            refresh_live_token,
-            set_live_keepalive,
-            set_live_token_holder,
-        )
-
-        set_live_token_holder(None)
-        set_live_keepalive(None)
-        assert refresh_live_token("new-jwt") is False  # no live session → no-op
-
-    def test_records_saved_token_event_with_masked_client_and_expiry(self, tmp_path: Path) -> None:
-        # DEC-TOKEN-EVENTS-001: a save records a `saved` event with the JWT-derived
-        # expiry + a MASKED client id — never the token secret.
-        import base64
-        import json
-
-        from brutex.adapters.dhan.token_events import load_token_events
-        from brutex.dashboard.pull_controller import refresh_live_token, set_live_token_holder
-
-        payload = base64.urlsafe_b64encode(json.dumps({"exp": 9_999_999_999}).encode())
-        jwt = f"hdr.{payload.rstrip(b'=').decode()}.sig"
-        set_live_token_holder(None)
-        try:
-            refresh_live_token(jwt, lake_root=tmp_path, client_id="1100123456788842")
-        finally:
-            set_live_token_holder(None)
-        (event,) = load_token_events(tmp_path)
-        assert event.action == "saved"
-        assert event.client_id_masked == "1100********8842"  # masked, not the raw id
-        assert event.expiry_at is not None  # the JWT exp was decoded
-        assert jwt not in str(event)  # the token secret never reaches the event
-
-    def test_records_saved_token_event_without_jwt_exp(self, tmp_path: Path) -> None:
-        # A non-JWT token → no expiry decoded, but the save is still recorded.
-        from brutex.adapters.dhan.token_events import load_token_events
-        from brutex.dashboard.pull_controller import refresh_live_token, set_live_token_holder
-
-        set_live_token_holder(None)
-        refresh_live_token("not-a-jwt", lake_root=tmp_path)
-        (event,) = load_token_events(tmp_path)
-        assert event.action == "saved"
-        assert event.expiry_at is None
-        assert event.client_id_masked is None
-
-    def test_updates_holder_and_pokes_keepalive(self) -> None:
-        from brutex.adapters.dhan.token_holder import TokenHolder
-        from brutex.dashboard.pull_controller import (
-            refresh_live_token,
-            set_live_keepalive,
-            set_live_token_holder,
-        )
-
-        holder = TokenHolder("startup-jwt")
-        keepalive = _FakeKeepalive()
-        set_live_token_holder(holder)
-        set_live_keepalive(keepalive)
-        try:
-            assert refresh_live_token("new-jwt") is True
-            assert holder.get() == "new-jwt"  # the live token the pull reads is updated
-            assert keepalive.forgot == 1  # keepalive told to re-learn the new expiry
-        finally:
-            set_live_token_holder(None)
-            set_live_keepalive(None)
-
-    def test_holder_without_keepalive_still_updates(self) -> None:
-        from brutex.adapters.dhan.token_holder import TokenHolder
-        from brutex.dashboard.pull_controller import (
-            refresh_live_token,
-            set_live_keepalive,
-            set_live_token_holder,
-        )
-
-        holder = TokenHolder("startup-jwt")
-        set_live_token_holder(holder)
-        set_live_keepalive(None)  # no keepalive → the `keepalive is not None` False arm
-        try:
-            assert refresh_live_token("new-jwt") is True
-            assert holder.get() == "new-jwt"
-        finally:
-            set_live_token_holder(None)
 
 
 class TestPullPopulatesLedger:
