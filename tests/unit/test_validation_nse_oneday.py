@@ -518,6 +518,47 @@ class TestRenderReport:
         assert "(+10p)" in text
 
 
+class TestVerdictToDict:
+    """``FieldComparison.to_dict`` + ``OneDayVerdict.to_dict`` — the JSON wire shape.
+
+    Backs the dashboard ``verify-nse`` route (DEC-NSE-VERIFY-ROUTE-001): Decimals
+    serialise as exact 2-dp strings (never floats), ``delta_paisa`` stays an int,
+    the whole payload round-trips through ``json``.
+    """
+
+    def test_mismatched_verdict_to_dict_is_json_safe(self) -> None:
+        groww = _quote("NIFTY", "100.10", "101.00", "99.00", "100.50")
+        official = _quote("NIFTY", "100.00", "101.00", "99.00", "100.50", source="nse")
+        verdict = compare_quotes(groww, official)
+        payload = verdict.to_dict()
+        # The whole verdict survives a JSON round-trip (Decimals are strings).
+        assert json.loads(json.dumps(payload)) == payload
+        assert payload["symbol"] == "NIFTY"
+        assert payload["trade_date"] == _DATE.isoformat()
+        assert payload["status"] == "mismatched"
+        assert payload["tolerance"] == str(DEFAULT_TOLERANCE_RUPEES_UNVERIFIED)
+        assert payload["groww_source"] == "groww"
+        assert payload["official_source"] == "nse"
+        assert payload["note"] is not None  # a mismatch carries an honest reason
+        fields = payload["fields"]
+        assert isinstance(fields, list)
+        open_field = next(f for f in fields if f["field"] == "open")
+        assert open_field["groww"] == "100.10"
+        assert open_field["official"] == "100.00"
+        assert open_field["delta"] == "0.10"
+        assert open_field["delta_paisa"] == 10
+        assert open_field["matched"] is False
+
+    def test_unavailable_verdict_to_dict_has_empty_fields(self) -> None:
+        verdict = m._unavailable("SENSEX", _DATE, DEFAULT_TOLERANCE_RUPEES_UNVERIFIED, "no url")
+        payload = verdict.to_dict()
+        assert payload["status"] == "unavailable"
+        assert payload["fields"] == []
+        assert payload["note"] == "no url"
+        assert payload["groww_source"] is None
+        assert json.loads(json.dumps(payload)) == payload
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # live entrypoints (injected fakes — degrade-never-crash)
 # ────────────────────────────────────────────────────────────────────────────

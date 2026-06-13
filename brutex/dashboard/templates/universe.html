@@ -371,12 +371,18 @@
     <label style="color:var(--muted); font-size:12px;" title="Inclusive end date — defaults to the previous trading day (pick today to include it).">to <input type="date" id="toDate" min="2021-01-01" max="__BRUTEX_DATE_MAX__" value="__BRUTEX_DATE_TO__" style="background:var(--panel,#161616); color:inherit; border:1px solid var(--line); border-radius:6px; padding:4px 6px;"></label>
     <button class="loadbtn" id="loadbtn" title="Download the public Groww instrument master — no keys needed">⟳ Load instruments</button>
     <button class="pullbtn" id="pullbtn" title="Pull 1-minute + 1-day spot for the selected instrument(s) — tick rows for many, or click one. Blank dates = full history (2021 → prev day)." disabled>⤓ Pull spot</button>
+    <button class="loadbtn" id="verifybtn" title="Cross-check the selected index's pulled spot 1-day OHLC against the official NSE close for the 'to' date — the trust anchor before any bulk pull. NIFTY / BANKNIFTY today (SENSEX needs an operator-verified BSE source)." disabled>🛡 Verify vs NSE</button>
     <button class="loadbtn" id="matbtn" title="Pre-build (materialise) all 19 derived intraday timeframes to the lake for the selected instrument(s), so the brute-force sweep reads each 5m/15m/60m bar in O(1) instead of resampling 1-minute every time. Optional speed lever — writes to your BRUTEX_LAKE_ROOT drive." disabled>⚙ Pre-build timeframes</button>
     <button class="loadbtn" id="selallbtn" title="Tick every instrument currently shown (respects the search filter)">✓ all shown</button>
     <button class="loadbtn" id="clrselbtn" title="Untick all selected">✗ clear</button>
     <button class="loadbtn" id="tickconstbtn" title="Best-effort: tick this index's F&amp;O-eligible constituent stocks (fetched from NSE on your machine — verify; membership rebalances)" disabled>⊕ tick its constituents</button>
   </div>
   <div class="loadmsg" id="loadmsg" style="margin:-4px 24px 8px;"></div>
+  <!-- Spot-vs-NSE verify result (DEC-NSE-VERIFY-ROUTE-001): the one-day trust
+       anchor — matched (green) / mismatched (red) / unavailable (yellow) with
+       per-field signed-paisa deltas. Display-only; the verdict is the server's
+       degrade-safe validate_index_oneday. -->
+  <div class="loadmsg" id="verifymsg" style="margin:-4px 24px 8px;" role="status" aria-live="polite"></div>
 
   <!-- Pull-verdict banner (DEC-VERDICT-BANNER-001): coloured, actionable verdict
        shown after a pull. Colour + retry-button visibility come from the server's
@@ -904,6 +910,51 @@ document.getElementById("pullbtn").onclick = async () => {
   }
 };
 
+/* ── "🛡 Verify vs NSE" (DEC-NSE-VERIFY-ROUTE-001): the FIRST trust anchor — pull
+   ONE index's spot for ONE day, cross-check its OHLC against the official NSE
+   close (matched / mismatched / unavailable, per-field signed-paisa deltas)
+   before any bulk derivative pull is trusted. Single-symbol: the highlighted
+   index + the "to" date. Honest for non-indices (→ unavailable note). ── */
+function verdictColour(status) {
+  if (status === "matched") return "var(--green)";
+  if (status === "mismatched") return "var(--red)";
+  return "var(--yellow)";  /* unavailable */
+}
+function renderVerdict(v) {
+  const colour = verdictColour(v.status);
+  let html = `<b style="color:${colour}">${(v.status || "").toUpperCase()}</b>`
+    + ` — ${v.symbol} ${v.trade_date} (groww vs ${v.official_source || "nse"})`;
+  if (v.fields && v.fields.length) {
+    html += " · " + v.fields.map(f =>
+      `${f.field}: groww=${f.groww} nse=${f.official} Δ=${f.delta_paisa}p${f.matched ? "" : " ⚠"}`
+    ).join(" · ");
+  }
+  if (v.note) html += `<div style="color:var(--muted);font-size:12px;margin-top:4px">${v.note}</div>`;
+  return html;
+}
+let verifyInFlight = false;
+document.getElementById("verifybtn").onclick = async () => {
+  if (verifyInFlight) return;
+  const sym = selInst;
+  const box = document.getElementById("verifymsg");
+  if (!sym) { box.textContent = "Highlight an index row first, then verify its spot vs NSE."; return; }
+  const day = document.getElementById("toDate").value;
+  if (!day) { box.textContent = "Pick a 'to' date — verify cross-checks that one day's spot vs NSE."; return; }
+  verifyInFlight = true;
+  box.textContent = `Verifying ${sym} spot vs NSE for ${day}…`;
+  try {
+    const r = await fetch("/api/v1/universe/verify-nse?symbol=" + encodeURIComponent(sym)
+      + "&date=" + encodeURIComponent(day), { method: "POST" });
+    const v = await r.json();
+    if (!r.ok) { box.textContent = "Verify failed: " + (v.detail || r.status); return; }
+    box.innerHTML = renderVerdict(v);
+  } catch (e) {
+    box.textContent = "Verify error: " + e;
+  } finally {
+    verifyInFlight = false;
+  }
+};
+
 /* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001): tick several rows → "⤓ Pull N
    selected" pulls each instrument's spot in turn (sequential, so the one shared
    rate budget is respected and each shows in the live panel). The per-row
@@ -925,6 +976,10 @@ function updateMultiBtn() {
   const m = document.getElementById("matbtn");
   m.textContent = n > 0 ? `⚙ Pre-build timeframes · ${n} selected` : "⚙ Pre-build timeframes";
   m.disabled = n === 0 && !selPullSymbol;
+  // "🛡 Verify vs NSE" is single-symbol: enabled whenever ONE index row is
+  // highlighted (the trust anchor verifies that one underlying's spot 1-day).
+  const v = document.getElementById("verifybtn");
+  if (v) v.disabled = !selInst;
 }
 document.getElementById("selallbtn").onclick = () => {
   // EXACTLY the rendered rows — search AND F&O-only composed
