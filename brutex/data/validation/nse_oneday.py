@@ -261,6 +261,21 @@ class FieldComparison:
     delta_paisa: int
     matched: bool
 
+    def to_dict(self) -> dict[str, object]:
+        """JSON-safe view: the two prices + signed delta as 2-dp Decimal strings.
+
+        Decimals serialise as strings (never floats) so the exact 2-dp rupee value
+        survives the JSON boundary unrounded; ``delta_paisa`` stays an int.
+        """
+        return {
+            "field": self.field,
+            "groww": str(self.groww),
+            "official": str(self.official),
+            "delta": str(self.delta),
+            "delta_paisa": self.delta_paisa,
+            "matched": self.matched,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class OneDayVerdict:
@@ -302,6 +317,25 @@ class OneDayVerdict:
     def mismatched_fields(self) -> tuple[FieldComparison, ...]:
         """The fields whose delta exceeded tolerance (empty unless mismatched)."""
         return tuple(field for field in self.fields if not field.matched)
+
+    def to_dict(self) -> dict[str, object]:
+        """JSON-safe view of the verdict for the dashboard ``verify-nse`` route.
+
+        ``trade_date`` → ISO string, ``status`` → its enum value, ``tolerance`` →
+        a Decimal string (full precision preserved), ``fields`` → per-field
+        :meth:`FieldComparison.to_dict`. The single source of truth for the
+        verdict's wire shape (CLAUDE.md §11 COMMON).
+        """
+        return {
+            "symbol": self.symbol,
+            "trade_date": self.trade_date.isoformat(),
+            "status": self.status.value,
+            "tolerance": str(self.tolerance),
+            "fields": [field.to_dict() for field in self.fields],
+            "groww_source": self.groww_source,
+            "official_source": self.official_source,
+            "note": self.note,
+        }
 
 
 @dataclass(frozen=True, slots=True)
