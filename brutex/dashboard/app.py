@@ -69,6 +69,11 @@ from brutex.dashboard.db_view import (
     summarize_spot_datasets,
     table_summary,
 )
+from brutex.dashboard.derivatives_pull import (
+    pull_all_derivatives,
+    resolve_contract_types,
+    resolve_pull_intervals,
+)
 from brutex.dashboard.movers_reader import (
     DEFAULT_INTERVAL,
     DEFAULT_RECENT_BARS,
@@ -1451,6 +1456,114 @@ def build_app(
                 "symbol": symbol,
                 "symbols": symbols,
                 "total": len(instruments) * 2,
+                "dry_run": dry_run,
+            }
+        )
+
+    @app.post("/api/v1/universe/pull-derivatives")
+    async def api_universe_pull_derivatives(
+        kind: str | None = Query(default=None),
+        symbol: str | None = Query(default=None),
+        symbols: str | None = Query(default=None),
+        interval: str = Query(default="1day"),
+        contract_type: str = Query(default="both"),
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull-derivatives — start a bulk F&O CHAIN pull.
+
+        Backs the "⤓ Pull expiries + contracts" button (DEC-PULL-DERIVATIVES-001):
+        enumerates the ENTIRE chain — ALL expiries × ALL listed strikes — for the
+        selected underlyings and ingests the option (CE/PE) and/or future (FUT)
+        candles into the lake via
+        :func:`brutex.dashboard.derivatives_pull.pull_all_derivatives` on the
+        single-flight background job (poll ``/pull-progress``). Selection precedence
+        mirrors ``/pull-all``: ``symbols`` (ticked many) > ``symbol`` (one) >
+        ``kind`` (every admitted index/stock). ``interval`` is ``1day`` / ``1minute``
+        / ``both`` (1day FIRST — the cheap, NSE-verifiable skeleton before the heavy
+        minute fill); ``contract_type`` is ``option`` / ``future`` / ``both``; a bad
+        value for either is a 400. ``dry_run`` is forced when Groww creds are absent —
+        and the dry-run enumerates an honest EMPTY chain (the strikes/expiries are
+        real vendor data, never fabricated offline, Golden Rule #1).
+        """
+        dry_run = not groww_credentials_present()
+        try:
+            intervals = resolve_pull_intervals(interval)
+            contract_types = resolve_contract_types(contract_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if symbols is not None:
+            try:
+                instruments = resolve_pull_symbols(symbols, _require_store().get)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            detail = f"{len(instruments)} symbols derivatives"
+        elif symbol is not None:
+            store = _require_store()
+            instrument = store.get(symbol)
+            if instrument is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unknown security_id {symbol!r} — not in the instrument store",
+                )
+            instruments = [instrument]
+            detail = f"{symbol} derivatives"
+        elif kind is not None:
+            instruments = _select_bulk_targets(kind)
+            detail = f"{kind} derivatives"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="pull-derivatives requires ?symbols=..., ?symbol=... or ?kind=...",
+            )
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        _LOG.info(
+            "universe.pull_derivatives.requested",
+            kind=kind,
+            symbol=symbol,
+            symbols=symbols,
+            count=len(instruments),
+            interval=interval,
+            contract_type=contract_type,
+            from_date=from_date,
+            to_date=to_date,
+            dry_run=dry_run,
+        )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
+            """Background body: bulk-pull every selected underlying's full F&O chain."""
+
+            # The derivative ingest fires a 3-arg Groww ProgressHook per (contract,
+            # interval) pair; adapt it onto the job's 4-arg hook (no known-gap concept).
+            def _deriv_progress(label: str, bars: int, failed: bool) -> None:
+                on_progress(label, bars, failed, False)
+
+            return pull_all_derivatives(
+                instruments,
+                lake_root=lake_root,
+                dry_run=dry_run,
+                contract_types=contract_types,
+                intervals=intervals,
+                from_date=from_date,
+                to_date=to_date,
+                on_progress=_deriv_progress,
+                session_rate=_session_rate,
+            )
+
+        # The chain size is only known after live enumeration, so the job total is a
+        # COARSE per-underlying unit; the live panel's bar/window counter is the
+        # accurate signal (Golden Rule #10 — honest, not a fabricated total).
+        started = _pull_job.start(_work, total=len(instruments), detail=detail)
+        return JSONResponse(
+            {
+                "started": started,
+                "kind": kind,
+                "symbol": symbol,
+                "symbols": symbols,
+                "interval": interval,
+                "contract_type": contract_type,
+                "intervals": list(intervals),
+                "contract_types": list(contract_types),
                 "dry_run": dry_run,
             }
         )
