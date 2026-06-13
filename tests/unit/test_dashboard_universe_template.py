@@ -63,6 +63,20 @@ def test_date_pickers_prefilled_with_canonical_default() -> None:
     assert "__BRUTEX_DATE_" not in html  # the placeholder tokens were all substituted
 
 
+def test_spot_interval_dropdown_defaults_to_one_day() -> None:
+    """DEC-PULL-1DAY-FIRST-001: the spot pull carries a granularity dropdown
+    (1day / 1minute / both) whose DEFAULT selected option is 1-day (verify-first),
+    and the pull JS threads the choice as ``&spot_interval=``."""
+    html = _render_universe_html()
+    assert 'id="spotInterval"' in html
+    # 1-day is the pre-selected default; 1-minute + both are also offered.
+    assert '<option value="1day" selected>' in html
+    assert '<option value="1minute">' in html
+    assert '<option value="both">' in html
+    # the choice is threaded into both the single + bulk pull query strings.
+    assert "spot_interval=" in html
+
+
 def test_instrument_rows_render_contract_economics() -> None:
     """The instruments column ships the lot/tick/freeze econ line (DEC-DASHBOARD-ECON-COLUMNS-001)."""
     from brutex.dashboard.app import _render_universe_html

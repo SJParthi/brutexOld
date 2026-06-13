@@ -7,9 +7,9 @@ index/stock or (lake-side) a contract — keyed by ``symbol_name`` (the engine
 symbol; ADR-0003). When the operator clicks a universe row and hits pull,
 :func:`pull_candles` ingests that instrument's candles across the
 **fetched** base timeframes
-(:data:`GROWW_FETCH_INTERVALS` — ``1minute`` + ``1day``; the 19 intraday
-timeframes are resampled from the 1-minute base, never fetched, per
-DEC-DHAN-1M-ONLY-001), reusing the proven
+(:data:`GROWW_FETCH_INTERVALS` — **``1day`` only during the verify-first phase**,
+DEC-PULL-1DAY-FIRST-001; ``1minute`` + the 19 intraday timeframes resampled from
+it return once the OHLCV-vs-bhavcopy check passes), reusing the proven
 :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` orchestration
 core (CLAUDE.md §11 COMMON — no copy-paste of the fan-out/quarantine spine).
 
@@ -110,11 +110,52 @@ _LOG = structlog.get_logger(__name__)
 #: clamped up to it so a too-early pick can never waste quota.
 GROWW_HISTORY_FLOOR: Final[date] = date(2020, 1, 1)
 
-#: The base timeframes Track 1 actually FETCHES from Groww: 1-minute (every
-#: intraday timeframe is resampled from it) + 1-day (PDH/PDL anchors). The 19
-#: derived intraday timeframes are produced from the stored 1-minute base by
-#: the resampler, never fetched (DEC-DHAN-1M-ONLY-001). Order = display order.
-GROWW_FETCH_INTERVALS: Final[tuple[str, ...]] = ("1minute", "1day")
+#: Spot-pull interval selection (DEC-PULL-1DAY-FIRST-001, operator decision
+#: 2026-06-13). The operator picks the fetch granularity per pull via a
+#: ``/universe`` dropdown — **1-day only** (the verify-first default), **1-minute
+#: only**, or **both** — so they can pull 1-day first, cross-check it against the
+#: official NSE/BSE bhavcopy (CLAUDE.md §6), THEN choose 1-minute / both, with no
+#: code change. The three canonical choice tokens:
+SPOT_INTERVAL_DAY: Final[str] = "1day"
+SPOT_INTERVAL_MINUTE: Final[str] = "1minute"
+SPOT_INTERVAL_BOTH: Final[str] = "both"
+
+#: Dropdown choice → the fetched-interval tuple. ``both`` keeps the canonical
+#: display order (1m before 1d; the 19 intraday TFs are resampled from the stored
+#: 1-minute base, never fetched — DEC-DHAN-1M-ONLY-001).
+SPOT_INTERVAL_CHOICES: Final[dict[str, tuple[str, ...]]] = {
+    SPOT_INTERVAL_DAY: ("1day",),
+    SPOT_INTERVAL_MINUTE: ("1minute",),
+    SPOT_INTERVAL_BOTH: ("1minute", "1day"),
+}
+
+#: The verify-first DEFAULT the pull functions use when no explicit ``intervals``
+#: is passed: **1-day only**. One source of truth shared by callers + tests.
+GROWW_FETCH_INTERVALS: Final[tuple[str, ...]] = SPOT_INTERVAL_CHOICES[SPOT_INTERVAL_DAY]
+
+
+def resolve_fetch_intervals(choice: str | None) -> tuple[str, ...]:
+    """Map a spot-interval dropdown *choice* to the fetch-interval tuple.
+
+    ``"1day"`` → ``("1day",)``, ``"1minute"`` → ``("1minute",)``, ``"both"`` →
+    ``("1minute", "1day")``. A blank / ``None`` / unrecognised choice falls back to
+    the verify-first **1-day only** default (:data:`GROWW_FETCH_INTERVALS`) — it
+    NEVER silently widens to 1-minute (DEC-PULL-1DAY-FIRST-001 / Golden Rule #1).
+
+    Parameters
+    ----------
+    choice
+        The dropdown / query-param value, or ``None`` when unspecified.
+
+    Returns
+    -------
+    tuple[str, ...]
+        The intervals to fetch, in display order.
+    """
+    if choice is None:
+        return GROWW_FETCH_INTERVALS
+    return SPOT_INTERVAL_CHOICES.get(choice.strip(), GROWW_FETCH_INTERVALS)
+
 
 #: Groww canonical interval → lake ``TF_LABELS`` display label, so the
 #: ``/universe`` grid shows ``1m`` / ``1d`` (consistent with the rest of the
@@ -403,9 +444,11 @@ class PullCandlesReport:
         this case.
     timeframes
         One :class:`TimeframeResult` per **fetched** interval, in
-        :data:`GROWW_FETCH_INTERVALS` order (``1m`` then ``1d``). The 19
-        derived intraday timeframes are resampled from the 1-minute base
-        downstream, not fetched here (DEC-DHAN-1M-ONLY-001).
+        :data:`GROWW_FETCH_INTERVALS` order (``1d`` only during the
+        verify-first phase, DEC-PULL-1DAY-FIRST-001; ``1m`` then ``1d``
+        once 1-minute is re-enabled). The 19 derived intraday timeframes
+        are resampled from the 1-minute base downstream, not fetched here
+        (DEC-DHAN-1M-ONLY-001).
     """
 
     symbol: str
@@ -821,6 +864,7 @@ def pull_all_spot(
     from_date: str | None = None,
     to_date: str | None = None,
     year: int | None = None,
+    intervals: tuple[str, ...] = GROWW_FETCH_INTERVALS,
     adapter_factory: BulkAdapterFactory | None = None,
     on_progress: ProgressHook | None = None,
     pull_id: str | None = None,
@@ -835,8 +879,9 @@ def pull_all_spot(
     The one-click "⤓ Pull ALL indices / stocks spot" button core: one
     :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` pass over
     the whole *instruments* list and the fetched base intervals
-    (:data:`GROWW_FETCH_INTERVALS` — ``1m`` + ``1d``), so the live adapter is
-    built ONCE with the full universe (O(1) index) and the fan-out quarantines
+    (the injected *intervals*, defaulting to :data:`GROWW_FETCH_INTERVALS` —
+    ``1d`` only during the verify-first phase, DEC-PULL-1DAY-FIRST-001), so the
+    live adapter is built ONCE with the full universe (O(1) index) and the fan-out quarantines
     a bad symbol without sinking the rest. An empty list is a clean no-op.
 
     Parameters
@@ -941,7 +986,7 @@ def pull_all_spot(
             plan_windows(
                 ledger,
                 instruments=instruments,
-                intervals=GROWW_FETCH_INTERVALS,
+                intervals=intervals,
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -960,7 +1005,7 @@ def pull_all_spot(
                 ledger,
                 lake_root,
                 instruments=instruments,
-                intervals=GROWW_FETCH_INTERVALS,
+                intervals=intervals,
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1021,7 +1066,7 @@ def pull_all_spot(
                 adapter,
                 sink,
                 instruments=instruments,
-                intervals=GROWW_FETCH_INTERVALS,
+                intervals=intervals,
                 start=start.date(),
                 end=end.date(),
                 pace=pace,
@@ -1150,7 +1195,7 @@ def pull_all_spot(
         for instrument in instruments:
             symbol = instrument.symbol_name
             completed = failed = no_data = 0
-            for fetch_interval, _label in _FETCH_INTERVAL_LABELS:
+            for fetch_interval in intervals:
                 key = (symbol, fetch_interval)
                 if key in failure_keys:
                     failed += 1
@@ -1287,6 +1332,7 @@ def pull_candles(
     from_date: str | None = None,
     to_date: str | None = None,
     dry_run: bool,
+    intervals: tuple[str, ...] = GROWW_FETCH_INTERVALS,
     adapter_factory: AdapterFactory | None = None,
     on_progress: ProgressHook | None = None,
     pull_id: str | None = None,
@@ -1298,9 +1344,10 @@ def pull_candles(
     Plans + drives one
     :func:`~brutex.adapters.groww.run_ingest.run_groww_spot_ingest` pass over
     the single *instrument* and the Groww **fetched** base intervals
-    (:data:`GROWW_FETCH_INTERVALS` — ``1minute`` + ``1day``; the 19 derived
-    intraday timeframes are resampled from the 1-minute base downstream,
-    never fetched, per DEC-DHAN-1M-ONLY-001). The window is resolved by
+    (the injected *intervals*, defaulting to :data:`GROWW_FETCH_INTERVALS` —
+    ``1day`` only during the verify-first phase, DEC-PULL-1DAY-FIRST-001;
+    ``1minute`` + the 19 resampled intraday timeframes return once 1-minute is
+    re-enabled, per DEC-DHAN-1M-ONLY-001). The window is resolved by
     :func:`resolve_candle_range`: an explicit *from_date* / *to_date* range
     (day-inclusive, clamped to ``[2020-01-01, today]``) when either is given,
     else the full calendar *year*, else (no dates, no year) the full Track-1
@@ -1390,7 +1437,7 @@ def pull_candles(
             plan_windows(
                 ledger,
                 instruments=[instrument],
-                intervals=GROWW_FETCH_INTERVALS,
+                intervals=intervals,
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1406,7 +1453,7 @@ def pull_candles(
                 ledger,
                 lake_root,
                 instruments=[instrument],
-                intervals=GROWW_FETCH_INTERVALS,
+                intervals=intervals,
                 start=start.date(),
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
@@ -1421,7 +1468,7 @@ def pull_candles(
             start_date=start.date().isoformat(),
             end_date=end_label,
             dry_run=dry_run,
-            intervals=len(GROWW_FETCH_INTERVALS),
+            intervals=len(intervals),
         )
 
         (pace, on_rate_limit, on_timeout, on_success), run_parallel, _rate_controller = (
@@ -1448,7 +1495,7 @@ def pull_candles(
             adapter,
             sink,
             instruments=[instrument],
-            intervals=GROWW_FETCH_INTERVALS,
+            intervals=intervals,
             start=start.date(),
             end=end.date(),
             pace=pace,
@@ -1463,8 +1510,14 @@ def pull_candles(
         _observe_rate(rate_observer, _rate_controller, adapter)
 
         failure_keys = {(f.symbol, f.interval) for f in report.failures}
+        # Build one result per ACTUALLY-fetched interval (the injected *intervals*,
+        # 1day-only during the verify-first phase, DEC-PULL-1DAY-FIRST-001) — NOT a
+        # hardcoded 1m+1d pair, which KeyError'd on report.pairs when 1-minute was
+        # gated off. The label map gives the dashboard's ``1m``/``1d`` display label.
+        label_for = dict(_FETCH_INTERVAL_LABELS)
         timeframes: list[TimeframeResult] = []
-        for fetch_interval, label in _FETCH_INTERVAL_LABELS:
+        for fetch_interval in intervals:
+            label = label_for.get(fetch_interval, fetch_interval)
             key = (symbol, fetch_interval)
             if key in failure_keys:
                 # Terminal Groww error — quarantined, never in report.pairs.
@@ -1500,6 +1553,10 @@ def pull_candles(
 __all__ = [
     "GROWW_FETCH_INTERVALS",
     "GROWW_HISTORY_FLOOR",
+    "SPOT_INTERVAL_BOTH",
+    "SPOT_INTERVAL_CHOICES",
+    "SPOT_INTERVAL_DAY",
+    "SPOT_INTERVAL_MINUTE",
     "AdapterFactory",
     "BulkAdapterFactory",
     "BulkSpotReport",
@@ -1511,5 +1568,6 @@ __all__ = [
     "pull_all_spot",
     "pull_candles",
     "resolve_candle_range",
+    "resolve_fetch_intervals",
     "resolve_pull_symbols",
 ]

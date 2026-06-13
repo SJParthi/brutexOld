@@ -41,6 +41,7 @@ from brutex.dashboard.pull_controller import (
     pull_all_spot,
     pull_candles,
     resolve_candle_range,
+    resolve_fetch_intervals,
     resolve_pull_symbols,
 )
 from brutex.data.models import CandleBar
@@ -70,6 +71,44 @@ def _index(symbol: str = "13") -> Instrument:
         strike_price=None,
         asm_gsm_flag=False,
     )
+
+
+#: Both fetch intervals — passed EXPLICITLY by the machinery tests that exercise
+#: per-(symbol, interval) mechanics (per-pair progress, mixed 1m-lands/1d-gap
+#: outcomes, both-interval failure/quarantine). The PRODUCTION default
+#: (``GROWW_FETCH_INTERVALS``) is **1-day only** — the verify-first default of the
+#: ``/universe`` granularity dropdown (DEC-PULL-1DAY-FIRST-001: 1day / 1minute /
+#: both). These tests opt INTO the two-interval ("both") shape so the multi-interval
+#: machinery stays covered while the default-behaviour tests assert the 1-day default.
+_BOTH_INTERVALS: tuple[str, ...] = ("1minute", "1day")
+
+
+class TestResolveFetchIntervals:
+    """The spot-interval dropdown resolver (DEC-PULL-1DAY-FIRST-001)."""
+
+    def test_default_is_one_day_only(self) -> None:
+        # The verify-first default: a blank/None choice NEVER widens to 1-minute.
+        assert resolve_fetch_intervals(None) == ("1day",)
+        assert GROWW_FETCH_INTERVALS == ("1day",)
+
+    def test_day_choice(self) -> None:
+        assert resolve_fetch_intervals("1day") == ("1day",)
+
+    def test_minute_choice(self) -> None:
+        assert resolve_fetch_intervals("1minute") == ("1minute",)
+
+    def test_both_choice_keeps_display_order(self) -> None:
+        # ``both`` fetches 1m then 1d (the canonical display order).
+        assert resolve_fetch_intervals("both") == ("1minute", "1day")
+
+    def test_whitespace_is_stripped(self) -> None:
+        assert resolve_fetch_intervals("  both  ") == ("1minute", "1day")
+
+    def test_unknown_choice_falls_back_to_one_day(self) -> None:
+        # An unrecognised value safely defaults to 1-day (never crashes, never
+        # silently widens to 1-minute — Golden Rule #1).
+        assert resolve_fetch_intervals("5minute") == ("1day",)
+        assert resolve_fetch_intervals("") == ("1day",)
 
 
 class _EmptyAdapter(SyntheticSpotAdapter):
@@ -189,10 +228,12 @@ class TestPullCandlesDryRun:
 
     def test_covers_fetched_intervals(self, tmp_path: Path) -> None:
         report = pull_candles(_index(), lake_root=tmp_path, year=2024, dry_run=True)
-        # Dhan fetches 1m + 1d only (the 19 derived TFs are resampled, not
-        # fetched — DEC-DHAN-1M-ONLY-001); the grid shows two cells.
-        assert [tf.interval for tf in report.timeframes] == ["1m", "1d"]
-        assert len(GROWW_FETCH_INTERVALS) == 2
+        # Verify-first phase: the PRODUCTION default fetches 1-day ONLY
+        # (DEC-PULL-1DAY-FIRST-001) — 1-minute + the 19 resampled intraday TFs
+        # return once the OHLCV-vs-bhavcopy check passes — so the grid shows the
+        # single 1d cell (not two).
+        assert [tf.interval for tf in report.timeframes] == ["1d"]
+        assert GROWW_FETCH_INTERVALS == ("1day",)
         # Synthetic adapter always returns bars → some completed, zero failed.
         assert report.total_failed == 0
         assert report.total_completed > 0
@@ -213,6 +254,7 @@ class TestPullCandlesDryRun:
             lake_root=tmp_path,
             year=2024,
             dry_run=True,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _inst: (_EmptyAdapter(), NullBarSink()),
         )
         assert report.total_completed == 0
@@ -235,6 +277,7 @@ class TestPullCandlesDryRun:
             _index(),
             lake_root=tmp_path,
             dry_run=True,
+            intervals=_BOTH_INTERVALS,
             from_date="2021-01-04",
             to_date="2021-01-08",
             on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
@@ -279,6 +322,7 @@ class TestPullCandlesInjectedFactory:
             lake_root=tmp_path,
             year=2024,
             dry_run=True,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _inst: (_FailingAdapter(), NullBarSink()),
         )
         assert report.total_completed == 0
@@ -484,8 +528,9 @@ class TestPullAllSpot:
         # pull passes no explicit to_date so the current session is excluded.
         assert report.start_date == "2020-01-01"
         assert report.end_date == "2026-05-29"  # previous day (now=05-30)
-        # both fetched intervals (1m + 1d) completed for each symbol → 4 pairs.
-        assert report.total_completed == 4
+        # Verify-first default fetches 1-day ONLY (DEC-PULL-1DAY-FIRST-001) →
+        # one interval × 2 symbols = 2 completed pairs (was 4 when 1m+1d).
+        assert report.total_completed == 2
         assert report.total_failed == 0
         assert report.total_no_data == 0
 
@@ -506,6 +551,7 @@ class TestPullAllSpot:
             lake_root=tmp_path,
             dry_run=True,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             auto_retry=True,
         )
         assert report.total_symbols == 2
@@ -559,6 +605,7 @@ class TestPullAllSpot:
             lake_root=tmp_path,
             dry_run=True,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
         )
         assert report.total_no_data == 2
@@ -574,6 +621,7 @@ class TestPullAllSpot:
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_FailingAdapter(), NullBarSink()),
         )
         assert failed.total_failed == 2
@@ -596,6 +644,7 @@ class TestPullAllSpot:
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
         )
         assert all_gap.total_failed == 0  # NOT counted as a failure
@@ -616,6 +665,7 @@ class TestPullAllSpot:
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_DailyGapAdapter(), NullBarSink()),
         )
         assert report.total_completed == 1  # the 1minute series landed bars
@@ -679,6 +729,7 @@ class TestPullAllSpot:
             lake_root=tmp_path,
             dry_run=True,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             on_progress=lambda label, bars, failed: events.append((label, bars, failed)),
         )
         # 2 symbols × 2 fetched intervals (1m + 1d) = 4 progress events, all clean.
@@ -958,6 +1009,7 @@ class TestQuotaDeathMidRound:
                 now=_BULK_NOW,
                 from_date="2021-01-04",
                 to_date="2021-01-08",
+                intervals=_BOTH_INTERVALS,
                 adapter_factory=factory,
                 on_progress=_on_progress,
                 until_clean=until_clean,
@@ -1058,6 +1110,7 @@ class TestQuotaDeathMidRound:
                 now=_BULK_NOW,
                 from_date="2021-01-04",
                 to_date="2021-01-08",
+                intervals=_BOTH_INTERVALS,
                 adapter_factory=lambda _root, _insts: (_DiesInRoundTwo(), NullBarSink()),
                 until_clean=True,
             )
@@ -1115,6 +1168,7 @@ class TestStatusSidecarWriteRetired:
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
+            intervals=_BOTH_INTERVALS,
             adapter_factory=lambda _root, _insts: (_DailyGapAdapter(), NullBarSink()),
         )
         assert report.verdict.kind == "clean"

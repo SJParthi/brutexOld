@@ -95,6 +95,7 @@ from brutex.dashboard.pull_controller import (
     SessionRateController,
     pull_all_spot,
     pull_candles,
+    resolve_fetch_intervals,
     resolve_pull_symbols,
 )
 from brutex.dashboard.pull_jobs import BackgroundPullJob, ProgressHook
@@ -1212,6 +1213,7 @@ def build_app(
         year: int | None = Query(default=None),
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
+        spot_interval: str | None = Query(default=None),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull — ingest one instrument's candles.
 
@@ -1231,6 +1233,10 @@ def build_app(
         Track-1 history ``[2020-01-01, previous day]``. A malformed date or
         a ``from`` after ``to`` surfaces as a 400 with the real reason
         (DEC-PULL-ERROR-VISIBILITY-001).
+        ``spot_interval`` is the verify-first granularity selector
+        (DEC-PULL-1DAY-FIRST-001): ``"1day"`` (the default — pull 1-day, verify vs
+        the official bhavcopy per CLAUDE.md §6, then widen), ``"1minute"``, or
+        ``"both"``; a blank / unknown value safely defaults to 1-day only.
         ``dry_run`` is forced ``True`` automatically when Groww
         credentials are not present (via the testable
         :func:`brutex.config.credentials.groww_credentials_present`
@@ -1245,6 +1251,7 @@ def build_app(
             year=year,
             from_date=from_date,
             to_date=to_date,
+            spot_interval=spot_interval,
             dry_run=dry_run,
         )
         store = _require_store()
@@ -1271,6 +1278,7 @@ def build_app(
                 year=year,
                 from_date=from_date,
                 to_date=to_date,
+                intervals=resolve_fetch_intervals(spot_interval),
                 dry_run=dry_run,
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
@@ -1356,6 +1364,7 @@ def build_app(
         year: int | None = Query(default=None),
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
+        spot_interval: str | None = Query(default=None),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull-all — start a bulk / multi / per-symbol SPOT pull.
 
@@ -1413,8 +1422,13 @@ def build_app(
             from_date=from_date,
             to_date=to_date,
             year=year,
+            spot_interval=spot_interval,
             dry_run=dry_run,
         )
+        # Verify-first granularity (DEC-PULL-1DAY-FIRST-001): the operator's
+        # dropdown choice → 1day-only (default) / 1minute-only / both. Drives BOTH
+        # the fetch AND the progress total (symbols × intervals).
+        fetch_intervals = resolve_fetch_intervals(spot_interval)
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: bulk-pull every selected spot symbol, streaming progress.
@@ -1445,6 +1459,7 @@ def build_app(
                 from_date=from_date,
                 to_date=to_date,
                 year=year,
+                intervals=fetch_intervals,
                 on_progress=_spot_progress,
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
@@ -1454,15 +1469,17 @@ def build_app(
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
 
-        # total = symbols × the 2 fetched intervals (1m + 1d) — the unit the hook fires on.
-        started = _pull_job.start(_work, total=len(instruments) * 2, detail=detail)
+        # total = symbols × the chosen fetch intervals (1d / 1m / both) — the unit
+        # the progress hook fires on (DEC-PULL-1DAY-FIRST-001).
+        unit_total = len(instruments) * len(fetch_intervals)
+        started = _pull_job.start(_work, total=unit_total, detail=detail)
         return JSONResponse(
             {
                 "started": started,
                 "kind": kind,
                 "symbol": symbol,
                 "symbols": symbols,
-                "total": len(instruments) * 2,
+                "total": unit_total,
                 "dry_run": dry_run,
             }
         )
@@ -1583,6 +1600,7 @@ def build_app(
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
         year: int | None = Query(default=None),
+        spot_interval: str | None = Query(default=None),
         until_clean: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/universe/retry-failed — MANUAL re-pull of ONLY the leftover failed windows.
@@ -1630,8 +1648,12 @@ def build_app(
             symbol=symbol,
             symbols=symbols,
             count=len(instruments),
+            spot_interval=spot_interval,
             dry_run=dry_run,
         )
+        # Verify-first granularity (DEC-PULL-1DAY-FIRST-001): match the original
+        # pull's interval choice so a retry re-plans the SAME windows.
+        fetch_intervals = resolve_fetch_intervals(spot_interval)
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
             """Background body: re-pull every selected symbol with auto-retry on.
@@ -1655,6 +1677,7 @@ def build_app(
                 from_date=from_date,
                 to_date=to_date,
                 year=year,
+                intervals=fetch_intervals,
                 on_progress=_spot_progress,
                 rate_observer=make_rate_observer(state),
                 session_rate=_session_rate,
@@ -1664,14 +1687,15 @@ def build_app(
             _last_pull_verdict["verdict"] = report.verdict.to_dict()
             return report
 
-        started = _pull_job.start(_work, total=len(instruments) * 2, detail=detail)
+        unit_total = len(instruments) * len(fetch_intervals)
+        started = _pull_job.start(_work, total=unit_total, detail=detail)
         return JSONResponse(
             {
                 "started": started,
                 "kind": kind,
                 "symbol": symbol,
                 "symbols": symbols,
-                "total": len(instruments) * 2,
+                "total": unit_total,
                 "dry_run": dry_run,
                 "retry_failed": True,
                 "until_clean": until_clean,
